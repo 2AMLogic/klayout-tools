@@ -3053,7 +3053,7 @@ class _ResolvedSimRequest:
     monte_carlo_stats: Any
     netlist_identity: Any
     netlist_identity_error: Any
-    adapt_report: Any
+    adapt_environment: Any
     netlist_overrides_report: Any
     netlist_path: Any
     netlist_source: Any
@@ -3154,13 +3154,14 @@ def _prepare_sim_request(
     if not isinstance(hosts, int) or isinstance(hosts, bool) or hosts < 1:
         raise SimError("remote.hosts must be a positive integer")
 
-    # Issue #3873: opt-in `adapt` rewrites the netlist / model library to
-    # private adapted copies that cannot leave this host.
-    backend = _yield_host_default_backend(
-        backend, backend_from_host_default, reason_ok="adapt" not in request
-    )
-    request, adapt_report = _maybe_adapt(
-        request, request_dir, engine=engine, backend=backend
+    # Issue #3873: opt-in `request.adapt` (private adapted copies, host-local).
+    request, adapt_env, backend = sim_adapt.prepare(
+        request,
+        request_dir,
+        engine,
+        backend,
+        backend_from_host_default,
+        _resolve_relative,
     )
 
     netlist_ref = request["netlist"]
@@ -3693,7 +3694,7 @@ def _prepare_sim_request(
         monte_carlo_stats=monte_carlo_stats,
         netlist_identity=netlist_identity,
         netlist_identity_error=netlist_identity_error,
-        adapt_report=adapt_report,
+        adapt_environment=adapt_env,
         netlist_overrides_report=netlist_overrides_report,
         netlist_path=netlist_path,
         netlist_source=netlist_source,
@@ -3799,7 +3800,6 @@ def _run_sim_corners(
     netlist_identity = resolved.netlist_identity
     netlist_identity_error = resolved.netlist_identity_error
     netlist_overrides_report = resolved.netlist_overrides_report
-    adapt_report = resolved.adapt_report
     netlist_path = resolved.netlist_path
     netlist_source = resolved.netlist_source
     ngspice_binary = resolved.ngspice_binary
@@ -3873,8 +3873,9 @@ def _run_sim_corners(
         if resume
         else corner_points
     )
-    _refuse_override_on_host_default(
+    sim_subckt_override.refuse_on_host_default(
         netlist_overrides_report,
+        backend_is_offhost=backend in _OFFHOST_BACKENDS,
         backend=backend,
         backend_from_host_default=backend_from_host_default,
         n_points=len(dispatch_points),
@@ -4474,8 +4475,7 @@ def _run_sim_corners(
     # Additive/optional (issue #3919): only present when the request declares
     # `netlist_overrides` -- see docs/cli/sim.md.
     environment.update(_netlist_overrides_environment(netlist_overrides_report))
-    if adapt_report is not None:
-        environment["adapt"] = adapt_report
+    environment.update(resolved.adapt_environment)
     if monte_carlo_info is not None:
         # Additive/optional: only present when the request declares
         # `monte_carlo` -- the seed contract's request-level echo, per
@@ -6889,61 +6889,6 @@ def _apply_mismatch_instance_gating(
 
 def _netlist_overrides_environment(report: Any) -> dict[str, Any]:
     return {} if report is None else {"netlist_overrides": report}
-
-
-def _refuse_override_on_host_default(
-    report: Any,
-    *,
-    backend: str,
-    backend_from_host_default: bool,
-    n_points: int,
-) -> None:
-    """Issue #3919: a multi-corner request with ``netlist_overrides`` cannot
-    follow a host-default off-host backend (the rewritten closure stays here)."""
-    if (
-        report is not None
-        and backend_from_host_default
-        and backend in _OFFHOST_BACKENDS
-        and n_points > 1
-    ):
-        raise SimError(
-            "request.netlist_overrides cannot run on the host-default "
-            f"{backend!r} backend (the rewritten include closure is not "
-            "forwarded to remote/batch workers) and this request has "
-            f"{n_points} corners; run a single corner, or pass "
-            "--backend local explicitly"
-        )
-
-
-def _maybe_adapt(
-    request: dict[str, Any], request_dir: str, *, engine: str, backend: str
-) -> tuple[dict[str, Any], dict[str, Any] | None]:
-    """Apply ``request.adapt`` (issue #3873); ``(request, None)`` when absent.
-    The adapted copies live in a private work dir, so off-host backends are
-    refused rather than submitted unadapted."""
-    import atexit
-
-    if "adapt" not in request:
-        return request, None
-    if backend in _OFFHOST_BACKENDS:
-        raise SimError(
-            f"request.adapt is not supported for backend {backend!r}: the "
-            "adapted netlist and model library are local files that are not "
-            "forwarded to remote/batch workers; use backend 'local' or "
-            "'local-parallel'"
-        )
-    work_dir = _tmp_work_dir()
-    atexit.register(_cleanup_dir, work_dir)
-    try:
-        return sim_adapt.apply_adapt(
-            request,
-            request_dir,
-            engine=engine,
-            work_dir=work_dir,
-            resolve=_resolve_relative,
-        )
-    except sim_adapt.AdaptError as exc:
-        raise SimError(str(exc)) from exc
 
 
 def _maybe_override_subckts(

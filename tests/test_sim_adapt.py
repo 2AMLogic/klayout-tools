@@ -107,3 +107,7 @@ def test_environment_entry_only_when_adapt(tmp_path):
     assert env["model_cards"][0]["corner"] == "tt"
     assert len(env["netlist_sha256_out"]) == 64
     assert ".lib tt" in Path(out["models"]["lib"]).read_text()
+
+
+def test_offhost_backends_mirror_sim():
+    assert sim_adapt.OFFHOST_BACKENDS == sim._OFFHOST_BACKENDS
