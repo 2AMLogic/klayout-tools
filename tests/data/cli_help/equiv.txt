@@ -1,8 +1,3 @@
-usage: klt equiv [-h] [--timeout-s TIMEOUT_S]
-                 [--sim-backend {iverilog,verilator,both}] [--resume]
-                 [--check REPORT] [--rerun] [--format {text,json}]
-                 request
-
 Prove or refute combinational equivalence between two RTL/gate-level netlists
 ('gold' and 'gate') via Yosys's built-in miter/SAT equivalence-checking flow
 -- Phase 0 of the formal-equivalence epic #707, the correctness loop-closer

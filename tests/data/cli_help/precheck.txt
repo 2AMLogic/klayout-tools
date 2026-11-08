@@ -1,7 +1,3 @@
-usage: klt precheck [-h] [--grid-um GRID_UM] [--allowed-layers ALLOWED_LAYERS]
-                    [--deck DECK] [--top TOP] [--format {text,json}]
-                    file
-
 Run an ordered battery of independently-named layout-hygiene checks (off-grid
 geometry, zero-area polygons, cell-name hygiene, an optional layer whitelist,
 and pin labels landing on drawn geometry) against a GDSII or OASIS layout

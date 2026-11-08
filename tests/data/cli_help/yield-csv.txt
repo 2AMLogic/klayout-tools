@@ -1,9 +1,3 @@
-usage: klt yield-csv [-h] --group-by COL --value COL [--status-col COL]
-                     [--pass-value V] [--draw-col COL] [--unit UNIT]
-                     [--min MIN] [--max MAX] [--target-yield TARGET_YIELD]
-                     [--format {text,json}]
-                     csv
-
 Derive a `klt yield` sample-set document from a long-format per-draw Monte
 Carlo CSV: one measurement per --group-by value, samples from --value. Rows
 whose --status-col is not --pass-value, and passing rows with an empty/non-

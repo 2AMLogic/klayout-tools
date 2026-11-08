@@ -1,5 +1,3 @@
-usage: klt report [-h] [--format {text,json,github-summary}] files [files ...]
-
 Read one or more `klt` JSON envelope files (or '-' for stdin) and render them
 into a single combined report. Each envelope's kind (a klt drc/lvs-style
 violations/mismatches report, a klt layout-metrics-style key-metrics report,

@@ -1,7 +1,3 @@
-usage: klt seam-check [-h] [--tiling CELL] [--layer L/D] [--band x0,y0,x1,y1]
-                      [--top TOP] [--format {text,json}]
-                      file
-
 Check the seams of a layout assembled from abutting cells. --tiling asserts
 the named cells' placements tile with no gap or overlap; --layer with --band
 asserts the layer's merged shapes cover each band fully and form one connected

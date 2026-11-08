@@ -1,7 +1,3 @@
-usage: klt design-centering [-h] [--measurement MEASUREMENT]
-                            [--format {text,json}]
-                            request
-
 Turn a `klt yield-sensitivity` parameter ranking into re-centering candidates
 against a `klt size` sized device's own geometry -- issue #924, Phase 3 of the
 statistical/yield epic #710, closing the loop with the analog-sizing engine

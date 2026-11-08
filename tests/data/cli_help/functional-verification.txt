@@ -1,7 +1,3 @@
-usage: klt functional-verification [-h] [--mutations PROPOSALS_PATH]
-                                   [-o OUTDIR] [--format {text,json}]
-                                   request
-
 Run a cocotb testbench against RTL sources through Icarus Verilog (default) or
 Verilator, reporting a per-test passed/failed/skipped breakdown plus optional
 Verilator coverage -- see docs/design/cocotb-verification-spike.md section 7

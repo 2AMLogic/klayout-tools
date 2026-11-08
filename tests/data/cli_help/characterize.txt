@@ -1,8 +1,3 @@
-usage: klt characterize [-h] [-o OUTDIR] [--lib LIB] [--backend BACKEND]
-                        [--keep-artifacts] [--cell NAME] [--compare-to LIB]
-                        [--format {text,json}]
-                        request
-
 Characterize one standard cell (or a batch) at ONE PVT corner from its SPICE
 netlist (post-`klt pex` where available) plus pin/function metadata, and emit
 a syntactically valid NLDM `.lib` carrying

@@ -1,5 +1,3 @@
-usage: klt cells [-h] [--top] [--format {text,json}] file
-
 Report the cell hierarchy of a GDSII or OASIS layout file: top-cell status,
 per-cell shape/instance counts, direct children/parents, and bounding box.
 

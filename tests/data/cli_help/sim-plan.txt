@@ -1,5 +1,3 @@
-usage: klt sim-plan [-h] [--axis {process}] [--format {text,json}] request
-
 Write one request per corners.process entry plus the shard manifest for `klt
 sim-merge`, next to the source request. The manifest's corner ids come from
 the same expansion `klt sim` runs. Monte Carlo and deck-list requests are

@@ -1,8 +1,3 @@
-usage: klt socket-check [-h] --socket SOCKET [--top TOP]
-                        [--require-power-ports] [--edge-band-um UM]
-                        [--format {text,json}]
-                        file
-
 Check a GDSII or OASIS layout file against a socket/template descriptor -- a
 JSON contract declaring the block's outline (bounding box), named pins
 (position, layer, informational size), reserved layers, and numeric interface

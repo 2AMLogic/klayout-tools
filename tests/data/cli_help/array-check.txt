@@ -1,9 +1,3 @@
-usage: klt array-check [-h] [--cell CELL] [--layers LAYERS]
-                       [--mirror-axis {x,y}] [--at AT] [--translate TRANSLATE]
-                       [--tolerance TOLERANCE] [--pitch PITCH] [--count COUNT]
-                       [--direction {x,y}] [--top TOP] [--format {text,json}]
-                       file
-
 Assert structural regularity of a cell array: layer-by-layer mirror or
 translation symmetry (XOR residual per layer) and/or abutment of the unit-cell
 placements at a declared pitch and count (no gap, no overlap, length == count

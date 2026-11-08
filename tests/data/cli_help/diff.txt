@@ -1,7 +1,3 @@
-usage: klt diff [-h] [--top TOP] [--max-items MAX_ITEMS]
-                [--format {text,json}]
-                file_a file_b
-
 Compare two layout streams shape-for-shape. Ignores stream timestamps, element
 order and library name; never ignores coordinates, path widths, text, instance
 transforms, the database unit or cell names. Exit 0 = equivalent, 3 = layouts

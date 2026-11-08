@@ -1,13 +1,3 @@
-usage: klt signoff [-h] [--manifest FILE] [--fleet FILE] [--repo-root DIR]
-                   [--allow-generator-exec] [--generator-approvals FILE]
-                   [--tiers-doc PATH] [--check REPORT] [--attest ITEM]
-                   [--inventory FILE] [--input STREAM] [--generator CMD]
-                   [--regenerated-hash sha256:HEX]
-                   [--hash-kind {bytes,geometry}] [-o FILE]
-                   [--describe-grader] [--format {text,json}]
-                   [--color {auto,always,never}] [--no-color]
-                   [files ...]
-
 Read one or more `klt` JSON envelope files (or '-' for stdin) produced by `klt drc`/`klt lvs`/`klt extract`/`klt sim` and combine them into a single signoff verdict: pass only if every check's own status passed AND every input's `provenance` block (issue #251) agrees on PDK/deck/input-layout identity -- a mismatched-provenance input set is refused (status: 'refused'), never silently aggregated into a wrong verdict. With --manifest instead, renders the T1-T4 evidence-tier item skeleton mechanically parsed from docs/design-evidence-tiers.md, graded against a block manifest's declared kind and per-item evidence locations -- an item is 'met' only when it cites a passing klt JSON envelope with fresh provenance; a missing or stale check renders 'unmet', never assumed met. With --fleet instead, grades every block named in a fleet manifest and reports each block's current tier and, for any block not yet T1, the single item still blocking it -- one query across the whole fleet instead of opening each block's own report. See docs/cli/signoff.md.
 
 positional arguments:

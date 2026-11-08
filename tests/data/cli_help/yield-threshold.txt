@@ -1,9 +1,3 @@
-usage: klt yield-threshold [-h] [--confidence CONFIDENCE]
-                           [--target-error-rate RATE] [--threshold THRESHOLD]
-                           [--outcome-when {above,below}]
-                           [--format {text,json}]
-                           records
-
 Fit P(decided high | stimulus) = Phi((stimulus - mu) / sigma) to per-sample
 binary outcomes, per corner (issue #2976): the input-referred offset of a
 comparator, latch or trip point is never observed directly, only through which

@@ -1,6 +1,3 @@
-usage: klt yield-sensitivity [-h] [--measurement NAME] [--format {text,json}]
-                             samples
-
 Rank a completed Monte Carlo campaign's device/process parameters by their
 contribution to an output metric's variance -- issue #923, Phase 3 of the
 statistical/yield epic #710. Reads a sensitivity sample document (per-sample

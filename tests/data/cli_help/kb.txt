@@ -1,5 +1,3 @@
-usage: klt kb [-h] <subcommand> ...
-
 Query kb/, the flat-files corpus of published circuit designs (topology,
 sizing strategy, layout idioms) the LLM reasoning module draws on -- see
 kb/README.md for the schema and sourcing rules. Runs entirely against the
@@ -17,8 +15,6 @@ options:
 
 --- klt kb list ---
 
-usage: klt kb list [-h] [--format {text,json}]
-
 Enumerate every kb/entries/*.json entry, id-sorted.
 
 options:
@@ -26,8 +22,6 @@ options:
   --format {text,json}  output format (default: text)
 
 --- klt kb show ---
-
-usage: klt kb show [-h] [--format {text,json}] id
 
 Print the full kb/entries/<id>.json entry.
 
@@ -39,10 +33,6 @@ options:
   --format {text,json}  output format (default: text)
 
 --- klt kb search ---
-
-usage: klt kb search [-h] [--where <figure><op><value>] [--pdk <pdk>]
-                     [--format {text,json}]
-                     [query]
 
 Case-insensitive keyword match over title, topology, spec_class,
 layout_idioms, and notes, optionally narrowed by numeric --where filters over
@@ -65,8 +55,6 @@ options:
   --format {text,json}  output format (default: text)
 
 --- klt kb validate ---
-
-usage: klt kb validate [-h] [--recheck-measured] [--format {text,json}]
 
 Validate that every kb/entries/*.json entry parses, conforms to
 kb/schema/entry.schema.json, and has an id matching its filename stem. Exits

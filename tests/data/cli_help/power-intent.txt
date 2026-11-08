@@ -1,7 +1,3 @@
-usage: klt power-intent [-h] --intent FILE --cell-models FILE [--top TOP]
-                        [--format {text,json}]
-                        netlist
-
 Check the power intent of a flat gate-level Verilog netlist with a power-gated
 domain against a JSON intent file: every gated-domain output passes a clamp
 cell with the declared value, every state element is retained or gated (and a

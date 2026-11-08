@@ -1,5 +1,3 @@
-usage: klt evidence [-h] <subcommand> ...
-
 Evidence records around finished `klt sim` / `klt pex` runs. `record` wraps
 the untouched report with git provenance, a dirty-inputs flag, pins,
 environment provenance and the per-corner deck/log snapshot. Never overwrites
@@ -14,12 +12,6 @@ options:
   -h, --help    show this help message and exit
 
 --- klt evidence record ---
-
-usage: klt evidence record [-h] --request REQUEST --block BLOCK --scope SCOPE
-                           [--subset-reason SUBSET_REASON] [--supersedes PATH]
-                           [--root ROOT] [--extensions FILE.json]
-                           [--input PATH] [--format {text,json}]
-                           report
 
 Write <root>/evidence/sim/<block>/<scope>/<YYYYMMDD>-<HHMMSS>-<short-sha>.json
 (UTC time, git short SHA of --root) plus a <id>.d/ sidecar with per-corner
@@ -47,10 +39,6 @@ options:
   --format {text,json}  output format (default: text)
 
 --- klt evidence lint ---
-
-usage: klt evidence lint [-h] [--base BASE] [--schema FILE.json]
-                         [--no-append-only] [--format {text,json}]
-                         [root]
 
 Audit <root>/evidence/sim: record shape, id/filename, append-only history (git
 diff vs --base), supersession chains, sidecar SHA-256s and re-derivation of

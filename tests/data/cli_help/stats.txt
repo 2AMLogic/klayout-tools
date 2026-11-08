@@ -1,7 +1,3 @@
-usage: klt stats [-h] [--per-layer] [--top TOP] [--density-window UM]
-                 [--window-layer L/D] [--format {text,json}]
-                 file
-
 Report bounding box, drawn area, density, and polygon/vertex counts of a GDSII
 or OASIS layout file, in total and optionally per layer.
 polygon_count/vertex_count are per cell definition (not instance-resolved);

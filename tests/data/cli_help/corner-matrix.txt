@@ -1,5 +1,3 @@
-usage: klt corner-matrix [-h] {check} ...
-
 Mechanical check of a repo-committed corner matrix (process / supply_v /
 temperature_c / params axes plus exclude[]) against a klt sim request
 (conformance: missing/extra/duplicate tuples) or a klt sim report
@@ -15,10 +13,6 @@ options:
   -h, --help  show this help message and exit
 
 --- klt corner-matrix check ---
-
-usage: klt corner-matrix check [-h] (--request REQUEST | --report REPORT)
-                               [--format {text,json}]
-                               matrix
 
 Diff a declared corner matrix against a request or a report.
 

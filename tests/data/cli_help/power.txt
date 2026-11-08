@@ -1,8 +1,3 @@
-usage: klt power [-h] [--top TOP] [--deck DECK]
-                 [--resistance-corner {nominal,high,low}]
-                 [--format {text,json}]
-                 file spec
-
 Extract a routed layout's named power/ground nets into a graph of nodes +
 segment resistances and -- when the spec declares 'pads' and/or a
 'current_model' -- solve that network for its DC operating point, reporting an

@@ -15,6 +15,7 @@ Regenerate the snapshots after an intentional help-text change with::
     KLT_UPDATE_HELP_SNAPSHOTS=1 KLT_TESTS_ALLOW_DIRTY_TREE=1 \
         uv run pytest tests/test_cli_help_snapshot.py
 
+The ``usage:`` line is omitted because its wrapping varies by Python version.
 The terminal width is pinned to 80 columns (argparse reads ``COLUMNS`` when
 it builds a formatter), so output does not depend on the invoking terminal.
 """
@@ -63,9 +64,22 @@ def _unique_choices(
     return out
 
 
+def _help(parser: argparse.ArgumentParser) -> str:
+    """``format_help()`` minus the ``usage:`` block.
+
+    argparse wraps the usage line differently across Python versions when a
+    parser has mutually exclusive groups (e.g. ``klt drc --check | --list-rules``),
+    so pinning it would make the snapshot depend on the interpreter. Every flag,
+    default and choice is still pinned by the options sections that follow.
+    """
+    text = parser.format_help()
+    head, sep, rest = text.partition("\n\n")
+    return rest if sep and head.startswith("usage:") else text
+
+
 def _render_tree(parser: argparse.ArgumentParser, path: str) -> str:
     """Help for ``parser`` followed by every nested subcommand's help."""
-    chunks = [parser.format_help()]
+    chunks = [_help(parser)]
     action = _subparsers_action(parser)
     if action is not None:
         for name, sub in _unique_choices(action).items():
@@ -78,7 +92,7 @@ def _render_tree(parser: argparse.ArgumentParser, path: str) -> str:
 def _render_all() -> dict[str, str]:
     """Map snapshot name -> rendered help text, for the whole CLI."""
     root = create_parser()
-    rendered = {ROOT_NAME: root.format_help()}
+    rendered = {ROOT_NAME: _help(root)}
     action = _subparsers_action(root)
     assert action is not None, "klt registers its verbs through add_subparsers"
     for verb, sub in _unique_choices(action).items():

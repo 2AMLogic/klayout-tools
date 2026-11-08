@@ -1,7 +1,3 @@
-usage: klt layout-metrics [-h] [--deck DECK] [--pdk PDK] [--output OUTPUT]
-                          [--dry-run] [--format {text,json}]
-                          block
-
 Aggregate klt layers/cells/drc output for a block directory into a single
 normalized layout.json, the gallery site's data contract (epic #13). Never
 recomputes metrics ad hoc -- it calls the same library functions that back klt

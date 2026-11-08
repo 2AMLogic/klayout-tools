@@ -1,9 +1,3 @@
-usage: klt eval [-h] [--candidate CANDIDATE] [--format {text,json}]
-                [--trajectory-log TRAJECTORY_LOG] [--turn TURN]
-                [--candidate-ref CANDIDATE_REF] [--description DESCRIPTION]
-                [--wall-clock-s WALL_CLOCK_S]
-                descriptor
-
 Orchestrate `klt drc`/`klt lvs`/`klt sim`/`klt layout-metrics` per a per-block
 descriptor and reconcile their four separate exit-code vocabularies into one
 envelope: a hard `valid` gate plus a single scalar `objective` with a declared

@@ -1,8 +1,3 @@
-usage: klt yield-samples [-h] --negative-control REPORT
-                         [--description DESCRIPTION] [--measurement NAME]
-                         [--format {text,json}]
-                         nominal
-
 Derive a `klt yield` sample-set document from two unedited `klt sim --format
 json` Monte Carlo reports: the nominal campaign and a seeded known-bad variant
 whose draw becomes each matched measurement's negative_control (issue #2563).

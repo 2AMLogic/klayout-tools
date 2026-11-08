@@ -1,5 +1,3 @@
-usage: klt gen-compose [-h] [--format {text,json}] request
-
 Place a set of already-generated `klt gen` blocks (each block's own JSON
 response, read from a file path or embedded inline) and/or existing library
 cells (blocks[].cell -- an existing cell in a stream, named by

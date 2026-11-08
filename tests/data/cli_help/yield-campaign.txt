@@ -1,11 +1,3 @@
-usage: klt yield-campaign [-h] [-o OUT_DIR] [--backend BACKEND]
-                          [--hosts HOSTS] [--seed SEED]
-                          [--confidence CONFIDENCE]
-                          [--target-ci-halfwidth TARGET_CI_HALFWIDTH]
-                          [--min-samples MIN_SAMPLES] [--measurement NAME]
-                          [--format {text,json}]
-                          spec
-
 Launch and manage a Monte Carlo yield campaign directly, rather than requiring
 a pre-run `klt sim` report -- issue #906, Phase 2a of the statistical/yield
 epic #710. A campaign spec is a `klt sim` request document with a mandatory

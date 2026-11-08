@@ -1,9 +1,3 @@
-usage: klt tap-distance [-h] --subject SUBJECT --taps TAPS
-                        --max-distance-um MAX_DISTANCE_UM [--island ISLAND]
-                        [--tap-net NET] [--net-spec NET_SPEC]
-                        [--region REGION] [--top TOP] [--format {text,json}]
-                        file
-
 Assert that every point of a subject region (e.g. diffusion) lies within
 --max-distance-um (Euclidean) of a qualifying tap (e.g. a well/substrate tie),
 optionally per island (e.g. per well) and optionally counting only taps wired

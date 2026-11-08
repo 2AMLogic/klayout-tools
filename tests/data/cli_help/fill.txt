@@ -1,11 +1,3 @@
-usage: klt fill [-h] --pdk {sky130,gf180mcu} --layers LAYERS
-                [--boundary {prBoundary}] [--extent EXTENT]
-                [--exclude EXCLUDE] [--spacing SPACING]
-                [--target-density TARGET_DENSITY] [--window WINDOW]
-                [--fill-size FILL_SIZE] [--fill-gap FILL_GAP] [--top TOP]
-                -o OUTPUT [--format {text,json}]
-                file
-
 Add fill squares on the PDK fill layer that maps to each named drawing layer,
 inside a prBoundary or --extent, keeping --spacing from drawn shapes and out
 of --exclude boxes. Writes a new layout (-o); the input is never modified. NOT

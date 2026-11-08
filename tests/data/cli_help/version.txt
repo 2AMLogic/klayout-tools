@@ -1,5 +1,3 @@
-usage: klt version [-h] [--format {text,json}]
-
 Report which klayout-tools build is running: its version, the git commit it
 was built from, and whether that commit is this version's release tag. Only a
 clean build made exactly at the release tag carries the bare `X.Y.Z`; any

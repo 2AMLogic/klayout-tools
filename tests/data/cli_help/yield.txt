@@ -1,9 +1,3 @@
-usage: klt yield [-h] [--limits LIMITS] [--confidence CONFIDENCE]
-                 [--target-ci-halfwidth TARGET_CI_HALFWIDTH]
-                 [--min-samples MIN_SAMPLES] [--measurement NAME]
-                 [--format {text,json}]
-                 samples
-
 Turn a Monte Carlo sample set and its spec limits into a yield estimate that
 always carries its confidence interval, Cpk/sigma-to-spec, and a sample-size
 verdict -- issue #816, Phase 1a of the statistical/yield epic #710. A `klt

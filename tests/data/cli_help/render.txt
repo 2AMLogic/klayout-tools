@@ -1,8 +1,3 @@
-usage: klt render [-h] [-o OUTPUT] [--width WIDTH] [--height HEIGHT]
-                  [--background BACKGROUND] [--top TOP] [--layers LAYERS]
-                  [--bbox BBOX] [--format {text,json}]
-                  file
-
 Render one PNG per non-empty layer of a GDSII or OASIS layout file, built on
 the same layer enumeration as `klt layers`. Runs fully headless via KLayout's
 offscreen LayoutView -- no GUI, no Qt, no X server.

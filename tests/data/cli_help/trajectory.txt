@@ -1,7 +1,3 @@
-usage: klt trajectory [-h] [--threshold THRESHOLD] [--plot PLOT]
-                      [--format {text,json}]
-                      log
-
 Read an append-only JSONL optimization trajectory log (one record per
 evaluation: turn, candidate_ref, objective, gate_results, wall_clock_s) and
 render (a) a markdown milestone table -- the turns where the objective

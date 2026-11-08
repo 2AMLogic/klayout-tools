@@ -1,7 +1,3 @@
-usage: klt size [-h] [-o OUTDIR] [--timeout-s TIMEOUT_S]
-                [--format {text,json}]
-                request
-
 Solve a single device's channel width from a gm/Id target and a current budget
 declared by a request JSON file, scoring every candidate against the real PDK
 models with ngspice -- never a closed-form surrogate as the final word. Phase

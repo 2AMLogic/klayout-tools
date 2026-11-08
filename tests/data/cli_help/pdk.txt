@@ -1,5 +1,3 @@
-usage: klt pdk [-h] <subcommand> ...
-
 Locate an installed open_pdks-layout PDK (open_pdks, volare, or ciel) and
 report its root, variant, version stamp, and per-tool asset directories as
 structured data. This is the one shared PDK_ROOT resolver every downstream
@@ -31,9 +29,6 @@ options:
 
 --- klt pdk find ---
 
-usage: klt pdk find [-h] [--pdk PDK] [--pdk-root PDK_ROOT]
-                    [--expect-version STAMP_OR_SHA] [--format {text,json}]
-
 Resolve a single PDK install and variant via the documented resolution order
 and emit its root, variant, version, how it was resolved, and its per-tool
 asset directories.
@@ -52,8 +47,6 @@ options:
 
 --- klt pdk list ---
 
-usage: klt pdk list [-h] [--pdk-root PDK_ROOT] [--format {text,json}]
-
 Enumerate every install and variant found across the full search order. An
 empty result is success (exit 0), not an error.
 
@@ -63,9 +56,6 @@ options:
   --format {text,json}  output format (default: text)
 
 --- klt pdk env ---
-
-usage: klt pdk env [-h] [--pdk PDK] [--pdk-root PDK_ROOT]
-                   [--format {text,json}]
 
 Emit the resolved install as shell `export` lines (`eval "$(klt pdk env)"`) so
 an interactive simulator or schematic-editor session uses the same install the
@@ -80,9 +70,6 @@ options:
                         exports)
 
 --- klt pdk check ---
-
-usage: klt pdk check [-h] [--pdk PDK] [--pdk-root PDK_ROOT]
-                     [--expect-version STAMP_OR_SHA] [--format {text,json}]
 
 Resolve a single PDK install/variant (same paths `find` emits) and
 additionally exit non-zero when any of its asset directories contain a
@@ -106,9 +93,6 @@ options:
 
 --- klt pdk cells ---
 
-usage: klt pdk cells [-h] [--pdk PDK] [--pdk-root PDK_ROOT] [--supply SUPPLY]
-                     [--format {text,json}]
-
 Report, per standard-cell digital library (libs.ref entries named `*_fd_sc_*`
 or `*_stdcell*`) under the resolved variant: the nfet/pfet device flavor(s)
 its cells instantiate (spice/<lib>.spice), and the nominal supply its .lib
@@ -128,9 +112,6 @@ options:
 
 --- klt pdk macros ---
 
-usage: klt pdk macros [-h] [--pdk PDK] [--pdk-root PDK_ROOT]
-                      [--format {text,json}]
-
 Report, per hard-macro IP library (libs.ref entries named `*_fd_ip_*`, or ones
 shipping both `lef` and `lib` views such as IHP's `sg13g2_sram`; e.g. an
 SRAM/ROM compiler output) under the resolved variant: which views it ships
@@ -147,9 +128,6 @@ options:
 
 --- klt pdk decks ---
 
-usage: klt pdk decks [-h] [--pdk PDK] [--pdk-root PDK_ROOT]
-                     [--format {text,json}]
-
 List the `.lydrc`/`.drc` KLayout DRC deck files under the resolved variant's
 libs.tech/klayout/drc, which one `klt drc --pdk` runs (`is_default`), and a
 best-effort static scan of the `-rd` globals each consumes
@@ -164,9 +142,6 @@ options:
   --format {text,json}  output format (default: text)
 
 --- klt pdk corners ---
-
-usage: klt pdk corners [-h] [--pdk PDK] [--pdk-root PDK_ROOT]
-                       [--format {text,json}]
 
 Report, for the resolved variant's golden ngspice model deck: the available
 top-level SPICE process corner names, and per corner, which curated device
@@ -185,9 +160,6 @@ options:
 
 --- klt pdk em-limits ---
 
-usage: klt pdk em-limits [-h] [--pdk PDK] [--pdk-root PDK_ROOT]
-                         [--format {text,json}]
-
 Parse every tech LEF the resolved variant ships (every libs_ref entry with a
 techlef/ directory, whatever its naming convention -- not just _fd_sc_-named
 standard-cell libraries) and report, per ROUTING/CUT layer, the
@@ -205,9 +177,6 @@ options:
   --format {text,json}  output format (default: text)
 
 --- klt pdk pcell-check ---
-
-usage: klt pdk pcell-check [-h] [--pdk PDK] [--pdk-root PDK_ROOT]
-                           [--format {text,json}]
 
 Attempt to import every KLayout PyCell package the resolved variant ships
 under `libs.tech/klayout/python/` and report which ones loaded (with their
@@ -228,10 +197,6 @@ options:
   --format {text,json}  output format (default: text)
 
 --- klt pdk stackup ---
-
-usage: klt pdk stackup [-h] [--pdk PDK] [--pdk-root PDK_ROOT]
-                       [--corner CORNER] [--thickness {curated,tech-lef}]
-                       [--format {text,json}]
 
 Emit the resolved variant's process stack-up as structured data -- the z-axis
 information a GDSII/OASIS file does not carry and an external E&M/field solver

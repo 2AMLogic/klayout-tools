@@ -1,6 +1,3 @@
-usage: klt draw [-h] [--params PARAMS] [--cell-name CELL_NAME] [-o OUTPUT]
-                [--format {text,json}]
-
 Write a GDSII/OASIS stream verbatim from a JSON description of polygons and
 labels on explicit (layer, datatype) pairs. The deliberately-dumb write-side
 counterpart to the read-side verbs: no PDK awareness and no rule checking --

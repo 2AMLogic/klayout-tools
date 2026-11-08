@@ -1,7 +1,3 @@
-usage: klt clip [-h] (--region REGION | --cell CELL) [--top TOP] -o OUTPUT
-                [--format {text,json}]
-                file
-
 Write a subset of a GDSII or OASIS layout file back out as its own top-cell
 stream: either a micrometre bounding-box region (--region, flattened per
 layer) or a named cell's full subtree (--cell, via kdb.Cell.copy_tree --

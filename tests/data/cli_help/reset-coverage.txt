@@ -1,8 +1,3 @@
-usage: klt reset-coverage [-h] --cell-models FILE --reset-port RESET_PORT
-                          [--reset-polarity {low,high}] [--top TOP]
-                          [--waivers FILE] [--format {text,json}]
-                          netlist
-
 Classify every sequential cell and hard macro of a flat gate-level Verilog
 netlist: reset/set from the named reset port through only buffers/inverters
 with the right polarity, or unreset with a machine-readable reason. A

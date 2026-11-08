@@ -1,5 +1,3 @@
-usage: klt formal [-h] [--timeout-s TIMEOUT_S] [--format {text,json}] request
-
 Formal property checking via SymbiYosys: bounded model checking (`bmc`),
 k-induction (`prove`) or cover reachability (`cover`) of an RTL design or a
 `klt synthesize` netlist (`netlist_path`, with a `liberty` supplying cell

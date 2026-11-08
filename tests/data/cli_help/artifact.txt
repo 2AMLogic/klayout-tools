@@ -1,5 +1,3 @@
-usage: klt artifact [-h] <subcommand> ...
-
 Evidence bytes go to the artifact store through its broker; git keeps a
 manifest naming each object by sha256. The broker URL comes from --broker or
 $KLT_ARTIFACT_BROKER; there is no default. No credential is held: the broker
@@ -18,14 +16,6 @@ options:
   -h, --help    show this help message and exit
 
 --- klt artifact put ---
-
-usage: klt artifact put [-h] [--manifest PATH] [--kind {evidence}]
-                        [--name NAME] [--media-type MEDIA_TYPE]
-                        [--producer-tool PRODUCER_TOOL]
-                        [--producer-version PRODUCER_VERSION]
-                        [--commit COMMIT] [--broker URL] [--repo OWNER/NAME]
-                        [--format {text,json}]
-                        FILE [FILE ...]
 
 Hash each file, ask the broker for a presigned PUT, upload with exactly the
 headers it returned, and emit one manifest entry per file. An object already
@@ -57,10 +47,6 @@ options:
 
 --- klt artifact get ---
 
-usage: klt artifact get [-h] -o OUTPUT [--force] [--broker URL]
-                        [--repo OWNER/NAME] [--format {text,json}]
-                        REF
-
 REF is a sha256 (stored under --repo) or MANIFEST[#SHA256|NAME]. The bytes are
 written only when their recomputed sha256 matches both the manifest's digest
 and the key's. `-o -` writes the verified bytes to stdout instead of a JSON
@@ -81,8 +67,6 @@ options:
 
 --- klt artifact verify ---
 
-usage: klt artifact verify [-h] [--broker URL] [--format {text,json}] MANIFEST
-
 stat each entry, then fetch and re-hash it. Exits 3 if any entry is missing or
 mismatched, 1 on a broker refusal or bad manifest.
 
@@ -96,11 +80,6 @@ options:
   --format {text,json}  output format (default: text)
 
 --- klt artifact delete ---
-
-usage: klt artifact delete [-h] [--keep MANIFEST] [--yes] [--force-referenced]
-                           [--broker URL] [--repo OWNER/NAME]
-                           [--format {text,json}]
-                           REF [REF ...]
 
 REF is a sha256 (under --repo) or MANIFEST[#SELECTOR], as for `get`. Without
 --yes only `stat` is called and nothing is deleted. Each --keep MANIFEST

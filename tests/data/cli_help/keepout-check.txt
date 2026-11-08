@@ -1,8 +1,3 @@
-usage: klt keepout-check [-h] --forbidden FORBIDDEN --margin MARGIN
-                         [--cells CELL] [--region REGION] [--top TOP]
-                         [--format {text,json}]
-                         file
-
 Assert that no shape on a forbidden layer set lies within a margin of a
 guarded cell or region (a keep-out around a spiral inductor, a sensitive
 analog block, ...) and report each intruding shape with its layer and

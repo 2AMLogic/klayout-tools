@@ -1,9 +1,3 @@
-usage: klt arith-gen [-h] [--width WIDTH]
-                     [--arch {ripple,brent-kung,han-carlson,sklansky,kogge-stone}]
-                     [--cell-map CELL_MAP] [--module-name MODULE_NAME]
-                     [--output-dir OUTPUT_DIR] [--include-cell-map]
-                     [--format {text,json}]
-
 Emit a parallel-prefix adder as Verilog RTL from a named architecture
 (`ripple`, `brent-kung`, `han-carlson`, `sklansky`, `kogge-stone`) or from an
 explicit N x N binary cell map -- issue #1722, the arithmetic-architecture

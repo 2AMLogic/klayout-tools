@@ -1,15 +1,3 @@
-usage: klt economy [-h] [--top TOP] [--grid-cols GRID_COLS]
-                   [--grid-rows GRID_ROWS]
-                   [--max-empty-regions MAX_EMPTY_REGIONS]
-                   [--budget-um2 BUDGET_UM2]
-                   [--reference-area-um2 REFERENCE_AREA_UM2]
-                   [--area-eff-max-dead-margin-um AREA_EFF_MAX_DEAD_MARGIN_UM]
-                   [--area-eff-min-utilization AREA_EFF_MIN_UTILIZATION]
-                   [--area-eff-max-empty-region-fraction AREA_EFF_MAX_EMPTY_REGION_FRACTION]
-                   [--area-eff-require-bbox-tightness] [--what-if MOVES_JSON]
-                   [--attribute] [--format {text,json}]
-                   file
-
 Report utilization (per cell and for the top), a whitespace map (grid +
 largest exact empty regions), bounding-box tightness/aspect-ratio/dead-
 margins, and optional area-budget/reference-area and AREA-EFF (issue #1086)

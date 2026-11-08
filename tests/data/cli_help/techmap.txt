@@ -1,7 +1,3 @@
-usage: klt techmap [-h] [--verify-equivalence]
-                   [--equiv-timeout-s EQUIV_TIMEOUT_S] [--format {text,json}]
-                   request
-
 Map a `klt.synth.generic-netlist/1` (a small, technology-independent
 10-primitive gate netlist -- see docs/design/synth-techmap-stage-contract.md
 section 2) onto a resolved standard-cell Liberty via `native/techmap`'s own

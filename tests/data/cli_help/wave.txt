@@ -1,5 +1,3 @@
-usage: klt wave [-h] <subcommand> ...
-
 Build an indexed FST store from a VCD/FST waveform trace (`build`), then
 answer one or more query operations against it (`query`) -- `value`, `find`,
 `count`, `sample`, `stuck`, `diff`, `wave` (see docs/cli/wave.md's op table).
@@ -18,8 +16,6 @@ options:
 
 --- klt wave build ---
 
-usage: klt wave build [-h] [--format {text,json}] request
-
 Index a VCD/FST waveform trace into a compact, queryable FST store -- built
 once, queried many times, exactly like `klt extract`'s netlist output. See
 docs/design/waveform-query-contract-spike.md section 4 for the full
@@ -33,8 +29,6 @@ options:
   --format {text,json}  output format (default: text)
 
 --- klt wave query ---
-
-usage: klt wave query [-h] [--format {text,json}] request
 
 Answer one or more query operations (a single query is simply a one-entry
 `ops` array) against a store `klt wave build` produced. See

@@ -1,7 +1,3 @@
-usage: klt layers [-h] [--top TOP] [--flattened] [--include-text]
-                  [--deck DECK] [--format {text,json}]
-                  file
-
 Report the layer/datatype pairs, names, and per-cell-definition shape counts
 of a GDSII or OASIS layout file.
 

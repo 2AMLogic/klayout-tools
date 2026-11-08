@@ -1,5 +1,3 @@
-usage: klt mcp [-h] <subcommand> ...
-
 Model Context Protocol bridge. `klt mcp serve` runs a stdio MCP server
 exposing one tool per klt verb, generated from this argument parser; each call
 runs `klt <verb> ... --format json` in a subprocess, so docs/json-contract.md
@@ -14,10 +12,6 @@ options:
   -h, --help    show this help message and exit
 
 --- klt mcp serve ---
-
-usage: klt mcp serve [-h] [--workspace-root WORKSPACE_ROOT]
-                     [--enable-verb VERB] [--allow-fleet]
-                     [--allow-outside-workspace] [--timeout TIMEOUT]
 
 Serve MCP over stdio (stdout is the protocol channel; nothing else is written
 there). Paths in tool calls resolve against --workspace-root, which is also

@@ -1,9 +1,3 @@
-usage: klt interface-check [-h] --place DX,DY --pins REGEX [--pin-layer-a L/D]
-                           [--pin-layer-b L/D] [--tol-um UM]
-                           [--pair A_REGEX=B_TEMPLATE] [--top-a TOP_A]
-                           [--top-b TOP_B] [--format {text,json}]
-                           a b
-
 Check that two separately generated blocks mate: pair the text labels of A and
 B whose string fully matches --pins, translate B by --place into A's frame (in
 memory; no assembled layout is written), and report per pin the offset between

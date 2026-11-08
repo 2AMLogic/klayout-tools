@@ -1,8 +1,3 @@
-usage: klt ring-check [-h] [--pdk PDK] [--layers LAYERS] [--region REGION]
-                      [--top TOP] [--ignore-enclosed] [--cells CELL]
-                      [--format {text,json}]
-                      file
-
 Assert that a caller-specified layer set forms a single closed annulus (guard
 ring, tap ring, seam moat) and report the break location when it does not: the
 shapes are merged and must form exactly one polygon with one hole. Catches a

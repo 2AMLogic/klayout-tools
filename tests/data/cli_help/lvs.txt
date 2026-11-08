@@ -1,8 +1,3 @@
-usage: klt lvs [-h] [--check REPORT] [--layout PATH] [--rerun]
-               [--deck-file PATH] [--deck-var NAME=VALUE]
-               [--progress | --no-progress] [--format {text,json}] [-o PATH]
-               [request]
-
 Compare a layout-derived netlist (extracted inline, or a pre-extracted `klt
 extract` output) against a reference (schematic/golden) SPICE netlist and
 report structured mismatches -- see docs/design/lvs-extraction-spike.md

@@ -1,6 +1,3 @@
-usage: klt mom [-h] [--top TOP] [--touchstone PATH] [--format {text,json}]
-               file spec
-
 Discretise conductor surfaces from a GDSII/OASIS layout per a stackup spec,
 fill the potential-coefficient matrix, and solve for the Maxwell capacitance
 matrix -- issue #718, Phase 0/1 of the Method-of-Moments epic #701. Numerics

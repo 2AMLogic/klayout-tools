@@ -1,5 +1,3 @@
-usage: klt sim-merge [-h] [--format {text,json}] manifest report [report ...]
-
 Merge the reports of N per-request `klt sim` runs (one corner grid split
 across requests) into the report a single request over the whole grid would
 have produced. Rollups, coverage and counters are recomputed over the union; a

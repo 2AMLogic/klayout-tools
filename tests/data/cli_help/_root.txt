@@ -1,5 +1,3 @@
-usage: klt [-h] [--version] <command> ...
-
 Tools for AI agents to work with IC layout.
 
 positional arguments:
