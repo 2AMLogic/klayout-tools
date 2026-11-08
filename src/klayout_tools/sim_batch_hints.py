@@ -79,3 +79,49 @@ def hint_existing_fatal(diagnostics: list[dict[str, Any]]) -> bool:
     for existing in diagnostics:
         with_runner_expr_hint(existing)
     return True
+
+
+#: ngspice prints the offending expanded-deck card on the line it reports:
+#: ``Error on line 570 : m.x1.m0 d g s b nfet_03v3 w=1.28e-4 l=2.8e-7``.
+_CARD_ERR_RE = re.compile(
+    r"^[ \t]*Error on line (\d+)[ \t]*:[ \t]*(\S[^\n]*)$", re.IGNORECASE | re.MULTILINE
+)
+_MODELNAME_RE = re.compile(r"could not find a valid modelname", re.IGNORECASE)
+_ATTRIBUTED_MARK = "ngspice card at expanded-deck line"
+
+
+def attribute_modelname(diagnostic: dict[str, Any], log_text: str) -> dict[str, Any]:
+    """Name the instance/model behind a ``could not find a valid modelname``
+    abort (issue #5138). The fleet outputs carry no expanded deck, but the
+    engine log quotes the offending card, so the instance, model and sizing
+    are read from it; ngspice's line number indexes the *expanded* deck, not
+    the caller's netlist, and is labelled so. Additive and idempotent; never
+    raises. Without a quoted card the diagnostic is returned unchanged."""
+    message = diagnostic.get("message")
+    if (
+        not isinstance(message, str)
+        or _ATTRIBUTED_MARK in message
+        or not _MODELNAME_RE.search(message)
+    ):
+        return diagnostic
+    cards = list(_CARD_ERR_RE.finditer(log_text))
+    modelname = _MODELNAME_RE.search(log_text)
+    if modelname is not None:
+        cards = [m for m in cards if m.start() < modelname.start()]
+    if not cards:
+        return diagnostic
+    line_no, card = cards[-1].group(1), cards[-1].group(2).split()
+    tokens = [t for t in card if "=" not in t]
+    params = " ".join(t for t in card if "=" in t)
+    if len(tokens) >= 6 and tokens[0][:1].lower() == "m":
+        detail = f"instance '{tokens[0]}' model '{tokens[5]}'"
+    else:
+        detail = f"'{card[0]}'"
+    if params:
+        detail += f" ({params})"
+    diagnostic["message"] = (
+        f"{message}; {_ATTRIBUTED_MARK} {line_no}: {detail} -- the line "
+        "number indexes ngspice's expanded deck, not your netlist; compare "
+        "this model's w/l against the library's bin cards"
+    )
+    return diagnostic
