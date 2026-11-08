@@ -19,7 +19,7 @@ _None._
 
 `loom:important`; taken before unlabelled work.
 
-_None._
+- **#4891**: batch fleet runner's ngspice cannot evaluate sky130A model-library expr() parameters (runner image gap), engine_version still null
 
 ## Ready
 
@@ -35,7 +35,6 @@ Human-approved issues ready for implementation (`loom:issue`).
 - **#4495**: place-and-route (asap7): router V1 landing pads fail the deck's M1 tip rules; not reported
 - **#4827**: Live-verify #4820 floating_gate_allowed against ASAP7 DFFASRHQNx1
 - **#4891**: batch fleet runner's ngspice cannot evaluate sky130A model-library expr() parameters (runner image gap), engine_version still null
-- **#5084**: [Epic #520] Sharded gf180mcuD run and CI sample
 
 ## In Progress
 
@@ -45,7 +44,8 @@ Issues currently being built (`loom:building`).
 - **#3420**: Re-pin open_pdks to f6eeac7 (ciel) — fleet retires volare c6d73a3
 - **#4312**: gf180mcu deck: no eFuse (EF.*) DRC rules and no eFuse device class in the extraction deck
 - **#4771**: Friction: klt sim --batch-set --dry-run submits real batch jobs; --wait-for-capacity is refused with --batch-set
-- **#5112**: klt sim: batch version lock, capacity wait, AC waveform export, waveform-only exit code
+- **#5137**: pex: asap7 N-card adaptation runs eagerly even for --extract-only / --measure-command
+- **#5138**: klt sim --backend batch: gf180mcu deck that passes locally aborts on the fleet with 'could not find a valid modelname' despite the #4976 preflight
 
 ## PRs Awaiting Review
 
@@ -55,8 +55,8 @@ PRs waiting on Judge (`loom:review-requested`).
 - **#4602**: docs: re-qualify c6d73a3 reference records under f6eeac7 and mark superseded
 - **#4737**: feat(drc): enforce sky130 licon1/mcon max size with exemptions
 - **#4772**: fix: honor --dry-run and --wait-for-capacity under klt sim --batch-set
-- **#5113**: feat: add options.waveform_decimate to thin waveform.raw.json
-- **#5116**: feat: shuttle-level layout URL template and --shard for tt corpus tools
+- **#5139**: feat(sim): bin-aware model-bin preflight from library bin cards
+- **#5140**: fix(pex): skip asap7 leg-netlist adaptation in extract-only and measure-command modes
 
 ## Approved (Awaiting Merge)
 
@@ -93,7 +93,8 @@ Issues carrying `loom:curated`.
 - **#4827**: Live-verify #4820 floating_gate_allowed against ASAP7 DFFASRHQNx1 *(curated)*
 - **#4845**: ring-check --pdk sg13g2: cross-check re-implemented Seal.* rules against the real Ruby deck *(curated)*
 - **#4902**: klt sim batch backend: derived measurements referencing other measurements (m_<name>) produce no value *(curated)*
-- **#5112**: klt sim: batch version lock, capacity wait, AC waveform export, waveform-only exit code *(curated)*
+- **#5137**: pex: asap7 N-card adaptation runs eagerly even for --extract-only / --measure-command *(curated)*
+- **#5138**: klt sim --backend batch: gf180mcu deck that passes locally aborts on the fleet with 'could not find a valid modelname' despite the #4976 preflight *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -118,12 +119,12 @@ Issues carrying `loom:curated`.
 |------|-------|
 | Operator merge-risk holds | 0 |
 | Very important | 0 |
-| Important | 0 |
-| Ready (`loom:issue`) | 11 |
-| In Progress (`loom:building`) | 5 |
+| Important | 1 |
+| Ready (`loom:issue`) | 10 |
+| In Progress (`loom:building`) | 6 |
 | PRs awaiting review | 6 |
 | Approved PRs awaiting merge | 0 |
-| Curated | 26 |
+| Curated | 27 |
 | Architect / Hermit proposals | 9 |
 | Active epics | 2 |
 <!-- guide:plan-body:end -->
