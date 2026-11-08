@@ -186,6 +186,7 @@ from ._jsonnum import is_number
 from ._paths import _resolve_relative
 from .gen import GenError, _pdk_family, _resolve_expected_device_class, generate
 from .gen_compose import GenComposeError, _translate_bbox, compose
+from .layout_plan_fields import ingest_netlist
 from .layout_plan_ports import (
     apply_gate_contact,
     device_owned_port_names,
@@ -193,7 +194,6 @@ from .layout_plan_ports import (
     port_pins,
     unrouted_reasons,
 )
-from .netlist_digest import build_netlist_digest
 from .pdk import PdkNotFoundError
 
 #: Bumped only on a non-additive (breaking) change to this module's own
@@ -1196,7 +1196,7 @@ def execute_layout_plan_document(
     work_dir: str | None = None,
 ) -> dict[str, Any]:
     """:func:`execute_layout_plan`, but ingesting ``request.netlist`` itself
-    (via :func:`klayout_tools.netlist_digest.build_netlist_digest`) rather
+    (via :func:`klayout_tools.layout_plan_fields.ingest_netlist`) rather
     than requiring the caller to have already built a digest -- mirrors
     :func:`klayout_tools.layout_plan.validate_layout_plan_document`'s own
     convenience-wrapper shape.
@@ -1216,20 +1216,7 @@ def execute_layout_plan_document(
     netlist_spec = layout_plan._parse_netlist(request["netlist"])
     resolved_path = _resolve_relative(netlist_spec["path"], request_dir or os.getcwd())
 
-    from .lvs import LvsError
-
-    try:
-        digest = build_netlist_digest(
-            resolved_path,
-            top=netlist_spec["top"],
-            form=netlist_spec["form"],
-            deck=netlist_spec["deck"],
-            device_map=netlist_spec["device_map"],
-        )
-    except LvsError as exc:
-        raise layout_plan.LayoutPlanError(
-            f"request.netlist could not be ingested: {exc}"
-        ) from exc
+    digest = ingest_netlist(netlist_spec, resolved_path)
 
     return execute_layout_plan(
         request, digest, request_dir=request_dir, work_dir=work_dir

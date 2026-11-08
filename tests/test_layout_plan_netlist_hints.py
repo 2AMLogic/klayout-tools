@@ -44,3 +44,22 @@ def test_lvs_reference_parse_hint_unchanged():
     exc = Exception("Can't find a value for a R, C or L device")
     message = _reference_parse_message("x.spice", exc)
     assert "reference.form" in message and "reference.deck" in message
+
+
+def test_execute_path_sim_form_netlist_error_names_netlist_keys(tmp_path):
+    # issue #5135 reports `klt layout-plan execute`: the execute wrapper must
+    # share the validate path's `netlist.*` hint rewrite.
+    from klayout_tools.layout_plan_execute import execute_layout_plan_document
+
+    (tmp_path / "sim.spice").write_text(_SIM_FORM_NETLIST)
+    plan = {
+        "schema": REQUEST_SCHEMA,
+        "netlist": {"path": "sim.spice", "top": "analog_block"},
+        "device_groups": [],
+    }
+
+    with pytest.raises(LayoutPlanError) as excinfo:
+        execute_layout_plan_document(plan, request_dir=str(tmp_path))
+    message = str(excinfo.value)
+    assert "request.netlist.form" in message
+    assert "reference.form" not in message
