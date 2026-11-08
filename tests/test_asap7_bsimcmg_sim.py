@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from klayout_tools import asap7_bsimcmg, sim
+from klayout_tools import sim
 from klayout_tools.extract import run_extract
 
 _ROOT = Path(__file__).resolve().parent.parent
@@ -73,21 +73,22 @@ _RAMP = "PWL(0 0 100p 0 120p 0.7 300p 0.7 320p 0 500p 0)"
 def _request(tmp_path: Path, cell: str, stimulus: str) -> Path:
     spice = tmp_path / f"{cell}.spice"
     run_extract(str(_GDS), "asap7", output=str(spice), top=f"{cell}_ASAP7_75t_R")
-    adapted = tmp_path / f"{cell}.osdi.spice"
-    adapted.write_text(asap7_bsimcmg.adapt_extracted_netlist(spice.read_text()))
-    sections = {
-        c.lower(): asap7_bsimcmg.adapt_model_cards(
-            (_PM / f"7nm_{c}_160803.pm").read_text()
-        )
-        for c in ("TT", "FF", "SS")
-    }
-    (tmp_path / "asap7_bsimcmg.lib").write_text(asap7_bsimcmg.corner_library(sections))
-    (tmp_path / "body.spice").write_text(
-        f".include {adapted}\nVdd vdd 0 0.7\nVin a 0 {_RAMP}\n{stimulus}\nCl y 0 1f\n"
+    # The raw extracted netlist plus the testbench is one file: `adapt`
+    # (issue #3873) rewrites its FinFET cards, so nothing is adapted by hand.
+    extracted = "\n".join(
+        line for line in spice.read_text().splitlines() if line.strip() != ".end"
     )
+    (tmp_path / "body.spice").write_text(
+        f"{extracted}\nVdd vdd 0 0.7\nVin a 0 {_RAMP}\n{stimulus}\nCl y 0 1f\n"
+    )
+    cards = {}
+    for c in ("TT", "FF", "SS"):
+        card = tmp_path / f"7nm_{c}.pm"
+        shutil.copy(_PM / f"7nm_{c}_160803.pm", card)
+        cards[c.lower()] = card.name
     request = {
         "netlist": "body.spice",
-        "models": {"lib": "asap7_bsimcmg.lib"},
+        "adapt": {"kind": "asap7_bsimcmg", "model_cards": cards},
         "analysis": {"kind": "tran", "args": "1p 500p"},
         "corners": {
             "process": ["tt", "ff", "ss"],
@@ -133,5 +134,9 @@ def test_extracted_cell_switches_in_every_corner(tmp_path, cell, stimulus):
         delays[corner["process"]] = values["tpd_fall"]
     # Process ordering: FF faster than TT faster than SS.
     assert delays["ff"] < delays["tt"] < delays["ss"]
+    adapt = report["environment"]["adapt"]
+    assert adapt["kind"] == "asap7_bsimcmg"
+    assert [m["corner"] for m in adapt["model_cards"]] == ["tt", "ff", "ss"]
+    assert adapt["netlist_sha256_in"] != adapt["netlist_sha256_out"]
     (preload,) = report["environment"]["osdi_preload"]
     assert preload["name"] == "bsimcmg.osdi" and len(preload["sha256"]) == 64

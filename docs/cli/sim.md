@@ -6346,6 +6346,29 @@ x86-64 (elsewhere set `OPENVAF_R_BIN`). The `.osdi` lands in the ignored
 - The extracted cell's separate `VDD`/`VDD$1` (tap vs. source) and
   `vsubs`/`VSS` pins are distinct nets; the testbench ties them.
 
+**One-call form: `adapt` (issue #3873).** Opt-in; absent `adapt` leaves a
+request byte-for-byte unchanged and nothing is sniffed from `osdi_preload` or
+the cards. The `netlist` is the raw `klt extract` output (plus testbench):
+
+```json
+"adapt": {"kind": "asap7_bsimcmg",
+          "model_cards": {"tt": "7nm_TT_160803.pm", "ff": "7nm_FF_160803.pm", "ss": "7nm_SS_160803.pm"}}
+```
+
+`klt sim` simulates `adapt_extracted_netlist` of `netlist` and, when
+`model_cards` is given, a `corner_library` of the adapted cards in place of
+`models.lib` (paths resolve like `models.lib`, relative to the request
+directory). `kind` is a closed enum with one member. Refused with a
+`SimError`: an unknown `kind`, `model_cards` together with `models.lib`
+(ambiguous), `engine: "xyce"` (OSDI/ngspice only), a backend that leaves this
+host (`remote`/`batch`: the adapted files are local and not forwarded; a host
+default backend steps aside to `local`), and any adapter `ValueError` (a
+non-level-72 card, a FinFET card without `NFIN`, `NF=`/`AS=`/... present).
+`options.osdi_preload` stays the caller's job. The report gains an additive
+`environment.adapt` = `{kind, netlist_sha256_in, netlist_sha256_out,
+model_cards: [{corner, sha256}]}` (present only when `adapt` is); **no
+`schema_version` bump** (additive). The hand-adapted flow below remains valid.
+
 **Request.**
 
 ```json
