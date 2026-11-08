@@ -1,0 +1,40 @@
+usage: klt socket-check [-h] --socket SOCKET [--top TOP]
+                        [--require-power-ports] [--edge-band-um UM]
+                        [--format {text,json}]
+                        file
+
+Check a GDSII or OASIS layout file against a socket/template descriptor -- a
+JSON contract declaring the block's outline (bounding box), named pins
+(position, layer, informational size), reserved layers, and numeric interface
+budgets. Reports missing/misplaced/wrong-layer pins, geometry outside the
+outline, and reserved-layer usage as structured violations; budgets are
+reported back declared-but-unverified, since verifying an R/C/current budget
+needs simulation/extraction data this checker doesn't have. See
+docs/schemas/socket.schema.json for the descriptor shape and docs/cli/socket-
+check.md for the CLI surface. Runs fully headless via KLayout's native batch
+database API -- no GUI, no Qt.
+
+positional arguments:
+  file                  path to a GDSII or OASIS layout file
+
+options:
+  -h, --help            show this help message and exit
+  --socket SOCKET       path to a socket descriptor JSON file (see
+                        docs/schemas/socket.schema.json). Not validated by
+                        argparse -- a missing/malformed descriptor exits 1
+                        with a clean error, per docs/cli/socket-check.md's
+                        exit-code contract, rather than argparse's usage-error
+                        exit 2.
+  --top TOP             top cell to check when the stream has more than one;
+                        omit to check every top cell
+  --require-power-ports
+                        run the power_ports check (issue #2839) even when the
+                        descriptor declares no 'power_ports' object: every
+                        POWER/GROUND pin name needs an edge-accessible port,
+                        and at least one POWER and one GROUND pin must be
+                        declared. See docs/cli/socket-check.md.
+  --edge-band-um UM     power_ports edge band in micrometres, overriding the
+                        descriptor's power_ports.edge_band_um (default 0: the
+                        port must touch the outline; provisional, see
+                        docs/cli/socket-check.md)
+  --format {text,json}  output format (default: text)

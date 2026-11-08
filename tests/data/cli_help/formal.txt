@@ -1,0 +1,22 @@
+usage: klt formal [-h] [--timeout-s TIMEOUT_S] [--format {text,json}] request
+
+Formal property checking via SymbiYosys: bounded model checking (`bmc`),
+k-induction (`prove`) or cover reachability (`cover`) of an RTL design or a
+`klt synthesize` netlist (`netlist_path`, with a `liberty` supplying cell
+models). Generates the .sby itself, copying inputs in so a WASI-sandboxed
+Yosys works. `fail` carries a VCD counterexample trace; a timeout is
+`unknown`, never `pass`. See docs/cli/formal.md.
+
+positional arguments:
+  request               klt formal request: a path to a JSON file, '-' to read
+                        the request from stdin, or an inline JSON object
+                        string
+
+options:
+  -h, --help            show this help message and exit
+  --timeout-s TIMEOUT_S
+                        overall wall-clock timeout in seconds (default: 120,
+                        or the request's own `timeout_s`); overrides the
+                        request field. A run that does not finish is
+                        `unknown`, never `pass`
+  --format {text,json}  output format (default: text)

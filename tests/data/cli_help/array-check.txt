@@ -1,0 +1,37 @@
+usage: klt array-check [-h] [--cell CELL] [--layers LAYERS]
+                       [--mirror-axis {x,y}] [--at AT] [--translate TRANSLATE]
+                       [--tolerance TOLERANCE] [--pitch PITCH] [--count COUNT]
+                       [--direction {x,y}] [--top TOP] [--format {text,json}]
+                       file
+
+Assert structural regularity of a cell array: layer-by-layer mirror or
+translation symmetry (XOR residual per layer) and/or abutment of the unit-cell
+placements at a declared pitch and count (no gap, no overlap, length == count
+x pitch). Purely geometric; fully headless via KLayout's batch database API.
+See docs/cli/array-check.md.
+
+positional arguments:
+  file                  path to a GDSII or OASIS layout file
+
+options:
+  -h, --help            show this help message and exit
+  --cell CELL           symmetry: root cell to flatten (default: every top
+                        cell); abutment: the unit cell whose placements are
+                        checked
+  --layers LAYERS       symmetry layer set: a path to a JSON file or an inline
+                        JSON array of [layer, datatype] pairs. Required with
+                        --mirror-axis/--translate.
+  --mirror-axis {x,y}   mirror about the line x = AT ('x') or y = AT ('y');
+                        needs --at
+  --at AT               mirror line coordinate in um
+  --translate TRANSLATE
+                        translation symmetry vector 'dx,dy' in um (exclusive
+                        with --mirror-axis)
+  --tolerance TOLERANCE
+                        ignore deviations below this many um (default 0)
+  --pitch PITCH         abutment pitch in um (> 0)
+  --count COUNT         expected number of placements
+  --direction {x,y}     array direction for the abutment check (default x)
+  --top TOP             top cell to check when the stream has more than one;
+                        omit for all
+  --format {text,json}  output format (default: text)

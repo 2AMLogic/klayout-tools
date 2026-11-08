@@ -1,0 +1,60 @@
+usage: klt lef-abstract [-h] --socket SOCKET --macro-name MACRO_NAME
+                        --cell-library CELL_LIBRARY [--top TOP]
+                        [--class MACRO_CLASS] [--symmetry SYMMETRY]
+                        [--pdk PDK] [--pdk-root PDK_ROOT] [-o OUTPUT]
+                        [--obs-mode {detailed,coarse}] [--require-power-pins]
+                        [--format {text,json}]
+                        file
+
+Emit a LEF abstract -- a MACRO block with PIN and OBS sections -- from a
+GDSII/OASIS block layout plus its `klt socket-check` socket descriptor, so
+OpenROAD (`klt place-and-route`) can place it as a hard macro alongside
+standard cells. Issue #438, Epic #393 Phase 2 Capability A. Pin geometry is
+read from real drawn shapes when the layout has metal at a pin's declared
+position, falling back to a synthesized placeholder box otherwise (reported
+per pin as `geometry_source`); OBS geometry is every routing-layer shape not
+already claimed by a declared pin. `--cell-library` resolves the tech LEF (via
+the same PDK resolver `klt synthesize`/`klt place-and-route` use) whose
+SITE/routing-layer header this command reads via `klayout_tools.lef_header` --
+no external LEF-parsing dependency. See docs/cli/socket-check.md's LEF
+translation section for the field-by-field mapping. Runs fully headless via
+KLayout's native batch database API -- no GUI, no Qt.
+
+positional arguments:
+  file                  path to a GDSII or OASIS layout file
+
+options:
+  -h, --help            show this help message and exit
+  --socket SOCKET       path to a socket descriptor JSON file (see
+                        docs/schemas/socket.schema.json). Not validated by
+                        argparse -- a missing/malformed descriptor exits 1
+                        with a clean error rather than argparse's usage-error
+                        exit 2.
+  --macro-name MACRO_NAME
+                        name for the emitted LEF MACRO block
+  --cell-library CELL_LIBRARY
+                        standard-cell library whose tech LEF supplies the
+                        routing-layer/SITE header this command reads (e.g.
+                        sky130_fd_sc_hd) -- not the macro's own library;
+                        resolved via the same PDK discovery `klt pdk
+                        find`/`klt synthesize` use
+  --top TOP             top cell to read when the stream has more than one
+  --class MACRO_CLASS   LEF MACRO CLASS value (default: BLOCK, a hard macro)
+  --symmetry SYMMETRY   space-separated LEF SYMMETRY axes, e.g. 'X Y' or 'X Y
+                        R90'; omit to emit no SYMMETRY statement
+  --pdk PDK             PDK variant to resolve (e.g. sky130A); overrides $PDK
+  --pdk-root PDK_ROOT   explicit PDK install root; overrides $PDK_ROOT and the
+                        search order
+  -o, --output OUTPUT   output LEF path (default: <macro-name>.lef)
+  --obs-mode {detailed,coarse}
+                        obstruction granularity (issue #4283): 'detailed'
+                        (default) emits every merged routing-layer region;
+                        'coarse' emits one bounding rectangle per routing
+                        layer minus the declared pin ports, bounding the LEF
+                        size to O(pins)
+  --require-power-pins  exit 3 when the supply-pin verdict (power_pins, issue
+                        #2839) fails: no USE POWER or no USE GROUND pin, a
+                        supply pin whose written USE differs, or a supply PORT
+                        that is not drawn layout geometry. Without it the
+                        verdict is reported only.
+  --format {text,json}  output format (default: text)

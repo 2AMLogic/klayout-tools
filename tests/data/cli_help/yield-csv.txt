@@ -1,0 +1,34 @@
+usage: klt yield-csv [-h] --group-by COL --value COL [--status-col COL]
+                     [--pass-value V] [--draw-col COL] [--unit UNIT]
+                     [--min MIN] [--max MAX] [--target-yield TARGET_YIELD]
+                     [--format {text,json}]
+                     csv
+
+Derive a `klt yield` sample-set document from a long-format per-draw Monte
+Carlo CSV: one measurement per --group-by value, samples from --value. Rows
+whose --status-col is not --pass-value, and passing rows with an empty/non-
+numeric/non-finite value, count as errored. The --format json output is the
+sample-set document (plus a `derivation` block with the CSV path and SHA-256
+hash); redirect it to a file and pass that to `klt yield`. See
+docs/cli/yield.md's 'Deriving a sample set from a per-draw CSV'.
+
+positional arguments:
+  csv                   path to the per-draw CSV (UTF-8, header row)
+
+options:
+  -h, --help            show this help message and exit
+  --group-by COL        column whose distinct values each become one
+                        measurement
+  --value COL           column holding the draw's value
+  --status-col COL      column holding the draw's status (requires --pass-
+                        value)
+  --pass-value V        status value marking a good draw; any other value
+                        counts errored
+  --draw-col COL        draw-index column; a repeated (group, draw) pair is
+                        rejected
+  --unit UNIT           unit recorded on each measurement
+  --min MIN             limits.min per measurement
+  --max MAX             limits.max per measurement
+  --target-yield TARGET_YIELD
+                        limits.target_yield per measurement
+  --format {text,json}  output format (default: text)

@@ -1,0 +1,31 @@
+usage: klt mom [-h] [--top TOP] [--touchstone PATH] [--format {text,json}]
+               file spec
+
+Discretise conductor surfaces from a GDSII/OASIS layout per a stackup spec,
+fill the potential-coefficient matrix, and solve for the Maxwell capacitance
+matrix -- issue #718, Phase 0/1 of the Method-of-Moments epic #701. Numerics
+run in the klt_mom_native Rust extension (native/mom/); see docs/cli/mom.md
+for the spec-file schema, the JSON contract, and how to build the extension.
+
+positional arguments:
+  file                  path to a GDSII or OASIS layout file
+  spec                  path to a JSON spec file: a non-empty 'stackup' array
+                        mapping GDS layer/datatype pairs to conductor names +
+                        z-extents, plus 'background_permittivity' and optional
+                        'panel_size_um' -- see docs/cli/mom.md's 'Spec file'
+                        section
+
+options:
+  -h, --help            show this help message and exit
+  --top TOP             top cell to discretise when the stream has more than
+                        one (required in that case -- klt mom operates on
+                        exactly one top cell, unlike klt layers' default of
+                        summing across all)
+  --touchstone PATH     write a standard 2-port Touchstone (.s2p) file to PATH
+                        from the report's full_wave_sweep S-parameters (issue
+                        #1518) -- requires 'ports' (exactly two entries) in
+                        the spec file; errors clearly if the report has no
+                        S-parameters or the two ports' reference_impedance_ohm
+                        differ. See docs/cli/mom.md's Touchstone export
+                        section
+  --format {text,json}  output format (default: text)

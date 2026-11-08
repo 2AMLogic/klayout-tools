@@ -1,0 +1,25 @@
+usage: klt layers [-h] [--top TOP] [--flattened] [--include-text]
+                  [--deck DECK] [--format {text,json}]
+                  file
+
+Report the layer/datatype pairs, names, and per-cell-definition shape counts
+of a GDSII or OASIS layout file.
+
+positional arguments:
+  file                  path to a GDSII or OASIS layout file
+
+options:
+  -h, --help            show this help message and exit
+  --top TOP             top cell to report on when the stream has more than
+                        one; omit to report shape counts summed across every
+                        top cell. Also selects the flattening root for
+                        --flattened
+  --flattened           also report per-layer instantiated (hierarchy- and
+                        transform-flattened) shape counts, physical bounding
+                        boxes, and instance-weighted contributing cells
+  --include-text        also report per-layer flattened text occurrence counts
+                        and unique text strings (requires --flattened)
+  --deck DECK           built-in deck whose layer-name table fills each
+                        entry's name when the stream carries none; the report
+                        also records the deck's content_hash
+  --format {text,json}  output format (default: text)

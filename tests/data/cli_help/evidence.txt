@@ -1,0 +1,71 @@
+usage: klt evidence [-h] <subcommand> ...
+
+Evidence records around finished `klt sim` / `klt pex` runs. `record` wraps
+the untouched report with git provenance, a dirty-inputs flag, pins,
+environment provenance and the per-corner deck/log snapshot. Never overwrites
+a record.
+
+positional arguments:
+  <subcommand>
+    record      write one evidence-record/1 file
+    lint        lint the evidence-record/1 files under a repo
+
+options:
+  -h, --help    show this help message and exit
+
+--- klt evidence record ---
+
+usage: klt evidence record [-h] --request REQUEST --block BLOCK --scope SCOPE
+                           [--subset-reason SUBSET_REASON] [--supersedes PATH]
+                           [--root ROOT] [--extensions FILE.json]
+                           [--input PATH] [--format {text,json}]
+                           report
+
+Write <root>/evidence/sim/<block>/<scope>/<YYYYMMDD>-<HHMMSS>-<short-sha>.json
+(UTC time, git short SHA of --root) plus a <id>.d/ sidecar with per-corner
+corner.cir and log copied from the report's artifacts. Exits 1 if the record
+exists (no --force), --root is not a git work tree, or the wrapper metadata
+would carry a local identifier.
+
+positional arguments:
+  report                raw klt sim / klt pex JSON report (the -o file)
+
+options:
+  -h, --help            show this help message and exit
+  --request REQUEST     request JSON the report was produced from
+  --block BLOCK         design under test
+  --scope SCOPE         evidence scope slug (e.g. full-pvt)
+  --subset-reason SUBSET_REASON
+                        why this run is a subset of the full corner matrix
+  --supersedes PATH     an existing record this one supersedes (repeatable)
+  --root ROOT           git work tree the record is written into (default:
+                        cwd)
+  --extensions FILE.json
+                        opaque JSON object stored verbatim under `extensions`
+  --input PATH          extra input (e.g. the netlist) included in the
+                        dirty_inputs check (repeatable)
+  --format {text,json}  output format (default: text)
+
+--- klt evidence lint ---
+
+usage: klt evidence lint [-h] [--base BASE] [--schema FILE.json]
+                         [--no-append-only] [--format {text,json}]
+                         [root]
+
+Audit <root>/evidence/sim: record shape, id/filename, append-only history (git
+diff vs --base), supersession chains, sidecar SHA-256s and re-derivation of
+the klt sim verdict. Exits 0 clean, 1 on findings. --schema adds repo-specific
+required fields, allowed extensions keys and a corner-id pattern.
+
+positional arguments:
+  root                  git work tree to lint (default: cwd)
+
+options:
+  -h, --help            show this help message and exit
+  --base BASE           ref the append-only check diffs against (default:
+                        origin/main)
+  --schema FILE.json    flat declarative repo schema: required_fields,
+                        extension_keys, corner_id_pattern
+  --no-append-only      skip the git-diff append-only check (e.g. no base ref
+                        available)
+  --format {text,json}  output format (default: text)

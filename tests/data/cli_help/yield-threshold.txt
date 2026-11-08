@@ -1,0 +1,41 @@
+usage: klt yield-threshold [-h] [--confidence CONFIDENCE]
+                           [--target-error-rate RATE] [--threshold THRESHOLD]
+                           [--outcome-when {above,below}]
+                           [--format {text,json}]
+                           records
+
+Fit P(decided high | stimulus) = Phi((stimulus - mu) / sigma) to per-sample
+binary outcomes, per corner (issue #2976): the input-referred offset of a
+comparator, latch or trip point is never observed directly, only through which
+way each sample decided. Reports mu/sigma with profile-likelihood confidence
+intervals, per-stimulus proportions with Clopper-Pearson intervals, a chi-
+square goodness of fit and, with --target-error-rate, the stimulus at that
+error rate (flagged extrapolated beyond what the sample count resolves).
+Degenerate data (one outcome, separation, fewer than 2 stimulus levels) yields
+null estimates and a fit.status, never a fabricated sigma. See docs/cli/yield-
+threshold.md.
+
+positional arguments:
+  records               path to the records JSON document: {"corners":
+                        [{"name", "records": [{"stimulus", "outcome"}]}]} or a
+                        flat {"records": [...]} with an optional per-record
+                        "corner"
+
+options:
+  -h, --help            show this help message and exit
+  --confidence CONFIDENCE
+                        two-sided confidence level for every interval
+                        (default: 0.95)
+  --target-error-rate RATE
+                        also report the stimulus at which the wrong-decision
+                        rate reaches RATE (0 < RATE < 0.5), flagged
+                        extrapolated when RATE is below what the sample count
+                        resolves
+  --threshold THRESHOLD
+                        derive each record's outcome from its numeric `value`
+                        against this threshold instead of reading a given
+                        `outcome`
+  --outcome-when {above,below}
+                        with --threshold: decided high when value is above
+                        (default) or below it
+  --format {text,json}  output format (default: text)

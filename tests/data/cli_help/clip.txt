@@ -1,0 +1,31 @@
+usage: klt clip [-h] (--region REGION | --cell CELL) [--top TOP] -o OUTPUT
+                [--format {text,json}]
+                file
+
+Write a subset of a GDSII or OASIS layout file back out as its own top-cell
+stream: either a micrometre bounding-box region (--region, flattened per
+layer) or a named cell's full subtree (--cell, via kdb.Cell.copy_tree --
+hierarchy preserved). Useful for handing a single device or region to an
+external tool (EM extraction, third-party meshing) or isolating it for review.
+
+positional arguments:
+  file                  path to a GDSII or OASIS layout file
+
+options:
+  -h, --help            show this help message and exit
+  --region REGION       bbox region to clip out, as an inline JSON array of
+                        four micrometre coordinates [left, bottom, right, top]
+                        (e.g. '[0, 0, 100, 100]') -- the same shape `klt ring-
+                        check`/`klt components` accept for their own --region.
+                        Every layer of the resolved top cell (see --top) is
+                        flattened and intersected with this window; mutually
+                        exclusive with --cell.
+  --cell CELL           name of a cell anywhere in the stream (top-level or
+                        nested) whose full subtree is copied verbatim into the
+                        output's fresh top cell of the same name; mutually
+                        exclusive with --region
+  --top TOP             top cell to clip --region against when the stream has
+                        more than one; omit to require exactly one top cell.
+                        Ignored (and should be left unset) with --cell.
+  -o, --output OUTPUT   output GDS/OASIS path for the clipped/extracted stream
+  --format {text,json}  output format (default: text)

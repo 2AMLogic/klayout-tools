@@ -1,0 +1,39 @@
+usage: klt mcp [-h] <subcommand> ...
+
+Model Context Protocol bridge. `klt mcp serve` runs a stdio MCP server
+exposing one tool per klt verb, generated from this argument parser; each call
+runs `klt <verb> ... --format json` in a subprocess, so docs/json-contract.md
+stays the single contract. Needs the optional extra: pip install 'klayout-
+tools[mcp]'. See docs/guides/mcp-server.md.
+
+positional arguments:
+  <subcommand>
+    serve       run the stdio MCP server
+
+options:
+  -h, --help    show this help message and exit
+
+--- klt mcp serve ---
+
+usage: klt mcp serve [-h] [--workspace-root WORKSPACE_ROOT]
+                     [--enable-verb VERB] [--allow-fleet]
+                     [--allow-outside-workspace] [--timeout TIMEOUT]
+
+Serve MCP over stdio (stdout is the protocol channel; nothing else is written
+there). Paths in tool calls resolve against --workspace-root, which is also
+each subprocess's cwd.
+
+options:
+  -h, --help            show this help message and exit
+  --workspace-root WORKSPACE_ROOT
+                        directory relative paths in tool calls resolve against
+                        (default: cwd)
+  --enable-verb VERB    expose a verb that is hidden by default (fleet-
+                        dispatching: yield-campaign); repeatable
+  --allow-fleet         expose every hidden verb and permit --backend
+                        remote/batch (provisions cloud hosts / submits to the
+                        batch fleet)
+  --allow-outside-workspace
+                        do not reject path arguments that resolve outside
+                        --workspace-root
+  --timeout TIMEOUT     per-call subprocess timeout in seconds (default: 900)

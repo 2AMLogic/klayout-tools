@@ -1,0 +1,161 @@
+usage: klt deck [-h] <subcommand> ...
+
+Identify klt's built-in DRC/LVS rule decks (sky130, gf180mcu, sg13g2). `hash`
+reports the `provenance.deck.content_hash` this build resolves for a deck,
+with no layout file and no check run -- the cheap way to gate on the deck
+revision a build will use before doing any work. `resolve` goes the other way:
+it turns a pinned `provenance.deck.content_hash` (docs/json-contract.md) or a
+`deck name + version` can be turned back into the klayout-tools git tag/commit
+and PyPI version that shipped it -- without hand-bisecting this repo's git
+history to reproduce against an older deck revision (`resolve`), or report
+this install's own deck content hash, structural device-class coverage, and
+release status directly, with no input layout needed (`info`). `rules` reports
+what the deck actually requires -- every rule's id, description, and threshold
+in micrometres, with the deck's content hash -- so pre-layout arithmetic can
+read a constant from the installed deck instead of transcribing it out of a
+deck comment. Resolve-only: this does not fetch, check out, or build a
+historical revision -- install the reported version yourself to reproduce
+against it.
+
+positional arguments:
+  <subcommand>
+    resolve     resolve a deck's content hash or (name, version) to a release
+    hash        report the content hash this build resolves for a deck
+    path        print the installed path of a deck's standalone DRC script
+    info        report the installed build's own deck content hash, device
+                coverage, and release status
+    rules       list the rule values a built-in deck enforces (id,
+                description, threshold in um), with no layout needed
+    devices     list the drawn-layer predicate set (marker + per-terminal
+                requires/excludes) each of a deck's device classes is
+                recognised by
+
+options:
+  -h, --help    show this help message and exit
+
+--- klt deck resolve ---
+
+usage: klt deck resolve [-h] [--content-hash CONTENT_HASH] [--deck DECK]
+                        [--version VERSION] [--format {text,json}]
+
+Look up a deck query against the generated hash/version -> release history
+table. Give either --content-hash (optionally narrowed with --deck), or both
+--deck and --version together.
+
+options:
+  -h, --help            show this help message and exit
+  --content-hash CONTENT_HASH
+                        sha256:<hex> deck content hash to resolve, e.g. as
+                        reported by `klt drc --deck sky130`'s
+                        provenance.deck.content_hash
+  --deck DECK           deck name (e.g. sky130, gf180mcu); narrows a
+                        --content-hash query, or combines with --version for
+                        an exact lookup
+  --version VERSION     klayout-tools package version to look up (requires
+                        --deck)
+  --format {text,json}  output format (default: text)
+
+--- klt deck hash ---
+
+usage: klt deck hash [-h] --deck DECK [--format {text,json}]
+
+Report the `provenance.deck.content_hash` this build would record for a built-
+in deck -- with no layout file and no check run (issue #1202). The hash, not
+the package version, is what pins a run's rule set, so gating on it used to
+mean running a throwaway `klt drc` on whatever layout happened to be around
+just to read the hash back out of the report. This answers the same question
+directly, so a CI preflight or container smoke test can check the deck it is
+about to use before doing any work. Pair with `klt deck resolve --content-hash
+<hash>` to turn the answer into the release that shipped it.
+
+options:
+  -h, --help            show this help message and exit
+  --deck DECK           built-in deck name to identify (e.g. asap7, gf180mcu,
+                        sg13cmos5l, sg13g2, sky130)
+  --format {text,json}  output format (default: text)
+
+--- klt deck path ---
+
+usage: klt deck path [-h] --deck DECK [--format {text,json}]
+
+Print the absolute path of a built-in deck's standalone KLayout DRC-DSL script
+(issue #3789) -- a file usable as `klt drc --engine klayout --deck-file
+<path>` from a wheel / `uv tool` install, where the repo-relative src/ path
+does not exist. Only asap7 ships such a script; the Python rule-table decks
+exit 1.
+
+options:
+  -h, --help            show this help message and exit
+  --deck DECK           built-in deck name whose script path to print (asap7)
+  --format {text,json}  output format (default: text)
+
+--- klt deck info ---
+
+usage: klt deck info [-h] [--deck DECK] [--format {text,json}]
+
+Report this klt install's own deck content hash, structural device-class
+coverage (ExtractionDeck.device_classes -- e.g. whether diode recognition is
+wired up at all), and release status -- with no input layout needed.
+Complements `klt deck resolve`: `resolve` turns a hash you already have into a
+release; `info` tells you your own currently-running hash and coverage without
+first running an extraction (issue #1209 -- two installs can report the
+identical `klt --version` string while shipping different deck content).
+
+options:
+  -h, --help            show this help message and exit
+  --deck DECK           deck name (e.g. sky130, gf180mcu) to report; omit to
+                        report every registered deck
+  --format {text,json}  output format (default: text)
+
+--- klt deck rules ---
+
+usage: klt deck rules [-h] --deck DECK [--rule RULE] [--format {text,json}]
+
+Report the *numbers* a built-in deck enforces -- every registered rule's id,
+description, check kind, drawn layers, and distance threshold in micrometres
+-- alongside the deck's own content hash, with no layout file and no check run
+(issue #2308). `klt drc` reports violations and therefore needs a stream; this
+answers the pre-layout question (area budgeting, device pitch, whether a
+proposed segmentation is drawable at all) that has to be settled before any
+GDS exists. Rule ids are this deck's own (`poly.width.1`), not the upstream
+PDK's numbering -- that is reported per rule under `provenance.rule_id`. Pair
+the reported `content_hash` with a cited constant to make the citation re-
+checkable against the installed deck on the next PDK bump.
+
+options:
+  -h, --help            show this help message and exit
+  --deck DECK           built-in curated-DRC deck name whose rules to list
+                        (e.g. gf180mcu, sg13cmos5l, sg13g2, sky130)
+  --rule RULE           narrow to a single rule by exact id (e.g.
+                        poly.width.1); an id the deck does not carry is a
+                        clean error, not an empty list
+  --format {text,json}  output format (default: text)
+
+--- klt deck devices ---
+
+usage: klt deck devices [-h] --deck DECK [--class DEVICE_CLASS]
+                        [--format {text,json}]
+
+Report what has to be **drawn** for each of an extraction deck's device
+classes to be recognised -- its device-recognition marker layer plus every
+per-terminal requires/excludes predicate, with layer/datatype numbers --
+alongside the deck's own content hash, with no layout file and no extraction
+run (issue #2365). `klt deck info` says which device classes a deck *can*
+recognise; this says what a layout must draw for one to be found. Most classes
+are driven off drawn conductor/diffusion geometry alone, but a minority are
+gated on a marker layer and/or implant predicates (filter on
+`marker_gated`/`predicate_gated`) -- and a layout missing any single member of
+that set extracts as `device_count: 0`, which reads exactly like 'this layout
+contains none of that device'. `klt extract` names the missing layer in
+`warnings[]` for a junction-diode near miss; this answers the same question
+ahead of time, for every class.
+
+options:
+  -h, --help            show this help message and exit
+  --deck DECK           built-in extraction deck name whose device classes to
+                        list (e.g. asap7, gf180mcu, sg13cmos5l, sg13g2,
+                        sky130)
+  --class DEVICE_CLASS  narrow to a single device class by exact name (e.g.
+                        diode_pd2nw_06v0); a name the deck does not declare is
+                        a clean error, not an empty list
+  --format {text,json}  output format (default: text)

@@ -1,0 +1,75 @@
+usage: klt lvs [-h] [--check REPORT] [--layout PATH] [--rerun]
+               [--deck-file PATH] [--deck-var NAME=VALUE]
+               [--progress | --no-progress] [--format {text,json}] [-o PATH]
+               [request]
+
+Compare a layout-derived netlist (extracted inline, or a pre-extracted `klt
+extract` output) against a reference (schematic/golden) SPICE netlist and
+report structured mismatches -- see docs/design/lvs-extraction-spike.md
+section 2b for the request/response contract and docs/cli/lvs.md for the CLI
+surface. Runs fully headless via KLayout's native
+NetlistComparer/NetlistSpiceReader -- no GUI, no Qt. Takes a request-document
+path (like `klt sim`/`klt gen`), not positional netlist file args.
+
+positional arguments:
+  request               klt lvs request: a path to a JSON file, '-' to read
+                        the request from stdin, or an inline JSON object
+                        string. Omit when using --check (inputs are read from
+                        the committed report instead)
+
+options:
+  -h, --help            show this help message and exit
+  --check REPORT        verify a previously committed 'klt lvs --format json'
+                        report (REPORT) instead of running a fresh compare:
+                        mutually exclusive with the positional 'request'
+                        argument, since inputs are read from REPORT itself
+                        (issue #1106). Cheap mode (default): re-hash REPORT's
+                        layout/reference netlists (and extraction deck, when
+                        one was used) and compare against the recorded environ
+                        ment.layout_sha256/reference_sha256/provenance.deck.co
+                        ntent_hash values, no compare engine re-run. Combine
+                        with --rerun for full mode (re-run the compare and
+                        diff verdict-bearing fields). Exits 0 if still
+                        consistent, 3 if drifted -- see docs/cli/lvs.md, '--
+                        check'
+  --layout PATH         explicit layout/netlist input for --check/--rerun
+                        (issue #2699): overrides the layout path REPORT
+                        recorded, unconditionally (same rule as the positional
+                        'file' of 'klt drc --check'/'klt extract --check').
+                        Use it when REPORT's layout is outside any repository
+                        (recorded as scope 'external', so it cannot be
+                        located) or the verifying clone is laid out
+                        differently. A layout that no longer hashes to the
+                        recorded value reports 'drifted'. Requires --check; a
+                        clean error (exit 1) otherwise
+  --rerun               full mode for --check (issue #1106): best-effort re-
+                        run of the compare REPORT names (reconstructed from
+                        REPORT's own echoed
+                        layout/reference/engine/deck/parameter_tolerance
+                        fields -- see docs/cli/lvs.md, '--check', for
+                        reconstruction limits) and diff verdict-bearing fields
+                        against the committed report, excluding
+                        provenance.klt_version/klayout_version/pdk.version.
+                        Requires --check; a clean error (exit 1) otherwise
+  --deck-file PATH      path to the PDK's KLayout LVS runset for
+                        request.engine 'klayout-runset' (issue #3206); fills
+                        request.deck_file, and is a clean error (exit 1) if
+                        the request already sets it or uses another engine. A
+                        relative PATH resolves against the current directory
+  --deck-var NAME=VALUE
+                        extra '-rd NAME=VALUE' global passed to the runset
+                        (engine 'klayout-runset' only; issue #3206).
+                        Repeatable; fills request.deck_vars, and is a clean
+                        error (exit 1) if the request already sets it or uses
+                        another engine
+  --progress, --no-progress
+                        write stage start/finish lines and a periodic
+                        heartbeat for inline layout extraction to stderr
+                        (stdout stays the pure response). Default: heartbeat
+                        lines only (every 30s of a long stage) when stderr is
+                        not a TTY, nothing on a TTY; --no-progress forces off
+  --format {text,json}  output format (default: text)
+  -o, --output PATH     also write the JSON envelope to PATH (same as --format
+                        json stdout; written atomically, '.gz' gzip-
+                        compressed; stdout is unchanged). An unwritable PATH
+                        is a clean error (exit 1). Rejected with --check

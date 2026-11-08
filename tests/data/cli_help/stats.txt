@@ -1,0 +1,28 @@
+usage: klt stats [-h] [--per-layer] [--top TOP] [--density-window UM]
+                 [--window-layer L/D] [--format {text,json}]
+                 file
+
+Report bounding box, drawn area, density, and polygon/vertex counts of a GDSII
+or OASIS layout file, in total and optionally per layer.
+polygon_count/vertex_count are per cell definition (not instance-resolved);
+flattened_polygon_count/flattened_vertex_count are the instance-resolved
+counterparts, weighted by CellInstArray multiplicity like area_um2, matching
+'klt layers --flattened'. area_um2 is the raw sum of shape areas (overlaps
+double-counted); merged_area_um2 is the unioned area.
+
+positional arguments:
+  file                  path to a GDSII or OASIS layout file
+
+options:
+  -h, --help            show this help message and exit
+  --per-layer           also report the same statistics broken down per layer
+  --top TOP             top cell to report on when the stream has more than
+                        one (required in that case; optional otherwise)
+  --density-window UM   also report per-layer drawn-area fraction (merged
+                        geometry) over square windows of this size in um tiled
+                        over the top-cell bbox; edge windows are clipped and
+                        judged against their clipped area
+  --window-layer L/D    restrict --density-window to this layer/datatype
+                        (repeatable); default: every non-annotation layer with
+                        geometry
+  --format {text,json}  output format (default: text)

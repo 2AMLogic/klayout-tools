@@ -1,0 +1,34 @@
+usage: klt yield-samples [-h] --negative-control REPORT
+                         [--description DESCRIPTION] [--measurement NAME]
+                         [--format {text,json}]
+                         nominal
+
+Derive a `klt yield` sample-set document from two unedited `klt sim --format
+json` Monte Carlo reports: the nominal campaign and a seeded known-bad variant
+whose draw becomes each matched measurement's negative_control (issue #2563).
+Both reports are read with `klt yield`'s own sim-report reader; measurements
+match by exact name and unit; the control is graded against the nominal
+limits. The --format json output is the sample-set document itself (plus
+schema_version and a `derivation` block recording both source paths and
+SHA-256 hashes) -- redirect it to a file and pass that to `klt yield`. Does
+not run simulations or grade yield. See docs/cli/yield.md's 'Deriving a sample
+set from two `klt sim` reports'.
+
+positional arguments:
+  nominal               path to the nominal campaign's `klt sim --format json`
+                        Monte Carlo report
+
+options:
+  -h, --help            show this help message and exit
+  --negative-control REPORT
+                        path to the seeded known-bad variant's own `klt sim
+                        --format json` Monte Carlo report; its draw becomes
+                        each matched measurement's negative_control
+  --description DESCRIPTION
+                        optional description of the deliberate defect,
+                        recorded as every derived negative_control's
+                        description
+  --measurement NAME    derive only this nominal measurement; repeatable, and
+                        comma-separated names are accepted (default: every
+                        measurement in the nominal report's rollup)
+  --format {text,json}  output format (default: text)

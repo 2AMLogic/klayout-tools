@@ -1,0 +1,146 @@
+usage: klt [-h] [--version] <command> ...
+
+Tools for AI agents to work with IC layout.
+
+positional arguments:
+  <command>
+    layers              enumerate layers of a GDSII/OASIS stream
+    stats               report area, density, and polygon/vertex counts of a
+                        GDSII/OASIS stream
+    diff                compare two GDSII/OASIS streams for equal geometry,
+                        labels and hierarchy
+    economy             quantitative layout-density report (issue #1012)
+    cells               report the cell hierarchy of a GDSII/OASIS stream
+    clip                write a bbox region or a named cell's subtree out as
+                        its own stream
+    components          report connected components across a caller-selected
+                        conductor/via stack
+    drc                 run a headless DRC deck against a GDSII/OASIS stream
+    precheck            run a named battery of layout-hygiene checks
+    socket-check        check a GDSII/OASIS stream against a socket/template
+                        descriptor
+    interface-check     check that block A's labelled pins land on block B's
+                        pads at a placement
+    reset-coverage      list state elements of a gate-level netlist an async
+                        reset misses
+    power-intent        check isolation, state and sequencing of a power-gated
+                        netlist
+    lef-abstract        emit a LEF abstract (MACRO/PIN/OBS) from a layout +
+                        socket descriptor
+    ring-check          assert a layer set forms a single closed annulus
+                        (guard/tap ring)
+    seam-check          check abutting-cell tiling and conductor continuity
+                        across seams
+    corner-matrix       check a klt sim request or report against a declared
+                        corner matrix
+    keepout-check       assert no forbidden-layer shape lies within a margin
+                        of a cell/region
+    fill                insert density fill shapes on a PDK's fill layers
+    array-check         assert mirror/translation symmetry and pitch abutment
+                        of a cell array
+    tap-distance        assert every subject point is within a Euclidean
+                        distance of a tap
+    layout-metrics      emit a normalized layout.json per block from existing
+                        klt output
+    render              render per-layer PNG images from a GDSII/OASIS stream
+    pdk                 discover and resolve an installed PDK
+    deck                identify a built-in rule deck, resolve one to its
+                        release, report the installed build's own deck
+                        coverage, or list the rule values a deck enforces
+    env-provenance      emit committable environment provenance for an
+                        evidence record, scan records for leaked home paths,
+                        or lint committed JSON envelopes for absolute host
+                        paths
+    evidence            write an evidence-record/1 file around a finished klt
+                        sim / klt pex report
+    artifact            put/get/verify/delete evidence bytes in the fleet
+                        artifact store by sha256, with a committed manifest
+    version             report the running build's identity (release vs post-
+                        tag build)
+    extract             extract a schematic-equivalent netlist from a
+                        GDSII/OASIS stream
+    lvs                 compare an extracted/reference netlist pair and report
+                        mismatches
+    netlist             export an xschem schematic to a SPICE netlist
+                        (headless)
+    synthesize          synthesize RTL against a standard-cell liberty via
+                        Yosys
+    arith-gen           generate a parallel-prefix adder (Verilog) from a cell
+                        map
+    techmap             Liberty-driven technology mapping of a generic netlist
+                        (native Rust)
+    equiv               prove/refute combinational equivalence of two RTL/gate
+                        netlists (Yosys)
+    formal              check assert/cover properties of RTL or a mapped
+                        netlist (SymbiYosys)
+    erc                 build a per-gate layer-by-layer connectivity model and
+                        antenna-ratio verdict (antenna/ERC signoff)
+    functional-verification
+                        run a cocotb regression against Icarus/Verilator
+    place-and-route     place and route a synthesized netlist against a
+                        resolved PDK via OpenROAD
+    wave                build/query an indexed store from a VCD/FST
+                        functional-verification waveform trace (native Rust)
+    sta                 standalone timing/power analysis via OpenSTA of a
+                        placed & routed DEF, or of a bare gate-level netlist
+                        with no DEF
+    characterize        characterize standard cells into one NLDM Liberty
+                        (.lib) model
+    eval                score a candidate against a per-block gate/objective
+                        descriptor
+    gen                 generate a parametrized layout cell (headless PCell
+                        harness)
+    gen-compose         place already-generated blocks and library cells into
+                        one composed cell
+    layout-plan         execute a netlist-driven klt.layout_plan.request/1
+                        document
+    draw                write a primitive GDSII/OASIS stream from a JSON shape
+                        description
+    sim                 run a headless SPICE PVT corner matrix (ngspice)
+    sim-merge           merge per-request klt sim reports of one split corner
+                        grid
+    sim-plan            split a klt sim request into per-process shards and a
+                        sim-merge manifest
+    pex                 extract a parasitic-annotated netlist and re-sim the
+                        schematic testbenches against it
+    size                solve a single device's operating point from a gm/Id
+                        target (ngspice)
+    report              render one or more klt JSON envelopes into a
+                        text/markdown report
+    signoff             aggregate klt drc/lvs/extract/sim JSON envelopes into
+                        one pass/fail verdict, render a T1-T4 tier-verdict
+                        report with --manifest, or a fleet-wide tier roll-up
+                        with --fleet
+    trajectory          render an optimization trajectory JSONL log to a
+                        milestone table + plot
+    kb                  query the circuit-design knowledge base (kb/)
+    mom                 quasi-static capacitance extraction (Method of
+                        Moments)
+    power               extract a routed layout's power grid as a resistive
+                        network, solve it for static IR drop, and emit a per-
+                        net EM current-density verdict
+    yield               Monte Carlo sample set + spec limits -> yield estimate
+                        with CIs (needs the klt-yield-native extension)
+    yield-samples       two `klt sim` MC reports (nominal + known-bad) -> a
+                        `klt yield` sample-set document carrying a negative
+                        control
+    yield-csv           per-draw Monte Carlo CSV -> a `klt yield` sample-set
+                        document
+    yield-campaign      launch + analyse a Monte Carlo yield campaign from a
+                        spec (needs the klt-yield-native extension)
+    yield-sensitivity   campaign parameter draws + output values -> ranked
+                        contribution to the spread (needs the klt-yield-native
+                        extension)
+    yield-threshold     per-sample (stimulus, binary outcome) records ->
+                        probit threshold mean/sigma with profile-likelihood
+                        CIs, per corner
+    design-centering    yield-sensitivity ranking + sized device -> re-
+                        centering candidates
+    mcp                 serve the klt verbs to MCP-capable agent frameworks
+
+options:
+  -h, --help            show this help message and exit
+  --version             print the running build's identity and exit -- bare
+                        `klt X.Y.Z` for a tagged release, a dev version such
+                        as `klt X.Y.(Z+1).devN+g<sha>` otherwise (see `klt
+                        version --format json`)

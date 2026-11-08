@@ -1,0 +1,76 @@
+usage: klt equiv [-h] [--timeout-s TIMEOUT_S]
+                 [--sim-backend {iverilog,verilator,both}] [--resume]
+                 [--check REPORT] [--rerun] [--format {text,json}]
+                 request
+
+Prove or refute combinational equivalence between two RTL/gate-level netlists
+('gold' and 'gate') via Yosys's built-in miter/SAT equivalence-checking flow
+-- Phase 0 of the formal-equivalence epic #707, the correctness loop-closer
+#704 (RTL synthesis) and #700 (place-and-route) both depend on. On a
+refutation, the concrete counterexample vector is independently re-run through
+both netlists via iverilog/vvp to confirm the divergence, not just trusted
+from the solver. A solver/process timeout is reported `inconclusive`, never
+`equivalent`. Combinational designs only in this MVP -- a design containing
+flip-flops, latches, or memories is a clear scope error (exit 1), not a
+silently-wrong verdict. Takes a request-document path (like `klt lvs`/`klt
+sim`/`klt synthesize`), not positional RTL file args -- see docs/cli/equiv.md.
+
+positional arguments:
+  request               klt equiv request: a path to a JSON file, '-' to read
+                        the request from stdin, or an inline JSON object
+                        string
+
+options:
+  -h, --help            show this help message and exit
+  --timeout-s TIMEOUT_S
+                        overall wall-clock timeout in seconds for the Yosys
+                        proof (default: 60, or the request's own `timeout_s`
+                        field); overrides the request field when given. A run
+                        that does not finish within this budget is reported
+                        `inconclusive`, never `equivalent` -- see
+                        docs/cli/equiv.md.
+  --sim-backend {iverilog,verilator,both}
+                        simulator used to replay a counterexample vector/trace
+                        (default: iverilog, or the request's own `sim_backend`
+                        field); overrides the request field when given.
+                        `verilator` compiles the replay via `verilator
+                        --binary` instead of interpreting it -- much faster on
+                        long vectors, but `iverilog` stays the canonical
+                        backend for evidence. `both` runs both and requires
+                        them to agree: a disagreement is reported as an error-
+                        severity `sim_backend_disagreement` diagnostic and
+                        `inconclusive`, never silently resolved in favour of
+                        one backend. See docs/cli/equiv.md.
+  --resume              resume from committed stage artifacts under
+                        .klt/equiv/ (issue #2280): a completed stage 1 whose
+                        stage1.commit.json record fingerprint-matches this
+                        request and whose committed log corroborates it is
+                        reused instead of re-run (an `all_proven` record
+                        yields the final verdict without re-running Yosys; an
+                        `unproven_cells` record re-enters at stage 2);
+                        anything else re-runs from stage 1. The `yosys`
+                        (combinational) engine is a single stage, so the flag
+                        is accepted and re-runs its one stage -- kept uniform
+                        so an agent fleet can use one retry command regardless
+                        of engine. See docs/cli/equiv.md, 'Resumable runs',
+                        and docs/guides/remote-evidence-runs.md.
+  --check REPORT        verify a previously committed 'klt equiv --format
+                        json' report (REPORT) instead of running a fresh
+                        proof, against the request given positionally (issues
+                        #2224 + #2280). Cheap mode (default): re-resolve and
+                        re-hash the request's gold/gate sources and compare
+                        against REPORT's recorded
+                        provenance.input.content_hash -- no Yosys run. Combine
+                        with --rerun for full mode. Exits 0 if still
+                        consistent, 3 if drifted -- see docs/cli/equiv.md, '--
+                        check / --rerun'
+  --rerun               full mode for --check (issues #2224 + #2280): re-run
+                        the proof the positional request declares and diff
+                        verdict-bearing fields against the committed report,
+                        excluding
+                        provenance.klt_version/klayout_version/pdk.version,
+                        engine_version, and run-scoped bookkeeping (elapsed_s,
+                        the resume block; see docs/cli/equiv.md, '--check /
+                        --rerun'). Requires --check; a clean error (exit 1)
+                        otherwise
+  --format {text,json}  output format (default: text)

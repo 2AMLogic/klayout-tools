@@ -1,0 +1,14 @@
+usage: klt version [-h] [--format {text,json}]
+
+Report which klayout-tools build is running: its version, the git commit it
+was built from, and whether that commit is this version's release tag. Only a
+clean build made exactly at the release tag carries the bare `X.Y.Z`; any
+other build's distribution version is a distinct PEP 440 dev version
+(`X.Y.(Z+1).devN+g<sha>`, plus `.dirty` for uncommitted changes), so it can
+never satisfy a `klayout-tools==X.Y.Z` pin. Identifying the build never fails:
+an unrecoverable identity is reported as `X.Y.Z.dev0+unknown` with
+`is_release: null`, not as an error.
+
+options:
+  -h, --help            show this help message and exit
+  --format {text,json}  output format (default: text)
