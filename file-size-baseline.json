@@ -1025,7 +1025,7 @@
     },
     {
       "path": "tests/test_place_and_route_batch.py",
-      "lines": 614
+      "lines": 613
     },
     {
       "path": "tests/test_place_and_route_min_area.py",
@@ -1105,7 +1105,7 @@
     },
     {
       "path": "tests/test_sim_decks.py",
-      "lines": 2367
+      "lines": 2362
     },
     {
       "path": "tests/test_sim_nodeset.py",
