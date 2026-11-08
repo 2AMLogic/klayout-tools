@@ -74,3 +74,30 @@ def parse_options(raw: Any) -> dict[str, Any]:
         )
 
     return {"cell_name": cell_name, "output": output}
+
+
+def ingest_netlist(netlist_spec: dict[str, Any], resolved_path: str) -> dict[str, Any]:
+    """Build the netlist digest; an ingest failure is a ``LayoutPlanError``.
+
+    The shared reader's hints name ``klt lvs``'s ``reference.form``/
+    ``reference.deck`` keys; a layout-plan author spells the same options
+    ``netlist.*``, so the message is rewritten to match (#5135).
+    """
+    from .layout_plan import LayoutPlanError
+    from .lvs import LvsError
+    from .netlist_digest import build_netlist_digest
+
+    try:
+        return build_netlist_digest(
+            resolved_path,
+            top=netlist_spec["top"],
+            form=netlist_spec["form"],
+            deck=netlist_spec["deck"],
+            device_map=netlist_spec["device_map"],
+        )
+    except LvsError as exc:
+        detail = str(exc).replace("reference.form", "netlist.form")
+        detail = detail.replace("reference.deck", "netlist.deck")
+        raise LayoutPlanError(
+            f"request.netlist could not be ingested: {detail}"
+        ) from exc

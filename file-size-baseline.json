@@ -413,7 +413,7 @@
     },
     {
       "path": "src/klayout_tools/layout_plan.py",
-      "lines": 886
+      "lines": 875
     },
     {
       "path": "src/klayout_tools/layout_plan_execute.py",

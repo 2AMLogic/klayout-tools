@@ -175,12 +175,12 @@ from ._paths import _resolve_relative
 from .gen import _GENERATOR_SPECS
 from .gen_compose import _ORIENTATIONS
 from .layout_plan_fields import (
+    ingest_netlist,
     net_echo,
     parse_group_net,
     parse_options,
     validate_group_nets,
 )
-from .netlist_digest import build_netlist_digest
 
 #: Contract identifier for the request envelope (spike section 2).
 REQUEST_SCHEMA = "klt.layout_plan.request/1"
@@ -854,25 +854,7 @@ def validate_layout_plan_document(
     netlist_spec = _parse_netlist(request["netlist"])
     resolved_path = _resolve_relative(netlist_spec["path"], request_dir or os.getcwd())
 
-    from .lvs import LvsError
-
-    try:
-        digest = build_netlist_digest(
-            resolved_path,
-            top=netlist_spec["top"],
-            form=netlist_spec["form"],
-            deck=netlist_spec["deck"],
-            device_map=netlist_spec["device_map"],
-        )
-    except LvsError as exc:
-        # The shared reader's hints name `klt lvs`'s `reference.*` keys; a
-        # plan author spells the same options `netlist.*` (issue #5135).
-        detail = str(exc).replace("request.reference.form", "request.netlist.form")
-        detail = detail.replace("reference.form", "netlist.form")
-        detail = detail.replace("reference.deck", "netlist.deck")
-        raise LayoutPlanError(
-            f"request.netlist could not be ingested: {detail}"
-        ) from exc
+    digest = ingest_netlist(netlist_spec, resolved_path)
 
     return validate_layout_plan(request, digest)
 
