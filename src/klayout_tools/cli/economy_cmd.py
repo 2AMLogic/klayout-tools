@@ -2,12 +2,14 @@
 
 import argparse
 
-from ..economy import EconomyError, economy_report
+from ..economy import EconomyError
+from ..economy_footprint import economy_report_with_footprint
 from .output import EXIT_USAGE_ERROR, emit_error, emit_success, render_table
 
 
 def register(parser: argparse.ArgumentParser) -> None:
-    """Add ``--pnr-report`` (issue #5181) and bind the command handler."""
+    """Add ``--pnr-report`` (issue #5181), the ``--cell-footprint`` family
+    (issue #5180) and bind the command handler."""
     parser.add_argument(
         "--pnr-report",
         metavar="REPORT_JSON",
@@ -16,6 +18,37 @@ def register(parser: argparse.ArgumentParser) -> None:
             "attribution.pnr_decomposition splitting the bbox into logical "
             "cells, physical-only cells, core whitespace, die margin and "
             "guard ring, plus overrun_ratio (issue #5181)"
+        ),
+    )
+    parser.add_argument(
+        "--cell-footprint",
+        action="store_true",
+        dest="cell_footprint",
+        help=(
+            "add a 'cell_footprint' block: per-master abutment footprint "
+            "(prBoundary, else --lef SIZE, else bbox) and a logic/sequential/"
+            "buffer/clock-tree/fill/tap/endcap split (issue #5180)"
+        ),
+    )
+    parser.add_argument(
+        "--group-by-instance-prefix",
+        default=None,
+        dest="group_by_instance_prefix",
+        metavar="SEP",
+        help=(
+            "group placed instances by the first SEP-delimited component of "
+            "their name (implies --cell-footprint); reports 'unavailable' "
+            "when the layout carries no instance names"
+        ),
+    )
+    parser.add_argument(
+        "--lef",
+        action="append",
+        default=None,
+        metavar="PATH",
+        help=(
+            "LEF file or directory supplying MACRO SIZE for masters with no "
+            "prBoundary (repeatable; first path wins); needs --cell-footprint"
         ),
     )
     parser.set_defaults(func=run)
@@ -30,7 +63,7 @@ def run(args: argparse.Namespace) -> int:
             exit_code=EXIT_USAGE_ERROR,
         )
     try:
-        report = economy_report(
+        report = economy_report_with_footprint(
             args.file,
             top=args.top,
             grid_cols=args.grid_cols,
@@ -48,6 +81,9 @@ def run(args: argparse.Namespace) -> int:
             attribute=args.attribute,
             pnr_report=args.pnr_report,
             flatten_wrappers=args.flatten_wrappers,
+            cell_footprint=args.cell_footprint,
+            group_by_instance_prefix=args.group_by_instance_prefix,
+            lef_paths=tuple(args.lef or ()),
         )
     except EconomyError as exc:
         return emit_error("economy", str(exc), args.format)
@@ -117,6 +153,50 @@ def _print_attribution(attribution: dict | None) -> None:
             "guard_ring",
         ):
             print(f"  {term}: {pnr[term]['area_um2']:.3f} um2  [{pnr[term]['source']}]")
+    print()
+
+
+def _print_footprint(fp: dict | None) -> None:
+    if fp is None:
+        return
+    print(
+        f"cell_footprint: {fp['instance_count']} instance(s), "
+        f"total={fp['total_footprint_um2']:.3f} um2, "
+        f"physical_only={fp['physical_only_um2']:.3f} um2"
+    )
+    render_table(
+        ("master", "category", "source", "count", "footprint_um2"),
+        [
+            (
+                m["master"],
+                m["category"],
+                m["source"],
+                str(m["instance_count"]),
+                f"{m['footprint_um2']:.3f}",
+            )
+            for m in fp["masters"]
+        ],
+        left_aligned={0, 1, 2},
+    )
+    grouping = fp.get("grouping")
+    if grouping is None:
+        return
+    if grouping["status"] != "ok":
+        print(f"grouping: {grouping['status']} ({grouping['reason']})")
+        return
+    render_table(
+        ("group", "instances", "footprint_um2", "share_of_bbox"),
+        [
+            (
+                g["group"],
+                str(g["instance_count"]),
+                f"{g['footprint_um2']:.3f}",
+                "-" if g["share_of_bbox"] is None else f"{g['share_of_bbox']:.4f}",
+            )
+            for g in grouping["groups"]
+        ],
+        left_aligned={0},
+    )
     print()
 
 
@@ -206,6 +286,7 @@ def _print_text(report: dict) -> None:
 
     _print_what_if(report.get("what_if"))
     _print_attribution(report.get("attribution"))
+    _print_footprint(report.get("cell_footprint"))
 
     cells = report["cells"]
     if not cells:

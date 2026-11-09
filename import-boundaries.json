@@ -150,8 +150,9 @@
         "klayout_tools.cli.economy_cmd",
         "klayout_tools.cli.parser_economy",
         "klayout_tools.economy",
-        "klayout_tools.economy_pnr",
+        "klayout_tools.economy_footprint",
         "klayout_tools.economy_leaves",
+        "klayout_tools.economy_pnr",
         "klayout_tools.economy_whatif"
       ]
     },

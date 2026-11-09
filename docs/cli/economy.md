@@ -272,6 +272,38 @@ last-stage `die_area_um2`/`core_area_um2`.
 
 A report whose die or core area exceeds the layout bbox is rejected.
 
+### Cell footprint block (`--cell-footprint`)
+
+Opt-in (issue #5180). `--cell-footprint` adds an additive `cell_footprint`
+object (existing fields unchanged); `--group-by-instance-prefix SEP` implies it
+and fills `grouping`. `--lef PATH` (repeatable; file or directory; first path
+wins) supplies `MACRO ... SIZE w BY h`. The GDS bbox of a std cell includes
+well/implant overhang, so the footprint uses the abutment box instead.
+
+| Field | Meaning |
+| ----- | ------- |
+| `masters[]` | Per placed master: `category`, `footprint_um2`, `source`, `instance_count`, `total_um2`. Arrayed instances count one per member. |
+| `masters[].source` | Fallback chain, observable: `prboundary` (cell draws layer 235/4) -> `lef` (`SIZE` from `--lef`) -> `bbox` (cell bbox, overstates). |
+| `total_footprint_um2` / `share_of_bbox` | Sum over all direct instances of the top cell, and its share of the top bbox area. |
+| `category_um2`, `physical_only_um2` | Footprint per category; `fill`/`tap`/`endcap` (physical-only) are also summed separately. |
+| `grouping` | `null` without `--group-by-instance-prefix`. Otherwise `{status, separator, groups[]}`; each group has `instance_count`, `footprint_um2`, `share_of_bbox`, `category_um2`. |
+
+Categories (sky130_fd_sc_hd masters, by base name; first match wins):
+`tap` (`tap*`), `endcap` (`endcap*`), `fill` (`fill*`, `decap*`, `diode*`),
+`clock-tree` (`clkbuf*`, `clkinv*`, `clkdlybuf*`, `dlclkp`/`sdlclkp`),
+`sequential` (`df*`, `sdf*`, `edf*`, `dl*`, `sdl*`), `buffer` (`buf*`,
+`bufbuf*`, `bufinv*`, `dlygate*`, `dlymetal*`, `probe*`), otherwise `logic`.
+Masters outside `sky130_fd_sc_hd__` are `other`.
+
+Grouping is by the first `SEP`-delimited component of the instance name
+(`u_foo/u1/x` with `/` -> `u_foo`); a name with no `SEP`, or no name, goes to
+`(top)`. Group footprints (physical-only cells included) sum to
+`total_footprint_um2`. Instance names are read from instance user properties
+(key `1`, the GDS `PROPATTR` convention, or `name`/`instance`). Most P&R GDS
+output has none; then `grouping.status` is `unavailable` (with a `reason`)
+and no groups are invented. Only direct instances of the top cell are
+considered; multi-level hierarchy is not walked.
+
 #### `--flatten-wrappers`
 
 Opt-in (issue #5179; requires `--attribute`, otherwise a usage error with the
