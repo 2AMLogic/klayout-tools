@@ -158,7 +158,7 @@ from .extract import (
 )
 from .extract_progress import StageTimer, active_timer, stage
 from .lvs_combine import (
-    _combine_circuit_devices_safely,
+    _combine_circuit_devices_safely,  # noqa: F401
     _combine_devices_safely,
     _correct_combine_parameters,
     _flatten_netlist_safely,  # noqa: F401
@@ -167,9 +167,9 @@ from .lvs_combine import (
     _parse_combine_devices_max_attempts,  # noqa: F401
     _parse_combine_devices_per_circuit,  # noqa: F401
     _purge_emptied_nets,
-    _resolve_combine_devices_per_circuit_targets,
+    _resolve_combine_devices_per_circuit_targets,  # noqa: F401
     _series_fold_offset_absorbed_warnings,
-    _unmatched_combine_devices_per_circuit_warnings,
+    _unmatched_combine_devices_per_circuit_warnings,  # noqa: F401
     _validate_combine_device_classes,
 )
 from .lvs_finfet import (
