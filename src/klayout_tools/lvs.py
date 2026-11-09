@@ -2682,6 +2682,76 @@ def run_lvs(
         mismatches, opts.finfet_layout, status, reference_spec, layout_spec
     )
 
+    return _assemble_lvs_report(
+        mismatches=mismatches,
+        status=status,
+        engine=engine,
+        engine_version=engine_version,
+        netgen_binary=netgen_binary,
+        layout_deck_name=layout_deck_name,
+        layout_hash_source=layout_hash_source,
+        layout_input_role=layout_input_role,
+        layout_circuit=layout_circuit,
+        layout_abstracted_cells=layout_abstracted_cells,
+        reference_circuit=reference_circuit,
+        reference_echo=reference_echo,
+        reference_form=reference_form,
+        reference_spec=reference_spec,
+        reference_pdk_info=reference_pdk_info,
+        reference_pin_order_sources=reference_pin_order_sources,
+        reference_pin_order_files=reference_pin_order_files,
+        reference_netlist_path=reference_netlist_path,
+        extracted_netlist_path=extracted_netlist_path,
+        equivalent_pins_applied=equivalent_pins_applied,
+        constant_bindings=constant_bindings,
+        power_connectivity=power_connectivity,
+        body_verification=body_verification,
+        device_parameter_coverage=device_parameter_coverage,
+        counts=counts,
+        device_classes=device_classes,
+        net_correspondence=net_correspondence,
+        portable_paths=portable_paths,
+        request_dir=request_dir,
+        opts=opts,
+    )
+
+
+def _assemble_lvs_report(
+    *,
+    mismatches: Any,
+    status: Any,
+    engine: Any,
+    engine_version: Any,
+    netgen_binary: Any,
+    layout_deck_name: Any,
+    layout_hash_source: Any,
+    layout_input_role: Any,
+    layout_circuit: Any,
+    layout_abstracted_cells: Any,
+    reference_circuit: Any,
+    reference_echo: Any,
+    reference_form: Any,
+    reference_spec: Any,
+    reference_pdk_info: Any,
+    reference_pin_order_sources: Any,
+    reference_pin_order_files: Any,
+    reference_netlist_path: Any,
+    extracted_netlist_path: Any,
+    equivalent_pins_applied: Any,
+    constant_bindings: Any,
+    power_connectivity: Any,
+    body_verification: Any,
+    device_parameter_coverage: Any,
+    counts: Any,
+    device_classes: Any,
+    net_correspondence: Any,
+    portable_paths: Any,
+    request_dir: Any,
+    opts: Any,
+) -> dict[str, Any]:
+    """Final stage of :func:`run_lvs` (issue #5162): tally ``mismatches[]``
+    per category, build provenance, assemble the report and apply the
+    ``portable_paths`` rewrite. Pure extraction -- no logic of its own."""
     category_counts: dict[str, int] = {}
     # Issue #1132: `category_counts` alone collapses `error`/`warning`
     # entries of the same category into one number (e.g. `"topology": 8`
