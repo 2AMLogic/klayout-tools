@@ -394,6 +394,7 @@
         "klayout_tools.lvs_mismatch_tolerance",
         "klayout_tools.lvs_mos_options",
         "klayout_tools.lvs_netgen",
+        "klayout_tools.lvs_netgen_branch",
         "klayout_tools.lvs_pin_anchors",
         "klayout_tools.lvs_power",
         "klayout_tools.lvs_reference_stage",

@@ -43,8 +43,13 @@ Issues currently being built (`loom:building`).
 - **#2835**: sky130 DRC: enforce licon1/mcon maximum size without rejecting compound-layer exceptions
 - **#3420**: Re-pin open_pdks to f6eeac7 (ciel) — fleet retires volare c6d73a3
 - **#4312**: gf180mcu deck: no eFuse (EF.*) DRC rules and no eFuse device class in the extraction deck
-- **#4693**: Remove routing_pitch.py: library-only helper with no callers
 - **#4771**: Friction: klt sim --batch-set --dry-run submits real batch jobs; --wait-for-capacity is refused with --batch-set
+- **#5147**: Move extract parser registration to cli/parsers/extract.py (first cluster of #3962)
+- **#5157**: Extract layout-resolve stage from run_lvs (stage 1/6, after #4126)
+- **#5158**: Extract reference-read stage from run_lvs (stage 2/6, after #4126)
+- **#5159**: Extract circuit-select/deck/combine stage from run_lvs (stage 3/6, after #4126)
+- **#5161**: Extract netgen branch and warning aggregation from run_lvs (stage 5/6, after #4126)
+- **#5162**: Extract mismatch counts and report assembly from run_lvs (stage 6/6, after #4126)
 
 ## PRs Awaiting Review
 
@@ -54,6 +59,8 @@ PRs waiting on Judge (`loom:review-requested`).
 - **#4602**: docs: re-qualify c6d73a3 reference records under f6eeac7 and mark superseded
 - **#4737**: feat(drc): enforce sky130 licon1/mcon max size with exemptions
 - **#4772**: fix: honor --dry-run and --wait-for-capacity under klt sim --batch-set
+- **#5165**: refactor: extract layout resolve stage from run_lvs
+- **#5168**: refactor: extract circuit-select/deck/combine stage from run_lvs
 
 ## Approved (Awaiting Merge)
 
@@ -90,6 +97,14 @@ Issues carrying `loom:curated`.
 - **#4827**: Live-verify #4820 floating_gate_allowed against ASAP7 DFFASRHQNx1 *(curated)*
 - **#4845**: ring-check --pdk sg13g2: cross-check re-implemented Seal.* rules against the real Ruby deck *(curated)*
 - **#4902**: klt sim batch backend: derived measurements referencing other measurements (m_<name>) produce no value *(curated)*
+- **#5147**: Move extract parser registration to cli/parsers/extract.py (first cluster of #3962) *(curated)*
+- **#5153**: Live-verify klt sim request.adapt on real ASAP7 extract-then-sim (needs lambdapdk + bsimcmg.osdi) *(curated)*
+- **#5157**: Extract layout-resolve stage from run_lvs (stage 1/6, after #4126) *(curated)*
+- **#5158**: Extract reference-read stage from run_lvs (stage 2/6, after #4126) *(curated)*
+- **#5159**: Extract circuit-select/deck/combine stage from run_lvs (stage 3/6, after #4126) *(curated)*
+- **#5160**: Extract compare-setup and klayout-engine branch from run_lvs (stage 4/6, after #4126) *(curated)*
+- **#5161**: Extract netgen branch and warning aggregation from run_lvs (stage 5/6, after #4126) *(curated)*
+- **#5162**: Extract mismatch counts and report assembly from run_lvs (stage 6/6, after #4126) *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -110,10 +125,10 @@ Issues carrying `loom:curated`.
 | Very important | 0 |
 | Important | 1 |
 | Ready (`loom:issue`) | 10 |
-| In Progress (`loom:building`) | 5 |
-| PRs awaiting review | 4 |
+| In Progress (`loom:building`) | 10 |
+| PRs awaiting review | 6 |
 | Approved PRs awaiting merge | 0 |
-| Curated | 25 |
+| Curated | 33 |
 | Architect / Hermit proposals | 3 |
 | Active epics | 2 |
 <!-- guide:plan-body:end -->
