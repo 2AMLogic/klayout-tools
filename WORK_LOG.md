@@ -8,6 +8,8 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-09
 
+- **PR #5190**: feat(economy): add Y-band partition for leaf cells under --attribute
+- **Issue #5189** (closed): klt economy --attribute: no decomposition for a leaf cell (no child instances)
 - **PR #5188**: fix: exclude pdk.ambiguous_sources from rerun drift and document run-specific fields
 - **PR #5185**: feat(economy): add cell footprint breakdown and instance-prefix grouping
 - **PR #5184**: fix(pex): spell diode instance params area=/pj= for ngspice in leg netlists
