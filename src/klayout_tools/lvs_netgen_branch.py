@@ -147,7 +147,7 @@ def _run_netgen_engine_branch(
     matched_nets = layout_net_count if status == "match" else 0
     matched_devices = layout_device_count if status == "match" else 0
     matched_pins = layout_pin_count if status == "match" else 0
-    net_correspondence = []
+    net_correspondence: list[dict[str, Any]] = []
     counts = {
         "nets": {
             "layout": layout_net_count,
