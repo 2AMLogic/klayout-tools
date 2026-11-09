@@ -1,0 +1,20 @@
+Orchestrate `klt drc`/`klt lvs`/`klt sim`/`klt layout-metrics` per a per-block
+descriptor and reconcile their four separate exit-code vocabularies into one
+envelope: a hard `valid` gate plus a single scalar `objective` with a declared
+polarity, so an agent can compare two candidates without hand-rolling the
+scoring across four subprocess calls (issue #387). Pure orchestration -- calls
+the same library entry points those verbs use, never re-implements their
+logic.
+
+positional arguments:
+  descriptor klt eval descriptor: a path to a JSON file, '-' to read the descriptor from stdin, or an inline JSON object string -- see docs/cli/eval.md
+
+options:
+  -h, --help show this help message and exit
+  --candidate CANDIDATE candidate substitution values for the descriptor's `${name}` placeholders: a path to a JSON file, '-' for stdin, or an inline JSON object string. Omit when the descriptor's `args` need no substitution.
+  --format {text,json} output format (default: text)
+  --trajectory-log TRAJECTORY_LOG append this evaluation as one record to an optimization trajectory JSONL log (#388) -- requires --turn and --candidate-ref; see docs/cli/eval.md
+  --turn TURN the evaluation/iteration index for --trajectory-log's record
+  --candidate-ref CANDIDATE_REF a path or identifier for this candidate, for --trajectory-log's record
+  --description DESCRIPTION a human note for --trajectory-log's record (optional)
+  --wall-clock-s WALL_CLOCK_S wall-clock seconds this evaluation took, for --trajectory-log's record (optional)

@@ -1,0 +1,67 @@
+Environment provenance an evidence record can carry in public forever: repo-
+relative paths only, a stable pseudonymous `host-<8hex>` id instead of the
+hostname, and no login/author field beyond what git already records (see
+docs/design-evidence-tiers.md, 'Provenance hygiene in evidence records').
+`emit` produces that block; `scan` reports home-directory-shaped absolute
+paths in files that already exist, so a regression is caught at PR time. A
+Python harness can import klayout_tools.env_provenance directly for the same
+payload with no subprocess.
+
+positional arguments:
+  <subcommand> emit emit the environment-provenance block for an evidence record scan scan files for home-directory-shaped absolute paths lint-envelope lint committed JSON envelopes for absolute host paths
+
+options:
+  -h, --help show this help message and exit
+
+--- klt env-provenance emit ---
+
+Emit the environment-provenance block: schema_version, host_id, os
+(system/release/machine), python_version, klt_version, klayout_version, and
+any --path entries normalised to repo-relative form. A path outside the repo
+is reported as {path: null, scope: 'external'} -- never as an absolute path;
+pin such an input by identity (name/version/content hash) instead. Refuses to
+emit (exit 1) if any collected value would carry a local identifier.
+
+options:
+  -h, --help show this help message and exit
+  --path LABEL=PATH a path to record under LABEL, normalised repo-relative (e.g. --path netlist=sim/bandgap/bandgap.spice). Repeatable.
+  --format {text,json} output format (default: text)
+
+--- klt env-provenance scan ---
+
+Scan files (e.g. the sim/**/records/*.md a PR adds) for home-directory-shaped
+absolute paths -- /Users/<name>/..., /home/<name>/..., C:\Users\<name>\... A
+`~/`-rooted path is not flagged: it names no user. Exits 3 when leaks are
+found (a successful run with findings), 0 when clean, 1 if a file cannot be
+read. Findings quote the leaking text, so scan output should not itself be
+committed to the repo it scanned.
+
+positional arguments:
+  FILE files to scan
+
+options:
+  -h, --help show this help message and exit
+  --format {text,json} output format (default: text)
+
+--- klt env-provenance lint-envelope ---
+
+Lint committed `klt --format json` envelopes (or any JSON artifact) for
+absolute host paths, reporting the offending field by dotted path (issue
+#2224). Distinct from `scan`: that asks 'does this record name a person' and
+matches home-shaped paths in arbitrary text; this asks 'does every reference
+still resolve on another checkout' and matches ANY absolute path --
+/opt/build/out.def and /tmp/run-3/top.gds name nobody and still make a
+regenerated artifact byte-differ, which is how a committed corpus artifact
+broke cross-checkout comparison downstream. Declare genuinely machine-wide
+PDK/tool install locations with --allow-prefix; nothing is allowed by default
+(a lint whose verdict depends on the linting machine's environment cannot be
+trusted in CI). Exits 3 when findings exist, 0 when clean, 1 if a file cannot
+be read or is not valid JSON.
+
+positional arguments:
+  FILE JSON envelope files to lint
+
+options:
+  -h, --help show this help message and exit
+  --allow-prefix PREFIX an absolute install prefix that may legitimately appear (e.g. --allow-prefix /usr/share/pdk). Matched on a path-component boundary, so /opt/pdk admits /opt/pdk/sky130A/... but not /opt/pdk-scratch/... Repeatable.
+  --format {text,json} output format (default: text)

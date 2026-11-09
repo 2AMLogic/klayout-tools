@@ -1,0 +1,26 @@
+Run a named layout generator against a JSON params object and PDK reference,
+producing a GDS/OASIS stream plus a structured report -- see
+docs/design/layout-generator-spike.md section 2 for the request/response
+contract. Runs fully headless via KLayout's native pya.PCellDeclarationHelper
+-- no GUI, no Qt. PDK resolution reuses `klt pdk find`'s resolver. Note: not
+every generator supports every PDK family -- resolving a family a given
+generator has not been wired up for is an application error -- see
+docs/cli/gen.md's 'PDK-family support' section for the current per-generator
+table, and `klt gen --list` for the full set of available generators. --list-
+pdk-pcells/--pdk-pcell reach the resolved PDK's *own* shipped PCell library
+instead of a klt built-in generator.
+
+positional arguments:
+  generator generator to run (see --list for available generators)
+
+options:
+  -h, --help show this help message and exit
+  --list list available generators and their params, then exit
+  --list-pdk-pcells list the PCell libraries the resolved PDK itself ships under libs.tech/klayout/python/ (with each cell's params), then exit
+  --pdk-pcell LIBRARY/CELL instantiate a PCell the resolved PDK itself ships, named '<library>/<cell>' as reported by --list-pdk- pcells, instead of a klt built-in generator
+  --params PARAMS generator params as a path to a JSON file, or an inline JSON object (e.g. '{"num": 8}'); omit to use every param's default
+  --pdk PDK PDK variant to resolve (e.g. sky130A); overrides $PDK
+  --pdk-root PDK_ROOT explicit PDK install root; overrides $PDK_ROOT and the search order
+  --cell-name CELL_NAME name for the generated top cell (default: <generator>_0)
+  -o, --output OUTPUT output GDS/OASIS path (default: <cell_name>.gds)
+  --format {text,json} output format (default: text)

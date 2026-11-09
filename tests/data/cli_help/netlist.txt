@@ -1,0 +1,35 @@
+Export an xschem schematic to a SPICE netlist, headlessly and with a real exit
+status (issue #55). This verb owns the xschem invocation: -n -s -q -x -r are
+always passed, whatever else is requested, because omitting -x does not fail
+-- xschem initialises its GUI, writes a plausible-looking netlist, and then
+hangs in the Tk event loop (and can stop responding to SIGTERM), so the caller
+sees an idle process and a possibly stale artifact instead of an error. Every
+run is bounded by --timeout-s and escalated SIGTERM -> SIGKILL across the
+whole process group if it is exceeded. Success is judged by the output netlist
+existing and being freshly written, NOT by xschem's exit status, which is non-
+zero even on a successful batch netlist. See docs/cli/netlist.md.
+
+positional arguments:
+  schematic path to the xschem schematic to netlist (.sch)
+
+options:
+  -h, --help show this help message and exit
+  -o, --output OUTPUT path to write the SPICE netlist to (the committed artifact). Under --check this file is read and compared, never written
+  --check do not write anything: regenerate the netlist into a temp directory and diff it against the committed file at --output, reporting status 'match' (exit 0) or 'drifted' (exit 3). This is the staleness gate for a committed netlist -- a netlist that has silently drifted from its schematics attributes simulation results to a schematic that no longer exists. An absent --output file is reported as 'drifted', not as an error
+  --timeout-s TIMEOUT_S wall-clock bound on the xschem run in seconds (default: 120). A real batch netlist takes well under a second; this bound exists for the hang described above, and exceeding it is an error (exit 1), never a silent empty result
+  --rcfile RCFILE project-local xschemrc to load (symbol search path, PDK root). Passed through to xschem as --rcfile verbatim. With --pdk/--pdk-root (or $PDK/$PDK_ROOT), the PDK root the xschemrc declares is cross-checked against the resolved PDK and a mismatch is reported (issue #2680)
+  --symbol-path DIR extra xschem symbol directory (repeatable), exported to xschem as XSCHEM_USER_LIBRARY_PATH ahead of any value already in the environment. DIR must exist. With --backend batch each DIR must be under the batch root and hold git-tracked files, and is forwarded root- relative; the batch runner needs a klt that knows --symbol-path (issue #4952)
+  --pdk PDK PDK variant to resolve (e.g. sky130A); overrides $PDK. Used to cross-check --rcfile's PDK root, as `klt sim` resolves it
+  --pdk-root PDK_ROOT explicit PDK install root; overrides $PDK_ROOT and the search order
+  --block emit this schematic as an includable block rather than a testbench deck: uncomment xschem's top-level **.subckt/**.ends pair and drop the trailing .end it always appends, so the result can be .include'd by a separate testbench netlist without a duplicate .end terminating it early (issue #2680, edge 1). Off by default -- xschem's unmodified export is correct for a testbench top sheet
+  --ignore-comments with --check: ignore every SPICE comment line (first non-blank character '*') and blank line on both sides, for a committed netlist a project post-processes (added header, rewritten '** sch_path:'). Non-comment lines are still compared; the written export is never altered (issue #4525)
+  --relative-paths generate mode: write xschem's '** sch_path:' / '** sym_path:' comments relative to the schematic's git toplevel (else its parent directory); paths outside that root are reduced to their basename. Regenerating the same sources from any checkout is then byte- identical. Off by default (issue #5046)
+  --no-provenance-header generate mode: omit the '** klt-netlist-inputs:' comment line, so the written netlist is byte-identical to xschem's own export (for projects that hash-pin committed netlists). Off by default (issue #5085)
+  --allow-unevaluated-expr write the netlist even when literal expr(...) atoms remain (for callers that evaluate expr() downstream); the condition is reported as a stderr warning and a `warnings` entry, never silent. Local backend only; unresolved symbols still fail (issue #4305)
+  --backend {local,batch} where xschem runs: 'local' (this host) or 'batch' (the batch runner, through the same S3 job contract as `klt sim --backend batch`). Default: $KLT_NETLIST_BACKEND, else 'local'. A batch failure is an error (exit 1), never a fallback to a local run. See docs/cli/netlist.md's 'Batch backend'
+  --batch-root BATCH_ROOT --backend batch only: the directory whose git-tracked files are uploaded as the job's input tree (default: the schematic's git checkout). The schematic and a project --rcfile must be tracked files under it; the uncompressed total is capped at 64 MiB
+  --batch-include GLOB --backend batch only, repeatable: upload only the git- tracked files under the batch root matching this root- relative glob (a bare directory name selects everything under it; '*' also crosses '/'). The schematic and a project --rcfile must match, or the run is refused
+  --batch-exclude GLOB --backend batch only, repeatable: leave the files matching this root-relative glob out of the upload (applied after --batch-include). The schematic and a project --rcfile cannot be excluded
+  --xschem-binary XSCHEM_BINARY xschem executable to run (default: 'xschem', resolved on PATH) -- for a pinned install or a container wrapper. It never changes the forced flag set above
+  --format {text,json} output format (default: text)
+  --erc fail (error.code erc_findings) when xschem reports ERC findings such as 'Error: undriven node' on its stdout/stderr. Local backend only (issue #4953)

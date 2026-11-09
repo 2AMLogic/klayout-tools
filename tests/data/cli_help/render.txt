@@ -1,0 +1,17 @@
+Render one PNG per non-empty layer of a GDSII or OASIS layout file, built on
+the same layer enumeration as `klt layers`. Runs fully headless via KLayout's
+offscreen LayoutView -- no GUI, no Qt, no X server.
+
+positional arguments:
+  file path to a GDSII or OASIS layout file
+
+options:
+  -h, --help show this help message and exit
+  -o, --output OUTPUT output directory for the rendered PNGs (default: a `renders/` subdirectory next to <file>, e.g. `<block>/output/renders/` for a file at `<block>/output/<name>.gds`)
+  --width WIDTH image width in pixels (default: 1024)
+  --height HEIGHT image height in pixels (default: 768)
+  --background BACKGROUND canvas color as #rrggbb/#rgb hex (default: #ffffff)
+  --top TOP top cell to render when the stream has more than one; omit to render every top cell
+  --layers LAYERS layer set to restrict rendering to: a path to a JSON file, or an inline JSON array, of [layer, datatype] pairs (e.g. '[[67, 20], [66, 44]]'); omit to render every non-empty layer (today's default, unchanged). Not validated by argparse -- a malformed value exits 1 with a clean error rather than argparse's usage-error exit 2.
+  --bbox BBOX physical crop window as four comma-separated micrometre coordinates 'xmin,ymin,xmax,ymax' (e.g. '0,0,50,50'); omit to fit the whole layout (today's default, unchanged). The physical aspect ratio is preserved -- the viewport is padded, not stretched, to match --width/--height.
+  --format {text,json} output format (default: text)

@@ -1,0 +1,41 @@
+Run a standalone OpenSTA timing/power analysis over one fixed geometry source,
+independent of `klt place-and-route`'s own in-flow STA (issue #1099). Exactly
+one geometry source is required, and they are mutually exclusive: `def` -- an
+already-routed (or pre-route) DEF -- or, DEF-free, `verilog` -- a structural
+gate-level netlist (e.g. `klt synthesize`'s own `netlist_path`) linked with
+`read_lef`/`read_verilog`/`link_design` and timed against liberty +
+`constraints.clock_port`/`clock_period_ns` alone, with no placement or routing
+of any kind and OpenSTA's own ideal wire-load estimate (optional
+`constraints.wire_load_model`/`wire_load_mode`); its response is labelled
+`geometry_source: "netlist_estimate"` rather than `def` mode's `"routed"`, so
+an estimate is never mistaken for a post-route number (issue #1825). Unlike
+`klt place-and-route`, this command never places, routes, or runs CTS -- there
+is no `target_stage`; the geometry handed in is the one and only geometry
+analysed. This is what makes correct corner characterization possible:
+analysing one fixed piece of geometry at N corners, rather than re-running
+`place-and-route` N times (which produces N different placements/routings,
+since global placement and detailed routing are not corner-invariant).
+`pdk.cell_library`/`corner` resolve via the same `find_pdk()`/`libs_ref`
+discovery `klt place-and-route` uses; `pdk.corners` (a list, mutually
+exclusive with the scalar `corner`) characterizes the same loaded geometry at
+N corners in one request/response round trip instead of N external
+invocations. `constraints.clock_port`/`clock_period_ns` are required (a
+standalone STA run has no meaning without a clock) -- or, for a multi-clock
+design, `constraints.clocks` (a list of {port, period_ns}; the first is
+primary) instead, with optional `constraints.clock_groups` declaring
+asynchronous clock groups (issue #4241). An optional `spef` path feeds a
+caller-supplied SPEF (e.g. from `klt extract --parasitics`) in via
+`read_spef`, with the same net-name-correlation sanity check `klt place-and-
+route`'s own `post_route_spef` pass runs. See docs/cli/sta.md for the full
+request/response contract. Runs `openroad` as a subprocess -- requires an
+`openroad` binary on `$PATH`. Takes a request-document path (like `klt place-
+and-route`/`klt synthesize`), not positional file args.
+
+positional arguments:
+  request path to a klt sta request JSON file
+
+options:
+  -h, --help show this help message and exit
+  --pdk PDK PDK variant to resolve (e.g. sky130A); overrides $PDK
+  --pdk-root PDK_ROOT explicit PDK install root; overrides $PDK_ROOT and the search order
+  --format {text,json} output format (default: text)

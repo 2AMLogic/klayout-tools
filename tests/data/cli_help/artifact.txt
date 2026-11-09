@@ -1,0 +1,84 @@
+Evidence bytes go to the artifact store through its broker; git keeps a
+manifest naming each object by sha256. The broker URL comes from --broker or
+$KLT_ARTIFACT_BROKER; there is no default. No credential is held: the broker
+identifies the caller by its network identity. Presigned URLs stay in-process
+and are never printed.
+
+positional arguments:
+  <subcommand> put store files and emit (or merge) manifest entries get fetch one object, writing it only if its sha256 verifies verify check every manifest entry's size and sha256 against the store delete delete stored objects through the broker (dry run unless --yes)
+
+options:
+  -h, --help show this help message and exit
+
+--- klt artifact put ---
+
+Hash each file, ask the broker for a presigned PUT, upload with exactly the
+headers it returned, and emit one manifest entry per file. An object already
+stored is not re-sent and still succeeds.
+
+positional arguments:
+  FILE file(s) to store
+
+options:
+  -h, --help show this help message and exit
+  --manifest PATH merge the entries into this manifest JSON (created if absent)
+  --kind {evidence}
+  --name NAME entry name (single file only; default: the path relative to its git checkout)
+  --media-type MEDIA_TYPE entry media_type
+  --producer-tool PRODUCER_TOOL producer.tool (default: klt)
+  --producer-version PRODUCER_VERSION producer.version (default: this klt's version)
+  --commit COMMIT producer.commit (default: git HEAD of the current directory)
+  --broker URL artifact broker base URL (default: $KLT_ARTIFACT_BROKER)
+  --repo OWNER/NAME repo the objects are stored under (default: $KLT_ARTIFACT_REPO, else the git origin remote)
+  --format {text,json} output format (default: text)
+
+--- klt artifact get ---
+
+REF is a sha256 (stored under --repo) or MANIFEST[#SHA256|NAME]. The bytes are
+written only when their recomputed sha256 matches both the manifest's digest
+and the key's. `-o -` writes the verified bytes to stdout instead of a JSON
+envelope.
+
+positional arguments:
+  REF sha256 or MANIFEST[#SELECTOR]
+
+options:
+  -h, --help show this help message and exit
+  -o, --output OUTPUT destination file, or - for stdout
+  --force replace an existing output file
+  --broker URL artifact broker base URL (default: $KLT_ARTIFACT_BROKER)
+  --repo OWNER/NAME repo the objects are stored under (default: $KLT_ARTIFACT_REPO, else the git origin remote)
+  --format {text,json} output format (default: text)
+
+--- klt artifact verify ---
+
+stat each entry, then fetch and re-hash it. Exits 3 if any entry is missing or
+mismatched, 1 on a broker refusal or bad manifest.
+
+positional arguments:
+  MANIFEST
+
+options:
+  -h, --help show this help message and exit
+  --broker URL artifact broker base URL (default: $KLT_ARTIFACT_BROKER)
+  --format {text,json} output format (default: text)
+
+--- klt artifact delete ---
+
+REF is a sha256 (under --repo) or MANIFEST[#SELECTOR], as for `get`. Without
+--yes only `stat` is called and nothing is deleted. Each --keep MANIFEST
+protects the objects it names: a referenced target refuses the whole batch
+unless --force-referenced. An absent object is success. The broker decides
+whether the caller may delete.
+
+positional arguments:
+  REF sha256 or MANIFEST[#SELECTOR]
+
+options:
+  -h, --help show this help message and exit
+  --keep MANIFEST manifest whose objects must not be deleted (repeatable)
+  --yes actually delete (default: dry run)
+  --force-referenced delete even objects a --keep manifest names
+  --broker URL artifact broker base URL (default: $KLT_ARTIFACT_BROKER)
+  --repo OWNER/NAME repo the objects are stored under (default: $KLT_ARTIFACT_REPO, else the git origin remote)
+  --format {text,json} output format (default: text)
