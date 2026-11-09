@@ -28,7 +28,7 @@ import pytest
 
 from helpers.subprocess_fakes import fake_completed
 from klayout_tools import remote_launcher as rl
-from klayout_tools import sim
+from klayout_tools import sim, sim_batch_contract_worker
 from klayout_tools import sim_batch as sb
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -5122,7 +5122,7 @@ def test_capture_program_version_probe_timeout_is_recorded(tmp_path, monkeypatch
     program = sb._WORKER_CAPTURE_PROGRAM.replace(
         f"{sb.WORKER_CAPTURE_PROBE_TIMEOUT_S}", "1", 1
     )
-    monkeypatch.setattr(sb, "_WORKER_CAPTURE_PROGRAM", program)
+    monkeypatch.setattr(sim_batch_contract_worker, "_WORKER_CAPTURE_PROGRAM", program)
     doc = _run_capture_program(tmp_path, ngspice_script="#!/bin/sh\nsleep 20\n")
     assert doc["simulator"]["version_probe"] == "timeout"
 

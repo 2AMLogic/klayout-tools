@@ -30,6 +30,7 @@ import pytest
 
 from klayout_tools import sim
 from klayout_tools import sim_batch as sb
+from klayout_tools import sim_batch_contract_worker as sbp
 from klayout_tools import sim_decks as sd
 from klayout_tools.sim import SimError
 
@@ -2058,16 +2059,10 @@ def test_runner_shell_probe_matches_python_rule(tmp_path, version, expected):
 
 def _publish_runner(monkeypatch, *versions):
     images = [
-        {
-            "pdk": "sky130A",
-            "region": "us-east-1",
-            "ami_id": f"ami-{index}",
-            "klt_version": version,
-            "klt_ref": None,
-        }
-        for index, version in enumerate(versions)
+        dict(pdk="sky130A", region="r", ami_id=str(n), klt_version=v, klt_ref=None)
+        for n, v in enumerate(versions)
     ]
-    monkeypatch.setattr(sb, "published_runner_identities", lambda pdk, region: images)
+    monkeypatch.setattr(sbp, "published_runner_identities", lambda *a: images)
 
 
 class TestRunnerDecksGate:

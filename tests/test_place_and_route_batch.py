@@ -444,8 +444,7 @@ def test_manifest_with_only_a_pre_backend_runner_refuses_before_any_cloud_call(
     fake, monkeypatch
 ):
     monkeypatch.setattr(
-        sim_batch,
-        "published_runner_identities",
+        "klayout_tools.sim_batch_contract_worker.published_runner_identities",
         lambda *a, **k: [_image("0.7.1.dev1000")],
     )
 
@@ -461,7 +460,8 @@ def test_manifest_runner_at_or_after_the_floor_or_unreadable_proceeds(
     fake, monkeypatch, version
 ):
     monkeypatch.setattr(
-        sim_batch, "published_runner_identities", lambda *a, **k: [_image(version)]
+        "klayout_tools.sim_batch_contract_worker.published_runner_identities",
+        lambda *a, **k: [_image(version)],
     )
 
     report = _run(fake)
@@ -472,8 +472,7 @@ def test_manifest_runner_at_or_after_the_floor_or_unreadable_proceeds(
 
 def test_mixed_manifest_falls_through_to_the_runner_side_check(fake, monkeypatch):
     monkeypatch.setattr(
-        sim_batch,
-        "published_runner_identities",
+        "klayout_tools.sim_batch_contract_worker.published_runner_identities",
         lambda *a, **k: [_image("0.7.1.dev1000"), _image("0.7.1.dev1200")],
     )
 
