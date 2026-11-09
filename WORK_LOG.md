@@ -8,6 +8,8 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-09
 
+- **PR #5165**: refactor: extract layout resolve stage from run_lvs
+- **Issue #5157** (closed): Extract layout-resolve stage from run_lvs (stage 1/6, after #4126)
 - **PR #5168**: refactor: extract circuit-select/deck/combine stage from run_lvs
 - **PR #5166**: refactor: extract netgen engine branch and findings aggregation from run_lvs
 - **Issue #5159** (closed): Extract circuit-select/deck/combine stage from run_lvs (stage 3/6, after #4126)
