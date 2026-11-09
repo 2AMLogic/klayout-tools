@@ -533,6 +533,74 @@ def _gap_position(gap_bbox: Any, bbox: Any, placed: list[tuple[str, Any]]) -> st
     return "interior"
 
 
+def _leaf_bands(
+    kdb: Any,
+    layout: Any,
+    top_cell: Any,
+    bbox: Any,
+    dbu: float,
+    annotation_pairs: set[tuple[int, int]],
+) -> list[dict[str, Any]]:
+    """Y-axis partition of a leaf cell's bbox into full-width bands keyed by
+    the set of drawn layers overlapping each band (issue #5189).
+
+    Elementary strips between consecutive merged-polygon vertex Y edges are
+    merged when their layer sets are equal, so band areas sum exactly to the
+    bbox area (integer dbu^2). Annotation layers are excluded.
+    """
+    if bbox.empty():
+        return []
+    regions: dict[str, Any] = {}
+    for li in layout.layer_indexes():
+        info = layout.get_info(li)
+        if (info.layer, info.datatype) in annotation_pairs:
+            continue
+        region = kdb.Region(top_cell.shapes(li)).merged()
+        if not region.is_empty():
+            regions[f"{info.layer}/{info.datatype}"] = region
+    edges = {bbox.bottom, bbox.top}
+    for region in regions.values():
+        for polygon in region.each():
+            for pt in polygon.each_point_hull():
+                edges.add(pt.y)
+            for h in range(polygon.holes()):
+                for pt in polygon.each_point_hole(h):
+                    edges.add(pt.y)
+    ys = sorted(y for y in edges if bbox.bottom <= y <= bbox.top)
+
+    # (bottom, top, layers, drawn_dbu2)
+    merged: list[list[Any]] = []
+    for y0, y1 in zip(ys, ys[1:], strict=False):
+        strip = kdb.Region(kdb.Box(bbox.left, y0, bbox.right, y1))
+        names = []
+        for name, region in sorted(regions.items()):
+            inside = region & strip
+            if not inside.is_empty():
+                names.append(name)
+        union = kdb.Region()
+        for name in names:
+            union += regions[name]
+        drawn = (union.merged() & strip).area()
+        if merged and merged[-1][2] == names:
+            merged[-1][1] = y1
+            merged[-1][3] += drawn
+        else:
+            merged.append([y0, y1, names, drawn])
+
+    bands = []
+    for y0, y1, names, drawn in merged:
+        box = kdb.Box(bbox.left, y0, bbox.right, y1)
+        bands.append(
+            {
+                "bbox_um": bbox_um_dict(box, dbu),
+                "area_um2": box.area() * dbu * dbu,
+                "layers": names,
+                "drawn_area_um2": drawn * dbu * dbu,
+            }
+        )
+    return bands
+
+
 def _attribution_block(
     kdb: Any,
     layout: Any,
@@ -620,7 +688,7 @@ def _attribution_block(
 
     unattributed = bbox.area() - (sum_children - overlap) - gap_total
     top_local = _merged_region(kdb, layout, top_cell, annotation_pairs, recursive=False)
-    return {
+    block: dict[str, Any] = {
         "children": children,
         "gap_components": gaps,
         "unattributed_um2": unattributed * dbu * dbu,
@@ -628,6 +696,9 @@ def _attribution_block(
         "top_level_drawn_area_um2": top_local.area() * dbu * dbu,
         "sums_to_total": unattributed == 0,
     }
+    if top_cell.child_instances() == 0:
+        block["bands"] = _leaf_bands(kdb, layout, top_cell, bbox, dbu, annotation_pairs)
+    return block
 
 
 def _area_eff_block(
