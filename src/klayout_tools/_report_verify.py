@@ -56,13 +56,11 @@ from . import env_provenance
 #: The `provenance` fields every verb's own docstring documents as
 #: legitimately varying between two runs of the identical inputs -- the tool
 #: build and the PDK release string, never the deck/input content hashes or
-#: any verdict-bearing field. Curator's own analysis (issue #1106): these are
-#: the fields inferred from the schema, not a pre-existing coded precedent
-#: (`klt signoff`'s consistency check goes the other way -- it *requires*
-#: these to agree *across* checks in one signoff bundle; here we deliberately
-#: allow them to disagree between one committed report and a fresh rerun of
-#: the same report, which is the whole reason `--rerun` needs an exclusion
-#: list at all).
+#: any verdict-bearing field. Inferred from the schema (issue #1106), not a
+#: coded precedent: `klt signoff`'s consistency check *requires* these to
+#: agree *across* checks in one bundle; here we deliberately allow them to
+#: differ between a committed report and a fresh rerun of it, which is the
+#: whole reason `--rerun` needs an exclusion list at all.
 VOLATILE_PROVENANCE_PATHS: frozenset[tuple[str, ...]] = frozenset(
     {
         ("provenance", "klt_version"),
@@ -78,6 +76,8 @@ VOLATILE_PROVENANCE_PATHS: frozenset[tuple[str, ...]] = frozenset(
         # a measurement of the run, never part of the evidence.
         ("timing",),
         ("provenance", "pdk", "linked_trees"),
+        # Issue #5182: other PDK roots on the resolving host (#2564) -- machine-local.
+        ("provenance", "pdk", "ambiguous_sources"),
     }
 )
 

@@ -3,7 +3,7 @@
 import argparse
 
 from ..economy import EconomyError, economy_report
-from .output import emit_error, emit_success, render_table
+from .output import EXIT_USAGE_ERROR, emit_error, emit_success, render_table
 
 
 def register(parser: argparse.ArgumentParser) -> None:
@@ -22,6 +22,13 @@ def register(parser: argparse.ArgumentParser) -> None:
 
 
 def run(args: argparse.Namespace) -> int:
+    if args.flatten_wrappers and not args.attribute:
+        return emit_error(
+            "economy",
+            "--flatten-wrappers requires --attribute",
+            args.format,
+            exit_code=EXIT_USAGE_ERROR,
+        )
     try:
         report = economy_report(
             args.file,
@@ -40,6 +47,7 @@ def run(args: argparse.Namespace) -> int:
             what_if=args.what_if,
             attribute=args.attribute,
             pnr_report=args.pnr_report,
+            flatten_wrappers=args.flatten_wrappers,
         )
     except EconomyError as exc:
         return emit_error("economy", str(exc), args.format)

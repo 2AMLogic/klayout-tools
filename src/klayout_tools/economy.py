@@ -74,6 +74,7 @@ from typing import Any
 from ._annotation import is_reserved_annotation_layer
 from ._layout import bbox_um_dict, cells_in_hierarchy, load_layout, resolve_top_cell
 from ._provenance import build_provenance
+from .economy_leaves import collect_leaf_placements
 from .economy_pnr import attach_pnr, check_pnr_args
 from .economy_whatif import what_if_block_or_none
 
@@ -542,6 +543,7 @@ def _attribution_block(
     bbox: Any,
     dbu: float,
     annotation_pairs: set[tuple[int, int]],
+    flatten_wrappers: bool = False,
 ) -> dict[str, Any]:
     """Partition the top bbox into direct-child instance bboxes and the gap
     components between them (issue #4660).
@@ -550,38 +552,25 @@ def _attribution_block(
     ``sum(child bbox) - instance_overlap + sum(gap components) +
     unattributed == bbox area``. Overlapping instance bboxes are counted
     once (the double-counted area is reported as ``instance_overlap_um2``).
-    Array instances contribute one child per element.
+    Array instances contribute one child per element. With
+    ``flatten_wrappers`` a child holding two or more direct instances is
+    recursively expanded into leaf placements named by hierarchical path
+    (``COMP[0]/OTA[0]``).
     """
     drawn_cache: dict[int, float] = {}
-    raw: list[tuple[str, str, Any, float]] = []
-    for inst in top_cell.each_inst():
-        child = inst.cell
-        child_bbox = child.bbox()
-        if child_bbox.empty():
-            continue
+
+    def drawn_area(child: Any) -> float:
         if child.cell_index() not in drawn_cache:
             drawn_cache[child.cell_index()] = _merged_region(
                 kdb, layout, child, annotation_pairs, recursive=True
             ).area()
-        for trans in inst.cell_inst.each_cplx_trans():
-            raw.append(
-                (
-                    child.name,
-                    child.name,
-                    child_bbox.transformed(trans),
-                    drawn_cache[child.cell_index()] * trans.mag**2,
-                )
-            )
+        return drawn_cache[child.cell_index()]
 
-    # Stable names: ordinal among same-cell instances by position.
-    raw.sort(key=lambda r: (r[0], r[2].left, r[2].bottom, r[2].right, r[2].top))
-    counts: dict[str, int] = {}
+    leaves = collect_leaf_placements(kdb, top_cell, drawn_area, flatten_wrappers)
+
     placed: list[tuple[str, Any]] = []
     children: list[dict[str, Any]] = []
-    for cell_name, _, ibox, drawn_dbu2 in raw:
-        idx = counts.get(cell_name, 0)
-        counts[cell_name] = idx + 1
-        name = f"{cell_name}[{idx}]"
+    for name, cell_name, ibox, drawn_dbu2 in leaves:
         placed.append((name, ibox))
         ibox_area = ibox.area()
         children.append(
@@ -736,6 +725,7 @@ def economy_report(
     area_eff_require_bbox_tightness: bool = False,
     what_if: str | None = None,
     attribute: bool = False,
+    flatten_wrappers: bool = False,
     pnr_report: str | None = None,
 ) -> dict[str, Any]:
     """Compute the layout-economy report for one top cell of a GDSII/OASIS
@@ -772,9 +762,10 @@ def economy_report(
 
     ``attribute`` (issue #4660) adds an ``attribution`` block partitioning
     the top bbox into direct-child instance bboxes and gap components; see
-    :func:`_attribution_block`. Omitted when false. ``pnr_report`` (issue
-    #5181; needs ``attribute``) adds ``attribution.pnr_decomposition``, see
-    :mod:`klayout_tools.economy_pnr`.
+    :func:`_attribution_block`. Omitted when false. ``flatten_wrappers``
+    (issue #5179, requires ``attribute``) expands wrapper children into
+    leaf placements. ``pnr_report`` (issue #5181; needs ``attribute``) adds
+    ``attribution.pnr_decomposition``, see :mod:`klayout_tools.economy_pnr`.
     """
     check_pnr_args(pnr_report, attribute)
     if grid_cols <= 0 or grid_rows <= 0:
@@ -900,7 +891,7 @@ def economy_report(
         report["what_if"] = what_if_block
     if attribute:
         report["attribution"] = _attribution_block(
-            kdb, layout, top_cell, bbox, dbu, annotation_pairs
+            kdb, layout, top_cell, bbox, dbu, annotation_pairs, flatten_wrappers
         )
         attach_pnr(report, kdb, top_cell, bbox, dbu, pnr_report)
 

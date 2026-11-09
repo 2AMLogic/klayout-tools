@@ -91,3 +91,29 @@ def test_adapt_leg_netlists_skip_returns_inputs_without_adapting(tmp_path):
         str(bad),
         None,
     )
+
+
+_DIODE = (
+    ".SUBCKT PADCELL PAD DVSS\n"
+    "D$95 DVSS PAD diode_nd2ps_06v0 A=178P P=55.6U\n"
+    "* A=1P stays in comments\n"
+    ".ENDS PADCELL\n"
+)
+
+
+def test_diode_cards_get_ngspice_spelling_in_a_copy(tmp_path):
+    raw = _raw(tmp_path, _DIODE)
+    out, dev = adapt_leg_netlists("gf180mcu", str(raw), None, str(tmp_path))
+    assert dev is None and out != str(raw)
+    adapted = Path(out).read_text()
+    assert "D$95 DVSS PAD diode_nd2ps_06v0 area=178p pj=55.6u\n" in adapted
+    assert "* A=1P stays in comments" in adapted
+    # KLayout's SPICE reader reads area=/pj= back as 0, so the raw
+    # extraction (which `klt lvs` consumes) must keep A=/P=.
+    assert raw.read_text() == _DIODE
+
+
+def test_netlist_without_diodes_is_not_copied(tmp_path):
+    raw = _raw(tmp_path)
+    out, _ = adapt_leg_netlists("gf180mcu", str(raw), None, str(tmp_path))
+    assert out == str(raw)
