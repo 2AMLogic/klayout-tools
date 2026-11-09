@@ -74,7 +74,8 @@ from typing import Any
 from ._annotation import is_reserved_annotation_layer
 from ._layout import bbox_um_dict, cells_in_hierarchy, load_layout, resolve_top_cell
 from ._provenance import build_provenance
-from .economy_leaves import collect_leaf_placements
+from .economy_bands import leaf_bands
+from .economy_leaves import collect_leaf_placements, gap_position
 
 SCHEMA_VERSION = 1
 
@@ -486,54 +487,6 @@ def _row_utilization(kdb: Any, top_cell: Any, dbu: float) -> dict[str, Any] | No
     }
 
 
-def _margin_edges(gap_bbox: Any, bbox: Any) -> list[str]:
-    """Top-bbox edges the gap component touches, in fixed order."""
-    checks = (
-        ("bottom", gap_bbox.bottom <= bbox.bottom),
-        ("left", gap_bbox.left <= bbox.left),
-        ("right", gap_bbox.right >= bbox.right),
-        ("top", gap_bbox.top >= bbox.top),
-    )
-    return [edge for edge, hit in checks if hit]
-
-
-def _single_neighbour_position(gap_bbox: Any, name: str, ibox: Any) -> str:
-    if gap_bbox.left >= ibox.right:
-        return f"right_of:{name}"
-    if gap_bbox.right <= ibox.left:
-        return f"left_of:{name}"
-    if gap_bbox.bottom >= ibox.top:
-        return f"above:{name}"
-    return f"below:{name}"
-
-
-def _gap_position(gap_bbox: Any, bbox: Any, placed: list[tuple[str, Any]]) -> str:
-    """Deterministic position label for one gap component.
-
-    ``margin:<edges>`` when the component touches the top bbox boundary
-    (edges joined by ``+`` in a fixed order); otherwise ``between:<a>,<b>``
-    when it abuts two or more instance bboxes (names sorted), or
-    ``left_of|right_of|above|below:<inst>`` when it abuts exactly one.
-    """
-    edges = _margin_edges(gap_bbox, bbox)
-    if edges:
-        return "margin:" + "+".join(edges)
-
-    neighbours = sorted(
-        (name, ibox)
-        for name, ibox in placed
-        if ibox.left <= gap_bbox.right
-        and ibox.right >= gap_bbox.left
-        and ibox.bottom <= gap_bbox.top
-        and ibox.top >= gap_bbox.bottom
-    )
-    if len(neighbours) >= 2:
-        return "between:" + ",".join(n for n, _ in neighbours)
-    if neighbours:
-        return _single_neighbour_position(gap_bbox, *neighbours[0])
-    return "interior"
-
-
 def _attribution_block(
     kdb: Any,
     layout: Any,
@@ -600,7 +553,7 @@ def _attribution_block(
         gb = polygon.bbox()
         gaps.append(
             {
-                "position": _gap_position(gb, bbox, placed),
+                "position": gap_position(gb, bbox, placed),
                 "bbox_um": bbox_um_dict(gb, dbu),
                 "area_um2": area * dbu * dbu,
             }
@@ -609,7 +562,7 @@ def _attribution_block(
 
     unattributed = bbox.area() - (sum_children - overlap) - gap_total
     top_local = _merged_region(kdb, layout, top_cell, annotation_pairs, recursive=False)
-    return {
+    block: dict[str, Any] = {
         "children": children,
         "gap_components": gaps,
         "unattributed_um2": unattributed * dbu * dbu,
@@ -617,6 +570,9 @@ def _attribution_block(
         "top_level_drawn_area_um2": top_local.area() * dbu * dbu,
         "sums_to_total": unattributed == 0,
     }
+    if top_cell.child_instances() == 0:
+        block["bands"] = leaf_bands(kdb, layout, top_cell, bbox, dbu, annotation_pairs)
+    return block
 
 
 def _area_eff_block(

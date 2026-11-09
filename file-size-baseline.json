@@ -281,7 +281,7 @@
     },
     {
       "path": "src/klayout_tools/economy.py",
-      "lines": 914
+      "lines": 870
     },
     {
       "path": "src/klayout_tools/env_provenance.py",
