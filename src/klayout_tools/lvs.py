@@ -4988,24 +4988,11 @@ def _select_resolve_and_combine(
 
     if opts.combine_devices_per_circuit is not None and layout_deck is not None:
         # Issue #559/#585/#1557: the same deferred resistor
-        # `fixed_offset_ohm` correction the whole-netlist `combine_devices`
-        # block below applies (mutually exclusive with
-        # `combine_devices_per_circuit`, so only one of the two ever runs
-        # for a given request) -- reached only once `layout_deck` is
-        # resolved (immediately above), which is *after*
-        # `_combine_circuit_devices_safely` already folded each targeted
-        # circuit's devices further up. Applied netlist-wide, exactly like
-        # the whole-netlist block does, rather than restricted to
-        # `layout_combined_circuits`: the deferral this correction reverses
-        # (`--defer-resistor-fixed-offset` at pre-extraction time, issue
-        # #585) was applied once, globally, to the whole pre-extracted
-        # netlist -- not per named circuit -- so a circuit
-        # `combine_devices_per_circuit` left uncombined still carries
-        # raw-body-only resistor primitives that need this same offset
-        # added exactly once each, the same as a degraded
-        # `Netlist.combine_devices()` run's leftover individual devices do
-        # in the whole-netlist block below (see that block's own comment on
-        # why it is "still applied after a symmetric degrade").
+        # `fixed_offset_ohm` correction the whole-netlist block below applies
+        # (mutually exclusive with `combine_devices_per_circuit`). Applied
+        # netlist-wide, not just to `layout_combined_circuits`: the deferral
+        # it reverses (#585) was applied once to the whole pre-extracted
+        # netlist, so uncombined circuits still need the offset added once.
         apply_resistor_fixed_offset_corrections(layout_netlist, layout_deck)
 
     combine_warnings: list[dict[str, Any]] = []
@@ -5111,42 +5098,21 @@ def _select_resolve_and_combine(
         layout_circuit = layout_netlist.circuit_by_name(layout_circuit_name)
         reference_circuit = reference_netlist.circuit_by_name(reference_circuit_name)
 
-        # combine_devices() folds matched device arrays but leaves the
-        # interior nets it emptied (0 terminals, 0 pins) behind in the
-        # circuit -- e.g. the N-1 interior nodes of a series string it
-        # collapsed into a single device. Left in place they inflate
-        # counts.nets.* (computed off each_net() below) and surface in
-        # mismatches[] as spurious net.unmatched findings no caller can act
-        # on (issue #500). Purge them symmetrically on both sides -- mirroring
-        # the symmetric combine above and running only when combine actually
-        # ran -- so counts and mismatches reflect the post-combine topology,
-        # not combine_devices()'s internal bookkeeping. Scoped to genuinely
-        # empty nets only, so a real (if unused) top-level pin's net is never
-        # dropped and counts.pins.* is unaffected.
-        #
-        # Skipped entirely after a symmetric degrade (issue #1370): nothing
-        # was folded on either side, so there is no combine-emptied net to
-        # purge, and skipping keeps the degraded run's `counts.nets.*`
-        # byte-identical to what `options.combine_devices: false` reports for
-        # the same inputs -- which is the whole point of the degrade.
+        # combine_devices() leaves emptied interior nets (0 terminals, 0 pins)
+        # behind, inflating counts.nets.* and surfacing spurious net.unmatched
+        # findings (issue #500). Purge them symmetrically, only when combine
+        # ran and only genuinely empty nets, so real pins are untouched.
+        # Skipped after a symmetric degrade (issue #1370): nothing was folded,
+        # and counts.nets.* must match `options.combine_devices: false`.
         if not combine_incomplete:
             _purge_emptied_nets(layout_netlist)
             _purge_emptied_nets(reference_netlist)
 
-            # Issues #1497/#2374: KLayout's own `combine_devices()` can leave
-            # a combined device's parameters inconsistent with the parallel
-            # group it folded -- silently, with no exception and no
-            # `device.combine_incomplete` warning (that category only covers
-            # the unrelated #1185/#466 `RuntimeError` case above): a
-            # capacitor's `C` left at one instance's value (#1497), or a
-            # bipolar array's whole accumulation inverted (#2374). Checked
-            # and corrected in place against each side's own pre-combine
-            # snapshot (already taken, for the #1370 symmetric-degrade
-            # rollback, before either combine call ran), appended to
-            # `combine_warnings` -- but only *after* `combine_incomplete` was
-            # computed above, so a correction here never triggers that
-            # rollback: the value is already fixed, there is nothing left to
-            # roll back for.
+            # Issues #1497/#2374: KLayout's `combine_devices()` can silently leave a
+            # combined device's parameters inconsistent with the folded group (no
+            # exception, no `device.combine_incomplete`). Corrected in place against
+            # each side's pre-combine snapshot; appended only *after*
+            # `combine_incomplete` was computed, so it never triggers the rollback.
             layout_parameter_correction = _correct_combine_parameters(
                 layout_snapshot, layout_netlist, "layout"
             )
@@ -5160,47 +5126,17 @@ def _select_resolve_and_combine(
 
         if layout_deck is not None:
             # Issue #559/#585: apply the deferred resistor `fixed_offset_ohm`
-            # correction here, after `combine_devices()` has folded
-            # series-connected drawn primitives into one device object.
-            # Because `apply_resistor_fixed_offset_corrections` walks whatever
-            # devices exist in `layout_netlist` right now, this adds the fixed
-            # offset exactly once per surviving (possibly-folded) logical
-            # device -- never once per original primitive -- fixing the
-            # over-count KLayout's native series fold otherwise produces by
-            # summing each primitive's already-corrected `R`.
-            #
-            # Reached by *both* layout shapes whenever a `layout.deck` is
-            # present (issue #585):
-            #   * `layout.file` (inline extraction): `_resolve_layout` deferred
-            #     the correction by passing `apply_resistor_fixed_offset=False`
-            #     to inline extraction, so the primitives here carry only their
-            #     raw body `R` -- the offset is added once, here, post-combine.
-            #   * `layout.netlist` (pre-extracted): honored only when the
-            #     supplied SPICE was itself extracted with the correction
-            #     *deferred* (`run_extract(..., apply_resistor_fixed_offset=
-            #     False)`). Then the pre-extracted primitives likewise carry
-            #     only raw body `R`, and this call is what applies the offset
-            #     once per post-combine device. (A netlist extracted the
-            #     default way already has the offset baked into each primitive;
-            #     feeding that through `combine_devices` is the caller's own
-            #     double-count to avoid -- there is no way to selectively
-            #     un-sum an already-applied per-primitive offset here.)
-            #
-            # The device-class-name lookup inside
-            # `apply_resistor_fixed_offset_corrections` is case-insensitive, so
-            # it matches both the in-process (`res_high_po`) and
-            # SpiceReader-uppercased (`RES_HIGH_PO`) class names identically
-            # (issue #585). The reference netlist never receives this
-            # correction: it is a layout-deck-specific geometric correction,
-            # not a property of the schematic reference.
-            #
-            # Still applied after a symmetric degrade (issue #1370), unlike
-            # the net purge above: a deferred extraction wrote raw body `R`
-            # values that are simply *wrong* until the offset is added, and
-            # with nothing folded this adds it exactly once per drawn
-            # primitive -- which is precisely what a non-deferred extraction
-            # would have produced. Skipping it here would leave the degraded
-            # run reporting under-valued resistances.
+            # correction post-combine, so the offset is added once per surviving
+            # (possibly-folded) device, not once per original primitive. Reached by
+            # both layout shapes whenever `layout.deck` is present: inline extraction
+            # deferred the correction, and a pre-extracted netlist is honored only if
+            # it was extracted with the correction deferred (a default-extracted one
+            # already has the offset baked in -- the caller's double-count to avoid).
+            # Class-name lookup is case-insensitive (SpiceReader uppercases). The
+            # reference never receives this layout-deck-specific correction.
+            # Unlike the net purge above, still applied after a symmetric degrade
+            # (issue #1370): deferred extraction wrote raw body `R`, which is wrong
+            # until the offset is added.
             apply_resistor_fixed_offset_corrections(layout_netlist, layout_deck)
             # Issue #3017: disclose the (N-1) head/end terms the fold above
             # absorbed (a no-op after a symmetric degrade).
