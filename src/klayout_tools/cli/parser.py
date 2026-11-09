@@ -5175,6 +5175,15 @@ def _add_economy_parser(subparsers: argparse._SubParsersAction) -> None:
             "(issue #4660)"
         ),
     )
+    economy_parser.add_argument(
+        "--flatten-wrappers",
+        action="store_true",
+        help=(
+            "with --attribute, expand wrapper children (cells holding two or "
+            "more instances) into leaf placements named by hierarchical path "
+            "(issue #5179)"
+        ),
+    )
     _add_format_arg(economy_parser)
     economy_parser.set_defaults(func=economy_cmd.run)
 
