@@ -279,6 +279,19 @@ output has none; then `grouping.status` is `unavailable` (with a `reason`)
 and no groups are invented. Only direct instances of the top cell are
 considered; multi-level hierarchy is not walked.
 
+#### `--flatten-wrappers`
+
+Opt-in (issue #5179; requires `--attribute`, otherwise a usage error with the
+standard envelope). A direct child that is a *wrapper* — a cell with two or
+more direct instances — is recursively expanded into its instances (composing
+transforms, array elements included); a cell with fewer than two is a *leaf*.
+`children[]` then lists leaves only, named by hierarchical path such as
+`COMP[0]/OTA[0]` (ordinals per cell name by position, at each level), and gap
+`position` labels name leaves. A wrapper's own whitespace and any shapes it
+draws between inner blocks become ordinary gap components, and the sum
+identity / `sums_to_total` still hold. Without the flag the output is
+unchanged.
+
 ### Budget and reference blocks
 
 With `--budget-um2 <area>`, `budget` is added:

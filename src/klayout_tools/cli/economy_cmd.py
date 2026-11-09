@@ -4,7 +4,7 @@ import argparse
 
 from ..economy import EconomyError
 from ..economy_footprint import economy_report_with_footprint
-from .output import emit_error, emit_success, render_table
+from .output import EXIT_USAGE_ERROR, emit_error, emit_success, render_table
 
 
 def register(parser: argparse.ArgumentParser) -> None:
@@ -45,6 +45,13 @@ def register(parser: argparse.ArgumentParser) -> None:
 
 
 def run(args: argparse.Namespace) -> int:
+    if args.flatten_wrappers and not args.attribute:
+        return emit_error(
+            "economy",
+            "--flatten-wrappers requires --attribute",
+            args.format,
+            exit_code=EXIT_USAGE_ERROR,
+        )
     try:
         report = economy_report_with_footprint(
             args.file,
@@ -62,6 +69,7 @@ def run(args: argparse.Namespace) -> int:
             area_eff_require_bbox_tightness=args.area_eff_require_bbox_tightness,
             what_if=args.what_if,
             attribute=args.attribute,
+            flatten_wrappers=args.flatten_wrappers,
             cell_footprint=args.cell_footprint,
             group_by_instance_prefix=args.group_by_instance_prefix,
             lef_paths=tuple(args.lef or ()),

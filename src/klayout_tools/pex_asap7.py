@@ -6,6 +6,7 @@ Lives outside ``pex.py`` so that file stays under its size ceiling.
 from __future__ import annotations
 
 import os
+import re
 
 #: ``extraction.netlist_adaptation`` value for the asap7 deck.
 ASAP7_NETLIST_ADAPTATION = "asap7_bsimcmg.adapt_extracted_netlist"
@@ -54,6 +55,45 @@ def adapted_dut_netlist(
 DEVICE_MODEL_CARD_PREFIXES = "MXQDN"
 
 
+#: A ``D`` device card's KLayout-spelled instance parameter (``A=``/``P=``).
+_DIODE_PARAM = re.compile(r"(?<!\S)([AaPp])=(\S+)")
+
+
+def ngspice_diode_cards(text: str) -> str:
+    """``text`` with every ``D`` card's ``A=``/``P=`` rewritten to ngspice's
+    ``area=``/``pj=`` (issue #5178; ngspice's D element rejects the KLayout
+    spellings with ``unknown parameter (a)``). Values are kept, lower-cased
+    (``178P`` -> ``178p``). Comments, directives and non-``D`` cards are
+    untouched."""
+
+    def spell(match: re.Match[str]) -> str:
+        name = "area" if match.group(1).lower() == "a" else "pj"
+        return f"{name}={match.group(2).lower()}"
+
+    return "".join(
+        _DIODE_PARAM.sub(spell, line) if line[:1] in "Dd" else line
+        for line in text.splitlines(keepends=True)
+    )
+
+
+def diode_adapted_netlist(
+    netlist_path: str, *, work_dir: str, label: str, side: str
+) -> str:
+    """``netlist_path`` itself, or -- when it holds a ``D`` card ngspice would
+    reject -- a rewritten copy under ``work_dir``. Never edits the raw
+    extraction: KLayout's SPICE reader (``klt lvs``) reads ``area=``/``pj=``
+    back as 0, so only the pex-facing copy may carry ngspice's spelling."""
+    with open(netlist_path, encoding="utf-8") as handle:
+        text = handle.read()
+    adapted = ngspice_diode_cards(text)
+    if adapted == text:
+        return netlist_path
+    adapted_path = os.path.join(work_dir, f"{label}.{side}-dut.ngspice-diode.spice")
+    with open(adapted_path, "w", encoding="utf-8") as handle:
+        handle.write(adapted)
+    return adapted_path
+
+
 def adapt_leg_netlists(
     deck_name: str | None,
     extracted: str,
@@ -69,12 +109,13 @@ def adapt_leg_netlists(
     returns the inputs untouched without adapting."""
     if skip:
         return extracted, device_only
-    return (
-        adapted_dut_netlist(
-            deck_name, extracted, work_dir=work_dir, label="dut", side="extracted"
-        ),
-        device_only
-        and adapted_dut_netlist(
-            deck_name, device_only, work_dir=work_dir, label="dut", side="device-only"
-        ),
+
+    def adapt(path: str, side: str) -> str:
+        path = adapted_dut_netlist(
+            deck_name, path, work_dir=work_dir, label="dut", side=side
+        )
+        return diode_adapted_netlist(path, work_dir=work_dir, label="dut", side=side)
+
+    return adapt(extracted, "extracted"), device_only and adapt(
+        device_only, "device-only"
     )
