@@ -8,6 +8,10 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-09
 
+- **PR #5168**: refactor: extract circuit-select/deck/combine stage from run_lvs
+- **PR #5166**: refactor: extract netgen engine branch and findings aggregation from run_lvs
+- **Issue #5159** (closed): Extract circuit-select/deck/combine stage from run_lvs (stage 3/6, after #4126)
+- **Issue #5161** (closed): Extract netgen branch and warning aggregation from run_lvs (stage 5/6, after #4126)
 - **PR #5167**: refactor(lvs): extract report assembly from run_lvs into a helper
 - **PR #5163**: refactor: move extract parser registration into cli/parsers/extract.py
 - **Issue #5162** (closed): Extract mismatch counts and report assembly from run_lvs (stage 6/6, after #4126)
