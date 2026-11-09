@@ -534,6 +534,11 @@
       "complexity": 20
     },
     {
+      "file": "src/klayout_tools/lvs_reference_stage.py",
+      "function": "_read_reference_stage",
+      "complexity": 13
+    },
+    {
       "file": "src/klayout_tools/lvs.py",
       "function": "_select_resolve_and_combine",
       "complexity": 12
@@ -541,7 +546,7 @@
     {
       "file": "src/klayout_tools/lvs.py",
       "function": "run_lvs",
-      "complexity": 23
+      "complexity": 11
     },
     {
       "file": "src/klayout_tools/lvs_mismatch.py",

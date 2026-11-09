@@ -398,6 +398,7 @@
         "klayout_tools.lvs_netgen_branch",
         "klayout_tools.lvs_pin_anchors",
         "klayout_tools.lvs_power",
+        "klayout_tools.lvs_reference_stage",
         "klayout_tools.lvs_report",
         "klayout_tools.lvs_run_options",
         "klayout_tools.lvs_runset",
