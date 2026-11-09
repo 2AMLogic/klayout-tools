@@ -536,7 +536,7 @@
     {
       "file": "src/klayout_tools/lvs.py",
       "function": "run_lvs",
-      "complexity": 44
+      "complexity": 41
     },
     {
       "file": "src/klayout_tools/lvs_mismatch.py",
