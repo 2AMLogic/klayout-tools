@@ -247,6 +247,19 @@ right, top) when the gap touches the top bbox boundary; otherwise
 `between:<a>,<b>` (names sorted) when it abuts two or more instances, or
 `left_of|right_of|above|below:<inst>` for one; `interior` if it abuts none.
 
+#### `--flatten-wrappers`
+
+Opt-in (issue #5179; requires `--attribute`, otherwise a usage error with the
+standard envelope). A direct child that is a *wrapper* — a cell with two or
+more direct instances — is recursively expanded into its instances (composing
+transforms, array elements included); a cell with fewer than two is a *leaf*.
+`children[]` then lists leaves only, named by hierarchical path such as
+`COMP[0]/OTA[0]` (ordinals per cell name by position, at each level), and gap
+`position` labels name leaves. A wrapper's own whitespace and any shapes it
+draws between inner blocks become ordinary gap components, and the sum
+identity / `sums_to_total` still hold. Without the flag the output is
+unchanged.
+
 ### Budget and reference blocks
 
 With `--budget-um2 <area>`, `budget` is added:
