@@ -1,6 +1,7 @@
 """Leaf-placement collection for ``klt economy --attribute`` (issue #5179).
 
-Split out of ``economy.py`` for the file-size ratchet.
+Split out of ``economy.py`` for the file-size ratchet (gap-position labels
+moved here alongside, issue #5189).
 """
 
 from collections.abc import Callable
@@ -50,3 +51,51 @@ def collect_leaf_placements(
         return out
 
     return collect(top_cell, kdb.ICplxTrans(), "")
+
+
+def _margin_edges(gap_bbox: Any, bbox: Any) -> list[str]:
+    """Top-bbox edges the gap component touches, in fixed order."""
+    checks = (
+        ("bottom", gap_bbox.bottom <= bbox.bottom),
+        ("left", gap_bbox.left <= bbox.left),
+        ("right", gap_bbox.right >= bbox.right),
+        ("top", gap_bbox.top >= bbox.top),
+    )
+    return [edge for edge, hit in checks if hit]
+
+
+def _single_neighbour_position(gap_bbox: Any, name: str, ibox: Any) -> str:
+    if gap_bbox.left >= ibox.right:
+        return f"right_of:{name}"
+    if gap_bbox.right <= ibox.left:
+        return f"left_of:{name}"
+    if gap_bbox.bottom >= ibox.top:
+        return f"above:{name}"
+    return f"below:{name}"
+
+
+def gap_position(gap_bbox: Any, bbox: Any, placed: list[tuple[str, Any]]) -> str:
+    """Deterministic position label for one gap component.
+
+    ``margin:<edges>`` when the component touches the top bbox boundary
+    (edges joined by ``+`` in a fixed order); otherwise ``between:<a>,<b>``
+    when it abuts two or more instance bboxes (names sorted), or
+    ``left_of|right_of|above|below:<inst>`` when it abuts exactly one.
+    """
+    edges = _margin_edges(gap_bbox, bbox)
+    if edges:
+        return "margin:" + "+".join(edges)
+
+    neighbours = sorted(
+        (name, ibox)
+        for name, ibox in placed
+        if ibox.left <= gap_bbox.right
+        and ibox.right >= gap_bbox.left
+        and ibox.bottom <= gap_bbox.top
+        and ibox.top >= gap_bbox.bottom
+    )
+    if len(neighbours) >= 2:
+        return "between:" + ",".join(n for n, _ in neighbours)
+    if neighbours:
+        return _single_neighbour_position(gap_bbox, *neighbours[0])
+    return "interior"

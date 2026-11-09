@@ -74,7 +74,8 @@ from typing import Any
 from ._annotation import is_reserved_annotation_layer
 from ._layout import bbox_um_dict, cells_in_hierarchy, load_layout, resolve_top_cell
 from ._provenance import build_provenance
-from .economy_leaves import collect_leaf_placements
+from .economy_bands import leaf_bands
+from .economy_leaves import collect_leaf_placements, gap_position
 
 SCHEMA_VERSION = 1
 
@@ -486,122 +487,6 @@ def _row_utilization(kdb: Any, top_cell: Any, dbu: float) -> dict[str, Any] | No
     }
 
 
-def _margin_edges(gap_bbox: Any, bbox: Any) -> list[str]:
-    """Top-bbox edges the gap component touches, in fixed order."""
-    checks = (
-        ("bottom", gap_bbox.bottom <= bbox.bottom),
-        ("left", gap_bbox.left <= bbox.left),
-        ("right", gap_bbox.right >= bbox.right),
-        ("top", gap_bbox.top >= bbox.top),
-    )
-    return [edge for edge, hit in checks if hit]
-
-
-def _single_neighbour_position(gap_bbox: Any, name: str, ibox: Any) -> str:
-    if gap_bbox.left >= ibox.right:
-        return f"right_of:{name}"
-    if gap_bbox.right <= ibox.left:
-        return f"left_of:{name}"
-    if gap_bbox.bottom >= ibox.top:
-        return f"above:{name}"
-    return f"below:{name}"
-
-
-def _gap_position(gap_bbox: Any, bbox: Any, placed: list[tuple[str, Any]]) -> str:
-    """Deterministic position label for one gap component.
-
-    ``margin:<edges>`` when the component touches the top bbox boundary
-    (edges joined by ``+`` in a fixed order); otherwise ``between:<a>,<b>``
-    when it abuts two or more instance bboxes (names sorted), or
-    ``left_of|right_of|above|below:<inst>`` when it abuts exactly one.
-    """
-    edges = _margin_edges(gap_bbox, bbox)
-    if edges:
-        return "margin:" + "+".join(edges)
-
-    neighbours = sorted(
-        (name, ibox)
-        for name, ibox in placed
-        if ibox.left <= gap_bbox.right
-        and ibox.right >= gap_bbox.left
-        and ibox.bottom <= gap_bbox.top
-        and ibox.top >= gap_bbox.bottom
-    )
-    if len(neighbours) >= 2:
-        return "between:" + ",".join(n for n, _ in neighbours)
-    if neighbours:
-        return _single_neighbour_position(gap_bbox, *neighbours[0])
-    return "interior"
-
-
-def _leaf_bands(
-    kdb: Any,
-    layout: Any,
-    top_cell: Any,
-    bbox: Any,
-    dbu: float,
-    annotation_pairs: set[tuple[int, int]],
-) -> list[dict[str, Any]]:
-    """Y-axis partition of a leaf cell's bbox into full-width bands keyed by
-    the set of drawn layers overlapping each band (issue #5189).
-
-    Elementary strips between consecutive merged-polygon vertex Y edges are
-    merged when their layer sets are equal, so band areas sum exactly to the
-    bbox area (integer dbu^2). Annotation layers are excluded.
-    """
-    if bbox.empty():
-        return []
-    regions: dict[str, Any] = {}
-    for li in layout.layer_indexes():
-        info = layout.get_info(li)
-        if (info.layer, info.datatype) in annotation_pairs:
-            continue
-        region = kdb.Region(top_cell.shapes(li)).merged()
-        if not region.is_empty():
-            regions[f"{info.layer}/{info.datatype}"] = region
-    edges = {bbox.bottom, bbox.top}
-    for region in regions.values():
-        for polygon in region.each():
-            for pt in polygon.each_point_hull():
-                edges.add(pt.y)
-            for h in range(polygon.holes()):
-                for pt in polygon.each_point_hole(h):
-                    edges.add(pt.y)
-    ys = sorted(y for y in edges if bbox.bottom <= y <= bbox.top)
-
-    # (bottom, top, layers, drawn_dbu2)
-    merged: list[list[Any]] = []
-    for y0, y1 in zip(ys, ys[1:], strict=False):
-        strip = kdb.Region(kdb.Box(bbox.left, y0, bbox.right, y1))
-        names = []
-        for name, region in sorted(regions.items()):
-            inside = region & strip
-            if not inside.is_empty():
-                names.append(name)
-        union = kdb.Region()
-        for name in names:
-            union += regions[name]
-        drawn = (union.merged() & strip).area()
-        if merged and merged[-1][2] == names:
-            merged[-1][1] = y1
-            merged[-1][3] += drawn
-        else:
-            merged.append([y0, y1, names, drawn])
-
-    bands = []
-    for y0, y1, names, drawn in merged:
-        box = kdb.Box(bbox.left, y0, bbox.right, y1)
-        bands.append(
-            {
-                "bbox_um": bbox_um_dict(box, dbu),
-                "area_um2": box.area() * dbu * dbu,
-                "layers": names,
-                "drawn_area_um2": drawn * dbu * dbu,
-            }
-        )
-    return bands
-
-
 def _attribution_block(
     kdb: Any,
     layout: Any,
@@ -668,7 +553,7 @@ def _attribution_block(
         gb = polygon.bbox()
         gaps.append(
             {
-                "position": _gap_position(gb, bbox, placed),
+                "position": gap_position(gb, bbox, placed),
                 "bbox_um": bbox_um_dict(gb, dbu),
                 "area_um2": area * dbu * dbu,
             }
@@ -686,7 +571,7 @@ def _attribution_block(
         "sums_to_total": unattributed == 0,
     }
     if top_cell.child_instances() == 0:
-        block["bands"] = _leaf_bands(kdb, layout, top_cell, bbox, dbu, annotation_pairs)
+        block["bands"] = leaf_bands(kdb, layout, top_cell, bbox, dbu, annotation_pairs)
     return block
 
 
