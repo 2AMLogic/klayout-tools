@@ -241,6 +241,7 @@ Array instances contribute one child per element.
 | `instance_overlap_um2` | Area double-covered by overlapping instance bboxes (counted once in the partition). |
 | `top_level_drawn_area_um2` | Drawn area of shapes placed directly in the top cell (not an extra partition term). |
 | `sums_to_total` | `true` when `unattributed_um2` is exactly zero (integer dbu² arithmetic). |
+| `bands[]` | Leaf cells only (no child instances; absent otherwise, issue #5189): a Y-axis partition of the bbox into full-width bands, bottom to top. Each has `bbox_um`, `area_um2`, `layers` (sorted `"L/D"` list of drawn, non-annotation layers overlapping the band; `[]` = bare whitespace) and `drawn_area_um2` (merged drawn area inside the band). Adjacent strips with the same `layers` set are merged; band areas sum exactly to the bbox area. |
 
 `position` is `margin:<edges>` (edges joined by `+`, order bottom, left,
 right, top) when the gap touches the top bbox boundary; otherwise

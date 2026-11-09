@@ -8,6 +8,14 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-09
 
+- **PR #5188**: fix: exclude pdk.ambiguous_sources from rerun drift and document run-specific fields
+- **PR #5185**: feat(economy): add cell footprint breakdown and instance-prefix grouping
+- **PR #5184**: fix(pex): spell diode instance params area=/pj= for ngspice in leg netlists
+- **PR #5183**: feat(economy): add --flatten-wrappers for leaf-level attribution
+- **Issue #5182** (closed): klt extract envelopes carry run-specific fields (timing, pdk.ambiguous_sources) that break committed-evidence comparison
+- **Issue #5180** (closed): klt economy: no standard-cell footprint breakdown (logic vs sequential vs fill/tap/endcap) grouped by instance-name prefix
+- **Issue #5179** (closed): klt economy --attribute: whitespace of a nested placement wrapper is not attributed to its leaf siblings
+- **Issue #5178** (closed): extract/pex emits A=/P= diode instance parameters that ngspice's D element rejects
 - **PR #5177**: chore(deps): Bump ruff from 0.17.1 to 0.17.2 in the uv-minor-patch group across 1 directory
 - **PR #5175**: chore(deps): Bump the npm-minor-patch group across 1 directory with 2 updates
 - **PR #5164**: refactor: extract reference-read stage from run_lvs
