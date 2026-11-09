@@ -530,8 +530,13 @@
     },
     {
       "file": "src/klayout_tools/lvs.py",
+      "function": "_read_reference_stage",
+      "complexity": 13
+    },
+    {
+      "file": "src/klayout_tools/lvs.py",
       "function": "run_lvs",
-      "complexity": 56
+      "complexity": 44
     },
     {
       "file": "src/klayout_tools/lvs_mismatch.py",
