@@ -6,6 +6,15 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 - [2026-09](work_log/WORK_LOG_2026-09.md)
 
+### 2026-11-09
+
+- **PR #5152**: refactor: extract run_lvs request-option parsing into a helper
+- **PR #5151**: test: snapshot klt --help for root parser and every verb
+- **PR #5149**: refactor: split sim_batch contract and preflight block into sim_batch_contract
+- **Issue #5146** (closed): Add klt --help snapshot test (prerequisite for splitting cli/parser.py)
+- **Issue #4126** (closed): Simplify run_lvs: split the 2,047-line orchestrator in lvs.py into stage helpers
+- **Issue #4065** (closed): Split sim_batch.py (5232 lines, 117 commits / 44 merges in 5 weeks) along its existing section seams
+
 ### 2026-11-08
 
 - **PR #5150**: feat: add opt-in request.adapt to klt sim for ASAP7 BSIM-CMG
