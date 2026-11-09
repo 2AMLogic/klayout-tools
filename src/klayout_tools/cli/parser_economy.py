@@ -151,4 +151,4 @@ def add_economy_parser(
         ),
     )
     _add_format_arg(economy_parser)
-    economy_parser.set_defaults(func=economy_cmd.run)
+    economy_cmd.register(economy_parser)

@@ -22,3 +22,6 @@ options:
   --attribute add an 'attribution' block partitioning the top cell's bbox into direct child instance bboxes and labelled gap components (issue #4660)
   --flatten-wrappers with --attribute, expand wrapper children (cells holding two or more instances) into leaf placements named by hierarchical path (issue #5179)
   --format {text,json} output format (default: text)
+  --cell-footprint add a 'cell_footprint' block: per-master abutment footprint (prBoundary, else --lef SIZE, else bbox) and a logic/sequential/buffer/clock-tree/fill/tap/endcap split (issue #5180)
+  --group-by-instance-prefix SEP group placed instances by the first SEP-delimited component of their name (implies --cell-footprint); reports 'unavailable' when the layout carries no instance names
+  --lef PATH LEF file or directory supplying MACRO SIZE for masters with no prBoundary (repeatable; first path wins); needs --cell-footprint

@@ -8,6 +8,8 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-09
 
+- **PR #5177**: chore(deps): Bump ruff from 0.17.1 to 0.17.2 in the uv-minor-patch group across 1 directory
+- **PR #5175**: chore(deps): Bump the npm-minor-patch group across 1 directory with 2 updates
 - **PR #5164**: refactor: extract reference-read stage from run_lvs
 - **Issue #5158** (closed): Extract reference-read stage from run_lvs (stage 2/6, after #4126)
 - **PR #5165**: refactor: extract layout resolve stage from run_lvs
