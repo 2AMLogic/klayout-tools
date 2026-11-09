@@ -5175,20 +5175,8 @@ def _add_economy_parser(subparsers: argparse._SubParsersAction) -> None:
             "(issue #4660)"
         ),
     )
-    economy_parser.add_argument(
-        "--pnr-report",
-        default=None,
-        dest="pnr_report",
-        metavar="REPORT_JSON",
-        help=(
-            "place-and-route report JSON (requires --attribute): adds "
-            "attribution.pnr_decomposition splitting the bbox into logical "
-            "cells, physical-only cells, core whitespace, die margin and "
-            "guard ring, plus overrun_ratio (issue #5181)"
-        ),
-    )
     _add_format_arg(economy_parser)
-    economy_parser.set_defaults(func=economy_cmd.run)
+    economy_cmd.register(economy_parser)
 
 
 def _add_cells_parser(subparsers: argparse._SubParsersAction) -> None:

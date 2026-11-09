@@ -6,6 +6,21 @@ from ..economy import EconomyError, economy_report
 from .output import emit_error, emit_success, render_table
 
 
+def register(parser: argparse.ArgumentParser) -> None:
+    """Add ``--pnr-report`` (issue #5181) and bind the command handler."""
+    parser.add_argument(
+        "--pnr-report",
+        metavar="REPORT_JSON",
+        help=(
+            "place-and-route report JSON (requires --attribute): adds "
+            "attribution.pnr_decomposition splitting the bbox into logical "
+            "cells, physical-only cells, core whitespace, die margin and "
+            "guard ring, plus overrun_ratio (issue #5181)"
+        ),
+    )
+    parser.set_defaults(func=run)
+
+
 def run(args: argparse.Namespace) -> int:
     try:
         report = economy_report(
