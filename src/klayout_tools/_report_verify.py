@@ -78,6 +78,10 @@ VOLATILE_PROVENANCE_PATHS: frozenset[tuple[str, ...]] = frozenset(
         # a measurement of the run, never part of the evidence.
         ("timing",),
         ("provenance", "pdk", "linked_trees"),
+        # Issue #5182: other PDK search roots present on the resolving host
+        # (#2564) -- describes the machine, not the layout, so a report
+        # committed on one host must not drift against a rerun on another.
+        ("provenance", "pdk", "ambiguous_sources"),
     }
 )
 
