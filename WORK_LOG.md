@@ -8,6 +8,10 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-09
 
+- **PR #5167**: refactor(lvs): extract report assembly from run_lvs into a helper
+- **PR #5163**: refactor: move extract parser registration into cli/parsers/extract.py
+- **Issue #5162** (closed): Extract mismatch counts and report assembly from run_lvs (stage 6/6, after #4126)
+- **Issue #5147** (closed): Move extract parser registration to cli/parsers/extract.py (first cluster of #3962)
 - **PR #5152**: refactor: extract run_lvs request-option parsing into a helper
 - **PR #5151**: test: snapshot klt --help for root parser and every verb
 - **PR #5149**: refactor: split sim_batch contract and preflight block into sim_batch_contract
