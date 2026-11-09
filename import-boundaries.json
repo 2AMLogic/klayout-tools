@@ -58,7 +58,8 @@
         "klayout_tools.cli._request_document",
         "klayout_tools.cli.color",
         "klayout_tools.cli.output",
-        "klayout_tools.cli.parser"
+        "klayout_tools.cli.parser",
+        "klayout_tools.cli.parsers"
       ],
       "public_import_any": true
     },
@@ -204,6 +205,9 @@
       "description": "`klt extract` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.extract_cmd",
+        "klayout_tools.cli.parsers.extract",
+        "klayout_tools.cli.parsers.extract_args_part2",
+        "klayout_tools.cli.parsers.extract_args_part3",
         "klayout_tools.extract",
         "klayout_tools.extract_abstract",
         "klayout_tools.extract_batch",
@@ -393,6 +397,7 @@
         "klayout_tools.lvs_netgen",
         "klayout_tools.lvs_pin_anchors",
         "klayout_tools.lvs_power",
+        "klayout_tools.lvs_report",
         "klayout_tools.lvs_run_options",
         "klayout_tools.lvs_runset",
         "klayout_tools.lvs_runset_reference",
