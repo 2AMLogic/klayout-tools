@@ -1816,301 +1816,25 @@ def run_lvs(
         if reference_flatten_warning is not None:
             flatten_warnings.append(reference_flatten_warning)
 
-    layout_circuit = _select_circuit(layout_netlist, layout_spec.get("top"), "layout")
-    reference_circuit = _select_circuit(
-        reference_netlist, reference_spec.get("top"), "reference"
+    (
+        layout_circuit,
+        reference_circuit,
+        power_connectivity,
+        layout_deck_name,
+        layout_deck,
+        family_findings,
+        combine_warnings,
+        combine_incomplete,
+    ) = _select_resolve_and_combine(
+        layout_netlist,
+        reference_netlist,
+        layout_spec,
+        reference_spec,
+        opts,
+        flatten_warnings,
+        power_connectivity,
+        reference_form,
     )
-
-    _prune_extra_top_circuits(layout_netlist, layout_circuit)
-    _prune_extra_top_circuits(reference_netlist, reference_circuit)
-    flatten_warnings.extend(
-        _hierarchy_mismatch_warnings(
-            layout_netlist, reference_netlist, opts.flatten_reference
-        )
-    )
-
-    # Issue #2813: FinFET comparison setup -- reference fingers merged with the
-    # extractor's combiner, the opt-in bulk policy applied (and disclosed),
-    # NFIN compared exactly on both sides.
-    prepare_finfet_comparison(opts.finfet_layout, layout_netlist, reference_netlist)
-
-    # Issue #2853 (option (b)): resolved here, after both sides' optional
-    # flatten, because a flattened side no longer carries the stub instances
-    # the reason talks about -- see `_with_stub_power_connectivity_reason`.
-    power_connectivity = _with_stub_power_connectivity_reason(
-        power_connectivity, reference_form, layout_circuit
-    )
-
-    # What the layout-side deck can structurally recognise
-    # (`ExtractionDeck.device_classes`, issue #221) -- `null` when no
-    # `layout.deck` was supplied. `layout.deck` is meaningful for *both*
-    # layout shapes: it is required for `layout.file` (it drives inline
-    # extraction), and it is optional-but-honored for the pre-extracted
-    # `layout.netlist` shape, where it does not trigger extraction but still
-    # names the deck whose resistor `fixed_offset_ohm` the `combine_devices`
-    # block below applies post-combine (issue #559/#585). Already validated by
-    # `_resolve_layout` above (an unknown deck name or an invalid
-    # `deck_options` entry would have raised `LvsError` before reaching this
-    # point) *for the `layout.file` shape only* -- re-fetching it here with
-    # the same `deck_options` cannot itself raise in that case. For the
-    # pre-extracted `layout.netlist` shape, `_resolve_layout` never touches
-    # the deck at all (no extraction happens), so this is the first -- and
-    # only -- place a bad `deck` name or `deck_options` entry on that shape
-    # surfaces; wrapped below the same way `extract_netlist_from_layout`
-    # wraps it (issue #600). Resolved here (rather than just before
-    # `device_classes` further down) so the `combine_devices` block below can
-    # also use it to apply the deferred resistor `fixed_offset_ohm`
-    # correction post-combine (issue #559).
-    layout_deck_name = layout_spec.get("deck")
-    try:
-        layout_deck = (
-            get_extraction_deck(layout_deck_name, opts.deck_options)
-            if layout_deck_name
-            else None
-        )
-    except (UnknownExtractionDeckError, InvalidDeckOptionError) as exc:
-        raise LvsError(str(exc)) from exc
-
-    # Issue #2421: a pre-flight check on the *reference* netlist against the
-    # deck's option-selected, shared-geometry device families (a
-    # `ResistorDevice`/`CapacitorDevice` entry carrying `flavour_option` plus
-    # two or more `flavours`, e.g. gf180mcu's `poly_res`). A reference that
-    # names more than one class of such a family cannot match under *any*
-    # `deck_options` value -- so the finding is collected here, from the
-    # reference netlist as given and independent of which value this run
-    # selected, and appended to `mismatches[]` further down (the same
-    # collect-early/append-late shape `flatten_warnings` above uses). Runs for
-    # both engines and both layout shapes: all it needs is a resolved
-    # `layout.deck` and the reference netlist.
-    family_findings = _device_class_family_findings(reference_netlist, layout_deck)
-    family_findings.extend(_flavour_selection_warnings(reference_netlist, layout_deck))
-
-    if opts.combine_devices_per_circuit is not None and layout_deck is not None:
-        # Issue #559/#585/#1557: the same deferred resistor
-        # `fixed_offset_ohm` correction the whole-netlist `combine_devices`
-        # block below applies (mutually exclusive with
-        # `combine_devices_per_circuit`, so only one of the two ever runs
-        # for a given request) -- reached only once `layout_deck` is
-        # resolved (immediately above), which is *after*
-        # `_combine_circuit_devices_safely` already folded each targeted
-        # circuit's devices further up. Applied netlist-wide, exactly like
-        # the whole-netlist block does, rather than restricted to
-        # `layout_combined_circuits`: the deferral this correction reverses
-        # (`--defer-resistor-fixed-offset` at pre-extraction time, issue
-        # #585) was applied once, globally, to the whole pre-extracted
-        # netlist -- not per named circuit -- so a circuit
-        # `combine_devices_per_circuit` left uncombined still carries
-        # raw-body-only resistor primitives that need this same offset
-        # added exactly once each, the same as a degraded
-        # `Netlist.combine_devices()` run's leftover individual devices do
-        # in the whole-netlist block below (see that block's own comment on
-        # why it is "still applied after a symmetric degrade").
-        apply_resistor_fixed_offset_corrections(layout_netlist, layout_deck)
-
-    combine_warnings: list[dict[str, Any]] = []
-    combine_incomplete = False
-    if opts.combine_devices_enabled:
-        # Opt-in (issue #261): `Netlist.combine_devices()` merges devices
-        # that a device class's own `combine_devices` logic recognises as
-        # combinable (e.g. parallel/series MOSFETs with matching gate/S/D/B
-        # connectivity) -- exactly the folded/multi-finger and split/
-        # interleaved layout constructions standard to analog matching and
-        # drive-strength splitting. It is a whole-`Netlist` method (not
-        # scoped to one `Circuit`), so it is applied once per netlist here.
-        # Applied symmetrically to *both* sides so a reference netlist that
-        # already lumps a device is not penalized relative to one that
-        # doesn't (and vice versa). Left opt-in, not unconditional: it would
-        # also collapse genuinely-distinct parallel devices (e.g. a DAC
-        # array's intentionally-separate legs) some callers want reported
-        # individually -- see docs/cli/lvs.md's `options.combine_devices`
-        # entry. Run after pruning (so it only ever touches the selected top
-        # circuit's hierarchy) and before the comparer is constructed, so
-        # every subsequent step (`same_circuits`, hints, `compare()`) sees
-        # the already-combined device set.
-        #
-        # Wrapped per netlist (issue #466): KLayout's own `combine_devices()`
-        # can raise an unhandled internal-consistency `RuntimeError` on a
-        # partial-match device group -- N real (matching-relevant) instances
-        # plus M dummy instances that all share two of three terminals, but
-        # only the N real ones also share the third (e.g. a matched
-        # bipolar/MOS array's flanking dummies). That is a `klayout.db`
-        # behavior this module merely surfaces; letting it propagate as a
-        # bare traceback would violate this module's own JSON-envelope
-        # contract. `_combine_devices_safely` degrades gracefully instead:
-        # whatever `combine_devices()` already merged before hitting the
-        # error stays merged, the rest are left as individual devices, and a
-        # `device.combine_incomplete` warning is added to `mismatches[]`.
-        #
-        # Issue #1185: `_combine_devices_safely` retries against independent
-        # `Netlist.dup()` copies to counter `combine_devices()`'s run-to-run
-        # nondeterminism (see its docstring and `_COMBINE_DEVICES_MAX_
-        # ATTEMPTS`'s), adopting a clean copy's result via `Netlist.assign()`
-        # the moment one succeeds. `assign()` replaces the netlist's circuits
-        # in place, which invalidates any `kdb.Circuit` object a caller took
-        # from it beforehand -- so `layout_circuit`/`reference_circuit`
-        # (selected above, before this block, at line ~515) must be
-        # re-fetched by name immediately after, before anything below uses
-        # them again. Captured here, before the calls that may invalidate
-        # them.
-        layout_circuit_name = layout_circuit.name
-        reference_circuit_name = reference_circuit.name
-
-        # Issue #1370: a list-valued `options.combine_devices` restricts
-        # combining to the named device classes. Validated against *both*
-        # netlists' actual device classes first, so naming a class that
-        # exists on neither side is a clean request error rather than a
-        # silent no-op that looks like "combining ran and found nothing".
-        if opts.combine_device_classes is not None:
-            _validate_combine_device_classes(
-                opts.combine_device_classes,
-                {"layout": layout_netlist, "reference": reference_netlist},
-            )
-
-        # Issue #1370, symmetric degrade: snapshot both sides *before* either
-        # combine runs. When a side exhausts its retry budget the compare the
-        # caller asked for cannot be performed on that side, and the
-        # status-quo behaviour (leave that side partially folded, leave the
-        # other side fully folded) compares a partially-folded netlist against
-        # a fully-folded one -- an unfair comparison whose every downstream
-        # `device.property`/`device.unmatched` finding is cascade, not a real
-        # design difference. Restoring *both* snapshots instead puts the two
-        # sides back on equal terms (exactly the state
-        # `options.combine_devices: false` would have produced), and the
-        # verdict is reported as `status: "inconclusive"` further down rather
-        # than as a design mismatch. Only paid for when combining is opted in.
-        layout_snapshot = layout_netlist.dup()
-        reference_snapshot = reference_netlist.dup()
-
-        layout_warning = _combine_devices_safely(
-            layout_netlist,
-            "layout",
-            opts.combine_devices_max_attempts,
-            device_classes=opts.combine_device_classes,
-        )
-        if layout_warning is not None:
-            combine_warnings.append(layout_warning)
-        reference_warning = _combine_devices_safely(
-            reference_netlist,
-            "reference",
-            opts.combine_devices_max_attempts,
-            device_classes=opts.combine_device_classes,
-        )
-        if reference_warning is not None:
-            combine_warnings.append(reference_warning)
-
-        combine_incomplete = bool(combine_warnings)
-        if combine_incomplete:
-            # Asymmetric failure (one side combined cleanly, the other did
-            # not) is handled by the same restore as the both-sides case: the
-            # side that *did* combine is rolled back too, so neither side
-            # carries a fold the other could not.
-            layout_netlist.assign(layout_snapshot)
-            reference_netlist.assign(reference_snapshot)
-
-        layout_circuit = layout_netlist.circuit_by_name(layout_circuit_name)
-        reference_circuit = reference_netlist.circuit_by_name(reference_circuit_name)
-
-        # combine_devices() folds matched device arrays but leaves the
-        # interior nets it emptied (0 terminals, 0 pins) behind in the
-        # circuit -- e.g. the N-1 interior nodes of a series string it
-        # collapsed into a single device. Left in place they inflate
-        # counts.nets.* (computed off each_net() below) and surface in
-        # mismatches[] as spurious net.unmatched findings no caller can act
-        # on (issue #500). Purge them symmetrically on both sides -- mirroring
-        # the symmetric combine above and running only when combine actually
-        # ran -- so counts and mismatches reflect the post-combine topology,
-        # not combine_devices()'s internal bookkeeping. Scoped to genuinely
-        # empty nets only, so a real (if unused) top-level pin's net is never
-        # dropped and counts.pins.* is unaffected.
-        #
-        # Skipped entirely after a symmetric degrade (issue #1370): nothing
-        # was folded on either side, so there is no combine-emptied net to
-        # purge, and skipping keeps the degraded run's `counts.nets.*`
-        # byte-identical to what `options.combine_devices: false` reports for
-        # the same inputs -- which is the whole point of the degrade.
-        if not combine_incomplete:
-            _purge_emptied_nets(layout_netlist)
-            _purge_emptied_nets(reference_netlist)
-
-            # Issues #1497/#2374: KLayout's own `combine_devices()` can leave
-            # a combined device's parameters inconsistent with the parallel
-            # group it folded -- silently, with no exception and no
-            # `device.combine_incomplete` warning (that category only covers
-            # the unrelated #1185/#466 `RuntimeError` case above): a
-            # capacitor's `C` left at one instance's value (#1497), or a
-            # bipolar array's whole accumulation inverted (#2374). Checked
-            # and corrected in place against each side's own pre-combine
-            # snapshot (already taken, for the #1370 symmetric-degrade
-            # rollback, before either combine call ran), appended to
-            # `combine_warnings` -- but only *after* `combine_incomplete` was
-            # computed above, so a correction here never triggers that
-            # rollback: the value is already fixed, there is nothing left to
-            # roll back for.
-            layout_parameter_correction = _correct_combine_parameters(
-                layout_snapshot, layout_netlist, "layout"
-            )
-            if layout_parameter_correction is not None:
-                combine_warnings.append(layout_parameter_correction)
-            reference_parameter_correction = _correct_combine_parameters(
-                reference_snapshot, reference_netlist, "reference"
-            )
-            if reference_parameter_correction is not None:
-                combine_warnings.append(reference_parameter_correction)
-
-        if layout_deck is not None:
-            # Issue #559/#585: apply the deferred resistor `fixed_offset_ohm`
-            # correction here, after `combine_devices()` has folded
-            # series-connected drawn primitives into one device object.
-            # Because `apply_resistor_fixed_offset_corrections` walks whatever
-            # devices exist in `layout_netlist` right now, this adds the fixed
-            # offset exactly once per surviving (possibly-folded) logical
-            # device -- never once per original primitive -- fixing the
-            # over-count KLayout's native series fold otherwise produces by
-            # summing each primitive's already-corrected `R`.
-            #
-            # Reached by *both* layout shapes whenever a `layout.deck` is
-            # present (issue #585):
-            #   * `layout.file` (inline extraction): `_resolve_layout` deferred
-            #     the correction by passing `apply_resistor_fixed_offset=False`
-            #     to inline extraction, so the primitives here carry only their
-            #     raw body `R` -- the offset is added once, here, post-combine.
-            #   * `layout.netlist` (pre-extracted): honored only when the
-            #     supplied SPICE was itself extracted with the correction
-            #     *deferred* (`run_extract(..., apply_resistor_fixed_offset=
-            #     False)`). Then the pre-extracted primitives likewise carry
-            #     only raw body `R`, and this call is what applies the offset
-            #     once per post-combine device. (A netlist extracted the
-            #     default way already has the offset baked into each primitive;
-            #     feeding that through `combine_devices` is the caller's own
-            #     double-count to avoid -- there is no way to selectively
-            #     un-sum an already-applied per-primitive offset here.)
-            #
-            # The device-class-name lookup inside
-            # `apply_resistor_fixed_offset_corrections` is case-insensitive, so
-            # it matches both the in-process (`res_high_po`) and
-            # SpiceReader-uppercased (`RES_HIGH_PO`) class names identically
-            # (issue #585). The reference netlist never receives this
-            # correction: it is a layout-deck-specific geometric correction,
-            # not a property of the schematic reference.
-            #
-            # Still applied after a symmetric degrade (issue #1370), unlike
-            # the net purge above: a deferred extraction wrote raw body `R`
-            # values that are simply *wrong* until the offset is added, and
-            # with nothing folded this adds it exactly once per drawn
-            # primitive -- which is precisely what a non-deferred extraction
-            # would have produced. Skipping it here would leave the degraded
-            # run reporting under-valued resistances.
-            apply_resistor_fixed_offset_corrections(layout_netlist, layout_deck)
-            # Issue #3017: disclose the (N-1) head/end terms the fold above
-            # absorbed (a no-op after a symmetric degrade).
-            combine_warnings.extend(
-                _series_fold_offset_absorbed_warnings(
-                    layout_snapshot,
-                    layout_netlist,
-                    layout_deck,
-                    combine_incomplete=combine_incomplete,
-                )
-            )
 
     bulk_warnings: list[dict[str, Any]] = []
     short_nets_warnings: list[dict[str, Any]] = []
@@ -4762,6 +4486,269 @@ def _apply_finfet_bulk_policy(
     return apply_finfet_bulk_hierarchy(
         _select_circuit(layout_netlist, layout_spec.get("top"), "layout"),
         finfet_bulk,
+    )
+
+
+def _select_resolve_and_combine(
+    layout_netlist: kdb.Netlist,
+    reference_netlist: kdb.Netlist,
+    layout_spec: dict[str, Any],
+    reference_spec: dict[str, Any],
+    opts: Any,
+    flatten_warnings: list[dict[str, Any]],
+    power_connectivity: Any,
+    reference_form: Any,
+) -> tuple[Any, ...]:
+    """Select the compared circuits, resolve the layout deck, combine devices.
+
+    Pure extraction of the stage of :func:`run_lvs` from circuit selection
+    through the whole-netlist ``combine_devices`` block (issue #5159, stage 3
+    of #5144). Mutates both netlists and extends ``flatten_warnings`` in
+    place, exactly as the inline code did; returns ``(layout_circuit,
+    reference_circuit, power_connectivity, layout_deck_name, layout_deck,
+    family_findings, combine_warnings, combine_incomplete)``.
+    """
+    layout_circuit = _select_circuit(layout_netlist, layout_spec.get("top"), "layout")
+    reference_circuit = _select_circuit(
+        reference_netlist, reference_spec.get("top"), "reference"
+    )
+
+    _prune_extra_top_circuits(layout_netlist, layout_circuit)
+    _prune_extra_top_circuits(reference_netlist, reference_circuit)
+    flatten_warnings.extend(
+        _hierarchy_mismatch_warnings(
+            layout_netlist, reference_netlist, opts.flatten_reference
+        )
+    )
+
+    # Issue #2813: FinFET comparison setup -- reference fingers merged with the
+    # extractor's combiner, the opt-in bulk policy applied (and disclosed),
+    # NFIN compared exactly on both sides.
+    prepare_finfet_comparison(opts.finfet_layout, layout_netlist, reference_netlist)
+
+    # Issue #2853 (option (b)): resolved here, after both sides' optional
+    # flatten, because a flattened side no longer carries the stub instances
+    # the reason talks about -- see `_with_stub_power_connectivity_reason`.
+    power_connectivity = _with_stub_power_connectivity_reason(
+        power_connectivity, reference_form, layout_circuit
+    )
+
+    # What the layout-side deck can structurally recognise
+    # (`ExtractionDeck.device_classes`, issue #221) -- `null` when no
+    # `layout.deck` was supplied. `layout.deck` is meaningful for *both*
+    # layout shapes: it is required for `layout.file` (it drives inline
+    # extraction), and it is optional-but-honored for the pre-extracted
+    # `layout.netlist` shape, where it does not trigger extraction but still
+    # names the deck whose resistor `fixed_offset_ohm` the `combine_devices`
+    # block below applies post-combine (issue #559/#585). Already validated by
+    # `_resolve_layout` above (an unknown deck name or an invalid
+    # `deck_options` entry would have raised `LvsError` before reaching this
+    # point) *for the `layout.file` shape only* -- re-fetching it here with
+    # the same `deck_options` cannot itself raise in that case. For the
+    # pre-extracted `layout.netlist` shape, `_resolve_layout` never touches
+    # the deck at all (no extraction happens), so this is the first -- and
+    # only -- place a bad `deck` name or `deck_options` entry on that shape
+    # surfaces; wrapped below the same way `extract_netlist_from_layout`
+    # wraps it (issue #600). Resolved here (rather than just before
+    # `device_classes` further down) so the `combine_devices` block below can
+    # also use it to apply the deferred resistor `fixed_offset_ohm`
+    # correction post-combine (issue #559).
+    layout_deck_name = layout_spec.get("deck")
+    try:
+        layout_deck = (
+            get_extraction_deck(layout_deck_name, opts.deck_options)
+            if layout_deck_name
+            else None
+        )
+    except (UnknownExtractionDeckError, InvalidDeckOptionError) as exc:
+        raise LvsError(str(exc)) from exc
+
+    # Issue #2421: a pre-flight check on the *reference* netlist against the
+    # deck's option-selected, shared-geometry device families (a
+    # `ResistorDevice`/`CapacitorDevice` entry carrying `flavour_option` plus
+    # two or more `flavours`, e.g. gf180mcu's `poly_res`). A reference that
+    # names more than one class of such a family cannot match under *any*
+    # `deck_options` value -- so the finding is collected here, from the
+    # reference netlist as given and independent of which value this run
+    # selected, and appended to `mismatches[]` further down (the same
+    # collect-early/append-late shape `flatten_warnings` above uses). Runs for
+    # both engines and both layout shapes: all it needs is a resolved
+    # `layout.deck` and the reference netlist.
+    family_findings = _device_class_family_findings(reference_netlist, layout_deck)
+    family_findings.extend(_flavour_selection_warnings(reference_netlist, layout_deck))
+
+    if opts.combine_devices_per_circuit is not None and layout_deck is not None:
+        # Issue #559/#585/#1557: the same deferred resistor
+        # `fixed_offset_ohm` correction the whole-netlist block below applies
+        # (mutually exclusive with `combine_devices_per_circuit`). Applied
+        # netlist-wide, not just to `layout_combined_circuits`: the deferral
+        # it reverses (#585) was applied once to the whole pre-extracted
+        # netlist, so uncombined circuits still need the offset added once.
+        apply_resistor_fixed_offset_corrections(layout_netlist, layout_deck)
+
+    combine_warnings: list[dict[str, Any]] = []
+    combine_incomplete = False
+    if opts.combine_devices_enabled:
+        # Opt-in (issue #261): `Netlist.combine_devices()` merges devices
+        # that a device class's own `combine_devices` logic recognises as
+        # combinable (e.g. parallel/series MOSFETs with matching gate/S/D/B
+        # connectivity) -- exactly the folded/multi-finger and split/
+        # interleaved layout constructions standard to analog matching and
+        # drive-strength splitting. It is a whole-`Netlist` method (not
+        # scoped to one `Circuit`), so it is applied once per netlist here.
+        # Applied symmetrically to *both* sides so a reference netlist that
+        # already lumps a device is not penalized relative to one that
+        # doesn't (and vice versa). Left opt-in, not unconditional: it would
+        # also collapse genuinely-distinct parallel devices (e.g. a DAC
+        # array's intentionally-separate legs) some callers want reported
+        # individually -- see docs/cli/lvs.md's `options.combine_devices`
+        # entry. Run after pruning (so it only ever touches the selected top
+        # circuit's hierarchy) and before the comparer is constructed, so
+        # every subsequent step (`same_circuits`, hints, `compare()`) sees
+        # the already-combined device set.
+        #
+        # Wrapped per netlist (issue #466): KLayout's own `combine_devices()`
+        # can raise an unhandled internal-consistency `RuntimeError` on a
+        # partial-match device group -- N real (matching-relevant) instances
+        # plus M dummy instances that all share two of three terminals, but
+        # only the N real ones also share the third (e.g. a matched
+        # bipolar/MOS array's flanking dummies). That is a `klayout.db`
+        # behavior this module merely surfaces; letting it propagate as a
+        # bare traceback would violate this module's own JSON-envelope
+        # contract. `_combine_devices_safely` degrades gracefully instead:
+        # whatever `combine_devices()` already merged before hitting the
+        # error stays merged, the rest are left as individual devices, and a
+        # `device.combine_incomplete` warning is added to `mismatches[]`.
+        #
+        # Issue #1185: `_combine_devices_safely` retries against independent
+        # `Netlist.dup()` copies to counter `combine_devices()`'s run-to-run
+        # nondeterminism (see its docstring and `_COMBINE_DEVICES_MAX_
+        # ATTEMPTS`'s), adopting a clean copy's result via `Netlist.assign()`
+        # the moment one succeeds. `assign()` replaces the netlist's circuits
+        # in place, which invalidates any `kdb.Circuit` object a caller took
+        # from it beforehand -- so `layout_circuit`/`reference_circuit`
+        # (selected above, before this block, at line ~515) must be
+        # re-fetched by name immediately after, before anything below uses
+        # them again. Captured here, before the calls that may invalidate
+        # them.
+        layout_circuit_name = layout_circuit.name
+        reference_circuit_name = reference_circuit.name
+
+        # Issue #1370: a list-valued `options.combine_devices` restricts
+        # combining to the named device classes. Validated against *both*
+        # netlists' actual device classes first, so naming a class that
+        # exists on neither side is a clean request error rather than a
+        # silent no-op that looks like "combining ran and found nothing".
+        if opts.combine_device_classes is not None:
+            _validate_combine_device_classes(
+                opts.combine_device_classes,
+                {"layout": layout_netlist, "reference": reference_netlist},
+            )
+
+        # Issue #1370, symmetric degrade: snapshot both sides *before* either
+        # combine runs. When a side exhausts its retry budget the compare the
+        # caller asked for cannot be performed on that side, and the
+        # status-quo behaviour (leave that side partially folded, leave the
+        # other side fully folded) compares a partially-folded netlist against
+        # a fully-folded one -- an unfair comparison whose every downstream
+        # `device.property`/`device.unmatched` finding is cascade, not a real
+        # design difference. Restoring *both* snapshots instead puts the two
+        # sides back on equal terms (exactly the state
+        # `options.combine_devices: false` would have produced), and the
+        # verdict is reported as `status: "inconclusive"` further down rather
+        # than as a design mismatch. Only paid for when combining is opted in.
+        layout_snapshot = layout_netlist.dup()
+        reference_snapshot = reference_netlist.dup()
+
+        layout_warning = _combine_devices_safely(
+            layout_netlist,
+            "layout",
+            opts.combine_devices_max_attempts,
+            device_classes=opts.combine_device_classes,
+        )
+        if layout_warning is not None:
+            combine_warnings.append(layout_warning)
+        reference_warning = _combine_devices_safely(
+            reference_netlist,
+            "reference",
+            opts.combine_devices_max_attempts,
+            device_classes=opts.combine_device_classes,
+        )
+        if reference_warning is not None:
+            combine_warnings.append(reference_warning)
+
+        combine_incomplete = bool(combine_warnings)
+        if combine_incomplete:
+            # Asymmetric failure (one side combined cleanly, the other did
+            # not) is handled by the same restore as the both-sides case: the
+            # side that *did* combine is rolled back too, so neither side
+            # carries a fold the other could not.
+            layout_netlist.assign(layout_snapshot)
+            reference_netlist.assign(reference_snapshot)
+
+        layout_circuit = layout_netlist.circuit_by_name(layout_circuit_name)
+        reference_circuit = reference_netlist.circuit_by_name(reference_circuit_name)
+
+        # combine_devices() leaves emptied interior nets (0 terminals, 0 pins)
+        # behind, inflating counts.nets.* and surfacing spurious net.unmatched
+        # findings (issue #500). Purge them symmetrically, only when combine
+        # ran and only genuinely empty nets, so real pins are untouched.
+        # Skipped after a symmetric degrade (issue #1370): nothing was folded,
+        # and counts.nets.* must match `options.combine_devices: false`.
+        if not combine_incomplete:
+            _purge_emptied_nets(layout_netlist)
+            _purge_emptied_nets(reference_netlist)
+
+            # Issues #1497/#2374: KLayout's `combine_devices()` can silently leave a
+            # combined device's parameters inconsistent with the folded group (no
+            # exception, no `device.combine_incomplete`). Corrected in place against
+            # each side's pre-combine snapshot; appended only *after*
+            # `combine_incomplete` was computed, so it never triggers the rollback.
+            layout_parameter_correction = _correct_combine_parameters(
+                layout_snapshot, layout_netlist, "layout"
+            )
+            if layout_parameter_correction is not None:
+                combine_warnings.append(layout_parameter_correction)
+            reference_parameter_correction = _correct_combine_parameters(
+                reference_snapshot, reference_netlist, "reference"
+            )
+            if reference_parameter_correction is not None:
+                combine_warnings.append(reference_parameter_correction)
+
+        if layout_deck is not None:
+            # Issue #559/#585: apply the deferred resistor `fixed_offset_ohm`
+            # correction post-combine, so the offset is added once per surviving
+            # (possibly-folded) device, not once per original primitive. Reached by
+            # both layout shapes whenever `layout.deck` is present: inline extraction
+            # deferred the correction, and a pre-extracted netlist is honored only if
+            # it was extracted with the correction deferred (a default-extracted one
+            # already has the offset baked in -- the caller's double-count to avoid).
+            # Class-name lookup is case-insensitive (SpiceReader uppercases). The
+            # reference never receives this layout-deck-specific correction.
+            # Unlike the net purge above, still applied after a symmetric degrade
+            # (issue #1370): deferred extraction wrote raw body `R`, which is wrong
+            # until the offset is added.
+            apply_resistor_fixed_offset_corrections(layout_netlist, layout_deck)
+            # Issue #3017: disclose the (N-1) head/end terms the fold above
+            # absorbed (a no-op after a symmetric degrade).
+            combine_warnings.extend(
+                _series_fold_offset_absorbed_warnings(
+                    layout_snapshot,
+                    layout_netlist,
+                    layout_deck,
+                    combine_incomplete=combine_incomplete,
+                )
+            )
+
+    return (
+        layout_circuit,
+        reference_circuit,
+        power_connectivity,
+        layout_deck_name,
+        layout_deck,
+        family_findings,
+        combine_warnings,
+        combine_incomplete,
     )
 
 
