@@ -1541,6 +1541,32 @@ is unchanged: these fields are still emitted as before (no `schema_version`
 change). A `--path-root` option that records them relative to a caller-given
 root is tracked separately.
 
+## Run-specific fields (issue #5182)
+
+Some envelope fields describe the run or the machine, not the layout/input.
+A consumer that commits an envelope as evidence and compares it with a fresh
+run should drop these before comparing; `--check --rerun` already does
+(`_report_verify.VOLATILE_PROVENANCE_PATHS` is the single source of truth, and
+a test keeps this table equal to it). Dotted paths:
+
+<!-- run-specific-fields:begin -->
+| Run-specific path | Varies with |
+| ----------------- | ----------- |
+| `timing` | wall-clock of this run (issue #3181) |
+| `provenance.klt_version` | tool build |
+| `provenance.klt_git_commit` | tool build (issue #4412) |
+| `provenance.klt_reinstall_spec` | tool build (issue #4412) |
+| `provenance.klayout_version` | KLayout build |
+| `provenance.pdk.version` | PDK release stamp |
+| `provenance.pdk.commit` | PDK upstream commit (issue #3786) |
+| `provenance.pdk.linked_trees` | host PDK install layout |
+| `provenance.pdk.ambiguous_sources` | other PDK roots on this machine (issue #2564) |
+<!-- run-specific-fields:end -->
+
+No field is added or removed by this list; `schema_version` is unchanged.
+Verb-specific extras (e.g. `engine_version` for the flow verbs) are
+documented with their verb.
+
 ## Verifying committed evidence: `--check` / `--rerun`
 
 Seven verbs let a consumer verify that a previously committed `--format json`
