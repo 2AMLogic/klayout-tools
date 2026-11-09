@@ -5175,6 +5175,37 @@ def _add_economy_parser(subparsers: argparse._SubParsersAction) -> None:
             "(issue #4660)"
         ),
     )
+    economy_parser.add_argument(
+        "--cell-footprint",
+        action="store_true",
+        dest="cell_footprint",
+        help=(
+            "add a 'cell_footprint' block: per-master abutment footprint "
+            "(prBoundary, else --lef SIZE, else bbox) and a logic/sequential/"
+            "buffer/clock-tree/fill/tap/endcap split (issue #5180)"
+        ),
+    )
+    economy_parser.add_argument(
+        "--group-by-instance-prefix",
+        default=None,
+        dest="group_by_instance_prefix",
+        metavar="SEP",
+        help=(
+            "group placed instances by the first SEP-delimited component of "
+            "their name (implies --cell-footprint); reports 'unavailable' "
+            "when the layout carries no instance names"
+        ),
+    )
+    economy_parser.add_argument(
+        "--lef",
+        action="append",
+        default=None,
+        metavar="PATH",
+        help=(
+            "LEF file or directory supplying MACRO SIZE for masters with no "
+            "prBoundary (repeatable; first path wins); needs --cell-footprint"
+        ),
+    )
     _add_format_arg(economy_parser)
     economy_parser.set_defaults(func=economy_cmd.run)
 

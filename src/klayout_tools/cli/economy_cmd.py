@@ -24,6 +24,9 @@ def run(args: argparse.Namespace) -> int:
             area_eff_require_bbox_tightness=args.area_eff_require_bbox_tightness,
             what_if=args.what_if,
             attribute=args.attribute,
+            cell_footprint=args.cell_footprint,
+            group_by_instance_prefix=args.group_by_instance_prefix,
+            lef_paths=tuple(args.lef or ()),
         )
     except EconomyError as exc:
         return emit_error("economy", str(exc), args.format)
@@ -76,6 +79,50 @@ def _print_attribution(attribution: dict | None) -> None:
     for g in attribution["gap_components"]:
         attr_rows.append(("gap", str(g["position"]), f"{g['area_um2']:.3f}"))
     render_table(("kind", "name", "area_um2"), attr_rows, left_aligned={0, 1})
+    print()
+
+
+def _print_footprint(fp: dict | None) -> None:
+    if fp is None:
+        return
+    print(
+        f"cell_footprint: {fp['instance_count']} instance(s), "
+        f"total={fp['total_footprint_um2']:.3f} um2, "
+        f"physical_only={fp['physical_only_um2']:.3f} um2"
+    )
+    render_table(
+        ("master", "category", "source", "count", "footprint_um2"),
+        [
+            (
+                m["master"],
+                m["category"],
+                m["source"],
+                str(m["instance_count"]),
+                f"{m['footprint_um2']:.3f}",
+            )
+            for m in fp["masters"]
+        ],
+        left_aligned={0, 1, 2},
+    )
+    grouping = fp.get("grouping")
+    if grouping is None:
+        return
+    if grouping["status"] != "ok":
+        print(f"grouping: {grouping['status']} ({grouping['reason']})")
+        return
+    render_table(
+        ("group", "instances", "footprint_um2", "share_of_bbox"),
+        [
+            (
+                g["group"],
+                str(g["instance_count"]),
+                f"{g['footprint_um2']:.3f}",
+                "-" if g["share_of_bbox"] is None else f"{g['share_of_bbox']:.4f}",
+            )
+            for g in grouping["groups"]
+        ],
+        left_aligned={0},
+    )
     print()
 
 
@@ -165,6 +212,7 @@ def _print_text(report: dict) -> None:
 
     _print_what_if(report.get("what_if"))
     _print_attribution(report.get("attribution"))
+    _print_footprint(report.get("cell_footprint"))
 
     cells = report["cells"]
     if not cells:

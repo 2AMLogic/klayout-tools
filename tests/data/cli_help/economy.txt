@@ -20,4 +20,7 @@ options:
   --area-eff-require-bbox-tightness AREA-EFF hard bound (issue #1086): require bbox_tightness == 1.0; when given, adds an 'area_eff' block with a 'bbox_tightness' PASS/FAIL check
   --what-if MOVES_JSON what-if floorplan estimate (issue #4661): apply instance moves and cell reshapes from MOVES_JSON to an in-memory copy and report the same figures plus a 'what_if' block (overlaps, broken contacts); writes nothing, runs no DRC, legality is never checked
   --attribute add an 'attribution' block partitioning the top cell's bbox into direct child instance bboxes and labelled gap components (issue #4660)
+  --cell-footprint add a 'cell_footprint' block: per-master abutment footprint (prBoundary, else --lef SIZE, else bbox) and a logic/sequential/buffer/clock-tree/fill/tap/endcap split (issue #5180)
+  --group-by-instance-prefix SEP group placed instances by the first SEP-delimited component of their name (implies --cell-footprint); reports 'unavailable' when the layout carries no instance names
+  --lef PATH LEF file or directory supplying MACRO SIZE for masters with no prBoundary (repeatable; first path wins); needs --cell-footprint
   --format {text,json} output format (default: text)
