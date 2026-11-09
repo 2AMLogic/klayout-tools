@@ -29,6 +29,8 @@ import os
 import re
 from typing import Any
 
+from ._layout import load_layout, resolve_top_cell
+from .economy import EconomyError, economy_report
 from .lef_header import read_lef_header
 
 #: Same layer as ``drc._PR_BOUNDARY_LAYER`` (sky130 ``prBoundary.boundary``).
@@ -241,3 +243,41 @@ def footprint_block(
                 ],
             }
     return block
+
+
+def economy_report_with_footprint(
+    path: str,
+    *,
+    cell_footprint: bool = False,
+    group_by_instance_prefix: str | None = None,
+    lef_paths: tuple[str, ...] = (),
+    **report_kwargs: Any,
+) -> dict[str, Any]:
+    """:func:`klayout_tools.economy.economy_report` plus the opt-in
+    ``cell_footprint`` block.
+
+    ``group_by_instance_prefix`` (a separator) implies ``cell_footprint``;
+    ``lef_paths`` requires it. Other keyword arguments pass through to
+    ``economy_report`` unchanged.
+    """
+    if group_by_instance_prefix is not None:
+        if group_by_instance_prefix == "":
+            raise EconomyError("--group-by-instance-prefix separator must not be empty")
+        cell_footprint = True
+    if lef_paths and not cell_footprint:
+        raise EconomyError("--lef requires --cell-footprint")
+    report = economy_report(path, **report_kwargs)
+    if not cell_footprint:
+        return report
+
+    layout = load_layout(path, EconomyError)
+    top_cell = resolve_top_cell(layout, report["top"], EconomyError)
+    report["cell_footprint"] = footprint_block(
+        layout,
+        top_cell,
+        layout.dbu,
+        report["bbox_area_um2"],
+        load_lef_sizes(tuple(lef_paths), EconomyError),
+        group_by_instance_prefix,
+    )
+    return report

@@ -2,13 +2,51 @@
 
 import argparse
 
-from ..economy import EconomyError, economy_report
+from ..economy import EconomyError
+from ..economy_footprint import economy_report_with_footprint
 from .output import emit_error, emit_success, render_table
+
+
+def register(parser: argparse.ArgumentParser) -> None:
+    """Add the ``--cell-footprint`` family of flags (issue #5180) and bind
+    ``run``."""
+    parser.add_argument(
+        "--cell-footprint",
+        action="store_true",
+        dest="cell_footprint",
+        help=(
+            "add a 'cell_footprint' block: per-master abutment footprint "
+            "(prBoundary, else --lef SIZE, else bbox) and a logic/sequential/"
+            "buffer/clock-tree/fill/tap/endcap split (issue #5180)"
+        ),
+    )
+    parser.add_argument(
+        "--group-by-instance-prefix",
+        default=None,
+        dest="group_by_instance_prefix",
+        metavar="SEP",
+        help=(
+            "group placed instances by the first SEP-delimited component of "
+            "their name (implies --cell-footprint); reports 'unavailable' "
+            "when the layout carries no instance names"
+        ),
+    )
+    parser.add_argument(
+        "--lef",
+        action="append",
+        default=None,
+        metavar="PATH",
+        help=(
+            "LEF file or directory supplying MACRO SIZE for masters with no "
+            "prBoundary (repeatable; first path wins); needs --cell-footprint"
+        ),
+    )
+    parser.set_defaults(func=run)
 
 
 def run(args: argparse.Namespace) -> int:
     try:
-        report = economy_report(
+        report = economy_report_with_footprint(
             args.file,
             top=args.top,
             grid_cols=args.grid_cols,

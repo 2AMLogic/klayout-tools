@@ -754,9 +754,6 @@ def economy_report(
     area_eff_require_bbox_tightness: bool = False,
     what_if: str | None = None,
     attribute: bool = False,
-    cell_footprint: bool = False,
-    group_by_instance_prefix: str | None = None,
-    lef_paths: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Compute the layout-economy report for one top cell of a GDSII/OASIS
     stream.
@@ -793,19 +790,7 @@ def economy_report(
     ``attribute`` (issue #4660) adds an ``attribution`` block partitioning
     the top bbox into direct-child instance bboxes and gap components; see
     :func:`_attribution_block`. Omitted when false.
-
-    ``cell_footprint`` (issue #5180) adds a ``cell_footprint`` block (see
-    :mod:`klayout_tools.economy_footprint`); ``group_by_instance_prefix``
-    (implies it) groups the top cell's instances by the first
-    separator-delimited component of their name; ``lef_paths`` are LEF
-    files/directories supplying ``SIZE`` for masters without a prBoundary.
     """
-    if group_by_instance_prefix is not None:
-        if group_by_instance_prefix == "":
-            raise EconomyError("--group-by-instance-prefix separator must not be empty")
-        cell_footprint = True
-    if lef_paths and not cell_footprint:
-        raise EconomyError("--lef requires --cell-footprint")
     if grid_cols <= 0 or grid_rows <= 0:
         raise EconomyError(f"grid must be positive, got {grid_cols}x{grid_rows}")
     if max_empty_regions <= 0:
@@ -930,18 +915,6 @@ def economy_report(
     if attribute:
         report["attribution"] = _attribution_block(
             kdb, layout, top_cell, bbox, dbu, annotation_pairs
-        )
-
-    if cell_footprint:
-        from .economy_footprint import footprint_block, load_lef_sizes
-
-        report["cell_footprint"] = footprint_block(
-            layout,
-            top_cell,
-            dbu,
-            bbox_area_um2,
-            load_lef_sizes(tuple(lef_paths), EconomyError),
-            group_by_instance_prefix,
         )
 
     report["provenance"] = build_provenance(input_path=path)
