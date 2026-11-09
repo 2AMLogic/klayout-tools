@@ -76,6 +76,8 @@ from ._layout import bbox_um_dict, cells_in_hierarchy, load_layout, resolve_top_
 from ._provenance import build_provenance
 from .economy_bands import leaf_bands
 from .economy_leaves import collect_leaf_placements, gap_position
+from .economy_pnr import attach_pnr, check_pnr_args
+from .economy_whatif import what_if_block_or_none
 
 SCHEMA_VERSION = 1
 
@@ -665,26 +667,6 @@ def _area_eff_block(
     return {"checks": checks, "status": overall}
 
 
-def _what_if_block(
-    kdb: Any, layout: Any, top_cell: Any, what_if: str | None
-) -> dict[str, Any] | None:
-    """Apply the ``what_if`` moves spec (if any) to the in-memory layout and
-    return the report's ``what_if`` block, or ``None`` when not requested.
-
-    Edits land on the in-memory copy ``load_layout`` just read; nothing is
-    ever written back (issue #4661).
-    """
-    if what_if is None:
-        return None
-    # Imported lazily, matching load_layout()'s own lazy `klayout.db` import
-    # convention (`_layout.py`'s module docstring).
-    from .economy_whatif import apply_what_if, load_what_if_spec
-
-    return apply_what_if(
-        kdb, layout, top_cell, load_what_if_spec(what_if, EconomyError), EconomyError
-    )
-
-
 def economy_report(
     path: str,
     top: str | None = None,
@@ -700,6 +682,7 @@ def economy_report(
     what_if: str | None = None,
     attribute: bool = False,
     flatten_wrappers: bool = False,
+    pnr_report: str | None = None,
 ) -> dict[str, Any]:
     """Compute the layout-economy report for one top cell of a GDSII/OASIS
     stream.
@@ -737,8 +720,10 @@ def economy_report(
     the top bbox into direct-child instance bboxes and gap components; see
     :func:`_attribution_block`. Omitted when false. ``flatten_wrappers``
     (issue #5179, requires ``attribute``) expands wrapper children into
-    leaf placements.
+    leaf placements. ``pnr_report`` (issue #5181; needs ``attribute``) adds
+    ``attribution.pnr_decomposition``, see :mod:`klayout_tools.economy_pnr`.
     """
+    check_pnr_args(pnr_report, attribute)
     if grid_cols <= 0 or grid_rows <= 0:
         raise EconomyError(f"grid must be positive, got {grid_cols}x{grid_rows}")
     if max_empty_regions <= 0:
@@ -755,7 +740,7 @@ def economy_report(
     top_cell = resolve_top_cell(layout, top, EconomyError)
     dbu = layout.dbu
 
-    what_if_block = _what_if_block(kdb, layout, top_cell, what_if)
+    what_if_block = what_if_block_or_none(kdb, layout, top_cell, what_if, EconomyError)
 
     bbox = top_cell.bbox()
     if bbox.empty():
@@ -864,6 +849,7 @@ def economy_report(
         report["attribution"] = _attribution_block(
             kdb, layout, top_cell, bbox, dbu, annotation_pairs, flatten_wrappers
         )
+        attach_pnr(report, kdb, top_cell, bbox, dbu, pnr_report)
 
     report["provenance"] = build_provenance(input_path=path)
 

@@ -248,6 +248,31 @@ right, top) when the gap touches the top bbox boundary; otherwise
 `between:<a>,<b>` (names sorted) when it abuts two or more instances, or
 `left_of|right_of|above|below:<inst>` for one; `interior` if it abuts none.
 
+#### P&R decomposition (`--pnr-report`)
+
+Issue #5181. `--pnr-report <place-and-route report.json>` (requires
+`--attribute`; otherwise the standard error envelope is emitted, as for an
+unreadable or malformed report) adds `attribution.pnr_decomposition`.
+Without the flag the output is unchanged. Tap/endcap/filler masters are read
+from the report's `power` block (`tapcell_master`, `endcap_master`,
+`filler_masters`, incl. `row_rail`), die/core areas from its top-level or
+last-stage `die_area_um2`/`core_area_um2`.
+
+| Field | Meaning |
+| ----- | ------- |
+| `logical_cells` | `{area_um2, source}`: union of direct-instance bboxes whose master is not physical-only. |
+| `physical_only_cells` | Same, for tap/endcap/filler masters (overlap with logical not double-counted). |
+| `core_whitespace` | Report core area minus the two cell terms (floored at 0). |
+| `die_margin` | Report die area minus core area. |
+| `guard_ring` | Top bbox minus the bbox of non-guard-ring instances (masters whose name contains `guard`); `0` when none. |
+| `sum_um2`, `bbox_area_um2` | Term sum and the top bbox area. |
+| `residual_um2` | `bbox_area_um2 - sum_um2`; nonzero when the report does not describe the layout. |
+| `tolerance_um2` | Absolute tolerance (`0.001`) for `sums_to_total`. |
+| `sums_to_total` | `abs(residual_um2) <= tolerance_um2`. |
+| `logical_cell_area_um2`, `overrun_ratio` | `overrun_ratio` = bbox area / logical cell area (`null` if no logical cells). |
+
+A report whose die or core area exceeds the layout bbox is rejected.
+
 ### Cell footprint block (`--cell-footprint`)
 
 Opt-in (issue #5180). `--cell-footprint` adds an additive `cell_footprint`

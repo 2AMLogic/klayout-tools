@@ -153,6 +153,7 @@
         "klayout_tools.economy_bands",
         "klayout_tools.economy_footprint",
         "klayout_tools.economy_leaves",
+        "klayout_tools.economy_pnr",
         "klayout_tools.economy_whatif"
       ]
     },

@@ -8,8 +8,18 @@ from .output import EXIT_USAGE_ERROR, emit_error, emit_success, render_table
 
 
 def register(parser: argparse.ArgumentParser) -> None:
-    """Add the ``--cell-footprint`` family of flags (issue #5180) and bind
-    ``run``."""
+    """Add ``--pnr-report`` (issue #5181), the ``--cell-footprint`` family
+    (issue #5180) and bind the command handler."""
+    parser.add_argument(
+        "--pnr-report",
+        metavar="REPORT_JSON",
+        help=(
+            "place-and-route report JSON (requires --attribute): adds "
+            "attribution.pnr_decomposition splitting the bbox into logical "
+            "cells, physical-only cells, core whitespace, die margin and "
+            "guard ring, plus overrun_ratio (issue #5181)"
+        ),
+    )
     parser.add_argument(
         "--cell-footprint",
         action="store_true",
@@ -69,6 +79,7 @@ def run(args: argparse.Namespace) -> int:
             area_eff_require_bbox_tightness=args.area_eff_require_bbox_tightness,
             what_if=args.what_if,
             attribute=args.attribute,
+            pnr_report=args.pnr_report,
             flatten_wrappers=args.flatten_wrappers,
             cell_footprint=args.cell_footprint,
             group_by_instance_prefix=args.group_by_instance_prefix,
@@ -125,6 +136,23 @@ def _print_attribution(attribution: dict | None) -> None:
     for g in attribution["gap_components"]:
         attr_rows.append(("gap", str(g["position"]), f"{g['area_um2']:.3f}"))
     render_table(("kind", "name", "area_um2"), attr_rows, left_aligned={0, 1})
+    pnr = attribution.get("pnr_decomposition")
+    if pnr is not None:
+        ratio = pnr["overrun_ratio"]
+        print(
+            f"pnr_decomposition: sums_to_total={pnr['sums_to_total']} "
+            f"residual={pnr['residual_um2']:.3f} um2 "
+            f"bbox={pnr['bbox_area_um2']:.3f} um2 "
+            f"overrun_ratio={'n/a' if ratio is None else f'{ratio:.3f}'}"
+        )
+        for term in (
+            "logical_cells",
+            "physical_only_cells",
+            "core_whitespace",
+            "die_margin",
+            "guard_ring",
+        ):
+            print(f"  {term}: {pnr[term]['area_um2']:.3f} um2  [{pnr[term]['source']}]")
     print()
 
 
