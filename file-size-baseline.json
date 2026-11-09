@@ -201,7 +201,7 @@
     },
     {
       "path": "src/klayout_tools/cli/parser.py",
-      "lines": 6450
+      "lines": 6315
     },
     {
       "path": "src/klayout_tools/cli/pdk_cmd.py",
@@ -281,7 +281,7 @@
     },
     {
       "path": "src/klayout_tools/economy.py",
-      "lines": 922
+      "lines": 914
     },
     {
       "path": "src/klayout_tools/env_provenance.py",

@@ -74,6 +74,7 @@ from typing import Any
 from ._annotation import is_reserved_annotation_layer
 from ._layout import bbox_um_dict, cells_in_hierarchy, load_layout, resolve_top_cell
 from ._provenance import build_provenance
+from .economy_leaves import collect_leaf_placements
 
 SCHEMA_VERSION = 1
 
@@ -563,39 +564,7 @@ def _attribution_block(
             ).area()
         return drawn_cache[child.cell_index()]
 
-    def collect(
-        cell: Any, parent_trans: Any, prefix: str, expand: bool
-    ) -> list[tuple[str, str, Any, float]]:
-        """Leaf placements (name, cell, bbox in top coords, drawn dbu^2) of the
-        direct instances of ``cell``; wrappers are expanded when ``expand``."""
-        elems: list[tuple[Any, Any, Any]] = []
-        for inst in cell.each_inst():
-            child = inst.cell
-            child_bbox = child.bbox()
-            if child_bbox.empty():
-                continue
-            for trans in inst.cell_inst.each_cplx_trans():
-                composed = parent_trans * trans
-                elems.append((child, composed, child_bbox.transformed(composed)))
-        # Stable names: ordinal among same-cell instances by position.
-        elems.sort(
-            key=lambda e: (e[0].name, e[2].left, e[2].bottom, e[2].right, e[2].top)
-        )
-        counts: dict[str, int] = {}
-        out: list[tuple[str, str, Any, float]] = []
-        for child, composed, ibox in elems:
-            idx = counts.get(child.name, 0)
-            counts[child.name] = idx + 1
-            name = f"{prefix}{child.name}[{idx}]"
-            if expand and child.child_instances() >= 2:
-                out.extend(collect(child, composed, name + "/", True))
-            else:
-                out.append(
-                    (name, child.name, ibox, drawn_area(child) * composed.mag**2)
-                )
-        return out
-
-    leaves = collect(top_cell, kdb.ICplxTrans(), "", flatten_wrappers)
+    leaves = collect_leaf_placements(kdb, top_cell, drawn_area, flatten_wrappers)
 
     placed: list[tuple[str, Any]] = []
     children: list[dict[str, Any]] = []
