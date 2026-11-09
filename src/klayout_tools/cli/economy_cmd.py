@@ -24,6 +24,7 @@ def run(args: argparse.Namespace) -> int:
             area_eff_require_bbox_tightness=args.area_eff_require_bbox_tightness,
             what_if=args.what_if,
             attribute=args.attribute,
+            pnr_report=args.pnr_report,
         )
     except EconomyError as exc:
         return emit_error("economy", str(exc), args.format)
@@ -76,6 +77,23 @@ def _print_attribution(attribution: dict | None) -> None:
     for g in attribution["gap_components"]:
         attr_rows.append(("gap", str(g["position"]), f"{g['area_um2']:.3f}"))
     render_table(("kind", "name", "area_um2"), attr_rows, left_aligned={0, 1})
+    pnr = attribution.get("pnr_decomposition")
+    if pnr is not None:
+        ratio = pnr["overrun_ratio"]
+        print(
+            f"pnr_decomposition: sums_to_total={pnr['sums_to_total']} "
+            f"residual={pnr['residual_um2']:.3f} um2 "
+            f"bbox={pnr['bbox_area_um2']:.3f} um2 "
+            f"overrun_ratio={'n/a' if ratio is None else f'{ratio:.3f}'}"
+        )
+        for term in (
+            "logical_cells",
+            "physical_only_cells",
+            "core_whitespace",
+            "die_margin",
+            "guard_ring",
+        ):
+            print(f"  {term}: {pnr[term]['area_um2']:.3f} um2  [{pnr[term]['source']}]")
     print()
 
 
