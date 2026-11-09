@@ -246,7 +246,6 @@ from .lvs_netgen import (
 from .lvs_pin_anchors import (
     _apply_top_level_pin_anchors,
     _retry_with_neutral_family_names,
-    _TopLevelPinAnchor,
 )
 from .lvs_power import (
     _body_verification_report,
@@ -918,6 +917,370 @@ def _merge_deck_flags(
         request["deck_vars"] = dict(deck_vars)
 
 
+def _run_klayout_compare(
+    request: dict[str, Any],
+    opts: Any,
+    layout_netlist: Any,
+    reference_netlist: Any,
+    layout_circuit: Any,
+    reference_circuit: Any,
+    *,
+    reference_device_bulk: Any,
+    reference_placeholder_classes: dict[str, str],
+    anchor_top_level_pins: bool,
+    supply_universe: _SupplyPinUniverse | None,
+) -> tuple[Any, ...]:
+    """Compare setup and the ``engine == "klayout"`` branch of
+    :func:`run_lvs` (issue #5160, stage 4 of the ``run_lvs`` split #5144):
+    the request-side hooks, the guarded ``NetlistComparer`` compare, the
+    optional tolerance re-compare and neutral-name retry, and the mismatch
+    classification. Moved verbatim -- no logic change."""
+    import klayout.db as kdb
+
+    tolerance_warnings: list[dict[str, Any]] = []
+
+    # Issue #2461: every `(class, parameter)` pair a request-side hook took
+    # out of *this* run's compare, so the classification pass downstream never
+    # reports one of them as a `device.property` error in the same report that
+    # discloses it as excluded. Kept as two sets so the coverage block can name
+    # which hook excluded each one.
+    placeholder_excluded: set[tuple[str, str]] = set()
+    compare_scoped_excluded: set[tuple[str, str]] = set()
+    # Issue #2654: the subset of `compare_scoped_excluded` that
+    # `options.compare_parameters` actually took *out of* the compare -- the
+    # parameters that were primary before `enable_parameter` ran. The option
+    # can only narrow, so scoping a class to one subset also disables every
+    # sibling the caller did not name; a sibling the class itself declares
+    # secondary was never compared, so the coverage block must not attribute
+    # its exclusion to the caller's option (see
+    # `_record_excluded_parameters`). The full set above still drives the
+    # classification pass's suppression, unchanged.
+    compare_scoped_narrowed: set[tuple[str, str]] = set()
+
+    # Issue #2653: resolve a mask-option (metal-option/probe-pad/e-fuse
+    # trim) reference's behavioural option construct to one concrete
+    # drawn state *before* anything else below -- every other reference-
+    # side normalisation in this block (`device_bulk`, placeholder
+    # values, `compare_parameters`, the parameter-coverage summary)
+    # should see the already-resolved device/net set, exactly as it
+    # would for a reference hand-authored at that one option code to
+    # begin with. Opt-in via `hints.short_nets`; a no-op (returns `[]`
+    # immediately) for every request that does not declare it, so a
+    # reference with no option construct present stays byte-identical to
+    # before this hook existed.
+    short_nets_warnings = _apply_short_nets_hint(
+        request.get("hints") or {},
+        reference_netlist,
+        reference_circuit,
+    )
+
+    # Issue #506: normalise the reference side's device classes up to the
+    # layout side's terminal list *before* the comparer is constructed, so
+    # a deck's bulk-terminal device flavour (e.g. a `bulk_to_substrate`
+    # resistor's three-terminal `RES_X`) can be compared against a
+    # schematic-derived reference that does not model that terminal at
+    # all. Runs after the `combine_devices()` step above so combining
+    # still sees each side's own, unmodified device classes (the
+    # status-quo behaviour), and returns the `severity: "warning"`
+    # disclosure entries appended to `mismatches[]` further down.
+    bulk_warnings = _apply_reference_device_bulk(
+        reference_device_bulk,
+        layout_netlist,
+        reference_netlist,
+    )
+
+    # Issue #1907: same placement rationale as `_apply_reference_device_bulk`
+    # just above -- a `form: "subckt-call"` conversion's placeholder `0`
+    # value has to be taken out of the comparison *before* the comparer is
+    # constructed, since `NetlistComparer` reads each device class's
+    # `equal_parameters` when it builds its device-equivalence seeding.
+    # Runs after `combine_devices()` for the same reason too (combining
+    # still sees each side's unmodified classes), and returns the
+    # `severity: "warning"` disclosure entries appended further down.
+    placeholder_warnings = _apply_reference_placeholder_values(
+        reference_placeholder_classes,
+        layout_netlist,
+        reference_netlist,
+        placeholder_excluded,
+    )
+
+    # Issue #1928: same placement rationale once more -- `enable_parameter`
+    # has to run before the comparer is constructed for the same reason
+    # `equal_parameters` does just above, and after `combine_devices()`
+    # so combining still sees each side's unmodified classes. Returns
+    # the `severity: "warning"` disclosure entries appended further down.
+    compare_parameter_warnings = _apply_compare_parameters(
+        opts.compare_parameters,
+        layout_netlist,
+        reference_netlist,
+        compare_scoped_excluded,
+        compare_scoped_narrowed,
+    )
+
+    ignore_mos_bulk_warnings = apply_ignore_mos_bulk(
+        opts.ignore_mos_bulk, layout_netlist, reference_netlist
+    )
+
+    # Issue #2461: read the two netlists' device-class state *after* every
+    # hook above has had its say (`enable_parameter` flips `is_primary` in
+    # place, so this has to run downstream of `_apply_compare_parameters`
+    # to describe the compare that is actually about to happen) and
+    # *before* the comparer is built. Read-only -- it changes nothing
+    # about the compare, it only records what the compare will cover.
+    geometry_warnings, device_parameter_coverage = _device_parameter_coverage(
+        layout_netlist,
+        reference_netlist,
+        placeholder_excluded,
+        compare_scoped_narrowed,
+    )
+    excluded_parameters = placeholder_excluded | compare_scoped_excluded
+
+    logger = _make_compare_logger(layout_circuit, reference_circuit)
+    comparer = kdb.NetlistComparer(logger)
+    # `_select_circuit` + `_prune_extra_top_circuits` above already guarantee
+    # `layout_circuit`/`reference_circuit` are each netlist's *sole*
+    # remaining top circuit, so these two are unambiguously the pair the
+    # request declared -- pin that pairing explicitly instead of leaving it
+    # to `NetlistComparer`'s default name-based matching, which silently
+    # degrades to a generic "could not be matched to a counterpart" finding
+    # on both sides whenever `layout.top`/`reference.top` name different
+    # circuits (issue #231). Safe unconditionally: there is no other
+    # circuit either one could be confused with post-pruning.
+    comparer.same_circuits(layout_circuit, reference_circuit)
+    same_nets_hints, equivalent_pins_applied = _apply_hints(
+        comparer, request.get("hints") or {}, layout_circuit, reference_circuit
+    )
+    # Issue #2692: applied *after* `_apply_hints` so a hand-written
+    # `hints.same_nets` pair stays the authority on the nets it names (see
+    # `_apply_top_level_pin_anchors`'s `declared` argument), and before
+    # `compare()` for the same reason `same_nets` itself must be: the
+    # assertions are comparer state read during the compare, not netlist
+    # state.
+    # Issue #3014: applied after `_apply_hints` (a hand-written
+    # `hints.same_nets` pair stays the authority on the nets it names) and
+    # before the pin anchors, which then leave a bound net alone.
+    constant_bindings, constant_warnings = _apply_constant_nets(
+        comparer,
+        request.get("hints") or {},
+        layout_circuit,
+        reference_circuit,
+        declared=same_nets_hints,
+    )
+    anchored_pins, anchor_warnings = _apply_top_level_pin_anchors(
+        comparer,
+        layout_circuit,
+        reference_circuit,
+        enabled=anchor_top_level_pins,
+        declared=[*same_nets_hints, *_constant_binding_pairs(constant_bindings)],
+    )
+
+    # `logger` is already bound via the `NetlistComparer(logger)` constructor
+    # above, so the 2-arg overload is used here (not the 3-arg one, which
+    # would pass a second, redundant logger reference).
+    compare_context = _compare_context(layout_circuit, reference_circuit)
+    compare_result, compare_timeout = _guarded_compare(
+        comparer,
+        layout_netlist,
+        reference_netlist,
+        opts.compare_timeout_s,
+        compare_context,
+    )
+
+    if not compare_result and opts.parameter_tolerance is not None:
+        # Issue #589: `options.parameter_tolerance` is opted in and the
+        # engine said "mismatch". Snap every reference-side parameter whose
+        # difference from its layout-side counterpart is within the
+        # requested relative tolerance, then run a *second, real*
+        # `compare()` -- the only thing that can legitimately move
+        # `status`, since this module never re-derives the verdict from its
+        # own event classification (see the module docstring). Skipped
+        # entirely when the option is omitted, so the default path is
+        # byte-identical to before.
+        for _pass in range(_MAX_TOLERANCE_PASSES):
+            snaps = _collect_tolerance_snaps(
+                logger, opts.parameter_tolerance, excluded_parameters
+            )
+            if not snaps:
+                break
+            _apply_tolerance_snaps(reference_netlist, snaps)
+            tolerance_warnings.extend(
+                _tolerance_disclosure(snap, opts.parameter_tolerance) for snap in snaps
+            )
+            logger = _make_compare_logger(layout_circuit, reference_circuit)
+            comparer = kdb.NetlistComparer(logger)
+            comparer.same_circuits(layout_circuit, reference_circuit)
+            # Re-declared on the fresh comparer: `same_nets`/
+            # `equivalent_pins` are comparer state, not netlist state, so
+            # the second pass would otherwise silently drop the caller's
+            # hints. Re-validation cannot raise here (the first call above
+            # already accepted every hint against these same circuits).
+            same_nets_hints, equivalent_pins_applied = _apply_hints(
+                comparer,
+                request.get("hints") or {},
+                layout_circuit,
+                reference_circuit,
+            )
+            # Issue #2692: re-declared on the fresh comparer for exactly
+            # the same reason the hints above are -- an anchor is comparer
+            # state, so the second pass would otherwise compare on
+            # topology alone and could reach a `"match"` the first,
+            # anchored pass had already refused.
+            # Issue #3014: bindings are comparer state too, so they are
+            # re-applied on the fresh comparer exactly like the hints.
+            constant_bindings, constant_warnings = _apply_constant_nets(
+                comparer,
+                request.get("hints") or {},
+                layout_circuit,
+                reference_circuit,
+                declared=same_nets_hints,
+            )
+            anchored_pins, anchor_warnings = _apply_top_level_pin_anchors(
+                comparer,
+                layout_circuit,
+                reference_circuit,
+                enabled=anchor_top_level_pins,
+                declared=[
+                    *same_nets_hints,
+                    *_constant_binding_pairs(constant_bindings),
+                ],
+            )
+            compare_result, compare_timeout = _guarded_compare(
+                comparer,
+                layout_netlist,
+                reference_netlist,
+                opts.compare_timeout_s,
+                compare_context,
+            )
+            if compare_result or compare_timeout:
+                break
+
+    # Issue #4798: one neutral-name retry for repeated-label pin families
+    # (see `_retry_with_neutral_family_names`). Hands the first-pass state
+    # back unchanged unless the retry reaches a real `match`.
+    (
+        compare_result,
+        logger,
+        same_nets_hints,
+        equivalent_pins_applied,
+        constant_bindings,
+        constant_warnings,
+        anchored_pins,
+        anchor_warnings,
+    ) = _retry_with_neutral_family_names(
+        request,
+        layout_circuit,
+        reference_circuit,
+        layout_netlist,
+        reference_netlist,
+        first_pass=(
+            compare_result,
+            logger,
+            same_nets_hints,
+            equivalent_pins_applied,
+            constant_bindings,
+            constant_warnings,
+            anchored_pins,
+            anchor_warnings,
+        ),
+        first_pass_timeout=compare_timeout,
+        anchor_top_level_pins=anchor_top_level_pins,
+        compare_timeout_s=opts.compare_timeout_s,
+        compare_context=compare_context,
+    )
+
+    mismatches = _build_mismatches(
+        logger,
+        layout_netlist,
+        reference_netlist,
+        same_nets_hints=same_nets_hints,
+        # Issue #2692: an anchored pin pairing the comparer refused is a
+        # real finding, reported through the same reconciliation a
+        # hand-written `hints.same_nets` refusal goes through.
+        anchored_pins=[
+            (anchor.layout_net, anchor.reference_net, anchor.pin)
+            for anchor in anchored_pins
+        ],
+        # Issue #3014: a refused constant binding is a `hints.rejected`
+        # finding attributed through `details.declared_constant_net`.
+        constant_bindings=constant_bindings,
+        excluded_parameters=excluded_parameters,
+    )
+    # Issue #4165: after a timeout nothing the (empty) logger produced
+    # describes the design; report only the timeout.
+    mismatches = _timeout_mismatches(mismatches, compare_timeout, compare_context)
+    if not compare_result and not mismatches:
+        # Safety net for the correctness invariant this module's docstring
+        # states: `compare()` is always authoritative. If the engine says
+        # "mismatch" but this module's own event classification produced
+        # nothing (a gap in event coverage, not a clean run), never let the
+        # response silently look like a match -- report a generic, honest
+        # finding instead of dropping the verdict.
+        #
+        # Built through `_mismatch()` like every other classification site
+        # (issue #1132 review): a hand-rolled dict literal here silently
+        # drifts out of the entry shape whenever a field is added -- it
+        # went missing `circuit`/`instance`/`subcircuit` entirely (absent
+        # keys, not `null`), breaking the "every entry carries the key,
+        # never omitted" invariant `_mismatch`'s docstring and
+        # docs/cli/lvs.md's field table both state.
+        mismatches = [
+            _mismatch(
+                CATEGORY_TOPOLOGY,
+                "error",
+                "netlists do not match (no further detail available "
+                "from the comparer's event log)",
+                "both",
+            )
+        ]
+    status = "match" if compare_result else "mismatch"
+    status = STATUS_INCONCLUSIVE if compare_timeout else status
+    engine_version = _engine_version()
+    # Issue #2373: the `klayout` engine launches no subprocess, so the
+    # field is present-and-null here rather than omitted -- the same
+    # always-present-but-nullable convention the rest of `environment`
+    # follows.
+    netgen_binary = None
+    net_correspondence = _build_net_correspondence(logger, supply_universe)
+    counts = {
+        "nets": {
+            "layout": sum(1 for _ in layout_circuit.each_net()),
+            "reference": sum(1 for _ in reference_circuit.each_net()),
+            "matched": logger.matched_nets,
+        },
+        "devices": {
+            "layout": sum(1 for _ in layout_circuit.each_device()),
+            "reference": sum(1 for _ in reference_circuit.each_device()),
+            "matched": logger.matched_devices,
+        },
+        "pins": {
+            "layout": layout_circuit.pin_count(),
+            "reference": reference_circuit.pin_count(),
+            "matched": logger.matched_pins,
+        },
+    }
+
+    return (
+        bulk_warnings,
+        short_nets_warnings,
+        placeholder_warnings,
+        tolerance_warnings,
+        compare_parameter_warnings,
+        ignore_mos_bulk_warnings,
+        geometry_warnings,
+        device_parameter_coverage,
+        equivalent_pins_applied,
+        anchor_warnings,
+        constant_bindings,
+        constant_warnings,
+        mismatches,
+        status,
+        engine_version,
+        netgen_binary,
+        net_correspondence,
+        counts,
+    )
+
+
 def run_lvs(
     request: str,
     *,
@@ -1227,8 +1590,6 @@ def run_lvs(
     opts = _parse_lvs_run_options(
         request, request_dir, engine, layout_spec, reference_spec
     )
-
-    import klayout.db as kdb
 
     (
         layout_netlist,
@@ -1959,23 +2320,6 @@ def run_lvs(
     # `device_classes` follow, never a spuriously empty `[]` that would read
     # as "no resistor/capacitor class participated".
     device_parameter_coverage: list[dict[str, Any]] | None = None
-    # Issue #2461: every `(class, parameter)` pair a request-side hook took
-    # out of *this* run's compare, so the classification pass downstream never
-    # reports one of them as a `device.property` error in the same report that
-    # discloses it as excluded. Kept as two sets so the coverage block can name
-    # which hook excluded each one.
-    placeholder_excluded: set[tuple[str, str]] = set()
-    compare_scoped_excluded: set[tuple[str, str]] = set()
-    # Issue #2654: the subset of `compare_scoped_excluded` that
-    # `options.compare_parameters` actually took *out of* the compare -- the
-    # parameters that were primary before `enable_parameter` ran. The option
-    # can only narrow, so scoping a class to one subset also disables every
-    # sibling the caller did not name; a sibling the class itself declares
-    # secondary was never compared, so the coverage block must not attribute
-    # its exclusion to the caller's option (see
-    # `_record_excluded_parameters`). The full set above still drives the
-    # classification pass's suppression, unchanged.
-    compare_scoped_narrowed: set[tuple[str, str]] = set()
     # Issue #1998: populated only for `engine == "klayout"` -- the `netgen`
     # branch below rejects any `request.hints` outright (no equivalent hook
     # in that engine's scope), so this stays empty for every netgen run.
@@ -1987,7 +2331,6 @@ def run_lvs(
     # same-nets reconciliation (a refused anchor is a `hints.rejected`
     # finding); `anchor_warnings` is the single disclosure entry appended with
     # the other request-side disclosures further down.
-    anchored_pins: list[_TopLevelPinAnchor] = []
     anchor_warnings: list[dict[str, Any]] = []
     # Issue #3014: the caller's explicit `hints.constant_nets` bindings; same
     # roles as `anchored_pins`/`anchor_warnings` above.
@@ -1995,308 +2338,37 @@ def run_lvs(
     constant_warnings: list[dict[str, Any]] = []
 
     if engine == "klayout":
-        # Issue #2653: resolve a mask-option (metal-option/probe-pad/e-fuse
-        # trim) reference's behavioural option construct to one concrete
-        # drawn state *before* anything else below -- every other reference-
-        # side normalisation in this block (`device_bulk`, placeholder
-        # values, `compare_parameters`, the parameter-coverage summary)
-        # should see the already-resolved device/net set, exactly as it
-        # would for a reference hand-authored at that one option code to
-        # begin with. Opt-in via `hints.short_nets`; a no-op (returns `[]`
-        # immediately) for every request that does not declare it, so a
-        # reference with no option construct present stays byte-identical to
-        # before this hook existed.
-        short_nets_warnings = _apply_short_nets_hint(
-            request.get("hints") or {},
-            reference_netlist,
-            reference_circuit,
-        )
-
-        # Issue #506: normalise the reference side's device classes up to the
-        # layout side's terminal list *before* the comparer is constructed, so
-        # a deck's bulk-terminal device flavour (e.g. a `bulk_to_substrate`
-        # resistor's three-terminal `RES_X`) can be compared against a
-        # schematic-derived reference that does not model that terminal at
-        # all. Runs after the `combine_devices()` step above so combining
-        # still sees each side's own, unmodified device classes (the
-        # status-quo behaviour), and returns the `severity: "warning"`
-        # disclosure entries appended to `mismatches[]` further down.
-        bulk_warnings = _apply_reference_device_bulk(
-            reference_device_bulk,
-            layout_netlist,
-            reference_netlist,
-        )
-
-        # Issue #1907: same placement rationale as `_apply_reference_device_bulk`
-        # just above -- a `form: "subckt-call"` conversion's placeholder `0`
-        # value has to be taken out of the comparison *before* the comparer is
-        # constructed, since `NetlistComparer` reads each device class's
-        # `equal_parameters` when it builds its device-equivalence seeding.
-        # Runs after `combine_devices()` for the same reason too (combining
-        # still sees each side's unmodified classes), and returns the
-        # `severity: "warning"` disclosure entries appended further down.
-        placeholder_warnings = _apply_reference_placeholder_values(
-            reference_placeholder_classes,
-            layout_netlist,
-            reference_netlist,
-            placeholder_excluded,
-        )
-
-        # Issue #1928: same placement rationale once more -- `enable_parameter`
-        # has to run before the comparer is constructed for the same reason
-        # `equal_parameters` does just above, and after `combine_devices()`
-        # so combining still sees each side's unmodified classes. Returns
-        # the `severity: "warning"` disclosure entries appended further down.
-        compare_parameter_warnings = _apply_compare_parameters(
-            opts.compare_parameters,
-            layout_netlist,
-            reference_netlist,
-            compare_scoped_excluded,
-            compare_scoped_narrowed,
-        )
-
-        ignore_mos_bulk_warnings = apply_ignore_mos_bulk(
-            opts.ignore_mos_bulk, layout_netlist, reference_netlist
-        )
-
-        # Issue #2461: read the two netlists' device-class state *after* every
-        # hook above has had its say (`enable_parameter` flips `is_primary` in
-        # place, so this has to run downstream of `_apply_compare_parameters`
-        # to describe the compare that is actually about to happen) and
-        # *before* the comparer is built. Read-only -- it changes nothing
-        # about the compare, it only records what the compare will cover.
-        geometry_warnings, device_parameter_coverage = _device_parameter_coverage(
-            layout_netlist,
-            reference_netlist,
-            placeholder_excluded,
-            compare_scoped_narrowed,
-        )
-        excluded_parameters = placeholder_excluded | compare_scoped_excluded
-
-        logger = _make_compare_logger(layout_circuit, reference_circuit)
-        comparer = kdb.NetlistComparer(logger)
-        # `_select_circuit` + `_prune_extra_top_circuits` above already guarantee
-        # `layout_circuit`/`reference_circuit` are each netlist's *sole*
-        # remaining top circuit, so these two are unambiguously the pair the
-        # request declared -- pin that pairing explicitly instead of leaving it
-        # to `NetlistComparer`'s default name-based matching, which silently
-        # degrades to a generic "could not be matched to a counterpart" finding
-        # on both sides whenever `layout.top`/`reference.top` name different
-        # circuits (issue #231). Safe unconditionally: there is no other
-        # circuit either one could be confused with post-pruning.
-        comparer.same_circuits(layout_circuit, reference_circuit)
-        same_nets_hints, equivalent_pins_applied = _apply_hints(
-            comparer, request.get("hints") or {}, layout_circuit, reference_circuit
-        )
-        # Issue #2692: applied *after* `_apply_hints` so a hand-written
-        # `hints.same_nets` pair stays the authority on the nets it names (see
-        # `_apply_top_level_pin_anchors`'s `declared` argument), and before
-        # `compare()` for the same reason `same_nets` itself must be: the
-        # assertions are comparer state read during the compare, not netlist
-        # state.
-        # Issue #3014: applied after `_apply_hints` (a hand-written
-        # `hints.same_nets` pair stays the authority on the nets it names) and
-        # before the pin anchors, which then leave a bound net alone.
-        constant_bindings, constant_warnings = _apply_constant_nets(
-            comparer,
-            request.get("hints") or {},
-            layout_circuit,
-            reference_circuit,
-            declared=same_nets_hints,
-        )
-        anchored_pins, anchor_warnings = _apply_top_level_pin_anchors(
-            comparer,
-            layout_circuit,
-            reference_circuit,
-            enabled=anchor_top_level_pins,
-            declared=[*same_nets_hints, *_constant_binding_pairs(constant_bindings)],
-        )
-
-        # `logger` is already bound via the `NetlistComparer(logger)` constructor
-        # above, so the 2-arg overload is used here (not the 3-arg one, which
-        # would pass a second, redundant logger reference).
-        compare_context = _compare_context(layout_circuit, reference_circuit)
-        compare_result, compare_timeout = _guarded_compare(
-            comparer,
-            layout_netlist,
-            reference_netlist,
-            opts.compare_timeout_s,
-            compare_context,
-        )
-
-        if not compare_result and opts.parameter_tolerance is not None:
-            # Issue #589: `options.parameter_tolerance` is opted in and the
-            # engine said "mismatch". Snap every reference-side parameter whose
-            # difference from its layout-side counterpart is within the
-            # requested relative tolerance, then run a *second, real*
-            # `compare()` -- the only thing that can legitimately move
-            # `status`, since this module never re-derives the verdict from its
-            # own event classification (see the module docstring). Skipped
-            # entirely when the option is omitted, so the default path is
-            # byte-identical to before.
-            for _pass in range(_MAX_TOLERANCE_PASSES):
-                snaps = _collect_tolerance_snaps(
-                    logger, opts.parameter_tolerance, excluded_parameters
-                )
-                if not snaps:
-                    break
-                _apply_tolerance_snaps(reference_netlist, snaps)
-                tolerance_warnings.extend(
-                    _tolerance_disclosure(snap, opts.parameter_tolerance)
-                    for snap in snaps
-                )
-                logger = _make_compare_logger(layout_circuit, reference_circuit)
-                comparer = kdb.NetlistComparer(logger)
-                comparer.same_circuits(layout_circuit, reference_circuit)
-                # Re-declared on the fresh comparer: `same_nets`/
-                # `equivalent_pins` are comparer state, not netlist state, so
-                # the second pass would otherwise silently drop the caller's
-                # hints. Re-validation cannot raise here (the first call above
-                # already accepted every hint against these same circuits).
-                same_nets_hints, equivalent_pins_applied = _apply_hints(
-                    comparer,
-                    request.get("hints") or {},
-                    layout_circuit,
-                    reference_circuit,
-                )
-                # Issue #2692: re-declared on the fresh comparer for exactly
-                # the same reason the hints above are -- an anchor is comparer
-                # state, so the second pass would otherwise compare on
-                # topology alone and could reach a `"match"` the first,
-                # anchored pass had already refused.
-                # Issue #3014: bindings are comparer state too, so they are
-                # re-applied on the fresh comparer exactly like the hints.
-                constant_bindings, constant_warnings = _apply_constant_nets(
-                    comparer,
-                    request.get("hints") or {},
-                    layout_circuit,
-                    reference_circuit,
-                    declared=same_nets_hints,
-                )
-                anchored_pins, anchor_warnings = _apply_top_level_pin_anchors(
-                    comparer,
-                    layout_circuit,
-                    reference_circuit,
-                    enabled=anchor_top_level_pins,
-                    declared=[
-                        *same_nets_hints,
-                        *_constant_binding_pairs(constant_bindings),
-                    ],
-                )
-                compare_result, compare_timeout = _guarded_compare(
-                    comparer,
-                    layout_netlist,
-                    reference_netlist,
-                    opts.compare_timeout_s,
-                    compare_context,
-                )
-                if compare_result or compare_timeout:
-                    break
-
-        # Issue #4798: one neutral-name retry for repeated-label pin families
-        # (see `_retry_with_neutral_family_names`). Hands the first-pass state
-        # back unchanged unless the retry reaches a real `match`.
         (
-            compare_result,
-            logger,
-            same_nets_hints,
+            bulk_warnings,
+            short_nets_warnings,
+            placeholder_warnings,
+            tolerance_warnings,
+            compare_parameter_warnings,
+            ignore_mos_bulk_warnings,
+            geometry_warnings,
+            device_parameter_coverage,
             equivalent_pins_applied,
+            anchor_warnings,
             constant_bindings,
             constant_warnings,
-            anchored_pins,
-            anchor_warnings,
-        ) = _retry_with_neutral_family_names(
+            mismatches,
+            status,
+            engine_version,
+            netgen_binary,
+            net_correspondence,
+            counts,
+        ) = _run_klayout_compare(
             request,
+            opts,
+            layout_netlist,
+            reference_netlist,
             layout_circuit,
             reference_circuit,
-            layout_netlist,
-            reference_netlist,
-            first_pass=(
-                compare_result,
-                logger,
-                same_nets_hints,
-                equivalent_pins_applied,
-                constant_bindings,
-                constant_warnings,
-                anchored_pins,
-                anchor_warnings,
-            ),
-            first_pass_timeout=compare_timeout,
+            reference_device_bulk=reference_device_bulk,
+            reference_placeholder_classes=reference_placeholder_classes,
             anchor_top_level_pins=anchor_top_level_pins,
-            compare_timeout_s=opts.compare_timeout_s,
-            compare_context=compare_context,
+            supply_universe=supply_universe,
         )
-
-        mismatches = _build_mismatches(
-            logger,
-            layout_netlist,
-            reference_netlist,
-            same_nets_hints=same_nets_hints,
-            # Issue #2692: an anchored pin pairing the comparer refused is a
-            # real finding, reported through the same reconciliation a
-            # hand-written `hints.same_nets` refusal goes through.
-            anchored_pins=[
-                (anchor.layout_net, anchor.reference_net, anchor.pin)
-                for anchor in anchored_pins
-            ],
-            # Issue #3014: a refused constant binding is a `hints.rejected`
-            # finding attributed through `details.declared_constant_net`.
-            constant_bindings=constant_bindings,
-            excluded_parameters=excluded_parameters,
-        )
-        # Issue #4165: after a timeout nothing the (empty) logger produced
-        # describes the design; report only the timeout.
-        mismatches = _timeout_mismatches(mismatches, compare_timeout, compare_context)
-        if not compare_result and not mismatches:
-            # Safety net for the correctness invariant this module's docstring
-            # states: `compare()` is always authoritative. If the engine says
-            # "mismatch" but this module's own event classification produced
-            # nothing (a gap in event coverage, not a clean run), never let the
-            # response silently look like a match -- report a generic, honest
-            # finding instead of dropping the verdict.
-            #
-            # Built through `_mismatch()` like every other classification site
-            # (issue #1132 review): a hand-rolled dict literal here silently
-            # drifts out of the entry shape whenever a field is added -- it
-            # went missing `circuit`/`instance`/`subcircuit` entirely (absent
-            # keys, not `null`), breaking the "every entry carries the key,
-            # never omitted" invariant `_mismatch`'s docstring and
-            # docs/cli/lvs.md's field table both state.
-            mismatches = [
-                _mismatch(
-                    CATEGORY_TOPOLOGY,
-                    "error",
-                    "netlists do not match (no further detail available "
-                    "from the comparer's event log)",
-                    "both",
-                )
-            ]
-        status = "match" if compare_result else "mismatch"
-        status = STATUS_INCONCLUSIVE if compare_timeout else status
-        engine_version = _engine_version()
-        # Issue #2373: the `klayout` engine launches no subprocess, so the
-        # field is present-and-null here rather than omitted -- the same
-        # always-present-but-nullable convention the rest of `environment`
-        # follows.
-        netgen_binary = None
-        net_correspondence = _build_net_correspondence(logger, supply_universe)
-        counts = {
-            "nets": {
-                "layout": sum(1 for _ in layout_circuit.each_net()),
-                "reference": sum(1 for _ in reference_circuit.each_net()),
-                "matched": logger.matched_nets,
-            },
-            "devices": {
-                "layout": sum(1 for _ in layout_circuit.each_device()),
-                "reference": sum(1 for _ in reference_circuit.each_device()),
-                "matched": logger.matched_devices,
-            },
-            "pins": {
-                "layout": layout_circuit.pin_count(),
-                "reference": reference_circuit.pin_count(),
-                "matched": logger.matched_pins,
-            },
-        }
     else:
         # `engine == "netgen"` -- the only other `SUPPORTED_ENGINES` member.
         # Netlist-vs-netlist only (see this module's docstring): no magic
