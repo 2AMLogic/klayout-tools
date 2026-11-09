@@ -2303,6 +2303,14 @@ Points worth knowing:
   the netlist supplies a matching `.model`. `--pdk` model binding
   (see "SPICE model binding" below) does **not** bind diode classes; like
   gf180mcu's `bjt`, they keep the bare primitive form.
+- **Card spelling: `A=`/`P=` in the extraction, `area=`/`pj=` for ngspice.**
+  The written netlist keeps KLayout's `A=`/`P=` instance parameters because
+  `klt lvs` reads it back through KLayout's SPICE reader, which reads
+  `area=`/`pj=` as `0`. ngspice's `D` element rejects `A=`/`P=`
+  (`unknown parameter (a)`), so `klt pex` includes a rewritten copy of the
+  netlist (`dut.<side>-dut.ngspice-diode.spice` in its work dir) with
+  `area=178p pj=55.6u` spelling on each `D` card (issue #5178); the file
+  `klt extract` wrote is not modified.
 - **Unmarked diffusion is never reclassified.** Both terminal regions are
   intersected with the PDK's `diode_mk` device mark before recognition, the
   same guard the bipolar block applies to its base — so an ordinary PMOS's
