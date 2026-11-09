@@ -132,7 +132,6 @@ from ._paths import validate_request_shape as _shared_validate_request_shape
 from ._provenance import (
     INPUT_ROLE_LAYOUT,
     INPUT_ROLE_NETLIST,
-    build_provenance,
     content_hash,
     explicit_deck_options,
     sha256_file,
@@ -237,12 +236,13 @@ from .lvs_mos_options import (
     parse_ignore_mos_bulk,  # noqa: F401
     split_layout_mos_flavours,
 )
-from .lvs_netgen import (
+from .lvs_netgen import (  # noqa: F401  (re-exported: klayout_tools.lvs.<name>)
     _NETGEN_DEFAULT_TIMEOUT_S,
     _resolve_netgen_binary,
     _resolve_netgen_setup,
     _run_netgen_lvs,
 )
+from .lvs_netgen_branch import _run_netgen_engine_branch
 from .lvs_pin_anchors import (
     _apply_top_level_pin_anchors,
     _retry_with_neutral_family_names,
@@ -257,6 +257,7 @@ from .lvs_power import (
     _well_layer_lef_pins,
     _with_stub_power_connectivity_reason,
 )
+from .lvs_report import assemble_lvs_report
 from .lvs_runset import RUNSET_ENGINE, run_lvs_klayout_runset
 from .lvs_short_nets import _short_nets_disclosure as _short_nets_disclosure
 from .lvs_supply import parse_supply_nets, supply_fragmentation_findings  # noqa: F401
@@ -275,7 +276,6 @@ from .netlist_capacitor_recovery import (
 )
 from .pdk import PdkNotFoundError, find_pdk, list_pdks
 from .place_and_route_portable import portable_response
-from .verilog_module_names import reference_module_names
 from .verilog_netlist import (
     VerilogNetlistError,
     collect_gate_level_port_aliases,
@@ -916,6 +916,300 @@ def _merge_deck_flags(
                 "both (a flag never silently overrides the request document)"
             )
         request["deck_vars"] = dict(deck_vars)
+
+
+def _aggregate_lvs_findings(
+    *,
+    status: Any,
+    counts: Any,
+    mismatches: Any,
+    opts: Any,
+    layout_circuit: Any,
+    reference_circuit: Any,
+    layout_deck: Any,
+    layout_spec: Any,
+    combine_incomplete: Any,
+    combine_warnings: Any,
+    combine_per_circuit_warnings: Any,
+    short_nets_warnings: Any,
+    anchor_warnings: Any,
+    constant_warnings: Any,
+    finfet_bulk_records: Any,
+    ignore_mos_bulk_warnings: Any,
+    bulk_warnings: Any,
+    placeholder_warnings: Any,
+    tolerance_warnings: Any,
+    compare_parameter_warnings: Any,
+    geometry_warnings: Any,
+    flatten_warnings: Any,
+    power_only_pruning_warnings: Any,
+    family_findings: Any,
+    gate_level_port_alias_warnings: Any,
+    reference_gate_level_case_folds: Any,
+    layout_pin_renames: Any,
+    supply_findings: Any,
+    unresolved_subckt_call_findings: Any,
+) -> tuple[Any, ...]:
+    """Strict-pin check, warning aggregation and status downgrade (issue #5161).
+
+    The tail of :func:`run_lvs` both engines converge on, ending at
+    ``_force_mismatch_on``. ``mismatches`` is extended and sorted in place;
+    warning order is unchanged. Returns ``(status, mismatches,
+    strict_pin_findings, device_classes, body_verification)``.
+    """
+    # Issue #2845: opt-in strict pin-count check, at the one point both
+    # engines converge, on the circuits actually compared (after any
+    # flatten/prune) -- the same counts reported as `counts.pins`.
+    status, strict_pin_findings = _strict_pin_count_check(
+        opts.strict_top_level_pin_count,
+        status,
+        counts,
+        layout_circuit,
+        reference_circuit,
+    )
+    mismatches.extend(strict_pin_findings)
+
+    # `layout_deck_name`/`layout_deck` were already resolved above (before
+    # the `combine_devices` block) -- reused here for `device_classes`
+    # (issue #221), `null` when `layout.netlist` (pre-extracted) was given
+    # instead of `layout.file` + `layout.deck`, since no deck is involved in
+    # that shape.
+    device_classes = (
+        list(layout_deck.device_classes) if layout_deck is not None else None
+    )
+
+    # Issue #1983: the machine-checkable counterpart of the
+    # `device.body_unverified` warning below, replaced with a real verdict
+    # whenever inline extraction ran. Emitted as an explicit `"unchecked"`
+    # carrying a reason rather than omitted, so "were this layout's device
+    # bodies verifiably tied?" is answerable from any `klt lvs` report on its
+    # own -- on the pre-extracted `layout.netlist` form the warning's absence
+    # means "not checked", and on an inline extraction it means "checked and
+    # clean", and nothing in the report used to tell those apart.
+    body_verification: dict[str, Any] = _body_verification_unchecked(
+        "no request.layout.deck was given (the pre-extracted "
+        "request.layout.netlist form), so nothing establishes this layout's "
+        "substrate/well-tap convention and no synthesized body net can be "
+        "told apart from a real one -- this run verified nothing about the "
+        "device bodies either way"
+    )
+
+    if layout_deck is not None:
+        # Issue #281: MOS body terminals extracted onto deck-synthesized or
+        # anonymous nets (never a real schematic net -- see
+        # `_body_net_warnings`) are a property of the inline extraction --
+        # which deck ran and what tie geometry this layout drew (per-device
+        # on both arms since issue #2048) -- not of this particular compare
+        # run's pairings. Appended (and the list re-sorted)
+        # rather than folded into `_build_mismatches`, since these entries
+        # never come from a `NetlistComparer` event and do not participate in
+        # the `compare_result`/safety-net invariant above -- they are purely
+        # additive, non-blocking notes.
+        mismatches.extend(_body_net_warnings(layout_circuit, layout_deck))
+        # Issue #1983: same determination, rendered as the gradeable block
+        # -- see `_body_verification_report` for why one source of truth
+        # backs both renderings.
+        body_verification = _body_verification_report(layout_circuit, layout_deck)
+
+    if combine_warnings:
+        # Issue #466: same rationale as `_body_net_warnings` above -- these
+        # never come from a `NetlistComparer` event either, so they are
+        # appended (and the list re-sorted) rather than folded into
+        # `_build_mismatches`. Unlike the inline-extraction-only body-net
+        # warnings, this fires for any request (pre-extracted `layout.netlist` and
+        # `"netgen"` engine included), since `combine_devices()` runs before
+        # the engine branch above.
+        mismatches.extend(combine_warnings)
+
+    if combine_per_circuit_warnings:
+        # Issue #1552: same rationale as `combine_warnings` just above --
+        # `options.combine_devices_per_circuit` runs before `_select_circuit`
+        # even, so these are request-side transforms too, not
+        # `NetlistComparer` events.
+        mismatches.extend(combine_per_circuit_warnings)
+
+    # Issue #2653: same rationale as `bulk_warnings` below -- a
+    # `hints.short_nets` disclosure records a *request-side* reference
+    # transform (device drops / net merges) applied before the compare, not a
+    # `NetlistComparer` event, so it is appended here rather than folded into
+    # `_build_mismatches`. Always `severity: "warning"`: it never changes
+    # `status`, it only keeps a match reached through the resolved option
+    # construct from being indistinguishable from a fully independent one.
+    # Extended unconditionally (an empty list is a no-op) rather than behind
+    # an `if` like its neighbours, so this hook adds no branch to `run_lvs`'s
+    # already-baselined cyclomatic complexity -- see
+    # `scripts/check_complexity_baseline.py`.
+    mismatches.extend(short_nets_warnings)
+
+    # Issue #2692: same rationale as `short_nets_warnings` just above -- a
+    # `topology.top_level_pins_anchored` disclosure records a *request-side*
+    # strengthening of the compare (assertions declared on the comparer before
+    # `compare()` ran), not a `NetlistComparer` event, so it is appended here
+    # rather than folded into `_build_mismatches`. Always `severity:
+    # "warning"`: anchoring only ever removes a degree of freedom, so it never
+    # changes `status` on its own -- it keeps a match that rests on
+    # name-anchored boundary pins from being indistinguishable from one
+    # reached by topology alone. Extended unconditionally (an empty list is a
+    # no-op) for the same `run_lvs`-complexity reason, see
+    # `scripts/check_complexity_baseline.py`.
+    mismatches.extend(anchor_warnings)
+    # Issue #3014: same rationale -- a request-side `hints.constant_nets`
+    # disclosure (empty list is a no-op); a warning never changes `status`.
+    mismatches.extend(constant_warnings)
+    # Issue #2813: `options.finfet_bulk` disclosure (empty list is a no-op).
+    mismatches.extend(
+        bulk_disclosures(finfet_bulk_records, CATEGORY_DEVICE_FINFET_BULK_TIED)
+    )
+    mismatches.extend(ignore_mos_bulk_warnings)  # Issue #5125
+
+    if bulk_warnings:
+        # Issue #506: same rationale again -- a `reference.device_bulk`
+        # disclosure records a *request-side* normalisation applied before the
+        # compare, not a `NetlistComparer` event, so it is appended here
+        # rather than folded into `_build_mismatches`. Always
+        # `severity: "warning"`: it never changes `status`, it only keeps a
+        # match achieved through the hook from being indistinguishable from a
+        # fully independent one.
+        mismatches.extend(bulk_warnings)
+
+    if placeholder_warnings:
+        # Issue #1907: same rationale again -- a `device.placeholder_value`
+        # disclosure records a *request-side* normalisation (one parameter of
+        # a converted reference class excluded from the compare) applied
+        # before the compare, not a `NetlistComparer` event, so it is appended
+        # here rather than folded into `_build_mismatches`. Always
+        # `severity: "warning"`: it never changes `status`, it only keeps a
+        # match reached with that class's value dimension unverified from
+        # being indistinguishable from one where the two values agreed.
+        mismatches.extend(placeholder_warnings)
+
+    if tolerance_warnings:
+        # Issue #589: same rationale once more -- a `parameter_tolerance`
+        # disclosure records a value this run deliberately absorbed *between*
+        # the two `compare()` passes, not a `NetlistComparer` event, so it is
+        # appended here rather than folded into `_build_mismatches`. Always
+        # `severity: "warning"`: it never changes `status` (the second
+        # `compare()` already did that, or didn't), it only keeps a match
+        # reached through the caller's tolerance from being indistinguishable
+        # from one where the two values actually agreed.
+        mismatches.extend(tolerance_warnings)
+
+    if compare_parameter_warnings:
+        # Issue #1928: same rationale once more -- a `compare_parameters`
+        # disclosure records a request-side compare-scoping choice applied
+        # before the compare, not a `NetlistComparer` event, so it is
+        # appended here rather than folded into `_build_mismatches`. Always
+        # `severity: "warning"`: it never changes `status`, it only keeps a
+        # match reached with a parameter scoped out from being
+        # indistinguishable from one where every parameter actually agreed.
+        mismatches.extend(compare_parameter_warnings)
+
+    # Issue #2461: same append-here rationale once more -- which parameters a
+    # device class declares primary is a property of the two netlists' classes
+    # as prepared for this run, not a `NetlistComparer` event, so it is
+    # appended here rather than folded into `_build_mismatches`. Always
+    # `severity: "warning"`: it never changes `status`, it only keeps a match
+    # reached without comparing a resistor/capacitor's geometry at all from
+    # being indistinguishable from one where the two sides' geometry actually
+    # agreed. Extended unconditionally (like `family_findings` below, unlike
+    # the `if`-guarded warnings above): the list is empty on every run with no
+    # resistor/capacitor class to report.
+    mismatches.extend(geometry_warnings)
+
+    if flatten_warnings:
+        # Issue #1085: same rationale as the disclosures above -- a
+        # `flatten_reference`/`flatten_layout` structural flatten is a
+        # request-side transform applied before the compare (indeed, before
+        # `_select_circuit` even runs), not a `NetlistComparer` event, so it
+        # is appended here rather than folded into `_build_mismatches`.
+        # Collected once, up front (before the `combine_devices`/engine
+        # branches below even run), so it fires for any request shape --
+        # both engines, both layout shapes -- the same way `combine_warnings`
+        # does.
+        mismatches.extend(flatten_warnings)
+
+    if power_only_pruning_warnings:
+        # Issue #1622: same rationale as the disclosures above -- pruning a
+        # power-only layout circuit is a request-side transform applied
+        # before the compare (before even `combine_devices_per_circuit`/
+        # `flatten_layout` above), not a `NetlistComparer` event, so it is
+        # appended here rather than folded into `_build_mismatches`.
+        mismatches.extend(power_only_pruning_warnings)
+
+    # Issue #2421: same append-here rationale as the disclosures above --
+    # this is a pre-flight determination about the reference netlist and the
+    # deck, made before the compare ran, not a `NetlistComparer` event.
+    # Unlike them it is `severity: "error"` (the reference really cannot
+    # match), but like `device.class_arity` it is diagnostic only: it never
+    # moves `status` on its own -- the compare that already ran reported the
+    # mismatch this entry explains. Extended unconditionally (like
+    # `supply_findings` below, unlike the `if`-guarded warnings above): the
+    # list is empty on every run that has no such family to report.
+    mismatches.extend(family_findings)
+
+    if gate_level_port_alias_warnings:
+        # Issue #2021: same rationale as the disclosures above -- joining an
+        # `assign`-aliased reference port's net onto its canonical target is
+        # a request-side transform applied before the compare (before even
+        # the power-only prune above), not a `NetlistComparer` event, so it
+        # is appended here rather than folded into `_build_mismatches`.
+        mismatches.extend(gate_level_port_alias_warnings)
+
+    # Issue #4815: same append-here rationale -- a request-side pin-name
+    # binding made while converting the reference, never a comparer event.
+    mismatches.extend(
+        _gate_level_port_case_fold_warnings(reference_gate_level_case_folds)
+    )
+
+    # Issue #2854: same append-here rationale as `family_findings` above --
+    # a promoted pin net carrying 2+ declared pin names is a pre-compare
+    # determination the inline extraction's rename pass made about the
+    # layout's declared interface, not a `NetlistComparer` event. Like
+    # `device.class_family_unsatisfiable` it is `severity: "error"` but
+    # diagnostic only: it never moves `status` on its own -- the compare
+    # that already ran reports the mismatch this entry explains (the
+    # layout's one joined boundary net against the reference's two separate
+    # pins). Extended unconditionally (an empty list is a no-op when no
+    # rename ran or no short was found) so this hook adds no branch to this
+    # already-complexity-baselined function.
+    mismatches.extend(_declared_pin_short_mismatches(layout_pin_renames))
+
+    mismatches.extend(supply_findings)
+    # Issue #4200: explain a net.merged that is really a case-fold name collision.
+    _annotate_case_collision_merges(mismatches, layout_circuit, "file" in layout_spec)
+    # Issue #2952: an unresolved reference subcircuit call is a pre-compare
+    # finding that moves `status` below (after the combine downgrade), so it
+    # is never hidden behind `"inconclusive"`.
+    mismatches.extend(unresolved_subckt_call_findings)
+    mismatches.sort(key=_sort_key)
+
+    # Issue #2845: a strict `pin.count` error is exempt from the downgrade
+    # below -- `combine_devices` only folds devices and never changes a
+    # circuit's declared pins, so the pin-count difference is a real
+    # mismatch whether or not combining applied, and downgrading would hide
+    # it behind `"inconclusive"`.
+    if combine_incomplete and status == "mismatch" and not strict_pin_findings:
+        # Issue #1370: `options.combine_devices` was requested, at least one
+        # side exhausted its retry budget, and both sides were rolled back to
+        # their pre-combine state (the symmetric degrade above). The compare
+        # that actually ran is therefore *not* the compare the caller asked
+        # for -- a folded layout compared uncombined against a lumped
+        # reference mismatches by construction, so this "mismatch" says
+        # nothing about whether the design differs. Report it as
+        # `"inconclusive"` instead, mirroring `klt equiv`'s own
+        # never-report-an-unreachable-verdict rule (see
+        # `STATUS_INCONCLUSIVE`).
+        #
+        # Deliberately only downgrades `"mismatch"`, never `"match"`: this
+        # module never re-derives a verdict the engine did not reach (see the
+        # module docstring), and an uncombined compare that still matched is
+        # a real, strictly-stronger match -- the fold turned out to be
+        # unnecessary. `mismatches[]` keeps the `device.combine_incomplete`
+        # warning either way, so a caller can always see that combining did
+        # not apply.
+        status = STATUS_INCONCLUSIVE
+    status = _force_mismatch_on(status, unresolved_subckt_call_findings)
+    return status, mismatches, strict_pin_findings, device_classes, body_verification
 
 
 def run_lvs(
@@ -2022,675 +2316,100 @@ def run_lvs(
             },
         }
     else:
-        # `engine == "netgen"` -- the only other `SUPPORTED_ENGINES` member.
-        # Netlist-vs-netlist only (see this module's docstring): no magic
-        # extraction backend, no per-net/per-device `hints` hook (netgen has
-        # no equivalent to `same_nets`/`equivalent_pins`/`short_nets` in this
-        # scope), and -- unlike the `klayout` engine's in-process compare --
-        # an external subprocess whose own exit code is not trustworthy on
-        # its own (see `_run_netgen_lvs`).
-        if request.get("hints"):
-            raise LvsError(
-                "request.hints (same_nets/equivalent_pins/short_nets) is "
-                "only supported for engine 'klayout' -- the netgen engine "
-                "has no equivalent hook in this issue's netlist-vs-netlist "
-                'scope (see docs/cli/lvs.md, "Engine")'
-            )
-        if reference_device_bulk:
-            # Issue #506: same boundary as `hints` above -- the reconciliation
-            # is a `klayout.db`-side device-class normalisation applied to the
-            # in-memory reference netlist, and netgen reads its own SPICE
-            # files through its own device-class model.
-            raise LvsError(
-                "request.reference.device_bulk is only supported for engine "
-                "'klayout' -- the netgen engine compares SPICE files through "
-                "its own device model and has no equivalent hook (see "
-                'docs/cli/lvs.md, "Engine")'
-            )
-        if opts.parameter_tolerance is not None:
-            # Issue #589: same boundary, for a concrete reason rather than an
-            # arbitrary one. netgen's own per-property tolerances are declared
-            # in its setup file as *absolute* per-device-class values
-            # (`property {-circuit1 <class>} tolerance <name> <value>`), so a
-            # single engine-neutral *relative* tolerance has no faithful
-            # translation into one -- deriving per-class absolute values would
-            # require this module to invent a device-by-device conversion the
-            # caller never asked for. Erroring keeps an opted-in tolerance from
-            # being silently ignored (the one outcome worse than not supporting
-            # it), and `options.netgen_setup` already exposes netgen's native
-            # tolerance vocabulary for callers on this engine.
-            raise LvsError(
-                "options.parameter_tolerance is only supported for engine "
-                "'klayout' -- express a netgen-side tolerance with that "
-                "engine's own setup file instead (options.netgen_setup, whose "
-                "'property ... tolerance' entries are absolute per-device-class "
-                'values, not a single relative one; see docs/cli/lvs.md, "Engine")'
-            )
-        if opts.compare_parameters:
-            # Issue #1928: same boundary again -- `DeviceClass.enable_parameter`
-            # is a `klayout.db`-side hook this module applies to the in-process
-            # `NetlistComparer`'s own device classes, and netgen has no
-            # equivalent per-parameter compare-scoping hook of its own.
-            raise LvsError(
-                "options.compare_parameters is only supported for engine "
-                "'klayout' -- the netgen engine has no equivalent "
-                "per-parameter compare-scoping hook (see docs/cli/lvs.md, "
-                '"Engine")'
-            )
-        setup_file = _resolve_netgen_setup(opts.options, request_dir)
-        # Issue #2673: the same conversion-provenance + all-reference-
-        # instances-zero proof the klayout branch applies, but with the
-        # exclusion carried into netgen's own setup (`property ... delete`)
-        # instead of a `klayout.db` hook. The disclosure is identical.
-        netgen_exclusions: list[tuple[str, str, str]] = []
-        placeholder_warnings = _apply_reference_placeholder_values(
-            reference_placeholder_classes,
-            layout_netlist,
-            reference_netlist,
-            mutate_classes=False,
-            netgen_exclusions=netgen_exclusions,
-        )
-        timeout_s = float(
-            opts.options.get("netgen_timeout_s", _NETGEN_DEFAULT_TIMEOUT_S)
-        )
-        # Issue #2373: resolve *which* netgen binary to run before launching
-        # it (`options.netgen_binary` > `$KLT_NETGEN_BINARY` > `netgen` >
-        # `netgen-lvs`), rather than hardcoding the name `netgen` -- the
-        # resolved path is both what gets spawned and what
-        # `environment.netgen_binary` records below.
-        netgen_binary = _resolve_netgen_binary(opts.options, request_dir)
-        status, mismatches, engine_version = _run_netgen_lvs(
+        # `engine == "netgen"` -- the only other `SUPPORTED_ENGINES` member;
+        # see `_run_netgen_engine_branch`.
+        (
+            status,
+            mismatches,
+            engine_version,
+            netgen_binary,
+            net_correspondence,
+            counts,
+            placeholder_warnings,
+        ) = _run_netgen_engine_branch(
+            request=request,
+            opts=opts,
+            request_dir=request_dir,
             layout_netlist=layout_netlist,
             layout_circuit=layout_circuit,
             reference_netlist=reference_netlist,
             reference_circuit=reference_circuit,
-            setup_file=setup_file,
-            timeout_s=timeout_s,
-            binary=netgen_binary,
-            excluded_properties=netgen_exclusions,
+            reference_device_bulk=reference_device_bulk,
+            reference_placeholder_classes=reference_placeholder_classes,
         )
-        layout_net_count = sum(1 for _ in layout_circuit.each_net())
-        reference_net_count = sum(1 for _ in reference_circuit.each_net())
-        layout_device_count = sum(1 for _ in layout_circuit.each_device())
-        reference_device_count = sum(1 for _ in reference_circuit.each_device())
-        layout_pin_count = layout_circuit.pin_count()
-        reference_pin_count = reference_circuit.pin_count()
-        # Known limitation (see docs/cli/lvs.md, "Engine" -> netgen):
-        # `_parse_netgen_report` classifies netgen's text report into
-        # `mismatches[]`, but does not reconstruct a full per-net/per-device
-        # correspondence the way the `klayout` engine's `NetlistComparer`
-        # callbacks do. On a `"match"` verdict the matched count is exact by
-        # construction (a unique match requires equal cardinality on both
-        # sides); on `"mismatch"` it is intentionally left at the
-        # conservative floor (`0`) rather than a fabricated estimate --
-        # never overstating how much of the netlist was actually verified.
-        # `net_correspondence` is `[]` for the same reason, which keeps the
-        # documented `len(net_correspondence) == counts.nets.matched`
-        # invariant intact for this engine too (both sides of that equation
-        # are `0` together on a mismatch).
-        matched_nets = layout_net_count if status == "match" else 0
-        matched_devices = layout_device_count if status == "match" else 0
-        matched_pins = layout_pin_count if status == "match" else 0
-        net_correspondence = []
-        counts = {
-            "nets": {
-                "layout": layout_net_count,
-                "reference": reference_net_count,
-                "matched": matched_nets,
-            },
-            "devices": {
-                "layout": layout_device_count,
-                "reference": reference_device_count,
-                "matched": matched_devices,
-            },
-            "pins": {
-                "layout": layout_pin_count,
-                "reference": reference_pin_count,
-                "matched": matched_pins,
-            },
-        }
 
-    # Issue #2845: opt-in strict pin-count check, at the one point both
-    # engines converge, on the circuits actually compared (after any
-    # flatten/prune) -- the same counts reported as `counts.pins`.
-    status, strict_pin_findings = _strict_pin_count_check(
-        opts.strict_top_level_pin_count,
+    (
         status,
-        counts,
-        layout_circuit,
-        reference_circuit,
+        mismatches,
+        strict_pin_findings,
+        device_classes,
+        body_verification,
+    ) = _aggregate_lvs_findings(
+        status=status,
+        counts=counts,
+        mismatches=mismatches,
+        opts=opts,
+        layout_circuit=layout_circuit,
+        reference_circuit=reference_circuit,
+        layout_deck=layout_deck,
+        layout_spec=layout_spec,
+        combine_incomplete=combine_incomplete,
+        combine_warnings=combine_warnings,
+        combine_per_circuit_warnings=combine_per_circuit_warnings,
+        short_nets_warnings=short_nets_warnings,
+        anchor_warnings=anchor_warnings,
+        constant_warnings=constant_warnings,
+        finfet_bulk_records=finfet_bulk_records,
+        ignore_mos_bulk_warnings=ignore_mos_bulk_warnings,
+        bulk_warnings=bulk_warnings,
+        placeholder_warnings=placeholder_warnings,
+        tolerance_warnings=tolerance_warnings,
+        compare_parameter_warnings=compare_parameter_warnings,
+        geometry_warnings=geometry_warnings,
+        flatten_warnings=flatten_warnings,
+        power_only_pruning_warnings=power_only_pruning_warnings,
+        family_findings=family_findings,
+        gate_level_port_alias_warnings=gate_level_port_alias_warnings,
+        reference_gate_level_case_folds=reference_gate_level_case_folds,
+        layout_pin_renames=layout_pin_renames,
+        supply_findings=supply_findings,
+        unresolved_subckt_call_findings=unresolved_subckt_call_findings,
     )
-    mismatches.extend(strict_pin_findings)
-
-    # `layout_deck_name`/`layout_deck` were already resolved above (before
-    # the `combine_devices` block) -- reused here for `device_classes`
-    # (issue #221), `null` when `layout.netlist` (pre-extracted) was given
-    # instead of `layout.file` + `layout.deck`, since no deck is involved in
-    # that shape.
-    device_classes = (
-        list(layout_deck.device_classes) if layout_deck is not None else None
-    )
-
-    # Issue #1983: the machine-checkable counterpart of the
-    # `device.body_unverified` warning below, replaced with a real verdict
-    # whenever inline extraction ran. Emitted as an explicit `"unchecked"`
-    # carrying a reason rather than omitted, so "were this layout's device
-    # bodies verifiably tied?" is answerable from any `klt lvs` report on its
-    # own -- on the pre-extracted `layout.netlist` form the warning's absence
-    # means "not checked", and on an inline extraction it means "checked and
-    # clean", and nothing in the report used to tell those apart.
-    body_verification: dict[str, Any] = _body_verification_unchecked(
-        "no request.layout.deck was given (the pre-extracted "
-        "request.layout.netlist form), so nothing establishes this layout's "
-        "substrate/well-tap convention and no synthesized body net can be "
-        "told apart from a real one -- this run verified nothing about the "
-        "device bodies either way"
-    )
-
-    if layout_deck is not None:
-        # Issue #281: MOS body terminals extracted onto deck-synthesized or
-        # anonymous nets (never a real schematic net -- see
-        # `_body_net_warnings`) are a property of the inline extraction --
-        # which deck ran and what tie geometry this layout drew (per-device
-        # on both arms since issue #2048) -- not of this particular compare
-        # run's pairings. Appended (and the list re-sorted)
-        # rather than folded into `_build_mismatches`, since these entries
-        # never come from a `NetlistComparer` event and do not participate in
-        # the `compare_result`/safety-net invariant above -- they are purely
-        # additive, non-blocking notes.
-        mismatches.extend(_body_net_warnings(layout_circuit, layout_deck))
-        # Issue #1983: same determination, rendered as the gradeable block
-        # -- see `_body_verification_report` for why one source of truth
-        # backs both renderings.
-        body_verification = _body_verification_report(layout_circuit, layout_deck)
-
-    if combine_warnings:
-        # Issue #466: same rationale as `_body_net_warnings` above -- these
-        # never come from a `NetlistComparer` event either, so they are
-        # appended (and the list re-sorted) rather than folded into
-        # `_build_mismatches`. Unlike the inline-extraction-only body-net
-        # warnings, this fires for any request (pre-extracted `layout.netlist` and
-        # `"netgen"` engine included), since `combine_devices()` runs before
-        # the engine branch above.
-        mismatches.extend(combine_warnings)
-
-    if combine_per_circuit_warnings:
-        # Issue #1552: same rationale as `combine_warnings` just above --
-        # `options.combine_devices_per_circuit` runs before `_select_circuit`
-        # even, so these are request-side transforms too, not
-        # `NetlistComparer` events.
-        mismatches.extend(combine_per_circuit_warnings)
-
-    # Issue #2653: same rationale as `bulk_warnings` below -- a
-    # `hints.short_nets` disclosure records a *request-side* reference
-    # transform (device drops / net merges) applied before the compare, not a
-    # `NetlistComparer` event, so it is appended here rather than folded into
-    # `_build_mismatches`. Always `severity: "warning"`: it never changes
-    # `status`, it only keeps a match reached through the resolved option
-    # construct from being indistinguishable from a fully independent one.
-    # Extended unconditionally (an empty list is a no-op) rather than behind
-    # an `if` like its neighbours, so this hook adds no branch to `run_lvs`'s
-    # already-baselined cyclomatic complexity -- see
-    # `scripts/check_complexity_baseline.py`.
-    mismatches.extend(short_nets_warnings)
-
-    # Issue #2692: same rationale as `short_nets_warnings` just above -- a
-    # `topology.top_level_pins_anchored` disclosure records a *request-side*
-    # strengthening of the compare (assertions declared on the comparer before
-    # `compare()` ran), not a `NetlistComparer` event, so it is appended here
-    # rather than folded into `_build_mismatches`. Always `severity:
-    # "warning"`: anchoring only ever removes a degree of freedom, so it never
-    # changes `status` on its own -- it keeps a match that rests on
-    # name-anchored boundary pins from being indistinguishable from one
-    # reached by topology alone. Extended unconditionally (an empty list is a
-    # no-op) for the same `run_lvs`-complexity reason, see
-    # `scripts/check_complexity_baseline.py`.
-    mismatches.extend(anchor_warnings)
-    # Issue #3014: same rationale -- a request-side `hints.constant_nets`
-    # disclosure (empty list is a no-op); a warning never changes `status`.
-    mismatches.extend(constant_warnings)
-    # Issue #2813: `options.finfet_bulk` disclosure (empty list is a no-op).
-    mismatches.extend(
-        bulk_disclosures(finfet_bulk_records, CATEGORY_DEVICE_FINFET_BULK_TIED)
-    )
-    mismatches.extend(ignore_mos_bulk_warnings)  # Issue #5125
-
-    if bulk_warnings:
-        # Issue #506: same rationale again -- a `reference.device_bulk`
-        # disclosure records a *request-side* normalisation applied before the
-        # compare, not a `NetlistComparer` event, so it is appended here
-        # rather than folded into `_build_mismatches`. Always
-        # `severity: "warning"`: it never changes `status`, it only keeps a
-        # match achieved through the hook from being indistinguishable from a
-        # fully independent one.
-        mismatches.extend(bulk_warnings)
-
-    if placeholder_warnings:
-        # Issue #1907: same rationale again -- a `device.placeholder_value`
-        # disclosure records a *request-side* normalisation (one parameter of
-        # a converted reference class excluded from the compare) applied
-        # before the compare, not a `NetlistComparer` event, so it is appended
-        # here rather than folded into `_build_mismatches`. Always
-        # `severity: "warning"`: it never changes `status`, it only keeps a
-        # match reached with that class's value dimension unverified from
-        # being indistinguishable from one where the two values agreed.
-        mismatches.extend(placeholder_warnings)
-
-    if tolerance_warnings:
-        # Issue #589: same rationale once more -- a `parameter_tolerance`
-        # disclosure records a value this run deliberately absorbed *between*
-        # the two `compare()` passes, not a `NetlistComparer` event, so it is
-        # appended here rather than folded into `_build_mismatches`. Always
-        # `severity: "warning"`: it never changes `status` (the second
-        # `compare()` already did that, or didn't), it only keeps a match
-        # reached through the caller's tolerance from being indistinguishable
-        # from one where the two values actually agreed.
-        mismatches.extend(tolerance_warnings)
-
-    if compare_parameter_warnings:
-        # Issue #1928: same rationale once more -- a `compare_parameters`
-        # disclosure records a request-side compare-scoping choice applied
-        # before the compare, not a `NetlistComparer` event, so it is
-        # appended here rather than folded into `_build_mismatches`. Always
-        # `severity: "warning"`: it never changes `status`, it only keeps a
-        # match reached with a parameter scoped out from being
-        # indistinguishable from one where every parameter actually agreed.
-        mismatches.extend(compare_parameter_warnings)
-
-    # Issue #2461: same append-here rationale once more -- which parameters a
-    # device class declares primary is a property of the two netlists' classes
-    # as prepared for this run, not a `NetlistComparer` event, so it is
-    # appended here rather than folded into `_build_mismatches`. Always
-    # `severity: "warning"`: it never changes `status`, it only keeps a match
-    # reached without comparing a resistor/capacitor's geometry at all from
-    # being indistinguishable from one where the two sides' geometry actually
-    # agreed. Extended unconditionally (like `family_findings` below, unlike
-    # the `if`-guarded warnings above): the list is empty on every run with no
-    # resistor/capacitor class to report.
-    mismatches.extend(geometry_warnings)
-
-    if flatten_warnings:
-        # Issue #1085: same rationale as the disclosures above -- a
-        # `flatten_reference`/`flatten_layout` structural flatten is a
-        # request-side transform applied before the compare (indeed, before
-        # `_select_circuit` even runs), not a `NetlistComparer` event, so it
-        # is appended here rather than folded into `_build_mismatches`.
-        # Collected once, up front (before the `combine_devices`/engine
-        # branches below even run), so it fires for any request shape --
-        # both engines, both layout shapes -- the same way `combine_warnings`
-        # does.
-        mismatches.extend(flatten_warnings)
-
-    if power_only_pruning_warnings:
-        # Issue #1622: same rationale as the disclosures above -- pruning a
-        # power-only layout circuit is a request-side transform applied
-        # before the compare (before even `combine_devices_per_circuit`/
-        # `flatten_layout` above), not a `NetlistComparer` event, so it is
-        # appended here rather than folded into `_build_mismatches`.
-        mismatches.extend(power_only_pruning_warnings)
-
-    # Issue #2421: same append-here rationale as the disclosures above --
-    # this is a pre-flight determination about the reference netlist and the
-    # deck, made before the compare ran, not a `NetlistComparer` event.
-    # Unlike them it is `severity: "error"` (the reference really cannot
-    # match), but like `device.class_arity` it is diagnostic only: it never
-    # moves `status` on its own -- the compare that already ran reported the
-    # mismatch this entry explains. Extended unconditionally (like
-    # `supply_findings` below, unlike the `if`-guarded warnings above): the
-    # list is empty on every run that has no such family to report.
-    mismatches.extend(family_findings)
-
-    if gate_level_port_alias_warnings:
-        # Issue #2021: same rationale as the disclosures above -- joining an
-        # `assign`-aliased reference port's net onto its canonical target is
-        # a request-side transform applied before the compare (before even
-        # the power-only prune above), not a `NetlistComparer` event, so it
-        # is appended here rather than folded into `_build_mismatches`.
-        mismatches.extend(gate_level_port_alias_warnings)
-
-    # Issue #4815: same append-here rationale -- a request-side pin-name
-    # binding made while converting the reference, never a comparer event.
-    mismatches.extend(
-        _gate_level_port_case_fold_warnings(reference_gate_level_case_folds)
-    )
-
-    # Issue #2854: same append-here rationale as `family_findings` above --
-    # a promoted pin net carrying 2+ declared pin names is a pre-compare
-    # determination the inline extraction's rename pass made about the
-    # layout's declared interface, not a `NetlistComparer` event. Like
-    # `device.class_family_unsatisfiable` it is `severity: "error"` but
-    # diagnostic only: it never moves `status` on its own -- the compare
-    # that already ran reports the mismatch this entry explains (the
-    # layout's one joined boundary net against the reference's two separate
-    # pins). Extended unconditionally (an empty list is a no-op when no
-    # rename ran or no short was found) so this hook adds no branch to this
-    # already-complexity-baselined function.
-    mismatches.extend(_declared_pin_short_mismatches(layout_pin_renames))
-
-    mismatches.extend(supply_findings)
-    # Issue #4200: explain a net.merged that is really a case-fold name collision.
-    _annotate_case_collision_merges(mismatches, layout_circuit, "file" in layout_spec)
-    # Issue #2952: an unresolved reference subcircuit call is a pre-compare
-    # finding that moves `status` below (after the combine downgrade), so it
-    # is never hidden behind `"inconclusive"`.
-    mismatches.extend(unresolved_subckt_call_findings)
-    mismatches.sort(key=_sort_key)
-
-    # Issue #2845: a strict `pin.count` error is exempt from the downgrade
-    # below -- `combine_devices` only folds devices and never changes a
-    # circuit's declared pins, so the pin-count difference is a real
-    # mismatch whether or not combining applied, and downgrading would hide
-    # it behind `"inconclusive"`.
-    if combine_incomplete and status == "mismatch" and not strict_pin_findings:
-        # Issue #1370: `options.combine_devices` was requested, at least one
-        # side exhausted its retry budget, and both sides were rolled back to
-        # their pre-combine state (the symmetric degrade above). The compare
-        # that actually ran is therefore *not* the compare the caller asked
-        # for -- a folded layout compared uncombined against a lumped
-        # reference mismatches by construction, so this "mismatch" says
-        # nothing about whether the design differs. Report it as
-        # `"inconclusive"` instead, mirroring `klt equiv`'s own
-        # never-report-an-unreachable-verdict rule (see
-        # `STATUS_INCONCLUSIVE`).
-        #
-        # Deliberately only downgrades `"mismatch"`, never `"match"`: this
-        # module never re-derives a verdict the engine did not reach (see the
-        # module docstring), and an uncombined compare that still matched is
-        # a real, strictly-stronger match -- the fold turned out to be
-        # unnecessary. `mismatches[]` keeps the `device.combine_incomplete`
-        # warning either way, so a caller can always see that combining did
-        # not apply.
-        status = STATUS_INCONCLUSIVE
-    status = _force_mismatch_on(status, unresolved_subckt_call_findings)
     note_known_limit(
         mismatches, opts.finfet_layout, status, reference_spec, layout_spec
     )
 
-    category_counts: dict[str, int] = {}
-    # Issue #1132: `category_counts` alone collapses `error`/`warning`
-    # entries of the same category into one number (e.g. `"topology": 8`
-    # could be six warnings and two errors), so a caller cannot gate on
-    # "any error present" without re-reading every `mismatches[]` entry.
-    # `category_error_counts` mirrors `category_counts`'s shape (same keys,
-    # sorted, additive) but counts only `severity: "error"` entries per
-    # category -- a category with zero errors (e.g. an all-`warning`
-    # `topology.flattened`) is simply absent, matching `category_counts`'s
-    # own "no entries of this category at all" convention of omitting the
-    # key rather than reporting 0.
-    category_error_counts: dict[str, int] = {}
-    for mismatch in mismatches:
-        category_counts[mismatch["category"]] = (
-            category_counts.get(mismatch["category"], 0) + 1
-        )
-        if mismatch["severity"] == "error":
-            category_error_counts[mismatch["category"]] = (
-                category_error_counts.get(mismatch["category"], 0) + 1
-            )
-
-    provenance = build_provenance(
-        deck_name=layout_deck_name,
-        deck_path=(deck_source_path(layout_deck_name) if layout_deck_name else None),
-        # Issue #1901: populated only for a `gate-level-verilog`
-        # reference whose `reference.pdk`/`reference.pdk_root` resolved
-        # a PDK (see `reference_pdk_info` above) -- `None` for a plain
-        # SPICE-vs-SPICE reference, which genuinely involves no PDK.
-        pdk=reference_pdk_info,
-        # Issue #1969: pin the layout side under `provenance.input`, the
-        # shared block's own field, for *both* engines (this call is
-        # reached after the `klayout`/`netgen` branch converges, and
-        # `layout_hash_source` is resolved before it). This deliberately
-        # reverses issue #331's original call: `environment.layout_sha256`
-        # above records the same digest of the same file (both go through
-        # `sha256_file`), but only under an LVS-specific key no generic
-        # consumer reads. `klt signoff --manifest`'s T1 item-4 staleness
-        # gate reads `provenance.input.content_hash` generically across
-        # every kind, so leaving this `null` made *every* content-hash-
-        # pinned "LVS clean" citation render `stale_evidence` -- a pinned
-        # hash can never match `None`. `environment.layout_sha256` is a
-        # bare hex digest and stays exactly as it was (a report-shape
-        # contract of its own); `provenance.input.content_hash` is the
-        # `sha256:`-prefixed form, so the two are redundant in content
-        # but not interchangeable in shape.
-        input_path=layout_hash_source,
-        # Issue #2027: and say *what* that hash is of -- `"layout"` for
-        # the `layout.file` shape (the original stream, the same bytes
-        # `klt drc` hashes), `"netlist"` for the pre-extracted
-        # `layout.netlist` shape. Without this discriminator `klt
-        # signoff` compared a pre-extracted run's SPICE digest against a
-        # DRC report's layout digest and refused to aggregate a
-        # perfectly consistent pair (the repo's own `examples/signoff/`
-        # pair reproduced it).
-        input_role=layout_input_role,
-        # Issue #600: echo the resolved `layout.deck_options` mapping
-        # under `provenance.deck.options`, matching `klt extract`'s
-        # shape exactly (`_deck_block` omits the key entirely when
-        # `deck_options` is `None`/empty).
-        deck_options=opts.deck_options,
-        # Issue #2394: ...and, identically to `klt extract`, record the
-        # *fully resolved* option set (the deck's own defaults for every
-        # key `layout.deck_options` did not pin) plus `options_explicit`/
-        # `options_hash`. `layout_deck_name` is `None` for the
-        # pre-extracted `layout.netlist` shape, where `_deck_block`
-        # returns `None` and this has no effect.
-        resolve_deck_options=True,
-        include_klayout_version_mismatch=True,
-    )
-    if reference_pin_order_sources:
-        # Issue #2693: *which* pin-order sources this compare's cell pin
-        # orders came from -- one record per file read, in read order. A
-        # macro-backed `gate-level-verilog` reference resolves several
-        # (`sky130_fd_sc_hd`'s aggregate library file plus one file per
-        # instantiated SRAM macro), so `provenance.pdk` alone cannot answer
-        # "where did this cell's pin order come from". Omitted entirely for
-        # every other `reference.form`, which reads no pin-order source at
-        # all -- never a spuriously present empty list.
-        provenance["pin_order_sources"] = reference_pin_order_sources
-
-    report = {
-        "schema_version": SCHEMA_VERSION,
-        "engine": engine,
-        # Issue #2659: the committable `{path, scope}` shape, built from the
-        # *resolved* layout path (`layout_hash_source` -- the file
-        # `provenance.input.content_hash` below actually hashes), never the
-        # request's own cwd-dependent echo. See `env_provenance.repo_relative_path`.
-        # Issue #4984: `reference` takes the same shape, built from the
-        # resolved path `environment.reference_sha256` hashes.
-        "layout": env_provenance.repo_relative_path(
-            layout_hash_source,
-            repo_root=env_provenance.repo_root_for(layout_hash_source),
-        ),
-        # Issue #2686: the applied `layout.label_layers` override (which GDS
-        # purpose inline extraction read net/pin names from, per role) --
-        # see `_label_layers_echo`. Absent when no override was applied, so
-        # those reports stay byte-identical to before.
-        **_label_layers_echo(opts.label_layers),
-        # Issue #4347: the applied `layout.def_net_names`/`def_pins` DEF-name
-        # options. Absent when not requested (byte-identical reports).
-        **({"def_net_names": True} if opts.def_net_names else {}),
-        **({"def_pins": opts.def_pins_echo} if opts.def_pins_echo is not None else {}),
-        # Issue #2853: the applied `layout.abstract_cells`/
-        # `abstract_cell_lef` black-box abstraction and its per-cell report
-        # -- see `_layout_abstraction_echo`. Absent when no abstraction was
-        # requested, so those reports stay byte-identical to before.
-        **_layout_abstraction_echo(opts.layout_abstraction, layout_abstracted_cells),
-        "reference": reference_echo,
-        "top": layout_circuit.name,
-        # Issue #1205: the *reference* side's resolved top circuit name,
-        # alongside the layout side's `top` above. The two are equal for the
-        # ordinary compare, but differ by construction for an LVS negative
-        # control (a deliberately-broken `<cell>_shorted` layout compared
-        # against the intact `<cell>`'s reference netlist). Recording only
-        # one of them made such a report unreconstructable by `--check
-        # --rerun`, which applied the single `top` to both sides and failed
-        # with "top cell/subcircuit not found in reference netlist" -- see
-        # `_reconstruct_lvs_request`.
-        "reference_top": reference_circuit.name,
-        # Issue #2673: the reference-conversion context `--rerun` needs to
-        # replay a `reference.form: "subckt-call"` reference -- see
-        # `_reference_conversion_echo`. Absent for every other form, so those
-        # reports stay byte-identical to before.
-        **_reference_conversion_echo(
-            reference_form, reference_spec, reference_pin_order_files
-        ),
-        # Issue #589: the effective `options.parameter_tolerance`, echoed so a
-        # consumer reading only the response can tell whether a `"match"` was
-        # reached under a caller-supplied design tolerance at all. `null` when
-        # the option was omitted (today's exact-compare behaviour).
-        "parameter_tolerance": opts.parameter_tolerance,
-        # Issue #1205: every request option that shapes *what was compared*,
-        # echoed as resolved, so a committed report round-trips back into the
-        # request it came from (`_reconstruct_lvs_request`) instead of being
-        # re-run as a differently-shaped compare whose difference is then
-        # reported as drift. Keys are always present with their effective
-        # values (never omitted), matching `parameter_tolerance`'s own
-        # always-present discipline -- `parameter_tolerance` is repeated here
-        # so this block is a complete request-side view, while the top-level
-        # field above stays exactly where it has always been.
-        #
-        # Deliberately *not* echoed here: `options.keep_extracted` (an
-        # output-side flag -- it only controls whether the intermediate
-        # netlist is also written to disk, and is already visible as
-        # `environment.extracted_netlist`) and `options.netgen_timeout_s` (a
-        # runtime guard, not a compare input). Neither can change a verdict.
-        #
-        # `combine_devices` echoes the *resolved* request value, so it is a
-        # boolean for the bool shape and the (normalised) list of device-class
-        # names for issue #1370's list shape -- the same round-trip discipline
-        # every other key here follows.
-        "options": {
-            "combine_devices": opts.combine_devices,
-            # Issue #1552: `null` when the option was omitted, else the
-            # resolved `{<circuit-name-glob>: <bool>}` mapping -- the same
-            # always-present-but-nullable convention `netgen_setup` already
-            # follows, since (unlike `combine_devices`) there is no
-            # meaningful default value to echo instead of the option being
-            # absent.
-            "combine_devices_per_circuit": opts.combine_devices_per_circuit,
-            # Issue #2682: the resolved retry budget (the parser's default
-            # when omitted), echoed even when combining is off -- it
-            # describes the configured budget, not retries consumed.
-            "combine_devices_max_attempts": opts.combine_devices_max_attempts,
-            "flatten_layout": opts.flatten_layout,
-            "flatten_reference": opts.flatten_reference,
-            # Issue #4165: present only when the caller set it, so a request
-            # without the option produces a byte-identical report.
-            **_compare_timeout_replay_options(
-                {"compare_timeout_s": opts.compare_timeout_s}
-            ),
-            "netgen_setup": opts.netgen_setup_echo,
-            "parameter_tolerance": opts.parameter_tolerance,
-            # Issue #1928: `null` when the option was omitted, else the
-            # resolved `{<device-class>: [<parameter>, ...]}` mapping -- the
-            # same always-present-but-nullable convention
-            # `combine_devices_per_circuit`/`netgen_setup` already follow.
-            "compare_parameters": opts.compare_parameters,
-            # Issue #1952: `null` when the option was omitted (the check
-            # still runs -- omitting it is the default-on case), else the
-            # caller's own `true`/`false`/`{"expected_nets": {...}}` value
-            # verbatim. Same always-present-but-nullable convention
-            # `combine_devices_per_circuit`/`netgen_setup` follow; echoed
-            # unresolved so a committed report round-trips back into the
-            # request document it came from.
-            "power_connectivity": opts.power_connectivity_echo,
-            # Issue #2692: `null` when the option was omitted (the
-            # form-dependent default applies -- on for
-            # `reference.form: "gate-level-verilog"`, off elsewhere), else the
-            # caller's own boolean verbatim. Same always-present-but-nullable
-            # convention `power_connectivity` above follows, echoed unresolved
-            # so a committed report round-trips back into the request document
-            # it came from; what this run actually *did* is reported as the
-            # `topology.top_level_pins_anchored` disclosure in `mismatches[]`.
-            "anchor_top_level_pins": opts.anchor_top_level_pins_echo,
-            # Issue #2845: the effective boolean (`false` when omitted).
-            "strict_top_level_pin_count": opts.strict_top_level_pin_count,
-            # Issue #3650: the effective boolean (`false` when omitted).
-            "compare_mos_flavour": opts.compare_mos_flavour,
-            "ignore_mos_bulk": opts.ignore_mos_bulk,
-            "supply_nets": opts.supply_nets,
-            # Issue #2813: `null` when omitted, else the resolved
-            # `{"nmos": <net>, "pmos": <net>}` bulk-tie policy (opt-in; the
-            # applied ties are disclosed in `mismatches[]`).
-            "finfet_bulk": opts.finfet_bulk,
-        },
-        # Issue #1998: every `hints.equivalent_pins` grouping actually passed
-        # to `NetlistComparer.equivalent_pins()` for this run, keyed by
-        # (reference-side) subcircuit name -- unlike `hints.same_nets`,
-        # which the comparer can refuse (surfaced as a `hints.rejected`
-        # mismatch entry, see `_build_mismatches`), a swappable-pin group has
-        # no rejection outcome to report, so without this field a caller
-        # reading only the response has no way to tell whether an
-        # `equivalent_pins` hint changed the verdict at all. `null` when
-        # `request.hints.equivalent_pins` was omitted (or resolved to no
-        # groups), matching `options.compare_parameters`'
-        # always-present-but-nullable convention for an optional dict-shaped
-        # echo -- never a spuriously present empty `{}`.
-        "hints_applied": (equivalent_pins_applied if equivalent_pins_applied else None),
-        # Issue #3014: the `hints.constant_nets` bindings applied
-        # (`{constant: layout net}`), `null` when none -- the echo `--rerun`
-        # replays, like `hints_applied` above.
-        "constant_nets_applied": _constant_nets_echo(constant_bindings),
-        "status": status,
-        # Issue #1952: the power/ground half of a `reference.form:
-        # "gate-level-verilog"` compare, reported as its own verdict beside
-        # `status` rather than folded into it. `status` is, and stays,
-        # exactly `NetlistComparer.compare()`'s own signal-connectivity
-        # result (see this module's docstring) -- so a caller that wants
-        # full LVS on a digital block gates on
-        # `status == "match" and power_connectivity["status"] == "match"`.
-        # See `_power_connectivity_report` and
-        # `docs/design/pg-connectivity-check-decision.md`.
-        "power_connectivity": power_connectivity,
-        # Issue #1983: whether this layout's MOS body terminals were resolved
-        # from real drawn/labelled geometry or from a deck-synthesized net --
-        # the gradeable form of the `device.body_unverified` warning, which
-        # was previously only discoverable by string-matching a `category`
-        # inside `mismatches[]`. Reported beside `status`, never folded into
-        # it: `status` is, and stays, exactly the comparer's own result, so a
-        # layout with unverified bodies still reports `status: "match"` when
-        # the compare matched. See `_body_verification_report`.
-        "body_verification": body_verification,
-        # Issue #2461: per participating resistor/capacitor device class,
-        # which of its declared parameters this compare actually covered and
-        # why each of the others did not -- the gradeable form of the
-        # `device.geometry_not_compared` warning (and of the
-        # `device.placeholder_value`/`device.parameter_excluded` warnings,
-        # whose exclusions are labelled with their own `reason`). Reported
-        # beside `status`, never folded into it: a class whose geometry was
-        # never compared still reports `status: "match"` when the compare
-        # matched -- that is precisely the disclosure gap this answers. `null`
-        # for `"engine": "netgen"`. See `_device_parameter_coverage`.
-        "device_parameter_coverage": device_parameter_coverage,
-        "mismatch_count": len(mismatches),
-        "error_count": sum(category_error_counts.values()),
-        "category_counts": dict(sorted(category_counts.items())),
-        "category_error_counts": dict(sorted(category_error_counts.items())),
-        "counts": counts,
-        "device_classes": device_classes,
-        "environment": {
-            "engine": engine,
-            "engine_version": engine_version,
-            # Issue #2373: which netgen executable actually produced this
-            # verdict -- the absolute path `_resolve_netgen_binary` settled
-            # on, so a committed report distinguishes a from-source `netgen`
-            # from Debian/Ubuntu's `netgen-lvs` (and from an explicitly
-            # named build). Always `null` for `"engine": "klayout"`, which
-            # launches no subprocess.
-            "netgen_binary": netgen_binary,
-            "layout_sha256": sha256_file(layout_hash_source),
-            "reference_sha256": sha256_file(reference_netlist_path),
-            "extracted_netlist": extracted_netlist_path,
-            **reference_module_names(reference_netlist_path, reference_form),
-        },
-        # Issue #2693: built above the return (per-form `pin_order_sources`).
-        "provenance": provenance,
-        "mismatches": mismatches,
-        "net_correspondence": net_correspondence,
-    }
-    return _finish_response(
-        report,
-        portable=portable_paths,
+    return assemble_lvs_report(
+        mismatches=mismatches,
+        status=status,
+        engine=engine,
+        engine_version=engine_version,
+        netgen_binary=netgen_binary,
+        layout_deck_name=layout_deck_name,
+        layout_hash_source=layout_hash_source,
+        layout_input_role=layout_input_role,
+        layout_circuit=layout_circuit,
+        layout_abstracted_cells=layout_abstracted_cells,
+        reference_circuit=reference_circuit,
+        reference_echo=reference_echo,
+        reference_form=reference_form,
+        reference_spec=reference_spec,
+        reference_pdk_info=reference_pdk_info,
+        reference_pin_order_sources=reference_pin_order_sources,
+        reference_pin_order_files=reference_pin_order_files,
+        reference_netlist_path=reference_netlist_path,
+        extracted_netlist_path=extracted_netlist_path,
+        equivalent_pins_applied=equivalent_pins_applied,
+        constant_bindings=constant_bindings,
+        power_connectivity=power_connectivity,
+        body_verification=body_verification,
+        device_parameter_coverage=device_parameter_coverage,
+        counts=counts,
+        device_classes=device_classes,
+        net_correspondence=net_correspondence,
+        portable_paths=portable_paths,
         request_dir=request_dir,
-        pdk_root=(reference_pdk_info or {}).get("root"),
+        opts=opts,
     )
 
 
