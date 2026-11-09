@@ -206,6 +206,8 @@
       "modules": [
         "klayout_tools.cli.extract_cmd",
         "klayout_tools.cli.parsers.extract",
+        "klayout_tools.cli.parsers.extract_args_part2",
+        "klayout_tools.cli.parsers.extract_args_part3",
         "klayout_tools.extract",
         "klayout_tools.extract_abstract",
         "klayout_tools.extract_batch",
