@@ -8,6 +8,9 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-10
 
+- **PR #5270**: fix: triage remaining contact/via/li native sky130A DRC ids
+- **PR #5258**: fix: triage 59 native sky130 contact/via/li rule ids
+- **Issue #5251** (closed): Triage native sky130A DRC ids, slice 1/4 (contacts/vias/li)
 - **PR #5261**: test: native-deck checks for sg13g2 ring cont_drw_Offgrid and LU.b
 - **PR #5259**: fix: triage native sky130A HV/well/varactor/vpp DRC ids (slice 3/4)
 - **Issue #5253** (closed): Triage native sky130A DRC ids, slice 3/4 (high-voltage/wells/varactor/vpp)
