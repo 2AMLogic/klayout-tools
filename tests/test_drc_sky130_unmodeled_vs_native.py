@@ -53,6 +53,20 @@ NATIVE_ALIASES: dict[str, str] = {
     "capm.4": "capm.enclosing.via3.1",
     "cap2m.3": "met4.enclosing.capm2.1",
     "cap2m.4": "capm2.enclosing.via4.1",
+    # Fixed-size cut width / max-length siblings (#5251). The deck's
+    # ``*.width.1`` rules are min/max-size checks; the native ids are the
+    # lydrc min/max form (``via.1a``) or the mr deck's split halves.
+    "ct.1_a": "mcon.width.1",
+    "ct.1_b": "mcon.width.1",
+    "ct.1_a/b": "mcon.width.1",
+    "via.1a": "via.width.1",
+    "via.1a_b": "via.width.1",
+    "via2.1a": "via2.width.1",
+    "via2.1a_b": "via2.width.1",
+    "via3.1a": "via3.width.1",
+    "via3.1_b": "via3.width.1",
+    "via4.1a": "via4.width.1",
+    "via4.1_b": "via4.width.1",
     **{
         f"{native}_OFFGRID": f"{stem}.ongrid.1"
         for native, stem in (
@@ -65,6 +79,11 @@ NATIVE_ALIASES: dict[str, str] = {
             ("nsm", "nsm"),
             ("pad", "pad"),
             ("rpm", "rpm"),
+            # native ``ct`` is the mcon layer; ``licon``/``li`` are the
+            # deck's ``licon1``/``li1`` rows (#5251).
+            ("ct", "mcon"),
+            ("licon", "licon1"),
+            ("li", "li1"),
         )
     },
 }
@@ -93,6 +112,10 @@ _ALIAS_STEMS = (
     "psdm",
     "tap",
     "tunm",
+    "via",
+    "via2",
+    "via3",
+    "via4",
 )
 IMPLEMENTED |= {
     native
@@ -461,10 +484,14 @@ def test_run_drc_sky130_coverage_lists_unmodeled_rules(tmp_path):
         "via.3",
         "via.3_a",
         "via.3_b",
+        "via.4a_a",
         "via.4b",
+        "via.4c.5c",
         "via.5a",
         "via1.14",
+        "via1.5a",
         "via1.5b",
+        "via2",
         "via2.11",
         "via2.12",
         "via2.14",
@@ -472,15 +499,22 @@ def test_run_drc_sky130_coverage_lists_unmodeled_rules(tmp_path):
         "via2.3",
         "via2.3_a",
         "via2.3_b",
+        "via2.4_a",
         "via2.4a",
         "via2.5",
+        "via3",
+        "via3.1",
         "via3.11",
         "via3.12",
         "via3.13",
+        "via3.4_a",
         "via3.5",
+        "via4",
+        "via4.1",
         "via4.3",
         "via4.3_a",
         "via4.3_b",
+        "via4.4_a",
         "vpp.1",
         "vpp.13",
         "vpp.3",

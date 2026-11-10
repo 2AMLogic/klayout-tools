@@ -5,39 +5,3 @@
 # rules); the rest are genuine gaps. Triage each into one of the two: remove it here
 # and add it to UNMODELED_RULES (gap) or give the implementing rule a provenance
 # rule_id (implemented). This list may only shrink; the test rejects new entries.
-ct.1_a
-ct.1_a/b
-ct.1_b
-ct_OFFGRID
-ct_angle
-li_OFFGRID
-li_angle
-licon_OFFGRID
-licon_angle
-via.1a
-via.1a_b
-via.4a_a
-via.4c.5c
-via1.5a
-via2
-via2.1a
-via2.1a_b
-via2.4_a
-via2_OFFGRID
-via2_angle
-via3
-via3.1
-via3.1_b
-via3.1a
-via3.4_a
-via3_OFFGRID
-via3_angle
-via4
-via4.1
-via4.1_b
-via4.1a
-via4.4_a
-via4_OFFGRID
-via4_angle
-via_OFFGRID
-via_angle
