@@ -32,11 +32,56 @@ def _ids(name: str) -> set[str]:
 
 NATIVE = _ids("sky130_native_rule_ids.txt")
 UNTRIAGED = _ids("sky130_native_rule_ids_untriaged.txt")
+_DECK_BY_ID = {r.id: r for r in deck_mod.DECK}
+
+#: Native output ids the deck implements under a different citation (#5252):
+#: native id -> deck rule id. ``<layer>_OFFGRID`` / ``<layer>_angle`` are the
+#: output names of ``sky130A_mr.drc``'s OFFGRID block, whose rule ids are
+#: ``x.1b`` / ``x.3a`` / ``x.2`` (what the deck's provenance cites), and
+#: ``m4.4`` is the ``sky130A.lydrc`` name of the 0.24um2 met4 area check the
+#: mr deck calls ``m4.4a``. Each target must exist in the deck.
+NATIVE_ALIASES: dict[str, str] = {
+    "m4.4": "met4.area.1",
+    # Enclosure rules cited via the mr deck's ids; kept here (not as deck
+    # ``provenance``) so sky130.py stays within its size ratchet.
+    "m1.4": "met1.enclosing.mcon.1",
+    "m2.4": "met2.enclosing.via.1",
+    "m3.4": "met3.enclosing.via2.1",
+    "m4.3": "met4.enclosing.via3.1",
+    "m5.3": "met5.enclosing.via4.1",
+    "capm.3": "met3.enclosing.capm.1",
+    "capm.4": "capm.enclosing.via3.1",
+    "cap2m.3": "met4.enclosing.capm2.1",
+    "cap2m.4": "capm2.enclosing.via4.1",
+    **{
+        f"{native}_OFFGRID": f"{stem}.ongrid.1"
+        for native, stem in (
+            ("m1", "met1"),
+            ("m2", "met2"),
+            ("m3", "met3"),
+            ("m4", "met4"),
+            ("m5", "met5"),
+            ("mf", "mf"),
+            ("nsm", "nsm"),
+            ("pad", "pad"),
+            ("rpm", "rpm"),
+        )
+    },
+}
+NATIVE_ALIASES.update(
+    {
+        k.replace("_OFFGRID", "_angle"): v.replace(".ongrid.1", ".angle.1")
+        for k, v in list(NATIVE_ALIASES.items())
+        if k.endswith("_OFFGRID")
+    }
+)
 IMPLEMENTED = {r.provenance.rule_id for r in deck_mod.DECK if r.provenance is not None}
+IMPLEMENTED |= {n for n, deck_id in NATIVE_ALIASES.items() if deck_id in _DECK_BY_ID}
 # <layer>_OFFGRID / <layer>_angle are implemented by the deck's ongrid/angle rules,
 # which cite the official x.1b/x.2*/x.3a ids in provenance (#5254). Only the
 # stems triaged so far are credited here; the remaining stems stay UNTRIAGED
-# until their own slice of #5242 lands (and then widens this set).
+# until their own slice of #5242 lands (and then widens this set). The metal /
+# mf / nsm / pad / rpm stems are credited via NATIVE_ALIASES above (#5252).
 _ALIAS_STEMS = (
     "areaid_re",
     "diff",
@@ -49,11 +94,10 @@ _ALIAS_STEMS = (
     "tap",
     "tunm",
 )
-_DECK_IDS = {r.id for r in deck_mod.DECK}
 IMPLEMENTED |= {
     native
     for native, rule_id in native_offgrid_aliases().items()
-    if rule_id in _DECK_IDS and native.rsplit("_", 1)[0] in _ALIAS_STEMS
+    if rule_id in _DECK_BY_ID and native.rsplit("_", 1)[0] in _ALIAS_STEMS
 }
 UNMODELED = set(deck_mod.UNMODELED_RULES)
 
@@ -65,6 +109,11 @@ def test_snapshot_header_records_pdk_version_and_command():
         if ln.startswith("#")
     )
     assert "open_pdks" in header and "Generated from" in header
+
+
+def test_native_aliases_resolve_to_deck_rules():
+    missing = {n: d for n, d in NATIVE_ALIASES.items() if d not in _DECK_BY_ID}
+    assert not missing, f"alias targets absent from the deck: {missing}"
 
 
 def test_ct4_and_li5_are_disclosed():
@@ -106,15 +155,25 @@ def test_run_drc_sky130_coverage_lists_unmodeled_rules(tmp_path):
     report = run_drc(str(path), "sky130")
 
     assert report["coverage"]["unmodeled_rules"] == [
+        "MR_li.WID.4",
         "MR_licon.SP.1",
+        "MR_lvtn.OVL.2",
+        "MR_rdl.CON.1",
+        "MR_thkox.CON.1",
+        "MR_tunm.CON.1",
         "cap2m.11",
         "cap2m.2b",
         "cap2m.2b_a",
+        "cap2m.3_a",
         "cap2m.5",
+        "capm.10",
         "capm.11",
         "capm.2b",
         "capm.2b_a",
         "capm.5",
+        "capm.6",
+        "capm.7",
+        "capm.8",
         "ct.4",
         "difftap.10",
         "difftap.11",
@@ -154,12 +213,37 @@ def test_run_drc_sky130_coverage_lists_unmodeled_rules(tmp_path):
         "lvtn.3b",
         "lvtn.4b",
         "lvtn.9",
+        "m1.11",
         "m1.3ab",
+        "m1.4a",
+        "m1.4a_a",
         "m1.5",
+        "m1.x",
+        "m2.11",
         "m2.3ab",
+        "m2.4_a",
+        "m2.4_b",
         "m2.5",
+        "m2.via",
+        "m2.x",
+        "m3.11",
         "m3.3ab",
+        "m3.3cd",
+        "m3.4_a",
+        "m3.via2",
+        "m3.x",
+        "m4.11",
+        "m4.15",
+        "m4.3_a",
         "m4.5ab",
+        "m4.via3",
+        "m4.x",
+        "m5.3_a",
+        "m5.via4",
+        "m5.x",
+        "mf.1",
+        "mf.2",
+        "mf.3",
         "moduleCut.1",
         "n/psdm.10a",
         "n/psdm.10b",
@@ -185,6 +269,9 @@ def test_run_drc_sky130_coverage_lists_unmodeled_rules(tmp_path):
         "nsdm.6a",
         "nsdm_psdm_overlap",
         "nsm.1",
+        "nsm.2",
+        "nsm.3",
+        "nsm.4",
         "pad.2",
         "photo.10",
         "photo.2",
@@ -211,9 +298,25 @@ def test_run_drc_sky130_coverage_lists_unmodeled_rules(tmp_path):
         "psdm.5",
         "psdm.6",
         "psdm.6a",
+        "pwres.2",
+        "pwres.3",
+        "pwres.4",
+        "pwres.5",
+        "pwres.6",
+        "pwres.8",
         "rdl.1",
         "rdl.2",
+        "rfdiode.1",
+        "rfdiode.2",
+        "rpm.10",
         "rpm.2",
+        "rpm.3",
+        "rpm.4",
+        "rpm.5",
+        "rpm.6",
+        "rpm.7",
+        "rpm.8",
+        "rpm.9",
         "thkox.1",
         "thkox.2",
         "tunm.1",
