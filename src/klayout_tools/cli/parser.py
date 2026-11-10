@@ -4335,10 +4335,8 @@ def _add_deck_parser(subparsers: argparse._SubParsersAction) -> None:
 
 
 def _add_evidence_parser(subparsers: argparse._SubParsersAction) -> None:
-    """Register the ``evidence`` verb with a nested ``record`` subcommand
-    (issue #4044): the writer side of the ``evidence-record/1`` convention in
-    docs/design/sim-evidence-discipline-spike.md.
-    """
+    """Register the ``evidence`` verb (issue #4044): the ``evidence-record/1``
+    writer per docs/design/sim-evidence-discipline-spike.md, plus lint/claims."""
     evidence_parser = subparsers.add_parser(
         "evidence",
         help="write an evidence-record/1 file around a finished klt sim / "
@@ -4444,6 +4442,7 @@ def _add_evidence_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(lint_parser)
     lint_parser.set_defaults(func=evidence_cmd.run_lint)
+    evidence_cmd.add_claims_parser(evidence_sub, _add_format_arg)
     evidence_cmd.add_render_parser(evidence_sub, _add_format_arg)
 
 

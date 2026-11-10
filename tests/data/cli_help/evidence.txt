@@ -4,7 +4,7 @@ environment provenance and the per-corner deck/log snapshot. Never overwrites
 a record.
 
 positional arguments:
-  <subcommand> record write one evidence-record/1 file lint lint the evidence-record/1 files under a repo render fill marked tables in docs from evidence records
+  <subcommand> record write one evidence-record/1 file lint lint the evidence-record/1 files under a repo claims check documents that cite evidence records against the records render fill marked tables in docs from evidence records
 
 options:
   -h, --help show this help message and exit
@@ -47,6 +47,23 @@ options:
   --base BASE ref the append-only check diffs against (default: origin/main)
   --schema FILE.json flat declarative repo schema: required_fields, extension_keys, corner_id_pattern
   --no-append-only skip the git-diff append-only check (e.g. no base ref available)
+  --format {text,json} output format (default: text)
+
+--- klt evidence claims ---
+
+Check documents against evidence records: every cited record exists (and its
+JSON twin), a citation of a superseded record is an error unless under a <!--
+klt:historical --> marker, and --registry rows must agree with the pointed-at
+record values. Legacy records are resolved via the registry's `mapping` key.
+Exits 0 clean, 1 on findings.
+
+positional arguments:
+  root repo root (default: cwd)
+
+options:
+  -h, --help show this help message and exit
+  --docs GLOB [GLOB ...] document glob(s), relative to ROOT; a glob matching nothing is an error
+  --registry FILE.json JSON registry: `claims` rows (literal, record, pointer, decimals, scale, corner, agg) and legacy- record `mapping`
   --format {text,json} output format (default: text)
 
 --- klt evidence render ---

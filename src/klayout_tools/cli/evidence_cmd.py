@@ -21,8 +21,9 @@ not run -- the error envelope), 2 usage.
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 
-from .. import evidence_lint, evidence_record, evidence_render
+from .. import evidence_claims, evidence_lint, evidence_record, evidence_render
 from .output import emit_error, emit_success
 
 
@@ -76,6 +77,32 @@ def _print_lint_text(payload: dict) -> None:
         print(f"  {finding['code']}  {finding['record']}: {finding['message']}")
 
 
+def run_claims(args: argparse.Namespace) -> int:
+    try:
+        registry = (
+            evidence_claims.load_registry(args.registry) if args.registry else None
+        )
+        payload = evidence_claims.claims(args.root, args.docs, registry)
+    except evidence_claims.EvidenceClaimsError as exc:
+        return emit_error("evidence claims", str(exc), args.format, code=exc.code)
+
+    emit_success(payload, args.format, _print_claims_text)
+    return 1 if payload["findings"] else 0
+
+
+def _print_claims_text(payload: dict) -> None:
+    print(
+        f"{payload['docs_checked']} doc(s), {payload['citations_checked']} "
+        f"citation(s), {payload['claims_checked']} claim(s) checked: "
+        f"{payload['status']}"
+    )
+    for finding in payload["findings"]:
+        print(
+            f"  {finding['code']}  {finding['doc'] or '-'}: "
+            f"{finding['record']}: {finding['message']}"
+        )
+
+
 def run_render(args: argparse.Namespace) -> int:
     try:
         payload = evidence_render.render(
@@ -93,6 +120,45 @@ def _print_render_text(payload: dict) -> None:
     for key in ("stale", "updated"):
         for ref in payload[key]:
             print(f"  {key}  {ref}")
+
+
+def add_claims_parser(
+    evidence_sub: argparse._SubParsersAction,
+    add_format_arg: Callable[[argparse.ArgumentParser], None],
+) -> None:
+    """Register ``klt evidence claims`` (lives here, not in ``parser.py``, for the
+    file-size ratchet)."""
+    claims_parser = evidence_sub.add_parser(
+        "claims",
+        help="check documents that cite evidence records against the records",
+        description=(
+            "Check documents against evidence records: every cited record "
+            "exists (and its JSON twin), a citation of a superseded record is "
+            "an error unless under a <!-- klt:historical --> marker, and "
+            "--registry rows must agree with the pointed-at record values. "
+            "Legacy records are resolved via the registry's `mapping` key. "
+            "Exits 0 clean, 1 on findings."
+        ),
+    )
+    claims_parser.add_argument(
+        "root", nargs="?", default=".", help="repo root (default: cwd)"
+    )
+    claims_parser.add_argument(
+        "--docs",
+        nargs="+",
+        required=True,
+        metavar="GLOB",
+        help="document glob(s), relative to ROOT; a glob matching nothing is an error",
+    )
+    claims_parser.add_argument(
+        "--registry",
+        metavar="FILE.json",
+        default=None,
+        help="JSON registry: `claims` rows (literal, record, pointer, decimals, "
+        "scale, corner, agg) and legacy-record `mapping`",
+    )
+    add_format_arg(claims_parser)
+    claims_parser.set_defaults(func=run_claims)
 
 
 def add_render_parser(subparsers, add_format_arg) -> None:  # type: ignore[no-untyped-def]
