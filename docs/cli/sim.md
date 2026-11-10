@@ -19,7 +19,9 @@ this document (and the code) win.
 - `--outdir` — override where per-corner logs/rawfiles are written when the
   request sets `options.keep_artifacts`. Defaults to a `.klt/sim/` directory
   next to the request file (the same "next to the input" convention as `klt
-  render`'s default output directory).
+  render`'s default output directory). `-o` names a **directory**, never the
+  report file, on every backend (including `--backend batch`): the report goes
+  to stdout, and `--report-out <path>` writes a copy to a file.
 - `--backend` — execution backend for the corner matrix, overriding the
   request's own `backend` field when given. See "Execution backends" below.
 - `--max-workers` — worker-pool size for the `local-parallel` backend,
