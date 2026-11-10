@@ -45,6 +45,16 @@ def fidelity_warnings_for_deck(deck_name: str | None) -> list[str]:
     ]
 
 
+def with_fidelity_warnings(result: dict, deck_name: str | None) -> dict:
+    """Return ``result`` with the additive ``warnings: array<string>`` field
+    (issue #5203) set from ``fidelity_warnings_for_deck`` -- present only when
+    non-empty, so every non-asap7 report stays byte-identical."""
+    warnings = fidelity_warnings_for_deck(deck_name)
+    if warnings:
+        result["warnings"] = warnings
+    return result
+
+
 def netlist_adaptation_for_deck(deck_name: str | None) -> str | None:
     """Name of the simulator adaptation applied to the extracted legs' DUT
     netlist for ``deck_name``, or ``None`` (no adaptation, sky130 etc.)."""

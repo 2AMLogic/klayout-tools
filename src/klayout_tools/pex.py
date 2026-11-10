@@ -233,8 +233,8 @@ from .op_sanity import INCLUDE_CARD_RE, IncludeState, expand_includes
 from .pex_asap7 import (
     DEVICE_MODEL_CARD_PREFIXES,
     adapt_leg_netlists,
-    fidelity_warnings_for_deck,
     netlist_adaptation_for_deck,
+    with_fidelity_warnings,
 )
 from .sim import SimError, load_request, run_sim
 from .spice_flatten import SpiceFlattenError, flatten_spice
@@ -3940,14 +3940,7 @@ def run_pex(
         "schematic_flatten": schematic_flatten,
         "provenance": extract_report["provenance"],
     }
-    result.update(
-        _device_only_result_fields(
-            device_only_netlist_path, device_only_parity, repo_root=repo_root
-        )
+    result |= _device_only_result_fields(
+        device_only_netlist_path, device_only_parity, repo_root=repo_root
     )
-    # Additive field (issue #5203): `warnings: array<string>`, present only
-    # when non-empty so every non-asap7 report stays byte-identical.
-    fidelity_warnings = fidelity_warnings_for_deck(deck_name)
-    if fidelity_warnings:
-        result["warnings"] = fidelity_warnings
-    return result
+    return with_fidelity_warnings(result, deck_name)
