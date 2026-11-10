@@ -434,6 +434,15 @@ def parse_probes(
     return probes
 
 
+class OrderedPinSet(frozenset):  # type: ignore[type-arg]
+    """A ``frozenset`` of declared pin names that remembers the order the
+    caller gave them in (``order``, issue #5255). Set semantics are unchanged,
+    so every existing ``declared_pins`` consumer is unaffected; only the
+    top-``.SUBCKT`` pin reorder reads ``order``."""
+
+    order: tuple[str, ...] = ()
+
+
 def parse_declared_pins(
     raw: str | None,
     error_cls: ErrorFactory,
@@ -453,7 +462,9 @@ def parse_declared_pins(
     """
     if raw is None:
         return None
-    names = frozenset(name.strip() for name in raw.split(",") if name.strip())
+    ordered = tuple(dict.fromkeys(n.strip() for n in raw.split(",") if n.strip()))
+    names = OrderedPinSet(ordered)
+    names.order = ordered
     if not names:
         raise error_cls(
             f"{flag} was given but contains no non-empty name "
