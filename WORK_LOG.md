@@ -8,6 +8,11 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-10
 
+- **PR #5230**: refactor: move extract --spef block out of run_extract
+- **PR #5229**: fix: expand pinned $PDK_ROOT in local osdi_preload entries
+- **PR #5225**: feat: add delay and energy circuit stage to ASAP7 parallel-line fidelity fixture
+- **Issue #5227** (closed): klt sim local backend does not expand $PDK_ROOT in osdi_preload
+- **Issue #5202** (closed): ASAP7 parallel-line fidelity (2/3): delay/energy consequence, evidence record, accuracy table
 - **PR #5226**: refactor: consolidate extract/netlist batch glue into _batch_common
 - **Issue #5232** (closed): gen bjt_array: adjacent sg13g2 HBT units abut with 5 nm Metal1 gap (M1.b), no spacing parameter
 - **Issue #5228** (closed): klt sim waveform.raw is all-vectors ASCII (160 MB for 30 ns) with no signal selection or reader
