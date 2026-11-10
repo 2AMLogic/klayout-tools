@@ -193,6 +193,8 @@ from .sim_convergence_retry import is_retryable_convergence_failure, note_not_re
 from .sim_corner_keys import unknown_key_warnings
 from .sim_decks import run_deck_request
 from .sim_echo_messages import echo_unsupported_message, zipped_length_message
+from .sim_osdi_pin import osdi_pdk_root_pin
+from .sim_osdi_pin import resolve_osdi_preload as _resolve_osdi_preload
 
 from .sim_analysis_overrides import (  # isort: skip
     AO_LABEL as _AO_LABEL,  # noqa: F401
@@ -3253,8 +3255,9 @@ def _prepare_sim_request(
     # image-baked `.osdi`; they are existence-checked here only when the run
     # stays on this host (see below).
     osdi_runner_resolved = sim_staging.runner_resolved_osdi(request, request_dir)
+    osdi_pdk_root = osdi_pdk_root_pin(request)
     osdi_preload = _resolve_osdi_preload(
-        options, request_dir, skip_indices=frozenset(osdi_runner_resolved)
+        options, request_dir, frozenset(osdi_runner_resolved), osdi_pdk_root
     )
     # Issue #2668: opt-in staging of the request's own model inputs for the
     # off-host backends. Validated for every backend (a typo'd value is
@@ -3290,7 +3293,12 @@ def _prepare_sim_request(
             "models.pdk_root) so the runner resolves it"
         )
     osdi_preload, osdi_runner_environment = _finalize_osdi_preload(
-        options, request_dir, backend, osdi_preload, osdi_runner_resolved
+        options,
+        request_dir,
+        backend,
+        osdi_preload,
+        osdi_runner_resolved,
+        pdk_root=osdi_pdk_root,
     )
     # Issue #3041: an `engine_version` pin is checked before any corner runs
     # where this process can see the engine (local backends); off-host
@@ -5118,6 +5126,7 @@ def _finalize_osdi_preload(
     backend: str,
     osdi_preload: tuple[str, ...],
     osdi_runner_resolved: dict[int, str],
+    pdk_root: str | None = None,
 ) -> tuple[tuple[str, ...], list[dict[str, str]]]:
     """Settle ``osdi_preload`` once the backend is known (issue #3819).
 
@@ -5127,7 +5136,7 @@ def _finalize_osdi_preload(
     here, so the full existence check and expansion apply, exactly as before.
     """
     if backend not in _OFFHOST_BACKENDS:
-        return _resolve_osdi_preload(options, request_dir), []
+        return _resolve_osdi_preload(options, request_dir, pdk_root=pdk_root), []
     return osdi_preload, [
         {"entry": options["osdi_preload"][index], "reason": reason}
         for index, reason in sorted(osdi_runner_resolved.items())
@@ -5141,65 +5150,6 @@ def _osdi_runner_environment_fields(
     if not osdi_runner_environment:
         return {}
     return {"osdi_preload_runner_resolved": osdi_runner_environment}
-
-
-def _resolve_osdi_preload(
-    options: dict[str, Any],
-    request_dir: str,
-    skip_indices: frozenset[int] = frozenset(),
-) -> tuple[str, ...]:
-    """Resolve ``options.osdi_preload`` (issue #2513) to absolute paths of
-    compiled OSDI shared libraries the generated deck must ``pre_osdi``.
-
-    ngspice can only instantiate a Verilog-A compact model through an OSDI
-    shared library, loaded with the *control* command ``pre_osdi <file>``
-    (``pre_``-prefixed commands run before the circuit is parsed). Several
-    open PDKs ship their core devices that way -- IHP's ``sg13g2`` MOSFETs
-    are PSP103 Verilog-A, compiled to ``libs.tech/ngspice/osdi/*.osdi`` by
-    ``scripts/fetch-sg13g2-sim-toolchain.sh`` (see ``pdks/README.md``) --
-    and without the preload every device fails with ``Unable to find
-    definition of model ...``. :func:`_write_corner_deck` emits one
-    ``pre_osdi`` line per entry, in declared order, at the top of the
-    ``.control`` block it already generates, so a caller's netlist body
-    never needs a ``.control`` block of its own (docs/cli/sim.md's "Netlist
-    convention").
-
-    Same resolution rule as ``models.lib``'s literal-path shape: env vars
-    and ``~`` are expanded, a relative path is joined against the request
-    file's own directory. Every entry is existence-checked **here**, before
-    any corner is dispatched -- the same posture as
-    :func:`_resolve_models_lib`'s ``model library not found`` -- rather than
-    left to surface as a per-corner ngspice error deep inside the run.
-
-    ``skip_indices`` (issue #3819) are entries the executing host resolves
-    itself (see :func:`sim_staging.runner_resolved_osdi`): validated as
-    paths but neither expanded nor existence-checked, and omitted from the
-    result.
-
-    Returns ``()`` when the option is absent or an empty list, which leaves
-    every generated deck byte-identical to before this issue.
-    """
-    raw = options.get("osdi_preload")
-    if raw is None:
-        return ()
-    if isinstance(raw, str) or not isinstance(raw, (list, tuple)):
-        raise SimError(
-            "request.options.osdi_preload must be an array of paths to "
-            "compiled `.osdi` shared libraries"
-        )
-    resolved: list[str] = []
-    for index, entry in enumerate(raw):
-        if not isinstance(entry, str) or not entry.strip():
-            raise SimError(
-                f"request.options.osdi_preload[{index}] must be a non-empty path"
-            )
-        if index in skip_indices:
-            continue
-        path = _resolve_relative(entry, request_dir)
-        if not os.path.isfile(path):
-            raise SimError(f"osdi_preload file not found: {path}")
-        resolved.append(path)
-    return tuple(resolved)
 
 
 def _model_inputs_environment(

@@ -178,6 +178,11 @@ from .signoff_runset import (
 from .signoff_runset import (
     REASON_RUNSET_UNRECOGNISED_DEVICE as _REASON_RUNSET_UNRECOGNISED_DEVICE,
 )
+from .signoff_sta_constraints import (
+    constraint_completeness_status,
+    sta_annotation_refusal,
+    sta_constraint_refusal,
+)
 
 __all__ = [
     "SignoffError",
@@ -2452,73 +2457,6 @@ def _sta_timing_passed(envelope: dict[str, Any]) -> bool:
     return _sta_corner_timing_passed(envelope)
 
 
-def _sta_annotation_shortfalls(envelope: dict[str, Any]) -> list[dict[str, Any]]:
-    """The corners of a `klt sta` envelope whose ``spef_annotation`` block is
-    present but does not report ``annotation_complete`` as literal ``True``
-    (issue #3258), as ``{"corner", "annotation_complete",
-    "annotation_warning"}`` entries.
-
-    Graded over the same corner set as :func:`_sta_timing_passed` (every
-    corner of a multi-corner response, or the flat envelope itself). A corner
-    whose ``spef_annotation`` is absent or ``null`` (no SPEF supplied) is not
-    a shortfall: the requirement cannot turn a no-SPEF run into a parasitics
-    claim. A present block whose ``annotation_complete`` is missing, ``null``
-    or non-boolean *is* one (fail-closed).
-    """
-    corners = envelope.get("corners")
-    scopes = (
-        [c for c in corners if isinstance(c, dict)]
-        if isinstance(corners, list)
-        else [envelope]
-    )
-    shortfalls: list[dict[str, Any]] = []
-    for scope in scopes:
-        block = scope.get("spef_annotation")
-        if block is None:
-            continue
-        if not isinstance(block, dict):
-            shortfalls.append(
-                {
-                    "corner": scope.get("corner"),
-                    "annotation_complete": None,
-                    "annotation_warning": None,
-                }
-            )
-            continue
-        if block.get("annotation_complete") is True:
-            continue
-        shortfalls.append(
-            {
-                "corner": scope.get("corner"),
-                "annotation_complete": block.get("annotation_complete"),
-                "annotation_warning": block.get("annotation_warning"),
-            }
-        )
-    return shortfalls
-
-
-def _sta_annotation_refusal(
-    check_kind: str, spec: dict[str, Any], envelope: dict[str, Any]
-) -> tuple[str, str, None, dict[str, Any]] | None:
-    """Issue #3258: the ``unmet`` grade for a cited `sta` envelope whose SPEF
-    annotation was not fully applied, when the evidence entry opted in with
-    ``require_annotation_complete``; ``None`` when the requirement is off, the
-    kind is not ``sta``, or every annotated corner is complete. The offending
-    corner(s)' ``annotation_warning`` ride along as the item's detail.
-    """
-    if check_kind != "sta" or spec.get("require_annotation_complete") is not True:
-        return None
-    shortfalls = _sta_annotation_shortfalls(envelope)
-    if not shortfalls:
-        return None
-    return (
-        "unmet",
-        _REASON_CHECK_FAILED,
-        None,
-        {"sta_annotation_incomplete": shortfalls},
-    )
-
-
 def _sta_worst_corner(envelope: dict[str, Any]) -> dict[str, Any]:
     """The `klt sta` corner whose reported timing decides the verdict --
     the entry with the lowest ``worst_slack_ns`` on a multi-corner
@@ -3705,6 +3643,7 @@ def _detail(kind: str, envelope: _EvidenceEnvelope) -> dict[str, Any]:
             "worst_slack_ns": worst.get("worst_slack_ns"),
             "worst_hold_slack_ns": worst.get("worst_hold_slack_ns"),
             "timing_status": worst.get("timing_status"),
+            "constraint_completeness_status": constraint_completeness_status(worst),
         }
     elif kind == "functional-verification":
         sdf = _sdf_metadata(envelope)
@@ -4838,11 +4777,15 @@ def _normalize_evidence_options(raw: dict[str, Any]) -> dict[str, Any] | None:
     malformed (degrading this one item to ``invalid_evidence``) rather than
     silently reading as "off" -- an opt-in requirement must never fail open.
 
-    ``require_annotation_complete`` is issue #3258; ``foundry_cell_exceptions``
+    ``require_annotation_complete`` is issue #3258;
+    ``require_complete_constraints`` is issue #5234; ``foundry_cell_exceptions``
     (disclosed foundry-cell DRC exceptions for item 3) is issue #4530.
     """
     require_annotation = raw.get("require_annotation_complete", False)
     if not isinstance(require_annotation, bool):
+        return None
+    require_constraints = raw.get("require_complete_constraints", False)
+    if not isinstance(require_constraints, bool):
         return None
     cell_exceptions = foundry_cell.normalize_exceptions(
         raw.get("foundry_cell_exceptions")
@@ -4851,6 +4794,7 @@ def _normalize_evidence_options(raw: dict[str, Any]) -> dict[str, Any] | None:
         return None
     return {
         "require_annotation_complete": require_annotation,
+        "require_complete_constraints": require_constraints,
         "foundry_cell_exceptions": cell_exceptions,
     }
 
@@ -4876,7 +4820,7 @@ def _normalize_evidence_entry(raw: Any) -> dict[str, Any] | None:
     ``"require_annotation_complete"`` (issue #3258) is an optional boolean on
     **both** shapes, always present in the returned spec (``False`` when
     absent); a non-boolean value makes the entry malformed. It only has an
-    effect on a ``sta`` citation -- see :func:`_sta_annotation_shortfalls`.
+    effect on a ``sta`` citation -- see :mod:`.signoff_sta_constraints`.
 
     ``"pointer"`` (issue #2342) is accepted on **both** shapes, and is always
     present in the returned spec (``None`` when the entry named none). It
@@ -5618,9 +5562,11 @@ def _grade_evidence(
     if unmet is not None:
         return unmet
 
-    annotation_refusal = _sta_annotation_refusal(check_kind, spec, envelope)
-    if annotation_refusal is not None:
-        return annotation_refusal
+    sta_refusal = sta_annotation_refusal(
+        check_kind, spec, envelope
+    ) or sta_constraint_refusal(check_kind, spec, envelope)
+    if sta_refusal is not None:
+        return sta_refusal
 
     # The two refusals that apply only to a kind this item actually accepts --
     # `nothing_checked` (issue #1996) and `not_post_layout` -- resolved
