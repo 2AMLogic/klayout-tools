@@ -155,7 +155,6 @@ from ._paths import _load_request_json
 from ._paths import load_request_arg as _shared_load_request_arg
 from ._paths import validate_request_shape as _shared_validate_request_shape
 from ._provenance import (
-    _klt_version,
     content_hash,
     explicit_deck_options,
     sha256_file,
@@ -296,10 +295,10 @@ from .extract_spef import (
     DefNetConnections,
     _renamed_def_name,
     _unescape_spice_safe_net_name,
-    _write_spef,
 )
 from .extract_spef import ExtractError as ExtractError
 from .extract_spef import def_net_instance_pins as def_net_instance_pins
+from .extract_spef_block import write_spef_block
 from .extract_validate import validate_run_extract_args
 
 # The SPEF-export subsystem lives in its own module (issue #1195). Two of its
@@ -3286,45 +3285,17 @@ def run_extract(
         warnings=warnings,
     )
 
-    # `--spef` (issue #948): translate the just-built `parasitics_report`
-    # into a SPEF file at `spef_output` -- see `_write_spef`'s docstring for
-    # the exact shape and its net-name-only correlation scope. Only reached
-    # when `parasitics_report is not None` (guaranteed above: `spef_output`
-    # given requires `parasitics=True`, which is exactly when
-    # `parasitic_nets is not None`).
-    spef_path: str | None = None
-    if spef_output is not None:
-        assert parasitics_report is not None
-        spef_path = spef_output
-        spef_out_dir = os.path.dirname(os.path.abspath(spef_path))
-        try:
-            os.makedirs(spef_out_dir, exist_ok=True)
-        except OSError as exc:
-            raise ExtractError(
-                f"cannot create output directory {spef_out_dir}: {exc}"
-            ) from exc
-        spef_conn_map = _remap_def_net_connections(def_net_connections, dotted_renames)
-        spef_skipped_nets = _write_spef(
-            spef_path,
-            design_name=top_cell_name,
-            klt_version=_klt_version(),
-            parasitics_report=parasitics_report,
-            port_names=(entry["name"] for entry in nets if entry["pin"]),
-            # Issue #961: real cell-instance `*CONN`/`*RES` correlation from
-            # the routed DEF's own `NETS` section -- `None` (the default)
-            # falls back to the pre-#961 port-only behavior.
-            net_instance_pins=spef_conn_map,
-        )
-        warnings.extend(
-            _spef_missing_conn_warnings(
-                parasitics_report, def_net_connections, spef_conn_map
-            )
-        )
-        warnings.extend(
-            _spef_warnings(
-                def_net_connections, def_pins, declared_pins, spef_skipped_nets
-            )
-        )
+    spef_path = write_spef_block(
+        spef_output=spef_output,
+        parasitics_report=parasitics_report,
+        def_net_connections=def_net_connections,
+        dotted_renames=dotted_renames,
+        top_cell_name=top_cell_name,
+        nets=nets,
+        def_pins=def_pins,
+        declared_pins=declared_pins,
+        warnings=warnings,
+    )
 
     # Issue #1503: every synthesized substrate identity `_tie_substrate_nets_
     # to_ground` just tied to ground (`substrate_dc_tie["nets"]`, already

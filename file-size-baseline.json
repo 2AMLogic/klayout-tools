@@ -313,7 +313,7 @@
     },
     {
       "path": "src/klayout_tools/extract.py",
-      "lines": 11089
+      "lines": 11060
     },
     {
       "path": "src/klayout_tools/extract_abstract.py",
@@ -497,7 +497,7 @@
     },
     {
       "path": "src/klayout_tools/op_sanity.py",
-      "lines": 1849
+      "lines": 1848
     },
     {
       "path": "src/klayout_tools/parasitic_integrity.py",
@@ -597,7 +597,7 @@
     },
     {
       "path": "src/klayout_tools/signoff.py",
-      "lines": 8293
+      "lines": 8239
     },
     {
       "path": "src/klayout_tools/signoff_attest.py",
@@ -613,7 +613,7 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 13884
+      "lines": 13834
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
