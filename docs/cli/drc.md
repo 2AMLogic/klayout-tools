@@ -3889,7 +3889,8 @@ compound rule), issue #2594's `licon1.width.1`/`mcon.width.1` cite
 (38 `ongrid` + 37 `angle`) cites its own `x.1b`/`x.3a`/`x.2`/`x.2c` source id,
 and issue #3031's `nwell.enclosed.hvi.1` cites `nwell.9`, and issue #2934's six `npc`/`nsdm`/`psdm` width and spacing rules cite `npc.1`/`npc.2`/`nsdm.1`/`psdm.1`/`n/psdm.1`, and #3316's four
 `enclosing_adjacent` rules cite `via.5a`/`m2.5`/`via2.5`/`via3.5`,
-so 130 of its 150 rules are covered.
+and issue #5251's six enclosure rules cite `licon.5`/`licon.8`/`via.4a`/`via2.4`/`via3.4`/`via4.4`,
+so 140 of its 153 rules are covered.
 
 ### The golden-pair manifest (`tests/golden_deck/`)
 
