@@ -4709,6 +4709,143 @@ def _create_placed_sub_cell(
     return sub_cell
 
 
+def _draw_routed_entry(
+    layout: Any,
+    top: Any,
+    route: dict[str, Any],
+    dbu: float,
+    route_layer: tuple[int, int] | None = None,
+    label_layer: tuple[int, int] | None = None,
+    via_drop_size_um: dict[tuple[int, int], float] | None = None,
+    landing_pad_size_um: dict[Any, float] | None = None,
+) -> None:
+    """Draw one ``routed_geometry`` entry into ``top`` (the per-route half of
+    :func:`_write_composed_gds`, shared with ``klt route``)."""
+    import klayout.db as kdb
+
+    points = route["points_um"]
+    if not points or len(points) < 2:
+        return
+    entry_route_layer = route.get("route_layer", route_layer) or route_layer
+    assert entry_route_layer is not None  # route_layer or the entry's own
+    entry_label_layer = route.get("label_layer", label_layer)
+    layer_index = layout.layer(entry_route_layer[0], entry_route_layer[1])
+    path_points = [
+        kdb.Point(int(round(x / dbu)), int(round(y / dbu))) for (x, y) in points
+    ]
+    width_dbu = int(round(route["width_um"] / dbu))
+    top.shapes(layer_index).insert(kdb.Path(path_points, width_dbu))
+
+    # `label` is False for every leg of a multi-leg (bundle) net after
+    # its first (#1073): the legs are one conductor, so one kdb.Text
+    # names it -- exactly as a two-pin net's single path gets exactly
+    # one label. Absent/True keeps the pre-#1073 one-label-per-entry
+    # behaviour for any other caller.
+    if entry_label_layer is not None and route.get("label", True):
+        lx_um, ly_um = _polyline_midpoint_um(points)
+        label_point = kdb.Point(int(round(lx_um / dbu)), int(round(ly_um / dbu)))
+        top.shapes(layout.layer(entry_label_layer[0], entry_label_layer[1])).insert(
+            kdb.Text(route["net"], kdb.Trans(label_point))
+        )
+
+    # Via-drops (#454; generalized to a multi-hop ladder by issue
+    # #1567): each entry drops one via hop at exactly the target
+    # pin's own position -- a via square on `via_layer`, plus a
+    # landing-pad square on *both* of that hop's own
+    # `landing_layers` (_VIA_LANDING_SIZE_UM, independent of the
+    # route's own trace width) so the via's enclosure requirement
+    # holds regardless of how thin routing.width_um is. A single-hop
+    # drop's two `landing_layers` are exactly (this leg's own
+    # effective layer, the pin's own layer) -- the pre-#1567 shape --
+    # and the backbone's own Path already terminates exactly at this
+    # same point (manhattan_backbone's endpoints are the raw pin
+    # positions), so the landing pad always overlaps -- and merges
+    # with -- the trace. A multi-hop ladder instead carries one
+    # `via_drops` entry per hop, all at the identical (x, y): drawing
+    # each one exactly the same way as the single-hop case builds
+    # the full stack -- the backbone's own landing pad from the first
+    # hop, the pin's own landing pad from the last hop, and one
+    # shared landing pad per intermediate level in between (drawn
+    # twice, once by each of its two neighbouring hops, at the same
+    # position with each hop's required side; the squares merge).
+    #
+    # The via square's own side (#1501) is looked up per `via_layer`
+    # in `via_drop_size_um` -- resolved by `compose()` against the
+    # same curated deck `klt drc` judges the drawn square with --
+    # falling back to the PDK-independent `_VIA_DROP_SIZE_UM`
+    # constant for any layer the caller didn't resolve a floor for
+    # (an unresolvable PDK family, or a pre-#1501 caller that never
+    # populates `via_drop_size_um` at all).
+    #
+    # Each landing pad's own side (#2072/#2074) is looked up per
+    # (landing layer, via layer) in `landing_pad_size_um`, resolved
+    # against the area floor and this hop's via-enclosure rule. Fall back
+    # to the fixed `_VIA_LANDING_SIZE_UM` constant unchanged for any
+    # layer the caller didn't resolve a floor for. A hop's two
+    # `landing_layers` can therefore draw two *differently*-sized
+    # squares at the identical (x, y) -- e.g. a met2 pad at the
+    # pre-#2072 0.42um fixed size alongside a met3 pad floored up to
+    # clear `met3.area.1` -- since each layer's own area minimum is
+    # independent of its neighbour's.
+    for drop in route.get("via_drops", []):
+        via_pair = drop["via_layer"]
+        via_layer_index = layout.layer(via_pair[0], via_pair[1])
+        cx = int(round(drop["x_um"] / dbu))
+        cy = int(round(drop["y_um"] / dbu))
+        via_size_um = (via_drop_size_um or {}).get(via_pair, _VIA_DROP_SIZE_UM)
+        via_half_dbu = int(round((via_size_um / 2.0) / dbu))
+        # #2927: a label-derived port's `access.via_array` draws a
+        # rows x cols cut array centred on the pin; pads below grow
+        # to enclose it.
+        _insert_via_cuts(top.shapes(via_layer_index), drop, cx, cy, via_half_dbu, dbu)
+        array_extra_um = _drop_array_extra_um(drop)
+        for landing_pair in drop.get("landing_layers", ()):
+            landing_size_um = (landing_pad_size_um or {}).get(
+                (landing_pair, via_pair), _VIA_LANDING_SIZE_UM
+            ) + array_extra_um
+            # Round minimum sizes outward, preserving the margin
+            # against the *rounded* via too. The epsilon only removes
+            # floating-point noise at an integer grid coordinate.
+            landing_half_dbu = math.ceil(
+                max(
+                    landing_size_um / (2.0 * dbu),
+                    via_half_dbu + (landing_size_um - via_size_um) / (2.0 * dbu),
+                )
+                - 1e-9
+            )
+            landing_box = kdb.Box(
+                cx - landing_half_dbu,
+                cy - landing_half_dbu,
+                cx + landing_half_dbu,
+                cy + landing_half_dbu,
+            )
+            top.shapes(layout.layer(landing_pair[0], landing_pair[1])).insert(
+                landing_box
+            )
+
+    # Stub-widen (#496): each entry (route_two_pin's own
+    # _endpoint_stub_widen_um) re-draws the backbone's own first
+    # segment out of one endpoint -- from that pin's exact position,
+    # `length_um` along its own `direction_deg`, exactly the same
+    # span the narrow backbone above already covers -- at the pin's
+    # own reported `width_um` instead of the route's. Drawn on this
+    # entry's own effective layer, the same layer/cell the
+    # backbone's own Path is already on, so it merges into one shape
+    # with both the backbone and (when the pin's own pad is also on
+    # that layer, which is the only case this fires for -- see the
+    # docstring) the block's own pad underneath.
+    for widen in route.get("stub_widen", []):
+        cx = int(round(widen["x_um"] / dbu))
+        cy = int(round(widen["y_um"] / dbu))
+        half_dbu = int(round((widen["width_um"] / 2.0) / dbu))
+        length_dbu = int(round(widen["length_um"] / dbu))
+        if widen["direction_deg"] == 90:
+            widen_box = kdb.Box(cx - half_dbu, cy, cx + half_dbu, cy + length_dbu)
+        else:  # 270
+            widen_box = kdb.Box(cx - half_dbu, cy - length_dbu, cx + half_dbu, cy)
+        top.shapes(layer_index).insert(widen_box)
+
+
 def _write_composed_gds(
     blocks: dict[str, dict[str, Any]],
     order: list[str],
@@ -4967,154 +5104,17 @@ def _write_composed_gds(
         # `(layer, datatype)` pair, but resolving it once per distinct pair
         # here avoids a redundant lookup per entry on the common single-layer
         # path.
-        layer_indices: dict[tuple[int, int], int] = {}
-        label_layer_indices: dict[tuple[int, int], int] = {}
-
-        def _layer_index(pair: tuple[int, int]) -> int:
-            index = layer_indices.get(pair)
-            if index is None:
-                index = layout.layer(pair[0], pair[1])
-                layer_indices[pair] = index
-            return index
-
-        def _label_layer_index(pair: tuple[int, int]) -> int:
-            index = label_layer_indices.get(pair)
-            if index is None:
-                index = layout.layer(pair[0], pair[1])
-                label_layer_indices[pair] = index
-            return index
-
         for route in routed_geometry:
-            points = route["points_um"]
-            if not points or len(points) < 2:
-                continue
-            entry_route_layer = route.get("route_layer", route_layer) or route_layer
-            assert entry_route_layer is not None  # route_layer or the entry's own
-            entry_label_layer = route.get("label_layer", label_layer)
-            layer_index = _layer_index(entry_route_layer)
-            path_points = [
-                kdb.Point(int(round(x / dbu)), int(round(y / dbu))) for (x, y) in points
-            ]
-            width_dbu = int(round(route["width_um"] / dbu))
-            top.shapes(layer_index).insert(kdb.Path(path_points, width_dbu))
-
-            # `label` is False for every leg of a multi-leg (bundle) net after
-            # its first (#1073): the legs are one conductor, so one kdb.Text
-            # names it -- exactly as a two-pin net's single path gets exactly
-            # one label. Absent/True keeps the pre-#1073 one-label-per-entry
-            # behaviour for any other caller.
-            if entry_label_layer is not None and route.get("label", True):
-                lx_um, ly_um = _polyline_midpoint_um(points)
-                label_point = kdb.Point(
-                    int(round(lx_um / dbu)), int(round(ly_um / dbu))
-                )
-                top.shapes(_label_layer_index(entry_label_layer)).insert(
-                    kdb.Text(route["net"], kdb.Trans(label_point))
-                )
-
-            # Via-drops (#454; generalized to a multi-hop ladder by issue
-            # #1567): each entry drops one via hop at exactly the target
-            # pin's own position -- a via square on `via_layer`, plus a
-            # landing-pad square on *both* of that hop's own
-            # `landing_layers` (_VIA_LANDING_SIZE_UM, independent of the
-            # route's own trace width) so the via's enclosure requirement
-            # holds regardless of how thin routing.width_um is. A single-hop
-            # drop's two `landing_layers` are exactly (this leg's own
-            # effective layer, the pin's own layer) -- the pre-#1567 shape --
-            # and the backbone's own Path already terminates exactly at this
-            # same point (manhattan_backbone's endpoints are the raw pin
-            # positions), so the landing pad always overlaps -- and merges
-            # with -- the trace. A multi-hop ladder instead carries one
-            # `via_drops` entry per hop, all at the identical (x, y): drawing
-            # each one exactly the same way as the single-hop case builds
-            # the full stack -- the backbone's own landing pad from the first
-            # hop, the pin's own landing pad from the last hop, and one
-            # shared landing pad per intermediate level in between (drawn
-            # twice, once by each of its two neighbouring hops, at the same
-            # position with each hop's required side; the squares merge).
-            #
-            # The via square's own side (#1501) is looked up per `via_layer`
-            # in `via_drop_size_um` -- resolved by `compose()` against the
-            # same curated deck `klt drc` judges the drawn square with --
-            # falling back to the PDK-independent `_VIA_DROP_SIZE_UM`
-            # constant for any layer the caller didn't resolve a floor for
-            # (an unresolvable PDK family, or a pre-#1501 caller that never
-            # populates `via_drop_size_um` at all).
-            #
-            # Each landing pad's own side (#2072/#2074) is looked up per
-            # (landing layer, via layer) in `landing_pad_size_um`, resolved
-            # against the area floor and this hop's via-enclosure rule. Fall back
-            # to the fixed `_VIA_LANDING_SIZE_UM` constant unchanged for any
-            # layer the caller didn't resolve a floor for. A hop's two
-            # `landing_layers` can therefore draw two *differently*-sized
-            # squares at the identical (x, y) -- e.g. a met2 pad at the
-            # pre-#2072 0.42um fixed size alongside a met3 pad floored up to
-            # clear `met3.area.1` -- since each layer's own area minimum is
-            # independent of its neighbour's.
-            for drop in route.get("via_drops", []):
-                via_pair = drop["via_layer"]
-                via_layer_index = layout.layer(via_pair[0], via_pair[1])
-                cx = int(round(drop["x_um"] / dbu))
-                cy = int(round(drop["y_um"] / dbu))
-                via_size_um = (via_drop_size_um or {}).get(via_pair, _VIA_DROP_SIZE_UM)
-                via_half_dbu = int(round((via_size_um / 2.0) / dbu))
-                # #2927: a label-derived port's `access.via_array` draws a
-                # rows x cols cut array centred on the pin; pads below grow
-                # to enclose it.
-                _insert_via_cuts(
-                    top.shapes(via_layer_index), drop, cx, cy, via_half_dbu, dbu
-                )
-                array_extra_um = _drop_array_extra_um(drop)
-                for landing_pair in drop.get("landing_layers", ()):
-                    landing_size_um = (landing_pad_size_um or {}).get(
-                        (landing_pair, via_pair), _VIA_LANDING_SIZE_UM
-                    ) + array_extra_um
-                    # Round minimum sizes outward, preserving the margin
-                    # against the *rounded* via too. The epsilon only removes
-                    # floating-point noise at an integer grid coordinate.
-                    landing_half_dbu = math.ceil(
-                        max(
-                            landing_size_um / (2.0 * dbu),
-                            via_half_dbu
-                            + (landing_size_um - via_size_um) / (2.0 * dbu),
-                        )
-                        - 1e-9
-                    )
-                    landing_box = kdb.Box(
-                        cx - landing_half_dbu,
-                        cy - landing_half_dbu,
-                        cx + landing_half_dbu,
-                        cy + landing_half_dbu,
-                    )
-                    top.shapes(layout.layer(landing_pair[0], landing_pair[1])).insert(
-                        landing_box
-                    )
-
-            # Stub-widen (#496): each entry (route_two_pin's own
-            # _endpoint_stub_widen_um) re-draws the backbone's own first
-            # segment out of one endpoint -- from that pin's exact position,
-            # `length_um` along its own `direction_deg`, exactly the same
-            # span the narrow backbone above already covers -- at the pin's
-            # own reported `width_um` instead of the route's. Drawn on this
-            # entry's own effective layer, the same layer/cell the
-            # backbone's own Path is already on, so it merges into one shape
-            # with both the backbone and (when the pin's own pad is also on
-            # that layer, which is the only case this fires for -- see the
-            # docstring) the block's own pad underneath.
-            for widen in route.get("stub_widen", []):
-                cx = int(round(widen["x_um"] / dbu))
-                cy = int(round(widen["y_um"] / dbu))
-                half_dbu = int(round((widen["width_um"] / 2.0) / dbu))
-                length_dbu = int(round(widen["length_um"] / dbu))
-                if widen["direction_deg"] == 90:
-                    widen_box = kdb.Box(
-                        cx - half_dbu, cy, cx + half_dbu, cy + length_dbu
-                    )
-                else:  # 270
-                    widen_box = kdb.Box(
-                        cx - half_dbu, cy - length_dbu, cx + half_dbu, cy
-                    )
-                top.shapes(layer_index).insert(widen_box)
+            _draw_routed_entry(
+                layout,
+                top,
+                route,
+                dbu,
+                route_layer,
+                label_layer,
+                via_drop_size_um,
+                landing_pad_size_um,
+            )
 
     draw_pins_and_boundary(top, layout, pin_placements, boundary_bbox_um)
 

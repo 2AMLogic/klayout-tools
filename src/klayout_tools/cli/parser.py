@@ -63,6 +63,7 @@ from . import (
     report_cmd,
     reset_coverage_cmd,
     ring_check_cmd,
+    route_cmd,
     seam_check_cmd,
     signoff_cmd,
     sim_merge_cmd,
@@ -279,16 +280,15 @@ def create_parser() -> argparse.ArgumentParser:
 
     _add_socket_check_parser(subparsers)
     _add_interface_check_parser(subparsers)
-
     _add_reset_coverage_parser(subparsers)
     _add_power_intent_parser(subparsers)
-
     _add_lef_abstract_parser(subparsers)
 
     _add_ring_check_parser(subparsers)
     _add_seam_check_parser(subparsers)
     _add_corner_matrix_parser(subparsers)
     keepout_check_cmd.add_parser(subparsers, _add_format_arg)
+    route_cmd.add_parser(subparsers, _add_format_arg)
     fill_cmd.add_parser(subparsers, _add_format_arg)
     _add_array_check_parser(subparsers)
     _add_tap_distance_parser(subparsers)
