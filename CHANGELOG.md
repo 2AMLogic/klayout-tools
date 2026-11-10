@@ -21,6 +21,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   `null` unless `checked`, so "never evaluated" is distinguishable from
   clean. Limits are the liberty's; report only, no verdict. Existing fields
   unchanged.
+- **`klt signoff`: opt-in `require_complete_constraints` on `sta` evidence**
+  (#5234, 2026-11-10): an item 5 `sta` citation may set
+  `"require_complete_constraints": true` to grade `unmet` (`check_failed`,
+  `detail.sta_constraints_incomplete`) unless every graded corner's
+  `constraint_completeness.status` is `"complete"`. Off by default; the `sta`
+  citation excerpt additively gains `constraint_completeness_status`. Helpers
+  (including #3258's annotation grading) moved to `signoff_sta_constraints`.
+  See `docs/cli/signoff.md`.
 - **New `klt route`: route between labelled pins of an already-placed layout**
   (#5205, 2026-11-10): `klt route <request.json>` derives endpoints from text
   labels on direct child instances of a top cell, routes two-pin nets with the
