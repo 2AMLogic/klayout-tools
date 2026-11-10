@@ -5681,7 +5681,7 @@ def test_rollup_measurements_without_monte_carlo_config_is_unchanged():
         [{"name": "vref", "unit": "V", "limits": {"max": 1.21}}], corners
     )
 
-    assert set(entry) == {"name", "unit", "limits", "status", "worst_case"}
+    assert set(entry) == set("name unit limits status worst_case min max".split())
 
 
 def test_rollup_measurements_monte_carlo_config_but_no_sampled_corners():
@@ -6023,7 +6023,7 @@ def test_run_sim_without_monte_carlo_has_no_statistics_block(tmp_path, monkeypat
     report = sim.run_sim(str(request))
 
     (entry,) = report["measurements"]
-    assert set(entry) == {"name", "unit", "limits", "status", "worst_case"}
+    assert set(entry) == set("name unit limits status worst_case min max".split())
 
 
 def test_run_sim_monte_carlo_sigma_window_pass_keeps_run_passing(tmp_path, monkeypatch):

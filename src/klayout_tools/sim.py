@@ -99,6 +99,7 @@ from . import (
     output_lock,
     sim_commands,
     sim_complex_vectors,
+    sim_corner_extremes,
     sim_crossings,
     sim_cycle_mean,
     sim_decks,
@@ -13350,12 +13351,7 @@ def _rollup_measurements(
     rollup: list[dict[str, Any]] = []
     for spec in measurements_spec:
         name = spec["name"]
-        entries = []
-        for corner in corners:
-            for m in corner["measurements"]:
-                if m["name"] == name:
-                    entries.append((corner, m))
-                    break
+        entries = sim_corner_extremes.corner_entries(name, corners)
 
         agg_status = _aggregate_measurement_status(entries)
 
@@ -13380,6 +13376,7 @@ def _rollup_measurements(
             "limits": spec.get("limits"),
             "status": agg_status,
             "worst_case": worst_case,
+            **sim_corner_extremes.corner_extremes(entries),  # issue #5221
             # Additive/optional (issue #2482): `step`/`derived_from` for an
             # `analysis_steps[]` measurement; nothing for any other one.
             **sim_steps.measurement_provenance(spec),

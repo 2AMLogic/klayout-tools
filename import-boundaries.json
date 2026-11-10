@@ -221,6 +221,7 @@
         "klayout_tools.extract_finfet",
         "klayout_tools.extract_hierarchy",
         "klayout_tools.extract_parasitics",
+        "klayout_tools.extract_parasitics_block",
         "klayout_tools.extract_netselect",
         "klayout_tools.extract_orient",
         "klayout_tools.extract_cap_top_plate",
@@ -698,6 +699,7 @@
         "klayout_tools.sim_cause",
         "klayout_tools.sim_complex_vectors",
         "klayout_tools.sim_convergence_retry",
+        "klayout_tools.sim_corner_extremes",
         "klayout_tools.sim_corner_keys",
         "klayout_tools.sim_crossings",
         "klayout_tools.sim_crossings_reduce",
@@ -1831,12 +1833,6 @@
     {
       "consumer": "klayout_tools.netlist_batch",
       "exporter": "klayout_tools.sim_batch",
-      "symbol": "_resolve_batch_config",
-      "reason": "Issue #3182: the netlist batch backend reuses sim_batch's job-contract helpers as they are (one transport, one config resolver, one preflight)."
-    },
-    {
-      "consumer": "klayout_tools.netlist_batch",
-      "exporter": "klayout_tools.sim_batch",
       "symbol": "_runner_preflight_script",
       "reason": "Issue #3182: the netlist batch backend reuses sim_batch's job-contract helpers as they are (one transport, one config resolver, one preflight)."
     },
@@ -2131,12 +2127,6 @@
     {
       "consumer": "klayout_tools.extract_batch",
       "exporter": "klayout_tools.sim_batch",
-      "symbol": "_resolve_batch_config",
-      "reason": "Issue #4613: `klt extract --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
-    },
-    {
-      "consumer": "klayout_tools.extract_batch",
-      "exporter": "klayout_tools.sim_batch",
       "symbol": "_runner_preflight_script",
       "reason": "Issue #4613: `klt extract --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
     },
@@ -2229,6 +2219,12 @@
       "exporter": "klayout_tools._paths",
       "symbol": "_resolve_relative",
       "reason": "Issue #5205: `klt route` reuses the existing shared helper rather than duplicating it; promote to a public/shared name when next reworked."
+    },
+    {
+      "consumer": "klayout_tools._batch_common",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_resolve_batch_config",
+      "reason": "Issue #5208: extract_batch and netlist_batch both resolved the fleet config through this sim_batch resolver; the shared helper now owns that one call so the two backends cannot drift. Promote to a public name when sim_batch is next split."
     }
   ],
   "legacy_exceptions": {

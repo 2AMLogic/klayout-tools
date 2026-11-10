@@ -313,7 +313,7 @@
     },
     {
       "path": "src/klayout_tools/extract.py",
-      "lines": 11446
+      "lines": 11089
     },
     {
       "path": "src/klayout_tools/extract_abstract.py",
@@ -321,7 +321,7 @@
     },
     {
       "path": "src/klayout_tools/extract_batch.py",
-      "lines": 650
+      "lines": 624
     },
     {
       "path": "src/klayout_tools/extract_finfet.py",
@@ -485,7 +485,7 @@
     },
     {
       "path": "src/klayout_tools/netlist_batch.py",
-      "lines": 887
+      "lines": 862
     },
     {
       "path": "src/klayout_tools/netlist_capacitor_recovery.py",
@@ -613,7 +613,7 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 13887
+      "lines": 13884
     },
     {
       "path": "src/klayout_tools/sim_batch.py",

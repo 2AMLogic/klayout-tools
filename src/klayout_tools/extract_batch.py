@@ -82,16 +82,9 @@ _NO_FALLBACK = "(no local fallback: the extraction was not run on this host)"
 
 def resolve_backend(flag: str | None) -> str:
     """``--backend`` > ``$KLT_EXTRACT_BACKEND`` > ``"local"``."""
-    if flag is not None:
-        value, source = flag, "--backend"
-    else:
-        value = os.environ.get(BACKEND_ENV, "").strip() or "local"
-        source = f"${BACKEND_ENV}"
-    if value not in SUPPORTED_BACKENDS:
-        raise ExtractError(
-            f"{source} must be one of {', '.join(SUPPORTED_BACKENDS)} (got {value!r})"
-        )
-    return value
+    return _batch_common.resolve_backend_value(
+        flag, BACKEND_ENV, SUPPORTED_BACKENDS, ExtractError
+    )
 
 
 def _translate(exc: NetlistError) -> ExtractError:
@@ -353,16 +346,9 @@ def build_job_spec(
 
 
 def _resolve_config(pdk: str, timeout_s: float) -> sim_batch.BatchConfig:
-    from .sim import SimError
-
-    try:
-        return sim_batch._resolve_batch_config(
-            {"models": {"pdk": pdk}}, corner_count=1, timeout_s=timeout_s
-        )
-    except (SimError, sim_batch.BatchError) as exc:
-        raise ExtractError(
-            f"batch backend: {exc} {_NO_FALLBACK}", code=getattr(exc, "code", None)
-        ) from exc
+    return _batch_common.resolve_batch_config(
+        pdk, timeout_s, ExtractError, _NO_FALLBACK
+    )
 
 
 def _check_ceiling(config: sim_batch.BatchConfig, timeout_s: float) -> dict[str, Any]:
@@ -395,16 +381,7 @@ def _check_ceiling(config: sim_batch.BatchConfig, timeout_s: float) -> dict[str,
 
 
 def _transport_error(job_id: str, exc: sim_batch.BatchError) -> ExtractError:
-    if isinstance(exc, sim_batch.BatchPollTimeout):
-        return ExtractError(
-            f"batch job {job_id}: {exc} -- it may still finish on the fleet, but "
-            f"no netlist was collected {_NO_FALLBACK}",
-            code=exc.code or _nb.BATCH_POLL_TIMEOUT_CODE,
-            job_id=job_id,
-        )
-    return ExtractError(
-        f"batch job {job_id}: {exc} {_NO_FALLBACK}", code=exc.code, job_id=job_id
-    )
+    return _batch_common.transport_error(job_id, exc, ExtractError, _NO_FALLBACK)
 
 
 def _job_failure(
@@ -416,18 +393,15 @@ def _job_failure(
     stderr_tail: str,
     harness_log: str,
 ) -> ExtractError:
-    message, code, details = _batch_common.job_failure_parts(
+    return _batch_common.job_failure(
         job_id=job_id,
-        state=str(status.get("state") or ""),
-        exit_code=sim_batch._status_exit_code(status),
-        detail=str(status.get("detail") or "").strip(),
+        status=status,
         runner_error=runner_error,
         note=note,
         stderr_tail=stderr_tail,
         harness_log=harness_log,
-    )
-    return ExtractError(
-        f"{message} {_NO_FALLBACK}", code=code, job_id=job_id, details=details or None
+        err_cls=ExtractError,
+        no_fallback=_NO_FALLBACK,
     )
 
 

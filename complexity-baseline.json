@@ -211,7 +211,7 @@
     {
       "file": "src/klayout_tools/extract.py",
       "function": "run_extract",
-      "complexity": 40
+      "complexity": 18
     },
     {
       "file": "src/klayout_tools/extract_abstract.py",
@@ -237,6 +237,11 @@
       "file": "src/klayout_tools/extract_parasitics.py",
       "function": "_inject_parasitics",
       "complexity": 20
+    },
+    {
+      "file": "src/klayout_tools/extract_parasitics_block.py",
+      "function": "build_parasitics_report",
+      "complexity": 23
     },
     {
       "file": "src/klayout_tools/extract_passive_regions.py",
