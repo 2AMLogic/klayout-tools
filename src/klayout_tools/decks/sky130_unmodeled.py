@@ -20,13 +20,28 @@ from __future__ import annotations
 #: rules, so there is no id to list for those (see ``docs/cli/drc.md``).
 #: Remove an id here when its rule is added.
 UNMODELED_RULES: tuple[str, ...] = (
-    # Implant/npc/well rules (issue #2934) scoped to compound layer
-    # expressions (diff.and(psdm), npsdm enclosing diff/tap, gate, ...) that
-    # `DrcRule` cannot evaluate; ids from sky130.lydrc. Also the spacing rules
-    # of sky130A_mr.drc this deck omits (issue #4282): marker/special layers
-    # not modelled (dnwell, lvtn, ncm, nsm, rpm, urpm, tunm, thkox, ldntm),
-    # licon spacing, areaid:core splits (poly.3, li.7) and capacitor-plate
-    # separations needing two-layer checks (capm.*, cap2m.*).
+    # Sorted (tests/test_drc_sky130_spacing.py enforces it), so per-group
+    # reasons live here rather than inline:
+    # - Implant/npc/well rules (issue #2934) scoped to compound layer
+    #   expressions (diff.and(psdm), npsdm enclosing diff/tap, gate, ...) that
+    #   `DrcRule` cannot evaluate; ids from sky130.lydrc. Also the spacing rules
+    #   of sky130A_mr.drc this deck omits (issue #4282): marker/special layers
+    #   not modelled (dnwell, lvtn, ncm, nsm, rpm, urpm, tunm, thkox, ldntm),
+    #   licon spacing, areaid:core splits (poly.3, li.7) and capacitor-plate
+    #   separations needing two-layer checks (capm.*, cap2m.*).
+    # - ct.4 ("mcon must be covered by li") has no curated rule (issue #5233).
+    # - li.5 is only floor-modeled by ``li1.enclosing.licon1.1`` (zero margin):
+    #   the official 0.08um on two adjacent edges is not checked (issue #5233).
+    # - difftap.*: diff/tap width, gate, abutment, spacing and areaid:en checks
+    #   (#5254); only difftap.1/.3 are transcribed. extd.* likewise.
+    # - lvtn/ncm/ldntm/tunm/thkox/moduleCut marker-layer rules needing compound
+    #   expressions the deck does not model (#5254).
+    # - nsdm/psdm areaid:ce/periphery, parallel-edge and overlap-over-active
+    #   sub-rules (#5254); only nsdm.1/psdm.1/n-psdm.1 are transcribed.
+    # - photo.*: photodiode (areaid.po) rules; the deck models no photodiode
+    #   layer (#5254).
+    # - poly.*: rules needing gate/diff/tap-relative expressions (#5254); only
+    #   poly.1a/.2/.8 are transcribed.
     "MR_licon.SP.1",
     "cap2m.11",
     "cap2m.2b",
@@ -36,13 +51,22 @@ UNMODELED_RULES: tuple[str, ...] = (
     "capm.2b",
     "capm.2b_a",
     "capm.5",
-    # ct.4 ("mcon must be covered by li") has no curated rule (issue #5233).
     "ct.4",
     "difftap.10",
     "difftap.11",
+    "difftap.1_a",
+    "difftap.1_b",
+    "difftap.1_c",
+    "difftap.2",
+    "difftap.4",
+    "difftap.5",
+    "difftap.6",
+    "difftap.7",
     "difftap.8",
     "difftap.9",
     "dnwell.2",
+    "extd.1",
+    "extd.2",
     "hvi.1",
     "hvi.2a",
     "hvntm.1",
@@ -52,19 +76,27 @@ UNMODELED_RULES: tuple[str, ...] = (
     "hvtr.1",
     "hvtr.2",
     "hvtr.2_a",
+    "ldntm.1",
     "ldntm.2",
-    # li.5 is only floor-modeled by ``li1.enclosing.licon1.1`` (zero margin):
-    # the official 0.08um on two adjacent edges is not checked (issue #5233).
     "li.5",
     "li.7",
     "licon.13",
+    "lvtn.1",
+    "lvtn.12",
+    "lvtn.13",
+    "lvtn.1a",
     "lvtn.2",
+    "lvtn.3a",
+    "lvtn.3b",
+    "lvtn.4b",
+    "lvtn.9",
     "m1.3ab",
     "m1.5",
     "m2.3ab",
     "m2.5",
     "m3.3ab",
     "m4.5ab",
+    "moduleCut.1",
     "n/psdm.10a",
     "n/psdm.10b",
     "n/psdm.5a",
@@ -72,60 +104,15 @@ UNMODELED_RULES: tuple[str, ...] = (
     "n/psdm.6",
     "n/psdm.7",
     "n/psdm.8",
-    "ncm.2a",
-    "npc.4",
-    "nsm.1",
-    "pad.2",
-    "poly.3",
-    "rdl.1",
-    "rdl.2",
-    "rpm.2",
-    "thkox.2",
-    "tunm.2",
-    "urpm.2",
-    "via.5a",
-    "via2.5",
-    "via3.5",
-    # diff/tap width, gate, abutment, spacing and areaid:en checks (#5254);
-    # only difftap.1/.3 are transcribed.
-    "difftap.1_a",
-    "difftap.1_b",
-    "difftap.1_c",
-    "difftap.2",
-    "difftap.4",
-    "difftap.5",
-    "difftap.6",
-    "difftap.7",
-    "extd.1",
-    "extd.2",
-    # lvtn/ncm/ldntm/tunm/thkox/moduleCut marker-layer rules needing compound
-    # expressions the deck does not model (#5254).
-    "ldntm.1",
-    "lvtn.1",
-    "lvtn.12",
-    "lvtn.13",
-    "lvtn.1a",
-    "lvtn.3a",
-    "lvtn.3b",
-    "lvtn.4b",
-    "lvtn.9",
-    "moduleCut.1",
     "ncm.1",
     "ncm.2",
+    "ncm.2a",
     "ncm.3",
     "ncm.5",
     "ncm.6",
     "ncm.7",
     "ncm.x.3",
-    "thkox.1",
-    "tunm.1",
-    "tunm.3",
-    "tunm.4",
-    "tunm.5",
-    "tunm.6a",
-    "tunm.7",
-    # nsdm/psdm areaid:ce/periphery, parallel-edge and overlap-over-active
-    # sub-rules (#5254); only nsdm.1/psdm.1/n-psdm.1 are transcribed.
+    "npc.4",
     "nsdm.2",
     "nsdm.3",
     "nsdm.4",
@@ -133,13 +120,8 @@ UNMODELED_RULES: tuple[str, ...] = (
     "nsdm.6",
     "nsdm.6a",
     "nsdm_psdm_overlap",
-    "psdm.2",
-    "psdm.3",
-    "psdm.4",
-    "psdm.5",
-    "psdm.6",
-    "psdm.6a",
-    # photodiode (areaid.po) rules: the deck models no photodiode layer (#5254).
+    "nsm.1",
+    "pad.2",
     "photo.10",
     "photo.2",
     "photo.3",
@@ -148,18 +130,39 @@ UNMODELED_RULES: tuple[str, ...] = (
     "photo.7",
     "photo.8",
     "photo.9",
-    # poly rules needing gate/diff/tap-relative expressions (#5254); only
-    # poly.1a/.2/.8 are transcribed.
     "poly.10",
     "poly.11",
     "poly.12",
     "poly.15",
     "poly.1b",
+    "poly.3",
     "poly.4",
     "poly.5",
     "poly.6",
     "poly.7",
     "poly.9",
+    "psdm.2",
+    "psdm.3",
+    "psdm.4",
+    "psdm.5",
+    "psdm.6",
+    "psdm.6a",
+    "rdl.1",
+    "rdl.2",
+    "rpm.2",
+    "thkox.1",
+    "thkox.2",
+    "tunm.1",
+    "tunm.2",
+    "tunm.3",
+    "tunm.4",
+    "tunm.5",
+    "tunm.6a",
+    "tunm.7",
+    "urpm.2",
+    "via.5a",
+    "via2.5",
+    "via3.5",
 )
 
 
