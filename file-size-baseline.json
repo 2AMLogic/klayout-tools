@@ -497,7 +497,7 @@
     },
     {
       "path": "src/klayout_tools/op_sanity.py",
-      "lines": 1849
+      "lines": 1848
     },
     {
       "path": "src/klayout_tools/parasitic_integrity.py",
@@ -613,7 +613,7 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 13884
+      "lines": 13834
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
