@@ -313,7 +313,7 @@
     },
     {
       "path": "src/klayout_tools/extract.py",
-      "lines": 11718
+      "lines": 11556
     },
     {
       "path": "src/klayout_tools/extract_abstract.py",

@@ -215,6 +215,7 @@
         "klayout_tools.cli.parsers.extract_args_part3",
         "klayout_tools.extract",
         "klayout_tools.extract_abstract",
+        "klayout_tools.extract_assemble",
         "klayout_tools.extract_batch",
         "klayout_tools.extract_finfet",
         "klayout_tools.extract_hierarchy",
