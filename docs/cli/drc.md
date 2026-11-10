@@ -1536,7 +1536,7 @@ per-engine reports are the useful output.
 | `agree_violations` | as above, both sides flag the same regions |
 | `disagreement` | in a covered mapped group, one engine flagged a region the other did not (`groups[].only_curated` / `only_native` list the bboxes) |
 | `not_comparable` | a group not covered by both sides, no groups, or rules on either side outside the mapping (`unmapped.curated` / `unmapped.native`) — an unmapped rule can never produce `agree_*` |
-| `native_unavailable` | no native deck, no `klayout` binary, or missing host tools; `reports.native` is `null` |
+| `native_unavailable` | no native deck (including no installed PDK of `--deck`'s family, #5211), no `klayout` binary, or missing host tools; `reports.native` is `null` |
 | `engine_failed` | the native run raised any other error; `reports.native` is `null` |
 
 `status` is `violations` if either engine found some, else the first

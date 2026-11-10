@@ -70,7 +70,7 @@ from ..drc import (
 )
 from ..drc_crosscheck import crosscheck_exit_code, run_drc_crosscheck
 from . import _request_document as reqdoc
-from ._drc_native import attach_native_deck, resolve_native_deck
+from ._drc_native import attach_native_deck, native_family_error, resolve_native_deck
 from .drc_text import _print_crosscheck_text, _print_rule_list, _print_text
 from .output import (
     emit_error,
@@ -422,6 +422,7 @@ def _run_crosscheck(args: argparse.Namespace) -> dict:
         top=args.top,
         pdk_variant=args.pdk,
         pdk_root=args.pdk_root,
+        native_unavailable_reason=native_family_error(args),
         native_kwargs={
             "timeout_s": args.timeout_s,
             "deck_vars": deck_vars,
@@ -462,6 +463,9 @@ def _run_klayout_engine(args: argparse.Namespace) -> dict:
         )
     deck_file, deck_vars, min_version, native = resolve_native_deck(args)
     if deck_file is None:
+        family_error = native_family_error(args)
+        if family_error is not None:
+            raise DrcError(f"no PDK-native klayout DRC deck: {family_error}")
         raise DrcError(
             "no PDK-native klayout DRC deck script found for this PDK "
             "variant -- pass --deck-file to point at one directly (see "
