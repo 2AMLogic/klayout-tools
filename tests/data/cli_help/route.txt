@@ -1,0 +1,13 @@
+Read a request document naming a placed layout, derive endpoints from text
+labels on direct child instances of its top cell, and route each two-pin net
+with the gen-compose router (unchanged). Reports every positive-area overlap
+of a drawn route with foreign metal; optionally writes the routed layout. A
+diagnostic like gen-compose's own checks -- run `klt drc` for sign-off. See
+docs/cli/route.md.
+
+positional arguments:
+  request path to a klt route request JSON file
+
+options:
+  -h, --help show this help message and exit
+  --format {text,json} output format (default: text)
