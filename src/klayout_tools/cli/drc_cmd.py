@@ -69,8 +69,8 @@ from ..drc import (
     run_drc_klayout_engine,
 )
 from ..drc_crosscheck import crosscheck_exit_code, run_drc_crosscheck
+from . import _drc_native as native_deck
 from . import _request_document as reqdoc
-from ._drc_native import attach_native_deck, resolve_native_deck
 from .drc_text import _print_crosscheck_text, _print_rule_list, _print_text
 from .output import (
     emit_error,
@@ -414,7 +414,7 @@ def _run_crosscheck(args: argparse.Namespace) -> dict:
             )
     if not args.deck:
         raise DrcError("argument --deck is required for --engine both")
-    deck_file, deck_vars, min_version, native = resolve_native_deck(args)
+    deck_file, deck_vars, min_version, native = native_deck.resolve_native_deck(args)
     result = run_drc_crosscheck(
         args.file,
         args.deck,
@@ -422,6 +422,7 @@ def _run_crosscheck(args: argparse.Namespace) -> dict:
         top=args.top,
         pdk_variant=args.pdk,
         pdk_root=args.pdk_root,
+        native_unavailable_reason=native_deck.native_family_error(args),
         native_kwargs={
             "timeout_s": args.timeout_s,
             "deck_vars": deck_vars,
@@ -435,7 +436,7 @@ def _run_crosscheck(args: argparse.Namespace) -> dict:
             "negative_control_categories": _negative_control_categories(args),
         },
     )
-    return attach_native_deck(result, native)
+    return native_deck.attach_native_deck(result, native)
 
 
 def _run_klayout_engine(args: argparse.Namespace) -> dict:
@@ -460,13 +461,9 @@ def _run_klayout_engine(args: argparse.Namespace) -> dict:
             "runset does not share the curated rule registry (see "
             "docs/cli/drc.md, 'Rule listing and selection')"
         )
-    deck_file, deck_vars, min_version, native = resolve_native_deck(args)
+    deck_file, deck_vars, min_version, native = native_deck.resolve_native_deck(args)
     if deck_file is None:
-        raise DrcError(
-            "no PDK-native klayout DRC deck script found for this PDK "
-            "variant -- pass --deck-file to point at one directly (see "
-            "docs/cli/drc.md, 'Engine' -> 'klayout')"
-        )
+        raise DrcError(native_deck.no_deck_message(args))
     result = run_drc_klayout_engine(
         args.file,
         deck_file,
@@ -486,7 +483,7 @@ def _run_klayout_engine(args: argparse.Namespace) -> dict:
         negative_control_categories=_negative_control_categories(args),
         max_violations=args.max_violations,
     )
-    return attach_native_deck(result, native)
+    return native_deck.attach_native_deck(result, native)
 
 
 def _run(args: argparse.Namespace) -> dict:

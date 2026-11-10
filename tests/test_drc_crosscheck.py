@@ -449,3 +449,16 @@ def test_rerun_crosscheck_report_is_rejected(tmp_path):
     _, report = _committed_crosscheck(tmp_path)
     with pytest.raises(DrcError, match="single-engine"):
         rerun_drc_report(report)
+
+
+def test_native_unavailable_reason_names_family(monkeypatch):
+    """Issue #5211: the family reason is carried into the comparison error."""
+    monkeypatch.setattr(
+        cc, "run_drc", lambda *a, **k: _report(engine="curated", checked=["a"])
+    )
+    out = cc.run_drc_crosscheck(
+        "x.gds", "sg13g2", None, native_unavailable_reason="no PDK variant of sg13g2"
+    )
+    assert out["comparison"]["state"] == "native_unavailable"
+    assert "sg13g2" in out["comparison"]["error"]["message"]
+    assert cc.crosscheck_exit_code(out) == 4

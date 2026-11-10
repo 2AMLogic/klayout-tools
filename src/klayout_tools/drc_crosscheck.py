@@ -203,6 +203,7 @@ def run_drc_crosscheck(
     pdk_variant: str | None = None,
     pdk_root: str | None = None,
     native_kwargs: dict[str, Any] | None = None,
+    native_unavailable_reason: str | None = None,
     rule_mapping: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Run both engines on ``path`` and return the cross-check envelope.
@@ -220,11 +221,13 @@ def run_drc_crosscheck(
     native: dict[str, Any] | None = None
     failure: dict[str, Any] | None = None
     if native_deck_file is None:
-        failure = {
-            "state": STATE_NATIVE_UNAVAILABLE,
-            "message": "no PDK-native klayout DRC deck script found for this PDK "
-            "variant (pass --deck-file)",
-        }
+        message = (
+            "no PDK-native klayout DRC deck script found for this PDK "
+            "variant (pass --deck-file)"
+        )
+        if native_unavailable_reason:
+            message = f"{message}: {native_unavailable_reason}"
+        failure = {"state": STATE_NATIVE_UNAVAILABLE, "message": message}
     else:
         try:
             native = run_drc_klayout_engine(
