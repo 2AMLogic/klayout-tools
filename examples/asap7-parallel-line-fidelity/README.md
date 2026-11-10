@@ -4,8 +4,12 @@ Phase 1 of [#5199](https://github.com/2AMLogic/klayout-tools/issues/5199)
 (issue [#5201](https://github.com/2AMLogic/klayout-tools/issues/5201)): grades
 `klt extract --deck asap7 --parasitics` against `klt mom` on N parallel lines,
 mirroring [`../critical-net-mom-fidelity/`](../critical-net-mom-fidelity/).
-Capacitance and resistance only -- no circuit quantities, no `klt pex`
-warning, no docs table (phases 2-3).
+Capacitance and resistance only here; the circuit stage (delay and energy,
+phase 2, [#5202](https://github.com/2AMLogic/klayout-tools/issues/5202)) is
+`generate_and_measure.py --circuit`, written to `circuit-results.json` and
+documented in
+[`docs/design/asap7-parallel-line-fidelity.md`](../../docs/design/asap7-parallel-line-fidelity.md).
+The `klt pex` warning is phase 3.
 
 ```bash
 scripts/fetch-pdks.sh        # optional: lets the script re-verify the cited sha256s

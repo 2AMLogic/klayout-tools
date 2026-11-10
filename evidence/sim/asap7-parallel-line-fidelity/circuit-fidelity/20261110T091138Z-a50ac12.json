@@ -1,0 +1,501 @@
+{
+  "block": "asap7-parallel-line-fidelity",
+  "extraction_pin": {
+    "deck": "asap7",
+    "deck_content_hash": "sha256:5c58a50e5f6a9099810b3fde37eaa8d93b0897653cb6597a831baac1f5ebee76",
+    "method": "--parasitics lumped RC vs klt mom reference network"
+  },
+  "note": "not a PDK-model klt sim record -- a klt extract + klt mom + klt sim (deck-list, linear RC) comparison for issue #5202 (phase 2 of #5199); request_path/request_sha256 pin the generation script, which with results.json (sha256 in result.inputs) fully determines every number; pdk_pin is null because the geometry is authored directly and the netlists contain no PDK device models.",
+  "pdk_pin": null,
+  "recorded_at": "2026-11-10T09:11:38Z",
+  "request_path": "examples/asap7-parallel-line-fidelity/generate_and_measure.py",
+  "request_sha256": "a50ac12ea333b0ceb8f1bba391558f25b636c109a7d97f2169590c3676f312a7",
+  "result": {
+    "idealisations": [
+      "each line is driven by an ideal step through a 10 kohm resistor and measured at its lumped RC hub (the deck's own topology: pin - R - hub - C)",
+      "only the victim's two nearest same-level neighbours switch; every other line is held at 0 V by an ideal source (a stiff quiet line)",
+      "reference network: R from klt mom's PEEC resistance; hub-to-ground C = klt mom ground + adjacent-level + non-nearest same-level coupling; the nearest-neighbour couplings are explicit hub-to-hub capacitors; each neighbour copies the victim's R and ground C (symmetry ASSUMED) and neighbour-to-neighbour coupling is dropped",
+      "deck network: the netlist `klt extract --deck asap7 --parasitics` wrote, verbatim; it has no same-level coupling, but every hub's C returns to the floating `vsubs` node (1e12 ohm to ground), which couples the lines weakly, so quiet and opposite differ slightly even there",
+      "critical-net path: refused by every FinFET deck (phase 1), reported 'unsupported', never zero-filled",
+      "quasi-static lumped RC, no inductance, no device nonlinearity; the energy is the integral of v*i at the victim's source over 0-40 ps"
+    ],
+    "inputs": {
+      "results_json_sha256": "822bd5f6c9869d5830426ac08cbdb73ab3e1262373816abf3e36e2382ea155f6"
+    },
+    "issue": "2AMLogic/klayout-tools#5202 (phase 2 of #5199)",
+    "points": [
+      {
+        "critical_net": "unsupported",
+        "deck": {
+          "opposite": {
+            "delay_ps": 0.05103,
+            "energy_fj": 0.002785
+          },
+          "quiet": {
+            "delay_ps": 0.04037,
+            "energy_fj": 0.002178
+          }
+        },
+        "density": "dense",
+        "id": "M2-p1x-dense-L0.36",
+        "level": "M2",
+        "pitch_mult": 1,
+        "reference": {
+          "opposite": {
+            "delay_ps": 1.22989,
+            "energy_fj": 0.139753
+          },
+          "quiet": {
+            "delay_ps": 0.52564,
+            "energy_fj": 0.075942
+          }
+        },
+        "rel_err_pct": {
+          "critical_net": "unsupported",
+          "deck": {
+            "delay_opposite": -95.85,
+            "delay_quiet": -92.32,
+            "energy_opposite": -98.01,
+            "energy_quiet": -97.13
+          }
+        }
+      },
+      {
+        "critical_net": "unsupported",
+        "deck": {
+          "opposite": {
+            "delay_ps": 0.05354,
+            "energy_fj": 0.002924
+          },
+          "quiet": {
+            "delay_ps": 0.03785,
+            "energy_fj": 0.002039
+          }
+        },
+        "density": "sparse",
+        "id": "M2-p1x-sparse-L0.36",
+        "level": "M2",
+        "pitch_mult": 1,
+        "reference": {
+          "opposite": {
+            "delay_ps": 1.23461,
+            "energy_fj": 0.140807
+          },
+          "quiet": {
+            "delay_ps": 0.51389,
+            "energy_fj": 0.075514
+          }
+        },
+        "rel_err_pct": {
+          "critical_net": "unsupported",
+          "deck": {
+            "delay_opposite": -95.66,
+            "delay_quiet": -92.63,
+            "energy_opposite": -97.92,
+            "energy_quiet": -97.3
+          }
+        }
+      },
+      {
+        "critical_net": "unsupported",
+        "deck": {
+          "opposite": {
+            "delay_ps": 0.04965,
+            "energy_fj": 0.002709
+          },
+          "quiet": {
+            "delay_ps": 0.04175,
+            "energy_fj": 0.002255
+          }
+        },
+        "density": "dense",
+        "id": "M2-p2x-dense-L0.36",
+        "level": "M2",
+        "pitch_mult": 2,
+        "reference": {
+          "opposite": {
+            "delay_ps": 0.59519,
+            "energy_fj": 0.059435
+          },
+          "quiet": {
+            "delay_ps": 0.40153,
+            "energy_fj": 0.03914
+          }
+        },
+        "rel_err_pct": {
+          "critical_net": "unsupported",
+          "deck": {
+            "delay_opposite": -91.66,
+            "delay_quiet": -89.6,
+            "energy_opposite": -95.44,
+            "energy_quiet": -94.24
+          }
+        }
+      },
+      {
+        "critical_net": "unsupported",
+        "deck": {
+          "opposite": {
+            "delay_ps": 0.05194,
+            "energy_fj": 0.002836
+          },
+          "quiet": {
+            "delay_ps": 0.03945,
+            "energy_fj": 0.002127
+          }
+        },
+        "density": "sparse",
+        "id": "M2-p2x-sparse-L0.36",
+        "level": "M2",
+        "pitch_mult": 2,
+        "reference": {
+          "opposite": {
+            "delay_ps": 0.59689,
+            "energy_fj": 0.059336
+          },
+          "quiet": {
+            "delay_ps": 0.39588,
+            "energy_fj": 0.038558
+          }
+        },
+        "rel_err_pct": {
+          "critical_net": "unsupported",
+          "deck": {
+            "delay_opposite": -91.3,
+            "delay_quiet": -90.03,
+            "energy_opposite": -95.22,
+            "energy_quiet": -94.48
+          }
+        }
+      },
+      {
+        "critical_net": "unsupported",
+        "deck": {
+          "opposite": {
+            "delay_ps": 0.04831,
+            "energy_fj": 0.002632
+          },
+          "quiet": {
+            "delay_ps": 0.04309,
+            "energy_fj": 0.002331
+          }
+        },
+        "density": "dense",
+        "id": "M2-p4x-dense-L0.36",
+        "level": "M2",
+        "pitch_mult": 4,
+        "reference": {
+          "opposite": {
+            "delay_ps": 0.41474,
+            "energy_fj": 0.037673
+          },
+          "quiet": {
+            "delay_ps": 0.36796,
+            "energy_fj": 0.03211
+          }
+        },
+        "rel_err_pct": {
+          "critical_net": "unsupported",
+          "deck": {
+            "delay_opposite": -88.35,
+            "delay_quiet": -88.29,
+            "energy_opposite": -93.01,
+            "energy_quiet": -92.74
+          }
+        }
+      },
+      {
+        "critical_net": "unsupported",
+        "deck": {
+          "opposite": {
+            "delay_ps": 0.05014,
+            "energy_fj": 0.002736
+          },
+          "quiet": {
+            "delay_ps": 0.04126,
+            "energy_fj": 0.002227
+          }
+        },
+        "density": "sparse",
+        "id": "M2-p4x-sparse-L0.36",
+        "level": "M2",
+        "pitch_mult": 4,
+        "reference": {
+          "opposite": {
+            "delay_ps": 0.40996,
+            "energy_fj": 0.036983
+          },
+          "quiet": {
+            "delay_ps": 0.36147,
+            "energy_fj": 0.031297
+          }
+        },
+        "rel_err_pct": {
+          "critical_net": "unsupported",
+          "deck": {
+            "delay_opposite": -87.77,
+            "delay_quiet": -88.59,
+            "energy_opposite": -92.6,
+            "energy_quiet": -92.88
+          }
+        }
+      },
+      {
+        "critical_net": "unsupported",
+        "deck": {
+          "opposite": {
+            "delay_ps": 0.02677,
+            "energy_fj": 0.001406
+          },
+          "quiet": {
+            "delay_ps": 0.02236,
+            "energy_fj": 0.001167
+          }
+        },
+        "density": "dense",
+        "id": "M4-p1x-dense-L0.36",
+        "level": "M4",
+        "pitch_mult": 1,
+        "reference": {
+          "opposite": {
+            "delay_ps": 1.24033,
+            "energy_fj": 0.141222
+          },
+          "quiet": {
+            "delay_ps": 0.53978,
+            "energy_fj": 0.077587
+          }
+        },
+        "rel_err_pct": {
+          "critical_net": "unsupported",
+          "deck": {
+            "delay_opposite": -97.84,
+            "delay_quiet": -95.86,
+            "energy_opposite": -99.0,
+            "energy_quiet": -98.5
+          }
+        }
+      },
+      {
+        "critical_net": "unsupported",
+        "deck": {
+          "opposite": {
+            "delay_ps": 0.02779,
+            "energy_fj": 0.00146
+          },
+          "quiet": {
+            "delay_ps": 0.02134,
+            "energy_fj": 0.001113
+          }
+        },
+        "density": "sparse",
+        "id": "M4-p1x-sparse-L0.36",
+        "level": "M4",
+        "pitch_mult": 1,
+        "reference": {
+          "opposite": {
+            "delay_ps": 1.24304,
+            "energy_fj": 0.141971
+          },
+          "quiet": {
+            "delay_ps": 0.52594,
+            "energy_fj": 0.076877
+          }
+        },
+        "rel_err_pct": {
+          "critical_net": "unsupported",
+          "deck": {
+            "delay_opposite": -97.76,
+            "delay_quiet": -95.94,
+            "energy_opposite": -98.97,
+            "energy_quiet": -98.55
+          }
+        }
+      },
+      {
+        "critical_net": "unsupported",
+        "deck": {
+          "opposite": {
+            "delay_ps": 0.026,
+            "energy_fj": 0.001364
+          },
+          "quiet": {
+            "delay_ps": 0.02313,
+            "energy_fj": 0.001208
+          }
+        },
+        "density": "dense",
+        "id": "M4-p2x-dense-L0.36",
+        "level": "M4",
+        "pitch_mult": 2,
+        "reference": {
+          "opposite": {
+            "delay_ps": 0.59854,
+            "energy_fj": 0.060873
+          },
+          "quiet": {
+            "delay_ps": 0.42028,
+            "energy_fj": 0.041458
+          }
+        },
+        "rel_err_pct": {
+          "critical_net": "unsupported",
+          "deck": {
+            "delay_opposite": -95.66,
+            "delay_quiet": -94.5,
+            "energy_opposite": -97.76,
+            "energy_quiet": -97.09
+          }
+        }
+      },
+      {
+        "critical_net": "unsupported",
+        "deck": {
+          "opposite": {
+            "delay_ps": 0.02688,
+            "energy_fj": 0.001412
+          },
+          "quiet": {
+            "delay_ps": 0.02225,
+            "energy_fj": 0.001161
+          }
+        },
+        "density": "sparse",
+        "id": "M4-p2x-sparse-L0.36",
+        "level": "M4",
+        "pitch_mult": 2,
+        "reference": {
+          "opposite": {
+            "delay_ps": 0.59884,
+            "energy_fj": 0.060505
+          },
+          "quiet": {
+            "delay_ps": 0.41214,
+            "energy_fj": 0.040525
+          }
+        },
+        "rel_err_pct": {
+          "critical_net": "unsupported",
+          "deck": {
+            "delay_opposite": -95.51,
+            "delay_quiet": -94.6,
+            "energy_opposite": -97.67,
+            "energy_quiet": -97.14
+          }
+        }
+      },
+      {
+        "critical_net": "unsupported",
+        "deck": {
+          "opposite": {
+            "delay_ps": 0.02541,
+            "energy_fj": 0.001332
+          },
+          "quiet": {
+            "delay_ps": 0.02372,
+            "energy_fj": 0.00124
+          }
+        },
+        "density": "dense",
+        "id": "M4-p4x-dense-L0.36",
+        "level": "M4",
+        "pitch_mult": 4,
+        "reference": {
+          "opposite": {
+            "delay_ps": 0.42794,
+            "energy_fj": 0.039752
+          },
+          "quiet": {
+            "delay_ps": 0.38882,
+            "energy_fj": 0.03486
+          }
+        },
+        "rel_err_pct": {
+          "critical_net": "unsupported",
+          "deck": {
+            "delay_opposite": -94.06,
+            "delay_quiet": -93.9,
+            "energy_opposite": -96.65,
+            "energy_quiet": -96.44
+          }
+        }
+      },
+      {
+        "critical_net": "unsupported",
+        "deck": {
+          "opposite": {
+            "delay_ps": 0.02605,
+            "energy_fj": 0.001367
+          },
+          "quiet": {
+            "delay_ps": 0.02308,
+            "energy_fj": 0.001206
+          }
+        },
+        "density": "sparse",
+        "id": "M4-p4x-sparse-L0.36",
+        "level": "M4",
+        "pitch_mult": 4,
+        "reference": {
+          "opposite": {
+            "delay_ps": 0.42081,
+            "energy_fj": 0.038706
+          },
+          "quiet": {
+            "delay_ps": 0.37912,
+            "energy_fj": 0.033599
+          }
+        },
+        "rel_err_pct": {
+          "critical_net": "unsupported",
+          "deck": {
+            "delay_opposite": -93.81,
+            "delay_quiet": -93.91,
+            "energy_opposite": -96.47,
+            "energy_quiet": -96.41
+          }
+        }
+      }
+    ],
+    "schema": "asap7-parallel-line-circuit-fidelity/1",
+    "sim": {
+      "backend": "batch",
+      "engine_version": "46",
+      "remote": {
+        "ami_id": "ami-095c25ae241a4d360",
+        "availability_zone": "us-east-1a",
+        "client_klt_version": "0.9.2.dev451+g4b93fc861697.dirty",
+        "concurrency": "2",
+        "elapsed_seconds": 46,
+        "exit_code": "0",
+        "instance_id": "i-0723c4c2fbef811e0",
+        "instance_type": "c7i.8xlarge",
+        "job_id": "klt-sim-e03f605d429f",
+        "lifecycle": "spot",
+        "physical_cores": "16",
+        "provider": "aws-batch-fleet",
+        "region": "us-east-1",
+        "runner_compatibility": "match",
+        "runner_klt_version": "0.9.0",
+        "spot": true,
+        "state": "done"
+      },
+      "unit_count": 48
+    },
+    "stimulus": {
+      "delay": "50% of the victim source to 50% of the victim hub",
+      "driver_ohm": 10000.0,
+      "edge_s": 1e-12,
+      "energy": "integral of v*i at the victim source, 0 to t_stop",
+      "t_stop_s": 4e-11,
+      "vdd_v": 1.0
+    },
+    "tools": {
+      "deck_content_hash": "sha256:5c58a50e5f6a9099810b3fde37eaa8d93b0897653cb6597a831baac1f5ebee76"
+    }
+  },
+  "schema": "evidence-record/1",
+  "scope": "circuit-fidelity",
+  "subset_reason": null,
+  "supersedes": []
+}
