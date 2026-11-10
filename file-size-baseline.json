@@ -261,7 +261,7 @@
     },
     {
       "path": "src/klayout_tools/decks/sky130.py",
-      "lines": 3139
+      "lines": 3064
     },
     {
       "path": "src/klayout_tools/digital_fleet.py",
@@ -837,7 +837,7 @@
     },
     {
       "path": "tests/test_drc.py",
-      "lines": 11775
+      "lines": 11707
     },
     {
       "path": "tests/test_drc_asap7_deck.py",
