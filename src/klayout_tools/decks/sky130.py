@@ -1682,9 +1682,10 @@ DECK: list[DrcRule] = [
         check="width",
         threshold_dbu=840,  # 0.84 um
         # sky130.lydrc rule "nwell.1a": nwell.width(0.84, euclidian)
-        # -> "nwell.1a : min. nwell width : 0.84um"
+        # -> "nwell.1a : min. nwell width : 0.84um"; the same 0.84um check is
+        # sky130A_mr.drc's native "nwell.1" (issue #5253), cited below.
         scope="nwell",  # sky130.lydrc "nwell.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "nwell.1a"),
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "nwell.1"),
     ),
     DrcRule(
         id="nwell.space.1",
@@ -1928,6 +1929,29 @@ OFFGRID_UNCHECKED_LAYERS: dict[tuple[int, int], str] = {
 }
 
 
+#: Rows whose provenance cites the native sky130A output ids
+#: (``<stem>_OFFGRID`` / ``<stem>_angle``, the ids ``klt drc`` coverage is
+#: diffed against, issue #5253) instead of the shared ``x.1b`` / ``x.2*`` /
+#: ``x.3a`` message ids. Each row's stem equals the native output stem. Other
+#: rows keep the message id until their triage slice of #5242 lands.
+_NATIVE_OUTPUT_ID_STEMS: frozenset[str] = frozenset(
+    {
+        "dnwell",
+        "hvi",
+        "hvntm",
+        "hvtp",
+        "hvtr",
+        "nwell",
+        "pwbm",
+        "pwde",
+        "pwell_rs",
+        "uhvi",
+        "vhvi",
+        "vpp",
+    }
+)
+
+
 def _offgrid_rules() -> list[DrcRule]:
     """Build the `DrcRule` entries for `_OFFGRID_ROWS` (issue #2642).
 
@@ -1951,7 +1975,10 @@ def _offgrid_rules() -> list[DrcRule]:
                 # sky130.lydrc OFFGRID block: `<layer>.ongrid(0.005)`
                 # -> "x.1b : OFFGRID vertex on <layer>"
                 scope="x",  # sky130.lydrc "x.*" rule-id family (#566)
-                provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "x.1b"),
+                provenance=_sky130_provenance(
+                    "sky130/klayout/sky130.lydrc",
+                    f"{stem}_OFFGRID" if stem in _NATIVE_OUTPUT_ID_STEMS else "x.1b",
+                ),
                 # One grid for every layer and every voltage domain: the
                 # source block has no second column to have misread (#2369).
                 voltage_independent=True,
@@ -1975,7 +2002,10 @@ def _offgrid_rules() -> list[DrcRule]:
                 # -> "<rule id> : non <limit> degree angle <layer>"
                 scope="x",  # sky130.lydrc "x.*" rule-id family (#566)
                 provenance=_sky130_provenance(
-                    "sky130/klayout/sky130.lydrc", angle_rule_id
+                    "sky130/klayout/sky130.lydrc",
+                    f"{stem}_angle"
+                    if stem in _NATIVE_OUTPUT_ID_STEMS
+                    else angle_rule_id,
                 ),
                 # `x.2c` is the diff/tap floor of a genuinely two-column
                 # source rule (note 1 above) -- the only rows here that keep
