@@ -8,9 +8,9 @@ import pytest
 
 from klayout_tools import _sta_period_maps, post_route_sta
 from klayout_tools.post_route_sta import PostRouteStaError, run_sta
+from test_post_route_sta import _setup_multi_corner_env, _stub_openroad_clock_capture
 
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
-from test_post_route_sta import _setup_multi_corner_env, _stub_openroad_clock_capture
 
 _PC = ("tt_025C_1v80", "ss_100C_1v60")
 
