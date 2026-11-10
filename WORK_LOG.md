@@ -8,6 +8,24 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-10
 
+- **PR #5249**: feat(ci): add ratcheting per-module coverage floor
+- **PR #5247**: feat: warn in klt pex report about measured ASAP7 coupled-wiring fidelity gap
+- **PR #5246**: feat: report min_pulse_width and min_period in klt sta electrical_checks
+- **PR #5245**: refactor(extract): move flat netlist-write block out of run_extract
+- **PR #5243**: fix: disclose ct.4 and li.5 in sky130 coverage.unmodeled_rules
+- **PR #5239**: feat: opt-in require_complete_constraints grading for sta signoff evidence
+- **PR #5235**: feat: sg13g2 P-substrate tap ring and on-grid ring Cont
+- **Issue #5241** (closed): klt sta: report minimum pulse width / minimum period checks
+- **Issue #5234** (closed): klt sta: no SDC passthrough; signoff does not surface incomplete constraint coverage
+- **Issue #5233** (closed): klt drc: curated sky130 deck's coverage omits native rules li.5 / ct.4 from unmodeled_rules
+- **Issue #5203** (closed): ASAP7 parallel-line fidelity (3/3): klt pex warning for high-error regimes
+- **Issue #5199** (closed): ASAP7 parasitics: accuracy of first-order extraction on dense parallel-line arrays, graded against the field solver
+- **Issue #3312** (closed): ci: add ratcheting per-module coverage floor once report-only data exists
+- **PR #5230**: refactor: move extract --spef block out of run_extract
+- **PR #5229**: fix: expand pinned $PDK_ROOT in local osdi_preload entries
+- **PR #5225**: feat: add delay and energy circuit stage to ASAP7 parallel-line fidelity fixture
+- **Issue #5227** (closed): klt sim local backend does not expand $PDK_ROOT in osdi_preload
+- **Issue #5202** (closed): ASAP7 parallel-line fidelity (2/3): delay/energy consequence, evidence record, accuracy table
 - **PR #5226**: refactor: consolidate extract/netlist batch glue into _batch_common
 - **Issue #5232** (closed): gen bjt_array: adjacent sg13g2 HBT units abut with 5 nm Metal1 gap (M1.b), no spacing parameter
 - **Issue #5228** (closed): klt sim waveform.raw is all-vectors ASCII (160 MB for 30 ns) with no signal selection or reader

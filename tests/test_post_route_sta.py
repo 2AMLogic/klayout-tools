@@ -7779,7 +7779,7 @@ def test_sta_script_lines_single_clock_unchanged_by_extras_none():
 
 
 def test_clock_targets_echo():
-    assert post_route_sta._clock_targets("clk", 1.1, None) == {
+    assert post_route_sta.clock_targets("clk", 1.1, None) == {
         "clocks": [{"port": "clk", "period_ns": 1.1}],
         "clock_groups": [],
     }

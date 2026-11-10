@@ -525,7 +525,7 @@ def build_job_spec(
         cmd=command,
         tool=BATCH_JOB_TOOL,
         pdk_variant=approval.pdk,
-        timeout_seconds=netlist_batch._job_timeout_seconds(approval.timeout_s),
+        timeout_seconds=_batch_common.job_timeout_seconds(approval.timeout_s),
         inputs=(
             sim_batch.BatchJobInput(
                 name=TREE_FILENAME, label="generator tree", local_path=tarball_path

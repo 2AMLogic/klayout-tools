@@ -125,7 +125,11 @@ two disagree, this document (and the code) win.
   of a lumped schematic device (e.g. one tap of a metal-option ladder) for
   documentation without blocking `klt lvs`'s `options.combine_devices` from
   folding the series chain. When unset, every named net still promotes to a
-  pin, byte-for-byte unchanged. See "Declared pin set" below.
+  pin, byte-for-byte unchanged. See "Declared pin set" below. The order
+  given is also the order of the top `.SUBCKT` header (issue #5255): declared
+  pins come first, in the given order, and any remaining ports follow in the
+  existing deterministic order — so `klt pex --pins` can match a schematic
+  header without a wrapper subcircuit.
 - `--rename-declared-pins` — optional, off by default, requires `--pins` or
   `--def-pins`. Renames each surviving promoted pin net whose comma-joined
   component labels contain *exactly one* declared name to that name (issue

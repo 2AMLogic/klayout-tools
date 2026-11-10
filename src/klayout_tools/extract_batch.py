@@ -261,13 +261,6 @@ def build_tarball(
 # --------------------------------------------------------------------------- #
 
 
-def job_timeout_seconds(timeout_s: float) -> int:
-    """``--timeout-s`` plus the per-job overhead ``klt sim`` adds, so the
-    inner ``timeout`` always fires before the harness's outer one. Never
-    capped here; the fleet ceiling is :func:`_check_ceiling`'s concern."""
-    return int(math.ceil(sim_batch._default_batch_job_timeout_s(1, timeout_s)))
-
-
 def build_job_spec(
     *,
     tarball_path: str,
@@ -329,7 +322,7 @@ def build_job_spec(
         cmd=command,
         tool=BATCH_JOB_TOOL,
         pdk_variant=pdk,
-        timeout_seconds=job_timeout_seconds(timeout_s),
+        timeout_seconds=_batch_common.job_timeout_seconds(timeout_s),
         inputs=(
             sim_batch.BatchJobInput(
                 name=BATCH_TREE_FILENAME,
@@ -448,22 +441,6 @@ def _collect(
 # --------------------------------------------------------------------------- #
 # Collected output
 # --------------------------------------------------------------------------- #
-
-
-def _rewrite(value: Any, runner_roots: list[str], local_root: str) -> Any:
-    """Rewrite every string under a runner scratch root to the caller's root."""
-    if isinstance(value, str):
-        for root in runner_roots:
-            if value == root or value.startswith(root + "/"):
-                return local_root.rstrip("/") + value[len(root) :]
-        return value
-    if isinstance(value, list):
-        return [_rewrite(item, runner_roots, local_root) for item in value]
-    if isinstance(value, dict):
-        return {
-            key: _rewrite(item, runner_roots, local_root) for key, item in value.items()
-        }
-    return value
 
 
 def _read_report(collected: str, job_id: str) -> dict[str, Any]:
@@ -588,7 +565,7 @@ def run_extract_batch(
         if output is not None and not no_netlist:
             _write_collected_netlist(collected, report, output, job_id)
         runner_roots = _batch_common.read_runner_roots(collected)
-        report = _rewrite(report, runner_roots, tree.root)
+        report = _batch_common.rewrite_runner_paths(report, runner_roots, tree.root)
         report["netlist_path"] = None if no_netlist else output
         remote = {
             **sim_batch._batch_environment(config, job_id, status),
