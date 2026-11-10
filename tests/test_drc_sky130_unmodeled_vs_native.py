@@ -16,6 +16,7 @@ import klayout.db as kdb
 
 from klayout_tools.decks import get_unmodeled_rules
 from klayout_tools.decks import sky130 as deck_mod
+from klayout_tools.decks.sky130_unmodeled import native_offgrid_aliases
 from klayout_tools.drc import run_drc
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -32,6 +33,28 @@ def _ids(name: str) -> set[str]:
 NATIVE = _ids("sky130_native_rule_ids.txt")
 UNTRIAGED = _ids("sky130_native_rule_ids_untriaged.txt")
 IMPLEMENTED = {r.provenance.rule_id for r in deck_mod.DECK if r.provenance is not None}
+# <layer>_OFFGRID / <layer>_angle are implemented by the deck's ongrid/angle rules,
+# which cite the official x.1b/x.2*/x.3a ids in provenance (#5254). Only the
+# stems triaged so far are credited here; the remaining stems stay UNTRIAGED
+# until their own slice of #5242 lands (and then widens this set).
+_ALIAS_STEMS = (
+    "areaid_re",
+    "diff",
+    "lvtn",
+    "ncm",
+    "npc",
+    "nsdm",
+    "poly",
+    "psdm",
+    "tap",
+    "tunm",
+)
+_DECK_IDS = {r.id for r in deck_mod.DECK}
+IMPLEMENTED |= {
+    native
+    for native, rule_id in native_offgrid_aliases().items()
+    if rule_id in _DECK_IDS and native.rsplit("_", 1)[0] in _ALIAS_STEMS
+}
 UNMODELED = set(deck_mod.UNMODELED_RULES)
 
 
@@ -100,9 +123,19 @@ def test_run_drc_sky130_coverage_lists_unmodeled_rules(tmp_path):
         "ct.irdrop.2",
         "difftap.10",
         "difftap.11",
+        "difftap.1_a",
+        "difftap.1_b",
+        "difftap.1_c",
+        "difftap.2",
+        "difftap.4",
+        "difftap.5",
+        "difftap.6",
+        "difftap.7",
         "difftap.8",
         "difftap.9",
         "dnwell.2",
+        "extd.1",
+        "extd.2",
         "hvi.1",
         "hvi.2a",
         "hvntm.1",
@@ -112,6 +145,7 @@ def test_run_drc_sky130_coverage_lists_unmodeled_rules(tmp_path):
         "hvtr.1",
         "hvtr.2",
         "hvtr.2_a",
+        "ldntm.1",
         "ldntm.2",
         "li.1a",
         "li.3a",
@@ -141,13 +175,22 @@ def test_run_drc_sky130_coverage_lists_unmodeled_rules(tmp_path):
         "licon.6",
         "licon.7",
         "licon.8a",
+        "lvtn.1",
+        "lvtn.12",
+        "lvtn.13",
+        "lvtn.1a",
         "lvtn.2",
+        "lvtn.3a",
+        "lvtn.3b",
+        "lvtn.4b",
+        "lvtn.9",
         "m1.3ab",
         "m1.5",
         "m2.3ab",
         "m2.5",
         "m3.3ab",
         "m4.5ab",
+        "moduleCut.1",
         "n/psdm.10a",
         "n/psdm.10b",
         "n/psdm.5a",
@@ -155,16 +198,61 @@ def test_run_drc_sky130_coverage_lists_unmodeled_rules(tmp_path):
         "n/psdm.6",
         "n/psdm.7",
         "n/psdm.8",
+        "ncm.1",
+        "ncm.2",
         "ncm.2a",
+        "ncm.3",
+        "ncm.5",
+        "ncm.6",
+        "ncm.7",
+        "ncm.x.3",
         "npc.4",
+        "nsdm.2",
+        "nsdm.3",
+        "nsdm.4",
+        "nsdm.5",
+        "nsdm.6",
+        "nsdm.6a",
+        "nsdm_psdm_overlap",
         "nsm.1",
         "pad.2",
+        "photo.10",
+        "photo.2",
+        "photo.3",
+        "photo.4",
+        "photo.5.6",
+        "photo.7",
+        "photo.8",
+        "photo.9",
+        "poly.10",
+        "poly.11",
+        "poly.12",
+        "poly.15",
+        "poly.1b",
         "poly.3",
+        "poly.4",
+        "poly.5",
+        "poly.6",
+        "poly.7",
+        "poly.9",
+        "psdm.2",
+        "psdm.3",
+        "psdm.4",
+        "psdm.5",
+        "psdm.6",
+        "psdm.6a",
         "rdl.1",
         "rdl.2",
         "rpm.2",
+        "thkox.1",
         "thkox.2",
+        "tunm.1",
         "tunm.2",
+        "tunm.3",
+        "tunm.4",
+        "tunm.5",
+        "tunm.6a",
+        "tunm.7",
         "urpm.2",
         "via.11",
         "via.12",
