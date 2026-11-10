@@ -161,3 +161,24 @@ UNMODELED_RULES: tuple[str, ...] = (
     "poly.7",
     "poly.9",
 )
+
+
+def native_offgrid_aliases() -> dict[str, str]:
+    """Native ``sky130A.lydrc`` OFFGRID output ids -> implementing deck rule (#5254).
+
+    The deck cites the official ``x.1b``/``x.2*``/``x.3a`` rule id in
+    ``provenance.rule_id``, but the native ``.output()`` id is
+    ``<layer>_OFFGRID`` / ``<layer>_angle``, so the native-vs-deck coverage diff
+    (``tests/test_drc_sky130_unmodeled_vs_native.py``) needs this map to see the
+    rule as implemented. Derived from ``sky130._OFFGRID_ROWS``, never hand-listed.
+    """
+    from .sky130 import _OFFGRID_ROWS  # lazy: sky130 imports this module
+
+    return {
+        **{f"{stem}_OFFGRID": f"{stem}.ongrid.1" for stem, *_ in _OFFGRID_ROWS},
+        **{
+            f"{stem}_angle": f"{stem}.angle.1"
+            for stem, _layer, limit, _rid in _OFFGRID_ROWS
+            if limit is not None
+        },
+    }

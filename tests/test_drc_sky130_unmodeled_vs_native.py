@@ -16,6 +16,7 @@ import klayout.db as kdb
 
 from klayout_tools.decks import get_unmodeled_rules
 from klayout_tools.decks import sky130 as deck_mod
+from klayout_tools.decks.sky130_unmodeled import native_offgrid_aliases
 from klayout_tools.drc import run_drc
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -51,7 +52,7 @@ _ALIAS_STEMS = (
 _DECK_IDS = {r.id for r in deck_mod.DECK}
 IMPLEMENTED |= {
     native
-    for native, rule_id in deck_mod.NATIVE_OFFGRID_ALIASES.items()
+    for native, rule_id in native_offgrid_aliases().items()
     if rule_id in _DECK_IDS and native.rsplit("_", 1)[0] in _ALIAS_STEMS
 }
 UNMODELED = set(deck_mod.UNMODELED_RULES)

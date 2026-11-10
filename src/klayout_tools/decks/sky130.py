@@ -1988,21 +1988,6 @@ def _offgrid_rules() -> list[DrcRule]:
 
 DECK += _offgrid_rules()
 
-#: Native ``sky130A.lydrc`` OFFGRID output ids -> the deck rule that implements
-#: each (issue #5254). The deck cites the official ``x.1b``/``x.2*``/``x.3a``
-#: rule id in ``provenance.rule_id``, but the native ``.output()`` id is
-#: ``<layer>_OFFGRID`` / ``<layer>_angle``, so the native-vs-deck coverage diff
-#: (``tests/test_drc_sky130_unmodeled_vs_native.py``) needs this map to see the
-#: rule as implemented. Derived from ``_OFFGRID_ROWS``, never hand-listed.
-NATIVE_OFFGRID_ALIASES: dict[str, str] = {
-    **{f"{stem}_OFFGRID": f"{stem}.ongrid.1" for stem, *_ in _OFFGRID_ROWS},
-    **{
-        f"{stem}_angle": f"{stem}.angle.1"
-        for stem, _layer, limit, _rid in _OFFGRID_ROWS
-        if limit is not None
-    },
-}
-
 # (layer, datatype) -> "name.purpose" string, from sky130.lyt's layer-map,
 # used only to render violations[].layer as e.g. "poly.drawing" instead of
 # the bare "66/20" fallback.
