@@ -18,6 +18,7 @@ from ..equiv import SUPPORTED_ENGINES as SUPPORTED_EQUIV_ENGINES
 from ..equiv import SUPPORTED_SIM_BACKENDS
 from ..extract_parasitics import parse_parasitic_variants
 from ..render import DEFAULT_HEIGHT, DEFAULT_WIDTH
+from ..signoff_attest_carry import add_skip_local_only_argument
 from . import (
     arith_gen_cmd,
     array_check_cmd,
@@ -2902,16 +2903,14 @@ def _add_signoff_parser(subparsers: argparse._SubParsersAction) -> None:
         help=(
             "produce the artifact-anchored generic envelope for T1 item 1 "
             "(Design sources), 8 (Characterization report), 9 (Testbenches "
-            "shipped) or 10 (Repo hygiene) "
-            "from --inventory, by running the item-specific checks the "
-            "inventory declares (issue #2844); or for item 2 (Layout) from "
-            "--input STREAM, by checking the committed layout stream "
-            "(readable, non-empty top cell, dbu on grid; issue #4188). "
-            "Status is derived from those checks: exit 0 pass, 3 fail "
-            "(nothing written), 1 malformed inventory. Mutually exclusive "
-            "with <file>/--manifest/--fleet/"
-            "--describe-grader/--tiers-doc. See docs/cli/signoff.md's "
-            "'Attesting items 1, 8, 9 and 10' section."
+            "shipped) or 10 (Repo hygiene) from --inventory, by running the "
+            "item-specific checks the inventory declares (issue #2844); or "
+            "for item 2 (Layout) from --input STREAM, by checking the "
+            "committed layout stream (readable, non-empty top cell, dbu on "
+            "grid; issue #4188). Status is derived from those checks: exit "
+            "0 pass, 3 fail (nothing written), 1 malformed inventory. "
+            "Mutually exclusive with <file>/--manifest/--fleet/"
+            "--describe-grader/--tiers-doc. See docs/cli/signoff.md."
         ),
     )
     signoff_parser.add_argument(
@@ -2923,6 +2922,7 @@ def _add_signoff_parser(subparsers: argparse._SubParsersAction) -> None:
             "sha256. Optional for --attest 2: declared layout 'checks'."
         ),
     )
+    add_skip_local_only_argument(signoff_parser)
     signoff_parser.add_argument(
         "--input",
         dest="attest_input",
