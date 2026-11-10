@@ -222,6 +222,7 @@
         "klayout_tools.extract_hierarchy",
         "klayout_tools.extract_parasitics",
         "klayout_tools.extract_parasitics_block",
+        "klayout_tools.extract_netlist_write",
         "klayout_tools.extract_netselect",
         "klayout_tools.extract_orient",
         "klayout_tools.extract_cap_top_plate",
@@ -659,7 +660,8 @@
         "klayout_tools.signoff_multi_member",
         "klayout_tools.signoff_na",
         "klayout_tools.signoff_power_delivery",
-        "klayout_tools.signoff_runset"
+        "klayout_tools.signoff_runset",
+        "klayout_tools.signoff_sta_constraints"
       ]
     },
     "sim": {
@@ -723,6 +725,7 @@
         "klayout_tools.sim_param_file",
         "klayout_tools.sim_passes",
         "klayout_tools.sim_op_check",
+        "klayout_tools.sim_osdi_pin",
         "klayout_tools.sim_peak_rss",
         "klayout_tools.sim_plan",
         "klayout_tools.sim_plot",
@@ -1658,6 +1661,12 @@
   ],
   "shared_private_permissions": [
     {
+      "consumer": "klayout_tools.sim_osdi_pin",
+      "exporter": "klayout_tools._paths",
+      "symbol": "_resolve_relative",
+      "reason": "Issue #5227: resolve_osdi_preload moved verbatim out of sim.py, which already imports this helper; promote to public with the other _paths importers."
+    },
+    {
       "consumer": "klayout_tools.synthesize_x_scan",
       "exporter": "klayout_tools.place_and_route_request",
       "symbol": "_NETLIST_X_CONSTANT_RE",
@@ -2243,12 +2252,6 @@
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {
-        "consumer": "klayout_tools.characterize_osdi",
-        "exporter": "klayout_tools.sim",
-        "symbol": "_resolve_osdi_preload",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
         "consumer": "klayout_tools.cli._request_document",
         "exporter": "klayout_tools._paths",
         "symbol": "_resolve_relative",
@@ -2589,12 +2592,6 @@
         "exporter": "klayout_tools.sim",
         "symbol": "_resolve_netlist_include",
         "reason": "op-lint follows `.include`s with the same resolver the sweep uses (issue #3101); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.op_sanity",
-        "exporter": "klayout_tools.sim",
-        "symbol": "_resolve_osdi_preload",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {
         "consumer": "klayout_tools.op_sanity",

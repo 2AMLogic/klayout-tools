@@ -8,6 +8,23 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-10
 
+- **PR #5226**: refactor: consolidate extract/netlist batch glue into _batch_common
+- **Issue #5232** (closed): gen bjt_array: adjacent sg13g2 HBT units abut with 5 nm Metal1 gap (M1.b), no spacing parameter
+- **Issue #5228** (closed): klt sim waveform.raw is all-vectors ASCII (160 MB for 30 ns) with no signal selection or reader
+- **Issue #5223** (closed): signoff --attest 9: no way to refresh file hashes without re-running the cold-start command
+- **PR #5224**: refactor: move extract --parasitics block into extract_parasitics_block
+- **PR #5222**: feat: add min/max corner extremes to klt sim measurement rollup
+- **Issue #5221** (closed): klt sim: report has no per-measurement min/max over corners for limit-less (extraction) measurements
+- **PR #5220**: refactor: move run_extract flag validation into extract_validate
+- **PR #5218**: feat: add klt route for labelled-pin routing in placed layouts
+- **PR #5216**: feat(drc): document SVaricap carve-out deviation for sg13g2 NW.c via runset_correspondence
+- **Issue #5212** (closed): drc(sg13g2): curated nwell.enclosing.pactiv.1 lacks the foundry SVaricap carve-out
+- **PR #5214**: fix(drc): constrain native engine PDK resolution to the deck's family
+- **Issue #5211** (closed): klt drc --engine both runs a native deck from a non-matching PDK instead of reporting not_checked
+- **PR #5213**: feat: add ASAP7 parallel-line extraction-vs-klt-mom fidelity example
+- **Issue #5208** (closed): Consolidate duplicated batch glue in extract_batch/netlist_batch into _batch_common
+- **Issue #5205** (closed): feat: klt route slice 1 — two-pin label-to-label routing with foreign-overlap report
+- **Issue #5201** (closed): ASAP7 parallel-line fidelity (1/3): fixture and R/C comparison vs klt mom
 - **PR #5217**: refactor(extract): move final report assembly out of run_extract
 - **PR #5215**: feat(signoff): add --skip-local-only to carry local_only outcomes on attest refresh
 - **Issue #5209** (closed): signoff --attest: no way to regenerate an attestation when a local_only command cannot run on the current host

@@ -6230,6 +6230,16 @@ fails with `Unable to find definition of model …` and every corner errors.
   sees the same devices.
 - **Resolution.** Same rule as `models.lib`'s literal-path shape: `$VAR`
   and `~` expand, a relative path joins the request file's own directory.
+  On a run that reads the file locally, a leading `$PDK_ROOT/` or
+  `${PDK_ROOT}/` is first replaced by the pinned PDK root
+  (`models.pdk_root`, or `--pdk-root`, which overrides it) when one is set, so
+  one request serves a local debug probe and a batch grid
+  ([#5227](https://github.com/2AMLogic/klayout-tools/issues/5227)). The pin
+  wins over a `PDK_ROOT` environment variable (as `--pdk-root` documents);
+  with no pin the environment variable expands as before, and with neither the
+  entry is a relative path and fails the existence check below. Off-host
+  backends are unchanged: runner-resolved entries are not expanded or checked
+  locally.
 - **Validated up front.** Every entry is existence-checked before any
   corner is dispatched — a missing file is an application error (exit `1`,
   `osdi_preload file not found: <path>`), the same posture as `models.lib`'s
