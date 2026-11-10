@@ -468,6 +468,10 @@ has 20 pins.
 If one check finds a gap and the other is unavailable, the status is still
 `"incomplete"`.
 
+`klt signoff`'s opt-in `require_complete_constraints` evidence key grades a
+cited `sta` envelope `unmet` unless every corner's `status` is `"complete"`
+([`signoff.md`](signoff.md)).
+
 **Combinational-only designs.** A design with no registers reports
 `unclocked_registers.count: 0`. This zero comes from a query that ran, so it
 is not unknown. Its outputs are ordinary endpoints. With
