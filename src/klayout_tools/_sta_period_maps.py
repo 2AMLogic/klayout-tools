@@ -27,16 +27,18 @@ def _period_number(value: Any, where: str) -> float:
     return float(value)
 
 
-def validate_period(period: Any, where: str) -> float | dict[str, float]:
-    """Validate one clock entry's ``period_ns``: a positive number, or a
-    non-empty ``{corner: positive number}`` map (``where`` is the entry's
-    path in the request)."""
+def validate_period(
+    period: Any, where: str, field: str = "period_ns"
+) -> float | dict[str, float]:
+    """Validate one clock period: a positive number, or a non-empty
+    ``{corner: positive number}`` map (``where`` is the entry's path in the
+    request, ``field`` the key name -- ``clock_period_ns`` for the shorthand)."""
     if not isinstance(period, dict):
-        return _period_number(period, f"{where}.period_ns")
+        return _period_number(period, f"{where}.{field}")
     if not period:
-        raise _error(f"{where}.period_ns corner map must name at least one corner")
+        raise _error(f"{where}.{field} corner map must name at least one corner")
     return {
-        corner: _period_number(value, f"{where}.period_ns['{corner}']")
+        corner: _period_number(value, f"{where}.{field}['{corner}']")
         for corner, value in period.items()
     }
 

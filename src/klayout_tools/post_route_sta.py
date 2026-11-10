@@ -1940,7 +1940,12 @@ def _validate_constraints(
         clock_period_ns = constraints.get("clock_period_ns")
     if not (isinstance(clock_port, str) and clock_port):
         raise PostRouteStaError("request.constraints.clock_port is required")
-    if not isinstance(clock_period_ns, dict) and (
+    if isinstance(clock_period_ns, dict):
+        # Shorthand map: validate every value (it reaches create_clock -period).
+        clock_period_ns = validate_period(
+            clock_period_ns, "request.constraints", "clock_period_ns"
+        )
+    elif (
         isinstance(clock_period_ns, bool)
         or not isinstance(clock_period_ns, (int, float))
         or clock_period_ns <= 0

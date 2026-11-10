@@ -46,6 +46,29 @@ def test_validate_clock_period_map_rejects_bad_values(period, message):
 
 
 @pytest.mark.parametrize(
+    "period, message",
+    [
+        ({}, "clock_period_ns corner map must name at least one"),
+        ({_PC[0]: -5, _PC[1]: 1}, r"clock_period_ns\['tt_025C_1v80'\] must be greater"),
+        ({_PC[0]: 1, _PC[1]: "1; exec foo"}, "clock_period_ns.*positive number"),
+        ({_PC[0]: True, _PC[1]: 1}, "positive number"),
+    ],
+)
+def test_validate_shorthand_period_map_rejects_bad_values(period, message):
+    with pytest.raises(PostRouteStaError, match=message):
+        post_route_sta._validate_constraints(
+            {"clock_port": "clk", "clock_period_ns": period}
+        )
+
+
+def test_validate_shorthand_period_map_accepted():
+    _, period, _, _ = post_route_sta._validate_constraints(
+        {"clock_port": "clk", "clock_period_ns": {_PC[0]: 2, _PC[1]: 3.5}}
+    )
+    assert period == {_PC[0]: 2.0, _PC[1]: 3.5}
+
+
+@pytest.mark.parametrize(
     "period, corners, message",
     [
         ({_PC[0]: 2.0}, list(_PC), "missing corner"),
