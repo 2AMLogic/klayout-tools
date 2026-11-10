@@ -14,6 +14,7 @@ from pathlib import Path
 
 import klayout.db as kdb
 
+from helpers.sky130_native_aliases import NATIVE_ALIASES
 from klayout_tools.decks import get_unmodeled_rules
 from klayout_tools.decks import sky130 as deck_mod
 from klayout_tools.decks.sky130_unmodeled import native_offgrid_aliases
@@ -34,47 +35,6 @@ NATIVE = _ids("sky130_native_rule_ids.txt")
 UNTRIAGED = _ids("sky130_native_rule_ids_untriaged.txt")
 _DECK_BY_ID = {r.id: r for r in deck_mod.DECK}
 
-#: Native output ids the deck implements under a different citation (#5252):
-#: native id -> deck rule id. ``<layer>_OFFGRID`` / ``<layer>_angle`` are the
-#: output names of ``sky130A_mr.drc``'s OFFGRID block, whose rule ids are
-#: ``x.1b`` / ``x.3a`` / ``x.2`` (what the deck's provenance cites), and
-#: ``m4.4`` is the ``sky130A.lydrc`` name of the 0.24um2 met4 area check the
-#: mr deck calls ``m4.4a``. Each target must exist in the deck.
-NATIVE_ALIASES: dict[str, str] = {
-    "m4.4": "met4.area.1",
-    # Enclosure rules cited via the mr deck's ids; kept here (not as deck
-    # ``provenance``) so sky130.py stays within its size ratchet.
-    "m1.4": "met1.enclosing.mcon.1",
-    "m2.4": "met2.enclosing.via.1",
-    "m3.4": "met3.enclosing.via2.1",
-    "m4.3": "met4.enclosing.via3.1",
-    "m5.3": "met5.enclosing.via4.1",
-    "capm.3": "met3.enclosing.capm.1",
-    "capm.4": "capm.enclosing.via3.1",
-    "cap2m.3": "met4.enclosing.capm2.1",
-    "cap2m.4": "capm2.enclosing.via4.1",
-    **{
-        f"{native}_OFFGRID": f"{stem}.ongrid.1"
-        for native, stem in (
-            ("m1", "met1"),
-            ("m2", "met2"),
-            ("m3", "met3"),
-            ("m4", "met4"),
-            ("m5", "met5"),
-            ("mf", "mf"),
-            ("nsm", "nsm"),
-            ("pad", "pad"),
-            ("rpm", "rpm"),
-        )
-    },
-}
-NATIVE_ALIASES.update(
-    {
-        k.replace("_OFFGRID", "_angle"): v.replace(".ongrid.1", ".angle.1")
-        for k, v in list(NATIVE_ALIASES.items())
-        if k.endswith("_OFFGRID")
-    }
-)
 IMPLEMENTED = {r.provenance.rule_id for r in deck_mod.DECK if r.provenance is not None}
 IMPLEMENTED |= {n for n, deck_id in NATIVE_ALIASES.items() if deck_id in _DECK_BY_ID}
 # <layer>_OFFGRID / <layer>_angle are implemented by the deck's ongrid/angle rules,
@@ -93,6 +53,10 @@ _ALIAS_STEMS = (
     "psdm",
     "tap",
     "tunm",
+    "via",
+    "via2",
+    "via3",
+    "via4",
 )
 IMPLEMENTED |= {
     native
@@ -461,10 +425,14 @@ def test_run_drc_sky130_coverage_lists_unmodeled_rules(tmp_path):
         "via.3",
         "via.3_a",
         "via.3_b",
+        "via.4a_a",
         "via.4b",
+        "via.4c.5c",
         "via.5a",
         "via1.14",
+        "via1.5a",
         "via1.5b",
+        "via2",
         "via2.11",
         "via2.12",
         "via2.14",
@@ -472,15 +440,22 @@ def test_run_drc_sky130_coverage_lists_unmodeled_rules(tmp_path):
         "via2.3",
         "via2.3_a",
         "via2.3_b",
+        "via2.4_a",
         "via2.4a",
         "via2.5",
+        "via3",
+        "via3.1",
         "via3.11",
         "via3.12",
         "via3.13",
+        "via3.4_a",
         "via3.5",
+        "via4",
+        "via4.1",
         "via4.3",
         "via4.3_a",
         "via4.3_b",
+        "via4.4_a",
         "vpp.1",
         "vpp.13",
         "vpp.3",
