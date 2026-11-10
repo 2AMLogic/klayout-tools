@@ -140,6 +140,29 @@ def test_fidelity_warning_absent_for_other_decks(deck):
     assert fidelity_warnings_for_deck(deck) == []
 
 
+def test_with_fidelity_warnings_asap7_attaches_warnings_in_place():
+    from klayout_tools.pex_asap7 import (
+        fidelity_warnings_for_deck,
+        with_fidelity_warnings,
+    )
+
+    result = {"ok": True}
+    out = with_fidelity_warnings(result, "asap7")
+    assert out is result
+    assert out["warnings"] == fidelity_warnings_for_deck("asap7")
+
+
+@pytest.mark.parametrize("deck", ["sky130", None])
+def test_with_fidelity_warnings_other_decks_leave_result_unchanged(deck):
+    from klayout_tools.pex_asap7 import with_fidelity_warnings
+
+    result = {"ok": True}
+    out = with_fidelity_warnings(result, deck)
+    assert out is result
+    assert out == {"ok": True}
+    assert "warnings" not in out
+
+
 def test_fidelity_warning_ranges_match_phase2_doc():
     import re
 
