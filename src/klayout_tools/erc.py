@@ -100,8 +100,9 @@ from .erc_ties import (  # noqa: F401 -- REASON_* are re-exported public names
     _degenerate_tie_reasons,
     _tie_findings,
 )
-from .erc_well_regions import (
+from .erc_well_regions import (  # noqa: F401 -- _cells_region is re-exported for tests
     _boxes_region,
+    _cells_region,
     _select_well_class,
     _tie_well_region,
     _well_assertion_coverage_entry,
