@@ -141,16 +141,9 @@ def resolve_backend(flag: str | None) -> str:
     value from the environment is an error naming the variable (argparse
     already validates the flag).
     """
-    if flag is not None:
-        value, source = flag, "--backend"
-    else:
-        value = os.environ.get(BACKEND_ENV, "").strip() or "local"
-        source = f"${BACKEND_ENV}"
-    if value not in SUPPORTED_BACKENDS:
-        raise NetlistError(
-            f"{source} must be one of {', '.join(SUPPORTED_BACKENDS)} (got {value!r})"
-        )
-    return value
+    return _batch_common.resolve_backend_value(
+        flag, BACKEND_ENV, SUPPORTED_BACKENDS, NetlistError
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -488,16 +481,9 @@ def _resolve_config(pdk: str, timeout_s: float) -> sim_batch.BatchConfig:
     request, so the fleet config resolves exactly as for ``klt sim``
     (``$KLT_BATCH_*``, then ``batch-fleet.env`` beside the provision script).
     Its ``SimError``/``BatchError`` becomes a :class:`NetlistError`."""
-    from .sim import SimError
-
-    try:
-        return sim_batch._resolve_batch_config(
-            {"models": {"pdk": pdk}}, corner_count=1, timeout_s=timeout_s
-        )
-    except (SimError, sim_batch.BatchError) as exc:
-        raise NetlistError(
-            f"batch backend: {exc} {_NO_FALLBACK}", code=getattr(exc, "code", None)
-        ) from exc
+    return _batch_common.resolve_batch_config(
+        pdk, timeout_s, NetlistError, _NO_FALLBACK
+    )
 
 
 def _runner_error(collected: str) -> tuple[dict[str, Any] | None, str]:
@@ -552,18 +538,16 @@ def _job_failure(
     stderr_tail: str = "",
     harness_log: str | None = None,
 ) -> NetlistError:
-    message, code, details = _batch_common.job_failure_parts(
+    return _batch_common.job_failure(
         job_id=job_id,
-        state=str(status.get("state") or ""),
-        exit_code=sim_batch._status_exit_code(status),
-        detail=str(status.get("detail") or "").strip(),
+        status=status,
         runner_error=runner_error,
         note=note,
         stderr_tail=stderr_tail,
         harness_log=harness_log,
+        err_cls=NetlistError,
+        no_fallback=_NO_FALLBACK,
     )
-    message += f" {_NO_FALLBACK}"
-    return NetlistError(message, code=code, job_id=job_id, details=details or None)
 
 
 # --------------------------------------------------------------------------- #
@@ -661,16 +645,7 @@ def _validate_batch_args(
 
 
 def _transport_error(job_id: str, exc: sim_batch.BatchError) -> NetlistError:
-    if isinstance(exc, sim_batch.BatchPollTimeout):
-        return NetlistError(
-            f"batch job {job_id}: {exc} -- it may still finish on the fleet, but "
-            f"no netlist was collected {_NO_FALLBACK}",
-            code=exc.code or BATCH_POLL_TIMEOUT_CODE,
-            job_id=job_id,
-        )
-    return NetlistError(
-        f"batch job {job_id}: {exc} {_NO_FALLBACK}", code=exc.code, job_id=job_id
-    )
+    return _batch_common.transport_error(job_id, exc, NetlistError, _NO_FALLBACK)
 
 
 def _submit_and_wait(
