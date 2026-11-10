@@ -1752,7 +1752,7 @@ DECK: list[DrcRule] = [
         provenance=_sg13g2_drc_provenance(f"{_BEOL}/6_11_mim.drc", "MIM.d"),
     ),
 ]
-
+__import__(f"{__package__}.sg13g2_runset_notes", fromlist=["x"]).apply(DECK)
 # Foundry rules this curated deck knows about but cannot evaluate (issue
 # #3571, mirroring #3012): `{rule id: (layer, description)}`. `drc.py`
 # reports each one under `coverage.unchecked_rules` whenever its layer is
