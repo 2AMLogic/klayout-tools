@@ -124,6 +124,8 @@ def run_keepout_check(
     region_um: tuple[float, float, float, float] | None = None,
     top: str | None = None,
     cells: list[str] | None = None,
+    allow: list[tuple[tuple[float, float, float, float], list[tuple[int, int]] | None]]
+    | None = None,
 ) -> dict[str, Any]:
     """Check that no ``forbidden``-layer shape lies within ``margin_um`` of the
     guard (``cells`` and/or ``region_um``; at least one is required).
@@ -140,6 +142,7 @@ def run_keepout_check(
             "dbu_um": float,
             "status": "clean" | "violated",
             "violation_count": int,
+            "allow": [{"bbox_um": [l, b, r, t], "layers": [[l, d], ...]}, ...],
             "violations": [
                 {
                     "rule": "keepout.forbidden_shape",
@@ -158,8 +161,14 @@ def run_keepout_check(
     ``kind`` is ``"inside"`` when the intruding piece overlaps the guard
     itself and ``"margin"`` when it lies only in the margin band. ``bbox`` is
     the piece of the shape inside the zone, in micrometres.
+
+    ``allow`` is an optional list of ``(bbox_um, layers)`` pin-access windows:
+    forbidden-layer geometry inside a window is exempt (``layers`` ``None`` =
+    every forbidden layer). Geometry outside the windows is still checked, and
+    each window is echoed in the report's ``allow`` array.
     """
     selected = _validate_request(forbidden, margin_um, cells, region_um)
+    windows = _normalise_allow(allow, forbidden)
 
     layout = load_layout(layout_path, KeepoutCheckError)
     _require_known_cells(layout, selected)
@@ -195,10 +204,14 @@ def run_keepout_check(
             if layer_index is None:
                 continue
             shapes = _layer_region(kdb, layout, cell, layer_index, excluded)
+            in_zone = shapes & zone
+            allowed = _allow_region(kdb, windows, (layer, datatype), dbu)
+            if allowed is not None:
+                in_zone = in_zone - allowed
             violations.extend(
                 _pieces_to_violations(
                     kdb,
-                    shapes & zone,
+                    in_zone,
                     guard,
                     layer,
                     datatype,
@@ -236,10 +249,53 @@ def run_keepout_check(
         "region_um": list(region_um) if region_um is not None else None,
         "cells": list(selected) if selected is not None else None,
         "dbu_um": dbu,
+        "allow": [
+            {"bbox_um": list(bbox), "layers": [list(pair) for pair in layers]}
+            for bbox, layers in windows
+        ],
         "status": "violated" if violations else "clean",
         "violation_count": len(violations),
         "violations": violations,
     }
+
+
+def _normalise_allow(
+    allow: Any, forbidden: list[tuple[int, int]]
+) -> list[tuple[tuple[float, float, float, float], list[tuple[int, int]]]]:
+    """Validate ``allow`` and resolve each window's layers (``None`` -> every
+    forbidden layer) so the report echoes the effective scope."""
+    if allow is None:
+        return []
+    if not isinstance(allow, (list, tuple)):
+        raise KeepoutCheckError("--allow must be a list of windows")
+    out = []
+    for entry in allow:
+        try:
+            (left, bottom, right, top), layers = entry
+            bbox = (float(left), float(bottom), float(right), float(top))
+        except (TypeError, ValueError) as exc:
+            raise KeepoutCheckError(f"malformed --allow window: {entry!r}") from exc
+        if not (math.isfinite(sum(bbox)) and right > left and top > bottom):
+            raise KeepoutCheckError(
+                "--allow bbox must be finite with right > left and top > bottom, "
+                f"got {list(bbox)}"
+            )
+        out.append((bbox, list(layers) if layers is not None else list(forbidden)))
+    return out
+
+
+def _allow_region(
+    kdb: Any,
+    windows: list[tuple[tuple[float, float, float, float], list[tuple[int, int]]]],
+    layer: tuple[int, int],
+    dbu: float,
+) -> Any | None:
+    """Union of the allow windows that cover ``layer``, or ``None`` if none do."""
+    region = kdb.Region()
+    for bbox, layers in windows:
+        if layer in layers:
+            region.insert(clip_box(kdb, bbox, dbu))
+    return None if region.is_empty() else region.merged()
 
 
 def _validate_margin(margin_um: Any) -> None:
