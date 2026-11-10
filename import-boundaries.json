@@ -1829,12 +1829,6 @@
     {
       "consumer": "klayout_tools.netlist_batch",
       "exporter": "klayout_tools.sim_batch",
-      "symbol": "_default_batch_job_timeout_s",
-      "reason": "Issue #3182: the netlist batch backend reuses sim_batch's job-contract helpers as they are (one transport, one config resolver, one preflight)."
-    },
-    {
-      "consumer": "klayout_tools.netlist_batch",
-      "exporter": "klayout_tools.sim_batch",
       "symbol": "_read_runner_identity",
       "reason": "Issue #3182: the netlist batch backend reuses sim_batch's job-contract helpers as they are (one transport, one config resolver, one preflight)."
     },
@@ -2020,12 +2014,6 @@
     },
     {
       "consumer": "klayout_tools.signoff_generator_batch",
-      "exporter": "klayout_tools.netlist_batch",
-      "symbol": "_job_timeout_seconds",
-      "reason": "Issue #3289: the signoff generator adapter reuses the batch job-contract helpers as they are (one transport, one config resolver, one preflight), as klayout_tools.netlist_batch does."
-    },
-    {
-      "consumer": "klayout_tools.signoff_generator_batch",
       "exporter": "klayout_tools.sim_batch",
       "symbol": "_runner_preflight_script",
       "reason": "Issue #3289: the signoff generator adapter reuses the batch job-contract helpers as they are (one transport, one config resolver, one preflight), as klayout_tools.netlist_batch does."
@@ -2124,12 +2112,6 @@
       "consumer": "klayout_tools.extract_batch",
       "exporter": "klayout_tools.sim_batch",
       "symbol": "_classify_collected_report",
-      "reason": "Issue #4613: `klt extract --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
-    },
-    {
-      "consumer": "klayout_tools.extract_batch",
-      "exporter": "klayout_tools.sim_batch",
-      "symbol": "_default_batch_job_timeout_s",
       "reason": "Issue #4613: `klt extract --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
     },
     {
@@ -2239,6 +2221,12 @@
       "exporter": "klayout_tools.sim_batch",
       "symbol": "_resolve_batch_config",
       "reason": "Issue #5208: extract_batch and netlist_batch both resolved the fleet config through this sim_batch resolver; the shared helper now owns that one call so the two backends cannot drift. Promote to a public name when sim_batch is next split."
+    },
+    {
+      "consumer": "klayout_tools._batch_common",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_default_batch_job_timeout_s",
+      "reason": "Issue #5238: extract_batch and netlist_batch each wrapped this sim_batch timeout formula; the shared job_timeout_seconds helper now owns that one call so the backends cannot drift. Promote to a public name when sim_batch is next split."
     }
   ],
   "legacy_exceptions": {
