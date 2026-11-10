@@ -99,6 +99,7 @@ from . import (
     output_lock,
     sim_commands,
     sim_complex_vectors,
+    sim_corner_extremes,
     sim_crossings,
     sim_cycle_mean,
     sim_decks,
@@ -13400,12 +13401,7 @@ def _rollup_measurements(
     rollup: list[dict[str, Any]] = []
     for spec in measurements_spec:
         name = spec["name"]
-        entries = []
-        for corner in corners:
-            for m in corner["measurements"]:
-                if m["name"] == name:
-                    entries.append((corner, m))
-                    break
+        entries = sim_corner_extremes.corner_entries(name, corners)
 
         agg_status = _aggregate_measurement_status(entries)
 
@@ -13424,33 +13420,13 @@ def _rollup_measurements(
                     "margin": margin,
                 }
 
-        # Additive (issue #5221): the true extremes over the corner matrix.
-        # ``worst_case`` is a margin pointer and, for a measurement with no
-        # ``limits`` (``margin`` always None), is just the first corner.
-        min_corner = None
-        max_corner = None
-        for corner, m in entries:
-            value = m.get("value")
-            if (
-                m["status"] == _ABSENT_STATUS
-                or isinstance(value, bool)
-                or not isinstance(value, (int, float))
-                or value != value
-            ):
-                continue
-            if min_corner is None or value < min_corner["value"]:
-                min_corner = {"corner_id": corner["corner_id"], "value": value}
-            if max_corner is None or value > max_corner["value"]:
-                max_corner = {"corner_id": corner["corner_id"], "value": value}
-
         entry: dict[str, Any] = {
             "name": name,
             "unit": spec.get("unit"),
             "limits": spec.get("limits"),
             "status": agg_status,
             "worst_case": worst_case,
-            "min": min_corner,
-            "max": max_corner,
+            **sim_corner_extremes.corner_extremes(entries),  # issue #5221
             # Additive/optional (issue #2482): `step`/`derived_from` for an
             # `analysis_steps[]` measurement; nothing for any other one.
             **sim_steps.measurement_provenance(spec),

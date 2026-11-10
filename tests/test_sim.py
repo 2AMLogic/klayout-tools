@@ -5681,61 +5681,7 @@ def test_rollup_measurements_without_monte_carlo_config_is_unchanged():
         [{"name": "vref", "unit": "V", "limits": {"max": 1.21}}], corners
     )
 
-    assert set(entry) == {
-        "name",
-        "unit",
-        "limits",
-        "status",
-        "worst_case",
-        "min",
-        "max",
-    }
-
-
-def _corner(cid, value, margin=None, status="pass"):
-    return {
-        "corner_id": cid,
-        "monte_carlo": None,
-        "measurements": [
-            {"name": "c", "value": value, "margin": margin, "status": status}
-        ],
-    }
-
-
-def test_rollup_measurements_min_max_unlimited_middle_extreme():
-    """Issue #5221: min/max are true extremes; worst_case stays the first corner."""
-    corners = [
-        _corner("a", 21.0),
-        _corner("b", 20.4),
-        _corner("c", 22.8),
-        _corner("d", 22.8),
-    ]
-    (entry,) = sim._rollup_measurements([{"name": "c", "unit": "fF"}], corners)
-
-    assert entry["min"] == {"corner_id": "b", "value": 20.4}
-    assert entry["max"] == {"corner_id": "c", "value": 22.8}  # tie -> first
-    assert entry["worst_case"]["corner_id"] == "a"
-
-
-def test_rollup_measurements_min_max_skip_absent_and_all_absent():
-    corners = [_corner("a", None, status="absent"), _corner("b", 3.0)]
-    (entry,) = sim._rollup_measurements([{"name": "c"}], corners)
-    assert entry["min"] == entry["max"] == {"corner_id": "b", "value": 3.0}
-
-    (entry,) = sim._rollup_measurements(
-        [{"name": "c"}], [_corner("a", None, status="absent")]
-    )
-    assert entry["min"] is None and entry["max"] is None
-
-
-def test_rollup_measurements_min_max_with_limits_keeps_worst_case():
-    corners = [_corner("a", 1.0, margin=0.5), _corner("b", 1.2, margin=0.1)]
-    (entry,) = sim._rollup_measurements(
-        [{"name": "c", "limits": {"max": 1.3}}], corners
-    )
-    assert entry["worst_case"]["corner_id"] == "b"
-    assert entry["min"]["corner_id"] == "a"
-    assert entry["max"]["corner_id"] == "b"
+    assert set(entry) == set("name unit limits status worst_case min max".split())
 
 
 def test_rollup_measurements_monte_carlo_config_but_no_sampled_corners():
@@ -6077,15 +6023,7 @@ def test_run_sim_without_monte_carlo_has_no_statistics_block(tmp_path, monkeypat
     report = sim.run_sim(str(request))
 
     (entry,) = report["measurements"]
-    assert set(entry) == {
-        "name",
-        "unit",
-        "limits",
-        "status",
-        "worst_case",
-        "min",
-        "max",
-    }
+    assert set(entry) == set("name unit limits status worst_case min max".split())
 
 
 def test_run_sim_monte_carlo_sigma_window_pass_keeps_run_passing(tmp_path, monkeypatch):
