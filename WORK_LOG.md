@@ -8,6 +8,20 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-10
 
+- **PR #5266**: test(pex): cover with_fidelity_warnings directly to restore 100% coverage
+- **PR #5264**: refactor: split erc ties/well-selection subsystem into erc_ties module
+- **PR #5263**: refactor: share batch job-timeout and runner-path rewrite helpers via _batch_common
+- **PR #5260**: fix: triage sky130 metal/cap/resistor/pad native DRC ids
+- **PR #5257**: feat: triage sky130 diff/tap/poly/implant/marker native DRC ids
+- **PR #5256**: feat: make --pins order define the top .SUBCKT pin order
+- **PR #5244**: feat: accept per-corner clock period maps in klt sta
+- **Issue #5265** (closed): main CI red: pex_asap7.py below 100% coverage floor (ratchet)
+- **Issue #5255** (closed): klt pex: --pins does not control extracted subcircuit pin order
+- **Issue #5254** (closed): Triage native sky130A DRC ids, slice 4/4 (diff/tap/poly/implants/markers)
+- **Issue #5252** (closed): Triage native sky130A DRC ids, slice 2/4 (metals/caps/resistors/pads)
+- **Issue #5250** (closed): Split erc.py ties / well-selection subsystem into its own module
+- **Issue #5240** (closed): klt sta: allow per-corner clock periods in one multi-corner request
+- **Issue #5238** (closed): Consolidate leftover batch helper duplicates into _batch_common
 - **PR #5249**: feat(ci): add ratcheting per-module coverage floor
 - **PR #5247**: feat: warn in klt pex report about measured ASAP7 coupled-wiring fidelity gap
 - **PR #5246**: feat: report min_pulse_width and min_period in klt sta electrical_checks
@@ -3557,107 +3571,4 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 - **Issue #1621** (closed): Friction: no metal-resistor device class, so a netlist using its PDK's metal resistor cannot be ingested at all (and no gen generator draws one)
 - **Issue #1620** (closed): Friction: routing.width_um is one scalar for two layers, so naming routing.cross_block_layer_role forces the primary plane's routing wider
 - **Issue #1614** (closed): klt lef-abstract: pins[] geometry search reuses socket-check's label-layer field, so a split label/drawing-datatype PDK convention always reports geometry_source=synthesized
-
-### 2026-09-10
-
-- **PR #1650**: refactor(gen): split _build_pcell_classes into per-family factories
-- **PR #1647**: fix(sta): verify SPEF annotation after read_spef, not just net names
-- **PR #1646**: refactor: remove unused build_identity.git_commit()/is_release() accessors
-- **PR #1644**: feat(pdk): provision SG13G2 ngspice/OSDI sim toolchain
-- **PR #1643**: refactor: dedupe _run_openroad/_count_violations/_openroad_version into _openroad_engine.py
-- **PR #1642**: fix(lef-abstract): emit non-rectangular OBS polygons instead of crashing
-- **PR #1638**: fix(pdk-pcell): reach ihp-sg13g2's cni compat shim via sys.path hint + tkinter workaround
-- **PR #1635**: feat(synthesize): report static leakage power (issue #1626)
-- **PR #1634**: feat(sta): add hold-side worst/negative slack fields to `klt sta`
-- **PR #1632**: fix: unescape DEF identifiers in extract's --def-net-connections
-- **PR #1631**: fix: pin SPEF *DATE header to a fixed placeholder
-- **Issue #1645** (closed): Remove unused build_identity.git_commit()/is_release() accessor functions
-- **Issue #1637** (closed): Dedupe _run_openroad/_count_violations/_openroad_version between post_route_sta.py and place_and_route.py
-- **Issue #1633** (closed): Split gen.py's _build_pcell_classes (2487 lines, 10 PCell classes) into per-family builders
-- **Issue #1630** (closed): Friction: klt gen --pdk-pcell cannot reach ihp-sg13g2's sg13g2_pycell_lib (cni compat shim IS present in the PDK, just not on klt's sys.path; plus a tkinter-triggered crash in the vendor shim)
-- **Issue #1628** (closed): SG13G2: no simulator-side provisioning to match fetch-ihp-sg13g2.sh (OSDI models, openvaf pin, ngspice ABI floor)
-- **Issue #1627** (closed): klt extract --spef: wall-clock *DATE header makes an otherwise byte-identical SPEF non-reproducible
-- **Issue #1626** (closed): klt synthesize: no leakage-power field in the response, despite already loading the Liberty file that has it
-- **Issue #1625** (closed): klt sta: no hold-side WNS/TNS, so corners cannot be ranked by hold margin in a characterization sweep
-- **Issue #1624** (closed): klt sta: spef_annotation.annotation_complete reports true for a SPEF read_spef discards, leaving delays bit-identical to the unannotated run
-- **Issue #1623** (closed): klt extract --def-net-connections: DEF-escaped identifiers never match, so hierarchical nets silently get no *CONN block
-- **Issue #1613** (closed): klt lef-abstract: AttributeError crash on non-rectangular OBS geometry (SimplePolygon has no each_point_hull)
-
-### 2026-09-09
-
-- **PR #1629**: feat(pdk): curate a gf180mcu cross-section table for klt pdk stackup
-- **PR #1618**: feat(clip): add `klt clip` to write a bbox region or named cell out as its own stream
-- **PR #1615**: klt pdk stackup: normalized PDK cross-section/stackup dump for external field solvers
-- **PR #1612**: docs: port per-concern RTL/testbench review guides into docs/guides/digital-review/
-- **PR #1611**: feat: surface PDK PCell importability probe via klt pdk pcell-check
-- **PR #1605**: klt synthesize: additive structural verdict, warnings summary, baseline QoR delta
-- **PR #1604**: feat(functional-verification): add --mutations mutation testing
-- **PR #1598**: docs(design): survey klt wave query surface and trace formats
-- **PR #1597**: docs(guides): port booley's RTL mutation-proposer guide (Apache-2.0)
-- **PR #1596**: docs(design): port-vs-build decision record for klt wave
-- **PR #1595**: docs(design): propose the klt wave build/query JSON contract
-- **PR #1594**: docs(design): survey mutation testing as a test-quality gate for functional-verification
-- **PR #1584**: feat(docker): add eda-sim overlay image on the loom-worker base
-- **PR #1583**: fix(gen): cover gf180mcu guard/tap/collector-ring Comp shapes with implant
-- **PR #1582**: fix(components): scope --label-layers texts to their own conductor
-- **PR #1581**: fix(gen): close mos_array's gf180mcu unit-device signoff-DRC gap (#1577)
-- **PR #1578**: docs: disclose gf180mcu mos_array's real-signoff-DRC gap
-- **Issue #1616** (closed): klt pdk stackup: curate a gf180mcu cross-section table
-- **Issue #1610** (closed): Surface PDK PCell-library importability probe via klt pdk (already exists in klt gen --list-pdk-pcells, #1538) + distinguish empty-submodule from missing-dependency
-- **Issue #1609** (closed): Add klt pdk stackup: normalized PDK cross-section/stackup dump for external field solvers
-- **Issue #1608** (closed): Add klt clip/extract-cell: write a named cell or bbox region out of a layout into its own top-cell stream
-- **Issue #1603** (closed): Friction: no klt path from a PDK's own PCell library to a stream an external tool can consume (headless vendor-PCell instantiation, sub-cell extraction, stackup export)
-- **Issue #1593** (closed): Port booley's RTL mutation-proposer guide into docs/guides/ (Apache-2.0 attribution)
-- **Issue #1592** (closed): Implement `klt functional-verification --mutations` (byte-exact proposal validation + isolated per-mutant run + mutation_score)
-- **Issue #1591** (closed): [Epic #1585] Port-vs-build decision record for klt wave
-- **Issue #1590** (closed): [Epic #1585] Propose the klt wave JSON contract
-- **Issue #1589** (closed): [Epic #1585] Survey klt wave query surface and trace formats
-- **Issue #1588** (closed): `klt synthesize`: additive `structural` verdict (latches / comb loops / multi-driven → exit 3), bounded `warnings` summary, and optional `baseline` QoR delta
-- **Issue #1587** (closed): docs: port the per-concern RTL/testbench review guides into docs/guides/digital-review/ (Apache-2.0 attribution) and wire them into the digital review bar
-- **Issue #1586** (closed): Spike: mutation-testing as a test-quality gate for `klt functional-verification` (byte-exact single-point variants, no HDL parsing — booley seam as reference)
-- **Issue #1580** (closed): gf180mcu: guard-ring/tap-ring Comp shapes are not covered by #1577's DF.12 source/drain implant fix
-- **Issue #1579** (closed): klt components: --label-layers attributes a text to every component stacked over it, not the one on the label's own layer
-- **Issue #1577** (closed): mos_array's gf180mcu unit device: close the DF.6/PL.4/PL.5a/PL.5b/CO.7/DF.12 signoff-DRC gap
-- **Issue #1575** (closed): mos_array's default gf180mcu output fails the PDK's real signoff DRC deck (only verified against klt drc's curated subset)
-- **Issue #509** (closed): EDA sim overlay image FROM loom-worker base — toolchain baked, PDK fetched via volare, never baked
-- **Issue #501** (closed): champion.md Priority 2 query re-discovers already-promoted/building curated issues every cycle
-
-### 2026-09-08
-
-- **PR #1576**: docs(gen): add dog-bone terminal recipe for W below UNIT_MIN_W_UM
-- **Issue #1574** (closed): mos_array/diff_pair have no dog-bone-terminal option for W below UNIT_MIN_W_UM's contact-fit floor
-
-### 2026-09-07
-
-- **PR #1571**: fix(dep-recheck): extract Dependencies section by last match, any heading level
-- **PR #1570**: feat(gen-compose): support multi-level via-drop ladders
-- **PR #1566**: docs(layout_plan): update stale Phase C not-yet-built claims
-- **PR #1564**: fix: write bare C cards for unbound capacitors; add klt pex --deck-option/--pins passthrough
-- **PR #1562**: fix(extract): normalize bookkeeping fields before --check --rerun diff
-- **PR #1561**: feat: add gf180mcu MiM-capacitor support to cap_array
-- **PR #1560**: fix(lvs): carry #559/#1497 resistor-offset and capacitor-C corrections into combine_devices_per_circuit
-- **PR #1556**: feat(lvs): add options.combine_devices_per_circuit for composed macros
-- **PR #1554**: fix(gen): snap res_array end contacts to the dbu grid before deriving edges
-- **PR #1553**: feat(gen): expose gf180mcu high-sheet-rho poly-resistor flavours in res_array
-- **PR #1549**: fix(gen-compose): reject unrecognized connectivity[]/legs[]/endpoint keys
-- **PR #1547**: fix(loom): restore FORMULA_VERSION guard reverted by resync (#1546)
-- **PR #1545**: fix(loom): version-guard dep-recheck-fingerprint.sh's CONCLUSION_HASH against CLI resyncs (#1544)
-- **PR #1543**: feat(extract): disclose positional net/pin identity for repeated-instance name collisions
-- **PR #1542**: fix(loom): repair curator.md's dep-recheck-fingerprint.sh recipe after CLI resync
-- **Issue #1569** (closed): fix(loom-scripts): dep-recheck-fingerprint.sh named-dependency ignores corrected Dependencies section at a different heading level
-- **Issue #1568** (closed): docs: gen-compose's module docstring says explicit placement supports no orientation, but mirror_x/mirror_y/rotate_180 all work
-- **Issue #1567** (closed): Friction: gen-compose's via-drop is single-hop only, so reaching a base-metal pad from the third routing role costs one hand-built stage per level
-- **Issue #1565** (closed): Fix stale "Phase C not-yet-built" claims in layout_plan.py docstring
-- **Issue #1559** (closed): Friction: klt extract's JSON report has no version-stable comparison form, so every reproducibility gate re-implements canonicalization
-- **Issue #1558** (closed): klt pex: no --deck-option/--pins passthrough; klt extract --pdk --parasitics emits a non-simulatable capacitor annotation
-- **Issue #1557** (closed): lvs: combine_devices_per_circuit skips the #559/#1497 resistor-offset and capacitor-C corrections
-- **Issue #1555** (closed): klt gen cap_array: no gf180mcu MiM-capacitor plate-layer configuration (the follow-on #1117 explicitly deferred, never filed)
-- **Issue #1552** (closed): Friction: klt lvs's options.combine_devices has no per-subcircuit scoping, so composed macros with opposing needs cannot both be satisfied
-- **Issue #1551** (closed): klt gen res_array: 219nm (not 220nm min) end contact at length_um=1.4965 exactly (half-nm grid tie)
-- **Issue #1550** (closed): klt gen res_array: gf180mcu has no high-sheet-rho (ppolyf_u_1k/2k/3k) flavor, only generic ppolyf_u
-- **Issue #1548** (closed): gen-compose: unrecognized connectivity[] field (e.g. legs[]) is silently ignored instead of rejected
-- **Issue #1546** (closed): Resync reverted the FORMULA_VERSION guard in dep-recheck-fingerprint.sh (#1544/#1545) ~51 minutes after it merged
-- **Issue #1544** (closed): dep-recheck fingerprint has no version guard — a CLI-changing resync silently invalidates every embedded curator:dep-recheck hash fleet-wide
-- **Issue #1541** (closed): curator.md's dep-recheck-fingerprint.sh recipe is stale after resync changed the script's CLI, producing hand-typed hashes on live issues
-- **Issue #1540** (closed): Friction: klt extract's flat-net naming gives internal chain nodes and the true external pin identical, position-ambiguous names for an internally-repetitive block
 
