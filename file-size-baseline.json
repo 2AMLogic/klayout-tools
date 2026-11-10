@@ -321,7 +321,7 @@
     },
     {
       "path": "src/klayout_tools/extract_batch.py",
-      "lines": 650
+      "lines": 624
     },
     {
       "path": "src/klayout_tools/extract_finfet.py",
@@ -485,7 +485,7 @@
     },
     {
       "path": "src/klayout_tools/netlist_batch.py",
-      "lines": 887
+      "lines": 862
     },
     {
       "path": "src/klayout_tools/netlist_capacitor_recovery.py",
