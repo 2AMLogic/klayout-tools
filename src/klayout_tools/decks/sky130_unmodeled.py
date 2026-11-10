@@ -18,6 +18,10 @@ from __future__ import annotations
 #: ``coverage.unmodeled_rules`` lists them rather than let a clean verdict read
 #: as full coverage. The open ``sky130A_mr.drc`` defines no latch-up or ESD
 #: rules, so there is no id to list for those (see ``docs/cli/drc.md``).
+#: Also the contact/via/li slice of the native-id triage (issue #5251, parent
+#: #5242): ring-shaped cuts (ct.3*, via*.3*), li/mcon IR-drop and cell-scoped li
+#: rules, licon spacing/placement/coverage rules, and via variants the deck does
+#: not transcribe (areaid:mt widths, 0.23um enclosures, inactive Cu back-end flow).
 #: Remove an id here when its rule is added.
 UNMODELED_RULES: tuple[str, ...] = (
     # Implant/npc/well rules (issue #2934) scoped to compound layer
@@ -36,8 +40,13 @@ UNMODELED_RULES: tuple[str, ...] = (
     "capm.2b",
     "capm.2b_a",
     "capm.5",
+    "ct.3",
+    "ct.3_a",
+    "ct.3_b",
     # ct.4 ("mcon must be covered by li") has no curated rule (issue #5233).
     "ct.4",
+    "ct.irdrop.1",
+    "ct.irdrop.2",
     "difftap.10",
     "difftap.11",
     "difftap.8",
@@ -53,11 +62,36 @@ UNMODELED_RULES: tuple[str, ...] = (
     "hvtr.2",
     "hvtr.2_a",
     "ldntm.2",
+    "li.1a",
+    "li.3a",
     # li.5 is only floor-modeled by ``li1.enclosing.licon1.1`` (zero margin):
     # the official 0.08um on two adjacent edges is not checked (issue #5233).
     "li.5",
+    "li.6",
     "li.7",
+    "li.8",
+    "licon.10",
+    "licon.11",
+    "licon.11a",
+    "licon.11c",
+    "licon.12",
     "licon.13",
+    "licon.13_a",
+    "licon.14",
+    "licon.15",
+    "licon.16",
+    "licon.17",
+    "licon.18",
+    "licon.1_c",
+    "licon.1b/c",
+    "licon.2",
+    "licon.2b",
+    "licon.2c",
+    "licon.2d",
+    "licon.4",
+    "licon.6",
+    "licon.7",
+    "licon.8a",
     "lvtn.2",
     "m1.3ab",
     "m1.5",
@@ -83,72 +117,30 @@ UNMODELED_RULES: tuple[str, ...] = (
     "thkox.2",
     "tunm.2",
     "urpm.2",
-    "via.5a",
-    "via2.5",
-    "via3.5",
-    # Contact/via/li slice of the native-id triage (issue #5251, parent #5242).
-    # Ring-shaped cuts (`SEAL` flow: ring mcon/via/via2/via4) -- the deck models
-    # no ring-shaped cut check:
-    "ct.3",
-    "ct.3_a",
-    "ct.3_b",
+    "via.11",
+    "via.12",
+    "via.1b",
     "via.3",
     "via.3_a",
     "via.3_b",
-    "via2.3",
-    "via2.3_a",
-    "via2.3_b",
-    "via4.3",
-    "via4.3_a",
-    "via4.3_b",
-    # li/mcon IR-drop and areaid:core / cell-scoped li rules (the deck's
-    # li1.width.1/li1.space.1 apply the stricter 0.17um uniformly, and it has no
-    # li area rule):
-    "ct.irdrop.1",
-    "ct.irdrop.2",
-    "li.1a",
-    "li.3a",
-    "li.6",
-    "li.8",
-    # licon spacing, resistor-licon, placement and coverage rules; the deck has
-    # only licon width plus the diff/poly enclosures and a tap floor (tap
-    # licon.7 is floor-only, like li.5 above):
-    "licon.1_c",
-    "licon.1b/c",
-    "licon.2",
-    "licon.2b",
-    "licon.2c",
-    "licon.2d",
-    "licon.4",
-    "licon.6",
-    "licon.7",
-    "licon.8a",
-    "licon.10",
-    "licon.11",
-    "licon.11a",
-    "licon.11c",
-    "licon.12",
-    "licon.13_a",
-    "licon.14",
-    "licon.15",
-    "licon.16",
-    "licon.17",
-    "licon.18",
-    # Via variants the deck does not transcribe: areaid:mt widths, the 0.23um
-    # via enclosures, and the Cu back-end-flow rules (inactive under
-    # sky130A_mr.drc's default `backend_flow = AL`):
-    "via.1b",
     "via.4b",
-    "via1.5b",
-    "via2.1b",
-    "via2.4a",
-    "via.11",
-    "via.12",
+    "via.5a",
     "via1.14",
+    "via1.5b",
     "via2.11",
     "via2.12",
     "via2.14",
+    "via2.1b",
+    "via2.3",
+    "via2.3_a",
+    "via2.3_b",
+    "via2.4a",
+    "via2.5",
     "via3.11",
     "via3.12",
     "via3.13",
+    "via3.5",
+    "via4.3",
+    "via4.3_a",
+    "via4.3_b",
 )

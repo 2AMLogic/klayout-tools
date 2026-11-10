@@ -150,23 +150,21 @@ exactly -- unlike gf180mcu, no area-term correction is needed here) and
 term). Both stacks share one corner file, so the same ``perim_cap_f_um``
 value applies to both curated entries below.
 
-Four rules below (``poly.width.1`` is not one of them) approximate an
-official rule defined on a *compound* layer expression (a union of two mask
-layers) or on a ``second_edges``-conditional refinement of a plain enclosure
-check, because our engine (native ``klayout.db.Region`` check primitives —
-see ``docs/cli/drc.md``) checks one
-layer, or one layer against one other layer, at a time; it does not evaluate
-arbitrary boolean layer expressions the way the DRC-DSL script runner does.
-``diff.width.1`` and ``tap.width.1`` are the two curated halves of one
-compound rule (``difftap.1``'s ``diff.or(tap)`` -- issue #2321 added the tap
-half); ``li1.enclosing.licon1.1`` (``li.5``) and ``tap.enclosing.licon.1``
-(``licon.7``, issue #2321) transcribe their source rules' unconditional
-zero-margin floor (see the #551 exception note above). Each such
-approximation is called out explicitly in its rule's docstring.
+Four rules below (``poly.width.1`` is not one of them) approximate an official
+rule defined on a *compound* layer expression (a union of two mask layers) or
+on a ``second_edges``-conditional refinement of a plain enclosure check,
+because our engine (native ``klayout.db.Region`` check primitives — see
+``docs/cli/drc.md``) checks one layer, or one layer against one other layer, at
+a time; it does not evaluate arbitrary boolean layer expressions the way the
+DRC-DSL script runner does. ``diff.width.1`` and ``tap.width.1`` are the two
+curated halves of one compound rule (``difftap.1``'s ``diff.or(tap)`` -- issue
+#2321 added the tap half); ``li1.enclosing.licon1.1`` (``li.5``) and
+``tap.enclosing.licon.1`` (``licon.7``, issue #2321) transcribe their source
+rules' unconditional zero-margin floor (see the #551 exception note above).
+Each such approximation is called out explicitly in its rule's docstring.
 
 Layer numbers (verified against ``sky130.lyt``'s ``layer-map`` and the
-``sky130.lydrc`` layer variable definitions, e.g. ``poly = polygons(66,
-20)``):
+``sky130.lydrc`` layer variable definitions, e.g. ``poly = polygons(66, 20)``):
 
     diff.drawing    65/20
     tap.drawing     65/44
@@ -179,75 +177,72 @@ Layer numbers (verified against ``sky130.lyt``'s ``layer-map`` and the
     met2.drawing    69/20
 
 met2/via rule coverage (issue #513, closing the gap #511 opened when it
-extended ``EXTRACTION_DECK`` to a third connectivity level -- see that
-field's own comment below): ``m2.1``/``m2.2``/``m2.4``/``m2.5`` and
+extended ``EXTRACTION_DECK`` to a third connectivity level -- see that field's
+own comment below): ``m2.1``/``m2.2``/``m2.4``/``m2.5`` and
 ``via.1a``/``via.2``/``via.4a``/``via.5a`` below are transcribed from a real
-sky130A PDK install (volare), whose
-``libs.tech/klayout/drc/sky130A_mr.drc`` is the sky130A variant's current
-name for the same official, community-maintained KLayout DRC deck this
-module's other rules already cite as ``sky130.lydrc`` (confirmed by
-cross-checking: every rule id/value this module already cites --
+sky130A PDK install (volare), whose ``libs.tech/klayout/drc/sky130A_mr.drc`` is
+the sky130A variant's current name for the same official, community-maintained
+KLayout DRC deck this module's other rules already cite as ``sky130.lydrc``
+(confirmed by cross-checking: every rule id/value this module already cites --
 ``poly.1a``, ``li.1``, ``li.3``, ``m1.1``, ``m1.2``, ``m1.4``,
 ``licon.5``/``licon.8``, ``ct.2`` -- appears in ``sky130A_mr.drc`` with the
-identical id and threshold value). ``m2.6`` (minimum met2 area, 0.0676
-um^2) is a real rule in that same source; at the time this note was
-written no ``"area"`` check primitive existed anywhere in this engine's
-``DrcRule`` vocabulary, so it was left untranscribed pending one (tracked
-as #513's own candidate follow-on). That primitive now exists (issue #812,
-``drc.py``'s ``_AREA_CHECKS``/``_run_area_check``) and ``m2.6`` is
-transcribed below as ``met2.area.1`` -- see the "met1-met5 minimum-area
-rule coverage" note further down for the full closure (issue #1955), which
-does the same for the analogous ``m1.6``/``m3.6``/``m4.4a``/``m5.4`` rules.
+identical id and threshold value). ``m2.6`` (minimum met2 area, 0.0676 um^2) is
+a real rule in that same source; at the time this note was written no
+``"area"`` check primitive existed anywhere in this engine's ``DrcRule``
+vocabulary, so it was left untranscribed pending one (tracked as #513's own
+candidate follow-on). That primitive now exists (issue #812, ``drc.py``'s
+``_AREA_CHECKS``/``_run_area_check``) and ``m2.6`` is transcribed below as
+``met2.area.1`` -- see the "met1-met5 minimum-area rule coverage" note further
+down for the full closure (issue #1955), which does the same for the analogous
+``m1.6``/``m3.6``/``m4.4a``/``m5.4`` rules.
 
-met3/met4/met5 connectivity (issue #619, closing the gap ``place_and_route.py``'s
-``_ROUTING_LAYER_RANGE`` exposed: it already told OpenROAD signal routing
-could use met1-met5, while ``EXTRACTION_DECK.metals`` stopped at met2, so a
-net joined only through met3-or-higher silently split into two nets with no
-warning): ``metals``/``metal_labels``/``vias`` below now cover the full
-li1-through-met5 stack, following the exact met1->met2 extension pattern
-issue #508 established (see that field's own comment below). Layer numbers
-verified against the same real sky130A install (volare) cited by #508:
+met3/met4/met5 connectivity (issue #619, closing the gap
+``place_and_route.py``'s ``_ROUTING_LAYER_RANGE`` exposed: it already told
+OpenROAD signal routing could use met1-met5, while ``EXTRACTION_DECK.metals``
+stopped at met2, so a net joined only through met3-or-higher silently split
+into two nets with no warning): ``metals``/``metal_labels``/``vias`` below now
+cover the full li1-through-met5 stack, following the exact met1->met2 extension
+pattern issue #508 established (see that field's own comment below). Layer
+numbers verified against the same real sky130A install (volare) cited by #508:
 ``libs.tech/klayout/tech/sky130A.lyt``'s ``<connectivity>`` block names
-``met2,69/44,met3`` / ``met3,70/44,met4`` / ``met4,71/44,met5`` (matching
-this deck's existing "via connects layer N's own layer number, datatype 44,
-to layer N+1" pattern -- mcon at li1's 67/44, via at met1's 68/44), and its
+``met2,69/44,met3`` / ``met3,70/44,met4`` / ``met4,71/44,met5`` (matching this
+deck's existing "via connects layer N's own layer number, datatype 44, to layer
+N+1" pattern -- mcon at li1's 67/44, via at met1's 68/44), and its
 ``<symbols>`` block gives ``met3='70/20+70/5+70/16'`` /
-``met4='71/20+71/5+71/16'`` / ``met5='72/20-72/15+72/5+72/16'`` (drawing/
-label datatypes 20/5, the same convention every metal level already in this
-deck follows -- also matching this repo's own ``gen.py``'s
-``"top_metal": (72, 20)`` bond-pad role, cited there as ``met5.drawing``
-from the same source). met3/met4 (70/20, 71/20) were already named in this
-deck as ``capacitors[].bottom_plate`` (see the module docstring's provenance
-note above) -- a layer can legitimately serve both roles at once, and
-``ExtractionDeck.device_recognition_only_layers`` (issue #619) is exactly
-the mechanism that would have flagged this "read but not merged" ambiguity
-had it existed before this extension closed the gap.
+``met4='71/20+71/5+71/16'`` / ``met5='72/20-72/15+72/5+72/16'`` (drawing/ label
+datatypes 20/5, the same convention every metal level already in this deck
+follows -- also matching this repo's own ``gen.py``'s ``"top_metal": (72, 20)``
+bond-pad role, cited there as ``met5.drawing`` from the same source). met3/met4
+(70/20, 71/20) were already named in this deck as ``capacitors[].bottom_plate``
+(see the module docstring's provenance note above) -- a layer can legitimately
+serve both roles at once, and ``ExtractionDeck.device_recognition_only_layers``
+(issue #619) is exactly the mechanism that would have flagged this "read but
+not merged" ambiguity had it existed before this extension closed the gap.
 
 met3/met4/met5 + via2/via3/via4 + capm/capm2 DRC rule coverage (issue #776,
-closing the asymmetry #619's connectivity extension and #225's MiM-cap
-device recognition opened -- the same class of gap #513 closed one stack
-level earlier for met2/via): before this, ``DECK`` had no rule of any kind
-above met2/via -- ``EXTRACTION_DECK.metals``/``.vias`` already recognised
-met3/met4/met5 and via2/via3/via4 as real connectivity, and
-``EXTRACTION_DECK.capacitors`` already recognised ``capm``/``capm2`` as
-genuine MiM-cap device marks, but ``klt drc --deck sky130`` reported a bare
-``clean`` verdict on all of it -- a caller who routed on met3-or-higher, or
-drew a MiM cap, got "no rule looked at this" indistinguishable from "this is
-legal." The rules below close that gap, transcribed from the same real
-sky130A install (volare) cited by the met2/via #513 note above --
-``libs.tech/klayout/drc/sky130A_mr.drc``'s ``m3.*``/``via2.*``,
-``m4.*``/``via3.*``, ``m5.*``/``via4.*``, and ``capm.*``/``cap2m.*`` rule
-families -- mirroring the exact width/space/enclosure rule shapes the
-met1/mcon and met2/via sections above already establish: each new metal
-level gets a width + space rule; each new via level gets a width + space
-rule plus an enclosure rule from the metal on each side; each MiM-cap top
-plate (``capm`` 89/44, ``capm2``/``cap2m`` 97/44) gets a width + space rule,
-an enclosure-by-its-bottom-plate rule, an enclosure-of-its-landing-via rule,
-and a plate-to-landing-via *separation* rule (``capm.separation(via3, ...)``
-/ ``cap2m.separation(via4, ...)``) -- unlike the enclosing rules elsewhere
-in this deck, this is a plain, uncompounded two-layer check with no
-boolean-expression narrowing, so it transcribes to our engine's own
-``"separation"`` check kind exactly, with no approximation.
+closing the asymmetry #619's connectivity extension and #225's MiM-cap device
+recognition opened -- the same class of gap #513 closed one stack level earlier
+for met2/via): before this, ``DECK`` had no rule of any kind above met2/via --
+``EXTRACTION_DECK.metals``/``.vias`` already recognised met3/met4/met5 and
+via2/via3/via4 as real connectivity, and ``EXTRACTION_DECK.capacitors`` already
+recognised ``capm``/``capm2`` as genuine MiM-cap device marks, but ``klt drc
+--deck sky130`` reported a bare ``clean`` verdict on all of it -- a caller who
+routed on met3-or-higher, or drew a MiM cap, got "no rule looked at this"
+indistinguishable from "this is legal." The rules below close that gap,
+transcribed from the same real sky130A install (volare) cited by the met2/via
+#513 note above -- ``libs.tech/klayout/drc/sky130A_mr.drc``'s
+``m3.*``/``via2.*``, ``m4.*``/``via3.*``, ``m5.*``/``via4.*``, and
+``capm.*``/``cap2m.*`` rule families -- mirroring the exact
+width/space/enclosure rule shapes the met1/mcon and met2/via sections above
+already establish: each new metal level gets a width + space rule; each new via
+level gets a width + space rule plus an enclosure rule from the metal on each
+side; each MiM-cap top plate (``capm`` 89/44, ``capm2``/``cap2m`` 97/44) gets a
+width + space rule, an enclosure-by-its-bottom-plate rule, an
+enclosure-of-its-landing-via rule, and a plate-to-landing-via *separation* rule
+(``capm.separation(via3, ...)`` / ``cap2m.separation(via4, ...)``) -- unlike
+the enclosing rules elsewhere in this deck, this is a plain, uncompounded
+two-layer check with no boolean-expression narrowing, so it transcribes to our
+engine's own ``"separation"`` check kind exactly, with no approximation.
 
 Not modelled, for the same reasons the met1/met2 sections above already
 document: ``m3.3cd``/``m4.5ab`` (wide-metal spacing exceptions, the
@@ -395,9 +390,8 @@ _OPEN_PDKS_COMMIT = "f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7"
 
 
 def _sky130_provenance(source_path: str, rule_id: str) -> RuleProvenance:
-    """Build a :class:`RuleProvenance` for a sky130 width/space rule (issue
-    #747) -- `source_repo`/`commit` shared across the whole deck (see the
-    module-level constants above), `source_path`/`rule_id` per call."""
+    """:class:`RuleProvenance` for a sky130 rule (issue #747); repo/commit are
+    deck-wide (module constants above), `source_path`/`rule_id` per call."""
     return RuleProvenance(
         source_repo=_OPEN_PDKS_REPO,
         source_path=source_path,
