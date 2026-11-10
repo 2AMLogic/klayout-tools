@@ -186,7 +186,9 @@
         "klayout_tools.erc",
         "klayout_tools.erc_antenna_gf180mcu",
         "klayout_tools.erc_disclosure",
-        "klayout_tools.erc_spec"
+        "klayout_tools.erc_spec",
+        "klayout_tools.erc_ties",
+        "klayout_tools.erc_well_regions"
       ]
     },
     "eval": {
@@ -223,6 +225,7 @@
         "klayout_tools.extract_parasitics",
         "klayout_tools.extract_parasitics_block",
         "klayout_tools.extract_netlist_write",
+        "klayout_tools.extract_pin_order",
         "klayout_tools.extract_netselect",
         "klayout_tools.extract_orient",
         "klayout_tools.extract_cap_top_plate",
@@ -795,6 +798,7 @@
       "description": "`klt sta` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.sta_cmd",
+        "klayout_tools._sta_period_maps",
         "klayout_tools._sta_request_diag",
         "klayout_tools.post_route_sta",
         "klayout_tools.post_route_sta_electrical"
@@ -1827,12 +1831,6 @@
     {
       "consumer": "klayout_tools.netlist_batch",
       "exporter": "klayout_tools.sim_batch",
-      "symbol": "_default_batch_job_timeout_s",
-      "reason": "Issue #3182: the netlist batch backend reuses sim_batch's job-contract helpers as they are (one transport, one config resolver, one preflight)."
-    },
-    {
-      "consumer": "klayout_tools.netlist_batch",
-      "exporter": "klayout_tools.sim_batch",
       "symbol": "_read_runner_identity",
       "reason": "Issue #3182: the netlist batch backend reuses sim_batch's job-contract helpers as they are (one transport, one config resolver, one preflight)."
     },
@@ -2018,12 +2016,6 @@
     },
     {
       "consumer": "klayout_tools.signoff_generator_batch",
-      "exporter": "klayout_tools.netlist_batch",
-      "symbol": "_job_timeout_seconds",
-      "reason": "Issue #3289: the signoff generator adapter reuses the batch job-contract helpers as they are (one transport, one config resolver, one preflight), as klayout_tools.netlist_batch does."
-    },
-    {
-      "consumer": "klayout_tools.signoff_generator_batch",
       "exporter": "klayout_tools.sim_batch",
       "symbol": "_runner_preflight_script",
       "reason": "Issue #3289: the signoff generator adapter reuses the batch job-contract helpers as they are (one transport, one config resolver, one preflight), as klayout_tools.netlist_batch does."
@@ -2122,12 +2114,6 @@
       "consumer": "klayout_tools.extract_batch",
       "exporter": "klayout_tools.sim_batch",
       "symbol": "_classify_collected_report",
-      "reason": "Issue #4613: `klt extract --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
-    },
-    {
-      "consumer": "klayout_tools.extract_batch",
-      "exporter": "klayout_tools.sim_batch",
-      "symbol": "_default_batch_job_timeout_s",
       "reason": "Issue #4613: `klt extract --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
     },
     {
@@ -2237,6 +2223,12 @@
       "exporter": "klayout_tools.sim_batch",
       "symbol": "_resolve_batch_config",
       "reason": "Issue #5208: extract_batch and netlist_batch both resolved the fleet config through this sim_batch resolver; the shared helper now owns that one call so the two backends cannot drift. Promote to a public name when sim_batch is next split."
+    },
+    {
+      "consumer": "klayout_tools._batch_common",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_default_batch_job_timeout_s",
+      "reason": "Issue #5238: extract_batch and netlist_batch each wrapped this sim_batch timeout formula; the shared job_timeout_seconds helper now owns that one call so the backends cannot drift. Promote to a public name when sim_batch is next split."
     }
   ],
   "legacy_exceptions": {

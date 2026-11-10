@@ -679,7 +679,7 @@ def _parse_cell_names(
     #4373: ``well_requires_cells`` / ``well_excludes_cells``). Omitted/``null``
     -> ``[]``. Every entry must be a non-empty string; whether the name exists
     in the stream is checked at run time against the layout, where it is
-    known (:func:`~klayout_tools.erc._cells_region`)."""
+    known (:func:`~klayout_tools.erc_well_regions._cells_region`)."""
     raw = entry.get(key, [])
     if raw is None:
         raw = []
@@ -847,7 +847,7 @@ def _parse_well_complement_of(
     half of a tie for a process whose bulk has no drawn well/tub shape -- a
     ``"<layer>/<datatype>"`` string or a non-empty array of them. The tie's
     region is the top-cell extent minus the merged union of those layers
-    (see :func:`~klayout_tools.erc._tie_well_region`), so it follows the
+    (see :func:`~klayout_tools.erc_well_regions._tie_well_region`), so it follows the
     layout instead of going stale like a hand-kept ``well_boxes`` list.
 
     Omitted/``null`` -> ``[]``. Valid only with ``well_layer: null``
@@ -891,7 +891,7 @@ def _parse_well_selection(
       ``well_layer`` geometry drawn directly in instances of the
       ``well_requires_cells`` cells and with none of the
       ``well_excludes_cells`` geometry, evaluated in each instance's
-      transformed frame (see :func:`~klayout_tools.erc._cells_region`).
+      transformed frame (see :func:`~klayout_tools.erc_well_regions._cells_region`).
 
     All six exist for the one thing the tap side cannot express: a single
     drawn tub layer carrying two differently-biased well classes (device-body

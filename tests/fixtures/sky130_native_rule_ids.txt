@@ -2,7 +2,6 @@
 # PDK: sky130A, open_pdks f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7 (ciel version dir of the same hash).
 # Generated from libs.tech/klayout/drc/sky130A_mr.drc and sky130A.lydrc: every first string argument of .output("<id>", ...), sorted unique:
 #   cat sky130A_mr.drc sky130A.lydrc | grep -Pzo 'output\(\s*"[^"]+"' | tr '\0' '\n' | grep -o '"[^"]*"' | tr -d '"' | sort -u
-791_m1.4
 MR_li.WID.4
 MR_licon.SP.1
 MR_lvtn.OVL.2
@@ -234,7 +233,6 @@ m3.3ab
 m3.3cd
 m3.4
 m3.4_a
-m3.5
 m3.6
 m3.7
 m3.via2
@@ -249,7 +247,6 @@ m4.3
 m4.3_a
 m4.4
 m4.4a
-m4.5
 m4.5ab
 m4.7
 m4.via3
@@ -391,7 +388,6 @@ rpm.8
 rpm.9
 rpm_OFFGRID
 rpm_angle
-tap and diff
 tap_OFFGRID
 tap_angle
 thkox.1

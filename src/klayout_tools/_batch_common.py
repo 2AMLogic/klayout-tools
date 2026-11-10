@@ -8,6 +8,7 @@ Error strings and ``details`` keys built here are part of the JSON contract
 
 from __future__ import annotations
 
+import math
 import os
 import tarfile
 import uuid
@@ -59,6 +60,34 @@ def read_runner_roots(collected: str) -> list[str]:
     return sorted(
         {line for line in lines if line.startswith("/")}, key=len, reverse=True
     )
+
+
+def job_timeout_seconds(timeout_s: float) -> int:
+    """``--timeout-s`` plus the per-job overhead ``klt sim`` adds, so the inner
+    ``timeout`` always fires before the harness's outer one. Never capped here;
+    the fleet ceiling is each module's own concern."""
+    from . import sim_batch
+
+    return int(math.ceil(sim_batch._default_batch_job_timeout_s(1, timeout_s)))
+
+
+def rewrite_runner_paths(value: Any, runner_roots: list[str], local_root: str) -> Any:
+    """``value`` with every string under a runner scratch root re-rooted at
+    ``local_root`` (the directory a local run would have written)."""
+    local_root = local_root.rstrip("/")
+    if isinstance(value, str):
+        for root in runner_roots:
+            if value == root or value.startswith(root + "/"):
+                return local_root + value[len(root) :]
+        return value
+    if isinstance(value, list):
+        return [rewrite_runner_paths(item, runner_roots, local_root) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: rewrite_runner_paths(item, runner_roots, local_root)
+            for key, item in value.items()
+        }
+    return value
 
 
 def job_failure_parts(

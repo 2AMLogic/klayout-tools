@@ -410,24 +410,6 @@ def _job_failure(
 # --------------------------------------------------------------------------- #
 
 
-def _rewrite_paths(value: Any, runner_roots: list[str], local_dir: str) -> Any:
-    """``value`` with every string under a runner stage-output root re-rooted
-    at ``local_dir`` (the directory a local run would have written)."""
-    if isinstance(value, str):
-        for root in runner_roots:
-            if value == root or value.startswith(root + "/"):
-                return local_dir + value[len(root) :]
-        return value
-    if isinstance(value, list):
-        return [_rewrite_paths(item, runner_roots, local_dir) for item in value]
-    if isinstance(value, dict):
-        return {
-            key: _rewrite_paths(item, runner_roots, local_dir)
-            for key, item in value.items()
-        }
-    return value
-
-
 def _read_unit_report(collected: str, job_id: str) -> dict[str, Any]:
     try:
         report = sim_batch.read_collected_report(collected)
@@ -696,7 +678,7 @@ def _finish_unit(
     if os.path.isdir(artifacts):
         os.makedirs(unit_dir, exist_ok=True)
         shutil.copytree(artifacts, unit_dir, dirs_exist_ok=True)
-    return _rewrite_paths(
+    return _batch_common.rewrite_runner_paths(
         report, _batch_common.read_runner_roots(collected), unit_dir
     ), remote
 

@@ -3304,9 +3304,8 @@ def run_extract(
     # via `.GLOBAL` -- see `create_model_binding_delegate`'s `global_nets`
     # docstring paragraph and `_tie_substrate_nets_to_ground`'s own docstring
     # for why. `[]` (the pre-#1503 default) whenever `--parasitics` was not
-    # given or synthesized no substrate identity at all, in which case
-    # `create_model_binding_delegate`'s `write_header` override emits
-    # nothing and this is a no-op.
+    # given or synthesized no substrate identity at all (then
+    # `create_model_binding_delegate`'s `write_header` emits nothing).
     substrate_global_nets: list[str] = []
     if parasitics_report is not None:
         substrate_global_nets = [
@@ -3336,6 +3335,7 @@ def run_extract(
         scratch_dir=scratch_dir,
         pin_renames=pin_renames,
         warnings=warnings,
+        pin_order=getattr(declared_pins, "order", ()),
     )
 
     # `--subcircuit` (issue #2245): a *second*, independent deck carrying one
