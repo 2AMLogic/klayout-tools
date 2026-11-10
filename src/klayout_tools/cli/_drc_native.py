@@ -35,6 +35,18 @@ def native_family_error(args: argparse.Namespace) -> str | None:
     return _family_variant(args)[1]
 
 
+def no_deck_message(args: argparse.Namespace) -> str:
+    """The ``DrcError`` text for ``--engine klayout`` finding no deck script."""
+    family_error = native_family_error(args)
+    if family_error is not None:
+        return f"no PDK-native klayout DRC deck: {family_error}"
+    return (
+        "no PDK-native klayout DRC deck script found for this PDK "
+        "variant -- pass --deck-file to point at one directly (see "
+        "docs/cli/drc.md, 'Engine' -> 'klayout')"
+    )
+
+
 def resolve_native_deck(
     args: argparse.Namespace,
 ) -> tuple[str | None, dict[str, str], str | None, dict | None]:
