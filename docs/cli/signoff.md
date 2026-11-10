@@ -2934,6 +2934,26 @@ literal `true`; otherwise the item is `unmet` with reason `check_failed` and
 The key is an additive manifest input and an additive `detail` field; no
 existing field changes meaning, so `schema_version` is unchanged.
 
+**Opt-in: `require_complete_constraints` (issue #5234).** `klt sta` reports
+`constraint_completeness` per corner ([`sta.md`](sta.md)), separate from
+`timing_status`: a design can have finite slack and still carry unconstrained
+endpoints or unclocked registers. An evidence entry citing a `klt sta`
+envelope may add `"require_complete_constraints": true` (same entry-level
+shape as `require_annotation_complete`). Then, for **every** graded corner
+(or the flat envelope), `constraint_completeness.status` must be literal
+`"complete"`; otherwise the item is `unmet` with reason `check_failed` and
+`detail.sta_constraints_incomplete` lists each offending corner as
+`{corner, status, unconstrained_endpoints, unclocked_registers}` (counts
+only; `null` when that check was `unavailable`, never `0`). Semantics:
+
+- Absent or `false` → grading is unchanged (the default).
+- `incomplete`, `unknown`, missing, `null` or malformed → unmet (fail-closed).
+- A non-boolean value makes the entry malformed (`invalid_evidence`).
+- Independently of the opt-in, the `sta` citation excerpt additively carries
+  `constraint_completeness_status` of the worst corner.
+
+Both are additive; `schema_version` is unchanged.
+
 **Corner scoping is the cited run's own declared corner set.** Which corners
 must close is decided by the request that produced the envelope (`klt sta`'s
 `pdk.corners`), so `klt signoff` never widens a claim to corners the
