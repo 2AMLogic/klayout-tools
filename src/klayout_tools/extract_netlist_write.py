@@ -36,7 +36,6 @@ def write_flat_netlist(
 ) -> tuple[Any, Any, Any]:
     from .extract import (
         ExtractError,
-        _apply_pin_order_to_spice,
         _apply_pin_ties_if_circuit,
         _finish_netlist_write,
         _model_delegate_factory,
@@ -48,6 +47,7 @@ def write_flat_netlist(
     # the PDK reference CDL's parameter set); every other deck keeps the
     # model-binding delegate exactly as before.
     from .extract_finfet import spice_writer_delegate_for
+    from .extract_pin_order import _apply_pin_order_to_spice
     from .extract_progress import stage
 
     # The model-binding delegate records any narrow-width fallback

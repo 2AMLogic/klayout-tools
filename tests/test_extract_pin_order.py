@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from klayout_tools.cli import main
 from klayout_tools.cli._parsing import parse_declared_pins
-from klayout_tools.extract import _apply_pin_order_to_spice
+from klayout_tools.extract_pin_order import _apply_pin_order_to_spice
+from test_extract import _make_inverter_layout, _write_gds
 
 
 def _write(tmp_path, header: str) -> str:
@@ -50,3 +52,23 @@ def test_continuation_lines_are_rejoined(tmp_path):
     ).split()
     assert flat[2:] == [names[-1]] + names[:-1]
     assert "R1 a b 1k" in text
+
+
+def test_cli_pins_flag_order_defines_subckt_pin_order(tmp_path, capsys):
+    """`--pins` order is the emitted top `.SUBCKT` pin order (issue #5255)."""
+    path = str(_write_gds(_make_inverter_layout(), tmp_path / "inv.gds"))
+    out_path = tmp_path / "inv.spice"
+    exit_code = main(
+        [
+            "extract", path, "--deck", "sky130", "-o", str(out_path),
+            "--pins", "Y,VPWR,VGND,VPB", "--format", "json",
+        ]
+    )  # fmt: skip
+    assert exit_code == 0
+    capsys.readouterr()
+    header = next(
+        line for line in out_path.read_text().splitlines()
+        if line.lower().startswith(".subckt")
+    )  # fmt: skip
+    pins = header.split()[2:]
+    assert pins[:4] == ["Y", "VPWR", "VGND", "VPB"]

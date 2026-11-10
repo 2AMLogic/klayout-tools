@@ -3538,26 +3538,6 @@ def test_cli_pins_flag_demotes_undeclared_label(tmp_path, capsys):
     assert {"VGND", "VPWR", "VPB", "Y"}.issubset(pins)
 
 
-def test_cli_pins_flag_order_defines_subckt_pin_order(tmp_path, capsys):
-    """`--pins` order is the emitted top `.SUBCKT` pin order (issue #5255)."""
-    path = str(_write_gds(_make_inverter_layout(), tmp_path / "inv.gds"))
-    out_path = tmp_path / "inv.spice"
-    exit_code = main(
-        [
-            "extract", path, "--deck", "sky130", "-o", str(out_path),
-            "--pins", "Y,VPWR,VGND,VPB", "--format", "json",
-        ]
-    )  # fmt: skip
-    assert exit_code == 0
-    capsys.readouterr()
-    header = next(
-        line for line in out_path.read_text().splitlines()
-        if line.lower().startswith(".subckt")
-    )  # fmt: skip
-    pins = header.split()[2:]
-    assert pins[:4] == ["Y", "VPWR", "VGND", "VPB"]
-
-
 def test_cli_pins_flag_empty_after_parsing_errors(tmp_path, capsys):
     """`--pins` given but containing no non-empty token is a clear
     application error, not a silent no-op."""
