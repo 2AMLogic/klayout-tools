@@ -12,7 +12,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import klayout.db as kdb
+
+from klayout_tools.decks import get_unmodeled_rules
 from klayout_tools.decks import sky130 as deck_mod
+from klayout_tools.drc import run_drc
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -57,3 +61,83 @@ def test_untriaged_list_only_shrinks():
     resolved = sorted(UNTRIAGED & (IMPLEMENTED | UNMODELED))
     assert not stale, f"untriaged ids that are not native ids: {stale}"
     assert not resolved, f"already covered, remove from the untriaged list: {resolved}"
+
+
+def _make_nwell_layout() -> kdb.Layout:
+    """One 2um nwell (64/20) square."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    li = layout.layer(64, 20)
+    layout.set_info(li, kdb.LayerInfo(64, 20))
+    top.shapes(li).insert(kdb.Box(0, 0, 2000, 2000))
+    return layout
+
+
+def test_run_drc_sky130_coverage_lists_unmodeled_rules(tmp_path):
+    """A clean sky130 verdict must disclose the enclosure refinements the
+    curated deck does not transcribe (issue #3031); non-sky130 decks that
+    declare none report an empty list."""
+    path = tmp_path / "unmodeled.gds"
+    _make_nwell_layout().write(str(path))
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["coverage"]["unmodeled_rules"] == [
+        "MR_licon.SP.1",
+        "cap2m.11",
+        "cap2m.2b",
+        "cap2m.2b_a",
+        "cap2m.5",
+        "capm.11",
+        "capm.2b",
+        "capm.2b_a",
+        "capm.5",
+        "ct.4",
+        "difftap.10",
+        "difftap.11",
+        "difftap.8",
+        "difftap.9",
+        "dnwell.2",
+        "hvi.1",
+        "hvi.2a",
+        "hvntm.1",
+        "hvntm.2",
+        "hvtp.1",
+        "hvtp.2",
+        "hvtr.1",
+        "hvtr.2",
+        "hvtr.2_a",
+        "ldntm.2",
+        "li.5",
+        "li.7",
+        "licon.13",
+        "lvtn.2",
+        "m1.3ab",
+        "m1.5",
+        "m2.3ab",
+        "m2.5",
+        "m3.3ab",
+        "m4.5ab",
+        "n/psdm.10a",
+        "n/psdm.10b",
+        "n/psdm.5a",
+        "n/psdm.5b",
+        "n/psdm.6",
+        "n/psdm.7",
+        "n/psdm.8",
+        "ncm.2a",
+        "npc.4",
+        "nsm.1",
+        "pad.2",
+        "poly.3",
+        "rdl.1",
+        "rdl.2",
+        "rpm.2",
+        "thkox.2",
+        "tunm.2",
+        "urpm.2",
+        "via.5a",
+        "via2.5",
+        "via3.5",
+    ]
+    assert get_unmodeled_rules("no-such-deck") == []

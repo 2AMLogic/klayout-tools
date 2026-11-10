@@ -485,6 +485,7 @@
         "klayout_tools.decks.sg13g2",
         "klayout_tools.decks.sg13g2_runset_notes",
         "klayout_tools.decks.sky130",
+        "klayout_tools.decks.sky130_unmodeled",
         "klayout_tools.liberty_merge",
         "klayout_tools.pdk",
         "klayout_tools.pdk_capabilities",
