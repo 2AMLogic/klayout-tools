@@ -214,6 +214,7 @@ from .extract_abstract import _sanitize_instance_name as _sanitize_instance_name
 
 # Final report assembly moved out of `run_extract` (issue #5196).
 from .extract_assemble import assemble_extract_report
+from .extract_netlist_write import write_flat_netlist
 from .extract_netselect import NetSelectors
 from .extract_orient import orient_asymmetric_mos
 
@@ -3321,48 +3322,21 @@ def run_extract(
         netlist, circuit, hierarchical_names, hierarchy_placements
     )
 
-    # Issue #2761: a FinFET deck gets its own card writer (`L`/`W`/`NFIN`,
-    # the PDK reference CDL's parameter set); every other deck keeps the
-    # model-binding delegate exactly as before.
-    from .extract_finfet import spice_writer_delegate_for
-
-    # The model-binding delegate records any narrow-width fallback
-    # substitution it makes (issue #4575); keep a handle to surface it below.
-    model_delegates: list[Any] = []
-    writer = kdb.NetlistSpiceWriter(
-        spice_writer_delegate_for(
-            deck_name,
-            _model_delegate_factory(
-                model_bindings, substrate_global_nets, model_delegates
-            ),
-        )
+    reported_netlist_path, netlist_sha256, pin_ties = write_flat_netlist(
+        kdb=kdb,
+        netlist=netlist,
+        circuit=circuit,
+        deck_name=deck_name,
+        model_bindings=model_bindings,
+        substrate_global_nets=substrate_global_nets,
+        parasitics_report=parasitics_report,
+        substrate_tie_requested=substrate_tie_requested,
+        fixed_value_capacitor_note=fixed_value_capacitor_note,
+        netlist_path=netlist_path,
+        scratch_dir=scratch_dir,
+        pin_renames=pin_renames,
+        warnings=warnings,
     )
-    writer.use_net_names = True
-    netlist_description = f"extracted by klt extract --deck {deck_name}"
-    if parasitics_report is not None:
-        netlist_description += "\n" + _parasitic_model_header_comment(
-            substrate_tie_requested
-        )
-        netlist_description += "".join(
-            "\n* " + note for note in fixed_value_capacitor_note
-        )
-    try:
-        with stage("netlist_write"):
-            netlist.write(netlist_path, writer, netlist_description)
-    except Exception as exc:
-        if scratch_dir is not None:
-            shutil.rmtree(scratch_dir, ignore_errors=True)
-        raise ExtractError(f"could not write netlist '{netlist_path}': {exc}") from exc
-
-    warnings.extend(_substitution_notes(model_delegates))
-
-    pin_ties = (pin_renames or {}).get("ties") or []
-    _apply_pin_ties_if_circuit(netlist_path, circuit, pin_ties)
-
-    with stage("netlist_hash"):
-        reported_netlist_path, netlist_sha256 = _finish_netlist_write(
-            netlist_path, scratch_dir
-        )
 
     # `--subcircuit` (issue #2245): a *second*, independent deck carrying one
     # named `.SUBCKT <cell>` for the sub-cell's own extracted devices. Run
