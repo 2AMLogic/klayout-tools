@@ -201,7 +201,7 @@
     },
     {
       "path": "src/klayout_tools/cli/parser.py",
-      "lines": 6315
+      "lines": 6245
     },
     {
       "path": "src/klayout_tools/cli/pdk_cmd.py",
