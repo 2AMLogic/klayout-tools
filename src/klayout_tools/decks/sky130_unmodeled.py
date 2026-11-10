@@ -88,8 +88,9 @@ UNMODELED_RULES: tuple[str, ...] = tuple(
             "via.5a",
             "via2.5",
             "via3.5",
-            # Metal / MIM-cap / resistor / pad / special-layer triage (issue #5252, slice
-            # 2/4 of #5242), each id checked against sky130A_mr.drc / sky130A.lydrc.
+            # Metal / MIM-cap / resistor / pad / special-layer triage (issue #5252,
+            # slice 2/4 of #5242), each id checked against sky130A_mr.drc /
+            # sky130A.lydrc.
             # No rule in the curated deck implements the check:
             # marker-layer prohibitions and straddle rules (MR_*; MR_li.WID.4 is the
             # li:res width).
