@@ -10,10 +10,19 @@ from typing import Any
 
 
 def request_sha256(request: dict[str, Any]) -> str:
-    """Digest of the whole request (what the synchronous submit receipt records)."""
+    """Digest of the whole request (what receipts written before #5194 recorded)."""
     return hashlib.sha256(
         json.dumps(request, sort_keys=True, default=str).encode("utf-8")
     ).hexdigest()
+
+
+def receipt_request_sha256(request: dict[str, Any]) -> str:
+    """Digest the synchronous submit receipt records: submission-only batch
+    fields (``capacity_wait_s``, ...) are excluded so a flag-less ``--attach``
+    of the original request verifies (issue #5194)."""
+    from . import sim_batch_shards
+
+    return sim_batch_shards.receipt_request_sha256(request)
 
 
 def check_attach_receipt(
@@ -34,10 +43,15 @@ def check_attach_receipt(
     if not isinstance(receipt, dict) or receipt.get("job_id") != job_id:
         return
     recorded = receipt.get("request_sha256")
-    # Two writers: the synchronous submit hashes the whole request; the
-    # --submit-only receipt excludes submission-only batch fields.
+    # Writers exclude submission-only batch fields (sync: receipt_request_sha256;
+    # --submit-only: request_sha256); the whole-request digest is still
+    # accepted for receipts written before #5194.
     supplied = request_sha256(request)
-    accepted = {supplied, sim_batch_shards.request_sha256(request)}
+    accepted = {
+        supplied,
+        sim_batch_shards.request_sha256(request),
+        receipt_request_sha256(request),
+    }
     if isinstance(recorded, str) and recorded not in accepted:
         raise SimError(
             f"--attach {job_id}: the supplied request (sha256 {supplied}) is not "

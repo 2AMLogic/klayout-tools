@@ -3340,7 +3340,7 @@ def _run_batch_job(
         "region": getattr(config, "region", None),
         "profile": getattr(config, "profile", None),
         "launched_at": datetime.now(timezone.utc).isoformat(),
-        "request_sha256": sim_batch_receipt.request_sha256(request),
+        "request_sha256": sim_batch_receipt.receipt_request_sha256(request),
         "state": None,
     }
     _write_batch_receipt(receipt_path, receipt)
