@@ -79,14 +79,7 @@ def _read_json(path: str, what: str) -> Any:
 # --------------------------------------------------------------------------- #
 
 
-def load_registry(path: str) -> dict[str, Any]:
-    """Validate and return ``{"mapping": [...], "claims": [...]}``."""
-    data = _read_json(path, "--registry")
-    if not isinstance(data, dict):
-        raise EvidenceClaimsError("--registry must be a JSON object")
-    unknown = set(data) - {"mapping", "claims"}
-    if unknown:
-        raise EvidenceClaimsError(f"--registry has unknown keys: {sorted(unknown)}")
+def _check_mapping(data: dict[str, Any]) -> list[Any]:
     mapping = data.get("mapping", {})
     if not isinstance(mapping, dict) or set(mapping) - {"records"}:
         raise EvidenceClaimsError("'mapping' must be an object with a 'records' list")
@@ -106,25 +99,41 @@ def load_registry(path: str) -> dict[str, Any]:
                 "each 'mapping.records' entry needs string 'path' and 'chain' "
                 "and an optional 'supersedes' list of strings"
             )
+    return records
+
+
+def _check_claim_row(row: Any) -> None:
+    if not isinstance(row, dict) or set(row) - _ROW_KEYS:
+        raise EvidenceClaimsError(f"claims row has unknown keys: {row!r}")
+    for key in ("literal", "record", "pointer"):
+        if not isinstance(row.get(key), str):
+            raise EvidenceClaimsError(f"claims row needs a string {key!r}: {row!r}")
+    if row.get("agg") not in (None, "min", "max"):
+        raise EvidenceClaimsError("claims 'agg' must be 'min' or 'max'")
+    if "decimals" in row and (
+        not isinstance(row["decimals"], int) or isinstance(row["decimals"], bool)
+    ):
+        raise EvidenceClaimsError("claims 'decimals' must be an integer")
+    if "scale" in row and (
+        not isinstance(row["scale"], (int, float)) or isinstance(row["scale"], bool)
+    ):
+        raise EvidenceClaimsError("claims 'scale' must be a number")
+
+
+def load_registry(path: str) -> dict[str, Any]:
+    """Validate and return ``{"mapping": [...], "claims": [...]}``."""
+    data = _read_json(path, "--registry")
+    if not isinstance(data, dict):
+        raise EvidenceClaimsError("--registry must be a JSON object")
+    unknown = set(data) - {"mapping", "claims"}
+    if unknown:
+        raise EvidenceClaimsError(f"--registry has unknown keys: {sorted(unknown)}")
+    records = _check_mapping(data)
     claims = data.get("claims", [])
     if not isinstance(claims, list):
         raise EvidenceClaimsError("'claims' must be a list")
     for row in claims:
-        if not isinstance(row, dict) or set(row) - _ROW_KEYS:
-            raise EvidenceClaimsError(f"claims row has unknown keys: {row!r}")
-        for key in ("literal", "record", "pointer"):
-            if not isinstance(row.get(key), str):
-                raise EvidenceClaimsError(f"claims row needs a string {key!r}: {row!r}")
-        if row.get("agg") not in (None, "min", "max"):
-            raise EvidenceClaimsError("claims 'agg' must be 'min' or 'max'")
-        if "decimals" in row and (
-            not isinstance(row["decimals"], int) or isinstance(row["decimals"], bool)
-        ):
-            raise EvidenceClaimsError("claims 'decimals' must be an integer")
-        if "scale" in row and (
-            not isinstance(row["scale"], (int, float)) or isinstance(row["scale"], bool)
-        ):
-            raise EvidenceClaimsError("claims 'scale' must be a number")
+        _check_claim_row(row)
     return {"mapping": records, "claims": claims}
 
 
@@ -279,8 +288,7 @@ def _row_value(row: Mapping[str, Any], record: Any) -> str:
         corners = (record.get("result") or {}).get("corners")
         match = [
             c
-            for c in corners
-            if isinstance(corners, list)
+            for c in (corners if isinstance(corners, list) else [])
             if isinstance(c, dict) and c.get("corner_id") == row["corner"]
         ]
         if len(match) != 1:
