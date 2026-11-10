@@ -483,9 +483,8 @@ from . import (
     UnmodelledDeviceFamily,
 )
 
-# `RuleProvenance.source_repo`/`.commit` shared by every rule in this module
-# -- the same "one repo/commit pin, per-rule source_path/rule_id" shape
-# `sky130.py`'s `_sky130_provenance`/`_sky130_lvs_provenance` helpers use.
+# `RuleProvenance.source_repo`/`.commit` shared by every rule in this module:
+# one repo/commit pin, per-rule source_path/rule_id (as `sky130.py`'s helpers).
 _IHP_OPEN_PDK_REPO = "IHP-GmbH/IHP-Open-PDK"
 _IHP_OPEN_PDK_COMMIT = "5cccb161f7492697cfa52eb14dc03beb00bdca9e"  # v0.3.0 tag
 
@@ -1752,6 +1751,7 @@ DECK: list[DrcRule] = [
         provenance=_sg13g2_drc_provenance(f"{_BEOL}/6_11_mim.drc", "MIM.d"),
     ),
 ]
+__import__(f"{__package__}.sg13g2_cont_grid", fromlist=["x"]).apply(DECK)
 __import__(f"{__package__}.sg13g2_runset_notes", fromlist=["x"]).apply(DECK)
 # Foundry rules this curated deck knows about but cannot evaluate (issue
 # #3571, mirroring #3012): `{rule id: (layer, description)}`. `drc.py`

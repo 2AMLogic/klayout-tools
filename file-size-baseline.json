@@ -261,7 +261,7 @@
     },
     {
       "path": "src/klayout_tools/decks/sky130.py",
-      "lines": 3139
+      "lines": 3064
     },
     {
       "path": "src/klayout_tools/digital_fleet.py",
@@ -393,7 +393,7 @@
     },
     {
       "path": "src/klayout_tools/gen_layer_tables.py",
-      "lines": 1021
+      "lines": 1019
     },
     {
       "path": "src/klayout_tools/gen_pcells/diff_pair.py",
@@ -525,7 +525,7 @@
     },
     {
       "path": "src/klayout_tools/pex.py",
-      "lines": 3947
+      "lines": 3946
     },
     {
       "path": "src/klayout_tools/place_and_route.py",
@@ -557,7 +557,7 @@
     },
     {
       "path": "src/klayout_tools/post_route_sta.py",
-      "lines": 4865
+      "lines": 4826
     },
     {
       "path": "src/klayout_tools/power.py",
@@ -837,7 +837,7 @@
     },
     {
       "path": "tests/test_drc.py",
-      "lines": 11775
+      "lines": 11707
     },
     {
       "path": "tests/test_drc_asap7_deck.py",

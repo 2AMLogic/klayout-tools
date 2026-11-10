@@ -14,6 +14,13 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt sta` `electrical_checks` gains `min_pulse_width` and `min_period`**
+  (#5241, 2026-11-10): two additive sibling classes next to `max_transition` /
+  `max_capacitance`, each with `coverage` (`checked` / `unsupported` /
+  `not_run`), `violation_count`, `worst_slack_ns` and `worst_pin`; values are
+  `null` unless `checked`, so "never evaluated" is distinguishable from
+  clean. Limits are the liberty's; report only, no verdict. Existing fields
+  unchanged.
 - **`klt signoff`: opt-in `require_complete_constraints` on `sta` evidence**
   (#5234, 2026-11-10): an item 5 `sta` citation may set
   `"require_complete_constraints": true` to grade `unmet` (`check_failed`,

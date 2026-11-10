@@ -322,9 +322,9 @@ def _sd_implant_margin_um(family: str) -> float:
 #: byte-for-byte unchanged.
 _PDK_RING_IMPLANT_MARGIN_UM: dict[str, float] = {
     "gf180mcu": 0.16,  # NP.5b/PP.5b (extension beyond COMP) are 0.16um
-    # sky130 (issue #2934): n/psdm.5b, "min. n/psdm enclosure tap except
-    # butting edge", 0.125um (sky130A.lydrc, PDK c6d73a35).
+    # sky130 (issue #2934): n/psdm.5b, 0.125um (sky130A.lydrc, PDK c6d73a35).
     "sky130": 0.125,
+    "sg13g2": 0.18,  # pSD.c (#5231); P-substrate tap ring only
 }
 
 

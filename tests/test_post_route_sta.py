@@ -7272,7 +7272,7 @@ def test_electrical_check_tcl_ends_redirect_on_error_path():
         if line == unsupported:
             assert lines[i - 1] == "  catch {sta::redirect_string_end}"
             assert lines[i - 2] == "} klt_elec_msg]} {"
-    assert lines.count(unsupported) == 2
+    assert lines.count(unsupported) == 4
 
 
 _ELECTRICAL_FIXTURE = Path(__file__).parent / "fixtures" / "sta_electrical_checks"

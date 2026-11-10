@@ -485,8 +485,10 @@
         "klayout_tools.decks.rules",
         "klayout_tools.decks.sg13cmos5l",
         "klayout_tools.decks.sg13g2",
+        "klayout_tools.decks.sg13g2_cont_grid",
         "klayout_tools.decks.sg13g2_runset_notes",
         "klayout_tools.decks.sky130",
+        "klayout_tools.decks.sky130_unmodeled",
         "klayout_tools.liberty_merge",
         "klayout_tools.pdk",
         "klayout_tools.pdk_capabilities",
@@ -795,7 +797,8 @@
         "klayout_tools.cli.sta_cmd",
         "klayout_tools._sta_period_maps",
         "klayout_tools._sta_request_diag",
-        "klayout_tools.post_route_sta"
+        "klayout_tools.post_route_sta",
+        "klayout_tools.post_route_sta_electrical"
       ]
     },
     "stats": {

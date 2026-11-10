@@ -666,10 +666,8 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         # 0.01um Metal1-encloses-Via1 -- is not even drawn by `guard_ring`).
         # Not recognised by `klt extract` as a distinct well/substrate *tie*
         # the way `well_island`'s own `well_tap_implant` role makes
-        # gf180mcu's tap ring recognisable
-        # (issue #1084) -- `guard_ring`/`diff_pair` draw no such implant on
-        # any currently-supported family, gf180mcu included, so this is not
-        # a new gap sg13g2 introduces.
+        # gf180mcu's tap ring recognisable (issue #1084); not a new gap.
+        "pplus": (14, 0),  # pSD.drawing; only `guard_ring`'s P-tap (#5231)
         "res_mark": (128, 0),  # PolyRes.drawing --
         # `EXTRACTION_DECK.resistors[0]` (`"rsil"`, sg13g2's lowest-sheet-rho
         # recognised poly resistor, 7 ohm/sq)'s `marker` field (issue #369's

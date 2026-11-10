@@ -1519,6 +1519,7 @@ full `repo`/`external`/`absent` scope meanings.
 | `device_only_netlist_sha256` | string \| null | Issue #3298 (additive, `--device-only-leg` only). `sha256:<hex>` of its exact bytes. |
 | `device_card_count`  | integer           | Issue #3298 (additive, `--device-only-leg` only). Device cards (non-`R`/`C`) in the device-only netlist. |
 | `device_cards_match` | boolean           | Issue #3298 (additive, `--device-only-leg` only). `true` when those cards equal the parasitic extraction's with star nodes mapped back to their nets; `false` means the leg is not purely device-only. |
+| `warnings`           | array\<string\>   | Issue #5203 (additive; **present only when non-empty**, so non-asap7 reports are unchanged). `--deck asap7` adds one run-level entry stating the measured coupled-wiring fidelity gap: covered range (ASAP7 M2/M4, pitch 1x-4x LEF, same-level parallel neighbours, 0.36 um run, 10 kohm driver, 1 ps edge), delay error -87.8% to -97.8%, energy error -92.6% to -99.0%, "lower bound", and a pointer to `docs/design/asap7-parallel-line-fidelity.md`. It is a statement about the deck, not a per-net classification; it never changes `status` or the exit code. |
 | `provenance`         | object            | The extraction's own shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) — see [`json-contract.md`](../json-contract.md#shared-provenance-block). `deck` pins the extraction deck (name + `sha256:` content hash — the "deck version" this report pins); `input` pins `<layout>`. |
 
 ### `delta[]` entries

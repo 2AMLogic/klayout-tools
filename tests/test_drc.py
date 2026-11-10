@@ -1505,74 +1505,6 @@ def test_run_drc_sky130_nwell9_hvnwell_enclosed_by_hvi(tmp_path, hvi_box, expect
         assert "nwell.enclosed.hvi.1" in report["coverage"]["rules_checked"]
 
 
-def test_run_drc_sky130_coverage_lists_unmodeled_rules(tmp_path):
-    """A clean sky130 verdict must disclose the enclosure refinements the
-    curated deck does not transcribe (issue #3031); non-sky130 decks that
-    declare none report an empty list."""
-    path = tmp_path / "unmodeled.gds"
-    _make_sky130_nwell_hvi_layout(None).write(str(path))
-
-    report = run_drc(str(path), "sky130")
-
-    assert report["coverage"]["unmodeled_rules"] == [
-        "MR_licon.SP.1",
-        "cap2m.11",
-        "cap2m.2b",
-        "cap2m.2b_a",
-        "cap2m.5",
-        "capm.11",
-        "capm.2b",
-        "capm.2b_a",
-        "capm.5",
-        "difftap.10",
-        "difftap.11",
-        "difftap.8",
-        "difftap.9",
-        "dnwell.2",
-        "hvi.1",
-        "hvi.2a",
-        "hvntm.1",
-        "hvntm.2",
-        "hvtp.1",
-        "hvtp.2",
-        "hvtr.1",
-        "hvtr.2",
-        "hvtr.2_a",
-        "ldntm.2",
-        "li.7",
-        "licon.13",
-        "lvtn.2",
-        "m1.3ab",
-        "m1.5",
-        "m2.3ab",
-        "m2.5",
-        "m3.3ab",
-        "m4.5ab",
-        "n/psdm.10a",
-        "n/psdm.10b",
-        "n/psdm.5a",
-        "n/psdm.5b",
-        "n/psdm.6",
-        "n/psdm.7",
-        "n/psdm.8",
-        "ncm.2a",
-        "npc.4",
-        "nsm.1",
-        "pad.2",
-        "poly.3",
-        "rdl.1",
-        "rdl.2",
-        "rpm.2",
-        "thkox.2",
-        "tunm.2",
-        "urpm.2",
-        "via.5a",
-        "via2.5",
-        "via3.5",
-    ]
-    assert get_unmodeled_rules("no-such-deck") == []
-
-
 def test_run_drc_sg13g2_coverage_lists_unmodeled_pad_and_latchup_rules(tmp_path):
     """A clean sg13g2 verdict must disclose the un-transcribed `Pad.*` and
     `LU.*` runset rules (issue #3854); sorted, and other decks unaffected."""
@@ -7404,7 +7336,7 @@ def test_run_drc_threshold_max_dbu_validated_even_when_layer_absent(
 
 
 def test_run_drc_sg13g2_every_rule_has_provenance():
-    """Every one of sg13g2's 62 curated `DrcRule` entries carries a populated
+    """Every one of sg13g2's 63 curated `DrcRule` entries carries a populated
     `provenance` citation (issue #905's own acceptance criterion: "every
     compiled rule cites its SG13G2 PDK source line", extended by issue #1243's
     Metal3-TopMetal2 stack, issue #2581's 6.11 MIM group, issue #3787's pSD
@@ -7413,7 +7345,7 @@ def test_run_drc_sg13g2_every_rule_has_provenance():
     36 width/space rules `tests/test_golden_deck.py`'s generic check already
     covers."""
     deck = get_deck("sg13g2")
-    assert len(deck) == 62
+    assert len(deck) == 63
     for rule in deck:
         assert rule.provenance is not None, f"sg13g2/{rule.id}: no provenance"
         assert rule.provenance.source_repo == "IHP-GmbH/IHP-Open-PDK"

@@ -1385,6 +1385,15 @@ jobs:
         if: ${{ !cancelled() && matrix.python-version == '3.12' && hashFiles('coverage.json') != '' }}
         run: python3 scripts/coverage_summary.py coverage.json >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Coverage floor (ratchet)
+        # Issue #3312. Fails when a module's line/branch coverage drops below
+        # its floor in coverage-baseline.json. Only on the leg that measures
+        # coverage, and only when pytest passed (a red run's coverage is
+        # partial and would double-report). Re-seed from completed main runs:
+        # docs/guides/test-coverage.md.
+        if: ${{ success() && matrix.python-version == '3.12' && hashFiles('coverage.json') != '' }}
+        run: python3 scripts/check_coverage_baseline.py coverage.json
+
       - name: Upload coverage report
         if: ${{ !cancelled() && matrix.python-version == '3.12' && hashFiles('coverage.json') != '' }}
         uses: actions/upload-artifact@v7
