@@ -22,11 +22,11 @@ import pytest
 from klayout_tools.decks import get_deck
 from klayout_tools.decks.rules import DrcRule
 from klayout_tools.decks.sky130 import (
-    _NATIVE_OUTPUT_ID_STEMS,
     _OFFGRID_ROWS,
     OFFGRID_GRID_UM,
     OFFGRID_UNCHECKED_LAYERS,
 )
+from klayout_tools.decks.sky130_unmodeled import _NATIVE_OUTPUT_ID_STEMS
 from klayout_tools.drc import DrcError, _run_grid_check, run_drc
 
 

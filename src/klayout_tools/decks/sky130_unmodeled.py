@@ -6,6 +6,34 @@ Split out of :mod:`.sky130` to keep that module under its file-size ceiling;
 
 from __future__ import annotations
 
+#: Rows whose provenance cites the native sky130A output ids
+#: (``<stem>_OFFGRID`` / ``<stem>_angle``, the ids ``klt drc`` coverage is
+#: diffed against, issue #5253) instead of the shared ``x.1b`` / ``x.2*`` /
+#: ``x.3a`` message ids. Each row's stem equals the native output stem. Other
+#: rows keep the message id until their triage slice of #5242 lands.
+_NATIVE_OUTPUT_ID_STEMS: frozenset[str] = frozenset(
+    {
+        "dnwell",
+        "hvi",
+        "hvntm",
+        "hvtp",
+        "hvtr",
+        "nwell",
+        "pwbm",
+        "pwde",
+        "pwell_rs",
+        "uhvi",
+        "vhvi",
+        "vpp",
+    }
+)
+
+
+def native_output_id(stem: str, suffix: str, fallback: str) -> str:
+    """``<stem>_<suffix>`` for a native-triaged stem, else the shared ``fallback``."""
+    return f"{stem}_{suffix}" if stem in _NATIVE_OUTPUT_ID_STEMS else fallback
+
+
 #: Official sky130A_mr.drc rule ids this curated deck knowingly does *not*
 #: transcribe (issue #3031): the "2-adjacent-edges-relaxed" enclosure
 #: refinements, which need a per-edge-pair primitive ``DrcRule`` does not have
