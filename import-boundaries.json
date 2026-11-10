@@ -228,6 +228,7 @@
         "klayout_tools.extract_resistance_graph",
         "klayout_tools.extract_spef",
         "klayout_tools.extract_subcircuit",
+        "klayout_tools.extract_warnings",
         "klayout_tools.parasitic_integrity",
         "klayout_tools.resistance_path",
         "klayout_tools.substrate_resistance"
