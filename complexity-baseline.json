@@ -211,7 +211,7 @@
     {
       "file": "src/klayout_tools/extract.py",
       "function": "run_extract",
-      "complexity": 67
+      "complexity": 40
     },
     {
       "file": "src/klayout_tools/extract_abstract.py",
@@ -267,6 +267,11 @@
       "file": "src/klayout_tools/extract_spef.py",
       "function": "def_net_instance_pins",
       "complexity": 12
+    },
+    {
+      "file": "src/klayout_tools/extract_validate.py",
+      "function": "validate_run_extract_args",
+      "complexity": 17
     },
     {
       "file": "src/klayout_tools/functional_verification.py",

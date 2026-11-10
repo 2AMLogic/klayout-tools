@@ -4,8 +4,8 @@
     "version": "0.9.1",
     "date": "2026-11-05"
   },
-  "verb_count": 67,
-  "mcp_tool_count": 92,
+  "verb_count": 68,
+  "mcp_tool_count": 93,
   "decks": [
     "asap7",
     "gf180mcu",
@@ -134,6 +134,11 @@
           "name": "gen-compose",
           "summary": "place already-generated blocks and library cells into one composed cell",
           "doc": "https://github.com/2AMLogic/klayout-tools/blob/main/docs/cli/gen-compose.md"
+        },
+        {
+          "name": "route",
+          "summary": "route between labelled pins of an already-placed layout",
+          "doc": "https://github.com/2AMLogic/klayout-tools/blob/main/docs/cli/route.md"
         },
         {
           "name": "layout-plan",
