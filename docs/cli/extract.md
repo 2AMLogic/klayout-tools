@@ -2776,6 +2776,10 @@ diffusion under one `MVSD` polygon is one drain net, so both fingers report the
 same `D` net (rather than the second finger's drain floating), with a distinct
 source net per source island. The result is two `nfet` devices (one per finger)
 sharing a drain, not a single merged device.
+To compare it to a single-device `nfet_10v0_asym` reference, strap the gates and the
+two source stripes and use `klt lvs` with `options.combine_devices` (measured
+recipe: `docs/cli/lvs.md`, "gf180mcu LDMOS PCell against a single reference
+device"); its 17 DRC markers are known false positives (`docs/cli/drc.md`).
 
 `sg13g2` declares one such entry too (issue #1231), keyed on its
 `ThickGateOx` (44/0) marker: a transistor drawn inside it binds the real
