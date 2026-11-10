@@ -284,6 +284,12 @@ from ._provenance import (
     sha256_file,
 )
 from ._request_fields import check_known_fields
+from ._sta_period_maps import (
+    check_period_maps,
+    clock_period_for_corner,
+    clock_targets,
+    validate_period,
+)
 from ._sta_request_diag import (
     KNOWN_REQUEST_FIELDS,
     SPEF_NAME_MISMATCH_HINT,
@@ -695,6 +701,7 @@ def run_sta(
         output_delay_ns,
     ) = _validate_constraints(request["constraints"])
     clock_extras = _validate_clock_extras(request["constraints"])
+    check_period_maps(clock_period_ns, clock_extras, clock_port, requested_corners)
     input_delays, output_delays = _validate_port_delay_maps(
         request["constraints"], clock_port
     )
@@ -950,7 +957,7 @@ def _dispatch_sta(
     hdl_toplevel: str | None,
     geometry_source: str,
     clock_port: str,
-    clock_period_ns: float,
+    clock_period_ns: float | dict[str, float],
     input_delay_ns: float | None,
     output_delay_ns: float | None,
     input_delays: dict[str, dict[str, float]] | None,
@@ -1022,6 +1029,7 @@ def _dispatch_sta(
             report_paths=report_paths,
         )
 
+    assert not isinstance(clock_period_ns, dict)  # maps need pdk.corners
     corner_fields, resolution = _run_corner_session(
         corner_name=requested_corner,
         cell_library=cell_library,
@@ -1113,7 +1121,7 @@ def _dispatch_sta(
         # shapes; never infer it from clock_skew_ns, which is a measured
         # metric that is non-zero under ideal timing too.
         "clock_mode": "propagated" if propagated_clock else "ideal",
-        "clock_targets": _clock_targets(clock_port, clock_period_ns, clock_extras),
+        "clock_targets": clock_targets(clock_port, clock_period_ns, clock_extras),
         "clock_uncertainty": _clock_uncertainty_block(clock_uncertainty),
         "spef_path": report_paths.spef_path,
         "worst_slack_ns": corner_fields["worst_slack_ns"],
@@ -1455,7 +1463,7 @@ def _run_multi_corner(
     hdl_toplevel: str | None,
     geometry_source: str,
     clock_port: str,
-    clock_period_ns: float,
+    clock_period_ns: float | dict[str, float],
     input_delay_ns: float | None,
     output_delay_ns: float | None,
     input_delays: dict[str, dict[str, float]] | None,
@@ -1531,6 +1539,9 @@ def _run_multi_corner(
         script_tag = f"{basename}__{corner_name or 'nominal'}"
         if interconnect is not None:
             script_tag += f"__{interconnect}"
+        corner_period, corner_extras, corner_targets = clock_period_for_corner(
+            corner_name, clock_port, clock_period_ns, clock_extras
+        )
         corner_fields, resolution = _run_corner_session(
             corner_name=corner_name,
             cell_library=cell_library,
@@ -1541,7 +1552,7 @@ def _run_multi_corner(
             verilog_path=verilog_path,
             hdl_toplevel=hdl_toplevel,
             clock_port=clock_port,
-            clock_period_ns=clock_period_ns,
+            clock_period_ns=corner_period,
             input_delay_ns=input_delay_ns,
             output_delay_ns=output_delay_ns,
             input_delays=input_delays,
@@ -1556,7 +1567,7 @@ def _run_multi_corner(
             wire_load_mode=wire_load_mode,
             macros=macros,
             propagated_clock=propagated_clock,
-            clock_extras=clock_extras,
+            clock_extras=corner_extras,
             power_activity=power_activity,
             clock_uncertainty=clock_uncertainty,
             output_dir=output_dir,
@@ -1580,6 +1591,7 @@ def _run_multi_corner(
                 "corner": resolution["corner"],
                 **axis_fields,
                 **corner_fields,
+                **corner_targets,
                 "deck": _deck_block(
                     deck_name,
                     resolution["liberty_path"],
@@ -1638,7 +1650,7 @@ def _run_multi_corner(
         # entry carries that session's own `clock_propagation` evidence
         # block (the network latencies it reports *do* vary per corner).
         "clock_mode": "propagated" if propagated_clock else "ideal",
-        "clock_targets": _clock_targets(clock_port, clock_period_ns, clock_extras),
+        "clock_targets": clock_targets(clock_port, clock_period_ns, clock_extras),
         "clock_uncertainty": _clock_uncertainty_block(clock_uncertainty),
         "spef_path": report_paths.spef_path,
         "provenance": provenance,
@@ -1902,7 +1914,7 @@ def _resolve_spef(spef_field: Any, request_dir: str) -> str | None:
 
 def _validate_constraints(
     constraints: Any,
-) -> tuple[str, float, float | None, float | None]:
+) -> tuple[str, float | dict[str, float], float | None, float | None]:
     """Unlike ``place_and_route.py``'s own ``_validate_constraints`` (where
     a clock is optional -- a ``target_stage: "floorplan"`` run has no
     meaningful clock yet), a standalone STA run has no meaning *without* a
@@ -1928,7 +1940,11 @@ def _validate_constraints(
         clock_period_ns = constraints.get("clock_period_ns")
     if not (isinstance(clock_port, str) and clock_port):
         raise PostRouteStaError("request.constraints.clock_port is required")
-    if (
+    if isinstance(clock_period_ns, dict):
+        clock_period_ns = validate_period(  # values reach create_clock -period
+            clock_period_ns, "request.constraints", "clock_period_ns"
+        )
+    elif (
         isinstance(clock_period_ns, bool)
         or not isinstance(clock_period_ns, (int, float))
         or clock_period_ns <= 0
@@ -1938,7 +1954,9 @@ def _validate_constraints(
         )
     input_delay_ns = _validate_io_delay(constraints.get("input_delay_ns"), "input")
     output_delay_ns = _validate_io_delay(constraints.get("output_delay_ns"), "output")
-    return clock_port, float(clock_period_ns), input_delay_ns, output_delay_ns
+    if not isinstance(clock_period_ns, dict):
+        clock_period_ns = float(clock_period_ns)
+    return clock_port, clock_period_ns, input_delay_ns, output_delay_ns
 
 
 def _validate_clocks_list(constraints: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1992,12 +2010,7 @@ def _validate_clock_entry(entry: Any, where: str) -> dict[str, Any]:
     port = entry.get("port")
     if not isinstance(port, str) or not port.strip():
         raise PostRouteStaError(f"{where}.port must be a non-empty string")
-    period = entry.get("period_ns")
-    if isinstance(period, bool) or not isinstance(period, (int, float)):
-        raise PostRouteStaError(f"{where}.period_ns must be a positive number")
-    if period <= 0:
-        raise PostRouteStaError(f"{where}.period_ns must be greater than zero")
-    return {"port": port, "period_ns": float(period)}
+    return {"port": port, "period_ns": validate_period(entry.get("period_ns"), where)}
 
 
 def _validate_clock_extras(constraints: dict[str, Any]) -> dict[str, Any] | None:
@@ -2050,19 +2063,6 @@ def _validate_clock_groups(groups_raw: Any, declared: set[Any]) -> list[list[str
             "for an asynchronous relationship"
         )
     return groups
-
-
-def _clock_targets(
-    clock_port: str, clock_period_ns: float, clock_extras: dict[str, Any] | None
-) -> dict[str, Any]:
-    """The response's additive ``clock_targets`` echo (issue #4241): every
-    clock applied (primary first), and the asynchronous groups."""
-    clocks = [{"port": clock_port, "period_ns": clock_period_ns}]
-    groups: list[list[str]] = []
-    if clock_extras:
-        clocks += clock_extras["clocks"]
-        groups = clock_extras["groups"]
-    return {"clocks": clocks, "clock_groups": groups}
 
 
 def _validate_io_delay(value: Any, which: str) -> float | None:
