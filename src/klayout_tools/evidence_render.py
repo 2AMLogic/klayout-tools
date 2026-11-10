@@ -44,6 +44,39 @@ def _read_json(path: str, what: str) -> Any:
         raise EvidenceRenderError(f"cannot read {what} {path}: {exc}") from exc
 
 
+def _check_columns(cols: Any, where: str) -> None:
+    if not isinstance(cols, list) or not cols:
+        raise EvidenceRenderError(f"{where}: 'columns' must be a non-empty array")
+    for col in cols:
+        if not isinstance(col, dict) or not isinstance(col.get("header"), str):
+            raise EvidenceRenderError(f"{where}: each column needs a string 'header'")
+        _check_format(col.get("format", "str"), where)
+
+
+def _check_cell(cell: Any, where: str) -> None:
+    if isinstance(cell, dict):
+        if not isinstance(cell.get("record"), str) or not isinstance(
+            cell.get("pointer"), str
+        ):
+            raise EvidenceRenderError(
+                f"{where}: a record cell needs string 'record' and 'pointer'"
+            )
+    elif not isinstance(cell, (str, int, float)) or isinstance(cell, bool):
+        raise EvidenceRenderError(f"{where}: literal cells must be string or number")
+
+
+def _check_rows(rows: Any, ncols: int, where: str) -> None:
+    if not isinstance(rows, list):
+        raise EvidenceRenderError(f"{where}: 'rows' must be an array")
+    for row in rows:
+        if not isinstance(row, list) or len(row) != ncols:
+            raise EvidenceRenderError(
+                f"{where}: every row must be an array with {ncols} cell(s)"
+            )
+        for cell in row:
+            _check_cell(cell, where)
+
+
 def load_spec(path: str) -> dict[str, dict[str, Any]]:
     """Load and shape-check the spec: ``{id: {"columns": [...], "rows": [...]}}``."""
     spec = _read_json(path, "spec")
@@ -55,36 +88,8 @@ def load_spec(path: str) -> dict[str, dict[str, Any]]:
         where = f"spec id {tid!r}"
         if not isinstance(entry, dict):
             raise EvidenceRenderError(f"{where}: entry must be an object")
-        cols = entry.get("columns")
-        rows = entry.get("rows")
-        if not isinstance(cols, list) or not cols:
-            raise EvidenceRenderError(f"{where}: 'columns' must be a non-empty array")
-        for col in cols:
-            if not isinstance(col, dict) or not isinstance(col.get("header"), str):
-                raise EvidenceRenderError(
-                    f"{where}: each column needs a string 'header'"
-                )
-            _check_format(col.get("format", "str"), where)
-        if not isinstance(rows, list):
-            raise EvidenceRenderError(f"{where}: 'rows' must be an array")
-        for row in rows:
-            if not isinstance(row, list) or len(row) != len(cols):
-                raise EvidenceRenderError(
-                    f"{where}: every row must be an array with {len(cols)} cell(s)"
-                )
-            for cell in row:
-                if isinstance(cell, dict):
-                    if not isinstance(cell.get("record"), str) or not isinstance(
-                        cell.get("pointer"), str
-                    ):
-                        raise EvidenceRenderError(
-                            f"{where}: a record cell needs string 'record' "
-                            "and 'pointer'"
-                        )
-                elif not isinstance(cell, (str, int, float)) or isinstance(cell, bool):
-                    raise EvidenceRenderError(
-                        f"{where}: literal cells must be string or number"
-                    )
+        _check_columns(entry.get("columns"), where)
+        _check_rows(entry.get("rows"), len(entry["columns"]), where)
     return spec
 
 
@@ -187,17 +192,7 @@ def _find_blocks(text: str, doc: str) -> list[tuple[str, int, int]]:
         pos = c2.end()
 
 
-def render(
-    root: str, docs: list[str], spec_path: str, check: bool = False
-) -> dict[str, Any]:
-    """Fill (or with ``check`` only compare) every marked block under ``docs``.
-
-    Returns the payload. Writes only when ``check`` is false and every block
-    rendered; any failure raises :class:`EvidenceRenderError` with nothing written.
-    """
-    if not os.path.isdir(root):
-        raise EvidenceRenderError(f"root {root} is not a directory")
-    spec = load_spec(spec_path)
+def _expand_docs(root: str, docs: list[str]) -> list[str]:
     paths: list[str] = []
     for pattern in docs:
         hits = sorted(
@@ -210,43 +205,71 @@ def render(
                 f"--docs {pattern!r} matched no files under {root}"
             )
         paths.extend(h for h in hits if h not in paths)
+    return paths
+
+
+def _render_doc(
+    root: str,
+    rel: str,
+    spec: dict[str, dict[str, Any]],
+    cache: dict[str, Any],
+    seen: dict[str, str],
+) -> tuple[dict[str, Any], str | None]:
+    """Render one doc; returns (result, new_text or None when unchanged)."""
+    full = os.path.join(root, rel)
+    try:
+        with open(full, encoding="utf-8", newline="") as fh:
+            text = fh.read()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise EvidenceRenderError(f"cannot read doc {rel}: {exc}") from exc
+    nl = "\r\n" if "\r\n" in text else "\n"
+    out: list[str] = []
+    last = 0
+    block_results = []
+    for tid, start, end in _find_blocks(text, rel):
+        if tid in seen:
+            raise EvidenceRenderError(
+                f"duplicate block id {tid!r} ({seen[tid]} and {rel})"
+            )
+        seen[tid] = rel
+        if tid not in spec:
+            raise EvidenceRenderError(f"{rel}: block id {tid!r} has no spec entry")
+        body = nl + nl.join(build_table(tid, spec[tid], root, cache)) + nl
+        out.append(text[last:start])
+        out.append(body)
+        last = end
+        block_results.append(
+            {"id": tid, "status": "current" if text[start:end] == body else "stale"}
+        )
+    out.append(text[last:])
+    new_text = "".join(out)
+    return {"doc": rel, "blocks": block_results}, (
+        new_text if new_text != text else None
+    )
+
+
+def render(
+    root: str, docs: list[str], spec_path: str, check: bool = False
+) -> dict[str, Any]:
+    """Fill (or with ``check`` only compare) every marked block under ``docs``.
+
+    Returns the payload. Writes only when ``check`` is false and every block
+    rendered; any failure raises :class:`EvidenceRenderError` with nothing written.
+    """
+    if not os.path.isdir(root):
+        raise EvidenceRenderError(f"root {root} is not a directory")
+    spec = load_spec(spec_path)
+    paths = _expand_docs(root, docs)
 
     cache: dict[str, Any] = {}
     seen: dict[str, str] = {}
     results: list[dict[str, Any]] = []
     pending: list[tuple[str, str]] = []
     for rel in paths:
-        full = os.path.join(root, rel)
-        try:
-            with open(full, encoding="utf-8", newline="") as fh:
-                text = fh.read()
-        except (OSError, UnicodeDecodeError) as exc:
-            raise EvidenceRenderError(f"cannot read doc {rel}: {exc}") from exc
-        nl = "\r\n" if "\r\n" in text else "\n"
-        out: list[str] = []
-        last = 0
-        block_results = []
-        for tid, start, end in _find_blocks(text, rel):
-            if tid in seen:
-                raise EvidenceRenderError(
-                    f"duplicate block id {tid!r} ({seen[tid]} and {rel})"
-                )
-            seen[tid] = rel
-            if tid not in spec:
-                raise EvidenceRenderError(f"{rel}: block id {tid!r} has no spec entry")
-            lines = build_table(tid, spec[tid], root, cache)
-            body = nl + nl.join(lines) + nl
-            out.append(text[last:start])
-            out.append(body)
-            last = end
-            block_results.append(
-                {"id": tid, "status": "current" if text[start:end] == body else "stale"}
-            )
-        out.append(text[last:])
-        new_text = "".join(out)
-        results.append({"doc": rel, "blocks": block_results})
-        if new_text != text:
-            pending.append((full, new_text))
+        result, new_text = _render_doc(root, rel, spec, cache, seen)
+        results.append(result)
+        if new_text is not None:
+            pending.append((os.path.join(root, rel), new_text))
 
     unused = sorted(set(spec) - set(seen))
     if unused:
@@ -254,6 +277,12 @@ def render(
             f"spec id(s) with no block in any doc: {', '.join(unused)}"
         )
 
+    return _payload(results, pending, check)
+
+
+def _payload(
+    results: list[dict[str, Any]], pending: list[tuple[str, str]], check: bool
+) -> dict[str, Any]:
     stale = [
         f"{r['doc']}#{b['id']}"
         for r in results

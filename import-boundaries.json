@@ -204,7 +204,8 @@
       "description": "`klt evidence` implementation: CLI adapter for the evidence-record/1 writer plus the evidence lint.",
       "modules": [
         "klayout_tools.cli.evidence_cmd",
-        "klayout_tools.evidence_lint"
+        "klayout_tools.evidence_lint",
+        "klayout_tools.evidence_render"
       ]
     },
     "extract": {

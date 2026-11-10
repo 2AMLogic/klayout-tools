@@ -4434,7 +4434,6 @@ def _add_evidence_parser(subparsers: argparse._SubParsersAction) -> None:
     lint_parser.add_argument(
         "--schema",
         metavar="FILE.json",
-        default=None,
         help="flat declarative repo schema: required_fields, extension_keys, "
         "corner_id_pattern",
     )
@@ -4445,40 +4444,7 @@ def _add_evidence_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(lint_parser)
     lint_parser.set_defaults(func=evidence_cmd.run_lint)
-
-    render_parser = evidence_sub.add_parser(
-        "render",
-        help="fill marked tables in docs from evidence records",
-        description=(
-            "Rewrite <!-- klt:table id=NAME --> ... <!-- /klt:table --> blocks "
-            "in --docs from evidence records via a JSON --spec. Text outside "
-            "blocks is untouched; all-or-nothing. --check writes nothing and "
-            "exits 1 if any block is stale."
-        ),
-    )
-    render_parser.add_argument(
-        "root", nargs="?", default=".", help="repo root (default: cwd)"
-    )
-    render_parser.add_argument(
-        "--docs",
-        nargs="+",
-        required=True,
-        metavar="GLOB",
-        help="doc glob(s) relative to ROOT; each must match a file",
-    )
-    render_parser.add_argument(
-        "--spec",
-        required=True,
-        metavar="FILE.json",
-        help="table spec, keyed by block id",
-    )
-    render_parser.add_argument(
-        "--check",
-        action="store_true",
-        help="write nothing; exit 1 if any block is stale",
-    )
-    _add_format_arg(render_parser)
-    render_parser.set_defaults(func=evidence_cmd.run_render)
+    evidence_cmd.add_render_parser(evidence_sub, _add_format_arg)
 
 
 def _add_artifact_parser(subparsers: argparse._SubParsersAction) -> None:
