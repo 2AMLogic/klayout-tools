@@ -14,6 +14,14 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **New `klt route`: route between labelled pins of an already-placed layout**
+  (#5205, 2026-11-10): `klt route <request.json>` derives endpoints from text
+  labels on direct child instances of a top cell, routes two-pin nets with the
+  `gen-compose` router (unchanged), optionally writes the routed layout, and
+  reports positive-area overlaps with foreign metal (`overlaps[]`). Exit `3`
+  when `unrouted_nets[]` or `overlaps[]` is non-empty. Additive: a new verb;
+  `gen-compose`'s drawing loop moved into a shared helper with no output
+  change. See `docs/cli/route.md`.
 - **`klt layout-plan-execute`: `request.routing.nets[<net>].legs` steers
   nets with three or more pins** (#5110, 2026-11-07): `legs` takes
   `gen-compose`'s `connectivity[].legs[]` shape (`from_pin`/`to_pin`

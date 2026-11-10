@@ -67,6 +67,7 @@ docs/
     power.md
     power-intent.md
     precheck.md
+    route.md
     render.md
     report.md
     reset-coverage.md
