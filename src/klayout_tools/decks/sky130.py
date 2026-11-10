@@ -2133,6 +2133,8 @@ UNMODELED_RULES: tuple[str, ...] = (
     "capm.2b",
     "capm.2b_a",
     "capm.5",
+    # ct.4 ("mcon must be covered by li") has no curated rule (issue #5233).
+    "ct.4",
     "difftap.10",
     "difftap.11",
     "difftap.8",
@@ -2148,6 +2150,9 @@ UNMODELED_RULES: tuple[str, ...] = (
     "hvtr.2",
     "hvtr.2_a",
     "ldntm.2",
+    # li.5 is only floor-modeled by ``li1.enclosing.licon1.1`` (zero margin):
+    # the official 0.08um on two adjacent edges is not checked (issue #5233).
+    "li.5",
     "li.7",
     "licon.13",
     "lvtn.2",

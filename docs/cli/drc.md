@@ -937,6 +937,7 @@ rule's message says "m3" but its code reads `m2.enclosing(via2, ...)`.
 `li.5` stays on its zero-margin floor: the official rule is scoped to
 contacts outside `areaid:ce`, which the curated deck does not model, so a
 corner check on all `licon1` would flag legal core cells.
+`coverage.unmodeled_rules` lists `li.5` (floor-modeled only) and `ct.4` (no curated rule), so a `clean` verdict is not read as covering them.
 
 ### Required containment for single-population cuts (`require_containment`, issue #2726)
 

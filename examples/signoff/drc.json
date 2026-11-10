@@ -259,6 +259,7 @@
       "capm.2b",
       "capm.2b_a",
       "capm.5",
+      "ct.4",
       "difftap.10",
       "difftap.11",
       "difftap.8",
@@ -274,6 +275,7 @@
       "hvtr.2",
       "hvtr.2_a",
       "ldntm.2",
+      "li.5",
       "li.7",
       "licon.13",
       "lvtn.2",
@@ -879,7 +881,7 @@
     "pdk": null,
     "deck": {
       "name": "sky130",
-      "content_hash": "sha256:029ef177c1f4e872c13cc81093f94a02a9bbfe1f51939a88194a83532d60bf7c",
+      "content_hash": "sha256:3181a268f92a064d641ec5b6321901019fee1ab707985634d50056a1c2e93b0e",
       "released": null
     },
     "input": {
