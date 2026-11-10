@@ -2148,6 +2148,47 @@ per-macro boundary left for this option to scope on that side. See the
 explanation and the currently-working alternative (issue #1552's option 3:
 `klt extract --abstract-cells` plus a matching hand-authored reference).
 
+## gf180mcu LDMOS PCell against a single reference device (issue #5277)
+
+The PDK's own `nfet_10v0_asym` PCell extracts as **two** per-finger `nfet`
+devices sharing a drain (`docs/cli/extract.md`, "Drain-extended LDMOS"), so a
+one-device `nfet_10v0_asym` reference only matches after `options.combine_devices`
+folds the fingers. Measured on klayout 0.30.13, gf180mcuA, PCell `w=4`, `l=0.6`
+(`klt gen --pdk-pcell gf180mcu_klayoutapi/nfet_10v0_asym`):
+
+```json
+{"layout": {"file": "ldmos.gds", "deck": "gf180mcu"},
+ "reference": {"netlist": "ref.spice", "form": "subckt-call"},
+ "options": {"combine_devices": true}}
+```
+
+```spice
+.SUBCKT nfet_10v0_asym_0 B D G S
+X1 D G S B nfet_10v0_asym L=0.6U W=8U
+.ENDS
+```
+
+Result: `status: "match"` (1 device, 4 nets), the two `W=4U` fingers folded to
+`W=8U`. Conditions, all measured:
+
+- **Label the layout** with Metal1 text (layer 34/10) on the centre drain
+  stripe (`D`), both gate pads (`G`), both source stripes (`S`) and the tap ring
+  (`B`). Two same-named labels on *unconnected* metal are **not** merged: the
+  raw PCell extracts pins `G`/`G$1` and `S`/`S$1`, and `combine_devices` then
+  folds nothing (`device.unmatched` 3, `net.unmatched` 10).
+- **Strap the fingers' gates together and their two source stripes together**
+  in Metal1 (the PCell leaves them separate). Only devices sharing D, G, S and
+  body are parallel and foldable.
+- Without `combine_devices` the same strapped layout reports `device.unmatched`
+  (2 layout devices vs 1 reference); a reference with `W=6U` reports
+  `device.property` on `w_um`, so the folded width is really compared.
+- `form: "subckt-call"` is needed for an `X`-card reference using the
+  `nfet_10v0_asym` model name.
+
+Only the NMOS PCell was exercised; `pfet_10v0_asym` was not. The PCell also
+trips 17 known DRC false positives, waived as described in `docs/cli/drc.md`
+("Known false positives: the PDK's own `nfet_10v0_asym` PCell").
+
 ## Large flat designs: deadline, heartbeat and manual hierarchy (issue #4165)
 
 `NetlistComparer.compare()` is a single blocking call. On a flat design of
