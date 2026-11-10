@@ -4,7 +4,7 @@ environment provenance and the per-corner deck/log snapshot. Never overwrites
 a record.
 
 positional arguments:
-  <subcommand> record write one evidence-record/1 file lint lint the evidence-record/1 files under a repo
+  <subcommand> record write one evidence-record/1 file lint lint the evidence-record/1 files under a repo render fill marked tables in docs from evidence records
 
 options:
   -h, --help show this help message and exit
@@ -47,4 +47,20 @@ options:
   --base BASE ref the append-only check diffs against (default: origin/main)
   --schema FILE.json flat declarative repo schema: required_fields, extension_keys, corner_id_pattern
   --no-append-only skip the git-diff append-only check (e.g. no base ref available)
+  --format {text,json} output format (default: text)
+
+--- klt evidence render ---
+
+Rewrite <!-- klt:table id=NAME --> ... <!-- /klt:table --> blocks in --docs
+from evidence records via a JSON --spec. Text outside blocks is untouched;
+all-or-nothing. --check writes nothing and exits 1 if any block is stale.
+
+positional arguments:
+  root repo root (default: cwd)
+
+options:
+  -h, --help show this help message and exit
+  --docs GLOB [GLOB ...] doc glob(s) relative to ROOT; each must match a file
+  --spec FILE.json table spec, keyed by block id
+  --check write nothing; exit 1 if any block is stale
   --format {text,json} output format (default: text)
