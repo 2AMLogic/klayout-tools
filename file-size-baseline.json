@@ -393,7 +393,7 @@
     },
     {
       "path": "src/klayout_tools/gen_layer_tables.py",
-      "lines": 1021
+      "lines": 1019
     },
     {
       "path": "src/klayout_tools/gen_pcells/diff_pair.py",

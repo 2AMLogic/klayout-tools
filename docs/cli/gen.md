@@ -305,6 +305,15 @@ untranscribed; see [`klt drc`](drc.md)'s "Coverage" section for the full
 modeled/unmodeled split and the one documented residue in `MIM.c`'s
 two-term construct.
 
+**sg13g2 P-substrate tap (issue #5231).** `guard_ring` with `"add_well": false`
+draws a P-substrate tap on `ihp-sg13g2`: the Activ ring plus a `pSD` (14/0)
+implant extending 0.18 µm (`pSD.c`) beyond it, Cont and Metal1 as usual, no
+NWell. Name the net with the ring's usual port naming. The default
+(`add_well` true) stays an n-well tie. Use it to close `LU.b` (20 µm from
+N+ Activ in PWell to a pSD-PWell tie); the caller sizes and places the ring.
+Ring `Cont` is also snapped to the 5 nm grid (`cont.ongrid.1`, native
+`cont_drw_Offgrid`).
+
 **sg13g2 (IHP-Open-PDK, issues #1448/#1450/#1455).** `res_array`/`guard_ring`
 (#1448), `mos_array`/`diff_pair` (#1450), and `cap_array` (#1455) are wired
 up against this family's curated deck (`klayout_tools.decks.sg13g2`) today;

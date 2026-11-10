@@ -7336,7 +7336,7 @@ def test_run_drc_threshold_max_dbu_validated_even_when_layer_absent(
 
 
 def test_run_drc_sg13g2_every_rule_has_provenance():
-    """Every one of sg13g2's 62 curated `DrcRule` entries carries a populated
+    """Every one of sg13g2's 63 curated `DrcRule` entries carries a populated
     `provenance` citation (issue #905's own acceptance criterion: "every
     compiled rule cites its SG13G2 PDK source line", extended by issue #1243's
     Metal3-TopMetal2 stack, issue #2581's 6.11 MIM group, issue #3787's pSD
@@ -7345,7 +7345,7 @@ def test_run_drc_sg13g2_every_rule_has_provenance():
     36 width/space rules `tests/test_golden_deck.py`'s generic check already
     covers."""
     deck = get_deck("sg13g2")
-    assert len(deck) == 62
+    assert len(deck) == 63
     for rule in deck:
         assert rule.provenance is not None, f"sg13g2/{rule.id}: no provenance"
         assert rule.provenance.source_repo == "IHP-GmbH/IHP-Open-PDK"

@@ -10563,8 +10563,8 @@ def test_mos_array_sd_implant_absence_noted_on_sg13g2(
     # dummy marker (99/50, issue #2590) joins it because this repro requests
     # `dummy: 1`; it is a deck-local extraction marker, not an implant.
     expected = {(1, 0), (5, 0), (6, 0), (8, 0), _SG13G2_DUMMY_LAYER}
-    if flavor == "pfet":
-        expected.add((31, 0))
+    # nfet: the guard ring's P-substrate tap carries its own pSD (issue #5231)
+    expected.add((31, 0) if flavor == "pfet" else (14, 0))
     assert present == expected
 
 
