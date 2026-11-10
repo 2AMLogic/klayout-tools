@@ -851,6 +851,7 @@ def _extract_with_parasitics(
     from .extract import (
         _apply_declared_pins,
         _def_net_name_probes,
+        _promote_orphan_named_nets,
         _purge_preserving_named_nets,
     )
 
@@ -881,6 +882,10 @@ def _extract_with_parasitics(
         )
     netlist.combine_devices()
     netlist.make_top_level_pins()
+    # Same as the planar path (issue #539): a labelled net with no device
+    # terminal (a bare routed wire) is skipped by `make_top_level_pins()` and
+    # would otherwise be purged, so `--parasitics` could never see it.
+    _promote_orphan_named_nets(netlist)
     if declared_pins is not None:
         _apply_declared_pins(netlist, top_cell.name, declared_pins, pin_warnings)
     _purge_preserving_named_nets(netlist)
