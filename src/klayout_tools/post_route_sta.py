@@ -378,6 +378,10 @@ _MAX_SLEW_BEGIN = "===KLT_STA_MAX_SLEW_BEGIN==="
 _MAX_SLEW_END = "===KLT_STA_MAX_SLEW_END==="
 _MAX_CAP_BEGIN = "===KLT_STA_MAX_CAP_BEGIN==="
 _MAX_CAP_END = "===KLT_STA_MAX_CAP_END==="
+_MIN_PULSE_BEGIN = "===KLT_STA_MIN_PULSE_BEGIN==="
+_MIN_PULSE_END = "===KLT_STA_MIN_PULSE_END==="
+_MIN_PERIOD_BEGIN = "===KLT_STA_MIN_PERIOD_BEGIN==="
+_MIN_PERIOD_END = "===KLT_STA_MIN_PERIOD_END==="
 _ELECTRICAL_OK = "KLT_ELECTRICAL_OK"
 _ELECTRICAL_UNSUPPORTED = "KLT_ELECTRICAL_UNSUPPORTED"
 _ELECTRICAL_NET_PREFIX = "KLT_ELECTRICAL_NET"
@@ -387,6 +391,17 @@ _ELECTRICAL_ROW_RE = re.compile(
     r"^(?P<pin>\S.*?)\s+(?P<limit>-?[\d.]+(?:e[-+]?\d+)?)\s+"
     r"(?P<value>-?[\d.]+(?:e[-+]?\d+)?)\s+(?P<slack>-?[\d.]+(?:e[-+]?\d+)?)"
     r"\s+\(VIOLATED\)\s*$",
+    re.IGNORECASE,
+)
+#: One violator row of ``report_check_types -min_pulse_width`` / ``-min_period``
+#: (issue #5241): ``<pin> [(low|high)] <required> <actual> <slack> (VIOLATED)``
+#: (captured on OpenROAD 26Q3). The optional edge qualifier is dropped from the
+#: pin name; the slack is the last numeric column.
+_SLACK_ROW_RE = re.compile(
+    r"^(?P<pin>\S+)(?:\s+\((?:low|high|rise|fall)\))?\s+"
+    r"(?P<required>-?[\d.]+(?:e[-+]?\d+)?)\s+"
+    r"(?P<actual>-?[\d.]+(?:e[-+]?\d+)?)\s+"
+    r"(?P<slack>-?[\d.]+(?:e[-+]?\d+)?)\s+\(VIOLATED\)\s*$",
     re.IGNORECASE,
 )
 #: Any OpenSTA-tagged warning. Only ever matched *inside* the
@@ -3637,10 +3652,10 @@ def _violation_count_lines() -> list[str]:
 
 
 def _electrical_check_lines() -> list[str]:
-    """Marker-delimited max-transition / max-capacitance violator reports
-    (issue #3005), run in the same session that already did ``read_spef`` so
-    the numbers are against the extracted parasitics when a ``spef`` was
-    given.
+    """Marker-delimited max-transition / max-capacitance / min-pulse-width /
+    min-period violator reports (issues #3005, #5241), run in the same
+    session that already did ``read_spef`` so the numbers are against the
+    extracted parasitics when a ``spef`` was given.
 
     Units are pinned with ``set_cmd_units`` (``ns`` / ``pF``) so the report
     is in the units the response states regardless of the Liberty's own.
@@ -3657,6 +3672,8 @@ def _electrical_check_lines() -> list[str]:
     for flag, begin, end in (
         ("-max_slew", _MAX_SLEW_BEGIN, _MAX_SLEW_END),
         ("-max_capacitance", _MAX_CAP_BEGIN, _MAX_CAP_END),
+        ("-min_pulse_width", _MIN_PULSE_BEGIN, _MIN_PULSE_END),
+        ("-min_period", _MIN_PERIOD_BEGIN, _MIN_PERIOD_END),
     ):
         lines += [
             f'puts "{begin}"',
@@ -4415,6 +4432,51 @@ def _electrical_class(
     }
 
 
+def _electrical_slack_class(
+    coverage: str, rows: list[tuple[str, float]]
+) -> dict[str, Any]:
+    """One slack-reported limit class (``min_pulse_width`` / ``min_period``,
+    issue #5241). Counts, slack and pin are ``null`` unless
+    ``coverage == "checked"``."""
+    checked = coverage == "checked"
+    worst = min(rows, key=lambda row: row[1], default=None) if checked else None
+    return {
+        "coverage": coverage,
+        "limit_source": "liberty",
+        "unit": "ns",
+        "violation_count": len(rows) if checked else None,
+        "worst_slack_ns": round(worst[1], 5) if worst is not None else None,
+        "worst_pin": worst[0] if worst is not None else None,
+    }
+
+
+def _parse_electrical_slack_check(stdout: str, begin: str, end: str) -> dict[str, Any]:
+    """Parse one ``-min_pulse_width`` / ``-min_period`` ``-violators`` block
+    (issue #5241); coverage semantics match :func:`_parse_electrical_check`.
+    If the sentinel closed the block but a violator line could not be parsed
+    into a pin and slack, the class is ``"unsupported"`` rather than a
+    guessed count."""
+    block = _extract_block(stdout, begin, end)
+    if block is None:
+        return _electrical_slack_class("not_run", [])
+    if _ELECTRICAL_UNSUPPORTED in block or _ELECTRICAL_OK not in block:
+        return _electrical_slack_class("unsupported", [])
+    rows: list[tuple[str, float]] = []
+    violated_lines = 0
+    for line in block.splitlines():
+        if line.startswith(_ELECTRICAL_NET_PREFIX + " "):
+            continue
+        if "(VIOLATED)" not in line:
+            continue
+        violated_lines += 1
+        match = _SLACK_ROW_RE.match(line.strip())
+        if match:
+            rows.append((match.group("pin"), float(match.group("slack"))))
+    if violated_lines != len(rows):
+        return _electrical_slack_class("unsupported", [])
+    return _electrical_slack_class("checked", rows)
+
+
 def _parse_electrical_check(
     stdout: str, begin: str, end: str, unit: str
 ) -> dict[str, Any]:
@@ -4456,6 +4518,12 @@ def _electrical_checks_block(stdout: str, has_spef: bool) -> dict[str, Any]:
         ),
         "max_capacitance": _parse_electrical_check(
             stdout, _MAX_CAP_BEGIN, _MAX_CAP_END, "pF"
+        ),
+        "min_pulse_width": _parse_electrical_slack_check(
+            stdout, _MIN_PULSE_BEGIN, _MIN_PULSE_END
+        ),
+        "min_period": _parse_electrical_slack_check(
+            stdout, _MIN_PERIOD_BEGIN, _MIN_PERIOD_END
         ),
     }
 

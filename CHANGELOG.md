@@ -14,6 +14,13 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt sta` `electrical_checks` gains `min_pulse_width` and `min_period`**
+  (#5241, 2026-11-10): two additive sibling classes next to `max_transition` /
+  `max_capacitance`, each with `coverage` (`checked` / `unsupported` /
+  `not_run`), `violation_count`, `worst_slack_ns` and `worst_pin`; values are
+  `null` unless `checked`, so "never evaluated" is distinguishable from
+  clean. Limits are the liberty's; report only, no verdict. Existing fields
+  unchanged.
 - **New `klt route`: route between labelled pins of an already-placed layout**
   (#5205, 2026-11-10): `klt route <request.json>` derives endpoints from text
   labels on direct child instances of a top cell, routes two-pin nets with the
