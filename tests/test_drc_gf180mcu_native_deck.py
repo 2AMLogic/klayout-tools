@@ -106,3 +106,58 @@ def test_cli_klayout_engine_uses_main_script_and_reports_it(
     assert seen["min_klayout_version"] == "0.30.9"
     assert out["native_deck"]["kind"] == "pdk_main_script"
     assert out["native_deck"]["min_klayout_version_defaulted"] is True
+
+
+def _multi_install(tmp_path, variants: dict[str, tuple[str, ...]]) -> str:
+    root = tmp_path / "pdk_multi"
+    for variant, files in variants.items():
+        drc = root / variant / "libs.tech" / "klayout" / "tech" / "drc"
+        drc.mkdir(parents=True)
+        for name in files:
+            (drc / name).write_text("# stub\n")
+    return str(root)
+
+
+def test_native_deck_constrained_to_deck_family(tmp_path, monkeypatch):
+    """Issue #5211: unset --pdk never yields another family's native deck."""
+    monkeypatch.delenv("PDK", raising=False)
+    from klayout_tools.cli._drc_native import native_family_error
+
+    root = _multi_install(
+        tmp_path,
+        {"gf180mcuD": ("gf180mcu.drc",), "sky130A": ("sky130A.lydrc",)},
+    )
+    args = _args(root, None, deck="sg13g2")
+    deck, _, _, native = resolve_native_deck(args)
+    assert deck is None and native is None
+    assert "sg13g2" in native_family_error(args)
+
+
+def test_native_deck_matching_family_resolves(tmp_path, monkeypatch):
+    monkeypatch.delenv("PDK", raising=False)
+    root = _multi_install(
+        tmp_path,
+        {"gf180mcuD": ("gf180mcu.drc",), "sky130A": ("sky130A.lydrc",)},
+    )
+    deck, _, _, _ = resolve_native_deck(_args(root, None, deck="sky130"))
+    assert deck.endswith("sky130A.lydrc")
+
+
+def test_unknown_deck_name_unconstrained(tmp_path, monkeypatch):
+    monkeypatch.delenv("PDK", raising=False)
+    root = _multi_install(tmp_path, {"sky130A": ("sky130A.lydrc",)})
+    deck, _, _, _ = resolve_native_deck(_args(root, None, deck="custom"))
+    assert deck.endswith("sky130A.lydrc")
+
+
+def test_explicit_pdk_family_mismatch_and_deck_file_bypass(tmp_path, monkeypatch):
+    monkeypatch.delenv("PDK", raising=False)
+    from klayout_tools.cli._drc_native import native_family_error
+
+    root = _multi_install(tmp_path, {"sky130A": ("sky130A.lydrc",)})
+    args = _args(root, "sky130A", deck="gf180mcu")
+    assert resolve_native_deck(args)[0] is None
+    assert "does not match" in native_family_error(args)
+    bypass = _args(root, "sky130A", deck="gf180mcu", deck_file="x.drc")
+    assert resolve_native_deck(bypass)[0] == "x.drc"
+    assert native_family_error(bypass) is None

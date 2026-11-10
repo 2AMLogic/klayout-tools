@@ -12,6 +12,41 @@ from .. import pdk
 from ..pdk_native_drc import native_drc_main_script
 
 
+def _family_variant(args: argparse.Namespace) -> tuple[str | None, str | None]:
+    """``(variant, error)``: the PDK variant constrained to ``--deck``'s family
+    (issue #5211). ``error`` carries the :class:`pdk.PdkNotFoundError` message
+    when no install of the deck's family exists (or ``--pdk`` is another
+    family); a deck-less or unknown-family request is unconstrained."""
+    deck_name = getattr(args, "deck", None)
+    if not deck_name:
+        return args.pdk, None
+    try:
+        info = pdk.find_pdk_for_deck(deck_name, variant=args.pdk, root=args.pdk_root)
+    except pdk.PdkNotFoundError as exc:
+        return None, str(exc)
+    return info.get("variant", args.pdk), None
+
+
+def native_family_error(args: argparse.Namespace) -> str | None:
+    """Why the native engine cannot run for ``--deck`` (issue #5211), or
+    ``None``. ``--deck-file`` bypasses the constraint."""
+    if args.deck_file is not None:
+        return None
+    return _family_variant(args)[1]
+
+
+def no_deck_message(args: argparse.Namespace) -> str:
+    """The ``DrcError`` text for ``--engine klayout`` finding no deck script."""
+    family_error = native_family_error(args)
+    if family_error is not None:
+        return f"no PDK-native klayout DRC deck: {family_error}"
+    return (
+        "no PDK-native klayout DRC deck script found for this PDK "
+        "variant -- pass --deck-file to point at one directly (see "
+        "docs/cli/drc.md, 'Engine' -> 'klayout')"
+    )
+
+
 def resolve_native_deck(
     args: argparse.Namespace,
 ) -> tuple[str | None, dict[str, str], str | None, dict | None]:
@@ -31,10 +66,13 @@ def resolve_native_deck(
     min_version = args.min_klayout_version
     if args.deck_file is not None:
         return args.deck_file, deck_vars, min_version, None
-    deck_file = pdk.drc_deck_file(variant=args.pdk, root=args.pdk_root)
+    variant, error = _family_variant(args)
+    if error is not None:
+        return None, deck_vars, min_version, None
+    deck_file = pdk.drc_deck_file(variant=variant, root=args.pdk_root)
     if deck_file is not None:
         return deck_file, deck_vars, min_version, None
-    found = native_drc_main_script(variant=args.pdk, root=args.pdk_root)
+    found = native_drc_main_script(variant=variant, root=args.pdk_root)
     if found is None:
         return None, deck_vars, min_version, None
     defaulted = {k: v for k, v in found["deck_vars"].items() if k not in deck_vars}

@@ -193,7 +193,7 @@
     },
     {
       "path": "src/klayout_tools/cli/drc_cmd.py",
-      "lines": 581
+      "lines": 578
     },
     {
       "path": "src/klayout_tools/cli/extract_cmd.py",
@@ -213,7 +213,7 @@
     },
     {
       "path": "src/klayout_tools/cli/signoff_cmd.py",
-      "lines": 1207
+      "lines": 1171
     },
     {
       "path": "src/klayout_tools/cli/sim_cmd.py",
@@ -313,7 +313,7 @@
     },
     {
       "path": "src/klayout_tools/extract.py",
-      "lines": 11718
+      "lines": 11556
     },
     {
       "path": "src/klayout_tools/extract_abstract.py",

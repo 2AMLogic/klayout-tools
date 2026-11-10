@@ -69,8 +69,8 @@ from ..drc import (
     run_drc_klayout_engine,
 )
 from ..drc_crosscheck import crosscheck_exit_code, run_drc_crosscheck
+from . import _drc_native as native_deck
 from . import _request_document as reqdoc
-from ._drc_native import attach_native_deck, resolve_native_deck
 from .drc_text import _print_crosscheck_text, _print_rule_list, _print_text
 from .output import (
     emit_error,
@@ -108,10 +108,12 @@ def run(args: argparse.Namespace) -> int:
         # request document; `_apply_request` normalizes the latter into the
         # same namespace fields the argv form produces, so `_run` below sees
         # exactly one shape and the two forms cannot drift.
+        request_arg = args.file
         if args.file is not None and looks_like_request_document(args.file):
             args = _apply_request(args)
         report = _run(args)
     except DrcError as exc:
+        reqdoc.annotate_missing_file(exc, str(request_arg), str(args.file))
         return emit_error("drc", str(exc), args.format, **vars(exc))
     except pdk_module.PdkNotFoundError as exc:
         return emit_error("drc", str(exc), args.format)
@@ -325,10 +327,8 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
             "file": _path("file"),
             "deck": _str("deck"),
             "top": _str("top"),
-            # `args.engine`, not a literal, for an omitted field: every flag
-            # is provably still at its parser default here (`reject_argv_flags`
-            # raised otherwise), so reusing it keeps the two forms' defaults
-            # from drifting apart.
+            # `args.engine` (still its parser default; `reject_argv_flags`
+            # raised otherwise) keeps the two forms' defaults from drifting.
             "engine": engine if engine is not None else args.engine,
             "deck_file": _path("deck_file"),
             "deck_var": reqdoc.get_str_map_as_pairs(
@@ -414,7 +414,7 @@ def _run_crosscheck(args: argparse.Namespace) -> dict:
             )
     if not args.deck:
         raise DrcError("argument --deck is required for --engine both")
-    deck_file, deck_vars, min_version, native = resolve_native_deck(args)
+    deck_file, deck_vars, min_version, native = native_deck.resolve_native_deck(args)
     result = run_drc_crosscheck(
         args.file,
         args.deck,
@@ -422,6 +422,7 @@ def _run_crosscheck(args: argparse.Namespace) -> dict:
         top=args.top,
         pdk_variant=args.pdk,
         pdk_root=args.pdk_root,
+        native_unavailable_reason=native_deck.native_family_error(args),
         native_kwargs={
             "timeout_s": args.timeout_s,
             "deck_vars": deck_vars,
@@ -435,7 +436,7 @@ def _run_crosscheck(args: argparse.Namespace) -> dict:
             "negative_control_categories": _negative_control_categories(args),
         },
     )
-    return attach_native_deck(result, native)
+    return native_deck.attach_native_deck(result, native)
 
 
 def _run_klayout_engine(args: argparse.Namespace) -> dict:
@@ -460,13 +461,9 @@ def _run_klayout_engine(args: argparse.Namespace) -> dict:
             "runset does not share the curated rule registry (see "
             "docs/cli/drc.md, 'Rule listing and selection')"
         )
-    deck_file, deck_vars, min_version, native = resolve_native_deck(args)
+    deck_file, deck_vars, min_version, native = native_deck.resolve_native_deck(args)
     if deck_file is None:
-        raise DrcError(
-            "no PDK-native klayout DRC deck script found for this PDK "
-            "variant -- pass --deck-file to point at one directly (see "
-            "docs/cli/drc.md, 'Engine' -> 'klayout')"
-        )
+        raise DrcError(native_deck.no_deck_message(args))
     result = run_drc_klayout_engine(
         args.file,
         deck_file,
@@ -486,7 +483,7 @@ def _run_klayout_engine(args: argparse.Namespace) -> dict:
         negative_control_categories=_negative_control_categories(args),
         max_violations=args.max_violations,
     )
-    return attach_native_deck(result, native)
+    return native_deck.attach_native_deck(result, native)
 
 
 def _run(args: argparse.Namespace) -> dict:

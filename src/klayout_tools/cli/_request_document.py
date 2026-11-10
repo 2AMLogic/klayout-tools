@@ -32,6 +32,8 @@ Private to the :mod:`klayout_tools.cli` package -- not part of the public
 
 from __future__ import annotations
 
+import json
+import os
 from typing import Any
 
 from .._paths import _resolve_relative
@@ -139,6 +141,31 @@ def get_path(
     if value is None:
         return None
     return _resolve_relative(value, base_dir)
+
+
+def annotate_missing_file(exc: Exception, request_arg: str, resolved: str) -> None:
+    """Issue #5207: when ``exc`` is the plain ``file not found: <resolved>``
+    error and ``resolved`` came from a *relative* ``file`` value in the
+    request file ``request_arg``, append the base directory that relative path
+    was resolved against, so a user expecting cwd-relative semantics sees
+    which base applied. Message text only; a no-op for stdin/inline requests,
+    absolute paths and every other error."""
+    if str(exc) != f"file not found: {resolved}" or not os.path.isfile(request_arg):
+        return
+    base_dir = os.path.dirname(os.path.abspath(request_arg))
+    try:
+        with open(request_arg, encoding="utf-8") as handle:
+            raw = json.load(handle)["file"]
+        if resolved != _resolve_relative(raw, base_dir) or os.path.isabs(
+            os.path.expanduser(os.path.expandvars(raw))
+        ):
+            return
+    except (OSError, ValueError, KeyError, TypeError):
+        return
+    exc.args = (
+        f"{exc} (relative path resolved against the request document's "
+        f"directory: {base_dir})",
+    )
 
 
 def get_bool(
