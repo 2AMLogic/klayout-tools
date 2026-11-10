@@ -1028,6 +1028,7 @@ def _dispatch_sta(
             report_paths=report_paths,
         )
 
+    assert not isinstance(clock_period_ns, dict)  # maps need pdk.corners
     corner_fields, resolution = _run_corner_session(
         corner_name=requested_corner,
         cell_library=cell_library,

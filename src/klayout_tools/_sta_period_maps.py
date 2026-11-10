@@ -113,7 +113,9 @@ def clock_period_for_corner(
 
 
 def clock_targets(
-    clock_port: str, clock_period_ns: float, clock_extras: dict[str, Any] | None
+    clock_port: str,
+    clock_period_ns: float | dict[str, float],
+    clock_extras: dict[str, Any] | None,
 ) -> dict[str, Any]:
     """The response's additive ``clock_targets`` echo (issue #4241): every
     clock applied (primary first), and the asynchronous groups."""
