@@ -6,8 +6,27 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 - [2026-09](work_log/WORK_LOG_2026-09.md)
 
+### 2026-11-10
+
+- **PR #5217**: refactor(extract): move final report assembly out of run_extract
+- **PR #5215**: feat(signoff): add --skip-local-only to carry local_only outcomes on attest refresh
+- **Issue #5209** (closed): signoff --attest: no way to regenerate an attestation when a local_only command cannot run on the current host
+- **PR #5210**: fix: name the request document's directory in klt drc missing-file errors
+- **Issue #5207** (closed): klt drc: request-document paths resolve against the request file's directory; error does not say so
+- **PR #5206**: docs: design spike for klt route between labelled pins
+- **Issue #5200** (closed): klt route: route between placed cells' labelled pins with foreign-geometry overlap report
+- **PR #5204**: feat: add --allow pin-access windows to klt keepout-check
+- **Issue #5198** (closed): keepout-check: allow pin-access windows; no verb to route between placed cells' labelled pins
+- **PR #5197**: refactor(extract): move run_extract warning and metrics builders into helpers
+- **PR #5195**: fix: exclude submission-only batch fields from sync submit receipt digest
+- **Issue #5194** (closed): klt sim --attach: request fingerprint mismatch when the original submit used --wait-for-capacity
+- **PR #5193**: chore(loom): resync installed Loom to v0.19.1283
+- **PR #5176**: chore(deps): Bump the github-actions group across 1 directory with 3 updates
+
 ### 2026-11-09
 
+- **PR #5186**: feat(economy): add --pnr-report P&R bbox decomposition to --attribute
+- **Issue #5181** (closed): klt economy: no decomposition of a P&R block bbox into placed cells, physical-only cells, core whitespace, die margin and guard ring
 - **PR #5190**: feat(economy): add Y-band partition for leaf cells under --attribute
 - **Issue #5189** (closed): klt economy --attribute: no decomposition for a leaf cell (no child instances)
 - **PR #5188**: fix: exclude pdk.ambiguous_sources from rerun drift and document run-specific fields
