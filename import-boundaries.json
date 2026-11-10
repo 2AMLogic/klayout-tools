@@ -699,6 +699,7 @@
         "klayout_tools.sim_cause",
         "klayout_tools.sim_complex_vectors",
         "klayout_tools.sim_convergence_retry",
+        "klayout_tools.sim_corner_extremes",
         "klayout_tools.sim_corner_keys",
         "klayout_tools.sim_crossings",
         "klayout_tools.sim_crossings_reduce",
