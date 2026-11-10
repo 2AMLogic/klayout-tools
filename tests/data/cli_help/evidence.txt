@@ -4,7 +4,7 @@ environment provenance and the per-corner deck/log snapshot. Never overwrites
 a record.
 
 positional arguments:
-  <subcommand> record write one evidence-record/1 file lint lint the evidence-record/1 files under a repo claims check documents that cite evidence records against the records
+  <subcommand> record write one evidence-record/1 file lint lint the evidence-record/1 files under a repo claims check documents that cite evidence records against the records render fill marked tables in docs from evidence records
 
 options:
   -h, --help show this help message and exit
@@ -64,4 +64,20 @@ options:
   -h, --help show this help message and exit
   --docs GLOB [GLOB ...] document glob(s), relative to ROOT; a glob matching nothing is an error
   --registry FILE.json JSON registry: `claims` rows (literal, record, pointer, decimals, scale, corner, agg) and legacy- record `mapping`
+  --format {text,json} output format (default: text)
+
+--- klt evidence render ---
+
+Rewrite <!-- klt:table id=NAME --> ... <!-- /klt:table --> blocks in --docs
+from evidence records via a JSON --spec. Text outside blocks is untouched;
+all-or-nothing. --check writes nothing and exits 1 if any block is stale.
+
+positional arguments:
+  root repo root (default: cwd)
+
+options:
+  -h, --help show this help message and exit
+  --docs GLOB [GLOB ...] doc glob(s) relative to ROOT; each must match a file
+  --spec FILE.json table spec, keyed by block id
+  --check write nothing; exit 1 if any block is stale
   --format {text,json} output format (default: text)

@@ -205,7 +205,8 @@
       "modules": [
         "klayout_tools.cli.evidence_cmd",
         "klayout_tools.evidence_claims",
-        "klayout_tools.evidence_lint"
+        "klayout_tools.evidence_lint",
+        "klayout_tools.evidence_render"
       ]
     },
     "extract": {

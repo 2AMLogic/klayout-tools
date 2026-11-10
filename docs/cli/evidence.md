@@ -167,5 +167,51 @@ Output (`--format json`): `{schema_version: 1, status: "clean"|"findings",
 docs_checked, citations_checked, claims_checked, findings: [{code, doc, record,
 message}]}`. Exit `0` clean, `1` findings or an error envelope, `2` usage.
 
-**Not covered:** `klt evidence render` (generating census/count tables) is a
-separate issue.
+
+## `klt evidence render`
+
+Fills count/census tables in docs from records (issue #5274), so they stop
+being hand-edited on every new append-only record.
+
+```
+klt evidence render [ROOT] --docs GLOB... --spec FILE.json [--check]
+    [--format text|json]
+```
+
+Marked blocks in any `--docs` file (globs relative to `ROOT`):
+
+```
+<!-- klt:table id=NAME -->
+...generated markdown pipe table...
+<!-- /klt:table -->
+```
+
+The body between the markers is replaced; text outside blocks is
+byte-identical (CRLF docs keep CRLF). The spec is JSON, one entry per `id`:
+
+```json
+{"census": {
+  "columns": [{"header": "Corner"},
+              {"header": "Runs", "format": "int"},
+              {"header": "Margin", "format": "{:.2f}"}],
+  "rows": [["tt",
+            {"record": "evidence/sim/a/full/x.json", "pointer": "/result/n"},
+            {"record": "evidence/sim/a/full/x.json", "pointer": "/result/m"}]]}}
+```
+
+A cell is a literal string/number or `{record, pointer}`: `record` is a JSON
+file relative to `ROOT` (it must stay inside `ROOT`; for legacy `.md` records
+point at the `.json` twin) and `pointer` an RFC 6901 JSON pointer. Column
+`format` is `str` (default), `int`, or `{:.Nf}`. `|` in cell text is escaped.
+
+Idempotent. `--check` writes nothing and exits 1 naming each stale
+`doc#id`. Output (`--format json`): `{schema_version: 1, status:
+"clean"|"updated"|"stale", check, docs: [{doc, blocks: [{id, status}]}],
+stale, updated}`.
+
+Fail-closed (error envelope, exit 1, **nothing written**): a block `id` with
+no spec entry, a spec `id` with no block in any doc, an unclosed, stray or
+duplicate block, a missing record, a pointer that does not resolve, a format
+mismatch, an unreadable doc/spec, or a `--docs` glob matching no file. Exit
+`2` is usage. Legacy `.md`-record mapping is deferred to the shared loader of
+#5273 (`claims`); this verb reads JSON directly.

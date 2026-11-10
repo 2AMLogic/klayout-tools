@@ -4432,7 +4432,6 @@ def _add_evidence_parser(subparsers: argparse._SubParsersAction) -> None:
     lint_parser.add_argument(
         "--schema",
         metavar="FILE.json",
-        default=None,
         help="flat declarative repo schema: required_fields, extension_keys, "
         "corner_id_pattern",
     )
@@ -4444,6 +4443,7 @@ def _add_evidence_parser(subparsers: argparse._SubParsersAction) -> None:
     _add_format_arg(lint_parser)
     lint_parser.set_defaults(func=evidence_cmd.run_lint)
     evidence_cmd.add_claims_parser(evidence_sub, _add_format_arg)
+    evidence_cmd.add_render_parser(evidence_sub, _add_format_arg)
 
 
 def _add_artifact_parser(subparsers: argparse._SubParsersAction) -> None:
