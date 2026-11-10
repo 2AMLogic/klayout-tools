@@ -9,6 +9,8 @@ from __future__ import annotations
 from typing import Any
 
 from . import sim, sim_staging
+from .sim_osdi_pin import osdi_pdk_root_pin
+from .sim_osdi_pin import resolve_osdi_preload as _resolve_preload
 
 
 def resolve_osdi_preload(
@@ -49,11 +51,11 @@ def resolve_osdi_preload(
         )
     try:
         resolved = iter(
-            sim._resolve_osdi_preload(
+            _resolve_preload(
                 spec,
                 request_dir,
                 skip_indices=frozenset(skip),
-                pdk_root=sim._osdi_pdk_root_pin(request),
+                pdk_root=osdi_pdk_root_pin(request),
             )
         )
     except sim.SimError as exc:

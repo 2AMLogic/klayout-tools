@@ -114,7 +114,7 @@ from collections.abc import Callable
 from typing import Any
 
 from . import _spice_number as spice_number
-from . import env_provenance
+from . import env_provenance, sim_osdi_pin
 from ._jsonnum import is_number
 from ._paths import (
     _load_request_json,
@@ -134,11 +134,9 @@ from .sim import (
     _expand_corners,
     _extract_engine_version,
     _needs_models_lib,
-    _osdi_pdk_root_pin,
     _resolve_corner_section_libs,
     _resolve_models_lib,
     _resolve_netlist_include,
-    _resolve_osdi_preload,
     _resolve_param_file,
     _scale_supply_waveforms,
     _supply_alter_lines,
@@ -1543,12 +1541,10 @@ def run_op_sanity(
 
     options = request.get("options") or {}
     timeout_s = op_lint.get("timeout_s", options.get("timeout_s", DEFAULT_TIMEOUT_S))
-    # Issue #2513: the same request document drives the sweep and this lint,
-    # so an OSDI-model PDK's preload must reach this deck too -- otherwise
-    # every device would be an undefined model here and only here.
+    # Issue #2513: the sweep's OSDI preload must reach this deck too.
     try:
-        osdi_preload = _resolve_osdi_preload(
-            options, request_dir, pdk_root=_osdi_pdk_root_pin(request)
+        osdi_preload = sim_osdi_pin.resolve_osdi_preload(
+            options, request_dir, pdk_root=sim_osdi_pin.osdi_pdk_root_pin(request)
         )
     except SimError as exc:
         raise OpSanityError(str(exc)) from exc
