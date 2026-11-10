@@ -168,7 +168,7 @@ A `--engine klayout` run, with the native deck's own script globals:
 | Field | Type | Flag it mirrors |
 | ----- | ---- | --------------- |
 | `schema` | string | — (optional contract identifier; omit it, or set it to `klt.drc.request/1`. A document declaring any *other* value is rejected rather than reinterpreted.) |
-| `file` | string | `<file>` — **required**; the only required field. |
+| `file` | string | `<file>` — **required**; the only required field. A relative value resolves against the request document's directory, not the cwd (see [Relative paths](#relative-paths)); a missing file's error names that base directory. |
 | `deck` | string | `--deck` |
 | `top` | string | `--top` |
 | `engine` | string | `--engine` (`"curated"` or `"klayout"`) |
@@ -245,6 +245,11 @@ against **the document's own directory** for the file form, and against the
 current working directory for the `-` (stdin) and inline-JSON forms — there is
 no request file to anchor them to in those cases. `~` and `$VAR` are expanded.
 This is `klt lvs`'s convention verbatim (both use the same shared helper).
+
+This is distinct from the report's `file.path`, which is a repo-relative
+envelope (`{"path", "scope"}`) computed from the invocation's repo root, never
+from the request document's directory. When a request's relative `file` is
+missing, the error names the base directory it was resolved against.
 
 ## Rule listing and selection
 

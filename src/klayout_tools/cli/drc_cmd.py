@@ -108,10 +108,12 @@ def run(args: argparse.Namespace) -> int:
         # request document; `_apply_request` normalizes the latter into the
         # same namespace fields the argv form produces, so `_run` below sees
         # exactly one shape and the two forms cannot drift.
+        request_arg = args.file
         if args.file is not None and looks_like_request_document(args.file):
             args = _apply_request(args)
         report = _run(args)
     except DrcError as exc:
+        reqdoc.annotate_missing_file(exc, str(request_arg), str(args.file))
         return emit_error("drc", str(exc), args.format, **vars(exc))
     except pdk_module.PdkNotFoundError as exc:
         return emit_error("drc", str(exc), args.format)
@@ -325,10 +327,8 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
             "file": _path("file"),
             "deck": _str("deck"),
             "top": _str("top"),
-            # `args.engine`, not a literal, for an omitted field: every flag
-            # is provably still at its parser default here (`reject_argv_flags`
-            # raised otherwise), so reusing it keeps the two forms' defaults
-            # from drifting apart.
+            # `args.engine` (still its parser default; `reject_argv_flags`
+            # raised otherwise) keeps the two forms' defaults from drifting.
             "engine": engine if engine is not None else args.engine,
             "deck_file": _path("deck_file"),
             "deck_var": reqdoc.get_str_map_as_pairs(
