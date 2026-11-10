@@ -223,6 +223,7 @@
         "klayout_tools.extract_parasitics",
         "klayout_tools.extract_parasitics_block",
         "klayout_tools.extract_netlist_write",
+        "klayout_tools.extract_pin_order",
         "klayout_tools.extract_netselect",
         "klayout_tools.extract_orient",
         "klayout_tools.extract_cap_top_plate",
