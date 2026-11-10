@@ -483,9 +483,8 @@ from . import (
     UnmodelledDeviceFamily,
 )
 
-# `RuleProvenance.source_repo`/`.commit` shared by every rule in this module
-# -- the same "one repo/commit pin, per-rule source_path/rule_id" shape
-# `sky130.py`'s `_sky130_provenance`/`_sky130_lvs_provenance` helpers use.
+# `RuleProvenance.source_repo`/`.commit` shared by every rule in this module:
+# one repo/commit pin, per-rule source_path/rule_id (as `sky130.py`'s helpers).
 _IHP_OPEN_PDK_REPO = "IHP-GmbH/IHP-Open-PDK"
 _IHP_OPEN_PDK_COMMIT = "5cccb161f7492697cfa52eb14dc03beb00bdca9e"  # v0.3.0 tag
 
@@ -1128,22 +1127,6 @@ DECK: list[DrcRule] = [
         scope="Cnt",
         provenance=_sg13g2_drc_provenance(f"{_FEOL}/5_14_cont.drc", "Cnt.d"),
     ),
-    DrcRule(
-        id="cont.ongrid.1",
-        description="Cont vertices must be on the 0.005um manufacturing grid",
-        layer=(6, 0),  # Cont.drawing
-        check="ongrid",
-        threshold_dbu=0,  # unused by "ongrid" -- see grid_um
-        grid_um=0.005,
-        # geometry/3_1_offgrid.drc: `offgrid_check(layer, name)` ->
-        # "3.1 cont_drw_Offgrid: ... on a drawing grid of 5 nm" (issue #5231)
-        scope="x",
-        provenance=_sg13g2_drc_provenance(
-            "ihp-sg13g2/libs.tech/klayout/tech/drc/rule_decks/geometry/3_1_offgrid.drc",
-            "cont_drw_Offgrid",
-        ),
-        voltage_independent=True,
-    ),
     # --- 5.16 Metal1 (beol/5_16_metal1.drc) ---------------------------
     DrcRule(
         id="metal1.width.1",
@@ -1768,6 +1751,7 @@ DECK: list[DrcRule] = [
         provenance=_sg13g2_drc_provenance(f"{_BEOL}/6_11_mim.drc", "MIM.d"),
     ),
 ]
+__import__(f"{__package__}.sg13g2_cont_grid", fromlist=["x"]).apply(DECK)
 __import__(f"{__package__}.sg13g2_runset_notes", fromlist=["x"]).apply(DECK)
 # Foundry rules this curated deck knows about but cannot evaluate (issue
 # #3571, mirroring #3012): `{rule id: (layer, description)}`. `drc.py`
