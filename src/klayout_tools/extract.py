@@ -289,6 +289,14 @@ from .extract_report import (
     _net_label_positions,
     _split_net_label_warnings,
 )
+from .extract_spef import (
+    DefNetConnections,
+    _renamed_def_name,
+    _unescape_spice_safe_net_name,
+    _write_spef,
+)
+from .extract_spef import ExtractError as ExtractError
+from .extract_spef import def_net_instance_pins as def_net_instance_pins
 
 # The SPEF-export subsystem lives in its own module (issue #1195). Two of its
 # names are re-exported here rather than merely imported: `ExtractError` (this
@@ -298,14 +306,13 @@ from .extract_report import (
 # `cli/extract_cmd.py`, `place_and_route.py`, and the test suite). The
 # redundant `X as X` aliases mark them explicit re-exports, so neither reads as
 # an unused import in a module that never calls them itself.
-from .extract_spef import (
-    DefNetConnections,
-    _renamed_def_name,
-    _unescape_spice_safe_net_name,
-    _write_spef,
+from .extract_warnings import (
+    ignored_layer_warnings,
+    merged_net_label_warnings,
+    pdk_dropped_param_warnings,
+    single_terminal_net_warnings,
+    unbiased_pmos_body_warnings,
 )
-from .extract_spef import ExtractError as ExtractError
-from .extract_spef import def_net_instance_pins as def_net_instance_pins
 from .metrics import is_registered
 from .parasitic_integrity import empty_integrity_summary
 from .pdk import PdkNotFoundError, find_pdk
@@ -1488,6 +1495,26 @@ def _model_delegate_factory(
 def _substitution_notes(delegates: list[Any]) -> list[str]:
     """Narrow-width fallback notes (issue #4575) recorded by ``delegates``."""
     return [n for d in delegates for n in getattr(d, "substitution_notes", ())]
+
+
+def _build_metrics(
+    result: Mapping[str, Any], parasitics_report: Mapping[str, Any] | None
+) -> dict[str, int | float]:
+    """Assemble the additive ``metrics`` block (issue #1848)."""
+    metrics: dict[str, int | float] = {
+        field_metric_name: result[field_name]
+        for field_name, field_metric_name in _METRIC_NAME_BY_FIELD.items()
+    }
+    if parasitics_report is not None:
+        metrics.update(
+            {
+                field_metric_name: parasitics_report[field_name]
+                for field_name, field_metric_name in (
+                    _PARASITICS_METRIC_NAME_BY_FIELD.items()
+                )
+            }
+        )
+    return metrics
 
 
 @_timed
@@ -3223,18 +3250,7 @@ def run_extract(
     # literal `|` is indistinguishable from a real collision by this
     # heuristic.
     merged_net_labels = _detect_merged_net_labels(nets)
-    for merged_entry in merged_net_labels:
-        labels_str = ", ".join(merged_entry["labels"])
-        warnings.append(
-            f"net '{merged_entry['net']}' merges "
-            f"{len(merged_entry['labels'])} distinct labels ({labels_str}) "
-            "onto one net -- KLayout joins multiple labels found on the "
-            "same electrical net (as '|' here and in the written netlist, "
-            "matching NetlistSpiceWriter's own node-name escaping); this "
-            "usually means two differently-named nets were shorted "
-            "together in the layout -- see docs/cli/extract.md's "
-            "'Merged net labels' section."
-        )
+    warnings.extend(merged_net_label_warnings(merged_net_labels))
 
     # The inverse (issue #3920): one drawn label on 2+ distinct nets, e.g.
     # two unstrapped `VDD` rails. Same two-way surfacing as above; see
@@ -3262,18 +3278,7 @@ def run_extract(
     # entries for 148 floating PMOS bodies) and defeat literal-list pinning
     # by a caller.
     unbiased_pmos_body_nets = _detect_unbiased_pmos_body_nets(devices, deck)
-    if unbiased_pmos_body_nets:
-        device_word = "device" if len(unbiased_pmos_body_nets) == 1 else "devices"
-        warnings.append(
-            f"{len(unbiased_pmos_body_nets)} PMOS {device_word} tie their "
-            "body to an anonymous net with no DC bias path -- no drawn (or "
-            f"derivable) well tie connects this PMOS body to a real supply "
-            "rail on this layout, so it is left floating rather than tied "
-            "to a real supply rail; resimulating this netlist directly "
-            "will not reproduce the schematic-level PMOS body bias -- see "
-            "unbiased_pmos_body_nets[] for the full list. See "
-            "docs/cli/extract.md's 'Parasitic (RC) extraction' section."
-        )
+    warnings.extend(unbiased_pmos_body_warnings(unbiased_pmos_body_nets))
 
     # Drawn MiM capacitors written as a fixed-value `C` card (issue #3090): the
     # value is the deck's nominal area+perimeter law, so PDK process-corner
@@ -3297,30 +3302,7 @@ def run_extract(
     # `device_counts` is keyed by `devices[].class`, independent of `--pdk`,
     # so it is safe to consult here even though it was computed before the
     # `--pdk`-bound netlist is written below.
-    if model_bindings is not None:
-        for class_name in sorted(model_bindings):
-            binding = model_bindings[class_name]
-            if not binding.dropped_params:
-                continue
-            count = device_counts.get(class_name, 0)
-            if count == 0:
-                continue
-            device_word = "device" if count == 1 else "devices"
-            params_str = "/".join(binding.dropped_params)
-            # `binding.subckt` is empty for a "bipolar" binding -- the real
-            # subcircuit name is resolved per device, from `binding.variants`
-            # (see `_select_bipolar_variant`), not fixed for the whole class
-            # -- so name the *target* generically rather than print an empty
-            # quoted string.
-            target = f"'{binding.subckt}'" if binding.subckt else "its bound target"
-            warnings.append(
-                f"--pdk binds {count} '{class_name}' {device_word} onto "
-                f"{target}, which has no parameter for the extractor's "
-                f"measured {params_str} -- these values are "
-                "dropped from the written netlist (rerun without --pdk to "
-                "recover them from the bare device-class card form). See "
-                "docs/cli/extract.md's 'SPICE model binding' section."
-            )
+    warnings.extend(pdk_dropped_param_warnings(model_bindings, device_counts))
 
     # Nets touching exactly one device terminal and no declared pin (issue
     # #596): there is no DC path through such a node from anywhere else in
@@ -3337,32 +3319,7 @@ def run_extract(
     # two-message-class aggregate pattern -- one line per net would blow up
     # `warnings[]` at scale.
     single_terminal_nets = _detect_single_terminal_nets(devices, nets)
-    single_terminal_gate_count = sum(
-        1 for entry in single_terminal_nets if entry["terminal_kind"] == "gate"
-    )
-    single_terminal_other_count = len(single_terminal_nets) - single_terminal_gate_count
-    if single_terminal_gate_count:
-        net_word = "net" if single_terminal_gate_count == 1 else "nets"
-        warnings.append(
-            f"{single_terminal_gate_count} {net_word} connect to exactly "
-            "one device terminal -- a MOS gate -- and are not a declared "
-            "pin: these gates have no DC path from anywhere else in the "
-            "netlist, so they are almost certainly unconnected inputs "
-            "rather than legitimate floating nodes; resimulating this "
-            "netlist directly will hit a singular matrix on these nets -- "
-            "see single_terminal_nets[] for the full list."
-        )
-    if single_terminal_other_count:
-        net_word = "net" if single_terminal_other_count == 1 else "nets"
-        warnings.append(
-            f"{single_terminal_other_count} {net_word} connect to exactly "
-            "one device terminal -- source/drain/body/resistor-equivalent, "
-            "not a gate -- and are not a declared pin; this can be a "
-            "legitimate single-terminal tie (e.g. an intentionally "
-            "unterminated dummy's diffusion tie), but confirm these nets "
-            "have no other intended connectivity -- see "
-            "single_terminal_nets[] for the full list."
-        )
+    warnings.extend(single_terminal_net_warnings(single_terminal_nets))
 
     # Layers carrying shapes the deck's connectivity graph never reads (issue
     # #220): geometry there is invisible to extraction, so surface it rather
@@ -3382,24 +3339,7 @@ def run_extract(
     # baked in (issue #599's pattern), not one line per layer -- mirroring
     # `metals_without_coefficient`'s `warnings[]` entry a bit further down
     # this function.
-    if ignored_layers:
-        layer_word = "layer" if len(ignored_layers) == 1 else "layers"
-        be_word = "is" if len(ignored_layers) == 1 else "are"
-        total_shapes = sum(entry["shapes"] for entry in ignored_layers)
-        shape_word = "shape" if total_shapes == 1 else "shapes"
-        layers_str = ", ".join(
-            f"{entry['layer']}/{entry['datatype']}" for entry in ignored_layers
-        )
-        warnings.append(
-            f"{len(ignored_layers)} {layer_word} ({layers_str}) carrying "
-            f"{total_shapes} {shape_word} {be_word} outside '{deck_name}' "
-            "deck's connectivity graph -- this geometry is invisible to "
-            "extraction, so a net routed only through it extracts as "
-            "multiple disconnected nets instead of one, which will "
-            "silently mismatch a downstream `klt lvs` reference netlist -- "
-            "see ignored_layers[] for the full per-layer shape counts. See "
-            "docs/cli/extract.md's 'ignored_layers' field documentation."
-        )
+    warnings.extend(ignored_layer_warnings(ignored_layers, deck_name))
 
     # Layers carrying shapes the deck reads for bipolar/capacitor/resistor/
     # diode device recognition but never treats as a `metals`/`vias`
@@ -4151,20 +4091,7 @@ def run_extract(
     # (#1847) adopters) -- see `run_extract`'s docstring "metrics" paragraph
     # for the full contract. Never replaces `device_count`/`net_count`/
     # `pin_count`/`parasitics.*` above, which stay exactly as documented.
-    metrics: dict[str, int | float] = {
-        field_metric_name: result[field_name]
-        for field_name, field_metric_name in _METRIC_NAME_BY_FIELD.items()
-    }
-    if parasitics_report is not None:
-        metrics.update(
-            {
-                field_metric_name: parasitics_report[field_name]
-                for field_name, field_metric_name in (
-                    _PARASITICS_METRIC_NAME_BY_FIELD.items()
-                )
-            }
-        )
-    result["metrics"] = metrics
+    result["metrics"] = _build_metrics(result, parasitics_report)
 
     return result
 

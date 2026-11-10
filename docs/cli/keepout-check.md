@@ -6,7 +6,7 @@ analog block, etc. -- and report each intruding shape when one does. Purely
 geometric; no extraction, netlist or deck.
 
 ```
-klt keepout-check <file> --forbidden <json> --margin <um> [--cells <name>]... [--region <json>] [--top <cell>] [--format text|json]
+klt keepout-check <file> --forbidden <json> --margin <um> [--cells <name>]... [--region <json>] [--allow <json>]... [--top <cell>] [--format text|json]
 ```
 
 - `<file>` -- path to a GDSII (`.gds`) or OASIS (`.oas`) file.
@@ -24,6 +24,14 @@ klt keepout-check <file> --forbidden <json> --margin <um> [--cells <name>]... [-
 - `--region` -- guard window as an inline JSON array `[left, bottom, right,
   top]` in micrometres. May be combined with `--cells` (the guards are
   unioned). **At least one of `--cells` / `--region` is required.**
+- `--allow` -- repeatable pin-access window, an inline JSON object
+  `{"bbox": [left, bottom, right, top], "layers": [[layer, datatype], ...]}` in
+  micrometres (`layers` omitted = every forbidden layer). Forbidden-layer
+  geometry inside a window is exempt (a deliberate parent-to-pin connection);
+  geometry outside it still violates, so a shape straddling the window reports
+  only its outside remainder. Windows are echoed in the report's `allow` array.
+  Bad JSON, a bbox that is not four numbers with right > left and top > bottom,
+  malformed `layers` or unknown keys exit `1`.
 - `--top` -- check only this top cell; omit to check every top cell. Top cells
   where a `--cells` guard is not placed (and no `--region` is given) are
   skipped.
@@ -47,6 +55,7 @@ Emitted through the shared envelope (`docs/json-contract.md`).
   "region_um": null,
   "cells": ["SPIRAL"],
   "dbu_um": 0.001,
+  "allow": [{"bbox_um": [100.0, 15.0, 115.0, 35.0], "layers": [[67, 20]]}],
   "status": "clean | violated",
   "violation_count": 1,
   "violations": [
@@ -64,6 +73,8 @@ Emitted through the shared envelope (`docs/json-contract.md`).
 }
 ```
 
+- `allow` echoes each `--allow` window with its effective layer list (`[]` when
+  none were given). Additive field; `schema_version` stays `1`.
 - `kind` is `inside` when the intruding piece overlaps the guard itself and
   `margin` when it lies only in the margin band.
 - `bbox` is the bounding box of the **part of the shape inside the zone**, in
@@ -78,7 +89,7 @@ Gate on `status`, not the exit code.
 | Code | Meaning |
 | ---- | ------- |
 | `0`  | Ran successfully -- the keep-out is clear. |
-| `1`  | Failed to run -- bad layout file, empty/invalid `--forbidden`, no guard (`--cells`/`--region`), unknown `--cells` or `--top`, bad `--margin`, malformed `--region`. |
+| `1`  | Failed to run -- bad layout file, empty/invalid `--forbidden`, no guard (`--cells`/`--region`), unknown `--cells` or `--top`, bad `--margin`, malformed `--region`, malformed `--allow`. |
 | `2`  | Usage error (missing argument, bad `--format`) -- from argparse. |
 | `3`  | Ran successfully, forbidden shapes intrude on the keep-out. |
 
