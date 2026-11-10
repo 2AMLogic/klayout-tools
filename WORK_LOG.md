@@ -8,6 +8,10 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-10
 
+- **PR #5261**: test: native-deck checks for sg13g2 ring cont_drw_Offgrid and LU.b
+- **PR #5259**: fix: triage native sky130A HV/well/varactor/vpp DRC ids (slice 3/4)
+- **Issue #5253** (closed): Triage native sky130A DRC ids, slice 3/4 (high-voltage/wells/varactor/vpp)
+- **Issue #5231** (closed): gen: no P-substrate tap (pSD-Activ) on ihp-sg13g2; guard_ring is an n-well tie with off-grid Cont
 - **PR #5266**: test(pex): cover with_fidelity_warnings directly to restore 100% coverage
 - **PR #5264**: refactor: split erc ties/well-selection subsystem into erc_ties module
 - **PR #5263**: refactor: share batch job-timeout and runner-path rewrite helpers via _batch_common
