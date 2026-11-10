@@ -315,6 +315,17 @@
         "klayout_tools.gen_compose_routing"
       ]
     },
+    "route": {
+      "kind": "verb",
+      "description": "`klt route` implementation: labelled-pin routing in placed layouts, core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.route_cmd",
+        "klayout_tools.route_instances",
+        "klayout_tools.route_labelled",
+        "klayout_tools.route_overlap",
+        "klayout_tools.route_request"
+      ]
+    },
     "interface_check": {
       "kind": "verb",
       "description": "`klt interface_check` implementation: core modules plus CLI adapter.",
@@ -1620,6 +1631,21 @@
       "consumer": "extract",
       "exporter": "sim",
       "reason": "Issue #4613: `klt extract --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "route",
+      "exporter": "cli-infra",
+      "reason": "`klt route` adapter uses the shared CLI output envelope (emit_success/emit_error), like every verb adapter (issue #5205)."
+    },
+    {
+      "consumer": "route",
+      "exporter": "gen",
+      "reason": "route_labelled catches gen.GenError raised by the shared compose routing helpers so it maps to the same error envelope (issue #5205)."
+    },
+    {
+      "consumer": "route",
+      "exporter": "gen_compose",
+      "reason": "`klt route` deliberately reuses gen_compose's router, landing-pad sizing and label-port derivation so labelled-pin routing in a placed layout matches klt gen-compose output (issue #5205); promote the private helpers to a shared module when either is next reworked."
     }
   ],
   "shared_private_permissions": [
@@ -2120,6 +2146,84 @@
       "exporter": "klayout_tools._provenance",
       "symbol": "_klt_version",
       "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
+      "consumer": "klayout_tools.route_labelled",
+      "exporter": "klayout_tools.gen_compose",
+      "symbol": "_VIA_DROP_SIZE_UM",
+      "reason": "Issue #5205: `klt route` reuses the existing gen_compose helper rather than duplicating it; promote to a public/shared name when next reworked."
+    },
+    {
+      "consumer": "klayout_tools.route_labelled",
+      "exporter": "klayout_tools.gen_compose",
+      "symbol": "_draw_routed_entry",
+      "reason": "Issue #5205: `klt route` reuses the existing gen_compose helper rather than duplicating it; promote to a public/shared name when next reworked."
+    },
+    {
+      "consumer": "klayout_tools.route_labelled",
+      "exporter": "klayout_tools.gen_compose",
+      "symbol": "_fixed_cut_side_um",
+      "reason": "Issue #5205: `klt route` reuses the existing gen_compose helper rather than duplicating it; promote to a public/shared name when next reworked."
+    },
+    {
+      "consumer": "klayout_tools.route_labelled",
+      "exporter": "klayout_tools.gen_compose",
+      "symbol": "_orient_port",
+      "reason": "Issue #5205: `klt route` reuses the existing gen_compose helper rather than duplicating it; promote to a public/shared name when next reworked."
+    },
+    {
+      "consumer": "klayout_tools.route_labelled",
+      "exporter": "klayout_tools.gen_compose",
+      "symbol": "_via_fixed_size_um",
+      "reason": "Issue #5205: `klt route` reuses the existing gen_compose helper rather than duplicating it; promote to a public/shared name when next reworked."
+    },
+    {
+      "consumer": "klayout_tools.route_labelled",
+      "exporter": "klayout_tools.gen_compose_routing",
+      "symbol": "_min_width_um_for_layer",
+      "reason": "Issue #5205: `klt route` reuses the existing gen_compose helper rather than duplicating it; promote to a public/shared name when next reworked."
+    },
+    {
+      "consumer": "klayout_tools.route_labelled",
+      "exporter": "klayout_tools.gen_compose_routing",
+      "symbol": "_pdk_family",
+      "reason": "Issue #5205: `klt route` reuses the existing gen_compose helper rather than duplicating it; promote to a public/shared name when next reworked."
+    },
+    {
+      "consumer": "klayout_tools.route_labelled",
+      "exporter": "klayout_tools.gen_compose_routing",
+      "symbol": "_resolve_label_layer",
+      "reason": "Issue #5205: `klt route` reuses the existing gen_compose helper rather than duplicating it; promote to a public/shared name when next reworked."
+    },
+    {
+      "consumer": "klayout_tools.route_labelled",
+      "exporter": "klayout_tools.gen_compose_routing",
+      "symbol": "_resolve_landing_pad_sizes",
+      "reason": "Issue #5205: `klt route` reuses the existing gen_compose helper rather than duplicating it; promote to a public/shared name when next reworked."
+    },
+    {
+      "consumer": "klayout_tools.route_labelled",
+      "exporter": "klayout_tools.gen_compose_routing",
+      "symbol": "_resolve_route_layer",
+      "reason": "Issue #5205: `klt route` reuses the existing gen_compose helper rather than duplicating it; promote to a public/shared name when next reworked."
+    },
+    {
+      "consumer": "klayout_tools.route_overlap",
+      "exporter": "klayout_tools.gen_compose_port_access",
+      "symbol": "_MacroNets",
+      "reason": "Issue #5205: `klt route` reuses the existing gen_compose helper rather than duplicating it; promote to a public/shared name when next reworked."
+    },
+    {
+      "consumer": "klayout_tools.route_overlap",
+      "exporter": "klayout_tools.gen_compose_routing",
+      "symbol": "_drawn_leg_footprint_region",
+      "reason": "Issue #5205: `klt route` reuses the existing gen_compose helper rather than duplicating it; promote to a public/shared name when next reworked."
+    },
+    {
+      "consumer": "klayout_tools.route_request",
+      "exporter": "klayout_tools._paths",
+      "symbol": "_resolve_relative",
+      "reason": "Issue #5205: `klt route` reuses the existing shared helper rather than duplicating it; promote to a public/shared name when next reworked."
     }
   ],
   "legacy_exceptions": {
