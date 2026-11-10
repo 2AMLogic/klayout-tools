@@ -31,7 +31,40 @@ def _ids(name: str) -> set[str]:
 
 NATIVE = _ids("sky130_native_rule_ids.txt")
 UNTRIAGED = _ids("sky130_native_rule_ids_untriaged.txt")
+_DECK_BY_ID = {r.id: r for r in deck_mod.DECK}
+
+#: Native output ids the deck implements under a different citation (#5252):
+#: native id -> deck rule id. ``<layer>_OFFGRID`` / ``<layer>_angle`` are the
+#: output names of ``sky130A_mr.drc``'s OFFGRID block, whose rule ids are
+#: ``x.1b`` / ``x.3a`` / ``x.2`` (what the deck's provenance cites), and
+#: ``m4.4`` is the ``sky130A.lydrc`` name of the 0.24um2 met4 area check the
+#: mr deck calls ``m4.4a``. Each target must exist in the deck.
+NATIVE_ALIASES: dict[str, str] = {
+    "m4.4": "met4.area.1",
+    **{
+        f"{native}_OFFGRID": f"{stem}.ongrid.1"
+        for native, stem in (
+            ("m1", "met1"),
+            ("m2", "met2"),
+            ("m3", "met3"),
+            ("m4", "met4"),
+            ("m5", "met5"),
+            ("mf", "mf"),
+            ("nsm", "nsm"),
+            ("pad", "pad"),
+            ("rpm", "rpm"),
+        )
+    },
+}
+NATIVE_ALIASES.update(
+    {
+        k.replace("_OFFGRID", "_angle"): v.replace(".ongrid.1", ".angle.1")
+        for k, v in list(NATIVE_ALIASES.items())
+        if k.endswith("_OFFGRID")
+    }
+)
 IMPLEMENTED = {r.provenance.rule_id for r in deck_mod.DECK if r.provenance is not None}
+IMPLEMENTED |= {n for n, deck_id in NATIVE_ALIASES.items() if deck_id in _DECK_BY_ID}
 UNMODELED = set(deck_mod.UNMODELED_RULES)
 
 
@@ -42,6 +75,11 @@ def test_snapshot_header_records_pdk_version_and_command():
         if ln.startswith("#")
     )
     assert "open_pdks" in header and "Generated from" in header
+
+
+def test_native_aliases_resolve_to_deck_rules():
+    missing = {n: d for n, d in NATIVE_ALIASES.items() if d not in _DECK_BY_ID}
+    assert not missing, f"alias targets absent from the deck: {missing}"
 
 
 def test_ct4_and_li5_are_disclosed():
@@ -83,15 +121,25 @@ def test_run_drc_sky130_coverage_lists_unmodeled_rules(tmp_path):
     report = run_drc(str(path), "sky130")
 
     assert report["coverage"]["unmodeled_rules"] == [
+        "MR_li.WID.4",
         "MR_licon.SP.1",
+        "MR_lvtn.OVL.2",
+        "MR_rdl.CON.1",
+        "MR_thkox.CON.1",
+        "MR_tunm.CON.1",
         "cap2m.11",
         "cap2m.2b",
         "cap2m.2b_a",
+        "cap2m.3_a",
         "cap2m.5",
+        "capm.10",
         "capm.11",
         "capm.2b",
         "capm.2b_a",
         "capm.5",
+        "capm.6",
+        "capm.7",
+        "capm.8",
         "ct.4",
         "difftap.10",
         "difftap.11",
@@ -112,12 +160,37 @@ def test_run_drc_sky130_coverage_lists_unmodeled_rules(tmp_path):
         "li.7",
         "licon.13",
         "lvtn.2",
+        "m1.11",
         "m1.3ab",
+        "m1.4a",
+        "m1.4a_a",
         "m1.5",
+        "m1.x",
+        "m2.11",
         "m2.3ab",
+        "m2.4_a",
+        "m2.4_b",
         "m2.5",
+        "m2.via",
+        "m2.x",
+        "m3.11",
         "m3.3ab",
+        "m3.3cd",
+        "m3.4_a",
+        "m3.via2",
+        "m3.x",
+        "m4.11",
+        "m4.15",
+        "m4.3_a",
         "m4.5ab",
+        "m4.via3",
+        "m4.x",
+        "m5.3_a",
+        "m5.via4",
+        "m5.x",
+        "mf.1",
+        "mf.2",
+        "mf.3",
         "n/psdm.10a",
         "n/psdm.10b",
         "n/psdm.5a",
@@ -128,11 +201,30 @@ def test_run_drc_sky130_coverage_lists_unmodeled_rules(tmp_path):
         "ncm.2a",
         "npc.4",
         "nsm.1",
+        "nsm.2",
+        "nsm.3",
+        "nsm.4",
         "pad.2",
         "poly.3",
+        "pwres.2",
+        "pwres.3",
+        "pwres.4",
+        "pwres.5",
+        "pwres.6",
+        "pwres.8",
         "rdl.1",
         "rdl.2",
+        "rfdiode.1",
+        "rfdiode.2",
+        "rpm.10",
         "rpm.2",
+        "rpm.3",
+        "rpm.4",
+        "rpm.5",
+        "rpm.6",
+        "rpm.7",
+        "rpm.8",
+        "rpm.9",
         "thkox.2",
         "tunm.2",
         "urpm.2",

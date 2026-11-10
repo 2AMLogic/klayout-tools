@@ -86,4 +86,76 @@ UNMODELED_RULES: tuple[str, ...] = (
     "via.5a",
     "via2.5",
     "via3.5",
+    # Metal / MIM-cap / resistor / pad / special-layer triage (issue #5252, slice
+    # 2/4 of #5242), each id checked against sky130A_mr.drc / sky130A.lydrc.
+    # No rule in the curated deck implements the check:
+    # marker-layer prohibitions and straddle rules (MR_*; MR_li.WID.4 is the
+    # li:res width).
+    "MR_li.WID.4",
+    "MR_lvtn.OVL.2",
+    "MR_rdl.CON.1",
+    "MR_thkox.CON.1",
+    "MR_tunm.CON.1",
+    # MiM-cap plates: size/shape/straddle/via-spacing checks and the
+    # "cap2m.3_a" zero-overlap variant.
+    "cap2m.3_a",
+    "capm.10",
+    "capm.6",
+    "capm.7",
+    "capm.8",
+    # Copper-flow-only slotting/enclosure rules of sky130A.lydrc (not
+    # transcribed; the AL enclosure rules m*.4 / m4.3 are).
+    "m1.11",
+    "m2.11",
+    "m3.11",
+    "m4.11",
+    "m4.15",
+    # Cell-restricted met1 enclosure of mcon (specific s8 cell list).
+    "m1.4a",
+    "m1.4a_a",
+    # Floating-metal checks (met must interact with a via); the deck has none.
+    "m1.x",
+    "m2.x",
+    "m3.x",
+    "m4.x",
+    "m5.x",
+    # "via must be enclosed by metal" (`via.not(met)`) and the core-vs-periphery
+    # met2 enclosure split: the deck's enclosure rules only scope to vias that
+    # already interact with the metal (see ``_OUTSIDE_CHECKS`` in drc.py), so
+    # a via with no metal at all is not flagged here.
+    "m2.4_a",
+    "m2.4_b",
+    "m3.4_a",
+    "m4.3_a",
+    "m5.3_a",
+    "m2.via",
+    "m3.via2",
+    "m4.via3",
+    "m5.via4",
+    # Large-metal (>3um) spacing, 0.4um; the deck has only the 0.3um m3.2.
+    "m3.3cd",
+    # Fuse (mf), nsm, pwell resistor (pwres), rfdiode and rpm width/spacing/
+    # enclosure checks; the deck models only rpm.1a, nsm/rpm/mf grid and angle.
+    "mf.1",
+    "mf.2",
+    "mf.3",
+    "nsm.2",
+    "nsm.3",
+    "nsm.4",
+    "pwres.2",
+    "pwres.3",
+    "pwres.4",
+    "pwres.5",
+    "pwres.6",
+    "pwres.8",
+    "rfdiode.1",
+    "rfdiode.2",
+    "rpm.10",
+    "rpm.3",
+    "rpm.4",
+    "rpm.5",
+    "rpm.6",
+    "rpm.7",
+    "rpm.8",
+    "rpm.9",
 )
