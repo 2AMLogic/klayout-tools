@@ -97,11 +97,12 @@ from .erc_ties import (  # noqa: F401 -- REASON_* are re-exported public names
     REASON_DEGENERATE_WELL_ASSERTION,
     REASON_DEGENERATE_WELL_SELECTION,
     REASON_EMPTY_WELL_REGION,
-    _boxes_region,
-    _cells_region,
     _degenerate_tie_reasons,
-    _select_well_class,
     _tie_findings,
+)
+from .erc_well_regions import (
+    _boxes_region,
+    _select_well_class,
     _tie_well_region,
     _well_assertion_coverage_entry,
 )

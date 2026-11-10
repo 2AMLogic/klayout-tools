@@ -301,7 +301,7 @@
     },
     {
       "path": "src/klayout_tools/erc.py",
-      "lines": 4100
+      "lines": 3530
     },
     {
       "path": "src/klayout_tools/erc_spec.py",
