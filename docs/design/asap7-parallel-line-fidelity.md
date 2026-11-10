@@ -8,7 +8,7 @@
 resistance; this phase converts each of its 12 points into a circuit quantity.
 Modelled on [`critical-net-mom-fidelity-phase2c.md`](critical-net-mom-fidelity-phase2c.md).
 
-Reproduce: `examples/asap7-parallel-line-fidelity/generate_and_measure.py --circuit`
+Reproduce: `examples/asap7-parallel-line-fidelity/circuit_stage.py`
 (reads phase 1's `results.json`, writes `circuit-results.json` and one record
 under
 [`evidence/sim/asap7-parallel-line-fidelity/circuit-fidelity/`](../../evidence/sim/asap7-parallel-line-fidelity/circuit-fidelity/),

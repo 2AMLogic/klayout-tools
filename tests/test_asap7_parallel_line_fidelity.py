@@ -28,6 +28,20 @@ def gm():
     return module
 
 
+@pytest.fixture(scope="module")
+def cs(gm):
+    path = os.path.join(os.path.dirname(_PATH), "circuit_stage.py")
+    sys.path.insert(0, os.path.dirname(_PATH))
+    try:
+        spec = importlib.util.spec_from_file_location("asap7_fidelity_cs", path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+    finally:
+        sys.path.remove(os.path.dirname(_PATH))
+    return module
+
+
 def test_stack_is_contiguous_and_cites_m1_thickness(gm):
     stack = gm.STACK
     assert stack[1]["thickness_um"] == 0.036
@@ -68,31 +82,31 @@ def _phase1_point(gm, point_id):
 
 
 @pytest.fixture(scope="module")
-def circuit_one_point(gm, tmp_path_factory):
+def circuit_one_point(gm, cs, tmp_path_factory):
     """The min-pitch (coupling-dominated) M2 point through the circuit stage,
     on the local backend (a debug probe of 4 single-corner decks)."""
     if shutil.which("ngspice") is None:
         pytest.skip("ngspice is not installed")
     point = _phase1_point(gm, "M2-p1x-sparse-L0.36")
     work = str(tmp_path_factory.mktemp("circuit"))
-    circuit, report = gm.circuit_stage([point], work, backend="local")
+    circuit, report = cs.circuit_stage([point], work, backend="local")
     return point, circuit, report
 
 
-def test_reference_network_uses_klt_mom_values(gm):
+def test_reference_network_uses_klt_mom_values(gm, cs):
     point = _phase1_point(gm, "M2-p1x-sparse-L0.36")
-    ports, body = gm.reference_subckt(point)
+    ports, body = cs.reference_subckt(point)
     assert ports == ["N0", "N1", "N2"]
     text = "\n".join(body)
     near = point["reference_klt_mom"]["coupling_each_ff"]["N0"]
     assert f"Ccc_N1_N0 N1__par N0__par {near * 1e-15:.6g}" in text
 
 
-def test_circuit_decks_pin_quiet_and_opposite_neighbours(gm):
+def test_circuit_decks_pin_quiet_and_opposite_neighbours(gm, cs):
     point = _phase1_point(gm, "M2-p1x-sparse-L0.36")
-    ports, body = gm.reference_subckt(point)
-    quiet = gm.circuit_deck(ports, body, "REF", "N1", "quiet")
-    opposite = gm.circuit_deck(ports, body, "REF", "N1", "opposite")
+    ports, body = cs.reference_subckt(point)
+    quiet = cs.circuit_deck(ports, body, "REF", "N1", "quiet")
+    opposite = cs.circuit_deck(ports, body, "REF", "N1", "opposite")
     assert "VN0 sN0 0 DC 0" in quiet
     assert "VN0 sN0 0 PULSE(1.0 0" in opposite
     assert "PULSE(0 1.0" in quiet and "PULSE(0 1.0" in opposite  # victim rises
@@ -130,7 +144,7 @@ def test_coupling_dominated_case_has_miller_penalty_and_deck_misses_it(
 
 
 def test_circuit_evidence_record_is_append_only_and_well_formed(
-    gm, circuit_one_point, tmp_path, monkeypatch
+    cs, circuit_one_point, tmp_path, monkeypatch
 ):
     sky130 = os.path.join(
         os.path.dirname(__file__),
@@ -144,8 +158,8 @@ def test_circuit_evidence_record_is_append_only_and_well_formed(
         template = json.load(open(os.path.join(sky130, handle.read().strip())))
 
     _, circuit, report = circuit_one_point
-    monkeypatch.setattr(gm, "EVIDENCE_DIR", str(tmp_path))
-    first = gm.write_circuit_evidence(circuit, report, "0" * 64)
+    monkeypatch.setattr(cs, "EVIDENCE_DIR", str(tmp_path))
+    first = cs.write_circuit_evidence(circuit, report, "0" * 64)
     scope = os.path.dirname(first)
     with open(first, encoding="utf-8") as handle:
         record = json.load(handle)
@@ -154,7 +168,7 @@ def test_circuit_evidence_record_is_append_only_and_well_formed(
     assert record["supersedes"] == []
     assert open(os.path.join(scope, "HEAD")).read().strip() == os.path.basename(first)
     monkeypatch.setattr(
-        gm,
+        cs,
         "datetime",
         type(
             "D",
@@ -168,6 +182,6 @@ def test_circuit_evidence_record_is_append_only_and_well_formed(
             },
         ),
     )
-    second = gm.write_circuit_evidence(circuit, report, "0" * 64)
+    second = cs.write_circuit_evidence(circuit, report, "0" * 64)
     assert json.load(open(second))["supersedes"] == [os.path.basename(first)]
     assert open(os.path.join(scope, "HEAD")).read().strip() == os.path.basename(second)
