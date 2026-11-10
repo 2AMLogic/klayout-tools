@@ -132,15 +132,12 @@ from ..signoff import (
 from ..signoff_attest import (
     STREAM_ATTESTABLE_ITEM,
     attach_output_tails,
-    build_attestation,
-    check_attestation,
     write_attestation,
 )
+from ..signoff_attest_carry import compute_attestation as _compute_attestation
+from ..signoff_attest_carry import flag_problem as _skip_local_only_problem
+from ..signoff_attest_carry import skip_lines
 from ..signoff_attest_input import input_line, with_entry
-from ..signoff_attest_stream import (
-    build_stream_attestation,
-    check_stream_attestation,
-)
 from ..signoff_attest_text import attestation_check_line as _attestation_check_line
 from ..signoff_attest_text import check_label
 from ..signoff_generator_batch import (
@@ -240,6 +237,7 @@ def _maybe_run_attest(
             ("--input", "attest_input"),
             ("--generator", "generator"),
             ("--regenerated-hash", "regenerated_hash"),
+            ("--skip-local-only", "skip_local_only"),
         )
         if getattr(args, attr, None)
     ]
@@ -247,7 +245,7 @@ def _maybe_run_attest(
         return emit_error(
             "signoff",
             "--inventory/--output/--input/--generator/--regenerated-hash/"
-            "--hash-kind only apply to --attest",
+            "--hash-kind/--skip-local-only only apply to --attest",
             args.format,
         )
     return None
@@ -322,41 +320,6 @@ def _attest_flag_problem(
     return None
 
 
-def _compute_attestation(
-    args: argparse.Namespace,
-    inventory: str | None,
-    stream: list[str] | None,
-    committed: str | None,
-) -> dict:
-    """Build (or, with ``committed``, re-check) the attestation. The flag
-    combination was validated by :func:`_attest_flag_problem`."""
-    if args.attest == STREAM_ATTESTABLE_ITEM:
-        assert stream is not None
-        generator = getattr(args, "generator", None)
-        regenerated_hash = getattr(args, "regenerated_hash", None)
-        hash_kind = getattr(args, "hash_kind", None) or "bytes"
-        if committed is not None:
-            return check_stream_attestation(
-                stream,
-                committed,
-                generator=generator,
-                regenerated_hash=regenerated_hash,
-                hash_kind=hash_kind,
-                inventory_path=inventory,
-            )
-        return build_stream_attestation(
-            stream,
-            generator=generator,
-            regenerated_hash=regenerated_hash,
-            hash_kind=hash_kind,
-            inventory_path=inventory,
-        )
-    assert inventory is not None
-    if committed is not None:
-        return check_attestation(args.attest, inventory, committed)
-    return build_attestation(args.attest, inventory)
-
-
 def _run_attest(
     args: argparse.Namespace,
     manifest_source: str | None,
@@ -391,6 +354,9 @@ def _run_attest(
         return emit_error("signoff", problem, args.format)
     committed = getattr(args, "check", None)
     output = getattr(args, "output", None)
+    problem = _skip_local_only_problem(args)
+    if problem is not None:
+        return emit_error("signoff", problem, args.format)
     if committed is not None and output:
         return emit_error(
             "signoff",
@@ -411,7 +377,8 @@ def _run_attest(
 
     if result["status"] == "pass" and output:
         try:
-            write_attestation(result, output)
+            envelope = {k: v for k, v in result.items() if k != "skipped_checks"}
+            write_attestation(envelope, output)
         except OSError as exc:
             return emit_error(
                 "signoff", f"could not write --output '{output}': {exc}", args.format
@@ -429,6 +396,8 @@ def _print_attestation_text(result: dict) -> None:
     print()
     for check in attestation["checks"]:
         print(_attestation_check_line(check))
+    for line in skip_lines(result, check_label):
+        print(line)
 
 
 def _print_attestation_check_text(result: dict) -> None:
@@ -437,13 +406,8 @@ def _print_attestation_check_text(result: dict) -> None:
     failed = [c for c in result["fresh"]["attestation"]["checks"] if not c["passed"]]
     for check in failed:
         print(_attestation_check_line(check))
-    for check in result.get("skipped_checks", []):
-        label = check_label(check)
-        outcome = "pass" if check["passed"] else "fail"
-        print(
-            f"[SKIP] {check['role']} {label}: {' '.join(check['argv'])} "
-            f"(local_only, not run; committed outcome: {outcome})"
-        )
+    for line in skip_lines(result, check_label):
+        print(line)
 
 
 def _run_envelope_aggregation(args: argparse.Namespace) -> int:

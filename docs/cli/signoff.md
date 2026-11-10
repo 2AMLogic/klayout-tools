@@ -67,7 +67,7 @@ klt signoff --fleet <fleet-manifest-file> [--tiers-doc <path>] [--format text|js
 klt signoff --manifest <manifest-file> --check <committed-report> [--tiers-doc <path>] [--format text|json]
 klt signoff --fleet <fleet-manifest-file> --check <committed-report> [--tiers-doc <path>] [--format text|json]
 klt signoff --describe-grader [--format text|json]
-klt signoff --attest {1,8,9,10} --inventory <file> [-o <envelope>] [--format text|json]
+klt signoff --attest {1,8,9,10} --inventory <file> [-o <envelope> [--skip-local-only]] [--format text|json]
 klt signoff --attest {1,8,9,10} --inventory <file> --check <committed-envelope> [--format text|json]
 ```
 
@@ -121,6 +121,11 @@ klt signoff --attest {1,8,9,10} --inventory <file> --check <committed-envelope> 
 - `-o`/`--output` — with `--attest`: also write the envelope to this path,
   only when it passes and only if its bytes changed. Refused without
   `--attest`, and together with `--check`.
+- `--skip-local-only` — with `--attest` and `-o`: do not run `local_only`
+  commands; carry their committed outcome from the existing `-o` envelope
+  and recompute everything else (issue #5209). See "Refreshing on a host
+  lacking the toolchain" below. Refused without `--attest`/`-o`, and with
+  `--check`.
 - `--format` — `text` (default, a human-readable pass/fail summary) or
   `json` (this command's own JSON envelope, see below).
 - `--color` — when to colour `--format text` output: `auto` (default),
@@ -2131,16 +2136,32 @@ has the toolchain to re-verify them.
 `local_only`, so a long cold start runs for its full duration on the first
 attest.
 
-**`--attest` has no skip.** Minting always runs every `local_only` command,
-and there is no `--skip-local-only` flag or `status: "partial"` envelope. An
-attested item-9 `cold_start` that did not run is not evidence, and T1 item 9
-depends on it. A host that cannot run the toolchain (for example, one blocked
-by a `batch_runner_version_mismatch` when a `local_only` check submits a
-`klt sim --backend batch` request) must be unblocked, not bypassed. See
-"When the client is newer than the runner" in [`sim.md`](sim.md) for the two
-existing paths: rebuilding the runner image at the client's minor, and
-`request.batch.runner_version_check: "warn"`. Neither relaxes `--attest`:
-the `local_only` command still runs and gates at mint time.
+**`--attest` runs every `local_only` command unless you opt out.** By
+default minting runs each `local_only` command, and there is no
+`status: "partial"` envelope: an attested item-9 `cold_start` that did not run
+is not evidence, and T1 item 9 depends on it. A host that cannot run the
+toolchain (for example, one blocked by a `batch_runner_version_mismatch` when a
+`local_only` check submits a `klt sim --backend batch` request) should be
+unblocked where possible. See "When the client is newer than the runner" in
+[`sim.md`](sim.md) for the two existing paths: rebuilding the runner image at
+the client's minor, and `request.batch.runner_version_check: "warn"`.
+
+**Refreshing on a host lacking the toolchain: `--skip-local-only` (issue
+#5209).** With `--attest ITEM --inventory FILE -o OUT --skip-local-only`, no
+`local_only` command is run. Their outcomes are carried from the existing
+`OUT` envelope (the one being refreshed), matched by role, `argv` and
+testbench identity, exactly as `--check` carries them; every other check (file
+presence, content hashes, non-`local_only` commands, pins) is recomputed. The
+written envelope has no marker for the skip, so a later `--attest --check`
+reports no drift. The live result lists the carried checks under
+`skipped_checks` (same shape as `--check`) and text output prints `[SKIP]`
+lines. A committed failing `local_only` check keeps the envelope `fail`
+(exit `3`, nothing written), and a `local_only` command with no counterpart in
+`OUT` fails. The flag is refused (exit `1`) without `--attest`, without `-o`,
+together with `--check`, or when `OUT` is missing or unparseable. **Trade-off:**
+the carried outcome is vouched for by the committed envelope, not by this run.
+Use it only when the change cannot affect that command's result; it never
+mints a first outcome.
 
 **Item 10 ordering: `checks[]` gate the envelope at mint time.** Every item-10
 `checks[]` command runs under `--attest` against the working tree as it is at
