@@ -16,6 +16,8 @@ Exit codes (see ``docs/cli/keepout-check.md`` for the full table):
 from __future__ import annotations
 
 import argparse
+import json
+from collections.abc import Callable
 
 from ..keepout_check import KeepoutCheckError, run_keepout_check
 from ._parsing import load_json_path_or_inline, load_region, parse_layer_pairs
@@ -29,6 +31,7 @@ def run(args: argparse.Namespace) -> int:
     try:
         layers = _load_layers(args.forbidden)
         region_um = load_region(args.region, KeepoutCheckError)
+        allow = [_load_allow(value) for value in args.allow or []]
         report = run_keepout_check(
             args.file,
             layers,
@@ -36,6 +39,7 @@ def run(args: argparse.Namespace) -> int:
             region_um=region_um,
             top=args.top,
             cells=args.cells,
+            allow=allow,
         )
     except KeepoutCheckError as exc:
         return emit_error("keepout-check", str(exc), args.format)
@@ -57,6 +61,31 @@ def _load_layers(value: str) -> list[tuple[int, int]]:
     return parse_layer_pairs(data, "--forbidden", KeepoutCheckError)
 
 
+def _load_allow(value: str) -> tuple:
+    """Parse one ``--allow`` value: inline JSON
+    ``{"bbox": [l, b, r, t], "layers": [[l, d], ...]?}`` (micrometres)."""
+    try:
+        data = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise KeepoutCheckError(
+            f"--allow must be an inline JSON object: {exc}"
+        ) from exc
+    if not isinstance(data, dict) or "bbox" not in data:
+        raise KeepoutCheckError(
+            f'--allow must be a JSON object with a "bbox" key, got {value!r}'
+        )
+    unknown = sorted(set(data) - {"bbox", "layers"})
+    if unknown:
+        raise KeepoutCheckError(f"--allow has unknown key(s): {', '.join(unknown)}")
+    bbox = load_region(json.dumps(data["bbox"]), KeepoutCheckError, "--allow bbox")
+    layers = None
+    if data.get("layers") is not None:
+        if not isinstance(data["layers"], list):
+            raise KeepoutCheckError("--allow layers must be a JSON array of pairs")
+        layers = parse_layer_pairs(data["layers"], "--allow layers", KeepoutCheckError)
+    return bbox, layers
+
+
 def _load_margin(value: str) -> float:
     try:
         return float(value)
@@ -75,6 +104,10 @@ def _print_text(report: dict) -> None:
         print(f"region_um: ({left},{bottom})-({right},{top})")
     if report["cells"] is not None:
         print(f"cells: {', '.join(report['cells'])}")
+    for window in report["allow"]:
+        left, bottom, right, top = window["bbox_um"]
+        scope = ", ".join(f"{layer}/{dt}" for layer, dt in window["layers"])
+        print(f"allow: ({left},{bottom})-({right},{top}) layers {scope}")
     print(f"dbu_um: {report['dbu_um']}")
     print(f"status: {report['status']}")
     print(f"violations: {report['violation_count']}")
@@ -99,3 +132,89 @@ def _print_text(report: dict) -> None:
         rows,
         left_aligned={0, 1, 2, 4},
     )
+
+
+def add_parser(
+    subparsers: argparse._SubParsersAction,
+    _add_format_arg: Callable[[argparse.ArgumentParser], None],
+) -> None:
+    """Register the ``keepout-check`` verb: no forbidden shapes near a guard."""
+    keepout_parser = subparsers.add_parser(
+        "keepout-check",
+        help="assert no forbidden-layer shape lies within a margin of a cell/region",
+        description=(
+            "Assert that no shape on a forbidden layer set lies within a "
+            "margin of a guarded cell or region (a keep-out around a spiral "
+            "inductor, a sensitive analog block, ...) and report each "
+            "intruding shape with its layer and micrometre coordinates. The "
+            "guard is the bounding box of every placement of the --cells "
+            "names and/or the --region window, sized outward by --margin; "
+            "the guarded cells' own shapes are never counted. Purely "
+            "geometric; fully headless via KLayout's batch database API. "
+            "See docs/cli/keepout-check.md."
+        ),
+    )
+    keepout_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
+    keepout_parser.add_argument(
+        "--forbidden",
+        "--layers",
+        dest="forbidden",
+        required=True,
+        help=(
+            "forbidden layer set as a path to a JSON file, or an inline JSON "
+            "array of [layer, datatype] pairs (e.g. '[[67, 20]]'). Not "
+            "validated by argparse -- an empty/malformed value exits 1."
+        ),
+    )
+    keepout_parser.add_argument(
+        "--margin",
+        required=True,
+        help=(
+            "keep-out margin in micrometres (>= 0); a shape at distance "
+            "exactly the margin is clear. Not validated by argparse -- a "
+            "non-numeric or negative value exits 1."
+        ),
+    )
+    keepout_parser.add_argument(
+        "--cells",
+        action="append",
+        default=None,
+        metavar="CELL",
+        help=(
+            "repeatable exact cell name to guard (every placement under each "
+            "checked top cell, by bounding box). At least one of --cells / "
+            "--region is required."
+        ),
+    )
+    keepout_parser.add_argument(
+        "--region",
+        default=None,
+        help=(
+            "guarded window as an inline JSON array of four micrometre "
+            "coordinates [left, bottom, right, top]; may be combined with "
+            "--cells"
+        ),
+    )
+    keepout_parser.add_argument(
+        "--top",
+        default=None,
+        help=(
+            "top cell to check when the stream has more than one; omit to "
+            "check every top cell"
+        ),
+    )
+    keepout_parser.add_argument(
+        "--allow",
+        action="append",
+        default=None,
+        metavar="JSON",
+        help=(
+            "repeatable pin-access window exempt from the check, as inline "
+            'JSON {"bbox": [left, bottom, right, top], "layers": [[l, d], ...]} '
+            "in micrometres; omit layers to cover every forbidden layer. "
+            "Geometry outside the window is still checked; windows are "
+            "echoed in the report's allow array."
+        ),
+    )
+    _add_format_arg(keepout_parser)
+    keepout_parser.set_defaults(func=run)

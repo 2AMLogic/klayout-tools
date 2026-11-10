@@ -16,4 +16,5 @@ options:
   --cells CELL repeatable exact cell name to guard (every placement under each checked top cell, by bounding box). At least one of --cells / --region is required.
   --region REGION guarded window as an inline JSON array of four micrometre coordinates [left, bottom, right, top]; may be combined with --cells
   --top TOP top cell to check when the stream has more than one; omit to check every top cell
+  --allow JSON repeatable pin-access window exempt from the check, as inline JSON {"bbox": [left, bottom, right, top], "layers": [[l, d], ...]} in micrometres; omit layers to cover every forbidden layer. Geometry outside the window is still checked; windows are echoed in the report's allow array.
   --format {text,json} output format (default: text)
