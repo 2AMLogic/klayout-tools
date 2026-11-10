@@ -845,6 +845,7 @@ DECK: list[DrcRule] = [
         # sibling rule is licon.7, transcribed as tap.enclosing.licon.1
         # below at its own floor, issue #2321.)
         scope="licon",  # sky130.lydrc "licon.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "licon.5"),
     ),
     DrcRule(
         id="tap.enclosing.licon.1",
@@ -897,6 +898,7 @@ DECK: list[DrcRule] = [
         # sky130.lydrc rule "licon.8": poly.enclosing(licon, 0.05, euclidian)
         # -> "licon.8 : min. poly enclosure of licon : 0.05um"
         scope="licon",  # sky130.lydrc "licon.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "licon.8"),
     ),
     DrcRule(
         id="li1.enclosing.licon1.1",
@@ -1076,6 +1078,7 @@ DECK: list[DrcRule] = [
         # modelled by met1.enclosing_adjacent.via.1 below; "m1.5", the
         # mcon sibling, is still not modelled.)
         scope="via",  # sky130A_mr.drc "via.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "via.4a"),
     ),
     DrcRule(
         id="met1.enclosing_adjacent.via.1",
@@ -1232,6 +1235,7 @@ DECK: list[DrcRule] = [
         # sky130A_mr.drc rule "via2.4": m2.enclosing(via2, 0.04, euclidian)
         # -> "via2.4 : min. m2 enclosure of via2 : 0.04um"
         scope="via2",  # sky130A_mr.drc "via2.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "via2.4"),
     ),
     DrcRule(
         id="met3.enclosing.via2.1",
@@ -1369,6 +1373,7 @@ DECK: list[DrcRule] = [
         # (the 2-adjacent-edges-relaxed refinement, "via3.5" (0.09um), is
         # met3.enclosing_adjacent.via3.1.)
         scope="via3",  # sky130A_mr.drc "via3.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "via3.4"),
     ),
     DrcRule(
         id="met3.enclosing_adjacent.via3.1",
@@ -1497,6 +1502,7 @@ DECK: list[DrcRule] = [
         # sky130A_mr.drc rule "via4.4": m4.enclosing(via4, 0.19, euclidian)
         # -> "via4.4 : min. m4 enclosure of via4 : 0.19um"
         scope="via4",  # sky130A_mr.drc "via4.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "via4.4"),
     ),
     DrcRule(
         id="met5.enclosing.via4.1",
