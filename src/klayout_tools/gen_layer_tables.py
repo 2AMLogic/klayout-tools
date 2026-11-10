@@ -670,6 +670,11 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         # (issue #1084) -- `guard_ring`/`diff_pair` draw no such implant on
         # any currently-supported family, gf180mcu included, so this is not
         # a new gap sg13g2 introduces.
+        "pplus": (14, 0),  # pSD.drawing -- `klayout_tools.decks.sg13g2`'s
+        # `psd.*` rules / `intersect_with=(14, 0)` P+ Activ. Used only for
+        # `guard_ring`'s P-substrate tap (`add_well=False`, issue #5231):
+        # `_PDK_SD_IMPLANT_MARGIN_UM` has no sg13g2 entry, so unit-device
+        # S/D geometry is unchanged, and no sg13g2 `"nplus"` role exists.
         "res_mark": (128, 0),  # PolyRes.drawing --
         # `EXTRACTION_DECK.resistors[0]` (`"rsil"`, sg13g2's lowest-sheet-rho
         # recognised poly resistor, 7 ohm/sq)'s `marker` field (issue #369's

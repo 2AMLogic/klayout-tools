@@ -1128,6 +1128,22 @@ DECK: list[DrcRule] = [
         scope="Cnt",
         provenance=_sg13g2_drc_provenance(f"{_FEOL}/5_14_cont.drc", "Cnt.d"),
     ),
+    DrcRule(
+        id="cont.ongrid.1",
+        description="Cont vertices must be on the 0.005um manufacturing grid",
+        layer=(6, 0),  # Cont.drawing
+        check="ongrid",
+        threshold_dbu=0,  # unused by "ongrid" -- see grid_um
+        grid_um=0.005,
+        # geometry/3_1_offgrid.drc: `offgrid_check(layer, name)` ->
+        # "3.1 cont_drw_Offgrid: ... on a drawing grid of 5 nm" (issue #5231)
+        scope="x",
+        provenance=_sg13g2_drc_provenance(
+            "ihp-sg13g2/libs.tech/klayout/tech/drc/rule_decks/geometry/3_1_offgrid.drc",
+            "cont_drw_Offgrid",
+        ),
+        voltage_independent=True,
+    ),
     # --- 5.16 Metal1 (beol/5_16_metal1.drc) ---------------------------
     DrcRule(
         id="metal1.width.1",

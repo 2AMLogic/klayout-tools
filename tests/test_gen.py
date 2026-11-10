@@ -10508,6 +10508,12 @@ def _sd_implant_absence_note(family: str, flavor: str) -> str:
     (issue #2580) -- the reporting-only mirror of ``voltage_flavor``'s own
     "unresolved role -> note it, never silently drop it" contract."""
     role = "nplus" if flavor == "nfet" else "pplus"
+    if family == "sg13g2" and role == "pplus":
+        # `pplus` exists for the ring P-tap only (issue #5231): no S/D margin.
+        return (
+            f"family '{family}' declares the S/D implant role ('{role}') but "
+            "no S/D implant margin -- no implant mask was drawn"
+        )
     return (
         f"family '{family}' declares no S/D implant role ('{role}') for "
         f"flavor '{flavor}' -- no implant mask was drawn"
@@ -10565,6 +10571,11 @@ def test_mos_array_sd_implant_absence_noted_on_sg13g2(
     expected = {(1, 0), (5, 0), (6, 0), (8, 0), _SG13G2_DUMMY_LAYER}
     if flavor == "pfet":
         expected.add((31, 0))
+    else:
+        # The nfet array's guard ring is a P-substrate tap, which since
+        # issue #5231 carries its own pSD (14/0); the unit devices' S/D
+        # implant is still not drawn.
+        expected.add((14, 0))
     assert present == expected
 
 

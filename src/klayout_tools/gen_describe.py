@@ -468,6 +468,14 @@ def _sd_implant_hints(
             f"('{sd_implant_role}') for flavor '{flavor}' -- no implant "
             "mask was drawn"
         )
+    elif _sd_implant_margin_um(family) <= 0:
+        # Role declared only for a ring's P-tap (sg13g2 `pplus`, issue #5231):
+        # the unit devices' S/D implant is still not drawn.
+        notes.append(
+            f"family '{family}' declares the S/D implant role "
+            f"('{sd_implant_role}') but no S/D implant margin -- no implant "
+            "mask was drawn"
+        )
     return {
         "sd_implant_present": (
             sd_implant is not None and _sd_implant_margin_um(family) > 0

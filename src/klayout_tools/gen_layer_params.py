@@ -325,6 +325,10 @@ _PDK_RING_IMPLANT_MARGIN_UM: dict[str, float] = {
     # sky130 (issue #2934): n/psdm.5b, "min. n/psdm enclosure tap except
     # butting edge", 0.125um (sky130A.lydrc, PDK c6d73a35).
     "sky130": 0.125,
+    # sg13g2 (issue #5231): pSD.c, "min. pSD enclosure of P+ Activ" (0.18um,
+    # sg13g2_tech_default.json drc_rules.pSD_c). Only drawn for a P-substrate
+    # tap ring (`well_tie=False`); no sg13g2 `well_tap_implant` role exists.
+    "sg13g2": 0.18,
 }
 
 
