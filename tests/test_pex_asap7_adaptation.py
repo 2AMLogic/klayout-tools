@@ -117,3 +117,43 @@ def test_netlist_without_diodes_is_not_copied(tmp_path):
     raw = _raw(tmp_path)
     out, _ = adapt_leg_netlists("gf180mcu", str(raw), None, str(tmp_path))
     assert out == str(raw)
+
+
+def test_fidelity_warning_asap7_states_ranges_and_doc():
+    from klayout_tools.pex_asap7 import fidelity_warnings_for_deck
+
+    (text,) = fidelity_warnings_for_deck("asap7")
+    for needle in (
+        "-97.8% to -87.8%",
+        "-99.0% to -92.6%",
+        "lower bound",
+        "M2 and M4",
+        "docs/design/asap7-parallel-line-fidelity.md",
+    ):
+        assert needle in text
+
+
+@pytest.mark.parametrize("deck", ["sky130", "gf180mcu", None])
+def test_fidelity_warning_absent_for_other_decks(deck):
+    from klayout_tools.pex_asap7 import fidelity_warnings_for_deck
+
+    assert fidelity_warnings_for_deck(deck) == []
+
+
+def test_fidelity_warning_ranges_match_phase2_doc():
+    import re
+
+    from klayout_tools.pex_asap7 import ASAP7_DELAY_ERROR_PCT, ASAP7_ENERGY_ERROR_PCT
+
+    doc = (
+        Path(__file__).parent.parent / "docs/design/asap7-parallel-line-fidelity.md"
+    ).read_text()
+    rows = [r for r in doc.splitlines() if re.match(r"\| M[24] \| [124]x ", r)]
+    assert len(rows) == 12
+    delay, energy = [], []
+    for r in rows:
+        cells = [c.strip() for c in r.strip("|").split("|")]
+        delay += [float(x) for x in cells[7].split("/")]
+        energy += [float(x) for x in cells[12].split("/")]
+    assert (min(delay), max(delay)) == ASAP7_DELAY_ERROR_PCT
+    assert (min(energy), max(energy)) == ASAP7_ENERGY_ERROR_PCT

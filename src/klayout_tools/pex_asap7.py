@@ -12,6 +12,49 @@ import re
 ASAP7_NETLIST_ADAPTATION = "asap7_bsimcmg.adapt_extracted_netlist"
 
 
+#: Covered range of the phase-2 measurement (issue #5202, table in
+#: ``docs/design/asap7-parallel-line-fidelity.md``): 12 points, none within
+#: 10%. Run length was never varied, so no threshold exists and nothing
+#: outside this range is claimed (issue #5203).
+ASAP7_FIDELITY_DOC = "docs/design/asap7-parallel-line-fidelity.md"
+ASAP7_COVERED_RANGE = (
+    "ASAP7 M2 and M4, pitch 1x-4x the LEF pitch, same-level parallel "
+    "neighbours, 0.36 um run, 10 kohm driver, 1 ps edge"
+)
+#: Measured error range, min to max over the 12 points (quiet and
+#: opposite-switching), in percent.
+ASAP7_DELAY_ERROR_PCT = (-97.8, -87.8)
+ASAP7_ENERGY_ERROR_PCT = (-99.0, -92.6)
+
+
+def fidelity_warnings_for_deck(deck_name: str | None) -> list[str]:
+    """Run-level ``warnings[]`` strings for ``deck_name`` (issue #5203): one
+    for asap7 stating the measured coupled-wiring fidelity gap, none for any
+    other deck. A statement about the deck, not a per-net classification."""
+    if deck_name != "asap7":
+        return []
+    d_lo, d_hi = ASAP7_DELAY_ERROR_PCT
+    e_lo, e_hi = ASAP7_ENERGY_ERROR_PCT
+    return [
+        "asap7 extraction fidelity: on same-level coupled wiring within the "
+        f"measured range ({ASAP7_COVERED_RANGE}) the deck's --parasitics "
+        f"delay error is {d_lo}% to {d_hi}% and energy error is {e_lo}% to "
+        f"{e_hi}% versus the klt mom reference. Treat the extracted delay "
+        "and energy as a lower bound. Nothing outside that range was "
+        f"measured. See {ASAP7_FIDELITY_DOC}."
+    ]
+
+
+def with_fidelity_warnings(result: dict, deck_name: str | None) -> dict:
+    """Return ``result`` with the additive ``warnings: array<string>`` field
+    (issue #5203) set from ``fidelity_warnings_for_deck`` -- present only when
+    non-empty, so every non-asap7 report stays byte-identical."""
+    warnings = fidelity_warnings_for_deck(deck_name)
+    if warnings:
+        result["warnings"] = warnings
+    return result
+
+
 def netlist_adaptation_for_deck(deck_name: str | None) -> str | None:
     """Name of the simulator adaptation applied to the extracted legs' DUT
     netlist for ``deck_name``, or ``None`` (no adaptation, sky130 etc.)."""
