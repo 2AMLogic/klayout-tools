@@ -16,6 +16,15 @@ def request_sha256(request: dict[str, Any]) -> str:
     ).hexdigest()
 
 
+def receipt_request_sha256(request: dict[str, Any]) -> str:
+    """Digest the synchronous submit receipt records: submission-only batch
+    fields (``capacity_wait_s``, ...) are excluded so a flag-less ``--attach``
+    of the original request verifies (issue #5194)."""
+    from . import sim_batch_shards
+
+    return sim_batch_shards.receipt_request_sha256(request)
+
+
 def check_attach_receipt(
     artifacts_dir: str, job_id: str, request: dict[str, Any]
 ) -> None:
@@ -41,7 +50,7 @@ def check_attach_receipt(
     accepted = {
         supplied,
         sim_batch_shards.request_sha256(request),
-        sim_batch_shards.receipt_request_sha256(request),
+        receipt_request_sha256(request),
     }
     if isinstance(recorded, str) and recorded not in accepted:
         raise SimError(
