@@ -230,6 +230,7 @@
         "klayout_tools.extract_report",
         "klayout_tools.extract_resistance_graph",
         "klayout_tools.extract_spef",
+        "klayout_tools.extract_spef_block",
         "klayout_tools.extract_subcircuit",
         "klayout_tools.extract_warnings",
         "klayout_tools.parasitic_integrity",
@@ -1788,7 +1789,7 @@
       "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
     },
     {
-      "consumer": "klayout_tools.extract",
+      "consumer": "klayout_tools.extract_spef_block",
       "exporter": "klayout_tools._provenance",
       "symbol": "_klt_version",
       "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
