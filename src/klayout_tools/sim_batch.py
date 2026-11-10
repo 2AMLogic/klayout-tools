@@ -3331,6 +3331,10 @@ def _run_batch_job(
         artifacts_dir,
         BATCH_RECEIPT_FILENAME if receipt_name is None else receipt_name,
     )
+    # Submission-only batch fields (capacity_wait_s, ...) are excluded so a
+    # flag-less --attach of the original request verifies (issue #5194).
+    from . import sim_batch_shards
+
     receipt: dict[str, Any] = {
         "job_id": job_id,
         # getattr: the receipt is best-effort and must never break a run.
@@ -3340,7 +3344,7 @@ def _run_batch_job(
         "region": getattr(config, "region", None),
         "profile": getattr(config, "profile", None),
         "launched_at": datetime.now(timezone.utc).isoformat(),
-        "request_sha256": sim_batch_receipt.request_sha256(request),
+        "request_sha256": sim_batch_shards.receipt_request_sha256(request),
         "state": None,
     }
     _write_batch_receipt(receipt_path, receipt)

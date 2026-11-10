@@ -33,15 +33,30 @@ def request_sha256(request: dict[str, Any]) -> str:
     """Digest of the request document (canonical JSON), so a caller can tie a
     later status read back to the request it submitted. Submission-only
     ``batch`` fields (:data:`_SUBMISSION_ONLY_BATCH_FIELDS`) are excluded."""
+    return _canonical_sha256(_without_submission_only(request, drop_empty=False))
+
+
+def receipt_request_sha256(request: dict[str, Any]) -> str:
+    """:func:`request_sha256` that also drops a ``batch`` block the exclusion
+    emptied, so a request that never had one (``--wait-for-capacity`` folds
+    ``batch.capacity_wait_s`` in) hashes the same as the original file
+    (issue #5194). Used by the synchronous submit receipt."""
+    return _canonical_sha256(_without_submission_only(request, drop_empty=True))
+
+
+def _without_submission_only(
+    request: dict[str, Any], *, drop_empty: bool
+) -> dict[str, Any]:
     batch = request.get("batch")
-    if isinstance(batch, dict) and any(
-        k in batch for k in _SUBMISSION_ONLY_BATCH_FIELDS
+    if not (
+        isinstance(batch, dict)
+        and any(k in batch for k in _SUBMISSION_ONLY_BATCH_FIELDS)
     ):
-        kept = {
-            k: v for k, v in batch.items() if k not in _SUBMISSION_ONLY_BATCH_FIELDS
-        }
-        request = {**request, "batch": kept}
-    return _canonical_sha256(request)
+        return request
+    kept = {k: v for k, v in batch.items() if k not in _SUBMISSION_ONLY_BATCH_FIELDS}
+    if drop_empty and not kept:
+        return {k: v for k, v in request.items() if k != "batch"}
+    return {**request, "batch": kept}
 
 
 def request_section_digests(request: dict[str, Any]) -> dict[str, str]:
