@@ -49,7 +49,12 @@ def resolve_osdi_preload(
         )
     try:
         resolved = iter(
-            sim._resolve_osdi_preload(spec, request_dir, skip_indices=frozenset(skip))
+            sim._resolve_osdi_preload(
+                spec,
+                request_dir,
+                skip_indices=frozenset(skip),
+                pdk_root=sim._osdi_pdk_root_pin(request),
+            )
         )
     except sim.SimError as exc:
         raise CharacterizeError(str(exc)) from exc

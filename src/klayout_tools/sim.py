@@ -3252,8 +3252,12 @@ def _prepare_sim_request(
     # image-baked `.osdi`; they are existence-checked here only when the run
     # stays on this host (see below).
     osdi_runner_resolved = sim_staging.runner_resolved_osdi(request, request_dir)
+    osdi_pdk_root = _osdi_pdk_root_pin(request)
     osdi_preload = _resolve_osdi_preload(
-        options, request_dir, skip_indices=frozenset(osdi_runner_resolved)
+        options,
+        request_dir,
+        skip_indices=frozenset(osdi_runner_resolved),
+        pdk_root=osdi_pdk_root,
     )
     # Issue #2668: opt-in staging of the request's own model inputs for the
     # off-host backends. Validated for every backend (a typo'd value is
@@ -3289,7 +3293,12 @@ def _prepare_sim_request(
             "models.pdk_root) so the runner resolves it"
         )
     osdi_preload, osdi_runner_environment = _finalize_osdi_preload(
-        options, request_dir, backend, osdi_preload, osdi_runner_resolved
+        options,
+        request_dir,
+        backend,
+        osdi_preload,
+        osdi_runner_resolved,
+        pdk_root=osdi_pdk_root,
     )
     # Issue #3041: an `engine_version` pin is checked before any corner runs
     # where this process can see the engine (local backends); off-host
@@ -5111,12 +5120,19 @@ def _needs_models_lib(point: CornerPoint) -> bool:
     return any(lib is None for lib in declared)
 
 
+def _osdi_pdk_root_pin(request: dict[str, Any]) -> str | None:
+    """``models.pdk_root`` (issue #5227) when set as a non-empty string."""
+    pin = (request.get("models") or {}).get("pdk_root")
+    return pin if isinstance(pin, str) and pin else None
+
+
 def _finalize_osdi_preload(
     options: dict[str, Any],
     request_dir: str,
     backend: str,
     osdi_preload: tuple[str, ...],
     osdi_runner_resolved: dict[int, str],
+    pdk_root: str | None = None,
 ) -> tuple[tuple[str, ...], list[dict[str, str]]]:
     """Settle ``osdi_preload`` once the backend is known (issue #3819).
 
@@ -5126,7 +5142,7 @@ def _finalize_osdi_preload(
     here, so the full existence check and expansion apply, exactly as before.
     """
     if backend not in _OFFHOST_BACKENDS:
-        return _resolve_osdi_preload(options, request_dir), []
+        return _resolve_osdi_preload(options, request_dir, pdk_root=pdk_root), []
     return osdi_preload, [
         {"entry": options["osdi_preload"][index], "reason": reason}
         for index, reason in sorted(osdi_runner_resolved.items())
@@ -5146,6 +5162,7 @@ def _resolve_osdi_preload(
     options: dict[str, Any],
     request_dir: str,
     skip_indices: frozenset[int] = frozenset(),
+    pdk_root: str | None = None,
 ) -> tuple[str, ...]:
     """Resolve ``options.osdi_preload`` (issue #2513) to absolute paths of
     compiled OSDI shared libraries the generated deck must ``pre_osdi``.
@@ -5175,6 +5192,13 @@ def _resolve_osdi_preload(
     paths but neither expanded nor existence-checked, and omitted from the
     result.
 
+    ``pdk_root`` (issue #5227) is the request's pinned PDK root
+    (``models.pdk_root``, which already carries the ``--pdk-root`` override).
+    When set, a leading literal ``$PDK_ROOT/`` / ``${PDK_ROOT}/`` is replaced
+    by it, so the pin wins over the process environment -- the same rule the
+    batch runner applies. With no pin the entry expands from ``$PDK_ROOT`` in
+    the environment as before.
+
     Returns ``()`` when the option is absent or an empty list, which leaves
     every generated deck byte-identical to before this issue.
     """
@@ -5194,6 +5218,11 @@ def _resolve_osdi_preload(
             )
         if index in skip_indices:
             continue
+        if pdk_root:
+            for prefix in sim_staging._PDK_ROOT_LITERAL_PREFIXES:
+                if entry.startswith(prefix):
+                    entry = os.path.join(pdk_root, entry[len(prefix) :])
+                    break
         path = _resolve_relative(entry, request_dir)
         if not os.path.isfile(path):
             raise SimError(f"osdi_preload file not found: {path}")

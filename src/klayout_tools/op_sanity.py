@@ -134,6 +134,7 @@ from .sim import (
     _expand_corners,
     _extract_engine_version,
     _needs_models_lib,
+    _osdi_pdk_root_pin,
     _resolve_corner_section_libs,
     _resolve_models_lib,
     _resolve_netlist_include,
@@ -1546,7 +1547,9 @@ def run_op_sanity(
     # so an OSDI-model PDK's preload must reach this deck too -- otherwise
     # every device would be an undefined model here and only here.
     try:
-        osdi_preload = _resolve_osdi_preload(options, request_dir)
+        osdi_preload = _resolve_osdi_preload(
+            options, request_dir, pdk_root=_osdi_pdk_root_pin(request)
+        )
     except SimError as exc:
         raise OpSanityError(str(exc)) from exc
 
