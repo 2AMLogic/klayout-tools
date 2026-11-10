@@ -48,7 +48,6 @@ unit, so that rule would make the setting a no-op.
 
 from __future__ import annotations
 
-import math
 import os
 import re
 import shlex
@@ -380,12 +379,6 @@ def build_tarball(tree: BatchTree, path: str) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _job_timeout_seconds(timeout_s: float) -> int:
-    """``--timeout-s`` plus the same per-job overhead ``klt sim`` adds, so
-    the harness's outer bound is always looser than the inner ``klt`` one."""
-    return int(math.ceil(sim_batch._default_batch_job_timeout_s(1, timeout_s)))
-
-
 def build_job_spec(
     tree: BatchTree,
     *,
@@ -454,7 +447,7 @@ def build_job_spec(
         cmd=command,
         tool=BATCH_JOB_TOOL,
         pdk_variant=pdk,
-        timeout_seconds=_job_timeout_seconds(timeout_s),
+        timeout_seconds=_batch_common.job_timeout_seconds(timeout_s),
         inputs=(
             sim_batch.BatchJobInput(
                 name=BATCH_TREE_FILENAME,
