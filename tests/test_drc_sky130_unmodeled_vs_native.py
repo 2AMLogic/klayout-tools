@@ -41,6 +41,17 @@ _DECK_BY_ID = {r.id: r for r in deck_mod.DECK}
 #: mr deck calls ``m4.4a``. Each target must exist in the deck.
 NATIVE_ALIASES: dict[str, str] = {
     "m4.4": "met4.area.1",
+    # Enclosure rules cited via the mr deck's ids; kept here (not as deck
+    # ``provenance``) so sky130.py stays within its size ratchet.
+    "m1.4": "met1.enclosing.mcon.1",
+    "m2.4": "met2.enclosing.via.1",
+    "m3.4": "met3.enclosing.via2.1",
+    "m4.3": "met4.enclosing.via3.1",
+    "m5.3": "met5.enclosing.via4.1",
+    "capm.3": "met3.enclosing.capm.1",
+    "capm.4": "capm.enclosing.via3.1",
+    "cap2m.3": "met4.enclosing.capm2.1",
+    "cap2m.4": "capm2.enclosing.via4.1",
     **{
         f"{native}_OFFGRID": f"{stem}.ongrid.1"
         for native, stem in (

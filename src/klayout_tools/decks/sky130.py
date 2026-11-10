@@ -750,7 +750,6 @@ DECK: list[DrcRule] = [
         # sky130.lydrc rule "m1.4": not_in_cell6_m1.enclosing(mcon, 0.03, euclidian)
         # -> "m1.4 : min. m1 enclosure of mcon : 0.03um"
         scope="m1",  # sky130.lydrc "m1.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "m1.4"),
     ),
     DrcRule(
         id="met1.area.1",
@@ -1108,7 +1107,6 @@ DECK: list[DrcRule] = [
         # 2-adjacent-edges-relaxed refinement, "m2.5" (0.085um), is
         # met2.enclosing_adjacent.via.1.)
         scope="m2",  # sky130A_mr.drc "m2.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "m2.4"),
     ),
     DrcRule(
         id="met2.enclosing_adjacent.via.1",
@@ -1247,7 +1245,6 @@ DECK: list[DrcRule] = [
         # (the 2-adjacent-edges-relaxed "via2.5" (0.085um) reads m2, not
         # m3, in the official code: met2.enclosing_adjacent.via2.1.)
         scope="m3",  # sky130A_mr.drc "m3.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "m3.4"),
     ),
     DrcRule(
         id="met2.enclosing_adjacent.via2.1",
@@ -1398,7 +1395,6 @@ DECK: list[DrcRule] = [
         # sky130A_mr.drc rule "m4.3": m4.enclosing(via3, 0.065, euclidian)
         # -> "m4.3 : min. m4 enclosure of via3 : 0.065um"
         scope="m4",  # sky130A_mr.drc "m4.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "m4.3"),
     ),
     DrcRule(
         id="met4.area.1",
@@ -1512,7 +1508,6 @@ DECK: list[DrcRule] = [
         # sky130A_mr.drc rule "m5.3": m5.enclosing(via4, 0.31, euclidian)
         # -> "m5.3 : min. m5 enclosure of via4 : 0.31um"
         scope="m5",  # sky130A_mr.drc "m5.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "m5.3"),
     ),
     DrcRule(
         id="met5.area.1",
@@ -1584,7 +1579,6 @@ DECK: list[DrcRule] = [
         # `capm.and(m3).enclosing(m3, 0.14, euclidian)`, is not the shipped
         # rule and is not transcribed here.)
         scope="capm",  # sky130A_mr.drc "capm.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "capm.3"),
     ),
     DrcRule(
         id="capm.enclosing.via3.1",
@@ -1596,7 +1590,6 @@ DECK: list[DrcRule] = [
         # sky130A_mr.drc rule "capm.4": capm.enclosing(via3, 0.14, euclidian)
         # -> "capm.4 : min. capm enclosure of via3 : 0.14um"
         scope="capm",  # sky130A_mr.drc "capm.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "capm.4"),
     ),
     DrcRule(
         id="capm.separation.via3.1",
@@ -1651,7 +1644,6 @@ DECK: list[DrcRule] = [
         # transcribed here; same choice as capm.3/met3.enclosing.capm.1
         # above.)
         scope="cap2m",  # sky130A_mr.drc "cap2m.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "cap2m.3"),
     ),
     DrcRule(
         id="capm2.enclosing.via4.1",
@@ -1663,7 +1655,6 @@ DECK: list[DrcRule] = [
         # sky130A_mr.drc rule "cap2m.4": cap2m.enclosing(via4, 0.2, euclidian)
         # -> "cap2m.4 : min. cap2m enclosure of via4 : 0.2um"
         scope="cap2m",  # sky130A_mr.drc "cap2m.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "cap2m.4"),
     ),
     DrcRule(
         id="capm2.separation.via4.1",
