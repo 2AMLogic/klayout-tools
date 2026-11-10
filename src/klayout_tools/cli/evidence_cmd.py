@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import argparse
 
-from .. import evidence_lint, evidence_record
+from .. import evidence_claims, evidence_lint, evidence_record
 from .output import emit_error, emit_success
 
 
@@ -71,3 +71,29 @@ def _print_lint_text(payload: dict) -> None:
     print(f"{payload['records_checked']} record(s) checked: {payload['status']}")
     for finding in payload["findings"]:
         print(f"  {finding['code']}  {finding['record']}: {finding['message']}")
+
+
+def run_claims(args: argparse.Namespace) -> int:
+    try:
+        registry = (
+            evidence_claims.load_registry(args.registry) if args.registry else None
+        )
+        payload = evidence_claims.claims(args.root, args.docs, registry)
+    except evidence_claims.EvidenceClaimsError as exc:
+        return emit_error("evidence claims", str(exc), args.format, code=exc.code)
+
+    emit_success(payload, args.format, _print_claims_text)
+    return 1 if payload["findings"] else 0
+
+
+def _print_claims_text(payload: dict) -> None:
+    print(
+        f"{payload['docs_checked']} doc(s), {payload['citations_checked']} "
+        f"citation(s), {payload['claims_checked']} claim(s) checked: "
+        f"{payload['status']}"
+    )
+    for finding in payload["findings"]:
+        print(
+            f"  {finding['code']}  {finding['doc'] or '-'}: "
+            f"{finding['record']}: {finding['message']}"
+        )

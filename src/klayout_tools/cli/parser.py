@@ -4446,6 +4446,38 @@ def _add_evidence_parser(subparsers: argparse._SubParsersAction) -> None:
     _add_format_arg(lint_parser)
     lint_parser.set_defaults(func=evidence_cmd.run_lint)
 
+    claims_parser = evidence_sub.add_parser(
+        "claims",
+        help="check documents that cite evidence records against the records",
+        description=(
+            "Check documents against evidence records: every cited record "
+            "exists (and its JSON twin), a citation of a superseded record is "
+            "an error unless under a <!-- klt:historical --> marker, and "
+            "--registry rows must agree with the pointed-at record values. "
+            "Legacy records are resolved via the registry's `mapping` key. "
+            "Exits 0 clean, 1 on findings."
+        ),
+    )
+    claims_parser.add_argument(
+        "root", nargs="?", default=".", help="repo root (default: cwd)"
+    )
+    claims_parser.add_argument(
+        "--docs",
+        nargs="+",
+        required=True,
+        metavar="GLOB",
+        help="document glob(s), relative to ROOT; a glob matching nothing is an error",
+    )
+    claims_parser.add_argument(
+        "--registry",
+        metavar="FILE.json",
+        default=None,
+        help="JSON registry: `claims` rows (literal, record, pointer, decimals, "
+        "scale, corner, agg) and legacy-record `mapping`",
+    )
+    _add_format_arg(claims_parser)
+    claims_parser.set_defaults(func=evidence_cmd.run_claims)
+
 
 def _add_artifact_parser(subparsers: argparse._SubParsersAction) -> None:
     """Register the ``artifact`` verb with nested ``put``/``get``/``verify``/``delete``

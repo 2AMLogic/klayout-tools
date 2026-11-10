@@ -359,6 +359,34 @@ def _check_supersession(
     return out
 
 
+def current_heads(supersedes: Mapping[str, list[str]]) -> dict[str, list[str]]:
+    """Newest unsuperseded descendants of every record.
+
+    ``supersedes`` maps a record path to the (normalised) paths it supersedes.
+    Returns, per record, the sorted tips reachable by following successors --
+    the record itself when nothing supersedes it. Shared with
+    ``klt evidence claims`` so both verbs agree on what "current" means.
+    """
+    successors: dict[str, set[str]] = {rec: set() for rec in supersedes}
+    for rec, targets in supersedes.items():
+        for target in targets:
+            successors.setdefault(target, set()).add(rec)
+    heads: dict[str, list[str]] = {}
+    for rec in successors:
+        seen = {rec}
+        stack = [rec]
+        tips: set[str] = set()
+        while stack:
+            node = stack.pop()
+            if not successors.get(node):
+                tips.add(node)
+            nxt = successors.get(node, set()) - seen
+            seen |= nxt
+            stack.extend(nxt)
+        heads[rec] = sorted(tips) or [rec]
+    return heads
+
+
 def _check_append_only(root: str, evidence_rel: str, base: str) -> list[dict]:
     out = _git(root, "diff", "--name-status", f"{base}...HEAD", "--", evidence_rel)
     findings: list[dict] = []
