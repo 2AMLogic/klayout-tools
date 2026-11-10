@@ -293,6 +293,25 @@ from ._sta_request_diag import SPEF_MISSING_NETS_END as _SPEF_MISSING_NETS_END
 from ._sta_request_diag import parse_spef_missing_nets as _parse_spef_missing_nets
 from .pdk import lef_files
 from .pdk_cells import resolve_liberty_for_cell_library
+from .post_route_sta_electrical import (  # noqa: F401 -- re-exported names
+    _ELECTRICAL_NET_PREFIX,
+    _ELECTRICAL_OK,
+    _ELECTRICAL_ROW_RE,
+    _ELECTRICAL_UNSUPPORTED,
+    _MAX_CAP_BEGIN,
+    _MAX_CAP_END,
+    _MAX_SLEW_BEGIN,
+    _MAX_SLEW_END,
+    _MIN_PERIOD_BEGIN,
+    _MIN_PERIOD_END,
+    _MIN_PULSE_BEGIN,
+    _MIN_PULSE_END,
+    _SLACK_ROW_RE,
+    _electrical_class,
+    _electrical_slack_class,
+    _parse_electrical_check,
+    _parse_electrical_slack_check,
+)
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- versioned independently of every other verb's own
@@ -371,24 +390,6 @@ _DRIVER_NET_PREFIX = "KLT_DRIVER_NET"
 #: Upper bound on how many driver pins each ``*_driver_sample`` field echoes
 #: -- a diagnostic sample, same style as ``design_nets_missing_sample``.
 _DRIVER_SAMPLE_LIMIT = 20
-#: Marker pairs and sentinels for the per-corner ``electrical_checks`` block
-#: (issue #3005): one ``report_check_types -violators`` region per limit class.
-#: See :func:`_electrical_check_lines` / :func:`_parse_electrical_check`.
-_MAX_SLEW_BEGIN = "===KLT_STA_MAX_SLEW_BEGIN==="
-_MAX_SLEW_END = "===KLT_STA_MAX_SLEW_END==="
-_MAX_CAP_BEGIN = "===KLT_STA_MAX_CAP_BEGIN==="
-_MAX_CAP_END = "===KLT_STA_MAX_CAP_END==="
-_ELECTRICAL_OK = "KLT_ELECTRICAL_OK"
-_ELECTRICAL_UNSUPPORTED = "KLT_ELECTRICAL_UNSUPPORTED"
-_ELECTRICAL_NET_PREFIX = "KLT_ELECTRICAL_NET"
-#: One violator row of ``report_check_types``: ``<pin> <limit> <value> <slack>
-#: (VIOLATED)``. Anchored from the right so a pin name is taken verbatim.
-_ELECTRICAL_ROW_RE = re.compile(
-    r"^(?P<pin>\S.*?)\s+(?P<limit>-?[\d.]+(?:e[-+]?\d+)?)\s+"
-    r"(?P<value>-?[\d.]+(?:e[-+]?\d+)?)\s+(?P<slack>-?[\d.]+(?:e[-+]?\d+)?)"
-    r"\s+\(VIOLATED\)\s*$",
-    re.IGNORECASE,
-)
 #: Any OpenSTA-tagged warning. Only ever matched *inside* the
 #: :data:`_SPEF_READ_BEGIN`/:data:`_SPEF_READ_END` stdout region, where the
 #: SPEF reader is the only thing running.
@@ -3637,10 +3638,10 @@ def _violation_count_lines() -> list[str]:
 
 
 def _electrical_check_lines() -> list[str]:
-    """Marker-delimited max-transition / max-capacitance violator reports
-    (issue #3005), run in the same session that already did ``read_spef`` so
-    the numbers are against the extracted parasitics when a ``spef`` was
-    given.
+    """Marker-delimited max-transition / max-capacitance / min-pulse-width /
+    min-period violator reports (issues #3005, #5241), run in the same
+    session that already did ``read_spef`` so the numbers are against the
+    extracted parasitics when a ``spef`` was given.
 
     Units are pinned with ``set_cmd_units`` (``ns`` / ``pF``) so the report
     is in the units the response states regardless of the Liberty's own.
@@ -3657,6 +3658,8 @@ def _electrical_check_lines() -> list[str]:
     for flag, begin, end in (
         ("-max_slew", _MAX_SLEW_BEGIN, _MAX_SLEW_END),
         ("-max_capacitance", _MAX_CAP_BEGIN, _MAX_CAP_END),
+        ("-min_pulse_width", _MIN_PULSE_BEGIN, _MIN_PULSE_END),
+        ("-min_period", _MIN_PERIOD_BEGIN, _MIN_PERIOD_END),
     ):
         lines += [
             f'puts "{begin}"',
@@ -4397,54 +4400,6 @@ def _driver_detail(
     return detail
 
 
-def _electrical_class(
-    coverage: str, unit: str, rows: list[tuple[str, float, float]], nets: set[str]
-) -> dict[str, Any]:
-    """One limit class of the ``electrical_checks`` block. Counts, excess and
-    pin are ``null`` unless ``coverage == "checked"``."""
-    checked = coverage == "checked"
-    worst = max(rows, key=lambda row: row[2], default=None) if checked else None
-    return {
-        "coverage": coverage,
-        "limit_source": "liberty",
-        "unit": unit,
-        "violation_count": len(rows) if checked else None,
-        "net_count": len(nets) if checked else None,
-        "worst_excess": round(worst[2], 5) if worst is not None else None,
-        "worst_pin": worst[0] if worst is not None else None,
-    }
-
-
-def _parse_electrical_check(
-    stdout: str, begin: str, end: str, unit: str
-) -> dict[str, Any]:
-    """Parse one ``report_check_types -violators`` block (issue #3005).
-
-    ``coverage`` is ``"not_run"`` when the markers are absent (the session
-    never reached the block), ``"unsupported"`` when the Tcl ``catch`` fired,
-    and ``"checked"`` only when the ``KLT_ELECTRICAL_OK`` sentinel closed the
-    block -- so zero violations is only ever reported for a check that ran.
-    ``worst_excess`` is ``value - limit`` of the worst violator (positive)."""
-    block = _extract_block(stdout, begin, end)
-    if block is None:
-        return _electrical_class("not_run", unit, [], set())
-    if _ELECTRICAL_UNSUPPORTED in block or _ELECTRICAL_OK not in block:
-        return _electrical_class("unsupported", unit, [], set())
-    rows: list[tuple[str, float, float]] = []
-    nets: set[str] = set()
-    for line in block.splitlines():
-        if line.startswith(_ELECTRICAL_NET_PREFIX + " "):
-            parts = line.split(None, 2)
-            if len(parts) == 3:
-                nets.add(parts[2].strip())
-            continue
-        match = _ELECTRICAL_ROW_RE.match(line)
-        if match:
-            excess = float(match.group("value")) - float(match.group("limit"))
-            rows.append((match.group("pin"), float(match.group("limit")), excess))
-    return _electrical_class("checked", unit, rows, nets)
-
-
 def _electrical_checks_block(stdout: str, has_spef: bool) -> dict[str, Any]:
     """The per-corner ``electrical_checks`` response block (issue #3005).
     ``parasitics_source`` says whether the numbers are against the
@@ -4456,6 +4411,12 @@ def _electrical_checks_block(stdout: str, has_spef: bool) -> dict[str, Any]:
         ),
         "max_capacitance": _parse_electrical_check(
             stdout, _MAX_CAP_BEGIN, _MAX_CAP_END, "pF"
+        ),
+        "min_pulse_width": _parse_electrical_slack_check(
+            stdout, _MIN_PULSE_BEGIN, _MIN_PULSE_END
+        ),
+        "min_period": _parse_electrical_slack_check(
+            stdout, _MIN_PERIOD_BEGIN, _MIN_PERIOD_END
         ),
     }
 

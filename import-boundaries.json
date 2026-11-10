@@ -795,7 +795,8 @@
       "modules": [
         "klayout_tools.cli.sta_cmd",
         "klayout_tools._sta_request_diag",
-        "klayout_tools.post_route_sta"
+        "klayout_tools.post_route_sta",
+        "klayout_tools.post_route_sta_electrical"
       ]
     },
     "stats": {
