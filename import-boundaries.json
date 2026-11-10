@@ -216,6 +216,7 @@
         "klayout_tools.extract",
         "klayout_tools.extract_abstract",
         "klayout_tools.extract_assemble",
+        "klayout_tools.extract_validate",
         "klayout_tools.extract_batch",
         "klayout_tools.extract_finfet",
         "klayout_tools.extract_hierarchy",
