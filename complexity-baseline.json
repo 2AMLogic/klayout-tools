@@ -211,7 +211,7 @@
     {
       "file": "src/klayout_tools/extract.py",
       "function": "run_extract",
-      "complexity": 18
+      "complexity": 16
     },
     {
       "file": "src/klayout_tools/extract_abstract.py",
