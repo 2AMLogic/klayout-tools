@@ -32,9 +32,11 @@ def write_flat_netlist(
     scratch_dir: Any,
     pin_renames: Any,
     warnings: Any,
+    pin_order: Any = (),
 ) -> tuple[Any, Any, Any]:
     from .extract import (
         ExtractError,
+        _apply_pin_order_to_spice,
         _apply_pin_ties_if_circuit,
         _finish_netlist_write,
         _model_delegate_factory,
@@ -80,6 +82,10 @@ def write_flat_netlist(
 
     pin_ties = (pin_renames or {}).get("ties") or []
     _apply_pin_ties_if_circuit(netlist_path, circuit, pin_ties)
+
+    # Issue #5255: `--pins` order defines the top `.SUBCKT` pin order.
+    if circuit is not None:
+        _apply_pin_order_to_spice(netlist_path, circuit.name, pin_order)
 
     with stage("netlist_hash"):
         reported_netlist_path, netlist_sha256 = _finish_netlist_write(
