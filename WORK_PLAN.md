@@ -7,7 +7,7 @@ Current work from GitHub labels. Long-term direction lives in [ROADMAP.md](ROADM
 
 Judge-approved PRs under a hold (`loom:blocked` or `loom:operator`) — only a human merge decision is missing.
 
-- **#5176**: chore(deps): Bump the github-actions group across 1 directory with 3 updates
+_None._
 
 ## Very Important
 
@@ -34,6 +34,7 @@ Human-approved issues ready for implementation (`loom:issue`).
 - **#4495**: place-and-route (asap7): router V1 landing pads fail the deck's M1 tip rules; not reported
 - **#4827**: Live-verify #4820 floating_gate_allowed against ASAP7 DFFASRHQNx1
 - **#4891**: batch fleet runner's ngspice cannot evaluate sky130A model-library expr() parameters (runner image gap), engine_version still null
+- **#5196**: Decompose run_extract: ~2,700-line function in extract.py
 
 ## In Progress
 
@@ -43,7 +44,14 @@ Issues currently being built (`loom:building`).
 - **#3420**: Re-pin open_pdks to f6eeac7 (ciel) — fleet retires volare c6d73a3
 - **#4312**: gf180mcu deck: no eFuse (EF.*) DRC rules and no eFuse device class in the extraction deck
 - **#4771**: Friction: klt sim --batch-set --dry-run submits real batch jobs; --wait-for-capacity is refused with --batch-set
-- **#5181**: klt economy: no decomposition of a P&R block bbox into placed cells, physical-only cells, core whitespace, die margin and guard ring
+- **#5231**: gen: no P-substrate tap (pSD-Activ) on ihp-sg13g2; guard_ring is an n-well tie with off-grid Cont
+- **#5238**: Consolidate leftover batch helper duplicates into _batch_common
+- **#5240**: klt sta: allow per-corner clock periods in one multi-corner request
+- **#5250**: Split erc.py ties / well-selection subsystem (~495 lines) into its own module
+- **#5251**: Triage native sky130A DRC ids, slice 1/4 (contacts/vias/li)
+- **#5252**: Triage native sky130A DRC ids, slice 2/4 (metals/caps/resistors/pads)
+- **#5253**: Triage native sky130A DRC ids, slice 3/4 (high-voltage/wells/varactor/vpp)
+- **#5255**: klt pex: --pins does not control extracted subcircuit pin order, so a layout whose labels are ordered differently from the schematic cannot be compared
 
 ## PRs Awaiting Review
 
@@ -53,13 +61,17 @@ PRs waiting on Judge (`loom:review-requested`).
 - **#4602**: docs: re-qualify c6d73a3 reference records under f6eeac7 and mark superseded
 - **#4737**: feat(drc): enforce sky130 licon1/mcon max size with exemptions
 - **#4772**: fix: honor --dry-run and --wait-for-capacity under klt sim --batch-set
-- **#5186**: feat(economy): add --pnr-report P&R bbox decomposition to --attribute
+- **#5256**: feat: make --pins order define the top .SUBCKT pin order
+- **#5259**: fix: triage native sky130A HV/well/varactor/vpp DRC ids (slice 3/4)
+- **#5260**: fix: triage sky130 metal/cap/resistor/pad native DRC ids
+- **#5263**: refactor: share batch job-timeout and runner-path rewrite helpers via _batch_common
+- **#5264**: refactor: split erc ties/well-selection subsystem into erc_ties module
 
 ## Approved (Awaiting Merge)
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
-- **#5176**: chore(deps): Bump the github-actions group across 1 directory with 3 updates
+_None._
 
 ## Proposed
 
@@ -71,7 +83,6 @@ Issues carrying `loom:curated`.
 - **#2912**: Friction: sky130 native-Vt NMOS (nfet_05v0_nvt) cannot be drawn by klt gen or compared by klt lvs *(curated)*
 - **#3057**: klt sim --backend batch: -o FILE not written when --format json (report goes to stdout) *(curated)*
 - **#3147**: ASAP7 DRC deck: BEOL rules needing track, net, corner or grid predicates *(curated)*
-- **#3312**: ci: add ratcheting per-module coverage floor once report-only data exists *(curated)*
 - **#3420**: Re-pin open_pdks to f6eeac7 (ciel) — fleet retires volare c6d73a3 *(curated)*
 - **#3462**: klt sim batch: no way to require the worker PDK revision match a pin *(curated)*
 - **#3522**: Verify OMP_NUM_THREADS pinning on the batch fleet (follow-up to #3502) *(curated)*
@@ -93,7 +104,13 @@ Issues carrying `loom:curated`.
 - **#4902**: klt sim batch backend: derived measurements referencing other measurements (m_<name>) produce no value *(curated)*
 - **#5153**: Live-verify klt sim request.adapt on real ASAP7 extract-then-sim (needs lambdapdk + bsimcmg.osdi) *(curated)*
 - **#5160**: Extract compare-setup and klayout-engine branch from run_lvs (stage 4/6, after #4126) *(curated)*
-- **#5181**: klt economy: no decomposition of a P&R block bbox into placed cells, physical-only cells, core whitespace, die margin and guard ring *(curated)*
+- **#5196**: Decompose run_extract: ~2,700-line function in extract.py *(curated)*
+- **#5231**: gen: no P-substrate tap (pSD-Activ) on ihp-sg13g2; guard_ring is an n-well tie with off-grid Cont *(curated)*
+- **#5240**: klt sta: allow per-corner clock periods in one multi-corner request *(curated)*
+- **#5251**: Triage native sky130A DRC ids, slice 1/4 (contacts/vias/li) *(curated)*
+- **#5252**: Triage native sky130A DRC ids, slice 2/4 (metals/caps/resistors/pads) *(curated)*
+- **#5253**: Triage native sky130A DRC ids, slice 3/4 (high-voltage/wells/varactor/vpp) *(curated)*
+- **#5255**: klt pex: --pins does not control extracted subcircuit pin order, so a layout whose labels are ordered differently from the schematic cannot be compared *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -110,14 +127,14 @@ Issues carrying `loom:curated`.
 
 | Bucket | Count |
 |------|-------|
-| Operator merge-risk holds | 1 |
+| Operator merge-risk holds | 0 |
 | Very important | 0 |
 | Important | 1 |
-| Ready (`loom:issue`) | 9 |
-| In Progress (`loom:building`) | 5 |
-| PRs awaiting review | 5 |
-| Approved PRs awaiting merge | 1 |
-| Curated | 29 |
+| Ready (`loom:issue`) | 10 |
+| In Progress (`loom:building`) | 12 |
+| PRs awaiting review | 9 |
+| Approved PRs awaiting merge | 0 |
+| Curated | 34 |
 | Architect / Hermit proposals | 3 |
 | Active epics | 2 |
 <!-- guide:plan-body:end -->

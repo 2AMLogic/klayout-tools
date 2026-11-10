@@ -23,7 +23,9 @@ invocations. `constraints.clock_port`/`clock_period_ns` are required (a
 standalone STA run has no meaning without a clock) -- or, for a multi-clock
 design, `constraints.clocks` (a list of {port, period_ns}; the first is
 primary) instead, with optional `constraints.clock_groups` declaring
-asynchronous clock groups (issue #4241). An optional `spef` path feeds a
+asynchronous clock groups (issue #4241). With `pdk.corners`, a
+`constraints.clocks[].period_ns` may be a {corner: period} map whose keys
+equal `pdk.corners` exactly (issue #5240). An optional `spef` path feeds a
 caller-supplied SPEF (e.g. from `klt extract --parasitics`) in via
 `read_spef`, with the same net-name-correlation sanity check `klt place-and-
 route`'s own `post_route_spef` pass runs. See docs/cli/sta.md for the full

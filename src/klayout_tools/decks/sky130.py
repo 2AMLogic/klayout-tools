@@ -377,6 +377,7 @@ from . import (
     ResistorDevice,
     RuleProvenance,
 )
+from .sky130_unmodeled import UNMODELED_RULES, native_output_id  # noqa: F401
 
 # `RuleProvenance.source_repo`/`.commit` shared by every sky130 width/space
 # rule's provenance below (issue #747, piloted on this deck's 11 width/space
@@ -1682,9 +1683,9 @@ DECK: list[DrcRule] = [
         check="width",
         threshold_dbu=840,  # 0.84 um
         # sky130.lydrc rule "nwell.1a": nwell.width(0.84, euclidian)
-        # -> "nwell.1a : min. nwell width : 0.84um"
+        # -> "nwell.1a : min. nwell width : 0.84um"; native id "nwell.1" (#5253)
         scope="nwell",  # sky130.lydrc "nwell.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "nwell.1a"),
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "nwell.1"),
     ),
     DrcRule(
         id="nwell.space.1",
@@ -1937,6 +1938,7 @@ def _offgrid_rules() -> list[DrcRule]:
     """
     rules: list[DrcRule] = []
     for stem, layer, angle_limit_deg, angle_rule_id in _OFFGRID_ROWS:
+        rid = native_output_id(stem, "OFFGRID", "x.1b")
         rules.append(
             DrcRule(
                 id=f"{stem}.ongrid.1",
@@ -1951,7 +1953,7 @@ def _offgrid_rules() -> list[DrcRule]:
                 # sky130.lydrc OFFGRID block: `<layer>.ongrid(0.005)`
                 # -> "x.1b : OFFGRID vertex on <layer>"
                 scope="x",  # sky130.lydrc "x.*" rule-id family (#566)
-                provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "x.1b"),
+                provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", rid),
                 # One grid for every layer and every voltage domain: the
                 # source block has no second column to have misread (#2369).
                 voltage_independent=True,
@@ -1959,6 +1961,7 @@ def _offgrid_rules() -> list[DrcRule]:
         )
         if angle_limit_deg is None:
             continue
+        rid = native_output_id(stem, "angle", angle_rule_id)
         rules.append(
             DrcRule(
                 id=f"{stem}.angle.1",
@@ -1974,9 +1977,7 @@ def _offgrid_rules() -> list[DrcRule]:
                 # `<layer>.with_angle(0 .. <limit>)`
                 # -> "<rule id> : non <limit> degree angle <layer>"
                 scope="x",  # sky130.lydrc "x.*" rule-id family (#566)
-                provenance=_sky130_provenance(
-                    "sky130/klayout/sky130.lydrc", angle_rule_id
-                ),
+                provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", rid),
                 # `x.2c` is the diff/tap floor of a genuinely two-column
                 # source rule (note 1 above) -- the only rows here that keep
                 # the conservative default.
@@ -2102,8 +2103,6 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
 #: ``marker_blind_layers``, so identical results with and without the marker
 #: are not misread as marker-aware behaviour.
 MARKER_BLIND_LAYERS: tuple[tuple[int, int], ...] = ((81, 2),)
-
-from .sky130_unmodeled import UNMODELED_RULES  # noqa: E402,F401  (re-export)
 
 UNMODELED_VOLTAGE_MARKERS: dict[tuple[int, int], str] = {
     (75, 20): (
