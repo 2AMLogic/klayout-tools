@@ -6,6 +6,34 @@ Split out of :mod:`.sky130` to keep that module under its file-size ceiling;
 
 from __future__ import annotations
 
+#: Rows whose provenance cites the native sky130A output ids
+#: (``<stem>_OFFGRID`` / ``<stem>_angle``, the ids ``klt drc`` coverage is
+#: diffed against, issue #5253) instead of the shared ``x.1b`` / ``x.2*`` /
+#: ``x.3a`` message ids. Each row's stem equals the native output stem. Other
+#: rows keep the message id until their triage slice of #5242 lands.
+_NATIVE_OUTPUT_ID_STEMS: frozenset[str] = frozenset(
+    {
+        "dnwell",
+        "hvi",
+        "hvntm",
+        "hvtp",
+        "hvtr",
+        "nwell",
+        "pwbm",
+        "pwde",
+        "pwell_rs",
+        "uhvi",
+        "vhvi",
+        "vpp",
+    }
+)
+
+
+def native_output_id(stem: str, suffix: str, fallback: str) -> str:
+    """``<stem>_<suffix>`` for a native-triaged stem, else the shared ``fallback``."""
+    return f"{stem}_{suffix}" if stem in _NATIVE_OUTPUT_ID_STEMS else fallback
+
+
 #: Official sky130A_mr.drc rule ids this curated deck knowingly does *not*
 #: transcribe (issue #3031): the "2-adjacent-edges-relaxed" enclosure
 #: refinements, which need a per-edge-pair primitive ``DrcRule`` does not have
@@ -19,7 +47,7 @@ from __future__ import annotations
 #: as full coverage. The open ``sky130A_mr.drc`` defines no latch-up or ESD
 #: rules, so there is no id to list for those (see ``docs/cli/drc.md``).
 #: Remove an id here when its rule is added.
-UNMODELED_RULES: tuple[str, ...] = (
+_CORE_UNMODELED_RULES: tuple[str, ...] = (
     # Sorted (tests/test_drc_sky130_spacing.py enforces it), so per-group
     # reasons live here rather than inline:
     # - Implant/npc/well rules (issue #2934) scoped to compound layer
@@ -223,6 +251,137 @@ UNMODELED_RULES: tuple[str, ...] = (
     "via.5a",
     "via2.5",
     "via3.5",
+)
+
+#: Native sky130A ids of the high-voltage / well / varactor / vpp families that
+#: the deck knowingly does not model (triage slice 3/4 of issue #5242).
+_HV_WELL_UNMODELED_RULES: tuple[str, ...] = (
+    # Depletion NMOS/PMOS (denmos/depmos) rules: the deck has no depletion-device
+    # marker layers or gate-derived layers (issue #5253).
+    "denmos.1",
+    "denmos.10",
+    "denmos.11",
+    "denmos.12",
+    "denmos.13",
+    "denmos.2",
+    "denmos.3",
+    "denmos.4",
+    "denmos.5",
+    "denmos.6",
+    "denmos.7",
+    "denmos.8",
+    "denmos.9a",
+    "denmos.9b",
+    "depmos.1",
+    "depmos.10",
+    "depmos.11",
+    "depmos.12",
+    "depmos.2",
+    "depmos.3",
+    "depmos.4",
+    "depmos.5",
+    "depmos.6",
+    "depmos.7",
+    "depmos.8",
+    "depmos.9a",
+    "depmos.9b",
+    # dnwell/pwde/pwbm/pwdem width, spacing and enclosure rules: dnwell, pwde,
+    # pwbm and the deep-pwell marker are only ongrid/angle-checked; the deck has
+    # no width/space/enclosure rule on them (issue #5253).
+    "dnwell.1",
+    "dnwell.3",
+    "dnwell.4",
+    "dnwell.5",
+    "pwbm",
+    "pwbm.4",
+    "pwde.1",
+    "pwde.2",
+    "pwdem.3",
+    "pwdem.4",
+    "pwdem.5",
+    # nwell.4-.7 need dnwell/uhvi/areaid:po/tap compound layer expressions
+    # (nwell.1 is nwell.width.1) (issue #5253).
+    "nwell.4",
+    "nwell.5",
+    "nwell.6",
+    "nwell.7",
+    # High-voltage (hv.*, hvdifftap.*, hvpoly.*, hvnwel*) rules over hvi-derived
+    # gate/diff/nwell layers that DrcRule cannot evaluate (issue #5253).
+    "hv.diff.1",
+    "hv.diff.2",
+    "hv.diff.3a",
+    "hv.nwell.1",
+    "hv.poly.2",
+    "hv.poly.3",
+    "hv.poly.4",
+    "hv.poly.6",
+    "hvdifftap.14",
+    "hvdifftap.14a",
+    "hvdifftap.15a",
+    "hvdifftap.15b",
+    "hvdifftap.16",
+    "hvdifftap.17",
+    "hvdifftap.18",
+    "hvdifftap.19",
+    "hvdifftap.20",
+    "hvdifftap.21",
+    "hvdifftap.22",
+    "hvdifftap.23",
+    "hvdifftap.24",
+    "hvdifftap.25",
+    "hvnwel.9",
+    "hvnwell.8",
+    "hvpoly.13",
+    "hvpoly.14",
+    # hvi/hvtp/hvntm/uhvi/vhvi spacing, enclosure and overlap rules; the deck
+    # gives these marker layers only ongrid/angle rules (see issue #3802, #5253).
+    "hvi.2",
+    "hvi.4",
+    "hvntm.3",
+    "hvntm.4",
+    "hvntm.5",
+    "hvntm.6a",
+    "hvntm.9",
+    "hvtp",
+    "hvtp.3",
+    "hvtp.4",
+    "hvtp.5",
+    "uhvi.1",
+    "uhvi.2",
+    "uhvi.3",
+    "uhvi.4",
+    "uhvi.5",
+    "uhvi.6",
+    "uhvi.7",
+    "vhvi.1",
+    "vhvi.2",
+    "vhvi.3",
+    "vhvi.5",
+    "vhvi.7",
+    # Varactor (varac.*) rules need varac marker and tap-minus-poly edge
+    # expressions (issue #5253).
+    "varac.1",
+    "varac.2",
+    "varac.3",
+    "varac.4",
+    "varac.5",
+    "varac.6",
+    "varac.7",
+    # vpp capacitor-marker rules; vpp is only ongrid/angle-checked (issue #5253).
+    "vpp.1",
+    "vpp.13",
+    "vpp.3",
+    "vpp.4",
+    "vpp.5",
+    "vpp.5a",
+    "vpp.5b",
+    "vpp.5c",
+    "vpp.8",
+    "vpp.9",
+)
+
+UNMODELED_RULES: tuple[str, ...] = tuple(
+    sorted(_CORE_UNMODELED_RULES + _HV_WELL_UNMODELED_RULES)
 )
 
 
