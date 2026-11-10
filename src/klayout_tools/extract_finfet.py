@@ -875,16 +875,13 @@ def _extract_with_parasitics(
     netlist = l2n.netlist()
     pin_warnings: list[str] = []
     if def_net_names:
-        # Same ordering contract as the planar path: after `extract_netlist`
-        # (needs the live `l2n`), before pins are promoted or nets purged.
+        # Planar-path ordering: after `extract_netlist`, before pins/purge.
         pin_warnings = _def_net_name_warnings(
             l2n, layers.metals, def_net_name_probes, top_cell.name
         )
     netlist.combine_devices()
     netlist.make_top_level_pins()
-    # Same as the planar path (issue #539): a labelled net with no device
-    # terminal (a bare routed wire) is skipped by `make_top_level_pins()` and
-    # would otherwise be purged, so `--parasitics` could never see it.
+    # As the planar path (#539): keep a labelled net with no device terminal.
     _promote_orphan_named_nets(netlist)
     if declared_pins is not None:
         _apply_declared_pins(netlist, top_cell.name, declared_pins, pin_warnings)
@@ -920,9 +917,7 @@ def _extract_with_parasitics(
     return netlist.dup(), warnings, parasitic_nets
 
 
-# --------------------------------------------------------------------------- #
-# Integration points used by extract.py / klt lvs
-# --------------------------------------------------------------------------- #
+# --- Integration points used by extract.py / klt lvs ----------------------- #
 
 
 def _deck_or_none(deck_name: str) -> object:

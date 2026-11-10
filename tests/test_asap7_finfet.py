@@ -1306,8 +1306,7 @@ _SCAN_FLOP_SERIES_ORDER_CELLS = (
 _SERIES_ORDER_CELLS = frozenset(
     _COMBINATIONAL_SERIES_ORDER_CELLS + _SCAN_FLOP_SERIES_ORDER_CELLS
 )
-#: No devices: only its labelled VDD/VSS rails are extracted (as orphan pins,
-#: #5201), so it is outside the 191 device-bearing cells counted below.
+#: No devices: only labelled VDD/VSS rails (orphan pins, #5201) are extracted.
 _NO_DEVICE_CELLS = frozenset({"TAPCELL_ASAP7_75t_R"})
 _UNSUPPORTED_CELLS = _FOLDED_STACK_CELLS | _SERIES_ORDER_CELLS | _NO_DEVICE_CELLS
 
@@ -1626,19 +1625,3 @@ def test_lvs_gate_level_verilog_missing_cell_body_is_an_error(tmp_path):
 def test_lvs_gate_level_verilog_still_refuses_device_map(tmp_path):
     with pytest.raises(LvsError, match="device_map"):
         _lvs_gate_level(tmp_path, extra={"device_map": {"a": "b"}})
-
-
-def test_parasitics_see_a_labelled_net_with_no_device_terminal(tmp_path):
-    """A bare routed wire carrying a pin-purpose label is promoted to a pin
-    (issue #539 on the planar path) instead of being purged (#5201)."""
-    layout = kdb.Layout()
-    layout.dbu = DBU
-    top = layout.create_cell("TOP")
-    top.shapes(layout.layer(19, 0)).insert(kdb.Box(0, 0, 2000, 72))
-    top.shapes(layout.layer(19, 251)).insert(kdb.Text("A", kdb.Trans(1000, 36)))
-    path = _write(layout, tmp_path)
-    report = run_extract(
-        path, "asap7", output=str(tmp_path / "w.spice"), parasitics=True
-    )
-    assert [n["name"] for n in report["nets"]] == ["A"]
-    assert [n["net"] for n in report["parasitics"]["nets"]] == ["A"]

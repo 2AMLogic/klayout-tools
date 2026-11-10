@@ -3,62 +3,35 @@
 (`klt extract --deck asap7 --parasitics`) against `klt mom`'s field solver on
 dense parallel lines.
 
-Mirrors `examples/critical-net-mom-fidelity/generate_and_measure.py` (the
-sky130 write-up); phases 2-3 of #5199 (circuit quantities, `klt pex` warning,
-docs accuracy table) are deliberately not here.
+Mirrors `examples/critical-net-mom-fidelity/` (sky130); phases 2-3 of #5199
+are deliberately not here.
 
 ## Fixture (one per sweep point)
 
-N parallel lines on one ASAP7 metal level `Mm` (running along x), at
-`pitch_mult` x the level's LEF pitch, plus three orthogonal lines on `Mm-1`
-and three on `Mm+1` (running along y, crossing every parallel line at the
-level's own minimum pitch). Nets: `N0..` (parallel), `D0..2` (below),
-`U0..2` (above). The victim is the middle parallel line. Sweep: level
-(M2, M4) x pitch (1x, 2x, 4x) x density (`dense`: 5 parallel lines, `sparse`:
-3, so the victim has no second neighbours) at one length (see `LENGTH_UM`).
+N parallel lines on one metal level `Mm` at `pitch_mult` x the LEF pitch,
+plus three orthogonal lines each on `Mm-1` and `Mm+1` (nets `N*`, `D0..2`,
+`U0..2`); the victim is the middle parallel line. Sweep: level (M2, M4) x
+pitch (1x, 2x, 4x) x density (`dense`: 5 lines, `sparse`: 3) at `LENGTH_UM`.
 
 ## Three extraction paths
 
 (a) `klt extract --deck asap7 --parasitics` (`run_extract`) -- the deck's
     lumped per-net R, ground C, and *vertical* overlap coupling.
-(b) the same with `--critical-net <victim>`. **This is refused for every
-    FinFET deck** (`extract_finfet.reject_unsupported_options`), and the asap7
-    parasitics deck curates no `metal_sidewalls`. The script calls it anyway
-    and records the refusal verbatim: the (b) columns read `"unsupported"`,
-    they are never silently dropped or zero-filled.
-(c) `klt mom`'s native solver (`solve_capacitance_matrix`, in memory -- the
-    same API `klt extract --mom-net` uses; per-net conductors need one
-    conductor per line, which a layer->conductor stackup spec cannot express)
-    for capacitance, and `run_mom(..., compute_inductance=True)` (PEEC) on a
-    single victim-shaped bar per level for DC resistance.
+(b) the same with `--critical-net <victim>`, **refused for every FinFET deck**
+    (`extract_finfet.reject_unsupported_options`). The script calls it anyway
+    and records the refusal verbatim: (b) reads `"unsupported"`, never
+    dropped or zero-filled.
+(c) `klt mom`'s native solver (`solve_capacitance_matrix`, in memory, as
+    `klt extract --mom-net` does) for capacitance, and
+    `run_mom(..., compute_inductance=True)` (PEEC) on one victim-shaped bar
+    per level for DC resistance.
 
 The relative error of (a)/(b) vs (c) is `100 * (a - c) / |c|`.
 
-## Stack: one way only -- an explicit stackup generated from cited sources
+## Stack and idealisations
 
-`stackup_from_pdk` has no ASAP7 route (sky130 only), so this script writes an
-explicit `stackup` (`asap7-stackup.json`, `klt mom` spec format) from `STACK`:
-
-- widths / pitches: `asap7_tech.lef` (lambdapdk v0.2.17, sha256 below);
-- M1 thickness 36 nm and the effective resistivity: the pinned RVT RC netlist
-  `asap7sc7p5t_28_R.sp` (`$thickness=3.6e-08`; rho = R*w*t/l, median over its
-  `$layer=M1` resistors);
-- **ASSUMED, not in the pinned archive**: M2.. thickness = 2 x min width
-  (aspect ratio 2, Clark et al., Microelectronics J. 53, 2016), inter-level
-  dielectric height = the lower level's thickness, background permittivity
-  3.9 (SiO2, the value `--mom-net` and the sky130 write-up use), a ground
-  plate one M1 thickness below M1.
-
-## Reference idealisations (state them next to any number)
-
-- 3-D boxes with full thickness, perfectly rectangular (no trapezoid
-  profile, no barrier/liner, no line-edge roughness);
-- one homogeneous dielectric -- no etch-stop/low-k layering;
-- the ground "plane" is a finite zero-thickness plate (bbox + 0.1 um), not
-  the substrate; conductors on levels not drawn are absent;
-- vias are not drawn: the orthogonal lines are separate nets;
-- quasi-static capacitance, DC resistance of one isolated bar (no size
-  effect beyond the effective rho above).
+One explicit `stackup` (`asap7-stackup.json`) is written from `STACK`; the
+cited vs ASSUMED inputs and the reference idealisations are in `README.md`.
 """
 
 from __future__ import annotations
@@ -235,11 +208,6 @@ def write_gds(shapes: dict, path: str) -> None:
             kdb.Text(net, kdb.Trans(box.center().x, box.center().y))
         )
     layout.write(path)
-
-
-# --------------------------------------------------------------------------- #
-# Measurements
-# --------------------------------------------------------------------------- #
 
 
 def _rel_err(value: float | None, ref: float | None) -> float | None:
@@ -466,12 +434,10 @@ def run_point(
 
 
 IDEALISATIONS = [
-    "reference is 3-D rectangular boxes of full thickness "
-    "(no trapezoid profile, liner or roughness)",
-    "one homogeneous dielectric (eps_r 3.9, ASSUMED); no etch-stop/low-k layering",
+    "reference is 3-D rectangular full-thickness boxes (no trapezoid, liner, "
+    "roughness); one homogeneous dielectric (eps_r 3.9, ASSUMED)",
     "ground is a finite zero-thickness plate one M1 thickness below M1 "
-    "(ASSUMED), not the substrate",
-    "vias not drawn: orthogonal lines are separate nets",
+    "(ASSUMED), not the substrate; vias not drawn (orthogonal lines are nets)",
     "M2+ thickness = 2x min width and ILD height = lower thickness are ASSUMED "
     "(not in the pinned archive); M1 thickness and rho are cited",
     "quasi-static C; R is DC of one isolated bar at the effective rho",

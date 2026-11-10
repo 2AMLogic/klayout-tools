@@ -16,8 +16,8 @@ Needs the built `klt_mom_native` extension (`maturin develop --release` in
 `native/mom/`); the full sweep takes about ten minutes. It regenerates
 `points/*.gds` (one fixture per point), `asap7-stackup.json` (the explicit
 `klt mom` stackup) and `results.json` (per-point numbers, tool versions,
-input hashes, idealisations). The docstring in `generate_and_measure.py` is
-the full methodology.
+input hashes, idealisations). The docstring in `generate_and_measure.py` gives
+the fixture and extraction paths; this README the stack and idealisations.
 
 ## Findings (M2/M4, 0.36 um long, victim = middle line)
 
