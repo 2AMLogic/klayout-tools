@@ -2365,8 +2365,8 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
             "unit list into batch jobs of at most this many units (applied "
             "to the schematic and the extracted `klt sim` call of every "
             "testbench separately), so no job outruns the fleet's whole-job "
-            "ceiling (default: each request's `batch.max_units_per_job`, "
-            "else no split). Same semantics as `klt sim --max-units-per-job`."
+            "ceiling (default: each request's `batch.max_units_per_job`, else "
+            "no split). Same as `klt sim --max-units-per-job`."
         ),
     )
     pex_parser.add_argument(
@@ -2378,8 +2378,7 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
             "backend `batch`, sharded runs: keep at most this many shard "
             "jobs in flight at once per `klt sim` call (default: each "
             "request's `batch.max_concurrent_jobs`, else every shard is "
-            "submitted at once). Same semantics as `klt sim "
-            "--max-concurrent-jobs`."
+            "submitted at once). Same as `klt sim --max-concurrent-jobs`."
         ),
     )
     pex_parser.add_argument(

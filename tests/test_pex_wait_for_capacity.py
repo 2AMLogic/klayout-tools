@@ -1,7 +1,7 @@
 """`klt pex --wait-for-capacity` (issue #5280): forwarded to every `run_sim`
 leg, and refused up front when invalid."""
 
-# ruff: noqa: F811
+# ruff: noqa: F401, F811
 from __future__ import annotations
 
 import pytest
@@ -12,6 +12,7 @@ from test_pex import (
     _write_request,
     _write_schematic_dut,
     _write_testbench,
+    resistor_layout,
 )
 
 
