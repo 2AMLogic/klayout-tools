@@ -1281,7 +1281,9 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   member fails, nothing is submitted, no `set-manifest.json` is written, and the
   command exits `1` with error code `batch_set_preflight_failed` naming every
   failing member (path and code). Capacity refusals (`--capacity-retries`) can
-  still fail mid-set.
+  still fail mid-set. `decks[]` and `commands[]` members are accepted and are
+  not ceiling-checked ([#5317](https://github.com/2AMLogic/klayout-tools/issues/5317)):
+  a deck list is one batch job and is never sharded, so there is no ceiling to assess.
 - **`--dry-run`** ([#5012](https://github.com/2AMLogic/klayout-tools/issues/5012)).
   `klt sim --batch-set ... --dry-run` runs only the all-or-nothing preflight
   above and exits `0` with `dry_run: true`, `submitted: 0` and one

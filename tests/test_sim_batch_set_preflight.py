@@ -130,3 +130,74 @@ def test_injected_run_without_preflight_skips_it(tmp_path, monkeypatch):
         paths, outdir=str(tmp_path / "out"), run=lambda p, **kw: _fake_report()
     )
     assert report["submitted"] == 1
+
+
+def _deck_member(tmp_path, name):
+    (tmp_path / f"{name}.sp").write_text("* deck\n.end\n")
+    request = {
+        "engine": "ngspice",
+        "backend": "batch",
+        "models": {"pdk": "sky130A"},
+        "decks": [{"id": "a", "deck": f"{name}.sp"}],
+    }
+    path = tmp_path / f"{name}_req.json"
+    path.write_text(json.dumps(request))
+    return str(path)
+
+
+def test_deck_list_members_pass_preflight_and_submit(tmp_path, monkeypatch):
+    from klayout_tools import sim_set
+
+    calls = []
+
+    def fake_run(path, **kw):
+        calls.append(path)
+        return _fake_report()
+
+    _patch_set_run(monkeypatch, fake_run)
+    paths = [_deck_member(tmp_path, "d1"), _deck_member(tmp_path, "d2")]
+
+    report = sim_set.run_sim_set(
+        paths,
+        outdir=str(tmp_path / "out"),
+        preflight=sim_set.preflight_batch_request,
+        max_in_flight=1,
+    )
+    assert report["submitted"] == 2
+    assert sorted(calls) == sorted(paths)
+
+    dry = sim_set.run_sim_set(
+        paths, preflight=sim_set.preflight_batch_request, dry_run=True
+    )
+    assert dry["status"] == "pass"
+    assert [r["status"] for r in dry["requests"]] == ["dry_run", "dry_run"]
+
+
+def test_mixed_set_names_only_the_corner_member(tmp_path, monkeypatch):
+    from klayout_tools import sim_set
+    from klayout_tools.sim import SimError
+
+    _write_body(tmp_path)
+    calls = []
+    _patch_set_run(monkeypatch, lambda path, **kw: calls.append(path))
+    paths = [
+        _deck_member(tmp_path, "d1"),
+        _member(tmp_path, "bad", timeout_s=100, max_job_seconds=150),
+    ]
+    with pytest.raises(SimError) as excinfo:
+        sim_set.run_sim_set(
+            paths,
+            outdir=str(tmp_path / "out"),
+            preflight=sim_set.preflight_batch_request,
+        )
+    assert calls == []
+    assert excinfo.value.code == sim_set.SET_PREFLIGHT_CODE
+    assert "bad.json" in str(excinfo.value) and "d1_req.json" not in str(excinfo.value)
+
+
+def test_command_list_member_passes_preflight(tmp_path):
+    from klayout_tools import sim_set
+
+    path = tmp_path / "c.json"
+    path.write_text(json.dumps({"backend": "batch", "commands": [{"id": "x"}]}))
+    assert sim_set.preflight_batch_request(str(path)) == {}

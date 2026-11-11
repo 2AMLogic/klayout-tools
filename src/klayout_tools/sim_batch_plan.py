@@ -49,7 +49,16 @@ def preflight_batch_request(request_path: str, **overrides: Any) -> dict[str, An
     before any S3 write. Raises :class:`SimError` with the submit path's own
     code; returns the job-ceiling assessment otherwise. ``overrides`` are the
     :func:`~klayout_tools.sim.run_sim` keyword options."""
-    from .sim import _prepare_sim_request
+    from . import sim_commands, sim_decks
+    from .sim import _prepare_sim_request, load_request
+
+    # Deck-list / command-list members (issue #5317) carry no corner grid, so
+    # the corner ceiling/split planner does not apply: one deck list is one
+    # batch job, never sharded. Accept them here (the real run validates their
+    # shape); this also avoids the corner path's ``request["netlist"]`` read.
+    request = load_request(request_path)
+    if sim_decks.DECKS_FIELD in request or sim_commands.COMMANDS_FIELD in request:
+        return {}
 
     resolved = _prepare_sim_request(
         request_path,
