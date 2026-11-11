@@ -6964,7 +6964,8 @@ def test_sg13g2_res_array_default_params_recognised_as_rsil(tmp_path, sg13g2_pdk
 
 
 @pytest.mark.parametrize(
-    ("flavor", "device"), [("generic", "rsil"), ("rppd", "rppd"), ("rhigh", "rhigh")]
+    ("flavor", "device"),
+    [("generic", "rsil"), ("rsil", "rsil"), ("rppd", "rppd"), ("rhigh", "rhigh")],
 )
 def test_sg13g2_res_array_uses_pdk_pcell_polyres_body_abutting_gatpoly_heads(
     tmp_path, sg13g2_pdk_root, flavor, device
@@ -12390,3 +12391,13 @@ def test_res_array_no_ongrid_rule_does_not_snap(tmp_path, both_pdk_root, monkeyp
 def test_res_array_metal_level_is_not_snapped(tmp_path, both_pdk_root):
     report = _gen_res(tmp_path, both_pdk_root, "met", length_um=3.343, metal_level=1)
     assert "length_snap" not in report["drc_hints"]
+
+
+def test_sg13g2_rsil_alias_matches_generic_masks():
+    """Issue #5288: sg13g2 `rsil` is an alias of `generic` (same masks);
+    sky130/gf180mcu still reject it."""
+    from klayout_tools.gen_layer_params import _PDK_RES_FLAVOR_LAYERS as T
+
+    assert T["sg13g2"]["rsil"] == T["sg13g2"]["generic"]
+    assert "rsil" not in T["sky130"]
+    assert "rsil" not in T["gf180mcu"]

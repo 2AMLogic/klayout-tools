@@ -224,6 +224,9 @@ packages = ["src/klayout_tools"]
 # wheel.)
 [tool.hatch.build.targets.wheel.force-include]
 "docs/design-evidence-tiers.md" = "klayout_tools/data/design-evidence-tiers.md"
+# Per-verb CLI pages: `--help` text points at `docs/cli/<verb>.md`, so ship them
+# for wheel-only installs (issue #5288).
+"docs/cli" = "klayout_tools/data/cli"
 
 # Distribution version (issue #2823). `base-version` is the release this
 # checkout is at or working towards -- bump it here (then `uv lock`) when

@@ -708,6 +708,13 @@ _PDK_RES_FLAVOR_LAYERS: dict[str, dict[str, tuple[tuple[int, int], ...]]] = {
             (111, 0),  # EXTBlock -- upstream's `polyres_mk` head term
             (24, 0),  # Res       -- the silicided-resistor marker itself
         ),
+        # `"rsil"` is the same class under its literal device-class name
+        # (issue #5288), mirroring sg13cmos5l's alias: identical masks, so
+        # `flavor="rsil"` and `flavor="generic"` draw byte-identical geometry.
+        "rsil": (
+            (111, 0),  # EXTBlock
+            (24, 0),  # Res
+        ),
         # rppd (260 ohm/sq): p+ doped, unsalicided poly --
         # `EXTRACTION_DECK.resistors["rppd"].requires` (issue #1451). Three
         # masks; rsil's own `excludes` (pSD, SalBlock) rule it out here.
