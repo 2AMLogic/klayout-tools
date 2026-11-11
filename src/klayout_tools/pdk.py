@@ -86,7 +86,6 @@ frozen ``klt pdk env`` export-line shape.
 
 from __future__ import annotations
 
-import json
 import math
 import os
 import re
@@ -107,6 +106,7 @@ from .pdk_families import (
     pdk_variant_family,
     pdk_variant_install_names,
 )
+from .pdk_store import read_store_stamp
 
 #: The ciel/volare stores, in resolution order (step 3). ``~`` is expanded at
 #: call time against ``$HOME``. Exposed at module scope so tests can override
@@ -702,48 +702,15 @@ def read_version(variant_dir: str) -> str | None:
     to before the fallbacks existed); (2) a ``.fetched-version`` marker
     (``scripts/fetch-*.sh``) as ``fetched:<marker>``; (3) when the variant
     directory or its parent is itself a git work tree root, ``git:<40-hex
-    HEAD>`` with a ``-dirty`` suffix for uncommitted changes (issue #3070).
-    (4) the fleet bundle's ``.pdk-store.json`` ``version`` (one level above
-    the real variant dir) as ``store:<version>`` (issue #5318).
+    HEAD>`` with a ``-dirty`` suffix for uncommitted changes (issue #3070);
+    (4) the bundle ``.pdk-store.json`` ``version`` as ``store:<v>`` (#5318).
     Absent/unreadable/empty → ``None`` (never guessed).
     """
-    sources = read_sources(variant_dir)
-    if sources:
+    if sources := read_sources(variant_dir):
         return sources
-    marker = read_fetched_marker(variant_dir)
-    if marker:
+    if marker := read_fetched_marker(variant_dir):
         return f"fetched:{marker}"
-    git = _git_version(variant_dir)
-    if git:
-        return git
-    store = read_store_version(variant_dir)
-    return f"store:{store}" if store else None
-
-
-#: Upper bound on bytes read from ``.pdk-store.json``.
-_STORE_FILE_MAX = 65536
-
-
-def read_store_version(variant_dir: str) -> str | None:
-    """The string ``version`` of the fleet bundle's ``.pdk-store.json``.
-
-    The file sits one level above the real (symlink-resolved) variant dir.
-    Read only, never written here. Missing/unreadable/non-object/non-string/
-    empty → ``None`` (never guessed).
-    """
-    path = os.path.join(
-        os.path.dirname(os.path.realpath(variant_dir)), ".pdk-store.json"
-    )
-    try:
-        with open(path, "rb") as handle:
-            raw = handle.read(_STORE_FILE_MAX + 1)[:_STORE_FILE_MAX]
-        data = json.loads(raw.decode("utf-8", "replace"))
-    except (OSError, ValueError):
-        return None
-    version = data.get("version") if isinstance(data, dict) else None
-    if isinstance(version, str) and version.strip():
-        return version.strip()
-    return None
+    return _git_version(variant_dir) or read_store_stamp(variant_dir)
 
 
 _HEX40 = re.compile(r"^[0-9a-f]{40}$")
