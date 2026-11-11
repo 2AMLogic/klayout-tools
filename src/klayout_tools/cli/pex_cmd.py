@@ -188,11 +188,9 @@ def run(args: argparse.Namespace) -> int:
             hosts=args.hosts,
             resume=args.resume,
             capacity_wait_s=args.wait_for_capacity,
-            # `--deck-option` (issue #1558): selects a caller-visible flavour
-            # of a shared-geometry device family (e.g. gf180mcu's
-            # `poly_res`/`mim_cap`), passed straight through to `klt extract
-            # --deck-option`. `None` when the flag was never given, unchanged
-            # from every call site that predates it.
+            # `--deck-option` (issue #1558): selects a flavour of a shared-geometry
+            # device family (e.g. gf180mcu's `poly_res`/`mim_cap`), passed to
+            # `klt extract --deck-option`; `None` when the flag was never given.
             deck_options=deck_options,
             # `--pins` (issue #1558): the declared top-level pin set, passed
             # straight through to `klt extract --pins`. `None` when the flag

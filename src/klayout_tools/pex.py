@@ -2863,23 +2863,6 @@ def _require_single_dut(dut_paths: Sequence[str]) -> None:
         )
 
 
-def _validate_capacity_wait(capacity_wait_s: float | None, backend: str | None) -> None:
-    """Issue #5280: refuse a bad ``--wait-for-capacity`` before any I/O, by the
-    same resolver / rule ``klt sim`` applies per leg."""
-    if capacity_wait_s is None:
-        return
-    from .sim_batch import resolve_capacity_wait_s
-
-    try:
-        resolve_capacity_wait_s({"capacity_wait_s": capacity_wait_s})
-    except SimError as exc:
-        raise PexError(str(exc), code=exc.code) from exc
-    if backend is not None and backend != "batch":
-        raise PexError(
-            f"--wait-for-capacity requires backend 'batch' (got '{backend}')"
-        )
-
-
 @output_lock.owns_run
 def run_pex(
     layout_path: str,
@@ -3024,10 +3007,9 @@ def run_pex(
     "Execution backends". ``max_units_per_job`` / ``max_concurrent_jobs``
     (issue #4616) are likewise passed to each of those calls, so each side's
     batch grid is sharded on its own; ``None`` leaves the request's own
-    ``batch`` block in force. ``hosts`` / ``resume`` (issue #4624) ride the same path:
-    each leg re-attaches from its own ``batch-shards.json`` on a re-run.
-    ``capacity_wait_s`` (issue #5280, ``--wait-for-capacity``) likewise rides to
-    every leg and overrides each request's ``batch.capacity_wait_s``.
+    ``batch`` block in force. ``hosts`` / ``resume`` (#4624) and
+    ``capacity_wait_s`` (#5280) ride the same path (each leg re-attaches from
+    its own ``batch-shards.json``).
     ``artifacts_dir`` overrides where this command
     writes its own generated artifacts (the extracted-side testbench body/
     request copies, see :func:`_prepare_extracted_request`, and each `klt
@@ -3182,7 +3164,7 @@ def run_pex(
         extract_only=extract_only,
         device_only_leg=device_only_leg,
     )
-    _validate_capacity_wait(capacity_wait_s, backend)
+    pex_async.validate_capacity_wait(capacity_wait_s, backend)
     _own_pex_root(_ownership, artifacts_dir, layout_path)
     # Issue #2478: exactly one of `testbench_paths` / `measure_command`.
     # `command` is the measurement command's argv in `--measure-command`
@@ -3565,17 +3547,13 @@ def run_pex(
     measurement_sides: dict[str, Any] | None = None
     # Issue #4616: the sharding flags ride to every `run_sim` call. Only the
     # given ones are passed, so omitting both is the call shape of before.
-    batch_shard = {
-        key: value
-        for key, value in (
-            ("max_units_per_job", max_units_per_job),
-            ("max_concurrent_jobs", max_concurrent_jobs),
-            ("hosts", hosts),
-            ("resume", resume),
-            ("capacity_wait_s", capacity_wait_s),
-        )
-        if value is not None
-    }
+    batch_shard = pex_async.batch_shard_flags(
+        max_units_per_job=max_units_per_job,
+        max_concurrent_jobs=max_concurrent_jobs,
+        hosts=hosts,
+        resume=resume,
+        capacity_wait_s=capacity_wait_s,
+    )
     if command is not None:
         command_rows, measurement_sides = _measure_both_sides(
             command,

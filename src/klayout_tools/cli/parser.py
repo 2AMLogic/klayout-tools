@@ -91,7 +91,7 @@ from ._drc_parser_args import add_klayout_app_args
 from .color import add_color_args
 from .parser_economy import add_economy_parser
 from .parser_netlist import add_netlist_parser
-from .parser_sim import add_sim_parser
+from .parser_sim import add_sim_parser, add_wait_for_capacity_arg
 from .parsers.extract import add_extract_parser
 
 
@@ -2391,27 +2391,12 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
             "backend `batch`: shard each side's expanded corner/Monte-Carlo "
             "unit list across this many hosts (applied to the schematic and "
             "the extracted `klt sim` call of every testbench separately); "
-            "each leg records its shard job ids in its own "
-            "`batch-shards.json` so `--resume` can re-attach. Same semantics "
-            "as `klt sim --hosts` (default: each request's `remote.hosts`)."
+            "each leg records its shard job ids in its own `batch-shards.json` "
+            "so `--resume` can re-attach. Same as `klt sim --hosts` (default: "
+            "each request's `remote.hosts`)."
         ),
     )
-    pex_parser.add_argument(
-        "--wait-for-capacity",
-        dest="wait_for_capacity",
-        metavar="SECONDS",
-        type=float,
-        default=None,
-        help=(
-            "with --backend batch, wait up to SECONDS (>= 0) for fleet "
-            "capacity when the launch is refused (batch_no_capacity / "
-            "batch_concurrency_cap), re-launching the same job with jittered "
-            "backoff; overrides the request's `batch.capacity_wait_s`. 0 "
-            "means one attempt. Applied to every `klt sim` call of the run "
-            "(schematic, extracted, device-only). Same semantics as `klt sim "
-            "--wait-for-capacity`."
-        ),
-    )
+    add_wait_for_capacity_arg(pex_parser, "Applied to every `klt sim` call of the run.")
     pex_parser.add_argument(
         "--resume",
         dest="resume",

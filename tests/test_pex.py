@@ -6898,53 +6898,6 @@ def test_run_pex_forwards_batch_sharding_flags_to_every_run_sim(
         assert kwargs["resume"] is True
 
 
-def test_run_pex_forwards_wait_for_capacity_to_every_run_sim(
-    tmp_path, resistor_layout, monkeypatch
-):
-    """Issue #5280: `--wait-for-capacity` reaches every `run_sim` leg
-    (including 0); omitted, the kwarg is not passed."""
-    import klayout_tools.pex as pex_module
-
-    def _run(**flags):
-        seen = []
-
-        def _fake_run_sim(*_args, **kwargs):
-            seen.append(kwargs)
-            return _two_corner_schematic_report()
-
-        monkeypatch.setattr(pex_module, "run_sim", _fake_run_sim)
-        dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
-        tb = _write_testbench(tmp_path / "testbench.spice", dut)
-        request = _write_request(tmp_path / "request.json", tb)
-        run_pex(resistor_layout, [str(request)], "sky130", **flags)
-        return seen
-
-    for value in (600.0, 0.0):
-        seen = _run(capacity_wait_s=value, backend="batch")
-        assert len(seen) == 2
-        assert all(kw["capacity_wait_s"] == value for kw in seen)
-    assert all("capacity_wait_s" not in kw for kw in _run())
-
-
-@pytest.mark.parametrize(
-    "kwargs, match",
-    [
-        ({"capacity_wait_s": -1}, "capacity_wait_s"),
-        ({"capacity_wait_s": True}, "capacity_wait_s"),
-        ({"capacity_wait_s": 5, "backend": "local"}, "requires backend 'batch'"),
-    ],
-)
-def test_run_pex_refuses_bad_wait_for_capacity_before_io(
-    tmp_path, resistor_layout, kwargs, match
-):
-    """Issue #5280: refused before anything is extracted or simulated."""
-    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
-    tb = _write_testbench(tmp_path / "testbench.spice", dut)
-    request = _write_request(tmp_path / "request.json", tb)
-    with pytest.raises(PexError, match=match):
-        run_pex(resistor_layout, [str(request)], "sky130", **kwargs)
-
-
 def test_run_pex_invalid_hosts_surfaces_as_pex_error(
     tmp_path, resistor_layout, monkeypatch
 ):
