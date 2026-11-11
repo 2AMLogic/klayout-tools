@@ -65,7 +65,13 @@ from . import liberty_writer, sim
 from ._paths import _load_request_json, _resolve_relative, fold_spice_continuations
 from ._provenance import INPUT_ROLE_NETLIST, build_provenance
 from .characterize_arcs import DerivedArc, FunctionError, derive_arcs
-from .characterize_cards import _POWER_CARDS, measurement_cards, power_cards
+from .characterize_cards import (
+    _POWER_CARDS,
+    measurement_cards,
+    power_cards,
+    slug,
+    spice_number,
+)
 from .characterize_constraints import (
     ConstraintError,
     resolve_constrained_pins,
@@ -218,7 +224,7 @@ def run_characterize(
     results: list[dict[str, Any]] = []
     for cell, arcs in resolved:
         cell_dir = (
-            os.path.join(work_dir, "cells", _slug(cell["name"])) if batch else work_dir
+            os.path.join(work_dir, "cells", slug(cell["name"])) if batch else work_dir
         )
         try:
             results.append(
@@ -1135,7 +1141,7 @@ def _build_stimulus_plan(
     # `_build_sim_request`), which `klt sim` emits as `pre_osdi` lines in the
     # `.control` block it generates itself (issue #2513).
     lines.append(f".include {cell['netlist_path']}")
-    lines.append(f"Vdd vdd 0 DC {_spice_number(vdd)}")
+    lines.append(f"Vdd vdd 0 DC {spice_number(vdd)}")
 
     rail_nodes = _rail_nodes(cell)
 
@@ -1249,7 +1255,7 @@ def _build_stimulus_plan(
                     "name": f"{tag}_{suffix}",
                     "spice": (
                         f".meas tran {tag}_{suffix} INTEG i(Vcm{tag}) "
-                        f"FROM={_spice_number(start)}n TO={_spice_number(stop)}n"
+                        f"FROM={spice_number(start)}n TO={spice_number(stop)}n"
                     ),
                     "unit": "C",
                 }
@@ -1279,7 +1285,7 @@ def _build_stimulus_plan(
                 "name": f"{tag}_i",
                 "spice": (
                     f".meas tran {tag}_i AVG i(Vpl{tag}) "
-                    f"FROM=0 TO={_spice_number(stop_ns)}n"
+                    f"FROM=0 TO={spice_number(stop_ns)}n"
                 ),
                 "unit": "A",
             }
@@ -1323,14 +1329,14 @@ def _instance_lines(
     for pin in cell["pins"]:
         name = pin["name"]
         if pin["direction"] == "output":
-            node_of[name] = f"o_{tag}_{_slug(name)}"
+            node_of[name] = f"o_{tag}_{slug(name)}"
         elif name == arc.related_pin:
             node_of[name] = f"i_{tag}"
         elif clock_times is not None and low_map.get(name, False) != side_map[name]:
-            node_of[name] = f"d_{tag}_{_slug(name)}"
+            node_of[name] = f"d_{tag}_{slug(name)}"
             data_sources.append(
                 data_pwl_line(
-                    f"V{tag}d_{_slug(name)}",
+                    f"V{tag}d_{slug(name)}",
                     node_of[name],
                     low=low_map[name],
                     high=side_map[name],
@@ -1349,10 +1355,10 @@ def _instance_lines(
     if clock_times is None:
         source = (
             f"V{tag} i_{tag} 0 PWL(0 0 "
-            f"{_spice_number(rise_start)}n 0 "
-            f"{_spice_number(rise_start + ramp_ns)}n {_spice_number(vdd)} "
-            f"{_spice_number(fall_start)}n {_spice_number(vdd)} "
-            f"{_spice_number(fall_start + ramp_ns)}n 0)"
+            f"{spice_number(rise_start)}n 0 "
+            f"{spice_number(rise_start + ramp_ns)}n {spice_number(vdd)} "
+            f"{spice_number(fall_start)}n {spice_number(vdd)} "
+            f"{spice_number(fall_start + ramp_ns)}n 0)"
         )
     else:
         source = clock_pwl_line(
@@ -1374,17 +1380,9 @@ def _instance_lines(
     ]
     for output in cell["output_pins"]:
         lines.append(
-            f"C{tag}_{_slug(output)} {node_of[output]} 0 {_spice_number(load_pf)}p"
+            f"C{tag}_{slug(output)} {node_of[output]} 0 {spice_number(load_pf)}p"
         )
     return lines
-
-
-def _spice_number(value: float) -> str:
-    return liberty_writer.format_number(value, precision=10)
-
-
-def _slug(name: str) -> str:
-    return re.sub(r"[^A-Za-z0-9_]", "_", name)
 
 
 # --------------------------------------------------------------------------- #
@@ -1403,8 +1401,8 @@ def _build_sim_request(
     keep_artifacts: bool | None,
 ) -> dict[str, Any]:
     window = plan["window"]
-    step = _spice_number(window["step_ns"])
-    stop = _spice_number(window["stop_ns"])
+    step = spice_number(window["step_ns"])
+    stop = spice_number(window["stop_ns"])
     corners: dict[str, Any] = {
         "supply_v": {"vdd": [corner["supply_v"]]},
         "temperature_c": [corner["temperature_c"]],
