@@ -8,6 +8,15 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-10
 
+- **PR #5278**: docs(lvs): document gf180mcu LDMOS PCell combine_devices recipe
+- **PR #5276**: feat: add klt evidence render to fill marked doc tables from records
+- **PR #5275**: feat: add klt evidence claims document-to-evidence checker
+- **PR #5272**: docs(sim): clarify -o is a directory; test batch report via --report-out
+- **Issue #5277** (closed): extract/drc: PDK nfet_10v0_asym PCell still extracts as two plain nfet on 0.9.1 and trips CO.4 / DF.1a_MV
+- **Issue #5274** (closed): klt evidence render: generate marked tables in docs from evidence records (--check for staleness)
+- **Issue #5273** (closed): klt evidence claims: check that documents cite current evidence records and that their numbers match (plus a table renderer)
+- **Issue #5242** (closed): Triage 398 untriaged native sky130A DRC rule ids into implemented vs unmodeled
+- **Issue #3057** (closed): klt sim --backend batch: -o FILE not written when --format json (report goes to stdout)
 - **PR #5270**: fix: triage remaining contact/via/li native sky130A DRC ids
 - **PR #5258**: fix: triage 59 native sky130 contact/via/li rule ids
 - **Issue #5251** (closed): Triage native sky130A DRC ids, slice 1/4 (contacts/vias/li)
