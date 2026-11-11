@@ -47,6 +47,15 @@ def validate_macro_margin(
             f"{name} must be a number (uniform, in um) or an object naming any of: "
             f"{sides}"
         )
+    return _validate_per_side(value, name=name, error_cls=error_cls)
+
+
+def _validate_per_side(
+    value: dict[str, Any], *, name: str, error_cls: type[Exception]
+) -> dict[str, float]:
+    """The object half of :func:`validate_macro_margin`: any subset of
+    :data:`MACRO_HALO_SIDES`, each unnamed side defaulting to ``0``."""
+    sides = ", ".join(MACRO_HALO_SIDES)
     if not value:
         raise error_cls(f"{name} must name at least one of: {sides}")
     unknown = sorted(set(value) - set(MACRO_HALO_SIDES))
