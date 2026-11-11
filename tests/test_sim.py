@@ -14809,9 +14809,9 @@ def test_apply_engine_host_xyce_stays_null_and_client_null():
 
 
 def test_pex_side_environment_carries_engine_host():
-    from klayout_tools import pex
+    from klayout_tools.pex_sim_evidence import SIDE_ENVIRONMENT_KEYS
 
-    assert {"engine_host", "client_ngspice_binary"} <= set(pex._SIDE_ENVIRONMENT_KEYS)
+    assert {"engine_host", "client_ngspice_binary"} <= set(SIDE_ENVIRONMENT_KEYS)
 
 
 # ---------------------------------------------------------------------------
