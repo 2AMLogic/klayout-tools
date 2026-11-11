@@ -2294,7 +2294,7 @@ for the cell itself, as in "Large flat designs" above.
 The reference carries a pin-only `.subckt BITCELL` stub (same name as the GDS
 cell); `flatten_reference` flattens any other reference hierarchy but keeps the
 stub. Verify the cell itself in a separate request, as in "Large flat designs".
-Run it as a single `klt lvs` request (`--backend local`); do not loop it.
+Run it as a single `klt lvs` request; do not loop it.
 
 **Pins.** Labels drawn *inside* the abstracted cell resolve that cell's
 instance pins and do not become top-level pins, with `top_cell_pins` on or off.
