@@ -237,7 +237,7 @@
     },
     {
       "path": "src/klayout_tools/decks/extraction.py",
-      "lines": 2261
+      "lines": 2260
     },
     {
       "path": "src/klayout_tools/decks/gf180mcu.py",
@@ -313,7 +313,7 @@
     },
     {
       "path": "src/klayout_tools/extract.py",
-      "lines": 11034
+      "lines": 11018
     },
     {
       "path": "src/klayout_tools/extract_abstract.py",
