@@ -930,7 +930,7 @@ stability statement, concrete precedents, and drift-detection guidance, and
     provenance for any other install is byte-identical to before. `version`
     stays `fetched:<tag>`. Like `version`, excluded from `--rerun` drift
     comparison. Additive; no `schema_version` bump. The fleet-bundle
-    `.pdk-store.json` is written outside this repo.
+    `.pdk-store.json` is read, never written, here (issue #5318).
   - `version` (issue #3070) is a self-describing stamp, or `null` when no
     revision can be read mechanically (never guessed): an open_pdks `SOURCES`
     file (the lines joined with `"; "`, unchanged), else `fetched:<marker>`
@@ -939,7 +939,9 @@ stability statement, concrete precedents, and drift-detection guidance, and
     `-dirty` suffix when the work tree has uncommitted changes — when the
     variant dir or its parent *is* a git work tree root. A tree nested inside
     an unrelated checkout (e.g. klt's own) never reports that checkout's
-    `HEAD`; a missing or failing `git` yields `null`.
+    `HEAD`; a missing or failing `git` yields `null`. Last, a bundle's
+    `.pdk-store.json` string `version` (one level above the real variant dir)
+    gives `store:<version>`; absent/malformed yields `null`.
   - `linked_trees` (issue #3070) — present **only** when the model library the
     run resolved (`provenance.deck`) realpath-resolves into a *different* PDK
     variant tree than `name` (a cross-variant symlink): a list of
