@@ -230,7 +230,7 @@ from .functional_verification_sdf import (
     _drop_sdf_zero_delay_alias_port_interconnects,
     _drop_sdf_zero_delay_bus_port_source_interconnects,
     _drop_sdf_zero_delay_physical_only_interconnects,
-    _normalize_sdf_header_triples,
+    _normalize_sdf_header_triples,  # noqa: F401 -- tests reach it as fv._normalize_sdf_header_triples
     _parse_toplevel_parameters,
     _parse_toplevel_ports,
     _reject_sdf_escaped_divider_interconnects,
@@ -247,6 +247,11 @@ from .functional_verification_sdf_instance import _reject_sdf_unresolvable_scope
 from .functional_verification_sdf_rename import (
     _apply_sdf_escaped_divider_rename,
     _sdf_renamed_report,
+)
+from .functional_verification_sdf_steps import (
+    SDF_COND_EXPRESSION_REASONS,
+    _apply_sdf_cond_expression_drop,
+    _apply_sdf_header_normalization,
 )
 from .reset_coverage import ResetCoverageError, sequential_elements
 
@@ -547,6 +552,7 @@ SDF_BENIGN_DIAGNOSTIC_REASONS: dict[str, str] = {
         "scalar port, or a cell with no model is left in place and still "
         "fails loudly"
     ),
+    **SDF_COND_EXPRESSION_REASONS,
 }
 
 #: Not an ``SDF``-prefixed diagnostic at all, but the single most dangerous
@@ -2330,30 +2336,6 @@ def _resolve_trace(
     return {"path": path, "format": fmt, "size_bytes": os.path.getsize(path)}
 
 
-def _apply_sdf_header_normalization(sdf_path: str, output_dir: str) -> str:
-    """Issue #1880's always-on first step of
-    :func:`run_functional_verification`'s SDF-normalization pipeline: fill
-    the empty member of any ``VOLTAGE``/``TEMPERATURE``/``PROCESS`` header
-    triple (OpenSTA's ``write_sdf`` writes them as ``min::max``) so
-    ``iverilog -T typ`` does not reject the header with ``Chosen value not
-    defined``. See :func:`_normalize_sdf_header_triples`.
-
-    Returns ``sdf_path`` unchanged when the header needed nothing (a run on
-    such an SDF is byte-identical to before), else the normalized-copy path.
-    Nothing is dropped, so no ``environment.sdf.dropped`` class is recorded:
-    Icarus selects no delay from these fields. A separate function for the
-    same cyclomatic-complexity reason ``_apply_sdf_physical_only_drop``'s
-    docstring records.
-    """
-    normalized = _normalize_sdf_header_triples(sdf_path)
-    if normalized is None:
-        return sdf_path
-    new_path = os.path.join(output_dir, "klt_sdf_header_normalized.sdf")
-    with open(new_path, "w", encoding="utf-8") as handle:
-        handle.write(normalized)
-    return new_path
-
-
 def _apply_sdf_interconnect_only_drop(
     annotate_source_path: str,
     output_dir: str,
@@ -2814,6 +2796,13 @@ def run_functional_verification(
             annotate_source_path,
             output_dir,
             sources,
+            sdf_pre_dropped_counts,
+            sdf_pre_dropped_arcs,
+        )
+        # Issue #5296: drop operator-expression COND IOPATHs (Icarus parse error).
+        annotate_source_path = _apply_sdf_cond_expression_drop(
+            annotate_source_path,
+            output_dir,
             sdf_pre_dropped_counts,
             sdf_pre_dropped_arcs,
         )

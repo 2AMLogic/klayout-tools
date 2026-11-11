@@ -380,7 +380,10 @@ each value `{count, reason}`. Issue #2885 added the
 only modpaths Icarus discards at elaboration) and, on that class's entry
 only, an `arcs` list (`{celltype, from, to}` per distinct dropped arc) so a
 caller can see which arcs ran with no module-path delay. Every other class's
-entry is byte-identical to before (no `arcs` key), and a run with no such
+entry is byte-identical to before (no `arcs` key). Issue #5296 added the
+`iopath_cond_expression` class (`COND`-wrapped `IOPATH` entries whose
+condition is an operator expression Icarus rejects), which carries `arcs` the
+same way. A run with no such
 arc never carries the class, so **no `schema_version` bump**. A consumer
 must keep treating `dropped` as an open map and read `arcs` as optional. See
 `docs/cli/functional-verification.md`'s "SDF back-annotation" section.
