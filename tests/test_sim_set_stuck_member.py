@@ -131,3 +131,16 @@ def test_cli_batch_set_writes_report_out(tmp_path, monkeypatch, capsys):
     assert code == 0
     assert json.loads(out.read_text())["request_count"] == 2
     assert json.loads(capsys.readouterr().out)["request_count"] == 2
+
+
+def test_manifest_ignores_writes_after_member_finalized(tmp_path):
+    """An abandoned worker must not clobber the member's final error entry."""
+    from klayout_tools.sim_set import _Manifest
+
+    manifest = _Manifest(str(tmp_path / "m.json"), ["a.json"], [str(tmp_path)])
+    manifest.finalize(0, status="error", error_code="not_launched")
+    manifest.update(0, status="done")
+    manifest.append_job(0, "job-late")
+    assert manifest._entries[0]["status"] == "error"
+    assert manifest._entries[0]["error_code"] == "not_launched"
+    assert manifest.job_ids(0) == []

@@ -1295,7 +1295,8 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   request's own `batch.max_units_per_job` / `batch.max_concurrent_jobs` /
   `batch.capacity_wait_s`.
 - **Stuck or interrupted members** ([#5324](https://github.com/2AMLogic/klayout-tools/issues/5324)).
-  With a positive `--wait-for-capacity` / `batch.capacity_wait_s`, a member
+  With a positive `--wait-for-capacity` (the command-line flag only; a
+  request-level `batch.capacity_wait_s` does not bound the set), a member
   whose job was accepted but stays `pending` longer than that budget becomes an
   entry with `status: "error"`, `exit_code: 4` and `error.code: "not_launched"`;
   its job id stays in `job_ids` and the manifest so it can be cancelled or

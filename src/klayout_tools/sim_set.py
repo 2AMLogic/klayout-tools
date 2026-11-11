@@ -137,6 +137,7 @@ class _Manifest:
     def __init__(self, path: str, paths: list[str], dirs: list[str]) -> None:
         self.path = path
         self._lock = threading.Lock()
+        self._frozen: set[int] = set()
         self._entries: list[dict[str, Any]] = [
             {
                 "index": i,
@@ -153,7 +154,17 @@ class _Manifest:
 
     def update(self, index: int, **fields: Any) -> None:
         with self._lock:
+            if index in self._frozen:
+                return  # abandoned member: its final entry is already written
             self._entries[index].update(fields)
+            self._flush()
+
+    def finalize(self, index: int, **fields: Any) -> None:
+        """Write a member's last state, then ignore later writes from its
+        abandoned worker thread."""
+        with self._lock:
+            self._entries[index].update(fields)
+            self._frozen.add(index)
             self._flush()
 
     def job_ids(self, index: int) -> list[str]:
@@ -162,6 +173,8 @@ class _Manifest:
 
     def append_job(self, index: int, job_id: str) -> list[str]:
         with self._lock:
+            if index in self._frozen:
+                return list(self._entries[index]["job_ids"])
             ids = self._entries[index]["job_ids"]
             if job_id not in ids:
                 ids.append(job_id)
@@ -419,7 +432,7 @@ def _unfinished_entry(
     """An ``error`` entry for a member that never produced a report. Its job
     ids come from the manifest so the caller can cancel or attach them."""
     job_ids = list(manifest.job_ids(index))
-    manifest.update(index, status="error", error_code=code)
+    manifest.finalize(index, status="error", error_code=code)
     return {
         "index": index,
         "request": path,
@@ -431,6 +444,102 @@ def _unfinished_entry(
         "error": {"message": message, "code": code},
         "shards": tracker.summary(None),
     }
+
+
+class _MemberScheduler:
+    """Runs members on daemon worker threads; see :func:`_execute_members`."""
+
+    def __init__(
+        self,
+        paths: list[str],
+        manifest: _Manifest,
+        launch_budget: float | None,
+        run_member: Callable[[int, _ShardTracker], dict[str, Any]],
+    ) -> None:
+        self.paths = paths
+        self.manifest = manifest
+        self.launch_budget = launch_budget
+        self.run_member = run_member
+        self.trackers = [_ShardTracker() for _ in paths]
+        self.results: list[dict[str, Any] | None] = [None] * len(paths)
+        self.started: set[int] = set()
+        self.abandoned: set[int] = set()
+        self.pending = list(range(len(paths)))
+        self.cond = threading.Condition()
+        self.stopping = False
+
+    def _finish(self, index: int, code: str, message: str) -> None:
+        """Record an unfinished member (caller holds ``cond``)."""
+        self.abandoned.add(index)
+        self.results[index] = _unfinished_entry(
+            index, self.paths[index], self.trackers[index], self.manifest,
+            code, message,
+        )  # fmt: skip
+
+    def _next_index(self) -> int | None:
+        with self.cond:
+            if self.stopping or not self.pending:
+                return None
+            index = self.pending.pop(0)
+            self.started.add(index)
+            return index
+
+    def _worker(self) -> None:
+        while (index := self._next_index()) is not None:
+            try:
+                entry = self.run_member(index, self.trackers[index])
+            except BaseException as exc:  # never lose the member's slot
+                entry = _unfinished_entry(
+                    index, self.paths[index], self.trackers[index], self.manifest,
+                    SET_INTERRUPTED_CODE, f"{type(exc).__name__}: {exc}",
+                )  # fmt: skip
+            with self.cond:
+                if index in self.abandoned:
+                    return  # superseded: a replacement worker took this slot
+                self.results[index] = entry
+                self.cond.notify_all()
+
+    def _spawn(self) -> None:
+        threading.Thread(target=self._worker, daemon=True).start()
+
+    def _scan_stalled(self) -> None:
+        """Abandon members whose job sat pending past the budget (holds ``cond``)."""
+        if self.launch_budget is None:
+            return
+        for index in sorted(self.started):
+            if self.results[index] is not None:
+                continue
+            job_id = self.trackers[index].stalled_job(self.launch_budget)
+            if job_id is None:
+                continue
+            self._finish(
+                index,
+                NOT_LAUNCHED_CODE,
+                f"batch job {job_id} was accepted but did not launch "
+                f"within {self.launch_budget:g}s (still pending); cancel or "
+                "attach it by job id",
+            )
+            self._spawn()
+
+    def _flush_interrupted(self, exc: BaseException) -> None:
+        with self.cond:
+            self.stopping = True
+            reason = f"{type(exc).__name__} before the member finished"
+            for index, result in enumerate(self.results):
+                if result is None:
+                    self._finish(index, SET_INTERRUPTED_CODE, reason)
+
+    def run(self, workers: int) -> list[dict[str, Any]]:
+        try:
+            for _ in range(workers):
+                self._spawn()
+            with self.cond:
+                while any(r is None for r in self.results):
+                    self.cond.wait(timeout=SET_POLL_INTERVAL_S)
+                    self._scan_stalled()
+        except BaseException as exc:
+            self._flush_interrupted(exc)
+        return [r for r in self.results if r is not None]
 
 
 def _execute_members(
@@ -450,76 +559,7 @@ def _execute_members(
     concurrency; an interrupt (``KeyboardInterrupt``/``SystemExit``) turns every
     unfinished member into a ``set_interrupted`` entry instead of exiting
     silently."""
-    count = len(paths)
-    trackers = [_ShardTracker() for _ in range(count)]
-    results: list[dict[str, Any] | None] = [None] * count
-    started: set[int] = set()
-    abandoned: set[int] = set()
-    pending = list(range(count))
-    cond = threading.Condition()
-    stopping = False
-
-    def next_index() -> int | None:
-        with cond:
-            if stopping or not pending:
-                return None
-            index = pending.pop(0)
-            started.add(index)
-            return index
-
-    def worker() -> None:
-        while (index := next_index()) is not None:
-            try:
-                entry = run_member(index, trackers[index])
-            except BaseException as exc:  # never lose the member's slot
-                entry = _unfinished_entry(
-                    index, paths[index], trackers[index], manifest,
-                    SET_INTERRUPTED_CODE, f"{type(exc).__name__}: {exc}",
-                )  # fmt: skip
-            with cond:
-                if index in abandoned:
-                    return  # superseded: a replacement worker took this slot
-                results[index] = entry
-                cond.notify_all()
-
-    def spawn() -> None:
-        threading.Thread(target=worker, daemon=True).start()
-
-    try:
-        for _ in range(workers):
-            spawn()
-        with cond:
-            while any(r is None for r in results):
-                cond.wait(timeout=SET_POLL_INTERVAL_S)
-                if launch_budget is None:
-                    continue
-                for index in sorted(started):
-                    if results[index] is not None:
-                        continue
-                    job_id = trackers[index].stalled_job(launch_budget)
-                    if job_id is None:
-                        continue
-                    abandoned.add(index)
-                    results[index] = _unfinished_entry(
-                        index, paths[index], trackers[index], manifest,
-                        NOT_LAUNCHED_CODE,
-                        f"batch job {job_id} was accepted but did not launch "
-                        f"within {launch_budget:g}s (still pending); cancel or "
-                        "attach it by job id",
-                    )  # fmt: skip
-                    spawn()
-    except BaseException as exc:
-        with cond:
-            stopping = True
-            reason = f"{type(exc).__name__} before the member finished"
-            for index in range(count):
-                if results[index] is None:
-                    abandoned.add(index)
-                    results[index] = _unfinished_entry(
-                        index, paths[index], trackers[index], manifest,
-                        SET_INTERRUPTED_CODE, reason,
-                    )  # fmt: skip
-    return [r for r in results if r is not None]
+    return _MemberScheduler(paths, manifest, launch_budget, run_member).run(workers)
 
 
 def run_sim_set(
