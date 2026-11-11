@@ -6,6 +6,15 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 - [2026-09](work_log/WORK_LOG_2026-09.md)
 
+### 2026-11-11
+
+- **PR #5286**: feat(pex): report unfinished sim legs in unfinished[] beside partial delta rows
+- **PR #5285**: feat(sim): allow --submit-only with --hosts N via sharded submit
+- **PR #5284**: feat(pex): add --wait-for-capacity forwarded to every klt sim leg
+- **Issue #5282** (closed): klt pex: partial result and lost-shard-only re-dispatch on --resume
+- **Issue #5281** (closed): klt sim/pex --submit-only: support --hosts > 1 (sharded submit, per-shard attach)
+- **Issue #5280** (closed): klt pex: add --wait-for-capacity and make --resume tolerate --hosts above remaining units
+
 ### 2026-11-10
 
 - **PR #5278**: docs(lvs): document gf180mcu LDMOS PCell combine_devices recipe
