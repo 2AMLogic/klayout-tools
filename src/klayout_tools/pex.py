@@ -2863,6 +2863,23 @@ def _require_single_dut(dut_paths: Sequence[str]) -> None:
         )
 
 
+def _validate_capacity_wait(capacity_wait_s: float | None, backend: str | None) -> None:
+    """Issue #5280: refuse a bad ``--wait-for-capacity`` before any I/O, by the
+    same resolver / rule ``klt sim`` applies per leg."""
+    if capacity_wait_s is None:
+        return
+    from .sim_batch import resolve_capacity_wait_s
+
+    try:
+        resolve_capacity_wait_s({"capacity_wait_s": capacity_wait_s})
+    except SimError as exc:
+        raise PexError(str(exc), code=exc.code) from exc
+    if backend is not None and backend != "batch":
+        raise PexError(
+            f"--wait-for-capacity requires backend 'batch' (got '{backend}')"
+        )
+
+
 @output_lock.owns_run
 def run_pex(
     layout_path: str,
@@ -3165,19 +3182,7 @@ def run_pex(
         extract_only=extract_only,
         device_only_leg=device_only_leg,
     )
-    # Issue #5280: refuse a bad `--wait-for-capacity` before any I/O, by the
-    # same resolver / rule `klt sim` applies per leg.
-    if capacity_wait_s is not None:
-        from .sim_batch import _resolve_capacity_wait_s
-
-        try:
-            _resolve_capacity_wait_s({"capacity_wait_s": capacity_wait_s})
-        except SimError as exc:
-            raise PexError(str(exc), code=exc.code) from exc
-        if backend is not None and backend != "batch":
-            raise PexError(
-                f"--wait-for-capacity requires backend 'batch' (got '{backend}')"
-            )
+    _validate_capacity_wait(capacity_wait_s, backend)
     _own_pex_root(_ownership, artifacts_dir, layout_path)
     # Issue #2478: exactly one of `testbench_paths` / `measure_command`.
     # `command` is the measurement command's argv in `--measure-command`
