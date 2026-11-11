@@ -865,6 +865,17 @@ exists once it has a location):
    issue #1091 ("a design with hard macros needs a caller-supplied macro
    halo/grid spec"), closed by this field.
 
+**Macro PDN `-instances` escaping, live-verified (issue #5302, OpenROAD
+26Q3-1510-g6cb3f2b704).** For the db name `g_bank\[0\].u_bank/u_macro` (one
+backslash before each bracket), the six-backslash spelling the macro PDN grid
+emits is the only one of 1/2/3/4/6/8 backslashes per bracket that
+`define_pdn_grid -macro -instances` resolves (the others give PDN-1030 "Unable
+to find instance"), and the resulting grid takes `add_pdn_connect` and `pdngen`
+cleanly. A `PDN-0231` ("not connected to any power/ground nets") followed by
+`PDN-0217` ("No grid found") is therefore *not* an escaping failure: it
+reproduces identically for a plain instance name whose macro supply pins no
+`add_global_connection -pin_pattern` matches.
+
 A `halo` with no `request.power` in the same request gets only the
 placement blockage — a geometry-only run has no PDN grid to extend a macro
 grid from in the first place. A `halo` whose macro LEF declares no `SIZE`,
