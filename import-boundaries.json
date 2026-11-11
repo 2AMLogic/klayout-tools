@@ -266,6 +266,7 @@
         "klayout_tools.functional_verification_sdf",
         "klayout_tools.functional_verification_sdf_instance",
         "klayout_tools.functional_verification_sdf_rename",
+        "klayout_tools.functional_verification_sdf_steps",
         "klayout_tools.functional_verification_verilog_top"
       ]
     },
