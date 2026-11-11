@@ -380,17 +380,16 @@ class MOSFlavour:
     that PDK-model-name table (kept in separate modules, matching this
     codebase's existing "geometry vs. model binding" module split).
 
-    A transistor's *whole* active-diffusion island (both source and drain,
-    not just the gate -- gf180mcu draws a MOS device's active mask as one
-    continuous polygon spanning source-gate-drain) is classified against
-    ``marker`` as a single unit: an island that ``interacting`` overlaps the
-    marker *at all* is entirely this flavour's, never split mid-island. This
-    is a deliberate, documented choice for the marker-straddling case (the
-    DRM does not contemplate a transistor legally straddling a voltage-
-    domain boundary at all -- every real device is either fully inside or
-    fully outside the marker), and matches the "any overlap counts" idiom
-    ``_detect_voltage_domain_overlap`` (issue #552/#577) already uses for its
-    own marker-interaction gate.
+    Classification is **per gate** (issue #5301): each gate (``poly`` over
+    active) is tested against ``marker`` with the "any overlap counts" idiom
+    ``_detect_voltage_domain_overlap`` (issue #552/#577) uses, so a marker
+    touching any part of a gate claims that whole device, while a marker that
+    only reaches source/drain diffusion shared with a neighbouring gate does
+    not flip that neighbour. Shared source/drain diffusion stays available to
+    both the flavoured and the default pass, so it remains one connected net
+    across the flavour boundary. An island that is wholly inside or wholly
+    outside the marker (every gf180mcu/sg13g2 device, one gate per island)
+    classifies exactly as before.
 
     ``description`` is a short human-readable label for this flavour
     (currently unused by any consumer beyond documentation -- a placeholder
@@ -418,9 +417,9 @@ class MOSFlavour:
 
     - ``and_markers``: the island must also ``interacting``-overlap *every*
       one of these layers to be claimed.
-    - ``not_markers``: an island that ``interacting``-overlaps *any* of these
+    - ``not_markers``: a gate that ``interacting``-overlaps *any* of these
       layers is not claimed (it stays available to later flavours / the
-      default split). Like ``marker``, this is island-level, not a geometric
+      default split). Like ``marker``, this is gate-level, not a geometric
       subtraction -- the same documented straddling policy.
     - ``nfet_only``: the flavour has no PMOS counterpart; an island
       ``interacting`` the deck's ``nwell`` is never claimed (no PMOS is

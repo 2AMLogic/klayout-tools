@@ -214,6 +214,7 @@ from .extract_abstract import _sanitize_instance_name as _sanitize_instance_name
 
 # Final report assembly moved out of `run_extract` (issue #5196).
 from .extract_assemble import assemble_extract_report
+from .extract_flavour import _flavour_split_island
 from .extract_netlist_write import write_flat_netlist
 from .extract_netselect import NetSelectors
 from .extract_orient import orient_asymmetric_mos
@@ -7330,25 +7331,6 @@ def _resolve_mos_capacitors(
     return capacitors, remaining, recognised, dropped
 
 
-def _flavour_claims_island(
-    island: kdb.Region,
-    flavour: MOSFlavour,
-    marker_region: kdb.Region,
-    and_regions: list[kdb.Region],
-    not_regions: list[kdb.Region],
-    nwell: kdb.Region,
-) -> bool:
-    """Whether ``flavour`` claims the active ``island``: it touches the
-    flavour's ``marker`` and every ``and_markers`` layer, touches no
-    ``not_markers`` layer, and (``nfet_only``) lies outside the well."""
-    return (
-        not island.interacting(marker_region).is_empty()
-        and all(not island.interacting(r).is_empty() for r in and_regions)
-        and all(island.interacting(r).is_empty() for r in not_regions)
-        and not (flavour.nfet_only and not island.interacting(nwell).is_empty())
-    )
-
-
 def _flavour_recognised_islands(
     layout: kdb.Layout,
     top_cell: kdb.Cell,
@@ -7374,10 +7356,12 @@ def _flavour_recognised_islands(
         not_regions = [_region(layout, top_cell, m) for m in flavour.not_markers]
         for component in active.merged().each():
             island = kdb.Region(component)
-            if not (island & poly).is_empty() and _flavour_claims_island(
-                island, flavour, marker_region, and_regions, not_regions, nwell
-            ):
-                recognised += island
+            if (island & poly).is_empty():
+                continue
+            claimed_part, _ = _flavour_split_island(
+                island, poly, flavour, marker_region, and_regions, not_regions, nwell
+            )
+            recognised += claimed_part
     return recognised
 
 
@@ -8769,17 +8753,17 @@ def _extract_netlist(
             remaining = kdb.Region()
             for component in active.merged().each():
                 component_region = kdb.Region(component)
-                if _flavour_claims_island(
+                claimed_part, remaining_part = _flavour_split_island(
                     component_region,
+                    poly,
                     flavour,
                     marker_region,
                     and_regions,
                     not_regions,
                     nwell,
-                ):
-                    claimed += component_region
-                else:
-                    remaining += component_region
+                )
+                claimed += claimed_part
+                remaining += remaining_part
             active = remaining
         flavour_active.append(claimed)
 
