@@ -14,6 +14,7 @@ import os
 from typing import Any
 
 from .gen_cap_vpp import _cap_vpp_array_describe, _inspect_gds
+from .gen_spec import _GeneratorSpec
 
 _NAME = "pdk_cell"
 
@@ -75,7 +76,7 @@ def _pdk_cell_layer_params(
 ) -> dict[str, Any]:
     path = _gds_path(params, pdk_info)
     _lookup(params, pdk_info)
-    return {"pdk_cell_gds_path": path}
+    return {"vpp_gds_path": path}
 
 
 def _lookup(params: dict[str, Any], pdk_info: dict[str, Any]) -> dict[str, Any]:
@@ -106,3 +107,18 @@ def _pdk_cell_describe(
 ) -> dict[str, Any]:
     entry = _lookup(params, pdk_info)
     return _cap_vpp_array_describe(params, dbu, pdk_info, entry=entry)
+
+
+_PDK_CELL_SPEC = _GeneratorSpec(
+    name=_NAME,
+    summary=(
+        "Row of any PDK fixed GDS cell (bondpad, ESD, ...) from a "
+        "libs.ref/<library> GDS, instantiated as-drawn on params.pitch_um; "
+        "ports are read from the cell's own pin labels and no pcell "
+        "library is imported (issue #5290)."
+    ),
+    dbu=0.001,
+    validate=_pdk_cell_validate,
+    describe=_pdk_cell_describe,
+    layer_params=_pdk_cell_layer_params,
+)

@@ -41,7 +41,7 @@ def _build_pdk_cell_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 default=0.0,
             )
             self.param(
-                "pdk_cell_gds_path",
+                "vpp_gds_path",
                 self.TypeString,
                 "Resolved PDK GDS holding the cell (harness-computed)",
                 default="",
@@ -52,7 +52,7 @@ def _build_pdk_cell_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
 
         def produce_impl(self) -> None:
             src = kdb.Layout()
-            src.read(self.pdk_cell_gds_path)
+            src.read(self.vpp_gds_path)
             src_cell = src.cell(self.pdk_cell)
             dst = self.layout.create_cell(self.pdk_cell)
             dst.copy_tree(src_cell)

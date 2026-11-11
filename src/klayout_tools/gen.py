@@ -329,11 +329,7 @@ from .gen_pcells import (
     _build_resistor_strip_pcell,
     _build_well_island_pcell,
 )
-from .gen_pdk_cell import (
-    _pdk_cell_describe,
-    _pdk_cell_layer_params,
-    _pdk_cell_validate,
-)
+from .gen_pdk_cell import _PDK_CELL_SPEC
 from .gen_spec import _GeneratorSpec
 from .pdk import PdkNotFoundError, find_pdk, resolve_pdk_dbu
 
@@ -343,12 +339,10 @@ if TYPE_CHECKING:
 #: Contract identifier for the request envelope (spike section 2).
 REQUEST_SCHEMA = "klt.gen.request/1"
 
-#: Bumped only on a non-additive (breaking) change to this command's own
-#: response JSON shape -- see docs/json-contract.md.
+#: Bumped only on a breaking change to the response JSON (docs/json-contract.md).
 SCHEMA_VERSION = 1
 
-#: Name this module registers its reference PCell library under. Registered
-#: lazily, once per process (see :func:`_pcell_library`).
+#: Reference PCell library name; registered lazily once (:func:`_pcell_library`).
 _PCELL_LIBRARY_NAME = "klt_gen_reference"
 
 #: PCell parameters are never sourced from the request -- they carry no
@@ -366,7 +360,6 @@ _PCELL_LIBRARY_NAME = "klt_gen_reference"
 #: :data:`_PDK_CAP_TOP_PLATE_REQUIRES` (issue #1555).
 _HIDDEN_PARAMS = {
     "vpp_gds_path",
-    "pdk_cell_gds_path",
     "layer",
     "active_layer",
     "poly_layer",
@@ -508,11 +501,9 @@ _HIDDEN_PARAMS |= {
 }
 
 #: ``cap_array``'s top-plate requires-mask slots are generated from
-#: :data:`_MAX_CAP_TOP_PLATE_REQUIRES` (which depends on
+#: :data:`_MAX_CAP_TOP_PLATE_REQUIRES` (see
 #: :data:`klayout_tools.gen_layer_params._PDK_CAP_TOP_PLATE_REQUIRES`), so --
-#: exactly like ``res_array``'s own ``res_flavor_<i>_*`` slots -- they join
-#: :data:`_HIDDEN_PARAMS` here rather than being listed literally at its own
-#: definition.
+#: like ``res_flavor_<i>_*`` -- they join :data:`_HIDDEN_PARAMS` here.
 _HIDDEN_PARAMS |= {
     f"cap_top_requires_{i}_{suffix}"
     for i in range(_MAX_CAP_TOP_PLATE_REQUIRES)
@@ -4254,19 +4245,7 @@ _GENERATOR_SPECS: dict[str, _GeneratorSpec] = {
         describe=_cap_vpp_array_describe,
         layer_params=_cap_vpp_array_layer_params,
     ),
-    "pdk_cell": _GeneratorSpec(
-        name="pdk_cell",
-        summary=(
-            "Row of any PDK fixed GDS cell (bondpad, ESD, ...) from a "
-            "libs.ref/<library> GDS, instantiated as-drawn on params.pitch_um; "
-            "ports are read from the cell's own pin labels and no pcell "
-            "library is imported (issue #5290)."
-        ),
-        dbu=0.001,
-        validate=_pdk_cell_validate,
-        describe=_pdk_cell_describe,
-        layer_params=_pdk_cell_layer_params,
-    ),
+    "pdk_cell": _PDK_CELL_SPEC,
     "guard_ring": _GeneratorSpec(
         name="guard_ring",
         summary=(
