@@ -13,11 +13,11 @@ from . import liberty_writer
 from .characterize_arcs import DerivedArc
 
 
-def _spice_number(value: float) -> str:
+def spice_number(value: float) -> str:
     return liberty_writer.format_number(value, precision=10)
 
 
-def _slug(name: str) -> str:
+def slug(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9_]", "_", name)
 
 
@@ -30,7 +30,7 @@ def measurement_cards(
     clock_edge: str = "rising",
     edge_starts: tuple[float, float] = (0.0, 0.0),
 ) -> list[dict[str, Any]]:
-    output_node = f"o_{tag}_{_slug(arc.output_pin)}"
+    output_node = f"o_{tag}_{slug(arc.output_pin)}"
     input_node = f"i_{tag}"
 
     # Which *input* edge produces the rising output edge, under this arc's
@@ -56,32 +56,32 @@ def measurement_cards(
     cards = [
         (
             f"{tag}_dr",
-            f"TRIG v({input_node}) VAL={_spice_number(trig_rise_v)} "
+            f"TRIG v({input_node}) VAL={spice_number(trig_rise_v)} "
             f"{rise_input_edge}=1 "
-            f"TARG v({output_node}) VAL={_spice_number(v_out_rise)} RISE=1",
+            f"TARG v({output_node}) VAL={spice_number(v_out_rise)} RISE=1",
         ),
         (
             f"{tag}_df",
-            f"TRIG v({input_node}) VAL={_spice_number(trig_fall_v)} "
+            f"TRIG v({input_node}) VAL={spice_number(trig_fall_v)} "
             f"{fall_input_edge}=1 "
-            f"TARG v({output_node}) VAL={_spice_number(v_out_fall)} FALL=1",
+            f"TARG v({output_node}) VAL={spice_number(v_out_fall)} FALL=1",
         ),
         (
             f"{tag}_tr",
-            f"TRIG v({output_node}) VAL={_spice_number(v_slew_lo_rise)} RISE=1 "
-            f"TARG v({output_node}) VAL={_spice_number(v_slew_hi_rise)} RISE=1",
+            f"TRIG v({output_node}) VAL={spice_number(v_slew_lo_rise)} RISE=1 "
+            f"TARG v({output_node}) VAL={spice_number(v_slew_hi_rise)} RISE=1",
         ),
         (
             f"{tag}_tf",
-            f"TRIG v({output_node}) VAL={_spice_number(v_slew_hi_fall)} FALL=1 "
-            f"TARG v({output_node}) VAL={_spice_number(v_slew_lo_fall)} FALL=1",
+            f"TRIG v({output_node}) VAL={spice_number(v_slew_hi_fall)} FALL=1 "
+            f"TARG v({output_node}) VAL={spice_number(v_slew_lo_fall)} FALL=1",
         ),
     ]
     if arc.is_sequential:
         # Skip the priming pulse (and the other measured pulse) with TD: the
         # output-rise edge belongs to the first measured pulse, the fall to
         # the second. Cards are dr, df, tr, tf in that order.
-        rise_td, fall_td = (_spice_number(t) + "n" for t in edge_starts)
+        rise_td, fall_td = (spice_number(t) + "n" for t in edge_starts)
         tds = (rise_td, fall_td, rise_td, fall_td)
         cards = [
             (name, body.replace(" TARG ", f" TD={td} TARG ") + f" TD={td}")
@@ -133,7 +133,7 @@ def power_cards(
                 "name": f"{tag}_{suffix}",
                 "spice": (
                     f".meas tran {tag}_{suffix} INTEG i({ammeter}{tag}) "
-                    f"FROM={_spice_number(start)}n TO={_spice_number(stop)}n"
+                    f"FROM={spice_number(start)}n TO={spice_number(stop)}n"
                 ),
                 "unit": "C",
             }

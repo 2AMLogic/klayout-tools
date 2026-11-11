@@ -10,16 +10,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import liberty_writer
 from .characterize_arcs import DerivedArc, FunctionError, derive_sequential_arc
+from .characterize_cards import spice_number
 
 
 class SequentialSpecError(Exception):
     """A request's sequential-cell fields are invalid."""
-
-
-def _spice_number(value: float) -> str:
-    return liberty_writer.format_number(value, precision=10)
 
 
 def _resolve_statics(
@@ -121,7 +117,7 @@ def derive_sequential_arcs(cell: dict[str, Any]) -> tuple[DerivedArc, ...]:
 
 
 def _pwl(name: str, node: str, points: list[tuple[float, float]]) -> str:
-    body = " ".join(f"{_spice_number(t)}n {_spice_number(v)}" for t, v in points)
+    body = " ".join(f"{spice_number(t)}n {spice_number(v)}" for t, v in points)
     return f"{name} {node} 0 PWL({body})"
 
 
