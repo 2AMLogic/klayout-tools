@@ -2379,6 +2379,15 @@ implants pick the flavour. Diffusion under `areaid.ed` (81/19) or inside
 Not modelled: the `photodiode` and the RF diode (`areaid.rfdiode`). Query
 the exact set with `klt deck devices --deck sky130 --class diode_pd2nw_05v5`.
 
+**sky130 `lvtn` partial coverage** (issues #5301, #5311): `lvtn` (125/44) is
+tested per *gate*, not per diffusion island -- a gate whose area touches
+`lvtn` (and no excluding implant such as `hvtp`) binds the `_lvt` model, its
+neighbours on the same diffusion keep the plain model. Diffusion shared by a
+claimed and an unclaimed gate stays one connected net, and its area and
+perimeter (`AS`/`AD`/`PS`/`PD`) are apportioned between the gates sharing it
+exactly as in a layout with no `lvtn` at all -- never counted in full for each
+side. Only the model name changes with the marker.
+
 ### Marker-gated and predicate-gated device classes (issue #2365)
 
 **Most device classes a deck recognises are driven off drawn
