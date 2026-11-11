@@ -1487,13 +1487,11 @@ def _flatten_netlist_safely(
     `reference.flatten`" section) -- not a partial result a caller can act
     on.
 
-    ``Netlist.flatten()`` is KLayout's own whole-netlist flatten: "After
-    calling this method, only the top circuits will remain" -- every
-    subcircuit-call instance is substituted in-place, in-process. Called
-    here, before :func:`_select_circuit`, so a caller-declared ``top`` name
-    still resolves normally afterwards whenever it already named a genuine
-    top-level circuit (the common case -- the design's own top level, not
-    an interior leaf that flatten would have inlined away).
+    ``Netlist.flatten()`` is KLayout's own whole-netlist flatten ("only the
+    top circuits will remain"): every subcircuit-call instance is
+    substituted in-place. Called here, before :func:`_select_circuit`, so a
+    caller-declared ``top`` still resolves if it named a genuine top
+    circuit. ``keep`` (#5322) globs spare matching circuits (lvs_flatten).
 
     Symmetric and opt-in on **both** sides (``options.flatten_reference``
     for the reference netlist, ``options.flatten_layout`` for the layout
@@ -1513,29 +1511,11 @@ def _flatten_netlist_safely(
     """
 
     from .lvs import CATEGORY_TOPOLOGY_FLATTENED
+    from .lvs_flatten import flatten_keeping
 
-    circuits_before = sum(1 for _ in netlist.each_circuit())
-    kept: list[str] = []
-    if keep:
-        # Issue #5322: flatten everything except circuits matching a glob
-        # (case-insensitive) -- e.g. pin-only stubs of abstracted cells.
-        import fnmatch
-
-        patterns = [g.lower() for g in keep]
-        doomed = []
-        for circuit in netlist.each_circuit():
-            if any(fnmatch.fnmatchcase(circuit.name.lower(), g) for g in patterns):
-                kept.append(circuit.name)
-            elif any(True for _ in circuit.each_ref()):
-                doomed.append(circuit)  # called by someone: not a top circuit
-        for circuit in doomed:
-            netlist.flatten_circuit(circuit)
-    else:
-        netlist.flatten()
-    circuits_after = sum(1 for _ in netlist.each_circuit())
+    circuits_before, circuits_after, kept_note = flatten_keeping(netlist, keep)
     if circuits_before == circuits_after:
         return None
-    kept_note = f" (kept un-flattened: {', '.join(sorted(kept))})" if kept else ""
     return _mismatch(
         CATEGORY_TOPOLOGY_FLATTENED,
         "warning",
