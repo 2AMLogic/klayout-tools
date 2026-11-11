@@ -1202,6 +1202,12 @@ def _validate_macros(
         :func:`_macro_blockage_lines` / :func:`_macro_pdn_grid_lines`, and
         this module's docstring "Power delivery" section (whose v1 exclusion
         of macro PDN grids this closes).
+    ``keepout`` (issue #5313)
+        Same shape and validation as ``halo``, but a *placement-only* keep-out:
+        it widens the ``create_blockage`` rectangle (per-side ``max(halo,
+        keepout)``) and never reaches ``define_pdn_grid``, so it can exceed
+        pdngen's halo limit and needs neither ``request.power`` nor a LEF
+        power pin.
     ``lib`` (alias ``liberty``)
         The macro's per-corner liberty map, exactly as ``klt synthesize``/
         ``klt sta`` take it. Read alongside the standard-cell liberty in
@@ -1295,6 +1301,10 @@ def _validate_macros(
                     error_cls=PlaceAndRouteError,
                 ),
                 "halo": _validate_macro_halo(macro.get("halo"), label=label),
+                # Issue #5313: placement-only keep-out, independent of `halo`.
+                "keepout": _validate_macro_halo(
+                    macro.get("keepout"), label=label, field="keepout"
+                ),
                 "width_um": macro_record.get("width_um"),
                 "height_um": macro_record.get("height_um"),
                 "power_ground_layers": _macro_power_ground_layers(
@@ -1318,7 +1328,9 @@ def _validate_macros(
 _MACRO_HALO_SIDES = ("left", "bottom", "right", "top")
 
 
-def _validate_macro_halo(halo: Any, *, label: str) -> dict[str, float] | None:
+def _validate_macro_halo(
+    halo: Any, *, label: str, field: str = "halo"
+) -> dict[str, float] | None:
     """Validate one ``request.macros[].halo`` value (issue #2635), returning
     ``{"left": f, "bottom": f, "right": f, "top": f}`` or ``None`` when the
     field is omitted.
@@ -1338,30 +1350,32 @@ def _validate_macro_halo(halo: Any, *, label: str) -> dict[str, float] | None:
         return None
     if isinstance(halo, bool):
         raise PlaceAndRouteError(
-            f"{label}.halo must be a number or an object naming any of: "
+            f"{label}.{field} must be a number or an object naming any of: "
             + ", ".join(_MACRO_HALO_SIDES)
         )
     if isinstance(halo, (int, float)):
-        return _validate_uniform_macro_halo(halo, label=label)
+        return _validate_uniform_macro_halo(halo, label=label, field=field)
     if isinstance(halo, dict):
-        return _validate_per_side_macro_halo(halo, label=label)
+        return _validate_per_side_macro_halo(halo, label=label, field=field)
     raise PlaceAndRouteError(
-        f"{label}.halo must be a number (uniform, in um) or an object "
+        f"{label}.{field} must be a number (uniform, in um) or an object "
         "naming any of: " + ", ".join(_MACRO_HALO_SIDES)
     )
 
 
-def _validate_uniform_macro_halo(halo: float, *, label: str) -> dict[str, float]:
+def _validate_uniform_macro_halo(
+    halo: float, *, label: str, field: str = "halo"
+) -> dict[str, float]:
     """The bare-number half of :func:`_validate_macro_halo`: one value applied
     to all four sides of :data:`_MACRO_HALO_SIDES`.
     """
     if halo < 0:
-        raise PlaceAndRouteError(f"{label}.halo must not be negative")
+        raise PlaceAndRouteError(f"{label}.{field} must not be negative")
     return dict.fromkeys(_MACRO_HALO_SIDES, float(halo))
 
 
 def _validate_per_side_macro_halo(
-    halo: dict[str, Any], *, label: str
+    halo: dict[str, Any], *, label: str, field: str = "halo"
 ) -> dict[str, float]:
     """The object half of :func:`_validate_macro_halo`: any subset of
     :data:`_MACRO_HALO_SIDES`, each unnamed side defaulting to ``0``.
@@ -1373,21 +1387,22 @@ def _validate_per_side_macro_halo(
     """
     if not halo:
         raise PlaceAndRouteError(
-            f"{label}.halo must name at least one of: " + ", ".join(_MACRO_HALO_SIDES)
+            f"{label}.{field} must name at least one of: "
+            + ", ".join(_MACRO_HALO_SIDES)
         )
     unknown = sorted(set(halo) - set(_MACRO_HALO_SIDES))
     if unknown:
         raise PlaceAndRouteError(
-            f"{label}.halo has unknown side(s) {', '.join(unknown)} -- "
+            f"{label}.{field} has unknown side(s) {', '.join(unknown)} -- "
             "valid sides are: " + ", ".join(_MACRO_HALO_SIDES)
         )
     resolved: dict[str, float] = {}
     for side in _MACRO_HALO_SIDES:
         value = halo.get(side, 0)
         if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise PlaceAndRouteError(f"{label}.halo.{side} must be a number")
+            raise PlaceAndRouteError(f"{label}.{field}.{side} must be a number")
         if value < 0:
-            raise PlaceAndRouteError(f"{label}.halo.{side} must not be negative")
+            raise PlaceAndRouteError(f"{label}.{field}.{side} must not be negative")
         resolved[side] = float(value)
     return resolved
 

@@ -2463,6 +2463,8 @@ def _run_single_corner(
                 "cell": macro["cell_name"],
                 "lib": macro["lib"],
                 "halo": macro["halo"],
+                # Additive (issue #5313): placement-only keep-out applied.
+                "keepout": macro["keepout"],
             }
             for macro in macros
         ],

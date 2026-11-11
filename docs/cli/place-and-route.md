@@ -814,6 +814,7 @@ error otherwise.
 | `cell` | string \| omitted | Additive field (issue #2635), shared with `klt synthesize`/`klt sta`'s own `macros[].cell`. The macro's master name — derived from the LEF's own `MACRO` name when omitted; when given, must match it exactly. |
 | `lib` (alias `liberty`) | object\<string, string\> \| omitted | Additive field (issue #2635), the same per-corner liberty map `klt synthesize`/`klt sta` accept: `{"<corner>": "<path>"}`, with a reserved `"default"` fallback key. `read_liberty`'d alongside the standard-cell liberty in every stage (the floorplan stage's own load, and every later stage's post-`read_db` reload) at whichever corner each stage runs — a macro `lib` map with no entry for that corner (and no `"default"`) is a request error naming the macro, the corner, and the keys that are available. Omitted leaves every stage script byte-identical to before this field existed; the instance is still placed and merged into the GDS exactly as it was. |
 | `halo` | number \| object \| omitted | Additive field (issue #2635). A keep-out margin around the macro, in micrometres: either one non-negative number (uniform on all four sides) or an object naming any of `left`/`right`/`top`/`bottom` (each defaulting to `0`). Honored two ways during `"floorplan"` — see "Macro halos" below. Omitted emits neither and leaves the floorplan/PDN Tcl byte-identical. |
+| `keepout` | number \| object \| omitted | Additive field (issue #5313). Same shape and validation as `halo`, but **placement-only**: it widens the `create_blockage` rectangle around the macro and never reaches `define_pdn_grid`, so it is not subject to pdngen's halo limit (`PDN-0008`), needs no `request.power`, and needs no power pin in the LEF. When a macro declares both, each side of the single blockage is `max(halo, keepout)`; the PDN halo stays `halo` alone. Omitted leaves the Tcl byte-identical. See "Macro keep-outs" below. |
 
 **Macro-pin routability cross-check (#464).** A macro LEF pin that `klt
 lef-abstract` emitted with no `PORT` geometry at all (a pin whose declared
@@ -882,6 +883,26 @@ grid from in the first place. A `halo` whose macro LEF declares no `SIZE`,
 or no power/ground pin with `PORT` geometry (when `request.power` is also
 given), is a named request error — never a halo silently skipped, since
 that would honor it in the response and not in the actual run.
+
+### Macro keep-outs (`macros[].keepout`, issue #5313)
+
+`halo` couples two things: the placement blockage and the PDN macro-grid halo.
+pdngen rejects a halo beyond a small limit (about 2.3 µm on the reproducer
+chip), so a halo cannot be widened enough to keep standard cells off a macro's
+pin edges. `keepout` is the placement half only: one `create_blockage` over
+the macro footprint plus the keep-out, emitted after `place_macro` in the
+`"floorplan"` stage. With both fields set, each side of the blockage is
+`max(halo, keepout)`; `define_pdn_grid -halo` still receives `halo` alone.
+A `keepout` whose macro LEF declares no `SIZE` is a named request error.
+
+```json
+{"instance": "u_sram", "lef": "sram.lef", "x_um": 10, "y_um": 10,
+ "keepout": {"left": 8, "right": 8}}
+```
+
+The response echoes the applied value under `macros[].keepout`
+(`{left, bottom, right, top}` in µm, `null` when omitted). Whether a keep-out
+lowers `GRT-0116` overflow on a given chip is a measurement, not a guarantee.
 
 ## Timing-driven/repair-iteration routing flags (`route_critical_nets_percentage`, `max_antenna_repair_iterations`)
 
@@ -2283,7 +2304,8 @@ be within the target `--deck`'s own label-layer coverage (cross-check with
       "orientation": "R0",
       "cell": "analog_block",
       "lib": null,
-      "halo": null
+      "halo": null,
+      "keepout": null
     }
   ],
   "def_path": "/abs/path/.klt/place-and-route/gcd.def",
@@ -2453,7 +2475,7 @@ plain string" for the full enumeration and rationale.
 | `power_basis` | object | Additive field (issue #4914). What `estimated_power_mw` was computed under, same shape as `klt sta`'s (see [`sta.md`](sta.md)): `activity_source` (`"global"` when `constraints.power_activity` was given, else `"engine_default"`), `activity` and `duty` (`null` when not given), `parasitics` (`"estimate_only"`). |
 | `clock_skew_ns` | number \| null | Worst setup-side clock skew (`report_clock_skew_metric -setup`) across the clock tree TritonCTS built. `null` before the `"cts"` stage — no clock tree exists yet, so there is nothing to measure skew across (issue #783). |
 | `stages` | array\<object\> | One entry per completed stage through `stage_reached`, each with whatever subset of the top-level metric fields that stage's own OpenROAD reports populate. The top-level fields above are always the **last** entry in `stages`, restated at top level. |
-| `macros` | array\<object\> | Echo of the request's `macros[]` (`instance`/`lef`/`x_um`/`y_um`/`orientation`; `lef` resolved to an absolute path), plus the additive `cell`/`lib`/`halo` fields (issue #2635) — `cell` is the resolved master name (shared with `klt synthesize`/`klt sta`'s own `macros[].cell`), `lib` is the per-corner liberty map resolved to absolute paths (`null` when omitted), `halo` is `{left, bottom, right, top}` in micrometres as actually honored (`null` when omitted). `[]` when the request declared none. |
+| `macros` | array\<object\> | Echo of the request's `macros[]` (`instance`/`lef`/`x_um`/`y_um`/`orientation`; `lef` resolved to an absolute path), plus the additive `cell`/`lib`/`halo` fields (issue #2635) and `keepout` (issue #5313, same shape as `halo`, `null` when omitted) — `cell` is the resolved master name (shared with `klt synthesize`/`klt sta`'s own `macros[].cell`), `lib` is the per-corner liberty map resolved to absolute paths (`null` when omitted), `halo` is `{left, bottom, right, top}` in micrometres as actually honored (`null` when omitted). `[]` when the request declared none. |
 | `def_path` | string \| null | Populated once `write_def` has run (i.e. `stage_reached` is `"route"`); `null` otherwise. |
 | `unrouted_def_path` | string \| null | Additive field (issue #1826). A pre-route DEF, populated only when `target_stage` itself is `"place"` or `"cts"` — the deterministic `<hdl_toplevel>.place.def`/`<hdl_toplevel>.cts.def` path each of those stages' own Tcl already writes unconditionally (the `"place"`-stage one existed on disk since issue #785 but was previously internal-only; the `"cts"`-stage one is new). `null` at `"floorplan"` (no DEF exists yet) and at `"route"` (`def_path` above is the routed artifact to use there instead — the two fields are never populated together). Feed this path into `klt sta`'s own `def` field (with `request.geometry_source: "placement_estimate"`, see `docs/cli/sta.md`) to get a real, SDC-driven setup/hold slack number before a full route — this stage's own parasitics come from `estimate_parasitics -placement` (a placement/bounding-box estimate, not routing-derived RC), so treat the result as an estimate, not a signoff number. See also issue #1825, which proposes a different (netlist-input) shape for the same underlying gap. |
 | `gds_path` | string \| null | Populated only once the DEF→GDS merge has also completed; `null` otherwise. |

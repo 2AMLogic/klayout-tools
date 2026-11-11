@@ -4650,6 +4650,7 @@ def test_stubbed_full_route_with_macro_emits_read_lef_and_place_macro(
             "cell": "analog_block",
             "lib": None,
             "halo": None,
+            "keepout": None,
         }
     ]
 

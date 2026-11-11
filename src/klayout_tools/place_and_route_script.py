@@ -673,19 +673,27 @@ def _macro_blockage_lines(macros: list[dict[str, Any]]) -> list[str]:
     lines: list[str] = []
     for macro in macros:
         halo = macro["halo"]
-        if halo is None:
+        keepout = macro.get("keepout")
+        if halo is None and keepout is None:
             continue
+        field = "halo" if keepout is None else "keepout"
         if macro["width_um"] is None or macro["height_um"] is None:
             raise PlaceAndRouteError(
-                f"request.macros[].halo for instance '{macro['instance']}' "
+                f"request.macros[].{field} for instance '{macro['instance']}' "
                 f"needs the macro's footprint, but its lef ({macro['lef']}) "
                 f"declares no SIZE for MACRO '{macro['cell_name']}'"
             )
+        # Issue #5313: the blockage is the per-side max of the PDN halo and
+        # the placement-only keep-out; the PDN grid keeps `halo` alone.
+        margin = {
+            side: max((halo or {}).get(side, 0.0), (keepout or {}).get(side, 0.0))
+            for side in ("left", "bottom", "right", "top")
+        }
         x1, y1, x2, y2 = _macro_footprint(macro)
         lines.append(
             "create_blockage -region "
-            f"{{{x1 - halo['left']} {y1 - halo['bottom']} "
-            f"{x2 + halo['right']} {y2 + halo['top']}}}"
+            f"{{{x1 - margin['left']} {y1 - margin['bottom']} "
+            f"{x2 + margin['right']} {y2 + margin['top']}}}"
         )
     return lines
 
