@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import liberty_writer
-from .characterize_sequential import _spice_number
+from .characterize_cards import spice_number
 
 #: Runs one probe deck: ``(netlist_text, measurements, label, stop_ns) ->
 #: {measurement name: value in seconds, or None when ngspice found no
@@ -68,7 +68,7 @@ def _frac(rising: bool, thresholds: liberty_writer.Thresholds) -> float:
 
 
 def _pwl(name: str, node: str, points: list[tuple[float, float]]) -> str:
-    body = " ".join(f"{_spice_number(t)}n {_spice_number(v)}" for t, v in points)
+    body = " ".join(f"{spice_number(t)}n {spice_number(v)}" for t, v in points)
     return f"{name} {node} 0 PWL({body})"
 
 
@@ -108,7 +108,7 @@ def build_deck(
     lines = [
         "* klt characterize -- setup/hold constraint probes, do not edit",
         f".include {cell['netlist_path']}",
-        f"Vdd vdd 0 DC {_spice_number(vdd)}",
+        f"Vdd vdd 0 DC {spice_number(vdd)}",
     ]
     measurements: list[dict[str, Any]] = []
     for k, (case_index, ci, di, offset) in enumerate(probes):
@@ -162,7 +162,7 @@ def build_deck(
         lines.append(_pwl(f"Vd{tag}", f"dd_{tag}", d_points))
         lines.append(f"X{tag} {' '.join(nodes)} {cell['subckt']}")
         for name in cell["output_pins"]:
-            lines.append(f"C{tag}_{name} {node_of[name]} 0 {_spice_number(load_pf)}p")
+            lines.append(f"C{tag}_{name} {node_of[name]} 0 {spice_number(load_pf)}p")
         out_thr = (
             thresholds.output_threshold_pct_rise
             if case.out_rising
@@ -173,16 +173,16 @@ def build_deck(
             if clk_rising
             else thresholds.input_threshold_pct_fall
         )
-        td = f"TD={_spice_number(t_clk)}n"
+        td = f"TD={spice_number(t_clk)}n"
         measurements.append(
             {
                 "name": f"{tag}_d",
                 "spice": (
                     f".meas tran {tag}_d TRIG v(ck_{tag}) "
-                    f"VAL={_spice_number(vdd * clk_thr / 100.0)} "
+                    f"VAL={spice_number(vdd * clk_thr / 100.0)} "
                     f"{'RISE' if clk_rising else 'FALL'}=1 {td} "
                     f"TARG v({node_of[case.output_pin]}) "
-                    f"VAL={_spice_number(vdd * out_thr / 100.0)} "
+                    f"VAL={spice_number(vdd * out_thr / 100.0)} "
                     f"{'RISE' if case.out_rising else 'FALL'}=1 {td}"
                 ),
                 "unit": "s",
