@@ -525,7 +525,7 @@
     },
     {
       "path": "src/klayout_tools/pex.py",
-      "lines": 3946
+      "lines": 3890
     },
     {
       "path": "src/klayout_tools/place_and_route.py",
