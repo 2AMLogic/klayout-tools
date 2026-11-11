@@ -8,6 +8,15 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-11
 
+- **PR #5295**: chore(loom): resync installed Loom to v0.19.1287
+- **PR #5293**: test(pex): cover --hosts sharding across both legs on submit and attach
+- **PR #5291**: feat(gen): add pdk_cell generator for fixed PDK GDS cells
+- **PR #5289**: feat: accept rsil flavour on sg13g2 res_array and ship docs/cli in the wheel
+- **PR #5287**: feat(extract): model sky130 1.8V LVT MOS flavour via lvtn marker
+- **Issue #5292** (closed): test(pex): cover --submit-only --hosts N submit/attach round trip with sharded legs
+- **Issue #5290** (closed): gen: no way to place a PDK's fixed GDS cells (bondpad/ESD) when its pcell library is unavailable
+- **Issue #5288** (closed): gen/signoff gaps on SG13G2: res_array lacks rsil flavour, PDK pcells need submodule, --attest 2 multi --input attests only last
+- **Issue #5283** (closed): extract/pex: sky130 deck does not recognise 1.8 V LVT MOS flavours (lvtn marker ignored)
 - **PR #5286**: feat(pex): report unfinished sim legs in unfinished[] beside partial delta rows
 - **PR #5285**: feat(sim): allow --submit-only with --hosts N via sharded submit
 - **PR #5284**: feat(pex): add --wait-for-capacity forwarded to every klt sim leg
