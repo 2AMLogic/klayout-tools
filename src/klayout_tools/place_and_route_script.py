@@ -100,7 +100,7 @@ def _design_rule_constraint_lines(
 
 def _pdn_instances_arg(instance: str) -> str:
     """Convert an OpenROAD db instance name to a `define_pdn_grid -instances`
-    argument (issue #4715).
+    argument (issue #4715; live-verified, see docs/cli/place-and-route.md).
 
     `-instances` is a list of glob patterns, unlike `place_macro -macro_name`
     (a literal db name). So the name is glob-escaped (a backslash before each
