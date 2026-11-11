@@ -110,6 +110,7 @@ from . import (
     sim_batch_receipt,
     sim_staging,
 )
+from .pdk import read_store_version
 from .pdk_families import family_subset, pdk_variant_family
 from .remote_launcher import (
     RemoteLaunchError,
@@ -1993,7 +1994,15 @@ def _client_pdk_stamp(request: dict[str, Any] | None) -> dict[str, Any] | None:
         with open(os.path.join(root, variant, "SOURCES"), "rb") as handle:
             text = handle.read(16385)[:16384].decode("utf-8", "replace")
     except OSError:
-        return None
+        # Issue #5318: bundle installs carry only ``.pdk-store.json``.
+        store = read_store_version(os.path.join(root, variant))
+        if store is None:
+            return None
+        return {
+            "variant": variant,
+            "stamp_scheme": "store-version-sha256",
+            "stamp_sha256": hashlib.sha256(store.encode("utf-8")).hexdigest(),
+        }
     normalized = "\n".join(
         line.rstrip() for line in text.replace("\r\n", "\n").strip().split("\n")
     )
