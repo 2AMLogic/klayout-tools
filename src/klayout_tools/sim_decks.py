@@ -81,7 +81,6 @@ import subprocess
 import tempfile
 import time
 import uuid
-from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
@@ -1661,31 +1660,20 @@ def _recover_failed_remote_deck_job(
 
 
 def _deck_batch_command(
-    version_check: str,
-    worker_request: dict[str, Any] | None = None,
-    model_names: Sequence[str] = (),
+    version_check: str, worker_request: dict[str, Any], model_names: list[str]
 ) -> str:
     """The batch job command for a deck-list request: the same preflight +
     ``klt sim --backend local-parallel`` invocation the corner job builds,
     with ``--outdir`` pointed into ``$EDA_OUTPUT_DIR`` **unconditionally**
     (unit streams are the result, not an opt-in artifact) and the report
     redirected to ``report.json`` (stdout is not a clean channel back --
-    see ``sim_batch._build_batch_job_spec``).
-
-    ``worker_request`` adds the same best-effort worker capture the corner
-    job runs (issue #5328), so a deck report carries the worker-observed
-    ``environment.remote.worker_environment``."""
-    capture = (
-        sim_batch._worker_capture_command(worker_request, model_names)
-        if worker_request is not None
-        else None
-    )
+    see ``sim_batch._build_batch_job_spec``). Includes the #5328 capture."""
     return (
         sim_batch._job_stderr_capture_prefix()
         + sim_batch._runner_preflight_script(
             _provenance._klt_version(),
             enforce=version_check == "enforce",
-            capture=capture,
+            capture=sim_batch._worker_capture_command(worker_request, model_names),
         )
         + sim_batch._deck_preflight_lines()
         + f'klt sim "$EDA_INPUT_DIR/{remote_transport.REMOTE_REQUEST_FILENAME}" '
@@ -1810,10 +1798,7 @@ def _recover_failed_deck_job(
     try:
         with tempfile.TemporaryDirectory(prefix="klt-batch-outputs-") as collected:
             sim_batch.collect_outputs(config, job_id, collected, runner=runner)
-            environment = {
-                **sim_batch._batch_environment(config, job_id, status),
-                **sim_batch._read_job_identity(collected, worker_request),
-            }
+            environment.update(sim_batch._read_job_identity(collected, worker_request))
             try:
                 report = _read_deck_report(collected)
             except sim_batch.BatchError:
@@ -1947,10 +1932,6 @@ def _collect_decks_batch(
                 ),
             },
         )
-    environment = {
-        **sim_batch._batch_environment(config, job_id, status),
-        **sim_batch._read_job_identity(None),
-    }
     if status.get("state") != "done" and (
         sim_batch._status_exit_code(status)
         not in sim_batch._BATCH_SIM_SUCCESS_EXIT_CODES

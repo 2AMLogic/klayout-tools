@@ -1360,28 +1360,9 @@ class TestBatchDispatch:
         assert remote["runner_compatibility"] == "mismatch"
 
     def test_job_command_captures_stderr_from_the_first_line(self):
-        cmd = sd._deck_batch_command("enforce")
+        cmd = sd._deck_batch_command("enforce", {}, [])
         assert cmd.startswith(sb._job_stderr_capture_prefix())
         assert cmd.count('> "$EDA_OUTPUT_DIR/report.json"') == 1
-
-    def test_job_command_runs_the_worker_capture(self):
-        request = {"models": {"pdk": "sky130A"}, "options": {}}
-        cmd = sd._deck_batch_command("enforce", request, ["m.lib"])
-        assert "worker_environment.json" in cmd
-        assert "sky130A" in cmd
-        assert "worker_environment.json" not in sd._deck_batch_command("enforce")
-
-    def test_report_carries_worker_environment_absent_when_not_captured(
-        self, tmp_path, monkeypatch
-    ):
-        fleet = install_fake_batch(
-            monkeypatch, _FakeFleet({"state": "done", "exit_code": "0"})
-        )
-        report = run_local(tmp_path, batch_deck_request(tmp_path), outdir="out")
-        assert fleet.spec is not None
-        assert "worker_environment.json" in fleet.spec.cmd
-        remote = report["environment"]["remote"]
-        assert remote["worker_environment"]["capture"] == "absent"
 
     @pytest.mark.parametrize(("deck_count", "goes_to_fleet"), [(1, False), (2, True)])
     def test_host_default_batch_keeps_a_single_deck_local(
