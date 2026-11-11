@@ -2455,16 +2455,14 @@ def _run_single_corner(
                 "x_um": macro["x_um"],
                 "y_um": macro["y_um"],
                 "orientation": macro["orientation"],
-                # Additive per-entry fields (issue #2635): the macro's
-                # master name (shared with `klt synthesize`/`klt sta`'s own
-                # `macros[].cell`), the per-corner liberty map as resolved,
-                # and the halo actually honored -- `null` when the request
-                # declared no `halo`/`lib`.
+                # Additive per-entry fields (issues #2635, #5313): master
+                # name (as `klt synthesize`/`klt sta` `macros[].cell`), the
+                # resolved per-corner liberty map, and the halo / keep-out
+                # honored -- `null` when the request declared none.
                 "cell": macro["cell_name"],
                 "lib": macro["lib"],
                 "halo": macro["halo"],
-                # Additive (issue #5313): placement-only keep-out applied.
-                "keepout": macro["keepout"],
+                "keepout": macro.get("keepout"),
             }
             for macro in macros
         ],
