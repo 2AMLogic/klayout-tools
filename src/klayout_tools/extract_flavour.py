@@ -125,10 +125,32 @@ def apportion_shared_sd(
     by ``gates in this pass / gates in all passes`` -- the value an unsplit
     extraction yields. No-op when no S/D polygon straddles passes.
     """
-    import klayout.db as kdb
-
     if circuit is None:
         return
+    mixed = _mixed_sd_region(passes)
+    if mixed.is_empty():
+        return
+    dbu = l2n.internal_layout().dbu
+    polygons = list(mixed.each())
+    pass_gates = [(g.merged() & g.merged().interacting(mixed)) for g, _sd in passes]
+    for device in circuit.each_device():
+        found = _owning_pass(pass_gates, device, dbu)
+        if found is None:
+            continue
+        owner, gate = found
+        defs = {td.name: td.id() for td in device.device_class().terminal_definitions()}
+        if "S" not in defs or "D" not in defs:
+            continue
+        for polygon in polygons:
+            _rescale_for_polygon(
+                l2n, device, defs, polygon, gate, pass_gates, passes[owner][1], owner
+            )
+
+
+def _mixed_sd_region(passes: list[tuple[kdb.Region, kdb.Region]]) -> kdb.Region:
+    """S/D polygons touched by gates of two or more extraction passes."""
+    import klayout.db as kdb
+
     all_sd = kdb.Region()
     for _g, sd in passes:
         all_sd += sd
@@ -138,48 +160,53 @@ def apportion_shared_sd(
     for i in range(len(touched)):
         for j in range(i + 1, len(touched)):
             mixed += touched[i] & touched[j]
-    mixed = mixed.merged()
-    if mixed.is_empty():
-        return
+    return mixed.merged()
+
+
+def _owning_pass(
+    pass_gates: list[kdb.Region], device: kdb.Device, dbu: float
+) -> tuple[int, kdb.Region] | None:
+    """Index of the pass whose gate sits at the device centre, plus that gate."""
+    import klayout.db as kdb
+
+    centre = device.trans.disp
+    cx, cy = round(centre.x / dbu), round(centre.y / dbu)
+    probe = kdb.Region(kdb.Box(cx - 1, cy - 1, cx + 1, cy + 1))
+    for k, g in enumerate(pass_gates):
+        if not g.interacting(probe).is_empty():
+            return k, g.interacting(probe)
+    return None
+
+
+def _rescale_for_polygon(
+    l2n: kdb.LayoutToNetlist,
+    device: kdb.Device,
+    defs: dict[str, int],
+    polygon: kdb.Polygon,
+    gate: kdb.Region,
+    pass_gates: list[kdb.Region],
+    owner_sd: kdb.Region,
+    owner: int,
+) -> None:
+    """Scale the terminal params of ``device`` for one shared S/D polygon."""
+    import klayout.db as kdb
+
     dbu = l2n.internal_layout().dbu
-    polygons = list(mixed.each())
-    pass_gates = [(g.merged() & g.merged().interacting(mixed)) for g, _sd in passes]
-    for device in circuit.each_device():
-        centre = device.trans.disp
-        cx, cy = round(centre.x / dbu), round(centre.y / dbu)
-        probe = kdb.Region(kdb.Box(cx - 1, cy - 1, cx + 1, cy + 1))
-        owner = next(
-            (
-                k
-                for k, g in enumerate(pass_gates)
-                if not g.interacting(probe).is_empty()
-            ),
-            None,
-        )
-        if owner is None:
-            continue
-        gate = pass_gates[owner].interacting(probe)
-        defs = {td.name: td.id() for td in device.device_class().terminal_definitions()}
-        if "S" not in defs or "D" not in defs:
-            continue
-        for polygon in polygons:
-            region = kdb.Region(polygon)
-            if region.interacting(gate).is_empty():
-                continue
-            counts = [g.interacting(region).count() for g in pass_gates]
-            total = sum(counts)
-            if total <= counts[owner] or counts[owner] == 0:
-                continue
-            vertex = next(iter(polygon.each_point_hull()))
-            net = l2n.probe_net(
-                passes[owner][1], kdb.DPoint(vertex.x * dbu, vertex.y * dbu)
-            )
-            if net is None:
-                continue
-            factor = counts[owner] / total
-            for term, params in (("S", ("AS", "PS")), ("D", ("AD", "PD"))):
-                t_net = device.net_for_terminal(defs[term])
-                if t_net is not None and t_net.cluster_id == net.cluster_id:
-                    for name in params:
-                        device.set_parameter(name, device.parameter(name) * factor)
-                    break
+    region = kdb.Region(polygon)
+    if region.interacting(gate).is_empty():
+        return
+    counts = [g.interacting(region).count() for g in pass_gates]
+    total = sum(counts)
+    if total <= counts[owner] or counts[owner] == 0:
+        return
+    vertex = next(iter(polygon.each_point_hull()))
+    net = l2n.probe_net(owner_sd, kdb.DPoint(vertex.x * dbu, vertex.y * dbu))
+    if net is None:
+        return
+    factor = counts[owner] / total
+    for term, params in (("S", ("AS", "PS")), ("D", ("AD", "PD"))):
+        t_net = device.net_for_terminal(defs[term])
+        if t_net is not None and t_net.cluster_id == net.cluster_id:
+            for name in params:
+                device.set_parameter(name, device.parameter(name) * factor)
+            return
