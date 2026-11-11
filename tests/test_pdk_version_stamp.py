@@ -125,3 +125,32 @@ def test_linked_trees_absent_without_cross_tree(tmp_path):
     assert "linked_trees" not in block
     assert block == {"name": "A", "source": "--pdk-root flag", "version": None}
     assert "linked_trees" not in _provenance._pdk_block(_info(tmp_path, "A"))
+
+
+def _store_bundle(tmp_path, payload):
+    bundle = tmp_path / "bundle"
+    (bundle / "sky130A").mkdir(parents=True)
+    if payload is not None:
+        (bundle / ".pdk-store.json").write_text(payload, encoding="utf-8")
+    link = tmp_path / "pdkroot" / "sky130A"
+    link.parent.mkdir()
+    link.symlink_to(bundle / "sky130A")
+    return link
+
+
+def test_store_version_fallback_via_symlink(tmp_path):
+    link = _store_bundle(tmp_path, '{"version": "2026.08.03", "sha256": "x"}')
+    assert pdk.read_version(str(link)) == "store:2026.08.03"
+
+
+def test_sources_wins_over_store(tmp_path):
+    link = _store_bundle(tmp_path, '{"version": "1"}')
+    (link / "SOURCES").write_text("open_pdks abc\n", encoding="utf-8")
+    assert pdk.read_version(str(link)) == "open_pdks abc"
+
+
+@pytest.mark.parametrize(
+    "payload", [None, "{not json", "[1]", '{"version": 3}', '{"version": "  "}']
+)
+def test_store_version_malformed_is_none(tmp_path, payload):
+    assert pdk.read_version(str(_store_bundle(tmp_path, payload))) is None

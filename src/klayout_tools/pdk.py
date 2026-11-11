@@ -106,6 +106,7 @@ from .pdk_families import (
     pdk_variant_family,
     pdk_variant_install_names,
 )
+from .pdk_store import read_store_stamp
 
 #: The ciel/volare stores, in resolution order (step 3). ``~`` is expanded at
 #: call time against ``$HOME``. Exposed at module scope so tests can override
@@ -701,16 +702,15 @@ def read_version(variant_dir: str) -> str | None:
     to before the fallbacks existed); (2) a ``.fetched-version`` marker
     (``scripts/fetch-*.sh``) as ``fetched:<marker>``; (3) when the variant
     directory or its parent is itself a git work tree root, ``git:<40-hex
-    HEAD>`` with a ``-dirty`` suffix for uncommitted changes (issue #3070).
+    HEAD>`` with a ``-dirty`` suffix for uncommitted changes (issue #3070);
+    (4) the bundle ``.pdk-store.json`` ``version`` as ``store:<v>`` (#5318).
     Absent/unreadable/empty → ``None`` (never guessed).
     """
-    sources = read_sources(variant_dir)
-    if sources:
+    if sources := read_sources(variant_dir):
         return sources
-    marker = read_fetched_marker(variant_dir)
-    if marker:
+    if marker := read_fetched_marker(variant_dir):
         return f"fetched:{marker}"
-    return _git_version(variant_dir)
+    return _git_version(variant_dir) or read_store_stamp(variant_dir)
 
 
 _HEX40 = re.compile(r"^[0-9a-f]{40}$")
