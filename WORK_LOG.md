@@ -8,6 +8,9 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-11
 
+- **PR #5304**: fix(extract): classify MOS flavour markers per gate, not per diffusion island
+- **PR #5303**: docs(pnr): record live-verified -instances spelling for bracketed macro names
+- **Issue #5301** (closed): extract/pex: sky130 deck over-classifies LVT PFETs when marker ends inside shared source/drain diffusion
 - **PR #5297**: feat(sdf): drop COND-expression IOPATH arcs Icarus rejects
 - **Issue #5302** (closed): place-and-route: macros[].halo fails with PDN-0217 for instance names with escaped brackets (0.9.1)
 - **Issue #5300** (closed): place-and-route: macros[].halo is accepted but silently ignored; no placement-density control
