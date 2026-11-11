@@ -8,6 +8,11 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-11
 
+- **PR #5312**: docs: document hierarchical LVS compare for large regular arrays with measurements
+- **PR #5308**: refactor(characterize): share spice_number and slug via characterize_cards
+- **Issue #5310** (closed): klt lvs: flat compare of a ~50k-device regular array still returns no verdict (follow-up to #4165)
+- **Issue #5306** (closed): Consolidate duplicated _spice_number/_slug helpers in characterize modules
+- **Issue #2727** (closed): Friction: klt sim's batch/remote backends refuse ihp-sg13cmos5l, so no SG13CMOS5L corner grid can run on a batch-only host
 - **Issue #5309** (closed): test flake: ci-apt-install fails installing ngspice on Tests (Python 3.10-3.14) (apt mirror, PR #5308)
 - **PR #5304**: fix(extract): classify MOS flavour markers per gate, not per diffusion island
 - **PR #5303**: docs(pnr): record live-verified -instances spelling for bracketed macro names
