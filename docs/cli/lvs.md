@@ -2222,6 +2222,67 @@ for tens of minutes with no output, which looks identical to a hang.
   KLayout's comparer is not known to expose them, so a slow match cannot be
   told apart from a mismatch beyond the deadline.
 
+## Large regular arrays: keep the repeated cell hierarchical (issue #5310)
+
+A flat compare of a regular array is the slow case, and the cost is superlinear
+in device count. Measured with `scripts/lvs_array_bench.py` (an R x C array of a
+6-device bitcell, layout side with anonymised internal nets as extraction
+produces them, one `NetlistComparer.compare()` call, single process, `nice`,
+on a `loom-worker-N` dispatch host):
+
+| devices | flat (all devices in the top circuit) | hierarchical (`BITCELL` x R*C) |
+| ------: | ------------------------------------: | -----------------------------: |
+| 384     | 0.11 s                                | 0.001 s                        |
+| 1,536   | 1.4 s                                 | 0.004 s                        |
+| 6,144   | 19.6 s                                | 0.02 s                         |
+| 24,576  | not finished after 10 min (CPU-bound) | not measured                   |
+| 49,686  | not measured (extrapolates to hours)  | 0.18 s `match`                 |
+
+Flat time grows about 15x per 4x devices (roughly N^2). The cause is that the
+identical bitcells cannot be told apart by their neighbourhood, so the comparer
+backtracks. With the cell kept as a subcircuit on both sides it is compared
+once, and the top level is a small graph of `R*C` instances.
+
+**Bound.** A 49,686-device array compares in under 1 s hierarchical (0.18 s
+clean, 0.2-0.3 s with a fault). `options.compare_timeout_s` repeats a finishing
+compare in-process, so with it set the cost is at most 2x that, still under 1 s.
+These are comparer times: extraction of a GDS is separate and not included.
+
+**One broken instance is reported.** Same 49,686-device case, hierarchical:
+
+- one cell wired to the wrong wordline (top-level wiring): `mismatch`, 0.33 s;
+- a gate tied to the wrong net inside the cell definition: `mismatch`, 0.23 s.
+
+### When to use it
+
+Use it when the design is a regular array of one repeated cell and the
+reference is, or can be written as, a hierarchical netlist with that cell as a
+subcircuit. Give `klt lvs` hierarchical netlists on both sides (`layout.netlist`
+and `reference.netlist`, each with the cell as a `.subckt` and no
+`flatten_layout` / `flatten_reference`); the comparer then matches circuits
+bottom-up. From a layout, extraction is flat, so the hierarchy comes from
+`layout.abstract_cells` (see "Mixed-level LVS" above) plus one separate request
+for the cell itself, as in "Large flat designs" above.
+
+### What it does not prove
+
+- **Cell-internal correctness is checked once, not per instance.** A fault that
+  is present in the cell definition is caught (and is caught in every instance).
+  A fault that exists in only one *placed* instance of a hierarchical layout
+  netlist cannot be seen inside the cell, because every instance is the same
+  circuit by construction; only its connections at the top level are checked.
+- **Top-level wiring is checked against the cell's pins.** Swapping two pins
+  of a cell that is symmetric in those pins is an isomorphic circuit, and both
+  the flat and the hierarchical compare report `match` for it, as they should.
+- **Not measured here:** extraction of a custom bitcell array from GDS through
+  `abstract_cells`. The measurements above are the netlist compare, which is the
+  step that did not finish. Per-cell pin and abstraction behaviour is as in
+  `docs/cli/extract.md`.
+
+Reproduce: `python scripts/lvs_array_bench.py --rows 91 --cols 91 --form hier
+[--broken wiring|internal]`. CI runs a 12 x 12 instance of the same shape
+(`tests/test_lvs_regular_array.py`).
+
 ## Output file (`-o`, issue #4984)
 
 `klt lvs <request> -o PATH` also writes the report envelope to `PATH`,
