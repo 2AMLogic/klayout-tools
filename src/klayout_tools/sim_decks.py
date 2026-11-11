@@ -1850,6 +1850,13 @@ def _recover_failed_deck_job(
     )
 
 
+def deck_serial_worst_s(units: list[dict[str, Any]]) -> float:
+    """Fully-serial worst case of a planned deck list: every unit's own
+    ``timeout_s`` one after another. The one deck job's timeout basis, shared
+    by the submit path and the ``--batch-set`` preflight (issue #5337)."""
+    return sum(unit["timeout_s"] for unit in units)
+
+
 def _prepare_decks_batch(
     request: dict[str, Any],
     files: list[sim_staging.StagedFile],
@@ -1860,7 +1867,7 @@ def _prepare_decks_batch(
     unit's own timeout, one after another) plus slack; the fleet's own
     ``$EDA_JOB_CONCURRENCY`` sizing still makes a real run far faster."""
     units = worker_request[DECKS_FIELD]
-    serial_worst_s = sum(unit["timeout_s"] for unit in units)
+    serial_worst_s = deck_serial_worst_s(units)
     config = sim_batch._resolve_batch_config(
         request, corner_count=1, timeout_s=serial_worst_s
     )

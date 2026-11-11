@@ -49,8 +49,25 @@ def preflight_batch_request(request_path: str, **overrides: Any) -> dict[str, An
     before any S3 write. Raises :class:`SimError` with the submit path's own
     code; returns the job-ceiling assessment otherwise. ``overrides`` are the
     :func:`~klayout_tools.sim.run_sim` keyword options."""
-    from .sim import _prepare_sim_request
+    from .sim import (
+        SimError,
+        _prepare_sim_request,
+        _with_pdk_root_override,
+        load_request,
+    )
 
+    request = load_request(request_path)
+    if "decks" in request:
+        return _preflight_decks_request(
+            _with_pdk_root_override(request, overrides.get("pdk_root")), request_path
+        )
+    if "netlist" not in request:
+        raise SimError(
+            f"{request_path}: --batch-set preflight supports corner requests "
+            "(`netlist`) and deck-list requests (`decks`) only; this request "
+            "has neither",
+            code="batch_set_unsupported_request",
+        )
     resolved = _prepare_sim_request(
         request_path,
         artifacts_dir=overrides.get("artifacts_dir"),
@@ -77,5 +94,30 @@ def preflight_batch_request(request_path: str, **overrides: Any) -> dict[str, An
     )
     job_ceiling, _hosts = plan_batch_job(
         config, unit_count=len(points), timeout_s=resolved.timeout_s, quiet=True
+    )
+    return job_ceiling
+
+
+def _preflight_decks_request(
+    request: dict[str, Any], request_path: str
+) -> dict[str, Any]:
+    """Ceiling check for a ``decks[]`` member (issue #5337): a deck list is one
+    batch job whose bound is the serial worst case of its units, sized exactly
+    as :func:`~klayout_tools.sim_decks._prepare_decks_batch` sizes it."""
+    import os
+
+    from . import sim_decks
+
+    units = sim_decks.plan_deck_units(
+        request,
+        request_dir=os.path.dirname(os.path.abspath(request_path)),
+        allow_worker_form=False,
+    )
+    serial_worst_s = sim_decks.deck_serial_worst_s(units)
+    config = _resolve_batch_config(
+        request, corner_count=1, timeout_s=serial_worst_s, check_runner=False
+    )
+    job_ceiling, _hosts = plan_batch_job(
+        config, unit_count=1, timeout_s=serial_worst_s, quiet=True
     )
     return job_ceiling
