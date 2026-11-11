@@ -2816,6 +2816,13 @@ def _dispatch_deck_request(
         _refuse_unsupported_submit_only(
             resolved_backend, 1 if hosts is None else hosts, resume, plot_dir
         )
+        if hosts is not None and hosts != 1 and not resume and plot_dir is None:
+            # Deck lists stay one job (issue #5281 shards corner requests only).
+            raise SimError(
+                "--submit-only submits one job; --hosts/remote.hosts sharding "
+                "is not supported for deck-list requests",
+                code=SUBMIT_ONLY_UNSUPPORTED_CODE,
+            )
     _apply_attach(
         {}, attach_job_id, resolved_backend, 1 if hosts is None else hosts, submit_only
     )
@@ -2932,19 +2939,12 @@ def _refuse_unsupported_submit_only(
     backend: str, hosts: int, resume: bool | None, plot_dir: str | None
 ) -> None:
     """``--submit-only`` is one batch job: refuse everything else by name,
-    before the first S3 write (issue #3073). ``--hosts > 1`` would need one
-    job per shard chosen by the client -- not represented, so refused rather
-    than silently submitting only part of the request. A ``max_units_per_job``
-    split is decided by the batch config and submitted shard by shard (issue
-    #4620)."""
+    before the first S3 write (issue #3073). ``--hosts N`` and a
+    ``max_units_per_job`` split are both submitted shard by shard (issues
+    #4620, #5281); ``hosts`` is unused here and kept for call-site stability."""
     reason = None
     if backend != "batch":
         reason = f"requires backend 'batch' (resolved backend: '{backend}')"
-    elif hosts != 1:
-        reason = (
-            "submits one job; --hosts/remote.hosts > 1 would need one job per "
-            "shard and is not supported"
-        )
     elif resume:
         reason = "cannot be combined with --resume"
     elif plot_dir is not None:
@@ -4087,7 +4087,14 @@ def _run_sim_corners(
 
     if submit_only:
         _refuse_unsupported_submit_only(backend, hosts, resume, plot_dir)
+        if hosts > len(dispatch_points):
+            raise SimError(
+                f"remote.hosts ({hosts}) exceeds the number of units to "
+                f"dispatch ({len(dispatch_points)}) -- an idle fleet member "
+                "would still be billed; use hosts <= corner/sample count"
+            )
         return _submit_batch_only(
+            hosts=hosts,
             request=request,
             corner_points=dispatch_points,
             netlist_path=netlist_path,

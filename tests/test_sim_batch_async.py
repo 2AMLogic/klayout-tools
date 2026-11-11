@@ -86,8 +86,8 @@ def test_submit_only_refuses_sharded_request_before_any_s3_write(tmp_path, monke
     with pytest.raises(sim.SimError) as err:
         sim.run_sim(str(path), submit_only=True, hosts=2)
 
-    assert err.value.code == sba.SUBMIT_ONLY_UNSUPPORTED_CODE
-    assert "hosts" in str(err.value)
+    # One unit cannot fill two hosts (issue #5281): refused by name.
+    assert "exceeds the number of units" in str(err.value)
     assert runner.calls == []
 
 
@@ -655,6 +655,31 @@ def test_sharded_submit_only_lists_every_shard_and_the_manifest(tmp_path, monkey
     ]
 
 
+def test_submit_only_client_hosts_shards_the_submit(tmp_path, monkeypatch):
+    """Issue #5281: ``hosts=3`` submits 3 shard jobs and writes the shard map."""
+    runner, shard_sizes = _split_runner(monkeypatch)
+    monkeypatch.delenv(sb.MAX_JOB_SECONDS_ENV, raising=False)
+
+    payload = sba.submit_only(
+        request=_ceiling_request(tmp_path),
+        corner_points=_corner_points(10),
+        netlist_path=str(_write_body(tmp_path)),
+        timeout_s=120.0,
+        keep_artifacts=False,
+        want_waveforms=False,
+        artifacts_dir=str(tmp_path / "artifacts"),
+        shard_fingerprint="fp-async",
+        hosts=3,
+    )
+
+    assert payload["sharded"] is True
+    assert len(payload["shards"]) == 3
+    assert sorted(shard_sizes) == [3, 3, 4]
+    assert len(runner.argvs_matching("launch", "--apply")) == 3
+    document = json.loads(open(payload["manifest_path"]).read())
+    assert document["hosts"] == 3
+
+
 def _launch_dies_on(monkeypatch, nth):
     """Make the `nth` (1-based) launch_job call raise, as a kill would."""
     real = sb.launch_job
@@ -809,10 +834,10 @@ def test_attach_requires_the_shard_map_filename(tmp_path, monkeypatch):
     assert err.value.code == sb.BATCH_SHARD_MANIFEST_CODE
 
 
-def test_submit_only_hosts_greater_than_one_keeps_its_refusal(tmp_path, monkeypatch):
+def test_submit_only_hosts_with_resume_is_still_refused(tmp_path, monkeypatch):
     runner = _FakeRunner()
     path = _setup(tmp_path, monkeypatch, runner)
     with pytest.raises(sim.SimError) as err:
-        sim.run_sim(str(path), submit_only=True, hosts=2)
+        sim.run_sim(str(path), submit_only=True, hosts=3, resume=True)
     assert err.value.code == sba.SUBMIT_ONLY_UNSUPPORTED_CODE
     assert runner.calls == []
