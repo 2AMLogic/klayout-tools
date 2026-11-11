@@ -4972,9 +4972,18 @@ def _preflight_staged_model_inputs(
     )
     if not enabled:
         return {}
-    return {
+    result: dict[str, Any] = {
         "staged_model_inputs": [asset.to_json() for asset in staged_job.model_assets]
     }
+    # Issue #5325: caller-asserted PDK revision, kept apart from the
+    # worker-observed ``worker_environment.pdk``.
+    asserted = sim_staging.pdk_revision_asserted(request)
+    if asserted is not None:
+        result["pdk_revision_asserted"] = {
+            "value": asserted,
+            "scope": "caller-asserted",
+        }
+    return result
 
 
 def _model_resolution_models(
