@@ -377,6 +377,7 @@ from . import (
     ResistorDevice,
     RuleProvenance,
 )
+from .sky130_lvt import lvt_mos_flavour
 from .sky130_unmodeled import UNMODELED_RULES, native_output_id  # noqa: F401
 
 # `RuleProvenance.source_repo`/`.commit` shared by every sky130 width/space
@@ -2348,14 +2349,10 @@ EXTRACTION_DECK = ExtractionDeck(
     # split (NMOS = active outside nwell, PMOS = active inside nwell). Real
     # sky130 draws several other voltage/threshold flavours off the *same*
     # split, keyed by additional implant/marker layers this curated deck
-    # does not model (e.g. the hvt/native siblings) -- this citation names
-    # the one flavour `nfet_class`/
-    # `pfet_class`'s generic `"nfet"`/`"pfet"` labels actually correspond to
-    # (the plain-active, no-implant-marker core device), not a claim that
-    # every sky130 MOS flavour is modelled. The `hvi`-marked
-    # `nfet_g5v0d10v5`/`pfet_g5v0d10v5` flavour (issue #1369) and the
-    # `lvtn`-marked `nfet_01v8_lvt`/`pfet_01v8_lvt` flavour (issue #5283)
-    # *are* now modelled, via the `mos_flavours` entries below.
+    # models only via `mos_flavours` below (hvi #1369, lvtn #5283) -- this
+    # citation names the one flavour `nfet_class`/`pfet_class`'s generic
+    # `"nfet"`/`"pfet"` labels correspond to (the plain-active, no-marker
+    # core device), not a claim that every sky130 MOS flavour is modelled.
     nfet_provenance=_sky130_lvs_provenance("sky130_fd_pr__nfet_01v8"),
     pfet_provenance=_sky130_lvs_provenance("sky130_fd_pr__pfet_01v8"),
     tap=(65, 44),  # tap.drawing -- distinct from diff.drawing, see above
@@ -2843,24 +2840,7 @@ EXTRACTION_DECK = ExtractionDeck(
             nfet_provenance=_sky130_lvs_provenance("sky130_fd_pr__nfet_g5v0d10v5"),
             pfet_provenance=_sky130_lvs_provenance("sky130_fd_pr__pfet_g5v0d10v5"),
         ),
-        # 1.8V low-threshold MOS (issue #5283): upstream `sky130.lvs` derives
-        # `pgate_1p8v_lvt = pgate_low_voltage_not_pass.not(hvtp).and(lvtn)`
-        # (L1196) -> `sky130_fd_pr__pfet_01v8_lvt` (L2051) and
-        # `ngate_1p8v_lvt = ngate_low_voltage_not_pass.and(lvtn)` (L1220) ->
-        # `sky130_fd_pr__nfet_01v8_lvt` (L2073). Keyed on lvtn (125/44) alone;
-        # `hvi` is excluded (those are the 5V `nvt`/`hvi` flavours above),
-        # as are areaid_ed (81/19) and areaid_ce (81/2). `not_markers` applies
-        # to both polarities, so hvtp (78/44) is excluded for NMOS too --
-        # harmless, since hvtp is a PMOS-only implant. Must come after `nvt`
-        # and `hvi` (flavours claim in declaration order).
-        MOSFlavour(
-            marker=(125, 44),  # lvtn.drawing
-            flavour="lvt",
-            not_markers=((75, 20), (78, 44), (81, 19), (81, 2)),
-            description="sky130 1.8V low-threshold MOS (lvtn 125/44)",
-            nfet_provenance=_sky130_lvs_provenance("sky130_fd_pr__nfet_01v8_lvt"),
-            pfet_provenance=_sky130_lvs_provenance("sky130_fd_pr__pfet_01v8_lvt"),
-        ),
+        lvt_mos_flavour(_sky130_lvs_provenance),  # issue #5283
     ),
 )
 

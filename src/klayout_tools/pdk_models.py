@@ -254,18 +254,12 @@ _MOS_MODEL_FLAVOURS: dict[tuple[str, str], dict[str, dict[str, str]]] = {
     ("sky130", "sky130"): {
         # Native-Vt NMOS only (issue #3599, `sky130.lvs` L1214/1226/2081);
         # deliberately no "pfet" entry -- there is no native PMOS.
-        "nvt": {
-            "nfet": "sky130_fd_pr__nfet_05v0_nvt",
-        },
+        "nvt": {"nfet": "sky130_fd_pr__nfet_05v0_nvt"},
         "hvi": {
             "nfet": "sky130_fd_pr__nfet_g5v0d10v5",
             "pfet": "sky130_fd_pr__pfet_g5v0d10v5",
         },
-        # 1.8V low-threshold pair (issue #5283, `sky130.lvs` L2051/L2073).
-        "lvt": {
-            "nfet": "sky130_fd_pr__nfet_01v8_lvt",
-            "pfet": "sky130_fd_pr__pfet_01v8_lvt",
-        },
+        "lvt": {p: f"sky130_fd_pr__{p}_01v8_lvt" for p in ("nfet", "pfet")},
     },
 }
 
