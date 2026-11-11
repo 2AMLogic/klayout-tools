@@ -653,7 +653,7 @@ def _resolve_batch_config(
             f"the ${BUCKET_ENV} environment variable, or BATCH_JOB_BUCKET in the "
             f"{FLEET_CONFIG_FILENAME} beside the provision script"
         )
-    capacity_wait_s = _resolve_capacity_wait_s(batch_spec)
+    capacity_wait_s = resolve_capacity_wait_s(batch_spec)
     runner_version_check = _resolve_runner_version_check(batch_spec)
     max_job_seconds, max_job_seconds_source = _resolve_max_job_seconds(
         batch_spec, fleet
@@ -1187,7 +1187,7 @@ def _resolve_runner_version_check(batch_spec: dict[str, Any]) -> str:
     return value
 
 
-def _resolve_capacity_wait_s(batch_spec: dict[str, Any]) -> float:
+def resolve_capacity_wait_s(batch_spec: dict[str, Any]) -> float:
     """``request.batch.capacity_wait_s``: a finite, non-negative number of
     seconds (default ``0``), else :class:`~klayout_tools.sim.SimError` --
     raised from :func:`_resolve_batch_config`, i.e. before any S3 write.

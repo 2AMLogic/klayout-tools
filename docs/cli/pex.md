@@ -8,7 +8,7 @@ Phase 1a of [Epic #709](https://github.com/2AMLogic/klayout-tools/issues/709)
 ("PEX-aware post-layout sim flow for klt").
 
 ```
-klt pex <layout> <testbench>... --deck sky130|gf180mcu|sg13g2 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--outdir <dir>] [--backend <backend>] [--max-units-per-job <n>] [--max-concurrent-jobs <n>] [--hosts <n>] [--resume] [--submit-only | --attach <pex-submit.json>] [--envelope-out <envelope.json>] [--deck-option <key>=<value>]... [--pins <a,b,...>] [--rename-declared-pins] [--tie-declared-pins] [--label-layer <role>=<layer>/<datatype>]... [--device-model <class>=<subckt>]... [--tie-net <extracted-net>=<schematic-net>]... [--critical-net <net>]... [--critical-net-pattern <glob>]... [--critical-net-all] [--critical-net-exclude <glob>]... [--distributed-rc] [--resistance-graph [--resistance-graph-r-cut <ohms>]] [--parasitic-variant <variant>]... [--substrate-tie-ohms <ohms>] [--mom-rlc-net <net>] [--mom-rlc-resistance-ohm <r>] [--mom-rlc-capacitance-ff <c>] [--mom-rlc-inductance-nh <l>] [--flatten-schematic] [--device-only-leg] [--extract-only] [--format text|json]
+klt pex <layout> <testbench>... --deck sky130|gf180mcu|sg13g2 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--outdir <dir>] [--backend <backend>] [--max-units-per-job <n>] [--max-concurrent-jobs <n>] [--hosts <n>] [--resume] [--wait-for-capacity <seconds>] [--submit-only | --attach <pex-submit.json>] [--envelope-out <envelope.json>] [--deck-option <key>=<value>]... [--pins <a,b,...>] [--rename-declared-pins] [--tie-declared-pins] [--label-layer <role>=<layer>/<datatype>]... [--device-model <class>=<subckt>]... [--tie-net <extracted-net>=<schematic-net>]... [--critical-net <net>]... [--critical-net-pattern <glob>]... [--critical-net-all] [--critical-net-exclude <glob>]... [--distributed-rc] [--resistance-graph [--resistance-graph-r-cut <ohms>]] [--parasitic-variant <variant>]... [--substrate-tie-ohms <ohms>] [--mom-rlc-net <net>] [--mom-rlc-resistance-ohm <r>] [--mom-rlc-capacitance-ff <c>] [--mom-rlc-inductance-nh <l>] [--flatten-schematic] [--device-only-leg] [--extract-only] [--format text|json]
 klt pex <layout> --deck <deck> --measure-command <command> --reference-netlist <schematic.spice> [--measure-timeout-s <seconds>] [<every flag above>]
 ```
 
@@ -84,6 +84,14 @@ klt pex <layout> --deck <deck> --measure-command <command> --reference-netlist <
   cannot address a pex run, which has at least two jobs per testbench. Shard-job re-attach is recorded only for sharded legs, so rely on it with
   `--hosts >= 2`; a plain single-job leg is not guaranteed to re-attach. Omitted, the flags are not passed and behavior is unchanged
   ([#4624](https://github.com/2AMLogic/klayout-tools/issues/4624)).
+- `--wait-for-capacity SECONDS` — with backend `batch`, wait up to SECONDS
+  (>= 0) for fleet capacity when a launch is refused (`batch_no_capacity` /
+  `batch_concurrency_cap`), re-launching with jittered backoff; same semantics
+  as `klt sim --wait-for-capacity`. Forwarded to every `klt sim` call
+  (schematic, extracted and device-only legs) and overrides each testbench
+  request's `batch.capacity_wait_s`. A negative value or a non-`batch`
+  backend is refused before anything is extracted. Omitted, behavior is
+  unchanged ([#5280](https://github.com/2AMLogic/klayout-tools/issues/5280)).
 - `--submit-only`, `--attach MANIFEST` — asynchronous batch runs, the pex
   counterpart of `klt sim --submit-only` / `--attach`
   ([#4619](https://github.com/2AMLogic/klayout-tools/issues/4619)).

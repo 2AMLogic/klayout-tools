@@ -2799,7 +2799,7 @@ def _run_device_only_sim(
     work_dir: str,
     label: str,
     backend: Any,
-    batch_shard: Mapping[str, int | bool | None] | None = None,
+    batch_shard: Mapping[str, int | float | bool | None] | None = None,
 ) -> dict[str, Any] | None:
     """One testbench re-run against the parasitic-free netlist (issue #3298),
     or ``None`` without the leg. A failure here costs only the device-only
@@ -2879,6 +2879,7 @@ def run_pex(
     max_concurrent_jobs: int | None = None,
     hosts: int | None = None,
     resume: bool | None = None,
+    capacity_wait_s: float | None = None,
     deck_options: Mapping[str, str] | None = None,
     declared_pins: frozenset[str] | None = None,
     rename_declared_pins: bool = False,
@@ -3006,8 +3007,9 @@ def run_pex(
     "Execution backends". ``max_units_per_job`` / ``max_concurrent_jobs``
     (issue #4616) are likewise passed to each of those calls, so each side's
     batch grid is sharded on its own; ``None`` leaves the request's own
-    ``batch`` block in force. ``hosts`` / ``resume`` (issue #4624) ride the same path:
-    each leg re-attaches from its own ``batch-shards.json`` on a re-run.
+    ``batch`` block in force. ``hosts`` / ``resume`` (#4624) and
+    ``capacity_wait_s`` (#5280) ride the same path (each leg re-attaches from
+    its own ``batch-shards.json``).
     ``artifacts_dir`` overrides where this command
     writes its own generated artifacts (the extracted-side testbench body/
     request copies, see :func:`_prepare_extracted_request`, and each `klt
@@ -3162,6 +3164,7 @@ def run_pex(
         extract_only=extract_only,
         device_only_leg=device_only_leg,
     )
+    pex_async.validate_capacity_wait(capacity_wait_s, backend)
     _own_pex_root(_ownership, artifacts_dir, layout_path)
     # Issue #2478: exactly one of `testbench_paths` / `measure_command`.
     # `command` is the measurement command's argv in `--measure-command`
@@ -3544,16 +3547,13 @@ def run_pex(
     measurement_sides: dict[str, Any] | None = None
     # Issue #4616: the sharding flags ride to every `run_sim` call. Only the
     # given ones are passed, so omitting both is the call shape of before.
-    batch_shard = {
-        key: value
-        for key, value in (
-            ("max_units_per_job", max_units_per_job),
-            ("max_concurrent_jobs", max_concurrent_jobs),
-            ("hosts", hosts),
-            ("resume", resume),
-        )
-        if value is not None
-    }
+    batch_shard = pex_async.batch_shard_flags(
+        max_units_per_job=max_units_per_job,
+        max_concurrent_jobs=max_concurrent_jobs,
+        hosts=hosts,
+        resume=resume,
+        capacity_wait_s=capacity_wait_s,
+    )
     if command is not None:
         command_rows, measurement_sides = _measure_both_sides(
             command,

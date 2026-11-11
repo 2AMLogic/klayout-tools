@@ -209,7 +209,7 @@
     },
     {
       "path": "src/klayout_tools/cli/pex_cmd.py",
-      "lines": 527
+      "lines": 526
     },
     {
       "path": "src/klayout_tools/cli/signoff_cmd.py",
