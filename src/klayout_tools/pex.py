@@ -1513,6 +1513,39 @@ def _project_testbench_sides(
     }
 
 
+def _unfinished_leg(
+    testbench: str, side: str, sim_report: Mapping[str, Any] | None
+) -> dict[str, Any] | None:
+    """Issue #5282: one ``unfinished[]`` entry for a sim leg that lost shards
+    (``lost_shard`` corners and/or ``environment.remote.unfinished_shards``),
+    else ``None``. The ``resumable`` / ``shard_map`` / ``unfinished_shards``
+    data comes from `klt sim`'s own environment, transported unchanged."""
+    if sim_report is None:
+        return None
+    environment = sim_report.get("environment") or {}
+    remote = environment.get("remote") or {}
+
+    def _find(key: str) -> Any:
+        return remote.get(key, environment.get(key))
+
+    lost = [
+        corner["corner_id"]
+        for corner in sim_report.get("corners", [])
+        if any(d.get("code") == "lost_shard" for d in corner.get("diagnostics") or [])
+    ]
+    shards = copy.deepcopy(_find("unfinished_shards") or [])
+    if not lost and not shards:
+        return None
+    return {
+        "testbench": testbench,
+        "side": side,
+        "corner_ids": lost,
+        "unfinished_shards": shards,
+        "resumable": bool(_find("resumable")),
+        "shard_map": _find("shard_map"),
+    }
+
+
 def _index_corner_measurements(
     sim_report: dict[str, Any],
 ) -> dict[str, dict[str, dict[str, Any]]]:
@@ -3505,6 +3538,8 @@ def run_pex(
     # Issue #2990: the first extracted-side `SimError` that is not a pin-count
     # mismatch (e.g. a batch-fleet capacity refusal), `None` otherwise.
     backend_failure: dict[str, Any] | None = None
+    # Issue #5282: legs that lost shards (partial result, resumable).
+    unfinished: list[dict[str, Any]] = []
     if not command_mode and not extract_only and flat_dut_mismatch is None:
         pin_count_mismatch = _pin_count_mismatch(
             reference_netlist=schematic_netlist_path,
@@ -3664,6 +3699,14 @@ def run_pex(
         if legs.submitting:
             # Issue #4619: submitted, not run -- nothing to grade yet.
             continue
+
+        for leg_side, leg_report in (
+            ("schematic", schematic_report),
+            ("extracted", extracted_report),
+        ):
+            leg_unfinished = _unfinished_leg(label, leg_side, leg_report)
+            if leg_unfinished is not None:
+                unfinished.append(leg_unfinished)
 
         spec_row_prefix = (
             None
@@ -3907,6 +3950,11 @@ def run_pex(
         # `batch_no_capacity`, or `None`); that testbench's `delta[]` rows
         # are `error` rows with the schematic value intact.
         "backend_failure": backend_failure,
+        # Additive field (issue #5282): sim legs that lost shards. `[]` when
+        # every leg finished; else `{testbench, side, corner_ids,
+        # unfinished_shards, resumable, shard_map}` per leg. Finished corners
+        # keep their ordinary `delta[]` rows; re-run with `--resume`.
+        "unfinished": unfinished,
         # Additive field (issue #1255, Gap 2): `None` on every run whose
         # schematic DUT is `.SUBCKT`-wrapped (the normal case) --
         # byte-identical to before this feature existed. Non-`None` names
