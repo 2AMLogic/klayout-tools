@@ -185,7 +185,12 @@ from .sim_batch import (
     dry_run_runner_check,
 )
 from .sim_batch import _resolve_batch_config as _resolve_batch_config
-from .sim_batch_async import SUBMIT_ONLY_UNSUPPORTED_CODE, shard_scoped_points
+from .sim_batch_async import (
+    SUBMIT_ONLY_UNSUPPORTED_CODE,
+    refuse_hosts_over_units,
+    refuse_sharded_deck_submit,
+    shard_scoped_points,
+)
 from .sim_batch_async import submit_only as _submit_batch_only
 from .sim_batch_features import pop_remote_diagnostics
 from .sim_cause import _with_fatal_error_cause
@@ -2816,6 +2821,8 @@ def _dispatch_deck_request(
         _refuse_unsupported_submit_only(
             resolved_backend, 1 if hosts is None else hosts, resume, plot_dir
         )
+        if not resume and plot_dir is None:
+            refuse_sharded_deck_submit(hosts)
     _apply_attach(
         {}, attach_job_id, resolved_backend, 1 if hosts is None else hosts, submit_only
     )
@@ -2932,19 +2939,10 @@ def _refuse_unsupported_submit_only(
     backend: str, hosts: int, resume: bool | None, plot_dir: str | None
 ) -> None:
     """``--submit-only`` is one batch job: refuse everything else by name,
-    before the first S3 write (issue #3073). ``--hosts > 1`` would need one
-    job per shard chosen by the client -- not represented, so refused rather
-    than silently submitting only part of the request. A ``max_units_per_job``
-    split is decided by the batch config and submitted shard by shard (issue
-    #4620)."""
+    before the first S3 write (issue #3073). ``hosts`` is unused (#5281)."""
     reason = None
     if backend != "batch":
         reason = f"requires backend 'batch' (resolved backend: '{backend}')"
-    elif hosts != 1:
-        reason = (
-            "submits one job; --hosts/remote.hosts > 1 would need one job per "
-            "shard and is not supported"
-        )
     elif resume:
         reason = "cannot be combined with --resume"
     elif plot_dir is not None:
@@ -4087,7 +4085,9 @@ def _run_sim_corners(
 
     if submit_only:
         _refuse_unsupported_submit_only(backend, hosts, resume, plot_dir)
+        refuse_hosts_over_units(hosts, len(dispatch_points))
         return _submit_batch_only(
+            hosts=hosts,
             request=request,
             corner_points=dispatch_points,
             netlist_path=netlist_path,

@@ -99,9 +99,9 @@ def add_sim_parser(
             "with --backend batch, upload and launch the job, print its "
             "identity (job_id, bucket, region, launched_at, request_sha256) "
             "and exit 0 immediately -- no polling, no collection (issue "
-            "#3073). Read the job later with --job-status. One job only: "
-            "refused with --hosts > 1, --resume, --plot, or "
-            "a non-batch backend. See docs/cli/sim.md 'Asynchronous submit'."
+            "#3073). Read the job later with --job-status. --hosts N submits "
+            "one job per shard (issue #5281). Refused with --resume, --plot, "
+            "or a non-batch backend. See docs/cli/sim.md 'Asynchronous submit'."
         ),
     )
     add_wait_for_capacity_arg(

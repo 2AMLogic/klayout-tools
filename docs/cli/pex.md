@@ -97,7 +97,7 @@ klt pex <layout> --deck <deck> --measure-command <command> --reference-netlist <
   ([#4619](https://github.com/2AMLogic/klayout-tools/issues/4619)).
   `--submit-only` extracts as usual, then submits every testbench's schematic
   and extracted `klt sim` leg (`run_sim(submit_only=True)`, honoring the
-  sharding flags above) without polling, writes `<outdir>/pex-submit.json`,
+  sharding flags above, including `--hosts N`, [#5281](https://github.com/2AMLogic/klayout-tools/issues/5281)) without polling, writes `<outdir>/pex-submit.json`,
   and exits 0 with a `submitted` payload instead of a report:
   `{schema_version: 1, status: "submitted", manifest_path, leg_count, legs[]}`,
   each leg `{testbench, side, sharded, attach, unit_count}` (`attach` is the
