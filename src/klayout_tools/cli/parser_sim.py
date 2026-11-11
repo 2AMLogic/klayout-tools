@@ -9,6 +9,24 @@ from typing import Any
 from . import sim_cmd
 
 
+def add_wait_for_capacity_arg(parser: argparse.ArgumentParser, tail: str) -> None:
+    """``--wait-for-capacity`` for ``klt sim`` and ``klt pex`` (issue #5280)."""
+    parser.add_argument(
+        "--wait-for-capacity",
+        dest="wait_for_capacity",
+        metavar="SECONDS",
+        type=float,
+        default=None,
+        help=(
+            "with --backend batch, wait up to SECONDS (>= 0) for fleet "
+            "capacity when the launch is refused (batch_no_capacity / "
+            "batch_concurrency_cap), re-launching the same job with jittered "
+            "backoff; overrides the request's `batch.capacity_wait_s`. 0 "
+            "means one attempt. " + tail
+        ),
+    )
+
+
 def add_sim_parser(
     subparsers: argparse._SubParsersAction,
     _add_pdk_args: Callable[..., Any],
@@ -81,25 +99,15 @@ def add_sim_parser(
             "with --backend batch, upload and launch the job, print its "
             "identity (job_id, bucket, region, launched_at, request_sha256) "
             "and exit 0 immediately -- no polling, no collection (issue "
-            "#3073). Read the job later with --job-status. One job only: "
-            "refused with --hosts > 1, --resume, --plot, or "
-            "a non-batch backend. See docs/cli/sim.md 'Asynchronous submit'."
+            "#3073). Read the job later with --job-status. --hosts N submits "
+            "one job per shard (issue #5281). Refused with --resume, --plot, "
+            "or a non-batch backend. See docs/cli/sim.md 'Asynchronous submit'."
         ),
     )
-    sim_parser.add_argument(
-        "--wait-for-capacity",
-        dest="wait_for_capacity",
-        metavar="SECONDS",
-        type=float,
-        default=None,
-        help=(
-            "with --backend batch, wait up to SECONDS (>= 0) for fleet "
-            "capacity when the launch is refused (batch_no_capacity / "
-            "batch_concurrency_cap), re-launching the same job with jittered "
-            "backoff; overrides the request's `batch.capacity_wait_s`. 0 "
-            "means one attempt. Also applies with --submit-only (issue "
-            "#3564). With --batch-set, applies to each member. See docs/cli/sim.md."
-        ),
+    add_wait_for_capacity_arg(
+        sim_parser,
+        "Also applies with --submit-only (issue #3564). With --batch-set, "
+        "applies to each member. See docs/cli/sim.md.",
     )
     sim_parser.add_argument(
         "--job-status",

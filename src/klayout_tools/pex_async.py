@@ -68,6 +68,30 @@ def validate_async_flags(
         raise PexError(reason, code=ASYNC_UNSUPPORTED_CODE)
 
 
+def validate_capacity_wait(capacity_wait_s: float | None, backend: str | None) -> None:
+    """Issue #5280: refuse a bad ``--wait-for-capacity`` before any I/O, by the
+    resolver ``klt sim`` applies per leg."""
+    if capacity_wait_s is None:
+        return
+    from .pex import PexError
+    from .sim import SimError
+    from .sim_batch import resolve_capacity_wait_s
+
+    try:
+        resolve_capacity_wait_s({"capacity_wait_s": capacity_wait_s})
+    except SimError as exc:
+        raise PexError(str(exc), code=exc.code) from exc
+    if backend is not None and backend != "batch":
+        raise PexError(
+            f"--wait-for-capacity requires backend 'batch' (got {backend!r})"
+        )
+
+
+def batch_shard_flags(**flags: int | float | bool | None) -> dict[str, Any]:
+    """The given (non-``None``) batch flags, for the ``run_sim`` kwargs."""
+    return {key: value for key, value in flags.items() if value is not None}
+
+
 def load_request(manifest_path: str) -> dict[str, Any]:
     """The ``klt pex`` request a ``--submit-only`` run recorded in its
     manifest, for a bare ``--attach`` (issue #4692). A manifest without one

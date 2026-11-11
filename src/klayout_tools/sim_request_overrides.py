@@ -77,9 +77,9 @@ def _with_capacity_wait_override(
     S3 write."""
     if capacity_wait_s is None:
         return request
-    from .sim_batch import _resolve_capacity_wait_s
+    from .sim_batch import resolve_capacity_wait_s
 
-    value = _resolve_capacity_wait_s({"capacity_wait_s": capacity_wait_s})
+    value = resolve_capacity_wait_s({"capacity_wait_s": capacity_wait_s})
     return {
         **request,
         "batch": {**(request.get("batch") or {}), "capacity_wait_s": value},
