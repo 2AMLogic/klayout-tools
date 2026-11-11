@@ -218,7 +218,7 @@ import subprocess
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from . import env_provenance, output_lock, pex_async
+from . import env_provenance, output_lock, pex_async, pex_sim_evidence
 from ._paths import _resolve_relative, fold_spice_continuations
 from ._provenance import content_hash, sha256_file
 from .coverage import (
@@ -1442,75 +1442,6 @@ def _pin_count_mismatch_from_report(
         reference_netlist=reference_netlist,
         extracted_netlist=extracted_netlist,
     )
-
-
-# Only keys `klt sim` actually emits in its `environment` (see sim.py's
-# `run_sim`): which engine/build ran, and -- for an off-host backend that
-# fills it -- the `remote` block carrying the job identity.
-_SIDE_ENVIRONMENT_KEYS = (
-    "engine",
-    "engine_version",
-    "ngspice_binary",
-    "engine_host",
-    "client_ngspice_binary",
-    "remote",
-)
-
-
-def _project_side_evidence(
-    sim_report: Mapping[str, Any] | None,
-) -> dict[str, Any] | None:
-    """Issue #2872 / #2876: the per-side execution evidence of one `klt sim`
-    response, transported unchanged (diagnostics are never re-classified or
-    filtered here -- `sim.py` owns that vocabulary). ``None`` when that side
-    was never simulated. ``produced_value`` is derived from the source
-    corner's own measurements (any non-null ``value``), never from
-    ``delta[]``. Keyed by ``corner_id`` within its testbench entry."""
-    if sim_report is None:
-        return None
-    environment = sim_report.get("environment") or {}
-    corners = []
-    for corner in sim_report.get("corners", []):
-        corners.append(
-            {
-                "corner_id": corner["corner_id"],
-                "status": corner.get("status"),
-                "diagnostics": copy.deepcopy(corner.get("diagnostics") or []),
-                "produced_value": any(
-                    m.get("value") is not None for m in corner.get("measurements", [])
-                ),
-            }
-        )
-    return {
-        "environment": {
-            key: copy.deepcopy(environment[key])
-            for key in _SIDE_ENVIRONMENT_KEYS
-            if key in environment
-        },
-        "corners": corners,
-    }
-
-
-def _project_testbench_sides(
-    schematic_report: Mapping[str, Any], extracted_report: Mapping[str, Any] | None
-) -> dict[str, Any]:
-    """``sides`` block of one ``testbenches[]`` entry, plus
-    ``nothing_simulated_corners``: corner ids where *neither* side produced
-    any non-null measurement (an execution failure), as opposed to a
-    one-sided failure (a real pex finding). Requires both sides to have run."""
-    schematic = _project_side_evidence(schematic_report)
-    extracted = _project_side_evidence(extracted_report)
-    nothing: list[str] = []
-    if schematic is not None and extracted is not None:
-        produced = {c["corner_id"]: c["produced_value"] for c in schematic["corners"]}
-        for corner in extracted["corners"]:
-            cid = corner["corner_id"]
-            if not corner["produced_value"] and not produced.get(cid, False):
-                nothing.append(cid)
-    return {
-        "sides": {"schematic": schematic, "extracted": extracted},
-        "nothing_simulated_corners": nothing,
-    }
 
 
 def _index_corner_measurements(
@@ -2799,7 +2730,7 @@ def _run_device_only_sim(
     work_dir: str,
     label: str,
     backend: Any,
-    batch_shard: Mapping[str, int | bool | None] | None = None,
+    batch_shard: Mapping[str, int | float | bool | None] | None = None,
 ) -> dict[str, Any] | None:
     """One testbench re-run against the parasitic-free netlist (issue #3298),
     or ``None`` without the leg. A failure here costs only the device-only
@@ -2879,6 +2810,7 @@ def run_pex(
     max_concurrent_jobs: int | None = None,
     hosts: int | None = None,
     resume: bool | None = None,
+    capacity_wait_s: float | None = None,
     deck_options: Mapping[str, str] | None = None,
     declared_pins: frozenset[str] | None = None,
     rename_declared_pins: bool = False,
@@ -3006,8 +2938,9 @@ def run_pex(
     "Execution backends". ``max_units_per_job`` / ``max_concurrent_jobs``
     (issue #4616) are likewise passed to each of those calls, so each side's
     batch grid is sharded on its own; ``None`` leaves the request's own
-    ``batch`` block in force. ``hosts`` / ``resume`` (issue #4624) ride the same path:
-    each leg re-attaches from its own ``batch-shards.json`` on a re-run.
+    ``batch`` block in force. ``hosts`` / ``resume`` (#4624) and
+    ``capacity_wait_s`` (#5280) ride the same path (each leg re-attaches from
+    its own ``batch-shards.json``).
     ``artifacts_dir`` overrides where this command
     writes its own generated artifacts (the extracted-side testbench body/
     request copies, see :func:`_prepare_extracted_request`, and each `klt
@@ -3162,6 +3095,7 @@ def run_pex(
         extract_only=extract_only,
         device_only_leg=device_only_leg,
     )
+    pex_async.validate_capacity_wait(capacity_wait_s, backend)
     _own_pex_root(_ownership, artifacts_dir, layout_path)
     # Issue #2478: exactly one of `testbench_paths` / `measure_command`.
     # `command` is the measurement command's argv in `--measure-command`
@@ -3505,6 +3439,8 @@ def run_pex(
     # Issue #2990: the first extracted-side `SimError` that is not a pin-count
     # mismatch (e.g. a batch-fleet capacity refusal), `None` otherwise.
     backend_failure: dict[str, Any] | None = None
+    # Issue #5282: legs that lost shards (partial result, resumable).
+    unfinished: list[dict[str, Any]] = []
     if not command_mode and not extract_only and flat_dut_mismatch is None:
         pin_count_mismatch = _pin_count_mismatch(
             reference_netlist=schematic_netlist_path,
@@ -3544,16 +3480,13 @@ def run_pex(
     measurement_sides: dict[str, Any] | None = None
     # Issue #4616: the sharding flags ride to every `run_sim` call. Only the
     # given ones are passed, so omitting both is the call shape of before.
-    batch_shard = {
-        key: value
-        for key, value in (
-            ("max_units_per_job", max_units_per_job),
-            ("max_concurrent_jobs", max_concurrent_jobs),
-            ("hosts", hosts),
-            ("resume", resume),
-        )
-        if value is not None
-    }
+    batch_shard = pex_async.batch_shard_flags(
+        max_units_per_job=max_units_per_job,
+        max_concurrent_jobs=max_concurrent_jobs,
+        hosts=hosts,
+        resume=resume,
+        capacity_wait_s=capacity_wait_s,
+    )
     if command is not None:
         command_rows, measurement_sides = _measure_both_sides(
             command,
@@ -3665,6 +3598,10 @@ def run_pex(
             # Issue #4619: submitted, not run -- nothing to grade yet.
             continue
 
+        unfinished += pex_sim_evidence.unfinished_legs(
+            label, schematic_report, extracted_report
+        )
+
         spec_row_prefix = (
             None
             if single_testbench
@@ -3696,7 +3633,7 @@ def run_pex(
                     "measurement_names": [
                         m["name"] for m in schematic_report["measurements"]
                     ],
-                    **_project_testbench_sides(schematic_report, None),
+                    **pex_sim_evidence.project_testbench_sides(schematic_report, None),
                 }
             )
             continue
@@ -3747,7 +3684,9 @@ def run_pex(
                 "measurement_names": [
                     m["name"] for m in extracted_report["measurements"]
                 ],
-                **_project_testbench_sides(schematic_report, extracted_report),
+                **pex_sim_evidence.project_testbench_sides(
+                    schematic_report, extracted_report
+                ),
             }
         )
 
@@ -3907,6 +3846,11 @@ def run_pex(
         # `batch_no_capacity`, or `None`); that testbench's `delta[]` rows
         # are `error` rows with the schematic value intact.
         "backend_failure": backend_failure,
+        # Additive field (issue #5282): sim legs that lost shards. `[]` when
+        # every leg finished; else `{testbench, side, corner_ids,
+        # unfinished_shards, resumable, shard_map}` per leg. Finished corners
+        # keep their ordinary `delta[]` rows; re-run with `--resume`.
+        "unfinished": unfinished,
         # Additive field (issue #1255, Gap 2): `None` on every run whose
         # schematic DUT is `.SUBCKT`-wrapped (the normal case) --
         # byte-identical to before this feature existed. Non-`None` names

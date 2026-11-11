@@ -960,12 +960,15 @@ collects:
 | `job_ceiling` | The pre-submit whole-job-ceiling assessment (same object as `environment.remote.job_ceiling`); `null` for a deck-list request, which does not assess one |
 
 Anything it cannot represent fails **before any S3 write** with
-`error.code: "submit_only_unsupported"`: a non-`batch` backend,
-`--hosts`/`remote.hosts` > 1 (client-chosen shards), `--resume`, or `--plot`.
+`error.code: "submit_only_unsupported"`: a non-`batch` backend, `--resume`,
+or `--plot`. `--hosts`/`remote.hosts` greater than the unit count is refused
+by name before any S3 write.
 
-**Sharded form** ([#4620](https://github.com/2AMLogic/klayout-tools/issues/4620)).
+**Sharded form** ([#4620](https://github.com/2AMLogic/klayout-tools/issues/4620),
+[#5281](https://github.com/2AMLogic/klayout-tools/issues/5281)).
 When the batch config splits the request (`--max-units-per-job N` /
-`batch.max_units_per_job`, or `job_ceiling_check: "split"`), `--submit-only`
+`batch.max_units_per_job`, or `job_ceiling_check: "split"`) or the client
+chooses `--hosts N` / `remote.hosts: N` (N > 1), `--submit-only`
 submits and launches **every shard** and exits `0` with a different payload
 (an unsharded run's payload is unchanged):
 
