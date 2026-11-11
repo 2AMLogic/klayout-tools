@@ -49,6 +49,7 @@ from .diode import _build_diode_pcell
 from .esd_device import _build_esd_device_pcell
 from .guard_ring import _build_guard_ring_pcell
 from .mos_array import _build_mos_array_pcell
+from .pdk_cell import _build_pdk_cell_pcell
 from .res_array import _build_res_array_pcell
 from .resistor_strip import _build_resistor_strip_pcell
 from .well_island import _build_well_island_pcell
@@ -66,6 +67,7 @@ __all__ = [
     "_build_esd_device_pcell",
     "_build_guard_ring_pcell",
     "_build_mos_array_pcell",
+    "_build_pdk_cell_pcell",
     "_build_res_array_pcell",
     "_build_resistor_strip_pcell",
     "_build_well_island_pcell",

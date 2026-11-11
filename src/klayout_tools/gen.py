@@ -324,9 +324,15 @@ from .gen_pcells import (
     _build_esd_device_pcell,
     _build_guard_ring_pcell,
     _build_mos_array_pcell,
+    _build_pdk_cell_pcell,
     _build_res_array_pcell,
     _build_resistor_strip_pcell,
     _build_well_island_pcell,
+)
+from .gen_pdk_cell import (
+    _pdk_cell_describe,
+    _pdk_cell_layer_params,
+    _pdk_cell_validate,
 )
 from .gen_spec import _GeneratorSpec
 from .pdk import PdkNotFoundError, find_pdk, resolve_pdk_dbu
@@ -360,6 +366,7 @@ _PCELL_LIBRARY_NAME = "klt_gen_reference"
 #: :data:`_PDK_CAP_TOP_PLATE_REQUIRES` (issue #1555).
 _HIDDEN_PARAMS = {
     "vpp_gds_path",
+    "pdk_cell_gds_path",
     "layer",
     "active_layer",
     "poly_layer",
@@ -4141,6 +4148,7 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
     pcell_classes.update(_build_res_array_pcell())
     pcell_classes.update(_build_cap_array_pcell())
     pcell_classes.update(_build_cap_vpp_array_pcell())
+    pcell_classes.update(_build_pdk_cell_pcell())
     pcell_classes.update(_build_guard_ring_pcell())
     pcell_classes.update(_build_well_island_pcell())
     pcell_classes.update(_build_diff_pair_pcell())
@@ -4245,6 +4253,19 @@ _GENERATOR_SPECS: dict[str, _GeneratorSpec] = {
         validate=_cap_vpp_array_validate,
         describe=_cap_vpp_array_describe,
         layer_params=_cap_vpp_array_layer_params,
+    ),
+    "pdk_cell": _GeneratorSpec(
+        name="pdk_cell",
+        summary=(
+            "Row of any PDK fixed GDS cell (bondpad, ESD, ...) from a "
+            "libs.ref/<library> GDS, instantiated as-drawn on params.pitch_um; "
+            "ports are read from the cell's own pin labels and no pcell "
+            "library is imported (issue #5290)."
+        ),
+        dbu=0.001,
+        validate=_pdk_cell_validate,
+        describe=_pdk_cell_describe,
+        layer_params=_pdk_cell_layer_params,
     ),
     "guard_ring": _GeneratorSpec(
         name="guard_ring",

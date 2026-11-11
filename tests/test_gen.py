@@ -711,6 +711,7 @@ def test_list_generators_includes_all_four_phase2_families():
         "esd_device",
         "cap_array",
         "cap_vpp_array",
+        "pdk_cell",
         "well_island",
         "asap7_finfet",
         "asap7_tap",

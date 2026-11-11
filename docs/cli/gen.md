@@ -137,6 +137,7 @@ dimension is now independently checkable — see the note itself.)
 | `bond_pad` | yes | yes | no | no |
 | `bjt_array` | yes | yes | yes (HBT, PDK cell) | no |
 | `diode` | yes | no | no | no |
+| `pdk_cell` | yes | yes | yes | yes (family-agnostic, reads `libs.ref`) |
 
 **gf180mcu — `mos_array`'s unit-device geometry was margined against the
 six-rule signoff gap (issue #1577), but this remains an *unverified*
@@ -1908,6 +1909,35 @@ device depends on the sky130 deck and is not claimed here.
 klt gen cap_vpp_array --pdk sky130A \
   --params '{"pdk_cell":"sky130_fd_pr__cap_vpp_02p4x04p6_m1m2_noshield","num":4,"pitch_um":3}' \
   -o caps.gds --format json
+```
+
+### `pdk_cell` (any PDK fixed GDS cell, issue #5290)
+
+Places one of a PDK's **fixed, pre-drawn** GDS cells (bondpad, ESD diode, ...)
+as drawn, for any PDK family — the generalisation of `cap_vpp_array`. The cell
+is read from `libs.ref/<library>/gds/` of the resolved PDK at request time
+(never vendored), and **no pcell library is imported**, so it works when a
+family's pycell library is unavailable (e.g. `klt gen --list-pdk-pcells`
+reporting `sg13g2_pycell_lib` unavailable on a release tarball).
+
+| Param      | Type   | Default | Meaning |
+|------------|--------|---------|---------|
+| `library`  | string | — (required) | A `libs.ref/<library>` directory name holding a `gds/` folder (e.g. `sg13g2_io`). The GDS is `gds/<library>.gds`, or the only `.gds` there. An unknown library lists the available ones. |
+| `pdk_cell` | string | — (required) | Cell name in that GDS. An unknown name fails with the standard error envelope listing every available cell. |
+| `num`      | int    | `1`     | Instances in the row; must be `>= 1`. |
+| `pitch_um` | double | `0.0`   | Same semantics as `cap_vpp_array`: `0` abuts at the cell's bbox width; a non-zero pitch below the cell width (with `num > 1`) is rejected. |
+
+Ports, origin shift and notes follow `cap_vpp_array` exactly: pin labels
+become `U<i>_<label>` ports (with an additive `bbox_um`), a cell without
+labels reports no ports and says so. The report composes into `gen-compose`
+like any other generator. As the compose-side alternative, a `gen-compose`
+`blocks[].cell` entry with `ports_from_labels` (#2927) reads the same labels
+without going through `klt gen`.
+
+```bash
+klt gen pdk_cell --pdk ihp-sg13g2 \
+  --params '{"library":"sg13g2_io","pdk_cell":"<cell name>","num":2}' \
+  -o pads.gds --format json
 ```
 
 ### `bond_pad` (chip-boundary bond pad, issue #568)

@@ -53,15 +53,18 @@ def _gds_path(pdk_info: dict[str, Any]) -> str:
 
 
 @functools.lru_cache(maxsize=4)
-def _inspect_gds(path: str, mtime_ns: int) -> dict[str, Any]:
-    """Map every ``cap_vpp_*`` cell in ``path`` to its bbox and pin labels."""
+def _inspect_gds(
+    path: str, mtime_ns: int, prefix: str = CAP_VPP_PREFIX
+) -> dict[str, Any]:
+    """Map every cell in ``path`` whose name starts with ``prefix`` to its bbox
+    and pin labels (``prefix=""`` takes every cell; shared with ``pdk_cell``)."""
     import klayout.db as kdb
 
     layout = kdb.Layout()
     layout.read(path)
     cells: dict[str, Any] = {}
     for cell in layout.each_cell():
-        if not cell.name.startswith(CAP_VPP_PREFIX):
+        if not cell.name.startswith(prefix):
             continue
         bbox = cell.dbbox()
         pins = []
@@ -153,11 +156,16 @@ def effective_pitch_um(params: dict[str, Any], entry: dict[str, Any]) -> float:
 
 
 def _cap_vpp_array_describe(
-    params: dict[str, Any], dbu: float, pdk_info: dict[str, Any]
+    params: dict[str, Any],
+    dbu: float,
+    pdk_info: dict[str, Any],
+    entry: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """Describe the array; ``entry`` lets ``pdk_cell`` supply its own lookup."""
     from .gen import _grid_snapped
 
-    entry = _lookup(params, pdk_info)
+    if entry is None:
+        entry = _lookup(params, pdk_info)
     pitch = effective_pitch_um(params, entry)
     x0, y0, x1, y1 = entry["bbox_um"]
     notes: list[str] = []
