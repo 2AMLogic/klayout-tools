@@ -6,19 +6,10 @@ Split out of :mod:`klayout_tools.characterize` (size ratchet, issue #4756).
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
-from . import liberty_writer
 from .characterize_arcs import DerivedArc
-
-
-def _spice_number(value: float) -> str:
-    return liberty_writer.format_number(value, precision=10)
-
-
-def _slug(name: str) -> str:
-    return re.sub(r"[^A-Za-z0-9_]", "_", name)
+from .characterize_cards import slug, spice_number
 
 
 def _metered_rail_nodes(
@@ -84,7 +75,7 @@ def _capacitance_instance_lines(
     for pin in cell["pins"]:
         name = pin["name"]
         if pin["direction"] == "output":
-            node_of[name] = f"o_{tag}_{_slug(name)}"
+            node_of[name] = f"o_{tag}_{slug(name)}"
         elif name == pin_name:
             node_of[name] = f"ci_{tag}"
         else:
@@ -95,10 +86,10 @@ def _capacitance_instance_lines(
     ]
     lines = [
         f"Vc{tag} cs_{tag} 0 PWL(0 0 "
-        f"{_spice_number(rise_start)}n 0 "
-        f"{_spice_number(rise_start + ramp_ns)}n {_spice_number(vdd)} "
-        f"{_spice_number(fall_start)}n {_spice_number(vdd)} "
-        f"{_spice_number(fall_start + ramp_ns)}n 0)",
+        f"{spice_number(rise_start)}n 0 "
+        f"{spice_number(rise_start + ramp_ns)}n {spice_number(vdd)} "
+        f"{spice_number(fall_start)}n {spice_number(vdd)} "
+        f"{spice_number(fall_start + ramp_ns)}n 0)",
         # 0 V ammeter in series with the pin: i(Vcm<tag>) is the current the
         # source delivers INTO the pin.
         f"Vcm{tag} cs_{tag} ci_{tag} DC 0",
@@ -106,7 +97,7 @@ def _capacitance_instance_lines(
     ]
     for output in cell["output_pins"]:
         lines.append(
-            f"C{tag}_{_slug(output)} {node_of[output]} 0 {_spice_number(load_pf)}p"
+            f"C{tag}_{slug(output)} {node_of[output]} 0 {spice_number(load_pf)}p"
         )
     return lines
 
@@ -143,7 +134,7 @@ def _leakage_instance_lines(
     for pin in cell["pins"]:
         name = pin["name"]
         if pin["direction"] == "output":
-            node_of[name] = f"o_{tag}_{_slug(name)}"
+            node_of[name] = f"o_{tag}_{slug(name)}"
         else:
             # A high input is tied to the *metered* supply node, not the
             # shared rail: its gate leakage is drawn from the supply too, and

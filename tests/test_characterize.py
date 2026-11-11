@@ -1467,12 +1467,12 @@ def test_power_cards_integrate_each_rail_over_its_output_edge_window(tmp_path):
     cards = _cards_by_name(plan)
 
     fall_window = (
-        f"FROM={characterize._spice_number(window['fall_start_ns'])}n "
-        f"TO={characterize._spice_number(window['stop_ns'])}n"
+        f"FROM={characterize.spice_number(window['fall_start_ns'])}n "
+        f"TO={characterize.spice_number(window['stop_ns'])}n"
     )
     rise_window = (
-        f"FROM={characterize._spice_number(window['rise_start_ns'])}n "
-        f"TO={characterize._spice_number(window['fall_start_ns'])}n"
+        f"FROM={characterize.spice_number(window['rise_start_ns'])}n "
+        f"TO={characterize.spice_number(window['fall_start_ns'])}n"
     )
     assert cards["a0s0l0_qvr"].endswith(fall_window)
     assert cards["a0s0l0_qgr"].endswith(fall_window)
@@ -1486,7 +1486,7 @@ def test_power_cards_follow_a_positive_unate_polarity(tmp_path):
     request = _inverter_request(tmp_path)
     request["cell"]["pins"][1]["function"] = "A"  # buffer: output rises with A
     plan, _ = _plan_for(tmp_path, request)
-    rise_start = characterize._spice_number(plan["window"]["rise_start_ns"])
+    rise_start = characterize.spice_number(plan["window"]["rise_start_ns"])
 
     assert f"FROM={rise_start}n" in _cards_by_name(plan)["a0s0l0_qvr"]
 
@@ -1794,12 +1794,12 @@ def test_capacitance_cards_integrate_the_slew_threshold_region(tmp_path):
     cards = _cap_cards(plan)
     rise_from = window["rise_start_ns"] + 0.2 * ramp
     rise_to = window["rise_start_ns"] + 0.8 * ramp
-    assert f"FROM={characterize._spice_number(rise_from)}n" in cards["cp0_qcr"]
-    assert f"TO={characterize._spice_number(rise_to)}n" in cards["cp0_qcr"]
+    assert f"FROM={characterize.spice_number(rise_from)}n" in cards["cp0_qcr"]
+    assert f"TO={characterize.spice_number(rise_to)}n" in cards["cp0_qcr"]
     fall_from = window["fall_start_ns"] + 0.2 * ramp
     fall_to = window["fall_start_ns"] + 0.8 * ramp
-    assert f"FROM={characterize._spice_number(fall_from)}n" in cards["cp0_qcf"]
-    assert f"TO={characterize._spice_number(fall_to)}n" in cards["cp0_qcf"]
+    assert f"FROM={characterize.spice_number(fall_from)}n" in cards["cp0_qcf"]
+    assert f"TO={characterize.spice_number(fall_to)}n" in cards["cp0_qcf"]
 
 
 def test_capacitance_cards_follow_custom_slew_thresholds(tmp_path):
@@ -1820,7 +1820,7 @@ def test_capacitance_cards_follow_custom_slew_thresholds(tmp_path):
     assert point["fall_span"] == pytest.approx(0.4)
     rise_from = point["ramp_ns"] * 0.3 + plan["window"]["rise_start_ns"]
     assert (
-        f"FROM={characterize._spice_number(rise_from)}n" in _cap_cards(plan)["cp0_qcr"]
+        f"FROM={characterize.spice_number(rise_from)}n" in _cap_cards(plan)["cp0_qcr"]
     )
 
 
