@@ -107,6 +107,17 @@ def _pdn_instances_arg(instance: str) -> str:
     of `\\ [ ] * ?`), then every backslash is doubled for the list parse. A
     db name `g\\[0\\]` therefore becomes six backslashes before each bracket.
     Names without those characters are returned unchanged.
+
+    Live-verified (issue #5302, OpenROAD 26Q3-1510-g6cb3f2b704): for the db
+    name `g_bank\\[0\\].u_bank/u_macro` (one backslash before each bracket) the
+    six-backslash spelling this helper emits is the only one of 1/2/3/4/6/8
+    backslashes per bracket that `define_pdn_grid -macro -instances`
+    resolves (the others give PDN-1030 "Unable to find instance"), and the
+    resulting grid takes `add_pdn_connect` and `pdngen` cleanly. A
+    `PDN-0231` ("not connected to any power/ground nets") followed by
+    `PDN-0217` ("No grid found") is therefore *not* an escaping failure: it
+    reproduces identically for a plain instance name whose macro supply pins
+    no `add_global_connection -pin_pattern` matches.
     """
     glob_escaped = re.sub(r"([\\\[\]*?])", r"\\\1", instance)
     return glob_escaped.replace("\\", "\\\\")
