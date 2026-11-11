@@ -2285,7 +2285,8 @@ against the client's own `environment.engine_build`).
 
 Coverage: the `batch` backend only, single jobs and every sharded member
 (mixed worker identities stay individually visible; recovered failed-job
-artifacts are included). The `remote` (SSH) backend does not write this
+artifacts are included). Deck-list (`decks[]`) batch reports carry it too (blocking,
+`--attach`, and recovered failed jobs). The `remote` (SSH) backend does not write this
 capture yet and reports no `worker_environment`. Workers that predate the
 capture, or lack `python3`, report `capture: "absent"`.
 
