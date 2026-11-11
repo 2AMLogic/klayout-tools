@@ -33,7 +33,6 @@ import os
 import threading
 import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from .output_lock import OutputLockError
@@ -65,6 +64,16 @@ CAPACITY_CODES = frozenset({BATCH_NO_CAPACITY_CODE, BATCH_CONCURRENCY_CAP_CODE})
 
 #: Base backoff (seconds) between capacity retries; doubles per attempt.
 CAPACITY_RETRY_BACKOFF_S = 5.0
+
+#: Issue #5324: a member whose job was accepted but never left ``pending``
+#: within the ``capacity_wait_s`` budget is reported, not waited on forever.
+NOT_LAUNCHED_CODE = "not_launched"
+
+#: Issue #5324: a member still unfinished when the client was interrupted.
+SET_INTERRUPTED_CODE = "set_interrupted"
+
+#: Seconds between the set's checks for a stalled / interrupted member.
+SET_POLL_INTERVAL_S = 1.0
 
 
 def _request_dirs(paths: list[str], outdir: str | None) -> list[str]:
@@ -147,6 +156,10 @@ class _Manifest:
             self._entries[index].update(fields)
             self._flush()
 
+    def job_ids(self, index: int) -> list[str]:
+        with self._lock:
+            return list(self._entries[index]["job_ids"])
+
     def append_job(self, index: int, job_id: str) -> list[str]:
         with self._lock:
             ids = self._entries[index]["job_ids"]
@@ -189,26 +202,60 @@ def _record_job(manifest: _Manifest | None, index: int) -> Callable[[str], None]
 class _ShardTracker:
     """Issue #5014: what this client observed of each batch job (shard) of one
     member -- last state and how many times it saw ``interrupted``. Observed
-    only; relaunches by the fleet's ``reconcile`` are never inferred."""
+    only; relaunches by the fleet's ``reconcile`` are never inferred.
 
-    def __init__(self) -> None:
+    Issue #5324: also when each job was first seen / last changed state, so the
+    set can tell a job that was accepted but never launched (still ``pending``)."""
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
         self._lock = threading.Lock()
+        self._clock = clock
         self._jobs: dict[str, dict[str, Any]] = {}
+
+    def on_job(self, job_id: str) -> None:
+        with self._lock:
+            self._jobs.setdefault(
+                job_id,
+                {
+                    "last_state": "pending",
+                    "interrupted_observations": 0,
+                    "since": self._clock(),
+                },
+            )
 
     def on_state(self, job_id: str, state: str) -> None:
         with self._lock:
             job = self._jobs.setdefault(
-                job_id, {"last_state": state, "interrupted_observations": 0}
+                job_id,
+                {
+                    "last_state": state,
+                    "interrupted_observations": 0,
+                    "since": self._clock(),
+                },
             )
+            if job["last_state"] != state:
+                job["since"] = self._clock()
             job["last_state"] = state
             if state == "interrupted":
                 job["interrupted_observations"] += 1
+
+    def stalled_job(self, budget_s: float) -> str | None:
+        """A job id that has sat in ``pending`` for more than ``budget_s``."""
+        now = self._clock()
+        with self._lock:
+            for job_id, job in self._jobs.items():
+                if job["last_state"] == "pending" and now - job["since"] > budget_s:
+                    return job_id
+        return None
 
     def summary(self, report: dict[str, Any] | None) -> list[dict[str, Any]]:
         """Per-shard rows (job id order of first sight); shards a
         ``--collect-partial`` read left unfinished carry the state it read."""
         with self._lock:
-            jobs = {k: dict(v) for k, v in self._jobs.items()}
+            jobs = {
+                k: {x: y for x, y in v.items() if x != "since"}
+                for k, v in self._jobs.items()
+            }
         remote = ((report or {}).get("environment") or {}).get("remote") or {}
         for shard in remote.get("unfinished_shards") or ():
             if isinstance(shard, dict) and shard.get("job_id"):
@@ -232,8 +279,9 @@ def _run_one(
     capacity_retries: int = 0,
     sleep: Callable[[float], None] = time.sleep,
     collect_partial: bool = False,
+    tracker: _ShardTracker | None = None,
 ) -> dict[str, Any]:
-    tracker = _ShardTracker()
+    tracker = tracker if tracker is not None else _ShardTracker()
     shard_map = os.path.join(directory, BATCH_SHARDS_FILENAME)
     attach_kwargs: dict[str, Any] = (
         {"attach_job_id": shard_map, "collect_partial": True}
@@ -257,7 +305,13 @@ def _run_one(
         if manifest:
             manifest.update(index, status="running", attempts=attempt)
         try:
-            observer = JobObserver(path, _record_job(manifest, index), tracker.on_state)
+            record = _record_job(manifest, index)
+
+            def _on_job(job_id: str, _record: Callable[[str], None] = record) -> None:
+                tracker.on_job(job_id)
+                _record(job_id)
+
+            observer = JobObserver(path, _on_job, tracker.on_state)
             with observe_batch_jobs(observer):
                 report = run(
                     path,
@@ -344,6 +398,130 @@ def print_set_text(report: dict) -> None:
         print("\n".join([line, *shard_text_lines(entry)]))
 
 
+def _launch_budget(capacity_wait_s: Any) -> float | None:
+    """The pending-job budget (issue #5324): ``capacity_wait_s`` when it is a
+    positive number, else ``None`` (no bound -- the pre-existing behaviour)."""
+    if isinstance(capacity_wait_s, bool) or not isinstance(
+        capacity_wait_s, int | float
+    ):
+        return None
+    return float(capacity_wait_s) if capacity_wait_s > 0 else None
+
+
+def _unfinished_entry(
+    index: int,
+    path: str,
+    tracker: _ShardTracker,
+    manifest: _Manifest,
+    code: str,
+    message: str,
+) -> dict[str, Any]:
+    """An ``error`` entry for a member that never produced a report. Its job
+    ids come from the manifest so the caller can cancel or attach them."""
+    job_ids = list(manifest.job_ids(index))
+    manifest.update(index, status="error", error_code=code)
+    return {
+        "index": index,
+        "request": path,
+        "status": "error",
+        "exit_code": 4,
+        "job_id": job_ids[0] if len(job_ids) == 1 else None,
+        "job_ids": job_ids,
+        "report": None,
+        "error": {"message": message, "code": code},
+        "shards": tracker.summary(None),
+    }
+
+
+def _execute_members(
+    paths: list[str],
+    dirs: list[str],
+    manifest: _Manifest,
+    workers: int,
+    launch_budget: float | None,
+    run_member: Callable[[int, _ShardTracker], dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Run every member on at most ``workers`` daemon threads and return one
+    entry per member, always (issue #5324).
+
+    A member whose job sits ``pending`` past ``launch_budget`` becomes a
+    ``not_launched`` entry and its blocked thread is abandoned (daemon, so it
+    cannot hold the process open) while a replacement worker keeps the
+    concurrency; an interrupt (``KeyboardInterrupt``/``SystemExit``) turns every
+    unfinished member into a ``set_interrupted`` entry instead of exiting
+    silently."""
+    count = len(paths)
+    trackers = [_ShardTracker() for _ in range(count)]
+    results: list[dict[str, Any] | None] = [None] * count
+    started: set[int] = set()
+    abandoned: set[int] = set()
+    pending = list(range(count))
+    cond = threading.Condition()
+    stopping = False
+
+    def next_index() -> int | None:
+        with cond:
+            if stopping or not pending:
+                return None
+            index = pending.pop(0)
+            started.add(index)
+            return index
+
+    def worker() -> None:
+        while (index := next_index()) is not None:
+            try:
+                entry = run_member(index, trackers[index])
+            except BaseException as exc:  # never lose the member's slot
+                entry = _unfinished_entry(
+                    index, paths[index], trackers[index], manifest,
+                    SET_INTERRUPTED_CODE, f"{type(exc).__name__}: {exc}",
+                )  # fmt: skip
+            with cond:
+                if index in abandoned:
+                    return  # superseded: a replacement worker took this slot
+                results[index] = entry
+                cond.notify_all()
+
+    def spawn() -> None:
+        threading.Thread(target=worker, daemon=True).start()
+
+    try:
+        for _ in range(workers):
+            spawn()
+        with cond:
+            while any(r is None for r in results):
+                cond.wait(timeout=SET_POLL_INTERVAL_S)
+                if launch_budget is None:
+                    continue
+                for index in sorted(started):
+                    if results[index] is not None:
+                        continue
+                    job_id = trackers[index].stalled_job(launch_budget)
+                    if job_id is None:
+                        continue
+                    abandoned.add(index)
+                    results[index] = _unfinished_entry(
+                        index, paths[index], trackers[index], manifest,
+                        NOT_LAUNCHED_CODE,
+                        f"batch job {job_id} was accepted but did not launch "
+                        f"within {launch_budget:g}s (still pending); cancel or "
+                        "attach it by job id",
+                    )  # fmt: skip
+                    spawn()
+    except BaseException as exc:
+        with cond:
+            stopping = True
+            reason = f"{type(exc).__name__} before the member finished"
+            for index in range(count):
+                if results[index] is None:
+                    abandoned.add(index)
+                    results[index] = _unfinished_entry(
+                        index, paths[index], trackers[index], manifest,
+                        SET_INTERRUPTED_CODE, reason,
+                    )  # fmt: skip
+    return [r for r in results if r is not None]
+
+
 def run_sim_set(
     request_paths: list[str],
     *,
@@ -428,23 +606,26 @@ def run_sim_set(
         os.path.join(manifest_dir, MANIFEST_FILENAME), request_paths, dirs
     )
     workers = min(max_in_flight, len(request_paths))
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [
-            pool.submit(
-                _run_one,
-                i,
-                path,
-                dirs[i],
-                run,
-                run_kwargs,
-                manifest,
-                capacity_retries,
-                sleep,
-                collect_partial,
-            )
-            for i, path in enumerate(request_paths)
-        ]
-        requests = [future.result() for future in futures]
+    launch_budget = _launch_budget(run_kwargs.get("capacity_wait_s"))
+    requests = _execute_members(
+        request_paths,
+        dirs,
+        manifest,
+        workers,
+        launch_budget,
+        lambda i, tracker: _run_one(
+            i,
+            request_paths[i],
+            dirs[i],
+            run,
+            run_kwargs,
+            manifest,
+            capacity_retries,
+            sleep,
+            collect_partial,
+            tracker,
+        ),
+    )
 
     errored = sum(1 for r in requests if r["status"] == "error")
     failed = sum(1 for r in requests if r["status"] == "fail")

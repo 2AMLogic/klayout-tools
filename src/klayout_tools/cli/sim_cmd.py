@@ -318,6 +318,8 @@ def _run_batch_set(args: argparse.Namespace) -> int:
     except SimError as exc:
         return emit_error("sim", str(exc), args.format, code=exc.code)
 
+    if (write_failure := _write_report_out(report, args)) is not None:
+        return write_failure
     emit_success(report, args.format, print_set_text)
     return max((r["exit_code"] for r in report["requests"]), default=EXIT_PASS)
 
