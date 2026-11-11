@@ -329,9 +329,17 @@ def launch_prepared_job(
 def _job_exists(
     config: BatchConfig, job_id: str, run: remote_transport.CommandRunner
 ) -> bool:
-    """Whether ``job.json`` exists under this job's prefix (one
-    ``head-object``). A 404 is "no such job"; any other failure (auth,
-    network) is a transport error, never reported as "unknown job"."""
+    """Whether ``job.json`` exists under this job's prefix."""
+    return _job_head(config, job_id, run) is not None
+
+
+def _job_head(
+    config: BatchConfig, job_id: str, run: remote_transport.CommandRunner
+) -> dict[str, Any] | None:
+    """``head-object`` of ``job.json`` (parsed JSON, ``{}`` when the output
+    is not JSON), or ``None`` when absent. A 404 is "no such job"; any other
+    failure (auth, network) is a transport error, never reported as
+    "unknown job"."""
     bucket_key = f"{config.jobs_prefix}/{job_id}/job.json"
     argv = _aws_argv(
         config,
@@ -347,10 +355,14 @@ def _job_exists(
     except Exception as exc:  # timeout / spawn failure
         raise BatchError(f"aws s3api head-object (job.json) failed: {exc}") from exc
     if result.returncode == 0:
-        return True
+        try:
+            head = json.loads(result.stdout or "")
+        except ValueError:
+            return {}
+        return head if isinstance(head, dict) else {}
     detail = (result.stderr or "").strip()
     if "404" in detail or "Not Found" in detail or "NoSuchKey" in detail:
-        return False
+        return None
     raise BatchError(
         f"aws s3api head-object (job.json) failed (exit {result.returncode}): {detail}"
     )
@@ -436,9 +448,12 @@ def read_job_status(
     config = _resolve_batch_config(
         request, corner_count=0, timeout_s=0.0, check_runner=False
     )
+    job_head: dict[str, Any] | None = None
     try:
         status = _read_status(config, job_id, run)
-        if status is None and not _job_exists(config, job_id, run):
+        if status is None:
+            job_head = _job_head(config, job_id, run)
+        if status is None and job_head is None:
             raise SimError(
                 f"no batch job {job_id!r} under {config.bucket}/{config.jobs_prefix}/",
                 code=BATCH_JOB_NOT_FOUND_CODE,
@@ -469,7 +484,35 @@ def read_job_status(
     if stale_seconds is not None:
         payload["stale"] = True
         payload["stale_seconds"] = stale_seconds
+    unstarted_s = _unstarted_seconds(status, job_head, now)
+    if unstarted_s is not None:
+        payload["never_started"] = True
+        payload["unstarted_seconds"] = unstarted_s
+        payload["diagnostic"] = sim_batch._format_never_started(job_id, unstarted_s)
     instance = {k: document[k] for k in _STATUS_INSTANCE_FIELDS if k in document}
     if instance:
         payload["instance"] = instance
     return payload
+
+
+def _unstarted_seconds(
+    status: dict[str, Any] | None,
+    job_head: dict[str, Any] | None,
+    now: datetime | None,
+) -> float | None:
+    """Age of ``job.json`` when no ``status.json`` ever appeared and that age
+    exceeds the provision slack (the ``--job-status`` twin of the blocking
+    poll's "never started" check); ``None`` otherwise."""
+    if status is not None or not job_head:
+        return None
+    stamp = job_head.get("LastModified")
+    if not isinstance(stamp, str):
+        return None
+    try:
+        written = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if written.tzinfo is None:
+        written = written.replace(tzinfo=timezone.utc)
+    age = ((now or datetime.now(timezone.utc)) - written).total_seconds()
+    return age if age >= sim_batch._BATCH_PROVISION_SLACK_S else None
