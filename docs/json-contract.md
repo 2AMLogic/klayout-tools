@@ -587,6 +587,11 @@ the image tree; `pdk.stamp_scope` (`image` / `executed`) says so, and
 `client_stamp`, `differing`) comparing the staged file digests. Additive
 fields only; no `schema_version` bump (issue #4020).
 
+`environment.remote` (and each `fleet[]` member) also gains the additive
+`runner_models_lib_sha256` (string or `null`) and `models_lib_comparison`
+(`status` `match` / `mismatch` / `not_comparable`); no `schema_version` bump
+(issue #5321).
+
 **No bucket in batch reports (issue #3777).** `environment.remote` (and each
 `fleet[]` member) no longer carries `bucket` on any batch verb. The bucket name
 embeds the fleet's AWS account number and reports are committed as evidence.

@@ -181,6 +181,7 @@ from .sim_batch import (
     _run_batch_fleet,
     _validate_batch_models_lib,
     attach_engine_build_comparison,
+    attach_models_lib_comparison,
     attach_staged_model_comparison,
     dry_run_runner_check,
 )
@@ -4471,6 +4472,12 @@ def _run_sim_corners(
     if remote_environment is not None:
         # Additive/optional: only present for the `remote` backend -- see
         # `_run_remote` and docs/cli/sim.md's "Remote backend" section.
+        if backend == "batch":
+            attach_models_lib_comparison(
+                remote_environment,
+                environment.get("models_lib_sha256"),
+                environment.get("models_lib_sha256_scope"),
+            )
         environment["remote"] = remote_environment
     apply_engine_host(
         environment, backend=backend, client_ngspice_binary=ngspice_binary
