@@ -10776,8 +10776,9 @@ def test_sky130_deck_declares_hvi_mos_flavour():
     """The sky130 extraction deck declares one `mos_flavours` entry keyed on
     `hvi` (75/20) -- the deck-data half of issue #1369."""
     deck = get_extraction_deck("sky130")
-    # Issue #3599 adds the native-Vt combination flavour *before* `hvi`.
-    assert [f.flavour for f in deck.mos_flavours] == ["nvt", "hvi"]
+    # Issue #3599 adds the native-Vt combination flavour *before* `hvi`;
+    # issue #5283 adds the 1.8V `lvt` flavour after both.
+    assert [f.flavour for f in deck.mos_flavours] == ["nvt", "hvi", "lvt"]
     flavour = deck.mos_flavours[1]
     assert flavour.marker == (75, 20)
     assert flavour.flavour == "hvi"
@@ -10864,6 +10865,61 @@ def test_sky130_hvi_lvtn_in_nwell_is_not_claimed_as_native(tmp_path):
     )
     assert lines
     assert not any("nvt" in line for line in lines)
+
+
+def test_sky130_lvtn_nfet_binds_lvt_model(tmp_path):
+    report, lines = _sky130_bound_models(tmp_path, "lvtn_n", [(125, 44)])
+    assert report["device_counts"] == {"nfet": 1}
+    (line,) = lines
+    assert "sky130_fd_pr__nfet_01v8_lvt" in line
+
+
+def test_sky130_lvtn_pfet_binds_lvt_model(tmp_path):
+    report, lines = _sky130_bound_models(tmp_path, "lvtn_p", [(125, 44)], pmos=True)
+    assert report["device_counts"] == {"pfet": 1}
+    (line,) = lines
+    assert "sky130_fd_pr__pfet_01v8_lvt" in line
+
+
+def test_sky130_lvtn_with_hvtp_pfet_is_not_lvt(tmp_path):
+    _report, lines = _sky130_bound_models(
+        tmp_path, "lvtn_hvtp", [(125, 44), (78, 44)], pmos=True
+    )
+    (line,) = lines
+    assert "_lvt" not in line
+
+
+def test_sky130_hvtp_pfet_without_lvtn_is_plain(tmp_path):
+    _report, lines = _sky130_bound_models(tmp_path, "hvtp", [(78, 44)], pmos=True)
+    (line,) = lines
+    assert "sky130_fd_pr__pfet_01v8" in line
+    assert "_lvt" not in line
+
+
+def test_sky130_hvi_lvtn_nfet_stays_nvt_not_lvt(tmp_path):
+    _report, lines = _sky130_bound_models(tmp_path, "nvt2", [(75, 20), (125, 44)])
+    (line,) = lines
+    assert "sky130_fd_pr__nfet_05v0_nvt" in line
+    assert "_01v8_lvt" not in line
+
+
+def test_sky130_lvtn_partial_cover_claims_whole_device(tmp_path):
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    _draw_sky130_nmos(top, layout, 0, "S", drain_label="D")
+    top.shapes(layout.layer(125, 44)).insert(kdb.Box(-500, -500, 1000, 1500))
+    path = _write_gds(layout, tmp_path / "lvt_partial.gds")
+    root = _make_pdk_install(tmp_path, "sky130A")
+    report = run_extract(
+        path,
+        "sky130",
+        pdk_variant="sky130A",
+        pdk_root=root,
+        output=str(tmp_path / "lvt_partial.spice"),
+    )
+    assert report["device_counts"] == {"nfet": 1}
+    text = Path(report["netlist_path"]).read_text()
+    assert text.count("sky130_fd_pr__nfet_01v8_lvt") == 1
 
 
 def _make_sky130_straddling_hvi_mos_layout() -> kdb.Layout:
@@ -24861,8 +24917,11 @@ def test_sky130_extract_warns_when_hvi_marker_has_no_shapes(tmp_path):
     )
 
     assert report["device_counts"] == {"nfet": 1}
-    (entry,) = report["missing_flavour_markers"]
-    assert entry["marker"] == "75/20"
+    # Issue #5283 adds the `lvt` flavour (lvtn 125/44), which is also absent
+    # here, so select the hvi entry by marker.
+    markers = {e["marker"] for e in report["missing_flavour_markers"]}
+    assert markers == {"75/20", "125/44"}
+    (entry,) = [e for e in report["missing_flavour_markers"] if e["marker"] == "75/20"]
     assert entry["deck"] == "sky130"
     assert entry["flavour"]
     assert any("75/20" in w and entry["flavour"] in w for w in report["warnings"])
@@ -24914,7 +24973,9 @@ def test_flavour_marker_present_does_not_warn_missing(tmp_path, overlap):
         pdk_root=root,
         output=str(tmp_path / "m.spice"),
     )
-    assert report["missing_flavour_markers"] == []
+    # Only the hvi marker is drawn; the `lvt` flavour's lvtn (125/44,
+    # issue #5283) is legitimately absent and flagged.
+    assert [e["marker"] for e in report["missing_flavour_markers"]] == ["125/44"]
     path = _write_gds(
         _make_gf180mcu_dualgate_mos_layout(dualgate_overlap=overlap),
         tmp_path / "g.gds",

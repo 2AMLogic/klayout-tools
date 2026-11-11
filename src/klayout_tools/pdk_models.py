@@ -261,6 +261,11 @@ _MOS_MODEL_FLAVOURS: dict[tuple[str, str], dict[str, dict[str, str]]] = {
             "nfet": "sky130_fd_pr__nfet_g5v0d10v5",
             "pfet": "sky130_fd_pr__pfet_g5v0d10v5",
         },
+        # 1.8V low-threshold pair (issue #5283, `sky130.lvs` L2051/L2073).
+        "lvt": {
+            "nfet": "sky130_fd_pr__nfet_01v8_lvt",
+            "pfet": "sky130_fd_pr__pfet_01v8_lvt",
+        },
     },
 }
 
