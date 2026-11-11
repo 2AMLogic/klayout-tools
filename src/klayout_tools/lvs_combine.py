@@ -1469,7 +1469,9 @@ def _series_fold_offset_absorbed_warnings(
     return warnings
 
 
-def _flatten_netlist_safely(netlist: kdb.Netlist, side: str) -> dict[str, Any] | None:
+def _flatten_netlist_safely(
+    netlist: kdb.Netlist, side: str, keep: list[str] | None = None
+) -> dict[str, Any] | None:
     """Call ``netlist.flatten()``, in-process, on ``side``'s netlist (issue
     #1085's ``options.flatten_reference``/``options.flatten_layout``).
 
@@ -1513,10 +1515,27 @@ def _flatten_netlist_safely(netlist: kdb.Netlist, side: str) -> dict[str, Any] |
     from .lvs import CATEGORY_TOPOLOGY_FLATTENED
 
     circuits_before = sum(1 for _ in netlist.each_circuit())
-    netlist.flatten()
+    kept: list[str] = []
+    if keep:
+        # Issue #5322: flatten everything except circuits matching a glob
+        # (case-insensitive) -- e.g. pin-only stubs of abstracted cells.
+        import fnmatch
+
+        patterns = [g.lower() for g in keep]
+        doomed = []
+        for circuit in netlist.each_circuit():
+            if any(fnmatch.fnmatchcase(circuit.name.lower(), g) for g in patterns):
+                kept.append(circuit.name)
+            elif any(True for _ in circuit.each_ref()):
+                doomed.append(circuit)  # called by someone: not a top circuit
+        for circuit in doomed:
+            netlist.flatten_circuit(circuit)
+    else:
+        netlist.flatten()
     circuits_after = sum(1 for _ in netlist.each_circuit())
     if circuits_before == circuits_after:
         return None
+    kept_note = f" (kept un-flattened: {', '.join(sorted(kept))})" if kept else ""
     return _mismatch(
         CATEGORY_TOPOLOGY_FLATTENED,
         "warning",
@@ -1525,7 +1544,7 @@ def _flatten_netlist_safely(netlist: kdb.Netlist, side: str) -> dict[str, Any] |
         f"{circuits_after} top-level circuit(s), substituting every "
         "subcircuit-call instance in place -- this compare verified "
         "topology only after removing the original hierarchy boundaries on "
-        f'this side (see docs/cli/lvs.md, "topology.flattened")',
+        f'this side{kept_note} (see docs/cli/lvs.md, "topology.flattened")',
         side,
     )
 
@@ -1533,7 +1552,7 @@ def _flatten_netlist_safely(netlist: kdb.Netlist, side: str) -> dict[str, Any] |
 def _hierarchy_mismatch_warnings(
     layout_netlist: kdb.Netlist,
     reference_netlist: kdb.Netlist,
-    flatten_reference: bool,
+    flatten_reference: bool | list[str],
 ) -> list[dict[str, Any]]:
     """Issue #4548: advisory ``topology.hierarchy_mismatch`` warning.
 

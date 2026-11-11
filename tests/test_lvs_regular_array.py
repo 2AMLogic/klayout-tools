@@ -63,3 +63,92 @@ def test_bench_comparer_agrees_with_klt_lvs():
     faulty = bench.run(ROWS, COLS, hier=True, broken="wiring")
     assert clean["match"] is True
     assert faulty["match"] is False
+
+
+# Issue #5322: `options.flatten_reference` as a keep-list of circuit globs.
+_LEAF = ".SUBCKT LEAF A B VSS\n.ENDS LEAF\n"
+_LAYOUT = (
+    _LEAF
+    + ".SUBCKT TOP IN OUT VSS\n"
+    + "X1 IN N1 VSS LEAF\nX2 N1 OUT VSS LEAF\n"
+    + "M1 OUT IN VSS VSS nfet W=1U L=0.15U\n.ENDS TOP\n"
+)
+_REFERENCE = (
+    _LEAF
+    + ".SUBCKT MID I O VSS\nX1 I N1 VSS LEAF\nX2 N1 O VSS LEAF\n"
+    + "M1 O I VSS VSS nfet W=1U L=0.15U\n.ENDS MID\n"
+    + ".SUBCKT TOP IN OUT VSS\nXM IN OUT VSS MID\n.ENDS TOP\n"
+)
+
+
+def _flatten_lvs(tmp_path: Path, flatten, reference: str = _REFERENCE) -> dict:
+    (tmp_path / "layout.spice").write_text(_LAYOUT)
+    (tmp_path / "ref.spice").write_text(reference)
+    request = tmp_path / "request.json"
+    request.write_text(
+        json.dumps(
+            {
+                "layout": {"netlist": str(tmp_path / "layout.spice"), "top": "TOP"},
+                "reference": {"netlist": str(tmp_path / "ref.spice"), "top": "TOP"},
+                "options": {"flatten_reference": flatten},
+            }
+        )
+    )
+    return run_lvs(str(request))
+
+
+def test_flatten_reference_keep_list_spares_stub(tmp_path):
+    report = _flatten_lvs(tmp_path, ["leaf"])  # case-insensitive glob
+    assert report["status"] == "match"
+    warn = [m for m in report["mismatches"] if m["category"] == "topology.flattened"]
+    assert warn and "LEAF" in warn[0]["description"].upper()
+    assert report["options"]["flatten_reference"] == ["leaf"]
+
+
+def test_flatten_reference_bool_still_flattens_stub(tmp_path):
+    assert _flatten_lvs(tmp_path, True)["status"] == "mismatch"
+
+
+def test_flatten_reference_keep_list_no_match_flattens_all(tmp_path):
+    assert _flatten_lvs(tmp_path, ["NOPE*"])["status"] == "mismatch"
+
+
+# Issue #5322: GDS-start abstracted array -> hierarchical compare in one request.
+def _gds_abstract_lvs(tmp_path: Path, x2_y_net: str) -> dict:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import test_extract as te
+
+    gds = te._write_gds(te._make_abstract_cells_layout(), tmp_path / "arr.gds")
+    ref = (
+        ".SUBCKT SC_BUF A Y\n.ENDS SC_BUF\n"
+        ".SUBCKT MID I1A I1Y I2A I2Y\n"
+        f"X1 I1A I1Y SC_BUF\nX2 I2A {x2_y_net} SC_BUF\n.ENDS MID\n"
+        ".SUBCKT TOP INST1_A INST1_Y INST2_A INST2_Y\n"
+        "XM INST1_A INST1_Y INST2_A INST2_Y MID\n.ENDS TOP\n"
+    )
+    (tmp_path / "ref.spice").write_text(ref)
+    request = tmp_path / "request.json"
+    request.write_text(
+        json.dumps(
+            {
+                "layout": {
+                    "file": str(gds),
+                    "deck": "sky130",
+                    "top": "TOP",
+                    "top_cell_pins": True,
+                    "abstract_cells": ["SC_BUF"],
+                },
+                "reference": {"netlist": str(tmp_path / "ref.spice"), "top": "TOP"},
+                "options": {"flatten_reference": ["SC_BUF"]},
+            }
+        )
+    )
+    return run_lvs(str(request))
+
+
+def test_gds_abstracted_array_matches_with_keep_list(tmp_path):
+    assert _gds_abstract_lvs(tmp_path, "I2Y")["status"] == "match"
+
+
+def test_gds_abstracted_array_broken_top_wire_mismatches(tmp_path):
+    assert _gds_abstract_lvs(tmp_path, "I1Y")["status"] == "mismatch"
