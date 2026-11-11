@@ -148,9 +148,7 @@ def _run_sweep(args: argparse.Namespace) -> int:
             collect_partial=getattr(args, "collect_partial", False),
             timeout_s=getattr(args, "timeout_s", None),
         )
-    except SimError as exc:
-        return emit_error("sim", str(exc), args.format, code=exc.code)
-    except OutputLockError as exc:
+    except (SimError, OutputLockError) as exc:
         return emit_error("sim", str(exc), args.format, code=exc.code)
 
     if (write_failure := _write_report_out(report, args)) is not None:
@@ -318,6 +316,8 @@ def _run_batch_set(args: argparse.Namespace) -> int:
     except SimError as exc:
         return emit_error("sim", str(exc), args.format, code=exc.code)
 
+    if (write_failure := _write_report_out(report, args)) is not None:
+        return write_failure
     emit_success(report, args.format, print_set_text)
     return max((r["exit_code"] for r in report["requests"]), default=EXIT_PASS)
 

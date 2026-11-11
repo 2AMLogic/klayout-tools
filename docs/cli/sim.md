@@ -1294,6 +1294,18 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   member is sharded independently, and an option left unset keeps that
   request's own `batch.max_units_per_job` / `batch.max_concurrent_jobs` /
   `batch.capacity_wait_s`.
+- **Stuck or interrupted members** ([#5324](https://github.com/2AMLogic/klayout-tools/issues/5324)).
+  With a positive `--wait-for-capacity` (the command-line flag only; a
+  request-level `batch.capacity_wait_s` does not bound the set), a member
+  whose job was accepted but stays `pending` longer than that budget becomes an
+  entry with `status: "error"`, `exit_code: 4` and `error.code: "not_launched"`;
+  its job id stays in `job_ids` and the manifest so it can be cancelled or
+  attached. Finished members keep their results. An interrupt
+  (`KeyboardInterrupt`/`SystemExit`) turns every unfinished member into a
+  `set_interrupted` entry; the envelope and manifest are still written. Without
+  a wait budget the pending wait is unbounded, as before.
+- **`--report-out`** writes the aggregate envelope to a file (also on a partial
+  failure), in addition to stdout.
 - **Incremental manifest.** `<outdir>/set-manifest.json` (without `-o`: the
   `.klt/sim/` directory next to the first request) is written when the set
   starts and atomically rewritten on every transition. It lists, per request,
