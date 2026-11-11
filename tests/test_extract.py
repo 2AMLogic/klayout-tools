@@ -10776,8 +10776,8 @@ def test_sky130_deck_declares_hvi_mos_flavour():
     """The sky130 extraction deck declares one `mos_flavours` entry keyed on
     `hvi` (75/20) -- the deck-data half of issue #1369."""
     deck = get_extraction_deck("sky130")
-    # Issue #3599 adds the native-Vt combination flavour *before* `hvi`.
-    assert [f.flavour for f in deck.mos_flavours] == ["nvt", "hvi"]
+    # Issue #3599 adds `nvt` *before* `hvi`; issue #5283 adds `lvt` after.
+    assert [f.flavour for f in deck.mos_flavours] == ["nvt", "hvi", "lvt"]
     flavour = deck.mos_flavours[1]
     assert flavour.marker == (75, 20)
     assert flavour.flavour == "hvi"
@@ -24861,8 +24861,8 @@ def test_sky130_extract_warns_when_hvi_marker_has_no_shapes(tmp_path):
     )
 
     assert report["device_counts"] == {"nfet": 1}
-    (entry,) = report["missing_flavour_markers"]
-    assert entry["marker"] == "75/20"
+    # `lvt` (lvtn 125/44, issue #5283) is also absent: pick hvi by marker.
+    (entry,) = [e for e in report["missing_flavour_markers"] if e["marker"] == "75/20"]
     assert entry["deck"] == "sky130"
     assert entry["flavour"]
     assert any("75/20" in w and entry["flavour"] in w for w in report["warnings"])
@@ -24914,7 +24914,7 @@ def test_flavour_marker_present_does_not_warn_missing(tmp_path, overlap):
         pdk_root=root,
         output=str(tmp_path / "m.spice"),
     )
-    assert report["missing_flavour_markers"] == []
+    assert [e["marker"] for e in report["missing_flavour_markers"]] == ["125/44"]
     path = _write_gds(
         _make_gf180mcu_dualgate_mos_layout(dualgate_overlap=overlap),
         tmp_path / "g.gds",

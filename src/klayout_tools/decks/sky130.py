@@ -377,6 +377,7 @@ from . import (
     ResistorDevice,
     RuleProvenance,
 )
+from .sky130_lvt import lvt_mos_flavour
 from .sky130_unmodeled import UNMODELED_RULES, native_output_id  # noqa: F401
 
 # `RuleProvenance.source_repo`/`.commit` shared by every sky130 width/space
@@ -2348,13 +2349,10 @@ EXTRACTION_DECK = ExtractionDeck(
     # split (NMOS = active outside nwell, PMOS = active inside nwell). Real
     # sky130 draws several other voltage/threshold flavours off the *same*
     # split, keyed by additional implant/marker layers this curated deck
-    # does not model (e.g. `nfet_01v8_lvt`/`pfet_01v8_lvt`, the low-threshold
-    # siblings) -- this citation names the one flavour `nfet_class`/
-    # `pfet_class`'s generic `"nfet"`/`"pfet"` labels actually correspond to
-    # (the plain-active, no-implant-marker core device), not a claim that
-    # every sky130 MOS flavour is modelled. The `hvi`-marked
-    # `nfet_g5v0d10v5`/`pfet_g5v0d10v5` flavour *is* now modelled, via the
-    # `mos_flavours` entry below (issue #1369).
+    # models only via `mos_flavours` below (hvi #1369, lvtn #5283) -- this
+    # citation names the one flavour `nfet_class`/`pfet_class`'s generic
+    # `"nfet"`/`"pfet"` labels correspond to (the plain-active, no-marker
+    # core device), not a claim that every sky130 MOS flavour is modelled.
     nfet_provenance=_sky130_lvs_provenance("sky130_fd_pr__nfet_01v8"),
     pfet_provenance=_sky130_lvs_provenance("sky130_fd_pr__pfet_01v8"),
     tap=(65, 44),  # tap.drawing -- distinct from diff.drawing, see above
@@ -2842,6 +2840,7 @@ EXTRACTION_DECK = ExtractionDeck(
             nfet_provenance=_sky130_lvs_provenance("sky130_fd_pr__nfet_g5v0d10v5"),
             pfet_provenance=_sky130_lvs_provenance("sky130_fd_pr__pfet_g5v0d10v5"),
         ),
+        lvt_mos_flavour(_sky130_lvs_provenance),  # issue #5283
     ),
 )
 

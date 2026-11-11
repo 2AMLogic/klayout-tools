@@ -12813,11 +12813,10 @@ def test_build_device_binding_map_derived_fallback_shape():
         "rppd",
         "rhigh",
     }
-    # sg13g2's capacitor family is now fully curated too (issue #1470), so
-    # neither capacitor key comes from the derived fallback any more. The
-    # dict is keyed by *subcircuit* name, not device-class name: `rfcmim`'s
-    # real subcircuit is `cap_rfcmim`, so that is the key that appears here,
-    # even though the device-class name `rfcmim` is unchanged.
+    # sg13g2's capacitor family is fully curated too (issue #1470): neither
+    # capacitor key comes from the derived fallback. The dict is keyed by
+    # *subcircuit* name, not device-class name: `rfcmim`'s real subcircuit is
+    # `cap_rfcmim`, so that is the key here, though the class name is unchanged.
     assert set(build_device_binding_map("sg13g2")) == {
         "sg13_lv_nmos",
         "sg13_lv_pmos",
@@ -12829,8 +12828,7 @@ def test_build_device_binding_map_derived_fallback_shape():
         "cap_cmim",
         "cap_rfcmim",
     }
-    # Both fully-curated decks are byte-for-byte unchanged: no derived entry
-    # is added to either.
+    # Both fully-curated decks are unchanged: no derived entry is added.
     assert set(build_device_binding_map("gf180mcu")) == {
         "nfet_03v3",
         "pfet_03v3",
@@ -12873,6 +12871,8 @@ def test_build_device_binding_map_derived_fallback_shape():
         "sky130_fd_pr__pfet_g5v0d10v5",
         # Native-Vt 5V NMOS via marker combination (issue #3599).
         "sky130_fd_pr__nfet_05v0_nvt",
+        "sky130_fd_pr__nfet_01v8_lvt",
+        "sky130_fd_pr__pfet_01v8_lvt",
         "sky130_fd_pr__res_generic_po",
         "sky130_fd_pr__res_high_po",
         "sky130_fd_pr__res_xhigh_po",
