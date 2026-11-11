@@ -2397,6 +2397,22 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     pex_parser.add_argument(
+        "--wait-for-capacity",
+        dest="wait_for_capacity",
+        metavar="SECONDS",
+        type=float,
+        default=None,
+        help=(
+            "with --backend batch, wait up to SECONDS (>= 0) for fleet "
+            "capacity when the launch is refused (batch_no_capacity / "
+            "batch_concurrency_cap), re-launching the same job with jittered "
+            "backoff; overrides the request's `batch.capacity_wait_s`. 0 "
+            "means one attempt. Applied to every `klt sim` call of the run "
+            "(schematic, extracted, device-only). Same semantics as `klt sim "
+            "--wait-for-capacity`."
+        ),
+    )
+    pex_parser.add_argument(
         "--resume",
         dest="resume",
         action="store_true",
