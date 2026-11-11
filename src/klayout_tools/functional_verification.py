@@ -225,6 +225,7 @@ from .functional_verification_sdf import (
     _collect_sdf_alias_port_bits,
     _collect_sdf_physical_only_instances,
     _drop_sdf_bit_selected_bus_iopaths,
+    _drop_sdf_cond_expression_iopaths,
     _drop_sdf_non_interconnect_entries,
     _drop_sdf_unsupported_edge_modpath_iopaths,
     _drop_sdf_zero_delay_alias_port_interconnects,
@@ -453,6 +454,13 @@ SDF_IFNONE_EDGE_MODPATH_DROPPED_CLASS = "iopath_ifnone_edge_modpath"
 #: without the SDF's delay.
 SDF_BUS_BIT_MODPATH_DROPPED_CLASS = "iopath_bus_bit_modpath"
 
+#: The ``environment.sdf.dropped`` class counting ``COND``-wrapped ``IOPATH``
+#: entries removed before annotation because their condition is an operator
+#: expression (``~D``, ``A & ~B``) that Icarus's SDF parser rejects as
+#: ``Invalid/malformed COND``, failing the whole annotation (issue #5296).
+#: Carries an ``arcs`` list like :data:`SDF_BUS_BIT_MODPATH_DROPPED_CLASS`.
+SDF_COND_EXPRESSION_DROPPED_CLASS = "iopath_cond_expression"
+
 #: A human-readable reason per dropped class, surfaced in
 #: ``environment.sdf.dropped`` (issue #1102) so a caller can explain *why* a
 #: class was dropped without re-deriving it from this module's own comments.
@@ -546,6 +554,18 @@ SDF_BENIGN_DIAGNOSTIC_REASONS: dict[str, str] = {
         "this run. An IOPATH onto a bus with a bit-indexed model path, a "
         "scalar port, or a cell with no model is left in place and still "
         "fails loudly"
+    ),
+    SDF_COND_EXPRESSION_DROPPED_CLASS: (
+        "Icarus Verilog's SDF parser accepts only a bare signal or a simple "
+        "equality as a conditional-path condition; an operator expression "
+        "(e.g. '(COND ~CLK&~D&SETN (IOPATH ...))', OpenSTA's write_sdf "
+        "shape for state-dependent arcs) is 'Invalid/malformed COND' and "
+        "aborts the whole annotation. Those COND-wrapped IOPATH entries were "
+        "removed before annotation and counted here, and 'arcs' names every "
+        "affected cell arc. The cell's unconditional arcs are kept, but the "
+        "state-dependent delay detail of the dropped arcs is NOT represented "
+        "in this run. Simple 'COND D' / 'COND D==1'b1' entries are left in "
+        "place"
     ),
 }
 
@@ -2462,6 +2482,29 @@ def _apply_sdf_bus_bit_modpath_drop(
     return new_path
 
 
+def _apply_sdf_cond_expression_drop(
+    annotate_source_path: str,
+    output_dir: str,
+    sdf_pre_dropped_counts: dict[str, int],
+    sdf_pre_dropped_arcs: dict[str, list[dict[str, str]]],
+) -> str:
+    """Issue #5296's ``COND``-expression ``IOPATH`` drop, applied as one step
+    of the SDF-normalization pipeline. Returns the path the next step should
+    read -- ``annotate_source_path`` unchanged when nothing was dropped.
+    Count and arcs are recorded into the two dicts in place, as in
+    :func:`_apply_sdf_bus_bit_modpath_drop`."""
+    cond_drop = _drop_sdf_cond_expression_iopaths(annotate_source_path)
+    if cond_drop is None:
+        return annotate_source_path
+    cond_text, cond_count, cond_arcs = cond_drop
+    new_path = os.path.join(output_dir, "klt_sdf_cond_expression_dropped.sdf")
+    with open(new_path, "w", encoding="utf-8") as handle:
+        handle.write(cond_text)
+    sdf_pre_dropped_counts[SDF_COND_EXPRESSION_DROPPED_CLASS] = cond_count
+    sdf_pre_dropped_arcs[SDF_COND_EXPRESSION_DROPPED_CLASS] = cond_arcs
+    return new_path
+
+
 def _sdf_dropped_report(
     sdf_dropped_counts: dict[str, int],
     sdf_pre_dropped_arcs: dict[str, list[dict[str, str]]],
@@ -2814,6 +2857,15 @@ def run_functional_verification(
             annotate_source_path,
             output_dir,
             sources,
+            sdf_pre_dropped_counts,
+            sdf_pre_dropped_arcs,
+        )
+        # Issue #5296: a COND-wrapped IOPATH whose condition is an operator
+        # expression (`~CLK&~D&SETN`) is a parse error in Icarus that aborts
+        # the whole annotation; drop and count it (arcs named).
+        annotate_source_path = _apply_sdf_cond_expression_drop(
+            annotate_source_path,
+            output_dir,
             sdf_pre_dropped_counts,
             sdf_pre_dropped_arcs,
         )
