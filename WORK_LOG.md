@@ -8,6 +8,7 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-11
 
+- **Issue #5309** (closed): test flake: ci-apt-install fails installing ngspice on Tests (Python 3.10-3.14) (apt mirror, PR #5308)
 - **PR #5304**: fix(extract): classify MOS flavour markers per gate, not per diffusion island
 - **PR #5303**: docs(pnr): record live-verified -instances spelling for bracketed macro names
 - **Issue #5301** (closed): extract/pex: sky130 deck over-classifies LVT PFETs when marker ends inside shared source/drain diffusion
