@@ -7349,6 +7349,48 @@ def _flavour_claims_island(
     )
 
 
+def _flavour_split_island(
+    island: kdb.Region,
+    poly: kdb.Region,
+    flavour: MOSFlavour,
+    marker_region: kdb.Region,
+    and_regions: list[kdb.Region],
+    not_regions: list[kdb.Region],
+    nwell: kdb.Region,
+) -> tuple[kdb.Region, kdb.Region]:
+    """Split an active ``island`` into ``(claimed, remaining)`` per *gate*
+    (issue #5301). A gate (``poly & island`` component) is claimed by
+    ``flavour`` under the :func:`_flavour_claims_island` test applied to the
+    gate area, so a marker ending inside diffusion shared with a neighbouring
+    gate does not flip that neighbour. Shared source/drain diffusion stays in
+    both halves. An island with no gate falls back to the island-level test;
+    a wholly covered/uncovered island returns the whole island on one side.
+    """
+    import klayout.db as kdb
+
+    gates = [kdb.Region(c) for c in (island & poly).merged().each()]
+    if not gates:
+        if _flavour_claims_island(
+            island, flavour, marker_region, and_regions, not_regions, nwell
+        ):
+            return island, kdb.Region()
+        return kdb.Region(), island
+    claimed_gates = kdb.Region()
+    unclaimed_gates = kdb.Region()
+    for gate in gates:
+        if _flavour_claims_island(
+            gate, flavour, marker_region, and_regions, not_regions, nwell
+        ):
+            claimed_gates += gate
+        else:
+            unclaimed_gates += gate
+    if unclaimed_gates.is_empty() and not claimed_gates.is_empty():
+        return island, kdb.Region()
+    if claimed_gates.is_empty():
+        return kdb.Region(), island
+    return island - unclaimed_gates, island - claimed_gates
+
+
 def _flavour_recognised_islands(
     layout: kdb.Layout,
     top_cell: kdb.Cell,
@@ -7374,10 +7416,12 @@ def _flavour_recognised_islands(
         not_regions = [_region(layout, top_cell, m) for m in flavour.not_markers]
         for component in active.merged().each():
             island = kdb.Region(component)
-            if not (island & poly).is_empty() and _flavour_claims_island(
-                island, flavour, marker_region, and_regions, not_regions, nwell
-            ):
-                recognised += island
+            if (island & poly).is_empty():
+                continue
+            claimed_part, _ = _flavour_split_island(
+                island, poly, flavour, marker_region, and_regions, not_regions, nwell
+            )
+            recognised += claimed_part
     return recognised
 
 
@@ -8769,17 +8813,17 @@ def _extract_netlist(
             remaining = kdb.Region()
             for component in active.merged().each():
                 component_region = kdb.Region(component)
-                if _flavour_claims_island(
+                claimed_part, remaining_part = _flavour_split_island(
                     component_region,
+                    poly,
                     flavour,
                     marker_region,
                     and_regions,
                     not_regions,
                     nwell,
-                ):
-                    claimed += component_region
-                else:
-                    remaining += component_region
+                )
+                claimed += claimed_part
+                remaining += remaining_part
             active = remaining
         flavour_active.append(claimed)
 
