@@ -86,8 +86,8 @@ def test_submit_only_refuses_sharded_request_before_any_s3_write(tmp_path, monke
     with pytest.raises(sim.SimError) as err:
         sim.run_sim(str(path), submit_only=True, hosts=2)
 
-    assert err.value.code == sba.SUBMIT_ONLY_UNSUPPORTED_CODE
-    assert "hosts" in str(err.value)
+    # One unit cannot fill two hosts (issue #5281): refused by name.
+    assert "exceeds the number of units" in str(err.value)
     assert runner.calls == []
 
 
@@ -809,10 +809,10 @@ def test_attach_requires_the_shard_map_filename(tmp_path, monkeypatch):
     assert err.value.code == sb.BATCH_SHARD_MANIFEST_CODE
 
 
-def test_submit_only_hosts_greater_than_one_keeps_its_refusal(tmp_path, monkeypatch):
+def test_submit_only_hosts_with_resume_is_still_refused(tmp_path, monkeypatch):
     runner = _FakeRunner()
     path = _setup(tmp_path, monkeypatch, runner)
     with pytest.raises(sim.SimError) as err:
-        sim.run_sim(str(path), submit_only=True, hosts=2)
+        sim.run_sim(str(path), submit_only=True, hosts=3, resume=True)
     assert err.value.code == sba.SUBMIT_ONLY_UNSUPPORTED_CODE
     assert runner.calls == []

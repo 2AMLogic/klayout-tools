@@ -91,7 +91,7 @@ from ._drc_parser_args import add_klayout_app_args
 from .color import add_color_args
 from .parser_economy import add_economy_parser
 from .parser_netlist import add_netlist_parser
-from .parser_sim import add_sim_parser
+from .parser_sim import add_sim_parser, add_wait_for_capacity_arg
 from .parsers.extract import add_extract_parser
 
 
@@ -2365,8 +2365,8 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
             "unit list into batch jobs of at most this many units (applied "
             "to the schematic and the extracted `klt sim` call of every "
             "testbench separately), so no job outruns the fleet's whole-job "
-            "ceiling (default: each request's `batch.max_units_per_job`, "
-            "else no split). Same semantics as `klt sim --max-units-per-job`."
+            "ceiling (default: each request's `batch.max_units_per_job`, else "
+            "no split). Same as `klt sim --max-units-per-job`."
         ),
     )
     pex_parser.add_argument(
@@ -2378,8 +2378,7 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
             "backend `batch`, sharded runs: keep at most this many shard "
             "jobs in flight at once per `klt sim` call (default: each "
             "request's `batch.max_concurrent_jobs`, else every shard is "
-            "submitted at once). Same semantics as `klt sim "
-            "--max-concurrent-jobs`."
+            "submitted at once). Same as `klt sim --max-concurrent-jobs`."
         ),
     )
     pex_parser.add_argument(
@@ -2391,11 +2390,12 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
             "backend `batch`: shard each side's expanded corner/Monte-Carlo "
             "unit list across this many hosts (applied to the schematic and "
             "the extracted `klt sim` call of every testbench separately); "
-            "each leg records its shard job ids in its own "
-            "`batch-shards.json` so `--resume` can re-attach. Same semantics "
-            "as `klt sim --hosts` (default: each request's `remote.hosts`)."
+            "each leg records its shard job ids in its own `batch-shards.json` "
+            "so `--resume` can re-attach. Same as `klt sim --hosts` (default: "
+            "each request's `remote.hosts`)."
         ),
     )
+    add_wait_for_capacity_arg(pex_parser, "Applied to every `klt sim` call of the run.")
     pex_parser.add_argument(
         "--resume",
         dest="resume",
