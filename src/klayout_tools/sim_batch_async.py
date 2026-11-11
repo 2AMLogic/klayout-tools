@@ -52,6 +52,7 @@ from .sim_batch_shards import (  # noqa: F401
     shard_map_request_fields,
     shard_scoped_points,
 )
+from .sim_batch_unstarted import unstarted_fields
 
 #: Schema version of the two payloads this module builds. They are new
 #: documents (not a field on the sim report), so they start at 1.
@@ -336,10 +337,8 @@ def _job_exists(
 def _job_head(
     config: BatchConfig, job_id: str, run: remote_transport.CommandRunner
 ) -> dict[str, Any] | None:
-    """``head-object`` of ``job.json`` (parsed JSON, ``{}`` when the output
-    is not JSON), or ``None`` when absent. A 404 is "no such job"; any other
-    failure (auth, network) is a transport error, never reported as
-    "unknown job"."""
+    """``head-object`` of ``job.json`` (parsed JSON, ``{}`` if not JSON), or
+    ``None`` on a 404; any other failure is a transport error."""
     bucket_key = f"{config.jobs_prefix}/{job_id}/job.json"
     argv = _aws_argv(
         config,
@@ -448,16 +447,8 @@ def read_job_status(
     config = _resolve_batch_config(
         request, corner_count=0, timeout_s=0.0, check_runner=False
     )
-    job_head: dict[str, Any] | None = None
     try:
-        status = _read_status(config, job_id, run)
-        if status is None:
-            job_head = _job_head(config, job_id, run)
-        if status is None and job_head is None:
-            raise SimError(
-                f"no batch job {job_id!r} under {config.bucket}/{config.jobs_prefix}/",
-                code=BATCH_JOB_NOT_FOUND_CODE,
-            )
+        status, job_head = _read_status_and_head(config, job_id, run)
     except BatchError as exc:
         raise SimError(f"batch backend failed: {exc}", code=exc.code) from exc
 
@@ -484,35 +475,26 @@ def read_job_status(
     if stale_seconds is not None:
         payload["stale"] = True
         payload["stale_seconds"] = stale_seconds
-    unstarted_s = _unstarted_seconds(status, job_head, now)
-    if unstarted_s is not None:
-        payload["never_started"] = True
-        payload["unstarted_seconds"] = unstarted_s
-        payload["diagnostic"] = sim_batch._format_never_started(job_id, unstarted_s)
+    payload.update(unstarted_fields(job_id, status, job_head, now))
     instance = {k: document[k] for k in _STATUS_INSTANCE_FIELDS if k in document}
     if instance:
         payload["instance"] = instance
     return payload
 
 
-def _unstarted_seconds(
-    status: dict[str, Any] | None,
-    job_head: dict[str, Any] | None,
-    now: datetime | None,
-) -> float | None:
-    """Age of ``job.json`` when no ``status.json`` ever appeared and that age
-    exceeds the provision slack (the ``--job-status`` twin of the blocking
-    poll's "never started" check); ``None`` otherwise."""
-    if status is not None or not job_head:
-        return None
-    stamp = job_head.get("LastModified")
-    if not isinstance(stamp, str):
-        return None
-    try:
-        written = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if written.tzinfo is None:
-        written = written.replace(tzinfo=timezone.utc)
-    age = ((now or datetime.now(timezone.utc)) - written).total_seconds()
-    return age if age >= sim_batch._BATCH_PROVISION_SLACK_S else None
+def _read_status_and_head(
+    config: BatchConfig, job_id: str, run: remote_transport.CommandRunner
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """``(status, job.json head)``; neither present is a not-found error."""
+    from .sim import SimError
+
+    status = _read_status(config, job_id, run)
+    if status is not None:
+        return status, None
+    job_head = _job_head(config, job_id, run)
+    if job_head is None:
+        raise SimError(
+            f"no batch job {job_id!r} under {config.bucket}/{config.jobs_prefix}/",
+            code=BATCH_JOB_NOT_FOUND_CODE,
+        )
+    return None, job_head
