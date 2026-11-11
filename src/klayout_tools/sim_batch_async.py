@@ -190,6 +190,30 @@ def submit_only(
     )
 
 
+def refuse_hosts_over_units(hosts: int, unit_count: int) -> None:
+    """Refuse more hosts than units (#5281): an idle member is still billed."""
+    from .sim import SimError
+
+    if hosts > unit_count:
+        raise SimError(
+            f"remote.hosts ({hosts}) exceeds the number of units to dispatch "
+            f"({unit_count}) -- an idle fleet member would still be billed; "
+            "use hosts <= corner/sample count"
+        )
+
+
+def refuse_sharded_deck_submit(hosts: int | None) -> None:
+    """Deck lists stay one job; only corner requests shard (#5281)."""
+    from .sim import SimError
+
+    if hosts not in (None, 1):
+        raise SimError(
+            "--submit-only submits one job; --hosts sharding is not "
+            "supported for deck-list requests",
+            code=SUBMIT_ONLY_UNSUPPORTED_CODE,
+        )
+
+
 def _submit_sharded(
     *,
     request: dict[str, Any],

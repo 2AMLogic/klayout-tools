@@ -185,7 +185,12 @@ from .sim_batch import (
     dry_run_runner_check,
 )
 from .sim_batch import _resolve_batch_config as _resolve_batch_config
-from .sim_batch_async import SUBMIT_ONLY_UNSUPPORTED_CODE, shard_scoped_points
+from .sim_batch_async import (
+    SUBMIT_ONLY_UNSUPPORTED_CODE,
+    refuse_hosts_over_units,
+    refuse_sharded_deck_submit,
+    shard_scoped_points,
+)
 from .sim_batch_async import submit_only as _submit_batch_only
 from .sim_batch_features import pop_remote_diagnostics
 from .sim_cause import _with_fatal_error_cause
@@ -2816,13 +2821,8 @@ def _dispatch_deck_request(
         _refuse_unsupported_submit_only(
             resolved_backend, 1 if hosts is None else hosts, resume, plot_dir
         )
-        if hosts is not None and hosts != 1 and not resume and plot_dir is None:
-            # Deck lists stay one job (issue #5281 shards corner requests only).
-            raise SimError(
-                "--submit-only submits one job; --hosts/remote.hosts sharding "
-                "is not supported for deck-list requests",
-                code=SUBMIT_ONLY_UNSUPPORTED_CODE,
-            )
+        if not resume and plot_dir is None:
+            refuse_sharded_deck_submit(hosts)
     _apply_attach(
         {}, attach_job_id, resolved_backend, 1 if hosts is None else hosts, submit_only
     )
@@ -2939,9 +2939,7 @@ def _refuse_unsupported_submit_only(
     backend: str, hosts: int, resume: bool | None, plot_dir: str | None
 ) -> None:
     """``--submit-only`` is one batch job: refuse everything else by name,
-    before the first S3 write (issue #3073). ``--hosts N`` and a
-    ``max_units_per_job`` split are both submitted shard by shard (issues
-    #4620, #5281); ``hosts`` is unused here and kept for call-site stability."""
+    before the first S3 write (issue #3073). ``hosts`` is unused (#5281)."""
     reason = None
     if backend != "batch":
         reason = f"requires backend 'batch' (resolved backend: '{backend}')"
@@ -4087,12 +4085,7 @@ def _run_sim_corners(
 
     if submit_only:
         _refuse_unsupported_submit_only(backend, hosts, resume, plot_dir)
-        if hosts > len(dispatch_points):
-            raise SimError(
-                f"remote.hosts ({hosts}) exceeds the number of units to "
-                f"dispatch ({len(dispatch_points)}) -- an idle fleet member "
-                "would still be billed; use hosts <= corner/sample count"
-            )
+        refuse_hosts_over_units(hosts, len(dispatch_points))
         return _submit_batch_only(
             hosts=hosts,
             request=request,
