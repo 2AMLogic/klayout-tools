@@ -13,7 +13,7 @@ import subprocess
 
 import pytest
 
-from klayout_tools import functional_verification_sdf as fvs
+from klayout_tools import functional_verification_sdf_steps as fvs
 
 HAVE_ICARUS = shutil.which("iverilog") is not None and shutil.which("vvp") is not None
 
