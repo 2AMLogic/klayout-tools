@@ -8,6 +8,10 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-11
 
+- **PR #5297**: feat(sdf): drop COND-expression IOPATH arcs Icarus rejects
+- **Issue #5302** (closed): place-and-route: macros[].halo fails with PDN-0217 for instance names with escaped brackets (0.9.1)
+- **Issue #5300** (closed): place-and-route: macros[].halo is accepted but silently ignored; no placement-density control
+- **Issue #5296** (closed): functional-verification options.sdf: post-route SDF with COND arcs and escaped-divider INTERCONNECT fails Icarus 13 annotation
 - **PR #5295**: chore(loom): resync installed Loom to v0.19.1287
 - **PR #5293**: test(pex): cover --hosts sharding across both legs on submit and attach
 - **PR #5291**: feat(gen): add pdk_cell generator for fixed PDK GDS cells
@@ -3559,50 +3563,4 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 - **Issue #1689** (closed): gen-compose: composed output drops the DEF net-name shape property, so "klt extract --def-net-names" silently degrades on a composed P&R macro
 - **Issue #1688** (closed): decks/gf180mcu: no metal4.width / metal4.space rule, while every other routing metal has both
 - **Issue #1687** (closed): extract: --pins cannot name a multi-label net -- KLayout joins labels with a comma, and --pins is itself a comma-separated list
-
-### 2026-09-11
-
-- **PR #1685**: ci: declare python3-click for the pinned SymbiYosys launcher (fixes main after #1246)
-- **PR #1684**: fix(gen-compose): warn when a block's declared bbox_um understates its real geometry (#1679)
-- **PR #1683**: fix(gen-compose): retry route-vs-route collision onto cross_block_layer_role
-- **PR #1682**: fix(gen-compose): exempt a hollow block's cavity from the obstacle check
-- **PR #1678**: fix: scope gen-compose obstacle-overlap check to layers a block draws
-- **PR #1677**: fix(loom): guard against inline-code-quoted closing keywords in PR bodies
-- **PR #1676**: docs(extract): document parasitics star addressing and device-card node order
-- **PR #1675**: gen-compose: add gf180mcu metal4/via3 routing roles
-- **PR #1672**: feat(extract): add devices[].instance_path, attributing each device to its originating GDS instance
-- **PR #1671**: fix(loom): named-dependency checklist regex misses 'PR #N' prose prefix
-- **PR #1668**: fix(ci): make ci-apt-install.sh's mirror rewrite adaptive, not one-directional
-- **PR #1664**: fix(lvs): compare circuits by identity in _prune_extra_top_circuits
-- **PR #1663**: fix(lvs): prune power-only layout circuits before gate-level-verilog compare
-- **PR #1662**: feat(extract): recognise gf180mcu's drawn metal-resistor family (issue #1640)
-- **PR #1661**: feat(drc): add isolated check kind, fix nwell.space.1 notch false positive
-- **PR #1660**: feat(gen): add metal_level param to res_array for sky130 res_generic_mN
-- **PR #1653**: fix(place-and-route): add gf180mcu_fd_sc_mcu7t5v0 table entries
-- **PR #1648**: feat(gen-compose): decouple cross_block_layer_role's width from routing.width_um (#1620)
-- **PR #1641**: feat(extract): recognise sky130's drawn metal-resistor family (issue #1621)
-- **PR #1636**: fix(lef-abstract): search every GDS datatype sharing a pin's LEF layer name
-- **PR #1573**: chore(deps-dev): bump the npm-minor-patch group across 1 directory with 5 updates
-- **PR #1482**: chore(deps): bump flate2 from 1.1.9 to 1.1.10 in /native/legalize in the cargo-minor-patch group across 1 directory
-- **PR #1246**: ci: run native-techmap on the dedicated heavy runner (2am#29)
-- **Issue #1681** (closed): gen-compose's obstacle-overlap check treats a region's own guard-ring block as unrelated to that region's own content block
-- **Issue #1680** (closed): gen-compose's connectivity[] router has no automatic layer hop when two routed nets must cross each other
-- **Issue #1679** (closed): gen-compose corrupts a composed place-and-route macro's own extracted connectivity (clean standalone, merged once composed)
-- **Issue #1674** (closed): Loom-tooling PR body containing an inline-code 'Closes #N' example can falsely auto-close an unrelated issue
-- **Issue #1673** (closed): docs: state klt extract --parasitics' per-terminal star and device-card node-order guarantees explicitly
-- **Issue #1670** (closed): gen-compose: gf180mcu's _PDK_ROLE_LAYERS has no metal4/via3 routing role, so a P&R macro's real (Metal4) pins are unreachable by connectivity[]/routing
-- **Issue #1669** (closed): dep-recheck-fingerprint.sh named-dependency: checklist regex misses 'PR #N' prose prefix, silently returns VERDICT=clear
-- **Issue #1667** (closed): CI: Python test matrix failing repo-wide — archive.ubuntu.com unreachable in ci-apt-install.sh ngspice step
-- **Issue #1666** (closed): Friction: klt extract always flattens hierarchy, so a caller cannot address a specific repeated-instance boundary inside an assembled block
-- **Issue #1665** (closed): CI: ci-apt-install.sh hard-codes archive.ubuntu.com as the 'good' mirror — all Tests jobs red when that mirror is the degraded one
-- **Issue #1657** (closed): fix(lvs): _prune_extra_top_circuits never removes anything for a Layout-less netlist (cell_index always 0)
-- **Issue #1656** (closed): gen-compose: obstacle-overlap check is layer-agnostic — rejects a route for crossing a block that draws nothing on that layer
-- **Issue #1654** (closed): DRC: check="space" approximating an isolated-semantics source rule false-positives on same-polygon concave notches
-- **Issue #1649** (closed): klt place-and-route: no gf180mcu_fd_sc_mcu7t5v0 (7-track) table entries — cannot reach route stage
-- **Issue #1640** (closed): gf180mcu: no metal-resistor device class (rm1/rm2/rm3/tm6k/9k/11k/30k) — same gap as sky130 (#1621)
-- **Issue #1639** (closed): klt gen: no generator for sky130's drawn metal-resistor family (res_generic_m1..m5)
-- **Issue #1622** (closed): klt lvs: gate-level-verilog reference form cannot match a layout with power-only (filler/tap) cells
-- **Issue #1621** (closed): Friction: no metal-resistor device class, so a netlist using its PDK's metal resistor cannot be ingested at all (and no gen generator draws one)
-- **Issue #1620** (closed): Friction: routing.width_um is one scalar for two layers, so naming routing.cross_block_layer_role forces the primary plane's routing wider
-- **Issue #1614** (closed): klt lef-abstract: pins[] geometry search reuses socket-check's label-layer field, so a split label/drawing-datatype PDK convention always reports geometry_source=synthesized
 
