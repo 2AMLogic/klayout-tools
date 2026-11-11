@@ -103,7 +103,8 @@ def _preflight_decks_request(
 ) -> dict[str, Any]:
     """Ceiling check for a ``decks[]`` member (issue #5337): a deck list is one
     batch job whose bound is the serial worst case of its units, sized exactly
-    as :func:`~klayout_tools.sim_decks._prepare_decks_batch` sizes it."""
+    as :func:`~klayout_tools.sim_decks._prepare_decks_batch` sizes it (the
+    sum of every unit's own ``timeout_s``; keep the two in step)."""
     import os
 
     from . import sim_decks
@@ -113,7 +114,7 @@ def _preflight_decks_request(
         request_dir=os.path.dirname(os.path.abspath(request_path)),
         allow_worker_form=False,
     )
-    serial_worst_s = sim_decks.deck_serial_worst_s(units)
+    serial_worst_s = sum(unit["timeout_s"] for unit in units)
     config = _resolve_batch_config(
         request, corner_count=1, timeout_s=serial_worst_s, check_runner=False
     )
