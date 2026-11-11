@@ -747,6 +747,7 @@
         "klayout_tools.sim_request_overrides",
         "klayout_tools.sim_search",
         "klayout_tools.sim_set",
+        "klayout_tools.sim_set_runtime",
         "klayout_tools.sim_settled",
         "klayout_tools.sim_slug",
         "klayout_tools.sim_snm",
