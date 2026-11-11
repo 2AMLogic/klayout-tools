@@ -5,7 +5,7 @@ import argparse
 import re
 from pathlib import Path
 
-import tomllib
+import pytest
 
 from klayout_tools.cli.parser import create_parser
 
@@ -22,6 +22,8 @@ def _all_help_texts(parser):
 
 
 def test_wheel_force_includes_cli_docs():
+    # `tomllib` is stdlib only from 3.11 (PEP 680); this project supports 3.10.
+    tomllib = pytest.importorskip("tomllib")
     cfg = tomllib.loads((_ROOT / "pyproject.toml").read_text())
     force = cfg["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
     assert force.get("docs/cli") == "klayout_tools/data/cli"
