@@ -201,6 +201,7 @@ from .sim_decks import run_deck_request
 from .sim_echo_messages import echo_unsupported_message, zipped_length_message
 from .sim_osdi_pin import osdi_pdk_root_pin
 from .sim_osdi_pin import resolve_osdi_preload as _resolve_osdi_preload
+from .sim_process_legs import process_leg_check
 
 from .sim_analysis_overrides import (  # isort: skip
     AO_LABEL as _AO_LABEL,  # noqa: F401
@@ -411,6 +412,9 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         # Report-level (top-level `diagnostics[]`, issue #4097): an off-host
         # `measurements[].expr` produced no value; the runner may predate it.
         "expr_runner_may_predate",
+        # Report-level (top-level `diagnostics[]`, issue #5385): process legs
+        # with bit-identical results; a warning.
+        "process_leg_check",
     }
 )
 
@@ -4603,6 +4607,8 @@ def _run_sim_corners(
     ]:
         report["diagnostics"] = top_diags
     _attach_expr_runner_hint(report, measurements_spec, corners, backend=backend)
+    if leg_diag := process_leg_check(corners):
+        report.setdefault("diagnostics", []).append(leg_diag)
     _attach_not_reached_count(report, measurements_spec, corners)
     if plot_dir is not None:
         # Additive/optional: only present when `--plot`/`plot_dir` was
