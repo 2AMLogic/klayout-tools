@@ -1,7 +1,8 @@
 """``measurements[].search`` for ``klt sim`` (issue #4121).
 
 A ``measurements[]`` entry declared with ``search`` grades the boundary of a
-monotone pass/fail predicate over one independent source's value -- "the
+monotone pass/fail predicate over one independent source's value (or, with
+``param``, one deck ``.param``; see :mod:`.sim_search_param`) -- "the
 smallest drive that still flips the cell" -- as one scalar::
 
     {"name": "min_flip_drive_ua",
@@ -15,11 +16,11 @@ The bisection runs *inside the corner's one ngspice process*, as a ``while``
 loop in the generated ``.control`` block (so it behaves identically on every
 backend and composes with corners, ``monte_carlo``, ``limits`` and
 ``klt yield``, which all read the ordinary measurement result). Each probe is
-``alter <source> = <x>``, the declared analysis, and the predicate evaluated at
-the last point of its vector. Both bracket ends are probed first; the endpoint
-outcomes must differ. The loop's state lives in the ``const`` plot (every
-probe starts from ``setplot const`` so a failed analysis can never be read as
-the previous probe's plot) and is printed once at the end::
+``alter <source> = <x>`` (or the ``param`` form), the declared analysis, and
+the predicate evaluated at the last point of its vector. Both bracket ends are
+probed first; the endpoint outcomes must differ. The loop's state lives in the
+``const`` plot (every probe starts from ``setplot const`` so a failed analysis
+can never be read as the previous probe's plot) and is printed once at the end::
 
     klt_s<k>_lo = ...   klt_s<k>_hi = ...   klt_s<k>_n = ...
     klt_s<k>_st = ...   klt_s<k>_x = ...
@@ -42,10 +43,12 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from . import sim_passes, sim_twoport
+from . import sim_passes, sim_search_param, sim_twoport
 from ._jsonnum import is_finite_number
 from .sim_errors import SimError
 from .sim_forms import validate_exclusive_form
+from .sim_search_analysis import no_control_chars, validate_analysis
+from .sim_search_param import TARGET_KEYS, target_name
 
 #: Reason tokens a failed ``search`` entry's diagnostic message leads with.
 ERROR_CODES = (
@@ -62,13 +65,9 @@ MAX_ITER_CAP = 64
 #: bracket magnitude (``$&`` text expansion keeps 6 significant digits).
 _TOL_RESOLUTION = 1e-5
 
-_KEYS = ("source", "lo", "hi", "tol", "max_iter", "analysis", "predicate")
-_ALLOWED_KEYS = frozenset((*_KEYS, "direction", "report"))
+_KEYS = ("lo", "hi", "tol", "max_iter", "analysis", "predicate")
+_ALLOWED_KEYS = frozenset((*_KEYS, *TARGET_KEYS, "direction", "report"))
 _DIRECTIONS = ("rising", "falling")
-_ANALYSIS_KINDS = ("tran", "dc", "op")
-
-#: An independent source name, as ``analysis_steps[].alter`` accepts.
-_SOURCE_RE = re.compile(r"^[VIvi][A-Za-z0-9_]*$")
 
 #: The other mutually exclusive measurement forms.
 _FORMS = (
@@ -140,13 +139,6 @@ def _number(name: Any, body: dict[str, Any], key: str) -> float:
 
 
 def _validate_bracket(name: Any, body: dict[str, Any]) -> tuple[float, float, float]:
-    source = body["source"]
-    if not isinstance(source, str) or not _SOURCE_RE.match(source):
-        raise SimError(
-            f"measurement '{name}': search.source must name a top-level "
-            "independent V or I source (V/I followed by [A-Za-z0-9_]); got "
-            f"{source!r}"
-        )
     lo, hi, tol = (_number(name, body, key) for key in ("lo", "hi", "tol"))
     if not hi > lo:
         raise SimError(
@@ -226,44 +218,12 @@ def validate_search_spec(name: Any, body: Any) -> None:
         raise SimError(
             f"measurement '{name}': search requires {list(_KEYS)}; missing {missing}"
         )
+    sim_search_param.validate_target(name, body)
     lo, hi, tol = _validate_bracket(name, body)
     _validate_max_iter(name, body, hi - lo, tol)
     _validate_options(name, body)
-    _validate_analysis(name, body["analysis"])
+    validate_analysis(name, body["analysis"])
     _validate_predicate(name, body["predicate"])
-
-
-def _no_control_chars(text: str) -> bool:
-    return not any(ord(ch) < 32 or ord(ch) == 127 for ch in text)
-
-
-def _validate_analysis(name: Any, analysis: Any) -> None:
-    if not isinstance(analysis, dict) or set(analysis) - {"kind", "args"}:
-        raise SimError(
-            f"measurement '{name}': search.analysis must be an object with "
-            'only "kind" and "args"'
-        )
-    kind = analysis.get("kind")
-    if not isinstance(kind, str) or kind.lower() not in _ANALYSIS_KINDS:
-        raise SimError(
-            f"measurement '{name}': search.analysis.kind must be one of "
-            f"{list(_ANALYSIS_KINDS)}; got {kind!r}"
-        )
-    args = analysis.get("args", "")
-    if not isinstance(args, str) or not _no_control_chars(args):
-        raise SimError(
-            f"measurement '{name}': search.analysis.args must be a single-line string"
-        )
-    if kind.lower() != "op" and not args.strip():
-        raise SimError(
-            f"measurement '{name}': search.analysis.args is required for kind {kind!r}"
-        )
-    if "{" in args or "}" in args:
-        raise SimError(
-            f"measurement '{name}': search.analysis.args may not use a "
-            "{param} brace reference (ngspice does not expand it in a "
-            ".control command)"
-        )
 
 
 def _validate_predicate(name: Any, predicate: Any) -> None:
@@ -276,7 +236,7 @@ def _validate_predicate(name: Any, predicate: Any) -> None:
     if (
         not isinstance(expr, str)
         or not expr.strip()
-        or not _no_control_chars(expr)
+        or not no_control_chars(expr)
         or "$" in expr
         or "=" in _OPERATOR_RE.sub("", expr)
     ):
@@ -325,12 +285,16 @@ def validate_search_targets(
     measurements_spec: list[dict[str, Any]],
     waveforms: dict[str, str],
     supply_targets: set[str],
+    axis_params: set[str] | None = None,
 ) -> None:
     """Pre-dispatch netlist check: an ``alter`` aimed at a corner supply
     source, or at one declared with an explicit waveform, has no effect (every
     probe would run the same circuit and the search would report a boundary
-    of nothing)."""
+    of nothing). A ``param`` target may not be a ``corners.params`` axis
+    (an unknown ``.param`` is a runtime ``search_probe_failed`` error)."""
     for spec in search_measurements(measurements_spec):
+        if sim_search_param.check_axis(spec, axis_params):
+            continue
         source = spec["search"]["source"].lower()
         if source in supply_targets:
             raise SimError(
@@ -359,7 +323,9 @@ def predicate_expr(expr: str) -> str:
     return _OPERATOR_RE.sub(lambda m: _OPERATOR_WORDS[m.group(0)], expr).strip()
 
 
-def _probe_lines(k: int, body: dict[str, Any], x_vec: str) -> list[str]:
+def _probe_lines(
+    k: int, body: dict[str, Any], x_vec: str, reset_prefix: list[str]
+) -> list[str]:
     """One probe at the value in vector ``x_vec``; leaves its truth value
     (``0``/``1``, or ``-1`` when the analysis or predicate failed) in the
     ``klt_s<k>_f`` vector of the ``const`` plot."""
@@ -369,7 +335,7 @@ def _probe_lines(k: int, body: dict[str, Any], x_vec: str) -> list[str]:
     expr = predicate_expr(body["predicate"]["expr"])
     return [
         "setplot const",
-        f"alter {body['source']} = $&{x_vec}",
+        *sim_search_param.probe_target_lines(body, x_vec, reset_prefix),
         f"{kind} {args}".strip(),
         f"set {pre}_fv = -1",
         f"let {pre}_p = {expr}",
@@ -383,9 +349,15 @@ def _probe_lines(k: int, body: dict[str, Any], x_vec: str) -> list[str]:
     ]
 
 
-def control_lines(measurements_spec: list[dict[str, Any]]) -> list[str]:
+def control_lines(
+    measurements_spec: list[dict[str, Any]],
+    reset_prefix: list[str] | None = None,
+) -> list[str]:
     """The bisection loop of every search entry plus one ``print`` of its
-    state. Empty without a search entry (deck byte-identical to before)."""
+    state. Empty without a search entry (deck byte-identical to before).
+    ``reset_prefix`` is the corner's control prefix, which a ``param`` probe
+    re-applies after ngspice's ``reset``."""
+    reset_prefix = sim_search_param.reset_prefix(reset_prefix)
     lines: list[str] = []
     for k, spec in enumerate(search_measurements(measurements_spec)):
         body = spec["search"]
@@ -403,7 +375,8 @@ def control_lines(measurements_spec: list[dict[str, Any]]) -> list[str]:
                 f"let {pre}_x = {pre}_lo",
             ]
         )
-        lines.extend(_probe_lines(k, body, f"{pre}_x"))
+        probe = _probe_lines(k, body, f"{pre}_x", reset_prefix)
+        lines.extend(probe)
         lines.extend(
             [
                 f"let {pre}_f0 = {pre}_f",
@@ -414,7 +387,7 @@ def control_lines(measurements_spec: list[dict[str, Any]]) -> list[str]:
                 f"  let {pre}_x = {pre}_hi",
             ]
         )
-        lines.extend("  " + line for line in _probe_lines(k, body, f"{pre}_x"))
+        lines.extend("  " + line for line in probe)
         lines.extend(
             [
                 f"  let {pre}_f1 = {pre}_f",
@@ -431,7 +404,7 @@ def control_lines(measurements_spec: list[dict[str, Any]]) -> list[str]:
                 f"  let {pre}_x = ({pre}_lo + {pre}_hi) / 2",
             ]
         )
-        lines.extend("  " + line for line in _probe_lines(k, body, f"{pre}_x"))
+        lines.extend("  " + line for line in probe)
         lines.extend(
             [
                 f"  if {pre}_f lt 0",
@@ -481,7 +454,7 @@ class SearchOutcome:
     def report(self, spec: dict[str, Any]) -> dict[str, Any]:
         body = spec["search"]
         return {
-            "source": body["source"],
+            **sim_search_param.report_target(body),
             "direction": body.get("direction", "rising"),
             "iterations": self.iterations,
             "lo": self.lo,
@@ -518,7 +491,7 @@ def _outcome(spec: dict[str, Any], state: dict[str, float] | None) -> SearchOutc
         return SearchOutcome(value=(lo + hi) / 2, **common)
     if st == 1:
         at = state.get("x")
-        where = f" at {body['source']} = {at:g}" if at is not None else ""
+        where = f" at {target_name(body)} = {at:g}" if at is not None else ""
         return SearchOutcome(
             code="search_probe_failed",
             error=(
@@ -561,5 +534,10 @@ def extract_corner_searches(
     outcomes: dict[int, SearchOutcome] = {}
     for position, spec in enumerate(measurements_spec):
         if is_search(spec):
-            outcomes[position] = _outcome(spec, states.get(declared.index(spec)))
+            error = sim_search_param.rejection(spec, log_text)
+            outcomes[position] = (
+                SearchOutcome(code="search_probe_failed", error=error)
+                if error
+                else _outcome(spec, states.get(declared.index(spec)))
+            )
     return outcomes

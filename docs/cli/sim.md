@@ -5251,8 +5251,9 @@ statistics and `klt yield` consume it like any measurement:
     "unit": "A", "limits": {"min": 1e-6}}]}
 ```
 
-- **Form.** `search` requires `source` (a top-level independent `V`/`I`
-  source), `lo` < `hi`, `tol`, `max_iter`, `analysis` (`{kind, args}`, `kind` is
+- **Form.** `search` requires exactly one of `source` (a top-level
+  independent `V`/`I` source) or `param` (a top-level `.param`; see
+  "Searching a `.param`" below), `lo` < `hi`, `tol`, `max_iter`, `analysis` (`{kind, args}`, `kind` is
   `tran`, `dc` or `op`) and `predicate` (`{expr, at}`; `at` is `"end"`, the last
   point of the expression's vector). Optional: `direction` (`"rising"`, the
   default: predicate false at `lo` and true at `hi`; or `"falling"`) and
@@ -5288,6 +5289,36 @@ statistics and `klt yield` consume it like any measurement:
   | `[search_probe_failed]` | a probe's analysis failed or the predicate vector did not resolve (check node names and `options.save_mode`) |
   | `[search_not_converged]` | `max_iter` was spent before `tol` (strict; there is no unconverged mode) |
   | `[search_no_result]` | the control block ended before the search reported |
+- **Searching a `.param` (`param`).** A source declared with an explicit
+  waveform (`PULSE`/`PWL`/`SIN`) cannot be searched with `source`, because
+  `alter` has no effect on it. Quantities that live inside such a waveform -- a
+  data-edge delay (setup/hold aperture), a pulse width -- are searched by
+  declaring them as a `.param` and naming it in `param`. Each probe runs
+  `alterparam <param> = <x>` and `reset` (which re-parses the deck so every
+  expression reading the parameter is re-evaluated), then re-applies the
+  corner's own `corners.params`, `save` and `corners.supply_v` lines, so it
+  composes with corners and `monte_carlo`. It is still one ngspice process per
+  corner. The report's `search` sibling carries `param` in place of `source`.
+  Supplying both `source` and `param`, or neither, a `param` that is also a
+  `corners.params` axis, and a malformed name are refused up front (exit 1);
+  a name no `.param` declares is a `[search_probe_failed]` error with no value.
+  A request carrying `param` needs a runner of 0.9.2 or later (a mandatory
+  feature: an older runner is refused, never silently omitted).
+
+  ```json
+  {"netlist": "capture.spice",
+   "analysis": {"kind": "tran", "args": "10p 5n"},
+   "measurements": [
+     {"name": "setup_aperture_s",
+      "search": {
+        "param": "td", "lo": 0.0, "hi": 2e-9, "tol": 1e-11, "max_iter": 20,
+        "direction": "falling",
+        "analysis": {"kind": "tran", "args": "10p 5n"},
+        "predicate": {"expr": "v(q) > 0.9*vdd", "at": "end"}},
+      "unit": "s"}]}
+  ```
+
+  with `.param td=1n` and `Vd d 0 PULSE(0 1 {td} 1p 1p 1 2)` in the netlist.
 - **Not supported.** `analysis_steps[]` (refused by name; search inside a step is
   a follow-up) and `engine: "xyce"`. Multi-dimensional or non-monotone search
   and read/write-margin wrapper templates are out of scope.

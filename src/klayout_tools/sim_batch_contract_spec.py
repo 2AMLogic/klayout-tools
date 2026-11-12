@@ -176,6 +176,9 @@ def _runner_gate_release(version: str) -> str | None:
 #: (``measurements[].snm``, #3895), and ``search`` (``measurements[].search``,
 #: #4121). ``eye`` (``measurements[].eye``, #4292) landed after ``v0.8.0``, so
 #: its first release segment is ``0.8.1``, as is ``stress`` (#4592/#4858).
+#: ``search_param`` (``measurements[].search.param``, #5391) landed after
+#: ``v0.9.1``, so its first release segment is ``0.9.2``; an older runner would
+#: reject the key or silently search nothing, hence mandatory.
 def _declared(finder: Callable[[list[Any]], Any]) -> Callable[[dict[str, Any]], bool]:
     """Detector: the request declares at least one measurement ``finder`` finds."""
     return lambda request: bool(finder(request.get("measurements") or []))
@@ -191,6 +194,15 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
     "settled": ((0, 8, 1), _declared(sim_settled.settled_measurements)),
     "stress": ((0, 8, 1), _declared(sim_stress.stress_measurements)),
     "search": ((0, 7, 1), _declared(sim_search.search_measurements)),
+    "search_param": (
+        (0, 9, 2),
+        lambda request: any(
+            isinstance(spec, dict)
+            and isinstance(spec.get("search"), dict)
+            and spec["search"].get("param") is not None
+            for spec in request.get("measurements") or []
+        ),
+    ),
     "stimulus": (
         (0, 7, 1),
         lambda request: request.get("stimulus") is not None,
@@ -235,6 +247,7 @@ _MANDATORY_RUNNER_FEATURES = frozenset(
         "transfer",
         "snm",
         "search",
+        "search_param",
         "eye",
         "step_resolution",
         "settled",

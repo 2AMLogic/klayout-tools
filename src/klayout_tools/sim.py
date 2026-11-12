@@ -1655,8 +1655,7 @@ def _validate_search_targets(
     netlist_path: str,
     corner_points: list[Any],
 ) -> None:
-    """Issue #4121: pre-dispatch check of every ``search.source`` against the
-    netlist (see :func:`klayout_tools.sim_search.validate_search_targets`)."""
+    """Issues #4121/#5391: pre-dispatch check of every search target."""
     if not sim_search.search_measurements(measurements_spec):
         return
     try:
@@ -1668,6 +1667,7 @@ def _validate_search_targets(
         measurements_spec,
         waveforms,
         {key.strip().lower() for point in corner_points for key in point.supply_v},
+        {name for point in corner_points for name in point.params},
     )
 
 
@@ -11342,7 +11342,7 @@ def _corner_deck_control_lines(
         measurements_spec, corner_dir
     )
     settled_lines = sim_settled.control_lines(measurements_spec, corner_dir)
-    search_lines = sim_search.control_lines(measurements_spec)
+    search_lines = sim_search.control_lines(measurements_spec, prefix)
     complex_vector_lines = sim_complex_vectors.control_lines(
         complex_vectors, corner_dir
     )

@@ -117,7 +117,7 @@ No `schema_version` bump. See [`docs/cli/sim.md`](cli/sim.md)'s
 `measurements[].search` (issue #4121) is a scalar form like `snm`: `value` stays
 a number (the midpoint of the converged bisection bracket) and is graded by
 `limits`, `monte_carlo` statistics and `klt yield` unchanged. The response
-entry gains one optional `search` object (`source`, `direction`, `iterations`,
+entry gains one optional `search` object (`source` or `param`, `direction`, `iterations`,
 `lo`, `hi`, `converged`), present on a converged entry and, with
 `converged: false`, on an errored one that ran probes; absent otherwise. A
 failure is `status: "error"` with `value: null` and a `code: "measurement"`
