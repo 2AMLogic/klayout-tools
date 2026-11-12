@@ -2337,9 +2337,7 @@ EXTRACTION_DECK = ExtractionDeck(
     active=(65, 20),  # diff.drawing
     poly=(66, 20),  # poly.drawing
     nwell=(64, 20),  # nwell.drawing
-    # Deep n-well (issue #5344): isolates the p-well above it only when an
-    # n-well ring closes the island, so the closure check is on.
-    substrate_isolation=_DNWELL,
+    substrate_isolation=_DNWELL,  # #5344: counts only if an n-well ring closes it
     substrate_isolation_needs_nwell_ring=True,
     # MOS device-recognition provenance (issue #868): `sky130.lvs`'s core
     # 1.8V devices --
@@ -2350,13 +2348,11 @@ EXTRACTION_DECK = ExtractionDeck(
     #     { "SD" => psd, "G" => pgate_1p8v, "tS" => psd, "tD" => psd,
     #       "tG" => poly_con, "W" => nwell })
     # -- both extracted off exactly this deck's own `active`/`poly`/`nwell`
-    # split (NMOS = active outside nwell, PMOS = active inside nwell). Real
-    # sky130 draws several other voltage/threshold flavours off the *same*
-    # split, keyed by additional implant/marker layers this curated deck
-    # models only via `mos_flavours` below (hvi #1369, lvtn #5283) -- this
-    # citation names the one flavour `nfet_class`/`pfet_class`'s generic
-    # `"nfet"`/`"pfet"` labels correspond to (the plain-active, no-marker
-    # core device), not a claim that every sky130 MOS flavour is modelled.
+    # split (NMOS = active outside nwell, PMOS = active inside nwell). Other
+    # sky130 voltage/threshold flavours share that split, keyed by extra
+    # implant/marker layers modelled only via `mos_flavours` below (hvi #1369,
+    # lvtn #5283); this names the flavour `nfet_class`/`pfet_class`'s generic
+    # labels correspond to (plain-active core device), not every flavour.
     nfet_provenance=_sky130_lvs_provenance("sky130_fd_pr__nfet_01v8"),
     pfet_provenance=_sky130_lvs_provenance("sky130_fd_pr__pfet_01v8"),
     tap=(65, 44),  # tap.drawing -- distinct from diff.drawing, see above

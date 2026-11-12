@@ -679,26 +679,18 @@ class ExtractionDeck:
     all keeps today's single shared ``substrate_net`` identity, matching
     real silicon (an un-isolated p-substrate genuinely is one continuous
     node) -- this is a per-*isolated-region* split, not a full per-instance
-    one. ``None`` (the default -- every deck as of this field's
-    introduction, until gf180mcu's own module sets it) disables this
-    scoping entirely: a deck that declares no ``substrate_isolation``
-    extracts exactly as it did before this field existed, with every NMOS
-    body/substrate-tie sharing one identity regardless of any well/deep-well
-    geometry drawn in the layout. Applies only to this deck's *default*
-    (non-``mos_flavours``) NMOS device recognition and to the ``tap``/
-    derived-tap substrate-tie slice -- a flavoured NMOS device
-    (``mos_flavours``), a ``bulk_to_substrate`` resistor's ``W`` terminal, or
-    a collector-less :class:`BipolarDevice`'s collector, whose own geometry
-    happens to sit inside an isolated region, still resolves to the single
-    global ``substrate_net`` identity: a known, documented residual gap left
-    for a follow-up rather than this issue's scope.
+    one. ``None`` (the default) disables this scoping entirely: every NMOS
+    body/substrate-tie shares one identity. Applies only to this deck's
+    *default* (non-``mos_flavours``) NMOS device recognition and the ``tap``/
+    derived-tap substrate-tie slice -- a flavoured NMOS device, a
+    ``bulk_to_substrate`` resistor's ``W`` terminal, or a collector-less
+    :class:`BipolarDevice`'s collector inside an isolated region still
+    resolves to the global ``substrate_net``: a known, documented gap.
 
-    ``substrate_isolation_needs_nwell_ring`` (issue #5344, default ``False``)
-    makes a ``substrate_isolation`` island count only when ``nwell`` closes
-    its outline (:func:`~klayout_tools.erc_islands.is_ring_closed`), as a
-    deep n-well only isolates the p-well above it when an n-well ring joins
-    it (sky130). An unclosed island stays on the shared ``substrate_net``.
-    ``False`` keeps every island (gf180mcu).
+    ``substrate_isolation_needs_nwell_ring`` (#5344, default ``False``): an
+    island counts only when ``nwell`` closes its outline
+    (:func:`~klayout_tools.erc_islands.is_ring_closed`), as sky130's deep
+    n-well isolates only with a ring; ``False`` keeps every island (gf180mcu).
 
     ``bipolars`` is an optional tuple of :class:`BipolarDevice` entries (empty
     by default) declaring this deck's drawn vertical-BJT device-recognition

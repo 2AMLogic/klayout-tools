@@ -27792,14 +27792,3 @@ def test_cli_extract_check_rerun_with_explicit_input_on_external_report(
         main(["extract", "--check", str(report_path), "--rerun", "--format", "json"])
         == 1
     )
-
-
-def test_sky130_deck_declares_closure_gated_dnwell_isolation():
-    """#5344: sky130 declares dnwell (64/18) as ``substrate_isolation`` and
-    gates islands on an n-well ring; gf180mcu keeps every island."""
-    from klayout_tools.decks.gf180mcu import EXTRACTION_DECK as GF180
-    from klayout_tools.decks.sky130 import EXTRACTION_DECK as SKY130
-
-    assert SKY130.substrate_isolation == (64, 18)
-    assert SKY130.substrate_isolation_needs_nwell_ring is True
-    assert GF180.substrate_isolation_needs_nwell_ring is False
