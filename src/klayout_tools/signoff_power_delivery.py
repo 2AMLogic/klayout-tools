@@ -35,6 +35,12 @@ from pathlib import Path
 from typing import Any, cast
 
 from ._provenance import content_hash
+from .signoff_power_delivery_substrate import (
+    REASON_SUBSTRATE_ISOLATION_UNDECIDABLE,
+    add_substrate_continuity,
+    erc_ties_checked_by_assertion,
+    substrate_undecidable_gate,
+)
 from .signoff_runset import runset_disclosure, runset_refusal
 
 #: Issue #2025, T1 item 11 ("Power delivery (structural)") only. Six
@@ -909,36 +915,6 @@ def _erc_disclosed_undeclared_tie_classes(
     return classes
 
 
-def _erc_ties_checked_by_assertion(envelope: dict[str, Any]) -> list[str]:
-    """The cited `klt erc` run's ``erc_coverage.checked_by_assertion``
-    (issue #2234): the ``erc.missing_tie`` work identities whose tap region
-    came from a caller **assertion** (``ties[].tap_boxes``) rather than
-    PDK-marker narrowing -- ``[]`` for every run that used none, and for
-    every report produced before the field existed.
-
-    Carried into a ``"met"`` item 11 citation's ``power_delivery`` block
-    (:func:`_grade_power_delivery`) for the same reason `klt erc` grades it
-    as its own classification rather than folding it into ``checked``: an
-    asserted tie is real, evaluated work -- the geometry was intersected and
-    the connectivity walked, and a degenerate or unmatched assertion is
-    rejected exactly as any other narrowing form is (``docs/cli/erc.md`` →
-    "A tie with no distinguishing marker layer at all") -- but *which
-    geometry counts as the tap* rested on the caller's word rather than on a
-    drawn marker. That is a provenance difference a reader of the verdict of
-    record should not have to re-open the cited ERC envelope to discover.
-    It does not change the verdict: item 11 is ``"met"`` on an asserted tie
-    exactly as on a marker-derived one.
-    """
-    block = envelope.get("erc_coverage")
-    if not isinstance(block, dict):
-        return []
-    return [
-        identity
-        for identity in block.get("checked_by_assertion") or []
-        if isinstance(identity, str)
-    ]
-
-
 def _erc_ties_checked_by_well_assertion(envelope: dict[str, Any]) -> list[str]:
     """The cited `klt erc` run's ``erc_coverage.checked_by_well_assertion``
     (issues #2255 and #2540): the ``erc.missing_tie`` work identities whose
@@ -954,7 +930,7 @@ def _erc_ties_checked_by_well_assertion(envelope: dict[str, Any]) -> list[str]:
       because no drawn layer separates the tub's two bias classes.
 
     Carried into a ``"met"`` item 11 citation beside
-    :func:`_erc_ties_checked_by_assertion`'s tap-side list, and deliberately
+    :func:`erc_ties_checked_by_assertion`'s tap-side list, and deliberately
     **not** merged into it, because the two state different things about the
     same verdict. A ``tap_boxes`` assertion says which of the drawn tap
     geometry counts as the tap; the well is still drawn, and still measured.
@@ -1083,6 +1059,10 @@ def _resolve_erc_supply_spec(
 
     if _erc_supply_findings(erc["envelope"], supply_spec["supply_nets"]):
         return None, _REASON_SUPPLY_NOT_CONTINUOUS, {}
+
+    undecidable = substrate_undecidable_gate(erc["envelope"])  # issue #5346
+    if undecidable is not None:
+        return None, REASON_SUBSTRATE_ISOLATION_UNDECIDABLE, undecidable
 
     return supply_spec, None, {}
 
@@ -1892,8 +1872,8 @@ def _grade_power_delivery(
         # Issue #2234: which of the cited run's `erc.missing_tie` checks
         # rested on a caller assertion (`ties[].tap_boxes`) rather than on
         # PDK-marker narrowing -- `[]` for a purely marker-derived (or
-        # pre-#2234) run. See `_erc_ties_checked_by_assertion`.
-        "ties_checked_by_assertion": _erc_ties_checked_by_assertion(erc["envelope"]),
+        # pre-#2234) run. See `erc_ties_checked_by_assertion`.
+        "ties_checked_by_assertion": erc_ties_checked_by_assertion(erc["envelope"]),
         # Issue #2255: which of them rested on a caller-asserted *well*
         # region (`ties[].well_layer: null` + `ties[].well_boxes`) rather
         # than on a drawn well/tub layer -- the native-substrate case, `[]`
@@ -1913,6 +1893,7 @@ def _grade_power_delivery(
             erc["envelope"], supply_spec["supply_nets"]
         ),
     }
+    add_substrate_continuity(citation["power_delivery"], erc["envelope"])  # #5346
     # Issue #2623: a *partial* tie declaration (one or more `ties[]` entries
     # declared and checked -- this is the `tie_count > 0` path, already
     # `"met"` on those merits -- plus one or more further classes disclosed
