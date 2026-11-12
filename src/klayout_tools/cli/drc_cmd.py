@@ -150,9 +150,7 @@ def _write_output(report: dict, args: argparse.Namespace) -> int | None:
         write_json_file(report, args.output)
     except OSError as exc:
         return emit_error(
-            "drc",
-            f"could not write report to '{args.output}': {exc}",
-            args.format,
+            "drc", f"could not write report to '{args.output}': {exc}", args.format
         )
     return None
 

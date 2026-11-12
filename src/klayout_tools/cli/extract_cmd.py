@@ -810,10 +810,7 @@ def _run_batch(args: argparse.Namespace) -> dict[str, Any]:
             request, expected=REQUEST_SCHEMA, verb="extract", error_cls=ExtractError
         )
         reqdoc.check_known_fields(
-            request,
-            tuple(_REQUEST_FIELD_DESTS),
-            verb="extract",
-            error_cls=ExtractError,
+            request, tuple(_REQUEST_FIELD_DESTS), verb="extract", error_cls=ExtractError
         )
         reqdoc.reject_argv_flags(args, verb="extract", error_cls=ExtractError)
         output = reqdoc.get_path(

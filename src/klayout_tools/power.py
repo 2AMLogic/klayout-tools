@@ -419,10 +419,7 @@ def _validate_via_cut_geometry(
             f"spec '{spec_path}': vias[{i}] must give 'cut_size_um' and "
             "'cut_space_um' together or neither"
         )
-    cut_geometry: dict[str, float | None] = {
-        "cut_size_um": None,
-        "cut_space_um": None,
-    }
+    cut_geometry: dict[str, float | None] = {"cut_size_um": None, "cut_space_um": None}
     for key in cut_geometry:
         if key not in entry:
             continue

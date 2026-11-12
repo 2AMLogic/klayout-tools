@@ -1687,10 +1687,7 @@ def run_drc_klayout_engine(
         # so an interrupted write still carries it.
         "coverage": coverage,
         **(
-            {
-                "violations_truncated": True,
-                "violations_serialized": len(violations),
-            }
+            {"violations_truncated": True, "violations_serialized": len(violations)}
             if truncated
             else {}
         ),

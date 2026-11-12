@@ -15,11 +15,7 @@ import math
 from typing import Any
 
 from ._jsonnum import is_int
-from ._paths import (
-    _parse_layer_datatype,
-    _reject_unknown_keys,
-    _validate_via_entries,
-)
+from ._paths import _parse_layer_datatype, _reject_unknown_keys, _validate_via_entries
 from .erc_spec_boxes import (  # noqa: F401 -- _parse_um_boxes is re-exported
     _parse_isolation_boxes,
     _parse_tap_boxes,

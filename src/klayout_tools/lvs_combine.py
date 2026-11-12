@@ -419,8 +419,7 @@ def _combine_circuit_devices_safely(
 
 
 def _validate_combine_device_classes(
-    class_names: list[str],
-    netlists: Mapping[str, kdb.Netlist],
+    class_names: list[str], netlists: Mapping[str, kdb.Netlist]
 ) -> None:
     """Reject a list-valued ``options.combine_devices`` naming a device class
     that exists on **neither** side (issue #1370).

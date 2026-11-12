@@ -540,10 +540,7 @@ def _node_wire(node_key: tuple[int, int], signal: str) -> str:
 
 
 def emit_adder_verilog(
-    graph: PrefixGraph,
-    module_name: str,
-    *,
-    architecture: str | None = None,
+    graph: PrefixGraph, module_name: str, *, architecture: str | None = None
 ) -> str:
     """Emit the structural prefix adder for ``graph`` as Verilog-2001 text.
 

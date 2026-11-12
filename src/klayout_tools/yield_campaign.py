@@ -218,7 +218,7 @@ def _parse_negative_control(spec: dict[str, Any]) -> dict[str, Any] | None:
             "object of monte_carlo overrides (e.g. {'mismatch_scale': 2.5})"
         )
     seed = overrides.get("seed")
-    if seed is not None and (not is_int(seed)):
+    if seed is not None and not is_int(seed):
         raise CampaignError(
             "campaign spec 'negative_control.monte_carlo.seed' must be an integer"
         )

@@ -198,8 +198,7 @@ class BrokerClient:
         parts = _split_http_url(base_url, "the artifact broker URL")
         if parts.query or parts.fragment:
             raise ArtifactError(
-                "the artifact broker URL must not carry a query or fragment",
-                "bad_url",
+                "the artifact broker URL must not carry a query or fragment", "bad_url"
             )
         self._parts = parts
         self._timeout = timeout

@@ -7957,8 +7957,7 @@ def _extract_bipolar_device(
     size_groups: dict[tuple, list[kdb.Region]],
     size_matched: dict[tuple, list[kdb.Region]],
 ) -> tuple[
-    tuple[kdb.Region, kdb.Region, kdb.Region, kdb.Region, kdb.Region | None],
-    int,
+    tuple[kdb.Region, kdb.Region, kdb.Region, kdb.Region, kdb.Region | None], int
 ]:
     """Resolve, register and extract one ``deck.bipolars`` entry; returns its
     ``(base, emitter, collector, substrate, substrate_layer)`` regions (for

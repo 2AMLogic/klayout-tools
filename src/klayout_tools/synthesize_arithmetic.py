@@ -67,9 +67,7 @@ from typing import Any
 from . import env_provenance
 from ._jsonnum import is_int
 from ._verilog_params import chparam_lines, read_verilog_line
-from .arith_gen import (
-    ARCHITECTURES as ADDER_ARCHITECTURES,
-)
+from .arith_gen import ARCHITECTURES as ADDER_ARCHITECTURES
 from .arith_gen import (
     ArithGenError,
     emit_techmap_verilog,

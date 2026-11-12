@@ -131,10 +131,7 @@ def _action_schema(action: argparse.Action) -> dict[str, Any]:
     if isinstance(action, argparse._CountAction):
         return {"type": "integer", "minimum": 0}
     scalar = _scalar_schema(action)
-    multi = isinstance(action, argparse._AppendAction) or action.nargs in (
-        "*",
-        "+",
-    )
+    multi = isinstance(action, argparse._AppendAction) or action.nargs in ("*", "+")
     if not multi and isinstance(action.nargs, int) and action.nargs > 1:
         multi = True
     if multi:

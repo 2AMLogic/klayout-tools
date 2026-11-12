@@ -567,11 +567,7 @@ def _require_name(entry: Any, field: str) -> str:
 
 
 def _layer_pair(value: Any) -> tuple[int, int] | None:
-    if (
-        isinstance(value, (list, tuple))
-        and len(value) == 2
-        and all(is_int(v) for v in value)
-    ):
+    if isinstance(value, (list, tuple)) and len(value) == 2 and all(map(is_int, value)):
         return (value[0], value[1])
     return None
 
