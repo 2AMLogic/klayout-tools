@@ -1197,17 +1197,16 @@ def _stage_script_lines(
             diode_cell, max_antenna_repair_iterations
         )
         # `-critical_nets_percentage` (issue #939, native-routing survey
-        # section 4.1): a real, documented `global_route` flag -- see this
-        # module's own docstring, "Timing-driven global routing + bounded
-        # antenna-repair iteration" -- that weights the given percentage of
-        # worst-slack nets as timing-critical during congestion-removal
-        # iterations. `0` (unset, `request.route_critical_nets_percentage`
-        # omitted) reproduces `global_route`'s own default -- the explicit
-        # A/B disable path.
-        # `-verbose` (issue #2994) makes the global router print its
-        # per-layer "Final congestion report" table, which the response's
-        # `congestion` block scrapes; routing results are unchanged.
-        global_route_call = "global_route -verbose"
+        # section 4.1; see this module's docstring, "Timing-driven global
+        # routing + bounded antenna-repair iteration") weights that
+        # percentage of worst-slack nets as timing-critical during
+        # congestion-removal. `0` (unset) is `global_route`'s own default.
+        # `-verbose` (#2994) prints the per-layer congestion table and
+        # `-congestion_report_file` (#5313) the per-GCell violation list the
+        # response's `congestion` block scrapes; routing results unchanged.
+        global_route_call = "global_route -verbose -congestion_report_file " + (
+            os.path.join(output_dir, f"{hdl_toplevel}_route_congestion.rpt")
+        )
         if route_critical_nets_percentage:
             global_route_call += (
                 f" -critical_nets_percentage {route_critical_nets_percentage}"

@@ -2387,7 +2387,7 @@ _OUTPUT_DRC_RE = re.compile(r"^detailed_route -output_drc (\S+) -output_maze")
 
 def _script_lines(script_path: str) -> list[str]:
     with open(script_path, encoding="utf-8") as handle:
-        return [line.rstrip("\n") for line in handle]
+        return [re.sub(r" -congestion_report_file \S+|\n", "", ln) for ln in handle]
 
 
 def _script_write_db_path(script_path: str) -> str:
