@@ -648,10 +648,6 @@ def _side_prep_lines(
     normalization -- ``opt_dff`` can merge/retime/remove registers, which
     would undercut the register-name correspondence ``equiv_make``'s
     name-based matching (and so this whole engine) depends on.
-
-    ``extra_opt`` also emits ``memory_map`` right after ``proc`` (issue
-    #5369) so a side with an inferred ``$mem`` (a runtime-indexed unpacked
-    array) reaches ``equiv_make`` instead of failing on its memory check.
     """
     lines: list[str] = []
     if side.get("liberty"):
@@ -660,25 +656,18 @@ def _side_prep_lines(
         # opaque blackbox -- see `_resolve_side`'s `liberty` docs.
         # `-ignore_miss_func` skips any cell lacking a `function` spec
         # (e.g. a pure sequential cell) rather than erroring the whole
-        # liberty read; such a cell surfaces instead as a missing-
-        # submodule `hierarchy` error if the netlist actually instantiates
-        # it.
+        # liberty read; such a cell surfaces instead as a missing-submodule
+        # `hierarchy` error if the netlist actually instantiates it.
         lines.append(f"read_liberty -ignore_miss_func {side['liberty']}")
     for path in side["sources"]:
         lines.append(
             read_verilog_line(path, side.get("defines") or {}, side.get("parameters"))
         )
-    # Issue #3466: optional top-level parameter overrides for this side.
+    # Issue #3466: optional top-level parameter overrides.
     lines += chparam_lines(side.get("parameters") or {}, side["top"])
-    lines.append("proc")
-    if extra_opt:
-        # Issue #5369: ``equiv_make`` refuses a module that still holds a
-        # ``$mem`` ("Gold module contains memories or processes"), so lower
-        # inferred memories to registers right after ``proc`` -- the same
-        # lowering synthesis does. Sequential engine only; the combinational
-        # engine's ``select -assert-none`` guard keeps rejecting memories.
-        lines.append("memory_map")
     lines += [
+        "proc",
+        *(["memory_map"] if extra_opt else []),  # #5369: equiv_make rejects $mem
         "opt_clean",
         f"hierarchy -check -top {side['top']}",
         "flatten",
