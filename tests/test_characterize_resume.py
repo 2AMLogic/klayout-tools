@@ -108,6 +108,32 @@ def test_resumable_job_id_without_receipt(tmp_path):
     assert sim_batch_receipt.resumable_job_id(str(tmp_path), REQUEST, 1, True) is None
 
 
+def test_resumable_job_id_not_resuming(tmp_path):
+    _receipt(tmp_path)
+    assert sim_batch_receipt.resumable_job_id(str(tmp_path), REQUEST, 1, False) is None
+
+
+@pytest.mark.parametrize("raw", ["{not json", "[1, 2]", '"job-7"'])
+def test_resumable_job_id_refuses_unreadable_receipt(tmp_path, raw):
+    (tmp_path / sim_batch.BATCH_RECEIPT_FILENAME).write_text(raw)
+    assert sim_batch_receipt.resumable_job_id(str(tmp_path), REQUEST, 1, True) is None
+
+
+@pytest.mark.parametrize("job_id", [None, 7, ""])
+def test_resumable_job_id_refuses_bad_job_id(tmp_path, job_id):
+    _receipt(tmp_path, job_id=job_id)
+    assert sim_batch_receipt.resumable_job_id(str(tmp_path), REQUEST, 1, True) is None
+
+
+def test_resumable_job_id_refuses_missing_job_id(tmp_path):
+    receipt = {
+        "request_sha256": sim_batch_receipt.receipt_request_sha256(REQUEST),
+        "unit_count": 1,
+    }
+    (tmp_path / sim_batch.BATCH_RECEIPT_FILENAME).write_text(json.dumps(receipt))
+    assert sim_batch_receipt.resumable_job_id(str(tmp_path), REQUEST, 1, True) is None
+
+
 def test_cli_accepts_resume():
     args = create_parser().parse_args(["characterize", "req.json", "--resume"])
     assert args.resume is True
