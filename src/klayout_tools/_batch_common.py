@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 import os
+import sys
 import tarfile
 import uuid
 from collections.abc import Sequence
@@ -157,6 +158,52 @@ def resumable(
         "resumable": True,
         "shard_map": str(manifest.path),
     }
+
+
+def with_unrun_signal(
+    environment: dict[str, Any] | None, unrun: int, state_path: str | None
+) -> tuple[dict[str, Any] | None, bool]:
+    """``environment`` plus the additive "incomplete, resumable" signal for
+    corners that never ran (``lost_shard``, ``batch_job_interrupted``, ...;
+    issue #5364): ``unrun_units`` (count), ``resumable: true`` and -- unless
+    :func:`resumable` already set it -- ``shard_map`` (``state_path``, the
+    retained shard map or checkpoint). Returns ``(environment, hint_needed)``;
+    ``hint_needed`` is False when the unlaunched-shard hint already covers
+    the rerun. Unchanged for ``unrun == 0`` or no retained state."""
+    if not unrun or not state_path or environment is None:
+        return environment, False
+    out = {**environment, "unrun_units": unrun, "resumable": True}
+    out.setdefault("shard_map", state_path)
+    return out, "unlaunched_shards" not in environment
+
+
+def apply_unrun_signal(
+    environment: dict[str, Any] | None,
+    unrun: int,
+    artifacts_dir: str,
+    checkpoint_path: str | None,
+) -> dict[str, Any] | None:
+    """Issue #5364 wiring for ``run_sim``: when ``unrun`` corners never ran
+    (only a ``batch`` run synthesizes them), pick the retained resume state
+    (the shard map in ``artifacts_dir``, else ``checkpoint_path``; ``None``
+    when no checkpoint was retained), add the :func:`with_unrun_signal`
+    fields and print the ``--resume`` hint to stderr once. Returns
+    ``environment`` unchanged when nothing applies."""
+    if not unrun:
+        return environment
+    from .sim_batch import BATCH_SHARDS_FILENAME  # circular at import time
+
+    manifest = os.path.join(artifacts_dir, BATCH_SHARDS_FILENAME)
+    state = manifest if os.path.exists(manifest) else checkpoint_path
+    environment, hint = with_unrun_signal(environment, unrun, state)
+    if hint:
+        print(
+            f"klt sim: {unrun} unit(s) never ran (lost or interrupted batch "
+            f"shard); rerun with --resume and the same outdir to finish them "
+            f"(state: {state})",
+            file=sys.stderr,
+        )
+    return environment
 
 
 def resolve_backend_value(

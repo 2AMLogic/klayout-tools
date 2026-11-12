@@ -834,6 +834,19 @@ the exit code stays 4; the fields only let an unattended caller tell
 callers should set `batch.capacity_wait_s` to wait out refusals before falling
 back to `--resume`.
 
+**Lost and interrupted shards are resumable too.** When a batch run ends with
+any corner that never ran (`lost_shard`, `batch_job_failed`,
+`batch_job_timeout`, `batch_poll_timeout`, `batch_job_interrupted`) and klt kept
+state to resume from (the shard map, else the `--resume` checkpoint),
+`environment.remote` additionally carries `unrun_units` (count) and
+`resumable: true`, with `shard_map` naming the retained file, and stderr names
+the `--resume` rerun once. Absent when every unit ran. `unrun_units` counts
+every corner that never ran; `unlaunched_shards` (above) counts only shards that
+were never launched, so with both present `unrun_units` is the larger. A lost shard is
+identified by `corners[].diagnostics[].code`, not by `status` (it stays
+`error`). The client does not re-launch these itself; fleet `reconcile` owns
+that ([#5364](https://github.com/2AMLogic/klayout-tools/issues/5364)).
+
 **Retry contract, up front.** A launch refused for lack of Spot capacity is
 *not* retried unless you opt in: `batch.capacity_wait_s` defaults to `0` (one
 attempt), and the refusal then fails the request with

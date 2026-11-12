@@ -146,6 +146,7 @@ from . import sim_bin_range as sim_bin_range
 from . import sim_op_check as sim_op_check
 from . import sim_peak_rss as sim_peak_rss
 from . import sim_staging as sim_staging
+from ._batch_common import apply_unrun_signal
 from ._jsonnum import is_number
 from ._paths import (
     _load_request_json,
@@ -2923,9 +2924,8 @@ def _record_batch_checkpoint(
     ``report.json``, so there is nothing to record incrementally; record the
     returned set after dispatch. A corner that never ran (``lost_shard``,
     ``batch_job_failed``, ``batch_job_timeout``, ``batch_poll_timeout``,
-    ``batch_job_interrupted``) is
-    left out and stays outstanding for the next ``--resume``; a corner that
-    ran and genuinely errored is recorded exactly as the local backends do.
+    ``batch_job_interrupted``) is left out and stays outstanding for the next
+    ``--resume``; one that ran and genuinely errored is recorded as locally.
     A no-op without a checkpoint or off ``batch``.
     """
     if checkpoint is None or backend != "batch":
@@ -4267,13 +4267,10 @@ def _run_sim_corners(
             for diag in corner["diagnostics"]
         )
     )
-    # Issue #3367: a corner that never ran on `batch` (`lost_shard`,
-    # `batch_job_failed`, `batch_job_timeout`, `batch_poll_timeout`,
-    # `batch_job_interrupted`) is
-    # outstanding too, so a checkpoint holding the rest must outlive this
-    # run. Kept out of `corners_skipped`
-    # (the reported `environment.budget.corners_skipped`) to leave that
-    # field's meaning unchanged.
+    # Issue #3367: a corner that never ran on `batch` (`_UNRUN_BATCH_CODES`)
+    # is outstanding too, so a checkpoint holding the rest must outlive this
+    # run. Kept out of `corners_skipped` (the reported
+    # `environment.budget.corners_skipped`) to leave its meaning unchanged.
     corners_lost = sum(1 for corner in corners if _is_unrun_batch_corner(corner))
 
     # Issue #2491: a top-level rollup of every `corners[].diagnostics[]`
@@ -4296,10 +4293,9 @@ def _run_sim_corners(
         and not sharded_attach
     ):
         # Issue #3300: nothing left to re-attach to. A sharded `--attach`
-        # keeps its map (issue #4721): a multi-leg caller (`klt pex
-        # --attach`) can be interrupted after this leg collected but before
-        # the others did, and the next attach still needs this leg's map.
-        # That caller removes the maps once its whole run succeeded.
+        # keeps its map (issue #4721): a multi-leg caller (`klt pex --attach`)
+        # interrupted after this leg collected still needs it on the next
+        # attach, and removes the maps once its whole run succeeded.
         _remove_shard_manifest(artifacts_dir)
 
     if checkpoint is not None:
@@ -4469,9 +4465,13 @@ def _run_sim_corners(
         )
     )
     if remote_environment is not None:
-        # Additive/optional: only present for the `remote` backend -- see
-        # `_run_remote` and docs/cli/sim.md's "Remote backend" section.
-        environment["remote"] = remote_environment
+        # Additive/optional (`remote`/`batch` only): docs/cli/sim.md.
+        environment["remote"] = apply_unrun_signal(
+            remote_environment,
+            corners_lost,
+            artifacts_dir,
+            checkpoint_path if checkpoint_retained else None,
+        )
     apply_engine_host(
         environment, backend=backend, client_ngspice_binary=ngspice_binary
     )
