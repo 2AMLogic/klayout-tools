@@ -111,6 +111,7 @@ from . import (
     sim_staging,
 )
 from .pdk_families import family_subset, pdk_variant_family
+from .pdk_store import store_pdk_stamp
 from .remote_launcher import (
     RemoteLaunchError,
     _signal_handlers_install,
@@ -1981,9 +1982,8 @@ def _bounded_str(value: Any, limit: int = WORKER_CAPTURE_STR_MAX) -> str | None:
 
 
 def _client_pdk_stamp(request: dict[str, Any] | None) -> dict[str, Any] | None:
-    """The submitter's own local view of the requested PDK variant's
-    ``SOURCES`` stamp, in the same ``sources-sha256`` scheme the worker
-    capture uses. ``None`` when nothing comparable can be read locally."""
+    """The submitter's local view of the requested PDK variant's stamp (``SOURCES``,
+    else bundle ``.pdk-store.json``); ``None`` when nothing comparable is readable."""
     models = (request or {}).get("models") or {}
     variant = models.get("pdk")
     root = models.get("pdk_root") or os.environ.get("PDK_ROOT")
@@ -1993,7 +1993,7 @@ def _client_pdk_stamp(request: dict[str, Any] | None) -> dict[str, Any] | None:
         with open(os.path.join(root, variant, "SOURCES"), "rb") as handle:
             text = handle.read(16385)[:16384].decode("utf-8", "replace")
     except OSError:
-        return None
+        return store_pdk_stamp(variant, os.path.join(root, variant))  # #5318
     normalized = "\n".join(
         line.rstrip() for line in text.replace("\r\n", "\n").strip().split("\n")
     )
@@ -3396,18 +3396,7 @@ def _run_batch_job(
         artifacts_dir,
         BATCH_RECEIPT_FILENAME if receipt_name is None else receipt_name,
     )
-    receipt: dict[str, Any] = {
-        "job_id": job_id,
-        # getattr: the receipt is best-effort and must never break a run.
-        # No bucket: its name carries the cloud account id and receipts get
-        # committed by canary repos (issue #4079).
-        "jobs_prefix": getattr(config, "jobs_prefix", None),
-        "region": getattr(config, "region", None),
-        "profile": getattr(config, "profile", None),
-        "launched_at": datetime.now(timezone.utc).isoformat(),
-        "request_sha256": sim_batch_receipt.receipt_request_sha256(request),
-        "state": None,
-    }
+    receipt = sim_batch_receipt.new_receipt(config, job_id, request, corner_points)
     _write_batch_receipt(receipt_path, receipt)
     return _poll_and_collect(
         config=config,
@@ -3714,10 +3703,14 @@ def _run_batch(
                 **_feature_diagnostic_field(config),
             }
         return corners, engine_version, environment
+    resume_job_id = sim_batch_receipt.resumable_job_id(
+        artifacts_dir, request, len(corner_points), checkpoint is not None
+    )
     try:
         corners, engine_version, environment = _run_batch_job(
             config=config,
-            job_id=new_job_id(),
+            job_id=resume_job_id or new_job_id(),
+            attach=resume_job_id is not None,
             corner_points=corner_points,
             netlist_path=netlist_path,
             timeout_s=timeout_s,

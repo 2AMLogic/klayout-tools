@@ -34,12 +34,17 @@
         "klayout_tools.characterize",
         "klayout_tools.characterize_arcs",
         "klayout_tools.characterize_bisect",
+        "klayout_tools.characterize_capacity",
         "klayout_tools.characterize_cards",
         "klayout_tools.characterize_constraints",
         "klayout_tools.characterize_instances",
+        "klayout_tools.characterize_leg",
         "klayout_tools.characterize_osdi",
+        "klayout_tools.characterize_pool",
+        "klayout_tools.characterize_probe",
         "klayout_tools.characterize_sequential",
         "klayout_tools.cli.characterize_cmd",
+        "klayout_tools.cli.parser_characterize",
         "klayout_tools.liberty_compare",
         "klayout_tools.liberty_leakage",
         "klayout_tools.liberty_render_pin",
@@ -187,6 +192,8 @@
         "klayout_tools.erc_antenna_gf180mcu",
         "klayout_tools.erc_disclosure",
         "klayout_tools.erc_spec",
+        "klayout_tools.erc_spec_boxes",
+        "klayout_tools.erc_substrate",
         "klayout_tools.erc_ties",
         "klayout_tools.erc_well_regions"
       ]
@@ -418,6 +425,7 @@
         "klayout_tools.lvs_combine",
         "klayout_tools.lvs_finfet",
         "klayout_tools.lvs_finfet_flatten",
+        "klayout_tools.lvs_flatten",
         "klayout_tools.lvs_gate_level",
         "klayout_tools.lvs_gate_level_convert",
         "klayout_tools.lvs_known_limits",
@@ -509,7 +517,8 @@
         "klayout_tools.pdk_models",
         "klayout_tools.pdk_native_drc",
         "klayout_tools.pdk_pcell",
-        "klayout_tools.pdk_stackup"
+        "klayout_tools.pdk_stackup",
+        "klayout_tools.pdk_store"
       ]
     },
     "pex": {
@@ -536,6 +545,7 @@
         "klayout_tools.place_and_route_groups",
         "klayout_tools.place_and_route_hints",
         "klayout_tools.place_and_route_layers",
+        "klayout_tools.place_and_route_macro_halo",
         "klayout_tools.place_and_route_min_area",
         "klayout_tools.place_and_route_pdn_fit",
         "klayout_tools.place_and_route_pins",
@@ -544,6 +554,7 @@
         "klayout_tools.place_and_route_reports",
         "klayout_tools.place_and_route_request",
         "klayout_tools.place_and_route_resume",
+        "klayout_tools.place_and_route_route_overflow",
         "klayout_tools.place_and_route_script",
         "klayout_tools.place_and_route_sta",
         "klayout_tools.place_and_route_via_pad"
@@ -638,7 +649,9 @@
         "klayout_tools._verilog_top",
         "klayout_tools.build_identity",
         "klayout_tools.coverage",
+        "klayout_tools.coverage_work",
         "klayout_tools.design_evidence_tiers",
+        "klayout_tools.erc_islands",
         "klayout_tools.evidence_record",
         "klayout_tools.lef_header",
         "klayout_tools.macros",
@@ -705,6 +718,7 @@
         "klayout_tools.sim_batch_contract_spec",
         "klayout_tools.sim_batch_contract_worker",
         "klayout_tools.sim_batch_shards",
+        "klayout_tools.sim_batch_unstarted",
         "klayout_tools.sim_batch_features",
         "klayout_tools.sim_batch_hints",
         "klayout_tools.sim_batch_plan",
@@ -747,6 +761,7 @@
         "klayout_tools.sim_request_overrides",
         "klayout_tools.sim_search",
         "klayout_tools.sim_set",
+        "klayout_tools.sim_set_runtime",
         "klayout_tools.sim_settled",
         "klayout_tools.sim_slug",
         "klayout_tools.sim_snm",
@@ -981,6 +996,11 @@
       "consumer": "characterize",
       "exporter": "env_provenance",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "characterize",
+      "exporter": "pex",
+      "reason": "Issue #5348: `klt characterize --wait-for-capacity` reuses the shared capacity-wait validator and batch shard flags from pex_async (as `klt pex` does, #5280) instead of duplicating the rule."
     },
     {
       "consumer": "characterize",

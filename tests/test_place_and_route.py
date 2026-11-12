@@ -2387,7 +2387,7 @@ _OUTPUT_DRC_RE = re.compile(r"^detailed_route -output_drc (\S+) -output_maze")
 
 def _script_lines(script_path: str) -> list[str]:
     with open(script_path, encoding="utf-8") as handle:
-        return [line.rstrip("\n") for line in handle]
+        return [re.sub(r" -congestion_report_file \S+|\n", "", ln) for ln in handle]
 
 
 def _script_write_db_path(script_path: str) -> str:
@@ -4636,10 +4636,9 @@ def test_stubbed_full_route_with_macro_emits_read_lef_and_place_macro(
 
     report = run_place_and_route(request_path)
 
-    # `cell`/`lib`/`halo` are issue #2635's additive per-entry fields: the
-    # macro's master name (shared with `klt synthesize`/`klt sta`) plus the
-    # two newly-accepted request fields, `null` here because this request
-    # declares neither.
+    # `cell`/`lib`/`halo` (#2635) and `keepout` (#5313) are additive per-entry
+    # fields: the master name plus the newly-accepted request fields, `null`
+    # here because this request declares none of them.
     assert report["macros"] == [
         {
             "instance": "u_analog",
@@ -4650,6 +4649,7 @@ def test_stubbed_full_route_with_macro_emits_read_lef_and_place_macro(
             "cell": "analog_block",
             "lib": None,
             "halo": None,
+            "keepout": None,
         }
     ]
 

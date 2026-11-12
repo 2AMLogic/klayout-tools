@@ -360,12 +360,15 @@ draws that the spec never declared" below.
     with `islands`, `same_net_as`, `roles` or `unlabelled_allowed_boxes`
     — or naming it from another entry's `same_net_as` — is a spec error.
     Example: `{ "name": "SUB", "kind": "supply", "extractor_global": true }`.
-  - Two or more `kind: "supply"` entries (issue #4384) add one
-    `erc_coverage.inapplicable` entry `{"id": "erc.supply_short", "reason":
-    "substrate_continuity_not_modelled"}`: `erc.supply_short` sees joins only
-    through the declared `stackup`/`vias`, so rails that are one conductor
-    through a shared substrate are not observable. Cross-check with
-    `klt lvs` (`hints.short_nets`). `erc_status` is unchanged.
+  - Two or more `kind: "supply"` entries also run the substrate-continuity
+    check, or disclose it as `erc.supply_short` /
+    `substrate_isolation_undecidable` with a `missing` list — see "Substrate
+    continuity between supply nets" below. `erc_status` is unchanged by the
+    disclosure. With `--pdk`-family decks that declare `substrate_isolation`
+    (gf180mcu, and sky130 as of #5344, sg13g2/sg13cmos5l as of #5359) the
+    substrate path is evaluated; for sky130 a `dnwell` island (for the IHP
+    decks an `nBuLay` island) isolates its p-well only when an n-well ring
+    closes its outline, otherwise it stays on the shared substrate.
   - `same_net_as` (string, optional, default absent, issue #2463) — the
     `name` of another `nets[]` entry this one is *intentionally* the same
     electrical net as. Declare it when the layout deliberately ties two
@@ -540,6 +543,15 @@ draws that the spec never declared" below.
     (see "A block with no drawn well at all" below). Each box's
     `left`/`bottom`/`right`/`top` must satisfy `left < right` and
     `bottom < top`.
+  - `isolation_boxes` (optional array of `[left, bottom, right, top]`
+    micrometre boxes, default `[]`, issue #5343) — a caller **assertion**
+    that substrate tap sites inside a box belong to that box's own isolated
+    body (deep n-well / isolated p-well), for a family whose deck does not
+    declare the isolation layer. Same shape and validation as `tap_boxes` /
+    `well_boxes`; overlapping boxes merge into one body. It applies to every
+    substrate tie's taps, not just this entry's, and has no effect on a tie
+    naming a drawn `well_layer`. Graded `checked_by_assertion` and echoed in
+    `provenance.isolation_assertions`.
   - `well_requires` / `well_excludes` (optional arrays of
     `"<layer>/<datatype>"`, default `[]`, issue #2339) — the **well-side
     class selectors**, for a drawn `well_layer` that carries two
@@ -864,14 +876,56 @@ which is which. Once that triage has confirmed the islands are the
 cannot see), the entry can declare the count — `nets[].islands`, issue
 #2400 — so the name grades against it instead of an implicit 1.
 
-**Substrate continuity between supply nets is not modelled either (issue
-#4384).** Two `kind: "supply"` nets that are one conductor through a shared
-p-substrate are each reported as one clean island, with no
-`erc.supply_short`, while `klt lvs` sees a single merged net (it needs
-`hints.short_nets`). When a spec declares two or more supply nets, the report
-says so in `erc_coverage.inapplicable` (`erc.supply_short`, reason
-`substrate_continuity_not_modelled`), so "no short found" is distinguishable
-from "short not observable". Cross-check those rails with `klt lvs`.
+**Substrate continuity between supply nets (issues #4384, #5336, #5343).**
+Two `kind: "supply"` nets that are one conductor through a shared p-substrate
+(or well) are reported by `erc.supply_short` with `via: "substrate"` and a
+`body` (`kind`, `id`, `ties`), found by a derived body-merge pass over the
+`ties[]` graph: only drawn, non-degenerate tap geometry joins anything, and
+the pass only ever *adds* findings. Whether it can be trusted depends on
+isolation (deep n-well / isolated p-well), which is **decidable or
+disclosed**: the substrate check is *evaluated* when isolation is derived
+(the deck declares a `substrate_isolation` layer), asserted
+(`ties[].isolation_boxes`), or provably absent; otherwise `erc_coverage.inapplicable` carries
+`{"id": "erc.supply_short", "reason": "substrate_isolation_undecidable",
+"missing": [...]}` and no pass is claimed. The earlier
+`substrate_continuity_not_modelled` reason is retired.
+
+| PDK family (`--deck`) | Isolation layer | Evaluated when | Otherwise disclosed because |
+|---|---|---|---|
+| gf180mcu | `DNWELL` 12/0 (deck `substrate_isolation`) | always; islands derived (`vsubs_iso<n>`) | — |
+| sky130 | `dnwell` 64/18 (deck `substrate_isolation`, #5344) | always; a `dnwell` island counts only when an n-well ring closes it, otherwise it stays on shared `vsubs` | — |
+| sg13g2 / sg13cmos5l | `nbulay` (layer not yet declared in the deck) | `ties[].isolation_boxes` asserts the isolated bodies | the deck declares no isolation layer, so "none drawn" cannot be measured |
+| asap7 | none | `ties[].isolation_boxes` asserts them | the cells draw no substrate/well tie: nothing to join through |
+| no `--deck` | unknown | `ties[].isolation_boxes` asserts them | the family is unknown, so isolation cannot be measured |
+
+`ties[].isolation_boxes` bodies are reported as `isolation_box[l,b,r,t]` in
+`provenance.substrate_bodies`, the measured effect of each assertion (bodies
+produced; empty when the boxes cover no tap) is echoed in
+`provenance.isolation_assertions`, and the substrate work is also listed in
+`erc_coverage.checked_by_assertion`. A declared `nets[].same_net_as` pair
+suppresses the substrate-path `erc.supply_short` for that pair, and
+`erc.expected_short_missing` is satisfied by a short on the primary graph **or**
+through the substrate; a pair satisfied only through the substrate is listed in
+`provenance.substrate_declared_joins` with `via: "substrate"`. The
+`klt lvs` cross-check (`hints.short_nets`) still applies.
+
+**Isolation layers per deck (issue #5345).** The substrate-continuity
+post-pass and `klt extract`/`klt lvs` split a body only for a layer the
+extraction deck declares as `substrate_isolation`:
+
+| Deck | `substrate_isolation` | Notes |
+|---|---|---|
+| `gf180mcu` | `DNWELL` (12/0) | |
+| `sg13g2` | `nBuLay.drawing` (32/0) | counts only if an NWell (31/0) ring closes it (#5359); layer/datatype from the PDK's `layers_def.drc` / tech `.lyp`; taps are derived from `Activ` (`tap=None`) and the tie logic handles it |
+| `sg13cmos5l` | `nBuLay.drawing` (32/0) | same as `sg13g2` |
+| `sky130` | not declared | |
+
+**Ring closure (issues #5344, #5359).** sky130 (DNWELL) and the IHP decks
+(nBuLay) set `substrate_isolation_needs_nwell_ring`: a drawn island isolates
+its body only when an n-well ring closes its outline; an unclosed island stays
+on the shared substrate, so a real short is still reported. gf180mcu's DNWELL
+island is still treated as isolating whether or not a ring closes it. Layouts
+that draw no isolation layer extract exactly as before.
 
 **That cross-check is not automatically an independent confirmation,
 either.** At least one widely used open-foundry LVS deck's connectivity
@@ -3201,7 +3255,7 @@ named.
 `erc_coverage.inapplicable` is build-dependent by design and is deliberately
 **not** excluded from the rerun diff: it is verdict-adjacent coverage
 disclosure (a newer build may disclose more, e.g. `erc.supply_short` with
-`substrate_continuity_not_modelled`), and excluding it would let a rerun hide a
+`substrate_isolation_undecidable`), and excluding it would let a rerun hide a
 coverage regression. Grade a report with the same-or-newer build that produced
 it, or pin the producing version (`uvx --from "klayout-tools==X" klt erc
 --check … --rerun`). A cross-build exit `3` limited to

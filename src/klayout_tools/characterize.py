@@ -56,7 +56,6 @@ See ``docs/cli/characterize.md`` for the request/response contract.
 
 from __future__ import annotations
 
-import json
 import os
 import re
 from typing import Any
@@ -65,6 +64,7 @@ from . import liberty_writer, sim
 from ._paths import _load_request_json, _resolve_relative, fold_spice_continuations
 from ._provenance import INPUT_ROLE_NETLIST, build_provenance
 from .characterize_arcs import DerivedArc, FunctionError, derive_arcs
+from .characterize_capacity import capacity_shard
 from .characterize_cards import (
     _POWER_CARDS,
     measurement_cards,
@@ -87,7 +87,10 @@ from .characterize_instances import (
     _metered_rail_nodes,
     _rail_nodes,
 )
+from .characterize_leg import resolve_resume, run_sim_leg
 from .characterize_osdi import resolve_osdi_preload
+from .characterize_pool import run_cells
+from .characterize_probe import probe_netlist_cells as _probe_netlist_cells
 from .characterize_sequential import (
     SequentialSpecError,
     clock_pwl_line,
@@ -162,6 +165,8 @@ def run_characterize(
     keep_artifacts: bool | None = None,
     cells: list[str] | tuple[str, ...] | None = None,
     compare_to: str | None = None,
+    resume: bool | None = None,
+    capacity_wait_s: float | None = None,
 ) -> dict[str, Any]:
     """Characterize one cell -- or a batch of cells -- at one corner and emit
     one NLDM ``.lib`` covering all of them.
@@ -187,12 +192,17 @@ def run_characterize(
     simulation artifacts under ``<outdir>/cells/<cell>/``). ``lib_path``
     overrides the emitted Liberty path (default: ``<outdir>/<library
     name>.lib``, or the request's own ``output.lib``). ``backend``/
-    ``keep_artifacts`` are forwarded to ``klt sim``.
+    ``keep_artifacts`` are forwarded to ``klt sim``. ``capacity_wait_s``
+    (issue #5348; ``--wait-for-capacity``) is forwarded to every ``klt sim``
+    call -- each cell's main sim and each constraint deck -- so a
+    ``batch_no_capacity`` burst can be waited out; omitted, it is not passed.
 
+    ``resume`` (#5350, else ``options.resume``): see :mod:`characterize_leg`.
     Raises :class:`CharacterizeError` for every failure mode; never returns
     a partially-populated table, and a batch run in which any one cell fails
     emits nothing (the error names the cell).
     """
+    batch_shard = capacity_shard(capacity_wait_s, backend)
     request = _load_request(request_path)
     request_dir = os.path.dirname(os.path.abspath(request_path)) or os.getcwd()
     batch = "cells" in request
@@ -206,6 +216,7 @@ def run_characterize(
     grid = _resolve_grid(request)
     thresholds = _resolve_thresholds(request)
     options = _resolve_options(request, grid, thresholds, request_dir, backend=backend)
+    resume = resolve_resume(request, resume)
 
     # Resolve *every* cell before simulating *any*: a typo in the fifth
     # cell's pin list must not cost the first four cells' simulation time.
@@ -221,31 +232,31 @@ def run_characterize(
     work_dir = _resolve_outdir(outdir, request, request_dir)
     os.makedirs(work_dir, exist_ok=True)
 
-    results: list[dict[str, Any]] = []
-    for cell, arcs in resolved:
-        cell_dir = (
-            os.path.join(work_dir, "cells", slug(cell["name"])) if batch else work_dir
-        )
+    def _run_one(index: int) -> dict[str, Any]:
+        cell, arcs = resolved[index]
+        cell_dir = os.path.join(work_dir, "cells", slug(cell["name"]))
         try:
-            results.append(
-                _characterize_cell(
-                    cell=cell,
-                    arcs=arcs,
-                    corner=corner,
-                    grid=grid,
-                    thresholds=thresholds,
-                    options=options,
-                    request=request,
-                    request_dir=request_dir,
-                    work_dir=cell_dir,
-                    backend=backend,
-                    keep_artifacts=keep_artifacts,
-                )
+            return _characterize_cell(
+                cell=cell,
+                arcs=arcs,
+                corner=corner,
+                grid=grid,
+                thresholds=thresholds,
+                options=options,
+                request=request,
+                request_dir=request_dir,
+                work_dir=cell_dir if batch else work_dir,
+                backend=backend,
+                keep_artifacts=keep_artifacts,
+                resume=resume,
+                batch_shard=batch_shard,
             )
         except CharacterizeError as exc:
             if not batch:
                 raise
             raise CharacterizeError(f"cell '{cell['name']}': {exc}") from exc
+
+    results = run_cells(_run_one, len(resolved), backend, request, capacity_wait_s)
 
     library = _build_library(
         request=request,
@@ -326,6 +337,8 @@ def _characterize_cell(
     work_dir: str,
     backend: str | None,
     keep_artifacts: bool | None,
+    resume: bool = False,
+    batch_shard: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run one cell's whole grid (timing, power, and leakage) as a single
     ``klt sim`` request and reshape the results into tables.
@@ -343,9 +356,8 @@ def _characterize_cell(
         arcs=arcs,
     )
     testbench_path = os.path.join(work_dir, "testbench.spice")
-    with open(testbench_path, "w", encoding="utf-8") as handle:
-        handle.write(plan["netlist_text"])
-
+    sim_request_path = os.path.join(work_dir, "sim-request.json")
+    sim_report_path = os.path.join(work_dir, "sim-report.json")
     sim_request = _build_sim_request(
         request=request,
         request_dir=request_dir,
@@ -355,24 +367,20 @@ def _characterize_cell(
         options=options,
         keep_artifacts=keep_artifacts,
     )
-    sim_request_path = os.path.join(work_dir, "sim-request.json")
-    with open(sim_request_path, "w", encoding="utf-8") as handle:
-        json.dump(sim_request, handle, indent=2)
-        handle.write("\n")
-
     try:
-        sim_report = sim.run_sim(
-            sim_request_path,
-            artifacts_dir=os.path.join(work_dir, "sim"),
+        sim_report = run_sim_leg(
+            testbench_path=testbench_path,
+            testbench_text=plan["netlist_text"],
+            sim_request=sim_request,
+            sim_request_path=sim_request_path,
+            sim_report_path=sim_report_path,
+            sim_dir=os.path.join(work_dir, "sim"),
             backend=backend,
+            resume=resume,
+            **(batch_shard or {}),
         )
     except sim.SimError as exc:
         raise CharacterizeError(f"simulation failed: {exc}") from exc
-
-    sim_report_path = os.path.join(work_dir, "sim-report.json")
-    with open(sim_report_path, "w", encoding="utf-8") as handle:
-        json.dump(sim_report, handle, indent=2)
-        handle.write("\n")
 
     values = _extract_measurements(sim_report, sim_report_path)
     tables = _build_tables(plan, grid, values, thresholds)
@@ -385,8 +393,6 @@ def _characterize_cell(
         deck_dir = os.path.join(work_dir, "constraints", label)
         os.makedirs(deck_dir, exist_ok=True)
         deck_path = os.path.join(deck_dir, "testbench.spice")
-        with open(deck_path, "w", encoding="utf-8") as handle:
-            handle.write(text)
         deck_plan = {
             "measurements": measurements,
             "window": {**plan["window"], "stop_ns": stop_ns},
@@ -401,14 +407,17 @@ def _characterize_cell(
             keep_artifacts=keep_artifacts,
         )
         request_path = os.path.join(deck_dir, "sim-request.json")
-        with open(request_path, "w", encoding="utf-8") as handle:
-            json.dump(deck_request, handle, indent=2)
-            handle.write("\n")
         try:
-            report = sim.run_sim(
-                request_path,
-                artifacts_dir=os.path.join(deck_dir, "sim"),
+            report = run_sim_leg(
+                testbench_path=deck_path,
+                testbench_text=text,
+                sim_request=deck_request,
+                sim_request_path=request_path,
+                sim_report_path=os.path.join(deck_dir, "sim-report.json"),
+                sim_dir=os.path.join(deck_dir, "sim"),
                 backend=backend,
+                resume=resume,
+                **(batch_shard or {}),
             )
         except sim.SimError as exc:
             raise CharacterizeError(f"constraint simulation failed: {exc}") from exc
@@ -2104,46 +2113,6 @@ def roundtrip_check_cells(
         ),
         "probe_netlist": probe_path,
     }
-
-
-def _probe_netlist_cells(
-    cells: list[tuple[str, tuple[str, ...], tuple[str, ...]]],
-) -> str:
-    """A structural wrapper instantiating each cell once (``u0``, ``u1``,
-    ...). A single cell keeps its own pin names as the module's ports (the
-    #2502 shape); several cells get per-instance ``u<i>_<pin>`` ports so no
-    two instances share a net."""
-    single = len(cells) == 1
-
-    def port(index: int, pin: str) -> str:
-        return pin if single else f"u{index}_{pin}"
-
-    inputs = [
-        port(index, pin) for index, (_, ins, _) in enumerate(cells) for pin in ins
-    ]
-    outputs = [
-        port(index, pin) for index, (_, _, outs) in enumerate(cells) for pin in outs
-    ]
-    lines = [
-        "/* Generated by `klt characterize` -- a wrapper instantiating each",
-        " * characterized cell once, whose only purpose is to make",
-        " * native/statime's Liberty reader parse and interpolate the emitted",
-        " * .lib. Not a design. */",
-        f"module klt_characterize_probe({', '.join(inputs + outputs)});",
-    ]
-    for name in inputs:
-        lines.append(f"  input {name};")
-        lines.append(f"  wire {name};")
-    for name in outputs:
-        lines.append(f"  output {name};")
-        lines.append(f"  wire {name};")
-    for index, (cell_name, ins, outs) in enumerate(cells):
-        lines.append(f"  {cell_name} u{index} (")
-        connections = [f"    .{pin}({port(index, pin)})" for pin in ins + outs]
-        lines.append(",\n".join(connections))
-        lines.append("  );")
-    lines.append("endmodule")
-    return "\n".join(lines) + "\n"
 
 
 # --------------------------------------------------------------------------- #

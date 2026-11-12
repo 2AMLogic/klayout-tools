@@ -189,7 +189,7 @@
     },
     {
       "path": "src/klayout_tools/characterize.py",
-      "lines": 2351
+      "lines": 2320
     },
     {
       "path": "src/klayout_tools/cli/drc_cmd.py",
@@ -201,7 +201,7 @@
     },
     {
       "path": "src/klayout_tools/cli/parser.py",
-      "lines": 6244
+      "lines": 6140
     },
     {
       "path": "src/klayout_tools/cli/pdk_cmd.py",
@@ -225,7 +225,7 @@
     },
     {
       "path": "src/klayout_tools/coverage.py",
-      "lines": 563
+      "lines": 529
     },
     {
       "path": "src/klayout_tools/decks/__init__.py",
@@ -301,11 +301,11 @@
     },
     {
       "path": "src/klayout_tools/erc.py",
-      "lines": 3531
+      "lines": 3524
     },
     {
       "path": "src/klayout_tools/erc_spec.py",
-      "lines": 1341
+      "lines": 1253
     },
     {
       "path": "src/klayout_tools/eval.py",
@@ -313,7 +313,7 @@
     },
     {
       "path": "src/klayout_tools/extract.py",
-      "lines": 11018
+      "lines": 10955
     },
     {
       "path": "src/klayout_tools/extract_abstract.py",
@@ -437,7 +437,7 @@
     },
     {
       "path": "src/klayout_tools/lvs_combine.py",
-      "lines": 1610
+      "lines": 1609
     },
     {
       "path": "src/klayout_tools/lvs_finfet.py",
@@ -529,7 +529,7 @@
     },
     {
       "path": "src/klayout_tools/place_and_route.py",
-      "lines": 3365
+      "lines": 3364
     },
     {
       "path": "src/klayout_tools/place_and_route_batch.py",
@@ -545,11 +545,11 @@
     },
     {
       "path": "src/klayout_tools/place_and_route_request.py",
-      "lines": 2316
+      "lines": 2250
     },
     {
       "path": "src/klayout_tools/place_and_route_script.py",
-      "lines": 1430
+      "lines": 1429
     },
     {
       "path": "src/klayout_tools/place_and_route_sta.py",
@@ -617,7 +617,7 @@
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
-      "lines": 4498
+      "lines": 4491
     },
     {
       "path": "src/klayout_tools/sim_commands.py",

@@ -36,3 +36,65 @@ def test_clean_sharded_run_has_no_unlaunched_signal(tmp_path, monkeypatch):
     _, _, environment = fleet()
     assert "unlaunched_shards" not in environment
     assert "resumable" not in environment
+
+
+def test_unrun_units_are_a_resumable_signal():
+    """Issue #5364: lost/interrupted shards carry the same additive signal."""
+    from klayout_tools import _batch_common
+
+    env, hint = _batch_common.with_unrun_signal({"job": "x"}, 3, "/o/batch-shards.json")
+    assert env == {
+        "job": "x",
+        "unrun_units": 3,
+        "resumable": True,
+        "shard_map": "/o/batch-shards.json",
+    }
+    assert hint is True
+
+
+def test_unrun_signal_absent_when_nothing_unrun_or_no_state():
+    from klayout_tools import _batch_common
+
+    base = {"job": "x"}
+    assert _batch_common.with_unrun_signal(base, 0, "/p") == (base, False)
+    assert _batch_common.with_unrun_signal(base, 2, None) == (base, False)
+
+
+def test_unrun_signal_mixed_with_unlaunched_keeps_one_hint():
+    from klayout_tools import _batch_common
+
+    base = {"unlaunched_shards": 1, "resumable": True, "shard_map": "/m"}
+    env, hint = _batch_common.with_unrun_signal(base, 4, "/other")
+    assert env["shard_map"] == "/m" and env["unrun_units"] == 4
+    assert hint is False
+
+
+def _wired(tmp_path, *, manifest, checkpoint, unrun=2):
+    from klayout_tools import _batch_common
+    from klayout_tools.sim_batch import BATCH_SHARDS_FILENAME
+
+    if manifest:
+        (tmp_path / BATCH_SHARDS_FILENAME).write_text("{}")
+    ckpt = str(tmp_path / "ckpt.json") if checkpoint else None
+    return _batch_common.apply_unrun_signal({"job": "x"}, unrun, str(tmp_path), ckpt)
+
+
+def test_apply_unrun_signal_prefers_manifest_and_hints_once(tmp_path, capsys):
+    env = _wired(tmp_path, manifest=True, checkpoint=True)
+    assert env["unrun_units"] == 2 and env["resumable"] is True
+    assert env["shard_map"] == str(tmp_path / "batch-shards.json")
+    err = capsys.readouterr().err
+    assert err.count("rerun with --resume") == 1
+    assert "2 unit(s) never ran" in err and env["shard_map"] in err
+
+
+def test_apply_unrun_signal_checkpoint_only(tmp_path, capsys):
+    env = _wired(tmp_path, manifest=False, checkpoint=True)
+    assert env["shard_map"] == str(tmp_path / "ckpt.json")
+    assert "rerun with --resume" in capsys.readouterr().err
+
+
+def test_apply_unrun_signal_no_state_or_nothing_unrun(tmp_path, capsys):
+    assert _wired(tmp_path, manifest=False, checkpoint=False) == {"job": "x"}
+    assert _wired(tmp_path, manifest=True, checkpoint=True, unrun=0) == {"job": "x"}
+    assert capsys.readouterr().err == ""

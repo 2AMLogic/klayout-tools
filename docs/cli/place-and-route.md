@@ -814,6 +814,7 @@ error otherwise.
 | `cell` | string \| omitted | Additive field (issue #2635), shared with `klt synthesize`/`klt sta`'s own `macros[].cell`. The macro's master name — derived from the LEF's own `MACRO` name when omitted; when given, must match it exactly. |
 | `lib` (alias `liberty`) | object\<string, string\> \| omitted | Additive field (issue #2635), the same per-corner liberty map `klt synthesize`/`klt sta` accept: `{"<corner>": "<path>"}`, with a reserved `"default"` fallback key. `read_liberty`'d alongside the standard-cell liberty in every stage (the floorplan stage's own load, and every later stage's post-`read_db` reload) at whichever corner each stage runs — a macro `lib` map with no entry for that corner (and no `"default"`) is a request error naming the macro, the corner, and the keys that are available. Omitted leaves every stage script byte-identical to before this field existed; the instance is still placed and merged into the GDS exactly as it was. |
 | `halo` | number \| object \| omitted | Additive field (issue #2635). A keep-out margin around the macro, in micrometres: either one non-negative number (uniform on all four sides) or an object naming any of `left`/`right`/`top`/`bottom` (each defaulting to `0`). Honored two ways during `"floorplan"` — see "Macro halos" below. Omitted emits neither and leaves the floorplan/PDN Tcl byte-identical. |
+| `keepout` | number \| object \| omitted | Additive field (issue #5313). Same shape and validation as `halo`, but **placement-only**: it widens the `create_blockage` rectangle around the macro and never reaches `define_pdn_grid`, so it is not subject to pdngen's halo limit (`PDN-0008`), needs no `request.power`, and needs no power pin in the LEF. When a macro declares both, each side of the single blockage is `max(halo, keepout)`; the PDN halo stays `halo` alone. Omitted leaves the Tcl byte-identical. See "Macro keep-outs" below. |
 
 **Macro-pin routability cross-check (#464).** A macro LEF pin that `klt
 lef-abstract` emitted with no `PORT` geometry at all (a pin whose declared
@@ -882,6 +883,26 @@ grid from in the first place. A `halo` whose macro LEF declares no `SIZE`,
 or no power/ground pin with `PORT` geometry (when `request.power` is also
 given), is a named request error — never a halo silently skipped, since
 that would honor it in the response and not in the actual run.
+
+### Macro keep-outs (`macros[].keepout`, issue #5313)
+
+`halo` couples two things: the placement blockage and the PDN macro-grid halo.
+pdngen rejects a halo beyond a small limit (about 2.3 µm on the reproducer
+chip), so a halo cannot be widened enough to keep standard cells off a macro's
+pin edges. `keepout` is the placement half only: one `create_blockage` over
+the macro footprint plus the keep-out, emitted after `place_macro` in the
+`"floorplan"` stage. With both fields set, each side of the blockage is
+`max(halo, keepout)`; `define_pdn_grid -halo` still receives `halo` alone.
+A `keepout` whose macro LEF declares no `SIZE` is a named request error.
+
+```json
+{"instance": "u_sram", "lef": "sram.lef", "x_um": 10, "y_um": 10,
+ "keepout": {"left": 8, "right": 8}}
+```
+
+The response echoes the applied value under `macros[].keepout`
+(`{left, bottom, right, top}` in µm, `null` when omitted). Whether a keep-out
+lowers `GRT-0116` overflow on a given chip is a measurement, not a guarantee.
 
 ## Timing-driven/repair-iteration routing flags (`route_critical_nets_percentage`, `max_antenna_repair_iterations`)
 
@@ -1226,6 +1247,23 @@ aimed at the caller's own tighter target actually hit it. That dual meaning
 is exactly what issue #2357 closes below: the two fields above alone cannot
 say *which* limit a given count reflects.
 
+#### Sizing macro channels (issue #5313)
+
+Read `congestion.global_route.overflow_regions` before widening a channel. In
+the `soc_top` reproducer (sky130-riscv-soc#37, eight 683 × 417 µm macros,
+123 signal pins each, 78.5 µm channels, 6.9 µm GCells), 92–97 % of the
+overflow sat in GCells whose centre is *inside* a macro footprint, on tiles
+with capacity 0 (e.g. 1357 of 1360 in the baseline). Those rows report
+`where: "inside_footprint"`. A wider channel or `macros[].keepout` does not
+touch them. Demand facing a channel is `pins / channel_height_um`: that run
+had 144 pins facing a 78.5 µm gap (1.83 pins/µm) and 70 facing another
+(0.89 pins/µm), yet moving the whole arrangement 5.44 µm changed total
+overflow from 1490 to 5119 at identical channel demand. When most regions
+are `keepout_band` or `macro: null` rows next to macro edges, a `keepout`
+(placement-only, independent of the PDN halo) is worth trying; when they are
+`inside_footprint`, change macro position against the GCell grid instead.
+These figures are from the reproducer's own records, not re-run here.
+
 #### Congestion and routability (`congestion`, issue #2994)
 
 Comparing floorplans of one netlist (a utilization or aspect-ratio sweep) needs
@@ -1240,7 +1278,16 @@ the engine's raw values:
   `resource`, `demand`, `usage_pct`, per-direction and total overflow) and
   `routed_net_count`. Overflow `0` everywhere means the global router found a
   legal solution. `max_gcell_usage_pct` is always `null`: the engine reports
-  usage per layer, not per GCell.
+  usage per layer, not per GCell. `overflow_regions` (issue #5313) is the
+  worst-20 overflowed GCells from `global_route -congestion_report_file`,
+  worst first: `direction` (`horizontal`/`vertical`), `layer`, `bbox_um`
+  (`[x1, y1, x2, y2]`), `capacity`, `usage`, `overflow`, and `macro`/`where`
+  naming the macro whose footprint holds the GCell centre
+  (`inside_footprint`) or whose footprint plus `halo`/`keepout` margin does
+  (`keepout_band`), else `null`. `layer` is `null` because OpenROAD
+  26Q3-1510-g6cb3f2b704 prints `-` in that field. The whole list is `null`
+  (reason in `null_reasons`) when no report was written or it held no
+  violation.
 - **`detailed_route`** — the violation series of the *first* `detailed_route`
   pass (the primary route, before antenna-repair reroutes): the count after the
   first iteration, `iteration_count`, the full `drc_violations_per_iteration`
@@ -2283,7 +2330,8 @@ be within the target `--deck`'s own label-layer coverage (cross-check with
       "orientation": "R0",
       "cell": "analog_block",
       "lib": null,
-      "halo": null
+      "halo": null,
+      "keepout": null
     }
   ],
   "def_path": "/abs/path/.klt/place-and-route/gcd.def",
@@ -2447,13 +2495,13 @@ plain string" for the full enumeration and rationale.
 | `worst_setup_slack_ns` / `worst_hold_slack_ns` | number \| null | The corner-swept worst-case setup/hold slack — see "Multi-corner setup/hold sweep" below. `null` before the `"route"` stage; distinct from (and does not replace) `worst_slack_ns`, which stays the single nominal-corner value it has always been (issue #949). |
 | `max_transition_violation_count` / `max_capacitance_violation_count` | integer \| null | Additive fields (issue #1709). The **effective design-rule-check verdict** at the same swept corners as `worst_setup_slack_ns`/`worst_hold_slack_ns` above — how many pins violate whichever of the max-transition (OpenSTA `-max_slew`)/max-capacitance limit ends up tighter at those decks: the caller's own `constraints.max_transition_ns`/`.max_capacitance_pf` when given, or the loaded liberty deck's own per-pin limit otherwise — from `report_check_types ... -violators` run inside the sweep's own already-paid-for invocation. `0` on a design-rule-clean run (present-but-zero, like `route_drc_violation_count`); `null` before the `"route"` stage, and `null` when `pdk.sweep_corners` explicitly sweeps zero corners. Reported whether or not `constraints.max_transition_ns`/`.max_capacitance_pf` were given. There is deliberately **no** `max_fanout_violation_count` — see "Design-rule-check verdict" below. |
 | `max_transition_violation_count_vs_library` / `max_capacitance_violation_count_vs_library` | integer \| null | Additive fields (issue #2357). The **library-only** counterpart of the pair above — the same check, run a second time in the same invocation *before* any caller-stated `constraints.max_transition_ns`/`.max_capacitance_pf` override is applied, so it reflects only what the loaded liberty decks themselves declare. Same `null`-before-`"route"`/present-but-zero-when-clean gating as the pair above. Lets a caller tell a guard-band overrun (this pair `0`, the effective pair above nonzero) apart from a genuine library violation (both pairs nonzero) directly from the report — see "Library-only counterpart" below. Identical to the pair above whenever the caller sets neither constraint field. |
-| `congestion` | object \| null | Additive field (issue #2994). Route-stage routability figures, restated at top level; `null` before the `"route"` stage. Sections: `global_route` (`total_overflow`, `max_horizontal_overflow`, `max_vertical_overflow`, `usage_pct`, `max_layer_usage_pct`, `overflow_per_layer`, `routed_net_count`, `max_gcell_usage_pct`), `detailed_route` (`first_iteration_drc_violation_count`, `iteration_count`, `drc_violations_per_iteration`, `converged`), `completeness` (`signal_net_count`, `unrouted_net_count`, `partially_routed_net_count`) and `placement` (`total_routing_overflow`, `overflowed_tile_count`, `final_weighted_congestion`). A figure the engine could not produce is `null` and named, with the reason, in `null_reasons` (keyed `section.field`) — never omitted or `0`. See "Congestion and routability" below. |
+| `congestion` | object \| null | Additive field (issue #2994). Route-stage routability figures, restated at top level; `null` before the `"route"` stage. Sections: `global_route` (`total_overflow`, `max_horizontal_overflow`, `max_vertical_overflow`, `usage_pct`, `max_layer_usage_pct`, `overflow_per_layer`, `routed_net_count`, `max_gcell_usage_pct`, `overflow_regions`), `detailed_route` (`first_iteration_drc_violation_count`, `iteration_count`, `drc_violations_per_iteration`, `converged`), `completeness` (`signal_net_count`, `unrouted_net_count`, `partially_routed_net_count`) and `placement` (`total_routing_overflow`, `overflowed_tile_count`, `final_weighted_congestion`). A figure the engine could not produce is `null` and named, with the reason, in `null_reasons` (keyed `section.field`) — never omitted or `0`. See "Congestion and routability" below. |
 | `corners` | array\<object\> \| null | Additive field (issue #1092). Per-corner breakdown of the sweep behind `worst_setup_slack_ns`/`worst_hold_slack_ns` — one entry per corner actually swept (every shipped corner, or the `request.pdk.sweep_corners`-named subset when given), each `{"name": ..., "setup_slack_ns": ..., "hold_slack_ns": ..., "total_negative_setup_slack_ns": ..., "total_negative_hold_slack_ns": ..., "timing_status": ..., "max_transition_violation_count": ..., "max_capacitance_violation_count": ..., "max_transition_violation_count_vs_library": ..., "max_capacitance_violation_count_vs_library": ...}` (the two effective `max_*_violation_count` fields added by issue #1709 and their two library-only `..._vs_library` counterparts added by issue #2357; the two `total_negative_*_slack_ns` fields added by issue #1866; `timing_status` added by issue #1865 — computed from that corner's own two slack values, so a corner OpenSTA could not time is never mistaken for a clean one). Names which corner decided each aggregate: the entry with the lowest `setup_slack_ns` is the one `worst_setup_slack_ns` came from, and likewise the lowest `hold_slack_ns` for `worst_hold_slack_ns`, and the per-corner violation counts name which deck's limits a pin actually breaks. The two `total_negative_*_slack_ns` fields report that corner's own total negative slack (TNS) — how much of the design fails at that corner, distinct from the worst-single-path `setup_slack_ns`/`hold_slack_ns` — see "Per-corner total negative slack" below. `null` before the `"route"` stage (mirroring the two aggregates above); `[]` when `sweep_corners` explicitly names zero corners. See "Multi-corner setup/hold sweep" below. |
 | `estimated_power_mw` | number \| null | `null` before placement. |
 | `power_basis` | object | Additive field (issue #4914). What `estimated_power_mw` was computed under, same shape as `klt sta`'s (see [`sta.md`](sta.md)): `activity_source` (`"global"` when `constraints.power_activity` was given, else `"engine_default"`), `activity` and `duty` (`null` when not given), `parasitics` (`"estimate_only"`). |
 | `clock_skew_ns` | number \| null | Worst setup-side clock skew (`report_clock_skew_metric -setup`) across the clock tree TritonCTS built. `null` before the `"cts"` stage — no clock tree exists yet, so there is nothing to measure skew across (issue #783). |
 | `stages` | array\<object\> | One entry per completed stage through `stage_reached`, each with whatever subset of the top-level metric fields that stage's own OpenROAD reports populate. The top-level fields above are always the **last** entry in `stages`, restated at top level. |
-| `macros` | array\<object\> | Echo of the request's `macros[]` (`instance`/`lef`/`x_um`/`y_um`/`orientation`; `lef` resolved to an absolute path), plus the additive `cell`/`lib`/`halo` fields (issue #2635) — `cell` is the resolved master name (shared with `klt synthesize`/`klt sta`'s own `macros[].cell`), `lib` is the per-corner liberty map resolved to absolute paths (`null` when omitted), `halo` is `{left, bottom, right, top}` in micrometres as actually honored (`null` when omitted). `[]` when the request declared none. |
+| `macros` | array\<object\> | Echo of the request's `macros[]` (`instance`/`lef`/`x_um`/`y_um`/`orientation`; `lef` resolved to an absolute path), plus the additive `cell`/`lib`/`halo` fields (issue #2635) and `keepout` (issue #5313, same shape as `halo`, `null` when omitted) — `cell` is the resolved master name (shared with `klt synthesize`/`klt sta`'s own `macros[].cell`), `lib` is the per-corner liberty map resolved to absolute paths (`null` when omitted), `halo` is `{left, bottom, right, top}` in micrometres as actually honored (`null` when omitted). `[]` when the request declared none. |
 | `def_path` | string \| null | Populated once `write_def` has run (i.e. `stage_reached` is `"route"`); `null` otherwise. |
 | `unrouted_def_path` | string \| null | Additive field (issue #1826). A pre-route DEF, populated only when `target_stage` itself is `"place"` or `"cts"` — the deterministic `<hdl_toplevel>.place.def`/`<hdl_toplevel>.cts.def` path each of those stages' own Tcl already writes unconditionally (the `"place"`-stage one existed on disk since issue #785 but was previously internal-only; the `"cts"`-stage one is new). `null` at `"floorplan"` (no DEF exists yet) and at `"route"` (`def_path` above is the routed artifact to use there instead — the two fields are never populated together). Feed this path into `klt sta`'s own `def` field (with `request.geometry_source: "placement_estimate"`, see `docs/cli/sta.md`) to get a real, SDC-driven setup/hold slack number before a full route — this stage's own parasitics come from `estimate_parasitics -placement` (a placement/bounding-box estimate, not routing-derived RC), so treat the result as an estimate, not a signoff number. See also issue #1825, which proposes a different (netlist-input) shape for the same underlying gap. |
 | `gds_path` | string \| null | Populated only once the DEF→GDS merge has also completed; `null` otherwise. |

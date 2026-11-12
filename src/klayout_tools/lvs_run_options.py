@@ -75,6 +75,24 @@ class _LvsRunOptions:
     netgen_setup_echo: Any
 
 
+def _parse_flatten_reference(
+    options: dict[str, Any], default: bool
+) -> bool | list[str]:
+    """``options.flatten_reference``: a bool, or a list of circuit-name globs
+    to keep un-flattened (issue #5322; e.g. pin-only stubs of abstracted
+    cells). A non-empty list means "flatten everything except these"."""
+
+    value = options.get("flatten_reference", default)
+    if isinstance(value, list):
+        if not all(isinstance(g, str) and g for g in value):
+            raise LvsError(
+                "options.flatten_reference list must contain only non-empty "
+                "circuit-name glob strings"
+            )
+        return list(value) if value else False
+    return bool(value)
+
+
 def _parse_lvs_run_options(
     request: dict[str, Any],
     request_dir: str,
@@ -213,11 +231,9 @@ def _parse_lvs_run_options(
     # layout netlist otherwise can never structurally match it).
     # Issue #4462: a FinFET layout is extracted flat at the transistor level,
     # so a gate-level reference (expanded to cell bodies) defaults to flat too.
-    flatten_reference = bool(
-        options.get(
-            "flatten_reference",
-            finfet_layout and reference_spec.get("form") == "gate-level-verilog",
-        )
+    flatten_reference = _parse_flatten_reference(
+        options,
+        bool(finfet_layout and reference_spec.get("form") == "gate-level-verilog"),
     )
     # Issue #4165: opt-in deadline for the `klayout` engine's compare.
     compare_timeout_s = parse_compare_timeout(options, engine)
