@@ -8,6 +8,15 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-11
 
+- **PR #5338**: docs: design note for substrate-continuity erc.supply_short evaluation
+- **PR #5333**: feat: report never-started jobs in klt sim --job-status
+- **PR #5330**: feat: capture worker environment for batch deck-list jobs
+- **PR #5329**: fix: always emit --batch-set envelope for stuck or interrupted members
+- **PR #5320**: feat: stamp PDK bundle version from .pdk-store.json for sim reports and batch comparison
+- **Issue #5335** (closed): klt erc: design note for substrate-continuity supply_short evaluation (phase 1 of #5334)
+- **Issue #5328** (closed): klt sim decks: worker PDK identity (revision/stamp) not reported for batch deck-list runs
+- **Issue #5324** (closed): klt sim --batch-set: a member that never launches leaves the set pending and the command exits 1 with no report
+- **Issue #5318** (closed): klt sim: report environment does not record the PDK revision when the PDK tree is not a git checkout
 - **PR #5312**: docs: document hierarchical LVS compare for large regular arrays with measurements
 - **PR #5308**: refactor(characterize): share spice_number and slug via characterize_cards
 - **Issue #5310** (closed): klt lvs: flat compare of a ~50k-device regular array still returns no verdict (follow-up to #4165)
