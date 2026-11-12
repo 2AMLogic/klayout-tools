@@ -64,7 +64,7 @@ from . import liberty_writer, sim
 from ._paths import _load_request_json, _resolve_relative, fold_spice_continuations
 from ._provenance import INPUT_ROLE_NETLIST, build_provenance
 from .characterize_arcs import DerivedArc, FunctionError, derive_arcs
-from .characterize_capacity import capacity_shard
+from .characterize_capacity import capacity_shard, with_batch_passthrough
 from .characterize_cards import (
     _POWER_CARDS,
     measurement_cards,
@@ -1456,7 +1456,7 @@ def _build_sim_request(
     netlist_source = request.get("netlist_source")
     if netlist_source is not None:
         sim_request["netlist_source"] = netlist_source
-    return sim_request
+    return with_batch_passthrough(sim_request, request)
 
 
 def _rebase_models(models: dict[str, Any], request_dir: str) -> dict[str, Any]:
