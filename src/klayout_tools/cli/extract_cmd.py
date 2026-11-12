@@ -380,6 +380,7 @@ _REQUEST_FIELD_DESTS = {
         "critical_net_excludes",
         "parasitics_net_patterns",
         "strict_net_patterns",
+        "fail_on_unmodelled",
         "parasitic_variants",
         "parasitics_top_cell_only",
         "resistance_graph",
@@ -495,6 +496,7 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
             "critical_net_excludes": _str_list("critical_net_excludes"),
             "parasitics_net_patterns": _str_list("parasitics_net_patterns"),
             "strict_net_patterns": _bool("strict_net_patterns"),
+            "fail_on_unmodelled": _bool("fail_on_unmodelled"),
             "parasitic_variants": _str_list("parasitic_variants"),
             "parasitics_top_cell_only": _bool("parasitics_top_cell_only"),
             "resistance_graph": _bool("resistance_graph"),
@@ -793,6 +795,19 @@ def run(args: argparse.Namespace) -> int:
             args.format,
             code=getattr(exc, "code", None),
             details=getattr(exc, "details", None),
+        )
+
+    # `--fail-on-unmodelled` (issue #5388): opt-in non-zero exit when the
+    # structured `unmodelled_poly[]` (the single source of truth for both
+    # `unmarked` and `marked_unrecognised` shapes) is non-empty.
+    unmodelled = report.get("unmodelled_poly") or []
+    if getattr(args, "fail_on_unmodelled", False) and unmodelled:
+        return emit_error(
+            "extract",
+            f"{len(unmodelled)} unmodelled poly shape(s) extracted as no "
+            "device; see unmodelled_poly[] (--fail-on-unmodelled)",
+            args.format,
+            details={"unmodelled_poly_count": len(unmodelled)},
         )
 
     emit_success(report, args.format, _print_text)
