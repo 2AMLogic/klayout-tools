@@ -232,7 +232,7 @@ from typing import Any
 
 from . import env_provenance
 from . import macros as macro_spec
-from ._jsonnum import is_number
+from ._jsonnum import is_int, is_number
 from ._paths import _load_request_json, _reject_unknown_keys, validate_request_shape
 from ._provenance import (
     INPUT_ROLE_SOURCE,
@@ -3933,7 +3933,7 @@ def _resolve_expected_latches(request: dict[str, Any]) -> int:
     if not isinstance(structural_request, dict):
         raise SynthesizeError("request.structural must be a JSON object")
     expected = structural_request.get("expected_latches", 0)
-    if isinstance(expected, bool) or not isinstance(expected, int) or expected < 0:
+    if not is_int(expected) or expected < 0:
         raise SynthesizeError(
             "request.structural.expected_latches must be a non-negative integer"
         )

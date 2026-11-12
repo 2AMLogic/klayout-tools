@@ -46,6 +46,7 @@ import sys
 from typing import Any
 
 from .. import extract_batch
+from .._jsonnum import is_int
 from .._paths import looks_like_request_document
 from ..env_provenance import render_path_field
 from ..extract import (
@@ -272,7 +273,7 @@ def _request_int(request: dict, key: str) -> int | None:
     value = request.get(key)
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, int):
+    if not is_int(value):
         raise ExtractError(
             f"`klt extract` request field {key!r} must be an integer (got "
             f"{type(value).__name__}: {value!r})"

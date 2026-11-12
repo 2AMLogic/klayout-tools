@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from ._jsonnum import is_int
+
 
 def _yield_error(message: str) -> Exception:
     # Lazy import: yield_analysis imports this module at load time.
@@ -30,10 +32,6 @@ def _spec_row_from(raw: Any, name: str, where: str) -> str | None:
     return raw
 
 
-def _is_int(value: Any) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool)
-
-
 def _provenance_from(raw: Any, where: str) -> dict[str, Any] | None:
     """Validate the optional run-level ``provenance`` block (issue #2840).
 
@@ -47,13 +45,13 @@ def _provenance_from(raw: Any, where: str) -> dict[str, Any] | None:
     if not isinstance(raw, dict):
         raise _yield_error(f"{where}: 'provenance' must be an object")
     seed = raw.get("seed")
-    if seed is not None and not _is_int(seed):
+    if seed is not None and not is_int(seed):
         raise _yield_error(f"{where}: provenance.seed must be an integer")
     rng = raw.get("rng")
     if rng is not None and not isinstance(rng, str):
         raise _yield_error(f"{where}: provenance.rng must be a string")
     draws = raw.get("draws_per_population")
-    if draws is not None and (not _is_int(draws) or draws <= 0):
+    if draws is not None and (not is_int(draws) or draws <= 0):
         raise _yield_error(
             f"{where}: provenance.draws_per_population must be a positive integer"
         )
@@ -131,8 +129,8 @@ def nominal_provenance(nominal_report: dict[str, Any]) -> dict[str, Any] | None:
     if not isinstance(mc, dict):
         return None
     prov: dict[str, Any] = {}
-    if _is_int(mc.get("seed")):
+    if is_int(mc.get("seed")):
         prov["seed"] = mc["seed"]
-    if _is_int(mc.get("n")) and mc["n"] > 0:
+    if is_int(mc.get("n")) and mc["n"] > 0:
         prov["draws_per_population"] = mc["n"]
     return prov or None

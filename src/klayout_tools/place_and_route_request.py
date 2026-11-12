@@ -28,7 +28,7 @@ from collections.abc import Callable
 from typing import Any
 
 from . import macros as macro_spec
-from ._jsonnum import is_number
+from ._jsonnum import is_int, is_number
 from .lef_header import read_lef_header, read_lef_macro_pin_ports
 from .pdk import descriptor_views, lef_files
 from .pdk_cells import resolve_liberty_for_cell_library
@@ -1911,7 +1911,7 @@ def _validate_library(library: Any) -> dict[str, Any] | None:
 
 
 def _validate_seed(seed: Any) -> int:
-    if isinstance(seed, bool) or not isinstance(seed, int):
+    if not is_int(seed):
         raise PlaceAndRouteError("request.seed must be an integer")
     return seed
 
@@ -1941,7 +1941,7 @@ def _validate_route_critical_nets_percentage(value: Any) -> int:
     driven global routing + bounded antenna-repair iteration"."""
     if value is None:
         return 0
-    if isinstance(value, bool) or not isinstance(value, int):
+    if not is_int(value):
         raise PlaceAndRouteError(
             "request.route_critical_nets_percentage must be an integer"
         )
@@ -1974,7 +1974,7 @@ def _validate_route_congestion_iterations(value: Any) -> int | None:
     ``None`` emits no flag (OpenROAD's own default)."""
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, int):
+    if not is_int(value):
         raise PlaceAndRouteError(
             "request.route_congestion_iterations must be an integer"
         )
@@ -2016,7 +2016,7 @@ def _validate_max_antenna_repair_iterations(value: Any) -> int:
     global routing + bounded antenna-repair iteration"."""
     if value is None:
         return 1
-    if isinstance(value, bool) or not isinstance(value, int):
+    if not is_int(value):
         raise PlaceAndRouteError(
             "request.max_antenna_repair_iterations must be an integer"
         )

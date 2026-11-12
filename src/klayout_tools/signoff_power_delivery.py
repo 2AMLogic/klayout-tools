@@ -34,7 +34,7 @@ import json
 from pathlib import Path
 from typing import Any, cast
 
-from ._jsonnum import is_number
+from ._jsonnum import is_int, is_number
 from ._provenance import content_hash
 from .signoff_power_delivery_substrate import (
     REASON_SUBSTRATE_ISOLATION_UNDECIDABLE,
@@ -1002,7 +1002,7 @@ def _erc_supply_unlabelled_islands(
         count = entry.get("unlabelled_islands")
         if not isinstance(name, str) or name.upper() not in declared:
             continue
-        if isinstance(count, bool) or not isinstance(count, int):
+        if not is_int(count):
             continue
         islands[name] = count
     return islands

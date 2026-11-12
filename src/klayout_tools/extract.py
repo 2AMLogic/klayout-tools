@@ -146,6 +146,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from ._annotation import is_reserved_annotation_layer
+from ._jsonnum import is_int
 from ._layout import complement_well_tie as _complement_well_tie
 from ._layout import region as _region
 from ._layout import region_expr as _region_expr
@@ -1251,7 +1252,7 @@ def _validate_resistance_path_args(
         raise ExtractError("--resistance-path requires --distributed-rc")
     for query in resistance_paths:
         net_id = query[0]
-        if isinstance(net_id, bool) or not isinstance(net_id, int):
+        if not is_int(net_id):
             raise ExtractError(
                 f"--resistance-path NET_ID must be an integer "
                 f"parasitics.nets[].net_id (got {net_id!r})"
@@ -1382,7 +1383,7 @@ def _label_layers_from_report(
         elif (
             isinstance(value, list)
             and len(value) == 2
-            and all(isinstance(v, int) and not isinstance(v, bool) for v in value)
+            and all(is_int(v) for v in value)
         ):
             overrides[role] = (value[0], value[1])
     return overrides or None

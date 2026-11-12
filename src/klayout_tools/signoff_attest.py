@@ -65,7 +65,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from . import signoff_attest_item9 as item9
-from ._jsonnum import is_number
+from ._jsonnum import is_int, is_number
 from ._provenance import sha256_file
 from ._report_verify import (
     VOLATILE_PROVENANCE_PATHS,
@@ -229,7 +229,7 @@ def _read_inventory(path: str) -> tuple[dict[str, Any], str]:
 
 def _validate_header(inventory: Mapping[str, Any], item: int, source: str) -> None:
     version = inventory.get("schema_version")
-    if isinstance(version, bool) or not isinstance(version, int):
+    if not is_int(version):
         raise AttestationError(
             f"inventory '{source}' has no integer 'schema_version' (this build "
             f"reads {sorted(SUPPORTED_INVENTORY_SCHEMA_VERSIONS)})"
@@ -246,7 +246,7 @@ def _validate_header(inventory: Mapping[str, Any], item: int, source: str) -> No
             f'inventory \'{source}\' must declare "kind": "{INVENTORY_KIND}"'
         )
     declared = inventory.get("t1_item")
-    if isinstance(declared, bool) or not isinstance(declared, int):
+    if not is_int(declared):
         raise AttestationError(
             f"inventory '{source}' must declare an integer 't1_item'"
         )

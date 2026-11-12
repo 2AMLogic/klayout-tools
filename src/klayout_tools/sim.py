@@ -147,7 +147,7 @@ from . import sim_op_check as sim_op_check
 from . import sim_peak_rss as sim_peak_rss
 from . import sim_staging as sim_staging
 from ._batch_common import apply_unrun_signal
-from ._jsonnum import is_number
+from ._jsonnum import is_int, is_number
 from ._paths import (
     _load_request_json,
     _resolve_relative,
@@ -1994,7 +1994,7 @@ def _validate_convergence_retry(value: Any) -> dict[str, Any] | None:
         )
     resolved = {**DEFAULT_CONVERGENCE_RETRY, **value}
     attempts = resolved["max_attempts"]
-    if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 1:
+    if not is_int(attempts) or attempts < 1:
         raise SimError(
             "options.retry_on_convergence_error.max_attempts must be an integer >= 1"
         )

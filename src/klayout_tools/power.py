@@ -148,6 +148,7 @@ from ._devices import (
     _device_body_cuts,
     _validate_devices,
 )
+from ._jsonnum import is_int
 from ._layout import load_layout, select_top_cells
 from ._layout import region as _region
 from ._layout import texts as _texts
@@ -604,7 +605,7 @@ def _validate_max_decomposition_cells(spec: dict[str, Any], spec_path: str) -> i
     raw = spec.get("max_decomposition_cells")
     if raw is None:
         return MAX_DECOMPOSITION_CELLS
-    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
+    if not is_int(raw) or raw < 1:
         raise PowerError(
             f"spec '{spec_path}': 'max_decomposition_cells' must be a positive "
             f"integer, got {raw!r}"

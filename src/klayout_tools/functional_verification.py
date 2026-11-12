@@ -209,6 +209,7 @@ import xml.etree.ElementTree as ElementTree
 from typing import Any
 
 from ._artifact_envelope import hashed_path_envelope as _hashed_path_envelope
+from ._jsonnum import is_int
 from ._paths import _load_request_json
 from ._paths import load_request_arg as _shared_load_request_arg
 from ._paths import validate_request_shape as _shared_validate_request_shape
@@ -888,9 +889,7 @@ def _resolve_options(
         resolved_timescale = (timescale[0], timescale[1])
 
     random_seed = options.get("random_seed")
-    if random_seed is not None and (
-        isinstance(random_seed, bool) or not isinstance(random_seed, int)
-    ):
+    if random_seed is not None and (not is_int(random_seed)):
         raise FunctionalVerificationError(
             "request.options.random_seed must be an integer when given"
         )
@@ -925,11 +924,7 @@ def _resolve_initial_state_seeds(mode: str, seeds: Any) -> list[int]:
                 "request.options.initial_state.seeds is only valid with mode 'random'"
             )
         return []
-    if (
-        not isinstance(seeds, list)
-        or not seeds
-        or any(isinstance(s, bool) or not isinstance(s, int) for s in seeds)
-    ):
+    if not isinstance(seeds, list) or not seeds or any(not is_int(s) for s in seeds):
         raise FunctionalVerificationError(
             "request.options.initial_state.seeds must be a non-empty "
             "array of integers when mode is 'random'"

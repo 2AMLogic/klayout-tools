@@ -125,6 +125,7 @@ from collections.abc import Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from typing import TYPE_CHECKING, Any, NamedTuple
 
+from ._jsonnum import is_int
 from ._paths import _load_request_json, _resolve_relative
 from ._paths import load_request_arg as _shared_load_request_arg
 from ._paths import validate_request_shape as _shared_validate_request_shape
@@ -2851,9 +2852,7 @@ def _parse_layout_label_layers(
         if not (
             isinstance(value, list)
             and len(value) == 2
-            and all(
-                isinstance(v, int) and not isinstance(v, bool) and v >= 0 for v in value
-            )
+            and all(is_int(v) and v >= 0 for v in value)
         ):
             raise LvsError(
                 f"request.layout.label_layers.{role} must be a [layer, datatype] "

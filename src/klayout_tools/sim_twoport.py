@@ -59,7 +59,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from . import sim_raw, touchstone
-from ._jsonnum import is_finite_number, is_number
+from ._jsonnum import is_finite_number, is_int, is_number
 from .sim_errors import SimError
 
 KIND = "twoport"
@@ -170,7 +170,7 @@ def _resolve_freq(freq: Any) -> dict[str, Any]:
             f"analysis.freq.sweep must be one of {list(SWEEPS)} (got {sweep!r})"
         )
     points = freq.get("points")
-    if isinstance(points, bool) or not isinstance(points, int) or points < 1:
+    if not is_int(points) or points < 1:
         raise SimError(
             f"analysis.freq.points must be a positive integer (got {points!r})"
         )

@@ -13,7 +13,7 @@ from __future__ import annotations
 import types
 from typing import Any, TypedDict, Union
 
-from ._jsonnum import is_number
+from ._jsonnum import is_int, is_number
 
 # --------------------------------------------------------------------------- #
 # Typed envelope shapes + runtime validation (issue #2033)
@@ -441,7 +441,7 @@ _ENVELOPE_SHAPES: dict[str, Any] = {
 #: as an integer.
 _SCALAR_CHECKS: dict[Any, Any] = {
     bool: lambda value: isinstance(value, bool),
-    int: lambda value: isinstance(value, int) and not isinstance(value, bool),
+    int: lambda value: is_int(value),
     float: is_number,
     str: lambda value: isinstance(value, str),
     type(None): lambda value: value is None,

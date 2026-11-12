@@ -65,6 +65,7 @@ import os
 from typing import Any
 
 from . import env_provenance
+from ._jsonnum import is_int
 from ._verilog_params import chparam_lines, read_verilog_line
 from .arith_gen import (
     ARCHITECTURES as ADDER_ARCHITECTURES,
@@ -156,7 +157,7 @@ def _resolve_arithmetic(request: dict[str, Any]) -> dict[str, Any] | None:
             raise SynthesizeError(f"request.arithmetic.adders: {exc}") from exc
 
     min_width = arithmetic.get("min_width", DEFAULT_ADDER_MIN_WIDTH)
-    if isinstance(min_width, bool) or not isinstance(min_width, int) or min_width < 2:
+    if not is_int(min_width) or min_width < 2:
         raise SynthesizeError(
             "request.arithmetic.min_width must be an integer >= 2 "
             f"(default {DEFAULT_ADDER_MIN_WIDTH})"

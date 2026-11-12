@@ -35,6 +35,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ._jsonnum import is_int
+
 TOOL_PREFIX = "klt_"
 
 DOCS_BASE_URL = "https://github.com/2AMLogic/klayout-tools/blob/main/docs/cli"
@@ -106,7 +108,7 @@ def _scalar_schema(action: argparse.Action) -> dict[str, Any]:
         choices = list(action.choices)
         if all(isinstance(c, str) for c in choices):
             schema = {"type": "string", "enum": choices}
-        elif all(isinstance(c, int) and not isinstance(c, bool) for c in choices):
+        elif all(is_int(c) for c in choices):
             schema = {"type": "integer", "enum": choices}
     return schema
 

@@ -14,6 +14,7 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
+from ._jsonnum import is_int
 from .lvs_mismatch import _mismatch
 
 if TYPE_CHECKING:
@@ -164,7 +165,7 @@ def _parse_combine_devices_max_attempts(options: Mapping[str, Any]) -> int:
     if "combine_devices_max_attempts" not in options:
         return _COMBINE_DEVICES_MAX_ATTEMPTS
     value = options["combine_devices_max_attempts"]
-    if isinstance(value, bool) or not isinstance(value, int):
+    if not is_int(value):
         raise LvsError(
             "options.combine_devices_max_attempts must be a positive integer; "
             f"got {value!r}"

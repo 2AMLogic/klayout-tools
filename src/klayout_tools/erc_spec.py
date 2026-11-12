@@ -14,6 +14,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from ._jsonnum import is_int
 from ._paths import (
     _parse_layer_datatype,
     _reject_unknown_keys,
@@ -494,7 +495,7 @@ def _parse_net_islands(entry: dict[str, Any], spec_path: str, index: int) -> int
     Split out of :func:`_validate_nets` to keep that function under the
     repo's C901 complexity ratchet, as :func:`_parse_same_net_as` is."""
     islands = entry.get("islands", 1)
-    if isinstance(islands, bool) or not isinstance(islands, int) or islands < 1:
+    if not is_int(islands) or islands < 1:
         raise ErcError(
             f"spec '{spec_path}': nets[{index}].islands must be an integer "
             f">= 1 (got {entry.get('islands')!r})"

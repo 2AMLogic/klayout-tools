@@ -48,7 +48,7 @@ import math
 import os
 from typing import Any
 
-from ._jsonnum import is_number
+from ._jsonnum import is_int, is_number
 from ._native import _load_native_extension, native_provenance
 from .yield_provenance import (
     _attach_spec_rows,
@@ -171,7 +171,7 @@ def _read_qualification_keys(
         out["target_sigma"] = float(k)
     n = raw.get("min_converged_samples")
     if n is not None:
-        if isinstance(n, bool) or not isinstance(n, int):
+        if not is_int(n):
             raise YieldError(
                 f"{prefix}min_converged_samples must be a non-negative integer"
             )
@@ -215,7 +215,7 @@ def _count_from(raw: Any, field: str, name: str, where: str) -> int:
     """
     if raw is None:
         return 0
-    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+    if not is_int(raw) or raw < 0:
         raise YieldError(
             f"{where}: measurement '{name}' {field} must be a non-negative integer"
         )

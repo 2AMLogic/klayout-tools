@@ -22,6 +22,7 @@ import xml.etree.ElementTree as ET
 from typing import Any
 
 from . import env_provenance
+from ._jsonnum import is_int
 from ._layout import load_layout, select_top_cells
 from ._provenance import build_provenance, sha256_file
 from .coverage import (
@@ -1116,7 +1117,7 @@ def _validate_expected_rule_categories(value: Any) -> None:
     """Reject anything but ``None`` or a positive ``int`` (issue #2697)."""
     if value is None:
         return
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+    if not is_int(value) or value < 1:
         raise DrcError(
             "expected_rule_categories (--expect-rule-categories) must be a "
             f"positive integer (got {value!r})"
@@ -1222,7 +1223,7 @@ def _rerun_assertion_kwargs(committed: dict[str, Any]) -> dict[str, Any]:
     kind = assertion.get("kind", COVERAGE_ASSERTION_COUNT_KIND)
     if kind == COVERAGE_ASSERTION_COUNT_KIND:
         expected = assertion.get("expected")
-        if isinstance(expected, bool) or not isinstance(expected, int) or expected < 1:
+        if not is_int(expected) or expected < 1:
             raise DrcError(
                 "committed report's 'coverage_assertion.expected' is "
                 f"malformed (expected a positive integer, got {expected!r})"

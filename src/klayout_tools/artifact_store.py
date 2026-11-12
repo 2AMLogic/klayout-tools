@@ -84,6 +84,7 @@ from typing import IO, Any
 from urllib.parse import SplitResult, urlsplit
 
 from . import build_identity
+from ._jsonnum import is_int
 
 #: Environment variable naming the broker's base URL (``http(s)://host:port``).
 ENV_BROKER = "KLT_ARTIFACT_BROKER"
@@ -355,7 +356,7 @@ def _parse_presigned(payload: dict[str, Any], op: str) -> Presigned:
     return Presigned(
         key=key,
         exists=payload.get("exists") is True,
-        size=size if isinstance(size, int) and not isinstance(size, bool) else None,
+        size=size if is_int(size) else None,
         method=_optional_str(payload, "method"),
         url=_optional_str(payload, "url"),
         headers=_parse_headers(payload.get("headers"), op),

@@ -20,6 +20,8 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
+from ._jsonnum import is_int
+
 
 def _error(message: str) -> Exception:
     """An ``AttestationError`` (imported lazily: ``signoff_attest`` imports us)."""
@@ -116,7 +118,7 @@ def validated_unbenched_rows(inventory: Mapping[str, Any]) -> list[dict[str, Any
         row, issue = entry["row"], entry["issue"]
         if not isinstance(row, str) or not row.strip():
             raise _error(f"'{field}.row' must be a non-empty string")
-        if isinstance(issue, bool) or not isinstance(issue, int) or issue <= 0:
+        if not is_int(issue) or issue <= 0:
             raise _error(f"'{field}.issue' must be a positive integer")
         if row in seen:
             raise _error(f"unbenched row '{row}' is declared more than once")
