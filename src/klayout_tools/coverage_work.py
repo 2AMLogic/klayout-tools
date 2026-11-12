@@ -14,7 +14,7 @@ from typing import Any
 def _identity_list_error(value: Any, *, records: bool) -> str | None:
     if not isinstance(value, list):
         return "work must be an array"
-    identities = []
+    identities: list[str] = []
     for item in value:
         if records:
             if not isinstance(item, dict) or not (
@@ -44,7 +44,7 @@ def _identity_list_error(value: Any, *, records: bool) -> str | None:
 
 
 def _work_lists_error(block: dict[str, Any]) -> str | None:
-    identities = []
+    identities: list[str] = []
     for field in ("checked", "skipped", "inapplicable", "unknown"):
         error = _identity_list_error(block.get(field), records=field != "checked")
         if error:
