@@ -18,6 +18,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from ._jsonnum import is_int
+
 _REASON_CHECK_FAILED = "check_failed"
 
 
@@ -37,7 +39,7 @@ def _check_count(block: dict[str, Any], key: str) -> int | None:
     if not isinstance(check, dict) or check.get("status") != "ok":
         return None
     count = check.get("count")
-    if isinstance(count, bool) or not isinstance(count, int):
+    if not is_int(count):
         return None
     return count
 

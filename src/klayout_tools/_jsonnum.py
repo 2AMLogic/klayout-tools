@@ -1,7 +1,7 @@
 """Shared JSON-number predicates used across the ``klt`` verb modules.
 
 Python's ``bool`` is an ``int``, so every verb module that validates request
-JSON needs the same "a number, but not a bool" guard. ``draw.py``,
+JSON needs the same "a number (or integer), but not a bool" guard. ``draw.py``,
 ``socket_check.py``, ``gen_compose_port_request.py``, ``sim.py`` and
 ``post_route_sta.py`` each carried their own copy, and the copies had already
 drifted (one tested finiteness with ``value == value``). They now live here as
@@ -19,6 +19,11 @@ from typing import Any, TypeGuard
 def is_number(value: Any) -> TypeGuard[int | float]:
     """True for a JSON number (int/float), excluding ``bool`` (a Python int)."""
     return not isinstance(value, bool) and isinstance(value, (int, float))
+
+
+def is_int(value: Any) -> TypeGuard[int]:
+    """True for a JSON integer, excluding ``bool`` (a Python int)."""
+    return not isinstance(value, bool) and isinstance(value, int)
 
 
 def is_finite_number(value: Any) -> TypeGuard[int | float]:

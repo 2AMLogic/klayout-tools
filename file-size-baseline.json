@@ -181,7 +181,7 @@
     },
     {
       "path": "src/klayout_tools/arith_gen.py",
-      "lines": 1011
+      "lines": 1010
     },
     {
       "path": "src/klayout_tools/artifact_store.py",
@@ -193,11 +193,11 @@
     },
     {
       "path": "src/klayout_tools/cli/drc_cmd.py",
-      "lines": 578
+      "lines": 577
     },
     {
       "path": "src/klayout_tools/cli/extract_cmd.py",
-      "lines": 1190
+      "lines": 1188
     },
     {
       "path": "src/klayout_tools/cli/parser.py",
@@ -221,7 +221,7 @@
     },
     {
       "path": "src/klayout_tools/components.py",
-      "lines": 609
+      "lines": 606
     },
     {
       "path": "src/klayout_tools/coverage.py",
@@ -237,7 +237,7 @@
     },
     {
       "path": "src/klayout_tools/decks/extraction.py",
-      "lines": 2260
+      "lines": 2256
     },
     {
       "path": "src/klayout_tools/decks/gf180mcu.py",
@@ -269,7 +269,7 @@
     },
     {
       "path": "src/klayout_tools/draw.py",
-      "lines": 648
+      "lines": 646
     },
     {
       "path": "src/klayout_tools/drc.py",
@@ -277,7 +277,7 @@
     },
     {
       "path": "src/klayout_tools/drc_klayout_engine.py",
-      "lines": 1730
+      "lines": 1728
     },
     {
       "path": "src/klayout_tools/economy.py",
@@ -305,7 +305,7 @@
     },
     {
       "path": "src/klayout_tools/erc_spec.py",
-      "lines": 1253
+      "lines": 1250
     },
     {
       "path": "src/klayout_tools/eval.py",
@@ -361,7 +361,7 @@
     },
     {
       "path": "src/klayout_tools/functional_verification.py",
-      "lines": 3167
+      "lines": 3162
     },
     {
       "path": "src/klayout_tools/functional_verification_sdf.py",
@@ -377,7 +377,7 @@
     },
     {
       "path": "src/klayout_tools/gen_compose_port_access.py",
-      "lines": 709
+      "lines": 706
     },
     {
       "path": "src/klayout_tools/gen_compose_routing.py",
@@ -433,7 +433,7 @@
     },
     {
       "path": "src/klayout_tools/lvs.py",
-      "lines": 6472
+      "lines": 6471
     },
     {
       "path": "src/klayout_tools/lvs_combine.py",
@@ -469,7 +469,7 @@
     },
     {
       "path": "src/klayout_tools/mcp_tools.py",
-      "lines": 505
+      "lines": 504
     },
     {
       "path": "src/klayout_tools/metrics.py",
@@ -561,7 +561,7 @@
     },
     {
       "path": "src/klayout_tools/power.py",
-      "lines": 2606
+      "lines": 2604
     },
     {
       "path": "src/klayout_tools/power_intent.py",
@@ -669,7 +669,7 @@
     },
     {
       "path": "src/klayout_tools/socket_check.py",
-      "lines": 1137
+      "lines": 1133
     },
     {
       "path": "src/klayout_tools/spice_flatten.py",
@@ -689,7 +689,7 @@
     },
     {
       "path": "src/klayout_tools/synthesize_arithmetic.py",
-      "lines": 848
+      "lines": 847
     },
     {
       "path": "src/klayout_tools/tap_distance.py",

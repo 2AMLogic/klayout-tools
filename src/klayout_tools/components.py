@@ -43,6 +43,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ._jsonnum import is_int
 from ._layout import clip_box as _clip_box
 from ._layout import load_layout
 from ._layout import region as _region
@@ -566,11 +567,7 @@ def _require_name(entry: Any, field: str) -> str:
 
 
 def _layer_pair(value: Any) -> tuple[int, int] | None:
-    if (
-        isinstance(value, (list, tuple))
-        and len(value) == 2
-        and all(isinstance(v, int) and not isinstance(v, bool) for v in value)
-    ):
+    if isinstance(value, (list, tuple)) and len(value) == 2 and all(map(is_int, value)):
         return (value[0], value[1])
     return None
 

@@ -187,7 +187,7 @@ from collections.abc import Callable
 from typing import Any
 
 from . import gen_compose_port_request as _pr
-from ._jsonnum import is_number
+from ._jsonnum import is_int, is_number
 from ._layout import write_layout
 from ._paths import _resolve_relative
 from ._provenance import build_provenance, layout_geometry_digest
@@ -1089,7 +1089,7 @@ def _orient_port(port: dict[str, Any], orientation: str) -> dict[str, Any]:
             float(x_um), float(y_um), orientation
         )
     direction_deg = port.get("direction_deg")
-    if not isinstance(direction_deg, bool) and isinstance(direction_deg, int):
+    if is_int(direction_deg):
         oriented["direction_deg"] = _ORIENTATION_DIRECTION_MAP[orientation].get(
             direction_deg, direction_deg
         )
@@ -1729,7 +1729,7 @@ def _parse_array_placement(raw_placement: dict[str, Any]) -> dict[str, Any]:
     """
 
     def _positive_int(value: Any, field: str) -> int:
-        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        if not is_int(value) or value < 1:
             raise GenComposeError(
                 f"request.placement.{field} must be a positive integer when "
                 "strategy is 'array'"

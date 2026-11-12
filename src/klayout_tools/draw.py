@@ -21,7 +21,7 @@ import json
 import os
 from typing import Any
 
-from ._jsonnum import is_number
+from ._jsonnum import is_int, is_number
 from ._layout import load_layout, resolve_top_cell, write_layout
 
 #: Request-envelope schema identifier (see ``docs/cli/draw.md``).
@@ -458,9 +458,7 @@ def _parse_erase(raw: Any) -> list[tuple[tuple[float, float, float, float], Any]
         if layer is not None and (
             not isinstance(layer, list)
             or len(layer) != 2
-            or any(
-                isinstance(v, bool) or not isinstance(v, int) or v < 0 for v in layer
-            )
+            or any(not is_int(v) or v < 0 for v in layer)
         ):
             raise DrawError(
                 f"erase_um[{i}].layer must be a [layer, datatype] pair of "
@@ -532,7 +530,7 @@ def _shape_layer(
     if (
         not isinstance(layer, list)
         or len(layer) != 2
-        or any(isinstance(v, bool) or not isinstance(v, int) for v in layer)
+        or any(not is_int(v) for v in layer)
         or any(v < 0 for v in layer)
     ):
         raise DrawError(
@@ -625,7 +623,7 @@ def _parse_array(
     if (
         not isinstance(count, list)
         or len(count) != 2
-        or any(isinstance(v, bool) or not isinstance(v, int) for v in count)
+        or any(not is_int(v) for v in count)
         or any(v <= 0 for v in count)
     ):
         raise DrawError(

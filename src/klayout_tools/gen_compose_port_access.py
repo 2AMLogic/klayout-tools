@@ -32,6 +32,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from ._jsonnum import is_int
 from .decks import UnknownDeckError, get_deck, get_extraction_deck, get_nominal_dbu
 from .gen import GenError
 from .gen_compose_routing import (
@@ -66,15 +67,11 @@ def _err(message: str) -> Exception:
     return GenComposeError(message)
 
 
-def _is_int(value: Any) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool)
-
-
 def _parse_layer_pair(raw: Any, where: str) -> _LayerPair:
     if (
         not isinstance(raw, dict)
-        or not _is_int(raw.get("layer"))
-        or not _is_int(raw.get("datatype"))
+        or not is_int(raw.get("layer"))
+        or not is_int(raw.get("datatype"))
     ):
         raise _err(
             f"{where} must be a JSON object with integer 'layer'/'datatype' "
@@ -116,7 +113,7 @@ def _parse_access(raw: Any, where: str) -> dict[str, Any]:
     if (
         not isinstance(via_array, list)
         or len(via_array) != 2
-        or not all(_is_int(n) and n >= 1 for n in via_array)
+        or not all(is_int(n) and n >= 1 for n in via_array)
     ):
         raise _err(f"{where}.via_array must be [rows, cols] of integers >= 1")
     if max(via_array) > _MAX_ARRAY_SIDE:
@@ -129,7 +126,7 @@ def _parse_access(raw: Any, where: str) -> dict[str, Any]:
     ):
         raise _err(f"{where}.grid_um must be a number > 0")
     max_candidates = raw.get("max_candidates", DEFAULT_MAX_CANDIDATES)
-    if not _is_int(max_candidates) or max_candidates < 1:
+    if not is_int(max_candidates) or max_candidates < 1:
         raise _err(f"{where}.max_candidates must be an integer >= 1")
     return {
         "up_to": up_to,

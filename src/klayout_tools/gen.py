@@ -55,7 +55,7 @@ import math
 import os
 from typing import TYPE_CHECKING, Any
 
-from ._jsonnum import is_number
+from ._jsonnum import is_int, is_number
 from ._layout import write_layout
 from ._provenance import build_provenance
 from .gen_asap7_tap import ASAP7_SPECS
@@ -4012,7 +4012,7 @@ def _coerce_param(generator: str, name: str, value: Any, ptype: int) -> Any:
             raise GenError(f"generator '{generator}': params.{name} must be a number")
         return float(value)
     if ptype == Decl.TypeInt:
-        if isinstance(value, bool) or not isinstance(value, int):
+        if not is_int(value):
             raise GenError(f"generator '{generator}': params.{name} must be an integer")
         return int(value)
     if ptype == Decl.TypeString:

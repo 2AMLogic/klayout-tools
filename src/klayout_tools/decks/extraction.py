@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from itertools import chain
 from typing import Any
 
+from .._jsonnum import is_int
 from .rules import RuleProvenance
 
 
@@ -1226,9 +1227,7 @@ class ExtractionDeck:
             if (
                 not isinstance(layer, tuple)
                 or len(layer) != 2
-                or not all(
-                    isinstance(v, int) and not isinstance(v, bool) for v in layer
-                )
+                or not all(is_int(v) for v in layer)
             ):
                 raise InvalidLabelLayerError(
                     f"{where} label-layer role {role!r} override must be a "
@@ -1386,10 +1385,7 @@ class LayerExpr:
             if (
                 isinstance(operand, tuple)
                 and len(operand) == 2
-                and all(
-                    isinstance(part, int) and not isinstance(part, bool)
-                    for part in operand
-                )
+                and all(is_int(part) for part in operand)
             ):
                 continue
             raise ValueError(

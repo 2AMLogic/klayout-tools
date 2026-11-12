@@ -44,7 +44,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import sim_passes, sim_search_param, sim_twoport
-from ._jsonnum import is_finite_number
+from ._jsonnum import is_finite_number, is_int
 from .sim_errors import SimError
 from .sim_forms import validate_exclusive_form
 from .sim_search_analysis import no_control_chars, validate_analysis
@@ -167,7 +167,7 @@ def _validate_max_iter(
     name: Any, body: dict[str, Any], width: float, tol: float
 ) -> None:
     max_iter = body["max_iter"]
-    if isinstance(max_iter, bool) or not isinstance(max_iter, int):
+    if not is_int(max_iter):
         raise SimError(
             f"measurement '{name}': search.max_iter must be an integer; "
             f"got {max_iter!r}"

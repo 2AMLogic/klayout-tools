@@ -42,7 +42,7 @@ from typing import Any
 from ._check_result import finish as _finish
 from ._check_result import fmt_layer as _fmt_layer
 from ._check_result import skipped as _skipped
-from ._jsonnum import is_number
+from ._jsonnum import is_int, is_number
 from ._layout import cells_in_hierarchy, load_layout
 from ._layout import select_top_cells as _select_top_cells
 
@@ -271,11 +271,7 @@ def run_socket_check(
 
 
 def _is_layer_pair(value: Any) -> bool:
-    return (
-        isinstance(value, list)
-        and len(value) == 2
-        and all(isinstance(v, int) and not isinstance(v, bool) for v in value)
-    )
+    return isinstance(value, list) and len(value) == 2 and all(is_int(v) for v in value)
 
 
 # --------------------------------------------------------------------------- #

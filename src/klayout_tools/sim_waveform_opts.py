@@ -12,6 +12,7 @@ import json
 from collections.abc import Iterable
 from typing import IO, Any
 
+from ._jsonnum import is_int
 from .sim_errors import SimError
 
 #: Default for ``options.waveform_max_bytes`` (issue #3211): the largest
@@ -33,7 +34,7 @@ def validate_max_bytes(options: dict[str, Any]) -> int | None:
     value = options["waveform_max_bytes"]
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+    if not is_int(value) or value < 1:
         raise SimError(
             "options.waveform_max_bytes must be a positive integer byte count "
             f"or null to disable the guard (got {json.dumps(value, default=repr)})"
@@ -50,7 +51,7 @@ def validate_decimate(options: dict[str, Any]) -> int | None:
     if "waveform_decimate" not in options:
         return None
     value = options["waveform_decimate"]
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+    if not is_int(value) or value < 1:
         raise SimError(
             "options.waveform_decimate must be a positive integer stride "
             f"(got {json.dumps(value, default=repr)})"
