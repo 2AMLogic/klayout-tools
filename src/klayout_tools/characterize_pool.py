@@ -22,12 +22,17 @@ from . import sim, sim_batch
 BATCH_CELL_CONCURRENCY = 4
 
 
-def batch_pool_size(n_cells: int, backend: str | None, request: dict[str, Any]) -> int:
+def batch_pool_size(
+    n_cells: int,
+    backend: str | None,
+    request: dict[str, Any],
+    capacity_wait_s: float | None = None,
+) -> int:
     """Worker count for the per-cell loop: >1 only for a multi-cell run whose
-    backend resolves to ``batch`` **and** whose request opts into waiting out
-    fleet capacity (``batch.capacity_wait_s`` > 0). Without that wait a burst
-    of concurrent submits hits ``batch_no_capacity`` and fails (issue #5348),
-    so the default stays serial. Local/other backends stay serial so a
+    backend resolves to ``batch`` **and** that opts into waiting out fleet
+    capacity (``--wait-for-capacity`` or ``batch.capacity_wait_s`` > 0).
+    Without that wait a burst of concurrent submits hits
+    ``batch_no_capacity`` and fails (issue #5348), so the default stays serial. Local/other backends stay serial so a
     shared host is never oversubscribed."""
     if n_cells <= 1:
         return 1
@@ -35,7 +40,9 @@ def batch_pool_size(n_cells: int, backend: str | None, request: dict[str, Any]) 
     if resolved_backend != "batch":
         return 1
     batch_spec = request.get("batch") or {}
-    if sim_batch.resolve_capacity_wait_s(batch_spec) <= 0:
+    if (capacity_wait_s or 0) <= 0 and sim_batch.resolve_capacity_wait_s(
+        batch_spec
+    ) <= 0:
         return 1
     return min(BATCH_CELL_CONCURRENCY, n_cells)
 
@@ -69,10 +76,11 @@ def run_cells(
     n_cells: int,
     backend: str | None,
     request: dict[str, Any],
+    capacity_wait_s: float | None = None,
 ) -> list[dict[str, Any]]:
     """Run every cell, serially unless the backend is ``batch`` and there is
     more than one cell; results are in cell order either way."""
-    pool_size = batch_pool_size(n_cells, backend, request)
+    pool_size = batch_pool_size(n_cells, backend, request, capacity_wait_s)
     if pool_size <= 1:
         return [run_one(index) for index in range(n_cells)]
     return run_cells_concurrently(run_one, n_cells, pool_size)

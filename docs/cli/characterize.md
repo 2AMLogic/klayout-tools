@@ -6,6 +6,7 @@ SPICE-driven NLDM timing **and power** characterization of one standard cell
 
 ```
 klt characterize <request> [-o OUTDIR] [--lib PATH] [--backend BACKEND]
+                          [--wait-for-capacity SECONDS]
                           [--keep-artifacts] [--cell NAME ...]
                           [--compare-to LIB] [--format text|json]
 ```
@@ -48,6 +49,12 @@ positional file args. Relative paths inside it (`cell.netlist`,
   `batch`/`remote` with `options.osdi_preload`, see
   [OSDI (Verilog-A) model preload](#osdi-verilog-a-model-preload) for the
   `$PDK_ROOT/<rel>` spelling.
+- `--wait-for-capacity SECONDS` — with `--backend batch`, wait up to SECONDS
+  (>= 0) for fleet capacity when a launch is refused (`batch_no_capacity` /
+  `batch_concurrency_cap`), as in `klt sim`. Forwarded to **every** `klt sim`
+  the run makes: each cell's main sweep and each constraint deck. `0` means
+  one attempt; negative values and a non-`batch` `--backend` are refused
+  before any I/O. Omitted, nothing is passed.
 - `--keep-artifacts` — keep the per-corner ngspice log/deck under
   `<outdir>/sim/`.
 - `--cell` — characterize only the named cell out of a batch request's

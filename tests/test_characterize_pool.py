@@ -35,6 +35,14 @@ def test_batch_pool_size_serial_without_capacity_wait(monkeypatch):
     assert size(8, "batch", {"batch": {"capacity_wait_s": 0}}) == 1
 
 
+def test_batch_pool_size_cli_capacity_wait_enables_pool(monkeypatch):
+    monkeypatch.delenv("KLT_SIM_BACKEND", raising=False)
+    size = characterize_pool.batch_pool_size
+    assert size(8, "batch", {}, 600) == characterize_pool.BATCH_CELL_CONCURRENCY
+    assert size(8, "batch", {}, 0) == 1
+    assert size(8, "local", {}, 600) == 1
+
+
 def test_run_cells_serial_off_batch(monkeypatch):
     monkeypatch.delenv("KLT_SIM_BACKEND", raising=False)
     order = []

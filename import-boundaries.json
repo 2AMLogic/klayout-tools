@@ -34,11 +34,13 @@
         "klayout_tools.characterize",
         "klayout_tools.characterize_arcs",
         "klayout_tools.characterize_bisect",
+        "klayout_tools.characterize_capacity",
         "klayout_tools.characterize_cards",
         "klayout_tools.characterize_constraints",
         "klayout_tools.characterize_instances",
         "klayout_tools.characterize_osdi",
         "klayout_tools.characterize_pool",
+        "klayout_tools.characterize_probe",
         "klayout_tools.characterize_sequential",
         "klayout_tools.cli.characterize_cmd",
         "klayout_tools.liberty_compare",
@@ -540,6 +542,7 @@
         "klayout_tools.place_and_route_groups",
         "klayout_tools.place_and_route_hints",
         "klayout_tools.place_and_route_layers",
+        "klayout_tools.place_and_route_macro_halo",
         "klayout_tools.place_and_route_min_area",
         "klayout_tools.place_and_route_pdn_fit",
         "klayout_tools.place_and_route_pins",
@@ -988,6 +991,11 @@
       "consumer": "characterize",
       "exporter": "env_provenance",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "characterize",
+      "exporter": "pex",
+      "reason": "Issue #5348: `klt characterize --wait-for-capacity` reuses the shared capacity-wait validator and batch shard flags from pex_async (as `klt pex` does, #5280) instead of duplicating the rule."
     },
     {
       "consumer": "characterize",

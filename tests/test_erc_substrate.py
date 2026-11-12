@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 
 import klayout.db as kdb
+import pytest
 
 from klayout_tools.erc import run_erc
 
@@ -174,6 +175,25 @@ def test_other_families_keep_the_disclosure(tmp_path):
         "reason": "substrate_continuity_not_modelled",
     } in report["erc_coverage"]["inapplicable"]
     assert "substrate_bodies" not in report["provenance"]
+
+
+@pytest.mark.parametrize("deck", ["sg13g2", "sg13cmos5l"])
+def test_ihp_nbulay_island_isolates_the_second_tap(tmp_path, deck):
+    """Issue #5345: the IHP decks declare nBuLay (32/0) as
+    ``substrate_isolation``, so a drawn nBuLay island around the VSS2 rail
+    is a separate body and there is no substrate-only short; without it the
+    two ties share ``vsubs`` and the short is reported."""
+    ties = [_ptie("p1", "VSS"), _ptie("p2", "VSS2")]
+    layout, top = _two_rails()
+    _box(top, layout, (32, 0), -1, 4, 21, 7)
+    report = _run(tmp_path, layout, _spec(ties), stem="iso", deck=deck)
+    assert _shorts(report) == []
+    bodies = {b["id"] for b in report["provenance"]["substrate_bodies"]}
+    assert bodies == {"vsubs", "vsubs_iso0"}
+
+    layout, _ = _two_rails()
+    report = _run(tmp_path, layout, _spec(ties), stem="noiso", deck=deck)
+    assert len(_shorts(report)) == 1
 
 
 # --- sky130: dnwell island counts only when an n-well ring closes it (#5344) --
