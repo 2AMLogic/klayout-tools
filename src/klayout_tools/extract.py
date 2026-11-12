@@ -215,7 +215,11 @@ from .extract_abstract import _sanitize_instance_name as _sanitize_instance_name
 
 # Final report assembly moved out of `run_extract` (issue #5196).
 from .extract_assemble import assemble_extract_report
-from .extract_flavour import _flavour_split_island
+from .extract_flavour import (
+    _extract_flavour_devices,
+    _flavour_split_island,
+    apportion_shared_sd,
+)
 from .extract_netlist_write import write_flat_netlist
 from .extract_netselect import NetSelectors
 from .extract_orient import orient_asymmetric_mos
@@ -8171,36 +8175,6 @@ def _flavour_mos_regions(
     return (n_gate, p_gate), (sd, kdb.Region()), (source, drain)
 
 
-def _extract_flavour_devices(
-    l2n: kdb.LayoutToNetlist,
-    deck: ExtractionDeck,
-    flavour: MOSFlavour,
-    regions: tuple[kdb.Region, kdb.Region, kdb.Region, kdb.Region],
-    terminals: tuple[kdb.Region, kdb.Region] | None,
-    nfet_body: kdb.Region,
-    pfet_body: kdb.Region,
-) -> None:
-    """One flavour's NMOS then PMOS extraction pass. A ``drain_marker``
-    flavour (issue #4570) additionally hands KLayout its ``tS``/``tD`` layers
-    so source and drain are distinct, ordered terminals."""
-    import klayout.db as kdb
-
-    f_nfet_sd, f_nfet_gate, f_pfet_sd, f_pfet_gate = regions
-    extra: dict[str, kdb.Region] = {}
-    if terminals is not None:
-        extra = {"tS": terminals[0], "tD": terminals[1]}
-    if not flavour.pfet_only:
-        l2n.extract_devices(
-            kdb.DeviceExtractorMOS4Transistor(deck.nfet_class),
-            {"SD": f_nfet_sd, "G": f_nfet_gate, "W": nfet_body, **extra},
-        )
-    if not (flavour.nfet_only and terminals is not None):
-        l2n.extract_devices(
-            kdb.DeviceExtractorMOS4Transistor(deck.pfet_class),
-            {"SD": f_pfet_sd, "G": f_pfet_gate, "W": pfet_body, **extra},
-        )
-
-
 def _extract_netlist(
     layout: kdb.Layout,
     top_cell: kdb.Cell,
@@ -8751,12 +8725,9 @@ def _extract_netlist(
     # derivation. `isolation_islands` is sorted by bounding box (not raw
     # `Region` iteration order, which is not a documented stability
     # guarantee) so the per-island identities synthesized below are stable
-    # across re-runs of the same layout. Empty -- and every downstream
-    # partition below a guaranteed no-op via
-    # `partition_region_by_islands` -- for the overwhelmingly common case:
-    # a deck that leaves this field `None` (every deck as of this field's
-    # introduction until gf180mcu's own module sets it), or a layout that
-    # draws no shapes on a deck's declared isolation layer at all.
+    # across re-runs. Empty -- and every downstream partition a guaranteed
+    # no-op via `partition_region_by_islands` -- for a deck leaving this
+    # field `None`, or a layout drawing nothing on the isolation layer.
     # Unioned with the `--abstract-cells` cover for the same reason
     # `nwell_body_cover` is (issue #1911): an isolation island is a
     # body-identity *classification* for every NMOS body and substrate tie
@@ -8768,7 +8739,10 @@ def _extract_netlist(
     isolation_region = (
         _region(layout, top_cell, deck.substrate_isolation) + abstract_isolation_cover
     )
-    isolation_islands: list[kdb.Region] = sorted_islands(isolation_region)
+    isolation_islands: list[kdb.Region] = sorted_islands(
+        isolation_region,
+        nwell if deck.substrate_isolation_needs_nwell_ring else None,
+    )
     # `nfet_active_outside`/`nfet_active_isolated` feed only the device-
     # recognition ("W" terminal) split below -- `nfet_gate`/`nfet_sd` above
     # stay the full (unpartitioned) region for every *other* purpose
@@ -9633,6 +9607,8 @@ def _extract_netlist(
                 l2n.connect(f_pfet_sd, bridge)
         l2n.connect(f_nfet_sd)
         l2n.connect(f_pfet_sd)
+        l2n.connect(f_nfet_sd, nfet_sd)  # #5311: shared S/D is one net
+        l2n.connect(f_pfet_sd, pfet_sd)
         l2n.connect(f_nfet_gate)
         l2n.connect(f_pfet_gate)
         l2n.connect(f_nfet_gate, poly)
@@ -9842,6 +9818,14 @@ def _extract_netlist(
         deck,
         flavour_terminals,
         (flavour_nfet_gate, flavour_pfet_gate),
+    )
+    # Issue #5311: re-divide S/D shared across the per-gate flavour split.
+    apportion_shared_sd(
+        l2n,
+        netlist.circuit_by_name(top_cell.name),
+        [(nfet_gate, nfet_sd), (pfet_gate, pfet_sd)]
+        + list(zip(flavour_nfet_gate, flavour_nfet_sd, strict=True))
+        + list(zip(flavour_pfet_gate, flavour_pfet_sd, strict=True)),
     )
 
     # `--def-net-names` (issue #951): must run right after `l2n.netlist()` --
