@@ -94,9 +94,9 @@ from .erc_spec import (
 )
 from .erc_substrate import (
     NO_TIES_MISSING,
-    SUBSTRATE_WORK_ID,
     SubstrateOutcome,
     run_substrate_pass,
+    substrate_coverage_work,
     substrate_provenance,
 )
 from .erc_ties import (  # noqa: F401 -- REASON_* are re-exported public names
@@ -322,15 +322,6 @@ REASON_NO_GATES = "no_gates"
 #: ``erc.net_connectivity`` cannot resolve it. Additive; leaves
 #: ``erc_status`` untouched like every other ``inapplicable`` entry.
 REASON_EXTRACTOR_GLOBAL_NET = "extractor_global_net"
-
-#: ``erc_coverage.inapplicable[].reason`` (issue #4384) on
-#: ``erc.supply_short`` when the spec declares two or more ``kind: "supply"``
-#: nets: ``klt erc`` joins conductors only through the declared
-#: ``stackup``/``vias``, so supply rails that are one conductor through a
-#: shared substrate read as separate clean islands. A coverage disclosure,
-#: not a merge (substrate/well merging was rejected in #2192); additive and
-#: leaves ``erc_status`` untouched. Cross-check with ``klt lvs``.
-REASON_SUBSTRATE_ISOLATION_UNDECIDABLE = "substrate_isolation_undecidable"
 
 #: The skip reason for a level that could have been graded had ``--pdk``
 #: named a PDK with an antenna-ratio table (or named one at all), or had the
@@ -584,9 +575,7 @@ def _connectivity_coverage(
     well_assertion_coverage: list[dict[str, Any]] | None = None,
     compact: bool = False,
     excused_gates: frozenset[str] | set[str] = frozenset(),
-    substrate_checked: bool = False,
-    substrate_missing: list[str] | None = None,
-    substrate_asserted: bool = False,
+    substrate: SubstrateOutcome | None = None,
 ) -> dict[str, Any]:
     """The *second* checked-work scope this envelope carries (issue #2179):
     the connectivity/geometry rules behind ``erc_findings``.
@@ -740,18 +729,12 @@ def _connectivity_coverage(
         inapplicable.append(
             {"id": work_id("erc.net_connectivity"), "reason": "no_nets_declared"}
         )
-    if substrate_checked:
-        checked.extend(["erc.supply_short", SUBSTRATE_WORK_ID])
-        if substrate_asserted:  # issue #5343: rests on `ties[].isolation_boxes`
-            checked_by_assertion.append(SUBSTRATE_WORK_ID)
-    elif sum(1 for decl in nets_decl if decl.get("kind") == "supply") >= 2:
-        inapplicable.append(
-            {
-                "id": "erc.supply_short",
-                "reason": REASON_SUBSTRATE_ISOLATION_UNDECIDABLE,
-                "missing": list(substrate_missing or ["substrate_isolation"]),
-            }
-        )
+    sub_checked, sub_asserted, sub_inapplicable = substrate_coverage_work(
+        substrate or SubstrateOutcome(), nets_decl
+    )
+    checked.extend(sub_checked)
+    checked_by_assertion.extend(sub_asserted)
+    inapplicable.extend(sub_inapplicable)
 
     for tie in ties:
         identity = work_id("erc.missing_tie", tie["name"])
@@ -2504,13 +2487,6 @@ def _extract_connectivity(
         if tie["tap_boxes"]:
             tap_region = tap_region & _boxes_region(kdb, layout, tie["tap_boxes"])
         tap_sites = (tap_region & well_region).merged()
-        # `isolation_boxes` (issue #5343): asserted isolated bodies, read only
-        # by the substrate post-pass (`erc_substrate`); never registered.
-        isolation_region = (
-            _boxes_region(kdb, layout, tie["isolation_boxes"])
-            if tie["isolation_boxes"]
-            else None
-        )
         tap_index = l2n.register(tap_sites, f"{tie['name']}__tap")
         l2n.connect(tap_sites)
         l2n.connect(tap_sites, regions[tie["connect_to"]])
@@ -2520,7 +2496,6 @@ def _extract_connectivity(
                 "well_region": well_region,
                 "tap_region": tap_sites,
                 "tap_index": tap_index,
-                "isolation_region": isolation_region,
                 # Issue #2199: measured here, where both regions exist,
                 # rather than re-derived later from the spec alone -- see
                 # `_degenerate_tie_reasons`. `tap_boxes` narrowing feeds the
@@ -3249,9 +3224,7 @@ def run_erc(
         well_assertion_coverage,
         compact,
         excused,
-        substrate_outcome.bodies is not None,
-        substrate_outcome.missing,
-        substrate_outcome.asserted,
+        substrate_outcome,
     )
     erc_rollup = coverage_rollup(
         {"coverage": erc_coverage}, failed=bool(erc_finding_count)

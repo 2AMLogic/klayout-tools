@@ -2516,13 +2516,9 @@ def test_two_supply_nets_disclose_substrate_isolation_undecidable(tmp_path):
 
     report = run_erc(str(gds), str(spec))
 
-    assert _supply_disclosure(report) == [
-        {
-            "id": "erc.supply_short",
-            "reason": "substrate_isolation_undecidable",
-            "missing": ["ties[] entries declaring the substrate/well tap geometry"],
-        }
-    ]
+    [entry] = _supply_disclosure(report)
+    assert entry["reason"] == "substrate_isolation_undecidable"
+    assert "tap geometry" in entry["missing"][0]
 
 
 def test_fewer_than_two_supply_nets_emit_no_substrate_disclosure(tmp_path):

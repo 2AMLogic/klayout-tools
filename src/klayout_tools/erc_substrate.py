@@ -38,6 +38,15 @@ from ._unionfind import UnionFind
 #: ``erc_coverage.checked`` id for the substrate-path work.
 SUBSTRATE_WORK_ID = "erc.supply_short.substrate"
 
+#: ``erc_coverage.inapplicable[].reason`` (issue #4384) on
+#: ``erc.supply_short`` when the spec declares two or more ``kind: "supply"``
+#: nets: ``klt erc`` joins conductors only through the declared
+#: ``stackup``/``vias``, so supply rails that are one conductor through a
+#: shared substrate read as separate clean islands. A coverage disclosure,
+#: not a merge (substrate/well merging was rejected in #2192); additive and
+#: leaves ``erc_status`` untouched. Cross-check with ``klt lvs``.
+REASON_SUBSTRATE_ISOLATION_UNDECIDABLE = "substrate_isolation_undecidable"
+
 #: ``missing`` entry when the spec declares no ``ties[]`` at all.
 NO_TIES_MISSING = "ties[] entries declaring the substrate/well tap geometry"
 
@@ -185,6 +194,23 @@ def _cluster_names(tie_circuit: Any, declared: set[str]) -> dict[int, set[str]]:
     return names
 
 
+def _isolation_box_region(
+    layout: Any, tie_layers: list[dict[str, Any]], degenerate_ties: dict[str, str]
+) -> Any:
+    """Union of every live ``isolation_boxes`` assertion. It is about where the
+    *substrate* is isolated, so it applies to every tie's tap sites there, not
+    just the asserting tie's (tap geometry is net-agnostic)."""
+    import klayout.db as kdb
+
+    from .erc_well_regions import _boxes_region
+
+    region = kdb.Region()
+    for tie in tie_layers:
+        if tie["isolation_boxes"] and tie["name"] not in degenerate_ties:
+            region += _boxes_region(kdb, layout, tie["isolation_boxes"])
+    return region
+
+
 def _assign_bodies(
     tie_l2n: Any,
     tie_circuit: Any,
@@ -192,23 +218,15 @@ def _assign_bodies(
     degenerate_ties: dict[str, str],
     islands: list[Any],
     names_by_cluster: dict[int, set[str]],
+    box_region: Any,
 ) -> tuple[UnionFind, dict[tuple[str, str], dict[str, Any]]]:
     """Union-find tie-graph clusters over the bodies their tap sites touch.
 
     Returns ``(union_find, bodies)``; ``bodies[key]`` carries the attributed
     ``ties``, the merged tap ``sites`` and the touching ``clusters``.
     """
-    import klayout.db as kdb
-
     uf = UnionFind()
     bodies: dict[tuple[str, str], dict[str, Any]] = {}
-    # An isolation assertion is about where the *substrate* is isolated, so it
-    # applies to every tie's tap sites there, not just the asserting tie's
-    # (tap geometry is net-agnostic: a sibling tie's taps share the sites).
-    box_region = kdb.Region()
-    for tie in tie_layers:
-        if tie["name"] not in degenerate_ties and tie.get("isolation_region"):
-            box_region += tie["isolation_region"]
     for tie in tie_layers:
         if tie["name"] in degenerate_ties:
             continue
@@ -265,6 +283,7 @@ def _short_finding(
 
 def substrate_supply_shorts(
     *,
+    box_region: Any,
     tie_l2n: Any,
     tie_circuit: Any,
     tie_layers: list[dict[str, Any]],
@@ -286,7 +305,13 @@ def substrate_supply_shorts(
     supplies = {name for name, kind in kind_by_name.items() if kind == "supply"}
     names_by_cluster = _cluster_names(tie_circuit, set(kind_by_name))
     uf, bodies = _assign_bodies(
-        tie_l2n, tie_circuit, tie_layers, degenerate_ties, islands, names_by_cluster
+        tie_l2n,
+        tie_circuit,
+        tie_layers,
+        degenerate_ties,
+        islands,
+        names_by_cluster,
+        box_region,
     )
 
     group_names: dict[Any, set[str]] = {}
@@ -317,6 +342,23 @@ def substrate_supply_shorts(
         for key, info in sorted(bodies.items())
     ]
     return findings, body_report, joined
+
+
+def substrate_coverage_work(
+    outcome: SubstrateOutcome, nets_decl: list[dict[str, Any]]
+) -> tuple[list[str], list[str], list[dict[str, Any]]]:
+    """``(checked, checked_by_assertion, inapplicable)`` for ``erc.supply_short``
+    substrate work: graded when the pass ran, disclosed with ``missing`` when
+    two or more supplies are declared and it could not."""
+    if outcome.bodies is not None:
+        asserted = [SUBSTRATE_WORK_ID] if outcome.asserted else []
+        return ["erc.supply_short", SUBSTRATE_WORK_ID], asserted, []
+    if sum(1 for decl in nets_decl if decl.get("kind") == "supply") < 2:
+        return [], [], []
+    missing = list(outcome.missing or ["substrate_isolation"])
+    record = {"id": "erc.supply_short", "missing": missing}
+    record["reason"] = REASON_SUBSTRATE_ISOLATION_UNDECIDABLE
+    return [], [], [record]
 
 
 def substrate_provenance(outcome: SubstrateOutcome) -> dict[str, Any]:
@@ -398,6 +440,7 @@ def run_substrate_pass(
         else []
     )
     findings, bodies, joined = substrate_supply_shorts(
+        box_region=_isolation_box_region(layout, tie_layers, degenerate_ties),
         tie_l2n=tie_l2n,
         tie_circuit=tie_circuit,
         tie_layers=tie_layers,

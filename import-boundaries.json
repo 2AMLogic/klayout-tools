@@ -187,6 +187,7 @@
         "klayout_tools.erc_antenna_gf180mcu",
         "klayout_tools.erc_disclosure",
         "klayout_tools.erc_spec",
+        "klayout_tools.erc_spec_boxes",
         "klayout_tools.erc_substrate",
         "klayout_tools.erc_ties",
         "klayout_tools.erc_well_regions"
@@ -641,6 +642,7 @@
         "klayout_tools._verilog_top",
         "klayout_tools.build_identity",
         "klayout_tools.coverage",
+        "klayout_tools.coverage_work",
         "klayout_tools.design_evidence_tiers",
         "klayout_tools.erc_islands",
         "klayout_tools.evidence_record",
