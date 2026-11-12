@@ -7,6 +7,7 @@ Split out of ``lvs_runset`` to keep that module under its file-size ceiling.
 from __future__ import annotations
 
 import os
+import re
 from typing import Any
 
 #: ``reference.form`` values the runset engine accepts.
@@ -94,7 +95,52 @@ def _drop_capacitor_placeholder(text: str, placeholder_classes: dict[str, str]) 
     return "\n".join(lines)
 
 
-def convert_reference(reference: str, ref_spec: dict[str, Any], work_dir: str) -> str:
+_SUBCKT_RE = re.compile(r"^(\s*\.(?:subckt|ends)\s+)(\S+)", re.I)
+
+
+def rename_top_subckt(text: str, old: str, new: str) -> str:
+    """Rename the ``.subckt old`` header (and its ``.ends old``) to ``new``;
+    only the exact, case-insensitive top name matches (issue #5402)."""
+    out = []
+    for line in text.split("\n"):
+        m = _SUBCKT_RE.match(line)
+        if m and m.group(2).lower() == old.lower():
+            line = m.group(1) + new + line[m.end() :]
+        out.append(line)
+    return "\n".join(out)
+
+
+def _protect_passthrough_calls(
+    text: str, passthrough: set[str], deck: str | None, device_map: Any
+) -> tuple[str, dict[str, str]]:
+    """Issue #5402: hide ``X`` cards that call a ``passthrough`` subcircuit
+    no curated/``device_map`` binding claims (curated wins) behind comment
+    markers, so the conversion leaves them for the runset's own reader."""
+    from .netlist_normalize import (
+        _binding_known,
+        _build_subckt_map,
+        _split_params,
+        _tokenize,
+    )
+
+    binding = _build_subckt_map(deck, device_map)[0]
+    saved: dict[str, str] = {}
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        if line.strip()[:1] not in ("X", "x"):
+            continue
+        positional, _ = _split_params(_tokenize(line)[1:])
+        name = positional[-1] if positional else ""
+        if name.upper() in passthrough and not _binding_known(name, binding):
+            marker = f"* __klt_passthrough_{i}__"
+            saved[marker] = line
+            lines[i] = marker
+    return "\n".join(lines), saved
+
+
+def convert_reference(
+    reference: str, request: dict[str, Any], work_dir: str, deck_file: str
+) -> str:
     """Write the ``subckt-call`` conversion of ``reference`` into ``work_dir``
     and return its path (``reference`` itself for any other form).
 
@@ -102,13 +148,19 @@ def convert_reference(reference: str, ref_spec: dict[str, Any], work_dir: str) -
     ``X.. <pdk>__cap_mim_m3_1 W= L=`` becomes the plain card the runset's own
     extraction pairs with (``C.. a b <pdk>__model__cap_mim A= P=``)."""
     from .lvs import LvsError
+    from .lvs_runset import _deck_device_list
     from .netlist_normalize import (
         NormalizeError,
         convert_reference_netlist,
         quote_spice_includes,
     )
 
-    if ref_spec.get("form", "plain-element") != "subckt-call":
+    ref_spec = request["reference"]
+    layout_top = request["layout"].get("top")
+    ref_top = ref_spec.get("top")
+    rename = bool(layout_top and ref_top and layout_top != ref_top)
+    subckt_call = ref_spec.get("form", "plain-element") == "subckt-call"
+    if not subckt_call and not rename:
         return reference
     try:
         with open(reference, encoding="utf-8", errors="replace") as handle:
@@ -119,18 +171,27 @@ def convert_reference(reference: str, ref_spec: dict[str, Any], work_dir: str) -
         ) from exc
     # The converted copy lives in work_dir: keep relative .include paths valid.
     text = quote_spice_includes(text, os.path.dirname(os.path.abspath(reference)))
-    try:
-        result = convert_reference_netlist(
-            text, deck=ref_spec.get("deck"), device_map=ref_spec.get("device_map")
+    converted = text
+    if subckt_call:
+        deck, device_map = ref_spec.get("deck"), ref_spec.get("device_map")
+        text, saved = _protect_passthrough_calls(
+            text, _deck_device_list(deck_file), deck, device_map
         )
-        converted = _drop_capacitor_placeholder(
-            result.text, result.placeholder_value_classes
-        )
-    except NormalizeError as exc:
-        raise LvsError(
-            f"could not convert subckt-call reference netlist '{reference}' to "
-            f"plain-element form: {exc}"
-        ) from exc
+        try:
+            result = convert_reference_netlist(text, deck=deck, device_map=device_map)
+            converted = _drop_capacitor_placeholder(
+                result.text, result.placeholder_value_classes
+            )
+            for marker, original in saved.items():
+                converted = converted.replace(marker, original)
+        except NormalizeError as exc:
+            raise LvsError(
+                f"could not convert subckt-call reference netlist '{reference}' to "
+                f"plain-element form: {exc}"
+            ) from exc
+    if rename:
+        # The runset pairs tops by name: give the reference top the layout's.
+        converted = rename_top_subckt(converted, ref_top, layout_top)
     out = os.path.join(work_dir, "reference_converted.sp")
     with open(out, "w", encoding="utf-8") as handle:
         handle.write(converted)

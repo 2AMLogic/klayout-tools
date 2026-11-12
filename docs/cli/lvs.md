@@ -299,6 +299,21 @@ a PDK runset's own SPICE reader takes it literally (as an extra net, losing
 cap with `a`/`b` labels on met3 (70/5) and met4 (71/5): with the `0` the compare
 was `mismatch` (`device.property`, net `0` unmatched); without it, `match`.
 
+**RF/bipolar subcircuits and differently named tops (issue #5402).** Under
+`reference.form: "subckt-call"`, an `X` card whose subcircuit is in the
+runset's own `DEVICE_LIST` (e.g. IHP `inductor`, `sg13_hv_svaricap`) and is
+neither a curated binding nor in `reference.device_map` is left untouched in
+the converted reference for the runset's reader to pair, instead of failing
+with `could not convert subckt-call reference netlist`. Curated and
+`device_map` bindings still convert as before, and a subcircuit in none of the
+three still refuses. When `layout.top` and `reference.top` are both given and
+differ, the work copy of the reference has its top `.subckt`/`.ends` renamed to
+`layout.top` so the runset can pair them (no `same_circuit` is emitted; your
+file is never modified). The report still echoes your `reference.top`. With
+equal or absent tops the reference passes through byte-for-byte as before.
+Not live-verified against the IHP `sg13g2.lvs` (not available on this host);
+covered by stub-deck unit tests in `tests/test_lvs_runset_reference.py`.
+
 **The verdict is taken from the `.lvsdb`, not the process.** The database is
 read back with `klayout.db.LayoutVsSchematic.read()` + `xref()`. A PDK driver
 may exit `0` on a non-matching pair, and another (sky130's `sky130.lvs`) exits
