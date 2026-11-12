@@ -2385,6 +2385,13 @@ _WRITE_VERILOG_RE = re.compile(r"^write_verilog (\S+)")
 _OUTPUT_DRC_RE = re.compile(r"^detailed_route -output_drc (\S+) -output_maze")
 
 
+def _grt_index(lines):
+    """Index of the ``global_route -verbose ...`` line (flags vary, #5313)."""
+    return next(
+        i for i, ln in enumerate(lines) if ln.startswith("global_route -verbose")
+    )
+
+
 def _script_lines(script_path: str) -> list[str]:
     with open(script_path, encoding="utf-8") as handle:
         return [line.rstrip("\n") for line in handle]
@@ -3038,14 +3045,12 @@ def test_stubbed_full_route_success(tmp_path, monkeypatch):
     # to break `tests/test_equiv.py`'s golden/gate port-list comparison --
     # see `_row_rail_lines`'s own docstring).
     assert "pdngen -dont_add_pins" in route_lines
-    assert route_lines.index("pdngen -dont_add_pins") < route_lines.index(
-        "global_route -verbose"
-    )
+    assert route_lines.index("pdngen -dont_add_pins") < _grt_index(route_lines)
     assert (
         "filler_placement {sky130_fd_sc_hd__fill_1 sky130_fd_sc_hd__fill_2 "
         "sky130_fd_sc_hd__fill_4 sky130_fd_sc_hd__fill_8}" in route_lines
     )
-    assert route_lines.index("global_route -verbose") < route_lines.index(
+    assert _grt_index(route_lines) < route_lines.index(
         "filler_placement {sky130_fd_sc_hd__fill_1 sky130_fd_sc_hd__fill_2 "
         "sky130_fd_sc_hd__fill_4 sky130_fd_sc_hd__fill_8}"
     )
@@ -7648,7 +7653,7 @@ def test_route_stage_omits_critical_nets_percentage_flag_by_default(
     run_place_and_route(request_path)
 
     route_lines = _script_lines(_stage_script(request_path, "route"))
-    assert "global_route -verbose" in route_lines
+    assert _grt_index(route_lines) >= 0
     assert not any("critical_nets_percentage" in line for line in route_lines)
 
 
@@ -7670,7 +7675,7 @@ def test_route_stage_passes_critical_nets_percentage_flag_when_requested(
     run_place_and_route(request_path)
 
     route_lines = _script_lines(_stage_script(request_path, "route"))
-    assert "global_route -verbose -critical_nets_percentage 30" in route_lines
+    assert "-critical_nets_percentage 30" in route_lines[_grt_index(route_lines)]
 
 
 @pytest.mark.parametrize("value", [-1, 101, 1.5, "30", True])
@@ -7700,7 +7705,7 @@ def test_congestion_and_density_knobs_default_to_prior_tcl(tmp_path, monkeypatch
     assert any(
         line.startswith("global_placement -density 0.6 ") for line in place_lines
     )
-    assert "global_route -verbose" in route_lines
+    assert _grt_index(route_lines) >= 0
     assert report["applied"] == {
         "placement_density": 0.6,
         "route_congestion_iterations": None,
@@ -7728,8 +7733,8 @@ def test_congestion_and_density_knobs_emitted_when_requested(tmp_path, monkeypat
         line.startswith("global_placement -density 0.45 ") for line in place_lines
     )
     assert (
-        "global_route -verbose -congestion_iterations 60 -allow_congestion"
-        in route_lines
+        "-congestion_iterations 60 -allow_congestion"
+        in route_lines[_grt_index(route_lines)]
     )
     assert report["applied"] == {
         "placement_density": 0.45,

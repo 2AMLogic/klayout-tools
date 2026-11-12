@@ -648,6 +648,26 @@ def _macro_footprint(macro: dict[str, Any]) -> tuple[float, float, float, float]
     )
 
 
+def _macro_boxes(macros: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Footprint + keep-out margin per macro, for attributing congestion
+    regions to macro channels (issue #5313). Macros whose LEF has no ``SIZE``
+    are skipped (no footprint to test against)."""
+    boxes: list[dict[str, Any]] = []
+    for macro in macros:
+        if macro["width_um"] is None or macro["height_um"] is None:
+            continue
+        margin = merge_macro_margins(macro["halo"], macro.get("keepout"))
+        boxes.append(
+            {
+                "instance": macro["instance"],
+                "footprint": _macro_footprint(macro),
+                "margin": margin
+                or {"left": 0.0, "right": 0.0, "top": 0.0, "bottom": 0.0},
+            }
+        )
+    return boxes
+
+
 def _macro_blockage_lines(macros: list[dict[str, Any]]) -> list[str]:
     """``create_blockage`` Tcl for every macro that declared a ``halo``
     (issue #2635) -- one hard placement blockage per macro, covering its own
@@ -1208,6 +1228,12 @@ def _stage_script_lines(
         # per-layer "Final congestion report" table, which the response's
         # `congestion` block scrapes; routing results are unchanged.
         global_route_call = "global_route -verbose"
+        # `-congestion_report_file` (issue #5313): the per-GCell violation
+        # list `congestion.global_route.overflow_regions` is parsed from.
+        global_route_call += (
+            f" -congestion_report_file "
+            f"{os.path.join(output_dir, f'{hdl_toplevel}_route_congestion.rpt')}"
+        )
         if route_critical_nets_percentage:
             global_route_call += (
                 f" -critical_nets_percentage {route_critical_nets_percentage}"
