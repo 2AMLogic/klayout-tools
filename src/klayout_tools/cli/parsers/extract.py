@@ -313,6 +313,17 @@ def add_extract_parser(
         ),
     )
     extract_parser.add_argument(
+        "--fail-on-unmodelled",
+        dest="fail_on_unmodelled",
+        action="store_true",
+        help=(
+            "exit 1 (error envelope) when the report's `unmodelled_poly[]` "
+            "is non-empty -- poly shapes (`unmarked` or `marked_unrecognised`) "
+            "extracted as no device -- instead of succeeding with only a "
+            "warning (issue #5388). Default behaviour is unchanged."
+        ),
+    )
+    extract_parser.add_argument(
         "--parasitics-top-cell-only",
         dest="parasitics_top_cell_only",
         action="store_true",

@@ -248,8 +248,8 @@ from .sim_remote import (
 from .sim_remote import _run_remote_dispatch as _run_remote_dispatch
 from .sim_remote import _shard_corner_points as _shard_corner_points
 from .sim_request_overrides import (
+    _refuse_corner_only_deck_flags,
     _refuse_corner_only_flags,
-    _refuse_deck_split_flags,
     _with_capacity_wait_override,
 )
 from .sim_request_overrides import (
@@ -2614,7 +2614,6 @@ def run_sim(
     if artifacts_dir is not None:
         artifacts_dir = os.path.abspath(artifacts_dir)
     _refuse_corner_only_flags(request, pdk_root, timeout_s, collect_partial)
-    _refuse_deck_split_flags(request, max_units_per_job, max_concurrent_jobs)
     if sim_commands.COMMANDS_FIELD in request:
         return _dispatch_command_request(
             request,
@@ -2652,6 +2651,9 @@ def run_sim(
             plot_dir=plot_dir,
             fail_fast_probe=fail_fast_probe,
             fail_on_diagnostic=fail_on_diagnostic,
+            max_units_per_job=max_units_per_job,
+            max_concurrent_jobs=max_concurrent_jobs,
+            collect_partial=collect_partial,
             dry_run=dry_run,
             submit_only=submit_only,
             attach_job_id=attach_job_id,
@@ -2680,36 +2682,6 @@ def run_sim(
         timeout_s=timeout_s,
         _ownership=_ownership,
     )
-
-
-def _refuse_corner_only_deck_flags(
-    budget_s: float | None,
-    plot_dir: str | None,
-    fail_fast_probe: bool | None,
-    fail_on_diagnostic: list[str] | tuple[str, ...] | None,
-) -> None:
-    """Refuse, by name, the corner-only flags a deck-list request has no
-    machinery for (see :func:`_dispatch_deck_request`)."""
-    if budget_s is not None:
-        raise SimError(
-            "--budget-s/options.wall_clock_budget_s is not supported for "
-            "deck-list requests -- bound each unit with decks[].timeout_s "
-            "instead"
-        )
-    if plot_dir is not None:
-        raise SimError(
-            "--plot writes waveform artifacts, which deck-list requests do not produce"
-        )
-    if fail_fast_probe:
-        raise SimError(
-            "--fail-fast-probe calibrates the corner engine, which "
-            "deck-list requests do not run"
-        )
-    if fail_on_diagnostic:
-        raise SimError(
-            "--fail-on-diagnostic grades corner diagnostics, which "
-            "deck-list requests do not produce"
-        )
 
 
 def _dispatch_command_request(
@@ -2796,6 +2768,9 @@ def _dispatch_deck_request(
     submit_only: bool = False,
     attach_job_id: str | None = None,
     capacity_wait_s: float | None = None,
+    max_units_per_job: int | None = None,
+    max_concurrent_jobs: int | None = None,
+    collect_partial: bool = False,
     _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
     """Route a deck-list request to :mod:`klayout_tools.sim_decks`,
@@ -2830,8 +2805,16 @@ def _dispatch_deck_request(
         if not resume and plot_dir is None:
             refuse_sharded_deck_submit(hosts)
     _apply_attach(
-        {}, attach_job_id, resolved_backend, 1 if hosts is None else hosts, submit_only
+        {},
+        attach_job_id,
+        resolved_backend,
+        1 if hosts is None else hosts,
+        submit_only,
+        collect_partial,
     )
+    # Issue #5378: the split knobs fold into `request.batch` for a deck list.
+    request = _with_max_units_override(request, max_units_per_job)
+    request = _with_max_concurrent_override(request, max_concurrent_jobs)
     _check_capacity_wait_applies(capacity_wait_s, resolved_backend, attach_job_id)
     # Issue #4543: the CLI value wins over `batch.capacity_wait_s`, and is
     # validated before any S3 write.
@@ -2888,6 +2871,7 @@ def _dispatch_deck_request(
         submit_only=submit_only,
         attach_job_id=attach_job_id,
         dry_run=dry_run,
+        collect_partial=collect_partial,
     )
     _check_offhost_engine_version_pin(
         engine_version_pin,
