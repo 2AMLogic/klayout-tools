@@ -257,3 +257,23 @@ def emit_error(
     else:
         print(f"klt {command}: {message}", file=sys.stderr)
     return exit_code
+
+
+def fail_on_unmodelled_exit(report: dict[str, Any], args: Any) -> int | None:
+    """``klt extract --fail-on-unmodelled`` (issue #5388).
+
+    Returns the error exit code when the flag is set and the report's
+    structured ``unmodelled_poly[]`` (the single source of truth for both
+    ``unmarked`` and ``marked_unrecognised`` shapes) is non-empty; ``None``
+    otherwise, so the caller proceeds with the normal success path.
+    """
+    unmodelled = report.get("unmodelled_poly") or []
+    if not (getattr(args, "fail_on_unmodelled", False) and unmodelled):
+        return None
+    return emit_error(
+        "extract",
+        f"{len(unmodelled)} unmodelled poly shape(s) extracted as no "
+        "device; see unmodelled_poly[] (--fail-on-unmodelled)",
+        args.format,
+        details={"unmodelled_poly_count": len(unmodelled)},
+    )

@@ -5064,7 +5064,7 @@ def _resolve_relative_to_report(path: str, spec: dict[str, Any]) -> str | None:
 
 def _yield_samples_content_hash(
     envelope: dict[str, Any], spec: dict[str, Any]
-) -> tuple[str | None, dict[str, Any] | None]:
+) -> tuple[str | None, dict[str, Any] | None, str | None]:
     """The citation's ``content_hash`` for a ``klt yield`` evidence entry
     (issue #870, Phase 2a of epic #706).
 
@@ -5091,7 +5091,8 @@ def _yield_samples_content_hash(
     is unaffected by this issue (that directory is recorded independently of
     where `klt signoff` itself is invoked from).
 
-    Returns ``(content_hash, unresolved)``. ``content_hash`` is ``None``
+    Returns ``(content_hash, unresolved, hashed_path)`` (``hashed_path``, issue
+    #5392: the samples file hashed, else ``None``). ``content_hash`` is ``None``
     when the envelope names no ``samples`` document (or it isn't a string),
     or when neither candidate location could be hashed (missing,
     unreadable) -- exactly mirroring ``sha256_file``'s own "unhashable
@@ -5109,7 +5110,7 @@ def _yield_samples_content_hash(
     """
     samples = envelope.get("samples")
     if not isinstance(samples, str):
-        return None, None
+        return None, None, None
 
     candidates: list[str] = []
     report_relative = _resolve_relative_to_report(samples, spec)
@@ -5122,9 +5123,9 @@ def _yield_samples_content_hash(
     for candidate in candidates:
         digest = sha256_file(candidate)
         if digest is not None:
-            return f"sha256:{digest}", None
+            return f"sha256:{digest}", None, candidate
 
-    return None, {"samples": samples, "searched": candidates}
+    return None, {"samples": samples, "searched": candidates}, None
 
 
 #: Per kind, the top-level envelope field(s) naming the **input artifact**
@@ -6502,21 +6503,19 @@ def _resolve_evidence(
     input_block = provenance.get("input") or {}
     actual_hash = input_block.get("content_hash")
     content_hash_unresolved: dict[str, Any] | None = None
+    yield_samples_path: str | None = None
     input_verified: bool | None
     if actual_hash is None and check_kind == "yield":
         # klt yield's current JSON shape (issue #816) carries no
         # `provenance` block of its own -- see this module's "Statistical-
         # evidence binding" docstring section and
         # :func:`_yield_samples_content_hash`.
-        actual_hash, content_hash_unresolved = _yield_samples_content_hash(
-            envelope, spec
+        actual_hash, content_hash_unresolved, yield_samples_path = (
+            _yield_samples_content_hash(envelope, spec)
         )
-        # That hash *is* a live re-hash of the samples document itself, not
-        # a self-report about it, so this kind arrives at issue #2196's
-        # guarantee by construction -- `None` only when nothing could be
-        # hashed, which is the same "no comparison was made" case
-        # :func:`_verify_input_artifact` reports `None` for, and exactly the
-        # case issue #2197's `content_hash_unresolved` then names.
+        # A live re-hash of the samples document (issue #2196 by construction);
+        # `None` only when nothing could be hashed (issue #2197's
+        # `content_hash_unresolved` then names why).
         input_verified = True if actual_hash is not None else None
     else:
         # Issue #2196: the manifest's pinned hash is checked against
@@ -6545,6 +6544,7 @@ def _resolve_evidence(
             "exit_status": exit_status,
             "content_hash": actual_hash,
             "content_hash_unresolved": content_hash_unresolved,
+            "yield_samples_path": yield_samples_path,
             "content_hash_basis": content_hash_basis,
             "input_verified": input_verified,
             "pex_inputs": pex_inputs,

@@ -2007,48 +2007,6 @@ def _submit_decks_batch_only(
     )
 
 
-def _attach_decks_batch(
-    request: dict[str, Any],
-    worker_request: dict[str, Any],
-    job_id: str,
-    *,
-    outdir: str,
-) -> dict[str, Any]:
-    """``--attach <job_id>`` for a deck list (issue #3958): stage, upload and
-    launch nothing; confirm the job exists, then poll and collect it exactly
-    as a blocking run would. The request must be the one the job was
-    submitted from -- it names the unit directories installed under
-    ``outdir``; a collected report whose units differ is refused."""
-    from .sim import SimError
-
-    units = worker_request[DECKS_FIELD]
-    serial_worst_s = sim_batch_plan.deck_serial_worst_s(units)
-    try:
-        config = sim_batch._resolve_batch_config(
-            request, corner_count=1, timeout_s=serial_worst_s
-        )
-        if not sim_batch.job_exists(config, job_id):
-            raise sim_batch.BatchError(
-                f"no batch job {job_id!r} in the configured bucket under "
-                f"prefix {config.jobs_prefix!r} (never submitted, wrong "
-                "bucket/profile/region, or expired)",
-                code=sim_batch.BATCH_UNKNOWN_JOB_CODE,
-            )
-        report = _collect_decks_batch(config, job_id, worker_request, outdir=outdir)
-    except sim_batch.BatchError as exc:
-        raise SimError(f"batch backend failed: {exc}", code=exc.code) from exc
-    expected = [unit["id"] for unit in units]
-    actual = [unit.get("id") for unit in report["units"]]
-    if actual != expected:
-        raise SimError(
-            f"batch job {job_id!r} ran decks {actual} but this request "
-            f"declares {expected}: --attach needs the request the job was "
-            "submitted from",
-            code="attach_request_mismatch",
-        )
-    return report
-
-
 # --------------------------------------------------------------------------- #
 # Entry point (wired into run_sim by sim.py)
 # --------------------------------------------------------------------------- #
@@ -2165,6 +2123,13 @@ def _run_decks_batch_pending(
             entry for entry in request[DECKS_FIELD] if entry.get("id") in pending_ids
         ],
     }
+    from . import sim_decks_split
+
+    split = sim_decks_split.run_if_split(
+        request, pending_request, pending, request_dir=request_dir, outdir=outdir
+    )
+    if split is not None:
+        return split
     files, worker_request = stage_deck_job(pending_request, request_dir=request_dir)
     return _run_decks_batch(pending_request, files, worker_request, outdir=outdir)
 
@@ -2183,6 +2148,7 @@ def _run_decks_offhost(
     resume: bool,
     submit_only: bool,
     attach_job_id: str | None,
+    collect_partial: bool = False,
 ) -> dict[str, Any]:
     """The ``remote`` / ``batch`` leg of :func:`run_deck_request`."""
     from .sim import apply_engine_host
@@ -2194,12 +2160,22 @@ def _run_decks_offhost(
     if backend == "remote":
         report = _run_decks_remote(request, files, worker_request, outdir=outdir)
     elif submit_only:
+        from . import sim_decks_split
+
+        sim_decks_split.refuse_submit_only(request, units)
         return _submit_decks_batch_only(
             request, files, worker_request, artifacts_dir=artifacts_dir
         )
     elif attach_job_id is not None:
-        report = _attach_decks_batch(
-            request, worker_request, attach_job_id, outdir=outdir
+        from . import sim_decks_split
+
+        report = sim_decks_split.attach(
+            request,
+            worker_request,
+            attach_job_id,
+            request_dir=request_dir,
+            outdir=outdir,
+            collect_partial=collect_partial,
         )
     else:
         report = _run_decks_batch_pending(
@@ -2231,6 +2207,7 @@ def run_deck_request(
     submit_only: bool = False,
     attach_job_id: str | None = None,
     dry_run: bool = False,
+    collect_partial: bool = False,
 ) -> dict[str, Any]:
     """Run a validated-in-shape deck-list request on ``backend`` and return
     the deck-list report (the dict ``klt sim`` emits through the shared
@@ -2316,6 +2293,7 @@ def run_deck_request(
             resume=resume,
             submit_only=submit_only,
             attach_job_id=attach_job_id,
+            collect_partial=collect_partial,
         )
 
     if backend == "local":

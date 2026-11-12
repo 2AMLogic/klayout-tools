@@ -376,6 +376,7 @@ Every field name is the flag's own `dest`, so the mapping is one-for-one:
 | `parasitics_nets` | array\<string\> \| string | repeatable `--parasitics-net` |
 | `critical_net_patterns` / `parasitics_net_patterns` | array\<string\> \| string | repeatable `--critical-net-pattern` / `--parasitics-net-pattern` (issue #2974) |
 | `critical_net_all` / `strict_net_patterns` | bool | `--critical-net-all` / `--strict-net-patterns` |
+| `fail_on_unmodelled` | bool | `--fail-on-unmodelled` (issue #5388) |
 | `critical_net_excludes` | array\<string\> \| string | repeatable `--critical-net-exclude` |
 | `parasitic_variants` | array\<string\> \| string | repeatable `--parasitic-variant` |
 | `parasitics_top_cell_only` | bool | `--parasitics-top-cell-only` |
@@ -2657,6 +2658,17 @@ deck has not declared this marker, or whose caller has not drawn it — so a
 non-empty `unmodelled_poly[]` is not on its own proof of a defect; a caller
 reading the report should check whether each flagged shape is a deliberate,
 unannotated underpass before assuming it is a missing device.
+
+#### `--fail-on-unmodelled` (issue #5388)
+
+By default a non-empty `unmodelled_poly[]` only adds a warning; the run exits
+0 and `device_count` / parasitics totals can look complete. Pass
+`--fail-on-unmodelled` to exit 1 through the shared error envelope instead
+(`error.message` names the count and points at `unmodelled_poly[]`;
+`error.unmodelled_poly_count` carries the count). Both `unmarked` and
+`marked_unrecognised` entries count. A clean cell exits 0 as usual. As noted
+above, a non-empty list can be a legitimate poly underpass, so the flag is
+opt-in. Request-document field: `fail_on_unmodelled`.
 
 ### Merged net labels (issue #470)
 
