@@ -1533,21 +1533,12 @@ EXTRACTION_DECK = ExtractionDeck(
     tap=None,
     tap_nplus=(7, 0),  # nSD.drawing -- well-tie implant (n+ Activ inside NWell)
     tap_pplus=(14, 0),  # pSD.drawing -- substrate-tie implant (p+ Activ outside NWell)
-    # nBuLay (issue #5345): the buried n-layer (nbulay_drw, `get_polygons(32,
-    # 0)` in the PDK's own layers_def.drc / `nBuLay.drawing` 32/0 in the
-    # tech .lyp). An NMOS body/tie inside a connected nBuLay island resolves
-    # to that island's own synthesized substrate identity -- see
-    # `ExtractionDeck.substrate_isolation`'s docstring. Like the gf180mcu
-    # DNWELL declaration, no n-well-ring closure check is made: a drawn
-    # island is treated as isolating whether or not the ring closes it
-    # (disclosed in docs/cli/erc.md). Layouts drawing no 32/0 are unaffected.
-    substrate_isolation=(32, 0),  # nBuLay.drawing
+    substrate_isolation=(32, 0),  # nBuLay.drawing (#5345; no ring-closure check)
     # Issue #3831: the PDK's own stdcells (`sg13cmos5l_inv_1`, ...) draw no
     # `nSD` (7/0) at all -- n+ is the family's default doping, so the well
-    # tie is an Activ inside NWell with no `pSD` over it. Same upstream form
-    # (`nactiv = activ.not(psd_drw...)`) and same shared-symlink derivation
-    # sg13g2.py's #2591 `tap_nplus_complement` already accepts; `tap_nplus`
-    # above stays so a layout drawing an explicit `nSD` extracts unchanged.
+    # tie is an Activ inside NWell with no `pSD` over it (same upstream form,
+    # `nactiv = activ.not(psd_drw...)`, as sg13g2.py's #2591
+    # `tap_nplus_complement`); `tap_nplus` above stays for explicit `nSD`.
     tap_nplus_complement=(14, 0),  # pSD.drawing -- absence marks an n+ well tie
     well_label=(31, 2),  # NWell.pin
     # Issue #1476 (the cmos5l sibling of sg13g2.py's own poly_label fix, same

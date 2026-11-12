@@ -2106,22 +2106,13 @@ EXTRACTION_DECK = ExtractionDeck(
     ),
     # No distinct drawn tap layer (`tap` stays `None`) -- but `tap_nplus`/
     # `tap_pplus` let `extract.py` derive an equivalent well-/substrate-tie
-    # region from these same implant layers (issue #1273, mirroring
-    # gf180mcu's #1084; see the module docstring note above this deck's
-    # definition for the full derivation, and for issue #2591's correction
-    # of the well-tie half against upstream).
+    # region from these same implant layers (issue #1273, mirroring gf180mcu's
+    # #1084; module docstring note above has the derivation and #2591's
+    # correction of the well-tie half against upstream).
     tap=None,
     tap_nplus=(7, 0),  # nSD.drawing -- well-tie implant (n+ Activ inside NWell)
     tap_pplus=(14, 0),  # pSD.drawing -- substrate-tie implant (p+ Activ outside NWell)
-    # nBuLay (issue #5345): the buried n-layer (nbulay_drw, `get_polygons(32,
-    # 0)` in the PDK's own layers_def.drc / `nBuLay.drawing` 32/0 in the
-    # tech .lyp). An NMOS body/tie inside a connected nBuLay island resolves
-    # to that island's own synthesized substrate identity -- see
-    # `ExtractionDeck.substrate_isolation`'s docstring. Like the gf180mcu
-    # DNWELL declaration, no n-well-ring closure check is made: a drawn
-    # island is treated as isolating whether or not the ring closes it
-    # (disclosed in docs/cli/erc.md). Layouts drawing no 32/0 are unaffected.
-    substrate_isolation=(32, 0),  # nBuLay.drawing
+    substrate_isolation=(32, 0),  # nBuLay.drawing (#5345; no ring-closure check)
     # Issue #2591: upstream's own well-tie form -- Activ inside NWell with
     # *no* pSD over it (`nactiv = activ.not(psd_drw...)`), unioned with the
     # positive `tap_nplus` form above so either drawing convention extracts.

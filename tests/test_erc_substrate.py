@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 
 import klayout.db as kdb
+import pytest
 
 from klayout_tools.erc import run_erc
 
@@ -174,9 +175,6 @@ def test_other_families_keep_the_disclosure(tmp_path):
         "reason": "substrate_continuity_not_modelled",
     } in report["erc_coverage"]["inapplicable"]
     assert "substrate_bodies" not in report["provenance"]
-
-
-import pytest  # noqa: E402
 
 
 @pytest.mark.parametrize("deck", ["sg13g2", "sg13cmos5l"])
