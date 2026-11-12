@@ -908,6 +908,22 @@ through the substrate; a pair satisfied only through the substrate is listed in
 `provenance.substrate_declared_joins` with `via: "substrate"`. The
 `klt lvs` cross-check (`hints.short_nets`) still applies.
 
+**Isolation layers per deck (issue #5345).** The substrate-continuity
+post-pass and `klt extract`/`klt lvs` split a body only for a layer the
+extraction deck declares as `substrate_isolation`:
+
+| Deck | `substrate_isolation` | Notes |
+|---|---|---|
+| `gf180mcu` | `DNWELL` (12/0) | |
+| `sg13g2` | `nBuLay.drawing` (32/0) | layer/datatype from the PDK's `layers_def.drc` / tech `.lyp`; taps are derived from `Activ` (`tap=None`) and the tie logic handles it |
+| `sg13cmos5l` | `nBuLay.drawing` (32/0) | same as `sg13g2` |
+| `sky130` | not declared | |
+
+**Not checked:** that a drawn isolation island is closed by an n-well ring.
+A drawn nBuLay/DNWELL island is treated as isolating its body whether or not
+the ring closes it, so an unclosed island can mask a real substrate short.
+Layouts that draw no nBuLay extract exactly as before.
+
 **That cross-check is not automatically an independent confirmation,
 either.** At least one widely used open-foundry LVS deck's connectivity
 setup ends with a name-joining rule (e.g. `connect_implicit('*')`): two

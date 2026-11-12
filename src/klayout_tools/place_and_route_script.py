@@ -17,6 +17,7 @@ from typing import Any
 from . import place_and_route_clock as _vclk
 from ._openroad_engine import _timing_violation_report_lines
 from .place_and_route_hints import make_tracks_lines as _make_tracks_lines
+from .place_and_route_macro_halo import merge_macro_margins
 from .place_and_route_pins import pin_constraint_lines
 from .place_and_route_reports import detailed_route_lines, routing_completeness_lines
 from .place_and_route_request import PlaceAndRouteError
@@ -672,20 +673,19 @@ def _macro_blockage_lines(macros: list[dict[str, Any]]) -> list[str]:
     """
     lines: list[str] = []
     for macro in macros:
-        halo = macro["halo"]
-        if halo is None:
+        margin = merge_macro_margins(macro["halo"], macro.get("keepout"))
+        if margin is None:
             continue
         if macro["width_um"] is None or macro["height_um"] is None:
             raise PlaceAndRouteError(
-                f"request.macros[].halo for instance '{macro['instance']}' "
+                f"request.macros[].halo/keepout for instance '{macro['instance']}' "
                 f"needs the macro's footprint, but its lef ({macro['lef']}) "
                 f"declares no SIZE for MACRO '{macro['cell_name']}'"
             )
         x1, y1, x2, y2 = _macro_footprint(macro)
         lines.append(
-            "create_blockage -region "
-            f"{{{x1 - halo['left']} {y1 - halo['bottom']} "
-            f"{x2 + halo['right']} {y2 + halo['top']}}}"
+            f"create_blockage -region {{{x1 - margin['left']} {y1 - margin['bottom']} "
+            f"{x2 + margin['right']} {y2 + margin['top']}}}"
         )
     return lines
 

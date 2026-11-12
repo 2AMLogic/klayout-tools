@@ -189,7 +189,7 @@
     },
     {
       "path": "src/klayout_tools/characterize.py",
-      "lines": 2351
+      "lines": 2322
     },
     {
       "path": "src/klayout_tools/cli/drc_cmd.py",
@@ -545,7 +545,7 @@
     },
     {
       "path": "src/klayout_tools/place_and_route_request.py",
-      "lines": 2316
+      "lines": 2250
     },
     {
       "path": "src/klayout_tools/place_and_route_script.py",
