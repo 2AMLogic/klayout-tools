@@ -1023,6 +1023,22 @@ into the circuit.)
   spacing rule against each other, so they are no longer compared at all.
   Like #1057, this remains an advisory heuristic, not a substitute for
   `klt drc` — see "Geometry is advisory" above.
+- **A via drop that crowds the target block's own via cuts is now rejected
+  (#5398, fixed).** The own-block checks above compared only *metal*. A via
+  drop landing on a pin inside a PDK-authored cell with its own cut array
+  (sg13g2's `npn13G2` emitter/base `Via1` arrays) could place its cut a few
+  nm from — without overlapping — the cell's own cuts, composing `routed:
+  true` with one `via1.space.1` finding per neighbouring cut. The same
+  deck-driven same-layer `"space"` lookup is now applied to each drop's cut
+  layer against the block's own cuts on it (cuts the new cut overlaps merge
+  with it and are exempt). A near miss reports the net in `unrouted_nets[]`
+  (so the composition is `partial`, exit code `3`) with a `legs[].reason` /
+  `drc_hints.notes[]` entry of the form `"draws a via cut on layer (19, 0) at
+  (x, y) that comes within 0.018um of block 'a''s own via cuts on that layer
+  -- closer than the resolved deck's own 'via1.space.1' minimum same-layer
+  spacing rule ..."`. Reach the net at a port outside the array, or route on
+  the block's own metal plane so no via is needed. Like the checks above this
+  is advisory — see "Geometry is advisory".
 - **A route-vs-route collision now retries onto `routing.cross_block_layer_role`
   instead of failing the net outright (#1680, fixed).** #1057/#1386 above only
   ever *rejected* a leg that collided with a different net's already-accepted

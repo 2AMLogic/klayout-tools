@@ -203,8 +203,10 @@ from .gen import (
     ENCLOSURE_MARGIN_UM,
     GenError,
     _cut_fixed_size_um,
-    _fixed_cut_side_um,
     _pdk_family,
+)
+from .gen import (
+    _fixed_cut_side_um as _fixed_cut_side_um,
 )
 from .gen_compose_boundary import draw_pins_and_boundary, parse_boundary
 from .gen_compose_port_access import derive_label_ports, parse_ports_from_labels
@@ -253,6 +255,7 @@ from .gen_compose_routing import (
 )
 from .gen_compose_routing import manhattan_backbone as manhattan_backbone
 from .gen_compose_routing import route_two_pin as route_two_pin
+from .gen_compose_via_cuts import own_via_cut_clearance_reason, via_drop_cut_side_um
 from .gen_layer_params import mfg_grid_um
 from .pdk import PdkNotFoundError, find_pdk
 
@@ -4164,7 +4167,12 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                             "routing.cross_block_layer_role), or supply "
                             "waypoints_um that approach from a clear side"
                         )
-            return None
+            return own_via_cut_clearance_reason(
+                via_drops,
+                pdk_info["variant"],
+                _min_spacing_um_for_layer,
+                _own_block_layer_geometry,
+            )
 
         # Bundle (>2-pin) nets route as a spanning tree of two-pin legs
         # (#1073); a 2-pin net is the degenerate one-leg case of exactly the
@@ -4426,16 +4434,8 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         for drop in route.get("via_drops", []):
             via_pair = drop["via_layer"]
             if via_pair not in via_drop_size_um:
-                floor = _min_width_um_for_layer(pdk_info["variant"], via_pair)
-                # Issue #2585: then clamp *down* to the layer's fixed size
-                # where the foundry rule is a maximum too (sky130's `via`,
-                # 0.15um; sg13g2's `Via1`-`Via4`, 0.19um) -- the generic
-                # 0.22um square is over that maximum. The landing pads
-                # below keep their own baseline/area/enclosure sizing, so
-                # the smaller via only gains enclosure.
-                via_drop_size_um[via_pair] = _fixed_cut_side_um(
-                    max(_VIA_DROP_SIZE_UM, floor[0] if floor is not None else 0.0),
-                    _via_fixed_size_um(pdk_info["variant"], via_pair),
+                via_drop_size_um[via_pair] = via_drop_cut_side_um(
+                    pdk_info["variant"], via_pair
                 )
     # Issue #2072: `_VIA_LANDING_SIZE_UM` is a guaranteed `met3.area.1`/
     # `met4.area.1`/`met5.area.1`-class violation whenever a via-drop
