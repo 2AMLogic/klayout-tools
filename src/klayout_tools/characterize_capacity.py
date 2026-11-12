@@ -25,3 +25,21 @@ def capacity_shard(
     except PexError as exc:
         raise CharacterizeError(str(exc)) from exc
     return batch_shard_flags(capacity_wait_s=capacity_wait_s)
+
+
+def with_batch_passthrough(
+    sim_request: dict[str, Any], request: dict[str, Any]
+) -> dict[str, Any]:
+    """Copy ``request.batch`` into ``sim_request`` (issue #5367).
+
+    Pass-through only: ``klt sim`` validates the values (and ignores the
+    block on a local run), so ``batch.capacity_wait_s`` is honored per cell.
+    """
+    batch = request.get("batch")
+    if batch is not None:
+        if not isinstance(batch, dict):
+            from .characterize import CharacterizeError
+
+            raise CharacterizeError("request.batch must be an object")
+        sim_request["batch"] = dict(batch)
+    return sim_request

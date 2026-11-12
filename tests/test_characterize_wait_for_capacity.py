@@ -76,3 +76,47 @@ def test_bad_wait_for_capacity_refused_before_io(tmp_path, monkeypatch, kwargs, 
     with pytest.raises(characterize.CharacterizeError, match=match):
         characterize.run_characterize(str(path), outdir=str(tmp_path / "o"), **kwargs)
     assert not seen and not (tmp_path / "o").exists()
+
+
+def _record_sim_requests(monkeypatch):
+    """Record the generated sim request of every `run_sim_leg` call."""
+    seen: list[dict] = []
+
+    def _fake_leg(*, sim_request, **_kwargs):
+        seen.append(sim_request)
+        raise sim.SimError("stop here")
+
+    monkeypatch.setattr(characterize, "run_sim_leg", _fake_leg)
+    return seen
+
+
+def test_request_batch_block_is_forwarded_to_sim_request(tmp_path, monkeypatch):
+    seen = _record_sim_requests(monkeypatch)
+    batch = {"capacity_wait_s": 600}
+    path = _write_request(tmp_path, _inverter_request(tmp_path, batch=batch))
+    with pytest.raises(characterize.CharacterizeError, match="simulation failed"):
+        characterize.run_characterize(str(path))
+    assert seen[0]["batch"] == batch
+
+
+def test_request_batch_block_reaches_constraint_deck(tmp_path):
+    request = _inverter_request(tmp_path, batch={"capacity_wait_s": 30})
+    kwargs = dict(
+        request=request,
+        request_dir=str(tmp_path),
+        testbench_path="tb.spice",
+        corner={"supply_v": 1.8, "temperature_c": 25, "process": None},
+        plan={"window": {"step_ns": 0.01, "stop_ns": 1.0}, "measurements": []},
+        options={"timeout_s": 10, "keep_artifacts": False, "osdi_preload": []},
+        keep_artifacts=None,
+    )
+    assert characterize._build_sim_request(**kwargs)["batch"] == {"capacity_wait_s": 30}
+    request.pop("batch")
+    assert "batch" not in characterize._build_sim_request(**kwargs)
+
+
+def test_non_object_request_batch_refused(tmp_path, monkeypatch):
+    _record_sim_requests(monkeypatch)
+    path = _write_request(tmp_path, _inverter_request(tmp_path, batch=600))
+    with pytest.raises(characterize.CharacterizeError, match=r"request\.batch"):
+        characterize.run_characterize(str(path))
