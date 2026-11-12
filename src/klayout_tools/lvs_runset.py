@@ -884,7 +884,7 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
     work_dir = tempfile.mkdtemp(prefix="klt-lvs-runset-")
     try:
         # Issue #4805: a ``subckt-call`` reference is converted into work_dir.
-        runset_reference = convert_reference(reference, request["reference"], work_dir)
+        runset_reference = convert_reference(reference, request, work_dir, deck_file)
         lvsdb_path, completed = _run_runset(
             binary=binary,
             deck_file=deck_file,
@@ -907,7 +907,7 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
         declared = verdict["coverage"]["declared_device_classes"]
         unresolved = _unresolved_reference_calls(
             runset_reference,
-            request["reference"].get("top"),
+            request["reference"].get("top") and (top or request["reference"]["top"]),
             {str(n).upper() for side in declared.values() for n in side or []}
             | _deck_device_list(deck_file),
         )

@@ -95,3 +95,82 @@ def test_subckt_call_report_replays_under_check_rerun(tmp_path, fake_klayout):
     result = rerun_lvs_report(str(committed))
     assert result["status"] == "match", result
     assert not result.get("drift"), result
+
+
+# --- Issue #5402: deck DEVICE_LIST pass-through and top renaming ------------
+
+RF_SPICE = (
+    ".subckt TOP a b\nXL1 a b inductor W=10u L=5u\n"
+    "XC1 a b sky130_fd_pr__cap_mim_m3_1 W=10u L=5u\n.ends TOP\n"
+)
+
+
+def _capture_reference(request):
+    seen = {}
+    real = lvs_runset._run_runset
+
+    def spy(**kw):
+        seen["text"] = open(kw["reference"]).read()
+        seen["path"] = kw["reference"]
+        return real(**kw)
+
+    lvs_runset._run_runset = spy
+    try:
+        report = run_lvs(json.dumps(request))
+    finally:
+        lvs_runset._run_runset = real
+    return report, seen
+
+
+def _rf_request(tmp_path, device_list=("inductor",), **reference):
+    request = _mim_request(tmp_path, form="subckt-call", deck="sky130", **reference)
+    (tmp_path / "ref.sp").write_text(RF_SPICE)
+    names = ", ".join(f'"{n}".upcase' for n in device_list)
+    (tmp_path / "pdk.lvs").write_text(f"DEVICE_LIST = [{names}]\n")
+    return request
+
+
+def test_deck_device_list_subckt_passes_through(tmp_path, fake_klayout):
+    _, seen = _capture_reference(_rf_request(tmp_path))
+    assert "XL1 a b inductor W=10u L=5u" in seen["text"]  # untouched
+    assert "C1 a b sky130_fd_pr__model__cap_mim" in seen["text"]  # curated wins
+
+
+def test_curated_name_in_device_list_still_converts(tmp_path, fake_klayout):
+    request = _rf_request(tmp_path, device_list=("sky130_fd_pr__cap_mim_m3_1",))
+    with pytest.raises(LvsError, match="inductor"):
+        run_lvs(json.dumps(request))  # inductor not listed here -> still loud
+    request = _rf_request(
+        tmp_path, device_list=("inductor", "sky130_fd_pr__cap_mim_m3_1")
+    )
+    _, seen = _capture_reference(request)
+    assert "XC1" not in seen["text"]
+
+
+def test_unlisted_unknown_subckt_still_refused(tmp_path, fake_klayout):
+    request = _rf_request(tmp_path, device_list=("other_dev",))
+    with pytest.raises(LvsError, match="could not convert subckt-call"):
+        run_lvs(json.dumps(request))
+
+
+def test_differing_tops_rename_reference_copy_only(tmp_path, fake_klayout):
+    request = _rf_request(tmp_path, top="TOP")
+    request["layout"]["top"] = "LAYTOP"
+    (tmp_path / "ref.sp").write_text(RF_SPICE + ".subckt TOPPER x\n.ends TOPPER\n")
+    report, seen = _capture_reference(request)
+    assert ".subckt LAYTOP a b" in seen["text"]
+    assert ".ends LAYTOP" in seen["text"]
+    assert ".subckt TOPPER x" in seen["text"]  # not a substring match
+    assert ".subckt TOP a b" in (tmp_path / "ref.sp").read_text()
+    assert report["reference_top"] == "TOP"
+
+
+def test_matching_or_absent_tops_leave_reference_unrenamed(tmp_path, fake_klayout):
+    request = json.loads(_request(tmp_path, 1))
+    request["layout"]["top"] = "TOP"
+    request["reference"]["top"] = "TOP"
+    _, seen = _capture_reference(request)
+    assert seen["path"] == str(tmp_path / "ref.sp")  # no work copy
+    request["reference"].pop("top")
+    _, seen = _capture_reference(request)
+    assert seen["path"] == str(tmp_path / "ref.sp")
