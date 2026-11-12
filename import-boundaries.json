@@ -419,6 +419,7 @@
         "klayout_tools.lvs_combine",
         "klayout_tools.lvs_finfet",
         "klayout_tools.lvs_finfet_flatten",
+        "klayout_tools.lvs_flatten",
         "klayout_tools.lvs_gate_level",
         "klayout_tools.lvs_gate_level_convert",
         "klayout_tools.lvs_known_limits",
