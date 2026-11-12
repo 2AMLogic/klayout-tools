@@ -94,7 +94,6 @@ from . import (
     sim_remote,
     sim_staging,
 )
-from ._jsonnum import is_number
 from .remote_launcher import ASSUMED_THREADS_PER_CORNER, RemoteLauncher
 
 #: Top-level request field that marks a deck-list request.
@@ -205,7 +204,7 @@ def _resolve_local_path(ref: str, *, request_dir: str, where: str) -> str:
 
 
 def _validated_timeout(value: Any, where: str) -> float:
-    if not is_number(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise _deck_error(f"{where} must be a positive number of seconds")
     if value <= 0:
         raise _deck_error(f"{where} must be a positive number of seconds")

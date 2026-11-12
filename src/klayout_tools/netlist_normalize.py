@@ -141,7 +141,6 @@ from typing import Any, NamedTuple
 
 from . import _spice_number as spice_number
 from ._capacitor_mf import capacitor_mf_is_m_alias
-from ._jsonnum import is_number
 from ._paths import fold_spice_continuations
 from .pdk_models import (
     GEOMETRY_STYLE_BARE_UM,
@@ -1848,7 +1847,7 @@ def _parse_device_map_fixed_um(
     if key not in value:
         return None
     raw = value[key]
-    if not is_number(raw):
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
         raise NormalizeError(
             f"device_map entry '{name}': '{key}' must be a number (the "
             "fixed dimension in micrometres this subcircuit's name bakes "

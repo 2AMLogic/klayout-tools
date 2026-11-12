@@ -49,7 +49,6 @@ import tempfile
 from typing import Any
 
 from . import design_centering, env_provenance
-from ._jsonnum import is_number
 from ._paths import _load_request_json, validate_request_shape
 from ._provenance import build_provenance
 from ._text import line_containing as _line_containing
@@ -247,7 +246,7 @@ def load_request(request_path: str) -> dict[str, Any]:
 
 
 def _require_positive_number(value: Any, field: str) -> float:
-    if not is_number(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise SizeError(f"{field} must be a number")
     if value <= 0:
         raise SizeError(f"{field} must be positive")
@@ -293,7 +292,7 @@ def _parse_device(device: dict[str, Any]) -> dict[str, Any]:
     nf = device.get("nf", 1)
     mult = device.get("mult", 1)
     for value, field in ((nf, "request.device.nf"), (mult, "request.device.mult")):
-        if not is_number(value) or value <= 0:
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
             raise SizeError(f"{field} must be a positive number")
 
     op_point_element = device.get("op_point_element") or _default_op_point_element(
@@ -326,7 +325,7 @@ def _parse_corner(corner: dict[str, Any]) -> dict[str, Any]:
         raise SizeError("request.corner.vdd_v is required")
     vdd = _require_positive_number(vdd, "request.corner.vdd_v")
     temperature_c = corner.get("temperature_c", 27)
-    if not is_number(temperature_c):
+    if isinstance(temperature_c, bool) or not isinstance(temperature_c, (int, float)):
         raise SizeError("request.corner.temperature_c must be a number")
     return {"process": process, "vdd_v": vdd, "temperature_c": float(temperature_c)}
 

@@ -28,7 +28,6 @@ from collections.abc import Callable
 from typing import Any
 
 from . import macros as macro_spec
-from ._jsonnum import is_number
 from .lef_header import read_lef_header, read_lef_macro_pin_ports
 from .pdk import descriptor_views, lef_files
 from .pdk_cells import resolve_liberty_for_cell_library
@@ -1959,7 +1958,7 @@ def _validate_placement_density(value: Any) -> float:
     this command's prior fixed value, so the generated Tcl is unchanged."""
     if value is None:
         return 0.6
-    if not is_number(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise PlaceAndRouteError("request.placement_density must be a number")
     if not (0 < value <= 1):
         raise PlaceAndRouteError(
@@ -2087,7 +2086,7 @@ def _validate_output_dbu_um(value: Any) -> float | None:
     time, when the native dbu is known."""
     if value is None:
         return None
-    if not is_number(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise PlaceAndRouteError("request.output_dbu_um must be a positive number")
     if not 0 < value < float("inf"):
         raise PlaceAndRouteError("request.output_dbu_um must be a positive number")

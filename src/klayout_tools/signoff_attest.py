@@ -65,7 +65,6 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from . import signoff_attest_item9 as item9
-from ._jsonnum import is_number
 from ._provenance import sha256_file
 from ._report_verify import (
     VOLATILE_PROVENANCE_PATHS,
@@ -925,7 +924,7 @@ def _metric_value(root: str, path: str, field: str) -> float | int | None:
             node = node[int(segment)]
         else:
             return None
-    if not is_number(node):
+    if isinstance(node, bool) or not isinstance(node, (int, float)):
         return None
     return node
 

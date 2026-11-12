@@ -219,7 +219,6 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from . import env_provenance, output_lock, pex_async, pex_sim_evidence
-from ._jsonnum import is_number
 from ._paths import _resolve_relative, fold_spice_continuations
 from ._provenance import content_hash, sha256_file
 from .coverage import (
@@ -1821,7 +1820,7 @@ def _measurement_number(raw: Any) -> float | None:
     """
     if raw is None:
         return None
-    if not is_number(raw):
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
         raise ValueError("must be a number or null")
     value = float(raw)
     if not math.isfinite(value):

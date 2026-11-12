@@ -48,7 +48,6 @@ import math
 import os
 from typing import Any
 
-from ._jsonnum import is_number
 from ._native import _load_native_extension, native_provenance
 from .yield_provenance import (
     _attach_spec_rows,
@@ -134,7 +133,7 @@ def _limits_from(raw: Any, name: str, where: str) -> dict[str, Any]:
         value = raw.get(key)
         if value is None:
             continue
-        if not is_number(value):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise YieldError(
                 f"{where}: measurement '{name}' limits.{key} must be a number"
             )
@@ -165,7 +164,7 @@ def _read_qualification_keys(
     declares neither is unchanged."""
     k = raw.get("target_sigma")
     if k is not None:
-        if not is_number(k):
+        if isinstance(k, bool) or not isinstance(k, (int, float)):
             raise YieldError(f"{prefix}target_sigma must be a number")
         if not math.isfinite(k) or k <= 0:
             raise YieldError(f"{prefix}target_sigma must be > 0 (got {k})")
@@ -275,7 +274,7 @@ def _negative_control_from(raw: Any, name: str, where: str) -> dict[str, Any] | 
         if value is None:
             errored += 1
             continue
-        if not is_number(value):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise YieldError(
                 f"{where}: measurement '{name}' negative_control has a non-numeric "
                 "sample value"
@@ -341,7 +340,7 @@ def _draw_from_mc_corners(
             value = m.get("value")
             if value is None:
                 errored += 1
-            elif not is_number(value):
+            elif isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise YieldError(
                     f"sim report: measurement '{name}' has a non-numeric value "
                     f"in corner {corner.get('corner_id')!r}"
@@ -488,7 +487,7 @@ def _measurements_from_sample_set(doc: dict[str, Any]) -> list[dict[str, Any]]:
             if value is None:
                 errored += 1
                 continue
-            if not is_number(value):
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise YieldError(
                     f"sample set: measurement '{name}' has a non-numeric sample value"
                 )
