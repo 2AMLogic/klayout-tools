@@ -117,6 +117,8 @@ A request naming both, or neither, is a request error.
 
 Unknown top-level keys are rejected (exit 1, naming the key and listing the
 known fields), matching `klt extract`; only `schema` is always allowed.
+The optional `sdc_check` field (see "SDC drift check") compares a committed
+`.sdc` with the constraints below.
 
 ```json
 {
@@ -1161,7 +1163,8 @@ input exclusions are `constraints.false_path_from` (issue #2968, see "Timing
 exceptions"). Clock uncertainty is `constraints.clock_uncertainty_ns` (issue
 #4240, see "Clock uncertainty"). A full caller-supplied SDC passthrough
 (`read_sdc`, which would also cover multicycle paths and `-to`/`-through`
-false paths) is still **not** in scope.
+false paths) is still **not** in scope; to detect drift between a committed
+`.sdc` and the request, see "SDC drift check".
 
 **Detect the sentinel mechanically.** Independent of any constraint the caller
 sets, `timing_status` reports `"constrained"` when every slack value in the
@@ -1356,7 +1359,9 @@ The global `worst_hold_path` is still `rst_n → ff_a/RESET_B`.
   are supported, plus `set_false_path -from` for the ports named in
   `constraints.false_path_from`: there are no multicycle paths, no
   `-to`/`-through` false paths, and no `read_sdc`. Clock uncertainty is
-  supported (`constraints.clock_uncertainty_ns`, issue #4240).
+  supported (`constraints.clock_uncertainty_ns`, issue #4240). A committed
+  `.sdc` can be *compared* with the request (never executed): see "SDC drift
+  check".
 
 ## Clock uncertainty (`constraints.clock_uncertainty_ns`, issue #4240)
 
@@ -1382,6 +1387,56 @@ hold value. The response's `clock_uncertainty` block says whether any
 uncertainty was applied, so a slack computed with the assumption is
 distinguishable from one computed without it. Not supported: inter-clock
 uncertainty, multiple clocks, per-corner values.
+
+## SDC drift check (`sdc_check`, issue #5236)
+
+A flow that keeps its constraints in a committed `.sdc` must duplicate them
+into this request, so the two can drift silently. The optional top-level
+`sdc_check` field names the file (resolved relative to the request, like `def`):
+
+```json
+{ "sdc_check": { "path": "constraints.sdc" } }
+```
+
+`klt sta` reads it with a small pure-Python reader and compares it with the
+request. **The SDC is never executed, never passed to OpenSTA and never a
+constraint source** -- the request stays the only one (no `read_sdc`), so
+constraint-completeness accounting is unchanged. Omitted: no `sdc_drift` key,
+and the response and generated Tcl are unchanged.
+
+Checked subset: `create_clock` (`-name`, `-period`, `[get_ports X]`),
+`set_input_delay` / `set_output_delay` (`-clock`, `-min`/`-max`, `[all_inputs]`
+/ `[all_outputs]` or `[get_ports X]` or a bare port) and
+`set_clock_uncertainty` (`-setup`/`-hold`, optional `[get_clocks X]`), compared
+with `constraints` clocks/periods, `input_delay_ns`/`output_delay_ns`,
+`input_delays`/`output_delays` and `clock_uncertainty_ns` (tolerance 1e-9 ns).
+A per-corner period map matches when the SDC period equals any corner's value.
+Comments, blank lines and `\` continuations are handled; anything else --
+other commands, or a checked command using an option/form the reader does not
+understand (`-add_delay`, `-waveform`, braces, `$variables`) -- goes to
+`unchecked`.
+
+```json
+"sdc_drift": {
+  "path": {"path": "constraints.sdc", "scope": "repo", "content_hash": "sha256:..."},
+  "mismatches": [
+    {"command": "set_input_delay", "subject": "a", "bound": "max",
+     "sdc_value": 0.9, "request_value": 0.8, "line": 4}
+  ],
+  "unchecked": [
+    {"command": "set_multicycle_path", "line": 7,
+     "reason": "command not in the checked subset"}
+  ],
+  "status": "drift"
+}
+```
+
+`sdc_value`/`request_value` are `null` when one side has no counterpart (a
+request constraint the SDC lacks, or the reverse). `status` is `"match"` or
+`"drift"`. The hash of the file is recorded in `path.content_hash`. Drift is
+data, not a gate: the exit code stays 0. A missing/unreadable file or a
+malformed `sdc_check` is a request error (exit 1). The block is hoisted once
+on both the single- and multi-corner response shapes.
 
 ## Input transitions (issue #3227)
 

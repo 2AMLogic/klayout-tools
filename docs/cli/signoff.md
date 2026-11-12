@@ -3965,6 +3965,18 @@ both for the citation and for the `content_hash` staleness pin. A future
 picked up automatically and takes precedence, with no manifest change
 required.
 
+**A stale yield pin says which file was hashed (issue #5392).** When the
+pinned `content_hash` disagrees, the `stale_evidence` `detail` carries
+`compared_against` (the resolved samples-document path that was hashed) and a
+`hint` that `content_hash` must be the sha256 of that samples document, not of
+the yield report; if the pin equals the yield report file's own sha256,
+`detail.pin_is_envelope_file_hash` is `true` and the hint says so. For yield,
+`detail.hash_check.field` reads `samples (sha256 of the named samples
+document)` instead of `provenance.input.content_hash` (a yield report has no
+such field); `expected`/`actual`/`match` are unchanged. When the samples
+document cannot be found, `compared_against` is omitted. Other kinds are
+unchanged.
+
 **The named samples document is resolved relative to the report, not to
 `klt signoff`'s own cwd (issue #2197).** `klt yield` records `samples`
 exactly as it was invoked — a normal `klt yield mc-samples.json` run made

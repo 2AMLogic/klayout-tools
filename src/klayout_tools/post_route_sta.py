@@ -246,7 +246,6 @@ timing, which matters most in a ``request.pdk.corners`` sweep. See
 from __future__ import annotations
 
 import json
-import math
 import os
 import re
 import subprocess  # noqa: F401 -- tests patch post_route_sta.subprocess.run
@@ -284,6 +283,10 @@ from ._provenance import (
     sha256_file,
 )
 from ._request_fields import check_known_fields
+from ._sta_clock_uncertainty import CLOCK_UNCERTAINTY_KEYS
+from ._sta_clock_uncertainty import (
+    validate_clock_uncertainty as _validate_clock_uncertainty,
+)
 from ._sta_period_maps import (
     check_period_maps,
     clock_period_for_corner,
@@ -297,6 +300,7 @@ from ._sta_request_diag import (
 from ._sta_request_diag import SPEF_MISSING_NETS_BEGIN as _SPEF_MISSING_NETS_BEGIN
 from ._sta_request_diag import SPEF_MISSING_NETS_END as _SPEF_MISSING_NETS_END
 from ._sta_request_diag import parse_spef_missing_nets as _parse_spef_missing_nets
+from ._sta_sdc_check import attach_sdc_drift, resolve_sdc_check
 from .pdk import lef_files
 from .pdk_cells import resolve_liberty_for_cell_library
 from .post_route_sta_electrical import (  # noqa: F401 -- re-exported names
@@ -719,6 +723,7 @@ def run_sta(
     propagated_clock = _validate_propagated_clock(request["constraints"], has_def)
     power_activity = _validate_power_activity(request["constraints"])
     clock_uncertainty = _validate_clock_uncertainty(request["constraints"])
+    sdc_path = resolve_sdc_check(request.get("sdc_check"), request_dir)
 
     spef_map: dict[str, str] | None = None
     if has_verilog:
@@ -778,7 +783,7 @@ def run_sta(
         repo_root=env_provenance.find_repo_root(request_dir),
     )
     with report_paths.scrubbing_errors():
-        return _dispatch_sta(
+        response = _dispatch_sta(
             requested_corner=requested_corner,
             requested_corners=requested_corners,
             report_paths=report_paths,
@@ -815,6 +820,19 @@ def run_sta(
             input_path=input_path,
             basename=basename,
         )
+        attach_sdc_drift(  # issue #5236: opt-in, informational only
+            response,
+            sdc_path,
+            request_dir=request_dir,
+            clocks=clock_targets(clock_port, clock_period_ns, clock_extras)["clocks"],
+            clock_port=clock_port,
+            input_delay_ns=input_delay_ns,
+            output_delay_ns=output_delay_ns,
+            input_delays=input_delays,
+            output_delays=output_delays,
+            clock_uncertainty=clock_uncertainty,
+        )
+        return response
 
 
 class _ReportPaths:
@@ -2601,63 +2619,6 @@ def _validate_power_activity(constraints: dict[str, Any]) -> dict[str, float] | 
     return validate_power_activity(constraints, PostRouteStaError)
 
 
-_CLOCK_UNCERTAINTY_KEYS = ("setup_ns", "hold_ns")
-
-
-def _validate_clock_uncertainty(
-    constraints: dict[str, Any],
-) -> dict[str, float | None] | None:
-    """Validate ``constraints.clock_uncertainty_ns`` (issue #4240), returning
-    ``{"setup_ns": float | None, "hold_ns": float | None}`` (``None`` on a
-    side means unconstrained), or ``None`` when omitted or ``null`` (no
-    ``set_clock_uncertainty`` is emitted and the generated script is
-    unchanged).
-
-    The value is either a finite number ``>= 0`` (applied to setup and hold)
-    or an object with the optional keys ``setup_ns`` / ``hold_ns`` (each a
-    finite number ``>= 0``, at least one required). Booleans, non-finite or
-    negative numbers, unknown keys and any other type are request errors.
-    """
-    value = constraints.get("clock_uncertainty_ns")
-    if value is None:
-        return None
-
-    def _number(number: Any, name: str) -> float:
-        if (
-            isinstance(number, bool)
-            or not isinstance(number, (int, float))
-            or not math.isfinite(number)
-        ):
-            raise PostRouteStaError(f"{name} must be a finite number")
-        if number < 0:
-            raise PostRouteStaError(f"{name} must be >= 0, got {number}")
-        return float(number)
-
-    if not isinstance(value, dict):
-        scalar = _number(value, "constraints.clock_uncertainty_ns")
-        return {"setup_ns": scalar, "hold_ns": scalar}
-    unknown = sorted(set(value) - set(_CLOCK_UNCERTAINTY_KEYS))
-    if unknown:
-        raise PostRouteStaError(
-            "constraints.clock_uncertainty_ns has unknown key(s): "
-            + ", ".join(unknown)
-            + " (allowed: setup_ns, hold_ns)"
-        )
-    if not value:
-        raise PostRouteStaError(
-            "constraints.clock_uncertainty_ns must give at least one of "
-            "'setup_ns' and 'hold_ns'"
-        )
-    return {
-        key: (
-            _number(value[key], f"constraints.clock_uncertainty_ns.{key}")
-            if value.get(key) is not None
-            else None
-        )
-        for key in _CLOCK_UNCERTAINTY_KEYS
-    }
-
-
 def _clock_uncertainty_lines(
     clock_port: str, clock_uncertainty: dict[str, float | None] | None
 ) -> list[str]:
@@ -2669,7 +2630,7 @@ def _clock_uncertainty_lines(
     return [
         f"set_clock_uncertainty -{key[:-3]} {clock_uncertainty[key]!r} "
         f"[get_clocks {clock_port}]"
-        for key in _CLOCK_UNCERTAINTY_KEYS
+        for key in CLOCK_UNCERTAINTY_KEYS
         if clock_uncertainty.get(key) is not None
     ]
 
