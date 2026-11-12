@@ -2223,6 +2223,83 @@ def test_sequential_engine_scripts_include_extra_opt_pass(tmp_path):
     assert "opt -noff" not in comb_lines
 
 
+def test_sequential_engine_scripts_lower_memories_after_proc(tmp_path):
+    """Issue #5369: both sequential script stages run `memory_map` right
+    after `proc` on each side (so `equiv_make` never sees a `$mem`); the
+    combinational engine's script does not."""
+    gold = _side([_write(tmp_path / "gold.v", _SEQ_GOLD_SIMPLE_DFF_RTL)])
+    gate = _side([_write(tmp_path / "gate.v", _SEQ_GATE_SIMPLE_DFF_RTL_BUFFERED)])
+
+    stage1_path = str(tmp_path / "stage1.ys")
+    equiv_sequential._write_sequential_stage1_script(
+        script_path=stage1_path,
+        gold=gold,
+        gate=gate,
+        port_map={},
+        netlist_path=str(tmp_path / "netlist.v"),
+        induction_depth=4,
+    )
+    stage2_path = str(tmp_path / "stage2.ys")
+    equiv_sequential._write_sequential_stage2_script(
+        script_path=stage2_path,
+        gold=gold,
+        gate=gate,
+        port_map={},
+        ports={"clk": "input", "d": "input", "q": "output"},
+        bmc_depth=4,
+        sat_timeout_s=60,
+    )
+    for path in (stage1_path, stage2_path):
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+        assert lines.count("memory_map") == 2  # once per gold/gate side
+        proc_idxs = [i for i, line in enumerate(lines) if line == "proc"]
+        assert len(proc_idxs) == 2
+        for i in proc_idxs:
+            assert lines[i + 1] == "memory_map"
+
+    comb_path = str(tmp_path / "comb.ys")
+    equiv._write_script(
+        script_path=comb_path,
+        gold=gold,
+        gate=gate,
+        port_map={},
+        netlist_path=str(tmp_path / "comb_netlist.v"),
+        sat_timeout_s=60,
+    )
+    comb_lines = Path(comb_path).read_text(encoding="utf-8").splitlines()
+    assert "memory_map" not in comb_lines
+
+
+_SEQ_MEM_RTL = """\
+module top(input clk, input we, input [1:0] wa, input [1:0] ra,
+           input [3:0] d, output [3:0] q);
+  reg [3:0] arr [0:3];
+  always @(posedge clk) if (we) arr[wa] <= d;
+  assign q = arr[ra];
+endmodule
+"""
+
+
+@pytest.mark.skipif(not HAVE_YOSYS, reason="yosys is not installed on this machine")
+def test_sequential_engine_handles_inferred_memory(tmp_path):
+    """Issue #5369: a runtime-indexed unpacked array (an inferred `$mem`)
+    reaches `equiv_make` and gets a real verdict, not an EquivError."""
+    _write(tmp_path / "gold.v", _SEQ_MEM_RTL)
+    _write(tmp_path / "gate.v", _SEQ_MEM_RTL)
+    request_path = _write_request(
+        tmp_path / "r.json",
+        {
+            "gold": _side(["gold.v"]),
+            "gate": _side(["gate.v"]),
+            "engine": "yosys-sequential",
+        },
+    )
+
+    report = run_equiv(request_path)
+
+    assert report["status"] == "equivalent"
+
+
 def test_sequential_stage1_script_emits_blacklist_when_given(tmp_path):
     """Issue #1353: stage 1's cut-point refinement loop re-runs the same
     script with an `equiv_make -blacklist <file>` flag; without a blacklist

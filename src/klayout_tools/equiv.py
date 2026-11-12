@@ -648,6 +648,10 @@ def _side_prep_lines(
     normalization -- ``opt_dff`` can merge/retime/remove registers, which
     would undercut the register-name correspondence ``equiv_make``'s
     name-based matching (and so this whole engine) depends on.
+
+    ``extra_opt`` also emits ``memory_map`` right after ``proc`` (issue
+    #5369) so a side with an inferred ``$mem`` (a runtime-indexed unpacked
+    array) reaches ``equiv_make`` instead of failing on its memory check.
     """
     lines: list[str] = []
     if side.get("liberty"):
@@ -666,8 +670,15 @@ def _side_prep_lines(
         )
     # Issue #3466: optional top-level parameter overrides for this side.
     lines += chparam_lines(side.get("parameters") or {}, side["top"])
+    lines.append("proc")
+    if extra_opt:
+        # Issue #5369: ``equiv_make`` refuses a module that still holds a
+        # ``$mem`` ("Gold module contains memories or processes"), so lower
+        # inferred memories to registers right after ``proc`` -- the same
+        # lowering synthesis does. Sequential engine only; the combinational
+        # engine's ``select -assert-none`` guard keeps rejecting memories.
+        lines.append("memory_map")
     lines += [
-        "proc",
         "opt_clean",
         f"hierarchy -check -top {side['top']}",
         "flatten",
