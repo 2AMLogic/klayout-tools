@@ -141,6 +141,8 @@ def _refuse_deck_split_flags(
     """Refuse job-splitting knobs on a deck-list request: a deck list is
     always one batch job, so honouring them is not implemented and silently
     ignoring them would mislead the caller (issue #5377)."""
+    if "decks" not in request:
+        return
     batch = request.get("batch") or {}
     given = [
         name

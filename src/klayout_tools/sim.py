@@ -246,11 +246,9 @@ from .sim_remote import (
 from .sim_remote import _run_remote_dispatch as _run_remote_dispatch
 from .sim_remote import _shard_corner_points as _shard_corner_points
 from .sim_request_overrides import (
-    _refuse_corner_only_flags as _refuse_corner_only_flags,
-)
-from .sim_request_overrides import _refuse_deck_split_flags as _refuse_deck_split_flags
-from .sim_request_overrides import (
-    _with_capacity_wait_override as _with_capacity_wait_override,
+    _refuse_corner_only_flags,
+    _refuse_deck_split_flags,
+    _with_capacity_wait_override,
 )
 from .sim_request_overrides import (
     _with_max_concurrent_override as _with_max_concurrent_override,
@@ -2611,6 +2609,7 @@ def run_sim(
     if artifacts_dir is not None:
         artifacts_dir = os.path.abspath(artifacts_dir)
     _refuse_corner_only_flags(request, pdk_root, timeout_s, collect_partial)
+    _refuse_deck_split_flags(request, max_units_per_job, max_concurrent_jobs)
     if sim_commands.COMMANDS_FIELD in request:
         return _dispatch_command_request(
             request,
@@ -2652,8 +2651,6 @@ def run_sim(
             submit_only=submit_only,
             attach_job_id=attach_job_id,
             capacity_wait_s=capacity_wait_s,
-            max_units_per_job=max_units_per_job,
-            max_concurrent_jobs=max_concurrent_jobs,
             _ownership=_ownership,
         )
     return _run_sim_corners(
@@ -2794,8 +2791,6 @@ def _dispatch_deck_request(
     submit_only: bool = False,
     attach_job_id: str | None = None,
     capacity_wait_s: float | None = None,
-    max_units_per_job: int | None = None,
-    max_concurrent_jobs: int | None = None,
     _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
     """Route a deck-list request to :mod:`klayout_tools.sim_decks`,
@@ -2804,7 +2799,6 @@ def _dispatch_deck_request(
     aside) and refusing the corner-only flags by name: a deck request
     has no corner machinery for them to act on, so silently ignoring
     one would mislead the caller about what ran."""
-    _refuse_deck_split_flags(request, max_units_per_job, max_concurrent_jobs)
     resolved_backend, from_host_default = resolve_backend(backend, request)
     if resolved_backend not in SUPPORTED_BACKENDS:
         source = f" (from ${BACKEND_ENV})" if from_host_default else ""
