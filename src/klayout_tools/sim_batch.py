@@ -111,6 +111,7 @@ from . import (
     sim_staging,
 )
 from .pdk_families import family_subset, pdk_variant_family
+from .pdk_store import store_pdk_stamp
 from .remote_launcher import (
     RemoteLaunchError,
     _signal_handlers_install,
@@ -1981,9 +1982,8 @@ def _bounded_str(value: Any, limit: int = WORKER_CAPTURE_STR_MAX) -> str | None:
 
 
 def _client_pdk_stamp(request: dict[str, Any] | None) -> dict[str, Any] | None:
-    """The submitter's own local view of the requested PDK variant's
-    ``SOURCES`` stamp, in the same ``sources-sha256`` scheme the worker
-    capture uses. ``None`` when nothing comparable can be read locally."""
+    """The submitter's local view of the requested PDK variant's stamp (``SOURCES``,
+    else bundle ``.pdk-store.json``); ``None`` when nothing comparable is readable."""
     models = (request or {}).get("models") or {}
     variant = models.get("pdk")
     root = models.get("pdk_root") or os.environ.get("PDK_ROOT")
@@ -1993,7 +1993,7 @@ def _client_pdk_stamp(request: dict[str, Any] | None) -> dict[str, Any] | None:
         with open(os.path.join(root, variant, "SOURCES"), "rb") as handle:
             text = handle.read(16385)[:16384].decode("utf-8", "replace")
     except OSError:
-        return None
+        return store_pdk_stamp(variant, os.path.join(root, variant))  # #5318
     normalized = "\n".join(
         line.rstrip() for line in text.replace("\r\n", "\n").strip().split("\n")
     )

@@ -6,8 +6,31 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 - [2026-09](work_log/WORK_LOG_2026-09.md)
 
+### 2026-11-12
+
+- **PR #5326**: feat(lvs): keep-list of circuit globs for options.flatten_reference
+- **PR #5347**: feat: add substrate body-merge post-pass for erc.supply_short
+- **Issue #5342** (closed): erc: substrate continuity - shared island partition + body-merge post-pass (gf180mcu), phase 2 A+B of #5336
+- **PR #5339**: fix: preflight decks[] members in klt sim --batch-set
+- **Issue #5337** (closed): klt sim --batch-set fails with KeyError 'netlist' on decks[] requests
+
 ### 2026-11-11
 
+- **PR #5338**: docs: design note for substrate-continuity erc.supply_short evaluation
+- **PR #5333**: feat: report never-started jobs in klt sim --job-status
+- **PR #5330**: feat: capture worker environment for batch deck-list jobs
+- **PR #5329**: fix: always emit --batch-set envelope for stuck or interrupted members
+- **PR #5320**: feat: stamp PDK bundle version from .pdk-store.json for sim reports and batch comparison
+- **Issue #5335** (closed): klt erc: design note for substrate-continuity supply_short evaluation (phase 1 of #5334)
+- **Issue #5328** (closed): klt sim decks: worker PDK identity (revision/stamp) not reported for batch deck-list runs
+- **Issue #5324** (closed): klt sim --batch-set: a member that never launches leaves the set pending and the command exits 1 with no report
+- **Issue #5318** (closed): klt sim: report environment does not record the PDK revision when the PDK tree is not a git checkout
+- **PR #5312**: docs: document hierarchical LVS compare for large regular arrays with measurements
+- **PR #5308**: refactor(characterize): share spice_number and slug via characterize_cards
+- **Issue #5310** (closed): klt lvs: flat compare of a ~50k-device regular array still returns no verdict (follow-up to #4165)
+- **Issue #5306** (closed): Consolidate duplicated _spice_number/_slug helpers in characterize modules
+- **Issue #2727** (closed): Friction: klt sim's batch/remote backends refuse ihp-sg13cmos5l, so no SG13CMOS5L corner grid can run on a batch-only host
+- **Issue #5309** (closed): test flake: ci-apt-install fails installing ngspice on Tests (Python 3.10-3.14) (apt mirror, PR #5308)
 - **PR #5304**: fix(extract): classify MOS flavour markers per gate, not per diffusion island
 - **PR #5303**: docs(pnr): record live-verified -instances spelling for bracketed macro names
 - **Issue #5301** (closed): extract/pex: sky130 deck over-classifies LVT PFETs when marker ends inside shared source/drain diffusion
@@ -3528,42 +3551,4 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 - **Issue #1725** (closed): kb: add reference netlists + measured figures for remaining KB entries
 - **Issue #1723** (closed): klt sim: render waveforms to SVG on a measurement miss so an agent can diagnose from the picture (waveform-image feedback)
 - **Issue #1722** (closed): klt synthesize: arithmetic-architecture lever — generate prefix adders (Sklansky / Brent-Kung / Kogge-Stone) from a cell map and pick per block by measured synthesis
-
-### 2026-09-12
-
-- **PR #1730**: feat(sim): add per-device operating-point sanity lint (klt sim --op-lint, eval op-sanity gate)
-- **PR #1729**: feat(benchmarks): design-agent benchmark harness (schema + runner + easy-tier tasks)
-- **PR #1727**: kb: measured figures block + numeric search filters for topology selection
-- **PR #1724**: refactor(lvs): split mismatch-classification subsystem into lvs_mismatch.py
-- **PR #1717**: refactor(gen-compose): split routing subsystem into gen_compose_routing.py
-- **PR #1716**: fix: scope champion-issue-promo tier backlog counts to loom:issue only
-- **PR #1715**: refactor: dedupe _tcl_net_list/_count_spef_nets_annotated into _paths.py
-- **PR #1713**: refactor(gen): split ten _build_<family>_pcell() factories into gen_pcells/ package
-- **PR #1712**: docs: document daemon dispatch race claiming a reverted promotion
-- **PR #1711**: refactor: extract _load_block_cell to dedupe gen_compose GDS-load block
-- **PR #1707**: docs: design spike — attribute --parasitics R/C to top-cell-drawn vs. instance-inherited geometry
-- **PR #1706**: extract: expose per-net R/C breakdown by layer in --parasitics JSON output
-- **PR #1705**: extract: add --parasitics-net to scope the ground R/C pass to named nets
-- **PR #1696**: fix(extract): recover DEF net names one level below a composed macro's top
-- **PR #1695**: sim: add coarse timeout-budget preflight warning (part of #1686)
-- **PR #1693**: refactor: deduplicate _validate_vias between power.py and erc.py
-- **PR #1692**: fix(decks): add gf180mcu metal4.width.1 / metal4.space.1 (#1688)
-- **PR #1690**: fix(extract): --pins matches any component label of a multi-label net
-- **Issue #1721** (closed): Split lvs.py's mismatch-classification subsystem (~1600 lines) into lvs_mismatch.py
-- **Issue #1720** (closed): kb: attach measured reference figures (gain, phase, bias point, corner) to every entry so topology selection can match on numbers
-- **Issue #1719** (closed): Design-agent benchmark: a task set × PDK harness scoring the S4→S6→S10 pipeline with pass@k
-- **Issue #1718** (closed): klt eval / klt sim: per-device operating-point sanity lint as targeted agent feedback (op-sanity gate)
-- **Issue #1714** (closed): champion-issue-promo.md: Tier 3 backlog cap count is self-referentially inflated
-- **Issue #1710** (closed): Dispatch race: daemon claims loom:building off a promotion window Champion already reverted
-- **Issue #1708** (closed): Split gen_compose.py's routing subsystem (~3,500 lines) into gen_compose_routing.py
-- **Issue #1703** (closed): Dedup: _tcl_net_list / _count_spef_nets_annotated duplicated between place_and_route.py and post_route_sta.py
-- **Issue #1702** (closed): extract: design spike — attribute --parasitics R/C to top-cell-drawn vs. instance-inherited geometry
-- **Issue #1701** (closed): extract: expose per-net R/C breakdown by layer in --parasitics JSON output
-- **Issue #1700** (closed): extract: add --parasitics-net flag to scope R/C pass to named nets
-- **Issue #1698** (closed): Split gen.py's 10 PCell-builder factories (~2,700 lines) into a gen_pcells/ package
-- **Issue #1697** (closed): Dedup: read_block_layer_geometry / _read_all_block_layers_geometry share ~18 lines of identical GDS-load boilerplate
-- **Issue #1691** (closed): Deduplicate _validate_vias: identical stackup-via validation copied between power.py and erc.py
-- **Issue #1689** (closed): gen-compose: composed output drops the DEF net-name shape property, so "klt extract --def-net-names" silently degrades on a composed P&R macro
-- **Issue #1688** (closed): decks/gf180mcu: no metal4.width / metal4.space rule, while every other routing metal has both
-- **Issue #1687** (closed): extract: --pins cannot name a multi-label net -- KLayout joins labels with a comma, and --pins is itself a comma-separated list
 

@@ -1469,7 +1469,9 @@ def _series_fold_offset_absorbed_warnings(
     return warnings
 
 
-def _flatten_netlist_safely(netlist: kdb.Netlist, side: str) -> dict[str, Any] | None:
+def _flatten_netlist_safely(
+    netlist: kdb.Netlist, side: str, keep: list[str] | None = None
+) -> dict[str, Any] | None:
     """Call ``netlist.flatten()``, in-process, on ``side``'s netlist (issue
     #1085's ``options.flatten_reference``/``options.flatten_layout``).
 
@@ -1485,13 +1487,11 @@ def _flatten_netlist_safely(netlist: kdb.Netlist, side: str) -> dict[str, Any] |
     `reference.flatten`" section) -- not a partial result a caller can act
     on.
 
-    ``Netlist.flatten()`` is KLayout's own whole-netlist flatten: "After
-    calling this method, only the top circuits will remain" -- every
-    subcircuit-call instance is substituted in-place, in-process. Called
-    here, before :func:`_select_circuit`, so a caller-declared ``top`` name
-    still resolves normally afterwards whenever it already named a genuine
-    top-level circuit (the common case -- the design's own top level, not
-    an interior leaf that flatten would have inlined away).
+    ``Netlist.flatten()`` is KLayout's own whole-netlist flatten ("only the
+    top circuits will remain"): every subcircuit-call instance is
+    substituted in-place. Called here, before :func:`_select_circuit`, so a
+    caller-declared ``top`` still resolves if it named a genuine top
+    circuit. ``keep`` (#5322) globs spare matching circuits (lvs_flatten).
 
     Symmetric and opt-in on **both** sides (``options.flatten_reference``
     for the reference netlist, ``options.flatten_layout`` for the layout
@@ -1511,10 +1511,9 @@ def _flatten_netlist_safely(netlist: kdb.Netlist, side: str) -> dict[str, Any] |
     """
 
     from .lvs import CATEGORY_TOPOLOGY_FLATTENED
+    from .lvs_flatten import flatten_keeping
 
-    circuits_before = sum(1 for _ in netlist.each_circuit())
-    netlist.flatten()
-    circuits_after = sum(1 for _ in netlist.each_circuit())
+    circuits_before, circuits_after, kept_note = flatten_keeping(netlist, keep)
     if circuits_before == circuits_after:
         return None
     return _mismatch(
@@ -1525,7 +1524,7 @@ def _flatten_netlist_safely(netlist: kdb.Netlist, side: str) -> dict[str, Any] |
         f"{circuits_after} top-level circuit(s), substituting every "
         "subcircuit-call instance in place -- this compare verified "
         "topology only after removing the original hierarchy boundaries on "
-        f'this side (see docs/cli/lvs.md, "topology.flattened")',
+        f'this side{kept_note} (see docs/cli/lvs.md, "topology.flattened")',
         side,
     )
 
@@ -1533,7 +1532,7 @@ def _flatten_netlist_safely(netlist: kdb.Netlist, side: str) -> dict[str, Any] |
 def _hierarchy_mismatch_warnings(
     layout_netlist: kdb.Netlist,
     reference_netlist: kdb.Netlist,
-    flatten_reference: bool,
+    flatten_reference: bool | list[str],
 ) -> list[dict[str, Any]]:
     """Issue #4548: advisory ``topology.hierarchy_mismatch`` warning.
 

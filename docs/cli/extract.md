@@ -215,7 +215,10 @@ two disagree, this document (and the code) win.
   `poly_label` text drawn directly in its own definition when present, else
   from `--abstract-cell-lef`. A matched type with neither pin source is an
   application error. Everything not matched by a pattern extracts exactly as
-  today. See "Cell-level (black-box + pins) abstraction" below.
+  today. In-cell labels only define the black box's own pins (issue #5322):
+  they are not promoted to top-level pins, with or without `--top-cell-pins`;
+  top-level pins come from labels drawn in the top cell. See "Cell-level
+  (black-box + pins) abstraction" below.
 - `--abstract-cell-lef` — optional, unset by default, repeatable. A LEF file
   (or a directory of `*.lef`/`*.tlef` files) to resolve pins from for an
   `--abstract-cells`-matched cell type that draws no in-cell pin label — the
@@ -2378,6 +2381,15 @@ implants pick the flavour. Diffusion under `areaid.ed` (81/19) or inside
 `dnwell`, and a vertical PNP's emitter (`pnp.drawing`, 82/44), are excluded.
 Not modelled: the `photodiode` and the RF diode (`areaid.rfdiode`). Query
 the exact set with `klt deck devices --deck sky130 --class diode_pd2nw_05v5`.
+
+**sky130 `lvtn` partial coverage** (issues #5301, #5311): `lvtn` (125/44) is
+tested per *gate*, not per diffusion island -- a gate whose area touches
+`lvtn` (and no excluding implant such as `hvtp`) binds the `_lvt` model, its
+neighbours on the same diffusion keep the plain model. Diffusion shared by a
+claimed and an unclaimed gate stays one connected net, and its area and
+perimeter (`AS`/`AD`/`PS`/`PD`) are apportioned between the gates sharing it
+exactly as in a layout with no `lvtn` at all -- never counted in full for each
+side. Only the model name changes with the marker.
 
 ### Marker-gated and predicate-gated device classes (issue #2365)
 
