@@ -8,6 +8,13 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-12
 
+- **PR #5314**: feat: add placement-only macros[].keepout independent of the PDN halo
+- **PR #5349**: feat: declare nBuLay substrate_isolation on sg13g2 and sg13cmos5l decks
+- **Issue #5345** (closed): erc: declare sg13g2/sg13cmos5l substrate_isolation in extraction decks, phase 2 D of #5336
+- **PR #5340**: Bump Repo Skills 0.25.10 -> 0.26.1
+- **Issue #5344** (closed): erc: declare sky130 substrate_isolation in extraction deck, phase 2 D of #5336
+- **PR #5356**: feat(erc): enable sky130 dnwell substrate isolation with n-well ring closure
+- **PR #5315**: fix: keep shared S/D one net and apportion its area across the lvtn per-gate split
 - **PR #5326**: feat(lvs): keep-list of circuit globs for options.flatten_reference
 - **PR #5347**: feat: add substrate body-merge post-pass for erc.supply_short
 - **Issue #5342** (closed): erc: substrate continuity - shared island partition + body-merge post-pass (gf180mcu), phase 2 A+B of #5336
