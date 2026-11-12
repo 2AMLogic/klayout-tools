@@ -683,6 +683,7 @@
         "klayout_tools.signoff_multi_member",
         "klayout_tools.signoff_na",
         "klayout_tools.signoff_power_delivery",
+        "klayout_tools.signoff_power_delivery_substrate",
         "klayout_tools.signoff_runset",
         "klayout_tools.signoff_sta_constraints"
       ]
