@@ -521,6 +521,11 @@ def _add_characterize_parser(subparsers: argparse._SubParsersAction) -> None:
             "off-host."
         ),
     )
+    add_wait_for_capacity_arg(
+        characterize_parser,
+        "Reaches every simulation the run launches (each cell and each "
+        "constraint deck; issue #5348).",
+    )
     characterize_parser.add_argument(
         "--keep-artifacts",
         action="store_true",

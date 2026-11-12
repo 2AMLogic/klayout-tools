@@ -162,6 +162,7 @@ def run_characterize(
     keep_artifacts: bool | None = None,
     cells: list[str] | tuple[str, ...] | None = None,
     compare_to: str | None = None,
+    capacity_wait_s: float | None = None,
 ) -> dict[str, Any]:
     """Characterize one cell -- or a batch of cells -- at one corner and emit
     one NLDM ``.lib`` covering all of them.
@@ -187,12 +188,16 @@ def run_characterize(
     simulation artifacts under ``<outdir>/cells/<cell>/``). ``lib_path``
     overrides the emitted Liberty path (default: ``<outdir>/<library
     name>.lib``, or the request's own ``output.lib``). ``backend``/
-    ``keep_artifacts`` are forwarded to ``klt sim``.
+    ``keep_artifacts`` are forwarded to ``klt sim``. ``capacity_wait_s``
+    (issue #5348; ``--wait-for-capacity``) is forwarded to every ``klt sim``
+    call -- each cell's main sim and each constraint deck -- so a
+    ``batch_no_capacity`` burst can be waited out; omitted, it is not passed.
 
     Raises :class:`CharacterizeError` for every failure mode; never returns
     a partially-populated table, and a batch run in which any one cell fails
     emits nothing (the error names the cell).
     """
+    _validate_capacity_wait(capacity_wait_s, backend)
     request = _load_request(request_path)
     request_dir = os.path.dirname(os.path.abspath(request_path)) or os.getcwd()
     batch = "cells" in request
@@ -221,6 +226,9 @@ def run_characterize(
     work_dir = _resolve_outdir(outdir, request, request_dir)
     os.makedirs(work_dir, exist_ok=True)
 
+    batch_shard = (
+        {} if capacity_wait_s is None else {"capacity_wait_s": capacity_wait_s}
+    )
     results: list[dict[str, Any]] = []
     for cell, arcs in resolved:
         cell_dir = (
@@ -240,6 +248,7 @@ def run_characterize(
                     work_dir=cell_dir,
                     backend=backend,
                     keep_artifacts=keep_artifacts,
+                    batch_shard=batch_shard,
                 )
             )
         except CharacterizeError as exc:
@@ -313,6 +322,23 @@ def run_characterize(
     )
 
 
+def _validate_capacity_wait(capacity_wait_s: float | None, backend: str | None) -> None:
+    """Issue #5348: refuse a bad ``--wait-for-capacity`` before any I/O, by the
+    resolver ``klt sim`` applies per leg (same rule as ``klt pex``, #5280)."""
+    if capacity_wait_s is None:
+        return
+    from .sim_batch import resolve_capacity_wait_s
+
+    try:
+        resolve_capacity_wait_s({"capacity_wait_s": capacity_wait_s})
+    except sim.SimError as exc:
+        raise CharacterizeError(str(exc)) from exc
+    if backend is not None and backend != "batch":
+        raise CharacterizeError(
+            f"--wait-for-capacity requires backend 'batch' (got {backend!r})"
+        )
+
+
 def _characterize_cell(
     *,
     cell: dict[str, Any],
@@ -326,6 +352,7 @@ def _characterize_cell(
     work_dir: str,
     backend: str | None,
     keep_artifacts: bool | None,
+    batch_shard: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     """Run one cell's whole grid (timing, power, and leakage) as a single
     ``klt sim`` request and reshape the results into tables.
@@ -365,6 +392,7 @@ def _characterize_cell(
             sim_request_path,
             artifacts_dir=os.path.join(work_dir, "sim"),
             backend=backend,
+            **(batch_shard or {}),
         )
     except sim.SimError as exc:
         raise CharacterizeError(f"simulation failed: {exc}") from exc
@@ -409,6 +437,7 @@ def _characterize_cell(
                 request_path,
                 artifacts_dir=os.path.join(deck_dir, "sim"),
                 backend=backend,
+                **(batch_shard or {}),
             )
         except sim.SimError as exc:
             raise CharacterizeError(f"constraint simulation failed: {exc}") from exc
