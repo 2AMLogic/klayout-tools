@@ -56,6 +56,14 @@ def _print_worker_pdk(report: dict) -> None:
         print(line)
         if comparison.get("warning"):
             print(f"warning: {comparison['warning']}")
+    models_cmp = remote.get("models_lib_comparison")
+    if isinstance(models_cmp, dict) and models_cmp.get("status"):
+        line = f"models_lib: {models_cmp['status']}"
+        if models_cmp.get("reason"):
+            line += f" ({models_cmp['reason']})"
+        print(line)
+        if models_cmp.get("warning"):
+            print(f"warning: {models_cmp['warning']}")
     pdk = worker.get("pdk")
     if isinstance(pdk, dict):
         print(f"models_staged: {str(pdk.get('models_staged') is True).lower()}")

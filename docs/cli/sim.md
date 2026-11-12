@@ -2276,6 +2276,20 @@ contents), size-capped, serialised with a JSON encoder, errors recorded as
 | `pdk_stamp_comparison` | `status` of `match`, `mismatch` (with `warning`) or `not_comparable` (with `reason`: `worker_stamp_unavailable`, `client_stamp_unavailable`, `variant_differs` or `scheme_differs`). Under `models_staged` the comparison is `basis: "staged_model_inputs"` instead -- see below. |
 | `engine_build_comparison` | Issue #3095. `status` of `match`, `mismatch` (with `warning`) or `not_comparable`: the worker's `simulator.version_banner` against the local `environment.engine_build.version_banner` (whitespace-normalised). `not_comparable` when either side has no banner — never a proven mismatch. A match proves the same banner, not identical build options. |
 
+Two sibling fields sit on `environment.remote` itself (issue #5321), for a
+runner whose image has no readable `SOURCES` stamp:
+
+- `runner_models_lib_sha256`: the `environment.models_lib_sha256` the runner's
+  own `klt sim` reported, i.e. the model card the worker actually loaded;
+  `null` when absent or malformed (older runner, error envelope), so
+  "unknown" is distinguishable from a value.
+- `models_lib_comparison`: `status` of `match`, `mismatch` (with `warning`) or
+  `not_comparable` (with `reason`: `runner_hash_unavailable`,
+  `client_hash_unavailable` or `models_staged`) comparing it with the client's
+  `environment.models_lib_sha256`. Missing data is never a proven mismatch,
+  and klt does not fail the run on `mismatch`. `pdk_stamp_comparison` is
+  unchanged. Text output prints a `models_lib:` line next to `pdk_stamp:`.
+
 `pdk_stamp_comparison` compares the worker's stamp with the `SOURCES` stamp the
 submitter resolves locally (`models.pdk_root` or `$PDK_ROOT`) and reports a
 `mismatch` only when both sides give the **same variant under the same stamp

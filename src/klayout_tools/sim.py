@@ -193,7 +193,7 @@ from .sim_batch_async import (
     shard_scoped_points,
 )
 from .sim_batch_async import submit_only as _submit_batch_only
-from .sim_batch_features import pop_remote_diagnostics
+from .sim_batch_features import attach_models_lib_comparison, pop_remote_diagnostics
 from .sim_cause import _with_fatal_error_cause
 from .sim_convergence_retry import is_retryable_convergence_failure, note_not_retried
 from .sim_corner_keys import unknown_key_warnings
@@ -1533,17 +1533,17 @@ def _worker_ngspice_binary(remote: Any) -> str | None:
 def apply_engine_host(
     environment: dict[str, Any], *, backend: str, client_ngspice_binary: str | None
 ) -> None:
-    """Stamp ``environment.engine_host`` and keep ``ngspice_binary`` honest
-    (issue #3110). Local runs: ``engine_host: "local"``, nothing else changes.
-    Off-host runs: ``"worker"``; ``ngspice_binary`` becomes the worker's
-    observed path (or ``null``) and the submitter's resolved path moves to
-    ``client_ngspice_binary``."""
+    """Stamp ``environment.engine_host``, keep ``ngspice_binary`` honest (#3110):
+    local changes nothing else; off-host ``"worker"`` makes it the worker's
+    path and moves the submitter's to ``client_ngspice_binary``. Batch adds
+    ``models_lib_comparison`` (#5321)."""
     if backend not in _OFFHOST_BACKENDS:
         environment["engine_host"] = "local"
         return
     environment["engine_host"] = "worker"
     environment["client_ngspice_binary"] = client_ngspice_binary
     environment["ngspice_binary"] = _worker_ngspice_binary(environment.get("remote"))
+    attach_models_lib_comparison(environment, backend)
 
 
 #: Environment-variable override for the ngspice binary (issue #2423), the
