@@ -183,6 +183,7 @@ from .decks import (
     get_extraction_deck,
     get_parasitics_deck,
 )
+from .erc_islands import partition_region_by_islands, sorted_islands
 
 # The cell-level (black-box + pins) abstraction subsystem lives in its own
 # module (issue #1303, split out of this one at ~8800 lines). `_sanitize_
@@ -7545,46 +7546,6 @@ def _detect_voltage_domain_overlap(
     return warnings, voltage_domain_warnings
 
 
-def _partition_region_by_islands(
-    region: kdb.Region, islands: list[kdb.Region]
-) -> tuple[kdb.Region, list[kdb.Region]]:
-    """Split ``region``'s own connected components into an "outside every
-    island" remainder plus one bucket per entry in ``islands`` (issue #1128,
-    see ``ExtractionDeck.substrate_isolation``'s docstring) -- the same "any
-    overlap claims the whole connected component" idiom ``mos_flavours``
-    marker classification already uses in :func:`_extract_netlist` (a
-    component cannot legally straddle two distinct isolation islands any
-    more than a transistor can legally straddle a voltage-domain marker
-    boundary, so whichever island is tested first for an overlapping
-    component wins).
-
-    Returns ``(region, [])`` -- ``region`` itself, completely unmodified,
-    with no connected-component walk at all -- when ``islands`` is empty.
-    This is the overwhelmingly common case (a deck that declares no
-    ``substrate_isolation``, or a layout that draws no shapes on one that is
-    declared) and is deliberately a fast, no-op path: skipping the walk
-    means the returned region is the exact same object passed in, not a
-    reassembled-from-merged-components copy that could fracture polygons
-    differently, so every caller stays byte-for-byte identical to the
-    pre-#1128 code path in that case.
-    """
-    if not islands:
-        return region, []
-    import klayout.db as kdb
-
-    outside = kdb.Region()
-    per_island: list[kdb.Region] = [kdb.Region() for _ in islands]
-    for component in region.merged().each():
-        component_region = kdb.Region(component)
-        for index, island in enumerate(islands):
-            if not component_region.interacting(island).is_empty():
-                per_island[index] += component_region
-                break
-        else:
-            outside += component_region
-    return outside, per_island
-
-
 def _is_synthesized_substrate_net(name: str, deck: ExtractionDeck) -> bool:
     """Whether ``name`` is one of this deck's *synthesized* substrate
     identities rather than a real, drawn-and-labelled net name: the deck-wide
@@ -8792,7 +8753,7 @@ def _extract_netlist(
     # guarantee) so the per-island identities synthesized below are stable
     # across re-runs of the same layout. Empty -- and every downstream
     # partition below a guaranteed no-op via
-    # `_partition_region_by_islands` -- for the overwhelmingly common case:
+    # `partition_region_by_islands` -- for the overwhelmingly common case:
     # a deck that leaves this field `None` (every deck as of this field's
     # introduction until gf180mcu's own module sets it), or a layout that
     # draws no shapes on a deck's declared isolation layer at all.
@@ -8807,22 +8768,14 @@ def _extract_netlist(
     isolation_region = (
         _region(layout, top_cell, deck.substrate_isolation) + abstract_isolation_cover
     )
-    isolation_islands: list[kdb.Region] = sorted(
-        (kdb.Region(component) for component in isolation_region.merged().each()),
-        key=lambda region: (
-            region.bbox().left,
-            region.bbox().bottom,
-            region.bbox().right,
-            region.bbox().top,
-        ),
-    )
+    isolation_islands: list[kdb.Region] = sorted_islands(isolation_region)
     # `nfet_active_outside`/`nfet_active_isolated` feed only the device-
     # recognition ("W" terminal) split below -- `nfet_gate`/`nfet_sd` above
     # stay the full (unpartitioned) region for every *other* purpose
     # (ordinary gate/SD net connectivity, the `_compute_parasitics` poly-
     # role gate exclusion), so a transistor's signal terminals route
     # normally regardless of which body-identity group it falls into.
-    nfet_active_outside, nfet_active_isolated = _partition_region_by_islands(
+    nfet_active_outside, nfet_active_isolated = partition_region_by_islands(
         nfet_active, isolation_islands
     )
     nfet_gate_outside = nfet_active_outside & poly
@@ -9099,7 +9052,7 @@ def _extract_netlist(
         island_body = kdb.Region()
         l2n.register(island_body, f"nfet_body_iso{index}")
         nfet_body_isolated.append(island_body)
-    tap_substrate_outside, tap_substrate_isolated = _partition_region_by_islands(
+    tap_substrate_outside, tap_substrate_isolated = partition_region_by_islands(
         tap_substrate, isolation_islands
     )
     if isolation_islands:
