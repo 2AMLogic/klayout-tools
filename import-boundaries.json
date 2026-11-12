@@ -824,8 +824,10 @@
       "description": "`klt sta` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.sta_cmd",
+        "klayout_tools._sta_clock_uncertainty",
         "klayout_tools._sta_period_maps",
         "klayout_tools._sta_request_diag",
+        "klayout_tools._sta_sdc_check",
         "klayout_tools.post_route_sta",
         "klayout_tools.post_route_sta_electrical"
       ]

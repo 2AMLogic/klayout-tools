@@ -300,7 +300,7 @@ from ._sta_request_diag import (
 from ._sta_request_diag import SPEF_MISSING_NETS_BEGIN as _SPEF_MISSING_NETS_BEGIN
 from ._sta_request_diag import SPEF_MISSING_NETS_END as _SPEF_MISSING_NETS_END
 from ._sta_request_diag import parse_spef_missing_nets as _parse_spef_missing_nets
-from ._sta_sdc_check import resolve_sdc_check, sdc_drift_block
+from ._sta_sdc_check import attach_sdc_drift, resolve_sdc_check
 from .pdk import lef_files
 from .pdk_cells import resolve_liberty_for_cell_library
 from .post_route_sta_electrical import (  # noqa: F401 -- re-exported names
@@ -820,20 +820,18 @@ def run_sta(
             input_path=input_path,
             basename=basename,
         )
-        if sdc_path is not None:  # issue #5236: opt-in, informational only
-            response["sdc_drift"] = sdc_drift_block(
-                sdc_path,
-                request_dir=request_dir,
-                clocks=clock_targets(clock_port, clock_period_ns, clock_extras)[
-                    "clocks"
-                ],
-                clock_port=clock_port,
-                input_delay_ns=input_delay_ns,
-                output_delay_ns=output_delay_ns,
-                input_delays=input_delays,
-                output_delays=output_delays,
-                clock_uncertainty=clock_uncertainty,
-            )
+        attach_sdc_drift(  # issue #5236: opt-in, informational only
+            response,
+            sdc_path,
+            request_dir=request_dir,
+            clocks=clock_targets(clock_port, clock_period_ns, clock_extras)["clocks"],
+            clock_port=clock_port,
+            input_delay_ns=input_delay_ns,
+            output_delay_ns=output_delay_ns,
+            input_delays=input_delays,
+            output_delays=output_delays,
+            clock_uncertainty=clock_uncertainty,
+        )
         return response
 
 

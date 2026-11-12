@@ -94,19 +94,23 @@ def _names(token: str, getter: str) -> str | None:
     return None if any(c in token for c in '{}$;"') else token
 
 
-def _parse_command(words: list[str]) -> dict[str, Any] | None:
-    """One supported command as a record, or ``None`` if its form is not
-    understood (the caller then lists it as unchecked)."""
-    cmd, args = words[0], words[1:]
+_VALUED = {
+    "create_clock": {"-name", "-period"},
+    "set_input_delay": {"-clock"},
+    "set_output_delay": {"-clock"},
+    "set_clock_uncertainty": set(),
+}
+_BOOLEAN = {"-min", "-max", "-setup", "-hold"}
+
+
+def _scan_args(
+    cmd: str, args: list[str]
+) -> tuple[dict[str, str | bool], list[str]] | None:
+    """Split ``args`` into option flags and positionals, or ``None`` when an
+    option is outside the understood subset."""
     flags: dict[str, str | bool] = {}
     positional: list[str] = []
-    valued = {
-        "create_clock": {"-name", "-period"},
-        "set_input_delay": {"-clock"},
-        "set_output_delay": {"-clock"},
-        "set_clock_uncertainty": set(),
-    }[cmd]
-    boolean = {"-min", "-max", "-setup", "-hold"}
+    valued = _VALUED[cmd]
     i = 0
     while i < len(args):
         arg = args[i]
@@ -115,7 +119,7 @@ def _parse_command(words: list[str]) -> dict[str, Any] | None:
                 return None
             flags[arg] = args[i + 1]
             i += 2
-        elif arg in boolean and cmd != "create_clock":
+        elif arg in _BOOLEAN and cmd != "create_clock":
             flags[arg] = True
             i += 1
         elif arg.startswith("-") and _num(arg) is None:
@@ -123,31 +127,49 @@ def _parse_command(words: list[str]) -> dict[str, Any] | None:
         else:
             positional.append(arg)
             i += 1
-    if cmd == "create_clock":
-        period = _num(str(flags.get("-period", "")))
-        if period is None or len(positional) != 1:
-            return None
-        port = _names(positional[0], "get_ports")
-        name = flags.get("-name", port)
-        if port is None or not isinstance(name, str):
-            return None
-        return {"cmd": cmd, "subject": name, "value": period}
-    if cmd == "set_clock_uncertainty":
-        if len(positional) not in (1, 2) or ("-setup" in flags and "-hold" in flags):
-            return None
-        value = _num(positional[0])
-        clock = _names(positional[1], "get_clocks") if len(positional) == 2 else None
-        if value is None or (len(positional) == 2 and clock is None):
-            return None
-        sides = (
-            ["setup"]
-            if "-setup" in flags
-            else ["hold"]
-            if "-hold" in flags
-            else ["setup", "hold"]
-        )
-        return {"cmd": cmd, "subject": clock, "value": value, "sides": sides}
-    # set_input_delay / set_output_delay
+    return flags, positional
+
+
+def _parse_create_clock(
+    flags: dict[str, str | bool], positional: list[str]
+) -> dict[str, Any] | None:
+    period = _num(str(flags.get("-period", "")))
+    if period is None or len(positional) != 1:
+        return None
+    port = _names(positional[0], "get_ports")
+    name = flags.get("-name", port)
+    if port is None or not isinstance(name, str):
+        return None
+    return {"cmd": "create_clock", "subject": name, "value": period}
+
+
+def _parse_uncertainty(
+    flags: dict[str, str | bool], positional: list[str]
+) -> dict[str, Any] | None:
+    if len(positional) not in (1, 2) or ("-setup" in flags and "-hold" in flags):
+        return None
+    value = _num(positional[0])
+    clock = _names(positional[1], "get_clocks") if len(positional) == 2 else None
+    if value is None or (len(positional) == 2 and clock is None):
+        return None
+    sides = (
+        ["setup"]
+        if "-setup" in flags
+        else ["hold"]
+        if "-hold" in flags
+        else ["setup", "hold"]
+    )
+    return {
+        "cmd": "set_clock_uncertainty",
+        "subject": clock,
+        "value": value,
+        "sides": sides,
+    }
+
+
+def _parse_delay(
+    cmd: str, flags: dict[str, str | bool], positional: list[str]
+) -> dict[str, Any] | None:
     if len(positional) != 2 or not isinstance(flags.get("-clock"), str):
         return None
     value = _num(positional[0])
@@ -166,6 +188,21 @@ def _parse_command(words: list[str]) -> dict[str, Any] | None:
         "value": value,
         "sides": sides,
     }
+
+
+def _parse_command(words: list[str]) -> dict[str, Any] | None:
+    """One supported command as a record, or ``None`` if its form is not
+    understood (the caller then lists it as unchecked)."""
+    cmd = words[0]
+    scanned = _scan_args(cmd, words[1:])
+    if scanned is None:
+        return None
+    flags, positional = scanned
+    if cmd == "create_clock":
+        return _parse_create_clock(flags, positional)
+    if cmd == "set_clock_uncertainty":
+        return _parse_uncertainty(flags, positional)
+    return _parse_delay(cmd, flags, positional)
 
 
 def parse_sdc(text: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -236,17 +273,19 @@ def _compare_clocks(commands, clocks, out):
             out.append(_mismatch("create_clock", k["port"], None, k["period_ns"]))
 
 
-def _compare_delays(commands, cmd, scalar, per_port, clock_port, out):
+def _compare_sdc_delays(commands, cmd, scalar, per_port, out):
+    """SDC -> request direction; returns the ``(subject, side)`` values seen."""
     seen: dict[tuple[str | None, str], float] = {}
     for c in commands:
         if c["cmd"] != cmd:
             continue
         for side in c["sides"]:
             seen[(c["subject"], side)] = c["value"]
-            if c["subject"] is None:
-                request = scalar
-            else:
-                request = _request_delay(scalar, per_port, c["subject"], side)
+            request = (
+                scalar
+                if c["subject"] is None
+                else _request_delay(scalar, per_port, c["subject"], side)
+            )
             if not _same(c["value"], request):
                 out.append(
                     _mismatch(
@@ -258,6 +297,11 @@ def _compare_delays(commands, cmd, scalar, per_port, clock_port, out):
                         line=c["line"],
                     )
                 )
+    return seen
+
+
+def _compare_delays(commands, cmd, scalar, per_port, clock_port, out):
+    seen = _compare_sdc_delays(commands, cmd, scalar, per_port, out)
     for side in ("min", "max"):
         if scalar is not None and (None, side) not in seen:
             out.append(_mismatch(cmd, "*", None, scalar, bound=side))
@@ -356,3 +400,11 @@ def sdc_drift_block(
         "unchecked": unchecked,
         "status": "drift" if mismatches else "match",
     }
+
+
+def attach_sdc_drift(
+    response: dict[str, Any], sdc_path: str | None, **kwargs: Any
+) -> None:
+    """Add ``response["sdc_drift"]`` when ``sdc_path`` is set (no-op otherwise)."""
+    if sdc_path is not None:
+        response["sdc_drift"] = sdc_drift_block(sdc_path, **kwargs)
