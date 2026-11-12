@@ -48,10 +48,10 @@ from ..op_sanity import OpSanityError, run_op_sanity
 from ..output_lock import OutputLockError
 from ..sim import SimError, load_request, run_sim
 from ..sim_batch_async import read_job_status
-from ..sim_process_legs import value_table
 from ..sim_set import DEFAULT_MAX_IN_FLIGHT, print_set_text, run_sim_set
 from .output import EXIT_USAGE_ERROR, emit_error, emit_success, write_json_file
 from .sim_job_text import _print_job_status_text as _print_job_status_text
+from .sim_measurement_text import print_measurement_head
 from .sim_pdk_text import _print_pdk as _print_pdk
 from .sim_pdk_text import _print_worker_pdk as _print_worker_pdk
 
@@ -533,19 +533,7 @@ def _print_text(report: dict) -> None:
         print()
         print("measurements:")
         for m in measurements:
-            worst = m["worst_case"]
-            if worst is not None:
-                worst_desc = (
-                    f"worst={worst['value']!r} @ {worst['corner_id']} "
-                    f"(margin={worst['margin']!r})"
-                )
-            else:
-                worst_desc = "worst=-"
-            print(f"  {m['name']} [{m['status']}]  {worst_desc}")
-            if len(report["corners"]) > 1:
-                # Issue #5385: per-corner value table (data already in JSON).
-                for cid, val in value_table(m["name"], report["corners"]):
-                    print(f"    {cid}: {val!r}")
+            print_measurement_head(m, report["corners"])
             plot = m.get("plot")
             if plot is not None:
                 # Issue #1723: name the SVG next to the failing measurement

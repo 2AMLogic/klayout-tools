@@ -102,3 +102,19 @@ def value_table(
                 rows.append((corner["corner_id"], m.get("value")))
                 break
     return rows
+
+
+def attach_process_leg_check(
+    report: dict[str, Any], corners: list[dict[str, Any]]
+) -> None:
+    """Append the ``process_leg_check`` warning to ``report["diagnostics"]``."""
+    diag = process_leg_check(corners)
+    if diag:
+        report.setdefault("diagnostics", []).append(diag)
+
+
+def print_value_table(measurement: str, corners: list[dict[str, Any]]) -> None:
+    """Text-mode per-corner value rows (multi-corner runs only)."""
+    if len(corners) > 1:
+        for cid, val in value_table(measurement, corners):
+            print(f"    {cid}: {val!r}")
