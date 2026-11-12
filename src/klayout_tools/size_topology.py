@@ -22,6 +22,7 @@ import tempfile
 from typing import Any
 
 from . import env_provenance
+from ._jsonnum import is_number
 from ._provenance import build_provenance
 from .pdk import PdkNotFoundError, find_pdk
 from .sim import SimError, _resolve_models_lib
@@ -223,11 +224,9 @@ def _parse_topology_bias(bias: Any) -> dict[str, Any]:
     if not isinstance(bias, dict):
         raise SizeError("request.bias must be a JSON object")
     vcm_v = bias.get("vcm_v")
-    if vcm_v is not None:
-        if isinstance(vcm_v, bool) or not isinstance(vcm_v, (int, float)):
-            raise SizeError("request.bias.vcm_v must be a number")
-        vcm_v = float(vcm_v)
-    return {"vcm_v": vcm_v}
+    if vcm_v is not None and not is_number(vcm_v):
+        raise SizeError("request.bias.vcm_v must be a number")
+    return {"vcm_v": None if vcm_v is None else float(vcm_v)}
 
 
 def _parse_max_joint_iterations(options: dict[str, Any]) -> int:

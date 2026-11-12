@@ -369,7 +369,7 @@
     },
     {
       "path": "src/klayout_tools/gen.py",
-      "lines": 4357
+      "lines": 4356
     },
     {
       "path": "src/klayout_tools/gen_compose.py",
@@ -381,7 +381,7 @@
     },
     {
       "path": "src/klayout_tools/gen_compose_routing.py",
-      "lines": 5525
+      "lines": 5524
     },
     {
       "path": "src/klayout_tools/gen_describe.py",
@@ -545,7 +545,7 @@
     },
     {
       "path": "src/klayout_tools/place_and_route_request.py",
-      "lines": 2250
+      "lines": 2249
     },
     {
       "path": "src/klayout_tools/place_and_route_script.py",
@@ -601,7 +601,7 @@
     },
     {
       "path": "src/klayout_tools/signoff_attest.py",
-      "lines": 1237
+      "lines": 1236
     },
     {
       "path": "src/klayout_tools/signoff_generator_batch.py",
@@ -609,7 +609,7 @@
     },
     {
       "path": "src/klayout_tools/signoff_power_delivery.py",
-      "lines": 2014
+      "lines": 2013
     },
     {
       "path": "src/klayout_tools/sim.py",
@@ -621,11 +621,11 @@
     },
     {
       "path": "src/klayout_tools/sim_commands.py",
-      "lines": 924
+      "lines": 923
     },
     {
       "path": "src/klayout_tools/sim_decks.py",
-      "lines": 2317
+      "lines": 2316
     },
     {
       "path": "src/klayout_tools/sim_remote.py",
@@ -665,7 +665,7 @@
     },
     {
       "path": "src/klayout_tools/size_topology.py",
-      "lines": 1194
+      "lines": 1193
     },
     {
       "path": "src/klayout_tools/socket_check.py",

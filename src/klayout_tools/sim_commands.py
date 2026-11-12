@@ -48,6 +48,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import _batch_common, _provenance, netlist_batch, sim_batch
+from ._jsonnum import is_number
 
 #: Top-level request field and report ``mode`` of a command-list request.
 COMMANDS_FIELD = "commands"
@@ -433,11 +434,9 @@ def plan_command_units(
 
 
 def _timeout(value: Any, where: str, default: float) -> float:
-    if value is None:
-        return float(default)
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+    if value is not None and (not is_number(value) or value <= 0):
         raise _error(f"{where} must be a positive number of seconds")
-    return float(value)
+    return float(default if value is None else value)
 
 
 # --------------------------------------------------------------------------- #

@@ -48,6 +48,7 @@ import math
 import os
 from typing import Any
 
+from ._jsonnum import is_number
 from ._native import _load_native_extension, native_provenance
 from .yield_provenance import (
     _attach_spec_rows,
@@ -130,10 +131,9 @@ def _limits_from(raw: Any, name: str, where: str) -> dict[str, Any]:
         raise YieldError(f"{where}: measurement '{name}' has non-object limits")
     limits: dict[str, Any] = {}
     for key in ("min", "max", "target_yield"):
-        value = raw.get(key)
-        if value is None:
+        if (value := raw.get(key)) is None:
             continue
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
+        if not is_number(value):
             raise YieldError(
                 f"{where}: measurement '{name}' limits.{key} must be a number"
             )
@@ -164,7 +164,7 @@ def _read_qualification_keys(
     declares neither is unchanged."""
     k = raw.get("target_sigma")
     if k is not None:
-        if isinstance(k, bool) or not isinstance(k, (int, float)):
+        if not is_number(k):
             raise YieldError(f"{prefix}target_sigma must be a number")
         if not math.isfinite(k) or k <= 0:
             raise YieldError(f"{prefix}target_sigma must be > 0 (got {k})")
@@ -274,7 +274,7 @@ def _negative_control_from(raw: Any, name: str, where: str) -> dict[str, Any] | 
         if value is None:
             errored += 1
             continue
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
+        if not is_number(value):
             raise YieldError(
                 f"{where}: measurement '{name}' negative_control has a non-numeric "
                 "sample value"
@@ -340,7 +340,7 @@ def _draw_from_mc_corners(
             value = m.get("value")
             if value is None:
                 errored += 1
-            elif isinstance(value, bool) or not isinstance(value, (int, float)):
+            elif not is_number(value):
                 raise YieldError(
                     f"sim report: measurement '{name}' has a non-numeric value "
                     f"in corner {corner.get('corner_id')!r}"
@@ -487,7 +487,7 @@ def _measurements_from_sample_set(doc: dict[str, Any]) -> list[dict[str, Any]]:
             if value is None:
                 errored += 1
                 continue
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
+            if not is_number(value):
                 raise YieldError(
                     f"sample set: measurement '{name}' has a non-numeric sample value"
                 )

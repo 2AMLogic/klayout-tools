@@ -232,6 +232,7 @@ from typing import Any
 
 from . import env_provenance
 from . import macros as macro_spec
+from ._jsonnum import is_number
 from ._paths import _load_request_json, _reject_unknown_keys, validate_request_shape
 from ._provenance import (
     INPUT_ROLE_SOURCE,
@@ -2320,8 +2321,7 @@ def _validate_clock_entry(entry: Any, where: str) -> dict[str, Any]:
     port = entry.get("port")
     if not isinstance(port, str) or not port.strip():
         raise SynthesizeError(f"{where}.port must be a non-empty string")
-    period = entry.get("period_ns")
-    if isinstance(period, bool) or not isinstance(period, (int, float)):
+    if not is_number(period := entry.get("period_ns")):
         raise SynthesizeError(
             f"{where}.period_ns must be a positive number (nanoseconds)"
         )
