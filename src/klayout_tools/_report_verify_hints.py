@@ -15,6 +15,10 @@ from typing import Any
 from ._provenance import sha256_file
 from ._report_verify import hash_check
 
+#: ``hash_check.field`` for a yield citation (issue #5392): its report has no
+#: ``provenance.input``; the compared value is the samples document's sha256.
+_YIELD_HASH_FIELD = "samples (sha256 of the named samples document)"
+
 
 def input_not_found_entry(
     path: str, report_path: str, found_relative_to_report: str | None
@@ -59,10 +63,15 @@ def stale_pin(spec: Mapping[str, Any], resolution: Mapping[str, Any]) -> dict[st
     sha256 -- the usual mistake.
     """
     expected = spec.get("content_hash")
+    samples_path = resolution.get("yield_samples_path")
     detail: dict[str, Any] = {
         "content_hash_pin": "stale",
         "hash_check": hash_check(
-            "provenance.input.content_hash", expected, resolution["content_hash"]
+            _YIELD_HASH_FIELD
+            if samples_path is not None
+            else "provenance.input.content_hash",
+            expected,
+            resolution["content_hash"],
         ),
     }
     envelope = resolution.get("envelope")
@@ -82,10 +91,16 @@ def stale_pin(spec: Mapping[str, Any], resolution: Mapping[str, Any]) -> dict[st
     elif isinstance(block.get("path"), str):
         detail["compared_against"] = block["path"]
         what = f"the sha256 of the input artifact {block['path']}"
+    elif isinstance(samples_path, str):
+        # Issue #5392: a yield report has no provenance.input; the hash is
+        # over the samples document the report names.
+        detail["compared_against"] = samples_path
+        what = f"the sha256 of the samples document {samples_path}"
     else:
         return detail
+    field = "samples document" if samples_path else "provenance.input.content_hash"
     hint = (
-        f"content_hash must be {what} (provenance.input.content_hash), "
+        f"content_hash must be {what} ({field}), "
         "not the hash of the evidence envelope file"
     )
     evidence_file = resolution.get("file")
