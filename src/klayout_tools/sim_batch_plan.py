@@ -14,9 +14,18 @@ from typing import Any
 from .sim_batch import (
     BatchConfig,
     _apply_job_split,
+    _assess_deck_support,
     _assess_job_ceiling,
     _resolve_batch_config,
 )
+
+
+def deck_serial_worst_s(units: list[dict[str, Any]]) -> float:
+    """Fully-serial worst case of a deck list: every unit's own ``timeout_s``,
+    one after another. The single definition shared by the submit path
+    (``sim_decks._prepare_decks_batch``), the attach path and the
+    ``--batch-set`` preflight (issue #5337), so they cannot drift."""
+    return sum(unit["timeout_s"] for unit in units)
 
 
 def plan_batch_job(
@@ -103,8 +112,9 @@ def _preflight_decks_request(
 ) -> dict[str, Any]:
     """Ceiling check for a ``decks[]`` member (issue #5337): a deck list is one
     batch job whose bound is the serial worst case of its units, sized exactly
-    as :func:`~klayout_tools.sim_decks._prepare_decks_batch` sizes it (the
-    sum of every unit's own ``timeout_s``; keep the two in step)."""
+    as :func:`~klayout_tools.sim_decks._prepare_decks_batch` sizes it, via the
+    shared :func:`deck_serial_worst_s`, and runs the same image-support
+    assessment the submit path does."""
     import os
 
     from . import sim_decks
@@ -114,10 +124,11 @@ def _preflight_decks_request(
         request_dir=os.path.dirname(os.path.abspath(request_path)),
         allow_worker_form=False,
     )
-    serial_worst_s = sum(unit["timeout_s"] for unit in units)
+    serial_worst_s = deck_serial_worst_s(units)
     config = _resolve_batch_config(
         request, corner_count=1, timeout_s=serial_worst_s, check_runner=False
     )
+    _assess_deck_support(request, config)
     job_ceiling, _hosts = plan_batch_job(
         config, unit_count=1, timeout_s=serial_worst_s, quiet=True
     )
