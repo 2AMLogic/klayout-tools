@@ -35,6 +35,12 @@ from pathlib import Path
 from typing import Any, cast
 
 from ._provenance import content_hash
+from .signoff_power_delivery_substrate import (
+    REASON_SUBSTRATE_ISOLATION_UNDECIDABLE,
+    add_substrate_continuity,
+    erc_ties_checked_by_assertion,
+    substrate_undecidable_gate,
+)
 from .signoff_runset import runset_disclosure, runset_refusal
 
 #: Issue #2025, T1 item 11 ("Power delivery (structural)") only. Six
@@ -146,16 +152,6 @@ _REASON_SUPPLY_SPEC_INCOMPLETE = "supply_spec_incomplete"
 _REASON_SUPPLY_SPEC_DISCLOSED_UNEXPRESSIBLE = "supply_spec_disclosed_unexpressible"
 _REASON_SUPPLY_SPEC_DISCLOSED_TOOL_LIMITATION = "supply_spec_disclosed_tool_limitation"
 _REASON_SUPPLY_NOT_CONTINUOUS = "supply_not_continuous"
-#: Issue #5346 (piece E of #5336): the cited ``klt erc`` run *disclosed* that
-#: it could not decide substrate-path ``erc.supply_short``
-#: (``erc_coverage.inapplicable[erc.supply_short]``, reason
-#: ``substrate_isolation_undecidable``, with a ``missing`` list). An
-#: undecided question is not a clean answer, so the item is ``"unmet"``; the
-#: ``missing`` list is surfaced in ``detail.power_delivery``. Fix: declare
-#: the isolation the run named (``ties[].isolation_boxes``) or the deck layer.
-_REASON_SUBSTRATE_ISOLATION_UNDECIDABLE = "substrate_isolation_undecidable"
-#: ``erc_coverage.checked`` id of the substrate-path ``erc.supply_short`` work.
-_SUBSTRATE_WORK_ID = "erc.supply_short.substrate"
 _REASON_LVS_SUPPLY_UNPROVEN = "lvs_supply_unproven"
 _REASON_LVS_DID_NOT_PASS = "lvs_did_not_pass"
 #: Issue #4193: the cited set resolved cleanly but lacks the ``erc`` and/or
@@ -919,77 +915,6 @@ def _erc_disclosed_undeclared_tie_classes(
     return classes
 
 
-def _erc_substrate_undecidable(envelope: dict[str, Any]) -> list[str] | None:
-    """The ``missing`` list of a cited ``klt erc`` run that disclosed
-    ``erc.supply_short`` as ``substrate_isolation_undecidable`` (issue
-    #5346), else ``None``.
-
-    Reads the design note's section 8 contract only -- the older
-    ``substrate_continuity_not_modelled`` reason (issue #4384) is a different
-    string and keeps grading as it did. A record with no usable ``missing``
-    list still counts (``[]``): the disclosure itself is what blocks.
-    """
-    block = envelope.get("erc_coverage")
-    if not isinstance(block, dict):
-        return None
-    for record in block.get("inapplicable") or []:
-        if (
-            isinstance(record, dict)
-            and record.get("id") == "erc.supply_short"
-            and record.get("reason") == _REASON_SUBSTRATE_ISOLATION_UNDECIDABLE
-        ):
-            return [m for m in record.get("missing") or [] if isinstance(m, str)]
-    return None
-
-
-def _erc_substrate_continuity(envelope: dict[str, Any]) -> dict[str, Any] | None:
-    """``{"checked": True, "by_assertion": <bool>}`` when the cited run
-    evaluated substrate-path ``erc.supply_short``
-    (``erc_coverage.checked`` carries ``erc.supply_short.substrate``), else
-    ``None`` -- so a pre-substrate run renders its citation unchanged.
-    ``by_assertion`` states the verdict rested on caller coordinates
-    (``checked_by_assertion``)."""
-    block = envelope.get("erc_coverage")
-    if not isinstance(block, dict) or _SUBSTRATE_WORK_ID not in (
-        block.get("checked") or []
-    ):
-        return None
-    return {
-        "checked": True,
-        "by_assertion": _SUBSTRATE_WORK_ID in (block.get("checked_by_assertion") or []),
-    }
-
-
-def _erc_ties_checked_by_assertion(envelope: dict[str, Any]) -> list[str]:
-    """The cited `klt erc` run's ``erc_coverage.checked_by_assertion``
-    (issue #2234): the ``erc.missing_tie`` work identities whose tap region
-    came from a caller **assertion** (``ties[].tap_boxes``) rather than
-    PDK-marker narrowing -- ``[]`` for every run that used none, and for
-    every report produced before the field existed.
-
-    Carried into a ``"met"`` item 11 citation's ``power_delivery`` block
-    (:func:`_grade_power_delivery`) for the same reason `klt erc` grades it
-    as its own classification rather than folding it into ``checked``: an
-    asserted tie is real, evaluated work -- the geometry was intersected and
-    the connectivity walked, and a degenerate or unmatched assertion is
-    rejected exactly as any other narrowing form is (``docs/cli/erc.md`` →
-    "A tie with no distinguishing marker layer at all") -- but *which
-    geometry counts as the tap* rested on the caller's word rather than on a
-    drawn marker. That is a provenance difference a reader of the verdict of
-    record should not have to re-open the cited ERC envelope to discover.
-    It does not change the verdict: item 11 is ``"met"`` on an asserted tie
-    exactly as on a marker-derived one.
-    """
-    block = envelope.get("erc_coverage")
-    if not isinstance(block, dict):
-        return []
-    return [
-        identity
-        for identity in block.get("checked_by_assertion") or []
-        if isinstance(identity, str)
-    ]
-
-
 def _erc_ties_checked_by_well_assertion(envelope: dict[str, Any]) -> list[str]:
     """The cited `klt erc` run's ``erc_coverage.checked_by_well_assertion``
     (issues #2255 and #2540): the ``erc.missing_tie`` work identities whose
@@ -1005,7 +930,7 @@ def _erc_ties_checked_by_well_assertion(envelope: dict[str, Any]) -> list[str]:
       because no drawn layer separates the tub's two bias classes.
 
     Carried into a ``"met"`` item 11 citation beside
-    :func:`_erc_ties_checked_by_assertion`'s tap-side list, and deliberately
+    :func:`erc_ties_checked_by_assertion`'s tap-side list, and deliberately
     **not** merged into it, because the two state different things about the
     same verdict. A ``tap_boxes`` assertion says which of the drawn tap
     geometry counts as the tap; the well is still drawn, and still measured.
@@ -1135,14 +1060,9 @@ def _resolve_erc_supply_spec(
     if _erc_supply_findings(erc["envelope"], supply_spec["supply_nets"]):
         return None, _REASON_SUPPLY_NOT_CONTINUOUS, {}
 
-    # Issue #5346: a disclosed-undecidable substrate path is not a clean one.
-    undecidable = _erc_substrate_undecidable(erc["envelope"])
+    undecidable = substrate_undecidable_gate(erc["envelope"])  # issue #5346
     if undecidable is not None:
-        return (
-            None,
-            _REASON_SUBSTRATE_ISOLATION_UNDECIDABLE,
-            {"power_delivery": {"substrate_isolation_missing": undecidable}},
-        )
+        return None, REASON_SUBSTRATE_ISOLATION_UNDECIDABLE, undecidable
 
     return supply_spec, None, {}
 
@@ -1952,8 +1872,8 @@ def _grade_power_delivery(
         # Issue #2234: which of the cited run's `erc.missing_tie` checks
         # rested on a caller assertion (`ties[].tap_boxes`) rather than on
         # PDK-marker narrowing -- `[]` for a purely marker-derived (or
-        # pre-#2234) run. See `_erc_ties_checked_by_assertion`.
-        "ties_checked_by_assertion": _erc_ties_checked_by_assertion(erc["envelope"]),
+        # pre-#2234) run. See `erc_ties_checked_by_assertion`.
+        "ties_checked_by_assertion": erc_ties_checked_by_assertion(erc["envelope"]),
         # Issue #2255: which of them rested on a caller-asserted *well*
         # region (`ties[].well_layer: null` + `ties[].well_boxes`) rather
         # than on a drawn well/tub layer -- the native-substrate case, `[]`
@@ -1973,11 +1893,7 @@ def _grade_power_delivery(
             erc["envelope"], supply_spec["supply_nets"]
         ),
     }
-    # Issue #5346: present only when the cited run evaluated the substrate
-    # path, so earlier runs render this citation exactly as before.
-    substrate_continuity = _erc_substrate_continuity(erc["envelope"])
-    if substrate_continuity is not None:
-        citation["power_delivery"]["substrate_continuity"] = substrate_continuity
+    add_substrate_continuity(citation["power_delivery"], erc["envelope"])  # #5346
     # Issue #2623: a *partial* tie declaration (one or more `ties[]` entries
     # declared and checked -- this is the `tie_count > 0` path, already
     # `"met"` on those merits -- plus one or more further classes disclosed

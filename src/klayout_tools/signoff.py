@@ -4357,11 +4357,6 @@ def build_tier_report(
       did ask, and the answer is no: a declared supply resolved to zero or
       several islands, two declared supplies resolved to one island, or a
       well/tub has no connected tap.
-    - ``"substrate_isolation_undecidable"`` (issue #5346, item 11 only) --
-      the cited `klt erc` run disclosed substrate-path ``erc.supply_short`` as
-      undecidable (``erc_coverage.inapplicable``); the ``missing`` list is in
-      ``detail.power_delivery.substrate_isolation_missing``. Unmet: an
-      undecided question is not a clean answer.
     - ``"lvs_supply_unproven"`` (issue #2025, item 11 only) -- the LVS half
       of the item is unproven: ``power_connectivity.status`` is not
       ``"match"`` (with a PDN citation), or the reference netlist did not
