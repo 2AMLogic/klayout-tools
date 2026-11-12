@@ -89,6 +89,7 @@ from . import (
     remote_transport,
     sim_batch,
     sim_batch_async,
+    sim_batch_plan,
     sim_deck_expand,
     sim_remote,
     sim_staging,
@@ -1859,8 +1860,7 @@ def _prepare_decks_batch(
     before any S3 write. Job timeout is the fully-serial worst case (every
     unit's own timeout, one after another) plus slack; the fleet's own
     ``$EDA_JOB_CONCURRENCY`` sizing still makes a real run far faster."""
-    units = worker_request[DECKS_FIELD]
-    serial_worst_s = sum(unit["timeout_s"] for unit in units)
+    serial_worst_s = sim_batch_plan.deck_serial_worst_s(worker_request[DECKS_FIELD])
     config = sim_batch._resolve_batch_config(
         request, corner_count=1, timeout_s=serial_worst_s
     )
@@ -2023,7 +2023,7 @@ def _attach_decks_batch(
     from .sim import SimError
 
     units = worker_request[DECKS_FIELD]
-    serial_worst_s = sum(unit["timeout_s"] for unit in units)
+    serial_worst_s = sim_batch_plan.deck_serial_worst_s(units)
     try:
         config = sim_batch._resolve_batch_config(
             request, corner_count=1, timeout_s=serial_worst_s
