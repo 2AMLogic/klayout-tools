@@ -12,7 +12,7 @@ from collections.abc import Callable
 from concurrent.futures import FIRST_EXCEPTION, Future, ThreadPoolExecutor, wait
 from typing import Any
 
-from . import sim
+from . import sim, sim_batch
 
 #: Cells characterized at once on the ``batch`` backend (issue #5351). Each
 #: cell blocks on one fleet job (~minutes), so serial wall-clock is
@@ -24,12 +24,18 @@ BATCH_CELL_CONCURRENCY = 4
 
 def batch_pool_size(n_cells: int, backend: str | None, request: dict[str, Any]) -> int:
     """Worker count for the per-cell loop: >1 only for a multi-cell run whose
-    backend resolves to ``batch``. Local/other backends stay serial so a
+    backend resolves to ``batch`` **and** whose request opts into waiting out
+    fleet capacity (``batch.capacity_wait_s`` > 0). Without that wait a burst
+    of concurrent submits hits ``batch_no_capacity`` and fails (issue #5348),
+    so the default stays serial. Local/other backends stay serial so a
     shared host is never oversubscribed."""
     if n_cells <= 1:
         return 1
     resolved_backend, _ = sim.resolve_backend(backend, request)
     if resolved_backend != "batch":
+        return 1
+    batch_spec = request.get("batch") or {}
+    if sim_batch.resolve_capacity_wait_s(batch_spec) <= 0:
         return 1
     return min(BATCH_CELL_CONCURRENCY, n_cells)
 

@@ -17,13 +17,22 @@ from klayout_tools import characterize, characterize_pool
 def test_batch_pool_size_only_parallel_for_multi_cell_batch(monkeypatch):
     monkeypatch.delenv("KLT_SIM_BACKEND", raising=False)
     size = characterize_pool.batch_pool_size
-    assert size(1, "batch", {}) == 1
-    assert size(8, "local", {}) == 1
-    assert size(8, None, {}) == 1
-    assert size(8, "batch", {}) == characterize_pool.BATCH_CELL_CONCURRENCY
-    assert size(2, None, {"backend": "batch"}) == 2
+    wait = {"batch": {"capacity_wait_s": 600}}
+    assert size(1, "batch", wait) == 1
+    assert size(8, "local", wait) == 1
+    assert size(8, None, wait) == 1
+    assert size(8, "batch", wait) == characterize_pool.BATCH_CELL_CONCURRENCY
+    assert size(2, None, {"backend": "batch", **wait}) == 2
     monkeypatch.setenv("KLT_SIM_BACKEND", "batch")
-    assert size(3, None, {}) == 3
+    assert size(3, None, wait) == 3
+
+
+def test_batch_pool_size_serial_without_capacity_wait(monkeypatch):
+    monkeypatch.delenv("KLT_SIM_BACKEND", raising=False)
+    size = characterize_pool.batch_pool_size
+    assert size(8, "batch", {}) == 1
+    assert size(8, "batch", {"batch": {}}) == 1
+    assert size(8, "batch", {"batch": {"capacity_wait_s": 0}}) == 1
 
 
 def test_run_cells_serial_off_batch(monkeypatch):
