@@ -50,6 +50,7 @@ def run_sim_leg(
     sim_dir: str,
     backend: str | None,
     resume: bool,
+    **run_sim_kwargs: Any,
 ) -> dict[str, Any]:
     """Write one leg's testbench + sim request and run it.
 
@@ -59,6 +60,8 @@ def run_sim_leg(
     report; the leg then runs through ``run_sim(resume=True)``, whose own
     fingerprint guard decides what a leftover checkpoint / batch receipt may
     be reused (a mismatch resubmits, never attaches stale results).
+    ``run_sim_kwargs`` (e.g. the ``--wait-for-capacity`` shard, #5348) pass
+    straight through to ``sim.run_sim``.
     """
     request_text = json.dumps(sim_request, indent=2) + "\n"
     unchanged = (
@@ -86,6 +89,7 @@ def run_sim_leg(
         artifacts_dir=sim_dir,
         backend=backend,
         resume=True if resume else None,
+        **run_sim_kwargs,
     )
     with open(sim_report_path, "w", encoding="utf-8") as handle:
         json.dump(report, handle, indent=2)

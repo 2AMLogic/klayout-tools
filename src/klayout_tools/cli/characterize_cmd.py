@@ -36,6 +36,7 @@ def run(args: argparse.Namespace) -> int:
             cells=getattr(args, "cell", None),
             compare_to=getattr(args, "compare_to", None),
             resume=getattr(args, "resume", None),
+            capacity_wait_s=getattr(args, "wait_for_capacity", None),
         )
     except CharacterizeError as exc:
         return emit_error("characterize", str(exc), args.format)

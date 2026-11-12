@@ -5,6 +5,7 @@ from collections.abc import Callable
 from typing import Any
 
 from . import characterize_cmd
+from .parser_sim import add_wait_for_capacity_arg
 
 
 def add_characterize_parser(
@@ -74,12 +75,12 @@ def add_characterize_parser(
         "--backend",
         default=None,
         help=(
-            "klt sim execution backend for the characterization sweep "
-            "(default: local). The grid is a single corner, so `local` is "
-            "normally correct -- this exists for a caller who needs the run "
-            "off-host."
+            "klt sim execution backend for the sweep (default: local). The "
+            "grid is a single corner, so `local` is normally correct -- this "
+            "exists for a caller who needs the run off-host."
         ),
     )
+    add_wait_for_capacity_arg(characterize_parser, "Reaches every sim (#5348).")
     characterize_parser.add_argument(
         "--keep-artifacts",
         action="store_true",
