@@ -19,7 +19,7 @@ Properties (each load-bearing, see the design note):
   ``klt extract`` uses, so island numbering agrees with ``vsubs_iso<n>``.
 
 Evaluated only when the extraction deck declares ``substrate_isolation``
-(today: gf180mcu); other families keep the
+(gf180mcu, sky130); other families keep the
 ``substrate_continuity_not_modelled`` disclosure until the deck work lands.
 """
 
@@ -255,7 +255,12 @@ def run_substrate_pass(
         tie_circuit=tie_circuit,
         tie_layers=tie_layers,
         degenerate_ties=degenerate_ties,
-        islands=sorted_islands(_region(layout, top_cell, deck.substrate_isolation)),
+        islands=sorted_islands(
+            _region(layout, top_cell, deck.substrate_isolation),
+            _region(layout, top_cell, deck.nwell)
+            if deck.substrate_isolation_needs_nwell_ring
+            else None,
+        ),
         nets_decl=nets_decl,
         group_by_name=_same_net_group_ids(
             nets_decl, _declared_same_net_pairs(nets_decl)
