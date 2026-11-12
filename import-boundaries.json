@@ -536,6 +536,7 @@
         "klayout_tools.place_and_route_groups",
         "klayout_tools.place_and_route_hints",
         "klayout_tools.place_and_route_layers",
+        "klayout_tools.place_and_route_macro_halo",
         "klayout_tools.place_and_route_min_area",
         "klayout_tools.place_and_route_pdn_fit",
         "klayout_tools.place_and_route_pins",
