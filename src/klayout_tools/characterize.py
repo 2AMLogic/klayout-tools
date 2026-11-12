@@ -61,7 +61,7 @@ import os
 import re
 from typing import Any
 
-from . import characterize_pool, liberty_writer, sim
+from . import liberty_writer, sim
 from ._paths import _load_request_json, _resolve_relative, fold_spice_continuations
 from ._provenance import INPUT_ROLE_NETLIST, build_provenance
 from .characterize_arcs import DerivedArc, FunctionError, derive_arcs
@@ -89,6 +89,7 @@ from .characterize_instances import (
     _rail_nodes,
 )
 from .characterize_osdi import resolve_osdi_preload
+from .characterize_pool import run_cells
 from .characterize_probe import probe_netlist_cells as _probe_netlist_cells
 from .characterize_sequential import (
     SequentialSpecError,
@@ -230,9 +231,7 @@ def run_characterize(
 
     def _run_one(index: int) -> dict[str, Any]:
         cell, arcs = resolved[index]
-        cell_dir = (
-            os.path.join(work_dir, "cells", slug(cell["name"])) if batch else work_dir
-        )
+        cell_dir = os.path.join(work_dir, "cells", slug(cell["name"]))
         try:
             return _characterize_cell(
                 cell=cell,
@@ -243,7 +242,7 @@ def run_characterize(
                 options=options,
                 request=request,
                 request_dir=request_dir,
-                work_dir=cell_dir,
+                work_dir=cell_dir if batch else work_dir,
                 backend=backend,
                 keep_artifacts=keep_artifacts,
                 batch_shard=batch_shard,
@@ -253,9 +252,7 @@ def run_characterize(
                 raise
             raise CharacterizeError(f"cell '{cell['name']}': {exc}") from exc
 
-    results = characterize_pool.run_cells(
-        _run_one, len(resolved), backend, request, capacity_wait_s
-    )
+    results = run_cells(_run_one, len(resolved), backend, request, capacity_wait_s)
 
     library = _build_library(
         request=request,
