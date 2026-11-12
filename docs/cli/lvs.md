@@ -4281,6 +4281,17 @@ anchored pin names, upper-cased and sorted, truncated to 20 with
 }
 ```
 
+When the layout declares top-level pins the reference has no same-named pin
+for (issue #5396) — typically the DEF-named internal nets that
+`klt extract --abstract-cells --def-net-names` lists as pins of the top
+subcircuit, against a gate-level Verilog reference that lists only its ports
+(power rails are also layout-only against such a reference) — `details` also
+carries `layout_only_pins` (sorted, upper-cased, truncated to 20),
+`layout_only_pin_count` (exact total) and `layout_only_pins_truncated`.
+These keys are additive and **omitted when there are no such pins**, so
+`counts.pins` differences are explained by this list rather than hidden. They
+never change the verdict.
+
 It never changes `status` on its own: anchoring only ever *removes* a degree
 of freedom from the comparer, so a verdict reached with it is strictly
 stronger than one reached without. A request whose only finding is this
