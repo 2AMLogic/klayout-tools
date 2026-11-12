@@ -170,7 +170,7 @@
         },
         "combine_devices_max_attempts": {"type": "integer", "minimum": 1},
         "flatten_layout": {"type": "boolean"},
-        "flatten_reference": {"type": "boolean"},
+        "flatten_reference": {"oneOf": [{"type": "boolean"}, {"type": "array", "items": {"type": "string"}}], "description": "true/false, or (issue #5322) a list of circuit-name globs kept un-flattened."},
         "compare_timeout_s": {"type": "number", "exclusiveMinimum": 0, "description": "Issue #4165: options.compare_timeout_s as requested. Present only when set."},
         "netgen_setup": {"type": ["string", "null"]},
         "parameter_tolerance": {"type": ["number", "null"]},

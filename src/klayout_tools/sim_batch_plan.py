@@ -14,9 +14,18 @@ from typing import Any
 from .sim_batch import (
     BatchConfig,
     _apply_job_split,
+    _assess_deck_support,
     _assess_job_ceiling,
     _resolve_batch_config,
 )
+
+
+def deck_serial_worst_s(units: list[dict[str, Any]]) -> float:
+    """Fully-serial worst case of a deck list: every unit's own ``timeout_s``,
+    one after another. The single definition shared by the submit path
+    (``sim_decks._prepare_decks_batch``), the attach path and the
+    ``--batch-set`` preflight (issue #5337), so they cannot drift."""
+    return sum(unit["timeout_s"] for unit in units)
 
 
 def plan_batch_job(
@@ -49,17 +58,30 @@ def preflight_batch_request(request_path: str, **overrides: Any) -> dict[str, An
     before any S3 write. Raises :class:`SimError` with the submit path's own
     code; returns the job-ceiling assessment otherwise. ``overrides`` are the
     :func:`~klayout_tools.sim.run_sim` keyword options."""
-    from . import sim_commands, sim_decks
-    from .sim import _prepare_sim_request, load_request
+    from . import sim_commands
+    from .sim import (
+        SimError,
+        _prepare_sim_request,
+        _with_pdk_root_override,
+        load_request,
+    )
 
-    # Deck-list / command-list members (issue #5317) carry no corner grid, so
-    # the corner ceiling/split planner does not apply: one deck list is one
-    # batch job, never sharded. Accept them here (the real run validates their
-    # shape); this also avoids the corner path's ``request["netlist"]`` read.
     request = load_request(request_path)
-    if sim_decks.DECKS_FIELD in request or sim_commands.COMMANDS_FIELD in request:
+    if "decks" in request:
+        return _preflight_decks_request(
+            _with_pdk_root_override(request, overrides.get("pdk_root")), request_path
+        )
+    if sim_commands.COMMANDS_FIELD in request:
+        # Command-list members (issue #5317) carry no corner grid: one command
+        # list is one batch job, never sharded, so there is no ceiling to assess.
         return {}
-
+    if "netlist" not in request:
+        raise SimError(
+            f"{request_path}: --batch-set preflight supports corner requests "
+            "(`netlist`), deck-list (`decks`) and command-list (`commands`) "
+            "requests only; this request has none of them",
+            code="batch_set_unsupported_request",
+        )
     resolved = _prepare_sim_request(
         request_path,
         artifacts_dir=overrides.get("artifacts_dir"),
@@ -86,5 +108,33 @@ def preflight_batch_request(request_path: str, **overrides: Any) -> dict[str, An
     )
     job_ceiling, _hosts = plan_batch_job(
         config, unit_count=len(points), timeout_s=resolved.timeout_s, quiet=True
+    )
+    return job_ceiling
+
+
+def _preflight_decks_request(
+    request: dict[str, Any], request_path: str
+) -> dict[str, Any]:
+    """Ceiling check for a ``decks[]`` member (issue #5337): a deck list is one
+    batch job whose bound is the serial worst case of its units, sized exactly
+    as :func:`~klayout_tools.sim_decks._prepare_decks_batch` sizes it, via the
+    shared :func:`deck_serial_worst_s`, and runs the same image-support
+    assessment the submit path does."""
+    import os
+
+    from . import sim_decks
+
+    units = sim_decks.plan_deck_units(
+        request,
+        request_dir=os.path.dirname(os.path.abspath(request_path)),
+        allow_worker_form=False,
+    )
+    serial_worst_s = deck_serial_worst_s(units)
+    config = _resolve_batch_config(
+        request, corner_count=1, timeout_s=serial_worst_s, check_runner=False
+    )
+    _assess_deck_support(request, config)
+    job_ceiling, _hosts = plan_batch_job(
+        config, unit_count=1, timeout_s=serial_worst_s, quiet=True
     )
     return job_ceiling

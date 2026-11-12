@@ -321,7 +321,11 @@ def _read_reference_stage(
 
     if opts.flatten_reference:
         reference_flatten_warning = _lvs._flatten_netlist_safely(
-            reference_netlist, "reference"
+            reference_netlist,
+            "reference",
+            keep=opts.flatten_reference
+            if isinstance(opts.flatten_reference, list)
+            else None,
         )
         if reference_flatten_warning is not None:
             flatten_warnings.append(reference_flatten_warning)

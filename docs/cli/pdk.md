@@ -194,7 +194,10 @@ tarball's pax global header (`git archive` writes it) and record it in a
 `commit`: a 40-hex string, or `null` when no valid record exists (older
 installs, tarballs without the header, other install kinds) — never guessed.
 `version` is unchanged. The fleet-bundle `.pdk-store.json` is written outside
-this repo (2AMLogic/2am); recording a commit there is out of scope here.
+this repo (2AMLogic/2am) -- read, never written, here (issue #5318): when
+`SOURCES`, `.fetched-version` and git give nothing, `version` falls back to
+`store:<version>` from that file's string `version` (one level above the real
+variant dir). It carries no commit; recording one is out of scope here.
 
 ## PDK layouts: what resolves and what doesn't
 
