@@ -8,7 +8,7 @@ SPICE-driven NLDM timing **and power** characterization of one standard cell
 klt characterize <request> [-o OUTDIR] [--lib PATH] [--backend BACKEND]
                           [--wait-for-capacity SECONDS]
                           [--keep-artifacts] [--cell NAME ...]
-                          [--compare-to LIB] [--format text|json]
+                          [--resume] [--compare-to LIB] [--format text|json]
 ```
 
 ## Why this exists
@@ -61,6 +61,17 @@ positional file args. Relative paths inside it (`cell.netlist`,
   `cells` array. Repeatable; default every declared cell. A name the request
   does not declare is an error (never a silent no-op), and `--cell` on a
   single-cell (`cell`) request is an error too.
+- `--resume` — recover an interrupted run (issue #5350). Every cell and
+  constraint deck runs under a deterministic directory
+  (`<outdir>/cells/<cell>/`, `.../constraints/<label>/`). With `--resume`, a
+  leg whose generated testbench and sim request are unchanged and whose
+  `sim-report.json` is already on disk is reloaded, not re-simulated; the
+  remaining legs run through `klt sim --resume`, so with `--backend batch` a
+  leg whose job was already submitted (recorded in that leg's
+  `sim/batch-receipt.json`) re-attaches to it instead of paying for the fleet
+  again. Changed inputs never reuse a stale report or job: they resubmit.
+  Overrides the request's `options.resume`; on a non-batch backend it reuses
+  collected legs and otherwise behaves as `klt sim --resume` does.
 - `--compare-to` — a reference Liberty file (typically the vendor library for
   the same corner) to compare the emitted `.lib` against arc by arc. The
   result lands in the response's `comparison` block; see "Accuracy against a
@@ -647,6 +658,7 @@ says which input edge produces the *rising* output edge under this arc's own
 | `options.tran_step_ns` | number | Transient step, also used as `tmax`. Default `min(0.001, shortest ramp / 10)`. |
 | `options.timeout_s` | number | Per-corner ngspice timeout. Default `900`. |
 | `options.keep_artifacts` | boolean | Keep the ngspice log/deck. Default `false`; `--keep-artifacts` overrides. |
+| `options.resume` | boolean | Same as `--resume`. Default `false`. |
 | `options.osdi_preload` | array of string | `.osdi` shared libraries to `pre_osdi`, forwarded to `klt sim`'s `options.osdi_preload`. See "OSDI (Verilog-A) model preload". |
 | `netlist_source` | string | Forwarded to `klt sim` (`"schematic"` / `"extracted"`), for provenance on a post-extraction run. |
 

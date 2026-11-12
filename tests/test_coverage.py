@@ -418,3 +418,15 @@ def test_malformed_or_contradictory_evidence_cannot_reach_a_verdict(block):
     assert not rollup.reached_verdict
     assert rollup.exit_code == 4
     assert coverage.coverage_skipped_work(envelope) == []
+
+
+def test_validation_and_reasons_tolerate_non_object_and_unusable_blocks(monkeypatch):
+    """Pin the ``coverage.py`` guard branches left behind by the work-list split."""
+    assert coverage.coverage_validation_error("partial") == "coverage must be an object"
+    # No nothing_checked statement at all -> no reasons.
+    assert coverage.coverage_nothing_checked_reasons({"coverage": _full()}) == []
+    # A reader that sees nothing_checked without a usable reasons list (a
+    # malformed block that slipped past validation) still gets [].
+    monkeypatch.setattr(coverage, "coverage_nothing_checked", lambda envelope: True)
+    envelope = {"coverage": {"nothing_checked_reasons": "not-a-list"}}
+    assert coverage.coverage_nothing_checked_reasons(envelope) == []

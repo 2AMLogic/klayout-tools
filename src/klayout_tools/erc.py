@@ -92,7 +92,13 @@ from .erc_spec import (
     _validate_ties_disclosure,
     _validate_vias,
 )
-from .erc_substrate import SUBSTRATE_WORK_ID, run_substrate_pass, substrate_provenance
+from .erc_substrate import (
+    NO_TIES_MISSING,
+    SubstrateOutcome,
+    run_substrate_pass,
+    substrate_coverage_work,
+    substrate_provenance,
+)
 from .erc_ties import (  # noqa: F401 -- REASON_* are re-exported public names
     REASON_DEGENERATE_TAP_DECLARATION,
     REASON_DEGENERATE_WELL_ASSERTION,
@@ -316,15 +322,6 @@ REASON_NO_GATES = "no_gates"
 #: ``erc.net_connectivity`` cannot resolve it. Additive; leaves
 #: ``erc_status`` untouched like every other ``inapplicable`` entry.
 REASON_EXTRACTOR_GLOBAL_NET = "extractor_global_net"
-
-#: ``erc_coverage.inapplicable[].reason`` (issue #4384) on
-#: ``erc.supply_short`` when the spec declares two or more ``kind: "supply"``
-#: nets: ``klt erc`` joins conductors only through the declared
-#: ``stackup``/``vias``, so supply rails that are one conductor through a
-#: shared substrate read as separate clean islands. A coverage disclosure,
-#: not a merge (substrate/well merging was rejected in #2192); additive and
-#: leaves ``erc_status`` untouched. Cross-check with ``klt lvs``.
-REASON_SUBSTRATE_CONTINUITY_NOT_MODELLED = "substrate_continuity_not_modelled"
 
 #: The skip reason for a level that could have been graded had ``--pdk``
 #: named a PDK with an antenna-ratio table (or named one at all), or had the
@@ -578,7 +575,7 @@ def _connectivity_coverage(
     well_assertion_coverage: list[dict[str, Any]] | None = None,
     compact: bool = False,
     excused_gates: frozenset[str] | set[str] = frozenset(),
-    substrate_checked: bool = False,
+    substrate: SubstrateOutcome | None = None,
 ) -> dict[str, Any]:
     """The *second* checked-work scope this envelope carries (issue #2179):
     the connectivity/geometry rules behind ``erc_findings``.
@@ -732,15 +729,12 @@ def _connectivity_coverage(
         inapplicable.append(
             {"id": work_id("erc.net_connectivity"), "reason": "no_nets_declared"}
         )
-    if substrate_checked:
-        checked.extend(["erc.supply_short", SUBSTRATE_WORK_ID])
-    elif sum(1 for decl in nets_decl if decl.get("kind") == "supply") >= 2:
-        inapplicable.append(
-            {
-                "id": "erc.supply_short",
-                "reason": REASON_SUBSTRATE_CONTINUITY_NOT_MODELLED,
-            }
-        )
+    sub_checked, sub_asserted, sub_inapplicable = substrate_coverage_work(
+        substrate or SubstrateOutcome(), nets_decl
+    )
+    checked.extend(sub_checked)
+    checked_by_assertion.extend(sub_asserted)
+    inapplicable.extend(sub_inapplicable)
 
     for tie in ties:
         identity = work_id("erc.missing_tie", tie["name"])
@@ -3082,15 +3076,16 @@ def run_erc(
     asserted_ties: set[str] = set()
     well_asserted_ties: set[str] = set()
     well_assertion_coverage: list[dict[str, Any]] = []
-    substrate_bodies: list[dict[str, Any]] | None = None
+    substrate_outcome = SubstrateOutcome(missing=[NO_TIES_MISSING])
     if ties:
         tie_l2n, tie_circuit, _, tie_layers = _extract_connectivity(
             layout, top_cell, stackup, vias, ties, device_cuts, verb=None
         )
         erc_findings.extend(_tie_findings(tie_l2n, tie_circuit, tie_layers))
         degenerate_ties = _degenerate_tie_reasons(tie_layers)
-        substrate_bodies = run_substrate_pass(
-            layout=layout, top_cell=top_cell, deck=deck_obj, tie_l2n=tie_l2n,
+        substrate_outcome = run_substrate_pass(
+            layout=layout, top_cell=top_cell, deck=deck_obj, deck_name=deck,
+            tie_l2n=tie_l2n,
             tie_circuit=tie_circuit, tie_layers=tie_layers, nets_decl=nets_decl,
             degenerate_ties=degenerate_ties, erc_findings=erc_findings,
         )  # fmt: skip
@@ -3229,7 +3224,7 @@ def run_erc(
         well_assertion_coverage,
         compact,
         excused,
-        substrate_bodies is not None,
+        substrate_outcome,
     )
     erc_rollup = coverage_rollup(
         {"coverage": erc_coverage}, failed=bool(erc_finding_count)
@@ -3329,7 +3324,7 @@ def run_erc(
     # a real supply defect; its #2401 warning is stderr-only. Always
     # present; `[]` when no stackup role declares a `label_layer`.
     provenance["label_layers"] = label_layers
-    provenance.update(substrate_provenance(substrate_bodies))  # issue #5342
+    provenance.update(substrate_provenance(substrate_outcome))  # issues #5342/#5343
 
     # (issue #2965) Opt-in `--compact` summary of the per-gate scaffolding
     # this run omitted. Built before `gates` is emptied below.
