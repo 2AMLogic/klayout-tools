@@ -121,12 +121,12 @@ from .remote_launcher import (
 from .sim_batch_features import (
     annotate_gap,
     annotate_unrecovered_failure,
+    collected_report_env,
     gap_note,
     refusal_diagnostic,
 )
 from .sim_batch_hints import attribute_modelname, hint_existing_fatal, with_runner_hints
 from .sim_batch_warn import warn_over_serial_bound_once
-from .sim_exit_reason import exit_reason_env
 from .sim_exit_reason import status_exit_code as _status_exit_code
 from .sim_remote import (
     _build_remote_request,
@@ -2397,78 +2397,13 @@ def _read_runner_identity(
     return fields
 
 
-def _runner_models_lib_sha256(report: dict[str, Any] | None) -> str | None:
-    """The model-library hash the runner's own ``klt sim`` reported (issue
-    #5321): ``environment.models_lib_sha256`` of the collected inner report,
-    i.e. the card the worker actually resolved. ``None`` when absent or not a
-    64-hex string (older runner, error envelope, malformed report)."""
-    env = report.get("environment") if isinstance(report, dict) else None
-    value = env.get("models_lib_sha256") if isinstance(env, dict) else None
-    if isinstance(value, str) and re.fullmatch(r"[0-9a-fA-F]{64}", value):
-        return value.lower()
-    return None
-
-
-def _compare_models_lib(
-    runner_sha: Any, client_sha: Any, *, staged: bool = False
-) -> dict[str, Any]:
-    """``models_lib_comparison`` (issue #5321): the runner's executed
-    model-card hash against the client's. Missing data is ``not_comparable``,
-    never a proven mismatch."""
-    if not isinstance(runner_sha, str) or not runner_sha:
-        return {"status": "not_comparable", "reason": "runner_hash_unavailable"}
-    if not isinstance(client_sha, str) or not client_sha:
-        return {"status": "not_comparable", "reason": "client_hash_unavailable"}
-    if staged:
-        return {"status": "not_comparable", "reason": "models_staged"}
-    if runner_sha.lower() == client_sha.lower():
-        return {"status": "match"}
-    return {
-        "status": "mismatch",
-        "warning": (
-            "the model library the runner executed hashes differently from the "
-            "one the submitter resolved locally; results may differ from a "
-            "local run"
-        ),
-    }
-
-
-def attach_models_lib_comparison(
-    remote_environment: dict[str, Any] | None,
-    client_sha: str | None,
-    client_scope: str | None,
-) -> None:
-    """Add ``models_lib_comparison`` to ``environment.remote`` (single job) or
-    each ``fleet[]`` member, in place (issue #5321)."""
-    if not isinstance(remote_environment, dict):
-        return
-    entries = [remote_environment]
-    fleet = remote_environment.get("fleet")
-    if isinstance(fleet, list):
-        entries = [entry for entry in fleet if isinstance(entry, dict)]
-    if client_scope not in (None, "client"):
-        client_sha = None
-    for entry in entries:
-        worker_env = entry.get("worker_environment")
-        pdk = worker_env.get("pdk") if isinstance(worker_env, dict) else None
-        staged = isinstance(pdk, dict) and pdk.get("models_staged") is True
-        entry["models_lib_comparison"] = _compare_models_lib(
-            entry.get("runner_models_lib_sha256"), client_sha, staged=staged
-        )
-
-
 def _read_job_identity(
-    local_dir: str | None,
-    request: dict[str, Any] | None = None,
-    report: dict[str, Any] | None = None,
+    local_dir: str | None, request: dict[str, Any] | None = None
 ) -> dict[str, Any]:
     """Runner identity plus the worker-observed environment capture, merged
-    into ``environment.remote``. Neither reader can raise. ``report`` is the
-    collected inner ``klt sim`` report, when one was read (issue #5321)."""
+    into ``environment.remote``. Neither reader can raise."""
     worker_environment = _read_worker_environment(local_dir, request)
     return {
-        # ``None`` (not absent) when unreported, so "unknown" is visible.
-        "runner_models_lib_sha256": _runner_models_lib_sha256(report),
         **_read_runner_identity(local_dir, request),
         "worker_environment": worker_environment,
         # ``None`` (not ``[]``) when the runner did not report it, so "none
@@ -3507,11 +3442,8 @@ def _poll_and_collect(
         environment["client_collected_at"] = now()
         report = read_collected_report(collected)
         check_ngspice_options_echo(request, report)
-        environment = {
-            **environment,
-            **_read_job_identity(collected, request, report),
-        }
-        environment.update(exit_reason_env(status, report))
+        environment = {**environment, **_read_job_identity(collected, request)}
+        environment.update(collected_report_env(status, report))
         corners = report.get("corners") or []
         _surface_log_fatal(corners, collected)
         if keep_artifacts:

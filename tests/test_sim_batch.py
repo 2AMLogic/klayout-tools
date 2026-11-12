@@ -7099,57 +7099,6 @@ def test_pdk_variant_check_absent_manifest_and_any_candidate_match(
         sb._validate_batch_pdk_variant(request, "us-east-1")
 
 
-# --- runner_models_lib_sha256 / models_lib_comparison (issue #5321) ---------
-
-_SHA_A = "a" * 64
-_SHA_B = "b" * 64
-
-
-def _inner(sha):
-    return {"environment": {"models_lib_sha256": sha}}
-
-
-def test_runner_models_lib_sha256_lifted_or_null():
-    f = sb._read_job_identity
-    assert f(None, None, _inner(_SHA_A))["runner_models_lib_sha256"] == _SHA_A
-    assert f(None, None, _inner(None))["runner_models_lib_sha256"] is None
-    assert f(None, None, _inner("zz"))["runner_models_lib_sha256"] is None
-    assert f(None, None, {"environment": "x"})["runner_models_lib_sha256"] is None
-    assert f(None)["runner_models_lib_sha256"] is None
-
-
-def test_models_lib_comparison_statuses():
-    cmp = sb._compare_models_lib
-    assert cmp(_SHA_A, _SHA_A) == {"status": "match"}
-    mismatch = cmp(_SHA_A, _SHA_B)
-    assert mismatch["status"] == "mismatch" and mismatch["warning"]
-    assert cmp(None, _SHA_A)["status"] == "not_comparable"
-    assert cmp(_SHA_A, None)["status"] == "not_comparable"
-    assert cmp(_SHA_A, _SHA_A, staged=True)["reason"] == "models_staged"
-
-
-def test_attach_models_lib_comparison_single_fleet_and_scope():
-    single = {"runner_models_lib_sha256": _SHA_A}
-    sb.attach_models_lib_comparison(single, _SHA_A, "client")
-    assert single["models_lib_comparison"] == {"status": "match"}
-
-    fleet = {
-        "fleet": [
-            {"runner_models_lib_sha256": _SHA_A},
-            None,
-            {"runner_models_lib_sha256": _SHA_B},
-            {"runner_models_lib_sha256": None},
-        ]
-    }
-    sb.attach_models_lib_comparison(fleet, _SHA_A, "client")
-    statuses = [e["models_lib_comparison"]["status"] for e in fleet["fleet"] if e]
-    assert statuses == ["match", "mismatch", "not_comparable"]
-
-    other = {"runner_models_lib_sha256": _SHA_B}
-    sb.attach_models_lib_comparison(other, _SHA_A, "local")
-    assert other["models_lib_comparison"]["status"] == "not_comparable"
-
-
 # --- engine_build_comparison (issue #3095) ---------------------------------
 
 

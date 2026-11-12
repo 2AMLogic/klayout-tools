@@ -8,7 +8,10 @@ non-empty ``missing`` list.
 
 from __future__ import annotations
 
+import re
 from typing import Any
+
+from .sim_exit_reason import exit_reason_env
 
 
 def missing_features(identity: dict[str, Any]) -> list[str]:
@@ -108,3 +111,75 @@ def annotate_unrecovered_failure(corners: list[dict[str, Any]], exit_code: int) 
         for diagnostic in corner.get("diagnostics") or []:
             if diagnostic.get("code") == "batch_job_failed":
                 diagnostic["message"] = f"{diagnostic['message']} [{note}]"
+
+
+# --- runner models_lib hash comparison (issue #5321) ---
+
+
+def runner_models_lib_sha256(report: dict[str, Any] | None) -> str | None:
+    """The model-library hash the runner's own ``klt sim`` reported (issue
+    #5321): ``environment.models_lib_sha256`` of the collected inner report,
+    i.e. the card the worker actually resolved. ``None`` when absent or not a
+    64-hex string (older runner, error envelope, malformed report)."""
+    env = report.get("environment") if isinstance(report, dict) else None
+    value = env.get("models_lib_sha256") if isinstance(env, dict) else None
+    if isinstance(value, str) and re.fullmatch(r"[0-9a-fA-F]{64}", value):
+        return value.lower()
+    return None
+
+
+def collected_report_env(status: Any, report: dict[str, Any]) -> dict[str, Any]:
+    """Environment keys derived from the collected inner report: the exit
+    reason plus ``runner_models_lib_sha256`` (``None`` when unreported, so
+    "unknown" is visible)."""
+    return {
+        **exit_reason_env(status, report),
+        "runner_models_lib_sha256": runner_models_lib_sha256(report),
+    }
+
+
+def _compare_models_lib(
+    runner_sha: Any, client_sha: Any, *, staged: bool = False
+) -> dict[str, Any]:
+    """``models_lib_comparison`` (issue #5321): the runner's executed
+    model-card hash against the client's. Missing data is ``not_comparable``,
+    never a proven mismatch."""
+    if not isinstance(runner_sha, str) or not runner_sha:
+        return {"status": "not_comparable", "reason": "runner_hash_unavailable"}
+    if not isinstance(client_sha, str) or not client_sha:
+        return {"status": "not_comparable", "reason": "client_hash_unavailable"}
+    if staged:
+        return {"status": "not_comparable", "reason": "models_staged"}
+    if runner_sha.lower() == client_sha.lower():
+        return {"status": "match"}
+    return {
+        "status": "mismatch",
+        "warning": (
+            "the model library the runner executed hashes differently from the "
+            "one the submitter resolved locally; results may differ from a "
+            "local run"
+        ),
+    }
+
+
+def attach_models_lib_comparison(environment: dict[str, Any], backend: str) -> None:
+    """Add ``models_lib_comparison`` to ``environment.remote`` (single job) or
+    each ``fleet[]`` member, in place (issue #5321); batch backend only."""
+    remote_environment = environment.get("remote")
+    if backend != "batch" or not isinstance(remote_environment, dict):
+        return
+    client_sha = environment.get("models_lib_sha256")
+    client_scope = environment.get("models_lib_sha256_scope")
+    entries = [remote_environment]
+    fleet = remote_environment.get("fleet")
+    if isinstance(fleet, list):
+        entries = [entry for entry in fleet if isinstance(entry, dict)]
+    if client_scope not in (None, "client"):
+        client_sha = None
+    for entry in entries:
+        worker_env = entry.get("worker_environment")
+        pdk = worker_env.get("pdk") if isinstance(worker_env, dict) else None
+        staged = isinstance(pdk, dict) and pdk.get("models_staged") is True
+        entry["models_lib_comparison"] = _compare_models_lib(
+            entry.get("runner_models_lib_sha256"), client_sha, staged=staged
+        )
