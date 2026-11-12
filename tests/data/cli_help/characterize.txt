@@ -25,7 +25,8 @@ options:
   -h, --help show this help message and exit
   -o, --outdir OUTDIR override where the generated testbench, the generated klt sim request, the raw sim report, and (by default) the emitted `.lib` are written (default: a `.klt/characterize/` directory next to the request file, or the request's own `output.outdir`)
   --lib LIB override the emitted Liberty path (default: the request's own `output.lib`, else `<outdir>/<library name>.lib`)
-  --backend BACKEND klt sim execution backend for the characterization sweep (default: local). The grid is a single corner, so `local` is normally correct -- this exists for a caller who needs the run off-host.
+  --backend BACKEND klt sim execution backend for the sweep (default: local). The grid is a single corner, so `local` is normally correct -- this exists for a caller who needs the run off-host.
+  --wait-for-capacity SECONDS with --backend batch, wait up to SECONDS (>= 0) for fleet capacity when the launch is refused (batch_no_capacity / batch_concurrency_cap), re- launching the same job with jittered backoff; overrides the request's `batch.capacity_wait_s`. 0 means one attempt. Reaches every sim (#5348).
   --keep-artifacts keep the per-corner ngspice log/deck under <outdir>/sim/ (overrides the request's own options.keep_artifacts)
   --cell NAME characterize only the named cell out of a batch request's `cells` array (repeatable; default: every cell the request declares). A name the request does not declare is an error.
   --compare-to LIB compare the emitted `.lib` arc by arc against this reference Liberty file (typically the vendor library for the same corner) and report per-point delay/transition/power/leakage deltas in the response's `comparison` block
