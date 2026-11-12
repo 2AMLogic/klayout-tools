@@ -92,7 +92,13 @@ from .erc_spec import (
     _validate_ties_disclosure,
     _validate_vias,
 )
-from .erc_substrate import SUBSTRATE_WORK_ID, run_substrate_pass, substrate_provenance
+from .erc_substrate import (
+    NO_TIES_MISSING,
+    SUBSTRATE_WORK_ID,
+    SubstrateOutcome,
+    run_substrate_pass,
+    substrate_provenance,
+)
 from .erc_ties import (  # noqa: F401 -- REASON_* are re-exported public names
     REASON_DEGENERATE_TAP_DECLARATION,
     REASON_DEGENERATE_WELL_ASSERTION,
@@ -324,7 +330,7 @@ REASON_EXTRACTOR_GLOBAL_NET = "extractor_global_net"
 #: shared substrate read as separate clean islands. A coverage disclosure,
 #: not a merge (substrate/well merging was rejected in #2192); additive and
 #: leaves ``erc_status`` untouched. Cross-check with ``klt lvs``.
-REASON_SUBSTRATE_CONTINUITY_NOT_MODELLED = "substrate_continuity_not_modelled"
+REASON_SUBSTRATE_ISOLATION_UNDECIDABLE = "substrate_isolation_undecidable"
 
 #: The skip reason for a level that could have been graded had ``--pdk``
 #: named a PDK with an antenna-ratio table (or named one at all), or had the
@@ -579,6 +585,8 @@ def _connectivity_coverage(
     compact: bool = False,
     excused_gates: frozenset[str] | set[str] = frozenset(),
     substrate_checked: bool = False,
+    substrate_missing: list[str] | None = None,
+    substrate_asserted: bool = False,
 ) -> dict[str, Any]:
     """The *second* checked-work scope this envelope carries (issue #2179):
     the connectivity/geometry rules behind ``erc_findings``.
@@ -734,11 +742,14 @@ def _connectivity_coverage(
         )
     if substrate_checked:
         checked.extend(["erc.supply_short", SUBSTRATE_WORK_ID])
+        if substrate_asserted:  # issue #5343: rests on `ties[].isolation_boxes`
+            checked_by_assertion.append(SUBSTRATE_WORK_ID)
     elif sum(1 for decl in nets_decl if decl.get("kind") == "supply") >= 2:
         inapplicable.append(
             {
                 "id": "erc.supply_short",
-                "reason": REASON_SUBSTRATE_CONTINUITY_NOT_MODELLED,
+                "reason": REASON_SUBSTRATE_ISOLATION_UNDECIDABLE,
+                "missing": list(substrate_missing or ["substrate_isolation"]),
             }
         )
 
@@ -2493,6 +2504,13 @@ def _extract_connectivity(
         if tie["tap_boxes"]:
             tap_region = tap_region & _boxes_region(kdb, layout, tie["tap_boxes"])
         tap_sites = (tap_region & well_region).merged()
+        # `isolation_boxes` (issue #5343): asserted isolated bodies, read only
+        # by the substrate post-pass (`erc_substrate`); never registered.
+        isolation_region = (
+            _boxes_region(kdb, layout, tie["isolation_boxes"])
+            if tie["isolation_boxes"]
+            else None
+        )
         tap_index = l2n.register(tap_sites, f"{tie['name']}__tap")
         l2n.connect(tap_sites)
         l2n.connect(tap_sites, regions[tie["connect_to"]])
@@ -2502,6 +2520,7 @@ def _extract_connectivity(
                 "well_region": well_region,
                 "tap_region": tap_sites,
                 "tap_index": tap_index,
+                "isolation_region": isolation_region,
                 # Issue #2199: measured here, where both regions exist,
                 # rather than re-derived later from the spec alone -- see
                 # `_degenerate_tie_reasons`. `tap_boxes` narrowing feeds the
@@ -3082,15 +3101,16 @@ def run_erc(
     asserted_ties: set[str] = set()
     well_asserted_ties: set[str] = set()
     well_assertion_coverage: list[dict[str, Any]] = []
-    substrate_bodies: list[dict[str, Any]] | None = None
+    substrate_outcome = SubstrateOutcome(missing=[NO_TIES_MISSING])
     if ties:
         tie_l2n, tie_circuit, _, tie_layers = _extract_connectivity(
             layout, top_cell, stackup, vias, ties, device_cuts, verb=None
         )
         erc_findings.extend(_tie_findings(tie_l2n, tie_circuit, tie_layers))
         degenerate_ties = _degenerate_tie_reasons(tie_layers)
-        substrate_bodies = run_substrate_pass(
-            layout=layout, top_cell=top_cell, deck=deck_obj, tie_l2n=tie_l2n,
+        substrate_outcome = run_substrate_pass(
+            layout=layout, top_cell=top_cell, deck=deck_obj, deck_name=deck,
+            tie_l2n=tie_l2n,
             tie_circuit=tie_circuit, tie_layers=tie_layers, nets_decl=nets_decl,
             degenerate_ties=degenerate_ties, erc_findings=erc_findings,
         )  # fmt: skip
@@ -3229,7 +3249,9 @@ def run_erc(
         well_assertion_coverage,
         compact,
         excused,
-        substrate_bodies is not None,
+        substrate_outcome.bodies is not None,
+        substrate_outcome.missing,
+        substrate_outcome.asserted,
     )
     erc_rollup = coverage_rollup(
         {"coverage": erc_coverage}, failed=bool(erc_finding_count)
@@ -3329,7 +3351,7 @@ def run_erc(
     # a real supply defect; its #2401 warning is stderr-only. Always
     # present; `[]` when no stackup role declares a `label_layer`.
     provenance["label_layers"] = label_layers
-    provenance.update(substrate_provenance(substrate_bodies))  # issue #5342
+    provenance.update(substrate_provenance(substrate_outcome))  # issues #5342/#5343
 
     # (issue #2965) Opt-in `--compact` summary of the per-gate scaffolding
     # this run omitted. Built before `gates` is emptied below.

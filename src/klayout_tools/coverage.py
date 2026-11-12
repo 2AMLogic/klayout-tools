@@ -122,8 +122,18 @@ def _identity_list_error(value: Any, *, records: bool) -> str | None:
     identities = []
     for item in value:
         if records:
-            if not isinstance(item, dict) or set(item) != {"id", "reason"}:
-                return "work records require id and reason"
+            if not isinstance(item, dict) or not (
+                set(item) == {"id", "reason"}
+                or set(item) == {"id", "reason", "missing"}
+            ):
+                return "work records require id and reason (and optional missing)"
+            missing = item.get("missing")
+            if "missing" in item and (
+                not isinstance(missing, list)
+                or not missing
+                or not all(isinstance(m, str) and m.strip() for m in missing)
+            ):
+                return "work record missing must be a non-empty list of strings"
             reason = item["reason"]
             if not isinstance(reason, str) or not re.fullmatch(
                 r"[a-z][a-z0-9_]*", reason

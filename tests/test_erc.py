@@ -2499,7 +2499,7 @@ def _supply_disclosure(report):
     ]
 
 
-def test_two_supply_nets_disclose_substrate_continuity_not_modelled(tmp_path):
+def test_two_supply_nets_disclose_substrate_isolation_undecidable(tmp_path):
     layout, top, poly, li1, label = _nets_fixture_layout()
     gds = tmp_path / "two.gds"
     layout.write(str(gds))
@@ -2517,7 +2517,11 @@ def test_two_supply_nets_disclose_substrate_continuity_not_modelled(tmp_path):
     report = run_erc(str(gds), str(spec))
 
     assert _supply_disclosure(report) == [
-        {"id": "erc.supply_short", "reason": "substrate_continuity_not_modelled"}
+        {
+            "id": "erc.supply_short",
+            "reason": "substrate_isolation_undecidable",
+            "missing": ["ties[] entries declaring the substrate/well tap geometry"],
+        }
     ]
 
 

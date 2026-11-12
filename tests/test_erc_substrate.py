@@ -169,8 +169,139 @@ def test_other_families_keep_the_disclosure(tmp_path):
         deck=None,
     )
     assert _shorts(report) == []
-    assert {
-        "id": "erc.supply_short",
-        "reason": "substrate_continuity_not_modelled",
-    } in report["erc_coverage"]["inapplicable"]
+    entry = next(
+        e
+        for e in report["erc_coverage"]["inapplicable"]
+        if e["id"] == "erc.supply_short"
+    )
+    assert entry["reason"] == "substrate_isolation_undecidable"
+    assert entry["missing"]
     assert "substrate_bodies" not in report["provenance"]
+
+
+# --- Issue #5343 (piece C): isolation_boxes, same_net_as, disclosure --------
+
+
+def _isolated_spec(boxes, nets=None):
+    spec = _spec([_ptie("p1", "VSS"), _ptie("p2", "VSS2", isolation_boxes=boxes)])
+    if nets is not None:
+        spec["nets"] = nets
+    return spec
+
+
+def _undecidable(report):
+    return [
+        e
+        for e in report["erc_coverage"]["inapplicable"]
+        if e["id"] == "erc.supply_short"
+    ]
+
+
+def test_sky130_isolation_boxes_pass_checked_by_assertion(tmp_path):
+    layout, _ = _two_rails()
+    spec = _isolated_spec([[-1, 4, 21, 7]])
+    report = _run(tmp_path, layout, spec, deck="sky130")
+    assert _shorts(report) == []
+    cov = report["erc_coverage"]
+    assert "erc.supply_short.substrate" in cov["checked"]
+    assert "erc.supply_short.substrate" in cov["checked_by_assertion"]
+    ids = {b["id"] for b in report["provenance"]["substrate_bodies"]}
+    assert "vsubs" in ids and any(i.startswith("isolation_box[") for i in ids)
+    (echo,) = report["provenance"]["isolation_assertions"]
+    assert echo["tie"] == "p2" and len(echo["bodies"]) == 1
+
+
+def test_sky130_without_assertion_and_no_dnwell_is_evaluated(tmp_path):
+    layout, _ = _two_rails()
+    report = _run(
+        tmp_path,
+        layout,
+        _spec([_ptie("p1", "VSS"), _ptie("p2", "VSS2")]),
+        deck="sky130",
+    )
+    assert len(_shorts(report)) == 1
+    assert (
+        "erc.supply_short.substrate"
+        not in report["erc_coverage"]["checked_by_assertion"]
+    )
+
+
+def test_sky130_drawn_dnwell_without_assertion_is_disclosed_not_passed(tmp_path):
+    layout, top = _two_rails()
+    _box(top, layout, (64, 18), -1, 4, 21, 7)
+    report = _run(
+        tmp_path,
+        layout,
+        _spec([_ptie("p1", "VSS"), _ptie("p2", "VSS2")]),
+        deck="sky130",
+    )
+    (entry,) = _undecidable(report)
+    assert entry["reason"] == "substrate_isolation_undecidable"
+    assert entry["missing"]
+    assert "erc.supply_short.substrate" not in report["erc_coverage"]["checked"]
+    assert "substrate_bodies" not in report["provenance"]
+
+
+def test_asap7_is_disclosed_with_missing(tmp_path):
+    layout, _ = _two_rails()
+    report = _run(
+        tmp_path, layout, _spec([_ptie("p1", "VSS"), _ptie("p2", "VSS2")]), deck="asap7"
+    )
+    (entry,) = _undecidable(report)
+    assert entry["reason"] == "substrate_isolation_undecidable"
+    assert any("asap7" in m for m in entry["missing"])
+
+
+def _same_net_nets():
+    return [
+        {"name": "VSS", "kind": "supply"},
+        {"name": "VSS2", "kind": "supply", "same_net_as": "VSS"},
+    ]
+
+
+def test_same_net_as_suppresses_substrate_short_and_expected_missing(tmp_path):
+    layout, _ = _two_rails()
+    spec = _spec([_ptie("p1", "VSS"), _ptie("p2", "VSS2")])
+    spec["nets"] = _same_net_nets()
+    report = _run(tmp_path, layout, spec)
+    assert _shorts(report) == []
+    assert not [
+        f for f in report["erc_findings"] if f["rule"] == "erc.expected_short_missing"
+    ]
+    assert report["provenance"]["substrate_declared_joins"] == [
+        {"net": "VSS", "other_net": "VSS2", "via": "substrate"}
+    ]
+
+
+def test_same_net_as_without_any_short_stays_missing(tmp_path):
+    layout, top = _two_rails()
+    _box(top, layout, (12, 0), -1, 4, 21, 7)  # DNWELL isolates VSS2: no join
+    spec = _spec([_ptie("p1", "VSS"), _ptie("p2", "VSS2")])
+    spec["nets"] = _same_net_nets()
+    report = _run(tmp_path, layout, spec)
+    missing = [
+        f for f in report["erc_findings"] if f["rule"] == "erc.expected_short_missing"
+    ]
+    assert len(missing) == 1
+    assert "substrate_declared_joins" not in report["provenance"]
+
+
+def test_isolation_box_covering_no_tap_has_empty_effect(tmp_path):
+    layout, _ = _two_rails()
+    report = _run(tmp_path, layout, _isolated_spec([[40, 40, 41, 41]]), deck="sky130")
+    assert len(_shorts(report)) == 1  # nothing was isolated
+    (echo,) = report["provenance"]["isolation_assertions"]
+    assert echo["bodies"] == []
+
+
+def test_overlapping_isolation_boxes_merge_into_one_body(tmp_path):
+    layout, _ = _two_rails()
+    report = _run(
+        tmp_path,
+        layout,
+        _isolated_spec([[-1, 4, 10, 7], [5, 4, 21, 7]]),
+        deck="sky130",
+    )
+    assert _shorts(report) == []
+    (echo,) = report["provenance"]["isolation_assertions"]
+    assert echo["boxes"] == 2 and len(echo["bodies"]) == 1

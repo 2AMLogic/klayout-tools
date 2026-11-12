@@ -115,6 +115,7 @@ _TIE_KEYS = (
     "tap_is_dedicated",
     "tap_boxes",
     "well_boxes",
+    "isolation_boxes",
     "well_complement_of",
     "well_requires",
     "well_excludes",
@@ -840,6 +841,19 @@ def _parse_well_boxes(
     return _parse_um_boxes(entry, "well_boxes", spec_path, index)
 
 
+def _parse_isolation_boxes(
+    entry: dict[str, Any], spec_path: str, index: int
+) -> list[tuple[float, float, float, float]]:
+    """``ties[].isolation_boxes`` (optional, issue #5343): a caller *assertion*
+    that a substrate tap site inside a box sits in that box's own isolated
+    body (deep n-well / isolated p-well) rather than the shared substrate.
+    Same ``[left, bottom, right, top]`` micrometre shape and validation as
+    ``tap_boxes``/``well_boxes``; the claim is graded ``checked_by_assertion``
+    because nothing in the stream corroborates it. Omitted/``null`` -> ``[]``.
+    """
+    return _parse_um_boxes(entry, "isolation_boxes", spec_path, index)
+
+
 def _parse_well_complement_of(
     entry: dict[str, Any], spec_path: str, index: int
 ) -> list[tuple[int, int]]:
@@ -1166,6 +1180,7 @@ def _validate_ties(
         tap_excludes = _parse_tap_excludes(entry, spec_path, i)
         tap_is_dedicated = _parse_tap_is_dedicated(entry, spec_path, i)
         tap_boxes = _parse_tap_boxes(entry, spec_path, i)
+        isolation_boxes = _parse_isolation_boxes(entry, spec_path, i)
 
         connect_to = str(entry["connect_to"])
         if connect_to not in stackup_names:
@@ -1187,6 +1202,7 @@ def _validate_ties(
                 "tap_excludes": tap_excludes,
                 "tap_is_dedicated": tap_is_dedicated,
                 "tap_boxes": tap_boxes,
+                "isolation_boxes": isolation_boxes,
                 "connect_to": connect_to,
                 "net": net,
             }
