@@ -53,8 +53,7 @@ already-tested implementation rather than reimplementing any of it:
    module puts back on that report is the spec's own yield-only limit keys
    (:data:`_YIELD_ONLY_LIMIT_KEYS`), which were held out of the dispatched
    request so `klt sim` would not grade its measurement coverage against a
-   bound that was never its to apply -- see
-   :func:`_restore_yield_only_limits`.
+   bound that was never its to apply -- see :func:`_restore_yield_only_limits`.
 
 Pure library: :func:`run_campaign` returns plain Python data and never
 prints -- serialisation and human-readable formatting live in
