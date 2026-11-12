@@ -159,6 +159,23 @@ def resumable(
     }
 
 
+def with_unrun_signal(
+    environment: dict[str, Any] | None, unrun: int, state_path: str | None
+) -> tuple[dict[str, Any] | None, bool]:
+    """``environment`` plus the additive "incomplete, resumable" signal for
+    corners that never ran (``lost_shard``, ``batch_job_interrupted``, ...;
+    issue #5364): ``unrun_units`` (count), ``resumable: true`` and -- unless
+    :func:`resumable` already set it -- ``shard_map`` (``state_path``, the
+    retained shard map or checkpoint). Returns ``(environment, hint_needed)``;
+    ``hint_needed`` is False when the unlaunched-shard hint already covers
+    the rerun. Unchanged for ``unrun == 0`` or no retained state."""
+    if not unrun or not state_path or environment is None:
+        return environment, False
+    out = {**environment, "unrun_units": unrun, "resumable": True}
+    out.setdefault("shard_map", state_path)
+    return out, "unlaunched_shards" not in environment
+
+
 def resolve_backend_value(
     flag: str | None,
     env_name: str,

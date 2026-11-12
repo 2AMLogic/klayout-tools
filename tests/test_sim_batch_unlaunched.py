@@ -36,3 +36,34 @@ def test_clean_sharded_run_has_no_unlaunched_signal(tmp_path, monkeypatch):
     _, _, environment = fleet()
     assert "unlaunched_shards" not in environment
     assert "resumable" not in environment
+
+
+def test_unrun_units_are_a_resumable_signal():
+    """Issue #5364: lost/interrupted shards carry the same additive signal."""
+    from klayout_tools import _batch_common
+
+    env, hint = _batch_common.with_unrun_signal({"job": "x"}, 3, "/o/batch-shards.json")
+    assert env == {
+        "job": "x",
+        "unrun_units": 3,
+        "resumable": True,
+        "shard_map": "/o/batch-shards.json",
+    }
+    assert hint is True
+
+
+def test_unrun_signal_absent_when_nothing_unrun_or_no_state():
+    from klayout_tools import _batch_common
+
+    base = {"job": "x"}
+    assert _batch_common.with_unrun_signal(base, 0, "/p") == (base, False)
+    assert _batch_common.with_unrun_signal(base, 2, None) == (base, False)
+
+
+def test_unrun_signal_mixed_with_unlaunched_keeps_one_hint():
+    from klayout_tools import _batch_common
+
+    base = {"unlaunched_shards": 1, "resumable": True, "shard_map": "/m"}
+    env, hint = _batch_common.with_unrun_signal(base, 4, "/other")
+    assert env["shard_map"] == "/m" and env["unrun_units"] == 4
+    assert hint is False

@@ -93,8 +93,8 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from typing import IO, Any, NamedTuple
 
-from . import _spice_number as spice_number
 from . import (
+    _batch_common,
     env_provenance,
     output_lock,
     sim_commands,
@@ -127,6 +127,7 @@ from . import (
     sim_waveform_opts,
     sim_xyce_refusals,
 )
+from . import _spice_number as spice_number
 
 #: `remote_fleet`/`remote_transport`/`RemoteLauncher`/`RemoteLaunchError` are
 #: not called directly from this module's own code any more (that code moved
@@ -170,12 +171,8 @@ from .pdk_families import pdk_variant_family
 from .remote_launcher import RemoteLauncher as RemoteLauncher
 from .remote_launcher import RemoteLaunchError as RemoteLaunchError
 from .sim_attach import apply_attach as _apply_attach
-
-#: ``batch`` backend entry points (issue #2080) -- the `klt sim` consumer of
-#: 2am's EDA batch fleet. Like ``sim_remote``'s: `run_sim` dispatches into them
-#: and re-exports their helpers (self-aliased) as ``klayout_tools.sim.<name>``.
-from .sim_batch import _build_batch_job_spec as _build_batch_job_spec
 from .sim_batch import (
+    BATCH_SHARDS_FILENAME,
     _remove_shard_manifest,
     _run_batch,
     _run_batch_fleet,
@@ -184,6 +181,11 @@ from .sim_batch import (
     attach_staged_model_comparison,
     dry_run_runner_check,
 )
+
+#: ``batch`` backend entry points (issue #2080) -- the `klt sim` consumer of
+#: 2am's EDA batch fleet. Like ``sim_remote``'s: `run_sim` dispatches into them
+#: and re-exports their helpers (self-aliased) as ``klayout_tools.sim.<name>``.
+from .sim_batch import _build_batch_job_spec as _build_batch_job_spec
 from .sim_batch import _resolve_batch_config as _resolve_batch_config
 from .sim_batch_async import (
     SUBMIT_ONLY_UNSUPPORTED_CODE,
@@ -4472,6 +4474,24 @@ def _run_sim_corners(
         # Additive/optional: only present for the `remote` backend -- see
         # `_run_remote` and docs/cli/sim.md's "Remote backend" section.
         environment["remote"] = remote_environment
+        if backend == "batch" and corners_lost:
+            # Issue #5364: lost/interrupted shards are resumable too.
+            _manifest = os.path.join(artifacts_dir, BATCH_SHARDS_FILENAME)
+            _state = (
+                _manifest
+                if os.path.exists(_manifest)
+                else (checkpoint_path if checkpoint_retained else None)
+            )
+            environment["remote"], _hint = _batch_common.with_unrun_signal(
+                remote_environment, corners_lost, _state
+            )
+            if _hint:
+                print(
+                    f"klt sim: {corners_lost} unit(s) never ran (lost or "
+                    f"interrupted batch shard); rerun with --resume and the "
+                    f"same outdir to finish them (state: {_state})",
+                    file=sys.stderr,
+                )
     apply_engine_host(
         environment, backend=backend, client_ngspice_binary=ngspice_binary
     )
