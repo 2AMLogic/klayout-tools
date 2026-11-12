@@ -140,7 +140,6 @@ from .place_and_route_power_audit import (
 from .place_and_route_reports import (
     build_congestion,
     detailed_route_convergence,
-    parse_congestion_report,
     parse_global_route_congestion,
     parse_placement_routability,
     parse_routing_completeness,
@@ -251,6 +250,14 @@ from .place_and_route_request import (
 from .place_and_route_request import (
     validate_tech_lef_track_offsets as validate_tech_lef_track_offsets,
 )
+from .place_and_route_route_overflow import grt_overflow
+
+# The OpenROAD Tcl script-generation subsystem (issue #3904 split) lives in
+# `place_and_route_script.py`: the `*_lines(...) -> list[str]` emitters and the
+# per-stage script assembly. Everything is re-exported (redundant `X as X`
+# aliases, same convention as the blocks above) so
+# `klayout_tools.place_and_route.<name>` keeps resolving for the stage runners
+# below and for the test suite's `monkeypatch`/direct calls.
 from .place_and_route_script import (
     _antenna_check_lines as _antenna_check_lines,
 )
@@ -281,14 +288,6 @@ from .place_and_route_script import (
 from .place_and_route_script import (
     _macro_blockage_lines as _macro_blockage_lines,
 )
-
-# The OpenROAD Tcl script-generation subsystem (issue #3904 split) lives in
-# `place_and_route_script.py`: the `*_lines(...) -> list[str]` emitters and the
-# per-stage script assembly. Everything is re-exported (redundant `X as X`
-# aliases, same convention as the blocks above) so
-# `klayout_tools.place_and_route.<name>` keeps resolving for the stage runners
-# below and for the test suite's `monkeypatch`/direct calls.
-from .place_and_route_script import _macro_boxes
 from .place_and_route_script import (
     _macro_pdn_grid_lines as _macro_pdn_grid_lines,
 )
@@ -2014,12 +2013,9 @@ def _run_single_corner(
         max_capacitance_violation_count_vs_library: int | None = None
         if stage == "route":
             antenna_count = _count_antenna_violations(completed.stdout)
-            # Same deterministic path `_stage_script_lines`'s own `route`
-            # branch built for `detailed_route -output_drc` -- recomputed
-            # here (rather than threaded back out of that function) since
-            # both `output_dir`/`hdl_toplevel` are already in scope and the
-            # naming is a fixed, single-source-of-truth convention (issue
-            # #938).
+            # Same deterministic path `_stage_script_lines` built for
+            # `detailed_route -output_drc` -- recomputed here (not threaded
+            # back out) as the naming is a fixed convention (issue #938).
             drc_report_path = os.path.join(output_dir, f"{hdl_toplevel}_route_drc.rpt")
             route_drc_count = _count_route_drc_violations(drc_report_path)
             write_route_metrics(
@@ -2030,10 +2026,7 @@ def _run_single_corner(
                 completeness=parse_routing_completeness(completed.stdout),
                 placement=placement_routability,
                 detailed=detailed_route_convergence(metrics),
-                overflow_regions=parse_congestion_report(
-                    os.path.join(output_dir, f"{hdl_toplevel}_route_congestion.rpt"),
-                    _macro_boxes(macros),
-                ),
+                overflow_regions=grt_overflow(output_dir, hdl_toplevel, macros),
             )
 
             # Issue #949: sweep every corner `cell_library` ships for

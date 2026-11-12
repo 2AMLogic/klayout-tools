@@ -243,7 +243,9 @@ def test_route_script_runs_verbose_global_route_and_completeness_check(
     _stub_merge_def_to_gds(monkeypatch)
     place_and_route.run_place_and_route(request)
     lines = _script_lines(_stage_script(request, "route"))
-    assert any(ln.startswith("global_route -verbose") for ln in lines)
+    assert "global_route -verbose" in lines
+    raw = open(_stage_script(request, "route"), encoding="utf-8").read()
+    assert "global_route -verbose -congestion_report_file " in raw
     begin = lines.index(reports.ROUTING_COMPLETENESS_BEGIN.join(['puts "', '"']))
     last_detailed = max(
         i for i, x in enumerate(lines) if x.startswith("detailed_route")

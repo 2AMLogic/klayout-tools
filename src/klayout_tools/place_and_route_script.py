@@ -648,26 +648,6 @@ def _macro_footprint(macro: dict[str, Any]) -> tuple[float, float, float, float]
     )
 
 
-def _macro_boxes(macros: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Footprint + keep-out margin per macro, for attributing congestion
-    regions to macro channels (issue #5313). Macros whose LEF has no ``SIZE``
-    are skipped (no footprint to test against)."""
-    boxes: list[dict[str, Any]] = []
-    for macro in macros:
-        if macro["width_um"] is None or macro["height_um"] is None:
-            continue
-        margin = merge_macro_margins(macro["halo"], macro.get("keepout"))
-        boxes.append(
-            {
-                "instance": macro["instance"],
-                "footprint": _macro_footprint(macro),
-                "margin": margin
-                or {"left": 0.0, "right": 0.0, "top": 0.0, "bottom": 0.0},
-            }
-        )
-    return boxes
-
-
 def _macro_blockage_lines(macros: list[dict[str, Any]]) -> list[str]:
     """``create_blockage`` Tcl for every macro that declared a ``halo``
     (issue #2635) -- one hard placement blockage per macro, covering its own
@@ -1217,22 +1197,15 @@ def _stage_script_lines(
             diode_cell, max_antenna_repair_iterations
         )
         # `-critical_nets_percentage` (issue #939, native-routing survey
-        # section 4.1): a real, documented `global_route` flag -- see this
-        # module's own docstring, "Timing-driven global routing + bounded
-        # antenna-repair iteration" -- that weights the given percentage of
-        # worst-slack nets as timing-critical during congestion-removal
-        # iterations. `0` (unset, `request.route_critical_nets_percentage`
-        # omitted) reproduces `global_route`'s own default -- the explicit
-        # A/B disable path.
-        # `-verbose` (issue #2994) makes the global router print its
-        # per-layer "Final congestion report" table, which the response's
-        # `congestion` block scrapes; routing results are unchanged.
-        global_route_call = "global_route -verbose"
-        # `-congestion_report_file` (issue #5313): the per-GCell violation
-        # list `congestion.global_route.overflow_regions` is parsed from.
-        global_route_call += (
-            f" -congestion_report_file "
-            f"{os.path.join(output_dir, f'{hdl_toplevel}_route_congestion.rpt')}"
+        # section 4.1; see this module's docstring, "Timing-driven global
+        # routing + bounded antenna-repair iteration") weights that
+        # percentage of worst-slack nets as timing-critical during
+        # congestion-removal. `0` (unset) is `global_route`'s own default.
+        # `-verbose` (#2994) prints the per-layer congestion table and
+        # `-congestion_report_file` (#5313) the per-GCell violation list the
+        # response's `congestion` block scrapes; routing results unchanged.
+        global_route_call = "global_route -verbose -congestion_report_file " + (
+            os.path.join(output_dir, f"{hdl_toplevel}_route_congestion.rpt")
         )
         if route_critical_nets_percentage:
             global_route_call += (
