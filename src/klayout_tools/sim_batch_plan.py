@@ -60,7 +60,6 @@ def preflight_batch_request(request_path: str, **overrides: Any) -> dict[str, An
     :func:`~klayout_tools.sim.run_sim` keyword options."""
     from . import sim_commands
     from .sim import (
-        SimError,
         _prepare_sim_request,
         _with_pdk_root_override,
         load_request,
