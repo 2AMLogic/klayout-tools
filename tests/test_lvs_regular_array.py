@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from klayout_tools.lvs import run_lvs
+from klayout_tools.lvs import LvsError, run_lvs
 
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
 
@@ -111,6 +111,17 @@ def test_flatten_reference_bool_still_flattens_stub(tmp_path):
 
 def test_flatten_reference_keep_list_no_match_flattens_all(tmp_path):
     assert _flatten_lvs(tmp_path, ["NOPE*"])["status"] == "mismatch"
+
+
+def test_flatten_reference_empty_list_means_false(tmp_path):
+    report = _flatten_lvs(tmp_path, [])
+    assert report["options"]["flatten_reference"] is False
+
+
+@pytest.mark.parametrize("bad", [[""], [1], ["ok", None]])
+def test_flatten_reference_rejects_bad_entries(tmp_path, bad):
+    with pytest.raises(LvsError, match="non-empty circuit-name glob"):
+        _flatten_lvs(tmp_path, bad)
 
 
 # Issue #5322: GDS-start abstracted array -> hierarchical compare in one request.
