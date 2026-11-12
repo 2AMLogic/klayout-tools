@@ -365,8 +365,9 @@ draws that the spec never declared" below.
     `substrate_isolation_undecidable` with a `missing` list — see "Substrate
     continuity between supply nets" below. `erc_status` is unchanged by the
     disclosure. With `--pdk`-family decks that declare `substrate_isolation`
-    (gf180mcu, and sky130 as of #5344) the substrate path is evaluated; for
-    sky130 a `dnwell` island isolates its p-well only when an n-well ring
+    (gf180mcu, and sky130 as of #5344, sg13g2/sg13cmos5l as of #5359) the
+    substrate path is evaluated; for sky130 a `dnwell` island (for the IHP
+    decks an `nBuLay` island) isolates its p-well only when an n-well ring
     closes its outline, otherwise it stays on the shared substrate.
   - `same_net_as` (string, optional, default absent, issue #2463) — the
     `name` of another `nets[]` entry this one is *intentionally* the same
@@ -915,14 +916,16 @@ extraction deck declares as `substrate_isolation`:
 | Deck | `substrate_isolation` | Notes |
 |---|---|---|
 | `gf180mcu` | `DNWELL` (12/0) | |
-| `sg13g2` | `nBuLay.drawing` (32/0) | layer/datatype from the PDK's `layers_def.drc` / tech `.lyp`; taps are derived from `Activ` (`tap=None`) and the tie logic handles it |
+| `sg13g2` | `nBuLay.drawing` (32/0) | counts only if an NWell (31/0) ring closes it (#5359); layer/datatype from the PDK's `layers_def.drc` / tech `.lyp`; taps are derived from `Activ` (`tap=None`) and the tie logic handles it |
 | `sg13cmos5l` | `nBuLay.drawing` (32/0) | same as `sg13g2` |
 | `sky130` | not declared | |
 
-**Not checked:** that a drawn isolation island is closed by an n-well ring.
-A drawn nBuLay/DNWELL island is treated as isolating its body whether or not
-the ring closes it, so an unclosed island can mask a real substrate short.
-Layouts that draw no nBuLay extract exactly as before.
+**Ring closure (issues #5344, #5359).** sky130 (DNWELL) and the IHP decks
+(nBuLay) set `substrate_isolation_needs_nwell_ring`: a drawn island isolates
+its body only when an n-well ring closes its outline; an unclosed island stays
+on the shared substrate, so a real short is still reported. gf180mcu's DNWELL
+island is still treated as isolating whether or not a ring closes it. Layouts
+that draw no isolation layer extract exactly as before.
 
 **That cross-check is not automatically an independent confirmation,
 either.** At least one widely used open-foundry LVS deck's connectivity

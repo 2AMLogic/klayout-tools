@@ -89,6 +89,7 @@ from .characterize_instances import (
 )
 from .characterize_leg import resolve_resume, run_sim_leg
 from .characterize_osdi import resolve_osdi_preload
+from .characterize_pool import run_cells
 from .characterize_probe import probe_netlist_cells as _probe_netlist_cells
 from .characterize_sequential import (
     SequentialSpecError,
@@ -231,33 +232,31 @@ def run_characterize(
     work_dir = _resolve_outdir(outdir, request, request_dir)
     os.makedirs(work_dir, exist_ok=True)
 
-    results: list[dict[str, Any]] = []
-    for cell, arcs in resolved:
-        cell_dir = (
-            os.path.join(work_dir, "cells", slug(cell["name"])) if batch else work_dir
-        )
+    def _run_one(index: int) -> dict[str, Any]:
+        cell, arcs = resolved[index]
+        cell_dir = os.path.join(work_dir, "cells", slug(cell["name"]))
         try:
-            results.append(
-                _characterize_cell(
-                    cell=cell,
-                    arcs=arcs,
-                    corner=corner,
-                    grid=grid,
-                    thresholds=thresholds,
-                    options=options,
-                    request=request,
-                    request_dir=request_dir,
-                    work_dir=cell_dir,
-                    backend=backend,
-                    keep_artifacts=keep_artifacts,
-                    resume=resume,
-                    batch_shard=batch_shard,
-                )
+            return _characterize_cell(
+                cell=cell,
+                arcs=arcs,
+                corner=corner,
+                grid=grid,
+                thresholds=thresholds,
+                options=options,
+                request=request,
+                request_dir=request_dir,
+                work_dir=cell_dir if batch else work_dir,
+                backend=backend,
+                keep_artifacts=keep_artifacts,
+                resume=resume,
+                batch_shard=batch_shard,
             )
         except CharacterizeError as exc:
             if not batch:
                 raise
             raise CharacterizeError(f"cell '{cell['name']}': {exc}") from exc
+
+    results = run_cells(_run_one, len(resolved), backend, request, capacity_wait_s)
 
     library = _build_library(
         request=request,

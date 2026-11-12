@@ -1,0 +1,868 @@
+violation type: Horizontal congestion
+	srcs: net:_005_ net:_118_ net:_145_ net:net97 net:net129 net:net137 net:net186
+	comment: capacity:3 usage:7 congestion:4
+	bbox = (48.3000, 27.6000) - (55.2000, 34.5000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_086_ net:_176_ net:_183_ net:_218_ net:_222_ net:_228_ net:b_in[3] net:net159
+	comment: capacity:3 usage:8 congestion:5
+	bbox = (27.6000, 62.1000) - (34.5000, 69.0000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_014_ net:_080_ net:_191_ net:_207_ net:_216_ net:_220_ net:_226_ net:a_in[5] net:rst_n net:net153
+	comment: capacity:3 usage:10 congestion:7
+	bbox = (6.9000, 34.5000) - (13.8000, 41.4000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_031_ net:_159_ net:_232_ net:_272_ net:result[13] net:result[1] net:net109
+	comment: capacity:3 usage:7 congestion:4
+	bbox = (0.0000, 55.2000) - (6.9000, 62.1000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_118_ net:rst_n net:net167 net:net168 net:net184
+	comment: capacity:3 usage:5 congestion:2
+	bbox = (55.2000, 34.5000) - (62.1000, 41.4000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_086_ net:_218_ net:b[11] net:b_in[3] net:net116 net:net175 net:net153
+	comment: capacity:3 usage:7 congestion:4
+	bbox = (34.5000, 62.1000) - (41.4000, 69.0000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:a[14] net:a_in[0] net:a_in[1] net:clk net:net130
+	comment: capacity:3 usage:5 congestion:2
+	bbox = (34.5000, 0.0000) - (41.4000, 6.9000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_042_ net:_060_ net:_216_ net:a[9] net:b[13] net:net162 net:net177 net:net178
+	comment: capacity:3 usage:8 congestion:5
+	bbox = (34.5000, 41.4000) - (41.4000, 48.3000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_115_ net:_154_ net:_277_ net:net106
+	comment: capacity:3 usage:4 congestion:1
+	bbox = (62.1000, 55.2000) - (69.0000, 62.1000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_238_ net:net169 net:net170 net:net187 net:net94 net:net130
+	comment: capacity:3 usage:6 congestion:3
+	bbox = (41.4000, 6.9000) - (48.3000, 13.8000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_011_ net:_212_ net:_236_ net:_280_ net:b_in[2] net:net128 net:net98 net:net130
+	comment: capacity:3 usage:8 congestion:5
+	bbox = (13.8000, 20.7000) - (20.7000, 27.6000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_085_ net:_088_ net:_183_ net:_218_ net:_222_ net:_228_ net:b_in[3] net:net159
+	comment: capacity:3 usage:8 congestion:5
+	bbox = (20.7000, 62.1000) - (27.6000, 69.0000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_020_ net:_207_ net:_230_ net:_294_ net:clk net:result[2] net:result[5]
+	comment: capacity:3 usage:7 congestion:4
+	bbox = (0.0000, 41.4000) - (6.9000, 48.3000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_160_ net:_162_ net:b[7] net:rst_n net:net179 net:net181
+	comment: capacity:4 usage:6 congestion:2
+	bbox = (48.3000, 69.0000) - (55.2000, 79.0050) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_091_ net:_209_ net:_258_ net:a_in[6] net:net116 net:net178 net:net130
+	comment: capacity:3 usage:7 congestion:4
+	bbox = (34.5000, 48.3000) - (41.4000, 55.2000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_000_ net:_050_ net:_064_ net:_134_ net:_205_ net:_305_ net:a_in[3] net:rst_n net:net153
+	comment: capacity:3 usage:9 congestion:6
+	bbox = (13.8000, 13.8000) - (20.7000, 20.7000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_224_ net:_234_ net:_314_ net:a_in[0] net:a_in[1] net:result[14]
+	comment: capacity:3 usage:6 congestion:3
+	bbox = (6.9000, 0.0000) - (13.8000, 6.9000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:net157 net:_092_ net:_216_ net:_281_ net:a[9] net:b[13] net:net108 net:net177
+	comment: capacity:3 usage:8 congestion:5
+	bbox = (27.6000, 41.4000) - (34.5000, 48.3000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_147_ net:_159_ net:_277_ net:net163 net:net166 net:net130 net:net153
+	comment: capacity:3 usage:7 congestion:4
+	bbox = (48.3000, 55.2000) - (55.2000, 62.1000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_000_ net:_063_ net:_141_ net:_193_ net:_212_ net:_280_ net:net98 net:net153
+	comment: capacity:3 usage:8 congestion:5
+	bbox = (20.7000, 20.7000) - (27.6000, 27.6000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_192_ net:_220_ net:a[13] net:a_in[5] net:b[12] net:net116
+	comment: capacity:3 usage:6 congestion:3
+	bbox = (27.6000, 34.5000) - (34.5000, 41.4000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_128_ net:_141_ net:_202_ net:_212_ net:_240_ net:b[14] net:net98
+	comment: capacity:3 usage:7 congestion:4
+	bbox = (34.5000, 20.7000) - (41.4000, 27.6000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_234_ net:_308_ net:_314_ net:a_in[0] net:a_in[1] net:net126 net:net130
+	comment: capacity:3 usage:7 congestion:4
+	bbox = (20.7000, 0.0000) - (27.6000, 6.9000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_087_ net:_088_ net:_148_ net:_159_ net:_272_ net:_277_ net:_295_ net:net105 net:net90
+	comment: capacity:3 usage:9 congestion:6
+	bbox = (27.6000, 55.2000) - (34.5000, 62.1000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_118_ net:a[3] net:net167 net:net168 net:net184
+	comment: capacity:3 usage:5 congestion:2
+	bbox = (62.1000, 34.5000) - (69.0000, 41.4000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_112_ net:_267_ net:_269_ net:_271_ net:a[7] net:net163
+	comment: capacity:3 usage:6 congestion:3
+	bbox = (55.2000, 62.1000) - (62.1000, 69.0000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_163_ net:_214_ net:b_in[10] net:clk net:result[11] net:result[8] net:rst_n net:net109
+	comment: capacity:4 usage:8 congestion:4
+	bbox = (13.8000, 69.0000) - (20.7000, 79.0050) on Layer -
+violation type: Horizontal congestion
+	srcs: net:net133 net:_151_ net:net165 net:net182 net:net185
+	comment: capacity:3 usage:5 congestion:2
+	bbox = (55.2000, 41.4000) - (62.1000, 48.3000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_247_ net:a[2] net:rst_n net:net97 net:net168 net:net186
+	comment: capacity:3 usage:6 congestion:3
+	bbox = (55.2000, 13.8000) - (62.1000, 20.7000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_258_ net:a_in[6] net:b_in[3] net:net116 net:net130
+	comment: capacity:3 usage:5 congestion:2
+	bbox = (41.4000, 48.3000) - (48.3000, 55.2000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_072_ net:_239_ net:a_in[0] net:a_in[1] net:clk net:rst_n
+	comment: capacity:3 usage:6 congestion:3
+	bbox = (41.4000, 0.0000) - (48.3000, 6.9000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:net154 net:_205_ net:a[15] net:a_in[2] net:net116 net:net94 net:net198
+	comment: capacity:3 usage:7 congestion:4
+	bbox = (34.5000, 6.9000) - (41.4000, 13.8000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_021_ net:_205_ net:_280_ net:b_in[2] net:result[15] net:result[3] net:start net:net109
+	comment: capacity:3 usage:8 congestion:5
+	bbox = (0.0000, 20.7000) - (6.9000, 27.6000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_000_ net:_141_ net:_197_ net:_202_ net:_212_ net:b[14] net:net98
+	comment: capacity:3 usage:7 congestion:4
+	bbox = (27.6000, 20.7000) - (34.5000, 27.6000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_004_ net:_139_ net:_142_ net:_254_ net:net93
+	comment: capacity:3 usage:5 congestion:2
+	bbox = (55.2000, 20.7000) - (62.1000, 27.6000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_100_ net:_101_ net:net111 net:net118 net:net125 net:net139
+	comment: capacity:3 usage:6 congestion:3
+	bbox = (62.1000, 48.3000) - (69.0000, 55.2000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_090_ net:_209_ net:_258_ net:a_in[6] net:b_in[0] net:net130
+	comment: capacity:3 usage:6 congestion:3
+	bbox = (13.8000, 48.3000) - (20.7000, 55.2000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_022_ net:_163_ net:b_in[10] net:clk net:result[11] net:result[4] net:result[8]
+	comment: capacity:4 usage:7 congestion:3
+	bbox = (6.9000, 69.0000) - (13.8000, 79.0050) on Layer -
+violation type: Horizontal congestion
+	srcs: net:net157 net:_092_ net:_165_ net:_170_ net:_216_ net:_278_ net:a[9] net:net142
+	comment: capacity:3 usage:8 congestion:5
+	bbox = (20.7000, 41.4000) - (27.6000, 48.3000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_077_ net:_078_ net:_084_ net:net123 net:_152_ net:_306_ net:net104 net:net122 net:net124
+	comment: capacity:3 usage:9 congestion:6
+	bbox = (20.7000, 27.6000) - (27.6000, 34.5000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_061_ net:_216_ net:net95 net:net162 net:net168 net:net185
+	comment: capacity:3 usage:6 congestion:3
+	bbox = (41.4000, 41.4000) - (48.3000, 48.3000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_055_ net:_220_ net:a_in[5] net:net116 net:net179 net:net181
+	comment: capacity:3 usage:6 congestion:3
+	bbox = (41.4000, 34.5000) - (48.3000, 41.4000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_063_ net:_152_ net:_207_ net:_306_ net:b_in[0] net:net171
+	comment: capacity:3 usage:6 congestion:3
+	bbox = (27.6000, 27.6000) - (34.5000, 34.5000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:net133 net:_261_ net:net139 net:net165 net:net182
+	comment: capacity:3 usage:5 congestion:2
+	bbox = (62.1000, 41.4000) - (69.0000, 48.3000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:a_in[10] net:a_in[4] net:a_in[6] net:b_in[0] net:clk
+	comment: capacity:3 usage:5 congestion:2
+	bbox = (0.0000, 48.3000) - (6.9000, 55.2000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_168_ net:_183_ net:_218_ net:_222_ net:_288_ net:b_in[3] net:net159 net:net176 net:net153
+	comment: capacity:3 usage:9 congestion:6
+	bbox = (13.8000, 62.1000) - (20.7000, 69.0000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:net157 net:_119_ net:_170_ net:_216_ net:_226_ net:_282_ net:_294_
+	comment: capacity:3 usage:7 congestion:4
+	bbox = (13.8000, 41.4000) - (20.7000, 48.3000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_123_ net:_148_ net:_159_ net:_272_ net:_295_ net:_296_ net:_299_ net:net145 net:net90
+	comment: capacity:3 usage:9 congestion:6
+	bbox = (20.7000, 55.2000) - (27.6000, 62.1000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:rst_n net:net152 net:net169 net:net170 net:net187
+	comment: capacity:3 usage:5 congestion:2
+	bbox = (55.2000, 6.9000) - (62.1000, 13.8000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:a_in[14] net:a_in[2] net:b_in[15] net:busy net:net109 net:net152
+	comment: capacity:3 usage:6 congestion:3
+	bbox = (13.8000, 6.9000) - (20.7000, 13.8000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_118_ net:_152_ net:b[15] net:b_in[0] net:net186 net:net187
+	comment: capacity:3 usage:6 congestion:3
+	bbox = (41.4000, 27.6000) - (48.3000, 34.5000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_091_ net:_094_ net:_169_ net:_209_ net:_232_ net:_258_ net:a_in[6] net:net130
+	comment: capacity:3 usage:8 congestion:5
+	bbox = (27.6000, 48.3000) - (34.5000, 55.2000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_191_ net:_207_ net:_220_ net:_224_ net:_303_ net:a_in[5] net:b[12] net:net174 net:net153
+	comment: capacity:3 usage:9 congestion:6
+	bbox = (13.8000, 34.5000) - (20.7000, 41.4000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_134_ net:_248_ net:a_in[3] net:net152 net:net186 net:net94
+	comment: capacity:3 usage:6 congestion:3
+	bbox = (41.4000, 13.8000) - (48.3000, 20.7000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_030_ net:b_in[10] net:clk net:done net:result[11] net:result[12] net:result[4] net:result[8] net:net109
+	comment: capacity:4 usage:9 congestion:5
+	bbox = (0.0000, 69.0000) - (6.9000, 79.0050) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_307_ net:_310_ net:a_in[2] net:b_in[15] net:net152 net:net153
+	comment: capacity:3 usage:6 congestion:3
+	bbox = (20.7000, 6.9000) - (27.6000, 13.8000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_198_ net:_314_ net:a[14] net:a_in[0] net:a_in[1] net:net130
+	comment: capacity:3 usage:6 congestion:3
+	bbox = (27.6000, 0.0000) - (34.5000, 6.9000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_099_ net:_100_ net:_257_ net:_261_ net:rst_n net:net179
+	comment: capacity:3 usage:6 congestion:3
+	bbox = (55.2000, 48.3000) - (62.1000, 55.2000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_163_ net:_214_ net:b[10] net:clk net:rst_n net:net188 net:net153
+	comment: capacity:4 usage:7 congestion:3
+	bbox = (34.5000, 69.0000) - (41.4000, 79.0050) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_000_ net:_033_ net:_134_ net:_305_ net:a_in[3] net:b_in[9] net:clk net:net153
+	comment: capacity:3 usage:8 congestion:5
+	bbox = (6.9000, 13.8000) - (13.8000, 20.7000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_148_ net:_159_ net:_272_ net:_273_ net:_277_ net:net163 net:net92
+	comment: capacity:3 usage:7 congestion:4
+	bbox = (41.4000, 55.2000) - (48.3000, 62.1000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_151_ net:net164 net:net165 net:net168 net:net182 net:net185
+	comment: capacity:3 usage:6 congestion:3
+	bbox = (48.3000, 41.4000) - (55.2000, 48.3000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_043_ net:_209_ net:_258_ net:a_in[4] net:a_in[6] net:b_in[0] net:rst_n net:net130
+	comment: capacity:3 usage:8 congestion:5
+	bbox = (6.9000, 48.3000) - (13.8000, 55.2000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_134_ net:_305_ net:a_in[3] net:b_in[12] net:b_in[9] net:result[10]
+	comment: capacity:3 usage:6 congestion:3
+	bbox = (0.0000, 13.8000) - (6.9000, 20.7000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:net103 net:_147_ net:_157_ net:_277_ net:net107 net:net130
+	comment: capacity:3 usage:6 congestion:3
+	bbox = (55.2000, 55.2000) - (62.1000, 62.1000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_081_ net:_083_ net:_152_ net:_189_ net:_193_ net:_299_ net:net104 net:net122
+	comment: capacity:3 usage:8 congestion:5
+	bbox = (13.8000, 27.6000) - (20.7000, 34.5000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_112_ net:_269_ net:_270_ net:_271_
+	comment: capacity:3 usage:4 congestion:1
+	bbox = (62.1000, 62.1000) - (69.0000, 69.0000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_134_ net:_201_ net:_205_ net:_236_ net:a_in[3] net:net110 net:net152
+	comment: capacity:3 usage:7 congestion:4
+	bbox = (20.7000, 13.8000) - (27.6000, 20.7000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_168_ net:_183_ net:_218_ net:a_in[10] net:b_in[3] net:rst_n net:net109 net:net153
+	comment: capacity:3 usage:8 congestion:5
+	bbox = (6.9000, 62.1000) - (13.8000, 69.0000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_271_ net:rst_n net:net164 net:net181 net:net91
+	comment: capacity:3 usage:5 congestion:2
+	bbox = (48.3000, 62.1000) - (55.2000, 69.0000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_144_ net:_253_ net:net125 net:net129 net:net137
+	comment: capacity:3 usage:5 congestion:2
+	bbox = (55.2000, 27.6000) - (62.1000, 34.5000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_114_ net:_144_ net:net112 net:_253_ net:net185
+	comment: capacity:3 usage:5 congestion:2
+	bbox = (62.1000, 27.6000) - (69.0000, 34.5000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_192_ net:_207_ net:_220_ net:a_in[5] net:b[12] net:b[9] net:b_in[0] net:net116 net:net177
+	comment: capacity:3 usage:9 congestion:6
+	bbox = (20.7000, 34.5000) - (27.6000, 41.4000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:net155 net:_310_ net:_315_ net:a_in[2] net:net116 net:net149 net:net172
+	comment: capacity:3 usage:7 congestion:4
+	bbox = (27.6000, 6.9000) - (34.5000, 13.8000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_065_ net:_234_ net:_314_ net:a_in[0] net:a_in[1] net:net130 net:net289
+	comment: capacity:3 usage:7 congestion:4
+	bbox = (13.8000, 0.0000) - (20.7000, 6.9000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:net154 net:_134_ net:_198_ net:_205_ net:net99 net:a_in[3] net:net110 net:net152
+	comment: capacity:3 usage:8 congestion:5
+	bbox = (27.6000, 13.8000) - (34.5000, 20.7000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:clk net:net152 net:net169 net:net170 net:net187
+	comment: capacity:3 usage:5 congestion:2
+	bbox = (48.3000, 6.9000) - (55.2000, 13.8000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_002_ net:_034_ net:_072_ net:_242_ net:rst_n
+	comment: capacity:3 usage:5 congestion:2
+	bbox = (48.3000, 0.0000) - (55.2000, 6.9000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_188_ net:_205_ net:_212_ net:_280_ net:b_in[2] net:result[15] net:start net:net130
+	comment: capacity:3 usage:8 congestion:5
+	bbox = (6.9000, 20.7000) - (13.8000, 27.6000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_224_ net:_314_ net:a_in[0] net:a_in[1] net:net109
+	comment: capacity:3 usage:5 congestion:2
+	bbox = (0.0000, 0.0000) - (6.9000, 6.9000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_119_ net:net132 net:_230_ net:_284_ net:_294_ net:rst_n net:net147
+	comment: capacity:3 usage:7 congestion:4
+	bbox = (6.9000, 41.4000) - (13.8000, 48.3000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_162_ net:_214_ net:clk net:rst_n net:net95 net:net179
+	comment: capacity:4 usage:6 congestion:2
+	bbox = (41.4000, 69.0000) - (48.3000, 79.0050) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_129_ net:_141_ net:_212_ net:b[14] net:net95
+	comment: capacity:3 usage:5 congestion:2
+	bbox = (41.4000, 20.7000) - (48.3000, 27.6000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_107_ net:_139_ net:a[2] net:net168 net:net185
+	comment: capacity:3 usage:5 congestion:2
+	bbox = (62.1000, 20.7000) - (69.0000, 27.6000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:a_in[5] net:clk net:net167 net:net179 net:net181 net:net184 net:net153
+	comment: capacity:3 usage:7 congestion:4
+	bbox = (48.3000, 34.5000) - (55.2000, 41.4000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_152_ net:_163_ net:_193_ net:a_in[14] net:a_in[9] net:result[0] net:result[7]
+	comment: capacity:3 usage:7 congestion:4
+	bbox = (0.0000, 27.6000) - (6.9000, 34.5000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:a_in[2] net:b_in[15] net:clk net:result[14] net:result[9] net:net152
+	comment: capacity:3 usage:6 congestion:3
+	bbox = (0.0000, 6.9000) - (6.9000, 13.8000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_134_ net:_207_ net:a_in[3] net:net95 net:net110 net:net152
+	comment: capacity:3 usage:6 congestion:3
+	bbox = (34.5000, 13.8000) - (41.4000, 20.7000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_148_ net:_159_ net:_272_ net:_277_ net:net158 net:net90 net:net92
+	comment: capacity:3 usage:7 congestion:4
+	bbox = (34.5000, 55.2000) - (41.4000, 62.1000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:a_in[14] net:a_in[2] net:b_in[15] net:rst_n net:net109 net:net152
+	comment: capacity:3 usage:6 congestion:3
+	bbox = (6.9000, 6.9000) - (13.8000, 13.8000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_163_ net:_179_ net:net121 net:_214_ net:b[10] net:clk net:rst_n net:net153
+	comment: capacity:4 usage:8 congestion:4
+	bbox = (27.6000, 69.0000) - (34.5000, 79.0050) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_148_ net:_159_ net:_232_ net:_272_ net:_287_ net:net131 net:net90 net:net153
+	comment: capacity:3 usage:8 congestion:5
+	bbox = (13.8000, 55.2000) - (20.7000, 62.1000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_142_ net:a_in[3] net:net97 net:net129 net:net93
+	comment: capacity:3 usage:5 congestion:2
+	bbox = (48.3000, 20.7000) - (55.2000, 27.6000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_162_ net:a[6] net:b[6] net:b[7] net:net179
+	comment: capacity:4 usage:5 congestion:1
+	bbox = (55.2000, 69.0000) - (62.1000, 79.0050) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_191_ net:_216_ net:_220_ net:_226_ net:a_in[12] net:a_in[5] net:clk net:net153
+	comment: capacity:3 usage:8 congestion:5
+	bbox = (0.0000, 34.5000) - (6.9000, 41.4000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_024_ net:_168_ net:_183_ net:b_in[3] net:b_in[4] net:result[6] net:rst_n net:net153
+	comment: capacity:3 usage:8 congestion:5
+	bbox = (0.0000, 62.1000) - (6.9000, 69.0000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_069_ net:_072_ net:_245_ net:net152
+	comment: capacity:3 usage:4 congestion:1
+	bbox = (62.1000, 6.9000) - (69.0000, 13.8000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_163_ net:_214_ net:b[10] net:b_in[10] net:clk net:result[11] net:rst_n net:net176 net:net153
+	comment: capacity:4 usage:9 congestion:5
+	bbox = (20.7000, 69.0000) - (27.6000, 79.0050) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_152_ net:_185_ net:_193_ net:net102 net:net101 net:net104 net:net114
+	comment: capacity:3 usage:7 congestion:4
+	bbox = (6.9000, 27.6000) - (13.8000, 34.5000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_047_ net:_118_ net:_152_ net:a[13] net:b_in[0] net:net171 net:net92
+	comment: capacity:3 usage:7 congestion:4
+	bbox = (34.5000, 27.6000) - (41.4000, 34.5000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_063_ net:_220_ net:a_in[5] net:b[12] net:net95 net:net116
+	comment: capacity:3 usage:6 congestion:3
+	bbox = (34.5000, 34.5000) - (41.4000, 41.4000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_134_ net:_247_ net:clk net:net168 net:net186 net:net130
+	comment: capacity:3 usage:6 congestion:3
+	bbox = (48.3000, 13.8000) - (55.2000, 20.7000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_218_ net:rst_n net:net95 net:net116 net:net153
+	comment: capacity:3 usage:5 congestion:2
+	bbox = (41.4000, 62.1000) - (48.3000, 69.0000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_159_ net:_232_ net:_272_ net:_285_ net:b_in[4] net:net90
+	comment: capacity:3 usage:6 congestion:3
+	bbox = (6.9000, 55.2000) - (13.8000, 62.1000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_069_ net:_107_ net:_247_ net:a[2] net:net186
+	comment: capacity:3 usage:5 congestion:2
+	bbox = (62.1000, 13.8000) - (69.0000, 20.7000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_257_ net:a_in[6] net:clk net:net166 net:net183
+	comment: capacity:3 usage:5 congestion:2
+	bbox = (48.3000, 48.3000) - (55.2000, 55.2000) on Layer -
+violation type: Horizontal congestion
+	srcs: net:_090_ net:_091_ net:_168_ net:_209_ net:_232_ net:_258_ net:a_in[6] net:net130
+	comment: capacity:3 usage:8 congestion:5
+	bbox = (20.7000, 48.3000) - (27.6000, 55.2000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_119_ net:_226_ net:_286_ net:_294_ net:_299_ net:a[9] net:b[9] net:b_in[0] net:net116
+	comment: capacity:2 usage:9 congestion:7
+	bbox = (20.7000, 41.4000) - (27.6000, 48.3000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_065_ net:_136_ net:_224_ net:rst_n net:net130
+	comment: capacity:2 usage:5 congestion:3
+	bbox = (13.8000, 0.0000) - (20.7000, 6.9000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_228_ net:a[10] net:b[10] net:net160 net:net176 net:net153
+	comment: capacity:2 usage:6 congestion:4
+	bbox = (20.7000, 62.1000) - (27.6000, 69.0000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_282_ net:_283_ net:_288_ net:net100 net:net144 net:net130 net:net153
+	comment: capacity:2 usage:7 congestion:5
+	bbox = (13.8000, 48.3000) - (20.7000, 55.2000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_234_ net:_312_ net:_313_ net:net126
+	comment: capacity:2 usage:4 congestion:2
+	bbox = (27.6000, 0.0000) - (34.5000, 6.9000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_097_ net:_110_ net:_116_ net:_275_ net:net141
+	comment: capacity:3 usage:5 congestion:2
+	bbox = (69.0000, 62.1000) - (79.0050, 69.0000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_163_ net:_207_ net:_302_ net:a_in[9] net:clk net:rst_n net:net130
+	comment: capacity:2 usage:7 congestion:5
+	bbox = (6.9000, 34.5000) - (13.8000, 41.4000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_230_ net:a_in[7] net:b_in[11] net:b_in[13] net:b_in[6] net:clk net:result[1] net:net109
+	comment: capacity:2 usage:8 congestion:6
+	bbox = (0.0000, 48.3000) - (6.9000, 55.2000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_235_ net:clk net:result[14] net:net109
+	comment: capacity:2 usage:4 congestion:2
+	bbox = (6.9000, 0.0000) - (13.8000, 6.9000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_214_ net:clk net:rst_n net:net95 net:net181
+	comment: capacity:2 usage:5 congestion:3
+	bbox = (48.3000, 62.1000) - (55.2000, 69.0000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_072_ net:a[14] net:a[15] net:rst_n net:net130
+	comment: capacity:2 usage:5 congestion:3
+	bbox = (41.4000, 0.0000) - (48.3000, 6.9000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_307_ net:_308_ net:busy net:net289
+	comment: capacity:2 usage:4 congestion:2
+	bbox = (20.7000, 0.0000) - (27.6000, 6.9000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_076_ net:_194_ net:b_in[15] net:net116 net:net152
+	comment: capacity:2 usage:5 congestion:3
+	bbox = (27.6000, 6.9000) - (34.5000, 13.8000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_015_ net:net156 net:_094_ net:_232_ net:clk net:net108 net:net173 net:net92
+	comment: capacity:2 usage:8 congestion:6
+	bbox = (34.5000, 34.5000) - (41.4000, 41.4000) on Layer -
+violation type: Vertical congestion
+	srcs: net:a[11] net:b[10] net:b_in[3] net:rst_n net:net95 net:net175
+	comment: capacity:2 usage:6 congestion:4
+	bbox = (41.4000, 55.2000) - (48.3000, 62.1000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_097_ net:_115_ net:_117_ net:_265_ net:_269_ net:_275_ net:net141
+	comment: capacity:3 usage:7 congestion:4
+	bbox = (69.0000, 55.2000) - (79.0050, 62.1000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_059_ net:_202_ net:rst_n net:net95 net:net92
+	comment: capacity:2 usage:5 congestion:3
+	bbox = (41.4000, 20.7000) - (48.3000, 27.6000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_063_ net:net156 net:_094_ net:a[13] net:clk net:net108 net:net92
+	comment: capacity:2 usage:7 congestion:5
+	bbox = (34.5000, 27.6000) - (41.4000, 34.5000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_230_ net:b_in[10] net:b_in[11] net:clk net:result[6] net:net153
+	comment: capacity:2 usage:6 congestion:4
+	bbox = (0.0000, 55.2000) - (6.9000, 62.1000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_114_ net:net112 net:b[3] net:rst_n net:net125 net:net185 net:net93
+	comment: capacity:2 usage:7 congestion:5
+	bbox = (62.1000, 27.6000) - (69.0000, 34.5000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_021_ net:_226_ net:_280_ net:a_in[15] net:b_in[1] net:clk net:net109 net:net152
+	comment: capacity:2 usage:8 congestion:6
+	bbox = (0.0000, 13.8000) - (6.9000, 20.7000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_108_ net:_252_ net:net115 net:net168 net:net185
+	comment: capacity:3 usage:5 congestion:2
+	bbox = (69.0000, 20.7000) - (79.0050, 27.6000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_077_ net:_078_ net:_124_ net:_207_ net:_280_ net:b[9] net:b_in[0] net:net116
+	comment: capacity:2 usage:8 congestion:6
+	bbox = (27.6000, 27.6000) - (34.5000, 34.5000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_076_ net:_124_ net:_125_ net:_194_ net:_202_ net:b[9] net:net116 net:net171
+	comment: capacity:2 usage:8 congestion:6
+	bbox = (27.6000, 13.8000) - (34.5000, 20.7000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_041_ net:_214_ net:_271_ net:clk net:net91 net:net153
+	comment: capacity:2 usage:6 congestion:4
+	bbox = (48.3000, 55.2000) - (55.2000, 62.1000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_213_ net:a_in[14] net:b_in[12] net:result[3] net:rst_n net:net153
+	comment: capacity:2 usage:6 congestion:4
+	bbox = (6.9000, 13.8000) - (13.8000, 20.7000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_063_ net:_124_ net:_125_ net:_126_ net:_280_ net:b[9] net:net116 net:net171
+	comment: capacity:2 usage:8 congestion:6
+	bbox = (27.6000, 20.7000) - (34.5000, 27.6000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_062_ net:_151_ net:b_in[3] net:net116 net:net163 net:net167 net:net182 net:net183
+	comment: capacity:2 usage:8 congestion:6
+	bbox = (48.3000, 34.5000) - (55.2000, 41.4000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_086_ net:a[11] net:b[10] net:b[11] net:net153
+	comment: capacity:2 usage:5 congestion:3
+	bbox = (41.4000, 62.1000) - (48.3000, 69.0000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_020_ net:_046_ net:net132 net:_163_ net:_210_ net:_285_ net:_302_ net:net147 net:net130
+	comment: capacity:2 usage:9 congestion:7
+	bbox = (6.9000, 41.4000) - (13.8000, 48.3000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_172_ net:_173_ net:_205_ net:_224_ net:result[15] net:start net:net130
+	comment: capacity:2 usage:7 congestion:5
+	bbox = (13.8000, 13.8000) - (20.7000, 20.7000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_072_ net:a[0] net:a[1] net:b[1] net:net170
+	comment: capacity:2 usage:5 congestion:3
+	bbox = (62.1000, 0.0000) - (69.0000, 6.9000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_044_ net:_288_ net:_290_ net:_291_ net:net100 net:net159 net:net153
+	comment: capacity:2 usage:7 congestion:5
+	bbox = (13.8000, 55.2000) - (20.7000, 62.1000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_003_ net:_135_ net:clk net:net97 net:net186 net:net130
+	comment: capacity:2 usage:6 congestion:4
+	bbox = (55.2000, 13.8000) - (62.1000, 20.7000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_109_ net:_113_ net:_115_ net:_143_ net:_252_ net:a[3] net:net168 net:net182
+	comment: capacity:3 usage:8 congestion:5
+	bbox = (69.0000, 27.6000) - (79.0050, 34.5000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_004_ net:_142_ net:rst_n net:net168 net:net185
+	comment: capacity:2 usage:5 congestion:3
+	bbox = (62.1000, 13.8000) - (69.0000, 20.7000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_077_ net:_124_ net:_165_ net:_278_ net:_280_ net:a[13] net:b[13] net:net105 net:net177
+	comment: capacity:2 usage:9 congestion:7
+	bbox = (27.6000, 34.5000) - (34.5000, 41.4000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_097_ net:_102_ net:_115_ net:_117_ net:net111 net:_256_ net:_264_ net:net139
+	comment: capacity:3 usage:8 congestion:5
+	bbox = (69.0000, 48.3000) - (79.0050, 55.2000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_013_ net:_181_ net:_182_ net:_184_ net:clk net:net127
+	comment: capacity:2 usage:6 congestion:4
+	bbox = (34.5000, 62.1000) - (41.4000, 69.0000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_174_ net:_299_ net:a[9] net:b[9] net:b_in[0] net:net116 net:net174
+	comment: capacity:2 usage:7 congestion:5
+	bbox = (20.7000, 34.5000) - (27.6000, 41.4000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_003_ net:_135_ net:_255_ net:clk net:net97 net:net186
+	comment: capacity:2 usage:6 congestion:4
+	bbox = (55.2000, 20.7000) - (62.1000, 27.6000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_090_ net:_170_ net:_171_ net:_282_ net:_283_ net:rst_n net:net144 net:net153
+	comment: capacity:2 usage:8 congestion:6
+	bbox = (13.8000, 41.4000) - (20.7000, 48.3000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_104_ net:_254_ net:b[2] net:rst_n net:net93
+	comment: capacity:2 usage:5 congestion:3
+	bbox = (62.1000, 20.7000) - (69.0000, 27.6000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_098_ net:_102_ net:_115_ net:_117_ net:_250_ net:_256_ net:_260_ net:_264_ net:net138
+	comment: capacity:3 usage:9 congestion:6
+	bbox = (69.0000, 41.4000) - (79.0050, 48.3000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_151_ net:_212_ net:b[15] net:b_in[3] net:net182 net:net153
+	comment: capacity:2 usage:6 congestion:4
+	bbox = (48.3000, 27.6000) - (55.2000, 34.5000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_209_ net:a[8] net:b[10] net:rst_n net:net95 net:net175 net:net178
+	comment: capacity:2 usage:7 congestion:5
+	bbox = (41.4000, 41.4000) - (48.3000, 48.3000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_109_ net:_113_ net:_115_ net:_118_ net:_250_ net:_256_ net:net182
+	comment: capacity:3 usage:7 congestion:4
+	bbox = (69.0000, 34.5000) - (79.0050, 41.4000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_212_ net:b[14] net:b_in[0] net:net129 net:net187
+	comment: capacity:2 usage:5 congestion:3
+	bbox = (48.3000, 20.7000) - (55.2000, 27.6000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_163_ net:a_in[10] net:b_in[4] net:rst_n net:net109
+	comment: capacity:2 usage:5 congestion:3
+	bbox = (6.9000, 55.2000) - (13.8000, 62.1000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_206_ net:_226_ net:a_in[15] net:b_in[1] net:b_in[7] net:clk net:result[7] net:net109 net:net152
+	comment: capacity:2 usage:9 congestion:7
+	bbox = (0.0000, 20.7000) - (6.9000, 27.6000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_059_ net:_248_ net:net116 net:net169 net:net94
+	comment: capacity:2 usage:5 congestion:3
+	bbox = (41.4000, 6.9000) - (48.3000, 13.8000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_043_ net:net132 net:_163_ net:_285_ net:a_in[10] net:rst_n net:net90
+	comment: capacity:2 usage:7 congestion:5
+	bbox = (6.9000, 48.3000) - (13.8000, 55.2000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_005_ net:_007_ net:_037_ net:_118_ net:clk net:net97 net:net190
+	comment: capacity:2 usage:7 congestion:5
+	bbox = (55.2000, 27.6000) - (62.1000, 34.5000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_174_ net:_193_ net:_305_ net:_307_ net:net122 net:net153
+	comment: capacity:2 usage:6 congestion:4
+	bbox = (20.7000, 20.7000) - (27.6000, 27.6000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_160_ net:_267_ net:_268_ net:rst_n net:net163 net:net164 net:net181
+	comment: capacity:2 usage:7 congestion:5
+	bbox = (55.2000, 55.2000) - (62.1000, 62.1000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_099_ net:_150_ net:net112 net:_261_ net:rst_n net:net125 net:net139
+	comment: capacity:2 usage:7 congestion:5
+	bbox = (62.1000, 41.4000) - (69.0000, 48.3000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_262_ net:clk net:net164 net:net179 net:net181 net:net153
+	comment: capacity:2 usage:6 congestion:4
+	bbox = (55.2000, 41.4000) - (62.1000, 48.3000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_207_ net:_230_ net:a_in[10] net:b_in[11] net:b_in[13] net:b_in[6] net:clk net:result[2] net:net109
+	comment: capacity:2 usage:9 congestion:7
+	bbox = (0.0000, 41.4000) - (6.9000, 48.3000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_059_ net:_128_ net:_129_ net:_240_ net:net95 net:net110 net:net92
+	comment: capacity:2 usage:7 congestion:5
+	bbox = (41.4000, 13.8000) - (48.3000, 20.7000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_036_ net:a_in[3] net:b_in[0] net:net187 net:net93
+	comment: capacity:2 usage:5 congestion:3
+	bbox = (48.3000, 13.8000) - (55.2000, 20.7000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_094_ net:_232_ net:clk net:net158 net:net159 net:net162 net:net92
+	comment: capacity:2 usage:7 congestion:5
+	bbox = (34.5000, 41.4000) - (41.4000, 48.3000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_161_ net:a[7] net:net140 net:net163 net:net179
+	comment: capacity:2 usage:5 congestion:3
+	bbox = (62.1000, 62.1000) - (69.0000, 69.0000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_088_ net:_122_ net:_123_ net:_168_ net:_292_ net:net131 net:net176
+	comment: capacity:2 usage:7 congestion:5
+	bbox = (20.7000, 55.2000) - (27.6000, 62.1000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_175_ net:_176_ net:net121 net:_297_ net:net145 net:net159
+	comment: capacity:2 usage:6 congestion:4
+	bbox = (27.6000, 62.1000) - (34.5000, 69.0000) on Layer -
+violation type: Vertical congestion
+	srcs: net:net154 net:_198_ net:_205_ net:net172
+	comment: capacity:2 usage:4 congestion:2
+	bbox = (34.5000, 6.9000) - (41.4000, 13.8000) on Layer -
+violation type: Vertical congestion
+	srcs: net:b[10] net:b_in[3] net:rst_n net:net95 net:net175
+	comment: capacity:2 usage:5 congestion:3
+	bbox = (41.4000, 48.3000) - (48.3000, 55.2000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_090_ net:_092_ net:_094_ net:_120_ net:_124_ net:_175_ net:net105 net:net119 net:net143
+	comment: capacity:2 usage:9 congestion:7
+	bbox = (27.6000, 48.3000) - (34.5000, 55.2000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_085_ net:_086_ net:_087_ net:_088_ net:_175_ net:_296_ net:_298_ net:net145
+	comment: capacity:2 usage:8 congestion:6
+	bbox = (27.6000, 55.2000) - (34.5000, 62.1000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_002_ net:_132_ net:rst_n
+	comment: capacity:2 usage:3 congestion:1
+	bbox = (55.2000, 0.0000) - (62.1000, 6.9000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_222_ net:clk net:net116 net:net158 net:net159 net:net92
+	comment: capacity:2 usage:6 congestion:4
+	bbox = (34.5000, 48.3000) - (41.4000, 55.2000) on Layer -
+violation type: Vertical congestion
+	srcs: net:b_in[0] net:net152 net:net187 net:net130 net:net197
+	comment: capacity:2 usage:5 congestion:3
+	bbox = (48.3000, 6.9000) - (55.2000, 13.8000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_027_ net:_225_ net:_314_ net:a_in[13] net:a_in[1] net:net109
+	comment: capacity:2 usage:6 congestion:4
+	bbox = (0.0000, 0.0000) - (6.9000, 6.9000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_224_ net:busy net:rst_n net:start net:net109 net:net130
+	comment: capacity:2 usage:6 congestion:4
+	bbox = (13.8000, 6.9000) - (20.7000, 13.8000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_163_ net:_301_ net:a_in[9] net:result[7] net:rst_n net:net130
+	comment: capacity:2 usage:6 congestion:4
+	bbox = (6.9000, 27.6000) - (13.8000, 34.5000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_215_ net:_222_ net:result[4] net:rst_n net:net109
+	comment: capacity:2 usage:5 congestion:3
+	bbox = (13.8000, 62.1000) - (20.7000, 69.0000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_107_ net:_138_ net:_139_ net:_246_ net:_251_ net:a[2]
+	comment: capacity:3 usage:6 congestion:3
+	bbox = (69.0000, 13.8000) - (79.0050, 20.7000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_040_ net:_111_ net:_160_ net:net134 net:net164
+	comment: capacity:2 usage:5 congestion:3
+	bbox = (55.2000, 62.1000) - (62.1000, 69.0000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_245_ net:a[0] net:b[0] net:b[1] net:net169
+	comment: capacity:2 usage:5 congestion:3
+	bbox = (62.1000, 6.9000) - (69.0000, 13.8000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_028_ net:_305_ net:_314_ net:clk net:net109 net:net152
+	comment: capacity:2 usage:6 congestion:4
+	bbox = (0.0000, 6.9000) - (6.9000, 13.8000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_023_ net:_217_ net:a_in[10] net:a_in[11] net:a_in[15] net:b_in[13] net:net109 net:net153
+	comment: capacity:2 usage:8 congestion:6
+	bbox = (0.0000, 34.5000) - (6.9000, 41.4000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_186_ net:_187_ net:a_in[14] net:result[0] net:rst_n net:net104 net:net114 net:net130
+	comment: capacity:2 usage:8 congestion:6
+	bbox = (6.9000, 20.7000) - (13.8000, 27.6000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_054_ net:_059_ net:b[10] net:b[13] net:rst_n net:net95 net:net175
+	comment: capacity:2 usage:7 congestion:5
+	bbox = (41.4000, 34.5000) - (48.3000, 41.4000) on Layer -
+violation type: Vertical congestion
+	srcs: net:a[4] net:a_in[6] net:b[4] net:rst_n net:net164 net:net166 net:net181 net:net153
+	comment: capacity:2 usage:8 congestion:6
+	bbox = (55.2000, 48.3000) - (62.1000, 55.2000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_000_ net:a_in[14] net:clk net:result[10] net:rst_n net:net109
+	comment: capacity:2 usage:6 congestion:4
+	bbox = (6.9000, 6.9000) - (13.8000, 13.8000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_014_ net:_082_ net:_083_ net:_172_ net:_224_ net:b[12]
+	comment: capacity:2 usage:6 congestion:4
+	bbox = (13.8000, 20.7000) - (20.7000, 27.6000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_092_ net:_124_ net:_165_ net:_166_ net:_167_ net:net105 net:net108 net:net143 net:net130
+	comment: capacity:2 usage:9 congestion:7
+	bbox = (27.6000, 41.4000) - (34.5000, 48.3000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_070_ net:_105_ net:_131_ net:net136 net:net150 net:net151
+	comment: capacity:3 usage:6 congestion:3
+	bbox = (69.0000, 0.0000) - (79.0050, 6.9000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_014_ net:_081_ net:_172_ net:_224_ net:_303_ net:a[12] net:b[12]
+	comment: capacity:2 usage:7 congestion:5
+	bbox = (13.8000, 27.6000) - (20.7000, 34.5000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_007_ net:a_in[5] net:clk net:net168 net:net179 net:net181 net:net153
+	comment: capacity:2 usage:7 congestion:5
+	bbox = (55.2000, 34.5000) - (62.1000, 41.4000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_000_ net:_063_ net:_236_ net:_305_ net:_307_ net:net153
+	comment: capacity:2 usage:6 congestion:4
+	bbox = (20.7000, 13.8000) - (27.6000, 20.7000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_075_ net:_094_ net:_118_ net:_127_ net:_128_ net:_207_ net:clk
+	comment: capacity:2 usage:7 congestion:5
+	bbox = (34.5000, 20.7000) - (41.4000, 27.6000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_006_ net:_149_ net:b_in[3] net:net116 net:net163 net:net166 net:net183
+	comment: capacity:2 usage:7 congestion:5
+	bbox = (48.3000, 41.4000) - (55.2000, 48.3000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_048_ net:_049_ net:net155 net:_198_ net:_314_
+	comment: capacity:2 usage:5 congestion:3
+	bbox = (34.5000, 0.0000) - (41.4000, 6.9000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_172_ net:_216_ net:_226_ net:a[12] net:net147 net:net153
+	comment: capacity:2 usage:6 congestion:4
+	bbox = (13.8000, 34.5000) - (20.7000, 41.4000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_242_ net:a_in[1] net:clk net:net152 net:net187
+	comment: capacity:2 usage:5 congestion:3
+	bbox = (48.3000, 0.0000) - (55.2000, 6.9000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_168_ net:_226_ net:_232_ net:_286_ net:_294_ net:_299_ net:net116
+	comment: capacity:2 usage:7 congestion:5
+	bbox = (20.7000, 48.3000) - (27.6000, 55.2000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_132_ net:clk net:rst_n net:net97
+	comment: capacity:2 usage:4 congestion:2
+	bbox = (55.2000, 6.9000) - (62.1000, 13.8000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_050_ net:_063_ net:_064_ net:_307_ net:net153 net:net289
+	comment: capacity:2 usage:6 congestion:4
+	bbox = (20.7000, 6.9000) - (27.6000, 13.8000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_114_ net:net112 net:b[5] net:rst_n net:net125 net:net185 net:net93
+	comment: capacity:2 usage:7 congestion:5
+	bbox = (62.1000, 34.5000) - (69.0000, 41.4000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_025_ net:_226_ net:a_in[15] net:clk net:result[0] net:net109
+	comment: capacity:2 usage:6 congestion:4
+	bbox = (0.0000, 27.6000) - (6.9000, 34.5000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_016_ net:_075_ net:_094_ net:_118_ net:_127_ net:_197_ net:_207_ net:net172
+	comment: capacity:2 usage:8 congestion:6
+	bbox = (34.5000, 13.8000) - (41.4000, 20.7000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_163_ net:clk net:rst_n net:net109
+	comment: capacity:2 usage:4 congestion:2
+	bbox = (6.9000, 62.1000) - (13.8000, 69.0000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_222_ net:b[11] net:clk net:net116 net:net158 net:net159
+	comment: capacity:2 usage:6 congestion:4
+	bbox = (34.5000, 55.2000) - (41.4000, 62.1000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_230_ net:b_in[10] net:clk net:done
+	comment: capacity:2 usage:4 congestion:2
+	bbox = (0.0000, 62.1000) - (6.9000, 69.0000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_174_ net:_190_ net:_299_ net:_304_ net:net124 net:net153
+	comment: capacity:2 usage:6 congestion:4
+	bbox = (20.7000, 27.6000) - (27.6000, 34.5000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_101_ net:_155_ net:net112 net:net118 net:net107 net:net179
+	comment: capacity:2 usage:6 congestion:4
+	bbox = (62.1000, 48.3000) - (69.0000, 55.2000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_038_ net:_149_ net:_214_ net:_259_ net:clk net:net163 net:net130
+	comment: capacity:2 usage:7 congestion:5
+	bbox = (48.3000, 48.3000) - (55.2000, 55.2000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_017_ net:_052_ net:_059_ net:b[10] net:rst_n net:net95 net:net175
+	comment: capacity:2 usage:7 congestion:5
+	bbox = (41.4000, 27.6000) - (48.3000, 34.5000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_069_ net:_105_ net:_106_ net:_246_
+	comment: capacity:3 usage:4 congestion:1
+	bbox = (69.0000, 6.9000) - (79.0050, 13.8000) on Layer -
+violation type: Vertical congestion
+	srcs: net:_157_ net:_266_ net:net106 net:net140 net:net179
+	comment: capacity:2 usage:5 congestion:3
+	bbox = (62.1000, 55.2000) - (69.0000, 62.1000) on Layer -
