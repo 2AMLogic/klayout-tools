@@ -33,15 +33,20 @@ this document (and the code) win.
   outruns the fleet's whole-job ceiling; overrides `batch.max_units_per_job`
   (see "Three budgets, and the fleet's whole-job ceiling"). An explicit cap
   is honored even when a shard's serial upper bound exceeds the ceiling (a
-  stderr warning says so). Corner requests only: on a `decks` request it (and
-  `batch.max_units_per_job`) is refused with
-  `error.code: "batch_decks_split_unsupported"` -- a deck list is always one
-  job, so split it into several requests by hand.
+  stderr warning says so). A `decks` request splits the same way (issue #5378):
+  `ceil(len(decks)/N)` balanced contiguous slices, one batch job each, merged
+  into one report in request order, with a shard map (`batch-shards.json`,
+  plus `deck_slices[]`) written to the artifacts dir and
+  `environment.remote.{split,shard_count,shard_map,shards[]}` in the report.
+  A list that already fits submits one job and writes no shard map.
+  `--submit-only` on a deck list that would split is refused with
+  `error.code: "batch_decks_split_unsupported"`; run it blocking, then
+  `--attach <shard map> [--collect-partial]` collects it (repeat the same
+  `--max-units-per-job`, as for corner requests).
 - `--max-concurrent-jobs` — backend `batch`, sharded runs (`remote.hosts > 1`
   or a split): keep at most this many shard jobs in flight at once and start
   the rest as earlier ones finish; overrides `batch.max_concurrent_jobs`.
-  Unset submits every shard at once. Refused on `decks` requests (same code
-  as above). See the `batch.max_concurrent_jobs` row
+  Unset submits every shard at once. Applies to a split `decks` request too. See the `batch.max_concurrent_jobs` row
   in the `batch.*` table.
 - `--hosts` — shard the expanded corner/Monte-Carlo unit list across this
   many hosts and merge the per-shard reports, overriding the request's own
@@ -1047,6 +1052,12 @@ with none done every unit is lost. The map is changed only by collected state,
 so a later plain `--attach` (or `--resume`) still finishes the remaining
 shards. Without `--attach <shard map>` the flag is refused
 (`error.code: "collect_partial_requires_attach"`).
+
+For a split `decks` request the same flags apply, with deck ids in place of
+corner points: an unfinished shard's decks are reported `error` with
+diagnostic code `batch_shard_unfinished`, and `environment.remote` carries
+`unfinished_shards[]` (`index`, `job_id`, `state`, `unit_ids`) and
+`resumable: true`. A shard whose job is gone reports `lost_shard`.
 
 Interrupted-shard retry stays with 2am's `reconcile`; the client never
 re-launches an `interrupted` job. To lose less work per reclaim, use smaller

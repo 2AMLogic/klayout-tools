@@ -197,7 +197,7 @@
     },
     {
       "path": "src/klayout_tools/cli/extract_cmd.py",
-      "lines": 1192
+      "lines": 1190
     },
     {
       "path": "src/klayout_tools/cli/parser.py",
@@ -613,7 +613,7 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 13834
+      "lines": 13818
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
@@ -625,7 +625,7 @@
     },
     {
       "path": "src/klayout_tools/sim_decks.py",
-      "lines": 2339
+      "lines": 2317
     },
     {
       "path": "src/klayout_tools/sim_remote.py",
