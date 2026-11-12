@@ -177,15 +177,33 @@ def test_other_families_keep_the_disclosure(tmp_path):
     assert "substrate_bodies" not in report["provenance"]
 
 
+def _ihp_ring(top, layout, gap=False):
+    """NWell (31/0) ring around the nBuLay island; `gap` opens its left side."""
+    for box in (
+        (-2, 3, 22, 4),
+        (-2, 7, 22, 8),
+        (21, 3, 22, 8),
+        (-2, 3, -1, 8),
+    ):
+        _box(top, layout, (31, 0), *box)
+    if gap:
+        region = kdb.Region(top.shapes(layout.layer(31, 0)))
+        region -= kdb.Region(kdb.Box(_um(-3), _um(4.5), _um(-0.5), _um(6.5)))
+        top.shapes(layout.layer(31, 0)).clear()
+        top.shapes(layout.layer(31, 0)).insert(region)
+
+
 @pytest.mark.parametrize("deck", ["sg13g2", "sg13cmos5l"])
 def test_ihp_nbulay_island_isolates_the_second_tap(tmp_path, deck):
-    """Issue #5345: the IHP decks declare nBuLay (32/0) as
-    ``substrate_isolation``, so a drawn nBuLay island around the VSS2 rail
-    is a separate body and there is no substrate-only short; without it the
-    two ties share ``vsubs`` and the short is reported."""
+    """Issues #5345/#5359: the IHP decks declare nBuLay (32/0) as
+    ``substrate_isolation`` needing a closed NWell (31/0) ring, so an nBuLay
+    island closed by a ring around the VSS2 rail is a separate body and there
+    is no substrate-only short; without it the two ties share ``vsubs`` and the
+    short is reported."""
     ties = [_ptie("p1", "VSS"), _ptie("p2", "VSS2")]
     layout, top = _two_rails()
     _box(top, layout, (32, 0), -1, 4, 21, 7)
+    _ihp_ring(top, layout)
     report = _run(tmp_path, layout, _spec(ties), stem="iso", deck=deck)
     assert _shorts(report) == []
     bodies = {b["id"] for b in report["provenance"]["substrate_bodies"]}
@@ -194,6 +212,22 @@ def test_ihp_nbulay_island_isolates_the_second_tap(tmp_path, deck):
     layout, _ = _two_rails()
     report = _run(tmp_path, layout, _spec(ties), stem="noiso", deck=deck)
     assert len(_shorts(report)) == 1
+
+
+@pytest.mark.parametrize("deck", ["sg13g2", "sg13cmos5l"])
+@pytest.mark.parametrize("ring", ["gap", "none"])
+def test_ihp_unclosed_or_missing_ring_leaves_island_unisolated(tmp_path, deck, ring):
+    """#5359: a gap in (or absence of) the NWell ring leaves the nBuLay island
+    on shared substrate, so the short is still reported."""
+    ties = [_ptie("p1", "VSS"), _ptie("p2", "VSS2")]
+    layout, top = _two_rails()
+    _box(top, layout, (32, 0), -1, 4, 21, 7)
+    if ring == "gap":
+        _ihp_ring(top, layout, gap=True)
+    report = _run(tmp_path, layout, _spec(ties), stem="unclosed", deck=deck)
+    shorts = _shorts(report)
+    assert len(shorts) == 1
+    assert shorts[0]["body"]["id"] == "vsubs"
 
 
 # --- sky130: dnwell island counts only when an n-well ring closes it (#5344) --

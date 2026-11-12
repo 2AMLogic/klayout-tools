@@ -1533,7 +1533,8 @@ EXTRACTION_DECK = ExtractionDeck(
     tap=None,
     tap_nplus=(7, 0),  # nSD.drawing -- well-tie implant (n+ Activ inside NWell)
     tap_pplus=(14, 0),  # pSD.drawing -- substrate-tie implant (p+ Activ outside NWell)
-    substrate_isolation=(32, 0),  # nBuLay.drawing (#5345; no ring-closure check)
+    substrate_isolation=(32, 0),  # nBuLay.drawing (#5345)
+    substrate_isolation_needs_nwell_ring=True,  # #5359: needs a closing NWell ring
     # Issue #3831: the PDK's own stdcells (`sg13cmos5l_inv_1`, ...) draw no
     # `nSD` (7/0) at all -- n+ is the family's default doping, so the well
     # tie is an Activ inside NWell with no `pSD` over it (same upstream form,
