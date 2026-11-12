@@ -1512,16 +1512,15 @@ EXTRACTION_DECK = ExtractionDeck(
     # are themselves symlinks into the pinned sibling `ihp-sg13g2` checkout,
     # see the module docstring, so this is the *same* derivation, not merely
     # an analogous one). Issue #1414 (the cmos5l sibling of sg13g2.py's own
-    # #1273 fix, mirroring gf180mcu's #1084): rather than leaving those
-    # well/substrate ties structurally unrecognisable, this deck declares
-    # `tap_nplus`/`tap_pplus` -- the `nSD` (7/0) / `pSD` (14/0) implant
-    # layers `mos_extraction.lvs` itself keys NMOS/PMOS source-drain off of
-    # (`nsd_fet`/`psd_fet`, cited by `nfet_provenance`/`pfet_provenance`
-    # above) -- so `extract.py` can *derive* an equivalent tap region: an
-    # `nSD`-covered Activ shape *inside* NWell is a well tie (ties the PMOS
-    # body to the well's real net -- opposite doping from the PMOS's own
-    # S/D, which is `pSD`-covered Activ inside the same NWell, so the two
-    # can never collide), and a `pSD`-covered Activ shape *outside* every
+    # #1273 fix, mirroring gf180mcu's #1084): rather than leaving those ties
+    # structurally unrecognisable, this deck declares `tap_nplus`/`tap_pplus` -- the
+    # `nSD` (7/0) / `pSD` (14/0) implant layers `mos_extraction.lvs` itself keys
+    # NMOS/PMOS source-drain off of (`nsd_fet`/`psd_fet`, cited by
+    # `nfet_provenance`/`pfet_provenance` above) -- so `extract.py` can *derive* an
+    # equivalent tap region: an `nSD`-covered Activ shape *inside* NWell is a well
+    # tie (ties the PMOS body to the well's real net -- opposite doping from the
+    # PMOS's own S/D, which is `pSD`-covered Activ inside the same NWell, so the
+    # two can never collide), and a `pSD`-covered Activ shape *outside* every
     # NWell is a substrate tie (ties the NMOS body to the substrate's real
     # net -- opposite doping from the NMOS's own S/D, which is `nSD`-covered
     # Activ outside NWell). A layout drawing no tie still extracts exactly
