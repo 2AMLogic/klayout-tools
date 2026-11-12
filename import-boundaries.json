@@ -729,6 +729,7 @@
         "klayout_tools.sim_batch_warn",
         "klayout_tools.sim_commands",
         "klayout_tools.sim_cause",
+        "klayout_tools.sim_case_names",
         "klayout_tools.sim_complex_vectors",
         "klayout_tools.sim_convergence_retry",
         "klayout_tools.sim_corner_extremes",
