@@ -2283,50 +2283,6 @@ def _leg_block_spacing_violation_um(
     return min(edge_pair.distance() for edge_pair in violations) * dbu
 
 
-def _via_cut_block_spacing_violation_um(
-    drop: dict[str, Any],
-    cut_side_um: float,
-    geometry: dict[str, Any],
-    spacing_um: float,
-    insert_cuts: Any,
-) -> float | None:
-    """Whether one via-drop's drawn cut(s) come within ``spacing_um`` of a
-    block's own cuts on the same via layer without touching them (#5398).
-
-    ``geometry`` is :func:`read_block_layer_geometry` on the *cut* layer, in
-    the composed frame. ``insert_cuts`` is ``gen_compose._insert_via_cuts``
-    (passed in, as it lives in the module that imports this one) -- called
-    with a ``kdb.Region`` so the compared footprint is exactly what
-    ``_write_composed_gds`` draws, array included. Cuts the new cuts overlap
-    are exempt (they merge), mirroring
-    :func:`_leg_block_spacing_violation_um`; only a near miss is reported.
-
-    Returns the closest offending distance (um), or ``None``.
-    """
-    import klayout.db as kdb
-
-    dbu = geometry["dbu"]
-    spacing_dbu = int(round(spacing_um / dbu))
-    if spacing_dbu <= 0:
-        return None
-    drawn = kdb.Region()
-    insert_cuts(
-        drawn,
-        drop,
-        int(round(drop["x_um"] / dbu)),
-        int(round(drop["y_um"] / dbu)),
-        int(round((cut_side_um / 2.0) / dbu)),
-        dbu,
-    )
-    obstacles = geometry["region"].not_interacting(drawn)
-    if obstacles.is_empty():
-        return None
-    violations = obstacles.separation_check(drawn, spacing_dbu)
-    if violations.is_empty():
-        return None
-    return min(edge_pair.distance() for edge_pair in violations) * dbu
-
-
 def _self_net_drawn_short(
     points_um: list[tuple[float, float]],
     geometry: dict[str, Any],
