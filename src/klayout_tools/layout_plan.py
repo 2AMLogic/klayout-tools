@@ -171,6 +171,7 @@ import json
 import os
 from typing import Any
 
+from ._jsonnum import is_number
 from ._paths import _resolve_relative
 from .gen import _GENERATOR_SPECS
 from .gen_compose import _ORIENTATIONS
@@ -624,7 +625,7 @@ def _parse_rows(raw: Any, group_ids: set[str]) -> list[dict[str, Any]]:
             )
 
         spacing_um = raw_row.get("spacing_um", 0.0)
-        if isinstance(spacing_um, bool) or not isinstance(spacing_um, (int, float)):
+        if not is_number(spacing_um):
             raise LayoutPlanUsageError(f"{where}.spacing_um must be a number")
         spacing_um = float(spacing_um)
         if spacing_um < 0:
@@ -643,7 +644,7 @@ def _parse_rows(raw: Any, group_ids: set[str]) -> list[dict[str, Any]]:
         # ``layout_plan_execute._resolve_placement``.
         margin_um = raw_row.get("margin_um")
         if margin_um is not None:
-            if isinstance(margin_um, bool) or not isinstance(margin_um, (int, float)):
+            if not is_number(margin_um):
                 raise LayoutPlanUsageError(f"{where}.margin_um must be a number")
             margin_um = float(margin_um)
             if margin_um < 0:
@@ -692,7 +693,7 @@ def _parse_abutment(raw: Any, group_ids: set[str]) -> list[dict[str, Any]]:
             raise LayoutPlanUsageError(f"{where}.edge must be one of {allowed}")
 
         gap_um = raw_entry.get("gap_um", 0.0)
-        if isinstance(gap_um, bool) or not isinstance(gap_um, (int, float)):
+        if not is_number(gap_um):
             raise LayoutPlanUsageError(f"{where}.gap_um must be a number")
         gap_um = float(gap_um)
         if gap_um < 0:

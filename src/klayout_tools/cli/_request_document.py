@@ -36,6 +36,7 @@ import json
 import os
 from typing import Any
 
+from .._jsonnum import is_number
 from .._paths import _resolve_relative
 from .._request_fields import check_known_fields  # noqa: F401 (re-exported as reqdoc.check_known_fields)
 
@@ -188,7 +189,7 @@ def get_number(
     value = request.get(key)
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if not is_number(value):
         raise _type_error(verb, key, "a number", value, error_cls)
     return float(value)
 

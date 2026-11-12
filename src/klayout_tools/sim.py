@@ -6968,7 +6968,7 @@ def _validate_k_sigma(value: Any, field: str) -> float:
     ``k=0`` degenerates the limit window to the mean itself, a legitimate
     "is the *typical* part inside the window?" question.
     """
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if not is_number(value):
         raise SimError(f"{field} must be a non-negative number (got {value!r})")
     if value < 0:
         raise SimError(f"{field} must be a non-negative number (got {value!r})")
@@ -6991,7 +6991,7 @@ def _resolve_mismatch_scale(
         return None
     value = mc_spec["mismatch_scale"]
     field = "request.monte_carlo.mismatch_scale"
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if not is_number(value):
         raise SimError(f"{field} must be a finite non-negative number (got {value!r})")
     if not math.isfinite(value) or value < 0:
         raise SimError(f"{field} must be a finite non-negative number (got {value!r})")
@@ -7046,7 +7046,7 @@ def _validate_plausible_range(value: Any, field: str) -> dict[str, float]:
         if key not in value:
             continue
         entry = value[key]
-        if isinstance(entry, bool) or not isinstance(entry, (int, float)):
+        if not is_number(entry):
             raise SimError(f"{field}.{key} must be a number (got {entry!r})")
         result[key] = float(entry)
     if not result:
@@ -7165,7 +7165,7 @@ def _validate_mc_statistics_spec(
             )
         ordered: list[float] = []
         for entry in raw_quantiles:
-            if isinstance(entry, bool) or not isinstance(entry, (int, float)):
+            if not is_number(entry):
                 raise SimError(
                     "request.monte_carlo.quantiles entries must be numbers in "
                     f"[0, 100] (got {entry!r})"

@@ -23,6 +23,7 @@ from typing import Any
 
 from . import evidence_lint as el
 from . import evidence_record as er
+from ._jsonnum import is_number
 
 F_CITE_MISSING = "cited_record_missing"
 F_TWIN_MISSING = "cited_twin_missing"
@@ -299,7 +300,7 @@ def _row_value(row: Mapping[str, Any], record: Any) -> str:
         if row.get("agg") is None:
             raise KeyError("pointer resolves to a list; set 'agg' to min or max")
         value = (min if row["agg"] == "min" else max)(value)
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if not is_number(value):
         return str(value)
     value = value * row.get("scale", 1)
     if "decimals" in row:

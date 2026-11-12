@@ -1734,7 +1734,7 @@ def _parse_array_placement(raw_placement: dict[str, Any]) -> dict[str, Any]:
         return value
 
     def _positive_number(value: Any, field: str) -> float:
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        if not is_number(value) or value <= 0:
             raise GenComposeError(
                 f"request.placement.{field} must be a positive number when "
                 "strategy is 'array'"
@@ -1883,7 +1883,7 @@ def _parse_placement(
         return strategy, order, 0.0, None, None, array_params
 
     spacing_um = raw_placement.get("spacing_um", 0.0)
-    if isinstance(spacing_um, bool) or not isinstance(spacing_um, (int, float)):
+    if not is_number(spacing_um):
         raise GenComposeError("request.placement.spacing_um must be a number")
     spacing_um = float(spacing_um)
     if spacing_um < 0:
@@ -1975,10 +1975,7 @@ def parse_waypoints_um(
         if (
             not isinstance(waypoint, list)
             or len(waypoint) not in (2, 3)
-            or any(
-                isinstance(v, bool) or not isinstance(v, (int, float))
-                for v in waypoint[:2]
-            )
+            or any(not is_number(v) for v in waypoint[:2])
         ):
             raise GenComposeError(
                 f"{where}[{wp_index}] must be a [x_um, y_um] pair of numbers "
@@ -2969,9 +2966,9 @@ def _port_probe_position_um(port: dict[str, Any]) -> tuple[float, float] | None:
     landing-connectivity path tolerates rather than fails). ``bool`` is
     rejected explicitly because it is a subclass of ``int``."""
     x_um, y_um = port.get("x_um"), port.get("y_um")
-    if isinstance(x_um, bool) or not isinstance(x_um, (int, float)):
+    if not is_number(x_um):
         return None
-    if isinstance(y_um, bool) or not isinstance(y_um, (int, float)):
+    if not is_number(y_um):
         return None
     return float(x_um), float(y_um)
 

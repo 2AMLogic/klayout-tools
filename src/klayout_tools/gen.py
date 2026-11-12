@@ -55,6 +55,7 @@ import math
 import os
 from typing import TYPE_CHECKING, Any
 
+from ._jsonnum import is_number
 from ._layout import write_layout
 from ._provenance import build_provenance
 from .gen_asap7_tap import ASAP7_SPECS
@@ -2702,7 +2703,7 @@ def _parse_well_regions(
             )
         coords: list[float] = []
         for value in entry[:4]:
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
+            if not is_number(value):
                 raise GenError(
                     f"generator '{generator}': {where}'s first four elements "
                     "must be numbers (a rectangle in um)"
@@ -4009,7 +4010,7 @@ def _coerce_param(generator: str, name: str, value: Any, ptype: int) -> Any:
 
     Decl = kdb.PCellParameterDeclaration
     if ptype == Decl.TypeDouble:
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
+        if not is_number(value):
             raise GenError(f"generator '{generator}': params.{name} must be a number")
         return float(value)
     if ptype == Decl.TypeInt:

@@ -48,6 +48,7 @@ import functools
 import math
 from typing import Any, NamedTuple
 
+from ._jsonnum import is_number
 from ._unionfind import UnionFind
 from .decks import (
     ExtractionDeck,
@@ -1307,7 +1308,7 @@ def _ring_gap_ports(block: dict[str, Any]) -> dict[str, dict[str, float]]:
         values: list[float] = []
         for key in ("x_um", "y_um", "width_um"):
             value = port.get(key)
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
+            if not is_number(value):
                 break
             values.append(float(value))
         if len(values) != 3 or values[2] <= 0.0:
@@ -1333,7 +1334,7 @@ def _ring_side_lines(block: dict[str, Any]) -> dict[str, float]:
         if side is None or not isinstance(port, dict):
             continue
         value = port.get("x_um" if side in ("E", "W") else "y_um")
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
+        if not is_number(value):
             continue
         lines[side] = float(value)
     return lines
@@ -1398,7 +1399,7 @@ def _ring_trace_half_width_um(block: dict[str, Any]) -> float | None:
         if _ring_port_side(name) is None:
             continue
         value = port.get("width_um")
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
+        if not is_number(value):
             continue
         if value > 0.0:
             widths.append(float(value))
@@ -4318,9 +4319,9 @@ def _pin_position_um(
     if not isinstance(port, dict):
         return None
     x_um, y_um = port.get("x_um"), port.get("y_um")
-    if isinstance(x_um, bool) or not isinstance(x_um, (int, float)):
+    if not is_number(x_um):
         return None
-    if isinstance(y_um, bool) or not isinstance(y_um, (int, float)):
+    if not is_number(y_um):
         return None
     offset = offsets_um[pin["block"]]
     return (float(x_um) + offset["x"], float(y_um) + offset["y"])

@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from . import liberty_writer
+from ._jsonnum import is_number
 from .characterize_bisect import (
     ConstraintCase,
     ConstraintError,
@@ -67,7 +68,7 @@ def resolve_constraint_options(spec: dict[str, Any]) -> dict[str, Any]:
     if (
         not isinstance(window, list)
         or len(window) != 2
-        or any(isinstance(v, bool) or not isinstance(v, (int, float)) for v in window)
+        or any(not is_number(v) for v in window)
         or not window[0] < 0 < window[1]
     ):
         raise ConstraintError(

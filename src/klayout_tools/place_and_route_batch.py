@@ -63,6 +63,7 @@ from collections.abc import Callable
 from typing import Any
 
 from . import _batch_common, _provenance, output_lock, remote_transport, sim, sim_batch
+from ._jsonnum import is_number
 from ._provenance import content_hash
 from .netlist_batch import _remote_stderr_tail, _runner_error
 from .place_and_route import (
@@ -321,7 +322,7 @@ def new_job_id() -> str:
 
 def _job_timeout_s(request: dict[str, Any]) -> float:
     value = (request.get("batch") or {}).get("job_timeout_s", DEFAULT_JOB_TIMEOUT_S)
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+    if not is_number(value) or value <= 0:
         raise PlaceAndRouteError(
             "request.batch.job_timeout_s must be a positive number of seconds"
         )

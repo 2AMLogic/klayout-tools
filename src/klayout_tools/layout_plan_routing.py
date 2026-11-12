@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ._jsonnum import is_number
 from .gen_compose import GenComposeError, parse_legs, parse_waypoints_um
 
 #: Allowed keys in one ``request.routing.nets[<net>]`` entry.
@@ -22,7 +23,7 @@ ALLOWED_NET_ROUTING_KEYS = {"layer_role", "width_um", "waypoints_um", "legs"}
 def require_positive_number(value: Any, name: str, error: type[Exception]) -> float:
     """Return ``value`` as a float, or raise ``error`` unless it is a
     positive (non-bool) number."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+    if not is_number(value) or value <= 0:
         raise error(f"{name} must be a positive number when given")
     return float(value)
 
