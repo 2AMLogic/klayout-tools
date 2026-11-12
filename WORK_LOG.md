@@ -6,6 +6,14 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 - [2026-09](work_log/WORK_LOG_2026-09.md)
 
+### 2026-11-12
+
+- **PR #5326**: feat(lvs): keep-list of circuit globs for options.flatten_reference
+- **PR #5347**: feat: add substrate body-merge post-pass for erc.supply_short
+- **Issue #5342** (closed): erc: substrate continuity - shared island partition + body-merge post-pass (gf180mcu), phase 2 A+B of #5336
+- **PR #5339**: fix: preflight decks[] members in klt sim --batch-set
+- **Issue #5337** (closed): klt sim --batch-set fails with KeyError 'netlist' on decks[] requests
+
 ### 2026-11-11
 
 - **PR #5338**: docs: design note for substrate-continuity erc.supply_short evaluation
