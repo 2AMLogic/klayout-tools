@@ -220,6 +220,7 @@ def _validate_measurement_forms(measurements_spec: list[dict[str, Any]]) -> None
     for spec in measurements_spec:
         _validate_measurement_form(spec)
     _validate_expr_names_unique(measurements_spec)
+    _validate_case_variant_names(measurements_spec)
 
 
 def _validate_optional_flag(name: Any, spec: dict[str, Any]) -> None:
@@ -462,6 +463,31 @@ def _validate_expr_names_unique(measurements_spec: list[dict[str, Any]]) -> None
                 "report the same value -- give each measurement a unique name "
                 "(compared case-insensitively: ngspice lower-cases the name "
                 "it prints back)"
+            )
+
+
+def _validate_case_variant_names(measurements_spec: list[dict[str, Any]]) -> None:
+    """Issue #5373: no two entries may differ *only* by letter case.
+
+    ngspice lower-cases ``.meas`` names, so ``ta`` and ``tA`` are one
+    measurement to it: the later card shadows the earlier and both response
+    entries report the same value. Byte-identical duplicates are left alone
+    (existing behavior; ``expr`` ones are caught by
+    :func:`_validate_expr_names_unique`).
+    """
+    spellings: dict[Any, str] = {}
+    for spec in measurements_spec:
+        name = spec.get("name")
+        if not isinstance(name, str):
+            continue
+        first = spellings.setdefault(_measurement_name_key(name), name)
+        if first != name:
+            raise SimError(
+                f"measurements '{first}' and '{name}' differ only by letter "
+                "case: measurement names are compared case-insensitively "
+                "(ngspice lower-cases them), so the later one would shadow "
+                "the earlier and both would report the same value -- give "
+                "each measurement a distinct name"
             )
 
 
