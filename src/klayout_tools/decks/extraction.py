@@ -671,7 +671,7 @@ class ExtractionDeck:
     of this layer resolves to a *per-island* identity (named
     ``f"{substrate_net}_iso{n}"``, with ``n`` assigned in deterministic
     bounding-box order, not raw ``Region`` iteration order -- see
-    :func:`~klayout_tools.extract._partition_region_by_islands`) instead of
+    :func:`~klayout_tools.erc_islands.partition_region_by_islands`) instead of
     the single, deck-wide ``substrate_net`` global -- letting two physically
     separate, isolated NMOS domains (e.g. deep-nwell/isolated-p-well tubs)
     extract as two genuinely distinct nets rather than always collapsing

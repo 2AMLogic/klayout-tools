@@ -215,7 +215,10 @@ two disagree, this document (and the code) win.
   `poly_label` text drawn directly in its own definition when present, else
   from `--abstract-cell-lef`. A matched type with neither pin source is an
   application error. Everything not matched by a pattern extracts exactly as
-  today. See "Cell-level (black-box + pins) abstraction" below.
+  today. In-cell labels only define the black box's own pins (issue #5322):
+  they are not promoted to top-level pins, with or without `--top-cell-pins`;
+  top-level pins come from labels drawn in the top cell. See "Cell-level
+  (black-box + pins) abstraction" below.
 - `--abstract-cell-lef` — optional, unset by default, repeatable. A LEF file
   (or a directory of `*.lef`/`*.tlef` files) to resolve pins from for an
   `--abstract-cells`-matched cell type that draws no in-cell pin label — the

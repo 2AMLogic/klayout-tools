@@ -1068,6 +1068,7 @@ the exit code describes the read, `state` describes the job:
 | `terminal` | `true` for `done`/`failed`/`timeout` |
 | `detail`, `started_at`, `updated_at`, `elapsed_seconds`, `exit_code`, `tool` | As written by the fleet harness; absent ones are omitted |
 | `stale`, `stale_seconds` | Derived by `klt`, present only when a non-terminal job's `updated_at` is more than 900 s old (`STALE_AFTER_S`, three heartbeat periods): `stale: true` and the age of `updated_at` in seconds. A job that old is far likelier lost with its instance (e.g. a Spot reclaim) than slow. `state` is never rewritten — it stays the runner's own value. Absent for terminal and `pending` jobs and when `updated_at` is missing or unparseable; additive, so callers must treat both as optional ([#4616](https://github.com/2AMLogic/klayout-tools/issues/4616)) |
+| `never_started`, `unstarted_seconds`, `diagnostic` | Derived by `klt`, present only on a `pending` job (no `status.json`) whose `job.json` is older than 1800 s (`_BATCH_PROVISION_SLACK_S`): `never_started: true`, the `job.json` age in seconds, and the same "never started" message `--attach` prints. Additive; treat all three as optional ([#5332](https://github.com/2AMLogic/klayout-tools/issues/5332)) |
 | `progress` | Optional object the runner publishes into `status.json` while a job runs, e.g. `{"sim_time_s": 1.5e-6, "stop_time_s": 1e-5}` (simulated time reached, and the target stop time when known). Passed through verbatim and additive: omitted when the runner publishes none, so callers must treat it as optional ([#4291](https://github.com/2AMLogic/klayout-tools/issues/4291)) |
 | `instance` | `instance_id`, `instance_type`, `availability_zone`, `lifecycle`, `spot`, ... when published |
 | `exit_reason` | Additive (#4964). Present only when the job ended with a `klt sim` verdict exit (3 or 4) and its `report.json` was collected (on `--attach`/blocking runs, and on `--job-status` via one bounded read of `outputs/report.json`; skipped for non-terminal jobs and when the report is unreadable): `{exit_code, report_status, nothing_checked, nothing_checked_reasons, message, units}`. `units` (#5019) is `{total, by_status, first_not_passed}` — counts by unit status and the first 5 non-passing units with their first diagnostic `code`/`message`. `message` states the cause was the `klt sim` verdict, not the whole-job ceiling (a ceiling kill reports `state: timeout`, exit 124). Explains e.g. an op-only request (no measurements) whose corners pass but whose job state is `failed` / `job command exited 4`. |
@@ -1282,6 +1283,11 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   command exits `1` with error code `batch_set_preflight_failed` naming every
   failing member (path and code). Capacity refusals (`--capacity-retries`) can
   still fail mid-set.
+  Members may be corner requests (`netlist`) or deck-list requests (`decks[]`,
+  [#5337](https://github.com/2AMLogic/klayout-tools/issues/5337)). A deck list
+  is one job sized at the serial worst case of its units' `timeout_s`, and is
+  checked against the same ceiling. A member with neither `netlist` nor `decks`
+  (e.g. a `commands` request) is refused with `batch_set_unsupported_request`.
 - **`--dry-run`** ([#5012](https://github.com/2AMLogic/klayout-tools/issues/5012)).
   `klt sim --batch-set ... --dry-run` runs only the all-or-nothing preflight
   above and exits `0` with `dry_run: true`, `submitted: 0` and one
@@ -1294,6 +1300,18 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   member is sharded independently, and an option left unset keeps that
   request's own `batch.max_units_per_job` / `batch.max_concurrent_jobs` /
   `batch.capacity_wait_s`.
+- **Stuck or interrupted members** ([#5324](https://github.com/2AMLogic/klayout-tools/issues/5324)).
+  With a positive `--wait-for-capacity` (the command-line flag only; a
+  request-level `batch.capacity_wait_s` does not bound the set), a member
+  whose job was accepted but stays `pending` longer than that budget becomes an
+  entry with `status: "error"`, `exit_code: 4` and `error.code: "not_launched"`;
+  its job id stays in `job_ids` and the manifest so it can be cancelled or
+  attached. Finished members keep their results. An interrupt
+  (`KeyboardInterrupt`/`SystemExit`) turns every unfinished member into a
+  `set_interrupted` entry; the envelope and manifest are still written. Without
+  a wait budget the pending wait is unbounded, as before.
+- **`--report-out`** writes the aggregate envelope to a file (also on a partial
+  failure), in addition to stdout.
 - **Incremental manifest.** `<outdir>/set-manifest.json` (without `-o`: the
   `.klt/sim/` directory next to the first request) is written when the set
   starts and atomically rewritten on every transition. It lists, per request,
@@ -2229,7 +2247,7 @@ contents), size-capped, serialised with a JSON encoder, errors recorded as
 | `capture` | `ok`, `absent` (older worker, no artifact, poll timeout) or `malformed`. When not `ok`, all observations are `null` -- never the client's values. |
 | `simulator` | `requested_binary`, `binary_source` (`request` / `KLT_NGSPICE_BINARY` / `PATH`), `selected_path` (binary actually selected on the worker), `version_banner` (full `--version` text, bounded to 2000 chars), `version_probe` (`ok` / `timeout` / `exit_N` / `error` / `unavailable`). |
 | `model_inputs` | Under `options.stage_model_inputs`: `[{name, sha256}]` digests of the staged model files in `$EDA_INPUT_DIR` (bounded to 64); `null` otherwise or when an older worker does not report it. Lifted to `environment.remote.runner_model_inputs`. |
-| `pdk` | `variant`, worker `root`, `stamp_scheme` (`sources-sha256`), `stamp_sha256`, `stamp_text` (bounded `SOURCES` text) for the resolved variant, `models_staged` (true under `options.stage_model_inputs`: the executed models then came from the request, not the image tree), `stamp_scope` (`image` when `models_staged` is true: `stamp_*` then describes the worker image's tree, not the models that ran; `executed` otherwise). Stamp fields are `null` when `SOURCES` is absent. |
+| `pdk` | `variant`, worker `root`, `stamp_scheme` (`sources-sha256`), `stamp_sha256`, `stamp_text` (bounded `SOURCES` text) for the resolved variant, `models_staged` (true under `options.stage_model_inputs`: the executed models then came from the request, not the image tree), `stamp_scope` (`image` when `models_staged` is true: `stamp_*` then describes the worker image's tree, not the models that ran; `executed` otherwise). Stamp fields are `null` when neither `SOURCES` nor a bundle `.pdk-store.json` is readable; with only the latter, `stamp_scheme` is `store-version-sha256` (sha256 of its `version` string; `stamp_text` is `store:<version>`). |
 | `cpu_model` | First `model name` from the worker's `/proc/cpuinfo`, else `null`. CPU count stays `physical_cores` / `concurrency` from `status.json`. |
 | `omp_num_threads` | The worker's effective `OMP_NUM_THREADS`, `null` when unset. |
 | `image_manifest` | Allowlisted fields of a worker-local manifest (`$KLT_IMAGE_MANIFEST`, `/etc/klt-image-manifest.json`, `/opt/klt/image-manifest.json`), or `null` when none exists. This is the worker's own file, not the submitter's AMI selection metadata (`ami_id`, `data/remote-sim-ami-manifest.json`); a selected image is not evidence of the model bytes executed. Whether an image pins its PDK revision is reported only if the worker manifest says so (`pdk_pinned`); otherwise unknown. |
@@ -2242,10 +2260,12 @@ submitter resolves locally (`models.pdk_root` or `$PDK_ROOT`) and reports a
 `mismatch` only when both sides give the **same variant under the same stamp
 scheme**; a missing stamp or an unlike scheme is `not_comparable`, never a
 proven mismatch. The `reason` says which: `client_stamp_unavailable` means the
-submitter has no readable local `SOURCES` (set `models.pdk` and
+submitter has no readable local `SOURCES` or bundle `.pdk-store.json` (set `models.pdk` and
 `models.pdk_root` / `$PDK_ROOT`); `worker_stamp_unavailable` means the runner
 reported no stamp (older worker or absent capture); `variant_differs` /
-`scheme_differs` mean the two sides name different variants or stamp schemes.
+`scheme_differs` mean the two sides name different variants or stamp schemes
+(`SOURCES` wins when present, so a `SOURCES` side against a store-only side is
+`scheme_differs`).
 When `pdk.models_staged` is true the image stamp says nothing about the
 executed models, so `pdk_stamp_comparison` instead compares the client's
 `environment.staged_model_inputs` digests with the worker's `model_inputs`
@@ -2271,7 +2291,8 @@ against the client's own `environment.engine_build`).
 
 Coverage: the `batch` backend only, single jobs and every sharded member
 (mixed worker identities stay individually visible; recovered failed-job
-artifacts are included). The `remote` (SSH) backend does not write this
+artifacts are included). Deck-list (`decks[]`) batch reports carry it too (blocking,
+`--attach`, and recovered failed jobs). The `remote` (SSH) backend does not write this
 capture yet and reports no `worker_environment`. Workers that predate the
 capture, or lack `python3`, report `capture: "absent"`.
 
