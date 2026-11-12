@@ -33,11 +33,15 @@ this document (and the code) win.
   outruns the fleet's whole-job ceiling; overrides `batch.max_units_per_job`
   (see "Three budgets, and the fleet's whole-job ceiling"). An explicit cap
   is honored even when a shard's serial upper bound exceeds the ceiling (a
-  stderr warning says so).
+  stderr warning says so). Corner requests only: on a `decks` request it (and
+  `batch.max_units_per_job`) is refused with
+  `error.code: "batch_decks_split_unsupported"` -- a deck list is always one
+  job, so split it into several requests by hand.
 - `--max-concurrent-jobs` — backend `batch`, sharded runs (`remote.hosts > 1`
   or a split): keep at most this many shard jobs in flight at once and start
   the rest as earlier ones finish; overrides `batch.max_concurrent_jobs`.
-  Unset submits every shard at once. See the `batch.max_concurrent_jobs` row
+  Unset submits every shard at once. Refused on `decks` requests (same code
+  as above). See the `batch.max_concurrent_jobs` row
   in the `batch.*` table.
 - `--hosts` — shard the expanded corner/Monte-Carlo unit list across this
   many hosts and merge the per-shard reports, overriding the request's own
@@ -2275,6 +2279,20 @@ contents), size-capped, serialised with a JSON encoder, errors recorded as
 | `diagnostics` | Bounded list of capture problems (missing binary, unreadable stamp, ...). |
 | `pdk_stamp_comparison` | `status` of `match`, `mismatch` (with `warning`) or `not_comparable` (with `reason`: `worker_stamp_unavailable`, `client_stamp_unavailable`, `variant_differs` or `scheme_differs`). Under `models_staged` the comparison is `basis: "staged_model_inputs"` instead -- see below. |
 | `engine_build_comparison` | Issue #3095. `status` of `match`, `mismatch` (with `warning`) or `not_comparable`: the worker's `simulator.version_banner` against the local `environment.engine_build.version_banner` (whitespace-normalised). `not_comparable` when either side has no banner — never a proven mismatch. A match proves the same banner, not identical build options. |
+
+Two sibling fields sit on `environment.remote` itself (issue #5321), for a
+runner whose image has no readable `SOURCES` stamp:
+
+- `runner_models_lib_sha256`: the `environment.models_lib_sha256` the runner's
+  own `klt sim` reported, i.e. the model card the worker actually loaded;
+  `null` when absent or malformed (older runner, error envelope), so
+  "unknown" is distinguishable from a value.
+- `models_lib_comparison`: `status` of `match`, `mismatch` (with `warning`) or
+  `not_comparable` (with `reason`: `runner_hash_unavailable`,
+  `client_hash_unavailable` or `models_staged`) comparing it with the client's
+  `environment.models_lib_sha256`. Missing data is never a proven mismatch,
+  and klt does not fail the run on `mismatch`. `pdk_stamp_comparison` is
+  unchanged. Text output prints a `models_lib:` line next to `pdk_stamp:`.
 
 `pdk_stamp_comparison` compares the worker's stamp with the `SOURCES` stamp the
 submitter resolves locally (`models.pdk_root` or `$PDK_ROOT`) and reports a

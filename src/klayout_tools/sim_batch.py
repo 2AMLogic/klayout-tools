@@ -121,6 +121,7 @@ from .remote_launcher import (
 from .sim_batch_features import (
     annotate_gap,
     annotate_unrecovered_failure,
+    collected_report_env,
     gap_note,
     refusal_diagnostic,
 )
@@ -130,7 +131,6 @@ from .sim_batch_reattach import (  # noqa: F401
     _try_reattach_shard,
 )
 from .sim_batch_warn import warn_over_serial_bound_once
-from .sim_exit_reason import exit_reason_env
 from .sim_exit_reason import status_exit_code as _status_exit_code
 from .sim_remote import (
     _build_remote_request,
@@ -3447,7 +3447,7 @@ def _poll_and_collect(
         report = read_collected_report(collected)
         check_ngspice_options_echo(request, report)
         environment = {**environment, **_read_job_identity(collected, request)}
-        environment.update(exit_reason_env(status, report))
+        environment.update(collected_report_env(status, report))
         corners = report.get("corners") or []
         _surface_log_fatal(corners, collected)
         if keep_artifacts:

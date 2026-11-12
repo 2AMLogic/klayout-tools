@@ -85,3 +85,40 @@ def run_cells(
     if pool_size <= 1:
         return [run_one(index) for index in range(n_cells)]
     return run_cells_concurrently(run_one, n_cells, pool_size)
+
+
+def run_cells_partitioned(
+    run_one: Callable[[int], dict[str, Any]],
+    names: list[str],
+    backend: str | None,
+    request: dict[str, Any],
+    capacity_wait_s: float | None,
+    error_type: type[Exception],
+    keep_going: bool = False,
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    """Without ``keep_going`` this is :func:`run_cells` plus an empty failure
+    list. With it (issue #5380): run every cell, recording a cell whose
+    ``run_one`` raises ``error_type`` as ``{"cell", "error"}`` instead of
+    aborting the batch. Returns ``(successes in cell order, failures in cell
+    order)``. Raises ``error_type`` naming every failure when no cell
+    succeeded (there is no library to emit). Any other exception propagates
+    -- only an expected characterization failure is tolerated."""
+    if not keep_going:
+        results = run_cells(run_one, len(names), backend, request, capacity_wait_s)
+        return results, []
+    errors: dict[int, str] = {}
+
+    def tolerant(index: int) -> dict[str, Any]:
+        try:
+            return run_one(index)
+        except error_type as exc:
+            errors[index] = str(exc)
+            return {}
+
+    outcomes = run_cells(tolerant, len(names), backend, request, capacity_wait_s)
+    failures = [{"cell": names[i], "error": errors[i]} for i in sorted(errors)]
+    successes = [outcome for i, outcome in enumerate(outcomes) if i not in errors]
+    if not successes:
+        listing = "; ".join(f"{f['cell']}: {f['error']}" for f in failures)
+        raise error_type(f"--keep-going: every cell failed ({listing})")
+    return successes, failures

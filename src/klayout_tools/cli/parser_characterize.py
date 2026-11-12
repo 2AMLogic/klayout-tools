@@ -125,5 +125,27 @@ def add_characterize_parser(
             "`options.resume`."
         ),
     )
+    characterize_parser.add_argument(
+        "--timeout-s",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "per-sim wall-clock timeout in seconds (issue #5380); overrides "
+            "the request's `options.timeout_s` for every sim the run "
+            "generates (cell sims and constraint decks). Must be positive."
+        ),
+    )
+    characterize_parser.add_argument(
+        "--keep-going",
+        action="store_true",
+        help=(
+            "batch requests only (issue #5380): a cell whose characterization "
+            "fails is recorded in the response's `failed_cells` and skipped; "
+            "the remaining cells still run and one `.lib` covers the "
+            "successful cells. Errors if every cell fails. Re-run with "
+            "`--resume` to retry only the failed cells."
+        ),
+    )
     _add_format_arg(characterize_parser)
     characterize_parser.set_defaults(func=characterize_cmd.run)
