@@ -21,6 +21,8 @@ import os
 import re
 from typing import Any
 
+from ._jsonnum import is_number
+
 CODE_BAD_INPUT = "bad_input"
 
 _OPEN_RE = re.compile(r"<!--\s*klt:table\s+id=([A-Za-z0-9_.-]+)\s*-->")
@@ -124,7 +126,7 @@ def _format(value: Any, fmt: str, where: str) -> str:
     if fmt == "str":
         text = value if isinstance(value, str) else json.dumps(value)
     else:
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
+        if not is_number(value):
             raise EvidenceRenderError(
                 f"{where}: format {fmt!r} needs a number, got {value!r}"
             )

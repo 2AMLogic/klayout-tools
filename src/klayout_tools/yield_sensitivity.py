@@ -41,6 +41,7 @@ import json
 import os
 from typing import Any
 
+from ._jsonnum import is_number
 from ._native import _load_native_extension
 
 #: Mirrors ``native/yield/src/contract.rs``'s ``SENSITIVITY_SCHEMA_VERSION``
@@ -89,7 +90,7 @@ def _parameters_from(raw: Any, name: str, index: int) -> dict[str, float]:
         )
     parameters: dict[str, float] = {}
     for key, value in raw.items():
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
+        if not is_number(value):
             raise SensitivityError(
                 f"measurement '{name}': sample {index}'s parameter '{key}' is "
                 "not a number"
@@ -131,7 +132,7 @@ def _measurements_from_doc(doc: dict[str, Any]) -> list[dict[str, Any]]:
                     f"measurement '{name}': sample {i} is not an object"
                 )
             value = sample.get("output")
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
+            if not is_number(value):
                 raise SensitivityError(
                     f"measurement '{name}': sample {i} has no numeric 'output' value"
                 )

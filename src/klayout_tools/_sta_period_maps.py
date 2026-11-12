@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from ._jsonnum import is_number
+
 
 def _error(message: str) -> Exception:
     from .post_route_sta import PostRouteStaError
@@ -20,7 +22,7 @@ def _error(message: str) -> Exception:
 
 
 def _period_number(value: Any, where: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if not is_number(value):
         raise _error(f"{where} must be a positive number")
     if value <= 0:
         raise _error(f"{where} must be greater than zero")

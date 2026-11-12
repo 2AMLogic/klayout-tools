@@ -38,6 +38,7 @@ import math
 import re
 from typing import Any
 
+from ._jsonnum import is_number
 from .sim_errors import SimError
 from .sim_remote import _UNRUN_MESSAGES
 
@@ -66,7 +67,7 @@ def is_declared(analysis: dict[str, Any]) -> bool:
 
 
 def _number(value: Any, where: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if not is_number(value):
         raise SimError(f"{where} must be a number (got {value!r})")
     if not math.isfinite(value):
         raise SimError(f"{where} must be finite (got {value!r})")

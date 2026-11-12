@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from ._jsonnum import is_number
+
 BOUNDARY_LAYER: tuple[int, int] = (235, 4)
 
 
@@ -28,7 +30,7 @@ def parse_boundary(raw: Any, error: type[Exception]) -> dict[str, float] | None:
     out: dict[str, float] = {}
     for key in ("x0", "y0", "x1", "y1"):
         value = bbox.get(key)
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
+        if not is_number(value):
             raise error(
                 f"options.boundary.bbox_um.{key} must be a number, got {value!r}"
             )
