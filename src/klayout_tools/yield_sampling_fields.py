@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ._jsonnum import is_number
 from .yield_provenance import _yield_error
 
 #: Which fields each `analytic_cross_check.kind` accepts, mirroring
@@ -49,7 +50,7 @@ def _analytic_cross_check_from(
             )
         if value is None:
             continue
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
+        if not is_number(value):
             raise _yield_error(
                 f"{where}: measurement '{name}' analytic_cross_check.{key} must be "
                 "a number"
@@ -114,7 +115,7 @@ def _sampling_from(raw: Any, name: str, where: str) -> dict[str, Any] | None:
             )
         weights: list[float] = []
         for value in raw_weights:
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
+            if not is_number(value):
                 raise _yield_error(
                     f"{where}: measurement '{name}' sampling.weights entries must "
                     "be numbers"

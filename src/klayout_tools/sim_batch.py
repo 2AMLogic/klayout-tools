@@ -125,6 +125,10 @@ from .sim_batch_features import (
     refusal_diagnostic,
 )
 from .sim_batch_hints import attribute_modelname, hint_existing_fatal, with_runner_hints
+from .sim_batch_reattach import (  # noqa: F401
+    _RESUME_INTERRUPTED_GRACE_S,
+    _try_reattach_shard,
+)
 from .sim_batch_warn import warn_over_serial_bound_once
 from .sim_exit_reason import exit_reason_env
 from .sim_exit_reason import status_exit_code as _status_exit_code
@@ -4004,6 +4008,7 @@ class _BatchFleetRun:
         attach: bool,
         index: int | None = None,
         launch_if_unlaunched: bool = False,
+        resumed: bool = False,
     ) -> _ShardResult:
         # The job id doubles as the shard's artifacts subdirectory, so
         # per-shard artifact trees never collide and each one is traceable
@@ -4014,6 +4019,14 @@ class _BatchFleetRun:
             else self.artifacts_dir
         )
         shard_config = self.shard_config()
+        if resumed and shard_config.interrupted_grace_s > 0:
+            # A recorded job still ``interrupted`` on resume already waited out
+            # the full grace in the prior run: surface it after ~one poll so
+            # ``_try_reattach_shard`` can submit that shard afresh (issue #5371).
+            # ``0`` (grace disabled by the request) is left unbounded.
+            shard_config = replace(
+                shard_config, interrupted_grace_s=_RESUME_INTERRUPTED_GRACE_S
+            )
         try:
             return _run_batch_job(
                 config=shard_config,
@@ -4103,6 +4116,7 @@ class _BatchFleetRun:
                     # Only an entry that says "submitted" (launch never
                     # started) is launched; older maps carry no state.
                     launch_if_unlaunched=prior.get("state") == "submitted",
+                    resumed=True,
                 ),
                 job_id=str(prior["job_id"]),
             )
@@ -4392,46 +4406,6 @@ def _mark_collected(
     environment = result[2]
     if manifest is not None and environment and environment.get("client_collected_at"):
         manifest.mark(index, "collected")
-
-
-def _try_reattach_shard(
-    attach: Callable[
-        [], tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]
-    ],
-    *,
-    job_id: str,
-) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None] | None:
-    """Re-attach to a shard's recorded job (issue #3300), or ``None`` when the
-    caller should submit it afresh: the job was never submitted, its outputs
-    cannot be collected, or it ended in a terminal failure. A client
-    interrupt is never swallowed, and a poll-budget overrun is returned as
-    is -- that job may still be running, so resubmitting would bill it twice.
-    """
-    try:
-        result = attach()
-    except BatchClientInterrupted:
-        raise
-    except BatchError as exc:
-        print(
-            f"klt sim: notice: cannot re-attach batch job {job_id} ({exc}); "
-            "submitting that shard again",
-            file=sys.stderr,
-        )
-        return None
-    corners = result[0]
-    if corners and all(
-        any(
-            d.get("code") == "batch_job_failed" for d in corner.get("diagnostics") or []
-        )
-        for corner in corners
-    ):
-        print(
-            f"klt sim: notice: batch job {job_id} had failed; submitting "
-            "that shard again",
-            file=sys.stderr,
-        )
-        return None
-    return result
 
 
 def _mark_resumed(

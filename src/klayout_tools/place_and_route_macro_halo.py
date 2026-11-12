@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from ._jsonnum import is_number
+
 MACRO_HALO_SIDES = ("left", "bottom", "right", "top")
 
 
@@ -67,7 +69,7 @@ def _validate_per_side(
     resolved: dict[str, float] = {}
     for side in MACRO_HALO_SIDES:
         side_value = value.get(side, 0)
-        if isinstance(side_value, bool) or not isinstance(side_value, (int, float)):
+        if not is_number(side_value):
             raise error_cls(f"{name}.{side} must be a number")
         if side_value < 0:
             raise error_cls(f"{name}.{side} must not be negative")

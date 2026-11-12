@@ -373,7 +373,7 @@
     },
     {
       "path": "src/klayout_tools/gen_compose.py",
-      "lines": 5122
+      "lines": 5119
     },
     {
       "path": "src/klayout_tools/gen_compose_port_access.py",
@@ -609,7 +609,7 @@
     },
     {
       "path": "src/klayout_tools/signoff_power_delivery.py",
-      "lines": 2033
+      "lines": 2014
     },
     {
       "path": "src/klayout_tools/sim.py",
@@ -617,7 +617,7 @@
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
-      "lines": 4491
+      "lines": 4465
     },
     {
       "path": "src/klayout_tools/sim_commands.py",

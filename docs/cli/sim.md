@@ -1779,7 +1779,13 @@ a shard still in `state: "submitted"` is **launched** first -- but only while
 the fleet has published no `status.json` for it, and never from `launching` or
 `launched` (a possibly-launched job is polled, not launched again) -- and only a
 shard with no usable job (never submitted, outputs gone, or a terminally
-`failed` job) is submitted again under a new id, overwriting its entry. Each
+`failed` job, or one still `interrupted` after Spot reclaimed it -- the prior run
+already waited out `interrupted_grace_s`, so the resume reports it after about one
+poll instead of another full window) is submitted again under a new id,
+overwriting its entry. Resubmitting an interrupted shard risks billing it twice if
+the fleet's `reconcile` later re-launches the old job; the exposure is bounded by
+the grace the first run already waited. A `batch_poll_timeout` shard is never
+resubmitted (that job may still be running). Each
 `environment.remote.fleet[]` entry carries `resumed: true|false`. A map
 written before these fields existed carries no `state` and is only ever polled.
 

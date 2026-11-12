@@ -36,6 +36,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from ._jsonnum import is_number
 from ._layout import bbox_um_dict, load_layout, select_top_cells
 
 #: Stable rule ids carried by the violations this module emits.
@@ -55,7 +56,7 @@ class ArrayCheckError(Exception):
 
 
 def _finite(value: Any, flag: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if not is_number(value):
         raise ArrayCheckError(f"{flag} must be a number, got {value!r}")
     if not math.isfinite(value):
         raise ArrayCheckError(f"{flag} must be finite, got {value!r}")

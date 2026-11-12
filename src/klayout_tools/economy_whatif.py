@@ -39,13 +39,14 @@ import os
 from typing import Any
 
 from ._annotation import CANONICAL_ANNOTATION_LAYER, is_reserved_annotation_layer
+from ._jsonnum import is_number
 from ._layout import bbox_um_dict
 
 _TOP_KEYS = {"moves", "reshape"}
 
 
 def _number(value: Any, where: str, error_cls: type[Exception]) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if not is_number(value):
         raise error_cls(f"{where} must be a number, got {value!r}")
     if not math.isfinite(value):
         raise error_cls(f"{where} must be finite, got {value!r}")
