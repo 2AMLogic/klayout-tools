@@ -4004,6 +4004,7 @@ class _BatchFleetRun:
         attach: bool,
         index: int | None = None,
         launch_if_unlaunched: bool = False,
+        resumed: bool = False,
     ) -> _ShardResult:
         # The job id doubles as the shard's artifacts subdirectory, so
         # per-shard artifact trees never collide and each one is traceable
@@ -4014,6 +4015,14 @@ class _BatchFleetRun:
             else self.artifacts_dir
         )
         shard_config = self.shard_config()
+        if resumed and shard_config.interrupted_grace_s > 0:
+            # A recorded job still ``interrupted`` on resume already waited out
+            # the full grace in the prior run: surface it after ~one poll so
+            # ``_try_reattach_shard`` can submit that shard afresh (issue #5371).
+            # ``0`` (grace disabled by the request) is left unbounded.
+            shard_config = replace(
+                shard_config, interrupted_grace_s=_RESUME_INTERRUPTED_GRACE_S
+            )
         try:
             return _run_batch_job(
                 config=shard_config,
@@ -4103,6 +4112,7 @@ class _BatchFleetRun:
                     # Only an entry that says "submitted" (launch never
                     # started) is launched; older maps carry no state.
                     launch_if_unlaunched=prior.get("state") == "submitted",
+                    resumed=True,
                 ),
                 job_id=str(prior["job_id"]),
             )
@@ -4394,6 +4404,12 @@ def _mark_collected(
         manifest.mark(index, "collected")
 
 
+#: Grace applied to a resumed re-attach (issue #5371): the prior run already
+#: waited out ``interrupted_grace_s``, so a job still ``interrupted`` is
+#: reported after about one poll interval instead of another full window.
+_RESUME_INTERRUPTED_GRACE_S = 1.0
+
+
 def _try_reattach_shard(
     attach: Callable[
         [], tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]
@@ -4403,7 +4419,8 @@ def _try_reattach_shard(
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None] | None:
     """Re-attach to a shard's recorded job (issue #3300), or ``None`` when the
     caller should submit it afresh: the job was never submitted, its outputs
-    cannot be collected, or it ended in a terminal failure. A client
+    cannot be collected, it ended in a terminal failure, or it stayed
+    ``interrupted`` past its grace. A client
     interrupt is never swallowed, and a poll-budget overrun is returned as
     is -- that job may still be running, so resubmitting would bill it twice.
     """
@@ -4419,18 +4436,23 @@ def _try_reattach_shard(
         )
         return None
     corners = result[0]
-    if corners and all(
-        any(
-            d.get("code") == "batch_job_failed" for d in corner.get("diagnostics") or []
-        )
-        for corner in corners
+    for code, what in (
+        ("batch_job_failed", "had failed"),
+        (
+            "batch_job_interrupted",
+            "stayed interrupted (Spot reclaimed) past its grace",
+        ),
     ):
-        print(
-            f"klt sim: notice: batch job {job_id} had failed; submitting "
-            "that shard again",
-            file=sys.stderr,
-        )
-        return None
+        if corners and all(
+            any(d.get("code") == code for d in corner.get("diagnostics") or [])
+            for corner in corners
+        ):
+            print(
+                f"klt sim: notice: batch job {job_id} {what}; submitting "
+                "that shard again",
+                file=sys.stderr,
+            )
+            return None
     return result
 
 
