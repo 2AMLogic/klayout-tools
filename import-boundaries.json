@@ -763,6 +763,8 @@
         "klayout_tools.sim_remote",
         "klayout_tools.sim_request_overrides",
         "klayout_tools.sim_search",
+        "klayout_tools.sim_search_analysis",
+        "klayout_tools.sim_search_param",
         "klayout_tools.sim_set",
         "klayout_tools.sim_set_runtime",
         "klayout_tools.sim_settled",

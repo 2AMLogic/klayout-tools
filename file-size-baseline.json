@@ -633,7 +633,7 @@
     },
     {
       "path": "src/klayout_tools/sim_search.py",
-      "lines": 565
+      "lines": 543
     },
     {
       "path": "src/klayout_tools/sim_staging.py",
