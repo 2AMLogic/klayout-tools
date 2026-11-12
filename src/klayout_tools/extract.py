@@ -8725,12 +8725,9 @@ def _extract_netlist(
     # derivation. `isolation_islands` is sorted by bounding box (not raw
     # `Region` iteration order, which is not a documented stability
     # guarantee) so the per-island identities synthesized below are stable
-    # across re-runs of the same layout. Empty -- and every downstream
-    # partition below a guaranteed no-op via
-    # `partition_region_by_islands` -- for the overwhelmingly common case:
-    # a deck that leaves this field `None` (every deck as of this field's
-    # introduction until gf180mcu's own module sets it), or a layout that
-    # draws no shapes on a deck's declared isolation layer at all.
+    # across re-runs. Empty -- and every downstream partition a guaranteed
+    # no-op via `partition_region_by_islands` -- for a deck leaving this
+    # field `None`, or a layout drawing nothing on the isolation layer.
     # Unioned with the `--abstract-cells` cover for the same reason
     # `nwell_body_cover` is (issue #1911): an isolation island is a
     # body-identity *classification* for every NMOS body and substrate tie
@@ -8742,7 +8739,10 @@ def _extract_netlist(
     isolation_region = (
         _region(layout, top_cell, deck.substrate_isolation) + abstract_isolation_cover
     )
-    isolation_islands: list[kdb.Region] = sorted_islands(isolation_region)
+    isolation_islands: list[kdb.Region] = sorted_islands(
+        isolation_region,
+        nwell if deck.substrate_isolation_needs_nwell_ring else None,
+    )
     # `nfet_active_outside`/`nfet_active_isolated` feed only the device-
     # recognition ("W" terminal) split below -- `nfet_gate`/`nfet_sd` above
     # stay the full (unpartitioned) region for every *other* purpose

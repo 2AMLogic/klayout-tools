@@ -50,16 +50,6 @@ REASON_SUBSTRATE_ISOLATION_UNDECIDABLE = "substrate_isolation_undecidable"
 #: ``missing`` entry when the spec declares no ``ties[]`` at all.
 NO_TIES_MISSING = "ties[] entries declaring the substrate/well tap geometry"
 
-#: Isolation layers the extraction deck does not declare as
-#: ``substrate_isolation`` but that a family is known to draw, keyed by the
-#: ``--deck`` name. Used only to *measure* "the layout draws none" (design
-#: section 4, rule 2). sky130's ``dnwell`` is the deck's own ``_DNWELL``
-#: (64/18); sg13g2/sg13cmos5l ``nbulay`` is deliberately absent until piece D
-#: declares its layer in the deck, so those families stay disclosed.
-_UNDECLARED_ISOLATION_LAYERS: dict[str, tuple[str, tuple[int, int]]] = {
-    "sky130": ("dnwell", (64, 18)),
-}
-
 _FAMILY_MISSING: dict[str, str] = {
     "sg13g2": "nbulay isolation layer/datatype not declared as substrate_isolation "
     "in the sg13g2 extraction deck",
@@ -105,18 +95,6 @@ def isolation_missing(
         return []  # derived from the deck's isolation layer
     if _asserts_isolation(tie_layers, degenerate_ties):
         return []  # asserted via ties[].isolation_boxes
-    known = _UNDECLARED_ISOLATION_LAYERS.get(deck_name or "")
-    if known is not None:
-        from ._layout import region as _region
-
-        label, layer = known
-        if _region(layout, top_cell, layer).is_empty():
-            return []  # the layout draws no isolation layer: one body
-        return [
-            f"the {deck_name} extraction deck declares no substrate_isolation "
-            f"layer, and this layout draws {label} {layer[0]}/{layer[1]}: "
-            "declare it or assert ties[].isolation_boxes"
-        ]
     if deck_name in _FAMILY_MISSING:
         return [_FAMILY_MISSING[deck_name], "or assert ties[].isolation_boxes"]
     return [
@@ -435,7 +413,12 @@ def run_substrate_pass(
         if f["rule"] == "erc.supply_short"
     }
     declared_islands = (
-        sorted_islands(_region(layout, top_cell, deck.substrate_isolation))
+        sorted_islands(
+            _region(layout, top_cell, deck.substrate_isolation),
+            _region(layout, top_cell, deck.nwell)
+            if deck.substrate_isolation_needs_nwell_ring
+            else None,
+        )
         if deck is not None and deck.substrate_isolation is not None
         else []
     )

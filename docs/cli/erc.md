@@ -364,7 +364,10 @@ draws that the spec never declared" below.
     check, or disclose it as `erc.supply_short` /
     `substrate_isolation_undecidable` with a `missing` list — see "Substrate
     continuity between supply nets" below. `erc_status` is unchanged by the
-    disclosure.
+    disclosure. With `--pdk`-family decks that declare `substrate_isolation`
+    (gf180mcu, and sky130 as of #5344) the substrate path is evaluated; for
+    sky130 a `dnwell` island isolates its p-well only when an n-well ring
+    closes its outline, otherwise it stays on the shared substrate.
   - `same_net_as` (string, optional, default absent, issue #2463) — the
     `name` of another `nets[]` entry this one is *intentionally* the same
     electrical net as. Declare it when the layout deliberately ties two
@@ -881,8 +884,7 @@ the pass only ever *adds* findings. Whether it can be trusted depends on
 isolation (deep n-well / isolated p-well), which is **decidable or
 disclosed**: the substrate check is *evaluated* when isolation is derived
 (the deck declares a `substrate_isolation` layer), asserted
-(`ties[].isolation_boxes`), or provably absent (the family's isolation layer is
-known and the layout draws none); otherwise `erc_coverage.inapplicable` carries
+(`ties[].isolation_boxes`), or provably absent; otherwise `erc_coverage.inapplicable` carries
 `{"id": "erc.supply_short", "reason": "substrate_isolation_undecidable",
 "missing": [...]}` and no pass is claimed. The earlier
 `substrate_continuity_not_modelled` reason is retired.
@@ -890,7 +892,7 @@ known and the layout draws none); otherwise `erc_coverage.inapplicable` carries
 | PDK family (`--deck`) | Isolation layer | Evaluated when | Otherwise disclosed because |
 |---|---|---|---|
 | gf180mcu | `DNWELL` 12/0 (deck `substrate_isolation`) | always; islands derived (`vsubs_iso<n>`) | — |
-| sky130 | `dnwell` 64/18 (not declared in the deck) | the layout draws no `dnwell`, or `ties[].isolation_boxes` asserts the isolated bodies | `dnwell` is drawn and the deck does not declare it as `substrate_isolation` |
+| sky130 | `dnwell` 64/18 (deck `substrate_isolation`, #5344) | always; a `dnwell` island counts only when an n-well ring closes it, otherwise it stays on shared `vsubs` | — |
 | sg13g2 / sg13cmos5l | `nbulay` (layer not yet declared in the deck) | `ties[].isolation_boxes` asserts the isolated bodies | the deck declares no isolation layer, so "none drawn" cannot be measured |
 | asap7 | none | `ties[].isolation_boxes` asserts them | the cells draw no substrate/well tie: nothing to join through |
 | no `--deck` | unknown | `ties[].isolation_boxes` asserts them | the family is unknown, so isolation cannot be measured |
