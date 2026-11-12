@@ -840,7 +840,9 @@ any corner that never ran (`lost_shard`, `batch_job_failed`,
 state to resume from (the shard map, else the `--resume` checkpoint),
 `environment.remote` additionally carries `unrun_units` (count) and
 `resumable: true`, with `shard_map` naming the retained file, and stderr names
-the `--resume` rerun once. Absent when every unit ran. A lost shard is
+the `--resume` rerun once. Absent when every unit ran. `unrun_units` counts
+every corner that never ran; `unlaunched_shards` (above) counts only shards that
+were never launched, so with both present `unrun_units` is the larger. A lost shard is
 identified by `corners[].diagnostics[].code`, not by `status` (it stays
 `error`). The client does not re-launch these itself; fleet `reconcile` owns
 that ([#5364](https://github.com/2AMLogic/klayout-tools/issues/5364)).

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 import os
+import sys
 import tarfile
 import uuid
 from collections.abc import Sequence
@@ -174,6 +175,35 @@ def with_unrun_signal(
     out = {**environment, "unrun_units": unrun, "resumable": True}
     out.setdefault("shard_map", state_path)
     return out, "unlaunched_shards" not in environment
+
+
+def apply_unrun_signal(
+    environment: dict[str, Any] | None,
+    unrun: int,
+    artifacts_dir: str,
+    checkpoint_path: str | None,
+) -> dict[str, Any] | None:
+    """Issue #5364 wiring for ``run_sim``: when ``unrun`` corners never ran
+    (only a ``batch`` run synthesizes them), pick the retained resume state
+    (the shard map in ``artifacts_dir``, else ``checkpoint_path``; ``None``
+    when no checkpoint was retained), add the :func:`with_unrun_signal`
+    fields and print the ``--resume`` hint to stderr once. Returns
+    ``environment`` unchanged when nothing applies."""
+    if not unrun:
+        return environment
+    from .sim_batch import BATCH_SHARDS_FILENAME  # circular at import time
+
+    manifest = os.path.join(artifacts_dir, BATCH_SHARDS_FILENAME)
+    state = manifest if os.path.exists(manifest) else checkpoint_path
+    environment, hint = with_unrun_signal(environment, unrun, state)
+    if hint:
+        print(
+            f"klt sim: {unrun} unit(s) never ran (lost or interrupted batch "
+            f"shard); rerun with --resume and the same outdir to finish them "
+            f"(state: {state})",
+            file=sys.stderr,
+        )
+    return environment
 
 
 def resolve_backend_value(
