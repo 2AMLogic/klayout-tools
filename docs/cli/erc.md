@@ -365,7 +365,11 @@ draws that the spec never declared" below.
     "substrate_continuity_not_modelled"}`: `erc.supply_short` sees joins only
     through the declared `stackup`/`vias`, so rails that are one conductor
     through a shared substrate are not observable. Cross-check with
-    `klt lvs` (`hints.short_nets`). `erc_status` is unchanged.
+    `klt lvs` (`hints.short_nets`). `erc_status` is unchanged. With
+    `--pdk`-family decks that declare `substrate_isolation` (gf180mcu, and
+    sky130 as of #5344) the substrate path is evaluated instead; for sky130 a
+    `dnwell` island isolates its p-well only when an n-well ring closes its
+    outline, otherwise it stays on the shared substrate.
   - `same_net_as` (string, optional, default absent, issue #2463) — the
     `name` of another `nets[]` entry this one is *intentionally* the same
     electrical net as. Declare it when the layout deliberately ties two
