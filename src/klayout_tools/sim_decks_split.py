@@ -23,7 +23,7 @@ import math
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any
+from typing import Any, cast
 
 from . import sim_batch, sim_batch_plan, sim_batch_shards, sim_decks, sim_remote
 from .sim_errors import SimError
@@ -51,7 +51,11 @@ def plan_slices(
     cap = config.max_units_per_job
     if cap is None or len(units) <= cap:
         return [units]
-    return sim_remote._shard_corner_points(units, math.ceil(len(units) / cap))
+    # The slicer is generic over list items; deck units are dicts, not CornerPoints.
+    shards = sim_remote._shard_corner_points(
+        cast("Any", units), math.ceil(len(units) / cap)
+    )
+    return cast("list[list[dict[str, Any]]]", shards)
 
 
 def _plan_config(request: dict[str, Any], units: list[dict[str, Any]]) -> Any:
@@ -209,7 +213,10 @@ def run_split(
             state = "collected" if report.get("status") == "pass" else "failed"
         except sim_batch.BatchError as exc:
             report = _failure_report(
-                worker, code=exc.code, message=str(exc), outdir=outdir
+                worker,
+                code=exc.code or "batch_error",
+                message=str(exc),
+                outdir=outdir,
             )
             state = "failed"
         return report, _shard_summary(index, ids, job_id, state)
