@@ -31,4 +31,6 @@ options:
   --cell NAME characterize only the named cell out of a batch request's `cells` array (repeatable; default: every cell the request declares). A name the request does not declare is an error.
   --compare-to LIB compare the emitted `.lib` arc by arc against this reference Liberty file (typically the vendor library for the same corner) and report per-point delay/transition/power/leakage deltas in the response's `comparison` block
   --resume recover an interrupted run (issue #5350): cells/constraint decks already collected under <outdir>/cells/<cell>/ are not re-simulated, and with `--backend batch` a leg whose job was already submitted re-attaches to it instead of resubmitting. Changed inputs resubmit. Overrides the request's own `options.resume`.
+  --timeout-s SECONDS per-sim wall-clock timeout in seconds (issue #5380); overrides the request's `options.timeout_s` for every sim the run generates (cell sims and constraint decks). Must be positive.
+  --keep-going batch requests only (issue #5380): a cell whose characterization fails is recorded in the response's `failed_cells` and skipped; the remaining cells still run and one `.lib` covers the successful cells. Errors if every cell fails. Re-run with `--resume` to retry only the failed cells.
   --format {text,json} output format (default: text)

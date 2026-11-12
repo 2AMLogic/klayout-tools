@@ -8,7 +8,8 @@ SPICE-driven NLDM timing **and power** characterization of one standard cell
 klt characterize <request> [-o OUTDIR] [--lib PATH] [--backend BACKEND]
                           [--wait-for-capacity SECONDS]
                           [--keep-artifacts] [--cell NAME ...]
-                          [--resume] [--compare-to LIB] [--format text|json]
+                          [--resume] [--timeout-s SECONDS] [--keep-going]
+                          [--compare-to LIB] [--format text|json]
 ```
 
 ## Why this exists
@@ -72,6 +73,22 @@ positional file args. Relative paths inside it (`cell.netlist`,
   again. Changed inputs never reuse a stale report or job: they resubmit.
   Overrides the request's `options.resume`; on a non-batch backend it reuses
   collected legs and otherwise behaves as `klt sim --resume` does.
+- `--timeout-s SECONDS` — per-sim wall-clock timeout (issue #5380). Overrides
+  the request's `options.timeout_s` (default 900) for every sim the run
+  generates — cell sims and constraint decks — with the same precedence as
+  `klt sim --timeout-s`. A non-positive value is an error (exit `1`). The
+  `timeout_preflight_warning` in a sim report predicts when the default is too
+  small.
+- `--keep-going` — batch requests only (issue #5380; refused on a single-cell
+  `cell` request, like `--cell`). A cell whose characterization fails
+  (including a failure inside one of its constraint decks) is recorded in the
+  response's `failed_cells` and skipped; the other cells still run and one
+  `.lib` covers the successful cells. If *every* cell fails, no `.lib` is
+  written and the run errors (exit `1`) listing the failures. Without
+  `--keep-going` the run is fail-fast, as before. A characterization is data,
+  not a verdict, so a partial result exits `0` and the text output warns
+  loudly; re-run with `--resume` to retry only the failed cells — the finished
+  ones are reused. Composes with `--cell`.
 - `--compare-to` — a reference Liberty file (typically the vendor library for
   the same corner) to compare the emitted `.lib` against arc by arc. The
   result lands in the response's `comparison` block; see "Accuracy against a
@@ -465,8 +482,9 @@ batch shares the request's one `corner`, `grid`, `thresholds`, `models`, and
   over it.
 - **Every cell is validated before any is simulated** -- a typo in the fifth
   cell's pin list does not cost the first four cells' simulation time.
-- **All or nothing.** If any cell fails, nothing is emitted and the error
-  names the cell (`cell 'sg13g2_nor2_1': ...`). Validation errors name the
+- **All or nothing** (unless `--keep-going`, which skips failed cells and
+  lists them in `failed_cells`). If any cell fails, nothing is emitted and the
+  error names the cell (`cell 'sg13g2_nor2_1': ...`). Validation errors name the
   entry (`request.cells[3].pins ...`).
 - Cell names must be unique (a library holds one `cell()` group per name).
 - The single-cell `request.arcs` override is refused in batch mode; put an
@@ -803,6 +821,7 @@ state it measured so the limitation is visible rather than implied.
     "window": { "settle_ns": 3.6, "tran_step_ns": 0.001 }
   },
   "comparison": null,
+  "failed_cells": [],
   "provenance": {
     "klt_version": "0.6.0",
     "klayout_version": "0.30.10",
@@ -1144,6 +1163,8 @@ bound means updating this table with the new observed spread and its cause.
 | `0` | Every requested cell was characterized and the `.lib` was written. With `--compare-to`, regardless of whether the comparison is within tolerance — the comparison is data, reported in `comparison.summary.within_tolerance`; the enforced bar is the automated test (see below). |
 | `1` | Failed to run: malformed request, unresolvable/unparseable netlist, pin metadata that does not describe a combinational cell, a simulation that did not complete, a grid point with no measured value, a transient window too short, an emitted `.lib` the round-trip reader rejects, an unknown `--cell` name, or an unreadable `--compare-to` library. |
 | `2` | Argparse usage error (as with every other `klt` subcommand). |
+
+With `--keep-going`, `0` means at least one cell was characterized; the cells that were not are in `failed_cells` (`[{"cell": ..., "error": ...}]`, always present, `[]` when none — additive per `docs/json-contract.md`). If every cell fails the run exits `1`.
 
 There is no pass/fail code — see "no top-level `status`" above.
 

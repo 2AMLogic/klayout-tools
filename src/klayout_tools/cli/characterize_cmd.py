@@ -6,6 +6,8 @@ every other ``klt`` subcommand -- see ``docs/json-contract.md``.
 
 Exit codes (see ``docs/cli/characterize.md`` for the full table):
     0 - every requested cell was characterized and the ``.lib`` was written
+        (with ``--keep-going``: at least one cell was, and ``failed_cells``
+        lists the rest)
         (with ``--compare-to``, regardless of whether the comparison is
         within tolerance -- the comparison is data, reported in the
         response's ``comparison`` block)
@@ -37,6 +39,8 @@ def run(args: argparse.Namespace) -> int:
             compare_to=getattr(args, "compare_to", None),
             resume=getattr(args, "resume", None),
             capacity_wait_s=getattr(args, "wait_for_capacity", None),
+            timeout_s=getattr(args, "timeout_s", None),
+            keep_going=bool(getattr(args, "keep_going", False)),
         )
     except CharacterizeError as exc:
         return emit_error("characterize", str(exc), args.format)
@@ -77,6 +81,13 @@ def _print_text(report: dict) -> None:
 
     for entry in report["cells"]:
         _print_cell(entry)
+
+    failed = report.get("failed_cells") or []
+    if failed:
+        print(f"WARNING: {len(failed)} cell(s) FAILED and are NOT in the .lib:")
+        for entry in failed:
+            print(f"  failed: {entry['cell']}: {entry['error']}")
+        print()
 
     print(f"liberty: {liberty['path']}")
     print(f"  library_name: {liberty['library_name']}")

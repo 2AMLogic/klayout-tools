@@ -1096,10 +1096,10 @@ def test_example_response_matches_the_documented_envelope(example_run):
         "liberty",
         "simulation",
         "comparison",
+        "failed_cells",
         "provenance",
     }
-    # Single-cell form: the top-level cell/arcs/leakage/simulation mirror the
-    # one `cells[]` entry, and no comparison was asked for.
+    # Single-cell form: top-level cell/arcs/leakage/simulation mirror `cells[0]`.
     assert len(report["cells"]) == 1
     entry = report["cells"][0]
     assert entry["cell"] == report["cell"]

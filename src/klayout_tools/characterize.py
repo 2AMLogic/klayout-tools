@@ -87,9 +87,9 @@ from .characterize_instances import (
     _metered_rail_nodes,
     _rail_nodes,
 )
-from .characterize_leg import resolve_resume, run_sim_leg
+from .characterize_leg import best_effort_pdk, resolve_resume, run_sim_leg
 from .characterize_osdi import resolve_osdi_preload
-from .characterize_pool import run_cells
+from .characterize_pool import run_cells_partitioned
 from .characterize_probe import probe_netlist_cells as _probe_netlist_cells
 from .characterize_sequential import (
     SequentialSpecError,
@@ -100,7 +100,6 @@ from .characterize_sequential import (
     stimulus_schedule,
 )
 from .env_provenance import repo_relative_path
-from .pdk import PdkNotFoundError, find_pdk
 
 #: Version of this command's JSON response shape (per-command, per
 #: ``docs/json-contract.md``).
@@ -167,6 +166,8 @@ def run_characterize(
     compare_to: str | None = None,
     resume: bool | None = None,
     capacity_wait_s: float | None = None,
+    timeout_s: float | None = None,
+    keep_going: bool = False,
 ) -> dict[str, Any]:
     """Characterize one cell -- or a batch of cells -- at one corner and emit
     one NLDM ``.lib`` covering all of them.
@@ -198,24 +199,27 @@ def run_characterize(
     ``batch_no_capacity`` burst can be waited out; omitted, it is not passed.
 
     ``resume`` (#5350, else ``options.resume``): see :mod:`characterize_leg`.
-    Raises :class:`CharacterizeError` for every failure mode; never returns
-    a partially-populated table, and a batch run in which any one cell fails
-    emits nothing (the error names the cell).
+    ``timeout_s`` (#5380) overrides ``options.timeout_s``; ``keep_going``
+    (#5380, batch) lists failed cells in ``failed_cells``, emitting the rest.
+    Raises :class:`CharacterizeError` for every failure mode; a batch run in
+    which a cell fails emits nothing unless ``keep_going``.
     """
     batch_shard = capacity_shard(capacity_wait_s, backend)
     request = _load_request(request_path)
     request_dir = os.path.dirname(os.path.abspath(request_path)) or os.getcwd()
     batch = "cells" in request
-    if cells and not batch:
+    if (cells or keep_going) and not batch:
         raise CharacterizeError(
-            "--cell selects cells out of a batch request's `cells` array; this "
-            "request uses the single-cell `cell` form"
+            "--cell/--keep-going select among a batch request's `cells` array; "
+            "this request uses the single-cell `cell` form"
         )
 
     corner = _resolve_corner(request)
     grid = _resolve_grid(request)
     thresholds = _resolve_thresholds(request)
-    options = _resolve_options(request, grid, thresholds, request_dir, backend=backend)
+    options = _resolve_options(
+        request, grid, thresholds, request_dir, backend=backend, timeout_s=timeout_s
+    )
     resume = resolve_resume(request, resume)
 
     # Resolve *every* cell before simulating *any*: a typo in the fifth
@@ -256,7 +260,15 @@ def run_characterize(
                 raise
             raise CharacterizeError(f"cell '{cell['name']}': {exc}") from exc
 
-    results = run_cells(_run_one, len(resolved), backend, request, capacity_wait_s)
+    results, failed_cells = run_cells_partitioned(
+        _run_one,
+        [cell["name"] for cell, _ in resolved],
+        backend,
+        request,
+        capacity_wait_s,
+        CharacterizeError,
+        keep_going,
+    )
 
     library = _build_library(
         request=request,
@@ -321,6 +333,7 @@ def run_characterize(
         comparison=comparison,
         request=request,
         batch=batch,
+        failed_cells=failed_cells,
     )
 
 
@@ -869,6 +882,7 @@ def _resolve_options(
     thresholds: liberty_writer.Thresholds,
     request_dir: str,
     backend: str | None = None,
+    timeout_s: float | None = None,
 ) -> dict[str, Any]:
     spec = request.get("options") or {}
     if not isinstance(spec, dict):
@@ -892,9 +906,12 @@ def _resolve_options(
         step_ns = min(0.001, min_ramp / 10.0)
     step_ns = _positive_number(step_ns, "request.options.tran_step_ns")
 
-    timeout_s = _positive_number(
-        spec.get("timeout_s", DEFAULT_TIMEOUT_S), "request.options.timeout_s"
-    )
+    if timeout_s is None:
+        timeout_s = _positive_number(
+            spec.get("timeout_s", DEFAULT_TIMEOUT_S), "request.options.timeout_s"
+        )
+    else:
+        timeout_s = _positive_number(timeout_s, "--timeout-s")
     keep_artifacts = spec.get("keep_artifacts", False)
     if not isinstance(keep_artifacts, bool):
         raise CharacterizeError("request.options.keep_artifacts must be a boolean")
@@ -2210,6 +2227,7 @@ def _build_response(
     comparison: dict[str, Any] | None,
     request: dict[str, Any],
     batch: bool,
+    failed_cells: list[dict[str, str]],
 ) -> dict[str, Any]:
     grid_points = len(grid["input_transition_ns"]) * len(grid["output_load_pf"])
     arc_count = sum(len(result["arcs"]) for result in results)
@@ -2287,8 +2305,9 @@ def _build_response(
         },
         "simulation": single["simulation"] if single else None,
         "comparison": comparison,
+        "failed_cells": failed_cells,
         "provenance": build_provenance(
-            pdk=_best_effort_pdk(request),
+            pdk=best_effort_pdk(request),
             # Batch mode pins the first cell's netlist -- the whole batch in
             # the common case of one library-wide SPICE file; every
             # `cells[].cell.netlist` names its own file regardless.
@@ -2296,25 +2315,3 @@ def _build_response(
             input_role=INPUT_ROLE_NETLIST,
         ),
     }
-
-
-def _best_effort_pdk(request: dict[str, Any]) -> dict[str, Any] | None:
-    """Resolve ``request.models.pdk``/``pdk_root`` for the provenance block,
-    or ``None``.
-
-    Best-effort by design, matching ``klt sim``'s own treatment of the same
-    field: a request pointing straight at a model library with no PDK
-    variant is legitimate, and a PDK that no longer resolves must not fail a
-    run whose simulation already completed.
-    """
-    models = request.get("models")
-    if not isinstance(models, dict):
-        return None
-    variant = models.get("pdk")
-    root = models.get("pdk_root")
-    if variant is None and root is None:
-        return None
-    try:
-        return find_pdk(variant=variant, root=root)
-    except PdkNotFoundError:
-        return None

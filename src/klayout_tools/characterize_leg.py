@@ -8,6 +8,7 @@ import os
 from typing import Any
 
 from . import sim
+from .pdk import PdkNotFoundError, find_pdk
 
 
 def _read_text(path: str) -> str | None:
@@ -95,3 +96,25 @@ def run_sim_leg(
         json.dump(report, handle, indent=2)
         handle.write("\n")
     return report
+
+
+def best_effort_pdk(request: dict[str, Any]) -> dict[str, Any] | None:
+    """Resolve ``request.models.pdk``/``pdk_root`` for the provenance block,
+    or ``None``.
+
+    Best-effort by design, matching ``klt sim``'s own treatment of the same
+    field: a request pointing straight at a model library with no PDK
+    variant is legitimate, and a PDK that no longer resolves must not fail a
+    run whose simulation already completed.
+    """
+    models = request.get("models")
+    if not isinstance(models, dict):
+        return None
+    variant = models.get("pdk")
+    root = models.get("pdk_root")
+    if variant is None and root is None:
+        return None
+    try:
+        return find_pdk(variant=variant, root=root)
+    except PdkNotFoundError:
+        return None
