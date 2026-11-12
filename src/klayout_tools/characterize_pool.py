@@ -32,8 +32,9 @@ def batch_pool_size(
     backend resolves to ``batch`` **and** that opts into waiting out fleet
     capacity (``--wait-for-capacity`` or ``batch.capacity_wait_s`` > 0).
     Without that wait a burst of concurrent submits hits
-    ``batch_no_capacity`` and fails (issue #5348), so the default stays serial. Local/other backends stay serial so a
-    shared host is never oversubscribed."""
+    ``batch_no_capacity`` and fails (issue #5348), so the default stays
+    serial. Local/other backends stay serial so a shared host is never
+    oversubscribed."""
     if n_cells <= 1:
         return 1
     resolved_backend, _ = sim.resolve_backend(backend, request)
