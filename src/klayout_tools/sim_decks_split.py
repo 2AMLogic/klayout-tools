@@ -226,19 +226,11 @@ def run_split(
     )
 
 
-def attach_split(
-    request: dict[str, Any],
-    manifest_path: str,
-    *,
-    request_dir: str,
-    outdir: str,
-    collect_partial: bool,
-) -> dict[str, Any]:
-    """``--attach <shard map>`` for a split deck list: collect every shard
-    the map records and merge them like the blocking run. The map must belong
-    to this request; with ``collect_partial`` each shard's ``status.json`` is
-    read once and a shard not in a terminal state reports its decks as
-    unfinished instead of being waited for."""
+def _load_shard_map(
+    request: dict[str, Any], manifest_path: str
+) -> tuple[list[list[str]], dict[int, dict[str, Any]]]:
+    """Read and validate a deck-list shard map against ``request``; return its
+    deck-id slices and per-shard entries."""
     if os.path.basename(manifest_path) != sim_batch.BATCH_SHARDS_FILENAME:
         raise SimError(
             f"--attach {manifest_path}: expected a job id or a "
@@ -275,6 +267,23 @@ def attach_split(
             "this request does not declare",
             code="attach_request_mismatch",
         )
+    return slices, entries
+
+
+def attach_split(
+    request: dict[str, Any],
+    manifest_path: str,
+    *,
+    request_dir: str,
+    outdir: str,
+    collect_partial: bool,
+) -> dict[str, Any]:
+    """``--attach <shard map>`` for a split deck list: collect every shard
+    the map records and merge them like the blocking run. The map must belong
+    to this request; with ``collect_partial`` each shard's ``status.json`` is
+    read once and a shard not in a terminal state reports its decks as
+    unfinished instead of being waited for."""
+    slices, entries = _load_shard_map(request, manifest_path)
     reports: list[dict[str, Any]] = []
     shards: list[dict[str, Any]] = []
     unfinished: list[dict[str, Any]] = []
