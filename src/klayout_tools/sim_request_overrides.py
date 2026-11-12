@@ -119,7 +119,43 @@ def _refuse_corner_only_flags(
     if timeout_s is not None:
         raise SimError("--timeout-s only applies to corner requests (with `models`)")
     if collect_partial:
+        if "decks" in request:
+            raise SimError(
+                "--collect-partial is not supported for deck-list requests "
+                "(`decks`): a deck list is one job with no shard map, so "
+                "there is no partial collection -- split the deck list into "
+                "several requests instead",
+                code="collect_partial_requires_attach",
+            )
         raise SimError(
             "--collect-partial only applies to corner requests (with `models`)",
             code="collect_partial_requires_attach",
+        )
+
+
+def _refuse_deck_split_flags(
+    request: dict[str, Any],
+    max_units_per_job: int | None,
+    max_concurrent_jobs: int | None,
+) -> None:
+    """Refuse job-splitting knobs on a deck-list request: a deck list is
+    always one batch job, so honouring them is not implemented and silently
+    ignoring them would mislead the caller (issue #5377)."""
+    batch = request.get("batch") or {}
+    given = [
+        name
+        for name, value in (
+            ("--max-units-per-job", max_units_per_job),
+            ("--max-concurrent-jobs", max_concurrent_jobs),
+            ("batch.max_units_per_job", batch.get("max_units_per_job")),
+            ("batch.max_concurrent_jobs", batch.get("max_concurrent_jobs")),
+        )
+        if value is not None
+    ]
+    if given:
+        raise SimError(
+            f"{', '.join(given)} cannot split a deck-list request (`decks`): "
+            "a deck list always runs as one batch job -- split the deck list "
+            "into several requests by hand",
+            code="batch_decks_split_unsupported",
         )

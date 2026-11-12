@@ -33,11 +33,15 @@ this document (and the code) win.
   outruns the fleet's whole-job ceiling; overrides `batch.max_units_per_job`
   (see "Three budgets, and the fleet's whole-job ceiling"). An explicit cap
   is honored even when a shard's serial upper bound exceeds the ceiling (a
-  stderr warning says so).
+  stderr warning says so). Corner requests only: on a `decks` request it (and
+  `batch.max_units_per_job`) is refused with
+  `error.code: "batch_decks_split_unsupported"` -- a deck list is always one
+  job, so split it into several requests by hand.
 - `--max-concurrent-jobs` — backend `batch`, sharded runs (`remote.hosts > 1`
   or a split): keep at most this many shard jobs in flight at once and start
   the rest as earlier ones finish; overrides `batch.max_concurrent_jobs`.
-  Unset submits every shard at once. See the `batch.max_concurrent_jobs` row
+  Unset submits every shard at once. Refused on `decks` requests (same code
+  as above). See the `batch.max_concurrent_jobs` row
   in the `batch.*` table.
 - `--hosts` — shard the expanded corner/Monte-Carlo unit list across this
   many hosts and merge the per-shard reports, overriding the request's own

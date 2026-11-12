@@ -2360,3 +2360,37 @@ class TestDeckPreflightAndProvenance:
         assert report["environment"]["engine_version"] == "46"
         record = json.loads((tmp_path / "out" / "tt_27c" / "unit.json").read_text())
         assert record["key"]["engine_version"] == "46"
+
+
+class TestDeckSplitRefusal:
+    """Issue #5377: a deck list is one job; split knobs are refused by name."""
+
+    def _run(self, tmp_path, request, **kwargs):
+        path = write_request(tmp_path, request)
+        return sim.run_sim(str(path), artifacts_dir=str(tmp_path / "out"), **kwargs)
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [{"max_units_per_job": 1}, {"max_concurrent_jobs": 1}],
+    )
+    def test_cli_flags_refused(self, tmp_path, kwargs):
+        with pytest.raises(sim.SimError) as err:
+            self._run(tmp_path, deck_request(tmp_path), **kwargs)
+        assert err.value.code == "batch_decks_split_unsupported"
+
+    @pytest.mark.parametrize("field", ["max_units_per_job", "max_concurrent_jobs"])
+    def test_request_fields_refused(self, tmp_path, field):
+        request = deck_request(tmp_path, batch={field: 2})
+        with pytest.raises(sim.SimError) as err:
+            self._run(tmp_path, request)
+        assert err.value.code == "batch_decks_split_unsupported"
+        assert f"batch.{field}" in str(err.value)
+
+    def test_collect_partial_message_is_deck_aware(self, tmp_path):
+        with pytest.raises(sim.SimError, match="deck-list requests") as err:
+            self._run(tmp_path, deck_request(tmp_path), collect_partial=True)
+        assert err.value.code == "collect_partial_requires_attach"
+
+    def test_unset_runs_as_before(self, tmp_path):
+        report = self._run(tmp_path, deck_request(tmp_path), backend="local")
+        assert report
