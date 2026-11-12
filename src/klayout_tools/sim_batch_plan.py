@@ -75,13 +75,8 @@ def preflight_batch_request(request_path: str, **overrides: Any) -> dict[str, An
         # Command-list members (issue #5317) carry no corner grid: one command
         # list is one batch job, never sharded, so there is no ceiling to assess.
         return {}
-    if "netlist" not in request:
-        raise SimError(
-            f"{request_path}: --batch-set preflight supports corner requests "
-            "(`netlist`), deck-list (`decks`) and command-list (`commands`) "
-            "requests only; this request has none of them",
-            code="batch_set_unsupported_request",
-        )
+    # Anything else is a corner request: `load_request` already guarantees
+    # `netlist` (and `analysis`) are present, so no further shape check is needed.
     resolved = _prepare_sim_request(
         request_path,
         artifacts_dir=overrides.get("artifacts_dir"),
