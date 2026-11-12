@@ -2105,14 +2105,14 @@ EXTRACTION_DECK = ExtractionDeck(
         (134, 25),  # TopMetal2.text
     ),
     # No distinct drawn tap layer (`tap` stays `None`) -- but `tap_nplus`/
-    # `tap_pplus` let `extract.py` derive an equivalent well-/substrate-tie
-    # region from these same implant layers (issue #1273, mirroring gf180mcu's
-    # #1084; module docstring note above has the derivation and #2591's
-    # correction of the well-tie half against upstream).
+    # `tap_pplus` let `extract.py` derive an equivalent well-/substrate-tie region
+    # from these same implant layers (issue #1273, mirroring gf180mcu's #1084;
+    # module docstring note above: the derivation and #2591's well-tie correction).
     tap=None,
     tap_nplus=(7, 0),  # nSD.drawing -- well-tie implant (n+ Activ inside NWell)
     tap_pplus=(14, 0),  # pSD.drawing -- substrate-tie implant (p+ Activ outside NWell)
-    substrate_isolation=(32, 0),  # nBuLay.drawing (#5345; no ring-closure check)
+    substrate_isolation=(32, 0),  # nBuLay.drawing (#5345)
+    substrate_isolation_needs_nwell_ring=True,  # #5359: needs a closing NWell ring
     # Issue #2591: upstream's own well-tie form -- Activ inside NWell with
     # *no* pSD over it (`nactiv = activ.not(psd_drw...)`), unioned with the
     # positive `tap_nplus` form above so either drawing convention extracts.
