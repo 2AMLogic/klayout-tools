@@ -1457,6 +1457,13 @@ def _build_sim_request(
     netlist_source = request.get("netlist_source")
     if netlist_source is not None:
         sim_request["netlist_source"] = netlist_source
+    batch = request.get("batch")
+    if batch is not None:
+        if not isinstance(batch, dict):
+            raise CharacterizeError("request.batch must be an object")
+        # Pass-through only: `klt sim` validates the values (and ignores the
+        # block on a local run), so `batch.capacity_wait_s` is honored per cell.
+        sim_request["batch"] = dict(batch)
     return sim_request
 
 
