@@ -246,10 +246,9 @@ from .sim_remote import (
 from .sim_remote import _run_remote_dispatch as _run_remote_dispatch
 from .sim_remote import _shard_corner_points as _shard_corner_points
 from .sim_request_overrides import (
-    _refuse_corner_only_flags as _refuse_corner_only_flags,
-)
-from .sim_request_overrides import (
-    _with_capacity_wait_override as _with_capacity_wait_override,
+    _refuse_corner_only_flags,
+    _refuse_deck_split_flags,
+    _with_capacity_wait_override,
 )
 from .sim_request_overrides import (
     _with_max_concurrent_override as _with_max_concurrent_override,
@@ -2610,6 +2609,7 @@ def run_sim(
     if artifacts_dir is not None:
         artifacts_dir = os.path.abspath(artifacts_dir)
     _refuse_corner_only_flags(request, pdk_root, timeout_s, collect_partial)
+    _refuse_deck_split_flags(request, max_units_per_job, max_concurrent_jobs)
     if sim_commands.COMMANDS_FIELD in request:
         return _dispatch_command_request(
             request,
