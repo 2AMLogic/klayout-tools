@@ -189,7 +189,7 @@
     },
     {
       "path": "src/klayout_tools/characterize.py",
-      "lines": 2322
+      "lines": 2321
     },
     {
       "path": "src/klayout_tools/cli/drc_cmd.py",
@@ -201,7 +201,7 @@
     },
     {
       "path": "src/klayout_tools/cli/parser.py",
-      "lines": 6244
+      "lines": 6140
     },
     {
       "path": "src/klayout_tools/cli/pdk_cmd.py",
@@ -225,7 +225,7 @@
     },
     {
       "path": "src/klayout_tools/coverage.py",
-      "lines": 563
+      "lines": 529
     },
     {
       "path": "src/klayout_tools/decks/__init__.py",
@@ -301,11 +301,11 @@
     },
     {
       "path": "src/klayout_tools/erc.py",
-      "lines": 3529
+      "lines": 3524
     },
     {
       "path": "src/klayout_tools/erc_spec.py",
-      "lines": 1341
+      "lines": 1253
     },
     {
       "path": "src/klayout_tools/eval.py",
@@ -617,7 +617,7 @@
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
-      "lines": 4498
+      "lines": 4491
     },
     {
       "path": "src/klayout_tools/sim_commands.py",
