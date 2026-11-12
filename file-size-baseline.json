@@ -225,7 +225,7 @@
     },
     {
       "path": "src/klayout_tools/coverage.py",
-      "lines": 563
+      "lines": 529
     },
     {
       "path": "src/klayout_tools/decks/__init__.py",
@@ -301,11 +301,11 @@
     },
     {
       "path": "src/klayout_tools/erc.py",
-      "lines": 3529
+      "lines": 3524
     },
     {
       "path": "src/klayout_tools/erc_spec.py",
-      "lines": 1341
+      "lines": 1253
     },
     {
       "path": "src/klayout_tools/eval.py",

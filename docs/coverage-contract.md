@@ -35,7 +35,7 @@ coverage fields remain alongside the common fields.
 | `known` | Boolean: the producer can account for this coverage scope's execution. Exactly equivalent to an empty `unknown` array. |
 | `checked` | Unique stable string identities for work actually checked, including checks that failed. A declaration or an attempted engine launch alone does not count. |
 | `skipped` | Requested work not checked, each `{id, reason}`. Reasons are nonempty stable codes matching `[a-z][a-z0-9_]*`. |
-| `inapplicable` | Work outside this invocation's applicable assessment, with the same identity/reason shape. These entries do not make otherwise complete work partial. |
+| `inapplicable` | Work outside this invocation's applicable assessment, with the same identity/reason shape. These entries do not make otherwise complete work partial. | A record may carry an optional non-empty `missing` list of strings (e.g. `klt erc`'s `substrate_isolation_undecidable`) naming the information still needed.
 | `unknown` | Execution whose extent cannot be measured, with the same shape. Unknown is neither zero nor full coverage. Actual findings can coexist with unknown coverage. |
 | `nothing_checked` | Exactly `known && checked.length == 0`. An unknown run must report `false`, even if it cannot prove a single check. |
 | `nothing_checked_reasons` | Nonempty unique reason codes only for known zero checked work; otherwise `[]`. |

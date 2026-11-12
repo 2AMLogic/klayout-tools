@@ -14,6 +14,18 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt erc`: `ties[].isolation_boxes`, `same_net_as` through the substrate,
+  and the decidable-or-disclosed substrate rule** (#5343, 2026-11-12): new
+  optional `ties[].isolation_boxes` (µm boxes) asserts isolated substrate
+  bodies (`provenance.substrate_bodies` ids `isolation_box[l,b,r,t]`,
+  `provenance.isolation_assertions`, graded `checked_by_assertion`). A
+  `nets[].same_net_as` pair now suppresses the substrate-path
+  `erc.supply_short` and `erc.expected_short_missing` is satisfied by a
+  substrate join (`provenance.substrate_declared_joins`). The
+  `erc.supply_short` disclosure reason `substrate_continuity_not_modelled` is
+  replaced by `substrate_isolation_undecidable` with a `missing` list (an
+  optional extra key on `inapplicable` records). Additive; no `schema_version`
+  bump. Per-family table in `docs/cli/erc.md`.
 - **`klt sta` `electrical_checks` gains `min_pulse_width` and `min_period`**
   (#5241, 2026-11-10): two additive sibling classes next to `max_transition` /
   `max_capacitance`, each with `coverage` (`checked` / `unsupported` /
