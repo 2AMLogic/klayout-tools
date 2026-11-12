@@ -63,7 +63,7 @@ from collections.abc import Callable
 from typing import Any
 
 from . import _batch_common, _provenance, output_lock, remote_transport, sim, sim_batch
-from ._provenance import content_hash
+from ._jsonnum import is_number
 from .netlist_batch import _remote_stderr_tail, _runner_error
 from .place_and_route import (
     SCHEMA_VERSION,
@@ -321,7 +321,7 @@ def new_job_id() -> str:
 
 def _job_timeout_s(request: dict[str, Any]) -> float:
     value = (request.get("batch") or {}).get("job_timeout_s", DEFAULT_JOB_TIMEOUT_S)
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+    if not is_number(value) or value <= 0:
         raise PlaceAndRouteError(
             "request.batch.job_timeout_s must be a positive number of seconds"
         )
@@ -453,7 +453,7 @@ def _local_deck_hash(
         )
     except PlaceAndRouteError:
         return None
-    return content_hash(path)
+    return _provenance.content_hash(path)
 
 
 def _preflight(
@@ -462,7 +462,7 @@ def _preflight(
     """The request-level checks done before any upload: the netlist hash, the
     cell library, the packaged tree, the job timeout and the fleet config."""
     netlist_path = _resolve_netlist(request["netlist"], request_dir)
-    input_hash = content_hash(netlist_path)
+    input_hash = _provenance.content_hash(netlist_path)
     cell_library = request["pdk"].get("cell_library")
     if not isinstance(cell_library, str) or not cell_library:
         raise PlaceAndRouteError("request.pdk.cell_library is required")

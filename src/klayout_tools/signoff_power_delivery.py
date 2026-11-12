@@ -34,6 +34,7 @@ import json
 from pathlib import Path
 from typing import Any, cast
 
+from ._jsonnum import is_number
 from ._provenance import content_hash
 from .signoff_power_delivery_substrate import (
     REASON_SUBSTRATE_ISOLATION_UNDECIDABLE,
@@ -1170,9 +1171,7 @@ def _policy_required(value: Any) -> bool | None:
 
 
 def _policy_edge_band(value: Any) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
-        return None
-    return float(value)
+    return None if not is_number(value) or value < 0 else float(value)
 
 
 def _policy_edges(value: Any) -> list[str] | None:
