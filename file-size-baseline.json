@@ -189,7 +189,7 @@
     },
     {
       "path": "src/klayout_tools/characterize.py",
-      "lines": 2351
+      "lines": 2322
     },
     {
       "path": "src/klayout_tools/cli/drc_cmd.py",
