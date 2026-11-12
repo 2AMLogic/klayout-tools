@@ -718,6 +718,7 @@
         "klayout_tools.sim_batch_contract_preflight",
         "klayout_tools.sim_batch_contract_spec",
         "klayout_tools.sim_batch_contract_worker",
+        "klayout_tools.sim_batch_reattach",
         "klayout_tools.sim_batch_shards",
         "klayout_tools.sim_batch_unstarted",
         "klayout_tools.sim_batch_features",
