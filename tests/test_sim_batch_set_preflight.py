@@ -203,7 +203,16 @@ def test_member_with_neither_netlist_nor_decks_is_structured_not_keyerror(tmp_pa
     from klayout_tools.sim_batch_plan import preflight_batch_request
 
     path = tmp_path / "odd.json"
-    path.write_text(json.dumps({"commands": []}))
+    path.write_text(json.dumps({"backend": "batch"}))
     with pytest.raises(SimError) as excinfo:
         preflight_batch_request(str(path))
-    assert excinfo.value.code == "batch_set_unsupported_request"
+    # load_request rejects it structurally (a SimError, never a bare KeyError).
+    assert "netlist" in str(excinfo.value)
+
+
+def test_command_list_member_passes_preflight(tmp_path):
+    from klayout_tools import sim_set
+
+    path = tmp_path / "c.json"
+    path.write_text(json.dumps({"backend": "batch", "commands": [{"id": "x"}]}))
+    assert sim_set.preflight_batch_request(str(path)) == {}

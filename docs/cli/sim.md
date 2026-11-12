@@ -1286,8 +1286,10 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   Members may be corner requests (`netlist`) or deck-list requests (`decks[]`,
   [#5337](https://github.com/2AMLogic/klayout-tools/issues/5337)). A deck list
   is one job sized at the serial worst case of its units' `timeout_s`, and is
-  checked against the same ceiling. A member with neither `netlist` nor `decks`
-  (e.g. a `commands` request) is refused with `batch_set_unsupported_request`.
+  checked against the same ceiling. `commands[]` members
+  ([#5317](https://github.com/2AMLogic/klayout-tools/issues/5317)) are accepted and
+  not ceiling-checked. A member with none of `netlist`, `decks` or `commands` is
+  refused with a structured request-shape error.
 - **`--dry-run`** ([#5012](https://github.com/2AMLogic/klayout-tools/issues/5012)).
   `klt sim --batch-set ... --dry-run` runs only the all-or-nothing preflight
   above and exits `0` with `dry_run: true`, `submitted: 0` and one

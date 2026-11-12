@@ -3331,18 +3331,7 @@ def _run_batch_job(
         artifacts_dir,
         BATCH_RECEIPT_FILENAME if receipt_name is None else receipt_name,
     )
-    receipt: dict[str, Any] = {
-        "job_id": job_id,
-        # getattr: the receipt is best-effort and must never break a run.
-        # No bucket: its name carries the cloud account id and receipts get
-        # committed by canary repos (issue #4079).
-        "jobs_prefix": getattr(config, "jobs_prefix", None),
-        "region": getattr(config, "region", None),
-        "profile": getattr(config, "profile", None),
-        "launched_at": datetime.now(timezone.utc).isoformat(),
-        "request_sha256": sim_batch_receipt.receipt_request_sha256(request),
-        "state": None,
-    }
+    receipt = sim_batch_receipt.new_receipt(config, job_id, request, corner_points)
     _write_batch_receipt(receipt_path, receipt)
     return _poll_and_collect(
         config=config,
@@ -3646,10 +3635,14 @@ def _run_batch(
                 **_feature_diagnostic_field(config),
             }
         return corners, engine_version, environment
+    resume_job_id = sim_batch_receipt.resumable_job_id(
+        artifacts_dir, request, len(corner_points), checkpoint is not None
+    )
     try:
         corners, engine_version, environment = _run_batch_job(
             config=config,
-            job_id=new_job_id(),
+            job_id=resume_job_id or new_job_id(),
+            attach=resume_job_id is not None,
             corner_points=corner_points,
             netlist_path=netlist_path,
             timeout_s=timeout_s,
