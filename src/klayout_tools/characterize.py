@@ -56,7 +56,6 @@ See ``docs/cli/characterize.md`` for the request/response contract.
 
 from __future__ import annotations
 
-import json
 import os
 import re
 from typing import Any
@@ -87,6 +86,7 @@ from .characterize_instances import (
     _metered_rail_nodes,
     _rail_nodes,
 )
+from .characterize_leg import run_sim_leg
 from .characterize_osdi import resolve_osdi_preload
 from .characterize_sequential import (
     SequentialSpecError,
@@ -162,6 +162,7 @@ def run_characterize(
     keep_artifacts: bool | None = None,
     cells: list[str] | tuple[str, ...] | None = None,
     compare_to: str | None = None,
+    resume: bool | None = None,
 ) -> dict[str, Any]:
     """Characterize one cell -- or a batch of cells -- at one corner and emit
     one NLDM ``.lib`` covering all of them.
@@ -189,6 +190,7 @@ def run_characterize(
     name>.lib``, or the request's own ``output.lib``). ``backend``/
     ``keep_artifacts`` are forwarded to ``klt sim``.
 
+    ``resume`` (#5350, else ``options.resume``): see :mod:`characterize_leg`.
     Raises :class:`CharacterizeError` for every failure mode; never returns
     a partially-populated table, and a batch run in which any one cell fails
     emits nothing (the error names the cell).
@@ -206,6 +208,8 @@ def run_characterize(
     grid = _resolve_grid(request)
     thresholds = _resolve_thresholds(request)
     options = _resolve_options(request, grid, thresholds, request_dir, backend=backend)
+    if resume is None:
+        resume = bool((request.get("options") or {}).get("resume", False))
 
     # Resolve *every* cell before simulating *any*: a typo in the fifth
     # cell's pin list must not cost the first four cells' simulation time.
@@ -240,6 +244,7 @@ def run_characterize(
                     work_dir=cell_dir,
                     backend=backend,
                     keep_artifacts=keep_artifacts,
+                    resume=resume,
                 )
             )
         except CharacterizeError as exc:
@@ -326,6 +331,7 @@ def _characterize_cell(
     work_dir: str,
     backend: str | None,
     keep_artifacts: bool | None,
+    resume: bool = False,
 ) -> dict[str, Any]:
     """Run one cell's whole grid (timing, power, and leakage) as a single
     ``klt sim`` request and reshape the results into tables.
@@ -343,9 +349,8 @@ def _characterize_cell(
         arcs=arcs,
     )
     testbench_path = os.path.join(work_dir, "testbench.spice")
-    with open(testbench_path, "w", encoding="utf-8") as handle:
-        handle.write(plan["netlist_text"])
-
+    sim_request_path = os.path.join(work_dir, "sim-request.json")
+    sim_report_path = os.path.join(work_dir, "sim-report.json")
     sim_request = _build_sim_request(
         request=request,
         request_dir=request_dir,
@@ -355,24 +360,19 @@ def _characterize_cell(
         options=options,
         keep_artifacts=keep_artifacts,
     )
-    sim_request_path = os.path.join(work_dir, "sim-request.json")
-    with open(sim_request_path, "w", encoding="utf-8") as handle:
-        json.dump(sim_request, handle, indent=2)
-        handle.write("\n")
-
     try:
-        sim_report = sim.run_sim(
-            sim_request_path,
-            artifacts_dir=os.path.join(work_dir, "sim"),
+        sim_report = run_sim_leg(
+            testbench_path=testbench_path,
+            testbench_text=plan["netlist_text"],
+            sim_request=sim_request,
+            sim_request_path=sim_request_path,
+            sim_report_path=sim_report_path,
+            sim_dir=os.path.join(work_dir, "sim"),
             backend=backend,
+            resume=resume,
         )
     except sim.SimError as exc:
         raise CharacterizeError(f"simulation failed: {exc}") from exc
-
-    sim_report_path = os.path.join(work_dir, "sim-report.json")
-    with open(sim_report_path, "w", encoding="utf-8") as handle:
-        json.dump(sim_report, handle, indent=2)
-        handle.write("\n")
 
     values = _extract_measurements(sim_report, sim_report_path)
     tables = _build_tables(plan, grid, values, thresholds)
@@ -385,8 +385,6 @@ def _characterize_cell(
         deck_dir = os.path.join(work_dir, "constraints", label)
         os.makedirs(deck_dir, exist_ok=True)
         deck_path = os.path.join(deck_dir, "testbench.spice")
-        with open(deck_path, "w", encoding="utf-8") as handle:
-            handle.write(text)
         deck_plan = {
             "measurements": measurements,
             "window": {**plan["window"], "stop_ns": stop_ns},
@@ -401,14 +399,16 @@ def _characterize_cell(
             keep_artifacts=keep_artifacts,
         )
         request_path = os.path.join(deck_dir, "sim-request.json")
-        with open(request_path, "w", encoding="utf-8") as handle:
-            json.dump(deck_request, handle, indent=2)
-            handle.write("\n")
         try:
-            report = sim.run_sim(
-                request_path,
-                artifacts_dir=os.path.join(deck_dir, "sim"),
+            report = run_sim_leg(
+                testbench_path=deck_path,
+                testbench_text=text,
+                sim_request=deck_request,
+                sim_request_path=request_path,
+                sim_report_path=os.path.join(deck_dir, "sim-report.json"),
+                sim_dir=os.path.join(deck_dir, "sim"),
                 backend=backend,
+                resume=resume,
             )
         except sim.SimError as exc:
             raise CharacterizeError(f"constraint simulation failed: {exc}") from exc

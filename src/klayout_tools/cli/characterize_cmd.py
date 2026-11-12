@@ -35,6 +35,7 @@ def run(args: argparse.Namespace) -> int:
             keep_artifacts=True if args.keep_artifacts else None,
             cells=getattr(args, "cell", None),
             compare_to=getattr(args, "compare_to", None),
+            resume=getattr(args, "resume", None),
         )
     except CharacterizeError as exc:
         return emit_error("characterize", str(exc), args.format)
