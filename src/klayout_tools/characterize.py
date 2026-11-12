@@ -59,6 +59,8 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Callable
+from concurrent.futures import FIRST_EXCEPTION, Future, ThreadPoolExecutor, wait
 from typing import Any
 
 from . import liberty_writer, sim
@@ -153,6 +155,50 @@ class CharacterizeError(Exception):
     """
 
 
+#: Cells characterized at once on the ``batch`` backend (issue #5351). Each
+#: cell blocks on one fleet job (~minutes), so serial wall-clock is
+#: cells x per-cell time; the fleet's own vCPU budget and
+#: ``batch.capacity_wait_s`` bound the real concurrency. Deliberately not a
+#: user-facing knob.
+BATCH_CELL_CONCURRENCY = 4
+
+
+def _batch_pool_size(n_cells: int, backend: str | None, request: dict[str, Any]) -> int:
+    """Worker count for the per-cell loop: >1 only for a multi-cell run whose
+    backend resolves to ``batch``. Local/other backends stay serial so a
+    shared host is never oversubscribed."""
+    if n_cells <= 1:
+        return 1
+    resolved_backend, _ = sim.resolve_backend(backend, request)
+    if resolved_backend != "batch":
+        return 1
+    return min(BATCH_CELL_CONCURRENCY, n_cells)
+
+
+def _run_cells_concurrently(
+    run_one: Callable[[int], dict[str, Any]], n_cells: int, pool_size: int
+) -> list[dict[str, Any]]:
+    """Run ``run_one(i)`` for every cell in a bounded pool; return results in
+    cell order. On failure, cancel cells not yet started and re-raise the
+    lowest-index failing cell's error (deterministic, matches serial order)."""
+    with ThreadPoolExecutor(max_workers=pool_size) as pool:
+        futures: list[Future[dict[str, Any]]] = [
+            pool.submit(run_one, index) for index in range(n_cells)
+        ]
+        wait(futures, return_when=FIRST_EXCEPTION)
+        for future in futures:
+            future.cancel()  # no-op for running/finished; drops queued cells
+        # Let running cells finish (pool exit) before deciding, so the
+        # lowest-index failure wins deterministically.
+    for future in futures:
+        if future.cancelled():
+            continue
+        exc = future.exception()
+        if exc is not None:
+            raise exc
+    return [future.result() for future in futures]
+
+
 def run_characterize(
     request_path: str,
     *,
@@ -221,31 +267,36 @@ def run_characterize(
     work_dir = _resolve_outdir(outdir, request, request_dir)
     os.makedirs(work_dir, exist_ok=True)
 
-    results: list[dict[str, Any]] = []
-    for cell, arcs in resolved:
+    def _run_one(index: int) -> dict[str, Any]:
+        cell, arcs = resolved[index]
         cell_dir = (
             os.path.join(work_dir, "cells", slug(cell["name"])) if batch else work_dir
         )
         try:
-            results.append(
-                _characterize_cell(
-                    cell=cell,
-                    arcs=arcs,
-                    corner=corner,
-                    grid=grid,
-                    thresholds=thresholds,
-                    options=options,
-                    request=request,
-                    request_dir=request_dir,
-                    work_dir=cell_dir,
-                    backend=backend,
-                    keep_artifacts=keep_artifacts,
-                )
+            return _characterize_cell(
+                cell=cell,
+                arcs=arcs,
+                corner=corner,
+                grid=grid,
+                thresholds=thresholds,
+                options=options,
+                request=request,
+                request_dir=request_dir,
+                work_dir=cell_dir,
+                backend=backend,
+                keep_artifacts=keep_artifacts,
             )
         except CharacterizeError as exc:
             if not batch:
                 raise
             raise CharacterizeError(f"cell '{cell['name']}': {exc}") from exc
+
+    pool_size = _batch_pool_size(len(resolved), backend, request)
+    results: list[dict[str, Any]] = []
+    if pool_size <= 1:
+        results = [_run_one(index) for index in range(len(resolved))]
+    else:
+        results = _run_cells_concurrently(_run_one, len(resolved), pool_size)
 
     library = _build_library(
         request=request,

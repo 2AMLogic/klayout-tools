@@ -135,6 +135,12 @@ In batch mode steps 1-6 run once **per cell** (one `klt sim` corner per
 cell, artifacts under `<outdir>/cells/<cell>/`), and step 7 runs once over
 the combined library. See "Batch mode".
 
+When the simulation backend resolves to `batch` and the request has more than
+one cell, up to 4 cells are characterized concurrently (each submits its own
+fleet job, honouring `batch.capacity_wait_s`). Results, Liberty cell order and
+the report's `cells` order are unchanged; the first failing cell cancels cells
+not yet started. Other backends stay serial.
+
 ### Input slew: what `index_1` means and what is applied
 
 `index_1` values are Liberty input *transition times*: the time between the
