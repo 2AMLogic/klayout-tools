@@ -18,6 +18,13 @@ def _read_text(path: str) -> str | None:
         return None
 
 
+def resolve_resume(request: dict[str, Any], resume: bool | None) -> bool:
+    """The explicit ``resume`` argument wins; else ``request.options.resume``."""
+    if resume is not None:
+        return resume
+    return bool((request.get("options") or {}).get("resume", False))
+
+
 def report_collected(report: dict[str, Any]) -> bool:
     """True when every corner actually ran (a pass, or only a `.meas` that
     captured nothing -- a constraint probe's answer): a report holding an

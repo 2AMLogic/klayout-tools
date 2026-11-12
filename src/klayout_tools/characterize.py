@@ -86,7 +86,7 @@ from .characterize_instances import (
     _metered_rail_nodes,
     _rail_nodes,
 )
-from .characterize_leg import run_sim_leg
+from .characterize_leg import resolve_resume, run_sim_leg
 from .characterize_osdi import resolve_osdi_preload
 from .characterize_sequential import (
     SequentialSpecError,
@@ -208,8 +208,7 @@ def run_characterize(
     grid = _resolve_grid(request)
     thresholds = _resolve_thresholds(request)
     options = _resolve_options(request, grid, thresholds, request_dir, backend=backend)
-    if resume is None:
-        resume = bool((request.get("options") or {}).get("resume", False))
+    resume = resolve_resume(request, resume)
 
     # Resolve *every* cell before simulating *any*: a typo in the fifth
     # cell's pin list must not cost the first four cells' simulation time.
