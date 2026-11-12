@@ -8768,7 +8768,10 @@ def _extract_netlist(
     isolation_region = (
         _region(layout, top_cell, deck.substrate_isolation) + abstract_isolation_cover
     )
-    isolation_islands: list[kdb.Region] = sorted_islands(isolation_region)
+    isolation_islands: list[kdb.Region] = sorted_islands(
+        isolation_region,
+        nwell if deck.substrate_isolation_needs_nwell_ring else None,
+    )
     # `nfet_active_outside`/`nfet_active_isolated` feed only the device-
     # recognition ("W" terminal) split below -- `nfet_gate`/`nfet_sd` above
     # stay the full (unpartitioned) region for every *other* purpose

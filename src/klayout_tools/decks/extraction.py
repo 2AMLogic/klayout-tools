@@ -693,6 +693,13 @@ class ExtractionDeck:
     global ``substrate_net`` identity: a known, documented residual gap left
     for a follow-up rather than this issue's scope.
 
+    ``substrate_isolation_needs_nwell_ring`` (issue #5344, default ``False``)
+    makes a ``substrate_isolation`` island count only when ``nwell`` closes
+    its outline (:func:`~klayout_tools.erc_islands.is_ring_closed`), as a
+    deep n-well only isolates the p-well above it when an n-well ring joins
+    it (sky130). An unclosed island stays on the shared ``substrate_net``.
+    ``False`` keeps every island (gf180mcu).
+
     ``bipolars`` is an optional tuple of :class:`BipolarDevice` entries (empty
     by default) declaring this deck's drawn vertical-BJT device-recognition
     layers -- the resistor/bipolar/capacitor extension point #221's own
@@ -811,6 +818,7 @@ class ExtractionDeck:
     pfet_class: str = "pfet"
     substrate_net: str = "vsubs"
     substrate_isolation: tuple[int, int] | None = None
+    substrate_isolation_needs_nwell_ring: bool = False
     bipolars: tuple[BipolarDevice, ...] = ()
     capacitors: tuple[CapacitorDevice, ...] = ()
     mom_capacitors: tuple[MomCapacitorDevice, ...] = ()

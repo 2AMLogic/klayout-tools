@@ -11,14 +11,48 @@ from __future__ import annotations
 import klayout.db as kdb
 
 
-def sorted_islands(isolation_region: kdb.Region) -> list[kdb.Region]:
+def is_ring_closed(island: kdb.Region, ring_region: kdb.Region) -> bool:
+    """Whether ``ring_region`` (an n-well) closes ``island``'s whole outline.
+
+    A deep-n-well only isolates the p-well above it when an n-well ring
+    joins it all the way round. The island's outer outline (holes ignored)
+    must be covered by ``ring_region`` on its outside band (a ring abutting
+    or enclosing the island) or on its inside band (a ring drawn overlapping
+    the island edge); each band is one database unit wide.
+    """
+    hull = kdb.Region()
+    for polygon in island.each():
+        hull.insert(kdb.Polygon(list(polygon.each_point_hull())))
+    hull = hull.merged()
+    if hull.is_empty():
+        return False
+    outside_band = hull.sized(1) - hull
+    inside_band = hull - hull.sized(-1)
+    return (outside_band - ring_region).is_empty() or (
+        inside_band - ring_region
+    ).is_empty()
+
+
+def sorted_islands(
+    isolation_region: kdb.Region, ring_region: kdb.Region | None = None
+) -> list[kdb.Region]:
     """Connected components of ``isolation_region``, sorted by bounding box.
 
     The order is stable across runs (raw ``Region`` iteration order is not a
     documented guarantee), so ``vsubs_iso<n>`` numbering agrees everywhere.
+
+    When ``ring_region`` is given, only islands closed by it (see
+    :func:`is_ring_closed`) are returned: an unclosed deep-n-well does not
+    isolate its p-well, so that geometry stays on the shared substrate
+    rather than hiding an ``erc.supply_short``. ``None`` keeps every island.
     """
+    components = (
+        kdb.Region(component) for component in isolation_region.merged().each()
+    )
+    if ring_region is not None:
+        components = (c for c in components if is_ring_closed(c, ring_region))
     return sorted(
-        (kdb.Region(component) for component in isolation_region.merged().each()),
+        components,
         key=lambda region: (
             region.bbox().left,
             region.bbox().bottom,

@@ -2337,6 +2337,10 @@ EXTRACTION_DECK = ExtractionDeck(
     active=(65, 20),  # diff.drawing
     poly=(66, 20),  # poly.drawing
     nwell=(64, 20),  # nwell.drawing
+    # Deep n-well (issue #5344): isolates the p-well above it only when an
+    # n-well ring closes the island, so the closure check is on.
+    substrate_isolation=_DNWELL,
+    substrate_isolation_needs_nwell_ring=True,
     # MOS device-recognition provenance (issue #868): `sky130.lvs`'s core
     # 1.8V devices --
     #   extract_devices(mos4("sky130_fd_pr__nfet_01v8"),
