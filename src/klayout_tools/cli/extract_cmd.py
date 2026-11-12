@@ -69,6 +69,7 @@ from .output import (
     EXIT_USAGE_ERROR,
     emit_error,
     emit_success,
+    fail_on_unmodelled_exit,
     render_check_text,
     render_rerun_drift,
 )
@@ -751,28 +752,20 @@ def run(args: argparse.Namespace) -> int:
             # post-extraction for equal `params`. `None` when the flag was
             # never given, unchanged from every call site that predates it.
             matched_device_groups=matched_device_groups,
-            # `--def-pins` (issue #1390): the automatic, DEF-merge-aware
-            # counterpart to `--pins` -- derives the declared top-level
-            # port set from a routed DEF's own `PINS` section instead of
-            # requiring a caller to hand-derive it. `None` when the flag
-            # was never given, unchanged from every call site that
-            # predates it.
+            # `--def-pins` (issue #1390): the DEF-merge-aware counterpart to
+            # `--pins` -- derives the declared top-level port set from a
+            # routed DEF's `PINS` section. `None` when never given.
             def_pins=def_pins,
-            # `--rename-declared-pins` (issue #2854): renames each
-            # surviving promoted pin net to its declared name, so the
-            # written `.SUBCKT` header carries canonical interface names.
-            # `False` when the flag was never given, unchanged from every
-            # call site that predates it.
+            # `--rename-declared-pins` (issue #2854): renames each surviving
+            # promoted pin net to its declared name, so the written
+            # `.SUBCKT` header carries canonical names. `False` when never given.
             rename_declared_pins=args.rename_declared_pins,
             # `--tie-declared-pins` (issue #4383).
             tie_declared_pins=args.tie_declared_pins,
             # `--pin-source-cells` (issue #1513): the positional, probe-based
-            # declared-pin mechanism for a `klt gen-compose`d assembly with
-            # no governing top-level DEF -- derives the declared top-level
-            # port set from which specific labels physically live inside the
-            # named cell(s), instead of matching a promoted net's string.
-            # `None` when the flag was never given, unchanged from every
-            # call site that predates it.
+            # declared-pin mechanism for a `klt gen-compose`d assembly with no
+            # governing top-level DEF -- derives the port set from which labels
+            # live inside the named cell(s). `None` when never given.
             pin_source_cells=pin_source_cells,
             # `--subcircuit`/`--subcircuit-output` (issue #2245): additionally
             # writes one named `.SUBCKT <cell>` deck for a sub-cell's own
@@ -797,18 +790,8 @@ def run(args: argparse.Namespace) -> int:
             details=getattr(exc, "details", None),
         )
 
-    # `--fail-on-unmodelled` (issue #5388): opt-in non-zero exit when the
-    # structured `unmodelled_poly[]` (the single source of truth for both
-    # `unmarked` and `marked_unrecognised` shapes) is non-empty.
-    unmodelled = report.get("unmodelled_poly") or []
-    if getattr(args, "fail_on_unmodelled", False) and unmodelled:
-        return emit_error(
-            "extract",
-            f"{len(unmodelled)} unmodelled poly shape(s) extracted as no "
-            "device; see unmodelled_poly[] (--fail-on-unmodelled)",
-            args.format,
-            details={"unmodelled_poly_count": len(unmodelled)},
-        )
+    if (rc := fail_on_unmodelled_exit(report, args)) is not None:  # issue #5388
+        return rc
 
     emit_success(report, args.format, _print_text)
 
