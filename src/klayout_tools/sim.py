@@ -1668,6 +1668,7 @@ def _validate_search_targets(
         measurements_spec,
         waveforms,
         {key.strip().lower() for point in corner_points for key in point.supply_v},
+        {name for point in corner_points for name in point.params},
     )
 
 
@@ -11358,7 +11359,13 @@ def _corner_deck_control_lines(
         measurements_spec, corner_dir
     )
     settled_lines = sim_settled.control_lines(measurements_spec, corner_dir)
-    search_lines = sim_search.control_lines(measurements_spec)
+    # A `param` search re-applies the corner prefix after each `reset`
+    # (the prefix opens with the corner's own alterparam + reset, if any).
+    param_lines = _param_reset_lines(point)
+    search_lines = sim_search.control_lines(
+        measurements_spec,
+        [*(param_lines or ["reset"]), *prefix[len(param_lines) :]],
+    )
     complex_vector_lines = sim_complex_vectors.control_lines(
         complex_vectors, corner_dir
     )
