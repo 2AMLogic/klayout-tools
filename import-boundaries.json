@@ -1707,6 +1707,30 @@
   ],
   "shared_private_permissions": [
     {
+      "consumer": "klayout_tools.lvs_runset_reference",
+      "exporter": "klayout_tools.netlist_normalize",
+      "symbol": "_binding_known",
+      "reason": "Issue #5402: passthrough-call protection must use the exact curated-binding test the netlist conversion uses so the two cannot drift; netlist_normalize is at its file-size ceiling, so promote to public when it is next split."
+    },
+    {
+      "consumer": "klayout_tools.lvs_runset_reference",
+      "exporter": "klayout_tools.netlist_normalize",
+      "symbol": "_build_subckt_map",
+      "reason": "Issue #5402: passthrough-call protection must use the exact curated-binding test the netlist conversion uses so the two cannot drift; netlist_normalize is at its file-size ceiling, so promote to public when it is next split."
+    },
+    {
+      "consumer": "klayout_tools.lvs_runset_reference",
+      "exporter": "klayout_tools.netlist_normalize",
+      "symbol": "_split_params",
+      "reason": "Issue #5402: passthrough-call protection must parse X cards exactly as the netlist conversion does; netlist_normalize is at its file-size ceiling, so promote to public when it is next split."
+    },
+    {
+      "consumer": "klayout_tools.lvs_runset_reference",
+      "exporter": "klayout_tools.netlist_normalize",
+      "symbol": "_tokenize",
+      "reason": "Issue #5402: passthrough-call protection must parse X cards exactly as the netlist conversion does; netlist_normalize is at its file-size ceiling, so promote to public when it is next split."
+    },
+    {
       "consumer": "klayout_tools.sim_osdi_pin",
       "exporter": "klayout_tools._paths",
       "symbol": "_resolve_relative",
