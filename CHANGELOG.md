@@ -25,6 +25,24 @@ not `klt --version`, if you need to detect this kind of drift. See
   (`klayout_tools/data/schemas`), so a wheel-only install serves the same
   listing as a source checkout. Tools, their names and their schemas are
   unchanged. See `docs/guides/mcp-server.md`.
+- **`klt drc`: a rule whose `layer_selection` empties its input is now
+  `inapplicable`, not `checked`** (#5435, 2026-11-13): applicability was
+  decided from layer *presence*, before a rule's own `layer_selection`
+  narrowing ran, so a rule that selected away all of its layer's geometry
+  still graded `checked` — a `clean` verdict naming a rule that measured zero
+  polygons, with no coverage field a consumer could consult to notice. The
+  selected primary region is now graded on the same per-top-cell merged
+  region the check measures: empty in **every** top cell → the rule leaves
+  `coverage.checked` / `coverage.rules_checked` and reports `inapplicable`
+  with the existing #3587 reason `inapplicable_empty_checked_region`.
+  **Behaviour change**: on a stream whose Cont population is entirely
+  non-square, sg13g2's `cont.width.1` and `cont.space.1` move from
+  `rules_checked` to `inapplicable`. No new JSON field or reason token, no
+  `schema_version` bump; verdicts are unchanged (inapplicable work never makes
+  a run partial), as is every rule without a `layer_selection`. The grading is
+  confirmed per check kind and excludes `net_space` and `require_containment`
+  `enclosing` rules, where an empty primary region can still report. See
+  `docs/cli/drc.md` → "`layer_selection` decides coverage".
 - **`klt erc`: `ties[].isolation_boxes`, `same_net_as` through the substrate,
   and the decidable-or-disclosed substrate rule** (#5343, 2026-11-12): new
   optional `ties[].isolation_boxes` (µm boxes) asserts isolated substrate

@@ -1186,6 +1186,31 @@ polygons are measured, so contact bars and rows of abutting 0.16 µm contacts
 oversized contact. They belong to the PDK's separate `CntB.*` family, which
 this deck does not yet transcribe.
 
+**A `layer_selection` decides coverage, not just measurement** (issue #5435).
+Applicability is settled *after* the selection runs, on the same per-top-cell
+merged region the check itself measures: a rule whose selected region is empty
+in **every** top cell measured zero polygons and could not have failed, so it
+is `inapplicable` with reason `inapplicable_empty_checked_region` — the #3587
+token for "this layer *is* drawn, but this rule's checked region is empty" —
+and is **not** listed in `coverage.checked` / `coverage.rules_checked`. On a
+stream whose whole Cont population is bars, `cont.width.1` and `cont.space.1`
+report exactly that, instead of a `clean` verdict naming two rules that
+measured nothing. Non-empty in at least one top cell and the rule stays
+`checked` with its violations unchanged; the layer absent from the stream
+altogether is still `no_applicable_geometry`, and the rule's layer still
+appears in `coverage.layers_checked` when some *other* rule reads it (here
+`cont.ongrid.1` does). Inapplicable work never makes a run partial, so the
+verdict stays `clean`.
+
+The grading is confirmed per check kind rather than assumed: it applies to the
+kinds where an empty primary region provably reports nothing
+(`width`/`space`/`notch`/`isolated`, the two-layer kinds, `area`, `density`,
+`ongrid`/`angle`, `antenna`), and deliberately not to `net_space` (which
+rebuilds its own regions and never reads the selected one) or to an
+`enclosing` rule with `require_containment`, where an empty primary region
+*is* the violation — every cut unlanded on its conductor (#2726). A rule with
+no `layer_selection` is graded exactly as before, from layer presence.
+
 sg13g2's `cont.width.1`/`via1.width.1`–`via4.width.1` and sky130's
 `via.width.1` were first deferred behind issue #2585: `klt gen` and
 `klt gen compose` drew every cut at a PDK-generic `gen.CONTACT_SIZE_UM`
@@ -2211,6 +2236,24 @@ family's resolution details rather than here — see
 [`pdk.md`](pdk.md)'s "How far the SG13G2 curated deck goes" and "How far
 the SG13CMOS5L curated deck goes" sections for their own per-surface
 coverage tables and gaps.
+
+**sg13g2's `nwell.enclosing.pactiv.1` exempts text-recognised `SVaricap`
+varactors (issue #5442).** The PDK's `NW.c` does not measure NWell enclosure
+of *every* P+ Activ: it first drops whole P+ Activ polygons interacting with
+a recognised `SVaricap` (`sg13g2_maximal.drc`:
+`lNw_c = PActLV.ext_not(PActLV.ext_interacting(SVaricap))`). This deck models
+that carve-out, deriving `SVaricap` exactly as the runset does — an N+ Activ
+plate crossed by a GatPoly gate, inside NWell over nBuLay, carrying an
+`SVaricap` text label on `63/0` — so a stream instantiating the PDK's own
+varactor is not reported against a threshold the foundry never applies to it,
+and needs no `--waivers` entry to reach `status: clean`. Recognition is
+geometry plus the label only: no cell-name matching, and a missing layer, a
+missing label or an incomplete stack exempts nothing (the rule is still
+*checked*, never skipped). The rule's `description` states the carve-out, in
+`--list-rules` and in every violation record. The sibling rules whose upstream
+operands carry their own text-marker exclusions — `nwell.enclosing.pactiv.hv.1`
+(`NW.c1`), the `nwell.space.*` rules and `activ.enclosing.cont.1` — are **not**
+modelled and are still held to the ordinary (stricter) threshold.
 
 **sg13g2's `MIM` rule group: `MIM.c`/`MIM.d` are modeled, `MIM.a`/`MIM.b`/
 `MIM.e`/`MIM.f`/`MIM.gR` are not (issue #2581).** Of the `sg13g2` deck's 45
@@ -3523,7 +3566,7 @@ On a run with findings:
 | `coverage`        | object                   | What was actually checked vs. what's present in the input stream, see below. |
 | `waived_count`, `waived_rule_counts`, `waived`, `unused_waivers` | integer, object\<string, int\>, array\<object\>, array\<object\> | Present only on a `--waivers` run (issue #3483): the markers a reviewed waiver file moved out of `violations`, with their justification; see "Waivers". Absent otherwise, so a default run's report is byte-identical. |
 | `source_cell_rollup` | array\<object\> | Issue #4520. Sorted `{source_cell, rule, count, waived_count}` rows (`source_cell: null` last = unattributed): kept markers in `count`, waived ones in `waived_count`. Present only when some finding has a `source_cell` or on a `--waivers` run; absent for a flat layout, so a default report is unchanged. |
-| `runset_correspondence` | array\<object\> | Issue #4520. For each rule that produced a finding and carries a note (sg13g2 `nwell.enclosing.pactiv.1`, whose NW.c runset counterpart exempts P+ Activ interacting with a text-recognised `SVaricap` that this deck checks unconditionally; sg13cmos5l `nwell.space.2`, `nwell.enclosing.pactiv*.1`, `nwell.space.nactiv.1`; the NW.c/NW.d rules `nwell.enclosing.pactiv.1` and `nwell.space.nactiv.1` note that the runset exempts NWell inside SRAM marker layer 25/0 via `NWell_Nsram`, while NW.c1 does not): `{rule, implemented_by_pdk_runset, runset_file, pdk_revision, note}`. `pdk_revision` is the PDK commit the deck was read against (the `ihp-sg13cmos5l` commit for sg13cmos5l, the ihp-sg13g2 v0.3.0 commit for sg13g2). The PDK's NWell table (`5_1_nwell.drc`) runs only NW.b, NW.b1, NW.f1, NW.f1.digibnd; NW.c/c1/d live in the optional `sg13cmos5l_maximal.drc`. Absent when no noted rule fired. |
+| `runset_correspondence` | array\<object\> | Issue #4520. For each rule that produced a finding and carries a note (sg13g2 `nwell.enclosing.pactiv.1`, whose NW.c runset counterpart measures against `NWell_Nsram` -- NWell outside the 25/0 SRAM marker -- while this deck measures against plain NWell; its `SVaricap` carve-out *is* modelled (issue #5442, see Coverage); sg13cmos5l `nwell.space.2`, `nwell.enclosing.pactiv*.1`, `nwell.space.nactiv.1`; the NW.c/NW.d rules `nwell.enclosing.pactiv.1` and `nwell.space.nactiv.1` note that the runset exempts NWell inside SRAM marker layer 25/0 via `NWell_Nsram`, while NW.c1 does not): `{rule, implemented_by_pdk_runset, runset_file, pdk_revision, note}`. `pdk_revision` is the PDK commit the deck was read against (the `ihp-sg13cmos5l` commit for sg13cmos5l, the ihp-sg13g2 v0.3.0 commit for sg13g2). The PDK's NWell table (`5_1_nwell.drc`) runs only NW.b, NW.b1, NW.f1, NW.f1.digibnd; NW.c/c1/d live in the optional `sg13cmos5l_maximal.drc`. Absent when no noted rule fired. |
 | `rule_selection`  | object                   | Present only on a `--rules` run (issue #2768): `{"selectors", "selected", "omitted", "deck_rule_count", "subset"}`, relative to the full registered deck — see "Rule listing and selection" above. Absent otherwise, so a default run's report is unchanged. |
 | `provenance`      | object                   | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` (issue #1901) is `{"name": ..., "source": ..., "version": ...}` when `--pdk` and/or `--pdk-root` was given (resolved via the same lookup `klt pdk find`/`klt sta`/`klt extract` use — this holds for both `--engine curated` and `--engine klayout`, in addition to `--engine klayout`'s own separate use of `--pdk`/`--pdk-root` to resolve the native deck script when `--deck-file` is omitted), else `null`; an unresolvable `--pdk`/`--pdk-root` fails the run the same as any other application error (exit 1), it does not silently fall back to `null`. `deck` pins the selected rule deck by name and `sha256:` content hash, plus a `released` tri-state signal (issue #1193) for whether that exact hash ships in any released `klayout-tools` version — `false` (non-fatal) flags a report generated against an unreleased/dev-edited deck, `null` when the answer can't be determined (e.g. the generated deck history table is missing); `input` pins the input layout file (`path`) by `sha256:` content hash. A deck hash is stable only per package version; to re-run under a previously pinned deck see [`deck.md`](deck.md#reproducing-a-run-under-a-pinned-deck). A `--waivers` run additionally carries `waivers` (issue #3483): `{"file", "content_hash"}` pinning the waiver file by `sha256:` hash. When `--engine klayout` was run with one or more `--deck-var NAME=VALUE` flags (issue #1302), `deck` additionally carries an `options` key (issue #1306) recording that mapping (e.g. `{"feol": "true"}`), so a committed report records which `--deck-var` configuration produced it — omitted entirely when no `--deck-var` was given. `klt drc` additionally carries `klayout_version_mismatch` (issue #1490, `true`\|`false`): whether the resolved `klayout_version` differs from the version this `klayout-tools` build/commit was tested against (`klt version --format json`'s `klayout_version_expected`) — see [`../json-contract.md`](../json-contract.md)'s "Pinning the KLayout engine version". `klayout_version_mismatch: true` is informational: the rule evaluation and the verdict are not changed by it, but report details that depend on the engine build (the deck content hash, `rules_skipped`, category counts) may differ from a run on the tested version. Re-run on the tested version (`klt version`) to reproduce a report exactly. |
 
@@ -3622,6 +3665,25 @@ A rule the caller deliberately left out of a `--rules` subset (issue #2768)
 never reaches this question: it is always `skipped` with reason
 `not_selected`, whatever its layers — see "Rule listing and selection"
 above.
+
+A rule whose layer *is* drawn can still be inapplicable, and that case is also
+decided directly rather than through the absent-layer question: when the
+rule's own checked region comes out empty anyway, it reports `reason:
+"inapplicable_empty_checked_region"` under `inapplicable`, with the same "no
+effect on the rollup" consequence as `no_applicable_geometry`. Two narrowings
+reach it, each graded on the very region the check measures:
+
+- a `"comp_coverage"` rule whose marker exemption exempts every checked
+  polygon (issue #3587 — see that check kind's section above), and the
+  equivalent empty voltage-selected region for `"tap_distance"` (#3607);
+- a rule whose `layer_selection` selects away all of its layer's geometry in
+  every top cell (issue #5435 — see "`layer_selection` decides coverage"
+  above).
+
+The distinction from `no_applicable_geometry` is the actionable part: the
+layer is present, so the geometry this stream *does* draw on it may be the
+business of a sibling rule family the deck has not transcribed (sg13g2's
+`CntB.*`, for the contact case) rather than of nothing at all.
 
 One skipped rule is not an absent-layer skip at all (issue #2642), so it is
 classified directly rather than through that question: an `"ongrid"` rule
