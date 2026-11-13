@@ -521,7 +521,7 @@
     },
     {
       "path": "src/klayout_tools/pex.py",
-      "lines": 3890
+      "lines": 3858
     },
     {
       "path": "src/klayout_tools/place_and_route.py",
@@ -669,7 +669,7 @@
     },
     {
       "path": "src/klayout_tools/spice_flatten.py",
-      "lines": 847
+      "lines": 798
     },
     {
       "path": "src/klayout_tools/stats.py",
