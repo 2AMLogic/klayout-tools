@@ -692,6 +692,7 @@
         "klayout_tools.signoff_generator_batch",
         "klayout_tools.signoff_multi_member",
         "klayout_tools.signoff_na",
+        "klayout_tools.signoff_nothing_checked",
         "klayout_tools.signoff_power_delivery",
         "klayout_tools.signoff_power_delivery_substrate",
         "klayout_tools.signoff_runset",
