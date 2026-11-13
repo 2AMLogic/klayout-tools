@@ -497,7 +497,8 @@
         "klayout_tools.netlist_normalize",
         "klayout_tools.netlist_normalize_scan",
         "klayout_tools.netlist_paths",
-        "klayout_tools.netlist_pdk"
+        "klayout_tools.netlist_pdk",
+        "klayout_tools.netlist_port_order"
       ]
     },
     "pdk": {

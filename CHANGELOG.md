@@ -43,6 +43,31 @@ not `klt --version`, if you need to detect this kind of drift. See
   install with neither a readable `SOURCES` nor a bundle `.pdk-store.json`.
   No JSON field is added, renamed or removed; no `schema_version` bump.
 
+- **`klt netlist --block`: a `.subckt` port order that is not the schematic's
+  is now reported, and `--check`'s attribution is corrected** (#5473,
+  2026-11-13): a block's port order is the positional contract of every
+  `subckt-call` instantiation and LVS reference, and three things about it
+  were silent. Measured against xschem 3.4.7: a sibling `<stem>.sym` decides
+  the top sheet's port order, not the pin instances in the `.sch`; without
+  one the pins' **file** order decides it (`sim_pinnumber` overrides that, but
+  is ignored when a symbol exists); and a schematic pin the symbol does not
+  declare is dropped from the card with exit `0` and no warning. `--block`
+  now compares the two and sets the new additive `block.port_order`
+  (`{"schematic", "emitted", "symbol"}`, `null` when they agree or cannot be
+  compared) plus a `block.warning` giving both lists, naming the symbol the
+  order came from, and naming any omitted pin. `klt netlist` still never
+  rewrites the header — the emitted card has to stay the card xschem writes
+  for the same cell as a child. `--check`'s port-order `reason` no longer
+  states "different xschem builds order ports differently" as fact: it names
+  the sibling symbol when there is one and offers an xschem build difference
+  as a further possible cause. `schema_version` stays `1`;
+  `drift.subckt_port_order`, `status: "drifted"` and exit `3` are unchanged.
+  Not comparable (reported as `null` with no warning, never guessed at): a
+  bus or comma-list pin label, custom pin symbols in place of xschem's
+  `ipin`/`opin`/`iopin` devices, an emitted port the schematic never
+  declared, and an export that was not testbench-shaped. See
+  `docs/cli/netlist.md` → "Where the port order comes from".
+
 - **`klt drc`: a rule whose `layer_selection` empties its input is now
   `inapplicable`, not `checked`** (#5435, 2026-11-13): applicability was
   decided from layer *presence*, before a rule's own `layer_selection`
