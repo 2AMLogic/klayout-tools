@@ -169,6 +169,10 @@ from .signoff_power_delivery import (
     _build_power_delivery_item,
     _read_power_port_policy,
 )
+
+# Spec-row coverage for a multi-citation item (issues #3778/#2908/#5490);
+# kept out of this file for its size-ratchet ceiling.
+from .signoff_row_coverage import _credited_rows, _multi_row_info
 from .signoff_runset import (
     PINNED_RUNSETS,
     runset_disclosure,
@@ -7059,7 +7063,10 @@ def _grade_multi_citation(
     only the named rows some tagged, limited, passing measurement grades --
     a named row with none is uncovered. A member with no tags keeps the
     manifest-asserted ``rows``. ``row_coverage.row_sources`` marks each
-    covered row ``derived`` or ``asserted``.
+    covered row ``derived`` or ``asserted``. On a ``yield`` envelope a
+    tagged, limited ``"reported"`` measurement (one declaring no
+    ``target_yield``) additionally covers a row declared ``ratified:
+    false`` -- see :func:`_envelope_tagged_rows` (issue #5490).
 
     Returns ``(status, reason, citation, failure_detail, extra_item_keys)``.
     """
@@ -7075,10 +7082,23 @@ def _grade_multi_citation(
 
     graded = [(spec, rows, grade_spec(spec)) for spec, rows in members]
     failed = [g for g in graded if g[2][0] != "met"]
+    # Issue #5490: the rows whose limit is declared unratified, which is the
+    # only place a `reported` yield measurement earns coverage. Same set
+    # `_multi_row_info` renders as `unratified_rows`.
+    unratified = frozenset(
+        row["id"]
+        for row in (spec_rows or [])
+        if row["gap"] is None and not row["ratified"]
+    )
     # Rows each member is credited with, and whether that was machine-derived.
     credited: dict[int, tuple[list[str] | None, bool]] = {
-        id(spec): _credited_rows(rows, (met_envelopes or {}).get(id(spec)))
-        for spec, rows, _ in graded
+        id(spec): _credited_rows(
+            rows,
+            (met_envelopes or {}).get(id(spec)),
+            kind=(g[2] or {}).get("kind"),
+            unratified=unratified,
+        )
+        for spec, rows, g in graded
     }
     row_info = _multi_row_info(graded, failed, spec_rows, credited)
     extra: dict[str, Any] = {
@@ -7350,82 +7370,6 @@ def _remember_envelope(
     """Key the envelope a ``met`` grading captured by ``spec``'s identity."""
     if sink:
         met_envelopes[id(spec)] = sink[0]
-
-
-def _envelope_tagged_rows(envelope: dict[str, Any]) -> tuple[bool, set[str]]:
-    """``(has_tags, covering)`` for a ``klt sim`` envelope (issue #3778):
-    whether any ``measurements[]`` entry declares a ``spec_row``, and the
-    rows with a passing measurement that is tagged with them and has
-    ``limits`` (a tag without limits grades nothing)."""
-    raw = envelope.get("measurements")
-    entries = [m for m in raw if isinstance(m, dict)] if isinstance(raw, list) else []
-    tagged = [
-        m for m in entries if isinstance(m.get("spec_row"), str) and m["spec_row"]
-    ]
-    covering = {
-        m["spec_row"] for m in tagged if m.get("status") == "pass" and m.get("limits")
-    }
-    return bool(tagged), covering
-
-
-def _credited_rows(
-    rows: list[str] | None, envelope: dict[str, Any] | None
-) -> tuple[list[str] | None, bool]:
-    """The rows a ``met`` member is credited with and whether they were
-    ``derived`` from its envelope's ``spec_row`` tags (issue #3778). Untagged
-    (or unavailable) envelopes keep the manifest-asserted ``rows``."""
-    if not rows or envelope is None:
-        return rows, False
-    has_tags, covering = _envelope_tagged_rows(envelope)
-    if not has_tags:
-        return rows, False
-    return [r for r in rows if r in covering], True
-
-
-def _multi_row_info(
-    graded: list[Any],
-    failed: list[Any],
-    spec_rows: list[dict[str, Any]] | None,
-    credited: dict[int, tuple[list[str] | None, bool]] | None = None,
-) -> dict[str, Any]:
-    """``failed_rows`` / ``uncovered_rows`` / ``declared_gaps`` /
-    ``unratified_rows`` for the declared ``spec_rows`` (empty when none were
-    declared). ``unratified_rows`` lists every non-gap row declared
-    ``ratified: false``, covered or not."""
-    if spec_rows is None:
-        return {}
-    credited = credited or {}
-    covered: set[str] = set()
-    row_sources: dict[str, str] = {}
-    for spec, rows, g in graded:
-        if g[0] != "met":
-            continue
-        credited_rows, derived = credited.get(id(spec), (rows, False))
-        for r in credited_rows or []:
-            covered.add(r)
-            # A row covered by any derived citation is machine-checked.
-            if derived or r not in row_sources:
-                row_sources[r] = "derived" if derived else "asserted"
-    failed_rows = sorted({r for _, rows, _ in failed for r in rows or []} - covered)
-    return {
-        "failed_rows": failed_rows,
-        "uncovered_rows": [
-            row["id"]
-            for row in spec_rows
-            if row["gap"] is None
-            and row["id"] not in covered
-            and row["id"] not in failed_rows
-        ],
-        "declared_gaps": [
-            {"id": row["id"], "gap": row["gap"]}
-            for row in spec_rows
-            if row["gap"] is not None
-        ],
-        "unratified_rows": [
-            row["id"] for row in spec_rows if row["gap"] is None and not row["ratified"]
-        ],
-        "row_sources": {r: row_sources[r] for r in sorted(row_sources)},
-    }
 
 
 # --------------------------------------------------------------------------- #

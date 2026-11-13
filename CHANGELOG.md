@@ -14,6 +14,24 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt signoff --manifest` item 6: a `reported` yield campaign now covers an
+  unratified spec row** (#5490, 2026-11-13): a `klt yield` measurement that
+  declares no `target_yield` has `status: "reported"` — it made no claim, so
+  nothing could fail — but item 6's derived-row reader credited a row only
+  from a `status: "pass"` tagged measurement. A row honestly declared
+  `ratified: false` and cited with a real campaign therefore came back in
+  `detail.uncovered_rows`, as if nobody had measured it, and the only
+  workaround was to invent a `target_yield` the campaign was known to clear.
+  A tagged, `limits`-bearing `reported` measurement of a `yield` envelope now
+  covers its row **when that row is `ratified: false`**, recorded
+  `row_sources: "derived"` like any other derived row. Deliberately scoped: a
+  ratified row is unaffected, `fail` / `insufficient_evidence` / no-`limits`
+  measurements still credit nothing, a citation the #2467 gates refuse still
+  credits nothing, and item 5 is untouched (`klt sim` never emits
+  `reported`). No item verdict changes anywhere — only the `detail` lists —
+  and such an item stays `unmet` / `partial_coverage` through
+  `unratified_rows`. No new JSON field; no `schema_version` bump. Row-coverage
+  helpers moved to `signoff_row_coverage`. See `docs/cli/signoff.md`.
 - **`klt sim --backend batch`: the local-versus-fleet PDK stamp comparison
   now works on a host that pins no PDK root** (#5474, 2026-11-13): the
   submitter's side of `pdk_stamp_comparison` was stamped only from
