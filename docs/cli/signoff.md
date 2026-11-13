@@ -1027,9 +1027,9 @@ See "Citing an envelope nested inside a composite report (`pointer`)" below.
     name where inside that file the envelope lives. The file may be
     **gzip-compressed** (issue #5452) — a `klt sim --report-out
     report.json.gz` report is citable as it stands, with no decompressed
-    second copy; see "Gzip-compressed evidence files" below. A `klt power` envelope
-    classifies fine here too, but is never graded `"met"` for any item — see
-    "No T1 item accepts `power` evidence" below; cite it in
+    second copy; see "Gzip-compressed evidence files" above. A `klt power`
+    envelope classifies fine here too, but is never graded `"met"` for any
+    item — see "No T1 item accepts `power` evidence" below; cite it in
     envelope-aggregation mode instead.
   - **Command-backed** (issue #825, Phase 1 of epic #706) —
     `{"command": [<argv>, ...], "cwd": ..., "content_hash": ...,
