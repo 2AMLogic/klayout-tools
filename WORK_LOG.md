@@ -6,8 +6,122 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 - [2026-09](work_log/WORK_LOG_2026-09.md)
 
+### 2026-11-13
+
+- **PR #5475**: feat(pex): add --dry-run, a validate-only mode for klt pex
+- **PR #5483**: fix: stamp the search-resolved PDK install for the batch stamp comparison
+- **PR #5476**: fix(netlist): read a K-less sibling .sym's symbol attributes from G {}
+- **PR #5456**: fix(drc): follow KLayout `# %include` lines when hashing the deck tree
+- **PR #5453**: feat(drc): model sg13g2 NW.c's text-recognised SVaricap carve-out
+- **PR #5451**: fix(sim): refuse a step measurement whose name an earlier sibling shadows
+- **PR #5467**: fix: resubmit a terminally-interrupted single-unit batch job on --resume
+- **PR #5434**: refactor(sim): split corner-matrix expansion into four sibling modules
+- **PR #5447**: fix(drc): grade a selection-emptied rule inapplicable, not checked
+- **PR #5448**: fix(sim): classify a title line on the request's netlist as netlist_title_line
+- **PR #5450**: feat(netlist): restore the cell's subcircuit parameters on --block's .subckt card
+- **PR #5440**: docs: attribute --resistance-graph-r-cut to unconsumed deck cuts, not absent ones
+- **Issue #5464** (closed): klt pex: add --dry-run (validate the invocation and testbench requests without extracting or simulating)
+- **Issue #5474** (closed): klt sim batch receipt: report the fleet PDK revision so a local-pass / fleet-fail model-selection abort can be attributed
+- **Issue #5489** (closed): No stream-equivalence verb: byte comparison is the only way to tell 'layout changed' from 'bytes reordered'
+- **Issue #5468** (closed): netlist --block: legacy (pre-1.2) .sym with symbol attributes in G {} restores no parameters and gives no warning
+- **Issue #5443** (closed): drc --engine klayout: deck content_hash covers only the entry .drc, not the %include chain that carries the rules
+- **Issue #5442** (closed): drc(sg13g2): a runset_note deviation is documented but still counted, so a stream with the PDK varactor can never grade clean (follow-up to #5212)
+- **Issue #5446** (closed): sim: a step measurement named after a deck node silently clobbers that node's vector, breaking later .meas cards in the same step
+- **Issue #5480** (closed): klt signoff: no way to re-stamp an attestation envelope's content hashes without re-running every local_only cold start
+- **Issue #5459** (closed): klt batch --resume re-attaches to a terminally-interrupted single-unit job instead of resubmitting (follow-on to #5371)
+- **Issue #5428** (closed): Split sim.py (13,773 lines): move the corner-matrix expansion section (~1,215 lines) into four sibling modules, each ≤500 lines
+- **Issue #5435** (closed): drc: a rule whose layer_selection empties its input still grades 'checked', so a clean verdict can name a rule that measured zero geometry
+- **Issue #5433** (closed): klt sim: the request's netlist is .include'd into a generated top deck, so a conventional SPICE title line on its line 1 is silently parsed as a netlist element
+- **Issue #5439** (closed): klt netlist --block: restored .subckt line omits the top schematic's own parameter block, so the emitted block references undeclared parameters
+- **Issue #5436** (closed): docs: stale 'shipped decks curate none' cut-resistance docstring in extract_parasitics.py
+- **PR #5445**: fix(netlist): label PDK env as exported only when klt resolved a PDK
+- **PR #5416**: fix(sim): explain out-of-interval measurement misses as window misses
+- **PR #5418**: docs: roadmap as of 2026-11-13
+- **PR #5430**: refactor(gen-compose): split layer-rule and plane-change leaves out of routing
+- **PR #5432**: refactor(extract): move pre-report detections into extract_detect_block
+- **PR #5423**: docs(extract-fidelity-roadmap): record per-stage shipped/partial states
+- **PR #5431**: feat(sta): report every per-path-group worst path, not just the minimum
+- **PR #5327**: feat: add staged-input transform name and caller-asserted pdk_revision to sim provenance
+- **PR #5422**: docs: refresh README release figures and index four examples
+- **PR #5413**: feat(synthesize): add request-level yosys_timeout_s budget
+- **PR #5414**: refactor(extract): move PDK/model-binding resolution out of run_extract
+- **PR #5411**: feat(characterize): add --split-grid to split a cell's slew rows across sim legs
+- **PR #5408**: fix(lvs): report empty-named device classes as skipped coverage instead of raising
+- **Issue #5441** (closed): klt netlist: --symbol-path without a resolved PDK turns an unresolved-symbol error into a traceback
+- **Issue #4308** (closed): Run composed layout-plan GDS through klt drc --deck gf180mcu to confirm no *.ongrid.1 (follow-up to #4267)
+- **Issue #5415** (closed): klt sim: measurement 'out of interval' on a completed run is reported as ngspice_fatal / corner error
+- **Issue #5426** (closed): Split gen_compose_routing.py (5,524 lines, at its ratchet ceiling): move layer-rule and plane-change clusters into sibling modules
+- **Issue #5196** (closed): Decompose run_extract: ~2,700-line function in extract.py
+- **Issue #5421** (closed): docs: extraction-fidelity roadmap still says "no implementation" after stages 2a, 2b and 3 partly shipped
+- **Issue #5424** (closed): sta: response has no per-check-family or per-path-group slack, and no worst-N paths — an async recovery violation silently owns worst_slack_ns and fmax_mhz
+- **Issue #5325** (closed): klt sim batch: report cannot attest the PDK revision of staged models, and the staged model-card sha256 differs from the source file's with no explanation
+- **Issue #5437** (closed): klt sim: --resume's per-shard recovery line and the unlaunched-jobs failure summary share the phrase 'never launched'
+- **Issue #5419** (closed): README status section is stale: says v0.5.0 and 44 verbs, main is at v0.9.1 with 68
+- **Issue #5429** (closed): signoff --attest: -o PATH omits the manifest_entry block that --format json emits, so the written attestation grades stale_evidence
+- **Issue #5409** (closed): Remove or wire digital_fleet.py: 944-LOC module with no production callers
+- **Issue #5412** (closed): synthesize: yosys_timeout_s request field (the 300 s Yosys budget is fixed, so a long synthesis can only be NO_VERDICT)
+- **Issue #5410** (closed): klt characterize: a cell whose single-sim grid exceeds the fleet job ceiling cannot be characterized (no per-cell grid split)
+- **Issue #5407** (closed): klt lvs klayout-runset: ValueError 'work identity must be a nonempty string' in _build_coverage after compare
+
 ### 2026-11-12
 
+- **PR #5404**: feat(lvs): pass deck DEVICE_LIST subckts through and pair differing tops for klayout-runset
+- **PR #5403**: chore(loom): resync installed Loom to v0.19.1294
+- **PR #5400**: refactor: consolidate inline int-not-bool checks into _jsonnum.is_int
+- **PR #5399**: fix: reject gen-compose via drops that crowd the block's own via cuts
+- **PR #5389**: feat: warn on identical klt sim process legs and print per-corner values
+- **PR #5383**: refactor: finish is_number sweep for ratchet-capped modules
+- **PR #5397**: feat: disclose layout-only pins in top-level pin anchoring entry
+- **PR #5394**: feat(sim): let measurements[].search target a deck .param
+- **PR #5395**: docs: record npn13G2 DRC measurement and explain klayout_version_mismatch
+- **PR #5384**: feat: add opt-in sdc_check drift report to klt sta
+- **PR #5393**: feat(signoff): name hashed samples document in stale yield pin detail
+- **PR #5390**: feat: add --fail-on-unmodelled exit to klt extract
+- **PR #5387**: feat: split deck-list batch runs into several jobs with a shard map
+- **PR #5375**: fix: reject sim measurement names differing only by case
+- **PR #5381**: feat: add --timeout-s and --keep-going to klt characterize
+- **PR #5379**: feat(sim): refuse job-split flags on deck-list requests
+- **PR #5323**: feat(sim): report and compare runner's executed models_lib hash in batch reports
+- **PR #5376**: refactor: use shared is_number for reversed bool/number guards
+- **PR #5372**: fix: resubmit interrupted shards on sharded batch --resume
+- **PR #5366**: feat(signoff): grade item 11 on the ERC substrate-path result
+- **PR #5370**: fix: lower inferred memories before sequential equivalence check
+- **PR #5368**: fix(characterize): forward request batch block to generated sim requests
+- **PR #5363**: feat(place-and-route): report worst global-route overflow regions
+- **PR #5354**: feat(characterize): concurrent per-cell runs on the batch backend
+- **PR #5360**: fix: require closed NWell ring for IHP nBuLay substrate isolation
+- **PR #5365**: feat(sim): flag lost batch shards as resumable
+- **PR #5357**: feat(characterize): add --resume to reload collected legs and re-attach batch jobs
+- **PR #5358**: feat(erc): isolation_boxes, same_net_as via substrate, undecidable-isolation disclosure
+- **PR #5319**: fix: accept decks[]/commands[] members in --batch-set preflight
+- **PR #5355**: feat(characterize): add --wait-for-capacity forwarded to every klt sim call
+- **Issue #5402** (closed): klt lvs: subckt-call reference conversion rejects RF devices the runset recognises; runset engine cannot pair differently named tops
+- **Issue #5382** (closed): Consolidate 53 inline int-not-bool checks and 2 private _is_int copies into _jsonnum.is_int
+- **Issue #5398** (closed): gen-compose: via drop on a PDK HBT terminal lands inside the cell's via array and breaks spacing, reported as routed
+- **Issue #5385** (closed): klt sim batch report: corner ids and per-corner values lost for multi-leg process axes
+- **Issue #5374** (closed): Finish _jsonnum consolidation: replace 58 reversed-order number-not-bool checks with is_number
+- **Issue #5396** (closed): klt lvs --check resolves a relative reference path against the cwd, but a run resolves it against the request file
+- **Issue #5391** (closed): klt sim: no way to search for a threshold inside a request (aperture/bisection needs a hand-built swept transient)
+- **Issue #5386** (closed): drc: curated sg13g2 deck reports spacing violations inside foundry npn13G2 PCell internals
+- **Issue #5236** (closed): klt sta: detect drift between a committed SDC and the request's constraints
+- **Issue #5392** (closed): klt signoff: a passing klt yield citation pins the hash of the referenced samples document, but docs/output only suggest the report's own hash
+- **Issue #5388** (closed): klt extract: opt-in non-zero exit when unmodelled_poly is non-empty
+- **Issue #5378** (closed): sim batch: split decks requests across jobs and support --collect-partial
+- **Issue #5373** (closed): klt sim: case-insensitive duplicate measurement names silently shadow each other
+- **Issue #5380** (closed): klt characterize: one timed-out cell aborts the whole batch, no timeout override or resume of finished cells
+- **Issue #5377** (closed): sim batch: decks requests ignore --max-units-per-job; whole-job timeout loses all completed units
+- **Issue #5321** (closed): klt sim --backend batch: runner PDK stamp unreadable, so the report cannot establish which PDK revision the runner used
+- **Issue #5371** (closed): klt sim batch: --resume does not recover shards whose Spot job is interrupted
+- **Issue #5369** (closed): klt synthesize --verify-equivalence: yosys-sequential rejects a gold module with memories
+- **Issue #5367** (closed): klt characterize: batch_no_capacity is not waited out (no --wait-for-capacity, request batch.capacity_wait_s not forwarded)
+- **Issue #5351** (closed): klt characterize: run batch-backend cells concurrently instead of serially
+- **Issue #5359** (closed): erc: consider substrate_isolation_needs_nwell_ring for IHP nBuLay decks
+- **Issue #5364** (closed): klt sim batch: lost or interrupted shards are reported as error corners and cannot be resumed
+- **Issue #5350** (closed): klt characterize: re-attach to batch jobs after an interrupted run (--resume/--attach)
+- **Issue #5343** (closed): erc: substrate continuity - isolation_boxes, same_net_as extension, undecidable disclosure + docs, phase 2 C of #5336
+- **Issue #5317** (closed): klt sim --batch-set crashes with KeyError 'netlist' on deck-list (decks[]) members
+- **Issue #3134** (closed): Publish SG13CMOS5L remote/batch AMI and verify live (follow-up to #2727)
+- **Issue #5348** (closed): klt characterize: no capacity wait, no re-attach, cells run serially on the batch backend
 - **PR #5356**: feat(erc): enable sky130 dnwell substrate isolation with n-well ring closure
 - **PR #5349**: feat: declare nBuLay substrate_isolation on sg13g2 and sg13cmos5l decks
 - **PR #5340**: Bump Repo Skills 0.25.10 -> 0.26.1
@@ -3507,55 +3621,4 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 - **Issue #1651** (closed): buildGate: local 'npm run check:ci' exceeds the 900s timeout, stalling ~20 builder attempts on #1633
 - **Issue #1600** (closed): [Epic #1585] Phase 2b: port VCD ingest and implement klt wave build
 - **Issue #1599** (closed): [Epic #1585] Phase 2a: port the FST query engine and implement klt wave query
-
-### 2026-09-13
-
-- **PR #1778**: kb: add reference netlist + measured figures for multi-ro-xor-entropy-source
-- **PR #1777**: fix(synthesize): bound _run_yosys with a timeout to avoid indefinite hangs
-- **PR #1776**: kb: add reference netlists + measured figures for ro-puf, metastability-trng, ring-oscillator-jitter-trng
-- **PR #1774**: feat(gen): populate res_array metal_level for gf180mcu rm1/rm2/rm3, warn on device_class mismatch
-- **PR #1773**: kb: add reference netlists + measured figures for beta-multiplier-bias-cell, cmos-subthreshold-voltage-reference and cmos-ring-vco-current-starved
-- **PR #1772**: feat: generate prefix adders and pick one by measured synthesis
-- **PR #1770**: refactor(benchmarks): split interactive agent provider into its own module
-- **PR #1769**: gen: populate res_array metal_level for sg13g2's res_metal1/res_metal2
-- **PR #1768**: fix(equiv): apply WASI-sandboxed-yosys hint to equiv.py too
-- **PR #1767**: feat(benchmarks): add charge-pump-pll hard-tier design-agent task
-- **PR #1765**: refactor(sim): split fleet shard/merge + remote dispatch into sim_remote.py
-- **PR #1763**: feat(benchmarks): add tool-using interactive design-agent provider
-- **PR #1762**: feat(loom): propagate held PR loom:operator hold onto linked issue(s)
-- **PR #1761**: fix(sim): parse_ascii_rawfile handles ac/sp Flags: complex rawfiles
-- **PR #1760**: kb: add reference netlists + measured figures for rx-front-end-termination-buffer and sram-power-up-puf
-- **PR #1757**: feat(sim): add klt sim --plot waveform SVG rendering (issue #1723)
-- **PR #1754**: kb: add reference netlists + measured figures for folded-cascode-ota and cml-tx-line-driver
-- **PR #1753**: feat(benchmarks): add hard-tier VCO design-agent task (remainder of #1735)
-- **PR #1751**: refactor: dedup SPICE + continuation-line fold into _paths.py
-- **PR #1750**: feat(benchmarks): add medium-tier cascode, integrator and Schmitt trigger tasks
-- **PR #1747**: kb: add reference netlists + measured figures for two-stage-miller-ota and strongarm-latch-comparator
-- **PR #1746**: feat(benchmarks): add medium-tier design-agent tasks (5T OTA + two-stage Miller OTA)
-- **PR #1745**: feat(benchmarks): add hard-tier RC relaxation oscillator design-agent task
-- **PR #1742**: feat(kb): nightly CI drift-check that re-runs measured testbenches
-- **PR #1740**: Design-agent benchmark: live candidate provider driving S4->S6 skills + CI wiring
-- **PR #1737**: kb: add reference netlists + measured figures for five-transistor-ota and inverter-based-comparator
-- **Issue #1775** (closed): synthesize: _run_yosys has no subprocess timeout — auto arithmetic sweep multiplies exposure
-- **Issue #1771** (closed): sky130 subckt `mult=` is inert (needs `m=`) — silently wrong device count, suspected live in charge_pump_recentered.spice
-- **Issue #1766** (closed): Split design_agent_benchmark.py's interactive-agent-provider subsystem (~630 lines) into a separate module
-- **Issue #1764** (closed): Split sim.py's fleet shard/merge + remote dispatch subsystem (~810 lines) into sim_remote.py
-- **Issue #1759** (closed): kb: add reference netlists + measured figures for remaining KB entries (batch 6)
-- **Issue #1758** (closed): gen: res_array has no metal_level entry for sg13g2's drawn res_metal1/res_metal2 classes
-- **Issue #1756** (closed): klt sim: waveform artifact capture (parse_ascii_rawfile) doesn't handle ac/sp's complex-valued rawfile encoding
-- **Issue #1755** (closed): Friction: klt equiv still emits the raw "Can't open script file" error under a WASI-sandboxed yosys — #1368's hint was only wired into klt synthesize
-- **Issue #1752** (closed): Design-agent benchmark: hard-tier PLL task (remainder of #1743)
-- **Issue #1749** (closed): work-finder: stop re-dispatching sweeps on an issue whose sole open PR is loom:operator-held
-- **Issue #1743** (closed): Design-agent benchmark: hard-tier VCO and PLL tasks (remainder of #1735)
-- **Issue #1741** (closed): Dedup SPICE + continuation-line folding: reimplemented in pex.py, op_sanity.py, netlist_normalize.py
-- **Issue #1739** (closed): Design-agent benchmark: fuller interactive/tool-using live-agent provider
-- **Issue #1735** (closed): Design-agent benchmark: hard-tier tasks — oscillator/VCO/PLL
-- **Issue #1734** (closed): Design-agent benchmark: medium-tier tasks — cascode + integrator + Schmitt trigger
-- **Issue #1733** (closed): Design-agent benchmark: medium-tier tasks — 5T OTA + two-stage Miller OTA
-- **Issue #1732** (closed): Design-agent benchmark: live candidate provider driving S4→S6 skills + CI wiring
-- **Issue #1731** (closed): res_array: no drawn-geometry support for a family's own metal-resistor device class, and silent wrong-device substitution when generator/flavor doesn't match declared device_class
-- **Issue #1726** (closed): kb: nightly CI drift-check that re-runs measured testbenches via klt kb validate
-- **Issue #1725** (closed): kb: add reference netlists + measured figures for remaining KB entries
-- **Issue #1723** (closed): klt sim: render waveforms to SVG on a measurement miss so an agent can diagnose from the picture (waveform-image feedback)
-- **Issue #1722** (closed): klt synthesize: arithmetic-architecture lever — generate prefix adders (Sklansky / Brent-Kung / Kogge-Stone) from a cell map and pick per block by measured synthesis
 
