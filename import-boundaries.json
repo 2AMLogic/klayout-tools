@@ -145,6 +145,7 @@
         "klayout_tools.drc_crosscheck",
         "klayout_tools.drc_klayout_abort",
         "klayout_tools.drc_klayout_app",
+      "klayout_tools.drc_layer_selection",
         "klayout_tools.drc_klayout_engine",
         "klayout_tools.drc_report_check"
       ]
@@ -741,8 +742,12 @@
         "klayout_tools.sim_case_names",
         "klayout_tools.sim_complex_vectors",
         "klayout_tools.sim_convergence_retry",
+        "klayout_tools.sim_corner_axes",
         "klayout_tools.sim_corner_extremes",
         "klayout_tools.sim_corner_keys",
+        "klayout_tools.sim_corner_point",
+        "klayout_tools.sim_corner_variants",
+        "klayout_tools.sim_corners",
         "klayout_tools.sim_crossings",
         "klayout_tools.sim_crossings_reduce",
         "klayout_tools.sim_cycle_mean",

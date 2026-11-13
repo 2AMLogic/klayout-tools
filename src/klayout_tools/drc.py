@@ -84,44 +84,23 @@ from .drc_check_kinds import (
     _COMP_COVERAGE_CHECKS,
     _DENSITY_CHECKS,
     _GRID_CHECKS,
+    _MAX_BOUND_CHECKS,
+    _SINGLE_LAYER_CHECKS,
     _TAP_DISTANCE_CHECKS,
+    _TWO_LAYER_CHECKS,
     _VERTEX_CHECKS,
     rule_threshold_fields,
+)
+from .drc_layer_selection import (
+    cell_primary_region,
+    select_other_region,
+    selection_empties_every_top_cell,
 )
 from .drc_report_check import _report_hash_checks
 from .layers import layers_report
 from .metrics import is_registered
 from .pdk import PdkNotFoundError, find_pdk_for_deck
 
-# Check kinds that operate on a single region (no other_layer).
-# "isolated" (issue #1654) dispatches to `Region.isolated_check`, which
-# -- unlike "space" (`Region.space_check`) -- measures spacing between
-# *different* polygons of a merged region only, never a concave notch
-# carved into one polygon. It exists as a first-class check kind so a rule
-# transcribed from a source rule whose real semantics is `isolated` (e.g.
-# sky130's `nwell.2a`, see `decks/sky130.py`'s `nwell.space.1`) can use the
-# primitive that actually matches it, instead of the strictly-stricter
-# `"space"` substitute. Already used internally for gf180mcu's
-# `mim.space.1` peer check (see `peer_edge_pairs` below) before this issue
-# exposed it as a `DrcRule.check` option.
-_SINGLE_LAYER_CHECKS = {"width", "space", "notch", "isolated"}
-# Check kinds `DrcRule.threshold_max_dbu` (issue #2370) is meaningful for --
-# i.e. the ones whose published rule can carry an *upper* size bound
-# alongside the lower one `threshold_dbu` already expresses (gf180mcu's
-# `CO.1` fixed 0.22x0.22um contact, `Vn.1` fixed 0.26x0.26um via). Only
-# "width" today; kept as a set (rather than an `== "width"` test) so the
-# validation error message can name the admissible kinds the same way every
-# other check-kind error in this module does. See
-# `_validate_threshold_max`/`_run_width_max_check` below.
-_MAX_BOUND_CHECKS = {"width"}
-# Check kinds that compare a region against another region (other_layer required).
-_TWO_LAYER_CHECKS = {
-    "separation",
-    "enclosing",
-    "enclosed",
-    "overlap",
-    "enclosing_adjacent",
-}
 # Two-layer check kinds where the "enclosed" layer can lie entirely outside
 # the "enclosing" layer -- a case `Region.enclosing_check`/`enclosed_check`
 # never reports (they only measure *facing edges*, so zero spatial overlap
@@ -317,11 +296,23 @@ INAPPLICABLE_REASON_NO_APPLICABLE_GEOMETRY = "no_applicable_geometry"
 SKIP_REASON_GRID_NOT_REPRESENTABLE = "grid_not_representable"
 
 #: The curated engine's second ``coverage.inapplicable[].reason`` (issue
-#: #3587): a ``"comp_coverage"`` rule whose checked layer *is* drawn but whose
-#: checked region is empty once the rule's marker exemption is applied (every
-#: COMP polygon is under an exempting marker), so there was nothing for it to
-#: constrain. Distinct from
-#: :data:`INAPPLICABLE_REASON_NO_APPLICABLE_GEOMETRY` (checked layer absent).
+#: #3587): a rule whose checked layer *is* drawn but whose own checked region
+#: came out empty anyway, so there was nothing for it to constrain. Distinct
+#: from :data:`INAPPLICABLE_REASON_NO_APPLICABLE_GEOMETRY` (checked layer
+#: absent from the stream) -- the layer is present here, and that difference
+#: is the actionable one: it is what says "look for the sibling rule family
+#: that *does* cover the geometry class this stream actually draws".
+#:
+#: Two narrowings reach it, both grading the region the check itself measures:
+#:
+#: - a ``"comp_coverage"`` rule's marker exemption (issue #3587): every COMP
+#:   polygon sits under an exempting marker -- see
+#:   :func:`_run_comp_coverage_check`;
+#: - a rule's ``layer_selection`` (issue #5435): the selection selects away
+#:   all of the layer's geometry in every top cell (sg13g2's
+#:   ``layer_selection="squares"`` contact rules against a stream whose Cont
+#:   population is entirely bars) -- see
+#:   :func:`~klayout_tools.drc_layer_selection.selection_empties_every_top_cell`.
 INAPPLICABLE_REASON_EMPTY_CHECKED_REGION = "inapplicable_empty_checked_region"
 
 
@@ -677,36 +668,6 @@ def _derived_region_unscoped(
     return intersect_region.interacting(base_region) & (base_region.sized(size_dbu))
 
 
-def _select_other_region(rule: DrcRule, other_region: Any) -> Any:
-    """Apply ``rule.other_layer_selection`` to the resolved ``other_layer``
-    region; returned unchanged when no selection is set.
-
-    ``"squares"`` (#2688) is whole-polygon square selection: the complement
-    of the DRC-DSL ``non_squares`` selector, applied to the *merged* layer
-    so two abutting squares forming a bar count as the bar they are.
-    Non-square shapes (contact bars) are dropped from both the margin check
-    and the #318 escape term.
-    """
-    if rule.other_layer_selection == "squares":
-        return other_region.merged().squares()
-    return other_region
-
-
-def _select_primary_region(rule: DrcRule, region: Any) -> Any:
-    """Apply ``rule.layer_selection`` to the rule's own ``layer`` region;
-    returned unchanged when no selection is set.
-
-    ``"squares"`` mirrors :func:`_select_other_region`: the *merged* layer
-    filtered by ``Region.squares()``, so a contact bar -- or a row of
-    abutting legal contacts that merges into one strip -- is dropped
-    (``cont_sq = cont.not(cont.non_squares)`` in the IHP runset) rather than
-    measured as a single oversized contact.
-    """
-    if rule.layer_selection == "squares":
-        return region.merged().squares()
-    return region
-
-
 def _rule_outside_voltage_gate(
     rule: DrcRule, marker: tuple[int, int], skipped_rule_ids: set[str]
 ) -> bool:
@@ -812,10 +773,17 @@ def _classify_skipped_rules(
     categories, unchanged: it is the pre-contract spelling of "did not run",
     and this classification is additive to it.
 
-    ``empty_checked_region_ids`` (issue #3587) names the ``"comp_coverage"``
-    rules whose checked layer is drawn but whose checked region came out empty
-    (:data:`INAPPLICABLE_REASON_EMPTY_CHECKED_REGION`): a rule constraining
-    nothing in this stream, so inapplicable rather than skipped.
+    ``empty_checked_region_ids`` (issues #3587, #5435) names the rules whose
+    checked layer *is* drawn but whose own checked region came out empty
+    anyway (:data:`INAPPLICABLE_REASON_EMPTY_CHECKED_REGION`): a
+    ``"comp_coverage"`` rule whose marker exemption exempted every polygon,
+    or a rule whose ``layer_selection`` selected all of them away. Either way
+    it constrains nothing in this stream, so inapplicable rather than
+    skipped -- and, unlike the absent-layer case above, the rule's layer is
+    present, which is the signal that some sibling rule family may be the one
+    that covers the geometry this stream does draw. Decided by the caller
+    from the same region the check measures, never from layer presence, so
+    this adapter takes the ids as given rather than re-deriving them.
 
     Returns ``(skipped, inapplicable)``, each a list of ``{"id", "reason"}``
     records sorted by rule id.
@@ -1649,14 +1617,9 @@ def _cell_check_regions(
             _context_region(cell, layout, rule, stage=2),
         )
     else:
-        region = _select_primary_region(
-            rule,
-            kdb.Region(cell.begin_shapes_rec(layer_index))
-            if layer_index is not None
-            else kdb.Region(),  # absent conductor (#2726)
-        )
+        region = cell_primary_region(rule, cell, layer_index)
     other_region = (
-        _select_other_region(rule, kdb.Region(cell.begin_shapes_rec(other_index)))
+        select_other_region(rule, kdb.Region(cell.begin_shapes_rec(other_index)))
         if other_index is not None
         else (kdb.Region() if rule.require_containment else None)
     )
@@ -1915,6 +1878,16 @@ def _evaluate_rule(rule: DrcRule, setup: _DrcSetup, state: _DrcState) -> None:
         ):
             state.rules_skipped.append(rule.id)
             return
+
+    # The rule's input layers all resolved, but a `layer_selection` can
+    # still leave it nothing to measure: the selected primary region may be
+    # empty in every top cell (issue #5435). That is a coverage hole, not a
+    # pass -- grade it `inapplicable` with the same reason #3587 uses for an
+    # empty checked region, and do not record it as checked.
+    if selection_empties_every_top_cell(rule, layout, setup.top_cells):
+        state.rules_skipped.append(rule.id)
+        state.empty_checked_region_ids.add(rule.id)
+        return
 
     # Every return above is a skip; reaching here means this rule's
     # input layer(s) all resolved, so it is about to be evaluated against
