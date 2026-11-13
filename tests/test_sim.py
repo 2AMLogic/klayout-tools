@@ -3527,9 +3527,27 @@ def _stub_subprocess_run(
     side_effect=None,
     returncode: int = 0,
 ):
-    def fake_run(cmd, capture_output, text, timeout, cwd=None, env=None, **_kw):
+    real_run = subprocess.run
+
+    def fake_run(cmd, capture_output, text, timeout, cwd=None, env=None, **kw):
         if "--version" in cmd:  # the once-per-sweep engine_build probe (#3095)
             return fake_completed(_STUB_VERSION_BANNER)
+        if "-o" not in cmd:
+            # Patching `subprocess.run` on the shared module object intercepts
+            # every call in the process, not just the ngspice invocation this
+            # stub stands in for -- e.g. `pdk._git_run`'s
+            # `git -C <variant> rev-parse ...` probe of a git-backed PDK
+            # variant. Delegate anything that is not an ngspice run (issue
+            # #5512); ngspice is always invoked with `-o <log>`.
+            return real_run(
+                cmd,
+                capture_output=capture_output,
+                text=text,
+                timeout=timeout,
+                cwd=cwd,
+                env=env,
+                **kw,
+            )
         log_path = cmd[cmd.index("-o") + 1]
         if side_effect is not None:
             raise side_effect
@@ -3538,6 +3556,53 @@ def _stub_subprocess_run(
         return fake_completed(stdout, returncode=returncode)
 
     monkeypatch.setattr(sim.subprocess, "run", fake_run)
+
+
+def test_stub_subprocess_run_delegates_non_ngspice_commands(tmp_path, monkeypatch):
+    """Issue #5512: the stub patches `subprocess.run` on the shared module
+    object, so it intercepts every call in the process -- including
+    `pdk._git_run`'s `git -C <variant> rev-parse --show-toplevel` probe, which
+    fires whenever the PDK root holds a git-backed variant directory (e.g. a
+    `*.bak-*` copy on the worker fleet). Such a command has no `-o`, and the
+    stub used to raise `ValueError: '-o' is not in list` on it.
+
+    CI runners have no such directory, so this exercises the stub directly
+    rather than relying on the host's PDK root.
+    """
+    _stub_subprocess_run(monkeypatch, side_effect=FileNotFoundError("no ngspice"))
+
+    # The git probe is delegated to the real runner -- with `check=False`
+    # forwarded -- and comes back as a real CompletedProcess, not an error.
+    proc = sim.subprocess.run(
+        ["git", "-C", str(tmp_path), "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert isinstance(proc, subprocess.CompletedProcess)
+
+    # The engine_build `--version` probe still returns the stub banner, and
+    # an actual ngspice invocation (always `-o <log>`) still gets the stubbed
+    # behaviour -- here the configured side effect.
+    banner = sim.subprocess.run(
+        ["ngspice", "--version"], capture_output=True, text=True, timeout=10
+    )
+    assert banner.stdout == _STUB_VERSION_BANNER
+
+    with pytest.raises(FileNotFoundError):
+        sim.subprocess.run(
+            [
+                "ngspice",
+                "-b",
+                str(tmp_path / "deck.cir"),
+                "-o",
+                str(tmp_path / "run.log"),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
 
 
 def test_run_sim_stubbed_missing_binary_is_corner_error(tmp_path, monkeypatch):
