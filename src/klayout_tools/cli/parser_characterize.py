@@ -17,7 +17,7 @@ def add_characterize_parser(
 
     Drives one cell's SPICE netlist over an input-slew x output-load grid at
     one PVT corner through `klt sim`, extracts propagation delay and
-    transition time per combinational arc, and emits an NLDM `.lib` (issue
+    transition time per timing arc, and emits an NLDM `.lib` (issue
     #2502). See docs/cli/characterize.md for the request/response contract.
     """
     characterize_parser = subparsers.add_parser(
@@ -44,7 +44,12 @@ def add_characterize_parser(
             "`leakage_power` (issue #2503). A request's `cells` array "
             "characterizes several cells into ONE `.lib`; `--compare-to` "
             "diffs the result against a reference (vendor) library. Scope: "
-            "one corner per invocation, combinational arcs only. "
+            "one corner per invocation; every combinational timing arc, plus "
+            "-- for a cell declaring `cell.clock_pin` -- clock-to-output "
+            "arcs (issue #4755) and setup/hold constraint arcs for each pin "
+            "in `cell.constrained_pins` (issue #4756). Still not emitted: "
+            "recovery/removal arcs, async set/reset arcs, `ff`/`latch` "
+            "groups and latch arcs, min-pulse-width. "
             "Takes a request-document path (like `klt sim`/`klt sta`), not "
             "positional file args."
         ),

@@ -122,7 +122,12 @@ corner; every *combinational* timing arc of each cell; `cell_rise`,
 `timing_sense`, `timing_type : combinational`; per-arc `internal_power()`
 with `rise_power`/`fall_power`; per-cell `cell_leakage_power` and one
 `leakage_power()` group per input state; per-input-pin **measured**
-`capacitance` with its `rise_capacitance`/`fall_capacitance` split.
+`capacitance` with its `rise_capacitance`/`fall_capacitance` split. For a
+cell that declares `cell.clock_pin`, also its **clock-to-output** arcs
+(`timing_type : rising_edge`/`falling_edge`) and, for each pin listed in
+`cell.constrained_pins`, its **setup/hold** constraint arcs
+(`setup_rising`/`hold_rising` or the `*_falling` pair) — see
+["Sequential cells"](#sequential-cells-clock-to-output-and-setuphold).
 
 **Out of scope**, deliberately — read the absence of a group as "this
 command did not measure it", never as an assertion about the cell:
@@ -268,9 +273,10 @@ not emitted for these cells.
 The testbench drives three clock pulses: a priming pulse that captures the
 output-low state, a pulse after the data moved to the output-high state
 (→ `cell_rise`/`rise_transition`), and a pulse after it returned
-(→ `cell_fall`/`fall_transition`). Still **not supported**: setup/hold/
-recovery/removal constraint arcs, `ff`/`latch` groups, latch time borrowing,
-min-pulse-width, `when`-qualified arcs, async set/reset arcs. Worked example:
+(→ `cell_fall`/`fall_transition`). Setup/hold constraint arcs are supported
+too — see the next section. Still **not supported**: recovery/removal
+constraint arcs, `ff`/`latch` groups, latch time borrowing, min-pulse-width,
+`when`-qualified arcs, async set/reset arcs. Worked example:
 `examples/characterize/request-dff.json`. Internal-power tables for these
 arcs cover the active clock edge's window only and are first-order.
 
