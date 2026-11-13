@@ -17,6 +17,7 @@ from typing import Any
 from . import place_and_route_clock as _vclk
 from ._openroad_engine import _timing_violation_report_lines
 from .place_and_route_hints import make_tracks_lines as _make_tracks_lines
+from .place_and_route_macro_halo import merge_macro_margins
 from .place_and_route_pins import pin_constraint_lines
 from .place_and_route_reports import detailed_route_lines, routing_completeness_lines
 from .place_and_route_request import PlaceAndRouteError
@@ -672,20 +673,19 @@ def _macro_blockage_lines(macros: list[dict[str, Any]]) -> list[str]:
     """
     lines: list[str] = []
     for macro in macros:
-        halo = macro["halo"]
-        if halo is None:
+        margin = merge_macro_margins(macro["halo"], macro.get("keepout"))
+        if margin is None:
             continue
         if macro["width_um"] is None or macro["height_um"] is None:
             raise PlaceAndRouteError(
-                f"request.macros[].halo for instance '{macro['instance']}' "
+                f"request.macros[].halo/keepout for instance '{macro['instance']}' "
                 f"needs the macro's footprint, but its lef ({macro['lef']}) "
                 f"declares no SIZE for MACRO '{macro['cell_name']}'"
             )
         x1, y1, x2, y2 = _macro_footprint(macro)
         lines.append(
-            "create_blockage -region "
-            f"{{{x1 - halo['left']} {y1 - halo['bottom']} "
-            f"{x2 + halo['right']} {y2 + halo['top']}}}"
+            f"create_blockage -region {{{x1 - margin['left']} {y1 - margin['bottom']} "
+            f"{x2 + margin['right']} {y2 + margin['top']}}}"
         )
     return lines
 
@@ -1197,17 +1197,16 @@ def _stage_script_lines(
             diode_cell, max_antenna_repair_iterations
         )
         # `-critical_nets_percentage` (issue #939, native-routing survey
-        # section 4.1): a real, documented `global_route` flag -- see this
-        # module's own docstring, "Timing-driven global routing + bounded
-        # antenna-repair iteration" -- that weights the given percentage of
-        # worst-slack nets as timing-critical during congestion-removal
-        # iterations. `0` (unset, `request.route_critical_nets_percentage`
-        # omitted) reproduces `global_route`'s own default -- the explicit
-        # A/B disable path.
-        # `-verbose` (issue #2994) makes the global router print its
-        # per-layer "Final congestion report" table, which the response's
-        # `congestion` block scrapes; routing results are unchanged.
-        global_route_call = "global_route -verbose"
+        # section 4.1; see this module's docstring, "Timing-driven global
+        # routing + bounded antenna-repair iteration") weights that
+        # percentage of worst-slack nets as timing-critical during
+        # congestion-removal. `0` (unset) is `global_route`'s own default.
+        # `-verbose` (#2994) prints the per-layer congestion table and
+        # `-congestion_report_file` (#5313) the per-GCell violation list the
+        # response's `congestion` block scrapes; routing results unchanged.
+        global_route_call = "global_route -verbose -congestion_report_file " + (
+            os.path.join(output_dir, f"{hdl_toplevel}_route_congestion.rpt")
+        )
         if route_critical_nets_percentage:
             global_route_call += (
                 f" -critical_nets_percentage {route_critical_nets_percentage}"

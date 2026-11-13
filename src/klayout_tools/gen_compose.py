@@ -187,7 +187,7 @@ from collections.abc import Callable
 from typing import Any
 
 from . import gen_compose_port_request as _pr
-from ._jsonnum import is_number
+from ._jsonnum import is_int, is_number
 from ._layout import write_layout
 from ._paths import _resolve_relative
 from ._provenance import build_provenance, layout_geometry_digest
@@ -203,8 +203,10 @@ from .gen import (
     ENCLOSURE_MARGIN_UM,
     GenError,
     _cut_fixed_size_um,
-    _fixed_cut_side_um,
     _pdk_family,
+)
+from .gen import (
+    _fixed_cut_side_um as _fixed_cut_side_um,
 )
 from .gen_compose_boundary import draw_pins_and_boundary, parse_boundary
 from .gen_compose_port_access import derive_label_ports, parse_ports_from_labels
@@ -253,6 +255,7 @@ from .gen_compose_routing import (
 )
 from .gen_compose_routing import manhattan_backbone as manhattan_backbone
 from .gen_compose_routing import route_two_pin as route_two_pin
+from .gen_compose_via_cuts import own_via_cut_clearance_reason, via_drop_cut_side_um
 from .gen_layer_params import mfg_grid_um
 from .pdk import PdkNotFoundError, find_pdk
 
@@ -1086,7 +1089,7 @@ def _orient_port(port: dict[str, Any], orientation: str) -> dict[str, Any]:
             float(x_um), float(y_um), orientation
         )
     direction_deg = port.get("direction_deg")
-    if not isinstance(direction_deg, bool) and isinstance(direction_deg, int):
+    if is_int(direction_deg):
         oriented["direction_deg"] = _ORIENTATION_DIRECTION_MAP[orientation].get(
             direction_deg, direction_deg
         )
@@ -1726,7 +1729,7 @@ def _parse_array_placement(raw_placement: dict[str, Any]) -> dict[str, Any]:
     """
 
     def _positive_int(value: Any, field: str) -> int:
-        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        if not is_int(value) or value < 1:
             raise GenComposeError(
                 f"request.placement.{field} must be a positive integer when "
                 "strategy is 'array'"
@@ -1734,7 +1737,7 @@ def _parse_array_placement(raw_placement: dict[str, Any]) -> dict[str, Any]:
         return value
 
     def _positive_number(value: Any, field: str) -> float:
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        if not is_number(value) or value <= 0:
             raise GenComposeError(
                 f"request.placement.{field} must be a positive number when "
                 "strategy is 'array'"
@@ -1883,7 +1886,7 @@ def _parse_placement(
         return strategy, order, 0.0, None, None, array_params
 
     spacing_um = raw_placement.get("spacing_um", 0.0)
-    if isinstance(spacing_um, bool) or not isinstance(spacing_um, (int, float)):
+    if not is_number(spacing_um):
         raise GenComposeError("request.placement.spacing_um must be a number")
     spacing_um = float(spacing_um)
     if spacing_um < 0:
@@ -1975,10 +1978,7 @@ def parse_waypoints_um(
         if (
             not isinstance(waypoint, list)
             or len(waypoint) not in (2, 3)
-            or any(
-                isinstance(v, bool) or not isinstance(v, (int, float))
-                for v in waypoint[:2]
-            )
+            or any(not is_number(v) for v in waypoint[:2])
         ):
             raise GenComposeError(
                 f"{where}[{wp_index}] must be a [x_um, y_um] pair of numbers "
@@ -2969,9 +2969,9 @@ def _port_probe_position_um(port: dict[str, Any]) -> tuple[float, float] | None:
     landing-connectivity path tolerates rather than fails). ``bool`` is
     rejected explicitly because it is a subclass of ``int``."""
     x_um, y_um = port.get("x_um"), port.get("y_um")
-    if isinstance(x_um, bool) or not isinstance(x_um, (int, float)):
+    if not is_number(x_um):
         return None
-    if isinstance(y_um, bool) or not isinstance(y_um, (int, float)):
+    if not is_number(y_um):
         return None
     return float(x_um), float(y_um)
 
@@ -4167,7 +4167,12 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                             "routing.cross_block_layer_role), or supply "
                             "waypoints_um that approach from a clear side"
                         )
-            return None
+            return own_via_cut_clearance_reason(
+                via_drops,
+                pdk_info["variant"],
+                _min_spacing_um_for_layer,
+                _own_block_layer_geometry,
+            )
 
         # Bundle (>2-pin) nets route as a spanning tree of two-pin legs
         # (#1073); a 2-pin net is the degenerate one-leg case of exactly the
@@ -4429,16 +4434,8 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         for drop in route.get("via_drops", []):
             via_pair = drop["via_layer"]
             if via_pair not in via_drop_size_um:
-                floor = _min_width_um_for_layer(pdk_info["variant"], via_pair)
-                # Issue #2585: then clamp *down* to the layer's fixed size
-                # where the foundry rule is a maximum too (sky130's `via`,
-                # 0.15um; sg13g2's `Via1`-`Via4`, 0.19um) -- the generic
-                # 0.22um square is over that maximum. The landing pads
-                # below keep their own baseline/area/enclosure sizing, so
-                # the smaller via only gains enclosure.
-                via_drop_size_um[via_pair] = _fixed_cut_side_um(
-                    max(_VIA_DROP_SIZE_UM, floor[0] if floor is not None else 0.0),
-                    _via_fixed_size_um(pdk_info["variant"], via_pair),
+                via_drop_size_um[via_pair] = via_drop_cut_side_um(
+                    pdk_info["variant"], via_pair
                 )
     # Issue #2072: `_VIA_LANDING_SIZE_UM` is a guaranteed `met3.area.1`/
     # `met4.area.1`/`met5.area.1`-class violation whenever a via-drop

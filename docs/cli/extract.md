@@ -215,7 +215,10 @@ two disagree, this document (and the code) win.
   `poly_label` text drawn directly in its own definition when present, else
   from `--abstract-cell-lef`. A matched type with neither pin source is an
   application error. Everything not matched by a pattern extracts exactly as
-  today. See "Cell-level (black-box + pins) abstraction" below.
+  today. In-cell labels only define the black box's own pins (issue #5322):
+  they are not promoted to top-level pins, with or without `--top-cell-pins`;
+  top-level pins come from labels drawn in the top cell. See "Cell-level
+  (black-box + pins) abstraction" below.
 - `--abstract-cell-lef` — optional, unset by default, repeatable. A LEF file
   (or a directory of `*.lef`/`*.tlef` files) to resolve pins from for an
   `--abstract-cells`-matched cell type that draws no in-cell pin label — the
@@ -373,6 +376,7 @@ Every field name is the flag's own `dest`, so the mapping is one-for-one:
 | `parasitics_nets` | array\<string\> \| string | repeatable `--parasitics-net` |
 | `critical_net_patterns` / `parasitics_net_patterns` | array\<string\> \| string | repeatable `--critical-net-pattern` / `--parasitics-net-pattern` (issue #2974) |
 | `critical_net_all` / `strict_net_patterns` | bool | `--critical-net-all` / `--strict-net-patterns` |
+| `fail_on_unmodelled` | bool | `--fail-on-unmodelled` (issue #5388) |
 | `critical_net_excludes` | array\<string\> \| string | repeatable `--critical-net-exclude` |
 | `parasitic_variants` | array\<string\> \| string | repeatable `--parasitic-variant` |
 | `parasitics_top_cell_only` | bool | `--parasitics-top-cell-only` |
@@ -2379,6 +2383,15 @@ implants pick the flavour. Diffusion under `areaid.ed` (81/19) or inside
 Not modelled: the `photodiode` and the RF diode (`areaid.rfdiode`). Query
 the exact set with `klt deck devices --deck sky130 --class diode_pd2nw_05v5`.
 
+**sky130 `lvtn` partial coverage** (issues #5301, #5311): `lvtn` (125/44) is
+tested per *gate*, not per diffusion island -- a gate whose area touches
+`lvtn` (and no excluding implant such as `hvtp`) binds the `_lvt` model, its
+neighbours on the same diffusion keep the plain model. Diffusion shared by a
+claimed and an unclaimed gate stays one connected net, and its area and
+perimeter (`AS`/`AD`/`PS`/`PD`) are apportioned between the gates sharing it
+exactly as in a layout with no `lvtn` at all -- never counted in full for each
+side. Only the model name changes with the marker.
+
 ### Marker-gated and predicate-gated device classes (issue #2365)
 
 **Most device classes a deck recognises are driven off drawn
@@ -2645,6 +2658,17 @@ deck has not declared this marker, or whose caller has not drawn it — so a
 non-empty `unmodelled_poly[]` is not on its own proof of a defect; a caller
 reading the report should check whether each flagged shape is a deliberate,
 unannotated underpass before assuming it is a missing device.
+
+#### `--fail-on-unmodelled` (issue #5388)
+
+By default a non-empty `unmodelled_poly[]` only adds a warning; the run exits
+0 and `device_count` / parasitics totals can look complete. Pass
+`--fail-on-unmodelled` to exit 1 through the shared error envelope instead
+(`error.message` names the count and points at `unmodelled_poly[]`;
+`error.unmodelled_poly_count` carries the count). Both `unmarked` and
+`marked_unrecognised` entries count. A clean cell exits 0 as usual. As noted
+above, a non-empty list can be a legitimate poly underpass, so the flag is
+opt-in. Request-document field: `fail_on_unmodelled`.
 
 ### Merged net labels (issue #470)
 

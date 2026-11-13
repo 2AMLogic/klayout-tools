@@ -111,6 +111,7 @@ from . import (
     sim_staging,
 )
 from .pdk_families import family_subset, pdk_variant_family
+from .pdk_store import store_pdk_stamp
 from .remote_launcher import (
     RemoteLaunchError,
     _signal_handlers_install,
@@ -120,12 +121,16 @@ from .remote_launcher import (
 from .sim_batch_features import (
     annotate_gap,
     annotate_unrecovered_failure,
+    collected_report_env,
     gap_note,
     refusal_diagnostic,
 )
 from .sim_batch_hints import attribute_modelname, hint_existing_fatal, with_runner_hints
+from .sim_batch_reattach import (  # noqa: F401
+    _RESUME_INTERRUPTED_GRACE_S,
+    _try_reattach_shard,
+)
 from .sim_batch_warn import warn_over_serial_bound_once
-from .sim_exit_reason import exit_reason_env
 from .sim_exit_reason import status_exit_code as _status_exit_code
 from .sim_remote import (
     _build_remote_request,
@@ -1981,9 +1986,8 @@ def _bounded_str(value: Any, limit: int = WORKER_CAPTURE_STR_MAX) -> str | None:
 
 
 def _client_pdk_stamp(request: dict[str, Any] | None) -> dict[str, Any] | None:
-    """The submitter's own local view of the requested PDK variant's
-    ``SOURCES`` stamp, in the same ``sources-sha256`` scheme the worker
-    capture uses. ``None`` when nothing comparable can be read locally."""
+    """The submitter's local view of the requested PDK variant's stamp (``SOURCES``,
+    else bundle ``.pdk-store.json``); ``None`` when nothing comparable is readable."""
     models = (request or {}).get("models") or {}
     variant = models.get("pdk")
     root = models.get("pdk_root") or os.environ.get("PDK_ROOT")
@@ -1993,7 +1997,7 @@ def _client_pdk_stamp(request: dict[str, Any] | None) -> dict[str, Any] | None:
         with open(os.path.join(root, variant, "SOURCES"), "rb") as handle:
             text = handle.read(16385)[:16384].decode("utf-8", "replace")
     except OSError:
-        return None
+        return store_pdk_stamp(variant, os.path.join(root, variant))  # #5318
     normalized = "\n".join(
         line.rstrip() for line in text.replace("\r\n", "\n").strip().split("\n")
     )
@@ -3331,18 +3335,7 @@ def _run_batch_job(
         artifacts_dir,
         BATCH_RECEIPT_FILENAME if receipt_name is None else receipt_name,
     )
-    receipt: dict[str, Any] = {
-        "job_id": job_id,
-        # getattr: the receipt is best-effort and must never break a run.
-        # No bucket: its name carries the cloud account id and receipts get
-        # committed by canary repos (issue #4079).
-        "jobs_prefix": getattr(config, "jobs_prefix", None),
-        "region": getattr(config, "region", None),
-        "profile": getattr(config, "profile", None),
-        "launched_at": datetime.now(timezone.utc).isoformat(),
-        "request_sha256": sim_batch_receipt.receipt_request_sha256(request),
-        "state": None,
-    }
+    receipt = sim_batch_receipt.new_receipt(config, job_id, request, corner_points)
     _write_batch_receipt(receipt_path, receipt)
     return _poll_and_collect(
         config=config,
@@ -3454,7 +3447,7 @@ def _poll_and_collect(
         report = read_collected_report(collected)
         check_ngspice_options_echo(request, report)
         environment = {**environment, **_read_job_identity(collected, request)}
-        environment.update(exit_reason_env(status, report))
+        environment.update(collected_report_env(status, report))
         corners = report.get("corners") or []
         _surface_log_fatal(corners, collected)
         if keep_artifacts:
@@ -3646,10 +3639,14 @@ def _run_batch(
                 **_feature_diagnostic_field(config),
             }
         return corners, engine_version, environment
+    resume_job_id = sim_batch_receipt.resumable_job_id(
+        artifacts_dir, request, len(corner_points), checkpoint is not None
+    )
     try:
         corners, engine_version, environment = _run_batch_job(
             config=config,
-            job_id=new_job_id(),
+            job_id=resume_job_id or new_job_id(),
+            attach=resume_job_id is not None,
             corner_points=corner_points,
             netlist_path=netlist_path,
             timeout_s=timeout_s,
@@ -4011,6 +4008,7 @@ class _BatchFleetRun:
         attach: bool,
         index: int | None = None,
         launch_if_unlaunched: bool = False,
+        resumed: bool = False,
     ) -> _ShardResult:
         # The job id doubles as the shard's artifacts subdirectory, so
         # per-shard artifact trees never collide and each one is traceable
@@ -4021,6 +4019,14 @@ class _BatchFleetRun:
             else self.artifacts_dir
         )
         shard_config = self.shard_config()
+        if resumed and shard_config.interrupted_grace_s > 0:
+            # A recorded job still ``interrupted`` on resume already waited out
+            # the full grace in the prior run: surface it after ~one poll so
+            # ``_try_reattach_shard`` can submit that shard afresh (issue #5371).
+            # ``0`` (grace disabled by the request) is left unbounded.
+            shard_config = replace(
+                shard_config, interrupted_grace_s=_RESUME_INTERRUPTED_GRACE_S
+            )
         try:
             return _run_batch_job(
                 config=shard_config,
@@ -4110,6 +4116,7 @@ class _BatchFleetRun:
                     # Only an entry that says "submitted" (launch never
                     # started) is launched; older maps carry no state.
                     launch_if_unlaunched=prior.get("state") == "submitted",
+                    resumed=True,
                 ),
                 job_id=str(prior["job_id"]),
             )
@@ -4399,46 +4406,6 @@ def _mark_collected(
     environment = result[2]
     if manifest is not None and environment and environment.get("client_collected_at"):
         manifest.mark(index, "collected")
-
-
-def _try_reattach_shard(
-    attach: Callable[
-        [], tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]
-    ],
-    *,
-    job_id: str,
-) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None] | None:
-    """Re-attach to a shard's recorded job (issue #3300), or ``None`` when the
-    caller should submit it afresh: the job was never submitted, its outputs
-    cannot be collected, or it ended in a terminal failure. A client
-    interrupt is never swallowed, and a poll-budget overrun is returned as
-    is -- that job may still be running, so resubmitting would bill it twice.
-    """
-    try:
-        result = attach()
-    except BatchClientInterrupted:
-        raise
-    except BatchError as exc:
-        print(
-            f"klt sim: notice: cannot re-attach batch job {job_id} ({exc}); "
-            "submitting that shard again",
-            file=sys.stderr,
-        )
-        return None
-    corners = result[0]
-    if corners and all(
-        any(
-            d.get("code") == "batch_job_failed" for d in corner.get("diagnostics") or []
-        )
-        for corner in corners
-    ):
-        print(
-            f"klt sim: notice: batch job {job_id} had failed; submitting "
-            "that shard again",
-            file=sys.stderr,
-        )
-        return None
-    return result
 
 
 def _mark_resumed(

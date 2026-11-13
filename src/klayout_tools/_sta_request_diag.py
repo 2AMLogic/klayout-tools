@@ -19,6 +19,7 @@ KNOWN_REQUEST_FIELDS = (
     "sdf",
     "geometry_source",
     "macros",
+    "sdc_check",
 )
 
 #: Appended to the "only N of M nets are named by this SPEF" reason.

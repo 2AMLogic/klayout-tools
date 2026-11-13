@@ -92,6 +92,13 @@ def sim():
         diag.append("simulator binary not found on worker")
     return s
 doc["simulator"] = guard("simulator", sim, {"selected_path": None, "version_banner": None})
+def store_version(vdir):
+    try:
+        d = json.loads(read(os.path.join(os.path.dirname(os.path.realpath(vdir)), ".pdk-store.json"), 65536))
+    except (OSError, ValueError):
+        return None
+    v = d.get("version") if isinstance(d, dict) else None
+    return v.strip() if isinstance(v, str) and v.strip() else None
 def pdk():
     root = os.environ.get("PDK_ROOT")
     p = {"variant": clip(variant) or None, "root": clip(root), "stamp_scheme": None,
@@ -105,6 +112,11 @@ def pdk():
         text = read(stamp, 16384)
     except OSError as exc:
         diag.append("pdk stamp unreadable: " + clip(type(exc).__name__, 80))
+        sv = store_version(os.path.join(root, variant))
+        if sv:
+            p["stamp_scheme"] = "store-version-sha256"
+            p["stamp_sha256"] = hashlib.sha256(sv.encode("utf-8")).hexdigest()
+            p["stamp_text"] = clip("store:" + sv, 1000)
         return p
     norm = "\n".join(l.rstrip() for l in text.replace("\r\n", "\n").strip().split("\n"))
     p["stamp_scheme"] = "sources-sha256"

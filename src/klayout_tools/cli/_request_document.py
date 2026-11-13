@@ -36,6 +36,7 @@ import json
 import os
 from typing import Any
 
+from .._jsonnum import is_int, is_number
 from .._paths import _resolve_relative
 from .._request_fields import check_known_fields  # noqa: F401 (re-exported as reqdoc.check_known_fields)
 
@@ -188,7 +189,7 @@ def get_number(
     value = request.get(key)
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if not is_number(value):
         raise _type_error(verb, key, "a number", value, error_cls)
     return float(value)
 
@@ -200,7 +201,7 @@ def get_int(
     value = request.get(key)
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, int):
+    if not is_int(value):
         raise _type_error(verb, key, "an integer", value, error_cls)
     return value
 
@@ -366,9 +367,7 @@ def get_label_layer_map_as_pairs(
         if (
             not isinstance(layer, list)
             or len(layer) != 2
-            or not all(
-                isinstance(v, int) and not isinstance(v, bool) and v >= 0 for v in layer
-            )
+            or not all(is_int(v) and v >= 0 for v in layer)
         ):
             raise _type_error(
                 verb,

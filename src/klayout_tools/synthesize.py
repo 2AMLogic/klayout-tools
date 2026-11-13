@@ -232,6 +232,8 @@ from typing import Any
 
 from . import env_provenance
 from . import macros as macro_spec
+from . import synthesize_timeout as ytimeout
+from ._jsonnum import is_int, is_number
 from ._paths import _load_request_json, _reject_unknown_keys, validate_request_shape
 from ._provenance import (
     INPUT_ROLE_SOURCE,
@@ -976,6 +978,7 @@ _ALLOWED_REQUEST_KEYS = frozenset(
         "parameters",
         "sv_frontend",
         "defines",
+        "yosys_timeout_s",
         "macros",
     }
 )
@@ -1031,6 +1034,7 @@ def _validate_outputs(request: dict[str, Any], request_path: str) -> None:
             )
 
 
+@ytimeout.scoped_yosys_timeout
 def run_synthesize(
     request_path: str,
     *,
@@ -1157,6 +1161,7 @@ def run_synthesize(
     )
 
     sv_frontend = validate_sv_frontend(request.get("sv_frontend"), SynthesizeError)
+    yosys_timeout_s = ytimeout.bind_yosys_timeout(request, SynthesizeError)
 
     pdk_spec = request["pdk"]
     if not isinstance(pdk_spec, dict):
@@ -1245,6 +1250,7 @@ def run_synthesize(
     # Issue #4196: likewise for preprocessor defines (a separate field, so the
     # input content hash of existing committed reports is unchanged).
     provenance["defines"] = dict(defines)
+    provenance.update(ytimeout.timeout_fields(yosys_timeout_s))
     output_dir = _create_run_directory(
         request_dir, request, ignore_outputs_dir=_scratch_run_dir
     )
@@ -1624,6 +1630,7 @@ def run_synthesize(
             executed_script_path, repo_root=repo_root
         ),
         "provenance": provenance,
+        **ytimeout.timeout_fields(yosys_timeout_s),
         "equivalence": equivalence,
         "restructuring": restructuring,
         "arithmetic": arithmetic,
@@ -2320,8 +2327,7 @@ def _validate_clock_entry(entry: Any, where: str) -> dict[str, Any]:
     port = entry.get("port")
     if not isinstance(port, str) or not port.strip():
         raise SynthesizeError(f"{where}.port must be a non-empty string")
-    period = entry.get("period_ns")
-    if isinstance(period, bool) or not isinstance(period, (int, float)):
+    if not is_number(period := entry.get("period_ns")):
         raise SynthesizeError(
             f"{where}.period_ns must be a positive number (nanoseconds)"
         )
@@ -3063,27 +3069,18 @@ def _write_script_text(script_path: str, text: str) -> None:
         ) from exc
 
 
-#: Default per-invocation wall-clock timeout for a single ``yosys -s
-#: <script>`` run (:func:`_run_yosys`), overridable per call via its own
-#: ``timeout_s`` keyword. Mirrors ``klayout_tools.equiv.DEFAULT_TIMEOUT_S``'s
-#: role (bound a hang, not a slow-but-legitimate run) but is deliberately
-#: more generous: a full ``synth``/``dfflibmap``/``abc`` mapping pass over a
-#: real design does substantially more work than ``equiv``'s SAT proof, and
-#: in ``"auto"`` arithmetic-architecture mode (issue #1775, following
-#: #1772) this same budget is paid up to ~10+ times per ``klt synthesize``
-#: request, so it must not be so tight that a legitimately-slow-but-healthy
-#: trial synthesis is mistaken for a hang. A fixed module constant (no
-#: request-level override/CLI flag) was chosen over threading a new
-#: ``yosys_timeout_s`` end-to-end alongside the existing ``equiv_timeout_s``
-#: precedent -- lower churn, and every call site already goes through this
-#: one function.
+#: Default per-invocation wall-clock timeout for one ``yosys -s <script>`` run
+#: (:func:`_run_yosys`); a request overrides it with ``yosys_timeout_s``
+#: (:mod:`klayout_tools.synthesize_timeout`). Generous on purpose: a full
+#: ``synth``/``abc`` pass does more work than ``equiv``'s SAT proof, and
+#: ``arithmetic: auto`` pays this budget ~10+ times per request.
 DEFAULT_YOSYS_TIMEOUT_S = 300.0
 
 
 def _run_yosys(
     script_path: str,
     *,
-    timeout_s: float | None = DEFAULT_YOSYS_TIMEOUT_S,
+    timeout_s: float | None = ytimeout.UNSET,
     cwd: str | None = None,
 ) -> str:
     """Invoke ``yosys -s <script_path>`` and raise :class:`SynthesizeError`
@@ -3117,6 +3114,7 @@ def _run_yosys(
     default: the invoking process's cwd), correct for every script that
     embeds only absolute paths.
     """
+    timeout_s = ytimeout.resolve_timeout(timeout_s, DEFAULT_YOSYS_TIMEOUT_S)
     try:
         completed = subprocess.run(
             ["yosys", "-s", script_path],
@@ -3933,7 +3931,7 @@ def _resolve_expected_latches(request: dict[str, Any]) -> int:
     if not isinstance(structural_request, dict):
         raise SynthesizeError("request.structural must be a JSON object")
     expected = structural_request.get("expected_latches", 0)
-    if isinstance(expected, bool) or not isinstance(expected, int) or expected < 0:
+    if not is_int(expected) or expected < 0:
         raise SynthesizeError(
             "request.structural.expected_latches must be a non-negative integer"
         )

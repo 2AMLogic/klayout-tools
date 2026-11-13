@@ -117,7 +117,7 @@ No `schema_version` bump. See [`docs/cli/sim.md`](cli/sim.md)'s
 `measurements[].search` (issue #4121) is a scalar form like `snm`: `value` stays
 a number (the midpoint of the converged bisection bracket) and is graded by
 `limits`, `monte_carlo` statistics and `klt yield` unchanged. The response
-entry gains one optional `search` object (`source`, `direction`, `iterations`,
+entry gains one optional `search` object (`source` or `param`, `direction`, `iterations`,
 `lo`, `hi`, `converged`), present on a converged entry and, with
 `converged: false`, on an errored one that ran probes; absent otherwise. A
 failure is `status: "error"` with `value: null` and a `code: "measurement"`
@@ -592,6 +592,11 @@ worker-observed `worker_environment.pdk` so the two are never confused;
 `cli/sim.md`'s option and `environment` tables are the field-level record.
 Additive fields only; no `schema_version` bump (issue #4020).
 
+`environment.remote` (and each `fleet[]` member) also gains the additive
+`runner_models_lib_sha256` (string or `null`) and `models_lib_comparison`
+(`status` `match` / `mismatch` / `not_comparable`); no `schema_version` bump
+(issue #5321).
+
 **No bucket in batch reports (issue #3777).** `environment.remote` (and each
 `fleet[]` member) no longer carries `bucket` on any batch verb. The bucket name
 embeds the fleet's AWS account number and reports are committed as evidence.
@@ -935,7 +940,7 @@ stability statement, concrete precedents, and drift-detection guidance, and
     provenance for any other install is byte-identical to before. `version`
     stays `fetched:<tag>`. Like `version`, excluded from `--rerun` drift
     comparison. Additive; no `schema_version` bump. The fleet-bundle
-    `.pdk-store.json` is written outside this repo.
+    `.pdk-store.json` is read, never written, here (issue #5318).
   - `version` (issue #3070) is a self-describing stamp, or `null` when no
     revision can be read mechanically (never guessed): an open_pdks `SOURCES`
     file (the lines joined with `"; "`, unchanged), else `fetched:<marker>`
@@ -944,7 +949,9 @@ stability statement, concrete precedents, and drift-detection guidance, and
     `-dirty` suffix when the work tree has uncommitted changes — when the
     variant dir or its parent *is* a git work tree root. A tree nested inside
     an unrelated checkout (e.g. klt's own) never reports that checkout's
-    `HEAD`; a missing or failing `git` yields `null`.
+    `HEAD`; a missing or failing `git` yields `null`. Last, a bundle's
+    `.pdk-store.json` string `version` (one level above the real variant dir)
+    gives `store:<version>`; absent/malformed yields `null`.
   - `linked_trees` (issue #3070) — present **only** when the model library the
     run resolved (`provenance.deck`) realpath-resolves into a *different* PDK
     variant tree than `name` (a cross-variant symlink): a list of

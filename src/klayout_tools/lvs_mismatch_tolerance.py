@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, NamedTuple
 
+from ._jsonnum import is_number
+
 if TYPE_CHECKING:
     from .lvs_mismatch import ExcludedParameters
 
@@ -41,7 +43,7 @@ def _parse_parameter_tolerance(options: dict[str, Any]) -> float | None:
     value = options["parameter_tolerance"]
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if not is_number(value):
         raise LvsError(
             "options.parameter_tolerance must be a number (a relative "
             "tolerance expressed as a fraction, e.g. 0.001 for 0.1%); got "

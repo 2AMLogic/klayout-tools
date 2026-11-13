@@ -56,15 +56,16 @@ See ``docs/cli/characterize.md`` for the request/response contract.
 
 from __future__ import annotations
 
-import json
 import os
 import re
+from functools import partial
 from typing import Any
 
 from . import liberty_writer, sim
 from ._paths import _load_request_json, _resolve_relative, fold_spice_continuations
 from ._provenance import INPUT_ROLE_NETLIST, build_provenance
 from .characterize_arcs import DerivedArc, FunctionError, derive_arcs
+from .characterize_capacity import capacity_shard, with_batch_passthrough
 from .characterize_cards import (
     _POWER_CARDS,
     measurement_cards,
@@ -87,7 +88,10 @@ from .characterize_instances import (
     _metered_rail_nodes,
     _rail_nodes,
 )
+from .characterize_leg import best_effort_pdk, resolve_resume, run_sim_leg
 from .characterize_osdi import resolve_osdi_preload
+from .characterize_pool import run_cells_partitioned
+from .characterize_probe import probe_netlist_cells as _probe_netlist_cells
 from .characterize_sequential import (
     SequentialSpecError,
     clock_pwl_line,
@@ -96,8 +100,8 @@ from .characterize_sequential import (
     resolve_sequential,
     stimulus_schedule,
 )
+from .characterize_split import resolve_split_grid, run_cell_legs
 from .env_provenance import repo_relative_path
-from .pdk import PdkNotFoundError, find_pdk
 
 #: Version of this command's JSON response shape (per-command, per
 #: ``docs/json-contract.md``).
@@ -162,6 +166,11 @@ def run_characterize(
     keep_artifacts: bool | None = None,
     cells: list[str] | tuple[str, ...] | None = None,
     compare_to: str | None = None,
+    resume: bool | None = None,
+    capacity_wait_s: float | None = None,
+    timeout_s: float | None = None,
+    keep_going: bool = False,
+    split_grid: int | None = None,
 ) -> dict[str, Any]:
     """Characterize one cell -- or a batch of cells -- at one corner and emit
     one NLDM ``.lib`` covering all of them.
@@ -187,25 +196,35 @@ def run_characterize(
     simulation artifacts under ``<outdir>/cells/<cell>/``). ``lib_path``
     overrides the emitted Liberty path (default: ``<outdir>/<library
     name>.lib``, or the request's own ``output.lib``). ``backend``/
-    ``keep_artifacts`` are forwarded to ``klt sim``.
+    ``keep_artifacts`` are forwarded to ``klt sim``. ``capacity_wait_s``
+    (issue #5348; ``--wait-for-capacity``) is forwarded to every ``klt sim``
+    call -- each cell's main sim and each constraint deck -- so a
+    ``batch_no_capacity`` burst can be waited out; omitted, it is not passed.
 
-    Raises :class:`CharacterizeError` for every failure mode; never returns
-    a partially-populated table, and a batch run in which any one cell fails
-    emits nothing (the error names the cell).
+    ``resume`` (#5350, else ``options.resume``): see :mod:`characterize_leg`.
+    ``split_grid`` (#5410): :mod:`characterize_split`. ``timeout_s`` (#5380)
+    overrides ``options.timeout_s``; ``keep_going``
+    (#5380, batch) lists failed cells in ``failed_cells``, emitting the rest.
+    Raises :class:`CharacterizeError` for every failure mode; a batch run in
+    which a cell fails emits nothing unless ``keep_going``.
     """
+    batch_shard = capacity_shard(capacity_wait_s, backend)
     request = _load_request(request_path)
     request_dir = os.path.dirname(os.path.abspath(request_path)) or os.getcwd()
     batch = "cells" in request
-    if cells and not batch:
+    if (cells or keep_going) and not batch:
         raise CharacterizeError(
-            "--cell selects cells out of a batch request's `cells` array; this "
-            "request uses the single-cell `cell` form"
+            "--cell/--keep-going select among a batch request's `cells` array; "
+            "this request uses the single-cell `cell` form"
         )
 
     corner = _resolve_corner(request)
     grid = _resolve_grid(request)
     thresholds = _resolve_thresholds(request)
-    options = _resolve_options(request, grid, thresholds, request_dir, backend=backend)
+    options = _resolve_options(
+        request, grid, thresholds, request_dir, backend, timeout_s, split_grid
+    )
+    resume = resolve_resume(request, resume)
 
     # Resolve *every* cell before simulating *any*: a typo in the fifth
     # cell's pin list must not cost the first four cells' simulation time.
@@ -221,31 +240,39 @@ def run_characterize(
     work_dir = _resolve_outdir(outdir, request, request_dir)
     os.makedirs(work_dir, exist_ok=True)
 
-    results: list[dict[str, Any]] = []
-    for cell, arcs in resolved:
-        cell_dir = (
-            os.path.join(work_dir, "cells", slug(cell["name"])) if batch else work_dir
-        )
+    def _run_one(index: int) -> dict[str, Any]:
+        cell, arcs = resolved[index]
+        cell_dir = os.path.join(work_dir, "cells", slug(cell["name"]))
         try:
-            results.append(
-                _characterize_cell(
-                    cell=cell,
-                    arcs=arcs,
-                    corner=corner,
-                    grid=grid,
-                    thresholds=thresholds,
-                    options=options,
-                    request=request,
-                    request_dir=request_dir,
-                    work_dir=cell_dir,
-                    backend=backend,
-                    keep_artifacts=keep_artifacts,
-                )
+            return _characterize_cell(
+                cell=cell,
+                arcs=arcs,
+                corner=corner,
+                grid=grid,
+                thresholds=thresholds,
+                options=options,
+                request=request,
+                request_dir=request_dir,
+                work_dir=cell_dir if batch else work_dir,
+                backend=backend,
+                keep_artifacts=keep_artifacts,
+                resume=resume,
+                batch_shard=batch_shard,
             )
         except CharacterizeError as exc:
             if not batch:
                 raise
             raise CharacterizeError(f"cell '{cell['name']}': {exc}") from exc
+
+    results, failed_cells = run_cells_partitioned(
+        _run_one,
+        [cell["name"] for cell, _ in resolved],
+        backend,
+        request,
+        capacity_wait_s,
+        CharacterizeError,
+        keep_going,
+    )
 
     library = _build_library(
         request=request,
@@ -310,6 +337,7 @@ def run_characterize(
         comparison=comparison,
         request=request,
         batch=batch,
+        failed_cells=failed_cells,
     )
 
 
@@ -326,6 +354,8 @@ def _characterize_cell(
     work_dir: str,
     backend: str | None,
     keep_artifacts: bool | None,
+    resume: bool = False,
+    batch_shard: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run one cell's whole grid (timing, power, and leakage) as a single
     ``klt sim`` request and reshape the results into tables.
@@ -334,7 +364,8 @@ def _characterize_cell(
     is this function in a loop, each cell in its own ``work_dir``.
     """
     os.makedirs(work_dir, exist_ok=True)
-    plan = _build_stimulus_plan(
+    build_plan = partial(
+        _build_stimulus_plan,
         cell=cell,
         corner=corner,
         grid=grid,
@@ -342,73 +373,57 @@ def _characterize_cell(
         options=options,
         arcs=arcs,
     )
-    testbench_path = os.path.join(work_dir, "testbench.spice")
-    with open(testbench_path, "w", encoding="utf-8") as handle:
-        handle.write(plan["netlist_text"])
+    plan = build_plan()
 
-    sim_request = _build_sim_request(
+    build_request = partial(
+        _build_sim_request,
         request=request,
         request_dir=request_dir,
-        testbench_path=testbench_path,
         corner=corner,
-        plan=plan,
         options=options,
         keep_artifacts=keep_artifacts,
     )
-    sim_request_path = os.path.join(work_dir, "sim-request.json")
-    with open(sim_request_path, "w", encoding="utf-8") as handle:
-        json.dump(sim_request, handle, indent=2)
-        handle.write("\n")
 
-    try:
-        sim_report = sim.run_sim(
-            sim_request_path,
-            artifacts_dir=os.path.join(work_dir, "sim"),
-            backend=backend,
-        )
-    except sim.SimError as exc:
-        raise CharacterizeError(f"simulation failed: {exc}") from exc
-
-    sim_report_path = os.path.join(work_dir, "sim-report.json")
-    with open(sim_report_path, "w", encoding="utf-8") as handle:
-        json.dump(sim_report, handle, indent=2)
-        handle.write("\n")
-
-    values = _extract_measurements(sim_report, sim_report_path)
-    tables = _build_tables(plan, grid, values, thresholds)
+    legs = run_cell_legs(
+        work_dir=work_dir,
+        plan=plan,
+        split_grid=options["split_grid"],
+        slew_count=len(grid["input_transition_ns"]),
+        build_plan=lambda rows: build_plan(slew_rows=rows),
+        build_request=build_request,
+        extract=_extract_measurements,
+        error_cls=CharacterizeError,
+        backend=backend,
+        resume=resume,
+        batch_shard=batch_shard,
+    )
+    tables = _build_tables(plan, grid, legs.values, thresholds)
     _check_settle_margin(plan, grid, tables, options)
-    power_tables = _build_power_tables(plan, grid, values, corner)
-    leakage = _build_leakage(plan, values, corner)
-    pin_capacitance = _build_pin_capacitance(plan, values, corner)
+    power_tables = _build_power_tables(plan, grid, legs.values, corner)
+    leakage = _build_leakage(plan, legs.values, corner)
+    pin_capacitance = _build_pin_capacitance(plan, legs.values, corner)
 
     def run_deck(text: str, measurements: list, label: str, stop_ns: float) -> dict:
         deck_dir = os.path.join(work_dir, "constraints", label)
         os.makedirs(deck_dir, exist_ok=True)
         deck_path = os.path.join(deck_dir, "testbench.spice")
-        with open(deck_path, "w", encoding="utf-8") as handle:
-            handle.write(text)
         deck_plan = {
             "measurements": measurements,
             "window": {**plan["window"], "stop_ns": stop_ns},
         }
-        deck_request = _build_sim_request(
-            request=request,
-            request_dir=request_dir,
-            testbench_path=deck_path,
-            corner=corner,
-            plan=deck_plan,
-            options=options,
-            keep_artifacts=keep_artifacts,
-        )
+        deck_request = build_request(plan=deck_plan, testbench_path=deck_path)
         request_path = os.path.join(deck_dir, "sim-request.json")
-        with open(request_path, "w", encoding="utf-8") as handle:
-            json.dump(deck_request, handle, indent=2)
-            handle.write("\n")
         try:
-            report = sim.run_sim(
-                request_path,
-                artifacts_dir=os.path.join(deck_dir, "sim"),
+            report = run_sim_leg(
+                testbench_path=deck_path,
+                testbench_text=text,
+                sim_request=deck_request,
+                sim_request_path=request_path,
+                sim_report_path=os.path.join(deck_dir, "sim-report.json"),
+                sim_dir=os.path.join(deck_dir, "sim"),
                 backend=backend,
+                resume=resume,
+                **(batch_shard or {}),
             )
         except sim.SimError as exc:
             raise CharacterizeError(f"constraint simulation failed: {exc}") from exc
@@ -442,10 +457,10 @@ def _characterize_cell(
         "power_tables": power_tables,
         "leakage": leakage,
         "pin_capacitance": pin_capacitance,
-        "testbench_path": testbench_path,
-        "sim_request_path": sim_request_path,
-        "sim_report_path": sim_report_path,
-        "sim_report": sim_report,
+        "testbench_path": legs.testbench_path,
+        "sim_request_path": legs.sim_request_path,
+        "sim_report_path": legs.sim_report_path,
+        "sim_report": legs.sim_report,
     }
 
 
@@ -860,6 +875,8 @@ def _resolve_options(
     thresholds: liberty_writer.Thresholds,
     request_dir: str,
     backend: str | None = None,
+    timeout_s: float | None = None,
+    split_grid: int | None = None,
 ) -> dict[str, Any]:
     spec = request.get("options") or {}
     if not isinstance(spec, dict):
@@ -884,7 +901,8 @@ def _resolve_options(
     step_ns = _positive_number(step_ns, "request.options.tran_step_ns")
 
     timeout_s = _positive_number(
-        spec.get("timeout_s", DEFAULT_TIMEOUT_S), "request.options.timeout_s"
+        spec.get("timeout_s", DEFAULT_TIMEOUT_S) if timeout_s is None else timeout_s,
+        "request.options.timeout_s" if timeout_s is None else "--timeout-s",
     )
     keep_artifacts = spec.get("keep_artifacts", False)
     if not isinstance(keep_artifacts, bool):
@@ -898,6 +916,7 @@ def _resolve_options(
         "settle_ns": settle_ns,
         "tran_step_ns": step_ns,
         "timeout_s": timeout_s,
+        "split_grid": resolve_split_grid(spec, split_grid, CharacterizeError),
         "keep_artifacts": keep_artifacts,
         "ramps_ns": tuple(ramps),
         "osdi_preload": resolve_osdi_preload(request, spec, request_dir, backend),
@@ -1084,8 +1103,11 @@ def _build_stimulus_plan(
     thresholds: liberty_writer.Thresholds,
     options: dict[str, Any],
     arcs: tuple[DerivedArc, ...],
+    slew_rows: frozenset[int] | None = None,
 ) -> dict[str, Any]:
     """Generate the single-deck testbench and its ``.meas`` card set.
+
+    ``slew_rows`` (#5410): only those slew rows (``None`` = all).
 
     One cell instance per (arc, input transition, output load) triple, each
     with a private ramp source and load capacitor on a private input/output
@@ -1166,6 +1188,8 @@ def _build_stimulus_plan(
     for arc_index, arc in enumerate(arcs):
         side_state = _full_side_state(arc, cell)
         for slew_index, transition_ns in enumerate(grid["input_transition_ns"]):
+            if slew_rows is not None and slew_index not in slew_rows:
+                continue
             ramp_ns = ramps[slew_index]
             for load_index, load_pf in enumerate(grid["output_load_pf"]):
                 tag = f"a{arc_index}s{slew_index}l{load_index}"
@@ -1447,7 +1471,7 @@ def _build_sim_request(
     netlist_source = request.get("netlist_source")
     if netlist_source is not None:
         sim_request["netlist_source"] = netlist_source
-    return sim_request
+    return with_batch_passthrough(sim_request, request)
 
 
 def _rebase_models(models: dict[str, Any], request_dir: str) -> dict[str, Any]:
@@ -2106,46 +2130,6 @@ def roundtrip_check_cells(
     }
 
 
-def _probe_netlist_cells(
-    cells: list[tuple[str, tuple[str, ...], tuple[str, ...]]],
-) -> str:
-    """A structural wrapper instantiating each cell once (``u0``, ``u1``,
-    ...). A single cell keeps its own pin names as the module's ports (the
-    #2502 shape); several cells get per-instance ``u<i>_<pin>`` ports so no
-    two instances share a net."""
-    single = len(cells) == 1
-
-    def port(index: int, pin: str) -> str:
-        return pin if single else f"u{index}_{pin}"
-
-    inputs = [
-        port(index, pin) for index, (_, ins, _) in enumerate(cells) for pin in ins
-    ]
-    outputs = [
-        port(index, pin) for index, (_, _, outs) in enumerate(cells) for pin in outs
-    ]
-    lines = [
-        "/* Generated by `klt characterize` -- a wrapper instantiating each",
-        " * characterized cell once, whose only purpose is to make",
-        " * native/statime's Liberty reader parse and interpolate the emitted",
-        " * .lib. Not a design. */",
-        f"module klt_characterize_probe({', '.join(inputs + outputs)});",
-    ]
-    for name in inputs:
-        lines.append(f"  input {name};")
-        lines.append(f"  wire {name};")
-    for name in outputs:
-        lines.append(f"  output {name};")
-        lines.append(f"  wire {name};")
-    for index, (cell_name, ins, outs) in enumerate(cells):
-        lines.append(f"  {cell_name} u{index} (")
-        connections = [f"    .{pin}({port(index, pin)})" for pin in ins + outs]
-        lines.append(",\n".join(connections))
-        lines.append("  );")
-    lines.append("endmodule")
-    return "\n".join(lines) + "\n"
-
-
 # --------------------------------------------------------------------------- #
 # Response
 # --------------------------------------------------------------------------- #
@@ -2241,6 +2225,7 @@ def _build_response(
     comparison: dict[str, Any] | None,
     request: dict[str, Any],
     batch: bool,
+    failed_cells: list[dict[str, str]],
 ) -> dict[str, Any]:
     grid_points = len(grid["input_transition_ns"]) * len(grid["output_load_pf"])
     arc_count = sum(len(result["arcs"]) for result in results)
@@ -2318,8 +2303,9 @@ def _build_response(
         },
         "simulation": single["simulation"] if single else None,
         "comparison": comparison,
+        "failed_cells": failed_cells,
         "provenance": build_provenance(
-            pdk=_best_effort_pdk(request),
+            pdk=best_effort_pdk(request),
             # Batch mode pins the first cell's netlist -- the whole batch in
             # the common case of one library-wide SPICE file; every
             # `cells[].cell.netlist` names its own file regardless.
@@ -2327,25 +2313,3 @@ def _build_response(
             input_role=INPUT_ROLE_NETLIST,
         ),
     }
-
-
-def _best_effort_pdk(request: dict[str, Any]) -> dict[str, Any] | None:
-    """Resolve ``request.models.pdk``/``pdk_root`` for the provenance block,
-    or ``None``.
-
-    Best-effort by design, matching ``klt sim``'s own treatment of the same
-    field: a request pointing straight at a model library with no PDK
-    variant is legitimate, and a PDK that no longer resolves must not fail a
-    run whose simulation already completed.
-    """
-    models = request.get("models")
-    if not isinstance(models, dict):
-        return None
-    variant = models.get("pdk")
-    root = models.get("pdk_root")
-    if variant is None and root is None:
-        return None
-    try:
-        return find_pdk(variant=variant, root=root)
-    except PdkNotFoundError:
-        return None

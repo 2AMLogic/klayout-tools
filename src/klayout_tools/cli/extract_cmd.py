@@ -46,6 +46,7 @@ import sys
 from typing import Any
 
 from .. import extract_batch
+from .._jsonnum import is_int
 from .._paths import looks_like_request_document
 from ..env_provenance import render_path_field
 from ..extract import (
@@ -69,6 +70,7 @@ from .output import (
     EXIT_USAGE_ERROR,
     emit_error,
     emit_success,
+    fail_on_unmodelled_exit,
     render_check_text,
     render_rerun_drift,
 )
@@ -271,7 +273,7 @@ def _request_int(request: dict, key: str) -> int | None:
     value = request.get(key)
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, int):
+    if not is_int(value):
         raise ExtractError(
             f"`klt extract` request field {key!r} must be an integer (got "
             f"{type(value).__name__}: {value!r})"
@@ -380,6 +382,7 @@ _REQUEST_FIELD_DESTS = {
         "critical_net_excludes",
         "parasitics_net_patterns",
         "strict_net_patterns",
+        "fail_on_unmodelled",
         "parasitic_variants",
         "parasitics_top_cell_only",
         "resistance_graph",
@@ -495,6 +498,7 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
             "critical_net_excludes": _str_list("critical_net_excludes"),
             "parasitics_net_patterns": _str_list("parasitics_net_patterns"),
             "strict_net_patterns": _bool("strict_net_patterns"),
+            "fail_on_unmodelled": _bool("fail_on_unmodelled"),
             "parasitic_variants": _str_list("parasitic_variants"),
             "parasitics_top_cell_only": _bool("parasitics_top_cell_only"),
             "resistance_graph": _bool("resistance_graph"),
@@ -749,28 +753,20 @@ def run(args: argparse.Namespace) -> int:
             # post-extraction for equal `params`. `None` when the flag was
             # never given, unchanged from every call site that predates it.
             matched_device_groups=matched_device_groups,
-            # `--def-pins` (issue #1390): the automatic, DEF-merge-aware
-            # counterpart to `--pins` -- derives the declared top-level
-            # port set from a routed DEF's own `PINS` section instead of
-            # requiring a caller to hand-derive it. `None` when the flag
-            # was never given, unchanged from every call site that
-            # predates it.
+            # `--def-pins` (issue #1390): the DEF-merge-aware counterpart to
+            # `--pins` -- derives the declared top-level port set from a
+            # routed DEF's `PINS` section. `None` when never given.
             def_pins=def_pins,
-            # `--rename-declared-pins` (issue #2854): renames each
-            # surviving promoted pin net to its declared name, so the
-            # written `.SUBCKT` header carries canonical interface names.
-            # `False` when the flag was never given, unchanged from every
-            # call site that predates it.
+            # `--rename-declared-pins` (issue #2854): renames each surviving
+            # promoted pin net to its declared name, so the written
+            # `.SUBCKT` header carries canonical names. `False` when never given.
             rename_declared_pins=args.rename_declared_pins,
             # `--tie-declared-pins` (issue #4383).
             tie_declared_pins=args.tie_declared_pins,
             # `--pin-source-cells` (issue #1513): the positional, probe-based
-            # declared-pin mechanism for a `klt gen-compose`d assembly with
-            # no governing top-level DEF -- derives the declared top-level
-            # port set from which specific labels physically live inside the
-            # named cell(s), instead of matching a promoted net's string.
-            # `None` when the flag was never given, unchanged from every
-            # call site that predates it.
+            # declared-pin mechanism for a `klt gen-compose`d assembly with no
+            # governing top-level DEF -- derives the port set from which labels
+            # live inside the named cell(s). `None` when never given.
             pin_source_cells=pin_source_cells,
             # `--subcircuit`/`--subcircuit-output` (issue #2245): additionally
             # writes one named `.SUBCKT <cell>` deck for a sub-cell's own
@@ -795,6 +791,9 @@ def run(args: argparse.Namespace) -> int:
             details=getattr(exc, "details", None),
         )
 
+    if (rc := fail_on_unmodelled_exit(report, args)) is not None:  # issue #5388
+        return rc
+
     emit_success(report, args.format, _print_text)
 
     return EXIT_OK
@@ -811,10 +810,7 @@ def _run_batch(args: argparse.Namespace) -> dict[str, Any]:
             request, expected=REQUEST_SCHEMA, verb="extract", error_cls=ExtractError
         )
         reqdoc.check_known_fields(
-            request,
-            tuple(_REQUEST_FIELD_DESTS),
-            verb="extract",
-            error_cls=ExtractError,
+            request, tuple(_REQUEST_FIELD_DESTS), verb="extract", error_cls=ExtractError
         )
         reqdoc.reject_argv_flags(args, verb="extract", error_cls=ExtractError)
         output = reqdoc.get_path(

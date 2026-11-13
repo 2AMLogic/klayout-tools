@@ -328,12 +328,40 @@ def _apply_top_level_pin_anchors(
             continue
         comparer.same_nets(layout_circuit, reference_circuit, net_a, net_b, True)
         anchors.append(_TopLevelPinAnchor(pin_name, layout_name, reference_name))
-    return anchors, _top_level_pin_anchor_warnings(anchors, sorted(families))
+    return anchors, _top_level_pin_anchor_warnings(
+        anchors,
+        sorted(families),
+        _layout_only_pins(layout_circuit, reference_circuit, families),
+    )
+
+
+def _layout_only_pins(
+    layout_circuit: Any, reference_circuit: Any, families: set[str]
+) -> list[str]:
+    """Sorted, upper-cased layout top-level pin names with no same-named
+    reference pin (issue #5396) -- e.g. the DEF-named internal nets
+    ``klt extract --def-net-names`` lists as pins, which a gate-level Verilog
+    reference (ports only) never declares. Repeated-label family members are
+    left out: they are disclosed separately as skipped families."""
+    reference_names = {
+        (pin.name() or "").upper() for pin in reference_circuit.each_pin()
+    }
+    names: set[str] = set()
+    for pin in layout_circuit.each_pin():
+        name = (pin.name() or "").upper()
+        if not name or name in reference_names:
+            continue
+        suffixed = _REPEATED_LABEL_SUFFIX.match(name)
+        if (suffixed.group(1) if suffixed else name) in families:
+            continue
+        names.add(name)
+    return sorted(names)
 
 
 def _top_level_pin_anchor_warnings(
     anchors: Sequence[_TopLevelPinAnchor],
     skipped_families: Sequence[str] = (),
+    layout_only_pins: Sequence[str] = (),
 ) -> list[dict[str, Any]]:
     """The single ``severity: "warning"``
     :data:`CATEGORY_TOPOLOGY_TOP_LEVEL_PINS_ANCHORED` disclosure for a run
@@ -355,6 +383,13 @@ def _top_level_pin_anchor_warnings(
         "pin_count": len(pins),
         "pins_truncated": len(sample) < len(pins),
     }
+    if layout_only_pins:
+        # Issue #5396: additive, present only when non-empty so a report
+        # without layout-only pins stays byte-identical.
+        only_sample = list(layout_only_pins[:_ANCHORED_PIN_SAMPLE_LIMIT])
+        details["layout_only_pins"] = only_sample
+        details["layout_only_pin_count"] = len(layout_only_pins)
+        details["layout_only_pins_truncated"] = len(only_sample) < len(layout_only_pins)
     family_note = ""
     if skipped_families:
         # Issue #4798: `PAD`/`PAD$1`/... are one repeated label whose `$k`

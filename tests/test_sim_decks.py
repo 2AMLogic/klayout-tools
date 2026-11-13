@@ -1360,7 +1360,7 @@ class TestBatchDispatch:
         assert remote["runner_compatibility"] == "mismatch"
 
     def test_job_command_captures_stderr_from_the_first_line(self):
-        cmd = sd._deck_batch_command("enforce")
+        cmd = sd._deck_batch_command("enforce", {}, [])
         assert cmd.startswith(sb._job_stderr_capture_prefix())
         assert cmd.count('> "$EDA_OUTPUT_DIR/report.json"') == 1
 

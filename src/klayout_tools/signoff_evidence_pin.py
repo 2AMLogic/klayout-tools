@@ -7,6 +7,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from ._jsonnum import is_int
 from ._provenance import sha256_file
 
 #: ``citation.content_hash_basis`` when the live hash is the grader's own
@@ -106,11 +107,12 @@ def generic_binding_check(
     ``t1_item`` absent (anchored item only) or not an integer,
     ``provenance.input.path`` unusable, and no manifest ``content_hash``."""
     declared = envelope.get("t1_item")
-    is_int = isinstance(declared, int) and not isinstance(declared, bool)
-    if is_int and declared != item_id:
+    if is_int(declared) and declared != item_id:
         return "wrong_item", []
     missing: list[str] = []
-    if (declared is None and anchored) or (declared is not None and not is_int):
+    if (declared is None and anchored) or (
+        declared is not None and not is_int(declared)
+    ):
         missing.append(MISSING_T1_ITEM)
     if anchored and not binding_present:
         missing.append(MISSING_INPUT_PATH)

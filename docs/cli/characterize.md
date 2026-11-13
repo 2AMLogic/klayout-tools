@@ -6,7 +6,10 @@ SPICE-driven NLDM timing **and power** characterization of one standard cell
 
 ```
 klt characterize <request> [-o OUTDIR] [--lib PATH] [--backend BACKEND]
+                          [--wait-for-capacity SECONDS]
                           [--keep-artifacts] [--cell NAME ...]
+                          [--resume] [--timeout-s SECONDS] [--split-grid N]
+                          [--keep-going]
                           [--compare-to LIB] [--format text|json]
 ```
 
@@ -48,12 +51,59 @@ positional file args. Relative paths inside it (`cell.netlist`,
   `batch`/`remote` with `options.osdi_preload`, see
   [OSDI (Verilog-A) model preload](#osdi-verilog-a-model-preload) for the
   `$PDK_ROOT/<rel>` spelling.
+- `--wait-for-capacity SECONDS` — with `--backend batch`, wait up to SECONDS
+  (>= 0) for fleet capacity when a launch is refused (`batch_no_capacity` /
+  `batch_concurrency_cap`), as in `klt sim`. Forwarded to **every** `klt sim`
+  the run makes: each cell's main sweep and each constraint deck. `0` means
+  one attempt; negative values and a non-`batch` `--backend` are refused
+  before any I/O. Omitted, nothing is passed.
 - `--keep-artifacts` — keep the per-corner ngspice log/deck under
   `<outdir>/sim/`.
 - `--cell` — characterize only the named cell out of a batch request's
   `cells` array. Repeatable; default every declared cell. A name the request
   does not declare is an error (never a silent no-op), and `--cell` on a
   single-cell (`cell`) request is an error too.
+- `--resume` — recover an interrupted run (issue #5350). Every cell and
+  constraint deck runs under a deterministic directory
+  (`<outdir>/cells/<cell>/`, `.../constraints/<label>/`). With `--resume`, a
+  leg whose generated testbench and sim request are unchanged and whose
+  `sim-report.json` is already on disk is reloaded, not re-simulated; the
+  remaining legs run through `klt sim --resume`, so with `--backend batch` a
+  leg whose job was already submitted (recorded in that leg's
+  `sim/batch-receipt.json`) re-attaches to it instead of paying for the fleet
+  again. Changed inputs never reuse a stale report or job: they resubmit.
+  Overrides the request's `options.resume`; on a non-batch backend it reuses
+  collected legs and otherwise behaves as `klt sim --resume` does.
+- `--timeout-s SECONDS` — per-sim wall-clock timeout (issue #5380). Overrides
+  the request's `options.timeout_s` (default 900) for every sim the run
+  generates — cell sims and constraint decks — with the same precedence as
+  `klt sim --timeout-s`. A non-positive value is an error (exit `1`). The
+  `timeout_preflight_warning` in a sim report predicts when the default is too
+  small. The timeout is not part of `--resume`'s reuse key (issue #5410):
+  changing only `--timeout-s` on a resumed run reuses collected legs and
+  re-runs only failed ones.
+- `--split-grid N` — split each cell's input-slew rows into at most `N`
+  contiguous chunks (`min(N, rows)`), each its own sim leg (its own fleet job
+  with `--backend batch`) under `<cell dir>/grid-<k>/` (issue #5410). For a
+  cell whose whole grid outruns the fleet job ceiling. The chunks are merged
+  into the same tables, power tables, leakage and pin capacitance an unsplit
+  run produces; leakage and pin capacitance come from chunk 1. Overrides
+  `options.split_grid`; default 1 (one leg, decks byte-identical to before).
+  A non-integer or `< 1` value is an error (exit `1`) before any simulation.
+  A failing chunk is named in the error (`grid chunk k/N`); `--keep-going`
+  still isolates the cell and `--resume` re-runs only the failed chunk. In
+  the response, `simulation.testbench/request/report` name chunk 1 and
+  `runtime_s` sums the chunks.
+- `--keep-going` — batch requests only (issue #5380; refused on a single-cell
+  `cell` request, like `--cell`). A cell whose characterization fails
+  (including a failure inside one of its constraint decks) is recorded in the
+  response's `failed_cells` and skipped; the other cells still run and one
+  `.lib` covers the successful cells. If *every* cell fails, no `.lib` is
+  written and the run errors (exit `1`) listing the failures. Without
+  `--keep-going` the run is fail-fast, as before. A characterization is data,
+  not a verdict, so a partial result exits `0` and the text output warns
+  loudly; re-run with `--resume` to retry only the failed cells — the finished
+  ones are reused. Composes with `--cell`.
 - `--compare-to` — a reference Liberty file (typically the vendor library for
   the same corner) to compare the emitted `.lib` against arc by arc. The
   result lands in the response's `comparison` block; see "Accuracy against a
@@ -134,6 +184,14 @@ command did not measure it", never as an assertion about the cell:
 In batch mode steps 1-6 run once **per cell** (one `klt sim` corner per
 cell, artifacts under `<outdir>/cells/<cell>/`), and step 7 runs once over
 the combined library. See "Batch mode".
+
+When the simulation backend resolves to `batch`, the request has more than
+one cell, and it sets `batch.capacity_wait_s` > 0, up to 4 cells are
+characterized concurrently (each submits its own fleet job and waits out a
+capacity refusal). Without `capacity_wait_s` cells stay serial, since a burst
+of concurrent submits would hit `batch_no_capacity`. Results, Liberty cell order and
+the report's `cells` order are unchanged; the first failing cell cancels cells
+not yet started. Other backends stay serial.
 
 ### Input slew: what `index_1` means and what is applied
 
@@ -439,8 +497,9 @@ batch shares the request's one `corner`, `grid`, `thresholds`, `models`, and
   over it.
 - **Every cell is validated before any is simulated** -- a typo in the fifth
   cell's pin list does not cost the first four cells' simulation time.
-- **All or nothing.** If any cell fails, nothing is emitted and the error
-  names the cell (`cell 'sg13g2_nor2_1': ...`). Validation errors name the
+- **All or nothing** (unless `--keep-going`, which skips failed cells and
+  lists them in `failed_cells`). If any cell fails, nothing is emitted and the
+  error names the cell (`cell 'sg13g2_nor2_1': ...`). Validation errors name the
   entry (`request.cells[3].pins ...`).
 - Cell names must be unique (a library holds one `cell()` group per name).
 - The single-cell `request.arcs` override is refused in batch mode; put an
@@ -631,9 +690,12 @@ says which input edge produces the *rising* output edge under this arc's own
 | `options.settle_ns` | number | Settle window per edge. Default `max(2, 3 x longest ramp)`. See "Transient window". |
 | `options.tran_step_ns` | number | Transient step, also used as `tmax`. Default `min(0.001, shortest ramp / 10)`. |
 | `options.timeout_s` | number | Per-corner ngspice timeout. Default `900`. |
+| `options.split_grid` | integer | Same as `--split-grid`. Default `1`. |
 | `options.keep_artifacts` | boolean | Keep the ngspice log/deck. Default `false`; `--keep-artifacts` overrides. |
+| `options.resume` | boolean | Same as `--resume`. Default `false`. |
 | `options.osdi_preload` | array of string | `.osdi` shared libraries to `pre_osdi`, forwarded to `klt sim`'s `options.osdi_preload`. See "OSDI (Verilog-A) model preload". |
 | `netlist_source` | string | Forwarded to `klt sim` (`"schematic"` / `"extracted"`), for provenance on a post-extraction run. |
+| `batch` | object | Forwarded verbatim to every generated `klt sim` request (each cell's main sweep and constraint decks), e.g. `{"capacity_wait_s": 600}`; `--wait-for-capacity` overrides it. |
 
 ### Non-unate arcs
 
@@ -775,6 +837,7 @@ state it measured so the limitation is visible rather than implied.
     "window": { "settle_ns": 3.6, "tran_step_ns": 0.001 }
   },
   "comparison": null,
+  "failed_cells": [],
   "provenance": {
     "klt_version": "0.6.0",
     "klayout_version": "0.30.10",
@@ -1116,6 +1179,8 @@ bound means updating this table with the new observed spread and its cause.
 | `0` | Every requested cell was characterized and the `.lib` was written. With `--compare-to`, regardless of whether the comparison is within tolerance — the comparison is data, reported in `comparison.summary.within_tolerance`; the enforced bar is the automated test (see below). |
 | `1` | Failed to run: malformed request, unresolvable/unparseable netlist, pin metadata that does not describe a combinational cell, a simulation that did not complete, a grid point with no measured value, a transient window too short, an emitted `.lib` the round-trip reader rejects, an unknown `--cell` name, or an unreadable `--compare-to` library. |
 | `2` | Argparse usage error (as with every other `klt` subcommand). |
+
+With `--keep-going`, `0` means at least one cell was characterized; the cells that were not are in `failed_cells` (`[{"cell": ..., "error": ...}]`, always present, `[]` when none — additive per `docs/json-contract.md`). If every cell fails the run exits `1`.
 
 There is no pass/fail code — see "no top-level `status`" above.
 

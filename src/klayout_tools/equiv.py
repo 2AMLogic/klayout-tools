@@ -656,18 +656,18 @@ def _side_prep_lines(
         # opaque blackbox -- see `_resolve_side`'s `liberty` docs.
         # `-ignore_miss_func` skips any cell lacking a `function` spec
         # (e.g. a pure sequential cell) rather than erroring the whole
-        # liberty read; such a cell surfaces instead as a missing-
-        # submodule `hierarchy` error if the netlist actually instantiates
-        # it.
+        # liberty read; such a cell surfaces instead as a missing-submodule
+        # `hierarchy` error if the netlist actually instantiates it.
         lines.append(f"read_liberty -ignore_miss_func {side['liberty']}")
     for path in side["sources"]:
         lines.append(
             read_verilog_line(path, side.get("defines") or {}, side.get("parameters"))
         )
-    # Issue #3466: optional top-level parameter overrides for this side.
+    # Issue #3466: optional top-level parameter overrides.
     lines += chparam_lines(side.get("parameters") or {}, side["top"])
     lines += [
         "proc",
+        *(["memory_map"] if extra_opt else []),  # #5369: equiv_make rejects $mem
         "opt_clean",
         f"hierarchy -check -top {side['top']}",
         "flatten",

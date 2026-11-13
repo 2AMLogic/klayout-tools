@@ -765,7 +765,7 @@ def _group_min_spacing_um(generator_report: dict[str, Any]) -> float:
     if not isinstance(drc_hints, dict):
         return 0.0
     spacing = drc_hints.get("min_spacing_um")
-    if isinstance(spacing, bool) or not isinstance(spacing, (int, float)):
+    if not is_number(spacing):
         return 0.0
     return max(0.0, float(spacing))
 

@@ -28,6 +28,7 @@ from collections.abc import Callable
 from typing import Any
 
 from . import macros as macro_spec
+from ._jsonnum import is_int, is_number
 from .lef_header import read_lef_header, read_lef_macro_pin_ports
 from .pdk import descriptor_views, lef_files
 from .pdk_cells import resolve_liberty_for_cell_library
@@ -42,6 +43,7 @@ from .place_and_route_layers import (
 from .place_and_route_layers import (
     _signal_routing_layers as _signal_routing_layers,
 )
+from .place_and_route_macro_halo import validate_macro_margin
 
 #: Valid ``request.macros[].orientation`` values -- OpenROAD's own
 #: orientation vocabulary (the same set ``place_macro``/``place_cell``
@@ -1202,6 +1204,12 @@ def _validate_macros(
         :func:`_macro_blockage_lines` / :func:`_macro_pdn_grid_lines`, and
         this module's docstring "Power delivery" section (whose v1 exclusion
         of macro PDN grids this closes).
+    ``keepout`` (issue #5313)
+        Same shape and validation as ``halo``, but a *placement-only* keep-out:
+        it widens the ``create_blockage`` rectangle (per-side ``max(halo,
+        keepout)``) and never reaches ``define_pdn_grid``, so it can exceed
+        pdngen's halo limit and needs neither ``request.power`` nor a LEF
+        power pin.
     ``lib`` (alias ``liberty``)
         The macro's per-corner liberty map, exactly as ``klt synthesize``/
         ``klt sta`` take it. Read alongside the standard-cell liberty in
@@ -1294,7 +1302,16 @@ def _validate_macros(
                     request_dir=request_dir,
                     error_cls=PlaceAndRouteError,
                 ),
-                "halo": _validate_macro_halo(macro.get("halo"), label=label),
+                "halo": validate_macro_margin(
+                    macro.get("halo"), label=label, error_cls=PlaceAndRouteError
+                ),
+                # Issue #5313: placement-only keep-out, independent of `halo`.
+                "keepout": validate_macro_margin(
+                    macro.get("keepout"),
+                    label=label,
+                    error_cls=PlaceAndRouteError,
+                    field="keepout",
+                ),
                 "width_um": macro_record.get("width_um"),
                 "height_um": macro_record.get("height_um"),
                 "power_ground_layers": _macro_power_ground_layers(
@@ -1308,88 +1325,6 @@ def _validate_macros(
         raise PlaceAndRouteError("request.macros[].instance values must be unique")
 
     return validated
-
-
-#: The four sides a ``request.macros[].halo`` object may name, in the order
-#: OpenROAD's own ``define_pdn_grid -halo`` list takes them (verified live
-#: against OpenROAD 26Q3: ``PDN-0008``'s own "reduce the halo to at most
-#: ``<left> <bottom> <right> <top>``" diagnostic restates a rejected halo in
-#: exactly this order).
-_MACRO_HALO_SIDES = ("left", "bottom", "right", "top")
-
-
-def _validate_macro_halo(halo: Any, *, label: str) -> dict[str, float] | None:
-    """Validate one ``request.macros[].halo`` value (issue #2635), returning
-    ``{"left": f, "bottom": f, "right": f, "top": f}`` or ``None`` when the
-    field is omitted.
-
-    Accepts a bare number (uniform on all four sides -- the overwhelmingly
-    common case, and the shape every ORFS platform config uses) or an object
-    naming any subset of :data:`_MACRO_HALO_SIDES`, each side defaulting to
-    ``0``. An empty object is rejected rather than silently treated as
-    "omitted": a caller who wrote ``"halo": {}`` meant something, and
-    guessing which is worse than asking.
-
-    Negative values are rejected -- a "negative halo" would mean letting
-    standard cells *overlap* the macro, which no caller means and which
-    ``create_blockage`` has no way to express anyway.
-    """
-    if halo is None:
-        return None
-    if isinstance(halo, bool):
-        raise PlaceAndRouteError(
-            f"{label}.halo must be a number or an object naming any of: "
-            + ", ".join(_MACRO_HALO_SIDES)
-        )
-    if isinstance(halo, (int, float)):
-        return _validate_uniform_macro_halo(halo, label=label)
-    if isinstance(halo, dict):
-        return _validate_per_side_macro_halo(halo, label=label)
-    raise PlaceAndRouteError(
-        f"{label}.halo must be a number (uniform, in um) or an object "
-        "naming any of: " + ", ".join(_MACRO_HALO_SIDES)
-    )
-
-
-def _validate_uniform_macro_halo(halo: float, *, label: str) -> dict[str, float]:
-    """The bare-number half of :func:`_validate_macro_halo`: one value applied
-    to all four sides of :data:`_MACRO_HALO_SIDES`.
-    """
-    if halo < 0:
-        raise PlaceAndRouteError(f"{label}.halo must not be negative")
-    return dict.fromkeys(_MACRO_HALO_SIDES, float(halo))
-
-
-def _validate_per_side_macro_halo(
-    halo: dict[str, Any], *, label: str
-) -> dict[str, float]:
-    """The object half of :func:`_validate_macro_halo`: any subset of
-    :data:`_MACRO_HALO_SIDES`, each unnamed side defaulting to ``0``.
-
-    An empty object is rejected rather than silently treated as "omitted",
-    and an unrecognized side name is named back to the caller rather than
-    ignored -- a misspelled side that validated would silently drop the halo
-    the caller asked for.
-    """
-    if not halo:
-        raise PlaceAndRouteError(
-            f"{label}.halo must name at least one of: " + ", ".join(_MACRO_HALO_SIDES)
-        )
-    unknown = sorted(set(halo) - set(_MACRO_HALO_SIDES))
-    if unknown:
-        raise PlaceAndRouteError(
-            f"{label}.halo has unknown side(s) {', '.join(unknown)} -- "
-            "valid sides are: " + ", ".join(_MACRO_HALO_SIDES)
-        )
-    resolved: dict[str, float] = {}
-    for side in _MACRO_HALO_SIDES:
-        value = halo.get(side, 0)
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise PlaceAndRouteError(f"{label}.halo.{side} must be a number")
-        if value < 0:
-            raise PlaceAndRouteError(f"{label}.halo.{side} must not be negative")
-        resolved[side] = float(value)
-    return resolved
 
 
 def _macro_power_ground_layers(
@@ -1976,7 +1911,7 @@ def _validate_library(library: Any) -> dict[str, Any] | None:
 
 
 def _validate_seed(seed: Any) -> int:
-    if isinstance(seed, bool) or not isinstance(seed, int):
+    if not is_int(seed):
         raise PlaceAndRouteError("request.seed must be an integer")
     return seed
 
@@ -2006,7 +1941,7 @@ def _validate_route_critical_nets_percentage(value: Any) -> int:
     driven global routing + bounded antenna-repair iteration"."""
     if value is None:
         return 0
-    if isinstance(value, bool) or not isinstance(value, int):
+    if not is_int(value):
         raise PlaceAndRouteError(
             "request.route_critical_nets_percentage must be an integer"
         )
@@ -2024,7 +1959,7 @@ def _validate_placement_density(value: Any) -> float:
     this command's prior fixed value, so the generated Tcl is unchanged."""
     if value is None:
         return 0.6
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if not is_number(value):
         raise PlaceAndRouteError("request.placement_density must be a number")
     if not (0 < value <= 1):
         raise PlaceAndRouteError(
@@ -2039,7 +1974,7 @@ def _validate_route_congestion_iterations(value: Any) -> int | None:
     ``None`` emits no flag (OpenROAD's own default)."""
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, int):
+    if not is_int(value):
         raise PlaceAndRouteError(
             "request.route_congestion_iterations must be an integer"
         )
@@ -2081,7 +2016,7 @@ def _validate_max_antenna_repair_iterations(value: Any) -> int:
     global routing + bounded antenna-repair iteration"."""
     if value is None:
         return 1
-    if isinstance(value, bool) or not isinstance(value, int):
+    if not is_int(value):
         raise PlaceAndRouteError(
             "request.max_antenna_repair_iterations must be an integer"
         )
@@ -2152,9 +2087,7 @@ def _validate_output_dbu_um(value: Any) -> float | None:
     time, when the native dbu is known."""
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise PlaceAndRouteError("request.output_dbu_um must be a positive number")
-    if not 0 < value < float("inf"):
+    if not is_number(value) or not 0 < value < float("inf"):
         raise PlaceAndRouteError("request.output_dbu_um must be a positive number")
     return float(value)
 

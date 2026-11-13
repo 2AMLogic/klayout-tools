@@ -54,6 +54,7 @@ normal run (see ``klayout_tools._report_verify``).
 import argparse
 
 from .. import pdk as pdk_module
+from .._jsonnum import is_int
 from .._paths import looks_like_request_document
 from ..drc import (
     REQUEST_SCHEMA,
@@ -149,9 +150,7 @@ def _write_output(report: dict, args: argparse.Namespace) -> int | None:
         write_json_file(report, args.output)
     except OSError as exc:
         return emit_error(
-            "drc",
-            f"could not write report to '{args.output}': {exc}",
-            args.format,
+            "drc", f"could not write report to '{args.output}': {exc}", args.format
         )
     return None
 
@@ -390,7 +389,7 @@ def _expect_rule_categories(request: dict) -> int | None:
     value = request.get("expect_rule_categories")
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+    if not is_int(value) or value < 1:
         raise DrcError(
             "`klt drc` request field 'expect_rule_categories' must be a "
             f"positive integer (got {value!r})"

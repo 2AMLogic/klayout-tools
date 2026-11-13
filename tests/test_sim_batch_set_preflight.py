@@ -130,3 +130,89 @@ def test_injected_run_without_preflight_skips_it(tmp_path, monkeypatch):
         paths, outdir=str(tmp_path / "out"), run=lambda p, **kw: _fake_report()
     )
     assert report["submitted"] == 1
+
+
+def _deck_member(tmp_path, name, *, max_job_seconds=3600):
+    """A ``decks[]`` member (no ``netlist``), in its own subdirectory."""
+    from test_sim_decks import batch_deck_request, write_request
+
+    sub = tmp_path / name
+    sub.mkdir()
+    request = batch_deck_request(sub)
+    request["batch"].update(
+        job_ceiling_check="enforce", max_job_seconds=max_job_seconds
+    )
+    return str(write_request(sub, request))
+
+
+def test_decks_members_preflight_and_submit_in_a_set(tmp_path, monkeypatch):
+    from klayout_tools import sim_set
+
+    calls = []
+    _patch_set_run(monkeypatch, lambda path, **kw: calls.append(path) or _fake_report())
+    paths = [_deck_member(tmp_path, "d1"), _deck_member(tmp_path, "d2")]
+
+    report = sim_set.run_sim_set(
+        paths, outdir=str(tmp_path / "out"), preflight=sim_set.preflight_batch_request
+    )
+
+    assert report["submitted"] == 2
+    assert calls == paths
+
+
+def test_over_ceiling_deck_member_refused_by_name(tmp_path, monkeypatch):
+    from klayout_tools import sim_set
+    from klayout_tools.sim import SimError
+
+    calls = []
+    _patch_set_run(monkeypatch, lambda path, **kw: calls.append(path))
+    paths = [
+        _deck_member(tmp_path, "ok"),
+        _deck_member(tmp_path, "big", max_job_seconds=1),
+    ]
+
+    with pytest.raises(SimError) as excinfo:
+        sim_set.run_sim_set(
+            paths,
+            outdir=str(tmp_path / "out"),
+            preflight=sim_set.preflight_batch_request,
+        )
+
+    assert calls == []
+    assert excinfo.value.code == sim_set.SET_PREFLIGHT_CODE
+    message = str(excinfo.value)
+    assert "big" in message and sb.BATCH_JOB_CEILING_CODE in message
+    assert "ok/request.json" not in message
+
+
+def test_mixed_corner_and_deck_set_preflights_both(tmp_path, monkeypatch):
+    from klayout_tools import sim_set
+
+    _write_body(tmp_path)
+    _patch_set_run(monkeypatch, lambda path, **kw: _fake_report())
+    paths = [_member(tmp_path, "corner"), _deck_member(tmp_path, "deck")]
+
+    report = sim_set.run_sim_set(
+        paths, outdir=str(tmp_path / "out"), preflight=sim_set.preflight_batch_request
+    )
+    assert report["submitted"] == 2
+
+
+def test_member_with_neither_netlist_nor_decks_is_structured_not_keyerror(tmp_path):
+    from klayout_tools.sim import SimError
+    from klayout_tools.sim_batch_plan import preflight_batch_request
+
+    path = tmp_path / "odd.json"
+    path.write_text(json.dumps({"backend": "batch"}))
+    with pytest.raises(SimError) as excinfo:
+        preflight_batch_request(str(path))
+    # load_request rejects it structurally (a SimError, never a bare KeyError).
+    assert "netlist" in str(excinfo.value)
+
+
+def test_command_list_member_passes_preflight(tmp_path):
+    from klayout_tools import sim_set
+
+    path = tmp_path / "c.json"
+    path.write_text(json.dumps({"backend": "batch", "commands": [{"id": "x"}]}))
+    assert sim_set.preflight_batch_request(str(path)) == {}

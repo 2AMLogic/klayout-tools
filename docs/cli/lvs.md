@@ -299,6 +299,21 @@ a PDK runset's own SPICE reader takes it literally (as an extra net, losing
 cap with `a`/`b` labels on met3 (70/5) and met4 (71/5): with the `0` the compare
 was `mismatch` (`device.property`, net `0` unmatched); without it, `match`.
 
+**RF/bipolar subcircuits and differently named tops (issue #5402).** Under
+`reference.form: "subckt-call"`, an `X` card whose subcircuit is in the
+runset's own `DEVICE_LIST` (e.g. IHP `inductor`, `sg13_hv_svaricap`) and is
+neither a curated binding nor in `reference.device_map` is left untouched in
+the converted reference for the runset's reader to pair, instead of failing
+with `could not convert subckt-call reference netlist`. Curated and
+`device_map` bindings still convert as before, and a subcircuit in none of the
+three still refuses. When `layout.top` and `reference.top` are both given and
+differ, the work copy of the reference has its top `.subckt`/`.ends` renamed to
+`layout.top` so the runset can pair them (no `same_circuit` is emitted; your
+file is never modified). The report still echoes your `reference.top`. With
+equal or absent tops the reference passes through byte-for-byte as before.
+Not live-verified against the IHP `sg13g2.lvs` (not available on this host);
+covered by stub-deck unit tests in `tests/test_lvs_runset_reference.py`.
+
 **The verdict is taken from the `.lvsdb`, not the process.** The database is
 read back with `klayout.db.LayoutVsSchematic.read()` + `xref()`. A PDK driver
 may exit `0` on a non-matching pair, and another (sky130's `sky130.lvs`) exits
@@ -333,7 +348,10 @@ error, as is a crashed runset. Additive; no `schema_version` bump.
 - `coverage` — the common v1 block (`checked` = classes with instances),
   plus `declared_device_classes`/`recognized_device_classes` (per side) and
   `declared_not_recognized` (declared by the runset, zero instances; also
-  listed under `skipped` with reason `declared_not_recognized`).
+  listed under `skipped` with reason `declared_not_recognized`). Device
+  instances whose class has an empty name are excluded from all class lists,
+  counted in `unnamed_device_instances`, and reported as one `skipped` entry
+  (`id: "<unnamed>"`, reason `unnamed_device_class`).
 - A run in which the runset recognizes **no** device on either side reports
   `status: "inconclusive"` (exit 4), `coverage.nothing_checked: true` and a
   `coverage.no_devices_recognized` mismatch — never a clean match.
@@ -2274,10 +2292,34 @@ for the cell itself, as in "Large flat designs" above.
 - **Top-level wiring is checked against the cell's pins.** Swapping two pins
   of a cell that is symmetric in those pins is an isomorphic circuit, and both
   the flat and the hierarchical compare report `match` for it, as they should.
-- **Not measured here:** extraction of a custom bitcell array from GDS through
-  `abstract_cells`. The measurements above are the netlist compare, which is the
-  step that did not finish. Per-cell pin and abstraction behaviour is as in
-  `docs/cli/extract.md`.
+- **GDS to verdict, measured at CI size (issue #5322).** An abstracted array
+  starting from a GDS reaches `match` in one request, and a broken top-level
+  wire reports `mismatch` (`tests/test_lvs_regular_array.py`,
+  `test_gds_abstracted_array_*`). The ~50k-device run (about 6.5 min of inline
+  extraction per attempt) was not repeated in CI; it is a live-run check.
+
+### Request shape, GDS to verdict
+
+```json
+{
+  "layout": {"file": "array.gds", "deck": "sky130", "top": "TOP",
+             "top_cell_pins": true, "abstract_cells": ["BITCELL"]},
+  "reference": {"netlist": "array_ref.spice", "top": "TOP"},
+  "options": {"flatten_reference": ["BITCELL"]}
+}
+```
+
+The reference carries a pin-only `.subckt BITCELL` stub (same name as the GDS
+cell); `flatten_reference` flattens any other reference hierarchy but keeps the
+stub. Verify the cell itself in a separate request, as in "Large flat designs".
+Run it as a single `klt lvs` request; do not loop it.
+
+**Pins.** Labels drawn *inside* the abstracted cell resolve that cell's
+instance pins and do not become top-level pins, with `top_cell_pins` on or off.
+Top-level pins come from labels drawn in the top cell; a label of the same text
+drawn in the top cell is a real top-level pin. If the layout reports far more
+pins than the reference, look for per-instance labels drawn in the top cell
+and use `top_cell_pins`/`declared_pins` to restrict them.
 
 Reproduce: `python scripts/lvs_array_bench.py --rows 91 --cols 91 --form hier
 [--broken wiring|internal]`. CI runs a 12 x 12 instance of the same shape
@@ -2354,7 +2396,7 @@ each resolves relative paths inside the document.
 | `options.netgen_setup` | string | Only used with `"engine": "netgen"`. Path to a netgen LVS setup `.tcl` file — see "Engine" -> `"netgen"` above. Omit to run with netgen's own default setup. |
 | `options.netgen_timeout_s` | number | Only used with `"engine": "netgen"`. Wall-clock budget (seconds) for the `netgen` subprocess. Default `300`. |
 | `options.compare_timeout_s` | number | Issue #4165. Only for the `"klayout"` engine; no default (omitted = unbounded, output unchanged). Wall-clock budget (positive seconds) for the netlist compare. The compare first runs in a killable child process; at the deadline the child is killed and the report is `status: "inconclusive"` (exit 4) with a single `compare.timeout` error entry whose `details` carry `code: "compare_timeout"`, `timeout_s`, `elapsed_s` and the layout/reference device, net and pin counts. A timeout is never a `match` or `mismatch`. **Cost:** a compare that finishes inside the budget is then repeated in-process (the comparer's event log cannot cross a process boundary), so a run near the limit takes up to twice its compare time. Echoed under `options.compare_timeout_s` only when set. A non-positive or non-number value, or use with `engine: "netgen"`, is an application error (exit 1). |
-| `options.flatten_reference` | boolean | When `true`, calls `klayout.db.Netlist.flatten()` on the **reference** netlist in-process, right after it is read and before circuit selection (issue #1085). `klt extract` always extracts a *flat* layout-side netlist — a single top circuit, no subcircuit calls (see `klt extract`'s "flat, not hierarchical" limitation note) — so a hierarchical reference (one leaf `.subckt` plus N instance calls of it, the shape a macro built by tiling one verified leaf cell naturally takes) can never structurally match it: `NetlistComparer` compares circuit-by-circuit, and the flat layout side simply has no subcircuit-call circuit to pair against the reference's, producing an undiagnosable `topology` "circuit could not be matched to a counterpart" mismatch on both sides. Flattening the reference first collapses every subcircuit-call instance in place, so only its top-level circuit(s) remain — directly comparable against the already-flat layout side. Default `false` (today's unconditional per-circuit matching, unchanged) — a caller who genuinely wants a hierarchy-preserving compare (e.g. because both sides are hierarchical, see `tests/test_lvs.py`'s `test_net_correspondence_scopes_dedup_by_circuit`) is never silently flattened out from under them. A `reference.top` name that only existed as an interior circuit flatten would inline away no longer resolves after flattening — pass the name of whatever remains a genuine top-level circuit. Each side that is actually flattened (its circuit count changes) is disclosed as a `severity: "warning"`, `category: "topology.flattened"` entry — see "`topology.flattened`" below — so a `"match"` reached after flattening is never silently indistinguishable from one reached against the netlist's original hierarchy; a netlist that already had only its top circuit(s) (nothing to flatten) adds no such entry. |
+| `options.flatten_reference` | boolean \| array\<string\> | **Keep-list form (issue #5322):** an array of circuit-name globs (`fnmatch`, case-insensitive) flattens every non-top circuit *except* those matching a glob, e.g. `["SC_BUF"]` keeps the pin-only stub of an `abstract_cells` cell un-flattened so it still pairs with the layout side's black box. The `topology.flattened` warning names the kept circuits. A glob matching nothing flattens everything (as `true`); `[]` is `false`. Elements must be non-empty strings. Otherwise, when `true`, calls `klayout.db.Netlist.flatten()` on the **reference** netlist in-process, right after it is read and before circuit selection (issue #1085). `klt extract` always extracts a *flat* layout-side netlist — a single top circuit, no subcircuit calls (see `klt extract`'s "flat, not hierarchical" limitation note) — so a hierarchical reference (one leaf `.subckt` plus N instance calls of it, the shape a macro built by tiling one verified leaf cell naturally takes) can never structurally match it: `NetlistComparer` compares circuit-by-circuit, and the flat layout side simply has no subcircuit-call circuit to pair against the reference's, producing an undiagnosable `topology` "circuit could not be matched to a counterpart" mismatch on both sides. Flattening the reference first collapses every subcircuit-call instance in place, so only its top-level circuit(s) remain — directly comparable against the already-flat layout side. Default `false` (today's unconditional per-circuit matching, unchanged) — a caller who genuinely wants a hierarchy-preserving compare (e.g. because both sides are hierarchical, see `tests/test_lvs.py`'s `test_net_correspondence_scopes_dedup_by_circuit`) is never silently flattened out from under them. A `reference.top` name that only existed as an interior circuit flatten would inline away no longer resolves after flattening — pass the name of whatever remains a genuine top-level circuit. Each side that is actually flattened (its circuit count changes) is disclosed as a `severity: "warning"`, `category: "topology.flattened"` entry — see "`topology.flattened`" below — so a `"match"` reached after flattening is never silently indistinguishable from one reached against the netlist's original hierarchy; a netlist that already had only its top circuit(s) (nothing to flatten) adds no such entry. |
 | `options.flatten_layout` | boolean | The symmetric counterpart of `options.flatten_reference`, for the **layout** side (issue #1085's item 2): calls `Netlist.flatten()` on the layout netlist right after it is resolved, before circuit selection. Meaningful for the pre-extracted `layout.netlist` shape, which can itself be hierarchical (a hand-written or externally-extracted SPICE netlist is under no obligation to be flat the way `klt extract`'s own output always is) — a no-op for the `layout.file` (inline extraction) shape, since that netlist is already flat. Default `false`; same `topology.flattened` disclosure and no-op-on-an-already-flat-netlist behaviour as `options.flatten_reference` above. |
 
 ### `layout` shapes
@@ -4256,6 +4298,17 @@ anchored pin names, upper-cased and sorted, truncated to 20 with
   }
 }
 ```
+
+When the layout declares top-level pins the reference has no same-named pin
+for (issue #5396) — typically the DEF-named internal nets that
+`klt extract --abstract-cells --def-net-names` lists as pins of the top
+subcircuit, against a gate-level Verilog reference that lists only its ports
+(power rails are also layout-only against such a reference) — `details` also
+carries `layout_only_pins` (sorted, upper-cased, truncated to 20),
+`layout_only_pin_count` (exact total) and `layout_only_pins_truncated`.
+These keys are additive and **omitted when there are no such pins**, so
+`counts.pins` differences are explained by this list rather than hidden. They
+never change the verdict.
 
 It never changes `status` on its own: anchoring only ever *removes* a degree
 of freedom from the comparer, so a verdict reached with it is strictly

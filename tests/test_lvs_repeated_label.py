@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+import test_lvs as base
 from klayout_tools.lvs import run_lvs
 
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
@@ -137,3 +138,31 @@ def test_run_lvs_lone_suffixed_pin_stays_anchored(tmp_path):
     ]
     assert entry["details"]["pins"] == ["A$1", "B", "VSS"]
     assert "skipped_repeated_label_pins" not in entry["details"]
+
+
+def test_run_lvs_anchoring_discloses_layout_only_pins(tmp_path):
+    """Issue #5396: layout top-level pins with no same-named reference pin
+    (DEF-named internal nets) are listed additively in the anchoring entry's
+    `details`; a run without any omits the keys entirely."""
+    extra = base._MACRO_BUS_LAYOUT_SPICE.replace(
+        ".subckt top din[3] din[2] din[1] din[0] dout",
+        ".subckt top din[3] din[2] din[1] din[0] dout n_int2 n_int1",
+    )
+    report = run_lvs(base._macro_bus_request(tmp_path / "extra", extra))
+    (entry,) = [
+        m
+        for m in report["mismatches"]
+        if m["category"] == "topology.top_level_pins_anchored"
+    ]
+    assert entry["details"]["pins"] == ["DIN[0]", "DIN[1]", "DIN[2]", "DIN[3]", "DOUT"]
+    assert entry["details"]["layout_only_pins"] == ["N_INT1", "N_INT2"]
+    assert entry["details"]["layout_only_pin_count"] == 2
+    assert entry["details"]["layout_only_pins_truncated"] is False
+
+    clean = run_lvs(base._macro_bus_request(tmp_path / "clean"))
+    (clean_entry,) = [
+        m
+        for m in clean["mismatches"]
+        if m["category"] == "topology.top_level_pins_anchored"
+    ]
+    assert "layout_only_pins" not in clean_entry["details"]

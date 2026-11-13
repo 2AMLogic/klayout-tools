@@ -92,6 +92,13 @@ from .erc_spec import (
     _validate_ties_disclosure,
     _validate_vias,
 )
+from .erc_substrate import (
+    NO_TIES_MISSING,
+    SubstrateOutcome,
+    run_substrate_pass,
+    substrate_coverage_work,
+    substrate_provenance,
+)
 from .erc_ties import (  # noqa: F401 -- REASON_* are re-exported public names
     REASON_DEGENERATE_TAP_DECLARATION,
     REASON_DEGENERATE_WELL_ASSERTION,
@@ -315,15 +322,6 @@ REASON_NO_GATES = "no_gates"
 #: ``erc.net_connectivity`` cannot resolve it. Additive; leaves
 #: ``erc_status`` untouched like every other ``inapplicable`` entry.
 REASON_EXTRACTOR_GLOBAL_NET = "extractor_global_net"
-
-#: ``erc_coverage.inapplicable[].reason`` (issue #4384) on
-#: ``erc.supply_short`` when the spec declares two or more ``kind: "supply"``
-#: nets: ``klt erc`` joins conductors only through the declared
-#: ``stackup``/``vias``, so supply rails that are one conductor through a
-#: shared substrate read as separate clean islands. A coverage disclosure,
-#: not a merge (substrate/well merging was rejected in #2192); additive and
-#: leaves ``erc_status`` untouched. Cross-check with ``klt lvs``.
-REASON_SUBSTRATE_CONTINUITY_NOT_MODELLED = "substrate_continuity_not_modelled"
 
 #: The skip reason for a level that could have been graded had ``--pdk``
 #: named a PDK with an antenna-ratio table (or named one at all), or had the
@@ -577,6 +575,7 @@ def _connectivity_coverage(
     well_assertion_coverage: list[dict[str, Any]] | None = None,
     compact: bool = False,
     excused_gates: frozenset[str] | set[str] = frozenset(),
+    substrate: SubstrateOutcome | None = None,
 ) -> dict[str, Any]:
     """The *second* checked-work scope this envelope carries (issue #2179):
     the connectivity/geometry rules behind ``erc_findings``.
@@ -730,13 +729,12 @@ def _connectivity_coverage(
         inapplicable.append(
             {"id": work_id("erc.net_connectivity"), "reason": "no_nets_declared"}
         )
-    if sum(1 for decl in nets_decl if decl.get("kind") == "supply") >= 2:
-        inapplicable.append(
-            {
-                "id": "erc.supply_short",
-                "reason": REASON_SUBSTRATE_CONTINUITY_NOT_MODELLED,
-            }
-        )
+    sub_checked, sub_asserted, sub_inapplicable = substrate_coverage_work(
+        substrate or SubstrateOutcome(), nets_decl
+    )
+    checked.extend(sub_checked)
+    checked_by_assertion.extend(sub_asserted)
+    inapplicable.extend(sub_inapplicable)
 
     for tie in ties:
         identity = work_id("erc.missing_tie", tie["name"])
@@ -2027,17 +2025,16 @@ def _cross_name_short_findings(
                     kind_by_name[a] == "supply" and kind_by_name[b] == "supply"
                 )
                 rule = "erc.supply_short" if both_supply else "erc.multiply_driven_net"
-                findings.append(
-                    _finding(
-                        rule,
-                        (
-                            f"declared nets {a!r} and {b!r} are electrically "
-                            "the same net (shorted together)"
-                        ),
-                        net=a,
-                        other_net=b,
-                    )
+                finding = _finding(
+                    rule,
+                    f"declared nets {a!r} and {b!r} are electrically "
+                    "the same net (shorted together)",
+                    net=a,
+                    other_net=b,
                 )
+                if both_supply:
+                    finding["via"] = "metal"  # substrate-path findings: erc_substrate
+                findings.append(finding)
     return findings
 
 
@@ -3071,43 +3068,37 @@ def run_erc(
     )
     erc_findings.extend(connectivity_findings)
 
-    # The tie graph (issue #2169): a second extraction, built only when the
-    # spec actually declares `ties[]`, that adds each tie's derived tap
-    # conductor on top of the same stackup/vias. Kept separate from the
-    # primary graph above so the `erc.missing_tie` answer can depend on tap
-    # geometry without any `ties[]` declaration -- correct, over-broad, or
-    # outright wrong -- being able to reach `gates[]`, the antenna ratios,
-    # or the `nets[]` findings already computed.
+    # The tie graph (issue #2169): a second extraction (only when `ties[]` is
+    # declared) adding each tie's tap conductor to the same stackup/vias. Kept
+    # separate so no `ties[]` declaration can reach `gates[]`, the antenna
+    # ratios, or the `nets[]` findings already computed.
     degenerate_ties: dict[str, str] = {}
     asserted_ties: set[str] = set()
     well_asserted_ties: set[str] = set()
     well_assertion_coverage: list[dict[str, Any]] = []
+    substrate_outcome = SubstrateOutcome(missing=[NO_TIES_MISSING])
     if ties:
         tie_l2n, tie_circuit, _, tie_layers = _extract_connectivity(
             layout, top_cell, stackup, vias, ties, device_cuts, verb=None
         )
         erc_findings.extend(_tie_findings(tie_l2n, tie_circuit, tie_layers))
         degenerate_ties = _degenerate_tie_reasons(tie_layers)
-        # Issue #2234: a non-degenerate tie whose tap region was derived (at
-        # least in part) from a caller assertion (`tap_boxes`) rather than
-        # pure PDK-marker narrowing -- graded `checked_by_assertion` by
-        # `_connectivity_coverage` below, distinct from a bare
-        # `tap_requires`/`tap_is_dedicated` pass.
+        substrate_outcome = run_substrate_pass(
+            layout=layout, top_cell=top_cell, deck=deck_obj, deck_name=deck,
+            tie_l2n=tie_l2n,
+            tie_circuit=tie_circuit, tie_layers=tie_layers, nets_decl=nets_decl,
+            degenerate_ties=degenerate_ties, erc_findings=erc_findings,
+        )  # fmt: skip
+        # Issue #2234: non-degenerate ties whose tap region rests on a caller
+        # assertion (`tap_boxes`) -- graded `checked_by_assertion`.
         asserted_ties = {
             tie["name"]
             for tie in tie_layers
             if tie["tap_asserted"] and tie["name"] not in degenerate_ties
         }
-        # Issues #2255/#2540: the same distinction one level up -- a
-        # non-degenerate tie whose *well* side rested on caller-named
-        # coordinates, either because the region itself was asserted
-        # (`well_layer: null` + `well_boxes`, for a block that draws no
-        # well/tub layer at all) or because the drawn layer's shapes were
-        # selected by literal boxes (`well_requires_boxes`/
-        # `well_excludes_boxes`, for a two-class tub no drawn layer
-        # separates). Its own `checked_by_well_assertion` list, never folded
-        # into the tap-side one: asserting which drawn geometry is the tap
-        # and naming the well side in coordinates are different claims.
+        # Issues #2255/#2540: the well-side analogue (asserted `well_boxes`
+        # region, or drawn shapes selected by literal boxes); its own
+        # `checked_by_well_assertion` list, never folded into the tap-side one.
         well_asserted_ties = {
             tie["name"]
             for tie in tie_layers
@@ -3233,6 +3224,7 @@ def run_erc(
         well_assertion_coverage,
         compact,
         excused,
+        substrate_outcome,
     )
     erc_rollup = coverage_rollup(
         {"coverage": erc_coverage}, failed=bool(erc_finding_count)
@@ -3332,6 +3324,7 @@ def run_erc(
     # a real supply defect; its #2401 warning is stderr-only. Always
     # present; `[]` when no stackup role declares a `label_layer`.
     provenance["label_layers"] = label_layers
+    provenance.update(substrate_provenance(substrate_outcome))  # issues #5342/#5343
 
     # (issue #2965) Opt-in `--compact` summary of the per-gate scaffolding
     # this run omitted. Built before `gates` is emptied below.

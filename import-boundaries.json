@@ -34,12 +34,18 @@
         "klayout_tools.characterize",
         "klayout_tools.characterize_arcs",
         "klayout_tools.characterize_bisect",
+        "klayout_tools.characterize_capacity",
         "klayout_tools.characterize_cards",
         "klayout_tools.characterize_constraints",
         "klayout_tools.characterize_instances",
+        "klayout_tools.characterize_leg",
+        "klayout_tools.characterize_split",
         "klayout_tools.characterize_osdi",
+        "klayout_tools.characterize_pool",
+        "klayout_tools.characterize_probe",
         "klayout_tools.characterize_sequential",
         "klayout_tools.cli.characterize_cmd",
+        "klayout_tools.cli.parser_characterize",
         "klayout_tools.liberty_compare",
         "klayout_tools.liberty_leakage",
         "klayout_tools.liberty_render_pin",
@@ -187,6 +193,8 @@
         "klayout_tools.erc_antenna_gf180mcu",
         "klayout_tools.erc_disclosure",
         "klayout_tools.erc_spec",
+        "klayout_tools.erc_spec_boxes",
+        "klayout_tools.erc_substrate",
         "klayout_tools.erc_ties",
         "klayout_tools.erc_well_regions"
       ]
@@ -228,6 +236,7 @@
         "klayout_tools.extract_parasitics",
         "klayout_tools.extract_parasitics_block",
         "klayout_tools.extract_netlist_write",
+        "klayout_tools.extract_pdk_resolve",
         "klayout_tools.extract_pin_order",
         "klayout_tools.extract_netselect",
         "klayout_tools.extract_orient",
@@ -326,7 +335,8 @@
         "klayout_tools.gen_compose_boundary",
         "klayout_tools.gen_compose_port_access",
         "klayout_tools.gen_compose_port_request",
-        "klayout_tools.gen_compose_routing"
+        "klayout_tools.gen_compose_routing",
+        "klayout_tools.gen_compose_via_cuts"
       ]
     },
     "route": {
@@ -418,6 +428,7 @@
         "klayout_tools.lvs_combine",
         "klayout_tools.lvs_finfet",
         "klayout_tools.lvs_finfet_flatten",
+        "klayout_tools.lvs_flatten",
         "klayout_tools.lvs_gate_level",
         "klayout_tools.lvs_gate_level_convert",
         "klayout_tools.lvs_known_limits",
@@ -434,6 +445,7 @@
         "klayout_tools.lvs_run_options",
         "klayout_tools.lvs_runset",
         "klayout_tools.lvs_runset_reference",
+        "klayout_tools.lvs_runset_census",
         "klayout_tools.lvs_short_nets",
         "klayout_tools.lvs_supply",
         "klayout_tools.lvs_timeout",
@@ -509,7 +521,8 @@
         "klayout_tools.pdk_models",
         "klayout_tools.pdk_native_drc",
         "klayout_tools.pdk_pcell",
-        "klayout_tools.pdk_stackup"
+        "klayout_tools.pdk_stackup",
+        "klayout_tools.pdk_store"
       ]
     },
     "pex": {
@@ -536,6 +549,7 @@
         "klayout_tools.place_and_route_groups",
         "klayout_tools.place_and_route_hints",
         "klayout_tools.place_and_route_layers",
+        "klayout_tools.place_and_route_macro_halo",
         "klayout_tools.place_and_route_min_area",
         "klayout_tools.place_and_route_pdn_fit",
         "klayout_tools.place_and_route_pins",
@@ -544,6 +558,7 @@
         "klayout_tools.place_and_route_reports",
         "klayout_tools.place_and_route_request",
         "klayout_tools.place_and_route_resume",
+        "klayout_tools.place_and_route_route_overflow",
         "klayout_tools.place_and_route_script",
         "klayout_tools.place_and_route_sta",
         "klayout_tools.place_and_route_via_pad"
@@ -638,7 +653,9 @@
         "klayout_tools._verilog_top",
         "klayout_tools.build_identity",
         "klayout_tools.coverage",
+        "klayout_tools.coverage_work",
         "klayout_tools.design_evidence_tiers",
+        "klayout_tools.erc_islands",
         "klayout_tools.evidence_record",
         "klayout_tools.lef_header",
         "klayout_tools.macros",
@@ -672,6 +689,7 @@
         "klayout_tools.signoff_multi_member",
         "klayout_tools.signoff_na",
         "klayout_tools.signoff_power_delivery",
+        "klayout_tools.signoff_power_delivery_substrate",
         "klayout_tools.signoff_runset",
         "klayout_tools.signoff_sta_constraints"
       ]
@@ -684,6 +702,7 @@
         "klayout_tools.cli.parser_sim",
         "klayout_tools.cli.sim_cmd",
         "klayout_tools.cli.sim_job_text",
+        "klayout_tools.cli.sim_measurement_text",
         "klayout_tools.cli.sim_merge_cmd",
         "klayout_tools.cli.sim_pdk_text",
         "klayout_tools.cli.sim_plan_cmd",
@@ -704,7 +723,9 @@
         "klayout_tools.sim_batch_contract_preflight",
         "klayout_tools.sim_batch_contract_spec",
         "klayout_tools.sim_batch_contract_worker",
+        "klayout_tools.sim_batch_reattach",
         "klayout_tools.sim_batch_shards",
+        "klayout_tools.sim_batch_unstarted",
         "klayout_tools.sim_batch_features",
         "klayout_tools.sim_batch_hints",
         "klayout_tools.sim_batch_plan",
@@ -713,6 +734,7 @@
         "klayout_tools.sim_batch_warn",
         "klayout_tools.sim_commands",
         "klayout_tools.sim_cause",
+        "klayout_tools.sim_case_names",
         "klayout_tools.sim_complex_vectors",
         "klayout_tools.sim_convergence_retry",
         "klayout_tools.sim_corner_extremes",
@@ -722,10 +744,12 @@
         "klayout_tools.sim_cycle_mean",
         "klayout_tools.sim_deck_expand",
         "klayout_tools.sim_decks",
+        "klayout_tools.sim_decks_split",
         "klayout_tools.sim_echo_messages",
         "klayout_tools.sim_energy",
         "klayout_tools.sim_errors",
         "klayout_tools.sim_exit_reason",
+        "klayout_tools.sim_expr_hint",
         "klayout_tools.sim_eye",
         "klayout_tools.sim_forms",
         "klayout_tools.sim_injected",
@@ -742,12 +766,16 @@
         "klayout_tools.sim_plan",
         "klayout_tools.sim_plot",
         "klayout_tools.sim_portable",
+        "klayout_tools.sim_process_legs",
         "klayout_tools.sim_provenance",
         "klayout_tools.sim_raw",
         "klayout_tools.sim_remote",
         "klayout_tools.sim_request_overrides",
         "klayout_tools.sim_search",
+        "klayout_tools.sim_search_analysis",
+        "klayout_tools.sim_search_param",
         "klayout_tools.sim_set",
+        "klayout_tools.sim_set_runtime",
         "klayout_tools.sim_settled",
         "klayout_tools.sim_slug",
         "klayout_tools.sim_snm",
@@ -807,8 +835,10 @@
       "description": "`klt sta` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.sta_cmd",
+        "klayout_tools._sta_clock_uncertainty",
         "klayout_tools._sta_period_maps",
         "klayout_tools._sta_request_diag",
+        "klayout_tools._sta_sdc_check",
         "klayout_tools.post_route_sta",
         "klayout_tools.post_route_sta_electrical"
       ]
@@ -834,6 +864,7 @@
         "klayout_tools.synthesize_arithmetic",
         "klayout_tools.synthesize_memory",
         "klayout_tools.synthesize_netlist_normalize",
+        "klayout_tools.synthesize_timeout",
         "klayout_tools.synthesize_x_scan"
       ]
     },
@@ -982,6 +1013,11 @@
       "consumer": "characterize",
       "exporter": "env_provenance",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "characterize",
+      "exporter": "pex",
+      "reason": "Issue #5348: `klt characterize --wait-for-capacity` reuses the shared capacity-wait validator and batch shard flags from pex_async (as `klt pex` does, #5280) instead of duplicating the rule."
     },
     {
       "consumer": "characterize",
@@ -1675,6 +1711,30 @@
     }
   ],
   "shared_private_permissions": [
+    {
+      "consumer": "klayout_tools.lvs_runset_reference",
+      "exporter": "klayout_tools.netlist_normalize",
+      "symbol": "_binding_known",
+      "reason": "Issue #5402: passthrough-call protection must use the exact curated-binding test the netlist conversion uses so the two cannot drift; netlist_normalize is at its file-size ceiling, so promote to public when it is next split."
+    },
+    {
+      "consumer": "klayout_tools.lvs_runset_reference",
+      "exporter": "klayout_tools.netlist_normalize",
+      "symbol": "_build_subckt_map",
+      "reason": "Issue #5402: passthrough-call protection must use the exact curated-binding test the netlist conversion uses so the two cannot drift; netlist_normalize is at its file-size ceiling, so promote to public when it is next split."
+    },
+    {
+      "consumer": "klayout_tools.lvs_runset_reference",
+      "exporter": "klayout_tools.netlist_normalize",
+      "symbol": "_split_params",
+      "reason": "Issue #5402: passthrough-call protection must parse X cards exactly as the netlist conversion does; netlist_normalize is at its file-size ceiling, so promote to public when it is next split."
+    },
+    {
+      "consumer": "klayout_tools.lvs_runset_reference",
+      "exporter": "klayout_tools.netlist_normalize",
+      "symbol": "_tokenize",
+      "reason": "Issue #5402: passthrough-call protection must parse X cards exactly as the netlist conversion does; netlist_normalize is at its file-size ceiling, so promote to public when it is next split."
+    },
     {
       "consumer": "klayout_tools.sim_osdi_pin",
       "exporter": "klayout_tools._paths",

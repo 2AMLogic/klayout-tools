@@ -146,6 +146,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from ._annotation import is_reserved_annotation_layer
+from ._jsonnum import is_int
 from ._layout import complement_well_tie as _complement_well_tie
 from ._layout import region as _region
 from ._layout import region_expr as _region_expr
@@ -183,6 +184,7 @@ from .decks import (
     get_extraction_deck,
     get_parasitics_deck,
 )
+from .erc_islands import partition_region_by_islands, sorted_islands
 
 # The cell-level (black-box + pins) abstraction subsystem lives in its own
 # module (issue #1303, split out of this one at ~8800 lines). `_sanitize_
@@ -214,7 +216,11 @@ from .extract_abstract import _sanitize_instance_name as _sanitize_instance_name
 
 # Final report assembly moved out of `run_extract` (issue #5196).
 from .extract_assemble import assemble_extract_report
-from .extract_flavour import _flavour_split_island
+from .extract_flavour import (
+    _extract_flavour_devices,
+    _flavour_split_island,
+    apportion_shared_sd,
+)
 from .extract_netlist_write import write_flat_netlist
 from .extract_netselect import NetSelectors
 from .extract_orient import orient_asymmetric_mos
@@ -259,6 +265,7 @@ from .extract_passive_regions import _resistor_body_region as _resistor_body_reg
 from .extract_passive_regions import (
     mom_capacitor_device_class as mom_capacitor_device_class,
 )
+from .extract_pdk_resolve import resolve_pdk_and_model_bindings
 from .extract_progress import StageTimer, active_timer, stage
 from .extract_report import (
     _case_collision_warnings,
@@ -319,13 +326,9 @@ from .extract_warnings import (
     unbiased_pmos_body_warnings,
 )
 from .metrics import is_registered
-from .pdk import PdkNotFoundError, find_pdk
 from .pdk_models import (
     MOS_FLAVOUR_PROPERTY,
-    DeviceBinding,
-    ModelBindingError,
     create_model_binding_delegate,
-    resolve_device_bindings,
 )
 
 # Two-terminal closed-form substrate spreading resistance (issue #2561,
@@ -1246,7 +1249,7 @@ def _validate_resistance_path_args(
         raise ExtractError("--resistance-path requires --distributed-rc")
     for query in resistance_paths:
         net_id = query[0]
-        if isinstance(net_id, bool) or not isinstance(net_id, int):
+        if not is_int(net_id):
             raise ExtractError(
                 f"--resistance-path NET_ID must be an integer "
                 f"parasitics.nets[].net_id (got {net_id!r})"
@@ -1377,7 +1380,7 @@ def _label_layers_from_report(
         elif (
             isinstance(value, list)
             and len(value) == 2
-            and all(isinstance(v, int) and not isinstance(v, bool) for v in value)
+            and all(is_int(v) for v in value)
         ):
             overrides[role] = (value[0], value[1])
     return overrides or None
@@ -2862,44 +2865,13 @@ def run_extract(
             "--abstract-cell-lef only has an effect as a pin-resolution "
             "fallback for a cell type --abstract-cells actually matches"
         )
-    # Issue #2761: a FinFET deck has no `--pdk` subcircuit binding; name that
-    # before the PDK lookup below reports a less precise error. No-op for
-    # other decks.
-    from .extract_finfet import refuse_run_options
-
-    refuse_run_options(deck_name, pdk_variant=pdk_variant, pdk_root=pdk_root)
-    pdk_info: dict[str, Any] | None = None
-    # Populated only when a PDK resolves: `{<deck's device class name>:
-    # DeviceBinding}` for every device class this deck extracts that has a
-    # curated binding (MOS + resistor + capacitor on both decks, plus sky130's
-    # bipolar; gf180mcu's bipolar is a documented carve-out and stays absent --
-    # see `klayout_tools.pdk_models`). Drives the `X`-card model-binding writer
-    # below -- see the module docstring's "--pdk-triggered model binding" note.
-    model_bindings: dict[str, DeviceBinding] | None = None
-    _require_pdk_for_device_models(device_models, pdk_variant, pdk_root)
-    if pdk_variant is not None or pdk_root is not None:
-        try:
-            pdk_info = find_pdk(variant=pdk_variant, root=pdk_root)
-        except PdkNotFoundError as exc:
-            raise ExtractError(str(exc)) from exc
-
-        # No `label_layers` (issue #2656) here on purpose: a label-layer
-        # override redirects which GDS purpose net/pin *names* are read from
-        # and cannot change which device classes this deck recognises, which
-        # is the only thing `resolve_device_bindings` reads off the deck.
-        try:
-            deck_for_models = get_extraction_deck(deck_name, deck_options)
-        except (UnknownExtractionDeckError, InvalidDeckOptionError) as exc:
-            raise ExtractError(str(exc)) from exc
-        try:
-            model_bindings = resolve_device_bindings(
-                deck_name,
-                pdk_info["variant"],
-                deck_for_models,
-                device_models=device_models,
-            )
-        except ModelBindingError as exc:
-            raise ExtractError(str(exc)) from exc
+    pdk_info, model_bindings = resolve_pdk_and_model_bindings(
+        deck_name=deck_name,
+        deck_options=deck_options,
+        pdk_variant=pdk_variant,
+        pdk_root=pdk_root,
+        device_models=device_models,
+    )
 
     # `--parasitics` resolves the curated per-PDK RC coefficient table for
     # this deck (see `klayout_tools.decks.ParasiticsDeck`); when the flag is
@@ -7545,46 +7517,6 @@ def _detect_voltage_domain_overlap(
     return warnings, voltage_domain_warnings
 
 
-def _partition_region_by_islands(
-    region: kdb.Region, islands: list[kdb.Region]
-) -> tuple[kdb.Region, list[kdb.Region]]:
-    """Split ``region``'s own connected components into an "outside every
-    island" remainder plus one bucket per entry in ``islands`` (issue #1128,
-    see ``ExtractionDeck.substrate_isolation``'s docstring) -- the same "any
-    overlap claims the whole connected component" idiom ``mos_flavours``
-    marker classification already uses in :func:`_extract_netlist` (a
-    component cannot legally straddle two distinct isolation islands any
-    more than a transistor can legally straddle a voltage-domain marker
-    boundary, so whichever island is tested first for an overlapping
-    component wins).
-
-    Returns ``(region, [])`` -- ``region`` itself, completely unmodified,
-    with no connected-component walk at all -- when ``islands`` is empty.
-    This is the overwhelmingly common case (a deck that declares no
-    ``substrate_isolation``, or a layout that draws no shapes on one that is
-    declared) and is deliberately a fast, no-op path: skipping the walk
-    means the returned region is the exact same object passed in, not a
-    reassembled-from-merged-components copy that could fracture polygons
-    differently, so every caller stays byte-for-byte identical to the
-    pre-#1128 code path in that case.
-    """
-    if not islands:
-        return region, []
-    import klayout.db as kdb
-
-    outside = kdb.Region()
-    per_island: list[kdb.Region] = [kdb.Region() for _ in islands]
-    for component in region.merged().each():
-        component_region = kdb.Region(component)
-        for index, island in enumerate(islands):
-            if not component_region.interacting(island).is_empty():
-                per_island[index] += component_region
-                break
-        else:
-            outside += component_region
-    return outside, per_island
-
-
 def _is_synthesized_substrate_net(name: str, deck: ExtractionDeck) -> bool:
     """Whether ``name`` is one of this deck's *synthesized* substrate
     identities rather than a real, drawn-and-labelled net name: the deck-wide
@@ -7991,8 +7923,7 @@ def _extract_bipolar_device(
     size_groups: dict[tuple, list[kdb.Region]],
     size_matched: dict[tuple, list[kdb.Region]],
 ) -> tuple[
-    tuple[kdb.Region, kdb.Region, kdb.Region, kdb.Region, kdb.Region | None],
-    int,
+    tuple[kdb.Region, kdb.Region, kdb.Region, kdb.Region, kdb.Region | None], int
 ]:
     """Resolve, register and extract one ``deck.bipolars`` entry; returns its
     ``(base, emitter, collector, substrate, substrate_layer)`` regions (for
@@ -8208,36 +8139,6 @@ def _flavour_mos_regions(
     if flavour.pfet_only:
         return (n_gate, p_gate), (kdb.Region(), sd), (source, drain)
     return (n_gate, p_gate), (sd, kdb.Region()), (source, drain)
-
-
-def _extract_flavour_devices(
-    l2n: kdb.LayoutToNetlist,
-    deck: ExtractionDeck,
-    flavour: MOSFlavour,
-    regions: tuple[kdb.Region, kdb.Region, kdb.Region, kdb.Region],
-    terminals: tuple[kdb.Region, kdb.Region] | None,
-    nfet_body: kdb.Region,
-    pfet_body: kdb.Region,
-) -> None:
-    """One flavour's NMOS then PMOS extraction pass. A ``drain_marker``
-    flavour (issue #4570) additionally hands KLayout its ``tS``/``tD`` layers
-    so source and drain are distinct, ordered terminals."""
-    import klayout.db as kdb
-
-    f_nfet_sd, f_nfet_gate, f_pfet_sd, f_pfet_gate = regions
-    extra: dict[str, kdb.Region] = {}
-    if terminals is not None:
-        extra = {"tS": terminals[0], "tD": terminals[1]}
-    if not flavour.pfet_only:
-        l2n.extract_devices(
-            kdb.DeviceExtractorMOS4Transistor(deck.nfet_class),
-            {"SD": f_nfet_sd, "G": f_nfet_gate, "W": nfet_body, **extra},
-        )
-    if not (flavour.nfet_only and terminals is not None):
-        l2n.extract_devices(
-            kdb.DeviceExtractorMOS4Transistor(deck.pfet_class),
-            {"SD": f_pfet_sd, "G": f_pfet_gate, "W": pfet_body, **extra},
-        )
 
 
 def _extract_netlist(
@@ -8790,12 +8691,9 @@ def _extract_netlist(
     # derivation. `isolation_islands` is sorted by bounding box (not raw
     # `Region` iteration order, which is not a documented stability
     # guarantee) so the per-island identities synthesized below are stable
-    # across re-runs of the same layout. Empty -- and every downstream
-    # partition below a guaranteed no-op via
-    # `_partition_region_by_islands` -- for the overwhelmingly common case:
-    # a deck that leaves this field `None` (every deck as of this field's
-    # introduction until gf180mcu's own module sets it), or a layout that
-    # draws no shapes on a deck's declared isolation layer at all.
+    # across re-runs. Empty -- and every downstream partition a guaranteed
+    # no-op via `partition_region_by_islands` -- for a deck leaving this
+    # field `None`, or a layout drawing nothing on the isolation layer.
     # Unioned with the `--abstract-cells` cover for the same reason
     # `nwell_body_cover` is (issue #1911): an isolation island is a
     # body-identity *classification* for every NMOS body and substrate tie
@@ -8807,14 +8705,9 @@ def _extract_netlist(
     isolation_region = (
         _region(layout, top_cell, deck.substrate_isolation) + abstract_isolation_cover
     )
-    isolation_islands: list[kdb.Region] = sorted(
-        (kdb.Region(component) for component in isolation_region.merged().each()),
-        key=lambda region: (
-            region.bbox().left,
-            region.bbox().bottom,
-            region.bbox().right,
-            region.bbox().top,
-        ),
+    isolation_islands: list[kdb.Region] = sorted_islands(
+        isolation_region,
+        nwell if deck.substrate_isolation_needs_nwell_ring else None,
     )
     # `nfet_active_outside`/`nfet_active_isolated` feed only the device-
     # recognition ("W" terminal) split below -- `nfet_gate`/`nfet_sd` above
@@ -8822,7 +8715,7 @@ def _extract_netlist(
     # (ordinary gate/SD net connectivity, the `_compute_parasitics` poly-
     # role gate exclusion), so a transistor's signal terminals route
     # normally regardless of which body-identity group it falls into.
-    nfet_active_outside, nfet_active_isolated = _partition_region_by_islands(
+    nfet_active_outside, nfet_active_isolated = partition_region_by_islands(
         nfet_active, isolation_islands
     )
     nfet_gate_outside = nfet_active_outside & poly
@@ -9099,7 +8992,7 @@ def _extract_netlist(
         island_body = kdb.Region()
         l2n.register(island_body, f"nfet_body_iso{index}")
         nfet_body_isolated.append(island_body)
-    tap_substrate_outside, tap_substrate_isolated = _partition_region_by_islands(
+    tap_substrate_outside, tap_substrate_isolated = partition_region_by_islands(
         tap_substrate, isolation_islands
     )
     if isolation_islands:
@@ -9680,6 +9573,8 @@ def _extract_netlist(
                 l2n.connect(f_pfet_sd, bridge)
         l2n.connect(f_nfet_sd)
         l2n.connect(f_pfet_sd)
+        l2n.connect(f_nfet_sd, nfet_sd)  # #5311: shared S/D is one net
+        l2n.connect(f_pfet_sd, pfet_sd)
         l2n.connect(f_nfet_gate)
         l2n.connect(f_pfet_gate)
         l2n.connect(f_nfet_gate, poly)
@@ -9889,6 +9784,14 @@ def _extract_netlist(
         deck,
         flavour_terminals,
         (flavour_nfet_gate, flavour_pfet_gate),
+    )
+    # Issue #5311: re-divide S/D shared across the per-gate flavour split.
+    apportion_shared_sd(
+        l2n,
+        netlist.circuit_by_name(top_cell.name),
+        [(nfet_gate, nfet_sd), (pfet_gate, pfet_sd)]
+        + list(zip(flavour_nfet_gate, flavour_nfet_sd, strict=True))
+        + list(zip(flavour_pfet_gate, flavour_pfet_sd, strict=True)),
     )
 
     # `--def-net-names` (issue #951): must run right after `l2n.netlist()` --

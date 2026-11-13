@@ -33,11 +33,20 @@ this document (and the code) win.
   outruns the fleet's whole-job ceiling; overrides `batch.max_units_per_job`
   (see "Three budgets, and the fleet's whole-job ceiling"). An explicit cap
   is honored even when a shard's serial upper bound exceeds the ceiling (a
-  stderr warning says so).
+  stderr warning says so). A `decks` request splits the same way (issue #5378):
+  `ceil(len(decks)/N)` balanced contiguous slices, one batch job each, merged
+  into one report in request order, with a shard map (`batch-shards.json`,
+  plus `deck_slices[]`) written to the artifacts dir and
+  `environment.remote.{split,shard_count,shard_map,shards[]}` in the report.
+  A list that already fits submits one job and writes no shard map.
+  `--submit-only` on a deck list that would split is refused with
+  `error.code: "batch_decks_split_unsupported"`; run it blocking, then
+  `--attach <shard map> [--collect-partial]` collects it (repeat the same
+  `--max-units-per-job`, as for corner requests).
 - `--max-concurrent-jobs` — backend `batch`, sharded runs (`remote.hosts > 1`
   or a split): keep at most this many shard jobs in flight at once and start
   the rest as earlier ones finish; overrides `batch.max_concurrent_jobs`.
-  Unset submits every shard at once. See the `batch.max_concurrent_jobs` row
+  Unset submits every shard at once. Applies to a split `decks` request too. See the `batch.max_concurrent_jobs` row
   in the `batch.*` table.
 - `--hosts` — shard the expanded corner/Monte-Carlo unit list across this
   many hosts and merge the per-shard reports, overriding the request's own
@@ -834,6 +843,19 @@ the exit code stays 4; the fields only let an unattended caller tell
 callers should set `batch.capacity_wait_s` to wait out refusals before falling
 back to `--resume`.
 
+**Lost and interrupted shards are resumable too.** When a batch run ends with
+any corner that never ran (`lost_shard`, `batch_job_failed`,
+`batch_job_timeout`, `batch_poll_timeout`, `batch_job_interrupted`) and klt kept
+state to resume from (the shard map, else the `--resume` checkpoint),
+`environment.remote` additionally carries `unrun_units` (count) and
+`resumable: true`, with `shard_map` naming the retained file, and stderr names
+the `--resume` rerun once. Absent when every unit ran. `unrun_units` counts
+every corner that never ran; `unlaunched_shards` (above) counts only shards that
+were never launched, so with both present `unrun_units` is the larger. A lost shard is
+identified by `corners[].diagnostics[].code`, not by `status` (it stays
+`error`). The client does not re-launch these itself; fleet `reconcile` owns
+that ([#5364](https://github.com/2AMLogic/klayout-tools/issues/5364)).
+
 **Retry contract, up front.** A launch refused for lack of Spot capacity is
 *not* retried unless you opt in: `batch.capacity_wait_s` defaults to `0` (one
 attempt), and the refusal then fails the request with
@@ -1031,6 +1053,12 @@ so a later plain `--attach` (or `--resume`) still finishes the remaining
 shards. Without `--attach <shard map>` the flag is refused
 (`error.code: "collect_partial_requires_attach"`).
 
+For a split `decks` request the same flags apply, with deck ids in place of
+corner points: an unfinished shard's decks are reported `error` with
+diagnostic code `batch_shard_unfinished`, and `environment.remote` carries
+`unfinished_shards[]` (`index`, `job_id`, `state`, `unit_ids`) and
+`resumable: true`. A shard whose job is gone reports `lost_shard`.
+
 Interrupted-shard retry stays with 2am's `reconcile`; the client never
 re-launches an `interrupted` job. To lose less work per reclaim, use smaller
 shards (`--max-units-per-job`) and `--collect-partial` plus `--resume`.
@@ -1068,6 +1096,7 @@ the exit code describes the read, `state` describes the job:
 | `terminal` | `true` for `done`/`failed`/`timeout` |
 | `detail`, `started_at`, `updated_at`, `elapsed_seconds`, `exit_code`, `tool` | As written by the fleet harness; absent ones are omitted |
 | `stale`, `stale_seconds` | Derived by `klt`, present only when a non-terminal job's `updated_at` is more than 900 s old (`STALE_AFTER_S`, three heartbeat periods): `stale: true` and the age of `updated_at` in seconds. A job that old is far likelier lost with its instance (e.g. a Spot reclaim) than slow. `state` is never rewritten — it stays the runner's own value. Absent for terminal and `pending` jobs and when `updated_at` is missing or unparseable; additive, so callers must treat both as optional ([#4616](https://github.com/2AMLogic/klayout-tools/issues/4616)) |
+| `never_started`, `unstarted_seconds`, `diagnostic` | Derived by `klt`, present only on a `pending` job (no `status.json`) whose `job.json` is older than 1800 s (`_BATCH_PROVISION_SLACK_S`): `never_started: true`, the `job.json` age in seconds, and the same "never started" message `--attach` prints. Additive; treat all three as optional ([#5332](https://github.com/2AMLogic/klayout-tools/issues/5332)) |
 | `progress` | Optional object the runner publishes into `status.json` while a job runs, e.g. `{"sim_time_s": 1.5e-6, "stop_time_s": 1e-5}` (simulated time reached, and the target stop time when known). Passed through verbatim and additive: omitted when the runner publishes none, so callers must treat it as optional ([#4291](https://github.com/2AMLogic/klayout-tools/issues/4291)) |
 | `instance` | `instance_id`, `instance_type`, `availability_zone`, `lifecycle`, `spot`, ... when published |
 | `exit_reason` | Additive (#4964). Present only when the job ended with a `klt sim` verdict exit (3 or 4) and its `report.json` was collected (on `--attach`/blocking runs, and on `--job-status` via one bounded read of `outputs/report.json`; skipped for non-terminal jobs and when the report is unreadable): `{exit_code, report_status, nothing_checked, nothing_checked_reasons, message, units}`. `units` (#5019) is `{total, by_status, first_not_passed}` — counts by unit status and the first 5 non-passing units with their first diagnostic `code`/`message`. `message` states the cause was the `klt sim` verdict, not the whole-job ceiling (a ceiling kill reports `state: timeout`, exit 124). Explains e.g. an op-only request (no measurements) whose corners pass but whose job state is `failed` / `job command exited 4`. |
@@ -1282,6 +1311,13 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   command exits `1` with error code `batch_set_preflight_failed` naming every
   failing member (path and code). Capacity refusals (`--capacity-retries`) can
   still fail mid-set.
+  Members may be corner requests (`netlist`) or deck-list requests (`decks[]`,
+  [#5337](https://github.com/2AMLogic/klayout-tools/issues/5337)). A deck list
+  is one job sized at the serial worst case of its units' `timeout_s`, and is
+  checked against the same ceiling. `commands[]` members
+  ([#5317](https://github.com/2AMLogic/klayout-tools/issues/5317)) are accepted and
+  not ceiling-checked. A member with none of `netlist`, `decks` or `commands` is
+  refused with a structured request-shape error.
 - **`--dry-run`** ([#5012](https://github.com/2AMLogic/klayout-tools/issues/5012)).
   `klt sim --batch-set ... --dry-run` runs only the all-or-nothing preflight
   above and exits `0` with `dry_run: true`, `submitted: 0` and one
@@ -1294,6 +1330,18 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   member is sharded independently, and an option left unset keeps that
   request's own `batch.max_units_per_job` / `batch.max_concurrent_jobs` /
   `batch.capacity_wait_s`.
+- **Stuck or interrupted members** ([#5324](https://github.com/2AMLogic/klayout-tools/issues/5324)).
+  With a positive `--wait-for-capacity` (the command-line flag only; a
+  request-level `batch.capacity_wait_s` does not bound the set), a member
+  whose job was accepted but stays `pending` longer than that budget becomes an
+  entry with `status: "error"`, `exit_code: 4` and `error.code: "not_launched"`;
+  its job id stays in `job_ids` and the manifest so it can be cancelled or
+  attached. Finished members keep their results. An interrupt
+  (`KeyboardInterrupt`/`SystemExit`) turns every unfinished member into a
+  `set_interrupted` entry; the envelope and manifest are still written. Without
+  a wait budget the pending wait is unbounded, as before.
+- **`--report-out`** writes the aggregate envelope to a file (also on a partial
+  failure), in addition to stdout.
 - **Incremental manifest.** `<outdir>/set-manifest.json` (without `-o`: the
   `.klt/sim/` directory next to the first request) is written when the set
   starts and atomically rewritten on every transition. It lists, per request,
@@ -1746,7 +1794,13 @@ a shard still in `state: "submitted"` is **launched** first -- but only while
 the fleet has published no `status.json` for it, and never from `launching` or
 `launched` (a possibly-launched job is polled, not launched again) -- and only a
 shard with no usable job (never submitted, outputs gone, or a terminally
-`failed` job) is submitted again under a new id, overwriting its entry. Each
+`failed` job, or one still `interrupted` after Spot reclaimed it -- the prior run
+already waited out `interrupted_grace_s`, so the resume reports it after about one
+poll instead of another full window) is submitted again under a new id,
+overwriting its entry. Resubmitting an interrupted shard risks billing it twice if
+the fleet's `reconcile` later re-launches the old job; the exposure is bounded by
+the grace the first run already waited. A `batch_poll_timeout` shard is never
+resubmitted (that job may still be running). Each
 `environment.remote.fleet[]` entry carries `resumed: true|false`. A map
 written before these fields existed carries no `state` and is only ever polled.
 
@@ -2229,7 +2283,7 @@ contents), size-capped, serialised with a JSON encoder, errors recorded as
 | `capture` | `ok`, `absent` (older worker, no artifact, poll timeout) or `malformed`. When not `ok`, all observations are `null` -- never the client's values. |
 | `simulator` | `requested_binary`, `binary_source` (`request` / `KLT_NGSPICE_BINARY` / `PATH`), `selected_path` (binary actually selected on the worker), `version_banner` (full `--version` text, bounded to 2000 chars), `version_probe` (`ok` / `timeout` / `exit_N` / `error` / `unavailable`). |
 | `model_inputs` | Under `options.stage_model_inputs`: `[{name, sha256}]` digests of the staged model files in `$EDA_INPUT_DIR` (bounded to 64); `null` otherwise or when an older worker does not report it. Lifted to `environment.remote.runner_model_inputs`. |
-| `pdk` | `variant`, worker `root`, `stamp_scheme` (`sources-sha256`), `stamp_sha256`, `stamp_text` (bounded `SOURCES` text) for the resolved variant, `models_staged` (true under `options.stage_model_inputs`: the executed models then came from the request, not the image tree), `stamp_scope` (`image` when `models_staged` is true: `stamp_*` then describes the worker image's tree, not the models that ran; `executed` otherwise). Stamp fields are `null` when `SOURCES` is absent. |
+| `pdk` | `variant`, worker `root`, `stamp_scheme` (`sources-sha256`), `stamp_sha256`, `stamp_text` (bounded `SOURCES` text) for the resolved variant, `models_staged` (true under `options.stage_model_inputs`: the executed models then came from the request, not the image tree), `stamp_scope` (`image` when `models_staged` is true: `stamp_*` then describes the worker image's tree, not the models that ran; `executed` otherwise). Stamp fields are `null` when neither `SOURCES` nor a bundle `.pdk-store.json` is readable; with only the latter, `stamp_scheme` is `store-version-sha256` (sha256 of its `version` string; `stamp_text` is `store:<version>`). |
 | `cpu_model` | First `model name` from the worker's `/proc/cpuinfo`, else `null`. CPU count stays `physical_cores` / `concurrency` from `status.json`. |
 | `omp_num_threads` | The worker's effective `OMP_NUM_THREADS`, `null` when unset. |
 | `image_manifest` | Allowlisted fields of a worker-local manifest (`$KLT_IMAGE_MANIFEST`, `/etc/klt-image-manifest.json`, `/opt/klt/image-manifest.json`), or `null` when none exists. This is the worker's own file, not the submitter's AMI selection metadata (`ami_id`, `data/remote-sim-ami-manifest.json`); a selected image is not evidence of the model bytes executed. Whether an image pins its PDK revision is reported only if the worker manifest says so (`pdk_pinned`); otherwise unknown. |
@@ -2237,15 +2291,31 @@ contents), size-capped, serialised with a JSON encoder, errors recorded as
 | `pdk_stamp_comparison` | `status` of `match`, `mismatch` (with `warning`) or `not_comparable` (with `reason`: `worker_stamp_unavailable`, `client_stamp_unavailable`, `variant_differs` or `scheme_differs`). Under `models_staged` the comparison is `basis: "staged_model_inputs"` instead -- see below. |
 | `engine_build_comparison` | Issue #3095. `status` of `match`, `mismatch` (with `warning`) or `not_comparable`: the worker's `simulator.version_banner` against the local `environment.engine_build.version_banner` (whitespace-normalised). `not_comparable` when either side has no banner — never a proven mismatch. A match proves the same banner, not identical build options. |
 
+Two sibling fields sit on `environment.remote` itself (issue #5321), for a
+runner whose image has no readable `SOURCES` stamp:
+
+- `runner_models_lib_sha256`: the `environment.models_lib_sha256` the runner's
+  own `klt sim` reported, i.e. the model card the worker actually loaded;
+  `null` when absent or malformed (older runner, error envelope), so
+  "unknown" is distinguishable from a value.
+- `models_lib_comparison`: `status` of `match`, `mismatch` (with `warning`) or
+  `not_comparable` (with `reason`: `runner_hash_unavailable`,
+  `client_hash_unavailable` or `models_staged`) comparing it with the client's
+  `environment.models_lib_sha256`. Missing data is never a proven mismatch,
+  and klt does not fail the run on `mismatch`. `pdk_stamp_comparison` is
+  unchanged. Text output prints a `models_lib:` line next to `pdk_stamp:`.
+
 `pdk_stamp_comparison` compares the worker's stamp with the `SOURCES` stamp the
 submitter resolves locally (`models.pdk_root` or `$PDK_ROOT`) and reports a
 `mismatch` only when both sides give the **same variant under the same stamp
 scheme**; a missing stamp or an unlike scheme is `not_comparable`, never a
 proven mismatch. The `reason` says which: `client_stamp_unavailable` means the
-submitter has no readable local `SOURCES` (set `models.pdk` and
+submitter has no readable local `SOURCES` or bundle `.pdk-store.json` (set `models.pdk` and
 `models.pdk_root` / `$PDK_ROOT`); `worker_stamp_unavailable` means the runner
 reported no stamp (older worker or absent capture); `variant_differs` /
-`scheme_differs` mean the two sides name different variants or stamp schemes.
+`scheme_differs` mean the two sides name different variants or stamp schemes
+(`SOURCES` wins when present, so a `SOURCES` side against a store-only side is
+`scheme_differs`).
 When `pdk.models_staged` is true the image stamp says nothing about the
 executed models, so `pdk_stamp_comparison` instead compares the client's
 `environment.staged_model_inputs` digests with the worker's `model_inputs`
@@ -2271,7 +2341,8 @@ against the client's own `environment.engine_build`).
 
 Coverage: the `batch` backend only, single jobs and every sharded member
 (mixed worker identities stay individually visible; recovered failed-job
-artifacts are included). The `remote` (SSH) backend does not write this
+artifacts are included). Deck-list (`decks[]`) batch reports carry it too (blocking,
+`--attach`, and recovered failed jobs). The `remote` (SSH) backend does not write this
 capture yet and reports no `worker_environment`. Workers that predate the
 capture, or lack `python3`, report `capture: "absent"`.
 
@@ -5180,8 +5251,9 @@ statistics and `klt yield` consume it like any measurement:
     "unit": "A", "limits": {"min": 1e-6}}]}
 ```
 
-- **Form.** `search` requires `source` (a top-level independent `V`/`I`
-  source), `lo` < `hi`, `tol`, `max_iter`, `analysis` (`{kind, args}`, `kind` is
+- **Form.** `search` requires exactly one of `source` (a top-level
+  independent `V`/`I` source) or `param` (a top-level `.param`; see
+  "Searching a `.param`" below), `lo` < `hi`, `tol`, `max_iter`, `analysis` (`{kind, args}`, `kind` is
   `tran`, `dc` or `op`) and `predicate` (`{expr, at}`; `at` is `"end"`, the last
   point of the expression's vector). Optional: `direction` (`"rising"`, the
   default: predicate false at `lo` and true at `hi`; or `"falling"`) and
@@ -5217,6 +5289,36 @@ statistics and `klt yield` consume it like any measurement:
   | `[search_probe_failed]` | a probe's analysis failed or the predicate vector did not resolve (check node names and `options.save_mode`) |
   | `[search_not_converged]` | `max_iter` was spent before `tol` (strict; there is no unconverged mode) |
   | `[search_no_result]` | the control block ended before the search reported |
+- **Searching a `.param` (`param`).** A source declared with an explicit
+  waveform (`PULSE`/`PWL`/`SIN`) cannot be searched with `source`, because
+  `alter` has no effect on it. Quantities that live inside such a waveform -- a
+  data-edge delay (setup/hold aperture), a pulse width -- are searched by
+  declaring them as a `.param` and naming it in `param`. Each probe runs
+  `alterparam <param> = <x>` and `reset` (which re-parses the deck so every
+  expression reading the parameter is re-evaluated), then re-applies the
+  corner's own `corners.params`, `save` and `corners.supply_v` lines, so it
+  composes with corners and `monte_carlo`. It is still one ngspice process per
+  corner. The report's `search` sibling carries `param` in place of `source`.
+  Supplying both `source` and `param`, or neither, a `param` that is also a
+  `corners.params` axis, and a malformed name are refused up front (exit 1);
+  a name no `.param` declares is a `[search_probe_failed]` error with no value.
+  A request carrying `param` needs a runner of 0.9.2 or later (a mandatory
+  feature: an older runner is refused, never silently omitted).
+
+  ```json
+  {"netlist": "capture.spice",
+   "analysis": {"kind": "tran", "args": "10p 5n"},
+   "measurements": [
+     {"name": "setup_aperture_s",
+      "search": {
+        "param": "td", "lo": 0.0, "hi": 2e-9, "tol": 1e-11, "max_iter": 20,
+        "direction": "falling",
+        "analysis": {"kind": "tran", "args": "10p 5n"},
+        "predicate": {"expr": "v(q) > 0.9*vdd", "at": "end"}},
+      "unit": "s"}]}
+  ```
+
+  with `.param td=1n` and `Vd d 0 PULSE(0 1 {td} 1p 1p 1 2)` in the netlist.
 - **Not supported.** `analysis_steps[]` (refused by name; search inside a step is
   a follow-up) and `engine: "xyce"`. Multi-dimensional or non-monotone search
   and read/write-margin wrapper templates are out of scope.
@@ -7782,6 +7884,7 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `all_units_at_timeout` | Report-level only (`environment.job_diagnostic`, never on a corner): every unit of a ≥2-unit run hit the time budget — see "Timeout-budget hint". |
 | `batch_runner_request_feature_predated` | Report-level only (top-level `diagnostics[]`, never on a corner), `severity: "warning"`: under `batch.runner_version_check: "warn"` the request uses fields the fleet runner `klt` predates — see "Request-feature capability check". |
 | `expr_runner_may_predate` | Report-level only (top-level `diagnostics[]`, never on a corner), `severity: "warning"` ([#4097](https://github.com/2AMLogic/klayout-tools/issues/4097)): an off-host (`remote`/`batch`) run returned no value for a `measurements[].expr` measurement, so the runner image may predate `expr`; `measurements` lists the affected names. |
+| `process_leg_check` | Report-level only (top-level `diagnostics[]`, never on a corner), `severity: "warning"` ([#5385](https://github.com/2AMLogic/klayout-tools/issues/5385)): two or more `corners.process` legs returned bit-identical values for every finite measurement at each supply/temperature, so they may not have been applied; `legs` lists the identical groups. Absent with one leg or when legs differ. The text output also prints a per-corner value table under each measurement (JSON already carries it in `corners[].measurements[]`). |
 | `batch_poll_timeout` | The corner's result was never observed: `batch.poll_timeout_s` elapsed with the job still non-terminal, or the job never published a `status.json` within 1800s (the message says it never started). The job may still be running on the fleet — this is what the client knows, not a claim the run failed. |
 | `batch_job_interrupted` | The corner's result was never observed: the job stayed `interrupted` (Spot-reclaimed, no re-launch seen) for longer than `batch.interrupted_grace_s`, so polling stopped before `poll_timeout_s`. Distinct from `batch_poll_timeout`; the job may still be recoverable on the fleet and the client does not re-launch it. |
 | `timeout_budget_unreachable` | The corner never started: `options.fail_fast_probe`'s calibration probe measured a rate implying `options.timeout_s` cannot plausibly cover the full analysis window, so the whole grid was aborted before dispatch (issue #1694). Carries additional `reached_s`/`fraction` fields — an *estimate* of how far this corner would have gotten, derived from the measured rate, not a real per-corner recovery. See "Timeout-budget preflight" above. |

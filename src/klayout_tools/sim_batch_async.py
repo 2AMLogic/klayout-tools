@@ -52,6 +52,7 @@ from .sim_batch_shards import (  # noqa: F401
     shard_map_request_fields,
     shard_scoped_points,
 )
+from .sim_batch_unstarted import unstarted_fields
 
 #: Schema version of the two payloads this module builds. They are new
 #: documents (not a field on the sim report), so they start at 1.
@@ -329,9 +330,15 @@ def launch_prepared_job(
 def _job_exists(
     config: BatchConfig, job_id: str, run: remote_transport.CommandRunner
 ) -> bool:
-    """Whether ``job.json`` exists under this job's prefix (one
-    ``head-object``). A 404 is "no such job"; any other failure (auth,
-    network) is a transport error, never reported as "unknown job"."""
+    """Whether ``job.json`` exists under this job's prefix."""
+    return _job_head(config, job_id, run) is not None
+
+
+def _job_head(
+    config: BatchConfig, job_id: str, run: remote_transport.CommandRunner
+) -> dict[str, Any] | None:
+    """``head-object`` of ``job.json`` (parsed JSON, ``{}`` if not JSON), or
+    ``None`` on a 404; any other failure is a transport error."""
     bucket_key = f"{config.jobs_prefix}/{job_id}/job.json"
     argv = _aws_argv(
         config,
@@ -347,10 +354,14 @@ def _job_exists(
     except Exception as exc:  # timeout / spawn failure
         raise BatchError(f"aws s3api head-object (job.json) failed: {exc}") from exc
     if result.returncode == 0:
-        return True
+        try:
+            head = json.loads(result.stdout or "")
+        except ValueError:
+            return {}
+        return head if isinstance(head, dict) else {}
     detail = (result.stderr or "").strip()
     if "404" in detail or "Not Found" in detail or "NoSuchKey" in detail:
-        return False
+        return None
     raise BatchError(
         f"aws s3api head-object (job.json) failed (exit {result.returncode}): {detail}"
     )
@@ -437,12 +448,7 @@ def read_job_status(
         request, corner_count=0, timeout_s=0.0, check_runner=False
     )
     try:
-        status = _read_status(config, job_id, run)
-        if status is None and not _job_exists(config, job_id, run):
-            raise SimError(
-                f"no batch job {job_id!r} under {config.bucket}/{config.jobs_prefix}/",
-                code=BATCH_JOB_NOT_FOUND_CODE,
-            )
+        status, job_head = _read_status_and_head(config, job_id, run)
     except BatchError as exc:
         raise SimError(f"batch backend failed: {exc}", code=exc.code) from exc
 
@@ -469,7 +475,26 @@ def read_job_status(
     if stale_seconds is not None:
         payload["stale"] = True
         payload["stale_seconds"] = stale_seconds
+    payload.update(unstarted_fields(job_id, status, job_head, now))
     instance = {k: document[k] for k in _STATUS_INSTANCE_FIELDS if k in document}
     if instance:
         payload["instance"] = instance
     return payload
+
+
+def _read_status_and_head(
+    config: BatchConfig, job_id: str, run: remote_transport.CommandRunner
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """``(status, job.json head)``; neither present is a not-found error."""
+    from .sim import SimError
+
+    status = _read_status(config, job_id, run)
+    if status is not None:
+        return status, None
+    job_head = _job_head(config, job_id, run)
+    if job_head is None:
+        raise SimError(
+            f"no batch job {job_id!r} under {config.bucket}/{config.jobs_prefix}/",
+            code=BATCH_JOB_NOT_FOUND_CODE,
+        )
+    return None, job_head

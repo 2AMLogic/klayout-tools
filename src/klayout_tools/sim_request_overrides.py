@@ -111,15 +111,47 @@ def _refuse_corner_only_flags(
     collect_partial: bool,
 ) -> None:
     """Refuse the corner-request-only flags on a command-list or deck-list
-    request (``--pdk-root`` #4758, ``--timeout-s`` #5036, ``--collect-partial``)."""
+    request (``--pdk-root`` #4758, ``--timeout-s`` #5036); ``--collect-partial``
+    is refused on a command list only (a deck list shards since #5378)."""
     if "commands" not in request and "decks" not in request:
         return
     if pdk_root is not None:
         raise SimError("--pdk-root only applies to corner requests (with `models`)")
     if timeout_s is not None:
         raise SimError("--timeout-s only applies to corner requests (with `models`)")
-    if collect_partial:
+    if collect_partial and "decks" not in request:
         raise SimError(
-            "--collect-partial only applies to corner requests (with `models`)",
+            "--collect-partial only applies to corner requests (with `models`) "
+            "and deck-list requests (`decks`)",
             code="collect_partial_requires_attach",
+        )
+
+
+def _refuse_corner_only_deck_flags(
+    budget_s: float | None,
+    plot_dir: str | None,
+    fail_fast_probe: bool | None,
+    fail_on_diagnostic: list[str] | tuple[str, ...] | None,
+) -> None:
+    """Refuse, by name, the corner-only flags a deck-list request has no
+    machinery for (see ``sim._dispatch_deck_request``)."""
+    if budget_s is not None:
+        raise SimError(
+            "--budget-s/options.wall_clock_budget_s is not supported for "
+            "deck-list requests -- bound each unit with decks[].timeout_s "
+            "instead"
+        )
+    if plot_dir is not None:
+        raise SimError(
+            "--plot writes waveform artifacts, which deck-list requests do not produce"
+        )
+    if fail_fast_probe:
+        raise SimError(
+            "--fail-fast-probe calibrates the corner engine, which "
+            "deck-list requests do not run"
+        )
+    if fail_on_diagnostic:
+        raise SimError(
+            "--fail-on-diagnostic grades corner diagnostics, which "
+            "deck-list requests do not produce"
         )

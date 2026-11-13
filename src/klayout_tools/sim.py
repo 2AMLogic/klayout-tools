@@ -147,7 +147,8 @@ from . import sim_op_check as sim_op_check
 from . import sim_peak_rss as sim_peak_rss
 from . import sim_provenance as sim_provenance
 from . import sim_staging as sim_staging
-from ._jsonnum import is_number
+from ._batch_common import apply_unrun_signal
+from ._jsonnum import is_int, is_number
 from ._paths import (
     _load_request_json,
     _resolve_relative,
@@ -193,14 +194,16 @@ from .sim_batch_async import (
     shard_scoped_points,
 )
 from .sim_batch_async import submit_only as _submit_batch_only
-from .sim_batch_features import pop_remote_diagnostics
+from .sim_batch_features import attach_models_lib_comparison, pop_remote_diagnostics
 from .sim_cause import _with_fatal_error_cause
 from .sim_convergence_retry import is_retryable_convergence_failure, note_not_retried
 from .sim_corner_keys import unknown_key_warnings
 from .sim_decks import run_deck_request
 from .sim_echo_messages import echo_unsupported_message, zipped_length_message
+from .sim_expr_hint import attach_expr_runner_hint as _attach_expr_runner_hint
 from .sim_osdi_pin import osdi_pdk_root_pin
 from .sim_osdi_pin import resolve_osdi_preload as _resolve_osdi_preload
+from .sim_process_legs import attach_process_leg_check
 
 from .sim_analysis_overrides import (  # isort: skip
     AO_LABEL as _AO_LABEL,  # noqa: F401
@@ -246,10 +249,9 @@ from .sim_remote import (
 from .sim_remote import _run_remote_dispatch as _run_remote_dispatch
 from .sim_remote import _shard_corner_points as _shard_corner_points
 from .sim_request_overrides import (
-    _refuse_corner_only_flags as _refuse_corner_only_flags,
-)
-from .sim_request_overrides import (
-    _with_capacity_wait_override as _with_capacity_wait_override,
+    _refuse_corner_only_deck_flags,
+    _refuse_corner_only_flags,
+    _with_capacity_wait_override,
 )
 from .sim_request_overrides import (
     _with_max_concurrent_override as _with_max_concurrent_override,
@@ -412,6 +414,9 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         # Report-level (top-level `diagnostics[]`, issue #4097): an off-host
         # `measurements[].expr` produced no value; the runner may predate it.
         "expr_runner_may_predate",
+        # Report-level (top-level `diagnostics[]`, issue #5385): process legs
+        # with bit-identical results; a warning.
+        "process_leg_check",
     }
 )
 
@@ -1533,17 +1538,17 @@ def _worker_ngspice_binary(remote: Any) -> str | None:
 def apply_engine_host(
     environment: dict[str, Any], *, backend: str, client_ngspice_binary: str | None
 ) -> None:
-    """Stamp ``environment.engine_host`` and keep ``ngspice_binary`` honest
-    (issue #3110). Local runs: ``engine_host: "local"``, nothing else changes.
-    Off-host runs: ``"worker"``; ``ngspice_binary`` becomes the worker's
-    observed path (or ``null``) and the submitter's resolved path moves to
-    ``client_ngspice_binary``."""
+    """Stamp ``environment.engine_host``, keep ``ngspice_binary`` honest (#3110):
+    local changes nothing else; off-host ``"worker"`` makes it the worker's
+    path and moves the submitter's to ``client_ngspice_binary``. Batch adds
+    ``models_lib_comparison`` (#5321)."""
     if backend not in _OFFHOST_BACKENDS:
         environment["engine_host"] = "local"
         return
     environment["engine_host"] = "worker"
     environment["client_ngspice_binary"] = client_ngspice_binary
     environment["ngspice_binary"] = _worker_ngspice_binary(environment.get("remote"))
+    attach_models_lib_comparison(environment, backend)
 
 
 #: Environment-variable override for the ngspice binary (issue #2423), the
@@ -1656,8 +1661,7 @@ def _validate_search_targets(
     netlist_path: str,
     corner_points: list[Any],
 ) -> None:
-    """Issue #4121: pre-dispatch check of every ``search.source`` against the
-    netlist (see :func:`klayout_tools.sim_search.validate_search_targets`)."""
+    """Issues #4121/#5391: pre-dispatch check of every search target."""
     if not sim_search.search_measurements(measurements_spec):
         return
     try:
@@ -1669,6 +1673,7 @@ def _validate_search_targets(
         measurements_spec,
         waveforms,
         {key.strip().lower() for point in corner_points for key in point.supply_v},
+        {name for point in corner_points for name in point.params},
     )
 
 
@@ -1990,7 +1995,7 @@ def _validate_convergence_retry(value: Any) -> dict[str, Any] | None:
         )
     resolved = {**DEFAULT_CONVERGENCE_RETRY, **value}
     attempts = resolved["max_attempts"]
-    if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 1:
+    if not is_int(attempts) or attempts < 1:
         raise SimError(
             "options.retry_on_convergence_error.max_attempts must be an integer >= 1"
         )
@@ -2647,6 +2652,9 @@ def run_sim(
             plot_dir=plot_dir,
             fail_fast_probe=fail_fast_probe,
             fail_on_diagnostic=fail_on_diagnostic,
+            max_units_per_job=max_units_per_job,
+            max_concurrent_jobs=max_concurrent_jobs,
+            collect_partial=collect_partial,
             dry_run=dry_run,
             submit_only=submit_only,
             attach_job_id=attach_job_id,
@@ -2675,36 +2683,6 @@ def run_sim(
         timeout_s=timeout_s,
         _ownership=_ownership,
     )
-
-
-def _refuse_corner_only_deck_flags(
-    budget_s: float | None,
-    plot_dir: str | None,
-    fail_fast_probe: bool | None,
-    fail_on_diagnostic: list[str] | tuple[str, ...] | None,
-) -> None:
-    """Refuse, by name, the corner-only flags a deck-list request has no
-    machinery for (see :func:`_dispatch_deck_request`)."""
-    if budget_s is not None:
-        raise SimError(
-            "--budget-s/options.wall_clock_budget_s is not supported for "
-            "deck-list requests -- bound each unit with decks[].timeout_s "
-            "instead"
-        )
-    if plot_dir is not None:
-        raise SimError(
-            "--plot writes waveform artifacts, which deck-list requests do not produce"
-        )
-    if fail_fast_probe:
-        raise SimError(
-            "--fail-fast-probe calibrates the corner engine, which "
-            "deck-list requests do not run"
-        )
-    if fail_on_diagnostic:
-        raise SimError(
-            "--fail-on-diagnostic grades corner diagnostics, which "
-            "deck-list requests do not produce"
-        )
 
 
 def _dispatch_command_request(
@@ -2791,6 +2769,9 @@ def _dispatch_deck_request(
     submit_only: bool = False,
     attach_job_id: str | None = None,
     capacity_wait_s: float | None = None,
+    max_units_per_job: int | None = None,
+    max_concurrent_jobs: int | None = None,
+    collect_partial: bool = False,
     _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
     """Route a deck-list request to :mod:`klayout_tools.sim_decks`,
@@ -2825,8 +2806,16 @@ def _dispatch_deck_request(
         if not resume and plot_dir is None:
             refuse_sharded_deck_submit(hosts)
     _apply_attach(
-        {}, attach_job_id, resolved_backend, 1 if hosts is None else hosts, submit_only
+        {},
+        attach_job_id,
+        resolved_backend,
+        1 if hosts is None else hosts,
+        submit_only,
+        collect_partial,
     )
+    # Issue #5378: the split knobs fold into `request.batch` for a deck list.
+    request = _with_max_units_override(request, max_units_per_job)
+    request = _with_max_concurrent_override(request, max_concurrent_jobs)
     _check_capacity_wait_applies(capacity_wait_s, resolved_backend, attach_job_id)
     # Issue #4543: the CLI value wins over `batch.capacity_wait_s`, and is
     # validated before any S3 write.
@@ -2883,6 +2872,7 @@ def _dispatch_deck_request(
         submit_only=submit_only,
         attach_job_id=attach_job_id,
         dry_run=dry_run,
+        collect_partial=collect_partial,
     )
     _check_offhost_engine_version_pin(
         engine_version_pin,
@@ -2924,9 +2914,8 @@ def _record_batch_checkpoint(
     ``report.json``, so there is nothing to record incrementally; record the
     returned set after dispatch. A corner that never ran (``lost_shard``,
     ``batch_job_failed``, ``batch_job_timeout``, ``batch_poll_timeout``,
-    ``batch_job_interrupted``) is
-    left out and stays outstanding for the next ``--resume``; a corner that
-    ran and genuinely errored is recorded exactly as the local backends do.
+    ``batch_job_interrupted``) is left out and stays outstanding for the next
+    ``--resume``; one that ran and genuinely errored is recorded as locally.
     A no-op without a checkpoint or off ``batch``.
     """
     if checkpoint is None or backend != "batch":
@@ -4268,13 +4257,10 @@ def _run_sim_corners(
             for diag in corner["diagnostics"]
         )
     )
-    # Issue #3367: a corner that never ran on `batch` (`lost_shard`,
-    # `batch_job_failed`, `batch_job_timeout`, `batch_poll_timeout`,
-    # `batch_job_interrupted`) is
-    # outstanding too, so a checkpoint holding the rest must outlive this
-    # run. Kept out of `corners_skipped`
-    # (the reported `environment.budget.corners_skipped`) to leave that
-    # field's meaning unchanged.
+    # Issue #3367: a corner that never ran on `batch` (`_UNRUN_BATCH_CODES`)
+    # is outstanding too, so a checkpoint holding the rest must outlive this
+    # run. Kept out of `corners_skipped` (the reported
+    # `environment.budget.corners_skipped`) to leave its meaning unchanged.
     corners_lost = sum(1 for corner in corners if _is_unrun_batch_corner(corner))
 
     # Issue #2491: a top-level rollup of every `corners[].diagnostics[]`
@@ -4297,10 +4283,9 @@ def _run_sim_corners(
         and not sharded_attach
     ):
         # Issue #3300: nothing left to re-attach to. A sharded `--attach`
-        # keeps its map (issue #4721): a multi-leg caller (`klt pex
-        # --attach`) can be interrupted after this leg collected but before
-        # the others did, and the next attach still needs this leg's map.
-        # That caller removes the maps once its whole run succeeded.
+        # keeps its map (issue #4721): a multi-leg caller (`klt pex --attach`)
+        # interrupted after this leg collected still needs it on the next
+        # attach, and removes the maps once its whole run succeeded.
         _remove_shard_manifest(artifacts_dir)
 
     if checkpoint is not None:
@@ -4470,9 +4455,13 @@ def _run_sim_corners(
         )
     )
     if remote_environment is not None:
-        # Additive/optional: only present for the `remote` backend -- see
-        # `_run_remote` and docs/cli/sim.md's "Remote backend" section.
-        environment["remote"] = remote_environment
+        # Additive/optional (`remote`/`batch` only): docs/cli/sim.md.
+        environment["remote"] = apply_unrun_signal(
+            remote_environment,
+            corners_lost,
+            artifacts_dir,
+            checkpoint_path if checkpoint_retained else None,
+        )
     apply_engine_host(
         environment, backend=backend, client_ngspice_binary=ngspice_binary
     )
@@ -4604,6 +4593,7 @@ def _run_sim_corners(
     ]:
         report["diagnostics"] = top_diags
     _attach_expr_runner_hint(report, measurements_spec, corners, backend=backend)
+    attach_process_leg_check(report, corners)
     _attach_not_reached_count(report, measurements_spec, corners)
     if plot_dir is not None:
         # Additive/optional: only present when `--plot`/`plot_dir` was
@@ -6968,7 +6958,7 @@ def _validate_k_sigma(value: Any, field: str) -> float:
     ``k=0`` degenerates the limit window to the mean itself, a legitimate
     "is the *typical* part inside the window?" question.
     """
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if not is_number(value):
         raise SimError(f"{field} must be a non-negative number (got {value!r})")
     if value < 0:
         raise SimError(f"{field} must be a non-negative number (got {value!r})")
@@ -6991,7 +6981,7 @@ def _resolve_mismatch_scale(
         return None
     value = mc_spec["mismatch_scale"]
     field = "request.monte_carlo.mismatch_scale"
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if not is_number(value):
         raise SimError(f"{field} must be a finite non-negative number (got {value!r})")
     if not math.isfinite(value) or value < 0:
         raise SimError(f"{field} must be a finite non-negative number (got {value!r})")
@@ -7046,7 +7036,7 @@ def _validate_plausible_range(value: Any, field: str) -> dict[str, float]:
         if key not in value:
             continue
         entry = value[key]
-        if isinstance(entry, bool) or not isinstance(entry, (int, float)):
+        if not is_number(entry):
             raise SimError(f"{field}.{key} must be a number (got {entry!r})")
         result[key] = float(entry)
     if not result:
@@ -7165,7 +7155,7 @@ def _validate_mc_statistics_spec(
             )
         ordered: list[float] = []
         for entry in raw_quantiles:
-            if isinstance(entry, bool) or not isinstance(entry, (int, float)):
+            if not is_number(entry):
                 raise SimError(
                     "request.monte_carlo.quantiles entries must be numbers in "
                     f"[0, 100] (got {entry!r})"
@@ -7647,7 +7637,7 @@ def _checkpoint_fingerprint(
     Content-hashes the netlist/model library (not just their paths -- an
     edited-in-place file at the same path must invalidate the checkpoint,
     per this issue's own acceptance criteria) alongside the analysis,
-    measurement cards, per-corner timeout, engine, and the exact list of
+    measurement cards, engine (not ``timeout_s``: #5410), and the exact list of
     expanded corner IDs (covers the whole corner matrix, including any
     Monte Carlo expansion, since two requests that expand to a different
     corner list are not resumable against each other's progress). A
@@ -7661,7 +7651,6 @@ def _checkpoint_fingerprint(
         "models_lib_sha256": sha256_file(models_lib),
         "analysis": analysis,
         "measurements_spec": measurements_spec,
-        "timeout_s": timeout_s,
         "engine": engine,
         "corner_ids": [point.corner_id for point in corner_points],
     }
@@ -11358,7 +11347,7 @@ def _corner_deck_control_lines(
         measurements_spec, corner_dir
     )
     settled_lines = sim_settled.control_lines(measurements_spec, corner_dir)
-    search_lines = sim_search.control_lines(measurements_spec)
+    search_lines = sim_search.control_lines(measurements_spec, prefix)
     complex_vector_lines = sim_complex_vectors.control_lines(
         complex_vectors, corner_dir
     )
@@ -13196,56 +13185,6 @@ def _monte_carlo_rollup(
         for corner_id, pairs in grouped.items()
     ]
     return rollup
-
-
-EXPR_RUNNER_MAYBE_OLD_CODE = "expr_runner_may_predate"
-
-
-def _attach_expr_runner_hint(
-    report: dict[str, Any],
-    measurements_spec: list[dict[str, Any]],
-    corners: list[dict[str, Any]],
-    *,
-    backend: str | None,
-) -> None:
-    """Additive/optional (issue #4097): on an off-host run, a
-    ``measurements[].expr`` measurement that came back with no value may mean
-    the runner image predates ``expr`` (its version compare is major.minor
-    only, so the pre-launch check cannot prove it). Name that suspect beside
-    the per-measurement "produced no value"."""
-    if backend not in _OFFHOST_BACKENDS:
-        return
-    expr_names = {
-        spec["name"]
-        for spec in measurements_spec
-        if isinstance(spec, dict) and spec.get("expr") is not None and "name" in spec
-    }
-    if not expr_names:
-        return
-    silent = sorted(
-        {
-            m["name"]
-            for corner in corners
-            for m in corner.get("measurements") or []
-            if m.get("name") in expr_names and m.get("value") is None
-        }
-    )
-    if not silent:
-        return
-    report.setdefault("diagnostics", []).append(
-        {
-            "code": EXPR_RUNNER_MAYBE_OLD_CODE,
-            "severity": "warning",
-            "message": (
-                f"measurements[].expr measurement(s) {', '.join(silent)} "
-                "produced no value on the off-host runner, which may predate "
-                "`expr` (runner may predate expr; compare "
-                "environment.remote.runner_klt_version with the client "
-                "version and rebuild the runner image if older)"
-            ),
-            "measurements": silent,
-        }
-    )
 
 
 def _attach_not_reached_count(
