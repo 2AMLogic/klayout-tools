@@ -2283,11 +2283,17 @@ minor from your client, either:
    `environment.remote.runner_compatibility` and
    `runner_compatibility_warning` in the result.
 
-Neither option 1 nor option 3 relaxes `klt signoff --attest`: it still runs
-every `local_only` command at mint time, and there is no flag to skip one
-(see "Toolchain-free runners: `local_only` commands" in
-[`signoff.md`](signoff.md)). A blocked host fixes the skew; it does not skip
-the attested check.
+Neither option 1 nor option 3 relaxes `klt signoff --attest`: by default it
+still runs every `local_only` command at mint time, so fixing the skew is the
+path to prefer — a blocked host unblocks itself, it does not skip the attested
+check. The one opt-out is `--skip-local-only`
+([#5209](https://github.com/2AMLogic/klayout-tools/issues/5209)), which
+refreshes an existing `-o` envelope by carrying that command's already-committed
+outcome forward instead of re-running it. The carried outcome is vouched for by
+the committed envelope, not by this run, and the flag never mints a first
+outcome — so use it only when the change cannot affect that command's result.
+See "Toolchain-free runners: `local_only` commands" and "Refreshing on a host
+lacking the toolchain" in [`signoff.md`](signoff.md).
 
 ### Worker-observed environment (`worker_environment`, [#2834](https://github.com/2AMLogic/klayout-tools/issues/2834))
 
@@ -7752,10 +7758,45 @@ substitution is **reported rather than discarded**:
   ```text
   models_lib: <outside repo>
   pdk: sky130A open_pdks 0fe599b (via search root: ~/.ciel)
-  pdk: WARNING: variant also installed under search root: ~/.volare -- resolution is first-match-wins; pin models.pdk_root to choose deliberately
+  pdk: WARNING: variant also installed under search root: ~/.volare -- resolution is first-match-wins; pin --pdk-root (or models.pdk_root) to choose deliberately
   ```
 
-**Pinning `models.pdk_root` is the fix**, and it is quiet by construction:
+**On `backend: batch` both warnings name `$PDK_ROOT` instead**
+([#5449](https://github.com/2AMLogic/klayout-tools/issues/5449)). The default
+remedy is a dead end there: `models.pdk_root` — and `--pdk-root`, which is
+folded into it — is refused on that backend with `models_pdk_root_host_path`
+(below), so a submitter who took the advice could not submit. `$PDK_ROOT` is
+the client-side pin that works, because it is the first search candidate and
+is never forwarded to the runner, which reads its own install selected by
+`models.pdk`:
+
+```text
+klt: warning: 2 installs provide PDK variant 'sky130A'; read
+/home/u/.ciel (search root: ~/.ciel), skipped /home/u/.volare (search
+root: ~/.volare). Resolution is first-match-wins, so a pinned open_pdks
+build may not be the one this client read -- set $PDK_ROOT to choose
+which install this client resolves (the only client-side pin backend
+'batch' accepts); the runner reads its own install, selected by
+models.pdk.
+```
+
+```text
+pdk: WARNING: variant also installed under search root: ~/.volare -- resolution is first-match-wins; set $PDK_ROOT to choose which install this client resolves; the runner reads its own, selected by models.pdk
+```
+
+Every other backend's wording is unchanged. `provenance.pdk.ambiguous_sources`
+is identical on all of them.
+
+Both messages key on **`environment.backend.resolved`** — the backend that
+actually ran — not on what was requested. So a host default of
+`$KLT_SIM_BACKEND=batch` that steps back to `local` (a single-unit run, an
+`engine: "xyce"` request, `options.resume`, a host-local
+`options.osdi_preload`; see "Host default" above) keeps the default wording,
+which is the correct advice for that run: it resolves the PDK here, so
+`--pdk-root` / `models.pdk_root` are accepted and do silence the warning.
+
+**Pinning `models.pdk_root` is the fix** (on `local`/`local-parallel`/`remote`;
+see the `batch` note above), and it is quiet by construction:
 step 1 disables the search, so there is no second candidate to be ambiguous
 against. `$PDK_ROOT` narrows the search to one *first* candidate but does not
 disable it, so a run pinned that way still reports any other install it
@@ -7800,7 +7841,19 @@ stay verbatim.
 **refused** on the `batch` backend before any S3 write: exit `1`, `error.code`
 `models_pdk_root_host_path`. It is forwarded verbatim and would not exist on the
 runner; drop it and use `models.pdk`. A path that does not exist here is
-assumed runner-valid and passes.
+assumed runner-valid and passes. `--pdk-root` is folded into `models.pdk_root`
+as an absolute path, so the flag form is refused the same way.
+
+`klt sim --dry-run --backend batch` raises the same error rather than passing
+clean ([#5449](https://github.com/2AMLogic/klayout-tools/issues/5449)), with
+the same code and message, and without resolving a bucket or provision script
+— so a dry run used as a pre-flight cannot green-light a request the submit
+path rejects. Like the warning wording above, the refusal follows the
+**resolved** backend: a dry run a host default steps back to `local` reports
+`backend: local` and accepts a host-local `models.pdk_root`, because that run
+would read it here rather than forward it. To choose which install the
+*client* reads on `batch`, set `$PDK_ROOT` in the submitting environment: it
+is not forwarded to the runner.
 
 When an off-host run returns no value for a `measurements[].expr` measurement,
 the report's top-level `diagnostics[]` also carries a warning with code

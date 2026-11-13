@@ -136,6 +136,7 @@
       "kind": "verb",
       "description": "`klt drc` implementation: core modules plus CLI adapter.",
       "modules": [
+        "klayout_tools.cli._drc_list_categories",
         "klayout_tools.cli._drc_native",
         "klayout_tools.cli._drc_parser_args",
         "klayout_tools.cli.drc_cmd",
@@ -148,6 +149,8 @@
         "klayout_tools.drc_klayout_app",
       "klayout_tools.drc_layer_selection",
         "klayout_tools.drc_klayout_engine",
+        "klayout_tools.drc_klayout_launch",
+        "klayout_tools.drc_klayout_list",
         "klayout_tools.drc_report_check",
         "klayout_tools.drc_text_exempt"
       ]
@@ -521,6 +524,7 @@
         "klayout_tools.decks.sky130_unmodeled",
         "klayout_tools.liberty_merge",
         "klayout_tools.pdk",
+        "klayout_tools.pdk_ambiguity",
         "klayout_tools.pdk_capabilities",
         "klayout_tools.pdk_cells",
         "klayout_tools.pdk_compat",
@@ -693,6 +697,7 @@
         "klayout_tools.signoff_attest_item9",
         "klayout_tools.signoff_attest_stream",
         "klayout_tools.signoff_attest_text",
+        "klayout_tools.signoff_derived_rows",
         "klayout_tools.signoff_details",
         "klayout_tools.signoff_envelopes",
         "klayout_tools.signoff_evidence_pin",
@@ -700,6 +705,7 @@
         "klayout_tools.signoff_generator_batch",
         "klayout_tools.signoff_multi_member",
         "klayout_tools.signoff_na",
+        "klayout_tools.signoff_nothing_checked",
         "klayout_tools.signoff_power_delivery",
         "klayout_tools.signoff_power_delivery_substrate",
         "klayout_tools.signoff_runset",
@@ -778,6 +784,7 @@
         "klayout_tools.sim_passes",
         "klayout_tools.sim_op_check",
         "klayout_tools.sim_osdi_pin",
+        "klayout_tools.sim_pdk_ambiguity",
         "klayout_tools.sim_peak_rss",
         "klayout_tools.sim_plan",
         "klayout_tools.sim_plot",
@@ -811,6 +818,7 @@
         "klayout_tools.sim_twoport",
         "klayout_tools.sim_validate",
         "klayout_tools.sim_waveform_opts",
+        "klayout_tools.sim_window",
         "klayout_tools.sim_xyce_refusals"
       ]
     },
