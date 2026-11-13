@@ -317,6 +317,50 @@ def clip_box(
     )
 
 
+def new_canonical_layout(dbu: float, pcell_values: dict[str, Any]) -> kdb.Layout:
+    """Return a fresh ``dbu``-scaled layout whose layer indices are allocated
+    in canonical ``(layer, datatype, name)`` order (issue #5499).
+
+    ``gen._pcell_library()`` is registered once per process and its layout
+    accumulates layer indices in *first-use* order across every PCell
+    produced in that process. ``Layout.add_pcell_variant`` mirrors the
+    library layout's layers into the fresh target layout in that same order,
+    and KLayout's stream writers emit each cell's elements in layer-index
+    order -- so without this, a ``mos_array`` request produced after a
+    ``bjt_array`` request wrote the same geometry in a different record order
+    than the same request produced first in a fresh process.
+
+    Pre-registering every ``kdb.LayerInfo`` the request carries, before any
+    PCell geometry lands in the layout, pins indices 0..N-1 to a sorted order
+    that depends only on the request -- so the layer table, and therefore the
+    written stream, is a function of the request alone. A param layer the
+    PCell does not end up drawing on costs an empty layer in the table and
+    zero bytes in the stream (GDS2 and OASIS both record geometry, not layer
+    declarations).
+    """
+    # Imported lazily, matching load_layout()'s lazy `klayout.db` import.
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.dbu = dbu
+
+    seen: set[tuple[int, int, str]] = set()
+    infos: list[kdb.LayerInfo] = []
+    for value in pcell_values.values():
+        if not isinstance(value, kdb.LayerInfo):
+            continue
+        key = (value.layer, value.datatype, value.name)
+        if key in seen:
+            continue
+        seen.add(key)
+        infos.append(value)
+
+    for info in sorted(infos, key=lambda i: (i.layer, i.datatype, i.name)):
+        layout.layer(info)
+
+    return layout
+
+
 def write_layout(layout: kdb.Layout, path: str, error_cls: type[Exception]) -> None:
     """Write ``layout`` to ``path`` with deterministic (reproducible-build) output.
 

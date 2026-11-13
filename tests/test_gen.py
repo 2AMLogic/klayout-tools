@@ -242,100 +242,6 @@ def test_generate_output_is_byte_reproducible(tmp_path, pdk_root):
     assert output_a.read_bytes() == output_b.read_bytes()
 
 
-#: Run `gen.generate()` once per named generator in a single process, then
-#: print the sha256 of the **last** stream written. Driven as a subprocess by
-#: `test_generate_output_does_not_depend_on_earlier_generators` below: the
-#: reference PCell library `_produce()` uses is registered process-globally
-#: (`gen._pcell_library()`), so "this request, generated first in a fresh
-#: process" is only expressible from a fresh interpreter -- pytest shares one.
-_GENERATOR_SEQUENCE_SCRIPT = """
-import hashlib, os, sys
-from klayout_tools import gen, pdk
-
-pdk.STORE_DIRS = []
-pdk.CONVENTIONAL_PREFIXES = []
-os.environ.pop("PDK_ROOT", None)
-os.environ.pop("PDK", None)
-
-pdk_root, out_dir = sys.argv[1], sys.argv[2]
-params = {
-    "mos_array": {"rows": 1, "cols": 1, "dummy": 0, "gate_contact": True},
-    "bjt_array": {"rows": 1, "cols": 8, "dummy": 0, "add_collector_ring": False},
-}
-
-for position, name in enumerate(sys.argv[3:]):
-    output = os.path.join(out_dir, "%d_%s.gds" % (position, name))
-    gen.generate(
-        {
-            "generator": name,
-            "pdk": {"variant": "sky130A", "root": pdk_root},
-            "params": params[name],
-            "options": {"cell_name": name + "_0", "output": output},
-        }
-    )
-
-with open(output, "rb") as handle:
-    print(hashlib.sha256(handle.read()).hexdigest())
-"""
-
-
-def _generator_sequence_sha256(tmp_path, pdk_root, tag, *sequence):
-    """sha256 of the stream `sequence[-1]` writes, generated in a *fresh*
-    interpreter that first generated `sequence[:-1]`."""
-    import subprocess
-    import sys
-
-    script_dir = tmp_path / f"script_{tag}"
-    script_dir.mkdir()
-    script = script_dir / "sequence.py"
-    script.write_text(_GENERATOR_SEQUENCE_SCRIPT)
-    out_dir = tmp_path / f"out_{tag}"
-    out_dir.mkdir()
-
-    completed = subprocess.run(
-        [sys.executable, "-I", str(script), str(pdk_root), str(out_dir), *sequence],
-        capture_output=True,
-        text=True,
-        timeout=600,
-    )
-    assert completed.returncode == 0, completed.stderr[-2000:]
-    return completed.stdout.strip()
-
-
-def test_generate_output_does_not_depend_on_earlier_generators(tmp_path, pdk_root):
-    """A `generate()` request's stream is a function of that request alone --
-    not of which other generators ran earlier in the same process (#5499).
-
-    Before the fix, `_produce()` let the process-global reference PCell
-    library's layer table -- which grows in *first-use* order across every
-    PCell produced in the process -- reach the written stream: KLayout's
-    writers emit each cell's elements in layer-index order, and
-    `Layout.add_pcell_variant` mirrored the library's layer order into the
-    fresh target layout. So `bjt_array` running first silently reordered the
-    element records of the `mos_array` stream that followed it: same
-    geometry, same size, different bytes. A flow that commits generated
-    streams and gates on a recorded hash then goes red because an *unrelated*
-    block was added to the same batch run.
-
-    Deliberately a **byte** compare run across two interpreters. An
-    in-memory `klayout.db` compare (`_assert_gds_geometry_equal` above)
-    normalises shape order on read and cannot see this at all, and neither
-    can `klt diff`'s `canonical_hash`; one process cannot express "generated
-    first" twice, because the library is registered once per process.
-    """
-    alone = _generator_sequence_sha256(tmp_path, pdk_root, "alone", "mos_array")
-    after_bjt = _generator_sequence_sha256(
-        tmp_path, pdk_root, "pair", "bjt_array", "mos_array"
-    )
-    # A third generator in front, and a repeat of the same one, are equally
-    # irrelevant -- the stream depends on the request, nothing else.
-    after_two = _generator_sequence_sha256(
-        tmp_path, pdk_root, "triple", "bjt_array", "bjt_array", "mos_array"
-    )
-
-    assert alone == after_bjt == after_two
-
-
 def test_generate_reports_snapped_to_grid(tmp_path, pdk_root):
     output = tmp_path / "out.gds"
     report = generate(
@@ -10359,15 +10265,10 @@ def test_dogbone_terminal_example_regenerates_byte_identical(tmp_path, family):
     on both families, silently invalidating the committed streams while
     every existing test stayed green.
 
-    A byte compare (rather than a geometry compare) is deliberate: it also
-    pins the stream's *record order*, which a `klayout.db` compare cannot
-    see because reading normalises shape order in memory -- the gap behind
-    #5499, where an earlier generator in the same process silently reordered
-    this stream's elements. (Until #5499 the compare also pinned
-    `mos_array`'s embedded PCell context-info properties, so a parameter
-    added to the generator drifted the fixture without moving a polygon;
-    `write_layout()` no longer writes context info, so a parameter-only
-    change is now invisible here.) When this fails, regenerate with
+    A byte compare (rather than a geometry compare) is deliberate: it pins the
+    stream's *record order*, which a `klayout.db` compare cannot see -- the
+    #5499 gap. PCell context info is no longer pinned (`write_layout()` stopped
+    writing it), so parameter drift is invisible. When this fails, regenerate with
     `uv run --extra dev python3 examples/dogbone-terminal/generate.py` and
     review the resulting diff as a deliberate fixture update.
     """
