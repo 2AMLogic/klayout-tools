@@ -3,6 +3,10 @@
 The derivation/execution half (``klayout_tools.mcp_tools``) needs no MCP SDK,
 so those tests always run. The stdio round-trip needs the optional ``[mcp]``
 extra and is skipped without it, keeping the base-install suite green.
+
+The schema resources the same server exposes (``klayout_tools.mcp_resources``,
+issue #5420) are covered in ``tests/test_mcp_resources.py`` -- a separate file
+so neither exceeds the 500-line per-file ratchet ceiling.
 """
 
 from __future__ import annotations
