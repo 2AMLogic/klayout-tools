@@ -14,6 +14,30 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt sim`: `monte_carlo.instances` now supports ihp-sg13g2, gating by the
+  `mm_ok` instance parameter** (#5487, 2026-11-13): per-instance mismatch
+  attribution was refused for sg13g2 ("needs models.pdk naming a PDK with a
+  known mismatch switch"), because the only gating mechanism was a wrapper
+  subcircuit shadowing a model-level `.param` and sg13g2 has no such switch —
+  its `*_mismatch.lib` device subcircuits default `mm_ok=1` *inside* each
+  subcircuit, which shadows any enclosing scope. An unselected sg13g2 instance
+  is now gated by rewriting its own instance line to carry `mm_ok=0` (an
+  existing `mm_ok=` is replaced, not duplicated; `+` continuations fold in). No
+  wrapper is generated, so **hierarchical probe names are unchanged** for
+  sg13g2. klt writes `mm_ok=0` only onto an instance whose subcircuit
+  definition it has read and found to declare the parameter — read from the
+  netlist's `.include` closure and the selected model-library sections, never
+  from a device-name list — and refuses an unselected instance whose
+  subcircuit does not, before any corner is dispatched: ngspice silently
+  accepts `mm_ok=0` on a user subcircuit declaring some *other* parameter and
+  leaves the devices inside randomised, which would have made klt report
+  `randomised: false` for an instance that was still randomised. Additive:
+  `environment.monte_carlo.instance_mismatch` keeps its shape, with
+  `"switch": "mm_ok"`; sky130 and gf180mcu output, refusals and wrapper
+  behaviour are unchanged, and there is no `schema_version` bump. Measured on
+  ngspice-47 against a real IHP-Open-PDK install (gated `stddev` exactly `0.0`
+  vs `8.136e-3` V randomised; negative control identical to a plain `mos_tt`
+  run). See `docs/cli/sim.md` → "Per-instance mismatch selection".
 - **`klt drc`: a rule whose `layer_selection` empties its input is now
   `inapplicable`, not `checked`** (#5435, 2026-11-13): applicability was
   decided from layer *presence*, before a rule's own `layer_selection`
