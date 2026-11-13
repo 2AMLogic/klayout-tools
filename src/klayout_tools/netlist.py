@@ -90,6 +90,8 @@ from .netlist_pdk import (
     _rcfile_pdk_root,
     _with_symbol_path_env,
 )
+from .netlist_port_order import port_order_drift_reason
+from .netlist_port_order import sibling_symbol as _sibling_symbol
 
 #: Payload schema version (``docs/json-contract.md``; versioned per command).
 SCHEMA_VERSION = 1
@@ -593,6 +595,7 @@ def _check_result(
     ignore_comments: bool = False,
     xschem_version: str | None = None,
     inputs: dict[str, str | None] | None = None,
+    sibling_symbol: str | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """``check=True``'s verdict: does the committed netlist at ``output``
     still match what the schematics produce?
@@ -621,7 +624,9 @@ def _check_result(
     When the only difference is the port order of one or more electrical
     ``.subckt`` cards, ``subckt_port_order`` names them and ``reason`` says so
     (issue #4524); the status stays ``"drifted"``. ``xschem_version`` is the
-    local xschem's version, quoted in that reason.
+    local xschem's version and ``sibling_symbol`` the symbol governing a
+    ``--block`` top sheet's port order, both quoted in that reason
+    (:func:`port_order_drift_reason`, issue #5473).
 
     ``inputs`` (issue #4945) are the fresh generation inputs; the committed
     side's record is the ``** klt-netlist-inputs:`` line :func:`run_netlist`
@@ -685,14 +690,7 @@ def _check_result(
     diff, truncated = _unified_diff(committed, fresh_data, output)
     port_order = _subckt_port_order_drift(committed, fresh_data, ignore_comments)
     if port_order:
-        names = ", ".join(entry["subckt"] for entry in port_order)
-        reason = (
-            f"the .subckt port order of {names} differs from the committed "
-            f"netlist (local xschem {xschem_version or 'version unknown'}); "
-            "different xschem builds order ports differently -- recheck "
-            "positional subckt-call callers and LVS references before "
-            "re-running without --check to refresh it"
-        )
+        reason = port_order_drift_reason(port_order, xschem_version, sibling_symbol)
         reason += f"; {inputs_reason}"
     else:
         reason = (
@@ -1055,6 +1053,7 @@ def run_netlist(
                 ignore_comments,
                 xschem_version=version,
                 inputs=inputs,
+                sibling_symbol=_sibling_symbol(schematic) if block else None,
             )
             nb = _netlist_block(None, written_data)
             payload.update(status=status, netlist=nb, drift=drift)
