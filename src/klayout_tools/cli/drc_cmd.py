@@ -70,6 +70,7 @@ from ..drc import (
     run_drc_klayout_engine,
 )
 from ..drc_crosscheck import crosscheck_exit_code, run_drc_crosscheck
+from . import _drc_list_categories
 from . import _drc_native as native_deck
 from . import _request_document as reqdoc
 from .drc_text import _print_crosscheck_text, _print_rule_list, _print_text
@@ -91,10 +92,11 @@ EXIT_DRIFTED = EXIT_VIOLATIONS
 
 
 def run(args: argparse.Namespace) -> int:
-    # `file`/`--check`/`--list-rules`: at least one is required and
-    # `--list-rules` stands alone -- both usage errors (exit 2) enforced by
-    # `parser._require_one_input` before `run()` is ever called. `file` may
-    # accompany `--check` (issue #2699) as an explicit input override.
+    # `file`/`--check`/`--list-rules`/`--list-rule-categories`: at least one
+    # is required and the two listing modes each stand alone -- both usage
+    # errors (exit 2) enforced by `parser._require_one_input` before `run()`
+    # is ever called. `file` may accompany `--check` (issue #2699) as an
+    # explicit input override.
     if args.check is not None:
         return _run_check(args)
 
@@ -103,6 +105,15 @@ def run(args: argparse.Namespace) -> int:
 
     if args.list_rules:
         return _run_list_rules(args)
+
+    # Issue #5444: the native-deck counterpart of `--list-rules` -- what a
+    # PDK-native deck *declares*, derived by running it on a tool-generated
+    # empty layout, so the result can be fed back in as
+    # `--expect-rule-categories-file` without being circular.
+    if args.list_rule_categories:
+        return _drc_list_categories.run_list_rule_categories(
+            args, _non_default_flags, EXIT_CLEAN
+        )
 
     try:
         # Issue #1867: the positional slot carries either a layout path or a
@@ -168,8 +179,10 @@ def _run_list_rules(args: argparse.Namespace) -> int:
         if args.engine == "klayout":
             raise DrcError(
                 "--list-rules is not supported with --engine klayout: a "
-                "PDK-native runset does not share the curated rule registry "
-                "(see docs/cli/drc.md, 'Rule listing and selection')"
+                "PDK-native runset does not share the curated rule "
+                "registry. Use --list-rule-categories to list what a "
+                "native deck declares (see docs/cli/drc.md, 'Rule listing "
+                "and selection')"
             )
         extra = _non_default_flags(args, allowed=("deck", "engine"))
         if extra:
@@ -453,8 +466,9 @@ def _run_klayout_engine(args: argparse.Namespace) -> dict:
         )
     if args.rules is not None:
         # Issue #2768: a native runset's rules are not the curated
-        # registry `--rules` resolves against (#2806 tracks native
-        # category discovery), so the selection is refused, not ignored.
+        # registry `--rules` resolves against (its declared categories are
+        # listed by `--list-rule-categories`, #5444), so the selection is
+        # refused, not ignored.
         raise DrcError(
             "--rules is not supported with --engine klayout: a PDK-native "
             "runset does not share the curated rule registry (see "
@@ -549,29 +563,3 @@ def _expected_rule_category_names(args: argparse.Namespace) -> list[str] | None:
             "mutually exclusive -- pass one rule-category assertion"
         )
     return load_rule_category_manifest(manifest)
-
-
-def _parse_deck_vars(raw: list[str] | None) -> dict[str, str]:
-    """Parse repeatable ``--deck-var name=value`` values (issue #1302) into
-    the ``deck_vars`` mapping :func:`run_drc_klayout_engine` threads through
-    as extra ``-rd`` script globals. Silently ignored (returns ``{}``) when
-    ``--engine curated`` is selected -- ``--deck-var`` is a klayout-engine-
-    only flag, the same "ignored, not rejected" treatment ``--deck-file``
-    and ``--timeout-s`` already get under the curated engine.
-
-    Raises :class:`DrcError` for a malformed value missing the required
-    ``=`` separator -- a clean error (exit 1) rather than a confusing
-    ``KeyError``/silent no-op.
-    """
-    if not raw:
-        return {}
-    deck_vars: dict[str, str] = {}
-    for item in raw:
-        name, sep, value = item.partition("=")
-        if not sep:
-            raise DrcError(
-                f"invalid --deck-var {item!r}: expected 'name=value' "
-                "(e.g. --deck-var feol=true)"
-            )
-        deck_vars[name] = value
-    return deck_vars

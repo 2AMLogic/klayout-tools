@@ -194,7 +194,7 @@ from .sim_batch_async import (
     shard_scoped_points,
 )
 from .sim_batch_async import submit_only as _submit_batch_only
-from .sim_batch_features import attach_models_lib_comparison, pop_remote_diagnostics
+from .sim_batch_features import finalize_batch_remote, pop_remote_diagnostics
 from .sim_convergence_retry import is_retryable_convergence_failure, note_not_retried
 
 #: Moved to the ``sim_corner_*`` modules (issue #5428) so this module stays
@@ -1573,14 +1573,14 @@ def apply_engine_host(
     """Stamp ``environment.engine_host``, keep ``ngspice_binary`` honest (#3110):
     local changes nothing else; off-host ``"worker"`` makes it the worker's
     path and moves the submitter's to ``client_ngspice_binary``. Batch adds
-    ``models_lib_comparison`` (#5321)."""
+    ``models_lib_comparison`` (#5321) and the sharded roll-ups (#5522)."""
     if backend not in _OFFHOST_BACKENDS:
         environment["engine_host"] = "local"
         return
     environment["engine_host"] = "worker"
     environment["client_ngspice_binary"] = client_ngspice_binary
     environment["ngspice_binary"] = _worker_ngspice_binary(environment.get("remote"))
-    attach_models_lib_comparison(environment, backend)
+    finalize_batch_remote(environment, backend)
 
 
 #: Environment-variable override for the ngspice binary (issue #2423), the

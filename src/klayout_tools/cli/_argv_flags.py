@@ -40,3 +40,39 @@ def _record_request_argv_flags(
         if action.option_strings and action.dest not in exclude
     }
     parser.set_defaults(request_argv_flags=flags)
+
+
+def _require_one_input(
+    subparser: argparse.ArgumentParser,
+    *dests: str,
+    exclusive: tuple[str, ...] = (),
+):
+    """Post-parse usage check (exit 2) replacing a required mutually
+    exclusive argparse group (issue #2699).
+
+    ``klt drc``/``klt extract`` once grouped the positional ``file`` with
+    ``--check`` so argparse itself rejected combining them; ``file`` may now
+    accompany ``--check`` as an explicit input override, which a group cannot
+    express. This keeps the other half of that contract -- at least one of
+    ``dests`` must be given -- and rejects ``exclusive`` modes
+    (``--list-rules``, ``--list-rule-categories``) combined with any other
+    input, both as usage errors exactly as before.
+    """
+
+    def check(args: argparse.Namespace) -> None:
+        given = [d for d in dests if getattr(args, d, None) not in (None, False)]
+        flag = {
+            "file": "file",
+            "check": "--check",
+            "list_rules": "--list-rules",
+            "list_rule_categories": "--list-rule-categories",
+        }
+        names = ", ".join(flag[d] for d in dests)
+        if not given:
+            subparser.error(f"one of the arguments {names} is required")
+        if len(given) > 1 and any(d in exclusive for d in given):
+            subparser.error(
+                f"argument {', '.join(flag[d] for d in given)}: not allowed together"
+            )
+
+    return check

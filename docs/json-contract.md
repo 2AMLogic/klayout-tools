@@ -168,6 +168,20 @@ the runner publishes one. Additive and absent otherwise; the existing fields
 and `schema_version` are unchanged. See [`docs/cli/sim.md`](cli/sim.md)'s
 "Asynchronous submit and status".
 
+`klt sim` on a **sharded** `batch` run (issue #5522) adds two top-level
+roll-ups to `environment.remote` beside the existing `fleet[]` array:
+`job_ids` (every non-`null` shard's `job_id`, in shard order) and a worst-of
+`runner_compatibility` (`mismatch` > `unknown` > `match`, so a lost or
+unknown shard never reads as clean). Additive, and narrower than the
+opt-in-flag rule above: they appear only where `fleet[]` already does, so an
+unsplit single-job report is byte-identical, the `fleet[]` entries are
+unchanged, and the SSH `remote` backend gets neither. No `schema_version`
+bump. The motivation is a reader, not a writer: splitting moved job identity
+and the runner-skew check inside `fleet[]`, where a consumer written against
+the single-job shape read `None` rather than failing -- and `None` is
+indistinguishable from `"match"` in the obvious skew check. See
+[`docs/cli/sim.md`](cli/sim.md)'s "Fleet sharding".
+
 `measurements[].on_unreached` (issue #3108) is the same shape: an optional
 request field (`"error"` default, `"null"` opt-in) whose default reproduces
 today's response byte-for-byte. Opting in adds a new measurement `status`
@@ -2169,7 +2183,8 @@ A verb's success payload may ship a machine-readable JSON Schema (Draft
 [`cells-response`](schemas/cells-response.schema.json),
 [`stats-response`](schemas/stats-response.schema.json),
 [`drc-response`](schemas/drc-response.schema.json) (verdict reports from both
-engines plus the non-verdict `--list-rules` listing; its `coverage` block
+engines plus the non-verdict `--list-rules` and `--list-rule-categories`
+listings; its `coverage` block
 `$ref`s [`coverage.schema.json`](schemas/coverage.schema.json)) and
 [`lvs-response`](schemas/lvs-response.schema.json).
 
