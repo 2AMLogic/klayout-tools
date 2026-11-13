@@ -584,8 +584,13 @@ environment" for the field names and limits.
 Under `options.stage_model_inputs` the worker's `pdk.stamp_*` still describes
 the image tree; `pdk.stamp_scope` (`image` / `executed`) says so, and
 `pdk_stamp_comparison` gains `basis: "staged_model_inputs"` (plus optional
-`client_stamp`, `differing`) comparing the staged file digests. Additive
-fields only; no `schema_version` bump (issue #4020).
+`client_stamp`, `differing`) comparing the staged file digests. A caller that
+can name the revision behind those staged models sets `options.pdk_revision`
+and gets it back as `environment.pdk_revision_asserted` (`{value, scope:
+"caller-asserted"}`, issue #5325) -- a *claim*, kept out of the
+worker-observed `worker_environment.pdk` so the two are never confused;
+`cli/sim.md`'s option and `environment` tables are the field-level record.
+Additive fields only; no `schema_version` bump (issue #4020).
 
 **No bucket in batch reports (issue #3777).** `environment.remote` (and each
 `fleet[]` member) no longer carries `bucket` on any batch verb. The bucket name

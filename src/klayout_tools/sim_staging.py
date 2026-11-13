@@ -92,6 +92,7 @@ from typing import Any
 
 from ._provenance import sha256_file, sha256_file_required
 from .sim_param_file import declared_model_refs, rewrite_model_refs
+from .sim_provenance import staged_asset_json
 
 #: A ``.include``/``.inc`` directive line -- ngspice's two spellings, target
 #: either quoted or bare. Deliberately the same shape ``pex.py``'s own
@@ -231,11 +232,6 @@ class StagedNetlist:
         return (self.netlist, *self.includes)
 
 
-#: ``staged_model_inputs[].transform`` for a file whose ``.include``/``.lib``
-#: targets were rewritten to flat job-relative names (issue #5325).
-STAGED_TRANSFORM_INCLUDE_REWRITE = "include-path-rewrite"
-
-
 @dataclass(frozen=True)
 class StagedModelAsset:
     """Provenance for one file of a staged model closure (issue #2668).
@@ -259,19 +255,7 @@ class StagedModelAsset:
     source_sha256: str = ""
 
     def to_json(self) -> dict[str, Any]:
-        doc: dict[str, Any] = {
-            "name": self.name,
-            "field": self.field,
-            "kind": self.kind,
-            "sha256": self.sha256,
-            "rewritten": self.rewritten,
-            "source_sha256": self.source_sha256 or self.sha256,
-        }
-        if self.rewritten:
-            # Issue #5325: name what staging did to the file, so a reader can
-            # tell ``sha256 != source_sha256`` (expected) from a content change.
-            doc["transform"] = STAGED_TRANSFORM_INCLUDE_REWRITE
-        return doc
+        return staged_asset_json(self)
 
 
 @dataclass(frozen=True)
@@ -510,23 +494,6 @@ def stage_model_inputs_requested(request: dict[str, Any]) -> bool:
     if not isinstance(value, bool):
         raise SimError(
             f"request.options.stage_model_inputs must be a boolean (got {value!r})"
-        )
-    return value
-
-
-def pdk_revision_asserted(request: dict[str, Any]) -> str | None:
-    """Validate and return ``request.options.pdk_revision`` (issue #5325): a
-    caller-asserted PDK revision string for staged models; absent -> ``None``,
-    anything but a non-empty string is a ``SimError``."""
-    from .sim import SimError
-
-    options = request.get("options") or {}
-    if not isinstance(options, dict) or "pdk_revision" not in options:
-        return None
-    value = options["pdk_revision"]
-    if not isinstance(value, str) or not value.strip():
-        raise SimError(
-            f"request.options.pdk_revision must be a non-empty string (got {value!r})"
         )
     return value
 

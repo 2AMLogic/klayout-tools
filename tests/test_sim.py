@@ -12854,56 +12854,6 @@ def test_remote_backend_stages_model_inputs_and_keeps_image_selection(
     )
 
 
-def test_staged_entries_name_the_transform_iff_rewritten(tmp_path, monkeypatch):
-    """Issue #5325: ``transform`` is present exactly when ``rewritten`` is."""
-    src = tmp_path / "src"
-    src.mkdir()
-    _install_fake_remote_transport(monkeypatch)
-    report = sim.run_sim(str(_write_request(src, _staged_model_fixture(src))))
-    staged = report["environment"]["staged_model_inputs"]
-    assert any(e["rewritten"] for e in staged)
-    assert any(not e["rewritten"] for e in staged)
-    for entry in staged:
-        assert ("transform" in entry) is entry["rewritten"]
-        if entry["rewritten"]:
-            assert entry["transform"] == "include-path-rewrite"
-    assert "pdk_revision_asserted" not in report["environment"]
-
-
-def test_pdk_revision_is_echoed_as_caller_asserted(tmp_path, monkeypatch):
-    src = tmp_path / "src"
-    src.mkdir()
-    request = _staged_model_fixture(src)
-    request["options"]["pdk_revision"] = "open_pdks@abc123"
-    _install_fake_remote_transport(monkeypatch)
-    report = sim.run_sim(str(_write_request(src, request)))
-    assert report["environment"]["pdk_revision_asserted"] == {
-        "value": "open_pdks@abc123",
-        "scope": "caller-asserted",
-    }
-
-
-@pytest.mark.parametrize("bad", [7, "", "  ", ["x"]])
-def test_pdk_revision_must_be_a_non_empty_string(tmp_path, monkeypatch, bad):
-    src = tmp_path / "src"
-    src.mkdir()
-    request = _staged_model_fixture(src)
-    request["options"]["pdk_revision"] = bad
-    _install_fake_remote_transport(monkeypatch)
-    with pytest.raises(sim.SimError, match="pdk_revision"):
-        sim.run_sim(str(_write_request(src, request)))
-
-
-def test_worker_capture_omits_unknown_pdk_diagnostic_when_models_staged():
-    from klayout_tools import sim_batch_contract_worker as w
-
-    script = [
-        v for v in vars(w).values() if isinstance(v, str) and "pdk root or variant" in v
-    ]
-    assert script, "worker capture script not found"
-    assert 'if staged != "1":' in script[0]
-
-
 def test_remote_backend_refuses_an_unstageable_model_dependency_before_launch(
     tmp_path, monkeypatch
 ):
