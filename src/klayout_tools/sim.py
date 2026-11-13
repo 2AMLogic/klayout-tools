@@ -225,6 +225,11 @@ from .sim_echo_messages import echo_unsupported_message
 from .sim_expr_hint import attach_expr_runner_hint as _attach_expr_runner_hint
 from .sim_osdi_pin import osdi_pdk_root_pin
 from .sim_osdi_pin import resolve_osdi_preload as _resolve_osdi_preload
+from .sim_osdi_settle import (
+    finalize_osdi_preload,
+    osdi_runner_environment_fields,
+    resettle_osdi_preload_for_local,
+)
 from .sim_pdk_ambiguity import warn_pdk_ambiguity as _warn_pdk_ambiguity
 from .sim_process_legs import attach_process_leg_check
 
@@ -3311,10 +3316,10 @@ def _prepare_sim_request(
             "image-baked `.osdi` as `$PDK_ROOT/<rel>` (or under "
             "models.pdk_root) so the runner resolves it"
         )
-    osdi_preload, osdi_runner_environment = _finalize_osdi_preload(
+    osdi_preload, osdi_runner_environment = finalize_osdi_preload(
         options,
         request_dir,
-        backend,
+        backend in _OFFHOST_BACKENDS,
         osdi_preload,
         osdi_runner_resolved,
         pdk_root=osdi_pdk_root,
@@ -3685,8 +3690,21 @@ def _prepare_sim_request(
     # this process does not reconcile against a local `CornerPoint.corner_id`,
     # so it stays rejected, mirroring the existing `hosts > 1` + `remote`
     # restriction above rather than inventing a new error shape.
+    offhost_before_yield = backend in _OFFHOST_BACKENDS
     backend = _yield_host_default_backend(
         backend, backend_from_host_default, reason_ok=not resume
+    )
+    # Issue #5492: that yield can land a run whose OSDI list was settled
+    # off-host back on this host -- re-settle it against what executes.
+    yielded_on_host = offhost_before_yield and backend not in _OFFHOST_BACKENDS
+    # A conditional expression, not an `if`: a new branch here would push this
+    # function past its `complexity-baseline.json` value without sign-off.
+    osdi_preload, osdi_runner_environment = (
+        resettle_osdi_preload_for_local(
+            request, request_dir, backend, engine, ngspice_binary or XYCE_BINARY
+        )
+        if yielded_on_host and osdi_runner_environment
+        else (osdi_preload, osdi_runner_environment)
     )
     if resume and backend == "remote":
         raise SimError(
@@ -3911,8 +3929,20 @@ def _run_sim_corners(
     # A single-unit run under a host default stays here: one corner does not
     # repay a Spot instance's minutes of boot, and it is exactly the "probe
     # one corner locally" case 2am#1004's ruling keeps local.
+    offhost_before_yield = backend in _OFFHOST_BACKENDS
     backend = _yield_host_default_backend(
         backend, backend_from_host_default, reason_ok=len(dispatch_points) > 1
+    )
+    # Issue #5492: the unit count is only known here, so this is the one yield
+    # that can move the run on-host after the OSDI list was already settled
+    # for an off-host backend -- re-settle it against the backend that runs.
+    yielded_on_host = offhost_before_yield and backend not in _OFFHOST_BACKENDS
+    osdi_preload, osdi_runner_environment = (  # expression, see the resume site
+        resettle_osdi_preload_for_local(
+            request, request_dir, backend, engine, ngspice_binary or XYCE_BINARY
+        )
+        if yielded_on_host and osdi_runner_environment
+        else (osdi_preload, osdi_runner_environment)
     )
     # Issue #2977: which backend actually ran, and where the request for it
     # came from -- so a host-policy audit can spot a `local` run although
@@ -4467,7 +4497,7 @@ def _run_sim_corners(
     # Additive/optional (issue #3819): `.osdi` entries the executing host
     # resolved itself -- named, never hashed; the worker's own report is
     # the source of what actually loaded.
-    environment.update(_osdi_runner_environment_fields(osdi_runner_environment))
+    environment.update(osdi_runner_environment_fields(osdi_runner_environment))
     # Additive/optional (issue #2668): `staged_model_inputs`, only present
     # when `options.stage_model_inputs` staged model inputs for an off-host
     # backend -- see `_preflight_staged_model_inputs`.
@@ -5137,38 +5167,6 @@ def _needs_models_lib(point: CornerPoint) -> bool:
     if declared is None:
         return True
     return any(lib is None for lib in declared)
-
-
-def _finalize_osdi_preload(
-    options: dict[str, Any],
-    request_dir: str,
-    backend: str,
-    osdi_preload: tuple[str, ...],
-    osdi_runner_resolved: dict[int, str],
-    pdk_root: str | None = None,
-) -> tuple[tuple[str, ...], list[dict[str, str]]]:
-    """Settle ``osdi_preload`` once the backend is known (issue #3819).
-
-    Off-host, the runner-resolved entries are reported by name in
-    ``environment.osdi_preload_runner_resolved`` and the already-resolved
-    host-local ones stand. A run that stays on this host reads every entry
-    here, so the full existence check and expansion apply, exactly as before.
-    """
-    if backend not in _OFFHOST_BACKENDS:
-        return _resolve_osdi_preload(options, request_dir, pdk_root=pdk_root), []
-    return osdi_preload, [
-        {"entry": options["osdi_preload"][index], "reason": reason}
-        for index, reason in sorted(osdi_runner_resolved.items())
-    ]
-
-
-def _osdi_runner_environment_fields(
-    osdi_runner_environment: list[dict[str, str]],
-) -> dict[str, Any]:
-    """The ``environment`` fragment for runner-resolved ``.osdi`` entries."""
-    if not osdi_runner_environment:
-        return {}
-    return {"osdi_preload_runner_resolved": osdi_runner_environment}
 
 
 def _model_inputs_environment(
