@@ -35,6 +35,7 @@
         "klayout_tools.characterize_arcs",
         "klayout_tools.characterize_async",
         "klayout_tools.characterize_bisect",
+        "klayout_tools.characterize_bisect_deck",
         "klayout_tools.characterize_capacity",
         "klayout_tools.characterize_cards",
         "klayout_tools.characterize_constraints",
