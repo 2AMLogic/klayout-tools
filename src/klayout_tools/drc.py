@@ -97,6 +97,7 @@ from .drc_layer_selection import (
     selection_empties_every_top_cell,
 )
 from .drc_report_check import _report_hash_checks
+from .drc_text_exempt import text_exempt
 from .layers import layers_report
 from .metrics import is_registered
 from .pdk import PdkNotFoundError, find_pdk_for_deck
@@ -123,12 +124,9 @@ _NET_SPACE_CHECKS = {"net_space"}
 
 
 def _spec_layers(rule: DrcRule) -> set[tuple[int, int]]:
-    """Layers referenced by a rule's ``region_spec`` / ``net_spec``, if any."""
-    layers: set[tuple[int, int]] = set()
-    for spec in (rule.region_spec, rule.net_spec):
-        if spec is not None:
-            layers.update(spec.layers())
-    return layers
+    """Layers referenced by ``region_spec``/``net_spec``/``text_exempt``, if any."""
+    specs = (rule.region_spec, rule.net_spec, rule.text_exempt)
+    return {layer for spec in specs if spec is not None for layer in spec.layers()}
 
 
 # Every `DerivedLayer.mode` `run_drc()` knows how to derive a region for --
@@ -1641,7 +1639,9 @@ def _cell_check_regions(
             rule, other_region, base_region, dbu_scale
         )
 
-    return region, other_region, base_region, peer_edge_pairs
+    # Issue #5442: whole checked polygons interacting with a text-recognised
+    # device drop out here, as the PDK runset's own operand drops them.
+    return text_exempt(rule, cell, region), other_region, base_region, peer_edge_pairs
 
 
 def _record_polygons(

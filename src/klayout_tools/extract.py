@@ -150,7 +150,6 @@ from ._jsonnum import is_int
 from ._layout import complement_well_tie as _complement_well_tie
 from ._layout import region as _region
 from ._layout import region_expr as _region_expr
-from ._layout import resolve_top_cell
 from ._layout import texts as _texts
 from ._paths import _load_request_json
 from ._paths import load_request_arg as _shared_load_request_arg
@@ -172,8 +171,6 @@ from .decks import (
     BipolarDevice,
     DiodeDevice,
     ExtractionDeck,
-    InvalidDeckOptionError,
-    InvalidLabelLayerError,
     MosCapacitorDevice,
     MOSFlavour,
     ParasiticsDeck,
@@ -270,6 +267,7 @@ from .extract_passive_regions import (
     mom_capacitor_device_class as mom_capacitor_device_class,
 )
 from .extract_pdk_resolve import resolve_pdk_and_model_bindings
+from .extract_preflight import preflight_layout, require_declared_set_for_rename
 from .extract_progress import StageTimer, active_timer, stage
 
 # The netlist-report-description subsystem lives in its own module (issue
@@ -4510,43 +4508,18 @@ def extract_netlist_from_layout(
     ``deck_options``/``label_layers`` entry, or missing/ambiguous top cell --
     identical error semantics to ``run_extract``.
     """
-    if not os.path.exists(path):
-        raise ExtractError(f"file not found: {path}")
-    if os.path.isdir(path):
-        raise ExtractError(f"not a file: {path}")
-
-    try:
-        deck = get_extraction_deck(deck_name, deck_options, label_layers)
-    except (
-        UnknownExtractionDeckError,
-        InvalidDeckOptionError,
-        InvalidLabelLayerError,
-    ) as exc:
-        raise ExtractError(str(exc)) from exc
-
-    # Imported lazily (after the cheap checks above) so `klt --version` and
-    # argument parsing never pay the cost of loading the KLayout database
-    # module -- same discipline as `_layout.load_layout`.
-    import klayout.db as kdb
-
-    layout = kdb.Layout()
-    try:
-        with stage("read_layout"):
-            layout.read(path)
-    except Exception as exc:  # klayout raises RuntimeError for bad/unknown streams
-        raise ExtractError(f"could not read layout '{path}': {exc}") from exc
-
-    top_cell = resolve_top_cell(layout, top, ExtractError, path=path)
-
-    # Issue #2761: a FinFET deck runs its own recogniser (see
-    # `extract_finfet`), which implements none of the planar-only options
-    # below -- refuse them by name instead of half-applying them.
-    from .extract_finfet import refuse_layout_options
-
-    refuse_layout_options(
-        deck,
+    # Issue #5464: the engine-free prefix (file checks, deck resolution, the
+    # layout read, top-cell resolution and the FinFET option refusal) lives
+    # in `extract_preflight` so `klt pex --dry-run` runs exactly these checks
+    # without starting the extraction engine -- one helper, two callers, so
+    # the two can never drift.
+    deck, layout, top_cell = preflight_layout(
+        path,
         deck_name,
-        **{
+        top=top,
+        deck_options=deck_options,
+        label_layers=label_layers,
+        refuse_options={
             "--top-cell-pins": top_cell_pins_only,
             "--abstract-cells": bool(abstract_cell_patterns),
             "--abstract-cell-lef": bool(abstract_cell_lef_paths),
@@ -4578,8 +4551,8 @@ def extract_netlist_from_layout(
     # to -- validated before any extraction work, the same window every
     # other request-shape check above uses (see the helper for why this is
     # an error rather than a silent no-op).
-    _require_declared_set_for_rename(rename_declared_pins, declared_pins, def_pins)
-    _require_declared_set_for_rename(
+    require_declared_set_for_rename(rename_declared_pins, declared_pins, def_pins)
+    require_declared_set_for_rename(
         tie_declared_pins, declared_pins, def_pins, flag="--tie-declared-pins"
     )
 
@@ -4824,25 +4797,6 @@ def extract_netlist_from_layout(
         substrate_spreading,
         pin_renames,
     )
-
-
-def _require_declared_set_for_rename(
-    rename_declared_pins: bool,
-    declared_pins: frozenset[str] | None,
-    def_pins: frozenset[str] | None,
-    flag: str = "--rename-declared-pins",
-) -> None:
-    """Issue #2854: ``--rename-declared-pins`` with neither ``--pins`` nor
-    ``--def-pins`` is a clean :class:`ExtractError`, not a silent no-op --
-    there is no declared set to rename *to*, and silently extracting an
-    unrenameable netlist would defeat the flag's whole purpose (canonical
-    pin names for ``klt lvs``'s ``options.anchor_top_level_pins``)."""
-    if rename_declared_pins and declared_pins is None and def_pins is None:
-        raise ExtractError(
-            f"{flag} requires a declared pin set to rename "
-            "to -- pass --pins <A,B,...> (or --def-pins <def>), the same "
-            "set whose reconciliation survives the pins it names"
-        )
 
 
 def _default_output_path(path: str) -> str:
