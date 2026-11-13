@@ -167,7 +167,6 @@ from .coverage import (
 )
 from .metrics import is_registered
 from .pdk import PdkNotFoundError, find_pdk, list_corners
-from .pdk import ambiguity_warning as pdk_ambiguity_warning
 from .pdk_families import pdk_variant_family
 from .remote_launcher import RemoteLauncher as RemoteLauncher
 from .remote_launcher import RemoteLaunchError as RemoteLaunchError
@@ -182,6 +181,7 @@ from .sim_batch import (
     _run_batch,
     _run_batch_fleet,
     _validate_batch_models_lib,
+    _validate_batch_pdk_root,
     attach_engine_build_comparison,
     attach_staged_model_comparison,
     dry_run_runner_check,
@@ -203,6 +203,7 @@ from .sim_echo_messages import echo_unsupported_message, zipped_length_message
 from .sim_expr_hint import attach_expr_runner_hint as _attach_expr_runner_hint
 from .sim_osdi_pin import osdi_pdk_root_pin
 from .sim_osdi_pin import resolve_osdi_preload as _resolve_osdi_preload
+from .sim_pdk_ambiguity import warn_pdk_ambiguity as _warn_pdk_ambiguity
 from .sim_process_legs import attach_process_leg_check
 
 from .sim_analysis_overrides import (  # isort: skip
@@ -3197,7 +3198,7 @@ def _prepare_sim_request(
             )
         except PdkNotFoundError:
             provenance_pdk = None
-        _warn_pdk_ambiguity(provenance_pdk)
+        _warn_pdk_ambiguity(provenance_pdk, backend=backend)
 
     # Issue #2482: either the scalar `analysis` (unchanged) or an ordered
     # `analysis_steps[]` sequence, resolved -- every structural error raised
@@ -4834,23 +4835,6 @@ def _attach_timeout_budget_hint(
         environment["job_diagnostic"] = job_diagnostic
 
 
-def _warn_pdk_ambiguity(resolution: dict[str, Any] | None) -> None:
-    """Print :func:`klayout_tools.pdk.ambiguity_warning` to stderr when the
-    run's PDK root was resolved by *search* and more than one install on this
-    host holds the requested variant (issue #2564).
-
-    The run is still well-defined -- resolution is first-match-wins -- but a
-    record can name a pinned ``open_pdks`` commit that a *different* build
-    actually produced, and nothing else says so up front: the JSON's
-    ``provenance.pdk.source`` is correct but purely after-the-fact, and a
-    caller only finds it by inspecting provenance it had no reason to
-    suspect. No-op for an unresolved PDK or an unambiguous one.
-    """
-    warning = pdk_ambiguity_warning(resolution) if resolution else None
-    if warning is not None:
-        print(warning, file=sys.stderr)
-
-
 #: Top-level request keys ``klt sim`` reads (or documents). A dry run
 #: reports anything else as a warning (issue #3064) -- never an error, so no
 #: existing request starts failing.
@@ -4891,6 +4875,15 @@ def _build_dry_run_report(
         # Issue #3917: a real batch submit refuses an unresolvable model
         # library before any S3 write; the dry-run must say the same.
         _validate_batch_models_lib(request)
+        # Issue #5449: and the same for a `models.pdk_root` that is a
+        # directory on *this* host (issue #4097's refusal). The real submit
+        # raises it from `_resolve_batch_config`, which a dry run reaches
+        # only through `dry_run_runner_check` -- and that swallows every
+        # code but the two runner ones, and is skipped outright on a host
+        # with no resolvable batch config. Re-applying it here, beside the
+        # #3917 check, makes the dry run refuse what the submit refuses
+        # whether or not this host can resolve a bucket or provision script.
+        _validate_batch_pdk_root(request)
     units: list[dict[str, Any]] = []
     for point in corner_points:
         unit: dict[str, Any] = {"corner_id": point.corner_id}
