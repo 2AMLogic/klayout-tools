@@ -127,7 +127,10 @@ this document (and the code) win.
   report runs to tens of MB indented but ~30x smaller gzipped, small enough
   to commit unmodified as evidence. Stdout and exit codes (0/3/4) are
   unaffected; an unwritable path exits 1 with the error envelope. `klt
-  yield` accepts the `.json.gz` file directly.
+  yield` and `klt signoff` accept the `.json.gz` file directly
+  ([#5452](https://github.com/2AMLogic/klayout-tools/issues/5452)), so the
+  compressed report is citable as manifest evidence with no decompressed
+  second copy.
 - `--plot` — write one self-contained, dependency-free waveform SVG per
   non-sweep signal per corner to this directory, forcing
   `options.waveforms`/`keep_artifacts` on for this run. See "Waveform
