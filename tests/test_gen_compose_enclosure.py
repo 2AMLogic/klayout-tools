@@ -6,6 +6,7 @@ import klayout.db as kdb
 import pytest
 
 from klayout_tools import decks
+from klayout_tools import gen_compose_layer_rules as layer_rules
 from klayout_tools import gen_compose_routing as routing
 from klayout_tools.decks import DerivedLayer, get_deck
 from klayout_tools.drc import run_drc
@@ -59,7 +60,7 @@ def test_minimum_enclosure_selects_the_tightest_plain_rule(monkeypatch):
         rule for rule in get_deck("sky130") if rule.id == "met4.enclosing.via4.1"
     )
     monkeypatch.setattr(
-        routing,
+        layer_rules,
         "get_deck",
         lambda _: [
             replace(rule, id="loose", threshold_dbu=10),
@@ -73,7 +74,7 @@ def test_minimum_enclosure_selects_the_tightest_plain_rule(monkeypatch):
             ),
         ],
     )
-    monkeypatch.setattr(routing, "get_nominal_dbu", lambda _: 0.002)
+    monkeypatch.setattr(layer_rules, "get_nominal_dbu", lambda _: 0.002)
     assert routing._min_enclosing_margin_um_for_layer(
         "sky130A", (71, 20), (71, 44)
     ) == (0.06, "tight")
@@ -148,7 +149,7 @@ def test_met5_enclosure_controls_size_when_via_is_upsized(
         )
         for rule in get_deck("sky130")
     ]
-    monkeypatch.setattr(routing, "get_deck", lambda _: rules)
+    monkeypatch.setattr(layer_rules, "get_deck", lambda _: rules)
     # The generator also clamps cuts to the deck's `threshold_max_dbu`
     # (issue #2585), read through `decks.get_deck` -- patch that too.
     monkeypatch.setattr(decks, "get_deck", lambda _: rules)

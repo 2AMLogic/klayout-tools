@@ -313,7 +313,7 @@
     },
     {
       "path": "src/klayout_tools/extract.py",
-      "lines": 10921
+      "lines": 10825
     },
     {
       "path": "src/klayout_tools/extract_abstract.py",
@@ -381,7 +381,7 @@
     },
     {
       "path": "src/klayout_tools/gen_compose_routing.py",
-      "lines": 5524
+      "lines": 4946
     },
     {
       "path": "src/klayout_tools/gen_describe.py",
@@ -557,7 +557,7 @@
     },
     {
       "path": "src/klayout_tools/post_route_sta.py",
-      "lines": 4791
+      "lines": 4651
     },
     {
       "path": "src/klayout_tools/power.py",
@@ -613,7 +613,7 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 13773
+      "lines": 13765
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
