@@ -30,6 +30,20 @@ not `klt --version`, if you need to detect this kind of drift. See
   so additive with no `schema_version` bump. Details in
   `docs/cli/signoff.md`'s "CI usage: `--check`".
 
+- **`klt signoff` reads a gzip-compressed evidence file** (#5452,
+  2026-11-13): a `klt sim --report-out report.json.gz` report — the compact
+  form `docs/cli/sim.md` recommends committing as evidence — is now citable
+  from a manifest as it stands, grading identically to the same envelope
+  decompressed (`unmet`/`unreadable_evidence` before, which forced a second
+  decompressed copy beside it). Detection is by the gzip magic bytes, not the
+  `.gz` suffix, matching `klt yield`; every `klt signoff` *file* reader
+  (positional envelopes, manifest and fleet files, file-backed citations)
+  accepts it, and a truncated or damaged stream still grades
+  `unmet`/`unreadable_evidence`. Hashing is unchanged: a citation's
+  `content_hash` comes from inside the envelope, so it is encoding-independent;
+  the one `content_hash_basis: "evidence_file"` case keeps hashing the file as
+  committed. Additive; no `schema_version` bump.
+
 - **`klt gen` / `klt layout-plan execute`: a generated stream no longer
   depends on which generators ran earlier in the same process** (#5499,
   2026-11-13): `gen`'s reference PCell library is registered once per process
