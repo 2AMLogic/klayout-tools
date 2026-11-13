@@ -129,7 +129,17 @@ two disagree, this document (and the code) win.
   given is also the order of the top `.SUBCKT` header (issue #5255): declared
   pins come first, in the given order, and any remaining ports follow in the
   existing deterministic order — so `klt pex --pins` can match a schematic
-  header without a wrapper subcircuit.
+  header without a wrapper subcircuit. That ordering uses the *same*
+  any-component-label match as promotion above (issue #5534), not a
+  whole-string one: a joined-label port is hoisted into the slot of the
+  earliest declared name it carries, keeping its joined spelling intact
+  (`Y|ybar` moves, but is still written `Y|ybar`), and a port carrying two
+  declared names appears once, at the earlier of them. Because a net none of
+  whose labels is declared is demoted, a header written *with* `--pins` is
+  fully determined by `--pins`. Without `--pins` the top-level port order is
+  the extractor's own and is **not** a cross-build contract — see
+  "[Top-level `.SUBCKT` port order without `--pins`](#top-level-subckt-port-order-without---pins-is-not-a-cross-build-contract-issue-5534)"
+  below.
 - `--rename-declared-pins` — optional, off by default, requires `--pins` or
   `--def-pins`. Renames each surviving promoted pin net whose comma-joined
   component labels contain *exactly one* declared name to that name (issue
@@ -761,6 +771,33 @@ Rather than hand-rolling this normalization, `klt extract --check <report>
 bookkeeping, tool metadata" and "`--check` / `--rerun`" below, which also
 name `net_id` and `parasitics.nets[]` ordering as the same class of
 extractor-internal bookkeeping.
+
+### Top-level `.SUBCKT` port order without `--pins` is NOT a cross-build contract (issue #5534)
+
+> **Evidence pins:** same as the `$N` caveat above — `netlist_sha256` embeds
+> this order; `netlist_normalized_sha256` (issue #3407) does not.
+
+Anonymous-net numbering is not the only part of a written netlist that can
+move between two builds with no behavioural change behind it. **Without
+`--pins`, the top-level `.SUBCKT` header's port order is whatever order the
+native `l2n.extract_netlist()` call promoted the pins in** — the same opaque
+KLayout routine that owns `cluster_id` — and this repo does not sort it.
+It is deterministic within one run and one environment, but it is not
+guaranteed across `klayout` point releases, host platforms, or `klt` versions
+that change pin promotion.
+
+This matters to exactly one kind of caller: a gate that byte-compares a
+*committed* extracted netlist against a fresh one. Such a gate can go red on a
+`klt`/`klayout` upgrade with the device and net bodies byte-identical and only
+the header reordered — and, unlike a `$N` swap, nothing in the output itself
+says so.
+
+**The fix is to pass `--pins`.** With a declared pin set the header order is
+fully determined by `--pins` (every non-matching net is demoted, and every
+surviving port is hoisted by the any-component-label rule above), so the
+header becomes a stable, caller-owned artifact rather than an extractor-owned
+one. As with `$N`, `klt lvs` is unaffected either way: `NetlistComparer` pairs
+by connectivity, never by pin position.
 
 ### Progress and timing (issue #3181)
 

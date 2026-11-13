@@ -14,6 +14,28 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt extract --pins` orders the top `.SUBCKT` header by component label,
+  not whole name** (#5534, 2026-11-13): `--pins`' documented ordering rule
+  (#5255 — declared pins first, in the given order) compared each header token
+  as a whole string, while the same flag's *matching* rule is per component
+  label (#1687 — a net matches when any of its comma-joined labels is
+  declared). On a layout where KLayout joins labels, a pin promoted through a
+  component label (`Y|ybar` matching declared `ybar`) was therefore never
+  hoisted, so the header was neither the declared order nor the pre-#5255
+  order. Ordering now uses the same any-component-label match as promotion: a
+  joined-label port is hoisted into the slot of the earliest declared name it
+  carries, and a port carrying two declared names is emitted once, at the
+  earlier. The token's text is unchanged (`Y|ybar` moves but is still written
+  `Y|ybar`), ports matching no declared name keep their relative order, and
+  without `--pins` the written netlist is byte-identical to before.
+  **Re-baseline note**: this moves the header once more for joined-label
+  layouts, so a committed extracted netlist produced with `--pins` on such a
+  layout needs regenerating once; after that the header depends only on
+  `--pins`. `docs/cli/extract.md` also now records that *without* `--pins` the
+  top-level port order is the extractor's own and is not a cross-build
+  contract, alongside the existing `$N` caveat (#1063). Additive; no
+  `schema_version` bump.
+
 - **`klt signoff` reads a gzip-compressed evidence file** (#5452,
   2026-11-13): a `klt sim --report-out report.json.gz` report — the compact
   form `docs/cli/sim.md` recommends committing as evidence — is now citable
