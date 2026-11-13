@@ -365,7 +365,7 @@
     },
     {
       "path": "src/klayout_tools/gen.py",
-      "lines": 4356
+      "lines": 4355
     },
     {
       "path": "src/klayout_tools/gen_compose.py",
@@ -477,7 +477,7 @@
     },
     {
       "path": "src/klayout_tools/netlist.py",
-      "lines": 1068
+      "lines": 1067
     },
     {
       "path": "src/klayout_tools/netlist_batch.py",
@@ -521,7 +521,7 @@
     },
     {
       "path": "src/klayout_tools/pex.py",
-      "lines": 3858
+      "lines": 3743
     },
     {
       "path": "src/klayout_tools/place_and_route.py",
