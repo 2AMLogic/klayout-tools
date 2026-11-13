@@ -10265,10 +10265,10 @@ def test_dogbone_terminal_example_regenerates_byte_identical(tmp_path, family):
     on both families, silently invalidating the committed streams while
     every existing test stayed green.
 
-    A byte compare (rather than a geometry compare) is deliberate: the GDS
-    carries `mos_array`'s PCell context-info properties too, so a parameter
-    added to the generator drifts the fixture without moving a single
-    polygon. When this fails, regenerate with
+    A byte compare (rather than a geometry compare) is deliberate: it pins the
+    stream's *record order*, which a `klayout.db` compare cannot see -- the
+    #5499 gap. PCell context info is no longer pinned (`write_layout()` stopped
+    writing it), so parameter drift is invisible. When this fails, regenerate with
     `uv run --extra dev python3 examples/dogbone-terminal/generate.py` and
     review the resulting diff as a deliberate fixture update.
     """
