@@ -481,7 +481,7 @@
     },
     {
       "path": "src/klayout_tools/netlist.py",
-      "lines": 1072
+      "lines": 1068
     },
     {
       "path": "src/klayout_tools/netlist_batch.py",
@@ -613,7 +613,7 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 13773
+      "lines": 13765
     },
     {
       "path": "src/klayout_tools/sim_batch.py",

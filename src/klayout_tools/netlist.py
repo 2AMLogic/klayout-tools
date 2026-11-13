@@ -84,7 +84,12 @@ from .netlist_inputs import (
     split_inputs_record,
 )
 from .netlist_paths import _PATH_COMMENT_RE, postprocess_netlist
-from .netlist_pdk import _pdk_root_consistent, _rcfile_pdk_root, _with_symbol_path_env
+from .netlist_pdk import (
+    _pdk_env_note,
+    _pdk_root_consistent,
+    _rcfile_pdk_root,
+    _with_symbol_path_env,
+)
 
 #: Payload schema version (``docs/json-contract.md``; versioned per command).
 SCHEMA_VERSION = 1
@@ -805,22 +810,10 @@ def _unevaluated_expr_warnings(
     ]
 
 
-def _pdk_env_note(rcfile: str | None, env: dict[str, str] | None) -> str:
-    """Name what klt can observe about xschem's PDK setup, for error text."""
-    if env is not None:
-        seen = f"PDK_ROOT={env['PDK_ROOT']} PDK={env['PDK']} (exported by klt)"
-    else:
-        root = os.environ.get("PDK_ROOT")
-        variant = os.environ.get("PDK")
-        seen = (
-            f"PDK_ROOT={root or 'not set'} PDK={variant or 'not set'} "
-            "(inherited, not set by klt)"
-        )
-    return f"xschem ran with --rcfile {rcfile or 'none'} and {seen}. "
-
-
 def _check_no_unresolved_symbol(
-    data: bytes, rcfile: str | None = None, env: dict[str, str] | None = None
+    data: bytes,
+    rcfile: str | None = None,
+    exported_pdk_env: dict[str, str] | None = None,
 ) -> None:
     """Fail when xschem could not resolve a symbol (issue #3964).
 
@@ -837,7 +830,7 @@ def _check_no_unresolved_symbol(
             f"the netlist has an unresolved symbol at line {number}: "
             f"{snippet!r}. xschem could not find a symbol an instance refers "
             "to, so the device is missing from the netlist and none was "
-            f"written. {_pdk_env_note(rcfile, env)}"
+            f"written. {_pdk_env_note(rcfile, exported_pdk_env)}"
             "Fix the symbol path or library.",
             code=UNRESOLVED_SYMBOL_CODE,
         )
@@ -998,6 +991,9 @@ def run_netlist(
                 "PDK_ROOT": pdk_block["root"],
                 "PDK": pdk_block["variant"],
             }
+        # Only a resolved PDK means klt exported PDK_ROOT/PDK; --symbol-path
+        # alone builds an env that merely inherits them (issue #5441).
+        exported_pdk_env = xschem_env
         xschem_env = _with_symbol_path_env(xschem_env, resolved_symbol_path)
         exit_status, stdout, stderr, duration_s = _launch_xschem(
             argv, timeout_s, xschem_env
@@ -1021,7 +1017,7 @@ def run_netlist(
         warnings = _unevaluated_expr_warnings(
             fresh_data, version, allow_unevaluated_expr
         )
-        _check_no_unresolved_symbol(fresh_data, rcfile, xschem_env)
+        _check_no_unresolved_symbol(fresh_data, rcfile, exported_pdk_env)
 
         payload: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
