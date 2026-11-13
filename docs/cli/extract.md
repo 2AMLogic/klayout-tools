@@ -7,7 +7,7 @@ first-order lumped RC interconnect parasitics (see "Parasitic (RC)
 extraction" below).
 
 ```
-klt extract <file> --deck sky130|gf180mcu|sg13g2|sg13cmos5l|asap7 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--parasitics] [--substrate-tie-ohms <ohms>] [--top-cell-pins] [--pins <A,B,VDD,VSS>] [--rename-declared-pins] [--tie-declared-pins] [--deck-option <key>=<value> ...] [--label-layer <role>=<layer>/<datatype> ...] [--device-model <class>=<subckt> ...] [--defer-resistor-fixed-offset] [--abstract-cells <glob> ...] [--abstract-cell-lef <path> ...] [--subcircuit <cell>] [--subcircuit-output <path>] [--hierarchical-cells <cell>[,<cell>...]] [--progress|--no-progress] [--backend local|batch] [--timeout-s <s>] [--batch-root <dir>] [--batch-include <glob> ...] [--batch-exclude <glob> ...] [--format text|json]
+klt extract <file> --deck sky130|gf180mcu|sg13g2|sg13cmos5l|asap7 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--parasitics] [--substrate-tie-ohms <ohms>] [--top-cell-pins] [--pins <A,B,VDD,VSS>] [--rename-declared-pins] [--tie-declared-pins] [--deck-option <key>=<value> ...] [--label-layer <role>=<layer>/<datatype> ...] [--device-model <class>=<subckt> ...] [--defer-resistor-fixed-offset] [--omit-dead-metal] [--abstract-cells <glob> ...] [--abstract-cell-lef <path> ...] [--subcircuit <cell>] [--subcircuit-output <path>] [--hierarchical-cells <cell>[,<cell>...]] [--progress|--no-progress] [--backend local|batch] [--timeout-s <s>] [--batch-root <dir>] [--batch-include <glob> ...] [--batch-exclude <glob> ...] [--format text|json]
 klt extract <request.json>|-|'{...}' [--backend local|batch] [--timeout-s <s>] [--format text|json]
 klt extract --check <report.json> [--rerun] [--format text|json]
 ```
@@ -207,6 +207,17 @@ two disagree, this document (and the code) win.
   byte-for-byte unchanged; and for a deck with no `fixed_offset_ohm`-opted-in
   resistor class (everything except sky130's `res_high_po` today) the flag is
   a no-op either way. See "Deferring the fixed resistor offset" below.
+- `--omit-dead-metal` — optional, off by default. Emit the JSON response's
+  `dead_metal` as an empty list and set `dead_metal_omitted: true`, keeping
+  only the always-present per-layer `dead_metal_summary` (issue #5545). Use
+  this when the report is committed as a provenance record: under
+  `--abstract-cells` every abstracted cell's internal wiring joins no
+  extracted net, so `dead_metal[]` grows one entry per *instance* and can
+  dominate the response. Detection itself is unchanged — the summary and the
+  aggregate dead-metal `warnings[]` line carry the same counts either way,
+  and only the per-cluster rows are dropped. When omitted, `dead_metal[]` and
+  `warnings[]` are byte-for-byte what they were before the flag existed. See
+  "Committing the report: `--omit-dead-metal`" below.
 - `--abstract-cells` — optional, unset by default, repeatable. An `fnmatch`
   glob (e.g. `'sky130_fd_sc_hd__*'`) naming instantiated cell types to
   extract as opaque, pinned black boxes instead of flattening them to their
@@ -401,6 +412,7 @@ Every field name is the flag's own `dest`, so the mapping is one-for-one:
 | `device_models` | object\<string, string\> | repeatable `--device-model CLASS=SUBCKT` (issue #4234), e.g. `{"bjt": "pnp_05p00x05p00"}`. |
 | `probes` | array\<object\|string\> | repeatable `--probe` (issue #2986): each entry is `{"name", "layer", "x", "y"}` or the flag's own `name=…,layer=…,x=…,y=…` string. Validated exactly like the flag. |
 | `defer_resistor_fixed_offset` | bool | `--defer-resistor-fixed-offset` |
+| `omit_dead_metal` | bool | `--omit-dead-metal` (issue #5545) |
 | `abstract_cells` | array\<string\> \| string | repeatable `--abstract-cells` |
 | `abstract_cell_lef` | array\<string\> \| string | repeatable `--abstract-cell-lef` |
 | `matched_groups` | object\<string, array\<string\>\> | repeatable `--matched-group NAME=A,B`. A group name containing `=`, or a member containing `,`, is rejected. |
@@ -6780,6 +6792,52 @@ sharper diagnostics (`unmodelled_poly`, `single_terminal_nets`,
 does not read at all is a different failure class again — see
 `ignored_layers` above.
 
+#### Committing the report: `--omit-dead-metal` (issue #5545)
+
+`dead_metal[]` is one entry per *cluster*, and on an `--abstract-cells` run
+over a standard-cell block that is one entry per *instance*: abstraction
+erases a matched cell's device-recognition layers but deliberately keeps its
+`contact`/`metals`/`vias` (the parent still has to reach the cell's pins), so
+every abstracted cell's own internal wiring now joins no surviving net and is
+correctly reported as dead. On a block of ~12k instances that is ~13.5k
+entries — several megabytes of rows nothing downstream reads, re-diffed in
+full every time the report is regenerated. The aggregate `warnings[]` line
+already carries the number a reader acts on.
+
+`--omit-dead-metal` (request field `omit_dead_metal`) is the opt-in
+compaction, mirroring `klt erc --omit-antenna-tables`:
+
+```bash
+klt extract block.gds --deck sky130 --abstract-cells 'sky130_fd_sc_hd__*'     --omit-dead-metal --format json -o block.spice
+```
+
+- `dead_metal` is `[]` — still a list, never `null`, so a reader iterating it
+  needs no new branch.
+- `dead_metal_omitted` is `true`.
+- `dead_metal_summary` carries the real counts, computed from the full
+  per-cluster list before it was dropped.
+- The aggregate `warnings[]` line keeps its cluster count, shape count and
+  layer set, and changes only its tail: it names `dead_metal_summary` and
+  says to re-run without the flag for the per-cluster list.
+- Everything else — the written netlist, `devices[]`, `nets[]`, every other
+  field, and the exit code — is identical to the unflagged run.
+
+`dead_metal_summary` and `dead_metal_omitted` are **always present**, on
+every report, flag or no flag: `dead_metal_summary` is byte-identical with
+and without `--omit-dead-metal` (a zeroed summary with an empty `by_layer` on
+a layout with no dead metal), and `dead_metal_omitted` is `false` unless the
+flag was given. Detection is not skipped — the flag drops the rows, it does
+not make extraction cheaper.
+
+Both `--check` modes handle a flagged report. Cheap mode only compares the
+recorded input/deck hashes, and `--check <report> --rerun` replays the flag
+from the committed `dead_metal_omitted`, so a report committed with
+`--omit-dead-metal` reruns with it and shows no drift.
+
+This is additive and opt-in: no `schema_version` bump, and a run without the
+flag emits exactly the `dead_metal[]` and `warnings[]` it did before — the
+same contract `klt erc --omit-antenna-tables` set.
+
 ### Substrate DC reference (issue #1263, node scope: issue #1503)
 
 Every ground capacitor `--parasitics` injects hangs off the deck's
@@ -8145,6 +8203,13 @@ numbering described in
   "unbiased_pmos_body_nets": [],
   "single_terminal_nets": [],
   "dead_metal": [],
+  "dead_metal_omitted": false,
+  "dead_metal_summary": {
+    "clusters": 0,
+    "shapes": 0,
+    "area_um2": 0.0,
+    "by_layer": []
+  },
   "label_layers": null,
   "pdk": null,
   "parasitics": null,
@@ -8194,7 +8259,9 @@ numbering described in
 | `unsupported_devices` | array\<object\> | One entry per deck `unsupported_device_markers` layer that carries shapes in the extracted cell (issue #2919), each `{ "kind": str, "marker": "<layer>/<datatype>", "count": int, "bbox_um": {"left", "bottom", "right", "top"}, "description": str }`. `count` is the number of merged marker shapes and `bbox_um` bounds all of them. The deck cannot extract that device class, so those devices are **absent from the netlist** although `status` stays `"extracted"`; a matching prose entry is appended to `warnings[]`. Today only `gf180mcu` declares one: `MOS_CAP_MK` (166/5) with `kind: "mos_capacitor"` (`cap_nmos_*`/`cap_pmos_*`), and only for marker components the deck's MOS-capacitor recogniser could not classify (a recognised capacitor is in `devices[]`, not here). Treat a non-empty field as an incomplete netlist. Always present, empty for a deck that declares no such marker or a layout with no shapes on it. |
 | `unbiased_pmos_body_nets` | array\<object\>  | One entry per extracted PMOS device whose body (`"b"`) terminal ties to an anonymous, KLayout-synthesized net rather than a real, named one (issue #555 — see "Known gap: an anonymous PMOS body net has no DC bias path" above), each `{ "device": "<device name>", "net": "<anonymous net name>" }`. A single aggregate prose entry (count baked in, e.g. `"148 PMOS devices tie their body to..."`) is also appended to `warnings[]` when this field is non-empty — not one line per device (issue #599). Always present, empty when no PMOS device's body net is anonymous — i.e. every device whose `nwell` island a drawn or derived well tie reaches (issue #1084). Present regardless of `--parasitics`/`--pdk`. |
 | `single_terminal_nets` | array\<object\>    | One entry per net with `device_count == 1` and `pin: false` (issue #596 — see "Single-device-terminal nets" above), each `{ "net": "<net name>", "device": "<owning device name>", "terminal": "<lower-cased terminal key>", "terminal_kind": "gate" \| "source" \| "drain" \| "body" \| "<literal terminal key>" }`. Up to two aggregate prose entries (one per `terminal_kind` bucket — `"gate"` vs. everything else — each with its bucket's count baked in) are also appended to `warnings[]`, phrased more strongly for the `"gate"` bucket — not one line per net (issue #599). Always present, empty when every net either has zero or 2+ device terminals, or is a declared pin. |
-| `dead_metal`       | array\<object\>            | One entry per connected cluster of routing-stack (`metals`/`vias`) geometry that joins no extracted net (issue #676 — see "Dead metal" above), each `{ "role": "metal<i>" \| "via<i>", "layer": int, "datatype": int, "bbox_um": {"left", "bottom", "right", "top"}, "shapes": int, "area_um2": number }`, sorted by `(layer, datatype, left, bottom)`. `role`'s `<i>` indexes the deck's own `metals`/`vias` tuple (`0` = bottom-most level); `shapes` counts the drawn shapes on that stream layer the cluster covers (one entry per *cluster*, not per polygon). XY overlap between adjacent metal levels is **not** connection — only a same-layer touch or a via landing joins two shapes, so a wire passing over another with no via between them is still dead. A labelled floating cluster (power strap, seal ring, bond pad) survives as a real named net and never appears here. A non-empty list also appends a single aggregate prose entry to `warnings[]` (count baked in, issue #599). Always present, empty when every metal/via shape joins a net. |
+| `dead_metal`       | array\<object\>            | One entry per connected cluster of routing-stack (`metals`/`vias`) geometry that joins no extracted net (issue #676 — see "Dead metal" above), each `{ "role": "metal<i>" \| "via<i>", "layer": int, "datatype": int, "bbox_um": {"left", "bottom", "right", "top"}, "shapes": int, "area_um2": number }`, sorted by `(layer, datatype, left, bottom)`. `role`'s `<i>` indexes the deck's own `metals`/`vias` tuple (`0` = bottom-most level); `shapes` counts the drawn shapes on that stream layer the cluster covers (one entry per *cluster*, not per polygon). XY overlap between adjacent metal levels is **not** connection — only a same-layer touch or a via landing joins two shapes, so a wire passing over another with no via between them is still dead. A labelled floating cluster (power strap, seal ring, bond pad) survives as a real named net and never appears here. A non-empty list also appends a single aggregate prose entry to `warnings[]` (count baked in, issue #599). `[]` under `--omit-dead-metal` (issue #5545) whatever the layout draws — see `dead_metal_omitted` below. Always present, empty when every metal/via shape joins a net. |
+| `dead_metal_omitted` | boolean | (issue #5545) Whether `--omit-dead-metal` (request field `omit_dead_metal`) was passed: `dead_metal` above is `[]` and the aggregate dead-metal `warnings[]` line points at `dead_metal_summary` instead of at `dead_metal[]`. `false` for every other run, where `dead_metal[]`/`warnings[]` are unchanged. Always present. `klt extract --check <report> --rerun` replays the flag from this field. |
+| `dead_metal_summary` | object | (issue #5545) The per-layer roll-up of the *same* detection `dead_metal` above reports: `{ "clusters": int, "shapes": int, "area_um2": number, "by_layer": [{ "role", "layer", "datatype", "clusters", "shapes", "area_um2" }, ...] }`, `by_layer` sorted by `(layer, datatype)` with one entry per distinct `(role, layer, datatype)`. **Identical with and without `--omit-dead-metal`** — it is what makes the flag safe to commit, since the counts a reader acts on survive the dropped rows. Always present; all-zero totals and an empty `by_layer` when there is no dead metal. |
 | `matched_device_groups` | array\<object\>       | One entry per `--matched-group` declaration, in the order given (issue #1018 — see "Matched-device geometry check" above), each `{ "name": string, "instances": [string, ...], "unresolved_instances": [string, ...], "mismatched_fields": [{"field": string, "values": {"<instance name>": number, ...}}, ...] }`. `instances` echoes the declared member list verbatim; `unresolved_instances` (sorted) is the subset matching no extracted device; `mismatched_fields` lists every parameter that diverges across the group's resolved members (post-rounding equality — no numeric tolerance). A matching prose entry is also appended to `warnings[]` for a group with unresolved members and/or mismatched fields. Always present, empty (`[]`) when `--matched-group` was never given. |
 | `pin_renames` | object \| `null`           | Additive field (issue #2854). `null` unless `--rename-declared-pins` was given, otherwise the declared-name rename report: `{ "declared": [string, ...], "declared_pins": [string, ...] \| null, "def_pins": [string, ...] \| null, "renamed": [{"from": string, "to": string}, ...], "findings": [{"severity", "code", "net", "message", ...}, ...] }`. `declared_pins`/`def_pins` echo each original argument separately (`null` for "flag not given", a list — `[]` included — for "flag given"; the echoes `--check --rerun` replays both demotion passes from, since the two sets are not interchangeable); `declared` is the union of `--pins`/`--def-pins` the renames resolved against — the rename pass's own matching set, retained for readers; `renamed` lists every `'joined name' -> 'declared name'` rename performed (sorted by `from`, names in the same `\|`-joined spelling `nets[].name` uses); `findings` carries the `error`-severity `declared_pin_short` (a net matching 2+ declared names — a short between interface pins, reported and never repaired) and the `warning`-severity `declared_pin_rename_collision` (a rename skipped because another net already carries the target name) entries, each mirrored into `warnings[]`. See "Renaming promoted pins to their declared name" above. |
 | `rename_declared_pins` | boolean                | Additive field (issue #2854). The effective `--rename-declared-pins` value — always present (`false` when the flag was not given), unlike `pin_renames`' null-unless-given convention, so `--check --rerun` replays the rename from it plus the `pin_renames.declared_pins`/`pin_renames.def_pins` echoes. |
@@ -8473,7 +8540,8 @@ for a report that carries a `pin_renames` block — the declared-pin sets
 echoes record; a block without the separate echoes — an earlier build of
 this unreleased feature, or a hand-edited report — replays its
 `pin_renames.declared` union as `--pins` alone) are reconstructed from the
-committed report. Every other optional flag
+committed report, and so is `--omit-dead-metal` (issue #5545), replayed from
+the report's own `dead_metal_omitted` echo. Every other optional flag
 (`--parasitics`, `--mom-net`, `--spef`, `--critical-net`,
 `--distributed-rc`, `--def-net-names`, `--def-net-connections`,
 `--mom-rlc-*`, `--top-cell-pins`, `--defer-resistor-fixed-offset`, `--abstract-cells`,

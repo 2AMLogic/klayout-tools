@@ -14,6 +14,27 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt extract --omit-dead-metal`: a committable report without the
+  per-cluster dead-metal list** (#5545, 2026-11-13): `dead_metal[]` carries one
+  entry per routing-stack cluster that joins no extracted net, and under
+  `--abstract-cells` that is one entry per *instance* — cell abstraction keeps
+  each matched cell's `contact`/`metals`/`vias` while erasing its device
+  layers, so every abstracted cell's internal wiring is correctly reported as
+  dead. On a standard-cell block the list scales with the instance count and
+  dominates a report committed as a provenance record (the document
+  `klt extract --check` reads). The new opt-in flag (request field
+  `omit_dead_metal`) emits `dead_metal` as `[]` with `dead_metal_omitted: true`
+  and keeps the counts in the new, **always-present** per-layer
+  `dead_metal_summary` (`clusters`, `shapes`, `area_um2`, `by_layer[]`), which
+  is byte-identical with and without the flag. The aggregate dead-metal
+  `warnings[]` line keeps its counts and layers and points at that summary
+  instead of at `dead_metal[]`; the netlist, `devices[]`, `nets[]`, every other
+  field and the exit code are unchanged. `--check` passes on a flagged report
+  and `--check --rerun` replays the flag from the committed
+  `dead_metal_omitted`, so it shows no drift. Detection itself is unchanged, as
+  is every run without the flag. Mirrors `klt erc --omit-antenna-tables`;
+  additive and opt-in, no `schema_version` bump.
+
 - **`klt signoff` reads a gzip-compressed evidence file** (#5452,
   2026-11-13): a `klt sim --report-out report.json.gz` report — the compact
   form `docs/cli/sim.md` recommends committing as evidence — is now citable
