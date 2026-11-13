@@ -7,7 +7,7 @@ import argparse
 
 import pytest
 
-from klayout_tools import characterize, sim
+from klayout_tools import characterize, characterize_split, sim
 from klayout_tools.cli import characterize_cmd
 from test_characterize import _batch_request, _inverter_request, _write_request
 
@@ -86,7 +86,7 @@ def _record_sim_requests(monkeypatch):
         seen.append(sim_request)
         raise sim.SimError("stop here")
 
-    monkeypatch.setattr(characterize, "run_sim_leg", _fake_leg)
+    monkeypatch.setattr(characterize_split, "run_sim_leg", _fake_leg)
     return seen
 
 

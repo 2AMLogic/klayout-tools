@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import os
 import re
+from functools import partial
 from typing import Any
 
 from . import liberty_writer, sim
@@ -99,6 +100,7 @@ from .characterize_sequential import (
     resolve_sequential,
     stimulus_schedule,
 )
+from .characterize_split import resolve_split_grid, run_cell_legs
 from .env_provenance import repo_relative_path
 
 #: Version of this command's JSON response shape (per-command, per
@@ -168,6 +170,7 @@ def run_characterize(
     capacity_wait_s: float | None = None,
     timeout_s: float | None = None,
     keep_going: bool = False,
+    split_grid: int | None = None,
 ) -> dict[str, Any]:
     """Characterize one cell -- or a batch of cells -- at one corner and emit
     one NLDM ``.lib`` covering all of them.
@@ -199,7 +202,8 @@ def run_characterize(
     ``batch_no_capacity`` burst can be waited out; omitted, it is not passed.
 
     ``resume`` (#5350, else ``options.resume``): see :mod:`characterize_leg`.
-    ``timeout_s`` (#5380) overrides ``options.timeout_s``; ``keep_going``
+    ``split_grid`` (#5410): :mod:`characterize_split`. ``timeout_s`` (#5380)
+    overrides ``options.timeout_s``; ``keep_going``
     (#5380, batch) lists failed cells in ``failed_cells``, emitting the rest.
     Raises :class:`CharacterizeError` for every failure mode; a batch run in
     which a cell fails emits nothing unless ``keep_going``.
@@ -218,7 +222,7 @@ def run_characterize(
     grid = _resolve_grid(request)
     thresholds = _resolve_thresholds(request)
     options = _resolve_options(
-        request, grid, thresholds, request_dir, backend=backend, timeout_s=timeout_s
+        request, grid, thresholds, request_dir, backend, timeout_s, split_grid
     )
     resume = resolve_resume(request, resume)
 
@@ -360,7 +364,8 @@ def _characterize_cell(
     is this function in a loop, each cell in its own ``work_dir``.
     """
     os.makedirs(work_dir, exist_ok=True)
-    plan = _build_stimulus_plan(
+    build_plan = partial(
+        _build_stimulus_plan,
         cell=cell,
         corner=corner,
         grid=grid,
@@ -368,39 +373,35 @@ def _characterize_cell(
         options=options,
         arcs=arcs,
     )
-    testbench_path = os.path.join(work_dir, "testbench.spice")
-    sim_request_path = os.path.join(work_dir, "sim-request.json")
-    sim_report_path = os.path.join(work_dir, "sim-report.json")
-    sim_request = _build_sim_request(
+    plan = build_plan()
+
+    build_request = partial(
+        _build_sim_request,
         request=request,
         request_dir=request_dir,
-        testbench_path=testbench_path,
         corner=corner,
-        plan=plan,
         options=options,
         keep_artifacts=keep_artifacts,
     )
-    try:
-        sim_report = run_sim_leg(
-            testbench_path=testbench_path,
-            testbench_text=plan["netlist_text"],
-            sim_request=sim_request,
-            sim_request_path=sim_request_path,
-            sim_report_path=sim_report_path,
-            sim_dir=os.path.join(work_dir, "sim"),
-            backend=backend,
-            resume=resume,
-            **(batch_shard or {}),
-        )
-    except sim.SimError as exc:
-        raise CharacterizeError(f"simulation failed: {exc}") from exc
 
-    values = _extract_measurements(sim_report, sim_report_path)
-    tables = _build_tables(plan, grid, values, thresholds)
+    legs = run_cell_legs(
+        work_dir=work_dir,
+        plan=plan,
+        split_grid=options["split_grid"],
+        slew_count=len(grid["input_transition_ns"]),
+        build_plan=lambda rows: build_plan(slew_rows=rows),
+        build_request=build_request,
+        extract=_extract_measurements,
+        error_cls=CharacterizeError,
+        backend=backend,
+        resume=resume,
+        batch_shard=batch_shard,
+    )
+    tables = _build_tables(plan, grid, legs.values, thresholds)
     _check_settle_margin(plan, grid, tables, options)
-    power_tables = _build_power_tables(plan, grid, values, corner)
-    leakage = _build_leakage(plan, values, corner)
-    pin_capacitance = _build_pin_capacitance(plan, values, corner)
+    power_tables = _build_power_tables(plan, grid, legs.values, corner)
+    leakage = _build_leakage(plan, legs.values, corner)
+    pin_capacitance = _build_pin_capacitance(plan, legs.values, corner)
 
     def run_deck(text: str, measurements: list, label: str, stop_ns: float) -> dict:
         deck_dir = os.path.join(work_dir, "constraints", label)
@@ -410,15 +411,7 @@ def _characterize_cell(
             "measurements": measurements,
             "window": {**plan["window"], "stop_ns": stop_ns},
         }
-        deck_request = _build_sim_request(
-            request=request,
-            request_dir=request_dir,
-            testbench_path=deck_path,
-            corner=corner,
-            plan=deck_plan,
-            options=options,
-            keep_artifacts=keep_artifacts,
-        )
+        deck_request = build_request(plan=deck_plan, testbench_path=deck_path)
         request_path = os.path.join(deck_dir, "sim-request.json")
         try:
             report = run_sim_leg(
@@ -464,10 +457,10 @@ def _characterize_cell(
         "power_tables": power_tables,
         "leakage": leakage,
         "pin_capacitance": pin_capacitance,
-        "testbench_path": testbench_path,
-        "sim_request_path": sim_request_path,
-        "sim_report_path": sim_report_path,
-        "sim_report": sim_report,
+        "testbench_path": legs.testbench_path,
+        "sim_request_path": legs.sim_request_path,
+        "sim_report_path": legs.sim_report_path,
+        "sim_report": legs.sim_report,
     }
 
 
@@ -883,6 +876,7 @@ def _resolve_options(
     request_dir: str,
     backend: str | None = None,
     timeout_s: float | None = None,
+    split_grid: int | None = None,
 ) -> dict[str, Any]:
     spec = request.get("options") or {}
     if not isinstance(spec, dict):
@@ -906,12 +900,10 @@ def _resolve_options(
         step_ns = min(0.001, min_ramp / 10.0)
     step_ns = _positive_number(step_ns, "request.options.tran_step_ns")
 
-    if timeout_s is None:
-        timeout_s = _positive_number(
-            spec.get("timeout_s", DEFAULT_TIMEOUT_S), "request.options.timeout_s"
-        )
-    else:
-        timeout_s = _positive_number(timeout_s, "--timeout-s")
+    timeout_s = _positive_number(
+        spec.get("timeout_s", DEFAULT_TIMEOUT_S) if timeout_s is None else timeout_s,
+        "request.options.timeout_s" if timeout_s is None else "--timeout-s",
+    )
     keep_artifacts = spec.get("keep_artifacts", False)
     if not isinstance(keep_artifacts, bool):
         raise CharacterizeError("request.options.keep_artifacts must be a boolean")
@@ -924,6 +916,7 @@ def _resolve_options(
         "settle_ns": settle_ns,
         "tran_step_ns": step_ns,
         "timeout_s": timeout_s,
+        "split_grid": resolve_split_grid(spec, split_grid, CharacterizeError),
         "keep_artifacts": keep_artifacts,
         "ramps_ns": tuple(ramps),
         "osdi_preload": resolve_osdi_preload(request, spec, request_dir, backend),
@@ -1110,8 +1103,11 @@ def _build_stimulus_plan(
     thresholds: liberty_writer.Thresholds,
     options: dict[str, Any],
     arcs: tuple[DerivedArc, ...],
+    slew_rows: frozenset[int] | None = None,
 ) -> dict[str, Any]:
     """Generate the single-deck testbench and its ``.meas`` card set.
+
+    ``slew_rows`` (#5410): only those slew rows (``None`` = all).
 
     One cell instance per (arc, input transition, output load) triple, each
     with a private ramp source and load capacitor on a private input/output
@@ -1192,6 +1188,8 @@ def _build_stimulus_plan(
     for arc_index, arc in enumerate(arcs):
         side_state = _full_side_state(arc, cell)
         for slew_index, transition_ns in enumerate(grid["input_transition_ns"]):
+            if slew_rows is not None and slew_index not in slew_rows:
+                continue
             ramp_ns = ramps[slew_index]
             for load_index, load_pf in enumerate(grid["output_load_pf"]):
                 tag = f"a{arc_index}s{slew_index}l{load_index}"

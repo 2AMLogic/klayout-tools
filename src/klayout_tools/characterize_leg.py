@@ -19,6 +19,18 @@ def _read_text(path: str) -> str | None:
         return None
 
 
+def _without_timeout(request_text: str | None) -> Any:
+    """The parsed sim request minus ``options.timeout_s`` (#5410): a timeout
+    does not change what runs, so raising it must not re-simulate a leg."""
+    try:
+        request = json.loads(request_text or "")
+    except ValueError:
+        return None
+    if isinstance(request, dict) and isinstance(request.get("options"), dict):
+        request["options"].pop("timeout_s", None)
+    return request
+
+
 def resolve_resume(request: dict[str, Any], resume: bool | None) -> bool:
     """The explicit ``resume`` argument wins; else ``request.options.resume``."""
     if resume is not None:
@@ -67,7 +79,9 @@ def run_sim_leg(
     request_text = json.dumps(sim_request, indent=2) + "\n"
     unchanged = (
         _read_text(testbench_path) == testbench_text
-        and _read_text(sim_request_path) == request_text
+        and _without_timeout(_read_text(sim_request_path)) is not None
+        and _without_timeout(_read_text(sim_request_path))
+        == _without_timeout(request_text)
     )
     if resume and unchanged:
         cached = _read_text(sim_report_path)
