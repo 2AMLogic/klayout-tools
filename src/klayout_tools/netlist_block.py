@@ -227,6 +227,17 @@ def _attr_tokens(text: str) -> list[tuple[str, str]]:
     return pairs
 
 
+def sibling_symbol(schematic: str) -> str | None:
+    """The sibling ``<stem>.sym`` next to ``schematic``, or ``None``.
+
+    This file is what a parent sheet instantiating the cell reads, so it
+    governs both the cell's subcircuit parameters (issue #5439) and the port
+    order of its ``.subckt`` card (issue #5473).
+    """
+    candidate = f"{os.path.splitext(schematic)[0]}.sym"
+    return candidate if os.path.isfile(candidate) else None
+
+
 def _symbol_attributes(schematic: str) -> tuple[dict[str, str], str | None]:
     """``(attributes, warning)`` for the cell ``schematic`` defines.
 
@@ -235,9 +246,7 @@ def _symbol_attributes(schematic: str) -> tuple[dict[str, str], str | None]:
     block. An unreadable source is reported as a warning rather than raised
     -- the netlist itself is still valid output.
     """
-    source = f"{os.path.splitext(schematic)[0]}.sym"
-    if not os.path.isfile(source):
-        source = schematic
+    source = sibling_symbol(schematic) or schematic
     try:
         with open(source, encoding="utf-8", errors="replace") as handle:
             text = handle.read()
