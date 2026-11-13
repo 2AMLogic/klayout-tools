@@ -44,15 +44,54 @@ _INTEGRITY_SUM_KEYS = (
 )
 
 
+def _union_in_top_order(values: Sequence[Sequence[str]]) -> list[str]:
+    """The union of per-top name lists, first occurrence in ``--top`` order
+    (issue #5523).
+
+    When every top's list is identical -- the case for a plain
+    ``--critical-net`` echo, which is this run's own flag repeated back by
+    each extraction -- the first top's list is returned **verbatim**, so a
+    deliberately repeated name (``--critical-net a --critical-net a``,
+    echoed "as given, not sorted/deduplicated") survives unchanged and the
+    field stays byte-identical to a single-top run's.
+
+    The lists differ only when the names were *resolved* per top rather than
+    echoed (``--critical-net-pattern`` / ``--critical-net-all``, which
+    :func:`klayout_tools.extract._adopt_resolved_net_selectors` replaces with
+    the set that matched *that* cell). Then the union is taken, so the
+    combined field names every net scoped as critical anywhere in the
+    combined netlist instead of the first top's resolution only -- the same
+    "never cleaner than the worst top" rule the rest of this module follows.
+    """
+    first = list(values[0]) if values else []
+    if all(list(value) == first for value in values[1:]):
+        return first
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        for name in value:
+            if name not in seen:
+                seen.add(name)
+                out.append(name)
+    return out
+
+
 def _combine_parasitics(blocks: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """The ``parasitics`` block describing the *combined* netlist (issue
     #5494): the first top's, with ``nets[]`` concatenated in ``--top`` order
     and every ``integrity`` counter summed.
 
-    The echo fields (``model``, ``critical_nets``, ``distributed_rc``,
-    ``mom_rlc_override``, ``parasitic_variant``, the resistance-graph data)
-    are the caller's own flags, identical across tops, so the first top's are
-    the run's. The two *diagnostic* parts are not: an integrity finding on
+    The echo fields (``model``, ``distributed_rc``, ``mom_rlc_override``,
+    ``parasitic_variant``, the resistance-graph data) are the caller's own
+    flags, identical across tops, so the first top's are the run's.
+
+    ``critical_nets`` is only *usually* such an echo (issue #5523): with
+    ``--critical-net-pattern`` / ``--critical-net-all`` it is the set the
+    pattern resolved to against *that top's* nets, which differs per top, so
+    it goes through :func:`_union_in_top_order` -- verbatim when every top
+    agrees, their union when they do not.
+
+    The two *diagnostic* parts are not echoes either: an integrity finding on
     the second top must not be invisible in a report whose ``netlist`` names
     the file that top's devices are in. So the counters are summed and the
     per-net entries concatenated -- the top-level block then reads as badly
@@ -69,6 +108,10 @@ def _combine_parasitics(blocks: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         nets.extend(block.get("nets") or [])
     if any("nets" in block for block in blocks):
         combined["nets"] = nets
+    if any("critical_nets" in block for block in blocks):
+        combined["critical_nets"] = _union_in_top_order(
+            [block.get("critical_nets") or [] for block in blocks]
+        )
     summaries = [
         block["integrity"]
         for block in blocks
@@ -110,6 +153,14 @@ def _combine_extract_reports(
       :func:`_body_bias_report` reports ``unbiased`` when *any* top is and
       carries every top's entries. A reader of ``klt signoff``'s item-7
       citation sees the disclosure, which is the whole point of the field.
+    - ``unsupported_devices`` (issue #5477, forwarded here since #5523) is
+      the concatenation in ``--top`` order, for the same reason. It is
+      **not** a flag echo:
+      :func:`klayout_tools.extract._detect_unsupported_devices` computes it
+      per extracted cell from the marker geometry *that cell* draws, so a
+      clean first top and a flagged second top must not combine to a clean
+      top-level field -- the combined netlist really is missing the second
+      top's devices, and that limit disclosure is the field's whole job.
     - ``parasitics`` is :func:`_combine_parasitics`.
     - Everything else -- the flag echoes (``label_layers``,
       ``device_models``, ``rename_declared_pins``, ``pin_ties``, ``pdk``) and
@@ -133,6 +184,11 @@ def _combine_extract_reports(
         unbiased.extend(report.get("unbiased_pmos_body_nets") or [])
     if any("unbiased_pmos_body_nets" in report for report in reports):
         combined["unbiased_pmos_body_nets"] = unbiased
+    unsupported: list[Any] = []
+    for report in reports:
+        unsupported.extend(report.get("unsupported_devices") or [])
+    if any("unsupported_devices" in report for report in reports):
+        combined["unsupported_devices"] = unsupported
     combined["parasitics"] = _combine_parasitics(
         [report.get("parasitics") or {} for report in reports]
     )

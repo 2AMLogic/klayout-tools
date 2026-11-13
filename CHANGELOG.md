@@ -47,8 +47,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   `parasitic_integrity` counters are sums (its `nets[]` concatenated in
   `--top` order), `body_bias.status` is `"unbiased"` if **any** top's is with
   every top's entries concatenated (so `klt signoff`'s verbatim item-7
-  citation keeps the disclosure), and each mismatch field is the first firing
-  top's block. `--flatten-schematic`, `--device-only-leg`, `--tie-net`,
+  citation keeps the disclosure), `extraction.unsupported_devices` (#5477's
+  device-coverage disclosure, computed per extracted cell rather than echoed
+  from a flag) is concatenated in `--top` order so a clean first top cannot
+  hide a flagged second one, `extraction.critical_nets` is passed through
+  verbatim when every top echoes the same `--critical-net` request and is
+  their union in `--top` order when `--critical-net-pattern` /
+  `--critical-net-all` resolved a different set against each top, and each
+  mismatch field is the first firing top's block. `--flatten-schematic`, `--device-only-leg`, `--tie-net`,
   `--tie-declared-pins`, `--mom-rlc-net`, `--measure-command`,
   `--extract-only`, `--submit-only`/`--attach`, `--resume` and `--dry-run`
   (the last tracked for support in #5511) are each a usage error with two or
