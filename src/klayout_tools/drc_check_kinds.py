@@ -7,6 +7,35 @@ from __future__ import annotations
 
 from typing import Any
 
+# Check kinds that operate on a single region (no other_layer).
+# "isolated" (issue #1654) dispatches to `Region.isolated_check`, which
+# -- unlike "space" (`Region.space_check`) -- measures spacing between
+# *different* polygons of a merged region only, never a concave notch
+# carved into one polygon. It exists as a first-class check kind so a rule
+# transcribed from a source rule whose real semantics is `isolated` (e.g.
+# sky130's `nwell.2a`, see `decks/sky130.py`'s `nwell.space.1`) can use the
+# primitive that actually matches it, instead of the strictly-stricter
+# `"space"` substitute. Already used internally for gf180mcu's
+# `mim.space.1` peer check (see `peer_edge_pairs` below) before this issue
+# exposed it as a `DrcRule.check` option.
+_SINGLE_LAYER_CHECKS = {"width", "space", "notch", "isolated"}
+# Check kinds `DrcRule.threshold_max_dbu` (issue #2370) is meaningful for --
+# i.e. the ones whose published rule can carry an *upper* size bound
+# alongside the lower one `threshold_dbu` already expresses (gf180mcu's
+# `CO.1` fixed 0.22x0.22um contact, `Vn.1` fixed 0.26x0.26um via). Only
+# "width" today; kept as a set (rather than an `== "width"` test) so the
+# validation error message can name the admissible kinds the same way every
+# other check-kind error in this module does. See
+# `_validate_threshold_max`/`_run_width_max_check` below.
+_MAX_BOUND_CHECKS = {"width"}
+# Check kinds that compare a region against another region (other_layer required).
+_TWO_LAYER_CHECKS = {
+    "separation",
+    "enclosing",
+    "enclosed",
+    "overlap",
+    "enclosing_adjacent",
+}
 # Single-layer check kind (issue #812) whose native primitive
 # (`Region.with_area`) returns violating *polygons* directly (a `Region`),
 # not an `EdgePairs` collection like every check kind above -- dispatched via
