@@ -230,12 +230,19 @@ from .coverage import (
     work_id,
 )
 from .extract import ExtractError, run_extract
-from .op_sanity import INCLUDE_CARD_RE, IncludeState, expand_includes
 from .pex_asap7 import (
-    DEVICE_MODEL_CARD_PREFIXES,
     adapt_leg_netlists,
     netlist_adaptation_for_deck,
     with_fidelity_warnings,
+)
+from .pex_netlist_text import (
+    _device_model_counts,
+    _dut_declares_a_circuit,
+    _expand_reference_includes,
+    _has_include_card,
+    _read_text,
+    _reference_is_hierarchical,
+    _subckt_interfaces,
 )
 from .sim import SimError, load_request, run_sim
 from .spice_flatten import SpiceFlattenError, flatten_spice
@@ -280,11 +287,6 @@ _PIN_COUNT_MISMATCH_RE = re.compile(
     r"[\"']?(?P<subckt>[^\"'\s]+)[\"']?",
     re.IGNORECASE,
 )
-
-#: A ``.subckt`` header line -- ``group("body")`` is everything after the
-#: directive (the subcircuit name, then its pins, then optional
-#: ``name=value`` parameters). See :func:`_subckt_interfaces`.
-_SUBCKT_RE = re.compile(r"^\s*\.subckt\s+(?P<body>\S.*?)\s*$", re.IGNORECASE)
 
 #: Issue #1983: ``body_bias.status`` values -- whether the extracted netlist
 #: this run re-simulated has a DC bias path for every device body.
@@ -721,89 +723,6 @@ def _check_dut_declares_a_circuit(testbench_path: str, dut_path: str) -> None:
     )
 
 
-def _read_text(path: str) -> str | None:
-    """``path``'s text, or ``None`` if it cannot be read -- every caller here
-    is building a *diagnostic*, so an unreadable file degrades the diagnostic
-    rather than raising over it."""
-    try:
-        with open(path, encoding="utf-8", errors="replace") as handle:
-            return handle.read()
-    except OSError:
-        return None
-
-
-def _logical_lines(netlist_text: str) -> list[str]:
-    """``netlist_text``'s lines with SPICE ``+`` continuation lines folded
-    into the line they continue, and inline ``$``/``;`` comments stripped --
-    so :func:`_subckt_interfaces` sees each `.subckt` header whole."""
-    lines = [
-        re.split(r"\s\$|;", raw, maxsplit=1)[0].rstrip()
-        for raw in netlist_text.splitlines()
-    ]
-    return fold_spice_continuations(lines)
-
-
-def _subckt_interfaces(netlist_text: str) -> dict[str, tuple[str, list[str]]]:
-    """``{lowercased subckt name: (name as written, [pin names])}`` for every
-    ``.subckt`` header in ``netlist_text``, in file order.
-
-    Pins stop at the first ``name=value`` token (or a ``params:`` keyword) --
-    a `.subckt` header's trailing default-parameter assignments are not part
-    of its terminal list. Lowercased keys because ngspice itself is
-    case-insensitive about subcircuit names, and `klt extract` writes an
-    upper-case ``.SUBCKT`` header where a hand-written schematic netlist
-    often does not.
-    """
-    interfaces: dict[str, tuple[str, list[str]]] = {}
-    for line in _logical_lines(netlist_text):
-        match = _SUBCKT_RE.match(line)
-        if not match:
-            continue
-        tokens = match.group("body").split()
-        name = tokens[0]
-        pins: list[str] = []
-        for token in tokens[1:]:
-            if "=" in token or token.lower() in ("params:", "param:"):
-                break
-            pins.append(token)
-        interfaces.setdefault(name.lower(), (name, pins))
-    return interfaces
-
-
-def _dut_declares_a_circuit(text: str) -> bool:
-    """``True`` if ``text`` -- a ``.include``/``.inc`` target's own file
-    contents -- declares at least one ``.subckt`` header or circuit element
-    card of its own, i.e. plausibly *is* a DUT netlist rather than
-    parameter/model/corner-file content with no circuit of its own (Gap 1,
-    issue #1255: a testbench whose only `.include` happens to name a shared
-    corner/parameter file used to be silently swapped in as if it were the
-    DUT).
-
-    Deliberately permissive about *how* the DUT is written: both a
-    ``.SUBCKT``-wrapped file (any header at all, even an empty body --
-    ``_subckt_interfaces`` only parses headers) and a flat file (bare device
-    cards, no wrapper) pass this check; only a file with *no* circuit
-    content at all -- pure ``.param``/``.model``/``.lib``/comment/`.` control
-    cards -- fails it. A flat schematic DUT against a `.SUBCKT`-wrapped
-    extraction is a *different*, separately-diagnosed condition -- see
-    :func:`_flat_dut_mismatch`.
-
-    Every non-blank line that survives comment-stripping and is not itself
-    a `.`-prefixed control card is treated as a circuit element -- SPICE's
-    own convention is that such a line names a device/subcircuit instance
-    (``R``/``C``/``L``/``M``/``Q``/``D``/``X``/``V``/``I``/...), so no fixed
-    prefix list is needed.
-    """
-    if _subckt_interfaces(text):
-        return True
-    for line in _logical_lines(text):
-        stripped = line.strip()
-        if not stripped or stripped.startswith(("*", ".")):
-            continue
-        return True
-    return False
-
-
 def _mismatch_side(
     netlist_path: str, interface: tuple[str, list[str]] | None
 ) -> dict[str, Any]:
@@ -931,12 +850,18 @@ def _no_preflight_mismatch(*diagnostics: dict[str, Any] | None) -> bool:
 def _pin_order_preflight(
     command_mode: bool,
     earlier: tuple[dict[str, Any] | None, ...],
+    *,
+    extract_only: bool = False,
     **kwargs: Any,
 ) -> dict[str, Any] | None:
     """The ``pin_order_mismatch`` pre-flight (issue #2890), gated: ``None`` in
-    ``--measure-command`` mode, and once an earlier (mutually exclusive)
-    pre-flight diagnostic has fired; otherwise :func:`_pin_order_mismatch`."""
-    if command_mode or not _no_preflight_mismatch(*earlier):
+    ``--measure-command`` mode, ``None`` in ``--extract-only`` mode -- an
+    explicit gate since issue #5477, no longer implied by an empty
+    ``reference_netlist`` (:func:`run_pex` states why once; its siblings
+    ``flat_dut_mismatch``/``pin_count_mismatch`` are gated at their own call
+    sites) -- and once an earlier (mutually exclusive) pre-flight diagnostic
+    has fired; otherwise :func:`_pin_order_mismatch`."""
+    if command_mode or extract_only or not _no_preflight_mismatch(*earlier):
         return None
     return _pin_order_mismatch(**kwargs)
 
@@ -1076,128 +1001,6 @@ def _flat_dut_mismatch(
             "already requires"
         ),
     }
-
-
-def _split_spice_tokens(line: str) -> list[str]:
-    """Split a SPICE card on whitespace, keeping a quoted ``'...'``/``"..."``
-    or braced ``{...}`` expression (which may contain spaces, e.g.
-    ``ad='int((nf+1)/2) * W/nf * 0.18u'``) inside its ``name=value`` token."""
-    tokens: list[str] = []
-    current: list[str] = []
-    quote = ""
-    depth = 0
-    for ch in line:
-        if quote:
-            current.append(ch)
-            if ch == quote:
-                quote = ""
-        elif ch in "'\"":
-            quote = ch
-            current.append(ch)
-        elif ch == "{":
-            depth += 1
-            current.append(ch)
-        elif ch == "}":
-            depth = max(depth - 1, 0)
-            current.append(ch)
-        elif ch.isspace() and depth == 0:
-            if current:
-                tokens.append("".join(current))
-                current = []
-        else:
-            current.append(ch)
-    if current:
-        tokens.append("".join(current))
-    return tokens
-
-
-def _device_model_counts(netlist_text: str) -> dict[str, tuple[str, int]]:
-    """``{lowercased model/subcircuit name: (name as written, instance
-    count)}`` for every `M` (raw MOSFET)/`X` (subcircuit call, `klt
-    extract`'s own convention for a bound MOS/bipolar device -- see
-    ``pdk_models.py``'s ``_ModelBindingSpiceWriterDelegate.write_device``)/
-    `Q` (raw BJT)/`D` (raw diode) device-instance card in ``netlist_text``,
-    in file order.
-
-    The model/subcircuit name is *the last whitespace token on the card that
-    is not a ``name=value`` parameter assignment* -- SPICE's own convention
-    is that a device card's trailing tokens, after its nodes, are either
-    exactly one model/subcircuit name or a run of ``name=value`` parameters
-    (e.g. ``L=``/``W=``/``AS=``/``AD=``), never both interleaved. This holds
-    identically for a raw ``M<name> d g s b <model> [L=... W=...]`` card and
-    for an ``X<name> <nodes...> <subckt> [param=value ...]`` subcircuit
-    call, so one rule covers both without needing to know each card's exact
-    node count up front.
-
-    Lowercased keys, original-case values -- the same case-insensitive-key
-    convention :func:`_subckt_interfaces` uses, since ngspice is
-    case-insensitive about model/subcircuit names the same way it is about
-    `.subckt` names.
-    """
-    counts: dict[str, tuple[str, int]] = {}
-    for line in _logical_lines(netlist_text):
-        stripped = line.strip()
-        if not stripped or stripped[0].upper() not in DEVICE_MODEL_CARD_PREFIXES:
-            continue
-        parts = [token for token in _split_spice_tokens(stripped) if "=" not in token]
-        if len(parts) < 2:
-            continue  # no nodes/model at all -- not a real device instance
-        name = parts[-1]
-        key = name.lower()
-        existing_name, existing_count = counts.get(key, (name, 0))
-        counts[key] = (existing_name, existing_count + 1)
-    return counts
-
-
-def _reference_is_hierarchical(netlist_text: str) -> bool:
-    """``True`` if ``netlist_text`` contains an `X` device-instance card
-    whose target names a `.subckt` **defined elsewhere in the same file**
-    -- i.e. the netlist is hierarchical (a leaf `.subckt` plus one or more
-    instance calls of it) rather than flat.
-
-    `klt extract`'s own output is always flat, by design
-    (``docs/cli/extract.md``: "Extraction is flat, not hierarchical"), so a
-    hierarchical *reference* netlist compared against it is exactly the
-    shape issue #1085 already documents for `klt lvs` (a leaf `.subckt`
-    called N times on the reference side has no counterpart circuit on the
-    flat extracted side to pair against). The same mismatch shows up here:
-    a device nested inside a locally-defined `.subckt` appears once per
-    *definition* in `_device_model_counts`'s card scan, not once per
-    physical *instance*, while the flat extracted side always counts once
-    per instance -- so a purely hierarchy-representation difference can
-    produce the same divergent multiset a genuine device-flavour swap
-    would, without being one. See :func:`_model_mismatch`.
-    """
-    local_subckts = set(_subckt_interfaces(netlist_text))
-    if not local_subckts:
-        return False
-    for line in _logical_lines(netlist_text):
-        stripped = line.strip()
-        if not stripped or stripped[0].upper() != "X":
-            continue
-        parts = [token for token in _split_spice_tokens(stripped) if "=" not in token]
-        if len(parts) < 2:
-            continue
-        if parts[-1].lower() in local_subckts:
-            return True
-    return False
-
-
-def _has_include_card(netlist_text: str) -> bool:
-    return any(
-        INCLUDE_CARD_RE.match(line.strip()) for line in _logical_lines(netlist_text)
-    )
-
-
-def _expand_reference_includes(netlist_text: str, netlist_path: str) -> str:
-    """``netlist_text`` with each resolvable ``.include``/``.inc`` card
-    replaced by the included file's lines (issue #4630), so a thin
-    ``.subckt`` wrapper around an included device file is tallied by its
-    real devices. Unresolvable includes are dropped, never raised."""
-    base_dir = os.path.dirname(os.path.abspath(netlist_path))
-    return "\n".join(
-        expand_includes(_logical_lines(netlist_text), base_dir, IncludeState(base_dir))
-    )
 
 
 def _model_mismatch(
@@ -2111,15 +1914,20 @@ def _resolve_reference_netlist_path(
     measured_reference_netlist: str | None,
     dut_paths: Sequence[str],
 ) -> str:
-    """The one ``reference_netlist`` for the run (issue #3739): ``""`` for
-    ``--extract-only`` (no schematic side; every consumer of the path is
-    skipped and ``env_provenance.repo_relative_path`` /
-    :func:`content_hash` read it as ``null``), the caller's own
-    ``--reference-netlist`` in ``--measure-command`` mode, else the DUT."""
-    if extract_only:
-        return ""
+    """The one ``reference_netlist`` for the run: the caller's own
+    ``--reference-netlist`` whenever one was given (``--measure-command``
+    mode, issue #2478, and ``--extract-only`` mode, issue #5477), ``""`` for
+    a bare ``--extract-only`` (no schematic side at all; every consumer of
+    the path is skipped and ``env_provenance.repo_relative_path`` /
+    :func:`content_hash` read it as ``null``), else the testbenches' own
+    single ``.include``d DUT. A non-empty path in ``--extract-only`` mode
+    feeds :func:`_model_mismatch` alone, not a schematic leg -- every
+    measurement-leg consumer stays gated on ``extract_only`` at its own call
+    site; see :func:`run_pex`."""
     if measured_reference_netlist is not None:
         return measured_reference_netlist
+    if extract_only:
+        return ""
     return dut_paths[0]
 
 
@@ -2145,13 +1953,16 @@ def _validate_measure_mode(
     does *not* express the exclusion with an argparse mutually-exclusive
     group -- `<testbench>` is a positional, and argparse's own message for
     that case says much less than these do).
+
+    Issue #5477: ``--extract-only`` accepts ``--reference-netlist`` -- it
+    buys the ``model_mismatch`` comparison alone (see :func:`run_pex`), so it
+    is not in the conflict list below; every other conflict is unchanged.
     """
     if extract_only:
         _reject_extract_only_conflicts(
             [
                 (bool(testbench_paths), "a testbench request"),
                 (measure_command is not None, "--measure-command"),
-                (reference_netlist is not None, "--reference-netlist"),
                 (measure_timeout_s is not None, "--measure-timeout-s"),
                 (device_only_leg, "--device-only-leg"),
                 (flatten_schematic, "--flatten-schematic"),
@@ -3057,8 +2868,28 @@ def run_pex(
     are ``null``, ``measurement.mode`` is ``"extract-only"`` and ``status`` is
     ``"not_checked"`` (``coverage.reasons`` ``no_delta_rows``) -- nothing was
     compared. Combining it with testbenches, ``measure_command``,
-    ``reference_netlist``, ``measure_timeout_s``, ``device_only_leg`` or
-    ``flatten_schematic`` raises :class:`PexError`.
+    ``measure_timeout_s``, ``device_only_leg`` or ``flatten_schematic``
+    raises :class:`PexError`.
+
+    **``extract_only`` with ``reference_netlist`` (issue #5477)** is the one
+    exception to that list. ``model_mismatch`` compares what the two
+    netlists *contain* -- the per-model ``M``/``X``/``Q``/``D`` instance
+    multiset (:func:`_model_mismatch`) -- so it is well-defined with no
+    measurement leg at all, and it is the only deck-agnostic signal that an
+    extraction is missing a whole device family: a curated deck that
+    declares no class for a family whose recognition region the PDK
+    *derives* (rather than drawing a marker layer for) leaves
+    ``extraction.unsupported_devices`` empty and the devices simply absent
+    from the netlist. Supplying the schematic netlist makes that divergence
+    nameable -- ``kind: "model_set"``, the missing model in
+    ``reference_only`` -- in an envelope whose ``delta[]`` is not yet
+    runnable. ``reference_netlist``/``reference_netlist_sha256`` then report
+    the caller's file; ``measurement.mode`` stays ``"extract-only"``,
+    ``delta`` stays ``[]``, ``status`` stays ``"not_checked"``, and
+    ``flat_dut_mismatch``/``pin_count_mismatch``/``pin_order_mismatch`` stay
+    ``null`` -- all three describe a measurement leg's testbench
+    ``X...``-line reuse, which this mode does not do. Without a
+    ``reference_netlist`` the envelope is byte-identical to before.
 
     **``device_only_leg`` (issue #3298)** adds a third, parasitic-free leg:
     the same layout is extracted again with ``parasitics=False`` (no star
@@ -3262,9 +3093,13 @@ def run_pex(
     # circuit of its own would make the schematic leg (and therefore every
     # `delta[]` row) meaningless while the report still looked like a real
     # comparison.
+    # Issue #5477: `--extract-only` may now carry one too, for the same
+    # "it still has to *be* a DUT" reason (see `run_pex`). Testbench mode
+    # never reaches here with a reference (`_validate_measure_mode` rejects
+    # it), so this one condition covers both modes that can supply one.
     measured_reference_netlist = (
         _resolve_measured_reference(reference_netlist)
-        if command is not None and reference_netlist is not None
+        if reference_netlist is not None
         else None
     )
 
@@ -3387,9 +3222,14 @@ def run_pex(
     # too (issue #2478): unlike the two pin-list diagnostics, it compares
     # what the two netlists *contain*, which is independent of how either
     # side was measured.
+    # Issue #5477: computed in `--extract-only` mode too whenever the caller
+    # supplied a `--reference-netlist` -- comparing the two netlists' text
+    # needs no measurement leg at all, and there it is reported, not enforced
+    # (`status` stays `not_checked`, the exit code stays 4). `run_pex` states
+    # why once.
     model_mismatch = (
         None
-        if extract_only
+        if not schematic_netlist_path
         else _model_mismatch(
             reference_netlist=schematic_netlist_path,
             extracted_netlist=extracted_netlist_path,
@@ -3456,6 +3296,7 @@ def run_pex(
     pin_order_mismatch = _pin_order_preflight(
         command_mode,
         (flat_dut_mismatch, pin_count_mismatch),
+        extract_only=extract_only,
         reference_netlist=reference_netlist_path,
         extracted_netlist=extracted_netlist_path,
         top_cell=extract_report["top"],
@@ -3759,6 +3600,18 @@ def run_pex(
             # Additive field (issue #4234): `klt extract`'s `device_models`
             # echo -- the applied `--device-model` mapping, or `None`.
             "device_models": extract_report.get("device_models"),
+            # Additive fields (issue #5477): `klt extract`'s own device
+            # coverage disclosure -- `device_classes` (issue #221, what the
+            # resolved deck can recognise) and `unsupported_devices` (issue
+            # #2919, the deck-declared "cannot extract this yet" marker
+            # geometry the layout draws) -- forwarded verbatim in every mode,
+            # so a committed envelope carries the same limit statement the
+            # extraction it cites published, instead of making a reader
+            # re-run `klt extract`. Neither sees a family the deck declares
+            # no class for *and* that draws no marker layer (e.g. `pnpMPA` on
+            # sg13cmos5l); see `run_pex` on `model_mismatch` for that gap.
+            "device_classes": extract_report.get("device_classes"),
+            "unsupported_devices": extract_report.get("unsupported_devices"),
             # Additive field (issue #2854): echoes the effective
             # `--rename-declared-pins` value back -- `False` when the flag
             # was never given, byte-identical to before this feature

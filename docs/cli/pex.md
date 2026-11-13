@@ -10,6 +10,7 @@ Phase 1a of [Epic #709](https://github.com/2AMLogic/klayout-tools/issues/709)
 ```
 klt pex <layout> <testbench>... --deck sky130|gf180mcu|sg13g2 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--outdir <dir>] [--backend <backend>] [--max-units-per-job <n>] [--max-concurrent-jobs <n>] [--hosts <n>] [--resume] [--wait-for-capacity <seconds>] [--submit-only | --attach <pex-submit.json>] [--envelope-out <envelope.json>] [--deck-option <key>=<value>]... [--pins <a,b,...>] [--rename-declared-pins] [--tie-declared-pins] [--label-layer <role>=<layer>/<datatype>]... [--device-model <class>=<subckt>]... [--tie-net <extracted-net>=<schematic-net>]... [--critical-net <net>]... [--critical-net-pattern <glob>]... [--critical-net-all] [--critical-net-exclude <glob>]... [--distributed-rc] [--resistance-graph [--resistance-graph-r-cut <ohms>]] [--parasitic-variant <variant>]... [--substrate-tie-ohms <ohms>] [--mom-rlc-net <net>] [--mom-rlc-resistance-ohm <r>] [--mom-rlc-capacitance-ff <c>] [--mom-rlc-inductance-nh <l>] [--flatten-schematic] [--device-only-leg] [--extract-only] [--dry-run] [--format text|json]
 klt pex <layout> --deck <deck> --measure-command <command> --reference-netlist <schematic.spice> [--measure-timeout-s <seconds>] [<every flag above>]
+klt pex <layout> --deck <deck> --extract-only [--reference-netlist <schematic.spice>] [<every flag above>]
 ```
 
 - `<layout>` — path to a GDSII (`.gds`) or OASIS (`.oas`) routed layout
@@ -32,9 +33,13 @@ klt pex <layout> --deck <deck> --measure-command <command> --reference-netlist <
   command" below for the full contract.
 - `--reference-netlist` — the schematic DUT netlist the schematic-side
   measurement is taken on, and the `reference_netlist` this run reports.
-  **Required with `--measure-command`, and rejected without it**: in
-  testbench mode the schematic DUT is whatever every testbench `.include`s,
-  which is an observation rather than a caller's claim.
+  **Required with `--measure-command`**, and **optionally accepted with
+  `--extract-only`** (issue #5477), where nothing is measured and it buys
+  exactly one field: `model_mismatch`, the device-set comparison that names
+  a device family the resolved deck has no class for. **Rejected in
+  testbench mode**: there the schematic DUT is whatever every testbench
+  `.include`s, which is an observation rather than a caller's claim. In
+  every mode the file must itself plausibly *be* a DUT (issue #1255, Gap 1).
 - `--measure-timeout-s` — wall-clock cap on **one** `--measure-command`
   invocation (there are two per run, one per side). Default `1800`, the same
   cap [`signoff.md`](signoff.md) puts on a command-backed evidence entry.
@@ -225,12 +230,42 @@ klt pex <layout> --deck <deck> --measure-command <command> --reference-netlist <
   "`coverage`" below), so it is distinguishable from a graded run and `klt
   signoff` cannot cite it as comparison evidence. `reference_netlist` is
   `{"path": null, "scope": "absent"}` and `reference_netlist_sha256`,
-  `pin_count_mismatch`, `flat_dut_mismatch` and `model_mismatch` are `null`:
-  there is no schematic side. Combining it with a testbench,
-  `--measure-command`, `--reference-netlist`, `--measure-timeout-s`,
+  `pin_count_mismatch`, `flat_dut_mismatch`, `pin_order_mismatch` and
+  `model_mismatch` are `null`: there is no schematic side. Combining it with
+  a testbench, `--measure-command`, `--measure-timeout-s`,
   `--device-only-leg` or `--flatten-schematic` is exit 1 (error envelope).
   Off by default — without it, naming no testbench still fails with "at
   least one testbench request is required".
+- `--extract-only --reference-netlist <schematic.spice>` — the one
+  combination `--extract-only` accepts (issue #5477), and the only way to
+  learn from an extraction-only envelope that the extraction is **missing a
+  whole device family**. It measures nothing: it buys exactly one field,
+  [`model_mismatch`](#a-device-model-divergence-invalidates-the-comparison-too-model_mismatch),
+  computed from the two netlists' own text (the per-model `M`/`X`/`Q`/`D`
+  instance multiset) rather than from any measured leg. A device family the
+  resolved `--deck` declares no class for extracts as **nothing at all** —
+  not a zero-valued placeholder, not a warning — so `extraction.device_count`
+  and a clean `klt lvs` can both look right while the netlist is a different
+  circuit from the schematic. `extraction.unsupported_devices` (issue #2919)
+  only sees a family whose deck declares an `UnsupportedDeviceMarker` layer
+  the layout draws on; a family whose recognition region the PDK *derives*
+  (e.g. `pnp_mk = ptap_holes.not(pnp_exclude)` for IHP sg13cmos5l's
+  `pnpMPA`) draws no such marker and stays invisible to it. Naming the
+  schematic netlist makes the divergence reportable — `kind: "model_set"`
+  with the missing model in `reference_only` — in an envelope whose
+  `delta[]` is not yet runnable. With it, `reference_netlist` and
+  `reference_netlist_sha256` report that file; `measurement.mode` stays
+  `"extract-only"`, `delta` stays `[]`, `status` stays `"not_checked"`
+  (exit 4), and the three measurement-leg diagnostics
+  (`pin_count_mismatch`, `flat_dut_mismatch`, `pin_order_mismatch`) stay
+  `null` — each describes the testbench `X...`-line reuse this mode never
+  does. The reference must still plausibly *be* a DUT (the Gap-1 check of
+  issue #1255): a parameter/corner file is exit 1. **Item-7 consequence**
+  (`docs/design-evidence-tiers.md`): running the comparison later, against
+  an extraction with a non-`null` `model_mismatch`, produces a `delta[]`
+  that compares two different circuits rather than a parasitic effect.
+  Checking it in `--extract-only` is how you find that out before paying
+  for the simulation legs.
 - `--tie-net` — repeatable `<extracted-net>=<schematic-net>` (issue #4245).
   Merges one reported-unbiased well/body net of the extracted netlist into a
   schematic net before the extracted leg is simulated, so the leg is
@@ -984,6 +1019,34 @@ whenever the reference netlist is hierarchical; treat a hierarchical-shaped
 (below), which removes the hierarchy from the comparison, before discarding
 the run's `delta[]` evidence.
 
+**Available without a measurement leg (issue #5477).** `model_mismatch` is
+the only one of this command's netlist diagnostics that reads the two
+netlists' *text* rather than anything a leg produced, so `klt pex
+--extract-only --reference-netlist <schematic.spice>` computes it with no
+testbench and no `--measure-command` at all (every other `--extract-only`
+conflict is unchanged). That matters most for the condition this section
+cannot otherwise reach: a device family the resolved `--deck` declares **no
+class for** is not warned about, not emitted as a placeholder and not
+counted — the devices are simply *absent* from the extracted netlist.
+`extraction.unsupported_devices` (issue #2919) catches this only when the
+deck declares an `UnsupportedDeviceMarker` layer and the layout draws on it;
+a family whose recognition region the PDK *derives* from other layers (IHP
+sg13cmos5l's `pnpMPA`, where `pnp_mk = ptap_holes.not(pnp_exclude)`) draws
+no marker and leaves `unsupported_devices` empty. Comparing against the
+schematic netlist is the deck-agnostic signal that does catch it: the
+missing model appears in `reference_only` with `kind: "model_set"`.
+
+**The item-7 consequence, stated plainly.**
+[`design-evidence-tiers.md`](../design-evidence-tiers.md) item 7 accepts only
+a `klt pex` report, and [`signoff.md`](signoff.md) enforces that. A `delta[]`
+computed over an extraction that is missing a device family compares **two
+different circuits**, not a parasitic effect — and because the `.SUBCKT`
+interfaces still match, the extracted leg converges and reports plausible
+numbers. `model_mismatch` is the field that says so. Check it in
+`--extract-only` first, before paying for the simulation legs, on any block
+whose schematic instantiates a device class you have not confirmed the deck
+declares (`extraction.device_classes`, below).
+
 ## ASAP7: the extracted legs are adapted to BSIM-CMG automatically (issue #5128)
 
 ngspice runs ASAP7's BSIM-CMG only through OSDI, which needs `N` cards, while
@@ -1536,7 +1599,7 @@ side simulates:
 | `testbenches[].request_sha256` | The request JSON file given as `<testbench>` (stimulus corner list, `.meas` cards, models). |
 | `testbenches[].netlist_sha256` | The simulation body file the request's `netlist` names (resolved request-dir-relative). |
 | `testbenches[].schematic_netlist_sha256` | The single DUT file that body `.include`s — the file the extracted-side run swaps out. Two testbenches sharing a DUT carry the same value. |
-| `reference_netlist_sha256` | `reference_netlist`: the shared DUT, or `--reference-netlist` in `--measure-command` mode (where `testbenches` is empty and the extracted leg stays bound by `extraction.netlist_sha256`). |
+| `reference_netlist_sha256` | `reference_netlist`: the shared DUT, or `--reference-netlist` in `--measure-command` mode (where `testbenches` is empty and the extracted leg stays bound by `extraction.netlist_sha256`) or in `--extract-only` mode (issue #5477 — where no leg runs at all and the file is compared, not simulated). `null` for a bare `--extract-only`. |
 
 Digests stay present when the matching path is redacted as `scope:
 "external"`. Each `testbenches[]` entry has the same keys whether or not its
@@ -1605,6 +1668,8 @@ full `repo`/`external`/`absent` scope meanings.
     "mom_rlc_override": null,
     "label_layers": null,
     "device_models": null,
+    "device_classes": ["nfet", "pfet", "pnp", "sky130_fd_pr__model__cap_mim", "sky130_fd_pr__model__cap_mim_m4", "resistor", "diode_pw2nd_05v5", "diode_pw2nd_05v5_lvt", "diode_pw2nd_05v5_nvt", "diode_pw2nd_11v0", "diode_pd2nw_05v5", "diode_pd2nw_05v5_lvt", "diode_pd2nw_05v5_hvt", "diode_pd2nw_11v0"],
+    "unsupported_devices": [],
     "parasitic_integrity": {
       "short_threshold_ohm": 1.0,
       "cap_tolerance": { "absolute_ff": 1e-06, "relative": 1e-09 },
@@ -1713,8 +1778,8 @@ full `repo`/`external`/`absent` scope meanings.
 | `status`             | string            | Aggregate: `"pass"`, `"fail"`, `"error"`, or `"not_checked"`. Precedence: `error` > `fail` > `not_checked` > `pass` — mirrors `klt sim`. |
 | `layout`             | object            | `{path, scope}` — `<layout>` normalised via `env_provenance.repo_relative_path` (issue #1261): `scope: "repo"` with a repo-relative `path` when `<layout>` sits inside the invocation's repo, else `{"path": null, "scope": "external"}`. The absolute path is never echoed. |
 | `netlist`            | object            | `{path, scope}` — the extracted (parasitic-annotated) netlist `klt extract` wrote, normalised the same way as `layout`. |
-| `reference_netlist`  | object            | `{path, scope}` — the schematic DUT file every testbench `.include`d (see "The DUT `.include` swap" above), normalised the same way as `layout`. `{path: null, scope: "absent"}` for `--extract-only` (issue #3739), which has no schematic side. |
-| `extraction`         | object            | `deck`, `netlist_adaptation` (issue #5128 — the simulator adaptation applied to the extracted and `--device-only-leg` legs' DUT netlist: `"asap7_bsimcmg.adapt_extracted_netlist"` for `--deck asap7`, `null` otherwise; see the asap7 section above), `device_count`, `net_count`, `netlist_sha256` (echoed from `klt extract`'s own report), `model` (`extract.py`'s `PARASITIC_MODEL_SCOPE`, verbatim — what the extracted side's R/C model does and does not account for), `critical_nets` (issue #976 — the `--critical-net` request echoed back, `[]` when the flag was never given), `distributed_rc` (issue #977 — `true` only when `--distributed-rc` was given, `false` otherwise), `parasitic_variant` (issue #3056 — the `--parasitic-variant` request echoed back; present only when the flag was given), `mom_rlc_override` (issue #988 — `null` unless `--mom-rlc-net` was given, in which case `klt extract`'s own substitution report; see [`extract.md`](extract.md)'s "Substitute a caller-supplied `klt mom` R/L/C for a critical net" section for the field list), `label_layers` (issue #2686 — `null` unless `--label-layer` was given, in which case `klt extract`'s own `label_layers` echo: `{"<role>": [layer, datatype] | null}`, sorted by role, `null` for a role cleared with `none`), `device_models` (issue #4234 — `null` unless `--device-model` was given, in which case the applied `{"<class>": "<subckt>"}` mapping), `resistance_graph` (issue #4037 — present only with `--resistance-graph`: `{r_cut_ohm, nets[]}` where each `nets[]` entry is `{net, net_id, resistance_source, selected_resistance_ohm, legacy_resistance_ohm}`; `resistance_source` says which value the extracted netlist's lumped R used), and `parasitic_integrity` (issue #2764 — the extraction's own per-net parasitic RC network integrity diagnostics; see below). Pins the extraction method alongside `provenance.deck`'s content-hash version pin. |
+| `reference_netlist`  | object            | `{path, scope}` — the schematic DUT file every testbench `.include`d (see "The DUT `.include` swap" above), normalised the same way as `layout`. `{path: null, scope: "absent"}` for a bare `--extract-only` (issue #3739), which has no schematic side — or the caller's own `--reference-netlist` when `--extract-only` is given one (issue #5477), which still measures nothing and is used only to compute `model_mismatch`. |
+| `extraction`         | object            | `deck`, `netlist_adaptation` (issue #5128 — the simulator adaptation applied to the extracted and `--device-only-leg` legs' DUT netlist: `"asap7_bsimcmg.adapt_extracted_netlist"` for `--deck asap7`, `null` otherwise; see the asap7 section above), `device_count`, `net_count`, `netlist_sha256` (echoed from `klt extract`'s own report), `model` (`extract.py`'s `PARASITIC_MODEL_SCOPE`, verbatim — what the extracted side's R/C model does and does not account for), `critical_nets` (issue #976 — the `--critical-net` request echoed back, `[]` when the flag was never given), `distributed_rc` (issue #977 — `true` only when `--distributed-rc` was given, `false` otherwise), `parasitic_variant` (issue #3056 — the `--parasitic-variant` request echoed back; present only when the flag was given), `mom_rlc_override` (issue #988 — `null` unless `--mom-rlc-net` was given, in which case `klt extract`'s own substitution report; see [`extract.md`](extract.md)'s "Substitute a caller-supplied `klt mom` R/L/C for a critical net" section for the field list), `label_layers` (issue #2686 — `null` unless `--label-layer` was given, in which case `klt extract`'s own `label_layers` echo: `{"<role>": [layer, datatype] | null}`, sorted by role, `null` for a role cleared with `none`), `device_models` (issue #4234 — `null` unless `--device-model` was given, in which case the applied `{"<class>": "<subckt>"}` mapping), `device_classes` and `unsupported_devices` (issue #5477 — `klt extract`'s own device-coverage disclosure, forwarded verbatim in every mode: the device classes the resolved deck can recognise at all (issue #221), and the deck-declared `UnsupportedDeviceMarker` geometry the layout draws on (issue #2919, `[]` when there is none). Neither can see a family the deck declares no class for **and** whose recognition region the PDK derives rather than drawing a marker for — for that, see `model_mismatch` and `--extract-only --reference-netlist` above), `resistance_graph` (issue #4037 — present only with `--resistance-graph`: `{r_cut_ohm, nets[]}` where each `nets[]` entry is `{net, net_id, resistance_source, selected_resistance_ohm, legacy_resistance_ohm}`; `resistance_source` says which value the extracted netlist's lumped R used), and `parasitic_integrity` (issue #2764 — the extraction's own per-net parasitic RC network integrity diagnostics; see below). Pins the extraction method alongside `provenance.deck`'s content-hash version pin. |
 | `body_bias`          | object            | Issue #1983 (additive field). Whether the extracted netlist this run re-simulated actually had a **DC bias path for every device body**: `status` (`"biased"`/`"unbiased"`, or `"tied"` when every unbiased net was declared tied with `--tie-net`), `unbiased_device_count`, `unbiased_nets` (the distinct synthesized net names, sorted), and `unbiased_pmos_body_nets` (`klt extract`'s own `{"device", "net"}` entries, verbatim), and — only with `--tie-net` (issue #4245) — `tied[]` (`{extracted_net, schematic_net, source: "declared"}`). See "Unbiased device bodies invalidate the comparison" above. Reduced from the extraction this command drove itself; it never changes `status`. |
 | `measurement`        | object            | Issue #2478 (additive field, always present). How this run's two legs were measured, so a reader of a committed record never has to infer it from the presence/absence of `testbenches[]`. `mode` is `"testbench"` (the default path — `command`/`timeout_s`/`sides` are then all `null`) `"command"` (a caller-supplied `--measure-command` produced both legs) or `"extract-only"` (issue #3739: `--extract-only` measured nothing — `testbenches` and `delta` are empty, `status` is `not_checked`, and `command`/`timeout_s`/`sides` are `null`). For `"command"`: `command` is the argv **list** verbatim (never a shell string — it is never run through a shell), `timeout_s` the per-invocation cap in force, and `sides` an object keyed `schematic`/`extracted`, each carrying `netlist` (`{path, scope}`, the exact netlist that side was measured on), `exit_status`, `corner_count` and `measurement_names`. See "Measuring with a caller-supplied command" above. |
 | `testbenches`        | array\<object\>   | One entry per `<testbench>`: `request` (`{path, scope}` — the `<testbench>` argument, normalised the same way as `layout`; issue #1261), `request_sha256`, `netlist` (`{path, scope}` — the simulation body the request names), `netlist_sha256`, `schematic_netlist` (`{path, scope}` — the resolved DUT path it `.include`d, normalised the same way), `schematic_netlist_sha256`, `corner_count`, `measurement_names`, and the issue #2872 `sides` / `nothing_simulated_corners` execution evidence (see "Per-side execution evidence" below). The `*_sha256` fields are the issue #2875 content identities, see "Schematic-side content identity" below. Informational — the full per-corner detail lives in `delta[]`. **Empty (`[]`) for a `--measure-command` run**, which has no testbenches at all; `measurement.sides` carries the equivalent per-leg detail there. |
@@ -1729,7 +1794,7 @@ full `repo`/`external`/`absent` scope meanings.
 | `unfinished`         | array             | `[]` when every sim leg finished (issue #5282 — additive field). When a sharded batch leg lost shards, one `{testbench, side, corner_ids, unfinished_shards, resumable, shard_map}` entry per leg: `corner_ids` are the corners whose shard never returned (their `delta[]` rows are `status: "error"`, `error.stage: "collect"`), `unfinished_shards` / `resumable` / `shard_map` are `klt sim`'s own `environment.remote` data. Corners that finished keep their ordinary `delta[]` rows. Re-run with `--resume` (same `-o`/`--outdir`) to re-dispatch only the lost shards; shards that completed re-attach from the shard map instead of being paid for again. |
 | `flat_dut_mismatch`  | object \| null    | `null` unless the schematic DUT is netlisted flat (no `.SUBCKT` wrapper) against a `.SUBCKT`-wrapped extraction (issue #1255, Gap 2 — additive field). Same shape as `pin_count_mismatch` (`subcircuit`, `schematic`/`extracted` objects, `ngspice_message` — always `null` here, no engine is ever invoked — and `detail`); mutually exclusive with `pin_count_mismatch` (the extracted side is never attempted when this fires). See "Flat schematic DUT vs `.SUBCKT`-wrapped extraction" above. |
 | `pin_order_mismatch` | object \| null    | `null` unless both sides declare the top subcircuit with the same pin set in a different order (issue #2890 — additive field). Same shape as `flat_dut_mismatch` (`ngspice_message` always `null`); mutually exclusive with `pin_count_mismatch`/`flat_dut_mismatch`; `null` in `--measure-command` mode. The extracted leg is skipped and the run exits `4`. See "Pin order must match" above. |
-| `model_mismatch`     | object \| null    | `null` when the reference (schematic) and extracted netlists' `M`/`X`/`Q`/`D` device cards instantiate the same models/`.subckt`s the same number of times (issue #2402 — additive field). Non-`null` names the divergence: `kind` (`model_set` or `count_only`, issue #3054), `reference_only`/`extracted_only` (model names unique to one side, by instance count), `counts` (each side's full per-model instance count), and a human-readable `detail`. Unlike `pin_count_mismatch`/`flat_dut_mismatch`, computed unconditionally (independent of whether the top-level pin lists match) and never skips the extracted-side simulation — it never changes `status`. See "A device-model divergence invalidates the comparison too" above. |
+| `model_mismatch`     | object \| null    | `null` when the reference (schematic) and extracted netlists' `M`/`X`/`Q`/`D` device cards instantiate the same models/`.subckt`s the same number of times (issue #2402 — additive field). Non-`null` names the divergence: `kind` (`model_set` or `count_only`, issue #3054), `reference_only`/`extracted_only` (model names unique to one side, by instance count), `counts` (each side's full per-model instance count), and a human-readable `detail`. Unlike `pin_count_mismatch`/`flat_dut_mismatch`, computed unconditionally (independent of whether the top-level pin lists match) and never skips the extracted-side simulation — it never changes `status`. Issue #5477: also computed in `--extract-only` mode whenever `--reference-netlist` is given (it compares the two netlists' text, so it needs no measurement leg), which is how an extraction missing a whole device family is named at all; `null` in `--extract-only` without a reference. See "A device-model divergence invalidates the comparison too" above. |
 | `flatten_schematic`  | boolean           | Issue #2889 (additive, always present). Echo of `--flatten-schematic` — `false` when not given. |
 | `schematic_flatten`  | object \| null    | Issue #2889 (additive). `null` unless `--flatten-schematic` was given. Otherwise the flattened schematic DUT the schematic leg ran: `netlist` (`{path, scope}`), `netlist_sha256` (`sha256:<hex>` of its exact bytes), `subckts` (root `.subckt` names kept), `inlined_instances`, `inlined_subckts`, `external_subckts` (undefined `X` targets kept as leaf devices — audit these) and `already_flat`, `wrapper` (`null`, or `{synthesized, pins}` when a fragment DUT was wrapped in `.subckt <top>`). See "Flattening a hierarchical schematic DUT" above. |
 | `device_only_netlist` | object            | Issue #3298 (additive, `--device-only-leg` only — absent otherwise). `{path, scope}` of the parasitic-free extraction the third leg ran. |
