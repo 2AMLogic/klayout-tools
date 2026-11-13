@@ -155,6 +155,7 @@ from ._paths import (
     validate_request_shape,
 )
 from ._provenance import INPUT_ROLE_NETLIST, build_provenance, sha256_file
+from ._spice_text import fold_spice_continuations, strip_spice_inline_comment
 from ._text import line_containing as _line_containing
 from .coverage import (
     REASON_EMPTY_CORNER_MATRIX,
@@ -8445,23 +8446,22 @@ _WAVEFORM_RE = re.compile(r"^([a-z]+)\s*(?:\(|$)")
 def _logical_netlist_lines(netlist_text: str) -> list[str]:
     """Netlist lines with ``+`` continuations joined and comments removed.
 
-    Full-line ``*`` comments and inline ``;``/``$`` comments are dropped.
-    Deliberately lexical, not a complete SPICE parser: ``.include``/``.lib``
-    are not followed."""
+    Comments and ``+`` continuations go through the shared helpers, so a
+    ``$`` glued to the next token (``.include $PDK_ROOT/...``) survives and
+    an orphan ``+`` is dropped, as it always was here. Deliberately lexical,
+    not a complete SPICE parser: ``.include``/``.lib`` are not followed."""
     logical: list[str] = []
     for raw in netlist_text.splitlines():
         line = raw.strip()
         if not line or line.startswith("*"):
             continue
-        line = re.split(r";|\s\$", line, maxsplit=1)[0].strip()
+        line = strip_spice_inline_comment(line)
         if not line:
             continue
-        if line.startswith("+"):
-            if logical:
-                logical[-1] += " " + line[1:].strip()
-            continue
         logical.append(line)
-    return logical
+    return [
+        line for line in fold_spice_continuations(logical) if not line.startswith("+")
+    ]
 
 
 _NOISE_SOURCE_RE = re.compile(r"\b(trnoise|trrandom)\s*\(", re.IGNORECASE)

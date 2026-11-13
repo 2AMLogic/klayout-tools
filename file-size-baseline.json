@@ -168,10 +168,6 @@
       "lines": 627
     },
     {
-      "path": "src/klayout_tools/_paths.py",
-      "lines": 526
-    },
-    {
       "path": "src/klayout_tools/_provenance.py",
       "lines": 1005
     },
@@ -497,7 +493,7 @@
     },
     {
       "path": "src/klayout_tools/op_sanity.py",
-      "lines": 1848
+      "lines": 1840
     },
     {
       "path": "src/klayout_tools/parasitic_integrity.py",
@@ -673,7 +669,7 @@
     },
     {
       "path": "src/klayout_tools/spice_flatten.py",
-      "lines": 847
+      "lines": 843
     },
     {
       "path": "src/klayout_tools/stats.py",

@@ -62,8 +62,9 @@ from functools import partial
 from typing import Any
 
 from . import liberty_writer, sim
-from ._paths import _load_request_json, _resolve_relative, fold_spice_continuations
+from ._paths import _load_request_json, _resolve_relative
 from ._provenance import INPUT_ROLE_NETLIST, build_provenance
+from ._spice_text import fold_spice_continuations, strip_spice_inline_comment
 from .characterize_arcs import DerivedArc, FunctionError, derive_arcs
 from .characterize_capacity import capacity_shard, with_batch_passthrough
 from .characterize_cards import (
@@ -735,9 +736,8 @@ def _read_subckt_terminals(netlist_path: str, subckt: str) -> tuple[str, ...]:
     """Return ``subckt``'s terminal names, in declaration order.
 
     The order is load-bearing: a SPICE ``X`` instance line is positional, so
-    the generated testbench binds nodes by the position each terminal
-    appears in here, never by the order the request happens to list pins in.
-    """
+    the generated testbench binds nodes by the position each terminal appears
+    in here, never by the order the request happens to list pins in."""
     try:
         with open(netlist_path, encoding="utf-8", errors="replace") as handle:
             lines = handle.read().splitlines()
@@ -745,7 +745,7 @@ def _read_subckt_terminals(netlist_path: str, subckt: str) -> tuple[str, ...]:
         raise CharacterizeError(f"could not read '{netlist_path}': {exc}") from exc
 
     for line in fold_spice_continuations(lines):
-        match = _SUBCKT_RE.match(line.split("$")[0])
+        match = _SUBCKT_RE.match(strip_spice_inline_comment(line))
         if match is None:
             continue
         if match.group(1) != subckt:

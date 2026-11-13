@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import re
 
-from ._paths import fold_spice_continuations
+from ._spice_text import fold_spice_continuations
 
 #: Verilog-A module name the OSDI binary exposes (``module bsimcmg_va`` in
 #: the pinned CMC source); the model card's second token must equal it.
