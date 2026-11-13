@@ -2246,6 +2246,25 @@ part in layout-consistency comparisons; `klt signoff` verifies them per role
 (`citation.pex_inputs`). Pre-change envelopes omit them and stay readable.
 See [`cli/pex.md`](cli/pex.md).
 
+### `klt pex --dry-run` (issue #5464)
+
+`klt pex --dry-run` emits a **different payload** from a graded run, not a
+superset of one: `dry_run: true`, `status: "valid"`, `layout`, `deck`,
+`top`, `deck_options`, `declared_pins`, `legs`, `reference_netlist`,
+`testbenches[]` (each `{request, schematic_netlist, sim}`, where `sim` is
+the nested `klt sim --dry-run` report verbatim) and `not_checked[]`. It
+rides the same envelope at the same `SCHEMA_VERSION` (`2`) — **no bump**.
+
+This is additive under the opt-in-flag rule above: the payload exists only
+when `--dry-run` is given, no field of the graded report changes name, type
+or meaning, and a consumer that never passes the flag sees a byte-identical
+report. `dry_run` is the discriminator — it is absent from every graded
+report, so a reader can tell the two apart without looking at the argv.
+`not_checked[]` is a closed set of fixed string codes (new codes are
+additive); it exists so a dry run states what it did not verify rather than
+letting a `"valid"` status imply more than it earned. See
+[`cli/pex.md`](cli/pex.md)'s "Validating an invocation without running it".
+
 ## Static typing of the envelope
 
 The envelope modules (`klayout_tools.cli.output`,
