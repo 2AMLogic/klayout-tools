@@ -111,7 +111,7 @@ from . import (
     sim_staging,
 )
 from .pdk_families import family_subset, pdk_variant_family
-from .pdk_store import store_pdk_stamp
+from .pdk_store import client_pdk_stamp
 from .remote_launcher import (
     RemoteLaunchError,
     _signal_handlers_install,
@@ -1989,25 +1989,14 @@ def _bounded_str(value: Any, limit: int = WORKER_CAPTURE_STR_MAX) -> str | None:
 
 def _client_pdk_stamp(request: dict[str, Any] | None) -> dict[str, Any] | None:
     """The submitter's local view of the requested PDK variant's stamp (``SOURCES``,
-    else bundle ``.pdk-store.json``); ``None`` when nothing comparable is readable."""
+    else bundle ``.pdk-store.json``, #5318); ``None`` when nothing comparable is
+    readable. The root is ``models.pdk_root``, else ``$PDK_ROOT``, else the install
+    the PDK search order resolves -- the one ``provenance.pdk`` names (#5474), so a
+    host that pins neither still gets a comparison rather than
+    ``client_stamp_unavailable`` (``models.pdk_root`` is refused for batch)."""
     models = (request or {}).get("models") or {}
-    variant = models.get("pdk")
     root = models.get("pdk_root") or os.environ.get("PDK_ROOT")
-    if not (isinstance(variant, str) and variant and isinstance(root, str) and root):
-        return None
-    try:
-        with open(os.path.join(root, variant, "SOURCES"), "rb") as handle:
-            text = handle.read(16385)[:16384].decode("utf-8", "replace")
-    except OSError:
-        return store_pdk_stamp(variant, os.path.join(root, variant))  # #5318
-    normalized = "\n".join(
-        line.rstrip() for line in text.replace("\r\n", "\n").strip().split("\n")
-    )
-    return {
-        "variant": variant,
-        "stamp_scheme": "sources-sha256",
-        "stamp_sha256": hashlib.sha256(normalized.encode("utf-8")).hexdigest(),
-    }
+    return client_pdk_stamp(models.get("pdk"), root)
 
 
 def _compare_pdk_stamps(
