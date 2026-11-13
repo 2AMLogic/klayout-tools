@@ -1,16 +1,13 @@
-"""Define ``klt characterize``: SPICE-driven NLDM timing characterization of
-one standard cell (or a batch) at one PVT corner (issue #2502, split from
-#2498).
+"""Define ``klt characterize``: SPICE-driven NLDM timing characterization of one
+standard cell (or a batch) at one PVT corner (issue #2502, split from #2498).
 
 ``klt`` could already *consume* a Liberty model from three verbs
 (``synthesize``, ``place-and-route``, ``post_route_sta``, all through
 ``pdk_cells.resolve_liberty_for_cell_library``) and ``native/statime`` could
-*parse* one, but nothing in the tree produced one -- characterization was
-the last stage of the cell flow with no open answer. This module is that
-answer's first increment, since grown to cover a batch of cells, power and
-leakage tables, and sequential cells: one corner, delay, transition time,
-internal energy and -- for a cell that declares a clock pin -- clock-to-output
-and setup/hold constraint arcs.
+*parse* one, but nothing in the tree produced one -- characterization was the
+last stage of the cell flow with no open answer. This module is that answer:
+one corner, delay, transition time, internal energy and -- for a cell that
+declares a clock pin -- clock-to-output and setup/hold constraint arcs.
 
 Pure library: :func:`run_characterize` returns plain Python data (a
 JSON-serialisable ``dict``) and never prints -- serialisation and
@@ -31,23 +28,16 @@ single-unit ``local``-backend run.
 
 Scope -- what the emitted ``.lib`` deliberately does **not** contain:
 
-- one corner per invocation (no multi-corner ``.lib``); a batch request's
-  ``cells`` array does put several cells in one file;
-- no ``recovery``/``removal`` arcs and no async set/reset arcs;
-- no ``ff``/``latch`` groups, no latch arcs or time borrowing, no
-  min-pulse-width;
-- no ``when``-qualified arc/power splitting, no ``bus``/``bundle`` pins, no
-  input-pin (hidden) internal power.
+- one corner per invocation (no multi-corner ``.lib``);
+- no ``recovery``/``removal`` or async set/reset arcs, no ``ff``/``latch``
+  groups, no latch arcs, time borrowing or min-pulse-width;
+- no ``when``-qualified splitting, ``bus``/``bundle`` pins or hidden input-pin power.
 
-Power/energy tables (``rise_power``/``fall_power``/``leakage_power``, issue
-#2503), multi-cell batch mode, and sequential cells have since shipped. A
-sequential cell is characterized only when it declares ``cell.clock_pin``:
-clock-to-output arcs (issue #4755), plus setup/hold constraint arcs for each
-pin in ``cell.constrained_pins`` (issue #4756). Without ``clock_pin`` such a
-cell is still refused -- its output ``function`` references a state node that
-is not a declared input pin, and that stays a named error rather than a
-mis-characterized combinational arc (see
-:mod:`klayout_tools.characterize_arcs`).
+Power/energy tables (issue #2503), multi-cell batch mode (several cells in one
+``.lib``) and sequential cells have since shipped. A sequential cell is
+characterized only when it declares ``cell.clock_pin``: clock-to-output arcs
+(issue #4755) and setup/hold arcs for ``cell.constrained_pins`` (issue #4756);
+without one it is refused by name (see :mod:`klayout_tools.characterize_arcs`).
 
 Input **pin capacitance is measured** (issue #2512) -- one extra probe
 instance per input pin on the same deck, emitted as the pin's
