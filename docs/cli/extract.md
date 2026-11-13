@@ -2904,6 +2904,35 @@ bare marker with no gate or drain marker) still yields an
 `unsupported_devices[]` entry with `kind: "ldmos"` (and a `warnings[]` line)
 instead of dropping the device silently.
 
+**A markerless device family is invisible to this field (issue #5477)**:
+`unsupported_devices[]` is driven by a deck-declared
+`UnsupportedDeviceMarker`, which is a single drawn `(layer, datatype)` pair.
+A device family whose recognition region the PDK *derives* from other layers
+draws no such marker, so a deck that declares no class for it reports
+nothing: the devices are simply **absent** from the netlist, with `status:
+"extracted"`, exit 0, an empty `unsupported_devices[]`, and no `warnings[]`
+line naming the family. IHP sg13cmos5l's `pnpMPA` is the worked case — its
+runset derives `pnp_mk = ptap_holes.not(pnp_exclude)` from Activ/pSD/NWell
+(`bjt_derivations.lvs:113`), layers the curated deck already reads for MOS.
+Extracting that PDK's own `pnpMPA` testcase (`--deck sg13cmos5l --top
+pnpMPA_lvs`, measured 2026-11-13) gives `status: "extracted"`,
+`device_count: 0`, `unsupported_devices: []` and `device_classes: ["nfet",
+"pfet", "cap_cmomi", "cap_cmomf", "resistor"]`. `ignored_layers` does not
+help either — it lists 10/25, 40/0 and 63/0 there, none of which is device
+recognition geometry.
+There is no deck-side signal for this shape, because the deck is exactly
+what is missing. The deck-agnostic signal is a comparison against the
+schematic: run `klt pex --extract-only --reference-netlist <schematic.spice>`
+(issue #5477) and read `model_mismatch`, which reports the missing model in
+`reference_only` with `kind: "model_set"` — see
+[`pex.md`](pex.md)'s "A device-model divergence invalidates the comparison
+too". Checking it matters for a
+[`design-evidence-tiers.md`](../design-evidence-tiers.md) item-7 citation:
+a `klt pex` `delta[]` taken over an extraction missing a device family
+converges and reports numbers, but compares two different circuits rather
+than a parasitic effect. `extraction.device_classes` in the same envelope
+says which classes the resolved deck can recognise at all.
+
 **What this field does and does not guarantee**: for a marker with no
 `mos_flavours` coverage, it only flags that the bound model name may be
 wrong — it does not correct the binding. For a marker `mos_flavours` *does*
