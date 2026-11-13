@@ -2131,18 +2131,17 @@ visible, never a pass; `skipped_checks` is `[]` when nothing was skipped.
 Run a plain `--attest --check` (no `local_only` commands) on a runner that
 has the toolchain to re-verify them.
 
-**`--attest` runs `local_only` commands.** `local_only` only affects
-`--check`; `--attest` executes `cold_start` even when it is marked
-`local_only`, so a long cold start runs for its full duration on the first
-attest.
-
 **`--attest` runs every `local_only` command unless you opt out.** By
-default minting runs each `local_only` command, and there is no
-`status: "partial"` envelope: an attested item-9 `cold_start` that did not run
-is not evidence, and T1 item 9 depends on it. A host that cannot run the
-toolchain (for example, one blocked by a `batch_runner_version_mismatch` when a
-`local_only` check submits a `klt sim --backend batch` request) should be
-unblocked where possible. See "When the client is newer than the runner" in
+default minting runs each `local_only` command — `--check` is the only mode
+that skips one on its own — so a `cold_start` marked `local_only` still runs
+for its full duration on the first attest. There is no `status: "partial"`
+envelope: an attested item-9 `cold_start` that did not run is not evidence,
+and T1 item 9 depends on it. The sole opt-out is `--skip-local-only` (below),
+and it only refreshes an envelope that already committed that outcome — it
+never substitutes for a first run. A host that cannot run the toolchain (for
+example, one blocked by a `batch_runner_version_mismatch` when a `local_only`
+check submits a `klt sim --backend batch` request) should be unblocked where
+possible. See "When the client is newer than the runner" in
 [`sim.md`](sim.md) for the two existing paths: rebuilding the runner image at
 the client's minor, and `request.batch.runner_version_check: "warn"`.
 
@@ -2166,9 +2165,10 @@ mints a first outcome.
 **Item 10 ordering: `checks[]` gate the envelope at mint time.** Every item-10
 `checks[]` command runs under `--attest` against the working tree as it is at
 that moment, and any failure gives `status: "fail"`, exit `3`, and no envelope
-(see "Exit codes"). `local_only` does not exempt a check from this: it only
-skips the command under `--attest --check`, and the command still runs, and
-gates, at mint time.
+(see "Exit codes"). `local_only` does not exempt a check from this: it skips
+the command under `--attest --check`, and under `--attest -o OUT
+--skip-local-only` it carries the outcome `OUT` already committed; on any
+other `--attest` the command runs, and gates, at mint time.
 
 This makes one case circular. A check that also verifies committed evidence
 *downstream* of the item-10 envelope (a lint for record freshness, or for
