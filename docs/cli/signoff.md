@@ -884,9 +884,11 @@ aggregation (`checks[].passed: false`) or numbered-citation grading (T1 item
 A `--rules` run that selected **every** registered rule has `omitted: []` and
 `subset: false`, and grades exactly like a full run. A report with no
 `rule_selection` key — every report written before the flag, and every
-default run — grades exactly as before. A `klt drc --list-rules` listing is
-not a DRC report at all (no `status`/`violations`) and is refused as an
-unrecognised envelope. To earn DRC credit, re-run without `--rules`.
+default run — grades exactly as before. A `klt drc --list-rules` or
+`klt drc --engine klayout --list-rule-categories` listing is not a DRC report
+at all (no `status`/`violations`) and is refused as an unrecognised
+envelope — a listing says what a deck *declares*, never what a layout
+passed. To earn DRC credit, re-run without `--rules`.
 
 ### Device-body bias is reported, not graded
 
