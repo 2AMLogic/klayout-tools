@@ -24,6 +24,8 @@ def assemble_extract_report(
     black_box_regions: Any,
     dbu_um: Any,
     dead_metal: Any,
+    dead_metal_omitted: Any,
+    dead_metal_summary: Any,
     deck: Any,
     deck_name: Any,
     deck_options: Any,
@@ -169,6 +171,17 @@ def assemble_extract_report(
         # `LayoutToNetlist` shape database), which also appends its aggregate
         # `warnings[]` entry.
         "dead_metal": dead_metal,
+        # Additive fields (issue #5545): `dead_metal_omitted` echoes
+        # `--omit-dead-metal` -- `False` on every run that did not pass it,
+        # where `dead_metal[]` above is unchanged -- and
+        # `dead_metal_summary` is the per-layer roll-up of the *same*
+        # detection, byte-identical with and without the flag (a zeroed
+        # summary with an empty `by_layer` when there is no dead metal). The
+        # summary is what makes the flag safe: the counts a reader acts on
+        # survive the dropped rows. See run_extract's docstring and
+        # `summarize_dead_metal`.
+        "dead_metal_omitted": dead_metal_omitted,
+        "dead_metal_summary": dead_metal_summary,
         # Additive field (issue #1018): always a list, empty unless
         # `matched_device_groups` (--matched-group) was given -- see
         # run_extract's docstring and `_describe_matched_device_groups` for
