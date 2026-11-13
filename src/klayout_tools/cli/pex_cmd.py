@@ -45,7 +45,7 @@ from ._parsing import (
 
 # Issue #2686: the same one-line `label_layers:` text rendering `klt extract`
 # prints for its own echo, reused rather than copied.
-from .extract_cmd import _print_label_layers
+from .extract_text import _print_label_layers
 from .output import EXIT_USAGE_ERROR, emit_error, emit_success, write_json_file
 
 EXIT_PASS = 0

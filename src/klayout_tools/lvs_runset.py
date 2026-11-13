@@ -245,8 +245,8 @@ def _run_runset(
     for name, value in deck_vars.items():
         cmd.extend(["-rd", f"{name}={value}"])
     try:
-        # cwd=work_dir: the runset writes side files (``<top>_extracted.cir``)
-        # into its cwd; keep them in the temp dir that is removed afterwards.
+        # cwd=work_dir catches only *cwd-relative* side files; it is NOT
+        # where ``<top>_extracted.cir`` lands (#5481; see extract_runset.py).
         completed = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout_s, cwd=work_dir
         )

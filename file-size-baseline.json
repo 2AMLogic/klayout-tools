@@ -197,7 +197,7 @@
     },
     {
       "path": "src/klayout_tools/cli/extract_cmd.py",
-      "lines": 1188
+      "lines": 907
     },
     {
       "path": "src/klayout_tools/cli/parser.py",

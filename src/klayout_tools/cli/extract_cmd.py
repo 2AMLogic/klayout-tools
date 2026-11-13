@@ -48,7 +48,6 @@ from typing import Any
 from .. import extract_batch
 from .._jsonnum import is_int
 from .._paths import looks_like_request_document
-from ..env_provenance import render_path_field
 from ..extract import (
     REQUEST_SCHEMA,
     ExtractError,
@@ -58,6 +57,7 @@ from ..extract import (
     rerun_extract_report,
     run_extract,
 )
+from ..extract_runset import DEFAULT_ENGINE, RUNSET_ENGINE
 from . import _request_document as reqdoc
 from ._parsing import (
     parse_deck_options,
@@ -66,6 +66,7 @@ from ._parsing import (
     parse_label_layers,
     parse_probes,
 )
+from .extract_text import _print_text
 from .output import (
     EXIT_USAGE_ERROR,
     emit_error,
@@ -81,6 +82,13 @@ EXIT_DRIFTED = 3
 #: same numeric value as a normal run's success exit, just named for the
 #: "match"/"drifted" vocabulary those modes report under.
 EXIT_MATCH = EXIT_OK
+
+
+def _parse_deck_vars(raw: list[str] | None) -> dict[str, str] | None:
+    """``--deck-var NAME=VALUE`` (repeatable) -> ``{NAME: VALUE}`` (issue
+    #5481). ``None`` when the flag was never given, so the runset engine can
+    tell "no vars" from "an empty mapping was requested"."""
+    return parse_deck_options(raw, ExtractError, flag="--deck-var")
 
 
 def _parse_deck_options(raw: list[str] | None) -> dict[str, str] | None:
@@ -281,23 +289,6 @@ def _request_int(request: dict, key: str) -> int | None:
     return value
 
 
-def _print_resistance_paths(parasitics: dict) -> None:
-    """Text-mode lines for ``parasitics.resistance_paths[]`` (issue #2765);
-    prints nothing when no ``--resistance-path`` was given."""
-    for query in parasitics.get("resistance_paths") or ():
-        head = (
-            f"resistance_path: net_id={query['net_id']} "
-            f"{query['from']} -> {query['to']}  status={query['status']}"
-        )
-        if query["status"] == "ok":
-            print(
-                f"{head}  series_R={query['resistance_ohm']} ohm  "
-                f"via {' -> '.join(query['path_nodes'])}"
-            )
-        else:
-            print(f"{head}  ({query['reason']})")
-
-
 def _parse_def_net_connections(
     raw: str | None, *, spef_output: str | None
 ) -> dict[str, tuple[tuple[str, str], ...]] | None:
@@ -361,61 +352,70 @@ def _parse_def_pins(raw: str | None) -> frozenset[str] | None:
 #: subparser's whole flag surface, so a flag added later cannot silently
 #: become unreachable from the request form.
 _REQUEST_FIELD_DESTS = {
-    name: name
-    for name in (
-        "file",
-        "deck",
-        "output",
-        "no_netlist",
-        "progress",
-        "top",
-        "pdk",
-        "pdk_root",
-        "parasitics",
-        "mom_net",
-        "substrate_spreading",
-        "spef",
-        "critical_nets",
-        "parasitics_nets",
-        "critical_net_patterns",
-        "critical_net_all",
-        "critical_net_excludes",
-        "parasitics_net_patterns",
-        "strict_net_patterns",
-        "fail_on_unmodelled",
-        "parasitic_variants",
-        "parasitics_top_cell_only",
-        "resistance_graph",
-        "resistance_graph_r_cut",
-        "distributed_rc",
-        "substrate_tie_ohms",
-        "resistance_paths",
-        "resistance_path_max_nodes",
-        "resistance_path_max_resistors",
-        "mom_rlc_net",
-        "mom_rlc_resistance_ohm",
-        "mom_rlc_capacitance_ff",
-        "mom_rlc_inductance_nh",
-        "def_net_names",
-        "def_net_connections",
-        "top_cell_pins",
-        "pins",
-        "def_pins",
-        "rename_declared_pins",
-        "tie_declared_pins",
-        "pin_source_cells",
-        "deck_options",
-        "label_layers",
-        "device_models",
-        "probes",
-        "defer_resistor_fixed_offset",
-        "abstract_cells",
-        "abstract_cell_lef",
-        "subcircuit",
-        "subcircuit_output",
-        "hierarchical_cells",
-        "matched_groups",
-    )
+    # `deck_vars` is the one request key whose argv dest differs from its own
+    # spelling (`--deck-var` accumulates into `deck_var`), so it is folded in
+    # explicitly below rather than through the identity comprehension.
+    **{"deck_vars": "deck_var"},
+    **{
+        name: name
+        for name in (
+            "file",
+            "deck",
+            "output",
+            "no_netlist",
+            "progress",
+            "top",
+            "pdk",
+            "pdk_root",
+            "parasitics",
+            "mom_net",
+            "substrate_spreading",
+            "spef",
+            "critical_nets",
+            "parasitics_nets",
+            "critical_net_patterns",
+            "critical_net_all",
+            "critical_net_excludes",
+            "parasitics_net_patterns",
+            "strict_net_patterns",
+            "fail_on_unmodelled",
+            "parasitic_variants",
+            "parasitics_top_cell_only",
+            "resistance_graph",
+            "resistance_graph_r_cut",
+            "distributed_rc",
+            "substrate_tie_ohms",
+            "resistance_paths",
+            "resistance_path_max_nodes",
+            "resistance_path_max_resistors",
+            "mom_rlc_net",
+            "mom_rlc_resistance_ohm",
+            "mom_rlc_capacitance_ff",
+            "mom_rlc_inductance_nh",
+            "def_net_names",
+            "def_net_connections",
+            "top_cell_pins",
+            "pins",
+            "def_pins",
+            "rename_declared_pins",
+            "tie_declared_pins",
+            "pin_source_cells",
+            "deck_options",
+            "label_layers",
+            "device_models",
+            "probes",
+            "defer_resistor_fixed_offset",
+            "abstract_cells",
+            "abstract_cell_lef",
+            "subcircuit",
+            "subcircuit_output",
+            "hierarchical_cells",
+            "matched_groups",
+            "engine",
+            "deck_file",
+            "runset_timeout",
+        )
+    },
 }
 
 
@@ -479,6 +479,19 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
             **vars(args),
             "file": _path("file"),
             "deck": _str("deck"),
+            # `--engine`/`--deck-file`/`--deck-var`/`--runset-timeout` (issue
+            # #5481). `engine` keeps the argv default when absent, so a
+            # document that predates the key selects the curated engine.
+            "engine": _str("engine") or args.engine,
+            "deck_file": _path("deck_file"),
+            "deck_var": reqdoc.get_str_map_as_pairs(
+                request,
+                "deck_vars",
+                verb="extract",
+                flag="--deck-var",
+                error_cls=ExtractError,
+            ),
+            "runset_timeout": _number("runset_timeout"),
             "output": _path("output"),
             "no_netlist": _bool("no_netlist"),
             # Tri-state like the flag: absent keeps the stderr-is-not-a-TTY
@@ -563,6 +576,20 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
     )
 
 
+def _refuse_batch_for_runset_engine(args: argparse.Namespace) -> None:
+    """Issue #5481: the runset engine needs the standalone ``klayout``
+    application and the PDK install on the *executing* host, and the batch
+    runner's request can ship neither -- so refuse rather than submit a job
+    that cannot honour the engine that was asked for."""
+    if getattr(args, "engine", DEFAULT_ENGINE) != RUNSET_ENGINE:
+        return
+    raise ExtractError(
+        f"--backend batch cannot run engine '{RUNSET_ENGINE}' -- the runset "
+        "needs the standalone klayout application and the PDK install on the "
+        "executing host. Run it locally (--backend local)"
+    )
+
+
 def run(args: argparse.Namespace) -> int:
     # `file` or `--check` is required -- omitting both is a usage error
     # (exit 2) enforced by `parser._require_one_input` before `run()` is ever
@@ -585,6 +612,7 @@ def run(args: argparse.Namespace) -> int:
         # `--backend` > $KLT_EXTRACT_BACKEND > local (issue #4613). `batch`
         # never falls back to a local run: every batch failure is exit 1.
         if extract_batch.resolve_backend(getattr(args, "backend", None)) == "batch":
+            _refuse_batch_for_runset_engine(args)
             report = _run_batch(args)
             emit_success(report, args.format, _print_text)
             return EXIT_OK
@@ -594,7 +622,9 @@ def run(args: argparse.Namespace) -> int:
         # sees exactly one shape and the two forms cannot drift.
         if args.file is not None and looks_like_request_document(args.file):
             args = _apply_request(args)
-        if not args.deck:
+        # `--deck` names the *curated* deck; the runset engine is selected by
+        # `--deck-file` instead and refuses `--deck` by name (issue #5481).
+        if not args.deck and args.engine != RUNSET_ENGINE:
             raise ExtractError("argument --deck is required")
         if args.parasitic_variants and not args.parasitics:
             # Usage error (exit 2), caught here rather than in `run_extract`
@@ -610,6 +640,7 @@ def run(args: argparse.Namespace) -> int:
         pin_source_cells = _parse_pin_source_cells(args.pin_source_cells)
         hierarchical_cells = _parse_hierarchical_cells(args.hierarchical_cells)
         deck_options = _parse_deck_options(args.deck_options)
+        deck_vars = _parse_deck_vars(args.deck_var)
         label_layers = _parse_label_layers(args.label_layers)
         device_models = _parse_device_models(args.device_models)
         probes = parse_probes(args.probes, ExtractError)
@@ -778,6 +809,13 @@ def run(args: argparse.Namespace) -> int:
             # `--hierarchical-cells` (issue #2722): opt-in hierarchical
             # `.SUBCKT` emission. `()` when the flag was never given.
             hierarchical_cells=hierarchical_cells,
+            # `--engine`/`--deck-file`/`--deck-var`/`--runset-timeout` (issue
+            # #5481): the PDK-runset engine. Defaults leave every call that
+            # predates them running the curated deck exactly as before.
+            engine=args.engine,
+            deck_file=args.deck_file,
+            deck_vars=deck_vars,
+            runset_timeout=args.runset_timeout,
         )
     except ExtractError as exc:
         # `error.code` is set only for classified failures (issue #2761's
@@ -867,322 +905,3 @@ def _run_check(args: argparse.Namespace) -> int:
     emit_success(result, args.format, text_renderer)
 
     return EXIT_MATCH if result["status"] == "match" else EXIT_DRIFTED
-
-
-def _print_device_models(device_models: dict | None) -> None:
-    """One ``device_models: CLASS=SUBCKT, ...`` line (issue #4234); silent
-    when ``--device-model`` was never given."""
-    if not device_models:
-        return
-    rendered = ", ".join(
-        f"{name}={model}" for name, model in sorted(device_models.items())
-    )
-    print(f"device_models: {rendered}")
-
-
-def _print_label_layers(label_layers: dict | None) -> None:
-    """One human-readable line for the response's ``label_layers`` echo
-    (issue #2656), or nothing when ``--label-layer`` was not given.
-
-    The ``deck`` name alone no longer answers "which GDS purpose did this run
-    read net/pin names from" once it can be overridden per request, so the text
-    surface states it too rather than leaving it visible only under
-    ``--format json``. Written as a helper taking the (possibly ``None``)
-    block, like :func:`_print_substrate_spreading` below, so the call site in
-    :func:`_print_text` adds no branch to an already long function.
-    """
-    if not label_layers:
-        return
-    rendered = ", ".join(
-        f"{role}={'none' if layer is None else f'{layer[0]}/{layer[1]}'}"
-        for role, layer in sorted(label_layers.items())
-    )
-    print(f"label_layers: {rendered}")
-
-
-def _print_probes(probes: list | None) -> None:
-    """One human-readable line per ``--probe`` result (issue #2986), or
-    nothing when none was given."""
-    for probe in probes or []:
-        where = f"{probe['layer']} ({probe['x_um']}, {probe['y_um']})"
-        if probe["found"]:
-            print(f"probe {probe['name']}: {where} -> {probe['net']}")
-        else:
-            print(f"probe {probe['name']}: {where} -> not found")
-
-
-def _print_substrate_spreading(block: dict | None) -> None:
-    """One human-readable line for ``parasitics.substrate_spreading``
-    (issue #2561), or nothing when ``--substrate-spreading`` was not given.
-
-    The min/max across the reported pairs is the honest one-line summary: a
-    single "the" resistance does not exist for a net with more than two taps
-    (see ``pairwise_approximation``), and the JSON carries every pair for a
-    caller that needs them. The line says "not a network solve" out loud so
-    a reader skimming text output cannot mistake it for one.
-    """
-    if block is None:
-        return
-    print(
-        f"substrate_spreading: net={block['net']}  "
-        f"taps={block['tap_count']}  "
-        f"pairs={block['pair_count']}  "
-        f"R={block['min_resistance_ohm']}..{block['max_resistance_ohm']} ohm  "
-        f"(rho={block['resistivity_ohm_cm']} ohm-cm, "
-        "two-terminal estimate, not a network solve)"
-    )
-
-
-def _print_text(report: dict) -> None:
-    # `file` is the `{path, scope}` object `env_provenance.repo_relative_path`
-    # defines (issue #2659) -- rendered through the same courtesy helper
-    # `klt sim`/`klt pex` use, so the absolute path is never printed even in
-    # text mode (`<outside repo>`/`<unresolved>` instead). `netlist_path`
-    # below is an output path, still a plain string, and prints as-is.
-    print(f"file: {render_path_field(report['file'])}")
-    print(f"deck: {report['deck']}")
-    # Present whenever this deck declares a caller-selectable option at all
-    # (issues #595, #2394) -- mirrors `provenance.deck.options` in the JSON
-    # report, which since #2394 is the *resolved* set rather than only the
-    # caller's `--deck-option` overrides. Each silently-defaulted value is
-    # marked `(default)` from `options_explicit`, so the text surface cannot
-    # present one option's answer as *the* answer either.
-    # `or {}` at each hop, not just a `.get` default: a present-but-`null`
-    # `provenance`/`deck` would otherwise chain a `.get()` onto `None`.
-    deck_provenance = (report.get("provenance") or {}).get("deck") or {}
-    deck_options = deck_provenance.get("options")
-    if deck_options:
-        # No `options_explicit` at all == a record predating #2394, whose
-        # `options` held caller-passed keys only -- so every key there was
-        # explicit, and none should be marked `(default)`.
-        explicit = deck_provenance.get("options_explicit")
-        rendered = ", ".join(
-            f"{key}={value}"
-            if explicit is None or explicit.get(key)
-            else f"{key}={value} (default)"
-            for key, value in sorted(deck_options.items())
-        )
-        print(f"deck_options: {rendered}")
-    # Additive (issue #2656): only printed when --label-layer was given.
-    # Called unconditionally, with the absent/empty test inside the helper, so
-    # this line adds no branch to an already long function -- the same shape
-    # `_print_substrate_spreading` below already uses.
-    _print_label_layers(report.get("label_layers"))
-    _print_device_models(report.get("device_models"))
-    _print_probes(report.get("probes"))
-    print(f"top: {report['top']}")
-    print(f"dbu_um: {report['dbu_um']}")
-    print(f"status: {report['status']}")
-    # Both are None under `--no-netlist` (issue #2850).
-    print(f"netlist_path: {report['netlist_path']}")
-    print(f"netlist_sha256: {report['netlist_sha256']}")
-    print(f"netlist_normalized_sha256: {report['netlist_normalized_sha256']}")
-    print(
-        f"devices: {report['device_count']}  "
-        f"nets: {report['net_count']}  "
-        f"pins: {report['pin_count']}"
-    )
-
-    pdk = report["pdk"]
-    if pdk is not None:
-        print(f"pdk: {pdk['variant']} ({pdk['version'] or '-'})")
-
-    parasitics = report.get("parasitics")
-    if parasitics is not None:
-        print(
-            f"parasitics: R={parasitics['r_count']} C={parasitics['c_count']}  "
-            f"total_R={parasitics['total_resistance_ohm']} ohm  "
-            f"total_C={parasitics['total_capacitance_ff']} fF"
-        )
-        # Additive (issue #760): only printed once coupling capacitance
-        # exists at all (`cc_count == 0` is the common case for a small,
-        # isolated cell today), matching this function's existing convention
-        # of omitting empty/zero optional sections rather than printing a
-        # row of zeros.
-        if parasitics.get("cc_count"):
-            print(
-                f"parasitics_coupling: CC={parasitics['cc_count']}  "
-                f"total_CC={parasitics['total_coupling_capacitance_ff']} fF"
-            )
-        # Additive (issue #976): only printed when --critical-net was given.
-        critical_nets = parasitics.get("critical_nets")
-        if critical_nets:
-            print(f"critical_nets: {', '.join(critical_nets)}")
-        # Additive (issue #1700): only printed when --parasitics-net was
-        # given -- the scoped run's `parasitics.nets[]` is deliberately short,
-        # so say why rather than leaving a reader to guess.
-        parasitics_nets = parasitics.get("parasitics_nets")
-        if parasitics_nets:
-            print(f"parasitics_nets: {', '.join(parasitics_nets)}")
-        # Additive (issue #3056): only printed when --parasitic-variant was given.
-        if parasitics.get("parasitic_variant"):
-            print(f"parasitic_variant: {', '.join(parasitics['parasitic_variant'])}")
-        # Additive (issue #977): only printed when --distributed-rc was given.
-        if parasitics.get("distributed_rc"):
-            distributed_count = sum(
-                1 for n in parasitics["nets"] if n.get("rc_model") == "distributed"
-            )
-            print(f"distributed_rc: {distributed_count} net(s)")
-        # Additive (issue #2765): only prints when --resistance-path was given.
-        _print_resistance_paths(parasitics)
-        # Additive (issue #1704): only printed when --parasitics-top-cell-only
-        # was given -- each `parasitics.nets[]` entry's
-        # `resistance_ohm_top_cell`/`capacitance_ff_top_cell` otherwise stay
-        # `None`, which text mode does not otherwise surface.
-        if parasitics.get("top_cell_only"):
-            top_cell_split_count = sum(
-                1
-                for n in parasitics["nets"]
-                if n.get("capacitance_ff_top_cell") is not None
-            )
-            print(f"parasitics_top_cell_only: {top_cell_split_count} net(s)")
-        # Additive (issue #798): only printed when --mom-net was given.
-        mom_crosscheck = parasitics.get("mom_crosscheck")
-        if mom_crosscheck is not None:
-            print(
-                f"mom_crosscheck: net={mom_crosscheck['net']}  "
-                f"lumped_rc={mom_crosscheck['lumped_rc_capacitance_ff']} fF  "
-                f"mom={mom_crosscheck['mom_capacitance_ff']} fF  "
-                f"delta={mom_crosscheck['delta_ff']} fF "
-                f"({mom_crosscheck['delta_pct']}%)"
-            )
-        # Additive (issue #2561): only printed when --substrate-spreading was
-        # given. Called unconditionally, with the `None` test inside the
-        # helper, so this line adds no branch to an already long function.
-        _print_substrate_spreading(parasitics.get("substrate_spreading"))
-        # Additive (issue #988): only printed when --mom-rlc-net was given.
-        mom_rlc_override = parasitics.get("mom_rlc_override")
-        if mom_rlc_override is not None:
-            print(
-                f"mom_rlc_override: net={mom_rlc_override['net']}  "
-                f"r_ohm={mom_rlc_override['resistance_ohm']}  "
-                f"c_ff={mom_rlc_override['capacitance_ff']}  "
-                f"l_nh={mom_rlc_override['inductance_nh']}"
-            )
-
-    # Additive (issue #948): only printed when --spef was given.
-    spef_path = report.get("spef_path")
-    if spef_path is not None:
-        print(f"spef_path: {spef_path}")
-
-    device_counts = report["device_counts"]
-    if device_counts:
-        print()
-        print("device_counts:")
-        for class_name in sorted(device_counts):
-            print(f"  {class_name}: {device_counts[class_name]}")
-
-    ignored_layers = report.get("ignored_layers", [])
-    if ignored_layers:
-        print()
-        print("ignored_layers (shapes not read by this deck's connectivity):")
-        for entry in ignored_layers:
-            print(f"  {entry['layer']}/{entry['datatype']}: {entry['shapes']} shape(s)")
-
-    device_recognition_only_layers = report.get("device_recognition_only_layers", [])
-    if device_recognition_only_layers:
-        print()
-        print(
-            "device_recognition_only_layers (read for device recognition, "
-            "not a metals/vias connectivity level):"
-        )
-        for entry in device_recognition_only_layers:
-            print(f"  {entry['layer']}/{entry['datatype']}: {entry['shapes']} shape(s)")
-
-    matched_device_groups = report.get("matched_device_groups", [])
-    if matched_device_groups:
-        print()
-        print("matched_device_groups (--matched-group):")
-        for group in matched_device_groups:
-            status = "OK" if not group["mismatched_fields"] else "MISMATCH"
-            print(f"  {group['name']}: {', '.join(group['instances'])} [{status}]")
-            for mismatch in group["mismatched_fields"]:
-                values_str = ", ".join(
-                    f"{name}={value}" for name, value in mismatch["values"].items()
-                )
-                print(f"    {mismatch['field']}: {values_str}")
-            if group["unresolved_instances"]:
-                print(f"    unresolved: {', '.join(group['unresolved_instances'])}")
-
-    # Additive (issue #2245): a no-op unless --subcircuit was given.
-    _print_subcircuit_text(report.get("subcircuit"))
-    # Additive (issue #2722): a no-op unless --hierarchical-cells was given.
-    _print_hierarchy_text(report.get("hierarchy"))
-
-    # Additive (issue #2473): a no-op unless --def-pins was given and its
-    # declared-vs-promoted reconciliation raised an error-severity finding.
-    _print_def_pin_promotion_text(report.get("def_pin_promotion"))
-
-    warnings = report["warnings"]
-    if warnings:
-        print()
-        print("warnings:")
-        for warning in warnings:
-            print(f"  {warning}")
-
-
-def _print_def_pin_promotion_text(promotion: dict | None) -> None:
-    """Render the `def_pin_promotion` block's `error`-severity findings
-    (issue #2473) -- nothing at all when `--def-pins` was never given, and
-    nothing when every declared DEF `PINS` name either promoted or missed
-    for an ordinary (non-geometry) reason, which is the common case. The
-    full prose for each finding is already in `warnings[]` below; this block
-    is the at-a-glance count and layer/datatype summary."""
-    if promotion is None or not promotion["findings"]:
-        return
-    print()
-    print(
-        f"def_pin_promotion (--def-pins): {promotion['promoted']} of "
-        f"{promotion['declared']} declared DEF PINS name(s) promoted"
-    )
-    for finding in promotion["findings"]:
-        print(
-            f"  [{finding['severity']}] {finding['layer']}/"
-            f"{finding['datatype']} (outside this deck's connectivity "
-            f"graph): {', '.join(finding['pins'])}"
-        )
-
-
-def _print_hierarchy_text(hierarchy: dict | None) -> None:
-    """Render the `hierarchy` block (issue #2722) -- nothing at all when
-    `--hierarchical-cells` was never given."""
-    if hierarchy is None:
-        return
-    print(
-        f"hierarchy: {len(hierarchy['cells'])} cell(s)  "
-        f"top devices: {hierarchy['top_device_count']}  "
-        f"top instances: {hierarchy['top_instance_count']}"
-    )
-    for entry in hierarchy["cells"]:
-        print(
-            f"  {entry['cell']}: {entry['placements']} placement(s)  "
-            f"devices: {entry['device_count']}  "
-            f"pins: {' '.join(entry['pins'])}"
-        )
-
-
-def _print_subcircuit_text(subcircuit: dict | None) -> None:
-    """Render the `subcircuit` block (issue #2245) -- nothing at all when
-    `--subcircuit` was never given."""
-    if subcircuit is None:
-        return
-    print()
-    print(f"subcircuit ({subcircuit['cell']}):")
-    print(f"  path: {subcircuit['path']}")
-    print(
-        f"  devices: {subcircuit['device_count']}  "
-        f"nets: {subcircuit['net_count']}  "
-        f"pins: {len(subcircuit['pins'])}"
-    )
-    for pin in subcircuit["pins"]:
-        print(f"    {pin['name']} [{pin['role']}]")
-    print(f"  instance_line: {subcircuit['instance_line']}")
-    excluded = subcircuit["excluded_parasitics"]
-    if excluded["r_count"] or excluded["c_count"] or excluded["l_count"]:
-        print(
-            "  excluded_parasitics (attributed to the parent deck): "
-            f"{excluded['r_count']} R  {excluded['c_count']} C  "
-            f"{excluded['l_count']} L  "
-            f"{excluded['capacitance_ff']} fF  "
-            f"{excluded['resistance_ohm']} ohm"
-        )

@@ -79,7 +79,7 @@
       "complexity": 14
     },
     {
-      "file": "src/klayout_tools/cli/extract_cmd.py",
+      "file": "src/klayout_tools/cli/extract_text.py",
       "function": "_print_text",
       "complexity": 25
     },
