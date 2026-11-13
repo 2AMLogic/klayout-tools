@@ -789,6 +789,7 @@
         "klayout_tools.sim_osdi_pin",
         "klayout_tools.sim_osdi_settle",
         "klayout_tools.sim_pdk_ambiguity",
+        "klayout_tools.sim_pin_settle",
         "klayout_tools.sim_peak_rss",
         "klayout_tools.sim_plan",
         "klayout_tools.sim_plot",
