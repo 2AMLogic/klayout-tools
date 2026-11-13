@@ -128,6 +128,8 @@ from .sim_batch_features import (
 from .sim_batch_hints import attribute_modelname, hint_existing_fatal, with_runner_hints
 from .sim_batch_reattach import (  # noqa: F401
     _RESUME_INTERRUPTED_GRACE_S,
+    _resume_attach_config,
+    _resume_or_submit_one_job,
     _try_reattach_shard,
 )
 from .sim_batch_warn import warn_over_serial_bound_once
@@ -3639,14 +3641,13 @@ def _run_batch(
                 **_feature_diagnostic_field(config),
             }
         return corners, engine_version, environment
-    resume_job_id = sim_batch_receipt.resumable_job_id(
-        artifacts_dir, request, len(corner_points), checkpoint is not None
-    )
     try:
-        corners, engine_version, environment = _run_batch_job(
+        corners, engine_version, environment = _resume_or_submit_one_job(
             config=config,
-            job_id=resume_job_id or new_job_id(),
-            attach=resume_job_id is not None,
+            resume_grace_s=_RESUME_INTERRUPTED_GRACE_S,
+            resume_job_id=sim_batch_receipt.resumable_job_id(
+                artifacts_dir, request, len(corner_points), checkpoint is not None
+            ),
             corner_points=corner_points,
             netlist_path=netlist_path,
             timeout_s=timeout_s,
@@ -4019,13 +4020,12 @@ class _BatchFleetRun:
             else self.artifacts_dir
         )
         shard_config = self.shard_config()
-        if resumed and shard_config.interrupted_grace_s > 0:
+        if resumed:
             # A recorded job still ``interrupted`` on resume already waited out
             # the full grace in the prior run: surface it after ~one poll so
             # ``_try_reattach_shard`` can submit that shard afresh (issue #5371).
-            # ``0`` (grace disabled by the request) is left unbounded.
-            shard_config = replace(
-                shard_config, interrupted_grace_s=_RESUME_INTERRUPTED_GRACE_S
+            shard_config = _resume_attach_config(
+                shard_config, _RESUME_INTERRUPTED_GRACE_S
             )
         try:
             return _run_batch_job(

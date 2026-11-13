@@ -1274,6 +1274,25 @@ the job was in flight — the job id there is the one to look up before
 resubmitting. A receipt that cannot be written is a stderr warning, not a
 failed sweep. `--format json` stdout is unchanged.
 
+**`--resume` re-attaches through the receipt, and resubmits a spent job.** On
+an unsharded request, `--resume` re-attaches to the `job_id` the receipt
+records when its `request_sha256` and `unit_count` match the run about to be
+dispatched ([#5350](https://github.com/2AMLogic/klayout-tools/issues/5350));
+any mismatch, or no receipt, submits afresh. A recorded job that has no usable
+result -- outputs gone, a terminally `failed` job, or one still `interrupted`
+after Spot reclaimed it -- is **submitted again under a new job id**, and the
+fresh launch rewrites `batch-receipt.json` with it
+([#5459](https://github.com/2AMLogic/klayout-tools/issues/5459)). Because the
+prior run already waited out `batch.interrupted_grace_s`, the re-attach reports
+a still-`interrupted` job after about one poll instead of burning another full
+window; `batch.interrupted_grace_s: 0` (grace disabled) keeps its unbounded
+wait. At most one resubmit per invocation: if the fresh job is itself reclaimed
+past the (full) grace, the run ends with `batch_job_interrupted` naming the
+*new* job id. As with a shard, resubmitting an interrupted job risks billing it
+twice should the fleet's `reconcile` later re-launch the old one; the exposure
+is bounded by the grace the first run already waited. A `batch_poll_timeout`
+job is never resubmitted -- it may still be running on the fleet.
+
 **Terminating the client does not cancel the job.** The fleet has no cancel
 primitive, so a SIGINT/SIGTERM during the wait prints one stderr line naming
 the job id, bucket and region and stating that the job is left running, then
@@ -1388,15 +1407,21 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   for both). A request whose resume is refused -- a shard map written for a
   different request (`resume_fingerprint_mismatch`; the shard count may differ, since a resume splits only the remaining units, so `--resume` is repeatable), or an
   unreadable one -- becomes an ordinary `error` entry, as it does for a single
-  request, and its siblings still run. A shard
-  still `interrupted` is re-polled first, so resuming it can wait up to another
-  `batch.interrupted_grace_s` (default 1800 s) before its replacement is
-  submitted. The aggregate envelope is unchanged.
+  request, and its siblings still run. A job
+  still `interrupted` is re-polled first, but only briefly: the prior run
+  already waited out `batch.interrupted_grace_s`, so the resume reports it
+  after about one poll and submits its replacement, rather than paying the
+  full window again -- for a shard
+  ([#5371](https://github.com/2AMLogic/klayout-tools/issues/5371)) and for an
+  unsharded single-job request
+  ([#5459](https://github.com/2AMLogic/klayout-tools/issues/5459)) alike.
+  The aggregate envelope is unchanged.
 - **An interrupted (Spot-reclaimed) shard.** Polling is bounded: a shard that
   stays `interrupted` is waited on for at most `batch.interrupted_grace_s`
   (default 1800 s, settable only in the request's `batch` block), and while it
   is polled it holds a `--max-in-flight` slot, so lowering the grace in the
-  request frees the slot sooner. The client never re-submits it itself.
+  request frees the slot sooner. The client never re-submits it mid-run (a
+  later `--resume` does, above).
   To re-run only the units with no result, re-run the same set with the same
   `-o` and `--resume` (or `--attach <batch-shards.json> --collect-partial`,
   then `--resume`). A request the *client* stopped (Ctrl-C/SIGTERM) carries
@@ -3359,6 +3384,22 @@ control/end cards before pointing a request at it. A PDK whose devices are
 Verilog-A compact models does **not** need a `.control` block in the body
 either — declare the compiled `.osdi` files in `options.osdi_preload` instead
 (see "OSDI (Verilog-A) model preload" below).
+
+**The file must not start with a SPICE title line** ([#5433](https://github.com/2AMLogic/klayout-tools/issues/5433)).
+In a standalone deck, line 1 is the title and is never parsed as circuit
+content — but under `.include` there is no title semantics: *every* line of the
+included file is circuit content, so a conventional title becomes a device
+card. Comment it out (`* my transient bench`) and the same file is fine. What
+the title's first word happens to look like decides what you see: a word
+beginning with a device-prefix letter aborts the run (`Unable to find
+definition of model`, `could not find a valid modelname`, `unknown device
+type`), which is classified as `netlist_title_line` naming the file and line
+(see "Failure classification" below). **A title that happens to parse as a
+valid card is not detected** — `r2 vdd 0 1k` as line 1 silently instantiates a
+resistor, and the run exits `0` with a wrong circuit. There is no syntactic
+test that separates a prose title from a device card without re-implementing
+ngspice's parser, so this command does not rewrite, comment out, or pre-flight
+the caller's line 1; it names the cause after the engine rejects it.
 
 Because `klt sim` owns that single `.control` block, a measurement that has no
 top-level `.meas` form — most notably an operating-point quantity — is
@@ -5844,6 +5885,18 @@ error, exit 1).
   Names follow the `expr` naming rule and are unique within the step. In the
   response, a step measurement is reported as `<step>.<name>` (e.g.
   `light.vout`).
+
+  **Do not name a step measurement after a node a later measurement in the
+  same step reads.** ngspice stores a measurement's result in the step's plot
+  as a vector named after the measurement, so such a name replaces that
+  node's waveform with a one-point scalar, and a later `v(<node>)` read then
+  fails with `out of interval` (or, for an `expr`, silently reduces the
+  scalar to a wrong value). `klt sim` refuses that request up front, naming
+  both measurements and the node
+  ([#5446](https://github.com/2AMLogic/klayout-tools/issues/5446)). Only
+  voltage-family reads of an **earlier** sibling collide: a card reading
+  `v(a)` while itself named `a` reads the node before it binds, and `i(a)`
+  resolves to `<src>#branch`.
 - **Derived measurements**: the top-level `measurements[]`.
   - Each must be an `expr`. A file-scope `.meas` card would run after every
     analysis, so it is refused; put it in the matching step instead.
@@ -7913,7 +7966,8 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `missing_include`  | ngspice's own `Error: Could not find include file ...` — a `.include`/`.inc` target that did not resolve. Everything downstream of it (missing devices, then `.meas` cards finding no vector) reads like a broken circuit, so it gets its own code rather than surfacing only as measurement failures ([#2485](https://github.com/2AMLogic/klayout-tools/issues/2485)). For an off-host backend this is now unreachable by construction — the include closure is staged, or the submit is refused (see "Off-host backends stage the netlist's `.include` closure" above). |
 | `netlist`          | A top-level `Error:` line naming a syntax/unknown/undefined/parse/subckt problem. |
 | `model_bin_range`  | ngspice's own `Error: could not find a valid modelname` — undiagnostic on its own; enriched with the netlist's likely culprit instance (largest `w` as written, without `m=`) when one is found. See "Model bin-range diagnostic" below. |
-| `ngspice_fatal`    | The generic shape of an ngspice deck abort — `Error on line N ...`, `Simulation interrupted due to error!` or `fatal error in ngspice` — when no more specific code above (`missing_include`, `netlist`, `model_bin_range`) matched. The message carries the first matching log line verbatim. For a bare `fatal error in ngspice` line the message also appends up to two cause lines from the log (`can't find model ...`, `Undefined parameter ...`, or the first `Error`/`warning` line) as `[cause: ...]`. When the log shows no analysis ever began, the cause diagnostic (this code or one of those three) also carries `analysis_started: false` and notes that `runtime_s` is wall-clock before the failure, and the per-measurement `produced no value` diagnostics are collapsed (the measurement results stay `status: error`). Batch runs back-fill it from the retrieved `ngspice.log` ([#3879](https://github.com/2AMLogic/klayout-tools/issues/3879)). On off-host (`batch`/`remote`) runs, when the message shows `Undefined parameter [expr]` or `Expression err: expr(` (a model-library `expr()` parameter the runner's ngspice cannot evaluate), one sentence is appended: the same library may load on a newer local ngspice, so compare `environment.remote.runner_klt_version` / `environment.engine_version` and update the runner image (an infra change); `--backend local` never gets it ([#4891](https://github.com/2AMLogic/klayout-tools/issues/4891)). |
+| `netlist_title_line` | [#5433](https://github.com/2AMLogic/klayout-tools/issues/5433). The request's `netlist` starts with a SPICE **title line**, which `.include` parses as circuit content (see "Netlist convention" above). Classified from the log after the fact: ngspice echoes the offending source line under its `Error on line N ...` location line, and this code is emitted when that echo is the netlist's own first non-blank line (compared case-insensitively, with internal whitespace folded the way ngspice folds it) and that line is not a `*`/`.`/`+` card. The message names the netlist **file and the line number in it** — not the composed deck's `line N`, which is what ngspice reports — and gives the fix (prefix the line with `*`). Being a deck abort it also carries `analysis_started: false` and collapses the measurement cascade, and it replaces the `ngspice_fatal` and `model_bin_range` readings of the same abort (a title beginning with `m` otherwise surfaces as a BSIM bin-range problem). Never fires when the netlist is unreadable where classification runs, when the echo is some other line, or when line 1 is a comment/dot/continuation card — each falls through to the classification it had before. A title that parses as a *valid* card is undetectable by construction: there is no abort to classify. |
+| `ngspice_fatal`    | The generic shape of an ngspice deck abort — `Error on line N ...`, `Simulation interrupted due to error!` or `fatal error in ngspice` — when no more specific code above (`missing_include`, `netlist`, `model_bin_range`, `netlist_title_line`) matched. The message carries the first matching log line verbatim. For a bare `fatal error in ngspice` line the message also appends up to two cause lines from the log (`can't find model ...`, `Undefined parameter ...`, or the first `Error`/`warning` line) as `[cause: ...]`. When the log shows no analysis ever began, the cause diagnostic (this code or one of those three) also carries `analysis_started: false` and notes that `runtime_s` is wall-clock before the failure, and the per-measurement `produced no value` diagnostics are collapsed (the measurement results stay `status: error`). Batch runs back-fill it from the retrieved `ngspice.log` ([#3879](https://github.com/2AMLogic/klayout-tools/issues/3879)). On off-host (`batch`/`remote`) runs, when the message shows `Undefined parameter [expr]` or `Expression err: expr(` (a model-library `expr()` parameter the runner's ngspice cannot evaluate), one sentence is appended: the same library may load on a newer local ngspice, so compare `environment.remote.runner_klt_version` / `environment.engine_version` and update the runner image (an infra change); `--backend local` never gets it ([#4891](https://github.com/2AMLogic/klayout-tools/issues/4891)). |
 | `unsupported_model_level` | ngspice's `Only MOS device levels ... are supported in this binary` (e.g. ASAP7 BSIM-CMG `level = 72` without an OSDI module); reported as `prerequisite missing: ...` and suppresses the follow-on `model_bin_range`. See "ASAP7 FinFET (BSIM-CMG) simulation". |
 | `osdi_abi_mismatch` | `NGSPICE only supports OSDI v0.N but ...` — ngspice too old for the compiled module's OSDI ABI. |
 | `osdi_load_failed` | `Error: Library <x>.osdi couldn't be loaded!` — the module is unreadable or not loadable by this ngspice. |

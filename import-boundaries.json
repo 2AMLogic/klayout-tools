@@ -143,10 +143,13 @@
         "klayout_tools.drc",
         "klayout_tools.drc_check_kinds",
         "klayout_tools.drc_crosscheck",
+        "klayout_tools.drc_deck_includes",
         "klayout_tools.drc_klayout_abort",
         "klayout_tools.drc_klayout_app",
+      "klayout_tools.drc_layer_selection",
         "klayout_tools.drc_klayout_engine",
-        "klayout_tools.drc_report_check"
+        "klayout_tools.drc_report_check",
+        "klayout_tools.drc_text_exempt"
       ]
     },
     "economy": {
@@ -511,6 +514,7 @@
         "klayout_tools.decks.sg13g2",
         "klayout_tools.decks.sg13g2_cont_grid",
         "klayout_tools.decks.sg13g2_runset_notes",
+        "klayout_tools.decks.sg13g2_svaricap",
         "klayout_tools.decks.sky130",
         "klayout_tools.decks.sky130_lvt",
         "klayout_tools.decks.sky130_unmodeled",
@@ -741,8 +745,12 @@
         "klayout_tools.sim_case_names",
         "klayout_tools.sim_complex_vectors",
         "klayout_tools.sim_convergence_retry",
+        "klayout_tools.sim_corner_axes",
         "klayout_tools.sim_corner_extremes",
         "klayout_tools.sim_corner_keys",
+        "klayout_tools.sim_corner_point",
+        "klayout_tools.sim_corner_variants",
+        "klayout_tools.sim_corners",
         "klayout_tools.sim_crossings",
         "klayout_tools.sim_crossings_reduce",
         "klayout_tools.sim_cycle_mean",
@@ -787,6 +795,7 @@
         "klayout_tools.sim_snm_meas",
         "klayout_tools.sim_staging",
         "klayout_tools.sim_step_resolution",
+        "klayout_tools.sim_step_shadow",
         "klayout_tools.sim_steps",
         "klayout_tools.sim_stimulus",
         "klayout_tools.sim_stress",
