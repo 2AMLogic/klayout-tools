@@ -46,8 +46,8 @@ an agent needs instead:
 
 ## Status
 
-Early alpha — [v0.5.0 is on PyPI](https://pypi.org/project/klayout-tools/)
-(44 verbs at release; see [`docs/cli/`](docs/cli/) for the set). The
+Early alpha — [v0.9.1 is on PyPI](https://pypi.org/project/klayout-tools/);
+`main` has 68 verbs (see [`docs/cli/`](docs/cli/) for the set). The
 pattern is proven (see the kicad-tools [gallery](https://kicad-tools.org) of
 boards designed end-to-end by agents); this repo is where it meets silicon.
 See [ROADMAP.md](ROADMAP.md) for the build order and [CLAUDE.md](CLAUDE.md)
@@ -175,9 +175,9 @@ klt version --format json                # which build is this: version, commit,
 ```
 
 Every verb is documented in [`docs/cli/`](docs/cli/) (`klt yield-campaign`
-shares the `yield.md` / `yield-sensitivity.md` pages). PyPI 0.5.0 shipped
-with 44 verbs; the from-source install above tracks `main`, which may be
-ahead of the latest release.
+shares the `yield.md` / `yield-sensitivity.md` pages). The latest release is
+PyPI 0.9.1; `main` has 68 verbs, and the from-source install above tracks
+`main`, so it may be ahead of the release.
 
 ## Development
 
