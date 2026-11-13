@@ -2116,6 +2116,47 @@ is the shared `--check` drift shape (`schema_version`, `mode: "check"`,
 `report`, `status: "match"|"drifted"`, `drift[]`, `fresh`) plus
 `fresh_status`, the re-attested envelope's own `status`.
 
+**A drift entry names the check, not only its index (issue #5460).** A
+`drift[]` entry that points at one `attestation.checks[]` entry carries an
+additive `check` object identifying it:
+
+```json
+{
+  "field": "attestation.checks.17.content_hash",
+  "committed": "sha256:3bca9b8e95ec…",
+  "fresh": "sha256:aaa8abc15692…",
+  "check": {"role": "testbench", "path": "sim/bin/sim_common.py"}
+}
+```
+
+`check` is the check's `role` plus whichever identity keys its kind carries —
+`path` for a file-presence check, `target` / `name` / `testbench` for a
+command or `recorded_hash` check, `row` for a citation check, `corner` +
+`metric` for an item-8 metric check. A check with no identity beyond its role
+(the `pdk` / `tools` pins, a top-level `cold_start`) gets `{"role": …}`.
+`--format text` prints it as a bracketed label after the pointer:
+
+```
+drift:
+  attestation.checks.17.content_hash  [testbench sim/bin/sim_common.py]:
+      committed: 'sha256:3bca9b8e95ec…'
+      fresh:     'sha256:aaa8abc15692…'
+```
+
+This matters most where the report is the only artifact a reader has — a CI
+job log, or a reviewer on a PR they did not write. The index alone is not
+even a stable identifier: file-presence checks are sorted by path, so
+inventorying one new file renumbers every entry after it.
+
+`field`, `committed` and `fresh` are unchanged (`field` is the dotted
+positional pointer, shared contract surface with `klt drc`/`extract`/`lvs`),
+so the key is additive with no `schema_version` bump. It is **absent** on an
+entry that names no single check: a `status` entry, and the single whole-list
+`attestation.checks` entry an inventory that *gained or lost* a file produces
+— equal-length lists are diffed index by index, a length mismatch is one
+whole-list diff. Matching committed to fresh checks by identity rather than
+position, so that case too became per-check, is not done here.
+
 **Toolchain-free runners: `local_only` commands (issue #3743).** A command
 declared `"local_only": true` (an item-1 `derived[].check`, an item-9
 `cold_start`, or an item-10 `checks[]` entry) runs under `--attest` as usual,

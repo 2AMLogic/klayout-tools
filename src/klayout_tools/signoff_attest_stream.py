@@ -29,7 +29,6 @@ from .signoff_attest import (
     AttestationError,
     _audit_command_checks,
     _command_check,
-    _drift_result,
     _load_committed_attestation,
     _read_inventory,
     _self_check,
@@ -37,6 +36,7 @@ from .signoff_attest import (
     _validate_header,
     _validated_command_checks,
 )
+from .signoff_attest_drift import drift_result
 
 #: ``--hash-kind`` values a stream attestation's regeneration claim accepts.
 REGENERATION_HASH_KINDS: tuple[str, ...] = (_HASH_KIND_BYTES, _HASH_KIND_GEOMETRY)
@@ -351,4 +351,4 @@ def check_stream_attestation(
         inventory_path=inventory_path,
         committed_checks=committed_checks if isinstance(committed_checks, list) else [],
     )
-    return _drift_result(committed_path, committed, fresh)
+    return drift_result(committed_path, committed, fresh)

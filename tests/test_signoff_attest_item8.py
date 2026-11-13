@@ -363,3 +363,53 @@ def test_text_line_per_check_kind():
     )
     with pytest.raises(ValueError):
         attestation_check_line({"check": "bogus", "passed": True})
+
+
+# --------------------------------------------------------------------------- #
+# `--attest --check` drift names the check, not only its list index
+# (issue #5460). Item 8 is the shape with two identity keys: a metric check is
+# one per corner x metric, so the corner alone would not name it.
+# --------------------------------------------------------------------------- #
+
+
+def _committed_item8(repo: Path, inventory: dict) -> str:
+    committed = repo / "evidence" / "item8.json"
+    committed.write_text(render_envelope(_attest(repo, inventory)))
+    return str(committed)
+
+
+def test_check_drift_names_a_metric_check_by_corner_and_metric(tmp_path):
+    repo = _repo(tmp_path)
+    inventory = _digital_inventory()
+    committed = _committed_item8(repo, inventory)
+    (repo / "evidence" / "sim_tt.json").write_text(
+        json.dumps({"status": "pass", "result": {"fmax": 120, "area": 5, "power": 2}})
+    )
+
+    result = check_attestation(8, str(repo / "inventory.json"), committed)
+
+    (value,) = [e for e in result["drift"] if e["field"].endswith(".value")]
+    assert value["check"] == {"role": "digital", "corner": "tt", "metric": "fmax"}
+    assert (value["committed"], value["fresh"]) == (100, 120)
+    # The evidence file's own presence check names the path that moved.
+    (hashed,) = [
+        e
+        for e in result["drift"]
+        if e["field"].startswith("attestation.checks.")
+        and e["field"].endswith(".content_hash")
+    ]
+    assert hashed["check"] == {"role": "evidence", "path": "evidence/sim_tt.json"}
+
+
+def test_check_drift_names_a_citation_check_by_spec_row(tmp_path):
+    repo = _repo(tmp_path)
+    inventory = _analog_inventory()
+    committed = _committed_item8(repo, inventory)
+    inventory["citations"]["gain"] = ["evidence/sim_ss.json"]
+    (repo / "inventory.json").write_text(json.dumps(inventory))
+
+    result = check_attestation(8, str(repo / "inventory.json"), committed)
+
+    rows = [e for e in result["drift"] if e.get("check", {}).get("role") == "spec_row"]
+    assert rows, result["drift"]
+    assert {e["check"]["row"] for e in rows} == {"gain"}
