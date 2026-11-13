@@ -6485,7 +6485,13 @@ fails with `Unable to find definition of model …` and every corner errors.
   `.include` rule uses (`env_var`, `pdk_root`). It is not existence-checked,
   staged or hashed on the submitting host, is forwarded to the worker
   unexpanded in declared order, and neither triggers the refusal above nor
-  makes a host-default off-host backend step back to `local`. The worker's
+  makes a host-default off-host backend step back to `local`. When some
+  *other* reason steps that host default back to `local` anyway — a
+  single-unit run, or `options.resume` — the list is re-settled against the
+  backend that actually executes (issue #5492): the entries are expanded and
+  existence-checked on this host, emitted as `pre_osdi` lines in declared
+  order, and reported under `environment.osdi_preload`, exactly as
+  `--backend local` does. The worker's
   own `ngspice` decides whether the module loads, so a real OSDI ABI
   mismatch there still surfaces as the per-corner `osdi_abi_mismatch`
   diagnostic (no client-side check is possible for an image-baked file).
