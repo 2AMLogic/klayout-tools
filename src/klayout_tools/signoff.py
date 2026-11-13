@@ -6830,6 +6830,11 @@ def _build_tier_item(
         if item_id == 5 and partition_kind == "digital"
         else None
     )
+    # Issue #5462: the manifest key is top-level, but it is item 5's ratchet.
+    item5_require_derived = require_derived_rows and item_id == DERIVED_ROWS_ITEM_ID
+    item5_require_derived_invalid = (
+        require_derived_rows_invalid and item_id == DERIVED_ROWS_ITEM_ID
+    )
     report_list = item_id in _REPORT_LIST_ITEMS and isinstance(raw_entry, list)
     if raw_entry is not None and not graded_by_build:
         reason = _REASON_UNGRADEABLE_BY_BUILD
@@ -6851,7 +6856,12 @@ def _build_tier_item(
         report_list
         or item_id in _ITEMS_ACCEPTING_MULTI_CITATION
         and (
-            raw_entry is not None
+            # Issue #5462: a mistyped ``require_derived_rows`` is item 5's own
+            # ``invalid_evidence``, so it must reach the aggregator for every
+            # evidence shape -- single-dict and absent entries took neither
+            # branch below and graded as if the key were not set at all.
+            item5_require_derived_invalid
+            or raw_entry is not None
             and (
                 isinstance(raw_entry, list)
                 or spec_rows is not None
@@ -6879,11 +6889,8 @@ def _build_tier_item(
             spec_rows_invalid=multi_rows_invalid,
             met_envelopes=met_envelopes,
             required_kind_pair=required_kind_pair,
-            # Issue #5462: a top-level manifest key, but item 5's ratchet.
-            require_derived=require_derived_rows and item_id == DERIVED_ROWS_ITEM_ID,
-            require_derived_invalid=(
-                require_derived_rows_invalid and item_id == DERIVED_ROWS_ITEM_ID
-            ),
+            require_derived=item5_require_derived,
+            require_derived_invalid=item5_require_derived_invalid,
         )
         # Issue #5031: per-cell DRC/LVS lists state how many members counted.
         extra = with_member_coverage(item_id, report_list, raw_entry, extra)

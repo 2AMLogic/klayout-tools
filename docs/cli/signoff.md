@@ -3215,8 +3215,10 @@ at least one `"asserted"` row grades `unmet` / `partial_coverage` (the existing
 reason), with those row ids sorted under `detail.asserted_rows` alongside the
 usual `uncovered_rows` / `declared_gaps` / `row_sources`. A row covered by both
 a tagged and an untagged citation is `"derived"` and passes. A failing citation
-still reports its own reason first, and the missing-kinds and timing-margin
-rules above are decided before this one.
+still reports its own reason first, and the timing-margin rule below is decided
+before this one. The missing-kinds rule below is decided *after* it, so a
+digital item 5 whose coverage includes an asserted row reports
+`detail.asserted_rows` and no `detail.missing_kinds`.
 
 The key is manifest-level but grades **item 5 only**; item 6's row sources are
 unaffected. Note that `spec_row` tags are read from a `klt sim` envelope's
@@ -3225,7 +3227,9 @@ such tags (`sta`, `functional-verification`, `generic`) is always `"asserted"`
 and therefore fails under this option — cite those rows from a tagged `klt sim`
 envelope as well, or leave the option off. Absent, `null` or `false` grades
 exactly as before and emits no new keys; a non-boolean value is `unmet` /
-`invalid_evidence` for item 5 alone, with `detail.problem` naming the key.
+`invalid_evidence` for item 5 alone, with `detail.problem` naming the key —
+whatever shape item 5's evidence has, including a single citation object or no
+item 5 evidence at all.
 Additive: no `schema_version` bump.
 
 **Digital item 5 needs both RTL-flow kinds (issue #3741).** The tier text

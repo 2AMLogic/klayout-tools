@@ -15,6 +15,7 @@ import json
 import pytest
 
 from klayout_tools.signoff import build_tier_report
+from test_signoff import STA_MULTI_CORNER_CLEAN_ENVELOPE
 
 _LIM = {"min": 1.0}
 
@@ -243,3 +244,95 @@ def test_item6_ignores_require_derived_rows(tmp_path):
         return next(i for i in build_tier_report(manifest)["items"] if i["id"] == 6)
 
     assert item6(require_derived_rows=True) == item6()
+
+
+@pytest.mark.parametrize("value", ["true", 1, 0, {}, []])
+def test_item5_non_boolean_require_derived_rows_degrades_single_dict_evidence(
+    tmp_path, value
+):
+    """A mistyped key is item 5's ``invalid_evidence`` even when its evidence
+    is a single citation object with no ``spec_rows``.
+
+    The validity check lives in the multi-citation aggregator, which a
+    single-dict entry declaring no rows did not reach -- so the item graded
+    ``met``, silently ignoring the ratchet it was asked to enforce.
+    """
+    a = _write(tmp_path, "a.json", _tagged_sim([_meas("t", limits=_LIM)]))
+
+    def report(**overrides):
+        return build_tier_report(
+            _manifest(evidence={"5": {"file": a}, "6": [a]}, **overrides)
+        )
+
+    bad = report(require_derived_rows=value)
+
+    item = next(i for i in bad["items"] if i["id"] == 5)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "invalid_evidence"
+    assert "require_derived_rows" in item["detail"]["problem"]
+    # Still item 5 alone: no other item sees the key.
+    baseline = report()
+    assert [i for i in bad["items"] if i["id"] != 5] == [
+        i for i in baseline["items"] if i["id"] != 5
+    ]
+
+
+@pytest.mark.parametrize("value", ["true", 1, 0, {}, []])
+def test_item5_non_boolean_require_derived_rows_degrades_with_no_evidence(
+    tmp_path, value
+):
+    """...and when item 5 cites nothing at all: the manifest key is still
+    malformed, and reporting ``no_evidence`` would never surface that."""
+    a = _write(tmp_path, "a.json", _tagged_sim([_meas("t", limits=_LIM)]))
+
+    item = next(
+        i
+        for i in build_tier_report(
+            _manifest(evidence={"6": [a]}, require_derived_rows=value)
+        )["items"]
+        if i["id"] == 5
+    )
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "invalid_evidence"
+    assert "require_derived_rows" in item["detail"]["problem"]
+
+
+def test_item5_valid_require_derived_rows_leaves_other_shapes_alone(tmp_path):
+    """The routing widened above is scoped to the *invalid* key: a well-typed
+    value still changes nothing for an item that declares no ``spec_rows``."""
+    a = _write(tmp_path, "a.json", _tagged_sim([_meas("t", limits=_LIM)]))
+    single = {"5": {"file": a}}
+
+    # A single citation object with no declared rows: nothing to ratchet.
+    assert _item5(single, require_derived_rows=True) == _item5(single)
+    assert _item5(single, require_derived_rows=False) == _item5(single)
+    assert _item5(single)["status"] == "met"
+
+    # No evidence at all stays ``no_evidence`` -- a valid key is not a defect.
+    assert _item5({}, require_derived_rows=True) == _item5({})
+    assert _item5({})["reason"] == "no_evidence"
+
+
+def test_item5_asserted_rows_are_reported_before_missing_kinds(tmp_path):
+    """The grading order ``docs/cli/signoff.md`` states for the option.
+
+    ``_grade_required_kinds`` (issue #3741) runs *after* the
+    ``partial_coverage`` branch, so a digital item 5 carrying an asserted row
+    reports ``asserted_rows`` and no ``missing_kinds`` -- an `sta` envelope
+    has no ``spec_row`` tagging path, so its rows are always asserted.
+    """
+    sta = _write(tmp_path, "sta.json", STA_MULTI_CORNER_CLEAN_ENVELOPE)
+    manifest = _manifest(
+        kind="digital",
+        evidence={"5.digital": [{"file": sta, "rows": ["tclk"]}]},
+        spec_rows={"5": [{"id": "tclk"}]},
+        require_derived_rows=True,
+    )
+
+    item = next(i for i in build_tier_report(manifest)["items"] if i["id"] == 5)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "partial_coverage"
+    assert item["detail"]["asserted_rows"] == ["tclk"]
+    assert "missing_kinds" not in item["detail"]
