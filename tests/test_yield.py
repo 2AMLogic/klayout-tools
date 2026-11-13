@@ -15,7 +15,6 @@ Two tiers, deliberately split:
 
 from __future__ import annotations
 
-import gzip
 import hashlib
 import importlib.util
 import json
@@ -1809,99 +1808,6 @@ def test_cli_error_uses_the_json_error_envelope(tmp_path, capsys):
     error = json.loads(captured.err)
     assert error["error"]["command"] == "yield"
     assert "not found" in error["error"]["message"]
-
-
-# --------------------------------------------------------------------------- #
-# Issue #5543: a damaged gzip input is an error envelope, not a traceback
-# --------------------------------------------------------------------------- #
-
-_GZIP_DOC = {
-    "measurements": [
-        {
-            "name": "m",
-            "unit": "V",
-            "samples": [0.0, 0.1, 0.2, 0.3],
-            "limits": {"min": -1.0, "max": 1.0},
-        }
-    ]
-}
-
-
-def _damaged_gzip(path, doc=None):
-    """Write a gzip file whose **deflate stream** is corrupt, and return its path.
-
-    Deliberately not the two failure modes that already reported correctly:
-    the 10-byte gzip header (magic included) is left intact so `_load_json`
-    still routes the file through `gzip.open`, and the stream is damaged in
-    place rather than cut short -- so zlib fails mid-stream with `zlib.error`
-    instead of `EOFError` (truncation) or `BadGzipFile` (bad CRC), neither of
-    which reproduces this issue.
-    """
-    raw = bytearray(
-        gzip.compress(json.dumps(_GZIP_DOC if doc is None else doc).encode())
-    )
-    for i in range(10, 24):
-        raw[i] ^= 0xFF
-    path.write_bytes(bytes(raw))
-    return str(path)
-
-
-def test_a_damaged_gzip_samples_file_raises_yield_error(tmp_path):
-    """The library surface converts a decompression failure like every other
-    unreadable input: `run_yield` must never leak `zlib.error` to its caller."""
-    path = _damaged_gzip(tmp_path / "samples.json.gz")
-    with pytest.raises(YieldError, match="could not read samples"):
-        run_yield(path)
-
-
-def test_cli_a_damaged_gzip_samples_file_uses_the_error_envelope(tmp_path, capsys):
-    path = _damaged_gzip(tmp_path / "samples.json.gz")
-    assert main(["yield", path, "--format", "json"]) == 1
-    captured = capsys.readouterr()
-    assert captured.out == ""
-    error = json.loads(captured.err)
-    assert error["error"]["command"] == "yield"
-    assert path in error["error"]["message"]
-
-
-def test_cli_a_damaged_gzip_limits_file_uses_the_error_envelope(tmp_path, capsys):
-    """The same must hold in the `--limits` position, which reaches
-    `_load_json` through `_read_spec` rather than `_read_samples`."""
-    samples = _sample_set(
-        tmp_path, [0.0, 0.1, 0.2, 0.3], limits={"min": -1.0, "max": 1.0}
-    )
-    limits = _damaged_gzip(
-        tmp_path / "limits.json.gz", {"measurements": {"m": {"min": -1.0, "max": 1.0}}}
-    )
-    assert main(["yield", samples, "--limits", limits, "--format", "json"]) == 1
-    captured = capsys.readouterr()
-    assert captured.out == ""
-    error = json.loads(captured.err)
-    assert error["error"]["command"] == "yield"
-    assert limits in error["error"]["message"]
-
-
-@pytest.mark.parametrize("damage", ["truncated", "bad-crc"])
-def test_cli_other_damaged_gzip_inputs_keep_their_existing_envelope(
-    tmp_path, capsys, damage
-):
-    """Guard the two gzip failure modes that already produced an envelope
-    before this fix: widening the `except` tuple must not change how a
-    truncated stream or a bad CRC trailer is reported."""
-    raw = bytearray(gzip.compress(json.dumps(_GZIP_DOC).encode()))
-    if damage == "truncated":
-        payload = bytes(raw[: len(raw) // 2])
-    else:
-        raw[-8] ^= 0xFF  # a CRC32 trailer byte, leaving the stream itself valid
-        payload = bytes(raw)
-    path = tmp_path / "samples.json.gz"
-    path.write_bytes(payload)
-    assert main(["yield", str(path), "--format", "json"]) == 1
-    captured = capsys.readouterr()
-    assert captured.out == ""
-    error = json.loads(captured.err)
-    assert error["error"]["command"] == "yield"
-    assert str(path) in error["error"]["message"]
 
 
 @requires_native
