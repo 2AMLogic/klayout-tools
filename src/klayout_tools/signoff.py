@@ -52,6 +52,7 @@ from typing import (
 
 from . import _report_verify_hints as hints
 from . import signoff_foundry_cell as foundry_cell
+from . import signoff_nothing_checked as vacuous
 from ._jsonnum import is_number
 from ._provenance import INPUT_ROLE_LAYOUT, layout_geometry_digest, sha256_file
 from ._report_verify import (
@@ -64,12 +65,9 @@ from ._report_verify import (
 from .build_identity import build_version, version_report
 from .coverage import (
     RESULT_PARTIAL,
-    coverage_nothing_checked,
-    coverage_nothing_checked_reasons,
     coverage_refusal_reason,
     coverage_skipped_work,
     coverage_state,
-    coverage_validation_error,
 )
 from .design_evidence_tiers import (
     CANONICAL_DOC_LABEL,
@@ -80,6 +78,17 @@ from .design_evidence_tiers import (
 )
 from .env_provenance import find_repo_root
 from .metrics import get_metric, is_registered
+
+# Item 5's spec-row coverage sources (issue #3778) and the manifest ratchet
+# that requires them machine-derived (issue #5462); out of this file for its
+# size-ratchet ceiling, same as `signoff_multi_member` and `signoff_na`.
+from .signoff_derived_rows import (
+    DERIVED_ROWS_ITEM_ID,
+    asserted_rows,
+    member_credited_rows,
+    multi_row_info,
+    read_require_derived_rows,
+)
 
 # The typed envelope shapes this boundary validates against (issue #2033) live
 # in their own module since issue #2313 -- ~300 lines of pure `TypedDict`
@@ -169,10 +178,6 @@ from .signoff_power_delivery import (
     _build_power_delivery_item,
     _read_power_port_policy,
 )
-
-# Spec-row coverage for a multi-citation item (issues #3778/#2908/#5490);
-# kept out of this file for its size-ratchet ceiling.
-from .signoff_row_coverage import _credited_rows, _multi_row_info
 from .signoff_runset import (
     PINNED_RUNSETS,
     runset_disclosure,
@@ -1149,15 +1154,13 @@ _REASON_UNGRADEABLE_BY_BUILD = "ungradeable_by_build"
 #: ``wrong_kind``: the cited check did not fail on its own terms.
 _REASON_NOT_POST_LAYOUT = "not_post_layout"
 
-#: Issue #1996: the evidence resolved to a readable, recognised, *passing*
-#: envelope of a kind this item accepts -- whose own ``coverage`` block
-#: states that the run checked **nothing** (``coverage.nothing_checked`` is
-#: ``true``; see :mod:`klayout_tools.coverage` and this module's
-#: "Vacuous-verdict refusal" docstring section). A DRC deck whose whole rule
-#: set was gated behind an unset ``--deck-var``, a `klt sim` corner matrix
-#: that expanded to zero corners, a `klt pex` run with no ``delta[]`` row to
-#: compare: each reports a passing ``status`` that says nothing at all about
-#: the design. Grouped with the "no runnable check proves this item" reasons
+#: Issue #1996: the cited envelope's own ``coverage`` block states that the
+#: run checked **nothing**, so it says nothing at all about the design --
+#: whatever its own ``status`` token (issue #5479). Reached by two routes,
+#: both carrying ``nothing_checked_item_detail``; see
+#: :mod:`klayout_tools.signoff_nothing_checked` for which producers emit
+#: which, and this module's "Vacuous-verdict refusal" section. Grouped with
+#: the "no runnable check proves this item" reasons
 #: (:data:`_REASON_WRONG_KIND`, :data:`_REASON_NOT_POST_LAYOUT`) rather than
 #: with :data:`_REASON_CHECK_FAILED`, per issue #826's invariant: the cited
 #: check did not fail on its own terms, it simply measured nothing -- and the
@@ -3039,57 +3042,7 @@ def _drc_coverage_disclosure(
     }
 
 
-def _nothing_checked_reasons(envelope: dict[str, Any]) -> list[str] | None:
-    """The reason codes behind ``envelope``'s own "I checked nothing"
-    statement (issue #1996) -- or ``None`` when it makes no such statement.
-
-    ``None`` (not ``[]``) for every envelope whose ``coverage`` block is
-    absent, non-object, or reports ``nothing_checked: false``, so a caller
-    can gate on the *presence* of a claim with a plain ``is None`` test and
-    never has to decide what an empty list means. That covers evidence
-    committed before the convention existed, and every kind that does not
-    emit a ``coverage`` block at all -- neither reads as a vacuous run.
-
-    Deliberately kind-agnostic, unlike :func:`_drc_coverage_disclosure` and
-    :func:`_pex_body_bias_disclosure` beside it: ``nothing_checked`` is one
-    shared convention across every verb that can reach a vacuous verdict
-    (`klt drc`, `klt sim`, `klt pex` today), so hard-coding the list here
-    would silently ignore the next verb that adopts it. Reading is delegated
-    to :mod:`klayout_tools.coverage` so the "missing block makes no
-    statement" rule is applied identically by every consumer.
-
-    A run may report more than one reason; the list is returned in the
-    producing verb's own order, verbatim -- including any code this `klt`
-    build does not itself know, so a newer producer's reason survives.
-    """
-    if not coverage_nothing_checked(envelope):
-        return None
-    return coverage_nothing_checked_reasons(envelope)
-
-
-def _nothing_checked_detail(envelope: dict[str, Any]) -> dict[str, Any]:
-    """:func:`_detail`'s ``nothing_checked_reasons`` key (issue #1996), or an
-    empty dict when ``envelope`` makes no vacuous-run claim.
-
-    A merge-in fragment rather than a mutation of the caller's dict, matching
-    how every other optional detail key beside it is decided -- and keeping
-    the "is this key present at all?" branch in one named place rather than
-    adding a fifth conditional to :func:`_detail` itself.
-    """
-    reasons = _nothing_checked_reasons(envelope)
-    detail = {} if reasons is None else {"nothing_checked_reasons": reasons}
-    state = coverage_state(envelope)
-    if state != "legacy":
-        detail["coverage_state"] = state
-    if state == "malformed":
-        detail["coverage_error"] = coverage_validation_error(envelope.get("coverage"))
-    partial = _partial_coverage_disclosure(envelope)
-    if partial is not None:
-        detail["coverage_qualification"] = partial
-    return detail
-
-
-def _partial_coverage_disclosure(envelope: dict[str, Any]) -> dict[str, Any] | None:
+def _partial_coverage_disclosure(envelope: Mapping[str, Any]) -> dict[str, Any] | None:
     """The cited envelope's own statement that it skipped requested work
     (issue #2109) -- or ``None`` when it makes no such statement.
 
@@ -3112,7 +3065,7 @@ def _partial_coverage_disclosure(envelope: dict[str, Any]) -> dict[str, Any] | N
     the report rather than silent, on both the ``checks[]`` and the
     ``"met"``-citation paths.
     """
-    skipped = coverage_skipped_work(envelope)
+    skipped = coverage_skipped_work(cast(dict[str, Any], envelope))
     if not skipped:
         return None
     if len(skipped) <= _PARTIAL_COVERAGE_SKIPPED_CAP:
@@ -3149,13 +3102,22 @@ def _reports_partial_status(kind: str, envelope: dict[str, Any]) -> bool:
     return envelope.get("status") == expected
 
 
-def _non_passing_reason(kind: str, envelope: dict[str, Any]) -> str:
+def _non_passing_reason(
+    kind: str, envelope: dict[str, Any], *, allowed_kinds: set[str] | None
+) -> str:
     """Why a non-passing envelope of a kind this item accepts is not
-    evidence: :data:`_REASON_PARTIAL_COVERAGE` or
-    :data:`_REASON_CHECK_FAILED` (issue #2109).
+    evidence: :data:`_REASON_NOTHING_CHECKED` (issue #5479),
+    :data:`_REASON_PARTIAL_COVERAGE` or :data:`_REASON_CHECK_FAILED`
+    (issue #2109).
 
-    Real failures keep precedence over the partial token, by two different
-    mechanisms -- only one of which is structural (issue #2152):
+    :data:`_REASON_NOTHING_CHECKED` is decided here as well as in
+    :func:`_kind_gated_refusal` because an envelope reporting the rollup's
+    zero-coverage token fails :func:`_check_passed` and so never reaches that
+    function -- see :mod:`klayout_tools.signoff_nothing_checked`.
+
+    Real failures keep precedence over both the zero-coverage and the partial
+    token, by two different mechanisms -- only one of which is structural
+    (issue #2152):
 
     - *Producer-side*, by construction: a run that found a defect reports
       its *failure* token, never the partial one
@@ -3173,6 +3135,19 @@ def _non_passing_reason(kind: str, envelope: dict[str, Any]) -> str:
     """
     if _critical_metric_blockers(envelope):
         return _REASON_CHECK_FAILED
+    # Issue #5479: a run whose own rollup token says it covered nothing, its
+    # `coverage` block agreeing (never `coverage_unknown`/`malformed_coverage`
+    # /`no_limits_checked`, each of which keeps its own reason) and the item
+    # accepting the kind, so a wrong artifact is not relabelled as a thin one.
+    # Directly after the blocker gate and nowhere earlier: a detected defect
+    # outranks a coverage statement, while every reason below reads a
+    # *different* status token, so none can co-occur with this one.
+    if (
+        vacuous.reports_zero_coverage(envelope)
+        and _kind_is_accepted(kind, allowed_kinds)
+        and _coverage_refusal(kind, envelope) == _REASON_NOTHING_CHECKED
+    ):
+        return _REASON_NOTHING_CHECKED
     # Issue #2870: a runset report that matched only the devices it knew.
     if (
         kind == "lvs"
@@ -3684,7 +3659,11 @@ def _detail(kind: str, envelope: _EvidenceEnvelope) -> dict[str, Any]:
     # envelope predating the convention renders exactly as before. This is
     # the reader-facing half of the `passed: False` `_build_check` applies
     # for the same condition; see "Vacuous-verdict refusal" above.
-    detail.update(_nothing_checked_detail(envelope))
+    detail.update(
+        vacuous.nothing_checked_detail(
+            envelope, partial=_partial_coverage_disclosure(envelope)
+        )
+    )
     counts = _sim_coverage_counts(envelope) if kind == "sim" else None
     if counts is not None and _sim_no_limits_applied(envelope):
         detail["no_limits_checked"] = {
@@ -4463,6 +4442,9 @@ def build_tier_report(
 
     partition_boundary = _read_partition_boundary(manifest, kind)
     spec_rows_by_item = _read_spec_rows(manifest)
+    # Issue #5462: the opt-in ratchet that fails item 5 on manifest-asserted
+    # (rather than envelope-derived) row coverage.
+    require_derived, require_derived_invalid = read_require_derived_rows(manifest)
     # Issue #2839: T1 item 11's port-accessibility policy (provisional).
     power_port_policy = _read_power_port_policy(manifest.get("power_ports"))
 
@@ -4519,6 +4501,8 @@ def build_tier_report(
                     graded_by_build=graded_by_build,
                     repo_root=repo_root,
                     **_resolve_spec_rows(spec_rows_by_item, t1_item["id"], partition),
+                    require_derived_rows=require_derived,
+                    require_derived_rows_invalid=require_derived_invalid,
                     generator_exec=generator_exec,
                 )
             total += 1
@@ -5563,7 +5547,14 @@ def _grade_evidence(
     if check_kind == "error":
         return "unmet", _REASON_CHECK_ERRORED, None, {}
 
-    citation_extra, unmet = _grade_check_outcome(check_kind, checked, spec, envelope)
+    citation_extra, unmet = _grade_check_outcome(
+        check_kind,
+        checked,
+        spec,
+        envelope,
+        resolution=resolution,
+        allowed_kinds=allowed_kinds,
+    )
     if unmet is not None:
         return unmet
 
@@ -5640,13 +5631,25 @@ def _grade_evidence(
 
 
 def _grade_check_outcome(
-    kind: str, checked: Any, spec: dict[str, Any], envelope: dict[str, Any]
+    kind: str,
+    checked: Any,
+    spec: dict[str, Any],
+    envelope: dict[str, Any],
+    *,
+    resolution: dict[str, Any],
+    allowed_kinds: set[str] | None,
 ) -> tuple[dict[str, Any], tuple[Any, ...] | None]:
     """Grade the envelope's own pass/fail. Returns ``(citation_extra, unmet)``:
     ``unmet`` is the full ``_grade_evidence`` result when the check did not
     pass, else ``None``. A non-passing envelope is first offered its disclosed
     foundry-cell exceptions (issue #4530); when they cover every violation the
-    item proceeds and ``citation_extra`` carries them for the citation."""
+    item proceeds and ``citation_extra`` carries them for the citation.
+
+    ``allowed_kinds`` only orders :data:`_REASON_NOTHING_CHECKED` against
+    :func:`_build_tier_item`'s own kind gate, as :func:`_kind_gated_refusal`
+    does; that verdict carries
+    :func:`~.signoff_nothing_checked.nothing_checked_item_detail` (issue
+    #5479), naming the artifact read though ``citation`` stays ``None``."""
     if _check_passed(kind, checked):
         return {}, None
     failure_detail = _critical_metric_detail(envelope)
@@ -5659,13 +5662,13 @@ def _grade_check_outcome(
             **failure_detail,
             "foundry_cell_exceptions": {"applied": False, "lapsed": lapsed},
         }
-    unmet = (
-        "unmet",
-        _non_passing_reason(kind, envelope),
-        None,
-        failure_detail,
-    )
-    return {}, unmet
+    reason = _non_passing_reason(kind, envelope, allowed_kinds=allowed_kinds)
+    if reason == _REASON_NOTHING_CHECKED:
+        failure_detail = {
+            **failure_detail,
+            **vacuous.nothing_checked_item_detail(envelope, _citation(resolution)),
+        }
+    return {}, ("unmet", reason, None, failure_detail)
 
 
 def _foundry_cell_exception_eligible(kind: str, envelope: dict[str, Any]) -> bool:
@@ -5701,7 +5704,15 @@ def _kind_gated_failure_detail(
     Issue #3063: the early return would otherwise hide a stale
     ``content_hash`` pin behind the campaign refusal until the sample is
     raised. Disclosed beside the verdict, never changing it.
+
+    Issue #5479: a :data:`_REASON_NOTHING_CHECKED` refusal carries
+    :func:`~.signoff_nothing_checked.nothing_checked_item_detail`, so this
+    route names the artifact it read as :func:`_grade_check_outcome`'s does.
     """
+    if kind_gated == _REASON_NOTHING_CHECKED:
+        return vacuous.nothing_checked_item_detail(
+            envelope, _citation(dict(resolution))
+        )
     campaign = _yield_campaign_disclosure(check_kind, envelope)
     if campaign is None or kind_gated not in (
         _REASON_UNDERSIZED_SAMPLE,
@@ -6689,6 +6700,8 @@ def _build_tier_item(
     repo_root: str | Path | None = None,
     spec_rows: list[dict[str, Any]] | None = None,
     spec_rows_invalid: bool = False,
+    require_derived_rows: bool = False,
+    require_derived_rows_invalid: bool = False,
     generator_exec: GeneratorExecution | None = None,
 ) -> dict[str, Any]:
     """Grade one T1 checklist item against ``evidence`` -- see
@@ -6816,6 +6829,11 @@ def _build_tier_item(
         if item_id == 5 and partition_kind == "digital"
         else None
     )
+    # Issue #5462: the manifest key is top-level, but it is item 5's ratchet.
+    item5_require_derived = require_derived_rows and item_id == DERIVED_ROWS_ITEM_ID
+    item5_require_derived_invalid = (
+        require_derived_rows_invalid and item_id == DERIVED_ROWS_ITEM_ID
+    )
     report_list = item_id in _REPORT_LIST_ITEMS and isinstance(raw_entry, list)
     if raw_entry is not None and not graded_by_build:
         reason = _REASON_UNGRADEABLE_BY_BUILD
@@ -6837,7 +6855,12 @@ def _build_tier_item(
         report_list
         or item_id in _ITEMS_ACCEPTING_MULTI_CITATION
         and (
-            raw_entry is not None
+            # Issue #5462: a mistyped ``require_derived_rows`` is item 5's own
+            # ``invalid_evidence``, so it must reach the aggregator for every
+            # evidence shape -- single-dict and absent entries took neither
+            # branch below and graded as if the key were not set at all.
+            item5_require_derived_invalid
+            or raw_entry is not None
             and (
                 isinstance(raw_entry, list)
                 or spec_rows is not None
@@ -6865,6 +6888,8 @@ def _build_tier_item(
             spec_rows_invalid=multi_rows_invalid,
             met_envelopes=met_envelopes,
             required_kind_pair=required_kind_pair,
+            require_derived=item5_require_derived,
+            require_derived_invalid=item5_require_derived_invalid,
         )
         # Issue #5031: per-cell DRC/LVS lists state how many members counted.
         extra = with_member_coverage(item_id, report_list, raw_entry, extra)
@@ -7037,6 +7062,8 @@ def _grade_multi_citation(
     spec_rows_invalid: bool,
     met_envelopes: dict[int, dict[str, Any]] | None = None,
     required_kind_pair: tuple[str, ...] | None = None,
+    require_derived: bool = False,
+    require_derived_invalid: bool = False,
 ) -> tuple[str, str | None, dict[str, Any] | None, dict[str, Any], dict[str, Any]]:
     """Grade a list-form (or ``spec_rows``-bearing) evidence entry (issue
     #2959). Each member goes through the ordinary per-envelope path
@@ -7063,10 +7090,13 @@ def _grade_multi_citation(
     only the named rows some tagged, limited, passing measurement grades --
     a named row with none is uncovered. A member with no tags keeps the
     manifest-asserted ``rows``. ``row_coverage.row_sources`` marks each
-    covered row ``derived`` or ``asserted``. On a ``yield`` envelope a
-    tagged, limited ``"reported"`` measurement (one declaring no
-    ``target_yield``) additionally covers a row declared ``ratified:
-    false`` -- see :func:`_envelope_tagged_rows` (issue #5490).
+    covered row ``derived`` or ``asserted``; a tagged, limited ``"reported"``
+    `klt yield` measurement additionally covers an unratified row (issue
+    #5490). With ``require_derived`` (issue #5462, the manifest's
+    ``require_derived_rows``, item 5 only) an asserted row is not coverage: an
+    otherwise passing set carrying one is ``unmet``/``partial_coverage`` with
+    ``detail.asserted_rows``. ``require_derived_invalid`` (a non-boolean key)
+    is ``invalid_evidence``.
 
     Returns ``(status, reason, citation, failure_detail, extra_item_keys)``.
     """
@@ -7076,31 +7106,19 @@ def _grade_multi_citation(
     ) -> tuple[str, str | None, None, dict[str, Any], dict[str, Any]]:
         return "unmet", _REASON_INVALID_EVIDENCE, None, {"problem": problem}, {}
 
+    if require_derived_invalid:
+        return invalid("'require_derived_rows' must be a boolean")
+
     members, problem = _checked_multi_members(raw_entry, spec_rows, spec_rows_invalid)
     if members is None:
         return invalid(problem or "malformed evidence entry")
 
     graded = [(spec, rows, grade_spec(spec)) for spec, rows in members]
     failed = [g for g in graded if g[2][0] != "met"]
-    # Issue #5490: the rows whose limit is declared unratified, which is the
-    # only place a `reported` yield measurement earns coverage. Same set
-    # `_multi_row_info` renders as `unratified_rows`.
-    unratified = frozenset(
-        row["id"]
-        for row in (spec_rows or [])
-        if row["gap"] is None and not row["ratified"]
-    )
-    # Rows each member is credited with, and whether that was machine-derived.
-    credited: dict[int, tuple[list[str] | None, bool]] = {
-        id(spec): _credited_rows(
-            rows,
-            (met_envelopes or {}).get(id(spec)),
-            kind=(g[2] or {}).get("kind"),
-            unratified=unratified,
-        )
-        for spec, rows, g in graded
-    }
-    row_info = _multi_row_info(graded, failed, spec_rows, credited)
+    # Rows each member is credited with, whether that was machine-derived,
+    # and the issue-#5490 `reported` case (needs kind + the unratified set).
+    credited = member_credited_rows(graded, met_envelopes, spec_rows)
+    row_info = multi_row_info(graded, failed, spec_rows, credited)
     extra: dict[str, Any] = {
         "citations_graded": [
             {
@@ -7126,12 +7144,17 @@ def _grade_multi_citation(
     )
     if margin_unmet is not None:
         return margin_unmet
+    # Issue #5462: under the ratchet a row credited on the manifest's word
+    # alone is not coverage, so it joins the other provisional conditions.
+    asserted = asserted_rows(row_info) if require_derived else []
     if row_info and (
         row_info["uncovered_rows"]
         or row_info["declared_gaps"]
         or row_info["unratified_rows"]
+        or asserted
     ):
-        return "unmet", _REASON_PARTIAL_COVERAGE, None, row_info, extra
+        detail = {**row_info, **({"asserted_rows": asserted} if asserted else {})}
+        return "unmet", _REASON_PARTIAL_COVERAGE, None, detail, extra
     kinds_unmet = _grade_required_kinds(required_kind_pair, graded, row_info, extra)
     if kinds_unmet is not None:
         return kinds_unmet

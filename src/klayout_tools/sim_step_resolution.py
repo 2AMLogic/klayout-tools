@@ -54,7 +54,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import sim_crossings
+from . import sim_crossings, sim_window
 from .sim_errors import SimError
 from .sim_forms import validate_exclusive_form
 
@@ -122,7 +122,7 @@ def validate_form_exclusive(spec: dict[str, Any]) -> bool:
 
 
 def _seconds(name: Any, body: dict[str, Any], key: str) -> float | None:
-    return sim_crossings._window_bound(name, body, key)
+    return sim_window.window_bound(name, body, key, form="step_resolution")
 
 
 def validate_step_resolution_spec(name: Any, body: Any) -> None:

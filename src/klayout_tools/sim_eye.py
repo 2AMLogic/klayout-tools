@@ -43,13 +43,12 @@ whose message starts with a ``[<reason>]`` token from :data:`ERROR_CODES`.
 
 from __future__ import annotations
 
-import bisect
 import math
 import os
 from dataclasses import dataclass
 from typing import Any
 
-from . import sim_crossings
+from . import sim_crossings, sim_window
 from .sim_errors import SimError
 from .sim_forms import validate_exclusive_form
 
@@ -112,7 +111,7 @@ def validate_form_exclusive(spec: dict[str, Any]) -> bool:
 
 
 def _seconds(name: Any, body: dict[str, Any], key: str) -> float | None:
-    return sim_crossings._window_bound(name, body, key)
+    return sim_window.window_bound(name, body, key, form="eye")
 
 
 def validate_eye_spec(name: Any, body: Any) -> None:
@@ -256,20 +255,6 @@ class EyeOutcome:
         }
 
 
-def _value_at(scale: list[float], values: list[float], t: float) -> float:
-    index = bisect.bisect_left(scale, t)
-    if index <= 0:
-        return values[0]
-    if index >= len(scale):
-        return values[-1]
-    t0, t1 = scale[index - 1], scale[index]
-    if t1 == t0:
-        return values[index]
-    return values[index - 1] + (values[index] - values[index - 1]) * (
-        (t - t0) / (t1 - t0)
-    )
-
-
 def compute_eye(
     scale: list[float],
     values: list[float],
@@ -297,7 +282,10 @@ def compute_eye(
         )
         return base
     inside = [v for t, v in zip(scale, values, strict=True) if start <= t <= end]
-    inside += [_value_at(scale, values, start), _value_at(scale, values, end)]
+    inside += [
+        sim_window.value_at(scale, values, start),
+        sim_window.value_at(scale, values, end),
+    ]
     threshold = (min(inside) + max(inside)) / 2 if level is None else float(level)
     crossings = sim_crossings.find_crossings(
         scale,
@@ -323,7 +311,8 @@ def compute_eye(
     widest = max(range(len(gaps)), key=gaps.__getitem__)
     best_phase = (folded[widest] + gaps[widest] / 2) % 1.0
     samples = [
-        _value_at(scale, values, start + (k + best_phase) * ui) for k in range(uis)
+        sim_window.value_at(scale, values, start + (k + best_phase) * ui)
+        for k in range(uis)
     ]
     high = [v for v in samples if v > threshold]
     low = [v for v in samples if v <= threshold]

@@ -30,8 +30,23 @@ not `klt --version`, if you need to detect this kind of drift. See
   credits nothing, and item 5 is untouched (`klt sim` never emits
   `reported`). No item verdict changes anywhere — only the `detail` lists —
   and such an item stays `unmet` / `partial_coverage` through
-  `unratified_rows`. No new JSON field; no `schema_version` bump. Row-coverage
-  helpers moved to `signoff_row_coverage`. See `docs/cli/signoff.md`.
+  `unratified_rows`. No new JSON field; no `schema_version` bump. See
+  `docs/cli/signoff.md`.
+
+- **`klt sim`: a bad time bound in `cycle_mean` / `eye` / `settled` /
+  `step_resolution` is now reported against its own form, not `crossings`**
+  (#5472, 2026-11-13): those four forms share one window-bound parser, which
+  labelled every diagnostic `crossings.<key>` by default -- so a
+  `cycle_mean.from` of `"soon"` came back as `measurement 'm1': crossings.from
+  must be a time in seconds`, naming a form the request never declared. The
+  shared parser now takes the form name from its caller, so the message reads
+  `cycle_mean.from` (likewise `eye.ui`, `step_resolution.window`,
+  `settled.from`). `energy` and `stress`, which carried their own copies of the
+  parser, now share it too; their messages keep the same wording but quote
+  `"10n"` as the example literal instead of `"5n"` / `"20n"`. Message text
+  only: no error code, exit code or JSON field changes, and no
+  `schema_version` bump.
+
 - **`klt sim --backend batch`: the local-versus-fleet PDK stamp comparison
   now works on a host that pins no PDK root** (#5474, 2026-11-13): the
   submitter's side of `pdk_stamp_comparison` was stamped only from
@@ -46,6 +61,31 @@ not `klt --version`, if you need to detect this kind of drift. See
   `client_stamp_unavailable` still reports an uninstalled variant or an
   install with neither a readable `SOURCES` nor a bundle `.pdk-store.json`.
   No JSON field is added, renamed or removed; no `schema_version` bump.
+
+- **`klt netlist --block`: a `.subckt` port order that is not the schematic's
+  is now reported, and `--check`'s attribution is corrected** (#5473,
+  2026-11-13): a block's port order is the positional contract of every
+  `subckt-call` instantiation and LVS reference, and three things about it
+  were silent. Measured against xschem 3.4.7: a sibling `<stem>.sym` decides
+  the top sheet's port order, not the pin instances in the `.sch`; without
+  one the pins' **file** order decides it (`sim_pinnumber` overrides that, but
+  is ignored when a symbol exists); and a schematic pin the symbol does not
+  declare is dropped from the card with exit `0` and no warning. `--block`
+  now compares the two and sets the new additive `block.port_order`
+  (`{"schematic", "emitted", "symbol"}`, `null` when they agree or cannot be
+  compared) plus a `block.warning` giving both lists, naming the symbol the
+  order came from, and naming any omitted pin. `klt netlist` still never
+  rewrites the header — the emitted card has to stay the card xschem writes
+  for the same cell as a child. `--check`'s port-order `reason` no longer
+  states "different xschem builds order ports differently" as fact: it names
+  the sibling symbol when there is one and offers an xschem build difference
+  as a further possible cause. `schema_version` stays `1`;
+  `drift.subckt_port_order`, `status: "drifted"` and exit `3` are unchanged.
+  Not comparable (reported as `null` with no warning, never guessed at): a
+  bus or comma-list pin label, custom pin symbols in place of xschem's
+  `ipin`/`opin`/`iopin` devices, an emitted port the schematic never
+  declared, and an export that was not testbench-shaped. See
+  `docs/cli/netlist.md` → "Where the port order comes from".
 
 - **`klt drc`: a rule whose `layer_selection` empties its input is now
   `inapplicable`, not `checked`** (#5435, 2026-11-13): applicability was
@@ -92,6 +132,25 @@ not `klt --version`, if you need to detect this kind of drift. See
   citation excerpt additively gains `constraint_completeness_status`. Helpers
   (including #3258's annotation grading) moved to `signoff_sta_constraints`.
   See `docs/cli/signoff.md`.
+- **`klt signoff --attest` gains `--skip-local-only`** (#5209, PR #5215,
+  2026-11-10): with `--attest ITEM --inventory FILE -o OUT
+  --skip-local-only`, no `local_only` command is run; each one's outcome is
+  carried from the `OUT` envelope being refreshed (matched by role, `argv`
+  and testbench identity, exactly as `--check` carries it) while every other
+  check — file presence, content hashes, non-`local_only` commands, pins —
+  is recomputed. For refreshing an envelope's hashes on a host that cannot
+  run the toolchain, after a change that cannot affect that command's result:
+  the carried outcome is vouched for by the committed envelope, not by the
+  run, and the flag never mints a first outcome. The written envelope records
+  no marker for the skip, so a later `--attest --check` reports no drift; the
+  live result lists the carried checks under `skipped_checks` and `--format
+  text` prints `[SKIP]` lines. A committed failing `local_only` check still
+  keeps the envelope `fail` (exit `3`, nothing written), and a `local_only`
+  command with no counterpart in `OUT` fails. Refused (exit `1`) without
+  `--attest`, without `-o`, with `--check`, or when `OUT` is missing or
+  unparseable. Additive: no `schema_version` bump, and the default
+  (`--attest` runs every `local_only` command) is unchanged. See
+  `docs/cli/signoff.md` → "Refreshing on a host lacking the toolchain".
 - **New `klt route`: route between labelled pins of an already-placed layout**
   (#5205, 2026-11-10): `klt route <request.json>` derives endpoints from text
   labels on direct child instances of a top cell, routes two-pin nets with the
