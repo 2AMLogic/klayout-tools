@@ -236,6 +236,7 @@
         "klayout_tools.extract_parasitics",
         "klayout_tools.extract_parasitics_block",
         "klayout_tools.extract_netlist_write",
+        "klayout_tools.extract_pdk_resolve",
         "klayout_tools.extract_pin_order",
         "klayout_tools.extract_netselect",
         "klayout_tools.extract_orient",
@@ -862,6 +863,7 @@
         "klayout_tools.synthesize_arithmetic",
         "klayout_tools.synthesize_memory",
         "klayout_tools.synthesize_netlist_normalize",
+        "klayout_tools.synthesize_timeout",
         "klayout_tools.synthesize_x_scan"
       ]
     },
