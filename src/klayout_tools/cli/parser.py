@@ -2117,17 +2117,12 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
         default=None,
         metavar="PATH",
         help=(
-            "the schematic DUT netlist the schematic-side measurement is "
-            "taken on, and the `reference_netlist` this run reports (issue "
-            "#2478). Required with --measure-command. Also accepted with "
-            "--extract-only (issue #5477), where it measures nothing and "
-            "buys only the model_mismatch device-set comparison: the one "
-            "signal that names a device family the resolved deck declares "
-            "no class for, which extraction.unsupported_devices cannot see "
-            "when the family has no drawn marker layer. Rejected in "
-            "testbench mode -- there the schematic DUT is whatever every "
-            "testbench `.include`s, which is an observation rather than a "
-            "caller's claim."
+            "the schematic DUT netlist the schematic-side measurement is taken on, "
+            "and the `reference_netlist` this run reports (issue #2478). Required "
+            "with --measure-command; also accepted with --extract-only (issue #5477), "
+            "where it buys only the model_mismatch device-set comparison; rejected in "
+            "testbench mode -- there the schematic DUT is whatever every testbench "
+            "`.include`s, which is an observation rather than a caller's claim."
         ),
     )
     pex_parser.add_argument(
@@ -2192,19 +2187,14 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         default=False,
         help=(
-            "extract and report without any measurement leg (issue #3739): "
-            "no testbench or --measure-command is needed, so no placeholder "
-            "measurement lands in delta[]. The response carries "
-            "extraction/body_bias/provenance as usual, testbenches and delta "
-            'are empty, measurement.mode is "extract-only" and status is '
-            "not_checked (exit 4). Cannot be combined with testbenches, "
-            "--measure-command, --measure-timeout-s, --device-only-leg or "
-            "--flatten-schematic. May be combined with --reference-netlist "
-            "(issue #5477) to compute model_mismatch -- a device-set "
-            "comparison over both netlists' text, which needs no "
-            "measurement leg -- so an extraction missing a whole device "
-            "family is named rather than silently absent; status and the "
-            "exit code are unchanged by it. Off by default."
+            "extract and report without any measurement leg (issue #3739): no "
+            "testbench or --measure-command is needed, so no placeholder measurement "
+            "lands in delta[]. The response carries extraction/body_bias/provenance "
+            "as usual, testbenches and delta are empty, measurement.mode is "
+            '"extract-only" and status is not_checked (exit 4). Cannot be combined '
+            "with testbenches, --measure-command, --measure-timeout-s, "
+            "--device-only-leg or --flatten-schematic; may be combined with "
+            "--reference-netlist (#5477) to compute model_mismatch. Off by default."
         ),
     )
     pex_parser.add_argument(
