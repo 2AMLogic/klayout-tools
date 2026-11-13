@@ -1274,6 +1274,25 @@ the job was in flight — the job id there is the one to look up before
 resubmitting. A receipt that cannot be written is a stderr warning, not a
 failed sweep. `--format json` stdout is unchanged.
 
+**`--resume` re-attaches through the receipt, and resubmits a spent job.** On
+an unsharded request, `--resume` re-attaches to the `job_id` the receipt
+records when its `request_sha256` and `unit_count` match the run about to be
+dispatched ([#5350](https://github.com/2AMLogic/klayout-tools/issues/5350));
+any mismatch, or no receipt, submits afresh. A recorded job that has no usable
+result -- outputs gone, a terminally `failed` job, or one still `interrupted`
+after Spot reclaimed it -- is **submitted again under a new job id**, and the
+fresh launch rewrites `batch-receipt.json` with it
+([#5459](https://github.com/2AMLogic/klayout-tools/issues/5459)). Because the
+prior run already waited out `batch.interrupted_grace_s`, the re-attach reports
+a still-`interrupted` job after about one poll instead of burning another full
+window; `batch.interrupted_grace_s: 0` (grace disabled) keeps its unbounded
+wait. At most one resubmit per invocation: if the fresh job is itself reclaimed
+past the (full) grace, the run ends with `batch_job_interrupted` naming the
+*new* job id. As with a shard, resubmitting an interrupted job risks billing it
+twice should the fleet's `reconcile` later re-launch the old one; the exposure
+is bounded by the grace the first run already waited. A `batch_poll_timeout`
+job is never resubmitted -- it may still be running on the fleet.
+
 **Terminating the client does not cancel the job.** The fleet has no cancel
 primitive, so a SIGINT/SIGTERM during the wait prints one stderr line naming
 the job id, bucket and region and stating that the job is left running, then
@@ -1388,15 +1407,21 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   for both). A request whose resume is refused -- a shard map written for a
   different request (`resume_fingerprint_mismatch`; the shard count may differ, since a resume splits only the remaining units, so `--resume` is repeatable), or an
   unreadable one -- becomes an ordinary `error` entry, as it does for a single
-  request, and its siblings still run. A shard
-  still `interrupted` is re-polled first, so resuming it can wait up to another
-  `batch.interrupted_grace_s` (default 1800 s) before its replacement is
-  submitted. The aggregate envelope is unchanged.
+  request, and its siblings still run. A job
+  still `interrupted` is re-polled first, but only briefly: the prior run
+  already waited out `batch.interrupted_grace_s`, so the resume reports it
+  after about one poll and submits its replacement, rather than paying the
+  full window again -- for a shard
+  ([#5371](https://github.com/2AMLogic/klayout-tools/issues/5371)) and for an
+  unsharded single-job request
+  ([#5459](https://github.com/2AMLogic/klayout-tools/issues/5459)) alike.
+  The aggregate envelope is unchanged.
 - **An interrupted (Spot-reclaimed) shard.** Polling is bounded: a shard that
   stays `interrupted` is waited on for at most `batch.interrupted_grace_s`
   (default 1800 s, settable only in the request's `batch` block), and while it
   is polled it holds a `--max-in-flight` slot, so lowering the grace in the
-  request frees the slot sooner. The client never re-submits it itself.
+  request frees the slot sooner. The client never re-submits it mid-run (a
+  later `--resume` does, above).
   To re-run only the units with no result, re-run the same set with the same
   `-o` and `--resume` (or `--attach <batch-shards.json> --collect-partial`,
   then `--resume`). A request the *client* stopped (Ctrl-C/SIGTERM) carries
