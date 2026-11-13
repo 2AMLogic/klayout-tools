@@ -3574,17 +3574,16 @@ def _add_deck_parser(subparsers: argparse._SubParsersAction) -> None:
 
 
 def _add_evidence_parser(subparsers: argparse._SubParsersAction) -> None:
-    """Register the ``evidence`` verb (issue #4044): the ``evidence-record/1``
-    writer per docs/design/sim-evidence-discipline-spike.md, plus lint/claims."""
+    """Register the ``evidence`` verb (#4044): the ``evidence-record/1`` writer
+    (docs/design/sim-evidence-discipline-spike.md) + lint/claims/render/canon."""
     evidence_parser = subparsers.add_parser(
         "evidence",
-        help="write an evidence-record/1 file around a finished klt sim / "
-        "klt pex report",
+        help="evidence records around finished klt sim / klt pex runs",
         description=(
             "Evidence records around finished `klt sim` / `klt pex` runs. "
             "`record` wraps the untouched report with git provenance, a "
-            "dirty-inputs flag, pins, environment provenance and the "
-            "per-corner deck/log snapshot. Never overwrites a record."
+            "dirty-inputs flag, pins and the per-corner snapshot, never "
+            "overwriting. `canonicalize` emits a report's `--rerun` view."
         ),
     )
     evidence_sub = evidence_parser.add_subparsers(
@@ -3683,6 +3682,7 @@ def _add_evidence_parser(subparsers: argparse._SubParsersAction) -> None:
     lint_parser.set_defaults(func=evidence_cmd.run_lint)
     evidence_cmd.add_claims_parser(evidence_sub, _add_format_arg)
     evidence_cmd.add_render_parser(evidence_sub, _add_format_arg)
+    evidence_cmd.add_canonicalize_parser(evidence_sub, _add_format_arg)
 
 
 def _add_artifact_parser(subparsers: argparse._SubParsersAction) -> None:

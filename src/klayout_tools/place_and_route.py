@@ -68,15 +68,14 @@ from ._paths import _tcl_net_list as _tcl_net_list
 from ._power_activity import power_basis_block, validate_power_activity
 from ._provenance import INPUT_ROLE_NETLIST, build_provenance, content_hash
 from ._report_verify import (
-    VOLATILE_FLOW_PATHS,
     build_check_result,
-    build_rerun_result,
     get_path,
     hash_check,
     load_committed_report,
     strip_keys,
 )
 from .env_provenance import find_repo_root, repo_relative_path
+from .evidence_canonicalize import rerun_result_for
 from .lef_header import read_lef_header as read_lef_header
 from .pdk_cells import list_lib_corners
 
@@ -3352,13 +3351,6 @@ def rerun_place_and_route_report(
         backend=backend,
         reuse_outputs_dir=True,
     )
-    return build_rerun_result(
-        report_path=report_path,
-        committed=committed,
-        fresh=fresh,
-        exclude=VOLATILE_FLOW_PATHS,
-        committed_for_diff=_canonicalize_place_and_route_report_for_rerun_diff(
-            committed
-        ),
-        fresh_for_diff=_canonicalize_place_and_route_report_for_rerun_diff(fresh),
+    return rerun_result_for(
+        "place-and-route", report_path, committed=committed, fresh=fresh
     )

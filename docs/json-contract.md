@@ -1596,6 +1596,12 @@ No field is added or removed by this list; `schema_version` is unchanged.
 Verb-specific extras (e.g. `engine_version` for the flow verbs) are
 documented with their verb.
 
+**Do not copy this table into a consumer.** `klt evidence canonicalize
+--kind <verb> REPORT` emits the report with these paths (and the verb's own
+extras and bookkeeping keys) already removed — the whole view `--rerun`
+diffs, as a document to commit and diff whole. See
+[`cli/evidence.md`](cli/evidence.md#klt-evidence-canonicalize) (issue #5541).
+
 ## Verifying committed evidence: `--check` / `--rerun`
 
 Seven verbs let a consumer verify that a previously committed `--format json`
@@ -1618,6 +1624,13 @@ All six share one contract:
   and compares them. No engine runs.
 - **Full mode (`--check … --rerun`)** re-runs the analysis and diffs
   verdict-bearing fields against the committed report.
+- **The view full mode diffs is available on its own** (issue #5541): `klt
+  evidence canonicalize --kind <verb> REPORT` emits a report reduced to
+  exactly those fields, so a consumer that commits a report and guards it
+  with its own regenerate-and-diff check does not re-implement the exclusion
+  list. The same definition feeds both, so they cannot diverge. One caveat,
+  for `lvs` only, is documented with the sub-verb in
+  [`cli/evidence.md`](cli/evidence.md#klt-evidence-canonicalize).
 - **`klt signoff` has one mode, not two** (issue #2249): re-grading the
   manifest *is* the whole verification — there is no engine run to hold back
   — so `--check` alone produces the full-mode `{status, drift, fresh}` shape

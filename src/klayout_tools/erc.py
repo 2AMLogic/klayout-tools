@@ -64,7 +64,6 @@ from ._paths import (
 from ._provenance import build_provenance, content_hash
 from ._report_verify import (
     build_check_result,
-    build_rerun_result,
     get_path,
     hash_check,
     resolve_committed_path,
@@ -114,6 +113,7 @@ from .erc_well_regions import (  # noqa: F401 -- _cells_region is re-exported fo
     _tie_well_region,
     _well_assertion_coverage_entry,
 )
+from .evidence_canonicalize import rerun_result_for
 from .extract import (
     _capacitor_plate_regions,
     _capacitor_top_via_overlap_region,
@@ -3521,4 +3521,4 @@ def rerun_erc_report(report_path: str) -> dict[str, Any]:
         omit_antenna_tables=bool(committed.get("antenna_tables_omitted")),
         compact="compact" in committed,
     )
-    return build_rerun_result(report_path=report_path, committed=committed, fresh=fresh)
+    return rerun_result_for("erc", report_path, committed=committed, fresh=fresh)

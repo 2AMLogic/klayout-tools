@@ -52,7 +52,6 @@ from ._paths import validate_request_shape as _shared_validate_request_shape
 from ._provenance import build_provenance, content_hash
 from ._report_verify import (
     build_check_result,
-    build_rerun_result,
     get_path,
     resolve_committed_path,
 )
@@ -98,6 +97,7 @@ from .drc_layer_selection import (
 )
 from .drc_report_check import _report_hash_checks
 from .drc_text_exempt import text_exempt
+from .evidence_canonicalize import rerun_result_for
 from .layers import layers_report
 from .metrics import is_registered
 from .pdk import PdkNotFoundError, find_pdk_for_deck
@@ -2713,7 +2713,7 @@ def rerun_drc_report(
             tile=_recorded_tile(committed),
         )
 
-    return build_rerun_result(report_path=report_path, committed=committed, fresh=fresh)
+    return rerun_result_for("drc", report_path, committed=committed, fresh=fresh)
 
 
 def _attribute_to_instance(

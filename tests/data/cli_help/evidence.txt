@@ -1,10 +1,10 @@
 Evidence records around finished `klt sim` / `klt pex` runs. `record` wraps
-the untouched report with git provenance, a dirty-inputs flag, pins,
-environment provenance and the per-corner deck/log snapshot. Never overwrites
-a record.
+the untouched report with git provenance, a dirty-inputs flag, pins and the
+per-corner snapshot, never overwriting. `canonicalize` emits a report's
+`--rerun` view.
 
 positional arguments:
-  <subcommand> record write one evidence-record/1 file lint lint the evidence-record/1 files under a repo claims check documents that cite evidence records against the records render fill marked tables in docs from evidence records
+  <subcommand> record write one evidence-record/1 file lint lint the evidence-record/1 files under a repo claims check documents that cite evidence records against the records render fill marked tables in docs from evidence records canonicalize emit the view `--check ... --rerun` diffs, for committing
 
 options:
   -h, --help show this help message and exit
@@ -81,3 +81,22 @@ options:
   --spec FILE.json table spec, keyed by block id
   --check write nothing; exit 1 if any block is stale
   --format {text,json} output format (default: text)
+
+--- klt evidence canonicalize ---
+
+Emit a klt report reduced to exactly the fields `klt <kind> --check REPORT
+--rerun` compares: run-scoped artifact paths and machine-local provenance
+removed, verdict fields untouched, keys sorted. Commit this instead of hand-
+maintaining a copy of the exclusion list (issue #5541). Two canonical views of
+one kind compare equal exactly when --rerun reports no drift. REPORT is a path
+or `-` for stdin. Caveat: `klt lvs --rerun` also tolerates fields the
+committed report never carried, which depends on the pair and cannot be
+expressed on one report -- see docs/cli/evidence.md.
+
+positional arguments:
+  REPORT klt --format json report, or `-` for stdin
+
+options:
+  -h, --help show this help message and exit
+  --kind {drc,lvs,erc,extract,synthesize,place-and-route,equiv} which verb produced REPORT (a report does not name its own verb)
+  --format {json,text} output format (default: json -- the canonical report itself)

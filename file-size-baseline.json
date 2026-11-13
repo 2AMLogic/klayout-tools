@@ -285,7 +285,7 @@
     },
     {
       "path": "src/klayout_tools/equiv.py",
-      "lines": 1132
+      "lines": 1125
     },
     {
       "path": "src/klayout_tools/equiv_replay.py",
@@ -309,7 +309,7 @@
     },
     {
       "path": "src/klayout_tools/extract.py",
-      "lines": 10779
+      "lines": 10773
     },
     {
       "path": "src/klayout_tools/extract_abstract.py",
@@ -525,7 +525,7 @@
     },
     {
       "path": "src/klayout_tools/place_and_route.py",
-      "lines": 3364
+      "lines": 3356
     },
     {
       "path": "src/klayout_tools/place_and_route_batch.py",
@@ -681,7 +681,7 @@
     },
     {
       "path": "src/klayout_tools/synthesize.py",
-      "lines": 4676
+      "lines": 4668
     },
     {
       "path": "src/klayout_tools/synthesize_arithmetic.py",
