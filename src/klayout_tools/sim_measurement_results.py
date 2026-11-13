@@ -23,6 +23,7 @@ from . import (
     sim_eye,
     sim_search,
     sim_settled,
+    sim_slope_band_meas,
     sim_snm_meas,
     sim_step_resolution,
     sim_steps,
@@ -58,6 +59,7 @@ def _corner_measurement_results(
     cycle_means: dict[int, sim_cycle_mean.CycleMeanOutcome] | None = None,
     transfers: dict[int, sim_transfer_meas.TransferOutcome] | None = None,
     snms: dict[int, sim_snm_meas.SnmOutcome] | None = None,
+    slope_bands: dict[int, sim_slope_band_meas.SlopeBandOutcome] | None = None,
     eyes: dict[int, sim_eye.EyeOutcome] | None = None,
     step_resolutions: (
         dict[int, sim_step_resolution.StepResolutionOutcome] | None
@@ -130,7 +132,12 @@ def _corner_measurement_results(
         ),
         (sim_transfer_meas.is_transfer, _transfer_measurement_result, transfers),
         (sim_tian.is_tian, _sim._tian_measurement_result, tians),
-        (sim_snm_meas.is_snm, _sim._snm_measurement_result, snms),
+        (sim_snm_meas.is_snm, sim_snm_meas.snm_measurement_result, snms),
+        (
+            sim_slope_band_meas.is_slope_band,
+            sim_slope_band_meas.slope_band_measurement_result,
+            slope_bands,
+        ),
         (sim_eye.is_eye, _sim._eye_measurement_result, eyes),
         (
             sim_step_resolution.is_step_resolution,
