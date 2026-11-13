@@ -4219,6 +4219,13 @@ written before `%include` was followed carry no `tree` block for such a deck,
 and `--check` keeps comparing only their entry hash until they are
 regenerated.
 
+One `%include` form is deliberately not followed: a path built by KLayout's
+`$(...)` expression interpolation (`# %include $("rule_decks")/a.drc`). The
+path only exists once KLayout evaluates the expression, which a static scan
+cannot do, so such a file is left out of `file_count` and the tree hash
+rather than guessed at — an edit to it is not drift `--check` can see. The
+same already holds for a computed Ruby `require "#{dir}/x"`.
+
 #### Negative control
 
 `--negative-control LAYOUT` (request field `negative_control`) runs the same

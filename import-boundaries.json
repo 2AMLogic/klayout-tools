@@ -143,6 +143,7 @@
         "klayout_tools.drc",
         "klayout_tools.drc_check_kinds",
         "klayout_tools.drc_crosscheck",
+        "klayout_tools.drc_deck_includes",
         "klayout_tools.drc_klayout_abort",
         "klayout_tools.drc_klayout_app",
         "klayout_tools.drc_klayout_engine",
