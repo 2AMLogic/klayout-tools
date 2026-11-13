@@ -704,7 +704,7 @@ identically everywhere — and **refuses the evidence**:
 | Mode | Effect |
 | ---- | ------ |
 | Envelope aggregation | That check's `passed` is `false` whatever its own `status` says, and `checks[].detail.nothing_checked_reasons` names why |
-| Tier-verdict report (`--manifest`) | The item renders `"unmet"` with `reason: "nothing_checked"` and no citation |
+| Tier-verdict report (`--manifest`) | The item renders `"unmet"` with `reason: "nothing_checked"` and no citation, carrying `detail.nothing_checked_reasons` and `detail.cited_evidence` |
 | Fleet roll-up (`--fleet`) | Inherited: the block's `blocking_item` reports that item and reason |
 
 ```
@@ -745,6 +745,37 @@ its own terms, it simply measured nothing, and the fix is to re-run it with
 something to check. Where both apply, the more actionable reason wins:
 `check_failed` (the run did fail) and `wrong_kind` ("cite a different
 artifact") both take precedence over `nothing_checked`.
+
+**The envelope's own status token does not decide this** (issue #5479). A
+producer that has adopted the common rollup rule reports the zero-coverage
+row's fixed token — `status: "not_checked"`, exit 4, see
+[`../coverage-contract.md`](../coverage-contract.md) — for a run that checked
+nothing, rather than its success word. Such a report is not a *passing*
+envelope, so until issue #5479 it was refused one step earlier and rendered
+`check_failed`: "a check ran and failed" for a run that ran nothing, which is
+exactly the conflation above forbids, and which made `nothing_checked`
+unreachable for every current producer (the reason was only reachable for a
+pre-rollup envelope still reporting its success word on an empty run). Both
+tokens now render `nothing_checked`, on the same three conditions — the
+`coverage` block says `nothing_checked: true`, the item accepts the kind, and
+no registered `critical: true` metric failed. The two precedence rules are
+unchanged by it: a `critical_metric_blockers` entry still renders
+`check_failed` whatever the status token, and `wrong_kind` still outranks a
+thin report of an artifact this item does not accept.
+
+**An unmet item names what was read.** `citation` is present only on a
+`"met"` item — that contract is unchanged — so a `nothing_checked` item
+carries the same information additively under `detail` instead (issue #5479):
+
+| Key | Value |
+| --- | ----- |
+| `detail.nothing_checked_reasons` | The envelope's own stable reason codes, e.g. `["no_delta_rows"]` — the same list the `checks[]` path reports, through the same accessor, so an unrecognised code from a newer producer survives here too |
+| `detail.cited_evidence` | The block a `"met"` citation would have carried: `file`/`command`, `kind`, `check_status` (the envelope's own token), `content_hash`, `input_verified`, `exit_status`, plus the same per-kind passthroughs — a `drc` report's `coverage`, a `pex` report's `body_bias` (issue #1983) |
+
+Both keys are present on **either** route into the reason, and neither is
+consulted by any grading rule. Without `cited_evidence` the committed record
+showed a verdict with no artifact behind it: a reader could not tell *which*
+extraction was cited, or that one had been read at all.
 
 ### A sim envelope that applied no bound (`no_limits_checked`)
 
@@ -2782,6 +2813,25 @@ unannotated (but passing) regression cited for item 7 renders `"unmet"` with
 what is missing: `"wrong_kind"` means "cite a different artifact",
 `"not_post_layout"` means "re-run *this* artifact against the layout".
 
+**`nothing_checked` vs. both of them** (issue #5479). The third thing that
+can be wrong with an item-7 citation is that the cited `klt pex` report
+measured nothing. `klt pex --extract-only` (issue #3739) exists precisely to
+produce one: it runs the extraction leg and does not attempt the measurement
+leg, so `delta` is `[]`, `measurement.mode` is `"extract-only"`, and the
+common rollup reports `status: "not_checked"` (exit 4). Cited for item 7 that
+renders `"unmet"` with `reason: "nothing_checked"` — a *third* distinct
+remedy, completing the set issue #826's rule asks for: `"wrong_kind"` means
+"cite a different artifact", `"not_post_layout"` means "re-run *this*
+artifact against the layout", and `"nothing_checked"` means "run a
+measurement leg". It is deliberately not `check_failed`: no `delta[]` row
+missed its tolerance, because no row was compared. The item carries
+`detail.cited_evidence` naming the extraction that *was* read — its file,
+`content_hash` and `body_bias` statement — so a committed record of an
+honestly-empty item 7 still says which extraction backs it. An
+extraction-only report can never render item 7 `"met"`; see "A check that
+checked nothing is refused, not reported" above for the shared rule and both
+routes into it.
+
 Only the literal JSON boolean `true` in `environment.sdf.annotated` grants
 annotation credit. False, null, missing fields, strings (including `"true"`
 and `"false"`), numbers, arrays, and objects do not qualify. Malformed optional
@@ -4217,7 +4267,7 @@ actually ran and failed):
 | `"lef_power_pin_missing"` | no  | **Item 11 only** (issue #2839). No `klt lef-abstract` envelope is cited, or its abstract has no `PIN` named for the supply. |
 | `"lef_power_pin_mismatch"` | no | **Item 11 only** (issue #2839). The LEF pin disagrees with the GDS port: its `USE` is not `POWER`/`GROUND` or differs, its `PORT` is not drawn geometry, it came from another GDS layer, its rectangles do not touch the port, or the macro `SIZE` differs from the socket outline. `detail.power_ports.findings[].aspect` says which. |
 | `"not_post_layout"`       | yes | The evidence resolved to a recognised, *passing* envelope **of a kind this item accepts**, but that run is not the post-layout run the item requires — today, a `klt functional-verification` regression cited for item 7 that ran without SDF back-annotation (`environment.sdf` is `null`), i.e. the pre-layout zero-delay simulation item 7's own checklist text excludes. Deliberately distinct from `"wrong_kind"`: the artifact *is* the right one, it just has to be re-run against the post-route netlist with SDF timing. |
-| `"nothing_checked"`       | yes | The evidence resolved to a recognised, *passing* envelope of a kind this item accepts, whose own `coverage` block states that the run checked **nothing** (`coverage.nothing_checked: true`, issue #1996) — a DRC deck gated behind an unset `--deck-var`, a `klt sim` corner matrix that expanded to zero corners, a `klt pex` run with no `delta[]` row. The cited check did not fail on its own terms; it measured nothing, so its passing `status` says nothing about the design. See "A check that checked nothing is refused, not reported" above. |
+| `"nothing_checked"`       | yes | The evidence resolved to a recognised envelope of a kind this item accepts, whose own `coverage` block states that the run checked **nothing** (`coverage.nothing_checked: true`, issue #1996) — a DRC deck gated behind an unset `--deck-var`, a `klt sim` corner matrix that expanded to zero corners, a `klt pex` run with no `delta[]` row (including a `klt pex --extract-only` report, issue #3739). Rendered whether the envelope's own `status` is the kind's success token or the common rollup's zero-coverage token `"not_checked"` (issue #5479) — the two differ only in what the producer called the run, and a run that measured nothing is not a run that failed. The cited check did not fail on its own terms; it measured nothing, so its `status` says nothing about the design. The item carries `detail.nothing_checked_reasons` (the envelope's own reason codes) and `detail.cited_evidence` (which artifact was read, in the same shape a `met` `citation` has); `citation` itself stays `null`, as on every unmet item. See "A check that checked nothing is refused, not reported" above. |
 | `"undersized_sample"`     | yes | **(issue #2467)** **Item 6 only** today. The evidence resolved to a recognised, *passing* `klt yield` envelope, but at least one of its own measurements reports `sample_size.verdict: "insufficient"` — the report stating, about itself, that the draw it published is not sized for the claim (`required_n`/`required_n_for_target` above the `n` actually drawn; see [`yield.md`](yield.md)'s "Sample-size verdict"). No contradiction with its `status`: that token answers only "did every *declared* `target_yield` hold at the stated confidence", and `"reported"` means none was declared at all, so it can never fail. The cited check did not fail on its own terms — draw the `required_n` the report names and re-run *this* campaign, do not go looking for a design defect. The item's `detail.yield_campaign` names which measurements are undersized. See "Campaign discipline on item 6" below. |
 | `"negative_control_not_detected"` | yes | **(issue #2467)** **Item 6 only** today. The cited `klt yield` campaign *did* declare a `negative_control` — a seeded, known-bad variant's own samples — and that self-check **failed**: `negative_control.verdict` is `"not_detected"`, i.e. the deliberate defect did not show up as a statistically distinguishable degradation ([`yield.md`](yield.md)'s "Negative control"). The campaign has demonstrated that its statistics cannot detect a degraded design, which is the opposite of what item 6's "deterministic negative control" requirement asks the citation to establish. Deliberately **not** rendered for a campaign that declared no control at all — that state is *disclosed* on the `"met"` citation instead (`citation.yield_campaign.negative_control: "not_declared"`), never refused. See "Campaign discipline on item 6" below. |
 | `"coverage_unknown"`      | yes | The evidence resolved to a recognised, *passing* envelope of a kind this item accepts, but its coverage cannot be classified: either its `coverage` block explicitly declares `known: false`, or (the legacy path) it is a KLayout-engine DRC result carrying a raw `violations` list with no `coverage` block at all to consult. The cited check did not fail on its own terms; it just does not establish whether the requested work was covered. |

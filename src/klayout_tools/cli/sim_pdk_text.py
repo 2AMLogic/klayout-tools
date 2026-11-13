@@ -1,9 +1,18 @@
-"""Text-mode PDK lines for ``klt sim`` (issues #2564, #3946, #4758).
+"""Text-mode PDK lines for ``klt sim`` (issues #2564, #3946, #4758, #5449).
 
 Split out of :mod:`klayout_tools.cli.sim_cmd` (file-size ratchet).
 """
 
 from __future__ import annotations
+
+from ..sim_pdk_ambiguity import text_remedy_for
+
+
+def _resolved_backend(report: dict) -> str | None:
+    """Which backend actually ran, per ``environment.backend.resolved``
+    (issue #2977), or ``None`` for a report carrying no such block."""
+    backend = (report.get("environment") or {}).get("backend")
+    return backend.get("resolved") if isinstance(backend, dict) else None
 
 
 def _print_pdk(report: dict) -> None:
@@ -29,10 +38,14 @@ def _print_pdk(report: dict) -> None:
     )
     ambiguous = pdk_block.get("ambiguous_sources")
     if ambiguous:
+        # Issue #5449: on `batch` both pins this line used to name are
+        # refused with `models_pdk_root_host_path`, so name the one that
+        # works there -- $PDK_ROOT, which this client reads and the runner
+        # never sees. Every other backend keeps the #2564 wording.
         print(
             f"pdk: WARNING: variant also installed under "
             f"{', '.join(ambiguous)} -- resolution is first-match-wins; "
-            f"pin --pdk-root (or models.pdk_root) to choose deliberately"
+            f"{text_remedy_for(_resolved_backend(report))}"
         )
 
 

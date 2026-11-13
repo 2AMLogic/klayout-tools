@@ -1,7 +1,7 @@
 """Runset-correspondence notes for the curated sg13g2 deck (issue #5212).
 
 Kept out of ``sg13g2.py`` (file-size ratchet); that module applies
-:func:`apply` to ``DECK`` with a single line. The notes surface as
+:func:`apply` to ``DECK`` alongside its other hooks. The notes surface as
 ``runset_correspondence`` in a ``klt drc`` report, only for rules that fired.
 """
 
@@ -19,13 +19,15 @@ RUNSET_NOTES: dict[str, dict[str, object]] = {
         "implemented_by_pdk_runset": True,
         "runset_file": _MAXIMAL_RUNSET,
         "note": (
-            "PDK rule NW.c first removes P+ Activ that interacts with a "
-            "text-recognised SVaricap (`lNw_c = PActLV.ext_not("
-            "PActLV.ext_interacting(SVaricap))`, SVaricap = NWell under an "
-            '"SVaricap" text label on a GatPoly stack); this deck checks every '
-            "P+ Activ unconditionally, so findings whose source_cell is a PDK "
-            "SVaricap device are expected to be absent from the runset "
-            "(deck over-report, not a real enclosure violation)."
+            "PDK rule NW.c measures `lNw_c` (P+ Activ outside ThickGateOx, "
+            "minus whole polygons interacting with a text-recognised "
+            "SVaricap) against `NWell_Nsram` -- NWell outside the SRAM "
+            "marker (25/0). This deck models the SVaricap carve-out "
+            "geometrically (issue #5442, `decks/sg13g2_svaricap.py`) but "
+            "checks against plain NWell, so a P+ Activ under-enclosed only "
+            "by an SRAM-marked NWell is reported here and is expected to be "
+            "absent from the runset (deck over-report, not a real enclosure "
+            "violation)."
         ),
     },
 }
