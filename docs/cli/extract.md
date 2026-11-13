@@ -2308,9 +2308,12 @@ Points worth knowing:
   schematic-equivalent `D` card whose model token is the deck entry's own
   name (`D$1 vsubs CATH diode_nd2ps_06v0 A=1P P=4U`), exactly the fidelity
   level the MOS/bipolar recognisers already provide — a consumer simulating
-  the netlist supplies a matching `.model`. `--pdk` model binding
-  (see "SPICE model binding" below) does **not** bind diode classes; like
-  gf180mcu's `bjt`, they keep the bare primitive form.
+  the netlist supplies a matching `.model`. `--pdk` model binding (see
+  "SPICE model binding" below) binds **one** diode family today: `sg13g2`'s
+  `dantenna`/`dpantenna` are written as `X … <class> l=… w=…` calls on their
+  real PDK subcircuits (issue #5491). Every other deck's diode classes keep
+  the bare primitive form, like gf180mcu's `bjt`. Without `--pdk`, every
+  deck — `sg13g2` included — still writes the bare `D` card above.
 - **Card spelling: `A=`/`P=` in the extraction, `area=`/`pj=` for ngspice.**
   The written netlist keeps KLayout's `A=`/`P=` instance parameters because
   `klt lvs` reads it back through KLayout's SPICE reader, which reads
@@ -4795,9 +4798,10 @@ X$9 vsubs BASE EMIT sky130_fd_pr__pnp_05v5_W0p68L0p68
 ```
 
 The device is bound via small curated per-class tables in
-`src/klayout_tools/pdk_models.py` (see that module's docstring for the exact
-provenance of every bound subcircuit name and parameter spelling, each read
-off a real fetched PDK install rather than assumed) and a
+`src/klayout_tools/pdk_models.py` — and, for junction diodes,
+`src/klayout_tools/pdk_diode_models.py` — (see those modules' docstrings for
+the exact provenance of every bound subcircuit name and parameter spelling,
+each read off a real fetched PDK install rather than assumed) and a
 `kdb.NetlistSpiceWriterDelegate` subclass that overrides KLayout's default
 primitive-card writer only for classes present in the resolved tables.
 
@@ -4844,6 +4848,7 @@ recognised analog device classes):
 | Capacitor (MiM) | ✅ | ✅ | ✅ `cap_cmim`/`rfcmim` (issue #1470) | `l`/`w` (sky130 or sg13g2) or `c_length`/`c_width` (gf180mcu), derived from the extracted plate area+perimeter |
 | Capacitor (MoM) | — (no MoM recognition in that deck) | — (no MoM recognition in that deck) | ❌ (bare, unmodelled-value card — `cap_cmomi`/`cap_cmomf` are recognised as of issue #1466, on `sg13g2` **and** `sg13cmos5l`, with no `C` at all to bind; a curated `--pdk` model table is out of scope until this device gets a real compact model to bind against) | n/a |
 | Bipolar | ✅ (`pnp`) | ❌ (carve-out) | — (no bipolar recognition in that deck yet) | none — a geometry-named variant selected by emitter area |
+| Junction diode | ❌ (bare `D` card — see the sg13g2 note below for what is and is not settled) | ❌ (bare `D` card) | ✅ `dantenna`/`dpantenna` (issue #5491) | `l`/`w`, derived from the extracted junction area+perimeter |
 
 MOS flavour note (issue #1111, extended to sky130 by issue #1369): gf180mcu's
 and sky130's `nfet`/`pfet` bindings are no longer a single fixed subcircuit
@@ -4887,6 +4892,37 @@ computes from that flavour's own sheet rho either way. The same is true of
 (`tm6k`/`tm9k`/`tm11k`/`tm30k`, issue #1640) — all seven have a real,
 two-terminal `.subckt` in `sm141064.ngspice` (confirmed the same way), so
 none of them fall back to a bare `R` card under `--pdk` either.
+
+sg13g2 antenna-diode note (issue #5491): `dantenna`/`dpantenna` bind to their
+real, identically-named two-terminal subcircuits (`X … dpantenna l=4.5U
+w=4.5U`, anode first). Unlike every other unbound class, the bare `D` card
+this replaced was not merely low-fidelity, it was **unloadable**: a real
+fetched IHP-Open-PDK v0.3.0 install defines both names *only* as `.subckt`s in
+`libs.tech/ngspice/models/diodes.lib` — there is no `.model dantenna` or
+`.model dpantenna` anywhere — so ngspice stopped at netlist load with `could
+not find a valid modelname`, and `klt pex` reported `ngspice_fatal` on the
+extracted leg of every `delta[]` row for any pad-connected cell.
+
+The junction geometry is stated as the **equivalent rectangle** of the
+extracted junction's own area and perimeter — the same recovery the MiM
+capacitor binding uses for a plate (`A=20.25P P=18U` → `l=4.5U w=4.5U`;
+`A=4P P=8U` → `l=2U w=2U`). For these two cells that is exact rather than an
+approximation: both use `l`/`w` only through `DEV_A=(l*w)/1p` and
+`DEV_P=(l+w)/0.5u`, so any `(l, w)` reproducing the measured area and
+perimeter hands the underlying `.MODEL` cards identical values, whatever the
+drawn shape was. A junction "rounder" than any real rectangle falls back to
+the `sqrt(area)` square, as for a capacitor plate. `DEV_C` (corner count) is
+left at the subcircuit default of 4 — the extractor does not measure it.
+
+`klt lvs` reads the same call back (`docs/cli/lvs.md` → "Per-deck coverage"):
+`X … dantenna l=.. w=..` converts to `D … dantenna A=l·w P=2(l+w)`, so a
+reference netlist calling the PDK subcircuit compares on real area and
+perimeter against the layout-extracted side. sky130's and gf180mcu's diode
+classes are deliberately **not** bound in this direction: whether their
+class-named bare `D` cards resolve against those PDKs was not re-verified
+when this landed, so no forward binding was fabricated for them (their
+subcircuits are still recognised on the *ingestion* side, where sky130's have
+been curated since issue #4319).
 
 sg13g2 resistor note (issue #1457): `rsil`/`rppd`/`rhigh` bind to their real,
 identically-named 3-terminal subcircuits (`X … rsil l=… w=…`, the bulk-tie

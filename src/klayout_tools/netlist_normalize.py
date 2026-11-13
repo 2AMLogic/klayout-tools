@@ -141,6 +141,7 @@ from typing import Any, NamedTuple
 
 from . import _spice_number as spice_number
 from ._capacitor_mf import capacitor_mf_is_m_alias
+from ._diode_card import convert_diode_card
 from ._jsonnum import is_number
 from ._paths import fold_spice_continuations
 from .pdk_models import (
@@ -851,7 +852,7 @@ def _convert_passive_or_bipolar_card(
     diode, an ``inductor``/``varactor`` call (issue #3206) or, otherwise, a
     bipolar."""
     if lookup.kind == "diode":
-        return _convert_diode_card(
+        return convert_diode_card(
             instance, nodes, subckt_name, lookup, params, geometry_style=geometry_style
         )
     if lookup.kind in _PASSIVE_X_TERMINALS:
@@ -1269,80 +1270,6 @@ def _convert_capacitor_card(
         f"{instance}_m{j} {' '.join(nodes)} 0 {lookup.device_class}{extra}"
         for j in range(multiplier)
     )
-
-
-def _parse_um2(
-    raw_value: str,
-    *,
-    device: str,
-    param: str,
-    geometry_style: str | None = None,
-) -> float:
-    """Parse a SPICE area literal to square micrometres, with the same
-    bare-literal convention as :func:`_parse_um` (a suffixed/exponent literal
-    is SI m^2; a bare one is already um^2 under a ``BARE_UM`` deck such as
-    sky130's ``.option scale=1.0u``)."""
-    match = spice_number.NUMBER_RE.match(raw_value.strip())
-    if match is None:
-        raise NormalizeError(
-            f"device '{device}': parameter '{param}' value '{raw_value}' is "
-            "not a plain numeric literal"
-        )
-    mantissa_text, raw_suffix = match.group(1), match.group(2)
-    mantissa = float(mantissa_text)
-    if not raw_suffix and "e" not in mantissa_text.lower():
-        if geometry_style is None:
-            raise NormalizeError(
-                f"device '{device}': parameter '{param}' value '{raw_value}' "
-                "has no unit suffix or exponent, so it is ambiguous whether it "
-                "is SI m^2 or already um^2 under an ambient '.option scale' -- "
-                'pass reference.deck (e.g. "sky130") or write an explicit '
-                "unit-suffixed literal (e.g. area=1p)"
-            )
-        if geometry_style == GEOMETRY_STYLE_BARE_UM:
-            return mantissa
-    return mantissa * spice_number.suffix_scale(raw_suffix) * 1e12
-
-
-def _convert_diode_card(
-    instance: str,
-    nodes: list[str],
-    subckt_name: str,
-    lookup: DeviceLookup,
-    params: dict[str, str],
-    *,
-    geometry_style: str | None = None,
-) -> str:
-    """Convert a PDK junction-diode call (``X<n> anode cathode <subckt>
-    area=.. perim=..``, issue #4319) to a plain ``D<n> anode cathode <class>
-    A=.. P=..`` card, which KLayout's reader reads as ``DeviceClassDiode``
-    (terminals ``A``, ``C``; parameters ``A`` um^2, ``P`` um) -- the class the
-    layout-side ``DeviceExtractorDiode`` emits. ``perim`` may be spelled
-    ``pj``. An omitted parameter is left off the card (class default).
-    ``mult``/``m`` > 1 is rejected, as for resistors/capacitors."""
-    if len(nodes) != 2:
-        raise NormalizeError(
-            f"device '{instance}' (subcircuit '{subckt_name}'): expected 2 "
-            f"terminals (anode cathode), found {len(nodes)} "
-            f"({' '.join(nodes) or '<none>'})"
-        )
-    _reject_multiplicity(instance, subckt_name, params)
-    extra = ""
-    if "area" in params:
-        area_um2 = _parse_um2(
-            params["area"],
-            device=instance,
-            param="area",
-            geometry_style=geometry_style,
-        )
-        extra += f" A={_format_um2(area_um2)}"
-    perim = params.get("perim", params.get("pj"))
-    if perim is not None:
-        perim_um = _parse_um(
-            perim, device=instance, param="perim", geometry_style=geometry_style
-        )
-        extra += f" P={_format_um(perim_um)}"
-    return f"{instance} {' '.join(nodes)} {lookup.device_class}{extra}"
 
 
 def _convert_bipolar_card(
