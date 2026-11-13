@@ -77,7 +77,6 @@ from __future__ import annotations
 import contextlib
 import functools
 import hashlib
-import itertools
 import json
 import math
 import os
@@ -103,7 +102,6 @@ from . import (
     sim_crossings,
     sim_cycle_mean,
     sim_decks,
-    sim_echo_messages,
     sim_energy,
     sim_eye,
     sim_injected,
@@ -143,6 +141,7 @@ from . import remote_transport as remote_transport
 from . import sim_adapt as sim_adapt
 from . import sim_analysis_overrides as _sao
 from . import sim_bin_range as sim_bin_range
+from . import sim_cause as sim_cause
 from . import sim_op_check as sim_op_check
 from . import sim_peak_rss as sim_peak_rss
 from . import sim_provenance as sim_provenance
@@ -195,11 +194,34 @@ from .sim_batch_async import (
 )
 from .sim_batch_async import submit_only as _submit_batch_only
 from .sim_batch_features import attach_models_lib_comparison, pop_remote_diagnostics
-from .sim_cause import _MEAS_ABSENT_CAUSE_RE, _cause_suffix, _with_fatal_error_cause
 from .sim_convergence_retry import is_retryable_convergence_failure, note_not_retried
+
+#: Moved to the ``sim_corner_*`` modules (issue #5428) so this module stays
+#: under its per-file size ratchet; re-exported here -- self-aliased where
+#: nothing below calls them -- so ``klayout_tools.sim.<name>`` keeps working.
+from .sim_corner_axes import CORNER_OPTION_NAMES as CORNER_OPTION_NAMES
+from .sim_corner_axes import _matches_exclude
+from .sim_corner_axes import _parse_process_entry as _parse_process_entry
 from .sim_corner_keys import unknown_key_warnings
+from .sim_corner_point import (
+    CornerPoint,
+    _format_param_value,
+    _ic_report_field,
+    _nodeset_report_field,
+    _options_report_field,
+    _params_report_field,
+    _validate_param_name,
+    _validate_param_scalar,
+)
+from .sim_corner_variants import _parse_variants as _parse_variants
+from .sim_corners import (
+    _corner_points_from_wire,
+    _expand_corners,
+    _normalize_nodeset_values,
+)
+from .sim_corners import _corner_points_to_wire as _corner_points_to_wire
 from .sim_decks import run_deck_request
-from .sim_echo_messages import echo_unsupported_message, zipped_length_message
+from .sim_echo_messages import echo_unsupported_message
 from .sim_expr_hint import attach_expr_runner_hint as _attach_expr_runner_hint
 from .sim_osdi_pin import osdi_pdk_root_pin
 from .sim_osdi_pin import resolve_osdi_preload as _resolve_osdi_preload
@@ -360,6 +382,7 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         "model_bin_range",
         "model_bin_range_preflight",
         "ngspice_fatal",
+        "netlist_title_line",
         "no_such_vector",
         # ngspice's 99-calls-per-file `par()` cap (issue #4084); a log
         # classifier (error) and a pre-flight deck count (warning).
@@ -1198,13 +1221,20 @@ _DIAGNOSTIC_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ),
 )
 
+#: Causes that supersede the `model_bin_range` reading of the same abort: a
+#: rejected MOS level (#2814) and a mis-parsed title line (#5433) both make
+#: ngspice say "could not find a valid modelname" with no bin range involved.
+#: `model_bin_range` is itself a specific code, so the "a specific fatal code
+#: already matched" rule below cannot drop it.
+_BIN_RANGE_SUPERSEDERS = frozenset({"unsupported_model_level", "netlist_title_line"})
+
 #: Codes that mean ngspice aborted while reading the deck (issue #3879). When
 #: one of them is classified and the log shows no analysis banner, the run
 #: never started: its per-measurement "produced no value" errors are
 #: consequences and are collapsed (`_demote_abort_cascade`).
 _NGSPICE_FATAL_CODES: frozenset[str] = frozenset(
     {"missing_include", "netlist", "model_bin_range", "ngspice_fatal"}
-)
+) | {sim_cause.NETLIST_TITLE_LINE_CODE}
 
 #: What ngspice prints once an analysis actually begins (or has produced
 #: data); absent from a run that died in the deck parser.
@@ -5193,1260 +5223,11 @@ def _model_file_entries(
 
 
 # --------------------------------------------------------------------------- #
-# Corner-matrix expansion
-# --------------------------------------------------------------------------- #
-
-
-class CornerPoint:
-    """One expanded (process, supply, temperature) point, pre-run.
-
-    ``sample_index``/``mc_seed`` are populated only when this point is one of
-    a Monte Carlo sample sequence (see :func:`_expand_monte_carlo`) --
-    ``None``/``None`` for an ordinary PVT corner point. Keeping them on
-    :class:`CornerPoint` itself (rather than a parallel structure) is why
-    sampling needs no new execution backend: every backend already consumes
-    a plain ``list[CornerPoint]`` and calls :func:`_run_corner` per point,
-    so a sampled point flows through exactly the same path as an
-    unsampled one.
-
-    ``params`` (issue #3035) is the normalized ``{name: scalar}`` row of the
-    ``corners.params`` axis this point sits on -- ``{}`` for a request with
-    no parameter axis, in which case :attr:`corner_id` and :attr:`slug` are
-    exactly the legacy ones.
-
-    ``nodeset`` (issue #3036) is the normalized ``{lowercase node: volts}``
-    initial-guess map :func:`_apply_nodeset_rules` selected for this point --
-    ``{}`` for a point no ``options.nodeset`` rule matched. It is a solver
-    hint, not part of the point's identity: it never changes :attr:`corner_id`.
-
-    ``initial_conditions`` (issue #3881) is the same shape for
-    ``options.initial_conditions``: the ``{lowercase node: volts}`` transient
-    start state, rendered as ``.ic`` cards plus ``uic`` on the analysis.
-    Like ``nodeset`` it never changes :attr:`corner_id`.
-
-    ``analysis_args`` (issue #4970) is the ``analysis_overrides`` args string
-    selected for this point (``None`` when no rule matched); it replaces
-    ``analysis.args`` for this point only and never changes :attr:`corner_id`.
-
-    ``options`` (issue #3125) is the same for the ``corners.options`` axis: the
-    normalized ``{solver option: number}`` row, ``{}`` when the request has
-    no such axis (and then the IDs/slugs are untouched).
-
-    ``process_sections`` is populated only when the request's
-    ``corners.process[]`` entry for this point was the multi-section bundle
-    object form (``{"name": str, "sections": [...]}``, see
-    :func:`_parse_process_entry`) rather than a bare string -- ``None`` for
-    an ordinary single-section (or process-less) corner. ``process`` always
-    holds the corner's display name either way (the bundle's ``name``, or
-    the bare string itself), so `corner_id`/`slug` labeling, the response's
-    ``process`` field, and `_matches_exclude` need no bundle-awareness of
-    their own.
-
-    ``process_section_libs``/``process_section_libs_resolved`` (issue #2522)
-    are the per-section model-library overrides of that bundle -- both
-    ``None`` unless at least one ``sections[]`` entry used the
-    ``{"lib": str, "section": str}`` object form, in which case both are
-    lists **parallel to** ``process_sections`` whose entry is ``None``
-    wherever that section takes the request's own ``models.lib``:
-
-    - ``process_section_libs`` holds the refs exactly **as declared**
-      (relative / ``$VAR`` / ``~``). This is what crosses the fleet wire
-      (:func:`_corner_points_to_wire`): a remote shard resolves them against
-      its *own* box, the same way it resolves ``models.lib`` itself, so
-      this host's absolute paths must never be baked in here.
-    - ``process_section_libs_resolved`` holds the absolute paths
-      :func:`_resolve_corner_section_libs` settled on for *this* host. It is
-      deliberately **not** serialised -- it is a local execution detail, not
-      part of the point's identity.
-    """
-
-    __slots__ = (
-        "process",
-        "process_sections",
-        "process_section_libs",
-        "process_section_libs_resolved",
-        "param_file",
-        "supply_v",
-        "temperature_c",
-        "params",
-        "nodeset",
-        "initial_conditions",
-        "analysis_args",
-        "options",
-        "sample_index",
-        "mc_seed",
-        "variant",
-        "mc_injected",
-        "supply_waveforms",
-    )
-
-    def __init__(
-        self,
-        process: str | None,
-        supply_v: dict[str, float],
-        temperature_c: float,
-        *,
-        process_sections: list[str] | None = None,
-        process_section_libs: list[str | None] | None = None,
-        process_section_libs_resolved: list[str | None] | None = None,
-        params: dict[str, int | float] | None = None,
-        nodeset: dict[str, float] | None = None,
-        initial_conditions: dict[str, float] | None = None,
-        analysis_args: str | None = None,
-        options: dict[str, int | float] | None = None,
-        sample_index: int | None = None,
-        mc_seed: dict[str, Any] | None = None,
-        variant: str | None = None,
-        mc_injected: list[dict[str, Any]] | None = None,
-        supply_waveforms: tuple[str, ...] = (),
-    ) -> None:
-        self.variant = variant
-        self.process = process
-        self.params: dict[str, int | float] = params or {}
-        self.nodeset: dict[str, float] = nodeset or {}
-        self.initial_conditions: dict[str, float] = initial_conditions or {}
-        self.analysis_args: str | None = analysis_args
-        self.options: dict[str, int | float] = options or {}
-        self.process_sections = process_sections
-        self.process_section_libs = process_section_libs
-        self.process_section_libs_resolved = process_section_libs_resolved
-        # Issue #4759: host-absolute ``models.param_file``; never serialised.
-        self.param_file: str | None = None
-        self.supply_v = supply_v
-        self.temperature_c = temperature_c
-        self.sample_index = sample_index
-        self.mc_seed = mc_seed
-        # Issue #2911: this sample's recorded design-owned mismatch draws
-        # (`sim_injected.draw`); ``None`` unless `monte_carlo.injected`.
-        self.mc_injected = mc_injected
-        # Issue #2902: `supply_v` keys whose PWL/PULSE source is rescaled in
-        # the corner's netlist copy instead of `alter`ed.
-        self.supply_waveforms = supply_waveforms
-
-    def section_lib(self, index: int, models_lib: str | None) -> str | None:
-        """The library path the ``.lib`` card for ``process_sections[index]``
-        must name: this bundle's per-section override when it declared one
-        for that section (issue #2522 -- the absolute path resolved by
-        :func:`_resolve_corner_section_libs` when this run resolved it,
-        otherwise the ref exactly as declared, so a direct caller that never
-        resolved still names what it asked for rather than silently binding
-        ``models.lib``), else the request's own ``models.lib``.
-        """
-        resolved = self.process_section_libs_resolved
-        if resolved is not None and resolved[index] is not None:
-            return resolved[index]
-        declared = self.process_section_libs
-        if declared is not None and declared[index] is not None:
-            return declared[index]
-        return models_lib
-
-    @property
-    def corner_id(self) -> str:
-        """``<process>/<supply>V/<temp>C``, per the spike's response schema,
-        with a ``/mc<sample_index>`` suffix appended for a Monte Carlo sample
-        point (see :func:`_expand_monte_carlo`) so per-sample corner IDs and
-        artifact paths never collide with each other or with the unsampled
-        corner they were drawn from.
-
-        ``process`` defaults to ``"default"`` when the request declares no
-        process axis. Multiple supply rails (an extension beyond the spike's
-        single-``vdd`` example) are joined ``key=value`` pairs, sorted by key
-        for determinism.
-        """
-        process_label = self.process if self.process is not None else "default"
-        if not self.supply_v:
-            supply_label = "novdd"
-        elif len(self.supply_v) == 1:
-            (value,) = self.supply_v.values()
-            supply_label = f"{value:.3f}V"
-        else:
-            supply_label = (
-                "_".join(f"{k}={v:.3f}" for k, v in sorted(self.supply_v.items())) + "V"
-            )
-        temp_label = _format_number(self.temperature_c)
-        base = f"{process_label}/{supply_label}/{temp_label}C"
-        if self.variant is not None:
-            base = f"{base}/@{self.variant}"
-        if self.params:
-            base = f"{base}/params:{_format_params_label(self.params)}"
-        if self.options:
-            base = f"{base}/options:{_format_params_label(self.options)}"
-        if self.sample_index is None:
-            return base
-        return f"{base}/mc{self.sample_index}"
-
-    @property
-    def slug(self) -> str:
-        """Filesystem-safe artifact-directory name for this corner, derived
-        from :attr:`corner_id` (e.g. ``ss/1.620V/125C`` -> ``ss_1p620V_125C``).
-        See :func:`_slugify_corner_id` for the parameter-axis and bounded forms."""
-        return _slugify_corner_id(self.corner_id)
-
-    @property
-    def readable_slug(self) -> str:
-        """The unbounded :attr:`slug` (before the long-name hash fallback)."""
-        return _readable_slug(self.corner_id)
-
-
-def _params_report_field(point: CornerPoint) -> dict[str, Any]:
-    """The additive ``params`` field of a corner report: present only for a
-    point on a ``corners.params`` axis, so every other report is unchanged."""
-    return {"params": dict(point.params)} if point.params else {}
-
-
-def _ic_report_field(point: CornerPoint) -> dict[str, Any]:
-    """The additive ``initial_conditions`` field of a corner report (issue
-    #3881): present only for a point an ``options.initial_conditions`` rule
-    selected."""
-    if not point.initial_conditions:
-        return {}
-    return {"initial_conditions": dict(point.initial_conditions)}
-
-
-def _nodeset_report_field(point: CornerPoint) -> dict[str, Any]:
-    """The additive ``nodeset`` field of a corner report (issue #3036):
-    present only for a point an ``options.nodeset`` rule selected."""
-    return {"nodeset": dict(point.nodeset)} if point.nodeset else {}
-
-
-def _options_report_field(point: CornerPoint) -> dict[str, Any]:
-    """The additive ``options`` field of a corner report (issue #3125):
-    present only for a point on a ``corners.options`` axis."""
-    return {"options": dict(point.options)} if point.options else {}
-
-
-def _format_number(value: float) -> str:
-    """Render an int-valued float without a trailing ``.0`` (e.g. temperatures)."""
-    if float(value).is_integer():
-        return str(int(value))
-    return str(value)
-
-
-_PARAM_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-
-
-def _format_param_value(value: int | float) -> str:
-    """Canonical text of one ``corners.params`` value (issue #3035): the
-    shortest round-trip JSON decimal spelling, an integral value rendered as
-    an integer, negative zero as ``0`` -- never a rounded or unit-suffixed
-    form, so close-valued parameters keep distinct IDs."""
-    return repr(_normalize_param_value(value))
-
-
-def _normalize_param_value(value: int | float) -> int | float:
-    """The scalar a parameter coordinate is carried as everywhere (report,
-    wire, deck): an integer when the value is integral, else the float."""
-    if isinstance(value, float) and value.is_integer():
-        return int(value)
-    return value
-
-
-def _format_params_label(params: dict[str, int | float]) -> str:
-    """``name=value`` pairs, sorted by (lowercase) name, comma-joined."""
-    return ",".join(
-        f"{name}={_format_param_value(value)}" for name, value in sorted(params.items())
-    )
-
-
-def _validate_param_scalar(value: Any, where: str) -> int | float:
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not math.isfinite(value)
-    ):
-        raise SimError(f"{where} must be a finite number (booleans excluded)")
-    return _normalize_param_value(value)
-
-
-def _validate_param_name(name: Any, where: str) -> str:
-    """Lowercased parameter name, or a :class:`SimError` for a malformed or
-    reserved (``mc_*``) one."""
-    if not isinstance(name, str) or not _PARAM_NAME_RE.fullmatch(name):
-        raise SimError(
-            f"{where} name {name!r} must match [A-Za-z_][A-Za-z0-9_]* "
-            "(a bare SPICE parameter name)"
-        )
-    lowered = name.lower()
-    if lowered.startswith("mc_"):
-        raise SimError(
-            f"{where} name {name!r} is reserved: mc_* parameters are "
-            "generated by monte_carlo"
-        )
-    return lowered
-
-
-def _normalize_param_row(
-    raw: Any, where: str, supply_v: dict[str, Any] | None = None
-) -> dict[str, int | float]:
-    """One scalar ``{name: value}`` parameter row (a report/wire ``params``
-    map), validated and normalized; ``supply_v`` names may not repeat."""
-    if not isinstance(raw, dict):
-        raise SimError(f"{where} must be an object mapping names to numbers")
-    row: dict[str, int | float] = {}
-    supply_names = {str(key).lower() for key in (supply_v or {})}
-    for name, value in raw.items():
-        lowered = _validate_param_name(name, where)
-        if lowered in row:
-            raise SimError(f"{where} declares {lowered!r} more than once")
-        if lowered in supply_names:
-            raise SimError(
-                f"{where} name {name!r} is also a supply_v key: a name may "
-                "not be in both corners.params and corners.supply_v"
-            )
-        row[lowered] = _validate_param_scalar(value, f"{where}.{name}")
-    return dict(sorted(row.items()))
-
-
-def _temperature_param_name(corners_spec: dict[str, Any]) -> str | None:
-    """The validated, lowercased ``corners.temperature_param`` name (issue
-    #3994), or ``None`` when the request does not bind one. It is refused if
-    ``corners.params`` or ``corners.supply_v`` already uses the name."""
-    raw = corners_spec.get("temperature_param")
-    if raw is None:
-        return None
-    if "units" in corners_spec:
-        raise SimError(
-            "corners.temperature_param cannot be combined with corners.units: "
-            "put the parameter in each unit's `params` instead"
-        )
-    name = _validate_param_name(raw, "corners.temperature_param")
-    declared = {str(key).lower() for key in (corners_spec.get("params") or {})}
-    if name in declared:
-        raise SimError(
-            f"corners.temperature_param name {name!r} is also a corners.params "
-            "key: a name may be bound by only one of the two"
-        )
-    supply = {str(key).lower() for key in (corners_spec.get("supply_v") or {})}
-    if name in supply:
-        raise SimError(
-            f"corners.temperature_param name {name!r} is also a "
-            "corners.supply_v key: a name may be in only one of the two maps"
-        )
-    return name
-
-
-def _bind_temperature_param(
-    param_row: dict[str, int | float],
-    temperature_param: str | None,
-    temperature_c: float,
-) -> dict[str, int | float]:
-    """``param_row`` with the grid temperature bound to ``temperature_param``
-    (issue #3994), name-sorted like every params row; ``param_row`` unchanged
-    when the request binds no temperature parameter."""
-    if not temperature_param:
-        return param_row
-    bound = {**param_row, temperature_param: _normalize_param_value(temperature_c)}
-    return dict(sorted(bound.items()))
-
-
-def _expand_param_axis(
-    corners_spec: dict[str, Any],
-) -> list[dict[str, int | float]]:
-    """The zipped ``corners.params`` rows (issue #3035), or ``[{}]`` for a
-    request with no parameter axis. Names zip by index; every array must be
-    nonempty and the same length; duplicate normalized rows are rejected."""
-    spec = corners_spec.get("params")
-    if spec is None or spec == {}:
-        return [{}]
-    if not isinstance(spec, dict):
-        raise SimError(
-            "corners.params must be an object mapping parameter names to "
-            "equal-length arrays of numbers"
-        )
-    columns: dict[str, list[int | float]] = {}
-    for name, values in spec.items():
-        lowered = _validate_param_name(name, "corners.params")
-        if lowered in columns:
-            raise SimError(
-                f"corners.params declares {lowered!r} more than once "
-                "(names are case-insensitive)"
-            )
-        if not isinstance(values, list) or not values:
-            raise SimError(f"corners.params.{name} must be a nonempty array of numbers")
-        columns[lowered] = [
-            _validate_param_scalar(value, f"corners.params.{name}[{i}]")
-            for i, value in enumerate(values)
-        ]
-    if len({len(values) for values in columns.values()}) != 1:
-        raise SimError(zipped_length_message("corners.params", columns))
-    supply_names = {str(key).lower() for key in (corners_spec.get("supply_v") or {})}
-    clash = sorted(set(columns) & supply_names)
-    if clash:
-        raise SimError(
-            f"corners.params name {clash[0]!r} is also a corners.supply_v key: "
-            "a name may be in only one of the two maps (supply_v addresses a "
-            "source with `alter`, params address a .param)"
-        )
-    count = len(next(iter(columns.values())))
-    rows = [
-        dict(sorted((name, values[i]) for name, values in columns.items()))
-        for i in range(count)
-    ]
-    seen: set[str] = set()
-    for row in rows:
-        label = _format_params_label(row)
-        if label in seen:
-            raise SimError(f"corners.params declares the row {label!r} twice")
-        seen.add(label)
-    return rows
-
-
-#: ``corners.options`` (issue #3125): the numeric solver ``.options`` a
-#: corner axis may sweep. A subset of :data:`NGSPICE_SOLVER_OPTIONS` -- the
-#: flag/token options (``method``, ``noopiter``) are not numbers -- plus
-#: ``itl3``. ngspice silently ignores an unknown ``.options`` name, so the
-#: allow-list turns a typo into a named error.
-CORNER_OPTION_NAMES = (
-    "abstol",
-    "gmin",
-    "gminsteps",
-    "itl1",
-    "itl2",
-    "itl3",
-    "itl4",
-    "pivtol",
-    "reltol",
-    "srcsteps",
-    "vntol",
-)
-
-
-def _validate_corner_option_name(name: Any, where: str) -> str:
-    lowered = name.lower() if isinstance(name, str) else name
-    if lowered not in CORNER_OPTION_NAMES:
-        raise SimError(
-            f"{where} name {name!r} is not a supported numeric solver "
-            f"option; supported: {', '.join(CORNER_OPTION_NAMES)}"
-        )
-    return lowered
-
-
-def _expand_options_axis(
-    corners_spec: dict[str, Any],
-) -> list[dict[str, int | float]]:
-    """The zipped ``corners.options`` rows (issue #3125), or ``[{}]`` for a
-    request with no options axis. Same shape and rules as
-    :func:`_expand_param_axis`: names zip by index, every array nonempty and
-    the same length, duplicate rows rejected."""
-    spec = corners_spec.get("options")
-    if spec is None or spec == {}:
-        return [{}]
-    if not isinstance(spec, dict):
-        raise SimError(
-            "corners.options must be an object mapping solver option names "
-            "to equal-length arrays of numbers"
-        )
-    columns: dict[str, list[int | float]] = {}
-    for name, values in spec.items():
-        lowered = _validate_corner_option_name(name, "corners.options")
-        if lowered in columns:
-            raise SimError(
-                f"corners.options declares {lowered!r} more than once "
-                "(names are case-insensitive)"
-            )
-        if not isinstance(values, list) or not values:
-            raise SimError(
-                f"corners.options.{name} must be a nonempty array of numbers"
-            )
-        columns[lowered] = [
-            _validate_param_scalar(value, f"corners.options.{name}[{i}]")
-            for i, value in enumerate(values)
-        ]
-    if len({len(values) for values in columns.values()}) != 1:
-        raise SimError(zipped_length_message("corners.options", columns))
-    count = len(next(iter(columns.values())))
-    rows = [
-        dict(sorted((name, values[i]) for name, values in columns.items()))
-        for i in range(count)
-    ]
-    seen: set[str] = set()
-    for row in rows:
-        label = _format_params_label(row)
-        if label in seen:
-            raise SimError(f"corners.options declares the row {label!r} twice")
-        seen.add(label)
-    return rows
-
-
-def _normalize_option_row(raw: Any, where: str) -> dict[str, int | float]:
-    """One scalar ``{option: number}`` row (a report/wire ``options`` map),
-    validated and normalized."""
-    if not isinstance(raw, dict):
-        raise SimError(f"{where} must be an object mapping names to numbers")
-    row: dict[str, int | float] = {}
-    for name, value in raw.items():
-        lowered = _validate_corner_option_name(name, where)
-        if lowered in row:
-            raise SimError(f"{where} declares {lowered!r} more than once")
-        row[lowered] = _validate_param_scalar(value, f"{where}.{name}")
-    return dict(sorted(row.items()))
-
-
-def _parse_process_entry(
-    entry: Any,
-) -> tuple[str | None, list[str] | None, list[str | None] | None]:
-    """Normalize one ``corners.process[]`` entry into ``(name, sections,
-    section_libs)``.
-
-    A bare string is today's single-``.lib``-section corner (e.g. sky130's
-    ``"tt"``): returns ``(entry, None, None)`` -- ``process_sections=None``
-    signals :func:`_write_corner_deck` to emit its historical single ``.lib``
-    line, byte-for-byte unchanged from before this function existed.
-
-    An object ``{"name": str, "sections": [...]}`` is a multi-section corner
-    *bundle* -- e.g. gf180mcu's ``sm141064.ngspice``, which has no all-device
-    corner sections and instead needs one ``.lib`` card per device family
-    (MOS + ``bjt_*`` + ``diode_*`` + ``res_*`` + ``moscap_*`` + ``mimcap_*``)
-    to fully select a named corner. :func:`_write_corner_deck` emits one
-    ``.lib`` line per section, in declaration order (ordering matters -- the
-    gf180 section set has interdependent global switch params).
-
-    Each ``sections[]`` entry is either:
-
-    - a **bare string** -- that section is read from the request's own
-      ``models.lib``, exactly as before issue #2522; or
-    - an object ``{"lib": str, "section": str}`` -- that section is read
-      from ``lib`` instead, for a PDK that ships one corner library *per
-      device family* rather than one file carrying every section. Returned
-      as the third element, a list parallel to ``sections`` holding the
-      declared ref (or ``None`` for a bare-string section).
-
-    ``section_libs`` is ``None`` -- not a list of ``None``s -- when no entry
-    used the object form, so an all-bare-string bundle produces exactly the
-    ``CornerPoint`` (and fleet wire payload) it produced before #2522.
-    """
-    if isinstance(entry, str):
-        return entry, None, None
-    if isinstance(entry, dict):
-        name = entry.get("name")
-        sections = entry.get("sections")
-        if not isinstance(name, str) or not name:
-            raise SimError(
-                "corners.process bundle entry requires a non-empty string 'name'"
-            )
-        if not isinstance(sections, list) or not sections:
-            raise SimError(
-                "corners.process bundle entry requires a non-empty list "
-                '\'sections\' of section names or {"lib", "section"} objects'
-            )
-        parsed = [_parse_process_section(section) for section in sections]
-        section_names = [section for section, _ in parsed]
-        section_libs = [lib for _, lib in parsed]
-        if all(lib is None for lib in section_libs):
-            return name, section_names, None
-        return name, section_names, section_libs
-    raise SimError(
-        "corners.process entries must be a string or an object "
-        '{"name": str, "sections": list[str | {"lib": str, "section": str}]}'
-    )
-
-
-def _parse_process_section(section: Any) -> tuple[str, str | None]:
-    """One ``corners.process[].sections[]`` entry -> ``(section name, library
-    ref or None)``.
-
-    A bare string names a section of the request's own ``models.lib``
-    (``None`` library ref -- today's behaviour); an object
-    ``{"lib": str, "section": str}`` names the model library that section is
-    read from instead (issue #2522). The ref is returned exactly as declared;
-    :func:`_resolve_corner_section_libs` is what resolves and
-    existence-checks it.
-    """
-    if isinstance(section, str) and section:
-        return section, None
-    if not isinstance(section, dict):
-        raise SimError(
-            "corners.process bundle 'sections' entries must be a "
-            'non-empty string or an object {"lib": str, "section": str}'
-        )
-    lib = section.get("lib")
-    name = section.get("section")
-    if not isinstance(lib, str) or not lib:
-        raise SimError(
-            "corners.process bundle per-section entry requires a non-empty "
-            "string 'lib' (the model library this section is read from)"
-        )
-    if not isinstance(name, str) or not name:
-        raise SimError(
-            "corners.process bundle per-section entry requires a non-empty "
-            "string 'section'"
-        )
-    return name, lib
-
-
-# --------------------------------------------------------------------------- #
-# CornerPoint <-> JSON wire format (issue #906's remote-fleet shard dispatch)
-# --------------------------------------------------------------------------- #
-
-
-def _corner_points_to_wire(points: list[CornerPoint]) -> list[dict[str, Any]]:
-    """Serialise a ``list[CornerPoint]`` verbatim, including any already-
-    derived Monte Carlo seed, to the internal ``request["_explicit_points"]``
-    wire shape a remote fleet shard's pushed request carries -- see
-    ``_build_remote_request``'s ``explicit_points`` parameter and this
-    module's ``_corner_points_from_wire`` counterpart.
-
-    ``process_section_libs`` (issue #2522) carries each per-section model
-    library **as the request declared it**, never
-    ``process_section_libs_resolved``'s absolute paths: the shard resolves
-    them against its own box, exactly as it resolves ``models.lib`` from the
-    forwarded ``models`` block (see ``_build_remote_request``'s decision 4).
-    ``None`` for every pre-#2522 corner list, so those shards' payloads are
-    unchanged apart from one added null field.
-    """
-    wire = []
-    for point in points:
-        entry: dict[str, Any] = {
-            "process": point.process,
-            "process_sections": point.process_sections,
-            "process_section_libs": point.process_section_libs,
-            "supply_v": point.supply_v,
-            "temperature_c": point.temperature_c,
-            "sample_index": point.sample_index,
-            "mc_seed": point.mc_seed,
-            "variant": point.variant,
-            "mc_injected": point.mc_injected,
-            "supply_waveforms": list(point.supply_waveforms),
-        }
-        if point.params:
-            # Issue #3035: only a parameter point carries the field, so every
-            # request without a `corners.params` axis serialises exactly as
-            # before.
-            entry["params"] = point.params
-        if point.nodeset:
-            # Issue #3036: the already-selected map, never the rules -- a
-            # shard holds a subset of the points and could not re-resolve them.
-            entry["nodeset"] = point.nodeset
-        if point.initial_conditions:
-            # Issue #3881: likewise the selected map, never the rules.
-            entry["initial_conditions"] = point.initial_conditions
-        if point.analysis_args:
-            entry["analysis_args"] = point.analysis_args
-        if point.options:
-            # Issue #3125: likewise additive, only for an options point.
-            entry["options"] = point.options
-        wire.append(entry)
-    return wire
-
-
-def _corner_points_from_wire(data: Any) -> list[CornerPoint]:
-    """Inverse of :func:`_corner_points_to_wire` -- reconstructs the exact
-    ``CornerPoint`` list a fleet shard was handed, seeds included, so a
-    remote box's own ``run_sim`` never re-derives (and could never
-    disagree about) which points are its own.
-    """
-    if not isinstance(data, list):
-        raise SimError("request._explicit_points must be an array")
-    points = []
-    for entry in data:
-        if not isinstance(entry, dict):
-            raise SimError("request._explicit_points entries must be objects")
-        sections = entry.get("process_sections")
-        section_libs = entry.get("process_section_libs")
-        if section_libs is not None and (
-            not isinstance(sections, list)
-            or not isinstance(section_libs, list)
-            or len(section_libs) != len(sections)
-        ):
-            # Issue #2522: the two lists are parallel by construction
-            # (`_parse_process_entry`), so a payload where they disagree is a
-            # corrupted shard dispatch -- refuse it rather than emit a deck
-            # binding some section to the wrong library.
-            raise SimError(
-                "request._explicit_points[].process_section_libs must be the "
-                "same length as process_sections"
-            )
-        supply_v = entry.get("supply_v") or {}
-        raw_params = entry.get("params")
-        # Issue #3035: validated here again, at the receiving worker, with
-        # the same rules the caller applied (a wire payload is not trusted).
-        params = (
-            _normalize_param_row(
-                raw_params, "request._explicit_points[].params", supply_v
-            )
-            if raw_params is not None
-            else {}
-        )
-        # Issue #3036: re-validated at the receiving worker as well.
-        raw_nodeset = entry.get("nodeset")
-        nodeset = (
-            _normalize_nodeset_values(raw_nodeset, "request._explicit_points[].nodeset")
-            if raw_nodeset is not None
-            else {}
-        )
-        raw_ic = entry.get("initial_conditions")
-        initial_conditions = (
-            _normalize_nodeset_values(
-                raw_ic, "request._explicit_points[].initial_conditions"
-            )
-            if raw_ic is not None
-            else {}
-        )
-        raw_options = entry.get("options")
-        options = (
-            _normalize_option_row(raw_options, "request._explicit_points[].options")
-            if raw_options is not None
-            else {}
-        )
-        points.append(
-            CornerPoint(
-                entry.get("process"),
-                supply_v,
-                entry.get("temperature_c"),
-                process_sections=sections,
-                process_section_libs=section_libs,
-                params=params,
-                nodeset=nodeset,
-                initial_conditions=initial_conditions,
-                analysis_args=_sao.wire_args(entry),
-                options=options,
-                sample_index=entry.get("sample_index"),
-                mc_seed=entry.get("mc_seed"),
-                variant=entry.get("variant"),
-                mc_injected=entry.get("mc_injected"),
-                supply_waveforms=tuple(entry.get("supply_waveforms") or ()),
-            )
-        )
-    return points
-
-
-def _expand_corners(
-    corners_spec: dict[str, Any], exclude_spec: list[dict[str, Any]]
-) -> list[CornerPoint]:
-    """Expand the declared axes into the deterministic, odometer-style corner list.
-
-    Axis order (outer to inner, per the spike): process, then the supply
-    sweep, then temperature, then ``params`` (#3035), then ``options``
-    (#3125). A missing axis collapses to a single default point
-    (``process=None``, ``supply_v={}``, ``temperature_c=27``) rather than an
-    error -- a request that only cares about one axis need not populate the others.
-
-    Each ``corners.process[]`` entry is either a bare string (one ``.lib``
-    section, unchanged) or a ``{"name": str, "sections": [...]}`` bundle
-    object (multiple ``.lib`` sections under one named corner, each
-    optionally naming its own model library) -- see
-    :func:`_parse_process_entry`.
-
-    ``corners.supply_v``'s keys sweep together by index (same-length arrays;
-    rails move as a set), matching the spike's documented semantics.
-
-    ``corners.units`` (issue #2993) is the alternative, non-crossing form: an
-    explicit list of points executed exactly as given -- see `_expand_corner_units`.
-    """
-    sim_echo_messages.require_corners_object(corners_spec)
-    if "units" in corners_spec:
-        return _expand_corner_units(corners_spec, exclude_spec)
-    raw_processes: list[Any] = corners_spec.get("process") or [None]
-    processes: list[tuple[str | None, list[str] | None, list[str | None] | None]] = [
-        (None, None, None) if raw is None else _parse_process_entry(raw)
-        for raw in raw_processes
-    ]
-
-    supply_spec: dict[str, list[float]] = corners_spec.get("supply_v") or {}
-    if supply_spec:
-        lengths = {len(values) for values in supply_spec.values()}
-        if len(lengths) != 1:
-            raise SimError(zipped_length_message("corners.supply_v", supply_spec))
-        (count,) = lengths
-        supply_points = [
-            {key: values[i] for key, values in supply_spec.items()}
-            for i in range(count)
-        ]
-    else:
-        supply_points = [{}]
-
-    supply_waveforms = sim_supply_waveform.parse_supply_waveforms(
-        corners_spec, supply_spec, SimError
-    )
-    temperatures: list[float] = corners_spec.get("temperature_c") or [27]
-
-    variants = _parse_variants(corners_spec.get("variants"))
-
-    # Issue #3035: the innermost axis. Its rows are validated before the
-    # exclusion rules so a selector can be checked against the declared names.
-    param_rows = _expand_param_axis(corners_spec)
-    temperature_param = _temperature_param_name(corners_spec)
-    declared_params = set(param_rows[0]).union(filter(None, [temperature_param]))
-    _validate_exclude_params(exclude_spec, declared_params)
-    # Issue #3125: the solver-option axis, innermost of all.
-    option_rows = _expand_options_axis(corners_spec)
-    _validate_exclude_options(exclude_spec, set(option_rows[0]))
-
-    points: list[CornerPoint] = []
-    for process, process_sections, process_section_libs in processes:
-        for supply_v in supply_points:
-            for variant_name, variant_sources in variants:
-                point_supply = {**supply_v, **variant_sources}
-                for temperature_c in temperatures:
-                    for param_row, option_row in itertools.product(
-                        param_rows, option_rows
-                    ):
-                        param_row = _bind_temperature_param(
-                            param_row, temperature_param, temperature_c
-                        )
-                        point = CornerPoint(
-                            process,
-                            point_supply,
-                            temperature_c,
-                            process_sections=process_sections,
-                            process_section_libs=process_section_libs,
-                            params=param_row,
-                            options=option_row,
-                            variant=variant_name,
-                            supply_waveforms=supply_waveforms,
-                        )
-                        if not _is_excluded(point, exclude_spec):
-                            points.append(point)
-    return points
-
-
-def _validate_exclude_params(
-    exclude_spec: list[dict[str, Any]], declared: set[str]
-) -> None:
-    """Reject an ``exclude[].params`` selector naming a parameter the request
-    does not sweep (issue #3035) -- it could never match, so it would
-    silently exclude nothing."""
-    for entry in exclude_spec:
-        if not isinstance(entry, dict) or "params" not in entry:
-            continue
-        selector = entry["params"]
-        if not isinstance(selector, dict):
-            raise SimError("exclude[].params must be an object of name: number")
-        for name, value in selector.items():
-            lowered = name.lower() if isinstance(name, str) else name
-            if lowered not in declared:
-                raise SimError(
-                    f"exclude[].params names {name!r}, which is not a "
-                    "corners.params parameter of this request"
-                    + (
-                        f" (declared: {', '.join(sorted(declared))})"
-                        if declared
-                        else ""
-                    )
-                )
-            _validate_param_scalar(value, f"exclude[].params.{name}")
-
-
-def _validate_exclude_options(
-    exclude_spec: list[dict[str, Any]], declared: set[str]
-) -> None:
-    """Reject an ``exclude[].options`` selector naming an option the request
-    does not sweep (issue #3125) -- it could never match."""
-    for entry in exclude_spec:
-        if not isinstance(entry, dict) or "options" not in entry:
-            continue
-        selector = entry["options"]
-        if not isinstance(selector, dict):
-            raise SimError("exclude[].options must be an object of name: number")
-        for name, value in selector.items():
-            lowered = name.lower() if isinstance(name, str) else name
-            if lowered not in declared:
-                raise SimError(
-                    f"exclude[].options names {name!r}, which is not a "
-                    "corners.options option of this request"
-                    + (
-                        f" (declared: {', '.join(sorted(declared))})"
-                        if declared
-                        else ""
-                    )
-                )
-            _validate_param_scalar(value, f"exclude[].options.{name}")
-
-
-_CORNER_UNIT_KEYS = ("process", "temperature_c", "supply_v")
-_CORNER_UNIT_CROSSED_KEYS = ("process", "supply_v", "temperature_c", "variants")
-
-
-def _expand_corner_units(
-    corners_spec: dict[str, Any], exclude_spec: list[dict[str, Any]]
-) -> list[CornerPoint]:
-    """Expand ``corners.units`` -- an explicit, non-crossed point list.
-
-    Each record is ``{process?, temperature_c?, supply_v?: {key: number}}``
-    and becomes exactly one :class:`CornerPoint`, in record order. Omitted
-    axes collapse to the same defaults as the crossed form (``process=None``,
-    ``supply_v={}``, ``temperature_c=27``) and ``process`` accepts the same
-    string-or-bundle forms (:func:`_parse_process_entry`), so a unit that
-    names the same coordinates as a crossed point yields an identical
-    ``corner_id`` and checkpoint/``--resume`` reuse works across both forms.
-
-    Mutually exclusive with the crossed axes and with ``exclude`` (a unit
-    list is already the exact set wanted). Duplicates are judged on
-    ``corner_id``, so two records that differ only below its 3-decimal supply
-    formatting are refused rather than silently merged.
-    """
-    for key in _CORNER_UNIT_CROSSED_KEYS:
-        if key in corners_spec:
-            raise SimError(
-                f"corners.units cannot be combined with corners.{key}: units "
-                "are executed as given, not crossed"
-            )
-    if exclude_spec:
-        raise SimError(
-            "corners.units cannot be combined with exclude: list only the units to run"
-        )
-    units = corners_spec["units"]
-    if not isinstance(units, list) or not units:
-        raise SimError("corners.units must be a non-empty array of objects")
-
-    supply_waveforms = sim_supply_waveform.parse_supply_waveforms(
-        corners_spec, {}, SimError, units_mode=True
-    )
-    points: list[CornerPoint] = []
-    seen: dict[str, int] = {}
-    for index, record in enumerate(units):
-        point = _parse_corner_unit(record, f"corners.units[{index}]")
-        sim_supply_waveform.require_unit_keys(
-            supply_waveforms, point.supply_v, index, SimError
-        )
-        point.supply_waveforms = supply_waveforms
-        corner_id = point.corner_id
-        if corner_id in seen:
-            raise SimError(
-                f"corners.units[{index}] duplicates corners.units[{seen[corner_id]}] "
-                f"(both resolve to corner_id '{corner_id}')"
-            )
-        seen[corner_id] = index
-        points.append(point)
-    return points
-
-
-def _parse_corner_unit(record: Any, where: str) -> CornerPoint:
-    """Validate one ``corners.units`` record and build its :class:`CornerPoint`."""
-    if not isinstance(record, dict):
-        raise SimError(f"{where} must be an object")
-    unknown = sorted(set(record) - set(_CORNER_UNIT_KEYS))
-    if unknown:
-        raise SimError(
-            f"{where} has unknown key(s) {', '.join(unknown)} "
-            f"(supported: {', '.join(_CORNER_UNIT_KEYS)})"
-        )
-    raw_process = record.get("process")
-    process, sections, section_libs = (
-        (None, None, None) if raw_process is None else _parse_process_entry(raw_process)
-    )
-    temperature_c = record.get("temperature_c", 27)
-    if not is_number(temperature_c):
-        raise SimError(f"{where}.temperature_c must be a number")
-    return CornerPoint(
-        process,
-        _parse_unit_supply_v(record.get("supply_v") or {}, where),
-        temperature_c,
-        process_sections=sections,
-        process_section_libs=section_libs,
-    )
-
-
-def _parse_unit_supply_v(supply_v: Any, where: str) -> dict[str, Any]:
-    """Require a ``corners.units`` ``supply_v`` to be rail -> scalar number."""
-    if not isinstance(supply_v, dict):
-        raise SimError(f"{where}.supply_v must be an object of scalar numbers")
-    for rail, value in supply_v.items():
-        if not is_number(value):
-            raise SimError(
-                f"{where}.supply_v.{rail} must be a scalar number "
-                "(arrays are only valid in the crossed corners.supply_v form)"
-            )
-    return dict(supply_v)
-
-
-_VARIANT_NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
-_EXPR_TOKEN_RE = re.compile(
-    r"\s*(?:(?P<num>\d+\.?\d*(?:[eE][+-]?\d+)?|\.\d+(?:[eE][+-]?\d+)?)"
-    r"|(?P<name>[A-Za-z_][A-Za-z0-9_.]*)|(?P<op>[-+*/()]))"
-)
-
-
-def _parse_variants(raw: Any) -> list[tuple[str | None, dict[str, float]]]:
-    """Normalize ``corners.variants`` (issue #3252) into ``(name, sources)``
-    pairs with every source value resolved to a number.
-
-    ``None`` (axis absent) yields the single nameless, source-less entry so
-    :func:`_expand_corners` is byte-identical to its pre-variant behaviour.
-    Each variant's ``sources`` map a voltage-source name to a number or to an
-    arithmetic expression of the *other* sources in the same variant; the
-    resolved numbers are applied with ``alter`` exactly like ``supply_v`` and
-    override a same-named ``supply_v`` key.
-    """
-    if raw is None:
-        return [(None, {})]
-    if not isinstance(raw, list) or not raw:
-        raise SimError("corners.variants must be a non-empty array")
-    seen: set[str] = set()
-    seen_slugs: dict[str, str] = {}
-    out: list[tuple[str | None, dict[str, float]]] = []
-    for index, entry in enumerate(raw):
-        where = f"corners.variants[{index}]"
-        if not isinstance(entry, dict):
-            raise SimError(f"{where} must be an object")
-        name = entry.get("name")
-        if not isinstance(name, str) or not _VARIANT_NAME_RE.match(name):
-            raise SimError(
-                f"{where}.name must be a non-empty string of letters, digits, "
-                "'_', '.' or '-'"
-            )
-        if name in seen:
-            raise SimError(f"corners.variants has duplicate name {name!r}")
-        seen.add(name)
-        # '.' and '-' are both legal in a name but slug to 'p' / 'n', so two
-        # distinct names can share an artifact directory -- refuse that.
-        slug = _slugify_label(name)
-        if slug in seen_slugs:
-            raise SimError(
-                f"corners.variants names {seen_slugs[slug]!r} and {name!r} "
-                f"both map to artifact slug {slug!r}; rename one"
-            )
-        seen_slugs[slug] = name
-        sources = entry.get("sources")
-        if not isinstance(sources, dict) or not sources:
-            raise SimError(f"{where}.sources must be a non-empty object")
-        out.append((name, _resolve_variant_sources(name, sources)))
-    return out
-
-
-def _resolve_variant_sources(variant: str, sources: dict[str, Any]) -> dict[str, float]:
-    resolved: dict[str, float] = {}
-    visiting: list[str] = []
-    lowered = {key.strip().lower(): key for key in sources}
-
-    def resolve(key: str) -> float:
-        if key in resolved:
-            return resolved[key]
-        if key in visiting:
-            cycle = " -> ".join([*visiting[visiting.index(key) :], key])
-            raise SimError(
-                f"corners.variants[{variant!r}].sources has a cyclic "
-                f"expression: {cycle}"
-            )
-        value = sources[key]
-        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
-            raise SimError(
-                f"corners.variants[{variant!r}].sources[{key!r}] must be a "
-                "number or an arithmetic expression string"
-            )
-        if isinstance(value, str):
-            visiting.append(key)
-            try:
-                result = _eval_source_expr(variant, key, value, lowered, resolve)
-            finally:
-                visiting.pop()
-        else:
-            result = float(value)
-        resolved[key] = result
-        return result
-
-    for key in sources:
-        resolve(key)
-    return {key: resolved[key] for key in sources}
-
-
-def _tokenize_source_expr(where: str, text: str) -> list[tuple[str, str]]:
-    """Split ``text`` into ``(kind, lexeme)`` tokens for the source-expression
-    grammar, raising :class:`SimError` on any unparseable character."""
-    tokens: list[tuple[str, str]] = []
-    pos = 0
-    while pos < len(text):
-        if not text[pos:].strip():
-            break
-        match = _EXPR_TOKEN_RE.match(text, pos)
-        if match is None:
-            raise SimError(f"{where}: cannot parse expression {text!r}")
-        kind = match.lastgroup or ""
-        tokens.append((kind, match.group(kind)))
-        pos = match.end()
-    return tokens
-
-
-class _SourceExprParser:
-    """Recursive-descent evaluator for ``+ - * /``, parentheses, numbers, and
-    other source names of the same variant (no ``eval``)."""
-
-    def __init__(
-        self,
-        where: str,
-        text: str,
-        tokens: list[tuple[str, str]],
-        lowered: dict[str, str],
-        resolve: Any,
-    ) -> None:
-        self.where = where
-        self.text = text
-        self.tokens = tokens
-        self.lowered = lowered
-        self.resolve = resolve
-        self.cursor = 0
-
-    def peek(self) -> tuple[str, str] | None:
-        return self.tokens[self.cursor] if self.cursor < len(self.tokens) else None
-
-    def take(self) -> tuple[str, str]:
-        token = self.peek()
-        if token is None:
-            raise SimError(f"{self.where}: unexpected end of expression {self.text!r}")
-        self.cursor += 1
-        return token
-
-    def _peek_op(self, ops: str) -> str | None:
-        token = self.peek()
-        if token is not None and token[0] == "op" and token[1] in ops:
-            return token[1]
-        return None
-
-    def parse(self) -> float:
-        result = self.expr()
-        leftover = self.peek()
-        if leftover is not None:
-            raise SimError(
-                f"{self.where}: unexpected {leftover[1]!r} in expression {self.text!r}"
-            )
-        return result
-
-    def expr(self) -> float:
-        value = self.term()
-        while (op := self._peek_op("+-")) is not None:
-            self.take()
-            rhs = self.term()
-            value = value + rhs if op == "+" else value - rhs
-        return value
-
-    def term(self) -> float:
-        value = self.factor()
-        while (op := self._peek_op("*/")) is not None:
-            self.take()
-            rhs = self.factor()
-            value = self._apply_muldiv(op, value, rhs)
-        return value
-
-    def _apply_muldiv(self, op: str, lhs: float, rhs: float) -> float:
-        if op == "*":
-            return lhs * rhs
-        if rhs == 0:
-            raise SimError(f"{self.where}: division by zero in {self.text!r}")
-        return lhs / rhs
-
-    def _name(self, tok: str) -> float:
-        target = self.lowered.get(tok.lower())
-        if target is None:
-            raise SimError(
-                f"{self.where}: unknown source name {tok!r} in expression "
-                f"{self.text!r} (expressions may only reference other sources "
-                "of the same variant)"
-            )
-        return float(self.resolve(target))
-
-    def _group(self) -> float:
-        value = self.expr()
-        if self.take()[1] != ")":
-            raise SimError(f"{self.where}: unbalanced parentheses in {self.text!r}")
-        return value
-
-    def factor(self) -> float:
-        kind, tok = self.take()
-        if kind == "num":
-            return float(tok)
-        if kind == "name":
-            return self._name(tok)
-        if tok == "-":
-            return -self.factor()
-        if tok == "+":
-            return self.factor()
-        if tok == "(":
-            return self._group()
-        raise SimError(f"{self.where}: unexpected {tok!r} in expression {self.text!r}")
-
-
-def _eval_source_expr(
-    variant: str,
-    key: str,
-    text: str,
-    lowered: dict[str, str],
-    resolve: Any,
-) -> float:
-    """Evaluate ``text`` (``+ - * /``, parentheses, numbers, and other source
-    names of the same variant) without ``eval``."""
-    where = f"corners.variants[{variant!r}].sources[{key!r}]"
-    tokens = _tokenize_source_expr(where, text)
-    return _SourceExprParser(where, text, tokens, lowered, resolve).parse()
-
-
-def _is_excluded(point: CornerPoint, exclude_spec: list[dict[str, Any]]) -> bool:
-    """A point is excluded if it matches every key of any one exclude entry."""
-    for entry in exclude_spec:
-        if _matches_exclude(point, entry):
-            return True
-    return False
-
-
-def _mapping_matches(actual: dict[str, Any], selector: Any, fold: Any) -> bool:
-    """Whether every ``selector`` key (name folded by ``fold``) equals the
-    point's value for it -- the subset match of ``exclude[].supply_v`` and
-    ``exclude[].params``."""
-    if not isinstance(selector, dict):
-        return False
-    return all(actual.get(fold(name)) == value for name, value in selector.items())
-
-
-def _fold_lower(name: Any) -> str:
-    return str(name).lower()
-
-
-# exclude-entry key -> predicate(point, selector value); an unknown key never matches.
-_EXCLUDE_KEY_MATCHERS: dict[str, Any] = {
-    "process": lambda point, value: point.process == value,
-    "temperature_c": lambda point, value: point.temperature_c == value,
-    "variant": lambda point, value: point.variant == value,
-    "supply_v": lambda point, value: _mapping_matches(point.supply_v, value, str),
-    "params": lambda point, value: _mapping_matches(point.params, value, _fold_lower),
-    "options": lambda point, value: _mapping_matches(point.options, value, _fold_lower),
-}
-
-
-def _matches_exclude(point: CornerPoint, entry: dict[str, Any]) -> bool:
-    for key, value in entry.items():
-        matcher = _EXCLUDE_KEY_MATCHERS.get(key)
-        if matcher is None or not matcher(point, value):
-            return False
-    return True
-
-
-# --------------------------------------------------------------------------- #
 # Initial-guess hints: `options.nodeset` (issue #3036)
 # --------------------------------------------------------------------------- #
 
-#: A node name a ``.nodeset`` card may carry: a bare SPICE identifier (with
-#: ``.``/``:`` for hierarchy) or an all-digit node. Anything else -- spaces,
-#: newlines, parentheses, operators -- could break out of the one generated
-#: card, so it is refused rather than escaped.
-_NODESET_NODE_RE = re.compile(r"(?:[A-Za-z_][A-Za-z0-9_.:]*|[0-9]+)")
 _NODESET_RULE_KEYS = ("match", "values")
 _NODESET_MATCH_KEYS = ("process", "temperature_c", "supply_v", "params")
-
-
-def _normalize_nodeset_values(raw: Any, where: str) -> dict[str, float]:
-    """A nonempty ``{node: volts}`` map, validated: names match
-    :data:`_NODESET_NODE_RE`, are lowercased, and may not repeat
-    case-insensitively; values are finite numbers (booleans and nulls are
-    refused). Used for the request rules and re-run at the receiving worker
-    on the wire map."""
-    if not isinstance(raw, dict) or not raw:
-        raise SimError(f"{where} must be a nonempty object mapping nodes to volts")
-    values: dict[str, float] = {}
-    for node, volts in raw.items():
-        if not isinstance(node, str) or not _NODESET_NODE_RE.fullmatch(node):
-            raise SimError(
-                f"{where} node {node!r} is not a supported node name "
-                "(expected [A-Za-z_][A-Za-z0-9_.:]* or digits only)"
-            )
-        lowered = node.lower()
-        if lowered in values:
-            raise SimError(
-                f"{where} names node {lowered!r} more than once "
-                "(node names are case-insensitive)"
-            )
-        if not is_number(volts) or not math.isfinite(volts):
-            raise SimError(f"{where}.{node} must be a finite number of volts")
-        values[lowered] = float(volts)
-    return dict(sorted(values.items()))
 
 
 def _nodeset_match_process(value: Any, where: str) -> str:
@@ -10265,7 +9046,7 @@ def _is_legitimately_absent(cause: str | None) -> bool:
     """Whether a value-less ``optional`` measurement is absent data rather than
     an engine failure: no ngspice ``Error: measure`` reason at all, or the
     "out of interval" (never crossed) reason."""
-    return cause is None or _MEAS_ABSENT_CAUSE_RE.search(cause) is not None
+    return cause is None or sim_cause._MEAS_ABSENT_CAUSE_RE.search(cause) is not None
 
 
 def _absent_measurement(
@@ -10310,7 +9091,7 @@ def _no_value_measurement(
         return result, diagnostic, cause is not None
     message = _no_value_message(spec, save_mode=save_mode)
     if cause is not None:
-        message += _cause_suffix(cause)
+        message += sim_cause._cause_suffix(cause)
     elif too_few_points and spec.get("spice"):
         message += _AC_TOO_FEW_POINTS_HINT
     result = {
@@ -12247,13 +11028,13 @@ def _classify_diagnostics(
 ) -> list[dict[str, Any]]:
     """Classify structured diagnostics from ``log_text``, per this module's
     ordered ``_DIAGNOSTIC_PATTERNS`` (most specific first, one match per
-    code). ``netlist_path``, when provided, lets the ``model_bin_range``
-    code replace ngspice's own uninformative message with one naming a
-    likely culprit instance (see :func:`_diagnose_modelname_error`); omitted
-    (the default -- also what every pre-#1214 caller/test still passes) it
-    falls back to ngspice's raw log line, same as every other code.
+    code). ``netlist_path``, when provided, also lets two codes read the
+    netlist itself: ``model_bin_range`` names a likely culprit instance
+    (:func:`_diagnose_modelname_error`, #1214) and ``netlist_title_line``
+    matches the abort's echoed line against line 1 (:func:`_title_line_cause`,
+    #5433). Omitted -- the default -- each falls back to today's behaviour.
     """
-    diagnostics: list[dict[str, Any]] = []
+    diagnostics: list[dict[str, Any]] = _title_line_cause(log_text, netlist_path)
     for code, pattern in _DIAGNOSTIC_PATTERNS:
         match = pattern.search(log_text)
         if match is None:
@@ -12265,41 +11046,33 @@ def _classify_diagnostics(
             )
             continue
         if code == "model_bin_range":
-            if any(d["code"] == "unsupported_model_level" for d in diagnostics):
+            if any(d["code"] in _BIN_RANGE_SUPERSEDERS for d in diagnostics):
                 # The follow-on "could not find a valid modelname" is a
-                # consequence of the rejected model level, not a bin range.
+                # consequence of the superseding cause, not a bin range.
                 continue
             message = _diagnose_modelname_error(netlist_path) or message
         elif code == "par_call_cap":
             message = _PAR_CALL_CAP_MESSAGE.format(raw=message.strip())
         elif code in _PREREQUISITE_MESSAGES:
             message = _PREREQUISITE_MESSAGES[code].format(raw=message.strip())
-        if code == "ngspice_fatal" and any(
-            d["code"] in _NGSPICE_FATAL_CODES for d in diagnostics
-        ):
-            continue
         if code == "ngspice_fatal":
-            message = _with_netlist_error_cause(message, log_text, match.start())
+            if any(d["code"] in _NGSPICE_FATAL_CODES for d in diagnostics):
+                continue
+            message = sim_cause._with_netlist_error_cause(
+                message, log_text, match.start()
+            )
         diagnostics.append({"severity": "error", "code": code, "message": message})
     return diagnostics
 
 
-def _with_netlist_error_cause(message: str, log_text: str, start: int) -> str:
-    """Append the next log line to an ``Error in netlist line no. N`` message.
-
-    ngspice puts the cause (``Undefined parameter [expr]``) on the line after
-    the location. Any other message is returned unchanged.
-    """
-    if "fatal error in ngspice" in message.lower():
-        return _with_fatal_error_cause(message, log_text)
-    if message.lower().startswith("error on line"):
-        return _with_fatal_error_cause(message, log_text)
-    if not message.lower().startswith("error in netlist line no."):
-        return message
-    following = log_text[start:].splitlines()[1:2]
-    if following and following[0].strip():
-        return f"{message} {following[0].strip()}"
-    return message
+def _title_line_cause(log_text: str, netlist_path: str) -> list[dict[str, Any]]:
+    """Issue #5433's ``netlist_title_line`` cause, or ``[]`` -- see
+    :func:`sim_cause._netlist_title_line` for when it fires and why."""
+    title = sim_cause._netlist_title_line(log_text, netlist_path)
+    if title is None:
+        return []
+    message = sim_cause._title_line_message(netlist_path, *title)
+    return [{"severity": "error", "code": "netlist_title_line", "message": message}]
 
 
 #: Width, in micrometres, above which a MOS instance's ``w`` as written
