@@ -2590,12 +2590,6 @@
     },
     {
       "file": "src/klayout_tools/sim.py",
-      "code": "arg-type",
-      "message": "Argument 3 to \"CornerPoint\" has incompatible type \"Any | None\"; expected \"float\"",
-      "count": 1
-    },
-    {
-      "file": "src/klayout_tools/sim.py",
       "code": "assignment",
       "message": "Incompatible types in assignment (expression has type \"list[str | None]\", target has type \"list[str] | float | list[dict[str, Any]] | dict[str, Any] | str | None\")",
       "count": 2
@@ -2628,6 +2622,12 @@
       "file": "src/klayout_tools/sim_batch_contract_spec.py",
       "code": "union-attr",
       "message": "Item \"None\" of \"Match[str] | None\" has no attribute \"group\"",
+      "count": 1
+    },
+    {
+      "file": "src/klayout_tools/sim_corners.py",
+      "code": "arg-type",
+      "message": "Argument 3 to \"CornerPoint\" has incompatible type \"Any | None\"; expected \"float\"",
       "count": 1
     },
     {
