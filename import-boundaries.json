@@ -651,6 +651,7 @@
         "klayout_tools._check_result",
         "klayout_tools._devices",
         "klayout_tools._digest",
+        "klayout_tools._jsongz",
         "klayout_tools._jsonnum",
         "klayout_tools._layout",
         "klayout_tools._native",
@@ -786,6 +787,7 @@
         "klayout_tools.sim_passes",
         "klayout_tools.sim_op_check",
         "klayout_tools.sim_osdi_pin",
+        "klayout_tools.sim_osdi_settle",
         "klayout_tools.sim_pdk_ambiguity",
         "klayout_tools.sim_peak_rss",
         "klayout_tools.sim_plan",
@@ -877,6 +879,7 @@
       "kind": "verb",
       "description": "`klt stats` implementation: core modules plus CLI adapter.",
       "modules": [
+        "klayout_tools._stats_density",
         "klayout_tools.cli.stats_cmd",
         "klayout_tools.stats"
       ]

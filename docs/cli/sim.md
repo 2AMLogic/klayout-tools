@@ -31,7 +31,12 @@ this document (and the code) win.
 - `--max-units-per-job` — backend `batch`, `remote.hosts: 1` only: split the
   expanded unit list into batch jobs of at most this many units so no job
   outruns the fleet's whole-job ceiling; overrides `batch.max_units_per_job`
-  (see "Three budgets, and the fleet's whole-job ceiling"). An explicit cap
+  (see "Three budgets, and the fleet's whole-job ceiling"). **A split changes
+  the report shape**: `environment.remote` becomes a `fleet[]` array -- one
+  block per job, even with `remote.hosts: 1` -- so every per-job field
+  (`job_id`, `instance_type`, `state`, `runner_klt_version`, ...) must be read
+  from `fleet[]`; only the `job_ids` and `runner_compatibility` roll-ups sit at
+  the top level (see "Fleet sharding" below). An explicit cap
   is honored even when a shard's serial upper bound exceeds the ceiling (a
   stderr warning says so). A `decks` request splits the same way (issue #5378):
   `ceil(len(decks)/N)` balanced contiguous slices, one batch job each, merged
@@ -122,7 +127,10 @@ this document (and the code) win.
   report runs to tens of MB indented but ~30x smaller gzipped, small enough
   to commit unmodified as evidence. Stdout and exit codes (0/3/4) are
   unaffected; an unwritable path exits 1 with the error envelope. `klt
-  yield` accepts the `.json.gz` file directly.
+  yield` and `klt signoff` accept the `.json.gz` file directly
+  ([#5452](https://github.com/2AMLogic/klayout-tools/issues/5452)), so the
+  compressed report is citable as manifest evidence with no decompressed
+  second copy.
 - `--plot` — write one self-contained, dependency-free waveform SVG per
   non-sweep signal per corner to this directory, forcing
   `options.waveforms`/`keep_artifacts` on for this run. See "Waveform
@@ -952,8 +960,8 @@ field and is tracked with the `analysis_steps[]` equivalent in
 | `batch.runner_version_check` | `"enforce"` \| `"warn"` | Runner/client `klt` version-skew policy (default `"enforce"`), applied both to the pre-launch check against the AMI manifest's published runner version and to the runner-side preflight; see "Runner/client `klt` version skew" below. Any other value is rejected before any S3 write. |
 | `batch.capacity_wait_s` | number ≥ 0 | Wall-clock budget, per `launch` call, for waiting out a Spot **capacity refusal** or a fleet **concurrency-cap refusal** ([#2721](https://github.com/2AMLogic/klayout-tools/issues/2721)). Per `launch` call for a single job; one run-wide deadline for a sharded run ([#4018](https://github.com/2AMLogic/klayout-tools/issues/4018)). Defaults to `0`: one launch attempt, exactly as before. See "Capacity refusal and `batch_no_capacity`" below. A negative, non-finite, or non-numeric value is rejected before any S3 write. |
 | `batch.max_job_seconds` | number > 0 | The fleet's **whole-job ceiling** the one-job pre-submit check compares against ([#2833](https://github.com/2AMLogic/klayout-tools/issues/2833)). Resolution order: this field, then `$KLT_BATCH_MAX_JOB_SECONDS`, then `BATCH_MAX_JOB_SECONDS` in the `batch-fleet.env` beside the provision script, else `3600` (the harness's own fallback when its `MaxJobSeconds` tag is absent). The value used and its source are reported; see "Three budgets, and the fleet's whole-job ceiling" below. A present but non-positive, non-finite, or non-numeric value from any source is rejected before any S3 write. |
-| `batch.job_ceiling_check` | `"warn"` \| `"enforce"` \| `"split"` | What the one-job pre-submit check does when the job's conservative bound exceeds `max_job_seconds`: `"warn"` (default) submits and warns, `"enforce"` refuses before any S3 write with `error.code: "batch_job_ceiling_exceeded"`, `"split"` ([#3446](https://github.com/2AMLogic/klayout-tools/issues/3446)) submits the request as the fewest balanced jobs that each fit (each holds at most `max_units_per_job = floor((max_job_seconds - 120) / options.timeout_s)` units). Any other value is rejected before any S3 write. |
-| `batch.max_units_per_job` | integer ≥ 1 | Opt-in cap on the units of one job ([#3446](https://github.com/2AMLogic/klayout-tools/issues/3446)); `--max-units-per-job` overrides it. With `remote.hosts: 1` the request is split into `ceil(units / N)` balanced jobs, even when it would have fit one. The ceiling bound is a fully-serial upper bound, not a runtime estimate, so an explicit cap is honored even when `timeout_s x shard units + 120` exceeds `max_job_seconds` ([#4982](https://github.com/2AMLogic/klayout-tools/issues/4982)); a stderr warning states the bound is a serial upper bound, and the harness still kills a job that actually runs past the ceiling. A request that should be sized automatically should omit the cap and use `job_ceiling_check: "split"` (largest shard `floor((max_job_seconds - 120) / options.timeout_s)`). Rejected before any S3 write with `error.code: "batch_max_units_per_job_invalid"` when not a positive integer, or when combined with `job_ceiling_check: "enforce"`. |
+| `batch.job_ceiling_check` | `"warn"` \| `"enforce"` \| `"split"` | What the one-job pre-submit check does when the job's conservative bound exceeds `max_job_seconds`: `"warn"` (default) submits and warns, `"enforce"` refuses before any S3 write with `error.code: "batch_job_ceiling_exceeded"`, `"split"` ([#3446](https://github.com/2AMLogic/klayout-tools/issues/3446)) submits the request as the fewest balanced jobs that each fit (each holds at most `max_units_per_job = floor((max_job_seconds - 120) / options.timeout_s)` units). A split reports `environment.remote` as a `fleet[]` array (one block per job, even with `remote.hosts: 1`) plus the top-level `job_ids` / `runner_compatibility` roll-ups, so per-job fields must be read from `fleet[]` -- see "Fleet sharding" below. Any other value is rejected before any S3 write. |
+| `batch.max_units_per_job` | integer ≥ 1 | Opt-in cap on the units of one job ([#3446](https://github.com/2AMLogic/klayout-tools/issues/3446)); `--max-units-per-job` overrides it. With `remote.hosts: 1` the request is split into `ceil(units / N)` balanced jobs, even when it would have fit one -- and that split reports `environment.remote.fleet[]` (one block per job) with only the `job_ids` / `runner_compatibility` roll-ups at the top level, so per-job fields must be read from `fleet[]` (see "Fleet sharding" below). The ceiling bound is a fully-serial upper bound, not a runtime estimate, so an explicit cap is honored even when `timeout_s x shard units + 120` exceeds `max_job_seconds` ([#4982](https://github.com/2AMLogic/klayout-tools/issues/4982)); a stderr warning states the bound is a serial upper bound, and the harness still kills a job that actually runs past the ceiling. A request that should be sized automatically should omit the cap and use `job_ceiling_check: "split"` (largest shard `floor((max_job_seconds - 120) / options.timeout_s)`). Rejected before any S3 write with `error.code: "batch_max_units_per_job_invalid"` when not a positive integer, or when combined with `job_ceiling_check: "enforce"`. |
 | `batch.max_concurrent_jobs` | integer ≥ 1 | Opt-in bound on the shard jobs in flight at once for a sharded run (`remote.hosts > 1`, or a split) ([#3914](https://github.com/2AMLogic/klayout-tools/issues/3914)); `--max-concurrent-jobs` overrides it. Unset submits every shard at once, as before. With a cap of K, at most K jobs sit between submit and collected; the remaining shards start as earlier ones finish, and the merge order, `fleet[]`, `batch-shards.json` and `--resume` are unchanged. The effective value is echoed as `environment.remote.max_concurrent_jobs` only when set. Use it to stay under the fleet's instance cap (`BATCH_MAX_CONCURRENT_INSTANCES`) instead of letting refused shards come back as `lost_shard`; it composes with `capacity_wait_s` (a retry of a refused launch, drawing on the run-wide budget) and with `--resume`, which re-submits only the `lost_shard` / failed units. Rejected before any S3 write with `error.code: "batch_max_concurrent_jobs_invalid"` when not a positive integer. |
 
 ### Asynchronous submit and status (`--submit-only`, `--job-status`, [#3073](https://github.com/2AMLogic/klayout-tools/issues/3073))
@@ -1699,9 +1707,11 @@ rejected up front (`batch_max_units_per_job_invalid`), and when even one unit
 exceeds the ceiling the "lower `options.timeout_s`" refusal applies
 (`batch_job_ceiling_exceeded`), because splitting cannot help. When a split
 mode is active, `environment.remote.job_ceiling` gains `split` (boolean) and
-`effective_hosts`; the report otherwise carries the `fleet[]` array of a
-`remote.hosts > 1` run. Units that finished before a killed job are still not
-recovered (the harness never writes an incremental report).
+`effective_hosts`; the report otherwise carries the `fleet[]` array -- and
+the top-level `job_ids` / `runner_compatibility` roll-ups -- of a
+`remote.hosts > 1` run, even though `remote.hosts` is still `1`. Units that
+finished before a killed job are still not recovered (the harness never writes
+an incremental report).
 
 ### Both off-host backends validate `models.pdk` up front
 
@@ -1994,14 +2004,25 @@ report a pass. Policy: **reject before simulating**.
   `runner_version_check: "warn"` when the run proceeded (that skew stays in
   `environment.remote` only). It covers the case the pre-launch manifest check
   cannot see (no manifest, or an entry without `klt_version`).
-- `environment.remote` (and each `environment.remote.fleet[]` entry for
-  `hosts > 1`, so mixed-version shards stay distinguishable) always carries
-  `runner_klt_version` (the runner's own version, or `null` when it could not
-  be established -- never the client's), `client_klt_version`, and
+- A single-job `environment.remote`, and each `environment.remote.fleet[]`
+  entry of a sharded run (so mixed-version shards stay distinguishable), always
+  carries `runner_klt_version` (the runner's own version, or `null` when it
+  could not be established -- never the client's), `client_klt_version`, and
   `runner_compatibility` (`match` / `mismatch` / `unknown`; `unknown` also
   when either version has no major.minor). A non-`match`
   value also carries `runner_compatibility_warning`. The report's
   `provenance.klt_version` stays the client's.
+- A sharded **batch** block carries a **worst-of** `runner_compatibility`
+  roll-up at the top level too
+  ([#5522](https://github.com/2AMLogic/klayout-tools/issues/5522)):
+  `mismatch` if any shard proved a skew, else `unknown` if any shard is lost
+  (`null`), `unknown`, or predates the field, else `match`. It is never `null` or
+  absent, so a client-side skew check written against the single-job shape
+  fails safe on a split run instead of reading `None` -- which is
+  indistinguishable from `match` in the obvious implementation -- and
+  recording a skewed runner as a clean one. The two version strings stay
+  per-shard only: shards can legitimately disagree, so there is no honest
+  single value. See "Fleet sharding" below.
 - `batch.runner_version_check` (`"enforce"`, default, or `"warn"`) selects the
   behavior. `warn` runs the simulation anyway and only reports the skew in
   `environment.remote`; use it deliberately (for example a client on a newer
@@ -3083,9 +3104,47 @@ not just equivalent.
   }
   ```
 
-  A `hosts: 1` run (or any backend that never populates
-  `environment.remote`, e.g. `local`/`local-parallel`) keeps the existing
-  non-array shape — `fleet[]` never appears there, for compatibility.
+  A `hosts: 1` run that is **not** split keeps the existing non-array
+  shape — `fleet[]` never appears there, for compatibility — and so does any
+  backend that never populates `environment.remote` at all
+  (`local`/`local-parallel`). **`hosts: 1` alone is not a guarantee of the
+  flat shape**: a `batch` run that `batch.max_units_per_job` or
+  `batch.job_ceiling_check: "split"` splits (see "Opt-in auto-split" above)
+  is sharded, and reports `fleet[]` exactly like a `hosts > 1` run.
+- **Top-level roll-ups on a sharded `batch` run.** Sharding moves job identity
+  *and* the runner-skew check inside `fleet[]`, where a consumer written
+  against the single-job shape reads `None` for both rather than failing —
+  silently losing provenance on exactly the large grids a split is reached for
+  ([#5522](https://github.com/2AMLogic/klayout-tools/issues/5522)). So a
+  sharded `batch` block also carries two roll-ups beside `fleet`:
+
+  | Field | Value |
+  |---|---|
+  | `job_ids` | Every non-`null` shard's `job_id`, in shard order. Shorter than `fleet[]` when a shard was lost. |
+  | `runner_compatibility` | Worst-of across `fleet[]`: `mismatch` if any shard proved a skew, else `unknown` if any shard is lost (`null`), `unknown`, or predates the field, else `match`. Never `null` or absent — see the `batch.runner_version_check` bullets above. |
+
+  ```json
+  {
+    "environment": {
+      "remote": {
+        "job_ids": ["klt-sim-4f2b19c0ae31", "klt-sim-9c7d04e18ba2"],
+        "runner_compatibility": "match",
+        "fleet": [
+          { "job_id": "klt-sim-4f2b19c0ae31", "runner_compatibility": "match" },
+          { "job_id": "klt-sim-9c7d04e18ba2", "runner_compatibility": "match" }
+        ]
+      }
+    }
+  }
+  ```
+
+  Nothing else is rolled up: every other per-job field (`job_id`,
+  `instance_type`, `state`, `lifecycle`, `runner_klt_version`,
+  `worker_environment`, cost, ...) must be read from `fleet[]`, because shards
+  can legitimately disagree and a single top-level value would be a guess.
+  The `fleet[]` entries themselves are unchanged, an unsplit single-job block
+  gains neither field, and the SSH `remote` backend — whose `fleet[]` entries
+  carry no runner identity at all — gets neither roll-up.
 - **`local`/`local-parallel`: in-process sharding.** `local` and
   `local-parallel` consume the expanded unit list directly (no separate
   "request document" to slice), so `hosts > 1` fans it across a thread pool
@@ -6590,7 +6649,13 @@ fails with `Unable to find definition of model …` and every corner errors.
   `.include` rule uses (`env_var`, `pdk_root`). It is not existence-checked,
   staged or hashed on the submitting host, is forwarded to the worker
   unexpanded in declared order, and neither triggers the refusal above nor
-  makes a host-default off-host backend step back to `local`. The worker's
+  makes a host-default off-host backend step back to `local`. When some
+  *other* reason steps that host default back to `local` anyway — a
+  single-unit run, or `options.resume` — the list is re-settled against the
+  backend that actually executes (issue #5492): the entries are expanded and
+  existence-checked on this host, emitted as `pre_osdi` lines in declared
+  order, and reported under `environment.osdi_preload`, exactly as
+  `--backend local` does. The worker's
   own `ngspice` decides whether the module loads, so a real OSDI ABI
   mismatch there still surfaces as the per-corner `osdi_abi_mismatch`
   diagnostic (no client-side check is possible for an image-baked file).

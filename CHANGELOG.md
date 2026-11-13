@@ -14,6 +14,33 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt stats` reports a `geometry_digest`** (#5551, 2026-11-13): the
+  timestamp- and record-order-independent digest of a stream's decoded
+  geometry is now a top-level field of `klt stats --format json` (and a
+  `geometry_digest:` line in text output). This gives
+  `klt signoff --attest 2 --regenerated-hash ... --hash-kind geometry` a
+  public producer for the value its grader recomputes -- previously the only
+  way to obtain it was to import the private
+  `klayout_tools._provenance.layout_geometry_digest`, since `klt diff`'s
+  `canonical_hash` is a *different* digest whose substitution grades
+  `stale_artifact`. The digest algorithm, `canonical_hash`, and how
+  `klt signoff --manifest` grades are all unchanged; the field covers the
+  whole stream and is not scoped by `--top`. Additive; `klt stats`'
+  `schema_version` stays `1`.
+- **`klt signoff` reads a gzip-compressed evidence file** (#5452,
+  2026-11-13): a `klt sim --report-out report.json.gz` report — the compact
+  form `docs/cli/sim.md` recommends committing as evidence — is now citable
+  from a manifest as it stands, grading identically to the same envelope
+  decompressed (`unmet`/`unreadable_evidence` before, which forced a second
+  decompressed copy beside it). Detection is by the gzip magic bytes, not the
+  `.gz` suffix, matching `klt yield`; every `klt signoff` *file* reader
+  (positional envelopes, manifest and fleet files, file-backed citations)
+  accepts it, and a truncated or damaged stream still grades
+  `unmet`/`unreadable_evidence`. Hashing is unchanged: a citation's
+  `content_hash` comes from inside the envelope, so it is encoding-independent;
+  the one `content_hash_basis: "evidence_file"` case keeps hashing the file as
+  committed. Additive; no `schema_version` bump.
+
 - **`klt gen` / `klt layout-plan execute`: a generated stream no longer
   depends on which generators ran earlier in the same process** (#5499,
   2026-11-13): `gen`'s reference PCell library is registered once per process
@@ -42,6 +69,29 @@ not `klt --version`, if you need to detect this kind of drift. See
   `example_gf180mcu.gds` (geometry byte-for-byte equivalent, zero XOR area on
   every layer; their `.drc.json` companions are unchanged). No JSON field is
   added, renamed or removed; no `schema_version` bump.
+- **`klt characterize`: level-sensitive latch arcs** (#5521, 2026-11-13): a
+  cell can now be declared a latch with `cell.enable_pin` (plus optional
+  `cell.enable_level`, `"high"` by default) instead of `cell.clock_pin`, which
+  asserts edge-triggered semantics and is mutually exclusive with it (as is
+  `cell.clock_edge`, whose job `enable_level` takes over). One run then emits,
+  per output pin: a **transparent** data-to-output `timing()` group per
+  referenced data pin (`timing_type : combinational`, measured with the enable
+  held at its active level), an **enable**-to-output group on the enable's
+  *opening* edge (`rising_edge` for an active-high enable, `falling_edge` for
+  active-low), and -- for each `cell.constrained_pins` entry -- setup/hold
+  referenced to the enable's *closing* edge (`setup_falling`/`hold_falling`
+  for an active-high enable, `setup_rising`/`hold_rising` for active-low). All
+  carry the usual six NLDM tables on the request's own slew x load grid. The
+  latch bisection probe passes when the transparent data-to-output delay is
+  within `(1 + options.constraint_degradation)` of its wide-end reference
+  **and** the output still holds the captured level after the enable closes;
+  an unbracketable point (including one that does not hold at the wide end)
+  still raises the existing named error rather than reporting a value. Purely
+  additive: `enable_pin`/`enable_level` are new request fields, no existing
+  JSON field changes shape, and no `schema_version` bump. Worked example:
+  `examples/characterize/request-dlat.json` (+ `dlat.spice`). See
+  [`docs/cli/characterize.md`](docs/cli/characterize.md)'s "Level-sensitive
+  latches".
 
 - **`klt sim`: a bad time bound in `cycle_mean` / `eye` / `settled` /
   `step_resolution` is now reported against its own form, not `crossings`**
