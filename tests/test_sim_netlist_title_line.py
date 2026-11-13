@@ -290,3 +290,86 @@ def test_failure_classification_table_documents_the_code():
 
     assert "| `netlist_title_line` |" in text
     assert "must not start with a SPICE title line" in text
+
+
+# --------------------------------------------------------------------------- #
+# The cause helpers this issue moved into `sim_cause` (#5433)
+#
+# `_with_netlist_error_cause` moved out of sim.py unchanged, so its
+# non-default paths need pinning where it now lives. The fixtures below are
+# the real ngspice shapes the function dispatches on; the one synthesized
+# line is labelled as such.
+# --------------------------------------------------------------------------- #
+
+
+def test_blank_line_between_the_location_and_the_echo_still_matches(tmp_path):
+    """ngspice separates the location line from the echoed source line with a
+    blank line in some builds; the echo is the first *non-blank* line after
+    the location, so the match must survive it."""
+    netlist = _write_netlist(tmp_path, "my transient bench")
+    log = "Error on line 1 or its substitute:\n\n  my transient bench\n"
+
+    assert sim_cause._netlist_title_line(log, netlist) == (1, "my transient bench")
+
+
+def test_a_fatal_line_is_never_quoted_back_as_its_own_cause():
+    """`ngspice_fatal`'s message is the matched substring `fatal error in
+    ngspice`, not the whole log line, so the line it came from is not caught
+    by the "skip my own line" test -- it is skipped by name instead, and only
+    a genuine cause line is quoted."""
+    log = (
+        "ngspice-47 : fatal error in ngspice, can't recover. Expect core dump\n"
+        "Error: unknown device type - error \n"
+    )
+
+    result = sim_cause._with_fatal_error_cause("fatal error in ngspice", log)
+
+    assert result == (
+        "fatal error in ngspice [cause: Error: unknown device type - error]"
+    )
+    assert "core dump" not in result
+
+
+def test_a_fatal_log_with_only_fatal_lines_invents_no_cause():
+    """The `Error:`-prefixed repeat below is synthesized, not captured: it is
+    the shape that would otherwise qualify as a cause line under
+    `_FATAL_CAUSE_LINE_RE`, and pins that the name test wins over it."""
+    log = (
+        "ngspice-47 : fatal error in ngspice, can't recover. Expect core dump\n"
+        "Error: fatal error in ngspice\n"
+    )
+
+    assert (
+        sim_cause._with_fatal_error_cause("fatal error in ngspice", log)
+        == "fatal error in ngspice"
+    )
+
+
+def test_an_unrecognised_fatal_message_is_returned_unchanged():
+    """`_with_netlist_error_cause` suffixes only the three shapes it knows.
+    `Simulation interrupted due to error` is a fourth `ngspice_fatal`
+    alternative and carries its cause nowhere -- it passes through."""
+    log = "Simulation interrupted due to error\nError: some later noise\n"
+
+    assert (
+        sim_cause._with_netlist_error_cause(
+            "Simulation interrupted due to error", log, 0
+        )
+        == "Simulation interrupted due to error"
+    )
+
+
+@pytest.mark.parametrize(
+    "log",
+    [
+        pytest.param("Error in netlist line no. 12\n\n", id="following-line-blank"),
+        pytest.param("Error in netlist line no. 12", id="no-following-line"),
+    ],
+)
+def test_netlist_line_error_with_no_cause_line_is_returned_unchanged(log):
+    """ngspice puts the cause on the line after `Error in netlist line no. N`.
+    When that line is blank or absent there is nothing to append."""
+    assert (
+        sim_cause._with_netlist_error_cause("Error in netlist line no. 12", log, 0)
+        == "Error in netlist line no. 12"
+    )

@@ -196,7 +196,6 @@ from .sim_batch_async import (
 )
 from .sim_batch_async import submit_only as _submit_batch_only
 from .sim_batch_features import attach_models_lib_comparison, pop_remote_diagnostics
-from .sim_cause import _MEAS_ABSENT_CAUSE_RE, _cause_suffix
 from .sim_convergence_retry import is_retryable_convergence_failure, note_not_retried
 from .sim_corner_keys import unknown_key_warnings
 from .sim_decks import run_deck_request
@@ -10274,7 +10273,7 @@ def _is_legitimately_absent(cause: str | None) -> bool:
     """Whether a value-less ``optional`` measurement is absent data rather than
     an engine failure: no ngspice ``Error: measure`` reason at all, or the
     "out of interval" (never crossed) reason."""
-    return cause is None or _MEAS_ABSENT_CAUSE_RE.search(cause) is not None
+    return cause is None or sim_cause._MEAS_ABSENT_CAUSE_RE.search(cause) is not None
 
 
 def _absent_measurement(
@@ -10319,7 +10318,7 @@ def _no_value_measurement(
         return result, diagnostic, cause is not None
     message = _no_value_message(spec, save_mode=save_mode)
     if cause is not None:
-        message += _cause_suffix(cause)
+        message += sim_cause._cause_suffix(cause)
     elif too_few_points and spec.get("spice"):
         message += _AC_TOO_FEW_POINTS_HINT
     result = {
