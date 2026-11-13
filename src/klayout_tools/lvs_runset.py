@@ -289,16 +289,29 @@ def _nonzero_exit_message(
     )
 
 
-def _class_census(netlist: kdb.Netlist | None) -> tuple[list[str], dict[str, int]]:
-    """``(declared_classes, instances_per_class)`` over every circuit."""
-    declared = sorted(dc.name for dc in netlist.each_device_class()) if netlist else []
+def _class_census(
+    netlist: kdb.Netlist | None,
+) -> tuple[list[str], dict[str, int], int]:
+    """``(declared_classes, instances_per_class, unnamed_instances)`` over
+    every circuit. Empty-named device classes are kept out of the first two
+    (an empty id is not a valid coverage identity) and counted in the third
+    so :func:`_build_coverage` can report them instead of losing them."""
+    declared = (
+        sorted(dc.name for dc in netlist.each_device_class() if dc.name)
+        if netlist
+        else []
+    )
     counts: dict[str, int] = {}
+    unnamed = 0
     if netlist is not None:
         for circuit in netlist.each_circuit():
             for device in circuit.each_device():
                 cls = device.device_class().name
+                if not cls:
+                    unnamed += 1
+                    continue
                 counts[cls] = counts.get(cls, 0) + 1
-    return declared, counts
+    return declared, counts, unnamed
 
 
 def _device_params(device: Any) -> dict[str, float]:
@@ -553,17 +566,18 @@ def _build_coverage(
     ref_declared: list[str],
     layout_counts: dict[str, int],
     ref_counts: dict[str, int],
+    unnamed_instances: int = 0,
 ) -> dict[str, Any]:
     recognized = sorted(set(layout_counts) | set(ref_counts))
     not_recognized = sorted(
         c for c in set(layout_declared) | set(ref_declared) if c not in recognized
     )
-    coverage = build_check_coverage(
-        checked=recognized,
-        skipped=[
-            {"id": c, "reason": "declared_not_recognized"} for c in not_recognized
-        ],
-    )
+    skipped = [{"id": c, "reason": "declared_not_recognized"} for c in not_recognized]
+    if unnamed_instances:
+        skipped.append({"id": "<unnamed>", "reason": "unnamed_device_class"})
+    coverage = build_check_coverage(checked=recognized, skipped=skipped)
+    if unnamed_instances:
+        coverage["unnamed_device_instances"] = unnamed_instances
     coverage["declared_device_classes"] = {
         "layout": layout_declared,
         "reference": ref_declared,
@@ -671,8 +685,8 @@ def _empty_extraction_verdict(l2n: Any, reference_path: str | None) -> dict[str,
     if reference is None:
         return {}
 
-    layout_declared, layout_counts = _class_census(l2n.netlist())
-    ref_declared, ref_counts = _class_census(reference)
+    layout_declared, layout_counts, layout_unnamed = _class_census(l2n.netlist())
+    ref_declared, ref_counts, ref_unnamed = _class_census(reference)
     mismatches: list[dict[str, Any]] = []
     for circuit in reference.each_circuit():
         cname = {"layout": None, "reference": circuit.name}
@@ -713,7 +727,11 @@ def _empty_extraction_verdict(l2n: Any, reference_path: str | None) -> dict[str,
         "mismatches": mismatches,
         "power_connectivity": runset_power_connectivity(layout_netlist),
         "coverage": _build_coverage(
-            layout_declared, ref_declared, layout_counts, ref_counts
+            layout_declared,
+            ref_declared,
+            layout_counts,
+            ref_counts,
+            layout_unnamed + ref_unnamed,
         ),
         "device_census": {"layout": layout_counts, "reference": ref_counts},
         "counts": {
@@ -768,8 +786,8 @@ def read_lvsdb_verdict(
         )
 
     mismatches, any_error, not_compared = _classify(xref)
-    layout_declared, layout_counts = _class_census(xref.netlist_a())
-    ref_declared, ref_counts = _class_census(xref.netlist_b())
+    layout_declared, layout_counts, layout_unnamed = _class_census(xref.netlist_a())
+    ref_declared, ref_counts, ref_unnamed = _class_census(xref.netlist_b())
     nothing = not (layout_counts or ref_counts)
     if nothing:
         mismatches.append(
@@ -792,7 +810,11 @@ def read_lvsdb_verdict(
         "mismatches": mismatches,
         "power_connectivity": runset_power_connectivity(l2n.netlist()),
         "coverage": _build_coverage(
-            layout_declared, ref_declared, layout_counts, ref_counts
+            layout_declared,
+            ref_declared,
+            layout_counts,
+            ref_counts,
+            layout_unnamed + ref_unnamed,
         ),
         "device_census": {"layout": layout_counts, "reference": ref_counts},
         "counts": _pair_counts(xref),

@@ -348,7 +348,10 @@ error, as is a crashed runset. Additive; no `schema_version` bump.
 - `coverage` — the common v1 block (`checked` = classes with instances),
   plus `declared_device_classes`/`recognized_device_classes` (per side) and
   `declared_not_recognized` (declared by the runset, zero instances; also
-  listed under `skipped` with reason `declared_not_recognized`).
+  listed under `skipped` with reason `declared_not_recognized`). Device
+  instances whose class has an empty name are excluded from all class lists,
+  counted in `unnamed_device_instances`, and reported as one `skipped` entry
+  (`id: "<unnamed>"`, reason `unnamed_device_class`).
 - A run in which the runset recognizes **no** device on either side reports
   `status: "inconclusive"` (exit 4), `coverage.nothing_checked: true` and a
   `coverage.no_devices_recognized` mismatch — never a clean match.
