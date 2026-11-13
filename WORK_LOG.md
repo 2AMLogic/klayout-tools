@@ -8,6 +8,32 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-13
 
+- **PR #5475**: feat(pex): add --dry-run, a validate-only mode for klt pex
+- **PR #5483**: fix: stamp the search-resolved PDK install for the batch stamp comparison
+- **PR #5476**: fix(netlist): read a K-less sibling .sym's symbol attributes from G {}
+- **PR #5456**: fix(drc): follow KLayout `# %include` lines when hashing the deck tree
+- **PR #5453**: feat(drc): model sg13g2 NW.c's text-recognised SVaricap carve-out
+- **PR #5451**: fix(sim): refuse a step measurement whose name an earlier sibling shadows
+- **PR #5467**: fix: resubmit a terminally-interrupted single-unit batch job on --resume
+- **PR #5434**: refactor(sim): split corner-matrix expansion into four sibling modules
+- **PR #5447**: fix(drc): grade a selection-emptied rule inapplicable, not checked
+- **PR #5448**: fix(sim): classify a title line on the request's netlist as netlist_title_line
+- **PR #5450**: feat(netlist): restore the cell's subcircuit parameters on --block's .subckt card
+- **PR #5440**: docs: attribute --resistance-graph-r-cut to unconsumed deck cuts, not absent ones
+- **Issue #5464** (closed): klt pex: add --dry-run (validate the invocation and testbench requests without extracting or simulating)
+- **Issue #5474** (closed): klt sim batch receipt: report the fleet PDK revision so a local-pass / fleet-fail model-selection abort can be attributed
+- **Issue #5489** (closed): No stream-equivalence verb: byte comparison is the only way to tell 'layout changed' from 'bytes reordered'
+- **Issue #5468** (closed): netlist --block: legacy (pre-1.2) .sym with symbol attributes in G {} restores no parameters and gives no warning
+- **Issue #5443** (closed): drc --engine klayout: deck content_hash covers only the entry .drc, not the %include chain that carries the rules
+- **Issue #5442** (closed): drc(sg13g2): a runset_note deviation is documented but still counted, so a stream with the PDK varactor can never grade clean (follow-up to #5212)
+- **Issue #5446** (closed): sim: a step measurement named after a deck node silently clobbers that node's vector, breaking later .meas cards in the same step
+- **Issue #5480** (closed): klt signoff: no way to re-stamp an attestation envelope's content hashes without re-running every local_only cold start
+- **Issue #5459** (closed): klt batch --resume re-attaches to a terminally-interrupted single-unit job instead of resubmitting (follow-on to #5371)
+- **Issue #5428** (closed): Split sim.py (13,773 lines): move the corner-matrix expansion section (~1,215 lines) into four sibling modules, each ≤500 lines
+- **Issue #5435** (closed): drc: a rule whose layer_selection empties its input still grades 'checked', so a clean verdict can name a rule that measured zero geometry
+- **Issue #5433** (closed): klt sim: the request's netlist is .include'd into a generated top deck, so a conventional SPICE title line on its line 1 is silently parsed as a netlist element
+- **Issue #5439** (closed): klt netlist --block: restored .subckt line omits the top schematic's own parameter block, so the emitted block references undeclared parameters
+- **Issue #5436** (closed): docs: stale 'shipped decks curate none' cut-resistance docstring in extract_parasitics.py
 - **PR #5445**: fix(netlist): label PDK env as exported only when klt resolved a PDK
 - **PR #5416**: fix(sim): explain out-of-interval measurement misses as window misses
 - **PR #5418**: docs: roadmap as of 2026-11-13

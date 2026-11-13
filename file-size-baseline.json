@@ -193,7 +193,7 @@
     },
     {
       "path": "src/klayout_tools/cli/drc_cmd.py",
-      "lines": 577
+      "lines": 565
     },
     {
       "path": "src/klayout_tools/cli/extract_cmd.py",
@@ -201,7 +201,7 @@
     },
     {
       "path": "src/klayout_tools/cli/parser.py",
-      "lines": 5512
+      "lines": 5480
     },
     {
       "path": "src/klayout_tools/cli/pdk_cmd.py",
@@ -273,7 +273,7 @@
     },
     {
       "path": "src/klayout_tools/drc_klayout_engine.py",
-      "lines": 1677
+      "lines": 1651
     },
     {
       "path": "src/klayout_tools/economy.py",
@@ -593,7 +593,7 @@
     },
     {
       "path": "src/klayout_tools/signoff.py",
-      "lines": 8239
+      "lines": 8206
     },
     {
       "path": "src/klayout_tools/signoff_attest.py",
