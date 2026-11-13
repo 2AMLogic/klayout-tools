@@ -273,11 +273,11 @@
     },
     {
       "path": "src/klayout_tools/drc.py",
-      "lines": 3791
+      "lines": 3764
     },
     {
       "path": "src/klayout_tools/drc_klayout_engine.py",
-      "lines": 1728
+      "lines": 1677
     },
     {
       "path": "src/klayout_tools/economy.py",
@@ -481,7 +481,7 @@
     },
     {
       "path": "src/klayout_tools/netlist.py",
-      "lines": 1072
+      "lines": 1068
     },
     {
       "path": "src/klayout_tools/netlist_batch.py",
@@ -613,7 +613,7 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 13765
+      "lines": 12538
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
@@ -641,7 +641,7 @@
     },
     {
       "path": "src/klayout_tools/sim_steps.py",
-      "lines": 1320
+      "lines": 1314
     },
     {
       "path": "src/klayout_tools/sim_tian.py",

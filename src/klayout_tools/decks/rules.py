@@ -475,11 +475,10 @@ class DrcRule:
     source rule whose real semantics is "isolated"/"distinct polygon"
     spacing (as opposed to "space", which also bounds intra-polygon
     notches) -- see ``sky130.py``'s ``nwell.space.1`` for a worked example.
-    ``threshold_dbu`` is the
-    rule's distance threshold expressed in database units of the deck's own
-    *nominal* dbu (see each deck module's ``NOMINAL_DBU_UM`` constant — e.g.
-    sky130 and gf180mcu are both authored against ``dbu_um = 0.001``, i.e.
-    1 nm per unit).
+    ``threshold_dbu`` is the rule's distance threshold expressed in database
+    units of the deck's own *nominal* dbu (see each deck module's ``NOMINAL_DBU_UM``
+    constant — e.g. sky130 and gf180mcu are both authored against ``dbu_um = 0.001``,
+    i.e. 1 nm per unit).
 
     For ``"enclosing"`` (``layer`` encloses ``other_layer``) and ``"enclosed"``
     (``layer`` is enclosed by ``other_layer``), ``run_drc()`` reports more than
@@ -854,6 +853,7 @@ class DrcRule:
     # `runset_correspondence` in a report only when the rule fires. Keys:
     # `implemented_by_pdk_runset` (bool), `runset_file`, `pdk_revision`, `note`.
     runset_note: dict[str, Any] | None = None
+    text_exempt: Any = None  # `drc_text_exempt.TextMarkerDeviceSpec` (#5442)
 
 
 class UnknownDeckError(Exception):
