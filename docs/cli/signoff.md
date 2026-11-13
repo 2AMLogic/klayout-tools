@@ -884,9 +884,11 @@ aggregation (`checks[].passed: false`) or numbered-citation grading (T1 item
 A `--rules` run that selected **every** registered rule has `omitted: []` and
 `subset: false`, and grades exactly like a full run. A report with no
 `rule_selection` key — every report written before the flag, and every
-default run — grades exactly as before. A `klt drc --list-rules` listing is
-not a DRC report at all (no `status`/`violations`) and is refused as an
-unrecognised envelope. To earn DRC credit, re-run without `--rules`.
+default run — grades exactly as before. A `klt drc --list-rules` or
+`klt drc --engine klayout --list-rule-categories` listing is not a DRC report
+at all (no `status`/`violations`) and is refused as an unrecognised
+envelope — a listing says what a deck *declares*, never what a layout
+passed. To earn DRC credit, re-run without `--rules`.
 
 ### Device-body bias is reported, not graded
 
@@ -2162,18 +2164,17 @@ visible, never a pass; `skipped_checks` is `[]` when nothing was skipped.
 Run a plain `--attest --check` (no `local_only` commands) on a runner that
 has the toolchain to re-verify them.
 
-**`--attest` runs `local_only` commands.** `local_only` only affects
-`--check`; `--attest` executes `cold_start` even when it is marked
-`local_only`, so a long cold start runs for its full duration on the first
-attest.
-
 **`--attest` runs every `local_only` command unless you opt out.** By
-default minting runs each `local_only` command, and there is no
-`status: "partial"` envelope: an attested item-9 `cold_start` that did not run
-is not evidence, and T1 item 9 depends on it. A host that cannot run the
-toolchain (for example, one blocked by a `batch_runner_version_mismatch` when a
-`local_only` check submits a `klt sim --backend batch` request) should be
-unblocked where possible. See "When the client is newer than the runner" in
+default minting runs each `local_only` command — `--check` is the only mode
+that skips one on its own — so a `cold_start` marked `local_only` still runs
+for its full duration on the first attest. There is no `status: "partial"`
+envelope: an attested item-9 `cold_start` that did not run is not evidence,
+and T1 item 9 depends on it. The sole opt-out is `--skip-local-only` (below),
+and it only refreshes an envelope that already committed that outcome — it
+never substitutes for a first run. A host that cannot run the toolchain (for
+example, one blocked by a `batch_runner_version_mismatch` when a `local_only`
+check submits a `klt sim --backend batch` request) should be unblocked where
+possible. See "When the client is newer than the runner" in
 [`sim.md`](sim.md) for the two existing paths: rebuilding the runner image at
 the client's minor, and `request.batch.runner_version_check: "warn"`.
 
@@ -2197,9 +2198,10 @@ mints a first outcome.
 **Item 10 ordering: `checks[]` gate the envelope at mint time.** Every item-10
 `checks[]` command runs under `--attest` against the working tree as it is at
 that moment, and any failure gives `status: "fail"`, exit `3`, and no envelope
-(see "Exit codes"). `local_only` does not exempt a check from this: it only
-skips the command under `--attest --check`, and the command still runs, and
-gates, at mint time.
+(see "Exit codes"). `local_only` does not exempt a check from this: it skips
+the command under `--attest --check`, and under `--attest -o OUT
+--skip-local-only` it carries the outcome `OUT` already committed; on any
+other `--attest` the command runs, and gates, at mint time.
 
 This makes one case circular. A check that also verifies committed evidence
 *downstream* of the item-10 envelope (a lint for record freshness, or for
@@ -3245,6 +3247,42 @@ the manifest-asserted `rows`, so existing manifests grade identically.
 `row_coverage.row_sources` maps each covered row to `"derived"` (checked
 against the envelope) or `"asserted"` (the manifest's word only). The change is
 additive: `schema_version` is not bumped.
+
+**Requiring derived coverage (issue #5462).** `row_sources` is report-only by
+itself: an item whose coverage is entirely `"asserted"` grades exactly like a
+fully tagged one. A project that has finished tagging its envelopes can ratchet
+with the optional top-level manifest boolean `require_derived_rows` (default
+`false`):
+
+```json
+{
+  "require_derived_rows": true,
+  "evidence": {"5": [{"file": "sim/decision_time.json", "rows": ["t_dec"]}]},
+  "spec_rows": {"5": [{"id": "t_dec"}]}
+}
+```
+
+With it `true`, an item 5 whose citations all pass but whose coverage includes
+at least one `"asserted"` row grades `unmet` / `partial_coverage` (the existing
+reason), with those row ids sorted under `detail.asserted_rows` alongside the
+usual `uncovered_rows` / `declared_gaps` / `row_sources`. A row covered by both
+a tagged and an untagged citation is `"derived"` and passes. A failing citation
+still reports its own reason first, and the timing-margin rule below is decided
+before this one. The missing-kinds rule below is decided *after* it, so a
+digital item 5 whose coverage includes an asserted row reports
+`detail.asserted_rows` and no `detail.missing_kinds`.
+
+The key is manifest-level but grades **item 5 only**; item 6's row sources are
+unaffected. Note that `spec_row` tags are read from a `klt sim` envelope's
+`measurements[]`, so a row cited only from an envelope kind that carries no
+such tags (`sta`, `functional-verification`, `generic`) is always `"asserted"`
+and therefore fails under this option — cite those rows from a tagged `klt sim`
+envelope as well, or leave the option off. Absent, `null` or `false` grades
+exactly as before and emits no new keys; a non-boolean value is `unmet` /
+`invalid_evidence` for item 5 alone, with `detail.problem` naming the key —
+whatever shape item 5's evidence has, including a single citation object or no
+item 5 evidence at all.
+Additive: no `schema_version` bump.
 
 **Digital item 5 needs both RTL-flow kinds (issue #3741).** The tier text
 reads "multi-corner STA **plus** a bit-exact functional test suite", so on a

@@ -45,13 +45,12 @@ computed. Every failure is ``status: "error"``, ``value: null`` with a
 
 from __future__ import annotations
 
-import bisect
 import math
 import os
 from dataclasses import dataclass
 from typing import Any
 
-from . import sim_crossings
+from . import sim_crossings, sim_window
 from .sim_errors import SimError
 
 #: Edge polarities that can align a cycle (``either`` would make "one cycle"
@@ -125,7 +124,7 @@ def validate_cycle_mean_spec(name: Any, body: Any) -> None:
             f"measurement '{name}': cycle_mean.cycles is required and must be "
             f"an integer in [1, {MAX_CYCLES}] (got {cycles!r})"
         )
-    sim_crossings._window_bound(name, body, "from")
+    sim_window.window_bound(name, body, "from", form="cycle_mean")
 
 
 def validate_cycle_mean_context(
@@ -198,21 +197,6 @@ class CycleMeanOutcome:
         }
 
 
-def _value_at(scale: list[float], values: list[float], t: float) -> float:
-    """Linear interpolation of the sampled signal at ``t`` (inside the scale)."""
-    index = bisect.bisect_left(scale, t)
-    if index <= 0:
-        return values[0]
-    if index >= len(scale):
-        return values[-1]
-    t0, t1 = scale[index - 1], scale[index]
-    if t1 == t0:
-        return values[index]
-    return values[index - 1] + (values[index] - values[index - 1]) * (
-        (t - t0) / (t1 - t0)
-    )
-
-
 def time_weighted_mean(
     scale: list[float], values: list[float], t_start: float, t_end: float
 ) -> float:
@@ -223,9 +207,9 @@ def time_weighted_mean(
     knots.extend(t for t in scale if t_start < t < t_end)
     knots.append(t_end)
     area = 0.0
-    previous = _value_at(scale, values, knots[0])
+    previous = sim_window.value_at(scale, values, knots[0])
     for left, right in zip(knots, knots[1:], strict=False):
-        current = _value_at(scale, values, right)
+        current = sim_window.value_at(scale, values, right)
         area += 0.5 * (previous + current) * (right - left)
         previous = current
     return area / (t_end - t_start)
@@ -328,7 +312,7 @@ def _extract_one(spec: dict[str, Any], raw_path: str) -> CycleMeanOutcome:
         [point[2] for point in points],
         level=float(body["level"]),
         edge=body.get("edge", "rise"),
-        start=sim_crossings._window_bound(name, body, "from"),
+        start=sim_window.window_bound(name, body, "from", form="cycle_mean"),
         cycles=body["cycles"],
     )
     if outcome.error is not None:

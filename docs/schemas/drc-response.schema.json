@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://2amlogic.com/klayout-tools/schemas/drc-response.schema.json",
   "title": "klt drc --format json success response, version 2",
-  "description": "Success payload of `klt drc`. Three shapes carry the top-level `schema_version`: a verdict report (3) (curated engine, or `--engine klayout`) carrying `status`/`violations`/`coverage`, and the non-verdict `--list-rules` listing (`mode: \"list_rules\"`, 2), which carries neither, and the `--engine both` cross-check (`mode: \"crosscheck\"`), which embeds two verdict reports unchanged under `reports` plus a `comparison` block. Error envelopes are governed by the shared error contract (docs/json-contract.md) and are out of scope. The `coverage` block `$ref`s coverage.schema.json (the shared work records); resolve it through the sibling file or a schema registry. See docs/cli/drc.md.",
+  "description": "Success payload of `klt drc`. Four shapes carry the top-level `schema_version`: a verdict report (3) (curated engine, or `--engine klayout`) carrying `status`/`violations`/`coverage`; the non-verdict `--list-rules` listing (`mode: \"list_rules\"`, 2), which carries none of those; the non-verdict `--engine klayout --list-rule-categories` listing (`mode: \"list_rule_categories\"`, 3, issue #5444), which carries none of those either; and the `--engine both` cross-check (`mode: \"crosscheck\"`), which embeds two verdict reports unchanged under `reports` plus a `comparison` block. Error envelopes are governed by the shared error contract (docs/json-contract.md) and are out of scope. The `coverage` block `$ref`s coverage.schema.json (the shared work records); resolve it through the sibling file or a schema registry. See docs/cli/drc.md.",
   "type": "object",
   "required": ["schema_version"],
   "properties": {
@@ -11,6 +11,7 @@
   "oneOf": [
     {"$ref": "#/$defs/verdict_report"},
     {"$ref": "#/$defs/list_rules_report"},
+    {"$ref": "#/$defs/list_rule_categories_report"},
     {"$ref": "#/$defs/crosscheck_report"}
   ],
   "additionalProperties": true,
@@ -183,6 +184,50 @@
           "additionalProperties": true
         },
         "rules": {"type": "array", "items": {"$ref": "#/$defs/listed_rule"}},
+        "provenance": {"$ref": "#/$defs/provenance"}
+      },
+      "additionalProperties": true
+    },
+    "list_rule_categories_report": {
+      "description": "`--engine klayout --list-rule-categories` (issue #5444): the rule categories the native deck declares, derived by running it under `deck_vars` against a tool-generated EMPTY layout -- independent of any layout being signed off, so it is non-circular input for `--expect-rule-categories-file`. Non-verdict: no `status`, `violations` or `coverage`, and `klt signoff` refuses it as evidence.",
+      "type": "object",
+      "required": ["schema_version", "mode", "engine", "deck_file", "deck_vars", "basis", "rule_category_count", "rule_categories", "limitations", "provenance"],
+      "properties": {
+        "schema_version": {"type": "integer", "const": 3},
+        "mode": {"type": "string", "const": "list_rule_categories"},
+        "engine": {"type": "string", "const": "klayout"},
+        "deck_file": {"type": "string", "description": "The resolved deck script path the listing was made from."},
+        "deck_vars": {
+          "type": "object",
+          "description": "The effective `-rd` script globals the deck ran under, including any defaulted by `--pdk` family resolution. The listing is valid only for this set.",
+          "additionalProperties": {"type": "string"}
+        },
+        "basis": {"type": "string", "const": "empty_layout_run", "description": "How the set was derived. A stable token, so a consumer can tell this derivation from any future one without parsing `limitations`."},
+        "rule_category_count": {"type": "integer", "minimum": 1, "description": "`len(rule_categories)`. Never 0: a report declaring no category fails closed (exit 1)."},
+        "rule_categories": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "description": "Sorted, deduplicated category names, exactly as `--expect-rule-categories-file` wants them.",
+          "items": {"type": "string"}
+        },
+        "limitations": {
+          "type": "array",
+          "minItems": 1,
+          "description": "What this listing does NOT establish -- notably that a category declared only inside a geometry-dependent branch is absent. Fixed per release, never derived from the deck, so a consumer can rely on it being present.",
+          "items": {
+            "type": "object",
+            "required": ["category", "text"],
+            "properties": {
+              "category": {"type": "string"},
+              "text": {"type": "string"}
+            },
+            "additionalProperties": true
+          }
+        },
+        "warnings": {"type": "array", "description": "Same shape a run emits (issue #3816): present only when the deck reads caller-supplied `-rd` globals and no `--deck-var` supplied any of them -- the one way this listing is silently wrong in the same direction a run is.", "items": {"type": "object"}},
+        "environment": {"type": "object", "description": "Present only when `--klayout-binary`/`$KLT_KLAYOUT_BINARY` was in force (issue #4950).", "properties": {"klayout_binary": {"type": "string"}}, "additionalProperties": true},
+        "native_deck": {"type": "object", "description": "Same additive block a run records (issue #4002) when the PDK's family main script was resolved."},
         "provenance": {"$ref": "#/$defs/provenance"}
       },
       "additionalProperties": true

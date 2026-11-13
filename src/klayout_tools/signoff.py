@@ -79,6 +79,17 @@ from .design_evidence_tiers import (
 from .env_provenance import find_repo_root
 from .metrics import get_metric, is_registered
 
+# Item 5's spec-row coverage sources (issue #3778) and the manifest ratchet
+# that requires them machine-derived (issue #5462); out of this file for its
+# size-ratchet ceiling, same as `signoff_multi_member` and `signoff_na`.
+from .signoff_derived_rows import (
+    DERIVED_ROWS_ITEM_ID,
+    asserted_rows,
+    credited_rows,
+    multi_row_info,
+    read_require_derived_rows,
+)
+
 # The typed envelope shapes this boundary validates against (issue #2033) live
 # in their own module since issue #2313 -- ~300 lines of pure `TypedDict`
 # declarations with no runtime logic, following the same split as
@@ -4431,6 +4442,9 @@ def build_tier_report(
 
     partition_boundary = _read_partition_boundary(manifest, kind)
     spec_rows_by_item = _read_spec_rows(manifest)
+    # Issue #5462: the opt-in ratchet that fails item 5 on manifest-asserted
+    # (rather than envelope-derived) row coverage.
+    require_derived, require_derived_invalid = read_require_derived_rows(manifest)
     # Issue #2839: T1 item 11's port-accessibility policy (provisional).
     power_port_policy = _read_power_port_policy(manifest.get("power_ports"))
 
@@ -4487,6 +4501,8 @@ def build_tier_report(
                     graded_by_build=graded_by_build,
                     repo_root=repo_root,
                     **_resolve_spec_rows(spec_rows_by_item, t1_item["id"], partition),
+                    require_derived_rows=require_derived,
+                    require_derived_rows_invalid=require_derived_invalid,
                     generator_exec=generator_exec,
                 )
             total += 1
@@ -6684,6 +6700,8 @@ def _build_tier_item(
     repo_root: str | Path | None = None,
     spec_rows: list[dict[str, Any]] | None = None,
     spec_rows_invalid: bool = False,
+    require_derived_rows: bool = False,
+    require_derived_rows_invalid: bool = False,
     generator_exec: GeneratorExecution | None = None,
 ) -> dict[str, Any]:
     """Grade one T1 checklist item against ``evidence`` -- see
@@ -6811,6 +6829,11 @@ def _build_tier_item(
         if item_id == 5 and partition_kind == "digital"
         else None
     )
+    # Issue #5462: the manifest key is top-level, but it is item 5's ratchet.
+    item5_require_derived = require_derived_rows and item_id == DERIVED_ROWS_ITEM_ID
+    item5_require_derived_invalid = (
+        require_derived_rows_invalid and item_id == DERIVED_ROWS_ITEM_ID
+    )
     report_list = item_id in _REPORT_LIST_ITEMS and isinstance(raw_entry, list)
     if raw_entry is not None and not graded_by_build:
         reason = _REASON_UNGRADEABLE_BY_BUILD
@@ -6832,7 +6855,12 @@ def _build_tier_item(
         report_list
         or item_id in _ITEMS_ACCEPTING_MULTI_CITATION
         and (
-            raw_entry is not None
+            # Issue #5462: a mistyped ``require_derived_rows`` is item 5's own
+            # ``invalid_evidence``, so it must reach the aggregator for every
+            # evidence shape -- single-dict and absent entries took neither
+            # branch below and graded as if the key were not set at all.
+            item5_require_derived_invalid
+            or raw_entry is not None
             and (
                 isinstance(raw_entry, list)
                 or spec_rows is not None
@@ -6860,6 +6888,8 @@ def _build_tier_item(
             spec_rows_invalid=multi_rows_invalid,
             met_envelopes=met_envelopes,
             required_kind_pair=required_kind_pair,
+            require_derived=item5_require_derived,
+            require_derived_invalid=item5_require_derived_invalid,
         )
         # Issue #5031: per-cell DRC/LVS lists state how many members counted.
         extra = with_member_coverage(item_id, report_list, raw_entry, extra)
@@ -7032,6 +7062,8 @@ def _grade_multi_citation(
     spec_rows_invalid: bool,
     met_envelopes: dict[int, dict[str, Any]] | None = None,
     required_kind_pair: tuple[str, ...] | None = None,
+    require_derived: bool = False,
+    require_derived_invalid: bool = False,
 ) -> tuple[str, str | None, dict[str, Any] | None, dict[str, Any], dict[str, Any]]:
     """Grade a list-form (or ``spec_rows``-bearing) evidence entry (issue
     #2959). Each member goes through the ordinary per-envelope path
@@ -7058,7 +7090,11 @@ def _grade_multi_citation(
     only the named rows some tagged, limited, passing measurement grades --
     a named row with none is uncovered. A member with no tags keeps the
     manifest-asserted ``rows``. ``row_coverage.row_sources`` marks each
-    covered row ``derived`` or ``asserted``.
+    covered row ``derived`` or ``asserted``. With ``require_derived`` (issue
+    #5462, the manifest's ``require_derived_rows``, item 5 only) an asserted
+    row is not coverage: an otherwise passing set carrying one is
+    ``unmet``/``partial_coverage`` with ``detail.asserted_rows``.
+    ``require_derived_invalid`` (a non-boolean key) is ``invalid_evidence``.
 
     Returns ``(status, reason, citation, failure_detail, extra_item_keys)``.
     """
@@ -7068,6 +7104,9 @@ def _grade_multi_citation(
     ) -> tuple[str, str | None, None, dict[str, Any], dict[str, Any]]:
         return "unmet", _REASON_INVALID_EVIDENCE, None, {"problem": problem}, {}
 
+    if require_derived_invalid:
+        return invalid("'require_derived_rows' must be a boolean")
+
     members, problem = _checked_multi_members(raw_entry, spec_rows, spec_rows_invalid)
     if members is None:
         return invalid(problem or "malformed evidence entry")
@@ -7076,10 +7115,10 @@ def _grade_multi_citation(
     failed = [g for g in graded if g[2][0] != "met"]
     # Rows each member is credited with, and whether that was machine-derived.
     credited: dict[int, tuple[list[str] | None, bool]] = {
-        id(spec): _credited_rows(rows, (met_envelopes or {}).get(id(spec)))
+        id(spec): credited_rows(rows, (met_envelopes or {}).get(id(spec)))
         for spec, rows, _ in graded
     }
-    row_info = _multi_row_info(graded, failed, spec_rows, credited)
+    row_info = multi_row_info(graded, failed, spec_rows, credited)
     extra: dict[str, Any] = {
         "citations_graded": [
             {
@@ -7105,12 +7144,17 @@ def _grade_multi_citation(
     )
     if margin_unmet is not None:
         return margin_unmet
+    # Issue #5462: under the ratchet a row credited on the manifest's word
+    # alone is not coverage, so it joins the other provisional conditions.
+    asserted = asserted_rows(row_info) if require_derived else []
     if row_info and (
         row_info["uncovered_rows"]
         or row_info["declared_gaps"]
         or row_info["unratified_rows"]
+        or asserted
     ):
-        return "unmet", _REASON_PARTIAL_COVERAGE, None, row_info, extra
+        detail = {**row_info, **({"asserted_rows": asserted} if asserted else {})}
+        return "unmet", _REASON_PARTIAL_COVERAGE, None, detail, extra
     kinds_unmet = _grade_required_kinds(required_kind_pair, graded, row_info, extra)
     if kinds_unmet is not None:
         return kinds_unmet
@@ -7349,82 +7393,6 @@ def _remember_envelope(
     """Key the envelope a ``met`` grading captured by ``spec``'s identity."""
     if sink:
         met_envelopes[id(spec)] = sink[0]
-
-
-def _envelope_tagged_rows(envelope: dict[str, Any]) -> tuple[bool, set[str]]:
-    """``(has_tags, covering)`` for a ``klt sim`` envelope (issue #3778):
-    whether any ``measurements[]`` entry declares a ``spec_row``, and the
-    rows with a passing measurement that is tagged with them and has
-    ``limits`` (a tag without limits grades nothing)."""
-    raw = envelope.get("measurements")
-    entries = [m for m in raw if isinstance(m, dict)] if isinstance(raw, list) else []
-    tagged = [
-        m for m in entries if isinstance(m.get("spec_row"), str) and m["spec_row"]
-    ]
-    covering = {
-        m["spec_row"] for m in tagged if m.get("status") == "pass" and m.get("limits")
-    }
-    return bool(tagged), covering
-
-
-def _credited_rows(
-    rows: list[str] | None, envelope: dict[str, Any] | None
-) -> tuple[list[str] | None, bool]:
-    """The rows a ``met`` member is credited with and whether they were
-    ``derived`` from its envelope's ``spec_row`` tags (issue #3778). Untagged
-    (or unavailable) envelopes keep the manifest-asserted ``rows``."""
-    if not rows or envelope is None:
-        return rows, False
-    has_tags, covering = _envelope_tagged_rows(envelope)
-    if not has_tags:
-        return rows, False
-    return [r for r in rows if r in covering], True
-
-
-def _multi_row_info(
-    graded: list[Any],
-    failed: list[Any],
-    spec_rows: list[dict[str, Any]] | None,
-    credited: dict[int, tuple[list[str] | None, bool]] | None = None,
-) -> dict[str, Any]:
-    """``failed_rows`` / ``uncovered_rows`` / ``declared_gaps`` /
-    ``unratified_rows`` for the declared ``spec_rows`` (empty when none were
-    declared). ``unratified_rows`` lists every non-gap row declared
-    ``ratified: false``, covered or not."""
-    if spec_rows is None:
-        return {}
-    credited = credited or {}
-    covered: set[str] = set()
-    row_sources: dict[str, str] = {}
-    for spec, rows, g in graded:
-        if g[0] != "met":
-            continue
-        credited_rows, derived = credited.get(id(spec), (rows, False))
-        for r in credited_rows or []:
-            covered.add(r)
-            # A row covered by any derived citation is machine-checked.
-            if derived or r not in row_sources:
-                row_sources[r] = "derived" if derived else "asserted"
-    failed_rows = sorted({r for _, rows, _ in failed for r in rows or []} - covered)
-    return {
-        "failed_rows": failed_rows,
-        "uncovered_rows": [
-            row["id"]
-            for row in spec_rows
-            if row["gap"] is None
-            and row["id"] not in covered
-            and row["id"] not in failed_rows
-        ],
-        "declared_gaps": [
-            {"id": row["id"], "gap": row["gap"]}
-            for row in spec_rows
-            if row["gap"] is not None
-        ],
-        "unratified_rows": [
-            row["id"] for row in spec_rows if row["gap"] is None and not row["ratified"]
-        ],
-        "row_sources": {r: row_sources[r] for r in sorted(row_sources)},
-    }
 
 
 # --------------------------------------------------------------------------- #
