@@ -147,7 +147,8 @@
         "klayout_tools.drc_klayout_app",
       "klayout_tools.drc_layer_selection",
         "klayout_tools.drc_klayout_engine",
-        "klayout_tools.drc_report_check"
+        "klayout_tools.drc_report_check",
+        "klayout_tools.drc_text_exempt"
       ]
     },
     "economy": {
@@ -512,6 +513,7 @@
         "klayout_tools.decks.sg13g2",
         "klayout_tools.decks.sg13g2_cont_grid",
         "klayout_tools.decks.sg13g2_runset_notes",
+        "klayout_tools.decks.sg13g2_svaricap",
         "klayout_tools.decks.sky130",
         "klayout_tools.decks.sky130_lvt",
         "klayout_tools.decks.sky130_unmodeled",
