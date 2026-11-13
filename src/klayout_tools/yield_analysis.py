@@ -46,6 +46,7 @@ import io
 import json
 import math
 import os
+import zlib
 from typing import Any
 
 from ._jsonnum import is_int, is_number
@@ -114,7 +115,13 @@ def _load_json(path: str, what: str) -> Any:
         opener = gzip.open if gzipped else open
         with opener(path, "rt", encoding="utf-8") as f:
             return json.load(f)
-    except (OSError, EOFError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (
+        OSError,
+        EOFError,
+        zlib.error,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+    ) as exc:
         raise YieldError(f"could not read {what} '{path}': {exc}") from exc
 
 
