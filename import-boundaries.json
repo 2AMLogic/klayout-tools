@@ -767,6 +767,7 @@
         "klayout_tools.sim_plot",
         "klayout_tools.sim_portable",
         "klayout_tools.sim_process_legs",
+        "klayout_tools.sim_provenance",
         "klayout_tools.sim_raw",
         "klayout_tools.sim_remote",
         "klayout_tools.sim_request_overrides",
