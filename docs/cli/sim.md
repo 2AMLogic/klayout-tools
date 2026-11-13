@@ -5885,6 +5885,18 @@ error, exit 1).
   Names follow the `expr` naming rule and are unique within the step. In the
   response, a step measurement is reported as `<step>.<name>` (e.g.
   `light.vout`).
+
+  **Do not name a step measurement after a node a later measurement in the
+  same step reads.** ngspice stores a measurement's result in the step's plot
+  as a vector named after the measurement, so such a name replaces that
+  node's waveform with a one-point scalar, and a later `v(<node>)` read then
+  fails with `out of interval` (or, for an `expr`, silently reduces the
+  scalar to a wrong value). `klt sim` refuses that request up front, naming
+  both measurements and the node
+  ([#5446](https://github.com/2AMLogic/klayout-tools/issues/5446)). Only
+  voltage-family reads of an **earlier** sibling collide: a card reading
+  `v(a)` while itself named `a` reads the node before it binds, and `i(a)`
+  resolves to `<src>#branch`.
 - **Derived measurements**: the top-level `measurements[]`.
   - Each must be an `expr`. A file-scope `.meas` card would run after every
     analysis, so it is refused; put it in the matching step instead.
