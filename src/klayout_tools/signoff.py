@@ -30,6 +30,7 @@ fleet roll-up are specified in ``docs/cli/signoff.md`` and
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import math
@@ -38,6 +39,7 @@ import re
 import shlex
 import subprocess
 import sys
+import zlib
 from collections.abc import Callable, Iterable, Mapping
 from functools import cache
 from pathlib import Path
@@ -1785,6 +1787,21 @@ def _read_json_source(source: str, description: str) -> Any:
     (e.g. ``"envelope"``, ``"manifest"``) only affects error-message wording,
     so each caller's failures still read naturally.
 
+    A file source may be **gzip-compressed** (issue #5452): `klt sim
+    --report-out report.json.gz` is the documented compact form for a report
+    committed as evidence, and before this a manifest citing one graded
+    ``unmet``/``unreadable_evidence``, forcing a second decompressed copy of
+    the same envelope to be committed beside it. Detection is by the gzip
+    magic bytes, never the ``.gz`` suffix -- the same rule `klt yield`'s
+    ``yield_analysis._load_json`` already applies, so one rule covers both
+    verbs and a renamed file still reads. An envelope's ``content_hash``
+    comparison is unaffected either way: it comes from
+    ``provenance.input.content_hash`` *inside* the envelope, so it is the
+    same for both encodings. (The one place signoff hashes an evidence
+    file's own bytes -- a pinned ``functional-verification`` citation, see
+    ``signoff_evidence_pin.rehash_evidence_file`` -- deliberately keeps
+    hashing the file as committed.) Stdin (``"-"``) is text-only, unchanged.
+
     Deliberately mirrors ``report.py``'s ``_read_envelope`` (same
     read/parse/error-message contract) rather than importing it: the two
     commands' input-reading needs are identical but incidental, not a
@@ -1809,13 +1826,20 @@ def _read_json_source(source: str, description: str) -> Any:
         raise SignoffError(f"not a file: {source}")
 
     try:
-        with open(source, encoding="utf-8") as handle:
+        with open(source, "rb") as probe:
+            opener = gzip.open if probe.read(2) == b"\x1f\x8b" else open
+        with opener(source, "rt", encoding="utf-8") as handle:
             return json.load(
                 handle,
                 parse_constant=_reject_json_constant,
                 parse_float=_finite_json_float,
             )
-    except (OSError, UnicodeDecodeError) as exc:
+    # A truncated gzip stream raises `EOFError` and a damaged one
+    # `zlib.error`, neither of which is an `OSError` -- both are read
+    # failures of the cited file, so they render `unreadable_evidence` like
+    # any other, never a traceback. (`gzip.BadGzipFile` already is an
+    # `OSError`.)
+    except (OSError, EOFError, zlib.error, UnicodeDecodeError) as exc:
         raise SignoffError(
             f"could not read {description} file '{source}': {exc}"
         ) from exc

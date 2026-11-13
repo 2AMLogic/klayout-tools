@@ -14,6 +14,19 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt signoff` reads a gzip-compressed evidence file** (#5452,
+  2026-11-13): a `klt sim --report-out report.json.gz` report — the compact
+  form `docs/cli/sim.md` recommends committing as evidence — is now citable
+  from a manifest as it stands, grading identically to the same envelope
+  decompressed (`unmet`/`unreadable_evidence` before, which forced a second
+  decompressed copy beside it). Detection is by the gzip magic bytes, not the
+  `.gz` suffix, matching `klt yield`; every `klt signoff` *file* reader
+  (positional envelopes, manifest and fleet files, file-backed citations)
+  accepts it, and a truncated or damaged stream still grades
+  `unmet`/`unreadable_evidence`. Hashing is unchanged: a citation's
+  `content_hash` comes from inside the envelope, so it is encoding-independent;
+  the one `content_hash_basis: "evidence_file"` case keeps hashing the file as
+  committed. Additive; no `schema_version` bump.
 - **`klt erc`: `ties[].isolation_boxes`, `same_net_as` through the substrate,
   and the decidable-or-disclosed substrate rule** (#5343, 2026-11-12): new
   optional `ties[].isolation_boxes` (µm boxes) asserts isolated substrate
