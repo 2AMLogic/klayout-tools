@@ -6766,8 +6766,11 @@ a corner grid. A stock ngspice without the module still produces the
 
   To scale or switch off these mechanisms from the request rather than by
   hand, use `monte_carlo.mismatch_scale` (sky130 and gf180mcu through their
-  global switch; sg13g2 MOS through its libraries' own `_mm` sigma
-  `.param`s — see "Monte Carlo sampling").
+  global switch — verified linear in both vendored decks; sg13g2 MOS through
+  its libraries' own `_mm` sigma `.param`s, whose effect on the sampled
+  `stddev` is **not yet measured** against the real models
+  ([#5503](https://github.com/2AMLogic/klayout-tools/issues/5503)) — see
+  "Monte Carlo sampling").
 
   For untested process corners or PDK variants not listed above, verify that
   the section (sky130-style) or the mismatch switch (gf180mcu-style) resolves in
@@ -7197,8 +7200,22 @@ values), *and* reduced to a per-measurement statistical verdict under
     `sg13g2_hv_svaricap_*_mm` geometry sigmas, and `mismatch_params` lists
     them. Refused before any corner is dispatched when no selected section
     is a `mos_*_mismatch` section, when the libraries cannot be read on the
-    submitting host, or when they define no `_mm` sigma at all — never a
-    silently unscaled run.
+    submitting host, when they define no `_mm` sigma at all, or when a
+    sigma they *do* define has a value that is not a plain numeric literal
+    (an expression such as `'0.5*2'`, or a reference to another parameter;
+    a scale-factor suffix like `4n` is read normally). That last refusal
+    names the parameter and the file: leaving one sigma at nominal while
+    its siblings are scaled would be a *partially* scaled run, and
+    `mismatch_params` — which lists only what was written — would not show
+    the omission. Never a silently unscaled, or partially scaled, run.
+
+    **Not yet measured on real models.** Unlike the switch families above,
+    the effect of these cards on the sampled `stddev` of an ngspice run
+    against the vendored sg13g2 decks has not been measured — the deck
+    contents are verified (byte-level, in CI), the live sampled spread is
+    not. Treat an sg13g2 `mismatch_scale` `negative_control` as unproven
+    until [#5503](https://github.com/2AMLogic/klayout-tools/issues/5503)
+    lands that measurement and replaces this paragraph with its result.
 
   Omitted, decks and responses are unchanged. Echoed per sample as
   `corners[].monte_carlo.mismatch_scale`, only when declared. Scaling a
@@ -8755,7 +8772,7 @@ the *response* echoes back.
 | `monte_carlo.n`          | integer           | Number of samples per expanded corner point. Positive integer, required when `monte_carlo` is present. See "Monte Carlo sampling" above.                              |
 | `monte_carlo.seed`       | integer           | Base seed the sample sequence derives from. Required when `monte_carlo` is present.                                                                                    |
 | `monte_carlo.vary`       | string            | `"mismatch"`, `"process"`, or `"both"` — which axis the sample sequence varies. Required when `monte_carlo` is present.                                                 |
-| `monte_carlo.mismatch_scale` | number        | Optional; finite, `>= 0`. Scales per-instance mismatch sigma (`0` = off): via the PDK family's switch (sky130, gf180mcu — echoed with `mismatch_param`), or, for sg13g2, via one `.param` per MOS mismatch-sigma read from the selected `mos_*_mismatch` section's libraries (MOS-only reach — echoed with `mismatch_params`). Any other family is an application error. See "Monte Carlo sampling" above. |
+| `monte_carlo.mismatch_scale` | number        | Optional; finite, `>= 0`. Scales per-instance mismatch sigma (`0` = off): via the PDK family's switch (sky130, gf180mcu — echoed with `mismatch_param`), or, for sg13g2, via one `.param` per MOS mismatch-sigma read from the selected `mos_*_mismatch` section's libraries (MOS-only reach — echoed with `mismatch_params`; the sg13g2 cards' effect on sampled `stddev` is not yet measured against the real models, [#5503](https://github.com/2AMLogic/klayout-tools/issues/5503)). Any other family is an application error. See "Monte Carlo sampling" above. |
 | `monte_carlo.seed_scope` | string            | Optional; `"per_corner"` (default), `"shared"` or `"point"`. Selects what keys each sample's seeds. See "Seed scope" above.                                        |
 | `monte_carlo.seed_mode`  | string            | Optional; `"derived"` (default) or `"sequential"` (`rndseed = seed + sample_index`). See "Seed mode" above.                                                        |
 | `monte_carlo.quantiles`  | array\<number\>   | Percentiles in `[0, 100]` reported per measurement. Defaults to `[5, 50, 95]`. See "Monte Carlo statistics" above.                                                      |

@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import sim_mismatch_gate
+from ._spice_number import parse as _spice_literal
 from .pdk_families import pdk_variant_family
 from .sim_errors import SimError
 
@@ -64,8 +65,13 @@ _INCLUDE_RE = re.compile(r"^\s*\.inc(?:lude)?\s+(\S+)\s*$", re.IGNORECASE)
 _PARAM_RE = re.compile(r"^\s*\.param\s+(.*)$", re.IGNORECASE)
 _SUBCKT_RE = re.compile(r"^\s*\.subckt\b", re.IGNORECASE)
 _SUBCKT_END_RE = re.compile(r"^\s*\.ends\b", re.IGNORECASE)
-_ASSIGN_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([^\s=]+)")
-_QUOTED_RE = re.compile(r"'[^']*'|\"[^\"]*\"|\{[^}]*\}")
+#: One ``<name> = <value>`` assignment of a ``.param`` card; a quoted or
+#: braced right-hand side is consumed as one unit, so an ``agauss(...)``
+#: expression that *mentions* a sigma is never rescanned as an assignment.
+_ASSIGN_RE = re.compile(
+    r"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*('[^']*'|\"[^\"]*\"|\{[^}]*\}|[^\s=]+)"
+)
+_COMMENT_RE = re.compile(r"'[^']*'|\"[^\"]*\"|\{[^}]*\}|([$;])")
 _MISMATCH_SECTION_RE = re.compile(r"^([a-z0-9]+)_.*_mismatch$")
 
 
@@ -353,7 +359,7 @@ def _walk_line(
     if nested is not None and nested.group(2) is not None:
         _walk_section(field, _join(path, nested.group(1)), nested.group(2), found, seen)
         return
-    found.update(_sigma_params(line))
+    found.update(_sigma_params(field, path, line))
 
 
 def _walk_file(field: str, path: str, found: dict[str, float], seen: set[Any]) -> None:
@@ -383,7 +389,7 @@ def _walk_file(field: str, path: str, found: dict[str, float], seen: set[Any]) -
         if include is not None:
             _walk_file(field, _join(path, include.group(1)), found, seen)
             continue
-        found.update(_sigma_params(line))
+        found.update(_sigma_params(field, path, line))
 
 
 def _join(from_path: str, ref: str) -> str:
@@ -391,25 +397,39 @@ def _join(from_path: str, ref: str) -> str:
     return ref if os.path.isabs(ref) else os.path.join(os.path.dirname(from_path), ref)
 
 
-def _sigma_params(line: str) -> dict[str, float]:
+def _strip_comment(body: str) -> str:
+    """``body`` up to its first ngspice ``$``/``;`` comment outside a quoted
+    or braced term, so a commented-out sigma is neither scaled nor refused."""
+    for match in _COMMENT_RE.finditer(body):
+        if match.group(1):
+            return body[: match.start(1)]
+    return body
+
+
+def _sigma_params(field: str, path: str, line: str) -> dict[str, float]:
     """The ``<name>_mm = <number>`` assignments of one ``.param`` card.
 
-    Quoted / braced expressions are blanked first, so an ``agauss(...)``
-    right-hand side can never be mistaken for a scalable nominal -- only a
-    plain numeric literal is scalable, and anything else is left alone.
+    A sigma whose value is **not** a plain numeric literal raises rather
+    than being skipped (issue #5486): skipping it would scale its siblings
+    and leave it at nominal -- a partially scaled run that
+    ``mismatch_scale: 0`` no longer makes a sigma=0 control, and that nothing
+    downstream flags, ``mismatch_params`` listing only what was written.
     """
     match = _PARAM_RE.match(line)
     if match is None:
         return {}
-    body = _QUOTED_RE.sub(" ", match.group(1))
     out: dict[str, float] = {}
-    for name, value in _ASSIGN_RE.findall(body):
+    for name, value in _ASSIGN_RE.findall(_strip_comment(match.group(1))):
         if not name.lower().endswith(SIGMA_SUFFIX):
             continue
-        try:
-            out[name] = float(value)
-        except ValueError:
-            continue
+        number = _spice_literal(value)
+        if number is None:
+            raise SimError(
+                f"{field} cannot scale mismatch-sigma parameter {name!r}, "
+                f"defined as {value.strip()} (not a plain numeric literal) in "
+                f"{path} -- refusing rather than scaling only its siblings"
+            )
+        out[name] = number
     return out
 
 

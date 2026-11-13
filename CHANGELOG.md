@@ -35,11 +35,17 @@ not `klt --version`, if you need to detect this kind of drift. See
   instantiates raises a new report-level warning
   `mismatch_scale_unreached_family`. Refused before any corner is dispatched
   when no `mos_*_mismatch` section is selected, when the libraries cannot be
-  read on the submitting host, or when they define no `_mm` sigma; off-host,
-  the resolved cards ride the pushed points and `mismatch_params` is a
-  **mandatory** runner feature, so a runner too old to apply them refuses the
-  job rather than running it unscaled. No `schema_version` bump. See
-  `docs/cli/sim.md` → `monte_carlo.mismatch_scale`.
+  read on the submitting host, when they define no `_mm` sigma, or when a
+  sigma they do define is not a plain numeric literal (an expression or a
+  reference to another parameter — a scale-factor suffix such as `4n` is
+  read normally), so a partially scaled run is refused as loudly as an
+  unscaled one; off-host, the resolved cards ride the pushed points and
+  `mismatch_params` is a **mandatory** runner feature, so a runner too old to
+  apply them refuses the job rather than running it unscaled. The deck
+  contents are verified byte-for-byte, but the effect on an ngspice run's
+  sampled `stddev` is **not yet measured** against the real sg13g2 models
+  (#5503). No `schema_version` bump. See `docs/cli/sim.md` →
+  `monte_carlo.mismatch_scale`.
 
 - **`klt sim --backend batch`: the local-versus-fleet PDK stamp comparison
   now works on a host that pins no PDK root** (#5474, 2026-11-13): the

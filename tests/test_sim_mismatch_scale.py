@@ -149,6 +149,57 @@ def test_refuses_when_the_section_defines_no_sigma_param(tmp_path):
         _resolve(1, corner)
 
 
+@pytest.mark.parametrize(
+    "value",
+    ["2*0.001", "'0.5*2'", "{0.5*2}", "other_mm", "'agauss(1, 0.01, mm_ok)'"],
+)
+def test_refuses_a_mixed_library_whose_sigma_is_not_a_literal(tmp_path, value):
+    """One literal sigma and one the scale cannot read is a **refusal**, not a
+    partial scale (#5486).
+
+    Keeping the literal and skipping the other would leave that magnitude at
+    nominal while its siblings move -- so ``mismatch_scale: 0`` would no
+    longer be a sigma=0 control, and nothing downstream would say so
+    (``mismatch_params`` simply omits what it never read).
+    """
+    (tmp_path / "sigma.lib").write_text(
+        ".param sg13g2_lv_nmos_delvto_mm = 0.0039\n"
+        f".param sg13g2_lv_nmos_dw_mm = {value}\n"
+    )
+    corner = tmp_path / "corner.lib"
+    corner.write_text(".lib mos_tt_mismatch\n  .include sigma.lib\n.endl\n")
+    with pytest.raises(sim.SimError) as excinfo:
+        _resolve(1, corner)
+    message = str(excinfo.value)
+    # Names the parameter and the file, so the fix is actionable.
+    assert "sg13g2_lv_nmos_dw_mm" in message
+    assert "sigma.lib" in message
+    assert "not a plain numeric literal" in message
+
+
+@pytest.mark.parametrize(
+    "written,nominal",
+    [("4n", 4e-9), ("2.5meg", 2.5e6), ("4nF", 4e-9), ("3E-9", 3e-9), ("5", 5.0)],
+)
+def test_scan_reads_a_spice_suffix_nominal(tmp_path, written, nominal):
+    """A sigma written the way ngspice accepts it (scale-factor suffix,
+    ignored trailing unit) is read and scaled, not refused."""
+    (tmp_path / "sigma.lib").write_text(f".param sg13g2_lv_nmos_dw_mm = {written}\n")
+    corner = tmp_path / "corner.lib"
+    corner.write_text(".lib mos_tt_mismatch\n  .include sigma.lib\n.endl\n")
+    assert dict(_resolve(2, corner).cards) == {"sg13g2_lv_nmos_dw_mm": nominal * 2}
+
+
+def test_scan_ignores_a_commented_out_sigma(tmp_path):
+    """An end-of-line comment is neither scaled nor refused."""
+    (tmp_path / "sigma.lib").write_text(
+        ".param sg13g2_lv_nmos_delvto_mm = 0.0039 $ sg13g2_lv_nmos_dw_mm = 'x*2'\n"
+    )
+    corner = tmp_path / "corner.lib"
+    corner.write_text(".lib mos_tt_mismatch\n  .include sigma.lib\n.endl\n")
+    assert dict(_resolve(1, corner).cards) == {"sg13g2_lv_nmos_delvto_mm": 0.0039}
+
+
 def test_refuses_when_the_library_is_unreadable_on_this_host(pdk_tree):
     pdk_tree.unlink()
     with pytest.raises(sim.SimError, match="not a readable file on this host"):
