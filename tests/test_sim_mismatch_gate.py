@@ -49,6 +49,58 @@ def test_all_excluded_wraps_everything():
     assert text.count(".param sw_stat_mismatch=0") == 2
 
 
+def test_spaced_parameter_assignment_does_not_eat_the_subckt_name():
+    """Issue #5461: ngspice accepts ``w = 1`` for ``w=1``. Before the card
+    tokenizers converged, the spaced spelling left bare ``w``/``=``/``1``
+    tokens, so the "first token containing ``=``" scan for where parameters
+    start ran past the subcircuit name -- the model was read as ``w`` and the
+    subcircuit name was counted as one more node, giving the wrapper an extra
+    pin."""
+    netlist = (
+        "XM1 d g s b sky130_fd_pr__nfet_01v8 L = 0.15 W = 1\n"
+        "XM2 d2 g s b sky130_fd_pr__nfet_01v8 L=0.15 W=1\n"
+        ".end\n"
+    )
+    text, rows = gate.gate_netlist(netlist, [], ["xm1"], "mc_mm_switch")
+
+    assert {r["instance"]: r["model"] for r in rows} == {
+        "XM1": "sky130_fd_pr__nfet_01v8",
+        "XM2": "sky130_fd_pr__nfet_01v8",
+    }
+    # four nodes -> a four-pin wrapper, same as the unspaced spelling
+    assert ".subckt klt_mmoff_XM1 p0 p1 p2 p3" in text
+    assert "XM1 d g s b klt_mmoff_XM1" in text
+    # re-emitted in the canonical unspaced spelling (equivalent to ngspice)
+    assert "L=0.15 W=1" in text
+
+
+def test_parenthesised_parameter_expression_stays_one_token():
+    """Issue #5461: a parenthesised value expression spans spaces exactly as
+    the already-handled ``{...}``/``'...'`` forms do.
+
+    Unspaced (``W=(2 * 1u)``) this path happened to survive the old
+    tokenizer -- the first token containing ``=`` was still ``W=(2`` -- so
+    that half is a non-regression guard on the tokenizer swap: the wrapper
+    must keep the same pin count and re-emit the expression verbatim.
+    Spaced (``W = (2 * 1u)``) it did not survive, and ``W`` was read as the
+    subcircuit name.
+    """
+    for card in (
+        "XM1 d g s b sky130_fd_pr__nfet_01v8 W=(2 * 1u) L=0.15\n",
+        "XM1 d g s b sky130_fd_pr__nfet_01v8 W = (2 * 1u) L = 0.15\n",
+    ):
+        netlist = card + "XM2 d2 g s b sky130_fd_pr__nfet_01v8 L=0.15 W=1\n.end\n"
+        text, rows = gate.gate_netlist(netlist, [], ["xm1"], "mc_mm_switch")
+
+        assert rows[0] == {
+            "instance": "XM1",
+            "model": "sky130_fd_pr__nfet_01v8",
+            "randomised": False,
+        }, card
+        assert ".subckt klt_mmoff_XM1 p0 p1 p2 p3" in text, card
+        assert "W=(2 * 1u)" in text, card
+
+
 def test_glob_matching_nothing_is_an_error():
     with pytest.raises(gate.GateError, match="matches no top-level X instance"):
         gate.gate_netlist(NETLIST, ["xq*"], [], "mc_mm_switch")

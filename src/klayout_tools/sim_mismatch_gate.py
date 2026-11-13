@@ -22,6 +22,8 @@ import fnmatch
 import re
 from typing import Any
 
+from ._spice_tokens import split_spice_tokens
+
 #: ``pdk_variant_family`` -> the model-level ``.param`` that turns per-instance
 #: mismatch on (docs/cli/sim.md, "Known-good mismatch mechanisms"). sky130
 #: sets it through its ``*_mm`` corner sections; gf180mcu takes it as a plain
@@ -73,37 +75,6 @@ def validate_instances_spec(spec: Any) -> tuple[list[str], list[str]]:
     return lists["include"], lists["exclude"]
 
 
-def _split_tokens(line: str) -> list[str]:
-    """Whitespace split that keeps ``{...}`` and quoted expressions whole."""
-    tokens: list[str] = []
-    cur: list[str] = []
-    depth = 0
-    quote = ""
-    for ch in line:
-        if quote:
-            cur.append(ch)
-            if ch == quote:
-                quote = ""
-        elif ch in "'\"":
-            quote = ch
-            cur.append(ch)
-        elif ch == "{":
-            depth += 1
-            cur.append(ch)
-        elif ch == "}":
-            depth = max(0, depth - 1)
-            cur.append(ch)
-        elif ch.isspace() and depth == 0:
-            if cur:
-                tokens.append("".join(cur))
-                cur = []
-        else:
-            cur.append(ch)
-    if cur:
-        tokens.append("".join(cur))
-    return tokens
-
-
 def _logical_lines(text: str) -> list[tuple[int, int, str]]:
     """``(first, last, joined)`` line index ranges, folding ``+`` continuations."""
     raw = text.split("\n")
@@ -143,7 +114,7 @@ def _scan_top_level(
             in_subckt = max(0, in_subckt - 1)
         if in_control or in_subckt or not stripped or stripped[0] in "*;.":
             continue
-        tokens = _split_tokens(stripped)
+        tokens = split_spice_tokens(stripped)
         if stripped[0] in "xX":
             x_instances.append((first, last, tokens[0], tokens))
         else:

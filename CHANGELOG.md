@@ -14,6 +14,30 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt pex` and `klt sim --monte-carlo` now read a SPICE card the same way
+  the flattener does: `w = 1` and `w=(2 * 1u)` are parameters, not device
+  names** (#5461, 2026-11-13): three hand-rolled card tokenizers lived in
+  `spice_flatten`, `pex` and `sim_mismatch_gate`. The two lesser copies
+  understood neither a space around `=` (ngspice accepts `w=1`, `w =1`,
+  `w= 1` and `w = 1` for one assignment) nor a parenthesised value
+  expression, while both fed "the model is the last token without `=`"
+  logic. `klt extract`'s own output is always unspaced, so a klt-generated
+  netlist never tripped this — but a **hand-written or xschem-netlisted**
+  file could, on two user-supplied inputs:
+  - `klt pex --reference`: a reference card `XM1 d g s b nfet w = 1 l = 0.15`
+    tallied its model as `0.15`, producing a phantom `model_mismatch`
+    (`kind: "model_set"`) against an extracted side naming the same device;
+    the same rule also decides `_reference_is_hierarchical`, so the
+    diagnostic's hierarchy-artifact caveat could be suppressed.
+  - `klt sim` `monte_carlo.instances`: an instance card `Xa n1 n2 sub w = 1`
+    read `w` as the subcircuit name and counted `sub` as an extra node, so
+    the generated mismatch-off wrapper got one pin too many.
+
+  All three now share `split_spice_tokens` (the flattener's implementation,
+  which was already the strict superset). **Behaviour change**: a gated
+  instance's parameters are re-emitted in the canonical unspaced spelling —
+  `w = 1` comes back as `w=1`, equivalent to ngspice. No JSON field is added,
+  renamed or removed; no `schema_version` bump.
 - **`klt stats` reports a `geometry_digest`** (#5551, 2026-11-13): the
   timestamp- and record-order-independent digest of a stream's decoded
   geometry is now a top-level field of `klt stats --format json` (and a

@@ -669,7 +669,7 @@
     },
     {
       "path": "src/klayout_tools/spice_flatten.py",
-      "lines": 847
+      "lines": 798
     },
     {
       "path": "src/klayout_tools/substrate_resistance.py",
