@@ -118,28 +118,31 @@ def validate_instances_spec(spec: Any) -> tuple[list[str], list[str]]:
 
 def _scan_top_level(
     text: str, *, strip_comments: bool = False
-) -> tuple[list[tuple[int, int, str, list[str], str]], list[str]]:
+) -> tuple[list[tuple[int, int, str, list[str], str, list[str]]], list[str]]:
     """Top-level elements of ``text`` outside ``.subckt``/``.control`` blocks:
     ``(x_instances, other_element_names)``, where each X instance is
-    ``(first_line, last_line, name, tokens, comment)``.
+    ``(first_line, last_line, name, tokens, comment, folded_over)``.
 
-    With ``strip_comments`` the end-of-line comments (``$ ...`` / ``; ...``)
-    are separated from each physical line before the ``+`` continuations are
-    folded, so ``tokens`` holds code only and ``comment`` holds the text a
-    rewritten line must carry along. Left off for the wrapper path, whose
-    output is byte-for-byte unchanged: there the comment simply travels with
-    the instance line that is moved inside the wrapper.
+    With ``strip_comments`` the end-of-line comments (``$ ...`` / ``; ...`` /
+    ``// ...``) are separated from each physical line before the ``+``
+    continuations are folded, so ``tokens`` holds code only and ``comment``
+    holds the text a rewritten line must carry along. Left off for the
+    wrapper path, whose output is byte-for-byte unchanged: there the comment
+    simply travels with the instance line that is moved inside the wrapper.
+
+    ``folded_over`` is the ``*``/blank/comment-only lines that sat inside the
+    instance's ``+`` continuation run -- dropped from the element, as ngspice
+    drops them, and re-emitted by :func:`_apply_replacements` so rewriting
+    the instance does not delete them.
     """
     in_subckt = 0
     in_control = False
-    x_instances: list[tuple[int, int, str, list[str], str]] = []
+    x_instances: list[tuple[int, int, str, list[str], str, list[str]]] = []
     other_names: list[str] = []
     entries = (
-        logical_lines_with_comments(text)
-        if strip_comments
-        else [(f, lst, j, "") for f, lst, j in logical_lines(text)]
+        logical_lines_with_comments(text) if strip_comments else logical_lines(text)
     )
-    for first, last, joined, comment in entries:
+    for first, last, joined, comment, folded in entries:
         stripped = joined.strip()
         low = stripped.lower()
         if low.startswith(".control"):
@@ -154,7 +157,7 @@ def _scan_top_level(
             continue
         tokens = split_tokens(stripped)
         if stripped[0] in "xX":
-            x_instances.append((first, last, tokens[0], tokens, comment))
+            x_instances.append((first, last, tokens[0], tokens, comment, folded))
         else:
             other_names.append(tokens[0])
     return x_instances, other_names
@@ -286,16 +289,23 @@ def _require_declared(
 
 
 def _apply_replacements(
-    lines: list[str], replacements: dict[int, tuple[int, str]], wrappers: list[str]
+    lines: list[str],
+    replacements: dict[int, tuple[int, list[str]]],
+    wrappers: list[str],
 ) -> str:
     """Substitute the rewritten instance lines and append the wrapper
-    subcircuits before the final ``.end``."""
+    subcircuits before the final ``.end``.
+
+    A replacement is a *list* of output lines: the rewritten element, then any
+    ``*``/blank/comment-only lines that had sat inside its ``+`` continuation
+    run, so folding them out of the element does not delete them.
+    """
     out: list[str] = []
     i = 0
     while i < len(lines):
         if i in replacements:
             last, new = replacements[i]
-            out.append(new)
+            out.extend(new)
             i = last + 1
         else:
             out.append(lines[i])
@@ -349,8 +359,8 @@ def gate_netlist(
 
     report: list[dict[str, Any]] = []
     wrappers: list[str] = []
-    replacements: dict[int, tuple[int, str]] = {}
-    for first, last, name, tokens, comment in x_instances:
+    replacements: dict[int, tuple[int, list[str]]] = {}
+    for first, last, name, tokens, comment, folded in x_instances:
         if instance_param is not None:
             tokens = merge_equals(tokens)
         nodes, model, body = _parse_instance(name, tokens)
@@ -360,13 +370,11 @@ def gate_netlist(
             continue
         if instance_param is not None:
             _require_declared(name, model, instance_param, declared)
-            replacements[first] = (
-                last,
-                _set_instance_param(name, tokens, instance_param, comment),
-            )
-            continue
-        assert switch is not None
-        wrapper, wrapper_lines = _wrap_instance(name, nodes, body, switch)
-        wrappers += wrapper_lines
-        replacements[first] = (last, " ".join([name, *nodes, wrapper]))
+            rewritten = _set_instance_param(name, tokens, instance_param, comment)
+        else:
+            assert switch is not None
+            wrapper, wrapper_lines = _wrap_instance(name, nodes, body, switch)
+            wrappers += wrapper_lines
+            rewritten = " ".join([name, *nodes, wrapper])
+        replacements[first] = (last, [rewritten, *folded])
     return _apply_replacements(text.split("\n"), replacements, wrappers), report

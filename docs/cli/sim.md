@@ -7430,13 +7430,40 @@ because the PDKs differ structurally:
   it, and folding any `+` continuation into the rewritten line). **No wrapper
   subcircuit is generated, so hierarchical probe names are unchanged.**
 
-  An end-of-line comment (`$ ...` or `; ...`, on the instance line or on any
-  of its `+` continuations) is separated from the element before the rewrite
-  and re-attached after it, so `mm_ok=0` is always written into the element
-  and never inside the comment — ngspice discards everything after the comment
-  marker, so a parameter written there would leave the instance randomised
-  while the report said `randomised: false`. For the same reason an `mm_ok=`
-  that appears only inside a comment is not treated as an existing assignment.
+  An end-of-line comment (`$ ...`, `; ...` or `// ...`, on the instance line
+  or on any of its `+` continuations) is separated from the element before the
+  rewrite and re-attached after it, so `mm_ok=0` is always written into the
+  element and never inside the comment — ngspice discards everything after the
+  comment marker, so a parameter written there would leave the instance
+  randomised while the report said `randomised: false`. For the same reason an
+  `mm_ok=` that appears only inside a comment is not treated as an existing
+  assignment. `//` opens a comment anywhere on the line; `$` only at the start
+  of a line or after whitespace (`w=1u$2` is a value, not a comment).
+
+  **Which lines break an element, measured (ngspice-47, 2026-11-13, #5498).**
+  ngspice drops some lines *before* it folds `+` continuations, so a
+  continuation after one of them still belongs to the element above. klt folds
+  the same way; reading it the other way round either attaches the
+  continuation's parameters to a comment (leaving the element's own `mm_ok`
+  untouched) or claims parameters ngspice never applied. Probe: `.subckt rr a
+  b foo=1 mm_ok=1` holding `R1 a b {1k + mm_ok*1k}` across 1 V, deck
+  `X1 n1 0 rr` / *the line below* / `+ mm_ok=0`, where `-1.0e-03` means
+  `mm_ok=0` was honoured and `-5.0e-04` means it was not:
+
+  | Line between the element and its `+` continuation | ngspice | Folds? |
+  | --- | --- | --- |
+  | blank or whitespace-only | `-1.0e-03` | yes |
+  | `*` comment line (any indent) | `-1.0e-03` | yes |
+  | `$ ...` only (any indent, `$note` too) | `-1.0e-03` | yes |
+  | `// ...` only (any indent) | `-1.0e-03` | yes |
+  | `; ...` only (any indent) | `-5.0e-04` | **no** |
+
+  A `;`-only line is the exception: it **breaks** the element, and the `+`
+  after it attaches to the comment and is discarded with no warning. klt ends
+  the element there too, gates the first line alone, and leaves the orphaned
+  continuation exactly as written. For the lines that do fold, the comment or
+  blank line itself is re-emitted after the rewritten element rather than
+  deleted with the continuation it sat inside.
 
   Because `mm_ok` is only honoured by a subcircuit that declares it, klt
   writes it **only** onto an instance whose subcircuit definition it has read
@@ -7455,6 +7482,16 @@ because the PDKs differ structurally:
   one declaring any *other* parameter and leaves the devices inside still
   randomised — so guessing would make klt report `randomised: false` for an
   instance that was still randomised.
+
+  **What "declares it" does and does not establish.** klt checks that the
+  subcircuit *declares* `mm_ok`, which is what makes the instance-line
+  override legal; it does not trace whether the subcircuit then passes the
+  parameter down to the devices inside it. A subcircuit that declares `mm_ok`
+  and ignores it would be reported as gated while its devices still varied.
+  Every `mm_ok`-bearing sg13g2 device subcircuit does use it (that is what the
+  `(mm_ok != 1 ? 0 : 1)` term is), so this is a caveat for a hand-written
+  wrapper that declares the parameter for pass-through and forgets to forward
+  it — not for PDK devices.
 
 **Verified on ngspice-47 with a real IHP-Open-PDK install (2026-11-13,
 #5487).** Two identical diode-connected `sg13_lv_nmos` (`w=1u l=0.13u`), each

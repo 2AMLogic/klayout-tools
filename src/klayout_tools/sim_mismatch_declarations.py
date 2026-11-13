@@ -68,13 +68,17 @@ def split_tokens(line: str) -> list[str]:
 def split_eol_comment(line: str) -> tuple[str, str]:
     """Split one *physical* line into ``(code, comment)``.
 
-    ngspice ends an element at an unquoted ``;``, or at a ``$`` that opens the
-    line or follows whitespace, and treats the rest as a comment -- so nothing
-    written after one is part of the element. Separating the two *before*
-    parsing is what stops the gate appending ``<param>=0`` inside a comment
-    (ngspice would silently drop it, leaving the instance randomised while klt
-    reported ``randomised: false``) and stops comment prose being read as a
-    parameter assignment or a ``.lib`` argument.
+    ngspice ends an element at an unquoted ``;``, at a ``//``, or at a ``$``
+    that opens the line or follows whitespace, and treats the rest as a
+    comment -- so nothing written after one is part of the element. Separating
+    the two *before* parsing is what stops the gate appending ``<param>=0``
+    inside a comment (ngspice would silently drop it, leaving the instance
+    randomised while klt reported ``randomised: false``) and stops comment
+    prose being read as a parameter assignment or a ``.lib`` argument.
+
+    ``//`` needs no preceding whitespace, unlike ``$``: measured on ngspice-47
+    (2026-11-13), ``X1 n1 0 rr//note mm_ok=0`` leaves ``mm_ok`` at its default
+    just as the spaced spelling does.
 
     Quoted text and ``{...}`` expressions are respected, as in
     :func:`split_tokens`.
@@ -92,54 +96,96 @@ def split_eol_comment(line: str) -> tuple[str, str]:
         elif ch == "}":
             depth = max(0, depth - 1)
         elif depth == 0 and (
-            ch == ";" or (ch == "$" and (index == 0 or line[index - 1].isspace()))
+            ch == ";"
+            or (ch == "$" and (index == 0 or line[index - 1].isspace()))
+            or (ch == "/" and line[index + 1 : index + 2] == "/")
         ):
             return line[:index], line[index:]
     return line, ""
 
 
-def logical_lines_with_comments(text: str) -> list[tuple[int, int, str, str]]:
-    """``(first, last, code, comment)`` -- :func:`logical_lines` with every
-    *physical* line's end-of-line comment separated out **before** the ``+``
-    continuations are folded.
+#: One logical line: ``(first, last, code, comment, folded_over)``.
+LogicalLine = tuple[int, int, str, str, list[str]]
+
+
+def _dropped_before_fold(line: str, code: str, comment: str) -> bool:
+    """Whether ngspice discards this *physical* line before it folds ``+``
+    continuations, so a continuation after it still belongs to the element
+    above: a blank line, a ``*`` line, or a line that is nothing but a ``$``
+    or ``//`` comment (any indent). A line that is nothing but a ``;``
+    comment is **not** dropped -- it *breaks* the element, and the ``+``
+    after it is discarded with no warning, so klt must end the element there
+    too. Measured on ngspice-47; the decks are in docs/cli/sim.md.
+
+    Folding the wrong way round either attaches the continuation's parameters
+    to a comment (leaving the element's own ``mm_ok`` untouched while klt
+    reported ``randomised: false``) or claims parameters ngspice never
+    applied.
+    """
+    if line.lstrip().startswith("*"):
+        return True
+    if code.strip():
+        return False
+    return not comment.lstrip().startswith(";")
+
+
+def _fold(text: str, *, strip_comments: bool) -> list[LogicalLine]:
+    """Fold ``+`` continuations as ngspice does, skipping the lines it drops
+    first (:func:`_dropped_before_fold`).
+
+    ``folded_over`` holds the dropped lines that sat *inside* a continuation
+    run -- not part of the element, but handed back so a caller rewriting the
+    logical line re-emits them instead of deleting the author's text. A
+    dropped line outside a run is its own entry, copied through verbatim.
+    """
+    raw = text.split("\n")
+    split = [split_eol_comment(line) for line in raw]
+    skip = [_dropped_before_fold(ln, *sp) for ln, sp in zip(raw, split, strict=True)]
+    parts = split if strip_comments else [(line, "") for line in raw]
+    out: list[LogicalLine] = []
+    i = 0
+    while i < len(raw):
+        code, comment = parts[i]
+        comments = [comment.strip()] if comment.strip() else []
+        folded: list[str] = []
+        pending: list[int] = []
+        last = i
+        j = i + 1
+        while not skip[i] and j < len(raw):
+            if skip[j]:
+                pending.append(j)
+            elif raw[j].lstrip().startswith("+"):
+                folded += [raw[k] for k in pending]
+                pending = []
+                code += " " + parts[j][0].lstrip()[1:]
+                if parts[j][1].strip():
+                    comments.append(parts[j][1].strip())
+                last = j
+            else:
+                break
+            j += 1
+        out.append((i, last, code, " ".join(comments), folded))
+        i = last + 1
+    return out
+
+
+def logical_lines_with_comments(text: str) -> list[LogicalLine]:
+    """:func:`_fold` with every *physical* line's end-of-line comment
+    separated out **before** the ``+`` continuations are folded.
 
     Folding first would splice a comment into the middle of the logical line,
     where it swallows the continuation's own tokens; separating first keeps
     the code contiguous and hands the caller the comment text, so a rewritten
     line can carry it along instead of dropping it.
     """
-    raw = text.split("\n")
-    parts = [split_eol_comment(line) for line in raw]
-    out: list[tuple[int, int, str, str]] = []
-    i = 0
-    while i < len(raw):
-        j = i
-        code = parts[i][0]
-        comments = [parts[i][1].strip()] if parts[i][1].strip() else []
-        while j + 1 < len(raw) and raw[j + 1].lstrip().startswith("+"):
-            j += 1
-            code += " " + parts[j][0].lstrip()[1:]
-            if parts[j][1].strip():
-                comments.append(parts[j][1].strip())
-        out.append((i, j, code, " ".join(comments)))
-        i = j + 1
-    return out
+    return _fold(text, strip_comments=True)
 
 
-def logical_lines(text: str) -> list[tuple[int, int, str]]:
-    """``(first, last, joined)`` line index ranges, folding ``+`` continuations."""
-    raw = text.split("\n")
-    out: list[tuple[int, int, str]] = []
-    i = 0
-    while i < len(raw):
-        j = i
-        joined = raw[i]
-        while j + 1 < len(raw) and raw[j + 1].lstrip().startswith("+"):
-            j += 1
-            joined += " " + raw[j].lstrip()[1:]
-        out.append((i, j, joined))
-        i = j + 1
-    return out
+def logical_lines(text: str) -> list[LogicalLine]:
+    """:func:`_fold` keeping each line's comment text inline in ``code``
+    (``comment`` is always empty), for the wrapper path, which moves the
+    instance line verbatim and so needs no comment separated out."""
+    return _fold(text, strip_comments=False)
 
 
 def merge_equals(tokens: list[str]) -> list[str]:
@@ -277,7 +323,7 @@ def _scan(
     lib_stack: list[bool] = []
     subckt_stack: list[str] = []
     refs = _Refs(acc, base_dir, seen, budget, depth)
-    for _first, _last, joined, _comment in logical_lines_with_comments(text):
+    for _first, _last, joined, _comment, _folded in logical_lines_with_comments(text):
         stripped = joined.strip()
         low = stripped.lower()
         if low.startswith((".lib", ".endl")):

@@ -23,10 +23,21 @@ not `klt --version`, if you need to detect this kind of drift. See
   subcircuit, which shadows any enclosing scope. An unselected sg13g2 instance
   is now gated by rewriting its own instance line to carry `mm_ok=0` (an
   existing `mm_ok=` is replaced, not duplicated; `+` continuations fold in; an
-  end-of-line `$`/`;` comment is separated from the element first and
+  end-of-line `$`/`;`/`//` comment is separated from the element first and
   re-attached after, so the parameter never lands inside a comment, where
   ngspice would discard it). No wrapper is generated, so **hierarchical probe
-  names are unchanged** for sg13g2. klt writes `mm_ok=0` only onto an instance whose subcircuit
+  names are unchanged** for sg13g2. Both readers fold a deck the way
+  ngspice-47 measurably does: `//` ends an element anywhere on the line (no
+  preceding whitespace needed, unlike `$`), and a blank, `*`, `$`-only or
+  `//`-only line between an element and its `+` continuation does **not**
+  break the element, while a `;`-only line does — the `+` after that one
+  attaches to the comment and is discarded with no warning, so klt ends the
+  element there too. Each of those lines is re-emitted after the rewritten
+  element rather than deleted. A comment-blind reader wrote `mm_ok=0` past a
+  `//`, or attached a continuation's `mm_ok=1` to a `*`/blank line so it won
+  — both reporting `randomised: false` for an instance ngspice kept
+  randomised, and both measured end to end here (#5498). klt writes
+  `mm_ok=0` only onto an instance whose subcircuit
   definition it has read and found to declare the parameter — read from the
   netlist's `.include` closure and the selected model-library sections, never
   from a device-name list — and refuses an unselected instance whose
