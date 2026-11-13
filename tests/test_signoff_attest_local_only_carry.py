@@ -140,3 +140,38 @@ def test_skip_refusals(tmp_path, capsys):
     capsys.readouterr()
     assert main(["signoff", "--skip-local-only", "--format", "json"]) == 1
     assert not missing.exists()
+
+
+def test_skip_carries_across_inventory_metadata_only_edit(tmp_path, capsys):
+    """A free-text-only inventory edit refreshes without rerunning (issue #5478).
+
+    The reported trigger: editing nothing but the inventory's own
+    ``description`` changes the envelope's pinned inventory hash, so the
+    envelope needs reminting -- but no check, path or declared tool moved, so
+    ``--skip-local-only`` must carry the committed ``cold_start`` outcome
+    rather than re-running a command the inventory declared local-only.
+    """
+    repo = _repo(tmp_path)
+    marker = repo / "ran.txt"
+    argv = [sys.executable, "-c", f"open({str(marker)!r}, 'w').write('x')"]
+    inventory, out = _seed(repo, argv)
+    marker.unlink()
+    before = out.read_text()
+
+    # Edit the inventory file itself, and only its free-text description.
+    path = Path(inventory)
+    loaded = json.loads(path.read_text())
+    loaded["description"] = "item 9 cold-start attestation (wording touched up)"
+    path.write_text(json.dumps(loaded))
+    assert _attest(inventory, None, "--check", str(out)) == 3  # hash drift
+    capsys.readouterr()
+
+    assert _attest(inventory, out, "--skip-local-only") == 0
+
+    assert not marker.exists()
+    live = json.loads(capsys.readouterr().out)
+    assert [c["role"] for c in live["skipped_checks"]] == ["cold_start"]
+    written = out.read_text()
+    assert written != before  # inventory hash re-pinned
+    assert json.loads(written)["status"] == "pass"
+    assert _attest(inventory, None, "--check", str(out)) == 0

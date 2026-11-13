@@ -193,7 +193,7 @@
     },
     {
       "path": "src/klayout_tools/cli/drc_cmd.py",
-      "lines": 577
+      "lines": 565
     },
     {
       "path": "src/klayout_tools/cli/extract_cmd.py",
@@ -201,15 +201,11 @@
     },
     {
       "path": "src/klayout_tools/cli/parser.py",
-      "lines": 6140
+      "lines": 5480
     },
     {
       "path": "src/klayout_tools/cli/pdk_cmd.py",
       "lines": 615
-    },
-    {
-      "path": "src/klayout_tools/cli/pex_cmd.py",
-      "lines": 526
     },
     {
       "path": "src/klayout_tools/cli/signoff_cmd.py",
@@ -277,7 +273,7 @@
     },
     {
       "path": "src/klayout_tools/drc_klayout_engine.py",
-      "lines": 1677
+      "lines": 1651
     },
     {
       "path": "src/klayout_tools/economy.py",
@@ -313,7 +309,7 @@
     },
     {
       "path": "src/klayout_tools/extract.py",
-      "lines": 10825
+      "lines": 10779
     },
     {
       "path": "src/klayout_tools/extract_abstract.py",
@@ -369,7 +365,7 @@
     },
     {
       "path": "src/klayout_tools/gen.py",
-      "lines": 4356
+      "lines": 4355
     },
     {
       "path": "src/klayout_tools/gen_compose.py",
@@ -481,7 +477,7 @@
     },
     {
       "path": "src/klayout_tools/netlist.py",
-      "lines": 1068
+      "lines": 1067
     },
     {
       "path": "src/klayout_tools/netlist_batch.py",
@@ -505,7 +501,7 @@
     },
     {
       "path": "src/klayout_tools/pdk.py",
-      "lines": 2584
+      "lines": 2561
     },
     {
       "path": "src/klayout_tools/pdk_cells.py",
@@ -525,7 +521,7 @@
     },
     {
       "path": "src/klayout_tools/pex.py",
-      "lines": 3890
+      "lines": 3743
     },
     {
       "path": "src/klayout_tools/place_and_route.py",
@@ -597,7 +593,7 @@
     },
     {
       "path": "src/klayout_tools/signoff.py",
-      "lines": 8239
+      "lines": 8206
     },
     {
       "path": "src/klayout_tools/signoff_attest.py",
@@ -613,7 +609,7 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 12536
+      "lines": 12535
     },
     {
       "path": "src/klayout_tools/sim_batch.py",

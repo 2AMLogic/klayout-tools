@@ -32,7 +32,6 @@ from .coverage import (
     work_id,
 )
 from .drc import (
-    CODE_KLAYOUT_UNAVAILABLE,
     CODE_MULTIPLE_TOP_CELLS,
     CODE_NEGATIVE_CONTROL_FAILED,
     SCHEMA_VERSION,
@@ -41,6 +40,7 @@ from .drc import (
 from .drc_deck_includes import _deck_script_files
 from .drc_klayout_abort import deck_abort_info, deck_aborted_error
 from .drc_klayout_app import _preflight_klayout_version, _resolve_klayout_executable
+from .drc_klayout_launch import launch_klayout_deck
 from .pdk import PdkNotFoundError, find_pdk_for_deck
 
 # --------------------------------------------------------------------------- #
@@ -1519,43 +1519,17 @@ def run_drc_klayout_engine(
             # reaches the deck; the caller's file is untouched.
             input_path = os.path.join(work_dir, "input-top.gds")
             top_cells[0].write(input_path)
-        cmd = [
+        # Issue #5444: the invocation shape is shared with
+        # `--list-rule-categories`' empty-layout listing, so it lives in one
+        # place rather than two copies that can drift.
+        completed = launch_klayout_deck(
             klayout_exe,
-            "-b",
-            "-r",
             deck_file,
-            "-rd",
-            f"input={input_path}",
-            "-rd",
-            f"report={report_path}",
-        ]
-        for name, value in (deck_vars or {}).items():
-            cmd.extend(["-rd", f"{name}={value}"])
-        try:
-            completed = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=timeout_s
-            )
-        except FileNotFoundError as exc:
-            raise DrcError(
-                "could not launch klayout: binary not found on PATH. "
-                "Install KLayout (https://www.klayout.de/build.html) or "
-                "omit --engine klayout to use the curated deck instead. "
-                f"({exc})",
-                code=CODE_KLAYOUT_UNAVAILABLE,
-            ) from exc
-        except OSError as exc:
-            raise DrcError(
-                f"could not launch klayout: {exc}. Check that a system "
-                "KLayout (https://www.klayout.de/build.html) is installed "
-                "and executable, or omit --engine klayout to use the "
-                "curated deck instead.",
-                code=CODE_KLAYOUT_UNAVAILABLE,
-            ) from exc
-        except subprocess.TimeoutExpired as exc:
-            raise DrcError(
-                f"klayout did not complete within {timeout_s}s (raise "
-                "--timeout-s to allow more time)"
-            ) from exc
+            input_path=input_path,
+            report_path=report_path,
+            deck_vars=deck_vars,
+            timeout_s=timeout_s,
+        )
 
         error_lines, deck_errored = _check_klayout_run(
             completed, report_path, allow_deck_errors=allow_deck_errors

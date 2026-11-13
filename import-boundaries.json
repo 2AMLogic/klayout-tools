@@ -136,6 +136,7 @@
       "kind": "verb",
       "description": "`klt drc` implementation: core modules plus CLI adapter.",
       "modules": [
+        "klayout_tools.cli._drc_list_categories",
         "klayout_tools.cli._drc_native",
         "klayout_tools.cli._drc_parser_args",
         "klayout_tools.cli.drc_cmd",
@@ -148,6 +149,8 @@
         "klayout_tools.drc_klayout_app",
       "klayout_tools.drc_layer_selection",
         "klayout_tools.drc_klayout_engine",
+        "klayout_tools.drc_klayout_launch",
+        "klayout_tools.drc_klayout_list",
         "klayout_tools.drc_report_check",
         "klayout_tools.drc_text_exempt"
       ]
@@ -255,7 +258,8 @@
         "klayout_tools.extract_warnings",
         "klayout_tools.parasitic_integrity",
         "klayout_tools.resistance_path",
-        "klayout_tools.substrate_resistance"
+        "klayout_tools.substrate_resistance",
+        "klayout_tools.extract_preflight"
       ]
     },
     "formal": {
@@ -493,7 +497,8 @@
         "klayout_tools.netlist_normalize",
         "klayout_tools.netlist_normalize_scan",
         "klayout_tools.netlist_paths",
-        "klayout_tools.netlist_pdk"
+        "klayout_tools.netlist_pdk",
+        "klayout_tools.netlist_port_order"
       ]
     },
     "pdk": {
@@ -520,6 +525,7 @@
         "klayout_tools.decks.sky130_unmodeled",
         "klayout_tools.liberty_merge",
         "klayout_tools.pdk",
+        "klayout_tools.pdk_ambiguity",
         "klayout_tools.pdk_capabilities",
         "klayout_tools.pdk_cells",
         "klayout_tools.pdk_compat",
@@ -539,9 +545,14 @@
         "klayout_tools.cli.pex_cmd",
         "klayout_tools.pex",
         "klayout_tools.pex_async",
+        "klayout_tools.pex_netlist_text",
         "klayout_tools.pex_asap7",
         "klayout_tools.pex_sim_evidence",
-        "klayout_tools.spice_flatten"
+        "klayout_tools.spice_flatten",
+        "klayout_tools.cli.parser_pex",
+        "klayout_tools.cli.parser_pex_extract",
+        "klayout_tools.cli.pex_text",
+        "klayout_tools.pex_dry_run"
       ]
     },
     "place_and_route": {
@@ -688,6 +699,7 @@
         "klayout_tools.signoff_attest_item9",
         "klayout_tools.signoff_attest_stream",
         "klayout_tools.signoff_attest_text",
+        "klayout_tools.signoff_derived_rows",
         "klayout_tools.signoff_details",
         "klayout_tools.signoff_envelopes",
         "klayout_tools.signoff_evidence_pin",
@@ -695,6 +707,7 @@
         "klayout_tools.signoff_generator_batch",
         "klayout_tools.signoff_multi_member",
         "klayout_tools.signoff_na",
+        "klayout_tools.signoff_nothing_checked",
         "klayout_tools.signoff_power_delivery",
         "klayout_tools.signoff_power_delivery_substrate",
         "klayout_tools.signoff_runset",
@@ -773,6 +786,7 @@
         "klayout_tools.sim_passes",
         "klayout_tools.sim_op_check",
         "klayout_tools.sim_osdi_pin",
+        "klayout_tools.sim_pdk_ambiguity",
         "klayout_tools.sim_peak_rss",
         "klayout_tools.sim_plan",
         "klayout_tools.sim_plot",
@@ -806,6 +820,7 @@
         "klayout_tools.sim_twoport",
         "klayout_tools.sim_validate",
         "klayout_tools.sim_waveform_opts",
+        "klayout_tools.sim_window",
         "klayout_tools.sim_xyce_refusals"
       ]
     },
@@ -1821,6 +1836,18 @@
       "reason": "Issue #4045: loads the request JSON with the same error handling as sim/characterize; promote to a public name when _paths is next reworked."
     },
     {
+      "consumer": "klayout_tools.eval",
+      "exporter": "klayout_tools._paths",
+      "symbol": "_load_request_json",
+      "reason": "Issue #5485: the descriptor/candidate file branch must handle unreadable and non-UTF-8 files exactly as every other verb does; its hand-rolled copy dropped both and tracebacked past the error envelope. Promote to a public name when _paths is next reworked."
+    },
+    {
+      "consumer": "klayout_tools.yield_sensitivity",
+      "exporter": "klayout_tools._paths",
+      "symbol": "_load_request_json",
+      "reason": "Issue #5485: reads the samples document with the shared error handling; its hand-rolled copy omitted UnicodeDecodeError and tracebacked past the error envelope. Promote to a public name when _paths is next reworked."
+    },
+    {
       "consumer": "klayout_tools.corner_matrix",
       "exporter": "klayout_tools.sim",
       "symbol": "_expand_corners",
@@ -2311,6 +2338,12 @@
       "exporter": "klayout_tools.sim_batch",
       "symbol": "_default_batch_job_timeout_s",
       "reason": "Issue #5238: extract_batch and netlist_batch each wrapped this sim_batch timeout formula; the shared job_timeout_seconds helper now owns that one call so the backends cannot drift. Promote to a public name when sim_batch is next split."
+    },
+    {
+      "consumer": "klayout_tools.pex_dry_run",
+      "exporter": "klayout_tools._paths",
+      "symbol": "_resolve_relative",
+      "reason": "Issue #5464: `klt pex --dry-run` resolves a testbench's `netlist` field against its request directory with the same helper `pex.py`'s own first pass uses, so the dry run cannot resolve it differently; promote to public with the other _paths importers."
     }
   ],
   "legacy_exceptions": {
@@ -2334,10 +2367,10 @@
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {
-        "consumer": "klayout_tools.cli.pex_cmd",
+        "consumer": "klayout_tools.cli.pex_text",
         "exporter": "klayout_tools.cli.extract_cmd",
         "symbol": "_print_label_layers",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module. Issue #5464 moved the importing code from `cli/pex_cmd.py` to `cli/pex_text.py` verbatim (size ratchet); the import itself is unchanged."
       },
       {
         "consumer": "klayout_tools.cli.yield_campaign_cmd",
