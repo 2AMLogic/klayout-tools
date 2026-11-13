@@ -811,6 +811,7 @@
         "klayout_tools.sim_twoport",
         "klayout_tools.sim_validate",
         "klayout_tools.sim_waveform_opts",
+        "klayout_tools.sim_window",
         "klayout_tools.sim_xyce_refusals"
       ]
     },
