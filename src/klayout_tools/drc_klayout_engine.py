@@ -447,6 +447,20 @@ _RUBY_INCLUDE_RE = re.compile(
     r"""(?:"(?P<path_dq>[^"\n]*)"|'(?P<path_sq>[^'\n]*)')"""
 )
 
+#: KLayout's own preprocessor include (issue #5443). ``# %include <path>``
+#: comment lines are spliced in textually before the deck is interpreted, so
+#: for a PDK whose native deck is a thin driver over a directory of rule
+#: files, essentially every rule arrives this way.
+#:
+#: Matched exactly as ``tl::IncludeExpander`` matches it, verified against
+#: KLayout 0.30.12: the ``#`` must be the line's first non-blank character
+#: (``## %include`` and a trailing ``code # %include`` are both inert),
+#: only blanks may sit between it and a case-sensitive ``%include``, and the
+#: path is the remainder of the line -- there is no trailing-comment syntax.
+_KLAYOUT_INCLUDE_RE = re.compile(
+    r"^[ \t]*#[ \t]*%include[ \t]+(?P<path>.+)$", re.MULTILINE
+)
+
 #: Words that name no external executable: shell builtins/keywords, plus the
 #: redirection/grouping artifacts a naive split can leave behind. Anything
 #: here is skipped rather than looked up on PATH.
@@ -547,14 +561,74 @@ def _shell_command_words(command: str) -> list[str]:
     return words
 
 
+def _klayout_include_path(raw: str) -> str:
+    """The path a ``# %include`` line names, de-quoted as KLayout de-quotes it
+    (issue #5443).
+
+    An opening ``"``/``'`` starts a quoted path that ends at the next matching
+    quote, or at the end of the line if there is none; anything else is taken
+    verbatim. Both halves were verified against KLayout 0.30.12, including the
+    asymmetry: ``"a/t.rb`` resolves to ``a/t.rb`` while ``a/t.rb"`` keeps its
+    trailing quote and fails to open.
+    """
+    raw = raw.strip()
+    if raw[:1] in ('"', "'"):
+        end = raw.find(raw[0], 1)
+        return raw[1:] if end < 0 else raw[1:end]
+    return raw
+
+
+def _resolve_include(raw: str, base: str, suffixes: tuple[str, ...]) -> str | None:
+    """``raw`` as an absolute path to an existing file, resolved against
+    ``base`` (the including file's directory) and the first of ``suffixes``
+    that exists; ``None`` when it names nothing readable."""
+    if not raw:
+        return None
+    candidate = raw if os.path.isabs(raw) else os.path.join(base, raw)
+    for resolved in (candidate + suffix for suffix in suffixes):
+        if os.path.isfile(resolved):
+            return os.path.abspath(resolved)
+    return None
+
+
+def _deck_include_targets(text: str, base: str) -> list[str]:
+    """Every existing file ``text`` includes, in source order per form:
+    Ruby literal ``require``/``require_relative``/``load`` (issue #2333),
+    then KLayout ``# %include`` (issue #5443). Both resolve relative to
+    ``base``, the directory of the file ``text`` came from.
+    """
+    targets: list[str] = []
+    for match in _RUBY_INCLUDE_RE.finditer(text):
+        raw = match.group("path_dq") or match.group("path_sq") or ""
+        if "#{" in raw:
+            # A computed path is unknowable statically; skip, never guess.
+            continue
+        # Ruby resolves a suffixless `require` name against `<name>.rb`.
+        found = _resolve_include(raw, base, ("", ".rb"))
+        if found is not None:
+            targets.append(found)
+    for match in _KLAYOUT_INCLUDE_RE.finditer(text):
+        # No suffix search: KLayout splices the named path exactly and errors
+        # out when it does not exist, so a path that resolves only with a
+        # suffix added is not part of the deck.
+        raw = _klayout_include_path(match.group("path"))
+        found = _resolve_include(raw, base, ("",))
+        if found is not None:
+            targets.append(found)
+    return targets
+
+
 def _deck_script_files(deck_file: str) -> list[str]:
-    """``deck_file`` plus every literal-path Ruby include reachable from it
-    (issue #2333), depth-first, de-duplicated, bounded by
+    """``deck_file`` plus every literal-path include reachable from it --
+    Ruby ``require``/``require_relative``/``load`` (issue #2333) and KLayout
+    ``# %include`` (issue #5443) -- breadth-first, de-duplicated, bounded by
     :data:`_DECK_SCAN_MAX_FILES`.
 
     A PDK's driver is often one file, but the shapes that carry host
     assumptions (a shared logging/util prologue, a per-topic rule table) split
-    it across a handful. Unreadable or computed-path includes are skipped, not
+    it across a handful, and a ``%include``-based deck keeps its whole rule
+    set out of the entry script. Both include forms resolve relative to the
+    *including* file. Unreadable or computed-path includes are skipped, not
     an error: this is a diagnostic aid, and a file it cannot read is simply
     one it cannot make claims about.
     """
@@ -572,16 +646,7 @@ def _deck_script_files(deck_file: str) -> list[str]:
                 text = handle.read()
         except OSError:
             continue
-        base = os.path.dirname(current)
-        for match in _RUBY_INCLUDE_RE.finditer(text):
-            raw = match.group("path_dq") or match.group("path_sq") or ""
-            if not raw or "#{" in raw:
-                continue
-            candidate = raw if os.path.isabs(raw) else os.path.join(base, raw)
-            for resolved in (candidate, candidate + ".rb"):
-                if os.path.isfile(resolved):
-                    pending.append(os.path.abspath(resolved))
-                    break
+        pending.extend(_deck_include_targets(text, os.path.dirname(current)))
     return ordered
 
 
@@ -646,8 +711,8 @@ def _record_deck_default(
 
 def scan_deck_globals(deck_file: str) -> list[dict[str, Any]]:
     """Best-effort static scan of the ``-rd`` globals a KLayout DRC deck
-    consumes (issue #3816), following literal includes as
-    :func:`_deck_script_files` does.
+    consumes (issue #3816), following literal Ruby and ``# %include``
+    includes as :func:`_deck_script_files` does.
 
     Returns a name-sorted list of ``{"name", "required_by_caller",
     "default"}``. A global whose first assignment is guarded by ``defined?``
@@ -720,9 +785,9 @@ def _missing_deck_globals_warning(
 
 
 def _scan_deck_host_commands(deck_file: str) -> dict[str, str]:
-    """Every host executable the deck script (and its literal includes) shells
-    out to, mapped to the ``<file>:<line>`` where it was first seen (issue
-    #2333).
+    """Every host executable the deck script (and every file it includes,
+    Ruby-literal or ``# %include``) shells out to, mapped to the
+    ``<file>:<line>`` where it was first seen (issue #2333).
 
     A static, deliberately shallow scan -- see
     :func:`_missing_deck_host_commands` for what that means for the caller.
@@ -782,15 +847,15 @@ def _deck_tree_identity(deck_file: str) -> dict[str, Any] | None:
     """Additive identity for a deck that is a *tree* of files (issue #3076).
 
     ``provenance.deck.content_hash`` pins only the entry script; a vendor
-    deck that pulls in sibling files via literal ``require``/``load`` is not
-    pinned by it. Returns ``None`` for a single-file deck (its identity is
-    unchanged), else ``{"file_count", "content_hash", "release"}`` where
-    ``content_hash`` is a sha256 over the sorted ``(relative path, file
-    hash)`` pairs of the entry script plus every literal include reachable
-    from it, and ``release`` is ``git describe --tags --always --dirty`` of
-    the deck's checkout (``None`` when it is not a git checkout or git is
-    unavailable). Computed-path includes are not followed (see
-    :func:`_deck_script_files`).
+    deck that pulls in sibling files via literal ``require``/``load`` or
+    KLayout's ``# %include`` is not pinned by it. Returns ``None`` for a
+    single-file deck (its identity is unchanged), else ``{"file_count",
+    "content_hash", "release"}`` where ``content_hash`` is a sha256 over the
+    sorted ``(relative path, file hash)`` pairs of the entry script plus
+    every literal include reachable from it, and ``release`` is ``git
+    describe --tags --always --dirty`` of the deck's checkout (``None`` when
+    it is not a git checkout or git is unavailable). Computed-path includes
+    are not followed (see :func:`_deck_script_files`).
     """
     files = _deck_script_files(deck_file)
     if len(files) < 2:

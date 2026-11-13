@@ -4196,8 +4196,9 @@ not run" is what a CI script could mistake for clean.
 #### Deck tree identity
 
 `provenance.deck.content_hash` pins the entry script. When that script pulls
-in other files through literal `require`/`require_relative`/`load`, the
-report also carries an additive `provenance.deck.tree`:
+in other files — through literal `require`/`require_relative`/`load`, or
+through KLayout's own `# %include` preprocessor lines — the report also
+carries an additive `provenance.deck.tree`:
 `{"file_count", "content_hash", "release"}` — a sha256 over the sorted
 (relative path, file hash) pairs of the entry script plus every reachable
 literal include, and `git describe --tags --always --dirty` of the deck's
@@ -4206,6 +4207,17 @@ Computed include paths are not followed. `klt drc --check` re-hashes the tree
 and reports `provenance.deck.tree.content_hash` drift. Additive, so
 `schema_version` is unchanged (`docs/json-contract.md`: optional fields are
 additive).
+
+`# %include` matters because it is how a PDK's native deck is usually built:
+a thin driver script plus a directory of rule files, so essentially every
+rule lives in an included file (the IHP sg13g2 deck splices in 38 of them).
+Each include resolves relative to the file it appears in, and both forms are
+followed recursively. `provenance.deck.content_hash` keeps its meaning —
+the entry script alone — so a rule-file edit under a `%include` deck shows up
+as `provenance.deck.tree.content_hash` drift and nowhere else. Reports
+written before `%include` was followed carry no `tree` block for such a deck,
+and `--check` keeps comparing only their entry hash until they are
+regenerated.
 
 #### Negative control
 
