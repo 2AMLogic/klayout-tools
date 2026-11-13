@@ -194,6 +194,18 @@ def _extraction_block(
         # Additive field (issue #4234): `klt extract`'s `device_models`
         # echo -- the applied `--device-model` mapping, or `None`.
         "device_models": extract_report.get("device_models"),
+        # Additive fields (issue #5477): `klt extract`'s own device
+        # coverage disclosure -- `device_classes` (issue #221, what the
+        # resolved deck can recognise) and `unsupported_devices` (issue
+        # #2919, the deck-declared "cannot extract this yet" marker
+        # geometry the layout draws) -- forwarded verbatim in every mode,
+        # so a committed envelope carries the same limit statement the
+        # extraction it cites published, instead of making a reader
+        # re-run `klt extract`. Neither sees a family the deck declares
+        # no class for *and* that draws no marker layer (e.g. `pnpMPA` on
+        # sg13cmos5l); see `run_pex` on `model_mismatch` for that gap.
+        "device_classes": extract_report.get("device_classes"),
+        "unsupported_devices": extract_report.get("unsupported_devices"),
         # Additive field (issue #2854): echoes the effective
         # `--rename-declared-pins` value back -- `False` when the flag
         # was never given, byte-identical to before this feature

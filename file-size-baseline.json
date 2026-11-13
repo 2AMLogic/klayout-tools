@@ -365,7 +365,7 @@
     },
     {
       "path": "src/klayout_tools/gen.py",
-      "lines": 4356
+      "lines": 4355
     },
     {
       "path": "src/klayout_tools/gen_compose.py",
@@ -521,7 +521,7 @@
     },
     {
       "path": "src/klayout_tools/pex.py",
-      "lines": 3890
+      "lines": 3731
     },
     {
       "path": "src/klayout_tools/place_and_route.py",

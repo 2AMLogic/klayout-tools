@@ -545,6 +545,7 @@
         "klayout_tools.cli.pex_cmd",
         "klayout_tools.pex",
         "klayout_tools.pex_async",
+        "klayout_tools.pex_netlist_text",
         "klayout_tools.pex_asap7",
         "klayout_tools.pex_sim_evidence",
         "klayout_tools.spice_flatten",
@@ -1836,6 +1837,18 @@
       "exporter": "klayout_tools._paths",
       "symbol": "_load_request_json",
       "reason": "Issue #4045: loads the request JSON with the same error handling as sim/characterize; promote to a public name when _paths is next reworked."
+    },
+    {
+      "consumer": "klayout_tools.eval",
+      "exporter": "klayout_tools._paths",
+      "symbol": "_load_request_json",
+      "reason": "Issue #5485: the descriptor/candidate file branch must handle unreadable and non-UTF-8 files exactly as every other verb does; its hand-rolled copy dropped both and tracebacked past the error envelope. Promote to a public name when _paths is next reworked."
+    },
+    {
+      "consumer": "klayout_tools.yield_sensitivity",
+      "exporter": "klayout_tools._paths",
+      "symbol": "_load_request_json",
+      "reason": "Issue #5485: reads the samples document with the shared error handling; its hand-rolled copy omitted UnicodeDecodeError and tracebacked past the error envelope. Promote to a public name when _paths is next reworked."
     },
     {
       "consumer": "klayout_tools.corner_matrix",
