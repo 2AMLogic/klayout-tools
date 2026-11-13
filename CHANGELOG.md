@@ -14,6 +14,31 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt sim`: an off-host report's `environment.engine_build` now describes
+  the worker, not the submitting client** (#5566, 2026-11-13): on an
+  `engine_host: "worker"` report (`--backend batch`/`remote`),
+  `environment.engine_version` has always been the worker's, while
+  `engine_build` was the submitter's own `ngspice --version` probe — so one
+  report could pair a worker-sourced version with a client-sourced banner
+  naming a different ngspice, and a consumer recording both emitted
+  self-contradicting simulator provenance. `engine_build` is now taken from
+  `environment.remote.worker_environment.simulator.version_banner` under the
+  same rule `ngspice_binary` uses (capture `"ok"`; a sharded run only when
+  every member agrees), with `binary_sha256: null` because the worker capture
+  carries no digest, and `probe`/`reason` explaining any missing banner rather
+  than falling back to the client's. The client's probe is kept verbatim under
+  the new `environment.client_engine_build`, present only on off-host reports.
+  This is the same correction #3110 made for `ngspice_binary` and is treated
+  as a bug fix against the already-documented `engine_host` contract, not a
+  new one — but it **changes what `environment.engine_build` means on an
+  off-host report**: a consumer that read it as the client's build must read
+  `client_engine_build` instead. Keys are otherwise unchanged;
+  `worker_environment.engine_build_comparison` still compares the worker's
+  banner with the client's probe, `engine_host: "local"` reports are
+  identical, `engine: "xyce"` keeps `engine_build: null`, and deck-list
+  reports gain no field. No `schema_version` bump (additive key; the
+  re-pointed field is a correction).
+
 - **`klt signoff` reads a gzip-compressed evidence file** (#5452,
   2026-11-13): a `klt sim --report-out report.json.gz` report — the compact
   form `docs/cli/sim.md` recommends committing as evidence — is now citable
