@@ -93,6 +93,13 @@ import subprocess
 from typing import Any
 
 from .lef_header import parse_lef_header
+
+#: Re-exported (self-aliased so linters recognise the re-export as
+#: intentional) from the module they were split into for the file-size
+#: ratchet (issue #5449): `pdk.ambiguity_warning` / `pdk.AMBIGUITY_REMEDY`
+#: are the spellings `klt sim`, `klt netlist` and the docs use.
+from .pdk_ambiguity import AMBIGUITY_REMEDY as AMBIGUITY_REMEDY
+from .pdk_ambiguity import ambiguity_warning as ambiguity_warning
 from .pdk_compat import (
     check_compatibility,
     check_expected_version,
@@ -346,36 +353,6 @@ def _ambiguous_roots(
         if any(entry["name"] == variant_name for entry in _probe_root(root_path)):
             matches.append({"root": root_path, "resolved_via": resolved_via})
     return matches
-
-
-def ambiguity_warning(report: dict[str, Any]) -> str | None:
-    """Render a one-line warning for a :func:`find_pdk` report whose
-    ``ambiguous_roots`` is non-empty, or ``None`` when the resolution was
-    unambiguous (issue #2564).
-
-    Pure formatter: this module never prints (see the module docstring), so a
-    caller emits the returned string itself -- to stderr for a CLI verb, or
-    into its own diagnostics channel. The message names the **absolute** root
-    actually read and every root skipped, because that is the only form of
-    the information a caller can act on; the JSON reports carry the
-    path-free ``resolved_via`` labels instead (see ``docs/json-contract.md``'s
-    path-privacy rule for committed evidence).
-    """
-    skipped = report.get("ambiguous_roots") or []
-    if not skipped:
-        return None
-    others = ", ".join(
-        f"{entry['root']} ({entry['resolved_via']})" for entry in skipped
-    )
-    return (
-        f"klt: warning: {len(skipped) + 1} installs provide PDK variant "
-        f"{report['variant']!r}; read {report['root']} "
-        f"({report['resolved_via']}), skipped {others}. Resolution is "
-        "first-match-wins, so a pinned open_pdks build may not be the one "
-        "this run read -- pin the root explicitly (--pdk-root, or a "
-        "request's models.pdk_root) to disable the search and choose "
-        "deliberately."
-    )
 
 
 def alternative_variants_warning(report: dict[str, Any]) -> str | None:
