@@ -56,9 +56,21 @@ EXIT_ROW_ERRORED = 4
 
 #: Namespace fields a ``--submit-only`` run does not record in its manifest
 #: (issue #4692): the verb plumbing, the output format, and the async flags
-#: themselves -- a bare ``--attach`` supplies its own.
+#: themselves -- a bare ``--attach`` supplies its own. ``dry_run`` (issue
+#: #5464) is per-invocation plumbing in the same sense: a dry run is a
+#: property of the *invocation*, not of the recorded run, and recording it
+#: would let a manifest clobber the ``--dry-run`` the caller just typed on a
+#: bare ``--attach`` (see ``_rehydrate_bare_attach``).
 _REQUEST_EXCLUDED = frozenset(
-    {"command", "func", "format", "submit_only", "attach_manifest", "envelope_out"}
+    {
+        "command",
+        "func",
+        "format",
+        "submit_only",
+        "attach_manifest",
+        "envelope_out",
+        "dry_run",
+    }
 )
 #: Request fields holding filesystem paths, stored absolute so a bare
 #: ``--attach`` from another working directory resolves them identically.
@@ -126,9 +138,19 @@ def _lock_details(exc: OutputLockError) -> dict | None:
 
 def _rehydrate_bare_attach(args: argparse.Namespace) -> None:
     """``klt pex --attach MANIFEST`` with no layout, ``--deck`` or testbenches
-    (issue #4692): take the request the ``--submit-only`` run recorded."""
+    (issue #4692): take the request the ``--submit-only`` run recorded.
+
+    ``_REQUEST_EXCLUDED`` keys are skipped (issue #5464). Current code never
+    records them, but a manifest written by an older ``klt`` -- or by hand --
+    can still carry one, and those fields describe *this* invocation (the
+    output format, the async flags, ``--dry-run``), not the recorded run. A
+    stale ``"dry_run": false`` must not overwrite the ``--dry-run`` the caller
+    just typed, which would turn the refusal into a real attach.
+    """
     request = pex_async.load_request(args.attach_manifest)
     for key, value in request.items():
+        if key in _REQUEST_EXCLUDED:
+            continue
         if hasattr(args, key):
             setattr(args, key, value)
 

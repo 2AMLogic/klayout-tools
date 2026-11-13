@@ -132,7 +132,10 @@ klt pex <layout> --deck <deck> --measure-command <command> --reference-netlist <
   behaviour (inputs re-given, hashes verified). A manifest written before
   schema 2 has no `request`: a bare `--attach` of it fails with
   `pex_manifest_no_request`. Without `--attach`, layout and `--deck` stay
-  required (exit `2`).
+  required (exit `2`). Per-invocation plumbing is **not** part of `request`
+  and is never taken from a manifest, even if one carries it: `--format`,
+  `--submit-only`, `--attach` itself, `--envelope-out`, and `--dry-run`
+  (issue #5464) always come from the command line you just typed.
   **Incremental manifest and re-running a submit**
   ([#4686](https://github.com/2AMLogic/klayout-tools/issues/4686)):
   `pex-submit.json` is rewritten atomically after every leg is submitted, with
@@ -325,7 +328,10 @@ klt pex <layout> --deck <deck> --measure-command <command> --reference-netlist <
   counterpart of [`sim.md`](sim.md)'s `klt sim --dry-run` (issue #3064).
   Exits `0` when everything it can check is valid, `1` with the normal
   error envelope otherwise. Refused with `--submit-only` / `--attach`, the
-  same pair `klt sim --dry-run` refuses. See "Validating an invocation
+  same pair `klt sim --dry-run` refuses -- including the **bare** `--attach
+  MANIFEST --dry-run` form, which is refused before anything is collected or
+  written (`--dry-run` is never recorded in a manifest and never taken from
+  one; see "Bare `--attach`" above). See "Validating an invocation
   without running it (`--dry-run`)" below.
 - `--format` — `text` (default, a human-readable pass/fail summary) or
   `json` (this command's own JSON envelope, see below).
