@@ -597,6 +597,20 @@ Additive fields only; no `schema_version` bump (issue #4020).
 (`status` `match` / `mismatch` / `not_comparable`); no `schema_version` bump
 (issue #5321).
 
+For a request that declares no `models.lib` because every selected section
+names its own library (issue #2522), that hash pair is `null` on both sides by
+construction, so `environment.remote` (and each `fleet[]` member) additionally
+gains `runner_corner_section_libs` (`[{name, sha256}]` or `null`) and —
+**only when the client or the runner reported per-section libraries** —
+`corner_section_libs_comparison` (`status` `match` / `mismatch` with `names` /
+`not_comparable` with `reason`), comparing by `(name, sha256)` pair
+membership. `models_lib_comparison` gains the `no_models_lib` reason for that
+case, previously reported as `runner_hash_unavailable`. A consumer that reads
+a reason string must treat the reason set as open. Additive fields and a new
+enum member on an existing optional field; no `schema_version` bump (issue
+#5457). Field-level record: [`docs/cli/sim.md`](cli/sim.md) "Worker-observed
+environment".
+
 **No bucket in batch reports (issue #3777).** `environment.remote` (and each
 `fleet[]` member) no longer carries `bucket` on any batch verb. The bucket name
 embeds the fleet's AWS account number and reports are committed as evidence.
