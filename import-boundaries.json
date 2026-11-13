@@ -862,6 +862,7 @@
         "klayout_tools.synthesize_arithmetic",
         "klayout_tools.synthesize_memory",
         "klayout_tools.synthesize_netlist_normalize",
+        "klayout_tools.synthesize_timeout",
         "klayout_tools.synthesize_x_scan"
       ]
     },

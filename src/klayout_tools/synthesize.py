@@ -219,7 +219,6 @@ by construction, and that used to be silent. See
 
 from __future__ import annotations
 
-import contextvars
 import fnmatch
 import importlib
 import json
@@ -233,6 +232,7 @@ from typing import Any
 
 from . import env_provenance
 from . import macros as macro_spec
+from . import synthesize_timeout as ytimeout
 from ._jsonnum import is_int, is_number
 from ._paths import _load_request_json, _reject_unknown_keys, validate_request_shape
 from ._provenance import (
@@ -978,8 +978,8 @@ _ALLOWED_REQUEST_KEYS = frozenset(
         "parameters",
         "sv_frontend",
         "defines",
-        "macros",
         "yosys_timeout_s",
+        "macros",
     }
 )
 
@@ -1034,42 +1034,8 @@ def _validate_outputs(request: dict[str, Any], request_path: str) -> None:
             )
 
 
+@ytimeout.scoped_yosys_timeout
 def run_synthesize(
-    request_path: str,
-    *,
-    pdk_variant: str | None = None,
-    pdk_root: str | None = None,
-    verify_equivalence: bool = False,
-    equiv_timeout_s: float | None = None,
-    equiv_engine: str | None = None,
-    restructure_timing: bool = False,
-    restructure_max_iterations: int | None = None,
-    _scratch_run_dir: bool = False,
-) -> dict[str, Any]:
-    """Run the Yosys synthesis declared by the request at ``request_path``.
-
-    Thin scope guard around :func:`_run_synthesize_impl` (which holds the
-    full contract): the request's ``yosys_timeout_s`` is bound for the
-    duration of the run only, so it never leaks into a later call.
-    """
-    token = _YOSYS_TIMEOUT_VAR.set(None)
-    try:
-        return _run_synthesize_impl(
-            request_path,
-            pdk_variant=pdk_variant,
-            pdk_root=pdk_root,
-            verify_equivalence=verify_equivalence,
-            equiv_timeout_s=equiv_timeout_s,
-            equiv_engine=equiv_engine,
-            restructure_timing=restructure_timing,
-            restructure_max_iterations=restructure_max_iterations,
-            _scratch_run_dir=_scratch_run_dir,
-        )
-    finally:
-        _YOSYS_TIMEOUT_VAR.reset(token)
-
-
-def _run_synthesize_impl(
     request_path: str,
     *,
     pdk_variant: str | None = None,
@@ -1195,9 +1161,7 @@ def _run_synthesize_impl(
     )
 
     sv_frontend = validate_sv_frontend(request.get("sv_frontend"), SynthesizeError)
-    yosys_timeout_s = _validate_yosys_timeout_s(request.get("yosys_timeout_s"))
-    if yosys_timeout_s is not None:
-        _YOSYS_TIMEOUT_VAR.set(yosys_timeout_s)
+    yosys_timeout_s = ytimeout.bind_yosys_timeout(request, SynthesizeError)
 
     pdk_spec = request["pdk"]
     if not isinstance(pdk_spec, dict):
@@ -1286,9 +1250,7 @@ def _run_synthesize_impl(
     # Issue #4196: likewise for preprocessor defines (a separate field, so the
     # input content hash of existing committed reports is unchanged).
     provenance["defines"] = dict(defines)
-    # Only when the request set it, so default-path records stay unchanged.
-    if yosys_timeout_s is not None:
-        provenance["yosys_timeout_s"] = yosys_timeout_s
+    provenance.update(ytimeout.timeout_fields(yosys_timeout_s))
     output_dir = _create_run_directory(
         request_dir, request, ignore_outputs_dir=_scratch_run_dir
     )
@@ -1668,7 +1630,7 @@ def _run_synthesize_impl(
             executed_script_path, repo_root=repo_root
         ),
         "provenance": provenance,
-        **({"yosys_timeout_s": yosys_timeout_s} if yosys_timeout_s is not None else {}),
+        **ytimeout.timeout_fields(yosys_timeout_s),
         "equivalence": equivalence,
         "restructuring": restructuring,
         "arithmetic": arithmetic,
@@ -3107,60 +3069,18 @@ def _write_script_text(script_path: str, text: str) -> None:
         ) from exc
 
 
-#: Default per-invocation wall-clock timeout for a single ``yosys -s
-#: <script>`` run (:func:`_run_yosys`), overridable per call via its own
-#: ``timeout_s`` keyword. Mirrors ``klayout_tools.equiv.DEFAULT_TIMEOUT_S``'s
-#: role (bound a hang, not a slow-but-legitimate run) but is deliberately
-#: more generous: a full ``synth``/``dfflibmap``/``abc`` mapping pass over a
-#: real design does substantially more work than ``equiv``'s SAT proof, and
-#: in ``"auto"`` arithmetic-architecture mode (issue #1775, following
-#: #1772) this same budget is paid up to ~10+ times per ``klt synthesize``
-#: request, so it must not be so tight that a legitimately-slow-but-healthy
-#: trial synthesis is mistaken for a hang. A fixed module constant (no
-#: request-level override/CLI flag) was chosen over threading a new
-#: ``yosys_timeout_s`` end-to-end alongside the existing ``equiv_timeout_s``
-#: precedent -- lower churn, and every call site already goes through this
-#: one function.
+#: Default per-invocation wall-clock timeout for one ``yosys -s <script>`` run
+#: (:func:`_run_yosys`); a request overrides it with ``yosys_timeout_s``
+#: (:mod:`klayout_tools.synthesize_timeout`). Generous on purpose: a full
+#: ``synth``/``abc`` pass does more work than ``equiv``'s SAT proof, and
+#: ``arithmetic: auto`` pays this budget ~10+ times per request.
 DEFAULT_YOSYS_TIMEOUT_S = 300.0
-
-#: Upper bound for the request's ``yosys_timeout_s`` (30 min needed by a
-#: large generic-``abc`` run, with 2x headroom). The budget is paid per Yosys
-#: invocation, so under ``arithmetic: auto`` it multiplies across trials.
-YOSYS_TIMEOUT_MAX_S = 3600.0
-
-#: The request's validated ``yosys_timeout_s`` for the run in progress, bound
-#: by :func:`run_synthesize` so every :func:`_run_yosys` call (including those
-#: in ``synthesize_arithmetic``/``synthesize_memory``) honours it without a
-#: new parameter on each helper.
-_YOSYS_TIMEOUT_VAR: contextvars.ContextVar[float | None] = contextvars.ContextVar(
-    "klt_synthesize_yosys_timeout_s", default=None
-)
-
-_UNSET: Any = object()
-
-
-def _validate_yosys_timeout_s(value: Any) -> float | None:
-    """Validate request ``yosys_timeout_s``; ``None`` (absent) -> ``None``."""
-    if value is None:
-        return None
-    if (
-        isinstance(value, bool)
-        or not is_number(value)
-        or not math.isfinite(value)
-        or value <= 0
-        or value > YOSYS_TIMEOUT_MAX_S
-    ):
-        raise SynthesizeError(
-            "request.yosys_timeout_s must be a finite number > 0 and <= "
-            f"{YOSYS_TIMEOUT_MAX_S:g} (seconds); got {value!r}"
-        )
-    return float(value)
 
 
 def _run_yosys(
     script_path: str,
     *,
-    timeout_s: float | None = _UNSET,
+    timeout_s: float | None = ytimeout.UNSET,
     cwd: str | None = None,
 ) -> str:
     """Invoke ``yosys -s <script_path>`` and raise :class:`SynthesizeError`
@@ -3194,9 +3114,7 @@ def _run_yosys(
     default: the invoking process's cwd), correct for every script that
     embeds only absolute paths.
     """
-    if timeout_s is _UNSET:
-        bound = _YOSYS_TIMEOUT_VAR.get()
-        timeout_s = DEFAULT_YOSYS_TIMEOUT_S if bound is None else bound
+    timeout_s = ytimeout.resolve_timeout(timeout_s, DEFAULT_YOSYS_TIMEOUT_S)
     try:
         completed = subprocess.run(
             ["yosys", "-s", script_path],

@@ -685,7 +685,7 @@
     },
     {
       "path": "src/klayout_tools/synthesize.py",
-      "lines": 4678
+      "lines": 4676
     },
     {
       "path": "src/klayout_tools/synthesize_arithmetic.py",
