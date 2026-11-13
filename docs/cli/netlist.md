@@ -489,7 +489,8 @@ restored** onto that header (see below). The result carries a
 | `subckt_uncommented` | boolean | Whether a commented `**.subckt` header was found and uncommented. |
 | `ends_uncommented` | boolean | Whether a commented `**.ends` was found and uncommented. |
 | `trailing_end_removed` | boolean | Whether a trailing `.end` line was found and dropped. |
-| `warning` | string \| null | Set when any of the above was *not* found — the export may not have been shaped like a testbench netlist — or when the cell's symbol attributes could not be read for its subcircuit parameters. The netlist is still written as xschem produced it; this is a warning, not an error. |
+| `warning` | string \| null | Set when any of the above was *not* found — the export may not have been shaped like a testbench netlist — when the cell's symbol attributes could not be read for its subcircuit parameters, or when the emitted port order is not the schematic's (see [Where the port order comes from](#where-the-port-order-comes-from)). The netlist is still written as xschem produced it; this is a warning, not an error. |
+| `port_order` | object \| null | `null` when the emitted ports are the ones the schematic declares, in that order, and when the two cannot be compared (see below). Otherwise `{"schematic": [...], "emitted": [...], "symbol": "<path>" \| null}` — the pin names in schematic file order, the ports on the emitted card, and the sibling `.sym` the order came from. Additive (issue #5473); `schema_version` stays `1`. |
 
 `--block` adds no xschem flags: it does not change the xschem invocation.
 Under `--check`, the whole transform runs before the comparison, so a
@@ -498,13 +499,66 @@ testbench-shaped) regeneration. A committed block netlist whose header lacks
 the subcircuit parameters therefore reports `"drifted"` — regenerate it. That
 is the same rule as the [port-list rewrite](#port-list-form-and-symbol-references).
 
+### Where the port order comes from
+
+A `.subckt` card's port order is the positional contract of every
+`subckt-call` instantiation and every LVS reference of the block: permute it
+and each positional caller is mis-wired until something electrical catches
+it, several steps downstream. It is worth knowing exactly what sets it.
+Measured against xschem 3.4.7:
+
+- **A sibling `<stem>.sym` decides it.** When the schematic has one, the top
+  sheet's ports are *that symbol's* pins, in the symbol's pin order — not the
+  schematic's. To change the order, reorder the symbol's pins.
+- **Without a sibling symbol, the pin instances decide it**, in the order
+  they are stored in the `.sch` *file* — not canvas position, not `name=pN`
+  numbering. Reordering them in the file reorders the card.
+- **`sim_pinnumber` overrides the file order** when every pin carries it —
+  but only in the no-symbol case: with a sibling symbol the symbol's order
+  wins and `sim_pinnumber` on the schematic pins is ignored.
+- **A schematic pin the sibling symbol does not declare is dropped** from the
+  `.subckt` card entirely, and the run still succeeds.
+
+A comment next to the pin declarations asserting that *their* order sets the
+terminal order is therefore false for any block that has a symbol — which is
+every block a parent sheet instantiates.
+
+`klt netlist --block` does not rewrite the header to the schematic's order:
+the emitted card has to stay the card xschem writes for the same cell when a
+parent instantiates it, or the block would disagree with its own callers. It
+**reports** the difference instead, in `block.port_order` and
+`block.warning`:
+
+```
+block: WARNING: --block emitted a '.subckt' port order that is not the pin
+order declared by cell.sch: the schematic declares 'vdda vssa inp outp bias'
+and the header carries 'vdda vssa inp bias outp'. The top sheet's ports come
+from the pin order of the sibling symbol cell.sym, ...
+```
+
+Generation still exits `0` in every case above — this is a warning, not a
+failure. When the ports *are* the schematic's, in that order, nothing is
+printed and `port_order` is `null`.
+
+Four cases are reported as **not comparable** (`port_order: null`, no
+warning) rather than risking a false alarm on a contract this important: a
+pin label that is not a plain scalar name (a bus `a[3:0]` or a comma list,
+which xschem expands onto the header in a form this comparison does not
+model); a sheet whose ports come from custom pin symbols rather than
+xschem's `ipin`/`opin`/`iopin` devices, which reads as having no pins at
+all; an emitted port the schematic never declared, which means a pin was not
+read far more often than it means the symbol grew one; and an export that
+was not shaped like a testbench netlist, where the file's first `.subckt` is
+some nested cell's rather than the top sheet's.
+
 ### Subcircuit parameters on the restored header
 
 A cell declares its subcircuit parameters in the `template` attribute of its
 *symbol* attributes — the top-level `K {...}` element of its `.sym`, or of the
-`.sch` itself. When a parent sheet instantiates the cell, xschem writes those
-parameters onto the child's `.subckt` card. The top sheet gets none: xschem
-comments its wrapper out (a top sheet is a deck, and a deck declares no
+`.sch` itself (or, for a `.sym` written without a `K` element at all, its
+`G {...}` element). When a parent sheet instantiates the cell, xschem writes
+those parameters onto the child's `.subckt` card. The top sheet gets none:
+xschem comments its wrapper out (a top sheet is a deck, and a deck declares no
 parameters), and xschem's own netlist post-processing skips every commented
 line, so the `**.subckt` header never reaches the step that would add them.
 
@@ -530,6 +584,14 @@ follow xschem's, so:
   next to the schematic when it exists, otherwise the schematic's own `K {}`
   block. A sibling symbol whose `template` holds no parameters means *no*
   parameters, even when the `.sch` has some: the symbol is what a parent reads.
+- **A sibling `.sym` with no `K` element is read from its `G {...}` element**,
+  which is where a symbol written before xschem split the two apart keeps its
+  attributes. A `.sym` that *has* a `K` element is read from it whatever is in
+  `G {}` — including an empty `K {}`, which means no parameters, and in either
+  order — and `file_version` does not enter into it: a `file_version=1.2`
+  `.sym` carrying its attributes in `G {}` has its `template` read exactly
+  like a 1.1 one. The schematic itself is never read from `G {}`. All of this
+  is xschem 3.4.7's own behavior, measured rather than inferred.
 - **Parameters land after the pin list**, in `template` order, and after the
   *last* `+` continuation line's ports when the header was wrapped — never in
   the middle of the port list.
@@ -546,8 +608,10 @@ follow xschem's, so:
 
 Four limits are worth stating.
 
-- Bare `key=value` text in a `file_version=1.2` `G {...}` element is **not** a
-  parameter source: xschem ignores it for every cell, so a block built from it
+- Bare `key=value` text in a `G {...}` element is **not** a parameter source,
+  in a `.sch` or a `.sym`: only a `template` attribute is, so reading a
+  `K`-less `.sym` from `G {}` picks up its `template` and nothing else.
+  xschem ignores bare assignments for every cell, so a block built from them
   would disagree with the same cell netlisted as a child — move such
   parameters into the symbol `template`, which is also what makes them work
   from a parent sheet.
@@ -590,6 +654,7 @@ any `--batch-include` globs you narrow with).
 | The cell's `template` subcircuit parameters, each value a single token | `*.ipin` / `*.opin` comment lines |
 | Removal of the trailing `.end` | Nested sub-block `.subckt` cards (xschem already writes their parameters) |
 | — | A `template` parameter whose value contains whitespace: omitted from the card and named in `block.warning` |
+| — | The **port order**, which stays xschem's: reported in `block.port_order` and `block.warning`, never rewritten ([above](#where-the-port-order-comes-from)) |
 
 ## Port-list form and symbol references
 
@@ -723,7 +788,7 @@ resolves its own `$PDK_ROOT`.
 | `committed_content_hash` | string \| null | `sha256:<hex>` of the committed netlist, or `null` when absent. |
 | `path_comments_differ` | boolean | `true` when the files differ only in the directories of xschem's `** sch_path:` / `** sym_path:` comments, which `--check` ignores (status is then `"match"`). Additive (issue #3010). |
 | `layout_differs` | boolean | `true` when the files match only after `--check` ignored `+` continuation layout, whitespace runs, or the port order of the `**.subckt` comment line (issue #3743). Additive (issue #3324). |
-| `subckt_port_order` | array\<object\> | One `{subckt, committed, regenerated}` entry per `.subckt` card whose port set is unchanged but whose port order differs, when that is the *only* drift (typically a different xschem build). Status stays `"drifted"` (port order is the positional contract of `subckt-call` and LVS), and `reason` names the local xschem version and warns to recheck positional callers. `[]` otherwise, including a missing file or any other drift. Additive (issue #4524). |
+| `subckt_port_order` | array\<object\> | One `{subckt, committed, regenerated}` entry per `.subckt` card whose port set is unchanged but whose port order differs, when that is the *only* drift. Status stays `"drifted"` (port order is the positional contract of `subckt-call` and LVS), and `reason` names the local xschem version, says where the order comes from — the sibling `.sym`'s pin order for a `--block` top sheet that has one, otherwise the cell's symbol or its schematic's pins, with a different xschem build as a further possible cause (issue #5473) — and warns to recheck positional callers. `[]` otherwise, including a missing file or any other drift. Additive (issue #4524). |
 | `inputs` | object | `{committed, fresh, changed}` (issue #4945). `fresh` is the current `{xschem_version, rcfile, pdk_variant}`; `committed` is the record parsed from the committed netlist's `** klt-netlist-inputs:` line, or `null` for a legacy netlist or a missing file; `changed` lists the keys whose values differ (`[]` = none, `null` = no committed record to compare). `reason` quotes the changes. Additive; no `schema_version` bump. |
 | `diff` | array\<string\> | Unified diff lines, committed → regenerated. `[]` on `"match"`. Capped at 200 lines. |
 | `diff_truncated` | boolean | Whether `diff` was cut off at the cap. |

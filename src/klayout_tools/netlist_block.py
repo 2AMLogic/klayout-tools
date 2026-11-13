@@ -74,11 +74,13 @@ _PARAM_ASSIGN_RE = re.compile(r"[ \t](\S*=)")
 #
 # xschem declares a cell's subcircuit parameters in the ``template``
 # attribute of its *symbol* attributes, which live in the top-level
-# ``K {...}`` element of a ``.sym`` (or of the ``.sch`` itself). When a parent
-# sheet instantiates the cell, xschem writes those parameters onto the child's
-# ``.subckt`` card. The top sheet gets none: xschem comments its wrapper out
-# (a deck has no parameters to declare), and its ``spice.awk`` post-processing
-# skips every line whose first field starts with ``*`` -- so the commented
+# ``K {...}`` element of a ``.sym`` (or of the ``.sch`` itself), or -- for a
+# ``.sym`` that has no ``K`` element at all -- in its ``G {...}`` element
+# (issue #5468). When a parent sheet instantiates the cell, xschem writes
+# those parameters onto the child's ``.subckt`` card. The top sheet gets
+# none: xschem comments its wrapper out (a deck has no parameters to
+# declare), and its ``spice.awk`` post-processing skips every line whose
+# first field starts with ``*`` -- so the commented
 # ``**.subckt`` header never reaches the ``.subckt`` branch that would have
 # added them. Under ``--block`` the premise is inverted (the sheet *is* a
 # cell), so the parameters have to be restored here, or the emitted block
@@ -88,6 +90,18 @@ _PARAM_ASSIGN_RE = re.compile(r"[ \t](\S*=)")
 #: Tag of the element holding a cell's symbol attributes in an xschem
 #: ``.sym``/``.sch``.
 _SYMBOL_ATTR_TAG = "K"
+
+#: Tag of the element holding the symbol attributes of a ``.sym`` written
+#: before xschem split them out into ``K {...}``. Measured against xschem
+#: 3.4.7 (issue #5468): a ``K`` element is the symbol-attribute element of a
+#: ``.sym`` whenever the file has one -- even an empty ``K {}``, in either
+#: order relative to ``G`` -- and ``G {...}`` is it only for a ``.sym`` with
+#: no ``K`` element at all. ``file_version`` does not enter into it: a
+#: ``file_version=1.2`` ``.sym`` carrying its attributes in ``G {}`` has its
+#: ``template`` read exactly like a 1.1 one. The fallback is for a ``.sym``
+#: only -- xschem reads no ``template`` from a ``.sch``'s ``G {}`` (also
+#: measured), so klt does not either.
+_LEGACY_SYMBOL_ATTR_TAG = "G"
 
 #: xschem's ``spice.awk`` strips the first `` m=<digits>`` from a ``.subckt``
 #: card ("m= is a multiplier not a param"). Replicated verbatim -- including
@@ -161,27 +175,43 @@ def _braced_body(text: str, open_brace: int) -> str | None:
     return None
 
 
-def _symbol_attr_element(text: str) -> tuple[str | None, bool]:
-    """``(body, unterminated)`` for the ``K {...}`` element of an xschem file.
+def _symbol_attr_element(
+    text: str, *, legacy_fallback: bool = False
+) -> tuple[str | None, str | None]:
+    """``(body, unterminated_tag)`` for the symbol-attribute element of an
+    xschem file.
 
     An xschem file is a sequence of ``<tag> [args] {body}`` elements, so the
     elements are walked in order rather than pattern-matched: that way a
     ``{`` inside some *other* element's body -- a ``T {...}`` text label, say
     -- can never be mistaken for the start of the symbol attributes.
-    ``body`` is ``None`` when the file has no ``K`` element; ``unterminated``
-    is ``True`` when an element's braces never close.
+
+    The element is the first ``K {...}``. With ``legacy_fallback`` the first
+    ``G {...}`` is remembered as the walk passes it and returned when the walk
+    ends without having met a ``K`` -- the rule xschem 3.4.7 applies to a
+    ``.sym`` (see ``_LEGACY_SYMBOL_ATTR_TAG``). A ``K`` short-circuits the
+    walk, so a file that has one keeps today's behavior whatever is in its
+    ``G {}``, in either order.
+
+    ``body`` is ``None`` when no symbol-attribute element was found;
+    ``unterminated_tag`` names the element whose braces never close (``None``
+    when every element is terminated), so the warning points at the right one.
     """
+    fallback: str | None = None
     pos = 0
     while True:
         brace = text.find("{", pos)
         if brace < 0:
-            return None, False
+            return fallback, None
         head = text[pos:brace].split()
         body = _braced_body(text, brace)
         if body is None:
-            return None, True
-        if head and head[0] == _SYMBOL_ATTR_TAG:
-            return body, False
+            return None, head[0] if head else _SYMBOL_ATTR_TAG
+        tag = head[0] if head else ""
+        if tag == _SYMBOL_ATTR_TAG:
+            return body, None
+        if legacy_fallback and tag == _LEGACY_SYMBOL_ATTR_TAG and fallback is None:
+            fallback = body
         pos = brace + len(body) + 2
 
 
@@ -227,17 +257,29 @@ def _attr_tokens(text: str) -> list[tuple[str, str]]:
     return pairs
 
 
+def sibling_symbol(schematic: str) -> str | None:
+    """The sibling ``<stem>.sym`` next to ``schematic``, or ``None``.
+
+    This file is what a parent sheet instantiating the cell reads, so it
+    governs both the cell's subcircuit parameters (issue #5439) and the port
+    order of its ``.subckt`` card (issue #5473).
+    """
+    candidate = f"{os.path.splitext(schematic)[0]}.sym"
+    return candidate if os.path.isfile(candidate) else None
+
+
 def _symbol_attributes(schematic: str) -> tuple[dict[str, str], str | None]:
     """``(attributes, warning)`` for the cell ``schematic`` defines.
 
     The source is the one a parent instantiating the cell would use: the
     sibling ``<stem>.sym`` when it exists, else the schematic's own ``K {}``
-    block. An unreadable source is reported as a warning rather than raised
-    -- the netlist itself is still valid output.
+    block. A sibling ``.sym`` with no ``K`` element is read from its
+    ``G {...}`` instead, as xschem reads it (issue #5468); the schematic
+    itself never is. An unreadable source is reported as a warning rather
+    than raised -- the netlist itself is still valid output.
     """
-    source = f"{os.path.splitext(schematic)[0]}.sym"
-    if not os.path.isfile(source):
-        source = schematic
+    symbol = sibling_symbol(schematic)
+    source = symbol or schematic
     try:
         with open(source, encoding="utf-8", errors="replace") as handle:
             text = handle.read()
@@ -248,11 +290,11 @@ def _symbol_attributes(schematic: str) -> tuple[dict[str, str], str | None]:
             "restored '.subckt' header carries no subcircuit parameters; it "
             "was written as xschem produced it"
         )
-    body, unterminated = _symbol_attr_element(text)
-    if unterminated:
+    body, unterminated = _symbol_attr_element(text, legacy_fallback=symbol is not None)
+    if unterminated is not None:
         return {}, (
-            f"--block found an unterminated 'K {{...}}' element in "
-            f"{os.path.basename(source)}, so the restored '.subckt' header "
+            f"--block found an unterminated '{unterminated} {{...}}' element "
+            f"in {os.path.basename(source)}, so the restored '.subckt' header "
             "carries no subcircuit parameters; it was written as xschem "
             "produced it"
         )
