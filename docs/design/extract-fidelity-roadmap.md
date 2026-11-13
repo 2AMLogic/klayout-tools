@@ -29,8 +29,10 @@ naming the issue that landed each increment and the flag that enables it:
   quasi-static capacitance solve (#718) with closed-form and
   convergence-under-refinement validation (#719) plus PEEC partial
   inductance/resistance (#797), and `klt pex --mom-rlc-net` splices a chosen
-  net's externally-solved R/L/C into the extracted netlist (#988). It is not an
-  automatic oracle for Stages 2–3, and `klt extract` never invokes it.
+  net's externally-solved R/L/C into the extracted netlist (#988), while `klt
+  extract --mom-net` runs the solve in-process to cross-check and replace one
+  net's ground capacitance (#798, Epic #701 Phase 1b). It is not an automatic
+  or whole-layout oracle for Stages 2–3.
 
 §3's per-stage sections and §3's Summary table carry the same states.
 
@@ -177,7 +179,7 @@ of this table; `docs/cli/extract.md` → "Parasitic model scope"):
 | **Fringe shielding** (an edge facing a neighbour does not also see full substrate fringe) | ❌ not modelled — full substrate fringe charged regardless of neighbours | implied by `model.capacitance` |
 | Distributed RC (per-segment ladder) | ⚠️ **partial** (#977) — `--distributed-rc` (requires `--critical-net`) emits a multi-segment ladder for a declared critical net, ordered by terminal position rather than by decomposed routed geometry; every other net keeps one lumped R, star-apportioned | `model.resistance` |
 | True per-terminal routed-path resistance | ⚠️ **partial** (#2982, #2983) — `--resistance-graph` additionally reports the net's geometry-derived terminal-pair effective-resistance matrix and can substitute its cross-level scalar; the default lumped path still uses coarse `Device.trans` centroid weighting | `docs/cli/extract.md` → "Per-terminal resistance is coarse" |
-| Via / contact resistance | ⚠️ **partial** (#2983) — modelled inside `--resistance-graph` as one `r_cut / n_cut` edge per landing, from the `--resistance-graph-r-cut` value the shipped decks do not curate; in the default lumped path vias still carry connectivity only, with no `sheet_res` term (`vias` is not a `PARASITICS` role) | `_compute_parasitics` roles list, `extract.py:4124-4149` |
+| Via / contact resistance | ⚠️ **partial** (#2983) — modelled inside `--resistance-graph` as one `r_cut / n_cut` edge per landing, from the caller-supplied `--resistance-graph-r-cut` value, because `klt extract` does not yet consume the decks' curated per-cut `cuts` table (#3053); in the default lumped path vias still carry connectivity only, with no `sheet_res` term (`vias` is not a `PARASITICS` role) | `_compute_parasitics` roles list, `extract.py:4124-4149` |
 | Self / mutual **inductance** | ❌ never computed — the geometry pass has no inductance term; an externally-solved value can be spliced in as a series L via `--mom-rlc-net --mom-rlc-inductance-nh` (#988), and `klt mom` can solve one (#797), but nothing in `--parasitics` derives it | `model.frequency` |
 | Frequency dependence (skin effect, distributed T-line behaviour) | ❌ quasi-static, one frequency-independent R and C | `model.frequency` |
 | Temperature / corner dependence of R and C | ❌ single nominal coefficient set per PDK; no corner axis | `decks/sky130.py:951` (one `LayerRC` per level) |
@@ -1221,7 +1223,7 @@ sections above and the status block at the top of this document.
 | **2b** lateral sidewall C + fringe shielding | **partial** (#976) — critical nets only, sky130 only, no fringe-shielding deduction | `--critical-net` (with `--parasitics`) | **largest** — touches 93.5% of reported C | medium | magic cross-check + crosstalk bench | 2a's plumbing |
 | **2c** side-overlap fringe | **not started** | — | small refinement; completes the coefficient set | low (after 2a/2b) | per-net total-C agreement with magic | 2a, 2b |
 | **3** distributed RC | **partial** (#977) — ladder from existing lumped totals, critical nets only; §3.D resistance graph shipped (#2982, #2983) | `--distributed-rc` (requires `--critical-net`); `--resistance-graph` / `--resistance-graph-r-cut` | removes ~2× single-section delay bias; fixes branch-count R bias | **high** | node-solve + `extresist` cross-check; R-bound canary row | 2 (ordering), #709 for re-sim claims |
-| **4** quasi-static field solve | **partial** — solver shipped as its own verb (#718, #719, #797); not wired in as an oracle, and `klt extract` never calls it | `klt mom`; `klt pex --mom-rlc-net` to splice a solved net's R/L/C (#988) | bounded error; the oracle for 2–3 | highest | #719's closed-form + convergence criteria | #718 |
+| **4** quasi-static field solve | **partial** — solver shipped as its own verb (#718, #719, #797), plus an opt-in single-net ground-C cross-check/replacement in `klt extract`; not an automatic or whole-layout oracle for Stages 2–3 | `klt mom`; `klt extract --mom-net` for one net's ground C (#798); `klt pex --mom-rlc-net` to splice a solved net's R/L/C (#988) | bounded error; the oracle for 2–3 | highest | #719's closed-form + convergence criteria | #718 |
 
 ## 4. Measurement harness — what already exists here
 
