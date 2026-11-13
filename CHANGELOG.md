@@ -22,9 +22,11 @@ not `klt --version`, if you need to detect this kind of drift. See
   its `*_mismatch.lib` device subcircuits default `mm_ok=1` *inside* each
   subcircuit, which shadows any enclosing scope. An unselected sg13g2 instance
   is now gated by rewriting its own instance line to carry `mm_ok=0` (an
-  existing `mm_ok=` is replaced, not duplicated; `+` continuations fold in). No
-  wrapper is generated, so **hierarchical probe names are unchanged** for
-  sg13g2. klt writes `mm_ok=0` only onto an instance whose subcircuit
+  existing `mm_ok=` is replaced, not duplicated; `+` continuations fold in; an
+  end-of-line `$`/`;` comment is separated from the element first and
+  re-attached after, so the parameter never lands inside a comment, where
+  ngspice would discard it). No wrapper is generated, so **hierarchical probe
+  names are unchanged** for sg13g2. klt writes `mm_ok=0` only onto an instance whose subcircuit
   definition it has read and found to declare the parameter — read from the
   netlist's `.include` closure and the selected model-library sections, never
   from a device-name list — and refuses an unselected instance whose

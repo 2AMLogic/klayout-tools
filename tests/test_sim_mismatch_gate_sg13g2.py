@@ -98,6 +98,103 @@ def test_sg13g2_handles_a_spaced_equals_spelling():
     assert "XM1 d g s b sg13_lv_nmos w=1u mm_ok=0" in text
 
 
+def test_sg13g2_writes_mm_ok_ahead_of_a_dollar_comment():
+    # ngspice discards anything after an end-of-line `$`, so appending
+    # `mm_ok=0` past the comment would leave the instance randomised while
+    # the report said otherwise -- silently (measured, ngspice-47: an
+    # `X1 n 0 rr $ note mm_ok=0` keeps mm_ok at its default).
+    text, rows = gate.gate_netlist(
+        "XM1 d g s b sg13_lv_nmos w=1u l=0.13u $ mirror ref\n.end\n",
+        [],
+        ["xm1"],
+        instance_param="mm_ok",
+        declared_params=SG13_DECLARED,
+    )
+
+    line = next(ln for ln in text.split("\n") if ln.startswith("XM1"))
+    assert line == "XM1 d g s b sg13_lv_nmos w=1u l=0.13u mm_ok=0 $ mirror ref"
+    assert line.index("mm_ok=0") < line.index("$")
+    assert rows == [{"instance": "XM1", "model": "sg13_lv_nmos", "randomised": False}]
+
+
+def test_sg13g2_writes_mm_ok_ahead_of_a_semicolon_comment():
+    text, _rows = gate.gate_netlist(
+        "XM1 d g s b sg13_lv_nmos w=1u ; mirror ref\n.end\n",
+        [],
+        ["xm1"],
+        instance_param="mm_ok",
+        declared_params=SG13_DECLARED,
+    )
+
+    line = next(ln for ln in text.split("\n") if ln.startswith("XM1"))
+    assert line == "XM1 d g s b sg13_lv_nmos w=1u mm_ok=0 ; mirror ref"
+    assert line.index("mm_ok=0") < line.index(";")
+
+
+def test_sg13g2_handles_a_comment_on_a_continued_line():
+    # The comment ends its own *physical* line; the `+` line continues the
+    # element. Folding before separating the comment would splice it into the
+    # middle of the logical line and swallow the continuation's tokens.
+    text, rows = gate.gate_netlist(
+        "XM1 d g s b $ nodes\n+ sg13_lv_nmos w=1u ; dims\n.end\n",
+        [],
+        ["xm1"],
+        instance_param="mm_ok",
+        declared_params=SG13_DECLARED,
+    )
+
+    assert rows == [{"instance": "XM1", "model": "sg13_lv_nmos", "randomised": False}]
+    line = next(ln for ln in text.split("\n") if ln.startswith("XM1"))
+    code, _, comment = line.partition("$")
+    assert code.split() == [
+        "XM1",
+        "d",
+        "g",
+        "s",
+        "b",
+        "sg13_lv_nmos",
+        "w=1u",
+        "mm_ok=0",
+    ]
+    assert comment.strip() == "nodes ; dims"
+
+
+def test_sg13g2_ignores_an_mm_ok_that_only_appears_inside_a_comment():
+    # A commented-out assignment is not an assignment: it must not be
+    # "replaced" in place, leaving the element itself ungated.
+    text, _rows = gate.gate_netlist(
+        "XM1 d g s b sg13_lv_nmos w=1u $ was mm_ok=1\n.end\n",
+        [],
+        ["xm1"],
+        instance_param="mm_ok",
+        declared_params=SG13_DECLARED,
+    )
+
+    line = next(ln for ln in text.split("\n") if ln.startswith("XM1"))
+    assert line == "XM1 d g s b sg13_lv_nmos w=1u mm_ok=0 $ was mm_ok=1"
+
+
+def test_split_eol_comment_respects_quotes_and_braces():
+    assert decl.split_eol_comment("X1 a b m={1;2} $ c") == ("X1 a b m={1;2} ", "$ c")
+    assert decl.split_eol_comment("X1 a b v='a$b' $ c") == ("X1 a b v='a$b' ", "$ c")
+    # `$` only opens a comment at the start of a line or after whitespace.
+    assert decl.split_eol_comment("X1 a b w=1u$2") == ("X1 a b w=1u$2", "")
+
+
+def test_declaration_scan_ignores_parameters_named_only_in_a_comment():
+    # Reading comment prose as a declaration would re-open the hazard from the
+    # other end: klt would write mm_ok=0 onto a subcircuit that never declared
+    # it and report `randomised: false` for a still-randomised instance.
+    header = decl.scan_declared_params(
+        ".subckt userblk a b foo=1 $ mm_ok=1 is the default\n.ends\n", {}
+    )
+    assert header == {"userblk": {"foo"}}
+    body = decl.scan_declared_params(
+        ".subckt userblk a b\n.param foo=1 ; mm_ok=1 here\n.ends\n", {}
+    )
+    assert body == {"userblk": {"foo"}}
+
+
 def test_sg13g2_gates_a_subcircuit_declaring_mm_ok_in_a_body_param():
     text, _rows = gate.gate_netlist(
         SG13_NETLIST,

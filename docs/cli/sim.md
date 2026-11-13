@@ -7430,6 +7430,14 @@ because the PDKs differ structurally:
   it, and folding any `+` continuation into the rewritten line). **No wrapper
   subcircuit is generated, so hierarchical probe names are unchanged.**
 
+  An end-of-line comment (`$ ...` or `; ...`, on the instance line or on any
+  of its `+` continuations) is separated from the element before the rewrite
+  and re-attached after it, so `mm_ok=0` is always written into the element
+  and never inside the comment — ngspice discards everything after the comment
+  marker, so a parameter written there would leave the instance randomised
+  while the report said `randomised: false`. For the same reason an `mm_ok=`
+  that appears only inside a comment is not treated as an existing assignment.
+
   Because `mm_ok` is only honoured by a subcircuit that declares it, klt
   writes it **only** onto an instance whose subcircuit definition it has read
   and found to declare it — on the `.subckt` line (`sg13_lv_nmos`) or in a body

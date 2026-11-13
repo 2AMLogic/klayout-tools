@@ -65,6 +65,67 @@ def split_tokens(line: str) -> list[str]:
     return tokens
 
 
+def split_eol_comment(line: str) -> tuple[str, str]:
+    """Split one *physical* line into ``(code, comment)``.
+
+    ngspice ends an element at an unquoted ``;``, or at a ``$`` that opens the
+    line or follows whitespace, and treats the rest as a comment -- so nothing
+    written after one is part of the element. Separating the two *before*
+    parsing is what stops the gate appending ``<param>=0`` inside a comment
+    (ngspice would silently drop it, leaving the instance randomised while klt
+    reported ``randomised: false``) and stops comment prose being read as a
+    parameter assignment or a ``.lib`` argument.
+
+    Quoted text and ``{...}`` expressions are respected, as in
+    :func:`split_tokens`.
+    """
+    depth = 0
+    quote = ""
+    for index, ch in enumerate(line):
+        if quote:
+            if ch == quote:
+                quote = ""
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth = max(0, depth - 1)
+        elif depth == 0 and (
+            ch == ";" or (ch == "$" and (index == 0 or line[index - 1].isspace()))
+        ):
+            return line[:index], line[index:]
+    return line, ""
+
+
+def logical_lines_with_comments(text: str) -> list[tuple[int, int, str, str]]:
+    """``(first, last, code, comment)`` -- :func:`logical_lines` with every
+    *physical* line's end-of-line comment separated out **before** the ``+``
+    continuations are folded.
+
+    Folding first would splice a comment into the middle of the logical line,
+    where it swallows the continuation's own tokens; separating first keeps
+    the code contiguous and hands the caller the comment text, so a rewritten
+    line can carry it along instead of dropping it.
+    """
+    raw = text.split("\n")
+    parts = [split_eol_comment(line) for line in raw]
+    out: list[tuple[int, int, str, str]] = []
+    i = 0
+    while i < len(raw):
+        j = i
+        code = parts[i][0]
+        comments = [parts[i][1].strip()] if parts[i][1].strip() else []
+        while j + 1 < len(raw) and raw[j + 1].lstrip().startswith("+"):
+            j += 1
+            code += " " + parts[j][0].lstrip()[1:]
+            if parts[j][1].strip():
+                comments.append(parts[j][1].strip())
+        out.append((i, j, code, " ".join(comments)))
+        i = j + 1
+    return out
+
+
 def logical_lines(text: str) -> list[tuple[int, int, str]]:
     """``(first, last, joined)`` line index ranges, folding ``+`` continuations."""
     raw = text.split("\n")
@@ -216,7 +277,7 @@ def _scan(
     lib_stack: list[bool] = []
     subckt_stack: list[str] = []
     refs = _Refs(acc, base_dir, seen, budget, depth)
-    for _first, _last, joined in logical_lines(text):
+    for _first, _last, joined, _comment in logical_lines_with_comments(text):
         stripped = joined.strip()
         low = stripped.lower()
         if low.startswith((".lib", ".endl")):

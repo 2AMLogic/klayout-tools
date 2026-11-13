@@ -25,9 +25,9 @@ modes (issue #5487):
 
   Because that parameter is only honoured by a subcircuit that declares it,
   the rewrite is applied **only** to an instance whose subcircuit definition
-  is known to declare it (:func:`scan_declared_params` /
-  :func:`scan_library_declared_params` read the definitions; klt keeps no
-  device-name list). ngspice accepts ``mm_ok=0`` silently on a user
+  is known to declare it (:mod:`klayout_tools.sim_mismatch_declarations`
+  reads the definitions; klt keeps no device-name list). ngspice accepts
+  ``mm_ok=0`` silently on a user
   subcircuit that declares some *other* parameter and leaves the devices
   inside it randomised, so guessing here would report ``randomised: false``
   for an instance that is still randomised; an instance whose subcircuit does
@@ -45,7 +45,12 @@ import fnmatch
 import re
 from typing import Any
 
-from .sim_mismatch_declarations import logical_lines, merge_equals, split_tokens
+from .sim_mismatch_declarations import (
+    logical_lines,
+    logical_lines_with_comments,
+    merge_equals,
+    split_tokens,
+)
 
 #: ``pdk_variant_family`` -> the model-level ``.param`` that turns per-instance
 #: mismatch on (docs/cli/sim.md, "Known-good mismatch mechanisms"). sky130
@@ -65,10 +70,6 @@ MISMATCH_INSTANCE_PARAM = {"sg13g2": "mm_ok"}
 #: Every family ``monte_carlo.instances`` can gate, either way -- what the
 #: "no known mismatch switch" refusal names.
 MISMATCH_GATED_FAMILIES = sorted({*MISMATCH_SWITCH, *MISMATCH_INSTANCE_PARAM})
-
-#: Caps on the model-library walk :func:`scan_library_declared_params` does,
-#: so a pathological ``.include`` tree cannot turn a refusal check into an
-#: unbounded read. Mirrors the posture of the netlist closure's own limits.
 
 _END_RE = re.compile(r"^\s*\.end\s*$", re.IGNORECASE)
 _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9_]")
@@ -116,16 +117,29 @@ def validate_instances_spec(spec: Any) -> tuple[list[str], list[str]]:
 
 
 def _scan_top_level(
-    text: str,
-) -> tuple[list[tuple[int, int, str, list[str]]], list[str]]:
+    text: str, *, strip_comments: bool = False
+) -> tuple[list[tuple[int, int, str, list[str], str]], list[str]]:
     """Top-level elements of ``text`` outside ``.subckt``/``.control`` blocks:
     ``(x_instances, other_element_names)``, where each X instance is
-    ``(first_line, last_line, name, tokens)``."""
+    ``(first_line, last_line, name, tokens, comment)``.
+
+    With ``strip_comments`` the end-of-line comments (``$ ...`` / ``; ...``)
+    are separated from each physical line before the ``+`` continuations are
+    folded, so ``tokens`` holds code only and ``comment`` holds the text a
+    rewritten line must carry along. Left off for the wrapper path, whose
+    output is byte-for-byte unchanged: there the comment simply travels with
+    the instance line that is moved inside the wrapper.
+    """
     in_subckt = 0
     in_control = False
-    x_instances: list[tuple[int, int, str, list[str]]] = []
+    x_instances: list[tuple[int, int, str, list[str], str]] = []
     other_names: list[str] = []
-    for first, last, joined in logical_lines(text):
+    entries = (
+        logical_lines_with_comments(text)
+        if strip_comments
+        else [(f, lst, j, "") for f, lst, j in logical_lines(text)]
+    )
+    for first, last, joined, comment in entries:
         stripped = joined.strip()
         low = stripped.lower()
         if low.startswith(".control"):
@@ -140,7 +154,7 @@ def _scan_top_level(
             continue
         tokens = split_tokens(stripped)
         if stripped[0] in "xX":
-            x_instances.append((first, last, tokens[0], tokens))
+            x_instances.append((first, last, tokens[0], tokens, comment))
         else:
             other_names.append(tokens[0])
     return x_instances, other_names
@@ -211,10 +225,19 @@ def _wrap_instance(
     return wrapper, lines
 
 
-def _set_instance_param(name: str, tokens: list[str], param: str) -> str:
+def _set_instance_param(
+    name: str, tokens: list[str], param: str, comment: str = ""
+) -> str:
     """The instance line with ``param=0`` on it: an existing assignment of
     ``param`` is replaced in place (never duplicated -- ngspice would take
-    one of the two), otherwise the assignment is appended."""
+    one of the two), otherwise the assignment is appended.
+
+    ``tokens`` is comment-free (:func:`_scan_top_level` with
+    ``strip_comments``), so the assignment lands in the element itself and
+    never inside a trailing ``$``/``;`` comment, where ngspice would discard
+    it silently. ``comment`` is re-attached after it, keeping the author's
+    text on the line.
+    """
     merged = merge_equals(tokens)
     out: list[str] = []
     replaced = False
@@ -226,7 +249,8 @@ def _set_instance_param(name: str, tokens: list[str], param: str) -> str:
             out.append(token)
     if not replaced:
         out.append(f"{param}=0")
-    return " ".join(out)
+    line = " ".join(out)
+    return f"{line} {comment}" if comment else line
 
 
 def _require_declared(
@@ -312,19 +336,21 @@ def gate_netlist(
       instance line is rewritten to carry ``<instance_param>=0``, and no
       wrapper is generated. ``declared_params`` maps lower-cased subcircuit
       names to their declared parameter names (see
-      :func:`scan_declared_params`); an unselected instance whose subcircuit
-      does not declare ``instance_param`` is refused.
+      :mod:`klayout_tools.sim_mismatch_declarations`); an unselected instance
+      whose subcircuit does not declare ``instance_param`` is refused.
     """
     if (switch is None) == (instance_param is None):
         raise GateError("gate_netlist needs exactly one of switch / instance_param")
     declared = declared_params or {}
-    x_instances, other_names = _scan_top_level(text)
+    x_instances, other_names = _scan_top_level(
+        text, strip_comments=instance_param is not None
+    )
     _check_globs_match(include, exclude, [x[2] for x in x_instances], other_names)
 
     report: list[dict[str, Any]] = []
     wrappers: list[str] = []
     replacements: dict[int, tuple[int, str]] = {}
-    for first, last, name, tokens in x_instances:
+    for first, last, name, tokens, comment in x_instances:
         if instance_param is not None:
             tokens = merge_equals(tokens)
         nodes, model, body = _parse_instance(name, tokens)
@@ -336,7 +362,7 @@ def gate_netlist(
             _require_declared(name, model, instance_param, declared)
             replacements[first] = (
                 last,
-                _set_instance_param(name, tokens, instance_param),
+                _set_instance_param(name, tokens, instance_param, comment),
             )
             continue
         assert switch is not None
