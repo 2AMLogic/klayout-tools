@@ -48,10 +48,10 @@ scope-narrowing comment, 2026-10-01) are both now addressed, via #2680:
    (``**.subckt ...`` / ``**.ends``) and always appends a trailing ``.end`` --
    correct when the top sheet is a testbench, wrong when it is a reusable
    block meant to be ``.include``d elsewhere. ``block=True`` post-processes
-   the export: the first commented ``.subckt``/``.ends`` pair is uncommented
-   and the trailing ``.end`` is dropped, so the result is directly
-   ``.include``able without a duplicate ``.end`` terminating the including
-   deck early (:func:`apply_block_mode`).
+   the export: the commented ``.subckt``/``.ends`` pair is uncommented, the
+   cell's subcircuit parameters restored onto it (#5439), and the trailing
+   ``.end`` dropped, so the result is ``.include``able without a duplicate
+   ``.end`` terminating the including deck early (:func:`apply_block_mode`).
 5. **PDK-root disagreement between the schematic and simulation sides is
    silent** (edge #3). Addressed as a *consistency check*, not
    auto-generation: ``--pdk``/``--pdk-root`` resolve through
@@ -934,10 +934,10 @@ def run_netlist(
     (with a capped unified diff under ``drift``). This is the staleness gate
     a repo runs in CI over a committed netlist.
 
-    ``block=True`` post-processes the export into an includable block (issue
-    #2680, edge 1): see :func:`apply_block_mode`. The transform runs before
-    ``check``'s comparison/diff and before the normal write, so both modes
-    operate on the block-shaped netlist, not xschem's raw testbench export.
+    ``block=True`` post-processes the export into an includable block (issues
+    #2680 edge 1, #5439): see :func:`apply_block_mode`. The transform runs
+    before ``check``'s comparison/diff and before the normal write, so both
+    modes operate on the block-shaped netlist, not xschem's raw export.
 
     ``allow_unevaluated_expr=True`` downgrades the unevaluated-``expr()`` gate
     (issue #4305) to a ``warnings`` entry in the payload, for callers that
