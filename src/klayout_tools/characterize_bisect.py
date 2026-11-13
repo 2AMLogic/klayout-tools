@@ -28,6 +28,26 @@ The same search measures an **asynchronous** pin's recovery/removal
   not apply. The bracket checks invert with it: the window's wide end must
   *not* capture and its narrow end must.
 
+**Latches (issue #5521)** reuse all of that with two substitutions. The
+reference edge is the enable's **closing** edge: the enable opens once, early,
+and the probe's data waveform -- unchanged -- is placed relative to the close
+at ``t_clk``. And the pass criterion has to change, because a transparent cell
+has no clock-to-output delay to degrade: the output already moved when the
+data moved, well before the closing edge. A latch probe instead **passes when
+both** hold:
+
+1. the **transparent data-to-output delay** -- the probe's capturing data edge
+   to the output edge it produces -- is within ``(1 + degradation)`` of the
+   same delay measured at the window's wide end (the reference), and
+2. the output still **holds the captured level** at the end of the run, after
+   the enable has closed and the data has moved on.
+
+(2) is what actually discriminates: a setup probe whose data arrives too late
+closes the latch before the new value propagates, and a hold probe whose data
+leaves too early is followed transparently back to the old value. (1) keeps
+the criterion from accepting a point whose capture only completed because the
+transparent path itself had degraded.
+
 Every probe of an iteration lives in one deck (one ``klt sim`` run), bisected
 in lockstep across all points, so the cost is
 ``2 + ceil(log2(window / tolerance))`` simulations. A point whose bracket does
@@ -123,15 +143,29 @@ def build_deck(
     window_ns: tuple[float, float],
     load_pf: float,
     edge: str,
+    latch: bool = False,
 ) -> tuple[str, list[dict[str, Any]], float]:
     """One deck of ``probes`` -- ``(case index, clock slew index, data slew
-    index, offset_ns)`` -- and the ``.meas`` card that reads each one's
-    clock-to-output delay. Returns ``(netlist_text, measurements, stop_ns)``.
+    index, offset_ns)`` -- and the ``.meas`` card(s) that read each one.
+    Returns ``(netlist_text, measurements, stop_ns)``.
+
+    ``edge`` is the related pin's *active* edge for a flop and its *opening*
+    edge for a latch; a latch's probes are placed relative to the closing
+    edge, which is its opposite. A flop probe gets one card (``c<k>_d``, its
+    clock-to-output delay); a latch probe gets two (``c<k>_d``, its
+    transparent data-to-output delay, and ``c<k>_h``, the output level held
+    after the enable closed).
     """
     max_ramp = max(ramps_ns)
     prime, pulse_w, t_early, t_clk, stop = _schedule(settle_ns, max_ramp, window_ns)
     idle, active = (0.0, vdd) if edge == "rising" else (vdd, 0.0)
     clk_rising = edge == "rising"
+    # The edge the data is referenced to: the active edge of a flop's clock,
+    # the *closing* edge of a latch's enable (so its ramp runs the other way).
+    ref_rising = clk_rising != latch
+    # Where the held-level card is read: after the close, after the last data
+    # edge, and inside the transient window.
+    t_final = stop - 0.5 * settle_ns
     lines = [
         "* klt characterize -- constraint probes, do not edit",
         f".include {cell['netlist_path']}",
@@ -141,27 +175,40 @@ def build_deck(
     for k, (case_index, ci, di, offset) in enumerate(probes):
         case = cases[case_index]
         rc, rd = ramps_ns[ci], ramps_ns[di]
-        clk50 = t_clk + rc * _frac(clk_rising, thresholds)
+        clk50 = t_clk + rc * _frac(ref_rising, thresholds)
         d_rising = case.edge == "rise"
         new_level = vdd if d_rising else 0.0
         old_level = vdd - new_level
         before = case.kind in _BEFORE_CLOCK
         d50 = clk50 + (-offset if before else offset)
         t_start = d50 - rd * _frac(d_rising, thresholds)
-        clk_points = [(0.0, idle)]
-        for start in (prime, t_clk):
-            clk_points += [(start, idle), (start + rc, active)]
-            if start == prime:
-                clk_points += [
-                    (start + pulse_w, active),
-                    (start + pulse_w + rc, idle),
-                ]
-            else:
-                # The measured edge is the last event: the clock stays
-                # active to the end of the run. A trailing falling edge
-                # lands on a PWL breakpoint that ngspice 42 cannot step to
-                # near a metastable bisection probe (timestep too small).
-                clk_points.append((stop, active))
+        if latch:
+            # One transparency window: the enable opens at `prime` and stays
+            # active until the measured *closing* edge at `t_clk`, after
+            # which the cell must hold whatever it captured.
+            clk_points = [
+                (0.0, idle),
+                (prime, idle),
+                (prime + rc, active),
+                (t_clk, active),
+                (t_clk + rc, idle),
+                (stop, idle),
+            ]
+        else:
+            clk_points = [(0.0, idle)]
+            for start in (prime, t_clk):
+                clk_points += [(start, idle), (start + rc, active)]
+                if start == prime:
+                    clk_points += [
+                        (start + pulse_w, active),
+                        (start + pulse_w + rc, idle),
+                    ]
+                else:
+                    # The measured edge is the last event: the clock stays
+                    # active to the end of the run. A trailing falling edge
+                    # lands on a PWL breakpoint that ngspice 42 cannot step to
+                    # near a metastable bisection probe (timestep too small).
+                    clk_points.append((stop, active))
         if case.kind != "hold":
             # setup, and both async kinds: one edge, from the level held
             # since t=0 (the captured value for setup, the asserted level
@@ -199,6 +246,44 @@ def build_deck(
             if case.out_rising
             else thresholds.output_threshold_pct_fall
         )
+        out_node = node_of[case.output_pin]
+        out_val = spice_number(vdd * out_thr / 100.0)
+        out_dir = "RISE" if case.out_rising else "FALL"
+        if latch:
+            # The capturing data edge is the one *onto* `captured_level`: the
+            # single edge of a setup probe, the early edge of a hold probe.
+            # It is the first data edge in its own direction either way, and
+            # the only output movement before the one it causes is the settle
+            # onto the pre-capture level, which runs the other way -- so
+            # neither card needs a TD.
+            d_thr = (
+                thresholds.input_threshold_pct_rise
+                if case.captured_level
+                else thresholds.input_threshold_pct_fall
+            )
+            measurements.append(
+                {
+                    "name": f"{tag}_d",
+                    "spice": (
+                        f".meas tran {tag}_d TRIG v(dd_{tag}) "
+                        f"VAL={spice_number(vdd * d_thr / 100.0)} "
+                        f"{'RISE' if case.captured_level else 'FALL'}=1 "
+                        f"TARG v({out_node}) VAL={out_val} {out_dir}=1"
+                    ),
+                    "unit": "s",
+                }
+            )
+            measurements.append(
+                {
+                    "name": f"{tag}_h",
+                    "spice": (
+                        f".meas tran {tag}_h FIND v({out_node}) "
+                        f"AT={spice_number(t_final)}n"
+                    ),
+                    "unit": "V",
+                }
+            )
+            continue
         clk_thr = (
             thresholds.input_threshold_pct_rise
             if clk_rising
@@ -212,14 +297,29 @@ def build_deck(
                     f".meas tran {tag}_d TRIG v(ck_{tag}) "
                     f"VAL={spice_number(vdd * clk_thr / 100.0)} "
                     f"{'RISE' if clk_rising else 'FALL'}=1 {td} "
-                    f"TARG v({node_of[case.output_pin]}) "
-                    f"VAL={spice_number(vdd * out_thr / 100.0)} "
-                    f"{'RISE' if case.out_rising else 'FALL'}=1 {td}"
+                    f"TARG v({out_node}) VAL={out_val} {out_dir}=1 {td}"
                 ),
                 "unit": "s",
             }
         )
     return "\n".join(lines) + "\n", measurements, stop
+
+
+def _held_captured(case: ConstraintCase, held: Any, vdd: float, latch: bool) -> bool:
+    """Did the probe's output still hold the captured value at the end of the
+    run?
+
+    Vacuously true for an edge-triggered cell: its capture is already proven
+    by the clock-to-output delay the single card measures. For a latch it is
+    the discriminating half of the criterion -- ``out_rising`` is the
+    direction of the output edge the capture produces, so the captured level
+    is high exactly when it is true.
+    """
+    if not latch:
+        return True
+    if held is None:
+        return False
+    return (held > 0.5 * vdd) == case.out_rising
 
 
 def _where(case: ConstraintCase, ci: int, di: int, grid: tuple[float, ...]) -> str:
@@ -233,34 +333,52 @@ def _where(case: ConstraintCase, ci: int, di: int, grid: tuple[float, ...]) -> s
 def _passes(
     case: ConstraintCase,
     delay: float | None,
+    held: Any,
     reference: float | None,
     degradation: float,
+    vdd: float,
+    latch: bool,
 ) -> bool:
     """Whether one probe is on the *safe* side of the boundary.
 
     Removal inverts the criterion: the clock edge must be ignored, so a pass
     is the output making no transition at all and the degraded reference
     delay has nothing to say about it.
+
+    A latch has to additionally still hold the captured level at the end of
+    the run (:func:`_held_captured`, vacuously true for a flop). The two
+    never combine: ``async_pins`` requires ``clock_pin``, which a latch may
+    not declare.
     """
     if case.kind == "removal":
         return delay is None
     assert reference is not None  # every non-removal point brackets one
-    return delay is not None and delay <= reference * (1.0 + degradation)
+    return (
+        delay is not None
+        and delay <= reference * (1.0 + degradation)
+        and _held_captured(case, held, vdd, latch)
+    )
 
 
 def _bracket(
     case: ConstraintCase,
     where: str,
     wide: float | None,
+    wide_held: Any,
     narrow: float | None,
+    narrow_held: Any,
     options: dict[str, Any],
+    vdd: float,
+    latch: bool,
+    reference_noun: str,
 ) -> float | None:
     """Check one point's bracket and return its reference delay.
 
     The wide end of the window must be on the *safe* side of the boundary
     and the narrow end on the unsafe side, or the boundary is not inside the
     search window at all. Removal inverts both (see :func:`_passes`) and has
-    no reference delay to return.
+    no reference delay to return; a latch's safe side additionally requires
+    the captured level to still be held.
     """
     wlo, whi = options["window_ns"]
     moved = "release edge" if case.kind in ASYNC_KINDS else "data edge"
@@ -279,19 +397,27 @@ def _bracket(
                 "search window (lower options.constraint_window_ns[0])"
             )
         return None
-    if wide is None:
+    if wide is None or not _held_captured(case, wide_held, vdd, latch):
+        missed = (
+            "the output did not settle to and hold the captured value"
+            if latch
+            else "the output never made the expected transition"
+        )
         raise ConstraintError(
-            f"{where}: the output never made the expected transition even "
-            f"with the {moved} {whi} ns from the clock edge -- the "
-            "constraint cannot be bracketed (widen "
+            f"{where}: {missed} even with the {moved} {whi} ns from the "
+            f"{reference_noun} -- the constraint cannot be bracketed (widen "
             "options.constraint_window_ns, or check the cell's function/"
             "static_inputs)"
         )
-    if narrow is not None and narrow <= wide * (1.0 + options["degradation"]):
+    if (
+        narrow is not None
+        and narrow <= wide * (1.0 + options["degradation"])
+        and _held_captured(case, narrow_held, vdd, latch)
+    ):
         raise ConstraintError(
             f"{where}: the cell still captures with the {moved} {wlo} ns "
-            "from the clock edge, so the boundary lies below the search "
-            "window (lower options.constraint_window_ns[0])"
+            f"from the {reference_noun}, so the boundary lies below the "
+            "search window (lower options.constraint_window_ns[0])"
         )
     return wide
 
@@ -317,9 +443,16 @@ def run_bisection(
     because its pass criterion has no reference delay. Raises
     :class:`ConstraintError` when a point's bracket does not contain a
     boundary.
+
+    A flop point passes when its clock-to-output delay is within
+    ``(1 + degradation)`` of the reference; a latch point additionally has to
+    still hold the captured level at the end of the run (see this module's
+    docstring, and :func:`_held_captured`).
     """
     wlo, whi = options["window_ns"]
     degradation = options["degradation"]
+    latch = bool(cell.get("latch"))
+    reference_noun = "enable's closing edge" if latch else "clock edge"
     points = [
         (c, ci, di)
         for c in range(len(cases))
@@ -340,9 +473,10 @@ def run_bisection(
             window_ns=options["window_ns"],
             load_pf=load_pf,
             edge=cell["clock_edge"],
+            latch=latch,
         )
         raw = run_deck(text, measurements, label, stop)
-        return [raw.get(f"c{k}_d") for k in range(len(probes))]
+        return [(raw.get(f"c{k}_d"), raw.get(f"c{k}_h")) for k in range(len(probes))]
 
     probes = [(c, ci, di, whi) for c, ci, di in points] + [
         (c, ci, di, wlo) for c, ci, di in points
@@ -350,14 +484,21 @@ def run_bisection(
     results = run(probes, "bracket")
     wide, narrow = results[: len(points)], results[len(points) :]
     reference: dict[tuple[int, int, int], float | None] = {}
-    for point, ref, low in zip(points, wide, narrow, strict=True):
+    for point, (ref, ref_held), (low, low_held) in zip(
+        points, wide, narrow, strict=True
+    ):
         case = cases[point[0]]
         reference[point] = _bracket(
             case,
             _where(case, point[1], point[2], grid_ns),
             ref,
+            ref_held,
             low,
+            low_held,
             options,
+            vdd,
+            latch,
+            reference_noun,
         )
 
     low_side = {p: wlo for p in points}
@@ -368,8 +509,16 @@ def run_bisection(
         measured = run(
             [(c, ci, di, mids[(c, ci, di)]) for c, ci, di in points], f"iter{n}"
         )
-        for point, delay in zip(points, measured, strict=True):
-            passed = _passes(cases[point[0]], delay, reference[point], degradation)
+        for point, (delay, held) in zip(points, measured, strict=True):
+            passed = _passes(
+                cases[point[0]],
+                delay,
+                held,
+                reference[point],
+                degradation,
+                vdd,
+                latch,
+            )
             if passed:
                 high_side[point] = mids[point]
             else:

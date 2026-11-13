@@ -5,6 +5,13 @@ and the JSON/Liberty shapes. The probe decks and bisection live in
 :mod:`klayout_tools.characterize_bisect`; the async *propagation* arcs those
 recovery/removal cases are derived from live in
 :mod:`klayout_tools.characterize_async`.
+
+For a **latch** (issue #5521) every one of those shapes is reused unchanged
+except the edge the groups are named after: a latch's data is constrained
+against the enable's **closing** edge, so an active-high enable (which opens
+rising) yields ``setup_falling``/``hold_falling``. That one substitution
+happens in :func:`run_constraints`, which hands the resolved reference edge
+to the shapes below.
 """
 
 from __future__ import annotations
@@ -21,6 +28,7 @@ from .characterize_bisect import (
     DeckRunner,
     run_bisection,
 )
+from .characterize_sequential import closing_edge
 
 DEFAULT_DEGRADATION = 0.1
 DEFAULT_WINDOW_NS = (-1.0, 2.0)
@@ -38,7 +46,10 @@ def resolve_constrained_pins(
     if raw is None:
         return ()
     if clock_pin is None:
-        raise ConstraintError(f"{where}.constrained_pins requires {where}.clock_pin")
+        raise ConstraintError(
+            f"{where}.constrained_pins requires {where}.clock_pin (or, for a "
+            f"level-sensitive latch, {where}.enable_pin)"
+        )
     if not isinstance(raw, list) or not raw:
         raise ConstraintError(
             f"{where}.constrained_pins must be a non-empty array of input pin names"
@@ -102,13 +113,18 @@ def derive_cases(
     """The four (edge, kind) cases of each constrained pin.
 
     The pin's polarity into the output comes from the clock-to-output arc
-    whose high/low next-state assignments differ in exactly that pin.
+    whose high/low next-state assignments differ in exactly that pin. Only
+    the *sequential* arcs are candidates: a latch also carries transparent
+    ``combinational`` data->output arcs (issue #5521), and those record no
+    captured state to observe, so their empty ``fall_side_inputs`` must never
+    be read as one.
     """
     base = {p: False for p in cell["input_pins"] if p != cell["clock_pin"]}
     cases: list[ConstraintCase] = []
+    sequential = tuple(arc for arc in arcs if arc.is_sequential)
     for pin in cell["constrained_pins"]:
         found = None
-        for arc in arcs:
+        for arc in sequential:
             high = {**base, **dict(arc.side_inputs)}
             low = {**base, **dict(arc.fall_side_inputs)}
             if high[pin] != low[pin] and all(
@@ -216,7 +232,7 @@ def build_tables(
 
 
 def liberty_constraints(
-    entries: list[dict[str, Any]], clock_pin: str, clock_edge: str
+    entries: list[dict[str, Any]], clock_pin: str, reference_edge: str
 ) -> dict[str, tuple[liberty_writer.ConstraintArc, ...]]:
     """Group the tables into ``{pin: (ConstraintArc, ...)}``.
 
@@ -225,8 +241,12 @@ def liberty_constraints(
     edge is constrained each of those groups holds a single table
     (``rise_constraint`` for an active-low pin, ``fall_constraint`` for an
     active-high one).
+
+    ``reference_edge`` is the edge of ``clock_pin`` the constraint is measured
+    against -- a flop's active clock edge, a latch's enable-closing edge --
+    and names the ``timing_type`` suffix.
     """
-    suffix = "rising" if clock_edge == "rising" else "falling"
+    suffix = "rising" if reference_edge == "rising" else "falling"
     by_pin: dict[str, dict[str, dict[str, liberty_writer.Table2D]]] = {}
     for entry in entries:
         case = entry["case"]
@@ -252,11 +272,11 @@ def response_entries(
     entries: list[dict[str, Any]],
     outcome: dict[str, Any],
     clock_pin: str,
-    clock_edge: str,
+    reference_edge: str,
     options: dict[str, Any],
 ) -> list[dict[str, Any]]:
     """The JSON ``constraints[]`` list: one object per (pin, edge, kind)."""
-    suffix = "rising" if clock_edge == "rising" else "falling"
+    suffix = "rising" if reference_edge == "rising" else "falling"
     out = []
     for c, entry in enumerate(entries):
         case, table = entry["case"], entry["table"]
@@ -323,6 +343,12 @@ def run_constraints(
         cases = cases + derive_async_cases(cell, async_entries)
     if not cases:
         return {"liberty": {}, "entries": []}
+    # A flop's data is constrained against its active clock edge; a latch's
+    # against the enable's closing edge, which is the opposite of the opening
+    # edge `clock_edge` holds (issue #5521).
+    reference_edge = (
+        closing_edge(cell["clock_edge"]) if cell.get("latch") else cell["clock_edge"]
+    )
     outcome = run_bisection(
         cell=cell,
         cases=cases,
@@ -338,9 +364,9 @@ def run_constraints(
     )
     tables = build_tables(cases, grid_ns, outcome)
     return {
-        "liberty": liberty_constraints(tables, cell["clock_pin"], cell["clock_edge"]),
+        "liberty": liberty_constraints(tables, cell["clock_pin"], reference_edge),
         "entries": response_entries(
-            tables, outcome, cell["clock_pin"], cell["clock_edge"], options
+            tables, outcome, cell["clock_pin"], reference_edge, options
         ),
     }
 

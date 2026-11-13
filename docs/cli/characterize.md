@@ -130,7 +130,7 @@ command did not measure it", never as an assertion about the cell:
 | Not emitted | Where it belongs |
 |---|---|
 | more than one corner per invocation / per file | invoke once per corner; see "Multiple corners" below |
-| `ff`/`latch` groups, `min_pulse_width`/`min_period`, set-vs-reset priority characterization | not filed (clock-to-output, setup/hold, async `preset`/`clear` and `recovery_*`/`removal_*` are supported; see "Sequential cells") |
+| the `ff`/`latch` **state** groups, `min_pulse_width`/`min_period`, set-vs-reset priority characterization | not filed (clock-to-output, transparent latch, setup/hold, async `preset`/`clear` and `recovery_*`/`removal_*` are supported; see "Sequential cells") |
 | `when`-qualified arc/power splitting, `bus`/`bundle` pins, input-pin (hidden) `internal_power` | not yet filed |
 
 ## How it works
@@ -241,10 +241,11 @@ delay definition, not a measurement failure; real libraries bound it with
 `default_max_transition` rather than by clamping. This command emits what it
 measured and never clamps.
 
-### Sequential cells: clock-to-output and setup/hold
+### Sequential cells: clock-to-output, latches and setup/hold
 
-A cell that declares `cell.clock_pin` is characterized as a sequential cell
-(issue #4755). Without `clock_pin`, a sequential cell is still **refused**:
+A cell that declares `cell.clock_pin` (edge-triggered, issue #4755) or
+`cell.enable_pin` (level-sensitive latch, issue #5521) is characterized as a
+sequential cell. Without either, a sequential cell is still **refused**:
 its output `function` references an internal state node (`IQ`, `IQN`) that is
 not a declared input pin, and that stays a hard error (`... which is not a
 declared input pin of this cell`) rather than a mis-characterized
@@ -252,10 +253,12 @@ combinational arc.
 
 | Field | Meaning |
 |---|---|
-| `cell.clock_pin` | Declared input pin that clocks the cell. Makes the cell sequential. |
-| `cell.clock_edge` | `"rising"` (default) or `"falling"` — the active edge. |
-| `cell.static_inputs` | Optional `{pin: bool}` held constant for every non-clock input the output `function` does not reference (e.g. `{"RESET_B": true}`); all other unreferenced inputs are held low. |
-| `cell.async_pins` | Optional array of `{"pin", "kind", "active"}` asynchronous set/reset pins; see "Asynchronous set/reset arcs" below. |
+| `cell.clock_pin` | Declared input pin that clocks the cell. Makes the cell **edge-triggered** sequential. Mutually exclusive with `enable_pin`. |
+| `cell.clock_edge` | `"rising"` (default) or `"falling"` — the active edge. Requires `clock_pin`; refused on a latch. |
+| `cell.enable_pin` | Declared input pin that enables a **level-sensitive latch**. Mutually exclusive with `clock_pin`. |
+| `cell.enable_level` | `"high"` (default) or `"low"` — the enable's active level. Requires `enable_pin`. |
+| `cell.static_inputs` | Optional `{pin: bool}` held constant for every non-clock/non-enable input the output `function` does not reference (e.g. `{"RESET_B": true}`); all other unreferenced inputs are held low. |
+| `cell.async_pins` | Optional array of `{"pin", "kind", "active"}` asynchronous set/reset pins; requires `clock_pin`. See "Asynchronous set/reset arcs" below. |
 
 For a sequential cell each output pin's `function` is its **next-state
 expression over the data pins** (`D` for a `Q`, `!D` for a `QN`) — not an
@@ -271,19 +274,89 @@ output-low state, a pulse after the data moved to the output-high state
 (→ `cell_rise`/`rise_transition`), and a pulse after it returned
 (→ `cell_fall`/`fall_transition`). Setup/hold, and the asynchronous
 set/reset arcs below, are opt-in through their own request fields. Still
-**not supported**: `ff`/`latch` groups, latch time borrowing, min-pulse-width
-and `when`-qualified arcs. Worked example:
+**not supported**: the `ff`/`latch` **state** groups, latch time borrowing,
+min-pulse-width and `when`-qualified arcs. Worked example:
 `examples/characterize/request-dff.json`. Internal-power tables for these
 arcs cover the active clock edge's window only and are first-order.
+
+**`clock_pin` asserts edge-triggered semantics.** It is not a generic "this
+pin sequences the cell" field: it yields exactly one clock-to-output arc per
+output and references setup/hold to that same edge, which is wrong for a
+transparent cell on both counts. A latch must be declared with
+`cell.enable_pin` (next section) — the request carries nothing else that
+would tell a latch from a flop, so a latch declared through `clock_pin` is
+characterized as the flop it claims to be rather than refused.
+
+#### Level-sensitive latches (issue #5521)
+
+`cell.enable_pin` (plus optional `cell.enable_level`, `"high"` by default)
+declares the cell a latch. The enable's **opening** edge is the edge onto its
+active level and its **closing** edge is the edge away from it, so an
+active-high enable opens rising and closes falling. Declaring `enable_pin`
+together with `clock_pin` — or with `clock_edge`, whose job `enable_level`
+takes over — is a named error, as is an `enable_pin` that is not a declared
+input pin.
+
+Each output pin's `function` is read the same way as a flop's: its next-state
+expression over the data pins, which for a latch is also what the output
+tracks while the enable is open. Three kinds of group come out of one run,
+per output pin:
+
+| Group | `timing_type` | Measured with |
+|---|---|---|
+| transparent data → output, one per data pin the `function` references | `combinational` | the enable held at its **active** level |
+| enable → output | `rising_edge` (active-high) / `falling_edge` (active-low) — the **opening** edge | the three-pulse enable stimulus every sequential cell uses |
+| setup/hold on each `constrained_pins` entry | `setup_falling`/`hold_falling` (active-high) / `setup_rising`/`hold_rising` (active-low) — the **closing** edge | bisection, below |
+
+All of them carry the six NLDM tables on the same `input_transition_ns` ×
+`output_load_pf` grid as any other arc (the constraint tables use the slew
+axis twice, as for a flop). The transparent arcs get `timing_sense` derived
+from the `function` exactly as a combinational cell's do, and they share the
+enable arc's deck: the sequential schedule's two measured-edge slots are each
+as wide as the whole combinational schedule, so one ramp on the data pin
+measures the same quantity there as it would in a combinational run.
+
+The output pin's Liberty `function` is not emitted (as for a flop), and
+neither is a `latch (IQ, IQN)` state group — the absence of one means this
+command did not model the state, never that the cell has none. Latch time
+borrowing in `klt sta`, async set/reset arcs and `min_pulse_width` stay out
+of scope. Worked example: `examples/characterize/request-dlat.json`.
+
+##### The latch probe's pass criterion
+
+Bisection needs a per-probe pass/fail test, and a latch has no
+clock-to-output delay to degrade: the output already moved when the data
+moved, well before the closing edge. A latch probe therefore **passes when
+both** of these hold, and the reported constraint is the smallest passing
+separation either way:
+
+1. its **transparent data-to-output delay** — the capturing data edge to the
+   output edge it produces — is within `(1 + constraint_degradation)` of the
+   same delay measured at the window's wide end (that wide-end value is what
+   `reference_delay_ns` reports for a latch), **and**
+2. the output still **holds the captured level** at the end of the run, after
+   the enable has closed and the data has moved on.
+
+(2) is what discriminates in practice. A setup probe whose data arrives too
+late closes the latch before the new value propagates, so the output falls
+back to the value it held; a hold probe whose data leaves too early is
+followed transparently back to the old value. (1) keeps the criterion from
+accepting a point that only captured because the transparent path itself had
+degraded. The probe deck opens the enable once, early, and places the data
+waveform relative to the close — same waveform as a flop probe's, referenced
+to the other edge.
 
 #### Setup/hold constraint arcs (issue #4756)
 
 `cell.constrained_pins` (an array of data input pins; requires
-`cell.clock_pin`) adds setup and hold constraints of each listed pin against
-the clock. Each pin yields four response entries in the cell's
+`cell.clock_pin`, or `cell.enable_pin` for a latch) adds setup and hold
+constraints of each listed pin against the clock — or, for a latch, against
+the enable's closing edge. Each pin yields four response entries in the cell's
 `constraints[]` — setup and hold for a rising and a falling data edge — and,
 in the `.lib`, a `timing_type : setup_rising` and a `hold_rising` group (or
-`*_falling` for a falling-edge clock) on the data pin with
+`*_falling` for a falling-edge clock; for a latch the suffix names the
+enable's **closing** edge, so an active-high enable yields `*_falling`) on
+the data pin with
 `rise_constraint`/`fall_constraint` tables over
 `constrained_pin_transition` × `related_pin_transition` (both axes are
 `grid.input_transition_ns`; `output_load_pf` does not apply — the minimum grid
@@ -317,9 +390,13 @@ field is additive: it is `[]` for a cell with no `constrained_pins`.
 grid point, the output does not make the expected transition even at the
 window's wide end, or the cell still captures at its narrow end, the run fails
 with a message naming the pin, kind, edge and slews (widen
-`constraint_window_ns`, or check `function`/`static_inputs`). A constrained
-pin must be a data pin some output's next-state `function` toggles with alone.
-Worked example: `examples/characterize/request-dff-constraints.json`.
+`constraint_window_ns`, or check `function`/`static_inputs`). For a latch the
+same applies to the held-level half of its criterion: a wide end at which the
+output does not hold the captured value is an unbracketable point, not a
+value. A constrained pin must be a data pin some output's next-state
+`function` toggles with alone. Worked examples:
+`examples/characterize/request-dff-constraints.json` (flop) and
+`examples/characterize/request-dlat.json` (latch).
 
 #### Asynchronous set/reset arcs (issue #5520)
 
