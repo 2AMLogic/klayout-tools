@@ -63,9 +63,9 @@ Can start today; one PR each. Items marked *claimed* had a Builder lease on 2026
 | sky130 native-Vt NMOS in `klt gen` and `klt lvs` | a generated `nfet_05v0_nvt` device reaches LVS `match` in a test | #2912 |
 | gf180mcu DRC on a composed layout-plan GDS | `klt drc --deck gf180mcu` run recorded with no `*.ongrid.1` outside resistor cells | #4308 |
 | Signoff item 11: live ERC/LVS agreement | side-by-side `klt erc` / `klt lvs` envelopes on a real layout cited on the issue (the CI-checkable half merged in PR #5366) | #5346 |
-| README status is stale (says v0.5.0, 44 verbs) | README status and quick-start figures match `cli.generated.json`, with a test that fails when they drift; four unindexed `examples/` directories listed | seed 1 |
-| MCP resources for request schemas | `klt mcp serve` lists each `docs/schemas/*.schema.json` as an MCP resource; test covers list and read | seed 2 |
-| Extraction-fidelity roadmap status is stale | its header and summary table mark what shipped (#760, #976, #977, #2982) and what has not (2c) | seed 3 |
+| README status is stale (says v0.5.0, 44 verbs) | README status and quick-start figures match `cli.generated.json`, with a test that fails when they drift; four unindexed `examples/` directories listed | #5419 |
+| MCP resources for request schemas | `klt mcp serve` lists each `docs/schemas/*.schema.json` as an MCP resource; test covers list and read | #5420 |
+| Extraction-fidelity roadmap status is stale | its header and summary table mark what shipped (#760, #976, #977, #2982) and what has not (2c) | #5421 |
 
 ## Next (unblocked by a named item above or by curation)
 
