@@ -8,7 +8,7 @@ Phase 1a of [Epic #709](https://github.com/2AMLogic/klayout-tools/issues/709)
 ("PEX-aware post-layout sim flow for klt").
 
 ```
-klt pex <layout> <testbench>... --deck sky130|gf180mcu|sg13g2 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--outdir <dir>] [--backend <backend>] [--max-units-per-job <n>] [--max-concurrent-jobs <n>] [--hosts <n>] [--resume] [--wait-for-capacity <seconds>] [--submit-only | --attach <pex-submit.json>] [--envelope-out <envelope.json>] [--deck-option <key>=<value>]... [--pins <a,b,...>] [--rename-declared-pins] [--tie-declared-pins] [--label-layer <role>=<layer>/<datatype>]... [--device-model <class>=<subckt>]... [--tie-net <extracted-net>=<schematic-net>]... [--critical-net <net>]... [--critical-net-pattern <glob>]... [--critical-net-all] [--critical-net-exclude <glob>]... [--distributed-rc] [--resistance-graph [--resistance-graph-r-cut <ohms>]] [--parasitic-variant <variant>]... [--substrate-tie-ohms <ohms>] [--mom-rlc-net <net>] [--mom-rlc-resistance-ohm <r>] [--mom-rlc-capacitance-ff <c>] [--mom-rlc-inductance-nh <l>] [--flatten-schematic] [--device-only-leg] [--extract-only] [--dry-run] [--format text|json]
+klt pex <layout> <testbench>... --deck sky130|gf180mcu|sg13g2 [-o|--output <netlist.spice>] [--top <cell>]... [--pdk <variant>] [--pdk-root <root>] [--outdir <dir>] [--backend <backend>] [--max-units-per-job <n>] [--max-concurrent-jobs <n>] [--hosts <n>] [--resume] [--wait-for-capacity <seconds>] [--submit-only | --attach <pex-submit.json>] [--envelope-out <envelope.json>] [--deck-option <key>=<value>]... [--pins <a,b,...>] [--rename-declared-pins] [--tie-declared-pins] [--label-layer <role>=<layer>/<datatype>]... [--device-model <class>=<subckt>]... [--tie-net <extracted-net>=<schematic-net>]... [--critical-net <net>]... [--critical-net-pattern <glob>]... [--critical-net-all] [--critical-net-exclude <glob>]... [--distributed-rc] [--resistance-graph [--resistance-graph-r-cut <ohms>]] [--parasitic-variant <variant>]... [--substrate-tie-ohms <ohms>] [--mom-rlc-net <net>] [--mom-rlc-resistance-ohm <r>] [--mom-rlc-capacitance-ff <c>] [--mom-rlc-inductance-nh <l>] [--flatten-schematic] [--device-only-leg] [--extract-only] [--dry-run] [--format text|json]
 klt pex <layout> --deck <deck> --measure-command <command> --reference-netlist <schematic.spice> [--measure-timeout-s <seconds>] [<every flag above>]
 ```
 
@@ -52,7 +52,13 @@ klt pex <layout> --deck <deck> --measure-command <command> --reference-netlist <
   A path that cannot be written is an exit-`1` error. Additive
   ([#4692](https://github.com/2AMLogic/klayout-tools/issues/4692)).
 - `--top` / `--pdk` / `--pdk-root` — passed through to `klt extract`; see
-  [`extract.md`](extract.md).
+  [`extract.md`](extract.md). **`--top` is repeatable**
+  ([#5494](https://github.com/2AMLogic/klayout-tools/issues/5494)): give it
+  twice or more and every named cell is extracted on its own and the results
+  are concatenated into the one `-o` netlist, so one graded run can extract
+  every drawn cell a testbench instantiates. See "Several drawn tops in one
+  run (`--top A --top B`)" below for the contract, the `tops` field, and the
+  flags that mode refuses. A repeated cell name is a usage error.
 - `--outdir` — overrides where this command writes its own generated
   artifacts: the extracted-side testbench body/request copies (see below),
   and each `klt sim` call's own `options.keep_artifacts` output, namespaced
@@ -658,6 +664,162 @@ schematic DUT in a `.SUBCKT` that declares the pins in the extracted order
 (shown in the block), so one instantiation line is valid for both legs.
 Rewriting the testbench instance by pin name, or reordering the extracted
 header, is not done by `klt pex`.
+
+## Several drawn tops in one run (`--top A --top B`)
+
+`--top` is repeatable
+([#5494](https://github.com/2AMLogic/klayout-tools/issues/5494)). With two or
+more values this command extracts **each top on its own** and concatenates
+the results into the one `-o` netlist, which therefore defines a `.SUBCKT`
+per top. The testbench's single DUT `.include` is re-pointed at that one
+combined file, so the testbench's own unmodified `X...` lines instantiate
+each cell by name on both legs.
+
+**What this is for.** A link bench instantiates two or more cells that are
+*separate tops in the layout* — a driver cell and a receiver cell, say, with
+a declared channel model between them. There is no single `--top` below the
+full array that covers both, so before this mode a both-ends-extracted leg
+could not be produced at all: a caller had two one-ended runs, whose deltas
+do not compose into the both-ends number, or an array-sized extraction paying
+array-sized simulation for two cells' worth of coverage. The row
+([`design-evidence-tiers.md`](../design-evidence-tiers.md) item 7, post-layout
+verification) was a declared gap rather than a measured number.
+
+```bash
+klt pex link.gds link-bench.json --deck sky130 \
+  --top driver_cell --top receiver_cell \
+  -o link-extracted.spice --format json
+```
+
+### What a multi-top run requires
+
+- **The schematic DUT must declare a `.SUBCKT` for every `--top`.** The one
+  `.include`d DUT file is swapped for the one combined extracted netlist, so
+  a `--top` the schematic does not model would leave the schematic leg
+  instantiating an undeclared subcircuit while the extracted leg ran fine —
+  a comparison between a broken deck and a working one. A missing one is an
+  exit-`1` error naming the cell, raised **before any simulation** (and
+  before the flat-schematic-DUT diagnostic, whose "declares no `.SUBCKT` at
+  all" message is strictly less actionable here).
+- **The exactly-one-`.include` rule is untouched** (#1030, #2871). One
+  `.include`, one swap point, one `reference_netlist` — the "which include is
+  the DUT" ambiguity never reopens. Several `.include` lines matched to tops
+  by `.SUBCKT` name was considered and rejected: it relaxes that rule to gain
+  nothing the combined file does not already give.
+- **Each `--top` must name a different cell.** A repeated name is a usage
+  error (case-insensitively — ngspice is case-insensitive about subcircuit
+  names): extracting one cell twice would write two identical `.SUBCKT`
+  blocks into the combined netlist and double-count its devices and nets.
+
+### What it does *not* do
+
+**Each top is extracted independently — no parasitics are modelled *between*
+tops.** Inter-cell routing capacitance, coupling between a driver's output
+net and a receiver's input net, and any shared-supply IR interaction across
+the two extractions are all absent, exactly as they would be from two
+separate single-top runs. This mode makes the both-ends leg *possible*; it
+does not make it a full-array extraction. If the inter-cell interconnect
+matters for the row you are measuring, extract the enclosing cell as a single
+top instead.
+
+Each top's extraction is otherwise *identical* to what a single-top run with
+the same flags would produce: same deck, same PDK, same `--pins`,
+`--critical-net*`, `--distributed-rc`, `--label-layer`, `--device-model`,
+`--deck-option`, `--substrate-tie-ohms`, `--parasitic-variant` and
+`--resistance-graph*` treatment, same synthesized substrate DC reference
+(issue #1263, one per extraction). `--pins` applies to every top as the
+per-net membership set it already is, so **the union of the tops' pin names
+is the natural value**: each top keeps its own declared pins promoted and
+demotes its own extra labelled nets. A declared name matching no promoted net
+in a given top's extraction produces that extraction's ordinary warning, not
+an error.
+
+### The combined netlist
+
+Written by `klt pex` itself (not by `klt extract`), to `-o` — or to the same
+default a single-top run uses, `<layout>` with its extension replaced by
+`.spice`. Each top's own extraction is staged first, under
+`<outdir>/tops/<NN>-<cell>.spice` (ordinal-prefixed in `--top` order), and
+the combined file is written **only once every extraction has succeeded** —
+so a failed extraction names the top that failed and leaves `-o` untouched,
+never half-written.
+
+The combined file is the per-top files concatenated in `--top` order, with
+two edits:
+
+- A `klt pex` title comment on line 1 naming the mode and the tops. SPICE
+  reads line 1 as the deck title whatever it holds, and `klt extract`'s own
+  output already opens with a comment line.
+- A **repeated `.GLOBAL` card is commented out** rather than emitted twice.
+  Each extraction emits one for the substrate identities it synthesized
+  (issue #1503), so two extractions of the same PDK repeat the identical
+  card. The first occurrence is kept; a later card declaring a *different*
+  net set is new information and is kept too. The dropped card is left in the
+  file as a comment saying so, so the artifact is self-describing. (ngspice
+  47 does in fact accept the repeated card; the de-duplication is kept as
+  engine-independent hygiene, and is covered by its own test.)
+
+### Pre-flight diagnostics run once per top
+
+`pin_count_mismatch`, `flat_dut_mismatch` and `pin_order_mismatch` are
+computed **per `--top`**, against the combined netlist. They already take the
+subcircuit as an argument, so each check is scoped to one top's header and
+cannot false-positive on another's. The same mutual exclusion holds per top as
+for a single-top run, and a firing diagnostic skips the extracted leg and
+exits `4` exactly as it does for one top.
+
+### The `tops` field, and what the singular fields mean
+
+The response gains **one additive field, `tops`**:
+
+- `null` on a zero- or one-`--top` run. Every other field is unchanged there —
+  which is what keeps this additive under
+  [`json-contract.md`](../json-contract.md): no existing field changes type or
+  meaning, and a reader that does not know about `tops` is unaffected.
+- On a multi-top run, one block per `--top` **in `--top` order**:
+  `{top, netlist, extraction, body_bias, pin_count_mismatch,
+  flat_dut_mismatch, pin_order_mismatch, provenance}`. Each sub-block is in
+  the same shape as the top-level field of that name, built by the same code,
+  so anything that can read the top level can read one of these. `netlist` is
+  that top's own staged extraction, not the combined file.
+
+The existing **singular** fields keep describing *the combined netlist the
+extracted leg actually simulated*, and are reduced so they **never read
+cleaner than the worst top**:
+
+| Field | On a multi-top run |
+| --- | --- |
+| `netlist`, `extraction.netlist_sha256` | The combined file. |
+| `extraction.device_count`, `extraction.net_count` | Sums over every top. |
+| `extraction.parasitic_integrity` | Counters summed, `nets[]` concatenated in `--top` order. Two tops can each own a net of the same name (a supply), so same-named entries can appear twice — `tops[]` is where a net is attributed to its extraction. |
+| `body_bias` | `status` is `"unbiased"` if **any** top's is, with the `unbiased_*` entries concatenated in `--top` order. `klt signoff` quotes this block verbatim into its item-7 citation, so losing a second top's floating-body disclosure here is exactly the failure this rule prevents. |
+| `pin_count_mismatch`, `flat_dut_mismatch`, `pin_order_mismatch` | The **first firing** top's block (each already names its own `subcircuit`), `null` only when no top fires. The field keeps its existing meaning: non-`null` still means the extracted leg was skipped. |
+| `model_mismatch` | Unchanged in shape — it compares what the reference file and the combined file *contain*. |
+| The remaining `extraction` echo fields, `provenance` | The first top's. These are this run's own inputs — same layout stream, deck, PDK and flags for every top. Per-top copies are in `tops[]`. |
+
+### Flags refused with two or more `--top`
+
+Each of these is a usage error (exit `1`, `error.code:
+"pex_multi_top_unsupported"`) naming the flag, raised **before any
+extraction**:
+
+| Flag | Why |
+| --- | --- |
+| `--flatten-schematic` | Flattens the schematic DUT against one named top cell's extracted interface. |
+| `--device-only-leg` | The parasitic-free third leg extracts one top cell. |
+| `--tie-net` | Its net names are valid for one extraction only. |
+| `--tie-declared-pins` | Its interaction with one shared `--pins` set across several tops' differing interfaces is undefined. |
+| `--mom-rlc-net` | Substitutes an R/L/C for one net of one extraction. |
+| `--measure-command` | A caller-supplied command measures one netlist per side. |
+| `--extract-only` | Reports an extraction with no schematic side, so the per-top `.SUBCKT` pre-flight this mode is built on has nothing to check against. |
+| `--submit-only` / `--attach` | The submit manifest records a single-valued top and would not round-trip a list. |
+| `--resume` | A sharded leg's resume fingerprint hashes the testbench body, not the extracted netlist its DUT `.include` names, so it cannot tell one `--top` list's shards from another's. |
+
+These are **refusals, not designs**: each flag is single-top by construction,
+and inventing a per-top syntax for every one of them would make this mode's
+contract several times larger than the capability it adds. Support for any
+individual flag is additive later — file an issue if a real bench needs one.
+Every other flag passes through to every top unchanged.
 
 ## The extracted side carries its own substrate DC reference (issue #1263)
 
@@ -1636,8 +1798,9 @@ full `repo`/`external`/`absent` scope meanings.
 | `layout`             | object            | `{path, scope}` — `<layout>` normalised via `env_provenance.repo_relative_path` (issue #1261): `scope: "repo"` with a repo-relative `path` when `<layout>` sits inside the invocation's repo, else `{"path": null, "scope": "external"}`. The absolute path is never echoed. |
 | `netlist`            | object            | `{path, scope}` — the extracted (parasitic-annotated) netlist `klt extract` wrote, normalised the same way as `layout`. |
 | `reference_netlist`  | object            | `{path, scope}` — the schematic DUT file every testbench `.include`d (see "The DUT `.include` swap" above), normalised the same way as `layout`. `{path: null, scope: "absent"}` for `--extract-only` (issue #3739), which has no schematic side. |
-| `extraction`         | object            | `deck`, `netlist_adaptation` (issue #5128 — the simulator adaptation applied to the extracted and `--device-only-leg` legs' DUT netlist: `"asap7_bsimcmg.adapt_extracted_netlist"` for `--deck asap7`, `null` otherwise; see the asap7 section above), `device_count`, `net_count`, `netlist_sha256` (echoed from `klt extract`'s own report), `model` (`extract.py`'s `PARASITIC_MODEL_SCOPE`, verbatim — what the extracted side's R/C model does and does not account for), `critical_nets` (issue #976 — the `--critical-net` request echoed back, `[]` when the flag was never given), `distributed_rc` (issue #977 — `true` only when `--distributed-rc` was given, `false` otherwise), `parasitic_variant` (issue #3056 — the `--parasitic-variant` request echoed back; present only when the flag was given), `mom_rlc_override` (issue #988 — `null` unless `--mom-rlc-net` was given, in which case `klt extract`'s own substitution report; see [`extract.md`](extract.md)'s "Substitute a caller-supplied `klt mom` R/L/C for a critical net" section for the field list), `label_layers` (issue #2686 — `null` unless `--label-layer` was given, in which case `klt extract`'s own `label_layers` echo: `{"<role>": [layer, datatype] | null}`, sorted by role, `null` for a role cleared with `none`), `device_models` (issue #4234 — `null` unless `--device-model` was given, in which case the applied `{"<class>": "<subckt>"}` mapping), `resistance_graph` (issue #4037 — present only with `--resistance-graph`: `{r_cut_ohm, nets[]}` where each `nets[]` entry is `{net, net_id, resistance_source, selected_resistance_ohm, legacy_resistance_ohm}`; `resistance_source` says which value the extracted netlist's lumped R used), and `parasitic_integrity` (issue #2764 — the extraction's own per-net parasitic RC network integrity diagnostics; see below). Pins the extraction method alongside `provenance.deck`'s content-hash version pin. |
-| `body_bias`          | object            | Issue #1983 (additive field). Whether the extracted netlist this run re-simulated actually had a **DC bias path for every device body**: `status` (`"biased"`/`"unbiased"`, or `"tied"` when every unbiased net was declared tied with `--tie-net`), `unbiased_device_count`, `unbiased_nets` (the distinct synthesized net names, sorted), and `unbiased_pmos_body_nets` (`klt extract`'s own `{"device", "net"}` entries, verbatim), and — only with `--tie-net` (issue #4245) — `tied[]` (`{extracted_net, schematic_net, source: "declared"}`). See "Unbiased device bodies invalidate the comparison" above. Reduced from the extraction this command drove itself; it never changes `status`. |
+| `extraction`         | object            | `deck`, `netlist_adaptation` (issue #5128 — the simulator adaptation applied to the extracted and `--device-only-leg` legs' DUT netlist: `"asap7_bsimcmg.adapt_extracted_netlist"` for `--deck asap7`, `null` otherwise; see the asap7 section above), `device_count`, `net_count`, `netlist_sha256` (echoed from `klt extract`'s own report — on a multi-top run, issue #5494, the counts are sums over every `--top` and the hash identifies the combined netlist), `model` (`extract.py`'s `PARASITIC_MODEL_SCOPE`, verbatim — what the extracted side's R/C model does and does not account for), `critical_nets` (issue #976 — the `--critical-net` request echoed back, `[]` when the flag was never given), `distributed_rc` (issue #977 — `true` only when `--distributed-rc` was given, `false` otherwise), `parasitic_variant` (issue #3056 — the `--parasitic-variant` request echoed back; present only when the flag was given), `mom_rlc_override` (issue #988 — `null` unless `--mom-rlc-net` was given, in which case `klt extract`'s own substitution report; see [`extract.md`](extract.md)'s "Substitute a caller-supplied `klt mom` R/L/C for a critical net" section for the field list), `label_layers` (issue #2686 — `null` unless `--label-layer` was given, in which case `klt extract`'s own `label_layers` echo: `{"<role>": [layer, datatype] | null}`, sorted by role, `null` for a role cleared with `none`), `device_models` (issue #4234 — `null` unless `--device-model` was given, in which case the applied `{"<class>": "<subckt>"}` mapping), `resistance_graph` (issue #4037 — present only with `--resistance-graph`: `{r_cut_ohm, nets[]}` where each `nets[]` entry is `{net, net_id, resistance_source, selected_resistance_ohm, legacy_resistance_ohm}`; `resistance_source` says which value the extracted netlist's lumped R used), and `parasitic_integrity` (issue #2764 — the extraction's own per-net parasitic RC network integrity diagnostics; see below — on a multi-top run its counters are summed and its `nets[]` concatenated in `--top` order). Pins the extraction method alongside `provenance.deck`'s content-hash version pin. |
+| `tops`               | array\<object\> \| null | Issue #5494 (additive). `null` on a zero- or one-`--top` run — every other field is then unchanged. On a multi-top run (`--top A --top B`), one block per `--top` **in `--top` order**: `top`, `netlist` (`{path, scope}` of that top's own staged extraction, not the combined file), `extraction`, `body_bias`, `pin_count_mismatch`, `flat_dut_mismatch`, `pin_order_mismatch` and `provenance` — each in the same shape as the top-level field of that name. The singular fields above and below then describe the *combined* netlist the extracted leg simulated, reduced so they never read cleaner than the worst top (summed counts, `body_bias.status: "unbiased"` if any top's is, the first firing top's mismatch block). See "Several drawn tops in one run" above. |
+| `body_bias`          | object            | Issue #1983 (additive field). Whether the extracted netlist this run re-simulated actually had a **DC bias path for every device body**: `status` (`"biased"`/`"unbiased"`, or `"tied"` when every unbiased net was declared tied with `--tie-net`), `unbiased_device_count`, `unbiased_nets` (the distinct synthesized net names, sorted), and `unbiased_pmos_body_nets` (`klt extract`'s own `{"device", "net"}` entries, verbatim), and — only with `--tie-net` (issue #4245) — `tied[]` (`{extracted_net, schematic_net, source: "declared"}`). See "Unbiased device bodies invalidate the comparison" above. Reduced from the extraction this command drove itself; it never changes `status`. On a multi-top run (issue #5494) `status` is `"unbiased"` if **any** `--top`'s is, with every top's `unbiased_*` entries concatenated in `--top` order; per-top verdicts are in `tops[]`. |
 | `measurement`        | object            | Issue #2478 (additive field, always present). How this run's two legs were measured, so a reader of a committed record never has to infer it from the presence/absence of `testbenches[]`. `mode` is `"testbench"` (the default path — `command`/`timeout_s`/`sides` are then all `null`) `"command"` (a caller-supplied `--measure-command` produced both legs) or `"extract-only"` (issue #3739: `--extract-only` measured nothing — `testbenches` and `delta` are empty, `status` is `not_checked`, and `command`/`timeout_s`/`sides` are `null`). For `"command"`: `command` is the argv **list** verbatim (never a shell string — it is never run through a shell), `timeout_s` the per-invocation cap in force, and `sides` an object keyed `schematic`/`extracted`, each carrying `netlist` (`{path, scope}`, the exact netlist that side was measured on), `exit_status`, `corner_count` and `measurement_names`. See "Measuring with a caller-supplied command" above. |
 | `testbenches`        | array\<object\>   | One entry per `<testbench>`: `request` (`{path, scope}` — the `<testbench>` argument, normalised the same way as `layout`; issue #1261), `request_sha256`, `netlist` (`{path, scope}` — the simulation body the request names), `netlist_sha256`, `schematic_netlist` (`{path, scope}` — the resolved DUT path it `.include`d, normalised the same way), `schematic_netlist_sha256`, `corner_count`, `measurement_names`, and the issue #2872 `sides` / `nothing_simulated_corners` execution evidence (see "Per-side execution evidence" below). The `*_sha256` fields are the issue #2875 content identities, see "Schematic-side content identity" below. Informational — the full per-corner detail lives in `delta[]`. **Empty (`[]`) for a `--measure-command` run**, which has no testbenches at all; `measurement.sides` carries the equivalent per-leg detail there. |
 | `reference_netlist_sha256` | string | Issue #2875 (additive). `sha256:<64 lowercase hex>` of the exact bytes of `reference_netlist` — the schematic DUT (testbench mode) or `--reference-netlist` (`--measure-command` mode). `null` only if the file was unreadable. |
