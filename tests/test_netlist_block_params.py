@@ -235,14 +235,53 @@ def test_block_mode_reads_a_multi_line_and_escaped_template(
     assert _subckt_line(written) == ".subckt block a b wstv=0.42 expr={a+b} tag=hi"
 
 
-def test_block_mode_keeps_a_quoted_template_value_with_spaces(
-    tmp_path, argv_log, monkeypatch
+@pytest.mark.parametrize(
+    ("template", "expected", "named"),
+    [
+        ('name=x1 note=\\"a b\\" w=2', ".subckt block a b w=2", ["note"]),
+        ("name=x1 note= w=2", ".subckt block a b w=2", ["note"]),
+        ("name=x1 a=b=c w=2", ".subckt block a b w=2", ["a"]),
+        ("name=x1 expr=\\{a w=2", ".subckt block a b w=2", ["expr"]),
+        ('name=x1 n=\\"a b\\" d=\\"x y\\"', ".subckt block a b", ["n", "d"]),
+    ],
+    ids=["whitespace", "empty", "second-equals", "unbalanced-brace", "none-emittable"],
+)
+def test_block_mode_omits_every_value_spice_cannot_spell(
+    tmp_path, argv_log, monkeypatch, template, expected, named
 ):
-    _, written = _block_header(
-        tmp_path, monkeypatch, 'template="name=x1 note=\\"a b\\" w=2"'
+    """The whole class, not just the `note="a b"` case the review cited: each
+    row makes `ngspice -b` reject the block (`Formula() error`, `Missing }`),
+    so none may be restored silently. xschem is no parity target for these --
+    its own card truncates the list at the whitespace, losing `w=2` too -- so
+    `--block` keeps the loadable parameters and names the omission instead of
+    emitting a card that dies at parse time (issue #5439's silent-failure
+    shape). The last row leaves nothing emittable: the header stays as xschem
+    wrote it, still reported. Loadability of every row was measured against
+    ngspice 44, not derived from the lexer rule."""
+    report, written = _block_header(tmp_path, monkeypatch, f'template="{template}"')
+
+    assert _subckt_line(written) == expected
+    for key in named:
+        assert f"'{key}'" in report["block"]["warning"]
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["{a + b}", "{a==b}", "{a>1?2:3}", "max(1,2)", "0.5f"],
+    ids=["braced-space", "braced-equals", "ternary", "comma", "suffixed"],
+)
+def test_block_mode_restores_a_value_ngspice_accepts(
+    tmp_path, argv_log, monkeypatch, value
+):
+    """The filter above must not over-reach: ngspice re-joins a braced
+    expression across whitespace and tolerates `=` inside it, so these all
+    load (measured) and must be restored untouched -- `f={a + b}` evaluates."""
+    report, written = _block_header(
+        tmp_path, monkeypatch, f'template="name=x1 f=\\"{value}\\" w=2"'
     )
 
-    assert _subckt_line(written) == ".subckt block a b note=a b w=2"
+    assert _subckt_line(written) == f".subckt block a b f={value} w=2"
+    assert report["block"]["warning"] is None
 
 
 def test_block_mode_warns_and_keeps_output_when_the_symbol_is_unparsable(

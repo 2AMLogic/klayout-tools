@@ -519,8 +519,12 @@ site has nothing to override.
 .subckt stage1 A B wstv=0.42 lstv=2 cld=0.5f
 ```
 
-The goal is parity: **the restored card is the card xschem itself writes for
-that cell when a parent instantiates it.** The rules follow xschem's, so:
+The goal is parity: **for a template whose every value is a single token —
+which is what real symbol templates carry — the restored card is the card
+xschem itself writes for that cell when a parent instantiates it**, verified
+against xschem 3.4.7 rather than derived from its rules. Parity stops where
+xschem's own card is not loadable — the unusable-value limit below. The rules
+follow xschem's, so:
 
 - **Source precedence** is what a parent would use — the sibling `<stem>.sym`
   next to the schematic when it exists, otherwise the schematic's own `K {}`
@@ -540,13 +544,37 @@ that cell when a parent instantiates it.** The rules follow xschem's, so:
   `.sym` leaves the header as xschem produced it and says so in
   `block.warning`.
 
-Two limits are worth stating. Bare `key=value` text in a `file_version=1.2`
-`G {...}` element is **not** a parameter source: xschem ignores it for every
-cell, so a block built from it would disagree with the same cell netlisted as
-a child — move such parameters into the symbol `template`, which is also what
-makes them work from a parent sheet. And a parameter *value* containing a
-comma (`f=max(1,2)`) is left intact, deliberately unlike xschem, which spaces
-commas across the whole `.subckt` card and would corrupt the expression.
+Four limits are worth stating.
+
+- Bare `key=value` text in a `file_version=1.2` `G {...}` element is **not** a
+  parameter source: xschem ignores it for every cell, so a block built from it
+  would disagree with the same cell netlisted as a child — move such
+  parameters into the symbol `template`, which is also what makes them work
+  from a parent sheet.
+- A parameter *value* containing a **comma** (`f=max(1,2)`) is left intact,
+  deliberately unlike xschem, which spaces commas across the whole `.subckt`
+  card and would corrupt the expression.
+- A parameter whose value is one **SPICE cannot spell as a parameter
+  default** is **left off the card**, and `block.warning` names it. Such a
+  value only arises from a quoted or backslash-escaped `template` value, as in
+  `template="name=x1 note=\"a b\" w=2"`. The unusable shapes, each measured
+  against ngspice, are: whitespace or a second `=` **outside** braces
+  (`note=a b`, `a=b=c` — the tail lands as a stray token and `.include`-ing
+  the block fails with `Formula() error`), an empty value (`note=`), and an
+  unbalanced brace (`Missing }`). Inside braces both are fine, so an
+  expression default is restored untouched — `f={a + b}`, `f={a==b}` and
+  `f={a>1?2:3}` all survive and evaluate.
+
+  This is the one place parity is deliberately dropped, because xschem's own
+  card is unusable too: it truncates the parameter list at the whitespace,
+  losing both that value's tail *and* every parameter after it (`note=a`, no
+  `w=2`). Every other parameter is still restored, so the header stays
+  loadable; a device referencing the omitted name still fails on `unknown
+  parameter`, but loudly, with the warning naming it.
+- A **multi-line** `template` is restored onto one line. xschem instead
+  continues the tail onto a bare second line with no `+`, which SPICE does not
+  read as a continuation; klt's single-line form is the valid one. The
+  parameters and their order are identical.
 
 Under [`--backend batch`](#batch-backend) this runs on the runner through the
 same code path, with no batch-specific behaviour — but the sibling `.sym` is
@@ -559,8 +587,9 @@ any `--batch-include` globs you narrow with).
 | --- | --- |
 | The first commented `**.subckt` / `**.ends` pair, uncommented | Anything in the sheet's `G {}`, `V {}`, `S {}` or `E {}` elements |
 | Commented `*+` continuation lines of that header, as real `+` continuations | `.GLOBAL` lines and other deck-level content |
-| The cell's `template` subcircuit parameters | `*.ipin` / `*.opin` comment lines |
+| The cell's `template` subcircuit parameters, each value a single token | `*.ipin` / `*.opin` comment lines |
 | Removal of the trailing `.end` | Nested sub-block `.subckt` cards (xschem already writes their parameters) |
+| — | A `template` parameter whose value contains whitespace: omitted from the card and named in `block.warning` |
 
 ## Port-list form and symbol references
 

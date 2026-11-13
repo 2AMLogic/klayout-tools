@@ -102,6 +102,45 @@ _SUBCKT_MULTIPLIER_RE = re.compile(r" m=[0-9]+")
 _TEMPLATE_DROP_KEYS = ("name", "spiceprefix")
 
 
+def _is_emittable_value(value: str) -> bool:
+    """Whether ``value`` can be written onto a ``.subckt`` card verbatim.
+
+    A quoted or backslash-escaped ``template`` value can hold things SPICE
+    cannot spell as a parameter default. ngspice reads the card as
+    whitespace-separated tokens but re-joins a brace-delimited expression
+    across whitespace, so (measured against ngspice 44):
+
+    * whitespace **outside** braces is fatal -- the tail lands as a stray
+      token and the including deck dies with ``Formula() error``
+      (``note="a b"`` -> ``.subckt cell A B note=a b``), while whitespace
+      **inside** them is fine (``f={a + b}`` evaluates);
+    * a second ``=`` outside braces is fatal (``a=b=c``), inside them fine
+      (``f={a==b}``);
+    * an empty value (``note=``) and an unbalanced brace never load.
+
+    A parameter failing this is left off the card and named in
+    ``block.warning`` instead. xschem is no parity target here: for such a
+    value its own card is unusable too -- it truncates the parameter list at
+    the whitespace, losing that value's tail *and* every later parameter --
+    so the choice is between an unloadable block and a loud, documented
+    omission. Silence is what issue #5439 exists to remove, so the omission
+    is reported rather than guessed at.
+    """
+    if not value:
+        return False
+    depth = 0
+    for char in value:
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth < 0:
+                return False
+        elif depth == 0 and (char.isspace() or char == "="):
+            return False
+    return depth == 0
+
+
 def _braced_body(text: str, open_brace: int) -> str | None:
     """The text between ``text[open_brace]`` (a ``{``) and its matching
     ``}``, honoring xschem's backslash escapes. ``None`` if unbalanced."""
@@ -149,11 +188,16 @@ def _symbol_attr_element(text: str) -> tuple[str | None, bool]:
 def _attr_tokens(text: str) -> list[tuple[str, str]]:
     """The ``key=value`` pairs of an xschem attribute string, in order.
 
-    Mirrors xschem's ``get_tok_value()``/``get_sym_template()`` lexer at
+    Follows xschem's ``get_tok_value()``/``get_sym_template()`` lexer at
     ``with_quotes=0``: pairs are whitespace-separated, a quoted value may
     contain whitespace (and may span lines), an unescaped ``"`` or ``\\`` is
     dropped, and a backslash-escaped character is kept verbatim. A bare word
     carrying no ``=`` is not a pair and is skipped.
+
+    This is the lexer only. What reaches a ``.subckt`` card is *not* always
+    what xschem writes there: a value that cannot be a SPICE parameter
+    default is filtered by :func:`subckt_params` rather than copied, since
+    xschem's own card is unusable for those (see ``_VALUE_WHITESPACE_RE``).
     """
     pairs: list[tuple[str, str]] = []
     key: list[str] = []
@@ -230,17 +274,39 @@ def subckt_params(schematic: str) -> tuple[str, str | None]:
     ``name``/``spiceprefix`` pair is dropped, as is any token named by the
     symbol's own ``extra`` attribute (a substring test, as in xschem). Empty
     when the cell declares no ``template``, or one holding only those keys.
+
+    One filter is klt's own rather than xschem's: a value SPICE cannot spell
+    as a parameter default is omitted and named in ``warning``, because no
+    card carrying it is loadable and xschem's own is not either
+    (:func:`_is_emittable_value`).
     """
     attributes, warning = _symbol_attributes(schematic)
     template = attributes.get("template", "")
     if not template:
         return "", warning
     extra = attributes.get("extra", "")
-    kept = [
-        f"{key}={value}"
-        for key, value in _attr_tokens(template)
-        if key not in _TEMPLATE_DROP_KEYS and not (extra and key in extra)
-    ]
+    kept: list[str] = []
+    skipped: list[str] = []
+    for key, value in _attr_tokens(template):
+        if key in _TEMPLATE_DROP_KEYS or (extra and key in extra):
+            continue
+        if not _is_emittable_value(value):
+            skipped.append(key)
+            continue
+        kept.append(f"{key}={value}")
+    if skipped:
+        names = ", ".join(f"'{key}'" for key in skipped)
+        plural = "s" if len(skipped) > 1 else ""
+        detail = (
+            f"--block left the subcircuit parameter{plural} {names} off the "
+            f"restored '.subckt' header of {os.path.basename(schematic)}: "
+            "the symbol template gives a value SPICE cannot spell as a "
+            "parameter default (whitespace or a second '=' outside braces, "
+            "an empty value, or an unbalanced brace), so emitting it would "
+            "make the block fail at parse time in any including deck. Every "
+            "other parameter was restored"
+        )
+        warning = detail if warning is None else f"{warning}. {detail}"
     return " ".join(kept), warning
 
 
