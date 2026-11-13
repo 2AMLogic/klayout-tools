@@ -1,4 +1,6 @@
-"""Cause-line extraction for ngspice fatal-error diagnostics (issues #4623, #4924).
+"""Cause text for ngspice diagnostics: fatal-error cause lines (issues #4623,
+#4924) and the ``measurement`` suffix for a ``.meas`` reason (issues #2925,
+#5415).
 
 Split out of sim.py to keep it under its per-file size ceiling.
 """
@@ -50,3 +52,41 @@ def _with_fatal_error_cause(message: str, log_text: str) -> str:
     if not causes:
         return message
     return f"{message} [cause: {' | '.join(causes)}]"
+
+
+# --------------------------------------------------------------------------- #
+# Measurement-cause suffixing (issues #2925, #5415)
+# --------------------------------------------------------------------------- #
+
+
+#: ngspice's reason text when a ``.meas`` search (``WHEN``/``TRIG``/``TARG``/
+#: ``FIND ... WHEN``) never found its crossing in the analysis interval, e.g.
+#: ``Error: measure  x  when(WHEN) : out of interval`` (verified on ngspice-46).
+#: The one engine reason that means "this figure does not exist at this point";
+#: any other ``Error: measure`` reason is a malformed card and stays an error.
+_MEAS_ABSENT_CAUSE_RE = re.compile(r"out of interval", re.IGNORECASE)
+
+#: Appended to the default-path ``measurement`` diagnostic when ngspice's
+#: reason is "out of interval" (issue #5415): the run completed and the target
+#: was never reached in the analysis window -- not a simulator abort.
+_WINDOW_MISS_HINT = (
+    " -- the analysis completed but the target was never reached inside the "
+    "analysis window (not a simulator failure): lengthen the window, or set "
+    '`on_unreached: "null"` / `optional: true` on this measurement to grade '
+    "it instead of erroring"
+)
+
+
+def _cause_suffix(cause: str) -> str:
+    """The ``measurement`` diagnostic suffix for an ngspice ``.meas`` reason.
+
+    Always names the reason. An "out of interval" reason (issue #5415) also
+    explains that the analysis completed and the target was simply never
+    reached inside the window -- not a simulator failure -- and names the two
+    opt-ins (``on_unreached: "null"`` / ``optional: true``) that grade such a
+    window miss instead of erroring.
+    """
+    suffix = f" -- ngspice reported: {cause}"
+    if _MEAS_ABSENT_CAUSE_RE.search(cause):
+        suffix += _WINDOW_MISS_HINT
+    return suffix

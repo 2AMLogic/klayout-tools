@@ -4589,6 +4589,14 @@ the same request that has no value still grades its corner `error`.
 `out of interval` is ngspice's reason when a `WHEN`/`TRIG`/`TARG` crossing is
 never found in the analysis interval (verified on ngspice 46).
 
+Without either opt-in the measurement still grades `error` (code, severity and
+statuses unchanged), but when the reason is `out of interval` its `measurement`
+diagnostic message ends with a note that the analysis completed, the target was
+never reached inside the window (not a simulator failure), and names
+`on_unreached: "null"` / `optional: true`. Such a miss never carries an
+`ngspice_fatal` diagnostic: that code is reserved for deck aborts (`Error on
+line N`, `Simulation interrupted due to error`, `fatal error in ngspice`).
+
 **Aggregation.**
 
 - Rollup (`measurements[]`): a measurement `absent` at some corners and `pass`
