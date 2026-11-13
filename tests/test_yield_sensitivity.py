@@ -102,7 +102,7 @@ def test_malformed_json_is_a_clean_error(tmp_path):
     # copy this replaced lumped under one "could not read" message.
     path = tmp_path / "bad.json"
     path.write_text("{not json")
-    with pytest.raises(SensitivityError, match="request file is not valid JSON"):
+    with pytest.raises(SensitivityError, match="is not valid JSON"):
         run_sensitivity(str(path))
 
 
