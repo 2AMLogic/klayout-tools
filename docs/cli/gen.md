@@ -1305,6 +1305,13 @@ centre with a fixed `direction_deg` and a `drc_hints.notes` warning, mirroring
 `mos_array`'s interior gate-contact port.) `device_count` is `num`.
 `drc_hints.matched_group_id` is `"cap_array:<num>"`.
 
+Both ports are therefore reported on the MiM stack's **own** metal levels —
+the bottom-plate conductor for `C<i>_BOT` and the top-plate landing metal for
+`C<i>_TOP` — not on the base routing metal every other analog generator in
+this family reports its terminals on. Landing either terminal on another
+routing level takes no extra generator parameter and no hand-built riser: see
+"Landing a terminal on another routing level" below.
+
 `sky130`, `sg13g2` and `gf180mcu` are supported; requesting `cap_array` for
 any other PDK family raises a clear application error (exit code `1`) rather
 than silently drawing sky130's layer numbers onto the wrong stack. On
@@ -1370,6 +1377,105 @@ three are the identical drawn geometry, selected at extraction time with
 | `connect`      | string | `"independent"` | `"independent"` draws `num` separate capacitors (the output described above, unchanged). `"parallel"` draws one capacitor of `num × C_unit` — see below (#3022). |
 | `stack` | int | `1` | `1` draws one MiM level (unchanged). `2` (sky130 only, requires `connect: "parallel"`) stacks the `capm2`/met4 level over the `capm`/met3 one — see below (#3332). Other values and other families are rejected with a `GenError`. |
 | `top_via_pitch_um` | double | `0.0` | `connect: "parallel"` only: pitch (µm) of the top-plate via grid over each unit. `0.0` = twice the drawn via side. A nonzero value must be `>= 0.44`; rejected with `connect: "independent"`. |
+
+#### Landing a terminal on another routing level (#5556)
+
+Both terminals sit on the MiM stack's **own** metal levels, one level apart,
+while every sibling analog generator (`mos_array`, `diff_pair`, `res_array`,
+`guard_ring`) reports its terminals on the base routing metal (sky130 li1
+`67/20`, or poly `66/20` for a gate contact). Per family:
+
+| family | `C<i>_BOT` — bottom-plate conductor | `C<i>_TOP` — top-plate landing metal |
+| ------ | ----------------------------------- | ------------------------------------ |
+| `sky130` | met3 `70/20` | met4 `71/20` |
+| `gf180mcu` | Metal4 `46/0` | Metal5 `81/0` |
+| `sg13g2` | Metal5 `67/0` | TopMetal1 `126/0` |
+
+(`connect: "parallel"` reports the same two levels as `C_BOT`/`C_TOP`;
+`stack: 2` reports met5 `72/20` for `C_OUTER` and met4 `71/20` for `C_MID`.)
+
+**The supported way to land either terminal on another routing level is a
+[`klt gen-compose`](gen-compose.md) `connectivity[]` net** — not a hand-built
+riser in the caller's own geometry, and not a `cap_array` parameter (there is
+none, deliberately: it would be a second implementation of a via stack this
+repo already draws). Every level in the table above is a member of its
+family's own `ExtractionDeck.metals` stack — the stack (paired with its
+`.vias`) that `gen-compose`'s via ladder walks — so a backbone on a declared
+`routing.layer_role` reaches the terminal by dropping the **full** ladder at
+the pin's own composed-frame position: one via per hop, plus a landing pad on
+every level in between, each pad sized against the resolved family's own DRC
+deck (including the met3/met4 minimum-**area** rules, which bind well before
+minimum width at these sizes). See [`gen-compose.md` § "Multi-level via-drop
+(#1567)"](gen-compose.md#multi-level-via-drop-1567) for the ladder's own
+contract, and § "Via-drop routing (metal2/via, #454)" for how a single hop is
+drawn and sized.
+
+A minimal sky130A request landing `C0_TOP` (met4) on an li1-level
+transistor terminal — `caps.json` is `klt gen cap_array --pdk sky130A
+--params '{"num":1,"plate_w_um":7.07,"plate_h_um":7.07}'`, `mos.json` a
+default `klt gen mos_array`:
+
+```json
+{
+  "pdk": { "variant": "sky130A" },
+  "blocks": [
+    { "id": "mos", "generator_report": "mos.json" },
+    { "id": "caps", "generator_report": "caps.json" }
+  ],
+  "placement": {
+    "strategy": "explicit",
+    "order": ["mos", "caps"],
+    "origins_um": {
+      "mos": { "x": 0.0, "y": 0.0 },
+      "caps": { "x": 10.0, "y": 0.0 }
+    }
+  },
+  "connectivity": [
+    {
+      "net": "CTERM",
+      "pins": [
+        { "block": "mos", "port": "U0_D" },
+        { "block": "caps", "port": "C0_TOP" }
+      ]
+    }
+  ],
+  "routing": { "layer_role": "metal", "width_um": 0.42 },
+  "options": { "cell_name": "cap_tap", "output": "cap_tap.gds" }
+}
+```
+
+`CTERM` comes back `status: "routed"` with `landed_on_block: true`, and the
+composed top cell carries the whole li1→met4 ladder it drew — a via cut on
+each of mcon `67/44`, via `68/44`, via2 `69/44` and via3 `70/44`, with a
+landing pad on li1, met1, met2, met3 and met4. `klt drc --deck sky130` on the output reports
+`violation_count: 0`, and `klt extract --deck sky130` returns the transistor's
+drain and the `sky130_fd_pr__model__cap_mim` device's top plate as **one**
+node, named `CTERM` — the connection is electrical, not just a clean stream
+(a riser that misses the plate passes DRC and shows up only as an extra
+dangling node in the extracted netlist). Naming `C0_BOT` (met3) instead does
+the same with one hop fewer, landing on the capacitor's bottom plate and
+leaving the top plate its own distinct node. Both directions are pinned by
+`test_compose_lands_cap_array_terminal_on_li1_via_ladder` in
+`tests/test_gen_compose_cap_ladder.py`.
+
+**Verified end to end on sky130 only.** `gf180mcu`'s and `sg13g2`'s terminal
+levels are members of their own decks' `metals` stacks too, so the same
+resolution applies there by construction — but neither family's ladder onto a
+MiM terminal is covered by a test, and neither has been checked for
+DRC-cleanliness or extracted connectivity on those upper levels. Treat a
+non-sky130 composition as unproven until it is.
+
+**Mind the terminal's declared direction when placing the neighbour.**
+`C<i>_BOT` faces `180` (due west, off the bottom plate's left edge) and
+`C<i>_TOP` faces `90` (due north, off the escape pad), so the neighbour has
+to sit on the faced side with a channel wide enough for the backbone's
+midpoint jog — hence `"explicit"` placement at a 10µm gap above, rather than
+a tight `"row"`. Crowding the capacitor instead gets the net rejected for
+routing *topology* (approaching a pin from behind, threading the neighbour's
+own drawn metal), which is a placement problem and not a layer-stack one; see
+[`gen-compose.md`](gen-compose.md) § "Known limitations" and
+[`layout-plan-execute.md`](layout-plan-execute.md)'s mixed-device routing
+note.
 
 #### `connect: "parallel"` — one capacitor from many units (#3022)
 
