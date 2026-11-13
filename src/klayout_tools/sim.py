@@ -145,6 +145,7 @@ from . import sim_analysis_overrides as _sao
 from . import sim_bin_range as sim_bin_range
 from . import sim_op_check as sim_op_check
 from . import sim_peak_rss as sim_peak_rss
+from . import sim_provenance as sim_provenance
 from . import sim_staging as sim_staging
 from ._batch_common import apply_unrun_signal
 from ._jsonnum import is_int, is_number
@@ -194,7 +195,7 @@ from .sim_batch_async import (
 )
 from .sim_batch_async import submit_only as _submit_batch_only
 from .sim_batch_features import attach_models_lib_comparison, pop_remote_diagnostics
-from .sim_cause import _with_fatal_error_cause
+from .sim_cause import _MEAS_ABSENT_CAUSE_RE, _cause_suffix, _with_fatal_error_cause
 from .sim_convergence_retry import is_retryable_convergence_failure, note_not_retried
 from .sim_corner_keys import unknown_key_warnings
 from .sim_decks import run_deck_request
@@ -3246,11 +3247,11 @@ def _prepare_sim_request(
     osdi_preload = _resolve_osdi_preload(
         options, request_dir, frozenset(osdi_runner_resolved), osdi_pdk_root
     )
-    # Issue #2668: opt-in staging of the request's own model inputs for the
-    # off-host backends. Validated for every backend (a typo'd value is
-    # always named) but only *acts* off-host -- `local`/`local-parallel`
-    # already read the files where they are. See `sim_staging.stage_sim_job`.
+    # Issue #2668 staging and issue #5325's `options.pdk_revision`: both are
+    # validated for every backend (a typo'd value is always named, never
+    # silently dropped) but only *act* off-host, in `stage_sim_job`.
     stage_model_inputs = sim_staging.stage_model_inputs_requested(request)
+    sim_provenance.pdk_revision_asserted(request)
     # An `.osdi` is a host-architecture shared library compiled against one
     # ngspice's OSDI ABI, so by default the off-host backends refuse the
     # option rather than stage it (see docs/cli/sim.md's "OSDI (Verilog-A)
@@ -4875,7 +4876,7 @@ def _build_dry_run_report(
     models_lib: str | None,
     corner_points: list[CornerPoint],
     monte_carlo_info: dict[str, Any] | None,
-    staged_model_environment: dict[str, list[dict[str, Any]]],
+    staged_model_environment: dict[str, Any],
     feature_diagnostic: dict[str, Any] | None = None,
     bin_range_diagnostic: dict[str, Any] | None = None,
     published_runner: dict[str, Any] | None = None,
@@ -4932,23 +4933,21 @@ def _preflight_staged_model_inputs(
     backend: str,
     enabled: bool,
     dry_run: bool = False,
-) -> dict[str, list[dict[str, Any]]]:
+) -> dict[str, Any]:
     """Stage the complete off-host job closure once, before any backend runs
     (issue #2668), so a missing model input, unresolvable dependency or
     exceeded cap is a named :class:`SimError` before any S3 write, SSH push
-    or instance launch on every off-host path -- single job, remote fleet
-    and batch shards alike.
+    or instance launch -- single job, remote fleet and batch shards alike.
 
     Returns the additive ``environment`` keys describing what the worker
-    receives: ``{"staged_model_inputs": [...]}`` -- one ``{name, field,
-    kind, sha256, rewritten}`` per staged model file, hashing the bytes the
-    worker actually reads (a library whose ``.include``/``.lib`` targets were
-    rewritten hashes differently from its source; an ``.osdi`` never does)
-    -- or ``{}`` when the option is off or the backend runs locally.
+    receives -- ``staged_model_inputs``, and ``pdk_revision_asserted`` when
+    the request declared one (:mod:`sim_provenance` owns both shapes) -- or
+    ``{}`` on a local run, which also leaves a declared
+    ``options.pdk_revision`` validated but unechoed.
 
     A dry run stages the netlist closure even with the option off, so it
-    reports the same netlist refusals (an unreadable ``.lib``/``.include``
-    target) the real submit would, before any run directory exists.
+    reports the same netlist refusals the real submit would, before any run
+    directory exists.
     """
     if backend not in _OFFHOST_BACKENDS or not (enabled or dry_run):
         return {}
@@ -4963,7 +4962,8 @@ def _preflight_staged_model_inputs(
     if not enabled:
         return {}
     return {
-        "staged_model_inputs": [asset.to_json() for asset in staged_job.model_assets]
+        "staged_model_inputs": [asset.to_json() for asset in staged_job.model_assets],
+        **sim_provenance.pdk_revision_environment(request),
     }
 
 
@@ -10244,14 +10244,6 @@ _ABSENT_STATUS = "absent"
 ABSENT_DIAGNOSTIC_CODE = "measurement_absent"
 
 
-#: ngspice's reason text when a ``.meas`` search (``WHEN``/``TRIG``/``TARG``/
-#: ``FIND ... WHEN``) never found its crossing in the analysis interval, e.g.
-#: ``Error: measure  x  when(WHEN) : out of interval`` (verified on ngspice-46).
-#: The one engine reason that means "this figure does not exist at this point";
-#: any other ``Error: measure`` reason is a malformed card and stays an error.
-_MEAS_ABSENT_CAUSE_RE = re.compile(r"out of interval", re.IGNORECASE)
-
-
 #: ngspice's data-row count line, e.g. ``No. of Data Rows : 1`` (verified on
 #: ngspice-46). An ``ac lin 2 ...`` sweep leaves one row, so ``.meas ac ...
 #: AT=`` cannot interpolate and fails without an ``Error: measure`` line
@@ -10318,7 +10310,7 @@ def _no_value_measurement(
         return result, diagnostic, cause is not None
     message = _no_value_message(spec, save_mode=save_mode)
     if cause is not None:
-        message += f" -- ngspice reported: {cause}"
+        message += _cause_suffix(cause)
     elif too_few_points and spec.get("spice"):
         message += _AC_TOO_FEW_POINTS_HINT
     result = {
