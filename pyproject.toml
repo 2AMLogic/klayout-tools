@@ -45,8 +45,9 @@ dev = [
     # Pinned to a major so diagnostics (and thus type-baseline.json) stay
     # stable between releases.
     "mypy>=2.4,<3",
-    # Lets tests/test_mcp_server.py run its stdio round-trip in CI. Dev-only:
-    # the test importorskip()s `mcp`, so the suite also passes without it.
+    # Lets tests/test_mcp_server.py and tests/test_mcp_resources.py run their
+    # stdio round-trips (and the in-process resource-handler tests) in CI.
+    # Dev-only: they importorskip() `mcp`, so the suite also passes without it.
     "mcp>=2.0,<3",
 ]
 # Backs `klt mcp serve` (issue #2830): the stdio MCP bridge over the verb
