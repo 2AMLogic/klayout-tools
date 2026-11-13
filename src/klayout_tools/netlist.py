@@ -84,7 +84,12 @@ from .netlist_inputs import (
     split_inputs_record,
 )
 from .netlist_paths import _PATH_COMMENT_RE, postprocess_netlist
-from .netlist_pdk import _pdk_root_consistent, _rcfile_pdk_root, _with_symbol_path_env
+from .netlist_pdk import (
+    _pdk_env_note,
+    _pdk_root_consistent,
+    _rcfile_pdk_root,
+    _with_symbol_path_env,
+)
 
 #: Payload schema version (``docs/json-contract.md``; versioned per command).
 SCHEMA_VERSION = 1
@@ -803,30 +808,6 @@ def _unevaluated_expr_warnings(
             "xschem_version": version,
         }
     ]
-
-
-def _pdk_env_note(rcfile: str | None, exported_env: dict[str, str] | None) -> str:
-    """Name what klt can observe about xschem's PDK setup, for error text.
-
-    ``exported_env`` is the env klt built *because it resolved a PDK*, and is
-    therefore guaranteed to carry ``PDK_ROOT``/``PDK``. Pass ``None`` whenever
-    klt did not resolve one — including when it built an env for another
-    reason, such as ``--symbol-path`` (issue #5441) — so the note reports what
-    xschem actually inherited instead of claiming klt exported it.
-    """
-    if exported_env is not None:
-        seen = (
-            f"PDK_ROOT={exported_env['PDK_ROOT']} PDK={exported_env['PDK']} "
-            "(exported by klt)"
-        )
-    else:
-        root = os.environ.get("PDK_ROOT")
-        variant = os.environ.get("PDK")
-        seen = (
-            f"PDK_ROOT={root or 'not set'} PDK={variant or 'not set'} "
-            "(inherited, not set by klt)"
-        )
-    return f"xschem ran with --rcfile {rcfile or 'none'} and {seen}. "
 
 
 def _check_no_unresolved_symbol(
