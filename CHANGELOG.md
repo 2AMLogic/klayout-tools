@@ -30,6 +30,58 @@ not `klt --version`, if you need to detect this kind of drift. See
   so additive with no `schema_version` bump. Details in
   `docs/cli/signoff.md`'s "CI usage: `--check`".
 
+- **`klt gen` / `klt layout-plan execute`: a generated stream no longer
+  depends on which generators ran earlier in the same process** (#5499,
+  2026-11-13): `gen`'s reference PCell library is registered once per process
+  and its layout accumulated layer indices in *first-use* order across every
+  PCell produced in that process. `Layout.add_pcell_variant` mirrored that
+  order into each fresh target layout, and KLayout's writers emit a cell's
+  elements in layer-index order — so running a `bjt_array` request before a
+  `mos_array` request reordered the second one's element records. The streams
+  stayed the same size and geometrically identical (zero XOR area on every
+  layer) but hashed differently, so a batch run and a single-plan run of the
+  same plan disagreed and a flow gating on a recorded stream hash went red
+  when an unrelated block joined the batch. `_produce()` now pins the target
+  layout's layer table to a sorted `(layer, datatype)` order taken from the
+  request alone, and `_layout.write_layout()` sets
+  `SaveLayoutOptions.write_context_info = False` so a reader that happens to
+  have the library registered (`klt gen-compose` reading a `klt gen` block
+  back in the same process) uses the geometry in the file instead of
+  re-linking the cell to the live library and re-inheriting its layer order.
+  **Streams written by every `write_layout()` caller — `gen`, `gen-compose`,
+  `gen --pdk-pcell`, `clip`, `fill`, `draw`, `route`, `place-and-route` — no
+  longer carry the `$$$CONTEXT_INFO$$$` structure** naming the library and
+  PCell behind a proxy cell, so they no longer reopen in the KLayout GUI as
+  editable PCell variants; they are product streams, their geometry is
+  unchanged, and nothing in `klt` reads that context back. Committed golden
+  streams regenerated: `examples/dogbone-terminal/example_sky130.gds` and
+  `example_gf180mcu.gds` (geometry byte-for-byte equivalent, zero XOR area on
+  every layer; their `.drc.json` companions are unchanged). No JSON field is
+  added, renamed or removed; no `schema_version` bump.
+- **`klt characterize`: level-sensitive latch arcs** (#5521, 2026-11-13): a
+  cell can now be declared a latch with `cell.enable_pin` (plus optional
+  `cell.enable_level`, `"high"` by default) instead of `cell.clock_pin`, which
+  asserts edge-triggered semantics and is mutually exclusive with it (as is
+  `cell.clock_edge`, whose job `enable_level` takes over). One run then emits,
+  per output pin: a **transparent** data-to-output `timing()` group per
+  referenced data pin (`timing_type : combinational`, measured with the enable
+  held at its active level), an **enable**-to-output group on the enable's
+  *opening* edge (`rising_edge` for an active-high enable, `falling_edge` for
+  active-low), and -- for each `cell.constrained_pins` entry -- setup/hold
+  referenced to the enable's *closing* edge (`setup_falling`/`hold_falling`
+  for an active-high enable, `setup_rising`/`hold_rising` for active-low). All
+  carry the usual six NLDM tables on the request's own slew x load grid. The
+  latch bisection probe passes when the transparent data-to-output delay is
+  within `(1 + options.constraint_degradation)` of its wide-end reference
+  **and** the output still holds the captured level after the enable closes;
+  an unbracketable point (including one that does not hold at the wide end)
+  still raises the existing named error rather than reporting a value. Purely
+  additive: `enable_pin`/`enable_level` are new request fields, no existing
+  JSON field changes shape, and no `schema_version` bump. Worked example:
+  `examples/characterize/request-dlat.json` (+ `dlat.spice`). See
+  [`docs/cli/characterize.md`](docs/cli/characterize.md)'s "Level-sensitive
+  latches".
+
 - **`klt sim`: a bad time bound in `cycle_mean` / `eye` / `settled` /
   `step_resolution` is now reported against its own form, not `crossings`**
   (#5472, 2026-11-13): those four forms share one window-bound parser, which
@@ -58,6 +110,31 @@ not `klt --version`, if you need to detect this kind of drift. See
   `client_stamp_unavailable` still reports an uninstalled variant or an
   install with neither a readable `SOURCES` nor a bundle `.pdk-store.json`.
   No JSON field is added, renamed or removed; no `schema_version` bump.
+
+- **`klt netlist --block`: a `.subckt` port order that is not the schematic's
+  is now reported, and `--check`'s attribution is corrected** (#5473,
+  2026-11-13): a block's port order is the positional contract of every
+  `subckt-call` instantiation and LVS reference, and three things about it
+  were silent. Measured against xschem 3.4.7: a sibling `<stem>.sym` decides
+  the top sheet's port order, not the pin instances in the `.sch`; without
+  one the pins' **file** order decides it (`sim_pinnumber` overrides that, but
+  is ignored when a symbol exists); and a schematic pin the symbol does not
+  declare is dropped from the card with exit `0` and no warning. `--block`
+  now compares the two and sets the new additive `block.port_order`
+  (`{"schematic", "emitted", "symbol"}`, `null` when they agree or cannot be
+  compared) plus a `block.warning` giving both lists, naming the symbol the
+  order came from, and naming any omitted pin. `klt netlist` still never
+  rewrites the header — the emitted card has to stay the card xschem writes
+  for the same cell as a child. `--check`'s port-order `reason` no longer
+  states "different xschem builds order ports differently" as fact: it names
+  the sibling symbol when there is one and offers an xschem build difference
+  as a further possible cause. `schema_version` stays `1`;
+  `drift.subckt_port_order`, `status: "drifted"` and exit `3` are unchanged.
+  Not comparable (reported as `null` with no warning, never guessed at): a
+  bus or comma-list pin label, custom pin symbols in place of xschem's
+  `ipin`/`opin`/`iopin` devices, an emitted port the schematic never
+  declared, and an export that was not testbench-shaped. See
+  `docs/cli/netlist.md` → "Where the port order comes from".
 
 - **`klt drc`: a rule whose `layer_selection` empties its input is now
   `inapplicable`, not `checked`** (#5435, 2026-11-13): applicability was
