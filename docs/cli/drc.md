@@ -1186,6 +1186,31 @@ polygons are measured, so contact bars and rows of abutting 0.16 µm contacts
 oversized contact. They belong to the PDK's separate `CntB.*` family, which
 this deck does not yet transcribe.
 
+**A `layer_selection` decides coverage, not just measurement** (issue #5435).
+Applicability is settled *after* the selection runs, on the same per-top-cell
+merged region the check itself measures: a rule whose selected region is empty
+in **every** top cell measured zero polygons and could not have failed, so it
+is `inapplicable` with reason `inapplicable_empty_checked_region` — the #3587
+token for "this layer *is* drawn, but this rule's checked region is empty" —
+and is **not** listed in `coverage.checked` / `coverage.rules_checked`. On a
+stream whose whole Cont population is bars, `cont.width.1` and `cont.space.1`
+report exactly that, instead of a `clean` verdict naming two rules that
+measured nothing. Non-empty in at least one top cell and the rule stays
+`checked` with its violations unchanged; the layer absent from the stream
+altogether is still `no_applicable_geometry`, and the rule's layer still
+appears in `coverage.layers_checked` when some *other* rule reads it (here
+`cont.ongrid.1` does). Inapplicable work never makes a run partial, so the
+verdict stays `clean`.
+
+The grading is confirmed per check kind rather than assumed: it applies to the
+kinds where an empty primary region provably reports nothing
+(`width`/`space`/`notch`/`isolated`, the two-layer kinds, `area`, `density`,
+`ongrid`/`angle`, `antenna`), and deliberately not to `net_space` (which
+rebuilds its own regions and never reads the selected one) or to an
+`enclosing` rule with `require_containment`, where an empty primary region
+*is* the violation — every cut unlanded on its conductor (#2726). A rule with
+no `layer_selection` is graded exactly as before, from layer presence.
+
 sg13g2's `cont.width.1`/`via1.width.1`–`via4.width.1` and sky130's
 `via.width.1` were first deferred behind issue #2585: `klt gen` and
 `klt gen compose` drew every cut at a PDK-generic `gen.CONTACT_SIZE_UM`
@@ -3622,6 +3647,25 @@ A rule the caller deliberately left out of a `--rules` subset (issue #2768)
 never reaches this question: it is always `skipped` with reason
 `not_selected`, whatever its layers — see "Rule listing and selection"
 above.
+
+A rule whose layer *is* drawn can still be inapplicable, and that case is also
+decided directly rather than through the absent-layer question: when the
+rule's own checked region comes out empty anyway, it reports `reason:
+"inapplicable_empty_checked_region"` under `inapplicable`, with the same "no
+effect on the rollup" consequence as `no_applicable_geometry`. Two narrowings
+reach it, each graded on the very region the check measures:
+
+- a `"comp_coverage"` rule whose marker exemption exempts every checked
+  polygon (issue #3587 — see that check kind's section above), and the
+  equivalent empty voltage-selected region for `"tap_distance"` (#3607);
+- a rule whose `layer_selection` selects away all of its layer's geometry in
+  every top cell (issue #5435 — see "`layer_selection` decides coverage"
+  above).
+
+The distinction from `no_applicable_geometry` is the actionable part: the
+layer is present, so the geometry this stream *does* draw on it may be the
+business of a sibling rule family the deck has not transcribed (sg13g2's
+`CntB.*`, for the contact case) rather than of nothing at all.
 
 One skipped rule is not an absent-layer skip at all (issue #2642), so it is
 classified directly rather than through that question: an `"ongrid"` rule
