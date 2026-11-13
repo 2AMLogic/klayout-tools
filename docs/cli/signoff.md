@@ -1322,7 +1322,13 @@ gains no `detail`.
 `klt signoff --attest` (both `--inventory` and `--input`) adds a top-level
 `manifest_entry` (`{"file": <--output or null>, "content_hash": "sha256:<hex>"}`)
 to its JSON result and prints it in text mode; it is not written into the
-`--output` envelope. Paste it into the manifest to pin the attestation.
+`--output` envelope. Paste it into the manifest to pin the attestation, or let
+[`--repin`](#re-pinning-a-stale-hash---repin-issue-5527) write it there for you
+— after an inventory change, re-attesting alone leaves the manifest's old pin
+in place and the item grades `stale_evidence`. **`--attest --check` reporting
+`match` says nothing about the manifest pin**: it compares the committed
+envelope against the inventory and has no manifest in hand, so it can answer
+`match` while the manifest grade is already broken.
 
 What each item binds:
 
@@ -2640,6 +2646,88 @@ Note that this is a separate question from drift: a version pin alone does
 not pin the grading build (that is what `grading_ruleset_id` is for, below),
 and `--check` excludes the whole `build` block from its verdict precisely
 because two legitimate installs of the same commit disagree about it.
+
+### Re-pinning a stale hash: `--repin` (issue #5527)
+
+When an attestation inventory changes, `klt signoff --attest` regenerates the
+envelope correctly — but the manifest's pinned `content_hash` still names the
+**old** input hash, so the next `--manifest` run grades the item
+`unmet`/`stale_evidence`. Re-pinning was a hand edit of JSON, and forgetting
+it is a silent downgrade of a signoff verdict.
+
+`--repin` is the mechanical half of that step:
+
+```bash
+klt signoff --attest 9 --inventory attestation/item9-inventory.json \
+  -o attestation/item9-envelope.json
+klt signoff --repin --manifest manifest.json      # <- this
+klt signoff --manifest manifest.json              # item 9 is met again
+```
+
+It rewrites, in place, the `content_hash` of every evidence entry whose pin
+is stale **and** whose live hash this grader re-derived from the artifact
+itself. It renders no tier verdict: exit `0` means the pass ran, not that the
+block is T1. Re-grade with `--manifest` afterwards.
+
+**What it refuses to touch** is the point of the command, not a limitation:
+
+| Entry | What `--repin` does | Why |
+| ----- | ------------------- | --- |
+| Stale pin, `input_verified: true` | **Rewritten**, and reported | The new value is a hash this run computed from the artifact on disk, not a claim copied out of the evidence |
+| Stale pin, `input_verified` `false`/`null` | Left alone, reported as skipped (`input_not_verified`) | For `drc`/`lvs`/`extract`/`sim` the pin is the manifest author's *independent* claim about which revision was checked; copying the report's own say-so into the manifest would defeat the staleness gate the pin exists to be |
+| Pin cannot be compared for this kind | Left alone, skipped (`unverifiable_pin`) | There is no live hash to re-pin to |
+| Pinned entry whose evidence will not resolve | Left alone, skipped (`unresolved_evidence` / `invalid_evidence`) | Nothing was read, so nothing is known |
+| Entry that pins nothing (bare-string form, or no `content_hash`) | Left alone, **never given a pin**, not reported | `--repin` updates an existing claim; it does not manufacture one |
+
+A manifest with nothing to re-pin is **not written at all** — its bytes and
+mtime are untouched, so a no-op `--repin` cannot show up in a diff. A
+rewritten manifest is serialized as 2-space-indented JSON with a trailing
+newline, the shape every manifest in this repo already uses, so the diff is
+the changed `content_hash` lines and nothing else. A manifest stored in some
+other layout is normalized to that shape.
+
+`--repin` requires `--manifest FILE` and refuses `--manifest -`: stdin cannot
+be written back. It is mutually exclusive with the envelope `<file>`
+arguments and with `--fleet`, `--attest`, `--check` and `--describe-grader` —
+each a mode that renders or checks something, where `--repin` writes. All of
+those are usage errors (exit `2`). `--repo-root` applies as it does to
+`--manifest`, since the same input-artifact resolution decides
+`input_verified`.
+
+#### `--repin` JSON
+
+```bash
+$ klt signoff --repin --manifest manifest.json --format json
+{
+  "schema_version": 1,
+  "status": "repinned",
+  "manifest": "manifest.json",
+  "block": "example-current-mirror",
+  "changed_count": 1,
+  "skipped_count": 0,
+  "changed": [
+    {
+      "item": "9",
+      "index": null,
+      "file": "attestation/item9-envelope.json",
+      "old_content_hash": "sha256:e613d0…",
+      "new_content_hash": "sha256:334575…"
+    }
+  ],
+  "skipped": []
+}
+```
+
+| Field | Meaning |
+| ----- | ------- |
+| `status` | `"repinned"` if any pin was rewritten, `"unchanged"` otherwise (the file was then not written) |
+| `manifest` | The manifest path, as given |
+| `block` | The manifest's `block`, echoed, or `null` |
+| `changed[]` | One record per rewritten pin: `item` (the evidence key verbatim, e.g. `"9"` or `"9.analog"`), `index` (position within a multi-citation list entry, else `null`), `file`, `old_content_hash`, `new_content_hash` |
+| `skipped[]` | One record per pinned entry that could not be confirmed fresh and was not rewritten: `item`, `index`, `file`, `reason` (`input_not_verified`, `unverifiable_pin`, `unresolved_evidence`, `invalid_evidence`) |
+
+`--format text` prints the same outcome as a courtesy; the JSON is the
+contract.
 
 ### Identifying the grading build
 

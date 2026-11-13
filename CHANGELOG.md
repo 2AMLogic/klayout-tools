@@ -14,6 +14,26 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt signoff --repin` re-pins a block manifest's stale `content_hash`
+  entries** (#5527, 2026-11-13): after an attestation inventory changed,
+  `klt signoff --attest` regenerated the envelope but the manifest's pin
+  still named the old input hash, so the next `--manifest` run silently
+  graded the item `unmet`/`stale_evidence` — and the only fix was a hand
+  edit of JSON. `klt signoff --repin --manifest <file>` now rewrites those
+  pins in place from the evidence they name. It rewrites a pin **only** when
+  the grader re-derived the live hash from the artifact itself
+  (`input_verified: true`); a stale pin it could not re-verify — the
+  `drc`/`lvs`/`extract`/`sim` case, where the pin is the manifest author's
+  independent claim about which revision was checked — is left intact and
+  reported as skipped, and an entry that pins nothing is never given a pin.
+  A manifest with nothing to re-pin is not written at all. The JSON payload
+  (`schema_version: 1`) lists one record per changed and per skipped entry;
+  `--repin` requires `--manifest` (not `-`) and is a usage error combined
+  with the envelope `<file>` arguments, `--fleet`, `--attest`, `--check` or
+  `--describe-grader`. See
+  [`docs/cli/signoff.md`](docs/cli/signoff.md)'s "Re-pinning a stale hash"
+  section.
+
 - **`klt gen` / `klt layout-plan execute`: a generated stream no longer
   depends on which generators ran earlier in the same process** (#5499,
   2026-11-13): `gen`'s reference PCell library is registered once per process
