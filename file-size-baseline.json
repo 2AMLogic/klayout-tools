@@ -189,7 +189,7 @@
     },
     {
       "path": "src/klayout_tools/characterize.py",
-      "lines": 2315
+      "lines": 2243
     },
     {
       "path": "src/klayout_tools/cli/drc_cmd.py",
@@ -609,7 +609,7 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 12537
+      "lines": 12535
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
