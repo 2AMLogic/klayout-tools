@@ -52,7 +52,11 @@ klt pex <layout> --deck <deck> --measure-command <command> --reference-netlist <
   A path that cannot be written is an exit-`1` error. Additive
   ([#4692](https://github.com/2AMLogic/klayout-tools/issues/4692)).
 - `--top` / `--pdk` / `--pdk-root` — passed through to `klt extract`; see
-  [`extract.md`](extract.md).
+  [`extract.md`](extract.md). **One run extracts one top**, and swaps one DUT
+  `.include` for it, so a testbench instantiating two or more cells that are
+  separate layout tops has no both-ends-extracted leg in testbench mode — see
+  ["One extracted top per run"](#one-extracted-top-per-run-testbenches-that-instantiate-several-drawn-cells)
+  for what that rules out and the three routes around it.
 - `--outdir` — overrides where this command writes its own generated
   artifacts: the extracted-side testbench body/request copies (see below),
   and each `klt sim` call's own `options.keep_artifacts` output, namespaced
@@ -419,6 +423,80 @@ would then be missing from the extracted run, which fails with errors such
 as `Undefined parameter`. Content both legs need must instead be inlined
 into the testbench body (for example as a `.param` card). If that is not
 possible, the testbench cannot be represented by the current request shape.
+
+### One extracted top per run: testbenches that instantiate several drawn cells
+
+One `klt pex` run extracts exactly one `--top` and swaps exactly one DUT
+`.include`/`.inc` line for it. Both halves of that sentence are singular by
+construction: the run makes a single `klt extract` call, reports a single
+`extraction` / `body_bias` / `reference_netlist` / `model_mismatch` block
+keyed on that one top, and (per the rule just above) refuses a testbench body
+carrying more than one `.include`/`.inc`.
+
+So a testbench that instantiates **two or more drawn cells that are separate
+tops in the layout** — the common shape being a link bench: a driver cell, a
+declared channel model and a receiver cell in one netlist, measuring an
+end-to-end quantity such as an eye opening, an edge-to-edge delay or a
+crossing level — **has no both-ends-extracted leg in testbench mode**. There
+is no single `--top` that covers the bench, and no second swap point for a
+second extraction. Design a bench set around this before building link
+benches, not after.
+
+Three routes exist today. Each measures something real; none of the first two
+is the post-layout number for the bench as a whole:
+
+- **One end extracted, the other schematic.** Extract the driver and leave
+  the receiver schematic, then the reverse. Each run is a legitimate
+  measurement of *that end's* parasitics, and is reported as such. The two
+  one-ended deltas do **not** compose into the both-ends figure — parasitic
+  effects at the two ends interact through the channel, so their separately
+  measured deltas are not additive.
+- **Extract a top that contains both.** If a cell above the two exists, name
+  it `--top`. The cost scales with that containing top, not with the two
+  cells the bench uses: for an array, that is the whole array (thousands of
+  devices across a full corner matrix of a long transient) for no additional
+  row coverage, since the per-cell extractions already match LVS.
+- **Compose `--extract-only` with `--measure-command` across two runs.** This
+  *does* produce a both-ends-extracted leg, at the cost of moving deck
+  construction to your harness. See immediately below.
+
+#### A both-ends-extracted leg via `--extract-only` + `--measure-command`
+
+`--extract-only` and `--measure-command` are mutually exclusive *within one
+run* (combining them is exit `1`). Across **two** runs they compose:
+
+1. **Run 1** — `klt pex <cell-B-layout> --deck <deck> --extract-only -o
+   b_extracted.spice`. This extracts the second cell and writes a usable
+   parasitic-annotated netlist, with no measurement leg and nothing fake in
+   `delta[]` (`status: "not_checked"`, exit `4` — see `--extract-only` above).
+2. **Run 2** — `klt pex <cell-A-layout> --deck <deck> --measure-command
+   '<harness>' --reference-netlist a_schematic.spice`. The harness builds the
+   whole link deck itself from the path it is handed, and picks the second
+   cell per leg by reading `$KLT_PEX_SIDE`: schematic B when the side is
+   `schematic`, run 1's `b_extracted.spice` when it is `extracted`.
+
+Because `klt pex` hands the harness only a netlist path and compares whatever
+the two legs report, the resulting `delta[]` row is a genuine
+both-ends-schematic vs. both-ends-extracted comparison, computed by `klt pex`
+itself (the caller supplies the measurement, never the comparison — see
+"What this mode does *not* loosen").
+
+**The caveat is a disclosure gap, and it is the reason this is a workaround
+rather than the feature.** Run 2's envelope describes **only its own
+`--top`**: `extraction` (including `device_count`/`net_count`),
+`body_bias`, `provenance` and `layout` all cover cell A alone, and
+`model_mismatch` compares cell A's two netlists only. Cell B's extraction is
+disclosed nowhere in that envelope — its only record is run 1's own
+`--extract-only` envelope, which a reader must be pointed at separately.
+Keeping the two legs' decks comparable is likewise the harness's
+responsibility, not this command's (`pin_count_mismatch`,
+`flat_dut_mismatch` and `pin_order_mismatch` are always `null` in
+`--measure-command` mode).
+
+A first-class multi-top mode — a repeatable `--top` writing one combined
+extracted netlist, so the exactly-one-`.include` rule above is untouched and
+a single envelope discloses every extracted cell — is tracked in
+[issue #5494](https://github.com/2AMLogic/klayout-tools/issues/5494).
 
 ### That one line must plausibly name the DUT
 
