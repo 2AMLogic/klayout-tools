@@ -265,6 +265,7 @@ from .extract_passive_regions import _resistor_body_region as _resistor_body_reg
 from .extract_passive_regions import (
     mom_capacitor_device_class as mom_capacitor_device_class,
 )
+from .extract_pdk_resolve import resolve_pdk_and_model_bindings
 from .extract_progress import StageTimer, active_timer, stage
 from .extract_report import (
     _case_collision_warnings,
@@ -325,13 +326,9 @@ from .extract_warnings import (
     unbiased_pmos_body_warnings,
 )
 from .metrics import is_registered
-from .pdk import PdkNotFoundError, find_pdk
 from .pdk_models import (
     MOS_FLAVOUR_PROPERTY,
-    DeviceBinding,
-    ModelBindingError,
     create_model_binding_delegate,
-    resolve_device_bindings,
 )
 
 # Two-terminal closed-form substrate spreading resistance (issue #2561,
@@ -2868,44 +2865,13 @@ def run_extract(
             "--abstract-cell-lef only has an effect as a pin-resolution "
             "fallback for a cell type --abstract-cells actually matches"
         )
-    # Issue #2761: a FinFET deck has no `--pdk` subcircuit binding; name that
-    # before the PDK lookup below reports a less precise error. No-op for
-    # other decks.
-    from .extract_finfet import refuse_run_options
-
-    refuse_run_options(deck_name, pdk_variant=pdk_variant, pdk_root=pdk_root)
-    pdk_info: dict[str, Any] | None = None
-    # Populated only when a PDK resolves: `{<deck's device class name>:
-    # DeviceBinding}` for every device class this deck extracts that has a
-    # curated binding (MOS + resistor + capacitor on both decks, plus sky130's
-    # bipolar; gf180mcu's bipolar is a documented carve-out and stays absent --
-    # see `klayout_tools.pdk_models`). Drives the `X`-card model-binding writer
-    # below -- see the module docstring's "--pdk-triggered model binding" note.
-    model_bindings: dict[str, DeviceBinding] | None = None
-    _require_pdk_for_device_models(device_models, pdk_variant, pdk_root)
-    if pdk_variant is not None or pdk_root is not None:
-        try:
-            pdk_info = find_pdk(variant=pdk_variant, root=pdk_root)
-        except PdkNotFoundError as exc:
-            raise ExtractError(str(exc)) from exc
-
-        # No `label_layers` (issue #2656) here on purpose: a label-layer
-        # override redirects which GDS purpose net/pin *names* are read from
-        # and cannot change which device classes this deck recognises, which
-        # is the only thing `resolve_device_bindings` reads off the deck.
-        try:
-            deck_for_models = get_extraction_deck(deck_name, deck_options)
-        except (UnknownExtractionDeckError, InvalidDeckOptionError) as exc:
-            raise ExtractError(str(exc)) from exc
-        try:
-            model_bindings = resolve_device_bindings(
-                deck_name,
-                pdk_info["variant"],
-                deck_for_models,
-                device_models=device_models,
-            )
-        except ModelBindingError as exc:
-            raise ExtractError(str(exc)) from exc
+    pdk_info, model_bindings = resolve_pdk_and_model_bindings(
+        deck_name=deck_name,
+        deck_options=deck_options,
+        pdk_variant=pdk_variant,
+        pdk_root=pdk_root,
+        device_models=device_models,
+    )
 
     # `--parasitics` resolves the curated per-PDK RC coefficient table for
     # this deck (see `klayout_tools.decks.ParasiticsDeck`); when the flag is
