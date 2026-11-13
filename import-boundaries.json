@@ -785,6 +785,7 @@
         "klayout_tools.sim_snm_meas",
         "klayout_tools.sim_staging",
         "klayout_tools.sim_step_resolution",
+        "klayout_tools.sim_step_shadow",
         "klayout_tools.sim_steps",
         "klayout_tools.sim_stimulus",
         "klayout_tools.sim_stress",
