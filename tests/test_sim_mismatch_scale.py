@@ -383,3 +383,39 @@ def test_refuses_when_no_library_resolves_for_the_section():
             models={},
             request_dir=".",
         )
+
+
+def test_scan_follows_a_nested_lib_card_and_a_transitive_include(tmp_path):
+    """A section may pull its sigmas in through a nested ``.lib <file>
+    <section>`` card, or through a file that itself ``.include``s another."""
+    (tmp_path / "deep.lib").write_text(".param sg13g2_deep_mm = 1e-3\n")
+    (tmp_path / "mid.lib").write_text(".include deep.lib\n")
+    (tmp_path / "nested.lib").write_text(
+        ".lib inner\n  .include mid.lib\n.endl inner\n"
+    )
+    corner = tmp_path / "corner.lib"
+    corner.write_text(
+        ".lib mos_tt_mismatch\n  .lib nested.lib inner\n.endl mos_tt_mismatch\n"
+    )
+    assert _resolve(3, corner).cards == (("sg13g2_deep_mm", 3e-3),)
+
+
+def test_scan_folds_continuation_lines_and_is_cycle_safe(tmp_path):
+    """A ``+`` continuation is part of its ``.param`` card, and a library
+    that includes itself terminates instead of recursing forever."""
+    (tmp_path / "sigma.lib").write_text(
+        ".include sigma.lib\n.param sg13g2_a_mm = 1\n+ sg13g2_b_mm = 2\n"
+    )
+    corner = tmp_path / "corner.lib"
+    corner.write_text(".lib mos_tt_mismatch\n  .include sigma.lib\n.endl\n")
+    assert _resolve(2, corner).cards == (
+        ("sg13g2_a_mm", 2.0),
+        ("sg13g2_b_mm", 4.0),
+    )
+
+
+def test_attach_is_a_no_op_without_a_diagnostic():
+    report = {}
+    info, points = _info(["mosfet"])
+    sim_mismatch_scale.attach_unreached_families(report, info, points)
+    assert report == {}
