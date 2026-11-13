@@ -1274,6 +1274,25 @@ the job was in flight — the job id there is the one to look up before
 resubmitting. A receipt that cannot be written is a stderr warning, not a
 failed sweep. `--format json` stdout is unchanged.
 
+**`--resume` re-attaches through the receipt, and resubmits a spent job.** On
+an unsharded request, `--resume` re-attaches to the `job_id` the receipt
+records when its `request_sha256` and `unit_count` match the run about to be
+dispatched ([#5350](https://github.com/2AMLogic/klayout-tools/issues/5350));
+any mismatch, or no receipt, submits afresh. A recorded job that has no usable
+result -- outputs gone, a terminally `failed` job, or one still `interrupted`
+after Spot reclaimed it -- is **submitted again under a new job id**, and the
+fresh launch rewrites `batch-receipt.json` with it
+([#5459](https://github.com/2AMLogic/klayout-tools/issues/5459)). Because the
+prior run already waited out `batch.interrupted_grace_s`, the re-attach reports
+a still-`interrupted` job after about one poll instead of burning another full
+window; `batch.interrupted_grace_s: 0` (grace disabled) keeps its unbounded
+wait. At most one resubmit per invocation: if the fresh job is itself reclaimed
+past the (full) grace, the run ends with `batch_job_interrupted` naming the
+*new* job id. As with a shard, resubmitting an interrupted job risks billing it
+twice should the fleet's `reconcile` later re-launch the old one; the exposure
+is bounded by the grace the first run already waited. A `batch_poll_timeout`
+job is never resubmitted -- it may still be running on the fleet.
+
 **Terminating the client does not cancel the job.** The fleet has no cancel
 primitive, so a SIGINT/SIGTERM during the wait prints one stderr line naming
 the job id, bucket and region and stating that the job is left running, then
@@ -1388,15 +1407,21 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   for both). A request whose resume is refused -- a shard map written for a
   different request (`resume_fingerprint_mismatch`; the shard count may differ, since a resume splits only the remaining units, so `--resume` is repeatable), or an
   unreadable one -- becomes an ordinary `error` entry, as it does for a single
-  request, and its siblings still run. A shard
-  still `interrupted` is re-polled first, so resuming it can wait up to another
-  `batch.interrupted_grace_s` (default 1800 s) before its replacement is
-  submitted. The aggregate envelope is unchanged.
+  request, and its siblings still run. A job
+  still `interrupted` is re-polled first, but only briefly: the prior run
+  already waited out `batch.interrupted_grace_s`, so the resume reports it
+  after about one poll and submits its replacement, rather than paying the
+  full window again -- for a shard
+  ([#5371](https://github.com/2AMLogic/klayout-tools/issues/5371)) and for an
+  unsharded single-job request
+  ([#5459](https://github.com/2AMLogic/klayout-tools/issues/5459)) alike.
+  The aggregate envelope is unchanged.
 - **An interrupted (Spot-reclaimed) shard.** Polling is bounded: a shard that
   stays `interrupted` is waited on for at most `batch.interrupted_grace_s`
   (default 1800 s, settable only in the request's `batch` block), and while it
   is polled it holds a `--max-in-flight` slot, so lowering the grace in the
-  request frees the slot sooner. The client never re-submits it itself.
+  request frees the slot sooner. The client never re-submits it mid-run (a
+  later `--resume` does, above).
   To re-run only the units with no result, re-run the same set with the same
   `-o` and `--resume` (or `--attach <batch-shards.json> --collect-partial`,
   then `--resume`). A request the *client* stopped (Ctrl-C/SIGTERM) carries
@@ -2305,17 +2330,35 @@ runner whose image has no readable `SOURCES` stamp:
   and klt does not fail the run on `mismatch`. `pdk_stamp_comparison` is
   unchanged. Text output prints a `models_lib:` line next to `pdk_stamp:`.
 
-`pdk_stamp_comparison` compares the worker's stamp with the `SOURCES` stamp the
-submitter resolves locally (`models.pdk_root` or `$PDK_ROOT`) and reports a
-`mismatch` only when both sides give the **same variant under the same stamp
-scheme**; a missing stamp or an unlike scheme is `not_comparable`, never a
-proven mismatch. The `reason` says which: `client_stamp_unavailable` means the
-submitter has no readable local `SOURCES` or bundle `.pdk-store.json` (set `models.pdk` and
-`models.pdk_root` / `$PDK_ROOT`); `worker_stamp_unavailable` means the runner
+`pdk_stamp_comparison` compares the worker's stamp with the `SOURCES` stamp
+the submitter resolves locally and reports a `mismatch` only when both sides
+give the **same variant under the same stamp scheme**; a missing stamp or an
+unlike scheme is `not_comparable`, never a proven mismatch. The submitter's
+side is stamped from `models.pdk_root` when the request pins one, else
+`$PDK_ROOT`, else -- since issue #5474 -- the install the PDK search order
+resolves, i.e. the very one `provenance.pdk` names. A batch run therefore gets
+a comparison without pinning anything, which matters because `models.pdk_root`
+is *refused* for `batch` (`models_pdk_root_host_path`, it is a submitting-host
+path) and a host whose PDK lives under `~/.ciel` pins nothing.
+The `reason` says which: `client_stamp_unavailable` means no install on the
+submitting host holds `models.pdk`, or the one that does has neither a readable
+`SOURCES` nor a bundle `.pdk-store.json` (set `models.pdk`, and on a host with
+no install, `$PDK_ROOT`); `worker_stamp_unavailable` means the runner
 reported no stamp (older worker or absent capture); `variant_differs` /
 `scheme_differs` mean the two sides name different variants or stamp schemes
 (`SOURCES` wins when present, so a `SOURCES` side against a store-only side is
 `scheme_differs`).
+
+Each side's PDK revision is also reported in full, independently of the
+comparison's status, so a divergence can be attributed from the report alone:
+
+| Side | Where the revision is reported |
+| --- | --- |
+| Submitter | `provenance.pdk.version` (the `SOURCES` stamp text, or `store:<version>`), with `provenance.pdk.source` naming the search-order step it came from (`search root: ~/.ciel`, ...). Present on `local` and `batch` runs alike. |
+| Runner | `environment.remote.worker_environment.pdk.stamp_text` (plus `stamp_scheme` / `stamp_sha256`, and under sharding the same block on each `fleet[]` member). |
+| Submitter's model library | `environment.models_lib_sha256` -- a content hash of the top model library file actually loaded. |
+| Runner's model library | `environment.remote.runner_models_lib_sha256`, compared in `models_lib_comparison`. |
+
 When `pdk.models_staged` is true the image stamp says nothing about the
 executed models, so `pdk_stamp_comparison` instead compares the client's
 `environment.staged_model_inputs` digests with the worker's `model_inputs`
@@ -2509,12 +2552,21 @@ aid, not a diagnosis. Equal PDK commits, equal library hashes and an equal
 ngspice major version do not by themselves show the two executions are
 equivalent.
 
-0. Read `environment.pdk_stamp_comparison` first (the worker's PDK
-   `SOURCES` stamp, or under `options.stage_model_inputs` the per-file sha256
-   of the shipped model files, against the submitter's). A `match` does not
-   prove the model closures are equal. The fatal ngspice line and its code
-   (`model_bin_range`, `ngspice_fatal`, ...) are on the errored unit's
-   `diagnostics` even without `options.keep_artifacts`.
+0. Read `environment.remote.worker_environment.pdk_stamp_comparison` first
+   (the worker's PDK `SOURCES` stamp, or under `options.stage_model_inputs`
+   the per-file sha256 of the shipped model files, against the submitter's).
+   A `match` does not prove the model closures are equal. Each side's revision
+   is reported whatever the comparison says: the submitter's in
+   `provenance.pdk.version`, the runner's in
+   `environment.remote.worker_environment.pdk.stamp_text`, and the two model
+   library hashes in `environment.models_lib_sha256` /
+   `environment.remote.runner_models_lib_sha256` (compared in
+   `models_lib_comparison`) -- quote all four when reporting a divergence.
+   Do **not** reach for `models.pdk_root` here: it is refused for `batch`
+   (`models_pdk_root_host_path`), and since #5474 the submitter's stamp comes
+   from the search-resolved install anyway, so no pinning is needed. The fatal
+   ngspice line and its code (`model_bin_range`, `ngspice_fatal`, ...) are on
+   the errored unit's `diagnostics` even without `options.keep_artifacts`.
 1. Run with `options.keep_artifacts` locally and on `batch`; diff the
    generated per-corner decks (`artifacts.deck`) and logs.
 2. Compare how every `.include`/`.lib` resolved: the expanded paths and
@@ -5860,6 +5912,18 @@ error, exit 1).
   Names follow the `expr` naming rule and are unique within the step. In the
   response, a step measurement is reported as `<step>.<name>` (e.g.
   `light.vout`).
+
+  **Do not name a step measurement after a node a later measurement in the
+  same step reads.** ngspice stores a measurement's result in the step's plot
+  as a vector named after the measurement, so such a name replaces that
+  node's waveform with a one-point scalar, and a later `v(<node>)` read then
+  fails with `out of interval` (or, for an `expr`, silently reduces the
+  scalar to a wrong value). `klt sim` refuses that request up front, naming
+  both measurements and the node
+  ([#5446](https://github.com/2AMLogic/klayout-tools/issues/5446)). Only
+  voltage-family reads of an **earlier** sibling collide: a card reading
+  `v(a)` while itself named `a` reads the node before it binds, and `i(a)`
+  resolves to `<src>#branch`.
 - **Derived measurements**: the top-level `measurements[]`.
   - Each must be an `expr`. A file-scope `.meas` card would run after every
     analysis, so it is refused; put it in the matching step instead.
@@ -7648,10 +7712,45 @@ substitution is **reported rather than discarded**:
   ```text
   models_lib: <outside repo>
   pdk: sky130A open_pdks 0fe599b (via search root: ~/.ciel)
-  pdk: WARNING: variant also installed under search root: ~/.volare -- resolution is first-match-wins; pin models.pdk_root to choose deliberately
+  pdk: WARNING: variant also installed under search root: ~/.volare -- resolution is first-match-wins; pin --pdk-root (or models.pdk_root) to choose deliberately
   ```
 
-**Pinning `models.pdk_root` is the fix**, and it is quiet by construction:
+**On `backend: batch` both warnings name `$PDK_ROOT` instead**
+([#5449](https://github.com/2AMLogic/klayout-tools/issues/5449)). The default
+remedy is a dead end there: `models.pdk_root` — and `--pdk-root`, which is
+folded into it — is refused on that backend with `models_pdk_root_host_path`
+(below), so a submitter who took the advice could not submit. `$PDK_ROOT` is
+the client-side pin that works, because it is the first search candidate and
+is never forwarded to the runner, which reads its own install selected by
+`models.pdk`:
+
+```text
+klt: warning: 2 installs provide PDK variant 'sky130A'; read
+/home/u/.ciel (search root: ~/.ciel), skipped /home/u/.volare (search
+root: ~/.volare). Resolution is first-match-wins, so a pinned open_pdks
+build may not be the one this client read -- set $PDK_ROOT to choose
+which install this client resolves (the only client-side pin backend
+'batch' accepts); the runner reads its own install, selected by
+models.pdk.
+```
+
+```text
+pdk: WARNING: variant also installed under search root: ~/.volare -- resolution is first-match-wins; set $PDK_ROOT to choose which install this client resolves; the runner reads its own, selected by models.pdk
+```
+
+Every other backend's wording is unchanged. `provenance.pdk.ambiguous_sources`
+is identical on all of them.
+
+Both messages key on **`environment.backend.resolved`** — the backend that
+actually ran — not on what was requested. So a host default of
+`$KLT_SIM_BACKEND=batch` that steps back to `local` (a single-unit run, an
+`engine: "xyce"` request, `options.resume`, a host-local
+`options.osdi_preload`; see "Host default" above) keeps the default wording,
+which is the correct advice for that run: it resolves the PDK here, so
+`--pdk-root` / `models.pdk_root` are accepted and do silence the warning.
+
+**Pinning `models.pdk_root` is the fix** (on `local`/`local-parallel`/`remote`;
+see the `batch` note above), and it is quiet by construction:
 step 1 disables the search, so there is no second candidate to be ambiguous
 against. `$PDK_ROOT` narrows the search to one *first* candidate but does not
 disable it, so a run pinned that way still reports any other install it
@@ -7696,7 +7795,19 @@ stay verbatim.
 **refused** on the `batch` backend before any S3 write: exit `1`, `error.code`
 `models_pdk_root_host_path`. It is forwarded verbatim and would not exist on the
 runner; drop it and use `models.pdk`. A path that does not exist here is
-assumed runner-valid and passes.
+assumed runner-valid and passes. `--pdk-root` is folded into `models.pdk_root`
+as an absolute path, so the flag form is refused the same way.
+
+`klt sim --dry-run --backend batch` raises the same error rather than passing
+clean ([#5449](https://github.com/2AMLogic/klayout-tools/issues/5449)), with
+the same code and message, and without resolving a bucket or provision script
+— so a dry run used as a pre-flight cannot green-light a request the submit
+path rejects. Like the warning wording above, the refusal follows the
+**resolved** backend: a dry run a host default steps back to `local` reports
+`backend: local` and accepts a host-local `models.pdk_root`, because that run
+would read it here rather than forward it. To choose which install the
+*client* reads on `batch`, set `$PDK_ROOT` in the submitting environment: it
+is not forwarded to the runner.
 
 When an off-host run returns no value for a `measurements[].expr` measurement,
 the report's top-level `diagnostics[]` also carries a warning with code

@@ -2,6 +2,57 @@
 
 Sections moved byte-for-byte from [WORK_LOG.md](../WORK_LOG.md) by `loom-daemon work-docs archive`.
 
+### 2026-09-13
+
+- **PR #1778**: kb: add reference netlist + measured figures for multi-ro-xor-entropy-source
+- **PR #1777**: fix(synthesize): bound _run_yosys with a timeout to avoid indefinite hangs
+- **PR #1776**: kb: add reference netlists + measured figures for ro-puf, metastability-trng, ring-oscillator-jitter-trng
+- **PR #1774**: feat(gen): populate res_array metal_level for gf180mcu rm1/rm2/rm3, warn on device_class mismatch
+- **PR #1773**: kb: add reference netlists + measured figures for beta-multiplier-bias-cell, cmos-subthreshold-voltage-reference and cmos-ring-vco-current-starved
+- **PR #1772**: feat: generate prefix adders and pick one by measured synthesis
+- **PR #1770**: refactor(benchmarks): split interactive agent provider into its own module
+- **PR #1769**: gen: populate res_array metal_level for sg13g2's res_metal1/res_metal2
+- **PR #1768**: fix(equiv): apply WASI-sandboxed-yosys hint to equiv.py too
+- **PR #1767**: feat(benchmarks): add charge-pump-pll hard-tier design-agent task
+- **PR #1765**: refactor(sim): split fleet shard/merge + remote dispatch into sim_remote.py
+- **PR #1763**: feat(benchmarks): add tool-using interactive design-agent provider
+- **PR #1762**: feat(loom): propagate held PR loom:operator hold onto linked issue(s)
+- **PR #1761**: fix(sim): parse_ascii_rawfile handles ac/sp Flags: complex rawfiles
+- **PR #1760**: kb: add reference netlists + measured figures for rx-front-end-termination-buffer and sram-power-up-puf
+- **PR #1757**: feat(sim): add klt sim --plot waveform SVG rendering (issue #1723)
+- **PR #1754**: kb: add reference netlists + measured figures for folded-cascode-ota and cml-tx-line-driver
+- **PR #1753**: feat(benchmarks): add hard-tier VCO design-agent task (remainder of #1735)
+- **PR #1751**: refactor: dedup SPICE + continuation-line fold into _paths.py
+- **PR #1750**: feat(benchmarks): add medium-tier cascode, integrator and Schmitt trigger tasks
+- **PR #1747**: kb: add reference netlists + measured figures for two-stage-miller-ota and strongarm-latch-comparator
+- **PR #1746**: feat(benchmarks): add medium-tier design-agent tasks (5T OTA + two-stage Miller OTA)
+- **PR #1745**: feat(benchmarks): add hard-tier RC relaxation oscillator design-agent task
+- **PR #1742**: feat(kb): nightly CI drift-check that re-runs measured testbenches
+- **PR #1740**: Design-agent benchmark: live candidate provider driving S4->S6 skills + CI wiring
+- **PR #1737**: kb: add reference netlists + measured figures for five-transistor-ota and inverter-based-comparator
+- **Issue #1775** (closed): synthesize: _run_yosys has no subprocess timeout — auto arithmetic sweep multiplies exposure
+- **Issue #1771** (closed): sky130 subckt `mult=` is inert (needs `m=`) — silently wrong device count, suspected live in charge_pump_recentered.spice
+- **Issue #1766** (closed): Split design_agent_benchmark.py's interactive-agent-provider subsystem (~630 lines) into a separate module
+- **Issue #1764** (closed): Split sim.py's fleet shard/merge + remote dispatch subsystem (~810 lines) into sim_remote.py
+- **Issue #1759** (closed): kb: add reference netlists + measured figures for remaining KB entries (batch 6)
+- **Issue #1758** (closed): gen: res_array has no metal_level entry for sg13g2's drawn res_metal1/res_metal2 classes
+- **Issue #1756** (closed): klt sim: waveform artifact capture (parse_ascii_rawfile) doesn't handle ac/sp's complex-valued rawfile encoding
+- **Issue #1755** (closed): Friction: klt equiv still emits the raw "Can't open script file" error under a WASI-sandboxed yosys — #1368's hint was only wired into klt synthesize
+- **Issue #1752** (closed): Design-agent benchmark: hard-tier PLL task (remainder of #1743)
+- **Issue #1749** (closed): work-finder: stop re-dispatching sweeps on an issue whose sole open PR is loom:operator-held
+- **Issue #1743** (closed): Design-agent benchmark: hard-tier VCO and PLL tasks (remainder of #1735)
+- **Issue #1741** (closed): Dedup SPICE + continuation-line folding: reimplemented in pex.py, op_sanity.py, netlist_normalize.py
+- **Issue #1739** (closed): Design-agent benchmark: fuller interactive/tool-using live-agent provider
+- **Issue #1735** (closed): Design-agent benchmark: hard-tier tasks — oscillator/VCO/PLL
+- **Issue #1734** (closed): Design-agent benchmark: medium-tier tasks — cascode + integrator + Schmitt trigger
+- **Issue #1733** (closed): Design-agent benchmark: medium-tier tasks — 5T OTA + two-stage Miller OTA
+- **Issue #1732** (closed): Design-agent benchmark: live candidate provider driving S4→S6 skills + CI wiring
+- **Issue #1731** (closed): res_array: no drawn-geometry support for a family's own metal-resistor device class, and silent wrong-device substitution when generator/flavor doesn't match declared device_class
+- **Issue #1726** (closed): kb: nightly CI drift-check that re-runs measured testbenches via klt kb validate
+- **Issue #1725** (closed): kb: add reference netlists + measured figures for remaining KB entries
+- **Issue #1723** (closed): klt sim: render waveforms to SVG on a measurement miss so an agent can diagnose from the picture (waveform-image feedback)
+- **Issue #1722** (closed): klt synthesize: arithmetic-architecture lever — generate prefix adders (Sklansky / Brent-Kung / Kogge-Stone) from a cell map and pick per block by measured synthesis
+
 ### 2026-09-12
 
 - **PR #1730**: feat(sim): add per-device operating-point sanity lint (klt sim --op-lint, eval op-sanity gate)
