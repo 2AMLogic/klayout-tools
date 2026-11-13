@@ -119,6 +119,32 @@ def _print_measurement(measurement: dict) -> None:
             )
 
 
+def _print_tops(tops: list | None) -> None:
+    """The text report's ``tops:`` section (issue #5494) -- nothing at all on
+    a single-top run, where ``tops`` is ``null``.
+
+    One line per ``--top`` in ``--top`` order, naming the cell, its own staged
+    extraction, its device/net counts and its ``body_bias`` verdict, so a
+    reader of the courtesy output can attribute the summed counts on the
+    ``extraction:`` line above to the tops that contributed them without
+    reaching for ``--format json``.
+    """
+    if not tops:
+        return
+    print(f"tops: {len(tops)}  ({', '.join(entry['top'] for entry in tops)})")
+    for entry in tops:
+        extraction = entry["extraction"]
+        print(
+            f"  {entry['top']}: {render_path_field(entry['netlist'])}  "
+            f"devices={extraction['device_count']}  "
+            f"nets={extraction['net_count']}  "
+            f"body_bias={entry['body_bias']['status']}"
+        )
+        for field in ("pin_count_mismatch", "flat_dut_mismatch", "pin_order_mismatch"):
+            if entry[field] is not None:
+                print(f"    {field}: {entry[field]['detail']}")
+
+
 def _print_text(report: dict) -> None:
     # Issue #1261: `layout`/`netlist`/`reference_netlist` are the
     # `{path, scope}` shape `env_provenance.repo_relative_path` defines --
@@ -146,6 +172,10 @@ def _print_text(report: dict) -> None:
         f"extraction: deck={extraction['deck']}  "
         f"devices={extraction['device_count']}  nets={extraction['net_count']}"
     )
+    # Additive (issue #5494): only printed for a multi-top run, where the
+    # counts above are sums over every `--top` and `netlist:` names the
+    # combined file. Nothing is printed for a single-top run.
+    _print_tops(report.get("tops"))
     # Additive (issue #2686): only printed when --label-layer was given.
     _print_label_layers(extraction.get("label_layers"))
     # Additive (issue #976): only printed when --critical-net was given.

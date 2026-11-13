@@ -540,7 +540,7 @@
     },
     "pex": {
       "kind": "verb",
-      "description": "`klt pex` implementation: core modules (including the SPICE-text subckt flattener behind --flatten-schematic) plus CLI adapter.",
+      "description": "`klt pex` implementation: core modules (including the SPICE-text subckt flattener behind --flatten-schematic and the repeatable-`--top` multi-top mode) plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.pex_cmd",
         "klayout_tools.pex",
@@ -552,7 +552,10 @@
         "klayout_tools.cli.parser_pex",
         "klayout_tools.cli.parser_pex_extract",
         "klayout_tools.cli.pex_text",
-        "klayout_tools.pex_dry_run"
+        "klayout_tools.pex_dry_run",
+        "klayout_tools.pex_multi_top",
+        "klayout_tools.pex_multi_top_flags",
+        "klayout_tools.pex_multi_top_report"
       ]
     },
     "place_and_route": {
@@ -2340,6 +2343,12 @@
       "exporter": "klayout_tools.sim_batch",
       "symbol": "_default_batch_job_timeout_s",
       "reason": "Issue #5238: extract_batch and netlist_batch each wrapped this sim_batch timeout formula; the shared job_timeout_seconds helper now owns that one call so the backends cannot drift. Promote to a public name when sim_batch is next split."
+    },
+    {
+      "consumer": "klayout_tools.pex_multi_top",
+      "exporter": "klayout_tools.extract",
+      "symbol": "_default_output_path",
+      "reason": "Issue #5494: multi-top mode writes the combined `-o` netlist itself (`klt extract` writes one file per `--top` into a staging directory instead), so it resolves `-o`'s default with `klt extract`'s own helper rather than restating the `<layout>` + `.spice` convention and risking drift from the single-top default. Promote to public when extract.py is next split."
     },
     {
       "consumer": "klayout_tools.pex_dry_run",

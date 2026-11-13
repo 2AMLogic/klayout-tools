@@ -232,9 +232,16 @@ from .coverage import (
 from .extract import ExtractError, run_extract
 from .pex_asap7 import (
     adapt_leg_netlists,
-    netlist_adaptation_for_deck,
     with_fidelity_warnings,
 )
+from .pex_multi_top import (
+    _first_firing,
+    _per_top_preflight,
+    _pex_work_dir,
+    extract_every_top,
+)
+from .pex_multi_top_flags import resolve_tops
+from .pex_multi_top_report import _extraction_block, _tops_block
 from .pex_netlist_text import (
     _device_model_counts,
     _dut_declares_a_circuit,
@@ -2612,7 +2619,7 @@ def run_pex(
     deck_name: str,
     *,
     output: str | None = None,
-    top: str | None = None,
+    top: str | Sequence[str] | None = None,
     pdk_variant: str | None = None,
     pdk_root: str | None = None,
     artifacts_dir: str | None = None,
@@ -2657,6 +2664,11 @@ def run_pex(
     testbench in ``testbench_paths`` against both the schematic DUT it
     already references and the newly-extracted one, producing a per-corner,
     per-spec-row delta report.
+
+    **Multi-top mode (issue #5494).** ``top`` is one cell name (the original
+    contract, unchanged) or a *sequence* of them (``klt pex --top A --top
+    B``), each then extracted on its own into the one concatenated ``output``
+    netlist. Contract: :mod:`klayout_tools.pex_multi_top`'s docstring.
 
     ``deck_name``/``top``/``pdk_variant``/``pdk_root``/``output`` are passed
     through to :func:`~klayout_tools.extract.run_extract` (``parasitics``
@@ -2943,6 +2955,22 @@ def run_pex(
     )
     command_mode = command is not None
     _reject_resistance_graph_with_distributed_rc(resistance_graph, distributed_rc)
+    # Issue #5494: two or more `--top` values put this run in multi-top mode
+    # (`pex_multi_top`), refusing up front what that mode does not define.
+    tops = resolve_tops(
+        top,
+        flatten_schematic=flatten_schematic,
+        device_only_leg=device_only_leg,
+        tie_nets=tie_nets,
+        tie_declared_pins=tie_declared_pins,
+        mom_rlc_net=mom_rlc_net,
+        measure_command=measure_command,
+        extract_only=extract_only,
+        submit_only=submit_only,
+        attach=attach,
+        resume=resume,
+    )
+    multi_top = len(tops) > 1
 
     # Issue #1261: every input-path field this run's own JSON response
     # echoes (`layout`/`netlist`/`reference_netlist`, each `testbenches[]`
@@ -2954,48 +2982,53 @@ def run_pex(
         os.path.dirname(os.path.abspath(layout_path))
     )
 
-    try:
-        extract_report = run_extract(
-            layout_path,
-            deck_name,
-            output=output,
-            top=top,
-            pdk_variant=pdk_variant,
-            pdk_root=pdk_root,
-            parasitics=True,
-            # Issue #1558: `--deck-option`/`--pins` passthrough. `None` for
-            # both whenever the flags were never given, which is the exact
-            # `run_extract` call this module made before they existed.
-            deck_options=deck_options,
-            declared_pins=declared_pins,
-            # Issue #2854: `--rename-declared-pins` passthrough. `False`
-            # whenever the flag was never given, which is the exact
-            # `run_extract` call this module made before it existed.
-            rename_declared_pins=rename_declared_pins,
-            tie_declared_pins=tie_declared_pins,
-            # Issue #2686: `--label-layer` passthrough. `None` when the flag
-            # was never given -- the exact `run_extract` call made before it.
-            label_layers=label_layers,
-            device_models=device_models,
-            critical_nets=critical_nets,
-            critical_net_patterns=critical_net_patterns,
-            critical_net_all=critical_net_all,
-            critical_net_excludes=critical_net_excludes,
-            distributed_rc=distributed_rc,
-            # Issue #4037: `False`/`None` whenever the flags were never given,
-            # which is the exact `run_extract` call made before they existed.
-            resistance_graph=resistance_graph,
-            resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
-            emit_selected_resistance=resistance_graph,
-            parasitic_variants=parasitic_variants,
-            substrate_tie_ohms=substrate_tie_ohms,
-            mom_rlc_net=mom_rlc_net,
-            mom_rlc_resistance_ohm=mom_rlc_resistance_ohm,
-            mom_rlc_capacitance_ff=mom_rlc_capacitance_ff,
-            mom_rlc_inductance_nh=mom_rlc_inductance_nh,
-        )
-    except ExtractError as exc:
-        raise PexError(f"extraction failed: {exc}") from exc
+    # Issue #5494: every `run_extract` keyword except `output`/`top` -- bound
+    # once so the single-top call and the per-top loop cannot drift apart.
+    # Each "flag never given" default reproduces the pre-flag call.
+    extract_kwargs: dict[str, Any] = dict(
+        pdk_variant=pdk_variant,
+        pdk_root=pdk_root,
+        parasitics=True,
+        # Issue #1558: `--deck-option`/`--pins` passthrough. `None` for
+        # both whenever the flags were never given, which is the exact
+        # `run_extract` call this module made before they existed.
+        deck_options=deck_options,
+        declared_pins=declared_pins,
+        # Issue #2854: `--rename-declared-pins` passthrough. `False`
+        # whenever the flag was never given, which is the exact
+        # `run_extract` call this module made before it existed.
+        rename_declared_pins=rename_declared_pins,
+        tie_declared_pins=tie_declared_pins,
+        # Issue #2686: `--label-layer` passthrough. `None` when the flag
+        # was never given -- the exact `run_extract` call made before it.
+        label_layers=label_layers,
+        device_models=device_models,
+        critical_nets=critical_nets,
+        critical_net_patterns=critical_net_patterns,
+        critical_net_all=critical_net_all,
+        critical_net_excludes=critical_net_excludes,
+        distributed_rc=distributed_rc,
+        # Issue #4037: `False`/`None` whenever the flags were never given,
+        # which is the exact `run_extract` call made before they existed.
+        resistance_graph=resistance_graph,
+        resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
+        emit_selected_resistance=resistance_graph,
+        parasitic_variants=parasitic_variants,
+        substrate_tie_ohms=substrate_tie_ohms,
+        mom_rlc_net=mom_rlc_net,
+        mom_rlc_resistance_ohm=mom_rlc_resistance_ohm,
+        mom_rlc_capacitance_ff=mom_rlc_capacitance_ff,
+        mom_rlc_inductance_nh=mom_rlc_inductance_nh,
+    )
+
+    extract_report, per_top_reports = extract_every_top(
+        layout_path,
+        deck_name,
+        tops,
+        output=output,
+        artifacts_dir=artifacts_dir,
+        extract_kwargs=extract_kwargs,
+    )
 
     # Issue #1525: `run_extract`'s own `netlist_path` field echoes `-o`/
     # `--output` back exactly as the caller spelled it (relative stays
@@ -3024,7 +3057,8 @@ def run_pex(
         extracted_netlist_path,
         layout_path,
         deck_name,
-        top=top,
+        # Issue #5494: refused with two or more tops, so there is one.
+        top=tops[0] if tops else None,
         pdk_variant=pdk_variant,
         pdk_root=pdk_root,
         deck_options=deck_options,
@@ -3049,11 +3083,7 @@ def run_pex(
         else extract_report["netlist_sha256"]
     )
 
-    work_dir = (
-        os.path.abspath(artifacts_dir)
-        if artifacts_dir
-        else os.path.join(os.path.dirname(os.path.abspath(layout_path)), ".klt", "pex")
-    )
+    work_dir = _pex_work_dir(artifacts_dir, layout_path)
     os.makedirs(work_dir, exist_ok=True)
     leg_extracted, leg_device_only = adapt_leg_netlists(
         deck_name, ext_path, dev_path, work_dir, skip=extract_only or command_mode
@@ -3203,8 +3233,21 @@ def run_pex(
     # handed, so neither the premise nor the consequence holds -- reporting
     # it anyway would be a false alarm, and (worse) would skip the
     # extracted-side measurement the harness is perfectly able to take.
+    #
+    # Issue #5494: with two or more tops `_per_top_preflight` requires a
+    # schematic `.SUBCKT` per `--top` and runs these three diagnostics once
+    # per top; the singular field here is then the first firing top's.
+    per_top_preflight = _per_top_preflight(
+        tops,
+        schematic_netlist=schematic_netlist_path,
+        reference_netlist=reference_netlist_path,
+        extracted_netlist=extracted_netlist_path,
+    )
+
     flat_dut_mismatch = (
-        None
+        _first_firing(per_top_preflight, "flat_dut_mismatch")
+        if multi_top
+        else None
         if command_mode or extract_only
         else _flat_dut_mismatch(
             reference_netlist=schematic_netlist_path,
@@ -3281,7 +3324,9 @@ def run_pex(
     backend_failure: dict[str, Any] | None = None
     # Issue #5282: legs that lost shards (partial result, resumable).
     unfinished: list[dict[str, Any]] = []
-    if not command_mode and not extract_only and flat_dut_mismatch is None:
+    if multi_top:
+        pin_count_mismatch = _first_firing(per_top_preflight, "pin_count_mismatch")
+    elif not command_mode and not extract_only and flat_dut_mismatch is None:
         pin_count_mismatch = _pin_count_mismatch(
             reference_netlist=schematic_netlist_path,
             extracted_netlist=extracted_netlist_path,
@@ -3293,13 +3338,17 @@ def run_pex(
     # and the schematic must declare the subcircuit), and `None` in
     # `--measure-command` mode for the same reason. It skips the extracted
     # leg and yields `status: "error"` / exit 4, like its siblings.
-    pin_order_mismatch = _pin_order_preflight(
-        command_mode,
-        (flat_dut_mismatch, pin_count_mismatch),
-        extract_only=extract_only,
-        reference_netlist=reference_netlist_path,
-        extracted_netlist=extracted_netlist_path,
-        top_cell=extract_report["top"],
+    pin_order_mismatch = (
+        _first_firing(per_top_preflight, "pin_order_mismatch")
+        if multi_top
+        else _pin_order_preflight(
+            command_mode,
+            (flat_dut_mismatch, pin_count_mismatch),
+            extract_only=extract_only,
+            reference_netlist=reference_netlist_path,
+            extracted_netlist=extracted_netlist_path,
+            top_cell=extract_report["top"],
+        )
     )
 
     # Issue #4696: a static pre-flight diagnostic skips the extracted leg, so
@@ -3555,7 +3604,6 @@ def run_pex(
     # failures and errors retain precedence over coverage qualification.
     status = _status_from_coverage(coverage, failed=bool(failed), errored=bool(errored))
 
-    parasitics = extract_report.get("parasitics") or {}
     result: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "status": status,
@@ -3571,85 +3619,25 @@ def run_pex(
         # Additive field (issue #2875): content identity of the schematic
         # DUT / `--reference-netlist` the schematic leg used.
         "reference_netlist_sha256": reference_netlist_sha256,
-        "extraction": {
-            "deck": deck_name,
-            "netlist_adaptation": netlist_adaptation_for_deck(deck_name),
-            "device_count": extract_report["device_count"],
-            "net_count": extract_report["net_count"],
-            "netlist_sha256": extracted_netlist_sha256,
-            "model": parasitics.get("model"),
-            # Additive field (issue #976): echoes `--critical-net` back --
-            # `[]` when the flag was never given, byte-identical to before
-            # this feature existed.
-            "critical_nets": parasitics.get("critical_nets") or [],
-            # Additive field (issue #977): echoes `--distributed-rc` back --
-            # `False` when the flag was never given, byte-identical to
-            # before this feature existed.
-            "distributed_rc": bool(parasitics.get("distributed_rc")),
-            # Additive field (issue #988, Epic #709 Phase 3a): `None`
-            # unless `--mom-rlc-net` was given, in which case it is `klt
-            # extract`'s own substitution report (see
-            # `run_extract`'s `mom_rlc_net` docstring paragraph) --
-            # byte-identical to before this feature existed otherwise.
-            "mom_rlc_override": parasitics.get("mom_rlc_override"),
-            # Additive field (issue #2686): `klt extract`'s own
-            # `label_layers` echo for this run's extraction -- the applied
-            # `--label-layer` mapping as `{role: [layer, datatype] | null}`,
-            # or `None` when the flag was never given.
-            "label_layers": extract_report.get("label_layers"),
-            # Additive field (issue #4234): `klt extract`'s `device_models`
-            # echo -- the applied `--device-model` mapping, or `None`.
-            "device_models": extract_report.get("device_models"),
-            # Additive fields (issue #5477): `klt extract`'s own device
-            # coverage disclosure -- `device_classes` (issue #221, what the
-            # resolved deck can recognise) and `unsupported_devices` (issue
-            # #2919, the deck-declared "cannot extract this yet" marker
-            # geometry the layout draws) -- forwarded verbatim in every mode,
-            # so a committed envelope carries the same limit statement the
-            # extraction it cites published, instead of making a reader
-            # re-run `klt extract`. Neither sees a family the deck declares
-            # no class for *and* that draws no marker layer (e.g. `pnpMPA` on
-            # sg13cmos5l); see `run_pex` on `model_mismatch` for that gap.
-            "device_classes": extract_report.get("device_classes"),
-            "unsupported_devices": extract_report.get("unsupported_devices"),
-            # Additive field (issue #2854): echoes the effective
-            # `--rename-declared-pins` value back -- `False` when the flag
-            # was never given, byte-identical to before this feature
-            # existed. The renames themselves are `klt extract`'s own
-            # `pin_renames` report, visible here through the extraction's
-            # written netlist (`.SUBCKT` header) rather than re-embedded.
-            "rename_declared_pins": bool(extract_report.get("rename_declared_pins")),
-            "tie_declared_pins": "pin_ties" in extract_report,
-            # Additive field (issue #4383): the PDK install this extraction
-            # actually read -- `klt extract`'s own `pdk` block (`variant`,
-            # `root` as `{path, scope}`, `version`), `None` without `--pdk`.
-            "pdk": extract_report.get("pdk"),
-            # Additive field (issue #2764): the extraction's own
-            # per-net parasitic RC network integrity diagnostics --
-            # threshold/tolerances, aggregate counts, and one entry per net
-            # (verbatim per-net payloads, `parasitics.nets[]` order). See
-            # `_parasitic_integrity_report`.
-            "parasitic_integrity": _parasitic_integrity_report(parasitics),
-            # Additive field (issue #3056): echoes `--parasitic-variant`
-            # back so a variant run is attributable -- present only when
-            # the flag was given, byte-identical to before otherwise.
-            **(
-                {"parasitic_variant": parasitics["parasitic_variant"]}
-                if "parasitic_variant" in parasitics
-                else {}
-            ),
-            # Additive field (issue #4037): present only with
-            # `--resistance-graph`.
-            **(
-                {
-                    "resistance_graph": _resistance_graph_echo(
-                        parasitics, resistance_graph_r_cut_ohm
-                    )
-                }
-                if resistance_graph
-                else {}
-            ),
-        },
+        "extraction": _extraction_block(
+            extract_report,
+            deck_name=deck_name,
+            netlist_sha256=extracted_netlist_sha256,
+            resistance_graph=resistance_graph,
+            resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
+        ),
+        # Additive field (issue #5494): `None` on a zero/one-`--top` run;
+        # otherwise one block per `--top`, where per-top attribution lives.
+        # See `pex_multi_top._tops_block`.
+        "tops": _tops_block(
+            per_top_reports,
+            per_top_preflight,
+            multi_top=multi_top,
+            deck_name=deck_name,
+            resistance_graph=resistance_graph,
+            resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
+            repo_root=repo_root,
+        ),
         # Additive field (issue #1983): whether the extracted netlist this
         # run re-simulated has a DC bias path for every device body, reduced
         # from the extraction's own `unbiased_pmos_body_nets[]` (issue #555).

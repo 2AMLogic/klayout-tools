@@ -60,6 +60,7 @@ from .pex import (
     _resolve_reference_netlist_path,
     _validate_measure_mode,
 )
+from .pex_multi_top_flags import resolve_tops
 from .sim import SimError, run_sim
 
 #: Codes a dry run always reports in ``not_checked[]`` -- what no amount of
@@ -264,7 +265,7 @@ def run_pex_dry_run(
     testbench_paths: Sequence[str],
     deck_name: str,
     *,
-    top: str | None = None,
+    top: str | Sequence[str] | None = None,
     pdk_variant: str | None = None,
     pdk_root: str | None = None,
     backend: str | None = None,
@@ -344,6 +345,15 @@ def run_pex_dry_run(
         device_only_leg=device_only_leg,
     )
     _reject_resistance_graph_with_distributed_rc(resistance_graph, distributed_rc)
+    # Issue #5494: `klt pex --top` is repeatable, so this entry point now
+    # receives a list too. A dry run is refused with two or more tops rather
+    # than silently validating only one of them: its own report is singular
+    # (`top`, one resolved cell name) and its `_extraction_preflight` resolves
+    # one top cell, so validating a multi-top request properly means a second
+    # additive change to *this* command's contract -- out of scope for the
+    # issue that made `--top` repeatable, and tracked in #5511. A
+    # zero-or-one-`--top` dry run is byte-identical to before.
+    tops = resolve_tops(top, dry_run=True)
 
     repo_root = env_provenance.find_repo_root(
         os.path.dirname(os.path.abspath(layout_path))
@@ -352,7 +362,7 @@ def run_pex_dry_run(
     resolved_top = _extraction_preflight(
         layout_path,
         deck_name,
-        top=top,
+        top=tops[0] if tops else None,
         pdk_variant=pdk_variant,
         pdk_root=pdk_root,
         deck_options=deck_options,
