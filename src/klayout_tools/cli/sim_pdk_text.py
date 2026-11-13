@@ -59,24 +59,36 @@ def _print_worker_pdk(report: dict) -> None:
     worker = remote.get("worker_environment")
     if not isinstance(worker, dict):
         return
-    comparison = worker.get("pdk_stamp_comparison")
-    if isinstance(comparison, dict) and comparison.get("status"):
-        line = f"pdk_stamp: {comparison['status']}"
-        if comparison.get("reason"):
-            line += f" ({comparison['reason']})"
-        if comparison.get("basis"):
-            line += f" [basis: {comparison['basis']}]"
-        print(line)
-        if comparison.get("warning"):
-            print(f"warning: {comparison['warning']}")
-    models_cmp = remote.get("models_lib_comparison")
-    if isinstance(models_cmp, dict) and models_cmp.get("status"):
-        line = f"models_lib: {models_cmp['status']}"
-        if models_cmp.get("reason"):
-            line += f" ({models_cmp['reason']})"
-        print(line)
-        if models_cmp.get("warning"):
-            print(f"warning: {models_cmp['warning']}")
+    _print_comparison("pdk_stamp", worker.get("pdk_stamp_comparison"))
+    _print_comparison("models_lib", remote.get("models_lib_comparison"))
+    # Issue #5457: the identity line for a request built out of per-section
+    # corner libraries, whose `models_lib:` line can only ever read
+    # `not_comparable (no_models_lib)`.
+    _print_comparison(
+        "corner_section_libs", remote.get("corner_section_libs_comparison")
+    )
     pdk = worker.get("pdk")
     if isinstance(pdk, dict):
         print(f"models_staged: {str(pdk.get('models_staged') is True).lower()}")
+
+
+def _print_comparison(label: str, comparison: object) -> None:
+    """One ``<label>: <status> (<reason>) [basis: <basis>]`` line, plus any
+    ``warning`` on the line after -- the shape every batch provenance
+    comparison on ``environment.remote`` reports (``pdk_stamp`` #3946,
+    ``models_lib`` #5321, ``corner_section_libs`` #5457). No-op for a
+    comparison that is absent or carries no ``status``, i.e. a non-batch
+    backend or a runner that reported nothing to compare. A mismatch's
+    ``names``/``differing`` list stays JSON-only; the warning text names what
+    a reader needs.
+    """
+    if not isinstance(comparison, dict) or not comparison.get("status"):
+        return
+    line = f"{label}: {comparison['status']}"
+    if comparison.get("reason"):
+        line += f" ({comparison['reason']})"
+    if comparison.get("basis"):
+        line += f" [basis: {comparison['basis']}]"
+    print(line)
+    if comparison.get("warning"):
+        print(f"warning: {comparison['warning']}")
