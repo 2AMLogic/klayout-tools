@@ -73,7 +73,7 @@ import re
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
 
-from ._paths import fold_spice_continuations
+from ._spice_text import fold_spice_continuations, strip_spice_inline_comment
 
 __all__ = ["FlattenResult", "SpiceFlattenError", "flatten_spice"]
 
@@ -132,10 +132,6 @@ _MULTIPLIABLE = frozenset("RCLMQDJZX")
 
 _HIERARCHY_SEP = "."
 
-#: ngspice inline-comment rule: ``;`` anywhere, or a ``$`` with whitespace
-#: before it and whitespace (or end of line) after it.
-_INLINE_COMMENT = re.compile(r"\s\$(?=\s|$)|;")
-
 
 # --------------------------------------------------------------------------- #
 # Lexing
@@ -145,10 +141,10 @@ _INLINE_COMMENT = re.compile(r"\s\$(?=\s|$)|;")
 def _logical_lines(text: str) -> list[str]:
     """Comment-stripped lines with ``+`` continuations folded.
 
-    Inline comments follow ngspice: ``;`` anywhere, or ``$`` with whitespace
-    on both sides (or whitespace before and end of line).  A ``$`` that is
-    glued to the next token -- ``.include $PDK_ROOT/...`` -- is *not* a
-    comment and survives intact.
+    Inline comments follow ngspice via the shared
+    :func:`strip_spice_inline_comment`: ``;`` anywhere, or a token-delimited
+    ``$``.  A ``$`` glued to the next token -- ``.include $PDK_ROOT/...`` --
+    is *not* a comment and survives intact.
     """
     lines: list[str] = []
     for raw in text.splitlines():
@@ -156,7 +152,7 @@ def _logical_lines(text: str) -> list[str]:
         if stripped.startswith("*"):
             lines.append("")
             continue
-        lines.append(_INLINE_COMMENT.split(raw, maxsplit=1)[0].rstrip())
+        lines.append(strip_spice_inline_comment(raw))
     return fold_spice_continuations([line for line in lines if line.strip()])
 
 

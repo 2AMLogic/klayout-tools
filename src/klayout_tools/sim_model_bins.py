@@ -19,6 +19,7 @@ import re
 from typing import Any
 
 from . import _spice_number as spice_number
+from ._spice_text import fold_spice_continuations
 
 #: Cap on library files followed through ``.include``/``.lib`` per run.
 _MAX_FILES = 64
@@ -42,13 +43,19 @@ def _num(raw: str) -> float | None:
 
 
 def _logical_lines(text: str) -> list[str]:
-    lines: list[str] = []
-    for raw in text.splitlines():
-        if raw.lstrip().startswith("+") and lines:
-            lines[-1] += " " + raw.lstrip()[1:]
-        else:
-            lines.append(raw)
-    return lines
+    """``text``'s lines with ``+`` continuations folded onto the card they
+    continue, via the shared :func:`fold_spice_continuations`.
+
+    Unlike the other netlist readers in the package this one deliberately
+    does **not** strip comments, and the fold is the only pre-processing
+    shared with them (issue #5417). Full-line ``*`` comments are kept --
+    none of this module's patterns match one, so they cost nothing -- and
+    inline ``$``/``;`` tails are kept because ``_INCLUDE_RE`` must still see
+    a ``$``-bearing include target in order to skip it (:func:`_include_targets`
+    refuses any reference containing ``$``). Stripping comments here would
+    only narrow what this best-effort, advisory parser can see.
+    """
+    return fold_spice_continuations(text.splitlines())
 
 
 def _include_targets(line: str, base_dir: str) -> list[str]:

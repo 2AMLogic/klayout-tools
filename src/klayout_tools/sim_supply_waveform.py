@@ -23,6 +23,7 @@ import re
 from typing import Any
 
 from . import _spice_number as spice_number
+from ._spice_text import strip_spice_inline_comment
 
 #: Waveform keywords this module can rewrite.
 SCALABLE_KINDS = ("pwl", "pulse")
@@ -36,7 +37,9 @@ _ANY_WAVE_RE = re.compile(
 def _cards(text: str) -> list[tuple[int, int, str]]:
     """Top-level (outside ``.subckt``) logical cards of ``text`` as
     ``(first_line, last_line, joined_text)`` -- ``+`` continuations joined,
-    ``;`` tail comments dropped. Line indices are 0-based and inclusive."""
+    ``;``/``$`` tail comments dropped by the shared
+    :func:`strip_spice_inline_comment`. Line indices are 0-based and
+    inclusive."""
     lines = text.split("\n")
     cards: list[tuple[int, int, str]] = []
     depth = 0
@@ -51,7 +54,7 @@ def _cards(text: str) -> list[tuple[int, int, str]]:
         while index < len(lines) and lines[index].lstrip().startswith("+"):
             joined += " " + lines[index].strip()[1:].strip()
             index += 1
-        joined = re.split(r";|\s\$", joined, maxsplit=1)[0].strip()
+        joined = strip_spice_inline_comment(joined)
         lowered = joined.lower()
         if lowered.startswith("."):
             word = lowered.split(None, 1)[0]

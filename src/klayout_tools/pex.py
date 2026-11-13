@@ -220,8 +220,9 @@ from typing import Any
 
 from . import env_provenance, output_lock, pex_async, pex_sim_evidence
 from ._jsonnum import is_number
-from ._paths import _resolve_relative, fold_spice_continuations
+from ._paths import _resolve_relative
 from ._provenance import content_hash, sha256_file
+from ._spice_text import fold_spice_continuations, strip_spice_inline_comment
 from .coverage import (
     REASON_NO_DELTA_ROWS,
     build_check_coverage,
@@ -733,13 +734,12 @@ def _read_text(path: str) -> str | None:
 
 
 def _logical_lines(netlist_text: str) -> list[str]:
-    """``netlist_text``'s lines with SPICE ``+`` continuation lines folded
-    into the line they continue, and inline ``$``/``;`` comments stripped --
-    so :func:`_subckt_interfaces` sees each `.subckt` header whole."""
-    lines = [
-        re.split(r"\s\$|;", raw, maxsplit=1)[0].rstrip()
-        for raw in netlist_text.splitlines()
-    ]
+    """``netlist_text``'s lines with ``+`` continuations folded onto the line
+    they continue and inline ``$``/``;`` comments stripped by the shared
+    ngspice rule -- so :func:`_subckt_interfaces` sees each `.subckt` header
+    whole, and a ``$PDK_ROOT``-style ``.include`` reaches
+    :func:`_has_include_card`/:func:`_expand_reference_includes` unmangled."""
+    lines = [strip_spice_inline_comment(raw) for raw in netlist_text.splitlines()]
     return fold_spice_continuations(lines)
 
 
