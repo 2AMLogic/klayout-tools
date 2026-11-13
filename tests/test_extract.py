@@ -27111,9 +27111,9 @@ def test_resistance_graph_two_terminal_strip_matches_analytic(tmp_path):
 
 
 def test_resistance_graph_unsupported_net_keeps_the_legacy_scalar(tmp_path):
-    """The deck curates no per-cut resistance, so a net containing a
+    """No `--resistance-graph-r-cut` is supplied here, so a net containing a
     poly->li1 landing reports `unsupported` (with an explicit
-    `unsupported_geometry` diagnostic) and the legacy scalar stays exactly
+    `via_resistance_unknown` diagnostic) and the legacy scalar stays exactly
     as it was."""
     path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
     base = run_extract(
@@ -27356,7 +27356,7 @@ def test_selected_resistance_graph_value_for_a_two_terminal_net(tmp_path):
 
 
 def test_selection_without_r_cut_falls_back_to_legacy_never_an_ideal_via(tmp_path):
-    """The shipped decks give no per-cut resistance and no value is assumed:
+    """No `--resistance-graph-r-cut` is supplied and no value is assumed:
     a cross-level net keeps the legacy scalar and says why."""
     entry, graph = _selected(_strap_fixture("strapped"), tmp_path, None)
     assert graph["status"] == "unsupported"

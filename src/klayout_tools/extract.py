@@ -2030,9 +2030,11 @@ def run_extract(
     ``False`` keeps the legacy-scalar netlist.
 
     ``resistance_graph_r_cut_ohm`` (``--resistance-graph-r-cut``, issue #2983)
-    supplies the per-cut via/contact resistance the shipped decks do not
-    curate (``0`` = ideal via). ``None`` (the default) keeps a net with a
-    cross-level landing ``unsupported`` and on the legacy scalar. Requires
+    supplies the per-cut via/contact resistance (``0`` = ideal via). It is
+    caller-supplied because ``klt extract`` does not yet consume the decks'
+    curated ``cuts`` table (``ParasiticsDeck.cuts``, issue #3053), not because
+    the decks lack one. ``None`` (the default) keeps a net with a cross-level
+    landing ``unsupported`` and on the legacy scalar. Requires
     ``resistance_graph=True``.
 
     ``distributed_rc`` (``klt extract --distributed-rc``, issue #977, Epic
