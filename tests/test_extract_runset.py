@@ -200,6 +200,10 @@ def test_devices_are_written_as_x_subcircuit_calls(tmp_path, fake_klayout):
     # device class's own (S G D B for a MOS4 extractor).
     assert cards[0].endswith(" NMOS")
     assert "no parasitics" in text
+    # The header has to say the call carries no device parameters too: the
+    # netlist is what gets handed to `klt sim`, and a reader who never sees
+    # warnings[] would otherwise read it as a faithful extraction.
+    assert "no device parameters" in text
 
 
 def test_device_model_renames_the_target_subcircuit(tmp_path, fake_klayout):

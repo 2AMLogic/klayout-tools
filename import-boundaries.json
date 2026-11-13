@@ -978,7 +978,7 @@
     {
       "consumer": "extract",
       "exporter": "lvs",
-      "reason": "Issue #5481: `klt extract --engine klayout-runset` drives the *same* PDK-runset launcher `klt lvs --engine klayout-runset` built (binary resolution, -rd construction, timeout and error text), through lvs_runset's public wrappers rather than a second copy, and converts its LvsError into an ExtractError. A copy would drift; the two engines must launch runsets identically."
+      "reason": "Issue #5481: `klt extract --engine klayout-runset` drives the *same* PDK-runset launcher `klt lvs --engine klayout-runset` built (binary resolution, -rd construction, timeout and error text), through lvs_runset's module-private helpers (`_resolve_klayout_binary`, `_run_runset`, `_application_version`, `_error_lines`) rather than a second copy, and converts its LvsError into an ExtractError. A copy would drift; the two engines must launch runsets identically."
     },
     {
       "consumer": "artifact",

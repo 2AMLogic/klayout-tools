@@ -280,10 +280,18 @@ def _write_netlist(
     netlist_path, scratch_dir = _resolve_netlist_target(path, output, no_netlist)
     writer = kdb.NetlistSpiceWriter(_runset_spice_writer_delegate(kdb, models, dropped))
     writer.use_net_names = True
+    # Only the *first* description line is comment-prefixed by
+    # `NetlistSpiceWriter`; every continuation line carries its own `* ` or
+    # ngspice reads it as a card (same convention as `extract.py`'s
+    # sub-circuit header).
     description = (
         f"extracted by klt extract --engine {RUNSET_ENGINE} --deck-file "
         f"{deck_basename}\n"
-        "* no parasitics: this engine extracts devices and connectivity only"
+        "* no parasitics: this engine extracts devices and connectivity only\n"
+        "* no device parameters: each device is an X call onto its class's "
+        "subcircuit with no parameters, so the subcircuit's own declared "
+        "defaults apply -- the measured geometry is in the report's "
+        "devices[].params, and warnings[] names it per class"
     )
     try:
         with stage("netlist_write"):
