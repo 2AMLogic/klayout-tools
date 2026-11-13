@@ -4805,25 +4805,6 @@ def extract_netlist_from_layout(
     )
 
 
-def _require_declared_set_for_rename(
-    rename_declared_pins: bool,
-    declared_pins: frozenset[str] | None,
-    def_pins: frozenset[str] | None,
-    flag: str = "--rename-declared-pins",
-) -> None:
-    """Issue #2854: ``--rename-declared-pins`` with neither ``--pins`` nor
-    ``--def-pins`` is a clean :class:`ExtractError`, not a silent no-op --
-    there is no declared set to rename *to*, and silently extracting an
-    unrenameable netlist would defeat the flag's whole purpose (canonical
-    pin names for ``klt lvs``'s ``options.anchor_top_level_pins``)."""
-    if rename_declared_pins and declared_pins is None and def_pins is None:
-        raise ExtractError(
-            f"{flag} requires a declared pin set to rename "
-            "to -- pass --pins <A,B,...> (or --def-pins <def>), the same "
-            "set whose reconciliation survives the pins it names"
-        )
-
-
 def _default_subcircuit_output_path(netlist_path: str, cell_name: str) -> str:
     """Where ``--subcircuit <cell>`` writes its sliced deck when
     ``--subcircuit-output`` was not given (issue #2245): the flat netlist's own
