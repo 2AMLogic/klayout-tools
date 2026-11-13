@@ -10263,6 +10263,17 @@ _AC_TOO_FEW_POINTS_HINT = (
 )
 
 
+#: Appended to the default-path ``measurement`` diagnostic when ngspice's
+#: reason is "out of interval" (issue #5415): the run completed and the target
+#: was never reached in the analysis window -- not a simulator abort.
+_WINDOW_MISS_HINT = (
+    " -- the analysis completed but the target was never reached inside the "
+    "analysis window (not a simulator failure): lengthen the window, or set "
+    '`on_unreached: "null"` / `optional: true` on this measurement to grade '
+    "it instead of erroring"
+)
+
+
 def _ac_sweep_too_few_points(log_text: str) -> bool:
     """Whether the log's (last) ``No. of Data Rows`` is below 2."""
     rows = _DATA_ROWS_RE.findall(log_text or "")
@@ -10319,6 +10330,8 @@ def _no_value_measurement(
     message = _no_value_message(spec, save_mode=save_mode)
     if cause is not None:
         message += f" -- ngspice reported: {cause}"
+        if _MEAS_ABSENT_CAUSE_RE.search(cause):
+            message += _WINDOW_MISS_HINT
     elif too_few_points and spec.get("spice"):
         message += _AC_TOO_FEW_POINTS_HINT
     result = {
