@@ -145,6 +145,7 @@
         "klayout_tools.drc_crosscheck",
         "klayout_tools.drc_klayout_abort",
         "klayout_tools.drc_klayout_app",
+      "klayout_tools.drc_layer_selection",
         "klayout_tools.drc_klayout_engine",
         "klayout_tools.drc_report_check"
       ]

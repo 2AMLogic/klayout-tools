@@ -273,7 +273,7 @@
     },
     {
       "path": "src/klayout_tools/drc.py",
-      "lines": 3791
+      "lines": 3764
     },
     {
       "path": "src/klayout_tools/drc_klayout_engine.py",
