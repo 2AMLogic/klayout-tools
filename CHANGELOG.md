@@ -14,6 +14,35 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt gen` / `klt layout-plan execute`: a generated stream no longer
+  depends on which generators ran earlier in the same process** (#5499,
+  2026-11-13): `gen`'s reference PCell library is registered once per process
+  and its layout accumulated layer indices in *first-use* order across every
+  PCell produced in that process. `Layout.add_pcell_variant` mirrored that
+  order into each fresh target layout, and KLayout's writers emit a cell's
+  elements in layer-index order — so running a `bjt_array` request before a
+  `mos_array` request reordered the second one's element records. The streams
+  stayed the same size and geometrically identical (zero XOR area on every
+  layer) but hashed differently, so a batch run and a single-plan run of the
+  same plan disagreed and a flow gating on a recorded stream hash went red
+  when an unrelated block joined the batch. `_produce()` now pins the target
+  layout's layer table to a sorted `(layer, datatype)` order taken from the
+  request alone, and `_layout.write_layout()` sets
+  `SaveLayoutOptions.write_context_info = False` so a reader that happens to
+  have the library registered (`klt gen-compose` reading a `klt gen` block
+  back in the same process) uses the geometry in the file instead of
+  re-linking the cell to the live library and re-inheriting its layer order.
+  **Streams written by every `write_layout()` caller — `gen`, `gen-compose`,
+  `gen --pdk-pcell`, `clip`, `fill`, `draw`, `route`, `place-and-route` — no
+  longer carry the `$$$CONTEXT_INFO$$$` structure** naming the library and
+  PCell behind a proxy cell, so they no longer reopen in the KLayout GUI as
+  editable PCell variants; they are product streams, their geometry is
+  unchanged, and nothing in `klt` reads that context back. Committed golden
+  streams regenerated: `examples/dogbone-terminal/example_sky130.gds` and
+  `example_gf180mcu.gds` (geometry byte-for-byte equivalent, zero XOR area on
+  every layer; their `.drc.json` companions are unchanged). No JSON field is
+  added, renamed or removed; no `schema_version` bump.
+
 - **`klt sim --backend batch`: the local-versus-fleet PDK stamp comparison
   now works on a host that pins no PDK root** (#5474, 2026-11-13): the
   submitter's side of `pdk_stamp_comparison` was stamped only from

@@ -4079,6 +4079,7 @@ def _produce(
 
     layout = kdb.Layout()
     layout.dbu = resolve_pdk_dbu(pdk_info) or spec.dbu
+    _register_canonical_layers(layout, pcell_values)
     pcell_var = layout.add_pcell_variant(lib, decl.id(), pcell_values)
     top = layout.create_cell(cell_name)
     top.insert(kdb.CellInstArray(pcell_var, kdb.Trans()))
@@ -4090,6 +4091,45 @@ def _produce(
         # flattened into) the extracted top cell, so ship one flat cell.
         top.flatten(-1, True)
     return layout, top
+
+
+def _register_canonical_layers(
+    layout: kdb.Layout, pcell_values: dict[str, Any]
+) -> None:
+    """Allocate ``layout``'s layer indices in canonical ``(layer, datatype)``
+    order, before any PCell geometry lands in it (issue #5499).
+
+    ``_pcell_library()`` is registered once per process and its layout
+    accumulates layer indices in *first-use* order across every PCell
+    produced in that process. ``Layout.add_pcell_variant`` mirrors the
+    library layout's layers into the fresh target layout in that same order,
+    and KLayout's stream writers emit each cell's elements in layer-index
+    order -- so without this, a ``mos_array`` request produced after a
+    ``bjt_array`` request wrote the same geometry in a different record
+    order than the same request produced first in a fresh process.
+
+    Pre-registering every ``kdb.LayerInfo`` the request carries pins indices
+    0..N-1 to a sorted order that depends only on the request, so the target
+    layout's layer table -- and therefore the written stream -- is a function
+    of the request alone. A param layer the PCell does not end up drawing on
+    costs an empty layer in the table and zero bytes in the stream (GDS2 and
+    OASIS both record geometry, not layer declarations).
+    """
+    import klayout.db as kdb
+
+    seen: set[tuple[int, int, str]] = set()
+    infos: list[kdb.LayerInfo] = []
+    for value in pcell_values.values():
+        if not isinstance(value, kdb.LayerInfo):
+            continue
+        key = (value.layer, value.datatype, value.name)
+        if key in seen:
+            continue
+        seen.add(key)
+        infos.append(value)
+
+    for info in sorted(infos, key=lambda i: (i.layer, i.datatype, i.name)):
+        layout.layer(info)
 
 
 def _pcell_library() -> kdb.Library:

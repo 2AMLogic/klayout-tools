@@ -328,6 +328,20 @@ def write_layout(layout: kdb.Layout, path: str, error_cls: type[Exception]) -> N
     those fields are written as zero -- the usual convention for generated
     GDSII, and a no-op for non-GDS2 output formats (e.g. OASIS).
 
+    It also sets ``write_context_info = False`` (issue #5499). KLayout
+    otherwise appends a ``$$$CONTEXT_INFO$$$`` structure naming the library
+    and PCell behind any proxy cell in ``layout`` (e.g. ``LIB=
+    klt_gen_reference`` / ``PCELL=mos_array`` for a ``klt gen`` block), and a
+    reader that has that library registered -- ``klt gen-compose`` reading a
+    ``klt gen`` block back in the same process, say -- re-links the cell to
+    the *live* library instead of using the geometry in the file. The
+    re-linked cell then re-inherits the library layout's process-global layer
+    order, which depends on what else ran earlier in that process, so the
+    composed stream stops being a function of its own inputs. klt writes
+    product streams, not editable PCell sources: nothing in this repo reads
+    PCell context back out of a klt-written stream, and every caller here
+    wants the geometry it just built, reproducibly.
+
     Raises ``error_cls`` (constructed with a single message string) if the
     write fails (e.g. an unwritable path or unrecognised format).
     """
@@ -336,6 +350,7 @@ def write_layout(layout: kdb.Layout, path: str, error_cls: type[Exception]) -> N
 
     options = kdb.SaveLayoutOptions()
     options.gds2_write_timestamps = False
+    options.write_context_info = False
     try:
         layout.write(path, options)
     except Exception as exc:  # klayout raises RuntimeError for bad formats/paths
