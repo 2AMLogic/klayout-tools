@@ -136,6 +136,7 @@
       "kind": "verb",
       "description": "`klt drc` implementation: core modules plus CLI adapter.",
       "modules": [
+        "klayout_tools.cli._drc_list_categories",
         "klayout_tools.cli._drc_native",
         "klayout_tools.cli._drc_parser_args",
         "klayout_tools.cli.drc_cmd",
@@ -148,6 +149,8 @@
         "klayout_tools.drc_klayout_app",
       "klayout_tools.drc_layer_selection",
         "klayout_tools.drc_klayout_engine",
+        "klayout_tools.drc_klayout_launch",
+        "klayout_tools.drc_klayout_list",
         "klayout_tools.drc_report_check",
         "klayout_tools.drc_text_exempt"
       ]
@@ -494,7 +497,8 @@
         "klayout_tools.netlist_normalize",
         "klayout_tools.netlist_normalize_scan",
         "klayout_tools.netlist_paths",
-        "klayout_tools.netlist_pdk"
+        "klayout_tools.netlist_pdk",
+        "klayout_tools.netlist_port_order"
       ]
     },
     "pdk": {
@@ -541,6 +545,7 @@
         "klayout_tools.cli.pex_cmd",
         "klayout_tools.pex",
         "klayout_tools.pex_async",
+        "klayout_tools.pex_netlist_text",
         "klayout_tools.pex_asap7",
         "klayout_tools.pex_sim_evidence",
         "klayout_tools.spice_flatten",
@@ -694,6 +699,7 @@
         "klayout_tools.signoff_attest_item9",
         "klayout_tools.signoff_attest_stream",
         "klayout_tools.signoff_attest_text",
+        "klayout_tools.signoff_derived_rows",
         "klayout_tools.signoff_details",
         "klayout_tools.signoff_envelopes",
         "klayout_tools.signoff_evidence_pin",
@@ -814,6 +820,7 @@
         "klayout_tools.sim_twoport",
         "klayout_tools.sim_validate",
         "klayout_tools.sim_waveform_opts",
+        "klayout_tools.sim_window",
         "klayout_tools.sim_xyce_refusals"
       ]
     },
