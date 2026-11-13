@@ -86,7 +86,8 @@ from . import (
 )
 from ._argv_flags import _REQUEST_ARGV_FLAG_EXCLUDE as _REQUEST_ARGV_FLAG_EXCLUDE
 from ._argv_flags import _record_request_argv_flags as _record_request_argv_flags
-from ._drc_parser_args import add_klayout_app_args
+from ._argv_flags import _require_one_input as _require_one_input
+from ._drc_parser_args import add_klayout_app_args, add_rule_listing_args
 from .color import add_color_args
 from .parser_characterize import add_characterize_parser
 from .parser_economy import add_economy_parser
@@ -210,36 +211,6 @@ def _add_expect_version_arg(parser: argparse.ArgumentParser) -> None:
             "(payload still emitted) on mismatch or unknown identity"
         ),
     )
-
-
-def _require_one_input(
-    subparser: argparse.ArgumentParser,
-    *dests: str,
-    exclusive: tuple[str, ...] = (),
-):
-    """Post-parse usage check (exit 2) replacing a required mutually
-    exclusive argparse group (issue #2699).
-
-    ``klt drc``/``klt extract`` once grouped the positional ``file`` with
-    ``--check`` so argparse itself rejected combining them; ``file`` may now
-    accompany ``--check`` as an explicit input override, which a group cannot
-    express. This keeps the other half of that contract -- at least one of
-    ``dests`` must be given -- and rejects ``exclusive`` modes (``--list-rules``)
-    combined with any other input, both as usage errors exactly as before.
-    """
-
-    def check(args: argparse.Namespace) -> None:
-        given = [d for d in dests if getattr(args, d, None) not in (None, False)]
-        flag = {"file": "file", "check": "--check", "list_rules": "--list-rules"}
-        names = ", ".join(flag[d] for d in dests)
-        if not given:
-            subparser.error(f"one of the arguments {names} is required")
-        if len(given) > 1 and any(d in exclusive for d in given):
-            subparser.error(
-                f"argument {', '.join(flag[d] for d in given)}: not allowed together"
-            )
-
-    return check
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -5026,13 +4997,14 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
             "instead (issue #565)."
         ),
     )
-    # `--check` (issue #1106) and `--list-rules` (issue #2768) are mutually
-    # exclusive input modes. `file` (positional) is *not* in the group: since
-    # issue #2699 it may accompany `--check` as an explicit input override.
-    # "One of file/--check/--list-rules is required" and "--list-rules takes
-    # no file" are still usage errors (exit 2), enforced after parsing by
-    # `_require_one_input` so the pre-#1106 contract (omitting `file` is a
-    # usage error, not an application-level one) is preserved.
+    # `--check` (issue #1106), `--list-rules` (issue #2768) and
+    # `--list-rule-categories` (issue #5444) are mutually exclusive input
+    # modes. `file` (positional) is *not* in the group: since issue #2699 it
+    # may accompany `--check` as an explicit input override. "One of them is
+    # required" and "a listing mode takes no file" are still usage errors
+    # (exit 2), enforced after parsing by `_require_one_input` so the
+    # pre-#1106 contract (omitting `file` is a usage error, not an
+    # application-level one) is preserved.
     drc_input_group = drc_parser.add_mutually_exclusive_group()
     drc_parser.add_argument(
         "file",
@@ -5053,7 +5025,7 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
             "'Request document'. Omit when using --check (the input path is "
             "read from the committed report instead; give it alongside "
             "--check to override that recorded path, issue #2699) or "
-            "--list-rules (no layout is read)"
+            "--list-rules/--list-rule-categories (no layout is read)"
         ),
     )
     drc_parser.add_argument(
@@ -5272,20 +5244,10 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
             "error (exit 1) otherwise"
         ),
     )
-    # Issue #2768: a third input mode beside `file` and `--check` -- listing
-    # reads no layout, so argparse itself rejects combining it with either.
-    drc_input_group.add_argument(
-        "--list-rules",
-        dest="list_rules",
-        action="store_true",
-        help=(
-            "list the curated --deck's registered rules (id, description, "
-            "check kind, layers, scope) and their total count instead of "
-            "running DRC: no layout is read and the output is not a DRC "
-            "verdict. Requires --deck; not supported with --engine klayout "
-            "(see #2806). See docs/cli/drc.md, 'Rule listing and selection'"
-        ),
-    )
+    # Issues #2768/#5444: the two listing input modes beside `file` and
+    # `--check` -- neither reads a layout, so argparse itself rejects
+    # combining them with either (or with each other).
+    add_rule_listing_args(drc_input_group)
     drc_parser.add_argument(
         "--rules",
         default=None,
@@ -5361,12 +5323,18 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(drc_parser)
     _record_request_argv_flags(
-        drc_parser, exclude=(*_REQUEST_ARGV_FLAG_EXCLUDE, "list_rules")
+        drc_parser,
+        exclude=(*_REQUEST_ARGV_FLAG_EXCLUDE, "list_rules", "list_rule_categories"),
     )
     drc_parser.set_defaults(
         func=drc_cmd.run,
         post_parse=_require_one_input(
-            drc_parser, "file", "check", "list_rules", exclusive=("list_rules",)
+            drc_parser,
+            "file",
+            "check",
+            "list_rules",
+            "list_rule_categories",
+            exclusive=("list_rules", "list_rule_categories"),
         ),
     )
 
