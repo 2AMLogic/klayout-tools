@@ -143,6 +143,7 @@ from . import remote_transport as remote_transport
 from . import sim_adapt as sim_adapt
 from . import sim_analysis_overrides as _sao
 from . import sim_bin_range as sim_bin_range
+from . import sim_cause as sim_cause
 from . import sim_op_check as sim_op_check
 from . import sim_peak_rss as sim_peak_rss
 from . import sim_provenance as sim_provenance
@@ -195,7 +196,6 @@ from .sim_batch_async import (
 )
 from .sim_batch_async import submit_only as _submit_batch_only
 from .sim_batch_features import attach_models_lib_comparison, pop_remote_diagnostics
-from .sim_cause import _MEAS_ABSENT_CAUSE_RE, _cause_suffix, _with_fatal_error_cause
 from .sim_convergence_retry import is_retryable_convergence_failure, note_not_retried
 from .sim_corner_keys import unknown_key_warnings
 from .sim_decks import run_deck_request
@@ -360,6 +360,7 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         "model_bin_range",
         "model_bin_range_preflight",
         "ngspice_fatal",
+        "netlist_title_line",
         "no_such_vector",
         # ngspice's 99-calls-per-file `par()` cap (issue #4084); a log
         # classifier (error) and a pre-flight deck count (warning).
@@ -1198,13 +1199,20 @@ _DIAGNOSTIC_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ),
 )
 
+#: Causes that supersede the `model_bin_range` reading of the same abort: a
+#: rejected MOS level (#2814) and a mis-parsed title line (#5433) both make
+#: ngspice say "could not find a valid modelname" with no bin range involved.
+#: `model_bin_range` is itself a specific code, so the "a specific fatal code
+#: already matched" rule below cannot drop it.
+_BIN_RANGE_SUPERSEDERS = frozenset({"unsupported_model_level", "netlist_title_line"})
+
 #: Codes that mean ngspice aborted while reading the deck (issue #3879). When
 #: one of them is classified and the log shows no analysis banner, the run
 #: never started: its per-measurement "produced no value" errors are
 #: consequences and are collapsed (`_demote_abort_cascade`).
 _NGSPICE_FATAL_CODES: frozenset[str] = frozenset(
     {"missing_include", "netlist", "model_bin_range", "ngspice_fatal"}
-)
+) | {sim_cause.NETLIST_TITLE_LINE_CODE}
 
 #: What ngspice prints once an analysis actually begins (or has produced
 #: data); absent from a run that died in the deck parser.
@@ -10265,7 +10273,7 @@ def _is_legitimately_absent(cause: str | None) -> bool:
     """Whether a value-less ``optional`` measurement is absent data rather than
     an engine failure: no ngspice ``Error: measure`` reason at all, or the
     "out of interval" (never crossed) reason."""
-    return cause is None or _MEAS_ABSENT_CAUSE_RE.search(cause) is not None
+    return cause is None or sim_cause._MEAS_ABSENT_CAUSE_RE.search(cause) is not None
 
 
 def _absent_measurement(
@@ -10310,7 +10318,7 @@ def _no_value_measurement(
         return result, diagnostic, cause is not None
     message = _no_value_message(spec, save_mode=save_mode)
     if cause is not None:
-        message += _cause_suffix(cause)
+        message += sim_cause._cause_suffix(cause)
     elif too_few_points and spec.get("spice"):
         message += _AC_TOO_FEW_POINTS_HINT
     result = {
@@ -12247,13 +12255,13 @@ def _classify_diagnostics(
 ) -> list[dict[str, Any]]:
     """Classify structured diagnostics from ``log_text``, per this module's
     ordered ``_DIAGNOSTIC_PATTERNS`` (most specific first, one match per
-    code). ``netlist_path``, when provided, lets the ``model_bin_range``
-    code replace ngspice's own uninformative message with one naming a
-    likely culprit instance (see :func:`_diagnose_modelname_error`); omitted
-    (the default -- also what every pre-#1214 caller/test still passes) it
-    falls back to ngspice's raw log line, same as every other code.
+    code). ``netlist_path``, when provided, also lets two codes read the
+    netlist itself: ``model_bin_range`` names a likely culprit instance
+    (:func:`_diagnose_modelname_error`, #1214) and ``netlist_title_line``
+    matches the abort's echoed line against line 1 (:func:`_title_line_cause`,
+    #5433). Omitted -- the default -- each falls back to today's behaviour.
     """
-    diagnostics: list[dict[str, Any]] = []
+    diagnostics: list[dict[str, Any]] = _title_line_cause(log_text, netlist_path)
     for code, pattern in _DIAGNOSTIC_PATTERNS:
         match = pattern.search(log_text)
         if match is None:
@@ -12265,41 +12273,33 @@ def _classify_diagnostics(
             )
             continue
         if code == "model_bin_range":
-            if any(d["code"] == "unsupported_model_level" for d in diagnostics):
+            if any(d["code"] in _BIN_RANGE_SUPERSEDERS for d in diagnostics):
                 # The follow-on "could not find a valid modelname" is a
-                # consequence of the rejected model level, not a bin range.
+                # consequence of the superseding cause, not a bin range.
                 continue
             message = _diagnose_modelname_error(netlist_path) or message
         elif code == "par_call_cap":
             message = _PAR_CALL_CAP_MESSAGE.format(raw=message.strip())
         elif code in _PREREQUISITE_MESSAGES:
             message = _PREREQUISITE_MESSAGES[code].format(raw=message.strip())
-        if code == "ngspice_fatal" and any(
-            d["code"] in _NGSPICE_FATAL_CODES for d in diagnostics
-        ):
-            continue
         if code == "ngspice_fatal":
-            message = _with_netlist_error_cause(message, log_text, match.start())
+            if any(d["code"] in _NGSPICE_FATAL_CODES for d in diagnostics):
+                continue
+            message = sim_cause._with_netlist_error_cause(
+                message, log_text, match.start()
+            )
         diagnostics.append({"severity": "error", "code": code, "message": message})
     return diagnostics
 
 
-def _with_netlist_error_cause(message: str, log_text: str, start: int) -> str:
-    """Append the next log line to an ``Error in netlist line no. N`` message.
-
-    ngspice puts the cause (``Undefined parameter [expr]``) on the line after
-    the location. Any other message is returned unchanged.
-    """
-    if "fatal error in ngspice" in message.lower():
-        return _with_fatal_error_cause(message, log_text)
-    if message.lower().startswith("error on line"):
-        return _with_fatal_error_cause(message, log_text)
-    if not message.lower().startswith("error in netlist line no."):
-        return message
-    following = log_text[start:].splitlines()[1:2]
-    if following and following[0].strip():
-        return f"{message} {following[0].strip()}"
-    return message
+def _title_line_cause(log_text: str, netlist_path: str) -> list[dict[str, Any]]:
+    """Issue #5433's ``netlist_title_line`` cause, or ``[]`` -- see
+    :func:`sim_cause._netlist_title_line` for when it fires and why."""
+    title = sim_cause._netlist_title_line(log_text, netlist_path)
+    if title is None:
+        return []
+    message = sim_cause._title_line_message(netlist_path, *title)
+    return [{"severity": "error", "code": "netlist_title_line", "message": message}]
 
 
 #: Width, in micrometres, above which a MOS instance's ``w`` as written
