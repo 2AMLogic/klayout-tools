@@ -138,7 +138,6 @@ from ._provenance import (
 from ._report_verify import (
     VOLATILE_PROVENANCE_PATHS,
     build_check_result,
-    build_rerun_result,
     get_path,
     hash_check,
     resolve_committed_path,
@@ -151,6 +150,7 @@ from .decks import (
     deck_source_path,
     get_extraction_deck,
 )
+from .evidence_canonicalize import rerun_result_for
 from .extract import (
     ExtractError,
     apply_resistor_fixed_offset_corrections,
@@ -2743,7 +2743,10 @@ def rerun_lvs_report(
         )
     )
     fresh = _run_reconstructed_lvs(request)
-    exclude = set(_LVS_RERUN_EXCLUDE_PATHS)
+    # Pair-dependent additions only: the static `_LVS_RERUN_EXCLUDE_PATHS`
+    # part arrives from the one place that pairs it with this kind, so
+    # `klt evidence canonicalize --kind lvs` cannot fall behind it (#5541).
+    exclude: set[tuple[str, ...]] = set()
     if isinstance(committed.get("reference"), str) and not isinstance(
         fresh.get("reference"), str
     ):
@@ -2781,11 +2784,8 @@ def rerun_lvs_report(
     ):
         if not isinstance(committed_options, dict) or option not in committed_options:
             exclude.add(("options", option))
-    return build_rerun_result(
-        report_path=report_path,
-        committed=committed,
-        fresh=fresh,
-        exclude=frozenset(exclude),
+    return rerun_result_for(
+        "lvs", report_path, committed=committed, fresh=fresh, extra_exclude=exclude
     )
 
 

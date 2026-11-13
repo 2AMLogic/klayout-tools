@@ -5,7 +5,7 @@
     "date": "2026-11-05"
   },
   "verb_count": 68,
-  "mcp_tool_count": 95,
+  "mcp_tool_count": 96,
   "decks": [
     "asap7",
     "gf180mcu",
@@ -357,7 +357,7 @@
         },
         {
           "name": "evidence",
-          "summary": "write an evidence-record/1 file around a finished klt sim / klt pex report",
+          "summary": "evidence records around finished klt sim / klt pex runs",
           "doc": "https://github.com/2AMLogic/klayout-tools/blob/main/docs/cli/evidence.md"
         },
         {
