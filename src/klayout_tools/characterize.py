@@ -83,9 +83,9 @@ from .characterize_instances import (
     _capacitance_instance_lines,
     _capacitance_side_state,
     _full_side_state,
+    _instance_lines,
     _leakage_instance_lines,
     _leakage_states,
-    _metered_rail_nodes,
     _rail_nodes,
 )
 from .characterize_leg import best_effort_pdk, resolve_resume, run_sim_leg
@@ -94,8 +94,7 @@ from .characterize_pool import run_cells_partitioned
 from .characterize_probe import probe_netlist_cells as _probe_netlist_cells
 from .characterize_sequential import (
     SequentialSpecError,
-    clock_pwl_line,
-    data_pwl_line,
+    derive_latch_arcs,
     derive_sequential_arcs,
     resolve_sequential,
     stimulus_schedule,
@@ -576,7 +575,9 @@ def _resolve_cell_spec(
     pins = _resolve_pins(spec, subckt, where)
     power = _resolve_power_pins(spec, terminals, pins, where)
     try:
-        clock_pin, clock_edge, static_inputs = resolve_sequential(spec, pins, where)
+        clock_pin, clock_edge, static_inputs, latch = resolve_sequential(
+            spec, pins, where
+        )
     except SequentialSpecError as exc:
         raise CharacterizeError(str(exc)) from exc
 
@@ -617,6 +618,10 @@ def _resolve_cell_spec(
         "where": where,
         "clock_pin": clock_pin,
         "clock_edge": clock_edge,
+        # True when `clock_pin` came from `enable_pin`: the cell is a
+        # level-sensitive latch, `clock_edge` is the enable's opening edge,
+        # and setup/hold reference its closing edge (issue #5521).
+        "latch": latch,
         "static_inputs": static_inputs,
         "constrained_pins": constrained_pins,
     }
@@ -943,8 +948,9 @@ def _resolve_arcs_for(
     if override is not None:
         return _arcs_from_request(override, cell, where)
     if cell["clock_pin"] is not None:
+        derive = derive_latch_arcs if cell["latch"] else derive_sequential_arcs
         try:
-            return derive_sequential_arcs(cell)
+            return derive(cell)
         except SequentialSpecError as exc:
             raise CharacterizeError(str(exc)) from exc
 
@@ -1329,84 +1335,6 @@ def _build_stimulus_plan(
             "step_ns": options["tran_step_ns"],
         },
     }
-
-
-def _instance_lines(
-    *,
-    tag: str,
-    cell: dict[str, Any],
-    arc: DerivedArc,
-    side_state: tuple[tuple[str, bool], ...],
-    rail_nodes: dict[str, str],
-    vdd: float,
-    ramp_ns: float,
-    load_pf: float,
-    rise_start: float,
-    fall_start: float,
-    clock_times: dict[str, float] | None = None,
-    clock_edge: str = "rising",
-) -> list[str]:
-    side_map = dict(side_state)
-    low_map = dict(arc.fall_side_inputs)
-    node_of: dict[str, str] = {}
-    data_sources: list[str] = []
-    for pin in cell["pins"]:
-        name = pin["name"]
-        if pin["direction"] == "output":
-            node_of[name] = f"o_{tag}_{slug(name)}"
-        elif name == arc.related_pin:
-            node_of[name] = f"i_{tag}"
-        elif clock_times is not None and low_map.get(name, False) != side_map[name]:
-            node_of[name] = f"d_{tag}_{slug(name)}"
-            data_sources.append(
-                data_pwl_line(
-                    f"V{tag}d_{slug(name)}",
-                    node_of[name],
-                    low=low_map[name],
-                    high=side_map[name],
-                    vdd=vdd,
-                    ramp_ns=ramp_ns,
-                    times=clock_times,
-                )
-            )
-        else:
-            node_of[name] = "vdd" if side_map[name] else "0"
-
-    metered = _metered_rail_nodes(tag, cell, rail_nodes)
-    nodes = [
-        node_of.get(terminal) or metered[terminal] for terminal in cell["terminals"]
-    ]
-    if clock_times is None:
-        source = (
-            f"V{tag} i_{tag} 0 PWL(0 0 "
-            f"{spice_number(rise_start)}n 0 "
-            f"{spice_number(rise_start + ramp_ns)}n {spice_number(vdd)} "
-            f"{spice_number(fall_start)}n {spice_number(vdd)} "
-            f"{spice_number(fall_start + ramp_ns)}n 0)"
-        )
-    else:
-        source = clock_pwl_line(
-            f"V{tag}",
-            f"i_{tag}",
-            vdd=vdd,
-            ramp_ns=ramp_ns,
-            times=clock_times,
-            edge=clock_edge,
-        )
-    lines = [
-        source,
-        *data_sources,
-        # 0 V ammeters: i(Vpd) is the current the supply delivers INTO the
-        # cell's vdd pin, i(Vpg) the current flowing OUT of its gnd pin.
-        f"Vpd{tag} vdd pd_{tag} DC 0",
-        f"Vpg{tag} pg_{tag} 0 DC 0",
-        f"X{tag} {' '.join(nodes)} {cell['subckt']}",
-    ]
-    for output in cell["output_pins"]:
-        lines.append(
-            f"C{tag}_{slug(output)} {node_of[output]} 0 {spice_number(load_pf)}p"
-        )
-    return lines
 
 
 # --------------------------------------------------------------------------- #
