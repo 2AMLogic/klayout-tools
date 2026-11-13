@@ -51,8 +51,9 @@ not `klt --version`, if you need to detect this kind of drift. See
   top's block. `--flatten-schematic`, `--device-only-leg`, `--tie-net`,
   `--tie-declared-pins`, `--mom-rlc-net`, `--measure-command`,
   `--extract-only`, `--submit-only`/`--attach`, `--resume` and `--dry-run`
-  are each a usage error with two or more tops (`error.code:
-  "pex_multi_top_unsupported"`), raised before any extraction — refusals, not
+  (the last tracked for support in #5511) are each a usage error with two or
+  more tops (`error.code: "pex_multi_top_unsupported"`), raised before any
+  extraction — refusals, not
   designs; every other flag passes through to every top unchanged, `--pins`
   as the union of the tops' pin names. No existing field is added to, renamed
   or removed; no `schema_version` bump. See

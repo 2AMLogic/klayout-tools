@@ -814,7 +814,7 @@ extraction**:
 | `--extract-only` | Reports an extraction with no schematic side, so the per-top `.SUBCKT` pre-flight this mode is built on has nothing to check against. |
 | `--submit-only` / `--attach` | The submit manifest records a single-valued top and would not round-trip a list. |
 | `--resume` | A sharded leg's resume fingerprint hashes the testbench body, not the extracted netlist its DUT `.include` names, so it cannot tell one `--top` list's shards from another's. |
-| `--dry-run` | A dry run reports one resolved `top` and validates one extraction request (issue #5464), so it cannot describe a multi-top run yet. Dry-run each top on its own, or drop `--dry-run`. |
+| `--dry-run` | A dry run reports one resolved `top` and validates one extraction request (issue #5464), so it cannot describe a multi-top run yet — tracked in [#5511](https://github.com/2AMLogic/klayout-tools/issues/5511). Dry-run each top on its own, or drop `--dry-run`. |
 
 These are **refusals, not designs**: each flag is single-top by construction,
 and inventing a per-top syntax for every one of them would make this mode's

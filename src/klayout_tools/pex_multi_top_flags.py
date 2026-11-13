@@ -146,8 +146,10 @@ def reject_unsupported_flags(
       testbench *body*, not the extracted netlist its DUT ``.include`` names,
       so it cannot tell one ``--top`` list's shards from another's.
     - ``--dry-run`` (issue #5464) reports one resolved ``top`` and validates
-      one extraction request, so it cannot describe a multi-top run yet.
-      Passed only by :mod:`klayout_tools.pex_dry_run`.
+      one extraction request, so it cannot describe a multi-top run yet --
+      the one refusal here with an obvious successor, tracked in #5511 (a
+      multi-top request is exactly what a caller most wants validated before
+      paying for it). Passed only by :mod:`klayout_tools.pex_dry_run`.
     """
     _reject_multi_top_conflicts(
         tops,

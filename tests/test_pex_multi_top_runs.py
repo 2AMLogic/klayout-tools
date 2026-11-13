@@ -390,7 +390,7 @@ def test_dry_run_refuses_two_or_more_tops(bench):
     rather than silently validating only one of them: its report is singular
     (`top`, one resolved cell name) and `_extraction_preflight` resolves one
     top cell, so describing a multi-top request properly is a second additive
-    change to this command's own contract, tracked separately."""
+    change to this command's own contract, tracked in #5511."""
     with pytest.raises(PexError) as excinfo:
         run_pex_dry_run(
             bench["layout"],

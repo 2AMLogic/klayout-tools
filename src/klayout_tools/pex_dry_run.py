@@ -351,7 +351,7 @@ def run_pex_dry_run(
     # (`top`, one resolved cell name) and its `_extraction_preflight` resolves
     # one top cell, so validating a multi-top request properly means a second
     # additive change to *this* command's contract -- out of scope for the
-    # issue that made `--top` repeatable, and tracked separately. A
+    # issue that made `--top` repeatable, and tracked in #5511. A
     # zero-or-one-`--top` dry run is byte-identical to before.
     tops = resolve_tops(top, dry_run=True)
 
