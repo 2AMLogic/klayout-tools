@@ -281,6 +281,27 @@ manifest/fleet files/stdin, nested fleet manifests, and command evidence.
 Malformed top-level JSON produces exit code 1 with the usual error envelope;
 malformed evidence leaves its tier item unmet with `unreadable_evidence`.
 
+**Gzip-compressed evidence files (issue #5452).** Every one of those *file*
+readers also accepts a gzip-compressed document — a positional envelope, a
+manifest or fleet file, and a file-backed evidence citation alike. `klt sim
+--report-out report.json.gz` writes the compact form recommended for a report
+committed as evidence (see [`sim.md`](sim.md)), and it is cited exactly as the
+plain `.json` twin is: same `status`, same `reason`, same citation fields.
+Detection is by the gzip magic bytes, **not** the `.gz` suffix — the same rule
+`klt yield` already applies, so one rule covers both verbs and a renamed file
+still reads. A *truncated* or *damaged* gzip stream is a read failure like any
+other: `unmet`/`unreadable_evidence`, never a traceback. Stdin (`"-"`) is
+text-only.
+
+Hashing is unchanged by the encoding. A citation's `content_hash` is compared
+against `provenance.input.content_hash` from *inside* the envelope, which is
+identical for both encodings. The one place `klt signoff` hashes an evidence
+file's own bytes — a pinned `functional-verification` citation, reported as
+`content_hash_basis: "evidence_file"` (issue #4893) — keeps hashing the file
+**as committed**, so a pin taken over a `.json.gz` binds those compressed
+bytes and a pin taken over the decompressed copy binds those; the two are not
+interchangeable for that one basis.
+
 **Vacuous-verdict refusal (issue #1996).** Also independently of the
 kind-specific `status` rules above, a check fails if the envelope's own
 `coverage` block reports `nothing_checked: true` — the shared convention in
@@ -1036,9 +1057,12 @@ See "Citing an envelope nested inside a composite report (`pointer`)" below.
     an artifact-anchored one for items 1, 2, 9 or 10, or `"-"` for
     stdin) or `{"file": ..., "content_hash": ..., "pointer": ...}` to also
     pin the check to an expected input revision, and/or (issue #2342) to
-    name where inside that file the envelope lives. A `klt power` envelope
-    classifies fine here too, but is never graded `"met"` for any item — see
-    "No T1 item accepts `power` evidence" below; cite it in
+    name where inside that file the envelope lives. The file may be
+    **gzip-compressed** (issue #5452) — a `klt sim --report-out
+    report.json.gz` report is citable as it stands, with no decompressed
+    second copy; see "Gzip-compressed evidence files" above. A `klt power`
+    envelope classifies fine here too, but is never graded `"met"` for any
+    item — see "No T1 item accepts `power` evidence" below; cite it in
     envelope-aggregation mode instead.
   - **Command-backed** (issue #825, Phase 1 of epic #706) —
     `{"command": [<argv>, ...], "cwd": ..., "content_hash": ...,
@@ -4264,7 +4288,7 @@ actually ran and failed):
 | ------------------------ | :--------------------------: | ------- |
 | `"no_evidence"`           | yes | The manifest's `evidence` map has no entry for this item at all. |
 | `"invalid_evidence"`      | yes | The manifest's entry for this item is present but malformed (neither a string, nor an object with a string `"file"`, nor an object with a non-empty list-of-strings `"command"`; or, issue #2342, one carrying a `"pointer"` that is not a string). |
-| `"unreadable_evidence"`   | yes | A file-backed entry's named file does not exist, is not readable, or is not valid JSON; or a command-backed entry's subprocess exited zero but its stdout was not valid JSON. A `not_applicable` object (item 6) also lands here under a grader older than 0.8.0, which predates that form. |
+| `"unreadable_evidence"`   | yes | A file-backed entry's named file does not exist, is not readable, or is not valid JSON; or a command-backed entry's subprocess exited zero but its stdout was not valid JSON. A gzip-compressed file is read directly (issue #5452) — only a *truncated* or *damaged* gzip stream lands here on that account. A `not_applicable` object (item 6) also lands here under a grader older than 0.8.0, which predates that form. |
 | `"unrecognized_envelope"` | yes | The resolved evidence parsed as JSON but is not a JSON object, does not match any recognised `klt` envelope shape, or matches one but is malformed for it — missing a required field, or carrying one of the wrong type (see "Envelope validation" above). |
 | `"envelope_version_skew"` | yes | **(issue #2198)** The resolved evidence *is* a `klt` envelope, carrying a kind's **primary** marker but none of the shape discriminators that marker is paired with — the shape a response written before those (additive) fields existed has. Today this applies to one kind: **`sta`**, whose `geometry_source` marker shipped with the verb but whose `timing_status`/`corners` discriminators are additive (issues #1865/#1915), so any `klt sta` response committed before them lands here. Refused exactly like `"unrecognized_envelope"` — it is never graded as that kind's evidence — but reported distinguishably, because the remedy differs: re-run the check under the current `klt`, rather than fix a citation pointing at the wrong artifact. A kind whose markers are *both* original (`place-and-route`'s `stage_reached`+`power`) has no version-skew shape and is unaffected. See "Digital-flow evidence" above. |
 | `"invalid_pointer"`       | yes | **(issue #2342)** The evidence entry carried a `"pointer"` (an RFC 6901 JSON Pointer naming where inside the cited document the envelope lives) that did not resolve to a JSON object: malformed syntax (no leading `/`, a `~` followed by neither `0` nor `1`), a path the document does not contain, or a value that is not an object (a string, number, array, or `null` — none of which can ever be a `klt` envelope). Deliberately distinct from `"unrecognized_envelope"`: nothing was ever classified, so this says nothing about the cited bytes, and the remedy is to fix the pointer rather than the citation. See "Citing an envelope nested inside a composite report" above. |
