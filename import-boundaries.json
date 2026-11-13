@@ -236,6 +236,7 @@
         "klayout_tools.extract_parasitics",
         "klayout_tools.extract_parasitics_block",
         "klayout_tools.extract_netlist_write",
+        "klayout_tools.extract_detect_block",
         "klayout_tools.extract_pdk_resolve",
         "klayout_tools.extract_pin_order",
         "klayout_tools.extract_netselect",
@@ -333,6 +334,8 @@
         "klayout_tools.cli.gen_compose_cmd",
         "klayout_tools.gen_compose",
         "klayout_tools.gen_compose_boundary",
+        "klayout_tools.gen_compose_layer_rules",
+        "klayout_tools.gen_compose_plane_change",
         "klayout_tools.gen_compose_port_access",
         "klayout_tools.gen_compose_port_request",
         "klayout_tools.gen_compose_routing",
@@ -771,6 +774,7 @@
         "klayout_tools.sim_plot",
         "klayout_tools.sim_portable",
         "klayout_tools.sim_process_legs",
+        "klayout_tools.sim_provenance",
         "klayout_tools.sim_raw",
         "klayout_tools.sim_remote",
         "klayout_tools.sim_request_overrides",
@@ -843,7 +847,8 @@
         "klayout_tools._sta_request_diag",
         "klayout_tools._sta_sdc_check",
         "klayout_tools.post_route_sta",
-        "klayout_tools.post_route_sta_electrical"
+        "klayout_tools.post_route_sta_electrical",
+        "klayout_tools.post_route_sta_path_groups"
       ]
     },
     "stats": {
@@ -2480,10 +2485,16 @@
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
       },
       {
-        "consumer": "klayout_tools.gen_compose_routing",
+        "consumer": "klayout_tools.gen_compose_layer_rules",
         "exporter": "klayout_tools.gen",
         "symbol": "_PDK_ROLE_LAYERS",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767), relocated from the gen_compose_routing entry when issue #5426 moved the layer-rule resolvers that use it into this module verbatim; same debt, new file. Remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.gen_compose_layer_rules",
+        "exporter": "klayout_tools.gen",
+        "symbol": "_pdk_family",
+        "reason": "Grandfathered cross-group private import at policy seed (issue #2767), extended to this module when issue #5426 moved the layer-rule resolvers that use it out of gen_compose_routing verbatim; same debt, new file. Remove by making the symbol public or moving it to a shared module."
       },
       {
         "consumer": "klayout_tools.gen_compose_routing",

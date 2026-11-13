@@ -92,6 +92,7 @@ from typing import Any
 
 from ._provenance import sha256_file, sha256_file_required
 from .sim_param_file import declared_model_refs, rewrite_model_refs
+from .sim_provenance import staged_asset_json
 
 #: A ``.include``/``.inc`` directive line -- ngspice's two spellings, target
 #: either quoted or bare. Deliberately the same shape ``pex.py``'s own
@@ -254,14 +255,7 @@ class StagedModelAsset:
     source_sha256: str = ""
 
     def to_json(self) -> dict[str, Any]:
-        return {
-            "name": self.name,
-            "field": self.field,
-            "kind": self.kind,
-            "sha256": self.sha256,
-            "rewritten": self.rewritten,
-            "source_sha256": self.source_sha256 or self.sha256,
-        }
+        return staged_asset_json(self)
 
 
 @dataclass(frozen=True)
