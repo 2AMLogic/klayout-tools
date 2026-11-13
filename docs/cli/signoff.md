@@ -1905,7 +1905,7 @@ an inventory the author did not write.
 | | `envelope_checks`: `{envelope path: command}` | yes, one per cited envelope | each command exits `0` (`command`, role `freshness`) — e.g. the cited verb's own `--check` |
 | | `corners`: list of names, with `metrics`: `{corner: {fmax\|area\|power: {"envelope": path, "field": "dotted.path"}}}` | digital partitions only (both or neither) | for every corner and each of `area`, `fmax`, `power`, the named field of the named cited envelope is a finite number (`metric`, role `digital`; the value is recorded). A missing binding or non-numeric field is a **failed check**. Digit segments index lists, e.g. `result.0.fmax_mhz`. |
 | **9** Testbenches shipped | `testbenches`: list of paths, or `{"path", "cold_start"}` objects (mixing is fine; the object form first ships in 0.9.0) | yes, non-empty | each file exists (`present`, role `testbench`) |
-| | `cold_start`: command | yes, unless **every** testbench entry carries its own `cold_start` | exits `0` (`command`, role `cold_start`). A per-bench `cold_start` is a command too and yields a `command` check with `testbench: "<path>"`, so a failure names its bench. When both forms are present, the top-level command runs as well. |
+| | `cold_start`: command | yes, unless **every** testbench entry carries its own `cold_start` | exits `0` (`command`, role `cold_start`). A per-bench `cold_start` is a command too and yields a `command` check with `testbench: "<path>"`, so a failure names its bench. When both forms are present, the top-level command runs as well. A cold start (either form) may add `documented_argv` — the full reproducing invocation, recorded and never run; see "A cold start that only validates its bench" below. *First ships in 0.9.2.* |
 | | `unbenched_rows`: list of `{"row": "<id>", "issue": <positive int>}` | no | one `unbenched_row` check per entry (role `row`), **passing**: the gap and its owner issue are visible to the grader, not refused. Empty/duplicate `row` or a non-positive `issue` is refused (exit `1`). Whether bench-less rows should fail T1 item 9 is a grading-policy decision this producer does not make. *First ships in 0.9.0; 0.8.0 refuses `unbenched_rows` as an unknown field.* |
 | | `pins`: `{"pdk": {"name", "revision"} \| {"none": true, "reason"}, "tools": {<tool>: <version>}}` | checked, not structurally required | `pdk.name` and `pdk.revision` non-empty, or, for a partition whose cold start consumes no PDK, the explicit no-PDK form `{"none": true, "reason": "<non-empty>"}` (`pin`, role `pdk`; `none` mixed with `name`/`revision`, or with an empty `reason`, fails; an absent `pdk` still fails -- silence never means "no PDK"); `tools` a non-empty map of non-empty versions (`pin`, role `tools`). A missing pin is a **failed check**, not a malformed inventory. |
 | **10** Repo hygiene | `hygiene`: list of paths | yes, non-empty | each file exists (`present`, role `hygiene`) |
@@ -1915,6 +1915,11 @@ A **command** is `{"argv": ["prog", "arg", ...], "cwd": "<repo-relative dir>", "
 `local_only` is optional (boolean, default `false`; anything else is refused,
 exit `1`). It marks a command that needs a toolchain the `--check` runner may
 not have (xschem, a PDK): see "CI usage" below.
+`documented_argv` is optional and accepted **only** on an item-9 `cold_start`
+(a non-empty list of non-empty strings; anything else, including the key on an
+item-1 `derived[].check`, an item-8 `envelope_checks` entry or an item-2/10
+`checks[]` entry, is refused, exit `1`). It is recorded, never executed: see
+"A cold start that only validates its bench".
 `timeout_s` is optional (positive finite number of seconds, at most `21600`;
 a string, boolean, non-positive, non-finite or larger value is refused, exit
 `1`). It raises or lowers that one command's time limit; omitted, the command
@@ -2111,6 +2116,57 @@ and a `... ok|FAILED|skipped in N.Ns` line to **stderr**, regardless of
 `--format`; stdout (and so the JSON envelope) is unchanged and carries no
 timing, keeping `--check` drift comparison reproducible.
 
+**A cold start that only validates its bench: `documented_argv` (issue
+#5463).** When a bench's claimed numbers come from a large corner grid or a
+Monte Carlo run on a batch fleet, the invocation that truly reproduces them
+costs hours of fleet budget, and `--attest` runs every declared command on
+every regeneration. Producers therefore declare a cheap proxy (typically
+`klt sim <request> --dry-run`) — and the envelope then records a command that
+only *validates* the bench, with nothing to say so. `documented_argv` carries
+that disclosure in the envelope instead of in prose:
+
+```json
+{
+  "path": "tb/ota_mc.spice",
+  "cold_start": {
+    "argv": ["klt", "sim", "sim/mc.json", "--dry-run", "--format", "json"],
+    "documented_argv": ["klt", "sim", "sim/mc.json", "-o", "evidence/mc.json"]
+  }
+}
+```
+
+`argv` is unchanged: it still runs, still gates the envelope, and a non-zero
+exit still makes the attestation `fail`. `documented_argv` is **never
+executed** — `klt` does not check that it is runnable, or that it is related to
+`argv`; it is the producer's claim about what reproduces the measurement. The
+emitted `attestation.checks[]` entry gains two fields:
+
+```json
+{"check": "command", "role": "cold_start", "testbench": "tb/ota_mc.spice",
+ "argv": ["klt", "sim", "sim/mc.json", "--dry-run", "--format", "json"],
+ "cwd": ".", "exit_status": 0, "passed": true,
+ "reproduces": "validates",
+ "documented_argv": ["klt", "sim", "sim/mc.json", "-o", "evidence/mc.json"]}
+```
+
+so a reader (or a grader) can tell a reproducing cold start from a validating
+one. Text output marks the check
+`(validates only; documented: klt sim sim/mc.json -o evidence/mc.json)`. A
+cold start without `documented_argv` emits exactly the entry it always did —
+no `reproduces` key — so committed envelopes show no `--check` drift.
+
+Item 9's `status` and the T1 grade are **unchanged** by the presence of
+`documented_argv`: today's proxy commands already grade `pass`, and this field
+only makes them visible. Whether a validation-only cold start should grade
+lower is a tier-policy question this producer does not decide.
+
+With `local_only: true`, a carried check (`--attest --check`,
+`--skip-local-only`) takes `reproduces`/`documented_argv` from the **current**
+inventory, not from the committed envelope — what a command reproduces is a
+property of what is declared now, so changing `documented_argv` is drift under
+`--check` and is refreshed into the envelope by `--skip-local-only`. The
+committed check is still matched on role, `argv` and testbench identity.
+
 Item 10: hygiene artifacts and the CI/audit commands that back them
 (`attest/item10.json`). A CI-run check is any command that exits non-zero
 when the run did not succeed, for example a `gh run view` query:
@@ -2179,7 +2235,8 @@ declared `"local_only": true` (an item-1 `derived[].check`, an item-9
 and its outcome is committed in the envelope (the check carries
 `"local_only": true`). Under `--attest --check` it is **not run**: the check
 is carried through with its committed outcome and listed in the response's
-`skipped_checks` (`[{"role", "name"?, "target"?, "argv", "cwd", "passed"}]`,
+`skipped_checks` (`[{"role", "name"?, "target"?, "argv", "cwd", "passed",
+"reproduces"?, "documented_argv"?}]`,
 `passed` being the *committed* outcome, never a result of this run). Text
 output prints each as `[SKIP]`. Every file-presence and content-hash check
 still runs, so drift in an inventoried file is still drift, and a committed

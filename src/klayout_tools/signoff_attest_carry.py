@@ -13,6 +13,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from .signoff_attest import (
+    SKIPPED_CHECK_KEYS,
     STREAM_ATTESTABLE_ITEM,
     AttestationError,
     _load_committed_attestation,
@@ -20,8 +21,7 @@ from .signoff_attest import (
     check_attestation,
 )
 from .signoff_attest_stream import build_stream_attestation, check_stream_attestation
-
-_SKIPPED_KEYS = ("role", "name", "target", "argv", "cwd", "passed")
+from .signoff_attest_text import documented_suffix
 
 
 def add_skip_local_only_argument(parser: Any) -> None:
@@ -73,7 +73,7 @@ def attest_carrying(
     skipped = []
     for check in result["attestation"]["checks"]:
         if check.pop("skipped", False):
-            skipped.append({k: check[k] for k in _SKIPPED_KEYS if k in check})
+            skipped.append({k: check[k] for k in SKIPPED_CHECK_KEYS if k in check})
     result["skipped_checks"] = skipped
     return result
 
@@ -86,6 +86,7 @@ def skip_lines(result: Mapping[str, Any], label: Callable[[Any], str]) -> list[s
         lines.append(
             f"[SKIP] {check['role']} {label(check)}: {' '.join(check['argv'])} "
             f"(local_only, not run; committed outcome: {outcome})"
+            f"{documented_suffix(check)}"
         )
     return lines
 
