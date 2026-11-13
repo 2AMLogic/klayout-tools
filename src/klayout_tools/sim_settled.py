@@ -65,7 +65,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import sim_crossings, sim_cycle_mean
+from . import sim_crossings, sim_cycle_mean, sim_window
 from .sim_errors import SimError
 
 #: Reason tokens a failed ``settled`` entry's diagnostic message leads with.
@@ -199,7 +199,7 @@ def validate_settled_spec(name: Any, body: Any) -> None:
         )
     _validate_tracked(name, "mean", body.get("mean"))
     _validate_tracked(name, "peak", body.get("peak"))
-    sim_crossings._window_bound(name, body, "from")
+    sim_window.window_bound(name, body, "from", form="settled")
 
 
 def validate_form_exclusive(spec: dict[str, Any]) -> bool:
@@ -323,8 +323,8 @@ def window_peak(
     """Maximum ``|value|`` of the piecewise-linear signal over
     ``[t_start, t_end]``, endpoints interpolated at their exact times."""
     peak = max(
-        abs(sim_cycle_mean._value_at(scale, values, t_start)),
-        abs(sim_cycle_mean._value_at(scale, values, t_end)),
+        abs(sim_window.value_at(scale, values, t_start)),
+        abs(sim_window.value_at(scale, values, t_end)),
     )
     lo = bisect.bisect_right(scale, t_start)
     hi = bisect.bisect_left(scale, t_end)
@@ -463,7 +463,7 @@ def _extract_one(spec: dict[str, Any], raw_path: str) -> SettledOutcome:
         [point[3] for point in points],
         level=float(body["level"]),
         edge=body.get("edge", "rise"),
-        start=sim_crossings._window_bound(name, body, "from"),
+        start=sim_window.window_bound(name, body, "from", form="settled"),
         cycles=body["cycles"],
         mean_tol_pct=float(body["mean"]["tol_pct"]),
         peak_tol_pct=float(body["peak"]["tol_pct"]),

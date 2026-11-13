@@ -2283,11 +2283,17 @@ minor from your client, either:
    `environment.remote.runner_compatibility` and
    `runner_compatibility_warning` in the result.
 
-Neither option 1 nor option 3 relaxes `klt signoff --attest`: it still runs
-every `local_only` command at mint time, and there is no flag to skip one
-(see "Toolchain-free runners: `local_only` commands" in
-[`signoff.md`](signoff.md)). A blocked host fixes the skew; it does not skip
-the attested check.
+Neither option 1 nor option 3 relaxes `klt signoff --attest`: by default it
+still runs every `local_only` command at mint time, so fixing the skew is the
+path to prefer — a blocked host unblocks itself, it does not skip the attested
+check. The one opt-out is `--skip-local-only`
+([#5209](https://github.com/2AMLogic/klayout-tools/issues/5209)), which
+refreshes an existing `-o` envelope by carrying that command's already-committed
+outcome forward instead of re-running it. The carried outcome is vouched for by
+the committed envelope, not by this run, and the flag never mints a first
+outcome — so use it only when the change cannot affect that command's result.
+See "Toolchain-free runners: `local_only` commands" and "Refreshing on a host
+lacking the toolchain" in [`signoff.md`](signoff.md).
 
 ### Worker-observed environment (`worker_environment`, [#2834](https://github.com/2AMLogic/klayout-tools/issues/2834))
 
