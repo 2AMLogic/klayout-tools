@@ -35,10 +35,21 @@ def _what_dbu(c: dict) -> str:
     return f"dbu on grid ({c['dbu']})"
 
 
+def documented_suffix(check: Mapping[str, Any]) -> str:
+    """The validation-only marker for a command check that carries a
+    ``documented_argv`` (issue #5463): the command that ran only validated the
+    bench, and this is the invocation that reproduces it. Empty otherwise."""
+    argv = check.get("documented_argv")
+    if not argv:
+        return ""
+    return f" (validates only; documented: {' '.join(argv)})"
+
+
 def _what_command(c: dict) -> str:
     label = check_label(c)
     status = c.get("error") or f"exit {c['exit_status']}"
-    return f"{c['role']} {label}: {' '.join(c['argv'])} ({status})"
+    argv = " ".join(c["argv"])
+    return f"{c['role']} {label}: {argv} ({status}){documented_suffix(c)}"
 
 
 def _what_unbenched(c: dict) -> str:

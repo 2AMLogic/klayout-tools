@@ -14,6 +14,17 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt signoff --attest 9`: `documented_argv` records a validation-only cold
+  start** (#5463, 2026-11-13): an item-9 `cold_start` (top-level or per-bench)
+  may declare `documented_argv`, the full invocation that reproduces a bench
+  whose declared `argv` only validates it — the usual case for a bench measured
+  by a corner grid or Monte Carlo run on a batch fleet. It is recorded and
+  never executed; `argv` still runs and still gates. The emitted
+  `attestation.checks[]` entry then carries `reproduces: "validates"` and the
+  `documented_argv`, and text output marks it `(validates only; documented:
+  ...)`. Additive: without the key the envelope is unchanged, grading is
+  unchanged, no `schema_version` bump. The key is refused on any non-item-9
+  command. See `docs/cli/signoff.md`.
 - **`klt erc`: `ties[].isolation_boxes`, `same_net_as` through the substrate,
   and the decidable-or-disclosed substrate rule** (#5343, 2026-11-12): new
   optional `ties[].isolation_boxes` (µm boxes) asserts isolated substrate

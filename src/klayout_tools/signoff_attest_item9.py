@@ -9,6 +9,9 @@ top-level ``cold_start``:
 * ``unbenched_rows`` declares spec rows that have no bench, with an owner issue;
 * a start/finish progress line per command run, written to stderr only.
 
+Plus (issue #5463) the ``documented_argv`` disclosure on a cold start and the
+item's reproducibility-pin checks, which live here for the same reason.
+
 The validators take the command/path helpers as arguments so this module need
 not import :mod:`signoff_attest` (which imports it).
 """
@@ -34,11 +37,107 @@ def _error(message: str) -> Exception:
 ITEM9_KEYS = frozenset({"testbenches", "cold_start", "pins", "unbenched_rows"})
 
 
+#: The emitted-check fields a validation-only cold start adds (issue #5463).
+DOCUMENTED_KEYS = ("reproduces", "documented_argv")
+
+
+def documented_spec(
+    raw: Mapping[str, Any], field: str, accepted: bool
+) -> dict[str, Any]:
+    """The validated ``documented_argv`` of a command spec (issue #5463).
+
+    ``documented_argv`` is the full invocation that *reproduces* a bench whose
+    declared ``argv`` only validates it -- the honest cold start for a bench
+    measured by a corner grid or a Monte Carlo run on a batch fleet costs
+    hours of fleet budget, so producers declare a cheap proxy instead. It is
+    recorded, never executed, and ``argv`` still runs and still gates.
+
+    Only an item-9 ``cold_start`` accepts it (``accepted``). Anywhere else the
+    key is a typo or a misunderstanding, and ``_command_spec`` ignores unknown
+    keys, so it is refused rather than silently dropped."""
+    if "documented_argv" not in raw:
+        return {}
+    if not accepted:
+        raise _error(
+            f"'{field}.documented_argv' is only accepted on an item 9 "
+            "cold_start -- it records the invocation that reproduces a bench "
+            "the declared argv only validates"
+        )
+    argv = raw["documented_argv"]
+    if (
+        not isinstance(argv, list)
+        or not argv
+        or not all(isinstance(arg, str) and arg for arg in argv)
+    ):
+        raise _error(
+            f"'{field}.documented_argv' must be a non-empty list of non-empty strings"
+        )
+    return {"documented_argv": list(argv)}
+
+
+def documented_fields(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """The check fields a spec carrying ``documented_argv`` emits: the command
+    that ran only ``"validates"`` the bench, and the invocation that
+    reproduces it. Empty otherwise, so an ordinary check is unchanged."""
+    argv = spec.get("documented_argv")
+    if not argv:
+        return {}
+    return {"reproduces": "validates", "documented_argv": list(argv)}
+
+
+def carried_check(
+    committed: Mapping[str, Any], spec: Mapping[str, Any]
+) -> dict[str, Any]:
+    """A committed ``local_only`` check carried by ``--check`` /
+    ``--skip-local-only``, with the disclosure fields taken from the *current*
+    inventory: what a command reproduces is a property of what is declared
+    now, so a committed value that no longer matches is drift, not evidence."""
+    kept = {
+        key: value for key, value in committed.items() if key not in DOCUMENTED_KEYS
+    }
+    return {**kept, "local_only": True, "skipped": True, **documented_fields(spec)}
+
+
+def pin_checks(pins: Any) -> list[dict[str, Any]]:
+    """Item 9's reproducibility pins: the PDK name + revision (or the explicit
+    ``{"none": true, "reason": "..."}`` no-PDK form -- an absent ``pdk`` never
+    means "no PDK"), and at least one tool version. A missing or empty pin is
+    a failed check, not a malformed inventory -- the inventory is well-formed,
+    it just does not yet say how to reproduce the run."""
+    pins = pins if isinstance(pins, Mapping) else {}
+    pdk_value = pdk_pin(pins.get("pdk"))
+    tools = pins.get("tools")
+    tools_value = None
+    if (
+        isinstance(tools, Mapping)
+        and tools
+        and all(
+            isinstance(key, str) and key and isinstance(value, str) and value
+            for key, value in tools.items()
+        )
+    ):
+        tools_value = {key: tools[key] for key in sorted(tools)}
+    return [
+        {
+            "check": "pin",
+            "role": "pdk",
+            "passed": pdk_value is not None,
+            "value": pdk_value,
+        },
+        {
+            "check": "pin",
+            "role": "tools",
+            "passed": tools_value is not None,
+            "value": tools_value,
+        },
+    ]
+
+
 def split_testbenches(
     inventory: Mapping[str, Any],
     root: str,
     normalize_path: Callable[[Any, str, str], str],
-    command_spec: Callable[[Any, str, str], dict[str, Any]],
+    command_spec: Callable[..., dict[str, Any]],
 ) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
     """Reduce object-form ``testbenches`` entries to plain paths.
 
@@ -69,7 +168,13 @@ def split_testbenches(
         if "cold_start" in entry:
             # A duplicate path is refused by the generic list validator.
             specs.setdefault(
-                path, command_spec(entry["cold_start"], f"{field}.cold_start", root)
+                path,
+                command_spec(
+                    entry["cold_start"],
+                    f"{field}.cold_start",
+                    root,
+                    documented_argv=True,
+                ),
             )
     return {**inventory, "testbenches": paths}, specs
 
@@ -79,7 +184,7 @@ def validate_into(
     inventory: Mapping[str, Any],
     bench_specs: Mapping[str, Any],
     root: str,
-    command_spec: Callable[[Any, str, str], dict[str, Any]],
+    command_spec: Callable[..., dict[str, Any]],
 ) -> None:
     """Item 9's normalised non-path fields. Every bench needs a cold start:
     its own, or the top-level one."""
@@ -89,7 +194,7 @@ def validate_into(
     normalized["pins"] = inventory.get("pins")
     if "cold_start" in inventory:
         normalized["cold_start"] = command_spec(
-            inventory["cold_start"], "cold_start", root
+            inventory["cold_start"], "cold_start", root, documented_argv=True
         )
         return
     missing = [path for path in benches if path not in bench_specs]

@@ -737,6 +737,20 @@ were not run. See
 [`docs/cli/signoff.md`](cli/signoff.md)'s "Items 1 and 2: attesting that
 the artifact was regenerated".
 
+Issue #5463 adds two more additive, optional fields on the same principle (no
+`schema_version` bump; absent they change nothing): `documented_argv` on an
+item-9 `cold_start` in an attestation inventory — the full invocation that
+reproduces a bench whose declared `argv` only validates it, recorded and never
+executed — and, on the emitted `attestation.checks[]` entry for such a command,
+`reproduces: "validates"` plus the `documented_argv` verbatim. A cold start
+that does not declare it emits the entry it always did, so committed envelopes
+show no `--attest --check` drift, and item 9's `status` and T1 grade are
+unchanged either way. The two fields also appear on the matching
+`skipped_checks[]` entry, taken from the current inventory rather than the
+committed envelope. The key is refused (exit `1`) on any non-item-9 command.
+See [`docs/cli/signoff.md`](cli/signoff.md)'s "A cold start that only
+validates its bench".
+
 `klt erc` since issue #2183 also carries a second verb-local key,
 `provenance.devices`: one entry per `devices[]` spec declaration (`{name,
 body_layer, on, body_area_um2}`), `[]` when none were declared. A
