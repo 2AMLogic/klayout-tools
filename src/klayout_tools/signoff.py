@@ -53,6 +53,7 @@ from typing import (
 from . import _report_verify_hints as hints
 from . import signoff_foundry_cell as foundry_cell
 from . import signoff_nothing_checked as vacuous
+from ._jsongz import READ_ERRORS, open_text
 from ._jsonnum import is_number
 from ._provenance import INPUT_ROLE_LAYOUT, layout_geometry_digest, sha256_file
 from ._report_verify import (
@@ -1784,21 +1785,20 @@ def _finite_json_float(token: str) -> float:
 
 
 def _read_json_source(source: str, description: str) -> Any:
-    """Read and JSON-decode one JSON source: ``source == "-"`` reads stdin,
-    otherwise ``source`` is a file path. Raises :class:`SignoffError` on any
-    read/parse failure, including nonstandard numeric constants and literals
-    that overflow to infinity -- never lets invalid JSON evidence become a
-    passing verdict or leak nonfinite values into output. ``description``
-    (e.g. ``"envelope"``, ``"manifest"``) only affects error-message wording,
-    so each caller's failures still read naturally.
+    """Read and JSON-decode one JSON source: ``source == "-"`` reads stdin, otherwise
+    ``source`` is a file path (gzip-compressed or not -- see ``_jsongz.open_text``,
+    issue #5452). Raises :class:`SignoffError` on any read/parse failure, including
+    nonstandard numeric constants and literals that overflow to infinity -- never
+    lets invalid JSON evidence become a passing verdict or leak nonfinite values into
+    output. ``description`` (e.g. ``"envelope"``, ``"manifest"``) only affects
+    error-message wording, so each caller's failures still read naturally.
 
     Deliberately mirrors ``report.py``'s ``_read_envelope`` (same
-    read/parse/error-message contract) rather than importing it: the two
-    commands' input-reading needs are identical but incidental, not a
-    shared abstraction worth coupling two independently-versioned CLI
-    verbs over. Shared *within* this module by :func:`_read_envelope` and
-    :func:`_read_fleet_block_manifest` (issue #827), which do belong to the
-    same command and would otherwise triplicate this same read/parse logic.
+    read/parse/error-message contract) rather than importing it: the two commands'
+    input-reading needs are identical but incidental, not a shared abstraction worth
+    coupling two independently-versioned CLI verbs over. Shared *within* this module
+    by :func:`_read_envelope` and :func:`_read_fleet_block_manifest` (issue #827),
+    which belong to the same command and would otherwise triplicate this logic.
     """
     if source == "-":
         try:
@@ -1816,13 +1816,13 @@ def _read_json_source(source: str, description: str) -> Any:
         raise SignoffError(f"not a file: {source}")
 
     try:
-        with open(source, encoding="utf-8") as handle:
+        with open_text(source) as handle:
             return json.load(
                 handle,
                 parse_constant=_reject_json_constant,
                 parse_float=_finite_json_float,
             )
-    except (OSError, UnicodeDecodeError) as exc:
+    except READ_ERRORS as exc:
         raise SignoffError(
             f"could not read {description} file '{source}': {exc}"
         ) from exc
