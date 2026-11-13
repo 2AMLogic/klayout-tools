@@ -111,7 +111,7 @@ from . import (
     sim_staging,
 )
 from .pdk_families import family_subset, pdk_variant_family
-from .pdk_store import store_pdk_stamp
+from .pdk_store import client_pdk_stamp
 from .remote_launcher import (
     RemoteLaunchError,
     _signal_handlers_install,
@@ -128,6 +128,8 @@ from .sim_batch_features import (
 from .sim_batch_hints import attribute_modelname, hint_existing_fatal, with_runner_hints
 from .sim_batch_reattach import (  # noqa: F401
     _RESUME_INTERRUPTED_GRACE_S,
+    _resume_attach_config,
+    _resume_or_submit_one_job,
     _try_reattach_shard,
 )
 from .sim_batch_warn import warn_over_serial_bound_once
@@ -1987,25 +1989,14 @@ def _bounded_str(value: Any, limit: int = WORKER_CAPTURE_STR_MAX) -> str | None:
 
 def _client_pdk_stamp(request: dict[str, Any] | None) -> dict[str, Any] | None:
     """The submitter's local view of the requested PDK variant's stamp (``SOURCES``,
-    else bundle ``.pdk-store.json``); ``None`` when nothing comparable is readable."""
+    else bundle ``.pdk-store.json``, #5318); ``None`` when nothing comparable is
+    readable. The root is ``models.pdk_root``, else ``$PDK_ROOT``, else the install
+    the PDK search order resolves -- the one ``provenance.pdk`` names (#5474), so a
+    host that pins neither still gets a comparison rather than
+    ``client_stamp_unavailable`` (``models.pdk_root`` is refused for batch)."""
     models = (request or {}).get("models") or {}
-    variant = models.get("pdk")
     root = models.get("pdk_root") or os.environ.get("PDK_ROOT")
-    if not (isinstance(variant, str) and variant and isinstance(root, str) and root):
-        return None
-    try:
-        with open(os.path.join(root, variant, "SOURCES"), "rb") as handle:
-            text = handle.read(16385)[:16384].decode("utf-8", "replace")
-    except OSError:
-        return store_pdk_stamp(variant, os.path.join(root, variant))  # #5318
-    normalized = "\n".join(
-        line.rstrip() for line in text.replace("\r\n", "\n").strip().split("\n")
-    )
-    return {
-        "variant": variant,
-        "stamp_scheme": "sources-sha256",
-        "stamp_sha256": hashlib.sha256(normalized.encode("utf-8")).hexdigest(),
-    }
+    return client_pdk_stamp(models.get("pdk"), root)
 
 
 def _compare_pdk_stamps(
@@ -3639,14 +3630,13 @@ def _run_batch(
                 **_feature_diagnostic_field(config),
             }
         return corners, engine_version, environment
-    resume_job_id = sim_batch_receipt.resumable_job_id(
-        artifacts_dir, request, len(corner_points), checkpoint is not None
-    )
     try:
-        corners, engine_version, environment = _run_batch_job(
+        corners, engine_version, environment = _resume_or_submit_one_job(
             config=config,
-            job_id=resume_job_id or new_job_id(),
-            attach=resume_job_id is not None,
+            resume_grace_s=_RESUME_INTERRUPTED_GRACE_S,
+            resume_job_id=sim_batch_receipt.resumable_job_id(
+                artifacts_dir, request, len(corner_points), checkpoint is not None
+            ),
             corner_points=corner_points,
             netlist_path=netlist_path,
             timeout_s=timeout_s,
@@ -4019,13 +4009,12 @@ class _BatchFleetRun:
             else self.artifacts_dir
         )
         shard_config = self.shard_config()
-        if resumed and shard_config.interrupted_grace_s > 0:
+        if resumed:
             # A recorded job still ``interrupted`` on resume already waited out
             # the full grace in the prior run: surface it after ~one poll so
             # ``_try_reattach_shard`` can submit that shard afresh (issue #5371).
-            # ``0`` (grace disabled by the request) is left unbounded.
-            shard_config = replace(
-                shard_config, interrupted_grace_s=_RESUME_INTERRUPTED_GRACE_S
+            shard_config = _resume_attach_config(
+                shard_config, _RESUME_INTERRUPTED_GRACE_S
             )
         try:
             return _run_batch_job(

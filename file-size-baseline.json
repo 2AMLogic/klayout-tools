@@ -201,15 +201,11 @@
     },
     {
       "path": "src/klayout_tools/cli/parser.py",
-      "lines": 6140
+      "lines": 5512
     },
     {
       "path": "src/klayout_tools/cli/pdk_cmd.py",
       "lines": 615
-    },
-    {
-      "path": "src/klayout_tools/cli/pex_cmd.py",
-      "lines": 526
     },
     {
       "path": "src/klayout_tools/cli/signoff_cmd.py",
@@ -277,7 +273,7 @@
     },
     {
       "path": "src/klayout_tools/drc_klayout_engine.py",
-      "lines": 1728
+      "lines": 1677
     },
     {
       "path": "src/klayout_tools/economy.py",
@@ -313,7 +309,7 @@
     },
     {
       "path": "src/klayout_tools/extract.py",
-      "lines": 10825
+      "lines": 10779
     },
     {
       "path": "src/klayout_tools/extract_abstract.py",
@@ -617,7 +613,7 @@
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
-      "lines": 4465
+      "lines": 4454
     },
     {
       "path": "src/klayout_tools/sim_commands.py",
@@ -641,7 +637,7 @@
     },
     {
       "path": "src/klayout_tools/sim_steps.py",
-      "lines": 1320
+      "lines": 1314
     },
     {
       "path": "src/klayout_tools/sim_tian.py",
@@ -1089,7 +1085,7 @@
     },
     {
       "path": "tests/test_sim_batch.py",
-      "lines": 8323
+      "lines": 8309
     },
     {
       "path": "tests/test_sim_batch_async.py",
