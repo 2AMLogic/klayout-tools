@@ -207,6 +207,19 @@ The optional `sdc_check` field (see "SDC drift check") compares a committed
     "startpoint": "_398_/CLK", "endpoint": "_405_/D", "slack_ns": 0.03812,
     "consistent_with_aggregate": true, "reason": null
   },
+  "worst_paths_by_group": {
+    "status": "ok", "reason": null,
+    "setup": [
+      { "check_type": "setup", "engine_check_role": "setup",
+        "startpoint": "req_val", "endpoint": "_412_/D", "slack_ns": -0.15321 },
+      { "check_type": "recovery", "engine_check_role": "recovery",
+        "startpoint": "rst_n", "endpoint": "_377_/RESET_B", "slack_ns": 1.42108 }
+    ],
+    "hold": [
+      { "check_type": "hold", "engine_check_role": "hold",
+        "startpoint": "_398_/CLK", "endpoint": "_405_/D", "slack_ns": 0.03812 }
+    ]
+  },
   "clock_skew_ns": 0.0421,
   "estimated_power_mw": 11.6,
   "spef_annotation": null,
@@ -287,6 +300,7 @@ bump. Reports without the field still verify, and `--check` treats
 | `fmax_mhz` | number \| null | `report_fmax_metric`'s own `1/(T-WNS)` extrapolation — see "What this is not" above for the not-yet-bisected caveat. |
 | `setup_violation_count` / `hold_violation_count` | integer | Number of **violating endpoints** (one `report_check_types -violators -format end` row per failing endpoint per path group — not every enumerated timing path), counted over the **same timing-check families** the WNS/TNS fields above measure: setup side = data setup (`-max_delay`, incl. output-delay checks) + asynchronous **recovery** + inferred **clock-gating setup**; hold side = data hold (`-min_delay`) + asynchronous **removal** + inferred **clock-gating hold** (issue #2741). See "Violation counts: check families" below. |
 | `worst_setup_path` / `worst_hold_path` | object | Additive fields (issue #2740), present on every response and every `corners[]` entry. Identity of the worst setup-side / hold-side path end in this session: `{status, check_type, engine_check_role, startpoint, endpoint, slack_ns, consistent_with_aggregate, reason}`. `check_type` is one of `setup`, `hold`, `recovery`, `removal`, `clock_gating_setup`, `clock_gating_hold`, `output_setup`, `output_hold`, `latch_setup`, `latch_hold`, or `unknown`, so async recovery/removal is never reported as data setup/hold. `status` is `"ok"`, `"no_paths"`, `"unavailable"` or `"inconsistent"`. Identity fields are `null` unless a path was found. See "Per-port I/O delays and worst-path identity" below. |
+| `worst_paths_by_group` | object | Additive field (issue #5424), present on the single-corner response and on every `corners[]` entry. Every per-path-group worst path the session found, unreduced: `{status, reason, setup, hold}`, each side a list of `{check_type, engine_check_role, startpoint, endpoint, slack_ns}` sorted worst-slack-first (engine order kept on ties). `status` is `"ok"` (a side with no constrained path is an empty list) or `"unavailable"` with both lists empty and the same `reason` the `worst_*_path` records carry. This is where a **data-setup** WNS is read when an asynchronous recovery check binds `worst_slack_ns` / `fmax_mhz`. See "Response: `worst_paths_by_group`" below. |
 | `port_paths` | object \| omitted | Additive field (issue #3042), present only when `constraints.report_ports` is given — on the single-corner response and on every `corners[]` entry. `{"<port>": {"direction", "setup", "hold"}}` in request order; `setup`/`hold` are path records of the `worst_*_path` shape. See "Per-port path queries" below. |
 | `false_path_from` | array \| omitted | Additive field (issue #2968), present only when `constraints.false_path_from` is given: the exclusion list that was applied, in request order. On a multi-corner response it is hoisted to the top level (it is the same for every corner), not repeated in `corners[]`. |
 | `clock_skew_ns` | number \| null | Worst setup-side clock skew (`report_clock_skew_metric -setup`) across the clock tree the loaded DEF already contains. `null` if the DEF has no clock tree (`report_clock_skew_metric` reports nothing to measure). |
@@ -1277,6 +1291,69 @@ The aggregate fields (`worst_slack_ns`, `worst_hold_slack_ns`, the TNS
 fields, both violation counts and `timing_status`) are unchanged.
 Violation-count semantics are covered in "Violation counts: check families"
 above.
+
+### Response: `worst_paths_by_group` (issue #5424)
+
+`worst_setup_path` / `worst_hold_path` are the **minimum-slack** row of the
+per-path-group query above. `worst_paths_by_group` is that query's *whole*
+result — the same rows, unreduced — on the single-corner response and on
+every `corners[]` entry:
+
+```json
+"worst_paths_by_group": {
+  "status": "ok",
+  "reason": null,
+  "setup": [
+    { "check_type": "recovery", "engine_check_role": "recovery",
+      "startpoint": "rst_n", "endpoint": "ff_a/RESET_B", "slack_ns": -0.41 },
+    { "check_type": "setup", "engine_check_role": "setup",
+      "startpoint": "b_in", "endpoint": "ff_b/D", "slack_ns": 0.69875 }
+  ],
+  "hold": [
+    { "check_type": "removal", "engine_check_role": "removal",
+      "startpoint": "rst_n", "endpoint": "ff_a/RESET_B", "slack_ns": -0.29559 },
+    { "check_type": "hold", "engine_check_role": "hold",
+      "startpoint": "bus[1]", "endpoint": "ff_bus1/D", "slack_ns": -0.17228 }
+  ]
+}
+```
+
+Each side is sorted ascending by `slack_ns` — worst first, so `setup[0]`
+names the same path `worst_setup_path` does and `hold[0]` the same path
+`worst_hold_path` does. Rows of equal slack keep the engine's own order.
+Entry fields are the identity fields of a `worst_*_path` record
+(`check_type` through `slack_ns`, same `_CHECK_ROLE_TYPES` mapping, same
+5-decimal rounding); the cross-check fields (`status`,
+`consistent_with_aggregate`, `reason`) are not repeated per entry, because
+only the head row can bind the session aggregate.
+
+| Field | Meaning |
+| --- | --- |
+| `status` | `"ok"`: the rows parsed. A side the engine found no constrained path on is an **empty list** with `status: "ok"` — not a failure. `"unavailable"`: the engine's path introspection failed or its output was missing or malformed, so both lists are empty and `reason` says why (the same reason the `worst_*_path` records report). Rows are never partially reported. |
+| `reason` | A human-readable reason when `status` is `"unavailable"`. Otherwise `null`. |
+| `setup` / `hold` | The setup-side (`-path_delay max`) and hold-side (`-path_delay min`) rows, worst first. |
+
+**Reading a data-only setup WNS.** The setup side spans three check families
+(data setup, asynchronous recovery, clock-gating setup — see "Violation
+counts: check families" above), and `worst_slack_ns` is the aggregate over
+all three. When the worst recovery check is worse than every data path, that
+aggregate describes the **reset network**, and `fmax_mhz` — `1/(T-WNS)` over
+the same aggregate — is a reset-network number, not a datapath frequency.
+Filter this field by `check_type` to get the family you actually gate on:
+
+```python
+setup_rows = response["worst_paths_by_group"]["setup"]
+data_setup_wns = next(
+    (row["slack_ns"] for row in setup_rows if row["check_type"] == "setup"), None
+)  # None => no data setup path in this session, not "0 slack"
+```
+
+`worst_slack_ns`, `total_negative_slack_ns`, `fmax_mhz`, both violation
+counts and `worst_*_path` are **unchanged** by this field: `fmax_mhz` remains
+the all-family setup aggregate, so a data-only `fmax` has to be derived from
+the filtered slack above and `clock_targets.clock_period_ns` — this command
+does not report one. The field adds no engine query; it is the rows the
+session already parsed.
 
 ### Boundary example
 
