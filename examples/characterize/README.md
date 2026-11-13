@@ -8,6 +8,7 @@ library.
 ```bash
 klt characterize examples/characterize/request.json          # one cell
 klt characterize examples/characterize/request-batch.json    # two cells, one .lib
+klt characterize examples/characterize/request-dffsr.json    # async set/reset flop
 ```
 
 Needs `ngspice` on `$PATH` and nothing else — no PDK, no Docker. The run is
@@ -24,6 +25,8 @@ capacitance probe per input pin, in one deck) and takes a few seconds.
 | `cells.spice` | the cell netlist: `inv_demo` and `nand2_demo` `.subckt`s over bare `level=1` MOSFETs |
 | `models.lib` | a two-section (`tt`/`ss`) synthetic model library |
 | `generate.py` | regenerates all four (`uv run python3 examples/characterize/generate.py`) |
+| `dff.spice` / `request-dff.json` / `request-dff-constraints.json` | the sequential example: a synthetic positive-edge D flip-flop, its clock-to-output arc, and its `D` setup/hold constraints (hand-maintained, not written by `generate.py`) |
+| `dffsr.spice` / `request-dffsr.json` | the asynchronous set/reset example: the same flop plus an active-low clear (`R`) and preset (`S`), emitting `preset`/`clear` propagation arcs on `Q`/`QN` and `recovery_rising`/`removal_rising` constraints on each async pin (hand-maintained) |
 
 These are **not** real PDK data. CLAUDE.md's "open PDKs only" rule is about
 design-rule/model data this repo *vendors*; a worked example only needs to

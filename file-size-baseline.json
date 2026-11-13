@@ -425,7 +425,7 @@
     },
     {
       "path": "src/klayout_tools/liberty_writer.py",
-      "lines": 544
+      "lines": 530
     },
     {
       "path": "src/klayout_tools/lvs.py",

@@ -15,6 +15,19 @@ smallest passing offset, to within ``tolerance_ns``.
 - **hold**: the data pin holds the value to be captured through the clock
   edge and switches away ``h`` after it.
 
+The same search measures an **asynchronous** pin's recovery/removal
+(issue #5520), with the pin's *release* edge as the constrained edge:
+
+- **recovery**: the async pin is released ``r`` before the clock edge, and
+  the probe passes on the same criterion as setup/hold -- the output makes
+  the captured transition within the degraded delay.
+- **removal**: the async pin is still asserted at the clock edge and
+  released ``h`` after it, and the passing outcome is the **opposite**: the
+  clock edge must be *ignored*, so a pass is the output making no
+  transition at all (``.meas`` finds no crossing) and ``degradation`` does
+  not apply. The bracket checks invert with it: the window's wide end must
+  *not* capture and its narrow end must.
+
 Every probe of an iteration lives in one deck (one ``klt sim`` run), bisected
 in lockstep across all points, so the cost is
 ``2 + ceil(log2(window / tolerance))`` simulations. A point whose bracket does
@@ -44,11 +57,14 @@ class ConstraintError(Exception):
 
 @dataclass(frozen=True)
 class ConstraintCase:
-    """One (constrained pin, data edge, kind) combination."""
+    """One (constrained pin, edge, kind) combination -- a data pin's
+    setup/hold, or an async pin's recovery/removal."""
 
     pin: str
-    edge: str  # "rise" / "fall": the constrained pin's transition
-    kind: str  # "setup" / "hold"
+    #: ``"rise"`` / ``"fall"``: the constrained pin's transition -- for
+    #: recovery/removal, the async pin's *release* edge.
+    edge: str
+    kind: str  # "setup" / "hold" / "recovery" / "removal"
     output_pin: str
     #: Levels of every other non-clock input during the probe.
     others: tuple[tuple[str, bool], ...]
@@ -65,6 +81,17 @@ def _frac(rising: bool, thresholds: liberty_writer.Thresholds) -> float:
     if rising:
         return thresholds.input_threshold_pct_rise / 100.0
     return 1.0 - thresholds.input_threshold_pct_fall / 100.0
+
+
+#: Kinds whose constrained edge sits *before* the clock edge (the offset is
+#: subtracted); the rest place it after.
+_BEFORE_CLOCK = ("setup", "recovery")
+
+#: Kinds measured on an asynchronous set/reset pin rather than a data pin
+#: (issue #5520). Their stimulus is a single release edge -- the pin is
+#: asserted from t=0 -- so they share the "setup" waveform shape whichever
+#: side of the clock edge they land on.
+ASYNC_KINDS = ("recovery", "removal")
 
 
 def _pwl(name: str, node: str, points: list[tuple[float, float]]) -> str:
@@ -106,7 +133,7 @@ def build_deck(
     idle, active = (0.0, vdd) if edge == "rising" else (vdd, 0.0)
     clk_rising = edge == "rising"
     lines = [
-        "* klt characterize -- setup/hold constraint probes, do not edit",
+        "* klt characterize -- constraint probes, do not edit",
         f".include {cell['netlist_path']}",
         f"Vdd vdd 0 DC {spice_number(vdd)}",
     ]
@@ -118,7 +145,8 @@ def build_deck(
         d_rising = case.edge == "rise"
         new_level = vdd if d_rising else 0.0
         old_level = vdd - new_level
-        d50 = clk50 + (offset if case.kind == "hold" else -offset)
+        before = case.kind in _BEFORE_CLOCK
+        d50 = clk50 + (-offset if before else offset)
         t_start = d50 - rd * _frac(d_rising, thresholds)
         clk_points = [(0.0, idle)]
         for start in (prime, t_clk):
@@ -134,7 +162,10 @@ def build_deck(
                 # lands on a PWL breakpoint that ngspice 42 cannot step to
                 # near a metastable bisection probe (timestep too small).
                 clk_points.append((stop, active))
-        if case.kind == "setup":
+        if case.kind != "hold":
+            # setup, and both async kinds: one edge, from the level held
+            # since t=0 (the captured value for setup, the asserted level
+            # for recovery/removal) to the new one.
             d_points = [
                 (0.0, old_level),
                 (t_start, old_level),
@@ -192,10 +223,77 @@ def build_deck(
 
 
 def _where(case: ConstraintCase, ci: int, di: int, grid: tuple[float, ...]) -> str:
+    what = "release edge" if case.kind in ASYNC_KINDS else "data edge"
     return (
-        f"{case.kind} on '{case.pin}' ({case.edge} data edge) at clock "
-        f"transition {grid[ci]} ns / data transition {grid[di]} ns"
+        f"{case.kind} on '{case.pin}' ({case.edge} {what}) at clock "
+        f"transition {grid[ci]} ns / {case.pin} transition {grid[di]} ns"
     )
+
+
+def _passes(
+    case: ConstraintCase,
+    delay: float | None,
+    reference: float | None,
+    degradation: float,
+) -> bool:
+    """Whether one probe is on the *safe* side of the boundary.
+
+    Removal inverts the criterion: the clock edge must be ignored, so a pass
+    is the output making no transition at all and the degraded reference
+    delay has nothing to say about it.
+    """
+    if case.kind == "removal":
+        return delay is None
+    assert reference is not None  # every non-removal point brackets one
+    return delay is not None and delay <= reference * (1.0 + degradation)
+
+
+def _bracket(
+    case: ConstraintCase,
+    where: str,
+    wide: float | None,
+    narrow: float | None,
+    options: dict[str, Any],
+) -> float | None:
+    """Check one point's bracket and return its reference delay.
+
+    The wide end of the window must be on the *safe* side of the boundary
+    and the narrow end on the unsafe side, or the boundary is not inside the
+    search window at all. Removal inverts both (see :func:`_passes`) and has
+    no reference delay to return.
+    """
+    wlo, whi = options["window_ns"]
+    moved = "release edge" if case.kind in ASYNC_KINDS else "data edge"
+    if case.kind == "removal":
+        if wide is not None:
+            raise ConstraintError(
+                f"{where}: the clock edge was still captured with the "
+                f"release edge {whi} ns after it, so the constraint cannot "
+                "be bracketed (widen options.constraint_window_ns, or check "
+                "the cell's netlist and cell.async_pins)"
+            )
+        if narrow is None:
+            raise ConstraintError(
+                f"{where}: the clock edge is ignored even with the release "
+                f"edge {wlo} ns from it, so the boundary lies below the "
+                "search window (lower options.constraint_window_ns[0])"
+            )
+        return None
+    if wide is None:
+        raise ConstraintError(
+            f"{where}: the output never made the expected transition even "
+            f"with the {moved} {whi} ns from the clock edge -- the "
+            "constraint cannot be bracketed (widen "
+            "options.constraint_window_ns, or check the cell's function/"
+            "static_inputs)"
+        )
+    if narrow is not None and narrow <= wide * (1.0 + options["degradation"]):
+        raise ConstraintError(
+            f"{where}: the cell still captures with the {moved} {wlo} ns "
+            "from the clock edge, so the boundary lies below the search "
+            "window (lower options.constraint_window_ns[0])"
+        )
+    return wide
 
 
 def run_bisection(
@@ -215,8 +313,10 @@ def run_bisection(
     """Bisect every (case, clock slew, data slew) point in lockstep.
 
     Returns ``{"values": {(case, ci, di): offset_ns}, "reference_ns":
-    {...}, "iterations": n}``. Raises :class:`ConstraintError` when a point's
-    bracket does not contain a boundary.
+    {...}, "iterations": n}``; a removal point's ``reference_ns`` is ``None``
+    because its pass criterion has no reference delay. Raises
+    :class:`ConstraintError` when a point's bracket does not contain a
+    boundary.
     """
     wlo, whi = options["window_ns"]
     degradation = options["degradation"]
@@ -249,24 +349,16 @@ def run_bisection(
     ]
     results = run(probes, "bracket")
     wide, narrow = results[: len(points)], results[len(points) :]
-    reference: dict[tuple[int, int, int], float] = {}
+    reference: dict[tuple[int, int, int], float | None] = {}
     for point, ref, low in zip(points, wide, narrow, strict=True):
-        where = _where(cases[point[0]], point[1], point[2], grid_ns)
-        if ref is None:
-            raise ConstraintError(
-                f"{where}: the output never made the expected transition even "
-                f"with the data edge {whi} ns from the clock edge -- the "
-                "constraint cannot be bracketed (widen "
-                "options.constraint_window_ns, or check the cell's function/"
-                "static_inputs)"
-            )
-        if low is not None and low <= ref * (1.0 + degradation):
-            raise ConstraintError(
-                f"{where}: the cell still captures with the data edge {wlo} ns "
-                "from the clock edge, so the boundary lies below the search "
-                "window (lower options.constraint_window_ns[0])"
-            )
-        reference[point] = ref
+        case = cases[point[0]]
+        reference[point] = _bracket(
+            case,
+            _where(case, point[1], point[2], grid_ns),
+            ref,
+            low,
+            options,
+        )
 
     low_side = {p: wlo for p in points}
     high_side = {p: whi for p in points}
@@ -277,15 +369,15 @@ def run_bisection(
             [(c, ci, di, mids[(c, ci, di)]) for c, ci, di in points], f"iter{n}"
         )
         for point, delay in zip(points, measured, strict=True):
-            passed = delay is not None and delay <= reference[point] * (
-                1.0 + degradation
-            )
+            passed = _passes(cases[point[0]], delay, reference[point], degradation)
             if passed:
                 high_side[point] = mids[point]
             else:
                 low_side[point] = mids[point]
     return {
         "values": dict(high_side),
-        "reference_ns": {p: v * 1e9 for p, v in reference.items()},
+        "reference_ns": {
+            p: (None if v is None else v * 1e9) for p, v in reference.items()
+        },
         "iterations": iterations,
     }

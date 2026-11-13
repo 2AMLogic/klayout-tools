@@ -1,0 +1,62 @@
+* klt characterize worked example -- synthetic positive-edge D flip-flop
+* with asynchronous active-low clear (R) and preset (S).
+* (transmission-gate master/slave; not a real PDK -- see generate.py).
+*
+* Q follows D after a rising CLK edge; QN = !Q. The internal slave nodes are
+* named sv/svk, not s/ss: SPICE node names are case-insensitive, so an
+* internal `s` would be the same net as the `S` pin.
+*
+* The async controls enter at the two storage-node inverters, which become
+* AOI21 gates -- NOT(m*R + sb) and NOT(Q*R + sb), with sb = !S -- rather than
+* fighting the data path:
+*
+*   R = 0 (clear)  -> both gates drive 1 -> sv = 1 -> Q = 0, QN = 1
+*   S = 0 (preset) -> both gates drive 0 -> sv = 0 -> Q = 1, QN = 0
+*
+* Driving both the master node (mb) and the slave keeper (svk) is what makes
+* the force hold in either clock phase: with CLK high the slave follows mb,
+* with CLK low it is held by svk.
+
+.subckt dffsr_demo Q QN CLK D R S VDD VSS
+* clock phases
+MNc1 clkb CLK VSS VSS nfet_demo w=1u l=0.15u
+MPc1 clkb CLK VDD VDD pfet_demo w=2u l=0.15u
+MNc2 clkp clkb VSS VSS nfet_demo w=1u l=0.15u
+MPc2 clkp clkb VDD VDD pfet_demo w=2u l=0.15u
+* S inverter: sb is the active-high form of the active-low preset
+MNsi sb S VSS VSS nfet_demo w=1u l=0.15u
+MPsi sb S VDD VDD pfet_demo w=2u l=0.15u
+* master: transparent while CLK low
+MNm D clkb m VSS nfet_demo w=1u l=0.15u
+MPm D clkp m VDD pfet_demo w=2u l=0.15u
+* master storage gate: mb = !(m*R + sb)
+MP1a n1 m VDD VDD pfet_demo w=4u l=0.15u
+MP1b n1 R VDD VDD pfet_demo w=4u l=0.15u
+MP1c mb sb n1 VDD pfet_demo w=4u l=0.15u
+MN1a mb m k1 VSS nfet_demo w=2u l=0.15u
+MN1b k1 R VSS VSS nfet_demo w=2u l=0.15u
+MN1c mb sb VSS VSS nfet_demo w=2u l=0.15u
+MN2 mm mb VSS VSS nfet_demo w=1u l=0.15u
+MP2 mm mb VDD VDD pfet_demo w=2u l=0.15u
+* master feedback: closed while CLK high
+MNmf mm clkp m VSS nfet_demo w=0.5u l=0.3u
+MPmf mm clkb m VDD pfet_demo w=1u l=0.3u
+* slave: transparent while CLK high
+MNs mb clkp sv VSS nfet_demo w=1u l=0.15u
+MPs mb clkb sv VDD pfet_demo w=2u l=0.15u
+MN3 Q sv VSS VSS nfet_demo w=2u l=0.15u
+MP3 Q sv VDD VDD pfet_demo w=4u l=0.15u
+* slave keeper gate: svk = !(Q*R + sb)
+MP4a n4 Q VDD VDD pfet_demo w=2u l=0.15u
+MP4b n4 R VDD VDD pfet_demo w=2u l=0.15u
+MP4c svk sb n4 VDD pfet_demo w=2u l=0.15u
+MN4a svk Q k4 VSS nfet_demo w=1u l=0.15u
+MN4b k4 R VSS VSS nfet_demo w=1u l=0.15u
+MN4c svk sb VSS VSS nfet_demo w=1u l=0.15u
+* slave feedback: closed while CLK low
+MNsf svk clkb sv VSS nfet_demo w=0.5u l=0.3u
+MPsf svk clkp sv VDD pfet_demo w=1u l=0.3u
+* complementary output
+MN5 QN Q VSS VSS nfet_demo w=2u l=0.15u
+MP5 QN Q VDD VDD pfet_demo w=4u l=0.15u
+.ends dffsr_demo

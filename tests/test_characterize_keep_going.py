@@ -138,7 +138,7 @@ def test_timeout_override_reaches_sim_request(tmp_path, monkeypatch):
         seen.append(json.load(open(path)))
         raise sim.SimError("stop here")
 
-    monkeypatch.setattr(characterize.sim, "run_sim", fake_run_sim)
+    monkeypatch.setattr(sim, "run_sim", fake_run_sim)
     request = _inverter_request(tmp_path)
     request.setdefault("options", {})["timeout_s"] = 900
     path = _write_request(tmp_path, request)

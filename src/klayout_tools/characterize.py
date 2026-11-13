@@ -61,7 +61,7 @@ import re
 from functools import partial
 from typing import Any
 
-from . import liberty_writer, sim
+from . import liberty_writer
 from ._paths import _load_request_json, _resolve_relative, fold_spice_continuations
 from ._provenance import INPUT_ROLE_NETLIST, build_provenance
 from .characterize_arcs import DerivedArc, FunctionError, derive_arcs
@@ -77,7 +77,7 @@ from .characterize_constraints import (
     ConstraintError,
     resolve_constrained_pins,
     resolve_constraint_options,
-    run_constraints,
+    run_sequential_constraints,
 )
 from .characterize_instances import (
     _capacitance_instance_lines,
@@ -88,7 +88,11 @@ from .characterize_instances import (
     _metered_rail_nodes,
     _rail_nodes,
 )
-from .characterize_leg import best_effort_pdk, resolve_resume, run_sim_leg
+from .characterize_leg import (
+    best_effort_pdk,
+    make_deck_runner,
+    resolve_resume,
+)
 from .characterize_osdi import resolve_osdi_preload
 from .characterize_pool import run_cells_partitioned
 from .characterize_probe import probe_netlist_cells as _probe_netlist_cells
@@ -97,6 +101,7 @@ from .characterize_sequential import (
     clock_pwl_line,
     data_pwl_line,
     derive_sequential_arcs,
+    resolve_async_pins,
     resolve_sequential,
     stimulus_schedule,
 )
@@ -403,52 +408,35 @@ def _characterize_cell(
     leakage = _build_leakage(plan, legs.values, corner)
     pin_capacitance = _build_pin_capacitance(plan, legs.values, corner)
 
-    def run_deck(text: str, measurements: list, label: str, stop_ns: float) -> dict:
-        deck_dir = os.path.join(work_dir, "constraints", label)
-        os.makedirs(deck_dir, exist_ok=True)
-        deck_path = os.path.join(deck_dir, "testbench.spice")
-        deck_plan = {
-            "measurements": measurements,
-            "window": {**plan["window"], "stop_ns": stop_ns},
-        }
-        deck_request = build_request(plan=deck_plan, testbench_path=deck_path)
-        request_path = os.path.join(deck_dir, "sim-request.json")
-        try:
-            report = run_sim_leg(
-                testbench_path=deck_path,
-                testbench_text=text,
-                sim_request=deck_request,
-                sim_request_path=request_path,
-                sim_report_path=os.path.join(deck_dir, "sim-report.json"),
-                sim_dir=os.path.join(deck_dir, "sim"),
-                backend=backend,
-                resume=resume,
-                **(batch_shard or {}),
-            )
-        except sim.SimError as exc:
-            raise CharacterizeError(f"constraint simulation failed: {exc}") from exc
-        return _extract_measurements(report, request_path, allow_missing=True)
+    run_deck = make_deck_runner(
+        work_dir=work_dir,
+        window=plan["window"],
+        build_request=build_request,
+        extract=_extract_measurements,
+        error_cls=CharacterizeError,
+        backend=backend,
+        resume=resume,
+        batch_shard=batch_shard,
+    )
 
-    constraints = None
-    if cell["constrained_pins"]:
-        try:
-            constraints = run_constraints(
-                cell=cell,
-                arcs=arcs,
-                grid_ns=grid["input_transition_ns"],
-                rail_nodes=_rail_nodes(cell),
-                vdd=corner["supply_v"],
-                thresholds=thresholds,
-                ramps_ns=options["ramps_ns"],
-                settle_ns=options["settle_ns"],
-                load_pf=min(grid["output_load_pf"]),
-                options=options["constraint"],
-                run_deck=run_deck,
-            )
-        except ConstraintError as exc:
-            raise CharacterizeError(str(exc)) from exc
+    try:
+        async_arcs, constraints = run_sequential_constraints(
+            cell=cell,
+            arcs=arcs,
+            grid=grid,
+            rail_nodes=_rail_nodes(cell),
+            vdd=corner["supply_v"],
+            thresholds=thresholds,
+            ramps_ns=options["ramps_ns"],
+            settle_ns=options["settle_ns"],
+            options=options["constraint"],
+            run_deck=run_deck,
+        )
+    except ConstraintError as exc:
+        raise CharacterizeError(str(exc)) from exc
 
     return {
+        "async_arcs": async_arcs,
         "constraints": constraints,
         "cell": cell,
         "arcs": arcs,
@@ -582,7 +570,10 @@ def _resolve_cell_spec(
 
     try:
         constrained_pins = resolve_constrained_pins(spec, pins, clock_pin, where)
-    except ConstraintError as exc:
+        async_pins = resolve_async_pins(
+            spec, pins, clock_pin, static_inputs, constrained_pins, where
+        )
+    except (ConstraintError, SequentialSpecError) as exc:
         raise CharacterizeError(str(exc)) from exc
 
     declared = {pin["name"] for pin in pins} | set(power.values())
@@ -619,6 +610,7 @@ def _resolve_cell_spec(
         "clock_edge": clock_edge,
         "static_inputs": static_inputs,
         "constrained_pins": constrained_pins,
+        "async_pins": async_pins,
     }
 
 
@@ -1958,6 +1950,10 @@ def _build_liberty_cell(
             )
         )
 
+    # Forced (async preset/clear) arcs ride the same output pins.
+    for name, forced in (result.get("async_arcs") or {}).get("liberty", {}).items():
+        arcs_by_output.setdefault(name, []).extend(forced)
+
     measured_caps = result["pin_capacitance"]
     constraint_arcs = (result.get("constraints") or {}).get("liberty", {})
     pins = []
@@ -2148,6 +2144,7 @@ def _cell_entry(result: dict[str, Any]) -> dict[str, Any]:
     cell, its arcs with all six tables, its leakage states, and its own
     simulation run."""
     cell = result["cell"]
+    async_arcs = cell["async_pins"]
     tables = result["tables"]
     power_tables = result["power_tables"]
     sim_report = result["sim_report"]
@@ -2193,6 +2190,9 @@ def _cell_entry(result: dict[str, Any]) -> dict[str, Any]:
             for index, arc in enumerate(result["arcs"])
         ],
         "leakage": result["leakage"],
+        # Present only for a cell that declares `async_pins` (issue #5520),
+        # which is what keeps a request without them byte-identical.
+        **({"async_arcs": result["async_arcs"]["entries"]} if async_arcs else {}),
         "constraints": (result.get("constraints") or {}).get("entries", []),
         "simulation": {
             "testbench": result["testbench_path"],
