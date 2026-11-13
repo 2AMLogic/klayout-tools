@@ -51,6 +51,20 @@ not `klt --version`, if you need to detect this kind of drift. See
   ngspice-47 against a real IHP-Open-PDK install (gated `stddev` exactly `0.0`
   vs `8.136e-3` V randomised; negative control identical to a plain `mos_tt`
   run). See `docs/cli/sim.md` → "Per-instance mismatch selection".
+- **`klt sim`: a bad time bound in `cycle_mean` / `eye` / `settled` /
+  `step_resolution` is now reported against its own form, not `crossings`**
+  (#5472, 2026-11-13): those four forms share one window-bound parser, which
+  labelled every diagnostic `crossings.<key>` by default -- so a
+  `cycle_mean.from` of `"soon"` came back as `measurement 'm1': crossings.from
+  must be a time in seconds`, naming a form the request never declared. The
+  shared parser now takes the form name from its caller, so the message reads
+  `cycle_mean.from` (likewise `eye.ui`, `step_resolution.window`,
+  `settled.from`). `energy` and `stress`, which carried their own copies of the
+  parser, now share it too; their messages keep the same wording but quote
+  `"10n"` as the example literal instead of `"5n"` / `"20n"`. Message text
+  only: no error code, exit code or JSON field changes, and no
+  `schema_version` bump.
+
 - **`klt sim --backend batch`: the local-versus-fleet PDK stamp comparison
   now works on a host that pins no PDK root** (#5474, 2026-11-13): the
   submitter's side of `pdk_stamp_comparison` was stamped only from
