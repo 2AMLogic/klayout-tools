@@ -68,8 +68,9 @@ model's fidelity is sequenced in
 ## Phase 5 — agent surface (partial — gallery + MCP server live; reasoning module outstanding)
 
 MCP server exposing the toolkit (shipped: `klt mcp serve`, a generic stdio
-bridge generated from the verb registry — `docs/guides/mcp-server.md`; per-verb
-curated tools, resources and prompts are follow-ups); LLM reasoning module for layout decisions
+bridge generated from the verb registry, plus the `docs/schemas/` JSON
+contract served as MCP resources — `docs/guides/mcp-server.md`; per-verb
+curated tools and prompts are follow-ups); LLM reasoning module for layout decisions
 (strategy in the model, geometry in the tools); worked examples designed
 end-to-end by agents, published in a gallery at klayout-tools.org — the
 kicad-tools.org pattern, one layer down. The gallery half is live

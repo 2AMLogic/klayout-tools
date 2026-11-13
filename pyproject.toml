@@ -227,6 +227,9 @@ packages = ["src/klayout_tools"]
 # Per-verb CLI pages: `--help` text points at `docs/cli/<verb>.md`, so ship them
 # for wheel-only installs (issue #5288).
 "docs/cli" = "klayout_tools/data/cli"
+# JSON-contract schemas: `klt mcp serve` serves them as MCP resources, so a
+# wheel-only install must carry them (issue #5420).
+"docs/schemas" = "klayout_tools/data/schemas"
 
 # Distribution version (issue #2823). `base-version` is the release this
 # checkout is at or working towards -- bump it here (then `uv lock`) when
