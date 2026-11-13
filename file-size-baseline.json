@@ -461,7 +461,7 @@
     },
     {
       "path": "src/klayout_tools/lvs_runset.py",
-      "lines": 1009
+      "lines": 977
     },
     {
       "path": "src/klayout_tools/macros.py",

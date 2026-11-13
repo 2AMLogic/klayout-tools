@@ -45,8 +45,8 @@ from typing import TYPE_CHECKING, Any
 
 from ._paths import resolve_tool_binary
 from ._provenance import build_provenance, sha256_file
-from .coverage import build_check_coverage
 from .lvs_mismatch import _mismatch
+from .lvs_runset_census import _build_coverage, _class_census
 
 if TYPE_CHECKING:
     import klayout.db as kdb
@@ -287,18 +287,6 @@ def _nonzero_exit_message(
         f"application {app_version}, pip klayout module "
         f"{module_version}). klayout's own output:\n{output.strip()}"
     )
-
-
-def _class_census(netlist: kdb.Netlist | None) -> tuple[list[str], dict[str, int]]:
-    """``(declared_classes, instances_per_class)`` over every circuit."""
-    declared = sorted(dc.name for dc in netlist.each_device_class()) if netlist else []
-    counts: dict[str, int] = {}
-    if netlist is not None:
-        for circuit in netlist.each_circuit():
-            for device in circuit.each_device():
-                cls = device.device_class().name
-                counts[cls] = counts.get(cls, 0) + 1
-    return declared, counts
 
 
 def _device_params(device: Any) -> dict[str, float]:
@@ -548,34 +536,6 @@ def _net_correspondence(xref: Any) -> list[dict[str, Any]]:
     )
 
 
-def _build_coverage(
-    layout_declared: list[str],
-    ref_declared: list[str],
-    layout_counts: dict[str, int],
-    ref_counts: dict[str, int],
-) -> dict[str, Any]:
-    recognized = sorted(set(layout_counts) | set(ref_counts))
-    not_recognized = sorted(
-        c for c in set(layout_declared) | set(ref_declared) if c not in recognized
-    )
-    coverage = build_check_coverage(
-        checked=recognized,
-        skipped=[
-            {"id": c, "reason": "declared_not_recognized"} for c in not_recognized
-        ],
-    )
-    coverage["declared_device_classes"] = {
-        "layout": layout_declared,
-        "reference": ref_declared,
-    }
-    coverage["recognized_device_classes"] = {
-        "layout": sorted(layout_counts),
-        "reference": sorted(ref_counts),
-    }
-    coverage["declared_not_recognized"] = not_recognized
-    return coverage
-
-
 #: ``power_pins_derivation.rule`` for this engine: the runset has no library
 #: pin-order data, so the power/ground universe is the pins the extracted
 #: subcircuits declare whose *names* classify as supplies.
@@ -671,8 +631,8 @@ def _empty_extraction_verdict(l2n: Any, reference_path: str | None) -> dict[str,
     if reference is None:
         return {}
 
-    layout_declared, layout_counts = _class_census(l2n.netlist())
-    ref_declared, ref_counts = _class_census(reference)
+    layout_declared, layout_counts, layout_unnamed = _class_census(l2n.netlist())
+    ref_declared, ref_counts, ref_unnamed = _class_census(reference)
     mismatches: list[dict[str, Any]] = []
     for circuit in reference.each_circuit():
         cname = {"layout": None, "reference": circuit.name}
@@ -713,7 +673,11 @@ def _empty_extraction_verdict(l2n: Any, reference_path: str | None) -> dict[str,
         "mismatches": mismatches,
         "power_connectivity": runset_power_connectivity(layout_netlist),
         "coverage": _build_coverage(
-            layout_declared, ref_declared, layout_counts, ref_counts
+            layout_declared,
+            ref_declared,
+            layout_counts,
+            ref_counts,
+            layout_unnamed + ref_unnamed,
         ),
         "device_census": {"layout": layout_counts, "reference": ref_counts},
         "counts": {
@@ -768,8 +732,8 @@ def read_lvsdb_verdict(
         )
 
     mismatches, any_error, not_compared = _classify(xref)
-    layout_declared, layout_counts = _class_census(xref.netlist_a())
-    ref_declared, ref_counts = _class_census(xref.netlist_b())
+    layout_declared, layout_counts, layout_unnamed = _class_census(xref.netlist_a())
+    ref_declared, ref_counts, ref_unnamed = _class_census(xref.netlist_b())
     nothing = not (layout_counts or ref_counts)
     if nothing:
         mismatches.append(
@@ -792,7 +756,11 @@ def read_lvsdb_verdict(
         "mismatches": mismatches,
         "power_connectivity": runset_power_connectivity(l2n.netlist()),
         "coverage": _build_coverage(
-            layout_declared, ref_declared, layout_counts, ref_counts
+            layout_declared,
+            ref_declared,
+            layout_counts,
+            ref_counts,
+            layout_unnamed + ref_unnamed,
         ),
         "device_census": {"layout": layout_counts, "reference": ref_counts},
         "counts": _pair_counts(xref),
