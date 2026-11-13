@@ -266,6 +266,8 @@ def test_monte_carlo_statistics_carry_the_value(tmp_path, monkeypatch):
         (None, "[snm_vector_missing]"),
         ("garbage\n", "[snm_raw_invalid]"),
         (_rawfile(_XS, _YS, _YS, nvars=3), "[snm_raw_invalid]"),
+        # Readable, four-variable, but swept zero points.
+        (_rawfile([], [], []), "[snm_raw_invalid]"),
         (_rawfile(_XS[:2], _YS[:2], _YS[:2]), "[snm_invalid_data]"),
         (_rawfile(_XS, _YS[::-1], _YS), "[snm_non_monotonic]"),
         (
@@ -356,3 +358,94 @@ def test_snm_is_a_registered_mandatory_runner_feature():
     assert sim_batch._missing_runner_features(["snm"], "0.7.0") == ["snm"]
     assert sim_batch._missing_runner_features(["snm"], "0.7.1") == []
     assert sim_batch._missing_runner_features(["snm"], None) is None
+
+
+# --------------------------------------------------------------------------- #
+# snm_measurement_result: the no-value paths
+# --------------------------------------------------------------------------- #
+#
+# snm_measurement_result is a plain module-level function, so these call it
+# directly -- no deck, no engine. They pin the fallbacks a corner-level failure
+# cannot reach: a missing outcome, an outcome carrying neither error nor code,
+# and the options.save_mode == "netlist" hint.
+
+
+def _no_value_diagnostic(outcome, *, save_mode="all", spec=_DECL):
+    result, diagnostics = sim_snm_meas.snm_measurement_result(
+        spec, outcome, save_mode=save_mode
+    )
+    assert result["value"] is None
+    assert result["status"] == "error"
+    assert result["margin"] is None
+    # No `snm` sibling: there is no request echo to report without a result.
+    assert "snm" not in result
+    (diagnostic,) = diagnostics
+    assert diagnostic["severity"] == "error"
+    assert diagnostic["code"] == "measurement"
+    return diagnostic["message"]
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        pytest.param(None, id="no-outcome"),
+        pytest.param(sim_snm_meas.SnmOutcome(), id="outcome-without-error-or-code"),
+    ],
+)
+def test_a_valueless_outcome_falls_back_to_the_default_reason_and_message(outcome):
+    assert _no_value_diagnostic(outcome) == (
+        "[snm_vector_missing] measurement 'snm_hold' produced no snm value"
+    )
+
+
+def test_an_outcome_error_and_code_are_used_verbatim_when_present():
+    outcome = sim_snm_meas.SnmOutcome(
+        code="snm_raw_invalid", error="measurement 'snm_hold': could not read it"
+    )
+
+    assert _no_value_diagnostic(outcome) == (
+        "[snm_raw_invalid] measurement 'snm_hold': could not read it"
+    )
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        pytest.param(None, id="no-outcome"),
+        pytest.param(
+            sim_snm_meas.SnmOutcome(
+                code="snm_vector_missing", error="measurement 'snm_hold': no rawfile"
+            ),
+            id="missing-vector-outcome",
+        ),
+    ],
+)
+def test_save_mode_netlist_appends_the_no_value_hint_to_a_missing_vector(outcome):
+    message = _no_value_diagnostic(outcome, save_mode="netlist")
+
+    assert message.startswith("[snm_vector_missing] ")
+    assert message.endswith(sim.SAVE_MODE_NETLIST_NO_VALUE_HINT)
+
+
+def test_the_netlist_hint_is_only_for_a_missing_vector_not_any_failure():
+    # A rawfile that was written but is unusable says nothing about .save cards.
+    outcome = sim_snm_meas.SnmOutcome(code="snm_raw_invalid", error="bad sweep: flat")
+
+    message = _no_value_diagnostic(outcome, save_mode="netlist")
+
+    assert message == "[snm_raw_invalid] bad sweep: flat"
+    assert sim.SAVE_MODE_NETLIST_NO_VALUE_HINT not in message
+
+
+def test_a_missing_vector_carries_no_hint_under_the_default_save_mode():
+    message = _no_value_diagnostic(None, save_mode="all")
+
+    assert sim.SAVE_MODE_NETLIST_NO_VALUE_HINT not in message
+
+
+def test_a_valueless_entry_still_echoes_the_declared_unit():
+    spec = {**_DECL, "unit": "V"}
+
+    result, _ = sim_snm_meas.snm_measurement_result(spec, None, save_mode="all")
+
+    assert result["unit"] == "V"
