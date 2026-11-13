@@ -2305,17 +2305,35 @@ runner whose image has no readable `SOURCES` stamp:
   and klt does not fail the run on `mismatch`. `pdk_stamp_comparison` is
   unchanged. Text output prints a `models_lib:` line next to `pdk_stamp:`.
 
-`pdk_stamp_comparison` compares the worker's stamp with the `SOURCES` stamp the
-submitter resolves locally (`models.pdk_root` or `$PDK_ROOT`) and reports a
-`mismatch` only when both sides give the **same variant under the same stamp
-scheme**; a missing stamp or an unlike scheme is `not_comparable`, never a
-proven mismatch. The `reason` says which: `client_stamp_unavailable` means the
-submitter has no readable local `SOURCES` or bundle `.pdk-store.json` (set `models.pdk` and
-`models.pdk_root` / `$PDK_ROOT`); `worker_stamp_unavailable` means the runner
+`pdk_stamp_comparison` compares the worker's stamp with the `SOURCES` stamp
+the submitter resolves locally and reports a `mismatch` only when both sides
+give the **same variant under the same stamp scheme**; a missing stamp or an
+unlike scheme is `not_comparable`, never a proven mismatch. The submitter's
+side is stamped from `models.pdk_root` when the request pins one, else
+`$PDK_ROOT`, else -- since issue #5474 -- the install the PDK search order
+resolves, i.e. the very one `provenance.pdk` names. A batch run therefore gets
+a comparison without pinning anything, which matters because `models.pdk_root`
+is *refused* for `batch` (`models_pdk_root_host_path`, it is a submitting-host
+path) and a host whose PDK lives under `~/.ciel` pins nothing.
+The `reason` says which: `client_stamp_unavailable` means no install on the
+submitting host holds `models.pdk`, or the one that does has neither a readable
+`SOURCES` nor a bundle `.pdk-store.json` (set `models.pdk`, and on a host with
+no install, `$PDK_ROOT`); `worker_stamp_unavailable` means the runner
 reported no stamp (older worker or absent capture); `variant_differs` /
 `scheme_differs` mean the two sides name different variants or stamp schemes
 (`SOURCES` wins when present, so a `SOURCES` side against a store-only side is
 `scheme_differs`).
+
+Each side's PDK revision is also reported in full, independently of the
+comparison's status, so a divergence can be attributed from the report alone:
+
+| Side | Where the revision is reported |
+| --- | --- |
+| Submitter | `provenance.pdk.version` (the `SOURCES` stamp text, or `store:<version>`), with `provenance.pdk.source` naming the search-order step it came from (`search root: ~/.ciel`, ...). Present on `local` and `batch` runs alike. |
+| Runner | `environment.remote.worker_environment.pdk.stamp_text` (plus `stamp_scheme` / `stamp_sha256`, and under sharding the same block on each `fleet[]` member). |
+| Submitter's model library | `environment.models_lib_sha256` -- a content hash of the top model library file actually loaded. |
+| Runner's model library | `environment.remote.runner_models_lib_sha256`, compared in `models_lib_comparison`. |
+
 When `pdk.models_staged` is true the image stamp says nothing about the
 executed models, so `pdk_stamp_comparison` instead compares the client's
 `environment.staged_model_inputs` digests with the worker's `model_inputs`
@@ -2509,12 +2527,21 @@ aid, not a diagnosis. Equal PDK commits, equal library hashes and an equal
 ngspice major version do not by themselves show the two executions are
 equivalent.
 
-0. Read `environment.pdk_stamp_comparison` first (the worker's PDK
-   `SOURCES` stamp, or under `options.stage_model_inputs` the per-file sha256
-   of the shipped model files, against the submitter's). A `match` does not
-   prove the model closures are equal. The fatal ngspice line and its code
-   (`model_bin_range`, `ngspice_fatal`, ...) are on the errored unit's
-   `diagnostics` even without `options.keep_artifacts`.
+0. Read `environment.remote.worker_environment.pdk_stamp_comparison` first
+   (the worker's PDK `SOURCES` stamp, or under `options.stage_model_inputs`
+   the per-file sha256 of the shipped model files, against the submitter's).
+   A `match` does not prove the model closures are equal. Each side's revision
+   is reported whatever the comparison says: the submitter's in
+   `provenance.pdk.version`, the runner's in
+   `environment.remote.worker_environment.pdk.stamp_text`, and the two model
+   library hashes in `environment.models_lib_sha256` /
+   `environment.remote.runner_models_lib_sha256` (compared in
+   `models_lib_comparison`) -- quote all four when reporting a divergence.
+   Do **not** reach for `models.pdk_root` here: it is refused for `batch`
+   (`models_pdk_root_host_path`), and since #5474 the submitter's stamp comes
+   from the search-resolved install anyway, so no pinning is needed. The fatal
+   ngspice line and its code (`model_bin_range`, `ngspice_fatal`, ...) are on
+   the errored unit's `diagnostics` even without `options.keep_artifacts`.
 1. Run with `options.keep_artifacts` locally and on `batch`; diff the
    generated per-corner decks (`artifacts.deck`) and logs.
 2. Compare how every `.include`/`.lib` resolved: the expanded paths and
