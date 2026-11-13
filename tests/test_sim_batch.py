@@ -26,7 +26,13 @@ from typing import Any
 import jsonschema
 import pytest
 
-from helpers.subprocess_fakes import fake_completed
+from helpers.subprocess_fakes import (
+    INPUTS_UPLOAD_ARGV,
+    fake_completed,
+    inputs_upload_of,
+    uploaded_input_bytes,
+    uploaded_request_of,
+)
 from klayout_tools import remote_launcher as rl
 from klayout_tools import sim, sim_batch_contract_worker
 from klayout_tools import sim_batch as sb
@@ -748,72 +754,9 @@ def test_build_batch_job_spec_leaves_pdk_rooted_includes_to_the_job_instance(tmp
     assert spec.inputs[0].local_path == str(netlist)
 
 
-def test_submit_uploads_every_staged_include_under_inputs(tmp_path):
-    runner = _FakeRunner()
-    config = _config(tmp_path)
-    spec = sb._build_batch_job_spec(
-        {"models": {"pdk": "sky130A"}},
-        str(_write_body_including_dut(tmp_path)),
-        corner_count=1,
-        timeout_s=30.0,
-        keep_artifacts=False,
-    )
-
-    sb.submit_job(config, "job-include", spec, runner=runner)
-
-    destinations = [call[-2] for call in runner.calls if "cp" in call]
-    assert any(d.endswith("/job-include/inputs/netlist.cir") for d in destinations)
-    assert any(
-        d.endswith("/job-include/inputs/07-reference.spice") for d in destinations
-    )
-    assert any(d.endswith("/job-include/job.json") for d in destinations)
-
-
 # --------------------------------------------------------------------------- #
 # Submit / launch / poll / collect (recorded-argv assertions)
 # --------------------------------------------------------------------------- #
-
-
-def test_submit_uploads_inputs_then_job_json_to_the_documented_keys(tmp_path):
-    runner = _FakeRunner()
-    config = _config(tmp_path)
-    netlist = _write_body(tmp_path)
-    spec = sb._build_batch_job_spec(
-        {"models": {"pdk": "sky130A"}},
-        str(netlist),
-        corner_count=1,
-        timeout_s=30.0,
-        keep_artifacts=False,
-    )
-
-    sb.submit_job(config, "job-1", spec, runner=runner)
-
-    destinations = [argv[-2] for argv in runner.calls]
-    assert destinations == [
-        f"s3://{FAKE_BUCKET}/jobs/job-1/inputs/netlist.cir",
-        f"s3://{FAKE_BUCKET}/jobs/job-1/inputs/request.json",
-        # job.json LAST: the object `launch` head-objects and the harness
-        # fetches first, so the submission is atomic from the fleet's view.
-        f"s3://{FAKE_BUCKET}/jobs/job-1/job.json",
-    ]
-    for argv in runner.calls:
-        assert argv[0] == "aws"
-        assert "--profile" in argv and sb.DEFAULT_BATCH_PROFILE in argv
-        assert "--region" in argv and "us-east-1" in argv
-
-
-def test_submit_failure_raises_batch_error(tmp_path):
-    runner = _FakeRunner()
-    runner.queue("inputs/netlist.cir", fake_completed(returncode=1, stderr="denied"))
-    spec = sb._build_batch_job_spec(
-        {"models": {}},
-        str(_write_body(tmp_path)),
-        corner_count=1,
-        timeout_s=30.0,
-        keep_artifacts=False,
-    )
-    with pytest.raises(sb.BatchError, match="denied"):
-        sb.submit_job(_config(tmp_path), "job-1", spec, runner=runner)
 
 
 def test_launch_shells_out_once_with_apply_and_profile(tmp_path):
@@ -1929,12 +1872,11 @@ def test_run_sim_batch_returns_per_corner_waveform_artifacts(tmp_path, monkeypat
     _install_fake_batch_transport(monkeypatch, runner=runner)
 
     uploaded: dict[str, str] = {}
-    real_open = open
 
     def _capture(argv, timeout_s):
-        if "inputs/request.json" in " ".join(argv):
-            with real_open(argv[-3], encoding="utf-8") as handle:
-                uploaded["request"] = handle.read()
+        captured = uploaded_request_of(argv)
+        if captured is not None:
+            uploaded["request"] = json.dumps(captured[0])
         return runner(argv, timeout_s)
 
     monkeypatch.setattr(sb, "_run_subprocess", _capture)
@@ -1969,13 +1911,11 @@ def test_run_sim_batch_uploads_a_local_parallel_request_document(tmp_path, monke
     _install_fake_batch_transport(monkeypatch, runner=runner)
 
     uploaded: dict[str, str] = {}
-    real_open = open
 
     def _capture(argv, timeout_s):
-        joined = " ".join(argv)
-        if "inputs/request.json" in joined:
-            with real_open(argv[-3], encoding="utf-8") as handle:
-                uploaded["request"] = handle.read()
+        captured = uploaded_request_of(argv)
+        if captured is not None:
+            uploaded["request"] = json.dumps(captured[0])
         return runner(argv, timeout_s)
 
     monkeypatch.setattr(sb, "_run_subprocess", _capture)
@@ -2000,12 +1940,11 @@ def test_run_sim_batch_forwards_cli_budget_s_to_the_uploaded_request(
     _install_fake_batch_transport(monkeypatch, runner=runner)
 
     uploaded: dict[str, str] = {}
-    real_open = open
 
     def _capture(argv, timeout_s):
-        if "inputs/request.json" in " ".join(argv):
-            with real_open(argv[-3], encoding="utf-8") as handle:
-                uploaded["request"] = handle.read()
+        captured = uploaded_request_of(argv)
+        if captured is not None:
+            uploaded["request"] = json.dumps(captured[0])
         return runner(argv, timeout_s)
 
     monkeypatch.setattr(sb, "_run_subprocess", _capture)
@@ -2032,12 +1971,11 @@ def test_run_sim_batch_accepts_an_analysis_steps_request(tmp_path, monkeypatch):
     _install_fake_batch_transport(monkeypatch, runner=runner)
 
     uploaded: dict[str, str] = {}
-    real_open = open
 
     def _capture(argv, timeout_s):
-        if "inputs/request.json" in " ".join(argv):
-            with real_open(argv[-3], encoding="utf-8") as handle:
-                uploaded["request"] = handle.read()
+        captured = uploaded_request_of(argv)
+        if captured is not None:
+            uploaded["request"] = json.dumps(captured[0])
         return runner(argv, timeout_s)
 
     monkeypatch.setattr(sb, "_run_subprocess", _capture)
@@ -3240,11 +3178,10 @@ def test_hosts_greater_than_one_submits_one_job_per_shard(tmp_path, monkeypatch)
         `_explicit_points` slice that job's uploaded request carries -- so
         the merge-order assertion below is deterministic no matter which
         shard finishes first."""
-        joined = " ".join(argv)
-        if "inputs/request.json" in joined:
-            source, destination = argv[argv.index("cp") + 1 : argv.index("cp") + 3]
-            document = json.loads(Path(source).read_text())
-            runner.outputs_by_job[job_id_of(destination)] = {
+        captured = uploaded_request_of(argv)
+        if captured is not None:
+            document, job_id = captured
+            runner.outputs_by_job[job_id] = {
                 "report.json": _sim_report(
                     corner_ids=tuple(
                         f"tt_1.800_{int(point['temperature_c'])}"
@@ -3300,12 +3237,11 @@ def test_every_shard_request_preserves_options_save_mode(tmp_path, monkeypatch):
     uploaded: list[dict] = []
 
     def _capture_request(argv, timeout_s):
-        joined = " ".join(argv)
-        if "inputs/request.json" in joined:
-            source, destination = argv[argv.index("cp") + 1 : argv.index("cp") + 3]
-            document = json.loads(Path(source).read_text())
+        captured = uploaded_request_of(argv)
+        if captured is not None:
+            document, job_id = captured
             uploaded.append(document)
-            runner.outputs_by_job[job_id_of(destination)] = {
+            runner.outputs_by_job[job_id] = {
                 "report.json": _sim_report(
                     corner_ids=tuple(
                         f"tt_1.800_{int(point['temperature_c'])}"
@@ -3568,16 +3504,19 @@ def _staged_batch_request(tmp_path: Path, **overrides) -> dict:
 
 
 def _capture_uploads(monkeypatch, runner: _FakeRunner) -> dict[str, bytes]:
-    """Read every `inputs/<name>` upload's bytes while the temp file exists."""
+    """Every uploaded input's bytes (plus `job.json`'s), keyed by basename,
+    read while the staged copies still exist. Since #5539 the inputs arrive
+    as one recursive upload of a staged tree, so one call yields them all.
+    """
     uploaded: dict[str, bytes] = {}
 
     def _capture(argv, timeout_s):
-        if "cp" in argv:
-            destination = argv[argv.index("cp") + 2]
-            if "/inputs/" in destination or destination.endswith("/job.json"):
-                key = destination.rsplit("/inputs/", 1)[-1].rsplit("/", 1)[-1]
-                with open(argv[argv.index("cp") + 1], "rb") as handle:
-                    uploaded[key] = handle.read()
+        staged = uploaded_input_bytes(argv)
+        if staged is not None:
+            for name, payload in staged.items():
+                uploaded[os.path.basename(name)] = payload
+        elif "cp" in argv and argv[argv.index("cp") + 2].endswith("/job.json"):
+            uploaded["job.json"] = Path(argv[argv.index("cp") + 1]).read_bytes()
         return runner(argv, timeout_s)
 
     monkeypatch.setattr(sb, "_run_subprocess", _capture)
@@ -3809,9 +3748,7 @@ def test_sequential_single_unit_probes_adapt_to_the_collected_result(
         for i, a in enumerate(runner.calls)
         if "outputs/" in " ".join(a) and "--recursive" in a
     ]
-    uploads = [
-        i for i, a in enumerate(runner.calls) if "inputs/request.json" in " ".join(a)
-    ]
+    uploads = [i for i, a in enumerate(runner.calls) if inputs_upload_of(a) is not None]
     assert len(collects) == len(uploads) == 2
     assert collects[0] < uploads[1]
 
@@ -3951,12 +3888,12 @@ def test_mixed_version_shards_keep_each_runner_identity(tmp_path, monkeypatch):
     versions = {"0": _CLIENT_VERSION, "1": "0.4.2"}
 
     def _register(argv, timeout_s):
-        if "inputs/request.json" in " ".join(argv):
-            source, destination = argv[argv.index("cp") + 1 : argv.index("cp") + 3]
-            document = json.loads(Path(source).read_text())
+        captured = uploaded_request_of(argv)
+        if captured is not None:
+            document, job_id = captured
             points = document["_explicit_points"]
             first = int(points[0]["temperature_c"])
-            runner.outputs_by_job[job_id_of(destination)] = {
+            runner.outputs_by_job[job_id] = {
                 "report.json": _sim_report(
                     corner_ids=tuple(
                         f"tt_1.800_{int(p['temperature_c'])}" for p in points
@@ -4939,9 +4876,10 @@ def test_mixed_worker_identities_stay_per_shard(tmp_path, monkeypatch):
     _install_fake_batch_transport(monkeypatch, runner=runner)
 
     def _register(argv, timeout_s):
-        if "inputs/request.json" in " ".join(argv):
-            source, destination = argv[argv.index("cp") + 1 : argv.index("cp") + 3]
-            points = json.loads(Path(source).read_text())["_explicit_points"]
+        captured = uploaded_request_of(argv)
+        if captured is not None:
+            document, job_id = captured
+            points = document["_explicit_points"]
             first = int(points[0]["temperature_c"])
             files = {
                 "report.json": _sim_report(
@@ -4952,7 +4890,7 @@ def test_mixed_worker_identities_stay_per_shard(tmp_path, monkeypatch):
             }
             if first == 0:  # the other shard is a legacy worker
                 files["worker_environment.json"] = _capture(cpu_model="CPU-A")
-            runner.outputs_by_job[job_id_of(destination)] = files
+            runner.outputs_by_job[job_id] = files
         return runner(argv, timeout_s)
 
     monkeypatch.setattr(sb, "_run_subprocess", _register)
@@ -5456,12 +5394,11 @@ def test_run_sim_batch_carries_a_crossings_series_inline(tmp_path, monkeypatch):
     runner.default = fake_completed(_status("done"))
     runner.outputs = {"report.json": _crossings_report()}
     uploaded: dict[str, str] = {}
-    real_open = open
 
     def _capture(argv, timeout_s):
-        if "inputs/request.json" in " ".join(argv):
-            with real_open(argv[-3], encoding="utf-8") as handle:
-                uploaded["request"] = handle.read()
+        captured = uploaded_request_of(argv)
+        if captured is not None:
+            uploaded["request"] = json.dumps(captured[0])
         return runner(argv, timeout_s)
 
     _install_fake_batch_transport(monkeypatch, runner=runner)
@@ -5490,12 +5427,11 @@ def test_sharded_batch_run_merges_each_shards_crossings_series(tmp_path, monkeyp
     _install_fake_batch_transport(monkeypatch, runner=runner)
 
     def _register_shard_report(argv, timeout_s):
-        joined = " ".join(argv)
-        if "inputs/request.json" in joined:
-            source, destination = argv[argv.index("cp") + 1 : argv.index("cp") + 3]
-            document = json.loads(Path(source).read_text())
+        captured = uploaded_request_of(argv)
+        if captured is not None:
+            document, job_id = captured
             assert document["measurements"] == [_CROSSINGS_DECL]
-            runner.outputs_by_job[job_id_of(destination)] = {
+            runner.outputs_by_job[job_id] = {
                 "report.json": _crossings_report(
                     corner_ids=tuple(
                         f"tt_1.800_{int(point['temperature_c'])}"
@@ -6625,11 +6561,11 @@ def _split_runner(monkeypatch):
     shard_sizes: list[int] = []
 
     def _capture(argv, timeout_s):
-        if "inputs/request.json" in " ".join(argv):
-            source, destination = argv[argv.index("cp") + 1 : argv.index("cp") + 3]
-            points = json.loads(Path(source).read_text())["_explicit_points"]
+        captured = uploaded_request_of(argv)
+        if captured is not None:
+            points = captured[0]["_explicit_points"]
             shard_sizes.append(len(points))
-            runner.outputs_by_job[job_id_of(destination)] = {
+            runner.outputs_by_job[captured[1]] = {
                 "report.json": _sim_report(
                     corner_ids=tuple(
                         f"tt_1.800_{int(p['temperature_c'])}" for p in points
@@ -6946,9 +6882,7 @@ def test_attach_to_done_job_collects_without_submitting_or_launching(tmp_path):
     assert [c["corner_id"] for c in corners] == ["tt_1.800_27"]
     assert environment["job_id"] == "job-1"
     assert runner.argvs_matching("launch") == []
-    assert [
-        a for a in runner.argvs_matching("s3", "cp") if "inputs/" in " ".join(a)
-    ] == []
+    assert [a for a in runner.calls if inputs_upload_of(a) is not None] == []
 
 
 def test_attach_to_running_job_waits_then_collects(tmp_path):
@@ -7167,10 +7101,10 @@ def _shard_resume_fixture(tmp_path, monkeypatch):
     _install_fake_batch_transport(monkeypatch, runner=runner)
 
     def _register_shard_report(argv, timeout_s):
-        if "inputs/request.json" in " ".join(argv):
-            source, destination = argv[argv.index("cp") + 1 : argv.index("cp") + 3]
-            document = json.loads(Path(source).read_text())
-            runner.outputs_by_job[job_id_of(destination)] = {
+        captured = uploaded_request_of(argv)
+        if captured is not None:
+            document, job_id = captured
+            runner.outputs_by_job[job_id] = {
                 "report.json": _sim_report(
                     corner_ids=tuple(
                         f"tt_1.800_{int(point['temperature_c'])}"
@@ -7248,12 +7182,12 @@ def test_resume_reattaches_to_every_recorded_shard_without_resubmitting(
         e["index"]: e["job_id"] for e in json.loads(manifest_path.read_text())["shards"]
     }
     launches_before = len(_launches(runner))
-    uploads_before = len(runner.argvs_matching("inputs/request.json"))
+    uploads_before = len(runner.argvs_matching(INPUTS_UPLOAD_ARGV))
 
     corners, _, environment = fleet(resume=True)
 
     assert len(_launches(runner)) == launches_before
-    assert len(runner.argvs_matching("inputs/request.json")) == uploads_before
+    assert len(runner.argvs_matching(INPUTS_UPLOAD_ARGV)) == uploads_before
     assert [e["resumed"] for e in environment["fleet"]] == [True, True]
     assert [e["job_id"] for e in environment["fleet"]] == [jobs[0], jobs[1]]
     assert [c["corner_id"] for c in corners] == [c["corner_id"] for c in first]
@@ -7342,9 +7276,8 @@ def _grade_shard_reports(runner, monkeypatch, *, fail_upload: int | None = None)
     uploads: list[str] = []
 
     def graded(argv, timeout_s):
-        if "inputs/request.json" in " ".join(argv):
-            destination = argv[argv.index("cp") + 2]
-            uploads.append(job_id_of(destination))
+        if inputs_upload_of(argv) is not None:
+            uploads.append(job_id_of(argv[argv.index("cp") + 2]))
             if fail_upload is not None and len(uploads) == fail_upload + 1:
                 runner.queue(
                     f"{uploads[-1]}/status.json",

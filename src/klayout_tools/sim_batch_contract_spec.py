@@ -5,7 +5,9 @@ Split from :mod:`klayout_tools.sim_batch_contract` (issue #4065), moved verbatim
 
 from __future__ import annotations
 
+import os
 import re
+import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -63,6 +65,28 @@ class BatchJobInput:
         remote_transport._validate_job_relative_name(
             self.name, field="BatchJobInput.name"
         )
+
+    def materialize(self, inputs_root: str) -> None:
+        """Place this input at ``<inputs_root>/<name>``, creating the
+        parents a ``name`` carrying a subdirectory needs -- the local
+        ``inputs/`` tree ``sim_batch.submit_job`` transfers in one
+        recursive copy (issue #5539).
+
+        Two inputs that declare the same ``name`` resolve last-one-wins,
+        exactly as the second of two transfers to one S3 key did. The
+        staged tree is always a *copy*, never a hardlink to the caller's
+        own file: a later input declaring the same ``name`` would then
+        truncate the caller's file through that link.
+        """
+        dest = os.path.join(inputs_root, self.name)
+        # Never empty: `dest` is always at least one segment under
+        # `inputs_root`, and a `name` may carry subdirectories of its own.
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        if self.local_path is None:
+            with open(dest, "w", encoding="utf-8") as handle:
+                handle.write(self.content or "")
+        else:
+            shutil.copyfile(self.local_path, dest)
 
 
 @dataclass(frozen=True)

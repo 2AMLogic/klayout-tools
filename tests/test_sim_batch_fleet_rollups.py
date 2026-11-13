@@ -11,7 +11,6 @@ hand-written `fleet[]` block.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 
@@ -30,7 +29,7 @@ from test_sim_batch import (
     _status,
     _write_body,
     _write_request,
-    job_id_of,
+    uploaded_request_of,
 )
 
 
@@ -64,11 +63,11 @@ def _split_rollup_report(
     shard_of_job: dict[str, int] = {}
 
     def _capture(argv, timeout_s):
-        if "inputs/request.json" in " ".join(argv):
-            source, destination = argv[argv.index("cp") + 1 : argv.index("cp") + 3]
-            points = json.loads(Path(source).read_text())["_explicit_points"]
+        captured = uploaded_request_of(argv)
+        if captured is not None:
+            document, job_id = captured
+            points = document["_explicit_points"]
             index = int(points[0]["temperature_c"]) // cap
-            job_id = job_id_of(destination)
             shard_of_job[job_id] = index
             runner.outputs_by_job[job_id] = {
                 "report.json": _sim_report(

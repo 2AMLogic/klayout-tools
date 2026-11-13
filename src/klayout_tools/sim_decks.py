@@ -91,6 +91,7 @@ from . import (
     sim_batch_async,
     sim_batch_plan,
     sim_deck_expand,
+    sim_decks_staging,
     sim_remote,
     sim_staging,
 )
@@ -695,23 +696,6 @@ def _classify_include_target(
 # --------------------------------------------------------------------------- #
 
 
-def _alloc_staged_name(used: set[str], tag: str, kind: str, base: str) -> str:
-    """A collision-free flat staged name: sanitized basename, prefixed with
-    the unit's index and role so two units can never collide (only unit
-    ``u<i>``'s own files share its prefix, and ``kind``+counter separates
-    those). The staged name is internal -- the deck runner copies each file
-    to its declared in-unit destination before the engine runs -- so only
-    transport safety matters here, never what the engine sees."""
-    base = sim_staging._UNSAFE_NAME_CHARS.sub("_", base) or "file"
-    candidate = f"{tag}-{kind}-{base}"
-    counter = 1
-    while candidate in used:
-        candidate = f"{tag}-{kind}-{counter}-{base}"
-        counter += 1
-    used.add(candidate)
-    return candidate
-
-
 def stage_deck_job(
     request: dict[str, Any], *, request_dir: str
 ) -> tuple[list[sim_staging.StagedFile], dict[str, Any]]:
@@ -728,55 +712,52 @@ def stage_deck_job(
     ``{"staged": <flat name>, "name": <unit-relative destination>}`` for
     every deck, input, and staged include, plus the ``host_resolved``
     targets left verbatim for provenance.
+
+    Naming and content dedup are
+    :class:`sim_decks_staging.DeckStager`'s: files whose bytes are
+    identical ship once, under one shared name every unit that needs them
+    references (issue #5539), which neither :func:`_copy_unit_files` (it
+    copies, never moves) nor :func:`_unit_input_key` (it hashes by
+    unit-relative ``name``) can notice.
     """
     units = plan_deck_units(request, request_dir=request_dir, allow_worker_form=False)
-    used: set[str] = {remote_transport.REMOTE_REQUEST_FILENAME}
-    files: list[sim_staging.StagedFile] = []
+    stager = sim_decks_staging.DeckStager(
+        reserved=[remote_transport.REMOTE_REQUEST_FILENAME]
+    )
+    stage = stager.stage
     worker_units: list[dict[str, Any]] = []
     for index, unit in enumerate(units):
         tag = f"u{index}"
-        deck_staged = _alloc_staged_name(
-            used, tag, "deck", os.path.basename(unit["deck"]["staged"])
+        deck_staged = stage(
+            unit["deck"]["staged"],
+            tag=tag,
+            kind="deck",
+            label=f"deck {unit['id']}",
         )
-        files.append(
-            sim_staging.StagedFile(
-                staged_name=deck_staged,
-                label=f"deck {unit['id']}",
-                local_path=unit["deck"]["staged"],
-            )
-        )
-        staged_inputs = []
-        for input_index, item in enumerate(unit["inputs"]):
-            staged = _alloc_staged_name(
-                used,
-                tag,
-                f"in{input_index}",
-                os.path.basename(item["staged"]),
-            )
-            files.append(
-                sim_staging.StagedFile(
-                    staged_name=staged,
+        staged_inputs = [
+            {
+                "staged": stage(
+                    item["staged"],
+                    tag=tag,
+                    kind=f"in{input_index}",
                     label=f"input {item['name']} of {unit['id']}",
-                    local_path=item["staged"],
-                )
-            )
-            staged_inputs.append({"staged": staged, "name": item["name"]})
-        staged_includes = []
-        for include_index, item in enumerate(unit["includes"]):
-            staged = _alloc_staged_name(
-                used,
-                tag,
-                f"inc{include_index}",
-                os.path.basename(item["staged"]),
-            )
-            files.append(
-                sim_staging.StagedFile(
-                    staged_name=staged,
+                ),
+                "name": item["name"],
+            }
+            for input_index, item in enumerate(unit["inputs"])
+        ]
+        staged_includes = [
+            {
+                "staged": stage(
+                    item["staged"],
+                    tag=tag,
+                    kind=f"inc{include_index}",
                     label=f"include {item['name']} of {unit['id']}",
-                    local_path=item["staged"],
-                )
-            )
-            staged_includes.append({"staged": staged, "name": item["name"]})
+                ),
+                "name": item["name"],
+            }
+            for include_index, item in enumerate(unit["includes"])
+        ]
         worker_units.append(
             {
                 "id": unit["id"],
@@ -801,7 +782,7 @@ def stage_deck_job(
         DECKS_FIELD: worker_units,
         "options": worker_options,
     }
-    return files, worker_request
+    return stager.files, worker_request
 
 
 # --------------------------------------------------------------------------- #
