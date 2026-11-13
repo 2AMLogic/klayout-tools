@@ -15,6 +15,7 @@ from . import (
     sim_eye,
     sim_search,
     sim_settled,
+    sim_slope_band_meas,
     sim_snm_meas,
     sim_step_resolution,
     sim_stress,
@@ -178,7 +179,10 @@ def _runner_gate_release(version: str) -> str | None:
 #: its first release segment is ``0.8.1``, as is ``stress`` (#4592/#4858).
 #: ``search_param`` (``measurements[].search.param``, #5391) landed after
 #: ``v0.9.1``, so its first release segment is ``0.9.2``; an older runner would
-#: reject the key or silently search nothing, hence mandatory.
+#: reject the key or silently search nothing, hence mandatory. ``slope_band``
+#: (``measurements[].slope_band``, #5518) landed after ``v0.9.1`` too, so
+#: ``0.9.2`` is its first release segment as well; an older runner would reject
+#: the unknown form or drop the measurement, hence mandatory.
 def _declared(finder: Callable[[list[Any]], Any]) -> Callable[[dict[str, Any]], bool]:
     """Detector: the request declares at least one measurement ``finder`` finds."""
     return lambda request: bool(finder(request.get("measurements") or []))
@@ -189,6 +193,10 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
     "analysis_steps": ((0, 7, 1), lambda r: r.get("analysis_steps") is not None),
     "transfer": ((0, 7, 1), _declared(sim_transfer_meas.transfer_measurements)),
     "snm": ((0, 7, 1), _declared(sim_snm_meas.snm_measurements)),
+    "slope_band": (
+        (0, 9, 2),
+        _declared(sim_slope_band_meas.slope_band_measurements),
+    ),
     "eye": ((0, 8, 1), _declared(sim_eye.eye_measurements)),
     "step_resolution": ((0, 8, 1), _step_res_declared),
     "settled": ((0, 8, 1), _declared(sim_settled.settled_measurements)),
@@ -246,6 +254,7 @@ _MANDATORY_RUNNER_FEATURES = frozenset(
     {
         "transfer",
         "snm",
+        "slope_band",
         "search",
         "search_param",
         "eye",

@@ -8,7 +8,7 @@ from .sim_errors import SimError
 
 # Forms whose own validators already reject duplicate names (any case) with a
 # more specific message; the generic check defers to them.
-_SELF_CHECKING_FORMS = ("snm", "transfer", "tian", "search")
+_SELF_CHECKING_FORMS = ("snm", "slope_band", "transfer", "tian", "search")
 
 
 def validate_case_variant_names(measurements_spec: list[dict[str, Any]]) -> None:

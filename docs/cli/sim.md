@@ -2121,7 +2121,7 @@ established. `runner_compatibility` itself stays a major.minor gate.
 - Limit: a `0.7.1.devN` runner built before a feature landed looks the same as
   one built after, so it counts as supporting it.
 
-**Mandatory features (`transfer`, [#2924](https://github.com/2AMLogic/klayout-tools/issues/2924); `stimulus`, [#2977](https://github.com/2AMLogic/klayout-tools/issues/2977); `dual_injection`, [#3161](https://github.com/2AMLogic/klayout-tools/issues/3161); `complex_vectors`, [#3337](https://github.com/2AMLogic/klayout-tools/issues/3337); `twoport`, [#3338](https://github.com/2AMLogic/klayout-tools/issues/3338); `snm`, [#3895](https://github.com/2AMLogic/klayout-tools/issues/3895); `search`, [#4121](https://github.com/2AMLogic/klayout-tools/issues/4121); `eye`, [#4292](https://github.com/2AMLogic/klayout-tools/issues/4292); `step_resolution`, [#4773](https://github.com/2AMLogic/klayout-tools/issues/4773); `settled`, [#4780](https://github.com/2AMLogic/klayout-tools/issues/4780); `stress`, [#4592](https://github.com/2AMLogic/klayout-tools/issues/4592)/[#4858](https://github.com/2AMLogic/klayout-tools/issues/4858)).**
+**Mandatory features (`transfer`, [#2924](https://github.com/2AMLogic/klayout-tools/issues/2924); `stimulus`, [#2977](https://github.com/2AMLogic/klayout-tools/issues/2977); `dual_injection`, [#3161](https://github.com/2AMLogic/klayout-tools/issues/3161); `complex_vectors`, [#3337](https://github.com/2AMLogic/klayout-tools/issues/3337); `twoport`, [#3338](https://github.com/2AMLogic/klayout-tools/issues/3338); `snm`, [#3895](https://github.com/2AMLogic/klayout-tools/issues/3895); `search`, [#4121](https://github.com/2AMLogic/klayout-tools/issues/4121); `eye`, [#4292](https://github.com/2AMLogic/klayout-tools/issues/4292); `step_resolution`, [#4773](https://github.com/2AMLogic/klayout-tools/issues/4773); `settled`, [#4780](https://github.com/2AMLogic/klayout-tools/issues/4780); `stress`, [#4592](https://github.com/2AMLogic/klayout-tools/issues/4592)/[#4858](https://github.com/2AMLogic/klayout-tools/issues/4858); `slope_band`, [#5518](https://github.com/2AMLogic/klayout-tools/issues/5518)).**
 A runner that predates `measurements[].transfer` would drop the metric (and one
 that predates `stimulus` would simulate with the digital control lines
 undriven), so
@@ -5202,6 +5202,105 @@ measurement, with no out-of-tool waveform post-processing:
   wrappers or cell templates. A bounded bisection over a source value is the
   separate [`measurements[].search`](#bisection--threshold-search-measurementssearch)
   form.
+
+## Local-slope-band run (`measurements[].slope_band`)
+
+Issue [#5518](https://github.com/2AMLogic/klayout-tools/issues/5518). A spec
+row graded as "the contiguous range around an operating point over which the
+local slope `dy/dx` of a DC transfer curve stays inside `[lo, hi]`" — usable
+range, compliance range, linear region — is one graded scalar, so `limits`,
+`plausible_range`, `spec_row`, `worst_case`, `monte_carlo` statistics and `klt
+yield` consume it like any other measurement, with no out-of-tool waveform
+post-processing:
+
+```json
+{"analysis": {"kind": "dc", "args": "Vin 0 1 0.0025"},
+ "measurements": [
+   {"name": "usable_range",
+    "slope_band": {"y": "v(out)", "x": "v(in)", "anchor": 0.5,
+                   "min_slope": 1.0, "max_slope": 2.5, "report": "y_span"},
+    "unit": "V", "limits": {"min": 0.5}}]}
+```
+
+- **Form.** `slope_band` is an object with **all six** of:
+
+  | Key | Meaning |
+  |---|---|
+  | `y` | Single-ended `v(node)` selector for the swept quantity. |
+  | `x` | Single-ended `v(node)` selector for the sweep variable. |
+  | `anchor` | A finite **`x` value**. The run must contain the sweep point nearest it. |
+  | `min_slope` / `max_slope` | The closed band `dy/dx` must stay inside. `min_slope > max_slope` is refused. |
+  | `report` | Which scalar becomes `value`: `y_span`, `y_lo`, `y_hi`, `x_span`, `x_lo`, `x_hi`. |
+
+  None has a default — each changes which run is found or which scalar is
+  graded. Unknown keys, missing keys, non-finite numbers, a bad `report` and
+  non-selector `x`/`y` are refused up front (exit 1), as is declaring
+  `slope_band` beside any other value form on the same entry. Measurement names
+  must be unique. `engine: "xyce"` is refused, and so is `analysis_steps[]`.
+- **Analysis.** Requires `analysis.kind: "dc"`; the sweep axis is `x`. Any other
+  kind is refused up front.
+- **Method.**
+  - The slope at each sweep point is the **central difference over the solver's
+    own points** — `(y[i+1] - y[i-1]) / (x[i+1] - x[i-1])` — one-sided at the
+    first and last point. No smoothing, no other estimator.
+  - `x` must be strictly monotonic. A descending sweep is reduced to the
+    identical result as the equivalent ascending one (reversing flips the sign
+    of both differences, so every slope is unchanged).
+  - The **anchor point** is the sweep point whose `x` is nearest `anchor`.
+  - The **run** is the largest contiguous set of sweep points containing the
+    anchor point whose slope is inside the closed band `[min_slope,
+    max_slope]`. A second in-band region that does not contain the anchor is
+    ignored.
+  - **Edges are the outermost in-band sample points — there is no
+    interpolation**, so the reported span never exceeds the true one by
+    construction. A finer sweep, not a second convention, buys resolution.
+  - `*_lo` / `*_hi` are the smaller / larger of the two edge values, and
+    `*_span = *_hi - *_lo`.
+- **Value.** `value` is the single scalar `report` names, graded against
+  `limits` like any other scalar (`status`, `margin`). An additive `slope_band`
+  sibling echoes the six request keys and adds all six scalars plus:
+
+  | Field | Meaning |
+  |---|---|
+  | `edge_lo_at` / `edge_hi_at` | `"band"` (the slope left the band there) or `"sweep_end"` (the run reached the end of the sweep, so the true range may extend past it). They describe the run's **low-`x`** and **high-`x`** end — the sweep axis, which is ordered unambiguously whatever `y` does. |
+  | `points_in_run` | How many sweep points the run spans (`1` is a legitimate zero-span run). |
+
+  The vectors are dumped to a small corner-local rawfile (`slope_band_<k>.raw`)
+  after the analysis, independent of `options.waveforms`: one rawfile per unique
+  `x`/`y` pair, and one run search per unique `(x, y, anchor, min_slope,
+  max_slope)` on it — so three entries differing only by `report` cost one
+  computation.
+- **Errors.** A failure is `status: "error"`, `value: null`, and a
+  `code: "measurement"` diagnostic whose message starts with a reason token —
+  never a silent substitute or a pass:
+
+  | Token | Meaning |
+  |---|---|
+  | `[slope_band_vector_missing]` | an `x`/`y` vector did not resolve (no rawfile written; check node names and `options.save_mode`) |
+  | `[slope_band_raw_invalid]` | the rawfile could not be read or has the wrong shape |
+  | `[slope_band_invalid_data]` | mismatched lengths, fewer than three points, or a non-finite sample |
+  | `[slope_band_non_monotonic]` | `x` is not strictly monotonic (a repeated or non-ordered sweep value) |
+  | `[slope_band_anchor_outside_sweep]` | `anchor` lies outside the swept `x` range |
+  | `[slope_band_anchor_out_of_band]` | the anchor point's **own** slope is outside the band |
+
+  The last one is deliberately an error rather than a run of span `0`: a zero
+  span would grade against `limits` as a real (and usually failing) number,
+  hiding the fact that the curve never satisfied the rule at the point the row
+  is defined at. Under `monte_carlo`, such a sample is counted in the
+  statistics block's `errored` — `n + errored + inconclusive` always equals the
+  number of samples drawn — so an error never silently shrinks the denominator
+  a yield is computed over.
+- **Backends.** `local`, `local-parallel`, `remote` and `batch` all run
+  `slope_band`; the worker computes it. It is a mandatory runner feature
+  (`slope_band`, first `klt` release segment `0.9.2`): see "Mandatory features"
+  under "Runner/client `klt` version skew". An older or unreadable runner
+  refuses the request instead of omitting the measurement.
+- **Out of scope.** `tran` (or any non-`dc`) analysis — every named row shape is
+  a DC transfer curve, and a time axis needs a different anchor and
+  monotonicity story. Also: an anchor given as a `y` value (ambiguous when `y`
+  is not monotonic), edge interpolation or smoothing, any other slope
+  estimator, differential or expression selectors for `x`/`y`,
+  `analysis_steps[]` integration, and Xyce support.
 
 ## Eye / phase-fold measurement (`measurements[].eye`)
 
@@ -8802,7 +8901,7 @@ the *response* echoes back.
 | `monte_carlo.window_scope` | string          | `"pooled"` (default) or `"per_corner"`: which `mean ± k*stddev` window gates status. `"per_corner"` fails a measurement if any `by_corner[]` window fails and adds `failing_corners` to its `monte_carlo` block; see "Pooled vs. per corner". |
 | `analysis`               | object            | `kind` (e.g. `"op"`, `"dc"`, `"ac"`, `"tran"`) and `args`, the engine-syntax analysis-card arguments. One analysis per corner. `"op"` is a valid `kind`, but see `measurements[]` below — it cannot be paired with a `.meas op` card; measure an operating-point quantity with `measurements[].expr` instead. Required unless the request declares `analysis_steps` instead; declaring both is an application error (exit 1). |
 | `analysis_steps[]`       | array\<object\>   | Issue #2482. Additive alternative to `analysis`: an ordered, non-empty sequence of named solves run inside each corner's one deck — each step `{name, analysis: {kind, args}, alter?, reset?, measurements?}` (`alter` values are a finite number, or `{"pwl": [t0, v0, ...]}` for a `pwl`-declared source). With it, the top-level `measurements[]` are **derived** `expr`s over `<step>.<measurement>` results. ngspice only (refused for `engine: "xyce"`); refuses `options.waveforms`/`--plot`. See "Several solves per corner (`analysis_steps[]`)" above for the full rules. |
-| `measurements[]`         | array\<object\>   | `name` (stable response key) plus **exactly one** of `spice` (a verbatim `.meas` card), `expr` (issue #2533 — a single-line ngspice expression evaluated after the analysis inside `klt sim`'s own `.control` block; see "Measurements that are not `.meas` cards" above), `crossings` (issue #2868 — `{signal, level, edge?, from?, to?, max?}`, a threshold-crossing time series, `tran` only; see "Threshold-crossing time series" above), `cycle_mean` (issue #2947 — `{signal, align, level, cycles, edge?, from?}`, a time-weighted mean over whole reference cycles, `tran` only; see "Cycle-aligned mean" above), `energy` (issue #3033 — `{source, voltage, from?, to?}`, a source's net/gross/recovered energy and charge over a transient window, `tran` only; see "Source energy over a transient window" above), `stress` (issue #4592 — `{a, b?, from?, to?}`, the worst `|v(a)-v(b)|` over a transient window, `tran` only; see "Worst voltage stress over a settled window" above), or `transfer` (issue #2923 — `{num, den, metric}`, an AC return-ratio metric, `ac` and local backends only; see "AC return-ratio metrics" above), or `snm` (issue #3895 — `{x, y1, y2}`, a butterfly static noise margin of two voltage-transfer curves, `dc` only; see "Butterfly static noise margin" above), plus optional `unit`, `optional` (issue #2925 — boolean, default `false`; `true` grades a value-less result `status: "absent"` instead of `error`, `spice`/`expr` on the scalar `analysis` only — see "Optional measurements" above), `limits` (`min`/`max`, either optional), `k_sigma` (per-measurement override of `monte_carlo.k_sigma`), and `plausible_range` (issue #2493 — `min`/`max`, either optional but at least one required; per-measurement plausibility bound, unscoped by `unit`; overrides `options.node_voltage_bounds` when both apply), and `spec_row` (issue #3778 — non-empty string, the spec row this measurement grades, echoed on the rollup entry only when declared; `klt signoff` item 5 derives a citation's row coverage from it, see `docs/cli/signoff.md` "Derived coverage". Same meaning as `spec_row` in `klt pex` delta rows). Optional `on_unreached` (issue #3108 — `"error"` (default) or `"null"`, `spice` only; see "Unreached `.meas` targets" below). No `limits` -> reported, never fails; no `plausible_range` (and no applicable `options.node_voltage_bounds`) -> plausibility check never runs, exactly as before this issue. Declaring both `spice` and `expr`, or neither, is an application error (exit 1). `spice`'s declared analysis type must be one ngspice's own `.MEASURE` implements (`dc`/`ac`/`tran`/`sp`) — there is no `.MEASURE OP`; a `.meas op` card is rejected up front (`SimError`), regardless of the request's own `analysis.kind`. `expr` must reduce to a single real scalar, must be one line, must have a name matching `[A-Za-z_][A-Za-z0-9_]*` unique across `measurements[]`, and is refused for `engine: "xyce"`. |
+| `measurements[]`         | array\<object\>   | `name` (stable response key) plus **exactly one** of `spice` (a verbatim `.meas` card), `expr` (issue #2533 — a single-line ngspice expression evaluated after the analysis inside `klt sim`'s own `.control` block; see "Measurements that are not `.meas` cards" above), `crossings` (issue #2868 — `{signal, level, edge?, from?, to?, max?}`, a threshold-crossing time series, `tran` only; see "Threshold-crossing time series" above), `cycle_mean` (issue #2947 — `{signal, align, level, cycles, edge?, from?}`, a time-weighted mean over whole reference cycles, `tran` only; see "Cycle-aligned mean" above), `energy` (issue #3033 — `{source, voltage, from?, to?}`, a source's net/gross/recovered energy and charge over a transient window, `tran` only; see "Source energy over a transient window" above), `stress` (issue #4592 — `{a, b?, from?, to?}`, the worst `|v(a)-v(b)|` over a transient window, `tran` only; see "Worst voltage stress over a settled window" above), or `transfer` (issue #2923 — `{num, den, metric}`, an AC return-ratio metric, `ac` and local backends only; see "AC return-ratio metrics" above), or `snm` (issue #3895 — `{x, y1, y2}`, a butterfly static noise margin of two voltage-transfer curves, `dc` only; see "Butterfly static noise margin" above), or `slope_band` (issue #5518 — `{y, x, anchor, min_slope, max_slope, report}`, one scalar of the largest contiguous run around `anchor` over which `dy/dx` stays in `[min_slope, max_slope]`, `dc` only; see "Local-slope-band run" above), plus optional `unit`, `optional` (issue #2925 — boolean, default `false`; `true` grades a value-less result `status: "absent"` instead of `error`, `spice`/`expr` on the scalar `analysis` only — see "Optional measurements" above), `limits` (`min`/`max`, either optional), `k_sigma` (per-measurement override of `monte_carlo.k_sigma`), and `plausible_range` (issue #2493 — `min`/`max`, either optional but at least one required; per-measurement plausibility bound, unscoped by `unit`; overrides `options.node_voltage_bounds` when both apply), and `spec_row` (issue #3778 — non-empty string, the spec row this measurement grades, echoed on the rollup entry only when declared; `klt signoff` item 5 derives a citation's row coverage from it, see `docs/cli/signoff.md` "Derived coverage". Same meaning as `spec_row` in `klt pex` delta rows). Optional `on_unreached` (issue #3108 — `"error"` (default) or `"null"`, `spice` only; see "Unreached `.meas` targets" below). No `limits` -> reported, never fails; no `plausible_range` (and no applicable `options.node_voltage_bounds`) -> plausibility check never runs, exactly as before this issue. Declaring both `spice` and `expr`, or neither, is an application error (exit 1). `spice`'s declared analysis type must be one ngspice's own `.MEASURE` implements (`dc`/`ac`/`tran`/`sp`) — there is no `.MEASURE OP`; a `.meas op` card is rejected up front (`SimError`), regardless of the request's own `analysis.kind`. `expr` must reduce to a single real scalar, must be one line, must have a name matching `[A-Za-z_][A-Za-z0-9_]*` unique across `measurements[]`, and is refused for `engine: "xyce"`. |
 | `options.node_voltage_bounds` | object       | Issue #2493. Run-wide plausibility default (`min`/`max`, either optional but at least one required) — see "Plausibility bounds" above. **Voltage-scoped**: only auto-applies to a measurement declaring `unit: "V"` that has no own `plausible_range`. Omit for no default (today's behaviour, unchanged). |
 | `options.timeout_s`      | number            | Per-corner wall-clock budget. Defaults to `120`. Exceeding it kills the process and yields an `error`-status corner.                                                    |
 | `options.keep_artifacts` | boolean           | Retain per-corner logs/rawfiles on disk under `--outdir` (or its default) and reference them from the response. Defaults to `false`.                                   |

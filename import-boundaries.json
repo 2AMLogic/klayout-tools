@@ -805,6 +805,8 @@
         "klayout_tools.sim_set_runtime",
         "klayout_tools.sim_settled",
         "klayout_tools.sim_slug",
+        "klayout_tools.sim_slope_band",
+        "klayout_tools.sim_slope_band_meas",
         "klayout_tools.sim_snm",
         "klayout_tools.sim_snm_meas",
         "klayout_tools.sim_staging",

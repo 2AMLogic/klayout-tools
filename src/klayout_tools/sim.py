@@ -112,6 +112,7 @@ from . import (
     sim_portable,
     sim_search,
     sim_settled,
+    sim_slope_band_meas,
     sim_snm_meas,
     sim_step_resolution,
     sim_steps,
@@ -1777,6 +1778,7 @@ def _resolve_analysis_and_measurements(
     sim_tian.validate_tian_context(measurements_spec, analysis)
     # Issue #3895: and an snm margin is a DC-sweep quantity.
     sim_snm_meas.validate_snm_context(measurements_spec, analysis)
+    sim_slope_band_meas.validate_slope_band_context(measurements_spec, analysis)
     # Issue #4292: an eye fold is a transient-time quantity too.
     sim_eye.validate_eye_context(measurements_spec, analysis)
     # Issue #4773: a step-resolution report is a transient-time quantity too.
@@ -3518,6 +3520,9 @@ def _prepare_sim_request(
             sim_transfer_meas.transfer_measurements(measurements_spec)
         ),
         snm_declared=bool(sim_snm_meas.snm_measurements(measurements_spec)),
+        slope_band_declared=bool(
+            sim_slope_band_meas.slope_band_measurements(measurements_spec)
+        ),
         search_declared=bool(sim_search.search_measurements(measurements_spec)),
         eye_declared=bool(sim_eye.eye_measurements(measurements_spec)),
         step_resolution_declared=bool(
@@ -6641,6 +6646,7 @@ def _enforce_xyce_support_boundary(
     stress_declared: bool = False,
     transfer_declared: bool = False,
     snm_declared: bool = False,
+    slope_band_declared: bool = False,
     search_declared: bool = False,
     eye_declared: bool = False,
     step_resolution_declared: bool = False,
@@ -6715,6 +6721,7 @@ def _enforce_xyce_support_boundary(
         stress_declared=stress_declared,
         transfer_declared=transfer_declared,
         snm_declared=snm_declared,
+        slope_band_declared=slope_band_declared,
         search_declared=search_declared,
         eye_declared=eye_declared,
         step_resolution_declared=step_resolution_declared,
@@ -8638,6 +8645,9 @@ def _run_corner(
         measurements_spec, corner_dir
     )
     snms = sim_snm_meas.extract_corner_snms(measurements_spec, corner_dir)
+    slope_bands = sim_slope_band_meas.extract_corner_slope_bands(
+        measurements_spec, corner_dir
+    )
     eyes = sim_eye.extract_corner_eyes(measurements_spec, corner_dir)
     step_resolutions = sim_step_resolution.extract_corner_step_resolutions(
         measurements_spec, corner_dir
@@ -8666,6 +8676,7 @@ def _run_corner(
             cycle_means=cycle_means,
             transfers=transfers,
             snms=snms,
+            slope_bands=slope_bands,
             eyes=eyes,
             step_resolutions=step_resolutions,
             settleds=settleds,
@@ -9202,63 +9213,6 @@ def _cycle_mean_measurement_result(
         "status": m_status,
         "margin": margin,
         "cycle_mean": outcome.report(),
-    }
-    return result, grading_diagnostics
-
-
-def _snm_measurement_result(
-    spec: dict[str, Any],
-    outcome: sim_snm_meas.SnmOutcome | None,
-    *,
-    save_mode: str,
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """One ``snm`` measurement's response entry (issue #3895).
-
-    ``value`` is the butterfly SNM in volts, graded through
-    :func:`_grade_measurement_value` like any scalar; the request echo and the
-    two per-eye sides ride the additive ``snm`` sibling. A failure is
-    ``status: "error"``, ``value: null`` (so it can never pass a limit) with a
-    ``code: "measurement"`` diagnostic whose message starts with a
-    ``[<reason>]`` token from :data:`klayout_tools.sim_snm_meas.ERROR_CODES`."""
-    name = spec["name"]
-    unit = spec.get("unit")
-    if outcome is None or outcome.value is None:
-        message = (
-            outcome.error
-            if outcome is not None and outcome.error is not None
-            else f"measurement '{name}' produced no snm value"
-        )
-        reason = (
-            outcome.code
-            if outcome is not None and outcome.code is not None
-            else "snm_vector_missing"
-        )
-        if save_mode == "netlist" and reason == "snm_vector_missing":
-            message += SAVE_MODE_NETLIST_NO_VALUE_HINT
-        result = {
-            "name": name,
-            "value": None,
-            "unit": unit,
-            "status": "error",
-            "margin": None,
-        }
-        return result, [
-            {
-                "severity": "error",
-                "code": "measurement",
-                "message": f"[{reason}] {message}",
-            }
-        ]
-    m_status, margin, grading_diagnostics = _grade_measurement_value(
-        spec, outcome.value
-    )
-    result = {
-        "name": name,
-        "value": outcome.value,
-        "unit": unit,
-        "status": m_status,
-        "margin": margin,
-        "snm": outcome.report(spec),
     }
     return result, grading_diagnostics
 
@@ -10112,6 +10066,7 @@ def _corner_deck_control_lines(
     cycle_mean_lines = sim_cycle_mean.control_lines(measurements_spec, corner_dir)
     transfer_lines = sim_transfer_meas.control_lines(measurements_spec, corner_dir)
     snm_lines = sim_snm_meas.control_lines(measurements_spec, corner_dir)
+    sband_lines = sim_slope_band_meas.control_lines(measurements_spec, corner_dir)
     eye_lines = sim_eye.control_lines(measurements_spec, corner_dir)
     step_resolution_lines = sim_step_resolution.control_lines(
         measurements_spec, corner_dir
@@ -10129,6 +10084,7 @@ def _corner_deck_control_lines(
         or cycle_mean_lines
         or transfer_lines
         or snm_lines
+        or sband_lines
         or eye_lines
         or step_resolution_lines
         or settled_lines
@@ -10162,6 +10118,7 @@ def _corner_deck_control_lines(
     lines.extend(cycle_mean_lines)
     lines.extend(transfer_lines)
     lines.extend(snm_lines)
+    lines.extend(sband_lines)
     lines.extend(eye_lines)
     lines.extend(step_resolution_lines)
     lines.extend(settled_lines)
