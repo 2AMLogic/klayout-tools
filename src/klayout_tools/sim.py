@@ -3190,6 +3190,7 @@ def _prepare_sim_request(
     # model library. Independent of whether `models_lib` itself ends up
     # resolved below; if the variant can't be found here, provenance.pdk is
     # null rather than fabricated (see `_provenance.build_provenance`).
+    # Its ambiguity warning is emitted once the backend is final (#5449).
     provenance_pdk: dict[str, Any] | None = None
     if models.get("pdk") or models.get("pdk_root"):
         try:
@@ -3198,7 +3199,6 @@ def _prepare_sim_request(
             )
         except PdkNotFoundError:
             provenance_pdk = None
-        _warn_pdk_ambiguity(provenance_pdk, backend=backend)
 
     # Issue #2482: either the scalar `analysis` (unchanged) or an ordered
     # `analysis_steps[]` sequence, resolved -- every structural error raised
@@ -3892,6 +3892,12 @@ def _run_sim_corners(
         "source": backend_source,
         "requested": requested_backend,
     }
+    # Issue #5449: this warning's remedy is backend-dependent, and the backend
+    # is final only after the yields above. Keyed on the pre-yield value, a run
+    # that executes locally under `$KLT_SIM_BACKEND=batch` was told `$PDK_ROOT`
+    # was its only pin -- false there -- disagreeing with the `--format text`
+    # `pdk: WARNING` line. Emitted from the recorded value so they cannot drift.
+    _warn_pdk_ambiguity(provenance_pdk, backend=backend_provenance["resolved"])
     # Issue #2924: off-host workers run the whole `klt sim` request and return
     # only the scalar results (the AC rawfile never leaves the worker), so the
     # `transfer` form is gated by the mandatory runner-feature check in

@@ -7661,6 +7661,14 @@ pdk: WARNING: variant also installed under search root: ~/.volare -- resolution 
 Every other backend's wording is unchanged. `provenance.pdk.ambiguous_sources`
 is identical on all of them.
 
+Both messages key on **`environment.backend.resolved`** — the backend that
+actually ran — not on what was requested. So a host default of
+`$KLT_SIM_BACKEND=batch` that steps back to `local` (a single-unit run, an
+`engine: "xyce"` request, `options.resume`, a host-local
+`options.osdi_preload`; see "Host default" above) keeps the default wording,
+which is the correct advice for that run: it resolves the PDK here, so
+`--pdk-root` / `models.pdk_root` are accepted and do silence the warning.
+
 **Pinning `models.pdk_root` is the fix** (on `local`/`local-parallel`/`remote`;
 see the `batch` note above), and it is quiet by construction:
 step 1 disables the search, so there is no second candidate to be ambiguous
@@ -7714,8 +7722,12 @@ as an absolute path, so the flag form is refused the same way.
 clean ([#5449](https://github.com/2AMLogic/klayout-tools/issues/5449)), with
 the same code and message, and without resolving a bucket or provision script
 — so a dry run used as a pre-flight cannot green-light a request the submit
-path rejects. To choose which install the *client* reads on `batch`, set
-`$PDK_ROOT` in the submitting environment: it is not forwarded to the runner.
+path rejects. Like the warning wording above, the refusal follows the
+**resolved** backend: a dry run a host default steps back to `local` reports
+`backend: local` and accepts a host-local `models.pdk_root`, because that run
+would read it here rather than forward it. To choose which install the
+*client* reads on `batch`, set `$PDK_ROOT` in the submitting environment: it
+is not forwarded to the runner.
 
 When an off-host run returns no value for a `measurements[].expr` measurement,
 the report's top-level `diagnostics[]` also carries a warning with code

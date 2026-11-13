@@ -342,3 +342,95 @@ def test_cli_dry_run_batch_pdk_root_flag_is_refused(tmp_path, monkeypatch, capsy
     envelope = json.loads(captured.err)
     assert envelope["error"]["code"] == sim_batch.BATCH_MODELS_PDK_ROOT_HOST_PATH_CODE
     assert str(local_root) in envelope["error"]["message"]
+
+
+# --- the warning keys on the *resolved* backend, not the host default -------
+
+
+def test_cli_host_default_batch_single_unit_keeps_the_default_remedy(
+    tmp_path, monkeypatch, capsys
+):
+    """A single-unit run under `$KLT_SIM_BACKEND=batch` yields back to
+    `local` (`_yield_host_default_backend`), so `--pdk-root` /
+    `models.pdk_root` *are* accepted and *do* silence the warning. Keying the
+    remedy on the pre-yield backend named `$PDK_ROOT` as the only pin, which
+    is false for that run, and disagreed with the `--format text` line
+    (which reads `environment.backend.resolved`)."""
+    request, _ciel, _volare = _two_store_request(tmp_path, monkeypatch)
+    monkeypatch.setenv(sim.BACKEND_ENV, "batch")
+
+    main(["sim", str(request), "--format", "json"])
+
+    captured = capsys.readouterr()
+    backend_block = json.loads(captured.out)["environment"]["backend"]
+    assert backend_block == {
+        "resolved": "local",
+        "source": "env",
+        "requested": "batch",
+    }
+    assert pdk.AMBIGUITY_REMEDY in captured.err
+    assert "$PDK_ROOT" not in captured.err
+    assert sim_pdk_ambiguity.BATCH_REMEDY not in captured.err
+
+
+def test_cli_host_default_batch_multi_unit_uses_the_batch_remedy(
+    tmp_path, monkeypatch, capsys
+):
+    """The other half of the same invariant: a multi-unit run under the same
+    host default *does* resolve to `batch`, so it keeps the `$PDK_ROOT`
+    wording."""
+    request, _ciel, _volare = _two_store_request(tmp_path, monkeypatch)
+    data = json.loads(request.read_text())
+    data["monte_carlo"] = {"n": 3, "seed": 7, "vary": "both"}
+    request.write_text(json.dumps(data))
+    monkeypatch.setenv(sim.BACKEND_ENV, "batch")
+
+    report = sim.run_sim(str(request), dry_run=True)
+
+    assert report["backend"] == "batch"
+    err = capsys.readouterr().err
+    assert sim_pdk_ambiguity.BATCH_REMEDY in err
+    assert pdk.AMBIGUITY_REMEDY not in err
+
+
+def test_cli_host_default_batch_osdi_preload_keeps_the_default_remedy(
+    tmp_path, monkeypatch, capsys
+):
+    """The OSDI-preload yield (`sim.py`'s second
+    `_yield_host_default_backend`) is the same class: a host-local `.osdi`
+    keeps the run here, so the remedy must stay the default one."""
+    request, _ciel, _volare = _two_store_request(tmp_path, monkeypatch)
+    osdi = tmp_path / "model.osdi"
+    osdi.write_bytes(b"\x7fELF")
+    data = json.loads(request.read_text())
+    data["monte_carlo"] = {"n": 3, "seed": 7, "vary": "both"}
+    data["options"] = {"osdi_preload": [str(osdi)]}
+    request.write_text(json.dumps(data))
+    monkeypatch.setenv(sim.BACKEND_ENV, "batch")
+
+    report = sim.run_sim(str(request), dry_run=True)
+
+    assert report["backend"] == "local"
+    err = capsys.readouterr().err
+    assert pdk.AMBIGUITY_REMEDY in err
+    assert "$PDK_ROOT" not in err
+
+
+def test_run_sim_dry_run_host_default_batch_single_unit_allows_host_pdk_root(
+    tmp_path, monkeypatch
+):
+    """The dry-run refusal added for `batch` must not fire on a run the host
+    default yields back to `local`: there `models.pdk_root` is a perfectly
+    good host path, and the report says `backend: local`."""
+    monkeypatch.setenv(sim.BACKEND_ENV, "batch")
+    local_root = tmp_path / "pdks"
+    local_root.mkdir()
+    request = _batch_dry_run_request(tmp_path, models={"pdk_root": str(local_root)})
+    data = json.loads(request.read_text())
+    del data["monte_carlo"]
+    request.write_text(json.dumps(data))
+
+    report = sim.run_sim(str(request), dry_run=True)
+
+    assert report["backend"] == "local"
+    assert report["status"] == "valid"
