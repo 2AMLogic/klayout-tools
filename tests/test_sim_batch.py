@@ -4890,20 +4890,6 @@ def test_pdk_stamp_mismatch_warns_only_when_comparable(tmp_path, monkeypatch):
         assert result == {"status": "not_comparable", "reason": reason}
 
 
-def test_pdk_stamp_not_comparable_without_a_local_stamp(tmp_path, monkeypatch):
-    monkeypatch.delenv("PDK_ROOT", raising=False)
-    env = _worker_env(
-        tmp_path,
-        monkeypatch,
-        {"worker_environment.json": _capture()},
-        request={"netlist": "body.spice", "models": {"pdk": "sky130A"}},
-    )
-    assert env["worker_environment"]["pdk_stamp_comparison"] == {
-        "status": "not_comparable",
-        "reason": "client_stamp_unavailable",
-    }
-
-
 def test_pdk_stamp_absent_capture_reports_worker_reason(tmp_path, monkeypatch):
     env = _worker_env(tmp_path, monkeypatch, {})
     assert env["worker_environment"]["capture"] == "absent"

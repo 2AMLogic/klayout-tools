@@ -14,6 +14,21 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt sim --backend batch`: the local-versus-fleet PDK stamp comparison
+  now works on a host that pins no PDK root** (#5474, 2026-11-13): the
+  submitter's side of `pdk_stamp_comparison` was stamped only from
+  `models.pdk_root` or `$PDK_ROOT`, so a host whose PDK is found through the
+  search order (`~/.ciel`, the default worker setup) got
+  `not_comparable (client_stamp_unavailable)` even though both stamps were in
+  the report and equal — and `models.pdk_root` is refused for `batch`
+  (`models_pdk_root_host_path`), so a request could not fix it. The client
+  stamp now falls back to the install the search order resolves, i.e. the one
+  `provenance.pdk` already names. Precedence is unchanged
+  (`models.pdk_root` > `$PDK_ROOT` > search order), and
+  `client_stamp_unavailable` still reports an uninstalled variant or an
+  install with neither a readable `SOURCES` nor a bundle `.pdk-store.json`.
+  No JSON field is added, renamed or removed; no `schema_version` bump.
+
 - **`klt drc`: a rule whose `layer_selection` empties its input is now
   `inapplicable`, not `checked`** (#5435, 2026-11-13): applicability was
   decided from layer *presence*, before a rule's own `layer_selection`

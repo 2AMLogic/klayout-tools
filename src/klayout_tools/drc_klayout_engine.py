@@ -37,6 +37,7 @@ from .drc import (
     SCHEMA_VERSION,
     DrcError,
 )
+from .drc_deck_includes import _deck_script_files
 from .drc_klayout_abort import deck_abort_info, deck_aborted_error
 from .drc_klayout_app import _preflight_klayout_version, _resolve_klayout_executable
 from .drc_klayout_launch import launch_klayout_deck
@@ -439,14 +440,6 @@ _RUBY_SHELL_OUT_RES = (
     ),
 )
 
-#: Ruby's literal-path include forms, so a driver split across files is
-#: scanned as a whole (issue #2333). Only string *literals* are followed --
-#: a computed path is unknowable statically and is simply not scanned.
-_RUBY_INCLUDE_RE = re.compile(
-    r"""\b(?:require_relative|require|load)\s*\(?\s*"""
-    r"""(?:"(?P<path_dq>[^"\n]*)"|'(?P<path_sq>[^'\n]*)')"""
-)
-
 #: Words that name no external executable: shell builtins/keywords, plus the
 #: redirection/grouping artifacts a naive split can leave behind. Anything
 #: here is skipped rather than looked up on PATH.
@@ -508,12 +501,6 @@ _SHELL_BUILTIN_WORDS = frozenset(
 #: token) is skipped -- the preflight only reports what it is sure about.
 _COMMAND_WORD_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.+-]*$|^[./~][\w./+-]*$")
 
-#: Upper bound on how many files one deck's include graph is scanned for
-#: (issue #2333) -- a static scan must never become the expensive part of a
-#: DRC run, and a driver that pulls in more than this is past the point where
-#: a heuristic preflight is useful.
-_DECK_SCAN_MAX_FILES = 64
-
 
 def _shell_command_words(command: str) -> list[str]:
     """The executables a shell would run for ``command`` -- the first word of
@@ -545,44 +532,6 @@ def _shell_command_words(command: str) -> list[str]:
             continue
         words.append(word)
     return words
-
-
-def _deck_script_files(deck_file: str) -> list[str]:
-    """``deck_file`` plus every literal-path Ruby include reachable from it
-    (issue #2333), depth-first, de-duplicated, bounded by
-    :data:`_DECK_SCAN_MAX_FILES`.
-
-    A PDK's driver is often one file, but the shapes that carry host
-    assumptions (a shared logging/util prologue, a per-topic rule table) split
-    it across a handful. Unreadable or computed-path includes are skipped, not
-    an error: this is a diagnostic aid, and a file it cannot read is simply
-    one it cannot make claims about.
-    """
-    seen: set[str] = set()
-    ordered: list[str] = []
-    pending = [os.path.abspath(deck_file)]
-    while pending and len(ordered) < _DECK_SCAN_MAX_FILES:
-        current = pending.pop(0)
-        if current in seen or not os.path.isfile(current):
-            continue
-        seen.add(current)
-        ordered.append(current)
-        try:
-            with open(current, encoding="utf-8", errors="replace") as handle:
-                text = handle.read()
-        except OSError:
-            continue
-        base = os.path.dirname(current)
-        for match in _RUBY_INCLUDE_RE.finditer(text):
-            raw = match.group("path_dq") or match.group("path_sq") or ""
-            if not raw or "#{" in raw:
-                continue
-            candidate = raw if os.path.isabs(raw) else os.path.join(base, raw)
-            for resolved in (candidate, candidate + ".rb"):
-                if os.path.isfile(resolved):
-                    pending.append(os.path.abspath(resolved))
-                    break
-    return ordered
 
 
 #: Ruby ``$name`` global reads. A leading letter/underscore excludes the
@@ -646,8 +595,8 @@ def _record_deck_default(
 
 def scan_deck_globals(deck_file: str) -> list[dict[str, Any]]:
     """Best-effort static scan of the ``-rd`` globals a KLayout DRC deck
-    consumes (issue #3816), following literal includes as
-    :func:`_deck_script_files` does.
+    consumes (issue #3816), following literal Ruby and ``# %include``
+    includes as :func:`_deck_script_files` does.
 
     Returns a name-sorted list of ``{"name", "required_by_caller",
     "default"}``. A global whose first assignment is guarded by ``defined?``
@@ -720,9 +669,9 @@ def _missing_deck_globals_warning(
 
 
 def _scan_deck_host_commands(deck_file: str) -> dict[str, str]:
-    """Every host executable the deck script (and its literal includes) shells
-    out to, mapped to the ``<file>:<line>`` where it was first seen (issue
-    #2333).
+    """Every host executable the deck script (and every file it includes,
+    Ruby-literal or ``# %include``) shells out to, mapped to the
+    ``<file>:<line>`` where it was first seen (issue #2333).
 
     A static, deliberately shallow scan -- see
     :func:`_missing_deck_host_commands` for what that means for the caller.
@@ -782,15 +731,15 @@ def _deck_tree_identity(deck_file: str) -> dict[str, Any] | None:
     """Additive identity for a deck that is a *tree* of files (issue #3076).
 
     ``provenance.deck.content_hash`` pins only the entry script; a vendor
-    deck that pulls in sibling files via literal ``require``/``load`` is not
-    pinned by it. Returns ``None`` for a single-file deck (its identity is
-    unchanged), else ``{"file_count", "content_hash", "release"}`` where
-    ``content_hash`` is a sha256 over the sorted ``(relative path, file
-    hash)`` pairs of the entry script plus every literal include reachable
-    from it, and ``release`` is ``git describe --tags --always --dirty`` of
-    the deck's checkout (``None`` when it is not a git checkout or git is
-    unavailable). Computed-path includes are not followed (see
-    :func:`_deck_script_files`).
+    deck that pulls in sibling files via literal ``require``/``load`` or
+    KLayout's ``# %include`` is not pinned by it. Returns ``None`` for a
+    single-file deck (its identity is unchanged), else ``{"file_count",
+    "content_hash", "release"}`` where ``content_hash`` is a sha256 over the
+    sorted ``(relative path, file hash)`` pairs of the entry script plus
+    every literal include reachable from it, and ``release`` is ``git
+    describe --tags --always --dirty`` of the deck's checkout (``None`` when
+    it is not a git checkout or git is unavailable). Computed-path includes
+    are not followed (see :func:`_deck_script_files`).
     """
     files = _deck_script_files(deck_file)
     if len(files) < 2:
