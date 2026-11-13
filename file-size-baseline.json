@@ -489,7 +489,7 @@
     },
     {
       "path": "src/klayout_tools/netlist_normalize.py",
-      "lines": 2347
+      "lines": 2274
     },
     {
       "path": "src/klayout_tools/op_sanity.py",
@@ -509,7 +509,7 @@
     },
     {
       "path": "src/klayout_tools/pdk_models.py",
-      "lines": 2088
+      "lines": 2080
     },
     {
       "path": "src/klayout_tools/pdk_pcell.py",
@@ -937,7 +937,7 @@
     },
     {
       "path": "tests/test_lvs.py",
-      "lines": 26234
+      "lines": 26221
     },
     {
       "path": "tests/test_lvs_device_provenance.py",

@@ -16,13 +16,17 @@ Public entry points:
   the curated ``(deck_name, pdk_variant_family) -> {"nfet": ..., "pfet": ...}``
   MOS lookup.
 - :func:`resolve_device_bindings`: the writing-direction bindings for every
-  MOS/resistor/capacitor/bipolar class a deck declares.
+  MOS/resistor/capacitor/bipolar/diode class a deck declares. The diode
+  family's curated tables and both of its binding builders live in
+  :mod:`klayout_tools.pdk_diode_models` (issue #5491); this module only calls
+  them.
 - :func:`build_device_binding_map`: the ingestion-direction map used by
   `klt lvs`'s ``reference.form: "subckt-call"`` converter.
 - :func:`create_model_binding_delegate`: the
   ``kdb.NetlistSpiceWriterDelegate`` subclass that emits the ``X`` cards.
 - :func:`equivalent_rectangle_um`: recovers ``L``/``W`` from plate area and
-  perimeter for capacitors.
+  perimeter for capacitors, and the junction ``l``/``w`` of a geometry-
+  parameterized diode subcircuit from its measured area and perimeter.
 
 Invariants that live only here:
 
@@ -55,6 +59,11 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from .pdk_diode_models import (
+    DIODE_MODEL_TABLE,
+    diode_lookup_bindings,
+    diode_write_bindings,
+)
 from .pdk_families import pdk_variant_family
 
 if TYPE_CHECKING:
@@ -700,42 +709,6 @@ class DeviceLookup:
     fixed_width_um: float | None = None
 
 
-#: ``(deck_name, family) -> {device-class name: subcircuit name}`` for the PDK
-#: junction-diode subcircuits (issue #4319). Each is a two-terminal
-#: ``anode cathode`` cell taking ``area``/``perim`` (``pj``) call-site
-#: parameters; the subcircuit name is ``sky130_fd_pr__`` + the deck's
-#: ``DiodeDevice`` class name (a test iterates ``EXTRACTION_DECK.diodes`` so a
-#: new class cannot be silently missed).
-_DIODE_MODEL_TABLE: dict[tuple[str, str], dict[str, str]] = {
-    ("sky130", "sky130"): {
-        name: f"sky130_fd_pr__{name}"
-        for name in (
-            "diode_pw2nd_05v5",
-            "diode_pw2nd_05v5_lvt",
-            "diode_pw2nd_05v5_nvt",
-            "diode_pw2nd_11v0",
-            "diode_pd2nw_05v5",
-            "diode_pd2nw_05v5_lvt",
-            "diode_pd2nw_05v5_hvt",
-            "diode_pd2nw_11v0",
-        )
-    },
-}
-
-
-def _diode_bindings(deck_name: str, family: str) -> dict[str, DeviceLookup]:
-    """``<subckt-name> -> DeviceLookup("diode", ...)`` for every junction-diode
-    :data:`_DIODE_MODEL_TABLE` curates for one ``(deck_name, family)`` pair;
-    empty for a pair the table does not cover. Like bipolar, resolved purely
-    by subcircuit name (the call carries no length/width parameter)."""
-    return {
-        subckt: DeviceLookup("diode", device_class)
-        for device_class, subckt in _DIODE_MODEL_TABLE.get(
-            (deck_name, family), {}
-        ).items()
-    }
-
-
 _BindingValue = TypeVar("_BindingValue")
 
 
@@ -863,9 +836,10 @@ def known_device_subckt_names() -> dict[str, tuple[str, DeviceLookup]]:
         _setdefault_bindings(
             result, _tagged_bindings(deck_name, _bipolar_bindings(deck_name, family))
         )
-    for deck_name, family in _DIODE_MODEL_TABLE:
+    for deck_name, family in DIODE_MODEL_TABLE:
         _setdefault_bindings(
-            result, _tagged_bindings(deck_name, _diode_bindings(deck_name, family))
+            result,
+            _tagged_bindings(deck_name, diode_lookup_bindings(deck_name, family)),
         )
     return result
 
@@ -998,7 +972,7 @@ def build_device_binding_map(deck_name: str) -> dict[str, DeviceLookup]:
             subckt, DeviceLookup("capacitor", device_class, cap_len, cap_wid)
         )
     _setdefault_bindings(result, _bipolar_bindings(deck_name, family))
-    _setdefault_bindings(result, _diode_bindings(deck_name, family))
+    _setdefault_bindings(result, diode_lookup_bindings(deck_name, family))
     if res_table is None or cap_table is None:
         declared_resistors, declared_capacitors = _declared_non_mos_classes(deck_name)
         if res_table is None:
@@ -1112,15 +1086,24 @@ class DeviceBinding:
     - ``"capacitor"`` -- terminals ``A B``, plate ``L``/``W`` derived from the
       device's ``A``/``P`` via :func:`equivalent_rectangle_um` (the extractor
       exposes area/perimeter, not ``L``/``W``).
+    - ``"diode"`` -- terminals ``A C`` (anode, cathode -- ``DeviceClassDiode``'s
+      own two terminals, in the order every PDK diode subcircuit declares
+      them), junction ``l``/``w`` derived from the device's measured ``A``/``P``
+      exactly as for a capacitor plate, and for the same reason: KLayout's
+      diode extractor reports the junction's area and perimeter, not a
+      rectangle. Only emitted for a family listed in
+      :data:`~klayout_tools.pdk_diode_models.DIODE_PARAM_STYLE`
+      (issue #5491).
     - ``"bipolar"`` -- terminals ``C B E`` (matching the vendor subcircuit's
       real three-terminal ``c b e`` declaration); no ``L``/``W`` params (the
       geometry is encoded by :attr:`variants`, selected by measured ``AE``).
 
     ``length_param``/``width_param`` are the subcircuit's own spellings of its
     length/width parameters (``l``/``w`` for sky130, ``r_length``/``r_width``
-    or ``c_length``/``c_width`` for gf180mcu -- see the module docstring's
-    verified-provenance section). ``variants`` is the ``(nominal AE in um^2,
-    subcircuit name)`` selection table for a geometry-named bipolar family.
+    or ``c_length``/``c_width`` for gf180mcu, ``l``/``w`` for sg13g2's antenna
+    diodes -- see the module docstring's verified-provenance section).
+    ``variants`` is the ``(nominal AE in um^2, subcircuit name)`` selection
+    table for a geometry-named bipolar family.
 
     ``dropped_params`` names every parameter the extractor measures on this
     device class that this binding deliberately does **not** carry onto the
@@ -1452,11 +1435,12 @@ def resolve_device_bindings(
 ) -> dict[str, DeviceBinding]:
     """Resolve the full ``{device-class-name -> DeviceBinding}`` map for
     ``deck`` against ``pdk_variant`` (issue #339): MOS, plus every resistor and
-    capacitor class the deck declares, plus a bindable bipolar class.
+    capacitor class the deck declares, plus a bindable bipolar class, plus a
+    bindable junction-diode class (issue #5491).
 
     ``deck`` is the deck object (duck-typed: its ``nfet_class``/``pfet_class``,
-    ``mos_flavours``, ``resistors``, ``capacitors`` and ``bipolars``
-    attributes are read) -- kept a parameter rather than an import so this
+    ``mos_flavours``, ``resistors``, ``capacitors``, ``bipolars`` and
+    ``diodes`` attributes are read) -- kept a parameter rather than an import so this
     module stays free of a ``decks`` dependency.
 
     Raises :class:`ModelBindingError` (via :func:`resolve_mos_model_table`)
@@ -1541,6 +1525,8 @@ def resolve_device_bindings(
             cap_wid,
             geometry_style=geometry_style,
         )
+
+    bindings.update(diode_write_bindings(deck_name, family, deck, geometry_style))
 
     bjt_table = _BIPOLAR_MODEL_TABLE.get((deck_name, family), {})
     for bipolar in getattr(deck, "bipolars", ()):
@@ -2037,7 +2023,13 @@ def create_model_binding_delegate(
                 self.emit_line(f"X{name} {pins} {subckt}")
                 return
 
-            if binding.kind == "capacitor":
+            if binding.kind in ("capacitor", "diode"):
+                # Both kinds state a rectangle at the call site while the
+                # extractor measures area+perimeter: a MiM plate
+                # (`DeviceClassCapacitor`'s secondary `A`/`P`) and a junction
+                # diode (`DeviceClassDiode`'s only two parameters, identically
+                # named). Same recovery, same square fallback for a shape no
+                # real rectangle matches (issue #5491 reuses #339's path).
                 dims = equivalent_rectangle_um(
                     self._device_param(device, "A") or 0.0,
                     self._device_param(device, "P") or 0.0,

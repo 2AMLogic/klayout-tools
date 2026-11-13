@@ -14,6 +14,26 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt extract --pdk` / `klt pex` on `sg13g2`: the antenna diodes are now
+  written as calls on their real PDK subcircuits** (#5491, 2026-11-13):
+  `dantenna`/`dpantenna` were emitted as bare `D` cards naming the device
+  class (`D$133 PAD VDDIO dpantenna A=20.25P P=18U`), but IHP-Open-PDK
+  defines both names *only* as `.subckt`s in
+  `libs.tech/ngspice/models/diodes.lib` — there is no `.model` of either name
+  — so ngspice stopped at netlist load with `could not find a valid
+  modelname` and `klt pex` reported `ngspice_fatal` on the extracted leg of
+  every `delta[]` row for any pad-connected cell. Under `--pdk` each is now
+  `X<n> <anode> <cathode> <class> l=<len> w=<wid>`, the unit-suffixed style
+  `rsil`/`rppd`/`rhigh` already use on this deck, with `(l, w)` the rectangle
+  carrying the junction's extracted area and perimeter (`A=20.25P P=18U` →
+  `l=4.5U w=4.5U`). That is exact, not an approximation: both subcircuits use
+  `l`/`w` only through `DEV_A=(l*w)/1p` and `DEV_P=(l+w)/0.5u`. `klt lvs`
+  reads the same call back as `A = l·w`, `P = 2(l+w)`. Unchanged: `sg13g2`
+  extraction without `--pdk` (still a bare `D` card), sky130's and gf180mcu's
+  diode cards, the `area=`/`pj=` rewrite `klt pex` applies to `D` cards
+  (#5178), and the JSON `devices[]` entry (`area_um2`/`perimeter_um`). No
+  JSON field is added, renamed or removed; no `schema_version` bump.
+
 - **`klt signoff` reads a gzip-compressed evidence file** (#5452,
   2026-11-13): a `klt sim --report-out report.json.gz` report — the compact
   form `docs/cli/sim.md` recommends committing as evidence — is now citable

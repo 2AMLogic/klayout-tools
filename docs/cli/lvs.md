@@ -835,7 +835,8 @@ When a device name is not one of the curated devices, supply it explicitly:
 The converter recognises four device families through that same curated
 table, never a second, independent device-name mapping — MOS, resistor,
 capacitor, and bipolar (issue #1130 extended the original, MOS-only #280
-converter), plus sky130's junction diodes (issue #4319, below). See `netlist_normalize.py`'s module docstring for the full
+converter), plus sky130's junction diodes (issue #4319) and sg13g2's antenna diodes
+(issue #5491) — both below. See `netlist_normalize.py`'s module docstring for the full
 per-family rationale. It is deliberately narrow and loud (a wrong
 parameter/unit mapping into a sign-off tool must never pass silently):
 
@@ -987,8 +988,20 @@ emits. `area` is um² and `perim` (alias `pj`) um under sky130's ambient
 `.option scale` for bare numbers (`area=1 perim=4`); suffixed/exponent literals
 are SI (`area=1p perim=4u`). Either may be omitted (class default). Anode is the
 first node, cathode the second, and polarity is compared. `mult`/`m` > 1 is
-rejected like resistors/capacitors. Other decks' diodes are not mapped, and
-`device_map`'s `kind` enum has no `diode`.
+rejected like resistors/capacitors. `device_map`'s `kind` enum has no `diode`.
+
+**sg13g2 antenna diodes** (issue #5491). `dantenna`/`dpantenna` resolve from
+their PDK subcircuit names, which on this deck *are* the device-class names.
+Unlike sky130's cells these take `l`/`w` rather than `area`/`perim`, so
+`X<n> anode cathode dantenna l=4.5U w=4.5U` becomes `D<n> anode cathode
+dantenna A=20.25P P=18U` — area `l·w` and perimeter `2(l+w)`, the elementary
+inverse of the equivalent-rectangle recovery `klt extract --pdk` uses when it
+*writes* that call (see `extract.md` → "SPICE model binding"), so an
+extract-written netlist read back here compares on exactly the area and
+perimeter the extractor measured. Both dimensions must be given together; a
+call stating neither leaves `A`/`P` at the class default rather than assuming
+the subcircuit's own `l=780n w=780n` defaults. `mult`/`m` > 1 is rejected as
+above. Other decks' diodes are not mapped.
 
 Anything outside that union — including a subcircuit whose real upstream
 name differs from the deck's device-class label and has no curated entry yet
