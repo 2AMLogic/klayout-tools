@@ -209,7 +209,7 @@
     },
     {
       "path": "src/klayout_tools/cli/signoff_cmd.py",
-      "lines": 1171
+      "lines": 1168
     },
     {
       "path": "src/klayout_tools/cli/sim_cmd.py",
