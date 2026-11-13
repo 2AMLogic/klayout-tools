@@ -35,6 +35,19 @@ not `klt --version`, if you need to detect this kind of drift. See
   is every run without the flag. Mirrors `klt erc --omit-antenna-tables`;
   additive and opt-in, no `schema_version` bump.
 
+- **`klt stats` reports a `geometry_digest`** (#5551, 2026-11-13): the
+  timestamp- and record-order-independent digest of a stream's decoded
+  geometry is now a top-level field of `klt stats --format json` (and a
+  `geometry_digest:` line in text output). This gives
+  `klt signoff --attest 2 --regenerated-hash ... --hash-kind geometry` a
+  public producer for the value its grader recomputes -- previously the only
+  way to obtain it was to import the private
+  `klayout_tools._provenance.layout_geometry_digest`, since `klt diff`'s
+  `canonical_hash` is a *different* digest whose substitution grades
+  `stale_artifact`. The digest algorithm, `canonical_hash`, and how
+  `klt signoff --manifest` grades are all unchanged; the field covers the
+  whole stream and is not scoped by `--top`. Additive; `klt stats`'
+  `schema_version` stays `1`.
 - **`klt signoff` reads a gzip-compressed evidence file** (#5452,
   2026-11-13): a `klt sim --report-out report.json.gz` report — the compact
   form `docs/cli/sim.md` recommends committing as evidence — is now citable
