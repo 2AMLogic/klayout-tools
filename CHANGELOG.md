@@ -42,6 +42,29 @@ not `klt --version`, if you need to detect this kind of drift. See
   `example_gf180mcu.gds` (geometry byte-for-byte equivalent, zero XOR area on
   every layer; their `.drc.json` companions are unchanged). No JSON field is
   added, renamed or removed; no `schema_version` bump.
+- **`klt characterize`: level-sensitive latch arcs** (#5521, 2026-11-13): a
+  cell can now be declared a latch with `cell.enable_pin` (plus optional
+  `cell.enable_level`, `"high"` by default) instead of `cell.clock_pin`, which
+  asserts edge-triggered semantics and is mutually exclusive with it (as is
+  `cell.clock_edge`, whose job `enable_level` takes over). One run then emits,
+  per output pin: a **transparent** data-to-output `timing()` group per
+  referenced data pin (`timing_type : combinational`, measured with the enable
+  held at its active level), an **enable**-to-output group on the enable's
+  *opening* edge (`rising_edge` for an active-high enable, `falling_edge` for
+  active-low), and -- for each `cell.constrained_pins` entry -- setup/hold
+  referenced to the enable's *closing* edge (`setup_falling`/`hold_falling`
+  for an active-high enable, `setup_rising`/`hold_rising` for active-low). All
+  carry the usual six NLDM tables on the request's own slew x load grid. The
+  latch bisection probe passes when the transparent data-to-output delay is
+  within `(1 + options.constraint_degradation)` of its wide-end reference
+  **and** the output still holds the captured level after the enable closes;
+  an unbracketable point (including one that does not hold at the wide end)
+  still raises the existing named error rather than reporting a value. Purely
+  additive: `enable_pin`/`enable_level` are new request fields, no existing
+  JSON field changes shape, and no `schema_version` bump. Worked example:
+  `examples/characterize/request-dlat.json` (+ `dlat.spice`). See
+  [`docs/cli/characterize.md`](docs/cli/characterize.md)'s "Level-sensitive
+  latches".
 
 - **`klt sim`: a bad time bound in `cycle_mean` / `eye` / `settled` /
   `step_resolution` is now reported against its own form, not `crossings`**
