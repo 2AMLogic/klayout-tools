@@ -479,7 +479,8 @@ already has its own `.end`, so a second one would terminate it early.
 pair is uncommented, and the trailing `.end` is dropped. When xschem wrapped a
 long port list onto commented continuation lines (`*+ ...`) directly after the
 header, those lines are rewritten to real `+` continuations so the `.subckt`
-card carries the whole port list. The result carries a
+card carries the whole port list. The cell's **subcircuit parameters are
+restored** onto that header (see below). The result carries a
 `block` object in the JSON payload:
 
 | Field | Type | Description |
@@ -488,12 +489,107 @@ card carries the whole port list. The result carries a
 | `subckt_uncommented` | boolean | Whether a commented `**.subckt` header was found and uncommented. |
 | `ends_uncommented` | boolean | Whether a commented `**.ends` was found and uncommented. |
 | `trailing_end_removed` | boolean | Whether a trailing `.end` line was found and dropped. |
-| `warning` | string \| null | Set when any of the above was *not* found — the export may not have been shaped like a testbench netlist. The netlist is still written as xschem produced it; this is a warning, not an error. |
+| `warning` | string \| null | Set when any of the above was *not* found — the export may not have been shaped like a testbench netlist — or when the cell's symbol attributes could not be read for its subcircuit parameters. The netlist is still written as xschem produced it; this is a warning, not an error. |
 
-This is purely a post-processing step on the netlist text; it does not change
-the xschem invocation (`--block` adds no xschem flags). Under `--check`,
-the transform runs before the comparison, so a committed block artifact is
-diffed against the transformed (not the raw testbench-shaped) regeneration.
+`--block` adds no xschem flags: it does not change the xschem invocation.
+Under `--check`, the whole transform runs before the comparison, so a
+committed block artifact is diffed against the transformed (not the raw
+testbench-shaped) regeneration. A committed block netlist whose header lacks
+the subcircuit parameters therefore reports `"drifted"` — regenerate it. That
+is the same rule as the [port-list rewrite](#port-list-form-and-symbol-references).
+
+### Subcircuit parameters on the restored header
+
+A cell declares its subcircuit parameters in the `template` attribute of its
+*symbol* attributes — the top-level `K {...}` element of its `.sym`, or of the
+`.sch` itself. When a parent sheet instantiates the cell, xschem writes those
+parameters onto the child's `.subckt` card. The top sheet gets none: xschem
+comments its wrapper out (a top sheet is a deck, and a deck declares no
+parameters), and xschem's own netlist post-processing skips every commented
+line, so the `**.subckt` header never reaches the step that would add them.
+
+Under `--block` the premise is inverted — the sheet *is* a cell, one a
+testbench instantiates and overrides parameters on — so `klt netlist` restores
+them. Without them the export is silently unusable: the instance lines inside
+the block still reference the parameter names, so `.include`-ing it fails at
+parse time with `unknown parameter`, and a caller overriding one at the call
+site has nothing to override.
+
+```
+.subckt stage1 A B wstv=0.42 lstv=2 cld=0.5f
+```
+
+The goal is parity: **for a template whose every value is a single token —
+which is what real symbol templates carry — the restored card is the card
+xschem itself writes for that cell when a parent instantiates it**, verified
+against xschem 3.4.7 rather than derived from its rules. Parity stops where
+xschem's own card is not loadable — the unusable-value limit below. The rules
+follow xschem's, so:
+
+- **Source precedence** is what a parent would use — the sibling `<stem>.sym`
+  next to the schematic when it exists, otherwise the schematic's own `K {}`
+  block. A sibling symbol whose `template` holds no parameters means *no*
+  parameters, even when the `.sch` has some: the symbol is what a parent reads.
+- **Parameters land after the pin list**, in `template` order, and after the
+  *last* `+` continuation line's ports when the header was wrapped — never in
+  the middle of the port list.
+- **`name=` and `spiceprefix=` are dropped**, as is any token named by the
+  symbol's own `extra=` attribute, and the first ` m=<digits>` (xschem treats
+  `m` as a multiplier, not a parameter).
+- **Nothing is doubled.** A header that already carries a `key=value` token is
+  left exactly as xschem wrote it.
+- **A cell with no `template`** (or one holding only `name=`) produces the same
+  bytes it did before this existed.
+- **Reading the symbol never fails the run.** An unreadable or unparsable
+  `.sym` leaves the header as xschem produced it and says so in
+  `block.warning`.
+
+Four limits are worth stating.
+
+- Bare `key=value` text in a `file_version=1.2` `G {...}` element is **not** a
+  parameter source: xschem ignores it for every cell, so a block built from it
+  would disagree with the same cell netlisted as a child — move such
+  parameters into the symbol `template`, which is also what makes them work
+  from a parent sheet.
+- A parameter *value* containing a **comma** (`f=max(1,2)`) is left intact,
+  deliberately unlike xschem, which spaces commas across the whole `.subckt`
+  card and would corrupt the expression.
+- A parameter whose value is one **SPICE cannot spell as a parameter
+  default** is **left off the card**, and `block.warning` names it. Such a
+  value only arises from a quoted or backslash-escaped `template` value, as in
+  `template="name=x1 note=\"a b\" w=2"`. The unusable shapes, each measured
+  against ngspice, are: whitespace or a second `=` **outside** braces
+  (`note=a b`, `a=b=c` — the tail lands as a stray token and `.include`-ing
+  the block fails with `Formula() error`), an empty value (`note=`), and an
+  unbalanced brace (`Missing }`). Inside braces both are fine, so an
+  expression default is restored untouched — `f={a + b}`, `f={a==b}` and
+  `f={a>1?2:3}` all survive and evaluate.
+
+  This is the one place parity is deliberately dropped, because xschem's own
+  card is unusable too: it truncates the parameter list at the whitespace,
+  losing both that value's tail *and* every parameter after it (`note=a`, no
+  `w=2`). Every other parameter is still restored, so the header stays
+  loadable; a device referencing the omitted name still fails on `unknown
+  parameter`, but loudly, with the warning naming it.
+- A **multi-line** `template` is restored onto one line. xschem instead
+  continues the tail onto a bare second line with no `+`, which SPICE does not
+  read as a continuation; klt's single-line form is the valid one. The
+  parameters and their order are identical.
+
+Under [`--backend batch`](#batch-backend) this runs on the runner through the
+same code path, with no batch-specific behaviour — but the sibling `.sym` is
+only found if it was uploaded, so keep it inside `--batch-root` (and inside
+any `--batch-include` globs you narrow with).
+
+### What `--block` does and does not restore
+
+| Restored | Left as xschem wrote it |
+| --- | --- |
+| The first commented `**.subckt` / `**.ends` pair, uncommented | Anything in the sheet's `G {}`, `V {}`, `S {}` or `E {}` elements |
+| Commented `*+` continuation lines of that header, as real `+` continuations | `.GLOBAL` lines and other deck-level content |
+| The cell's `template` subcircuit parameters, each value a single token | `*.ipin` / `*.opin` comment lines |
+| Removal of the trailing `.end` | Nested sub-block `.subckt` cards (xschem already writes their parameters) |
+| — | A `template` parameter whose value contains whitespace: omitted from the card and named in `block.warning` |
 
 ## Port-list form and symbol references
 
