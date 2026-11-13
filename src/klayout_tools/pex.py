@@ -931,12 +931,24 @@ def _no_preflight_mismatch(*diagnostics: dict[str, Any] | None) -> bool:
 def _pin_order_preflight(
     command_mode: bool,
     earlier: tuple[dict[str, Any] | None, ...],
+    *,
+    extract_only: bool = False,
     **kwargs: Any,
 ) -> dict[str, Any] | None:
     """The ``pin_order_mismatch`` pre-flight (issue #2890), gated: ``None`` in
-    ``--measure-command`` mode, and once an earlier (mutually exclusive)
-    pre-flight diagnostic has fired; otherwise :func:`_pin_order_mismatch`."""
-    if command_mode or not _no_preflight_mismatch(*earlier):
+    ``--measure-command`` mode, ``None`` in ``--extract-only`` mode, and once
+    an earlier (mutually exclusive) pre-flight diagnostic has fired;
+    otherwise :func:`_pin_order_mismatch`.
+
+    The ``extract_only`` gate is explicit (issue #5477) rather than implied
+    by an empty ``reference_netlist``: that mode may now carry a
+    ``--reference-netlist`` for ``model_mismatch`` alone, and this
+    diagnostic describes the testbench ``X...``-line reuse of a measurement
+    leg that ``--extract-only`` never runs. Its siblings
+    (``flat_dut_mismatch``, ``pin_count_mismatch``) are gated on
+    ``extract_only`` at their own call sites for the same reason.
+    """
+    if command_mode or extract_only or not _no_preflight_mismatch(*earlier):
         return None
     return _pin_order_mismatch(**kwargs)
 
@@ -2111,15 +2123,24 @@ def _resolve_reference_netlist_path(
     measured_reference_netlist: str | None,
     dut_paths: Sequence[str],
 ) -> str:
-    """The one ``reference_netlist`` for the run (issue #3739): ``""`` for
-    ``--extract-only`` (no schematic side; every consumer of the path is
-    skipped and ``env_provenance.repo_relative_path`` /
-    :func:`content_hash` read it as ``null``), the caller's own
-    ``--reference-netlist`` in ``--measure-command`` mode, else the DUT."""
-    if extract_only:
-        return ""
+    """The one ``reference_netlist`` for the run: the caller's own
+    ``--reference-netlist`` whenever one was given (``--measure-command``
+    mode, issue #2478, and ``--extract-only`` mode, issue #5477), ``""`` for
+    a bare ``--extract-only`` (no schematic side at all; every consumer of
+    the path is skipped and ``env_provenance.repo_relative_path`` /
+    :func:`content_hash` read it as ``null``), else the testbenches' own
+    single ``.include``d DUT.
+
+    Issue #5477: a non-empty path in ``--extract-only`` mode does **not**
+    mean a schematic leg runs. It is the reference
+    :func:`_model_mismatch` compares the extracted netlist's device-model
+    multiset against, and nothing else -- every measurement-leg consumer
+    stays gated on ``extract_only`` at its own call site.
+    """
     if measured_reference_netlist is not None:
         return measured_reference_netlist
+    if extract_only:
+        return ""
     return dut_paths[0]
 
 
@@ -2145,13 +2166,18 @@ def _validate_measure_mode(
     does *not* express the exclusion with an argparse mutually-exclusive
     group -- `<testbench>` is a positional, and argparse's own message for
     that case says much less than these do).
+
+    Issue #5477: ``--extract-only`` accepts ``--reference-netlist``. It
+    buys exactly one thing -- the ``model_mismatch`` device-set comparison,
+    which reads both netlists' text and needs no measurement leg -- so it
+    is not in the conflict list below. Every other ``--extract-only``
+    conflict is unchanged.
     """
     if extract_only:
         _reject_extract_only_conflicts(
             [
                 (bool(testbench_paths), "a testbench request"),
                 (measure_command is not None, "--measure-command"),
-                (reference_netlist is not None, "--reference-netlist"),
                 (measure_timeout_s is not None, "--measure-timeout-s"),
                 (device_only_leg, "--device-only-leg"),
                 (flatten_schematic, "--flatten-schematic"),
@@ -3057,8 +3083,28 @@ def run_pex(
     are ``null``, ``measurement.mode`` is ``"extract-only"`` and ``status`` is
     ``"not_checked"`` (``coverage.reasons`` ``no_delta_rows``) -- nothing was
     compared. Combining it with testbenches, ``measure_command``,
-    ``reference_netlist``, ``measure_timeout_s``, ``device_only_leg`` or
-    ``flatten_schematic`` raises :class:`PexError`.
+    ``measure_timeout_s``, ``device_only_leg`` or ``flatten_schematic``
+    raises :class:`PexError`.
+
+    **``extract_only`` with ``reference_netlist`` (issue #5477)** is the one
+    exception to that list. ``model_mismatch`` compares what the two
+    netlists *contain* -- the per-model ``M``/``X``/``Q``/``D`` instance
+    multiset (:func:`_model_mismatch`) -- so it is well-defined with no
+    measurement leg at all, and it is the only deck-agnostic signal that an
+    extraction is missing a whole device family: a curated deck that
+    declares no class for a family whose recognition region the PDK
+    *derives* (rather than drawing a marker layer for) leaves
+    ``extraction.unsupported_devices`` empty and the devices simply absent
+    from the netlist. Supplying the schematic netlist makes that divergence
+    nameable -- ``kind: "model_set"``, the missing model in
+    ``reference_only`` -- in an envelope whose ``delta[]`` is not yet
+    runnable. ``reference_netlist``/``reference_netlist_sha256`` then report
+    the caller's file; ``measurement.mode`` stays ``"extract-only"``,
+    ``delta`` stays ``[]``, ``status`` stays ``"not_checked"``, and
+    ``flat_dut_mismatch``/``pin_count_mismatch``/``pin_order_mismatch`` stay
+    ``null`` -- all three describe a measurement leg's testbench
+    ``X...``-line reuse, which this mode does not do. Without a
+    ``reference_netlist`` the envelope is byte-identical to before.
 
     **``device_only_leg`` (issue #3298)** adds a third, parasitic-free leg:
     the same layout is extracted again with ``parasitics=False`` (no star
@@ -3262,9 +3308,16 @@ def run_pex(
     # circuit of its own would make the schematic leg (and therefore every
     # `delta[]` row) meaningless while the report still looked like a real
     # comparison.
+    #
+    # Issue #5477: `--extract-only` may now carry one too, for the same
+    # "it still has to *be* a DUT" reason -- a parameter/corner file would
+    # make `model_mismatch`'s device-set comparison meaningless while the
+    # envelope still named a reference. Testbench mode never reaches here
+    # with a reference (`_validate_measure_mode` rejects it), so this one
+    # condition covers both modes that can supply one.
     measured_reference_netlist = (
         _resolve_measured_reference(reference_netlist)
-        if command is not None and reference_netlist is not None
+        if reference_netlist is not None
         else None
     )
 
@@ -3387,9 +3440,18 @@ def run_pex(
     # too (issue #2478): unlike the two pin-list diagnostics, it compares
     # what the two netlists *contain*, which is independent of how either
     # side was measured.
+    # Issue #5477: computed in `--extract-only` mode too, whenever the
+    # caller supplied a `--reference-netlist`. It is the one diagnostic
+    # here that compares the two netlists' *text* rather than anything a
+    # measurement leg produced, so it is well-defined with no leg at all --
+    # and it is the only deck-agnostic signal that an extraction is missing
+    # a whole device family (the curated deck declaring no class for it is
+    # invisible to `unsupported_devices[]` when the family has no drawn
+    # marker layer). Still reported, not enforced: `status` stays
+    # `not_checked` and the exit code stays 4.
     model_mismatch = (
         None
-        if extract_only
+        if not schematic_netlist_path
         else _model_mismatch(
             reference_netlist=schematic_netlist_path,
             extracted_netlist=extracted_netlist_path,
@@ -3456,6 +3518,7 @@ def run_pex(
     pin_order_mismatch = _pin_order_preflight(
         command_mode,
         (flat_dut_mismatch, pin_count_mismatch),
+        extract_only=extract_only,
         reference_netlist=reference_netlist_path,
         extracted_netlist=extracted_netlist_path,
         top_cell=extract_report["top"],
@@ -3759,6 +3822,23 @@ def run_pex(
             # Additive field (issue #4234): `klt extract`'s `device_models`
             # echo -- the applied `--device-model` mapping, or `None`.
             "device_models": extract_report.get("device_models"),
+            # Additive fields (issue #5477): `klt extract`'s own device
+            # coverage disclosure, forwarded verbatim in every mode, so a
+            # committed `klt pex` envelope carries the same limit statement
+            # the extraction it cites already published instead of making a
+            # reader re-run `klt extract` to find it.
+            #
+            # `device_classes` (issue #221) is what the resolved deck can
+            # recognise at all; `unsupported_devices` (issue #2919) is the
+            # deck-declared "cannot extract this yet" marker geometry the
+            # layout actually draws. Neither can see a device family the
+            # deck declares no class for *and* that has no drawn marker
+            # layer (a derived recognition region, e.g. `pnpMPA` on
+            # sg13cmos5l) -- for that, `model_mismatch` against a supplied
+            # `--reference-netlist` is the signal, available in
+            # `--extract-only` mode since issue #5477.
+            "device_classes": extract_report.get("device_classes"),
+            "unsupported_devices": extract_report.get("unsupported_devices"),
             # Additive field (issue #2854): echoes the effective
             # `--rename-declared-pins` value back -- `False` when the flag
             # was never given, byte-identical to before this feature
