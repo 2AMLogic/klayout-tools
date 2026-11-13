@@ -502,9 +502,10 @@ is the same rule as the [port-list rewrite](#port-list-form-and-symbol-reference
 
 A cell declares its subcircuit parameters in the `template` attribute of its
 *symbol* attributes — the top-level `K {...}` element of its `.sym`, or of the
-`.sch` itself. When a parent sheet instantiates the cell, xschem writes those
-parameters onto the child's `.subckt` card. The top sheet gets none: xschem
-comments its wrapper out (a top sheet is a deck, and a deck declares no
+`.sch` itself (or, for a `.sym` written without a `K` element at all, its
+`G {...}` element). When a parent sheet instantiates the cell, xschem writes
+those parameters onto the child's `.subckt` card. The top sheet gets none:
+xschem comments its wrapper out (a top sheet is a deck, and a deck declares no
 parameters), and xschem's own netlist post-processing skips every commented
 line, so the `**.subckt` header never reaches the step that would add them.
 
@@ -530,6 +531,14 @@ follow xschem's, so:
   next to the schematic when it exists, otherwise the schematic's own `K {}`
   block. A sibling symbol whose `template` holds no parameters means *no*
   parameters, even when the `.sch` has some: the symbol is what a parent reads.
+- **A sibling `.sym` with no `K` element is read from its `G {...}` element**,
+  which is where a symbol written before xschem split the two apart keeps its
+  attributes. A `.sym` that *has* a `K` element is read from it whatever is in
+  `G {}` — including an empty `K {}`, which means no parameters, and in either
+  order — and `file_version` does not enter into it: a `file_version=1.2`
+  `.sym` carrying its attributes in `G {}` has its `template` read exactly
+  like a 1.1 one. The schematic itself is never read from `G {}`. All of this
+  is xschem 3.4.7's own behavior, measured rather than inferred.
 - **Parameters land after the pin list**, in `template` order, and after the
   *last* `+` continuation line's ports when the header was wrapped — never in
   the middle of the port list.
@@ -546,8 +555,10 @@ follow xschem's, so:
 
 Four limits are worth stating.
 
-- Bare `key=value` text in a `file_version=1.2` `G {...}` element is **not** a
-  parameter source: xschem ignores it for every cell, so a block built from it
+- Bare `key=value` text in a `G {...}` element is **not** a parameter source,
+  in a `.sch` or a `.sym`: only a `template` attribute is, so reading a
+  `K`-less `.sym` from `G {}` picks up its `template` and nothing else.
+  xschem ignores bare assignments for every cell, so a block built from them
   would disagree with the same cell netlisted as a child — move such
   parameters into the symbol `template`, which is also what makes them work
   from a parent sheet.

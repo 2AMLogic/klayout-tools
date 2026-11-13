@@ -8,7 +8,7 @@ Phase 1a of [Epic #709](https://github.com/2AMLogic/klayout-tools/issues/709)
 ("PEX-aware post-layout sim flow for klt").
 
 ```
-klt pex <layout> <testbench>... --deck sky130|gf180mcu|sg13g2 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--outdir <dir>] [--backend <backend>] [--max-units-per-job <n>] [--max-concurrent-jobs <n>] [--hosts <n>] [--resume] [--wait-for-capacity <seconds>] [--submit-only | --attach <pex-submit.json>] [--envelope-out <envelope.json>] [--deck-option <key>=<value>]... [--pins <a,b,...>] [--rename-declared-pins] [--tie-declared-pins] [--label-layer <role>=<layer>/<datatype>]... [--device-model <class>=<subckt>]... [--tie-net <extracted-net>=<schematic-net>]... [--critical-net <net>]... [--critical-net-pattern <glob>]... [--critical-net-all] [--critical-net-exclude <glob>]... [--distributed-rc] [--resistance-graph [--resistance-graph-r-cut <ohms>]] [--parasitic-variant <variant>]... [--substrate-tie-ohms <ohms>] [--mom-rlc-net <net>] [--mom-rlc-resistance-ohm <r>] [--mom-rlc-capacitance-ff <c>] [--mom-rlc-inductance-nh <l>] [--flatten-schematic] [--device-only-leg] [--extract-only] [--format text|json]
+klt pex <layout> <testbench>... --deck sky130|gf180mcu|sg13g2 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--outdir <dir>] [--backend <backend>] [--max-units-per-job <n>] [--max-concurrent-jobs <n>] [--hosts <n>] [--resume] [--wait-for-capacity <seconds>] [--submit-only | --attach <pex-submit.json>] [--envelope-out <envelope.json>] [--deck-option <key>=<value>]... [--pins <a,b,...>] [--rename-declared-pins] [--tie-declared-pins] [--label-layer <role>=<layer>/<datatype>]... [--device-model <class>=<subckt>]... [--tie-net <extracted-net>=<schematic-net>]... [--critical-net <net>]... [--critical-net-pattern <glob>]... [--critical-net-all] [--critical-net-exclude <glob>]... [--distributed-rc] [--resistance-graph [--resistance-graph-r-cut <ohms>]] [--parasitic-variant <variant>]... [--substrate-tie-ohms <ohms>] [--mom-rlc-net <net>] [--mom-rlc-resistance-ohm <r>] [--mom-rlc-capacitance-ff <c>] [--mom-rlc-inductance-nh <l>] [--flatten-schematic] [--device-only-leg] [--extract-only] [--dry-run] [--format text|json]
 klt pex <layout> --deck <deck> --measure-command <command> --reference-netlist <schematic.spice> [--measure-timeout-s <seconds>] [<every flag above>]
 klt pex <layout> --deck <deck> --extract-only [--reference-netlist <schematic.spice>] [<every flag above>]
 ```
@@ -137,7 +137,10 @@ klt pex <layout> --deck <deck> --extract-only [--reference-netlist <schematic.sp
   behaviour (inputs re-given, hashes verified). A manifest written before
   schema 2 has no `request`: a bare `--attach` of it fails with
   `pex_manifest_no_request`. Without `--attach`, layout and `--deck` stay
-  required (exit `2`).
+  required (exit `2`). Per-invocation plumbing is **not** part of `request`
+  and is never taken from a manifest, even if one carries it: `--format`,
+  `--submit-only`, `--attach` itself, `--envelope-out`, and `--dry-run`
+  (issue #5464) always come from the command line you just typed.
   **Incremental manifest and re-running a submit**
   ([#4686](https://github.com/2AMLogic/klayout-tools/issues/4686)):
   `pex-submit.json` is rewritten atomically after every leg is submitted, with
@@ -355,6 +358,16 @@ klt pex <layout> --deck <deck> --extract-only [--reference-netlist <schematic.sp
   byte-identical to before this feature existed. See
   [`extract.md`](extract.md)'s "Substitute a caller-supplied `klt mom` R/L/C
   for a critical net" section.
+- `--dry-run` — validate the invocation and print its expansion without
+  extracting or simulating anything (issue #5464), the `klt pex`
+  counterpart of [`sim.md`](sim.md)'s `klt sim --dry-run` (issue #3064).
+  Exits `0` when everything it can check is valid, `1` with the normal
+  error envelope otherwise. Refused with `--submit-only` / `--attach`, the
+  same pair `klt sim --dry-run` refuses -- including the **bare** `--attach
+  MANIFEST --dry-run` form, which is refused before anything is collected or
+  written (`--dry-run` is never recorded in a manifest and never taken from
+  one; see "Bare `--attach`" above). See "Validating an invocation
+  without running it (`--dry-run`)" below.
 - `--format` — `text` (default, a human-readable pass/fail summary) or
   `json` (this command's own JSON envelope, see below).
 
@@ -1371,6 +1384,122 @@ This document (and the shipped command) follow that AC; the response
 *shape* nonetheless matches the provisional envelope exactly (`delta[]` +
 `reference_netlist` + the fields below), so `klt signoff`'s existing
 recognition logic needed no change.
+
+## Validating an invocation without running it (`--dry-run`)
+
+`klt sim --dry-run` ([`sim.md`](sim.md), issue #3064) gives a committed
+`klt sim` request a cold-start check that costs well under a second.
+`klt pex --dry-run` (issue #5464) is the same contract for a committed
+post-layout invocation: **validate and print the expansion, extract
+nothing, simulate nothing, write nothing.**
+
+Before it existed, a committed `klt pex` invocation could only be checked
+by paying for a full extraction plus both simulation legs. The obvious
+workaround — running `klt sim --dry-run` on the pex testbench request —
+validates the measurement request alone and skips everything `klt pex`
+itself adds: deck / `--deck-option` / `--top` resolution, the
+flag-combination rules, and the testbench-to-DUT pairing.
+
+```console
+$ klt pex layout.gds tb.json --deck sky130 --dry-run
+klt pex --dry-run: valid (1 testbench(es), legs=schematic+extracted, 6 unit(s) per leg)
+  not checked: extraction
+  not checked: netlist_diagnostics
+  not checked: extracted_leg_preflight
+```
+
+### What it checks
+
+In `run_pex`'s own order, and through the very same helpers the real run
+calls — so a dry run's error message *is* the real run's error message for
+the same input, rather than a lookalike that can drift:
+
+1. **The pre-extraction flag refusals.** Async flags (`--submit-only` /
+   `--attach` / `--resume` / backend), `--wait-for-capacity`, the
+   measure-mode rules (`<testbench>` vs `--measure-command` vs
+   `--extract-only`, and every flag each of them forbids), and
+   `--resistance-graph` with `--distributed-rc`. The output-directory lock
+   is the one thing deliberately **not** taken (see below).
+2. **The extraction preflight** — every check `klt extract --parasitics`
+   makes before its engine starts: PDK and device-model binding resolution,
+   the parasitics deck, the `run_extract` argument rules, then the layout
+   file checks, `--deck` / `--deck-option` / `--label-layer` resolution, the
+   layout read, `--top` resolution, the per-deck option refusals, and
+   `--rename-declared-pins` / `--tie-declared-pins` needing a declared pin
+   set. Reading the stream to resolve `--top` is in scope: it is a file
+   read, not an extraction.
+3. **The per-testbench DUT resolution** that a real run only reaches *after*
+   extraction has already been paid for: the request loads, its body netlist
+   exists, the body carries exactly one `.include`/`.inc`, that target
+   plausibly declares a circuit, and every testbench agrees on one schematic
+   DUT. In `--measure-command` mode, the same "does it declare a circuit"
+   check on `--reference-netlist` instead.
+4. **One nested `klt sim --dry-run` per testbench**, with the same backend
+   and shard arguments the schematic leg would pass. Its report is embedded
+   verbatim as that testbench's `sim` field.
+
+Every entry in `legs` expands to that same unit list: the extracted-side
+(and `--device-only-leg`) requests are deep copies of the testbench request
+with only the DUT netlist, its models library and `netlist_source` changed,
+so the corner / Monte Carlo expansion is identical on every leg.
+
+### What it writes: nothing
+
+No netlist at `-o`, no `.klt/pex/` or `--outdir` tree, no `--envelope-out`
+file, and the output-directory lock (see "Output-directory ownership"
+below) is never taken — so a dry run can be issued against a directory a
+real run is holding. A *validation failure* still rides the normal error
+envelope, including the `--envelope-out` mirror every other `klt pex`
+failure writes, so a caller watching that file sees why the invocation was
+refused.
+
+### What it cannot check: `not_checked[]`
+
+A dry run reports what it did not look at rather than implying it passed.
+Each entry is a fixed string code:
+
+| Code | Why a dry run cannot see it |
+|---|---|
+| `extraction` | Always present. Anything needing the extracted netlist: whether a `--critical-net` / `--mom-rlc-net` name resolves to a real net, and whether the label roles the deck reads are actually present in the layout. |
+| `netlist_diagnostics` | Always present. `pin_count_mismatch`, `pin_order_mismatch`, `flat_dut_mismatch` and `model_mismatch` all compare the extracted netlist's own `.SUBCKT` text against the schematic DUT's. |
+| `extracted_leg_preflight` | Always present. The extracted-side `klt sim` staging runs against a DUT-swapped request pointing at a netlist that does not exist yet. Dry-running it against a placeholder would validate a file the real run will never use. |
+| `tie_nets` | With `--tie-net`. Each pair names a net of *this extraction's* `body_bias.unbiased_nets`. |
+| `measure_command` | With `--measure-command`. The command is deliberately not executed. |
+| `flatten_schematic` | With `--flatten-schematic`. The flattener runs against the resolved schematic DUT at run time. |
+
+### The report
+
+Additive to the `klt pex` envelope — same `schema_version`, no bump. Path
+fields use the same `{path, scope}` shape the full report uses.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `dry_run` | bool | Always `true`. Absent from a real run's report. |
+| `status` | string | Always `"valid"` — a dry run that reaches a report passed every check it made. A failure is an error envelope, exit 1. |
+| `layout` | object | `{path, scope}` — the layout this invocation would extract. |
+| `deck` | string | The `--deck` value, resolved. |
+| `top` | string | The resolved top cell name (`--top`, or the stream's single top cell). |
+| `deck_options` | object | The **fully resolved** deck-option mapping, including keys the deck defaulted — the same mapping `provenance.deck.options` records on a real run. `{}` for a deck with no selectable options. |
+| `declared_pins` | array\|null | `--pins`, sorted; `null` when the flag was not given. |
+| `legs` | array | The measurement legs this invocation would run: `["schematic", "extracted"]`, plus `"device-only"` with `--device-only-leg`. Empty for `--extract-only`, which measures nothing. |
+| `reference_netlist` | object | `{path, scope}` — the one schematic DUT, as resolved: every testbench's `.include` target, or `--reference-netlist` in `--measure-command` mode. `{path: null, scope: "absent"}` for `--extract-only`. |
+| `testbenches` | array | One entry per testbench: `request` and `schematic_netlist` (both `{path, scope}`), plus `sim` — the nested `klt sim --dry-run` report, unmodified. Empty for `--extract-only` and `--measure-command`. |
+| `not_checked` | array | The codes above, in table order. |
+
+### The other two input modes
+
+- **`--extract-only`** — `testbenches` is `[]` and `legs` is `[]`: only the
+  extraction-side checks run, because that is all the real run would do.
+- **`--measure-command`** — `--reference-netlist` is resolved and checked to
+  declare a circuit, and the command is **not** executed. `measure_command`
+  is listed in `not_checked`.
+
+### Text output
+
+One summary line (`klt pex --dry-run: valid (...)` with the testbench count,
+the planned legs and the per-leg unit count), then one `  not checked: <code>`
+line per entry. As everywhere else, the text form is a courtesy; the JSON is
+the contract.
 
 ## JSON schema (the contract)
 
