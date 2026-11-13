@@ -137,6 +137,19 @@ def add_characterize_parser(
         ),
     )
     characterize_parser.add_argument(
+        "--split-grid",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "split each cell's input-slew rows across up to N sim legs "
+            "(issue #5410), one fleet job each under <cell dir>/grid-<k>/, "
+            "merged into the same tables -- for a cell whose whole grid "
+            "outruns the fleet job ceiling. Overrides the request's "
+            "`options.split_grid`; default 1 (one leg). Must be >= 1."
+        ),
+    )
+    characterize_parser.add_argument(
         "--keep-going",
         action="store_true",
         help=(

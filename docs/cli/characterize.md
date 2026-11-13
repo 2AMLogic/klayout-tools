@@ -8,7 +8,8 @@ SPICE-driven NLDM timing **and power** characterization of one standard cell
 klt characterize <request> [-o OUTDIR] [--lib PATH] [--backend BACKEND]
                           [--wait-for-capacity SECONDS]
                           [--keep-artifacts] [--cell NAME ...]
-                          [--resume] [--timeout-s SECONDS] [--keep-going]
+                          [--resume] [--timeout-s SECONDS] [--split-grid N]
+                          [--keep-going]
                           [--compare-to LIB] [--format text|json]
 ```
 
@@ -78,7 +79,21 @@ positional file args. Relative paths inside it (`cell.netlist`,
   generates — cell sims and constraint decks — with the same precedence as
   `klt sim --timeout-s`. A non-positive value is an error (exit `1`). The
   `timeout_preflight_warning` in a sim report predicts when the default is too
-  small.
+  small. The timeout is not part of `--resume`'s reuse key (issue #5410):
+  changing only `--timeout-s` on a resumed run reuses collected legs and
+  re-runs only failed ones.
+- `--split-grid N` — split each cell's input-slew rows into at most `N`
+  contiguous chunks (`min(N, rows)`), each its own sim leg (its own fleet job
+  with `--backend batch`) under `<cell dir>/grid-<k>/` (issue #5410). For a
+  cell whose whole grid outruns the fleet job ceiling. The chunks are merged
+  into the same tables, power tables, leakage and pin capacitance an unsplit
+  run produces; leakage and pin capacitance come from chunk 1. Overrides
+  `options.split_grid`; default 1 (one leg, decks byte-identical to before).
+  A non-integer or `< 1` value is an error (exit `1`) before any simulation.
+  A failing chunk is named in the error (`grid chunk k/N`); `--keep-going`
+  still isolates the cell and `--resume` re-runs only the failed chunk. In
+  the response, `simulation.testbench/request/report` name chunk 1 and
+  `runtime_s` sums the chunks.
 - `--keep-going` — batch requests only (issue #5380; refused on a single-cell
   `cell` request, like `--cell`). A cell whose characterization fails
   (including a failure inside one of its constraint decks) is recorded in the
@@ -675,6 +690,7 @@ says which input edge produces the *rising* output edge under this arc's own
 | `options.settle_ns` | number | Settle window per edge. Default `max(2, 3 x longest ramp)`. See "Transient window". |
 | `options.tran_step_ns` | number | Transient step, also used as `tmax`. Default `min(0.001, shortest ramp / 10)`. |
 | `options.timeout_s` | number | Per-corner ngspice timeout. Default `900`. |
+| `options.split_grid` | integer | Same as `--split-grid`. Default `1`. |
 | `options.keep_artifacts` | boolean | Keep the ngspice log/deck. Default `false`; `--keep-artifacts` overrides. |
 | `options.resume` | boolean | Same as `--resume`. Default `false`. |
 | `options.osdi_preload` | array of string | `.osdi` shared libraries to `pre_osdi`, forwarded to `klt sim`'s `options.osdi_preload`. See "OSDI (Verilog-A) model preload". |

@@ -39,6 +39,7 @@
         "klayout_tools.characterize_constraints",
         "klayout_tools.characterize_instances",
         "klayout_tools.characterize_leg",
+        "klayout_tools.characterize_split",
         "klayout_tools.characterize_osdi",
         "klayout_tools.characterize_pool",
         "klayout_tools.characterize_probe",

@@ -40,6 +40,7 @@ def run(args: argparse.Namespace) -> int:
             resume=getattr(args, "resume", None),
             capacity_wait_s=getattr(args, "wait_for_capacity", None),
             timeout_s=getattr(args, "timeout_s", None),
+            split_grid=getattr(args, "split_grid", None),
             keep_going=bool(getattr(args, "keep_going", False)),
         )
     except CharacterizeError as exc:

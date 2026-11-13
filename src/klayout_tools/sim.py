@@ -7637,7 +7637,7 @@ def _checkpoint_fingerprint(
     Content-hashes the netlist/model library (not just their paths -- an
     edited-in-place file at the same path must invalidate the checkpoint,
     per this issue's own acceptance criteria) alongside the analysis,
-    measurement cards, per-corner timeout, engine, and the exact list of
+    measurement cards, engine (not ``timeout_s``: #5410), and the exact list of
     expanded corner IDs (covers the whole corner matrix, including any
     Monte Carlo expansion, since two requests that expand to a different
     corner list are not resumable against each other's progress). A
@@ -7651,7 +7651,6 @@ def _checkpoint_fingerprint(
         "models_lib_sha256": sha256_file(models_lib),
         "analysis": analysis,
         "measurements_spec": measurements_spec,
-        "timeout_s": timeout_s,
         "engine": engine,
         "corner_ids": [point.corner_id for point in corner_points],
     }
