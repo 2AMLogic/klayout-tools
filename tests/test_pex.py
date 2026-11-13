@@ -31,7 +31,6 @@ import klayout.db as kdb
 import pytest
 
 from klayout_tools import output_lock, sim
-from klayout_tools._provenance import sha256_file
 from klayout_tools.cli import main
 from klayout_tools.pex import (
     BODY_BIAS_BIASED,
@@ -397,6 +396,7 @@ def test_run_pex_tie_net_reports_hash_of_rewritten_netlist(
     tmp_path, resistor_layout, measure_reference, monkeypatch
 ):
     import klayout_tools.pex as pex_module
+    from klayout_tools._provenance import sha256_file
 
     real = pex_module.run_extract
 
