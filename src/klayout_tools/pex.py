@@ -230,6 +230,11 @@ from .coverage import (
     work_id,
 )
 from .extract import ExtractError, run_extract
+
+# Issue #5494: multi-top mode writes the combined `-o` netlist itself, so it
+# resolves the default output path with `klt extract`'s own helper rather
+# than restating the convention and risking drift from it.
+from .extract import _default_output_path as _default_extracted_netlist_path
 from .op_sanity import INCLUDE_CARD_RE, IncludeState, expand_includes
 from .pex_asap7 import (
     DEVICE_MODEL_CARD_PREFIXES,
@@ -310,6 +315,13 @@ BODY_BIAS_UNBIASED = "unbiased"
 BODY_BIAS_TIED = "tied"
 #: ``body_bias.tied[].source`` for a ``--tie-net`` tie.
 TIE_SOURCE_DECLARED = "declared"
+
+#: Issue #5494: ``PexError.code`` for a flag/argument combination the
+#: repeatable-``--top`` (multi-top) mode does not define. Every such refusal
+#: is raised *before* anything is extracted, in the style of
+#: :func:`_reject_extract_only_conflicts` -- see
+#: :func:`_reject_multi_top_conflicts`.
+MULTI_TOP_UNSUPPORTED_CODE = "pex_multi_top_unsupported"
 
 #: Issue #2478: ``measurement.mode`` values -- how this run's two legs were
 #: measured.
@@ -2106,6 +2118,429 @@ def _reject_extract_only_conflicts(conflicts: Sequence[tuple[bool, str]]) -> Non
             )
 
 
+# --------------------------------------------------------------------------- #
+# Multi-top mode (issue #5494): one graded run, several drawn tops
+# --------------------------------------------------------------------------- #
+
+
+def _normalize_tops(top: str | Sequence[str] | None) -> list[str]:
+    """``top`` as a list of cell names, in the order ``--top`` was given.
+
+    ``klt pex --top`` is repeatable (issue #5494), so ``argparse`` hands this
+    module a list; a bare string (every library caller that predates the
+    flag's repeatability, and ``klt extract``'s own single-valued spelling)
+    is accepted unchanged and normalised to a one-entry list. ``None`` --
+    the "let the stream's single top cell decide" default -- normalises to
+    the empty list, which is the same ``top=None`` call ``run_extract``
+    received before this mode existed.
+
+    A repeated cell name is a usage error rather than a silently
+    de-duplicated or doubly-extracted top: extracting the same cell twice
+    would write two identical ``.SUBCKT`` blocks into the one combined
+    netlist, which ngspice rejects as a redefinition, and double-count its
+    devices/nets in the summed ``extraction`` counts. Compared
+    case-insensitively because ngspice itself is case-insensitive about
+    subcircuit names (the same reason :func:`_subckt_interfaces` lowercases
+    its keys), so ``--top RES --top res`` is the same collision.
+    """
+    if top is None:
+        tops: list[str] = []
+    elif isinstance(top, str):
+        tops = [top]
+    else:
+        tops = list(top)
+    seen: dict[str, str] = {}
+    for name in tops:
+        key = name.lower()
+        if key in seen:
+            raise PexError(
+                f"--top {name!r} was given more than once "
+                f"(already given as {seen[key]!r}): each --top must name a "
+                "different cell -- extracting one cell twice would write "
+                "two identical `.SUBCKT` blocks into the one combined "
+                "netlist and double-count its devices and nets",
+                code=MULTI_TOP_UNSUPPORTED_CODE,
+            )
+        seen[key] = name
+    return tops
+
+
+def _reject_multi_top_conflicts(
+    tops: Sequence[str], conflicts: Sequence[tuple[bool, str, str]]
+) -> None:
+    """Raise :class:`PexError` naming the first flag that two or more
+    ``--top`` values do not define (issue #5494).
+
+    ``conflicts`` is ``(present, flag-spelling, why)`` triples, checked in
+    order, *before* any extraction runs -- the same "refuse what this mode
+    does not define, by name, up front" shape
+    :func:`_reject_extract_only_conflicts` already uses for
+    ``--extract-only``.
+
+    This is deliberately a refusal rather than a design: every flag listed
+    at the call site is single-top by construction (it takes one cell name,
+    names one net of one extraction, or records one request a list-valued
+    top would not round-trip), and inventing a per-top syntax for each one
+    here would make this mode's contract several times larger than the
+    capability it adds. Support for any individual flag is additive later;
+    a refusal now is not a dead end, and it is what keeps a multi-top run's
+    envelope honest about what it measured.
+    """
+    if len(tops) < 2:
+        return
+    for present, flag, why in conflicts:
+        if present:
+            raise PexError(
+                f"{flag} cannot be combined with {len(tops)} --top values "
+                f"({', '.join(tops)}): {why}. Extract the tops in separate "
+                "single-`--top` runs if you need that flag, or drop it",
+                code=MULTI_TOP_UNSUPPORTED_CODE,
+            )
+
+
+def _pex_work_dir(artifacts_dir: str | None, layout_path: str) -> str:
+    """Where this run writes its own generated artifacts: ``--outdir`` when
+    given, else a ``.klt/pex`` directory next to ``<layout>``.
+
+    Factored out (issue #5494) only so the multi-top extraction loop -- which
+    stages one netlist per ``--top`` before the combined ``-o`` exists, and
+    therefore runs *before* the work directory would otherwise be computed --
+    resolves the identical directory the rest of the run uses. The expression
+    is unchanged.
+    """
+    if artifacts_dir:
+        return os.path.abspath(artifacts_dir)
+    return os.path.join(os.path.dirname(os.path.abspath(layout_path)), ".klt", "pex")
+
+
+def _per_top_netlist_path(staging_dir: str, index: int, top: str) -> str:
+    """Where the ``index``-th ``--top``'s own extraction is written under
+    ``staging_dir`` (issue #5494).
+
+    Named ``<NN>-<cell>.spice`` -- the ordinal prefix makes ``--top`` order
+    readable on disk and guarantees two cells whose names differ only in
+    characters this sanitises apart cannot collide, and the whole thing lives
+    in its own ``tops/`` subdirectory of the run's ``--outdir`` so it can
+    never collide with the combined ``-o`` netlist (which the caller may well
+    have pointed *at* ``--outdir``).
+    """
+    slug = re.sub(r"[^A-Za-z0-9._-]", "_", top) or "top"
+    return os.path.join(staging_dir, f"{index:02d}-{slug}.spice")
+
+
+#: A SPICE ``.GLOBAL`` card (issue #5494). ``klt extract --parasitics``
+#: emits one per extraction for the substrate identities it synthesized
+#: (issue #1503), so concatenating two extractions of the same PDK repeats
+#: the identical card -- see :func:`_concatenate_extractions`.
+_GLOBAL_CARD_RE = re.compile(r"^\s*\.global\b", re.IGNORECASE)
+#: A SPICE continuation line, which belongs to the card above it.
+_CONTINUATION_RE = re.compile(r"^\s*\+")
+
+
+def _concatenate_extractions(
+    per_top_paths: Sequence[str], tops: Sequence[str], combined_path: str
+) -> None:
+    """Write ``combined_path`` as the per-top extractions concatenated in
+    ``--top`` order (issue #5494), with repeated ``.GLOBAL`` cards commented
+    out rather than emitted twice.
+
+    Each ``klt extract`` run writes exactly one ``.SUBCKT <top> ... .ENDS``
+    block (`klt pex` never passes ``hierarchical_cells``), preceded by its
+    header comments and -- when ``--parasitics`` synthesized a substrate
+    identity -- a ``.GLOBAL`` card naming it (issue #1503). Concatenating
+    two such files therefore yields two disjoint subcircuit definitions,
+    which is exactly what the one re-pointed DUT ``.include`` needs, plus
+    *the same* ``.GLOBAL vsubs`` card twice.
+
+    **Why the de-duplication is here and not left to the simulator.** A
+    repeated declaration of an already-global net is at best redundant and at
+    worst a parse error depending on the engine, and this command's whole
+    contract is that the extracted leg actually runs. Keeping the first
+    occurrence of each distinct card and commenting out later identical ones
+    (rather than deleting them) leaves the combined file self-describing
+    about what was dropped and why, so a reader of a committed artifact does
+    not have to diff it against the per-top files to understand it. A later
+    card declaring a *different* net set is kept: it is new information, not
+    a repeat.
+
+    The combined file's first line is a `klt pex` title comment. SPICE reads
+    line 1 as the deck title whatever it contains, and `klt extract`'s own
+    output already opens with a comment line, so this changes nothing about
+    how the file parses while naming the mode that produced it.
+    """
+    chunks: list[str] = [
+        f"* combined extraction written by klt pex: "
+        f"{len(per_top_paths)} extractions concatenated in --top order "
+        f"({', '.join(tops)}) -- each top is extracted on its own, so no "
+        f"parasitic coupling between tops is modelled"
+    ]
+    seen_global: set[str] = set()
+    for path, top in zip(per_top_paths, tops, strict=True):
+        text = _read_text(path)
+        if text is None:
+            raise PexError(
+                f"--top {top}: extraction wrote no readable netlist at {path}"
+            )
+        chunks.append(f"\n* ---- klt pex --top {top} ----")
+        kept: list[str] = []
+        dropping = False
+        for line in text.splitlines():
+            if _GLOBAL_CARD_RE.match(line):
+                key = " ".join(line.split()).lower()
+                dropping = key in seen_global
+                seen_global.add(key)
+                if dropping:
+                    kept.append(
+                        "* klt pex: duplicate card already declared above: "
+                        f"{line.strip()}"
+                    )
+                    continue
+            elif dropping and _CONTINUATION_RE.match(line):
+                kept.append(f"* klt pex: {line.strip()}")
+                continue
+            else:
+                dropping = False
+            kept.append(line)
+        chunks.append("\n".join(kept))
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(combined_path)), exist_ok=True)
+        with open(combined_path, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(chunks).rstrip("\n") + "\n")
+    except OSError as exc:
+        raise PexError(
+            f"cannot write the combined extracted netlist {combined_path}: {exc}"
+        ) from exc
+
+
+#: ``parasitics.integrity`` counters that are sums across extractions
+#: (issue #5494). The remaining keys (``short_threshold_ohm``,
+#: ``cap_tolerance``, ``max_detail_items``) are thresholds the caller's own
+#: flags fix, identical for every top of one run, so the first top's are the
+#: run's.
+_INTEGRITY_SUM_KEYS = (
+    "nets_checked",
+    "nets_with_findings",
+    "open_nets",
+    "island_components",
+    "orphan_nodes",
+    "suspicious_resistors",
+    "short_candidates",
+    "capacitance_mismatches",
+)
+
+
+def _combine_parasitics(blocks: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """The ``parasitics`` block describing the *combined* netlist (issue
+    #5494): the first top's, with ``nets[]`` concatenated in ``--top`` order
+    and every ``integrity`` counter summed.
+
+    The echo fields (``model``, ``critical_nets``, ``distributed_rc``,
+    ``mom_rlc_override``, ``parasitic_variant``, the resistance-graph data)
+    are the caller's own flags, identical across tops, so the first top's are
+    the run's. The two *diagnostic* parts are not: an integrity finding on
+    the second top must not be invisible in a report whose ``netlist`` names
+    the file that top's devices are in. So the counters are summed and the
+    per-net entries concatenated -- the top-level block then reads as badly
+    as the worst top, never cleaner.
+
+    Two tops can each own a net of the same name (``vsubs``, a supply), so
+    the concatenated ``nets[]`` can carry two same-named entries. They are
+    carried verbatim and in ``--top`` order rather than merged: ``tops[]``
+    is where a reader attributes a net to the extraction it came from.
+    """
+    combined = dict(blocks[0])
+    nets: list[Any] = []
+    for block in blocks:
+        nets.extend(block.get("nets") or [])
+    if any("nets" in block for block in blocks):
+        combined["nets"] = nets
+    summaries = [
+        block["integrity"]
+        for block in blocks
+        if isinstance(block.get("integrity"), dict)
+    ]
+    if summaries:
+        combined["integrity"] = {
+            **summaries[0],
+            **{
+                key: sum(summary.get(key) or 0 for summary in summaries)
+                for key in _INTEGRITY_SUM_KEYS
+                if any(key in summary for summary in summaries)
+            },
+        }
+    return combined
+
+
+def _combine_extract_reports(
+    reports: Sequence[Mapping[str, Any]],
+    *,
+    netlist_path: str,
+    netlist_sha256: str | None,
+) -> dict[str, Any]:
+    """One synthetic ``run_extract`` report describing the *combined*
+    extracted netlist a multi-top run simulated (issue #5494).
+
+    Built so every downstream reader in this module -- :func:`_body_bias_
+    report`, the ``extraction`` block, ``provenance`` -- keeps reading one
+    report, exactly as it does for a single-top run, while the values it
+    reads describe the file the extracted leg actually ran.
+
+    The rule the issue settles, and the one this function implements: the
+    combined report must **never read cleaner than the worst top**.
+
+    - ``netlist_path``/``netlist_sha256`` identify the combined file.
+    - ``device_count``/``net_count`` are sums -- the combined netlist really
+      does contain all of them.
+    - ``unbiased_pmos_body_nets`` is the concatenation in ``--top`` order, so
+      :func:`_body_bias_report` reports ``unbiased`` when *any* top is and
+      carries every top's entries. A reader of ``klt signoff``'s item-7
+      citation sees the disclosure, which is the whole point of the field.
+    - ``parasitics`` is :func:`_combine_parasitics`.
+    - Everything else -- the flag echoes (``label_layers``,
+      ``device_models``, ``rename_declared_pins``, ``pin_ties``, ``pdk``) and
+      ``provenance`` -- is the first top's. Those are this run's own inputs,
+      identical for every top because every top is extracted with the same
+      flags, the same deck and the same PDK, from the same layout stream.
+    - ``top`` stays the first top's name and is deliberately *unused* in
+      multi-top mode: every diagnostic that keyed on it is run once per top
+      instead (see :func:`_per_top_preflight`).
+
+    Per-top detail is never lost -- it is reported under ``tops[]``, built
+    from these same per-top reports by :func:`_tops_block`.
+    """
+    combined = dict(reports[0])
+    combined["netlist_path"] = netlist_path
+    combined["netlist_sha256"] = netlist_sha256
+    combined["device_count"] = sum(report["device_count"] for report in reports)
+    combined["net_count"] = sum(report["net_count"] for report in reports)
+    unbiased: list[Any] = []
+    for report in reports:
+        unbiased.extend(report.get("unbiased_pmos_body_nets") or [])
+    if any("unbiased_pmos_body_nets" in report for report in reports):
+        combined["unbiased_pmos_body_nets"] = unbiased
+    combined["parasitics"] = _combine_parasitics(
+        [report.get("parasitics") or {} for report in reports]
+    )
+    return combined
+
+
+def _require_subckt_per_top(reference_netlist: str, tops: Sequence[str]) -> None:
+    """Every ``--top`` must be declared as a ``.SUBCKT`` by the schematic DUT
+    (issue #5494) -- raised before any simulation, naming the missing top.
+
+    Multi-top mode keeps the exactly-one-``.include`` rule (#1030, #2871):
+    the testbench's single DUT file is swapped for the one combined extracted
+    netlist, and the testbench's own unmodified ``X...`` lines instantiate
+    each cell by name on both legs. So the schematic DUT must define every
+    cell the combined extraction defines, or the schematic leg instantiates a
+    subcircuit nothing declares while the extracted leg runs fine -- a
+    comparison between a working deck and a broken one, reported as a
+    ``delta[]`` row.
+
+    This is a hard error, not one of the three reported mismatch blocks,
+    because unlike them it is a statement about the *caller's own arguments*
+    (a ``--top`` the schematic does not model) rather than about a
+    schematic/layout divergence the report exists to describe. It also
+    necessarily precedes :func:`_flat_dut_mismatch`: a schematic DUT with no
+    ``.SUBCKT`` at all fails this check on the first top, which is a strictly
+    more actionable message than the flat-DUT diagnostic's for a multi-top
+    run (it names which cell is missing, not merely that none are present).
+    """
+    declared = _subckt_interfaces(_read_text(reference_netlist) or "")
+    missing = [top for top in tops if top.lower() not in declared]
+    if not missing:
+        return
+    present = ", ".join(name for name, _pins in declared.values()) or "(none)"
+    raise PexError(
+        f"the schematic DUT ({reference_netlist}) declares no `.SUBCKT` for "
+        f"{'these --top cells' if len(missing) > 1 else 'the --top cell'} "
+        f"{', '.join(missing)} -- it declares {present}. A multi-top run "
+        "swaps the testbench's single DUT `.include` for one combined "
+        "extracted netlist defining a `.SUBCKT` per --top, and re-runs the "
+        "testbench's own instantiation lines unmodified against both legs, "
+        "so the schematic DUT must define every --top cell too",
+        code=MULTI_TOP_UNSUPPORTED_CODE,
+    )
+
+
+def _per_top_preflight(
+    tops: Sequence[str],
+    *,
+    schematic_netlist: str,
+    reference_netlist: str,
+    extracted_netlist: str,
+) -> list[dict[str, Any]]:
+    """The three static pre-flight diagnostics, once per ``--top`` (issue
+    #5494), in ``--top`` order.
+
+    Each entry is ``{top, flat_dut_mismatch, pin_count_mismatch,
+    pin_order_mismatch}`` -- the same three functions a single-top run calls
+    on ``extract_report["top"]``, asked instead about each named subcircuit
+    inside the one combined netlist. They already take the subcircuit as an
+    argument (``subcircuit``/``top_cell``) and compare only that name's
+    interface, so a combined file holding several ``.SUBCKT`` blocks needs no
+    change in them: each call is scoped to one top and cannot false-positive
+    on another top's header.
+
+    The same mutual exclusion holds per top as for a single-top run: a top
+    whose counts differ is not also asked about pin *order*.
+    ``flat_dut_mismatch`` cannot fire at all here -- it tests "the schematic
+    declares no ``.SUBCKT`` whatsoever", which :func:`_require_subckt_per_top`
+    has already rejected with a better message -- and is still computed, per
+    top, so ``tops[]`` carries the field in the same shape the top level
+    does rather than a special-cased ``null``.
+    """
+    entries: list[dict[str, Any]] = []
+    for top in tops:
+        flat = _flat_dut_mismatch(
+            reference_netlist=schematic_netlist,
+            extracted_netlist=extracted_netlist,
+            top_cell=top,
+        )
+        count = (
+            None
+            if flat is not None
+            else _pin_count_mismatch(
+                reference_netlist=schematic_netlist,
+                extracted_netlist=extracted_netlist,
+                subcircuit=top,
+            )
+        )
+        order = _pin_order_preflight(
+            False,
+            (flat, count),
+            reference_netlist=reference_netlist,
+            extracted_netlist=extracted_netlist,
+            top_cell=top,
+        )
+        entries.append(
+            {
+                "top": top,
+                "flat_dut_mismatch": flat,
+                "pin_count_mismatch": count,
+                "pin_order_mismatch": order,
+            }
+        )
+    return entries
+
+
+def _first_firing(entries: Sequence[Mapping[str, Any]], field: str) -> Any:
+    """The first ``--top``'s non-``None`` ``field`` diagnostic, else ``None``
+    (issue #5494) -- how a multi-top run's *singular* ``pin_count_mismatch``
+    / ``flat_dut_mismatch`` / ``pin_order_mismatch`` field is chosen.
+
+    Reporting the first firing top (rather than ``None``, or a list) keeps
+    the field's existing type and meaning: non-``None`` still means "the
+    extracted leg was not runnable and was skipped", and each block already
+    identifies its own subcircuit, so the top it belongs to is readable from
+    the block itself. Every top's own verdict is in ``tops[]``.
+    """
+    for entry in entries:
+        if entry.get(field) is not None:
+            return entry[field]
+    return None
+
+
 def _resolve_reference_netlist_path(
     extract_only: bool,
     measured_reference_netlist: str | None,
@@ -2794,6 +3229,162 @@ def _require_single_dut(dut_paths: Sequence[str]) -> None:
         )
 
 
+def _extraction_block(
+    extract_report: Mapping[str, Any],
+    *,
+    deck_name: str,
+    netlist_sha256: str | None,
+    resistance_graph: bool,
+    resistance_graph_r_cut_ohm: float | None,
+) -> dict[str, Any]:
+    """The report's ``extraction`` block for one ``run_extract`` report.
+
+    Factored out of :func:`run_pex`'s response literal (issue #5494) with no
+    change to a single field, so a multi-top run can build the same block
+    twice: once from the combined report (the top-level ``extraction``) and
+    once per ``--top`` (each ``tops[]`` entry's own ``extraction``), which is
+    what makes a ``tops[]`` sub-block readable by anything that can already
+    read the top-level one.
+
+    ``netlist_sha256`` is passed in rather than read from ``extract_report``
+    because a ``--tie-net`` rewrite re-hashes the file after extraction (see
+    :func:`run_pex`), so the extract-time hash no longer identifies the file
+    the report points at.
+    """
+    parasitics = extract_report.get("parasitics") or {}
+    return {
+        "deck": deck_name,
+        "netlist_adaptation": netlist_adaptation_for_deck(deck_name),
+        "device_count": extract_report["device_count"],
+        "net_count": extract_report["net_count"],
+        "netlist_sha256": netlist_sha256,
+        "model": parasitics.get("model"),
+        # Additive field (issue #976): echoes `--critical-net` back --
+        # `[]` when the flag was never given, byte-identical to before
+        # this feature existed.
+        "critical_nets": parasitics.get("critical_nets") or [],
+        # Additive field (issue #977): echoes `--distributed-rc` back --
+        # `False` when the flag was never given, byte-identical to
+        # before this feature existed.
+        "distributed_rc": bool(parasitics.get("distributed_rc")),
+        # Additive field (issue #988, Epic #709 Phase 3a): `None`
+        # unless `--mom-rlc-net` was given, in which case it is `klt
+        # extract`'s own substitution report (see
+        # `run_extract`'s `mom_rlc_net` docstring paragraph) --
+        # byte-identical to before this feature existed otherwise.
+        "mom_rlc_override": parasitics.get("mom_rlc_override"),
+        # Additive field (issue #2686): `klt extract`'s own
+        # `label_layers` echo for this run's extraction -- the applied
+        # `--label-layer` mapping as `{role: [layer, datatype] | null}`,
+        # or `None` when the flag was never given.
+        "label_layers": extract_report.get("label_layers"),
+        # Additive field (issue #4234): `klt extract`'s `device_models`
+        # echo -- the applied `--device-model` mapping, or `None`.
+        "device_models": extract_report.get("device_models"),
+        # Additive field (issue #2854): echoes the effective
+        # `--rename-declared-pins` value back -- `False` when the flag
+        # was never given, byte-identical to before this feature
+        # existed. The renames themselves are `klt extract`'s own
+        # `pin_renames` report, visible here through the extraction's
+        # written netlist (`.SUBCKT` header) rather than re-embedded.
+        "rename_declared_pins": bool(extract_report.get("rename_declared_pins")),
+        "tie_declared_pins": "pin_ties" in extract_report,
+        # Additive field (issue #4383): the PDK install this extraction
+        # actually read -- `klt extract`'s own `pdk` block (`variant`,
+        # `root` as `{path, scope}`, `version`), `None` without `--pdk`.
+        "pdk": extract_report.get("pdk"),
+        # Additive field (issue #2764): the extraction's own
+        # per-net parasitic RC network integrity diagnostics --
+        # threshold/tolerances, aggregate counts, and one entry per net
+        # (verbatim per-net payloads, `parasitics.nets[]` order). See
+        # `_parasitic_integrity_report`.
+        "parasitic_integrity": _parasitic_integrity_report(parasitics),
+        # Additive field (issue #3056): echoes `--parasitic-variant`
+        # back so a variant run is attributable -- present only when
+        # the flag was given, byte-identical to before otherwise.
+        **(
+            {"parasitic_variant": parasitics["parasitic_variant"]}
+            if "parasitic_variant" in parasitics
+            else {}
+        ),
+        # Additive field (issue #4037): present only with
+        # `--resistance-graph`.
+        **(
+            {
+                "resistance_graph": _resistance_graph_echo(
+                    parasitics, resistance_graph_r_cut_ohm
+                )
+            }
+            if resistance_graph
+            else {}
+        ),
+    }
+
+
+def _tops_block(
+    per_top_reports: Sequence[Mapping[str, Any]],
+    per_top_preflight: Sequence[Mapping[str, Any]],
+    *,
+    multi_top: bool,
+    deck_name: str,
+    resistance_graph: bool,
+    resistance_graph_r_cut_ohm: float | None,
+    repo_root: str | None,
+) -> list[dict[str, Any]] | None:
+    """The additive ``tops`` field (issue #5494).
+
+    ``None`` on a zero- or one-``--top`` run -- the whole envelope is then
+    exactly what it was before this mode existed, with this one extra key
+    whose ``null`` says "single-top run, every singular field below describes
+    the one extraction". That is what keeps the change additive under
+    ``docs/json-contract.md``: no existing field changes type or meaning, and
+    a reader that does not know about ``tops`` is unaffected.
+
+    On a multi-top run, one entry per ``--top`` **in ``--top`` order**, each
+    carrying that top's own ``top``, ``netlist`` (the per-top staged
+    extraction, not the combined file), ``extraction``, ``body_bias``, the
+    three pre-flight mismatch diagnostics and ``provenance`` -- each in the
+    same shape as the top-level field of that name, built by the same
+    helper, so anything that can read the top level can read one of these.
+
+    This is where per-top detail lives. The top-level fields describe the
+    *combined* netlist the extracted leg actually simulated and are reduced
+    so they never read cleaner than the worst top (see
+    :func:`_combine_extract_reports` and :func:`_first_firing`); when a
+    reader needs to know *which* top contributed a count, a floating body or
+    a mismatch, this is the field that answers.
+    """
+    if not multi_top:
+        return None
+    entries: list[dict[str, Any]] = []
+    for report, preflight in zip(per_top_reports, per_top_preflight, strict=True):
+        netlist_path = os.path.abspath(report["netlist_path"])
+        entries.append(
+            {
+                "top": preflight["top"],
+                "netlist": env_provenance.repo_relative_path(
+                    netlist_path or None, repo_root=repo_root
+                ),
+                "extraction": _extraction_block(
+                    report,
+                    deck_name=deck_name,
+                    netlist_sha256=report["netlist_sha256"],
+                    resistance_graph=resistance_graph,
+                    resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
+                ),
+                # `--tie-net` is refused with two or more tops, so no tie
+                # can apply to a per-top block: `_body_bias_report`'s second
+                # argument is always `None` here.
+                "body_bias": _body_bias_report(report),
+                "pin_count_mismatch": preflight["pin_count_mismatch"],
+                "flat_dut_mismatch": preflight["flat_dut_mismatch"],
+                "pin_order_mismatch": preflight["pin_order_mismatch"],
+                "provenance": report["provenance"],
+            }
+        )
+    return entries
+
+
 @output_lock.owns_run
 def run_pex(
     layout_path: str,
@@ -2801,7 +3392,7 @@ def run_pex(
     deck_name: str,
     *,
     output: str | None = None,
-    top: str | None = None,
+    top: str | Sequence[str] | None = None,
     pdk_variant: str | None = None,
     pdk_root: str | None = None,
     artifacts_dir: str | None = None,
@@ -2846,6 +3437,38 @@ def run_pex(
     testbench in ``testbench_paths`` against both the schematic DUT it
     already references and the newly-extracted one, producing a per-corner,
     per-spec-row delta report.
+
+    **Multi-top mode (issue #5494).** ``top`` is either one cell name (the
+    original contract, unchanged) or a *sequence* of them (``klt pex --top A
+    --top B``). With two or more names this command extracts each top on its
+    own -- one :func:`~klayout_tools.extract.run_extract` call per top, with
+    the caller's flags unchanged, so each top is extracted exactly as a
+    single-top run with the same flags would extract it -- and concatenates
+    the results into the one ``output`` netlist, which therefore defines a
+    ``.SUBCKT`` per top. The exactly-one-``.include`` rule (#1030, #2871) is
+    untouched: the testbench's single schematic DUT file must declare a
+    ``.SUBCKT`` for every top (enforced before any simulation, see
+    :func:`_require_subckt_per_top`), and the swap re-points that one
+    ``.include`` line at the one combined file, so the testbench's own
+    unmodified ``X...`` lines instantiate each cell by name on both legs.
+    That is what makes a **both-ends-extracted** leg possible for a link
+    bench whose driver and receiver are separate drawn tops -- previously
+    only two one-ended runs were, and their deltas do not compose.
+
+    Each top is extracted *independently*: no parasitic coupling between
+    tops is modelled (that is out of scope -- exactly as two single-top
+    runs would behave). The three static pre-flight diagnostics run once per
+    top against the combined netlist. The report gains one additive field,
+    ``tops`` (``None`` on a zero/one-top run; see :func:`_tops_block`), and
+    every singular field keeps describing the combined netlist the extracted
+    leg actually simulated, reduced so it never reads cleaner than the worst
+    top (see :func:`_combine_extract_reports` and :func:`_first_firing`).
+    The flags this first version does not define are refused by name, before
+    any extraction (see :func:`_reject_multi_top_conflicts`); a repeated top
+    name is likewise a usage error. ``declared_pins`` (``--pins``) applies to
+    every top as the one membership set it already is -- the union of the
+    tops' pin names is the natural value, and each top's own non-declared
+    promoted nets are demoted as usual.
 
     ``deck_name``/``top``/``pdk_variant``/``pdk_root``/``output`` are passed
     through to :func:`~klayout_tools.extract.run_extract` (``parasitics``
@@ -3112,6 +3735,83 @@ def run_pex(
     )
     command_mode = command is not None
     _reject_resistance_graph_with_distributed_rc(resistance_graph, distributed_rc)
+    # Issue #5494: `--top` is repeatable. Two or more values put this run in
+    # multi-top mode: one `run_extract` call per top, their results
+    # concatenated into the one `-o` netlist, every pre-flight diagnostic run
+    # once per top, and an additive `tops[]` block carrying each top's own
+    # detail. Zero or one value is the single-top path, unchanged in every
+    # observable way (`tops` is then `null`).
+    tops = _normalize_tops(top)
+    multi_top = len(tops) > 1
+    # Refused before anything is extracted, by name -- see
+    # `_reject_multi_top_conflicts` for why these are refusals rather than
+    # per-top designs, and docs/cli/pex.md for the list as documented.
+    _reject_multi_top_conflicts(
+        tops,
+        (
+            (
+                flatten_schematic,
+                "--flatten-schematic",
+                "it flattens the schematic DUT against one named top cell's "
+                "extracted interface",
+            ),
+            (
+                device_only_leg,
+                "--device-only-leg",
+                "the parasitic-free third leg extracts one top cell",
+            ),
+            (
+                bool(tie_nets),
+                "--tie-net",
+                "its net names are valid for one extraction only, and a "
+                "multi-top run has one extraction per top",
+            ),
+            (
+                tie_declared_pins,
+                "--tie-declared-pins",
+                "its interaction with one shared --pins set across several "
+                "tops' differing interfaces is not defined",
+            ),
+            (
+                mom_rlc_net is not None,
+                "--mom-rlc-net",
+                "it substitutes an R/L/C for one net of one extraction",
+            ),
+            (
+                measure_command is not None,
+                "--measure-command",
+                "a caller-supplied command measures one netlist per side, "
+                "and this mode's reference side is the schematic DUT's own "
+                "per-top `.SUBCKT` set",
+            ),
+            (
+                extract_only,
+                "--extract-only",
+                "it reports an extraction without a schematic side, so the "
+                "per-top `.SUBCKT` pre-flight this mode is built on has "
+                "nothing to check against",
+            ),
+            (
+                submit_only,
+                "--submit-only",
+                "the submit manifest records a single-valued top and would "
+                "not round-trip a list on --attach",
+            ),
+            (
+                attach is not None,
+                "--attach",
+                "the submit manifest records a single-valued top, so an "
+                "attach cannot verify it against a list",
+            ),
+            (
+                bool(resume),
+                "--resume",
+                "a sharded leg's resume fingerprint hashes the testbench "
+                "body, not the extracted netlist the DUT `.include` names, "
+                "so it cannot tell one --top list's shards from another's",
+            ),
+        ),
+    )
 
     # Issue #1261: every input-path field this run's own JSON response
     # echoes (`layout`/`netlist`/`reference_netlist`, each `testbenches[]`
@@ -3123,48 +3823,108 @@ def run_pex(
         os.path.dirname(os.path.abspath(layout_path))
     )
 
-    try:
-        extract_report = run_extract(
-            layout_path,
-            deck_name,
-            output=output,
-            top=top,
-            pdk_variant=pdk_variant,
-            pdk_root=pdk_root,
-            parasitics=True,
-            # Issue #1558: `--deck-option`/`--pins` passthrough. `None` for
-            # both whenever the flags were never given, which is the exact
-            # `run_extract` call this module made before they existed.
-            deck_options=deck_options,
-            declared_pins=declared_pins,
-            # Issue #2854: `--rename-declared-pins` passthrough. `False`
-            # whenever the flag was never given, which is the exact
-            # `run_extract` call this module made before it existed.
-            rename_declared_pins=rename_declared_pins,
-            tie_declared_pins=tie_declared_pins,
-            # Issue #2686: `--label-layer` passthrough. `None` when the flag
-            # was never given -- the exact `run_extract` call made before it.
-            label_layers=label_layers,
-            device_models=device_models,
-            critical_nets=critical_nets,
-            critical_net_patterns=critical_net_patterns,
-            critical_net_all=critical_net_all,
-            critical_net_excludes=critical_net_excludes,
-            distributed_rc=distributed_rc,
-            # Issue #4037: `False`/`None` whenever the flags were never given,
-            # which is the exact `run_extract` call made before they existed.
-            resistance_graph=resistance_graph,
-            resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
-            emit_selected_resistance=resistance_graph,
-            parasitic_variants=parasitic_variants,
-            substrate_tie_ohms=substrate_tie_ohms,
-            mom_rlc_net=mom_rlc_net,
-            mom_rlc_resistance_ohm=mom_rlc_resistance_ohm,
-            mom_rlc_capacitance_ff=mom_rlc_capacitance_ff,
-            mom_rlc_inductance_nh=mom_rlc_inductance_nh,
+    # Issue #5494: every `run_extract` keyword except `output`/`top` -- bound
+    # once here so the single-top call and the per-top multi-top loop below
+    # cannot drift apart in what they pass through. The values, and the
+    # reasons each one's "flag never given" default reproduces the exact call
+    # this module made before that flag existed, are unchanged.
+    extract_kwargs: dict[str, Any] = dict(
+        pdk_variant=pdk_variant,
+        pdk_root=pdk_root,
+        parasitics=True,
+        # Issue #1558: `--deck-option`/`--pins` passthrough. `None` for
+        # both whenever the flags were never given, which is the exact
+        # `run_extract` call this module made before they existed.
+        deck_options=deck_options,
+        declared_pins=declared_pins,
+        # Issue #2854: `--rename-declared-pins` passthrough. `False`
+        # whenever the flag was never given, which is the exact
+        # `run_extract` call this module made before it existed.
+        rename_declared_pins=rename_declared_pins,
+        tie_declared_pins=tie_declared_pins,
+        # Issue #2686: `--label-layer` passthrough. `None` when the flag
+        # was never given -- the exact `run_extract` call made before it.
+        label_layers=label_layers,
+        device_models=device_models,
+        critical_nets=critical_nets,
+        critical_net_patterns=critical_net_patterns,
+        critical_net_all=critical_net_all,
+        critical_net_excludes=critical_net_excludes,
+        distributed_rc=distributed_rc,
+        # Issue #4037: `False`/`None` whenever the flags were never given,
+        # which is the exact `run_extract` call made before they existed.
+        resistance_graph=resistance_graph,
+        resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
+        emit_selected_resistance=resistance_graph,
+        parasitic_variants=parasitic_variants,
+        substrate_tie_ohms=substrate_tie_ohms,
+        mom_rlc_net=mom_rlc_net,
+        mom_rlc_resistance_ohm=mom_rlc_resistance_ohm,
+        mom_rlc_capacitance_ff=mom_rlc_capacitance_ff,
+        mom_rlc_inductance_nh=mom_rlc_inductance_nh,
+    )
+
+    # Issue #5494: one `run_extract` call per `--top`, in `--top` order, each
+    # with the caller's flags unchanged -- so each top is extracted exactly
+    # as a single-top run with the same flags would extract it -- staged into
+    # its own file under `<outdir>/tops/`, and only once every extraction has
+    # succeeded are they concatenated into the one `-o` netlist. A failure
+    # therefore names the top that failed and leaves `-o` untouched (never
+    # half-written), which is also why the combined file is not streamed as
+    # the loop goes.
+    #
+    # The single-top path is deliberately the *same* call as before: one
+    # `run_extract` with the caller's own `output`/`top`, no staging
+    # directory created, `-o` written by `klt extract` itself.
+    if multi_top:
+        combined_netlist_path = os.path.abspath(
+            output
+            if output is not None
+            else _default_extracted_netlist_path(layout_path)
         )
-    except ExtractError as exc:
-        raise PexError(f"extraction failed: {exc}") from exc
+        staging_dir = os.path.join(_pex_work_dir(artifacts_dir, layout_path), "tops")
+        try:
+            os.makedirs(staging_dir, exist_ok=True)
+        except OSError as exc:
+            raise PexError(
+                f"cannot create the per-top extraction directory {staging_dir}: {exc}"
+            ) from exc
+        per_top_reports: list[dict[str, Any]] = []
+        for index, one_top in enumerate(tops):
+            try:
+                per_top_reports.append(
+                    run_extract(
+                        layout_path,
+                        deck_name,
+                        output=_per_top_netlist_path(staging_dir, index, one_top),
+                        top=one_top,
+                        **extract_kwargs,
+                    )
+                )
+            except ExtractError as exc:
+                raise PexError(f"extraction failed for --top {one_top}: {exc}") from exc
+        _concatenate_extractions(
+            [report["netlist_path"] for report in per_top_reports],
+            tops,
+            combined_netlist_path,
+        )
+        extract_report = _combine_extract_reports(
+            per_top_reports,
+            netlist_path=combined_netlist_path,
+            netlist_sha256=sha256_file(combined_netlist_path),
+        )
+    else:
+        try:
+            extract_report = run_extract(
+                layout_path,
+                deck_name,
+                output=output,
+                top=tops[0] if tops else None,
+                **extract_kwargs,
+            )
+        except ExtractError as exc:
+            raise PexError(f"extraction failed: {exc}") from exc
+        per_top_reports = [extract_report]
 
     # Issue #1525: `run_extract`'s own `netlist_path` field echoes `-o`/
     # `--output` back exactly as the caller spelled it (relative stays
@@ -3193,7 +3953,9 @@ def run_pex(
         extracted_netlist_path,
         layout_path,
         deck_name,
-        top=top,
+        # Issue #5494: `--device-only-leg` is refused with two or more
+        # `--top` values, so there is exactly one top to extract here.
+        top=tops[0] if tops else None,
         pdk_variant=pdk_variant,
         pdk_root=pdk_root,
         deck_options=deck_options,
@@ -3218,11 +3980,7 @@ def run_pex(
         else extract_report["netlist_sha256"]
     )
 
-    work_dir = (
-        os.path.abspath(artifacts_dir)
-        if artifacts_dir
-        else os.path.join(os.path.dirname(os.path.abspath(layout_path)), ".klt", "pex")
-    )
+    work_dir = _pex_work_dir(artifacts_dir, layout_path)
     os.makedirs(work_dir, exist_ok=True)
     leg_extracted, leg_device_only = adapt_leg_netlists(
         deck_name, ext_path, dev_path, work_dir, skip=extract_only or command_mode
@@ -3331,6 +4089,16 @@ def run_pex(
     # (`None` for `--extract-only`, which has no reference netlist).
     reference_netlist_sha256 = content_hash(reference_netlist_path)
 
+    # Issue #5494: in multi-top mode the one schematic DUT must declare a
+    # `.SUBCKT` for every `--top`, checked here -- after the DUT is resolved,
+    # before any `klt sim` call -- so a `--top` the schematic does not model
+    # is a named error rather than a `delta[]` row comparing a broken
+    # schematic deck against a working extracted one. `--extract-only` and
+    # `--measure-command` (which have no `.include`d DUT) are both refused
+    # with two or more tops, so `reference_netlist_path` is a real DUT here.
+    if multi_top:
+        _require_subckt_per_top(reference_netlist_path, tops)
+
     # Issue #2889: `--flatten-schematic` -- the netlist the schematic leg
     # actually runs (and every diagnostic below compares) is a flattened
     # copy of the DUT; `reference_netlist` keeps naming the caller's file.
@@ -3368,8 +4136,30 @@ def run_pex(
     # handed, so neither the premise nor the consequence holds -- reporting
     # it anyway would be a false alarm, and (worse) would skip the
     # extracted-side measurement the harness is perfectly able to take.
+    #
+    # Issue #5494: in multi-top mode the same three static diagnostics run
+    # once per `--top` against the one combined netlist (`_per_top_preflight`
+    # -- they already take the subcircuit as an argument, so each call is
+    # scoped to one top's header and cannot see another's). Each top's own
+    # verdict is reported under `tops[]`; the singular field here is the
+    # *first firing* top's block, which keeps this field's existing type and
+    # meaning -- non-`None` still means "the extracted leg was skipped" --
+    # and can never read cleaner than the worst top.
+    per_top_preflight = (
+        _per_top_preflight(
+            tops,
+            schematic_netlist=schematic_netlist_path,
+            reference_netlist=reference_netlist_path,
+            extracted_netlist=extracted_netlist_path,
+        )
+        if multi_top
+        else []
+    )
+
     flat_dut_mismatch = (
-        None
+        _first_firing(per_top_preflight, "flat_dut_mismatch")
+        if multi_top
+        else None
         if command_mode or extract_only
         else _flat_dut_mismatch(
             reference_netlist=schematic_netlist_path,
@@ -3441,7 +4231,9 @@ def run_pex(
     backend_failure: dict[str, Any] | None = None
     # Issue #5282: legs that lost shards (partial result, resumable).
     unfinished: list[dict[str, Any]] = []
-    if not command_mode and not extract_only and flat_dut_mismatch is None:
+    if multi_top:
+        pin_count_mismatch = _first_firing(per_top_preflight, "pin_count_mismatch")
+    elif not command_mode and not extract_only and flat_dut_mismatch is None:
         pin_count_mismatch = _pin_count_mismatch(
             reference_netlist=schematic_netlist_path,
             extracted_netlist=extracted_netlist_path,
@@ -3453,12 +4245,16 @@ def run_pex(
     # and the schematic must declare the subcircuit), and `None` in
     # `--measure-command` mode for the same reason. It skips the extracted
     # leg and yields `status: "error"` / exit 4, like its siblings.
-    pin_order_mismatch = _pin_order_preflight(
-        command_mode,
-        (flat_dut_mismatch, pin_count_mismatch),
-        reference_netlist=reference_netlist_path,
-        extracted_netlist=extracted_netlist_path,
-        top_cell=extract_report["top"],
+    pin_order_mismatch = (
+        _first_firing(per_top_preflight, "pin_order_mismatch")
+        if multi_top
+        else _pin_order_preflight(
+            command_mode,
+            (flat_dut_mismatch, pin_count_mismatch),
+            reference_netlist=reference_netlist_path,
+            extracted_netlist=extracted_netlist_path,
+            top_cell=extract_report["top"],
+        )
     )
 
     # Issue #4696: a static pre-flight diagnostic skips the extracted leg, so
@@ -3714,7 +4510,6 @@ def run_pex(
     # failures and errors retain precedence over coverage qualification.
     status = _status_from_coverage(coverage, failed=bool(failed), errored=bool(errored))
 
-    parasitics = extract_report.get("parasitics") or {}
     result: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "status": status,
@@ -3730,73 +4525,29 @@ def run_pex(
         # Additive field (issue #2875): content identity of the schematic
         # DUT / `--reference-netlist` the schematic leg used.
         "reference_netlist_sha256": reference_netlist_sha256,
-        "extraction": {
-            "deck": deck_name,
-            "netlist_adaptation": netlist_adaptation_for_deck(deck_name),
-            "device_count": extract_report["device_count"],
-            "net_count": extract_report["net_count"],
-            "netlist_sha256": extracted_netlist_sha256,
-            "model": parasitics.get("model"),
-            # Additive field (issue #976): echoes `--critical-net` back --
-            # `[]` when the flag was never given, byte-identical to before
-            # this feature existed.
-            "critical_nets": parasitics.get("critical_nets") or [],
-            # Additive field (issue #977): echoes `--distributed-rc` back --
-            # `False` when the flag was never given, byte-identical to
-            # before this feature existed.
-            "distributed_rc": bool(parasitics.get("distributed_rc")),
-            # Additive field (issue #988, Epic #709 Phase 3a): `None`
-            # unless `--mom-rlc-net` was given, in which case it is `klt
-            # extract`'s own substitution report (see
-            # `run_extract`'s `mom_rlc_net` docstring paragraph) --
-            # byte-identical to before this feature existed otherwise.
-            "mom_rlc_override": parasitics.get("mom_rlc_override"),
-            # Additive field (issue #2686): `klt extract`'s own
-            # `label_layers` echo for this run's extraction -- the applied
-            # `--label-layer` mapping as `{role: [layer, datatype] | null}`,
-            # or `None` when the flag was never given.
-            "label_layers": extract_report.get("label_layers"),
-            # Additive field (issue #4234): `klt extract`'s `device_models`
-            # echo -- the applied `--device-model` mapping, or `None`.
-            "device_models": extract_report.get("device_models"),
-            # Additive field (issue #2854): echoes the effective
-            # `--rename-declared-pins` value back -- `False` when the flag
-            # was never given, byte-identical to before this feature
-            # existed. The renames themselves are `klt extract`'s own
-            # `pin_renames` report, visible here through the extraction's
-            # written netlist (`.SUBCKT` header) rather than re-embedded.
-            "rename_declared_pins": bool(extract_report.get("rename_declared_pins")),
-            "tie_declared_pins": "pin_ties" in extract_report,
-            # Additive field (issue #4383): the PDK install this extraction
-            # actually read -- `klt extract`'s own `pdk` block (`variant`,
-            # `root` as `{path, scope}`, `version`), `None` without `--pdk`.
-            "pdk": extract_report.get("pdk"),
-            # Additive field (issue #2764): the extraction's own
-            # per-net parasitic RC network integrity diagnostics --
-            # threshold/tolerances, aggregate counts, and one entry per net
-            # (verbatim per-net payloads, `parasitics.nets[]` order). See
-            # `_parasitic_integrity_report`.
-            "parasitic_integrity": _parasitic_integrity_report(parasitics),
-            # Additive field (issue #3056): echoes `--parasitic-variant`
-            # back so a variant run is attributable -- present only when
-            # the flag was given, byte-identical to before otherwise.
-            **(
-                {"parasitic_variant": parasitics["parasitic_variant"]}
-                if "parasitic_variant" in parasitics
-                else {}
-            ),
-            # Additive field (issue #4037): present only with
-            # `--resistance-graph`.
-            **(
-                {
-                    "resistance_graph": _resistance_graph_echo(
-                        parasitics, resistance_graph_r_cut_ohm
-                    )
-                }
-                if resistance_graph
-                else {}
-            ),
-        },
+        "extraction": _extraction_block(
+            extract_report,
+            deck_name=deck_name,
+            netlist_sha256=extracted_netlist_sha256,
+            resistance_graph=resistance_graph,
+            resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
+        ),
+        # Additive field (issue #5494): `None` on a zero/one-`--top` run (the
+        # single-top path -- every other field is unchanged there). On a
+        # multi-top run, one block per `--top` in `--top` order, each in the
+        # shape of the top-level fields it mirrors. The singular fields above
+        # and below describe the *combined* netlist the extracted leg
+        # simulated and are reduced so they never read cleaner than the worst
+        # top; this is where per-top attribution lives. See `_tops_block`.
+        "tops": _tops_block(
+            per_top_reports,
+            per_top_preflight,
+            multi_top=multi_top,
+            deck_name=deck_name,
+            resistance_graph=resistance_graph,
+            resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
+            repo_root=repo_root,
+        ),
         # Additive field (issue #1983): whether the extracted netlist this
         # run re-simulated has a DC bias path for every device body, reduced
         # from the extraction's own `unbiased_pmos_body_nets[]` (issue #555).

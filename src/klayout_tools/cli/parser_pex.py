@@ -228,10 +228,19 @@ def add_pex_parser(
     )
     pex_parser.add_argument(
         "--top",
+        action="append",
         default=None,
+        metavar="CELL",
         help=(
             "top cell to extract when the stream has more than one "
-            "(required in that case; optional otherwise)"
+            "(required in that case; optional otherwise). Repeatable "
+            "(issue #5494): give it twice or more and every named cell is "
+            "extracted on its own and the results are concatenated into the "
+            "one -o netlist, so a testbench instantiating two separately "
+            "drawn cells gets a both-ends-extracted leg from one run. The "
+            "schematic DUT must then declare a `.SUBCKT` for every --top, "
+            "and the flags listed in docs/cli/pex.md as unsupported with "
+            "two or more tops are refused"
         ),
     )
     _add_pdk_args(
