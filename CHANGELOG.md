@@ -14,6 +14,29 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt layout-plan execute` ties a MOS group's body to the net the netlist
+  already puts it on** (#5546, 2026-11-13): a `mos_array` / `diff_pair` /
+  `esd_device` group's `B`/bulk terminal was deliberately left out of the
+  per-device terminal map, so the group's own contacted tap pads (`TAP_PAD<k>`,
+  #4143) and guard-ring taps stayed floating. The plan reported itself fully
+  routed and `klt drc` reported 0 violations on a layout that could not pass
+  LVS: every PMOS body extracted onto an anonymous `$<n>` well net, every NMOS
+  body onto the deck-synthesized substrate net, and `klt lvs` came back
+  `unmatched` on every MOS. The body net is now derived from the digest and
+  bound group-level — one pin per group, on the first `TAP_PAD<k>` pad, or on
+  the first `TAP_<side>` port when the group draws its own ring instead. A
+  group whose declared devices disagree on their body net is an application
+  error (exit 1) naming the group and the nets, rather than a silent short; a
+  group with a body net and no tie port at all (a ring-less sky130 array)
+  binds nothing and earns a `warnings[]` entry, suppressed when a `guard_ring`
+  group's `net` (#5095) already names that net. No request or response field
+  is added, removed or renamed; no `schema_version` bump. **Behaviour change:**
+  a gf180mcu plan gains a pin per MOS group on its bulk net, so a plan that
+  exited `0` can now exit `3` with that net in `unrouted_nets[]` and a reason
+  in `unrouted_reasons[]` — an honest report of a tie that was previously
+  missing. A group enclosed by its own ring typically needs
+  `routing.cross_block_layer_role` for the tie to route out.
+
 - **`klt signoff` reads a gzip-compressed evidence file** (#5452,
   2026-11-13): a `klt sim --report-out report.json.gz` report — the compact
   form `docs/cli/sim.md` recommends committing as evidence — is now citable

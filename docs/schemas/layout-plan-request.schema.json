@@ -147,7 +147,7 @@
           },
           "net": {
             "type": "string",
-            "description": "Optional digest net (e.g. \"VSS\") this group's ring is tied to (#5095). Accepted only when generator is guard_ring (any other generator is an application error, exit code 1); a net absent from the netlist digest is also exit 1. The ring's first generated port joins that net's connectivity[] pin set, so a bulk/supply net no longer lands in unmapped_netlist_nets[]. MOS bulk (B) stays deliberately unmapped."
+            "description": "Optional digest net (e.g. \"VSS\") this group's ring is tied to (#5095). Accepted only when generator is guard_ring (any other generator is an application error, exit code 1); a net absent from the netlist digest is also exit 1. The ring's first generated port joins that net's connectivity[] pin set, so a bulk/supply net no longer lands in unmapped_netlist_nets[]. A mos_array/diff_pair/esd_device group's own MOS bulk (B) net needs no net field: since #5546 it is derived from the digest and bound group-level to that group's own TAP_PAD<k> pad or guard-ring TAP_<side> port. Declaring net on such a group remains an application error."
           },
           "dummy": {
             "type": "object",

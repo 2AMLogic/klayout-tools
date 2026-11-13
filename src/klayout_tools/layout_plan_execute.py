@@ -96,15 +96,12 @@ description alone):
 5. **Open question -- how ``unmapped_netlist_nets[]`` treats a
    deliberately-unrouted supply net**: no ``netlist.ignore_nets[]``-style
    opt-out is added -- Phase B's already-merged schema and validator have no
-   such field, and this phase does not extend the request shape to add one.
-   A net every one of whose touching device terminals falls outside this
-   module's known per-generator terminal map (MOS ``B``/bulk, BJT ``C``/
-   collector -- both conventionally tied to a shared substrate/well tap a
-   ``guard_ring``/``bjt_array`` collector ring already owns, not a
-   per-device port) lands in ``unmapped_netlist_nets[]`` unconditionally,
-   ``VDD``/``VSS``-style supply nets included, per the response field's own
-   "always report the array, never silently drop... let the caller judge it
-   benign" description in the spike.
+   such field. A net every one of whose touching device terminals falls
+   outside this module's per-generator terminal map lands there
+   unconditionally, supply nets included ("always report the array, never
+   silently drop... let the caller judge it benign"). Only BJT ``C`` is
+   still such a terminal; MOS ``B`` was too until #5546 bound it
+   group-level -- see :func:`~klayout_tools.layout_plan_ports.bind_body_nets`.
 6. **No ``klt`` CLI subcommand is added this phase**, mirroring Phase B's
    own decision and for the same reason: :func:`execute_layout_plan`/
    :func:`execute_layout_plan_document` are a complete library surface, and
@@ -225,9 +222,9 @@ _ALLOWED_ROUTING_KEYS = {
 #: absent from this table (``guard_ring``, ``bond_pad``, ``resistor_strip``
 #: -- the last has no per-unit port at all, see scope decision 1) has no
 #: per-device port concept for connectivity derivation; a terminal name
-#: absent from a present generator's own sub-dict (MOS ``B``, BJT ``C``) is
-#: a deliberately unmapped terminal, not an oversight -- see scope decision
-#: 5.
+#: absent from a present generator's own sub-dict (MOS ``B``, BJT ``C``) has
+#: no *per-device* port to map onto -- MOS ``B`` is bound group-level
+#: instead (``layout_plan_ports.bind_body_nets``, #5546); see decision 5.
 _TERMINAL_SUFFIXES: dict[str, dict[str, str]] = {
     "mos_array": {"S": "S", "D": "D", "G": "G"},
     "diff_pair": {"S": "S", "D": "D", "G": "G"},
@@ -685,6 +682,9 @@ def _build_connectivity(
                 )
 
     layout_plan_ports.bind_ring_nets(device_groups, generated, net_pins, warnings)
+    layout_plan_ports.bind_body_nets(
+        device_groups, digest_devices_by_key, generated, net_pins, warnings
+    )
     connectivity: list[dict[str, Any]] = []
     for net in digest["nets"]:
         pins = net_pins.get(net["name"], [])

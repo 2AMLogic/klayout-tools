@@ -235,11 +235,44 @@ two or more pins) and is no longer reported in `unmapped_netlist_nets[]`. `net`
 on any other generator, or a net absent from the netlist digest, is an
 application error (exit 1). Plans without `net` are unchanged.
 
-A terminal absent from a generator's own row above (MOS `B`/bulk, BJT
-`C`/collector) is **deliberately** unmapped — both conventionally tie to a
-shared substrate/well tap a `guard_ring`/collector ring already owns, not
-to a per-device port. `guard_ring`, `bond_pad`, and `resistor_strip` have no
-row at all — no per-device port concept to map onto (see "Parameter
+**Body/bulk nets (#5546).** A MOS `B`/bulk terminal has no row above
+because a body tie is a property of the *group*, not of a device: one well
+(pfet) or substrate (nfet) contact shared by every unit in the array, with
+no `_B`-suffixed per-device port to bind. It is therefore bound
+group-level, automatically, with no request field. For each `mos_array` /
+`diff_pair` / `esd_device` group, the `B` net its declared devices sit on
+gets **one** pin on that group's own tie port — the first `TAP_PAD<k>` pad a
+ring-less array draws on a family with a tap-distance rule (gf180mcu), or,
+when the group draws its own guard ring instead (`params.add_guard_ring`,
+which suppresses the pads), that ring's first `TAP_<side>` port. The pin
+then flows through `connectivity[]` / `pins[]` /
+`unmapped_netlist_nets[]` exactly like a device-terminal pin.
+
+Two cases do not bind:
+
+- **The group's declared devices disagree about their body net** and the
+  group has a tie port: an application error (exit 1) naming the group and
+  the conflicting nets, rather than the silent short one shared tie would
+  draw between them. Split the group so each body net gets its own.
+- **The group has no tie port at all** — a ring-less array on a family with
+  no tap-distance rule (sky130). Nothing is bound and one `warnings[]` entry
+  names the group and the untied net, so the gap is a same-run signal
+  instead of a later LVS surprise. The warning is suppressed when a
+  `guard_ring` group's own `net` (above) already names that net.
+
+**This is a behaviour change for gf180mcu plans.** A plan whose MOS bodies
+used to be left untied now gains a pin per MOS group on its bulk net, which
+the router has to reach. A plan that exited `0` before can exit `3` with the
+bulk net in `unrouted_nets[]` and a reason in `unrouted_reasons[]` — an
+honest report of a tie that was previously missing, not a regression. A
+group whose own ring encloses its devices usually needs
+`routing.cross_block_layer_role` (a metal2/via stack) for the tie to route
+out past the gate pad.
+
+A BJT `C`/collector terminal is still **deliberately** unmapped — it
+conventionally ties to a shared substrate tap a `guard_ring`/collector ring
+already owns, not to a per-device port. `guard_ring`, `bond_pad`, and
+`resistor_strip` have no row at all — no per-device port concept to map onto (see "Parameter
 resolution" above for the last one). A device index past the end of a
 suffix's own candidate list (every unit-arity mismatch, including
 `mos_array`'s `finger_topology: "series"` mode, whose per-finger port names
@@ -368,7 +401,7 @@ execution's terminal step *is* a composition:
 | `nets[]` | array\<object\> | Straight from `gen-compose.compose()` — `net`, `pins[]`, `routed`, `route_length_um`, `status` (`"routed"`/`"partial"`/`"unrouted"`, issue #1169), `legs[]` (a 2-pin net is the degenerate one-leg case of the same shape a bundle net uses). |
 | `unrouted_nets[]` | array\<string\> | Straight from `gen-compose.compose()` — every placed group, but this net's pins could not all be connected (includes both `status: "partial"` and `status: "unrouted"` nets, #1169 — see [`gen-compose.md`](gen-compose.md) for the distinction). |
 | `unrouted_reasons[]` | array\<object\> | Additive (#4966): one `{"net", "reason"}` per `unrouted_nets[]` entry, parsed from `compose()`'s `drc_hints.notes` `net '<n>' could not be routed: <reason>` lines, so a caller sees *why* a net failed. Always present, empty when nothing is unrouted. |
-| `unmapped_netlist_nets[]` | array\<string\> | **The one field with no `gen-compose` analogue.** Every digest net that resolved to *zero* `device_groups[]` ports — including a deliberately unrouted supply/bulk net (`VDD`/`VSS`-style, or a MOS bulk/BJT collector terminal, both deliberately unmapped — see "Connectivity derivation"). Always present, empty when every netlist net touching a declared group's devices resolved to at least one port. No `netlist.ignore_nets[]`-style opt-out exists — a caller judges an entry here benign or not; nothing is silently dropped. |
+| `unmapped_netlist_nets[]` | array\<string\> | **The one field with no `gen-compose` analogue.** Every digest net that resolved to *zero* `device_groups[]` ports — including a deliberately unrouted supply net (`VDD`/`VSS`-style) or a BJT collector terminal, which stays deliberately unmapped — a MOS bulk net is bound group-level since #5546, so it only lands here when its group reported no tie port; see "Connectivity derivation". Always present, empty when every netlist net touching a declared group's devices resolved to at least one port. No `netlist.ignore_nets[]`-style opt-out exists — a caller judges an entry here benign or not; nothing is silently dropped. |
 | `warnings[]` | array\<string\> | A netlist port with no mapped device port (no pin label written, #4966), netlist-derived-vs-override parameter divergences, abutment-overrides-rows notices, connectivity-derivation degradations (an index past a suffix's candidate list), a resolved-generator-output-vs-declared-`device_class` mismatch (issue #1731 — see "Scope decisions" below), plus `gen-compose.compose()`'s own warnings (e.g. an `"explicit"`-placement clearance advisory). |
 
 ## Pin labels and supported scope (mixed-device sky130 blocks)
@@ -378,8 +411,10 @@ is promoted through `compose()`'s `pins[]` to a top-level label on its first
 resolved device port, so the output GDS carries one label per port name for
 `klt lvs`. A port the router already wires (`connectivity[]`) is promoted
 without a duplicate label. A port that resolves to no device port (for
-example a bulk-only net, which is deliberately unmapped) gets a `warnings[]`
-entry and no label. The labels appear in the response's `pins[]`.
+example a BJT-collector-only net, which is deliberately unmapped, or a MOS
+bulk net whose group reported no tie port) gets a `warnings[]` entry and no
+label. A bound MOS body tie (#5546) *is* a resolved port, so a bulk net now
+carries a label on a family that draws taps. The labels appear in the response's `pins[]`.
 
 **`gate_contact` derivation (#5093).** For `mos_array`, `diff_pair` and
 `esd_device` groups, `execute` sets `params.gate_contact: true` when any
@@ -401,8 +436,10 @@ the derived `gate_contact`; with `gate_contact: false` forced, `VBIAS` stays
 unrouted ("bare-poly gate"). No mixed-device sky130 block (`hvi` FETs plus
 `res_array` and `cap_array`) is verified to route fully: the #5093 report
 still showed self-net backbone crossings, "crosses the block's interior on the
-side away from its own pin", and cross-layer detour conflicts, and MOS bulk
-has no well/substrate tap, so an LVS bulk compare would fail regardless.
+side away from its own pin", and cross-layer detour conflicts. MOS bulk is
+no longer part of that gap (#5546) on a family that draws taps — but sky130
+arrays draw none, so a sky130 block's LVS bulk compare still fails unless a
+`guard_ring` group with `net` supplies the tie.
 Treat an all-nets-unrouted result as a **placement-only floorplan**, read
 `unrouted_reasons[]` for the cause, and file a router issue for a capability
 gap.
@@ -486,11 +523,13 @@ than only in a PR description:
   net, and `legs` together with `waypoints_um` on one net is an error. A leg
   without `waypoints_um` only forces that pin pair into the net's spanning
   tree; supply waypoints that approach each pin from its facing side to get
-  past a "reaches the pin from behind" rejection. MOS bulk reaches LVS through a
-  `guard_ring` group's `net` (issue #5095): add a tap-ring group, set its
+  past a "reaches the pin from behind" rejection. A MOS group's own body tie is
+  bound automatically since #5546 (see "Connectivity derivation"); a
+  `guard_ring` group's `net` (issue #5095) remains the way to tie a bulk net
+  on a family whose arrays draw no taps — add a tap-ring group, set its
   `net` to the digest net the bulk ties to, and that ring's port joins the
-  net in a mixed-device block; the MOS `B` port itself stays unmapped, and
-  the bulk-compare limit above still applies. Still not available: a
+  net in a mixed-device block, with the bulk-compare limit above still
+  applying there. Still not available: a
   per-group port-side hint and a mixed-device row topology (one group per
   device is the workaround). Each entry must set at least one
   key; a net name matching no derived entry (unmapped, fewer than 2 pins,
