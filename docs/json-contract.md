@@ -2191,7 +2191,8 @@ A verb's success payload may ship a machine-readable JSON Schema (Draft
 [`cells-response`](schemas/cells-response.schema.json),
 [`stats-response`](schemas/stats-response.schema.json),
 [`drc-response`](schemas/drc-response.schema.json) (verdict reports from both
-engines plus the non-verdict `--list-rules` listing; its `coverage` block
+engines plus the non-verdict `--list-rules` and `--list-rule-categories`
+listings; its `coverage` block
 `$ref`s [`coverage.schema.json`](schemas/coverage.schema.json)) and
 [`lvs-response`](schemas/lvs-response.schema.json).
 
