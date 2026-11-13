@@ -7527,11 +7527,13 @@ without the flag — output is byte-identical to a run that never had it):
   pieces of its own in the mesh. A net with thousands of such landings may
   exceed the decomposition or node caps and report `graph_too_large`, keeping
   the legacy scalar.
-- The shipped decks curate **no per-cut resistance**, so a net with a
-  contact/via landing joining two *modelled* roles reports
-  `via_resistance_unknown` rather than an assumed ideal via. Diffusion has no
-  coefficient in the shipped decks, so a contact onto diffusion is a terminal,
-  not a landing.
+- The per-cut resistance is **caller-supplied** via
+  `--resistance-graph-r-cut`: the shipped decks do curate a per-cut table
+  (`ParasiticsDeck.cuts`, issue #3053), but `klt extract` does not consume it
+  yet. Without the flag, a net with a contact/via landing joining two
+  *modelled* roles reports `via_resistance_unknown` rather than an assumed
+  ideal via. Diffusion has no coefficient in the shipped decks, so a contact
+  onto diffusion is a terminal, not a landing.
 - Terminals come from geometry (landings onto an unmodelled role and
   device-body cut edges), not from `terminals[]` device pins, which carry only
   a per-device position.
