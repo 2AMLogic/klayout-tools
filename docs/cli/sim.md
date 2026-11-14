@@ -4657,6 +4657,7 @@ quantity instead; `klt sim` evaluates it against the spectrum:
 | `quantity` | `"inoise"` (input-referred) or `"onoise"` (output-referred). Required. |
 | `at_hz` | Spot density (per √Hz) at that frequency, interpolated between the two bracketing spectrum points -- in log-frequency for a `dec`/`oct` sweep, linearly for `lin`; exact on a grid point. |
 | `band_hz` | `[lo, hi]`: total rms over the band, `sqrt(∫ density² df)`, trapezoidal on the swept grid with the band edges interpolated in the squared density. |
+| `mechanism` | Optional. `"thermal"` or `"flicker"`: narrow the value to that share of the total rather than the whole spectrum. See "Per-mechanism shares" below. |
 
 Exactly one of `at_hz` / `band_hz`. The `noise1.` plot prefix is internal; it
 is never part of a request. The value is an ordinary
@@ -4675,6 +4676,83 @@ another form; `band_hz` with `lo >= hi`; a frequency outside the swept range
 of `analysis.args`; `noise` under a non-`noise` analysis; `noise` inside
 `analysis_steps`; `engine: "xyce"` (like `expr`, it needs ngspice's control
 block). The measurement name must match `[A-Za-z_][A-Za-z0-9_]*`.
+
+### Per-mechanism shares (`noise.mechanism`)
+
+Issue [#5553](https://github.com/2AMLogic/klayout-tools/issues/5553). The
+value above is a *total*: thermal plus flicker plus gate-leakage/shot noise
+lumped together, so a spec that budgets a thermal share separately cannot be
+graded against it. An optional `mechanism` key narrows the value to one
+share, aggregated by `klt` over every device in the flattened netlist -- no
+instance names in the request:
+
+```json
+"measurements": [
+  { "name": "thermal_rms", "noise": { "quantity": "onoise", "band_hz": [1, 1e5], "mechanism": "thermal" }, "unit": "V" },
+  { "name": "flicker_rms", "noise": { "quantity": "onoise", "band_hz": [1, 1e5], "mechanism": "flicker" }, "unit": "V" }
+]
+```
+
+| Value | What it sums |
+| ----- | ------------ |
+| `"thermal"` | Johnson/channel thermal generators: MOSFET `id`, `rd`, `rs`, `rg`, `rb*`; resistor `thermal`; diode `rs`, `rsw`; BJT `rb`, `rc`, `re`. |
+| `"flicker"` | Any generator whose suffix begins `1overf` (including a diode's sidewall `1overfsw`). |
+
+`mechanism` combines with either `at_hz` or `band_hz`, with the same
+interpolation and integration rules the total form uses, so the shares and the
+total are directly comparable. The value is the **power sum** of that
+mechanism's leaf generators (`sqrt(Σ aᵢ²)`) -- noise amplitudes add in power,
+never linearly -- so `thermal² + flicker²` reproduces the total up to whatever
+power is unclassified.
+
+**`analysis.args` must end with a `pts_per_summary` argument**
+(`"v(out) V1 dec 20 10 1e7 1"` -- the trailing `1`). Without it ngspice emits
+only the total spectrum and no per-device decomposition exists at all. A
+`mechanism` measurement without it is refused up front (exit 1, message names
+the entry and the corrected `args`) rather than returning a null value. The
+argument is deliberately **not** injected: it also multiplies the vector count
+by the device count, which is the caller's cost to accept.
+
+**Completeness is asserted, not assumed.** A generator family the table above
+does not know is *unclassified*: it belongs to neither mechanism. Gate leakage
+(`igb`/`igd`/`igs`) and junction currents (diode `id`/`idsw`, BJT `ib`/`ic`)
+are shot noise and stay unclassified on purpose. On every corner carrying a
+`mechanism` measurement, `klt` also reduces *all* leaves and the plot's own
+`onoise_spectrum` over the same frequency or band. If they disagree by more
+than `1e-3` relative, or any unclassified generator carries power, the corner
+gets a `warning` diagnostic with `code: "noise_mechanism_incomplete"` naming
+the unclassified suffixes and stating the residual. The value is still
+reported -- it is a sound *lower bound* on that mechanism -- so an incomplete
+decomposition can never pass silently into an evidence record.
+
+The same evidence rides an additive `noise` object on that
+`corners[].measurements[]` entry (present only for a `mechanism` entry):
+
+```json
+{ "name": "thermal_rms", "value": 3.09e-05, "status": "pass",
+  "noise": { "mechanism": "thermal", "total": 3.178e-04, "unclassified": 0.0,
+             "residual_relative": 0.0, "unclassified_suffixes": [] } }
+```
+
+Verified on ngspice 47 against sky130 (`sky130_fd_pr__nfet_01v8`, BSIM4,
+reached through its PDK subcircuit): `thermal² + flicker²` matches the total
+form's band value to 5e-8 relative, with a zero residual and no unclassified
+power.
+
+Refused up front, naming the entry: an unknown `mechanism` value;
+`mechanism` with `quantity: "inoise"` (ngspice emits no per-contributor
+input-referred spectra, so an input-referred share cannot be separated out --
+measure it output-referred and divide by the gain); `analysis.args` without
+`pts_per_summary`. Everything the total form refuses applies unchanged.
+
+**How it is computed.** Unlike the total form, a `mechanism` entry is *not*
+lowered to `let` lines: the contributor vector names are hierarchical
+flattened instance paths unknown until the run, and `expr` has no vector glob.
+Instead the corner's deck dumps ngspice's spectra plot to a rawfile beside its
+other artifacts and `klt` reduces it in Python inside the corner run, so only
+the scalar leaves the corner -- the `batch`/`remote` backends work with
+`options.keep_artifacts: false`, as for `cycle_mean`. A request with no
+`mechanism` entry emits a byte-identical deck and an unchanged report.
 
 ### Runner version
 
