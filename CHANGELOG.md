@@ -14,6 +14,30 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt extract --engine klayout-runset`: a device family only the PDK
+  runset recognises can now reach an extracted netlist** (#5481, 2026-11-13):
+  `klt extract` had one engine, the curated `--deck`, so a device class that
+  deck does not declare was simply not extracted — IHP's `pnpMPA` on
+  `sg13cmos5l` came back `device_count: 0`, and no `klt` verb could produce a
+  simulatable netlist containing it. `klt lvs` could already run the PDK's own
+  runset for such a family (#2849), but a verdict is not a netlist. The new
+  engine runs that same runset through the same launcher (`--deck-file`,
+  `--deck-var`, `--runset-timeout`) and reads the extracted netlist back out
+  of the `.lvsdb`. Measured on the PDK's own `pnpMPA` testcase:
+  `device_count: 2`, `device_counts: {"pnpMPA": 1, "ptap1": 1}`, and the
+  written netlist completes an ngspice `.op` against the PDK model library.
+  Every device is written as an `X` subcircuit call onto its class name
+  (KLayout's default `Q`/`R` cards name a `.model` no PDK library declares and
+  do not bind); measured parameters are **not** carried onto the call and each
+  dropped parameter is named in `warnings[]`. **Additive**: `--engine` defaults
+  to `klayout`, a curated-deck report is byte-identical and does not even carry
+  the new top-level `engine` field, so no `schema_version` bump (`klt extract`
+  stays at 4). The runset report adds `engine`, `deck_file`, `deck_vars` and
+  `provenance.runset` (the block `klt lvs` already emits). No parasitics, so
+  `klt pex` cannot use this engine and it does not by itself make
+  `docs/design-evidence-tiers.md` T1 item 7 citable; every curated-engine-only
+  flag, and `--backend batch`, is refused by name with exit 1 rather than
+  silently ignored. See `docs/cli/extract.md` → "Engine".
 - **`klt stats` reports a `geometry_digest`** (#5551, 2026-11-13): the
   timestamp- and record-order-independent digest of a stream's decoded
   geometry is now a top-level field of `klt stats --format json` (and a
@@ -40,7 +64,6 @@ not `klt --version`, if you need to detect this kind of drift. See
   `content_hash` comes from inside the envelope, so it is encoding-independent;
   the one `content_hash_basis: "evidence_file"` case keeps hashing the file as
   committed. Additive; no `schema_version` bump.
-
 - **`klt gen` / `klt layout-plan execute`: a generated stream no longer
   depends on which generators ran earlier in the same process** (#5499,
   2026-11-13): `gen`'s reference PCell library is registered once per process

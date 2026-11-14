@@ -14,7 +14,7 @@ from ..env_provenance import render_path_field
 
 # Issue #2686: the same one-line `label_layers:` text rendering `klt extract`
 # prints for its own echo, reused rather than copied.
-from .extract_cmd import _print_label_layers
+from .extract_text import _print_label_layers
 
 
 def _print_submitted_text(report: dict) -> None:

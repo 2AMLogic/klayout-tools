@@ -7,7 +7,7 @@ first-order lumped RC interconnect parasitics (see "Parasitic (RC)
 extraction" below).
 
 ```
-klt extract <file> --deck sky130|gf180mcu|sg13g2|sg13cmos5l|asap7 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--parasitics] [--substrate-tie-ohms <ohms>] [--top-cell-pins] [--pins <A,B,VDD,VSS>] [--rename-declared-pins] [--tie-declared-pins] [--deck-option <key>=<value> ...] [--label-layer <role>=<layer>/<datatype> ...] [--device-model <class>=<subckt> ...] [--defer-resistor-fixed-offset] [--abstract-cells <glob> ...] [--abstract-cell-lef <path> ...] [--subcircuit <cell>] [--subcircuit-output <path>] [--hierarchical-cells <cell>[,<cell>...]] [--progress|--no-progress] [--backend local|batch] [--timeout-s <s>] [--batch-root <dir>] [--batch-include <glob> ...] [--batch-exclude <glob> ...] [--format text|json]
+klt extract <file> [--engine klayout|klayout-runset] --deck sky130|gf180mcu|sg13g2|sg13cmos5l|asap7 [--deck-file <runset.lvs>] [--deck-var <name>=<value> ...] [--runset-timeout <s>] [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--parasitics] [--substrate-tie-ohms <ohms>] [--top-cell-pins] [--pins <A,B,VDD,VSS>] [--rename-declared-pins] [--tie-declared-pins] [--deck-option <key>=<value> ...] [--label-layer <role>=<layer>/<datatype> ...] [--device-model <class>=<subckt> ...] [--defer-resistor-fixed-offset] [--abstract-cells <glob> ...] [--abstract-cell-lef <path> ...] [--subcircuit <cell>] [--subcircuit-output <path>] [--hierarchical-cells <cell>[,<cell>...]] [--progress|--no-progress] [--backend local|batch] [--timeout-s <s>] [--batch-root <dir>] [--batch-include <glob> ...] [--batch-exclude <glob> ...] [--format text|json]
 klt extract <request.json>|-|'{...}' [--backend local|batch] [--timeout-s <s>] [--format text|json]
 klt extract --check <report.json> [--rerun] [--format text|json]
 ```
@@ -27,7 +27,18 @@ two disagree, this document (and the code) win.
   file, `-` to read the document from stdin, or an inline JSON object string.
   Mutually exclusive with the flags it replaces — see "Request document"
   below.
-- `--deck` — required. The connectivity + device-extraction deck to run.
+- `--engine` — which extractor runs: `klayout` (default, the curated
+  `--deck`) or `klayout-runset` (the PDK's own LVS runset, `--deck-file`).
+  See "Engine" below. Every flag and report of the default engine is unchanged
+  by this flag's existence.
+- `--deck-file` — the PDK's own KLayout LVS runset, for
+  `--engine klayout-runset` only (required there, a clean error elsewhere).
+- `--deck-var <name>=<value>` — repeatable; an extra `-rd name=value` global
+  passed to that runset. `--engine klayout-runset` only.
+- `--runset-timeout <seconds>` — wall-clock budget for the runset subprocess
+  (default 600). `--engine klayout-runset` only.
+- `--deck` — required for `--engine klayout` (the default); refused by name
+  under `--engine klayout-runset`. The connectivity + device-extraction deck to run.
   Currently: `sky130`, `gf180mcu`, `sg13g2`, `sg13cmos5l`. `sg13g2`'s device
   coverage is MOS (thin-oxide `sg13_lv_*` plus, as of issue #1231, the
   thick-oxide `sg13_hv_*` flavour scoped to `ThickGateOx` 44/0), three drawn
@@ -460,6 +471,155 @@ to anchor them to in those cases. `~` and `$VAR` are expanded. This is
 `klt lvs`'s convention verbatim (both use the same shared helper).
 
 ## Engine
+
+`--engine` selects which extractor runs (issue #5481):
+
+| `--engine` | What runs | Needs |
+|---|---|---|
+| `klayout` (default) | the curated `--deck` (`decks/`) through the pip `klayout` module | `pip install klayout` only |
+| `klayout-runset` | the PDK's **own** KLayout LVS runset (`--deck-file`) through the standalone `klayout` application | the `klayout` binary + the PDK install |
+
+Everything in the rest of this document describes the default `klayout`
+engine unless it says otherwise. `--engine klayout` is the default, so every
+invocation and every report that predates the flag is unchanged by it: a
+curated-deck report carries no `engine` field at all.
+
+### `--engine klayout-runset` (issue #5481)
+
+A curated deck can only extract a device family it declares a class for. For a
+family it does not — IHP's `pnpMPA` on `sg13cmos5l` — `klt extract --deck
+sg13cmos5l` reports `device_count: 0`, and there was no `klt` path to an
+extracted *netlist* containing the device at all. `klt lvs` could already
+reach such a family by running the PDK's own runset
+([`docs/cli/lvs.md`](lvs.md) → "`klayout-runset`", issue #2849), but a verdict
+is not a netlist. This engine closes exactly that gap:
+
+```bash
+klt extract "$PDK_ROOT/ihp-sg13cmos5l/libs.tech/klayout/tech/lvs/testing/testcases/unit/bjt_devices/layout/pnpMPA.gds" \
+  --engine klayout-runset \
+  --deck-file "$PDK_ROOT/ihp-sg13cmos5l/libs.tech/klayout/tech/lvs/sg13cmos5l.lvs" \
+  --top pnpMPA_lvs -o pnpMPA.spice --format json
+```
+
+```
+device_count: 2   device_counts: {"pnpMPA": 1, "ptap1": 1}
+```
+
+The same layout through the curated deck still reports `device_count: 0`
+(`tests/test_extract_runset.py` measures both, rather than asserting the
+contrast from memory).
+
+**Flags.** `--deck-file PATH` is the PDK's runset, required under this engine
+and refused under any other; `--deck-var NAME=VALUE` (repeatable) passes an
+extra `-rd NAME=VALUE` global to it; `--runset-timeout SECONDS` is the
+subprocess budget (default 600). All three are spelled as on `klt lvs`.
+`$KLT_KLAYOUT_BINARY` picks the `klayout` application, exactly as for
+`klt lvs`. The engine sets `input`, `schematic`, `report`, `top` and `topcell`
+itself, so `--deck-var` may not.
+
+**Where the netlist comes from.** The runset is launched by the *same*
+launcher `klt lvs` uses — same binary resolution, same `-rd` construction,
+same error text — and the netlist is read back from the `.lvsdb` it writes
+(`LayoutVsSchematic.read()` + `.netlist()`), **never** from a runset's own
+`<top>_extracted.cir` side file: that file's location is runset-specific
+(`sg13cmos5l.lvs` derives it from the *layout's* directory, not the process
+cwd), so depending on it would make the engine runset-specific too.
+
+**The synthesized stub schematic.** A PDK runset runs a complete LVS flow and
+hard-requires a schematic. This engine therefore synthesizes an empty
+`.SUBCKT <top> / .ENDS <top>` stub purely to satisfy that requirement and
+**discards the compare verdict entirely** — comparing is `klt lvs`'s job. The
+open question of whether a stub costs devices was measured against
+`sg13cmos5l.lvs` for issue #5481: it does not. The runset's own log reports
+`Devices to compare: layout=2 schematic=0` after `align`, its default
+`SIMPLIFY` pass keeps both, and the written `.lvsdb` carries them. (Its
+`net_only=true` switch — which skips the compare and would need no stub —
+was measured too and **rejected**: on that runset it writes neither the
+`.lvsdb` nor a side netlist, leaving nothing to read back.)
+
+**Every device is written as an `X` subcircuit call.** A runset's device-class
+names *are* the PDK's own device names, and an open PDK's ngspice library
+declares those as **subcircuits** — IHP's `sg13cmos5l_pnpMPA_mod.lib:38` is
+`.subckt pnpMPA c b e`, `resistors_mod.lib:23` is `.subckt ptap1 1 2`.
+KLayout's default primitive writer would emit `Q$1 … pnpMPA` / `R$2 … ptap1`,
+whose trailing token ngspice reads as a `.model` reference no PDK model
+library declares; neither card binds. So this engine writes every extracted
+device as an `X` call onto the class's own name, in the class's own terminal
+order:
+
+```spice
+.SUBCKT pnpMPA_lvs PAD VDD VSS
+X$1 \$1 PAD VDD pnpMPA
+X$2 VSS \$1 ptap1
+.ENDS pnpMPA_lvs
+```
+
+`--device-model CLASS=SUBCKT` renames the target for a class whose PDK
+spelling differs — the same flag the curated engine uses for its own unbound
+bipolar classes (issue #4234), generalised here to any class because under a
+runset there is no curated binding table to consult. A class the PDK model
+library does not declare fails loudly in the simulator as an unknown
+subcircuit rather than binding to something wrong.
+
+**Measured parameters are not carried onto the call.** KLayout reports a
+device's geometry in micron units (`A=2` µm², `P=6` µm for `pnpMPA`) while the
+PDK subcircuit declares its own in SI (`.param a=2p p=6u`), and the parameter
+*names* differ per class and per PDK. Guessing a per-family unit rescale is
+the per-PDK workaround that disqualified `tests/helpers/extract_klayout_oracle.py`
+as the basis for this engine, so the `X` call is written parameter-free and
+the subcircuit's own declared defaults apply. This is disclosed, never silent:
+every dropped parameter is named per class in `warnings[]`, and
+`devices[].params` still carries every measured value the report has a field
+for.
+
+**Refused flags.** Everything only the curated engine can honour is refused by
+name with exit 1, never silently ignored — a caller who believes
+`--parasitics` is in force would otherwise read a device-only netlist as a
+parasitic-annotated one. That covers `--deck`, `--pdk`/`--pdk-root`,
+`--parasitics` and everything built on it (`--critical-net*`,
+`--parasitics-net*`, `--distributed-rc`, `--resistance-graph*`,
+`--resistance-path*`, `--spef`, `--mom-net`, `--mom-rlc-*`,
+`--parasitic-variant`, `--substrate-spreading`, `--substrate-tie-ohms`),
+`--deck-option`, `--label-layer`, `--subcircuit`/`--subcircuit-output`,
+`--hierarchical-cells`, `--abstract-cells`/`--abstract-cell-lef`, `--probe`,
+`--pins`/`--def-pins`/`--pin-source-cells`, `--top-cell-pins`,
+`--rename-declared-pins`/`--tie-declared-pins`, `--matched-group`,
+`--def-net-names`/`--def-net-connections`, `--defer-resistor-fixed-offset`.
+`--backend batch` is refused too: the batch runner's request cannot ship the
+`klayout` application or the PDK install the runset needs on the executing
+host. `-o/--output`, `--no-netlist`, `--top`, `--device-model`, `--format` and
+`--progress` all work as usual.
+
+**No parasitics, so `klt pex` cannot use this engine.** The result is a
+device-level netlist with `parasitics: null`. Combining runset devices with
+curated-deck parasitics would need a geometric net correspondence between two
+independent extractions that number their unlabelled nets independently
+(`\$1` above; see "Anonymous net numbering" below) — nothing in this repo
+provides that today. Consequently this engine does **not** by itself make
+`docs/design-evidence-tiers.md` T1 item 7 citable for such a block: item 7
+accepts only a `klt pex` report.
+
+**Report.** Additive fields only, so `SCHEMA_VERSION` is unchanged (4): the
+report carries a top-level `engine`, `deck_file`, `deck_vars`, `deck: null`,
+`parasitics: null`, `pdk: null`, and `provenance.runset` (`deck_file`,
+`deck_vars`, `content_hash`, `klayout_application_version`, `exit_status`,
+`engine_error_lines`) — the same block `klt lvs` emits. `device_count`,
+`device_counts`, `devices[]`, `nets[]`, `netlist_path`, `netlist_sha256`,
+`netlist_normalized_sha256`, `status` and `metrics` mean exactly what they
+mean for the curated engine. **The exit status proves nothing** about the
+extraction: a runset may exit non-zero purely because its (discarded) compare
+against the stub failed, so the verdict comes from the database, exactly as in
+`klt lvs`. A missing `klayout` binary, a run that wrote no database, a
+timeout, and an unreadable database are each a clean error envelope with exit
+1.
+
+**Tested target.** Only IHP `sg13cmos5l` is pinned by a test. The engine takes
+any `--deck-file`, but a runset that aborts or prunes its devices against an
+empty stub schematic (sky130's `sky130.lvs` needs `net_only`/`top_lvl_pins` to
+avoid exactly that, per `tests/helpers/extract_klayout_oracle.py`) is not
+supported today; try `--deck-var` for that runset's own switches first.
+
+### The default `klayout` engine
 
 `klt extract` runs fully headless via the pip `klayout` package's native
 `klayout.db.LayoutToNetlist` (connectivity + device extraction) and
@@ -3328,12 +3488,15 @@ the full per-rule table and each test's docstring for the underlying
 geometry/coefficient detail.
 
 **Scope.** `run_extract_klayout_engine` is a Python helper used by this
-cross-check's own test module, not (yet) wired up as a `klt extract
---engine klayout` CLI flag the way `run_drc_klayout_engine` is for `klt
-drc` — this issue's acceptance criteria ask for the cross-check to be run
-and reported, not for a new user-facing engine flag; promoting it to a CLI
-surface (JSON contract, docs, exit codes) is a separate, explicitly-scoped
-follow-on if a caller ever needs to run this oracle outside of tests.
+cross-check's own test module (it lives in `tests/helpers/extract_klayout_oracle.py`),
+and it is **not** the implementation behind `klt extract --engine`. Issue
+#869's acceptance criteria asked for the cross-check to be run and reported,
+not for a user-facing engine flag. That flag now exists — `--engine
+klayout-runset` (issue #5481), see "Engine" above — but it was written as its
+own module (`src/klayout_tools/extract_runset.py`) rather than by promoting
+this oracle, which re-reads the runset's own SPICE output and carries per-PDK
+unit-rescale workarounds that are appropriate for an oracle and not for a
+product surface. This oracle stays test-only.
 gf180mcu was out of scope for issue #869 (its device entries carried no
 `RuleProvenance` citations yet to cross-check against at the time) — see the
 next section for issue #904's own gf180mcu cross-check, once that

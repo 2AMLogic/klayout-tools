@@ -145,6 +145,9 @@ import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
+# The `"klayout-runset"` engine (issue #5481). Imported as a module, never by
+# name: it defers its imports of this module's own helpers to call time.
+from . import extract_runset
 from ._annotation import is_reserved_annotation_layer
 from ._jsonnum import is_int
 from ._layout import complement_well_tie as _complement_well_tie
@@ -221,6 +224,15 @@ from .extract_flavour import (
     _extract_flavour_devices,
     _flavour_split_island,
     apportion_shared_sd,
+)
+
+# Moved out (issue #5481) and re-exported, so every existing
+# `from .extract import _resolve_netlist_target` still resolves.
+from .extract_netlist_target import _default_output_path as _default_output_path
+from .extract_netlist_target import _finish_netlist_write as _finish_netlist_write
+from .extract_netlist_target import _resolve_netlist_target as _resolve_netlist_target
+from .extract_netlist_target import (
+    _validate_no_netlist_flags as _validate_no_netlist_flags,
 )
 from .extract_netlist_write import write_flat_netlist
 from .extract_netselect import NetSelectors
@@ -1590,8 +1602,21 @@ def run_extract(
     no_netlist: bool = False,
     substrate_tie_ohms: float | None = None,
     probes: Sequence[Mapping[str, Any]] = (),
+    engine: str = "klayout",
+    deck_file: str | None = None,
+    deck_vars: Mapping[str, str] | None = None,
+    runset_timeout: float | None = None,
+    klayout_binary: str | None = None,
 ) -> dict[str, Any]:
     """Extract a schematic-equivalent netlist from the layout at ``path``.
+
+    ``engine`` (``klt extract --engine``, issue #5481) selects which extractor
+    runs. ``"klayout"`` (the default) is the curated-deck engine every
+    paragraph below describes, byte-identical to this function before the
+    parameter existed. ``"klayout-runset"`` runs a PDK's **own** KLayout LVS
+    runset (``deck_file``, ``deck_vars``) instead -- devices and connectivity
+    only, with every curated-engine-specific parameter refused by name. See
+    :mod:`klayout_tools.extract_runset` and ``docs/cli/extract.md``, "Engine".
 
     The report carries an additive ``timing`` object (issue #3181):
     ``stages`` (wall seconds per named stage), ``total_seconds`` and
@@ -2870,6 +2895,40 @@ def run_extract(
     automatically when missing (matching ``klt render``/``klt lvs``),
     including any missing intermediate directories.
     """
+    # Engine dispatch (issue #5481), deliberately first in the body: the
+    # runset engine shares none of the curated path's deck resolution, so
+    # everything after it is curated-engine-only. The refused-flag set is read
+    # out of this call's own arguments against `extract_runset`'s explicit
+    # parameter -> flag table, so a parameter added here forces a deliberate
+    # decision there (`tests/test_extract_runset.py` checks the table names
+    # real parameters). `--backend batch` never reaches here, and
+    # `--check`/`--rerun` run no engine at all.
+    extract_runset.validate_engine(engine)
+    extract_runset.require_deck_file(engine, deck_file)
+    extract_runset.require_runset_engine_for_deck_vars(engine, deck_vars)
+    if engine == extract_runset.RUNSET_ENGINE:
+        given = locals()
+        extract_runset.refuse_unsupported(
+            {k: given[k] for k in extract_runset.REFUSED_FLAG_BY_PARAM if k in given}
+        )
+        _validate_no_netlist_flags(no_netlist, output, subcircuit_cell, None)
+        return extract_runset.run_extract_klayout_runset(
+            path,
+            deck_file=deck_file or "",
+            output=output,
+            top=top,
+            deck_vars=deck_vars,
+            device_models=device_models,
+            no_netlist=no_netlist,
+            runset_timeout_s=runset_timeout,
+            klayout_binary=klayout_binary,
+        )
+    if runset_timeout is not None or klayout_binary is not None:
+        raise ExtractError(
+            "runset_timeout/klayout_binary are only used by engine "
+            f"'{extract_runset.RUNSET_ENGINE}' (this run uses '{engine}')"
+        )
+
     if abstract_cell_lef_paths and not abstract_cell_patterns:
         raise ExtractError(
             "abstract_cell_lef_paths (--abstract-cell-lef) was given but "
@@ -3402,59 +3461,6 @@ def _require_hierarchy_cells_populated(
             f"--hierarchical-cells {missing[0]!r} matched no extracted device "
             "-- the cell is placed in the layout hierarchy but none of the "
             "devices this deck recognized resolve to a placement of it"
-        )
-
-
-def _resolve_netlist_target(
-    path: str, output: str | None, no_netlist: bool
-) -> tuple[str, str | None]:
-    """Where the netlist is written, plus the scratch dir to delete after (or
-    ``None``). ``--no-netlist`` (issue #2850) writes into a private temp dir
-    so nothing persists; otherwise ``output`` or the next-to-input default,
-    with its parent directory created."""
-    if no_netlist:
-        scratch_dir = tempfile.mkdtemp(prefix="klt-extract-")
-        return os.path.join(scratch_dir, "extracted.spice"), scratch_dir
-    netlist_path = output if output is not None else _default_output_path(path)
-    out_dir = os.path.dirname(os.path.abspath(netlist_path))
-    try:
-        os.makedirs(out_dir, exist_ok=True)
-    except OSError as exc:
-        raise ExtractError(f"cannot create output directory {out_dir}: {exc}") from exc
-    return netlist_path, None
-
-
-def _finish_netlist_write(
-    netlist_path: str, scratch_dir: str | None
-) -> tuple[str | None, str | None]:
-    """``(reported netlist_path, netlist_sha256)``; both ``None`` after
-    discarding the scratch dir of a ``--no-netlist`` run (issue #2850)."""
-    if scratch_dir is not None:
-        shutil.rmtree(scratch_dir, ignore_errors=True)
-        return None, None
-    return netlist_path, sha256_file(netlist_path)
-
-
-def _validate_no_netlist_flags(
-    no_netlist: bool,
-    output: str | None,
-    subcircuit_cell: str | None,
-    subcircuit_output: str | None,
-) -> None:
-    """``--no-netlist`` (issue #2850) rejections: it contradicts ``-o`` and
-    the ``--subcircuit`` family, which slices/hashes the written netlist."""
-    if not no_netlist:
-        return
-    if output is not None:
-        raise ExtractError(
-            "--no-netlist cannot be combined with -o/--output -- no netlist "
-            "is written, so there is nothing to place at that path"
-        )
-    if subcircuit_cell is not None or subcircuit_output is not None:
-        raise ExtractError(
-            "--no-netlist cannot be combined with --subcircuit/"
-            "--subcircuit-output -- the sub-circuit deck is sliced from the "
-            "written netlist"
         )
 
 
@@ -4797,12 +4803,6 @@ def extract_netlist_from_layout(
         substrate_spreading,
         pin_renames,
     )
-
-
-def _default_output_path(path: str) -> str:
-    """``<file>`` with its extension replaced by ``.spice`` (spike section 2a)."""
-    stem, _ext = os.path.splitext(path)
-    return f"{stem}.spice"
 
 
 def _default_subcircuit_output_path(netlist_path: str, cell_name: str) -> str:
