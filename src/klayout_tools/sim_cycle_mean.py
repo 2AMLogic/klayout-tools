@@ -50,7 +50,7 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
-from . import sim_crossings, sim_window
+from . import sim_crossings, sim_measurement_kind, sim_window
 from .sim_errors import SimError
 
 #: Edge polarities that can align a cycle (``either`` would make "one cycle"
@@ -74,7 +74,7 @@ _VECTOR_PREFIX = "__klt_cmean_"
 
 def is_cycle_mean(spec: dict[str, Any]) -> bool:
     """Whether a ``measurements[]`` entry is declared with ``cycle_mean``."""
-    return spec.get("cycle_mean") is not None
+    return sim_measurement_kind.declares(spec, "cycle_mean")
 
 
 def cycle_mean_measurements(
@@ -135,13 +135,13 @@ def validate_cycle_mean_context(
     declared = cycle_mean_measurements(measurements_spec)
     if not declared:
         return
-    kind = str(analysis.get("kind", "")).lower()
-    if kind != "tran":
-        raise SimError(
-            f"measurement '{declared[0]['name']}' declares 'cycle_mean', "
-            "which averages a transient signal over reference cycles and so "
-            f'requires analysis.kind "tran" (got {analysis.get("kind")!r})'
-        )
+    sim_measurement_kind.require_analysis_kind(
+        declared,
+        analysis,
+        form="cycle_mean",
+        required="tran",
+        explanation="averages a transient signal over reference cycles",
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -149,9 +149,13 @@ def validate_cycle_mean_context(
 # --------------------------------------------------------------------------- #
 
 
+#: Prefix of the rawfile each cycle_mean measurement writes per corner.
+_RAWFILE_PREFIX = "cycle_mean"
+
+
 def rawfile_path(corner_dir: str, index: int) -> str:
     """Where cycle_mean measurement number ``index`` writes its rawfile."""
-    return os.path.join(corner_dir, f"cycle_mean_{index}.raw")
+    return sim_measurement_kind.rawfile_path(corner_dir, _RAWFILE_PREFIX, index)
 
 
 def control_lines(
@@ -268,14 +272,13 @@ def extract_corner_cycle_means(
     of one finished corner, read from the rawfiles :func:`control_lines` asked
     ngspice to write. Never raises: an unreadable or missing rawfile becomes
     that measurement's own ``error``."""
-    outcomes: dict[int, CycleMeanOutcome] = {}
-    index = 0
-    for position, spec in enumerate(measurements_spec):
-        if not is_cycle_mean(spec):
-            continue
-        outcomes[position] = _extract_one(spec, rawfile_path(corner_dir, index))
-        index += 1
-    return outcomes
+    return sim_measurement_kind.extract_indexed(
+        measurements_spec,
+        corner_dir,
+        prefix=_RAWFILE_PREFIX,
+        predicate=is_cycle_mean,
+        extractor=_extract_one,
+    )
 
 
 def _extract_one(spec: dict[str, Any], raw_path: str) -> CycleMeanOutcome:

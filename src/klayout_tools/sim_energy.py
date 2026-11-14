@@ -61,7 +61,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from . import sim_window
+from . import sim_measurement_kind, sim_window
 from .sim_errors import SimError
 
 #: Keys an ``energy`` object may carry. Anything else is refused by name.
@@ -77,7 +77,7 @@ _SOURCE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.$#]*$")
 
 def is_energy(spec: dict[str, Any]) -> bool:
     """Whether a ``measurements[]`` entry is declared with ``energy``."""
-    return spec.get("energy") is not None
+    return sim_measurement_kind.declares(spec, "energy")
 
 
 def energy_measurements(
@@ -145,13 +145,13 @@ def validate_energy_context(
     declared = energy_measurements(measurements_spec)
     if not declared:
         return
-    kind = str(analysis.get("kind", "")).lower()
-    if kind != "tran":
-        raise SimError(
-            f"measurement '{declared[0]['name']}' declares 'energy', which "
-            "integrates power over a time window and so requires "
-            f'analysis.kind "tran" (got {analysis.get("kind")!r})'
-        )
+    sim_measurement_kind.require_analysis_kind(
+        declared,
+        analysis,
+        form="energy",
+        required="tran",
+        explanation="integrates power over a time window",
+    )
     sim_window.validate_window_inside_tran(declared, analysis, form="energy")
 
 
@@ -160,9 +160,13 @@ def validate_energy_context(
 # --------------------------------------------------------------------------- #
 
 
+#: Prefix of the rawfile each energy measurement writes per corner.
+_RAWFILE_PREFIX = "energy"
+
+
 def rawfile_path(corner_dir: str, index: int) -> str:
     """Where energy measurement number ``index`` writes its rawfile."""
-    return os.path.join(corner_dir, f"energy_{index}.raw")
+    return sim_measurement_kind.rawfile_path(corner_dir, _RAWFILE_PREFIX, index)
 
 
 def control_lines(
@@ -292,14 +296,13 @@ def extract_corner_energy(
     one finished corner, read from the rawfiles :func:`control_lines` asked
     ngspice to write. Never raises: an unreadable or missing rawfile becomes
     that measurement's own ``error``."""
-    outcomes: dict[int, EnergyOutcome] = {}
-    index = 0
-    for position, spec in enumerate(measurements_spec):
-        if not is_energy(spec):
-            continue
-        outcomes[position] = _extract_one(spec, rawfile_path(corner_dir, index))
-        index += 1
-    return outcomes
+    return sim_measurement_kind.extract_indexed(
+        measurements_spec,
+        corner_dir,
+        prefix=_RAWFILE_PREFIX,
+        predicate=is_energy,
+        extractor=_extract_one,
+    )
 
 
 def _extract_one(spec: dict[str, Any], raw_path: str) -> EnergyOutcome:

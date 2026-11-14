@@ -32,7 +32,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from . import sim_raw, sim_snm
+from . import sim_measurement_kind, sim_raw, sim_snm
 from .sim_errors import SimError
 from .sim_forms import validate_exclusive_form
 
@@ -68,7 +68,7 @@ _FORMS = (
 
 
 def is_snm(spec: dict[str, Any]) -> bool:
-    return spec.get("snm") is not None
+    return sim_measurement_kind.declares(spec, "snm")
 
 
 def snm_measurements(measurements_spec: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -147,22 +147,16 @@ def validate_snm_context(
     declared = snm_measurements(measurements_spec)
     if not declared:
         return
-    kind = str(analysis.get("kind", "")).lower()
-    if kind != "dc":
-        raise SimError(
-            f"measurement '{declared[0]['name']}' declares 'snm', which needs "
-            f'a DC sweep and so requires analysis.kind "dc" (got '
-            f"{analysis.get('kind')!r})"
-        )
-    seen: set[str] = set()
-    for spec in measurements_spec:
-        key = str(spec.get("name")).lower()
-        if key in seen:
-            raise SimError(
-                f"duplicate measurement name '{spec.get('name')}': names must "
-                "be unique when measurements[] declares an snm entry"
-            )
-        seen.add(key)
+    sim_measurement_kind.require_analysis_kind(
+        declared,
+        analysis,
+        form="snm",
+        required="dc",
+        explanation="needs a DC sweep",
+    )
+    sim_measurement_kind.require_unique_measurement_names(
+        measurements_spec, form="an snm entry"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -170,8 +164,12 @@ def validate_snm_context(
 # --------------------------------------------------------------------------- #
 
 
+#: Prefix of the rawfile each snm measurement writes per corner.
+_RAWFILE_PREFIX = "snm"
+
+
 def rawfile_path(corner_dir: str, index: int) -> str:
-    return os.path.join(corner_dir, f"snm_{index}.raw")
+    return sim_measurement_kind.rawfile_path(corner_dir, _RAWFILE_PREFIX, index)
 
 
 def control_lines(

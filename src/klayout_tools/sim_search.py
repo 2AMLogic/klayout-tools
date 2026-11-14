@@ -43,7 +43,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from . import sim_passes, sim_search_param, sim_twoport
+from . import sim_measurement_kind, sim_passes, sim_search_param, sim_twoport
 from ._jsonnum import is_finite_number, is_int
 from .sim_errors import SimError
 from .sim_forms import validate_exclusive_form
@@ -270,15 +270,9 @@ def validate_search_context(
             "with analysis.passes or a twoport analysis -- use a scalar "
             "analysis"
         )
-    seen: set[str] = set()
-    for spec in measurements_spec:
-        key = str(spec.get("name")).lower()
-        if key in seen:
-            raise SimError(
-                f"duplicate measurement name '{spec.get('name')}': names must "
-                "be unique when measurements[] declares a search entry"
-            )
-        seen.add(key)
+    sim_measurement_kind.require_unique_measurement_names(
+        measurements_spec, form="a search entry"
+    )
 
 
 def validate_search_targets(
