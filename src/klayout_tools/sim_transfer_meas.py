@@ -35,13 +35,13 @@ whose message starts with a ``[<reason>]`` token from :data:`ERROR_CODES`.
 from __future__ import annotations
 
 import os
-import re
 from dataclasses import dataclass
 from typing import Any
 
 from . import sim_raw, sim_transfer
 from .sim_errors import SimError
-from .sim_forms import validate_exclusive_form
+from .sim_forms import normalize_selector as normalize_selector
+from .sim_forms import other_forms, validate_exclusive_form
 
 #: The six first-crossing metric tokens, exactly
 #: :mod:`klayout_tools.sim_transfer`'s names. Unchanged by issue #3088.
@@ -82,11 +82,7 @@ _ALLOWED_KEYS = frozenset({"num", "den", "metric"})
 
 #: Single-ended ``v(node)``: one non-empty token without whitespace, control
 #: characters, commas or parentheses.
-_SELECTOR_RE = re.compile(r"^[vV]\(([^\s\x00-\x1f\x7f,()]+)\)$")
-
 _VECTOR_PREFIX = "__klt_xfer_"
-
-_FORMS = ("spice", "expr", "crossings", "cycle_mean", "energy", "stress")
 
 
 def is_transfer(spec: dict[str, Any]) -> bool:
@@ -97,14 +93,6 @@ def transfer_measurements(
     measurements_spec: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     return [spec for spec in measurements_spec if is_transfer(spec)]
-
-
-def normalize_selector(selector: Any) -> str | None:
-    """``"v(node)"`` lower-cased, or ``None`` when not an accepted selector."""
-    if not isinstance(selector, str):
-        return None
-    match = _SELECTOR_RE.match(selector)
-    return None if match is None else f"v({match.group(1).lower()})"
 
 
 def _pair(spec: dict[str, Any]) -> tuple[str, str]:
@@ -135,7 +123,7 @@ def validate_form_exclusive(spec: dict[str, Any]) -> bool:
     return validate_exclusive_form(
         spec,
         "transfer",
-        _FORMS,
+        other_forms("transfer"),
         lambda name, spec: validate_transfer_spec(name, spec["transfer"]),
     )
 

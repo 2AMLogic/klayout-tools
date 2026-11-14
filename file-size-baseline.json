@@ -629,7 +629,7 @@
     },
     {
       "path": "src/klayout_tools/sim_search.py",
-      "lines": 543
+      "lines": 529
     },
     {
       "path": "src/klayout_tools/sim_staging.py",
@@ -641,7 +641,7 @@
     },
     {
       "path": "src/klayout_tools/sim_tian.py",
-      "lines": 559
+      "lines": 547
     },
     {
       "path": "src/klayout_tools/sim_transfer.py",

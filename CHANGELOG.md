@@ -14,6 +14,19 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt sim` refuses `measurements[].transfer` declared beside `noise`**
+  (#5695, 2026-11-14): the mutually exclusive measurement forms each carried a
+  hand-maintained list of "every *other* exclusive form", and `transfer`'s
+  predated `noise` and never gained it. Because the form validators return on
+  the first match, an entry declaring both was accepted as a plain `transfer`
+  entry and the `noise` request was silently dropped -- one measurement came
+  back where two were asked for. All seven lists are now derived from one
+  ordered registry (`sim_forms.FORMS`), so every pair of forms is refused in
+  both declaration orders. A request declaring `transfer` together with
+  `noise` now fails validation with the usual "alternative forms of a
+  measurement" error instead of running; every other refusal and message is
+  byte-identical. `klt sim`'s `schema_version` is unaffected.
+
 - **`klt sim`'s per-measurement `min`/`max` skip an infinite value** (#5580,
   2026-11-14): the corner-matrix extremes in the `measurements[]` rollup are
   documented as the extremes over *finite* numeric values, but the predicate

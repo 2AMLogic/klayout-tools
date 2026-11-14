@@ -70,9 +70,9 @@ from typing import Any
 
 from . import sim_transfer
 from .sim_errors import SimError
-from .sim_forms import validate_exclusive_form
+from .sim_forms import normalize_selector as _normalize_voltage
+from .sim_forms import other_forms, validate_exclusive_form
 from .sim_passes import PassResult
-from .sim_transfer_meas import normalize_selector as _normalize_voltage
 
 #: Every accepted ``tian.metric`` token.
 METRICS = (
@@ -118,18 +118,6 @@ _ALLOWED_KEYS = frozenset(
 _SERIES_KEYS = frozenset({"load_node", "source"})
 
 _CURRENT_RE = re.compile(r"^[iI]\(([^\s\x00-\x1f\x7f,()]+)\)$")
-
-#: Every other measurement form an entry must not also declare.
-_OTHER_FORMS = (
-    "spice",
-    "expr",
-    "crossings",
-    "cycle_mean",
-    "energy",
-    "stress",
-    "noise",
-    "transfer",
-)
 
 
 def is_tian(spec: dict[str, Any]) -> bool:
@@ -196,7 +184,7 @@ def validate_form_exclusive(spec: dict[str, Any]) -> bool:
     return validate_exclusive_form(
         spec,
         "tian",
-        _OTHER_FORMS,
+        other_forms("tian"),
         lambda name, spec: validate_tian_spec(name, spec["tian"]),
     )
 

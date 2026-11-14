@@ -28,13 +28,13 @@ with a ``[<reason>]`` token from :data:`ERROR_CODES`.
 from __future__ import annotations
 
 import os
-import re
 from dataclasses import dataclass
 from typing import Any
 
 from . import sim_raw, sim_snm
 from .sim_errors import SimError
-from .sim_forms import validate_exclusive_form
+from .sim_forms import normalize_selector as normalize_selector
+from .sim_forms import other_forms, validate_exclusive_form
 
 #: Reason tokens a failed ``snm`` entry's diagnostic message leads with.
 ERROR_CODES = (
@@ -50,21 +50,7 @@ _ALLOWED_KEYS = frozenset(_KEYS)
 
 #: Single-ended ``v(node)``: one non-empty token without whitespace, control
 #: characters, commas or parentheses.
-_SELECTOR_RE = re.compile(r"^[vV]\(([^\s\x00-\x1f\x7f,()]+)\)$")
-
 _VECTOR_PREFIX = "__klt_snm_"
-
-_FORMS = (
-    "spice",
-    "expr",
-    "crossings",
-    "cycle_mean",
-    "energy",
-    "stress",
-    "noise",
-    "transfer",
-    "tian",
-)
 
 
 def is_snm(spec: dict[str, Any]) -> bool:
@@ -73,14 +59,6 @@ def is_snm(spec: dict[str, Any]) -> bool:
 
 def snm_measurements(measurements_spec: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [spec for spec in measurements_spec if is_snm(spec)]
-
-
-def normalize_selector(selector: Any) -> str | None:
-    """``"v(node)"`` lower-cased, or ``None`` when not an accepted selector."""
-    if not isinstance(selector, str):
-        return None
-    match = _SELECTOR_RE.match(selector)
-    return None if match is None else f"v({match.group(1).lower()})"
 
 
 def _triple(spec: dict[str, Any]) -> tuple[str, str, str]:
@@ -113,7 +91,7 @@ def validate_form_exclusive(spec: dict[str, Any]) -> bool:
     return validate_exclusive_form(
         spec,
         "snm",
-        _FORMS,
+        other_forms("snm"),
         lambda name, spec: validate_snm_spec(name, spec["snm"]),
     )
 
