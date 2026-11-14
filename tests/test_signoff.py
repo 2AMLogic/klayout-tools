@@ -13942,7 +13942,7 @@ def test_check_refuses_a_missing_or_unparseable_committed_report(tmp_path):
     """Both refusals come from the shared loader -- a clean message, never a
     traceback."""
     manifest = _manifest()
-    with pytest.raises(SignoffError, match="committed report not found"):
+    with pytest.raises(SignoffError, match="file not found"):
         check_tier_report(str(tmp_path / "nope.json"), manifest)
 
     bad = tmp_path / "bad.json"

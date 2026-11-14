@@ -598,7 +598,7 @@ def test_lint_envelope_files_rejects_a_non_json_file(tmp_path):
 
 
 def test_lint_envelope_files_rejects_an_unreadable_file(tmp_path):
-    with pytest.raises(ep.EnvironmentProvenanceError, match="could not read"):
+    with pytest.raises(ep.EnvironmentProvenanceError, match="file not found"):
         ep.lint_envelope_files([str(tmp_path / "missing.json")])
 
 

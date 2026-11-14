@@ -154,9 +154,9 @@ def _load_spec_json(spec_path: str, error_cls: type[Exception]) -> dict[str, Any
     if os.path.isdir(spec_path):
         raise error_cls(f"not a file: {spec_path}")
     try:
-        with open(spec_path) as f:
+        with open(spec_path, encoding="utf-8") as f:
             spec = json.load(f)
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         raise error_cls(f"could not read spec '{spec_path}': {exc}") from exc
     if not isinstance(spec, dict):
         raise error_cls(f"spec '{spec_path}' must be a JSON object")
