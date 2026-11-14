@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 from . import (
     remote_transport,
     sim_eye,
+    sim_mismatch_scale,
     sim_search,
     sim_settled,
     sim_snm_meas,
@@ -179,6 +180,9 @@ def _runner_gate_release(version: str) -> str | None:
 #: ``search_param`` (``measurements[].search.param``, #5391) landed after
 #: ``v0.9.1``, so its first release segment is ``0.9.2``; an older runner would
 #: reject the key or silently search nothing, hence mandatory.
+#: ``mismatch_params`` (``monte_carlo.mismatch_scale`` on a PDK family whose
+#: sigmas are scanned out of the model libraries, #5486) landed after
+#: ``v0.9.1`` too, so ``0.9.2`` is its first release segment as well.
 def _declared(finder: Callable[[list[Any]], Any]) -> Callable[[dict[str, Any]], bool]:
     """Detector: the request declares at least one measurement ``finder`` finds."""
     return lambda request: bool(finder(request.get("measurements") or []))
@@ -225,6 +229,7 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
         (0, 7, 1),
         lambda request: sim_twoport.has_noise_request(request.get("analysis")),
     ),
+    "mismatch_params": ((0, 9, 2), sim_mismatch_scale.wire_uses_scanned_cards),
 }
 
 #: Registry features a runner must be *known* to support (issue #2924): a
@@ -241,9 +246,13 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
 #: ``twoport_noise`` is mandatory because an older runner would reject
 #: ``analysis.noise`` or omit ``nf_db`` (#3339). ``corners.params`` is
 #: mandatory because an older runner ignores the axis, running one corner per
-#: process x temperature with ``status: pass`` (#4235).
+#: process x temperature with ``status: pass`` (#4235). ``mismatch_params``
+#: is mandatory because an older runner drops the scanned sigma cards off the
+#: pushed points and runs the sweep at *nominal* sigma while the response
+#: still echoes the scale -- a silently invalid negative control (#5486).
 _MANDATORY_RUNNER_FEATURES = frozenset(
     {
+        "mismatch_params",
         "transfer",
         "snm",
         "search",
