@@ -60,3 +60,27 @@ def test_min_max_with_limits_keeps_worst_case():
     assert entry["worst_case"]["corner_id"] == "b"
     assert entry["min"]["corner_id"] == "a"
     assert entry["max"]["corner_id"] == "b"
+
+
+def test_min_max_skip_infinity():
+    """+/-infinity is not a finite value, so it is never an extreme (#5580)."""
+    corners = [
+        _corner("a", float("-inf")),
+        _corner("b", 1.0),
+        _corner("c", float("inf")),
+        _corner("d", 2.0),
+    ]
+    extremes = sim_corner_extremes.corner_extremes(
+        sim_corner_extremes.corner_entries("c", corners)
+    )
+    assert extremes["min"] == {"corner_id": "b", "value": 1.0}
+    assert extremes["max"] == {"corner_id": "d", "value": 2.0}
+
+
+def test_min_max_all_infinite_is_none():
+    """A measurement whose every corner is infinite has no extremes (#5580)."""
+    corners = [_corner("a", float("inf")), _corner("b", float("-inf"))]
+    extremes = sim_corner_extremes.corner_extremes(
+        sim_corner_extremes.corner_entries("c", corners)
+    )
+    assert extremes["min"] is None and extremes["max"] is None

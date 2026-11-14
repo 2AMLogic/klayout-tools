@@ -388,6 +388,7 @@ def test_json_contract(tmp_path, capsys):
         "file",
         "dbu_um",
         "top_cell",
+        "geometry_digest",
         "bbox_um",
         "total",
         "layers",
@@ -395,9 +396,8 @@ def test_json_contract(tmp_path, capsys):
     }
     assert data["density_windows"] is None
     assert data["schema_version"] == 1
-    assert isinstance(data["file"], str)
-    assert isinstance(data["dbu_um"], float)
-    assert isinstance(data["top_cell"], str)
+    for key, kind in (("file", str), ("dbu_um", float), ("top_cell", str)):
+        assert isinstance(data[key], kind)
     assert set(data["bbox_um"].keys()) == {
         "left",
         "bottom",
