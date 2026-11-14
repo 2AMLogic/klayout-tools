@@ -130,7 +130,7 @@ command did not measure it", never as an assertion about the cell:
 | Not emitted | Where it belongs |
 |---|---|
 | more than one corner per invocation / per file | invoke once per corner; see "Multiple corners" below |
-| `recovery_*`/`removal_*` arcs, the `ff`/`latch` **state** groups | not filed (clock-to-output, transparent latch and setup/hold *arcs* are supported; see "Sequential cells") |
+| the `ff`/`latch` **state** groups, `min_pulse_width`/`min_period`, set-vs-reset priority characterization | not filed (clock-to-output, transparent latch, setup/hold, async `preset`/`clear` and `recovery_*`/`removal_*` are supported; see "Sequential cells") |
 | `when`-qualified arc/power splitting, `bus`/`bundle` pins, input-pin (hidden) `internal_power` | not yet filed |
 
 ## How it works
@@ -258,6 +258,7 @@ combinational arc.
 | `cell.enable_pin` | Declared input pin that enables a **level-sensitive latch**. Mutually exclusive with `clock_pin`. |
 | `cell.enable_level` | `"high"` (default) or `"low"` — the enable's active level. Requires `enable_pin`. |
 | `cell.static_inputs` | Optional `{pin: bool}` held constant for every non-clock/non-enable input the output `function` does not reference (e.g. `{"RESET_B": true}`); all other unreferenced inputs are held low. |
+| `cell.async_pins` | Optional array of `{"pin", "kind", "active"}` asynchronous set/reset pins; requires `clock_pin`. See "Asynchronous set/reset arcs" below. |
 
 For a sequential cell each output pin's `function` is its **next-state
 expression over the data pins** (`D` for a `Q`, `!D` for a `QN`) — not an
@@ -271,12 +272,12 @@ not emitted for these cells.
 The testbench drives three clock pulses: a priming pulse that captures the
 output-low state, a pulse after the data moved to the output-high state
 (→ `cell_rise`/`rise_transition`), and a pulse after it returned
-(→ `cell_fall`/`fall_transition`). Still **not supported**: setup/hold/
-recovery/removal constraint arcs, the `ff`/`latch` **state** groups, latch time
-borrowing, min-pulse-width, `when`-qualified arcs, async set/reset arcs.
-Worked example: `examples/characterize/request-dff.json`. Internal-power
-tables for these arcs cover the active clock edge's window only and are
-first-order.
+(→ `cell_fall`/`fall_transition`). Setup/hold, and the asynchronous
+set/reset arcs below, are opt-in through their own request fields. Still
+**not supported**: the `ff`/`latch` **state** groups, latch time borrowing,
+min-pulse-width and `when`-qualified arcs. Worked example:
+`examples/characterize/request-dff.json`. Internal-power tables for these
+arcs cover the active clock edge's window only and are first-order.
 
 **`clock_pin` asserts edge-triggered semantics.** It is not a generic "this
 pin sequences the cell" field: it yields exactly one clock-to-output arc per
@@ -396,6 +397,86 @@ value. A constrained pin must be a data pin some output's next-state
 `function` toggles with alone. Worked examples:
 `examples/characterize/request-dff-constraints.json` (flop) and
 `examples/characterize/request-dlat.json` (latch).
+
+#### Asynchronous set/reset arcs (issue #5520)
+
+`cell.async_pins` declares the cell's asynchronous set/reset pins — an array
+of `{"pin", "kind", "active"}` objects, requiring `cell.clock_pin`:
+
+| Field | Meaning |
+|---|---|
+| `pin` | A declared non-clock input pin. |
+| `kind` | `"clear"` (the pin drives the cell's stored state to 0) or `"preset"` (to 1). |
+| `active` | `"low"` or `"high"` — the level at which the pin asserts. |
+
+```json
+"async_pins": [
+  {"pin": "R", "kind": "clear",  "active": "low"},
+  {"pin": "S", "kind": "preset", "active": "low"}
+]
+```
+
+A declared async pin is **held at its inactive level** for the whole
+clock-to-output and setup/hold measurement, without the request also listing
+it in `static_inputs` — in fact doing so is an error, as is naming the clock,
+an undeclared pin, the same pin twice, a pin `constrained_pins` also lists,
+or one an output's next-state `function` references. A request that declares
+no `async_pins` emits a byte-identical `.lib` and response.
+
+**Propagation arcs: `timing_type` follows the output, not the pin.** Each
+declared pin gets one `timing()` group per output it forces, on the usual
+slew × load grid (slew = the async pin's own transition): `preset` where the
+output is driven **high** (`cell_rise`/`rise_transition` only) and `clear`
+where it is driven **low** (`cell_fall`/`fall_transition` only). So an
+active-low clear pin reads `clear` on `Q` and `preset` on an inverted `QN`.
+The opposite pair of tables is **absent**, not zero: a pin that drives an
+output to a level has no edge in the other direction to measure.
+`timing_sense` follows the pin's own active level — an active-low pin forcing
+an output low moves the same way the pin does, so `positive_unate`.
+
+Which way each output is forced is **measured, not inferred from `kind`**:
+the deck probes both primings of every (output, pin) pair — the clock sets
+the output high in one and low in the other — and asserts the pin in each.
+Exactly one produces an output edge; the other is already at the forced level
+and its `.meas` finds no crossing. If both or neither answer, that is a named
+error rather than a fabricated arc.
+
+**Recovery and removal** ride the same bisection as setup/hold, with the
+pin's *release* edge as the constrained edge and the other async pins held
+inactive. Only the release edge is constrained, so each group carries a
+single table — `rise_constraint` for an active-low pin, `fall_constraint` for
+an active-high one — under `timing_type : recovery_rising` / `removal_rising`
+(or `*_falling` for a falling-edge clock), and the cell's `constraints[]`
+gains matching entries with `kind` `recovery`/`removal`. The same
+`constraint_degradation` / `constraint_window_ns` / `constraint_tolerance_ns`
+options apply, and the cases share the setup/hold run, so an async pin adds
+no simulation rounds beyond the propagation deck.
+
+- **Recovery** keeps setup/hold's criterion: the pin is released `r` before
+  the clock edge and the probe passes when the output still makes the
+  captured transition within `(1 + constraint_degradation)` of the reference.
+- **Removal inverts it.** The pin is still asserted at the clock edge and
+  released `h` after it, and the passing outcome is that the clock edge is
+  *ignored* — so a pass is the output making **no** transition at all, the
+  bracket checks invert with it (the window's wide end must not capture, its
+  narrow end must), and `degradation` does not apply. Removal entries
+  therefore report `reference_delay_ns : null` and `degradation : null`.
+  Failure to bracket is the same named error setup/hold raises.
+
+The `async_arcs[]` field carries the measured propagation arcs: `pin`,
+`output_pin`, `related_pin`, `timing_type`, `timing_sense`, `forced_level`
+(`high`/`low`), `active`, `side_inputs`, and the one measured
+delay/transition table pair. It is **present only for a cell that declares
+`async_pins`**, which is what keeps a request without them byte-identical.
+Internal-power tables are not emitted for forced arcs.
+
+**Out of scope here**: set-vs-reset priority when both pins are asserted (the
+vendor `dffsr_1` expresses this with `when`-qualified arcs; every arc here is
+measured with the other async pin inactive and emitted unqualified),
+`min_pulse_width`/`min_period`, `ff`/`latch` groups, `non_seq_setup`/
+`non_seq_hold` between the two async pins, and making `klt sta` *use* the new
+groups (`native/statime` keeps reading them as an untyped arc). Worked
+example: `examples/characterize/request-dffsr.json`.
 
 ### Multiple corners
 
@@ -938,7 +1019,7 @@ each a full `len(index_1) x len(index_2)` `values` matrix — and so is
 | `grid` | object | The two index axes plus derived counts, summed over every cell: `points` (`len(index_1) * len(index_2)`), `arc_count`, `measurement_count` (timing cards, `points * arc_count * 4` -- unchanged from #2502), `power_measurement_count` (`INTEG` rail-charge cards, `points * arc_count * 4`), `leakage_measurement_count` (one per input state per cell), `capacitance_measurement_count` (two per input pin per cell, one per edge), and `total_measurement_count` (their sum). |
 | `thresholds` | object | Every resolved Liberty threshold, defaults included — the definitions the tables mean. |
 | `units` | object | The units of every value in this response and the `.lib`: `time` `ns`, `capacitance` `pF`, `internal_energy` `pJ`, `leakage_power` `pW`. |
-| `cells` | array | One entry per characterized cell, in request order: `{cell, arcs, leakage, simulation}`, each shaped exactly like the single-cell top-level fields below. **This is the batch-mode data.** |
+| `cells` | array | One entry per characterized cell, in request order: `{cell, arcs, leakage, constraints, simulation}` — plus `async_arcs` for a cell that declares `cell.async_pins` (see "Asynchronous set/reset arcs"). `cell`/`arcs`/`leakage`/`simulation` are shaped exactly like the single-cell top-level fields below. **This is the batch-mode data.** |
 | `cell` | object \| null | Single-cell form: `cells[0].cell`. `null` in batch mode (there is no one cell to describe). |
 | `arcs` | array \| null | Single-cell form: `cells[0].arcs`; `null` in batch mode. One entry per characterized arc: `output_pin`, `related_pin`, `timing_sense`, `measured_sense`, `side_inputs` (the full held state, including inputs the function does not reference), and the six tables `cell_rise`/`cell_fall`/`rise_transition`/`fall_transition`/`rise_power`/`fall_power` as `{index_1, index_2, values}` in the library's own units. Same numbers as the `.lib`, so a consumer need not re-parse Liberty to read them. |
 | `leakage` | object \| null | Single-cell form: `cells[0].leakage`; `null` in batch mode. `cell_leakage_power_pw` (the mean over states) and `states[]` of `{when, inputs, value_pw}`, one per input state. |
@@ -962,6 +1043,13 @@ and the capacitance block (issue #2512):
 | `declared_capacitance_pf` | number \| null | The request's `pins[].capacitance_pf`, if any. |
 | `measured_capacitance_pf` | number \| null | This run's own measurement — reported even when a declared value overrode it, so the override is auditable. |
 | `measured_rise_capacitance_pf` / `measured_fall_capacitance_pf` | number \| null | The per-edge split. Emitted into the `.lib` as `rise_capacitance`/`fall_capacitance` **only** when `capacitance_source` is `"measured"`. |
+
+`cells[].constraints` is the setup/hold and recovery/removal list (`[]` for a
+cell that declares neither `constrained_pins` nor `async_pins`), and
+`cells[].async_arcs` the measured `preset`/`clear` propagation arcs — the one
+field that is **absent**, not empty, when the cell declares no `async_pins`,
+so a request without them is byte-identical to before #5520. Both are
+documented under "Sequential cells".
 
 **Compatibility.** Every #2502 field is still present with its #2502 meaning
 for a single-cell (`cell`) request; power tables, `leakage`, `units`,

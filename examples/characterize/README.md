@@ -10,6 +10,7 @@ klt characterize examples/characterize/request.json          # one cell
 klt characterize examples/characterize/request-batch.json    # two cells, one .lib
 klt characterize examples/characterize/request-dff.json      # edge-triggered flop
 klt characterize examples/characterize/request-dlat.json     # level-sensitive latch
+klt characterize examples/characterize/request-dffsr.json    # async set/reset flop
 ```
 
 Needs `ngspice` on `$PATH` and nothing else — no PDK, no Docker. The run is
@@ -29,6 +30,8 @@ capacitance probe per input pin, in one deck) and takes a few seconds.
 | `dff.spice` | a synthetic positive-edge D flip-flop (transmission-gate master/slave) |
 | `request-dlat.json` | the level-sensitive latch request (issue #5521) — `enable_pin`/`enable_level` plus `constrained_pins` |
 | `dlat.spice` | a synthetic active-high D latch: `Q` tracks `D` while `E` is high, and holds once `E` falls |
+| `request-dffsr.json` | the asynchronous set/reset request (issue #5520) — `async_pins` on an active-low clear (`R`) and preset (`S`), emitting `preset`/`clear` propagation arcs on `Q`/`QN` and `recovery_rising`/`removal_rising` constraints on each async pin |
+| `dffsr.spice` | the same flop as `dff.spice` plus an active-low clear (`R`) and preset (`S`) (hand-maintained, not written by `generate.py`) |
 | `generate.py` | regenerates `models.lib`, `cells.spice`, `request.json`, `request-batch.json`, `dlat.spice` and `request-dlat.json` (`uv run python3 examples/characterize/generate.py`) |
 
 These are **not** real PDK data. CLAUDE.md's "open PDKs only" rule is about

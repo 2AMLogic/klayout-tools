@@ -53,9 +53,11 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
+from .liberty_render_pin import TIMING_SENSES as _TIMING_SENSES
 from .liberty_render_pin import (
     ConstraintArc,
     constraint_template_lines,
+    render_arc,
     render_constraint,
     render_pin_capacitance,
 )
@@ -66,9 +68,9 @@ from .liberty_render_pin import (
 #: emits.
 DEFAULT_PRECISION = 6
 
-#: Recognised ``timing_sense`` values -- the three
-#: ``native/statime/src/liberty.rs``'s ``parse_timing_sense`` distinguishes.
-TIMING_SENSES = ("positive_unate", "negative_unate", "non_unate")
+#: Recognised ``timing_sense`` values, re-exported from where
+#: :func:`liberty_render_pin.render_arc` validates them.
+TIMING_SENSES = _TIMING_SENSES
 
 #: Recognised ``direction`` values for a :class:`Pin`. ``inout`` is accepted
 #: for completeness (the reader models it) but ``klt characterize`` never
@@ -151,14 +153,21 @@ class Table2D:
 
 @dataclass(frozen=True)
 class TimingArc:
-    """One combinational ``timing()`` group on an output pin."""
+    """One ``timing()`` group on an output pin.
+
+    A combinational or clock-to-output arc carries all four tables. A
+    **forced** arc -- an async ``preset``/``clear`` pin driving the output to
+    a level and holding it there (issue #5520) -- has only one direction to
+    measure, so the opposite pair is ``None``: absent because it was not
+    measured, never fabricated. At least one table must be present.
+    """
 
     related_pin: str
     timing_sense: str
-    cell_rise: Table2D
-    cell_fall: Table2D
-    rise_transition: Table2D
-    fall_transition: Table2D
+    cell_rise: Table2D | None = None
+    cell_fall: Table2D | None = None
+    rise_transition: Table2D | None = None
+    fall_transition: Table2D | None = None
     timing_type: str = "combinational"
 
 
@@ -361,7 +370,7 @@ def _render_header(library: Library, precision: int) -> list[str]:
 
     template = _first_table(library)
     # The header's `lu_table_template` and `default_max_transition` are
-    # derived from this table's axes, *before* `_render_arc` gets to validate
+    # derived from this table's axes, *before* `render_arc` gets to validate
     # anything -- so validate it here too. Without this an empty `index_1`
     # reaches `max()` as a bare `ValueError` instead of the named
     # `LibertyWriteError` every other malformed-table path raises.
@@ -415,7 +424,9 @@ def _render_pin(pin: Pin, cell: Cell, library: Library, number) -> list[str]:
         lines.append(f'      function : "{_escape(pin.function)}";')
     lines.extend(render_pin_capacitance(pin, cell, number))
     for arc in pin.arcs:
-        lines.extend(_render_arc(arc, cell, pin, library, number))
+        lines.extend(
+            render_arc(arc, cell, pin, library.template_name, number, _render_table)
+        )
     for power in pin.internal_power:
         lines.extend(_render_internal_power(power, cell, pin, library, number))
     for constraint in pin.constraints:
@@ -430,38 +441,6 @@ def _render_pin(pin: Pin, cell: Cell, library: Library, number) -> list[str]:
             )
         )
     lines.append("    }")
-    return lines
-
-
-def _render_arc(
-    arc: TimingArc,
-    cell: Cell,
-    pin: Pin,
-    library: Library,
-    number,
-) -> list[str]:
-    if arc.timing_sense not in TIMING_SENSES:
-        raise LibertyWriteError(
-            f"cell '{cell.name}' pin '{pin.name}' arc from "
-            f"'{arc.related_pin}': unknown timing_sense {arc.timing_sense!r} "
-            f"(expected one of {', '.join(TIMING_SENSES)})"
-        )
-    lines = ["      timing () {"]
-    lines.append(f'        related_pin : "{arc.related_pin}";')
-    lines.append(f"        timing_sense : {arc.timing_sense};")
-    lines.append(f"        timing_type : {arc.timing_type};")
-    for group, table in (
-        ("cell_rise", arc.cell_rise),
-        ("rise_transition", arc.rise_transition),
-        ("cell_fall", arc.cell_fall),
-        ("fall_transition", arc.fall_transition),
-    ):
-        where = (
-            f"cell '{cell.name}' pin '{pin.name}' arc from '{arc.related_pin}' {group}"
-        )
-        table.validate(where)
-        lines.extend(_render_table(group, table, library.template_name, number))
-    lines.append("      }")
     return lines
 
 
@@ -525,7 +504,14 @@ def _first_table(library: Library) -> Table2D:
     for cell in library.cells:
         for pin in cell.pins:
             for arc in pin.arcs:
-                return arc.cell_rise
+                for table in (
+                    arc.cell_rise,
+                    arc.cell_fall,
+                    arc.rise_transition,
+                    arc.fall_transition,
+                ):
+                    if table is not None:
+                        return table
     raise LibertyWriteError(
         "a Liberty NLDM library needs at least one timing arc to derive its "
         "lu_table_template axes from"

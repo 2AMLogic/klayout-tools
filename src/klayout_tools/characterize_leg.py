@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Callable
 from typing import Any
 
 from . import sim
@@ -132,3 +133,53 @@ def best_effort_pdk(request: dict[str, Any]) -> dict[str, Any] | None:
         return find_pdk(variant=variant, root=root)
     except PdkNotFoundError:
         return None
+
+
+def make_deck_runner(
+    *,
+    work_dir: str,
+    window: dict[str, Any],
+    build_request: Callable[..., dict[str, Any]],
+    extract: Callable[..., dict[str, Any]],
+    error_cls: type[Exception],
+    backend: str | None,
+    resume: bool,
+    batch_shard: dict[str, Any] | None,
+) -> Callable[[str, list[Any], str, float], dict[str, Any]]:
+    """A ``DeckRunner`` (:mod:`characterize_bisect`) over one cell's work
+    directory: each labelled probe deck is written, simulated and read back
+    under ``<work_dir>/constraints/<label>/``.
+
+    Probe decks answer with the *absence* of a crossing as readily as a
+    value, so the report is extracted with ``allow_missing=True``.
+    """
+
+    def run_deck(
+        text: str, measurements: list[Any], label: str, stop_ns: float
+    ) -> dict[str, Any]:
+        deck_dir = os.path.join(work_dir, "constraints", label)
+        os.makedirs(deck_dir, exist_ok=True)
+        deck_path = os.path.join(deck_dir, "testbench.spice")
+        deck_plan = {
+            "measurements": measurements,
+            "window": {**window, "stop_ns": stop_ns},
+        }
+        deck_request = build_request(plan=deck_plan, testbench_path=deck_path)
+        request_path = os.path.join(deck_dir, "sim-request.json")
+        try:
+            report = run_sim_leg(
+                testbench_path=deck_path,
+                testbench_text=text,
+                sim_request=deck_request,
+                sim_request_path=request_path,
+                sim_report_path=os.path.join(deck_dir, "sim-report.json"),
+                sim_dir=os.path.join(deck_dir, "sim"),
+                backend=backend,
+                resume=resume,
+                **(batch_shard or {}),
+            )
+        except sim.SimError as exc:
+            raise error_cls(f"constraint simulation failed: {exc}") from exc
+        return extract(report, request_path, allow_missing=True)
+
+    return run_deck

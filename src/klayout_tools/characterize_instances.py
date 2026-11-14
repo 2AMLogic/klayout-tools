@@ -41,14 +41,21 @@ def _capacitance_side_state(
     one the pin actually presents in the situation a timing analysis cares
     about.
 
-    An input pin no arc names (an unused pin, or a second output's input on a
-    multi-output cell) has no such state; its neighbours are held low, the
-    same fallback :func:`_full_side_state` applies to an unreferenced pin.
+    An input pin no arc names (an unused pin, a second output's input on a
+    multi-output cell, or an async set/reset pin -- no clock-to-output arc
+    names one) has no such state; its neighbours are held low, the same
+    fallback :func:`_full_side_state` applies to an unreferenced pin, except
+    that a *declared async pin* is held at its own inactive level: asserting
+    one would force the output and change the Miller charge the measured pin
+    sees.
     """
     for arc in arcs:
         if arc.related_pin == pin_name:
             return _full_side_state(arc, cell)
-    return tuple((pin, False) for pin in cell["input_pins"] if pin != pin_name)
+    inactive = {spec.pin: spec.inactive_level for spec in cell.get("async_pins", ())}
+    return tuple(
+        (pin, inactive.get(pin, False)) for pin in cell["input_pins"] if pin != pin_name
+    )
 
 
 def _capacitance_instance_lines(
