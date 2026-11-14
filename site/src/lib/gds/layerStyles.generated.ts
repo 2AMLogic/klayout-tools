@@ -10,8 +10,8 @@
  * provenance and PDK licensing).
  *
  * Sources:
- *   sky130: ~/.volare/volare/sky130/versions/c6d73a35f524070e85faff4a6a9eef49553ebc2b/sky130A/libs.tech/klayout/tech/sky130A.lyp
- *   gf180mcu: ~/.volare/volare/gf180mcu/versions/c6d73a35f524070e85faff4a6a9eef49553ebc2b/gf180mcuD/libs.tech/klayout/tech/gf180mcu.lyp
+ *   sky130: ~/.ciel/ciel/sky130/versions/f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7/sky130A/libs.tech/klayout/tech/sky130A.lyp
+ *   gf180mcu: ~/.ciel/ciel/gf180mcu/versions/f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7/gf180mcuD/libs.tech/klayout/tech/gf180mcu.lyp
  */
 
 /** `[layer, datatype, fillColor, frameColor, name]`. */
@@ -462,6 +462,7 @@ export const GF180MCU_LAYER_STYLES: readonly GeneratedLayerStyle[] = [
   [14, 222, "#3f12e4", "#3f12e4", ""],
   [15, 222, "#f9bd46", "#f9bd46", ""],
   [22, 0, "#bd74bd", "#bd74bd", "COMP"],
+  [23, 5, "#ffa080", "#ffa080", "ISOSUB"],
   [12, 0, "#88cb1d", "#88cb1d", "DNWELL"],
   [21, 0, "#f9946b", "#f9946b", "Nwell"],
   [204, 0, "#3a2888", "#3a2888", "LVPWELL"],
@@ -559,6 +560,7 @@ export const GF180MCU_LAYER_STYLES: readonly GeneratedLayerStyle[] = [
   [81, 5, "#44fa82", "#44fa82", "Metal5_BLK"],
   [53, 5, "#614b6a", "#614b6a", "MetalT_BLK"],
   [0, 0, "#d9f817", "#d9f817", "PR_bndry"],
+  [63, 63, "#d9f817", "#d9f817", "VTEXT"],
   [116, 5, "#0bdfb7", "#0bdfb7", "MDIODE"],
   [110, 11, "#658af3", "#658af3", "Metal1_Res"],
   [110, 12, "#e9465c", "#e9465c", "Metal2_Res"],

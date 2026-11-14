@@ -34,7 +34,7 @@ const FAMILIES = [
   {
     family: "sky130",
     flag: "--sky130",
-    // ~/.volare/volare/sky130/versions/<hash>/sky130A/libs.tech/klayout/tech/sky130A.lyp
+    // ~/.ciel/ciel/sky130/versions/<hash>/sky130A/libs.tech/klayout/tech/sky130A.lyp
     discover: () => discoverVolare("sky130", "sky130A", "sky130A.lyp"),
   },
   {
@@ -45,7 +45,7 @@ const FAMILIES = [
 ];
 
 function discoverVolare(pdk, variant, lypName) {
-  for (const root of [join(homedir(), ".volare", "volare"), join(homedir(), ".ciel", "ciel")]) {
+  for (const root of [join(homedir(), ".ciel", "ciel"), join(homedir(), ".volare", "volare")]) {
     const versionsDir = join(root, pdk, "versions");
     if (!existsSync(versionsDir)) continue;
     for (const version of readdirSync(versionsDir).sort()) {
