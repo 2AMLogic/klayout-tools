@@ -3622,6 +3622,20 @@ misclassify it as a native kind instead:
   `klt yield` report. A manifest entry with no pinned `content_hash` at all
   is unaffected either way — no staleness claim was made to check.
 
+**What a generic citation's `content_hash` hashes.** A manifest entry's
+pinned `content_hash` is compared against the envelope's own
+`provenance.input.content_hash`, which covers the **input artifact**
+`provenance.input.path` names (the committed record the envelope attests) —
+**not** the bytes of the evidence envelope file itself. That is the same
+convention every native kind uses, and the grader says so verbatim in the
+`stale_evidence` hint ("`content_hash` must be the sha256 of the input
+artifact … not the hash of the evidence envelope file"); pinning the envelope
+file's own sha256 is common enough that `klt` names it, setting
+`pin_is_envelope_file_hash: true` in the stale-pin detail. Only
+`functional-verification` pins the evidence file's bytes (issue #4893);
+`generic` deliberately gets no such fallback, so with no `provenance.input`
+there is no live hash and the pin can only render `"unverifiable"`.
+
 **`provenance.input.path` (issue #2403) — optional, opt-in — the artifact
 `input_verified` re-hashes.** Even when `provenance` is given, a generic
 envelope's `content_hash` was, until this field existed, structurally
@@ -4994,8 +5008,9 @@ document the report names equals the pin), `"stale"` (it differs), or
 live hash to compare). It is disclosure only: `status` and `reason` stay
 `unmet` / `undersized_sample` (or `negative_control_not_detected`), so a bad
 pin is visible now rather than only after the sample size is raised. The key
-is absent when the entry pins no `content_hash`, on every other refusal, and
-on `met` items.
+is absent when the entry pins no `content_hash` and on `met` items; since
+issue #5598 a non-passing envelope's own refusal carries it too (see "A
+non-passing envelope discloses its pin too" below).
 
 **An unverifiable pin explains itself (issue #3747).** When the entry pins
 `content_hash` and the resolved envelope carries no input hash at all (a
@@ -5006,6 +5021,26 @@ on `met` items.
 pin itself is visible as the cause. Disclosure only: `status` and `reason` are
 unchanged, and the keys are absent when the entry pins nothing or the pin is
 `stale`.
+
+**A non-passing envelope discloses its pin too (issue #5598).** An envelope
+whose own `status` is not passing is refused *before* the staleness gate is
+reached, so that refusal used to publish nothing at all about the manifest's
+pin: a `content_hash` that matched, one that was comparable and genuinely
+**stale**, and one that could never be compared all rendered the same `unmet`
+/ `check_failed` with no `detail`. For every citation kind, that refusal now
+carries `detail.content_hash_pin` (`"verified"` / `"stale"` /
+`"unverifiable"`), with `detail.content_hash_pin_note` on an unverifiable pin
+and, on a stale one, the same `hash_check` / `compared_against` / `hint`
+payload the `stale_evidence` verdict carries. Disclosure only: `status` and
+`reason` are unchanged for every manifest, so a drifted pin is visible on the
+first commit rather than only on the day the item first passes — which is what
+a repo byte-comparing this command's `--format json` output against a
+committed record needs. The keys are absent when the entry pins no
+`content_hash`, and when disclosed foundry-cell exceptions cover every
+violation (the item proceeds, so there is no refusal to sit beside). An
+unprovenanced `generic` envelope has no live hash, so its pin renders
+`"unverifiable"` whatever value it holds — uncomparable, not mismatched;
+anchor the citation with `provenance.input.path` to make it enforceable.
 
 **A `functional-verification` pin binds the evidence file (issue #4893).**
 `klt functional-verification` records no input hash, so for a **file-backed**
