@@ -107,6 +107,7 @@ from . import (
     sim_injected,
     sim_mismatch_gate,
     sim_noise,
+    sim_noise_mechanism,
     sim_op_args,
     sim_passes,
     sim_portable,
@@ -8644,6 +8645,7 @@ def _run_corner(
     )
     settleds = sim_settled.extract_corner_settleds(measurements_spec, corner_dir)
     searches = sim_search.extract_corner_searches(measurements_spec, log_text)
+    nzm = sim_noise_mechanism.extract_corner(measurements_spec, corner_dir, analysis)
     # Issue #3160: each pass's rawfile is decoded once, shared by the tian
     # reduction below and the corner's `passes` field.
     pass_results = (
@@ -8671,6 +8673,7 @@ def _run_corner(
             settleds=settleds,
             searches=searches,
             tians=tians,
+            noise_mechanisms=nzm,
             engine_diagnostics=diagnostics,
         )
     )
@@ -10061,6 +10064,7 @@ def _corner_deck_control_lines(
        (:func:`klayout_tools.sim_snm_meas.control_lines`), after the transfer
        lines; same ``set filetype=ascii`` rule. None of this appears without
        an snm entry.
+    10. The ``mechanism`` noise-spectra dump (#5553): order-free, restores $curplot.
 
     An ``analysis_steps[]`` request (issue #2482) replaces step 3's analysis
     and 4's ``expr`` lines with the ordered step sequence
@@ -10121,6 +10125,7 @@ def _corner_deck_control_lines(
     complex_vector_lines = sim_complex_vectors.control_lines(
         complex_vectors, corner_dir
     )
+    nz_lines = sim_noise_mechanism.control_lines(measurements_spec, corner_dir)
     if (
         raw_path is not None
         or crossings_lines
@@ -10133,6 +10138,7 @@ def _corner_deck_control_lines(
         or step_resolution_lines
         or settled_lines
         or complex_vector_lines
+        or nz_lines
     ):
         lines.append("set filetype=ascii")
     lines.append(f"{analysis['kind']} {_sao.deck_args(point, analysis)}")
@@ -10144,13 +10150,8 @@ def _corner_deck_control_lines(
         # `expr` lets, so time-weighted sums are not biased by the
         # adaptive timestep distribution.
         lines.append("linearize")
-    expr_specs = _expr_measurements(measurements_spec)
-    if expr_specs and analysis["kind"] == "noise":
-        # Issue #2893: after `noise`, ngspice's current plot is the integrated
-        # one (noise2: onoise_total/inoise_total); the spectra live in noise1.
-        # Alias them into the current plot (after any `write`, so the rawfile
-        # is unchanged) so bare names resolve while totals stay bare too.
-        lines.extend(f"let {vec} = noise1.{vec}" for vec in NOISE_SPECTRUM_VECTORS)
+    expr_specs = sim_noise.emittable_exprs(_expr_measurements(measurements_spec))
+    lines.extend(sim_noise.alias_lines(analysis, expr_specs))
     for spec in expr_specs:
         lines.extend(spec.get("expr_prelude", ()))
         lines.append(f"let {spec['name']} = {spec['expr']}")
@@ -10166,6 +10167,7 @@ def _corner_deck_control_lines(
     lines.extend(step_resolution_lines)
     lines.extend(settled_lines)
     lines.extend(complex_vector_lines)
+    lines.extend(nz_lines)
     # Issue #4121: last, so no later line reads the main analysis' plot after
     # the search has moved ngspice's current plot.
     lines.extend(search_lines)
@@ -10174,9 +10176,7 @@ def _corner_deck_control_lines(
     return lines
 
 
-#: Spectrum vectors of ngspice's first noise plot, aliased by bare name into
-#: the current (totals) plot for ``expr`` measurements (issue #2893).
-NOISE_SPECTRUM_VECTORS = ("inoise_spectrum", "onoise_spectrum")
+NOISE_SPECTRUM_VECTORS = sim_noise.NOISE_SPECTRUM_VECTORS  # re-export, #2893
 
 
 def _write_xyce_deck(
