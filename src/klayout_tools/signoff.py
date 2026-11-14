@@ -141,9 +141,9 @@ from .signoff_evidence_pin import (
     PIN_UNVERIFIABLE,
     content_hash_pin_state,
     generic_binding_check,
+    pin_disclosure,
     rehash_evidence_file,
     unanchored_detail,
-    unverifiable_pin_note,
 )
 from .signoff_generator_batch import (
     GeneratorExecution,
@@ -5595,15 +5595,8 @@ def _grade_evidence(
     )
     if pin_state == PIN_UNVERIFIABLE:
         # Issue #3747: say why -- the pin itself is ungradable for this kind.
-        return (
-            "unmet",
-            _REASON_UNVERIFIABLE_PROVENANCE,
-            None,
-            {
-                "content_hash_pin": PIN_UNVERIFIABLE,
-                "content_hash_pin_note": unverifiable_pin_note(check_kind, resolution),
-            },
-        )
+        pin = pin_disclosure(spec, resolution, check_kind=check_kind)
+        return "unmet", _REASON_UNVERIFIABLE_PROVENANCE, None, pin
     if pin_state == PIN_STALE:
         return "unmet", _REASON_STALE_EVIDENCE, None, hints.stale_pin(spec, resolution)
 
@@ -5649,7 +5642,14 @@ def _grade_check_outcome(
     :func:`_build_tier_item`'s own kind gate, as :func:`_kind_gated_refusal`
     does; that verdict carries
     :func:`~.signoff_nothing_checked.nothing_checked_item_detail` (issue
-    #5479), naming the artifact read though ``citation`` stays ``None``."""
+    #5479), naming the artifact read though ``citation`` stays ``None``.
+
+    Issue #5598: this return precedes :func:`_grade_evidence`'s staleness
+    gate, so it would otherwise hide the manifest ``content_hash`` pin --
+    a comparable, genuinely stale one included -- behind the envelope's own
+    failure, for every kind. :func:`~.signoff_evidence_pin.pin_disclosure`
+    carries it beside the verdict, never changing it; a stale pin also names
+    the failed comparison, as the staleness verdict's own detail does."""
     if _check_passed(kind, checked):
         return {}, None
     failure_detail = _critical_metric_detail(envelope)
@@ -5668,7 +5668,11 @@ def _grade_check_outcome(
             **failure_detail,
             **vacuous.nothing_checked_item_detail(envelope, _citation(resolution)),
         }
-    return {}, ("unmet", reason, None, failure_detail)
+    pin = pin_disclosure(spec, resolution, check_kind=kind)
+    if pin.get("content_hash_pin") == PIN_STALE:
+        # Name the failed comparison, exactly as the staleness verdict does.
+        pin = hints.stale_pin(spec, resolution)
+    return {}, ("unmet", reason, None, {**failure_detail, **pin})
 
 
 def _foundry_cell_exception_eligible(kind: str, envelope: dict[str, Any]) -> bool:
@@ -5703,7 +5707,8 @@ def _kind_gated_failure_detail(
 
     Issue #3063: the early return would otherwise hide a stale
     ``content_hash`` pin behind the campaign refusal until the sample is
-    raised. Disclosed beside the verdict, never changing it.
+    raised. Disclosed beside the verdict, never changing it -- via the
+    shared :func:`~.signoff_evidence_pin.pin_disclosure` since issue #5598.
 
     Issue #5479: a :data:`_REASON_NOTHING_CHECKED` refusal carries
     :func:`~.signoff_nothing_checked.nothing_checked_item_detail`, so this
@@ -5719,13 +5724,7 @@ def _kind_gated_failure_detail(
         _REASON_NEGATIVE_CONTROL_NOT_DETECTED,
     ):
         return {}
-    detail: dict[str, Any] = {"yield_campaign": campaign}
-    pin_state = content_hash_pin_state(
-        spec.get("content_hash"), resolution["content_hash"]
-    )
-    if pin_state is not None:
-        detail["content_hash_pin"] = pin_state
-    return detail
+    return {"yield_campaign": campaign, **pin_disclosure(spec, resolution)}
 
 
 def _bind_anchored_citation(
