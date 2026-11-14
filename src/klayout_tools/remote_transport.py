@@ -251,9 +251,7 @@ def artifacts_root(
 # --------------------------------------------------------------------------- #
 
 
-def _ssh_options(
-    *, identity_file: str | None, port: int, connect_timeout: float
-) -> list[str]:
+def _ssh_options(*, identity_file: str | None, connect_timeout: float) -> list[str]:
     opts = [
         "-o",
         "StrictHostKeyChecking=accept-new",
@@ -277,9 +275,7 @@ def build_ssh_argv(
     connect_timeout: float = DEFAULT_CONNECT_TIMEOUT_S,
 ) -> list[str]:
     """Build a non-interactive ``ssh ... "<remote_command>"`` argv."""
-    options = _ssh_options(
-        identity_file=identity_file, port=port, connect_timeout=connect_timeout
-    )
+    options = _ssh_options(identity_file=identity_file, connect_timeout=connect_timeout)
     return ["ssh", "-p", str(port)] + options + [f"{user}@{host}", remote_command]
 
 
@@ -298,9 +294,7 @@ def build_scp_upload_argv(
     argv = ["scp", "-P", str(port)]
     if recursive:
         argv.append("-r")
-    argv += _ssh_options(
-        identity_file=identity_file, port=port, connect_timeout=connect_timeout
-    )
+    argv += _ssh_options(identity_file=identity_file, connect_timeout=connect_timeout)
     argv += [local_path, f"{user}@{host}:{remote_path}"]
     return argv
 
@@ -320,9 +314,7 @@ def build_scp_download_argv(
     argv = ["scp", "-P", str(port)]
     if recursive:
         argv.append("-r")
-    argv += _ssh_options(
-        identity_file=identity_file, port=port, connect_timeout=connect_timeout
-    )
+    argv += _ssh_options(identity_file=identity_file, connect_timeout=connect_timeout)
     argv += [f"{user}@{host}:{remote_path}", local_path]
     return argv
 

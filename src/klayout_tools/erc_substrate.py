@@ -86,8 +86,6 @@ def _asserts_isolation(
 
 def isolation_missing(
     *,
-    layout: Any,
-    top_cell: Any,
     deck: Any,
     deck_name: str | None,
     tie_layers: list[dict[str, Any]],
@@ -398,8 +396,6 @@ def run_substrate_pass(
     if not any(tie["name"] not in degenerate_ties for tie in tie_layers):
         return SubstrateOutcome(missing=["a non-degenerate ties[] tap entry"])
     missing = isolation_missing(
-        layout=layout,
-        top_cell=top_cell,
         deck=deck,
         deck_name=deck_name,
         tie_layers=tie_layers,

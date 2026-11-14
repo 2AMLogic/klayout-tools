@@ -2835,7 +2835,6 @@ def _prepare_batch_job_spec(
         netlist_path,
         corner_count=corner_count,
         timeout_s=timeout_s,
-        keep_artifacts=keep_artifacts,
         request_dir=request_dir,
         version_check=config.runner_version_check,
     )
