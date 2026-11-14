@@ -186,9 +186,13 @@ def validate_step_resolution_context(
 # --------------------------------------------------------------------------- #
 
 
+#: Prefix of the rawfile each step_resolution measurement writes per corner.
+_RAWFILE_PREFIX = "step_resolution"
+
+
 def rawfile_path(corner_dir: str, index: int) -> str:
     """Where step_resolution measurement number ``index`` writes its rawfile."""
-    return os.path.join(corner_dir, f"step_resolution_{index}.raw")
+    return sim_measurement_kind.rawfile_path(corner_dir, _RAWFILE_PREFIX, index)
 
 
 def control_lines(

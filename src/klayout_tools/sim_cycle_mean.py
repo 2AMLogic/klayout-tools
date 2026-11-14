@@ -149,9 +149,13 @@ def validate_cycle_mean_context(
 # --------------------------------------------------------------------------- #
 
 
+#: Prefix of the rawfile each cycle_mean measurement writes per corner.
+_RAWFILE_PREFIX = "cycle_mean"
+
+
 def rawfile_path(corner_dir: str, index: int) -> str:
     """Where cycle_mean measurement number ``index`` writes its rawfile."""
-    return os.path.join(corner_dir, f"cycle_mean_{index}.raw")
+    return sim_measurement_kind.rawfile_path(corner_dir, _RAWFILE_PREFIX, index)
 
 
 def control_lines(

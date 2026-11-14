@@ -128,9 +128,13 @@ def validate_stress_context(
 # --------------------------------------------------------------------------- #
 
 
+#: Prefix of the rawfile each stress measurement writes per corner.
+_RAWFILE_PREFIX = "stress"
+
+
 def rawfile_path(corner_dir: str, index: int) -> str:
     """Where stress measurement number ``index`` writes its rawfile."""
-    return os.path.join(corner_dir, f"stress_{index}.raw")
+    return sim_measurement_kind.rawfile_path(corner_dir, _RAWFILE_PREFIX, index)
 
 
 def control_lines(

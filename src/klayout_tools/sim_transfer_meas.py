@@ -197,8 +197,12 @@ def validate_transfer_context(
 # --------------------------------------------------------------------------- #
 
 
+#: Prefix of the rawfile each transfer measurement writes per corner.
+_RAWFILE_PREFIX = "transfer"
+
+
 def rawfile_path(corner_dir: str, index: int) -> str:
-    return os.path.join(corner_dir, f"transfer_{index}.raw")
+    return sim_measurement_kind.rawfile_path(corner_dir, _RAWFILE_PREFIX, index)
 
 
 def control_lines(

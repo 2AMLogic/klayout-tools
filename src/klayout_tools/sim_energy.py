@@ -160,9 +160,13 @@ def validate_energy_context(
 # --------------------------------------------------------------------------- #
 
 
+#: Prefix of the rawfile each energy measurement writes per corner.
+_RAWFILE_PREFIX = "energy"
+
+
 def rawfile_path(corner_dir: str, index: int) -> str:
     """Where energy measurement number ``index`` writes its rawfile."""
-    return os.path.join(corner_dir, f"energy_{index}.raw")
+    return sim_measurement_kind.rawfile_path(corner_dir, _RAWFILE_PREFIX, index)
 
 
 def control_lines(

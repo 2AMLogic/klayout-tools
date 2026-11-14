@@ -247,9 +247,13 @@ def validate_crossings_context(
 # --------------------------------------------------------------------------- #
 
 
+#: Prefix of the rawfile each crossings measurement writes per corner.
+_RAWFILE_PREFIX = "crossings"
+
+
 def rawfile_path(corner_dir: str, index: int) -> str:
     """Where crossings measurement number ``index`` writes its rawfile."""
-    return os.path.join(corner_dir, f"crossings_{index}.raw")
+    return sim_measurement_kind.rawfile_path(corner_dir, _RAWFILE_PREFIX, index)
 
 
 def control_lines(

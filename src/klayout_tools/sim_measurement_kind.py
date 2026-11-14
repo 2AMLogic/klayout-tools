@@ -19,9 +19,17 @@ it -- the same convention :mod:`klayout_tools.sim_window` established.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 
 def declares(spec: dict[str, Any], key: str) -> bool:
     """Whether a ``measurements[]`` entry is declared with ``key``."""
     return spec.get(key) is not None
+
+
+def rawfile_path(corner_dir: str, prefix: str, index: int) -> str:
+    """Where measurement number ``index`` of the ``prefix`` kind writes its
+    ASCII rawfile -- the on-disk name its ``.control`` ``write`` line and
+    its ``extract_corner_*`` read-back must agree on."""
+    return os.path.join(corner_dir, f"{prefix}_{index}.raw")
