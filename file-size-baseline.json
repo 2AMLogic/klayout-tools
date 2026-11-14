@@ -317,7 +317,7 @@
     },
     {
       "path": "src/klayout_tools/extract_batch.py",
-      "lines": 601
+      "lines": 575
     },
     {
       "path": "src/klayout_tools/extract_finfet.py",
@@ -481,7 +481,7 @@
     },
     {
       "path": "src/klayout_tools/netlist_batch.py",
-      "lines": 855
+      "lines": 824
     },
     {
       "path": "src/klayout_tools/netlist_capacitor_recovery.py",
@@ -529,7 +529,7 @@
     },
     {
       "path": "src/klayout_tools/place_and_route_batch.py",
-      "lines": 696
+      "lines": 682
     },
     {
       "path": "src/klayout_tools/place_and_route_gds_merge.py",
@@ -601,7 +601,7 @@
     },
     {
       "path": "src/klayout_tools/signoff_generator_batch.py",
-      "lines": 703
+      "lines": 695
     },
     {
       "path": "src/klayout_tools/signoff_power_delivery.py",
@@ -617,7 +617,7 @@
     },
     {
       "path": "src/klayout_tools/sim_commands.py",
-      "lines": 923
+      "lines": 915
     },
     {
       "path": "src/klayout_tools/sim_decks.py",

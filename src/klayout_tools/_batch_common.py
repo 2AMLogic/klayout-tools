@@ -290,3 +290,140 @@ def job_failure(
     return _ctor(err_cls)(
         f"{message} {no_fallback}", code=code, job_id=job_id, details=details or None
     )
+
+
+# --------------------------------------------------------------------------- #
+# job.json: the shared command and spec assembler
+# --------------------------------------------------------------------------- #
+
+#: A ``$EDA_OUTPUT_DIR`` member, quoted for the runner's shell.
+_OUT = '"$EDA_OUTPUT_DIR/{}"'
+
+
+def build_job_command(
+    *,
+    tree_member: str,
+    run: str,
+    err_cls: type[_E],
+    stdout_target: str | None,
+    client_version: str | None = None,
+    version_check: str = "enforce",
+    preflight_extra: str = "",
+    extra_setup: Sequence[str] = (),
+    tree_root_subdir: str | None = None,
+    extra_tail: str = "",
+) -> str:
+    """One batch job's ``cmd``: the runner-version preflight, the shared setup
+    prologue, ``run``, and the exit-status tail.
+
+    Every byte of the result is the batch contract -- the fleet harness parses
+    it (``docs/schemas/batch-job-spec.schema.json``) -- so it is assembled
+    here once instead of per verb.
+
+    ``tree_member`` is the input tarball's ``inputs/`` name. The prologue
+    resolves ``$EDA_INPUT_DIR``/``$EDA_OUTPUT_DIR``, makes a scratch
+    directory, exports a fallback ``HOME`` (the runner can leave it unset,
+    which killed xschem's Tcl init outright -- commit ``bf3d1ae10``), unpacks
+    the tree and ``cd``s into it.
+
+    ``run`` is the per-verb inner command, already quoted. ``err_cls`` is the
+    calling module's error class, raised in place of the preflight's
+    ``SimError`` when the submitting client's version cannot be pinned, so
+    every verb emits ``docs/json-contract.md``'s error envelope rather than a
+    traceback. ``preflight_extra`` is appended to the preflight script (a
+    runner-capability gate).
+
+    ``extra_setup`` lines join the prologue just before ``cd "$w"`` (the
+    place-and-route unit-request install). ``tree_root_subdir`` records the
+    runner's scratch root in :data:`BATCH_TREE_ROOT_FILENAME` for
+    :func:`read_runner_roots` -- ``""`` for the tree root itself, a
+    tree-relative path for a stage directory under it, ``None`` to record
+    none. The filename comes from this module's constant, so the reader and
+    every writer can never name different files.
+
+    ``stdout_target`` is the ``$EDA_OUTPUT_DIR`` member ``run``'s stdout goes
+    to, with its stderr teed to ``stderr.log`` and the job exiting with
+    ``run``'s own status: ``report.json`` for a ``klt <verb>`` job. ``None``
+    -- only ``klt sim``'s multi-unit command, which redirects per unit and
+    publishes each unit's exit code -- emits neither the redirect nor the
+    status capture, and the job exits 0. ``extra_tail`` runs once the status
+    is captured, whether or not ``run`` succeeded (the place-and-route
+    artifact copy, the generator output publish); it needs a
+    ``stdout_target``.
+    """
+    from . import _provenance, sim_batch
+
+    version = (
+        client_version if client_version is not None else _provenance._klt_version()
+    )
+    try:
+        preflight = sim_batch._runner_preflight_script(
+            version, enforce=version_check == "enforce"
+        )
+    except Exception as exc:  # SimError: a client version unsafe to embed
+        raise _ctor(err_cls)(str(exc)) from exc
+    setup = [
+        'EDA_INPUT_DIR=$(cd "$EDA_INPUT_DIR" && pwd -P)',
+        'EDA_OUTPUT_DIR=$(cd "$EDA_OUTPUT_DIR" && pwd -P)',
+        'w=$(mktemp -d) && export HOME="${HOME:-$(mktemp -d)}"',
+        f'tar -xzf "$EDA_INPUT_DIR/{tree_member}" -C "$w"',
+        *extra_setup,
+        'cd "$w"',
+    ]
+    if tree_root_subdir is not None:
+        at = f"/{tree_root_subdir}" if tree_root_subdir else ""
+        setup.append(
+            f'printf \'%s\\n%s\\n\' "$w{at}" "$(pwd -P){at}" >'
+            + _OUT.format(BATCH_TREE_ROOT_FILENAME)
+        )
+    if stdout_target is None:
+        tail = "; exit 0"
+    else:
+        run += (
+            f" > {_OUT.format(stdout_target)}"
+            f" 2> >(tee {_OUT.format(sim_batch.BATCH_STDERR_FILENAME)} >&2)"
+        )
+        tail = "; rc=$?; wait $! 2>/dev/null"
+        tail += f"; {extra_tail}" if extra_tail else ""
+        tail += "; exit $rc"
+    return preflight + preflight_extra + " && ".join(setup) + " && " + run + tail
+
+
+def build_job_spec(
+    *,
+    cmd: str,
+    tool: str,
+    pdk_variant: str | None,
+    tree_member: str,
+    tree_label: str,
+    tarball_path: str,
+    timeout_s: float,
+    timeout_seconds: int | None = None,
+    extra_inputs: Sequence[Any] = (),
+) -> Any:
+    """One batch job as a ``sim_batch.BatchJobSpec``: ``cmd`` (from
+    :func:`build_job_command`), the input tree, and the job's wall-clock cap.
+
+    The cap defaults to :func:`job_timeout_seconds` -- ``timeout_s`` plus the
+    per-job overhead, so the inner ``timeout`` always fires before the
+    harness's outer one. Pass ``timeout_seconds`` only where ``timeout_s`` is
+    not an inner timeout for the headroom to protect.
+    """
+    from . import sim_batch
+
+    return sim_batch.BatchJobSpec(
+        cmd=cmd,
+        tool=tool,
+        pdk_variant=pdk_variant,
+        timeout_seconds=(
+            job_timeout_seconds(timeout_s)
+            if timeout_seconds is None
+            else timeout_seconds
+        ),
+        inputs=(
+            sim_batch.BatchJobInput(
+                name=tree_member, label=tree_label, local_path=tarball_path
+            ),
+            *extra_inputs,
+        ),
+    )

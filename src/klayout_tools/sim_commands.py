@@ -722,39 +722,31 @@ def build_job_spec(
     version_check: str = "enforce",
     client_version: str | None = None,
 ) -> sim_batch.BatchJobSpec:
-    version = (
-        client_version if client_version is not None else _provenance._klt_version()
-    )
-    preflight = sim_batch._runner_preflight_script(
-        version, enforce=version_check == "enforce"
-    )
-    setup = " && ".join(
-        [
-            'EDA_INPUT_DIR=$(cd "$EDA_INPUT_DIR" && pwd -P)',
-            'EDA_OUTPUT_DIR=$(cd "$EDA_OUTPUT_DIR" && pwd -P)',
-            "w=$(mktemp -d)",
-            f'tar -xzf "$EDA_INPUT_DIR/{TREE_FILENAME}" -C "$w"',
-            'cd "$w"',
-        ]
-    )
-    command = (
-        preflight
-        + setup
-        + " && "
-        + "; ".join(_unit_script(u) for u in units)
-        + "; exit 0"
-    )
+    """The commands job: every unit's script run in sequence on one job.
+
+    Each unit redirects and publishes its own stdout/stderr/exit code, so the
+    job itself has no ``report.json`` and always exits 0 -- a failed unit is a
+    reported outcome, not a failed job.
+    """
+    from .sim import SimError
+
     serial_worst_s = sum(u["timeout_s"] * len(u["steps"]) for u in units)
-    return sim_batch.BatchJobSpec(
+    command = _batch_common.build_job_command(
+        tree_member=TREE_FILENAME,
+        run="; ".join(_unit_script(u) for u in units),
+        err_cls=SimError,
+        stdout_target=None,
+        client_version=client_version,
+        version_check=version_check,
+    )
+    return _batch_common.build_job_spec(
         cmd=command,
         tool=BATCH_JOB_TOOL,
         pdk_variant=pdk,
-        timeout_seconds=int(math.ceil(serial_worst_s)) + 120,
-        inputs=(
-            sim_batch.BatchJobInput(
-                name=TREE_FILENAME, label="command inputs", local_path=tarball_path
-            ),
-        ),
+        tree_member=TREE_FILENAME,
+        tree_label="command inputs",
+        tarball_path=tarball_path,
+        timeout_s=serial_worst_s,
     )
 
 
