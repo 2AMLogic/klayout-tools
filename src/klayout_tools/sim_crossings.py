@@ -395,16 +395,17 @@ def extract_corner_crossings(
     supply-relative ``level`` is resolved against), read from the rawfiles
     :func:`control_lines` asked ngspice to write. Never raises: an unreadable
     or missing rawfile becomes that measurement's own ``error``."""
-    outcomes: dict[int, CrossingsOutcome] = {}
-    index = 0
-    for position, spec in enumerate(measurements_spec):
-        if not is_crossings(spec):
-            continue
-        outcomes[position] = _extract_one(
-            spec, rawfile_path(corner_dir, index), supply_v
-        )
-        index += 1
-    return outcomes
+
+    def extract(spec: dict[str, Any], raw_path: str) -> CrossingsOutcome:
+        return _extract_one(spec, raw_path, supply_v)
+
+    return sim_measurement_kind.extract_indexed(
+        measurements_spec,
+        corner_dir,
+        prefix=_RAWFILE_PREFIX,
+        predicate=is_crossings,
+        extractor=extract,
+    )
 
 
 def _extract_one(

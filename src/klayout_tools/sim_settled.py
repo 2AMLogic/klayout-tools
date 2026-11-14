@@ -421,14 +421,13 @@ def extract_corner_settleds(
     """``{position in measurements_spec: outcome}`` for every settled entry of
     one finished corner. Never raises: any rawfile problem becomes that
     measurement's own ``error``."""
-    outcomes: dict[int, SettledOutcome] = {}
-    index = 0
-    for position, spec in enumerate(measurements_spec):
-        if not is_settled(spec):
-            continue
-        outcomes[position] = _extract_one(spec, rawfile_path(corner_dir, index))
-        index += 1
-    return outcomes
+    return sim_measurement_kind.extract_indexed(
+        measurements_spec,
+        corner_dir,
+        prefix=_RAWFILE_PREFIX,
+        predicate=is_settled,
+        extractor=_extract_one,
+    )
 
 
 def _extract_one(spec: dict[str, Any], raw_path: str) -> SettledOutcome:

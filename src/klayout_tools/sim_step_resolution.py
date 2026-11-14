@@ -312,14 +312,13 @@ def extract_corner_step_resolutions(
     """``{position in measurements_spec: outcome}`` for every entry of one
     finished corner. Never raises: any rawfile problem becomes that
     measurement's own ``error``."""
-    outcomes: dict[int, StepResolutionOutcome] = {}
-    index = 0
-    for position, spec in enumerate(measurements_spec):
-        if not is_step_resolution(spec):
-            continue
-        outcomes[position] = _extract_one(spec, rawfile_path(corner_dir, index))
-        index += 1
-    return outcomes
+    return sim_measurement_kind.extract_indexed(
+        measurements_spec,
+        corner_dir,
+        prefix=_RAWFILE_PREFIX,
+        predicate=is_step_resolution,
+        extractor=_extract_one,
+    )
 
 
 def _extract_one(spec: dict[str, Any], raw_path: str) -> StepResolutionOutcome:
