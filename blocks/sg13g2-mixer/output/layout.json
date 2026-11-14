@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:11:04.800006+00:00",
+  "slug": "sg13g2-mixer",
+  "name": "Sg13G2 Mixer",
+  "description": "SiGe downconversion mixer on IHP SG13G2 \u2014 2AM Logic canary block",
+  "pdk": "sg13g2",
+  "spec_summary": {
+    "rows": [
+      {
+        "parameter": "RF band",
+        "fallback": "2400\u20132483.5 MHz",
+        "target": "2400\u20132483.5 MHz (`sg13g2-lna`'s ratified band)"
+      },
+      {
+        "parameter": "RF input",
+        "fallback": "50 \u03a9 single-ended",
+        "target": "50 \u03a9, matched to the LNA output (S11 < \u221210 dB)",
+        "stretch": "on-chip balun included"
+      },
+      {
+        "parameter": "IF",
+        "fallback": "single low IF",
+        "target": "low IF (to be fixed by the spec, 1\u201350 MHz class)",
+        "stretch": "zero-IF quadrature (I/Q) pair"
+      },
+      {
+        "parameter": "Conversion gain",
+        "fallback": "> 5 dB",
+        "target": "> 10 dB",
+        "stretch": "> 15 dB"
+      },
+      {
+        "parameter": "SSB noise figure",
+        "fallback": "< 15 dB",
+        "target": "< 12 dB",
+        "stretch": "< 9 dB"
+      },
+      {
+        "parameter": "IIP3",
+        "fallback": "> \u22125 dBm",
+        "target": "> 0 dBm",
+        "stretch": "> +5 dBm"
+      },
+      {
+        "parameter": "LO-to-RF isolation",
+        "fallback": "> 30 dB",
+        "target": "> 40 dB",
+        "stretch": "> 50 dB"
+      },
+      {
+        "parameter": "Supply / power",
+        "fallback": "1.8 V \u00b110%, < 20 mW",
+        "target": "1.8 V \u00b110%, < 10 mW",
+        "stretch": "< 5 mW"
+      },
+      {
+        "parameter": "Signoff",
+        "fallback": "DRC + LVS clean",
+        "target": "DRC + LVS clean, post-layout re-verified"
+      }
+    ],
+    "status_note": "DRAFT \u2014 engineering to ratify, see issue #2"
+  },
+  "source": {
+    "repo": "2AMLogic/sg13g2-mixer",
+    "ref": "e31b164ca84777a059974ef9483b9a703123221a",
+    "path": "."
+  },
+  "downloadable": true,
+  "status": "in design \u2014 simulation evidence"
+}

@@ -70,6 +70,7 @@ from typing import Any
 
 from . import sim_transfer
 from .sim_errors import SimError
+from .sim_forms import validate_exclusive_form
 from .sim_passes import PassResult
 from .sim_transfer_meas import normalize_selector as _normalize_voltage
 
@@ -125,6 +126,7 @@ _OTHER_FORMS = (
     "crossings",
     "cycle_mean",
     "energy",
+    "stress",
     "noise",
     "transfer",
 )
@@ -191,21 +193,12 @@ def _tuple_key(spec: dict[str, Any]) -> _Key:
 def validate_form_exclusive(spec: dict[str, Any]) -> bool:
     """For an entry declaring ``tian``: refuse any other form beside it and
     validate the body. Returns ``True`` when the entry is a tian entry."""
-    if not is_tian(spec):
-        return False
-    name = spec.get("name")
-    if name is None:
-        raise SimError("each request.measurements[] entry requires 'name'")
-    others = [form for form in _OTHER_FORMS if spec.get(form) is not None]
-    if others:
-        raise SimError(
-            f"measurement '{name}' declares 'tian' together with "
-            f"'{others[0]}': they are alternative forms of a measurement -- "
-            "declare exactly one (use a separate measurements[] entry for "
-            "the other)"
-        )
-    validate_tian_spec(name, spec["tian"])
-    return True
+    return validate_exclusive_form(
+        spec,
+        "tian",
+        _OTHER_FORMS,
+        lambda name, spec: validate_tian_spec(name, spec["tian"]),
+    )
 
 
 def validate_tian_spec(name: Any, body: Any) -> None:

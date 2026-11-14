@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:08:58.715836+00:00",
+  "slug": "gf180-rcosc",
+  "name": "Gf180 Rcosc",
+  "description": "Canary \u2014 gf180mcu trimmable free-running RC oscillator. AI-designed, open-source.",
+  "pdk": "gf180mcu",
+  "layer_count": 13,
+  "cell_count": 21,
+  "instance_count": 20,
+  "layout_file": "rcosc_bias.gds",
+  "renders": {
+    "overview": "renders/overview.png",
+    "Nwell": "renders/21_0.png",
+    "Comp": "renders/22_0.png",
+    "Poly2": "renders/30_0.png",
+    "Pplus": "renders/31_0.png",
+    "Nplus": "renders/32_0.png",
+    "Contact": "renders/33_0.png",
+    "Metal1": "renders/34_0.png",
+    "layer_34_10": "renders/34_10.png",
+    "Via1": "renders/35_0.png",
+    "Metal2": "renders/36_0.png",
+    "SAB": "renders/49_0.png",
+    "Resistor": "renders/62_0.png",
+    "RES_MK": "renders/110_5.png",
+    "center_crop": "renders/center_crop/overview.png"
+  },
+  "spec_summary": {
+    "rows": [
+      {
+        "parameter": "Output frequency",
+        "target": "48.000 MHz",
+        "basis": "matches the crystal-less full-speed-USB precedent \u2014 ST `DS9826` Rev 6 Table 43 (`fHSI48` typ 48 MHz) and Silicon Labs CP2102N Rev 1.5 Table 3.5 (`fOSC` typ 48 MHz); explicit engineering choice, see DR-0002, citations verified in DR-0003"
+      },
+      {
+        "parameter": "Trim interface",
+        "target": "8-bit digital trim, \u00b140% range (28.8\u201367.2 MHz), 0.314%/code (150.6 kHz/code LSB), half-LSB \u00b10.157%, single-point trim at test",
+        "basis": "range covers the sourced untrimmed spread (required pull \u221232.3%/+38.4%) with margin; full arithmetic in DR-0003 \u00a7\"Row 2\""
+      },
+      {
+        "parameter": "Free-running, untrimmed (process spread, fixed T/V)",
+        "target": "\u00b135% first-order (\u221227.7%/+47.6% exact in frequency)",
+        "basis": "**sourced** from gf180mcu-pdk `docs/analog/spice/elec_specs/`: poly-resistor spread \u00b120% (\u00a75.1, \u00a76.1A/B) + MIM-cap spread \u00b115.33% (\u00a76.2(a)), summed worst-case as independent process modules \u2014 DR-0003"
+      },
+      {
+        "parameter": "Free-running, post-trim, **at calibration point** (T = 27 \u00b0C, process, VDD \u00b110%)",
+        "target": "**\u22122.9% / +2.0%** worst-case",
+        "basis": "quantization \u00b10.157% + trim-DAC mismatch \u00b10.300% + comparator offset \u00b10.300% (both still flagged assumptions) + the **measured** supply span at per-corner calibrated codes (\u22122.07%/+1.17%, campaign `sim/pvt/results/20260923T030125Z/`; the low-side comparator's supply slope is flattened by the complementary PMOS-input cell of issue #57 \u2014 delay share of the span 62\u201382% \u2192 7.6\u201333%, probe `sim/pvt/results/20260923T030905Z/` \u2014 so the residual is now dominated by the charge-path term) \u2014 DR-0017 supersedes DR-0016's \u22129.2%/+6.5% (which superseded DR-0003's \u00b11.1%). Against ST's shipped `ACC_HSI48` = \u22122.8/+2.9% at 25 \u00b0C: slightly looser on the low side (\u22122.9% vs \u22122.8%), tighter on the high side (+2.0% vs +2.9%); the charge-path supply term is the next lever"
+      },
+      {
+        "parameter": "Free-running, post-trim, **full temperature range** (\u221240\u2026+85 \u00b0C, VDD \u00b110%)",
+        "target": "**+8.8% / \u221210.8%** worst-case",
+        "basis": "gf180mcu's published poly-resistor TCR of \u22121200 ppm/K (\u00a76.1A), trimmed at 27 \u00b0C: \u0394R/R = \u22126.96% at +85 \u00b0C (58 K) so f rises +6.84%, \u0394R/R = +8.04% at \u221240 \u00b0C (67 K) so f falls \u22127.91%, plus the re-derived at-calibration figure above \u2014 DR-0017 (supersedes DR-0016's +13.4%/\u221217.1%; DR-0004 stands \u2014 no active TC compensation, the delay term is budgeted, not compensated \u2014 and closing the gap to USB compliance remains entirely the job of the runtime-disciplined row below)"
+      },
+      {
+        "parameter": "Runtime-disciplined (reserved, not designed)",
+        "target": "\u2264 \u00b10.25% (2,500 ppm) \u2014 USB full-speed compliance",
+        "basis": "USB 2.0 Rev 2.0 \u00a77.1.11 `TFDRATE`, verified verbatim; the clause covers temperature and supply, with no pre-/post-discipline distinction. Precedented by ST's CRS peripheral (`RM0091` Rev 10 \u00a77, SOF-based) and Silicon Labs' crystal-less USB parts \u2014 see DR-0003"
+      },
+      {
+        "parameter": "Supply",
+        "target": "3.3 V core (3.0\u20133.6 V)",
+        "basis": "explicit engineering choice, matches gf180mcu's 3.3V-primary flavor and sibling canary `gf180-bandgap`'s own supply scope"
+      },
+      {
+        "parameter": "Quiescent current (Iq)",
+        "target": "< 500 \u00b5A (running)",
+        "basis": "anchored to ST `DS9826` Rev 6 Table 43 `IDDA(HSI48)` = 312 \u00b5A typ / 350 \u00b5A max, with headroom for gf180mcu's older 180 nm node \u2014 DR-0003"
+      },
+      {
+        "parameter": "Startup time",
+        "target": "\u2264 10 \u00b5s to within trimmed accuracy",
+        "basis": "looser than the shipped precedent ST `DS9826` Rev 6 Table 43 `tsu(HSI48)` \u2264 6 \u00b5s max \u2014 DR-0002, citation verified in DR-0003"
+      },
+      {
+        "parameter": "Temperature range",
+        "target": "\u221240 \u00b0C to +85 \u00b0C (industrial)",
+        "basis": "explicit engineering choice, standard industrial MCU/oscillator range"
+      }
+    ],
+    "status_note": "RATIFIED 2026-08-20, see issues #1 and #3"
+  },
+  "source": {
+    "repo": "2AMLogic/gf180-rcosc",
+    "ref": "bfb4f539cb0b796a53d4129f2641bacb412c1d99",
+    "path": "layout/cells/rcosc_bias.gds"
+  },
+  "downloadable": true,
+  "status": "ok"
+}

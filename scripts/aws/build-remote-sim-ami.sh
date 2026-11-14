@@ -150,12 +150,12 @@ KLT_REF="$(cd "$REPO_ROOT" && git rev-parse HEAD 2>/dev/null || echo main)"
 PDK_ROOT="/opt/pdk"
 #: Pinned open_pdks build the AMI bakes -- the same snapshot the local
 #: ~/.volare installs and the canary block repos pin (decision 4:
-#: reproducible, never "whatever volare's latest is at build time").
+#: reproducible, never "whatever ciel's latest is at build time").
 #: Override with --pdk-version for a deliberate refresh. Used by the
 #: sky130A/gf180mcu branches of PDK_FETCH_CMDS only -- SG13G2 is not on
 #: volare's feed at all (see SG13G2_PDK_SNAPSHOT_PREFIX below), so it never
 #: reads this variable.
-PDK_VERSION="c6d73a35f524070e85faff4a6a9eef49553ebc2b"
+PDK_VERSION="f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7"
 #: SG13G2 snapshot-pinning decision (issue #2573, acceptance criterion 4):
 #: unlike PDK_VERSION above, SG13G2 has no single upstream commit/tag this
 #: script pins directly. Its recipe (the sg13g2 PDK_FETCH_CMDS branch below)
@@ -352,10 +352,10 @@ esac
 # build instance's own user-data shell (BUILD_USERDATA below), not here.
 case "$PDK" in
   sky130A)
-    PDK_FETCH_CMDS='PIP_BREAK_SYSTEM_PACKAGES=1 pip install volare && PDK_ROOT="'"${PDK_ROOT}"'" volare enable --pdk sky130 '"${PDK_VERSION}"''
+    PDK_FETCH_CMDS='PIP_BREAK_SYSTEM_PACKAGES=1 pip install ciel==2.6.1 && PDK_ROOT="'"${PDK_ROOT}"'" ciel enable --pdk-family sky130 -l sky130_fd_pr -l sky130_fd_sc_hd '"${PDK_VERSION}"''
     ;;
   gf180mcu)
-    PDK_FETCH_CMDS='PIP_BREAK_SYSTEM_PACKAGES=1 pip install volare && PDK_ROOT="'"${PDK_ROOT}"'" volare enable --pdk gf180mcu '"${PDK_VERSION}"''
+    PDK_FETCH_CMDS='PIP_BREAK_SYSTEM_PACKAGES=1 pip install ciel==2.6.1 && PDK_ROOT="'"${PDK_ROOT}"'" ciel enable --pdk-family gf180mcu -l gf180mcu_fd_pr -l gf180mcu_fd_sc_mcu9t5v0 '"${PDK_VERSION}"''
     ;;
   sg13g2)
     # A second, independent `git clone` of this repo (distinct from the

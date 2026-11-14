@@ -37,6 +37,7 @@ Three tiers:
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -847,14 +848,14 @@ def test_run_synthesize_stubbed_success(tmp_path, monkeypatch):
     # The fabricated `_make_pdk_install` liberty carries no
     # `cell_leakage_power` entries at all (issue #1626) -- `_compute_leakage`
     # must degrade to `None`/`None`, never a fabricated/partial number.
-    assert report["leakage_power_nw"] is None
-    assert report["leakage_by_type_nw"] is None
+    assert report["leakage_power_nw"] is report["leakage_by_type_nw"] is None
 
     assert report["timing"] == {
         "source": "abc_stime",
         "wire_load": None,
         "critical_path_ps": 2485.93,
         "delay_target_ps": None,
+        "regions": [{"module": None, "critical_path_ps": 2485.93}],
     }
 
     # The `sta` field (issue #925) always exists in the response shape, but
@@ -947,6 +948,62 @@ def test_repo_relative_paths_resolve_absent_outside_any_repo(
     # `run_script_path`, being another path outside any repo, degrades to the
     # same `external` shape rather than leaking the absolute path.
     assert report["run_script_path"] == {"path": None, "scope": "external"}
+
+
+def test_external_scope_still_writes_artifacts_under_request_dir_run_id(
+    tmp_path_factory, monkeypatch
+):
+    """Issue #4550: `external` only redacts the reported path. The netlist
+    still lands in `<request dir>/.klt/synthesize/<run_id>/`, which a caller
+    can reconstruct from the response's `run_id`."""
+    no_repo_dir = tmp_path_factory.mktemp("no-repo-artifacts")
+    assert env_provenance.find_repo_root(str(no_repo_dir)) is None
+
+    _isolate_pdk(monkeypatch, no_repo_dir)
+    install_root = no_repo_dir / "install"
+    _make_pdk_install(install_root, "sky130A")
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(no_repo_dir / "gcd.v", _GCD_RTL)
+    request_path = _write_request(no_repo_dir / "request.json", _base_request())
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert report["netlist_path"] == {"path": None, "scope": "external"}
+    run_dir = no_repo_dir / ".klt" / "synthesize" / report["run_id"]
+    assert run_dir.is_dir()
+    netlist = run_dir / "gcd_synth.v"
+    assert netlist.is_file() and netlist.stat().st_size > 0
+    digest = hashlib.sha256(netlist.read_bytes()).hexdigest()
+    assert report["netlist_sha256"] == digest
+
+
+@pytest.mark.parametrize("marker", ["dir", "file"])
+def test_git_marker_in_request_dir_gives_repo_scope(
+    tmp_path_factory, monkeypatch, marker
+):
+    """Issue #4550: a `.git` directory or a `.git` file (git worktree) in the
+    request's directory makes the reported paths `scope: "repo"`."""
+    repo_dir = tmp_path_factory.mktemp("marked-repo")
+    if marker == "dir":
+        (repo_dir / ".git").mkdir()
+    else:
+        (repo_dir / ".git").write_text("gitdir: /elsewhere\n", encoding="utf-8")
+
+    _isolate_pdk(monkeypatch, repo_dir)
+    install_root = repo_dir / "install"
+    _make_pdk_install(install_root, "sky130A")
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(repo_dir / "gcd.v", _GCD_RTL)
+    request_path = _write_request(repo_dir / "request.json", _base_request())
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert report["netlist_path"]["scope"] == "repo"
+    assert report["netlist_path"]["path"] == (
+        f".klt/synthesize/{report['run_id']}/gcd_synth.v"
+    )
 
 
 def test_json_response_and_generated_script_are_leak_free_inside_a_repo(
@@ -1569,6 +1626,16 @@ def test_liberty_cell_names_quoted_and_malformed(tmp_path):
     # Unclosed library: cannot establish the cell list -> None, not a guess.
     unclosed = _write(tmp_path / "u.lib", "library (x) {\n cell (a) {\n }\n")
     assert synthesize._liberty_cell_names(unclosed) is None
+
+
+def test_liberty_cell_names_survives_missing_semicolon_before_group(tmp_path):
+    lib = _write(
+        tmp_path / "m.lib",
+        "library (x) {\n cell (A) {\n area : 0.23\n"
+        " pg_pin (VDD) { pg_type : primary_power ; }\n }\n"
+        " cell (B) {\n }\n cell (C) {\n }\n}\n",
+    )
+    assert synthesize._liberty_cell_names(lib) == frozenset({"A", "B", "C"})
 
 
 def test_compute_leakage_unreadable_liberty_degrades_to_none(tmp_path):
@@ -6260,9 +6327,7 @@ def _macro_success_env(tmp_path, monkeypatch, *, macros, liberty_cells=None) -> 
             + "  }\n"
             for cell, area in liberty_cells.items()
         )
-        liberty_path.write_text(
-            liberty_path.read_text(encoding="utf-8") + blocks, encoding="utf-8"
-        )
+        _append_to_library(liberty_path, blocks)
     return _write_request(tmp_path / "request.json", _base_request(macros=macros))
 
 
@@ -6300,16 +6365,21 @@ def test_macro_with_liberty_emits_read_liberty_lib_before_hierarchy(
     report = run_synthesize(request_path)
 
     lines = _script_lines(_main_script_path(request_path))
-    macro_line = next(line for line in lines if line.startswith("read_liberty -lib "))
-    assert macro_line.endswith("sram_8x8_tt.lib")
+    macro_line = next(
+        line
+        for line in lines
+        if line.startswith("read_liberty -lib ") and line.endswith("sram_8x8_tt.lib")
+    )
     hierarchy_index = next(
         i for i, line in enumerate(lines) if line.startswith("hierarchy ")
     )
     assert lines.index(macro_line) < hierarchy_index
-    # The standard-cell liberty is still loaded the way it always was --
-    # via `dfflibmap -liberty`/`abc -liberty`. The only `read_liberty` in
-    # the script is the macro's, and it always carries `-lib`.
-    assert [line for line in lines if line.startswith("read_liberty")] == [macro_line]
+    # Issue #4205: the standard-cell liberty is also read with `-lib` (as
+    # cell definitions), so the script carries exactly two `read_liberty`
+    # lines -- the std-cell one first, then the macro's.
+    read_liberty_lines = [line for line in lines if line.startswith("read_liberty")]
+    assert len(read_liberty_lines) == 2
+    assert read_liberty_lines[-1] == macro_line
 
     assert report["macros"][0]["cell"] == "sram_8x8"
     assert report["macros"][0]["blackbox_source"] == "liberty"
@@ -6384,7 +6454,12 @@ def test_no_macros_field_emits_no_macro_lines(tmp_path, monkeypatch):
     assert report["macro_instance_count"] == 0
     assert report["macro_instance_counts_by_type"] == {}
     lines = _script_lines(_main_script_path(request_path))
-    assert not any("-lib " in line for line in lines)
+    # Only the single std-cell `read_liberty -lib` (issue #4205) is present.
+    assert not any(line.startswith("read_verilog -lib") for line in lines)
+    assert [line for line in lines if "-lib " in line] == [
+        line for line in lines if line.startswith("read_liberty -lib ")
+    ]
+    assert len([line for line in lines if "-lib " in line]) == 1
 
 
 def test_macro_rejected_when_its_lef_is_missing(tmp_path, monkeypatch):
@@ -6513,6 +6588,25 @@ def test_cells_without_area_reports_types_when_every_parsed_cell_lacks_area(
     assert missing == ["BUF", "sram"]
     warning = synthesize._macro_area_warning(missing, frozenset({"sram"}))
     assert "macro_area_excluded" in warning
+
+
+def test_macro_area_warning_does_not_point_a_lef_only_macro_at_its_lib():
+    """Issue #4368: `response.macros[].lib` is null for a LEF-only macro, so
+    the text must not tell the caller to add its area from there."""
+    warning = synthesize._macro_area_warning(
+        ["lef_only", "with_lib"],
+        frozenset({"lef_only", "with_lib"}),
+        macros_with_lib=frozenset({"with_lib"}),
+    )["macro_area_excluded"]
+    assert "Add the area of with_lib from its macro liberty" in warning
+    assert "lef_only has no macro liberty" in warning
+    assert "Add the area of lef_only" not in warning
+
+    only_lef = synthesize._macro_area_warning(
+        ["lef_only"], frozenset({"lef_only"}), macros_with_lib=frozenset()
+    )["macro_area_excluded"]
+    assert "Add" not in only_lef
+    assert "no area is available" in only_lef
 
 
 def test_cells_without_area_is_null_when_the_liberty_declares_no_cells(
@@ -7202,3 +7296,148 @@ def test_integration_real_yosys_library_cell_instance_needs_no_stub(
     assert report["instance_count"] == 1
     assert report["area_um2"] > 0
     assert report["blackbox_modules"] == []
+
+
+# --- constraints.abc_constr (issue #4662) ------------------------------------
+
+
+def _abc_constr_text(report: dict, tmp_path: Path) -> str:
+    script = _abs_path(report["script_path"], tmp_path)
+    return (Path(script).parent / "gcd_abc.constr").read_text(encoding="utf-8")
+
+
+def test_request_abc_constr_enables_constr_on_a_library_without_one(
+    tmp_path, monkeypatch
+):
+    """`constraints.abc_constr` gives a library with no built-in entry
+    `-constr`, and the capability warning no longer claims it was skipped."""
+    cell_library = "asap7sc7p5t_rvt"
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(
+        install_root,
+        "asap7A",
+        cell_library=cell_library,
+        corners=(("tt_025C_1v80", 1.0, 25.0, 1.8),),
+    )
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(tmp_path / "gcd.v", _GCD_RTL)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(
+            pdk={"cell_library": cell_library, "corner": "tt_025C_1v80"},
+            constraints={
+                "abc_constr": {"driving_cell": "BUFx2_ASAP7_75t_R", "load_ff": 3.5}
+            },
+        ),
+    )
+    _stub_yosys_success(monkeypatch)
+
+    assert cell_library not in synthesize._ABC_CONSTR_INPUTS
+    report = run_synthesize(request_path)
+
+    abc_line = _script_abc_line(_abs_path(report["script_path"], tmp_path))
+    assert "-constr " in abc_line
+    assert _abc_constr_text(report, tmp_path) == (
+        "set_driving_cell BUFx2_ASAP7_75t_R\nset_load 3.5\n"
+    )
+    assert report["abc_constr"] == {
+        "source": "request",
+        "driving_cell": "BUFx2_ASAP7_75t_R",
+        "load_ff": 3.5,
+    }
+    assert "ABC -constr" not in json.dumps(report["warnings"])
+
+
+def test_request_abc_constr_overrides_the_builtin_entry(tmp_path, monkeypatch):
+    request_path = _setup_dont_use_env(
+        tmp_path,
+        monkeypatch,
+        {
+            "abc_constr": {
+                "driving_cell": "sky130_fd_sc_hd__o21a_2",
+                "load_ff": 12,
+            }
+        },
+    )
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert _abc_constr_text(report, tmp_path) == (
+        "set_driving_cell sky130_fd_sc_hd__o21a_2\nset_load 12\n"
+    )
+    assert report["abc_constr"]["source"] == "request"
+
+
+def test_abc_constr_absent_reports_builtin_source(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    driving_cell, load_ff = synthesize._ABC_CONSTR_INPUTS["sky130_fd_sc_hd"]
+    assert report["abc_constr"] == {
+        "source": "builtin",
+        "driving_cell": driving_cell,
+        "load_ff": load_ff,
+    }
+    assert _abc_constr_text(report, tmp_path) == (
+        f"set_driving_cell {driving_cell}\nset_load {load_ff:g}\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("abc_constr", "message"),
+    [
+        ("BUFx2", r"abc_constr must be a JSON object"),
+        ({"load_ff": 3}, r"abc_constr\.driving_cell is required"),
+        (
+            {"driving_cell": "sky130_fd_sc_hd__o21a_2"},
+            r"abc_constr\.load_ff is required",
+        ),
+        (
+            {"driving_cell": "sky130_fd_sc_hd__o21a_2", "load_ff": 1, "x": 1},
+            r"abc_constr has unknown key",
+        ),
+        (
+            {"driving_cell": "no_such_cell", "load_ff": 1},
+            r"abc_constr\.driving_cell 'no_such_cell' is not a cell",
+        ),
+        ({"driving_cell": "", "load_ff": 1}, r"abc_constr\.driving_cell must be"),
+        (
+            {"driving_cell": "sky130_fd_sc_hd__o21a_2", "load_ff": 0},
+            r"abc_constr\.load_ff must be",
+        ),
+        (
+            {"driving_cell": "sky130_fd_sc_hd__o21a_2", "load_ff": -2},
+            r"abc_constr\.load_ff must be",
+        ),
+        (
+            {"driving_cell": "sky130_fd_sc_hd__o21a_2", "load_ff": float("nan")},
+            r"abc_constr\.load_ff must be",
+        ),
+        (
+            {"driving_cell": "sky130_fd_sc_hd__o21a_2", "load_ff": float("inf")},
+            r"abc_constr\.load_ff must be",
+        ),
+        (
+            {"driving_cell": "sky130_fd_sc_hd__o21a_2", "load_ff": True},
+            r"abc_constr\.load_ff must be",
+        ),
+        (
+            {"driving_cell": "sky130_fd_sc_hd__o21a_2", "load_ff": "3"},
+            r"abc_constr\.load_ff must be",
+        ),
+    ],
+)
+def test_request_abc_constr_rejects_invalid_values(
+    tmp_path, monkeypatch, abc_constr, message
+):
+    request_path = _setup_dont_use_env(
+        tmp_path, monkeypatch, {"abc_constr": abc_constr}
+    )
+    _stub_yosys_success(monkeypatch)
+
+    with pytest.raises(SynthesizeError, match=message):
+        run_synthesize(request_path)

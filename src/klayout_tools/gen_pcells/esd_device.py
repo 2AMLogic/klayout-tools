@@ -11,10 +11,98 @@ submodule only imports it, never the reverse).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import klayout.db as kdb
+
+
+def _declare_flavor_and_width_params(pcell: Any) -> None:
+    """Declare the user-facing ``voltage_flavor`` / ``total_width_um`` params
+    (issue #4299). ``pcell`` is untyped so the dynamic ``param`` attributes
+    don't add ``attr-defined`` diagnostics to ``type-baseline.json``."""
+    pcell.param(
+        "voltage_flavor",
+        pcell.TypeString,
+        "Optional thick-oxide/medium-voltage device-class marker: "
+        "'' (default, no marker drawn) or a name the resolved PDK "
+        "family's role-layer table recognises (e.g. 'hvi' on sky130, "
+        "'medium_voltage' on gf180mcu) -- see mos_array's equivalent "
+        "param. A name the family doesn't recognise draws nothing and "
+        "is reported via drc_hints.notes",
+        default="",
+    )
+    pcell.param(
+        "total_width_um",
+        pcell.TypeDouble,
+        "Optional total device width (um); 0.0 (default) means unset. "
+        "When given, fingers/finger_width_um are derived: the "
+        "smallest finger count whose equal split stays within the "
+        "per-finger cap. Cannot be combined with an explicit fingers "
+        "or finger_width_um",
+        default=0.0,
+    )
+
+
+def _declare_flavor_mark_params(pcell: Any, kdb: Any, default_margin_um: float) -> None:
+    """Declare the harness-resolved ``voltage_flavor`` marker layer params."""
+    pcell.param(
+        "voltage_flavor_mark_layer",
+        pcell.TypeLayer,
+        "Thick-oxide/medium-voltage device-class marker drawing "
+        "layer, sized to enclose the finger array (only used when "
+        "voltage_flavor_mark_present)",
+        default=kdb.LayerInfo(0, 0),
+    )
+    pcell.param(
+        "voltage_flavor_mark_present",
+        pcell.TypeBoolean,
+        "Whether voltage_flavor_mark_layer is a real layer resolved "
+        "for params.voltage_flavor on this PDK family",
+        default=False,
+    )
+    pcell.param(
+        "voltage_flavor_extra_mark_layer",
+        pcell.TypeLayer,
+        "Second voltage_flavor marker layer drawn over the same box "
+        "(only used when voltage_flavor_extra_mark_present)",
+        default=kdb.LayerInfo(0, 0),
+    )
+    pcell.param(
+        "voltage_flavor_extra_mark_present",
+        pcell.TypeBoolean,
+        "Whether voltage_flavor_extra_mark_layer is a real layer "
+        "resolved for params.voltage_flavor on this PDK family",
+        default=False,
+    )
+    pcell.param(
+        "voltage_flavor_mark_margin_um",
+        pcell.TypeDouble,
+        "Harness-resolved margin the voltage_flavor marker box grows "
+        "beyond the finger array's active footprint",
+        default=default_margin_um,
+    )
+
+
+def _voltage_flavor_margin(pcell: Any) -> float:
+    return float(pcell.voltage_flavor_mark_margin_um)
+
+
+def _insert_voltage_flavor_marks(
+    pcell: Any, dbu: float, mark_box: tuple[float, float, float, float]
+) -> None:
+    """Draw the optional ``voltage_flavor`` marker (issue #4299): one box
+    enclosing the finger array, plus the second marker layer some flavours
+    need over the same box. Mirrors ``mos_array``."""
+    from klayout_tools.gen import _insert_boxes
+
+    if not pcell.voltage_flavor_mark_present:
+        return
+    layers = [pcell.voltage_flavor_mark_layer]
+    if pcell.voltage_flavor_extra_mark_present:
+        layers.append(pcell.voltage_flavor_extra_mark_layer)
+    for layer in layers:
+        _insert_boxes(pcell.cell, pcell.layout.layer(layer), dbu, [mark_box])
 
 
 def _build_esd_device_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
@@ -33,6 +121,7 @@ def _build_esd_device_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
     from klayout_tools.gen import (
         GATE_LENGTH_SAFE_MIN_UM,
         GUARD_RING_DEFAULT_PADDING_UM,
+        WELL_ENCLOSURE_MARGIN_UM,
         _clamp_cut_boxes,
         _esd_device_layout,
         _insert_boxes,
@@ -142,6 +231,7 @@ def _build_esd_device_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "role comments in _PDK_ROLE_LAYERS)",
                 default=False,
             )
+            _declare_flavor_and_width_params(self)
             self.param(
                 "active_layer",
                 self.TypeLayer,
@@ -198,6 +288,7 @@ def _build_esd_device_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Whether salicide_block_layer is a real layer this PDK family cites",
                 default=False,
             )
+            _declare_flavor_mark_params(self, kdb, WELL_ENCLOSURE_MARGIN_UM)
             self.param(
                 "contact_gate_offset_um",
                 self.TypeDouble,
@@ -312,6 +403,7 @@ def _build_esd_device_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.bottom_endcap_um,
                 self.sd_implant_margin_um if self.sd_implant_present else 0.0,
                 top_endcap_um=self.top_endcap_um,
+                voltage_flavor_mark_margin_um=_voltage_flavor_margin(self),
             )
             unit_boxes = info["unit"]["boxes_um"]
             for role, li in (
@@ -336,6 +428,11 @@ def _build_esd_device_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             if self.esd_mark_present:
                 li_mark = self.layout.layer(self.esd_mark_layer)
                 _insert_boxes(self.cell, li_mark, dbu, unit_boxes["active"])
+
+            # Optional `voltage_flavor` marker (issue #4299): mirrors
+            # mos_array -- one box enclosing the finger array, plus the
+            # second marker layer some flavours need over the same box.
+            _insert_voltage_flavor_marks(self, dbu, info["voltage_flavor_mark_box_um"])
 
             if self.salicide_block and self.salicide_block_present:
                 li_block = self.layout.layer(self.salicide_block_layer)

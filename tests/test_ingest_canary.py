@@ -56,12 +56,15 @@ def _have_gh_network() -> bool:
     binary that is at least unauthenticated-usable for public repo reads)."""
     if shutil.which("gh") is None:
         return False
-    result = subprocess.run(
-        ["gh", "api", "repos/2AMLogic/klayout-tools", "--jq", ".visibility"],
-        capture_output=True,
-        text=True,
-        timeout=15,
-    )
+    try:
+        result = subprocess.run(
+            ["gh", "api", "repos/2AMLogic/klayout-tools", "--jq", ".visibility"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return False
     return result.returncode == 0 and result.stdout.strip() == "public"
 
 
@@ -70,6 +73,40 @@ _SKIP_NO_NETWORK = pytest.mark.skipif(
     not HAVE_GH_NETWORK,
     reason="gh CLI + network access to GitHub not available in this environment",
 )
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [subprocess.TimeoutExpired(cmd="gh", timeout=15), OSError("spawn failed")],
+)
+def test_have_gh_network_false_on_probe_failure(monkeypatch, exc):
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/gh")
+
+    def _raise(*args, **kwargs):
+        raise exc
+
+    monkeypatch.setattr(subprocess, "run", _raise)
+    assert _have_gh_network() is False
+
+
+def test_have_gh_network_true_on_public(monkeypatch):
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/gh")
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout="public\n", stderr=""),
+    )
+    assert _have_gh_network() is True
+
+
+def test_have_gh_network_false_on_nonzero_exit(monkeypatch):
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/gh")
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(a, 1, stdout="", stderr="err"),
+    )
+    assert _have_gh_network() is False
 
 
 # --------------------------------------------------------------------------- #
@@ -523,6 +560,78 @@ def test_no_gds_yields_in_design_status(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# clone_repo transient-network retry (mocked)
+# --------------------------------------------------------------------------- #
+
+
+def _cp(returncode, stderr="", stdout=""):
+    return subprocess.CompletedProcess([], returncode, stdout=stdout, stderr=stderr)
+
+
+def test_clone_repo_retries_transient_clone_failure(tmp_path, monkeypatch):
+    clones = []
+    sleeps = []
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:2] == ["git", "clone"]:
+            clones.append(cmd)
+            dest = Path(cmd[-1])
+            # A real failed clone can leave a partial dir; a retry must find it gone.
+            assert not dest.exists()
+            dest.mkdir(parents=True)
+            if len(clones) == 1:
+                return _cp(128, "fatal: Failure when receiving data from the peer")
+            return _cp(0)
+        if "rev-parse" in cmd:
+            return _cp(0, stdout="abc123\n")
+        return _cp(0)
+
+    monkeypatch.setattr(ic.subprocess, "run", fake_run)
+    monkeypatch.setattr(ic, "_sleep", sleeps.append)
+    repo_dir, sha = ic.clone_repo("2AMLogic/x", tmp_path / "cache", None)
+    assert repo_dir == tmp_path / "cache" / "x"
+    assert sha == "abc123"
+    assert len(clones) == 2
+    assert len(sleeps) == 1
+
+
+def test_clone_repo_raises_after_all_attempts_fail(tmp_path, monkeypatch):
+    clones = []
+
+    def fake_run(cmd, **kwargs):
+        clones.append(cmd)
+        return _cp(128, "fatal: repository not found")
+
+    monkeypatch.setattr(ic.subprocess, "run", fake_run)
+    monkeypatch.setattr(ic, "_sleep", lambda s: None)
+    with pytest.raises(
+        ic.IngestError,
+        match=r"git clone failed for 2AMLogic/x: fatal: repository not found",
+    ):
+        ic.clone_repo("2AMLogic/x", tmp_path / "cache", None)
+    assert len(clones) == ic.GIT_NETWORK_ATTEMPTS
+
+
+def test_clone_repo_retries_fetch_on_cached_path(tmp_path, monkeypatch):
+    (tmp_path / "cache" / "x").mkdir(parents=True)
+    fetches = []
+
+    def fake_run(cmd, **kwargs):
+        if "fetch" in cmd:
+            fetches.append(cmd)
+            return _cp(1, "transient") if len(fetches) == 1 else _cp(0)
+        if "rev-parse" in cmd:
+            return _cp(0, stdout="def456\n")
+        return _cp(0)
+
+    monkeypatch.setattr(ic.subprocess, "run", fake_run)
+    monkeypatch.setattr(ic, "_sleep", lambda s: None)
+    _, sha = ic.clone_repo("2AMLogic/x", tmp_path / "cache", None)
+    assert sha == "def456"
+    assert len(fetches) == 2
+
+
+# --------------------------------------------------------------------------- #
 # Integration: real network + gh CLI
 # --------------------------------------------------------------------------- #
 
@@ -633,3 +742,191 @@ def test_full_ingest_real_public_canary_with_layout(tmp_path, repo):
     # source.path records exactly which file within the source repo this
     # came from, not just "somewhere in the repo".
     assert layout["source"]["path"].endswith(layout["layout_file"])
+
+
+# --------------------------------------------------------------------------- #
+# Manifest mode (issue #4565)
+# --------------------------------------------------------------------------- #
+
+
+def _write_manifest(tmp_path, entries):
+    path = tmp_path / "canaries.json"
+    path.write_text(json.dumps(entries))
+    return path
+
+
+def _entry(name, ref=None):
+    return {"repo": f"2AMLogic/{name}", "slug": name, "pdk": "sky130", "ref": ref}
+
+
+def _fake_ingest(failing=()):
+    calls = []
+
+    def fake(repo, **kwargs):
+        calls.append((repo, kwargs))
+        if repo in failing:
+            raise ic.IngestError(f"{repo} is not public")
+        return {"slug": kwargs["slug"], "status": "ok"}
+
+    return fake, calls
+
+
+def test_manifest_all_ok(tmp_path, monkeypatch, capsys):
+    fake, calls = _fake_ingest()
+    monkeypatch.setattr(ic, "ingest", fake)
+    manifest = _write_manifest(
+        tmp_path, [_entry("sky130-a"), _entry("sky130-b", "abc")]
+    )
+    assert ic.main(["--manifest", str(manifest), "--dry-run"]) == 0
+    assert [c[0] for c in calls] == ["2AMLogic/sky130-a", "2AMLogic/sky130-b"]
+    assert calls[1][1]["ref"] == "abc"
+    assert calls[1][1]["pdk"] == "sky130"
+    assert "sky130-a: would write" in capsys.readouterr().out
+
+
+def test_manifest_one_private_does_not_stop_others(tmp_path, monkeypatch, capsys):
+    fake, calls = _fake_ingest(failing={"2AMLogic/sky130-a"})
+    monkeypatch.setattr(ic, "ingest", fake)
+    manifest = _write_manifest(tmp_path, [_entry("sky130-a"), _entry("sky130-b")])
+    assert ic.main(["--manifest", str(manifest), "--dry-run"]) == 1
+    assert len(calls) == 2
+    captured = capsys.readouterr()
+    assert "sky130-a: FAILED" in captured.err
+    assert "sky130-b: would write" in captured.out
+
+
+def test_manifest_gate_refusal_is_reported_and_writes_nothing(tmp_path, monkeypatch):
+    monkeypatch.setattr(ic, "repo_visibility", lambda repo: "private")
+    blocks_dir = tmp_path / "blocks"
+    manifest = _write_manifest(tmp_path, [_entry("sky130-a")])
+    rc = ic.main(
+        [
+            "--manifest",
+            str(manifest),
+            "--blocks-dir",
+            str(blocks_dir),
+            "--cache-dir",
+            str(tmp_path / "cache"),
+        ]
+    )
+    assert rc == 1
+    assert not blocks_dir.exists()
+
+
+def test_manifest_one_failing_unexpected_ingest_error(tmp_path, monkeypatch):
+    def fake(repo, **kwargs):
+        if repo.endswith("sky130-b"):
+            raise ic.IngestError("clone failed")
+        return {"slug": kwargs["slug"], "status": "ok"}
+
+    monkeypatch.setattr(ic, "ingest", fake)
+    manifest = _write_manifest(tmp_path, [_entry("sky130-a"), _entry("sky130-b")])
+    results = ic.ingest_manifest(ic.load_manifest(manifest))
+    assert [r[2] for r in results] == [None, "clone failed"]
+
+
+def test_manifest_empty_is_ok(tmp_path):
+    manifest = _write_manifest(tmp_path, [])
+    assert ic.main(["--manifest", str(manifest), "--dry-run"]) == 0
+
+
+def test_manifest_duplicate_slugs_rejected(tmp_path):
+    manifest = _write_manifest(tmp_path, [_entry("sky130-a"), _entry("sky130-a")])
+    with pytest.raises(ic.IngestError, match="duplicate slug"):
+        ic.load_manifest(manifest)
+    assert ic.main(["--manifest", str(manifest)]) == 1
+
+
+def test_manifest_malformed_rejected(tmp_path):
+    bad = tmp_path / "bad.json"
+    bad.write_text("{}")
+    with pytest.raises(ic.IngestError):
+        ic.load_manifest(bad)
+    with pytest.raises(ic.IngestError):
+        ic.load_manifest(tmp_path / "missing.json")
+
+
+def test_repo_and_manifest_are_exclusive(tmp_path):
+    manifest = _write_manifest(tmp_path, [])
+    with pytest.raises(SystemExit):
+        ic.main(["--manifest", str(manifest), "--repo", "2AMLogic/x"])
+    with pytest.raises(SystemExit):
+        ic.main([])
+
+
+def test_shipped_manifest_is_valid_and_forge_derived():
+    entries = ic.load_manifest(
+        Path(__file__).parent.parent / "blocks" / "canaries.json"
+    )
+    slugs = [e["slug"] for e in entries]
+    assert {"gf180-bandgap", "sky130-bandgap"} <= set(slugs)
+    assert slugs == sorted(slugs)
+    for e in entries:
+        assert e["repo"] == f"2AMLogic/{e['slug']}"
+        assert e["slug"].startswith(tuple(ic.CANARY_PDK_PREFIXES))
+
+
+def test_rewrite_over_unchanged_content_keeps_file(tmp_path, monkeypatch):
+    """Idempotency: only `generated_at` differs -> file left untouched."""
+    monkeypatch.setattr(ic, "assert_public_repo", lambda repo: None)
+    monkeypatch.setattr(ic, "clone_repo", lambda repo, cache, ref: (tmp_path, "sha1"))
+    stamp = iter(["t1", "t2"])
+    monkeypatch.setattr(
+        ic,
+        "build_layout_json",
+        lambda *a, **k: {"slug": "x", "status": "ok", "generated_at": next(stamp)},
+    )
+    blocks = tmp_path / "blocks"
+    ic.ingest("2AMLogic/x", blocks_dir=blocks, cache_dir=tmp_path / "c")
+    before = (blocks / "x/output/layout.json").read_text()
+    ic.ingest("2AMLogic/x", blocks_dir=blocks, cache_dir=tmp_path / "c")
+    assert (blocks / "x/output/layout.json").read_text() == before
+
+
+# --------------------------------------------------------------------------- #
+# Manifest drift check / sync (issue #4642)
+# --------------------------------------------------------------------------- #
+
+
+def test_check_manifest_clean(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(ic, "list_public_repos", lambda *a: ["sky130-a", "docs"])
+    manifest = _write_manifest(tmp_path, [_entry("sky130-a")])
+    assert ic.main(["--check-manifest", "--manifest", str(manifest)]) == 0
+
+
+def test_check_manifest_missing_public_canary(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(ic, "list_public_repos", lambda *a: ["sky130-a", "sky130-b"])
+    manifest = _write_manifest(tmp_path, [_entry("sky130-a")])
+    assert ic.main(["--check-manifest", "--manifest", str(manifest)]) == 1
+    assert "2AMLogic/sky130-b is not in the manifest" in capsys.readouterr().err
+
+
+def test_check_manifest_listed_repo_no_longer_public(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(ic, "list_public_repos", lambda *a: ["sky130-a"])
+    manifest = _write_manifest(tmp_path, [_entry("sky130-a"), _entry("sky130-b")])
+    assert ic.main(["--check-manifest", "--manifest", str(manifest)]) == 1
+    assert "2AMLogic/sky130-b is no longer public" in capsys.readouterr().err
+
+
+def test_check_manifest_forge_failure_is_not_a_pass(tmp_path, monkeypatch):
+    def boom(*a):
+        raise ic.IngestError("gh failed")
+
+    monkeypatch.setattr(ic, "list_public_repos", boom)
+    manifest = _write_manifest(tmp_path, [_entry("sky130-a")])
+    assert ic.main(["--check-manifest", "--manifest", str(manifest)]) == 1
+
+
+def test_sync_manifest_keeps_pins_and_maps_pdk(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        ic,
+        "list_public_repos",
+        lambda *a: ["sky130-a", "asap7-x", "gf180-y", "sg13cmos5l-z", "other"],
+    )
+    manifest = _write_manifest(tmp_path, [_entry("sky130-a", "abc")])
+    assert ic.main(["--sync-manifest", "--manifest", str(manifest)]) == 0
+    got = {e["slug"]: e for e in json.loads(manifest.read_text())}
+    assert set(got) == {"sky130-a", "asap7-x", "gf180-y", "sg13cmos5l-z"}
+    assert got["sky130-a"]["ref"] == "abc"
+    assert got["gf180-y"]["pdk"] == "gf180mcu"
+    assert got["asap7-x"]["pdk"] is None

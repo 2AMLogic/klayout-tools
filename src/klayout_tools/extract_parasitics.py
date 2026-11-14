@@ -864,10 +864,10 @@ def _resistance_graph_report(
     :class:`~klayout_tools.extract_resistance_graph.TerminalResistanceMatrix`
     as-is; ``legacy_resistance_ohm`` is the unchanged series-sum scalar.
 
-    ``r_cut_ohm`` is the per-cut via/contact resistance; the shipped decks
-    curate none, so ``_compute_parasitics`` passes ``None`` and a net whose
-    graph contains a landing reports ``via_resistance_unknown``
-    (``status: "unsupported"``) instead of an assumed ideal via."""
+    ``r_cut_ohm`` is the caller's per-cut via/contact resistance, forwarded
+    from ``--resistance-graph-r-cut`` and ``None`` only without it, as ``klt
+    extract`` does not read the decks' ``ParasiticsDeck.cuts`` yet (#3053); a
+    landing then reports ``via_resistance_unknown`` (``unsupported``)."""
     from .extract_resistance_graph import (
         RoleInput,
         build_resistance_graph,

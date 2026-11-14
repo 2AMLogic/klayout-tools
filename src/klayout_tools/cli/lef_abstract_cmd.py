@@ -49,6 +49,7 @@ def run(args: argparse.Namespace) -> int:
             symmetry=args.symmetry.split() if args.symmetry else None,
             pdk_variant=args.pdk,
             pdk_root=args.pdk_root,
+            obs_mode=args.obs_mode,
         )
     except LefAbstractError as exc:
         return emit_error("lef-abstract", str(exc), args.format)
@@ -88,6 +89,7 @@ def _print_text(report: dict) -> None:
             f"{pin['layer'] or '(unresolved)'} [{pin['geometry_source']}]"
         )
 
+    print(f"obs_mode: {report['obs_mode']}")
     if report["obs"]:
         print()
         print("obs:")

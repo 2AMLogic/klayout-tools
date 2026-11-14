@@ -1438,6 +1438,54 @@ def test_floating_gate_does_not_flag_fully_strapped_gate(tmp_path):
     assert "GATE_A" not in floating_nets
 
 
+def _overlap_contact_fixture(path) -> None:
+    """A gate poly with a ``lig`` strap landing directly on it (no via
+    geometry at all), the strap labelled ``GATE_NET``."""
+    layout = kdb.Layout()
+    layout.dbu = DBU
+    top = layout.create_cell("TOP")
+    poly = layout.layer(1, 0)
+    lig = layout.layer(8, 0)
+    label = layout.layer(8, 5)
+    top.shapes(poly).insert(kdb.Box.new(_um(0), _um(0), _um(1), _um(1)))
+    top.shapes(lig).insert(kdb.Box.new(_um(0), _um(0), _um(2), _um(1)))
+    top.shapes(label).insert(kdb.Text("GATE_NET", kdb.Trans(_um(1.5), _um(0.5))))
+    layout.write(str(path))
+
+
+def _overlap_contact_spec(path, vias) -> None:
+    _write_spec(
+        path,
+        {
+            "stackup": [
+                {"name": "gate", "layer": "1/0", "role": "gate"},
+                {"name": "lig", "layer": "8/0", "label_layer": "8/5"},
+            ],
+            "vias": vias,
+        },
+    )
+
+
+def test_same_layer_via_expresses_via_less_overlap_contact(tmp_path):
+    """A `vias[]` entry whose `layer` is the upper role's own layer is the
+    supported form for a contact that is a plain overlap of two drawn layers
+    (issue #4541). Without it the gate floats; with it, it is connected."""
+    gds = tmp_path / "overlap.gds"
+    _overlap_contact_fixture(gds)
+
+    bare = tmp_path / "bare.erc.json"
+    _overlap_contact_spec(bare, [])
+    report = run_erc(str(gds), str(bare))
+    assert [f for f in report["erc_findings"] if f["rule"] == "erc.floating_gate"]
+
+    strapped = tmp_path / "strapped.erc.json"
+    _overlap_contact_spec(
+        strapped, [{"name": "gate_lig", "layer": "8/0", "between": ["gate", "lig"]}]
+    )
+    report = run_erc(str(gds), str(strapped))
+    assert not [f for f in report["erc_findings"] if f["rule"] == "erc.floating_gate"]
+
+
 # --- erc_findings: unconnected / multiply-driven net (issue #861) ------------
 
 
@@ -2441,6 +2489,77 @@ def test_extractor_global_net_is_not_reported_unconnected_and_is_disclosed(tmp_p
     assert 'erc.net_connectivity:["SUB"]' not in coverage["checked"]
     assert [n["name"] for n in report["nets"]] == ["VDD"]
     assert all(f["net"] != "SUB" for f in report["erc_findings"])
+
+
+def _supply_disclosure(report):
+    return [
+        e
+        for e in report["erc_coverage"]["inapplicable"]
+        if e["id"] == "erc.supply_short"
+    ]
+
+
+def test_two_supply_nets_disclose_substrate_isolation_undecidable(tmp_path):
+    layout, top, poly, li1, label = _nets_fixture_layout()
+    gds = tmp_path / "two.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "two.erc.json"
+    _write_spec(
+        spec,
+        _nets_spec(
+            nets=[
+                {"name": "VDD", "kind": "supply"},
+                {"name": "VDD2", "kind": "supply"},
+            ]
+        ),
+    )
+
+    report = run_erc(str(gds), str(spec))
+
+    [entry] = _supply_disclosure(report)
+    assert entry["reason"] == "substrate_isolation_undecidable"
+    assert "tap geometry" in entry["missing"][0]
+
+
+def test_fewer_than_two_supply_nets_emit_no_substrate_disclosure(tmp_path):
+    layout, top, poly, li1, label = _nets_fixture_layout()
+    gds = tmp_path / "one.gds"
+    layout.write(str(gds))
+    for name, nets in (
+        ("zero", []),
+        ("one", [{"name": "VDD", "kind": "supply"}]),
+        (
+            "signals",
+            [{"name": "A", "kind": "signal"}, {"name": "B", "kind": "signal"}],
+        ),
+    ):
+        spec = tmp_path / f"{name}.erc.json"
+        _write_spec(spec, _nets_spec(nets=nets))
+        report = run_erc(str(gds), str(spec))
+        assert _supply_disclosure(report) == [], name
+
+
+def test_substrate_disclosure_leaves_erc_status_unchanged(tmp_path):
+    layout, top, poly, li1, label = _nets_fixture_layout()
+    gds = tmp_path / "status.gds"
+    layout.write(str(gds))
+    base = tmp_path / "base.erc.json"
+    two = tmp_path / "two.erc.json"
+    _write_spec(base, _nets_spec(nets=[{"name": "VDD", "kind": "supply"}]))
+    _write_spec(
+        two,
+        _nets_spec(
+            nets=[
+                {"name": "VDD", "kind": "supply"},
+                {"name": "SUB", "kind": "supply", "extractor_global": True},
+            ]
+        ),
+    )
+
+    assert _supply_disclosure(run_erc(str(gds), str(two)))
+    assert (
+        run_erc(str(gds), str(two))["status"] == run_erc(str(gds), str(base))["status"]
+    )
 
 
 def test_same_net_without_extractor_global_is_still_reported(tmp_path):
@@ -8346,6 +8465,51 @@ def test_deck_still_names_an_undeclared_metal_level(tmp_path):
     assert report["erc_status"] == "clean"
 
 
+def _gf180mcu_with_extra_shapes(tmp_path, draw, **kwargs):
+    gds = tmp_path / "gf_extra.gds"
+    spec = tmp_path / "gf_extra.erc.json"
+    _gf180mcu_resistor_divider_fixture(gds)
+    layout = kdb.Layout()
+    layout.read(str(gds))
+    draw(layout, layout.top_cell())
+    layout.write(str(gds))
+    _write_spec(spec, _gf180mcu_resistor_divider_spec())
+    return run_erc(str(gds), str(spec), deck="gf180mcu", **kwargs)
+
+
+def test_deck_names_an_undeclared_label_purpose_carrying_text(tmp_path):
+    """A text on a purpose the spec declares as no `label_layer` reads as
+    absent; under `--deck` it must still be named (issue #4376), while a
+    shape-only marker layer stays suppressed and the field stays
+    reporting-only."""
+
+    def draw(layout, top):
+        top.shapes(layout.layer(36, 5)).insert(
+            kdb.Text("VDD", kdb.Trans(_um(1), _um(0.5)))
+        )
+        top.shapes(layout.layer(200, 0)).insert(
+            kdb.Box.new(_um(0), _um(0), _um(1), _um(1))
+        )
+
+    report = _gf180mcu_with_extra_shapes(tmp_path, draw)
+
+    assert report["erc_coverage"]["layers_in_stream_without_declaration"] == ["36/5"]
+    assert report["erc_status"] == "clean"
+
+
+def test_deck_undeclared_text_counts_in_child_cells_not_sibling_tops(tmp_path):
+    def draw(layout, top):
+        child = layout.create_cell("CHILD")
+        child.shapes(layout.layer(36, 5)).insert(kdb.Text("A", kdb.Trans(0, 0)))
+        top.insert(kdb.CellInstArray(child.cell_index(), kdb.Trans()))
+        sibling = layout.create_cell("SIBLING")
+        sibling.shapes(layout.layer(37, 5)).insert(kdb.Text("B", kdb.Trans(0, 0)))
+
+    report = _gf180mcu_with_extra_shapes(tmp_path, draw, top="TOP")
+
+    assert report["erc_coverage"]["layers_in_stream_without_declaration"] == ["36/5"]
+
+
 def test_cli_json_carries_undeclared_stream_layers(tmp_path, capsys):
     """The field reaches the JSON envelope (the contract), not just the
     in-process return value."""
@@ -8535,18 +8699,95 @@ def test_omit_antenna_tables_coverage_collapses_and_validates(tmp_path):
     assert cov["checked"] == full["coverage"]["checked"] == []
 
 
-def test_omit_antenna_tables_without_findings_only_raises(tmp_path):
+def test_omit_antenna_tables_without_findings_only_no_pdk(tmp_path, capsys):
+    from klayout_tools.coverage import coverage_validation_error
+
     gds = tmp_path / "basic.gds"
     spec = tmp_path / "basic.erc.json"
     _basic_fixture(gds)
     _basic_spec(spec)
 
-    with pytest.raises(ErcError, match="--findings-only"):
+    full = run_erc(str(gds), str(spec))
+    omitted = run_erc(str(gds), str(spec), omit_antenna_tables=True)
+
+    assert omitted["gates"] == []
+    assert omitted["gate_count"] == full["gate_count"] > 0
+    assert omitted["antenna_tables_omitted"] is True
+    cov = omitted["coverage"]
+    assert coverage_validation_error(cov) is None
+    assert [e["id"] for e in cov["skipped"]] == ["antenna:[]"]
+    assert [e["reason"] for e in cov["skipped"]] == ["missing_antenna_pdk"]
+    assert (
+        len([e for e in cov["inapplicable"] if e["reason"] == "gate_reference_level"])
+        == 1
+    )
+    for key in omitted:
+        if key in {"gates", "coverage", "antenna_tables_omitted"}:
+            continue
+        assert json.dumps(omitted[key], sort_keys=True) == json.dumps(
+            full[key], sort_keys=True
+        ), key
+    base = ["erc", str(gds), str(spec), "--format", "json"]
+    code_full = main(base)
+    code_omit = main([*base, "--omit-antenna-tables"])
+    capsys.readouterr()
+    assert code_omit == code_full
+
+
+def test_omit_antenna_tables_with_pdk_without_findings_only_raises(tmp_path):
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.erc.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+
+    with pytest.raises(ErcError, match="--pdk"):
+        run_erc(str(gds), str(spec), pdk="sky130", omit_antenna_tables=True)
+    assert (
+        main(
+            [
+                "erc",
+                str(gds),
+                str(spec),
+                "--pdk",
+                "sky130",
+                "--omit-antenna-tables",
+                "--format",
+                "json",
+            ]
+        )
+        == 1
+    )
+
+
+def test_omit_antenna_tables_graded_antenna_limits_raises(tmp_path):
+    gds = tmp_path / "basic.gds"
+    _basic_fixture(gds)
+    _basic_spec(tmp_path / "basic.erc.json")
+    spec = tmp_path / "limits.erc.json"
+    _limits_spec(spec, [_limit("met1", 100.0)])
+
+    with pytest.raises(ErcError, match="antenna_limits"):
         run_erc(str(gds), str(spec), omit_antenna_tables=True)
     assert (
         main(["erc", str(gds), str(spec), "--omit-antenna-tables", "--format", "json"])
         == 1
     )
+
+
+def test_omit_antenna_tables_rerun_replays(tmp_path):
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.erc.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+    report = tmp_path / "report.json"
+    report.write_text(
+        json.dumps(run_erc(str(gds), str(spec), omit_antenna_tables=True))
+    )
+
+    assert main(["erc", "--check", str(report), "--rerun", "--format", "json"]) in {
+        0,
+        4,
+    }
 
 
 def test_omit_antenna_tables_pdk_still_rejected(tmp_path):
@@ -8742,6 +8983,40 @@ def test_rerun_erc_report_replays_omit_antenna_tables(tmp_path):
 
     assert result["status"] == "match"
     assert result["drift"] == []
+
+
+def test_rerun_erc_report_ignores_build_provenance_commit_fields(tmp_path):
+    # Issue #4542: a report from a dev build differs from a fresh rerun only in
+    # the commit/reinstall handle behind klt_version -- tool churn, not drift.
+    _, _, report_path = _committed_erc_report(tmp_path)
+    report = json.loads(report_path.read_text())
+    report["provenance"]["klt_git_commit"] = "deadbeef"
+    report["provenance"]["klt_reinstall_spec"] = (
+        "git+https://example.invalid/x@deadbeef"
+    )
+    report_path.write_text(json.dumps(report))
+
+    result = erc.rerun_erc_report(str(report_path))
+
+    assert result["status"] == "match"
+    assert result["drift"] == []
+
+
+def test_rerun_erc_report_coverage_inapplicable_is_not_excluded(tmp_path):
+    # Issue #4542: erc_coverage.inapplicable is verdict-adjacent disclosure and
+    # deliberately stays in the rerun diff.
+    _, _, report_path = _committed_erc_report(tmp_path)
+    report = json.loads(report_path.read_text())
+    report["erc_coverage"]["inapplicable"] = [
+        *report["erc_coverage"].get("inapplicable", []),
+        {"check": "erc.supply_short", "reason": "substrate_continuity_not_modelled"},
+    ]
+    report_path.write_text(json.dumps(report))
+
+    result = erc.rerun_erc_report(str(report_path))
+
+    assert result["status"] == "drifted"
+    assert "erc_coverage.inapplicable" in {d["field"] for d in result["drift"]}
 
 
 def test_rerun_erc_report_names_verdict_drift(tmp_path):
@@ -9187,13 +9462,13 @@ def test_sg13g2_unlisted_role_stays_unchecked_and_partial(tmp_path):
     assert report["status"] == "not_checked"
 
 
-def test_unknown_pdk_error_lists_both_supported_pdks(tmp_path):
+def test_unknown_pdk_error_lists_all_supported_pdks(tmp_path):
     gds = tmp_path / "basic.gds"
     spec = tmp_path / "basic.erc.json"
     _basic_fixture(gds)
     _basic_spec(spec)
 
-    with pytest.raises(ErcError, match=r"supported: ihp-sg13g2, sky130"):
+    with pytest.raises(ErcError, match=r"supported: gf180mcu, ihp-sg13g2, sky130"):
         run_erc(str(gds), str(spec), pdk="nope")
 
 
@@ -9391,3 +9666,276 @@ def test_check_erc_report_external_file_is_unverifiable(tmp_path_factory):
     result = erc.check_erc_report(str(report_path))
 
     assert result["status"] != "match"
+
+
+# --- Issue #4373: well_requires_cells / well_excludes_cells ----------------
+# The cell-relative form of #2540's box selectors: the class of a drawn well
+# is named by the cell it is drawn in, evaluated in each instance's frame.
+
+
+def _hierarchical_two_class_layout():
+    """`_two_class_well_layout(marker=False)` with the base tub's well moved
+    out of the top cell into a `BASE_TUB` cell placed at the identity, so the
+    cell-name and box spellings grade identical geometry."""
+    layout, top = _two_class_well_layout(marker=False)
+    nwell = layout.layer(10, 0)
+    tub = kdb.Box.new(_um(3), _um(0.4), _um(6.5), _um(2.8))
+    for shape in list(top.shapes(nwell).each()):
+        if shape.bbox() == tub:
+            shape.delete()
+    sub = layout.create_cell("BASE_TUB")
+    sub.shapes(nwell).insert(tub)
+    top.insert(kdb.CellInstArray(sub.cell_index(), kdb.Trans()))
+    return layout
+
+
+def _run_hierarchical(tmp_path, stem, ties):
+    layout = _hierarchical_two_class_layout()
+    gds = tmp_path / f"{stem}.gds"
+    layout.write(str(gds))
+    spec = tmp_path / f"{stem}.erc.json"
+    _write_spec(spec, _routed_tie_spec(ties=ties))
+    return run_erc(str(gds), str(spec), pdk="sky130")
+
+
+def test_cell_selectors_match_the_equivalent_box_spec(tmp_path):
+    by_cell = _run_hierarchical(
+        tmp_path,
+        "cells",
+        _two_class_ties(
+            body_overrides={"well_excludes_cells": ["BASE_TUB"]},
+            base_overrides={"well_requires_cells": ["BASE_TUB"]},
+        ),
+    )
+    by_box = _run_two_class_well(
+        tmp_path,
+        "boxes",
+        _two_class_ties(
+            body_overrides={"well_excludes_boxes": [_BASE_TUB_BOX]},
+            base_overrides={"well_requires_boxes": [_BASE_TUB_BOX]},
+        ),
+        marker=False,
+    )
+
+    assert by_cell["erc_findings"] == by_box["erc_findings"] == []
+    assert {_BODY_ID, _BASE_ID} <= set(by_cell["erc_coverage"]["checked"])
+    assert by_cell["erc_coverage"]["skipped"] == []
+    assert by_cell["erc_status"] == "clean"
+
+
+def test_cell_selected_ties_are_not_well_assertions(tmp_path):
+    report = _run_hierarchical(
+        tmp_path,
+        "cells_not_asserted",
+        _two_class_ties(
+            body_overrides={"well_excludes_cells": ["BASE_TUB"]},
+            base_overrides={"well_requires_cells": ["BASE_TUB"]},
+        ),
+    )
+
+    assert report["erc_coverage"]["checked_by_well_assertion"] == []
+
+
+def test_cell_selectors_compose_with_boxes_and_report_degenerate(tmp_path):
+    keeps_none = _run_hierarchical(
+        tmp_path,
+        "cells_keep_none",
+        [
+            _two_class_ties(
+                base_overrides={
+                    "well_requires_cells": ["BASE_TUB"],
+                    "well_excludes_boxes": [_BASE_TUB_BOX],
+                }
+            )[1]
+        ],
+    )
+    assert _tie_skips(keeps_none) == {_BASE_ID: "degenerate_well_selection"}
+
+    keeps_all = _run_hierarchical(
+        tmp_path,
+        "cells_keep_all",
+        [_two_class_ties(base_overrides={"well_excludes_cells": ["BASE_TUB"]})[0]],
+    )
+    # Excluding BASE_TUB leaves only the body well -> a real partition.
+    assert _tie_skips(keeps_all) == {}
+
+
+def test_unknown_cell_name_is_an_error(tmp_path):
+    with pytest.raises(ErcError, match="NOPE"):
+        _run_hierarchical(
+            tmp_path,
+            "cells_unknown",
+            _two_class_ties(base_overrides={"well_requires_cells": ["NOPE"]}),
+        )
+
+
+def test_cell_selector_keys_must_be_string_arrays(tmp_path):
+    with pytest.raises(ErcError, match="well_requires_cells"):
+        _run_hierarchical(
+            tmp_path,
+            "cells_bad_type",
+            _two_class_ties(base_overrides={"well_requires_cells": "BASE_TUB"}),
+        )
+
+
+def test_cells_region_follows_rotation_mirroring_arrays_and_ignores_children():
+    layout = kdb.Layout()
+    layout.dbu = DBU
+    well = layout.layer(10, 0)
+    top = layout.create_cell("TOP")
+    cell = layout.create_cell("WELLCELL")
+    child = layout.create_cell("CHILD")
+    cell.shapes(well).insert(kdb.Box.new(0, 0, _um(2), _um(1)))
+    child.shapes(well).insert(kdb.Box.new(_um(10), _um(10), _um(11), _um(11)))
+    cell.insert(kdb.CellInstArray(child.cell_index(), kdb.Trans()))
+    top.insert(kdb.CellInstArray(cell.cell_index(), kdb.Trans(1, False, _um(20), 0)))
+    top.insert(kdb.CellInstArray(cell.cell_index(), kdb.Trans(2, True, 0, _um(30))))
+    top.insert(
+        kdb.CellInstArray(
+            cell.cell_index(),
+            kdb.Trans(),
+            kdb.Vector(_um(5), 0),
+            kdb.Vector(0, _um(5)),
+            2,
+            2,
+        )
+    )
+
+    region = erc._cells_region(kdb, layout, top, (10, 0), ["WELLCELL"])
+
+    boxes = sorted(
+        (p.bbox().left, p.bbox().bottom, p.bbox().right, p.bbox().top)
+        for p in region.each()
+    )
+    expected = sorted(
+        [
+            (_um(19), 0, _um(20), _um(2)),  # R90 about (20, 0)
+            (_um(-2), _um(30), 0, _um(31)),  # M0 then R180: mirrored in x
+            (0, 0, _um(2), _um(1)),
+            (_um(5), 0, _um(7), _um(1)),
+            (0, _um(5), _um(2), _um(6)),
+            (_um(5), _um(5), _um(7), _um(6)),
+        ]
+    )
+    assert boxes == expected
+
+
+# Issue #4374: `erc.unlabelled_conductor` locates and classifies its islands,
+# and `nets[].unlabelled_allow_device_connected` excuses the gate-driven ones.
+
+
+def _device_connected_run(tmp_path, net_extra=None, boxes=None):
+    """VDD (labelled li1 5-6) owning li1, with two unlabelled li1 islands: a
+    gate-driven strap (0-1, via-joined to the gate poly) and a terminal-less
+    fragment (8-9)."""
+    layout, top, *_ = _severed_rail_layout()
+    licon = layout.layer(2, 0)
+    top.shapes(licon).insert(kdb.Box.new(_um(0.2), _um(0.2), _um(0.8), _um(0.8)))
+    gds = tmp_path / "devconn.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "devconn.erc.json"
+    body = _nets_spec(
+        nets=[
+            {
+                "name": "VDD",
+                "kind": "supply",
+                "roles": ["li1"],
+                **({"unlabelled_allowed_boxes": boxes} if boxes else {}),
+                **(net_extra or {}),
+            }
+        ]
+    )
+    body["vias"] = [{"name": "licon", "layer": "2/0", "between": ["poly", "li1"]}]
+    _write_spec(spec, body)
+    return run_erc(str(gds), str(spec))
+
+
+def test_unlabelled_conductor_islands_are_located_and_classified(tmp_path):
+    report = _device_connected_run(tmp_path)
+
+    (finding,) = _unlabelled_findings(report)
+    kinds = {island["bbox"]["left"]: island["kind"] for island in finding["islands"]}
+    assert kinds == {_um(0): "device_connected", _um(8): "floating"}
+    for island in finding["islands"]:
+        assert island["layer"] == "li1"
+        assert island["shape_count"] == 1
+    assert finding["islands"][0]["bbox"] == {
+        "left": _um(0),
+        "bottom": _um(0),
+        "right": _um(1),
+        "top": _um(1),
+    }
+
+
+def test_unlabelled_allow_device_connected_excuses_only_gate_driven_islands(
+    tmp_path,
+):
+    report = _device_connected_run(
+        tmp_path, {"unlabelled_allow_device_connected": True}
+    )
+
+    (finding,) = _unlabelled_findings(report)
+    assert [i["kind"] for i in finding["islands"]] == ["floating"]
+    assert finding["bbox"]["left"] == _um(8)
+    # Raw measurement stays raw; the excused island is counted and echoed.
+    assert report["nets"][0]["unlabelled_islands"] == 2
+    assert report["nets"][0]["unlabelled_allowed_islands"] == 1
+    (echo,) = report["provenance"]["net_exclusions"]
+    assert echo["allow_device_connected"] is True
+    assert echo["excluded_device_connected_islands"] == 1
+
+
+def test_unlabelled_allow_device_connected_composes_with_boxes(tmp_path):
+    """Carve-out box excuses the floating fragment, the key the gate-driven
+    one: nothing gates."""
+    report = _device_connected_run(
+        tmp_path,
+        {"unlabelled_allow_device_connected": True},
+        boxes=[[7.5, -0.5, 9.5, 1.5]],
+    )
+
+    assert _unlabelled_findings(report) == []
+    assert report["nets"][0]["unlabelled_allowed_islands"] == 2
+
+
+def test_unlabelled_allow_device_connected_false_matches_default(tmp_path):
+    report = _device_connected_run(
+        tmp_path, {"unlabelled_allow_device_connected": False}
+    )
+    (finding,) = _unlabelled_findings(report)
+    assert len(finding["islands"]) == 2
+    assert (
+        "allow_device_connected"
+        not in (report["provenance"].get("net_exclusions") or [{}])[0]
+    )
+
+
+@pytest.mark.parametrize(
+    "net, match",
+    [
+        (
+            {"name": "VDD", "unlabelled_allow_device_connected": True},
+            r"needs a non-empty",
+        ),
+        (
+            {
+                "name": "VDD",
+                "roles": ["li1"],
+                "unlabelled_allow_device_connected": "yes",
+            },
+            r"must be a boolean",
+        ),
+    ],
+)
+def test_unlabelled_allow_device_connected_rejects_bad_declarations(
+    tmp_path, net, match
+):
+    layout, *_ = _nets_fixture_layout()
+    gds = tmp_path / "adc_bad.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "adc_bad.erc.json"
+    _write_spec(spec, _nets_spec(nets=[net]))
+    with pytest.raises(
+        ErcError, match=rf"nets\[0\]\.unlabelled_allow_device_connected.*{match}"
+    ):
+        run_erc(str(gds), str(spec))

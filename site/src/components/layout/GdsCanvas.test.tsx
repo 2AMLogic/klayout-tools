@@ -164,10 +164,10 @@ describe("drawLayout — the gallery's real blocks", () => {
   it.skipIf(!hasBlocks)("draws gf180-bandgap with gf180mcu's own layer colors", () => {
     const { layout, calls } = renderBlock("gf180-bandgap", "bandgap_top.gds", "gf180mcu");
 
-    // One fill per layer that has polygons; 8624 subpaths for its geometry.
+    // One fill per layer that has polygons; 11991 subpaths for its geometry.
     const layersWithPolygons = layout.layers.filter((layer) => layer.polygons.length > 0).length;
     expect(calls.filter((call) => call.op === "fill")).toHaveLength(layersWithPolygons);
-    expect(calls.filter((call) => call.op === "closePath")).toHaveLength(8624);
+    expect(calls.filter((call) => call.op === "closePath")).toHaveLength(11991);
 
     // Metal1 (34/0) must be gf180mcu's Metal1 color, not sky130's 34/0.
     expect(resolveLayerStyle(34, 0, "gf180mcu")).toMatchObject({

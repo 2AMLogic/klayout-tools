@@ -625,7 +625,6 @@ def _post_route_spef_metrics(
     sites).
     """
     from .place_and_route import (
-        _EXTRACT_DECK_FOR_CELL_LIBRARY,
         _HOLD_VIOLATIONS_BEGIN,
         _HOLD_VIOLATIONS_END,
         _SETUP_VIOLATIONS_BEGIN,
@@ -636,17 +635,11 @@ def _post_route_spef_metrics(
         PlaceAndRouteError,
         _engine_error_message,
         _read_metrics,
+        _require_extract_deck_for_cell_library,
         _write_script,
     )
 
-    extract_deck = _EXTRACT_DECK_FOR_CELL_LIBRARY.get(cell_library)
-    if extract_deck is None:
-        raise PlaceAndRouteError(
-            "request.post_route_spef requires a known klt extract deck for "
-            f"cell_library '{cell_library}' (supported: "
-            + ", ".join(sorted(_EXTRACT_DECK_FOR_CELL_LIBRARY))
-            + ")"
-        )
+    extract_deck = _require_extract_deck_for_cell_library(cell_library)
 
     # Local import (mirrors `_merge_def_to_gds`'s own local `klayout.db`
     # import): keeps `extract.py`'s own (heavier) import cost out of every

@@ -14,6 +14,472 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt sim`'s per-measurement `min`/`max` skip an infinite value** (#5580,
+  2026-11-14): the corner-matrix extremes in the `measurements[]` rollup are
+  documented as the extremes over *finite* numeric values, but the predicate
+  behind them tested finiteness with `value == value` -- which rejects NaN and
+  accepts `+/-inf`. A corner whose measurement came back infinite could
+  therefore be reported as `min` or `max` (and would always win, being an
+  extreme by construction), masking the real worst finite corner. The rollup
+  now uses the shared `_jsonnum.is_finite_number` predicate, so booleans, NaN
+  **and** infinities are all skipped alike, and a measurement whose every
+  corner is infinite reports `min`/`max` as `null` rather than naming one.
+  `worst_case` is a margin pointer and is unchanged. `klt sim-merge` shares the
+  rollup and gets the same fix. Report output can change for a run with a
+  non-finite measurement; `klt sim`'s `schema_version` is unaffected (the field
+  shape is the same).
+
+- **`klt stats` reports a `geometry_digest`** (#5551, 2026-11-13): the
+  timestamp- and record-order-independent digest of a stream's decoded
+  geometry is now a top-level field of `klt stats --format json` (and a
+  `geometry_digest:` line in text output). This gives
+  `klt signoff --attest 2 --regenerated-hash ... --hash-kind geometry` a
+  public producer for the value its grader recomputes -- previously the only
+  way to obtain it was to import the private
+  `klayout_tools._provenance.layout_geometry_digest`, since `klt diff`'s
+  `canonical_hash` is a *different* digest whose substitution grades
+  `stale_artifact`. The digest algorithm, `canonical_hash`, and how
+  `klt signoff --manifest` grades are all unchanged; the field covers the
+  whole stream and is not scoped by `--top`. Additive; `klt stats`'
+  `schema_version` stays `1`.
+- **`klt signoff` reads a gzip-compressed evidence file** (#5452,
+  2026-11-13): a `klt sim --report-out report.json.gz` report — the compact
+  form `docs/cli/sim.md` recommends committing as evidence — is now citable
+  from a manifest as it stands, grading identically to the same envelope
+  decompressed (`unmet`/`unreadable_evidence` before, which forced a second
+  decompressed copy beside it). Detection is by the gzip magic bytes, not the
+  `.gz` suffix, matching `klt yield`; every `klt signoff` *file* reader
+  (positional envelopes, manifest and fleet files, file-backed citations)
+  accepts it, and a truncated or damaged stream still grades
+  `unmet`/`unreadable_evidence`. Hashing is unchanged: a citation's
+  `content_hash` comes from inside the envelope, so it is encoding-independent;
+  the one `content_hash_basis: "evidence_file"` case keeps hashing the file as
+  committed. Additive; no `schema_version` bump.
+
+- **`klt gen` / `klt layout-plan execute`: a generated stream no longer
+  depends on which generators ran earlier in the same process** (#5499,
+  2026-11-13): `gen`'s reference PCell library is registered once per process
+  and its layout accumulated layer indices in *first-use* order across every
+  PCell produced in that process. `Layout.add_pcell_variant` mirrored that
+  order into each fresh target layout, and KLayout's writers emit a cell's
+  elements in layer-index order — so running a `bjt_array` request before a
+  `mos_array` request reordered the second one's element records. The streams
+  stayed the same size and geometrically identical (zero XOR area on every
+  layer) but hashed differently, so a batch run and a single-plan run of the
+  same plan disagreed and a flow gating on a recorded stream hash went red
+  when an unrelated block joined the batch. `_produce()` now pins the target
+  layout's layer table to a sorted `(layer, datatype)` order taken from the
+  request alone, and `_layout.write_layout()` sets
+  `SaveLayoutOptions.write_context_info = False` so a reader that happens to
+  have the library registered (`klt gen-compose` reading a `klt gen` block
+  back in the same process) uses the geometry in the file instead of
+  re-linking the cell to the live library and re-inheriting its layer order.
+  **Streams written by every `write_layout()` caller — `gen`, `gen-compose`,
+  `gen --pdk-pcell`, `clip`, `fill`, `draw`, `route`, `place-and-route` — no
+  longer carry the `$$$CONTEXT_INFO$$$` structure** naming the library and
+  PCell behind a proxy cell, so they no longer reopen in the KLayout GUI as
+  editable PCell variants; they are product streams, their geometry is
+  unchanged, and nothing in `klt` reads that context back. Committed golden
+  streams regenerated: `examples/dogbone-terminal/example_sky130.gds` and
+  `example_gf180mcu.gds` (geometry byte-for-byte equivalent, zero XOR area on
+  every layer; their `.drc.json` companions are unchanged). No JSON field is
+  added, renamed or removed; no `schema_version` bump.
+- **`klt characterize`: level-sensitive latch arcs** (#5521, 2026-11-13): a
+  cell can now be declared a latch with `cell.enable_pin` (plus optional
+  `cell.enable_level`, `"high"` by default) instead of `cell.clock_pin`, which
+  asserts edge-triggered semantics and is mutually exclusive with it (as is
+  `cell.clock_edge`, whose job `enable_level` takes over). One run then emits,
+  per output pin: a **transparent** data-to-output `timing()` group per
+  referenced data pin (`timing_type : combinational`, measured with the enable
+  held at its active level), an **enable**-to-output group on the enable's
+  *opening* edge (`rising_edge` for an active-high enable, `falling_edge` for
+  active-low), and -- for each `cell.constrained_pins` entry -- setup/hold
+  referenced to the enable's *closing* edge (`setup_falling`/`hold_falling`
+  for an active-high enable, `setup_rising`/`hold_rising` for active-low). All
+  carry the usual six NLDM tables on the request's own slew x load grid. The
+  latch bisection probe passes when the transparent data-to-output delay is
+  within `(1 + options.constraint_degradation)` of its wide-end reference
+  **and** the output still holds the captured level after the enable closes;
+  an unbracketable point (including one that does not hold at the wide end)
+  still raises the existing named error rather than reporting a value. Purely
+  additive: `enable_pin`/`enable_level` are new request fields, no existing
+  JSON field changes shape, and no `schema_version` bump. Worked example:
+  `examples/characterize/request-dlat.json` (+ `dlat.spice`). See
+  [`docs/cli/characterize.md`](docs/cli/characterize.md)'s "Level-sensitive
+  latches".
+
+- **`klt sim`: a bad time bound in `cycle_mean` / `eye` / `settled` /
+  `step_resolution` is now reported against its own form, not `crossings`**
+  (#5472, 2026-11-13): those four forms share one window-bound parser, which
+  labelled every diagnostic `crossings.<key>` by default -- so a
+  `cycle_mean.from` of `"soon"` came back as `measurement 'm1': crossings.from
+  must be a time in seconds`, naming a form the request never declared. The
+  shared parser now takes the form name from its caller, so the message reads
+  `cycle_mean.from` (likewise `eye.ui`, `step_resolution.window`,
+  `settled.from`). `energy` and `stress`, which carried their own copies of the
+  parser, now share it too; their messages keep the same wording but quote
+  `"10n"` as the example literal instead of `"5n"` / `"20n"`. Message text
+  only: no error code, exit code or JSON field changes, and no
+  `schema_version` bump.
+
+- **`klt sim --backend batch`: the local-versus-fleet PDK stamp comparison
+  now works on a host that pins no PDK root** (#5474, 2026-11-13): the
+  submitter's side of `pdk_stamp_comparison` was stamped only from
+  `models.pdk_root` or `$PDK_ROOT`, so a host whose PDK is found through the
+  search order (`~/.ciel`, the default worker setup) got
+  `not_comparable (client_stamp_unavailable)` even though both stamps were in
+  the report and equal — and `models.pdk_root` is refused for `batch`
+  (`models_pdk_root_host_path`), so a request could not fix it. The client
+  stamp now falls back to the install the search order resolves, i.e. the one
+  `provenance.pdk` already names. Precedence is unchanged
+  (`models.pdk_root` > `$PDK_ROOT` > search order), and
+  `client_stamp_unavailable` still reports an uninstalled variant or an
+  install with neither a readable `SOURCES` nor a bundle `.pdk-store.json`.
+  No JSON field is added, renamed or removed; no `schema_version` bump.
+
+- **`klt netlist --block`: a `.subckt` port order that is not the schematic's
+  is now reported, and `--check`'s attribution is corrected** (#5473,
+  2026-11-13): a block's port order is the positional contract of every
+  `subckt-call` instantiation and LVS reference, and three things about it
+  were silent. Measured against xschem 3.4.7: a sibling `<stem>.sym` decides
+  the top sheet's port order, not the pin instances in the `.sch`; without
+  one the pins' **file** order decides it (`sim_pinnumber` overrides that, but
+  is ignored when a symbol exists); and a schematic pin the symbol does not
+  declare is dropped from the card with exit `0` and no warning. `--block`
+  now compares the two and sets the new additive `block.port_order`
+  (`{"schematic", "emitted", "symbol"}`, `null` when they agree or cannot be
+  compared) plus a `block.warning` giving both lists, naming the symbol the
+  order came from, and naming any omitted pin. `klt netlist` still never
+  rewrites the header — the emitted card has to stay the card xschem writes
+  for the same cell as a child. `--check`'s port-order `reason` no longer
+  states "different xschem builds order ports differently" as fact: it names
+  the sibling symbol when there is one and offers an xschem build difference
+  as a further possible cause. `schema_version` stays `1`;
+  `drift.subckt_port_order`, `status: "drifted"` and exit `3` are unchanged.
+  Not comparable (reported as `null` with no warning, never guessed at): a
+  bus or comma-list pin label, custom pin symbols in place of xschem's
+  `ipin`/`opin`/`iopin` devices, an emitted port the schematic never
+  declared, and an export that was not testbench-shaped. See
+  `docs/cli/netlist.md` → "Where the port order comes from".
+
+- **`klt drc`: a rule whose `layer_selection` empties its input is now
+  `inapplicable`, not `checked`** (#5435, 2026-11-13): applicability was
+  decided from layer *presence*, before a rule's own `layer_selection`
+  narrowing ran, so a rule that selected away all of its layer's geometry
+  still graded `checked` — a `clean` verdict naming a rule that measured zero
+  polygons, with no coverage field a consumer could consult to notice. The
+  selected primary region is now graded on the same per-top-cell merged
+  region the check measures: empty in **every** top cell → the rule leaves
+  `coverage.checked` / `coverage.rules_checked` and reports `inapplicable`
+  with the existing #3587 reason `inapplicable_empty_checked_region`.
+  **Behaviour change**: on a stream whose Cont population is entirely
+  non-square, sg13g2's `cont.width.1` and `cont.space.1` move from
+  `rules_checked` to `inapplicable`. No new JSON field or reason token, no
+  `schema_version` bump; verdicts are unchanged (inapplicable work never makes
+  a run partial), as is every rule without a `layer_selection`. The grading is
+  confirmed per check kind and excludes `net_space` and `require_containment`
+  `enclosing` rules, where an empty primary region can still report. See
+  `docs/cli/drc.md` → "`layer_selection` decides coverage".
+- **`klt erc`: `erc.supply_short` is now evaluated through the substrate**
+  (#5342, 2026-11-12): two `kind: "supply"` nets that are one conductor
+  through a shared p-substrate or well are reported as an `erc.supply_short`
+  finding carrying `via: "substrate"` and `body`
+  (`{"kind", "id", "ties"}`), found by a derived body-merge post-pass over the
+  spec's `ties[]` graph. Only drawn, non-degenerate tap geometry joins
+  anything, and the pass only ever *adds* findings — a blanket well row over a
+  tap row still reports no short (#2169 regression). The measured bodies are
+  echoed in `provenance.substrate_bodies`, and the work identity
+  `erc.supply_short.substrate` is listed in `erc_coverage.checked` when the
+  pass ran. A deck declaring `substrate_isolation` (gf180mcu's `DNWELL` 12/0)
+  splits the shared substrate into `vsubs_iso<n>` islands, matching `klt
+  extract`'s own numbering. Additive keys only; no `schema_version` bump.
+- **sky130's extraction deck declares `dnwell` as `substrate_isolation`**
+  (#5344, 2026-11-12): `dnwell` (64/18) now splits substrate bodies in the
+  substrate post-pass and in `klt extract` / `klt lvs`, so a sky130 run is
+  *evaluated* rather than disclosed as `substrate_isolation_undecidable`. New
+  deck field `substrate_isolation_needs_nwell_ring`: a `dnwell` island
+  isolates its body only when an `nwell` (64/20) ring closes its outline — an
+  unclosed island stays on the shared `vsubs`, so a real short is still
+  reported. gf180mcu's `DNWELL` keeps isolating whether or not a ring closes
+  it. A layout drawing no `dnwell` extracts exactly as before.
+- **sg13g2 / sg13cmos5l extraction decks declare `nBuLay` as
+  `substrate_isolation`** (#5345, #5359, 2026-11-12): `nBuLay.drawing` (32/0,
+  layer/datatype from the PDK's `layers_def.drc` and tech `.lyp`) does the
+  same for the two IHP families, which are now evaluated rather than
+  disclosed. Both set `substrate_isolation_needs_nwell_ring` (#5359), so an
+  island counts only when an `NWell` (31/0) ring closes it; taps are derived
+  from `Activ` (`tap=None`) and the tie logic handles that. A layout drawing
+  no `nBuLay` extracts exactly as before.
+- **`klt signoff` item 11 reads the substrate-path ERC result** (#5346,
+  2026-11-12): a substrate-path `erc.supply_short` (`via: "substrate"`) is a
+  `supply_not_continuous` blocker exactly like a metal one, so a real short is
+  no longer graded `met`. A cited run that disclosed `erc.supply_short` as
+  `substrate_isolation_undecidable` renders the item `unmet` with the new
+  reason `substrate_isolation_undecidable` and the run's own `missing` list in
+  `detail.power_delivery.substrate_isolation_missing`. A met citation whose
+  run evaluated the substrate path carries
+  `power_delivery.substrate_continuity: {"checked": true, "by_assertion":
+  <bool>}`; evidence produced before the substrate pass existed renders
+  unchanged. The live `2AMLogic/sg13g2-ldo` ERC/LVS agreement run is recorded
+  in `docs/design/erc-substrate-continuity-live-run.md`.
+- **`klt erc`: `ties[].isolation_boxes`, `same_net_as` through the substrate,
+  and the decidable-or-disclosed substrate rule** (#5343, 2026-11-12): new
+  optional `ties[].isolation_boxes` (µm boxes) asserts isolated substrate
+  bodies (`provenance.substrate_bodies` ids `isolation_box[l,b,r,t]`,
+  `provenance.isolation_assertions`, graded `checked_by_assertion`). A
+  `nets[].same_net_as` pair now suppresses the substrate-path
+  `erc.supply_short` and `erc.expected_short_missing` is satisfied by a
+  substrate join (`provenance.substrate_declared_joins`). The
+  `erc.supply_short` disclosure reason `substrate_continuity_not_modelled` is
+  replaced by `substrate_isolation_undecidable` with a `missing` list (an
+  optional extra key on `inapplicable` records). Additive; no `schema_version`
+  bump. Per-family table in `docs/cli/erc.md`.
+- **`klt sta` `electrical_checks` gains `min_pulse_width` and `min_period`**
+  (#5241, 2026-11-10): two additive sibling classes next to `max_transition` /
+  `max_capacitance`, each with `coverage` (`checked` / `unsupported` /
+  `not_run`), `violation_count`, `worst_slack_ns` and `worst_pin`; values are
+  `null` unless `checked`, so "never evaluated" is distinguishable from
+  clean. Limits are the liberty's; report only, no verdict. Existing fields
+  unchanged.
+- **`klt signoff`: opt-in `require_complete_constraints` on `sta` evidence**
+  (#5234, 2026-11-10): an item 5 `sta` citation may set
+  `"require_complete_constraints": true` to grade `unmet` (`check_failed`,
+  `detail.sta_constraints_incomplete`) unless every graded corner's
+  `constraint_completeness.status` is `"complete"`. Off by default; the `sta`
+  citation excerpt additively gains `constraint_completeness_status`. Helpers
+  (including #3258's annotation grading) moved to `signoff_sta_constraints`.
+  See `docs/cli/signoff.md`.
+- **`klt signoff --attest` gains `--skip-local-only`** (#5209, PR #5215,
+  2026-11-10): with `--attest ITEM --inventory FILE -o OUT
+  --skip-local-only`, no `local_only` command is run; each one's outcome is
+  carried from the `OUT` envelope being refreshed (matched by role, `argv`
+  and testbench identity, exactly as `--check` carries it) while every other
+  check — file presence, content hashes, non-`local_only` commands, pins —
+  is recomputed. For refreshing an envelope's hashes on a host that cannot
+  run the toolchain, after a change that cannot affect that command's result:
+  the carried outcome is vouched for by the committed envelope, not by the
+  run, and the flag never mints a first outcome. The written envelope records
+  no marker for the skip, so a later `--attest --check` reports no drift; the
+  live result lists the carried checks under `skipped_checks` and `--format
+  text` prints `[SKIP]` lines. A committed failing `local_only` check still
+  keeps the envelope `fail` (exit `3`, nothing written), and a `local_only`
+  command with no counterpart in `OUT` fails. Refused (exit `1`) without
+  `--attest`, without `-o`, with `--check`, or when `OUT` is missing or
+  unparseable. Additive: no `schema_version` bump, and the default
+  (`--attest` runs every `local_only` command) is unchanged. See
+  `docs/cli/signoff.md` → "Refreshing on a host lacking the toolchain".
+- **New `klt route`: route between labelled pins of an already-placed layout**
+  (#5205, 2026-11-10): `klt route <request.json>` derives endpoints from text
+  labels on direct child instances of a top cell, routes two-pin nets with the
+  `gen-compose` router (unchanged), optionally writes the routed layout, and
+  reports positive-area overlaps with foreign metal (`overlaps[]`). Exit `3`
+  when `unrouted_nets[]` or `overlaps[]` is non-empty. Additive: a new verb;
+  `gen-compose`'s drawing loop moved into a shared helper with no output
+  change. See `docs/cli/route.md`.
+- **`klt layout-plan-execute`: `request.routing.nets[<net>].legs` steers
+  nets with three or more pins** (#5110, 2026-11-07): `legs` takes
+  `gen-compose`'s `connectivity[].legs[]` shape (`from_pin`/`to_pin`
+  `{block, port}`, optional per-leg `waypoints_um`/`layer_role`/`width_um`),
+  is validated against the net's derived pins and forwarded unchanged.
+  `legs` together with `waypoints_um` on one net is an application error.
+  Additive; no existing request changes behavior. See
+  `docs/cli/layout-plan-execute.md`.
+- **`klt yield` 0.8.0 retrospective: zero-spread sample sets are now
+  `degenerate`** (#2909, documented via #5058, 2026-11-06): in releases before
+  0.8.0, a bit-identical sample set (or one with only a rounding-residue
+  spread, sample stddev <= `1e-12 * max(abs(mean), tiny)`) produced a
+  `yield.normal` block (estimate `1.0`, interval `[1, 1]`, `stddev` ~`8.9e-16`)
+  with normality `rejected`. From 0.8.0 it produces `yield.normal: null`,
+  `stddev: 0.0` and normality `degenerate`. Exit code and `schema_version` are
+  unchanged (`normal: null` was already a permitted shape). See "Degenerate
+  (zero-spread) input" in `docs/cli/yield.md`. Docs only; no code, JSON field
+  or `schema_version` change.
+
+- **`klt extract` docs: `devices[]` is the device contract, the written deck's
+  card form is not** (issue #5050): `docs/cli/extract.md` now states that
+  consumers should read devices from the JSON `devices[]` (class,
+  `params.r_ohm` / `params.c_f`) rather than card-matching `-o out.spice`, and
+  lists the resistor (`R` → `X` subcircuit, 0.7.0, #1157) and capacitor
+  (dropped trailing model name, 0.5.0, #1558) card-form changes as examples.
+  Convention from here on: any release that changes a written card form gets
+  a changelog line naming the device class and the old and new form. Docs
+  only; no JSON field, schema or `schema_version` change.
+
+- **sky130 `npc` now encloses each poly-contact licon by 0.1 µm** (issue
+  #2934): `klt gen` generators with `gate_contact` grew `npc` 0.095 µm around
+  the licon, short of `licon.15` (0.1 µm, `sky130A.lydrc`). Geometry-only
+  change; no JSON field or deck change.
+
+- **sg13cmos5l poly resistors from PDK PCells** (issue #3094): `klt extract
+  --deck sg13cmos5l` now recognises `rsil`/`rppd`/`rhigh` drawn the IHP PCell
+  way (`PolyRes` body, two abutting `GatPoly` heads) by declaring
+  `topology="abutting_heads"`, as sg13g2 did in #2679; a missing head or a gap
+  is not recognised, and the legacy continuous-bar shape still extracts.
+  `klt gen res_array` on sg13cmos5l now draws the same convention.
+
+## 0.9.1 (2026-11-05)
+
+- **`klt sim` `corners.supply_waveforms` with `corners.units`** (issue #4981):
+  a PWL/PULSE supply source can now be rescaled per unit in an explicit
+  `corners.units` request (each name must be a `supply_v` key of every unit).
+  Previously the option was silently ignored with `units`. Requests without
+  the option are unchanged.
+
+- **`klt sim` honors an explicit `--max-units-per-job` over the ceiling bound** (issue #4982): the whole-job ceiling bound (`timeout_s x units + 120`) is a serial upper bound, so a cap whose shards exceed it is no longer rejected with `batch_max_units_per_job_invalid`; it is honored with a stderr warning. Non-positive caps, `enforce` combos and a single unit over the ceiling still fail as before.
+- **Automated releases** (issue #4920, design in
+  [`RELEASING.md`](RELEASING.md) "Automated release"): `release.yml` opens a
+  weekly `chore(release)` PR when `main` is over the commit backstop, tags the
+  merged bump commit and dispatches `publish.yml`. `release-lag.yml` is
+  retired; `generate_deck_history.py` gains `--as-release`.
+
+## 0.9.0 (2026-11-05)
+
+- **`klt signoff --attest 9` accepts an explicit no-PDK pin** (issue #4904,
+  documented in [`docs/cli/signoff.md`](docs/cli/signoff.md)): `pins.pdk` may
+  be `{"none": true, "reason": "<non-empty>"}` for a partition whose cold
+  start consumes no PDK. An absent `pins.pdk` still fails the `pin`/`pdk`
+  check, as does `none` with an empty reason or mixed with `name`/`revision`.
+  The docs also state that `--attest` runs `cold_start` even when marked
+  `local_only`.
+- **`klt signoff --attest 9` accepts per-bench `cold_start`, `unbenched_rows`
+  and prints stderr progress** (PR #4849, documented in
+  [`docs/cli/signoff.md`](docs/cli/signoff.md)): a `testbenches` entry may be a
+  `{"path", "cold_start"}` object whose command runs on its own and yields a
+  `command` check naming the bench; `unbenched_rows` (`{"row", "issue"}`
+  entries) records bench-less rows as passing `unbenched_row` checks. On
+  `main` only: `klayout-tools==0.8.0` refuses `unbenched_rows` as an unknown
+  item-9 inventory field.
+- **`klt gen bjt_array` runs on `sg13g2` as a SiGe HBT array** (issue #4850,
+  documented in [`docs/cli/gen.md`](docs/cli/gen.md)): `params.flavor`
+  (`npn13G2` default, `npn13G2l`, `npn13G2v`) instantiates the PDK's own cell
+  from `sg13g2_pr.gds` on a `rows` x `cols` grid; a missing GDS/cell is an
+  application error. Additive `flavor` param and report `hbt` object; ports
+  gain `Q<i>_C`. Extraction round-trip is not claimed (#4397).
+- **`klt lvs` folds Liberty/CDL pin-name case in a `gate-level-verilog`
+  reference** (issue #4815, documented in [`docs/cli/lvs.md`](docs/cli/lvs.md)):
+  a library-cell scalar port with no exact pin match (`.RESETN` against CDL
+  `RESETn`) binds to the single pin differing only by letter case, disclosed
+  as the additive `reference.gate_level_pin_case_folded` warning category
+  (never changes `status`). Ambiguous case-twin pin lists are still refused.
+- **`klt signoff` item 6 `not_applicable` accepts a markdown spec and a
+  reviewed assertion** (issue #4793, documented in
+  [`docs/cli/signoff.md`](docs/cli/signoff.md)): the `spec` reference takes
+  optional `"format": "markdown-table"` + `"id_column"` (ratification from a
+  `Status:` line, row ids from the first pipe table; granted output echoes
+  `format`/`id_column`), and a statement row may set
+  `reviewed_not_statistical: true` to waive the string-pattern scan (never
+  the key scan) for that row, echoed in the output. Additive; JSON-form
+  manifests grade unchanged.
+- **`klt lvs` accepts escaped module names in a `gate-level-verilog`
+  reference** (issue #4810, documented in [`docs/cli/lvs.md`](docs/cli/lvs.md)):
+  a Yosys `\$paramod\child\W=s32'd64` module declaration no longer fails
+  before the compare. Names are mapped to legal SPICE subckt names (hash
+  suffix on collision), consistently at declaration and instantiation, and the
+  report gains the additive `environment.reference_module_names`
+  (`{original: mapped}`, present only when a name was mapped).
+- **`klt signoff --attest 1` binds the whole input set** (issue #4764,
+  documented in [`docs/cli/signoff.md`](docs/cli/signoff.md)): the item-1
+  envelope now emits `provenance.input.paths` (every inventory source, every
+  derived file, and the inventory) and drops `provenance.input.path`;
+  `provenance.input.content_hash` becomes the combined set digest. A source
+  edit now grades `stale_evidence` in `--manifest`. **Existing manifests
+  citing an item-1 envelope must re-pin `content_hash`.** No `schema_version`
+  bump: the shape stays within the generic-evidence set binding the grader
+  already accepts (#3044). Items 9/10 are unchanged.
+
+- **`klt characterize` clock-to-output arcs** (issue #4755, documented in
+  [`docs/cli/characterize.md`](docs/cli/characterize.md)): a cell declaring
+  `cell.clock_pin` (plus optional `clock_edge`, `static_inputs`) now yields one
+  `timing_type : rising_edge`/`falling_edge` arc per output pin; the response
+  arc gains an additive `timing_type` field. Cells without `clock_pin` are
+  still refused. Setup/hold remain unsupported (#4756).
+
+- **`klt economy --attribute`** (issue #4660, documented in
+  [`docs/cli/economy.md`](docs/cli/economy.md)): opt-in additive `attribution`
+  block partitioning the top bbox into direct-child instance bboxes and
+  labelled gap components, with `sums_to_total`. No `schema_version` bump.
+- **`klt layout-plan check`** (issue #4649, documented in
+  [`docs/cli/layout-plan-check.md`](docs/cli/layout-plan-check.md)): read-only
+  verification of a finished layout against its `klt.layout_plan.request/1`
+  (group presence, row order/stacking/spacing/align, abutment gaps). Emits a
+  `kind: generic` evidence envelope `klt signoff` accepts; exit 3 on
+  violations. Additive.
+- **`klt extract --deck gf180mcu` extracts the drain-extended LDMOS devices**
+  (issue #4570, documented in [`docs/cli/extract.md`](docs/cli/extract.md)):
+  `nfet_10v0_asym` (`MVSD` 210/0 + `LDMOS_XTOR` 226/0) and `pfet_10v0_asym`
+  (`MVPSD` 11/39 in `DNWELL`) were silently absent from the netlist; they now
+  extract as `nfet`/`pfet` with distinct, marker-oriented source/drain and bind
+  their own models under `--pdk`. Additive: `MOSFlavour` gains optional
+  `drain_marker`/`pfet_only`/`body` fields; existing 3.3 V/5 V/6 V results are
+  unchanged.
+- **`klt gen cap_array` `connect: "parallel"`** (issue #3022): new `connect`
+  (`"independent"` default, output unchanged) and `top_via_pitch_um` params draw
+  one shared bottom plate under all units, a via grid over each top plate and a
+  strap, reported as two ports (`C_BOT`/`C_TOP`), `device_count: 1` and a new
+  optional top-level `expected` object (`capacitance_f`, ...). sky130 only;
+  other families and unit sides outside 2-30 um are rejected. Additive; no
+  `schema_version` bump.
+- **`klt drc` gains `-o/--output PATH`** (issue #4393, documented in
+  [`docs/cli/drc.md`](docs/cli/drc.md)): an additive file copy of the report
+  envelope, byte-identical to `--format json` stdout and written for clean and
+  violating (exit `3`) runs alike; `.gz` paths are gzip-compressed. Stdout and
+  exit codes are unchanged; reachable from a request document as `output`.
+- **`place-and-route` `power.preset` accepts `power.connects`; `drc` tap_distance note**
+  (issue #4348). An explicit `connects` replaces the preset's connect entries
+  (`[]` = no via tuning); `power.straps` stays mutually exclusive. The response
+  gains an additive `power.connects_overridden` boolean. `klt drc` violations
+  from `tap_distance` rules carry an additive `note` that the rule is
+  tap-placement dependent.
+- **ASAP7 deck no longer aborts on LIG near unconnected LISD/SDT** (issue
+  #4340). The LIG.LISD.S.6 / LIG.SDT.S.8 / LIG.LISD.S.7 net separation
+  tripped a KLayout 0.28 assertion on tie and tap cells whose LIG sat within
+  the search distance of a LISD/SDT with no pair closer than the rule, leaving
+  a partial report. An empty plain separation now short-circuits the
+  net-aware call; the rules are still declared, so coverage is unchanged.
+  `provenance.deck` (sha256) changes.
+- **`klt place-and-route` rejects unknown top-level request keys** (issue
+  #4230, documented in [`docs/cli/place-and-route.md`](docs/cli/place-and-route.md)):
+  a misspelt or foreign key now exits 1 naming the key instead of being
+  dropped silently, matching `klt synthesize` (#3466). Behaviour change for
+  requests carrying stray keys; response schema unchanged.
+- **`signoff_runset.PINNED_RUNSETS` pins the gf180mcu LVS runset** (issue #4395):
+  `klayout/lvs/gf180mcu.lvs` at `fossi-foundation/globalfoundries-pdk-libs-gf180mcu_fd_pv`
+  commit `1a4e4b5` (sha256 `09a4f1f1…fde9`, byte-identical in all four open_pdks
+  gf180mcuA-D trees), so a gf180mcu `klayout-runset` LVS report is no longer
+  refused `runset_not_pinned`. Allowlist data only; no schema change.
+- **`erc` `ties[].well_requires_cells` / `well_excludes_cells`** (issue #4373).
+  Select a drawn well class by the cell it is drawn in, evaluated in each
+  instance's transformed frame, instead of hand-generated per-placement
+  `*_boxes`. Unknown cell names are a spec error; a tie selected this way is not
+  listed in `erc_coverage.checked_by_well_assertion`. Additive: no
+  `schema_version` bump, byte-identical output when the keys are omitted.
+- **`klt signoff` item 11: a partial `erc`/`lvs` set renders
+  `power_delivery_parts_missing`** (issue #4193, documented in
+  [`docs/cli/signoff.md`](docs/cli/signoff.md)). A cited set lacking the `erc`
+  and/or `lvs` part used to render `unmet`/`wrong_kind` with an empty detail;
+  it now renders `unmet`/`power_delivery_parts_missing` with
+  `detail.power_delivery.{missing_parts,cited_parts}` and, when the ERC spec
+  resolved, `supply_nets`. Value change on an existing field for that case
+  only; never `met`.
+- **New verb `klt formal`** (issue #4358, documented in
+  [`docs/cli/formal.md`](docs/cli/formal.md)): bounded model checking,
+  k-induction and cover via SymbiYosys on RTL or a `klt synthesize` netlist
+  plus liberty. Generates the `.sby` itself (inputs copied via `[files]`, so
+  WASI-sandboxed Yosys works); report carries `status` (`pass`|`fail`|
+  `unknown`), `depth_reached`, `trace_path`, `netlist_path`. Timeout is
+  `unknown`, never `pass`. Exit codes 0/1/3/4. New command; no existing
+  `schema_version` changes.
+- **`klt lvs` `subckt-call` converts sky130 junction diodes** (issue #4319,
+  documented in [`docs/cli/lvs.md`](docs/cli/lvs.md)): `X… sky130_fd_pr__diode_*
+  area=… perim=…` now converts to a `D` card in the deck's diode class instead
+  of raising `reference.unresolved_subckt_call`, for all 8 classes in the sky130
+  deck's `diodes`. Additive; other decks unchanged.
+- **`klt erc` discloses that substrate continuity is not modelled** (issue
+  #4384, documented in [`docs/cli/erc.md`](docs/cli/erc.md)): a spec declaring
+  two or more `kind: "supply"` nets gains one `erc_coverage.inapplicable`
+  entry `{"id": "erc.supply_short", "reason": "substrate_continuity_not_modelled"}`,
+  so "no short found" is distinguishable from "short not observable". Additive;
+  `erc_status`, findings and exit code are unchanged.
 - **`klt place-and-route` gains `instance_groups` (request) and `instance_groups[]`
   (response)** (issue #4344, documented in
   [`docs/cli/place-and-route.md`](docs/cli/place-and-route.md)): name sets of
@@ -923,6 +1389,18 @@ not `klt --version`, if you need to detect this kind of drift. See
   nets. Reports a proven `lower_bound_um`/`measured_max_distance_um` bracket;
   exits `0` pass, `3` fail, `4` `unsupported` (rule not evaluable, never a
   pass). See `docs/cli/tap-distance.md`.
+
+- **Honest `[yield]` install guidance and a pre-publish guard** (issue #2900,
+  refs): `klayout-tools[yield]` does not resolve for 0.6.0/0.7.0 because
+  `klt-yield-native` was never published. `klt yield`/`yield-sensitivity`
+  `--help`, the README and the yield/signoff/evidence-tier docs now lead with
+  the from-source build as the supported route and state the extra resolves
+  only for releases cut after the wheel is on PyPI. New
+  `scripts/check_native_extras.py`, run by `publish.yml` before `uv publish`,
+  fails a release whose `klt-*-native` extra pin is not published (exit 1
+  unpublished, exit 2 PyPI unreachable). Help/doc text only; no JSON field or
+  `schema_version` changes. The PyPI project, trusted publisher and
+  `klt-yield-native-v0.1.0` tag remain operator steps.
 
 - **Flat post-route SDFs with escaped-divider instance names now annotate**
   (issue #2897, following #1890): `klt functional-verification

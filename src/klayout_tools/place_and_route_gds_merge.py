@@ -63,6 +63,7 @@ from typing import Any
 from ._layout import write_layout
 from .lef_header import read_lef_macro_pin_ports
 from .place_and_route_min_area import repair_min_area
+from .place_and_route_via_pad import trim_via_pads
 
 #: ``UNITS DISTANCE MICRONS <n> ;`` -- mirrors ``congestion.py``'s own
 #: ``_UNITS_RE`` (kept as a separate, module-local copy here rather than
@@ -424,6 +425,37 @@ def _stamp_single_pin_def_net_names(
     return report
 
 
+def _output_dbu_factor(current_dbu_um: float, output_dbu_um: float | None) -> int:
+    """Integer factor by which to refine the merged GDS's dbu (issue #4482).
+
+    ``1`` when ``output_dbu_um`` is unset or equals the current dbu. Raises
+    :class:`PlaceAndRouteError` for a coarsening or non-integer ratio rather
+    than snapping geometry."""
+    if output_dbu_um is None:
+        return 1
+    # Deferred like the other helpers here: place_and_route imports this module.
+    from .place_and_route import PlaceAndRouteError
+
+    ratio = current_dbu_um / output_dbu_um
+    factor = round(ratio)
+    if factor < 1 or abs(ratio - factor) > 1e-6 * factor:
+        raise PlaceAndRouteError(
+            f"request.output_dbu_um {output_dbu_um} um must divide the merged "
+            f"GDS's native dbu {current_dbu_um} um by a whole number (a "
+            "lossless refinement); coarsening or a non-integer ratio would "
+            "snap geometry"
+        )
+    return factor
+
+
+def _refine_dbu(layout: Any, top: Any, factor: int, base_dbu: float) -> None:
+    """Lossless integer dbu refinement: every coordinate scales by ``factor``
+    and the dbu shrinks by the same factor, so micron geometry is unchanged."""
+    if factor > 1:
+        layout.scale_and_snap(top, 1, factor, 1)
+        layout.dbu = base_dbu / factor
+
+
 def _merge_def_to_gds(
     *,
     def_path: str,
@@ -434,6 +466,7 @@ def _merge_def_to_gds(
     hdl_toplevel: str,
     macros: list[dict[str, Any]],
     out_path: str,
+    output_dbu_um: float | None = None,
 ) -> dict[str, Any]:
     """Merge the routed DEF with the resolved standard-cell GDS view into a
     single GDS -- ported directly from ORFS's ``def2stream.py`` (survey
@@ -468,7 +501,9 @@ def _merge_def_to_gds(
     drew, and what it could **not** repair safely -- surfaced as the sibling
     ``min_area_repair`` response field for the same reason: a caller has no
     other way to tell whether the merged GDS it just got back really clears
-    the PDK's own ``*.area.*`` rules.
+    the PDK's own ``*.area.*`` rules. ``via_pad_trim`` is
+    :func:`~klayout_tools.place_and_route_via_pad.trim_via_pads`'s report
+    (issue #4495), surfaced as the sibling ``via_pad_trim`` response field.
     """
     # Deferred import: `place_and_route.py` imports this function back at
     # module scope (to preserve `klayout_tools.place_and_route.
@@ -559,6 +594,10 @@ def _merge_def_to_gds(
             raise PlaceAndRouteError(
                 f"could not read macro GDS view '{macro['gds']}' for GDS merge: {exc}"
             ) from exc
+
+    # Issue #4482: resolve the opt-in output dbu before any further work so a
+    # non-integer / coarsening request fails fast with no output written.
+    dbu_factor = _output_dbu_factor(main_layout.dbu, output_dbu_um)
 
     top_only = kdb.Layout()
     top_only.dbu = main_layout.dbu
@@ -706,15 +745,31 @@ def _merge_def_to_gds(
         die_area_um=die_area_um,
     )
 
+    # Issue #4495: ASAP7-only trim of redundant VIA_* M1 landing pads (a
+    # documented no-op, GDS untouched, for every other PDK family). Runs
+    # after the min-area pass so that pass keeps judging the router's own
+    # geometry; the pads dropped are fully covered by wire, so no polygon
+    # area the repair measured changes.
+    via_pad_info = trim_via_pads(
+        kdb,
+        layout=top_only,
+        top_cell=top,
+        variant=pdk_info["variant"],
+        lef_to_gds=_lef_net_layer_gds_map(layer_map_path),
+    )
+
     # write_layout() (see _layout.py, #320) always disables KLayout's default
     # wall-clock GDS2 BGNLIB/BGNSTR timestamps, so re-running an identical
     # place-and-route request twice produces a byte-identical merged GDS --
     # not just a byte-identical DEF (#1367).
+    _refine_dbu(top_only, top, dbu_factor, main_layout.dbu)
     write_layout(top_only, out_path, PlaceAndRouteError)
 
     return {
+        "output_dbu_um": top_only.dbu,
         "path": layer_map_path,
         "resolution": layer_map_resolution,
         "def_net_names": def_net_names_info,
         "min_area_repair": min_area_info,
+        "via_pad_trim": via_pad_info,
     }

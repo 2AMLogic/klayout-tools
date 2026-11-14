@@ -61,7 +61,7 @@ from .extraction import (
     UnmodelledDeviceFamily,
     UnsupportedDeviceMarker,
 )
-from .finfet import FinFETExtractionDeck, FinFETFlavour
+from .finfet import FinFETExtractionDeck, FinFETFlavour, FinFETPassiveCapacitor
 from .parasitics import (
     HIGH_CORNER,
     LOW_CORNER,
@@ -98,6 +98,7 @@ __all__ = [
     "ExtractionDeck",
     "FinFETExtractionDeck",
     "FinFETFlavour",
+    "FinFETPassiveCapacitor",
     "HIGH_CORNER",
     "InvalidDeckOptionError",
     "InvalidLabelLayerError",
@@ -420,8 +421,8 @@ def _extraction_registry() -> dict[str, ExtractionDeck]:
         "sg13g2": sg13g2.EXTRACTION_DECK,
         "sg13cmos5l": sg13cmos5l.EXTRACTION_DECK,
         # Issue #2761: extraction-only FinFET deck. ASAP7 is deliberately
-        # absent from the DRC registries above (#2760) and from
-        # `_parasitics_registry` below -- see `pdk_capabilities.DECISIONS`.
+        # absent from the DRC registries above (#2760); its first-order
+        # parasitics table is registered in `_parasitics_registry` (#4558).
         "asap7": asap7.EXTRACTION_DECK,
     }
 
@@ -648,9 +649,10 @@ def _resolve_flavour(
 
 
 def _parasitics_registry() -> dict[str, ParasiticsDeck]:
-    from . import gf180mcu, sg13cmos5l, sg13g2, sky130
+    from . import asap7, gf180mcu, sg13cmos5l, sg13g2, sky130
 
     return {
+        "asap7": asap7.PARASITICS,
         "sky130": sky130.PARASITICS,
         "gf180mcu": gf180mcu.PARASITICS,
         "sg13g2": sg13g2.PARASITICS,

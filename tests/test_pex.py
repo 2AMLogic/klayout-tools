@@ -30,12 +30,13 @@ from pathlib import Path
 import klayout.db as kdb
 import pytest
 
-from klayout_tools import sim
+from klayout_tools import output_lock, sim
 from klayout_tools.cli import main
 from klayout_tools.pex import (
     BODY_BIAS_BIASED,
     BODY_BIAS_UNBIASED,
     PexError,
+    _apply_tie_nets,
     _body_bias_report,
     _build_coverage,
     _build_delta_rows,
@@ -56,6 +57,7 @@ from klayout_tools.pex import (
     _status_from_coverage,
     _subckt_interfaces,
     _unextracted_delta_rows,
+    _validate_tie_nets,
     run_pex,
 )
 
@@ -280,6 +282,153 @@ def test_body_bias_report_unbiased_names_devices_and_nets():
     assert report["unbiased_device_count"] == 3
     assert report["unbiased_nets"] == ["\\$5", "\\$7"]
     assert report["unbiased_pmos_body_nets"] == entries
+
+
+# --------------------------------------------------------------------------- #
+# `--tie-net` (issue #4245): a caller-declared tie of a reported-unbiased net.
+# --------------------------------------------------------------------------- #
+
+_TIE_ENTRIES = [
+    {"device": "M1", "net": "\\$5"},
+    {"device": "M2", "net": "\\$7"},
+]
+
+
+def test_body_bias_report_without_ties_has_no_tied_key():
+    assert "tied" not in _body_bias_report({"unbiased_pmos_body_nets": _TIE_ENTRIES})
+
+
+def test_body_bias_report_partial_tie_stays_unbiased():
+    report = _body_bias_report(
+        {"unbiased_pmos_body_nets": _TIE_ENTRIES}, [("\\$5", "VDD")]
+    )
+    assert report["status"] == BODY_BIAS_UNBIASED
+    assert report["tied"] == [
+        {"extracted_net": "\\$5", "schematic_net": "VDD", "source": "declared"}
+    ]
+    # The layout's own finding is carried verbatim.
+    assert report["unbiased_pmos_body_nets"] == _TIE_ENTRIES
+
+
+def test_body_bias_report_fully_tied_is_tied_not_biased():
+    report = _body_bias_report(
+        {"unbiased_pmos_body_nets": _TIE_ENTRIES},
+        [("\\$5", "VDD"), ("\\$7", "VDD")],
+    )
+    assert report["status"] == "tied"
+    assert [t["schematic_net"] for t in report["tied"]] == ["VDD", "VDD"]
+
+
+def test_validate_tie_nets_lists_valid_names_for_unknown_net():
+    with pytest.raises(PexError) as exc:
+        _validate_tie_nets([("vout", "VDD")], {"unbiased_pmos_body_nets": _TIE_ENTRIES})
+    assert "vout" in str(exc.value)
+    assert "\\$5" in str(exc.value) and "\\$7" in str(exc.value)
+    assert exc.value.code == "invalid_tie_net"
+
+
+def test_validate_tie_nets_errors_when_nothing_is_unbiased():
+    with pytest.raises(PexError, match="no unbiased net"):
+        _validate_tie_nets([("\\$5", "VDD")], {"unbiased_pmos_body_nets": []})
+
+
+def test_apply_tie_nets_rewrites_whole_tokens_on_device_cards(tmp_path):
+    path = tmp_path / "x.spice"
+    path.write_text(
+        "* \\$5 comment\n.SUBCKT top a b\n"
+        "M1 a b c \\$5 pmos w=1\nM2 a b c \\$7 pmos w=1\n"
+        "M3 a b c \\$55 pmos w=1\n.ENDS\n"
+    )
+    _apply_tie_nets(str(path), [("\\$5", "VDD"), ("\\$7", "VDD")])
+    assert path.read_text() == (
+        "* \\$5 comment\n.SUBCKT top a b\n"
+        "M1 a b c VDD pmos w=1\nM2 a b c VDD pmos w=1\n"
+        "M3 a b c \\$55 pmos w=1\n.ENDS\n"
+    )
+
+
+def test_apply_tie_nets_does_not_chain(tmp_path):
+    path = tmp_path / "x.spice"
+    path.write_text("M1 a b c n1 pmos\nM2 a b c n2 pmos\n")
+    _apply_tie_nets(str(path), [("n1", "n2"), ("n2", "n3")])
+    assert path.read_text() == "M1 a b c n2 pmos\nM2 a b c n3 pmos\n"
+
+
+def test_apply_tie_nets_errors_when_net_absent(tmp_path):
+    path = tmp_path / "x.spice"
+    path.write_text("M1 a b c d pmos\n")
+    with pytest.raises(PexError, match="does not appear"):
+        _apply_tie_nets(str(path), [("\\$9", "VDD")])
+
+
+def test_parse_tie_nets():
+    from klayout_tools.cli._parsing import parse_tie_nets
+
+    assert parse_tie_nets(None, PexError) is None
+    assert parse_tie_nets(["\\$5=VDD", "\\$7=VDD", "\\$5=VDD"], PexError) == [
+        ("\\$5", "VDD"),
+        ("\\$7", "VDD"),
+    ]
+    for bad in ("nope", "=VDD", "a="):
+        with pytest.raises(PexError):
+            parse_tie_nets([bad], PexError)
+    with pytest.raises(PexError, match="twice"):
+        parse_tie_nets(["a=X", "a=Y"], PexError)
+
+
+def test_run_pex_tie_net_on_layout_with_no_unbiased_nets_errors(
+    tmp_path, resistor_layout, measure_reference
+):
+    with pytest.raises(PexError, match="not an unbiased"):
+        run_pex(
+            resistor_layout,
+            [],
+            "sky130",
+            output=str(tmp_path / "res.spice"),
+            artifacts_dir=str(tmp_path / "art"),
+            measure_command=_write_harness(tmp_path),
+            reference_netlist=measure_reference,
+            tie_nets=[("\\$5", "VDD")],
+        )
+
+
+def test_run_pex_tie_net_reports_hash_of_rewritten_netlist(
+    tmp_path, resistor_layout, measure_reference, monkeypatch
+):
+    import klayout_tools.pex as pex_module
+    from klayout_tools._provenance import sha256_file
+
+    real = pex_module.run_extract
+
+    def _with_unbiased(*args, **kwargs):
+        rep = real(*args, **kwargs)
+        rep["unbiased_pmos_body_nets"] = [{"device": "M0", "net": "n_tie"}]
+        return rep
+
+    monkeypatch.setattr(pex_module, "run_extract", _with_unbiased)
+    monkeypatch.setattr(
+        pex_module,
+        "_validate_tie_nets",
+        lambda ties, rep: None,
+    )
+    out = tmp_path / "res.spice"
+
+    def _fake_apply(path, ties):
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write("* tied\n")
+
+    monkeypatch.setattr(pex_module, "_apply_tie_nets", _fake_apply)
+    report = run_pex(
+        resistor_layout,
+        [],
+        "sky130",
+        output=str(out),
+        artifacts_dir=str(tmp_path / "art"),
+        measure_command=_write_harness(tmp_path),
+        reference_netlist=measure_reference,
+        tie_nets=[("n_tie", "VDD")],
+    )
+    assert report["extraction"]["netlist_sha256"] == sha256_file(str(out))
 
 
 # --------------------------------------------------------------------------- #
@@ -4309,6 +4458,105 @@ print(json.dumps({"corners": [{"corner_id": "tt", "measurements": [
     assert report["errored"] == 1
 
 
+def _run_message_harness(tmp_path, resistor_layout, measure_reference, entry):
+    harness = f"""\
+import json, os
+side = os.environ["KLT_PEX_SIDE"]
+entry = {entry}
+print(json.dumps({{"corners": [{{"corner_id": "tt", "measurements": [
+    dict(name="t_cross", **entry.get(side, {{}}))
+]}}]}}))
+"""
+    return run_pex(
+        resistor_layout,
+        [],
+        "sky130",
+        output=str(tmp_path / "res.spice"),
+        artifacts_dir=str(tmp_path / "art"),
+        measure_command=_write_harness(tmp_path, harness),
+        reference_netlist=measure_reference,
+    )
+
+
+_OK = {"value": 1.0}
+
+
+@pytest.mark.parametrize("bad_side", ["extracted", "schematic"])
+def test_run_pex_measure_command_message_reaches_error_row(
+    tmp_path, resistor_layout, measure_reference, bad_side
+):
+    other = "schematic" if bad_side == "extracted" else "extracted"
+    report = _run_message_harness(
+        tmp_path,
+        resistor_layout,
+        measure_reference,
+        {bad_side: {"value": None, "message": "out of interval"}, other: _OK},
+    )
+    assert report["delta"][0]["error"] == {
+        "side": bad_side,
+        "stage": "execute",
+        "message": "out of interval",
+    }
+
+
+def test_run_pex_measure_command_no_message_keeps_fallback(
+    tmp_path, resistor_layout, measure_reference
+):
+    report = _run_message_harness(
+        tmp_path,
+        resistor_layout,
+        measure_reference,
+        {"extracted": {"value": None}, "schematic": _OK},
+    )
+    error = report["delta"][0]["error"]
+    assert error["stage"] == "unknown"
+    assert error["message"] == "no diagnostic was recorded for this errored row"
+    assert set(error) == {"side", "stage", "message"}
+
+
+def test_run_pex_measure_command_both_null_blames_schematic_message(
+    tmp_path, resistor_layout, measure_reference
+):
+    report = _run_message_harness(
+        tmp_path,
+        resistor_layout,
+        measure_reference,
+        {
+            "schematic": {"value": None, "message": "sch msg"},
+            "extracted": {"value": None, "message": "ext msg"},
+        },
+    )
+    error = report["delta"][0]["error"]
+    assert (error["side"], error["message"]) == ("schematic", "sch msg")
+
+
+def test_run_pex_measure_command_message_on_pass_row_is_ignored(
+    tmp_path, resistor_layout, measure_reference
+):
+    report = _run_message_harness(
+        tmp_path,
+        resistor_layout,
+        measure_reference,
+        {"extracted": {**_OK, "message": "fine"}, "schematic": _OK},
+    )
+    assert report["delta"][0]["status"] == "pass"
+    assert "error" not in report["delta"][0]
+    assert "fine" not in json.dumps(report["delta"])
+
+
+@pytest.mark.parametrize("bad", [5, "", "  "])
+def test_run_pex_measure_command_bad_message_is_pex_error(
+    tmp_path, resistor_layout, measure_reference, bad
+):
+    with pytest.raises(PexError, match=r"measurements\[0\]\.message"):
+        _run_message_harness(
+            tmp_path,
+            resistor_layout,
+            measure_reference,
+            {"extracted": {"value": 1.0, "message": bad}, "schematic": _OK},
+        )
+
+
 def test_run_pex_measure_command_failing_row_status_is_a_fail(
     tmp_path, resistor_layout, measure_reference
 ):
@@ -5544,6 +5792,7 @@ def test_run_pex_flatten_schematic_runs_the_flattened_dut(
         "inlined_subckts": ["HALF"],
         "external_subckts": [],
         "already_flat": False,
+        "wrapper": None,
     }
     # No hierarchy-caused model_mismatch any more.
     assert report["model_mismatch"] is None
@@ -5554,6 +5803,66 @@ def test_run_pex_flatten_schematic_runs_the_flattened_dut(
     assert report["testbenches"][0]["schematic_netlist_sha256"] == (
         "sha256:" + _sha256_hex(dut)
     )
+
+
+def test_run_pex_flatten_schematic_wraps_a_fragment_dut(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """Issue #4625: a fragment DUT (file-level devices, helper `.subckt`, no
+    `.subckt <top>`) gets a synthesized wrapper with the extracted pins."""
+    dut = tmp_path / "schematic_dut.spice"
+    dut.write_text(
+        ".SUBCKT HALF A B\nR1 A B 144.6\n.ENDS HALF\n"
+        ".model res_generic_po r\n"
+        "X1 RA M HALF\nX2 M RB HALF\n"
+    )
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+    _install_recording_fake_run_sim(monkeypatch)
+    outdir = tmp_path / "pex"
+
+    report = run_pex(
+        resistor_layout,
+        [str(request)],
+        "sky130",
+        artifacts_dir=str(outdir),
+        flatten_schematic=True,
+    )
+
+    block = report["schematic_flatten"]
+    assert block["wrapper"] == {"synthesized": True, "pins": ["RA", "RB"]}
+    assert block["subckts"] == ["RES"]
+    flat = (outdir / "schematic-dut.flat.spice").read_text()
+    assert ".subckt RES RA RB" in flat
+    assert flat.index(".subckt RES") < flat.index("R.X1.R1") < flat.index(".ends RES")
+    assert flat.index(".subckt RES") < flat.index(".model res_generic_po")
+    assert report["flat_dut_mismatch"] is None
+    assert report["pin_count_mismatch"] is None
+
+
+def test_run_pex_flatten_schematic_fragment_missing_pin_net_is_coded(
+    tmp_path, resistor_layout, monkeypatch
+):
+    dut = tmp_path / "schematic_dut.spice"
+    dut.write_text("R1 RA MID 289.2\n")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+
+    def _boom(*_a, **_k):
+        raise AssertionError("run_sim must not be called")
+
+    import klayout_tools.pex as pex_module
+
+    monkeypatch.setattr(pex_module, "run_sim", _boom)
+    with pytest.raises(PexError) as excinfo:
+        run_pex(
+            resistor_layout,
+            [str(request)],
+            "sky130",
+            artifacts_dir=str(tmp_path / "pex"),
+            flatten_schematic=True,
+        )
+    assert excinfo.value.code == "schematic_flatten_wrapper_pin_unconnected"
 
 
 def test_run_pex_flatten_schematic_already_flat_dut_is_reported(
@@ -6288,6 +6597,7 @@ def test_run_pex_extract_only_reports_extraction_without_measuring(
     assert report["reference_netlist_sha256"] is None
     assert report["pin_count_mismatch"] is None
     assert report["flat_dut_mismatch"] is None
+    assert report["pin_order_mismatch"] is None
     assert report["model_mismatch"] is None
 
 
@@ -6295,7 +6605,6 @@ def test_run_pex_extract_only_reports_extraction_without_measuring(
     ("kwargs", "needle"),
     [
         ({"measure_command": ["true"]}, "--measure-command"),
-        ({"reference_netlist": "x.spice"}, "--reference-netlist"),
         ({"measure_timeout_s": 5.0}, "--measure-timeout-s"),
         ({"device_only_leg": True}, "--device-only-leg"),
         ({"flatten_schematic": True}, "--flatten-schematic"),
@@ -6546,3 +6855,704 @@ def test_cli_pex_resistance_graph_extract_only_json(tmp_path, capsys):
     report = json.loads(capsys.readouterr().out)
     (net,) = report["extraction"]["resistance_graph"]["nets"]
     assert net["resistance_source"] == "graph"
+
+
+def test_run_pex_forwards_batch_sharding_flags_to_every_run_sim(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """Issue #4616: `--max-units-per-job` / `--max-concurrent-jobs` reach both
+    the schematic-side and extracted-side `run_sim`; omitted, neither kwarg is
+    passed (the call shape of before the flags existed)."""
+    import klayout_tools.pex as pex_module
+
+    def _run(**flags):
+        seen = []
+
+        def _fake_run_sim(*_args, **kwargs):
+            seen.append(kwargs)
+            return _two_corner_schematic_report()
+
+        monkeypatch.setattr(pex_module, "run_sim", _fake_run_sim)
+        dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+        tb = _write_testbench(tmp_path / "testbench.spice", dut)
+        request = _write_request(tmp_path / "request.json", tb)
+        run_pex(resistor_layout, [str(request)], "sky130", **flags)
+        return seen
+
+    seen = _run(max_units_per_job=5, max_concurrent_jobs=2)
+    assert len(seen) == 2
+    for kwargs in seen:
+        assert kwargs["max_units_per_job"] == 5
+        assert kwargs["max_concurrent_jobs"] == 2
+
+    for kwargs in _run():
+        assert "max_units_per_job" not in kwargs
+        assert "max_concurrent_jobs" not in kwargs
+        assert "hosts" not in kwargs
+        assert "resume" not in kwargs
+
+    seen = _run(hosts=3, resume=True)
+    assert len(seen) == 2
+    for kwargs in seen:
+        assert kwargs["hosts"] == 3
+        assert kwargs["resume"] is True
+
+
+def test_run_pex_invalid_hosts_surfaces_as_pex_error(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """Issue #4624: a `hosts < 1` rejection from `run_sim` is a PexError."""
+    import klayout_tools.pex as pex_module
+    from klayout_tools.sim import SimError
+
+    def _fake_run_sim(*_args, **_kwargs):
+        raise SimError("remote.hosts must be a positive integer")
+
+    monkeypatch.setattr(pex_module, "run_sim", _fake_run_sim)
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+    with pytest.raises(PexError, match="positive integer"):
+        run_pex(resistor_layout, [str(request)], "sky130", hosts=0)
+
+
+def _async_inputs(tmp_path):
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    return str(_write_request(tmp_path / "request.json", tb))
+
+
+def _fake_async_sim(monkeypatch, calls, sharded=False):
+    import klayout_tools.pex as pex_module
+
+    def _fake_run_sim(request_path, **kwargs):
+        calls.append(kwargs)
+        side = os.path.basename(kwargs["artifacts_dir"])
+        if kwargs.get("submit_only"):
+            if sharded:
+                return {
+                    "status": "submitted",
+                    "sharded": True,
+                    "manifest_path": f"/shards/{side}/batch-shards.json",
+                    "unit_count": 2,
+                }
+            return {"status": "submitted", "job_id": f"job-{side}", "unit_count": 2}
+        return _two_corner_schematic_report()
+
+    monkeypatch.setattr(pex_module, "run_sim", _fake_run_sim)
+
+
+def test_run_pex_submit_only_writes_manifest_without_polling(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """Issue #4619: every side/testbench is submitted, none is collected."""
+    calls: list = []
+    _fake_async_sim(monkeypatch, calls)
+    request = _async_inputs(tmp_path)
+    outdir = tmp_path / "art"
+    report = run_pex(
+        resistor_layout,
+        [request],
+        "sky130",
+        artifacts_dir=str(outdir),
+        backend="batch",
+        submit_only=True,
+    )
+    assert report["status"] == "submitted"
+    assert [(leg["side"], leg["attach"]) for leg in report["legs"]] == [
+        ("schematic", "job-schematic"),
+        ("extracted", "job-extracted"),
+    ]
+    assert all(call["submit_only"] for call in calls)
+    manifest = json.loads((outdir / "pex-submit.json").read_text())
+    assert manifest["legs"] == report["legs"]
+    assert "delta" not in report
+
+
+def _mismatched_async_inputs(tmp_path, *, flat):
+    if flat:
+        dut = _write_flat_dut(tmp_path)
+        tb = tmp_path / "testbench.spice"
+        tb.write_text(f'.include "{dut}"\nVdd RA 0 DC 1.8\nRload RB 0 1k\n')
+    else:
+        dut = tmp_path / "schematic_dut.spice"
+        dut.write_text(".SUBCKT RES RA RB VSUB\nR1 RA RB 289.2\n.ENDS RES\n")
+        tb = tmp_path / "testbench.spice"
+        tb.write_text(
+            f'.include "{dut}"\n'
+            ".model res_generic_po r\n"
+            "Vdd RA 0 DC 1.8\nXres RA RB 0 RES\nRload RB 0 1k\n"
+        )
+    return str(_write_request(tmp_path / "request.json", tb))
+
+
+@pytest.mark.parametrize(
+    ("flat", "code"), [(False, "pin_count_mismatch"), (True, "flat_dut_mismatch")]
+)
+def test_run_pex_submit_only_refuses_static_preflight_mismatch(
+    tmp_path, resistor_layout, monkeypatch, flat, code
+):
+    """Issue #4696: a pre-flight diagnostic that would skip the extracted leg
+    fails the submit before any leg is launched or any manifest written."""
+    calls: list = []
+    _fake_async_sim(monkeypatch, calls)
+    request = _mismatched_async_inputs(tmp_path, flat=flat)
+    outdir = tmp_path / "art"
+    with pytest.raises(PexError) as err:
+        run_pex(
+            resistor_layout,
+            [request],
+            "sky130",
+            artifacts_dir=str(outdir),
+            backend="batch",
+            submit_only=True,
+        )
+    assert err.value.code == code
+    assert calls == []
+    assert not (outdir / "pex-submit.json").exists()
+
+
+@pytest.mark.parametrize(
+    "code", ["flat_dut_mismatch", "pin_count_mismatch", "pin_order_mismatch"]
+)
+def test_refuse_submit_on_preflight_mismatch_names_each_code(code):
+    """Issue #4696: every static pre-flight code, pin order included, refuses."""
+    from klayout_tools.pex import _refuse_submit_on_preflight_mismatch
+
+    fired = {
+        "flat_dut_mismatch": None,
+        "pin_count_mismatch": None,
+        "pin_order_mismatch": None,
+    }
+    fired[code] = {"detail": "boom"}
+    with pytest.raises(PexError) as err:
+        _refuse_submit_on_preflight_mismatch(submitting=True, **fired)
+    assert err.value.code == code
+    _refuse_submit_on_preflight_mismatch(submitting=False, **fired)
+
+
+def test_async_legs_finish_submit_refuses_missing_leg(tmp_path):
+    """Issue #4696: `complete: true` is never written with a leg missing."""
+    from klayout_tools.pex_async import AsyncLegs
+
+    legs = AsyncLegs(submit_only=True, attach=None, work_dir=str(tmp_path))
+    legs._legs.append(
+        {"testbench": "tb", "side": "schematic", "sharded": False, "attach": "j"}
+    )
+    with pytest.raises(PexError) as err:
+        legs.finish_submit(extracted_netlist_sha256="x", request_sha256={"tb": "y"})
+    assert err.value.code == "pex_manifest_incomplete"
+    assert not os.path.exists(legs.manifest_path)
+
+
+def _interrupting_async_sim(monkeypatch, calls, fail_on):
+    """A fake `run_sim` whose submit of the `fail_on` side raises once."""
+    import klayout_tools.pex as pex_module
+    from klayout_tools.sim import SimError
+
+    state = {"armed": True}
+
+    def _fake_run_sim(request_path, **kwargs):
+        side = os.path.basename(kwargs["artifacts_dir"])
+        if kwargs.get("submit_only"):
+            if side == fail_on and state["armed"]:
+                state["armed"] = False
+                raise SimError("submit cut off", code="batch_client_interrupted")
+            calls.append(side)
+            return {"status": "submitted", "job_id": f"job-{side}", "unit_count": 2}
+        return _two_corner_schematic_report()
+
+    monkeypatch.setattr(pex_module, "run_sim", _fake_run_sim)
+
+
+def test_run_pex_submit_only_flushes_manifest_per_leg_and_resumes(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """Issue #4686: an interrupted submit leaves an incomplete manifest; a
+    re-run submits only the legs that are missing, and attach is refused
+    until the manifest is complete."""
+    calls: list = []
+    _interrupting_async_sim(monkeypatch, calls, fail_on="extracted")
+    request = _async_inputs(tmp_path)
+    outdir = tmp_path / "art"
+    kwargs = dict(artifacts_dir=str(outdir), backend="batch")
+
+    with pytest.raises(PexError):
+        run_pex(resistor_layout, [request], "sky130", submit_only=True, **kwargs)
+    partial = json.loads((outdir / "pex-submit.json").read_text())
+    assert partial["complete"] is False
+    assert [leg["side"] for leg in partial["legs"]] == ["schematic"]
+
+    with pytest.raises(PexError) as err:
+        run_pex(
+            resistor_layout,
+            [request],
+            "sky130",
+            attach=str(outdir / "pex-submit.json"),
+            **kwargs,
+        )
+    assert err.value.code == "pex_manifest_incomplete"
+    assert "extracted" in str(err.value)
+
+    report = run_pex(resistor_layout, [request], "sky130", submit_only=True, **kwargs)
+    # The schematic leg was not submitted a second time.
+    assert calls == ["schematic", "extracted"]
+    assert [leg["side"] for leg in report["legs"]] == ["schematic", "extracted"]
+    final = json.loads((outdir / "pex-submit.json").read_text())
+    assert final["complete"] is True
+
+
+def test_run_pex_submit_only_rerun_refuses_changed_request(
+    tmp_path, resistor_layout, monkeypatch
+):
+    calls: list = []
+    _interrupting_async_sim(monkeypatch, calls, fail_on="extracted")
+    request = _async_inputs(tmp_path)
+    kwargs = dict(artifacts_dir=str(tmp_path / "art"), backend="batch")
+    with pytest.raises(PexError):
+        run_pex(resistor_layout, [request], "sky130", submit_only=True, **kwargs)
+    with open(request, "a", encoding="utf-8") as handle:
+        handle.write("\n")
+    with pytest.raises(PexError) as err:
+        run_pex(resistor_layout, [request], "sky130", submit_only=True, **kwargs)
+    assert err.value.code == "resume_fingerprint_mismatch"
+    assert calls == ["schematic"]
+
+
+def test_run_pex_attach_delta_equals_synchronous_run(
+    tmp_path, resistor_layout, monkeypatch
+):
+    calls: list = []
+    _fake_async_sim(monkeypatch, calls, sharded=True)
+    request = _async_inputs(tmp_path)
+    outdir = str(tmp_path / "art")
+    sync = run_pex(resistor_layout, [request], "sky130", artifacts_dir=outdir)
+    submitted = run_pex(
+        resistor_layout,
+        [request],
+        "sky130",
+        artifacts_dir=outdir,
+        backend="batch",
+        submit_only=True,
+    )
+    calls.clear()
+    attached = run_pex(
+        resistor_layout,
+        [request],
+        "sky130",
+        artifacts_dir=outdir,
+        backend="batch",
+        attach=submitted["manifest_path"],
+    )
+    assert attached["delta"] == sync["delta"]
+    assert [c["attach_job_id"] for c in calls] == [
+        "/shards/schematic/batch-shards.json",
+        "/shards/extracted/batch-shards.json",
+    ]
+
+
+def test_run_pex_attach_refuses_changed_request(tmp_path, resistor_layout, monkeypatch):
+    _fake_async_sim(monkeypatch, [])
+    request = _async_inputs(tmp_path)
+    outdir = str(tmp_path / "art")
+    submitted = run_pex(
+        resistor_layout,
+        [request],
+        "sky130",
+        artifacts_dir=outdir,
+        submit_only=True,
+    )
+    with open(request, "a", encoding="utf-8") as handle:
+        handle.write("\n")
+    with pytest.raises(PexError) as err:
+        run_pex(
+            resistor_layout,
+            [request],
+            "sky130",
+            artifacts_dir=outdir,
+            attach=submitted["manifest_path"],
+        )
+    assert err.value.code == "resume_fingerprint_mismatch"
+
+
+def test_attach_removes_sharded_leg_maps_only_after_full_success(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """Issue #4721: leg 1 collects, leg 2 is interrupted -> leg 1's map stays
+    (run_sim keeps it on a sharded attach); a completed attach removes both."""
+    import klayout_tools.pex as pex_module
+
+    request = _async_inputs(tmp_path)
+    outdir = str(tmp_path / "art")
+    _fake_async_sim(monkeypatch, [], sharded=True)
+    submitted = run_pex(
+        resistor_layout,
+        [request],
+        "sky130",
+        artifacts_dir=outdir,
+        submit_only=True,
+    )
+    maps = [leg["attach"] for leg in submitted["legs"]]
+    assert len(maps) == 2
+    # Real files at the recorded paths, as the fleet run would leave them.
+    real = [tmp_path / f"leg{i}" / "batch-shards.json" for i in range(2)]
+    for path in real:
+        path.parent.mkdir()
+        path.write_text("{}")
+    manifest = json.loads(open(submitted["manifest_path"], encoding="utf-8").read())
+    for leg, path in zip(manifest["legs"], real, strict=True):
+        leg["attach"] = str(path)
+    with open(submitted["manifest_path"], "w", encoding="utf-8") as handle:
+        json.dump(manifest, handle)
+
+    def _interrupted(request_path, **kwargs):
+        raise PexError("interrupted", code="batch_client_interrupted")
+
+    monkeypatch.setattr(pex_module, "run_sim", _interrupted)
+    with pytest.raises(PexError):
+        run_pex(
+            resistor_layout,
+            [request],
+            "sky130",
+            artifacts_dir=outdir,
+            attach=submitted["manifest_path"],
+        )
+    assert all(path.exists() for path in real)
+
+    def _collect(request_path, **kwargs):
+        return _two_corner_schematic_report()
+
+    monkeypatch.setattr(pex_module, "run_sim", _collect)
+    run_pex(
+        resistor_layout,
+        [request],
+        "sky130",
+        artifacts_dir=outdir,
+        attach=submitted["manifest_path"],
+    )
+    assert not any(path.exists() for path in real)
+
+
+@pytest.mark.parametrize(
+    "flags, match",
+    [
+        ({"submit_only": True, "attach": "m.json"}, "mutually exclusive"),
+        ({"submit_only": True, "backend": "local"}, "requires backend 'batch'"),
+        ({"attach": "m.json", "backend": "local"}, "requires backend 'batch'"),
+        ({"submit_only": True, "resume": True}, "--resume"),
+        ({"submit_only": True, "extract_only": True}, "--extract-only"),
+        ({"submit_only": True, "device_only_leg": True}, "--device-only-leg"),
+        ({"submit_only": True, "measure_command": ["x"]}, "--measure-command"),
+    ],
+)
+def test_run_pex_async_refusals_by_name(tmp_path, resistor_layout, flags, match):
+    with pytest.raises(PexError, match=match):
+        run_pex(resistor_layout, [], "sky130", artifacts_dir=str(tmp_path), **flags)
+
+
+def test_run_pex_attach_missing_manifest_is_named_error(tmp_path, resistor_layout):
+    request = _async_inputs(tmp_path)
+    with pytest.raises(PexError) as err:
+        run_pex(
+            resistor_layout,
+            [request],
+            "sky130",
+            artifacts_dir=str(tmp_path / "art"),
+            attach=str(tmp_path / "nope.json"),
+        )
+    assert err.value.code == "pex_manifest_invalid"
+
+
+def test_cli_pex_submit_only_emits_submitted_payload_exit_0(
+    tmp_path, resistor_layout, monkeypatch, capsys
+):
+    _fake_async_sim(monkeypatch, [])
+    request = _async_inputs(tmp_path)
+    code = main(
+        [
+            "pex",
+            str(resistor_layout),
+            request,
+            "--deck",
+            "sky130",
+            "--backend",
+            "batch",
+            "--submit-only",
+            "--outdir",
+            str(tmp_path / "art"),
+            "--format",
+            "json",
+        ]
+    )
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "submitted"
+    assert payload["leg_count"] == 2
+
+
+def _cli_submit(tmp_path, resistor_layout, request, *extra):
+    return main(
+        [
+            "pex",
+            str(resistor_layout),
+            request,
+            "--deck",
+            "sky130",
+            "--backend",
+            "batch",
+            "--submit-only",
+            "--outdir",
+            str(tmp_path / "art"),
+            "--format",
+            "json",
+            *extra,
+        ]
+    )
+
+
+def test_cli_pex_envelope_out_writes_submitted_envelope(
+    tmp_path, resistor_layout, monkeypatch, capsys
+):
+    """Issue #4692: `--envelope-out` gets the envelope; `-o` the netlist."""
+    _fake_async_sim(monkeypatch, [])
+    request = _async_inputs(tmp_path)
+    envelope = tmp_path / "r.json"
+    netlist = tmp_path / "n.spice"
+    code = _cli_submit(
+        tmp_path,
+        resistor_layout,
+        request,
+        "--envelope-out",
+        str(envelope),
+        "-o",
+        str(netlist),
+    )
+    assert code == 0
+    assert json.loads(envelope.read_text()) == json.loads(capsys.readouterr().out)
+    assert netlist.read_text().lstrip().startswith((".SUBCKT", "*", ".subckt"))
+
+
+def test_cli_pex_envelope_out_with_text_format_still_json(
+    tmp_path, resistor_layout, monkeypatch
+):
+    _fake_async_sim(monkeypatch, [])
+    request = _async_inputs(tmp_path)
+    envelope = tmp_path / "r.json"
+    code = main(
+        [
+            "pex",
+            str(resistor_layout),
+            request,
+            "--deck",
+            "sky130",
+            "--backend",
+            "batch",
+            "--submit-only",
+            "--outdir",
+            str(tmp_path / "art"),
+            "--envelope-out",
+            str(envelope),
+        ]
+    )
+    assert code == 0
+    assert json.loads(envelope.read_text())["status"] == "submitted"
+
+
+def test_cli_pex_envelope_out_gets_error_envelope(tmp_path, resistor_layout, capsys):
+    envelope = tmp_path / "r.json"
+    code = main(
+        [
+            "pex",
+            str(resistor_layout),
+            str(tmp_path / "missing-request.json"),
+            "--deck",
+            "sky130",
+            "--format",
+            "json",
+            "--envelope-out",
+            str(envelope),
+        ]
+    )
+    assert code == 1
+    written = json.loads(envelope.read_text())
+    assert written == json.loads(capsys.readouterr().err)
+    assert written["error"]["command"] == "pex"
+
+
+def test_cli_pex_envelope_out_unwritable_path_is_an_error(
+    tmp_path, resistor_layout, monkeypatch, capsys
+):
+    _fake_async_sim(monkeypatch, [])
+    request = _async_inputs(tmp_path)
+    code = _cli_submit(
+        tmp_path,
+        resistor_layout,
+        request,
+        "--envelope-out",
+        str(tmp_path / "no-such-dir" / "r.json"),
+    )
+    assert code == 1
+    assert "--envelope-out" in json.loads(capsys.readouterr().err)["error"]["message"]
+
+
+def test_cli_pex_outdir_locked_carries_structured_owner(
+    tmp_path, resistor_layout, monkeypatch, capsys
+):
+    import klayout_tools.cli.pex_cmd as pex_cmd
+
+    def _locked(*args, **kwargs):
+        raise output_lock.OutputDirLockedError(
+            str(tmp_path / "art"),
+            owner_pid=4242,
+            owner_acquired_at="2026-10-31T00:00:00+00:00",
+        )
+
+    monkeypatch.setattr(pex_cmd, "run_pex", _locked)
+    request = _async_inputs(tmp_path)
+    code = _cli_submit(tmp_path, resistor_layout, request)
+    assert code == 1
+    error = json.loads(capsys.readouterr().err)["error"]
+    assert error["code"] == "outdir_locked"
+    assert error["owner_pid"] == 4242
+    assert error["owner_acquired_at"] == "2026-10-31T00:00:00+00:00"
+    assert error["relation"] == "same"
+    assert error["locked_directory"] == str(tmp_path / "art")
+
+
+def test_cli_pex_bare_attach_matches_full_args_attach(
+    tmp_path, resistor_layout, monkeypatch, capsys
+):
+    """Issue #4692: `--attach MANIFEST` alone rebuilds the run from the
+    manifest, even from another working directory."""
+    calls: list = []
+    _fake_async_sim(monkeypatch, calls)
+    request = _async_inputs(tmp_path)
+    assert _cli_submit(tmp_path, resistor_layout, request) == 0
+    capsys.readouterr()
+    manifest = tmp_path / "art" / "pex-submit.json"
+    assert "request" in json.loads(manifest.read_text())
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    full = main(
+        [
+            "pex",
+            str(resistor_layout),
+            request,
+            "--deck",
+            "sky130",
+            "--backend",
+            "batch",
+            "--outdir",
+            str(tmp_path / "art"),
+            "--attach",
+            str(manifest),
+            "--format",
+            "json",
+        ]
+    )
+    full_out = json.loads(capsys.readouterr().out)
+    bare = main(["pex", "--attach", str(manifest), "--format", "json"])
+    bare_out = json.loads(capsys.readouterr().out)
+    assert bare == full
+    assert bare_out["delta"] == full_out["delta"]
+    assert bare_out["status"] == full_out["status"]
+
+
+def test_cli_pex_bare_attach_of_old_manifest_is_named_error(tmp_path, capsys):
+    manifest = tmp_path / "pex-submit.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "complete": True,
+                "extracted_netlist_sha256": "x",
+                "testbenches": [],
+                "legs": [],
+            }
+        )
+    )
+    code = main(["pex", "--attach", str(manifest), "--format", "json"])
+    assert code == 1
+    error = json.loads(capsys.readouterr().err)["error"]
+    assert error["code"] == "pex_manifest_no_request"
+    assert "layout" not in error["message"].split("--attach:")[0]
+
+
+def test_cli_pex_without_attach_still_requires_layout_and_deck(capsys):
+    code = main(["pex", "--format", "json"])
+    assert code == 2
+    assert "required" in json.loads(capsys.readouterr().err)["error"]["message"]
+
+
+def _write_wrapper_pair(tmp_path, *, included_model, extracted_model, subdir=""):
+    base = tmp_path / subdir if subdir else tmp_path
+    base.mkdir(exist_ok=True)
+    (base / "devs.spice").write_text(
+        f"Xm1 Y A VSS VSS {included_model} l=0.15 w=0.42\n"
+        f"Xm2 Y A VDD VDD {included_model} l=0.15 w=0.84\n"
+    )
+    reference = base / "ref.spice"
+    reference.write_text('.subckt INV A Y VDD VSS\n.include "devs.spice"\n.ends INV\n')
+    extracted = tmp_path / "extracted.spice"
+    extracted.write_text(
+        ".SUBCKT INV A Y VDD VSS\n"
+        f"Xm1 Y A VSS VSS {extracted_model} l=0.15 w=0.42\n"
+        f"Xm2 Y A VDD VDD {extracted_model} l=0.15 w=0.84\n"
+        ".ENDS INV\n"
+    )
+    return str(reference), str(extracted)
+
+
+def test_model_mismatch_expands_include_wrapper_match(tmp_path, monkeypatch):
+    reference, extracted = _write_wrapper_pair(
+        tmp_path,
+        included_model="sky130_fd_pr__nfet_01v8",
+        extracted_model="sky130_fd_pr__nfet_01v8",
+        subdir="sub",
+    )
+    monkeypatch.chdir(tmp_path)  # includes resolve against the file, not CWD
+    assert (
+        _model_mismatch(reference_netlist=reference, extracted_netlist=extracted)
+        is None
+    )
+
+
+def test_model_mismatch_expands_include_wrapper_divergence(tmp_path):
+    reference, extracted = _write_wrapper_pair(
+        tmp_path,
+        included_model="sky130_fd_pr__nfet_g5v0",
+        extracted_model="sky130_fd_pr__nfet_01v8",
+    )
+    mismatch = _model_mismatch(reference_netlist=reference, extracted_netlist=extracted)
+    assert mismatch["kind"] == "model_set"
+    assert mismatch["counts"]["reference"] == {"sky130_fd_pr__nfet_g5v0": 2}
+    assert "could not be resolved" not in mismatch["detail"]
+
+
+def test_model_mismatch_include_cycle_terminates(tmp_path):
+    reference, extracted = _write_wrapper_pair(
+        tmp_path,
+        included_model="sky130_fd_pr__nfet_01v8",
+        extracted_model="sky130_fd_pr__nfet_01v8",
+    )
+    with open(tmp_path / "devs.spice", "a") as handle:
+        handle.write(".inc devs.spice\n.include ref.spice\n")
+    assert (
+        _model_mismatch(reference_netlist=reference, extracted_netlist=extracted)
+        is None
+    )
+
+
+def test_model_mismatch_unresolvable_include_says_so(tmp_path):
+    reference, extracted = _write_wrapper_pair(
+        tmp_path,
+        included_model="sky130_fd_pr__nfet_01v8",
+        extracted_model="sky130_fd_pr__nfet_01v8",
+    )
+    (tmp_path / "devs.spice").unlink()
+    mismatch = _model_mismatch(reference_netlist=reference, extracted_netlist=extracted)
+    assert mismatch["counts"]["reference"] == {}
+    assert "`.include` that could not be resolved" in mismatch["detail"]
+    assert "electrically unrelated" not in mismatch["detail"]

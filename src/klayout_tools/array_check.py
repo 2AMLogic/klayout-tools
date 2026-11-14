@@ -36,6 +36,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from ._jsonnum import is_int, is_number
 from ._layout import bbox_um_dict, load_layout, select_top_cells
 
 #: Stable rule ids carried by the violations this module emits.
@@ -55,7 +56,7 @@ class ArrayCheckError(Exception):
 
 
 def _finite(value: Any, flag: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if not is_number(value):
         raise ArrayCheckError(f"{flag} must be a number, got {value!r}")
     if not math.isfinite(value):
         raise ArrayCheckError(f"{flag} must be finite, got {value!r}")
@@ -95,7 +96,7 @@ def _validate_abutment(
         raise ArrayCheckError("abutment needs both --pitch and --count")
     if _finite(pitch_um, "--pitch") <= 0:
         raise ArrayCheckError(f"--pitch must be > 0 um, got {pitch_um}")
-    if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+    if not is_int(count) or count < 1:
         raise ArrayCheckError(f"--count must be an integer >= 1, got {count!r}")
     if direction not in ("x", "y"):
         raise ArrayCheckError(f"--direction must be 'x' or 'y', got {direction!r}")

@@ -63,7 +63,7 @@ from collections.abc import Callable
 from typing import Any
 
 from . import _batch_common, _provenance, output_lock, remote_transport, sim, sim_batch
-from ._provenance import _content_hash
+from ._jsonnum import is_number
 from .netlist_batch import _remote_stderr_tail, _runner_error
 from .place_and_route import (
     SCHEMA_VERSION,
@@ -321,7 +321,7 @@ def new_job_id() -> str:
 
 def _job_timeout_s(request: dict[str, Any]) -> float:
     value = (request.get("batch") or {}).get("job_timeout_s", DEFAULT_JOB_TIMEOUT_S)
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+    if not is_number(value) or value <= 0:
         raise PlaceAndRouteError(
             "request.batch.job_timeout_s must be a positive number of seconds"
         )
@@ -410,24 +410,6 @@ def _job_failure(
 # --------------------------------------------------------------------------- #
 
 
-def _rewrite_paths(value: Any, runner_roots: list[str], local_dir: str) -> Any:
-    """``value`` with every string under a runner stage-output root re-rooted
-    at ``local_dir`` (the directory a local run would have written)."""
-    if isinstance(value, str):
-        for root in runner_roots:
-            if value == root or value.startswith(root + "/"):
-                return local_dir + value[len(root) :]
-        return value
-    if isinstance(value, list):
-        return [_rewrite_paths(item, runner_roots, local_dir) for item in value]
-    if isinstance(value, dict):
-        return {
-            key: _rewrite_paths(item, runner_roots, local_dir)
-            for key, item in value.items()
-        }
-    return value
-
-
 def _read_unit_report(collected: str, job_id: str) -> dict[str, Any]:
     try:
         report = sim_batch.read_collected_report(collected)
@@ -471,7 +453,7 @@ def _local_deck_hash(
         )
     except PlaceAndRouteError:
         return None
-    return _content_hash(path)
+    return _provenance.content_hash(path)
 
 
 def _preflight(
@@ -480,7 +462,7 @@ def _preflight(
     """The request-level checks done before any upload: the netlist hash, the
     cell library, the packaged tree, the job timeout and the fleet config."""
     netlist_path = _resolve_netlist(request["netlist"], request_dir)
-    input_hash = _content_hash(netlist_path)
+    input_hash = _provenance.content_hash(netlist_path)
     cell_library = request["pdk"].get("cell_library")
     if not isinstance(cell_library, str) or not cell_library:
         raise PlaceAndRouteError("request.pdk.cell_library is required")
@@ -696,7 +678,7 @@ def _finish_unit(
     if os.path.isdir(artifacts):
         os.makedirs(unit_dir, exist_ok=True)
         shutil.copytree(artifacts, unit_dir, dirs_exist_ok=True)
-    return _rewrite_paths(
+    return _batch_common.rewrite_runner_paths(
         report, _batch_common.read_runner_roots(collected), unit_dir
     ), remote
 

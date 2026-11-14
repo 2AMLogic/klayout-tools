@@ -224,6 +224,9 @@ packages = ["src/klayout_tools"]
 # wheel.)
 [tool.hatch.build.targets.wheel.force-include]
 "docs/design-evidence-tiers.md" = "klayout_tools/data/design-evidence-tiers.md"
+# Per-verb CLI pages: `--help` text points at `docs/cli/<verb>.md`, so ship them
+# for wheel-only installs (issue #5288).
+"docs/cli" = "klayout_tools/data/cli"
 
 # Distribution version (issue #2823). `base-version` is the release this
 # checkout is at or working towards -- bump it here (then `uv lock`) when
@@ -245,7 +248,7 @@ packages = ["src/klayout_tools"]
 source = "code"
 path = "hatch_build.py"
 expression = "version_from_pyproject()"
-base-version = "0.8.0"
+base-version = "0.9.1"
 
 # Build identity (issue #1202). `hatch_build.py` records the commit/tag/dirty
 # state of the checkout each distribution is built from (plus the version the

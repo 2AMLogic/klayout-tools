@@ -1,5 +1,6 @@
 """Helpers shared by the batch-offload modules (``netlist_batch``,
-``place_and_route_batch``, ``sim_batch``, ``signoff_generator_batch``).
+``extract_batch``, ``place_and_route_batch``, ``sim_batch``,
+``signoff_generator_batch``).
 
 Error strings and ``details`` keys built here are part of the JSON contract
 (``docs/json-contract.md``); change them here, once.
@@ -7,14 +8,27 @@ Error strings and ``details`` keys built here are part of the JSON contract
 
 from __future__ import annotations
 
+import math
 import os
+import sys
 import tarfile
 import uuid
-from typing import Any
+from collections.abc import Sequence
+from typing import Any, TypeVar
+
+# ``ExtractError``/``NetlistError`` share a ``code``/``job_id``/``details``
+# keyword shape that ``type[Exception]`` cannot express, so construction goes
+# through ``Any`` while the return type stays the caller's own class.
+_E = TypeVar("_E", bound=Exception)
 
 BATCH_TREE_ROOT_FILENAME = "tree_root.txt"
 BATCH_JOB_FAILED_CODE = "batch_job_failed"
 BATCH_JOB_TIMEOUT_CODE = "batch_job_timeout"
+BATCH_POLL_TIMEOUT_CODE = "batch_poll_timeout"
+
+
+def _ctor(err_cls: type[_E]) -> Any:
+    return err_cls
 
 
 def make_job_id(kind: str) -> str:
@@ -47,6 +61,34 @@ def read_runner_roots(collected: str) -> list[str]:
     return sorted(
         {line for line in lines if line.startswith("/")}, key=len, reverse=True
     )
+
+
+def job_timeout_seconds(timeout_s: float) -> int:
+    """``--timeout-s`` plus the per-job overhead ``klt sim`` adds, so the inner
+    ``timeout`` always fires before the harness's outer one. Never capped here;
+    the fleet ceiling is each module's own concern."""
+    from . import sim_batch
+
+    return int(math.ceil(sim_batch._default_batch_job_timeout_s(1, timeout_s)))
+
+
+def rewrite_runner_paths(value: Any, runner_roots: list[str], local_root: str) -> Any:
+    """``value`` with every string under a runner scratch root re-rooted at
+    ``local_root`` (the directory a local run would have written)."""
+    local_root = local_root.rstrip("/")
+    if isinstance(value, str):
+        for root in runner_roots:
+            if value == root or value.startswith(root + "/"):
+                return local_root + value[len(root) :]
+        return value
+    if isinstance(value, list):
+        return [rewrite_runner_paths(item, runner_roots, local_root) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: rewrite_runner_paths(item, runner_roots, local_root)
+            for key, item in value.items()
+        }
+    return value
 
 
 def job_failure_parts(
@@ -99,3 +141,152 @@ def job_failure_parts(
         if stderr_tail:
             details["remote_stderr_tail"] = stderr_tail
     return message, code, details
+
+
+def resumable(
+    environment: dict[str, Any] | None, manifest: Any
+) -> dict[str, Any] | None:
+    """``environment`` plus the additive "incomplete, resumable" signal
+    (issue #4856) when ``manifest`` (a shard manifest) still has shards that
+    were submitted but never launched; ``environment`` unchanged otherwise."""
+    count = manifest.unlaunched() if manifest is not None else 0
+    if not count:
+        return environment
+    return {
+        **(environment or {}),
+        "unlaunched_shards": count,
+        "resumable": True,
+        "shard_map": str(manifest.path),
+    }
+
+
+def with_unrun_signal(
+    environment: dict[str, Any] | None, unrun: int, state_path: str | None
+) -> tuple[dict[str, Any] | None, bool]:
+    """``environment`` plus the additive "incomplete, resumable" signal for
+    corners that never ran (``lost_shard``, ``batch_job_interrupted``, ...;
+    issue #5364): ``unrun_units`` (count), ``resumable: true`` and -- unless
+    :func:`resumable` already set it -- ``shard_map`` (``state_path``, the
+    retained shard map or checkpoint). Returns ``(environment, hint_needed)``;
+    ``hint_needed`` is False when the unlaunched-shard hint already covers
+    the rerun. Unchanged for ``unrun == 0`` or no retained state."""
+    if not unrun or not state_path or environment is None:
+        return environment, False
+    out = {**environment, "unrun_units": unrun, "resumable": True}
+    out.setdefault("shard_map", state_path)
+    return out, "unlaunched_shards" not in environment
+
+
+def apply_unrun_signal(
+    environment: dict[str, Any] | None,
+    unrun: int,
+    artifacts_dir: str,
+    checkpoint_path: str | None,
+) -> dict[str, Any] | None:
+    """Issue #5364 wiring for ``run_sim``: when ``unrun`` corners never ran
+    (only a ``batch`` run synthesizes them), pick the retained resume state
+    (the shard map in ``artifacts_dir``, else ``checkpoint_path``; ``None``
+    when no checkpoint was retained), add the :func:`with_unrun_signal`
+    fields and print the ``--resume`` hint to stderr once. Returns
+    ``environment`` unchanged when nothing applies."""
+    if not unrun:
+        return environment
+    from .sim_batch import BATCH_SHARDS_FILENAME  # circular at import time
+
+    manifest = os.path.join(artifacts_dir, BATCH_SHARDS_FILENAME)
+    state = manifest if os.path.exists(manifest) else checkpoint_path
+    environment, hint = with_unrun_signal(environment, unrun, state)
+    if hint:
+        print(
+            f"klt sim: {unrun} unit(s) never ran (lost or interrupted batch "
+            f"shard); rerun with --resume and the same outdir to finish them "
+            f"(state: {state})",
+            file=sys.stderr,
+        )
+    return environment
+
+
+def resolve_backend_value(
+    flag: str | None,
+    env_name: str,
+    supported: Sequence[str],
+    err_cls: type[_E],
+) -> str:
+    """``--backend`` > ``$<env_name>`` > ``"local"``; an unknown value raises
+    ``err_cls`` naming the flag or variable it came from."""
+    if flag is not None:
+        value, source = flag, "--backend"
+    else:
+        value = os.environ.get(env_name, "").strip() or "local"
+        source = f"${env_name}"
+    if value not in supported:
+        raise _ctor(err_cls)(
+            f"{source} must be one of {', '.join(supported)} (got {value!r})"
+        )
+    return value
+
+
+def resolve_batch_config(
+    pdk: str, timeout_s: float, err_cls: type[_E], no_fallback: str
+) -> Any:
+    """:func:`sim_batch._resolve_batch_config` fed a synthetic one-unit
+    request, so the fleet config resolves exactly as for ``klt sim``. Its
+    ``SimError``/``BatchError`` becomes ``err_cls``."""
+    from . import sim_batch
+    from .sim import SimError
+
+    try:
+        return sim_batch._resolve_batch_config(
+            {"models": {"pdk": pdk}}, corner_count=1, timeout_s=timeout_s
+        )
+    except (SimError, sim_batch.BatchError) as exc:
+        raise _ctor(err_cls)(
+            f"batch backend: {exc} {no_fallback}", code=getattr(exc, "code", None)
+        ) from exc
+
+
+def transport_error(job_id: str, exc: Any, err_cls: type[_E], no_fallback: str) -> _E:
+    """``err_cls`` for a ``sim_batch.BatchError`` raised while submitting,
+    launching or polling; the poll timeout says the job may still finish."""
+    from . import sim_batch
+
+    if isinstance(exc, sim_batch.BatchPollTimeout):
+        return _ctor(err_cls)(
+            f"batch job {job_id}: {exc} -- it may still finish on the fleet, but "
+            f"no netlist was collected {no_fallback}",
+            code=exc.code or BATCH_POLL_TIMEOUT_CODE,
+            job_id=job_id,
+        )
+    return _ctor(err_cls)(
+        f"batch job {job_id}: {exc} {no_fallback}", code=exc.code, job_id=job_id
+    )
+
+
+def job_failure(
+    *,
+    job_id: str,
+    status: dict[str, Any],
+    runner_error: dict[str, Any] | None,
+    note: str,
+    stderr_tail: str,
+    harness_log: str | None,
+    err_cls: type[_E],
+    no_fallback: str,
+) -> _E:
+    """:func:`job_failure_parts` as an ``err_cls`` with ``no_fallback``
+    appended to the message."""
+    from .sim_exit_reason import status_exit_code
+
+    message, code, details = job_failure_parts(
+        job_id=job_id,
+        state=str(status.get("state") or ""),
+        exit_code=status_exit_code(status),
+        detail=str(status.get("detail") or "").strip(),
+        runner_error=runner_error,
+        note=note,
+        stderr_tail=stderr_tail,
+        harness_log=harness_log,
+    )
+    return _ctor(err_cls)(
+        f"{message} {no_fallback}", code=code, job_id=job_id, details=details or None
+    )

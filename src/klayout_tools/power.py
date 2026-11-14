@@ -148,6 +148,7 @@ from ._devices import (
     _device_body_cuts,
     _validate_devices,
 )
+from ._jsonnum import is_int
 from ._layout import load_layout, select_top_cells
 from ._layout import region as _region
 from ._layout import texts as _texts
@@ -157,7 +158,7 @@ from ._paths import (
     _reject_unknown_keys,
     _validate_via_entries,
 )
-from ._provenance import INPUT_ROLE_LAYOUT, _content_hash, build_provenance
+from ._provenance import INPUT_ROLE_LAYOUT, build_provenance, content_hash
 from ._unionfind import UnionFind
 from .coverage import build_check_coverage, coverage_rollup, rollup_status, work_id
 from .ir_solver import solve_ir_drop, worst_deviation
@@ -418,10 +419,7 @@ def _validate_via_cut_geometry(
             f"spec '{spec_path}': vias[{i}] must give 'cut_size_um' and "
             "'cut_space_um' together or neither"
         )
-    cut_geometry: dict[str, float | None] = {
-        "cut_size_um": None,
-        "cut_space_um": None,
-    }
+    cut_geometry: dict[str, float | None] = {"cut_size_um": None, "cut_space_um": None}
     for key in cut_geometry:
         if key not in entry:
             continue
@@ -604,7 +602,7 @@ def _validate_max_decomposition_cells(spec: dict[str, Any], spec_path: str) -> i
     raw = spec.get("max_decomposition_cells")
     if raw is None:
         return MAX_DECOMPOSITION_CELLS
-    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
+    if not is_int(raw) or raw < 1:
         raise PowerError(
             f"spec '{spec_path}': 'max_decomposition_cells' must be a positive "
             f"integer, got {raw!r}"
@@ -2579,7 +2577,7 @@ def run_power(
     # Issue #3400: with `--deck`, the deck that defaulted the via
     # resistances is recorded; without it `deck` stays `null`.
     provenance = _power_provenance(file, deck)
-    provenance["spec"] = {"content_hash": _content_hash(spec_path)}
+    provenance["spec"] = {"content_hash": content_hash(spec_path)}
     provenance["top_cell"] = top_cell.name
 
     report: dict[str, Any] = {

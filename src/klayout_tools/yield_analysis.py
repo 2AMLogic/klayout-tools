@@ -48,7 +48,18 @@ import math
 import os
 from typing import Any
 
-from ._native import _load_native_extension
+from ._jsonnum import is_int, is_number
+from ._native import _load_native_extension, native_provenance
+from .yield_provenance import (
+    _attach_spec_rows,
+    _provenance_from,
+    _request_without_spec_rows,
+    _spec_row_from,
+    _spec_rows_for,
+    nominal_provenance,
+    spec_rows_from_limits,
+)
+from .yield_sampling_fields import _analytic_cross_check_from, _sampling_from
 
 #: Mirrors ``native/yield/src/contract.rs``'s ``SCHEMA_VERSION`` -- kept in
 #: sync manually, the same convention ``mom.py`` uses for the constants it
@@ -88,6 +99,7 @@ def _load_native() -> Any:
         "native/yield/",
         "uv sync --group yield",
         docs_link="docs/cli/yield.md#building-the-native-extension",
+        extra="yield",
     )
 
 
@@ -119,10 +131,9 @@ def _limits_from(raw: Any, name: str, where: str) -> dict[str, Any]:
         raise YieldError(f"{where}: measurement '{name}' has non-object limits")
     limits: dict[str, Any] = {}
     for key in ("min", "max", "target_yield"):
-        value = raw.get(key)
-        if value is None:
+        if (value := raw.get(key)) is None:
             continue
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
+        if not is_number(value):
             raise YieldError(
                 f"{where}: measurement '{name}' limits.{key} must be a number"
             )
@@ -153,14 +164,14 @@ def _read_qualification_keys(
     declares neither is unchanged."""
     k = raw.get("target_sigma")
     if k is not None:
-        if isinstance(k, bool) or not isinstance(k, (int, float)):
+        if not is_number(k):
             raise YieldError(f"{prefix}target_sigma must be a number")
         if not math.isfinite(k) or k <= 0:
             raise YieldError(f"{prefix}target_sigma must be > 0 (got {k})")
         out["target_sigma"] = float(k)
     n = raw.get("min_converged_samples")
     if n is not None:
-        if isinstance(n, bool) or not isinstance(n, int):
+        if not is_int(n):
             raise YieldError(
                 f"{prefix}min_converged_samples must be a non-negative integer"
             )
@@ -204,11 +215,40 @@ def _count_from(raw: Any, field: str, name: str, where: str) -> int:
     """
     if raw is None:
         return 0
-    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+    if not is_int(raw) or raw < 0:
         raise YieldError(
             f"{where}: measurement '{name}' {field} must be a non-negative integer"
         )
     return raw
+
+
+def _not_applicable_control_from(
+    raw: dict[str, Any], name: str, where: str
+) -> dict[str, Any]:
+    """Validate a ``negative_control`` that declares ``not_applicable``.
+
+    Issue #4523: a declared "control not applicable" disposition -- the
+    seeded defect cannot degrade this measurement by construction. It
+    carries a required reason and no samples; it never reaches the native
+    core (see ``run_yield``).
+    """
+    if raw["not_applicable"] is not True:
+        raise YieldError(
+            f"{where}: measurement '{name}' negative_control.not_applicable "
+            "must be true"
+        )
+    reason = raw.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        raise YieldError(
+            f"{where}: measurement '{name}' negative_control declares "
+            "not_applicable but no non-empty string 'reason'"
+        )
+    if "samples" in raw:
+        raise YieldError(
+            f"{where}: measurement '{name}' negative_control cannot declare "
+            "both not_applicable and samples"
+        )
+    return {"not_applicable": True, "reason": reason.strip()}
 
 
 def _negative_control_from(raw: Any, name: str, where: str) -> dict[str, Any] | None:
@@ -221,6 +261,8 @@ def _negative_control_from(raw: Any, name: str, where: str) -> dict[str, Any] | 
         raise YieldError(
             f"{where}: measurement '{name}' has a non-object negative_control"
         )
+    if raw.get("not_applicable") is not None:
+        return _not_applicable_control_from(raw, name, where)
     raw_samples = raw.get("samples")
     if not isinstance(raw_samples, list):
         raise YieldError(
@@ -232,7 +274,7 @@ def _negative_control_from(raw: Any, name: str, where: str) -> dict[str, Any] | 
         if value is None:
             errored += 1
             continue
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
+        if not is_number(value):
             raise YieldError(
                 f"{where}: measurement '{name}' negative_control has a non-numeric "
                 "sample value"
@@ -264,120 +306,6 @@ def _negative_control_from(raw: Any, name: str, where: str) -> dict[str, Any] | 
         "censored": censored,
         "description": description,
     }
-
-
-#: Which fields each `analytic_cross_check.kind` accepts, mirroring
-#: `native/yield/src/contract.rs`'s `AnalyticCrossCheckRequest` variants.
-_ANALYTIC_CROSS_CHECK_FIELDS = {
-    "ktc_noise": {"capacitance_f", "temperature_k", "analytic_mean"},
-    "mismatch_offset": {"sigma", "mean"},
-}
-
-
-def _analytic_cross_check_from(
-    raw: Any, name: str, where: str
-) -> dict[str, Any] | None:
-    """Normalise one measurement's ``analytic_cross_check`` object (issue
-    #817's closed-form cross-check), or ``None`` when absent.
-    """
-    if raw is None:
-        return None
-    if not isinstance(raw, dict):
-        raise YieldError(
-            f"{where}: measurement '{name}' has a non-object analytic_cross_check"
-        )
-    kind = raw.get("kind")
-    if kind not in _ANALYTIC_CROSS_CHECK_FIELDS:
-        raise YieldError(
-            f"{where}: measurement '{name}' analytic_cross_check.kind must be one of "
-            f"{sorted(_ANALYTIC_CROSS_CHECK_FIELDS)} (got {kind!r})"
-        )
-    allowed = _ANALYTIC_CROSS_CHECK_FIELDS[kind]
-    out: dict[str, Any] = {"kind": kind}
-    for key, value in raw.items():
-        if key == "kind":
-            continue
-        if key not in allowed:
-            raise YieldError(
-                f"{where}: measurement '{name}' analytic_cross_check.{key} is not "
-                f"valid for kind '{kind}' (allowed: {sorted(allowed)})"
-            )
-        if value is None:
-            continue
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise YieldError(
-                f"{where}: measurement '{name}' analytic_cross_check.{key} must be "
-                "a number"
-            )
-        out[key] = float(value)
-    return out
-
-
-#: Which fields each `sampling.strategy` accepts, mirroring
-#: `native/yield/src/contract.rs`'s `SamplingRequest` variants (issue #907,
-#: Phase 2b of the statistical/yield epic #710).
-_SAMPLING_STRATEGY_FIELDS = {
-    "plain_random": set(),
-    "latin_hypercube": {"replicates"},
-    "importance": {"weights"},
-}
-
-
-def _sampling_from(raw: Any, name: str, where: str) -> dict[str, Any] | None:
-    """Normalise one measurement's ``sampling`` object (issue #907's
-    variance-reduction sampling strategies), or ``None`` when absent -- in
-    which case the native core treats it as Phase 1's plain random Monte
-    Carlo, unaffected by any of this.
-    """
-    if raw is None:
-        return None
-    if not isinstance(raw, dict):
-        raise YieldError(f"{where}: measurement '{name}' has a non-object sampling")
-    strategy = raw.get("strategy")
-    if strategy not in _SAMPLING_STRATEGY_FIELDS:
-        raise YieldError(
-            f"{where}: measurement '{name}' sampling.strategy must be one of "
-            f"{sorted(_SAMPLING_STRATEGY_FIELDS)} (got {strategy!r})"
-        )
-    allowed = _SAMPLING_STRATEGY_FIELDS[strategy]
-    for key in raw:
-        if key not in {"strategy", *allowed}:
-            raise YieldError(
-                f"{where}: measurement '{name}' sampling.{key} is not valid for "
-                f"strategy '{strategy}' (allowed: {sorted(allowed)})"
-            )
-
-    if strategy == "latin_hypercube":
-        replicates = raw.get("replicates")
-        if (
-            isinstance(replicates, bool)
-            or not isinstance(replicates, int)
-            or replicates < 2
-        ):
-            raise YieldError(
-                f"{where}: measurement '{name}' sampling.replicates must be an "
-                f"integer >= 2 (got {replicates!r})"
-            )
-        return {"strategy": strategy, "replicates": replicates}
-
-    if strategy == "importance":
-        raw_weights = raw.get("weights")
-        if not isinstance(raw_weights, list) or not raw_weights:
-            raise YieldError(
-                f"{where}: measurement '{name}' sampling.weights must be a "
-                "non-empty array"
-            )
-        weights: list[float] = []
-        for value in raw_weights:
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
-                raise YieldError(
-                    f"{where}: measurement '{name}' sampling.weights entries must "
-                    "be numbers"
-                )
-            weights.append(float(value))
-        return {"strategy": strategy, "weights": weights}
-
-    return {"strategy": strategy}
 
 
 def _draw_from_mc_corners(
@@ -412,7 +340,7 @@ def _draw_from_mc_corners(
             value = m.get("value")
             if value is None:
                 errored += 1
-            elif isinstance(value, bool) or not isinstance(value, (int, float)):
+            elif not is_number(value):
                 raise YieldError(
                     f"sim report: measurement '{name}' has a non-numeric value "
                     f"in corner {corner.get('corner_id')!r}"
@@ -531,6 +459,7 @@ def _measurements_from_sim_report(report: dict[str, Any]) -> list[dict[str, Any]
                 # way regardless of input shape -- same as the two blocks
                 # above.
                 "sampling": _sampling_from(entry.get("sampling"), name, "sim report"),
+                "spec_row": _spec_row_from(entry.get("spec_row"), name, "sim report"),
             }
         )
     return out
@@ -558,7 +487,7 @@ def _measurements_from_sample_set(doc: dict[str, Any]) -> list[dict[str, Any]]:
             if value is None:
                 errored += 1
                 continue
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
+            if not is_number(value):
                 raise YieldError(
                     f"sample set: measurement '{name}' has a non-numeric sample value"
                 )
@@ -606,6 +535,7 @@ def _measurements_from_sample_set(doc: dict[str, Any]) -> list[dict[str, Any]]:
                     entry.get("analytic_cross_check"), name, "sample set"
                 ),
                 "sampling": _sampling_from(entry.get("sampling"), name, "sample set"),
+                "spec_row": _spec_row_from(entry.get("spec_row"), name, "sample set"),
             }
         )
     return out
@@ -650,6 +580,7 @@ def _read_samples(path: str) -> tuple[str, list[dict[str, Any]], dict[str, Any]]
             "kind": "sim-report",
             "netlist": _source_netlist(doc.get("netlist")),
             "monte_carlo": mc,
+            "provenance": _provenance_from(doc.get("provenance"), "sim report"),
         }
         return "sim-report", measurements, source
 
@@ -658,7 +589,12 @@ def _read_samples(path: str) -> tuple[str, list[dict[str, Any]], dict[str, Any]]
         return (
             "sample-set",
             measurements,
-            {"kind": "sample-set", "netlist": None, "monte_carlo": None},
+            {
+                "kind": "sample-set",
+                "netlist": None,
+                "monte_carlo": None,
+                "provenance": _provenance_from(doc.get("provenance"), "sample set"),
+            },
         )
 
     raise YieldError(
@@ -667,8 +603,10 @@ def _read_samples(path: str) -> tuple[str, list[dict[str, Any]], dict[str, Any]]
     )
 
 
-def _read_spec(path: str) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
-    """Read a spec-limits file into ``(per_measurement_limits, run_defaults)``."""
+def _read_spec(
+    path: str,
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any], dict[str, str]]:
+    """Read a spec-limits file into ``(limits, run_defaults, spec_rows)``."""
     doc = _load_json(path, "limits")
     if not isinstance(doc, dict):
         raise YieldError(f"limits '{path}' must be a JSON object")
@@ -694,12 +632,37 @@ def _read_spec(path: str) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
         name: _limits_from(value, name, f"limits '{path}'")
         for name, value in raw.items()
     }
-    return limits, defaults
+    spec_rows = spec_rows_from_limits(raw, f"limits '{path}'")
+    return limits, defaults, spec_rows
 
 
 # --------------------------------------------------------------------------- #
 # Public entry point
 # --------------------------------------------------------------------------- #
+
+
+def _strip_not_applicable(
+    entry: dict[str, Any], not_applicable: dict[str, str]
+) -> dict[str, Any]:
+    """Record and drop a ``not_applicable`` negative control (issue #4523) so
+    the native core never sees it; other entries pass through unchanged."""
+    control = entry.get("negative_control")
+    if control is not None and control.get("not_applicable"):
+        not_applicable[entry["name"]] = control["reason"]
+        return {**entry, "negative_control": None}
+    return entry
+
+
+def _patch_not_applicable(
+    response: dict[str, Any], not_applicable: dict[str, str]
+) -> None:
+    """Write the declared ``not_applicable`` verdicts into the core response."""
+    for m in response.get("measurements") or []:
+        if m.get("name") in not_applicable:
+            m["negative_control"] = {
+                "verdict": "not_applicable",
+                "reason": not_applicable[m["name"]],
+            }
 
 
 def run_yield(
@@ -726,8 +689,9 @@ def run_yield(
 
     spec_limits: dict[str, dict[str, Any]] = {}
     spec_defaults: dict[str, Any] = {}
+    spec_rows: dict[str, str] = {}
     if limits_path is not None:
-        spec_limits, spec_defaults = _read_spec(limits_path)
+        spec_limits, spec_defaults, spec_rows = _read_spec(limits_path)
 
     by_name = {e["name"]: e for e in entries}
     if measurements is not None:
@@ -744,6 +708,9 @@ def run_yield(
     run_target_yield = spec_defaults.get("target_yield")
     warnings: list[str] = []
     request_measurements: list[dict[str, Any]] = []
+    # Issue #4523: measurements that declared "negative control not
+    # applicable" -- carried around the native core and patched into the report.
+    not_applicable: dict[str, str] = {}
     for entry in selected:
         name = entry["name"]
         limits = dict(entry["limits"])
@@ -765,6 +732,7 @@ def run_yield(
                 "supply limits via --limits to include it"
             )
             continue
+        entry = _strip_not_applicable(entry, not_applicable)
         request_measurements.append({**entry, "limits": limits})
 
     if not request_measurements:
@@ -772,6 +740,7 @@ def run_yield(
             "no measurement has spec limits to estimate a yield against -- supply "
             "them via --limits (see docs/cli/yield.md)"
         )
+    row_by_name = _spec_rows_for(request_measurements, spec_rows)
 
     request: dict[str, Any] = {
         "confidence": _resolve(
@@ -782,7 +751,7 @@ def run_yield(
             spec_defaults.get("target_ci_halfwidth"),
             DEFAULT_TARGET_CI_HALFWIDTH,
         ),
-        "measurements": request_measurements,
+        "measurements": _request_without_spec_rows(request_measurements),
     }
     resolved_min = _resolve(
         min_samples, spec_defaults.get("min_samples"), ABSOLUTE_MIN_SAMPLES
@@ -795,6 +764,7 @@ def run_yield(
     except ValueError as exc:
         raise YieldError(str(exc)) from exc
     response = json.loads(response_json)
+    _patch_not_applicable(response, not_applicable)
 
     payload: dict[str, Any] = {
         "samples": samples_path,
@@ -803,12 +773,12 @@ def run_yield(
             **source,
             "kind": kind,
             "sample_count": sum(len(m["samples"]) for m in request_measurements),
+            "native": native_provenance("klt_yield_native", "klt-yield-native"),
         },
     }
     payload.update(response)
-    # The native core owns the payload's shape version; this module's
-    # constant mirrors it (and is asserted against it below) so a crate-side
-    # bump that Python never noticed cannot ship silently.
+    _attach_spec_rows(payload, row_by_name)
+    # The native core owns the shape version; assert our mirror of it matches.
     if response.get("schema_version") != SCHEMA_VERSION:
         raise YieldError(
             "klt_yield_native reports schema_version "
@@ -1016,6 +986,8 @@ def _derived_entry(
         "analytic_cross_check": nominal["analytic_cross_check"],
         "sampling": nominal["sampling"],
     }
+    if nominal.get("spec_row") is not None:
+        entry["spec_row"] = nominal["spec_row"]
     disclosure = {
         "name": nominal["name"],
         "negative_control": {
@@ -1091,8 +1063,12 @@ def derive_sample_set(
         out_measurements.append(entry)
         disclosures.append(disclosure)
 
+    prov = nominal_provenance(nominal_report)
+    doc: dict[str, Any] = {"schema_version": SAMPLE_SET_SCHEMA_VERSION}
+    if prov:
+        doc["provenance"] = prov
     return {
-        "schema_version": SAMPLE_SET_SCHEMA_VERSION,
+        **doc,
         "measurements": out_measurements,
         "derivation": {
             "nominal": {"path": nominal_path, "content_hash": nominal_hash},

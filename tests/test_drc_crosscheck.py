@@ -378,3 +378,87 @@ def test_crosscheck_envelope_validates_with_real_reports(tmp_path, monkeypatch):
     # Real decks and no mapping group: never an agreement.
     assert out["comparison"]["state"] == "not_comparable"
     _schema_validator().validate(out)
+
+
+# --------------------------------------------------------------------------- #
+# `klt drc --check` on a crosscheck envelope (issue #4986)
+# --------------------------------------------------------------------------- #
+
+
+def _committed_crosscheck(tmp_path, *, native=True):
+    from klayout_tools.drc import run_drc
+
+    gds = _tiny_gds(tmp_path)
+    curated = run_drc(gds, "sky130")
+    envelope = {
+        "schema_version": 2,
+        "mode": "crosscheck",
+        "file": gds,
+        "reports": {
+            "curated": curated,
+            # Same layout/deck hashes recorded on the native side.
+            "native": json.loads(json.dumps(curated)) if native else None,
+        },
+    }
+    report = tmp_path / "x.crosscheck.json"
+    report.write_text(json.dumps(envelope))
+    return gds, str(report)
+
+
+def test_check_crosscheck_report_matches_with_engine_prefixed_fields(tmp_path):
+    from klayout_tools.drc import check_drc_report
+
+    gds, report = _committed_crosscheck(tmp_path)
+    # Embedded `file` is scope "external" outside a repo, so the input path
+    # comes from the positional override, which applies to both sides.
+    result = check_drc_report(report, input_path=gds)
+    assert result["status"] == "match"
+    fields = {c["field"] for c in result["checks"]}
+    assert "reports.curated.provenance.input.content_hash" in fields
+    assert "reports.native.provenance.deck.content_hash" in fields
+
+
+def test_check_crosscheck_report_drifts_when_input_changes(tmp_path):
+    import klayout.db as kdb
+
+    from klayout_tools.drc import check_drc_report
+
+    gds, report = _committed_crosscheck(tmp_path)
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    layout.create_cell("OTHER")
+    layout.write(gds)
+    result = check_drc_report(report, input_path=gds)
+    assert result["status"] == "drifted"
+    by_field = {c["field"]: c for c in result["checks"]}
+    assert by_field["reports.curated.provenance.input.content_hash"]["match"] is False
+
+
+def test_check_crosscheck_report_null_native_checks_curated_only(tmp_path):
+    from klayout_tools.drc import check_drc_report
+
+    gds, report = _committed_crosscheck(tmp_path, native=False)
+    result = check_drc_report(report, input_path=gds)
+    assert result["status"] == "match"
+    assert all(c["field"].startswith("reports.curated.") for c in result["checks"])
+
+
+def test_rerun_crosscheck_report_is_rejected(tmp_path):
+    from klayout_tools.drc import DrcError, rerun_drc_report
+
+    _, report = _committed_crosscheck(tmp_path)
+    with pytest.raises(DrcError, match="single-engine"):
+        rerun_drc_report(report)
+
+
+def test_native_unavailable_reason_names_family(monkeypatch):
+    """Issue #5211: the family reason is carried into the comparison error."""
+    monkeypatch.setattr(
+        cc, "run_drc", lambda *a, **k: _report(engine="curated", checked=["a"])
+    )
+    out = cc.run_drc_crosscheck(
+        "x.gds", "sg13g2", None, native_unavailable_reason="no PDK variant of sg13g2"
+    )
+    assert out["comparison"]["state"] == "native_unavailable"
+    assert "sg13g2" in out["comparison"]["error"]["message"]
+    assert cc.crosscheck_exit_code(out) == 4

@@ -1,0 +1,102 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:10:10.345175+00:00",
+  "slug": "sg13cmos5l-stdcells",
+  "name": "Sg13Cmos5L Stdcells",
+  "description": "8-track standard-cell library on IHP SG13CMOS5L \u2014 2AM Logic canary block",
+  "layer_count": 9,
+  "cell_count": 1,
+  "instance_count": 0,
+  "layout_file": "sg13cmos5l_inv_1.gds",
+  "renders": {
+    "overview": "renders/overview.png",
+    "layer_1_0": "renders/1_0.png",
+    "layer_5_0": "renders/5_0.png",
+    "layer_6_0": "renders/6_0.png",
+    "layer_8_0": "renders/8_0.png",
+    "layer_8_2": "renders/8_2.png",
+    "layer_8_25": "renders/8_25.png",
+    "layer_14_0": "renders/14_0.png",
+    "layer_31_0": "renders/31_0.png",
+    "layer_189_4": "renders/189_4.png",
+    "center_crop": "renders/center_crop/overview.png"
+  },
+  "spec_summary": {
+    "rows": [
+      {
+        "parameter": "Row height",
+        "target": "3.36 \u00b5m (8 tracks of 0.42 \u00b5m)",
+        "fallback": "3.78 \u00b5m (9 tracks), the `sg13cmos5l_stdcell` site height"
+      },
+      {
+        "parameter": "Routing grid",
+        "target": "0.42 \u00b5m \u00d7 0.42 \u00b5m"
+      },
+      {
+        "parameter": "Intra-cell routing",
+        "target": "Metal1 only"
+      },
+      {
+        "parameter": "Pin access",
+        "target": "every pin on a routing-grid point"
+      },
+      {
+        "parameter": "Combinational cells",
+        "target": "40",
+        "fallback": "20",
+        "stretch": "120"
+      },
+      {
+        "parameter": "Sequential cells",
+        "target": "0 (deferred)",
+        "stretch": "8"
+      },
+      {
+        "parameter": "DRC",
+        "target": "clean, `klt drc`, SG13CMOS5L deck"
+      },
+      {
+        "parameter": "LVS",
+        "target": "layout-vs-schematic match, `klt lvs`"
+      },
+      {
+        "parameter": "Core supply",
+        "target": "1.20 V (`sg13_lv` devices)"
+      },
+      {
+        "parameter": "Liberty corners",
+        "target": "TT / 1.20 V / 25 \u00b0C",
+        "stretch": "+ FF / 1.32 V / \u221240 \u00b0C, SS / 1.08 V / 125 \u00b0C"
+      },
+      {
+        "parameter": "Characterization grid",
+        "target": "input slew 0.0186\u20132.5074 ns, output load 0.001\u20130.3 pF (7 \u00d7 7, the baseline's index set)"
+      },
+      {
+        "parameter": "Benchmark cell area vs `sg13cmos5l_stdcell`",
+        "target": "\u2264 1.00\u00d7",
+        "fallback": "\u2264 1.20\u00d7",
+        "stretch": "\u2264 0.80\u00d7"
+      },
+      {
+        "parameter": "Benchmark energy vs `sg13cmos5l_stdcell`",
+        "target": "\u2264 1.00\u00d7",
+        "stretch": "\u2264 0.80\u00d7"
+      },
+      {
+        "parameter": "Benchmark clock period vs `sg13cmos5l_stdcell`",
+        "target": "within 10 %",
+        "fallback": "within 20 %",
+        "stretch": "within 5 %"
+      }
+    ],
+    "status_note": "ratified \u2014 see [spec/](spec/target-spec.md"
+  },
+  "source": {
+    "repo": "2AMLogic/sg13cmos5l-stdcells",
+    "ref": "e3cdd941066a353a92a318ec3e47799243660311",
+    "path": "layout/smoke/sg13cmos5l_inv_1.gds"
+  },
+  "downloadable": true,
+  "status": "ok"
+}

@@ -85,11 +85,11 @@ jobs:
           - target: linux-x86_64
             runner: ubuntu-24.04
             manylinux: "2_28"
-          # macOS arm64: GitHub-hosted Apple-silicon runner (`macos-14`).
+          # macOS arm64: GitHub-hosted Apple-silicon runner (`macos-15`).
           # Free for public repos; if the runner label is retired/renamed this
           # leg fails loudly rather than shipping a Linux-only release.
           - target: macos-arm64
-            runner: macos-14
+            runner: macos-15
             manylinux: "off"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -143,12 +143,12 @@ jobs:
         include:
           - { target: linux-x86_64, runner: ubuntu-24.04, python: "3.10" }
           - { target: linux-x86_64, runner: ubuntu-24.04, python: "3.13" }
-          - { target: macos-arm64, runner: macos-14, python: "3.10" }
-          - { target: macos-arm64, runner: macos-14, python: "3.13" }
+          - { target: macos-arm64, runner: macos-15, python: "3.10" }
+          - { target: macos-arm64, runner: macos-15, python: "3.13" }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           version: "latest"
           python-version: ${{ matrix.python }}
@@ -203,7 +203,7 @@ jobs:
           path: dist/
           merge-multiple: true
 
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           version: "latest"
 

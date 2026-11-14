@@ -64,6 +64,25 @@ class FinFETFlavour:
 
 
 @dataclass(frozen=True)
+class FinFETPassiveCapacitor:
+    """A klt-convention drawn capacitor on a FinFET deck (issue #4469).
+
+    ``marker`` is a klt-private recognition layer (the PDK defines none)
+    drawn over ``metal`` -- an entry of the owning deck's ``metals``. The
+    metal polygons touching one marker polygon must be exactly two separate
+    pieces (the two comb/plate terminals of a MOM capacitor);
+    ``C = area_cap_f_um2 * (marker area in um^2)`` farads. The coefficient
+    is a labelled assumption, not PDK data.
+    """
+
+    name: str
+    marker: tuple[int, int]
+    metal: tuple[int, int]
+    area_cap_f_um2: float
+    provenance: RuleProvenance | None = None
+
+
+@dataclass(frozen=True)
 class FinFETExtractionDeck(ExtractionDeck):
     """FinFET layer roles on top of :class:`ExtractionDeck` (see the module
     docstring).
@@ -105,6 +124,7 @@ class FinFETExtractionDeck(ExtractionDeck):
     fin_provenance: RuleProvenance | None = None
     lig_lisd_connected: bool = False
     sd_contact: tuple[int, int] | None = None
+    passive_capacitors: tuple[FinFETPassiveCapacitor, ...] = ()
 
     @property
     def _finfet_connectivity_layers(self) -> frozenset[tuple[int, int]]:
@@ -125,6 +145,7 @@ class FinFETExtractionDeck(ExtractionDeck):
             super().device_recognition_layers
             | {self.fin, self.nselect, self.pselect}
             | {flavour.marker for flavour in self.vt_flavours}
+            | {cap.marker for cap in self.passive_capacitors}
         )
 
     @property
@@ -134,4 +155,5 @@ class FinFETExtractionDeck(ExtractionDeck):
             | self._finfet_connectivity_layers
             | {self.fin, self.nselect, self.pselect}
             | {flavour.marker for flavour in self.vt_flavours}
+            | {cap.marker for cap in self.passive_capacitors}
         )

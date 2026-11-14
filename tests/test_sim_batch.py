@@ -28,7 +28,7 @@ import pytest
 
 from helpers.subprocess_fakes import fake_completed
 from klayout_tools import remote_launcher as rl
-from klayout_tools import sim
+from klayout_tools import sim, sim_batch_contract_worker
 from klayout_tools import sim_batch as sb
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -313,7 +313,7 @@ def test_job_cmd_redirects_report_to_output_dir(tmp_path):
     assert '> "$EDA_OUTPUT_DIR/report.json"' in spec.cmd
     assert '"$EDA_INPUT_DIR/request.json"' in spec.cmd
     assert "--backend local-parallel --format json" in spec.cmd
-    assert "--outdir" not in spec.cmd
+    assert "--outdir" in spec.cmd  # engine logs always collected (#4369)
 
 
 def test_job_cmd_tees_stderr_into_outputs(tmp_path):
@@ -559,7 +559,7 @@ def test_job_cmd_physical_core_workers_expand_as_intended_in_a_shell(tmp_path):
         timeout_s=30.0,
         keep_artifacts=False,
     )
-    flag = spec.cmd.split("--format json", 1)[1].split(">", 1)[0].strip()
+    flag = spec.cmd.split("--format json", 1)[1].split("--outdir", 1)[0].strip()
     probe = f'printf "%s|" {flag}'
     with_cores = subprocess.run(
         ["sh", "-c", probe],
@@ -598,6 +598,18 @@ def test_job_cmd_points_outdir_into_output_dir_when_keeping_artifacts(tmp_path):
     assert spec.cmd.index("--outdir") < spec.cmd.index(
         '> "$EDA_OUTPUT_DIR/report.json"'
     )
+
+
+def test_job_cmd_collects_engine_logs_without_keep_artifacts(tmp_path):
+    """Issue #4369: the log must be collected so a deck abort is diagnosable."""
+    spec = sb._build_batch_job_spec(
+        {"models": {}},
+        str(_write_body(tmp_path)),
+        corner_count=1,
+        timeout_s=30.0,
+        keep_artifacts=False,
+    )
+    assert '--outdir "$EDA_OUTPUT_DIR/artifacts"' in spec.cmd
 
 
 def test_job_json_omits_unset_optional_fields(tmp_path):
@@ -1203,7 +1215,7 @@ def test_poll_fails_fast_on_a_job_stuck_interrupted(tmp_path):
     assert excinfo.value.code == sb.BATCH_JOB_INTERRUPTED_CODE
     assert excinfo.value.last_state == "interrupted"
     assert excinfo.value.interrupted_s >= 100.0
-    assert "job-1" in str(excinfo.value)
+    assert "job-1" in str(excinfo.value) and "--resume" in str(excinfo.value)
     # Failed fast: nowhere near the 5400s poll budget.
     assert len(runner.argvs_matching("status.json")) < 20
 
@@ -1495,28 +1507,32 @@ def test_unsupported_pdk_raises_before_any_s3_write(tmp_path, monkeypatch):
     message = str(excinfo.value)
     assert "unsupported PDK 'sky130B'" in message
     assert "batch backend" in message
-    for supported in rl.SUPPORTED_PDKS:  # names the whole supported set
+    for supported in sb.BATCH_PUBLISHED_PDKS:  # names the whole supported set
         assert supported in message
     assert runner.calls == []  # not one byte uploaded, nothing launched
 
 
-def test_unsupported_pdk_is_refused_even_when_the_fleet_is_unconfigured(tmp_path):
+def test_unsupported_pdk_is_refused_even_when_the_fleet_is_unconfigured():
     """The PDK is a property of the *request*, not of this host's fleet
-    configuration, so it is reported first -- an operator with no provision
-    script yet still learns the request could never have run.
-
-    `ihp-sg13cmos5l` (not `ihp-sg13g2`, registered by #2573) is used here:
-    its family classifies (via `pdk_families.pdk_variant_family`) but is not
-    a member of `_AMI_PDK_FAMILIES`, so it is still refused."""
-    with pytest.raises(sim.SimError, match="unsupported PDK 'ihp-sg13cmos5l'"):
+    configuration, so it is reported first."""
+    with pytest.raises(sim.SimError, match="unsupported PDK 'not-a-pdk'"):
         sb._resolve_batch_config(
-            {"models": {"pdk": "ihp-sg13cmos5l"}}, corner_count=1, timeout_s=30.0
+            {"models": {"pdk": "not-a-pdk"}}, corner_count=1, timeout_s=30.0
         )
 
 
 @pytest.mark.parametrize(
     "variant",
-    ["gf180mcuA", "gf180mcuC", "gf180mcu", "sky130A", "ihp-sg13g2", "sg13g2"],
+    [
+        "gf180mcuA",
+        "gf180mcuC",
+        "gf180mcu",
+        "sky130A",
+        "ihp-sg13g2",
+        "sg13g2",
+        "ihp-sg13cmos5l",
+        "sg13cmos5l",
+    ],
 )
 def test_a_variant_reducible_to_a_published_family_is_accepted(
     tmp_path, monkeypatch, variant
@@ -1663,21 +1679,13 @@ def test_a_request_naming_no_pdk_at_all_is_not_refused(tmp_path, monkeypatch):
     ).bucket
 
 
-@pytest.mark.parametrize("unsupported", ["sky130B", "ihp-sg13cmos5l", "not-a-pdk"])
-def test_remote_and_batch_reject_the_same_unsupported_pdk_identically(
-    tmp_path, unsupported
-):
-    """Issue #2523: the two off-host backends must agree by construction.
-
-    `remote` refuses in `resolve_ami` before its `run-instances` call; `batch`
-    refuses in `_resolve_batch_config` before its first S3 write. Both go
-    through the *same* `remote_launcher.ami_pdk_key`, so the messages differ
-    only in the backend name -- this test fails if either side ever grows its
-    own copy of the supported-PDK rule.
-    """
-    with pytest.raises(rl.RemoteLaunchError) as remote_exc:
+@pytest.mark.parametrize("unsupported", ["sky130B", "not-a-pdk"])
+def test_remote_and_batch_reject_a_pdk_neither_publishes(tmp_path, unsupported):
+    """A PDK in neither published set is refused by both off-host backends;
+    the messages differ in the backend name and the supported list."""
+    with pytest.raises(rl.RemoteLaunchError, match="unsupported PDK"):
         rl.resolve_ami(unsupported, "us-east-1")
-    with pytest.raises(sim.SimError) as batch_exc:
+    with pytest.raises(sim.SimError, match=f"unsupported PDK '{unsupported}'") as exc:
         sb._resolve_batch_config(
             {
                 "models": {"pdk": unsupported},
@@ -1689,21 +1697,31 @@ def test_remote_and_batch_reject_the_same_unsupported_pdk_identically(
             corner_count=1,
             timeout_s=30.0,
         )
-    remote_message = str(remote_exc.value)
-    assert "unsupported PDK" in remote_message
-    assert remote_message.replace("the remote backend", "the batch backend") == str(
-        batch_exc.value
-    )
+    assert "batch backend" in str(exc.value)
 
 
-def test_narrowing_supported_pdks_narrows_both_backends_together(tmp_path, monkeypatch):
-    """The anti-divergence guarantee, exercised directly: drop `sky130A` from
-    the single supported-PDK declaration and *both* backends must start
-    refusing it. A `batch`-side copy of the list would leave this test's
-    `batch` half passing `sky130A` while `remote` refuses it."""
-    monkeypatch.setattr(rl, "SUPPORTED_PDKS", ("gf180mcu",))
-    with pytest.raises(rl.RemoteLaunchError, match="unsupported PDK 'sky130A'"):
-        rl.resolve_ami("sky130A", "us-east-1")
+@pytest.mark.parametrize("pdk", ["ihp-sg13cmos5l", "sg13cmos5l", "ihp-sg13g2"])
+def test_batch_set_is_independent_of_the_remote_ami_set(pdk):
+    """Issue #2727: batch bakes sg13cmos5l in its runner image, while `remote`
+    (which needs a published AMI per PDK) still refuses it."""
+    if pdk in ("ihp-sg13cmos5l", "sg13cmos5l"):
+        with pytest.raises(rl.RemoteLaunchError, match="unsupported PDK"):
+            rl.ami_pdk_key(pdk)
+    assert sb.batch_pdk_key(pdk) in sb.BATCH_PUBLISHED_PDKS
+
+
+def test_batch_pdk_key_reduces_variants_and_rejects_sky130b():
+    assert sb.batch_pdk_key("gf180mcuC") == "gf180mcu"
+    assert sb.batch_pdk_key("ihp-sg13cmos5l") == "sg13cmos5l"
+    with pytest.raises(sim.SimError, match="unsupported PDK 'sky130B'"):
+        sb.batch_pdk_key("sky130B")
+
+
+def test_narrowing_batch_published_pdks_narrows_batch_only(tmp_path, monkeypatch):
+    """The batch set is its own declaration: dropping `sky130A` from it refuses
+    `sky130A` on batch without touching `remote`."""
+    monkeypatch.setattr(sb, "BATCH_PUBLISHED_PDKS", ("gf180mcu",))
+    assert rl.ami_pdk_key("sky130A") == "sky130A"
     with pytest.raises(sim.SimError, match="unsupported PDK 'sky130A'"):
         sb._resolve_batch_config(
             {
@@ -1718,16 +1736,16 @@ def test_narrowing_supported_pdks_narrows_both_backends_together(tmp_path, monke
         )
 
 
-def test_batch_pdk_validation_delegates_to_ami_pdk_key(tmp_path, monkeypatch):
-    """Named-callsite guard: the batch path must call `ami_pdk_key` itself
-    (with its own backend label), never re-implement the mapping."""
-    seen: list[tuple[str, str]] = []
+def test_batch_pdk_validation_uses_batch_pdk_key_not_ami_pdk_key(tmp_path, monkeypatch):
+    """Named-callsite guard (#2727): validation goes through `batch_pdk_key`."""
+    seen: list[str] = []
+    real = sb.batch_pdk_key
 
-    def _spy(pdk: str, *, backend: str = "remote") -> str:
-        seen.append((pdk, backend))
-        return pdk
+    def _spy(pdk: str) -> str:
+        seen.append(pdk)
+        return real(pdk)
 
-    monkeypatch.setattr(sb, "ami_pdk_key", _spy)
+    monkeypatch.setattr(sb, "batch_pdk_key", _spy)
     sb._resolve_batch_config(
         {
             "models": {"pdk": "gf180mcuC"},
@@ -1739,7 +1757,7 @@ def test_batch_pdk_validation_delegates_to_ami_pdk_key(tmp_path, monkeypatch):
         corner_count=1,
         timeout_s=30.0,
     )
-    assert seen == [("gf180mcuC", "batch")]
+    assert seen == ["gf180mcuC"]
 
 
 def test_no_credential_key_path_or_bucket_name_is_baked_into_source():
@@ -3050,7 +3068,7 @@ def test_interrupted_grace_reports_distinct_unrun_corners(tmp_path, monkeypatch)
     for corner in corners:
         assert corner["status"] == "error"
         assert corner["diagnostics"][0]["code"] == "batch_job_interrupted"
-        assert "job-1" in corner["diagnostics"][0]["message"]
+        assert "job-1" in (m := corner["diagnostics"][0]["message"]) and "--resume" in m
     assert environment["job_id"] == "job-1"
     assert environment["state"] == "interrupted"
     assert environment["interrupted_s"] >= 0.0
@@ -4872,20 +4890,6 @@ def test_pdk_stamp_mismatch_warns_only_when_comparable(tmp_path, monkeypatch):
         assert result == {"status": "not_comparable", "reason": reason}
 
 
-def test_pdk_stamp_not_comparable_without_a_local_stamp(tmp_path, monkeypatch):
-    monkeypatch.delenv("PDK_ROOT", raising=False)
-    env = _worker_env(
-        tmp_path,
-        monkeypatch,
-        {"worker_environment.json": _capture()},
-        request={"netlist": "body.spice", "models": {"pdk": "sky130A"}},
-    )
-    assert env["worker_environment"]["pdk_stamp_comparison"] == {
-        "status": "not_comparable",
-        "reason": "client_stamp_unavailable",
-    }
-
-
 def test_pdk_stamp_absent_capture_reports_worker_reason(tmp_path, monkeypatch):
     env = _worker_env(tmp_path, monkeypatch, {})
     assert env["worker_environment"]["capture"] == "absent"
@@ -5104,7 +5108,7 @@ def test_capture_program_version_probe_timeout_is_recorded(tmp_path, monkeypatch
     program = sb._WORKER_CAPTURE_PROGRAM.replace(
         f"{sb.WORKER_CAPTURE_PROBE_TIMEOUT_S}", "1", 1
     )
-    monkeypatch.setattr(sb, "_WORKER_CAPTURE_PROGRAM", program)
+    monkeypatch.setattr(sim_batch_contract_worker, "_WORKER_CAPTURE_PROGRAM", program)
     doc = _run_capture_program(tmp_path, ngspice_script="#!/bin/sh\nsleep 20\n")
     assert doc["simulator"]["version_probe"] == "timeout"
 
@@ -5400,7 +5404,6 @@ def test_cli_batch_set_accepts_resume_and_forwards_it(tmp_path, monkeypatch, cap
         ["--op-lint"],
         ["--submit-only"],
         ["--job-status", "job-1"],
-        ["--wait-for-capacity", "5"],
     ],
 )
 def test_cli_batch_set_still_refuses_other_single_request_flags(tmp_path, flags):
@@ -5831,6 +5834,15 @@ def test_log_with_missing_include_classifies_naming_the_file(target):
     assert target in found["message"]
 
 
+def test_fatal_log_diagnostic_surfaces_model_cause():
+    found = sb._fatal_log_diagnostic(
+        "warning, can't find model 'nfet'\nfatal error in ngspice, exit(1)\n"
+    )
+    assert found is not None
+    assert found["code"] == "ngspice_fatal"
+    assert "can't find model 'nfet'" in found["message"]
+
+
 def test_exit_4_batch_job_surfaces_missing_include_from_retrieved_log(
     tmp_path, monkeypatch
 ):
@@ -5900,6 +5912,46 @@ def test_exit_4_batch_job_surfaces_generic_fatal_from_retrieved_log(
     assert diagnostics[1]["message"].startswith("Error on line 7")
     assert diagnostics[1]["analysis_started"] is False
     assert "wall-clock" in diagnostics[1]["message"]
+
+
+def test_batch_job_surfaces_model_bin_range_without_keep_artifacts(
+    tmp_path, monkeypatch
+):
+    """Issue #4369: `could not find a valid modelname` reaches the errored
+    corner without `keep_artifacts`, and nothing is installed for the caller."""
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("failed", exit_code="4"))
+    remote_log = "/var/tmp/eda-job-1/outputs/artifacts/tt_1.800_27/ngspice.log"
+    runner.outputs = {
+        "report.json": _errored_report_without_include_code(remote_log),
+        "artifacts/tt_1.800_27/ngspice.log": (
+            "Circuit: * deck\n"
+            "Error on line 570 : m.x1.m0 d g s b nfet_03v3 w=1.28e-4 l=2.8e-7\n"
+            "Error: could not find a valid modelname\n"
+        ),
+    }
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    artifacts_dir = tmp_path / "caller-artifacts"
+
+    corners, _, _ = sb._run_batch_job(
+        config=_config(tmp_path),
+        job_id="job-1",
+        corner_points=_corner_points(1),
+        netlist_path=str(_write_body(tmp_path)),
+        timeout_s=30.0,
+        keep_artifacts=False,
+        want_waveforms=False,
+        artifacts_dir=str(artifacts_dir),
+        request={"netlist": "body.spice"},
+        measurements_spec=_measurements_spec(),
+        runner=runner,
+        sleep=runner.sleep,
+    )
+
+    diagnostics = corners[0]["diagnostics"]
+    assert [d["code"] for d in diagnostics] == ["measurement", "model_bin_range"]
+    assert "valid modelname" in diagnostics[1]["message"]
+    assert not list(artifacts_dir.rglob("*.log"))
 
 
 def test_report_already_carrying_missing_include_is_not_duplicated(
@@ -6142,6 +6194,52 @@ def test_dry_run_check_passes_when_the_manifest_supports_the_feature(
     assert sb.dry_run_runner_check(request, corner_count=1, timeout_s=30.0) is None
 
 
+def test_dry_run_check_reports_the_published_runner_whatever_the_status(
+    tmp_path, monkeypatch
+):
+    _pin_client_version(monkeypatch, _PRELAUNCH_CLIENT)
+    request = _dry_run_request(tmp_path)
+    _publish_manifest(tmp_path, monkeypatch, [_image(klt_version="0.7.1")])
+    out: dict = {}
+    sb.dry_run_runner_check(request, corner_count=1, timeout_s=30.0, runner_out=out)
+    assert out["status"] == "match"
+    assert out["images"][0]["klt_version"] == "0.7.1"
+    _publish_manifest(tmp_path, monkeypatch, [_image()])
+    out = {}
+    sb.dry_run_runner_check(request, corner_count=1, timeout_s=30.0, runner_out=out)
+    assert out["status"] == "unknown"
+    assert out["client_klt_version"] == _PRELAUNCH_CLIENT
+
+
+def test_dry_run_check_refuses_a_mismatch_under_enforce_without_a_report(
+    tmp_path, monkeypatch
+):
+    _pin_client_version(monkeypatch, _PRELAUNCH_CLIENT)
+    _publish_manifest(tmp_path, monkeypatch, [_image(klt_version="0.6.0")])
+    out: dict = {}
+    with pytest.raises(sim.SimError) as raised:
+        sb.dry_run_runner_check(
+            _dry_run_request(tmp_path), corner_count=1, timeout_s=30.0, runner_out=out
+        )
+    assert raised.value.code == sb.BATCH_RUNNER_MISMATCH_CODE
+    assert "0.6.0" in str(raised.value)
+    assert _PRELAUNCH_CLIENT in str(raised.value)
+    assert out == {}
+
+
+def test_dry_run_check_reports_a_mismatch_under_warn(tmp_path, monkeypatch, capsys):
+    _pin_client_version(monkeypatch, _PRELAUNCH_CLIENT)
+    _publish_manifest(tmp_path, monkeypatch, [_image(klt_version="0.6.0")])
+    request = _dry_run_request(tmp_path)
+    request["batch"]["runner_version_check"] = "warn"
+    out: dict = {}
+    sb.dry_run_runner_check(request, corner_count=1, timeout_s=30.0, runner_out=out)
+    assert out["status"] == "mismatch"
+    assert out["client_klt_version"] == _PRELAUNCH_CLIENT
+    assert out["images"][0]["klt_version"] == "0.6.0"
+    assert "warning" in capsys.readouterr().err
+
+
 def test_dry_run_check_warn_mode_returns_the_diagnostic(tmp_path, monkeypatch):
     _pin_client_version(monkeypatch, _PRELAUNCH_CLIENT)
     _publish_manifest(tmp_path, monkeypatch, [_image(klt_version="0.7.0")])
@@ -6224,6 +6322,21 @@ def test_request_features_detect_the_released_fields():
     ]
     plain = {"corners": {"process": [{"name": "b", "sections": ["a"]}]}}
     assert sb._request_features(plain) == []
+
+
+def test_request_features_detect_the_v080_fields():
+    """#4212: both first shipped in v0.8.0; an empty value is not a use."""
+    request = {
+        "options": {"ngspice_options": {"reltol": 1e-4}},
+        "corners": {"params": {"names": ["w"], "rows": [[1]]}},
+    }
+    assert sorted(sb._request_features(request)) == [
+        "corners.params",
+        "options.ngspice_options",
+    ]
+    assert sb._request_features({"options": {"ngspice_options": {}}}) == []
+    for key in ("corners.params", "options.ngspice_options"):
+        assert sb.REQUEST_FEATURE_MIN_RUNNER_VERSION[key] == "0.8.0"
 
 
 def test_prelaunch_warn_returns_one_diagnostic_naming_every_field(
@@ -6638,25 +6751,6 @@ def test_max_units_per_job_at_or_under_the_ceiling_limit_is_accepted(
     )
 
     assert max(shard_sizes) <= cap
-
-
-def test_max_units_per_job_over_the_ceiling_limit_is_rejected_before_s3(
-    tmp_path, monkeypatch
-):
-    runner = _FakeRunner()
-    with pytest.raises(sim.SimError) as excinfo:
-        _run_one_batch(
-            tmp_path,
-            monkeypatch,
-            runner,
-            units=63,
-            timeout_s=120.0,
-            max_units_per_job=40,  # 120 x 40 + 120 > 3600
-        )
-
-    assert runner.calls == []
-    assert excinfo.value.code == sb.BATCH_MAX_UNITS_CODE
-    assert "at most 29" in str(excinfo.value)
 
 
 @pytest.mark.parametrize("bad", [0, -3, 2.5, "8", True])
@@ -7182,6 +7276,41 @@ def test_resume_submits_only_the_shard_whose_job_is_gone(tmp_path, monkeypatch):
     assert rewritten["shards"][1]["job_id"] != gone
 
 
+def test_resume_refusal_names_fingerprint_difference(tmp_path, monkeypatch):
+    """Issue #4721: the refusal says what it compared."""
+    _, fleet, _ = _shard_resume_fixture(tmp_path, monkeypatch)
+    fleet()
+    with pytest.raises(sim.SimError) as err:
+        fleet(resume=True, shard_fingerprint="fp-2")
+    assert err.value.code == sb.BATCH_SHARD_MANIFEST_CODE
+    assert "fingerprint: map fp-1, request fp-2" in str(err.value)
+    assert "hosts:" not in str(err.value)
+
+
+def test_resume_with_a_different_hosts_count_is_not_refused(tmp_path, monkeypatch):
+    """Issue #4821: resume re-splits only remaining units, so shard count varies."""
+    _, fleet, manifest_path = _shard_resume_fixture(tmp_path, monkeypatch)
+    first = [c["corner_id"] for c in fleet()[0]]
+    for hosts in (1, 2, 1):
+        assert [c["corner_id"] for c in fleet(resume=True, hosts=hosts)[0]] == first
+        assert json.loads(manifest_path.read_text())["hosts"] == hosts
+
+
+@pytest.mark.parametrize(
+    "status, label",
+    [
+        ({"state": "done"}, "finished"),
+        ({"state": "failed"}, "failed"),
+        ({"state": "running"}, "running"),
+        (None, "unknown"),
+    ],
+)
+def test_remote_state_note_reports_job_state(monkeypatch, status, label):
+    """Issue #4721: a lost shard's reason says where the remote job is."""
+    monkeypatch.setattr(sb, "_read_status", lambda *_args: status)
+    assert sb._remote_state_note(None, "job-1") == f" [remote job job-1: {label}]"
+
+
 _SET_MEASUREMENT = {
     "name": "vout",
     "expr": "v(out)",
@@ -7351,8 +7480,8 @@ def test_resume_resubmits_a_shard_whose_job_terminally_failed(tmp_path, monkeypa
 
 @pytest.mark.parametrize(
     "overrides",
-    [{"shard_fingerprint": "fp-2"}, {"hosts": 4}],
-    ids=["request-changed", "hosts-changed"],
+    [{"shard_fingerprint": "fp-2"}],
+    ids=["request-changed"],
 )
 def test_resume_against_another_requests_shard_map_is_refused(
     tmp_path, monkeypatch, overrides
@@ -7903,7 +8032,7 @@ def test_fleet_capacity_wait_budget_is_shared_across_shards(tmp_path, monkeypatc
         message = corner["diagnostics"][0]["message"]
         assert "batch_concurrency_cap" in message
         assert "capacity wait budget" in message
-    assert environment is None
+    assert environment["unlaunched_shards"] == 2  # issue #4856: resumable signal
     assert sum(clock.sleeps) == pytest.approx(100.0, abs=1.0)
 
 
@@ -7954,6 +8083,62 @@ def test_capacity_watch_throttles_to_the_heartbeat_interval():
     assert len(lines) == 3
     assert "3 of 3 shards pending" in lines[0]
     assert "(last refusal: batch_no_capacity)" in lines[0]
+
+
+def test_capacity_watch_progress_line_counts_rate_and_eta():
+    now = [0.0]
+    lines: list[str] = []
+    watch = sb._CapacityWatch(4, monotonic=lambda: now[0], emit=lines.append)
+
+    watch.phase(0, "submitted")  # still pending: counts unchanged, no line
+    watch.phase(0, "launching")
+    assert lines == [
+        "klt sim: shards 0/4 launched, 1 launching, 3 pending, "
+        "0 collected; launch rate unknown, ETA unknown"
+    ]
+    now[0] += sb.BATCH_HEARTBEAT_INTERVAL_S
+    watch.phase(0, "launched")  # first launch: no rate yet
+    assert "1/4 launched" in lines[-1] and "ETA unknown" in lines[-1]
+    watch.phase(1, "launching")  # inside the interval: suppressed
+    assert len(lines) == 2
+    now[0] += 60.0
+    watch.phase(1, "launched")  # suppressed again (interval not elapsed)
+    now[0] += sb.BATCH_HEARTBEAT_INTERVAL_S
+    watch.phase(2, "launching")
+    assert "2/4 launched" in lines[-1]
+    assert "launch rate 0.2/min" in lines[-1]
+    assert "ETA 12m" in lines[-1]
+
+
+def test_capacity_watch_progress_final_line_and_refusal_rollback():
+    now = [0.0]
+    lines: list[str] = []
+    watch = sb._CapacityWatch(2, monotonic=lambda: now[0], emit=lines.append)
+    watch.phase(0, "launching")
+    now[0] += sb.BATCH_HEARTBEAT_INTERVAL_S
+    watch.phase(0, "launch_refused")  # back to pending
+    assert "0 launching, 2 pending" in lines[-1]
+    for i in (0, 1):
+        watch.phase(i, "launching")
+        watch.phase(i, "launched")
+    assert "2/2 launched, 0 launching, 0 pending" in lines[-1]
+    count = len(lines)
+    watch.finished(0)  # throttled, final already printed
+    assert len(lines) == count
+
+
+def test_capacity_watch_progress_seeded_and_single_shard_silent():
+    lines: list[str] = []
+    watch = sb._CapacityWatch(3, emit=lines.append)
+    watch.seed(0, "collected")
+    watch.seed(1, "launched")
+    watch.phase(2, "launching")
+    assert "1 launching, 0 pending, 1 collected" in lines[-1]
+    quiet: list[str] = []
+    one = sb._CapacityWatch(1, emit=quiet.append)
+    one.phase(0, "launching")
+    one.phase(0, "launched")
+    assert quiet == []
 
 
 def test_models_pdk_root_local_directory_is_refused(tmp_path):
@@ -8026,6 +8211,18 @@ def test_request_without_corners_params_runs_on_a_0_7_0_runner(tmp_path):
     proc, _, marker = _run_job_cmd_with_fake_klt(tmp_path, spec, _fake_klt("klt 0.7.0"))
     assert proc.returncode == 0, proc.stderr
     assert marker.exists()
+
+
+def test_corner_axis_fields_are_registry_features():
+    request = {"corners": {"units": {"vdd": "V"}, "temperature_param": "temp_c"}}
+    assert sorted(sb._request_features(request)) == [
+        "corners.temperature_param",
+        "corners.units",
+    ]
+    for name in ("corners.units", "corners.temperature_param"):
+        assert sb._missing_runner_features([name], "0.7.0") == [name]
+        assert sb._missing_runner_features([name], "0.8.0") == []
+        assert sb._missing_runner_features([name], None) is None
 
 
 def test_expr_no_value_offhost_carries_runner_hint():

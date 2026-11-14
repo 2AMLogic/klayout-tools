@@ -730,6 +730,128 @@ def test_unroutable_pins_empty_when_every_pin_resolves(tmp_path, monkeypatch):
     assert report["unroutable_pins"] == []
 
 
+def _notched_layout() -> kdb.Layout:
+    """A met1 C-shaped polygon whose bbox covers the pin at (1.5, 1.5), plus
+    a separate real pin rect sitting in the notch."""
+    layout = kdb.Layout()
+    layout.dbu = DBU_UM
+    top = layout.create_cell("ANALOG_BLOCK")
+    met1 = layout.layer(*MET1_NET)
+    c_shape = kdb.DPolygon(
+        [
+            kdb.DPoint(0, 0),
+            kdb.DPoint(4, 0),
+            kdb.DPoint(4, 1),
+            kdb.DPoint(1, 1),
+            kdb.DPoint(1, 3),
+            kdb.DPoint(4, 3),
+            kdb.DPoint(4, 4),
+            kdb.DPoint(0, 4),
+        ]
+    )
+    top.shapes(met1).insert(c_shape)
+    top.shapes(met1).insert(_box_um(1.4, 1.4, 1.6, 1.6))  # real pin in notch
+    return layout
+
+
+def test_pin_port_ignores_notched_polygon_whose_bbox_covers_pin(tmp_path, monkeypatch):
+    descriptor = _basic_descriptor(
+        pins=[{"name": "A0", "layer": list(MET1_NET), "x": 1.5, "y": 1.5}]
+    )
+    report = _run(
+        tmp_path, monkeypatch, layout=_notched_layout(), descriptor=descriptor
+    )
+    pin = report["pins"][0]
+    assert pin["geometry_source"] == "drawn"
+    assert pin["rects_um"] == [[1.4, 1.4, 1.6, 1.6]]
+
+
+def test_pin_on_polygon_edge_still_matches(tmp_path, monkeypatch):
+    descriptor = _basic_descriptor(
+        pins=[{"name": "VDD", "layer": list(MET1_NET), "x": 0.2, "y": 2.5}]
+    )
+    report = _run(tmp_path, monkeypatch, descriptor=descriptor)
+    assert report["pins"][0]["geometry_source"] == "drawn"
+
+
+def test_oversize_port_rect_warns_but_keeps_geometry(tmp_path, monkeypatch):
+    descriptor = _basic_descriptor(
+        pins=[
+            {
+                "name": "VDD",
+                "layer": list(MET1_NET),
+                "x": 0.1,
+                "y": 2.5,
+                "width_um": 0.2,
+                "height_um": 0.2,
+            }
+        ]
+    )
+    report = _run(tmp_path, monkeypatch, descriptor=descriptor)
+    assert report["pins"][0]["rects_um"] == [[0.0, 2.0, 0.2, 3.0]]
+    assert any(
+        "VDD" in w and "larger than the declared" in w for w in report["warnings"]
+    )
+
+
+def test_pin_declared_on_unmapped_label_datatype_resolves_via_sibling(
+    tmp_path, monkeypatch
+):
+    """Issue #4283: (68, 5) is not in the map but (68, 20) is."""
+    layout = kdb.Layout()
+    layout.dbu = DBU_UM
+    top = layout.create_cell("ANALOG_BLOCK")
+    top.shapes(layout.layer(*MET1_NET)).insert(_box_um(0.0, 2.0, 0.2, 3.0))
+    descriptor = _basic_descriptor(
+        pins=[{"name": "VDD", "layer": [68, 5], "x": 0.1, "y": 2.5}]
+    )
+    report = _run(tmp_path, monkeypatch, layout=layout, descriptor=descriptor)
+    pin = report["pins"][0]
+    assert pin["layer"] == "met1"
+    assert pin["geometry_source"] == "drawn"
+    assert pin["gds_layer"] == [68, 5]
+    assert not report["warnings"]
+
+
+def test_default_obs_mode_is_detailed(tmp_path, monkeypatch):
+    report = _run(tmp_path, monkeypatch)
+    assert report["obs_mode"] == "detailed"
+
+
+def test_coarse_obs_mode_bounds_shape_count_and_keeps_ports_open(tmp_path, monkeypatch):
+    layout = kdb.Layout()
+    layout.dbu = DBU_UM
+    top = layout.create_cell("ANALOG_BLOCK")
+    met1 = layout.layer(*MET1_NET)
+    for i in range(10):
+        top.shapes(met1).insert(_box_um(0.5 + 0.4 * i, 1.0, 0.7 + 0.4 * i, 1.5))
+    top.shapes(met1).insert(_box_um(0.0, 2.0, 0.2, 3.0))  # VDD port
+    descriptor = _basic_descriptor(
+        pins=[{"name": "VDD", "layer": list(MET1_NET), "x": 0.1, "y": 2.5}]
+    )
+    detailed = _run(tmp_path, monkeypatch, layout=layout, descriptor=descriptor)
+    coarse = _run(
+        tmp_path, monkeypatch, layout=layout, descriptor=descriptor, obs_mode="coarse"
+    )
+    assert coarse["obs_mode"] == "coarse"
+    assert detailed["obs_shape_count"] == 10
+    assert coarse["obs_shape_count"] < detailed["obs_shape_count"]
+    text = (tmp_path / "out.lef").read_text(encoding="utf-8")
+    assert "RECT 0.0000 2.0000 0.2000 3.0000" in text  # port still a PIN rect
+    assert coarse["self_check"]["status"] == "pass"
+
+
+def test_coarse_obs_mode_layer_without_pins_is_single_bbox_rect(tmp_path, monkeypatch):
+    report = _run(tmp_path, monkeypatch, obs_mode="coarse")
+    li1 = [e for e in report["obs"] if e["layer"] == "li1"]
+    assert li1 == []  # only shape on li1 is the VOUT port itself
+
+
+def test_invalid_obs_mode_raises(tmp_path, monkeypatch):
+    with pytest.raises(LefAbstractError, match="obs_mode"):
+        _run(tmp_path, monkeypatch, obs_mode="fine")
+
+
 # --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #

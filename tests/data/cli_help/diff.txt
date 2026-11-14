@@ -1,0 +1,14 @@
+Compare two layout streams shape-for-shape. Ignores stream timestamps, element
+order and library name; never ignores coordinates, path widths, text, instance
+transforms, the database unit or cell names. Exit 0 = equivalent, 3 = layouts
+differ, 1 = unreadable file or unknown --top.
+
+positional arguments:
+  file_a first GDSII or OASIS layout file
+  file_b second GDSII or OASIS layout file
+
+options:
+  -h, --help show this help message and exit
+  --top TOP compare only this cell's hierarchy (must exist in both streams)
+  --max-items MAX_ITEMS cap on listed differences per list (counts stay exact; default 50)
+  --format {text,json} output format (default: text)

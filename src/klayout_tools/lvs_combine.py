@@ -14,6 +14,7 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
+from ._jsonnum import is_int
 from .lvs_mismatch import _mismatch
 
 if TYPE_CHECKING:
@@ -164,7 +165,7 @@ def _parse_combine_devices_max_attempts(options: Mapping[str, Any]) -> int:
     if "combine_devices_max_attempts" not in options:
         return _COMBINE_DEVICES_MAX_ATTEMPTS
     value = options["combine_devices_max_attempts"]
-    if isinstance(value, bool) or not isinstance(value, int):
+    if not is_int(value):
         raise LvsError(
             "options.combine_devices_max_attempts must be a positive integer; "
             f"got {value!r}"
@@ -418,8 +419,7 @@ def _combine_circuit_devices_safely(
 
 
 def _validate_combine_device_classes(
-    class_names: list[str],
-    netlists: Mapping[str, kdb.Netlist],
+    class_names: list[str], netlists: Mapping[str, kdb.Netlist]
 ) -> None:
     """Reject a list-valued ``options.combine_devices`` naming a device class
     that exists on **neither** side (issue #1370).
@@ -1469,7 +1469,9 @@ def _series_fold_offset_absorbed_warnings(
     return warnings
 
 
-def _flatten_netlist_safely(netlist: kdb.Netlist, side: str) -> dict[str, Any] | None:
+def _flatten_netlist_safely(
+    netlist: kdb.Netlist, side: str, keep: list[str] | None = None
+) -> dict[str, Any] | None:
     """Call ``netlist.flatten()``, in-process, on ``side``'s netlist (issue
     #1085's ``options.flatten_reference``/``options.flatten_layout``).
 
@@ -1485,13 +1487,11 @@ def _flatten_netlist_safely(netlist: kdb.Netlist, side: str) -> dict[str, Any] |
     `reference.flatten`" section) -- not a partial result a caller can act
     on.
 
-    ``Netlist.flatten()`` is KLayout's own whole-netlist flatten: "After
-    calling this method, only the top circuits will remain" -- every
-    subcircuit-call instance is substituted in-place, in-process. Called
-    here, before :func:`_select_circuit`, so a caller-declared ``top`` name
-    still resolves normally afterwards whenever it already named a genuine
-    top-level circuit (the common case -- the design's own top level, not
-    an interior leaf that flatten would have inlined away).
+    ``Netlist.flatten()`` is KLayout's own whole-netlist flatten ("only the
+    top circuits will remain"): every subcircuit-call instance is
+    substituted in-place. Called here, before :func:`_select_circuit`, so a
+    caller-declared ``top`` still resolves if it named a genuine top
+    circuit. ``keep`` (#5322) globs spare matching circuits (lvs_flatten).
 
     Symmetric and opt-in on **both** sides (``options.flatten_reference``
     for the reference netlist, ``options.flatten_layout`` for the layout
@@ -1511,10 +1511,9 @@ def _flatten_netlist_safely(netlist: kdb.Netlist, side: str) -> dict[str, Any] |
     """
 
     from .lvs import CATEGORY_TOPOLOGY_FLATTENED
+    from .lvs_flatten import flatten_keeping
 
-    circuits_before = sum(1 for _ in netlist.each_circuit())
-    netlist.flatten()
-    circuits_after = sum(1 for _ in netlist.each_circuit())
+    circuits_before, circuits_after, kept_note = flatten_keeping(netlist, keep)
     if circuits_before == circuits_after:
         return None
     return _mismatch(
@@ -1525,9 +1524,49 @@ def _flatten_netlist_safely(netlist: kdb.Netlist, side: str) -> dict[str, Any] |
         f"{circuits_after} top-level circuit(s), substituting every "
         "subcircuit-call instance in place -- this compare verified "
         "topology only after removing the original hierarchy boundaries on "
-        f'this side (see docs/cli/lvs.md, "topology.flattened")',
+        f'this side{kept_note} (see docs/cli/lvs.md, "topology.flattened")',
         side,
     )
+
+
+def _hierarchy_mismatch_warnings(
+    layout_netlist: kdb.Netlist,
+    reference_netlist: kdb.Netlist,
+    flatten_reference: bool | list[str],
+) -> list[dict[str, Any]]:
+    """Issue #4548: advisory ``topology.hierarchy_mismatch`` warning.
+
+    A flat layout netlist (``klt extract`` is flat-only) against a
+    hierarchical reference reports only per-circuit ``topology`` "could not
+    be matched" errors, which read like a connectivity problem. When the
+    layout side is a single circuit, the reference still has more than one
+    circuit (call after ``_prune_extra_top_circuits`` on both sides) and
+    ``options.flatten_reference`` is not set, disclose that the cause is
+    structural and name the option that compares the two. Returns a
+    one-entry list, else an empty one. Warning-only: never changes ``status``.
+    """
+
+    from .lvs import CATEGORY_TOPOLOGY_HIERARCHY_MISMATCH
+
+    if flatten_reference:
+        return []
+    layout_circuits = sum(1 for _ in layout_netlist.each_circuit())
+    reference_circuits = sum(1 for _ in reference_netlist.each_circuit())
+    if layout_circuits != 1 or reference_circuits <= 1:
+        return []
+    return [
+        _mismatch(
+            CATEGORY_TOPOLOGY_HIERARCHY_MISMATCH,
+            "warning",
+            f"the layout netlist is flat (1 circuit) but the reference netlist is "
+            f"hierarchical ({reference_circuits} circuits); per-circuit topology "
+            "errors here may stem from that structural difference rather than a "
+            "connectivity defect -- retry with options.flatten_reference: true to "
+            "compare the flattened reference against the flat layout "
+            '(see docs/cli/lvs.md, "topology.hierarchy_mismatch")',
+            "reference",
+        )
+    ]
 
 
 def _purge_emptied_nets(netlist: kdb.Netlist) -> None:

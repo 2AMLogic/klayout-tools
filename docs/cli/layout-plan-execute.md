@@ -97,6 +97,12 @@ except LayoutPlanExecuteError as exc:  # Phase C execution failure
 raise SystemExit(exit_code_for(response))
 ```
 
+A schematic-flow (simulation-form, `X`-card) netlist needs the conversion
+options on the request's `netlist` object — `netlist.form: "subckt-call"`,
+`netlist.deck` (`"sky130"`/`"gf180mcu"`) and optionally `netlist.device_map` —
+not `klt lvs`'s `reference.*` keys. See the `netlist.*` rows of the
+[request table](layout-plan.md#request).
+
 - `execute_layout_plan(request, digest, *, request_dir=None, work_dir=None)`
   — the pure-ish function: `digest` is a
   [`build_netlist_digest()`](../../src/klayout_tools/netlist_digest.py)
@@ -220,6 +226,15 @@ terminals' suffixes.
 | `res_array` | `A`, `B` | `_A`, `_B` |
 | `cap_array` | `A`, `B` | `_BOT`, `_TOP` |
 
+**Tap/ring nets (`device_groups[].net`, #5095).** A `guard_ring` group may
+declare an optional `net` naming a digest net (e.g. `"VSS"`). The ring's
+first generated port (`TAP_N`; the four `TAP_*` ports sit on one closed ring,
+so one stands for the conductor) joins that net's pin set exactly like a
+device terminal would, so the net gets a `connectivity[]` entry (when it has
+two or more pins) and is no longer reported in `unmapped_netlist_nets[]`. `net`
+on any other generator, or a net absent from the netlist digest, is an
+application error (exit 1). Plans without `net` are unchanged.
+
 A terminal absent from a generator's own row above (MOS `B`/bulk, BJT
 `C`/collector) is **deliberately** unmapped — both conventionally tie to a
 shared substrate/well tap a `guard_ring`/collector ring already owns, not
@@ -291,12 +306,15 @@ horizontal), leaving the perpendicular axis exactly as the row placement
 left it. A `warnings[]` entry records every time this actually changes an
 already-placed group's offset, so the override is never silent.
 
-**Group origins are snapped onto the PDK manufacturing grid.** After rows and
-abutment resolve, every group's `offset_um` (`x` and `y`) is rounded *up* to
-the coarsest `ongrid` grid the PDK deck declares (so `spacing_um` / `gap_um`
-stay lower bounds), because an off-grid origin makes every shape in the group
-fail `*.ongrid.1`. Each group that moves gets a `warnings[]` entry naming it and
-the shift; a PDK family with no ongrid rule is left unchanged.
+**Group origins are snapped onto the PDK manufacturing grid.** Every group's
+`offset_um` (`x` and `y`) is snapped to the coarsest `ongrid` grid the PDK deck
+declares *as it is resolved*, before any successor is placed from it, because
+an off-grid origin makes every shape in the group fail `*.ongrid.1`. Offsets
+round away from the anchor (up, except the gap axis of a `left`/`bottom`
+abutment, which rounds down), so every `spacing_um` / `gap_um` / `margin_um`
+stays a lower bound between neighbours, not just for the first pair. Each group
+that moves gets a `warnings[]` entry naming it and the shift; a PDK family with
+no ongrid rule is left unchanged.
 
 ## Response
 
@@ -335,6 +353,7 @@ execution's terminal step *is* a composition:
   ],
   "pins": [],
   "unrouted_nets": [],
+  "unrouted_reasons": [],
   "unmapped_netlist_nets": [],
   "drc_hints": { "min_spacing_um": null, "matched_groups": [], "notes": [] },
   "warnings": []
@@ -348,8 +367,50 @@ execution's terminal step *is* a composition:
 | `device_groups[]` | array\<object\> | Replaces `gen-compose`'s `blocks[]` — per group: `id`, `generator`, `devices` (fully qualified, from Phase B), `resolved_params` (see "Parameter resolution"), `offset_um`, `bbox_um` (the latter two straight from `compose()`'s own `blocks[]`). |
 | `nets[]` | array\<object\> | Straight from `gen-compose.compose()` — `net`, `pins[]`, `routed`, `route_length_um`, `status` (`"routed"`/`"partial"`/`"unrouted"`, issue #1169), `legs[]` (a 2-pin net is the degenerate one-leg case of the same shape a bundle net uses). |
 | `unrouted_nets[]` | array\<string\> | Straight from `gen-compose.compose()` — every placed group, but this net's pins could not all be connected (includes both `status: "partial"` and `status: "unrouted"` nets, #1169 — see [`gen-compose.md`](gen-compose.md) for the distinction). |
+| `unrouted_reasons[]` | array\<object\> | Additive (#4966): one `{"net", "reason"}` per `unrouted_nets[]` entry, parsed from `compose()`'s `drc_hints.notes` `net '<n>' could not be routed: <reason>` lines, so a caller sees *why* a net failed. Always present, empty when nothing is unrouted. |
 | `unmapped_netlist_nets[]` | array\<string\> | **The one field with no `gen-compose` analogue.** Every digest net that resolved to *zero* `device_groups[]` ports — including a deliberately unrouted supply/bulk net (`VDD`/`VSS`-style, or a MOS bulk/BJT collector terminal, both deliberately unmapped — see "Connectivity derivation"). Always present, empty when every netlist net touching a declared group's devices resolved to at least one port. No `netlist.ignore_nets[]`-style opt-out exists — a caller judges an entry here benign or not; nothing is silently dropped. |
-| `warnings[]` | array\<string\> | Netlist-derived-vs-override parameter divergences, abutment-overrides-rows notices, connectivity-derivation degradations (an index past a suffix's candidate list), a resolved-generator-output-vs-declared-`device_class` mismatch (issue #1731 — see "Scope decisions" below), plus `gen-compose.compose()`'s own warnings (e.g. an `"explicit"`-placement clearance advisory). |
+| `warnings[]` | array\<string\> | A netlist port with no mapped device port (no pin label written, #4966), netlist-derived-vs-override parameter divergences, abutment-overrides-rows notices, connectivity-derivation degradations (an index past a suffix's candidate list), a resolved-generator-output-vs-declared-`device_class` mismatch (issue #1731 — see "Scope decisions" below), plus `gen-compose.compose()`'s own warnings (e.g. an `"explicit"`-placement clearance advisory). |
+
+## Pin labels and supported scope (mixed-device sky130 blocks)
+
+**Port labels (#4966).** Each netlist subckt port (a digest net with `is_pin`)
+is promoted through `compose()`'s `pins[]` to a top-level label on its first
+resolved device port, so the output GDS carries one label per port name for
+`klt lvs`. A port the router already wires (`connectivity[]`) is promoted
+without a duplicate label. A port that resolves to no device port (for
+example a bulk-only net, which is deliberately unmapped) gets a `warnings[]`
+entry and no label. The labels appear in the response's `pins[]`.
+
+**`gate_contact` derivation (#5093).** For `mos_array`, `diff_pair` and
+`esd_device` groups, `execute` sets `params.gate_contact: true` when any
+declared device's gate terminal is on a net with two or more terminal
+connections or on a subckt port, because the router cannot reach a bare-poly
+gate. An explicit `device_groups[].params.gate_contact` (true or false) always
+wins. The derived choice shows in the group's `resolved_params` and as one
+`warnings[]` entry; plans with no such gate net resolve as before.
+
+**Scope.** Routing runs between the generated groups' ports exactly as in
+`gen-compose`; there is no "row of unlike devices" topology, and each
+single-device `mos_array`/`res_array`/`cap_array` group is one unit.
+
+*Largest block known to route end to end* (recorded 2026-11-06, base commit
+`3d2c74e`): the three-NFET shared-gate rail in
+`tests/test_layout_plan_gate_contact.py` (`_GATE_RAIL_NETLIST`, three one-unit
+`mos_array` groups in one row, shared gate net `VBIAS`) routes every net with
+the derived `gate_contact`; with `gate_contact: false` forced, `VBIAS` stays
+unrouted ("bare-poly gate"). No mixed-device sky130 block (`hvi` FETs plus
+`res_array` and `cap_array`) is verified to route fully: the #5093 report
+still showed self-net backbone crossings, "crosses the block's interior on the
+side away from its own pin", and cross-layer detour conflicts, and MOS bulk
+has no well/substrate tap, so an LVS bulk compare would fail regardless.
+Treat an all-nets-unrouted result as a **placement-only floorplan**, read
+`unrouted_reasons[]` for the cause, and file a router issue for a capability
+gap.
+
+**Class-qualified device references.** A device name is only unique within its
+class, so `device_groups[].devices[]` entries are class-qualified. The MIM
+capacitor class is `SKY130_FD_PR__MODEL__CAP_MIM` (easy to miss when writing
+`device_class`).
 
 ## Exit codes
 
@@ -403,8 +464,39 @@ than only in a PR description:
   the full mechanics. This module only validates its shape (a positive
   number); `gen-compose.compose()` re-validates it against the cross-block
   layer's own deck minimum and defaults it to that layer's own minimum when
-  omitted. An unrecognised `request.routing` key is a usage error, mirroring
-  `request.pdk`/`request.netlist`'s own unknown-key rejection.
+  omitted. `nets` (issue #5094) is a further optional field: an object
+  `{net_name: {layer_role?, width_um?, waypoints_um?, legs?}}` copied onto the matching derived
+  `connectivity[]` entry (`gen-compose`'s per-net override, issue #1655), the
+  one lever on a "pin reached from behind" / "crosses already-routed net"
+  rejection other than reordering rows. `waypoints_um` (issue #5108) takes the
+  same shape as `gen-compose`'s `connectivity[].waypoints_um` (`[x_um, y_um]`
+  pairs, or `[x_um, y_um, "layer_role"]` to change routing plane at that
+  point), is validated by the same parser and is forwarded unchanged; it is
+  only valid for a 2-pin net. `legs` (issue #5110) is the lever for a net
+  with three or more pins: an array of
+  `{from_pin: {block, port}, to_pin: {block, port}, waypoints_um?,
+  layer_role?, width_um?}` forwarded unchanged onto the derived
+  `connectivity[].legs` (`gen-compose`'s per-leg steering, issue #1529) and
+  validated by the same parser against that net's own derived pins. A pin is
+  `{"block": <device_groups[].id>, "port": <generated port name>}`; the port
+  name is the generator's (`<unit>_S/_D/_G` for `mos_array`, `_A/_B` for
+  `res_array`, `_BOT/_TOP` for `cap_array`; e.g. `U0_G`). Unknown pins, the
+  same pin twice, or unknown keys are an error naming
+  `request.routing.nets['<net>'].legs`. `legs` is also valid on a 2-pin
+  net, and `legs` together with `waypoints_um` on one net is an error. A leg
+  without `waypoints_um` only forces that pin pair into the net's spanning
+  tree; supply waypoints that approach each pin from its facing side to get
+  past a "reaches the pin from behind" rejection. MOS bulk reaches LVS through a
+  `guard_ring` group's `net` (issue #5095): add a tap-ring group, set its
+  `net` to the digest net the bulk ties to, and that ring's port joins the
+  net in a mixed-device block; the MOS `B` port itself stays unmapped, and
+  the bulk-compare limit above still applies. Still not available: a
+  per-group port-side hint and a mixed-device row topology (one group per
+  device is the workaround). Each entry must set at least one
+  key; a net name matching no derived entry (unmapped, fewer than 2 pins,
+  or nonexistent) adds a `warnings[]` entry and is otherwise ignored; unlisted
+  nets are unchanged. An unrecognised `request.routing` key is a usage error,
+  mirroring `request.pdk`/`request.netlist`'s own unknown-key rejection.
 - **Resolved-generator-vs-declared-`device_class` consistency (issue
   #1731).** Phase B only checks a `device_groups[].devices[].device_class`
   against what the netlist digest itself declares for that device name — it

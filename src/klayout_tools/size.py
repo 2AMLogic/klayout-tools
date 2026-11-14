@@ -49,6 +49,7 @@ import tempfile
 from typing import Any
 
 from . import design_centering, env_provenance
+from ._jsonnum import is_number
 from ._paths import _load_request_json, validate_request_shape
 from ._provenance import build_provenance
 from ._text import line_containing as _line_containing
@@ -245,22 +246,8 @@ def load_request(request_path: str) -> dict[str, Any]:
     return request
 
 
-def _report_path(path: str | None, *, repo_root: str | None) -> dict[str, Any]:
-    """Normalise one resolved input path for this module's own JSON response
-    (issue #1274) -- a thin, module-local wrapper over
-    :func:`~klayout_tools.env_provenance.repo_relative_path`, matching
-    ``sim.py``'s helper of the same name so ``klt size``, ``klt sim``,
-    ``klt pex`` and ``klt env-provenance`` all agree on exactly one
-    ``{path, scope}`` shape. Pass an already-resolved absolute path (e.g.
-    ``_resolve_models_lib``'s answer); a bare relative string would be
-    resolved against the current process's cwd, which is not necessarily
-    what a caller meant.
-    """
-    return env_provenance.repo_relative_path(path, repo_root=repo_root)
-
-
 def _require_positive_number(value: Any, field: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if not is_number(value):
         raise SizeError(f"{field} must be a number")
     if value <= 0:
         raise SizeError(f"{field} must be positive")
@@ -306,7 +293,7 @@ def _parse_device(device: dict[str, Any]) -> dict[str, Any]:
     nf = device.get("nf", 1)
     mult = device.get("mult", 1)
     for value, field in ((nf, "request.device.nf"), (mult, "request.device.mult")):
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        if not is_number(value) or value <= 0:
             raise SizeError(f"{field} must be a positive number")
 
     op_point_element = device.get("op_point_element") or _default_op_point_element(
@@ -338,8 +325,7 @@ def _parse_corner(corner: dict[str, Any]) -> dict[str, Any]:
     if vdd is None:
         raise SizeError("request.corner.vdd_v is required")
     vdd = _require_positive_number(vdd, "request.corner.vdd_v")
-    temperature_c = corner.get("temperature_c", 27)
-    if isinstance(temperature_c, bool) or not isinstance(temperature_c, (int, float)):
+    if not is_number(temperature_c := corner.get("temperature_c", 27)):
         raise SizeError("request.corner.temperature_c must be a number")
     return {"process": process, "vdd_v": vdd, "temperature_c": float(temperature_c)}
 
@@ -881,7 +867,9 @@ def _run_single_device_size(
         # a PDK model library normally lives outside the repo (under the
         # user's home directory) and would leak that layout into every
         # committed report. `provenance.deck` still pins which library ran.
-        "models_lib": _report_path(models_lib, repo_root=repo_root),
+        "models_lib": env_provenance.repo_relative_path(
+            models_lib, repo_root=repo_root
+        ),
     }
 
     if len(valid_points) < 2:
@@ -1593,7 +1581,9 @@ def _run_worst_case_margin(
         "engine": "ngspice",
         "engine_version": engine_version,
         # Issue #1274 -- see `run_size`'s own `environment` block.
-        "models_lib": _report_path(models_lib, repo_root=repo_root),
+        "models_lib": env_provenance.repo_relative_path(
+            models_lib, repo_root=repo_root
+        ),
     }
 
     if not corner_curves:

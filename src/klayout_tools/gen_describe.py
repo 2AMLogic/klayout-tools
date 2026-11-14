@@ -46,12 +46,14 @@ imported here directly from their defining module rather than through
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from .gen_layer_params import (
     _DEFAULT_RES_FLAVOR,
     _MAX_METAL_RES_LEVEL,
     _METAL_RES_GEOMETRY_MIN_KEYS,
+    _PDK_CAP_STACK_GEOMETRY_UM,
     _PDK_ROLE_LAYERS,
     CONTACT_GAP_SAFE_UM,
     ESD_FINGER_WIDTH_MAX_UM,
@@ -65,8 +67,10 @@ from .gen_layer_params import (
     UNIT_MIN_W_UM,
     _cap_family_layers,
     _cap_geometry_min_um,
+    _check_cap_stack_supported,
     _contact_gate_extra_offset_um,
     _cut_fixed_size_um,
+    _deck_min_width_um,
     _gate_bottom_endcap_um,
     _gate_pad_clearance_um,
     _gate_top_endcap_um,
@@ -76,6 +80,7 @@ from .gen_layer_params import (
     _pdk_family,
     _reject_deferred_family,
     _res_end_contact_um,
+    _res_flavor_layers,
     _res_flavor_min_width_um_floor,
     _res_sab_geometry_um,
     _ring_implant_margin_um,
@@ -333,34 +338,9 @@ def _pitch_hints_and_warnings(
     return hints, warnings
 
 
-def _validate_mos_array_width(params: dict[str, Any]) -> None:
-    from .gen import GenError
-
-    if params["mos_cap"]:
-        # The width floor of a MOS capacitor is the deck's own COMP min-width
-        # rule for the selected oxide, resolved once the PDK is known (see
-        # `_device_layer_params`); the flat generator-side floor below applies
-        # to plain transistors only.
-        if params["w_um"] <= 0:
-            raise GenError("generator 'mos_array': params.w_um must be > 0")
-        if not params["add_guard_ring"]:
-            raise GenError(
-                "generator 'mos_array': params.mos_cap requires "
-                "params.add_guard_ring (the guard ring is the capacitor's "
-                "body tie)"
-            )
-        if params["gate_contact"]:
-            raise GenError(
-                "generator 'mos_array': params.mos_cap does not support "
-                "params.gate_contact"
-            )
-    elif params["w_um"] < UNIT_MIN_W_UM:
-        raise GenError(
-            f"generator 'mos_array': params.w_um must be >= {UNIT_MIN_W_UM} "
-            "(the smallest width that fits an enclosed contact with margin -- "
-            "a generator-side structural floor, not the target PDK's own "
-            "diffusion-width rule)"
-        )
+from .gen_layer_params_checks import (  # noqa: E402 -- re-exported name
+    validate_mos_array_width as _validate_mos_array_width,
+)
 
 
 def _mos_array_validate(params: dict[str, Any]) -> None:
@@ -482,7 +462,7 @@ def _sd_implant_hints(
     flavor = params.get("flavor", "nfet")
     sd_implant_role = "nplus" if flavor == "nfet" else "pplus"
     sd_implant = _role_layer_info(family, sd_implant_role)
-    if sd_implant is None:
+    if sd_implant is None or _sd_implant_margin_um(family) <= 0:
         notes.append(
             f"family '{family}' declares no S/D implant role "
             f"('{sd_implant_role}') for flavor '{flavor}' -- no implant "
@@ -505,6 +485,7 @@ def _mfg_grid_warnings(
     params: dict[str, Any],
     multiple: int = 1,
     multiple_label: str = "",
+    checks: tuple[tuple[str, str], ...] = (("w_um", "active"), ("l_um", "poly")),
 ) -> list[str]:
     """Top-level ``warnings[]`` entries for a MOS generator's ``w_um``/
     ``l_um`` that is not an exact multiple of the resolved family's
@@ -519,12 +500,15 @@ def _mfg_grid_warnings(
     whose total width is ``multiple`` unit widths of ``w_um`` each (e.g.
     ``diff_pair``'s ``splits``): every unit must be on-grid, so the total is
     representable only as a multiple of ``multiple x grid`` -- the nearest
-    such totals are reported alongside the unit-width neighbours."""
+    such totals are reported alongside the unit-width neighbours.
+
+    ``checks`` are the ``(param, role)`` pairs to check (issue #4203:
+    ``res_array`` passes ``(("length_um", "poly"),)``)."""
     from .gen import _mfg_grid_neighbours
 
     roles = _PDK_ROLE_LAYERS[family]
     warnings: list[str] = []
-    for param, role in (("w_um", "active"), ("l_um", "poly")):
+    for param, role in checks:
         grid_um = mfg_grid_um(family, roles.get(role))
         value_um = params[param]
         neighbours = _mfg_grid_neighbours(grid_um, value_um)
@@ -705,6 +689,7 @@ def _mos_array_describe(
         tap_reach_um=_tap_reach_um(family),
         share_sd=params["share_sd"],
         mirror=params["mirror"],
+        dogbone_terminals=params["dogbone_terminals"],
     )
     unit = info["unit"]
     metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
@@ -960,6 +945,10 @@ def _res_array_validate(params: dict[str, Any]) -> None:
         raise GenError("generator 'res_array': params.dummy must be >= 0")
     if params["rows"] < 1:
         raise GenError("generator 'res_array': params.rows must be >= 1")
+    if params["short_length"] not in ("refuse", "lengthen"):
+        raise GenError(
+            "generator 'res_array': params.short_length must be 'refuse' or 'lengthen'"
+        )
     if not (0 <= params["metal_level"] <= _MAX_METAL_RES_LEVEL):
         raise GenError(
             "generator 'res_array': params.metal_level must be between 0 "
@@ -1030,6 +1019,116 @@ def _res_array_series_note(joints: list[dict[str, Any]], num: int) -> str:
         f"units end to end; only R0_A and R{num - 1}_B are reported as ports. "
         "Per-joint overhead (jumper length): "
         + (", ".join(overhead) if overhead else "none (num is 1)")
+    )
+
+
+def _res_min_length_floor_um(
+    family: str, params: dict[str, Any]
+) -> tuple[str, float] | None:
+    """``(rule id, um)`` of the largest deck minimum mask width among the
+    body-sized masks of a poly ``res_array``'s flavour (issue #4203), or
+    ``None`` where no salicide block is drawn (:func:`_res_sab_geometry_um`;
+    today only gf180mcu has one) or the deck declares no such rule. The
+    minimum is read from the deck rule, never restated."""
+    flavor = params.get("flavor", _DEFAULT_RES_FLAVOR)
+    if _res_sab_geometry_um(family, flavor) == (0.0, 0.0):
+        return None
+    worst: tuple[str, float] | None = None
+    for pair in _res_flavor_layers(family, flavor):
+        rule = _deck_min_width_um(family, pair)
+        if rule is not None and (worst is None or rule[1] > worst[1]):
+            worst = rule
+    return worst
+
+
+def _res_short_length_warnings(family: str, params: dict[str, Any]) -> list[str]:
+    """Advisory ``warnings[]`` entry when a poly ``res_array``'s ``length_um``
+    is below the deck's minimum width of a body-sized mask (issue #4203).
+
+    The SAB and the implant masks of the flavour span the resistor body
+    segment, whose length is exactly ``length_um``, so a shorter length draws a
+    mask narrower than the deck's ``*.width.*`` minimum."""
+    worst = _res_min_length_floor_um(family, params)
+    if worst is None or params["length_um"] >= worst[1]:
+        return []
+    return [
+        f"generator 'res_array': params.length_um={_fmt_um(params['length_um'])} "
+        f"is below the '{family}' deck's {worst[0]} minimum mask width "
+        f"({_fmt_um(worst[1])}) -- the body-length SAB/implant mask will be "
+        "drawn narrower than that rule and expect a width DRC finding"
+    ]
+
+
+def _res_array_snap_length(
+    params: dict[str, Any], pdk_info: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Snap a poly ``res_array``'s ``length_um`` to the manufacturing grid and
+    enforce the deck's minimum drawable length (issue #4666), rewriting
+    ``params["length_um"]`` in place.
+
+    Returns the ``drc_hints.length_snap`` record (requested/realised length,
+    resistance delta, reasons), or ``None`` when nothing applies: a metal
+    resistor, ``params.snap`` false (today's #4203 warnings stay), or a length
+    already on-grid and above the floor. Raises :class:`GenError` for a
+    below-floor length under ``short_length='refuse'``."""
+    from .gen import GenError, _mfg_grid_neighbours
+
+    if params.get("metal_level", 0) or not params.get("snap", True):
+        return None
+    family = _pdk_family(pdk_info["variant"])
+    requested = params["length_um"]
+    grid_um = mfg_grid_um(family, _PDK_ROLE_LAYERS[family].get("poly"))
+    realised = requested
+    reasons: list[str] = []
+    if _mfg_grid_neighbours(grid_um, requested) is not None:
+        # Round half up (float-safe: the epsilon keeps 0.0125 -> 0.015).
+        realised = round(math.floor(requested / grid_um + 0.5 + 1e-9) * grid_um, 9)
+        reasons.append("snapped_to_grid")
+    floor = _res_min_length_floor_um(family, params)
+    if floor is not None and realised < floor[1] - 1e-9:
+        if params["short_length"] == "refuse":
+            raise GenError(
+                f"generator 'res_array': params.length_um={_fmt_um(requested)}"
+                + (
+                    f" (snapped to {_fmt_um(realised)})"
+                    if realised != requested
+                    else ""
+                )
+                + f" is below the '{family}' deck's {floor[0]} minimum mask "
+                f"width ({_fmt_um(floor[1])}) -- raise length_um to at least "
+                f"{_fmt_um(floor[1])} or pass params.short_length='lengthen'"
+            )
+        realised = (
+            round(math.ceil(floor[1] / grid_um - 1e-9) * grid_um, 9)
+            if grid_um > 0
+            else floor[1]
+        )
+        reasons.append("lengthened_to_floor")
+    if not reasons:
+        return None
+    params["length_um"] = realised
+    return {
+        "requested_um": requested,
+        "realised_um": realised,
+        "grid_um": grid_um,
+        "resistance_delta_pct": round((realised / requested - 1.0) * 100.0, 6),
+        "reasons": reasons,
+    }
+
+
+def _res_array_apply_snap_report(
+    described: dict[str, Any], snap: dict[str, Any]
+) -> None:
+    """Attach ``drc_hints.length_snap`` and a ``warnings[]`` entry stating the
+    snap to a ``res_array`` describe result (issue #4666)."""
+    described["drc_hints"]["length_snap"] = snap
+    described["warnings"].append(
+        f"generator 'res_array': params.length_um={_fmt_um(snap['requested_um'])} "
+        f"was drawn as {_fmt_um(snap['realised_um'])} "
+        f"({', '.join(snap['reasons'])}; resistance "
+        f"{snap['resistance_delta_pct']:+.4g}%) "
+        "-- update the netlist length to the realised value or record the "
+        "deviation; pass params.snap=false to draw verbatim"
     )
 
 
@@ -1160,6 +1259,14 @@ def _res_array_describe(
             ["one or more dimensions were rounded to the technology grid"]
             if snapped
             else []
+        )
+        + (
+            []
+            if metal_level
+            else _mfg_grid_warnings(
+                "res_array", family, params, checks=(("length_um", "poly"),)
+            )
+            + _res_short_length_warnings(family, params)
         ),
     }
 
@@ -1179,6 +1286,27 @@ def _cap_array_validate(params: dict[str, Any]) -> None:
         raise GenError("generator 'cap_array': params.spacing_um must be >= 0")
     if params["num"] < 1:
         raise GenError("generator 'cap_array': params.num must be >= 1")
+    from .gen import CONTACT_SIZE_UM
+
+    if params["connect"] not in ("independent", "parallel"):
+        raise GenError(
+            "generator 'cap_array': params.connect must be 'independent' or 'parallel'"
+        )
+    if params["stack"] not in (1, 2):
+        raise GenError("generator 'cap_array': params.stack must be 1 or 2")
+    pitch = params["top_via_pitch_um"]
+    if pitch < 0:
+        raise GenError("generator 'cap_array': params.top_via_pitch_um must be >= 0")
+    if pitch > 0 and params["connect"] != "parallel":
+        raise GenError(
+            "generator 'cap_array': params.top_via_pitch_um only applies to "
+            "connect='parallel'"
+        )
+    if 0 < pitch < 2 * CONTACT_SIZE_UM:
+        raise GenError(
+            "generator 'cap_array': params.top_via_pitch_um must be >= "
+            f"{2 * CONTACT_SIZE_UM} (twice the via side) or 0 for the default"
+        )
 
 
 def _cap_array_describe(
@@ -1193,6 +1321,7 @@ def _cap_array_describe(
 
     family = _pdk_family(pdk_info["variant"])
     layers = _cap_family_layers(family)
+    _check_cap_stack_supported(family, params)
     floors = _cap_geometry_min_um(family)
     top_via_metal_min_w_um = floors["cap_top_via_metal_min_w_um"]
     info = _cap_array_layout(
@@ -1204,6 +1333,10 @@ def _cap_array_describe(
         floors["cap_top_via_min_w_um"],
         floors["cap_bottom_plate_margin_min_um"],
         floors["cap_min_spacing_um"],
+        params["connect"],
+        params["top_via_pitch_um"],
+        params["stack"],
+        _PDK_CAP_STACK_GEOMETRY_UM.get(family),
     )
     unit = info["unit"]
     bottom_pair = layers["cap_bottom_plate"]
@@ -1231,7 +1364,76 @@ def _cap_array_describe(
 
     notes = []
     ports = []
-    for c in info["cells"]:
+    parallel = info.get("parallel")
+    stack = info.get("stack")
+    if stack is not None:
+        # Stacked bank (issue #3332): the outer plates (met3 + met5, tied
+        # outside the footprint) and the shared met4 middle plate.
+        outer_pair = _PDK_ROLE_LAYERS[family]["cap2_top_via_metal"]
+        assert outer_pair is not None  # guaranteed by _check_cap_stack_supported
+        ports.append(
+            {
+                "name": "C_OUTER",
+                "net": None,
+                "layer": {
+                    "layer": outer_pair[0],
+                    "datatype": outer_pair[1],
+                    "name": None,
+                },
+                "x_um": stack["outer_xy"][0],
+                "y_um": stack["outer_xy"][1],
+                "width_um": stack["outer_pad_w_um"],
+                "direction_deg": RING_SIDE_DIRECTIONS["S"],
+            }
+        )
+        ports.append(
+            {
+                "name": "C_MID",
+                "net": None,
+                "layer": top_layer,
+                "x_um": stack["mid_xy"][0],
+                "y_um": stack["mid_xy"][1],
+                "width_um": stack["mid_pad_w_um"],
+                "direction_deg": RING_SIDE_DIRECTIONS["N"],
+            }
+        )
+        notes.append(
+            f"stack=2: {params['num']} unit(s) with the met3/capm and "
+            "met4/capm2 MiM levels over one footprint; the outer plates "
+            "(met3 + met5) are strapped outside the footprint (port C_OUTER) "
+            "and met4 is the shared middle plate (port C_MID)"
+        )
+    elif parallel is not None:
+        # One bank, one device: exactly two terminals (issue #3022).
+        ports.append(
+            {
+                "name": "C_BOT",
+                "net": None,
+                "layer": bottom_layer,
+                "x_um": parallel["bot_xy"][0],
+                "y_um": parallel["bot_xy"][1],
+                "width_um": parallel["total_h_um"],
+                "direction_deg": 180,
+            }
+        )
+        ports.append(
+            {
+                "name": "C_TOP",
+                "net": None,
+                "layer": top_layer,
+                "x_um": parallel["top_escape_xy"][0],
+                "y_um": parallel["top_escape_xy"][1],
+                "width_um": parallel["top_pad_w_um"],
+                "direction_deg": RING_SIDE_DIRECTIONS["N"],
+            }
+        )
+        notes.append(
+            f"connect='parallel': {params['num']} unit(s) share one bottom "
+            f"plate, each top plate carries {parallel['vias_per_unit']} "
+            "top-plate via(s), and all are strapped into one capacitor "
+            "(ports C_BOT/C_TOP)"
+        )
+    for c in [] if parallel is not None else info["cells"]:
         idx = c["idx"]
         bot_xy = unit["bot_xy"]
         ports.append(
@@ -1320,8 +1522,10 @@ def _cap_array_describe(
     # same-layer margin every other generator reports.
     foreign_clearance_um = max(MIN_SAME_LAYER_SPACING_UM, floors["cap_min_spacing_um"])
 
-    return {
-        "device_count": params["num"],
+    described: dict[str, Any] = {
+        "device_count": (
+            2 if stack is not None else 1 if parallel is not None else params["num"]
+        ),
         "ports": ports,
         "drc_hints": {
             "min_spacing_um": effective_spacing_um,
@@ -1335,6 +1539,44 @@ def _cap_array_describe(
             if snapped
             else []
         ),
+    }
+    if parallel is not None:
+        described["expected"] = _cap_parallel_expected(family, params)
+    return described
+
+
+def _cap_parallel_expected(family: str, params: dict[str, Any]) -> dict[str, Any]:
+    """Expected extracted capacitance (issue #3022) of a ``connect='parallel'``
+    bank: ``num x (area_cap * W * H + perim_cap * 2 * (W + H))`` from the
+    family's extraction-deck :class:`~klayout_tools.decks.CapacitorDevice`
+    -- the same two-term law ``klt extract`` applies to each top plate."""
+    from .decks import get_extraction_deck
+
+    caps = get_extraction_deck(family).capacitors
+    cap = caps[0]
+    w, h = params["plate_w_um"], params["plate_h_um"]
+    unit_f = cap.area_cap_f_um2 * w * h + cap.perim_cap_f_um * 2.0 * (w + h)
+    if params["stack"] == 2:
+        # Both MiM levels, each `num` units, between the same two nets.
+        cap2 = caps[1]
+        unit2_f = cap2.area_cap_f_um2 * w * h + cap2.perim_cap_f_um * 2.0 * (w + h)
+        return {
+            "capacitance_f": (unit_f + unit2_f) * params["num"],
+            "unit_capacitance_f": unit_f + unit2_f,
+            "device_class": cap.name,
+            "area_cap_f_um2": cap.area_cap_f_um2,
+            "perim_cap_f_um": cap.perim_cap_f_um,
+            "levels": [
+                {"device_class": c.name, "unit_capacitance_f": u}
+                for c, u in ((cap, unit_f), (cap2, unit2_f))
+            ],
+        }
+    return {
+        "capacitance_f": unit_f * params["num"],
+        "unit_capacitance_f": unit_f,
+        "device_class": cap.name,
+        "area_cap_f_um2": cap.area_cap_f_um2,
+        "perim_cap_f_um": cap.perim_cap_f_um,
     }
 
 
@@ -2666,6 +2908,45 @@ def _bond_pad_describe(
     }
 
 
+def _esd_device_resolve_total_width(
+    raw_params: dict[str, Any], resolved: dict[str, Any]
+) -> None:
+    """Pre-resolve ``esd_device``'s optional ``total_width_um`` (issue #4299),
+    in place on ``resolved``, before :func:`_esd_device_validate` runs so the
+    per-finger cap and finger-count limit are checked on the derived values.
+
+    Picks the smallest finger count whose equal split stays within
+    ``ESD_FINGER_WIDTH_MAX_UM`` (21.5 -> 2 x 10.75). ``0.0`` (the default)
+    means unset. Combining it with an explicit ``fingers``/``finger_width_um``
+    is ambiguous and rejected."""
+    from .gen import GenError
+
+    if "total_width_um" not in raw_params:
+        return
+    total = resolved["total_width_um"]
+    if total <= 0:
+        raise GenError("generator 'esd_device': params.total_width_um must be > 0")
+    explicit = [k for k in ("fingers", "finger_width_um") if k in raw_params]
+    if explicit:
+        raise GenError(
+            "generator 'esd_device': params.total_width_um cannot be combined "
+            f"with an explicit params.{explicit[0]} (it derives both "
+            "fingers and finger_width_um)"
+        )
+    # The epsilon keeps a total that is exactly N x the cap at N fingers
+    # despite float division noise.
+    fingers = max(1, math.ceil(total / ESD_FINGER_WIDTH_MAX_UM - 1e-9))
+    if fingers > ESD_MAX_FINGERS_PER_RING:
+        raise GenError(
+            f"generator 'esd_device': params.total_width_um {total} needs "
+            f"{fingers} fingers at <= {ESD_FINGER_WIDTH_MAX_UM} um each, above "
+            f"the {ESD_MAX_FINGERS_PER_RING}-finger limit per automatically-"
+            "sized tap ring"
+        )
+    resolved["fingers"] = fingers
+    resolved["finger_width_um"] = total / fingers
+
+
 def _esd_device_validate(params: dict[str, Any]) -> None:
     from .gen import (
         GenError,
@@ -2803,6 +3084,7 @@ def _esd_device_describe(
     notes = _ring_gap_notes(
         info["ring"] if ring_drawn else None, params["ring_gap_side"]
     )
+    voltage_flavor_hints = _voltage_flavor_hints(family, params, notes)
     if not params["add_guard_ring"]:
         notes.append(
             "no tap ring drawn (params.add_guard_ring is false) -- substrate "
@@ -2827,6 +3109,86 @@ def _esd_device_describe(
 
     snapped = _grid_snapped(dbu, params["finger_width_um"], params["l_um"])
 
+    return {
+        "device_count": 1,
+        "ports": ports,
+        "drc_hints": {
+            "min_spacing_um": MIN_SAME_LAYER_SPACING_UM,
+            "matched_group_id": None,
+            "snapped_to_grid": snapped,
+            "notes": notes,
+            # Echo the (possibly `total_width_um`-derived) split, issue #4299.
+            "fingers": params["fingers"],
+            "finger_width_um": params["finger_width_um"],
+            **voltage_flavor_hints,
+        },
+        "warnings": (
+            ["one or more dimensions were rounded to the technology grid"]
+            if snapped
+            else []
+        ),
+    }
+
+
+def _diode_validate(params: dict[str, Any]) -> None:
+    from .gen import GenError
+    from .gen_diode import DIODE_KINDS, DIODE_MIN_EDGE_UM, DIODE_VOLTAGE_CLASSES
+
+    if params["kind"] not in DIODE_KINDS:
+        raise GenError(
+            f"generator 'diode': params.kind must be one of {list(DIODE_KINDS)}"
+        )
+    if params["voltage_class"] not in DIODE_VOLTAGE_CLASSES:
+        raise GenError(
+            "generator 'diode': params.voltage_class must be one of "
+            f"{list(DIODE_VOLTAGE_CLASSES)}"
+        )
+    for name in ("width_um", "length_um"):
+        if params[name] < DIODE_MIN_EDGE_UM:
+            raise GenError(
+                f"generator 'diode': params.{name} must be >= {DIODE_MIN_EDGE_UM} "
+                "(the smallest diffusion that fits an enclosed contact)"
+            )
+
+
+def _diode_describe(
+    params: dict[str, Any], dbu: float, pdk_info: dict[str, Any]
+) -> dict[str, Any]:
+    from .gen import MIN_SAME_LAYER_SPACING_UM, _grid_snapped
+    from .gen_diode import _diode_layout
+
+    info = _diode_layout(
+        params["kind"], params["voltage_class"], params["width_um"], params["length_um"]
+    )
+    metal_pair = _PDK_ROLE_LAYERS[_pdk_family(pdk_info["variant"])]["metal"]
+    assert metal_pair is not None
+    metal_layer = {"layer": metal_pair[0], "datatype": metal_pair[1], "name": None}
+    ports = []
+    for name, box, direction in (
+        ("ANODE", info["anode_li"], 90),
+        ("CATHODE", info["cathode_li"], 90),
+    ):
+        ports.append(
+            {
+                "name": name,
+                "net": None,
+                "layer": metal_layer,
+                "x_um": (box[0] + box[2]) / 2,
+                "y_um": (box[1] + box[3]) / 2,
+                "width_um": box[2] - box[0],
+                "direction_deg": direction,
+            }
+        )
+    snapped = _grid_snapped(dbu, params["width_um"], params["length_um"])
+    notes = [
+        "areaid.ed (81/19) is never drawn -- the extraction deck treats it as "
+        "an exclusion, so an ESD-flagged diode would not extract as diode_*"
+    ]
+    if params["kind"] == "n_psub":
+        notes.append(
+            "ANODE is a p+ substrate tap; the p-substrate itself is the anode "
+            "terminal in the extracted netlist"
+        )
     return {
         "device_count": 1,
         "ports": ports,

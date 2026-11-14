@@ -62,6 +62,8 @@ LAYERS = {
     "LVT": 98,
     "SRAMDRC": 99,
     "SRAMVT": 110,
+    # Assumed stream number: the DRM / asap7.lyp have no thick-oxide marker (#4465).
+    "THICKOX": 111,
 }
 
 DBU_UM = 0.00025
@@ -601,6 +603,69 @@ def _select_cases() -> list[Case]:
         _pass("VT.AUX.2", [box("SLVT", 0, 0, 120, 60), box("LVT", 0, 60, 120, 120)])
     )
     return c
+
+
+def _tk_device(
+    *,
+    gate_w: float = 20,
+    active_h: float = 81,
+    **kw: float,
+) -> list[Shape]:
+    """A THICKOX-marked :func:`device` (marker 46/27 nm past ACTIVE) whose
+    channel GATE is ``gate_w`` wide and whose ACTIVE is ``active_h`` tall."""
+    shapes = device(vt="THICKOX", ay1=27 + active_h, **kw)
+    if gate_w != 20:
+        shapes = [
+            box("GATE", 71, 10, 71 + gate_w, 125)
+            if s == box("GATE", 71, 10, 91, 125)
+            else s
+            for s in shapes
+        ]
+    return shapes
+
+
+def _thickox_cases() -> list[Case]:
+    """THICKOX.* (#4465): predictive rules, every threshold assumed."""
+    # Every marked device here draws the core 20 nm gate (GATE.W.1 requires
+    # it), so it is also under the assumed 30 nm THICKOX.GATE.L minimum.
+    lg = ["THICKOX.GATE.L"]
+    # A 30 nm channel gate crowds its neighbours and the SDT; a 53.75 nm
+    # ACTIVE is off the 27 nm height step and short of the fins.
+    gw = ["GATE.S.2", "GATE.ACTIVE.EX.2", "SDT.GATE.AUX.1"]
+    aw = ["ACTIVE.W.2", "ACTIVE.FIN.EX.1", "SDT.W.3"]
+    core = device()
+    return [
+        _fail("THICKOX.ACTIVE.EN", device(vt="THICKOX", vt_h=27 - D, vt_v=27 - D), lg),
+        _pass("THICKOX.ACTIVE.EN", device(vt="THICKOX", vt_h=27, vt_v=27), lg),
+        # marker edge coincident with the ACTIVE edge: zero enclosure
+        _fail("THICKOX.ACTIVE.EN", device(vt="THICKOX", vt_h=0, vt_v=27), lg),
+        _fail(
+            "THICKOX.S",
+            [box("THICKOX", 0, 0, 120, 60), box("THICKOX", 174 - D, 0, 294, 60)],
+        ),
+        _pass(
+            "THICKOX.S",
+            [box("THICKOX", 0, 0, 120, 60), box("THICKOX", 174, 0, 294, 60)],
+        ),
+        # abutting and overlapping markers merge into one
+        _pass(
+            "THICKOX.S",
+            [box("THICKOX", 0, 0, 120, 60), box("THICKOX", 120, 0, 240, 60)],
+        ),
+        _pass(
+            "THICKOX.S",
+            [box("THICKOX", 0, 0, 120, 60), box("THICKOX", 100, 0, 220, 60)],
+        ),
+        _fail("THICKOX.GATE.L", _tk_device(gate_w=30 - D), [*gw, "GATE.W.1"]),
+        # the conforming 30 nm marked gate is itself an exact-20 nm GATE.W.1 miss
+        _pass("THICKOX.GATE.L", _tk_device(gate_w=30), [*gw, "GATE.W.1"]),
+        # a core device (no marker) keeps its 20 nm gate
+        _pass("THICKOX.GATE.L", core),
+        _fail("THICKOX.ACTIVE.W", _tk_device(active_h=54 - D), [*lg, *aw]),
+        _pass("THICKOX.ACTIVE.W", _tk_device(active_h=54), lg),
+        # a core device keeps a narrow (27 nm) channel
+        _pass("THICKOX.ACTIVE.W", device(ay1=54)),
+    ]
 
 
 def _sram_active(
@@ -2108,6 +2173,7 @@ def all_cases() -> list[Case]:
         *_active_cases(),
         *_gcut_cases(),
         *_select_cases(),
+        *_thickox_cases(),
         *_sram_cases(),
         *_sdt_cases(),
         *_lisd_cases(),

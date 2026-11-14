@@ -1,0 +1,7 @@
+# Native sky130A rule ids not yet triaged (issue #5233).
+# Each id is in tests/fixtures/sky130_native_rule_ids.txt but is neither cited by a
+# deck rule's provenance.rule_id nor in UNMODELED_RULES. Many are implemented under
+# a different citation (e.g. the *_OFFGRID/*_angle ids are modeled as x.1b/x.2*
+# rules); the rest are genuine gaps. Triage each into one of the two: remove it here
+# and add it to UNMODELED_RULES (gap) or give the implementing rule a provenance
+# rule_id (implemented). This list may only shrink; the test rejects new entries.

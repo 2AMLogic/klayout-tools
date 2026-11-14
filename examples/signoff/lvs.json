@@ -1,11 +1,14 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "engine": "klayout",
   "layout": {
     "path": "examples/signoff/layout.spice",
     "scope": "repo"
   },
-  "reference": "schematic.spice",
+  "reference": {
+    "path": "examples/signoff/schematic.spice",
+    "scope": "repo"
+  },
   "top": "CURRENT_MIRROR",
   "reference_top": "CURRENT_MIRROR",
   "parameter_tolerance": null,
@@ -22,6 +25,7 @@
     "anchor_top_level_pins": null,
     "strict_top_level_pin_count": false,
     "compare_mos_flavour": false,
+    "ignore_mos_bulk": false,
     "supply_nets": [
       "GND",
       "VCC",
@@ -43,6 +47,7 @@
     "instance_count": 0,
     "expected_nets": null,
     "unchecked_expected_pins": [],
+    "excluded_pins": [],
     "findings": [],
     "finding_count": 0
   },
@@ -87,6 +92,8 @@
   },
   "provenance": {
     "klt_version": null,
+    "klt_git_commit": null,
+    "klt_reinstall_spec": null,
     "klayout_version": "0.30.12",
     "pdk": null,
     "deck": null,

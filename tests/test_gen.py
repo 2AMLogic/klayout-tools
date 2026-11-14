@@ -315,6 +315,8 @@ def test_generate_report_includes_provenance_block(tmp_path, pdk_root):
     provenance = report["provenance"]
     assert set(provenance) == {
         "klt_version",
+        "klt_git_commit",
+        "klt_reinstall_spec",
         "klayout_version",
         "pdk",
         "deck",
@@ -692,11 +694,8 @@ _SG13G2_DUMMY_LAYER = (99, 50)
 
 
 def test_list_generators_includes_all_four_phase2_families():
-    """`klt gen --list` must show all four analog primitive families the
-    issue scopes, alongside phase 1's `resistor_strip`, phase 4's
-    `bjt_array`, the chip-boundary `bond_pad` (issue #568), `esd_device`
-    (issue #569), and the named-net `well_island` (issue #1421) (acceptance
-    criterion #1)."""
+    """`klt gen --list` must show every registered generator family (incl.
+    `pdk_cell`, #5290): the analog primitives, `bond_pad`, `esd_device`, ASAP7."""
     report = list_generators()
     names = {g["name"] for g in report["generators"]}
     assert names == {
@@ -707,10 +706,14 @@ def test_list_generators_includes_all_four_phase2_families():
         "diff_pair",
         "bjt_array",
         "bond_pad",
+        "diode",
         "esd_device",
         "cap_array",
         "cap_vpp_array",
+        "pdk_cell",
         "well_island",
+        "asap7_finfet",
+        "asap7_tap",
     }
 
 
@@ -5162,7 +5165,15 @@ def test_cap_array_hidden_geometry_params_are_not_request_facing():
     report = list_generators()
     cap_array = next(g for g in report["generators"] if g["name"] == "cap_array")
     param_names = {p["name"] for p in cap_array["params"]}
-    assert param_names == {"plate_w_um", "plate_h_um", "spacing_um", "num"}
+    assert param_names == {
+        "plate_w_um",
+        "plate_h_um",
+        "spacing_um",
+        "num",
+        "connect",
+        "top_via_pitch_um",
+        "stack",
+    }
 
 
 def test_cap_array_extracts_as_capacitor_device(tmp_path, pdk_root):
@@ -5202,6 +5213,185 @@ def test_cap_array_drc_clean_on_sky130(tmp_path, pdk_root):
     report = run_drc(str(gds_path), "sky130")
 
     assert report["status"] == "clean", report["violations"]
+
+
+def _gen_parallel_cap(tmp_path, pdk_root, **params):
+    gds_path = tmp_path / "cap_parallel.gds"
+    report = generate(
+        {
+            "generator": "cap_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"connect": "parallel", **params},
+            "options": {"output": str(gds_path)},
+        }
+    )
+    return gds_path, report
+
+
+def test_cap_array_parallel_reports_two_ports_one_device(tmp_path, pdk_root):
+    _, report = _gen_parallel_cap(tmp_path, pdk_root, num=3)
+    assert report["device_count"] == 1
+    assert [p["name"] for p in report["ports"]] == ["C_BOT", "C_TOP"]
+    assert report["drc_hints"]["matched_group_id"] == "cap_array:3"
+
+
+def test_cap_array_parallel_reports_expected_capacitance(tmp_path, pdk_root):
+    _, report = _gen_parallel_cap(tmp_path, pdk_root, num=3, plate_w_um=5, plate_h_um=4)
+    unit = 2.0e-15 * 5 * 4 + 1.9e-16 * 2 * (5 + 4)
+    assert report["expected"]["unit_capacitance_f"] == pytest.approx(unit)
+    assert report["expected"]["capacitance_f"] == pytest.approx(3 * unit)
+
+
+@pytest.mark.parametrize("num,w,h", [(1, 5.0, 5.0), (3, 2.0, 2.0), (2, 30.0, 30.0)])
+def test_cap_array_parallel_drc_clean_and_extracts_expected_c(
+    tmp_path, pdk_root, num, w, h
+):
+    gds_path, report = _gen_parallel_cap(
+        tmp_path, pdk_root, num=num, plate_w_um=w, plate_h_um=h
+    )
+
+    drc = run_drc(str(gds_path), "sky130")
+    assert drc["status"] == "clean", drc["violations"]
+
+    extracted = run_extract(str(gds_path), "sky130")
+    caps = [
+        d for d in extracted["devices"] if d["class"] == "sky130_fd_pr__model__cap_mim"
+    ]
+    # One recognised MiM device per unit top plate, all across the same two
+    # nets (the shared bottom plate and the strapped top plate) -- i.e. `num`
+    # parallel capacitors, which `klt lvs`'s `combine_devices` folds into one.
+    assert len(caps) == num, extracted["devices"]
+    assert len({tuple(sorted(d["nets"].values())) for d in caps}) == 1
+    c_f = sum(d["params"]["c_f"] for d in caps)
+    assert c_f == pytest.approx(report["expected"]["capacitance_f"], rel=0.02)
+
+
+def test_cap_array_parallel_top_via_pitch_sets_via_count(tmp_path, pdk_root):
+    from klayout_tools.gen import _cap_array_layout
+
+    dense = _cap_array_layout(5.0, 5.0, 0.5, 1, connect="parallel")["parallel"]
+    sparse = _cap_array_layout(
+        5.0, 5.0, 0.5, 1, connect="parallel", top_via_pitch_um=1.0
+    )["parallel"]
+    assert sparse["vias_per_unit"] < dense["vias_per_unit"]
+    assert dense["vias_per_unit"] > 1
+
+
+def test_cap_array_default_connect_is_unchanged(tmp_path, pdk_root):
+    from klayout_tools.gen import _cap_array_layout
+
+    assert "parallel" not in _cap_array_layout(5.0, 5.0, 0.5, 3)
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"plate_w_um": 1.9},
+        {"plate_h_um": 30.1},
+        {"connect": "series"},
+        {"top_via_pitch_um": 0.1},
+        {"top_via_pitch_um": -1.0},
+    ],
+)
+def test_cap_array_parallel_invalid_params_rejected(tmp_path, pdk_root, params):
+    with pytest.raises(GenError):
+        _gen_parallel_cap(tmp_path, pdk_root, **params)
+
+
+def test_cap_array_pitch_without_parallel_rejected(tmp_path, pdk_root):
+    with pytest.raises(GenError):
+        generate(
+            {
+                "generator": "cap_array",
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "params": {"top_via_pitch_um": 1.0},
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+def test_cap_array_parallel_rejected_on_unverified_family(tmp_path, both_pdk_root):
+    with pytest.raises(GenError, match="only verified"):
+        generate(
+            {
+                "generator": "cap_array",
+                "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+                "params": {"connect": "parallel"},
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+def _gen_stacked_cap(tmp_path, pdk_root, **params):
+    return _gen_parallel_cap(tmp_path, pdk_root, stack=2, **params)
+
+
+def test_cap_array_stack_reports_outer_and_middle_ports(tmp_path, pdk_root):
+    _, report = _gen_stacked_cap(tmp_path, pdk_root, num=2)
+    assert [p["name"] for p in report["ports"]] == ["C_OUTER", "C_MID"]
+    assert report["ports"][0]["layer"]["layer"] == 72  # met5
+    assert report["ports"][1]["layer"]["layer"] == 71  # met4
+    assert report["device_count"] == 2
+
+
+@pytest.mark.parametrize("num,w,h", [(1, 5.0, 5.0), (3, 2.0, 2.0), (2, 30.0, 30.0)])
+def test_cap_array_stack_drc_clean_and_extracts_two_levels_on_two_nets(
+    tmp_path, pdk_root, num, w, h
+):
+    gds_path, report = _gen_stacked_cap(
+        tmp_path, pdk_root, num=num, plate_w_um=w, plate_h_um=h
+    )
+
+    drc = run_drc(str(gds_path), "sky130")
+    assert drc["status"] == "clean", drc["violations"]
+
+    devices = run_extract(str(gds_path), "sky130")["devices"]
+    low = [d for d in devices if d["class"] == "sky130_fd_pr__model__cap_mim"]
+    high = [d for d in devices if d["class"] == "sky130_fd_pr__model__cap_mim_m4"]
+    assert len(low) == len(high) == num, devices
+    # Both levels resolve to the same two nets (outer met3+met5, middle met4).
+    assert len({tuple(sorted(d["nets"].values())) for d in low + high}) == 1
+    c_f = sum(d["params"]["c_f"] for d in low + high)
+    assert c_f == pytest.approx(report["expected"]["capacitance_f"], rel=0.02)
+    # ~2x a single level.
+    assert report["expected"]["capacitance_f"] == pytest.approx(
+        2 * report["expected"]["levels"][0]["unit_capacitance_f"] * num, rel=0.01
+    )
+
+
+def test_cap_array_default_stack_is_unchanged(tmp_path, pdk_root):
+    from klayout_tools.gen import _cap_array_layout
+
+    assert "stack" not in _cap_array_layout(5.0, 5.0, 0.5, 2, connect="parallel")
+
+
+def test_cap_array_stack_requires_parallel(tmp_path, pdk_root):
+    with pytest.raises(GenError, match="connect='parallel'"):
+        generate(
+            {
+                "generator": "cap_array",
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "params": {"stack": 2},
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+def test_cap_array_invalid_stack_rejected(tmp_path, pdk_root):
+    with pytest.raises(GenError, match="stack must be 1 or 2"):
+        _gen_parallel_cap(tmp_path, pdk_root, stack=3)
+
+
+def test_cap_array_stack_rejected_on_other_families(tmp_path, both_pdk_root):
+    with pytest.raises(GenError, match="stack=2 is only supported"):
+        generate(
+            {
+                "generator": "cap_array",
+                "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+                "params": {"connect": "parallel", "stack": 2},
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
 
 
 # --- guard_ring --------------------------------------------------------------- #
@@ -6704,6 +6894,49 @@ def test_sg13g2_generator_default_params_are_drc_clean(
     assert drc_report["status"] == "clean", drc_report["violations"]
 
 
+@pytest.mark.parametrize("generator_name", ("mos_array", "diff_pair"))
+def test_sg13g2_pfet_guard_ring_nwell_encloses_ring_nplus_activ(
+    generator_name, tmp_path, sg13g2_pdk_root
+):
+    """Issue #4426: the n-tap guard ring of an sg13g2 pfet must be enclosed by
+    NWell by IHP `NW.e` (0.24um), not the generic 0.15um margin."""
+    output = tmp_path / f"{generator_name}_ring_sg13g2.gds"
+    params = {
+        "w_um": 0.52,
+        "l_um": 0.52,
+        "flavor": "pfet",
+        "add_guard_ring": True,
+    }
+    if generator_name == "mos_array":
+        params.update({"rows": 1, "cols": 4, "topology": "common_centroid"})
+    generate(
+        {
+            "generator": generator_name,
+            "pdk": {"variant": _SG13G2_VARIANT, "root": str(sg13g2_pdk_root)},
+            "params": params,
+            "options": {"output": str(output)},
+        }
+    )
+    # The synthetic PDK install draws no nSD, so the deck's N+ Activ-derived
+    # `nwell.enclosing.nactiv.1` cannot fire here; assert the geometry directly:
+    # NWell must enclose the outermost Activ (the ring) by at least NW.e.
+    activ = _layer_bbox(output, 1, 0)
+    nwell = _layer_bbox(output, 31, 0)
+    for edge, sign in (("left", 1), ("bottom", 1), ("right", -1), ("top", -1)):
+        assert sign * (activ[edge] - nwell[edge]) >= 0.24 - 1e-9, edge
+
+
+def test_sg13g2_ring_well_margin_clears_nw_e_and_others_unchanged():
+    from klayout_tools.decks import get_deck
+    from klayout_tools.gen_layer_params import _ring_well_margin_um
+
+    for family in ("sg13g2", "sg13cmos5l"):
+        (rule,) = [r for r in get_deck(family) if r.id == "nwell.enclosing.nactiv.1"]
+        assert _ring_well_margin_um(family) > rule.threshold_dbu / 1000
+    assert _ring_well_margin_um("sky130") == 0.2
+    assert _ring_well_margin_um("gf180mcu") == gen.WELL_ENCLOSURE_MARGIN_UM
+
+
 def test_sg13g2_res_array_default_params_recognised_as_rsil(tmp_path, sg13g2_pdk_root):
     """`res_array`'s default output round-trips through `klt extract --deck
     sg13g2` to the `"rsil"` device class (`res_mark`/`res_implant`/
@@ -7571,12 +7804,11 @@ def test_families_without_gate_pad_clearance_are_unchanged(family):
     )
 
 
-@pytest.mark.parametrize("generator_name", ("bjt_array", "esd_device", "well_island"))
+@pytest.mark.parametrize("generator_name", ("esd_device", "well_island"))
 def test_sg13g2_deferred_generators_rejected(generator_name, tmp_path, sg13g2_pdk_root):
-    """`bjt_array` (no bipolar device recognition in this deck's curated
-    extraction deck -- `EXTRACTION_DECK.bipolars` is empty), `esd_device`,
-    and `well_island` (neither attempted by this issue) are all explicitly
-    deferred rather than silently accepted with untested geometry."""
+    """`esd_device` and `well_island` (neither attempted by this issue) are
+    explicitly deferred rather than silently accepted with untested geometry.
+    (`bjt_array` is no longer deferred: issue #4850 -- see the HBT tests.)"""
     with pytest.raises(GenError, match="not yet supported by this generator"):
         generate(
             {
@@ -8401,6 +8633,7 @@ def test_list_generators_bjt_array_params_schema():
     generator = next(g for g in report["generators"] if g["name"] == "bjt_array")
     params = {p["name"]: p for p in generator["params"]}
     assert set(params) == {
+        "flavor",  # sg13g2 HBT cell selector (#4850)
         "emitter_um",
         "rows",
         "cols",
@@ -9655,6 +9888,8 @@ def test_esd_device_params_schema_has_no_hidden_layer_fields():
         "ring_padding_um",
         "gate_contact",
         "salicide_block",
+        "voltage_flavor",
+        "total_width_um",
     }
     assert not param_names & {
         "active_layer",
@@ -10030,10 +10265,10 @@ def test_dogbone_terminal_example_regenerates_byte_identical(tmp_path, family):
     on both families, silently invalidating the committed streams while
     every existing test stayed green.
 
-    A byte compare (rather than a geometry compare) is deliberate: the GDS
-    carries `mos_array`'s PCell context-info properties too, so a parameter
-    added to the generator drifts the fixture without moving a single
-    polygon. When this fails, regenerate with
+    A byte compare (rather than a geometry compare) is deliberate: it pins the
+    stream's *record order*, which a `klayout.db` compare cannot see -- the
+    #5499 gap. PCell context info is no longer pinned (`write_layout()` stopped
+    writing it), so parameter drift is invisible. When this fails, regenerate with
     `uv run --extra dev python3 examples/dogbone-terminal/generate.py` and
     review the resulting diff as a deliberate fixture update.
     """
@@ -10328,8 +10563,8 @@ def test_mos_array_sd_implant_absence_noted_on_sg13g2(
     # dummy marker (99/50, issue #2590) joins it because this repro requests
     # `dummy: 1`; it is a deck-local extraction marker, not an implant.
     expected = {(1, 0), (5, 0), (6, 0), (8, 0), _SG13G2_DUMMY_LAYER}
-    if flavor == "pfet":
-        expected.add((31, 0))
+    # nfet: the guard ring's P-substrate tap carries its own pSD (issue #5231)
+    expected.add((31, 0) if flavor == "pfet" else (14, 0))
     assert present == expected
 
 
@@ -11854,7 +12089,7 @@ def test_sky130_ring_tap_implant_and_npc_geometry(
     """Phase B of issue #2934: the guard ring's tap is covered by the implant
     matching the well underneath it (nsdm for the pfet's n-tap well tie, psdm
     for the nfet's p-tap substrate tie) with ``n/psdm.5b``'s 0.125um margin,
-    and ``npc`` caps every poly-contact licon with ``npc.2`` spacing met."""
+    and ``npc`` caps every poly-contact licon (licon.15) with ``npc.2`` met."""
     import klayout.db as kdb
 
     output = tmp_path / f"{generator}_sky130_phase_b_{flavor}.gds"
@@ -11891,7 +12126,7 @@ def test_sky130_ring_tap_implant_and_npc_geometry(
 
     gate_licons = licon.inside(poly)
     assert not gate_licons.is_empty()
-    assert (gate_licons.sized(95) - npc).is_empty()
+    assert (gate_licons.sized(100) - npc).is_empty()
     assert npc.space_check(270).count() == 0
     assert npc.width_check(270).count() == 0
     # No npc over source/drain or tap licons.
@@ -11920,3 +12155,238 @@ def test_sky130_no_ring_draws_no_opposite_implant(tmp_path, pdk_root):
     assert (93, 44) in present
     assert (94, 20) not in present
     assert (95, 20) not in present
+
+
+# --- esd_device: voltage_flavor + total_width_um (issue #4299) -------------- #
+
+
+def _esd_gen(tmp_path, pdk_root, params, name="esd", variant="sky130A"):
+    output = tmp_path / f"{name}.gds"
+    report = generate(
+        {
+            "generator": "esd_device",
+            "pdk": {"variant": variant, "root": str(pdk_root)},
+            "params": params,
+            "options": {"output": str(output)},
+        }
+    )
+    return output, report
+
+
+def _gds_layers(gds_path):
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(gds_path))
+    return {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+
+
+def test_esd_device_default_voltage_flavor_output_unchanged(tmp_path, pdk_root):
+    """No `voltage_flavor` draws no marker: geometry identical to an explicit `''`."""
+    implicit, _ = _esd_gen(tmp_path, pdk_root, {}, "implicit")
+    explicit, report = _esd_gen(tmp_path, pdk_root, {"voltage_flavor": ""}, "explicit")
+    _assert_gds_geometry_equal(implicit, explicit)
+    assert report["drc_hints"]["voltage_flavor"] is None
+    assert report["drc_hints"]["voltage_flavor_mark_present"] is False
+    assert _SKY130_VOLTAGE_FLAVOR_MARK_LAYER not in _gds_layers(implicit)
+
+
+def test_esd_device_voltage_flavor_hvi_draws_marker_and_extracts_g5v0d10v5(
+    tmp_path, pdk_root
+):
+    output, report = _esd_gen(tmp_path, pdk_root, {"voltage_flavor": "hvi"})
+    assert _SKY130_VOLTAGE_FLAVOR_MARK_LAYER in _gds_layers(output)
+    assert report["drc_hints"]["voltage_flavor"] == "hvi"
+    assert report["drc_hints"]["voltage_flavor_mark_present"] is True
+
+    extract = run_extract(
+        str(output), "sky130", pdk_variant="sky130A", pdk_root=str(pdk_root)
+    )
+    cards = Path(extract["netlist_path"]).read_text().splitlines()
+    assert any(" sky130_fd_pr__nfet_g5v0d10v5 " in c for c in cards)
+    assert not any(" sky130_fd_pr__nfet_01v8 " in c for c in cards)
+
+
+def test_esd_device_unknown_voltage_flavor_notes_not_drawn(tmp_path, pdk_root):
+    output, report = _esd_gen(tmp_path, pdk_root, {"voltage_flavor": "bogus"})
+    assert report["drc_hints"]["voltage_flavor_mark_present"] is False
+    flavor_notes = [n for n in report["drc_hints"]["notes"] if "voltage_flavor" in n]
+    assert len(flavor_notes) == 1
+    assert _SKY130_VOLTAGE_FLAVOR_MARK_LAYER not in _gds_layers(output)
+
+
+def test_esd_device_voltage_flavor_medium_voltage_gf180mcu(tmp_path, both_pdk_root):
+    """gf180mcu keeps its unconditional `esd_mark`; the flavor still resolves."""
+    _, report = _esd_gen(
+        tmp_path,
+        both_pdk_root,
+        {"voltage_flavor": "medium_voltage"},
+        variant="gf180mcuD",
+    )
+    assert report["drc_hints"]["voltage_flavor"] == "medium_voltage"
+    assert report["drc_hints"]["voltage_flavor_mark_present"] is True
+
+
+@pytest.mark.parametrize(
+    ("total", "fingers", "finger_w"),
+    [(21.5, 2, 10.75), (20.0, 1, 20.0), (20.01, 2, 10.005), (40.0, 2, 20.0)],
+)
+def test_esd_device_total_width_splits_fingers(
+    tmp_path, pdk_root, total, fingers, finger_w
+):
+    _, report = _esd_gen(tmp_path, pdk_root, {"total_width_um": total})
+    assert report["drc_hints"]["fingers"] == fingers
+    assert report["drc_hints"]["finger_width_um"] == pytest.approx(finger_w)
+
+
+@pytest.mark.parametrize("extra", [{"fingers": 2}, {"finger_width_um": 5.0}])
+def test_esd_device_total_width_conflicts_with_explicit_split(
+    tmp_path, pdk_root, extra
+):
+    with pytest.raises(GenError, match="cannot be combined"):
+        _esd_gen(tmp_path, pdk_root, {"total_width_um": 21.5, **extra})
+
+
+def test_esd_device_total_width_over_finger_limit_rejected(tmp_path, pdk_root):
+    with pytest.raises(GenError, match="finger limit|-finger limit"):
+        _esd_gen(tmp_path, pdk_root, {"total_width_um": 20.0 * 33})
+
+
+# --------------------------------------------------------------------------- #
+# Issue #4203: res_array length_um mfg-grid / short-length warnings
+# --------------------------------------------------------------------------- #
+
+
+def _gen_res(tmp_path, root, tag, variant="gf180mcuD", **params):
+    return generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": variant, "root": str(root)},
+            "params": {"width_um": 1.0, "spacing_um": 1.0, "num": 1, **params},
+            "options": {"output": str(tmp_path / f"res_{tag}.gds")},
+        }
+    )
+
+
+def test_res_array_off_mfg_grid_length_warns(tmp_path, both_pdk_root):
+    report = _gen_res(tmp_path, both_pdk_root, "off", length_um=3.343, snap=False)
+    (warning,) = _mfg_grid_warnings_of(report)
+    assert "params.length_um=3.343um" in warning
+    assert "0.005um" in warning
+    assert "3.34um (below)" in warning
+    assert "3.345um (above)" in warning
+
+
+def test_res_array_on_grid_length_no_warning(tmp_path, both_pdk_root):
+    report = _gen_res(tmp_path, both_pdk_root, "on", length_um=3.345)
+    assert _mfg_grid_warnings_of(report) == []
+
+
+def test_res_array_no_ongrid_rule_no_warning(tmp_path, both_pdk_root, monkeypatch):
+    from klayout_tools import gen_describe
+
+    monkeypatch.setattr(gen_describe, "mfg_grid_um", lambda family, layer: 0.0)
+    report = _gen_res(tmp_path, both_pdk_root, "nogrid", length_um=3.343)
+    assert _mfg_grid_warnings_of(report) == []
+
+
+def test_res_array_off_grid_warning_leaves_geometry_unchanged(
+    tmp_path, both_pdk_root, monkeypatch
+):
+    from klayout_tools import gen_describe
+
+    warned = _gen_res(tmp_path, both_pdk_root, "warned", length_um=3.343, snap=False)
+    monkeypatch.setattr(gen_describe, "mfg_grid_um", lambda family, layer: 0.0)
+    silent = _gen_res(tmp_path, both_pdk_root, "silent", length_um=3.343, snap=False)
+    assert _mfg_grid_warnings_of(warned) and not _mfg_grid_warnings_of(silent)
+    assert (tmp_path / "res_warned.gds").read_bytes() == (
+        tmp_path / "res_silent.gds"
+    ).read_bytes()
+
+
+def test_res_array_short_length_warns_on_gf180mcu(tmp_path, both_pdk_root):
+    short = _gen_res(tmp_path, both_pdk_root, "short", length_um=0.3, snap=False)
+    assert any("minimum mask width" in w for w in short["warnings"])
+    long = _gen_res(tmp_path, both_pdk_root, "long", length_um=3.0)
+    assert not any("minimum mask width" in w for w in long["warnings"])
+
+
+def test_res_array_sky130_has_no_short_length_warning(tmp_path, pdk_root):
+    report = _gen_res(tmp_path, pdk_root, "sky", variant="sky130A", length_um=0.5)
+    assert not any("minimum mask width" in w for w in report["warnings"])
+
+
+# --------------------------------------------------------------------------- #
+# Issue #4666: res_array length_um snap + minimum drawable length
+# --------------------------------------------------------------------------- #
+
+
+def test_res_array_off_grid_length_snaps_and_reports(tmp_path, both_pdk_root):
+    report = _gen_res(tmp_path, both_pdk_root, "snap", length_um=3.343)
+    snap = report["drc_hints"]["length_snap"]
+    assert snap["requested_um"] == 3.343
+    assert snap["realised_um"] == 3.345
+    assert snap["grid_um"] == 0.005
+    assert snap["resistance_delta_pct"] == pytest.approx(0.0598, abs=1e-3)
+    assert snap["reasons"] == ["snapped_to_grid"]
+    assert _mfg_grid_warnings_of(report) == []
+    assert any("was drawn as 3.345um" in w for w in report["warnings"])
+    _gen_res(tmp_path, both_pdk_root, "ongrid", length_um=3.345)
+    assert (tmp_path / "res_snap.gds").read_bytes() == (
+        tmp_path / "res_ongrid.gds"
+    ).read_bytes()
+
+
+def test_res_array_on_grid_length_has_no_snap_record(tmp_path, both_pdk_root):
+    report = _gen_res(tmp_path, both_pdk_root, "noop", length_um=3.345)
+    assert "length_snap" not in report["drc_hints"]
+
+
+def test_res_array_snap_false_draws_verbatim(tmp_path, both_pdk_root):
+    report = _gen_res(tmp_path, both_pdk_root, "verb", length_um=3.343, snap=False)
+    assert "length_snap" not in report["drc_hints"]
+    assert len(_mfg_grid_warnings_of(report)) == 1
+
+
+def test_res_array_snap_rounds_half_up(tmp_path, both_pdk_root):
+    report = _gen_res(tmp_path, both_pdk_root, "half", length_um=3.3425)
+    assert report["drc_hints"]["length_snap"]["realised_um"] == 3.345
+
+
+def test_res_array_below_floor_refuses_by_default(tmp_path, both_pdk_root):
+    with pytest.raises(GenError, match="minimum mask width"):
+        _gen_res(tmp_path, both_pdk_root, "refuse", length_um=0.3)
+
+
+def test_res_array_below_floor_lengthens_on_opt_in(tmp_path, both_pdk_root):
+    report = _gen_res(
+        tmp_path, both_pdk_root, "lengthen", length_um=0.3, short_length="lengthen"
+    )
+    snap = report["drc_hints"]["length_snap"]
+    assert "lengthened_to_floor" in snap["reasons"]
+    assert snap["realised_um"] > snap["requested_um"]
+    assert snap["resistance_delta_pct"] > 0
+    assert not any("minimum mask width" in w for w in report["warnings"])
+    again = _gen_res(tmp_path, both_pdk_root, "again", length_um=snap["realised_um"])
+    assert "length_snap" not in again["drc_hints"]
+
+
+def test_res_array_invalid_short_length_value(tmp_path, both_pdk_root):
+    with pytest.raises(GenError, match="short_length"):
+        _gen_res(tmp_path, both_pdk_root, "bad", length_um=3.0, short_length="x")
+
+
+def test_res_array_no_ongrid_rule_does_not_snap(tmp_path, both_pdk_root, monkeypatch):
+    from klayout_tools import gen_describe
+
+    monkeypatch.setattr(gen_describe, "mfg_grid_um", lambda family, layer: 0.0)
+    report = _gen_res(tmp_path, both_pdk_root, "g0", length_um=3.343)
+    assert "length_snap" not in report["drc_hints"]
+
+
+def test_res_array_metal_level_is_not_snapped(tmp_path, both_pdk_root):
+    report = _gen_res(tmp_path, both_pdk_root, "met", length_um=3.343, metal_level=1)
+    assert "length_snap" not in report["drc_hints"]

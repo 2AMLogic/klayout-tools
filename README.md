@@ -46,8 +46,8 @@ an agent needs instead:
 
 ## Status
 
-Early alpha — [v0.5.0 is on PyPI](https://pypi.org/project/klayout-tools/)
-(44 verbs at release; see [`docs/cli/`](docs/cli/) for the set). The
+Early alpha — [v0.9.1 is on PyPI](https://pypi.org/project/klayout-tools/);
+`main` has 68 verbs (see [`docs/cli/`](docs/cli/) for the set). The
 pattern is proven (see the kicad-tools [gallery](https://kicad-tools.org) of
 boards designed end-to-end by agents); this repo is where it meets silicon.
 See [ROADMAP.md](ROADMAP.md) for the build order and [CLAUDE.md](CLAUDE.md)
@@ -78,16 +78,21 @@ uv tool install git+https://github.com/2AMLogic/klayout-tools
 > **`klt yield` (and its `yield-campaign`/`yield-sensitivity` siblings) need
 > the `yield` extra.** Both install commands above ship the pure-Python
 > package only — `klt yield`'s statistics run in a Rust extension
-> (`klt_yield_native`), published as the prebuilt `klt-yield-native` wheel
-> (Linux x86_64, macOS arm64). Install it with
-> `pip install 'klayout-tools[yield]'` (or `uv tool install
-> 'klayout-tools[yield]'`). The git-pinned form, other platforms, and any
-> release that predates the first `klt-yield-native` publication still need
-> a full repo checkout plus a Rust toolchain; see
+> (`klt_yield_native`). **Install with the extra**:
+> `pip install 'klayout-tools[yield]'` or
+> `uvx --from "klayout-tools[yield]" klt yield ...`. Platforms without a
+> prebuilt wheel need a repo checkout plus a Rust toolchain; see
 > [`docs/cli/yield.md#building-the-native-extension`](docs/cli/yield.md#building-the-native-extension).
 > `klt mom` and `klt synthesize --restructure-timing` have the same
 > from-source gap for their own Rust extensions; every other verb works
 > from the commands above alone.
+>
+> As of 2026-11-06 the prebuilt `klt-yield-native` 0.1.0 wheel (Linux
+> x86_64, macOS arm64) is on PyPI, so `[yield]` resolves for klayout-tools
+> 0.9.1 and later. Linux aarch64, Windows and Intel macOS have no wheel and
+> build from source. Without the `[yield]` extra, `klt yield` fails with
+> "the klt_yield_native extension is not installed"
+> ([`docs/releasing-native.md`](docs/releasing-native.md)).
 
 ### Container image (`klt` + the analog sim toolchain)
 
@@ -112,6 +117,7 @@ klt precheck design.gds --grid-um 0.005  # off-grid/zero-area/naming hygiene che
 klt ring-check design.gds --layers '[[22,0],[34,0]]'  # guard/tap ring is a closed annulus
 klt seam-check row.gds --tiling TILE --layer 68/20 --band 0,0,30,2  # abutting cells tile and the rail is continuous across seams
 klt keepout-check design.gds --forbidden '[[67,20]]' --margin 10 --cells SPIRAL  # nothing on the forbidden layers within a margin of a cell
+klt fill design.gds --pdk sky130 --layers '[[68,20]]' --boundary prBoundary --spacing 0.5 -o filled.gds  # density fill on the PDK fill layers (not a sign-off density check)
 klt array-check column.gds --cell BIT --pitch 2.72 --count 8  # unit-cell placements abut at the pitch; add --mirror-axis x --at 10 --layers '[[68,20]]' for layer-wise symmetry
 klt tap-distance design.gds --subject '65/20' --taps '65/44' --max-distance-um 15  # every diffusion point within a Euclidean distance of a tap
 klt components design.gds --conductors '[{"name":"m1","layer":[68,20]}]'  # connected components, no deck
@@ -147,6 +153,7 @@ klt power routed.gds power.json          # routed power/ground nets -> resistive
 klt erc routed.gds erc.json --pdk sky130 # per-gate connectivity model + antenna-ratio verdict + core ERC findings (floating gate, unconnected/shorted net, missing tie)
 klt functional-verification verify.json  # cocotb regression (Icarus/Verilator) -> pass/fail + coverage
 klt equiv request.json                   # combinational equivalence (Yosys miter/SAT) -> proof or counterexample
+klt formal request.json                  # bmc / k-induction / cover on RTL or a mapped netlist (SymbiYosys)
 klt eval descriptor.json --candidate '{"layout": "..."}'  # score a candidate: valid + one objective
 klt gen-compose plan.json                # place + wire generated blocks into one circuit
 klt socket-check design.gds --socket socket.json  # pins/outline/budgets vs a socket descriptor
@@ -168,9 +175,9 @@ klt version --format json                # which build is this: version, commit,
 ```
 
 Every verb is documented in [`docs/cli/`](docs/cli/) (`klt yield-campaign`
-shares the `yield.md` / `yield-sensitivity.md` pages). PyPI 0.5.0 shipped
-with 44 verbs; the from-source install above tracks `main`, which may be
-ahead of the latest release.
+shares the `yield.md` / `yield-sensitivity.md` pages). The latest release is
+PyPI 0.9.1; `main` has 68 verbs, and the from-source install above tracks
+`main`, so it may be ahead of the release.
 
 ## Development
 

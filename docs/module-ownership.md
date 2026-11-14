@@ -8,7 +8,7 @@ This document maps each `klt` verb implementation to its constituent modules, id
 
 This map is **mechanically assisted, hand-verified**:
 
-1. **CLI parser registration** in `src/klayout_tools/cli/parser.py`: each verb's entry point via `set_defaults(func=<verb>_cmd.run)`
+1. **CLI parser registration** in `src/klayout_tools/cli/parser.py` and the per-verb `src/klayout_tools/cli/parsers/<verb>.py` modules: each verb's entry point via `set_defaults(func=<verb>_cmd.run)`
 2. **Import graph analysis**: tracing the `from .. import` chains in each `<verb>_cmd.py` module to find all related modules
 3. **Module docstrings**: extracting the first paragraph from each module's `"""..."""` to document ownership boundaries
 
@@ -175,7 +175,7 @@ Both fit the single-implementation-module pattern (see "Single-File Verbs" below
 
 The following verbs have all their implementation in a single module (`src/klayout_tools/<verb>.py`) with a corresponding CLI module (`src/klayout_tools/cli/<verb>_cmd.py`):
 
-arith_gen, cells, clip, components, design_centering, draw, drc, economy, env_provenance, equiv, erc, eval, interface_check, kb, layers, layout_metrics, lef_abstract, mom, pex, power, precheck, render, report, reset_coverage, ring_check, seam_check, size, socket_check, stats, tap_distance, techmap, trajectory, version, wave, yield_campaign, yield_sensitivity
+arith_gen, cells, clip, components, design_centering, draw, drc, economy, env_provenance, equiv, erc, eval, interface_check, kb, layers, layout_metrics, lef_abstract, mom, pex, power, power_intent, precheck, render, report, reset_coverage, ring_check, seam_check, size, socket_check, stats, tap_distance, techmap, trajectory, version, wave, yield_campaign, yield_sensitivity
 
 These verbs follow the simpler pattern: a single implementation module (e.g., `extract.py`) paired with a CLI command module (e.g., `cli/extract_cmd.py`).
 

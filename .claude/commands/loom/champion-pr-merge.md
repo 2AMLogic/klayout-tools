@@ -133,6 +133,17 @@ case "$HRC $HC" in
   "0 "*" state=clear "*|"0 "*" state=champion-hold "*|"2 ") ;;
   "0 "*" state=stray-operator "*) gh pr edit "$PR_NUMBER" --remove-label "loom:operator" ;;
   "0 "*" state=contradiction "*) OTHER_VERDICT_LABEL=${HC##* detail=} ;;
+  "0 "*" state=stacked-on-loom-branch "*)
+    # Stacked child (#12761): never merged; say why once per head (#13737).
+    # The work finder passes these as `stacked`, so only a targeted run lands here.
+    STACK_BASE=${HC##* detail=}
+    STACK_HEAD=$("$GH_READ" pr view "$PR_NUMBER" --json headRefOid --jq .headRefOid)
+    STACK_MARKER="<!-- champion:stacked-skip base=$STACK_BASE head=$STACK_HEAD -->"
+    if [ "$("$GH_READ" pr view "$PR_NUMBER" --json comments --jq "[.comments[].body] | any(startswith(\"$STACK_MARKER\"))")" != "true" ]; then
+      ./.loom/scripts/post-comment.sh "$PR_NUMBER" --pr --body "$STACK_MARKER
+**Champion**: not merging. This PR is stacked on \`$STACK_BASE\`, a Loom stack branch. It merges after its parent lands and the base is retargeted to the default branch."
+    fi
+    echo "SKIP #$PR_NUMBER: stacked on $STACK_BASE"; continue ;;  # outcome=skipped reason=janitor_rc3
   *) echo "SKIP #$PR_NUMBER: ${HC:-rc=$HRC} — no merge, no comment"; continue ;;  # single-PR step: outcome=skipped reason=janitor_rc3
 esac
 
@@ -535,6 +546,22 @@ behavior is byte-for-byte unchanged from before #6850.
   malformed, the entry is skipped in both criteria. Opt-in only; no class
   enables it by default. The waiver is recorded in the pre-merge comment's
   critical-file bullet (scope `critical, additive-migrations waiver`).
+- `lockedDepsOnly` (2am#6942 ruling 2026-11-07, optional, default `false`) — a
+  literal `true` makes the class a `criticalFilesOnly` class (same matching, same
+  `merge-risk` ineligibility) that covers a `Cargo.toml` critical-file hit **only
+  when** `loom-daemon forge locked-deps-only <pr>` exits 0: no `Cargo.lock` in the
+  PR adds a `source =`/`checksum =` line or changes or drops an existing package
+  (a new registry or git package, a version bump), no changed `Cargo.toml` line
+  names `git =`, `registry =`, `build =`, `links =`, `[patch.*]`, `[replace]` or a
+  `path =` outside the repo, and a manifest change comes with a `Cargo.lock`
+  change. This is the new-workspace-crate-with-already-locked-deps shape; the
+  class exists because a `criticalFilesOnly` class never sees `Cargo.lock`. Every
+  critical-file hit the class covers must be a `Cargo.toml`, since the verb proves
+  nothing about other files. A non-zero exit, a forge error or an older daemon
+  without the verb leaves the hold as today. The kept set is untouched. Not a
+  boolean `true`/`false`: malformed, the entry is skipped in both criteria. Opt-in
+  only; no class enables it by default. The waiver is recorded in the pre-merge
+  comment's critical-file bullet (scope `critical, locked-deps-only waiver`).
 - `excludeFilePatterns` (#12528, optional) — globs, matched like
   `filePatterns`. A PR with **any** changed file matching one is disqualified
   from the class (e.g. `.github/workflows/*publish*`, `*release*`,
@@ -674,6 +701,9 @@ KEPT_SET_PATTERNS=(
   ".github/labels.yml" "*/.github/labels.yml" "defaults/labels.json"
   "*/defaults/labels.json" "*labels_migrate*"
   "*migrations/*" "*_migration.py"
+  # Destructive cleanup of open work, quarantine, and account binding (#12950):
+  # the floor under the `merge-risk` criterion's self-release as well as under `critical-files`.
+  "*deep_clean*" "*reaper*" "*quarantine*" "*account*"
 )
 
 # standing_auth_fetch_diff: read the PR's files ONCE, every page slurped into a
@@ -774,7 +804,8 @@ standing_auth_class_hits() {
 # STANDING_AUTH_COVERED (the files the classes matched), and STANDING_AUTH_WHY
 # (one line per class/hit that failed a check, for the hold comment), and
 # STANDING_AUTH_ADDITIVE=1 when a passing additiveMigrations class (#13102)
-# lifted the migrations kept-set entry for this PR. Every
+# lifted the migrations kept-set entry for this PR, and STANDING_AUTH_LOCKED=1
+# when a passing lockedDepsOnly class covered a Cargo.toml hit. Every
 # check fails closed. Reads PR_NUMBER, CONFIG_FILE, LABELS (judgeApproval),
 # read_ci_checks (greenCi) and, in "any" mode, FAST_PATH_FILES. In critical
 # mode $2 is the critical-files criterion's own $FILES and CRITICAL_PATTERNS its pattern list.
@@ -782,8 +813,9 @@ standing_auth_eval() {
   local mode="$1" crit_files="${2:-}" i NUM_CLASSES CLASS_ID PATTERNS CONDITIONS EXCLUDES FORBIDDEN PRIVILEGED
   local MATCH_FILES CHANGED_COUNT CRIT_DIFF="" CRIT_PATS_JSON CRIT_MATCH_FILES="" CFO ONLY_CRIT CLASS_FILES CLASS_DIFF
   local CLASS_HITS UNION_HITS="[]" USED_IDS="" CRIT_NAMES UNCOVERED
-  local ADD_MIG ADD_MIG_STATE="" ADD_MIG_LIFTED=0
+  local ADD_MIG ADD_MIG_STATE="" ADD_MIG_LIFTED=0 LOCKED_DEPS LOCKED_STATE="" LOCKED_USED=0
   STANDING_AUTH_ADDITIVE=0
+  STANDING_AUTH_LOCKED=0
   STANDING_AUTH_RESULT="NOT ELIGIBLE"
   STANDING_AUTH_ID=""
   STANDING_AUTH_WHY=""
@@ -860,6 +892,16 @@ standing_auth_eval() {
       *) continue ;;
     esac
 
+    # lockedDepsOnly (2am#6942): same shape as additiveMigrations. `true` makes the
+    # class criticalFilesOnly-shaped (critical mode only) and gates its Cargo.toml
+    # coverage on the locked-deps-only verb. Any other value is malformed.
+    LOCKED_DEPS=0
+    case "$(jq -c ".champion.standingAuthorizations[$i].lockedDepsOnly" "$CONFIG_FILE")" in
+      null | false) ;;
+      true) [ "$mode" = "critical" ] || continue; LOCKED_DEPS=1; ONLY_CRIT=1 ;;
+      *) continue ;;
+    esac
+
     # Critical mode: only an explicit boolean true opts the class in.
     if [ "$mode" = "critical" ] && [ "$ONLY_CRIT" -eq 0 ]; then
       [ "$(jq -r ".champion.standingAuthorizations[$i].coversCriticalFiles == true" "$CONFIG_FILE")" = "true" ] || continue
@@ -877,6 +919,10 @@ standing_auth_eval() {
       printf '%s' "$CLASS_HITS" | jq -e 'length > 0' >/dev/null 2>&1 || continue
       CLASS_DIFF="$CLASS_HITS"
       CLASS_FILES=$(printf '%s' "$CLASS_HITS" | jq -r '.[] | .filename, (.previous_filename // empty)') || continue
+      # lockedDepsOnly: the verb proves nothing about a non-Cargo.toml hit.
+      if [ "$LOCKED_DEPS" -eq 1 ]; then
+        printf '%s' "$CLASS_HITS" | jq -e 'all(.[]; (.filename | split("/") | last) == "Cargo.toml")' >/dev/null 2>&1 || { STANDING_AUTH_WHY+="class '$CLASS_ID': lockedDepsOnly covers only Cargo.toml hits"$'\n'; continue; }
+      fi
     fi
 
     # Fail safe: a malformed entry (no id, no patterns, or no conditions)
@@ -930,6 +976,17 @@ standing_auth_eval() {
       done <<<"$EXCLUDES"
     done <<<"$CLASS_FILES"
     [ "$ALL_MATCH" -eq 0 ] && continue
+    # lockedDepsOnly (2am#6942): the class covers its Cargo.toml hits only when the
+    # verb clears the PR. Run once; any non-zero exit (new registry/git package,
+    # version bump, source key, no lock change, forge error, older daemon) skips it.
+    LOCKED_USED=0
+    if [ "$LOCKED_DEPS" -eq 1 ]; then
+      if [ -z "$LOCKED_STATE" ]; then
+        if loom-daemon forge locked-deps-only "$PR_NUMBER" >/dev/null 2>&1; then LOCKED_STATE=ok; else LOCKED_STATE=held; fi
+      fi
+      [ "$LOCKED_STATE" = ok ] || { STANDING_AUTH_WHY+="class '$CLASS_ID': locked-deps-only verb did not clear the PR"$'\n'; continue; }
+      LOCKED_USED=1
+    fi
     if [ "$mode" = "critical" ]; then
       ADD_MIG_LIFTED=0
       while IFS= read -r file; do
@@ -1060,6 +1117,7 @@ standing_auth_eval() {
         # passes once the classes together cover every hit.
         UNION_HITS=$(printf '%s\n%s' "$UNION_HITS" "$CLASS_HITS" | jq -s -c '.[0] + .[1] | unique_by(.filename)') || continue
         [ "$ADD_MIG_LIFTED" -eq 1 ] && STANDING_AUTH_ADDITIVE=1
+        [ "$LOCKED_USED" -eq 1 ] && STANDING_AUTH_LOCKED=1
         USED_IDS="${USED_IDS:+$USED_IDS,}$CLASS_ID"
         continue
       fi
@@ -1119,7 +1177,26 @@ still cannot waive the kept set, and `KEPT_SET_PATTERNS` stays hardcoded (no con
 
 It is eligible only when **all** hold, each read live in this pass:
 
-- the PR title is `chore(loom): resync installed Loom to v<X.Y.Z>`;
+- the PR title is `chore(loom): resync installed Loom to v<X.Y.Z>`, or, for the Repo Skills
+  variant (#13435, operator ruling 2026-11-01), `Bump Repo Skills <from> -> <X.Y.Z>` /
+  `chore(repo-skills): ... v<X.Y.Z>`. The Repo Skills variant runs the same rule against
+  `rjwalters/repo`: install set `.claude/skills/repo/`, `.claude/commands/repo/`,
+  `.agents/skills/repo*`, `.claude/settings.json`, `.gitignore`, `CLAUDE.md`; metadata
+  `.claude/skills/repo/install-metadata.json` `version`; tag `refs/tags/v<X.Y.Z>` in
+  `rjwalters/repo`; kept-set files map through `install.sh`'s copy lines
+  (`.claude/skills/repo/hooks/X` <- `hooks/repo/X`, `.claude/skills/repo/scripts/X` <-
+  `scripts/repo/X`, `.claude/commands/repo/X` <- `commands/repo/X`). A file the installer
+  renders (a `{{PLACEHOLDER}}` substituted on copy) never byte-matches and holds.
+  `.claude/settings.json` has no upstream counterpart, so a bump that changes it holds, which
+  keeps the rjwalters/repo#733 guard-wiring PRs held;
+- every changed file is under `.loom/` or `.claude/`, and none is a merge-gate path
+  (the daemon's `GATE` list: `champion*`, `judge*`, `merge-pr.sh`, `merge_pr*`, `verdict*`,
+  comment-trust files, `config.json`): the gate never waives a change to itself (#12945). A file
+  under `.loom/scripts/tests/` (name and previous name both) is not a gate path, since no merge
+  path sources it: it is compared byte-for-byte like any kept-set file (#13486);
+  (This is Champion's proof. The daemon's own strict landing of its resync PR instead lets
+  byte-identical gate files land without a Judge when the tag is a published release, per
+  operator ruling r7-q33, #13665; a PR the daemon left for the lane still takes this rule.)
 - `.loom/install-metadata.json` at the PR head has `loom_version` equal to `<X.Y.Z>`, and
   `refs/tags/v<X.Y.Z>` exists in `rjwalters/loom`;
 - the files read is complete (count equals `changed_files`) and at least one changed file is a
@@ -1136,67 +1213,26 @@ A differing byte, a local-only file, a missing or unparsable tag, or any failed 
 `NOT ELIGIBLE` and the kept-set hold applies exactly as before. A non-resync PR never matches.
 
 ```bash
-# resync_upstream_path <installed-path>: the defaults/ counterpart per resync-installed.sh's
-# surface map, empty when the path has none. Roles and skills are symlinks or generated
-# upstream, so their blobs never compare equal: no mapping, hold.
-resync_upstream_path() {
-  case "$1" in
-    .loom/hooks/*)            printf 'defaults/hooks/%s' "${1#.loom/hooks/}" ;;
-    .loom/scripts/*)          printf 'defaults/scripts/%s' "${1#.loom/scripts/}" ;;
-    .loom/docs/*)             printf 'defaults/docs/%s' "${1#.loom/docs/}" ;;
-    .loom/runtimes/*)         printf 'defaults/runtimes/%s' "${1#.loom/runtimes/}" ;;
-    .loom/bin/*)              printf 'defaults/.loom/bin/%s' "${1#.loom/bin/}" ;;
-    .claude/commands/loom/*)  printf 'defaults/.claude/commands/loom/%s' "${1#.claude/commands/loom/}" ;;
-    .claude/agents/*)         printf 'defaults/.claude/agents/%s' "${1#.claude/agents/}" ;;
-    *) return 0 ;;
-  esac
-}
-
 # resync_waiver_eval: sets RESYNC_WAIVER_RESULT (ELIGIBLE|NOT ELIGIBLE), RESYNC_WAIVER_TAG,
 # RESYNC_WAIVER_RECORD (one "path: sha" line per kept-set file) and RESYNC_WAIVER_REASON.
-# Reads PR_NUMBER and KEPT_SET_PATTERNS. Every step fails closed.
+# Reads PR_NUMBER. The rules are NOT here: they live once, in loom-daemon
+# (`fleet_sync/workspace_resync/waiver.rs`), which also runs them when the daemon lands its own
+# resync PR (#13487). Exit 0 plus RESYNC_WAIVER=ELIGIBLE is the only eligible answer; a missing or
+# older binary, any other exit, or any other output is NOT ELIGIBLE (fail closed).
 resync_waiver_eval() {
-  local title ver tag sha1 sha2 meta_ver changed n file prev pattern is_kept up enc up_sha up_type head_sha status
+  local out rc=0 line
   RESYNC_WAIVER_RESULT="NOT ELIGIBLE"; RESYNC_WAIVER_TAG=""; RESYNC_WAIVER_RECORD=""; RESYNC_WAIVER_REASON=""
-  [ "${#KEPT_SET_PATTERNS[@]}" -gt 0 ] 2>/dev/null || { RESYNC_WAIVER_REASON="kept set not loaded"; return 0; }
-  title=$(gh api "repos/{owner}/{repo}/pulls/$PR_NUMBER" --jq '.title' 2>/dev/null) || { RESYNC_WAIVER_REASON="PR unreadable"; return 0; }
-  if [[ "$title" =~ ^chore\(loom\):\ resync\ installed\ Loom\ to\ v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
-    ver="${BASH_REMATCH[1]}"; tag="v$ver"
-  else
-    RESYNC_WAIVER_REASON="not a resync PR"; return 0
+  out=$("${LOOM_DAEMON_BIN:-loom-daemon}" forge resync-waiver "$PR_NUMBER" 2>/dev/null) || rc=$?
+  if [ "$rc" -ne 0 ]; then RESYNC_WAIVER_REASON="waiver proof did not hold (exit $rc)"; return 0; fi
+  printf '%s\n' "$out" | grep -qx 'RESYNC_WAIVER=ELIGIBLE' || { RESYNC_WAIVER_REASON="no ELIGIBLE answer"; return 0; }
+  RESYNC_WAIVER_TAG=$(printf '%s\n' "$out" | sed -n 's/^RESYNC_WAIVER_TAG=//p' | head -n1)
+  while IFS= read -r line; do RESYNC_WAIVER_RECORD="${RESYNC_WAIVER_RECORD}${line}"$'\n'; done \
+    < <(printf '%s\n' "$out" | sed -n 's/^RESYNC_WAIVER_RECORD=//p')
+  if [ -z "$RESYNC_WAIVER_TAG" ] || [ -z "$RESYNC_WAIVER_RECORD" ]; then
+    RESYNC_WAIVER_RESULT="NOT ELIGIBLE"; RESYNC_WAIVER_TAG=""; RESYNC_WAIVER_RECORD=""
+    RESYNC_WAIVER_REASON="ELIGIBLE answer without a tag or record"; return 0
   fi
-  sha1=$(gh api "repos/{owner}/{repo}/pulls/$PR_NUMBER" --jq '.head.sha' 2>/dev/null) || sha1=""
-  [ -n "$sha1" ] || { RESYNC_WAIVER_REASON="head unreadable"; return 0; }
-  meta_ver=$(gh api -H "Accept: application/vnd.github.raw" "repos/{owner}/{repo}/contents/.loom/install-metadata.json?ref=$sha1" 2>/dev/null | jq -r '.loom_version // empty' 2>/dev/null) || meta_ver=""
-  [ "$meta_ver" = "$ver" ] || { RESYNC_WAIVER_REASON="install-metadata names '${meta_ver:-none}', title names $ver"; return 0; }
-  [ "$(gh api "repos/rjwalters/loom/git/ref/tags/$tag" --jq '.ref' 2>/dev/null)" = "refs/tags/$tag" ] \
-    || { RESYNC_WAIVER_REASON="tag $tag not found upstream"; return 0; }
-  standing_auth_fetch_diff || { RESYNC_WAIVER_REASON="files unreadable"; return 0; }
-  n=$(gh api "repos/{owner}/{repo}/pulls/$PR_NUMBER" --jq '.changed_files' 2>/dev/null) || n=""
-  printf '%s' "$DIFF_JSON" | jq -e --argjson n "${n:-null}" 'length == $n and length > 0' >/dev/null 2>&1 \
-    || { RESYNC_WAIVER_REASON="files read incomplete"; return 0; }
-  while IFS=$'\t' read -r file prev head_sha status; do
-    [ -z "$file" ] && continue
-    is_kept=0
-    for pattern in "${KEPT_SET_PATTERNS[@]}"; do
-      # shellcheck disable=SC2053
-      if [[ "$file" == $pattern || "$prev" == $pattern ]]; then is_kept=1; break; fi
-    done
-    [ "$is_kept" -eq 1 ] || continue
-    case "$status" in added | modified) ;; *) RESYNC_WAIVER_REASON="$file is $status"; RESYNC_WAIVER_RECORD=""; return 0 ;; esac
-    up=$(resync_upstream_path "$file")
-    [ -n "$up" ] || { RESYNC_WAIVER_REASON="$file has no upstream counterpart"; RESYNC_WAIVER_RECORD=""; return 0; }
-    enc=$(jq -rn --arg p "$up" '$p | split("/") | map(@uri) | join("/")') || { RESYNC_WAIVER_RECORD=""; return 0; }
-    IFS=$'\t' read -r up_type up_sha < <(gh api "repos/rjwalters/loom/contents/${enc}?ref=$tag" --jq '[.type, .sha] | @tsv' 2>/dev/null)
-    if [ "$up_type" != "file" ] || [ -z "$up_sha" ] || [ "$up_sha" != "$head_sha" ]; then
-      RESYNC_WAIVER_REASON="$file differs from $tag:$up"; RESYNC_WAIVER_RECORD=""; return 0
-    fi
-    RESYNC_WAIVER_RECORD="${RESYNC_WAIVER_RECORD}${file}: ${head_sha}"$'\n'
-  done < <(printf '%s' "$DIFF_JSON" | jq -r '.[] | [.filename, (.previous_filename // .filename), (.sha // ""), (.status // "")] | @tsv')
-  [ -n "$RESYNC_WAIVER_RECORD" ] || { RESYNC_WAIVER_REASON="no kept-set file to waive"; return 0; }
-  sha2=$(gh api "repos/{owner}/{repo}/pulls/$PR_NUMBER" --jq '.head.sha' 2>/dev/null) || sha2=""
-  [ "$sha1" = "$sha2" ] || { RESYNC_WAIVER_REASON="head moved while reading"; RESYNC_WAIVER_RECORD=""; return 0; }
-  RESYNC_WAIVER_RESULT="ELIGIBLE"; RESYNC_WAIVER_TAG="$tag"
+  RESYNC_WAIVER_RESULT="ELIGIBLE"
 }
 ```
 
@@ -1219,9 +1255,14 @@ to a CI workflow is not red on blast radius *because it is a workflow* when
   `claude-bot-deploy-plan.yml` is not. The list is the one #12954's
   `privilegedContentPatterns` classes use; both tests read it from this block;
 - every workflow file has a non-empty patch, and no added or removed workflow
-  line matches, case-insensitively, the words `permissions` or `secrets`, or
-  `id-token`, `pull_request_target`, `workflow_run`, `github.token`,
-  `GITHUB_TOKEN`; and no *added* `run:` or `uses:` line (YAML comments ignored)
+  line matches, case-insensitively, the words `secrets`, `id-token`,
+  `pull_request_target`, `workflow_run`, `github.token`, `GITHUB_TOKEN`; and
+  `permissions` is judged by direction (#13291): an *added* bare `permissions:`
+  or `permissions: {}` header reads green (its children are checked against
+  `PRIVILEGED_CONTENT_PATTERNS`, so `contents: read` passes while any `write`,
+  `write-all` or `id-token` child is red), but any *removed* line naming
+  `permissions`, and any other added shape (`read-all`, a flow map, a quoted
+  key, a comment) stays red; and no *added* `run:` or `uses:` line (YAML comments ignored)
   names publish, release, deploy or merge, which is a new release step;
 - the PR carries `loom:pr` (the `judge-approval` criterion has already checked that the approval
   is for this head) and CI is green right now, with at least one passing
@@ -1293,7 +1334,19 @@ ci_workflow_blast_eval() {
     standing_auth_content_clear "$CONTENT_FILES" "$(printf '%s\n' "${PRIVILEGED_CONTENT_PATTERNS[@]}")" \
       || { WF_BLAST_REASON="a workflow's head contents are privileged or unreadable"; return 0; }
   fi
-  for rx in '\bpermissions\b' '\bsecrets\b' 'id-token' 'pull_request_target' 'workflow_run' \
+  # permissions (#13291): direction-aware. A removed line naming it is red (it
+  # widens the token back to the repo default); an added one is red unless it is
+  # exactly the header `permissions:` or `permissions: {}`. The children are
+  # judged above, by the head-contents check (`:\s*write\b`, `write-all`,
+  # `id-token`), so `read-all`, flow maps and quoted keys stay red here.
+  PERM_HIT=$(printf '%s' "$DIFF_JSON" | jq -r '
+    [.[] | select(((.filename | ascii_downcase) | startswith(".github/workflows/")) or (((.previous_filename // "") | ascii_downcase) | startswith(".github/workflows/")))
+         | .patch | split("\n")[] | select(test("^[+-]"))
+         | select(test("^-.*\\bpermissions\\b"; "i")
+             or (test("^\\+.*\\bpermissions\\b"; "i") and (test("^\\+\\s*permissions:\\s*(\\{\\s*\\})?\\s*$") | not)))]
+    | length' 2>/dev/null) || { WF_BLAST_REASON="workflow lines unparseable"; return 0; }
+  [ "$PERM_HIT" = "0" ] || { WF_BLAST_REASON="a workflow line removes or changes permissions beyond a bare 'permissions:' header"; return 0; }
+  for rx in '\bsecrets\b' 'id-token' 'pull_request_target' 'workflow_run' \
     'github\.token' 'github_token'; do
     printf '%s' "$LINES_JSON" | jq -e --arg rx "$rx" 'any(.[]; test($rx; "i"))' >/dev/null 2>&1
     rc=$?
@@ -1352,13 +1405,110 @@ echo "WF_BLAST=$WF_BLAST${WF_BLAST_REASON:+ ($WF_BLAST_REASON)}"
 **Decision rule**:
 - Docs-only fast path found `ELIGIBLE` **and** no prior hold is still in force -> **PASS**, continue to the `critical-files` criterion — the axes are not judged for this PR (see "Docs-only fast path" above).
 - Standing operator authorization matched (`STANDING_AUTH_RESULT=ELIGIBLE`) **and** no prior hold is still in force -> **PASS**, continue to the `critical-files` criterion — the axes are not judged for this PR (see "Standing operator authorization (#6850)" above). Name `STANDING_AUTH_ID` in the rationale.
-- All four axes green **and** no prior hold is still in force -> **PASS**, continue to the `critical-files` criterion.
+- All four axes green **and** no prior hold is still in force -> **PASS**, continue to the `critical-files` criterion; export it with `loom-daemon park-record decision --pr "$PR_NUMBER" --outcome pass --confidence 1 >/dev/null 2>&1 || true` (#12950).
 - All four axes green **but** the sticky-hold precheck found a hold still in force -> **HOLD the merge** (silently; the axes do not get a vote here — see "Sticky holds" below). The PR is **not** dropped from this pass: continue to the **Held-PR Health Pass** (#6720).
+- Any axis red or unsure, **and** "Self-release" (#12950) clears -> **PASS**, continue to the `critical-files` criterion; Step 2 carries the self-release block (and the reversal block when `PRIOR_HOLD=true`).
 - Any axis red -> **HOLD the merge** (see hold behavior below), then continue to the **Held-PR Health Pass** (#6720) — except a human-released same concern, (e) in "Sticky holds" (#11416).
 - **Unsure on any axis -> HOLD.** Conservative bias: a held PR costs one human merge; a bad auto-merge costs a revert on `main`.
 - Merging a PR that ever carried a hold marker -> **PASS + mandatory reversal comment** (Step 2 must state what changed; see "Sticky holds").
 
 **Size is not a proxy for any axis.** An 886-line PR that is 700 lines of new tests plus one self-contained module is green on all four; a 12-line change to `merge-pr.sh`'s ordering guard is red on blast radius *and* revertability. Never hold a PR because it is large, and never merge a PR because it is small.
+
+#### Self-release (#12950)
+
+Operator direction (2026-10-20): Champion makes the call itself when the answer is clear. When the four-axis read is **red or unsure** (a fresh PR, or a held one: `PRIOR_HOLD=true` with no `RELEASE_REASON`), Champion may clear the hold on its own confidence that a human would release it. This relaxes **the `merge-risk` criterion only**: `critical-files`, `loom:auto-merge-ok` and every other criterion are untouched.
+
+**Order is fixed; each step can only stop the release.**
+
+1. **Kept-set check, deterministic, no judgment.** If any changed file, or any `previous_filename` on a rename, matches `KEPT_SET_PATTERNS` (hardcoded above, so no config can narrow it), or the file list cannot be read, **stop: hold as today.** No confidence is formed, so a high-confidence misjudgment cannot reach a kept-set path. Unmatched but uncertain also holds (the confidence step below).
+2. **State the confidence** (0-1) that a human would release this PR, from the evidence only: revertability (does `git revert -m 1` undo it), blast radius, Judge review depth (named files, what was run), and cited operator rulings on the same kind of PR (PR or comment links, e.g. a `clear the hold —` comment). A ruling that cannot be linked is not evidence. Name the single axis that was red.
+3. **Compare with the threshold.** `champion.mergeRisk.selfReleaseConfidence`, a number in (0, 1], absent = 0.9, read below. At or above it: self-release. Below it, or when the key is `1.0`: hold exactly as today.
+
+```bash
+PR_NUMBER=<number>
+
+# Threshold: resolved through the daemon's config tiers (fleet / repo-class /
+# .loom/config.json), like champion.outOfBandAcGate. Absent, unreadable, a
+# missing verb or any value that is not a number in (0, 1] means 0.9.
+self_release_threshold() {
+  local out v
+  command -v loom-daemon >/dev/null 2>&1 || { echo 0.9; return; }
+  out=$(loom-daemon config get champion.mergeRisk.selfReleaseConfidence --json 2>/dev/null) || { echo 0.9; return; }
+  v=$(printf '%s' "$out" | jq -r 'if .found == true and (.value | type) == "number" and .value > 0 and .value <= 1 then .value else 0.9 end' 2>/dev/null) || v=0.9
+  [ -n "$v" ] && echo "$v" || echo 0.9
+}
+
+# Exit 0 only when self-release is on (threshold < 1.0; 1.0 disables it) and
+# the stated confidence $1 is a number in [threshold, 1].
+self_release_clears() {
+  local t
+  t=$(self_release_threshold)
+  awk -v t="$t" -v c="$1" 'BEGIN { exit !(t < 1 && c ~ /^[0-9]*\.?[0-9]+$/ && c + 0 >= t + 0 && c + 0 <= 1) }'
+}
+
+# Exit 0 (= HOLD) on any kept-set hit, an unreadable list or an empty one.
+kept_set_hit() {
+  local list file pattern
+  list=$(gh api "repos/{owner}/{repo}/pulls/$1/files" --paginate --jq '.[] | .filename, (.previous_filename // empty)' 2>/dev/null) || return 0
+  [ -n "$list" ] || return 0
+  [ "${#KEPT_SET_PATTERNS[@]}" -gt 0 ] 2>/dev/null || return 0
+  while IFS= read -r file; do
+    [ -z "$file" ] && continue
+    for pattern in "${KEPT_SET_PATTERNS[@]}"; do
+      # shellcheck disable=SC2053
+      [[ "$file" == $pattern ]] && return 0
+    done
+  done <<<"$list"
+  return 1
+}
+
+# Only when the axes are red/unsure and no durable release signal fired:
+if kept_set_hit "$PR_NUMBER"; then
+  loom-daemon park-record decision --pr "$PR_NUMBER" --outcome hold >/dev/null 2>&1 || true
+  : # hold as today
+elif [ "$OPEN_CONDITION" = true ]; then
+  : # an operator-named release condition (#12594) is the hold; Champion never self-releases it
+else
+  SELF_CONF=<0-1, stated from the evidence above>
+  if self_release_clears "$SELF_CONF"; then
+    SELF_RELEASE=true
+    SELF_AXIS="<the axis that was red>"
+    SELF_EVIDENCE="<revertability; blast radius; Judge review depth; cited rulings as links>"
+    # Held PR: un-stick it for this pass; the reversal block names the release.
+    if [ "$PRIOR_HOLD" = true ] && [ -z "$RELEASE_REASON" ]; then
+      RELEASE_REASON="Champion self-release (confidence $SELF_CONF >= $(self_release_threshold))"
+      MERGE_BLOCKED_BY_HOLD=false
+      HOLD_REVERSAL_BLOCK="<!-- champion:merge-risk-hold-cleared -->
+**Reversing a prior merge-risk hold** (held $HOLD_AT):
+
+- **What released it**: $RELEASE_REASON
+- **Axis that flipped**: $SELF_AXIS: <the concrete, falsifiable reason it is now clear>
+- **Original hold concern**: <QUOTE_THE_AXIS_AND_CONCERN_FROM_THE_HOLD_COMMENT>
+"
+    fi
+    SELF_RELEASE_BLOCK="<!-- champion:merge-risk-self-release -->
+**Champion self-release** (head $(jq -r '.headRefOid' <<<"$PR_JSON")):
+
+- **Axis**: $SELF_AXIS
+- **Confidence**: $SELF_CONF (threshold $(self_release_threshold))
+- **Evidence**: $SELF_EVIDENCE
+"
+    loom-daemon park-record decision --pr "$PR_NUMBER" --outcome self-release --confidence "$SELF_CONF" >/dev/null 2>&1 || true
+    # PASS the `merge-risk` criterion and continue to `critical-files`. Step 2 posts the block(s) below.
+  else
+    loom-daemon park-record decision --pr "$PR_NUMBER" --outcome hold --confidence "$SELF_CONF" >/dev/null 2>&1 || true
+    : # below threshold or disabled: hold as today
+  fi
+fi
+```
+
+**Properties that must hold.**
+
+- **A high confidence never overrides the kept set**, because step 1 runs first and ends the attempt. A kept-set PR is never self-released at any confidence, including `1.0`.
+- **`champion.mergeRisk.selfReleaseConfidence=1.0` never self-releases.** `self_release_clears` returns false for any threshold of 1.0.
+- **Nothing is carried over.** The confidence is formed on this pass against this head SHA; a self-release comment on an earlier head is never read as a release (the sticky precheck does not look for it), so a push after a self-release gets a fresh decision. The comment is an audit record of a decision made in the same pass as the merge, in the same comment as the reversal block, so it creates no new trusted-marker input (`comment-trust.md`).
+- **Not the shadow score.** The confidence is not the #8545 pre-score, which never changes a verdict ([`champion-merge-risk-shadow.md`](champion-merge-risk-shadow.md)).
+- **Telemetry on every decision.** The `park-record decision` calls above (and the `pass` call in the all-green row of the decision rule: `--outcome pass --confidence 1`) export the outcome and confidence as `hold.transition` records (`loom.hold.confidence_pct`), so calibration can be checked against later reverts and operator overrides. Best-effort: a failed call changes nothing. The 7-day revert comparison is `loom-daemon champion-hold self-release-calibration` (#12952).
 
 **Optional shadow pre-score (#8545).** Only with `TYPESAFE_API_KEY` set, and only *after* your verdict above is final, log a score per [`champion-merge-risk-shadow.md`](champion-merge-risk-shadow.md) — telemetry about this rubric, never an input to it. Unset: skip; nothing changes.
 
@@ -1388,6 +1538,8 @@ HOLD_MARKER="<!-- champion:merge-risk-hold -->"
 # Reset per PR, FIRST (#6720): it routes the Held-PR Health Pass, so a `true`
 # leaked from the previous PR would mis-route this one.
 MERGE_BLOCKED_BY_HOLD=false
+SELF_RELEASE=false   # #12950: set only by "Self-release" below, never by this precheck
+SELF_RELEASE_BLOCK=""
 
 # "0. PR facts" — this pass's live read, NOT "$GH_READ": it gates the merge.
 # Comments are TRUSTED authors only (#9548, `.loom/docs/comment-trust.md`): an
@@ -1585,7 +1737,10 @@ else
   OPEN_CONDITION=false              # closed, or overridden by the label: the rows below apply as usual
 fi
 
-if [ "$PRIOR_HOLD" = true ] && [ -z "$RELEASE_REASON" ]; then
+if [ "$PRIOR_HOLD" = true ] && [ -z "$RELEASE_REASON" ] && [ "$SELF_RELEASE" != true ]; then
+  # Not final yet (#12950): this is the first pass through the block, so
+  # SELF_RELEASE is false. "Self-release" below judges a held PR's axes too and,
+  # only if it clears, sets RELEASE_REASON and resets MERGE_BLOCKED_BY_HOLD.
   MERGE_BLOCKED_BY_HOLD=true
   if [ "$OPEN_CONDITION" = true ]; then
     # Name the condition once per condition comment (idempotent: the marker
@@ -1625,7 +1780,8 @@ fi
 | Precheck result | What the `merge-risk` criterion does |
 |---|---|
 | `PRIOR_HOLD=false` | Judge the four axes normally. No behavior change from before #4742. |
-| `PRIOR_HOLD=true`, no `RELEASE_REASON` | **HOLD the merge, silently.** The PR is not merged this pass regardless of how the axes read this tick, and no comment is posted (anti-spam guard already covers it). It is **not** skipped, though: `MERGE_BLOCKED_BY_HOLD=true` routes it to the **Held-PR Health Pass** (#6720), which still evaluates the `mergeable`, `recency` and `ci-green` criteria. |
+| `PRIOR_HOLD=true`, no `RELEASE_REASON`, "Self-release" clears (#12950) | The `merge-risk` criterion **PASS**: no kept-set path is touched and the confidence is at or above the threshold. Continue to `critical-files`. Step 2's reversal block **and** self-release block are **mandatory**. |
+| `PRIOR_HOLD=true`, no `RELEASE_REASON`, "Self-release" does not clear | **HOLD the merge, silently.** The PR is not merged this pass regardless of how the axes read this tick, and no comment is posted (anti-spam guard already covers it). It is **not** skipped, though: `MERGE_BLOCKED_BY_HOLD=true` routes it to the **Held-PR Health Pass** (#6720), which still evaluates the `mergeable`, `recency` and `ci-green` criteria. |
 | `OPEN_CONDITION=true` (#12594), no `loom:auto-merge-ok` | **HOLD the merge** whatever (b)-(e) and the axes say — `PRIOR_HOLD=true`, `RELEASE_REASON=""`, `MERGE_BLOCKED_BY_HOLD=true`, even with no hold marker on the PR. The notice names the condition (once per condition comment). Closed only by a later trusted comment from a person (never an `x[bot]` author, never Champion) that opens with `<!-- loom:release-condition-met -->`, or that is a release instruction (`clear the hold — …`, `override: …`, `ok to merge — …`) citing the condition (the word "condition" in its body); then the rows below apply as usual. A clearing comment that does not cite it releases nothing: the condition is the hold. |
 | `PRIOR_HOLD=true`, released by `loom:auto-merge-ok` (`HOLD_OVERRIDE=true`) | The `merge-risk` criterion **PASS** by override — the axes are not re-scored. Continue to `critical-files`. Step 2's reversal block is **mandatory**. |
 | `PRIOR_HOLD=true`, released by (b), (c), (d), or (e) | Re-judge the four axes normally. Now green -> **PASS**, continue to `critical-files`, and Step 2's reversal block is **mandatory**. Still red **and** `MANUAL_RELEASE_SINCE_HOLD=true` **and** the concern is byte-identical to the prior hold's bullet -> **PASS** the same way: a human released exactly that concern (#11416); "Hold behavior"'s first branch executes it (no notice, no label). When your concern *is* the one on record, copy the prior bullet verbatim; write a new bullet only for a concern it does not name. Still red otherwise -> the hold persists: `MERGE_BLOCKED_BY_HOLD=true`, "Hold behavior" below, then the **Held-PR Health Pass**. |
@@ -1636,7 +1792,7 @@ itself, not by a counter: after a new commit lands, later ticks keep seeing
 written against a diff that no longer exists. What can never happen is a merge of
 the *same* diff on a *different* read.
 
-**Champion cannot release its own hold.** Every release test excludes comments
+**Champion cannot release its own hold by re-reading it.** The one exception is "Self-release" (#12950), which is not a stored signal: it is a fresh decision each pass behind the deterministic kept-set check, and no earlier self-release comment is ever read back as one. Every release test (a)-(e) excludes comments
 containing `champion:` or `*Automated by Champion role*`. A hold is released by a
 human/Judge signal or by the code moving — never by Champion talking to itself.
 That exclusion is also what keeps Champion's own rejection/janitor comments from
@@ -1726,7 +1882,37 @@ CONCERN_BULLET="- **<AXIS>**: <SPECIFIC_CONCERN — name the file/function and w
 BLOCKER_NUMBERS=""   # #10937: open issue/PR numbers the concern names (e.g. "pending verification in #N"); empty if none
 PRIOR_CONCERN_BULLET=$(printf '%s\n' "$HOLD_BODY" | grep -m1 -E '^- \*\*.+\*\*:')
 
-if [ "$MANUAL_RELEASE_SINCE_HOLD" = true ] && [ "$CONCERN_BULLET" = "$PRIOR_CONCERN_BULLET" ]; then
+# Live, uncached re-read of the PR's state immediately before anything is posted
+# (#13534): `$PR_JSON` was read earlier in the pass and the assessment can outlast
+# a concurrent merge (human `merge-pr.sh`, a second Champion pass), which left
+# merged PRs carrying a hold notice + `loom:blocked`. Plain `gh api` (REST), not
+# `$GH_READ`: a cached read is exactly the stale read being fixed.
+LIVE_STATE=$(gh api "repos/{owner}/{repo}/pulls/$PR_NUMBER" --jq '"\(.merged) \(any(.labels[]; .name == "loom:blocked"))"' 2>/dev/null)
+LIVE_MERGED=${LIVE_STATE%% *}; LIVE_BLOCKED=${LIVE_STATE##* }
+MERGED_NOTE_MARKER="<!-- champion:merged-before-hold -->"
+
+if [ "$LIVE_MERGED" = true ]; then
+  # Merged before the hold could apply: no hold notice, no park record, and a
+  # hold that already landed on the merged PR is removed in this same pass.
+  echo "PR #$PR_NUMBER merged before the merge-risk hold could apply — no hold"
+  if [ "$LIVE_BLOCKED" = true ]; then
+    gh api -X DELETE "repos/{owner}/{repo}/issues/$PR_NUMBER/labels/loom%3Ablocked" >/dev/null 2>&1 || true
+  fi
+  if [ "$("$GH_READ" pr view "$PR_NUMBER" --json comments --jq "[.comments[].body] | any(startswith(\"$MERGED_NOTE_MARKER\"))")" != "true" ]; then
+    ./.loom/scripts/post-comment.sh "$PR_NUMBER" --pr --body "$MERGED_NOTE_MARKER
+**Champion: merged before hold could apply** — this PR merged while the merge-risk assessment was still running, so no hold was placed. The concern below was never addressed; file it as a follow-up if it still matters:
+
+$CONCERN_BULLET
+
+---
+*Automated by Champion role*"
+  fi
+  MERGE_BLOCKED_BY_HOLD=true   # nothing left to merge this pass
+elif [ "$LIVE_MERGED" != false ]; then
+  # Fail closed: an unreadable live state posts nothing; the next tick retries.
+  echo "Live state of #$PR_NUMBER unreadable — no hold notice, no label write; retry next tick"
+  MERGE_BLOCKED_BY_HOLD=true
+elif [ "$MANUAL_RELEASE_SINCE_HOLD" = true ] && [ "$CONCERN_BULLET" = "$PRIOR_CONCERN_BULLET" ]; then
   # Not a hold (#11416): a human removed the hold label for exactly this
   # concern. PASS — continue to critical-files; Step 2's reversal block is mandatory.
   echo "PASS: #$PR_NUMBER — human released this same concern ($RELEASE_REASON)"
@@ -1767,7 +1953,7 @@ auto-merging:
 $CONCERN_BULLET
 
 **Next steps** — this hold stays in force until one of these happens; Champion re-reading the same diff will **not** clear it:
-- A human releases it: \`gh pr edit $PR_NUMBER --remove-label \"loom:blocked\"\`. Champion merges on its next tick unless it finds a concern this notice does not name; or run \`./.loom/scripts/merge-pr.sh $PR_NUMBER\` yourself after removing it (\`merge-pr.sh\` refuses \`loom:pr\` + \`loom:blocked\` together, #8112)
+- A human releases it and merges in one audited step: \`./.loom/scripts/merge-pr.sh $PR_NUMBER --release-hold\` (#13517). It refuses if the head moved since this hold or the Judge approval, and posts a comment naming you and the approved head. Bare \`merge-pr.sh\` still refuses \`loom:pr\` + \`loom:blocked\` together (#8112)
 - Or applies \`loom:auto-merge-ok\` to override the hold; Champion merges on the next tick
 - Or comments here to clear it explicitly — **start the comment with the instruction**: \`clear the hold — <why>\`, \`cleared: <why>\`, \`override: <why>\`, \`merge anyway, <why>\`, \`ok to merge — <why>\`. Phrasing that only mentions those words later in a sentence, negates them (\`do not merge anyway\`), or asks about them (\`is it ok to merge?\`) deliberately does **not** release the hold, and neither does a bare 'looks fine'
 - Or the situation actually changes: a new push that narrows the concern, or a deeper Judge re-review
@@ -1905,12 +2091,18 @@ version_only_diff() {
 # SUSPECT_LINE= / SUSPECT_SECTION= (kept for the FAIL line and the hold
 # comment); anything else -- patch missing/empty, unparseable hunk, forge error,
 # 2 (a daemon predating the verb), 126/127 (no binary) -- is a hold with no line.
-CRITERION3_SUSPECT_LINE=""; CRITERION3_SUSPECT_SECTION=""
+# The verb addresses `repos/<owner>/<repo>/…` explicitly (#13296): `--repo` from
+# $LOOM_REPO when set, else resolved from the cwd; never `gh`'s placeholder. Its
+# stderr (the held reason, with the forge's HTTP status on a read failure) is kept
+# in $CRITERION3_SUSPECT_ERROR for the hold comment.
+CRITERION3_SUSPECT_LINE=""; CRITERION3_SUSPECT_SECTION=""; CRITERION3_SUSPECT_ERROR=""
 suspect_critical_diff() {
-  local file="$1" number="$2" out rc
+  local file="$1" number="$2" out rc errf
   case "${file##*/}" in Cargo.toml|package.json) ;; *) return 1 ;; esac
-  out=$(loom-daemon forge suspect-critical-diff "$number" "$file" 2>/dev/null); rc=$?
-  if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -qx 'SUSPECT=0'; then return 0; fi
+  errf=$(mktemp); CRITERION3_SUSPECT_ERROR=""
+  out=$(loom-daemon forge suspect-critical-diff "$number" "$file" ${LOOM_REPO:+--repo "$LOOM_REPO"} 2>"$errf"); rc=$?
+  if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -qx 'SUSPECT=0'; then rm -f "$errf"; return 0; fi
+  CRITERION3_SUSPECT_ERROR=$(head -c 600 "$errf" | tr '\n' ' '); rm -f "$errf"
   CRITERION3_SUSPECT_LINE=$(printf '%s\n' "$out" | sed -n 's/^SUSPECT_LINE=//p' | head -1)
   CRITERION3_SUSPECT_SECTION=$(printf '%s\n' "$out" | sed -n 's/^SUSPECT_SECTION=//p' | head -1)
   return 1
@@ -1939,10 +2131,70 @@ standing_auth_load_config             # resolved effective config (#12591)
 STANDING_AUTH_RESULT="NOT ELIGIBLE"   # never inherit the merge-risk criterion's ELIGIBLE
 STANDING_AUTH_ID=""
 STANDING_AUTH_ADDITIVE=0
+STANDING_AUTH_LOCKED=0
 # Waiver record (#13031): set only when a class waives this criterion; the
 # pre-merge comment renders its critical-file bullet from these, so a waiver is
 # never reported as "No critical files modified".
 CRITERION3_WAIVER_ID=""; CRITERION3_WAIVER_SCOPE=""; CRITERION3_WAIVED_FILES=""
+
+# Repo-declared extra critical paths (#13542): `champion.extraCriticalPaths`, an
+# array of bash globs matched against the FULL repo path (`*` crosses `/`, so
+# `infra/bot/**` and `policy/*-policy.json` work as written), for `filename` and
+# `previous_filename`. Additive only: never appended to CRITICAL_PATTERNS (a
+# criticalFilesOnly class reads that array) and never to KEPT_SET_PATTERNS. It runs
+# BEFORE standing_auth_eval and exits 1 on a hit, so no class, the version-only /
+# suspect-line / WF_BLAST carve-outs or the merge-risk self-release can clear it:
+# only the human release of the sticky hold (#9944) does. A non-array value, or a
+# non-string / empty entry, is skipped with a WARN line and adds nothing. No key:
+# no output and no extra read, byte-for-byte as before.
+EXTRA_CRITICAL_PATHS=()
+CRITERION3_DECLARED_PATH=""; CRITERION3_DECLARED_FILE=""
+extra_critical_paths_load() {
+  local out raw="" ok=0 entry
+  if command -v loom-daemon >/dev/null 2>&1 && out=$(loom-daemon config get champion.extraCriticalPaths --json 2>/dev/null) \
+     && printf '%s' "$out" | jq -e . >/dev/null 2>&1; then
+    ok=1; raw=$(printf '%s' "$out" | jq -c 'select(.found == true) | .value' 2>/dev/null)
+  fi
+  [ "$ok" -eq 1 ] || raw=$(jq -c '.champion.extraCriticalPaths // empty' .loom/config.json 2>/dev/null)
+  [ -n "$raw" ] && [ "$raw" != null ] || return 0
+  if [ "$(printf '%s' "$raw" | jq -r type 2>/dev/null)" != array ]; then
+    echo "WARN: champion.extraCriticalPaths is not an array; ignored"; return 0
+  fi
+  while IFS= read -r entry; do
+    if [ "$(printf '%s' "$entry" | jq -r 'if type == "string" and length > 0 then "ok" else "bad" end')" = ok ]; then
+      EXTRA_CRITICAL_PATHS+=("$(printf '%s' "$entry" | jq -r .)")
+    else
+      echo "WARN: champion.extraCriticalPaths entry $entry is not a non-empty string; skipped"
+    fi
+  done < <(printf '%s' "$raw" | jq -c '.[]')
+}
+
+# stdin: filename and previous_filename lines. Sets CRITERION3_DECLARED_{PATH,FILE}.
+extra_critical_hit() {
+  local name p
+  while IFS= read -r name; do
+    [ -z "$name" ] && continue
+    for p in ${EXTRA_CRITICAL_PATHS[@]+"${EXTRA_CRITICAL_PATHS[@]}"}; do
+      # shellcheck disable=SC2053 # unquoted on purpose: $p is a glob
+      if [[ "$name" == $p ]]; then CRITERION3_DECLARED_PATH="$p"; CRITERION3_DECLARED_FILE="$name"; return 0; fi
+    done
+  done
+  return 1
+}
+
+extra_critical_paths_load
+if [ "${#EXTRA_CRITICAL_PATHS[@]}" -gt 0 ]; then
+  # Fresh paginated read, names only (filename + previous_filename). A failed or empty read fails closed.
+  if ! DECLARED_NAMES=$(gh api "repos/{owner}/{repo}/pulls/<number>/files" --paginate --jq '.[] | .filename, (.previous_filename // empty)') || [ -z "$DECLARED_NAMES" ]; then
+    echo "FAIL: Could not read the changed-file list to check champion.extraCriticalPaths"
+    exit 1
+  fi
+  if extra_critical_hit <<<"$DECLARED_NAMES"; then
+    echo "FAIL: Declared critical path modified: $CRITERION3_DECLARED_FILE (champion.extraCriticalPaths '$CRITERION3_DECLARED_PATH')"
+    exit 1
+  fi
+fi
+
 standing_auth_eval critical "$FILES"
 if [ "$STANDING_AUTH_RESULT" = "ELIGIBLE" ] && [ "$STANDING_AUTH_SCOPE" = "critical" ]; then
   CRITERION3_WAIVER_ID="$STANDING_AUTH_ID"; CRITERION3_WAIVER_SCOPE="critical"; CRITERION3_WAIVED_FILES="$STANDING_AUTH_COVERED"
@@ -1952,6 +2204,12 @@ if [ "$STANDING_AUTH_RESULT" = "ELIGIBLE" ] && [ "$STANDING_AUTH_SCOPE" = "criti
     # additiveMigrations class (#13102): migrations kept-set entry lifted by the verb.
     CRITERION3_WAIVER_SCOPE="critical, additive-migrations waiver"
     echo "PASS (standing authorization '$STANDING_AUTH_ID', #13102): additive-migrations waiver — migration files verified additive by loom-daemon forge additive-migrations; critical files: $STANDING_AUTH_COVERED"
+    exit 0
+  fi
+  if [ "$STANDING_AUTH_LOCKED" -eq 1 ]; then
+    # lockedDepsOnly class (2am#6942): Cargo.toml hit covered because the verb proved no third-party package is added.
+    CRITERION3_WAIVER_SCOPE="critical, locked-deps-only waiver"
+    echo "PASS (standing authorization '$STANDING_AUTH_ID', 2am#6942): locked-deps-only waiver — no new third-party package, verified by loom-daemon forge locked-deps-only; critical files: $STANDING_AUTH_COVERED"
     exit 0
   fi
   # #13042: STANDING_AUTH_ID names every class used (comma-joined); each hit
@@ -2014,13 +2272,15 @@ generalize this pattern to any other critical file or any other kind of
 "trivial-looking" diff — it is scoped to exactly these 6 filenames and
 exactly a version-string line change.
 
-**Suspect-line carve-out (#12999, operator ruling 2026-10-21)**: a critical-file hit is not a blanket veto on every edit to it. For a `Cargo.toml`-family or `package.json`-family hit that `version_only_diff` did not clear, the check-loop calls `suspect_critical_diff`, which wraps `loom-daemon forge suspect-critical-diff <pr> <file>`. Only a clean exit 0 with `SUSPECT=0` passes. It holds when a changed line is in a dependency, dev/build/target dependency, `[patch.*]`, `[replace]` or `[features]` table, is a `build =` / `links =` / `git =` / `registry =` / `path =` source key (a target table's own `path =` under `[[bin]]`, `[[bench]]`, `[[test]]`, `[[example]]` or `[lib]` is not one), or, in `package.json`, sits under `dependencies` / `devDependencies` / `optionalDependencies` / `peerDependencies` / `overrides` / `resolutions` or is a `preinstall` / `install` / `postinstall` / `prepare` script. A suspect hit emits the FAIL line with the matched line and its section, and passes that line on to the hold comment as `$CRITERION3_SUSPECT_LINE` / `$CRITERION3_SUSPECT_SECTION`. Every other outcome is a hold: no patch, an unparseable hunk, an unreadable head file for a hunk whose section the patch does not show, a forge error, exit 2 from an older daemon, 126/127 for no binary. A `.github/workflows/*` hit passes only on `WF_BLAST=green` (the `merge-risk` criterion's `ci_workflow_blast_eval`); red, none, or an unreadable read holds. `migrations/` and `_migration.py` hits still hold on any change, unless an `additiveMigrations` class (#13102) applies. The carve-out never widens `CRITICAL_PATTERNS` and never judges anything but these two manifest families; `Cargo.lock` and `package-lock.json` keep today's version-only treatment.
+**Suspect-line carve-out (#12999, operator ruling 2026-10-21)**: a critical-file hit is not a blanket veto on every edit to it. For a `Cargo.toml`-family or `package.json`-family hit that `version_only_diff` did not clear, the check-loop calls `suspect_critical_diff`, which wraps `loom-daemon forge suspect-critical-diff <pr> <file>`. Only a clean exit 0 with `SUSPECT=0` passes. It holds when a changed line is in a dependency, dev/build/target dependency, `[patch.*]`, `[replace]` or `[features]` table, is a `build =` / `links =` / `git =` / `registry =` / `path =` source key (a target table's own `path =` under `[[bin]]`, `[[bench]]`, `[[test]]`, `[[example]]` or `[lib]` is not one), or, in `package.json`, sits under `dependencies` / `devDependencies` / `optionalDependencies` / `peerDependencies` / `overrides` / `resolutions` or is a `preinstall` / `install` / `postinstall` / `prepare` script. A suspect hit emits the FAIL line with the matched line and its section, and passes that line on to the hold comment as `$CRITERION3_SUSPECT_LINE` / `$CRITERION3_SUSPECT_SECTION`. The verb takes an explicit `OWNER/REPO` (`--repo`, else resolved from the cwd; it never sends a `{owner}/{repo}` placeholder), and a forge read failure keeps its HTTP status and message in the verb's stderr, which the hold comment shows as `$CRITERION3_SUSPECT_ERROR`. Every other outcome is a hold: no patch, an unparseable hunk, an unreadable head file for a hunk whose section the patch does not show, a forge error, exit 2 from an older daemon, 126/127 for no binary. A `.github/workflows/*` hit passes only on `WF_BLAST=green` (the `merge-risk` criterion's `ci_workflow_blast_eval`); red, none, or an unreadable read holds. `migrations/` and `_migration.py` hits still hold on any change, unless an `additiveMigrations` class (#13102) applies. The carve-out never widens `CRITICAL_PATTERNS` and never judges anything but these two manifest families; `Cargo.lock` and `package-lock.json` keep today's version-only treatment.
 
 **Standing-authorization class (#12528)**: the check-loop runs `standing_auth_eval critical` (defined under the `merge-risk` criterion) before it can emit FAIL. A `champion.standingAuthorizations` class with `"coversCriticalFiles": true` whose `filePatterns` cover **every** changed file, with no changed file in `excludeFilePatterns`, no added/removed line matching `forbiddenDiffPatterns`, no kept-set path, and every `conditions` entry (`judgeApproval`, `greenCi`) holding now, passes this criterion and names the class id. Any one file outside the class, an excluded file, a forbidden diff line, an unreadable diff or a kept-set path restores today's FAIL and the durable hold below. A class without the flag, or no class at all, changes nothing. The check is mechanical, never a judgment call.
 
 **Critical-files-only class (#12648)**: a class with `"criticalFilesOnly": true` is matched against the **critical-file hits** only: the changed files this criterion's `CRITICAL_PATTERNS` flag, and the `previous_filename` of each on a rename. If every hit matches the class's `filePatterns`, no hit matches `excludeFilePatterns`, no added/removed line of a hit's patch matches `forbiddenDiffPatterns` (a hit with no patch fails closed), no changed file at all is a kept-set path, and every condition holds now, this criterion passes and the PASS line names the class (`#12648`) and the critical files. The other changed files are not matched against the class; the `merge-risk` criterion judged them, and the whole PR, on the four axes, because such a class is never eligible there. A rename into a covered path from outside the class or from a kept-set path, a forbidden line in the workflow patch, or an excluded workflow restores the FAIL and the durable hold. An open hold episode closes through the ordinary PASS row.
 
 **Per-hit composition (#13042)**: each `criticalFilesOnly` class is checked over **its own** hits only (a hit whose name and `previous_filename` match its `filePatterns` and no `excludeFilePatterns`), with its own forbidden-line, privileged-content and condition checks. The `critical-files` criterion passes when every critical-file hit is covered by at least one passing class, so a workflow + `package.json` PR passes under `workflow-critical-only` plus `package-scripts` and the PASS line names both ids (comma-joined). A class that fails on a hit leaves only that hit uncovered; a hit no class covers, a kept-set path anywhere, or an unreadable read still fails. The hold-state `auth=` digest is the existing `config get champion.standingAuthorizations --digest` of the whole class list, which changes whenever any class used changes. On a FAIL the block prints `STANDING_AUTH_WHY`, one line per class and hit with the failed check (pattern, exclude, forbidden or privileged line, condition, kept set) or "no criticalFilesOnly or coversCriticalFiles class is configured"; the hold comment quotes it, and Champion must never write "no class covers" without that output.
+
+**Declared critical paths (#13542)**: `champion.extraCriticalPaths` in `.loom/config.json` (read via `loom-daemon config get champion.extraCriticalPaths --json`, committed file as the fallback) lets a repo add its own critical paths without editing Loom-managed files. Entries are bash globs matched against the full repo path (`*` crosses `/`; anchored, not substring), for both `filename` and `previous_filename`, so a rename out of a declared path holds. The check runs before `standing_auth_eval critical` and holds on **any** edit: no `standingAuthorizations` class, carve-out (version-only, suspect-line, `WF_BLAST`) or `merge-risk` self-release clears it, and declared paths are never added to `CRITICAL_PATTERNS` or the kept set. It can only add: a built-in pattern still holds with the key set. A non-array value, or an empty or non-string entry, is skipped with a `WARN` line and adds nothing. The FAIL line and the hold comment name the matched glob (`$CRITERION3_DECLARED_PATH`).
 
 **Rationale**: Changes to these files require careful human review due to high impact.
 
@@ -2034,7 +2294,7 @@ This criterion is deliberately kept **in addition to** the merge-risk judgment i
 
 Run [`champion-critical-file-hold.md`](champion-critical-file-hold.md)'s tick immediately after the check-loop above, passing its verdict as `$CRITICAL_FILES_RESULT` (`"FAIL"` if it printed `FAIL: Critical file modified: ...` and would have exited 1; `"PASS"` otherwise), plus `$CRITERION3_SUSPECT_LINE` / `$CRITERION3_SUSPECT_SECTION` when the FAIL named a suspect line. That file owns the whole state machine: the `loom:blocked` label and its reason-only park record (#11861, was `loom:operator`), the hold / release-respected / cleared markers, the head-scoped operator release (#9016 — a hand-removed `loom:blocked` at the held head is a durable release Champion does not override on the next tick, which is what makes the documented `./.loom/scripts/merge-pr.sh <N>` human-merge path actually work against the #8112 contradiction guard), and the automatic clear when a later push narrows the diff.
 
-A FAIL skips Steps 2-3 for this PR this pass in **every** one of those states, including a released one — releasing the hold hands the merge to the operator, never back to Champion — and `loom:auto-merge-ok` does not release it (that override is scoped to the `merge-risk` criterion).
+A FAIL skips Steps 2-3 for this PR this pass in **every** one of those states, including a released one — releasing the hold hands the merge to the operator, never back to Champion — and `loom:auto-merge-ok` does not release it (that override is scoped to the `merge-risk` criterion). **One exception (#13321)**: when the tick prints `CF-RELEASED-HANDOFF pr=N head=<sha>` (`CF_HANDOFF=1`: a trusted release record at the current head, `loom:blocked` absent, merge-queue mode proven), the PR continues to the remaining criteria and, if they all pass, to Step 3 with `CF_HANDOFF_SHA` as its `EXPECTED_HEAD`. Step 3 is a separate shell, so prefix its block with `CF_HANDOFF=1 CF_HANDOFF_SHA=<sha>` (the tick's variables do not carry over; without them the queue-only guards below are inert); Step 3 then only ever hands it to the merge queue and never merges it directly. Every other state (`held`, `defer`, `stands`, `rearm`, an untrusted marker, direct mode) skips Steps 2-3 exactly as before.
 
 ### `ratification`: Ratification Hold (#12992)
 - [ ] No spec/decision file in the PR declares that merging it ratifies it
@@ -2782,13 +3042,15 @@ fi
 # Resync waiver bullet (#13096): only when resync_waiver_eval returned ELIGIBLE in this pass.
 RESYNC_BULLET=""
 if [ "${RESYNC_WAIVER_RESULT:-}" = "ELIGIBLE" ]; then
-  RESYNC_BULLET="- Kept-set hold waived (#13096): resync PR, every kept-set file byte-matches upstream tag \`$RESYNC_WAIVER_TAG\` (blob SHAs):
+  RESYNC_BULLET="- Kept-set hold waived (#13096, #13435): resync / Repo Skills bump PR, every kept-set file byte-matches upstream tag \`$RESYNC_WAIVER_TAG\` (blob SHAs):
 $(printf '%s' "$RESYNC_WAIVER_RECORD" | sed 's/^/  - /')
 <!-- champion:resync-waiver tag=$RESYNC_WAIVER_TAG -->"
 fi
 
 # $HOLD_REVERSAL_BLOCK (the merge-risk criterion's sticky-hold precheck): empty when never
 # held, mandatory when this merge reverses a prior hold (#4742).
+# $SELF_RELEASE_BLOCK (the `merge-risk` criterion's "Self-release", #12950): empty unless
+# Champion cleared the merge-risk judgment on its own confidence.
 ./.loom/scripts/post-comment.sh "$PR_NUMBER" --pr --body "$(cat <<EOF
 **Champion Auto-Merge**
 
@@ -2804,6 +3066,7 @@ ${RESYNC_BULLET:+$RESYNC_BULLET
 - $CI_STATUS
 
 $HOLD_REVERSAL_BLOCK
+${SELF_RELEASE_BLOCK:-}
 **Proceeding with merge...** If this was merged in error, you can revert with:
 \`git revert -m 1 <merge-sha>\`
 
@@ -2842,11 +3105,9 @@ fi
 `merge-pr.sh` names no actor, so a merge without Step 2 looks like a human ran
 it (#4742).
 
-**Timeout invariant (#9096)**: run this block under a **600000 ms** Bash-tool
-timeout, with `LOOM_AUTO_MERGE_TIMEOUT` (420s below) **strictly under** it, so
-`merge-pr.sh` gives up first and its exit 5 re-queues (the 180s gap covers the
-post-wait merge and cleanup). Equal values let the tool win, leaving Step 2's
-"Proceeding with merge..." as the PR's last word. **Edit one number, edit both.**
+**Timeout (#9096)**: run this block under a **120000 ms** Bash-tool timeout.
+`merge-pr.sh` waits on no checks (#12063), so it returns in seconds; a tool
+timeout would leave Step 2's "Proceeding with merge..." as the PR's last word.
 
 ```bash
 PR_NUMBER=$1
@@ -2862,13 +3123,20 @@ PF="/tmp/loom-champion/$CHAMPION_KEY/pin-pr-$PR_NUMBER"; PIN=; PIN_PID=; { read 
 { [ -n "$(find "$PF" -mmin -60)" ] || { [ "${PIN_PID:-0}" -gt 1 ] && kill -0 "$PIN_PID" && [ -n "$(find "$PF" -mmin -1440)" ]; } || PIN=; } 2>/dev/null
 if [ -n "$PIN" ] && [ "${EXPECTED_HEAD:-}" != "$PIN" ]; then MERGE_RC=9; echo "CHAMPION-PIN-MISSING pr=$PR_NUMBER: set EXPECTED_HEAD=$PIN in this block; not merging";
 # #11932: only `state=clear` (or exit 2: a daemon older than the verb) merges.
-elif HC=$(loom-daemon champion-hold classify --pr "$PR_NUMBER" 2>/dev/null); case "$? $HC" in "0 "*" state=clear "*|"2 ") false ;; esac; then MERGE_RC=10; echo "CHAMPION-HOLD-SKIP pr=$PR_NUMBER: ${HC:-unreadable}; not merging"; else
+elif HC=$(loom-daemon champion-hold classify --pr "$PR_NUMBER" 2>/dev/null); case "$? $HC" in "0 "*" state=clear "*|"2 ") false ;; esac; then MERGE_RC=10; echo "CHAMPION-HOLD-SKIP pr=$PR_NUMBER: ${HC:-unreadable}; not merging"
+# #13321: a released critical-file handoff is pinned to the released head; a moved or unreadable head enqueues nothing.
+elif [ "${CF_HANDOFF:-0}" = 1 ] && [ "$(gh pr view "$PR_NUMBER" --json headRefOid -q .headRefOid 2>/dev/null)" != "${CF_HANDOFF_SHA:-unset}" ]; then MERGE_RC=9; echo "CHAMPION-HANDOFF-HEAD-MOVED pr=$PR_NUMBER: head != ${CF_HANDOFF_SHA:-unset}; not enqueued"; else
 # Queue mode (#10256): only a DIRECT first stdout line + rc 0 falls through.
 HEAD_SHA=${EXPECTED_HEAD:-$(gh pr view "$PR_NUMBER" --json headRefOid -q .headRefOid)}
+[ "${CF_HANDOFF:-0}" = 1 ] && HEAD_SHA=$CF_HANDOFF_SHA   # #13321: the released head, nothing else
 QE=$(mktemp); QOUT=$(loom-daemon forge merge-queue step "$PR_NUMBER" \
   --approved-sha "$HEAD_SHA" 2>"$QE"); QRC=$?; QWHY=$(head -n1 "$QE"); rm -f "$QE"
 MERGE_RC=0; QCOMPAT=
 case "${QOUT%%$'\n'*}" in LOOM-MERGE-QUEUE-DIRECT*) [ "$QRC" -eq 0 ] || MERGE_RC=7 ;; *) MERGE_RC=7 ;; esac
+# #13321: a released critical-file PR (CF_HANDOFF=1, pinned to CF_HANDOFF_SHA) goes ONLY to the queue; direct/compat never merges it.
+if [ "${CF_HANDOFF:-0}" = 1 ]; then
+  case "${QOUT%%$'\n'*}" in LOOM-MERGE-QUEUE-DIRECT*) MERGE_RC=7; echo "CHAMPION-HANDOFF-NOT-QUEUE pr=$PR_NUMBER: critical-file release is the operator's merge in direct mode" ;; esac
+fi
 # #10628: a daemon without `step` merges directly only on PROVEN direct mode:
 # its own `mode` says direct, or it predates merge modes (no `merge-queue`).
 case "$QRC|$QOUT|$QWHY" in
@@ -2876,12 +3144,13 @@ case "$QRC|$QOUT|$QWHY" in
     [ "${QMODE%% source=*}" = "merge-queue: mode=direct" ] && QCOMPAT=1 ;;
   "2||error: unrecognized subcommand 'merge-queue'") QCOMPAT=1 ;;
 esac
-[ -n "$QCOMPAT" ] && { MERGE_RC=0; echo "LOOM-MERGE-QUEUE-COMPAT pr=$PR_NUMBER: $QWHY; direct mode proven, pre-#10256 merge"; }
+[ -n "$QCOMPAT" ] && [ "${CF_HANDOFF:-0}" != 1 ] && { MERGE_RC=0; echo "LOOM-MERGE-QUEUE-COMPAT pr=$PR_NUMBER: $QWHY; direct mode proven, pre-#10256 merge"; }
 case "$MERGE_RC ${QOUT%%$'\n'*}" in "0 "*) ;; # direct: merge-pr.sh below
   "7 LOOM-MERGE-QUEUE-"QUEUED*|"7 LOOM-MERGE-QUEUE-"DROPPED*|"7 LOOM-MERGE-QUEUE-"HANDED-OFF*|\
   "7 LOOM-MERGE-QUEUE-"MERGED*) echo "$QOUT (rc=$QRC)" ;; # queue protocol working: silent
-  *) QWHY="$(printf '%s' "$QOUT" | head -n2 | tr '\n' ' ')$QWHY (rc=$QRC)" # a stall: surface it, 1 notice/head
-     echo "CHAMPION-MERGE-QUEUE-STALL pr=$PR_NUMBER: $QWHY"; QM="<!-- champion:merge-queue-stall pr=$PR_NUMBER sha=$HEAD_SHA -->"
+  *) QWHY="$(printf '%s' "$QOUT" | head -n2 | tr '\n' ' ')$QWHY (rc=$QRC)" # a stall: surface it, 1 notice/head+reason
+     QH=$(printf '%s' "$QWHY" | cksum | cut -d' ' -f1) # a changed reason on the same head posts a new notice (#13357)
+     echo "CHAMPION-MERGE-QUEUE-STALL pr=$PR_NUMBER: $QWHY"; QM="<!-- champion:merge-queue-stall pr=$PR_NUMBER sha=$HEAD_SHA why=$QH -->"
      gh pr view "$PR_NUMBER" --json comments -q '.comments[].body' 2>/dev/null | grep -qF "$QM" || gh pr comment "$PR_NUMBER" \
        --body "**Champion: merge blocked** by \`forge merge-queue step\`: \`$QWHY\`. Not merged, still approved, retried next pass. \`unrecognized subcommand\`: upgrade \`loom-daemon\`.
 
@@ -2889,9 +3158,8 @@ $QM" >/dev/null ;;
 esac
 fi
 
-# Forge-API merge: --auto merges HERE (#8410), head-SHA precondition (#5579).
-# No re-date: a head whose checks are green is not re-tested because main moved (#12063). 420s < 600000 ms (above).
-[ "$MERGE_RC" -eq 0 ] && { LOOM_AUTO_MERGE_TIMEOUT=420 \
+# Forge-API merge: one call, head-SHA precondition (#5579). No wait, no re-date (#12063): GitHub gates required checks.
+[ "$MERGE_RC" -eq 0 ] && { \
   ./.loom/scripts/merge-pr.sh "$PR_NUMBER" --auto ${EXPECTED_HEAD:+--expected-head "$EXPECTED_HEAD"} || MERGE_RC=$?; }
 
 if [ "$MERGE_RC" -eq 7 ] || [ "$MERGE_RC" -eq 3 ] || [ "$MERGE_RC" -eq 4 ] || [ "$MERGE_RC" -eq 5 ] || [ "$MERGE_RC" -eq 8 ] || [ "$MERGE_RC" -eq 9 ] || [ "$MERGE_RC" -eq 10 ]; then
@@ -2941,6 +3209,29 @@ Champion: #$PR_NUMBER merged and this bump now conflicts. Requesting a rebase.
 
 $MARK"
   done
+fi
+```
+
+### Step 3b: Close Superseded Resync PRs (#12945)
+
+When the PR just merged is a `chore(loom): resync installed Loom to vY` PR, every other open resync PR
+in this repo for a lower version is superseded by it. Close each with a comment. A title that does not
+parse as `X.Y.Z` is left alone; a failed read or close skips that PR (best effort, never blocks Step 4).
+
+```bash
+MERGED_TITLE=$(gh api "repos/{owner}/{repo}/pulls/$PR_NUMBER" --jq '.title' 2>/dev/null) || MERGED_TITLE=""
+if [[ "$MERGED_TITLE" =~ ^chore\(loom\):\ resync\ installed\ Loom\ to\ v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+  NEW_VER="${BASH_REMATCH[1]}"
+  while IFS=$'\t' read -r OLD_PR OLD_TITLE; do
+    [ -n "$OLD_PR" ] && [ "$OLD_PR" != "$PR_NUMBER" ] || continue
+    [[ "$OLD_TITLE" =~ ^chore\(loom\):\ resync\ installed\ Loom\ to\ v([0-9]+\.[0-9]+\.[0-9]+)$ ]] || continue
+    OLD_VER="${BASH_REMATCH[1]}"
+    [ "$OLD_VER" != "$NEW_VER" ] && [ "$(printf '%s\n%s\n' "$OLD_VER" "$NEW_VER" | sort -V | head -1)" = "$OLD_VER" ] || continue
+    ./.loom/scripts/post-comment.sh "$OLD_PR" --pr --body "Champion: closing as superseded by #$PR_NUMBER (resync to v$NEW_VER merged; this PR targets v$OLD_VER).
+
+<!-- champion:resync-superseded by=$PR_NUMBER -->" || continue
+    gh pr close "$OLD_PR" >/dev/null 2>&1 || true
+  done < <(gh pr list --state open --limit 100 --json number,title --jq '.[] | [.number, .title] | @tsv' 2>/dev/null)
 fi
 ```
 
@@ -3062,7 +3353,7 @@ cannot distinguish from a correctly-passing filter.
 **Per-repo switch: `champion.outOfBandAcGate` (#12703).** Boolean, **absent =
 `true`** (the gate as described below). A repo that tests on its live deployment
 and does not want a human hold waiting on a confirmation of a real run sets it
-`false` through the normal config tiers (for fleet-gitops: the repo's override
+`false` through the normal config tiers (for the fleet state store: the repo's override
 in `fleet.yml`; no new plumbing, same resolution as `champion.standingAuthorizations`).
 First use case: 2AMLogic/loom-ui. With `false`, Step 4 runs neither the
 classifier nor `hold_issue_on_unverified_ac` for any linked issue: no
@@ -4165,7 +4456,7 @@ fi
 
 Evaluate `loom-daemon pr-queue --role champion` rows in order (`.loom/docs/pr-planning.md`). Continue past holds and CI/dependency waits.
 
-After each completed/skipped PR, refresh the queue and take the next unvisited row; keep a per-pass visited set. It pauses once after `${LOOM_CHAMPION_PR_SLICE:-10}` rows for promotion, then resumes (`champion.md`, #10753). Continue past individual merge failures.
+After each completed/skipped PR, refresh the queue and take the next unvisited row; keep a per-pass visited set. Continue past individual merge failures.
 
 **Congestion signal, report-only.** At the start of the pass, run
 `loom-daemon forge pr-congestion` from the repo root and copy its verdict
@@ -4226,9 +4517,9 @@ Never the failure exit **1**; each means "the merge did not happen":
 - **3** — the head moved between the fresh head-SHA read and the merge call.
 - **4** — retired (#12063 slice 1): `merge-pr.sh` no longer re-dates checks, so
   it never emits 4. Still re-queued if seen, for mixed versions mid-roll.
-- **5** — `--auto`'s bounded settle-wait expired; no required check went red.
-  **Do not "fix" a recurring 5 by raising `LOOM_AUTO_MERGE_TIMEOUT`** (pinned
-  under Step 3's own timeout, #9096); re-queuing is cheap.
+- **5** — a required status check is missing or pending on this head (#10688), or
+  the forge refused the merge call over a pending/red one (#12063). Nothing
+  waits; re-queuing is cheap.
 - **7** — `merge-pr.sh` ran: a sequencing hold (`LOOM-SEQUENCED-HOLD`,
   #11330), never a stall. Or Step 3's: `merge-queue step` gave no direct
   verdict, so `merge-pr.sh` never ran (#10256). QUEUED / DROPPED / HANDED-OFF /

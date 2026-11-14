@@ -222,6 +222,7 @@ from __future__ import annotations
 import fnmatch
 import importlib
 import json
+import math
 import os
 import re
 import subprocess
@@ -231,13 +232,15 @@ from typing import Any
 
 from . import env_provenance
 from . import macros as macro_spec
+from . import synthesize_timeout as ytimeout
+from ._jsonnum import is_int, is_number
 from ._paths import _load_request_json, _reject_unknown_keys, validate_request_shape
 from ._provenance import (
     INPUT_ROLE_SOURCE,
     _combined_content_hash,
-    _content_hash,
     _yosys_version,
     build_provenance,
+    content_hash,
     sha256_file,
     wasi_sandbox_hint_if_applicable,
 )
@@ -275,6 +278,7 @@ from .sta import StaError, compute_critical_path
 # `ADDER_ARCHITECTURES`, which moved there with its only callers.
 # `synthesize_arithmetic.py` imports this module's own helpers back at call
 # time, never at load time, so this import direction is the only one.
+from .synthesize_abc_timing import parse_abc_regions
 from .synthesize_arithmetic import ADDER_ARCHITECTURES as ADDER_ARCHITECTURES
 from .synthesize_arithmetic import (
     _candidate_measurement,
@@ -294,6 +298,8 @@ from .synthesize_arithmetic import _verify_generated_adder as _verify_generated_
 # Issue #2745: same one-directional split as `synthesize_arithmetic.py` --
 # `synthesize_memory.py` imports this module's helpers at call time only.
 from .synthesize_memory import collect_memory_evidence
+from .synthesize_netlist_normalize import rewrite_netlist
+from .synthesize_x_scan import netlist_x_constant_warning
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
@@ -307,7 +313,7 @@ from .synthesize_memory import collect_memory_evidence
 #: sim` (issue #1261) -- a committed evidence record wraps this response
 #: unmodified (`docs/design/sim-evidence-discipline-spike.md`), so an
 #: absolute path here used to leak the author's home directory/worktree
-#: layout into every such record. See `_report_path` below.
+#: layout into every such record. See `env_provenance.repo_relative_path`.
 #: `equivalence.artifacts.{script_path,netlist_path}` is `klt equiv`'s own
 #: response shape (echoed through unmodified) and is deliberately **not**
 #: normalized here -- doing so would be a `klt equiv` contract change,
@@ -336,15 +342,6 @@ _ADDER_MODES = ("auto", DEFAULT_ADDER_LABEL)
 #: measurement is dominated by mapping noise -- the issue's own "sub-16-bit
 #: micro-optimisation" non-goal, with a little headroom.
 DEFAULT_ADDER_MIN_WIDTH = 8
-
-#: ABC's own ``stime -p`` summary line, as it reaches the Yosys log (and,
-#: via ``tee -q -o``, the captured ABC log this module parses):
-#: ``ABC: WireLoad = "none"  Gates = 297 ( 5.7 %)   Cap = 6.2 ff ( 12.4 %)
-#: Area = 1986.91 ( 66.3 %)   Delay = 2485.93 ps  ( 32.3 %)``. Verified live
-#: (Yosys 0.68+48, sky130_fd_sc_hd, issue #807).
-_ABC_STIME_RE = re.compile(
-    r'WireLoad\s*=\s*"(?P<wire_load>[^"]*)".*?Delay\s*=\s*(?P<delay_ps>[\d.]+)\s*ps'
-)
 
 #: Per-cell-library ABC constraint inputs -- ``(set_driving_cell cell,
 #: set_load femtofarads)`` -- written to the ``<top>_abc.constr`` file this
@@ -751,30 +748,6 @@ _MAX_WARNING_REPRESENTATIVES = 10
 #: this scalar attribute and leaves a cell with no such entry absent from its
 #: result, rather than guessing from the conditional groups.
 
-#: A Liberty ``cell ("<name>") {`` group header. Each cell's body runs from
-#: its header to the next header -- enough to read a cell's scalar ``area``
-#: attribute without :func:`parse_liberty_text`'s full parse. The cell name's
-#: quotes are optional: a real volare `sky130_fd_sc_hd` liberty quotes it, a
-#: synthetic/other-vendor liberty may not (verified live against both, issue
-#: #1626).
-_LIBERTY_CELL_HEADER_RE = re.compile(
-    r'\bcell\s*\(\s*"?(?P<name>[A-Za-z0-9_]+)"?\s*\)\s*\{'
-)
-
-#: The scalar ``area : <value>;`` attribute Liberty defines for a cell's
-#: footprint -- the number Yosys's own ``stat -liberty`` sums into
-#: ``area_um2``. Read here (issue #2635) only to answer the *inverse*
-#: question: which of the cell types this run actually instantiated have
-#: **no** such number in the resolved liberty, and therefore contributed a
-#: silent ``0`` to ``area_um2``. A blackboxed hard macro is the motivating
-#: case -- its area lives in its own macro liberty, never in the
-#: standard-cell liberty ``stat -liberty`` was handed -- but a
-#: ``-dont_use``d or otherwise unmapped cell type lands in the same bucket,
-#: which is exactly why the response field is a cell list rather than a
-#: macro list. Deliberately minimal, the same scope discipline
-#: :func:`_parse_liberty_leakage_nw` states for itself.
-_CELL_AREA_RE = re.compile(r"\barea\s*:\s*(?P<value>[-+0-9.eE]+)\s*;")
-
 #: The value of a library's ``leakage_power_unit`` attribute --
 #: ``"1nW"`` (sky130_fd_sc_hd) / ``1uW`` (gf180mcu_fd_sc_mcu9t5v0, unquoted) --
 #: the multiplier a bare ``cell_leakage_power`` number in this liberty is
@@ -811,23 +784,6 @@ class SynthesizeError(Exception):
     with ``structural.has_critical: true`` and exit code ``3`` -- never this
     exception. See ``docs/cli/synthesize.md``'s "Exit codes" section.
     """
-
-
-def _report_path(path: str | None, *, repo_root: str | None) -> dict[str, Any]:
-    """Normalise one output-path field for this module's own JSON response
-    (issue #1844) -- a thin, module-local wrapper over
-    :func:`~klayout_tools.env_provenance.repo_relative_path` rather than a
-    second normalizer, so `klt synthesize`'s reports and `klt
-    env-provenance`'s own emitter agree on exactly one `{path, scope}`
-    shape, matching the precedent `klt pex`/`klt sim` set for issue #1261.
-
-    Deliberately applied only at the point a path is inserted into the
-    response dict -- every internal caller (`_run_yosys`, `_read_sta_timing`,
-    the equivalence gate, `_run_timing_restructuring`, `_compute_baseline`,
-    arithmetic candidate measurement) keeps using the real absolute path
-    variable for actual file I/O; only the reported *value* changes.
-    """
-    return env_provenance.repo_relative_path(path, repo_root=repo_root)
 
 
 def _script_path_text(path: str, *, repo_root: str | None) -> str:
@@ -1016,11 +972,13 @@ _ALLOWED_REQUEST_KEYS = frozenset(
         "structural",
         "baseline",
         "arithmetic",
+        "latch_map",
         "run_id",
         "outputs",
         "parameters",
         "sv_frontend",
         "defines",
+        "yosys_timeout_s",
         "macros",
     }
 )
@@ -1076,6 +1034,7 @@ def _validate_outputs(request: dict[str, Any], request_path: str) -> None:
             )
 
 
+@ytimeout.scoped_yosys_timeout
 def run_synthesize(
     request_path: str,
     *,
@@ -1202,6 +1161,7 @@ def run_synthesize(
     )
 
     sv_frontend = validate_sv_frontend(request.get("sv_frontend"), SynthesizeError)
+    yosys_timeout_s = ytimeout.bind_yosys_timeout(request, SynthesizeError)
 
     pdk_spec = request["pdk"]
     if not isinstance(pdk_spec, dict):
@@ -1228,6 +1188,7 @@ def run_synthesize(
     # resolved liberty, just below.
     dont_use_requested, dont_use_mode = _resolve_dont_use_request(constraints)
     expected_latches = _resolve_expected_latches(request)
+    latch_map_request = _resolve_latch_map(request)
     # Issue #2635: the shared hard-macro declaration. Shape-validated here,
     # with everything else that needs no PDK resolution; the one
     # corner-dependent half (which of a macro's per-corner liberties applies)
@@ -1241,6 +1202,7 @@ def run_synthesize(
     dont_use_validated = _validate_dont_use_against_liberty(
         dont_use_requested, liberty_path
     )
+    abc_constr_request = _resolve_abc_constr_request(constraints, liberty_path)
 
     # Issue #2635: a declared macro's LEF/liberty/blackbox/GDS are *declared
     # inputs* to this run exactly as the RTL sources and the standard-cell
@@ -1288,6 +1250,7 @@ def run_synthesize(
     # Issue #4196: likewise for preprocessor defines (a separate field, so the
     # input content hash of existing committed reports is unchanged).
     provenance["defines"] = dict(defines)
+    provenance.update(ytimeout.timeout_fields(yosys_timeout_s))
     output_dir = _create_run_directory(
         request_dir, request, ignore_outputs_dir=_scratch_run_dir
     )
@@ -1313,7 +1276,17 @@ def run_synthesize(
     netlist_path = os.path.join(output_dir, f"{hdl_toplevel}_synth.v")
     stats_path = os.path.join(output_dir, f"{hdl_toplevel}_stats.json")
 
-    constr_inputs = _ABC_CONSTR_INPUTS.get(cell_library)
+    # Issue #4662: a request-supplied `constraints.abc_constr` wins over the
+    # built-in per-library entry and is the only way a library without one
+    # gets `-constr` (sizing/buffering/`stime`).
+    constr_inputs = abc_constr_request or _ABC_CONSTR_INPUTS.get(cell_library)
+    constr_source = (
+        "request"
+        if abc_constr_request is not None
+        else "builtin"
+        if constr_inputs is not None
+        else None
+    )
     constr_path: str | None = None
     abc_log_path: str | None = None
     if constr_inputs is not None:
@@ -1340,6 +1313,10 @@ def run_synthesize(
         dont_use_globs=dont_use_globs,
         tie_cells=_TIE_CELLS.get(cell_library),
         constr_inputs=constr_inputs,
+    )
+
+    latch_map_report, latch_techmap_path = _prepare_latch_map(
+        latch_map_request, liberty_path, output_dir, hdl_toplevel
     )
 
     arithmetic = None
@@ -1396,6 +1373,7 @@ def run_synthesize(
         tie_cells=_TIE_CELLS.get(cell_library),
         adder_sources=adder_sources,
         adder_techmap_path=adder_techmap_path,
+        latch_techmap_path=latch_techmap_path,
         macro_inputs=tuple(macro_inputs),
         repo_root=repo_root,
         pdk_root=pdk_info["root"],
@@ -1415,17 +1393,13 @@ def run_synthesize(
     # is never the one executed.
     yosys_log = _run_yosys(executed_script_path, cwd=repo_root)
 
-    # Issue #1973 Failure 1: strip any `signed` port/wire declaration Yosys's
-    # `write_verilog` left in place -- see `_strip_signed_qualifiers`'s own
-    # docstring for why this is a post-write text rewrite rather than a
-    # Yosys pass. Rewritten in place only when something actually changed,
-    # so a netlist with no `signed` declaration at all (the common case) is
-    # never touched -- not even its mtime.
+    # Issue #1973 Failure 1: strip any `signed` declaration `write_verilog`
+    # left in place (see `_strip_signed_qualifiers`); rewritten only when
+    # something changed, so a clean netlist's mtime is never touched.
     netlist_text = _read_produced_netlist(netlist_path)
-    stripped_netlist_text = _strip_signed_qualifiers(netlist_text)
-    if stripped_netlist_text != netlist_text:
-        with open(netlist_path, "w", encoding="utf-8") as handle:
-            handle.write(stripped_netlist_text)
+    rewrite_netlist(  # issue #4872: also drops host source dirs
+        netlist_path, netlist_text, _strip_signed_qualifiers(netlist_text), elab_sources
+    )
 
     module_stats = _read_stats(stats_path, hdl_toplevel)
     timing = _read_produced_abc_timing(abc_log_path, delay_target_ps)
@@ -1457,10 +1431,19 @@ def run_synthesize(
     warnings_summary = _summarize_warnings(
         yosys_log,
         capability_warnings={
-            **_library_capability_warnings(cell_library),
+            **_library_capability_warnings(cell_library, constr_inputs is not None),
             **_missing_timing_warning(abc_log_path, timing),
+            **netlist_x_constant_warning(_read_produced_netlist(netlist_path)),
             **_dont_use_unsupported_warning(cell_exclusions),
-            **_macro_area_warning(cells_without_area, macro_cells),
+            **_macro_area_warning(
+                cells_without_area,
+                macro_cells,
+                macros_with_lib=frozenset(
+                    macro_input["cell"]
+                    for macro_input in macro_inputs
+                    if macro_input["source"] == "liberty"
+                ),
+            ),
         },
     )
     # Issue #2745: memory-mapping evidence from a *separate* Yosys
@@ -1478,6 +1461,7 @@ def run_synthesize(
         parameters=parameters,
         liberty_path=liberty_path,
         defines=defines,
+        macro_inputs=tuple(macro_inputs),
     )
 
     equivalence = None
@@ -1555,7 +1539,9 @@ def run_synthesize(
             {
                 **entry,
                 "blackbox_source": macro_input["source"],
-                "blackbox_path": _report_path(macro_input["path"], repo_root=repo_root),
+                "blackbox_path": env_provenance.repo_relative_path(
+                    macro_input["path"], repo_root=repo_root
+                ),
             }
             for entry, macro_input in zip(
                 macro_spec.macros_response(
@@ -1566,7 +1552,9 @@ def run_synthesize(
                     # evidence, and an absolute path in one leaks the
                     # author's home directory. `macros[]`'s paths are no
                     # exception; `find_absolute_path_fields` enforces it.
-                    normalize_path=lambda path: _report_path(path, repo_root=repo_root),
+                    normalize_path=lambda path: env_provenance.repo_relative_path(
+                        path, repo_root=repo_root
+                    ),
                 ),
                 macro_inputs,
                 strict=True,
@@ -1602,6 +1590,15 @@ def run_synthesize(
         # Always present (like `structural`/`warnings`); additive field, no
         # `schema_version` bump (docs/json-contract.md).
         "cell_exclusions": cell_exclusions,
+        # Issue #4662: where the `abc -constr` inputs came from -- `request`
+        # (`constraints.abc_constr`), `builtin` (`_ABC_CONSTR_INPUTS`), or
+        # `null` when no `-constr` was passed. Additive field, no
+        # `schema_version` bump.
+        "abc_constr": {
+            "source": constr_source,
+            "driving_cell": constr_inputs[0] if constr_inputs else None,
+            "load_ff": constr_inputs[1] if constr_inputs else None,
+        },
         "warnings": warnings_summary,
         # Issue #2745: whether inferred memories were lowered to logic,
         # optimized away before lowering, or survived mapping -- per module
@@ -1612,26 +1609,36 @@ def run_synthesize(
         # `schema_version` bump (docs/json-contract.md).
         "memory_mapping": memory_mapping,
         "blackbox_modules": blackbox_modules,
-        "netlist_path": _report_path(netlist_path, repo_root=repo_root),
+        "netlist_path": env_provenance.repo_relative_path(
+            netlist_path, repo_root=repo_root
+        ),
         # Issue #2452: SHA-256 of the exact bytes of the file `netlist_path`
         # refers to, taken from the internal absolute path (never the
         # redacted `{path, scope}` object) after signed-qualifier stripping.
         # Additive field; no `schema_version` bump.
         "netlist_sha256": sha256_file(netlist_path),
-        "script_path": _report_path(script_path, repo_root=repo_root),
+        "script_path": env_provenance.repo_relative_path(
+            script_path, repo_root=repo_root
+        ),
         # Issue #1870: the script Yosys was actually handed. Equal to
         # `script_path` whenever no `$PDK_ROOT` token was written (a liberty
         # outside the resolved install root), and the rehydrated
         # `synth_<top>.run.ys` sibling otherwise -- so "what ran" is always
         # nameable, and never has to be inferred from a filename convention.
         # Additive field, no `schema_version` bump (docs/json-contract.md).
-        "run_script_path": _report_path(executed_script_path, repo_root=repo_root),
+        "run_script_path": env_provenance.repo_relative_path(
+            executed_script_path, repo_root=repo_root
+        ),
         "provenance": provenance,
+        **ytimeout.timeout_fields(yosys_timeout_s),
         "equivalence": equivalence,
         "restructuring": restructuring,
         "arithmetic": arithmetic,
         "baseline": None,
     }
+    _attach_latch_map_report(
+        response, latch_map_report, latch_techmap_path, repo_root=repo_root
+    )
     if arithmetic is not None:
         arithmetic["selected_measured"] = _candidate_measurement(
             instance_count=module_stats["num_cells"],
@@ -1996,7 +2003,7 @@ def _run_timing_restructuring(
     # the value handed back to `run_synthesize`'s response is normalized,
     # and only when it is not already `None` (no resize applied).
     if report["restructured_netlist_path"] is not None:
-        report["restructured_netlist_path"] = _report_path(
+        report["restructured_netlist_path"] = env_provenance.repo_relative_path(
             report["restructured_netlist_path"], repo_root=repo_root
         )
 
@@ -2119,31 +2126,6 @@ def _macro_blackbox_inputs(
     return inputs
 
 
-def _liberty_cell_areas(liberty_text: str) -> dict[str, float]:
-    """Every ``cell (name) { ... area : <value>; ... }`` scalar in
-    ``liberty_text`` (issue #2635). Deliberately minimal, and the exact
-    block-scanning structure :func:`_parse_liberty_leakage_nw` already uses
-    -- a cell with no ``area`` line is simply absent from the result, never
-    assigned a guessed value, which is the whole point here."""
-    headers = list(_LIBERTY_CELL_HEADER_RE.finditer(liberty_text))
-    areas: dict[str, float] = {}
-    for index, header in enumerate(headers):
-        body_start = header.end()
-        body_end = (
-            headers[index + 1].start()
-            if index + 1 < len(headers)
-            else len(liberty_text)
-        )
-        match = _CELL_AREA_RE.search(liberty_text, body_start, body_end)
-        if match is None:
-            continue
-        try:
-            areas[header.group("name")] = float(match.group("value"))
-        except ValueError:  # pragma: no cover - regex only matches numbers
-            continue
-    return areas
-
-
 def _cells_without_area(
     liberty_path: str, instance_counts_by_type: dict[str, int]
 ) -> list[str] | None:
@@ -2162,8 +2144,8 @@ def _cells_without_area(
     ``[]`` -- a real, not-fabricated empty answer -- when the design
     instantiates nothing at all, or when every instantiated type does have
     an area. ``None`` -- "not establishable", never a fabricated empty list
-    -- when the liberty cannot be read or this deliberately-partial parser
-    can see no ``cell (...)`` group in it at all (a liberty whose cells all
+    -- when the liberty cannot be read or parsed, or
+    has no ``cell (...)`` group at all (a liberty whose cells all
     lack ``area`` is *not* that case: its cells are parseable, so every
     instantiated type is reported missing), exactly the posture
     :func:`_liberty_cell_names` takes for the same two cases.
@@ -2173,18 +2155,28 @@ def _cells_without_area(
     try:
         with open(liberty_path, encoding="utf-8") as handle:
             liberty_text = handle.read()
-    except (OSError, UnicodeDecodeError):
+        library = parse_liberty_text(liberty_text, source=liberty_path)
+    except (OSError, UnicodeDecodeError, LibertyCompareError):
         return None
-    if _LIBERTY_CELL_HEADER_RE.search(liberty_text) is None:
+    cells = [cell for cell in library.children("cell") if cell.args]
+    if not cells:
         return None
-    areas = _liberty_cell_areas(liberty_text)
+    areas: set[str] = set()
+    for cell in cells:
+        try:
+            float(cell.attributes.get("area", ""))
+        except (TypeError, ValueError):
+            continue
+        areas.add(cell.args[0])
     return sorted(
         cell_type for cell_type in instance_counts_by_type if cell_type not in areas
     )
 
 
 def _macro_area_warning(
-    cells_without_area: list[str] | None, macro_cells: frozenset[str]
+    cells_without_area: list[str] | None,
+    macro_cells: frozenset[str],
+    macros_with_lib: frozenset[str] | None = None,
 ) -> dict[str, str]:
     """A ``warnings`` entry (issue #2635) whenever ``area_um2`` demonstrably
     does not account for every instantiated cell type.
@@ -2198,6 +2190,11 @@ def _macro_area_warning(
     unmapped type" because the dispositions differ: the first is expected
     and the caller must add the macro's own area themselves, the second is
     usually a ``-dont_use``/mapping problem.
+
+    ``macros_with_lib`` (issue #4368) names the macros that have a macro
+    liberty (``response.macros[].lib`` non-null); a LEF-only or
+    blackbox-only macro has no area there, so the text must not send the
+    caller to it. ``None`` treats every macro as having one.
     """
     if not cells_without_area:
         return {}
@@ -2205,14 +2202,34 @@ def _macro_area_warning(
     others_missing = [cell for cell in cells_without_area if cell not in macro_cells]
     warnings: dict[str, str] = {}
     if macros_missing:
-        warnings["macro_area_excluded"] = (
+        with_lib = [
+            cell
+            for cell in macros_missing
+            if macros_with_lib is None or cell in macros_with_lib
+        ]
+        without_lib = [cell for cell in macros_missing if cell not in with_lib]
+        text = (
             "area_um2 excludes the hard macro(s) "
             + ", ".join(macros_missing)
-            + ": their area lives in their own macro liberty, not in the "
-            "standard-cell liberty stat -liberty was handed. Add it from "
-            "response.macros[].lib before comparing area_um2 to an area "
-            "budget."
+            + ": the standard-cell liberty stat -liberty was handed has no "
+            "area for them."
         )
+        if with_lib:
+            text += (
+                " Add the area of "
+                + ", ".join(with_lib)
+                + " from its macro liberty (response.macros[].lib) before "
+                "comparing area_um2 to an area budget."
+            )
+        if without_lib:
+            text += (
+                " "
+                + ", ".join(without_lib)
+                + " has no macro liberty (response.macros[].lib is null: "
+                "LEF-only or verilog_blackbox), so no area is available "
+                "for it here."
+            )
+        warnings["macro_area_excluded"] = text
     if others_missing:
         warnings["cells_without_liberty_area"] = (
             "area_um2 excludes instantiated cell type(s) with no liberty "
@@ -2310,8 +2327,7 @@ def _validate_clock_entry(entry: Any, where: str) -> dict[str, Any]:
     port = entry.get("port")
     if not isinstance(port, str) or not port.strip():
         raise SynthesizeError(f"{where}.port must be a non-empty string")
-    period = entry.get("period_ns")
-    if isinstance(period, bool) or not isinstance(period, (int, float)):
+    if not is_number(period := entry.get("period_ns")):
         raise SynthesizeError(
             f"{where}.period_ns must be a positive number (nanoseconds)"
         )
@@ -2390,6 +2406,57 @@ def _describe_clock_targets(
         "delay_target_basis": basis,
         "per_clock_enforced": False,
     }
+
+
+def _resolve_abc_constr_request(
+    constraints: dict[str, Any] | None, liberty_path: str
+) -> tuple[str, float] | None:
+    """The validated ``constraints.abc_constr`` as ``(driving_cell, load_ff)``,
+    or ``None`` when the request does not supply one (issue #4662).
+
+    Supplies the ``abc -constr`` inputs for any ``cell_library`` and overrides
+    the built-in :data:`_ABC_CONSTR_INPUTS` entry when both exist. Any shape
+    problem, an unknown key, a ``driving_cell`` absent from the resolved
+    liberty (skipped only when the liberty's cell list cannot be established,
+    as for ``dont_use``), or a non-positive/non-finite ``load_ff`` is a
+    :class:`SynthesizeError` naming the field.
+    """
+    if not constraints or constraints.get("abc_constr") is None:
+        return None
+    raw = constraints["abc_constr"]
+    where = "request.constraints.abc_constr"
+    if not isinstance(raw, dict):
+        raise SynthesizeError(f"{where} must be a JSON object")
+    unknown = sorted(set(raw) - {"driving_cell", "load_ff"})
+    if unknown:
+        raise SynthesizeError(
+            f"{where} has unknown key(s) {unknown}; allowed: driving_cell, load_ff"
+        )
+    for key in ("driving_cell", "load_ff"):
+        if key not in raw:
+            raise SynthesizeError(f"{where}.{key} is required")
+    driving_cell = raw["driving_cell"]
+    if not isinstance(driving_cell, str) or not driving_cell:
+        raise SynthesizeError(f"{where}.driving_cell must be a non-empty string")
+    load_ff = raw["load_ff"]
+    if (
+        isinstance(load_ff, bool)
+        or not isinstance(load_ff, (int, float))
+        or not math.isfinite(load_ff)
+        or load_ff <= 0
+    ):
+        raise SynthesizeError(
+            f"{where}.load_ff must be a finite number greater than zero "
+            f"(femtofarads), got {load_ff!r}"
+        )
+    cell_names = _liberty_cell_names(liberty_path)
+    if cell_names is not None and driving_cell not in cell_names:
+        raise SynthesizeError(
+            f"{where}.driving_cell '{driving_cell}' is not a cell in the "
+            f"resolved liberty '{os.path.basename(liberty_path)}' "
+            f"({len(cell_names)} cells)"
+        )
+    return driving_cell, float(load_ff)
 
 
 def _write_constr(constr_path: str, driving_cell: str, load_ff: float) -> None:
@@ -2721,6 +2788,7 @@ def _write_script(
     tie_cells: tuple[tuple[str, str], tuple[str, str]] | None = None,
     adder_sources: tuple[str, ...] = (),
     adder_techmap_path: str | None = None,
+    latch_techmap_path: str | None = None,
     macro_inputs: tuple[dict[str, str], ...] = (),
     repo_root: str | None = None,
     pdk_root: str | None = None,
@@ -2820,6 +2888,13 @@ def _write_script(
     that was not generated) is left untouched for Yosys's own expansion, so
     this is always a subset substitution.
 
+    ``latch_techmap_path`` (issue #4458, the request's ``latch_map`` field)
+    inserts ``techmap -map <path>`` **after** ``synth`` and **before**
+    ``dfflibmap``: ``synth`` is what infers the ``$_DLATCH_P_``/
+    ``$_DLATCH_N_`` primitives the rule file matches, and ``dfflibmap``/``abc``
+    would otherwise leave them unmapped. ``None`` emits nothing, so every
+    pre-#4458 script is byte-identical.
+
     Commit-safety vs. cwd-independence (issue #1844): every path embedded in
     the script used to be absolute unconditionally, so the script ran
     correctly regardless of the invoking process's own working directory --
@@ -2906,7 +2981,9 @@ def _write_script(
     # `read_verilog` of a legacy stub for the same cell still works.
     lines = [f"read_liberty -lib {liberty_text}"]
     lines += [
-        read_verilog_line(_script_path_text(path, repo_root=repo_root), defines)
+        read_verilog_line(
+            _script_path_text(path, repo_root=repo_root), defines, parameters
+        )
         for path in sources
     ]
     # Issue #2635: every declared hard macro's blackbox declaration, before
@@ -2935,8 +3012,12 @@ def _write_script(
         lines.append(
             f"techmap -map {_script_path_text(adder_techmap_path, repo_root=repo_root)}"
         )
+    lines.append(f"synth -top {hdl_toplevel}")
+    if latch_techmap_path is not None:
+        lines.append(
+            f"techmap -map {_script_path_text(latch_techmap_path, repo_root=repo_root)}"
+        )
     lines += [
-        f"synth -top {hdl_toplevel}",
         f"dfflibmap -liberty {liberty_text}",
         abc_command,
         "clean",
@@ -2988,27 +3069,18 @@ def _write_script_text(script_path: str, text: str) -> None:
         ) from exc
 
 
-#: Default per-invocation wall-clock timeout for a single ``yosys -s
-#: <script>`` run (:func:`_run_yosys`), overridable per call via its own
-#: ``timeout_s`` keyword. Mirrors ``klayout_tools.equiv.DEFAULT_TIMEOUT_S``'s
-#: role (bound a hang, not a slow-but-legitimate run) but is deliberately
-#: more generous: a full ``synth``/``dfflibmap``/``abc`` mapping pass over a
-#: real design does substantially more work than ``equiv``'s SAT proof, and
-#: in ``"auto"`` arithmetic-architecture mode (issue #1775, following
-#: #1772) this same budget is paid up to ~10+ times per ``klt synthesize``
-#: request, so it must not be so tight that a legitimately-slow-but-healthy
-#: trial synthesis is mistaken for a hang. A fixed module constant (no
-#: request-level override/CLI flag) was chosen over threading a new
-#: ``yosys_timeout_s`` end-to-end alongside the existing ``equiv_timeout_s``
-#: precedent -- lower churn, and every call site already goes through this
-#: one function.
+#: Default per-invocation wall-clock timeout for one ``yosys -s <script>`` run
+#: (:func:`_run_yosys`); a request overrides it with ``yosys_timeout_s``
+#: (:mod:`klayout_tools.synthesize_timeout`). Generous on purpose: a full
+#: ``synth``/``abc`` pass does more work than ``equiv``'s SAT proof, and
+#: ``arithmetic: auto`` pays this budget ~10+ times per request.
 DEFAULT_YOSYS_TIMEOUT_S = 300.0
 
 
 def _run_yosys(
     script_path: str,
     *,
-    timeout_s: float | None = DEFAULT_YOSYS_TIMEOUT_S,
+    timeout_s: float | None = ytimeout.UNSET,
     cwd: str | None = None,
 ) -> str:
     """Invoke ``yosys -s <script_path>`` and raise :class:`SynthesizeError`
@@ -3042,6 +3114,7 @@ def _run_yosys(
     default: the invoking process's cwd), correct for every script that
     embeds only absolute paths.
     """
+    timeout_s = ytimeout.resolve_timeout(timeout_s, DEFAULT_YOSYS_TIMEOUT_S)
     try:
         completed = subprocess.run(
             ["yosys", "-s", script_path],
@@ -3400,7 +3473,11 @@ def _read_abc_timing(
     When a run produces several ``stime`` reports (Yosys invokes ABC once
     per combinational region), the **maximum** reported delay is used --
     the critical path across the whole design, not whichever region
-    happened to be mapped last.
+    happened to be mapped last. Every report is also listed, in log order, as
+    ``regions: [{"module": "top", "critical_path_ps": 130.4}, ...]``
+    (issue #4743); ``module`` is the ``Extracting gate netlist of module``
+    banner preceding that ``stime`` line, or ``null`` when the log carries
+    none. The maximum over ``regions`` equals ``critical_path_ps``.
     """
     if abc_log_path is None or not os.path.isfile(abc_log_path):
         return None
@@ -3410,23 +3487,20 @@ def _read_abc_timing(
     except OSError:
         return None
 
-    best: tuple[float, str] | None = None
-    for match in _ABC_STIME_RE.finditer(log_text):
-        try:
-            delay_ps = float(match.group("delay_ps"))
-        except ValueError:  # pragma: no cover - regex only matches numbers
-            continue
-        if best is None or delay_ps > best[0]:
-            best = (delay_ps, match.group("wire_load"))
-    if best is None:
+    regions = parse_abc_regions(log_text)
+    if not regions:
         return None
 
-    critical_path_ps, wire_load = best
+    worst = max(regions, key=lambda r: r.delay_ps)
+    critical_path_ps, wire_load = worst.delay_ps, worst.wire_load
     return {
         "source": "abc_stime",
         "wire_load": None if wire_load.lower() == "none" else wire_load,
         "critical_path_ps": critical_path_ps,
         "delay_target_ps": delay_target_ps,
+        "regions": [
+            {"module": r.module, "critical_path_ps": r.delay_ps} for r in regions
+        ],
     }
 
 
@@ -3707,6 +3781,138 @@ def _compute_leakage(
     return total_nw, dict(sorted(leakage_by_type.items()))
 
 
+#: Latch polarities ``request.latch_map`` may map, to the Yosys internal
+#: primitive each one rewrites (issue #4458). ``$_DLATCH_N_`` is transparent
+#: while its enable is low, ``$_DLATCH_P_`` while high.
+_LATCH_MAP_POLARITIES = {"positive": "$_DLATCH_P_", "negative": "$_DLATCH_N_"}
+_LATCH_MAP_PIN_KEYS = ("enable", "data", "q")
+_LATCH_MAP_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_$]*")
+
+
+def _resolve_latch_map(request: dict[str, Any]) -> dict[str, dict[str, str]] | None:
+    """``request.latch_map`` (issue #4458) shape-validated, or ``None`` when
+    absent. ``{"positive"|"negative": {"cell", "enable", "data", "q"}}``: the
+    library latch each inferred ``$_DLATCH_*_`` is mapped onto. An omitted
+    polarity stays unmapped. Raises :class:`SynthesizeError` on any other
+    shape (unknown key, missing pin, non-identifier name, empty object)."""
+    if "latch_map" not in request:
+        return None
+    latch_map = request["latch_map"]
+    if not isinstance(latch_map, dict) or not latch_map:
+        raise SynthesizeError(
+            "request.latch_map must be a non-empty object keyed by "
+            f"{' and/or '.join(repr(k) for k in _LATCH_MAP_POLARITIES)}"
+        )
+    _reject_unknown_keys(
+        latch_map,
+        frozenset(_LATCH_MAP_POLARITIES),
+        "request",
+        "latch_map",
+        SynthesizeError,
+    )
+    resolved: dict[str, dict[str, str]] = {}
+    for polarity in _LATCH_MAP_POLARITIES:
+        if polarity not in latch_map:
+            continue
+        entry = latch_map[polarity]
+        where = f"request.latch_map.{polarity}"
+        if not isinstance(entry, dict):
+            raise SynthesizeError(f"{where} must be an object")
+        _reject_unknown_keys(
+            entry,
+            frozenset(("cell", *_LATCH_MAP_PIN_KEYS)),
+            "request",
+            f"latch_map.{polarity}",
+            SynthesizeError,
+        )
+        resolved_entry: dict[str, str] = {}
+        for key in ("cell", *_LATCH_MAP_PIN_KEYS):
+            value = entry.get(key)
+            if not isinstance(value, str) or not _LATCH_MAP_NAME.fullmatch(value):
+                raise SynthesizeError(
+                    f"{where}.{key} must be a string naming a Verilog "
+                    "identifier (letters, digits, '_', '$')"
+                )
+            resolved_entry[key] = value
+        if len(set(resolved_entry[k] for k in _LATCH_MAP_PIN_KEYS)) != 3:
+            raise SynthesizeError(f"{where} enable, data and q must be distinct pins")
+        resolved[polarity] = resolved_entry
+    return resolved
+
+
+def _prepare_latch_map(
+    latch_map: dict[str, dict[str, str]] | None,
+    liberty_path: str,
+    output_dir: str,
+    hdl_toplevel: str,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Validate ``latch_map`` against the liberty and write its techmap file
+    (issue #4458); ``(report, techmap_path)``, both ``None`` without one."""
+    if latch_map is None:
+        return None, None
+    report = _validate_latch_map_against_liberty(latch_map, liberty_path)
+    techmap_path = os.path.join(output_dir, f"{hdl_toplevel}_latch_map.v")
+    _write_script_text(techmap_path, _latch_techmap_text(latch_map))
+    return report, techmap_path
+
+
+def _attach_latch_map_report(
+    response: dict[str, Any],
+    report: dict[str, Any] | None,
+    techmap_path: str | None,
+    *,
+    repo_root: str | None,
+) -> None:
+    """Add the ``latch_map`` block to ``response`` when a map was requested."""
+    if report is None:
+        return
+    report["techmap_path"] = env_provenance.repo_relative_path(
+        techmap_path, repo_root=repo_root
+    )
+    response["latch_map"] = report
+
+
+def _validate_latch_map_against_liberty(
+    latch_map: dict[str, dict[str, str]], liberty_path: str
+) -> dict[str, Any]:
+    """Reject a ``latch_map`` cell absent from the resolved liberty (issue
+    #4458) and return the response's ``latch_map`` block. When the cell list
+    cannot be established the check is skipped (``validated: false``), the
+    same posture as :func:`_validate_dont_use_against_liberty`."""
+    cell_names = _liberty_cell_names(liberty_path)
+    if cell_names is not None:
+        for polarity, entry in latch_map.items():
+            if entry["cell"] not in cell_names:
+                raise SynthesizeError(
+                    f"request.latch_map.{polarity}.cell '{entry['cell']}' is "
+                    f"not a cell in the resolved liberty "
+                    f"'{os.path.basename(liberty_path)}'"
+                )
+    return {
+        "mapped": {polarity: dict(entry) for polarity, entry in latch_map.items()},
+        "validated": cell_names is not None,
+        "techmap_path": None,
+    }
+
+
+def _latch_techmap_text(latch_map: dict[str, dict[str, str]]) -> str:
+    """The Yosys ``techmap`` rule file for ``latch_map`` (issue #4458): one
+    module per mapped polarity, instantiating the library latch in place of
+    the ``$_DLATCH_*_`` primitive (ports ``E``/``D``/``Q``)."""
+    chunks = ["// Generated by klt synthesize from request.latch_map (issue #4458)\n"]
+    for polarity, primitive in _LATCH_MAP_POLARITIES.items():
+        entry = latch_map.get(polarity)
+        if entry is None:
+            continue
+        chunks.append(
+            f"module \\{primitive} (input E, input D, output Q);\n"
+            f"  {entry['cell']} _TECHMAP_REPLACE_ "
+            f"(.{entry['enable']}(E), .{entry['data']}(D), .{entry['q']}(Q));\n"
+            "endmodule\n"
+        )
+    return "\n".join(chunks)
+
+
 def _resolve_expected_latches(request: dict[str, Any]) -> int:
     """``request.structural.expected_latches`` (issue #1588; default ``0``
     when ``request.structural`` is omitted entirely) -- the number of
@@ -3725,7 +3931,7 @@ def _resolve_expected_latches(request: dict[str, Any]) -> int:
     if not isinstance(structural_request, dict):
         raise SynthesizeError("request.structural must be a JSON object")
     expected = structural_request.get("expected_latches", 0)
-    if isinstance(expected, bool) or not isinstance(expected, int) or expected < 0:
+    if not is_int(expected) or expected < 0:
         raise SynthesizeError(
             "request.structural.expected_latches must be a non-negative integer"
         )
@@ -3808,15 +4014,23 @@ def _categorize_warning(message: str) -> str:
     return "other"
 
 
-def _library_capability_warnings(cell_library: str) -> dict[str, str]:
+def _library_capability_warnings(
+    cell_library: str, has_constr: bool | None = None
+) -> dict[str, str]:
     """Disclose skipped synthesis capabilities without guessing library data.
 
     Combine missing capabilities into one representative so neither is
     hidden by warning aggregation. An absent ``dont_use`` entry is not a
     missing capability: e.g. gf180 intentionally allows minimum-drive cells.
+
+    ``has_constr`` says whether this run passed ``-constr`` at all (a request
+    ``constraints.abc_constr`` supplies it for a library with no built-in
+    entry, issue #4662); ``None`` falls back to the built-in table.
     """
+    if has_constr is None:
+        has_constr = cell_library in _ABC_CONSTR_INPUTS
     skipped = []
-    if cell_library not in _ABC_CONSTR_INPUTS:
+    if not has_constr:
         skipped.append(
             "ABC -constr (driving cell/output load), load-driven sizing/buffering "
             "and ABC timing (timing is null)"
@@ -4193,7 +4407,7 @@ def _synthesize_provenance_hashes(
 
     Deliberately mirrors :func:`run_synthesize`'s own hashing, step for step:
     the sources are resolved through the same :func:`_resolve_sources`, a
-    single source hashes through :func:`klayout_tools._provenance._content_hash`
+    single source hashes through :func:`klayout_tools._provenance.content_hash`
     (what :func:`build_provenance`'s ``input_path`` does) and multiple sources
     through :func:`klayout_tools._provenance._combined_content_hash` (what
     :func:`run_synthesize` substitutes for the multi-source case), and the
@@ -4218,7 +4432,7 @@ def _synthesize_provenance_hashes(
     if not isinstance(cell_library, str) or not cell_library:
         raise SynthesizeError("request.pdk.cell_library is required")
     if len(resolved_sources) == 1:
-        input_hash = _content_hash(resolved_sources[0])
+        input_hash = content_hash(resolved_sources[0])
     else:
         input_hash = _combined_content_hash(resolved_sources)
     if skip_deck:
@@ -4229,7 +4443,7 @@ def _synthesize_provenance_hashes(
         variant=pdk_variant,
         root=pdk_root,
     )
-    return input_hash, _content_hash(liberty_path)
+    return input_hash, content_hash(liberty_path)
 
 
 def _synthesize_request_parameters(request_path: str) -> dict[str, int | str]:

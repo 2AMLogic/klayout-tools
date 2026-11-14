@@ -246,7 +246,6 @@ timing, which matters most in a ``request.pdk.corners`` sweep. See
 from __future__ import annotations
 
 import json
-import math
 import os
 import re
 import subprocess  # noqa: F401 -- tests patch post_route_sta.subprocess.run
@@ -256,14 +255,15 @@ from typing import Any
 
 from . import env_provenance
 from . import macros as macro_spec
+from ._jsonnum import is_finite_number
 from ._openroad_engine import (
-    _container_runtime_hint,
     _count_violations,
     _openroad_version,
     _OpenRoadResult,
     _run_openroad,
     _timing_status,
     _timing_violation_report_lines,
+    container_runtime_hint,
     write_sdf_line,
 )
 from ._paths import (
@@ -272,6 +272,9 @@ from ._paths import (
     _tcl_net_list,
     validate_request_shape,
 )
+from ._power_activity import power_activity_lines as _power_activity_lines
+from ._power_activity import power_basis_block as _power_basis_block
+from ._power_activity import validate_power_activity
 from ._provenance import (
     INPUT_ROLE_LAYOUT,
     INPUT_ROLE_NETLIST,
@@ -279,8 +282,57 @@ from ._provenance import (
     build_provenance,
     sha256_file,
 )
+from ._request_fields import check_known_fields
+from ._sta_clock_uncertainty import CLOCK_UNCERTAINTY_KEYS
+from ._sta_clock_uncertainty import (
+    validate_clock_uncertainty as _validate_clock_uncertainty,
+)
+from ._sta_period_maps import (
+    check_period_maps,
+    clock_period_for_corner,
+    clock_targets,
+    validate_period,
+)
+from ._sta_request_diag import (
+    KNOWN_REQUEST_FIELDS,
+    SPEF_NAME_MISMATCH_HINT,
+)
+from ._sta_request_diag import SPEF_MISSING_NETS_BEGIN as _SPEF_MISSING_NETS_BEGIN
+from ._sta_request_diag import SPEF_MISSING_NETS_END as _SPEF_MISSING_NETS_END
+from ._sta_request_diag import parse_spef_missing_nets as _parse_spef_missing_nets
+from ._sta_sdc_check import attach_sdc_drift, resolve_sdc_check
 from .pdk import lef_files
 from .pdk_cells import resolve_liberty_for_cell_library
+from .post_route_sta_electrical import (  # noqa: F401 -- re-exported names
+    _ELECTRICAL_NET_PREFIX,
+    _ELECTRICAL_OK,
+    _ELECTRICAL_ROW_RE,
+    _ELECTRICAL_UNSUPPORTED,
+    _MAX_CAP_BEGIN,
+    _MAX_CAP_END,
+    _MAX_SLEW_BEGIN,
+    _MAX_SLEW_END,
+    _MIN_PERIOD_BEGIN,
+    _MIN_PERIOD_END,
+    _MIN_PULSE_BEGIN,
+    _MIN_PULSE_END,
+    _SLACK_ROW_RE,
+    _electrical_class,
+    _electrical_slack_class,
+    _parse_electrical_check,
+    _parse_electrical_slack_check,
+)
+from .post_route_sta_path_groups import (  # noqa: F401 -- re-exported names
+    _CHECK_ROLE_TYPES,
+    _SLACK_CONSISTENCY_TOL_NS,
+    _WORST_PATHS_BEGIN,
+    _WORST_PATHS_END,
+    _empty_path_record,
+    _parse_worst_path_rows,
+    _worst_path_record,
+    _worst_paths,
+    _worst_paths_by_group,
+)
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- versioned independently of every other verb's own
@@ -319,11 +371,6 @@ _LIBERTY_IDENT_RE = re.compile(r"[A-Za-z0-9_$.]+")
 _SPEF_NAME_MAP_ENTRY_RE = re.compile(r"^(\*\d+)\s+(\S+)", re.MULTILINE)
 _SPEF_HEADER_DIVIDER_RE = re.compile(r"^\*DIVIDER\s+(\S)", re.MULTILINE)
 
-#: Delimits the (capped) sample of design-side net names that failed to
-#: correlate against the SPEF's own declared name set -- see
-#: :func:`_spef_net_check_lines` and :func:`_parse_spef_missing_nets`.
-_SPEF_MISSING_NETS_BEGIN = "===KLT_STA_SPEF_MISSING_NETS_BEGIN==="
-_SPEF_MISSING_NETS_END = "===KLT_STA_SPEF_MISSING_NETS_END==="
 #: Upper bound on how many uncorrelated design-side net names
 #: :func:`_spef_net_check_lines` collects into ``klt_design_missing`` -- a
 #: diagnostic sample, not an exhaustive list, so a design with thousands of
@@ -364,24 +411,6 @@ _DRIVER_NET_PREFIX = "KLT_DRIVER_NET"
 #: Upper bound on how many driver pins each ``*_driver_sample`` field echoes
 #: -- a diagnostic sample, same style as ``design_nets_missing_sample``.
 _DRIVER_SAMPLE_LIMIT = 20
-#: Marker pairs and sentinels for the per-corner ``electrical_checks`` block
-#: (issue #3005): one ``report_check_types -violators`` region per limit class.
-#: See :func:`_electrical_check_lines` / :func:`_parse_electrical_check`.
-_MAX_SLEW_BEGIN = "===KLT_STA_MAX_SLEW_BEGIN==="
-_MAX_SLEW_END = "===KLT_STA_MAX_SLEW_END==="
-_MAX_CAP_BEGIN = "===KLT_STA_MAX_CAP_BEGIN==="
-_MAX_CAP_END = "===KLT_STA_MAX_CAP_END==="
-_ELECTRICAL_OK = "KLT_ELECTRICAL_OK"
-_ELECTRICAL_UNSUPPORTED = "KLT_ELECTRICAL_UNSUPPORTED"
-_ELECTRICAL_NET_PREFIX = "KLT_ELECTRICAL_NET"
-#: One violator row of ``report_check_types``: ``<pin> <limit> <value> <slack>
-#: (VIOLATED)``. Anchored from the right so a pin name is taken verbatim.
-_ELECTRICAL_ROW_RE = re.compile(
-    r"^(?P<pin>\S.*?)\s+(?P<limit>-?[\d.]+(?:e[-+]?\d+)?)\s+"
-    r"(?P<value>-?[\d.]+(?:e[-+]?\d+)?)\s+(?P<slack>-?[\d.]+(?:e[-+]?\d+)?)"
-    r"\s+\(VIOLATED\)\s*$",
-    re.IGNORECASE,
-)
 #: Any OpenSTA-tagged warning. Only ever matched *inside* the
 #: :data:`_SPEF_READ_BEGIN`/:data:`_SPEF_READ_END` stdout region, where the
 #: SPEF reader is the only thing running.
@@ -439,14 +468,6 @@ _PORT_CHECK_END = "===KLT_STA_PORT_CHECK_END==="
 #: reported -- so a typo can never silently constrain no ports.
 _PORT_CHECK_EXIT_CODE = 3
 
-#: Issue #2740: brackets the per-path-group worst setup/hold path records
-#: (:func:`_worst_path_lines`), one
-#: ``PATH\t<max|min>\t<check_role>\t<slack_s>\t<startpoint>\t<endpoint>`` row
-#: per path group per side, or a single ``ERROR\t<message>`` row when the
-#: engine's path introspection itself failed.
-_WORST_PATHS_BEGIN = "===KLT_STA_WORST_PATHS_BEGIN==="
-_WORST_PATHS_END = "===KLT_STA_WORST_PATHS_END==="
-
 #: Issue #3042: brackets the per-port worst-path records
 #: (:func:`_port_path_lines`) a ``constraints.report_ports`` request emits.
 #: Per requested port: one ``DIR\t<port>\t<direction>`` row, then
@@ -501,33 +522,6 @@ _COMPLETENESS_CHECKS = (
     ("unconstrained_endpoints", "0 0 0 0 1 0 0"),
     ("unclocked_registers", "0 0 0 1 0 0 0"),
 )
-
-#: OpenSTA ``PathEnd::checkRole()`` names -> this command's ``check_type``
-#: values. Verified live (OpenROAD ``openroad/orfs:latest`` image, 2026-10-10)
-#: for ``setup``, ``hold``, ``recovery``, ``removal``, ``clock gating
-#: setup``, ``clock gating hold`` and ``output setup``; ``output hold``,
-#: ``latch setup`` and ``latch hold`` are the remaining OpenSTA
-#: ``TimingRole`` names a path end can carry. Any role not listed here is
-#: reported as ``check_type: "unknown"`` (with the engine's own spelling kept
-#: in ``engine_check_role``) -- never guessed into a setup/hold bucket.
-_CHECK_ROLE_TYPES = {
-    "setup": "setup",
-    "hold": "hold",
-    "recovery": "recovery",
-    "removal": "removal",
-    "clock gating setup": "clock_gating_setup",
-    "clock gating hold": "clock_gating_hold",
-    "output setup": "output_setup",
-    "output hold": "output_hold",
-    "latch setup": "latch_setup",
-    "latch hold": "latch_hold",
-}
-
-#: Largest |path slack - aggregate WNS| (ns) still treated as "the same
-#: number": the aggregate comes from ``report_worst_slack_metric`` (printed
-#: to 6 decimals in the engine's time unit) while the path slack is the
-#: engine's own full-precision value in seconds.
-_SLACK_CONSISTENCY_TOL_NS = 1e-4
 
 #: The direction strings OpenSTA's ``get_property <port> direction`` may
 #: return that a per-port input/output delay may be applied to.
@@ -603,6 +597,9 @@ def run_sta(
     as debuggable artifacts, never deleted.
     """
     request = load_request(request_path)
+    check_known_fields(
+        request, KNOWN_REQUEST_FIELDS, verb="sta", error_cls=PostRouteStaError
+    )
     request_dir = os.path.dirname(os.path.abspath(request_path))
 
     # Issue #1825: `def`/`verilog` are mutually exclusive alternate geometry
@@ -683,6 +680,8 @@ def run_sta(
         input_delay_ns,
         output_delay_ns,
     ) = _validate_constraints(request["constraints"])
+    clock_extras = _validate_clock_extras(request["constraints"])
+    check_period_maps(clock_period_ns, clock_extras, clock_port, requested_corners)
     input_delays, output_delays = _validate_port_delay_maps(
         request["constraints"], clock_port
     )
@@ -700,6 +699,7 @@ def run_sta(
     propagated_clock = _validate_propagated_clock(request["constraints"], has_def)
     power_activity = _validate_power_activity(request["constraints"])
     clock_uncertainty = _validate_clock_uncertainty(request["constraints"])
+    sdc_path = resolve_sdc_check(request.get("sdc_check"), request_dir)
 
     spef_map: dict[str, str] | None = None
     if has_verilog:
@@ -759,7 +759,7 @@ def run_sta(
         repo_root=env_provenance.find_repo_root(request_dir),
     )
     with report_paths.scrubbing_errors():
-        return _dispatch_sta(
+        response = _dispatch_sta(
             requested_corner=requested_corner,
             requested_corners=requested_corners,
             report_paths=report_paths,
@@ -788,6 +788,7 @@ def run_sta(
             wire_load_mode=wire_load_mode,
             macros=macros,
             propagated_clock=propagated_clock,
+            clock_extras=clock_extras,
             power_activity=power_activity,
             clock_uncertainty=clock_uncertainty,
             write_sdf=write_sdf,
@@ -795,6 +796,19 @@ def run_sta(
             input_path=input_path,
             basename=basename,
         )
+        attach_sdc_drift(  # issue #5236: opt-in, informational only
+            response,
+            sdc_path,
+            request_dir=request_dir,
+            clocks=clock_targets(clock_port, clock_period_ns, clock_extras)["clocks"],
+            clock_port=clock_port,
+            input_delay_ns=input_delay_ns,
+            output_delay_ns=output_delay_ns,
+            input_delays=input_delays,
+            output_delays=output_delays,
+            clock_uncertainty=clock_uncertainty,
+        )
+        return response
 
 
 class _ReportPaths:
@@ -937,7 +951,7 @@ def _dispatch_sta(
     hdl_toplevel: str | None,
     geometry_source: str,
     clock_port: str,
-    clock_period_ns: float,
+    clock_period_ns: float | dict[str, float],
     input_delay_ns: float | None,
     output_delay_ns: float | None,
     input_delays: dict[str, dict[str, float]] | None,
@@ -953,6 +967,7 @@ def _dispatch_sta(
     wire_load_mode: str | None,
     macros: list[dict[str, Any]],
     propagated_clock: bool,
+    clock_extras: dict[str, Any] | None,
     power_activity: dict[str, float] | None,
     clock_uncertainty: dict[str, float | None] | None,
     output_dir: str,
@@ -998,6 +1013,7 @@ def _dispatch_sta(
             wire_load_mode=wire_load_mode,
             macros=macros,
             propagated_clock=propagated_clock,
+            clock_extras=clock_extras,
             power_activity=power_activity,
             clock_uncertainty=clock_uncertainty,
             write_sdf=write_sdf,
@@ -1007,6 +1023,7 @@ def _dispatch_sta(
             report_paths=report_paths,
         )
 
+    assert not isinstance(clock_period_ns, dict)  # maps need pdk.corners
     corner_fields, resolution = _run_corner_session(
         corner_name=requested_corner,
         cell_library=cell_library,
@@ -1032,6 +1049,7 @@ def _dispatch_sta(
         wire_load_mode=wire_load_mode,
         macros=macros,
         propagated_clock=propagated_clock,
+        clock_extras=clock_extras,
         power_activity=power_activity,
         clock_uncertainty=clock_uncertainty,
         output_dir=output_dir,
@@ -1097,6 +1115,7 @@ def _dispatch_sta(
         # shapes; never infer it from clock_skew_ns, which is a measured
         # metric that is non-zero under ideal timing too.
         "clock_mode": "propagated" if propagated_clock else "ideal",
+        "clock_targets": clock_targets(clock_port, clock_period_ns, clock_extras),
         "clock_uncertainty": _clock_uncertainty_block(clock_uncertainty),
         "spef_path": report_paths.spef_path,
         "worst_slack_ns": corner_fields["worst_slack_ns"],
@@ -1124,6 +1143,10 @@ def _dispatch_sta(
         "hold_violation_count": corner_fields["hold_violation_count"],
         "worst_setup_path": corner_fields["worst_setup_path"],
         "worst_hold_path": corner_fields["worst_hold_path"],
+        # Additive field (issue #5424): the unreduced per-path-group rows
+        # behind the two records above -- how a caller reads a data-setup
+        # WNS when an async recovery check binds `worst_slack_ns`/`fmax_mhz`.
+        "worst_paths_by_group": corner_fields["worst_paths_by_group"],
         "clock_skew_ns": corner_fields["clock_skew_ns"],
         "estimated_power_mw": corner_fields["estimated_power_mw"],
         "power_basis": corner_fields["power_basis"],
@@ -1177,6 +1200,7 @@ def _run_corner_session(
     wire_load_mode: str | None,
     macros: list[dict[str, Any]],
     propagated_clock: bool,
+    clock_extras: dict[str, Any] | None,
     power_activity: dict[str, float] | None,
     clock_uncertainty: dict[str, float | None] | None,
     output_dir: str,
@@ -1285,6 +1309,7 @@ def _run_corner_session(
             report_ports=report_ports,
             false_path_from=false_path_from,
             propagated_clock=propagated_clock,
+            clock_extras=clock_extras,
             power_activity=power_activity,
             clock_uncertainty=clock_uncertainty,
             sdf_path=sdf_path,
@@ -1314,6 +1339,7 @@ def _run_corner_session(
             report_ports=report_ports,
             false_path_from=false_path_from,
             power_activity=power_activity,
+            clock_extras=clock_extras,
             clock_uncertainty=clock_uncertainty,
         )
     _write_script(script_path, lines)
@@ -1373,6 +1399,10 @@ def _run_corner_session(
         # hold-side path end this session found -- see `_worst_path_record`.
         "worst_setup_path": worst_setup_path,
         "worst_hold_path": worst_hold_path,
+        # Additive field (issue #5424): every per-path-group row behind
+        # those two records, unreduced -- the per-check-family slack the
+        # single records cannot carry. See `_worst_paths_by_group`.
+        "worst_paths_by_group": _worst_paths_by_group(completed.stdout or ""),
         "clock_skew_ns": round(clock_skew, 5) if clock_skew is not None else None,
         "estimated_power_mw": (
             round(power_w * 1000, 4) if power_w is not None else None
@@ -1435,7 +1465,7 @@ def _run_multi_corner(
     hdl_toplevel: str | None,
     geometry_source: str,
     clock_port: str,
-    clock_period_ns: float,
+    clock_period_ns: float | dict[str, float],
     input_delay_ns: float | None,
     output_delay_ns: float | None,
     input_delays: dict[str, dict[str, float]] | None,
@@ -1451,6 +1481,7 @@ def _run_multi_corner(
     wire_load_mode: str | None,
     macros: list[dict[str, Any]],
     propagated_clock: bool,
+    clock_extras: dict[str, Any] | None,
     power_activity: dict[str, float] | None,
     clock_uncertainty: dict[str, float | None] | None,
     output_dir: str,
@@ -1510,6 +1541,9 @@ def _run_multi_corner(
         script_tag = f"{basename}__{corner_name or 'nominal'}"
         if interconnect is not None:
             script_tag += f"__{interconnect}"
+        corner_period, corner_extras, corner_targets = clock_period_for_corner(
+            corner_name, clock_port, clock_period_ns, clock_extras
+        )
         corner_fields, resolution = _run_corner_session(
             corner_name=corner_name,
             cell_library=cell_library,
@@ -1520,7 +1554,7 @@ def _run_multi_corner(
             verilog_path=verilog_path,
             hdl_toplevel=hdl_toplevel,
             clock_port=clock_port,
-            clock_period_ns=clock_period_ns,
+            clock_period_ns=corner_period,
             input_delay_ns=input_delay_ns,
             output_delay_ns=output_delay_ns,
             input_delays=input_delays,
@@ -1535,6 +1569,7 @@ def _run_multi_corner(
             wire_load_mode=wire_load_mode,
             macros=macros,
             propagated_clock=propagated_clock,
+            clock_extras=corner_extras,
             power_activity=power_activity,
             clock_uncertainty=clock_uncertainty,
             output_dir=output_dir,
@@ -1558,6 +1593,7 @@ def _run_multi_corner(
                 "corner": resolution["corner"],
                 **axis_fields,
                 **corner_fields,
+                **corner_targets,
                 "deck": _deck_block(
                     deck_name,
                     resolution["liberty_path"],
@@ -1616,6 +1652,7 @@ def _run_multi_corner(
         # entry carries that session's own `clock_propagation` evidence
         # block (the network latencies it reports *do* vary per corner).
         "clock_mode": "propagated" if propagated_clock else "ideal",
+        "clock_targets": clock_targets(clock_port, clock_period_ns, clock_extras),
         "clock_uncertainty": _clock_uncertainty_block(clock_uncertainty),
         "spef_path": report_paths.spef_path,
         "provenance": provenance,
@@ -1718,6 +1755,7 @@ def _spef_annotation_block(
             f"only {design_nets_annotated} of {design_nets_total} nets in "
             "the linked design are named by this SPEF"
         )
+        reasons[-1] += SPEF_NAME_MISMATCH_HINT
         design_nets_missing_sample = _parse_spef_missing_nets(stdout)
     if reader_warning_count:
         reasons.append(
@@ -1878,7 +1916,7 @@ def _resolve_spef(spef_field: Any, request_dir: str) -> str | None:
 
 def _validate_constraints(
     constraints: Any,
-) -> tuple[str, float, float | None, float | None]:
+) -> tuple[str, float | dict[str, float], float | None, float | None]:
     """Unlike ``place_and_route.py``'s own ``_validate_constraints`` (where
     a clock is optional -- a ``target_stage: "floorplan"`` run has no
     meaningful clock yet), a standalone STA run has no meaning *without* a
@@ -1895,11 +1933,20 @@ def _validate_constraints(
     validated and emitted here too, never inherited."""
     if not isinstance(constraints, dict):
         raise PostRouteStaError("request.constraints must be a JSON object")
-    clock_port = constraints.get("clock_port")
-    clock_period_ns = constraints.get("clock_period_ns")
+    clocks = _validate_clocks_list(constraints)
+    if clocks:
+        clock_port = clocks[0]["port"]
+        clock_period_ns = clocks[0]["period_ns"]
+    else:
+        clock_port = constraints.get("clock_port")
+        clock_period_ns = constraints.get("clock_period_ns")
     if not (isinstance(clock_port, str) and clock_port):
         raise PostRouteStaError("request.constraints.clock_port is required")
-    if (
+    if isinstance(clock_period_ns, dict):
+        clock_period_ns = validate_period(  # values reach create_clock -period
+            clock_period_ns, "request.constraints", "clock_period_ns"
+        )
+    elif (
         isinstance(clock_period_ns, bool)
         or not isinstance(clock_period_ns, (int, float))
         or clock_period_ns <= 0
@@ -1909,7 +1956,115 @@ def _validate_constraints(
         )
     input_delay_ns = _validate_io_delay(constraints.get("input_delay_ns"), "input")
     output_delay_ns = _validate_io_delay(constraints.get("output_delay_ns"), "output")
-    return clock_port, float(clock_period_ns), input_delay_ns, output_delay_ns
+    if not isinstance(clock_period_ns, dict):
+        clock_period_ns = float(clock_period_ns)
+    return clock_port, clock_period_ns, input_delay_ns, output_delay_ns
+
+
+def _validate_clocks_list(constraints: dict[str, Any]) -> list[dict[str, Any]]:
+    """``constraints.clocks`` (issue #4241) as ``[{port, period_ns}]``, empty
+    when omitted/``null``. The multi-clock alternative to the
+    ``clock_port``/``clock_period_ns`` shorthand -- the two are mutually
+    exclusive, and the first entry is the primary clock (it keeps every role
+    ``clock_port`` has: the I/O-delay ``-clock``, ``report_ports`` /
+    ``false_path_from`` anchors and the input-delay exclusion). Mirrors
+    ``synthesize.py``'s ``constraints.clocks`` (issue #2883) rules."""
+    raw = constraints.get("clocks")
+    if raw is None:
+        return []
+    if constraints.get("clock_port") is not None or (
+        constraints.get("clock_period_ns") is not None
+    ):
+        raise PostRouteStaError(
+            "request.constraints.clocks cannot be combined with "
+            "clock_port/clock_period_ns -- give either the single-clock "
+            "shorthand or the clocks list"
+        )
+    if not isinstance(raw, list) or not raw:
+        raise PostRouteStaError(
+            "request.constraints.clocks must be a non-empty array of "
+            "{port, period_ns} objects"
+        )
+    clocks: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, entry in enumerate(raw):
+        clock = _validate_clock_entry(entry, f"request.constraints.clocks[{index}]")
+        if clock["port"] in seen:
+            raise PostRouteStaError(
+                f"request.constraints.clocks[{index}].port "
+                f"'{clock['port']}' is listed more than once"
+            )
+        seen.add(clock["port"])
+        clocks.append(clock)
+    return clocks
+
+
+def _validate_clock_entry(entry: Any, where: str) -> dict[str, Any]:
+    """One ``constraints.clocks`` entry as ``{port, period_ns}`` (issue #4241)."""
+    if not isinstance(entry, dict):
+        raise PostRouteStaError(f"{where} must be a {{port, period_ns}} object")
+    unknown = sorted(set(entry) - {"port", "period_ns"})
+    if unknown:
+        raise PostRouteStaError(
+            f"{where} has unknown key(s): {', '.join(map(str, unknown))} "
+            "(allowed: port, period_ns)"
+        )
+    port = entry.get("port")
+    if not isinstance(port, str) or not port.strip():
+        raise PostRouteStaError(f"{where}.port must be a non-empty string")
+    return {"port": port, "period_ns": validate_period(entry.get("period_ns"), where)}
+
+
+def _validate_clock_extras(constraints: dict[str, Any]) -> dict[str, Any] | None:
+    """The multi-clock additions beyond the primary clock (issue #4241):
+    ``{"clocks": [{port, period_ns}, ...secondary], "groups": [[port, ...]]}``,
+    or ``None`` when the request is the plain single-clock shorthand with no
+    ``clock_groups`` -- which keeps the generated Tcl byte-identical to the
+    pre-#4241 output. ``constraints.clock_groups`` names declared clocks only
+    and is emitted as ``set_clock_groups -asynchronous``."""
+    clocks = _validate_clocks_list(constraints)
+    groups_raw = constraints.get("clock_groups")
+    groups: list[list[str]] = []
+    if groups_raw is not None:
+        declared = (
+            {c["port"] for c in clocks} if clocks else {constraints.get("clock_port")}
+        )
+        groups = _validate_clock_groups(groups_raw, declared)
+    if len(clocks) <= 1 and not groups:
+        return None
+    return {"clocks": clocks[1:], "groups": groups}
+
+
+def _validate_clock_groups(groups_raw: Any, declared: set[Any]) -> list[list[str]]:
+    """``constraints.clock_groups`` (issue #4241) as de-duplicated port lists,
+    each naming only ``declared`` clocks; at least two groups are required."""
+    if not isinstance(groups_raw, list) or not groups_raw:
+        raise PostRouteStaError(
+            "request.constraints.clock_groups must be a non-empty array "
+            "of non-empty port-name arrays"
+        )
+    groups: list[list[str]] = []
+    for index, group in enumerate(groups_raw):
+        where = f"request.constraints.clock_groups[{index}]"
+        if not isinstance(group, list) or not group:
+            raise PostRouteStaError(f"{where} must be a non-empty array")
+        ports: list[str] = []
+        for port in group:
+            if not isinstance(port, str) or not port:
+                raise PostRouteStaError(f"{where} entries must be port names")
+            if port not in declared:
+                raise PostRouteStaError(
+                    f"{where} names '{port}', which is not a declared clock"
+                )
+            if port not in ports:
+                ports.append(port)
+        groups.append(ports)
+    if len(groups) < 2:
+        raise PostRouteStaError(
+            "request.constraints.clock_groups needs at least two groups "
+            "for an asynchronous relationship"
+        )
+    return groups
 
 
 def _validate_io_delay(value: Any, which: str) -> float | None:
@@ -2125,7 +2280,7 @@ def _validate_load_value(value: Any, field: str) -> float | None:
     non-boolean number ``>= 0``."""
     if value is None:
         return None
-    if not _is_finite_number(value) or value < 0:
+    if not is_finite_number(value) or value < 0:
         raise PostRouteStaError(f"{field} must be a finite non-negative number")
     return float(value)
 
@@ -2135,18 +2290,9 @@ def _validate_transition_value(value: Any, field: str) -> float | None:
     non-boolean number ``>= 0`` (``0`` is an ideal edge)."""
     if value is None:
         return None
-    if not _is_finite_number(value) or value < 0:
+    if not is_finite_number(value) or value < 0:
         raise PostRouteStaError(f"{field} must be a finite non-negative number")
     return float(value)
-
-
-def _is_finite_number(value: Any) -> bool:
-    return (
-        isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and value == value  # NaN
-        and value not in (float("inf"), float("-inf"))
-    )
 
 
 def _validate_port_delay_maps(
@@ -2242,7 +2388,7 @@ def _parse_port_delay_entry(field: str, port: str, entry: Any) -> dict[str, floa
         if bound not in entry:
             continue
         bound_value = entry[bound]
-        if not _is_finite_number(bound_value):
+        if not is_finite_number(bound_value):
             raise PostRouteStaError(
                 f"{field}[{port!r}].{bound} must be a finite number "
                 f"(got {bound_value!r})"
@@ -2452,129 +2598,9 @@ def _validate_propagated_clock(constraints: dict[str, Any], has_def: bool) -> bo
     return value
 
 
-_POWER_ACTIVITY_KEYS = ("activity", "duty")
-
-
 def _validate_power_activity(constraints: dict[str, Any]) -> dict[str, float] | None:
-    """Validate ``constraints.power_activity`` (issue #3744), returning the
-    validated ``{"activity"?: float, "duty"?: float}`` mapping, or ``None``
-    when omitted or ``null`` (no ``set_power_activity`` is emitted and the
-    generated script is unchanged).
-
-    The value must be a non-empty JSON object with only the keys
-    ``activity`` (a finite number ``>= 0``) and ``duty`` (a finite number in
-    ``[0, 1]``). Booleans, non-finite numbers, unknown keys and a non-object
-    are request errors that name the offending field.
-    """
-    value = constraints.get("power_activity")
-    if value is None:
-        return None
-    if not isinstance(value, dict):
-        raise PostRouteStaError(
-            "constraints.power_activity must be an object with 'activity' and/or 'duty'"
-        )
-    unknown = sorted(set(value) - set(_POWER_ACTIVITY_KEYS))
-    if unknown:
-        raise PostRouteStaError(
-            "constraints.power_activity has unknown key(s): "
-            + ", ".join(unknown)
-            + " (allowed: activity, duty)"
-        )
-    if not value:
-        raise PostRouteStaError(
-            "constraints.power_activity must give at least one of 'activity' and 'duty'"
-        )
-    out: dict[str, float] = {}
-    for key in _POWER_ACTIVITY_KEYS:
-        if key not in value:
-            continue
-        number = value[key]
-        if (
-            isinstance(number, bool)
-            or not isinstance(number, (int, float))
-            or not math.isfinite(number)
-        ):
-            raise PostRouteStaError(
-                f"constraints.power_activity.{key} must be a finite number"
-            )
-        if number < 0 or (key == "duty" and number > 1):
-            bound = ">= 0" if key == "activity" else "in [0, 1]"
-            raise PostRouteStaError(
-                f"constraints.power_activity.{key} must be {bound}, got {number}"
-            )
-        out[key] = float(number)
-    return out
-
-
-def _power_activity_lines(power_activity: dict[str, float] | None) -> list[str]:
-    """The ``set_power_activity -global`` command (issue #3744) for a
-    validated ``constraints.power_activity``; empty when none was requested,
-    leaving OpenSTA's built-in default activity in force."""
-    if not power_activity:
-        return []
-    flags = "".join(
-        f" -{key} {power_activity[key]!r}"
-        for key in _POWER_ACTIVITY_KEYS
-        if key in power_activity
-    )
-    return [f"set_power_activity -global{flags}"]
-
-
-_CLOCK_UNCERTAINTY_KEYS = ("setup_ns", "hold_ns")
-
-
-def _validate_clock_uncertainty(
-    constraints: dict[str, Any],
-) -> dict[str, float | None] | None:
-    """Validate ``constraints.clock_uncertainty_ns`` (issue #4240), returning
-    ``{"setup_ns": float | None, "hold_ns": float | None}`` (``None`` on a
-    side means unconstrained), or ``None`` when omitted or ``null`` (no
-    ``set_clock_uncertainty`` is emitted and the generated script is
-    unchanged).
-
-    The value is either a finite number ``>= 0`` (applied to setup and hold)
-    or an object with the optional keys ``setup_ns`` / ``hold_ns`` (each a
-    finite number ``>= 0``, at least one required). Booleans, non-finite or
-    negative numbers, unknown keys and any other type are request errors.
-    """
-    value = constraints.get("clock_uncertainty_ns")
-    if value is None:
-        return None
-
-    def _number(number: Any, name: str) -> float:
-        if (
-            isinstance(number, bool)
-            or not isinstance(number, (int, float))
-            or not math.isfinite(number)
-        ):
-            raise PostRouteStaError(f"{name} must be a finite number")
-        if number < 0:
-            raise PostRouteStaError(f"{name} must be >= 0, got {number}")
-        return float(number)
-
-    if not isinstance(value, dict):
-        scalar = _number(value, "constraints.clock_uncertainty_ns")
-        return {"setup_ns": scalar, "hold_ns": scalar}
-    unknown = sorted(set(value) - set(_CLOCK_UNCERTAINTY_KEYS))
-    if unknown:
-        raise PostRouteStaError(
-            "constraints.clock_uncertainty_ns has unknown key(s): "
-            + ", ".join(unknown)
-            + " (allowed: setup_ns, hold_ns)"
-        )
-    if not value:
-        raise PostRouteStaError(
-            "constraints.clock_uncertainty_ns must give at least one of "
-            "'setup_ns' and 'hold_ns'"
-        )
-    return {
-        key: (
-            _number(value[key], f"constraints.clock_uncertainty_ns.{key}")
-            if value.get(key) is not None
-            else None
-        )
-        for key in _CLOCK_UNCERTAINTY_KEYS
-    }
+    """``klt sta`` binding of :func:`validate_power_activity` (issue #3744)."""
+    return validate_power_activity(constraints, PostRouteStaError)
 
 
 def _clock_uncertainty_lines(
@@ -2588,7 +2614,7 @@ def _clock_uncertainty_lines(
     return [
         f"set_clock_uncertainty -{key[:-3]} {clock_uncertainty[key]!r} "
         f"[get_clocks {clock_port}]"
-        for key in _CLOCK_UNCERTAINTY_KEYS
+        for key in CLOCK_UNCERTAINTY_KEYS
         if clock_uncertainty.get(key) is not None
     ]
 
@@ -2605,22 +2631,6 @@ def _clock_uncertainty_block(
         "applied": True,
         "setup_ns": clock_uncertainty.get("setup_ns"),
         "hold_ns": clock_uncertainty.get("hold_ns"),
-    }
-
-
-def _power_basis_block(
-    power_activity: dict[str, float] | None, has_spef: bool
-) -> dict[str, Any]:
-    """The ``power_basis`` response block (issue #3744): what
-    ``estimated_power_mw`` was computed under. ``engine_default`` carries
-    ``null`` activity/duty rather than a guessed numeric default; a
-    ``power_activity`` with only one key leaves the other ``null``."""
-    given = power_activity or {}
-    return {
-        "activity_source": "global" if power_activity else "engine_default",
-        "activity": given.get("activity"),
-        "duty": given.get("duty"),
-        "parasitics": "spef_annotated" if has_spef else "estimate_only",
     }
 
 
@@ -2877,6 +2887,25 @@ def _propagated_clock_lines(clock_port: str) -> list[str]:
     analysis. The clock-port spelling matches :func:`_clock_lines`'s own
     (plain interpolation -- the same string ``create_clock -name`` used)."""
     return [f"set_propagated_clock [get_clocks {clock_port}]"]
+
+
+def _extra_clock_lines(clock_extras: dict[str, Any] | None) -> list[str]:
+    """Issue #4241: one ``create_clock`` per secondary clock, then any
+    ``set_clock_groups -asynchronous``. Empty for a single-clock request."""
+    if not clock_extras:
+        return []
+    lines = [
+        f"create_clock -name {c['port']} -period {c['period_ns']} "
+        f"[get_ports {c['port']}]"
+        for c in clock_extras["clocks"]
+    ]
+    groups = clock_extras["groups"]
+    if groups:
+        lines.append(
+            "set_clock_groups -asynchronous "
+            + " ".join(f"-group [get_clocks {{{' '.join(g)}}}]" for g in groups)
+        )
+    return lines
 
 
 def _clock_latency_lines() -> list[str]:
@@ -3554,10 +3583,10 @@ def _violation_count_lines() -> list[str]:
 
 
 def _electrical_check_lines() -> list[str]:
-    """Marker-delimited max-transition / max-capacitance violator reports
-    (issue #3005), run in the same session that already did ``read_spef`` so
-    the numbers are against the extracted parasitics when a ``spef`` was
-    given.
+    """Marker-delimited max-transition / max-capacitance / min-pulse-width /
+    min-period violator reports (issues #3005, #5241), run in the same
+    session that already did ``read_spef`` so the numbers are against the
+    extracted parasitics when a ``spef`` was given.
 
     Units are pinned with ``set_cmd_units`` (``ns`` / ``pF``) so the report
     is in the units the response states regardless of the Liberty's own.
@@ -3574,6 +3603,8 @@ def _electrical_check_lines() -> list[str]:
     for flag, begin, end in (
         ("-max_slew", _MAX_SLEW_BEGIN, _MAX_SLEW_END),
         ("-max_capacitance", _MAX_CAP_BEGIN, _MAX_CAP_END),
+        ("-min_pulse_width", _MIN_PULSE_BEGIN, _MIN_PULSE_END),
+        ("-min_period", _MIN_PERIOD_BEGIN, _MIN_PERIOD_END),
     ):
         lines += [
             f'puts "{begin}"',
@@ -3632,6 +3663,7 @@ def _sta_script_lines(
     report_ports: list[str] | None = None,
     false_path_from: list[str] | None = None,
     propagated_clock: bool = False,
+    clock_extras: dict[str, Any] | None = None,
     sdf_path: str | None = None,
     power_activity: dict[str, float] | None = None,
     clock_uncertainty: dict[str, float | None] | None = None,
@@ -3693,8 +3725,12 @@ def _sta_script_lines(
     ]
     lines += [f"read_liberty {lib}" for lib in macro_liberty_paths or []]
     lines += _clock_lines(clock_port, clock_period_ns)
+    lines += _extra_clock_lines(clock_extras)
     if propagated_clock:
         lines += _propagated_clock_lines(clock_port)
+        if clock_extras:
+            for extra in clock_extras["clocks"]:
+                lines += _propagated_clock_lines(extra["port"])
     lines += _clock_uncertainty_lines(clock_port, clock_uncertainty)
     lines += _request_io_delay_lines(
         clock_port,
@@ -3765,6 +3801,7 @@ def _sta_netlist_script_lines(
     report_ports: list[str] | None = None,
     false_path_from: list[str] | None = None,
     power_activity: dict[str, float] | None = None,
+    clock_extras: dict[str, Any] | None = None,
     clock_uncertainty: dict[str, float | None] | None = None,
 ) -> list[str]:
     """Build the Tcl script for a from-scratch, netlist-input OpenSTA
@@ -3817,6 +3854,7 @@ def _sta_netlist_script_lines(
         f"link_design {hdl_toplevel}",
     ]
     lines += _clock_lines(clock_port, clock_period_ns)
+    lines += _extra_clock_lines(clock_extras)
     lines += _clock_uncertainty_lines(clock_port, clock_uncertainty)
     lines += _request_io_delay_lines(
         clock_port,
@@ -3942,7 +3980,7 @@ def _engine_error_message(completed: _OpenRoadResult) -> str:
     function's route-stage-only ``DRT-0305`` diagnosis, which cannot occur
     here -- this verb never runs TritonRoute).
 
-    :func:`~klayout_tools._openroad_engine._container_runtime_hint` is
+    :func:`~klayout_tools._openroad_engine.container_runtime_hint` is
     appended as a further ``--`` clause when the captured output shows the
     engine never really ran at all because its container runtime was
     unreachable (issue #2632) -- the same append-a-recognized-hint structure
@@ -3968,14 +4006,14 @@ def _engine_error_message(completed: _OpenRoadResult) -> str:
         snippet = " ".join(tail_source[-3:]) if tail_source else "no output captured"
         message = f"openroad sta run exited with code {completed.returncode}: {snippet}"
 
-    hint = _container_runtime_hint(completed)
+    hint = container_runtime_hint(completed)
     if hint is not None:
         message = f"{message} -- {hint}"
     # Issue #2635: `ORD-2013` names the instance and the LEF master but
     # nothing about which request field would have supplied it -- the one
     # failure mode a caller with a hard macro and no `request.macros` entry
     # hits first. Appended as a further `--` clause, the same
-    # recognized-hint structure `_container_runtime_hint` above uses.
+    # recognized-hint structure `container_runtime_hint` above uses.
     macro_hint = macro_spec.missing_lef_master_hint(
         (completed.stdout or "") + "\n" + (completed.stderr or "")
     )
@@ -4006,26 +4044,6 @@ def _read_metrics(metrics_path: str) -> dict[str, Any]:
             f"sta metrics '{metrics_path}' must contain a JSON object"
         )
     return data
-
-
-def _parse_spef_missing_nets(stdout: str) -> list[str]:
-    """A capped sample of design-side net names that failed to correlate
-    against the SPEF's own declared name set, parsed from
-    :func:`_spef_net_check_lines`'s own
-    ``===KLT_STA_SPEF_MISSING_NETS_BEGIN===``/``===END===``-delimited stdout
-    block (one net name per line, already the design's real spelling --
-    ``get_full_name``'s own output). Returns ``[]`` when the markers aren't
-    found (defensive; should not happen for a successful run) or the block
-    is empty (nothing missing)."""
-    try:
-        start_idx = stdout.index(_SPEF_MISSING_NETS_BEGIN) + len(
-            _SPEF_MISSING_NETS_BEGIN
-        )
-        stop_idx = stdout.index(_SPEF_MISSING_NETS_END, start_idx)
-    except ValueError:
-        return []
-    block = stdout[start_idx:stop_idx]
-    return [line.strip() for line in block.splitlines() if line.strip()]
 
 
 def _extract_block(text: str, begin: str, end: str) -> str | None:
@@ -4327,54 +4345,6 @@ def _driver_detail(
     return detail
 
 
-def _electrical_class(
-    coverage: str, unit: str, rows: list[tuple[str, float, float]], nets: set[str]
-) -> dict[str, Any]:
-    """One limit class of the ``electrical_checks`` block. Counts, excess and
-    pin are ``null`` unless ``coverage == "checked"``."""
-    checked = coverage == "checked"
-    worst = max(rows, key=lambda row: row[2], default=None) if checked else None
-    return {
-        "coverage": coverage,
-        "limit_source": "liberty",
-        "unit": unit,
-        "violation_count": len(rows) if checked else None,
-        "net_count": len(nets) if checked else None,
-        "worst_excess": round(worst[2], 5) if worst is not None else None,
-        "worst_pin": worst[0] if worst is not None else None,
-    }
-
-
-def _parse_electrical_check(
-    stdout: str, begin: str, end: str, unit: str
-) -> dict[str, Any]:
-    """Parse one ``report_check_types -violators`` block (issue #3005).
-
-    ``coverage`` is ``"not_run"`` when the markers are absent (the session
-    never reached the block), ``"unsupported"`` when the Tcl ``catch`` fired,
-    and ``"checked"`` only when the ``KLT_ELECTRICAL_OK`` sentinel closed the
-    block -- so zero violations is only ever reported for a check that ran.
-    ``worst_excess`` is ``value - limit`` of the worst violator (positive)."""
-    block = _extract_block(stdout, begin, end)
-    if block is None:
-        return _electrical_class("not_run", unit, [], set())
-    if _ELECTRICAL_UNSUPPORTED in block or _ELECTRICAL_OK not in block:
-        return _electrical_class("unsupported", unit, [], set())
-    rows: list[tuple[str, float, float]] = []
-    nets: set[str] = set()
-    for line in block.splitlines():
-        if line.startswith(_ELECTRICAL_NET_PREFIX + " "):
-            parts = line.split(None, 2)
-            if len(parts) == 3:
-                nets.add(parts[2].strip())
-            continue
-        match = _ELECTRICAL_ROW_RE.match(line)
-        if match:
-            excess = float(match.group("value")) - float(match.group("limit"))
-            rows.append((match.group("pin"), float(match.group("limit")), excess))
-    return _electrical_class("checked", unit, rows, nets)
-
-
 def _electrical_checks_block(stdout: str, has_spef: bool) -> dict[str, Any]:
     """The per-corner ``electrical_checks`` response block (issue #3005).
     ``parasitics_source`` says whether the numbers are against the
@@ -4386,6 +4356,12 @@ def _electrical_checks_block(stdout: str, has_spef: bool) -> dict[str, Any]:
         ),
         "max_capacitance": _parse_electrical_check(
             stdout, _MAX_CAP_BEGIN, _MAX_CAP_END, "pF"
+        ),
+        "min_pulse_width": _parse_electrical_slack_check(
+            stdout, _MIN_PULSE_BEGIN, _MIN_PULSE_END
+        ),
+        "min_period": _parse_electrical_slack_check(
+            stdout, _MIN_PERIOD_BEGIN, _MIN_PERIOD_END
         ),
     }
 
@@ -4460,130 +4436,6 @@ def _port_check_error_message(rows: list[tuple[str, str, str]]) -> str:
         only_side, "per-port I/O delay constraint(s) rejected"
     )
     return f"{prefix}: " + "; ".join(details)
-
-
-def _empty_path_record(status: str, reason: str | None) -> dict[str, Any]:
-    return {
-        "status": status,
-        "check_type": None,
-        "engine_check_role": None,
-        "startpoint": None,
-        "endpoint": None,
-        "slack_ns": None,
-        "consistent_with_aggregate": None,
-        "reason": reason,
-    }
-
-
-def _parse_worst_path_rows(
-    stdout: str,
-) -> tuple[dict[str, list[dict[str, Any]]] | None, str | None]:
-    """``({"max": [...], "min": [...]}, None)`` from
-    :func:`_worst_path_lines`' block, or ``(None, reason)`` when the block is
-    absent, reports an engine error, or carries a malformed ``PATH`` row.
-    Lines that are neither ``PATH`` nor ``ERROR`` rows (stray engine
-    warnings) are ignored -- they can never be mistaken for a path."""
-    block = _extract_block(stdout, _WORST_PATHS_BEGIN, _WORST_PATHS_END)
-    if block is None:
-        return None, "worst-path records absent from engine output"
-    rows: dict[str, list[dict[str, Any]]] = {"max": [], "min": []}
-    for line in block.splitlines():
-        if line.startswith("ERROR\t"):
-            return None, (
-                "engine path introspection failed: " + line[len("ERROR\t") :].strip()
-            )
-        if not line.startswith("PATH\t"):
-            continue
-        parts = line.split("\t")
-        if len(parts) != 6 or parts[1] not in rows or not all(parts[2:]):
-            return None, f"malformed worst-path record: {line!r}"
-        try:
-            slack_s = float(parts[3])
-        except ValueError:
-            return None, f"malformed worst-path slack: {line!r}"
-        if slack_s != slack_s or abs(slack_s) == float("inf"):
-            return None, f"non-finite worst-path slack: {line!r}"
-        rows[parts[1]].append(
-            {
-                "engine_check_role": parts[2],
-                "slack_ns": slack_s * 1e9,
-                "startpoint": parts[4],
-                "endpoint": parts[5],
-            }
-        )
-    return rows, None
-
-
-def _worst_path_record(
-    rows: list[dict[str, Any]], aggregate_ns: float | None
-) -> dict[str, Any]:
-    """The worst (minimum-slack) record among one side's per-group rows,
-    cross-checked against that side's aggregate WNS from the same session.
-
-    ``status``:
-
-    - ``"ok"`` -- a path was found and its slack equals the aggregate WNS
-      (within :data:`_SLACK_CONSISTENCY_TOL_NS`), or the aggregate was not
-      reported at all (``consistent_with_aggregate: null``).
-    - ``"no_paths"`` -- the engine found no constrained path on this side,
-      and the aggregate agrees (sentinel or absent). Identity fields null.
-    - ``"inconsistent"`` -- the path population and the aggregate WNS
-      disagree (no path but a real WNS, or a different slack). The record
-      is still the engine's real worst *found* path, but it must not be
-      read as the path that binds the aggregate.
-    """
-    aggregate_real = aggregate_ns is not None and abs(aggregate_ns) < 1e29
-    if not rows:
-        if aggregate_real:
-            record = _empty_path_record(
-                "inconsistent",
-                "engine reported no constrained path but an aggregate WNS of "
-                f"{aggregate_ns}",
-            )
-            record["consistent_with_aggregate"] = False
-            return record
-        return _empty_path_record("no_paths", None)
-    worst = min(rows, key=lambda row: row["slack_ns"])
-    role = worst["engine_check_role"]
-    record = {
-        "status": "ok",
-        "check_type": _CHECK_ROLE_TYPES.get(role, "unknown"),
-        "engine_check_role": role,
-        "startpoint": worst["startpoint"],
-        "endpoint": worst["endpoint"],
-        "slack_ns": round(worst["slack_ns"], 5),
-        "consistent_with_aggregate": None,
-        "reason": None,
-    }
-    if aggregate_ns is None:
-        return record
-    consistent = aggregate_real and (
-        abs(worst["slack_ns"] - aggregate_ns) <= _SLACK_CONSISTENCY_TOL_NS
-    )
-    record["consistent_with_aggregate"] = consistent
-    if not consistent:
-        record["status"] = "inconsistent"
-        record["reason"] = (
-            f"worst path slack {record['slack_ns']} ns differs from the "
-            f"aggregate WNS {aggregate_ns}"
-        )
-    return record
-
-
-def _worst_paths(
-    stdout: str, setup_ws: float | None, hold_ws: float | None
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    """``(worst_setup_path, worst_hold_path)`` for one session."""
-    rows, reason = _parse_worst_path_rows(stdout)
-    if rows is None:
-        return (
-            _empty_path_record("unavailable", reason),
-            _empty_path_record("unavailable", reason),
-        )
-    return (
-        _worst_path_record(rows["max"], setup_ws),
-        _worst_path_record(rows["min"], hold_ws),
-    )
 
 
 def _apply_port_record(

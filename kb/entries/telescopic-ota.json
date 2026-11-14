@@ -1,0 +1,56 @@
+{
+  "id": "telescopic-ota",
+  "title": "Telescopic (stacked-cascode) OTA",
+  "topology": "A single-stage differential OTA in which the signal current stays in one vertical stack per side: an NMOS input pair sits at the bottom, NMOS cascode transistors are stacked directly on its drains, PMOS cascode transistors sit above those, and a PMOS current-mirror load tops each stack, with a shared NMOS tail source below the pair. The mirror converts the differential current to a single-ended, high-impedance output at the right-hand cascode junction. Because both the NMOS and PMOS sides are cascoded, output resistance is on the order of gm*ro^2 on each side, giving higher DC gain than a five-transistor OTA at the same bias current, and with no extra folding branches the bias current is lower and there are fewer noise-contributing devices than in a folded-cascode OTA. The trade against folded-cascode is headroom: the stack puts about five device drops between supply and ground, so the input common-mode range and output swing are narrower, and the input and output common-mode levels cannot be chosen independently (the input must sit high enough to keep the tail saturated and low enough to keep the input pair and its cascodes saturated).",
+  "spec_class": "high-gain, low-power, low-noise single-stage OTA for moderate-swing feedback and switched-capacitor stages where supply headroom is not the binding constraint and the input common-mode level is controlled — chosen over a folded-cascode OTA when gain per unit current and noise matter more than input/output swing",
+  "pdk_portability": {
+    "primary_pdk": "sky130",
+    "notes": "The telescopic stack is portable to any PDK with enough supply for roughly five saturated device drops; the achievable swing and the cascode bias levels are sky130-specific, because at the common 1.8 V core supply the stack leaves little headroom and the input common-mode level must be chosen to fit it. In a lower-voltage node the stack stops fitting and a folded-cascode or two-stage topology is the usual substitute."
+  },
+  "sizing_approach": "Size headroom first: pick the tail current and input-pair gm/ID for the noise and gm target, then choose cascode and mirror overdrives small enough that the full stack fits under the supply with the output node near mid-supply; set the input common-mode voltage from the input pair's gate-source drop plus the tail's saturation voltage rather than treating it as free. Use channel lengths longer than minimum on the cascode and mirror devices to raise output resistance, and keep the input pair shorter for gm. Derive cascode gate biases from small diode-connected replica stacks carrying a reference current near the branch current (a simplification of a full wide-swing bias generator, which would recover some swing). Expect gain to sit well under the idealized gm*ro^2 figure when headroom forces devices toward the edge of saturation.",
+  "layout_idioms": [
+    "input differential pair in common-centroid or interdigitated layout with dummy devices, matched to the discipline used for a five-transistor OTA input pair",
+    "matched NMOS cascode pair and matched PMOS cascode pair placed symmetrically about the signal axis so both stacks see the same parasitics",
+    "PMOS mirror load interdigitated and common-centroid matched so the mirror ratio holds across process gradients",
+    "cascode bias replica stacks placed adjacent to the core with short, symmetric bias routing to each cascode gate, avoiding IR-drop or coupling-induced systematic mismatch"
+  ],
+  "source": {
+    "citation": "B. Razavi, Design of Analog CMOS Integrated Circuits, 2nd ed., McGraw-Hill Education, 2017, Chapter 9 (Operational Amplifiers), telescopic cascode op amp section.",
+    "url": "https://openlibrary.org/search?q=razavi+design+of+analog+cmos+integrated+circuits",
+    "license_or_openness": "Standard analog IC design textbook cited for its telescopic-cascode topology and headroom trade-off, restated in this entry's own words with no figures or text reproduced (case 4, textbook-level common knowledge, in kb/SOURCING.md). The textbook is not open access; no proprietary or NDA'd data is recorded."
+  },
+  "notes": "Framed as a general-purpose single-ended-output telescopic OTA, not a wide-swing, gain-boosted or fully-differential variant; those add bias-generator or common-mode-feedback complexity and are out of scope for this entry. The entry cites a classic textbook as the primary source; a recent LLM-for-analog-design preprint (OPERA, arXiv:2610.39395) motivated adding a telescopic entry to the KB but is not the source for the topology and no result from it is reproduced.",
+  "artifacts": {
+    "netlist": "examples/kb/telescopic-ota/telescopic_ota.spice",
+    "notes": "From-scratch sky130 netlist: a real NMOS input pair, NMOS cascodes, PMOS cascodes and a PMOS mirror load, all sky130_fd_pr__nfet_01v8/pfet_01v8 -- not behavioral. The tail and both cascode gate biases come from diode-connected replica stacks driven by ideal DC current references (the same convention as five-transistor-ota and folded-cascode-ota), a simplification of a full wide-swing bias generator. Open-loop AC is measured with the Lfb/Cfb DC-feedback technique at an input common-mode of 1.0 V."
+  },
+  "measured": {
+    "pdk": "sky130",
+    "corner": "tt, 1.8V, 27C",
+    "supply_v": 1.8,
+    "notes": "Real sky130A device models, not behavioral elements. Open-loop gain/phase are measured with the same Lfb/Cfb DC-feedback technique used by five-transistor-ota and folded-cascode-ota. av_db (53.0 dB) is above folded-cascode-ota's 40.5 dB and five-transistor-ota's 39.6 dB at comparable tail current, but is far below the idealized gm*ro^2 gain the topology text describes: at 1.8 V the stack leaves little headroom, and this reference stage uses simple replica-stack cascode biasing rather than a wide-swing generator. Single corner only (no PVT or Monte Carlo). Reproduce with `klt sim examples/kb/telescopic-ota/request.json`.",
+    "figures": [
+      {
+        "name": "av_db",
+        "value": 53.0087,
+        "unit": "dB",
+        "analysis": "ac",
+        "testbench": "examples/kb/telescopic-ota/request.json"
+      },
+      {
+        "name": "gbw_hz",
+        "value": 39536800.0,
+        "unit": "Hz",
+        "analysis": "ac",
+        "testbench": "examples/kb/telescopic-ota/request.json"
+      },
+      {
+        "name": "pm_deg",
+        "value": 79.737,
+        "unit": "deg",
+        "analysis": "ac",
+        "testbench": "examples/kb/telescopic-ota/request.json"
+      }
+    ]
+  }
+}

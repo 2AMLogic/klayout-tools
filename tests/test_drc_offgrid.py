@@ -26,6 +26,7 @@ from klayout_tools.decks.sky130 import (
     OFFGRID_GRID_UM,
     OFFGRID_UNCHECKED_LAYERS,
 )
+from klayout_tools.decks.sky130_unmodeled import _NATIVE_OUTPUT_ID_STEMS
 from klayout_tools.drc import DrcError, _run_grid_check, run_drc
 
 
@@ -280,7 +281,9 @@ def test_offgrid_group_coverage_is_transcribed_as_the_source_block_has_it():
         assert grid_rule.voltage_independent is True
         assert grid_rule.provenance is not None
         assert grid_rule.provenance.source_path == "sky130/klayout/sky130.lydrc"
-        assert grid_rule.provenance.rule_id == "x.1b"
+        assert grid_rule.provenance.rule_id == (
+            f"{stem}_OFFGRID" if stem in _NATIVE_OUTPUT_ID_STEMS else "x.1b"
+        )
 
         angle_id = f"{stem}.angle.1"
         if angle_limit_deg is None:
@@ -293,7 +296,9 @@ def test_offgrid_group_coverage_is_transcribed_as_the_source_block_has_it():
         assert angle_rule.angle_limit_deg == angle_limit_deg
         assert angle_rule.provenance is not None
         assert angle_rule.provenance.source_path == "sky130/klayout/sky130.lydrc"
-        assert angle_rule.provenance.rule_id == angle_rule_id
+        assert angle_rule.provenance.rule_id == (
+            f"{stem}_angle" if stem in _NATIVE_OUTPUT_ID_STEMS else angle_rule_id
+        )
         assert angle_rule.voltage_independent == (angle_rule_id != "x.2c")
 
     assert {

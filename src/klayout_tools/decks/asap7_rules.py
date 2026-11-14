@@ -213,6 +213,42 @@ def _select_family(layer: str) -> tuple[Asap7Rule, ...]:
     )
 
 
+def _thickox_family() -> tuple[Asap7Rule, ...]:
+    # The DRM 1p7 has no thick-oxide layer; Table 3.7.1 is cited only as the
+    # select-layer table these rules are modelled on. Every threshold is
+    # assumed, and the marker's 111/0 stream number is assumed too.
+    t = "Table 3.7.1"
+    pre = "PREDICTIVE, not a DRM or foundry rule (THICKOX 111/0 is an assumed number): "
+    return (
+        Asap7Rule(
+            "THICKOX.ACTIVE.EN",
+            t,
+            pre + "marker encloses ACTIVE of a marked device by 27 nm, the core "
+            "NSELECT.ACTIVE.EN.2 value; ACTIVE only partly covered or touching "
+            "the marker is also reported",
+        ),
+        Asap7Rule(
+            "THICKOX.S",
+            t,
+            pre + "marker-to-marker spacing 54 nm, the core NSELECT.W.2 value; "
+            "abutting or overlapping markers merge and are not reported",
+        ),
+        Asap7Rule(
+            "THICKOX.GATE.L",
+            t,
+            pre + "minimum horizontal GATE width (Lg) 30 nm on a gate crossing "
+            "ACTIVE under the marker, 1.5x the core 20 nm; GATE.W.1 still "
+            "requires exactly 20 nm, so a conforming marked gate also trips it",
+        ),
+        Asap7Rule(
+            "THICKOX.ACTIVE.W",
+            t,
+            pre + "minimum vertical ACTIVE width (channel width) 54 nm, two "
+            "ACTIVE.W.2 steps, on ACTIVE crossed by a GATE under the marker",
+        ),
+    )
+
+
 _PITCH_NOTE = (
     "exact pitch checked edge-to-edge for minimum-width shapes: neighbours "
     "closer than two pitches must sit exactly one pitch apart; alignment of "
@@ -313,6 +349,8 @@ RULES: tuple[Asap7Rule, ...] = (
     *_select_family("SRAMVT"),
     Asap7Rule("NSELECT.PSELECT.AUX.1", "Table 3.7.1"),
     Asap7Rule("VT.AUX.2", "Table 3.7.1"),
+    # THICKOX (I/O marker): predictive, not in the DRM (#4465)
+    *_thickox_family(),
     # SDT
     Asap7Rule("SDT.W.1", "Table 3.8.1"),
     Asap7Rule("SDT.W.2", "Table 3.8.1"),
@@ -460,7 +498,7 @@ RULE_IDS: tuple[str, ...] = tuple(r.id for r in RULES)
 
 #: Opt-in absolute grid-origin rules (#4082). Not in :data:`RULES`: they run
 #: only when the caller declares an origin with the matching ``--deck-var``,
-#: so the default 263-category contract is unchanged. The DRM gives the fin
+#: so the default 267-category contract is unchanged. The DRM gives the fin
 #: and gate pitches (Tables 3.3.1 / 3.4.1) but no absolute origin, so the
 #: origin is the caller's; the checked reference is the FIN lower edge and
 #: the GATE left edge.

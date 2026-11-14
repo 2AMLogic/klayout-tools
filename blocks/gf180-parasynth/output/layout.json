@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:08:44.220513+00:00",
+  "slug": "gf180-parasynth",
+  "name": "Gf180 Parasynth",
+  "description": "Paraphonic ladder-filter synthesizer voice and a complete TR-808 drum section on gf180mcu \u2014 2AM Logic canary block",
+  "pdk": "gf180mcu",
+  "source": {
+    "repo": "2AMLogic/gf180-parasynth",
+    "ref": "ccedc9cb59ced910546d59c6aaa9494f3ea78cd4",
+    "path": "."
+  },
+  "downloadable": true,
+  "status": "in design \u2014 simulation evidence"
+}

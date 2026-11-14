@@ -14,9 +14,11 @@ from klayout_tools.signoff import build_tier_report
 from klayout_tools.signoff_attest import (
     AttestationError,
     build_attestation,
+    render_envelope,
+)
+from klayout_tools.signoff_attest_stream import (
     build_stream_attestation,
     check_stream_attestation,
-    render_envelope,
 )
 
 _GENERATOR = "python gen.py -o layout/top.gds"
@@ -165,6 +167,80 @@ def test_geometry_hash_kind_is_recorded(tmp_path):
     assert _bind(repo, envelope)["status"] == "met"
 
 
+def _stats_geometry_digest(stream: str, capsys) -> str:
+    """The digest an attester gets from the public CLI, as documented in
+    ``docs/cli/signoff.md``: ``klt stats --format json | jq -r .geometry_digest``."""
+    assert main(["stats", stream, "--format", "json"]) == 0
+    return json.loads(capsys.readouterr().out)["geometry_digest"]
+
+
+def test_stats_geometry_digest_round_trips_to_a_met_item(tmp_path, capsys):
+    """Issue #5551: the public `klt stats` field is a usable producer for
+    `--regenerated-hash --hash-kind geometry`.
+
+    This is the whole documented workflow with no private import: read the
+    digest off `klt stats --format json`, attest with it, and the manifest
+    grades the item `met` rather than `stale_artifact`.
+    """
+    repo, stream = _stream(tmp_path)
+
+    digest = _stats_geometry_digest(stream, capsys)
+
+    assert digest is not None and digest.startswith("sha256:")
+
+    envelope = build_stream_attestation(
+        stream, generator=_GENERATOR, regenerated_hash=digest, hash_kind="geometry"
+    )
+    item = _bind(repo, envelope)
+
+    assert item["status"] == "met"
+    assert item.get("reason") != "stale_artifact"
+    assert item["citation"]["artifact_binding"]["regeneration"] == {
+        "generator": _GENERATOR,
+        "regenerated_hash": digest,
+        "hash_kind": "geometry",
+        "executed_by_klt": False,
+    }
+
+
+def test_stats_geometry_digest_matches_the_private_grader_input(tmp_path, capsys):
+    """The CLI field is the *same* value the grader recomputes -- not merely
+    one that happens to grade. Pins the two together so a future change to
+    either surface cannot silently diverge."""
+    from klayout_tools._provenance import layout_geometry_digest
+
+    _, stream = _stream(tmp_path)
+
+    assert _stats_geometry_digest(stream, capsys) == layout_geometry_digest(stream)
+
+
+def test_diff_canonical_hash_is_not_the_geometry_digest(tmp_path, capsys):
+    """Issue #5551's trap: `klt diff`'s `canonical_hash` is also a
+    geometry-level digest, looks like the right value, and grades
+    `stale_artifact`. It must stay distinguishable from `klt stats`'
+    `geometry_digest`, which is the supported producer."""
+    repo, stream = _stream(tmp_path)
+
+    geometry_digest = _stats_geometry_digest(stream, capsys)
+    assert main(["diff", stream, stream, "--format", "json"]) == 0
+    canonical_hash = json.loads(capsys.readouterr().out)["a"]["canonical_hash"]
+
+    assert f"sha256:{canonical_hash}" != geometry_digest
+
+    # Substituting it (prefixed into the shape the claim requires) is refused
+    # as a stale artifact, not silently accepted.
+    envelope = build_stream_attestation(
+        stream,
+        generator=_GENERATOR,
+        regenerated_hash=f"sha256:{canonical_hash}",
+        hash_kind="geometry",
+    )
+    item = _bind(repo, envelope)
+
+    assert item["status"] != "met"
+    assert item["reason"] == "stale_artifact"
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
@@ -298,4 +374,120 @@ def test_failing_cli_attest_writes_nothing(tmp_path):
 def test_inventory_items_unchanged_still_reject_item2():
     with pytest.raises(AttestationError):
         build_attestation(2, "nonexistent.json")
-    assert attest_module.ATTESTABLE_ITEMS == (1, 9, 10)
+    assert attest_module.ATTESTABLE_ITEMS == (1, 8, 9, 10)
+
+
+# --- declared checks via optional --inventory (issue #4767) ---------------- #
+
+
+def _inv(repo: Path, checks: list, **extra) -> str:
+    path = repo / "evidence" / "item2-inv.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "t1-attestation-inventory",
+                "t1_item": 2,
+                "checks": checks,
+                **extra,
+            }
+        )
+    )
+    return str(path)
+
+
+_PASS = {"name": "ok", "argv": ["python3", "-c", "pass"]}
+_FAIL = {"name": "bad", "argv": ["python3", "-c", "import sys; sys.exit(4)"]}
+
+
+def test_declared_checks_recorded_and_pass(tmp_path):
+    repo, stream = _stream(tmp_path)
+    inv = _inv(repo, [_PASS])
+    env = build_stream_attestation(stream, inventory_path=inv)
+    assert env["status"] == "pass"
+    last = env["attestation"]["checks"][-1]
+    assert last["role"] == "audit" and last["name"] == "ok"
+    assert last["argv"] == _PASS["argv"] and last["exit_status"] == 0
+    assert env["attestation"]["check_count"] == 4
+    assert env["attestation"]["inventory"]["path"]["path"] == "evidence/item2-inv.json"
+
+
+def test_declared_check_failure_fails_envelope(tmp_path):
+    repo, stream = _stream(tmp_path)
+    inv = _inv(repo, [_PASS, _FAIL])
+    env = build_stream_attestation(stream, inventory_path=inv)
+    assert env["status"] == "fail"
+    assert env["attestation"]["checks"][-1]["exit_status"] == 4
+    code = main(
+        [
+            "signoff",
+            "--attest",
+            "2",
+            "--input",
+            stream,
+            "--inventory",
+            inv,
+            "--format",
+            "json",
+        ]
+    )
+    assert code == 3
+
+
+def test_no_inventory_envelope_unchanged(tmp_path):
+    repo, stream = _stream(tmp_path)
+    env = build_stream_attestation(stream)
+    assert "inventory" not in env["attestation"]
+    assert env["attestation"]["check_count"] == 3
+
+
+def test_declared_check_timeout(tmp_path):
+    repo, stream = _stream(tmp_path)
+    slow = {
+        "name": "slow",
+        "argv": ["python3", "-c", "import time; time.sleep(5)"],
+        "timeout_s": 0.5,
+    }
+    env = build_stream_attestation(stream, inventory_path=_inv(repo, [slow]))
+    last = env["attestation"]["checks"][-1]
+    assert env["status"] == "fail" and last["error"] == "timeout"
+
+
+def test_declared_checks_check_mode_drift_and_local_only(tmp_path):
+    repo, stream = _stream(tmp_path)
+    local = {**_FAIL, "name": "local", "local_only": True}
+    inv = _inv(repo, [_PASS, {**_PASS, "name": "lo", "local_only": True}])
+    env = build_stream_attestation(stream, inventory_path=inv)
+    committed = repo / "evidence" / "item2.json"
+    committed.write_text(render_envelope(env))
+    result = check_stream_attestation(stream, str(committed), inventory_path=inv)
+    assert result["status"] == "match"
+    assert [c["name"] for c in result["skipped_checks"]] == ["lo"]
+    # Editing the inventory is drift.
+    inv2 = _inv(repo, [_PASS, local])
+    drift = check_stream_attestation(stream, str(committed), inventory_path=inv2)
+    assert drift["status"] != "match"
+
+
+@pytest.mark.parametrize(
+    "inventory",
+    [
+        {"checks": []},
+        {"checks": [_PASS, _PASS]},
+        {"checks": [_PASS], "t1_item": 9},
+        {"checks": [_PASS], "stream": "layout/other.gds"},
+        {"checks": [{"name": "x"}]},
+    ],
+)
+def test_malformed_item2_inventory_refused(tmp_path, inventory):
+    repo, stream = _stream(tmp_path)
+    doc = {
+        "schema_version": 1,
+        "kind": "t1-attestation-inventory",
+        "t1_item": 2,
+        **inventory,
+    }
+    path = repo / "evidence" / "bad.json"
+    path.write_text(json.dumps(doc))
+    with pytest.raises(AttestationError):
+        build_stream_attestation(stream, inventory_path=str(path))

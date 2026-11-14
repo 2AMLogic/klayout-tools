@@ -111,3 +111,54 @@ def test_sv_source_parses_in_real_yosys_with_sv_front_end(tmp_path):
     script = tmp_path / "s.ys"
     script.write_text(f"{read_verilog_line(rtl)}\nhierarchy -check -top c\n")
     subprocess.run(["yosys", "-q", "-s", str(script)], check=True)
+
+
+def test_chparam_lines_module_qualified_keys():
+    assert chparam_lines({"W": 8, "sub.F": "i.hex", "sub.G": 2, "a.X": 1}, "top") == [
+        "chparam -set W 8 top",
+        "select -assert-any $abstract\\a",
+        "chparam -set X 1 a",
+        "select -assert-any $abstract\\sub",
+        'chparam -set F "i.hex" -set G 2 sub',
+    ]
+
+
+def test_validate_parameters_accepts_qualified_and_rejects_deeper_keys():
+    assert validate_parameters({"sub.F": 1}, ValueError, "p") == {"sub.F": 1}
+    for bad in ("a.b.c", ".F", "sub.", "sub .F"):
+        with pytest.raises(ValueError, match="module-qualified"):
+            validate_parameters({bad: 1}, ValueError, "p")
+
+
+def test_read_verilog_line_defers_only_for_qualified_parameters():
+    assert read_verilog_line("t.sv", None, {"W": 1}) == "read_verilog -sv t.sv"
+    assert (
+        read_verilog_line("t.sv", None, {"sub.F": 1}) == "read_verilog -sv -defer t.sv"
+    )
+
+
+@pytest.mark.skipif(shutil.which("yosys") is None, reason="needs yosys")
+def test_submodule_parameter_reaches_readmemh_in_real_yosys(tmp_path):
+    (tmp_path / "t.sv").write_text(
+        'module sub #(parameter F = "") (input logic [1:0] a, output logic [7:0] y);\n'
+        "  logic [7:0] m [0:3];\n  initial $readmemh(F, m);\n  assign y = m[a];\n"
+        "endmodule\n"
+        "module top (input logic [1:0] a, output logic [7:0] y);\n"
+        "  sub u(.a(a), .y(y));\nendmodule\n"
+    )
+    (tmp_path / "i.hex").write_text("01\n02\n03\n04\n")
+
+    def run(parameters):
+        script = [read_verilog_line("t.sv", None, parameters)]
+        script += chparam_lines(parameters, "top") + ["hierarchy -check -top top"]
+        return subprocess.run(
+            ["yosys", "-q", "-p", "; ".join(script)],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+        )
+
+    assert run({"sub.F": "i.hex"}).returncode == 0
+    missing = run({"nosuch.F": "i.hex"})
+    assert missing.returncode != 0
+    assert "selection is empty: $abstract\\nosuch" in missing.stdout + missing.stderr

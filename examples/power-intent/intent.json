@@ -1,0 +1,7 @@
+{
+  "gated_instances": ["xor0", "xor1", "xor2", "ff_g"],
+  "always_on": {"ports": ["iso_n", "iso", "clk", "d"]},
+  "clamp_values": {"ga": 0, "gb": 1, "gc": 0, "gq": 0},
+  "retained": ["ff_r"],
+  "sequence": ["iso_assert", "switch_off", "rail_good", "iso_release", "reset_release", "clk_restart"]
+}

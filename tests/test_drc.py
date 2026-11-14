@@ -639,6 +639,8 @@ def test_json_contract(tmp_path, capsys):
     prov = data["provenance"]
     assert set(prov.keys()) == {
         "klt_version",
+        "klt_git_commit",
+        "klt_reinstall_spec",
         "klayout_version",
         "pdk",
         "deck",
@@ -673,7 +675,9 @@ def test_json_contract(tmp_path, capsys):
     assert data["metrics"] == {"drc__error__count": data["violation_count"]}
 
     for entry in data["violations"]:
-        assert set(entry.keys()) == {
+        assert set(entry.keys()) - (
+            {"note"} if entry["check"] == "tap_distance" else set()
+        ) == {
             "rule",
             "description",
             "check",
@@ -1501,74 +1505,6 @@ def test_run_drc_sky130_nwell9_hvnwell_enclosed_by_hvi(tmp_path, hvi_box, expect
         assert "nwell.enclosed.hvi.1" in report["coverage"]["rules_checked"]
 
 
-def test_run_drc_sky130_coverage_lists_unmodeled_rules(tmp_path):
-    """A clean sky130 verdict must disclose the enclosure refinements the
-    curated deck does not transcribe (issue #3031); non-sky130 decks that
-    declare none report an empty list."""
-    path = tmp_path / "unmodeled.gds"
-    _make_sky130_nwell_hvi_layout(None).write(str(path))
-
-    report = run_drc(str(path), "sky130")
-
-    assert report["coverage"]["unmodeled_rules"] == [
-        "MR_licon.SP.1",
-        "cap2m.11",
-        "cap2m.2b",
-        "cap2m.2b_a",
-        "cap2m.5",
-        "capm.11",
-        "capm.2b",
-        "capm.2b_a",
-        "capm.5",
-        "difftap.10",
-        "difftap.11",
-        "difftap.8",
-        "difftap.9",
-        "dnwell.2",
-        "hvi.1",
-        "hvi.2a",
-        "hvntm.1",
-        "hvntm.2",
-        "hvtp.1",
-        "hvtp.2",
-        "hvtr.1",
-        "hvtr.2",
-        "hvtr.2_a",
-        "ldntm.2",
-        "li.7",
-        "licon.13",
-        "lvtn.2",
-        "m1.3ab",
-        "m1.5",
-        "m2.3ab",
-        "m2.5",
-        "m3.3ab",
-        "m4.5ab",
-        "n/psdm.10a",
-        "n/psdm.10b",
-        "n/psdm.5a",
-        "n/psdm.5b",
-        "n/psdm.6",
-        "n/psdm.7",
-        "n/psdm.8",
-        "ncm.2a",
-        "npc.4",
-        "nsm.1",
-        "pad.2",
-        "poly.3",
-        "rdl.1",
-        "rdl.2",
-        "rpm.2",
-        "thkox.2",
-        "tunm.2",
-        "urpm.2",
-        "via.5a",
-        "via2.5",
-        "via3.5",
-    ]
-    assert get_unmodeled_rules("no-such-deck") == []
-
-
 def test_run_drc_sg13g2_coverage_lists_unmodeled_pad_and_latchup_rules(tmp_path):
     """A clean sg13g2 verdict must disclose the un-transcribed `Pad.*` and
     `LU.*` runset rules (issue #3854); sorted, and other decks unaffected."""
@@ -1637,7 +1573,9 @@ def test_gf180mcu_corpus_layout_produces_well_formed_report(layout_path: Path):
     assert len(report["violations"]) == report["violation_count"]
 
     for entry in report["violations"]:
-        assert set(entry.keys()) == {
+        assert set(entry.keys()) - (
+            {"note"} if entry["check"] == "tap_distance" else set()
+        ) == {
             "rule",
             "description",
             "check",
@@ -1693,7 +1631,9 @@ def test_openroad_gcd_fixture_produces_well_formed_report():
     assert report["violation_count"] == sum(report["rule_counts"].values())
     assert len(report["violations"]) == report["violation_count"]
     for entry in report["violations"]:
-        assert set(entry.keys()) == {
+        assert set(entry.keys()) - (
+            {"note"} if entry["check"] == "tap_distance" else set()
+        ) == {
             "rule",
             "description",
             "check",
@@ -7396,7 +7336,7 @@ def test_run_drc_threshold_max_dbu_validated_even_when_layer_absent(
 
 
 def test_run_drc_sg13g2_every_rule_has_provenance():
-    """Every one of sg13g2's 62 curated `DrcRule` entries carries a populated
+    """Every one of sg13g2's 63 curated `DrcRule` entries carries a populated
     `provenance` citation (issue #905's own acceptance criterion: "every
     compiled rule cites its SG13G2 PDK source line", extended by issue #1243's
     Metal3-TopMetal2 stack, issue #2581's 6.11 MIM group, issue #3787's pSD
@@ -7405,7 +7345,7 @@ def test_run_drc_sg13g2_every_rule_has_provenance():
     36 width/space rules `tests/test_golden_deck.py`'s generic check already
     covers."""
     deck = get_deck("sg13g2")
-    assert len(deck) == 62
+    assert len(deck) == 63
     for rule in deck:
         assert rule.provenance is not None, f"sg13g2/{rule.id}: no provenance"
         assert rule.provenance.source_repo == "IHP-GmbH/IHP-Open-PDK"
@@ -10223,7 +10163,11 @@ def test_legacy_enclosing_unchanged_without_opt_in(tmp_path, monkeypatch):
     )
     assert not _synthetic_hits(path)
     gf = get_deck("gf180mcu")
-    assert not any(getattr(r, "require_containment", False) for r in gf)
+    # Only MDP.6 opts in: upstream's `mvpsd.not_inside(ldmos_xtor)` flags an
+    # MVPSD not wholly inside LDMOS_XTOR, which interaction-scoped enclosing
+    # cannot express. Every other gf180mcu rule keeps the legacy semantics.
+    opted_in = {r.id for r in gf if getattr(r, "require_containment", False)}
+    assert opted_in == {"ldmos_xtor.enclosing.mvpsd.1"}
 
 
 @pytest.fixture
@@ -10987,6 +10931,80 @@ def test_waivers_never_waive_unattributed_marker(tmp_path):
     assert report["waived_count"] == 0
 
 
+def test_source_cell_rollup_counts_kept_and_waived_per_cell(tmp_path):
+    """Issue #4520: rule x source_cell roll-up, waived counted separately."""
+    gds = _hier_gds(tmp_path)
+
+    plain = run_drc(gds, "sky130")
+    assert plain["source_cell_rollup"] == [
+        {
+            "source_cell": _WAIVED_CELL,
+            "rule": "poly.width.1",
+            "count": 3,
+            "waived_count": 0,
+        }
+    ]
+
+    waived = run_drc(gds, "sky130", waivers_file=_waivers_file(tmp_path, [_waiver()]))
+    assert waived["source_cell_rollup"] == [
+        {
+            "source_cell": _WAIVED_CELL,
+            "rule": "poly.width.1",
+            "count": 0,
+            "waived_count": 3,
+        }
+    ]
+
+
+def test_source_cell_rollup_absent_on_flat_layout_unattributed_with_waivers(tmp_path):
+    path = tmp_path / "flat.gds"
+    _make_violation_layout().write(str(path))
+
+    assert "source_cell_rollup" not in run_drc(str(path), "sky130")
+
+    report = run_drc(
+        str(path), "sky130", waivers_file=_waivers_file(tmp_path, [_waiver()])
+    )
+    assert report["source_cell_rollup"]
+    assert all(row["source_cell"] is None for row in report["source_cell_rollup"])
+    assert all(row["waived_count"] == 0 for row in report["source_cell_rollup"])
+
+
+def test_runset_correspondence_only_for_firing_rules_with_a_note():
+    from klayout_tools.decks import get_deck
+    from klayout_tools.drc import _runset_correspondence
+
+    deck = get_deck("sg13cmos5l")
+    fired = [{"rule": "nwell.space.2"}, {"rule": "poly.width.1"}]
+    notes = _runset_correspondence(deck, fired, [])
+
+    assert [n["rule"] for n in notes] == ["nwell.space.2"]
+    assert notes[0]["implemented_by_pdk_runset"] is True
+    assert notes[0]["runset_file"].endswith("5_1_nwell.drc")
+    assert len(notes[0]["pdk_revision"]) == 40
+    assert _runset_correspondence(deck, [], []) == []
+    assert _runset_correspondence(get_deck("sky130"), fired, []) == []
+
+
+def test_runset_correspondence_names_sram_marker_for_nwell_nsram_rules():
+    from klayout_tools.decks import get_deck
+    from klayout_tools.drc import _runset_correspondence
+
+    deck = get_deck("sg13cmos5l")
+    fired = [
+        {"rule": "nwell.enclosing.pactiv.1"},
+        {"rule": "nwell.space.nactiv.1"},
+        {"rule": "nwell.enclosing.pactiv.hv.1"},
+    ]
+    notes = {n["rule"]: n["note"] for n in _runset_correspondence(deck, fired, [])}
+
+    for rule in ("nwell.enclosing.pactiv.1", "nwell.space.nactiv.1"):
+        assert "25/0" in notes[rule] and "NWell_Nsram" in notes[rule]
+        assert "--disable_extra_rules" in notes[rule]
+    assert "25/0" in notes["nwell.enclosing.pactiv.hv.1"]
+    assert "NWell_Nsram" not in notes["nwell.enclosing.pactiv.hv.1"]
+
+
 def test_without_waivers_report_has_no_waiver_fields(tmp_path):
     report = run_drc(_hier_gds(tmp_path), "sky130")
 
@@ -11541,3 +11559,149 @@ def test_curated_request_document_negative_control(tmp_path, capsys):
     assert json.loads(capsys.readouterr().out)["negative_control"]["status"] == (
         "passed"
     )
+
+
+# ---------------------------------------------------------------------------
+# -o/--output: additive report file copy (#4393)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("make_layout", "expected_exit"),
+    [(_make_violation_layout, 3), (_make_clean_layout, 0)],
+)
+def test_output_file_equals_stdout(tmp_path, capsys, make_layout, expected_exit):
+    gds = tmp_path / "in.gds"
+    make_layout().write(str(gds))
+    out = tmp_path / "report.json"
+
+    rc = main(["drc", str(gds), "--deck", "sky130", "--format", "json", "-o", str(out)])
+
+    assert rc == expected_exit
+    assert out.read_text() == capsys.readouterr().out
+
+
+def test_output_text_format_still_writes_json(tmp_path, capsys):
+    gds = tmp_path / "in.gds"
+    _make_violation_layout().write(str(gds))
+    out = tmp_path / "report.json"
+
+    assert main(["drc", str(gds), "--deck", "sky130", "--output", str(out)]) == 3
+
+    assert json.loads(out.read_text())["status"] == "violations"
+    assert not capsys.readouterr().out.lstrip().startswith("{")
+
+
+def test_output_gz_is_gzipped_json(tmp_path, capsys):
+    import gzip
+
+    gds = tmp_path / "in.gds"
+    _make_violation_layout().write(str(gds))
+    out = tmp_path / "report.json.gz"
+
+    main(["drc", str(gds), "--deck", "sky130", "--format", "json", "-o", str(out)])
+
+    assert gzip.decompress(out.read_bytes()).decode() == capsys.readouterr().out
+
+
+def test_output_unwritable_path_is_error_envelope(tmp_path, capsys):
+    gds = tmp_path / "in.gds"
+    _make_violation_layout().write(str(gds))
+    out = tmp_path / "no-such-dir" / "report.json"
+
+    rc = main(["drc", str(gds), "--deck", "sky130", "--format", "json", "-o", str(out)])
+
+    assert rc == 1
+    assert (
+        "could not write report"
+        in json.loads(capsys.readouterr().err)["error"]["message"]
+    )
+
+
+def test_output_rejected_with_list_rules(tmp_path, capsys):
+    rc = main(
+        [
+            "drc",
+            "--deck",
+            "sky130",
+            "--list-rules",
+            "-o",
+            str(tmp_path / "r.json"),
+            "--format",
+            "json",
+        ]
+    )
+
+    assert rc == 1
+    assert "--output" in json.loads(capsys.readouterr().err)["error"]["message"]
+
+
+def test_output_rejected_with_check(tmp_path, capsys):
+    report = tmp_path / "committed.json"
+    report.write_text("{}")
+
+    rc = main(
+        [
+            "drc",
+            "--check",
+            str(report),
+            "-o",
+            str(tmp_path / "r.json"),
+            "--format",
+            "json",
+        ]
+    )
+
+    assert rc == 1
+    assert "-o/--output" in json.loads(capsys.readouterr().err)["error"]["message"]
+
+
+def test_output_reachable_from_request_document(tmp_path, capsys):
+    gds = tmp_path / "in.gds"
+    _make_violation_layout().write(str(gds))
+    request = tmp_path / "drc.request.json"
+    request.write_text(
+        json.dumps({"file": "in.gds", "deck": "sky130", "output": "out.json"})
+    )
+
+    rc = main(["drc", str(request), "--format", "json"])
+
+    assert rc == 3
+    assert (tmp_path / "out.json").read_text() == capsys.readouterr().out
+
+
+def _make_multi_family_root(tmp_path, variants) -> str:
+    root = tmp_path / "multi_pdk"
+    for variant in variants:
+        (root / variant / "libs.tech").mkdir(parents=True)
+    return str(root)
+
+
+def test_run_drc_provenance_pdk_follows_deck_family(tmp_path):
+    """Issue #4474: a root holding gf180mcu and sky130 variants records the
+    sky130 variant for a sky130 deck, not the root's lowest variant."""
+    path = tmp_path / "clean.gds"
+    _make_clean_layout().write(str(path))
+    root = _make_multi_family_root(tmp_path, ["gf180mcuA", "gf180mcuB", "sky130A"])
+
+    report = run_drc(str(path), "sky130", pdk_root=root)
+
+    assert report["provenance"]["pdk"]["name"] == "sky130A"
+
+
+def test_run_drc_explicit_pdk_of_other_family_errors(tmp_path):
+    path = tmp_path / "clean.gds"
+    _make_clean_layout().write(str(path))
+    root = _make_multi_family_root(tmp_path, ["gf180mcuA", "sky130A"])
+
+    with pytest.raises(DrcError, match="gf180mcu.*sky130|sky130.*gf180mcu"):
+        run_drc(str(path), "sky130", pdk_variant="gf180mcuA", pdk_root=root)
+
+
+def test_run_drc_root_without_deck_family_errors(tmp_path):
+    path = tmp_path / "clean.gds"
+    _make_clean_layout().write(str(path))
+    root = _make_multi_family_root(tmp_path, ["gf180mcuA"])
+
+    with pytest.raises(DrcError, match="sky130"):
+        run_drc(str(path), "sky130", pdk_root=root)

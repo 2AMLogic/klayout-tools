@@ -11,9 +11,13 @@ which re-exports every name here so
 from __future__ import annotations
 
 import os
+import re
 from typing import Any
 
+from . import place_and_route_clock as _vclk
 from ._openroad_engine import _timing_violation_report_lines
+from .place_and_route_hints import make_tracks_lines as _make_tracks_lines
+from .place_and_route_macro_halo import merge_macro_margins
 from .place_and_route_pins import pin_constraint_lines
 from .place_and_route_reports import detailed_route_lines, routing_completeness_lines
 from .place_and_route_request import PlaceAndRouteError
@@ -56,7 +60,7 @@ def _clock_lines(clock_port: str | None, clock_period_ns: float | None) -> list[
     :func:`_stage_script_lines`'s call sites, never before ``link_design``).
     """
     if clock_port is None:
-        return []
+        return _vclk.virtual_clock_lines(clock_period_ns, _UNIT_PIN_LINE)  # issue #4913
     return [
         _UNIT_PIN_LINE,
         f"create_clock -name {clock_port} -period {clock_period_ns} "
@@ -95,6 +99,20 @@ def _design_rule_constraint_lines(
     return lines
 
 
+def _pdn_instances_arg(instance: str) -> str:
+    """Convert an OpenROAD db instance name to a `define_pdn_grid -instances`
+    argument (issue #4715; live-verified, see docs/cli/place-and-route.md).
+
+    `-instances` is a list of glob patterns, unlike `place_macro -macro_name`
+    (a literal db name). So the name is glob-escaped (a backslash before each
+    of `\\ [ ] * ?`), then every backslash is doubled for the list parse. A
+    db name `g\\[0\\]` therefore becomes six backslashes before each bracket.
+    Names without those characters are returned unchanged.
+    """
+    glob_escaped = re.sub(r"([\\\[\]*?])", r"\\\1", instance)
+    return glob_escaped.replace("\\", "\\\\")
+
+
 def _io_delay_lines(
     clock_port: str | None,
     input_delay_ns: float | None,
@@ -130,10 +148,10 @@ def _io_delay_lines(
     given -- a request with neither field set produces Tcl byte-identical
     to before this function existed. ``clock_port`` is never ``None`` when
     either delay is set (:func:`_validate_constraints` rejects that
-    combination); the guard is defensive only.
+    combination); with no port, the delays use the virtual clock (#4913).
     """
     if clock_port is None:
-        return []
+        return _vclk.virtual_io_delay_lines(input_delay_ns, output_delay_ns)
     lines: list[str] = []
     if input_delay_ns is not None:
         lines += [
@@ -148,18 +166,6 @@ def _io_delay_lines(
             f"set_output_delay {output_delay_ns} -clock {clock_port} [all_outputs]"
         )
     return lines
-
-
-def _make_tracks_lines(floorplan: dict[str, Any]) -> list[str]:
-    tracks = floorplan.get("tracks")
-    if not tracks:
-        return ["make_tracks"]
-    return [
-        f"make_tracks {t['layer']} -x_offset {t['x_offset_um']} "
-        f"-x_pitch {t['x_pitch_um']} -y_offset {t['y_offset_um']} "
-        f"-y_pitch {t['y_pitch_um']}"
-        for t in tracks
-    ]
 
 
 def _floorplan_init_lines(floorplan: dict[str, Any]) -> list[str]:
@@ -667,22 +673,45 @@ def _macro_blockage_lines(macros: list[dict[str, Any]]) -> list[str]:
     """
     lines: list[str] = []
     for macro in macros:
-        halo = macro["halo"]
-        if halo is None:
+        margin = merge_macro_margins(macro["halo"], macro.get("keepout"))
+        if margin is None:
             continue
         if macro["width_um"] is None or macro["height_um"] is None:
             raise PlaceAndRouteError(
-                f"request.macros[].halo for instance '{macro['instance']}' "
+                f"request.macros[].halo/keepout for instance '{macro['instance']}' "
                 f"needs the macro's footprint, but its lef ({macro['lef']}) "
                 f"declares no SIZE for MACRO '{macro['cell_name']}'"
             )
         x1, y1, x2, y2 = _macro_footprint(macro)
         lines.append(
-            "create_blockage -region "
-            f"{{{x1 - halo['left']} {y1 - halo['bottom']} "
-            f"{x2 + halo['right']} {y2 + halo['top']}}}"
+            f"create_blockage -region {{{x1 - margin['left']} {y1 - margin['bottom']} "
+            f"{x2 + margin['right']} {y2 + margin['top']}}}"
         )
     return lines
+
+
+def _layer_number(layer: str) -> int | None:
+    """Trailing integer of a metal layer name (``met3`` -> 3, ``Metal4`` -> 4),
+    or ``None`` when the name carries none."""
+    match = re.search(r"(\d+)$", layer)
+    return int(match.group(1)) if match else None
+
+
+def _lowest_strap_above(lower: str, strap_layers: list[str]) -> str | None:
+    """The lowest strap layer stacked above ``lower``, a macro P/G layer that
+    is not itself a strap layer (issue #4703): only the *upper* layer of
+    ``add_pdn_connect`` must carry a core strap. Layers are ordered by
+    trailing number; ``None`` when ``lower`` has no parseable number or no
+    strap lies above it."""
+    lower_n = _layer_number(lower)
+    if lower_n is None:
+        return None
+    candidates = [
+        (n, layer)
+        for layer in strap_layers
+        if (n := _layer_number(layer)) is not None and n > lower_n
+    ]
+    return min(candidates)[1] if candidates else None
 
 
 def _macro_pdn_grid_lines(
@@ -710,8 +739,10 @@ def _macro_pdn_grid_lines(
     layer is the next strap layer above it in ``power.straps`` (which every
     real platform config lists bottom-to-top, the same assumption the core
     grid's own consecutive-pair ``add_pdn_connect`` loop above already
-    makes). When neither can be established the request is **rejected with a
-    named error**, never silently degraded: a halo a caller asked for and
+    makes); a P/G layer that is not itself a strap layer connects to the
+    lowest strap above it by trailing layer number (issue #4703). When
+    neither can be established the request is **rejected with a named
+    error**, never silently degraded: a halo a caller asked for and
     this function quietly skipped would be a wrong answer reported as a
     right one.
 
@@ -738,12 +769,18 @@ def _macro_pdn_grid_lines(
         connects: list[str] = []
         for lower in pg_layers:
             if lower not in strap_layers:
-                raise PlaceAndRouteError(
-                    f"request.macros[].halo for instance '{macro['instance']}' "
-                    "needs a request.power strap on the macro's own P/G layer "
-                    f"'{lower}' to connect to; request.power.straps declares "
-                    + ", ".join(strap_layers)
-                )
+                above = _lowest_strap_above(lower, strap_layers)
+                if above is None:
+                    raise PlaceAndRouteError(
+                        f"request.macros[].halo for instance '{macro['instance']}' "
+                        "needs a request.power strap *above* the macro's own P/G "
+                        f"layer '{lower}' to connect up to, but "
+                        "request.power.straps declares "
+                        + ", ".join(strap_layers)
+                        + " (layers are ordered by their trailing number)"
+                    )
+                connects.append(f"{lower} {above}")
+                continue
             index = strap_layers.index(lower)
             if index + 1 >= len(strap_layers):
                 raise PlaceAndRouteError(
@@ -756,7 +793,7 @@ def _macro_pdn_grid_lines(
         name = f"macro_{macro['instance']}"
         lines.append(
             f"define_pdn_grid -macro -name {{{name}}} -voltage_domains {{CORE}} "
-            f"-instances {{{macro['instance']}}} -halo "
+            f"-instances {{{_pdn_instances_arg(macro['instance'])}}} -halo "
             f"{{{halo['left']} {halo['bottom']} {halo['right']} {halo['top']}}} "
             "-grid_over_boundary"
         )
@@ -887,6 +924,31 @@ def _repair_iterations(diode_cell: str | None, requested: int) -> int:
     return 0 if diode_cell is None else requested
 
 
+def _global_placement_call(
+    density: float | None, default_density: float, seed: int
+) -> str:
+    """The ``global_placement`` line; ``density=None`` uses ``default_density``
+    (issue #4716)."""
+    used = default_density if density is None else density
+    return (
+        f"global_placement -density {used} "
+        f"-routability_driven -timing_driven -random_seed {seed}"
+    )
+
+
+def _global_route_congestion_flags(
+    iterations: int | None, allow_congestion: bool
+) -> str:
+    """Opt-in ``global_route`` congestion flags, each omitted by default
+    (issue #4716). Returns a string with a leading space per flag, or ``""``."""
+    flags = ""
+    if iterations is not None:
+        flags += f" -congestion_iterations {iterations}"
+    if allow_congestion:
+        flags += " -allow_congestion"
+    return flags
+
+
 def _stage_script_lines(
     *,
     stage: str,
@@ -908,19 +970,28 @@ def _stage_script_lines(
     max_fanout: float | None,
     input_delay_ns: float | None,
     output_delay_ns: float | None,
+    power_activity: dict[str, float] | None = None,
     cell_library: str,
     seed: int,
     output_dir: str,
     route_critical_nets_percentage: int,
     max_antenna_repair_iterations: int,
+    placement_density: float | None = None,
+    route_congestion_iterations: int | None = None,
+    route_allow_congestion: bool = False,
     library: dict[str, Any] | None = None,
     macro_liberty_paths: list[str] | None = None,
 ) -> list[str]:
+    from ._power_activity import power_activity_lines
     from .place_and_route import (
         _CTS_BUFFER_CELLS,
         _GLOBAL_PLACEMENT_DENSITY,
         _ROUTING_LAYER_RANGE,
         _ROW_RAIL_STRAP,
+    )
+
+    global_placement_call = _global_placement_call(
+        placement_density, _GLOBAL_PLACEMENT_DENSITY, seed
     )
 
     # Issue #2635: `request.macros[].lib`, resolved to this run's own
@@ -962,9 +1033,12 @@ def _stage_script_lines(
         # and after `link_design` (the instance must already exist in the
         # linked network). Never OpenROAD's automatic macro placer
         # (`rtl_macro_placer`): a socket-driven macro's location is a
-        # caller decision, not something to optimize away.
+        # caller decision, not something to optimize away. The instance is
+        # brace-quoted so a bracketed name is passed literally here; the
+        # `-instances` site re-escapes it for glob + list parsing (issues
+        # #4701, #4715).
         lines += [
-            f"place_macro -macro_name {macro['instance']} "
+            f"place_macro -macro_name {{{macro['instance']}}} "
             f"-location {{{macro['x_um']} {macro['y_um']}}} "
             f"-orientation {macro['orientation']} -exact"
             for macro in macros
@@ -1011,8 +1085,7 @@ def _stage_script_lines(
             f"place_pins -hor_layers {io_spec['layer_h']} "
             f"-ver_layers {io_spec['layer_v']}",
             *_wire_rc_lines(io_spec, library),
-            f"global_placement -density {_GLOBAL_PLACEMENT_DENSITY} "
-            f"-routability_driven -timing_driven -random_seed {seed}",
+            global_placement_call,
             "estimate_parasitics -placement",
             "repair_design",
             "repair_timing",
@@ -1020,17 +1093,13 @@ def _stage_script_lines(
         ]
     elif stage == "cts":
         assert io_spec is not None
-        # Guaranteed non-None here: the request validator (`run_place_and_
-        # route`) already rejects `target_stage in {"place", "cts",
-        # "route"}` with `clock_port is None` before this generator ever
-        # runs -- see its own `stage_index >= STAGE_ORDER.index("place")`
-        # check.
-        assert clock_port is not None
+        # Request validation guarantees clock_port or clock_period_ns here.
         buf_cell = (
             library["cts_buffer"]
             if library is not None and "cts_buffer" in library
             else _CTS_BUFFER_CELLS[cell_library]
         )
+        cts_clock = clock_port if clock_port is not None else _vclk.VIRTUAL_CLOCK_NAME
         lines += [
             *_wire_rc_lines(io_spec, library),
             "estimate_parasitics -placement",
@@ -1060,7 +1129,7 @@ def _stage_script_lines(
             # rather than re-deriving what it already knows (see this
             # module's own docstring, "Macro-pin routability cross-check").
             f"set _klt_cts_seq_sinks [llength [all_registers -clock "
-            f"[get_clocks {{{clock_port}}}]]]",
+            f"[get_clocks {{{cts_clock}}}]]]",
             "if {$_klt_cts_seq_sinks > 0} {",
             # `-sink_clustering_enable -obstruction_aware` (P&R survey
             # section 3.4, issue #783): TritonCTS clusters nearby sinks
@@ -1089,7 +1158,7 @@ def _stage_script_lines(
             "estimate_parasitics -placement",
             "repair_timing -hold",
             "} else {",
-            f'puts "klt place-and-route: clock {clock_port} has no '
+            f'puts "klt place-and-route: clock {cts_clock} has no '
             "sequential (registered) fanout -- skipping "
             'clock_tree_synthesis (see issue #1506)"',
             "}",
@@ -1128,21 +1197,23 @@ def _stage_script_lines(
             diode_cell, max_antenna_repair_iterations
         )
         # `-critical_nets_percentage` (issue #939, native-routing survey
-        # section 4.1): a real, documented `global_route` flag -- see this
-        # module's own docstring, "Timing-driven global routing + bounded
-        # antenna-repair iteration" -- that weights the given percentage of
-        # worst-slack nets as timing-critical during congestion-removal
-        # iterations. `0` (unset, `request.route_critical_nets_percentage`
-        # omitted) reproduces `global_route`'s own default -- the explicit
-        # A/B disable path.
-        # `-verbose` (issue #2994) makes the global router print its
-        # per-layer "Final congestion report" table, which the response's
-        # `congestion` block scrapes; routing results are unchanged.
-        global_route_call = "global_route -verbose"
+        # section 4.1; see this module's docstring, "Timing-driven global
+        # routing + bounded antenna-repair iteration") weights that
+        # percentage of worst-slack nets as timing-critical during
+        # congestion-removal. `0` (unset) is `global_route`'s own default.
+        # `-verbose` (#2994) prints the per-layer congestion table and
+        # `-congestion_report_file` (#5313) the per-GCell violation list the
+        # response's `congestion` block scrapes; routing results unchanged.
+        global_route_call = "global_route -verbose -congestion_report_file " + (
+            os.path.join(output_dir, f"{hdl_toplevel}_route_congestion.rpt")
+        )
         if route_critical_nets_percentage:
             global_route_call += (
                 f" -critical_nets_percentage {route_critical_nets_percentage}"
             )
+        global_route_call += _global_route_congestion_flags(
+            route_congestion_iterations, route_allow_congestion
+        )
         # Row-rail fallback (issue #1442): only when `request.power` was
         # *not* given -- a `request.power`-bearing run already got a real
         # PDN (including, when the caller's own `straps[]` name a met1
@@ -1235,6 +1306,9 @@ def _stage_script_lines(
             lines += [f"filler_placement {{{filler_masters}}}", "global_connect"]
         lines += ["estimate_parasitics -global_routing"]
 
+    # Issue #4914: global switching activity for `report_power_metric`
+    # (empty, so byte-identical, when `constraints.power_activity` is omitted).
+    lines += power_activity_lines(power_activity)
     lines += _metrics_report_lines(
         include_fmax=True,
         include_power=True,

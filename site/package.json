@@ -7,10 +7,9 @@
   "scripts": {
     "copy-renders": "node scripts/copy-renders.mjs",
     "stage-models": "node scripts/stage-models.mjs",
-    "stage-em-data": "node scripts/stage-em-data.mjs",
-    "predev": "npm run copy-renders && npm run stage-models && npm run stage-em-data",
+    "predev": "npm run copy-renders && npm run stage-models",
     "dev": "vite",
-    "prebuild": "npm run copy-renders && npm run stage-models && npm run stage-em-data",
+    "prebuild": "npm run copy-renders && npm run stage-models",
     "build": "tsc -b && node scripts/prerender.mjs",
     "preview": "vite preview",
     "check": "tsc -b",
@@ -20,9 +19,9 @@
   "dependencies": {
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
-    "eecircuit-engine": "1.8.0",
-    "react": "^19.3.0",
-    "react-dom": "^19.3.0",
+    "eecircuit-engine": "1.9.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
     "tailwind-merge": "^3.7.0"
   },
   "devDependencies": {
@@ -34,10 +33,10 @@
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.1",
-    "jsdom": "^30.1.0",
+    "jsdom": "^30.1.3",
     "tailwindcss": "^4.3.3",
     "typescript": "^7.0.2",
-    "vite": "^8.3.0",
-    "vitest": "^5.0.4"
+    "vite": "^8.3.5",
+    "vitest": "^5.0.5"
   }
 }

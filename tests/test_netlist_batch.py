@@ -352,9 +352,9 @@ def test_job_json_shape(repo, fake, no_local_xschem, tmp_path):
         '--backend local --format json > "$EDA_OUTPUT_DIR/report.json"'
     ) in cmd
     assert f'tar -xzf "$EDA_INPUT_DIR/{nb.BATCH_TREE_FILENAME}"' in cmd
+    assert cmd.index('export HOME="${HOME:-$(mktemp -d)}"') < cmd.index("klt netlist ")
     # No host-absolute path ever reaches the runner.
-    assert str(tmp_path) not in cmd
-    assert str(repo) not in cmd
+    assert str(tmp_path) not in cmd and str(repo) not in cmd
     assert str(repo) not in json.dumps(job)
     # One input, the tree, uploaded before job.json.
     uploads = [
@@ -1095,3 +1095,25 @@ def test_unresolved_symbol_in_collected_netlist_fails_on_batch(
     assert main(_argv(repo, output, "--backend", "batch")) == 1
     assert _error(capsys)["code"] == "unresolved_symbol"
     assert not output.exists()
+
+
+def test_check_ignore_comments_passes_through_on_batch(repo, fake, tmp_path, capsys):
+    """Issue #4525: the batch path compares with the same comment-ignoring
+    `_check_result`."""
+    fake.statuses = [_status("done")]
+    fake.outputs = _runner_outputs(_BODY.format(sch=f"{RUNNER_TREE}/design/block.sch"))
+    committed = tmp_path / "block.spice"
+    committed.write_text(
+        "* project header\n"
+        + _BODY.format(sch="/home/someone/elsewhere/design/block.sch"),
+        encoding="utf-8",
+    )
+
+    assert main(_argv(repo, committed, "--backend", "batch", "--check")) == 3
+    capsys.readouterr()
+    fake.statuses = [_status("done")]
+    args = _argv(repo, committed, "--backend", "batch", "--check", "--ignore-comments")
+    assert main(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "match"
+    assert payload["drift"]["comments_differ"] is True

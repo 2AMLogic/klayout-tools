@@ -963,6 +963,57 @@ def test_list_cell_libraries_reports_shipped_corners(tmp_path):
     assert ihp["libraries"][0]["corners"] == ["typ_1p20V_25C"]
 
 
+def test_parse_corner_name_open_pdks_shapes():
+    assert pdk_cells.parse_corner_name("ss_n40C_3v00") == {
+        "name": "ss_n40C_3v00",
+        "process": "ss",
+        "temperature_c": -40,
+        "supply_v": 3.0,
+    }
+    ff = pdk_cells.parse_corner_name("ff_125C_1v98")
+    assert (ff["process"], ff["temperature_c"], ff["supply_v"]) == ("ff", 125, 1.98)
+    tt = pdk_cells.parse_corner_name("tt_025C_1v80")
+    assert (tt["temperature_c"], tt["supply_v"]) == (25, 1.8)
+    ss = pdk_cells.parse_corner_name("ss_125C_1v62")
+    assert ss["supply_v"] == 1.62
+
+
+def test_parse_corner_name_unrecognised_yields_nulls():
+    assert pdk_cells.parse_corner_name("typ_1p20V_25C") == {
+        "name": "typ_1p20V_25C",
+        "process": None,
+        "temperature_c": None,
+        "supply_v": None,
+    }
+
+
+def test_list_cell_libraries_reports_corner_points(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("libs_ref",))
+    _make_cell_library(
+        variant_dir,
+        "sky130_fd_sc_hd",
+        corners=(("tt_025C_1v80", 1.0, 25.0, 1.8),),
+    )
+    ihp_dir = _make_install(root, "ihp-sg13g2", assets=("libs_ref",))
+    _make_ihp_stdcell_library(ihp_dir, "sg13g2_stdcell", with_spice=False)
+
+    sky = pdk_cells.list_cell_libraries(variant="sky130A", root=str(root))
+    ihp = pdk_cells.list_cell_libraries(variant="ihp-sg13g2", root=str(root))
+
+    assert sky["libraries"][0]["corner_points"] == [
+        {"name": "tt_025C_1v80", "process": "tt", "temperature_c": 25, "supply_v": 1.8}
+    ]
+    assert ihp["libraries"][0]["corner_points"] == [
+        {
+            "name": "typ_1p20V_25C",
+            "process": None,
+            "temperature_c": None,
+            "supply_v": None,
+        }
+    ]
+
+
 def test_resolve_liberty_not_found_lists_available_corners(tmp_path):
     root = tmp_path / "install"
     variant_dir = _make_install(root, "ihp-sg13g2", assets=("libs_ref",))

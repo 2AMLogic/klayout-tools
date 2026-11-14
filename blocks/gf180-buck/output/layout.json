@@ -1,0 +1,93 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:07:51.495920+00:00",
+  "slug": "gf180-buck",
+  "name": "Gf180 Buck",
+  "description": "Inductive buck converter on gf180mcu, 30 k\u00c5 MetalTop \u2014 2AM Logic canary block",
+  "pdk": "gf180mcu",
+  "spec_summary": {
+    "rows": [
+      {
+        "parameter": "Input voltage",
+        "target": "5.0 V \u00b110%",
+        "fallback": "3.3 V \u00b110%"
+      },
+      {
+        "parameter": "Output voltage",
+        "target": "1.8 V fixed, \u00b14% untrimmed",
+        "fallback": "1.8 V fixed, \u00b15%",
+        "stretch": "1.0\u20133.3 V programmable"
+      },
+      {
+        "parameter": "Load current",
+        "target": "0\u2013500 mA",
+        "fallback": "0\u2013200 mA",
+        "stretch": "0\u20131 A"
+      },
+      {
+        "parameter": "Light-load mode",
+        "target": "forced PWM",
+        "fallback": "forced PWM",
+        "stretch": "forced PWM"
+      },
+      {
+        "parameter": "Switching frequency",
+        "target": "2 MHz \u00b115%",
+        "fallback": "1 MHz \u00b115%",
+        "stretch": "4 MHz \u00b115%"
+      },
+      {
+        "parameter": "Peak efficiency (simulated, post-layout, excludes inductor core loss)",
+        "target": "\u2265 85%",
+        "fallback": "\u2265 80%",
+        "stretch": "\u2265 90%"
+      },
+      {
+        "parameter": "Output ripple",
+        "target": "\u2264 1% of Vout",
+        "fallback": "\u2264 2%",
+        "stretch": "\u2264 0.5%"
+      },
+      {
+        "parameter": "Load-step transient",
+        "target": "\u2264 5% of Vout, 10%\u201390% load step",
+        "fallback": "\u2264 10%",
+        "stretch": "\u2264 3%"
+      },
+      {
+        "parameter": "Control",
+        "target": "voltage mode, PM \u2265 45\u00b0, GM \u2265 10 dB",
+        "fallback": "same",
+        "stretch": "same"
+      },
+      {
+        "parameter": "Dead time",
+        "target": "1\u20136 ns, zero overlap",
+        "fallback": "1\u201310 ns",
+        "stretch": "1\u20133 ns"
+      },
+      {
+        "parameter": "Protection",
+        "target": "soft start, cycle-by-cycle current limit (0.70\u20132.1 A trip window)",
+        "fallback": "soft start, current limit",
+        "stretch": "+ thermal shutdown"
+      },
+      {
+        "parameter": "Top metal",
+        "target": "30 k\u00c5 MetalTop",
+        "fallback": "thinner MetalTop option, argued"
+      },
+      {
+        "parameter": "Signoff",
+        "target": "DRC + LVS clean, EM-checked, post-layout re-verified"
+      }
+    ]
+  },
+  "source": {
+    "repo": "2AMLogic/gf180-buck",
+    "ref": "6ea423e2a863cb72d8664de6dec5028e937735b1",
+    "path": "."
+  },
+  "downloadable": true,
+  "status": "in design \u2014 simulation evidence"
+}

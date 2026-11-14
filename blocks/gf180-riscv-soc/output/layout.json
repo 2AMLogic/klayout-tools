@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:09:01.910488+00:00",
+  "slug": "gf180-riscv-soc",
+  "name": "Gf180 Riscv Soc",
+  "description": "RISC-V microcontroller SoC on gf180mcu \u2014 2AM Logic canary block",
+  "pdk": "gf180mcu",
+  "spec_summary": {
+    "rows": [
+      {
+        "parameter": "Core",
+        "target": "CVE2, RV32IMC, same core and configuration as `sky130-riscv-soc` (origin rows 1-2)",
+        "fallback": "RV32EC",
+        "stretch": "+ debug module over JTAG"
+      },
+      {
+        "parameter": "Interconnect",
+        "target": "OBI v1.4 crossbar, 2 managers x 4 subordinates, as the origin (row 5)",
+        "fallback": "single shared OBI bus"
+      },
+      {
+        "parameter": "PDK",
+        "target": "`gf180mcuD`, open_pdks `f6eeac7`"
+      },
+      {
+        "parameter": "Standard cells",
+        "target": "`gf180mcu_fd_sc_mcu7t5v0` (7-track)",
+        "fallback": "`gf180mcu_fd_sc_mcu9t5v0`"
+      },
+      {
+        "parameter": "SRAM",
+        "target": "4 KB instruction + 4 KB data = 8 \u00d7 `gf180-sram` 256 x 32",
+        "fallback": "2 KB + 2 KB = 4 \u00d7",
+        "stretch": "8 KB + 8 KB = 16 \u00d7"
+      },
+      {
+        "parameter": "Peripherals",
+        "target": "boot ROM, UART, GPIO, timer",
+        "fallback": "boot ROM, UART, GPIO",
+        "stretch": "SPI flash execute-in-place"
+      },
+      {
+        "parameter": "Core supply",
+        "target": "3.3 V, shared with `gf180-sram`"
+      },
+      {
+        "parameter": "Signoff Fmax (post-route STA, slow corner)",
+        "target": "25 MHz",
+        "fallback": "12.5 MHz",
+        "stretch": "50 MHz"
+      },
+      {
+        "parameter": "Signoff",
+        "target": "DRC + LVS clean, STA closed at every corner in `spec/soc.md` (macro Liberty not yet available, see `spec/macro-views-interim-decision.md`)"
+      }
+    ],
+    "status_note": "ratified in [`spec/soc.md`](spec/soc.md"
+  },
+  "source": {
+    "repo": "2AMLogic/gf180-riscv-soc",
+    "ref": "f4cd844102357ecc32fb866c999ca264935ebd0c",
+    "path": "."
+  },
+  "downloadable": true,
+  "status": "in design \u2014 simulation evidence"
+}

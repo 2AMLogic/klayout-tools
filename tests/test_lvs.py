@@ -702,7 +702,7 @@ def test_clean_self_compare_reports_match(tmp_path):
     )
     report = run_lvs(path)
 
-    assert report["schema_version"] == 2
+    assert report["schema_version"] == 3
     assert report["engine"] == "klayout"
     assert report["status"] == "match"
     assert report["mismatch_count"] == 0
@@ -723,6 +723,8 @@ def test_clean_self_compare_reports_match(tmp_path):
     prov = report["provenance"]
     assert set(prov.keys()) == {
         "klt_version",
+        "klt_git_commit",
+        "klt_reinstall_spec",
         "klayout_version",
         "pdk",
         "deck",
@@ -1435,12 +1437,19 @@ def test_pure_width_change_reports_device_property_on_both_request_shapes(tmp_pa
         ("pre-extracted", preextracted_report),
     ):
         assert report["status"] == "mismatch", label
-        # Five parameter entries on both shapes: `w_um`, plus the deck-
-        # measured `as`/`ad`/`ps`/`pd` against the reader's implicit zeros
-        # (the reference declares only L/W). Same category, same count.
-        assert report["category_counts"]["device.property"] == 5, label
+        # One parameter entry on both shapes (issue #4729): `w_um`, with the
+        # deck-measured `as`/`ad`/`ps`/`pd` (against the reader's implicit
+        # zeros -- the reference declares only L/W) grouped under it as
+        # `details.derived`. Same category, same count.
+        assert report["category_counts"]["device.property"] == 1, label
         errors = [m for m in report["mismatches"] if m["severity"] == "error"]
-        assert [m["category"] for m in errors] == ["device.property"] * 5, label
+        assert [m["category"] for m in errors] == ["device.property"], label
+        assert [d["name"] for d in errors[0]["details"]["derived"]] == [
+            "as",
+            "ad",
+            "ps",
+            "pd",
+        ], label
         # The recovery fired on this shape: the unmatched device pair and
         # the nets it dragged in are collateral warnings, not errors.
         collateral = [
@@ -1880,6 +1889,63 @@ def test_parameter_tolerance_passive_cell_anchored_out_of_tolerance_still_mismat
         _PASSIVE_ONLY_CAPS_REFERENCE_SPICE.replace("3.0012p", "3.3000p"),
         top="caps",
         options={"parameter_tolerance": 0.001, "anchor_top_level_pins": True},
+    )
+
+    assert report["status"] == "mismatch"
+
+
+_ONE_PMOS_PIN_SWAP_LAYOUT_SPICE = """
+.subckt pcell A B C
+M1 A B C C pfet W=1U L=1U
+.ends
+"""
+
+# Gate and drain nets exchanged; every net is a pin and the bulk is tied to C.
+_ONE_PMOS_PIN_SWAP_REFERENCE_SPICE = _ONE_PMOS_PIN_SWAP_LAYOUT_SPICE.replace(
+    "M1 A B C C", "M1 B A C C"
+)
+
+
+def test_one_device_pin_swap_matches_by_default(tmp_path):
+    """Issue #4513: a one-device cell whose nets are all pins has a
+    pin-relabelling automorphism, so a gate/drain pin-name swap compares as
+    `match` with the plain-element default (anchoring off). Documents the
+    limitation; the opt-in below closes it."""
+    report = _tolerance_report(
+        tmp_path,
+        _ONE_PMOS_PIN_SWAP_LAYOUT_SPICE,
+        _ONE_PMOS_PIN_SWAP_REFERENCE_SPICE,
+        top="pcell",
+    )
+
+    assert report["status"] == "match"
+
+
+def test_one_device_pin_swap_is_rejected_with_anchor_top_level_pins(tmp_path):
+    """Issue #4513: `options.anchor_top_level_pins` (issue #2692) pairs the
+    same-named pins and so catches the swap the default misses."""
+    report = _tolerance_report(
+        tmp_path,
+        _ONE_PMOS_PIN_SWAP_LAYOUT_SPICE,
+        _ONE_PMOS_PIN_SWAP_REFERENCE_SPICE,
+        top="pcell",
+        options={"anchor_top_level_pins": True},
+    )
+
+    assert report["status"] == "mismatch"
+    rejected = [m for m in report["mismatches"] if m["category"] == "hints.rejected"]
+    assert rejected
+    assert all(m["details"].get("anchored_top_level_pin") for m in rejected)
+
+
+def test_one_device_gate_source_swap_stays_a_mismatch_by_default(tmp_path):
+    """Control (issue #4513): exchanging gate and source is broken by the bulk
+    tie, so it is reported even with anchoring off."""
+    report = _tolerance_report(
+        tmp_path,
+        _ONE_PMOS_PIN_SWAP_LAYOUT_SPICE,
+        _ONE_PMOS_PIN_SWAP_LAYOUT_SPICE.replace("M1 A B C C", "M1 A C B C"),
+        top="pcell",
     )
 
     assert report["status"] == "mismatch"
@@ -2892,13 +2958,17 @@ def test_flat_layout_against_hierarchical_reference_is_a_topology_mismatch(tmp_p
     assert report["status"] == "mismatch"
     assert report["category_counts"] == {
         "topology": 2,
+        lvs.CATEGORY_TOPOLOGY_HIERARCHY_MISMATCH: 1,
         # Issue #2461: one per participating resistor class.
         lvs.CATEGORY_DEVICE_GEOMETRY_NOT_COMPARED: 1,
     }
     assert report["counts"]["devices"] == {"layout": 2, "reference": 0, "matched": 0}
-    assert all(
-        m["category"] == "topology" for m in _without_geometry_disclosure(report)
-    )
+    errors = [
+        m
+        for m in _without_geometry_disclosure(report)
+        if m["category"] != lvs.CATEGORY_TOPOLOGY_HIERARCHY_MISMATCH
+    ]
+    assert all(m["category"] == "topology" for m in errors)
     assert "topology.flattened" not in report["category_counts"]
 
     # Issue #1132: `category_error_counts`/`error_count` split `error`
@@ -2913,13 +2983,11 @@ def test_flat_layout_against_hierarchical_reference_is_a_topology_mismatch(tmp_p
     # `topology` finding is attributable without a side-channel netlist
     # diff -- `instance`/`subcircuit` stay `null` (this is a whole-circuit
     # mismatch, not a subcircuit-instance one).
-    assert [m["circuit"] for m in _without_geometry_disclosure(report)] == [
+    assert [m["circuit"] for m in errors] == [
         {"layout": "TOP", "reference": "TOP"},
         {"layout": None, "reference": "LEAF"},
     ]
-    assert all(
-        m["instance"] is None and m["subcircuit"] is None for m in report["mismatches"]
-    )
+    assert all(m["instance"] is None and m["subcircuit"] is None for m in errors)
 
 
 def test_subcircuit_instance_mismatch_names_the_instance_and_its_type(tmp_path):
@@ -3064,6 +3132,86 @@ def test_flatten_reference_turns_the_topology_mismatch_into_a_match(tmp_path):
     assert "1 top-level circuit(s)" in flattened["description"]
 
 
+def _hierarchy_mismatch_entries(report):
+    return [
+        m
+        for m in report["mismatches"]
+        if m["category"] == lvs.CATEGORY_TOPOLOGY_HIERARCHY_MISMATCH
+    ]
+
+
+def _run_divider(tmp_path, layout_spice, reference_spice, options=None):
+    request = {
+        "layout": {
+            "netlist": _write(tmp_path / "layout.spice", layout_spice),
+            "top": "top",
+        },
+        "reference": {
+            "netlist": _write(tmp_path / "ref.spice", reference_spice),
+            "top": "top",
+        },
+    }
+    if options is not None:
+        request["options"] = options
+    return run_lvs(_write_request(tmp_path / "request.json", request))
+
+
+def test_hierarchy_mismatch_warning_names_flatten_reference(tmp_path):
+    """Issue #4548: flat layout + hierarchical reference, no flag -> advisory
+    warning naming the option; status stays `mismatch`."""
+    report = _run_divider(tmp_path, _FLAT_DIVIDER_SPICE, _HIERARCHICAL_DIVIDER_SPICE)
+
+    assert report["status"] == "mismatch"
+    [entry] = _hierarchy_mismatch_entries(report)
+    assert entry["severity"] == "warning"
+    assert entry["side"] == "reference"
+    assert "options.flatten_reference: true" in entry["description"]
+
+
+def test_hierarchy_mismatch_warning_absent_when_flatten_reference_set(tmp_path):
+    report = _run_divider(
+        tmp_path,
+        _FLAT_DIVIDER_SPICE,
+        _HIERARCHICAL_DIVIDER_SPICE,
+        {"flatten_reference": True},
+    )
+
+    assert report["status"] == "match"
+    assert _hierarchy_mismatch_entries(report) == []
+    assert report["category_counts"]["topology.flattened"] == 1
+
+
+def test_hierarchy_mismatch_warning_absent_when_both_flat(tmp_path):
+    report = _run_divider(tmp_path, _FLAT_DIVIDER_SPICE, _FLAT_DIVIDER_SPICE)
+
+    assert _hierarchy_mismatch_entries(report) == []
+
+
+def test_hierarchy_mismatch_warning_absent_when_both_hierarchical(tmp_path):
+    report = _run_divider(
+        tmp_path, _HIERARCHICAL_DIVIDER_SPICE, _HIERARCHICAL_DIVIDER_SPICE
+    )
+
+    assert _hierarchy_mismatch_entries(report) == []
+
+
+def test_hierarchy_mismatch_warning_ignores_unrelated_top_circuits(tmp_path):
+    """Extra unrelated top circuits in a flat reference are pruned before the
+    check, so they must not look like hierarchy."""
+    library = (
+        _FLAT_DIVIDER_SPICE
+        + """
+.subckt unrelated X Y
+R9 X Y 1k
+.ends
+"""
+    )
+    report = _run_divider(tmp_path, _FLAT_DIVIDER_SPICE, library)
+
+    assert report["status"] == "match"
+    assert _hierarchy_mismatch_entries(report) == []
+
+
 def test_flatten_layout_turns_a_hierarchical_layout_netlist_into_a_match(tmp_path):
     """Symmetric counterpart (issue #1085's item 2): a pre-extracted
     `layout.netlist` can itself be hierarchical -- `options.flatten_layout`
@@ -3113,6 +3261,7 @@ def test_flatten_options_default_false_leaves_status_unchanged(tmp_path):
     assert report["status"] == "mismatch"
     assert report["category_counts"] == {
         "topology": 2,
+        lvs.CATEGORY_TOPOLOGY_HIERARCHY_MISMATCH: 1,
         # Issue #2461: one per participating resistor class.
         lvs.CATEGORY_DEVICE_GEOMETRY_NOT_COMPARED: 1,
     }
@@ -5764,7 +5913,9 @@ def test_multifinger_device_mismatches_without_combine_devices(tmp_path):
     report = run_lvs(path)
 
     assert report["status"] == "mismatch"
-    assert report["category_counts"].get("device.unmatched", 0) >= 1
+    # Issue #4729: the unmerged fingers are reported as one grouped finding
+    # naming the summed width, rather than as per-finger `device.unmatched`.
+    assert report["category_counts"].get("device.unmerged_fingers", 0) == 1
     assert report["counts"]["devices"]["layout"] == 3
     assert report["counts"]["devices"]["reference"] == 2
 
@@ -6160,7 +6311,7 @@ def test_neither_global_combine_devices_setting_satisfies_both_composed_macros(
     )
     report_false = run_lvs(path_false)
     assert report_false["status"] == "mismatch"
-    assert report_false["category_counts"].get("device.unmatched", 0) >= 1
+    assert report_false["category_counts"].get("device.unmerged_fingers", 0) >= 1
 
     path_true = _write_request(
         tmp_path / "request_true.json",
@@ -8191,6 +8342,8 @@ def test_lvs_cli_exits_4_on_inconclusive(tmp_path, monkeypatch, capsys):
         deck_file=None,
         deck_var=None,
         layout=None,
+        progress=None,
+        output=None,
     )
     assert lvs_cmd.run(args) == lvs_cmd.EXIT_INCONCLUSIVE
     payload = json.loads(capsys.readouterr().out)
@@ -12339,7 +12492,7 @@ def test_normalize_capacitor_wrong_terminal_count_fails():
 
 
 def test_normalize_capacitor_multiplicity_gt_one_rejected():
-    with pytest.raises(NormalizeError, match="multi-finger/multiplied"):
+    with pytest.raises(NormalizeError, match="mf=2 with no m"):
         normalize_reference_netlist(
             "XC1 c0 c1 sky130_fd_pr__cap_mim_m3_1 w=5u l=5u mf=2\n", deck="sky130"
         )
@@ -12370,14 +12523,6 @@ def test_normalize_capacitor_bad_m_rejected(bad):
     with pytest.raises(NormalizeError, match="'m'|m="):
         normalize_reference_netlist(
             f"XC1 c0 c1 sky130_fd_pr__cap_mim_m3_1 w=5u l=5u m={bad}\n",
-            deck="sky130",
-        )
-
-
-def test_normalize_capacitor_m_with_mf_still_rejected():
-    with pytest.raises(NormalizeError, match="multi-finger/multiplied"):
-        normalize_reference_netlist(
-            "XC1 c0 c1 sky130_fd_pr__cap_mim_m3_1 w=5u l=5u m=2 mf=2\n",
             deck="sky130",
         )
 
@@ -12671,11 +12816,10 @@ def test_build_device_binding_map_derived_fallback_shape():
         "rppd",
         "rhigh",
     }
-    # sg13g2's capacitor family is now fully curated too (issue #1470), so
-    # neither capacitor key comes from the derived fallback any more. The
-    # dict is keyed by *subcircuit* name, not device-class name: `rfcmim`'s
-    # real subcircuit is `cap_rfcmim`, so that is the key that appears here,
-    # even though the device-class name `rfcmim` is unchanged.
+    # sg13g2's capacitor family is fully curated too (issue #1470): neither
+    # capacitor key comes from the derived fallback. The dict is keyed by
+    # *subcircuit* name, not device-class name: `rfcmim`'s real subcircuit is
+    # `cap_rfcmim`, so that is the key here, though the class name is unchanged.
     assert set(build_device_binding_map("sg13g2")) == {
         "sg13_lv_nmos",
         "sg13_lv_pmos",
@@ -12687,13 +12831,15 @@ def test_build_device_binding_map_derived_fallback_shape():
         "cap_cmim",
         "cap_rfcmim",
     }
-    # Both fully-curated decks are byte-for-byte unchanged: no derived entry
-    # is added to either.
+    # Both fully-curated decks are unchanged: no derived entry is added.
     assert set(build_device_binding_map("gf180mcu")) == {
         "nfet_03v3",
         "pfet_03v3",
         "nfet_06v0",
         "pfet_06v0",
+        # Drain-extended LDMOS (issue #4570) -- curated in `pdk_models.py`.
+        "nfet_10v0_asym",
+        "pfet_10v0_asym",
         "ppolyf_u",
         "ppolyf_u_1k",
         "ppolyf_u_2k",
@@ -12728,6 +12874,8 @@ def test_build_device_binding_map_derived_fallback_shape():
         "sky130_fd_pr__pfet_g5v0d10v5",
         # Native-Vt 5V NMOS via marker combination (issue #3599).
         "sky130_fd_pr__nfet_05v0_nvt",
+        "sky130_fd_pr__nfet_01v8_lvt",
+        "sky130_fd_pr__pfet_01v8_lvt",
         "sky130_fd_pr__res_generic_po",
         "sky130_fd_pr__res_high_po",
         "sky130_fd_pr__res_xhigh_po",
@@ -12748,6 +12896,15 @@ def test_build_device_binding_map_derived_fallback_shape():
         "sky130_fd_pr__cap_mim_m3_2",
         "sky130_fd_pr__pnp_05v5_W0p68L0p68",
         "sky130_fd_pr__pnp_05v5_W3p40L3p40",
+        # Junction diodes (issue #4319) -- curated in `_DIODE_MODEL_TABLE`.
+        "sky130_fd_pr__diode_pw2nd_05v5",
+        "sky130_fd_pr__diode_pw2nd_05v5_lvt",
+        "sky130_fd_pr__diode_pw2nd_05v5_nvt",
+        "sky130_fd_pr__diode_pw2nd_11v0",
+        "sky130_fd_pr__diode_pd2nw_05v5",
+        "sky130_fd_pr__diode_pd2nw_05v5_lvt",
+        "sky130_fd_pr__diode_pd2nw_05v5_hvt",
+        "sky130_fd_pr__diode_pd2nw_11v0",
     }
 
 
@@ -15765,7 +15922,7 @@ def test_check_lvs_report_detects_moved_layout_hash(tmp_path):
     assert by_field["environment.layout_sha256"]["match"] is False
 
 
-def _portable_pair(tmp_path: Path) -> tuple[Path, Path]:
+def _portable_pair(tmp_path: Path, legacy_reference: bool = False) -> tuple[Path, Path]:
     """Issue #2595's repro shape: a self-contained directory holding a
     request whose `layout`/`reference` are relative to the request *file's
     own* directory, its two netlists, and the report that run produced.
@@ -15782,7 +15939,10 @@ def _portable_pair(tmp_path: Path) -> tuple[Path, Path]:
         },
     )
     report_path = pair / "lvs.json"
-    _write_report(report_path, run_lvs(request_path))
+    report = run_lvs(request_path)
+    if legacy_reference:  # pre-#4984: request-relative bare string
+        report["reference"] = "ref.spice"
+    _write_report(report_path, report)
     return pair, report_path
 
 
@@ -15798,14 +15958,10 @@ def test_check_lvs_report_names_unresolvable_input_path(tmp_path, monkeypatch):
     just carries an additional `input_not_found` block naming the resolved
     path, plus the report-relative path that *does* exist when one does.
 
-    Issue #2659 removed the trap for `layout`, which is now the
-    `{path, scope}` envelope resolved against the repo root of the committed
-    report's own directory rather than the cwd -- so this test now also pins
-    the *asymmetry* between the two sides, which is the whole point of
-    leaving `reference` alone (it is pinned by
-    `environment.reference_sha256`, not by `provenance.input`).
+    Uses a pre-#4984 bare-string `reference`; `layout` (#2659) and v3
+    `reference` (#4984) are `{path, scope}` and have no such trap.
     """
-    pair, report_path = _portable_pair(tmp_path)
+    pair, report_path = _portable_pair(tmp_path, legacy_reference=True)
 
     monkeypatch.chdir(tmp_path)
     result = check_lvs_report(os.path.join("pair", "lvs.json"))
@@ -16259,12 +16415,12 @@ def test_run_lvs_echoes_reference_top_and_options(tmp_path):
         "compare_parameters": None,
         # Issue #1952: `null` when the option was omitted.
         "power_connectivity": None,
-        # Issue #2692: `null` when the option was omitted -- the
-        # form-dependent default applies (off for this `plain-element`
-        # reference, on for `gate-level-verilog`).
+        # Issue #2692: `null` when omitted -- the form-dependent default applies
+        # (off for this `plain-element` reference, on for `gate-level-verilog`).
         "anchor_top_level_pins": None,
         "strict_top_level_pin_count": False,
         "compare_mos_flavour": False,
+        "ignore_mos_bulk": False,
         "supply_nets": ["GND", "VCC", "VDD", "VGND", "VPWR", "VSS"],
         "finfet_bulk": None,
     }
@@ -16272,7 +16428,7 @@ def test_run_lvs_echoes_reference_top_and_options(tmp_path):
     # earned no `schema_version` bump of its own (docs/json-contract.md,
     # "additive envelope"). The envelope is at `2` because issue #2659
     # separately retyped `layout`.
-    assert report["schema_version"] == 2
+    assert report["schema_version"] == 3
     assert report["parameter_tolerance"] is None
 
 
@@ -16635,7 +16791,7 @@ def test_cli_lvs_check_text_names_unresolvable_input(tmp_path, capsys, monkeypat
     a committed pair from its parent directory still exits 3, but the text
     rendering says the input was not found (and where it really is) instead
     of the bare `actual: None` the report reads as a lost hash."""
-    pair, _report_path = _portable_pair(tmp_path)
+    pair, _report_path = _portable_pair(tmp_path, legacy_reference=True)
     monkeypatch.chdir(tmp_path)
     capsys.readouterr()
 
@@ -17815,8 +17971,8 @@ def test_run_lvs_gate_level_verilog_reference_converts_and_matches(tmp_path):
 
 def _committed_gate_level_verilog_report(tmp_path: Path) -> Path:
     """Commit a clean `reference.form: "gate-level-verilog"` report (issue
-    #2250) -- a form `--rerun` cannot reconstruct, since no report echoes
-    `reference.form`."""
+    #2250) in the legacy shape -- `reference_conversion` stripped (issue
+    #4353 added it), so `--rerun` cannot reconstruct `reference.form`."""
     root = _make_fake_pdk_library(
         tmp_path, "myvariant", "mylib", _GATE_LEVEL_LIBRARY_SPICE
     )
@@ -17835,6 +17991,7 @@ def _committed_gate_level_verilog_report(tmp_path: Path) -> Path:
     }
     report = run_lvs(json.dumps(request))
     assert report["status"] == "match"
+    report.pop("reference_conversion")
     report_path = tmp_path / "lvs.json"
     _write_report(report_path, report)
     return report_path
@@ -22930,9 +23087,9 @@ def test_run_lvs_layout_is_repo_relative_inside_a_repo(tmp_path):
 
     report = run_lvs(request_path)
 
-    assert report["schema_version"] == 2
+    assert report["schema_version"] == 3
     assert report["layout"] == {"path": "blocks/layout.spice", "scope": "repo"}
-    assert report["reference"] == reference_path
+    assert report["reference"] == {"path": "ref.spice", "scope": "repo"}
 
 
 def test_run_lvs_layout_is_external_outside_any_repo(tmp_path_factory):
@@ -22963,7 +23120,7 @@ def test_run_lvs_layout_scope_follows_the_layout_not_the_request(
 ):
     """`layout`'s scope answers "is the *layout* inside a repo", so it is
     anchored on the layout's own location rather than the request document's
-    (`_report_repo_root`). The two are genuinely different questions -- and
+    (`env_provenance.repo_root_for`). The two are genuinely different questions -- and
     the inline/stdin request forms have no document directory at all -- so
     anchoring on the request would make the field depend on where `klt` was
     invoked from. This is also the anchor `klt drc`/`klt extract`/`klt pex`
@@ -23077,9 +23234,9 @@ def test_check_lvs_report_reports_an_external_layout_as_unverifiable(
     by_field = {check["field"]: check for check in result["checks"]}
     assert by_field["environment.layout_sha256"]["actual"] is None
     assert by_field["environment.layout_sha256"]["match"] is False
-    # The reference side is unaffected -- still the verbatim echo, still
-    # re-hashed against the cwd, and here it resolves and matches.
-    assert by_field["environment.reference_sha256"]["match"] is True
+    # #4984: the reference is outside any repo too: unverifiable.
+    assert by_field["environment.reference_sha256"]["actual"] is None
+    assert by_field["environment.reference_sha256"]["match"] is False
     assert result["status"] == "drifted"
 
 
@@ -23130,6 +23287,7 @@ def test_check_lvs_report_still_resolves_a_pre_2659_bare_string_layout(
     )
     report["schema_version"] = 1
     report["layout"] = layout_path  # the pre-#2659 shape
+    report["reference"] = reference_path  # the pre-#4984 shape
     report_path = outside / "lvs.json"
     _write_report(report_path, report)
 
@@ -23183,7 +23341,7 @@ def test_lvs_text_output_renders_the_layout_envelope_not_a_dict_repr(
     outside_text = capsys.readouterr().out
 
     assert "layout: layout.spice\n" in inside
-    assert f"reference: {reference_path}\n" in inside
+    assert "reference: ref.spice\n" in inside
     assert "layout: <outside repo>\n" in outside_text
 
 
@@ -23523,6 +23681,43 @@ def test_rerun_report_without_reference_conversion_is_not_drift(tmp_path):
     old = {k: v for k, v in report.items() if k != "reference_conversion"}
     with pytest.raises(LvsError):
         # Replayed as plain-element SPICE, exactly as before this change.
+        rerun_lvs_report(_commit_report(tmp_path, old))
+
+
+# Issue #4353: `reference.form: "gate-level-verilog"` is replayed too.
+def _gate_level_replay_request(tmp_path, *, with_library):
+    if with_library:
+        macro = _write(tmp_path / "macro.spice", _SRAM_MACRO_SPICE)
+        extra = {
+            "library": "sky130_fd_sc_hd",
+            "pdk": "sky130A",
+            "pdk_root": _make_fake_macro_pdk(tmp_path),
+            "pin_order_files": [macro],
+        }
+    else:
+        cells = _SKY130_HD_LIBRARY_SPICE + _SRAM_MACRO_SPICE
+        extra = {"pin_order_files": [_write(tmp_path / "all_cells.spice", cells)]}
+    return _macro_request(tmp_path, extra)
+
+
+@pytest.mark.parametrize("with_library", [True, False])
+def test_rerun_replays_gate_level_verilog_reference(tmp_path, with_library):
+    report = run_lvs(_gate_level_replay_request(tmp_path, with_library=with_library))
+    assert report["status"] == "match"
+    _assert_lvs_report_conforms(report)
+    echo = report["reference_conversion"]
+    assert echo["form"] == "gate-level-verilog"
+    assert echo["library"] == ("sky130_fd_sc_hd" if with_library else None)
+    assert echo["pdk"] == ("sky130A" if with_library else None)
+    assert all(os.path.isabs(path) for path in echo["pin_order_files"])
+    result = rerun_lvs_report(_commit_report(tmp_path, report))
+    assert result["status"] == "match", result
+
+
+def test_rerun_gate_level_report_without_echo_stays_best_effort(tmp_path):
+    report = run_lvs(_gate_level_replay_request(tmp_path, with_library=False))
+    old = {k: v for k, v in report.items() if k != "reference_conversion"}
+    with pytest.raises(LvsError):
         rerun_lvs_report(_commit_report(tmp_path, old))
 
 
@@ -25594,6 +25789,79 @@ def test_run_lvs_sky130_diode_matches_and_mismatches_on_removal(tmp_path, flavou
         assert report["status"] != "match", (layout_diode, reference_diode)
 
 
+def _sky130_diode_subckt_call_report(tmp_path, flavour):
+    from klayout_tools.extract import run_extract
+    from test_lvs_device_provenance import _make_sky130_diode_layout, _write_gds
+
+    n_plus = flavour.startswith("diode_pw2nd")
+    gds = _write_gds(_make_sky130_diode_layout(flavour), tmp_path / "diode.gds")
+    extracted = tmp_path / "extracted.spice"
+    run_extract(gds, "sky130", output=str(extracted))
+    # Bare area/perim are um^2 / um under sky130's ambient `.option scale`.
+    ports, nodes = ("TERM VSUBS", "VSUBS TERM") if n_plus else ("TERM", "TERM WELL")
+    reference = (
+        f".subckt TOP {ports}\n"
+        f"X1 {nodes} sky130_fd_pr__{flavour} area=1 perim=4\n.ends\n"
+    )
+    request = {
+        "layout": {
+            "netlist": _write(tmp_path / "layout.spice", extracted.read_text()),
+            "top": "TOP",
+        },
+        "reference": {
+            "netlist": _write(tmp_path / "ref.spice", reference),
+            "top": "TOP",
+            "form": "subckt-call",
+            "deck": "sky130",
+        },
+    }
+    return run_lvs(json.dumps(request))
+
+
+@pytest.mark.parametrize("flavour", ["diode_pw2nd_05v5", "diode_pd2nw_05v5"])
+def test_run_lvs_sky130_diode_subckt_call_matches(tmp_path, flavour):
+    """Issue #4319: a PDK diode subcircuit call converts and A/P units agree
+    with the layout-extracted side."""
+    report = _sky130_diode_subckt_call_report(tmp_path, flavour)
+    assert report["status"] == "match", report
+    assert "reference.unresolved_subckt_call" not in json.dumps(report)
+
+
+def test_run_lvs_sky130_diode_subckt_call_polarity_matters(tmp_path):
+    """Two diodes sharing an anode do not match two diodes sharing a cathode
+    (a lone diode is graph-symmetric, so the check needs a shared net)."""
+    layout = (
+        ".subckt TOP A X Y\n"
+        "D1 A X DIODE_PD2NW_05V5 A=1P P=4U\n"
+        "D2 A Y DIODE_PD2NW_05V5 A=1P P=4U\n.ends\n"
+    )
+
+    def run(nodes1, nodes2, sub):
+        d = tmp_path / sub
+        d.mkdir()
+        ref = (
+            ".subckt TOP A X Y\n"
+            f"X1 {nodes1} sky130_fd_pr__diode_pd2nw_05v5 area=1 perim=4\n"
+            f"X2 {nodes2} sky130_fd_pr__diode_pd2nw_05v5 area=1 perim=4\n.ends\n"
+        )
+        return run_lvs(
+            json.dumps(
+                {
+                    "layout": {"netlist": _write(d / "l.spice", layout), "top": "TOP"},
+                    "reference": {
+                        "netlist": _write(d / "r.spice", ref),
+                        "top": "TOP",
+                        "form": "subckt-call",
+                        "deck": "sky130",
+                    },
+                }
+            )
+        )
+
+    assert run("A X", "A Y", "ok")["status"] == "match"
+    assert run("X A", "Y A", "swapped")["status"] != "match"
+
+
 # ---------------------------------------------------------------------------
 # Explicit --layout alongside --check / --rerun (issue #2699)
 # ---------------------------------------------------------------------------
@@ -25606,18 +25874,17 @@ def _external_lvs_report(tmp_path_factory):
     layout_path = _write(outside / "layout.spice", _INVERTER_SPICE)
     reference_path = _write(outside / "ref.spice", _INVERTER_SPICE)
     report_path = outside / "lvs.json"
-    _write_report(
-        report_path,
-        run_lvs(
-            _write_request(
-                outside / "request.json",
-                {
-                    "layout": {"netlist": layout_path, "top": "inv"},
-                    "reference": {"netlist": reference_path, "top": "inv"},
-                },
-            )
-        ),
+    report = run_lvs(
+        _write_request(
+            outside / "request.json",
+            {
+                "layout": {"netlist": layout_path, "top": "inv"},
+                "reference": {"netlist": reference_path, "top": "inv"},
+            },
+        )
     )
+    report["reference"] = reference_path  # pre-#4984 bare string (no override)
+    _write_report(report_path, report)
     return layout_path, report_path
 
 
@@ -25831,3 +26098,140 @@ def test_compare_heartbeat_goes_to_stderr_only_issue_4165(
     captured = capsys.readouterr()
     assert "comparing netlists" in captured.err
     assert json.loads(captured.out)["status"] == "inconclusive"
+
+
+# --------------------------------------------------------------------------- #
+# layout.def_net_names / layout.def_pins / --progress (issue #4347)
+# --------------------------------------------------------------------------- #
+
+_DEF_WITH_PINS = (
+    "VERSION 5.8 ;\nDESIGN top ;\nPINS 3 ;\n"
+    " - A + NET A + DIRECTION INPUT ;\n"
+    " - VGND + NET VGND + DIRECTION INOUT ;\n"
+    " - dout + NET dout + DIRECTION OUTPUT ;\n"
+    "END PINS\nEND DESIGN\n"
+)
+
+
+def _def_request(tmp_path, **layout_extra) -> dict:
+    layout = _make_single_nmos_layout(extra_drain_label="dout")
+    gds_path = tmp_path / "nmos.gds"
+    layout.write(str(gds_path))
+    return {
+        "layout": {"file": str(gds_path), "deck": "sky130", **layout_extra},
+        "reference": {"netlist": str(tmp_path / "ref.spice")},
+    }
+
+
+def test_def_pins_and_def_net_names_are_forwarded_and_echoed(tmp_path, monkeypatch):
+    import klayout_tools.lvs as lvs_mod
+
+    def_path = tmp_path / "top.def"
+    def_path.write_text(_DEF_WITH_PINS)
+    seen = {}
+    real = lvs_mod.extract_netlist_from_layout
+
+    def spy(*args, **kwargs):
+        seen.update(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(lvs_mod, "extract_netlist_from_layout", spy)
+    request = _def_request(
+        tmp_path,
+        def_pins=str(def_path),
+        def_net_names=True,
+        rename_declared_pins=True,
+    )
+    from klayout_tools.extract import run_extract
+
+    run_extract(
+        request["layout"]["file"],
+        "sky130",
+        output=request["reference"]["netlist"],
+        def_pins=frozenset({"A", "VGND", "dout"}),
+        rename_declared_pins=True,
+    )
+    report = run_lvs(json.dumps(request))
+    assert seen["def_pins"] == frozenset({"A", "VGND", "dout"})
+    assert seen["def_net_names"] is True
+    assert seen["rename_declared_pins"] is True
+    assert report["def_pins"] == str(def_path)
+    assert report["def_net_names"] is True
+
+
+def test_def_fields_absent_leave_report_without_them(tmp_path):
+    from klayout_tools.extract import run_extract
+
+    request = _def_request(tmp_path)
+    run_extract(
+        request["layout"]["file"], "sky130", output=request["reference"]["netlist"]
+    )
+    report = run_lvs(json.dumps(request))
+    assert "def_pins" not in report
+    assert "def_net_names" not in report
+
+
+def test_def_fields_reject_bad_values(tmp_path):
+    (tmp_path / "no_pins.def").write_text("VERSION 5.8 ;\nEND DESIGN\n")
+    cases = [
+        ({"def_net_names": "yes"}, "def_net_names must be a boolean"),
+        ({"def_pins": 3}, "def_pins must be a DEF file path string"),
+        ({"def_pins": "no_pins.def"}, "no parseable DEF `PINS` section"),
+    ]
+    for extra, match in cases:
+        request = _def_request(tmp_path, **extra)
+        request_file = tmp_path / "req.json"
+        request_file.write_text(json.dumps(request))
+        with pytest.raises(LvsError, match=match):
+            run_lvs(str(request_file))
+
+
+@pytest.mark.parametrize("extra", [{"def_net_names": True}, {"def_pins": "x.def"}])
+def test_def_fields_refused_on_preextracted_netlist(tmp_path, extra):
+    spice = tmp_path / "layout.spice"
+    spice.write_text(".subckt top\n.ends\n")
+    request = {
+        "layout": {"netlist": str(spice), **extra},
+        "reference": {"netlist": str(spice)},
+    }
+    with pytest.raises(LvsError, match="applies only to inline extraction"):
+        run_lvs(json.dumps(request))
+
+
+def test_rename_declared_pins_accepts_def_pins_alone(tmp_path):
+    def_path = tmp_path / "top.def"
+    def_path.write_text(_DEF_WITH_PINS)
+    from klayout_tools.lvs import _parse_layout_rename_declared_pins
+
+    assert _parse_layout_rename_declared_pins(
+        {"rename_declared_pins": True, "def_pins": str(def_path)}
+    )
+
+
+def test_progress_writes_stage_lines_to_stderr_only(tmp_path, capsys):
+    from klayout_tools.extract import run_extract
+
+    request = _def_request(tmp_path)
+    run_extract(
+        request["layout"]["file"], "sky130", output=request["reference"]["netlist"]
+    )
+    run_lvs(json.dumps(request), progress=True)
+    captured = capsys.readouterr()
+    assert "extract_layout started" in captured.err
+    assert "extract_layout started" not in captured.out
+
+
+def test_rerun_request_replays_def_fields(tmp_path):
+    from klayout_tools.lvs import _reconstruct_lvs_request
+
+    committed = {
+        "layout": str(tmp_path / "x.gds"),
+        "provenance": {"deck": {"name": "sky130"}},
+        "reference": "ref.spice",
+        "top": "top",
+        "def_net_names": True,
+        "def_pins": "top.def",
+    }
+    layout_spec = _reconstruct_lvs_request(committed)["layout"]
+    assert layout_spec["def_net_names"] is True
+    assert layout_spec["def_pins"] == "top.def"

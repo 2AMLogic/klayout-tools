@@ -75,7 +75,9 @@ The artifact per item:
 - item 1: the design-source inventory;
 - item 2: the committed layout stream;
 - item 9: the testbench inventory;
-- item 10: the repo-hygiene inventory.
+- item 10: the repo-hygiene inventory (repo-owned files only, not
+  Loom/Repo-Skills resync-managed paths; re-attesting is an owner action —
+  see `docs/cli/signoff.md` "Item 10: what belongs in a hygiene inventory").
 
 For items 1, 9 and 10 that envelope is **tool-produced**, not hand-rolled:
 `klt signoff --attest {1,9,10} --inventory <file>` (issue #2844) reads a
@@ -226,6 +228,18 @@ written to every block.
    `met` verdict from `klt signoff` is still not evidence that the gaps were
    disclosed. A reviewer must read the reported `coverage` against the claim
    themselves.
+   **Disclosed exception for unmodified foundry cells** (operator ruling
+   2026-10-28): DRC violations inside an unmodified foundry-library cell
+   (a stock I/O pad, a foundry SRAM macro) do not block `met`, provided all
+   three of these hold: (1) the same violations — same rules, same counts —
+   reproduce when the unmodified PDK cell is checked alone, with none of the
+   block's own geometry; (2) the exception is pinned to the stock cell by
+   content hash and names its rules and counts, and lapses if the cell or the
+   counts change; (3) the T1 claim lists every such exception, and says
+   nothing about the internals of those cells. `klt signoff` grades this from
+   a `foundry_cell_exceptions` list on the item 3 evidence entry
+   (`docs/cli/signoff.md` → "Foundry-cell DRC exceptions") and lists each
+   applied exception in item 3's citation.
 4. **LVS clean** — latest LVS report (or, per cell, a list of reports — all must
    pass) `status: match`, fresh, engine named,
    checked against the netlist from item 1 (schematic netlist for analog,
@@ -281,8 +295,16 @@ written to every block.
    `runset_hash_mismatch`. **This does not change** the default: curated decks
    stay the route wherever they recognise every device in the block, and a
    block may not choose the runset to avoid a curated-deck finding. The
-   allowlist is empty as of this change (2026-10-17) until a published runset's
-   digest is reviewed into it, so no runset report grades `met` before then.
+   allowlist (`signoff_runset.PINNED_RUNSETS`, listed by
+   `klt signoff --describe-grader` under `pinned_runsets`) holds the SG13G2,
+   SG13CMOS5L and gf180mcu `*.lvs` runsets as of 2026-10-27.
+   **Adding an entry** is a reviewed trust decision, never a copy of a hash
+   from a report: fetch the PDK's runset file from its upstream repo at a
+   named commit, `sha256` it (the same digest `_provenance.sha256_file`
+   records), and add one entry recording `pdk`, `revision`, `repo`, `commit`,
+   `path` and `reviewed_by`. The digest covers the top-level runset file only,
+   so the `commit` is what fixes the `rule_decks/` it includes. A PDK whose
+   runset cannot be fetched or run at a verifiable commit is left unpinned.
 5. **Full corner verification vs a ratified spec**
    - *Analog* — PVT corner-matrix simulation results covering every spec
      row at its bound corners, with per-row pass/fail and the binding
@@ -291,6 +313,9 @@ written to every block.
      declaring the full row set; the item is met only when every cited
      envelope passes and every declared row is covered, and rows no
      envelope can express are declared gaps that keep it unmet.
+     A row defined by an analytical/linear-model run may instead cite a
+     committed `model-run` envelope (same per-row, limits-bearing
+     coverage rule; `klt` does not execute the model).
    - *Digital* — multi-corner static timing analysis (setup and hold
      across the PVT corner set) plus a bit-exact functional test suite,
      with per-corner and per-test pass/fail recorded. For the full-custom
@@ -344,12 +369,13 @@ written to every block.
    verb needs the `yield` extra.** Unlike every other T1 item's
    evidence verb (`drc`, `lvs`, `extract`, `sim`, `pex`, `sta`,
    `functional-verification`, `erc`, `place-and-route`), `klt yield`
-   requires the `klt_yield_native` Rust extension. It is published as the
-   prebuilt `klt-yield-native` wheel (Linux x86_64, macOS arm64), reached by
-   `pip install 'klayout-tools[yield]'`; a bare `pip install klayout-tools`
-   and the git-pinned form do not include it. A consumer pinning a release
-   that predates the first `klt-yield-native` publication, or on another
-   platform, still needs a repo checkout with a Rust toolchain; see
+   requires the `klt_yield_native` Rust extension: install it with the
+   `[yield]` extra (`pip install 'klayout-tools[yield]'`). As of 2026-11-06 the
+   prebuilt `klt-yield-native` 0.1.0 wheel (Linux x86_64, macOS arm64) is on
+   PyPI and the extra resolves for klayout-tools 0.9.1 and later. A bare
+   `pip install klayout-tools` and the git-pinned form do not include it. A
+   consumer on another platform (Linux aarch64, Windows, Intel macOS) needs a
+   repo checkout with a Rust toolchain; see
    `docs/cli/yield.md`'s "What the extra does and does not reach" callout and
    `docs/releasing-native.md`.
    **When "not applicable" is legitimate** (issue #2865): a block whose
@@ -366,6 +392,20 @@ written to every block.
    partition only; an analog partition (including the analog half of a
    mixed-signal block) always requires Monte Carlo evidence. `klt signoff`
    reports it as `not_applicable`, never as `met`.
+   **Analog partitions** (issue #4183, operator ruling 2026-10-28): this
+   restriction is intentional. Analog performance is inherently statistical
+   (offset, mismatch, bias spread), so an analog spec with no statistical row
+   is a gap in the spec, not a block with no variation; the grader is not
+   relaxed and there is no analog-keyed `not_applicable` form. A
+   mixed-signal block's analog partition that uses `not_applicable` renders
+   `unmet` with `reason: not_applicable_wrong_partition`, even when the
+   statement covers every spec row. It discharges item 6 one of two ways:
+   - **Add the missing statistical row(s)** to the block's spec through a
+     decision record the operator ratifies, then supply Monte Carlo evidence
+     (`klt yield`) for them. Where the PDK has no mismatch models, assumed
+     mismatch is acceptable, labelled as such in the evidence.
+   - **Declare item 6 a gap** for the analog partition.
+   The digital partition of the same block may still use `not_applicable`.
    **Several statistical rows, only some evidenced** (issue #2908): item 6
    is a claim about *every* statistical row, so a manifest may declare the
    row set under `spec_rows."6"` and cite one `klt yield` report per row set
@@ -439,9 +479,14 @@ written to every block.
    tool). For a digital or mixed-signal digital partition this includes
    Fmax, area, and power across the corner set, not just functional
    pass/fail. Unlike every other T1 item, this one names no specific `klt`
-   verb — there is no dedicated aggregation command, and its evidence may be
-   a hand-assembled record (e.g. a committed Markdown characterization
-   report) rather than one `klt` verb's own JSON output. `klt signoff
+   verb for its evidence, which may be a hand-assembled record (e.g. a
+   committed Markdown characterization report) rather than one `klt` verb's
+   own JSON output. `klt signoff --attest 8 --inventory FILE` (issue #4311)
+   produces the generic envelope mechanically — report present, each spec row
+   cited, each cited envelope present and passing its own `--check`, and for a
+   digital partition Fmax/area/power bound per corner — and a met citation
+   discloses whether the tool produced it; a bare hand-written envelope still
+   grades. `klt signoff
    --manifest` grades it via an opt-in **generic evidence envelope**
    (`"kind": "generic"`, issue #1152) — a minimal, hand-rolled JSON wrapper
    asserting `status: "pass"|"fail"` for whatever record backs it. Item 8
@@ -483,7 +528,10 @@ written to every block.
       `klt signoff` renders `lvs_did_not_pass` (not the plain
       `check_failed`) when the ERC supply evidence is complete and
       continuous and only the LVS half is unavailable, naming in
-      `detail.power_delivery` the supplies the ERC run did prove. Produce
+      `detail.power_delivery` the supplies the ERC run did prove. A set
+      citing only the `erc` or only the `lvs` part renders
+      `power_delivery_parts_missing` (not `wrong_kind`), naming the absent
+      part and crediting the supplies a resolved ERC spec proved. Produce
       the ERC supply spec anyway — it is the half that survives an unrelated
       LVS defect, and it is what makes the distinction visible.
       A `klayout-runset` report (item 4's PDK-runset path) can be this LVS
@@ -498,7 +546,10 @@ written to every block.
       4's power/ground verdict having actually run. Concretely: the `klt
       place-and-route` response's `power.pdn` is `true` with a
       `power.tapcell_master` named (`docs/cli/place-and-route.md` → "Power
-      delivery"), every `power.straps[].layer` is covered by the cited
+      delivery") — or, for a library documented tapless (`sg13g2_stdcell`),
+      `power.tapless: true` with the master `null`, which the citation
+      records (a null master without `tapless` is `no_tapcell_master`, not
+      `no_pdn`) — every `power.straps[].layer` is covered by the cited
       `klt erc` spec's own stackup, and that same LVS report's
       `power_connectivity.status` is `"match"` — `"unchecked"` does **not**
       satisfy this item, unlike item 4 itself, where it means "the question
@@ -527,6 +578,14 @@ written to every block.
       `erc.expected_short_missing` naming a declared supply — blocks this
       item in the short's place, so declaring the tie converts a false
       blocking finding into a real check rather than into no evidence.
+      **Supplies that share a substrate body are graded too** (issue
+      #5346): an `erc.supply_short` with `via: "substrate"` blocks this item
+      like a metal one, and a cited run that *disclosed* the substrate path
+      undecidable (`erc_coverage.inapplicable[erc.supply_short]`, reason
+      `substrate_isolation_undecidable`) is `unmet` with the same-named
+      reason and its `missing` list in `detail.power_delivery`; only an
+      evaluated-clean run (`erc.supply_short.substrate` in `checked`) is
+      `met`.
       **The severed-rail half of "exactly one island" is gradeable too,
       where the spec declares the roles a supply owns** (issue #2524).
       `erc.unconnected_net` counts islands *carrying the declared label*,

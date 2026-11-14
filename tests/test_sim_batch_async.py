@@ -5,6 +5,7 @@ runner from `test_sim_batch.py`; nothing here reaches `aws` or S3."""
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -16,10 +17,14 @@ from klayout_tools.cli import main
 from test_sim_batch import (
     FAKE_BUCKET,
     _batch_request,
+    _ceiling_request,
     _Clock,
+    _corner_points,
     _FakeRunner,
     _install_fake_batch_transport,
+    _measurements_spec,
     _sim_report,
+    _split_runner,
     _status,
     _write_body,
     _write_request,
@@ -81,8 +86,8 @@ def test_submit_only_refuses_sharded_request_before_any_s3_write(tmp_path, monke
     with pytest.raises(sim.SimError) as err:
         sim.run_sim(str(path), submit_only=True, hosts=2)
 
-    assert err.value.code == sba.SUBMIT_ONLY_UNSUPPORTED_CODE
-    assert "hosts" in str(err.value)
+    # One unit cannot fill two hosts (issue #5281): refused by name.
+    assert "exceeds the number of units" in str(err.value)
     assert runner.calls == []
 
 
@@ -389,29 +394,6 @@ def test_cli_wait_for_capacity_with_job_status_is_a_usage_error(
     assert runner.calls == []
 
 
-def test_cli_wait_for_capacity_with_batch_set_is_a_usage_error(
-    tmp_path, monkeypatch, capsys
-):
-    runner = _FakeRunner()
-    path = _setup(tmp_path, monkeypatch, runner)
-
-    code = main(
-        [
-            "sim",
-            "--batch-set",
-            str(path),
-            "--wait-for-capacity",
-            "0",
-            "--format",
-            "json",
-        ]
-    )
-
-    assert code == 2
-    assert "--wait-for-capacity" in _stderr_json(capsys)["error"]["message"]
-    assert runner.calls == []
-
-
 def test_cli_wait_for_capacity_flows_to_submit_only(tmp_path, monkeypatch, capsys):
     runner = _FakeRunner()
     path = _setup(tmp_path, monkeypatch, runner)
@@ -538,3 +520,299 @@ def test_attach_pending_job_emits_the_note_end_to_end(tmp_path, monkeypatch, cap
     sim.run_sim(str(path), attach_job_id=job_id)
 
     assert "was never started" in capsys.readouterr().err
+
+
+# --- issue #4616: staleness verdict on a frozen non-terminal status ---
+
+_UPDATED_AT = datetime(2026, 9, 18, 0, 5, 0, tzinfo=timezone.utc)
+
+
+def _read_at(tmp_path, monkeypatch, status_text, age_s):
+    runner = _FakeRunner()
+    runner.default = fake_completed(status_text)
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    return sba.read_job_status(
+        _batch_request(tmp_path),
+        "klt-sim-deadbeef",
+        now=_UPDATED_AT + timedelta(seconds=age_s),
+    )
+
+
+def test_job_status_old_running_job_is_marked_stale(tmp_path, monkeypatch):
+    status = _read_at(tmp_path, monkeypatch, _status("running"), 2700)
+
+    assert status["stale"] is True
+    assert status["stale_seconds"] == 2700.0
+    assert status["state"] == "running"
+
+
+def test_job_status_fresh_running_job_is_not_stale(tmp_path, monkeypatch):
+    status = _read_at(tmp_path, monkeypatch, _status("running"), 60)
+
+    assert "stale" not in status
+    assert "stale_seconds" not in status
+
+
+@pytest.mark.parametrize("state", ["done", "failed", "timeout"])
+def test_job_status_terminal_job_is_never_stale(tmp_path, monkeypatch, state):
+    status = _read_at(tmp_path, monkeypatch, _status(state), 86400)
+
+    assert "stale" not in status
+    assert status["state"] == state
+
+
+@pytest.mark.parametrize("updated_at", ["not-a-date", None])
+def test_job_status_bad_updated_at_makes_no_stale_claim(
+    tmp_path, monkeypatch, updated_at
+):
+    status = _read_at(
+        tmp_path, monkeypatch, _status("running", updated_at=updated_at), 86400
+    )
+
+    assert "stale" not in status
+
+
+def test_job_status_pending_is_not_stale(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.queue("status.json", fake_completed("", returncode=1))
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+
+    status = sba.read_job_status(
+        _batch_request(tmp_path),
+        "klt-sim-deadbeef",
+        now=_UPDATED_AT + timedelta(days=2),
+    )
+
+    assert status["state"] == "pending"
+    assert "stale" not in status
+
+
+# --------------------------------------------------------------------------- #
+# Sharded --submit-only / --attach (issue #4620)
+# --------------------------------------------------------------------------- #
+
+_SHARD_KW = dict(
+    models_lib=None,
+    analysis={"kind": "tran", "args": "1n 1u"},
+    timeout_s=120.0,
+    keep_artifacts=False,
+    want_waveforms=False,
+    max_workers=None,
+)
+
+
+def _submit_shards(tmp_path, units=10, cap=4):
+    request = _ceiling_request(tmp_path, max_units_per_job=cap)
+    payload = sba.submit_only(
+        request=request,
+        corner_points=_corner_points(units),
+        netlist_path=str(_write_body(tmp_path)),
+        timeout_s=120.0,
+        keep_artifacts=False,
+        want_waveforms=False,
+        artifacts_dir=str(tmp_path / "artifacts"),
+        shard_fingerprint="fp-async",
+    )
+    return request, payload
+
+
+def _attach_shards(tmp_path, request, manifest, units=10, **overrides):
+    kwargs = dict(
+        corner_points=_corner_points(units),
+        netlist_path=str(_write_body(tmp_path)),
+        measurements_spec=_measurements_spec(),
+        artifacts_dir=str(tmp_path / "artifacts"),
+        request=request,
+        attach_job_id=manifest,
+        shard_fingerprint="fp-async",
+        **_SHARD_KW,
+    )
+    kwargs.update(overrides)
+    return sb._run_batch(**kwargs)
+
+
+def test_sharded_submit_only_lists_every_shard_and_the_manifest(tmp_path, monkeypatch):
+    runner, shard_sizes = _split_runner(monkeypatch)
+    monkeypatch.delenv(sb.MAX_JOB_SECONDS_ENV, raising=False)
+
+    _, payload = _submit_shards(tmp_path)
+
+    assert payload["sharded"] is True
+    assert "job_id" not in payload
+    assert sorted(shard_sizes) == [3, 3, 4]
+    assert [s["unit_count"] for s in payload["shards"]] == [4, 3, 3]
+    assert [s["unit_start"] for s in payload["shards"]] == [0, 4, 7]
+    assert len({s["job_id"] for s in payload["shards"]}) == 3
+    assert len(runner.argvs_matching("launch", "--apply")) == 3
+    # Fire and forget: no poll, no collect.
+    assert runner.argvs_matching("status.json") == []
+    assert runner.argvs_matching("outputs/") == []
+    document = json.loads(open(payload["manifest_path"]).read())
+    assert document["request_sha256"] == payload["request_sha256"]
+    assert [e["state"] for e in document["shards"]] == ["launched"] * 3
+    assert [e["job_id"] for e in document["shards"]] == [
+        s["job_id"] for s in payload["shards"]
+    ]
+
+
+def _launch_dies_on(monkeypatch, nth):
+    """Make the `nth` (1-based) launch_job call raise, as a kill would."""
+    real = sb.launch_job
+    seen = {"n": 0}
+
+    def _launch(config, job_id, **kwargs):
+        seen["n"] += 1
+        if seen["n"] == nth:
+            raise sb.BatchError("killed during launch", code="batch_launch_failed")
+        return real(config, job_id, **kwargs)
+
+    monkeypatch.setattr(sb, "launch_job", _launch)
+
+
+@pytest.mark.parametrize("state", ["submitted", "launching"])
+def test_sharded_resubmit_reuses_recorded_job_ids(tmp_path, monkeypatch, state):
+    """Issue #4686: an interrupt after `submit_job` (and in `launching`)
+    leaves a shard map; re-running submit never mints a second id."""
+    runner, _ = _split_runner(monkeypatch)
+    monkeypatch.delenv(sb.MAX_JOB_SECONDS_ENV, raising=False)
+    submits: list = []
+    real_submit = sb.submit_job
+
+    def _spy(config, job_id, spec, **kwargs):
+        submits.append(job_id)
+        return real_submit(config, job_id, spec, **kwargs)
+
+    monkeypatch.setattr(sb, "submit_job", _spy)
+    _launch_dies_on(monkeypatch, nth=2)
+    with pytest.raises(sim.SimError):
+        _submit_shards(tmp_path)
+    path = tmp_path / "artifacts" / sb.BATCH_SHARDS_FILENAME
+    entries = json.loads(path.read_text())["shards"]
+    assert [e["state"] for e in entries] == ["launched", "submitted", "pending"]
+    first_ids = [e["job_id"] for e in entries]
+    if state == "launching":
+        # The kill landed after launch_job started: outcome unknown.
+        entries[1]["state"] = "launching"
+        document = json.loads(path.read_text())
+        document["shards"] = entries
+        path.write_text(json.dumps(document))
+
+    monkeypatch.undo()
+    runner, _ = _split_runner(monkeypatch)
+    monkeypatch.delenv(sb.MAX_JOB_SECONDS_ENV, raising=False)
+    monkeypatch.setattr(sb, "submit_job", _spy)
+    # The pending shard was killed before its job.json upload.
+    monkeypatch.setattr(sb, "job_exists", lambda *_a, **_k: False)
+    _, payload = _submit_shards(tmp_path)
+
+    assert [s["job_id"] for s in payload["shards"]] == first_ids
+    assert sorted(submits) == sorted(set(submits))
+    assert len(submits) == 3
+    launches = len(runner.argvs_matching("launch", "--apply"))
+    # shard 0 launched earlier; shard 1 launched here only if it never started.
+    assert launches == (2 if state == "submitted" else 1)
+    document = json.loads(path.read_text())
+    assert [e["job_id"] for e in document["shards"]] == first_ids
+
+
+def test_unsharded_submit_only_payload_is_unchanged(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    path = _setup(tmp_path, monkeypatch, runner)
+
+    result = _submit(path)
+
+    assert "sharded" not in result
+    assert "shards" not in result
+    assert result["job_id"].startswith("klt-sim-")
+
+
+def test_attach_shard_map_equals_the_synchronous_sharded_report(tmp_path, monkeypatch):
+    runner, _ = _split_runner(monkeypatch)
+    monkeypatch.delenv(sb.MAX_JOB_SECONDS_ENV, raising=False)
+    request, payload = _submit_shards(tmp_path)
+    launches_before = len(runner.argvs_matching("launch"))
+
+    corners, _, environment = _attach_shards(
+        tmp_path, request, payload["manifest_path"]
+    )
+
+    assert [c["corner_id"] for c in corners] == [f"tt_1.800_{i}" for i in range(10)]
+    assert [f["job_id"] for f in environment["fleet"]] == [
+        s["job_id"] for s in payload["shards"]
+    ]
+    # Attach launches and uploads nothing new.
+    assert len(runner.argvs_matching("launch")) == launches_before
+
+    sync_corners, _, _ = sb._run_batch(
+        corner_points=_corner_points(10),
+        netlist_path=str(_write_body(tmp_path)),
+        measurements_spec=_measurements_spec(),
+        artifacts_dir=str(tmp_path / "sync"),
+        request=request,
+        **_SHARD_KW,
+    )
+    assert corners == sync_corners
+
+
+def test_attach_shard_map_with_a_different_request_is_refused(tmp_path, monkeypatch):
+    runner, _ = _split_runner(monkeypatch)
+    monkeypatch.delenv(sb.MAX_JOB_SECONDS_ENV, raising=False)
+    request, payload = _submit_shards(tmp_path)
+    launches = len(runner.argvs_matching("launch"))
+
+    other = {**request, "batch": {**request["batch"], "poll_timeout_s": 12345}}
+    with pytest.raises(sim.SimError) as err:
+        _attach_shards(tmp_path, other, payload["manifest_path"])
+
+    assert err.value.code == sb.BATCH_SHARD_MANIFEST_CODE
+    assert "request_sha256" in str(err.value)
+    assert len(runner.argvs_matching("launch")) == launches
+
+
+def test_attach_shard_map_reports_a_lost_shard_and_the_others(tmp_path, monkeypatch):
+    runner, _ = _split_runner(monkeypatch)
+    monkeypatch.delenv(sb.MAX_JOB_SECONDS_ENV, raising=False)
+    request, payload = _submit_shards(tmp_path)
+    lost = payload["shards"][1]["job_id"]
+    inner = sb._run_subprocess
+
+    def _lose(argv, timeout_s):
+        joined = " ".join(argv)
+        if lost in joined and joined.endswith("job.json -"):
+            return fake_completed("", returncode=1, stderr="404 Not Found")
+        return inner(argv, timeout_s)
+
+    monkeypatch.setattr(sb, "_run_subprocess", _lose)
+    launches = len(runner.argvs_matching("launch"))
+
+    corners, _, environment = _attach_shards(
+        tmp_path, request, payload["manifest_path"]
+    )
+
+    assert len(corners) == 10
+    lost_ids = {c["corner_id"] for c in corners if _is_lost(c)}
+    assert lost_ids == {"tt/1.800V/4C", "tt/1.800V/5C", "tt/1.800V/6C"}
+    assert all(c["status"] == "pass" for c in corners if c["corner_id"] not in lost_ids)
+    assert len(runner.argvs_matching("launch")) == launches  # never relaunched
+    assert len(environment["fleet"]) == 3
+
+
+def _is_lost(corner):
+    return any(d.get("code") == "lost_shard" for d in corner.get("diagnostics") or [])
+
+
+def test_attach_requires_the_shard_map_filename(tmp_path, monkeypatch):
+    with pytest.raises(sim.SimError) as err:
+        _attach_shards(
+            tmp_path, _ceiling_request(tmp_path), str(tmp_path / "other.json")
+        )
+    assert err.value.code == sb.BATCH_SHARD_MANIFEST_CODE
+
+
+def test_submit_only_hosts_with_resume_is_still_refused(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    path = _setup(tmp_path, monkeypatch, runner)
+    with pytest.raises(sim.SimError) as err:
+        sim.run_sim(str(path), submit_only=True, hosts=3, resume=True)
+    assert err.value.code == sba.SUBMIT_ONLY_UNSUPPORTED_CODE
+    assert runner.calls == []

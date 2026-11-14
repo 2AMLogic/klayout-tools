@@ -1,0 +1,22 @@
+Check that two separately generated blocks mate: pair the text labels of A and
+B whose string fully matches --pins, translate B by --place into A's frame (in
+memory; no assembled layout is written), and report per pin the offset between
+A's and B's pad on the pin layer. A pin is ok when the pads overlap or are
+within --tol-um, misaligned otherwise, and no_partner when it exists in only
+one stream. See docs/cli/interface-check.md.
+
+positional arguments:
+  a path to block A (GDSII or OASIS)
+  b path to block B (GDSII or OASIS)
+
+options:
+  -h, --help show this help message and exit
+  --place DX,DY translation of B into A's frame in micrometres, e.g. '120.5,0'
+  --pins REGEX regex that must fully match a label string for it to be checked
+  --pin-layer-a L/D layer of A's pads (default: each label's own layer)
+  --pin-layer-b L/D layer of B's pads (default: each label's own layer)
+  --tol-um UM largest pad-to-pad gap still counted as mated (default 0: overlap/touch)
+  --pair A_REGEX=B_TEMPLATE pair complementary names: an A label fully matching A_REGEX mates with the B label named by the re.Match.expand template, e.g. 'n_out\[(\d+)\]=s_in[\1]'; repeatable, first match wins; both names must match --pins
+  --top-a TOP_A top cell of A (required if several)
+  --top-b TOP_B top cell of B (required if several)
+  --format {text,json} output format (default: text)

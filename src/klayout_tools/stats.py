@@ -21,6 +21,8 @@ from typing import Any
 
 from ._annotation import is_reserved_annotation_layer
 from ._layout import bbox_um_dict, cells_in_hierarchy, load_layout
+from ._provenance import layout_geometry_digest
+from ._stats_density import MAX_DENSITY_WINDOWS, density_windows
 
 
 class StatsError(Exception):
@@ -190,11 +192,6 @@ def _accumulate(
     )
 
 
-#: Upper bound on windows per layer for ``--density-window``; a finer grid is
-#: refused rather than emitting unbounded JSON.
-MAX_DENSITY_WINDOWS = 10_000
-
-
 def _merged_region(top_cell: Any, layer_index: int, kdb: Any) -> Any:
     """Flattened, boolean-merged region of one layer under ``top_cell``.
 
@@ -204,53 +201,6 @@ def _merged_region(top_cell: Any, layer_index: int, kdb: Any) -> Any:
     if top_cell is None:
         return kdb.Region()
     return kdb.Region(top_cell.begin_shapes_rec(layer_index)).merged()
-
-
-def _density_windows(
-    region: Any, bbox: Any, window_dbu: int, dbu: float, kdb: Any
-) -> dict[str, Any]:
-    """Tile ``bbox`` with ``window_dbu`` squares and report drawn fraction.
-
-    Windows start at the bbox left/bottom; edge windows are clipped to the
-    bbox and judged against their clipped area. Ordered by ``(iy, ix)``.
-    """
-    windows: list[dict[str, Any]] = []
-    iy = 0
-    y = bbox.bottom
-    while y < bbox.top:
-        y2 = min(y + window_dbu, bbox.top)
-        ix = 0
-        x = bbox.left
-        while x < bbox.right:
-            x2 = min(x + window_dbu, bbox.right)
-            box = kdb.Box(x, y, x2, y2)
-            area_dbu2 = (region & kdb.Region(box)).area()
-            windows.append(
-                {
-                    "ix": ix,
-                    "iy": iy,
-                    "bbox_um": bbox_um_dict(box, dbu),
-                    "area_um2": area_dbu2 * dbu * dbu,
-                    "fraction": area_dbu2 / (box.width() * box.height()),
-                }
-            )
-            ix += 1
-            x = x2
-        iy += 1
-        y = y2
-    fractions = [w["fraction"] for w in windows]
-    low = min(windows, key=lambda w: w["fraction"])
-    high = max(windows, key=lambda w: w["fraction"])
-    return {
-        "windows": windows,
-        "summary": {
-            "min": low["fraction"],
-            "max": high["fraction"],
-            "mean": sum(fractions) / len(fractions),
-            "min_window": {"ix": low["ix"], "iy": low["iy"]},
-            "max_window": {"ix": high["ix"], "iy": high["iy"]},
-        },
-    }
 
 
 def _density_report(
@@ -293,7 +243,7 @@ def _density_report(
         if window_layers is None and region.is_empty():
             continue
         entry: dict[str, Any] = {"layer": pair[0], "datatype": pair[1]}
-        entry.update(_density_windows(region, bbox, window_dbu, dbu, kdb))
+        entry.update(density_windows(region, bbox, window_dbu, dbu, kdb))
         layers.append(entry)
     layers.sort(key=lambda e: (e["layer"], e["datatype"]))
     return {"window_um": window_dbu * dbu, "window_count": n_windows, "layers": layers}
@@ -325,6 +275,8 @@ def stats_report(
             "file": <path as provided>,
             "dbu_um": <database unit in micrometres, float>,
             "top_cell": <top cell name, or None if the layout has no cells>,
+            "geometry_digest": <"sha256:<64 hex>" of the stream's decoded
+                                geometry, or None if it cannot be computed>,
             "bbox_um": {"left": .., "bottom": .., "right": .., "top": ..,
                         "width": .., "height": ..},
             "total": {"area_um2": .., "density": .., "polygon_count": ..,
@@ -377,6 +329,17 @@ def stats_report(
     per-layer windowed drawn-area fractions over merged geometry (``None``
     when not requested); ``window_layers`` restricts it to ``(layer,
     datatype)`` pairs, default every non-annotation layer with geometry.
+
+    ``geometry_digest`` (issue #5551) is
+    :func:`klayout_tools._provenance.layout_geometry_digest` of ``path`` --
+    a ``"sha256:<64 hex>"`` digest of the stream's *decoded geometry*, which
+    ignores the write timestamps and record order a raw-byte hash is
+    sensitive to, so two writes of identical geometry share it. It is
+    reported for the whole stream, never scoped by ``top``. This is the
+    public producer of the value ``klt signoff --attest 2 --hash-kind
+    geometry`` is graded against (``docs/cli/signoff.md``), which previously
+    had none -- note it is **not** ``klt diff``'s ``canonical_hash``, a
+    different digest. ``None`` when the digest cannot be computed.
 
     ``layers`` is ``None`` unless ``per_layer=True``, in which case it is a
     list sorted by ``(layer, datatype)`` ascending for deterministic output.
@@ -493,6 +456,7 @@ def stats_report(
         "file": path,
         "dbu_um": dbu,
         "top_cell": top_cell.name if top_cell is not None else None,
+        "geometry_digest": layout_geometry_digest(path),
         "bbox_um": bbox_um_dict(bbox, dbu),
         "total": {
             "area_um2": total_area_dbu2 * dbu * dbu,

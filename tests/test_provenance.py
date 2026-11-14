@@ -59,6 +59,8 @@ def test_build_provenance_always_reports_versions():
     prov = _provenance.build_provenance()
     assert set(prov.keys()) == {
         "klt_version",
+        "klt_git_commit",
+        "klt_reinstall_spec",
         "klayout_version",
         "pdk",
         "deck",
@@ -315,6 +317,7 @@ def test_build_provenance_mismatch_check_does_not_shell_out(monkeypatch):
     # Build identity intentionally probes source installs; isolate the
     # engine-pin check this test covers from that independent resolution.
     monkeypatch.setattr(_provenance.build_identity, "build_version", lambda: "0.5.0")
+    monkeypatch.setattr(_provenance, "_klt_build_handle", lambda: (None, None))
     monkeypatch.setattr(_provenance.subprocess, "run", _fail)
     prov = _provenance.build_provenance(include_klayout_version_mismatch=True)
     assert prov["klayout_version_mismatch"] in (True, False)
@@ -812,3 +815,45 @@ def test_deck_block_path_envelope_is_opt_in():
     with_path = _deck_block("d", None, path_envelope=envelope)
     assert with_path["path"] == envelope
     assert {k: v for k, v in with_path.items() if k != "path"} == plain
+
+
+# --------------------------------------------------------------------------- #
+# build handle (issue #4412)
+# --------------------------------------------------------------------------- #
+
+_SHA = "a" * 40
+
+
+@pytest.mark.parametrize(
+    ("ident", "expected_spec"),
+    [
+        (
+            {"git_commit": _SHA, "git_tag": None, "dirty": False, "is_release": False},
+            f"klayout-tools @ git+https://github.com/2AMLogic/klayout-tools@{_SHA}",
+        ),
+        (
+            {"git_commit": _SHA, "git_tag": None, "dirty": True, "is_release": False},
+            None,
+        ),
+        (
+            {"git_commit": None, "git_tag": None, "dirty": None, "is_release": False},
+            None,
+        ),
+    ],
+    ids=["clean", "dirty", "unknown"],
+)
+def test_build_provenance_records_reinstall_handle(monkeypatch, ident, expected_spec):
+    monkeypatch.setattr(_provenance.build_identity, "identity", lambda: ident)
+    monkeypatch.setattr(
+        _provenance.build_identity, "build_version", lambda: "1.2.4.dev3+gaaaaaaaaaaaa"
+    )
+    prov = _provenance.build_provenance()
+    assert prov["klt_git_commit"] == ident["git_commit"]
+    assert prov["klt_reinstall_spec"] == expected_spec
+
+
+def test_build_handle_fields_are_volatile_for_rerun_diff():
+    from klayout_tools import _report_verify
+
+    for field in ("klt_git_commit", "klt_reinstall_spec"):
+        assert ("provenance", field) in _report_verify.VOLATILE_PROVENANCE_PATHS

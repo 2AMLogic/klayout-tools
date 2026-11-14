@@ -90,6 +90,10 @@ from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from ._provenance import sha256_file, sha256_file_required
+from .sim_param_file import declared_model_refs, rewrite_model_refs
+from .sim_provenance import staged_asset_json
+
 #: A ``.include``/``.inc`` directive line -- ngspice's two spellings, target
 #: either quoted or bare. Deliberately the same shape ``pex.py``'s own
 #: ``_INCLUDE_RE`` matches (the directive `klt pex` re-points for its
@@ -104,6 +108,7 @@ _INCLUDE_RE = re.compile(
 #: one token is a section *definition* (``.lib tt`` ... ``.endl``), left
 #: verbatim; two tokens are a file-bearing ``.lib <file> <section>``
 #: reference, staged and rewritten; anything else is refused by name.
+_PDK_ROOT_VAR_RE = re.compile(r"\$\{?PDK_ROOT\b")
 _LIB_RE = re.compile(r"^(?P<prefix>\s*\.lib)(?P<rest>(?:\s.*)?)$", re.IGNORECASE)
 
 #: Characters allowed in a staged job-relative filename. Everything else in
@@ -250,14 +255,7 @@ class StagedModelAsset:
     source_sha256: str = ""
 
     def to_json(self) -> dict[str, Any]:
-        return {
-            "name": self.name,
-            "field": self.field,
-            "kind": self.kind,
-            "sha256": self.sha256,
-            "rewritten": self.rewritten,
-            "source_sha256": self.source_sha256 or self.sha256,
-        }
+        return staged_asset_json(self)
 
 
 @dataclass(frozen=True)
@@ -404,7 +402,6 @@ def netlist_closure(
     Raises :class:`IncludeStagingError` when the closure cannot be resolved.
     """
     from . import env_provenance
-    from ._provenance import sha256_file
 
     staged = stage_netlist(
         netlist_path,
@@ -604,7 +601,7 @@ def _stage_model_closure(
                 source_path=item.local_path,
                 sha256=_staged_sha256(staged),
                 rewritten=staged.content is not None,
-                source_sha256=_file_sha256(item.local_path),
+                source_sha256=sha256_file_required(item.local_path),
             )
         )
 
@@ -644,8 +641,7 @@ def _declared_lib_refs(request: dict[str, Any]) -> Iterator[tuple[str, str, Any]
     """``(field, label, ref)`` for every model-library reference the request
     declares, in :func:`_collect_model_roots`'s order."""
     models = request.get("models") or {}
-    if models.get("lib") is not None:
-        yield "models.lib", "model library", models.get("lib")
+    yield from declared_model_refs(models)  # + param_file (#4759)
     corners = request.get("corners") or {}
     declared = [
         ("process", index, entry)
@@ -763,8 +759,7 @@ def _rewrite_worker_request(
     resolved entries (issue #3819) verbatim among the staged names."""
     worker = copy.deepcopy(request)
     models = worker.get("models")
-    if isinstance(models, dict) and models.get("lib") in lib_names:
-        models["lib"] = lib_names[models["lib"]]
+    rewrite_model_refs(models, lib_names)
     worker_corners = worker.get("corners") or {}
     process_entries = list(worker_corners.get("process") or []) + [
         unit.get("process")
@@ -793,15 +788,7 @@ def _staged_sha256(staged: StagedFile) -> str:
     if staged.content is not None:
         return hashlib.sha256(staged.content.encode("utf-8")).hexdigest()
     assert staged.local_path is not None
-    return _file_sha256(staged.local_path)
-
-
-def _file_sha256(path: str) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    return sha256_file_required(staged.local_path)
 
 
 # --------------------------------------------------------------------------- #
@@ -1067,6 +1054,16 @@ class _Stager:
             self.host_resolved.append(env_form)
             self.host_resolved_detail.append((env_form, "env_var"))
             return f'{lib_match.group("prefix")} "{env_form}" {section}'
+        if _PDK_ROOT_VAR_RE.search(target):
+            raise IncludeStagingError(
+                f"netlist '{item.local_path}' line {index}: `.lib` target "
+                f"{target!r} names `$PDK_ROOT` literally, which the runner "
+                "does not expand in a netlist body (every corner would end "
+                "`unknown subckt`). Write the absolute path under the "
+                "submitting host's `$PDK_ROOT` (with PDK_ROOT exported for "
+                "klt) and klt rewrites it for the runner, or add the section "
+                "via corners.process[].sections[]"
+            )
         expanded = os.path.expanduser(target)
         if "$" in target or not os.path.isabs(expanded):
             return None
@@ -1076,9 +1073,9 @@ class _Stager:
             f"netlist '{item.local_path}' line {index}: `.lib` target "
             f"{target!r} is an absolute path on this host that is not under "
             "$PDK_ROOT, so the runner cannot read it (the job would die with "
-            "`Could not find library file`). Name it under the PDK root or "
-            "through an environment variable (e.g. `$PDK_ROOT/...`), or add "
-            "the section via corners.process[].sections[]"
+            "`Could not find library file`). Name it by an absolute path under "
+            "this host's `$PDK_ROOT` (exported for klt, which rewrites it for "
+            "the runner), or add the section via corners.process[].sections[]"
         )
 
     @staticmethod

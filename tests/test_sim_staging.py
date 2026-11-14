@@ -226,7 +226,7 @@ def test_non_directive_lines_are_left_byte_identical(tmp_path):
     netlist = tmp_path / "tb.spice"
     netlist.write_bytes(
         b"* this deck will .include the dut\r\n"
-        b".lib $PDK_ROOT/sky130.lib.spice tt\r\n"
+        b".lib $MODELS/sky130.lib.spice tt\r\n"
         b'.include "dut.spice"\r\n'
         b"R1 a b 1k\r\n"
     )
@@ -236,7 +236,7 @@ def test_non_directive_lines_are_left_byte_identical(tmp_path):
     content = staged.netlist.content
     assert content is not None
     assert "* this deck will .include the dut\r\n" in content
-    assert ".lib $PDK_ROOT/sky130.lib.spice tt\r\n" in content
+    assert ".lib $MODELS/sky130.lib.spice tt\r\n" in content
     assert '.include "dut.spice"\r\n' in content
     assert content.endswith("R1 a b 1k\r\n")
 
@@ -923,10 +923,33 @@ def test_netlist_lib_outside_pdk_root_is_refused(tmp_path, monkeypatch):
         _stage(netlist)
 
 
-def test_netlist_lib_one_token_and_env_forms_stay_verbatim(tmp_path, monkeypatch):
+def test_netlist_lib_one_token_and_other_env_forms_stay_verbatim(tmp_path, monkeypatch):
     monkeypatch.delenv("PDK_ROOT", raising=False)
-    netlist = _write(tmp_path, "tb.spice", ".lib tt\n.lib $PDK_ROOT/x.lib tt\n")
+    netlist = _write(tmp_path, "tb.spice", ".lib tt\n.lib $MODELS/x.lib tt\n")
 
     staged = _stage(netlist)
 
     assert staged.netlist.content is None
+
+
+@pytest.mark.parametrize(
+    "target", ["$PDK_ROOT/x.lib", "${PDK_ROOT}/x.lib", '"$PDK_ROOT/x.lib"']
+)
+def test_netlist_lib_literal_pdk_root_is_refused(tmp_path, monkeypatch, target):
+    monkeypatch.delenv("PDK_ROOT", raising=False)
+    netlist = _write(tmp_path, "tb.spice", f".lib {target} tt\n")
+
+    with pytest.raises(st.IncludeStagingError, match="names `\\$PDK_ROOT` literally"):
+        _stage(netlist)
+
+
+def test_netlist_lib_refusal_text_does_not_suggest_literal_pdk_root(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("PDK_ROOT", str(tmp_path / "pdks"))
+    models = _write(tmp_path / "elsewhere", "m.lib", "* models\n")
+    netlist = _write(tmp_path, "tb.spice", f'.lib "{models}" tt\n')
+
+    with pytest.raises(st.IncludeStagingError) as exc:
+        _stage(netlist)
+    assert "e.g. `$PDK_ROOT/...`" not in str(exc.value)

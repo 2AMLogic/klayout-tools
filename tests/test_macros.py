@@ -250,6 +250,53 @@ def test_macro_verilog_blackbox_must_exist_when_given(tmp_path):
         )
 
 
+def _blackbox_request(tmp_path, text):
+    _write_macro_lef(tmp_path / "m.lef")
+    (tmp_path / "bb.v").write_text(text, encoding="utf-8")
+    return [{"lef": "m.lef", "verilog_blackbox": "bb.v"}]
+
+
+def test_blackbox_module_differing_from_macro_cell_is_rejected(tmp_path):
+    request = _blackbox_request(
+        tmp_path, "(* blackbox *)\nmodule foo (input D, output Q);\nendmodule\n"
+    )
+    with pytest.raises(_Err, match=r"declares module\(s\) \['foo'\].*'sram_8x8'"):
+        macro_spec.validate_macros(request, str(tmp_path), error_cls=_Err)
+
+
+def test_commented_out_matching_module_does_not_count(tmp_path):
+    request = _blackbox_request(
+        tmp_path,
+        "// module sram_8x8 (D);\n/* module sram_8x8 (D); */\n"
+        "module other (D);\nendmodule\n",
+    )
+    with pytest.raises(_Err, match="verilog_blackbox declares"):
+        macro_spec.validate_macros(request, str(tmp_path), error_cls=_Err)
+
+
+def test_matching_blackbox_is_accepted(tmp_path):
+    request = _blackbox_request(
+        tmp_path, "(* blackbox *) module sram_8x8 (input D, output Q);\nendmodule\n"
+    )
+    macros = macro_spec.validate_macros(request, str(tmp_path), error_cls=_Err)
+    assert macros[0]["verilog_blackbox"] == str(tmp_path / "bb.v")
+
+
+def test_multi_module_blackbox_containing_the_cell_is_accepted(tmp_path):
+    request = _blackbox_request(
+        tmp_path,
+        "module helper (D);\nendmodule\n"
+        "(* blackbox *)\nmodule sram_8x8 (D);\nendmodule\n",
+    )
+    assert macro_spec.validate_macros(request, str(tmp_path), error_cls=_Err)
+
+
+def test_escaped_identifier_blackbox_module_is_matched(tmp_path):
+    assert macro_spec.verilog_declared_modules("module \\a.b (D);\nendmodule") == [
+        "a.b"
+    ]
+
+
 def test_duplicate_macro_cell_names_rejected(tmp_path):
     _write_macro_lef(tmp_path / "m.lef")
     with pytest.raises(_Err, match=r"request\.macros\[\]\.cell values must be unique"):

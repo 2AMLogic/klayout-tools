@@ -470,7 +470,8 @@ def test_429_is_retried_then_succeeds(broker, monkeypatch, sleeps):
     out = client.call("stat", {"kind": "evidence", "repo": REPO, "sha256": "a" * 64})
 
     assert out["exists"] is False
-    assert sleeps == [1.0, 2.0]
+    assert len(sleeps) == 2
+    assert 0 <= sleeps[0] <= 1.0 and 0 <= sleeps[1] <= 2.0
     assert len(broker.requests) == 3
 
 
@@ -524,6 +525,41 @@ def test_retry_after_is_honored_and_clamped(monkeypatch, sleeps):
 
     assert out == {}
     assert sleeps == [5.0, store.RATE_LIMIT_MAX_SLEEP_S]
+
+
+def test_concurrent_publishers_finish_within_budget(monkeypatch, sleeps):
+    callers = 16
+    throttled = {i: 5 for i in range(callers)}
+
+    class Resp:
+        def __init__(self, status):
+            self.status = status
+
+        def read(self, n):
+            return b"{}" if self.status == 200 else b'{"error":"rate_limited"}'
+
+        def getheader(self, name):
+            return "3" if self.status == 429 else None
+
+    class Conn:
+        def __init__(self, i):
+            self.i = i
+
+        def request(self, *a, **k): ...
+        def getresponse(self):
+            if throttled[self.i] > 0:
+                throttled[self.i] -= 1
+                return Resp(429)
+            return Resp(200)
+
+        def close(self): ...
+
+    for i in range(callers):
+        monkeypatch.setattr(store, "_connection", lambda *a, i=i, **k: Conn(i))
+        assert store.BrokerClient("http://x").call("put", {}) == {}
+
+    assert len(sleeps) == callers * 5
+    assert sum(sleeps) / callers <= store.RATE_LIMIT_TOTAL_WAIT_S
 
 
 def test_verify_reports_broker_rate_limited(

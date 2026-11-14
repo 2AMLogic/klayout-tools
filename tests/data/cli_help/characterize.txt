@@ -1,0 +1,37 @@
+Characterize one standard cell (or a batch) at ONE PVT corner from its SPICE
+netlist (post-`klt pex` where available) plus pin/function metadata, and emit
+a syntactically valid NLDM `.lib` carrying
+`cell_rise`/`cell_fall`/`rise_transition`/`fall_transition` per combinational
+timing arc. This is the write side of the Liberty path `klt sta`/`klt
+synthesize`/`klt place-and-route` already read (issue #2502). Timing arcs and
+their side-input states are derived from each output pin's Liberty `function`,
+so a NAND's A->Y arc is measured with B at its non-controlling value rather
+than at a value where nothing propagates. The whole grid is one `klt sim`
+request -- the generated testbench instantiates the cell once per (arc, slew,
+load) point and a single `tran` run drives every instance -- never one
+simulator invocation per grid point. The emitted file is parsed back through
+`native/statime`'s own Liberty reader before the run reports success. Every
+arc also carries `rise_power`/`fall_power` internal-energy tables and each
+cell its per-state `leakage_power` (issue #2503). A request's `cells` array
+characterizes several cells into ONE `.lib`; `--compare-to` diffs the result
+against a reference (vendor) library. Scope: one corner per invocation,
+combinational arcs only. Takes a request-document path (like `klt sim`/`klt
+sta`), not positional file args.
+
+positional arguments:
+  request path to a klt characterize request JSON file
+
+options:
+  -h, --help show this help message and exit
+  -o, --outdir OUTDIR override where the generated testbench, the generated klt sim request, the raw sim report, and (by default) the emitted `.lib` are written (default: a `.klt/characterize/` directory next to the request file, or the request's own `output.outdir`)
+  --lib LIB override the emitted Liberty path (default: the request's own `output.lib`, else `<outdir>/<library name>.lib`)
+  --backend BACKEND klt sim execution backend for the sweep (default: local). The grid is a single corner, so `local` is normally correct -- this exists for a caller who needs the run off-host.
+  --wait-for-capacity SECONDS with --backend batch, wait up to SECONDS (>= 0) for fleet capacity when the launch is refused (batch_no_capacity / batch_concurrency_cap), re- launching the same job with jittered backoff; overrides the request's `batch.capacity_wait_s`. 0 means one attempt. Reaches every sim (#5348).
+  --keep-artifacts keep the per-corner ngspice log/deck under <outdir>/sim/ (overrides the request's own options.keep_artifacts)
+  --cell NAME characterize only the named cell out of a batch request's `cells` array (repeatable; default: every cell the request declares). A name the request does not declare is an error.
+  --compare-to LIB compare the emitted `.lib` arc by arc against this reference Liberty file (typically the vendor library for the same corner) and report per-point delay/transition/power/leakage deltas in the response's `comparison` block
+  --resume recover an interrupted run (issue #5350): cells/constraint decks already collected under <outdir>/cells/<cell>/ are not re-simulated, and with `--backend batch` a leg whose job was already submitted re-attaches to it instead of resubmitting. Changed inputs resubmit. Overrides the request's own `options.resume`.
+  --timeout-s SECONDS per-sim wall-clock timeout in seconds (issue #5380); overrides the request's `options.timeout_s` for every sim the run generates (cell sims and constraint decks). Must be positive.
+  --split-grid N split each cell's input-slew rows across up to N sim legs (issue #5410), one fleet job each under <cell dir>/grid-<k>/, merged into the same tables -- for a cell whose whole grid outruns the fleet job ceiling. Overrides the request's `options.split_grid`; default 1 (one leg). Must be >= 1.
+  --keep-going batch requests only (issue #5380): a cell whose characterization fails is recorded in the response's `failed_cells` and skipped; the remaining cells still run and one `.lib` covers the successful cells. Errors if every cell fails. Re-run with `--resume` to retry only the failed cells.
+  --format {text,json} output format (default: text)

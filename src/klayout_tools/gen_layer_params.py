@@ -33,8 +33,11 @@ from typing import Any
 from .gen_layer_tables import (  # noqa: F401
     _CAP_GEOMETRY_MIN_KEYS,
     _PDK_CAP_GEOMETRY_MIN_UM,
+    _PDK_CAP_PARALLEL_UNIT_RANGE_UM,
+    _PDK_CAP_STACK_GEOMETRY_UM,
     _PDK_ROLE_LAYERS,
     CAP_BOTTOM_PLATE_MARGIN_UM,
+    CAP_PARALLEL_VIA_EDGE_INSET_UM,
     CAP_TOP_ESCAPE_CLEARANCE_UM,
     CONTACT_GAP_SAFE_UM,
     ESD_FINGER_WIDTH_MAX_UM,
@@ -319,9 +322,9 @@ def _sd_implant_margin_um(family: str) -> float:
 #: byte-for-byte unchanged.
 _PDK_RING_IMPLANT_MARGIN_UM: dict[str, float] = {
     "gf180mcu": 0.16,  # NP.5b/PP.5b (extension beyond COMP) are 0.16um
-    # sky130 (issue #2934): n/psdm.5b, "min. n/psdm enclosure tap except
-    # butting edge", 0.125um (sky130A.lydrc, PDK c6d73a35).
+    # sky130 (issue #2934): n/psdm.5b, 0.125um (sky130A.lydrc, PDK c6d73a35).
     "sky130": 0.125,
+    "sg13g2": 0.18,  # pSD.c (#5231); P-substrate tap ring only
 }
 
 
@@ -335,11 +338,10 @@ _DISTINCT_TAP_IMPLANT_FAMILIES = frozenset({"sky130"})
 
 
 #: Margin (um) the ``npc`` box grows beyond each poly-contact licon (issue
-#: #2934): 0.095um, the amount ``sky130A.tech``'s own ``cifoutput`` grows NPC
-#: around ``xpc`` (the same figure :data:`_PDK_RES_FLAVOR_MASK_ENCLOSURE_UM`
-#: uses for resistor heads). The official ``sky130A_mr.drc`` carries no
-#: npc-enclosure-of-licon rule. A family absent here draws no ``npc``.
-_PDK_NPC_MARGIN_UM: dict[str, float] = {"sky130": 0.095}
+#: #2934): 0.1um, sky130 rule ``licon.15`` from the PDK's ``sky130A.lydrc``
+#: (``sky130A.tech``'s cifoutput grows only 0.095um; ``sky130A_mr.drc`` has
+#: no such rule). A family absent here draws no ``npc``.
+_PDK_NPC_MARGIN_UM: dict[str, float] = {"sky130": 0.1}
 
 #: ``npc.2`` same-layer spacing (um); closer ``npc`` shapes are merged
 #: (``sky130A_mr.drc`` marks it "should be manually merged").
@@ -456,8 +458,14 @@ def _voltage_flavor_mark_margin_um(family: str) -> float:
 #: ``sky130`` only (issue #3115): the PDK's ``diff/tap.10`` (nwell overlap of
 #: n-tap) is 0.18um, which this repo's curated sky130 deck does not
 #: transcribe; 0.2um clears it with headroom.
+#:
+#: ``sg13g2`` and ``sg13cmos5l`` (issue #4426): IHP ``NW.e`` (NWell enclosure
+#: of N+ Activ well tie, deck rule ``nwell.enclosing.nactiv.1``) is 0.24um in
+#: both decks; 0.25um matches ``WELL_TAP_ENCLOSURE_MARGIN_UM`` (issue #3573).
 _PDK_RING_WELL_MARGIN_UM: dict[str, float] = {
     "sky130": 0.2,  # diff/tap.10 (nwell overlap of n-tap) is 0.18um
+    "sg13g2": 0.25,  # NW.e (nwell enclosure of N+ Activ) is 0.24um
+    "sg13cmos5l": 0.25,  # NW.e (nwell enclosure of N+ Activ) is 0.24um
 }
 
 
@@ -580,7 +588,7 @@ def _cap_top_plate_requires(family: str) -> tuple[tuple[int, int], ...]:
 #: ``guard_ring``/``diff_pair`` avoid above into this module's own clear
 #: ``GenError``.
 _GENERATOR_FAMILY_DEFERRED: dict[str, tuple[str, ...]] = {
-    "bjt_array": ("sg13g2", "sg13cmos5l"),
+    "bjt_array": ("sg13cmos5l",),
     "esd_device": ("sg13g2", "sg13cmos5l"),
     "well_island": ("sg13g2", "sg13cmos5l"),
     "guard_ring": ("sg13cmos5l",),
@@ -694,12 +702,12 @@ _PDK_RES_FLAVOR_LAYERS: dict[str, dict[str, tuple[tuple[int, int], ...]]] = {
         # nSD/nSD_block, so drawing exactly one flavour's `requires` set can
         # only ever match that flavour.
         #
-        # rsil (7 ohm/sq): the lowest-sheet-rho class, and this family's
-        # default -- `EXTRACTION_DECK.resistors["rsil"].requires`.
+        # rsil (7 ohm/sq), the default: `EXTRACTION_DECK.resistors["rsil"].requires`.
         "generic": (
             (111, 0),  # EXTBlock -- upstream's `polyres_mk` head term
             (24, 0),  # Res       -- the silicided-resistor marker itself
         ),
+        "rsil": ((111, 0), (24, 0)),  # alias of "generic" (issue #5288)
         # rppd (260 ohm/sq): p+ doped, unsalicided poly --
         # `EXTRACTION_DECK.resistors["rppd"].requires` (issue #1451). Three
         # masks; rsil's own `excludes` (pSD, SalBlock) rule it out here.
@@ -950,7 +958,7 @@ def _res_sab_geometry_um(
 #: is only the two abutting contact heads. Must match the families whose
 #: extraction-deck poly ``ResistorDevice`` entries declare
 #: ``topology="abutting_heads"`` (asserted in ``tests/test_sg13g2_deck.py``).
-_PDK_RES_POLY_HEADS_ONLY: frozenset[str] = frozenset({"sg13g2"})
+_PDK_RES_POLY_HEADS_ONLY: frozenset[str] = frozenset({"sg13g2", "sg13cmos5l"})
 
 
 def _res_end_contact_um(
@@ -1438,6 +1446,29 @@ def _deck_cut_max_size_um(family: str, layer: tuple[int, int]) -> float | None:
         and rule.threshold_max_dbu is not None
     ]
     return round(min(bounds), 6) if bounds else None
+
+
+def _deck_min_width_um(family: str, layer: tuple[int, int]) -> tuple[str, float] | None:
+    """``(rule id, um)`` of the plain ``"width"`` rule in ``family``'s curated
+    deck with the largest minimum on ``layer`` (issue #4203), or ``None`` when
+    the deck declares none (or ``family`` has no registered deck)."""
+    from .decks import UnknownDeckError, get_deck, get_nominal_dbu
+
+    try:
+        rules = get_deck(family)
+        nominal_dbu_um = get_nominal_dbu(family)
+    except UnknownDeckError:
+        return None
+    mins = [
+        (rule.id, round(rule.threshold_dbu * nominal_dbu_um, 6))
+        for rule in rules
+        if rule.check == "width"
+        and rule.layer == layer
+        and rule.other_layer is None
+        and rule.derived_layer is None
+        and rule.threshold_dbu > 0
+    ]
+    return max(mins, key=lambda m: m[1]) if mins else None
 
 
 def _cut_fixed_size_um(family: str, layer: Any) -> float:
@@ -2024,25 +2055,10 @@ def _device_layer_params(
     # must clear the deck's own COMP min-width rule for the selected oxide,
     # else the request fails here rather than drawing an unmarked or
     # sub-rule capacitor.
-    mos_cap_mark = None
-    if params.get("mos_cap"):
-        from .gen import GenError
+    from .gen_layer_params_checks import check_dogbone_width, resolve_mos_cap_mark
 
-        pair = _PDK_MOS_CAP_MARK_LAYERS.get(family)
-        if pair is None:
-            raise GenError(
-                f"generator 'mos_array': params.mos_cap is not supported on "
-                f"PDK family '{family}' (no MOS-capacitor marker layer is "
-                "declared for it)"
-            )
-        mos_cap_mark = kdb.LayerInfo(*pair)
-        floor = _mos_cap_min_width_um(family, voltage_flavor_mark)
-        if floor is not None and params["w_um"] < floor[0]:
-            raise GenError(
-                f"generator 'mos_array': params.w_um must be >= {floor[0]} for "
-                f"a MOS capacitor on '{family}' (deck rule '{floor[1]}', the "
-                "minimum COMP width for the selected oxide)"
-            )
+    mos_cap_mark = resolve_mos_cap_mark(family, params, voltage_flavor_mark)
+    check_dogbone_width(family, params)
     layer_params = {
         "active_layer": _role_layer_info(family, "active"),
         "poly_layer": _role_layer_info(family, "poly"),
@@ -2291,6 +2307,50 @@ def _cap_family_layers(family: str) -> dict[str, tuple[int, int] | None]:
     }
 
 
+def _check_cap_stack_supported(family: str, params: dict[str, Any]) -> None:
+    """Reject ``stack=2`` on a family it is not verified on, or without
+    ``connect="parallel"`` (issue #3332). A no-op for ``stack=1``."""
+    from .gen import GenError
+
+    if params.get("stack", 1) != 2:
+        return
+    if family not in _PDK_CAP_STACK_GEOMETRY_UM:
+        raise GenError(
+            "generator 'cap_array': params.stack=2 is only supported on "
+            f"{', '.join(sorted(_PDK_CAP_STACK_GEOMETRY_UM))}, not on PDK "
+            f"family '{family}'"
+        )
+    if params.get("connect", "independent") != "parallel":
+        raise GenError(
+            "generator 'cap_array': params.stack=2 requires connect='parallel'"
+        )
+
+
+def _check_cap_parallel_supported(family: str, params: dict[str, Any]) -> None:
+    """Reject ``connect="parallel"`` on a family it is not verified on, or a
+    unit plate side outside that family's characterised range (issue #3022).
+    A no-op for ``connect="independent"``."""
+    from .gen import GenError
+
+    if params.get("connect", "independent") != "parallel":
+        return
+    unit_range = _PDK_CAP_PARALLEL_UNIT_RANGE_UM.get(family)
+    if unit_range is None:
+        raise GenError(
+            "generator 'cap_array': params.connect='parallel' is only verified "
+            f"on {', '.join(sorted(_PDK_CAP_PARALLEL_UNIT_RANGE_UM))}, not on "
+            f"PDK family '{family}'"
+        )
+    lo, hi = unit_range
+    for name in ("plate_w_um", "plate_h_um"):
+        if not lo <= params[name] <= hi:
+            raise GenError(
+                f"generator 'cap_array': params.{name} must be within the "
+                f"{family} MiM characterised unit range {lo}-{hi}um for "
+                f"connect='parallel' (got {params[name]})"
+            )
+
+
 def _cap_array_layer_params(
     pdk_info: dict[str, Any], params: dict[str, Any]
 ) -> dict[str, Any]:
@@ -2321,6 +2381,8 @@ def _cap_array_layer_params(
     import klayout.db as kdb
 
     family = _pdk_family(pdk_info["variant"])
+    _check_cap_stack_supported(family, params)
+    _check_cap_parallel_supported(family, params)
     layers = _cap_family_layers(family)
     top_via = layers["cap_top_via"]
     top_via_metal = layers["cap_top_via_metal"]
@@ -2341,6 +2403,19 @@ def _cap_array_layer_params(
         "cap_top_via_metal_present": top_via_metal is not None,
         **_cap_geometry_min_um(family),
     }
+    stack_geometry = _PDK_CAP_STACK_GEOMETRY_UM.get(family)
+    for name in ("cap2_top_plate", "cap2_top_via", "cap2_top_via_metal"):
+        pair = _PDK_ROLE_LAYERS[family].get(name)
+        resolved[f"{name}_layer"] = (
+            kdb.LayerInfo(*pair) if pair is not None else kdb.LayerInfo(0, 0)
+        )
+    resolved["cap2_present"] = stack_geometry is not None
+    for key in (
+        "cap2_via_side_um",
+        "cap2_metal_min_w_um",
+        "cap2_metal_via_enclosure_um",
+    ):
+        resolved[key] = (stack_geometry or {}).get(key, 0.0)
     for i in range(_MAX_CAP_TOP_PLATE_REQUIRES):
         pair = top_requires[i] if i < len(top_requires) else None
         resolved[f"cap_top_requires_{i}_layer"] = (
@@ -2710,7 +2785,31 @@ def _esd_device_layer_params(
     sd_implant = _role_layer_info(family, "nplus")
     sd_implant_margin = _sd_implant_margin_um(family)
     ring_implant = _ring_tap_implant_layer(family, well_tie=False)
+    # Optional `voltage_flavor` marker (issue #4299), resolved exactly like
+    # `_device_layer_params` does for `mos_array`.
+    voltage_flavor = params.get("voltage_flavor", "")
+    voltage_flavor_mark = (
+        _voltage_flavor_mark_layer(family, voltage_flavor) if voltage_flavor else None
+    )
+    voltage_flavor_extra_mark = (
+        _voltage_flavor_extra_mark_layer(family, voltage_flavor)
+        if voltage_flavor
+        else None
+    )
     return {
+        "voltage_flavor_mark_layer": (
+            voltage_flavor_mark
+            if voltage_flavor_mark is not None
+            else kdb.LayerInfo(0, 0)
+        ),
+        "voltage_flavor_mark_present": voltage_flavor_mark is not None,
+        "voltage_flavor_extra_mark_layer": (
+            voltage_flavor_extra_mark
+            if voltage_flavor_extra_mark is not None
+            else kdb.LayerInfo(0, 0)
+        ),
+        "voltage_flavor_extra_mark_present": voltage_flavor_extra_mark is not None,
+        "voltage_flavor_mark_margin_um": _voltage_flavor_mark_margin_um(family),
         "active_layer": _role_layer_info(family, "active"),
         "poly_layer": _role_layer_info(family, "poly"),
         "contact_layer": _role_layer_info(family, "contact"),
@@ -2745,4 +2844,36 @@ def _esd_device_layer_params(
         "ring_implant_margin_um": (
             _ring_implant_margin_um(family) if ring_implant is not None else 0.0
         ),
+    }
+
+
+def _diode_layer_params(
+    pdk_info: dict[str, Any], params: dict[str, Any]
+) -> dict[str, Any]:
+    """Hidden layer params for ``diode`` (issue #4300). sky130 only: the
+    ``diode_mark`` (``areaid.diode``) and ``hvi`` roles exist only there, and
+    the other curated decks' diode recognition has not been exercised against
+    this geometry."""
+    from .gen import GenError
+
+    family = _pdk_family(pdk_info["variant"])
+    if family != "sky130":
+        raise GenError(
+            f"generator 'diode': PDK family '{family}' is not yet supported "
+            "by this generator -- see docs/cli/gen.md's 'PDK-family support' "
+            "section"
+        )
+    return {
+        f"{role}_layer": _role_layer_info(family, role)
+        for role in (
+            "active",
+            "tap",
+            "nplus",
+            "pplus",
+            "well",
+            "hvi",
+            "diode_mark",
+            "contact",
+            "metal",
+        )
     }

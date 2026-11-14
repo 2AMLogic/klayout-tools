@@ -44,6 +44,8 @@ import json
 import os
 from typing import Any
 
+from . import env_provenance
+from ._jsonnum import is_int
 from ._verilog_params import chparam_lines, read_verilog_line
 
 #: The memory outcome vocabulary, per module and overall. Fixed (a caller may
@@ -85,6 +87,8 @@ def memory_evidence_script_text(
     liberty_path: str | None = None,
     library_cells_path: str | None = None,
     defines: dict[str, str | None] | None = None,
+    macro_inputs: tuple[dict[str, str], ...] = (),
+    repo_root: str | None = None,
 ) -> str:
     """The side invocation's ``.ys`` text.
 
@@ -96,19 +100,47 @@ def memory_evidence_script_text(
     :fine``. The extra ``proc`` before the first ``stat`` is the pass
     ``synth``'s own ``coarse`` label (and the arithmetic insertion) would
     run first anyway; ``proc`` is idempotent, and ``stat``/``select -list``
-    never modify the design. No liberty is read -- nothing here is
+    never modify the design. No liberty is read for mapping -- nothing is
     technology-mapped. The one exception (issue #4205): when ``liberty_path``
     is given it is loaded ``-lib`` first, exactly as the production script
     does, so RTL instantiating a library cell elaborates; the cells that load
     declares are listed to ``library_cells_path`` so they are not reported as
-    surviving blackboxes (they carry area).
+    surviving blackboxes (they carry area). Declared hard macros' blackbox
+    declarations (``macro_inputs``, issue #4368) are read exactly as the
+    production script reads them -- after the RTL, before ``hierarchy`` --
+    because otherwise ``hierarchy -check`` fails on the undeclared macro cell
+    and ``memory_mapping`` degrades to ``indeterminate`` on every
+    macro-bearing design.
+
+    With ``repo_root`` set, every path that resolves inside it is written
+    repo-relative (the main script's ``_script_path_text`` rule), so the
+    retained file is commit-safe; the caller must then run it with
+    ``cwd=repo_root``. Paths outside ``repo_root``, or ``repo_root=None``,
+    stay absolute.
     """
+    from .synthesize import _script_path_text
+
+    def rel(path: str) -> str:
+        return _script_path_text(path, repo_root=repo_root)
+
+    blackbox_list_path = rel(blackbox_list_path)
+    elaborated_stats_path = rel(elaborated_stats_path)
+    pre_lowering_stats_path = rel(pre_lowering_stats_path)
     lines = []
     if liberty_path is not None:
-        lines.append(f"read_liberty -lib {liberty_path}")
+        lines.append(f"read_liberty -lib {rel(liberty_path)}")
         if library_cells_path is not None:
-            lines.append(f"tee -q -o {library_cells_path} select -list =A:blackbox")
-    lines += [read_verilog_line(path, defines) for path in sources]
+            lines.append(
+                f"tee -q -o {rel(library_cells_path)} select -list =A:blackbox"
+            )
+    lines += [read_verilog_line(rel(path), defines, parameters) for path in sources]
+    for macro_input in macro_inputs:
+        reader = (
+            "read_liberty -lib"
+            if macro_input["source"] == "liberty"
+            else "read_verilog -lib"
+        )
+        lines.append(f"{reader} {rel(macro_input['path'])}")
     lines += chparam_lines(parameters or {}, hdl_toplevel)
     lines.append(f"hierarchy -check -top {hdl_toplevel}")
     lines.append(f"tee -q -o {blackbox_list_path} select -list =A:blackbox =A:whitebox")
@@ -116,8 +148,8 @@ def memory_evidence_script_text(
     lines.append(f"tee -q -o {elaborated_stats_path} stat -json")
     if adder_techmap_path is not None:
         lines += ["opt_expr", "opt_clean"]
-        lines += [f"read_verilog {path}" for path in adder_sources]
-        lines.append(f"techmap -map {adder_techmap_path}")
+        lines += [f"read_verilog {rel(path)}" for path in adder_sources]
+        lines.append(f"techmap -map {rel(adder_techmap_path)}")
     lines.append(f"synth -top {hdl_toplevel} -run :fine")
     lines.append(f"tee -q -o {pre_lowering_stats_path} stat -json")
     return "\n".join(lines) + "\n"
@@ -137,7 +169,7 @@ def _load_modules(stats_path: str) -> dict[str, Any] | None:
 
 
 def _int(value: Any) -> int:
-    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+    return value if is_int(value) else 0
 
 
 def memory_counts(modules: dict[str, Any]) -> dict[str, dict[str, int]]:
@@ -360,6 +392,7 @@ def collect_memory_evidence(
     parameters: dict[str, int | str] | None = None,
     liberty_path: str | None = None,
     defines: dict[str, str | None] | None = None,
+    macro_inputs: tuple[dict[str, str], ...] = (),
 ) -> tuple[dict[str, Any], list[str] | None]:
     """Run the side evidence invocation and return ``(memory_mapping,
     blackbox_modules)`` for the response.
@@ -368,13 +401,14 @@ def collect_memory_evidence(
     change nor pre-empt production errors. **Never raises**: a Yosys
     failure, timeout, or unreadable stage degrades ``memory_mapping`` to
     ``status: "indeterminate"`` with the failure in ``reason`` (and
-    ``blackbox_modules`` to ``None``). The evidence script embeds absolute
-    paths only, but the RTL may not (``$readmemh "reference/x.hex"``), so
-    the run uses ``cwd=repo_root`` -- the same cwd as the main Yosys run.
+    ``blackbox_modules`` to ``None``). The evidence script embeds
+    repo-relative paths for anything inside ``repo_root`` (absolute
+    otherwise), and the RTL may use relative paths too (``$readmemh
+    "reference/x.hex"``), so the run uses ``cwd=repo_root`` -- the same cwd
+    as the main Yosys run.
     """
     from .synthesize import (
         SynthesizeError,
-        _report_path,
         _run_yosys,
         _write_script_text,
     )
@@ -394,7 +428,9 @@ def collect_memory_evidence(
     pre_lowering_path = os.path.join(
         output_dir, f"{hdl_toplevel}{_PRE_LOWERING_STATS_SUFFIX}"
     )
-    reported_script = _report_path(script_path, repo_root=repo_root)
+    reported_script = env_provenance.repo_relative_path(
+        script_path, repo_root=repo_root
+    )
     try:
         _write_script_text(
             script_path,
@@ -410,6 +446,8 @@ def collect_memory_evidence(
                 liberty_path=liberty_path,
                 library_cells_path=library_cells_path,
                 defines=defines,
+                macro_inputs=macro_inputs,
+                repo_root=repo_root,
             ),
         )
         _run_yosys(script_path, cwd=repo_root)

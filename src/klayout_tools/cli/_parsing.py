@@ -33,6 +33,8 @@ import os
 from collections.abc import Callable
 from typing import Any
 
+from .._jsonnum import is_number
+
 ErrorFactory = Callable[[str], Exception]
 
 
@@ -143,9 +145,7 @@ def load_region(
     if (
         not isinstance(data, list)
         or len(data) != 4
-        or not all(
-            isinstance(v, (int, float)) and not isinstance(v, bool) for v in data
-        )
+        or not all(is_number(v) for v in data)
     ):
         raise error_cls(
             f"{flag} must be a JSON array of four numbers "
@@ -192,6 +192,43 @@ def parse_deck_options(
             )
         options[key] = value.strip()
     return options
+
+
+def parse_tie_nets(
+    raw: list[str] | None,
+    error_cls: ErrorFactory,
+    flag: str = "--tie-net",
+) -> list[tuple[str, str]] | None:
+    """Parse the ``--tie-net`` flag's ``EXTRACTED_NET=SCHEMATIC_NET`` entries
+    (issue #4245, repeatable) into ordered ``(extracted_net, schematic_net)``
+    pairs, or ``None`` when the flag was never given.
+
+    Several extracted nets may name one schematic net; one extracted net named
+    twice with different schematic nets is an error (the tie would be
+    ambiguous), and a verbatim repeat is collapsed. Whether the extracted net
+    is a reported unbiased net is checked by ``run_pex``, which has the
+    extraction to hand.
+    """
+    if raw is None:
+        return None
+    pairs: dict[str, str] = {}
+    for entry in raw:
+        extracted, sep, schematic = entry.partition("=")
+        extracted = extracted.strip()
+        schematic = schematic.strip()
+        if not sep or not extracted or not schematic:
+            raise error_cls(
+                f"{flag} entry {entry!r} is not EXTRACTED_NET=SCHEMATIC_NET "
+                f"-- e.g. {flag} '\\$5=VDD'"
+            )
+        if pairs.get(extracted, schematic) != schematic:
+            raise error_cls(
+                f"{flag} names extracted net {extracted!r} twice with "
+                f"different schematic nets ({pairs[extracted]!r} and "
+                f"{schematic!r})"
+            )
+        pairs[extracted] = schematic
+    return list(pairs.items())
 
 
 def parse_device_models(
@@ -397,6 +434,15 @@ def parse_probes(
     return probes
 
 
+class OrderedPinSet(frozenset):  # type: ignore[type-arg]
+    """A ``frozenset`` of declared pin names that remembers the order the
+    caller gave them in (``order``, issue #5255). Set semantics are unchanged,
+    so every existing ``declared_pins`` consumer is unaffected; only the
+    top-``.SUBCKT`` pin reorder reads ``order``."""
+
+    order: tuple[str, ...] = ()
+
+
 def parse_declared_pins(
     raw: str | None,
     error_cls: ErrorFactory,
@@ -416,7 +462,9 @@ def parse_declared_pins(
     """
     if raw is None:
         return None
-    names = frozenset(name.strip() for name in raw.split(",") if name.strip())
+    ordered = tuple(dict.fromkeys(n.strip() for n in raw.split(",") if n.strip()))
+    names = OrderedPinSet(ordered)
+    names.order = ordered
     if not names:
         raise error_cls(
             f"{flag} was given but contains no non-empty name "

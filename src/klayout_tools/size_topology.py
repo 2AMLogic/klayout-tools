@@ -21,6 +21,8 @@ import re
 import tempfile
 from typing import Any
 
+from . import env_provenance
+from ._jsonnum import is_number
 from ._provenance import build_provenance
 from .pdk import PdkNotFoundError, find_pdk
 from .sim import SimError, _resolve_models_lib
@@ -51,7 +53,6 @@ from .size import (
     _op_point_from_confirmed,
     _parse_corner,
     _parse_device,
-    _report_path,
     _require_positive_number,
     _run_sweep,
 )
@@ -223,11 +224,9 @@ def _parse_topology_bias(bias: Any) -> dict[str, Any]:
     if not isinstance(bias, dict):
         raise SizeError("request.bias must be a JSON object")
     vcm_v = bias.get("vcm_v")
-    if vcm_v is not None:
-        if isinstance(vcm_v, bool) or not isinstance(vcm_v, (int, float)):
-            raise SizeError("request.bias.vcm_v must be a number")
-        vcm_v = float(vcm_v)
-    return {"vcm_v": vcm_v}
+    if vcm_v is not None and not is_number(vcm_v):
+        raise SizeError("request.bias.vcm_v must be a number")
+    return {"vcm_v": None if vcm_v is None else float(vcm_v)}
 
 
 def _parse_max_joint_iterations(options: dict[str, Any]) -> int:
@@ -364,7 +363,9 @@ def _run_topology_size(
         "engine": "ngspice",
         "engine_version": None,
         # Issue #1274 -- see `run_size`'s own `environment` block.
-        "models_lib": _report_path(models_lib, repo_root=repo_root),
+        "models_lib": env_provenance.repo_relative_path(
+            models_lib, repo_root=repo_root
+        ),
     }
 
     def _finish(payload: dict[str, Any]) -> dict[str, Any]:

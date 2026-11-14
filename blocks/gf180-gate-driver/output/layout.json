@@ -1,0 +1,762 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:08:15.920301+00:00",
+  "slug": "gf180-gate-driver",
+  "name": "Gf180 Gate Driver",
+  "description": "High-voltage gate driver on gf180mcu \u2014 2AM Logic canary block",
+  "pdk": "gf180mcu",
+  "layer_count": 24,
+  "cell_count": 80,
+  "instance_count": 79,
+  "layout_file": "gate_driver_core.gds",
+  "renders": {
+    "overview": "renders/overview.png",
+    "DNWELL": "renders/12_0.png",
+    "Nwell": "renders/21_0.png",
+    "Comp": "renders/22_0.png",
+    "Poly2": "renders/30_0.png",
+    "Pplus": "renders/31_0.png",
+    "Nplus": "renders/32_0.png",
+    "Contact": "renders/33_0.png",
+    "Metal1": "renders/34_0.png",
+    "Via1": "renders/35_0.png",
+    "Metal2": "renders/36_0.png",
+    "layer_36_10": "renders/36_10.png",
+    "Via2": "renders/38_0.png",
+    "Via3": "renders/40_0.png",
+    "Via4": "renders/41_0.png",
+    "Metal3": "renders/42_0.png",
+    "Metal4": "renders/46_0.png",
+    "SAB": "renders/49_0.png",
+    "Dualgate": "renders/55_0.png",
+    "FuseTop": "renders/75_0.png",
+    "Metal5": "renders/81_0.png",
+    "RES_MK": "renders/110_5.png",
+    "CAP_MK": "renders/117_5.png",
+    "MIM_L_MK": "renders/117_10.png",
+    "layer_204_0": "renders/204_0.png",
+    "center_crop": "renders/center_crop/overview.png"
+  },
+  "spec_summary": {
+    "rows": [
+      {
+        "parameter": "Drive rail",
+        "target": "5 V nominal (+10% overshoot per [DRM 14.1.2](https://gf180mcu-pdk.readthedocs.io/en/latest/physical_verification/design_manual/drm_14_1.html))",
+        "stretch": "6 V"
+      },
+      {
+        "parameter": "Logic input",
+        "target": "3.3 V",
+        "stretch": "--"
+      },
+      {
+        "parameter": "Reference load",
+        "target": "1 nF (gate-capacitance stand-in for a mid-size discrete power MOSFET/IGBT)",
+        "stretch": "--"
+      },
+      {
+        "parameter": "Peak source/sink current",
+        "target": ">= 0.5 A",
+        "stretch": "1 A"
+      },
+      {
+        "parameter": "Propagation delay",
+        "target": "< 50 ns",
+        "stretch": "< 25 ns"
+      },
+      {
+        "parameter": "Rise/fall into reference load",
+        "target": "< 50 ns (10-90%)",
+        "stretch": "--"
+      },
+      {
+        "parameter": "Signoff",
+        "target": "DRC + LVS clean",
+        "stretch": "--"
+      }
+    ]
+  },
+  "signals": {
+    "schema_version": 1,
+    "engine": "ngspice",
+    "engine_version": "ngspice",
+    "status": "fail",
+    "corner_count": 15,
+    "default_corner_id": "device-mv-fet/overall",
+    "passed": 6,
+    "failed": 9,
+    "errored": 0,
+    "measurements": [
+      {
+        "name": "Device Mv Fet",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Gate Driver Core Drive",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Gate Driver Core Drive Postlayout",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Gate Driver Core Drive With Uvlo",
+        "limits": null,
+        "status": "fail",
+        "worst_case": null
+      },
+      {
+        "name": "Gate Driver Core Drive With Uvlo Postlayout",
+        "limits": null,
+        "status": "fail",
+        "worst_case": null
+      },
+      {
+        "name": "Gate Driver Indrv Mismatch",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Level Shifter Inb Mismatch",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Level Shifter Oxide Safety",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Level Shifter Oxide Safety Postlayout",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Low Side Power Switch",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Low Side Power Switch Ronw Mismatch",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Output Stage Drive",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Output Stage Taper Mismatch",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Smoke Mv Inverter",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Uvlo Trip Verification",
+        "limits": null,
+        "status": "fail",
+        "worst_case": null
+      }
+    ],
+    "corners": [
+      {
+        "corner_id": "device-mv-fet/overall",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "gate-driver-core-drive/tt_27c_vlogic2p97v-vdrv4p50v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "trise_s",
+            "value": 5.474885e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "tfall_s",
+            "value": 5.052898e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "tpdlh_s",
+            "value": 4.528122e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "tpdhl_s",
+            "value": 4.306317e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "ipeak_source_a",
+            "value": 0.87412,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "ipeak_sink_a",
+            "value": 0.824169,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vout_max_v",
+            "value": 4.50455,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vout_min_v",
+            "value": -0.0028622,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "gate-driver-core-drive-postlayout/tt_27c_vlogic2p97v-vdrv4p50v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "trise_s",
+            "value": 5.481838e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "tfall_s",
+            "value": 5.071451e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "tpdlh_s",
+            "value": 9.454085e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "tpdhl_s",
+            "value": 7.75841e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "ipeak_source_a",
+            "value": 0.875095,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "ipeak_sink_a",
+            "value": 0.818939,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vout_max_v",
+            "value": 4.50426,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vout_min_v",
+            "value": -0.00276552,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "gate-driver-core-drive-with-uvlo/tt_27c_vlogic2p97v-vdrv3p30v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "fail",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "trise_s",
+            "value": 1.09013e-09,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "tfall_s",
+            "value": 7.635256e-10,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "tpdlh_s",
+            "value": 2.848886e-09,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "tpdhl_s",
+            "value": 1.977577e-09,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "ipeak_source_a",
+            "value": 0.30683,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "ipeak_sink_a",
+            "value": 0.358981,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "vout_max_v",
+            "value": 0.195255,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "vout_min_v",
+            "value": -0.00220877,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "gate-driver-core-drive-with-uvlo-postlayout/tt_27c_vlogic2p97v-vdrv3p30v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "fail",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "trise_s",
+            "value": 1.104972e-09,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "tfall_s",
+            "value": 7.927077e-10,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "tpdlh_s",
+            "value": 1.371063e-08,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "tpdhl_s",
+            "value": 8.748711e-09,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "ipeak_source_a",
+            "value": 0.293287,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "ipeak_sink_a",
+            "value": 0.338155,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "vout_max_v",
+            "value": 0.197044,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "vout_min_v",
+            "value": -0.00206433,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "gate-driver-indrv-mismatch/overall",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "level-shifter-inb-mismatch/overall",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "level-shifter-oxide-safety/tt_27c_vlogic2p97v-vdrv4p50v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "vgate_thinox_max",
+            "value": 2.99673,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vna_peak",
+            "value": 2.09363,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vnb_peak",
+            "value": 2.05159,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vccomp_dev_max",
+            "value": 1.08293,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vccomp_stack_max",
+            "value": 4.33172,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "t_plh_ns",
+            "value": 0.771784,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "t_phl_ns",
+            "value": 0.425692,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vout_hi_ratio",
+            "value": 1.0,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "level-shifter-oxide-safety-postlayout/tt_27c_vlogic2p97v-vdrv4p50v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "vgate_thinox_max",
+            "value": 2.98037,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vna_peak",
+            "value": 1.97903,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vnb_peak",
+            "value": 1.87843,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vccomp_dev_max",
+            "value": 1.04876,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vccomp_stack_max",
+            "value": 3.80456,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "t_plh_ns",
+            "value": 6.81416,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "t_phl_ns",
+            "value": 3.62842,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vout_hi_ratio",
+            "value": 0.999993,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "low-side-power-switch/overall",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "low-side-power-switch-ronw-mismatch/overall",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "output-stage-drive/tt_27c_vdrv4p50v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "trise_s",
+            "value": 5.472133e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "tfall_s",
+            "value": 5.053069e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "tpdlh_s",
+            "value": 3.839638e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "tpdhl_s",
+            "value": 4.022316e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "ipeak_source_a",
+            "value": 0.87985,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "ipeak_sink_a",
+            "value": 0.829769,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "ishoot_rise_a",
+            "value": 0.149111,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "ishoot_fall_a",
+            "value": 0.00962587,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "output-stage-taper-mismatch/overall",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "smoke-mv-inverter/tt_27c_vlogic2p97v-vdrv4p50v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "vdiv_ratio",
+            "value": 0.5,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vout_ratio",
+            "value": 1.0,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vbias_drv",
+            "value": 0.947202,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "uvlo-trip-verification/overall",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "fail",
+        "runtime_s": 0,
+        "measurements": [],
+        "diagnostics": []
+      }
+    ]
+  },
+  "source": {
+    "repo": "2AMLogic/gf180-gate-driver",
+    "ref": "56558634ba22864cd4c9abec9ac59d2caf9c2f72",
+    "path": "layout/gate_driver_core.gds"
+  },
+  "downloadable": true,
+  "status": "ok"
+}

@@ -21,6 +21,8 @@ import tempfile
 import xml.etree.ElementTree as ET
 from typing import Any
 
+from . import env_provenance
+from ._jsonnum import is_int
 from ._layout import load_layout, select_top_cells
 from ._provenance import build_provenance, sha256_file
 from .coverage import (
@@ -30,16 +32,16 @@ from .coverage import (
     work_id,
 )
 from .drc import (
-    CODE_KLAYOUT_UNAVAILABLE,
-    CODE_KLAYOUT_VERSION_TOO_OLD,
     CODE_MULTIPLE_TOP_CELLS,
     CODE_NEGATIVE_CONTROL_FAILED,
     SCHEMA_VERSION,
     DrcError,
-    _report_path,
-    _report_repo_root,
 )
-from .pdk import PdkNotFoundError, find_pdk
+from .drc_deck_includes import _deck_script_files
+from .drc_klayout_abort import deck_abort_info, deck_aborted_error
+from .drc_klayout_app import _preflight_klayout_version, _resolve_klayout_executable
+from .drc_klayout_launch import launch_klayout_deck
+from .pdk import PdkNotFoundError, find_pdk_for_deck
 
 # --------------------------------------------------------------------------- #
 # "klayout" engine (issue #565): opt-in subprocess wrapper around the
@@ -416,14 +418,7 @@ def _check_klayout_run(
         detail = _klayout_deck_error_detail(
             completed.stdout, completed.stderr, error_lines
         )
-        raise DrcError(
-            "klayout reported an error while running the deck script "
-            f"(exit status {completed.returncode}) -- the deck likely "
-            "aborted part-way through, so the report file it did write "
-            "covers only the rules that ran before the abort, and its "
-            "verdict cannot be trusted. Pass --allow-deck-errors to "
-            "accept a partial report anyway. klayout's own output:\n" + detail
-        )
+        raise deck_aborted_error(completed, error_lines, detail)
     return error_lines, deck_errored
 
 
@@ -443,14 +438,6 @@ _RUBY_SHELL_OUT_RES = (
         r"\b(?:system|exec|spawn|IO\.popen|Open3\.\w+)\s*\(?\s*"
         r"""(?:"(?P<cmd_dq>[^"\n]*)"|'(?P<cmd_sq>[^'\n]*)')"""
     ),
-)
-
-#: Ruby's literal-path include forms, so a driver split across files is
-#: scanned as a whole (issue #2333). Only string *literals* are followed --
-#: a computed path is unknowable statically and is simply not scanned.
-_RUBY_INCLUDE_RE = re.compile(
-    r"""\b(?:require_relative|require|load)\s*\(?\s*"""
-    r"""(?:"(?P<path_dq>[^"\n]*)"|'(?P<path_sq>[^'\n]*)')"""
 )
 
 #: Words that name no external executable: shell builtins/keywords, plus the
@@ -514,12 +501,6 @@ _SHELL_BUILTIN_WORDS = frozenset(
 #: token) is skipped -- the preflight only reports what it is sure about.
 _COMMAND_WORD_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.+-]*$|^[./~][\w./+-]*$")
 
-#: Upper bound on how many files one deck's include graph is scanned for
-#: (issue #2333) -- a static scan must never become the expensive part of a
-#: DRC run, and a driver that pulls in more than this is past the point where
-#: a heuristic preflight is useful.
-_DECK_SCAN_MAX_FILES = 64
-
 
 def _shell_command_words(command: str) -> list[str]:
     """The executables a shell would run for ``command`` -- the first word of
@@ -551,44 +532,6 @@ def _shell_command_words(command: str) -> list[str]:
             continue
         words.append(word)
     return words
-
-
-def _deck_script_files(deck_file: str) -> list[str]:
-    """``deck_file`` plus every literal-path Ruby include reachable from it
-    (issue #2333), depth-first, de-duplicated, bounded by
-    :data:`_DECK_SCAN_MAX_FILES`.
-
-    A PDK's driver is often one file, but the shapes that carry host
-    assumptions (a shared logging/util prologue, a per-topic rule table) split
-    it across a handful. Unreadable or computed-path includes are skipped, not
-    an error: this is a diagnostic aid, and a file it cannot read is simply
-    one it cannot make claims about.
-    """
-    seen: set[str] = set()
-    ordered: list[str] = []
-    pending = [os.path.abspath(deck_file)]
-    while pending and len(ordered) < _DECK_SCAN_MAX_FILES:
-        current = pending.pop(0)
-        if current in seen or not os.path.isfile(current):
-            continue
-        seen.add(current)
-        ordered.append(current)
-        try:
-            with open(current, encoding="utf-8", errors="replace") as handle:
-                text = handle.read()
-        except OSError:
-            continue
-        base = os.path.dirname(current)
-        for match in _RUBY_INCLUDE_RE.finditer(text):
-            raw = match.group("path_dq") or match.group("path_sq") or ""
-            if not raw or "#{" in raw:
-                continue
-            candidate = raw if os.path.isabs(raw) else os.path.join(base, raw)
-            for resolved in (candidate, candidate + ".rb"):
-                if os.path.isfile(resolved):
-                    pending.append(os.path.abspath(resolved))
-                    break
-    return ordered
 
 
 #: Ruby ``$name`` global reads. A leading letter/underscore excludes the
@@ -652,8 +595,8 @@ def _record_deck_default(
 
 def scan_deck_globals(deck_file: str) -> list[dict[str, Any]]:
     """Best-effort static scan of the ``-rd`` globals a KLayout DRC deck
-    consumes (issue #3816), following literal includes as
-    :func:`_deck_script_files` does.
+    consumes (issue #3816), following literal Ruby and ``# %include``
+    includes as :func:`_deck_script_files` does.
 
     Returns a name-sorted list of ``{"name", "required_by_caller",
     "default"}``. A global whose first assignment is guarded by ``defined?``
@@ -726,9 +669,9 @@ def _missing_deck_globals_warning(
 
 
 def _scan_deck_host_commands(deck_file: str) -> dict[str, str]:
-    """Every host executable the deck script (and its literal includes) shells
-    out to, mapped to the ``<file>:<line>`` where it was first seen (issue
-    #2333).
+    """Every host executable the deck script (and every file it includes,
+    Ruby-literal or ``# %include``) shells out to, mapped to the
+    ``<file>:<line>`` where it was first seen (issue #2333).
 
     A static, deliberately shallow scan -- see
     :func:`_missing_deck_host_commands` for what that means for the caller.
@@ -784,122 +727,19 @@ def _missing_deck_host_commands(deck_file: str) -> dict[str, str]:
     }
 
 
-_KLAYOUT_EXECUTABLE = "klayout"
-
-KLAYOUT_VERSION_PROBE_TIMEOUT_S = 15.0
-"""Wall-clock budget for the ``klayout -v`` version probe (issue #2689)."""
-
-_REQUESTED_VERSION_RE = re.compile(r"^\d+(?:\.\d+)*$")
-_REPORTED_VERSION_RE = re.compile(r"\d+(?:\.\d+)+")
-
-
-def _parse_requested_klayout_version(value: str) -> tuple[int, ...]:
-    """Validate a caller-declared ``min_klayout_version`` (issue #2689): dotted
-    decimal components only (``0.30.12``). Raises :class:`DrcError` otherwise."""
-    text = value.strip() if isinstance(value, str) else value
-    if not isinstance(text, str) or not _REQUESTED_VERSION_RE.match(text):
-        raise DrcError(
-            f"invalid minimum KLayout version {value!r}: expected dotted "
-            "decimal components such as '0.30.12'"
-        )
-    return tuple(int(part) for part in text.split("."))
-
-
-def _klayout_version_at_least(
-    found: tuple[int, ...], required: tuple[int, ...]
-) -> bool:
-    """Numeric component-wise comparison (``0.30.12 > 0.30.9``); missing
-    trailing components count as zero."""
-    width = max(len(found), len(required))
-    pad = lambda v: v + (0,) * (width - len(v))  # noqa: E731
-    return pad(found) >= pad(required)
-
-
-def _preflight_klayout_version(executable: str, min_version: str | None) -> None:
-    """Refuse to run a deck on a standalone ``klayout`` application older than
-    the caller-declared minimum (issue #2689).
-
-    A no-op when ``min_version`` is ``None`` (existing behaviour: no
-    compatibility is claimed or checked). Otherwise probes the *same*
-    executable the deck will run with (``<executable> -v``, bounded by
-    :data:`KLAYOUT_VERSION_PROBE_TIMEOUT_S`) and raises :class:`DrcError` for
-    an invalid minimum, a missing/failed/timed-out/unparseable probe, or a
-    detected version below the minimum. Never bypassed by
-    ``allow_deck_errors`` or ``allow_missing_host_tools``. Passing proves only
-    the version, not that an arbitrary deck is compatible.
-    """
-    if min_version is None:
-        return
-    required = _parse_requested_klayout_version(min_version)
-    required_text = ".".join(str(c) for c in required)
-    try:
-        probe = subprocess.run(
-            [executable, "-v"],
-            capture_output=True,
-            text=True,
-            timeout=KLAYOUT_VERSION_PROBE_TIMEOUT_S,
-        )
-    except FileNotFoundError as exc:
-        raise DrcError(
-            f"cannot verify the minimum KLayout version ({required_text}): "
-            f"{executable!r} binary not found on PATH. Install KLayout "
-            f">= {required_text} (https://www.klayout.de/build.html) or omit "
-            f"the minimum version. ({exc})",
-            code=CODE_KLAYOUT_UNAVAILABLE,
-        ) from exc
-    except subprocess.TimeoutExpired as exc:
-        raise DrcError(
-            f"cannot verify the minimum KLayout version ({required_text}): "
-            f"'{executable} -v' did not complete within "
-            f"{KLAYOUT_VERSION_PROBE_TIMEOUT_S}s. Check the installation."
-        ) from exc
-    except OSError as exc:
-        raise DrcError(
-            f"cannot verify the minimum KLayout version ({required_text}): "
-            f"could not launch '{executable} -v' ({exc}). Check that the "
-            f"binary is executable and install KLayout >= {required_text}.",
-            code=CODE_KLAYOUT_UNAVAILABLE,
-        ) from exc
-    output = ((probe.stdout or "") + "\n" + (probe.stderr or "")).strip()
-    if probe.returncode != 0:
-        raise DrcError(
-            f"cannot verify the minimum KLayout version ({required_text}): "
-            f"'{executable} -v' exited with status {probe.returncode}. "
-            f"Reinstall or update KLayout. Output:\n{output}"
-        )
-    match = _REPORTED_VERSION_RE.search(output)
-    if match is None:
-        raise DrcError(
-            f"cannot verify the minimum KLayout version ({required_text}): "
-            f"could not parse a version from '{executable} -v' output. "
-            f"Check the installation. Output:\n{output}"
-        )
-    found = tuple(int(part) for part in match.group(0).split("."))
-    if not _klayout_version_at_least(found, required):
-        raise DrcError(
-            f"the standalone KLayout application on PATH is version "
-            f"{match.group(0)}, but this run requires >= {required_text}. "
-            f"Install or update the KLayout application to {required_text} "
-            "or newer (https://www.klayout.de/build.html); the pip `klayout` "
-            "package is a separate install and is not used by --engine "
-            "klayout. See docs/cli/drc.md, 'Engine' -> 'klayout'.",
-            code=CODE_KLAYOUT_VERSION_TOO_OLD,
-        )
-
-
 def _deck_tree_identity(deck_file: str) -> dict[str, Any] | None:
     """Additive identity for a deck that is a *tree* of files (issue #3076).
 
     ``provenance.deck.content_hash`` pins only the entry script; a vendor
-    deck that pulls in sibling files via literal ``require``/``load`` is not
-    pinned by it. Returns ``None`` for a single-file deck (its identity is
-    unchanged), else ``{"file_count", "content_hash", "release"}`` where
-    ``content_hash`` is a sha256 over the sorted ``(relative path, file
-    hash)`` pairs of the entry script plus every literal include reachable
-    from it, and ``release`` is ``git describe --tags --always --dirty`` of
-    the deck's checkout (``None`` when it is not a git checkout or git is
-    unavailable). Computed-path includes are not followed (see
-    :func:`_deck_script_files`).
+    deck that pulls in sibling files via literal ``require``/``load`` or
+    KLayout's ``# %include`` is not pinned by it. Returns ``None`` for a
+    single-file deck (its identity is unchanged), else ``{"file_count",
+    "content_hash", "release"}`` where ``content_hash`` is a sha256 over the
+    sorted ``(relative path, file hash)`` pairs of the entry script plus
+    every literal include reachable from it, and ``release`` is ``git
+    describe --tags --always --dirty`` of the deck's checkout (``None`` when
+    it is not a git checkout or git is unavailable). Computed-path includes
+    are not followed (see :func:`_deck_script_files`).
     """
     files = _deck_script_files(deck_file)
     if len(files) < 2:
@@ -1226,7 +1066,7 @@ def _validate_expected_rule_categories(value: Any) -> None:
     """Reject anything but ``None`` or a positive ``int`` (issue #2697)."""
     if value is None:
         return
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+    if not is_int(value) or value < 1:
         raise DrcError(
             "expected_rule_categories (--expect-rule-categories) must be a "
             f"positive integer (got {value!r})"
@@ -1332,7 +1172,7 @@ def _rerun_assertion_kwargs(committed: dict[str, Any]) -> dict[str, Any]:
     kind = assertion.get("kind", COVERAGE_ASSERTION_COUNT_KIND)
     if kind == COVERAGE_ASSERTION_COUNT_KIND:
         expected = assertion.get("expected")
-        if isinstance(expected, bool) or not isinstance(expected, int) or expected < 1:
+        if not is_int(expected) or expected < 1:
             raise DrcError(
                 "committed report's 'coverage_assertion.expected' is "
                 f"malformed (expected a positive integer, got {expected!r})"
@@ -1361,7 +1201,7 @@ def _rerun_assertion_kwargs(committed: dict[str, Any]) -> dict[str, Any]:
 
 
 def _resolve_provenance_pdk(
-    pdk_variant: str | None, pdk_root: str | None
+    pdk_variant: str | None, pdk_root: str | None, deck_name: str | None = None
 ) -> dict[str, Any] | None:
     """The :func:`klayout_tools.pdk.find_pdk` record for ``provenance.pdk``
     when ``--pdk``/``--pdk-root`` was given, else ``None``. A missing PDK
@@ -1369,7 +1209,7 @@ def _resolve_provenance_pdk(
     if pdk_variant is None and pdk_root is None:
         return None
     try:
-        return find_pdk(variant=pdk_variant, root=pdk_root)
+        return find_pdk_for_deck(deck_name, variant=pdk_variant, root=pdk_root)
     except PdkNotFoundError as exc:
         raise DrcError(str(exc)) from exc
 
@@ -1389,6 +1229,9 @@ def run_drc_klayout_engine(
     expected_rule_category_names: list[str] | None = None,
     negative_control: str | None = None,
     negative_control_categories: list[str] | None = None,
+    deck_name: str | None = None,
+    max_violations: int | None = None,
+    klayout_binary: str | None = None,
 ) -> dict[str, Any]:
     """Run a PDK-native KLayout DRC-DSL rule-deck script (``deck_file``,
     typically resolved via :func:`klayout_tools.pdk.drc_deck_file` or an
@@ -1596,7 +1439,9 @@ def run_drc_klayout_engine(
     ``cli/drc_cmd.py`` to resolve ``deck_file`` itself via
     :func:`klayout_tools.pdk.drc_deck_file` when ``--deck-file`` is omitted.
     Omitting both leaves ``provenance.pdk`` ``None``, matching every prior
-    release's behaviour.
+    release's behaviour. ``deck_name`` (the ``--deck`` family, issue #4474),
+    when given, constrains that resolution to the deck's PDK family and
+    refuses a contradictory ``--pdk``.
 
     Raises :class:`DrcError` for every failure mode above, plus a missing/
     unreadable ``path`` or ``deck_file`` (checked before the subprocess is
@@ -1613,7 +1458,7 @@ def run_drc_klayout_engine(
     # layer up in `cli/drc_cmd.py`'s `drc_deck_file` call). Mirrors
     # `run_drc`'s identical guard so an omitted `--pdk` still yields
     # `provenance.pdk: null`.
-    pdk_info = _resolve_provenance_pdk(pdk_variant, pdk_root)
+    pdk_info = _resolve_provenance_pdk(pdk_variant, pdk_root, deck_name)
 
     if not os.path.isfile(deck_file):
         raise DrcError(f"deck file not found: {deck_file}")
@@ -1625,7 +1470,8 @@ def run_drc_klayout_engine(
 
     # Issue #2689: opt-in application-version floor, probed on the very
     # executable launched below, before any deck work.
-    _preflight_klayout_version(_KLAYOUT_EXECUTABLE, min_klayout_version)
+    klayout_exe, klayout_override = _resolve_klayout_executable(klayout_binary)
+    _preflight_klayout_version(klayout_exe, min_klayout_version)
 
     negative_control_result = None
     if negative_control is not None:
@@ -1640,6 +1486,7 @@ def run_drc_klayout_engine(
             pdk_root=pdk_root,
             allow_deck_errors=allow_deck_errors,
             allow_missing_host_tools=allow_missing_host_tools,
+            klayout_binary=klayout_binary,
         )
 
     # Validates `path` (missing/directory/unreadable) before the subprocess
@@ -1672,43 +1519,17 @@ def run_drc_klayout_engine(
             # reaches the deck; the caller's file is untouched.
             input_path = os.path.join(work_dir, "input-top.gds")
             top_cells[0].write(input_path)
-        cmd = [
-            _KLAYOUT_EXECUTABLE,
-            "-b",
-            "-r",
+        # Issue #5444: the invocation shape is shared with
+        # `--list-rule-categories`' empty-layout listing, so it lives in one
+        # place rather than two copies that can drift.
+        completed = launch_klayout_deck(
+            klayout_exe,
             deck_file,
-            "-rd",
-            f"input={input_path}",
-            "-rd",
-            f"report={report_path}",
-        ]
-        for name, value in (deck_vars or {}).items():
-            cmd.extend(["-rd", f"{name}={value}"])
-        try:
-            completed = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=timeout_s
-            )
-        except FileNotFoundError as exc:
-            raise DrcError(
-                "could not launch klayout: binary not found on PATH. "
-                "Install KLayout (https://www.klayout.de/build.html) or "
-                "omit --engine klayout to use the curated deck instead. "
-                f"({exc})",
-                code=CODE_KLAYOUT_UNAVAILABLE,
-            ) from exc
-        except OSError as exc:
-            raise DrcError(
-                f"could not launch klayout: {exc}. Check that a system "
-                "KLayout (https://www.klayout.de/build.html) is installed "
-                "and executable, or omit --engine klayout to use the "
-                "curated deck instead.",
-                code=CODE_KLAYOUT_UNAVAILABLE,
-            ) from exc
-        except subprocess.TimeoutExpired as exc:
-            raise DrcError(
-                f"klayout did not complete within {timeout_s}s (raise "
-                "--timeout-s to allow more time)"
-            ) from exc
+            input_path=input_path,
+            report_path=report_path,
+            deck_vars=deck_vars,
+            timeout_s=timeout_s,
+        )
 
         error_lines, deck_errored = _check_klayout_run(
             completed, report_path, allow_deck_errors=allow_deck_errors
@@ -1734,6 +1555,12 @@ def run_drc_klayout_engine(
         )
     )
 
+    # Issue #4464: cap what is serialized, never what is counted.
+    violation_count = len(violations)
+    truncated = max_violations is not None and violation_count > max_violations
+    if truncated:
+        violations = violations[:max_violations]
+
     coverage = _klayout_engine_coverage(
         rule_counts,
         rule_categories,
@@ -1743,14 +1570,23 @@ def run_drc_klayout_engine(
         _packaged_asap7_isolation_only_rules(deck_file, layout),
     )
     deck_global_warnings = _missing_deck_globals_warning(deck_file, deck_vars)
-    rollup = coverage_rollup({"coverage": coverage}, failed=bool(violations))
+    rollup = coverage_rollup({"coverage": coverage}, failed=bool(violation_count))
     return {
         "schema_version": SCHEMA_VERSION,
         # Issue #2659: same `{path, scope}` normalization the curated engine's
-        # own response builder applies -- see `drc._report_path`.
-        "file": _report_path(path, repo_root=_report_repo_root(path)),
+        # own response builder applies -- see `env_provenance.repo_relative_path`.
+        "file": env_provenance.repo_relative_path(
+            path, repo_root=env_provenance.repo_root_for(path)
+        ),
         "deck": deck_file,
         "engine": "klayout",
+        # Additive (issue #4950): present only when a binary override
+        # (--klayout-binary / $KLT_KLAYOUT_BINARY) was in force.
+        **(
+            {"environment": {"klayout_binary": klayout_override}}
+            if klayout_override is not None
+            else {}
+        ),
         # Additive, and present *only* when --allow-deck-errors actually
         # tolerated a failed deck run (issue #1941) -- an ordinary run's
         # payload is unchanged, and a tolerated one is self-describing
@@ -1760,6 +1596,7 @@ def run_drc_klayout_engine(
                 "engine_deck_errors": {
                     "exit_status": completed.returncode,
                     "error_lines": error_lines,
+                    **deck_abort_info(completed.stdout, completed.stderr, error_lines),
                 }
             }
             if deck_errored
@@ -1767,10 +1604,17 @@ def run_drc_klayout_engine(
         ),
         "dbu_um": dbu,
         "status": rollup_status(rollup, success="clean", failure="violations"),
-        "violation_count": len(violations),
+        "violation_count": violation_count,
         "rule_counts": dict(sorted(rule_counts.items())),
-        "violations": violations,
+        # Issue #4464: `coverage` precedes the (possibly huge) violation list
+        # so an interrupted write still carries it.
         "coverage": coverage,
+        **(
+            {"violations_truncated": True, "violations_serialized": len(violations)}
+            if truncated
+            else {}
+        ),
+        "violations": violations,
         # Additive (issue #3816): only present when the deck reads globals a
         # caller must supply and the run supplied none. Never alters status.
         **({"warnings": deck_global_warnings} if deck_global_warnings else {}),

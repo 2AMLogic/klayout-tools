@@ -50,7 +50,11 @@ Every verb accepts these fields with identical names and semantics:
     ``klt synthesize`` consumes it; when both it and ``lib`` are omitted,
     that verb **generates** one from the LEF's own ``PIN``
     ``DIRECTION``\\ s (:func:`blackbox_verilog_text`), so a caller never has
-    to hand-maintain a stub against a vendor port list.
+    to hand-maintain a stub against a vendor port list. A supplied file must
+    declare a module named exactly the macro's cell (others may sit beside
+    it); otherwise the request is rejected, naming both, because instance
+    counts are keyed on the cell and a mismatch would silently count zero
+    macros.
 
 ``klt place-and-route`` keeps two additional, placement-specific fields it
 has shipped since issue #438 -- ``instance`` (**required** there: the
@@ -327,6 +331,47 @@ def macro_lib_for_corner(
     )
 
 
+_VERILOG_COMMENT_RE = re.compile(r"//[^\n]*|/\*.*?\*/", re.DOTALL)
+_VERILOG_ATTRIBUTE_RE = re.compile(r"\(\*.*?\*\)", re.DOTALL)
+_VERILOG_MODULE_RE = re.compile(
+    r"(?<![\w$])(?:macro)?module\s+(?:\\(\S+)|([A-Za-z_][\w$]*))"
+)
+
+
+def verilog_declared_modules(text: str) -> list[str]:
+    """Module names declared in Verilog ``text``, in order. Comments and
+    ``(* ... *)`` attributes are stripped first, so a commented-out
+    ``module`` line is not a declaration; escaped identifiers
+    (``\\name``) are returned without the backslash."""
+    text = _VERILOG_COMMENT_RE.sub(" ", text)
+    text = _VERILOG_ATTRIBUTE_RE.sub(" ", text)
+    return [m.group(1) or m.group(2) for m in _VERILOG_MODULE_RE.finditer(text)]
+
+
+def check_blackbox_declares_cell(
+    path: str,
+    cell: str,
+    *,
+    label: str,
+    error_cls: type[Exception],
+) -> None:
+    """Reject a ``verilog_blackbox`` that declares no module named ``cell``.
+
+    Instance counts are keyed on the LEF-derived cell name, so a blackbox
+    declaring a differently named module would make the design's instances
+    silently count as zero macros. A file declaring several modules passes
+    when any one equals ``cell``."""
+    with open(path, encoding="utf-8", errors="replace") as handle:
+        modules = verilog_declared_modules(handle.read())
+    if cell not in modules:
+        raise error_cls(
+            f"{label}.verilog_blackbox declares module(s) {modules} but the "
+            f"macro cell is '{cell}' (from its lef); rename the blackbox "
+            f"module to '{cell}' so the design's instances resolve to this "
+            "macro"
+        )
+
+
 def validate_macros(
     macros: Any,
     request_dir: str,
@@ -372,6 +417,17 @@ def validate_macros(
             lef_cell_name=macro_record["name"],
             error_cls=error_cls,
         )
+        blackbox = resolve_optional_macro_file(
+            entry,
+            "verilog_blackbox",
+            label=label,
+            request_dir=request_dir,
+            error_cls=error_cls,
+        )
+        if blackbox is not None:
+            check_blackbox_declares_cell(
+                blackbox, cell, label=label, error_cls=error_cls
+            )
         validated.append(
             {
                 "cell": cell,
@@ -389,13 +445,7 @@ def validate_macros(
                     request_dir=request_dir,
                     error_cls=error_cls,
                 ),
-                "verilog_blackbox": resolve_optional_macro_file(
-                    entry,
-                    "verilog_blackbox",
-                    label=label,
-                    request_dir=request_dir,
-                    error_cls=error_cls,
-                ),
+                "verilog_blackbox": blackbox,
                 "width_um": macro_record.get("width_um"),
                 "height_um": macro_record.get("height_um"),
                 "pins": macro_record.get("pins") or [],

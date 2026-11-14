@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:10:45.751375+00:00",
+  "slug": "sg13g2-fpga",
+  "name": "Sg13G2 Fpga",
+  "description": "eFPGA logic tile on IHP SG13G2 \u2014 2AM Logic canary block",
+  "pdk": "sg13g2",
+  "spec_summary": {
+    "rows": [
+      {
+        "parameter": "Logic tile",
+        "fallback": "4\u00d7 LUT4 + 1 FF per LUT, no carry (inherited)",
+        "target": "same",
+        "stretch": "carry chain as a later tile revision"
+      },
+      {
+        "parameter": "Routing (architecture)",
+        "fallback": "4 tracks/edge, FABulous-style switch matrix (inherited)",
+        "target": "same"
+      },
+      {
+        "parameter": "Bitstream",
+        "fallback": "open, documented, FABulous-generated (inherited)",
+        "target": "same"
+      },
+      {
+        "parameter": "Library, supply, corners",
+        "fallback": "`sg13g2_stdcell`, 1.2 V core, the three 1.2 V core liberty corners",
+        "target": "same, plus the 1.5 V-class corners reported as information"
+      },
+      {
+        "parameter": "Routing layers",
+        "fallback": "Metal1\u2013Metal5 signal, TopMetal1/TopMetal2 reserved for power",
+        "target": "same",
+        "stretch": "TopMetal signal use only by a later decision record"
+      },
+      {
+        "parameter": "Tile area / aspect",
+        "fallback": "abuts in a grid; area reported, no figure ratified",
+        "target": "measured figure ratified by a later decision record"
+      },
+      {
+        "parameter": "Demonstration fabric",
+        "fallback": "2\u00d72 tiles",
+        "target": "2\u00d72 to 4\u00d74, single logic tile type"
+      },
+      {
+        "parameter": "Timing",
+        "fallback": "setup/hold-clean at a stated period at every claim corner",
+        "target": "same, period fixed before measurement; Fmax only if derived from characterized data",
+        "stretch": "SDF-annotated gate-level re-simulation"
+      },
+      {
+        "parameter": "Signoff",
+        "fallback": "DRC clean, LVS gaps attributed to filed deck issues",
+        "target": "DRC/LVS clean on the tile and the assembled fabric"
+      }
+    ],
+    "status_note": "ratified \u2014 see [`spec/target-spec.md`](spec/target-spec.md"
+  },
+  "source": {
+    "repo": "2AMLogic/sg13g2-fpga",
+    "ref": "afdb7cbe58efdde7e5b3b17712d4b53aed1dbf27",
+    "path": "."
+  },
+  "downloadable": true,
+  "status": "in design \u2014 simulation evidence"
+}

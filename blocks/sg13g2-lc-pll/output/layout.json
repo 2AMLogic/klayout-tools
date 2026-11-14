@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:10:47.971763+00:00",
+  "slug": "sg13g2-lc-pll",
+  "name": "Sg13G2 Lc Pll",
+  "description": "LC PLL around sg13g2-vco on IHP SG13G2 \u2014 2AM Logic canary block",
+  "pdk": "sg13g2",
+  "spec_summary": {
+    "rows": [
+      {
+        "parameter": "Output frequency",
+        "target": "5.0 GHz, within the VCO's ratified band",
+        "fallback": "one fixed channel",
+        "stretch": "full 4.5\u20135.5 GHz band"
+      },
+      {
+        "parameter": "Reference input",
+        "target": "50 MHz",
+        "fallback": "100 MHz",
+        "stretch": "25 MHz"
+      },
+      {
+        "parameter": "Division",
+        "target": "integer-N, N = 100 (5.0 GHz / 50 MHz); P = 8/9 prescaler",
+        "fallback": "fixed N",
+        "stretch": "N = 90-110 (4.5-5.5 GHz); fractional-N out of scope"
+      },
+      {
+        "parameter": "Loop bandwidth / phase margin",
+        "target": "f_c 1 MHz (0.5-2.0), PM \u2265 45\u00b0",
+        "stretch": "PM \u2265 60\u00b0"
+      },
+      {
+        "parameter": "Integrated rms jitter (simulated)",
+        "target": "\u2264 1 ps, 10 kHz\u201310 MHz",
+        "fallback": "\u2264 2 ps",
+        "stretch": "\u2264 0.5 ps"
+      },
+      {
+        "parameter": "Reference spur",
+        "target": "\u2264 \u221250 dBc",
+        "fallback": "\u2264 \u221240 dBc",
+        "stretch": "\u2264 \u221260 dBc"
+      },
+      {
+        "parameter": "Lock time",
+        "target": "\u2264 20 \u00b5s",
+        "fallback": "\u2264 50 \u00b5s",
+        "stretch": "\u2264 10 \u00b5s"
+      },
+      {
+        "parameter": "Power (loop, excluding the VCO core)",
+        "target": "\u2264 20 mW",
+        "fallback": "\u2264 30 mW",
+        "stretch": "\u2264 10 mW"
+      },
+      {
+        "parameter": "Signoff",
+        "target": "DRC + LVS clean with the VCO in place, post-layout re-verified"
+      }
+    ],
+    "status_note": "ratified as targets by DR-001, issue #2; none measured"
+  },
+  "source": {
+    "repo": "2AMLogic/sg13g2-lc-pll",
+    "ref": "2d81a9641bd0036923d4082824acbe6ff28dead5",
+    "path": "."
+  },
+  "downloadable": true,
+  "status": "in design \u2014 simulation evidence"
+}

@@ -90266,7 +90266,7 @@
       "driver": "examples/em/block_coupling/geode_driver"
     },
     "geometry": {
-      "fixture": "blocks/sky130-bandgap/output/bandgap_core_routed.gds",
+      "fixture": "tests/fixtures/legacy_bandgap_gds/sky130-bandgap.gds",
       "fixture_sha256": "f2ff80dafb269c236112ee497571d3a98ba8d15c79cfcfa33d7ccb29f3581db1",
       "description": "A real routed bundle of the `sky130-bandgap` gallery block: the 5 met1 nets (TAIL, net_8, net_7, D2, D1) that run parallel along x for 182.50 um (x = 24.00 .. 206.50 um), read out of the block's own committed GDS -- the same layout the gallery renders, not a benchmark shape. Widths and spacings are the drawn ones (the mesh is breakpoint-aligned to every conductor edge); net names are the GDS's own label texts.",
       "source_repo": "https://github.com/2AMLogic/klayout-tools",

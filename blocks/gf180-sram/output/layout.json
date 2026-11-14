@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:09:14.040277+00:00",
+  "slug": "gf180-sram",
+  "name": "Gf180 Sram",
+  "description": "SRAM macro on gf180mcu \u2014 2AM Logic canary block",
+  "pdk": "gf180mcu",
+  "layer_count": 12,
+  "cell_count": 1,
+  "instance_count": 0,
+  "layout_file": "sram_bitcell_6t.gds",
+  "renders": {
+    "overview": "renders/overview.png",
+    "Nwell": "renders/21_0.png",
+    "Comp": "renders/22_0.png",
+    "Poly2": "renders/30_0.png",
+    "layer_30_10": "renders/30_10.png",
+    "Pplus": "renders/31_0.png",
+    "Nplus": "renders/32_0.png",
+    "Contact": "renders/33_0.png",
+    "Metal1": "renders/34_0.png",
+    "layer_34_10": "renders/34_10.png",
+    "Via1": "renders/35_0.png",
+    "Metal2": "renders/36_0.png",
+    "layer_36_10": "renders/36_10.png",
+    "center_crop": "renders/center_crop/overview.png"
+  },
+  "source": {
+    "repo": "2AMLogic/gf180-sram",
+    "ref": "d00fabdd9e5b9e6fa4ec24fb966f3ac0b830de5f",
+    "path": "layout/bitcell/sram_bitcell_6t.gds"
+  },
+  "downloadable": true,
+  "status": "ok"
+}

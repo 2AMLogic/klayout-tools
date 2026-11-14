@@ -171,10 +171,17 @@ import json
 import os
 from typing import Any
 
+from ._jsonnum import is_number
 from ._paths import _resolve_relative
 from .gen import _GENERATOR_SPECS
 from .gen_compose import _ORIENTATIONS
-from .netlist_digest import build_netlist_digest
+from .layout_plan_fields import (
+    ingest_netlist,
+    net_echo,
+    parse_group_net,
+    parse_options,
+    validate_group_nets,
+)
 
 #: Contract identifier for the request envelope (spike section 2).
 REQUEST_SCHEMA = "klt.layout_plan.request/1"
@@ -229,6 +236,7 @@ _GENERATOR_TOPOLOGY_SUPPORT: dict[str, frozenset[str]] = {
     "diff_pair": frozenset({"common_centroid"}),
     "bjt_array": frozenset({"array", "common_centroid"}),
     "bond_pad": frozenset(),
+    "diode": frozenset(),
     "esd_device": frozenset(),
     "well_island": frozenset(),
 }
@@ -480,6 +488,7 @@ def _parse_device_groups_shape(raw: Any) -> list[dict[str, Any]]:
                 "dummy": dummy,
                 "params": params,
                 "orientation": orientation,
+                **parse_group_net(raw_group, entry_where),
             }
         )
 
@@ -616,7 +625,7 @@ def _parse_rows(raw: Any, group_ids: set[str]) -> list[dict[str, Any]]:
             )
 
         spacing_um = raw_row.get("spacing_um", 0.0)
-        if isinstance(spacing_um, bool) or not isinstance(spacing_um, (int, float)):
+        if not is_number(spacing_um):
             raise LayoutPlanUsageError(f"{where}.spacing_um must be a number")
         spacing_um = float(spacing_um)
         if spacing_um < 0:
@@ -633,9 +642,8 @@ def _parse_rows(raw: Any, group_ids: set[str]) -> list[dict[str, Any]]:
         # Phase C to derive it automatically from the two adjacent rows' own
         # declared ``drc_hints.min_spacing_um`` -- see
         # ``layout_plan_execute._resolve_placement``.
-        margin_um = raw_row.get("margin_um")
-        if margin_um is not None:
-            if isinstance(margin_um, bool) or not isinstance(margin_um, (int, float)):
+        if (margin_um := raw_row.get("margin_um")) is not None:
+            if not is_number(margin_um):
                 raise LayoutPlanUsageError(f"{where}.margin_um must be a number")
             margin_um = float(margin_um)
             if margin_um < 0:
@@ -684,7 +692,7 @@ def _parse_abutment(raw: Any, group_ids: set[str]) -> list[dict[str, Any]]:
             raise LayoutPlanUsageError(f"{where}.edge must be one of {allowed}")
 
         gap_um = raw_entry.get("gap_um", 0.0)
-        if isinstance(gap_um, bool) or not isinstance(gap_um, (int, float)):
+        if not is_number(gap_um):
             raise LayoutPlanUsageError(f"{where}.gap_um must be a number")
         gap_um = float(gap_um)
         if gap_um < 0:
@@ -712,26 +720,6 @@ def _parse_abutment(raw: Any, group_ids: set[str]) -> list[dict[str, Any]]:
         abutment.append({"a": a, "b": b, "edge": edge, "gap_um": gap_um})
 
     return abutment
-
-
-def _parse_options(raw: Any) -> dict[str, Any]:
-    if raw is None:
-        return {"cell_name": None, "output": None}
-    if not isinstance(raw, dict):
-        raise LayoutPlanUsageError("request.options must be a JSON object")
-
-    cell_name = raw.get("cell_name")
-    if cell_name is not None and (not isinstance(cell_name, str) or not cell_name):
-        raise LayoutPlanUsageError(
-            "request.options.cell_name must be a non-empty string when given"
-        )
-    output = raw.get("output")
-    if output is not None and (not isinstance(output, str) or not output):
-        raise LayoutPlanUsageError(
-            "request.options.output must be a non-empty string when given"
-        )
-
-    return {"cell_name": cell_name, "output": output}
 
 
 def validate_layout_plan(request: Any, digest: dict[str, Any]) -> dict[str, Any]:
@@ -788,10 +776,11 @@ def validate_layout_plan(request: Any, digest: dict[str, Any]) -> dict[str, Any]
     circuit_name = digest.get("circuit") if isinstance(digest, dict) else None
 
     _validate_device_group_references(raw_groups, group_ids, classes_by_name)
+    validate_group_nets(raw_groups, digest_nets)
 
     rows = _parse_rows(request.get("rows"), group_ids)
     abutment = _parse_abutment(request.get("abutment"), group_ids)
-    options = _parse_options(request.get("options"))
+    options = parse_options(request.get("options"))
 
     referenced_devices = {
         (d["name"], d["device_class"]) for g in raw_groups for d in g["devices"]
@@ -826,6 +815,7 @@ def validate_layout_plan(request: Any, digest: dict[str, Any]) -> dict[str, Any]
                 "devices": g["devices"],
                 "encloses": g["encloses"],
                 "orientation": g["orientation"],
+                **net_echo(g),
             }
             for g in raw_groups
         ],
@@ -864,18 +854,7 @@ def validate_layout_plan_document(
     netlist_spec = _parse_netlist(request["netlist"])
     resolved_path = _resolve_relative(netlist_spec["path"], request_dir or os.getcwd())
 
-    from .lvs import LvsError
-
-    try:
-        digest = build_netlist_digest(
-            resolved_path,
-            top=netlist_spec["top"],
-            form=netlist_spec["form"],
-            deck=netlist_spec["deck"],
-            device_map=netlist_spec["device_map"],
-        )
-    except LvsError as exc:
-        raise LayoutPlanError(f"request.netlist could not be ingested: {exc}") from exc
+    digest = ingest_netlist(netlist_spec, resolved_path)
 
     return validate_layout_plan(request, digest)
 

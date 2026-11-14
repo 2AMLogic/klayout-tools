@@ -34,7 +34,7 @@ import pytest
 from helpers.subprocess_fakes import fake_completed
 from klayout_tools import pdk as pdk_module
 from klayout_tools import post_route_sta
-from klayout_tools._openroad_engine import _container_runtime_hint
+from klayout_tools._openroad_engine import container_runtime_hint
 from klayout_tools.cli import main
 from klayout_tools.post_route_sta import PostRouteStaError, load_request, run_sta
 
@@ -2666,7 +2666,7 @@ def test_container_runtime_hint_recognizes_both_daemon_wordings(stderr):
     says the request was never analyzed -- the whole point of the
     distinction, since retrying the same request after starting the runtime
     is the correct response."""
-    hint = _container_runtime_hint(fake_completed(returncode=1, stderr=stderr))
+    hint = container_runtime_hint(fake_completed(returncode=1, stderr=stderr))
 
     assert hint is not None
     assert "container runtime" in hint
@@ -2678,7 +2678,7 @@ def test_container_runtime_hint_recognizes_both_daemon_wordings(stderr):
 def test_container_runtime_hint_recognizes_permission_denied():
     """The socket-permission case gets its own remedy -- starting the daemon
     would not help; the invoking user needs access to it."""
-    hint = _container_runtime_hint(
+    hint = container_runtime_hint(
         fake_completed(returncode=1, stderr=_DOCKER_PERMISSION_DENIED)
     )
 
@@ -2692,7 +2692,7 @@ def test_container_runtime_hint_reads_stdout_too():
     """Detection is stream-agnostic: a wrapper that merges docker's message
     onto stdout is diagnosed the same way."""
     assert (
-        _container_runtime_hint(
+        container_runtime_hint(
             fake_completed(returncode=1, stdout=_DOCKER_CLASSIC_UNREACHABLE)
         )
         is not None
@@ -2704,7 +2704,7 @@ def test_container_runtime_hint_none_for_genuine_analysis_failure():
     be actively misleading -- it would tell a caller to go restart Docker
     when the actual problem is their design."""
     assert (
-        _container_runtime_hint(
+        container_runtime_hint(
             fake_completed(
                 returncode=1,
                 stdout=_GENUINE_STA_FAILURE_STDOUT,
@@ -2716,7 +2716,7 @@ def test_container_runtime_hint_none_for_genuine_analysis_failure():
 
 
 def test_container_runtime_hint_none_for_empty_output():
-    assert _container_runtime_hint(fake_completed(returncode=1)) is None
+    assert container_runtime_hint(fake_completed(returncode=1)) is None
 
 
 def test_engine_error_message_appends_container_runtime_hint():
@@ -7272,7 +7272,7 @@ def test_electrical_check_tcl_ends_redirect_on_error_path():
         if line == unsupported:
             assert lines[i - 1] == "  catch {sta::redirect_string_end}"
             assert lines[i - 2] == "} klt_elec_msg]} {"
-    assert lines.count(unsupported) == 2
+    assert lines.count(unsupported) == 4
 
 
 _ELECTRICAL_FIXTURE = Path(__file__).parent / "fixtures" / "sta_electrical_checks"
@@ -7668,6 +7668,121 @@ def test_run_sta_power_basis_per_corner_entry(tmp_path, monkeypatch):
     for entry in report["corners"]:
         assert entry["power_basis"]["activity_source"] == "global"
         assert entry["power_basis"]["activity"] == 0.1
+
+
+# -- multi-clock `constraints.clocks` / `clock_groups` (issue #4241) ---------#
+
+
+def _clocks_constraints(**overrides) -> dict:
+    constraints = {
+        "clocks": [
+            {"port": "clk_a", "period_ns": 2.0},
+            {"port": "clk_b", "period_ns": 5.0},
+        ]
+    }
+    constraints.update(overrides)
+    return constraints
+
+
+def test_validate_clocks_primary_is_first_entry():
+    port, period, _, _ = post_route_sta._validate_constraints(_clocks_constraints())
+    assert (port, period) == ("clk_a", 2.0)
+    extras = post_route_sta._validate_clock_extras(_clocks_constraints())
+    assert extras == {"clocks": [{"port": "clk_b", "period_ns": 5.0}], "groups": []}
+
+
+def test_validate_clocks_single_entry_equals_shorthand():
+    constraints = {"clocks": [{"port": "clk", "period_ns": 1.1}]}
+    assert post_route_sta._validate_constraints(constraints)[:2] == ("clk", 1.1)
+    assert post_route_sta._validate_clock_extras(constraints) is None
+
+
+@pytest.mark.parametrize(
+    "constraints, message",
+    [
+        (
+            {"clocks": [{"port": "a", "period_ns": 1}], "clock_port": "a"},
+            "cannot be combined",
+        ),
+        (
+            {"clocks": [{"port": "a", "period_ns": 1}], "clock_period_ns": 1},
+            "cannot be combined",
+        ),
+        ({"clocks": []}, "non-empty array"),
+        ({"clocks": "clk"}, "non-empty array"),
+        ({"clocks": ["clk"]}, r"clocks\[0\] must be"),
+        ({"clocks": [{"port": "a", "period_ns": 1, "x": 1}]}, "unknown key"),
+        ({"clocks": [{"port": "", "period_ns": 1}]}, r"clocks\[0\]\.port"),
+        ({"clocks": [{"port": "a", "period_ns": 0}]}, "greater than zero"),
+        ({"clocks": [{"port": "a", "period_ns": True}]}, "positive number"),
+        (
+            {"clocks": [{"port": "a", "period_ns": 1}, {"port": "a", "period_ns": 2}]},
+            "more than once",
+        ),
+    ],
+)
+def test_validate_clocks_rejects(constraints, message):
+    with pytest.raises(PostRouteStaError, match=message):
+        post_route_sta._validate_constraints(constraints)
+
+
+@pytest.mark.parametrize(
+    "groups, message",
+    [
+        ([["clk_a"], ["nope"]], "not a declared clock"),
+        ([["clk_a", "clk_b"]], "at least two groups"),
+        ([], "non-empty array"),
+        ([[], ["clk_b"]], "non-empty array"),
+    ],
+)
+def test_validate_clock_groups_rejects(groups, message):
+    with pytest.raises(PostRouteStaError, match=message):
+        post_route_sta._validate_clock_extras(_clocks_constraints(clock_groups=groups))
+
+
+def test_sta_script_lines_multi_clock_and_groups():
+    extras = post_route_sta._validate_clock_extras(
+        _clocks_constraints(clock_groups=[["clk_a"], ["clk_b"]])
+    )
+    lines = post_route_sta._sta_script_lines(
+        tech_lef="/pdk/tech.lef",
+        cell_lef="/pdk/cells.lef",
+        def_path="/design/top.def",
+        liberty_path="/pdk/lib.lib",
+        clock_port="clk_a",
+        clock_period_ns=2.0,
+        propagated_clock=True,
+        clock_extras=extras,
+    )
+    assert "create_clock -name clk_a -period 2.0 [get_ports clk_a]" in lines
+    assert "create_clock -name clk_b -period 5.0 [get_ports clk_b]" in lines
+    assert (
+        "set_clock_groups -asynchronous -group [get_clocks {clk_a}] "
+        "-group [get_clocks {clk_b}]"
+    ) in lines
+    assert "set_propagated_clock [get_clocks clk_a]" in lines
+    assert "set_propagated_clock [get_clocks clk_b]" in lines
+
+
+def test_sta_script_lines_single_clock_unchanged_by_extras_none():
+    kwargs = dict(
+        tech_lef="/t.lef",
+        cell_lef="/c.lef",
+        def_path="/d.def",
+        liberty_path="/l.lib",
+        clock_port="clk",
+        clock_period_ns=1.1,
+    )
+    lines = post_route_sta._sta_script_lines(**kwargs)
+    assert not any(ln.startswith("set_clock_groups") for ln in lines)
+    assert sum(ln.startswith("create_clock") for ln in lines) == 1
+
+
+def test_clock_targets_echo():
+    assert post_route_sta.clock_targets("clk", 1.1, None) == {
+        "clocks": [{"port": "clk", "period_ns": 1.1}],
+        "clock_groups": [],
+    }
 
 
 # --------------------------------------------------------------------------- #

@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from . import evidence_record as er
+from ._provenance import sha256_file_required
 
 #: Stable finding codes (the JSON contract).
 F_UNREADABLE = "record_unreadable"
@@ -207,7 +208,7 @@ def _check_sidecar(rel: str, path: str, record: Mapping[str, Any]) -> list[dict]
                 )
                 continue
             expected = entry.get(f"{key}_sha256")
-            if expected and er._sha256_file(target) != expected:
+            if expected and sha256_file_required(target) != expected:
                 out.append(
                     _finding(F_SIDECAR_HASH, rel, f"{key} {ref!r} SHA-256 differs")
                 )
@@ -356,6 +357,34 @@ def _check_supersession(
         out += _check_tips(members, tips, loaded, directory)
         out += _check_head(root, directory, tips)
     return out
+
+
+def current_heads(supersedes: Mapping[str, list[str]]) -> dict[str, list[str]]:
+    """Newest unsuperseded descendants of every record.
+
+    ``supersedes`` maps a record path to the (normalised) paths it supersedes.
+    Returns, per record, the sorted tips reachable by following successors --
+    the record itself when nothing supersedes it. Shared with
+    ``klt evidence claims`` so both verbs agree on what "current" means.
+    """
+    successors: dict[str, set[str]] = {rec: set() for rec in supersedes}
+    for rec, targets in supersedes.items():
+        for target in targets:
+            successors.setdefault(target, set()).add(rec)
+    heads: dict[str, list[str]] = {}
+    for rec in successors:
+        seen = {rec}
+        stack = [rec]
+        tips: set[str] = set()
+        while stack:
+            node = stack.pop()
+            if not successors.get(node):
+                tips.add(node)
+            nxt = successors.get(node, set()) - seen
+            seen |= nxt
+            stack.extend(nxt)
+        heads[rec] = sorted(tips) or [rec]
+    return heads
 
 
 def _check_append_only(root: str, evidence_rel: str, base: str) -> list[dict]:

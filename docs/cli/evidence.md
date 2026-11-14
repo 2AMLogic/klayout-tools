@@ -100,3 +100,118 @@ records_checked, base, findings: [{code, record, message}]}`. Exit `0` clean,
 directories keyed by their own SHA-256 manifest are covered only to the extent
 they are `evidence-record/1` sidecars (the `*_sha256` check above); a dedicated
 manifest check is a follow-up to be filed at `loom:triage`.
+
+## `klt evidence claims`
+
+The document half (issue #5273): checks the READMEs, specs and signoff
+summaries that *cite* evidence records, so chips share one checker instead of
+each growing a `check_claim_drift.py`. Toolchain-free, fail-closed, no network.
+
+```
+klt evidence claims [ROOT] --docs GLOB... [--registry FILE.json] [--format text|json]
+```
+
+`--docs` globs are relative to `ROOT` (`**` allowed). A glob that matches no
+file is an error (`no_docs`), never a silent pass; so is an unreadable
+document, registry or record (`bad_input`).
+
+| Check | Finding code |
+|---|---|
+| A cited record path (`evidence/sim/<block>/<scope>/<id>.json`, or a mapped legacy path) does not exist | `cited_record_missing` |
+| A cited `.md` record has no `.json` twin | `cited_twin_missing` |
+| A cited record is not the current head of its chain (same supersession model as `evidence lint`, including the `HEAD` file); the message names the newer record(s) | `cited_record_superseded` |
+| A registry row's literal disagrees with the value it points at | `claim_mismatch` |
+| A registry row's literal is absent from its document(s) | `claim_literal_not_in_doc` |
+| A registry row's pointer, corner or `agg` cannot be resolved, or its `doc` is not in `--docs` | `claim_unresolved` |
+
+### Historical marker
+
+A deliberate citation of an old record is allowed under
+`<!-- klt:historical -->`. The marker governs its own paragraph (the run of
+non-blank lines around it); placed on the line directly under a Markdown
+heading, it governs that whole section, up to the next heading of the same or
+higher level.
+
+### Registry (`--registry`)
+
+```json
+{
+  "claims": [
+    {"doc": "README.md", "literal": "1.23",
+     "record": "evidence/sim/blk/full/20260201-000000-bbbbbbb.json",
+     "pointer": "/gain", "corner": "tt", "agg": "min",
+     "decimals": 2, "scale": 1}
+  ],
+  "mapping": {
+    "records": [
+      {"path": "records/a.md", "chain": "blk/full"},
+      {"path": "records/b.md", "chain": "blk/full", "supersedes": ["records/a.md"]}
+    ]
+  }
+}
+```
+
+- `literal`, `record`, `pointer` (RFC 6901 JSON pointer) are required; `doc`
+  limits where the literal must appear (default: any `--docs` file).
+- `corner` selects the `result.corners[]` entry with that `corner_id` and makes
+  `pointer` relative to it; without it the pointer is relative to the record.
+- A pointer to a list needs `agg` (`min`|`max`). Numbers are multiplied by
+  `scale` (default 1) and rendered with `decimals` places (default: `%g`);
+  non-numbers compare as `str()`. A `.md` record resolves to its `.json` twin.
+- `mapping.records` lists **legacy** records (plain `records/<id>.md` + `.json`
+  twin, predating `evidence-record/1`). Each names its `chain` and the paths it
+  `supersedes`; citations of those paths get the exists/twin/superseded checks.
+  Unknown keys anywhere in the registry are rejected.
+
+Output (`--format json`): `{schema_version: 1, status: "clean"|"findings",
+docs_checked, citations_checked, claims_checked, findings: [{code, doc, record,
+message}]}`. Exit `0` clean, `1` findings or an error envelope, `2` usage.
+
+
+## `klt evidence render`
+
+Fills count/census tables in docs from records (issue #5274), so they stop
+being hand-edited on every new append-only record.
+
+```
+klt evidence render [ROOT] --docs GLOB... --spec FILE.json [--check]
+    [--format text|json]
+```
+
+Marked blocks in any `--docs` file (globs relative to `ROOT`):
+
+```
+<!-- klt:table id=NAME -->
+...generated markdown pipe table...
+<!-- /klt:table -->
+```
+
+The body between the markers is replaced; text outside blocks is
+byte-identical (CRLF docs keep CRLF). The spec is JSON, one entry per `id`:
+
+```json
+{"census": {
+  "columns": [{"header": "Corner"},
+              {"header": "Runs", "format": "int"},
+              {"header": "Margin", "format": "{:.2f}"}],
+  "rows": [["tt",
+            {"record": "evidence/sim/a/full/x.json", "pointer": "/result/n"},
+            {"record": "evidence/sim/a/full/x.json", "pointer": "/result/m"}]]}}
+```
+
+A cell is a literal string/number or `{record, pointer}`: `record` is a JSON
+file relative to `ROOT` (it must stay inside `ROOT`; for legacy `.md` records
+point at the `.json` twin) and `pointer` an RFC 6901 JSON pointer. Column
+`format` is `str` (default), `int`, or `{:.Nf}`. `|` in cell text is escaped.
+
+Idempotent. `--check` writes nothing and exits 1 naming each stale
+`doc#id`. Output (`--format json`): `{schema_version: 1, status:
+"clean"|"updated"|"stale", check, docs: [{doc, blocks: [{id, status}]}],
+stale, updated}`.
+
+Fail-closed (error envelope, exit 1, **nothing written**): a block `id` with
+no spec entry, a spec `id` with no block in any doc, an unclosed, stray or
+duplicate block, a missing record, a pointer that does not resolve, a format
+mismatch, an unreadable doc/spec, or a `--docs` glob matching no file. Exit
+`2` is usage. Legacy `.md`-record mapping is deferred to the shared loader of
+#5273 (`claims`); this verb reads JSON directly.

@@ -181,6 +181,58 @@ clone and may differ from the original build's. Compare `git_commit`, not
 `version`. A build with `reinstall_spec: null` (dirty tree or no recorded
 commit) cannot be reproduced and should not be used as a pin.
 
+Reports record the same handle: `provenance.klt_git_commit` and
+`provenance.klt_reinstall_spec` (issue #4412) equal `git_commit` and
+`reinstall_spec` above, so a committed report names a re-obtainable build
+without re-running `klt version`. `klt_git_commit` is `null` only when no
+commit is recoverable (tarball install, `X.Y.Z.dev0+unknown`) and stays
+populated on a dirty tree; `klt_reinstall_spec` is `null` when the tree is
+dirty or the commit is unrecoverable.
+
+### Pinning a release tag: use the peeled commit
+
+An annotated release tag (`vX.Y.Z`) is its own git object. `git ls-remote`
+lists the **tag-object** sha on the `refs/tags/vX.Y.Z` line and the commit it
+points at on the `refs/tags/vX.Y.Z^{}` line:
+
+```
+$ git ls-remote origin 'refs/tags/v0.8.0*'
+01c67a95a23c…  refs/tags/v0.8.0        # tag object — do not pin this
+c572046be644…  refs/tags/v0.8.0^{}     # peeled commit — pin this
+```
+
+Pin the **peeled commit** (`git rev-parse vX.Y.Z^{commit}`, or the `^{}` line
+above). Pinning the tag-object sha fails:
+
+```
+$ uvx --from "git+https://github.com/2AMLogic/klayout-tools@01c67a95a23c…" klt --version
+error: Failed to resolve `--with` requirement
+  cause: Exact Git revision `01c67a95a23c...` does not match precise commit `c572046be644...`
+```
+
+A lightweight tag has no tag object (its sha already is the commit), so
+nothing needs peeling.
+
+A `git+…@<commit>` install of a release commit still reports a
+`X.Y.(Z+1).devN+g<sha>` version, not `X.Y.Z`: the package manager's scratch
+clone carries no tags (see the route table under "These fields describe the
+install" below). The release identity is `klayout-tools==X.Y.Z` from PyPI;
+use the git pin only to reproduce an exact commit.
+
+**The same `git+…@<sha>` pin can report different `build` blocks depending on
+the installer's cache state.** Whether the scratch checkout carries tags
+depends on how the package manager obtained it, so one pin has been observed
+to yield a dev identity (`0.8.0.devN+g<sha>`, `is_release: false`) from one
+cache and the release identity (`0.8.0`, `is_release: true`) from another. Do
+not depend on either. For the release identity use the PyPI pin
+`klayout-tools==X.Y.Z`, or force a fresh checkout with `uvx --no-cache`
+(worded as observed behaviour, not a guarantee). If you commit a `klt signoff`
+report generated under such a pin, verify it with `klt signoff --check`,
+which excludes the `build` block (see
+[`signoff.md`](signoff.md#verifying-a-committed-report---check-issue-2249) and
+[`json-contract.md`](../json-contract.md)), not a raw byte diff. Behaviour as
+of 2026-11-06; editable installs and PyPI wheels are unaffected.
+
 ## How the identity is determined
 
 Two sources, in priority order:

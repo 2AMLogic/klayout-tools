@@ -374,3 +374,39 @@ def test_null_antenna_diode_warns_on_route_target_only():
     assert place_and_route._antenna_repair_warnings("route", None) == []
     diode = _validate_library({"antenna_diode": {"cell": "D", "pin": "I"}})
     assert place_and_route._antenna_repair_warnings("route", diode) == []
+
+
+def test_layer_map_warning_only_when_resolution_is_none():
+    (warning,) = place_and_route._layer_map_warnings(
+        {"path": None, "resolution": "none"}
+    )
+    assert "sequential" in warning
+    assert "tech/<variant>.map" in warning
+    assert "/home" not in warning
+    for resolution in ("exact", "family"):
+        info = {"path": "x.map", "resolution": resolution}
+        assert place_and_route._layer_map_warnings(info) == []
+    assert place_and_route._layer_map_warnings(None) == []
+
+
+def test_io_layer_outside_route_layers_cap_rejected():
+    # Issue #4802: a signal-layer cap that excludes an io layer is rejected
+    # at request time, naming the cap and the offending layer.
+    lib = _validate_library({"route_layers": {"low": "met2", "high": "met3"}})
+    io = {"layer_h": "met3", "layer_v": "met4"}
+    with pytest.raises(PlaceAndRouteError, match=r"layer_v 'met4'.*met2-met3"):
+        place_and_route._validate_io(io, "sky130_fd_sc_hd", lib)
+    # Same io under the built-in range (met1-met5) is fine.
+    assert place_and_route._validate_io(io, "sky130_fd_sc_hd", None) == io
+    # A cap equal to a single layer containing both io layers is accepted.
+    one = _validate_library({"route_layers": {"low": "met2", "high": "met2"}})
+    io2 = {"layer_h": "met2", "layer_v": "met2"}
+    assert place_and_route._validate_io(io2, "sky130_fd_sc_hd", one) == io2
+
+
+def test_signal_routing_layers_honors_override():
+    lib = _validate_library({"route_layers": {"low": "met2", "high": "met3"}})
+    assert place_and_route._signal_routing_layers("sky130_fd_sc_hd", lib) == (
+        "met2",
+        "met3",
+    )

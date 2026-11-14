@@ -1,0 +1,13 @@
+Merge the reports of N per-request `klt sim` runs (one corner grid split
+across requests) into the report a single request over the whole grid would
+have produced. Rollups, coverage and counters are recomputed over the union; a
+missing, duplicate, unexpected or mismatching report is refused with a
+distinct exit code. See docs/cli/sim.md 'Merging per-request reports'.
+
+positional arguments:
+  manifest shard manifest JSON (planned requests and expected corners)
+  report per-request klt sim report JSON
+
+options:
+  -h, --help show this help message and exit
+  --format {text,json} output format (default: text)

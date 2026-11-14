@@ -12,6 +12,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 
 import klayout.db as kdb
 import pytest
@@ -58,7 +59,11 @@ def _write_lvsdb(
     l2n.connect(bulk)
     l2n.extract_netlist()
     ref = kdb.Netlist()
-    ref.read(schem, kdb.NetlistSpiceReader())
+    # The stock reader needs a C-card value the deck's reader doesn't (#4817).
+    patched = schem + ".stock.sp"
+    with open(schem) as src, open(patched, "w") as dst:
+        dst.write(src.read().replace(" sky130_fd_pr__model", " 0 sky130_fd_pr__model"))
+    ref.read(patched, kdb.NetlistSpiceReader())
     l2n.reference = ref
     if compare:
         l2n.compare(kdb.NetlistComparer())
@@ -152,6 +157,116 @@ def test_driver_exit_zero_on_mismatch_is_a_mismatch(tmp_path, fake_klayout):
     assert "device.unmatched" in cats
     assert report["device_census"]["layout"]["NMOS"] == 2
     assert report["device_census"]["reference"]["NMOS"] == 1
+
+
+def test_unresolved_x_call_in_reference_is_reported(tmp_path, fake_klayout):
+    request = json.loads(_request(tmp_path, 1))
+    sp = tmp_path / "ref.sp"
+    sp.write_text(
+        SPICE_ONE.replace(
+            ".ends", "XC1 a b sky130_fd_pr__cap_mim_m3_1 W=1u L=1u\n.ends"
+        )
+    )
+    report = run_lvs(json.dumps(request))
+    assert report["status"] == "mismatch"
+    found = [
+        m
+        for m in report["mismatches"]
+        if m["category"] == "reference.unresolved_subckt_call"
+    ]
+    assert len(found) == 1
+    assert found[0]["subcircuit"]["reference"] == "SKY130_FD_PR__CAP_MIM_M3_1"
+    assert found[0]["instance"]["reference"].upper() == "C1"
+
+
+def test_defined_x_call_in_reference_is_not_reported(tmp_path, fake_klayout):
+    request = json.loads(_request(tmp_path, 1))
+    sp = tmp_path / "ref.sp"
+    sp.write_text(
+        ".subckt CELL p q\nR1 p q 1k\n.ends\n"
+        ".subckt TOP\nM1 c b a d NMOS L=0.2u W=0.4u\nX1 a b CELL\n.ends\n"
+    )
+    report = run_lvs(json.dumps(request))
+    assert not [
+        m
+        for m in report["mismatches"]
+        if m["category"] == "reference.unresolved_subckt_call"
+    ]
+
+
+def _unresolved(report):
+    return [
+        m
+        for m in report["mismatches"]
+        if m["category"] == "reference.unresolved_subckt_call"
+    ]
+
+
+def test_x_call_to_declared_device_class_is_not_reported(tmp_path, fake_klayout):
+    request = json.loads(_request(tmp_path, 1))
+    sp = tmp_path / "ref.sp"
+    sp.write_text(SPICE_ONE.replace(".ends", "X2 a b c d nmos W=1u L=1u\n.ends"))
+    assert not _unresolved(run_lvs(json.dumps(request)))
+
+
+def test_x_call_in_deck_device_list_is_not_reported(tmp_path, fake_klayout):
+    """The runset renames some DEVICE_LIST callees (sky130 special_nfet_01v8
+    -> nfet_01v8), so no declared class carries the called name."""
+    request = json.loads(_request(tmp_path, 1))
+    (tmp_path / "pdk.lvs").write_text(
+        'DEVICE_LIST = [\n  "foo_special_dev".upcase,  # renamed\n'
+        '  "other_dev".upcase,\n]\n'
+    )
+    sp = tmp_path / "ref.sp"
+    sp.write_text(
+        SPICE_ONE.replace(
+            ".ends", "X2 a b c d foo_special_dev W=1u\nX3 a b unlisted_dev\n.ends"
+        )
+    )
+    found = _unresolved(run_lvs(json.dumps(request)))
+    assert [m["subcircuit"]["reference"] for m in found] == ["UNLISTED_DEV"]
+
+
+def test_deck_device_list_parsing(tmp_path):
+    deck = tmp_path / "d.lvs"
+    deck.write_text('X = 1\nDEVICE_LIST = [\n "a_b".upcase, # c "z"\n "c".upcase\n]\n')
+    assert lvs_runset._deck_device_list(str(deck)) == {"A_B", "C"}
+    assert lvs_runset._deck_device_list(str(tmp_path / "missing")) == set()
+
+
+def test_deck_device_list_parses_real_sky130_block():
+    """Verbatim excerpt of the real sky130B ``sky130.lvs`` (see the fixture
+    header for the PDK version) -- not a hand-written deck."""
+    deck = os.path.join(
+        os.path.dirname(__file__),
+        "fixtures",
+        "sky130_lvs_deck",
+        "device_list_excerpt.lvs",
+    )
+    names = lvs_runset._deck_device_list(deck)
+    assert {
+        "SKY130_FD_PR__NFET_01V8",
+        "SKY130_FD_PR__PFET_01V8_HVT",
+        "SKY130_FD_PR__SPECIAL_NFET_01V8",
+        "SKY130_FD_PR__SPECIAL_PFET_01V8_HVT",
+        "SKY130_FD_PR__NPN_05V5_W1P00L1P00",
+    } <= names
+    assert "SKY130_FD_PR__CAP_MIM_M3_1" not in names
+
+
+def test_deck_device_list_parses_installed_sky130_deck():
+    import glob
+
+    decks = glob.glob(
+        os.path.expanduser(
+            "~/.ciel/ciel/sky130/versions/*/sky130B/libs.tech/klayout/lvs/sky130.lvs"
+        )
+    )
+    if not decks:
+        pytest.skip("no installed sky130 klayout LVS runset")
+    names = lvs_runset._deck_device_list(decks[0])
+    assert "SKY130_FD_PR__SPECIAL_NFET_01V8" in names
+    assert len(names) > 50
 
 
 def test_zero_devices_recognized_is_not_clean(tmp_path, fake_klayout):
@@ -371,15 +486,10 @@ def test_real_binary_version_probe():
 
 def _spice_netlist(text: str) -> kdb.Netlist:
     netlist = kdb.Netlist()
-    reader_input = kdb.NetlistSpiceReader()
-    import os
-    import tempfile
-
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "n.sp")
-        with open(path, "w") as fh:
-            fh.write(text)
-        netlist.read(path, reader_input)
+        open(path, "w").write(text)
+        netlist.read(path, kdb.NetlistSpiceReader())
     return netlist
 
 

@@ -8,6 +8,7 @@ from klayout_tools.place_and_route import _stage_script_lines
 from klayout_tools.place_and_route_pins import (
     check_pin_constraints,
     netlist_top_ports,
+    pin_abutment,
     pin_constraint_lines,
     read_def_instance_groups,
     read_def_pins,
@@ -350,3 +351,112 @@ def test_integration_real_openroad_pin_constraints_land_on_requested_edges(
         expected[f"b_in[{bit}]"] = "south"
         expected[f"result[{bit}]"] = "east"
     assert edge_of == expected
+
+
+@pytest.mark.skipif(
+    not HAVE_OPENROAD, reason="openroad is not installed on this machine"
+)
+@pytest.mark.skipif(
+    _REAL_SKY130_PNR_VARIANT is None,
+    reason="no real sky130_fd_sc_hd LEF/liberty/GDS set resolves via list_pdks()",
+)
+def test_integration_real_openroad_ordered_range_pins_stay_in_range_and_order(
+    tmp_path, monkeypatch
+):
+    """`ordered` + `range_um` end to end against a real `openroad` (issue
+    #3930): the matched bus bits land inside the requested offset window on
+    the requested edge, in listed (ascending-index) order."""
+    root, variant = _REAL_SKY130_PNR_VARIANT
+    monkeypatch.setenv("PDK_ROOT", root)
+    monkeypatch.setenv("PDK", variant)
+
+    from klayout_tools.synthesize import run_synthesize
+
+    (tmp_path / "gcd.v").write_text(_GCD_RTL, encoding="utf-8")
+    synth_request = _write_request(
+        tmp_path / "synth_request.json",
+        {
+            "engine": "yosys",
+            "sources": ["gcd.v"],
+            "hdl_toplevel": "gcd",
+            "pdk": {"cell_library": "sky130_fd_sc_hd"},
+        },
+    )
+    synth_report = run_synthesize(synth_request)
+
+    lo, hi = 10.0, 40.0
+    request_path = _write_request(
+        tmp_path / "pnr_request.json",
+        _base_request(
+            netlist=_synth_netlist_path(synth_request, "gcd", synth_report["run_id"]),
+            pdk={"cell_library": "sky130_fd_sc_hd"},
+            floorplan={
+                "method": "utilization",
+                "utilization_pct": 38,
+                "aspect_ratio": 1.0,
+                "core_margin_um": 2.0,
+                "site": "unithd",
+            },
+            io={
+                **IO,
+                "pin_constraints": [
+                    {
+                        "pins": ["result[*]"],
+                        "edge": "east",
+                        "range_um": [lo, hi],
+                        "ordered": True,
+                    },
+                ],
+            },
+            constraints={"clock_port": "clk", "clock_period_ns": 1.1},
+        ),
+    )
+    report = run_place_and_route(request_path)
+
+    assert report["status"] == "ok"
+    by_name = {pin["name"]: pin for pin in report["pins"]}
+    bits = [by_name[f"result[{bit}]"] for bit in range(16)]
+    assert {pin["edge"] for pin in bits} == {"east"}
+    ys = [pin["y_um"] for pin in bits]
+    assert ys == sorted(ys) or ys == sorted(ys, reverse=True), ys
+    assert len(set(ys)) == 16, ys
+    assert all(lo <= y <= hi for y in ys), ys
+
+
+def _pin(name, edge, x, y):
+    return {"name": name, "edge": edge, "x_um": x, "y_um": y, "layer": "met3"}
+
+
+def test_pin_abutment_reports_aligned_and_misaligned_pairs():
+    constraints = [
+        {"pins": ["w[*]"], "edge": "west"},
+        {"pins": ["e[*]"], "edge": "east"},
+        {"pins": ["n"], "edge": "north"},
+    ]
+    ports = ["w[0]", "w[1]", "e[0]", "e[1]", "n"]
+    pins = [
+        _pin("w[0]", "west", 0, 10.0),
+        _pin("w[1]", "west", 0, 11.0),
+        _pin("e[0]", "east", 50, 10.0),
+        _pin("e[1]", "east", 50, 13.5),
+        _pin("n", "north", 5, 50),
+    ]
+    result = pin_abutment(constraints, ports, pins)
+    assert len(result) == 1  # west/east only; north has no facing entry
+    record = result[0]
+    assert record["entries"] == [0, 1] and record["shared"] == "y"
+    assert record["aligned"] is False
+    assert [p["aligned"] for p in record["pairs"]] == [True, False]
+    assert record["pairs"][1]["delta_um"] == 2.5
+
+
+def test_pin_abutment_count_mismatch_and_unknown_inputs():
+    constraints = [
+        {"pins": ["a[*]"], "edge": "north"},
+        {"pins": ["b"], "edge": "south"},
+    ]
+    ports = ["a[0]", "a[1]", "b"]
+    record = pin_abutment(constraints, ports, [])[0]
+    assert record["aligned"] is None and "cannot pair" in record["reason"]
+    assert pin_abutment(constraints, None, []) == []
+    assert pin_abutment(None, ports, []) == []

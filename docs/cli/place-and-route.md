@@ -169,7 +169,7 @@ wrapper falls back to `klt pdk find --format json | jq -r .root` so the
 mount always matches whatever root `klt place-and-route` itself resolves,
 rather than mounting nothing (issue #1868 — see the "Gotcha" note above).
 It fetches a full open_pdks-layout sky130A PDK via the pinned
-`volare enable --pdk sky130 c6d73a35f524070e85faff4a6a9eef49553ebc2b`
+`ciel enable --pdk-family sky130 -l sky130_fd_pr -l sky130_fd_sc_hd f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7`
 (matching `scripts/aws/build-remote-sim-ami.sh`'s own pin) — the full
 LEF/tech-LEF/liberty tree this command's PDK resolution needs, not the
 liberty-only subset `.github/workflows/ci.yml`'s `test` job already caches
@@ -469,6 +469,49 @@ changes that net's own routing, so this mirrors ORFS's own
 then reports the post-repair violation count (`antenna_violation_count`)
 before `write_def`.
 
+## Resuming an interrupted run (`--resume`, issue #4411)
+
+A `route` stage on a large block can run for hours; if the `klt` process dies
+afterwards (host tool replaced, OOM, kill), the stage ODBs are on disk but a
+plain re-invocation starts again from `floorplan` — and, with `outputs.dir`
+set, is refused because the directory is populated. `--resume` picks the run
+up instead:
+
+```
+klt place-and-route request.json --resume
+```
+
+After each stage finishes, the flow writes `<top>_<stage>.commit.json` next to
+the checkpoint, holding the stage's `stages[]` entry, its `engine_logs`, the
+artifacts it produced (`<top>_<stage>.odb`, `<top>_<stage>_metrics.json`, plus
+`<top>.def` and `<top>.v` for `route`) and an **input hash**. On `--resume`,
+each stage in order is skipped iff its record exists, its input hash matches,
+and every listed artifact is still on disk. The first stage that fails the
+check — and every stage after it — runs normally. If every stage up to
+`target_stage` is reusable, only the DEF→GDS merge (and any `post_route_spef`
+pass) and response assembly run.
+
+The input hash covers the previous stage's hash (so a change invalidates all
+later stages), the request document except `target_stage`, the stage's
+generated Tcl script text, and the content hashes of the netlist, tech/cell
+LEF, liberty, and any macro LEF/liberty. A stage killed mid-run has no record
+(it is written last, and any stale one is deleted before the stage re-runs),
+so a partial `.odb` is never reused.
+
+* `--resume` lifts the populated-`outputs.dir` refusal (like `--rerun`). On an
+  empty or missing directory it behaves as a normal run.
+* Without `--resume`, behaviour is unchanged (the refusal stands) and the
+  response has no `resume` field.
+* The response gains an optional `resume` object, present only under
+  `--resume`: `{"resumed_stages": ["floorplan", "place", ...]}` (empty when
+  nothing was reusable). All other fields have the same shape and, for
+  reused stages, the same values as an uninterrupted run (`engine_logs`
+  entries of reused stages are the recorded ones).
+* Refused with a clear error (exit 1): `--resume` together with
+  `pdk.rebuild_corners` (each corner re-runs in full; resume is not applied
+  per corner), and `--resume` together with `--check`.
+* Out of scope: resuming inside a stage, and the `--backend batch` path.
+
 ## Floorplan methods
 
 Three of ORFS's four floorplan-initialization methods are supported (the
@@ -514,6 +557,56 @@ Each entry needs `layer` (non-empty string, unique across entries) and the four
 finite numbers `x_offset_um`, `x_pitch_um`, `y_offset_um`, `y_pitch_um`
 (pitches `> 0`, offsets `>= 0`). Layers not listed get no tracks, so list every
 layer routing needs. Omitted, the script is byte-identical to before.
+
+#### ASAP7 RVT example (M4-M7 on the DRC deck's grid)
+
+The packaged ASAP7 deck's `M4.AUX.*` rules assume wire centres sit at a 0 nm
+origin plus a fixed offset per pitch class. For `asap7sc7p5t_rvt`, give M4/M5
+(0.048 um pitch) a 0.012 um offset and M6/M7 (0.064 um pitch) a 0.016 um
+offset, so wire centres land at `48k + 12` nm and `64k + 16` nm and
+minimum-width edges fall on that grid:
+
+```json
+"tracks": [
+  {"layer": "M4", "x_offset_um": 0.012, "x_pitch_um": 0.048,
+   "y_offset_um": 0.012, "y_pitch_um": 0.048},
+  {"layer": "M5", "x_offset_um": 0.012, "x_pitch_um": 0.048,
+   "y_offset_um": 0.012, "y_pitch_um": 0.048},
+  {"layer": "M6", "x_offset_um": 0.016, "x_pitch_um": 0.064,
+   "y_offset_um": 0.016, "y_pitch_um": 0.064},
+  {"layer": "M7", "x_offset_um": 0.016, "x_pitch_um": 0.064,
+   "y_offset_um": 0.016, "y_pitch_um": 0.064}
+]
+```
+
+Remember to also list the lower layers (M1-M3) your routing uses, since
+unlisted layers get no tracks. This is a documented preset, not a default:
+no offsets are applied unless you set `floorplan.tracks`. The offsets come from
+the reporter of issue #4493; the `M4.AUX.1`/`M4.AUX.2` improvement versus
+offset 0 (~9.6k violations each on ~1,000 um^2) has not been re-measured in
+this repo, so check it with `klt drc --engine klayout` on your own block.
+
+#### ASAP7 track-alignment residual (router M4 stub ends)
+
+Setting `floorplan.tracks` offsets to the packaged ASAP7 deck's grid (#4493)
+aligns the router's *track* positions, not its *wire ends*. The detailed router
+chooses where a short M4 stub ends (e.g. a stub running from a via landing to a
+coordinate 61 nm from the via centre), and that choice is not checked against
+the deck's track-alignment rules. The request has no control for it, and
+`klt place-and-route` does not snap routed geometry after the fact.
+
+Expect a small residual of `M4.AUX.2` (minimum-width M4 off a routing track) and
+`M4.W.3` (vertical M4 width an even multiple of 24 nm) point markers from
+`klt drc` on the merged GDS. As observed by the issue author on the 2026-10
+ASAP7 reproducer, with the `floorplan.tracks` offsets above and the PDN straps
+disabled (#4494), this was about 7 markers per block (4 `M4.AUX.2`, 3
+`M4.W.3`) against several thousand router shapes. This is a dated observation,
+not a guarantee or a pass/fail threshold.
+
+These markers carry no `source_cell` / `source_path` (both `null`), so they
+cannot be traced to a net or router shape. That is a `klt drc` attribution
+limit, not a place-and-route field. Rule definitions are in
+[`drc.md`](drc.md).
 
 ## PDK / LEF / liberty resolution
 
@@ -713,7 +806,7 @@ error otherwise.
 
 | `macros[]` field | Type | Description |
 | --- | --- | --- |
-| `instance` | string | The RTL/netlist instance name this macro placement applies to. Required, and must be unique across the array — a different thing from `cell` below, the *master* name, since a design may place several instances of one master. |
+| `instance` | string | The RTL/netlist instance name this macro placement applies to, written as OpenROAD names it. A name with escaped brackets (generate-loop instance) takes a **single** backslash per bracket, e.g. `top/blk/gen\[0\].inst`; the same brace-quoted string reaches both `place_macro` and the macro PDN grid. The old three-backslash workaround no longer works. Required, and must be unique across the array — a different thing from `cell` below, the *master* name, since a design may place several instances of one master. |
 | `lef` | string | Path to the macro's LEF abstract (e.g. `klt lef-abstract`'s own `output`). Required; must declare exactly one `MACRO`. Resolved relative to the request file's own directory. |
 | `x_um` / `y_um` | number | The macro's lower-left corner, in micrometres, in `place_macro -location`'s own coordinate space. Both required. |
 | `orientation` | string | One of `R0` (default) `R90` `R180` `R270` `MX` `MY` `MXR90` `MYR90` — OpenROAD's own orientation vocabulary. |
@@ -721,6 +814,7 @@ error otherwise.
 | `cell` | string \| omitted | Additive field (issue #2635), shared with `klt synthesize`/`klt sta`'s own `macros[].cell`. The macro's master name — derived from the LEF's own `MACRO` name when omitted; when given, must match it exactly. |
 | `lib` (alias `liberty`) | object\<string, string\> \| omitted | Additive field (issue #2635), the same per-corner liberty map `klt synthesize`/`klt sta` accept: `{"<corner>": "<path>"}`, with a reserved `"default"` fallback key. `read_liberty`'d alongside the standard-cell liberty in every stage (the floorplan stage's own load, and every later stage's post-`read_db` reload) at whichever corner each stage runs — a macro `lib` map with no entry for that corner (and no `"default"`) is a request error naming the macro, the corner, and the keys that are available. Omitted leaves every stage script byte-identical to before this field existed; the instance is still placed and merged into the GDS exactly as it was. |
 | `halo` | number \| object \| omitted | Additive field (issue #2635). A keep-out margin around the macro, in micrometres: either one non-negative number (uniform on all four sides) or an object naming any of `left`/`right`/`top`/`bottom` (each defaulting to `0`). Honored two ways during `"floorplan"` — see "Macro halos" below. Omitted emits neither and leaves the floorplan/PDN Tcl byte-identical. |
+| `keepout` | number \| object \| omitted | Additive field (issue #5313). Same shape and validation as `halo`, but **placement-only**: it widens the `create_blockage` rectangle around the macro and never reaches `define_pdn_grid`, so it is not subject to pdngen's halo limit (`PDN-0008`), needs no `request.power`, and needs no power pin in the LEF. When a macro declares both, each side of the single blockage is `max(halo, keepout)`; the PDN halo stays `halo` alone. Omitted leaves the Tcl byte-identical. See "Macro keep-outs" below. |
 
 **Macro-pin routability cross-check (#464).** A macro LEF pin that `klt
 lef-abstract` emitted with no `PORT` geometry at all (a pin whose declared
@@ -761,10 +855,27 @@ exists once it has a location):
    `add_pdn_connect` pair per halo'd macro, connecting the macro's own
    `USE POWER`/`USE GROUND` LEF pins (whichever routing layer their `PORT`
    geometry is actually on — read from the LEF, never asked for in the
-   request) up to the next strap layer above it in `power.straps`. This is
+   request) up to the next strap layer above it in `power.straps`. A pin
+   layer that is not itself a strap layer (e.g. `met3` with straps
+   `met1`/`met4`/`met5`) connects to the lowest strap above it, ordering
+   layers by their trailing number (`met3` < `met4`; `Metal3` < `Metal4`),
+   so no core strap is needed on the pin layer; a pin layer above every
+   strap, or a name with no trailing number, is a named request error
+   (issue #4703). This is
    the `v1` exclusion `request.power`'s own docstring has flagged since
    issue #1091 ("a design with hard macros needs a caller-supplied macro
    halo/grid spec"), closed by this field.
+
+**Macro PDN `-instances` escaping, live-verified (issue #5302, OpenROAD
+26Q3-1510-g6cb3f2b704).** For the db name `g_bank\[0\].u_bank/u_macro` (one
+backslash before each bracket), the six-backslash spelling the macro PDN grid
+emits is the only one of 1/2/3/4/6/8 backslashes per bracket that
+`define_pdn_grid -macro -instances` resolves (the others give PDN-1030 "Unable
+to find instance"), and the resulting grid takes `add_pdn_connect` and `pdngen`
+cleanly. A `PDN-0231` ("not connected to any power/ground nets") followed by
+`PDN-0217` ("No grid found") is therefore *not* an escaping failure: it
+reproduces identically for a plain instance name whose macro supply pins no
+`add_global_connection -pin_pattern` matches.
 
 A `halo` with no `request.power` in the same request gets only the
 placement blockage — a geometry-only run has no PDN grid to extend a macro
@@ -772,6 +883,26 @@ grid from in the first place. A `halo` whose macro LEF declares no `SIZE`,
 or no power/ground pin with `PORT` geometry (when `request.power` is also
 given), is a named request error — never a halo silently skipped, since
 that would honor it in the response and not in the actual run.
+
+### Macro keep-outs (`macros[].keepout`, issue #5313)
+
+`halo` couples two things: the placement blockage and the PDN macro-grid halo.
+pdngen rejects a halo beyond a small limit (about 2.3 µm on the reproducer
+chip), so a halo cannot be widened enough to keep standard cells off a macro's
+pin edges. `keepout` is the placement half only: one `create_blockage` over
+the macro footprint plus the keep-out, emitted after `place_macro` in the
+`"floorplan"` stage. With both fields set, each side of the blockage is
+`max(halo, keepout)`; `define_pdn_grid -halo` still receives `halo` alone.
+A `keepout` whose macro LEF declares no `SIZE` is a named request error.
+
+```json
+{"instance": "u_sram", "lef": "sram.lef", "x_um": 10, "y_um": 10,
+ "keepout": {"left": 8, "right": 8}}
+```
+
+The response echoes the applied value under `macros[].keepout`
+(`{left, bottom, right, top}` in µm, `null` when omitted). Whether a keep-out
+lowers `GRT-0116` overflow on a given chip is a measurement, not a guarantee.
 
 ## Timing-driven/repair-iteration routing flags (`route_critical_nets_percentage`, `max_antenna_repair_iterations`)
 
@@ -1116,6 +1247,23 @@ aimed at the caller's own tighter target actually hit it. That dual meaning
 is exactly what issue #2357 closes below: the two fields above alone cannot
 say *which* limit a given count reflects.
 
+#### Sizing macro channels (issue #5313)
+
+Read `congestion.global_route.overflow_regions` before widening a channel. In
+the `soc_top` reproducer (sky130-riscv-soc#37, eight 683 × 417 µm macros,
+123 signal pins each, 78.5 µm channels, 6.9 µm GCells), 92–97 % of the
+overflow sat in GCells whose centre is *inside* a macro footprint, on tiles
+with capacity 0 (e.g. 1357 of 1360 in the baseline). Those rows report
+`where: "inside_footprint"`. A wider channel or `macros[].keepout` does not
+touch them. Demand facing a channel is `pins / channel_height_um`: that run
+had 144 pins facing a 78.5 µm gap (1.83 pins/µm) and 70 facing another
+(0.89 pins/µm), yet moving the whole arrangement 5.44 µm changed total
+overflow from 1490 to 5119 at identical channel demand. When most regions
+are `keepout_band` or `macro: null` rows next to macro edges, a `keepout`
+(placement-only, independent of the PDN halo) is worth trying; when they are
+`inside_footprint`, change macro position against the GCell grid instead.
+These figures are from the reproducer's own records, not re-run here.
+
 #### Congestion and routability (`congestion`, issue #2994)
 
 Comparing floorplans of one netlist (a utilization or aspect-ratio sweep) needs
@@ -1130,7 +1278,16 @@ the engine's raw values:
   `resource`, `demand`, `usage_pct`, per-direction and total overflow) and
   `routed_net_count`. Overflow `0` everywhere means the global router found a
   legal solution. `max_gcell_usage_pct` is always `null`: the engine reports
-  usage per layer, not per GCell.
+  usage per layer, not per GCell. `overflow_regions` (issue #5313) is the
+  worst-20 overflowed GCells from `global_route -congestion_report_file`,
+  worst first: `direction` (`horizontal`/`vertical`), `layer`, `bbox_um`
+  (`[x1, y1, x2, y2]`), `capacity`, `usage`, `overflow`, and `macro`/`where`
+  naming the macro whose footprint holds the GCell centre
+  (`inside_footprint`) or whose footprint plus `halo`/`keepout` margin does
+  (`keepout_band`), else `null`. `layer` is `null` because OpenROAD
+  26Q3-1510-g6cb3f2b704 prints `-` in that field. The whole list is `null`
+  (reason in `null_reasons`) when no report was written or it held no
+  violation.
 - **`detailed_route`** — the violation series of the *first* `detailed_route`
   pass (the primary route, before antenna-repair reroutes): the count after the
   first iteration, `iteration_count`, the full `drc_violations_per_iteration`
@@ -1245,6 +1402,12 @@ fields below) is computed from `estimate_parasitics -global_routing` — a
 coarse Elmore-style RC estimate over the global-routing Steiner topology, not
 parasitics extracted from the actual detailed-routed geometry `write_def`
 commits to disk.
+
+`post_route_spef` / `post_route_sdf` also accept `asap7sc7p5t_rvt` (issue
+#4559): the pass extracts with `klt extract --deck asap7`, whose FinFET path
+honours the `--def-net-names` and `--pins` options the pass passes. A library
+with no extract-deck entry still fails at request validation, before any
+engine runs.
 
 The optional boolean `post_route_spef` request field (default `false`) opts
 in to a real-parasitics **A/B** pass on top of that existing behaviour, never
@@ -1983,34 +2146,54 @@ live re-measurement above.
 | `io.layer_h` / `.layer_v` | string | Horizontal/vertical I/O routing layers for `place_pins`. Required once `target_stage` reaches `"place"` or later. |
 | `io.pin_constraints` | array\<object\> \| omitted | Additive field (issue #3885). Pins top-level ports to a die edge so a block can abut or tile with a neighbour. Each entry: `pins` (non-empty array of port names or globs; bus bits are `a[3]`, `a[*]` matches a bus), `edge` (`"north"` \| `"east"` \| `"south"` \| `"west"`), `range_um` (optional `[lo, hi]` offset along that edge, `0 <= lo < hi`), `ordered` (optional boolean, default `false`; keeps the matched pins in listed order via `-group -order`). Each entry emits one `set_io_pin_constraint` before `place_pins`. A pattern matching no top-level port of `netlist`, or a port matched by two entries, is a request error. A `range_um` with fewer pin slots than the entry has pins fails `place`; the error names the `pin_constraints[i]` entry (or quotes OpenROAD's `PPL-0110` line) with its pin and slot counts. See "Pin placement" for slot pitch and range semantics. Omitted or `[]`, the Tcl is byte-identical to before. |
 | `pins` (response) | array\<object\> \| null | Additive field (issue #3885). Final placement of every top-level pin, read from the DEF this run wrote: `name`, `edge` (nearest die edge), `x_um`, `y_um`, `layer`. Present for every run that reaches `place` (constrained or not); `null` at `target_stage: "floorplan"`. Lets a caller verify abutment from the envelope without parsing the DEF. |
-| `instance_groups` | array\<object\> \| omitted | Additive field (issue #4344). Names sets of instances whose final proximity the response reports. Each entry: `name` (unique non-empty string), `instances` (non-empty array of instance names or globs; `[`/`]` are literal), `max_extent_um` (optional number `> 0`). Measurement only: it does **not** constrain placement. Globs match the instance names in the written DEF, which are the post-synthesis (yosys/ABC-renamed, flattened) names visible in `verilog_path`. Omitted or `[]`, the request and response are unchanged apart from `instance_groups: []`. |
-| `instance_groups` (response) | array\<object\> \| null | Additive field (issue #4344). One entry per request group, read from the DEF `COMPONENTS` section: `name`, `matched` (instances matching any glob), `bbox` (`x_min_um`/`x_max_um`/`y_min_um`/`y_max_um` over the matched instances' placed **origins** (COMPONENTS carries no master size, so this is not a cell-extent box); `null` when nothing matched, never a fabricated box), `max_extent_um` (echo, or `null`), `within_extent` (`max(x-span, y-span) <= max_extent_um`; `null` without a bound or without a `bbox`). The run never fails on a violated extent; assert on it from the envelope. `[]` when no groups were requested; `null` at `target_stage: "floorplan"`. |
+| `pin_abutment` (response) | array\<object\> \| null | Additive field (issue #4156). Facing-pin abutment check over `pins[]`; see "Pin placement". `[]` without opposite-edge `io.pin_constraints` entries; `null` at `target_stage: "floorplan"`. |
+| `instance_groups` | array\<object\> \| omitted | Additive field (issue #4344). Names sets of instances whose final proximity the response reports. Each entry: `name` (unique non-empty string), `instances` (non-empty array of instance names or globs; `[`/`]` are literal), `max_extent_um` (optional number `> 0`), `region_um` (optional `[x0, y0, x1, y1]`, finite, `x0 < x1`, `y0 < y1`), `order` (optional `{axis: "x"\|"y", pitch_um?: number > 0}`; requires exact instance names, no globs, listed in the expected order). Measurement only: it does **not** constrain placement. Globs match the instance names in the written DEF, which are the post-synthesis (yosys/ABC-renamed, flattened) names visible in `verilog_path`. Omitted or `[]`, the request and response are unchanged apart from `instance_groups: []`. |
+| `instance_groups` (response) | array\<object\> \| null | Additive field (issue #4344). One entry per request group, read from the DEF `COMPONENTS` section: `name`, `matched` (instances matching any glob), `bbox` (`x_min_um`/`x_max_um`/`y_min_um`/`y_max_um` over the matched instances' placed **origins** (COMPONENTS carries no master size, so this is not a cell-extent box); `null` when nothing matched, never a fabricated box), `max_extent_um` (echo, or `null`), `within_extent` (`max(x-span, y-span) <= max_extent_um`; `null` without a bound or without a `bbox`). With `region_um`: echo plus `within_region` (every placed origin inside the closed rectangle; `null` if no member is placed, any matched member is unplaced, or a listed instance pattern matches nothing). With `order`: `order` block `{axis, members, ordered, pitch_um_measured, pitch_ok}` where `ordered` is strictly monotonic along the axis (either direction), `pitch_um_measured` the successive deltas and `pitch_ok` whether each `abs(delta)` matches `pitch_um` within 0.01 um; `ordered`/`pitch_ok` are `null` (and the deltas `[]`) when a member is unplaced. All additive. The run never fails on a violated extent, region or order; assert on it from the envelope. `[]` when no groups were requested; `null` at `target_stage: "floorplan"`. |
 | `macros` | array\<object\> \| omitted | Hard-macro instances to fix at a caller-given location — see "Hard-macro placement" above. `[]`/omitted when the design has none. |
 | `power` | object \| omitted | Power delivery (tapcell/PDN/fillers) — see "Power delivery" below. Omitted (the default) preserves prior behavior exactly for this full PDN: no tapcells/fillers. `sky130_fd_sc_hd` runs still emit a small, separate row-rail obstruction regardless (issue #1442) — see "Row-rail fallback" below. |
 | `power.power_net` / `.ground_net` | string \| omitted | Power/ground net names. Default `"VDD"`/`"VSS"`. Must differ from each other. |
-| `power.preset` | string \| omitted | Additive field (issue #2123). Names a shipped, per-platform PDN recipe — `"gf180mcu_7t_6M"`, `"gf180mcu_9t_6M"`, `"sg13g2"` (issue #2447), `"sky130hd"` — supplying `power.straps`/`power.connects` in place of hand-transcribed ones. **Mutually exclusive with explicit `power.straps`/`power.connects`** (supplying both is a validation error, not a per-field override). The preset's own standard-cell library must match `pdk.cell_library`. An unknown name is a validation error listing the supported set. Resolved before any other validation runs, so the recipe is checked and emitted exactly as an equivalent hand-written block would be — and echoed back in `power.straps[]`/`power.connects[]`, plus `power.preset`. See "Platform PDN presets" below for each recipe's upstream provenance and exact geometry. |
+| `power.preset` | string \| omitted | Additive field (issue #2123). Names a shipped, per-platform PDN recipe — `"gf180mcu_7t_6M"`, `"gf180mcu_9t_6M"`, `"sg13g2"` (issue #2447), `"sky130hd"`, `"asap7sc7p5t"` (issue #4494) — supplying `power.straps`/`power.connects` in place of hand-transcribed ones. **Mutually exclusive with explicit `power.straps`** (supplying both is a validation error, not a per-field override). An explicit `power.connects` (issue #4348) is allowed and *replaces* the preset's connect entries wholesale (`[]` = no via tuning); the response then sets `power.connects_overridden: true`. The preset's own standard-cell library must match `pdk.cell_library`. An unknown name is a validation error listing the supported set. Resolved before any other validation runs, so the recipe is checked and emitted exactly as an equivalent hand-written block would be — and echoed back in `power.straps[]`/`power.connects[]`, plus `power.preset`. See "Platform PDN presets" below for each recipe's upstream provenance and exact geometry. |
 | `power.straps` | array\<object\> | Required when `power` is given **unless** `power.preset` supplies it (issue #2123), non-empty. Each entry: `layer` (string, required), `width_um`/`pitch_um` (positive numbers, required), `offset_um` (number, default `0`), `spacing_um` (positive number, omitted by default — issue #1133), `followpins` (boolean, default `false`). Listed bottom-to-top; each consecutive pair is connected by an `add_pdn_connect` call. |
 | `power.tapcell` | object \| omitted | Additive field (issue #3051). Only key: `distance_um` — positive, finite number (µm) → `tapcell -distance`. Omitted, the per-library default applies and the Tcl is byte-identical to before. Zero, negative, boolean, string, a non-object `tapcell` or an unknown key is rejected; so is any override on a library that places no tapcells (`sg13g2_stdcell`), rather than being silently ignored. The pitch is a **placement input, not evidence of any diffusion-to-tap boundary distance** — measure the resulting stream. The effective value is echoed as `power.tapcell_distance_um`. |
 | `power.straps[].spacing_um` | number \| omitted | Additive field (issue #1133) → `add_pdn_stripe -spacing`. The paired power/ground stripe spacing on this strap's own layer (used when a grid draws power and ground as an adjacent pair on one layer rather than on a single pitch). Omitted (the default) emits no `-spacing` flag, byte-identical to before this field existed. Not tied to having a second strap — describes this stripe alone. |
-| `power.connects` | array\<object\> \| omitted | Additive field (issue #1133); mutually exclusive with `power.preset` (issue #2123). Per-pair `add_pdn_connect` via-stack tuning. Omitted (the default, `[]`) preserves this command's prior plain `add_pdn_connect -grid {grid} -layers {lower upper}` call for every consecutive `power.straps` pair. A pair with no matching entry here still gets that plain call — only pairs named in `power.connects` get the extra flags below. |
+| `power.connects` | array\<object\> \| omitted | Additive field (issue #1133). With `power.preset` (issue #4348) it replaces the preset's connect entries entirely (no per-entry merge). Per-pair `add_pdn_connect` via-stack tuning. Omitted (the default, `[]`) preserves this command's prior plain `add_pdn_connect -grid {grid} -layers {lower upper}` call for every consecutive `power.straps` pair. A pair with no matching entry here still gets that plain call — only pairs named in `power.connects` get the extra flags below. |
 | `power.connects[].layers` | array\<string\> | Required, exactly 2 entries: `[lower_layer, upper_layer]`. Must name one of `power.straps`'s own consecutive pairs, in that pair's own order — an unmatched or duplicated pair is a validation error. |
 | `power.connects[].max_columns` | integer \| omitted | → `add_pdn_connect -max_columns`. Positive integer when given. |
 | `power.connects[].ongrid` | array\<string\> \| omitted | → `add_pdn_connect -ongrid`. Non-empty list of layer names when given. |
 | `power.connects[].split_cuts` | object \| omitted | → `add_pdn_connect -split_cuts`. `{ layer: string, width_um: positive number }`, both required together when given. |
-| `constraints.clock_port` / `.clock_period_ns` | string / number | Clock port name + target period (ns). Required once `target_stage` reaches `"place"` or later — stages beyond floorplan have no meaning without a clock. |
+| `constraints.clock_port` / `.clock_period_ns` | string / number | Clock port name + target period (ns). Required once `target_stage` reaches `"place"` or later — stages beyond floorplan have no meaning without a clock. **Virtual clock** (issue #4913, additive): `clock_period_ns` *without* `clock_port` defines a port-less clock (`create_clock -name klt_virtual_clk -period P`) for purely combinational blocks; `input_delay_ns`/`output_delay_ns` then apply to every input/output, so slack is the real input-to-output budget (`period - in - out`) and `timing_status` is `constrained`. CTS is skipped (no registers). `clock_port` without `clock_period_ns`, or a non-positive period, is still an error. |
 | `constraints.max_transition_ns` | number \| omitted | Additive field (issue #1709) → `set_max_transition <ns> [current_design]`. Positive number when given. Emitted right after the clock constraint (`create_clock`), before `repair_design`/`repair_timing`, aiming that already-generated optimiser at a caller-given max-slew target instead of only whatever limit the resolved liberty deck declares. Omitted (the default) emits no `set_max_transition` line, byte-identical to this command's behavior before this field existed. |
 | `constraints.max_capacitance_pf` | number \| omitted | Additive field (issue #1709) → `set_max_capacitance <pf> [current_design]`. Positive number when given; same emission point and omitted-default behavior as `max_transition_ns` above. |
 | `constraints.max_fanout` | number \| omitted | Additive field (issue #1709) → `set_max_fanout <n> [current_design]`. Positive number when given; same emission point and omitted-default behavior as `max_transition_ns` above. Useful for standard-cell libraries that declare no fanout limit of their own (`default_max_fanout`/per-pin `max_fanout` absent from the liberty), where `repair_design` would otherwise have nothing to aim at for fanout. Note the response reports **no** fanout violation count to go with it — see "Design-rule-check verdict" for the `sta::max_fanout_violation_count` SIGSEGV that rules one out. |
+| `constraints.power_activity` | object \| omitted | Additive field (issue #4914). `{"activity"?: number >= 0, "duty"?: number in [0, 1]}`, at least one key; validation, errors and semantics are `klt sta`'s (issue #3744). Emitted as `set_power_activity -global ...` before the power report in each stage that reports power, so `estimated_power_mw` is computed under it; echoed in `power_basis`. Global activity/duty only (no VCD/SAIF). Omitted, the generated Tcl and every number are unchanged. |
 | `constraints.input_delay_ns` | number \| omitted | Additive field (issue #1865) → `set_input_delay <ns> -clock <clock_port>` on every **non-clock** input port. Non-negative number when given (`0` is valid and meaningful — "the port is valid exactly at the clock edge"); **requires** `constraints.clock_port`/`.clock_period_ns`, since `set_input_delay` is defined relative to a named clock. Omitted (the default) emits no `set_input_delay` line, byte-identical to this command's behavior before this field existed. Without it, a design whose only timing paths run *input port → register* has no constrained startpoint and every slack field degrades to the unconstrained sentinel — see "I/O timing constraints" below. |
 | `constraints.output_delay_ns` | number \| omitted | Additive field (issue #1865) → `set_output_delay <ns> -clock <clock_port> [all_outputs]`. Same validation, same clock requirement, and same omitted-default behavior as `input_delay_ns` above; the two are independently optional (either alone is valid). Covers the *register → output port* half of the same gap. |
 | `seed` | integer | Placement/routing seed. **Required** — P&R is genuinely stochastic; a stored result must be reproducible. Echoed unchanged in the response. |
 | `target_stage` | string | One of `"floorplan"`, `"place"`, `"cts"`, `"route"` (default) — how far this run is asked to go. See "Partial completion" below. |
 | `route_critical_nets_percentage` | integer \| omitted | 0–100, default `0` (no flag emitted). Percentage of worst-slack nets `global_route` treats as timing-critical during congestion-removal iterations (`-critical_nets_percentage`, issue #939). `0` reproduces this command's prior behaviour exactly — the A/B disable path. Not evaluated with a real OpenROAD A/B run as of this field's introduction; see "Timing-driven/repair-iteration routing flags" for the audit methodology and its limitations. |
+| `placement_density` | number \| omitted | `0 < x <= 1`, default `0.6`. Target density for `global_placement -density` (issue #4716). Omitted reproduces the prior fixed `0.6` exactly. Lower values spread cells and can relieve localized congestion; not evaluated against any specific failing design. |
+| `route_congestion_iterations` | integer \| omitted | `>= 1`; omitted emits no flag. Passed as `global_route -congestion_iterations <n>` (issue #4716). Accepted but unused when `target_stage` stops before `route`. |
+| `route_allow_congestion` | boolean \| omitted | Default `false` (no flag). `true` emits `global_route -allow_congestion` so the route stage continues past residual global-routing overflow (issue #4716); the final congestion report is still scraped into the response. |
 | `max_antenna_repair_iterations` | integer \| omitted | 0–8, default `1`. Zero disables antenna repair/reroute passes; initial routing and the final antenna check still run. Repeats the `"route"` stage's `repair_antennas`/`detailed_route` reroute pair this many times (issue #939), a bounded flow-level generalisation of the single pass issue #759 shipped. No early exit on a zero-violation `check_antennas` result — every pass runs unconditionally. |
-| `library` | object \| omitted | Additive field (issue #4086): per-library inputs for a standard-cell library with no built-in table, or an override of a built-in entry. Unknown keys are rejected. All keys optional: `cts_buffer` (non-empty string, the `clock_tree_synthesis` buffer cell); `power_pins` (list of `{"net_role": "power"\|"ground", "pattern": str, "primary": bool}`, exactly one primary per role, emitted as the `add_global_connection` lines a table entry would produce); `wire_rc` (`{"resistance_ohm_per_um": >0, "capacitance_pf_per_um": >0}`, emitted as `set_wire_rc -signal`/`-clock -resistance … -capacitance …` in place of `set_wire_rc -layer <io.layer_v>` in the `place`, `cts` and post-route STA scripts; values are passed to OpenROAD verbatim. Capacitance is always pF/um: the scripts emit `set_cmd_units -time ns -capacitance pF` before `set_wire_rc`, independent of the Liberty `capacitive_load_unit`, so convert from fF first, e.g. ASAP7's 0.16579 fF/um is `0.00016579`. The resistance unit is not pinned: OpenROAD reads it in the first Liberty file's resistance unit (ASAP7 `report_units` prints `resistance 1kohm`), so convert if that is not what you supply). Omitted ⇒ scripts are byte-identical to before. Routing and power inputs (issue #4127): `route_layers` (`{"low": str, "high": str}`, emitted as `set_routing_layers`'s `low-high` range at `route`); `antenna_diode` (`{"cell": str, "pin": str}`, the `repair_antennas` diode, or JSON `null` (issue #4274) to state the library has no antenna diode and no antenna rules, e.g. ASAP7: the `route` stage then emits no `repair_antennas` call and no reroute pass, exactly like `max_antenna_repair_iterations: 0`, while the initial `detailed_route`, `check_antennas` and routing-completeness still run, and the response `warnings` states that antenna repair did not run; distinct from omitting the key, i.e. "unverified", which is still rejected at `route` for a library with no built-in entry); `tapcell` (`{"master": str, "endcap": str\|null, "distance_um": >0}` for the `request.power` `tapcell` call, or JSON `null` to state the library has no tap/endcap cells, which is distinct from omitting it, i.e. "unverified"); `filler` (non-empty list of filler master names for `filler_placement` and the power audit). Together with `cts_buffer`, `power_pins` and `wire_rc` these let a library with no built-in table reach `route` with a `power` block. A supplied key overrides a built-in entry. A request missing several per-library inputs is rejected up front with **one** error listing all of them, each naming the `library` field that supplies it (`[supply request.library.<key>]`). For a library with no built-in CTS/power table, a tech-LEF `io.layer_v` without `RESISTANCE RPERSQ` is also reported (it otherwise fails at `place` with OpenROAD `RSZ-0089`). |
+| `library` | object \| omitted | Additive field (issue #4086): per-library inputs for a standard-cell library with no built-in table, or an override of a built-in entry. Unknown keys are rejected. All keys optional: `cts_buffer` (non-empty string, the `clock_tree_synthesis` buffer cell); `power_pins` (list of `{"net_role": "power"\|"ground", "pattern": str, "primary": bool}`, exactly one primary per role, emitted as the `add_global_connection` lines a table entry would produce); `wire_rc` (`{"resistance_ohm_per_um": >0, "capacitance_pf_per_um": >0}`, emitted as `set_wire_rc -signal`/`-clock -resistance … -capacitance …` in place of `set_wire_rc -layer <io.layer_v>` in the `place`, `cts` and post-route STA scripts; values are passed to OpenROAD verbatim. Capacitance is always pF/um: the scripts emit `set_cmd_units -time ns -capacitance pF` before `set_wire_rc`, independent of the Liberty `capacitive_load_unit`, so convert from fF first, e.g. ASAP7's 0.16579 fF/um is `0.00016579`. The resistance unit is not pinned: OpenROAD reads it in the first Liberty file's resistance unit (ASAP7 `report_units` prints `resistance 1kohm`), so convert if that is not what you supply). Omitted ⇒ scripts are byte-identical to before. Routing and power inputs (issue #4127): `route_layers` (`{"low": str, "high": str}`, emitted as `set_routing_layers`'s `low-high` range at `route`; it also **caps the signal routing layers** (issue #4802), e.g. `{"low": "Metal2", "high": "Metal4"}` for `gf180mcu_fd_sc_mcu7t5v0` to reserve the top metal for power/clock, and a cap that excludes `io.layer_h`/`io.layer_v` is rejected at request time naming the cap and the layer; the resolved range is echoed in `applied.signal_layers`); `antenna_diode` (`{"cell": str, "pin": str}`, the `repair_antennas` diode, or JSON `null` (issue #4274) to state the library has no antenna diode and no antenna rules, e.g. ASAP7: the `route` stage then emits no `repair_antennas` call and no reroute pass, exactly like `max_antenna_repair_iterations: 0`, while the initial `detailed_route`, `check_antennas` and routing-completeness still run, and the response `warnings` states that antenna repair did not run; distinct from omitting the key, i.e. "unverified", which is still rejected at `route` for a library with no built-in entry); `tapcell` (`{"master": str, "endcap": str\|null, "distance_um": >0}` for the `request.power` `tapcell` call, or JSON `null` to state the library has no tap/endcap cells, which is distinct from omitting it, i.e. "unverified"); `filler` (non-empty list of filler master names for `filler_placement` and the power audit). Together with `cts_buffer`, `power_pins` and `wire_rc` these let a library with no built-in table reach `route` with a `power` block. A supplied key overrides a built-in entry. A request missing several per-library inputs is rejected up front with **one** error listing all of them, each naming the `library` field that supplies it (`[supply request.library.<key>]`). For a library with no built-in CTS/power table, a tech-LEF `io.layer_v` without `RESISTANCE RPERSQ` is also reported (it otherwise fails at `place` with OpenROAD `RSZ-0089`). |
 | `post_route_spef` | boolean \| omitted | Default `false`. Opts in to the real-parasitics A/B pass described in "Post-route SPEF STA" above — populates the response's `spef_sta` field. Off by default (real added wall-clock cost); has no effect unless `target_stage` reaches `"route"` (issue #948). |
 | `post_route_sdf` | boolean \| omitted | Default `false`. **Requires `post_route_spef: true`** (exit 1 otherwise). Adds one `write_sdf` call to that same post-`read_spef` OpenSTA session and reports the written file as `spef_sta.sdf_path` — see "SDF export" above (issue #1002). |
+| `outputs` | object \| omitted | Additive field (issue #4231), mirroring `klt synthesize`'s `outputs.dir`. `{"dir": "<path>"}` replaces `.klt/place-and-route/` as the directory every artifact (DEF/GDS/Verilog/SPEF, Tcl, ODB, metrics) is written to; relative paths resolve against the request file's directory. Multi-corner requests write `<dir>/<corner>/` and `corner_runs[].output_dir` names it. Response paths are produced from this directory, so they name the committed location and `portable_paths` rewrites them as usual. Unknown keys and a non-string/empty `dir` are rejected, as is a `dir` that already exists and is non-empty (prior evidence is retained); an existing empty directory is accepted. The output-dir lock is held on this directory. `--check --rerun` reuses the directory in place (overwriting its own artifacts), so the non-empty refusal does not apply to a re-run. Not supported with `--backend batch` (rejected with an error). Omitting `outputs` leaves behaviour and JSON unchanged. |
+| `output_dbu_um` | number \| omitted | Additive field (issue #4482). Default unset: the merged GDS keeps the tech LEF's `DATABASE MICRONS` dbu, byte-identical to before. A positive value (um), e.g. `0.00025`, rewrites the merged GDS at that dbu so a deck written for a finer grid (the packaged ASAP7 DRC deck) sees no rounding artefacts. Only a lossless integer refinement is accepted (`0.001` → `0.00025` is ×4; equal to the native dbu is a no-op); a coarsening or non-integer ratio raises a `PlaceAndRouteError` and writes no GDS. Not a positive number → `PlaceAndRouteError`. The effective dbu is reported as `gds_dbu_um`. No `schema_version` bump. |
 | `portable_paths` | boolean \| omitted | Additive field (issue #3820). Default `false`: the response is byte-identical to before this field existed (absolute paths, which `klt extract --def-pins` and `klt signoff` chain on). `true` rewrites every absolute host path in the response — `def_path`, `unrouted_def_path`, `gds_path`, `verilog_path`, `stages[].def_path`, `power.placed.def_path`, `spef_sta.*_path`, `layer_map.path`, and paths embedded in messages — so it can be committed as evidence and passes `klt env-provenance lint-envelope`: inside the repo → `{"path": "<repo-relative>", "scope": "repo"}`; outside it (or no git root) → `{"path": null, "scope": "external"}`; under the PDK root → a `"$PDK_ROOT/<relative>"` string. Fields that are `null` stay `null`. An `external` path cannot be chained into `--def-pins`; keep `output_dir` inside the repo if you need both. No `schema_version` bump. |
+
+### Unknown request keys are errors (issue #4230)
+
+An unrecognised **top-level** request key is rejected with an error naming it
+and the request file (exit 1, nothing written), instead of being dropped in
+silence — a misspelt `post_route_spef` can no longer pass for a deliberate
+default. Recognised keys: `schema`, `engine`, `netlist`, `hdl_toplevel`, `pdk`,
+`floorplan`, `io`, `macros`, `power`, `constraints`, `seed`, `target_stage`,
+`route_critical_nets_percentage`, `placement_density`, `route_congestion_iterations`, `route_allow_congestion`, `max_antenna_repair_iterations`, `library`,
+`post_route_spef`, `post_route_sdf`, `portable_paths`, `output_dbu_um`, `backend`, `batch`, `outputs`,
+`instance_groups`; the `_comment` annotation is also accepted (its contents are never read). The same
+check applies to `--check` and `pdk.rebuild_corners`. Nested objects (`pdk`,
+`floorplan`, …) are not yet checked for unknown keys.
 
 ### IO pin layers must be inside the signal-routing range (#2473)
 
@@ -2080,6 +2263,16 @@ be within the target `--deck`'s own label-layer coverage (cross-check with
 
 ## Response
 
+> **Committing a report as evidence?** The default response carries
+> absolute host paths (`def_path`, `unrouted_def_path`, `gds_path`,
+> `verilog_path`, `power.placed.def_path`, `layer_map.path`, ...) because
+> `klt extract --def-pins` and `klt signoff` chain on those strings, so a
+> committed default report fails `klt env-provenance lint-envelope`. Set
+> `"portable_paths": true` in the request (issue #3820, see the
+> [Request](#request) table) to get a host-independent report that passes
+> the lint with an empty allow-list. The default stays absolute; there is
+> no `schema_version` bump either way.
+
 ```json
 {
   "schema_version": 1,
@@ -2089,6 +2282,12 @@ be within the target `--deck`'s own label-layer coverage (cross-check with
   "status": "ok",
   "stage_reached": "route",
   "seed": 1,
+  "applied": {
+    "placement_density": 0.6,
+    "route_congestion_iterations": null,
+    "route_allow_congestion": false,
+    "signal_layers": "met1-met5"
+  },
   "interconnect_corner": "nom",
   "die_area_um2": 8487.94,
   "core_area_um2": 7607.3,
@@ -2131,7 +2330,8 @@ be within the target `--deck`'s own label-layer coverage (cross-check with
       "orientation": "R0",
       "cell": "analog_block",
       "lib": null,
-      "halo": null
+      "halo": null,
+      "keepout": null
     }
   ],
   "def_path": "/abs/path/.klt/place-and-route/gcd.def",
@@ -2156,6 +2356,13 @@ be within the target `--deck`'s own label-layer coverage (cross-check with
       { "rule": "met5.area.1", "layer": [72, 20], "threshold_um2": 4.0, "violations_before": 18, "violations_after": 0, "patches": 18 }
     ],
     "unrepaired": []
+  },
+  "via_pad_trim": {
+    "status": "skipped",
+    "reason": "PDK family of 'sky130A' is not ASAP7; no-op",
+    "cells_touched": 0,
+    "pads_trimmed": 0,
+    "pads_left": 0
   },
   "verilog_path": "/abs/path/.klt/place-and-route/gcd.v",
   "spef_sta": {
@@ -2242,6 +2449,8 @@ be within the target `--deck`'s own label-layer coverage (cross-check with
   "warnings": [],
   "provenance": {
     "klt_version": "0.1.0",
+    "klt_git_commit": null,
+    "klt_reinstall_spec": null,
     "klayout_version": "0.30.10",
     "pdk": { "name": "sky130A", "source": "PDK_ROOT environment variable", "version": "<stamp>" },
     "deck": { "name": "sky130_fd_sc_hd__tt_025C_1v80", "content_hash": "sha256:<hex>", "path": { "path": null, "scope": "external" } },
@@ -2273,11 +2482,12 @@ plain string" for the full enumeration and rationale.
 | `seed` | integer | Echo of the request. |
 | `netlist` | `{path, scope}` | Additive field (issue #3751). The gate-level netlist the run placed — the file `request.netlist` names — as the `{path, scope}` envelope (`docs/json-contract.md`): `{"path": "<repo-relative POSIX path>", "scope": "repo"}`, or `{"path": null, "scope": "external"}` when it lies outside the repo (an absolute path is never emitted). `provenance.input.content_hash` is the `sha256:` digest of the **raw bytes of this file**, with no transform, concatenation or temp copy, so `sha256sum <path>` reproduces it offline. In a `--backend batch` report each `corner_runs[]` entry carries the field as the runner emitted it (that unit's own netlist). |
 | `interconnect_corner` | string | Additive field (issue #1100). The tech-LEF parasitic-extraction corner actually resolved (`"min"`/`"nom"`/`"max"`) — echo of `request.pdk.interconnect_corner`, or `"nom"` when omitted. Distinct from the liberty (device) corner, which `provenance.deck.name` encodes; the two can differ in the same response (e.g. `interconnect_corner: "max"` alongside a `deck.name` ending in `__ss_125C_3v00`). |
+| `applied` | object | Additive field (issue #4716). The resolved global-placement / global-route knobs actually applied, defaults included: `placement_density` (number), `route_congestion_iterations` (integer or `null` when no flag was emitted), `route_allow_congestion` (boolean), `signal_layers` (string `"<low>-<high>"`, additive, issue #4802: the range passed to `set_routing_layers -signal`, i.e. `library.route_layers` if supplied, else the built-in per-library range; `null` only for a library with neither). |
 | `die_area_um2` / `core_area_um2` / `utilization_pct` | number | From `initialize_floorplan`/`report_design_area_metrics`, at `stage_reached`. |
 | `wirelength_um` | number \| null | HPWL at `stage_reached`; `null` before placement. |
 | `worst_slack_ns` / `total_negative_slack_ns` | number | WNS/TNS at `stage_reached`. Negative values are expected, not an error — a caller wanting a pass/fail gate on timing composes this contract into `klt eval`. A `target_stage: "floorplan"` request with no `constraints` (a clock is not required until `"place"`, see below) reports OpenROAD's own unconstrained-design sentinel (`1e+39`/`0`) rather than a real number — a `constraints`-less floorplan-only run has no clock to measure slack against, and this field is never fabricated to hide that. **That sentinel is not the only way to reach it** — a fully-constrained, fully-routed run of a design with no register-to-register path reports the identical `1e+39`/`0`. Check `timing_status` below before treating this number as a measurement. |
 | `timing_status` | string \| null | Additive field (issue #1865). `"constrained"` \| `"unconstrained"` \| `null` — whether the slack fields in this response are *measurements* at all, or OpenSTA's unconstrained-design sentinel (`1e+39`) restated. `"unconstrained"` whenever **any** slack field in scope carries the sentinel; `null` when the stage reported no slack metric at all (nothing to classify — not a claim either way). **A pass/fail gate on timing must require `timing_status == "constrained"` before reading any slack number**: `1e+39` is a positive value, so `worst_slack_ns >= 0` on its own reports "timing closed with maximum confidence" on a design that was never timed. The sentinel values themselves are reported verbatim and unchanged — this field is additive and retypes nothing. Restated per stage in `stages[]` and per corner in `corners[]` (and inside `spef_sta`), each computed from that entry's own slack values. See "I/O timing constraints" below for the most common way to *fix* an `"unconstrained"` result rather than merely detect it. |
-| `fmax_mhz` | number \| null | `null` before placement (floorplan-stage ideal-clock STA reports no `fmax`). |
+| `fmax_mhz` | number \| null | `null` before placement (floorplan-stage ideal-clock STA reports no `fmax`). Also `null` (issue #4914) wherever the same entry's `timing_status` is `"unconstrained"` (top level and each `stages[]` entry): with no timed path it is not an achievable clock. Check `timing_status` first; `"constrained"` and `null` statuses leave the number as reported. |
 | `setup_violation_count` / `hold_violation_count` | integer \| null | `null` at the floorplan stage (no placement-aware timing yet). Nominal-corner count of **violating endpoints** (one `report_check_types -violators -format end` row per failing endpoint per path group, not every enumerated path) over the same timing-check families as the nominal setup/hold WNS/TNS: setup = data setup + asynchronous **recovery** + clock-gating setup (`-max_delay -recovery -clock_gating_setup`); hold = data hold + asynchronous **removal** + clock-gating hold (`-min_delay -removal -clock_gating_hold`) (issue #2741). Not swept: the corner-swept `worst_setup_slack_ns`/`worst_hold_slack_ns` below have no count counterpart. See [`docs/cli/sta.md`](sta.md)'s "Violation counts: check families" for the engine evidence and the gating caveats. |
 | `nominal_hold_slack_ns` | number \| null | Additive field (issue #1826). The single, nominal-corner hold WNS (`report_worst_slack_metric -hold`), mirroring `worst_slack_ns` above's setup-side value — a real slack-in-ns margin, not just the pass/fail count `hold_violation_count` already provides. `null` at the floorplan stage, matching `hold_violation_count`'s own gating. Named `nominal_hold_slack_ns` (not `worst_hold_slack_ns`) specifically to avoid colliding with the corner-swept `worst_hold_slack_ns` aggregate below — the two are independent fields that never replace one another, the same way `worst_slack_ns` and `worst_setup_slack_ns` already coexist (issue #949). |
 | `antenna_violation_count` | integer \| null | The post-repair antenna-*violating-net* count from `check_antennas`, run right after `repair_antennas`'s own reroute pass. `null` before the `"route"` stage — this is a DRC-signoff concern (`klt drc` on the merged GDS is the gate this metric tracks), not a connectivity one; `klt lvs` is unaffected by antenna repair. |
@@ -2285,22 +2495,25 @@ plain string" for the full enumeration and rationale.
 | `worst_setup_slack_ns` / `worst_hold_slack_ns` | number \| null | The corner-swept worst-case setup/hold slack — see "Multi-corner setup/hold sweep" below. `null` before the `"route"` stage; distinct from (and does not replace) `worst_slack_ns`, which stays the single nominal-corner value it has always been (issue #949). |
 | `max_transition_violation_count` / `max_capacitance_violation_count` | integer \| null | Additive fields (issue #1709). The **effective design-rule-check verdict** at the same swept corners as `worst_setup_slack_ns`/`worst_hold_slack_ns` above — how many pins violate whichever of the max-transition (OpenSTA `-max_slew`)/max-capacitance limit ends up tighter at those decks: the caller's own `constraints.max_transition_ns`/`.max_capacitance_pf` when given, or the loaded liberty deck's own per-pin limit otherwise — from `report_check_types ... -violators` run inside the sweep's own already-paid-for invocation. `0` on a design-rule-clean run (present-but-zero, like `route_drc_violation_count`); `null` before the `"route"` stage, and `null` when `pdk.sweep_corners` explicitly sweeps zero corners. Reported whether or not `constraints.max_transition_ns`/`.max_capacitance_pf` were given. There is deliberately **no** `max_fanout_violation_count` — see "Design-rule-check verdict" below. |
 | `max_transition_violation_count_vs_library` / `max_capacitance_violation_count_vs_library` | integer \| null | Additive fields (issue #2357). The **library-only** counterpart of the pair above — the same check, run a second time in the same invocation *before* any caller-stated `constraints.max_transition_ns`/`.max_capacitance_pf` override is applied, so it reflects only what the loaded liberty decks themselves declare. Same `null`-before-`"route"`/present-but-zero-when-clean gating as the pair above. Lets a caller tell a guard-band overrun (this pair `0`, the effective pair above nonzero) apart from a genuine library violation (both pairs nonzero) directly from the report — see "Library-only counterpart" below. Identical to the pair above whenever the caller sets neither constraint field. |
-| `congestion` | object \| null | Additive field (issue #2994). Route-stage routability figures, restated at top level; `null` before the `"route"` stage. Sections: `global_route` (`total_overflow`, `max_horizontal_overflow`, `max_vertical_overflow`, `usage_pct`, `max_layer_usage_pct`, `overflow_per_layer`, `routed_net_count`, `max_gcell_usage_pct`), `detailed_route` (`first_iteration_drc_violation_count`, `iteration_count`, `drc_violations_per_iteration`, `converged`), `completeness` (`signal_net_count`, `unrouted_net_count`, `partially_routed_net_count`) and `placement` (`total_routing_overflow`, `overflowed_tile_count`, `final_weighted_congestion`). A figure the engine could not produce is `null` and named, with the reason, in `null_reasons` (keyed `section.field`) — never omitted or `0`. See "Congestion and routability" below. |
+| `congestion` | object \| null | Additive field (issue #2994). Route-stage routability figures, restated at top level; `null` before the `"route"` stage. Sections: `global_route` (`total_overflow`, `max_horizontal_overflow`, `max_vertical_overflow`, `usage_pct`, `max_layer_usage_pct`, `overflow_per_layer`, `routed_net_count`, `max_gcell_usage_pct`, `overflow_regions`), `detailed_route` (`first_iteration_drc_violation_count`, `iteration_count`, `drc_violations_per_iteration`, `converged`), `completeness` (`signal_net_count`, `unrouted_net_count`, `partially_routed_net_count`) and `placement` (`total_routing_overflow`, `overflowed_tile_count`, `final_weighted_congestion`). A figure the engine could not produce is `null` and named, with the reason, in `null_reasons` (keyed `section.field`) — never omitted or `0`. See "Congestion and routability" below. |
 | `corners` | array\<object\> \| null | Additive field (issue #1092). Per-corner breakdown of the sweep behind `worst_setup_slack_ns`/`worst_hold_slack_ns` — one entry per corner actually swept (every shipped corner, or the `request.pdk.sweep_corners`-named subset when given), each `{"name": ..., "setup_slack_ns": ..., "hold_slack_ns": ..., "total_negative_setup_slack_ns": ..., "total_negative_hold_slack_ns": ..., "timing_status": ..., "max_transition_violation_count": ..., "max_capacitance_violation_count": ..., "max_transition_violation_count_vs_library": ..., "max_capacitance_violation_count_vs_library": ...}` (the two effective `max_*_violation_count` fields added by issue #1709 and their two library-only `..._vs_library` counterparts added by issue #2357; the two `total_negative_*_slack_ns` fields added by issue #1866; `timing_status` added by issue #1865 — computed from that corner's own two slack values, so a corner OpenSTA could not time is never mistaken for a clean one). Names which corner decided each aggregate: the entry with the lowest `setup_slack_ns` is the one `worst_setup_slack_ns` came from, and likewise the lowest `hold_slack_ns` for `worst_hold_slack_ns`, and the per-corner violation counts name which deck's limits a pin actually breaks. The two `total_negative_*_slack_ns` fields report that corner's own total negative slack (TNS) — how much of the design fails at that corner, distinct from the worst-single-path `setup_slack_ns`/`hold_slack_ns` — see "Per-corner total negative slack" below. `null` before the `"route"` stage (mirroring the two aggregates above); `[]` when `sweep_corners` explicitly names zero corners. See "Multi-corner setup/hold sweep" below. |
 | `estimated_power_mw` | number \| null | `null` before placement. |
+| `power_basis` | object | Additive field (issue #4914). What `estimated_power_mw` was computed under, same shape as `klt sta`'s (see [`sta.md`](sta.md)): `activity_source` (`"global"` when `constraints.power_activity` was given, else `"engine_default"`), `activity` and `duty` (`null` when not given), `parasitics` (`"estimate_only"`). |
 | `clock_skew_ns` | number \| null | Worst setup-side clock skew (`report_clock_skew_metric -setup`) across the clock tree TritonCTS built. `null` before the `"cts"` stage — no clock tree exists yet, so there is nothing to measure skew across (issue #783). |
 | `stages` | array\<object\> | One entry per completed stage through `stage_reached`, each with whatever subset of the top-level metric fields that stage's own OpenROAD reports populate. The top-level fields above are always the **last** entry in `stages`, restated at top level. |
-| `macros` | array\<object\> | Echo of the request's `macros[]` (`instance`/`lef`/`x_um`/`y_um`/`orientation`; `lef` resolved to an absolute path), plus the additive `cell`/`lib`/`halo` fields (issue #2635) — `cell` is the resolved master name (shared with `klt synthesize`/`klt sta`'s own `macros[].cell`), `lib` is the per-corner liberty map resolved to absolute paths (`null` when omitted), `halo` is `{left, bottom, right, top}` in micrometres as actually honored (`null` when omitted). `[]` when the request declared none. |
+| `macros` | array\<object\> | Echo of the request's `macros[]` (`instance`/`lef`/`x_um`/`y_um`/`orientation`; `lef` resolved to an absolute path), plus the additive `cell`/`lib`/`halo` fields (issue #2635) and `keepout` (issue #5313, same shape as `halo`, `null` when omitted) — `cell` is the resolved master name (shared with `klt synthesize`/`klt sta`'s own `macros[].cell`), `lib` is the per-corner liberty map resolved to absolute paths (`null` when omitted), `halo` is `{left, bottom, right, top}` in micrometres as actually honored (`null` when omitted). `[]` when the request declared none. |
 | `def_path` | string \| null | Populated once `write_def` has run (i.e. `stage_reached` is `"route"`); `null` otherwise. |
 | `unrouted_def_path` | string \| null | Additive field (issue #1826). A pre-route DEF, populated only when `target_stage` itself is `"place"` or `"cts"` — the deterministic `<hdl_toplevel>.place.def`/`<hdl_toplevel>.cts.def` path each of those stages' own Tcl already writes unconditionally (the `"place"`-stage one existed on disk since issue #785 but was previously internal-only; the `"cts"`-stage one is new). `null` at `"floorplan"` (no DEF exists yet) and at `"route"` (`def_path` above is the routed artifact to use there instead — the two fields are never populated together). Feed this path into `klt sta`'s own `def` field (with `request.geometry_source: "placement_estimate"`, see `docs/cli/sta.md`) to get a real, SDC-driven setup/hold slack number before a full route — this stage's own parasitics come from `estimate_parasitics -placement` (a placement/bounding-box estimate, not routing-derived RC), so treat the result as an estimate, not a signoff number. See also issue #1825, which proposes a different (netlist-input) shape for the same underlying gap. |
 | `gds_path` | string \| null | Populated only once the DEF→GDS merge has also completed; `null` otherwise. |
-| `layer_map` | object \| null | Additive field (issue #1029). `null` unless `stage_reached` is `"route"`, mirroring `gds_path`. `path` — the absolute path to the open_pdks KLayout LEF/DEF layer-map file actually applied to the DEF→GDS merge, or `null` if none was found. `resolution` — `"exact"` when a variant-named file (`<variant>.map`, e.g. `sky130A.map`) matched; `"family"` when no variant-named file existed and the family-level fallback (`<family>.map`, e.g. `gf180mcu.map` for `gf180mcuC`/`gf180mcuD`, whose open_pdks install ships only that shared file — see `_resolve_layer_map`) matched instead; `"none"` when neither existed, in which case the merge proceeded without a guaranteed-matching layer/datatype assignment for routing shapes, matching `def2stream.py`'s own degrade-gracefully behavior. |
+| `layer_map` | object \| null | Additive field (issue #1029). `null` unless `stage_reached` is `"route"`, mirroring `gds_path`. `path` — the absolute path to the open_pdks KLayout LEF/DEF layer-map file actually applied to the DEF→GDS merge, or `null` if none was found. `resolution` — `"exact"` when a variant-named file (`<variant>.map`, e.g. `sky130A.map`) matched; `"family"` when no variant-named file existed and the family-level fallback (`<family>.map`, e.g. `gf180mcu.map` for `gf180mcuC`/`gf180mcuD`, whose open_pdks install ships only that shared file — see `_resolve_layer_map`) matched instead; `"none"` when neither existed, in which case the merge proceeded with KLayout's sequential default layer numbers for routing metals/vias, which can overlap the PDK's device layers and make DRC on the GDS unreliable (issue #4481: a `warnings` entry is emitted; see "Supplying a KLayout layer map" below). |
 | `def_net_names` | object \| null | Additive field (issue #1488). `null` unless `stage_reached` is `"route"`, mirroring `layer_map`. Reports the DEF→GDS merge's own unrouted-single-pin net-name marker pass — see "Unrouted single-pin net names" above. `single_pin_markers` — how many marker shapes were synthesized (one per unrouted single-pin net whose pin geometry resolved); `0` is the normal value for a design with no tie-cell-style nets, and says nothing is missing. `unresolved_single_pin_nets` — every single-pin net the pass could **not** resolve, by DEF net name (sorted): no layer-map file to translate the LEF `PORT` layer name through, a macro or pin the LEF never declares, or a pin centre not covered by drawn conductor. Those nets keep extraction's synthesized `$<id>` name under `klt extract --def-net-names`, exactly as before this field existed — never a merge failure. |
+| `gds_dbu_um` | number \| null | Additive field (issue #4482). The dbu (um) of the merged `gds_path`: the tech LEF's native dbu unless `request.output_dbu_um` refined it. `null` unless `stage_reached` is `"route"`. |
 | `min_area_repair` | object \| null | Additive field (issue #2139). `null` unless `stage_reached` is `"route"`, mirroring `layer_map`. Reports the DEF→GDS merge's own post-route minimum-**area** repair pass — see "Minimum-area repair" below. `status` — `"clean"` (no sub-minimum-area polygon remains on any checked layer), `"violations"` (at least one could not be repaired safely), or `"skipped"` (the pass could not run at all). `reason` — `null` unless `"skipped"`; a `"skipped"` pass is deliberately **not** reported as clean, so "never measured" stays distinguishable from "measured and clean". `patches` — repair patches drawn. `repaired`/`remaining` — violating polygons cleared / still violating, both re-measured against the layer's own post-repair geometry rather than inferred. `rules[]` — per-rule detail (`rule`, `layer`, `threshold_um2`, `violations_before`, `violations_after`, `patches`) for every checked layer that had at least one violation, sorted by rule id; `[]` when nothing violated. `unrepaired[]` — up to 20 still-violating polygons (`rule`, `layer`, `area_um2`, `threshold_um2`, `bbox_um`), so a caller can act on real residual geometry rather than on a bare count. |
+| `via_pad_trim` | object \| null | Additive field (issue #4495). `null` unless `stage_reached` is `"route"`; no `schema_version` bump. Reports the DEF→GDS merge's **ASAP7-only** pass that drops the M1 landing pad of OpenROAD's `VIA_*` cells, which otherwise breaks the packaged deck's M1 tip rules (`M1.S.2`–`M1.S.5`). A pad that protrudes past the wire is **shrunk** to the V1 cut(s) it lands plus 5 nm on every side (the deck's `V1.M1.EN.1` side bound, applied conservatively), which is what changes the merged M1 region; it is shrunk only if the shrunk pad still touches the wire wherever the original did, and is otherwise left alone (counted in `pads_left`). A shrink needs a `V1` layer in the layer map and a cut under the pad. `"trimmed"` means pads were dropped or shrunk, **not** that the deck result improved — the `M1.S.2`–`M1.S.5` effect is measured with `klt drc --deck asap7`. A pad polygon is dropped only when, in **every** placed instance of its via cell, it is fully covered by M1 outside any `VIA_*` cell (routed wire, PDN, standard-cell metal); partly covered pads are left alone. `status` — `"trimmed"` (at least one pad dropped or shrunk), `"clean"` (ran, nothing to drop) or `"skipped"` (`reason` says why; every non-ASAP7 PDK reports `"skipped"` and its GDS is byte-identical to before). `cells_touched` — via cells whose pad was edited; `pads_trimmed` / `pads_shrunk` / `pads_left` — pad polygons dropped / shrunk to the V1 enclosure (additive, issue #4508) / kept unchanged. **`route_drc_violation_count: 0` does not imply deck-clean on ASAP7** — TritonRoute's rule set does not carry the deck's M1 tip rules; run `klt drc --deck asap7` on `gds_path` (using `gds_dbu_um`) for the deck verdict. |
 | `verilog_path` | string \| null | Additive field (issue #996). The **as-built** gate-level Verilog netlist — OpenROAD's own `write_verilog` output, written from the same linked design `write_def` dumped, so it describes the exact design state `def_path`/`gds_path` implement (CTS buffers, `repair_design`/`repair_timing` resizes, and `repair_antennas` diodes all included). Populated once the `"route"` stage has run (i.e. `stage_reached` is `"route"`); `null` otherwise, exactly like `def_path`. See "As-built netlist (`verilog_path`)" below. |
 | `spef_sta` | object \| null | Additive field (issue #948; `design_nets_*` added by #951). `null` unless `post_route_spef: true` **and** `stage_reached` is `"route"`. `spef_path` — the written SPEF file. `sdf_path` (issue #1002) — the written IEEE-1497 SDF file, or `null` unless `post_route_sdf: true`; see "SDF export". `worst_slack_ns`/`total_negative_slack_ns`/`setup_violation_count`/`hold_violation_count` — the `read_spef`-fed re-report, directly comparable to the top-level fields above (same design, same checkpoint, different parasitics source). `timing_status` (issue #1865) — the same constrained/unconstrained verdict the top-level field carries, computed from this block's own `worst_slack_ns`. `nets_annotated`/`nets_total` — SPEF-side correlation (`get_nets -quiet` against every SPEF-declared net name, run before `read_spef`); flat extraction also emits intra-standard-cell nodes the gate-level design never had, so this ratio cannot reach 1 by construction. `design_nets_annotated`/`design_nets_total` — design-side correlation: how many of the nets OpenSTA times the SPEF names at all; this pair is a name-match count, not evidence that parasitics were applied. `annotation_complete` — `true` only when the design-side pair is equal and non-zero (name correlation only; `klt sta`'s `spef_annotation.annotation_complete` is the machine-checkable four-check signal). `annotation_warning` — `null` when complete, otherwise a sentence naming the shortfall and stating that the timing values are not a real-parasitics measurement to the extent annotation is missing. |
-| `power` | object | Additive field (issue #1091). Always present (never `null`) so a caller can tell a signal-only "route" result from a power-complete one without parsing the DEF for a missing `SPECIALNETS` section — see "Power delivery" below. `preset` — additive (issue #2123): the `request.power.preset` name this run's `straps`/`connects` were resolved from, or `null` for a hand-written block (and for a `request.power`-less run). Because a preset resolves into the *same* validated values an explicit request produces, `straps`/`connects` alone cannot say which of the two a response describes; this field can. `pdn`/`global_connect` — `false`/`false` unless `request.power` was given, in which case both are `true` (they always run together, at the end of the `"floorplan"` stage). `power_net`/`ground_net` — echo of the request (or its `"VDD"`/`"VSS"` defaults), `null` when `request.power` was omitted. `tapcell_master`/`endcap_master` — the per-library masters `tapcell` actually used, `null`/`null` when `request.power` was omitted. `tapcell_distance_um` — additive (issue #3051): the effective `tapcell -distance` pitch in µm (`request.power.tapcell.distance_um` if given, else the per-library default), `null` when `request.power` was omitted or the library places no tapcells. `filler_masters` — the per-library masters the `"route"` stage's own `filler_placement` call used; `[]` unless `request.power` was given **and** `stage_reached` is `"route"` (`filler_placement` is a `"route"`-stage-only call). **Not** a live placed-instance count — see "Power delivery" below. `straps`/`connects` — additive (issue #1133); `[]`/`[]` when `request.power` was omitted. `straps[].spacing_um` echoes each strap's applied `-spacing` value (`null` when not given). `connects[]` lists one entry per consecutive `power.straps` pair (regardless of whether the caller's own `request.power.connects[]` tuned it) with the `max_columns`/`ongrid`/`split_cuts` actually applied to that pair's `add_pdn_connect` call — `null` for any flag not applied. Lets a caller citing a real platform PDN config confirm whether its request reproduced that config's via-stack tuning or silently fell back to this command's plain defaults, without re-deriving it from the request document itself. `row_rail` — additive (issue #1442): the separate, `request.power`-*independent* row-rail obstruction fallback (`emitted`/`layer`/`power_net`/`ground_net`/`filler_masters`) — see "Row-rail fallback" below. `emitted` is `true` only once a run both omitted `request.power` *and* reached the `"route"` stage on a `cell_library` this defect affects (`sky130_fd_sc_hd` today). `filler_masters` mirrors `power.filler_masters`'s own shape: the per-library masters this fallback's own `filler_placement` call used, `[]` whenever `emitted` is `false`. `placed` — additive (issue #2086): what the run's own DEF says was actually *placed*, as opposed to every field above, which reports what it was *configured* with. `evidence` is `"def"` (the DEF was read and parsed — every count below is a measurement, and a `0` means zero) or `"unavailable"` (no DEF at this stage, unreadable, or no `COMPONENTS` section — every count is `null` and `unavailable_reason` says why; never a fabricated `0`). `def_path` names the DEF graded (the routed `def_path` at `"route"`, `unrouted_def_path` at `"place"`/`"cts"`, `null` at `"floorplan"`). `components`/`tapcells`/`endcaps`/`fillers` are instance counts by master. `special_nets` is one entry per DEF `SPECIALNETS` net — `{name, use, followpin_segments, stripe_segments, other_segments, stripe_layers, vias}` — i.e. the PDN's rails, straps and vias. `status` is `"complete"`/`"partial"`/`"absent"`/`"unknown"`, and `missing` names every failed check (`tapcells`, `endcaps`, `fillers`, `power_special_net`, `ground_special_net`, `special_nets`, `followpin_segments`, `stripe_segments`, `pdn_vias`) — a check that cannot apply (no endcap master in this library, a pre-`"route"` DEF that cannot yet carry fillers) is omitted, not failed. See "Measured power delivery" below. |
-| `warnings` | array\<string\> | Additive field (issue #2086). Non-fatal conditions a caller must see before trusting this run's numbers; `[]` when there are none, never `null`. Today's producers are the power-delivery audit and the row-rail fallback caveat (issue #1985): a run with no `request.power` (0 tapcells, 0 PDN, 0 fillers), a run whose *supplied* `request.power` produced an incomplete grid, and a run whose `power.row_rail.emitted` is `true` all warn here — the first two quoting the measured counts, the third stating that the row-rail fallback's horizontal rails are not a complete PDN. This is a warning, not a refusal — `status` stays `"ok"` and the exit code stays `0`; the same strings are also written to **stderr** by the CLI in both `--format json` and `--format text`, so stdout stays a single parseable document. See "Measured power delivery" and "Row-rail fallback" below. |
+| `power` | object | Additive field (issue #1091). Always present (never `null`) so a caller can tell a signal-only "route" result from a power-complete one without parsing the DEF for a missing `SPECIALNETS` section — see "Power delivery" below. `connects_overridden` — additive (issue #4348): `true` only when the request supplied `power.connects` alongside `power.preset`, else `false`. `preset` — additive (issue #2123): the `request.power.preset` name this run's `straps`/`connects` were resolved from, or `null` for a hand-written block (and for a `request.power`-less run). Because a preset resolves into the *same* validated values an explicit request produces, `straps`/`connects` alone cannot say which of the two a response describes; this field can. `pdn`/`global_connect` — `false`/`false` unless `request.power` was given, in which case both are `true` (they always run together, at the end of the `"floorplan"` stage). `power_net`/`ground_net` — echo of the request (or its `"VDD"`/`"VSS"` defaults), `null` when `request.power` was omitted. `tapcell_master`/`endcap_master` — the per-library masters `tapcell` actually used, `null`/`null` when `request.power` was omitted. `tapless` — additive (issue #4199): `true` iff `request.power` was given and the library is documented tapless (no tapcells placed by design, `tapcell_master` `null`); `false` otherwise. Lets `klt signoff` tell "tapless by design" from "tap step never ran". `tapcell_distance_um` — additive (issue #3051): the effective `tapcell -distance` pitch in µm (`request.power.tapcell.distance_um` if given, else the per-library default), `null` when `request.power` was omitted or the library places no tapcells. `filler_masters` — the per-library masters the `"route"` stage's own `filler_placement` call used; `[]` unless `request.power` was given **and** `stage_reached` is `"route"` (`filler_placement` is a `"route"`-stage-only call). **Not** a live placed-instance count — see "Power delivery" below. `straps`/`connects` — additive (issue #1133); `[]`/`[]` when `request.power` was omitted. `straps[].spacing_um` echoes each strap's applied `-spacing` value (`null` when not given). `connects[]` lists one entry per consecutive `power.straps` pair (regardless of whether the caller's own `request.power.connects[]` tuned it) with the `max_columns`/`ongrid`/`split_cuts` actually applied to that pair's `add_pdn_connect` call — `null` for any flag not applied. Lets a caller citing a real platform PDN config confirm whether its request reproduced that config's via-stack tuning or silently fell back to this command's plain defaults, without re-deriving it from the request document itself. `row_rail` — additive (issue #1442): the separate, `request.power`-*independent* row-rail obstruction fallback (`emitted`/`layer`/`power_net`/`ground_net`/`filler_masters`) — see "Row-rail fallback" below. `emitted` is `true` only once a run both omitted `request.power` *and* reached the `"route"` stage on a `cell_library` this defect affects (`sky130_fd_sc_hd` today). `filler_masters` mirrors `power.filler_masters`'s own shape: the per-library masters this fallback's own `filler_placement` call used, `[]` whenever `emitted` is `false`. `placed` — additive (issue #2086): what the run's own DEF says was actually *placed*, as opposed to every field above, which reports what it was *configured* with. `evidence` is `"def"` (the DEF was read and parsed — every count below is a measurement, and a `0` means zero) or `"unavailable"` (no DEF at this stage, unreadable, or no `COMPONENTS` section — every count is `null` and `unavailable_reason` says why; never a fabricated `0`). `def_path` names the DEF graded (the routed `def_path` at `"route"`, `unrouted_def_path` at `"place"`/`"cts"`, `null` at `"floorplan"`). `components`/`tapcells`/`endcaps`/`fillers` are instance counts by master. `special_nets` is one entry per DEF `SPECIALNETS` net — `{name, use, followpin_segments, stripe_segments, other_segments, stripe_layers, vias}` — i.e. the PDN's rails, straps and vias. `status` is `"complete"`/`"partial"`/`"absent"`/`"unknown"`, and `missing` names every failed check (`tapcells`, `endcaps`, `fillers`, `power_special_net`, `ground_special_net`, `special_nets`, `followpin_segments`, `stripe_segments`, `pdn_vias`) — a check that cannot apply (no endcap master in this library, a pre-`"route"` DEF that cannot yet carry fillers) is omitted, not failed. See "Measured power delivery" below. |
+| `warnings` | array\<string\> | Additive field (issue #2086). Non-fatal conditions a caller must see before trusting this run's numbers; `[]` when there are none, never `null`. Today's producers are the power-delivery audit, the layer-map caveat (issue #4481: `layer_map.resolution == "none"`) and the row-rail fallback caveat (issue #1985): a run with no `request.power` (0 tapcells, 0 PDN, 0 fillers), a run whose *supplied* `request.power` produced an incomplete grid, and a run whose `power.row_rail.emitted` is `true` all warn here — the first two quoting the measured counts, the third stating that the row-rail fallback's horizontal rails are not a complete PDN. This is a warning, not a refusal — `status` stays `"ok"` and the exit code stays `0`; the same strings are also written to **stderr** by the CLI in both `--format json` and `--format text`, so stdout stays a single parseable document. See "Measured power delivery" and "Row-rail fallback" below. |
 | `provenance` | object | The shared envelope block (`docs/json-contract.md`). `deck` names the resolved liberty file (`<cell_library>__<corner>`); `pdk` is `find_pdk()`'s resolved triple; `input` is the content hash of `netlist`, with `input.role: "netlist"` (issue #2027 — this verb pins the gate-level netlist it placed, never a layout stream). |
 
 ## As-built netlist (`verilog_path`, issue #996)
@@ -2444,6 +2657,16 @@ above), so a caller citing a platform config can confirm its request
 actually reproduced it, rather than silently falling back to this command's
 plain defaults.
 
+The `gf180mcu_7t_6M` preset deliberately does **not** reproduce that
+`-split_cuts {Metal3 0.128}` (issue #4301): the generated via cells were
+reported DRC-dirty under `klt drc --deck gf180mcu`, and neither does
+`gf180mcu_9t_6M`. Measured on a routed `gcd` block (`gf180mcuD`, one run per
+preset): with the ORFS `split_cuts` the 9t run had 2,624 hits on
+`metal2/3/4.ongrid.1`, `via2/via3.ongrid.1` and `via2/via3.width.1`; without
+it, the 7t run has none on those rules. The only hits left are
+`comp.tap_distance.{nwell,psub}.mv.1`, which come from the tapcell pitch, not
+the PDN. `split_cuts` remains a supported request field.
+
 ### `sg13g2_stdcell`: a supported PDN with no tapcell step (issues #1784, #2441)
 
 `sg13g2_stdcell` ships **no tap or endcap cells at all** — IHP's own
@@ -2476,7 +2699,7 @@ depends on `tapcell` having run) and leaves `add_global_connection`/
 `pdngen` grid, and the `"route"`-stage `filler_placement` exactly as they
 are for every other library. The response reports
 `power.tapcell_master`/`endcap_master` as `null` — never a fabricated master
-name — alongside `power.pdn: true`, and `power.placed.tapcells`/`.endcaps`
+name — alongside `power.pdn: true` and `power.tapless: true`, and `power.placed.tapcells`/`.endcaps`
 are `0` by construction. Live-verified end to end; see the
 `sg13g2_stdcell` entry under "Live verification" above for that run's
 numbers and the request body it used.
@@ -2575,6 +2798,15 @@ a placement *input* — the pitch between tap columns — and is **not** evidenc
 of any diffusion-to-tap boundary distance (observed maxima are roughly half the
 pitch, and depend on the block). Callers checking a well/substrate tie-distance
 rule must measure the resulting stream.
+
+### Supplying a KLayout layer map (issue #4481)
+
+The DEF→GDS merge reads a KLayout LEF/DEF layer map from the PDK's
+`klt-pdk.json` `assets.klayout` directory: `<assets.klayout>/tech/<variant>.map`
+(exact match, e.g. `sky130A.map`) or the family-level `<family>.map` fallback —
+the same files `lef_abstract` / `extract_abstract` read. With neither,
+`layer_map.resolution` is `"none"`, routing shapes get KLayout's sequential
+layer numbers, and `warnings` says so (`status` stays `"ok"`, exit `0`).
 
 ### Measured power delivery: `power.placed` and `warnings` (issue #2086)
 
@@ -2716,9 +2948,10 @@ platform at all:
 
 | `preset` | `pdk.cell_library` | Upstream source | Straps (bottom→top) | Via-stack tuning |
 | --- | --- | --- | --- | --- |
-| `"gf180mcu_7t_6M"` | `gf180mcu_fd_sc_mcu7t5v0` | ORFS `flow/platforms/gf180/openROAD/pdn/pdn_grid_strategy_7t_6M.cfg` | `Metal1` w 0.600 / p 3.92 / off 0, followpins · `Metal4` w 4.480 / sp 0.56 / p 44.8 / off 22.4 · `Metal5` w 4.480 / p 89.6 / off 44.8 | `Metal1↔Metal4`: `max_columns 5`, `ongrid {Metal2 Metal3 Metal4}`, `split_cuts {Metal3 0.128}`. `Metal4↔Metal5`: none. |
-| `"gf180mcu_9t_6M"` | `gf180mcu_fd_sc_mcu9t5v0` | ORFS `flow/platforms/gf180/openROAD/pdn/pdn_grid_strategy_9t_6M.cfg` | `Metal1` w 0.900 / p 5.040 / off 0, followpins · `Metal4`/`Metal5` identical to the 7t row above | identical to the 7t row above |
+| `"gf180mcu_7t_6M"` | `gf180mcu_fd_sc_mcu7t5v0` | ORFS `flow/platforms/gf180/openROAD/pdn/pdn_grid_strategy_7t_6M.cfg` | `Metal1` w 0.600 / p 3.92 / off 0, followpins · `Metal4` w 4.480 / sp 0.56 / p 44.8 / off 22.4 · `Metal5` w 4.480 / p 89.6 / off 44.8 | `Metal1↔Metal4`: `max_columns 5`, `ongrid {Metal2 Metal3 Metal4}`; **no** `split_cuts` — a deliberate deviation from the ORFS cfg (issue #4301: its `-split_cuts {Metal3 0.128}` produced DRC-dirty vias under `klt drc --deck gf180mcu`). `Metal4↔Metal5`: none. |
+| `"gf180mcu_9t_6M"` | `gf180mcu_fd_sc_mcu9t5v0` | ORFS `flow/platforms/gf180/openROAD/pdn/pdn_grid_strategy_9t_6M.cfg` | `Metal1` w 0.900 / p 5.040 / off 0, followpins · `Metal4`/`Metal5` identical to the 7t row above | `Metal1↔Metal4`: `max_columns 5`, `ongrid {Metal2 Metal3 Metal4}`, **no** `split_cuts` — the same deliberate deviation from the ORFS cfg as the 7t row, measured DRC-dirty on this preset too (issue #4301). `Metal4↔Metal5`: none. |
 | `"sg13g2"` | `sg13g2_stdcell` | IHP-Open-PDK v0.3.0 `libs.tech/librelane/config.tcl` (+ `libs.tech/librelane/sg13g2_stdcell/config.tcl` for `PDN_RAIL_WIDTH`) | `Metal1` w 0.44 / **p 7.56 (derived — see below)** / off 0, followpins · `TopMetal1` w 2.2 / sp 4.0 / p 75.6 / off 13.6 · `TopMetal2` w 2.2 / sp 4.0 / p 75.6 / off 13.6 | none — that config names no via-stack tuning |
+| `"asap7sc7p5t"` | `asap7sc7p5t_28` | ORFS `flow/platforms/asap7/openRoad/pdn/grid_strategy-M1-M2-M5-M6.tcl` (M1/M2 rails verbatim; M5/M6 deviate, see below) | `M1`/`M2` w 0.018 / p 0.54 / off 0, followpins · `M5` w 0.216 / sp 0.312 / p 5.4 / off 0.312 · `M6` w 0.288 / sp 0.096 / p 5.376 / off 0.344 | `M2↔M5`: `max_columns 1`, `ongrid {M3 M4}`. `M5↔M6`: `max_columns 1`. |
 | `"sky130hd"` | `sky130_fd_sc_hd` | ORFS `flow/platforms/sky130hd/pdn.tcl` | `met1` w 0.48 / p 5.44 / off 0, followpins · `met4` w 1.600 / p 27.140 / off 13.570 · `met5` w 1.600 / p 27.200 / off 13.600 | none — that config's two `add_pdn_connect` lines carry no flags |
 
 (The two gf180mcu configs differ in exactly one place: the taller 9-track
@@ -2744,6 +2977,8 @@ this check.
 | | `Metal5` (horizontal) | 94.08 µm (height) | height ≥ 94.08 µm |
 | `"sg13g2"` | `TopMetal1` (vertical) | 22.0 µm (width) | |
 | | `TopMetal2` (horizontal) | 22.0 µm (height) | width and height ≥ 22.0 µm |
+| `"asap7sc7p5t"` | `M5` (vertical) | 1.056 µm (width) | |
+| | `M6` (horizontal) | 1.016 µm (height) | width ≥ 1.056 µm, height ≥ 1.016 µm |
 | `"sky130hd"` | `met4` (vertical) | 28.74 µm (width) | |
 | | `met5` (horizontal) | 28.8 µm (height) | width ≥ 28.74 µm, height ≥ 28.8 µm |
 
@@ -2770,7 +3005,27 @@ in it. (This is the same geometry the `sg13g2_stdcell` PDN section above
 documents as an explicit `power.straps` block under issue #2441; the preset
 is that block, shipped so no caller has to retype it.)
 
-**`preset` and explicit `straps`/`connects` are mutually exclusive.**
+**`"asap7sc7p5t"` deviates from the ORFS config on purpose (issue #4494).**
+ORFS uses `M5` w 0.12 / p 5.4 / off 0.300 and `M6` w 0.288 / p 5.4 / off
+0.513. Measured with the packaged `asap7.drc` (`klt drc --engine klayout`,
+tiny routed block, `output_dbu_um` 0.00025, M4/M5 track offsets 0.012 and
+M6/M7 0.016 per #4493): the ORFS-width `M5` strap lands a 24 nm `V4` cut in
+a 120 nm strap, so `V4.M5.AUX.2` fired 1,332 times, with `M4.AUX.1`/`M4.AUX.2`
+from the off-grid `M3`/`M4` stub and `M5.AUX.1`/`M6.AUX.1` from strap edges.
+The shipped recipe clears those families: `M5` is 0.216 um wide, the only
+width for which the tech LEF has a wide `V4` bar (`VIARULE
+M5_M4widePWR0p864`); `ongrid {M3 M4}` snaps the stub onto the tracks;
+`max_columns 1` clears the `V5.M5.EN.1`/`V5.M6.EN.2` hits; widths plus
+spacings, pitches and offsets sit on the deck's 24 nm (`M5`) / 32 nm (`M6`)
+edge grids. Measured result: zero `V4.M5.AUX.2`, `M4.AUX.1`, `M4.AUX.2`,
+`M4.W.3`, `M5.AUX.1`, `M6.AUX.1`. **Not deck-clean:** the tech LEF's wide
+`V4` bar has zero `M4` enclosure, so `V4.M4.EN.1` (~370) and `V4.M5.EN.2`
+(~13) remain, plus 1-2 `M5.W.3`; no existing request field changes that.
+`pdngen` offsets are core-origin relative: the edge-grid result was measured
+with core origin 0.96 um, and other origins can leave `M5.AUX.1`/`M6.AUX.1`
+hits (adjust `power.straps` explicitly in that case).
+
+**`preset` and explicit `straps` are mutually exclusive.**
 Supplying both is a validation error — deliberately, rather than a
 per-field override. A partial override would recreate the very failure mode
 presets exist to remove: a request that *looks* like it cites a platform
@@ -3108,6 +3363,17 @@ sweeps, and the optional SPEF timing session. Retries allocate new IDs and
 never overwrite earlier transcripts. Other P&R artifacts keep their existing
 names; log retention does not isolate all outputs between retries.
 
+The transcripts are written **live**: the directory and both log files are
+created before `openroad` launches and the engine streams into them, so
+`tail -f .klt/place-and-route/openroad-logs/<invocation_id>/stdout.log` shows
+progress during a long stage, and an interrupted run keeps whatever OpenROAD
+had flushed. OpenROAD may block-buffer stdout when it is not on a TTY, so
+lines can lag the engine; this has not been measured. `invocation.json` is
+written when the process ends. As a single anecdotal sizing hint (not a
+model): a ~44k-instance IHP SG13G2 design took roughly 2 h+ in the `route`
+stage versus about 3 min for the other stages combined (klt 0.8.1.dev442,
+OpenROAD 26Q3-1510).
+
 Successful JSON responses add `engine_logs`, an array in invocation order.
 Each entry contains:
 
@@ -3195,7 +3461,7 @@ committed one, reporting `status: "drifted"` with a `drift[]` list of
 `wirelength_um`, `setup_violation_count`, a `power.placed` count that stopped
 being reported, a changed `provenance.input.content_hash`.
 
-Excluded from the diff: `provenance.klt_version`/`klayout_version`/
+Excluded from the diff: `provenance.klt_version`/`klt_git_commit`/`klt_reinstall_spec`/`klayout_version`/
 `pdk.version` and `engine_version` (an OpenROAD upgrade that leaves the result
 untouched is tool churn, not evidence drift), plus the whole `engine_logs[]`
 block — every entry is keyed by a fresh `uuid4` `invocation_id` with its
@@ -3273,6 +3539,8 @@ offending net and the fix instead (issue #854):
 openroad 'route' stage failed: [ERROR DRT-0305] Net zero_ of signal type GROUND is not routable by TritonRoute. -- net 'zero_' is a constant tie, not a real signal: … Re-synthesize the netlist so its constants are driven by real tie cells …
 ```
 
+A route-stage `GRT-0116` failure (issue #5122) likewise appends a `-- global-route congestion: total overflow N (max H … / max V …); worst layer <layer> with overflow M` clause scraped from the `GRT-0096` table; if no table was captured the clause points at `route_allow_congestion: true` instead.
+
 Netlists produced by `klt synthesize` no longer hit this: it maps constants
 onto the resolved library's own tie cells via Yosys's `setundef -zero` +
 `hilomap` passes — see [`docs/cli/synthesize.md`](synthesize.md)'s "Constant
@@ -3329,6 +3597,8 @@ by
   implemented today.
 
 ## Fleet evaluation of digital candidates (Epic #391 Phase 6)
+
+> **Experimental library, not a shipped fleet path.** `klayout_tools.digital_fleet` (and the congestion pre-check chain it was built to host: `congestion.py`, `native/congestion/`) is kept as an experimental library. No `klt` verb calls it and nothing in the shipped `klt synthesize` / `klt place-and-route` flow depends on it. Its planned consumer is live digital fleet validation, tracked in [#485](https://github.com/2AMLogic/klayout-tools/issues/485); until that lands, treat the API below as unstable and unvalidated against a live fleet.
 
 `klt sim`'s `remote`/fleet-sharding backend (see [`docs/cli/sim.md`](sim.md)'s
 "Remote backend"/"Fleet sharding" sections, Epic #375) provisions and
@@ -3429,7 +3699,7 @@ Without `io.pin_constraints`, OpenROAD chooses every pin's edge and position. To
 }
 ```
 
-Check the result in the response's `pins[]` (for example, every `west_in[*]` entry should report `"edge": "west"`). Two blocks abut only if the facing `y_um`/`x_um` values coincide; `klt` does not check that yet.
+Check the result in the response's `pins[]` (for example, every `west_in[*]` entry should report `"edge": "west"`). Two blocks abut only if the facing `y_um`/`x_um` values coincide. The response's `pin_abutment[]` (issue #4156) checks this for you: for each pair of `pin_constraints` entries on opposite edges, the k-th matched port (netlist order) of one is compared with the k-th of the other (north/south share `x_um`, east/west share `y_um`). Each record has `entries`, `shared`, `tolerance_um` (0.01), `pairs[]` (`a`, `b`, `a_um`, `b_um`, `delta_um`, `aligned`), `aligned` and `reason`. `aligned` is `null` (with a `reason`) when the entries match different port counts or a pin is not placed. Measurement only: a mismatch never fails the run.
 
 Notes when sizing ranges (issue #4155):
 
@@ -3444,6 +3714,7 @@ To assert that a delay chain stayed together, name it and bound its footprint:
 ```json
 "instance_groups": [
   { "name": "delay_chain", "instances": ["dly*"], "max_extent_um": 40 }
+  // optional measurement: "region_um": [0, 0, 40, 40]; "order": {"axis": "x", "pitch_um": 2.76} (exact names only)
 ]
 ```
 

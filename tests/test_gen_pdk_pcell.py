@@ -158,6 +158,59 @@ def test_pdk_pcell_lib_dir_is_none_without_python_subdir(tmp_path):
     assert pdk.pdk_pcell_libraries(variant="gf180mcuD", root=str(root)) == []
 
 
+def _write_pymacros_package(variant_dir, package):
+    package_dir = variant_dir / "libs.tech" / "klayout" / "tech" / "pymacros" / package
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("")
+    return package_dir
+
+
+def test_pdk_pcell_lib_dir_probes_tech_pymacros(tmp_path):
+    root = tmp_path / "pdk_install"
+    variant_dir = _make_install(root, "gf180mcuC")
+    _write_pymacros_package(variant_dir, "cells")
+
+    lib_dir = pdk.pdk_pcell_lib_dir(variant="gf180mcuC", root=str(root))
+    assert lib_dir == str(
+        root / "gf180mcuC" / "libs.tech" / "klayout" / "tech" / "pymacros"
+    )
+    assert pdk.pdk_pcell_libraries(variant="gf180mcuC", root=str(root)) == ["cells"]
+    assert pdk.find_pdk(variant="gf180mcuC", root=str(root))["has_pcell_library"]
+
+
+def test_pdk_pcell_lib_dir_prefers_python_over_pymacros(tmp_path):
+    root = tmp_path / "pdk_install"
+    variant_dir = _make_install(root, "sky130A")
+    _write_package(variant_dir, "first", "")
+    _write_pymacros_package(variant_dir, "other")
+
+    lib_dir = pdk.pdk_pcell_lib_dir(variant="sky130A", root=str(root))
+    assert lib_dir.endswith("libs.tech/klayout/python")
+
+
+def test_pymacros_without_packages_lists_empty(tmp_path):
+    root = tmp_path / "pdk_install"
+    variant_dir = _make_install(root, "gf180mcuC")
+    (variant_dir / "libs.tech" / "klayout" / "tech" / "pymacros").mkdir(parents=True)
+
+    report = list_pdk_pcells(variant="gf180mcuC", root=str(root))
+    assert report["pcell_lib_dir"].endswith("tech/pymacros")
+    assert report["libraries"] == []
+    assert report["unavailable"] == []
+
+
+def test_list_pdk_pcells_reports_searched_dirs_when_none_found(tmp_path):
+    root = tmp_path / "pdk_install"
+    _make_install(root, "gf180mcuD")
+
+    report = list_pdk_pcells(variant="gf180mcuD", root=str(root))
+    assert report["pcell_lib_dir"] is None
+    assert [d.split("klayout/", 1)[1] for d in report["searched_dirs"]] == [
+        "python",
+        "tech/pymacros",
+    ]
+
+
 def test_pdk_pcell_lib_dir_is_none_without_klayout_asset(tmp_path):
     root = tmp_path / "pdk_install"
     _make_install(root, "sky130A", klayout=False)
@@ -398,6 +451,7 @@ def test_cli_list_pdk_pcells_json(tmp_path, capsys):
         "schema_version",
         "pdk",
         "pcell_lib_dir",
+        "searched_dirs",
         "libraries",
         "unavailable",
     }

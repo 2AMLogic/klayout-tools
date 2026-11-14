@@ -30,15 +30,28 @@ from __future__ import annotations
 
 import json
 import os
-import threading
 import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from .output_lock import OutputLockError
 from .sim import SimError, run_sim
-from .sim_batch import BATCH_CONCURRENCY_CAP_CODE, BATCH_NO_CAPACITY_CODE
+from .sim_batch import (
+    BATCH_CONCURRENCY_CAP_CODE,
+    BATCH_NO_CAPACITY_CODE,
+    BATCH_SHARDS_FILENAME,
+)
+from .sim_batch_observer import JobObserver, observe_batch_jobs
+from .sim_batch_plan import preflight_batch_request
+from .sim_set_runtime import (
+    MANIFEST_SCHEMA_VERSION,  # noqa: F401  (re-exported)
+    NOT_LAUNCHED_CODE,  # noqa: F401  (re-exported)
+    SET_INTERRUPTED_CODE,  # noqa: F401  (re-exported)
+    _Manifest,
+    _MemberScheduler,
+    _record_job,
+    _ShardTracker,
+)
 
 SET_SCHEMA_VERSION = 1
 
@@ -51,14 +64,14 @@ REPORT_FILENAME = "report.json"
 #: Name of the incrementally-updated request -> directory/job map (issue #3520).
 MANIFEST_FILENAME = "set-manifest.json"
 
-#: Schema version of the manifest file.
-MANIFEST_SCHEMA_VERSION = 1
-
 #: Refusal codes ``capacity_retries`` re-submits; every other code is terminal.
 CAPACITY_CODES = frozenset({BATCH_NO_CAPACITY_CODE, BATCH_CONCURRENCY_CAP_CODE})
 
 #: Base backoff (seconds) between capacity retries; doubles per attempt.
 CAPACITY_RETRY_BACKOFF_S = 5.0
+
+#: Seconds between the set's checks for a stalled / interrupted member.
+SET_POLL_INTERVAL_S = 1.0
 
 
 def _request_dirs(paths: list[str], outdir: str | None) -> list[str]:
@@ -92,6 +105,21 @@ def _job_ids(report: dict[str, Any]) -> list[str]:
     return [b["job_id"] for b in blocks if isinstance(b, dict) and b.get("job_id")]
 
 
+def _client_interrupted(report: dict[str, Any]) -> bool:
+    env = report.get("environment") or {}
+    remote = env.get("remote") or {}
+    return bool(env.get("interrupted") or remote.get("interrupted"))
+
+
+def shard_text_lines(entry: dict[str, Any]) -> list[str]:
+    """Text-mode per-shard summary lines for one request entry."""
+    return [
+        f"    shard {sh['job_id']}: {sh['last_state']}  "
+        f"interrupted_observations={sh['interrupted_observations']}"
+        for sh in entry.get("shards") or ()
+    ]
+
+
 def _entry_exit_code(status: str) -> int:
     """The exit code a single ``klt sim`` would have returned for ``status``."""
     if status in {"error", "not_checked", "inconclusive"}:
@@ -99,47 +127,6 @@ def _entry_exit_code(status: str) -> int:
     if status == "fail":
         return 3
     return 0
-
-
-class _Manifest:
-    """Thread-safe, atomically rewritten ``set-manifest.json``."""
-
-    def __init__(self, path: str, paths: list[str], dirs: list[str]) -> None:
-        self.path = path
-        self._lock = threading.Lock()
-        self._entries: list[dict[str, Any]] = [
-            {
-                "index": i,
-                "request": request,
-                "dir": dirs[i],
-                "status": "pending",
-                "job_id": None,
-                "job_ids": [],
-                "attempts": 0,
-            }
-            for i, request in enumerate(paths)
-        ]
-        self._flush()
-
-    def update(self, index: int, **fields: Any) -> None:
-        with self._lock:
-            self._entries[index].update(fields)
-            self._flush()
-
-    def _flush(self) -> None:
-        os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
-        tmp = f"{self.path}.tmp"
-        with open(tmp, "w", encoding="utf-8") as handle:
-            json.dump(
-                {
-                    "schema_version": MANIFEST_SCHEMA_VERSION,
-                    "requests": self._entries,
-                },
-                handle,
-                indent=2,
-            )
-            handle.write("\n")
-        os.replace(tmp, self.path)
 
 
 def _run_one(
@@ -151,7 +138,16 @@ def _run_one(
     manifest: _Manifest | None = None,
     capacity_retries: int = 0,
     sleep: Callable[[float], None] = time.sleep,
+    collect_partial: bool = False,
+    tracker: _ShardTracker | None = None,
 ) -> dict[str, Any]:
+    tracker = tracker if tracker is not None else _ShardTracker()
+    shard_map = os.path.join(directory, BATCH_SHARDS_FILENAME)
+    attach_kwargs: dict[str, Any] = (
+        {"attach_job_id": shard_map, "collect_partial": True}
+        if collect_partial and os.path.isfile(shard_map)
+        else {}
+    )
     entry: dict[str, Any] = {
         "index": index,
         "request": path,
@@ -161,6 +157,7 @@ def _run_one(
         "job_ids": [],
         "report": None,
         "error": None,
+        "shards": [],
     }
     attempt = 0
     while True:
@@ -168,7 +165,21 @@ def _run_one(
         if manifest:
             manifest.update(index, status="running", attempts=attempt)
         try:
-            report = run(path, artifacts_dir=directory, backend="batch", **run_kwargs)
+            record = _record_job(manifest, index)
+
+            def _on_job(job_id: str, _record: Callable[[str], None] = record) -> None:
+                tracker.on_job(job_id)
+                _record(job_id)
+
+            observer = JobObserver(path, _on_job, tracker.on_state)
+            with observe_batch_jobs(observer):
+                report = run(
+                    path,
+                    artifacts_dir=directory,
+                    backend="batch",
+                    **attach_kwargs,
+                    **run_kwargs,
+                )
             break
         except (SimError, OutputLockError) as exc:
             code = getattr(exc, "code", None)
@@ -178,6 +189,7 @@ def _run_one(
             entry["error"] = {"message": str(exc), "code": code}
         except Exception as exc:  # one request must never sink its siblings
             entry["error"] = {"message": f"{type(exc).__name__}: {exc}", "code": None}
+        entry["shards"] = tracker.summary(None)
         if manifest:
             manifest.update(index, status="error")
         return entry
@@ -194,12 +206,88 @@ def _run_one(
         job_id=job_ids[0] if len(job_ids) == 1 else None,
         job_ids=job_ids,
         report=report_path,
+        shards=tracker.summary(report),
     )
+    if _client_interrupted(report):
+        entry["interrupted"] = True
     if manifest:
         manifest.update(
             index, status=entry["status"], job_id=entry["job_id"], job_ids=job_ids
         )
     return entry
+
+
+#: Code of the all-or-nothing preflight refusal (issue #4972).
+SET_PREFLIGHT_CODE = "batch_set_preflight_failed"
+
+
+def _preflight_set(
+    paths: list[str], preflight: Callable[..., Any], run_kwargs: dict[str, Any]
+) -> None:
+    """Run ``preflight`` over every member; raise one error naming all failures."""
+    failures: list[str] = []
+    for path in paths:
+        try:
+            preflight(path, **run_kwargs)
+        except (SimError, OutputLockError) as exc:
+            code = getattr(exc, "code", None)
+            failures.append(f"{path}: {code + ': ' if code else ''}{exc}")
+    if failures:
+        raise SimError(
+            f"--batch-set refused before submitting anything: {len(failures)} of "
+            f"{len(paths)} request(s) failed validation:\n  " + "\n  ".join(failures),
+            code=SET_PREFLIGHT_CODE,
+        )
+
+
+def print_set_text(report: dict) -> None:
+    if report.get("dry_run"):
+        print("dry run: every member passed preflight; nothing was submitted")
+    print(
+        f"status: {report['status']}  requests: {report['request_count']}  "
+        f"submitted: {report['submitted']}  refused: {report['refused']}  "
+        f"max_in_flight: {report['max_in_flight']}"
+    )
+    for entry in report["requests"]:
+        line = f"  {entry['request']}  [{entry['status']}]"
+        if entry["job_ids"]:
+            line += f"  job={','.join(entry['job_ids'])}"
+        error = entry["error"]
+        if error:
+            line += f"  {error['code'] or 'error'}: {error['message']}"
+        print("\n".join([line, *shard_text_lines(entry)]))
+
+
+def _launch_budget(capacity_wait_s: Any) -> float | None:
+    """The pending-job budget (issue #5324): ``capacity_wait_s`` when it is a
+    positive number, else ``None`` (no bound -- the pre-existing behaviour)."""
+    if isinstance(capacity_wait_s, bool) or not isinstance(
+        capacity_wait_s, int | float
+    ):
+        return None
+    return float(capacity_wait_s) if capacity_wait_s > 0 else None
+
+
+def _execute_members(
+    paths: list[str],
+    dirs: list[str],
+    manifest: _Manifest,
+    workers: int,
+    launch_budget: float | None,
+    run_member: Callable[[int, _ShardTracker], dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Run every member on at most ``workers`` daemon threads and return one
+    entry per member, always (issue #5324).
+
+    A member whose job sits ``pending`` past ``launch_budget`` becomes a
+    ``not_launched`` entry and its blocked thread is abandoned (daemon, so it
+    cannot hold the process open) while a replacement worker keeps the
+    concurrency; an interrupt (``KeyboardInterrupt``/``SystemExit``) turns every
+    unfinished member into a ``set_interrupted`` entry instead of exiting
+    silently."""
+    return _MemberScheduler(
+        paths, manifest, launch_budget, SET_POLL_INTERVAL_S, run_member
+    ).run(workers)
 
 
 def run_sim_set(
@@ -210,6 +298,9 @@ def run_sim_set(
     run: Callable[..., dict[str, Any]] = run_sim,
     capacity_retries: int = 0,
     sleep: Callable[[float], None] = time.sleep,
+    preflight: Callable[..., Any] | None = None,
+    dry_run: bool = False,
+    collect_partial: bool = False,
     **run_kwargs: Any,
 ) -> dict[str, Any]:
     """Run ``request_paths`` with at most ``max_in_flight`` in flight; return
@@ -218,9 +309,28 @@ def run_sim_set(
     ``capacity_retries`` (default 0: off) re-submits a request refused with a
     capacity code up to that many more times, with doubling backoff.
 
+    ``collect_partial`` (issue #5014): a member whose directory holds a
+    ``batch-shards.json`` is collected through the single-request
+    ``--attach <map> --collect-partial`` path (each shard read once, never
+    relaunched); unfinished units are reported missing, not fabricated.
+    Members without a shard map run as usual.
+
     ``resume=True`` in ``run_kwargs`` reaches every request's ``run`` call; each
     request resumes from its own directory, so a sharded request re-attaches to
-    the shard jobs recorded there (issue #4005)."""
+    the shard jobs recorded there (issue #4005).
+
+    **All-or-nothing preflight (issue #4972).** Before anything is submitted,
+    every member is resolved (with ``run_kwargs`` overrides applied) and put
+    through the submit path's own ceiling / split check
+    (:func:`~klayout_tools.sim_batch_plan.preflight_batch_request`). If any
+    member fails, a single :class:`SimError` names every failing member and nothing is
+    submitted or written. ``preflight`` replaces the check; by default it runs
+    only with the real ``run_sim`` (an injected ``run`` is a test double).
+
+    ``dry_run`` (issue #5012) stops after that preflight: nothing is submitted,
+    no manifest or output directory is written, and the fleet is never
+    contacted. The envelope carries ``dry_run: true`` and one ``dry_run``
+    entry per member."""
     if not request_paths:
         raise SimError("--batch-set needs at least one request file")
     if isinstance(max_in_flight, bool) or max_in_flight < 1:
@@ -228,28 +338,62 @@ def run_sim_set(
     if isinstance(capacity_retries, bool) or capacity_retries < 0:
         raise SimError(f"--capacity-retries must be >= 0 (got {capacity_retries!r})")
 
+    if preflight is None and run is run_sim:
+        preflight = preflight_batch_request
+    if preflight is not None:
+        _preflight_set(request_paths, preflight, run_kwargs)
+
+    if dry_run:
+        return {
+            "schema_version": SET_SCHEMA_VERSION,
+            "status": "pass",
+            "dry_run": True,
+            "request_count": len(request_paths),
+            "max_in_flight": min(max_in_flight, len(request_paths)),
+            "submitted": 0,
+            "refused": 0,
+            "refused_codes": [],
+            "requests": [
+                {
+                    "index": i,
+                    "request": path,
+                    "status": "dry_run",
+                    "exit_code": 0,
+                    "job_id": None,
+                    "job_ids": [],
+                    "report": None,
+                    "error": None,
+                }
+                for i, path in enumerate(request_paths)
+            ],
+        }
+
     dirs = _request_dirs(request_paths, outdir)
     manifest_dir = outdir if outdir is not None else os.path.dirname(dirs[0])
     manifest = _Manifest(
         os.path.join(manifest_dir, MANIFEST_FILENAME), request_paths, dirs
     )
     workers = min(max_in_flight, len(request_paths))
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [
-            pool.submit(
-                _run_one,
-                i,
-                path,
-                dirs[i],
-                run,
-                run_kwargs,
-                manifest,
-                capacity_retries,
-                sleep,
-            )
-            for i, path in enumerate(request_paths)
-        ]
-        requests = [future.result() for future in futures]
+    launch_budget = _launch_budget(run_kwargs.get("capacity_wait_s"))
+    requests = _execute_members(
+        request_paths,
+        dirs,
+        manifest,
+        workers,
+        launch_budget,
+        lambda i, tracker: _run_one(
+            i,
+            request_paths[i],
+            dirs[i],
+            run,
+            run_kwargs,
+            manifest,
+            capacity_retries,
+            sleep,
+            collect_partial,
+            tracker,
+        ),
+    )
 
     errored = sum(1 for r in requests if r["status"] == "error")
     failed = sum(1 for r in requests if r["status"] == "fail")

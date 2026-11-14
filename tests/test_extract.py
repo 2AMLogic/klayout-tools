@@ -656,6 +656,8 @@ def test_synthetic_inverter_extracts_two_devices(tmp_path):
     prov = report["provenance"]
     assert set(prov.keys()) == {
         "klt_version",
+        "klt_git_commit",
+        "klt_reinstall_spec",
         "klayout_version",
         "pdk",
         "deck",
@@ -2571,6 +2573,75 @@ def test_rename_declared_pins_reports_a_short_between_two_declared_pins(tmp_path
         w.startswith("ERROR:") and "'A|Y'" in w and "--rename-declared-pins" in w
         for w in report["warnings"]
     )
+
+
+def test_tie_declared_pins_aliases_a_merged_net_to_every_declared_pin(tmp_path):
+    """Issue #4383: `--tie-declared-pins` on the two-declared-names-one-net
+    fixture lists both declared names as `.SUBCKT` ports, tied by a resistor,
+    reports the tie, and keeps a `warning`-severity `declared_pin_short`."""
+    path = _write_gds(_make_inverter_layout(extra_a_label="B"), tmp_path / "tie.gds")
+    out = tmp_path / "tie.spice"
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(out),
+        declared_pins=frozenset({"A", "B", "VGND", "VPWR", "VPB"}),
+        tie_declared_pins=True,
+    )
+
+    assert report["pin_ties"] == [{"net": "A|B", "pin": "A", "tied_pins": ["B"]}]
+    [finding] = report["pin_renames"]["findings"]
+    assert finding["severity"] == "warning"
+    assert finding["code"] == "declared_pin_short"
+    text = out.read_text()
+    header = next(line for line in text.splitlines() if line.startswith(".SUBCKT"))
+    assert {"A", "B"} <= set(header.split()[2:])
+    assert "Rtie_B B A 1u" in text
+    assert text.index("Rtie_B") < text.index(".ENDS")
+
+
+def test_tie_declared_pins_off_has_no_pin_ties_field(tmp_path):
+    path = _write_gds(_make_inverter_layout(extra_a_label="B"), tmp_path / "s.gds")
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "s.spice"),
+        declared_pins=frozenset({"A", "B", "VGND", "VPWR", "VPB"}),
+        rename_declared_pins=True,
+    )
+    assert "pin_ties" not in report
+    assert "ties" not in report["pin_renames"]
+
+
+def test_tie_declared_pins_on_a_device_free_layout_succeeds(tmp_path):
+    """Issue #4383: no extracted circuit means no `.SUBCKT` to tie into; the
+    tie rewrite is skipped rather than raising `AttributeError`."""
+    layout = kdb.Layout()
+    top = layout.create_cell("EMPTY")
+    top.shapes(layout.layer(68, 20)).insert(kdb.Box(0, 0, 1000, 1000))
+    path = _write_gds(layout, tmp_path / "empty.gds")
+
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "empty.spice"),
+        declared_pins=frozenset({"A"}),
+        tie_declared_pins=True,
+    )
+
+    assert report["device_count"] == 0
+    assert report["pin_ties"] == []
+
+
+def test_tie_declared_pins_requires_a_declared_pin_set(tmp_path):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    with pytest.raises(ExtractError, match="--tie-declared-pins requires"):
+        run_extract(
+            path,
+            "sky130",
+            output=str(tmp_path / "inv.spice"),
+            tie_declared_pins=True,
+        )
 
 
 def test_rename_declared_pins_skips_and_reports_a_colliding_rename(tmp_path):
@@ -10549,13 +10620,18 @@ def test_gf180mcu_unmodeled_voltage_marker_registry_no_longer_claims_mos_gap():
 
 
 def test_gf180mcu_deck_declares_dualgate_mos_flavour():
-    """The gf180mcu extraction deck declares one `mos_flavours` entry keyed
-    on `Dualgate` (55/0) -- the deck-data half of issue #1111."""
+    """The gf180mcu extraction deck declares a `mos_flavours` entry keyed
+    on `Dualgate` (55/0) -- the deck-data half of issue #1111 -- after the two
+    drain-extended LDMOS entries (issue #4570), which must come first because
+    the LDMOS sits inside `Dualgate` and the first matching flavour claims."""
     deck = get_extraction_deck("gf180mcu")
-    assert len(deck.mos_flavours) == 1
-    flavour = deck.mos_flavours[0]
+    assert [f.flavour for f in deck.mos_flavours] == [
+        "10v0_asym_n",
+        "10v0_asym_p",
+        "06v0",
+    ]
+    flavour = deck.mos_flavours[-1]
     assert flavour.marker == (55, 0)
-    assert flavour.flavour == "06v0"
 
 
 def _make_gf180mcu_straddling_dualgate_mos_layout() -> kdb.Layout:
@@ -10700,8 +10776,8 @@ def test_sky130_deck_declares_hvi_mos_flavour():
     """The sky130 extraction deck declares one `mos_flavours` entry keyed on
     `hvi` (75/20) -- the deck-data half of issue #1369."""
     deck = get_extraction_deck("sky130")
-    # Issue #3599 adds the native-Vt combination flavour *before* `hvi`.
-    assert [f.flavour for f in deck.mos_flavours] == ["nvt", "hvi"]
+    # Issue #3599 adds `nvt` *before* `hvi`; issue #5283 adds `lvt` after.
+    assert [f.flavour for f in deck.mos_flavours] == ["nvt", "hvi", "lvt"]
     flavour = deck.mos_flavours[1]
     assert flavour.marker == (75, 20)
     assert flavour.flavour == "hvi"
@@ -24787,8 +24863,8 @@ def test_sky130_extract_warns_when_hvi_marker_has_no_shapes(tmp_path):
     )
 
     assert report["device_counts"] == {"nfet": 1}
-    (entry,) = report["missing_flavour_markers"]
-    assert entry["marker"] == "75/20"
+    # `lvt` (lvtn 125/44, issue #5283) is also absent: pick hvi by marker.
+    (entry,) = [e for e in report["missing_flavour_markers"] if e["marker"] == "75/20"]
     assert entry["deck"] == "sky130"
     assert entry["flavour"]
     assert any("75/20" in w and entry["flavour"] in w for w in report["warnings"])
@@ -24840,7 +24916,7 @@ def test_flavour_marker_present_does_not_warn_missing(tmp_path, overlap):
         pdk_root=root,
         output=str(tmp_path / "m.spice"),
     )
-    assert report["missing_flavour_markers"] == []
+    assert [e["marker"] for e in report["missing_flavour_markers"]] == ["125/44"]
     path = _write_gds(
         _make_gf180mcu_dualgate_mos_layout(dualgate_overlap=overlap),
         tmp_path / "g.gds",
@@ -27037,9 +27113,9 @@ def test_resistance_graph_two_terminal_strip_matches_analytic(tmp_path):
 
 
 def test_resistance_graph_unsupported_net_keeps_the_legacy_scalar(tmp_path):
-    """The deck curates no per-cut resistance, so a net containing a
+    """No `--resistance-graph-r-cut` is supplied here, so a net containing a
     poly->li1 landing reports `unsupported` (with an explicit
-    `unsupported_geometry` diagnostic) and the legacy scalar stays exactly
+    `via_resistance_unknown` diagnostic) and the legacy scalar stays exactly
     as it was."""
     path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
     base = run_extract(
@@ -27282,7 +27358,7 @@ def test_selected_resistance_graph_value_for_a_two_terminal_net(tmp_path):
 
 
 def test_selection_without_r_cut_falls_back_to_legacy_never_an_ideal_via(tmp_path):
-    """The shipped decks give no per-cut resistance and no value is assumed:
+    """No `--resistance-graph-r-cut` is supplied and no value is assumed:
     a cross-level net keeps the legacy scalar and says why."""
     entry, graph = _selected(_strap_fixture("strapped"), tmp_path, None)
     assert graph["status"] == "unsupported"

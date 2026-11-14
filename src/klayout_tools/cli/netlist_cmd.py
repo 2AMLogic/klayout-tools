@@ -41,12 +41,50 @@ def _warn(message: str) -> None:
     print(f"klt netlist: warning: {message}", file=sys.stderr)
 
 
+def register(parser: argparse.ArgumentParser) -> None:
+    """Add the ``--erc`` flag (issue #4953) and bind :func:`run` to ``parser``."""
+    parser.add_argument(
+        "--erc",
+        action="store_true",
+        default=False,
+        help=(
+            "fail (error.code erc_findings) when xschem reports ERC findings "
+            "such as 'Error: undriven node' on its stdout/stderr. Local "
+            "backend only (issue #4953)"
+        ),
+    )
+    parser.set_defaults(func=run)
+
+
 def run(args: argparse.Namespace) -> int:
+    if getattr(args, "ignore_comments", False) and not args.check:
+        # argparse-style usage failure (stderr message, SystemExit(2)).
+        sys.stderr.write("klt netlist: error: --ignore-comments requires --check\n")
+        raise SystemExit(2)
     try:
         # `--backend` > $KLT_NETLIST_BACKEND > local. `batch` never falls
         # back to a local xschem run: every batch failure is exit 1.
         backend = resolve_backend(getattr(args, "backend", None))
+        allow_expr = bool(getattr(args, "allow_unevaluated_expr", False))
+        ignore_comments = bool(getattr(args, "ignore_comments", False))
+        erc = bool(getattr(args, "erc", False))
+        no_header = bool(getattr(args, "no_provenance_header", False))
         if backend == "batch":
+            if erc:
+                raise NetlistError(
+                    "--erc is not supported with --backend batch; use --backend local"
+                )
+            if no_header:
+                raise NetlistError(
+                    "--no-provenance-header is not supported with --backend "
+                    "batch; use --backend local"
+                )
+            if allow_expr:
+                raise NetlistError(
+                    "--allow-unevaluated-expr is not supported with "
+                    "--backend batch (the runner applies the expr() gate "
+                    "itself); use --backend local"
+                )
             report = run_netlist_batch(
                 args.schematic,
                 args.output,
@@ -60,6 +98,9 @@ def run(args: argparse.Namespace) -> int:
                 batch_include=getattr(args, "batch_include", None) or (),
                 batch_exclude=getattr(args, "batch_exclude", None) or (),
                 xschem_binary=args.xschem_binary,
+                ignore_comments=ignore_comments,
+                symbol_path=getattr(args, "symbol_path", None) or (),
+                relative_paths=args.relative_paths,
                 warn=_warn,
             )
         else:
@@ -73,12 +114,24 @@ def run(args: argparse.Namespace) -> int:
                 pdk=args.pdk,
                 pdk_root=args.pdk_root,
                 block=args.block,
+                allow_unevaluated_expr=allow_expr,
+                ignore_comments=ignore_comments,
+                symbol_path=getattr(args, "symbol_path", None) or (),
+                erc=erc,
+                relative_paths=args.relative_paths,
+                provenance_header=not no_header,
             )
     except NetlistError as exc:
         return emit_error(
             "netlist", str(exc), args.format, code=exc.code, details=exc.details
         )
 
+    for entry in report.get("warnings") or ():
+        _warn(
+            f"unevaluated expr(...) at line {entry['line']}: {entry['snippet']!r} "
+            f"(xschem version: {entry['xschem_version'] or 'unknown'}); "
+            "written anyway because --allow-unevaluated-expr was given"
+        )
     emit_success(report, args.format, _print_text)
     return EXIT_DRIFTED if report["status"] == "drifted" else EXIT_OK
 
@@ -94,6 +147,14 @@ def _print_remote(report: dict) -> None:
         f"runner_klt={remote.get('runner_klt_version') or '-'} "
         f"({remote.get('runner_compatibility')})"
     )
+
+
+def _print_port_order_drift(drift: dict) -> None:
+    for entry in drift.get("subckt_port_order", []):
+        print(
+            f"drift: .subckt {entry['subckt']} ports "
+            f"{' '.join(entry['committed'])} -> {' '.join(entry['regenerated'])}"
+        )
 
 
 def _print_text(report: dict) -> None:
@@ -149,6 +210,7 @@ def _print_text(report: dict) -> None:
 
     if drift["reason"] is not None:
         print(f"drift: {drift['reason']}")
+    _print_port_order_drift(drift)
     for line in drift["diff"]:
         print(f"  {line}")
     if drift["diff_truncated"]:

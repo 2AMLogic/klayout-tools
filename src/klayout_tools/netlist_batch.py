@@ -48,8 +48,6 @@ unit, so that rule would make the setting a no-op.
 
 from __future__ import annotations
 
-import fnmatch
-import math
 import os
 import re
 import shlex
@@ -63,7 +61,6 @@ from typing import Any
 
 from . import _batch_common, _provenance, remote_transport, sim_batch
 from .netlist import (
-    _PATH_COMMENT_RE,
     DEFAULT_XSCHEM_BINARY,
     SCHEMA_VERSION,
     STATUS_GENERATED,
@@ -72,9 +69,13 @@ from .netlist import (
     _check_no_unresolved_symbol,
     _check_result,
     _netlist_block,
-    _sha256_file_hash,
     _validate_schematic,
     _write_output,
+)
+from .netlist_batch_select import _relative_symbol_dirs, _select_files
+from .netlist_paths import (
+    _rewrite_runner_paths,
+    relativize_schematic_paths,
 )
 
 # --------------------------------------------------------------------------- #
@@ -139,16 +140,9 @@ def resolve_backend(flag: str | None) -> str:
     value from the environment is an error naming the variable (argparse
     already validates the flag).
     """
-    if flag is not None:
-        value, source = flag, "--backend"
-    else:
-        value = os.environ.get(BACKEND_ENV, "").strip() or "local"
-        source = f"${BACKEND_ENV}"
-    if value not in SUPPORTED_BACKENDS:
-        raise NetlistError(
-            f"{source} must be one of {', '.join(SUPPORTED_BACKENDS)} (got {value!r})"
-        )
-    return value
+    return _batch_common.resolve_backend_value(
+        flag, BACKEND_ENV, SUPPORTED_BACKENDS, NetlistError
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -172,6 +166,7 @@ class BatchTree:
     schematic: str
     rcfile_arg: str | None
     rcfile_pdk_relative: bool
+    symbol_paths: tuple[str, ...] = ()
 
 
 def _git(cwd: str, *args: str) -> bytes:
@@ -276,35 +271,6 @@ def _pdk_relative_rcfile(rcfile: str, pdk: str) -> str | None:
     return '"$PDK_ROOT"/' + shlex.quote(rest)
 
 
-_GLOB_CHARS = frozenset("*?[")
-
-
-def _matches_glob(rel: str, pattern: str) -> bool:
-    """``rel`` (a root-relative POSIX path) against one ``--batch-include`` /
-    ``--batch-exclude`` pattern. ``fnmatch`` semantics, so ``*`` also crosses
-    ``/``; a pattern with no glob character names a file or a directory and
-    matches that file or everything under that directory."""
-    while pattern.startswith("./"):
-        pattern = pattern[2:]
-    if not any(char in _GLOB_CHARS for char in pattern):
-        bare = pattern.rstrip("/")
-        return rel == bare or rel.startswith(bare + "/")
-    return fnmatch.fnmatchcase(rel, pattern)
-
-
-def _select_files(
-    files: list[str], include: Sequence[str], exclude: Sequence[str]
-) -> list[str]:
-    """``files`` kept by ``include`` (every file when empty) and not dropped
-    by ``exclude``."""
-    return [
-        rel
-        for rel in files
-        if (not include or any(_matches_glob(rel, pat) for pat in include))
-        and not any(_matches_glob(rel, pat) for pat in exclude)
-    ]
-
-
 def package_tree(
     schematic: str,
     *,
@@ -314,6 +280,7 @@ def package_tree(
     include: Sequence[str] = (),
     exclude: Sequence[str] = (),
     max_bytes: int | None = None,
+    symbol_path: Sequence[str] = (),
 ) -> BatchTree:
     """Select and validate the input tree, **without** building the archive.
 
@@ -357,6 +324,8 @@ def package_tree(
             _require_selected(rel_rcfile, selected, what="--rcfile")
             rcfile_arg = shlex.quote(rel_rcfile)
 
+    symbol_rel = _relative_symbol_dirs(symbol_path, root, selected)
+
     present: list[str] = []
     total = 0
     for rel in files:
@@ -388,6 +357,7 @@ def package_tree(
         schematic=rel_schematic,
         rcfile_arg=rcfile_arg,
         rcfile_pdk_relative=pdk_relative,
+        symbol_paths=tuple(symbol_rel),
     )
 
 
@@ -407,12 +377,6 @@ def build_tarball(tree: BatchTree, path: str) -> None:
 # --------------------------------------------------------------------------- #
 # job.json
 # --------------------------------------------------------------------------- #
-
-
-def _job_timeout_seconds(timeout_s: float) -> int:
-    """``--timeout-s`` plus the same per-job overhead ``klt sim`` adds, so
-    the harness's outer bound is always looser than the inner ``klt`` one."""
-    return int(math.ceil(sim_batch._default_batch_job_timeout_s(1, timeout_s)))
 
 
 def build_job_spec(
@@ -449,7 +413,7 @@ def build_job_spec(
         [
             'EDA_INPUT_DIR=$(cd "$EDA_INPUT_DIR" && pwd -P)',
             'EDA_OUTPUT_DIR=$(cd "$EDA_OUTPUT_DIR" && pwd -P)',
-            "w=$(mktemp -d)",
+            'w=$(mktemp -d) && export HOME="${HOME:-$(mktemp -d)}"',
             f'tar -xzf "$EDA_INPUT_DIR/{BATCH_TREE_FILENAME}" -C "$w"',
             'cd "$w"',
             'printf \'%s\\n%s\\n\' "$w" "$(pwd -P)" >'
@@ -466,6 +430,8 @@ def build_job_spec(
         argv.append("--block")
     if tree.rcfile_arg is not None:
         argv += ["--rcfile", tree.rcfile_arg]
+    for rel_dir in tree.symbol_paths:
+        argv += ["--symbol-path", shlex.quote(rel_dir)]
     argv += ["--pdk", shlex.quote(pdk), "--timeout-s", repr(float(timeout_s))]
     argv += ["--backend local --format json"]
     command = (
@@ -481,7 +447,7 @@ def build_job_spec(
         cmd=command,
         tool=BATCH_JOB_TOOL,
         pdk_variant=pdk,
-        timeout_seconds=_job_timeout_seconds(timeout_s),
+        timeout_seconds=_batch_common.job_timeout_seconds(timeout_s),
         inputs=(
             sim_batch.BatchJobInput(
                 name=BATCH_TREE_FILENAME,
@@ -508,16 +474,9 @@ def _resolve_config(pdk: str, timeout_s: float) -> sim_batch.BatchConfig:
     request, so the fleet config resolves exactly as for ``klt sim``
     (``$KLT_BATCH_*``, then ``batch-fleet.env`` beside the provision script).
     Its ``SimError``/``BatchError`` becomes a :class:`NetlistError`."""
-    from .sim import SimError
-
-    try:
-        return sim_batch._resolve_batch_config(
-            {"models": {"pdk": pdk}}, corner_count=1, timeout_s=timeout_s
-        )
-    except (SimError, sim_batch.BatchError) as exc:
-        raise NetlistError(
-            f"batch backend: {exc} {_NO_FALLBACK}", code=getattr(exc, "code", None)
-        ) from exc
+    return _batch_common.resolve_batch_config(
+        pdk, timeout_s, NetlistError, _NO_FALLBACK
+    )
 
 
 def _runner_error(collected: str) -> tuple[dict[str, Any] | None, str]:
@@ -572,45 +531,21 @@ def _job_failure(
     stderr_tail: str = "",
     harness_log: str | None = None,
 ) -> NetlistError:
-    message, code, details = _batch_common.job_failure_parts(
+    return _batch_common.job_failure(
         job_id=job_id,
-        state=str(status.get("state") or ""),
-        exit_code=sim_batch._status_exit_code(status),
-        detail=str(status.get("detail") or "").strip(),
+        status=status,
         runner_error=runner_error,
         note=note,
         stderr_tail=stderr_tail,
         harness_log=harness_log,
+        err_cls=NetlistError,
+        no_fallback=_NO_FALLBACK,
     )
-    message += f" {_NO_FALLBACK}"
-    return NetlistError(message, code=code, job_id=job_id, details=details or None)
 
 
 # --------------------------------------------------------------------------- #
 # Collected output
 # --------------------------------------------------------------------------- #
-
-
-def _rewrite_runner_paths(
-    data: bytes, runner_roots: list[str], local_root: str
-) -> bytes:
-    """Rewrite xschem's ``** sch_path:`` / ``** sym_path:`` comments that
-    point into the runner's scratch tree so they point into ``local_root``
-    -- the paths a local export from this checkout would have written.
-    Paths outside the tree (the runner's PDK symbols) are left alone."""
-    if not runner_roots:
-        return data
-    targets = [root.encode("utf-8", errors="surrogateescape") for root in runner_roots]
-    local = local_root.rstrip("/").encode("utf-8", errors="surrogateescape")
-
-    def _rewrite(match: Any) -> bytes:
-        path = match.group(2)
-        for target in targets:
-            if path == target or path.startswith(target + b"/"):
-                return match.group(1) + local + path[len(target) :]
-        return match.group(0)
-
-    return _PATH_COMMENT_RE.sub(_rewrite, data)
 
 
 def _read_runner_report(collected: str, job_id: str) -> dict[str, Any]:
@@ -660,7 +595,7 @@ def _read_collected_netlist(
             job_id=job_id,
         ) from exc
     expected = report["netlist"].get("content_hash")
-    if expected is not None and expected != _sha256_file_hash(data):
+    if expected is not None and expected != _provenance.content_hash_bytes(data):
         raise NetlistError(
             f"batch job {job_id}: the collected {BATCH_NETLIST_FILENAME} does "
             f"not match the content_hash the runner reported ({expected}) "
@@ -703,16 +638,7 @@ def _validate_batch_args(
 
 
 def _transport_error(job_id: str, exc: sim_batch.BatchError) -> NetlistError:
-    if isinstance(exc, sim_batch.BatchPollTimeout):
-        return NetlistError(
-            f"batch job {job_id}: {exc} -- it may still finish on the fleet, but "
-            f"no netlist was collected {_NO_FALLBACK}",
-            code=exc.code or BATCH_POLL_TIMEOUT_CODE,
-            job_id=job_id,
-        )
-    return NetlistError(
-        f"batch job {job_id}: {exc} {_NO_FALLBACK}", code=exc.code, job_id=job_id
-    )
+    return _batch_common.transport_error(job_id, exc, NetlistError, _NO_FALLBACK)
 
 
 def _submit_and_wait(
@@ -784,6 +710,8 @@ def _payload(
     report: dict[str, Any],
     data: bytes,
     remote: dict[str, Any],
+    ignore_comments: bool = False,
+    symbol_path: Sequence[str] = (),
 ) -> dict[str, Any]:
     """The ``schema_version: 1`` payload a local run returns, from the
     runner's report, plus ``environment.remote``; writes ``output`` unless
@@ -793,7 +721,9 @@ def _payload(
         "schematic": schematic,
         "output": output,
         "mode": "check" if check else "generate",
-        "xschem": report["xschem"],
+        # ``symbol_path`` is the root-relative list the client forwarded
+        # (the runner's own absolute paths are meaningless here).
+        "xschem": {**report["xschem"], "symbol_path": list(symbol_path)},
     }
     for key in ("pdk", "block"):
         if isinstance(report.get(key), dict):
@@ -801,7 +731,7 @@ def _payload(
     payload["environment"] = {"remote": remote}
 
     if check:
-        status_value, drift = _check_result(output, data)
+        status_value, drift = _check_result(output, data, ignore_comments)
         payload["status"] = status_value
         payload["netlist"] = _netlist_block(None, data)
         payload["drift"] = drift
@@ -827,6 +757,9 @@ def run_netlist_batch(
     batch_include: Sequence[str] = (),
     batch_exclude: Sequence[str] = (),
     xschem_binary: str = DEFAULT_XSCHEM_BINARY,
+    ignore_comments: bool = False,
+    symbol_path: Sequence[str] = (),
+    relative_paths: bool = False,
     runner: remote_transport.CommandRunner | None = None,
     sleep: Callable[[float], None] = time.sleep,
     warn: Callable[[str], None] | None = None,
@@ -839,6 +772,8 @@ def run_netlist_batch(
     Raises :class:`NetlistError` for every failure, before any upload when
     the cause is local, and never runs xschem on this host.
     """
+    if ignore_comments and not check:
+        raise NetlistError("--ignore-comments only applies with --check")
     variant = _validate_batch_args(
         schematic, pdk=pdk, timeout_s=timeout_s, xschem_binary=xschem_binary
     )
@@ -855,6 +790,7 @@ def run_netlist_batch(
         batch_root=batch_root,
         include=batch_include,
         exclude=batch_exclude,
+        symbol_path=symbol_path,
     )
     config = _resolve_config(variant, timeout_s)
     job_id = new_job_id()
@@ -878,6 +814,8 @@ def run_netlist_batch(
         data = _rewrite_runner_paths(
             data, _batch_common.read_runner_roots(collected), tree.root
         )
+        if relative_paths:
+            data = relativize_schematic_paths(data, schematic)
         # The runner's klt gates too; this keeps the guarantee client-side.
         _check_no_unevaluated_expr(data, report["xschem"].get("version"))
         _check_no_unresolved_symbol(data)
@@ -896,6 +834,8 @@ def run_netlist_batch(
         report=report,
         data=data,
         remote=remote,
+        ignore_comments=ignore_comments,
+        symbol_path=list(tree.symbol_paths),
     )
 
 

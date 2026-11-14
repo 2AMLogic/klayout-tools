@@ -30,6 +30,7 @@ import pytest
 
 from klayout_tools import sim
 from klayout_tools import sim_batch as sb
+from klayout_tools import sim_batch_contract_worker as sbp
 from klayout_tools import sim_decks as sd
 from klayout_tools.sim import SimError
 
@@ -78,6 +79,9 @@ def main() -> int:
             elif directive == "emit-stderr":
                 sys.stderr.buffer.write(bytes(int(rest)))
                 sys.stderr.buffer.flush()
+            elif directive == "emit-stderr-text":
+                sys.stderr.write(rest.replace("\\n", "\n") + "\n")
+                sys.stderr.flush()
             elif directive == "copy-input":
                 source, _, dest = rest.partition(" ")
                 shutil_copy(source, dest)
@@ -583,6 +587,57 @@ class TestLocalRunner:
         assert unit["exit_code"] == 3
         assert (Path(report["outdir"]) / "u0" / "stderr.bin").read_bytes() == bytes(5)
         assert any(d["code"] == "engine_exit" for d in unit["diagnostics"])
+
+    def test_library_parse_error_is_classified_from_stderr(self, tmp_path):
+        request = deck_request(tmp_path, decks=[{"id": "u0", "deck": "deck.spice"}])
+        (tmp_path / "deck.spice").write_text(
+            "* stub-exit: 1\n* stub-emit-stderr-text: Error in netlist line no. "
+            "7557, new internal line no. 22:\\nUndefined parameter [expr]"
+            "\\nExpression err: expr((int((@nf+1)/2)*@w/@nf*0.29))\n",
+            encoding="utf-8",
+        )
+        unit = run_local(tmp_path, request)["units"][0]
+        codes = [d["code"] for d in unit["diagnostics"]]
+        assert "engine_exit" in codes
+        fatal = next(d for d in unit["diagnostics"] if d["code"] == "ngspice_fatal")
+        assert "Undefined parameter [expr]" in fatal["message"]
+        assert "line no. 7557" in fatal["message"]
+        assert "engine_output_tail" not in codes
+
+    def test_library_parse_error_after_blank_line_keeps_message(self, tmp_path):
+        request = deck_request(tmp_path, decks=[{"id": "u0", "deck": "deck.spice"}])
+        (tmp_path / "deck.spice").write_text(
+            "* stub-exit: 1\n* stub-emit-stderr-text: warn\\n\\n\\n"
+            "Error in netlist line no. 5, new internal line no. 2:"
+            "\\nUndefined parameter [expr]\n",
+            encoding="utf-8",
+        )
+        unit = run_local(tmp_path, request)["units"][0]
+        codes = [d["code"] for d in unit["diagnostics"]]
+        fatal = next(d for d in unit["diagnostics"] if d["code"] == "ngspice_fatal")
+        assert "line no. 5" in fatal["message"]
+        assert "Undefined parameter [expr]" in fatal["message"]
+        assert "engine_output_tail" not in codes
+
+    def test_unrecognised_stderr_falls_back_to_tail(self, tmp_path):
+        request = deck_request(tmp_path, decks=[{"id": "u0", "deck": "deck.spice"}])
+        (tmp_path / "deck.spice").write_text(
+            "* stub-exit: 1\n* stub-emit-stderr-text: something odd happened\n",
+            encoding="utf-8",
+        )
+        unit = run_local(tmp_path, request)["units"][0]
+        tail = next(d for d in unit["diagnostics"] if d["code"] == "engine_output_tail")
+        assert "something odd happened" in tail["message"]
+
+    def test_pass_unit_gains_no_failure_diagnostics(self, tmp_path):
+        request = deck_request(tmp_path, decks=[{"id": "u0", "deck": "deck.spice"}])
+        (tmp_path / "deck.spice").write_text(
+            "* stub-emit-stderr-text: Error in netlist line no. 1:\n",
+            encoding="utf-8",
+        )
+        unit = run_local(tmp_path, request)["units"][0]
+        assert unit["status"] == "pass"
+        assert unit["diagnostics"] == []
 
     def test_timeout_kills_unit_and_keeps_partial_streams(self, tmp_path):
         request = deck_request(
@@ -1305,7 +1360,7 @@ class TestBatchDispatch:
         assert remote["runner_compatibility"] == "mismatch"
 
     def test_job_command_captures_stderr_from_the_first_line(self):
-        cmd = sd._deck_batch_command("enforce")
+        cmd = sd._deck_batch_command("enforce", {}, [])
         assert cmd.startswith(sb._job_stderr_capture_prefix())
         assert cmd.count('> "$EDA_OUTPUT_DIR/report.json"') == 1
 
@@ -2004,16 +2059,10 @@ def test_runner_shell_probe_matches_python_rule(tmp_path, version, expected):
 
 def _publish_runner(monkeypatch, *versions):
     images = [
-        {
-            "pdk": "sky130A",
-            "region": "us-east-1",
-            "ami_id": f"ami-{index}",
-            "klt_version": version,
-            "klt_ref": None,
-        }
-        for index, version in enumerate(versions)
+        dict(pdk="sky130A", region="r", ami_id=str(n), klt_version=v, klt_ref=None)
+        for n, v in enumerate(versions)
     ]
-    monkeypatch.setattr(sb, "published_runner_identities", lambda pdk, region: images)
+    monkeypatch.setattr(sbp, "published_runner_identities", lambda *a: images)
 
 
 class TestRunnerDecksGate:
@@ -2093,6 +2142,77 @@ class TestRunnerDecksGate:
         assert "predates decks[] support" in message
 
 
+# --------------------------------------------------------------------------- #
+# engine_version pin on deck requests (issue #3625)
+# --------------------------------------------------------------------------- #
+
+
+class TestEngineVersionPin:
+    def test_local_mismatch_fails_before_any_deck_runs(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(sim, "_probe_engine_version", lambda *_: "42")
+        request = deck_request(tmp_path, engine_version="44")
+        with pytest.raises(sim.SimError, match="requires ngspice 44") as exc:
+            run_local(tmp_path, request)
+        assert exc.value.code == sim.ENGINE_VERSION_UNMET_CODE
+        assert not (tmp_path / "out").exists()
+
+    @pytest.mark.parametrize(
+        ("pin", "found"), [("44", "44.2"), ("44.2", "44.2"), ("42", "42")]
+    )
+    def test_local_match_runs(self, tmp_path, monkeypatch, pin, found):
+        monkeypatch.setattr(sim, "_probe_engine_version", lambda *_: found)
+        report = run_local(tmp_path, deck_request(tmp_path, engine_version=pin))
+        assert report["unit_count"] == 2
+
+    def test_minor_pin_mismatch_and_unparseable_probe_fail_closed(
+        self, tmp_path, monkeypatch
+    ):
+        request = deck_request(tmp_path, engine_version="44.2")
+        monkeypatch.setattr(sim, "_probe_engine_version", lambda *_: "44.1")
+        with pytest.raises(sim.SimError) as exc:
+            run_local(tmp_path, request)
+        assert exc.value.code == sim.ENGINE_VERSION_UNMET_CODE
+        monkeypatch.setattr(sim, "_probe_engine_version", lambda *_: None)
+        with pytest.raises(sim.SimError, match="no ngspice version") as exc:
+            run_local(tmp_path, request)
+        assert exc.value.code == sim.ENGINE_VERSION_UNMET_CODE
+
+    @pytest.mark.parametrize("bad", [44, "v44", "44.2.1", ""])
+    def test_malformed_pin_rejected(self, tmp_path, bad):
+        request = deck_request(tmp_path, engine_version=bad)
+        with pytest.raises(sim.SimError, match="MAJOR") as exc:
+            run_local(tmp_path, request)
+        assert exc.value.code is None
+
+    def test_unpinned_request_does_not_probe(self, tmp_path, monkeypatch):
+        def must_not_probe(*_):
+            raise AssertionError("no probe without a pin")
+
+        monkeypatch.setattr(sim, "_probe_engine_version", must_not_probe)
+        report = run_local(tmp_path, deck_request(tmp_path))
+        assert report["unit_count"] == 2
+
+    @pytest.mark.parametrize(
+        ("reported", "ok"), [("46.1", True), ("42", False), (None, False)]
+    )
+    def test_offhost_pin_checked_against_report(
+        self, tmp_path, monkeypatch, reported, ok
+    ):
+        def fake_run(request, **_):
+            return {"environment": {"engine_version": reported}}
+
+        monkeypatch.setattr(sim, "run_deck_request", fake_run)
+        request = batch_deck_request(tmp_path, engine_version="46")
+        if ok:
+            assert run_local(tmp_path, request)["environment"] == {
+                "engine_version": reported
+            }
+            return
+        with pytest.raises(sim.SimError) as exc:
+            run_local(tmp_path, request)
+        assert exc.value.code == sim.ENGINE_VERSION_UNMET_CODE
+
+
 class TestDecksRequestFeatureReport:
     """`environment.remote.runner_request_features` covers `decks[]` (#4109)."""
 
@@ -2139,3 +2259,104 @@ class TestDecksRequestFeatureReport:
     def test_request_without_decks_is_unchanged(self, tmp_path, monkeypatch):
         fields = self._identity(tmp_path, monkeypatch, "0.7.0", {"decks": []})
         assert "runner_request_features" not in fields
+
+
+# --------------------------------------------------------------------------- #
+# --dry-run, --wait-for-capacity and engine_version (issue #4543)
+# --------------------------------------------------------------------------- #
+
+
+class TestDeckPreflightAndProvenance:
+    def test_dry_run_reports_units_and_spawns_nothing(self, tmp_path, monkeypatch):
+        request = deck_request(tmp_path)
+        write_request(tmp_path, request)
+
+        def explode(*args, **kwargs):
+            raise AssertionError("dry-run must not spawn an engine")
+
+        monkeypatch.setattr(sd.subprocess, "run", explode)
+        monkeypatch.setattr(sd.subprocess, "Popen", explode)
+        report = sim.run_sim(
+            str(tmp_path / "request.json"),
+            dry_run=True,
+            artifacts_dir=str(tmp_path / "out"),
+        )
+        assert report["dry_run"] is True
+        assert report["status"] == "valid"
+        assert report["mode"] == "decks"
+        assert report["unit_count"] == len(request["decks"])
+        assert [u["id"] for u in report["units"]] == [d["id"] for d in request["decks"]]
+        assert not (tmp_path / "out").exists()
+
+    def test_dry_run_gives_the_real_staging_error(self, tmp_path):
+        request = deck_request(tmp_path)
+        (tmp_path / "deck.spice").unlink()
+        write_request(tmp_path, request)
+        with pytest.raises(SimError, match="deck.spice"):
+            sim.run_sim(str(tmp_path / "request.json"), dry_run=True)
+
+    def test_batch_dry_run_launches_nothing(self, tmp_path, monkeypatch):
+        calls: list[str] = []
+        for name in ("submit_job", "launch_job", "poll_status", "collect_outputs"):
+            monkeypatch.setattr(sb, name, lambda *a, _n=name, **k: calls.append(_n))
+        write_request(tmp_path, batch_deck_request(tmp_path))
+        report = sim.run_sim(
+            str(tmp_path / "request.json"), backend="batch", dry_run=True
+        )
+        assert report["dry_run"] is True
+        assert report["backend"] == "batch"
+        assert report["staged_files"]
+        assert calls == []
+
+    @pytest.mark.parametrize(
+        ("cli_value", "request_value", "expected"),
+        [(120.0, None, 120.0), (0.0, 600, 0.0), (None, 45, 45.0)],
+    )
+    def test_wait_for_capacity_overrides_request_field(
+        self, tmp_path, monkeypatch, cli_value, request_value, expected
+    ):
+        seen: list[float] = []
+        fleet = _FakeFleet({"state": "done", "exit_code": "0"})
+
+        def launch(config, job_id):
+            seen.append(config.capacity_wait_s)
+            return fleet.launch(config, job_id)
+
+        install_fake_batch(monkeypatch, fleet)
+        monkeypatch.setattr(sb, "launch_job", launch)
+        request = batch_deck_request(tmp_path)
+        if request_value is not None:
+            request["batch"]["capacity_wait_s"] = request_value
+        write_request(tmp_path, request)
+        sim.run_sim(
+            str(tmp_path / "request.json"),
+            backend="batch",
+            capacity_wait_s=cli_value,
+            artifacts_dir=str(tmp_path / "out"),
+        )
+        assert seen == [expected]
+
+    def test_wait_for_capacity_refused_off_batch(self, tmp_path):
+        write_request(tmp_path, deck_request(tmp_path))
+        with pytest.raises(SimError, match="requires backend 'batch'"):
+            sim.run_sim(
+                str(tmp_path / "request.json"),
+                backend="local",
+                capacity_wait_s=30.0,
+            )
+
+    def test_engine_version_from_version_probe_when_no_banner(self, tmp_path):
+        request = deck_request(tmp_path)
+        stub = tmp_path / "stub-ngspice"
+        # Banner only for --version, as a real `ngspice -b` behaves.
+        stub.write_text(
+            stub.read_text(encoding="utf-8").replace(
+                '    print("ngspice-46 stub banner")\n    sys.stdout.flush()\n', ""
+            ),
+            encoding="utf-8",
+        )
+        report = run_local(tmp_path, request)
+        assert all(u["engine_version"] == "46" for u in report["units"])
+        assert report["environment"]["engine_version"] == "46"
+        record = json.loads((tmp_path / "out" / "tt_27c" / "unit.json").read_text())
+        assert record["key"]["engine_version"] == "46"

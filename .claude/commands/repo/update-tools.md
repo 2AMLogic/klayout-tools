@@ -107,9 +107,28 @@ source in step 2, and treat its presence as a resolved sidecar for step 3's
 `sidecar missing` status below.
 
 Known family members: Loom (`.loom/`), Anvil (`.anvil/`), Repo Skills
-(`.claude/skills/repo/`), kicad-tools, and anything else that follows the same
-metadata pattern. Report any metadata file found even if the tool is
-unrecognized.
+(`.claude/skills/repo/`), squad (`.claude/skills/squad/`), kicad-tools, and
+anything else that follows the same metadata pattern. Report any metadata file
+found even if the tool is unrecognized.
+
+**squad installs from a release, not a source clone — the sidecar `source` can
+be a non-git directory.** squad conforms to C5/C6 (tracked
+`.claude/skills/squad/install-metadata.json` with `layout_version: 2`,
+gitignored `.install-local.json` sidecar), but its sidecar `source` points at
+the release install (`<SQUAD_HOME>/current`), which has no `.git` and no
+`origin` remote. Apply the **release-path rule** when the sidecar `source`
+resolves to a directory with no git remote **and** `install-metadata.json`
+names `package: @rjwalters/squad`:
+
+- Resolve the GitHub slug from a repository URL recorded in the metadata if one
+  is present; otherwise infer it from the package name (`@scope/name` →
+  `scope/name`, i.e. `rjwalters/squad`) and say it is inferred. The tool is then
+  **not** UNKNOWN: take step 2's GitHub version-file fallback with that slug.
+- Commit drift is not computable on this path (squad also records
+  `"commit": "unknown"`); step 3 reports it as such.
+- If the `package` key is absent or names another package, nothing changes: the
+  tool stays UNKNOWN. If the sidecar itself is missing, the existing `sidecar
+  missing` row applies.
 
 **A tool's top-level `version` can be a partial claim — read the per-component
 fields too where the tool records them.** `install-anvil.sh` deliberately
@@ -344,6 +363,12 @@ scale without re-reading the manifest; a component whose version is unrecorded
 (pre-anvil#633 manifest, step 1) is named with `unknown` rather than the
 top-level number.
 
+**Release-path installs (squad).** A tool resolved by step 1's release-path
+rule fills the unknown row's `<why>` slot with `source is a release install, not
+a source clone`, i.e. `current (commit drift unknown — source is a release
+install, not a source clone)`. Version drift still comes from the GitHub
+version-file fallback using the resolved slug.
+
 A frozen count of zero is a real `0`, not an `unknown` — the manifest's
 `skipped_overrides` is authoritative and requires no remote lookup — so this row
 never degrades into the "could not evaluate" wording the commit-drift row needs.
@@ -467,13 +492,27 @@ files:
 git -C <source> pull --ff-only
 # Loom:        <this-repo>/.loom/scripts/resync-installed.sh --dry-run   # preview drift
 #              <this-repo>/.loom/scripts/resync-installed.sh             # apply once confirmed
+#              <this-repo>/.loom/scripts/resync-installed.sh --output <dir>  # stage into a disposable worktree (see below)
 # Repo Skills: <this-repo>/.claude/skills/repo/scripts/resync-installed.sh --dry-run
 #              <this-repo>/.claude/skills/repo/scripts/resync-installed.sh
 # Anvil:       <source>/scripts/install-anvil.sh <this-repo>
 # kicad-tools: <source>/scripts/install-kct.sh <this-repo>
+# squad:       <source>/scripts/release-install.sh                      # in the source clone, builds the release
+#              bash <SQUAD_HOME>/current/install.sh [--no-codex] [--no-link] <this-repo>
+#              (squad ships no C7 resync-installed.sh)
 # Unknown tools: look for <tool-root>/scripts/resync-installed.sh first (contract
 #                C7); failing that, install.sh / scripts/install-*.sh in the source
 ```
+
+**squad's update is two commands, and its source is a release install.** Run
+`scripts/release-install.sh` in the squad source clone first (do not `git pull`
+`<SQUAD_HOME>/current`, which is not a clone), then the installer from
+`<SQUAD_HOME>/current`. If the installer exits `1` with `differs from its
+installed copy`, report the tool as a **legacy (pre-receipt) install needing
+manual adoption** — squad's installer cannot upgrade a pre-receipt install
+(e.g. v0.1.0) until it is adopted — and point the operator at the upstream
+migration issue in `rjwalters/squad`. Do not report it as a generic failure,
+and do not retry or force it.
 
 **Prefer a tool's C7 resync over its installer.** [Contract][contract] C7 gives
 every conforming tool the same consumer-side entry point —
@@ -492,7 +531,7 @@ trailing `<this-repo>` is a positional argument that **selects** the repo the
 installer acts on. So do **not** "fix" a resync row to look like its siblings by
 appending a bare target path: Loom's script rejects a positional with exit `1`
 (its arg loop matches only `--dry-run`/`-n`, `--quiet`/`-q`, `--allow-worktree`,
-`--help`/`-h`), and so does Repo Skills' (which takes an explicit `--target
+`--output <dir>`, `--base <ref>`, `--help`/`-h`), and so does Repo Skills' (which takes an explicit `--target
 <path>` instead) — in both cases with an error that does not obviously point back
 to the cause.
 
@@ -510,6 +549,20 @@ they will silently resync whichever repo cwd happens to be.
   an update command for it: Loom's installer refuses a non-interactive reinstall
   over an existing `.loom/` and exits with an error, which is the only situation
   this step ever runs in.
+
+  **Prefer `--output <dir>`** whenever the update is landing on a branch or
+  worktree, or the host runs a Loom daemon. It creates a disposable detached
+  worktree at `<dir>` (which must not exist yet), resyncs into that, and never
+  touches the primary checkout — safe mid-sweep, from the primary or any linked
+  worktree. The staged commit is based on the **invoking checkout's HEAD**
+  (`--base <ref>` overrides), so to land it: run the `git add` / `git commit` /
+  `git push` sequence the script prints from `<dir>`, then `git worktree remove
+  <dir>`; the commit fast-forwards onto the branch you ran it from. With
+  `--base`, the script points at `git cherry-pick <sha>` instead.
+  `--allow-worktree` is the **fallback** for when you deliberately mean to write
+  the primary checkout from a linked worktree; it is unsafe while the fleet is
+  live, and it writes `.loom/install-metadata.json` there too, not on your
+  branch.
 - **Repo Skills** resolves its target via `git rev-parse --show-toplevel`, so
   writes land in the worktree you are standing in; there is no `--allow-worktree`
   because there is nothing to escape. It re-stamps `version` / `commit` into the

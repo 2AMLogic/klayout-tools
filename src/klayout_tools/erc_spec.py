@@ -14,10 +14,13 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from ._paths import (
-    _parse_layer_datatype,
-    _reject_unknown_keys,
-    _validate_via_entries,
+from ._jsonnum import is_int
+from ._paths import _parse_layer_datatype, _reject_unknown_keys, _validate_via_entries
+from .erc_spec_boxes import (  # noqa: F401 -- _parse_um_boxes is re-exported
+    _parse_isolation_boxes,
+    _parse_tap_boxes,
+    _parse_um_boxes,
+    _parse_well_boxes,
 )
 
 #: The stable ``erc_coverage.inapplicable`` reason for the undeclared
@@ -100,6 +103,7 @@ _NET_KEYS = (
     "same_net_as",
     "roles",
     "unlabelled_allowed_boxes",
+    "unlabelled_allow_device_connected",
     "extractor_global",
 )
 _TIE_KEYS = (
@@ -113,11 +117,14 @@ _TIE_KEYS = (
     "tap_is_dedicated",
     "tap_boxes",
     "well_boxes",
+    "isolation_boxes",
     "well_complement_of",
     "well_requires",
     "well_excludes",
     "well_requires_boxes",
     "well_excludes_boxes",
+    "well_requires_cells",
+    "well_excludes_cells",
 )
 _TIES_DISCLOSURE_KEYS = ("reason", "kind", "undeclared_classes")
 _ANTENNA_LIMIT_KEYS = ("layer", "max_ratio", "source")
@@ -431,6 +438,10 @@ def _validate_nets(
                 "unlabelled_allowed_boxes": _parse_unlabelled_allowed_boxes(
                     entry, spec_path, i, roles
                 ),
+                # Issue #4374: excuse unlabelled clusters that drive a gate.
+                "unlabelled_allow_device_connected": (
+                    _parse_unlabelled_allow_device_connected(entry, spec_path, i, roles)
+                ),
             }
         )
 
@@ -452,8 +463,14 @@ def _parse_extractor_global(entry: dict[str, Any], spec_path: str, index: int) -
             f"boolean (got {value!r})"
         )
     if value:
-        for key in ("islands", "same_net_as", "roles", "unlabelled_allowed_boxes"):
-            if entry.get(key) not in (None, [], {}):
+        for key in (
+            "islands",
+            "same_net_as",
+            "roles",
+            "unlabelled_allowed_boxes",
+            "unlabelled_allow_device_connected",
+        ):
+            if entry.get(key) not in (None, [], {}, False):
                 raise ErcError(
                     f"spec '{spec_path}': nets[{index}].extractor_global "
                     f"conflicts with nets[{index}].{key}: an extractor-global "
@@ -474,7 +491,7 @@ def _parse_net_islands(entry: dict[str, Any], spec_path: str, index: int) -> int
     Split out of :func:`_validate_nets` to keep that function under the
     repo's C901 complexity ratchet, as :func:`_parse_same_net_as` is."""
     islands = entry.get("islands", 1)
-    if isinstance(islands, bool) or not isinstance(islands, int) or islands < 1:
+    if not is_int(islands) or islands < 1:
         raise ErcError(
             f"spec '{spec_path}': nets[{index}].islands must be an integer "
             f">= 1 (got {entry.get('islands')!r})"
@@ -583,6 +600,30 @@ def _parse_unlabelled_allowed_boxes(
     return boxes
 
 
+def _parse_unlabelled_allow_device_connected(
+    entry: dict[str, Any], spec_path: str, index: int, roles: list[str]
+) -> bool:
+    """``nets[].unlabelled_allow_device_connected`` (optional, issue #4374,
+    default ``false``): when ``true``, unlabelled clusters that drive a gate
+    (internal signal nets, ``kind: "device_connected"``) do not gate
+    ``erc.unlabelled_conductor``; ``floating`` clusters still do. Like
+    ``unlabelled_allowed_boxes`` it narrows the unlabelled measurement, so
+    declaring it without ``roles`` is a spec error rather than a silent no-op."""
+    value = entry.get("unlabelled_allow_device_connected", False)
+    if not isinstance(value, bool):
+        raise ErcError(
+            f"spec '{spec_path}': nets[{index}].unlabelled_allow_device_connected "
+            f"must be a boolean (got {value!r})"
+        )
+    if value and not roles:
+        raise ErcError(
+            f"spec '{spec_path}': nets[{index}].unlabelled_allow_device_connected "
+            "needs a non-empty nets[].roles to narrow -- without a declared "
+            "owned role there is no unlabelled remainder to excuse"
+        )
+    return value
+
+
 def _validate_same_net_refs(
     entries: list[dict[str, Any]], names: list[str], spec_path: str
 ) -> None:
@@ -632,6 +673,27 @@ def _parse_tie_layer_list(
         )
         for j, value in enumerate(raw)
     ]
+
+
+def _parse_cell_names(
+    entry: dict[str, Any], key: str, spec_path: str, index: int
+) -> list[str]:
+    """One ``ties[]`` entry's array of cell names under ``key`` (issue
+    #4373: ``well_requires_cells`` / ``well_excludes_cells``). Omitted/``null``
+    -> ``[]``. Every entry must be a non-empty string; whether the name exists
+    in the stream is checked at run time against the layout, where it is
+    known (:func:`~klayout_tools.erc_well_regions._cells_region`)."""
+    raw = entry.get(key, [])
+    if raw is None:
+        raw = []
+    if not isinstance(raw, list) or not all(
+        isinstance(name, str) and name for name in raw
+    ):
+        raise ErcError(
+            f"spec '{spec_path}': ties[{index}].{key} must be an array of "
+            "non-empty cell-name strings"
+        )
+    return list(raw)
 
 
 def _parse_tap_requires(
@@ -685,104 +747,6 @@ def _parse_tap_is_dedicated(entry: dict[str, Any], spec_path: str, index: int) -
     return raw
 
 
-def _parse_um_boxes(
-    entry: dict[str, Any],
-    key: str,
-    spec_path: str,
-    index: int,
-    section: str = "ties",
-) -> list[tuple[float, float, float, float]]:
-    """One spec entry's ``[left, bottom, right, top]`` micrometre box list
-    under ``key`` -- the shared parser behind ``ties[].tap_boxes`` (issue
-    #2234, :func:`_parse_tap_boxes`), ``ties[].well_boxes`` (issue #2255,
-    :func:`_parse_well_boxes`), ``ties[].well_requires_boxes`` /
-    ``ties[].well_excludes_boxes`` (issue #2540, :func:`_parse_well_selection`)
-    and ``nets[].unlabelled_allowed_boxes`` (issue #2524,
-    :func:`_parse_unlabelled_allowed_boxes`), which take the identical
-    literal-geometry shape and differ only in what the boxes *mean*.
-
-    ``[left, bottom, right, top]`` is the same tuple
-    :func:`~klayout_tools._layout.clip_box` already converts for ``klt
-    clip``/``components.py``. Omitted/``null`` -> ``[]``. Every box is
-    validated rather than coerced: a 3-element array, a non-number, a bool
-    (JSON ``true`` is not a coordinate), or an inverted/degenerate extent is
-    a spec error, since a silently-dropped box would weaken an assertion the
-    caller believes they made.
-
-    ``section`` names the spec array the entry came from, so the error
-    message points at the caller's own key path (``ties[2].tap_boxes[0]`` vs.
-    ``nets[1].unlabelled_allowed_boxes[0]``) rather than at whichever array
-    happened to be the first user of this parser.
-    """
-    raw = entry.get(key, [])
-    if raw is None:
-        raw = []
-    if not isinstance(raw, list):
-        raise ErcError(
-            f"spec '{spec_path}': {section}[{index}].{key} must be an array of "
-            "[left, bottom, right, top] micrometre boxes"
-        )
-    boxes: list[tuple[float, float, float, float]] = []
-    for j, value in enumerate(raw):
-        field = f"{section}[{index}].{key}[{j}]"
-        if (
-            not isinstance(value, list)
-            or len(value) != 4
-            or not all(
-                isinstance(v, (int, float)) and not isinstance(v, bool) for v in value
-            )
-        ):
-            raise ErcError(
-                f"spec '{spec_path}': {field} must be a 4-number "
-                "[left, bottom, right, top] array"
-            )
-        left, bottom, right, top = (float(v) for v in value)
-        if left >= right or bottom >= top:
-            raise ErcError(
-                f"spec '{spec_path}': {field} must have left < right and bottom < top"
-            )
-        boxes.append((left, bottom, right, top))
-    return boxes
-
-
-def _parse_tap_boxes(
-    entry: dict[str, Any], spec_path: str, index: int
-) -> list[tuple[float, float, float, float]]:
-    """``ties[].tap_boxes`` (optional, issue #2234): a caller *assertion* of
-    where the tap geometry is, as a list of ``[left, bottom, right, top]``
-    micrometre boxes intersected into ``tap_layer``. Composes with
-    ``tap_requires`` (both narrow the same region) but, unlike it, needs no
-    PDK marker layer to exist at all: a stream whose taps are genuinely
-    drawn but carry no distinguishing implant/marker layer can point
-    directly at them instead. Omitted/``null`` -> ``[]`` (no assertion,
-    pre-#2234 behaviour, byte-identical). Split out of :func:`_validate_ties`
-    to keep that function under the repo's C901 complexity ratchet, as
-    :func:`_parse_tap_requires` is.
-    """
-    return _parse_um_boxes(entry, "tap_boxes", spec_path, index)
-
-
-def _parse_well_boxes(
-    entry: dict[str, Any], spec_path: str, index: int
-) -> list[tuple[float, float, float, float]]:
-    """``ties[].well_boxes`` (optional, issue #2255): a caller *assertion*
-    of the substrate/well region this tie is about, for a block that draws
-    no well/tub layer for it to name -- the same ``[left, bottom, right,
-    top]`` micrometre box list ``tap_boxes`` takes, and deliberately so, but
-    a fundamentally different kind of claim.
-
-    ``tap_boxes`` **narrows** a required, drawn ``tap_layer``: it composes
-    with the geometry, and the geometry is still what is measured. This
-    **substitutes** for a required drawn layer, so the region it names is
-    not corroborated by anything in the stream at all. That is why it is
-    valid only with ``well_layer: null`` (:func:`_parse_well_declaration`),
-    why it is graded under its own coverage classification rather than
-    folded into ``checked_by_assertion``, and why it carries its own
-    degeneracy test (:func:`_degenerate_tie_reasons`).
-    """
-    return _parse_um_boxes(entry, "well_boxes", spec_path, index)
-
-
 def _parse_well_complement_of(
     entry: dict[str, Any], spec_path: str, index: int
 ) -> list[tuple[int, int]]:
@@ -790,7 +754,7 @@ def _parse_well_complement_of(
     half of a tie for a process whose bulk has no drawn well/tub shape -- a
     ``"<layer>/<datatype>"`` string or a non-empty array of them. The tie's
     region is the top-cell extent minus the merged union of those layers
-    (see :func:`~klayout_tools.erc._tie_well_region`), so it follows the
+    (see :func:`~klayout_tools.erc_well_regions._tie_well_region`), so it follows the
     layout instead of going stale like a hand-kept ``well_boxes`` list.
 
     Omitted/``null`` -> ``[]``. Valid only with ``well_layer: null``
@@ -829,8 +793,14 @@ def _parse_well_selection(
       same shape ``tap_boxes``/``well_boxes`` take. A shape is kept when it
       interacts with the union of ``well_requires_boxes`` and with none of the
       ``well_excludes_boxes`` union.
+    - ``well_requires_cells`` / ``well_excludes_cells`` (optional, issue
+      #4373) -- *cell names*. A shape is kept when it interacts with the
+      ``well_layer`` geometry drawn directly in instances of the
+      ``well_requires_cells`` cells and with none of the
+      ``well_excludes_cells`` geometry, evaluated in each instance's
+      transformed frame (see :func:`~klayout_tools.erc_well_regions._cells_region`).
 
-    All four exist for the one thing the tap side cannot express: a single
+    All six exist for the one thing the tap side cannot express: a single
     drawn tub layer carrying two differently-biased well classes (device-body
     wells on one rail, a vertical bipolar's base tub on the other). Each class
     is declared as its own ``ties[]`` entry with its own ``net``.
@@ -856,7 +826,7 @@ def _parse_well_selection(
     ignored, for the same reason :func:`_parse_um_boxes` rejects a malformed
     box.
 
-    Returns the four parsed values as a dict, merged into the tie entry by
+    Returns the six parsed values as a dict, merged into the tie entry by
     :func:`_parse_well_declaration`. Split out of that function to keep it
     under the repo's C901 complexity ratchet, as :func:`_parse_tap_requires`
     is split out of :func:`_validate_ties`.
@@ -873,6 +843,12 @@ def _parse_well_selection(
         ),
         "well_excludes_boxes": _parse_um_boxes(
             entry, "well_excludes_boxes", spec_path, index
+        ),
+        "well_requires_cells": _parse_cell_names(
+            entry, "well_requires_cells", spec_path, index
+        ),
+        "well_excludes_cells": _parse_cell_names(
+            entry, "well_excludes_cells", spec_path, index
         ),
     }
     named = next((key for key, value in selection.items() if value), None)
@@ -1097,6 +1073,7 @@ def _validate_ties(
         tap_excludes = _parse_tap_excludes(entry, spec_path, i)
         tap_is_dedicated = _parse_tap_is_dedicated(entry, spec_path, i)
         tap_boxes = _parse_tap_boxes(entry, spec_path, i)
+        isolation_boxes = _parse_isolation_boxes(entry, spec_path, i)
 
         connect_to = str(entry["connect_to"])
         if connect_to not in stackup_names:
@@ -1118,6 +1095,7 @@ def _validate_ties(
                 "tap_excludes": tap_excludes,
                 "tap_is_dedicated": tap_is_dedicated,
                 "tap_boxes": tap_boxes,
+                "isolation_boxes": isolation_boxes,
                 "connect_to": connect_to,
                 "net": net,
             }

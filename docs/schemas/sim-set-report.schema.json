@@ -14,6 +14,7 @@
   ],
   "properties": {
     "schema_version": { "const": 1 },
+    "dry_run": { "const": true },
     "status": { "enum": ["pass", "fail", "error"] },
     "request_count": { "type": "integer", "minimum": 1 },
     "max_in_flight": { "type": "integer", "minimum": 1 },
@@ -33,6 +34,19 @@
           "job_id": { "type": ["string", "null"] },
           "job_ids": { "type": "array", "items": { "type": "string" } },
           "report": { "type": ["string", "null"] },
+          "interrupted": { "type": "boolean" },
+          "shards": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["job_id", "last_state", "interrupted_observations"],
+              "properties": {
+                "job_id": { "type": "string" },
+                "last_state": { "type": "string" },
+                "interrupted_observations": { "type": "integer", "minimum": 0 }
+              }
+            }
+          },
           "error": {
             "type": ["object", "null"],
             "required": ["message", "code"],

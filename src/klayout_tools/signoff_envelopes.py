@@ -13,6 +13,8 @@ from __future__ import annotations
 import types
 from typing import Any, TypedDict, Union
 
+from ._jsonnum import is_int, is_number
+
 # --------------------------------------------------------------------------- #
 # Typed envelope shapes + runtime validation (issue #2033)
 #
@@ -354,6 +356,24 @@ class _GenericEnvelope(_GenericRequired, total=False):
     provenance: dict[str, Any] | None
 
 
+class _ModelRunRequired(_EnvelopeCommon):
+    # Issue #4859: a committed analytical/linear-model run record (docs/cli/
+    # signoff.md "Model-run evidence"). `kind` is the explicit
+    # self-declaration `_classify` recognises it by; `measurements` reuses
+    # the `klt sim` rollup shape so row-coverage derivation applies as-is.
+    kind: str
+    status: str
+    method: str
+    measurements: list[Any]
+
+
+class _ModelRunEnvelope(_ModelRunRequired, total=False):
+    # Optional per-point rollup; any non-passing entry fails the run.
+    corners: Any
+    metrics: dict[str, Any]
+    provenance: dict[str, Any] | None
+
+
 class _ErrorRequired(_EnvelopeCommon):
     error: dict[str, Any]
 
@@ -384,6 +404,7 @@ _EvidenceEnvelope = (
     | _LefAbstractEnvelope
     | _SynthesizeEnvelope
     | _GenericEnvelope
+    | _ModelRunEnvelope
     | _ErrorEnvelope
 )
 
@@ -410,6 +431,7 @@ _ENVELOPE_SHAPES: dict[str, Any] = {
     "lef-abstract": _LefAbstractEnvelope,
     "synthesize": _SynthesizeEnvelope,
     "generic": _GenericEnvelope,
+    "model-run": _ModelRunEnvelope,
     "error": _ErrorEnvelope,
 }
 
@@ -419,10 +441,8 @@ _ENVELOPE_SHAPES: dict[str, Any] = {
 #: as an integer.
 _SCALAR_CHECKS: dict[Any, Any] = {
     bool: lambda value: isinstance(value, bool),
-    int: lambda value: isinstance(value, int) and not isinstance(value, bool),
-    float: lambda value: (
-        isinstance(value, (int, float)) and not isinstance(value, bool)
-    ),
+    int: lambda value: is_int(value),
+    float: is_number,
     str: lambda value: isinstance(value, str),
     type(None): lambda value: value is None,
 }

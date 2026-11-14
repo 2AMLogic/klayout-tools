@@ -70,6 +70,14 @@ def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Emitter diffusion side length (um)",
                 default=0.6,
             )
+            self.param(
+                "flavor",
+                self.TypeString,  # type: ignore[attr-defined]
+                "sg13g2 only: SiGe HBT cell to instantiate from the PDK's "
+                "sg13g2_pr.gds ('npn13G2' (default), 'npn13G2l' or "
+                "'npn13G2v'); must be empty on every other PDK family",
+                default="",
+            )
             self.param("rows", self.TypeInt, "Array rows", default=3)
             self.param("cols", self.TypeInt, "Array columns", default=3)
             self.param(

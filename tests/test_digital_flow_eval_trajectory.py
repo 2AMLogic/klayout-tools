@@ -395,6 +395,7 @@ def _stub_merge_def_to_gds(
         layout.write(kwargs["out_path"])
         layout.write(str(block_layout_path))
         return {
+            "output_dbu_um": 0.001,
             "path": None,
             "resolution": "none",
             "def_net_names": {

@@ -32,9 +32,13 @@ Private to the :mod:`klayout_tools.cli` package -- not part of the public
 
 from __future__ import annotations
 
+import json
+import os
 from typing import Any
 
+from .._jsonnum import is_int, is_number
 from .._paths import _resolve_relative
+from .._request_fields import check_known_fields  # noqa: F401 (re-exported as reqdoc.check_known_fields)
 
 ErrorFactory = type[Exception]
 
@@ -72,30 +76,6 @@ def check_schema(
             f"`klt {verb}` request declares schema {schema!r}, but this build "
             f"reads {expected!r} -- the field is optional; omit it or set it "
             "to the supported value"
-        )
-
-
-def check_known_fields(
-    request: dict[str, Any],
-    known: tuple[str, ...],
-    *,
-    verb: str,
-    error_cls: ErrorFactory,
-) -> None:
-    """Reject unknown top-level fields.
-
-    A request document mirrors the command's flag surface one-for-one, so an
-    unrecognised key is almost always a typo or a field from a newer build --
-    either way, silently ignoring it would drop an input the caller believed
-    was applied, which is precisely what the hashable-request contract exists
-    to prevent.
-    """
-    unknown = sorted(key for key in request if key != "schema" and key not in known)
-    if unknown:
-        raise error_cls(
-            f"unknown field(s) in `klt {verb}` request document: "
-            f"{', '.join(unknown)} -- known fields: schema, "
-            f"{', '.join(sorted(known))}"
         )
 
 
@@ -164,6 +144,31 @@ def get_path(
     return _resolve_relative(value, base_dir)
 
 
+def annotate_missing_file(exc: Exception, request_arg: str, resolved: str) -> None:
+    """Issue #5207: when ``exc`` is the plain ``file not found: <resolved>``
+    error and ``resolved`` came from a *relative* ``file`` value in the
+    request file ``request_arg``, append the base directory that relative path
+    was resolved against, so a user expecting cwd-relative semantics sees
+    which base applied. Message text only; a no-op for stdin/inline requests,
+    absolute paths and every other error."""
+    if str(exc) != f"file not found: {resolved}" or not os.path.isfile(request_arg):
+        return
+    base_dir = os.path.dirname(os.path.abspath(request_arg))
+    try:
+        with open(request_arg, encoding="utf-8") as handle:
+            raw = json.load(handle)["file"]
+        if resolved != _resolve_relative(raw, base_dir) or os.path.isabs(
+            os.path.expanduser(os.path.expandvars(raw))
+        ):
+            return
+    except (OSError, ValueError, KeyError, TypeError):
+        return
+    exc.args = (
+        f"{exc} (relative path resolved against the request document's "
+        f"directory: {base_dir})",
+    )
+
+
 def get_bool(
     request: dict[str, Any], key: str, *, verb: str, error_cls: ErrorFactory
 ) -> bool:
@@ -184,9 +189,21 @@ def get_number(
     value = request.get(key)
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if not is_number(value):
         raise _type_error(verb, key, "a number", value, error_cls)
     return float(value)
+
+
+def get_int(
+    request: dict[str, Any], key: str, *, verb: str, error_cls: ErrorFactory
+) -> int | None:
+    """``request[key]`` as an int, or ``None`` when absent/``null``."""
+    value = request.get(key)
+    if value is None:
+        return None
+    if not is_int(value):
+        raise _type_error(verb, key, "an integer", value, error_cls)
+    return value
 
 
 def get_str_list(
@@ -350,9 +367,7 @@ def get_label_layer_map_as_pairs(
         if (
             not isinstance(layer, list)
             or len(layer) != 2
-            or not all(
-                isinstance(v, int) and not isinstance(v, bool) and v >= 0 for v in layer
-            )
+            or not all(is_int(v) and v >= 0 for v in layer)
         ):
             raise _type_error(
                 verb,

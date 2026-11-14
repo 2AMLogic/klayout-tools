@@ -122,7 +122,8 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "by which implant/precision-resistor masks cover each body: "
                 "'generic' (default, the base sheet-rho flavour -- "
                 "res_generic_po on sky130, ppolyf_u on gf180mcu, rsil on "
-                "sg13g2), or, on sky130, 'high' (res_high_po) / 'xhigh' "
+                "sg13g2/sg13cmos5l; also spelled 'rsil' on both), or, on "
+                "sky130, 'high' (res_high_po) / 'xhigh' "
                 "(res_xhigh_po), or, on gf180mcu, '1k' / '2k' / '3k' "
                 "(ppolyf_u_1k/_2k/_3k, selected at extraction time via "
                 "'klt extract --deck-option poly_res='), or, on sg13g2, "
@@ -141,6 +142,26 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "level below) instead, ignoring 'flavor' entirely (issue "
                 "#1639)",
                 default=0,
+            )
+            self.param(
+                "snap",
+                kdb.PCellParameterDeclaration.TypeBoolean,
+                "Poly-body only: round length_um to the nearest multiple of "
+                "the PDK manufacturing grid before drawing (default True; "
+                "the requested/realised lengths and the resistance delta are "
+                "reported in drc_hints.length_snap). False draws length_um "
+                "verbatim and only warns (issue #4666)",
+                default=True,
+            )
+            self.param(
+                "short_length",
+                kdb.PCellParameterDeclaration.TypeString,
+                "Poly-body only: what to do when the (snapped) length_um is "
+                "below the deck's SAB/implant minimum mask width -- 'refuse' "
+                "(default, error naming the floor) or 'lengthen' (raise to "
+                "the smallest on-grid length >= the floor and report the "
+                "delta). Ignored when snap is False (issue #4666)",
+                default="refuse",
             )
             self.param(
                 "poly_layer",

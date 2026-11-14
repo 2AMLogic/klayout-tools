@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:11:43.869865+00:00",
+  "slug": "sky130-asic-puzzle",
+  "name": "Sky130 Asic Puzzle",
+  "description": "Reverse-engineering canary for klayout-tools \u2014 cell-level netlist extraction against a third-party sky130 layout. Solved and public; writeup: https://2amlogic.com/notes/2026-09-05-someone-elses-layout",
+  "pdk": "sky130",
+  "source": {
+    "repo": "2AMLogic/sky130-asic-puzzle",
+    "ref": "564d88bc7f3fecf6ab6feaf9df9f5f17ecb2d2a4",
+    "path": "."
+  },
+  "downloadable": true,
+  "status": "in design \u2014 simulation evidence"
+}

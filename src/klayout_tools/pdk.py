@@ -93,6 +93,13 @@ import subprocess
 from typing import Any
 
 from .lef_header import parse_lef_header
+
+#: Re-exported (self-aliased so linters recognise the re-export as
+#: intentional) from the module they were split into for the file-size
+#: ratchet (issue #5449): `pdk.ambiguity_warning` / `pdk.AMBIGUITY_REMEDY`
+#: are the spellings `klt sim`, `klt netlist` and the docs use.
+from .pdk_ambiguity import AMBIGUITY_REMEDY as AMBIGUITY_REMEDY
+from .pdk_ambiguity import ambiguity_warning as ambiguity_warning
 from .pdk_compat import (
     check_compatibility,
     check_expected_version,
@@ -101,10 +108,12 @@ from .pdk_compat import (
 )
 from .pdk_descriptor import DescriptorError, has_descriptor, load_descriptor
 from .pdk_families import (
+    KNOWN_PDK_FAMILIES,
     family_subset,
     pdk_variant_family,
     pdk_variant_install_names,
 )
+from .pdk_store import read_store_stamp
 
 #: The ciel/volare stores, in resolution order (step 3). ``~`` is expanded at
 #: call time against ``$HOME``. Exposed at module scope so tests can override
@@ -135,18 +144,22 @@ _ASSET_LAYOUT: dict[str, tuple[str, ...]] = {
     "libs_ref": ("libs.ref",),
 }
 
-#: Subdirectory of ``assets["klayout"]`` a PDK stages its own importable
-#: KLayout PyCell (Python PCell) library packages under -- see
-#: :func:`pdk_pcell_lib_dir`. Verified against three real installs for issue
-#: #1535: a ``volare``-fetched ``sky130A`` (``libs.tech/klayout/python/cells``
-#: -- the Mabrains-authored ``sky130`` PCell library the PDK's own
+#: Candidate subdirectories of ``assets["klayout"]`` a PDK stages its own
+#: importable KLayout PyCell (Python PCell) library packages under, probed in
+#: order -- see :func:`pdk_pcell_lib_dir`. Verified against real installs: a
+#: ``volare``-fetched ``sky130A`` (``libs.tech/klayout/python/cells`` -- the
+#: Mabrains-authored ``sky130`` PCell library the PDK's own
 #: ``pymacros/sky130_pcells.lym`` autoloads by putting exactly this directory
 #: on ``sys.path``), a fetched ``ihp-sg13g2``
 #: (``libs.tech/klayout/python/{sg13g2_native_pcell_lib,sg13g2_pycell_lib,...}``),
-#: and a ``volare``-fetched ``gf180mcuD`` (ships **no** ``python/`` at all).
-#: Unlike ``drc/``/``lvs/`` (see :func:`drc_deck_file`), no verified install
-#: nests this one under ``klayout/tech/``, so no nested fallback is probed.
-_PCELL_LIB_SUBDIR = "python"
+#: and an open_pdks ``gf180mcuC`` (no ``python/``; ships ``cells``,
+#: ``klayout_api_cells`` and ``sealring_cells`` under
+#: ``libs.tech/klayout/tech/pymacros/``, which its ``gf180mcu.lym`` puts on
+#: ``sys.path``). A ``volare``-fetched ``gf180mcuD`` ships neither.
+_PCELL_LIB_SUBDIRS: tuple[tuple[str, ...], ...] = (
+    ("python",),
+    ("tech", "pymacros"),
+)
 
 
 class PdkNotFoundError(Exception):
@@ -342,36 +355,6 @@ def _ambiguous_roots(
     return matches
 
 
-def ambiguity_warning(report: dict[str, Any]) -> str | None:
-    """Render a one-line warning for a :func:`find_pdk` report whose
-    ``ambiguous_roots`` is non-empty, or ``None`` when the resolution was
-    unambiguous (issue #2564).
-
-    Pure formatter: this module never prints (see the module docstring), so a
-    caller emits the returned string itself -- to stderr for a CLI verb, or
-    into its own diagnostics channel. The message names the **absolute** root
-    actually read and every root skipped, because that is the only form of
-    the information a caller can act on; the JSON reports carry the
-    path-free ``resolved_via`` labels instead (see ``docs/json-contract.md``'s
-    path-privacy rule for committed evidence).
-    """
-    skipped = report.get("ambiguous_roots") or []
-    if not skipped:
-        return None
-    others = ", ".join(
-        f"{entry['root']} ({entry['resolved_via']})" for entry in skipped
-    )
-    return (
-        f"klt: warning: {len(skipped) + 1} installs provide PDK variant "
-        f"{report['variant']!r}; read {report['root']} "
-        f"({report['resolved_via']}), skipped {others}. Resolution is "
-        "first-match-wins, so a pinned open_pdks build may not be the one "
-        "this run read -- pin the root explicitly (--pdk-root, or a "
-        "request's models.pdk_root) to disable the search and choose "
-        "deliberately."
-    )
-
-
 def alternative_variants_warning(report: dict[str, Any]) -> str | None:
     """Render a one-line warning for a :func:`find_pdk` report whose
     ``alternative_variants`` is non-empty, or ``None`` otherwise (issue #3814).
@@ -387,6 +370,52 @@ def alternative_variants_warning(report: dict[str, Any]) -> str | None:
         f"{', '.join(others)}. Set $PDK or pass --pdk to choose "
         "deliberately."
     )
+
+
+def find_pdk_for_deck(
+    deck_name: str | None,
+    variant: str | None = None,
+    root: str | None = None,
+) -> dict[str, Any]:
+    """:func:`find_pdk`, constrained to the PDK family of ``deck_name``
+    (issue #4474), so ``provenance.pdk`` never contradicts ``deck.name``.
+
+    With no pinned variant (no ``variant`` and no ``$PDK``), the lowest
+    variant *of the deck's family* is chosen instead of the root's lowest
+    variant overall. A pinned variant of a different family, or a root with
+    no variant of the deck's family, raises :class:`PdkNotFoundError` naming
+    both families. A ``deck_name`` that is not a known PDK family (or
+    ``None``) imposes no constraint -- exactly :func:`find_pdk`.
+    """
+    if deck_name not in KNOWN_PDK_FAMILIES:
+        return find_pdk(variant=variant, root=root)
+    effective = variant if variant is not None else os.environ.get("PDK")
+    if effective is not None:
+        pdk_family = pdk_variant_family(effective)
+        if pdk_family != deck_name:
+            raise PdkNotFoundError(
+                f"PDK variant {effective!r} (family {pdk_family!r}) does not match "
+                f"the deck's family {deck_name!r}"
+            )
+        return find_pdk(variant=variant, root=root)
+    names = sorted(
+        {
+            entry["name"]
+            for install in list_pdks(root)["installs"]
+            for entry in install["variants"]
+            if pdk_variant_family(entry["name"]) == deck_name
+        }
+    )
+    if not names:
+        # No variant of any kind: find_pdk's own not-found message is the
+        # right one; otherwise the root holds only other families.
+        resolved = find_pdk(variant=variant, root=root)
+        raise PdkNotFoundError(
+            f"no PDK variant of the deck's family {deck_name!r} found "
+            f"(resolved {resolved['variant']!r}, family "
+            f"{pdk_variant_family(resolved['variant'])!r})"
+        )
+    return find_pdk(variant=names[0], root=root)
 
 
 def list_pdks(root: str | None = None) -> dict[str, Any]:
@@ -650,16 +679,15 @@ def read_version(variant_dir: str) -> str | None:
     to before the fallbacks existed); (2) a ``.fetched-version`` marker
     (``scripts/fetch-*.sh``) as ``fetched:<marker>``; (3) when the variant
     directory or its parent is itself a git work tree root, ``git:<40-hex
-    HEAD>`` with a ``-dirty`` suffix for uncommitted changes (issue #3070).
+    HEAD>`` with a ``-dirty`` suffix for uncommitted changes (issue #3070);
+    (4) the bundle ``.pdk-store.json`` ``version`` as ``store:<v>`` (#5318).
     Absent/unreadable/empty → ``None`` (never guessed).
     """
-    sources = read_sources(variant_dir)
-    if sources:
+    if sources := read_sources(variant_dir):
         return sources
-    marker = read_fetched_marker(variant_dir)
-    if marker:
+    if marker := read_fetched_marker(variant_dir):
         return f"fetched:{marker}"
-    return _git_version(variant_dir)
+    return _git_version(variant_dir) or read_store_stamp(variant_dir)
 
 
 _HEX40 = re.compile(r"^[0-9a-f]{40}$")
@@ -892,20 +920,16 @@ def drc_deck_file(variant: str | None = None, root: str | None = None) -> str | 
     same "prefer the specific name" precedence :func:`netgen_setup_file`
     uses) and falls back to a bare ``<variant>.drc``.
 
-    Not every PDK's native deck fits that single-file shape: gf180mcu (also
-    verified against a real fetched install) ships its native deck instead as
-    ~60 topic fragments under ``drc/rule_decks/*.drc`` plus a Python
-    assembly/CLI wrapper (``drc/run_drc.py``) that concatenates the right
-    subset at run time -- a distinct, PDK-specific invocation contract (its
-    own ``--variant``/``--table``/``--run_dir`` flags) this function
-    deliberately does not attempt to drive generically, the same "avoid
-    hand-assembling rule-table fragments ourselves" boundary
-    ``docs/cli/drc.md``'s "Engine" section draws for the curated-deck engine.
-    For a variant shaped like that, this function returns ``None`` rather
-    than guessing or reimplementing that assembly -- a caller who has already
-    produced a merged single-file deck (e.g. by running the PDK's own
-    ``run_drc.py --macro_gen`` ahead of time) can still reach it via `klt
-    drc`'s ``--deck-file`` override, which bypasses this resolver entirely.
+    Not every PDK's native deck fits that single-file, variant-named shape:
+    gf180mcu ships a single main script named for the *family*
+    (``tech/drc/gf180mcu.drc``) that selects the metal stack from a ``variant``
+    ``-rd`` global, not a variant-named file. That shape is resolved by
+    :func:`.pdk_native_drc.native_drc_main_script` (issue #4002), not by this
+    function, which keeps its "``None`` means no variant-named deck" contract. An older
+    gf180mcu layout (topic fragments under ``drc/rule_decks/*.drc`` plus a
+    ``drc/run_drc.py`` wrapper) is not driven by either; reach it with `klt
+    drc`'s ``--deck-file`` override after running the PDK's own ``run_drc.py
+    --macro_gen``.
 
     A single-PDK flat install (:func:`_probe_flat_variant`, e.g. IHP-Open-
     PDK's SG13G2/SG13CMOS5L) nests its ``drc/`` one directory deeper, at
@@ -1153,11 +1177,19 @@ def _pcell_lib_dir_for_assets(assets: dict[str, str | None]) -> str | None:
     :func:`list_pdks` can compute their ``has_pcell_library`` field without
     recursing back into :func:`find_pdk`.
     """
+    for path in _pcell_search_dirs(assets):
+        if os.path.isdir(path):
+            return path
+    return None
+
+
+def _pcell_search_dirs(assets: dict[str, str | None]) -> list[str]:
+    """The ordered candidate PyCell-library directories probed for an
+    already-resolved ``assets`` map (``[]`` when it has no ``klayout`` dir)."""
     klayout_dir = assets.get("klayout")
     if klayout_dir is None:
-        return None
-    path = os.path.join(klayout_dir, _PCELL_LIB_SUBDIR)
-    return path if os.path.isdir(path) else None
+        return []
+    return [os.path.join(klayout_dir, *sub) for sub in _PCELL_LIB_SUBDIRS]
 
 
 def _pcell_packages_in(lib_dir: str) -> list[str]:
@@ -1242,16 +1274,14 @@ def pdk_pcell_lib_dir(
     exactly as :func:`find_pdk` does (same precedence, same
     :class:`PdkNotFoundError` on no match).
 
-    Layout convention (verified against three real installs, see
-    :data:`_PCELL_LIB_SUBDIR`): both sky130A and ihp-sg13g2 stage their PyCell
-    packages directly at ``libs.tech/klayout/python/<package>/``, and
-    gf180mcuD ships no such directory at all. Unlike ``drc/``/``lvs/``, no
-    verified install nests it under ``klayout/tech/``, so -- keeping this
-    module's "enumerate what is present, never guess" convention -- no nested
-    fallback is probed.
+    Layout convention (see :data:`_PCELL_LIB_SUBDIRS`): sky130A and
+    ihp-sg13g2 stage their PyCell packages at
+    ``libs.tech/klayout/python/<package>/``; gf180mcuC at
+    ``libs.tech/klayout/tech/pymacros/<package>/``. Both are probed, in that
+    order, and the first existing directory wins. gf180mcuD ships neither.
 
     Returns the absolute directory, or ``None`` when the variant ships no
-    ``klayout`` asset directory at all or no ``python/`` subdirectory under it.
+    ``klayout`` asset directory at all or neither candidate exists under it.
 
     Raises :class:`PdkNotFoundError` when no PDK install resolves at all.
     """
