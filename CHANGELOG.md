@@ -14,6 +14,25 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt components` answers "which component does this point land on?"**
+  (#5552, 2026-11-14): a repeatable
+  `--probe 'name=<id>,layer=<conductor>,x=<um>,y=<um>'` -- the same spec
+  grammar `klt extract --probe` takes, with `layer` naming one `--conductors`
+  entry instead of a deck role -- adds a top-level `probes[]` array of
+  `{name, layer, x_um, y_um, found, component_id}`. `component_id` is always
+  one of the same report's `components[].id`, so two pads prove they are one
+  island when they share it, and the report can finally separate two
+  interleaved nets whose `bbox_um` overlap (`labels` only helped where the
+  point carried its own unique text, and a `--region` around the point loses
+  the component's whole-layout identity). A point on empty space, on a
+  different conductor only, or outside `--region` is `found: false`, not an
+  error; `--probe` needs a single top cell in scope (`--top` on a multi-top
+  stream). Deck-free, so unlike `klt extract --probe` it needs no
+  `--deck`, takes an arbitrary conductor/via stack with `and`/`not`
+  qualifiers, and -- because this engine never purges -- still names the
+  component of a floating island. Additive; `klt components`'
+  `schema_version` stays `1` and a run with no `--probe` differs only by
+  `"probes": []`.
 - **`klt stats` reports a `geometry_digest`** (#5551, 2026-11-13): the
   timestamp- and record-order-independent digest of a stream's decoded
   geometry is now a top-level field of `klt stats --format json` (and a
