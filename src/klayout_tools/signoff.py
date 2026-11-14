@@ -86,7 +86,7 @@ from .metrics import get_metric, is_registered
 from .signoff_derived_rows import (
     DERIVED_ROWS_ITEM_ID,
     asserted_rows,
-    credited_rows,
+    member_credited_rows,
     multi_row_info,
     read_require_derived_rows,
 )
@@ -7090,11 +7090,13 @@ def _grade_multi_citation(
     only the named rows some tagged, limited, passing measurement grades --
     a named row with none is uncovered. A member with no tags keeps the
     manifest-asserted ``rows``. ``row_coverage.row_sources`` marks each
-    covered row ``derived`` or ``asserted``. With ``require_derived`` (issue
-    #5462, the manifest's ``require_derived_rows``, item 5 only) an asserted
-    row is not coverage: an otherwise passing set carrying one is
-    ``unmet``/``partial_coverage`` with ``detail.asserted_rows``.
-    ``require_derived_invalid`` (a non-boolean key) is ``invalid_evidence``.
+    covered row ``derived`` or ``asserted``; a tagged, limited ``"reported"``
+    `klt yield` measurement additionally covers an unratified row (issue
+    #5490). With ``require_derived`` (issue #5462, the manifest's
+    ``require_derived_rows``, item 5 only) an asserted row is not coverage: an
+    otherwise passing set carrying one is ``unmet``/``partial_coverage`` with
+    ``detail.asserted_rows``. ``require_derived_invalid`` (a non-boolean key)
+    is ``invalid_evidence``.
 
     Returns ``(status, reason, citation, failure_detail, extra_item_keys)``.
     """
@@ -7113,11 +7115,9 @@ def _grade_multi_citation(
 
     graded = [(spec, rows, grade_spec(spec)) for spec, rows in members]
     failed = [g for g in graded if g[2][0] != "met"]
-    # Rows each member is credited with, and whether that was machine-derived.
-    credited: dict[int, tuple[list[str] | None, bool]] = {
-        id(spec): credited_rows(rows, (met_envelopes or {}).get(id(spec)))
-        for spec, rows, _ in graded
-    }
+    # Rows each member is credited with, whether that was machine-derived,
+    # and the issue-#5490 `reported` case (needs kind + the unratified set).
+    credited = member_credited_rows(graded, met_envelopes, spec_rows)
     row_info = multi_row_info(graded, failed, spec_rows, credited)
     extra: dict[str, Any] = {
         "citations_graded": [

@@ -3291,6 +3291,10 @@ the manifest-asserted `rows`, so existing manifests grade identically.
 against the envelope) or `"asserted"` (the manifest's word only). The change is
 additive: `schema_version` is not bumped.
 
+The same rule reads a `klt yield` envelope's `spec_row`-tagged
+`measurements[]` for item 6, with one additional covering case — see "Item 6
+with several statistical rows" below.
+
 **Requiring derived coverage (issue #5462).** `row_sources` is report-only by
 itself: an item whose coverage is entirely `"asserted"` grades exactly like a
 fully tagged one. A project that has finished tagging its envelopes can ratchet
@@ -3467,6 +3471,36 @@ A manifest with no `spec_rows."6"` grades exactly as before. `ratified` is
 additive and also parsed for item 5 rows, where it likewise blocks `met`.
 `schema_version`: no bump; `detail.unratified_rows` is a new optional field
 and `partial_coverage` is an existing reason.
+
+**Derived coverage on a `klt yield` envelope, and `reported` measurements
+(issue #5490).** "Derived coverage (issue #3778)" above applies to item 6 as
+written: when a citation carries `rows` **and** its envelope has at least one
+`spec_row`-tagged measurement, only the rows a tagged, `limits`-bearing
+measurement grades are covered. One case is added on top of it, for `klt
+yield` envelopes only:
+
+- a tagged, `limits`-bearing measurement whose `status` is **`reported`** —
+  the token `klt yield` gives a measurement that declares no `target_yield`,
+  so nothing could fail ([`yield.md`](yield.md)) — covers its row **when that
+  row is declared `ratified: false`**, and `row_sources` records it
+  `"derived"` like any other derived row;
+- the same measurement does **not** cover a **ratified** row: that row still
+  needs a measurement graded against a declared target, exactly as before.
+
+The restriction to unratified rows is what keeps every item verdict
+unchanged. An item with an unratified row is already `unmet` /
+`partial_coverage` through `unratified_rows`, so only the `detail` lists
+move; nothing here can turn an `unmet` item `met`. A `fail` or
+`insufficient_evidence` measurement, and a tag with no `limits`, still cover
+nothing — ratified or not — and a citation the #2467 campaign-discipline
+gates refuse never reaches the crediting step at all.
+
+The case this closes: a row whose spec states a method rather than a number
+has no yield claim to make, so declaring a `target_yield` for it would invent
+one — the number-invention `ratified: false` exists to let a manifest avoid.
+Before this, such a row came back in `uncovered_rows` as if no campaign had
+been run, and the only workaround was to declare a `target_yield` the
+campaign was known to clear. No new field, no `schema_version` bump.
 
 #### Item 6's evidence needs the `[yield]` extra (issue #2466)
 
