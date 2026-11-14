@@ -3690,7 +3690,7 @@ EXTRACTION_DECK = ExtractionDeck(
         # 'C' => anode | cathode, 'tA' => anode, 'tB' => cathode})` with
         # `ignore_parameter('efuse', 'R')` -- the link's value is not
         # compared, so an LVS request scopes the class with
-        # `options.compare_parameters` (`{"efuse": []}`). Anode and cathode
+        # `options.compare_parameters` (`{"efuse": ["L", "W"]}`). Anode and cathode
         # abut around the link, hence the split-terminal `anode_marker` form.
         ResistorDevice(
             name="efuse",  # gf180mcu_fd_pr__efuse (subckt "efuse")
