@@ -1598,7 +1598,7 @@ documented with their verb.
 
 ## Verifying committed evidence: `--check` / `--rerun`
 
-Seven verbs let a consumer verify that a previously committed `--format json`
+Eight verbs let a consumer verify that a previously committed `--format json`
 report still reproduces, built on one shared implementation
 (`src/klayout_tools/_report_verify.py`):
 
@@ -1611,8 +1611,20 @@ report still reproduces, built on one shared implementation
 | `place-and-route` | `klt place-and-route REQUEST --check REPORT [--rerun]` | #2224 |
 | `signoff` | `klt signoff --manifest\|--fleet M --check REPORT` | #2249 |
 | `equiv` | `klt equiv REQUEST --check REPORT [--rerun]` | #2280 |
+| `erc` | `klt erc --check REPORT [--rerun]` | #3060 |
 
-All six share one contract:
+**Seven of those eight also take `--rerun`** — every verb in the table except
+`signoff`, which is in it as a `--check`-only verb because re-grading a
+manifest *is* the whole verification (the `klt signoff` bullet below). So a
+consumer asking "does my verb have a regenerate-and-diff mode?" reads yes for
+`drc`, `lvs`, `extract`, `synthesize`, `place-and-route`, `equiv` and `erc`,
+and no for `signoff`. A boolean `--check` elsewhere in the CLI is a different
+mechanism and is deliberately absent above: `klt netlist --check` diffs a
+regenerated netlist against the committed artifact at `-o`, and `klt evidence
+render --check` is a doc-staleness flag — neither verifies a committed
+`--format json` report.
+
+All eight share one contract:
 
 - **Cheap mode (`--check`)** re-derives the recorded input/deck content hashes
   and compares them. No engine runs.
@@ -1707,8 +1719,8 @@ surface, **not** by `diff`-ing a committed report against a fresh render. See
 [`cli/signoff.md`](cli/signoff.md)'s "`build` describes the *install*, not
 only the commit".
 
-**The flow verbs take the request back.** `drc`/`lvs`/`extract` echo their own
-inputs into the report, so `--check REPORT` is self-sufficient. A
+**The flow verbs take the request back.** `drc`/`lvs`/`extract`/`erc` echo
+their own inputs into the report, so `--check REPORT` is self-sufficient. A
 `synthesize`/`place-and-route`/`equiv` report echoes *outputs* and
 provenance hashes but never the request document or the source paths it
 resolved — so those three keep their positional `REQUEST` argument
@@ -1731,6 +1743,7 @@ Per-verb detail:
 [`cli/synthesize.md`](cli/synthesize.md),
 [`cli/place-and-route.md`](cli/place-and-route.md),
 [`cli/equiv.md`](cli/equiv.md),
+[`cli/erc.md`](cli/erc.md),
 [`cli/signoff.md`](cli/signoff.md).
 
 ## Functional-verification run identity (**proposed** — not yet emitted, issue #2097)
