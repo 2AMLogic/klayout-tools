@@ -1,0 +1,103 @@
+# Reusable composite Action: provision the pinned sky130A open_pdks build
+# with ciel, restoring it from the Actions cache when possible.
+# =================================================================================
+#
+# One provisioning step for every workflow that needs the PDK (equiv-canary,
+# place-and-route-smoke, post-route-sta-live, kb-drift-canary,
+# design-agent-benchmark). This is the "provisioning is deliberately NOT
+# reinvented here" rule those workflows' header comments already document,
+# finally expressed as one `uses:` step instead of seven copy-pasted
+# Install-ciel/Cache/Fetch triples (issue #5658).
+#
+# The library list is an INPUT and is folded into the cache key. Before
+# #5658 all seven sites shared the single key
+# `sky130A-ciel-f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7` while installing
+# two different payloads (`-l sky130_fd_pr` vs `-l sky130_fd_pr
+# -l sky130_fd_sc_hd`), so whichever payload populated the key first was
+# handed to every consumer: the nightly device-models-only entry
+# (kb-drift-canary's schedule) always won by construction, and the three
+# std-cell consumers restored a ~/.ciel tree with no liberty/LEF and skipped
+# their own fetch. With the library slug in the key, a differing library
+# list cannot share a key by construction.
+#
+# Deliberately NO `restore-keys`: a fallback key would let a
+# device-models-only entry satisfy a std-cell request and silently
+# reintroduce the same collision through the restore path.
+#
+# The pins (and their provenance):
+# - ciel 2.6.1 -- the version #3426's volare->ciel migration pinned; a bump
+#   here is a deliberate change to every consumer at once.
+# - open_pdks commit f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7 -- the same
+#   pinned build scripts/aws/build-remote-sim-ami.sh and docs/cli/drc.md's
+#   gf180mcu recipe pin, reused for reproducibility rather than "whatever
+#   ciel's latest is at run time" (see place-and-route-smoke.yml's header
+#   comment for the full rationale).
+
+name: "Set up the pinned sky130A PDK (ciel)"
+description: >-
+  Install ciel and restore/fetch the pinned sky130A open_pdks build into
+  ~/.ciel, with the requested library list folded into the cache key
+  (issue #5658) so two different payloads can never share one key.
+
+inputs:
+  libs:
+    description: >-
+      Space-separated ciel library families to install (each becomes a -l
+      flag). Defaults to the device-models-only list the sim canaries use;
+      std-cell consumers pass "sky130_fd_pr sky130_fd_sc_hd".
+    required: false
+    default: sky130_fd_pr
+  ciel-version:
+    description: Pinned ciel version to pip install.
+    required: false
+    default: "2.6.1"
+  pdk-commit:
+    description: Pinned open_pdks commit for ciel to fetch.
+    required: false
+    default: f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7
+
+outputs:
+  cache-hit:
+    description: >-
+      Whether ~/.ciel was restored from the cache ("true"/"false"), so a
+      call site stepped with `id: pdk-cache` keeps the interface the inline
+      triple's cache step used to expose.
+    value: ${{ steps.pdk-cache.outputs.cache-hit }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install ciel
+      shell: bash
+      run: |
+        PIP_BREAK_SYSTEM_PACKAGES=1 python3 -m pip install --user "ciel==${{ inputs.ciel-version }}"
+        echo "$HOME/.local/bin" >>"$GITHUB_PATH"
+
+    - name: Compute the cache-key library slug
+      id: libs-slug
+      # GitHub cache keys may not contain spaces, so the library list
+      # becomes one dash-joined slug -- the input the key must carry so
+      # that a differing library list cannot collide (issue #5658).
+      shell: bash
+      run: echo "slug=$(printf '%s' "${{ inputs.libs }}" | tr ' ' '-')" >>"$GITHUB_OUTPUT"
+
+    - name: Cache full sky130A PDK (ciel, pinned)
+      id: pdk-cache
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      with:
+        path: ~/.ciel
+        # The library slug is part of the key ON PURPOSE: it is what makes
+        # "one key, two payloads" structurally impossible (issue #5658). Do
+        # not widen it into a shared key and do not add restore-keys.
+        key: sky130A-ciel-${{ inputs.pdk-commit }}-${{ steps.libs-slug.outputs.slug }}
+
+    - name: Fetch full sky130A PDK (ciel, cache miss only)
+      if: steps.pdk-cache.outputs.cache-hit != 'true'
+      timeout-minutes: 20
+      shell: bash
+      run: |
+        libs_args=()
+        for lib in ${{ inputs.libs }}; do
+          libs_args+=(-l "$lib")
+        done
+        ciel enable --pdk-family sky130 "${libs_args[@]}" "${{ inputs.pdk-commit }}"

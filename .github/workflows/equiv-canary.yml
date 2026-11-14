@@ -120,26 +120,15 @@ jobs:
       - name: Verify Yosys runs headlessly
         run: yosys -V
 
-      - name: Install ciel
-        run: |
-          PIP_BREAK_SYSTEM_PACKAGES=1 python3 -m pip install --user ciel==2.6.1
-          echo "$HOME/.local/bin" >>"$GITHUB_PATH"
-
-      - name: Cache full sky130A PDK (ciel, pinned)
+      - name: Install ciel + restore/fetch the pinned sky130A PDK (device + std-cell libs)
+        # Shared composite action (issue #5658): the library list is an input
+        # folded into the cache key, so this std-cell consumer can no longer
+        # restore the device-models-only entry the nightly sim canaries
+        # populate under their own key.
         id: pdk-cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        uses: ./.github/actions/setup-sky130a-pdk
         with:
-          path: ~/.ciel
-          # Same pinned open_pdks build place-and-route-smoke.yml pins, reused
-          # here for reproducibility rather than "whatever ciel's latest is
-          # at run time".
-          key: sky130A-ciel-f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7
-
-      - name: Fetch full sky130A PDK (ciel, cache miss only)
-        if: steps.pdk-cache.outputs.cache-hit != 'true'
-        timeout-minutes: 20
-        run: |
-          ciel enable --pdk-family sky130 -l sky130_fd_pr -l sky130_fd_sc_hd f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7
+          libs: sky130_fd_pr sky130_fd_sc_hd
 
       - name: Install the openroad Docker wrapper
         # scripts/install-openroad-docker.sh (issue #1328) -- pulls the
