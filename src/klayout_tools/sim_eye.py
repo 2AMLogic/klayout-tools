@@ -48,7 +48,7 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
-from . import sim_crossings, sim_window
+from . import sim_crossings, sim_measurement_kind, sim_window
 from .sim_errors import SimError
 from .sim_forms import validate_exclusive_form
 
@@ -85,7 +85,7 @@ _FORMS = (
 
 def is_eye(spec: dict[str, Any]) -> bool:
     """Whether a ``measurements[]`` entry is declared with ``eye``."""
-    return spec.get("eye") is not None
+    return sim_measurement_kind.declares(spec, "eye")
 
 
 def eye_measurements(measurements_spec: list[dict[str, Any]]) -> list[dict[str, Any]]:

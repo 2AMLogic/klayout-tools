@@ -50,7 +50,7 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
-from . import sim_crossings, sim_window
+from . import sim_crossings, sim_measurement_kind, sim_window
 from .sim_errors import SimError
 
 #: Edge polarities that can align a cycle (``either`` would make "one cycle"
@@ -74,7 +74,7 @@ _VECTOR_PREFIX = "__klt_cmean_"
 
 def is_cycle_mean(spec: dict[str, Any]) -> bool:
     """Whether a ``measurements[]`` entry is declared with ``cycle_mean``."""
-    return spec.get("cycle_mean") is not None
+    return sim_measurement_kind.declares(spec, "cycle_mean")
 
 
 def cycle_mean_measurements(

@@ -65,7 +65,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import sim_crossings, sim_cycle_mean, sim_window
+from . import sim_crossings, sim_cycle_mean, sim_measurement_kind, sim_window
 from .sim_errors import SimError
 
 #: Reason tokens a failed ``settled`` entry's diagnostic message leads with.
@@ -107,7 +107,7 @@ _FORMS = (
 
 def is_settled(spec: dict[str, Any]) -> bool:
     """Whether a ``measurements[]`` entry is declared with ``settled``."""
-    return spec.get("settled") is not None
+    return sim_measurement_kind.declares(spec, "settled")
 
 
 def settled_measurements(

@@ -39,7 +39,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from . import sim_raw, sim_transfer
+from . import sim_measurement_kind, sim_raw, sim_transfer
 from .sim_errors import SimError
 from .sim_forms import validate_exclusive_form
 
@@ -90,7 +90,7 @@ _FORMS = ("spice", "expr", "crossings", "cycle_mean", "energy", "stress")
 
 
 def is_transfer(spec: dict[str, Any]) -> bool:
-    return spec.get("transfer") is not None
+    return sim_measurement_kind.declares(spec, "transfer")
 
 
 def transfer_measurements(

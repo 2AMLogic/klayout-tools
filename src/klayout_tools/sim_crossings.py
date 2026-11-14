@@ -50,7 +50,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import sim_supply_relative, sim_window
+from . import sim_measurement_kind, sim_supply_relative, sim_window
 from ._jsonnum import is_number
 from .sim_crossings_reduce import reduce_crossings, validate_reduce
 from .sim_errors import SimError
@@ -74,7 +74,7 @@ _VECTOR_PREFIX = "__klt_xing_"
 
 def is_crossings(spec: dict[str, Any]) -> bool:
     """Whether a ``measurements[]`` entry is declared with ``crossings``."""
-    return spec.get("crossings") is not None
+    return sim_measurement_kind.declares(spec, "crossings")
 
 
 def crossings_measurements(

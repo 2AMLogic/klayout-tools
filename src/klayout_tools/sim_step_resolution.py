@@ -54,7 +54,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import sim_crossings, sim_window
+from . import sim_crossings, sim_measurement_kind, sim_window
 from .sim_errors import SimError
 from .sim_forms import validate_exclusive_form
 
@@ -87,7 +87,7 @@ _FORMS = (
 
 def is_step_resolution(spec: dict[str, Any]) -> bool:
     """Whether a ``measurements[]`` entry is declared with ``step_resolution``."""
-    return spec.get("step_resolution") is not None
+    return sim_measurement_kind.declares(spec, "step_resolution")
 
 
 def step_resolution_measurements(

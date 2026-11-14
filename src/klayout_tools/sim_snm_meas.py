@@ -32,7 +32,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from . import sim_raw, sim_snm
+from . import sim_measurement_kind, sim_raw, sim_snm
 from .sim_errors import SimError
 from .sim_forms import validate_exclusive_form
 
@@ -68,7 +68,7 @@ _FORMS = (
 
 
 def is_snm(spec: dict[str, Any]) -> bool:
-    return spec.get("snm") is not None
+    return sim_measurement_kind.declares(spec, "snm")
 
 
 def snm_measurements(measurements_spec: list[dict[str, Any]]) -> list[dict[str, Any]]:

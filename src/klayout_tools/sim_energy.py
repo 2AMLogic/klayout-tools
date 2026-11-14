@@ -61,7 +61,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from . import sim_window
+from . import sim_measurement_kind, sim_window
 from .sim_errors import SimError
 
 #: Keys an ``energy`` object may carry. Anything else is refused by name.
@@ -77,7 +77,7 @@ _SOURCE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.$#]*$")
 
 def is_energy(spec: dict[str, Any]) -> bool:
     """Whether a ``measurements[]`` entry is declared with ``energy``."""
-    return spec.get("energy") is not None
+    return sim_measurement_kind.declares(spec, "energy")
 
 
 def energy_measurements(

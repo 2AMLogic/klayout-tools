@@ -36,7 +36,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from . import sim_window
+from . import sim_measurement_kind, sim_window
 from .sim_errors import SimError
 
 #: Keys a ``stress`` object may carry. Anything else is refused by name.
@@ -53,7 +53,7 @@ _NODE_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.$#:/\[\]<>!+-]*$")
 
 def is_stress(spec: dict[str, Any]) -> bool:
     """Whether a ``measurements[]`` entry is declared with ``stress``."""
-    return spec.get("stress") is not None
+    return sim_measurement_kind.declares(spec, "stress")
 
 
 def stress_measurements(
