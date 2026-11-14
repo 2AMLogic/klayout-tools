@@ -879,6 +879,7 @@
       "kind": "verb",
       "description": "`klt stats` implementation: core modules plus CLI adapter.",
       "modules": [
+        "klayout_tools._stats_density",
         "klayout_tools.cli.stats_cmd",
         "klayout_tools.stats"
       ]
