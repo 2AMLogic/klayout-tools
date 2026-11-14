@@ -579,7 +579,8 @@
         "klayout_tools.place_and_route_route_overflow",
         "klayout_tools.place_and_route_script",
         "klayout_tools.place_and_route_sta",
-        "klayout_tools.place_and_route_via_pad"
+        "klayout_tools.place_and_route_via_pad",
+        "klayout_tools.place_and_route_via_tip"
       ]
     },
     "power": {

@@ -8708,16 +8708,21 @@ def test_merge_def_to_gds_success(tmp_path):
             "rules": [],
             "unrepaired": [],
         },
-        # Issue #4495: non-ASAP7 PDK -> named no-op, GDS untouched.
-        "via_pad_trim": {
-            "status": "skipped",
-            "reason": "PDK family of 'sky130A' is not ASAP7; no-op",
-            "cells_touched": 0,
-            "pads_trimmed": 0,
-            "pads_shrunk": 0,
-            "pads_left": 0,
-        },
+        "via_pad_trim": _skipped_via_pad_trim("sky130A"),
     }
+
+
+def _skipped_via_pad_trim(variant: str) -> dict:
+    """Issue #4495: off ASAP7 both halves of the via-pad pass are a *named*
+    no-op -- the trim leaves the GDS untouched and `tip_check` (which writes
+    no geometry on any PDK) reports that skip, never a misleading clean."""
+    s = {
+        "status": "skipped",
+        "reason": f"PDK family of '{variant}' is not ASAP7; no-op",
+    }
+    counts = {"cells_touched": 0, "pads_trimmed": 0, "pads_shrunk": 0, "pads_left": 0}
+    tip = {"violations": 0, "via_pad_violations": 0, "rules": []}
+    return {**s, **counts, "layers": [], "tip_check": {**s, **tip}}
 
 
 def test_merge_def_to_gds_is_byte_reproducible_across_runs(tmp_path):
@@ -8832,15 +8837,7 @@ def test_merge_def_to_gds_applies_family_fallback_layer_map_for_gf180mcu(tmp_pat
             "rules": [],
             "unrepaired": [],
         },
-        # Issue #4495: non-ASAP7 PDK -> named no-op, GDS untouched.
-        "via_pad_trim": {
-            "status": "skipped",
-            "reason": "PDK family of 'gf180mcuC' is not ASAP7; no-op",
-            "cells_touched": 0,
-            "pads_trimmed": 0,
-            "pads_shrunk": 0,
-            "pads_left": 0,
-        },
+        "via_pad_trim": _skipped_via_pad_trim("gf180mcuC"),
     }
 
 
