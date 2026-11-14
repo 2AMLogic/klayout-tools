@@ -8,6 +8,13 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-13
 
+- **PR #5537**: fix: name the offending path in _load_request_json's read/parse errors
+- **PR #5458**: feat(signoff): read gzip-compressed JSON evidence files
+- **PR #5501**: fix: re-settle osdi_preload when a late host-default yield lands on local
+- **PR #5532**: feat: characterize level-sensitive latch arcs from cell.enable_pin
+- **PR #5516**: test: delegate non-ngspice commands from test_sim's subprocess stub
+- **PR #5529**: feat: roll job_ids and a worst-of runner_compatibility up to a sharded batch remote block
+- **PR #5526**: docs: record the live sg13g2-ldo ERC/LVS substrate agreement run
 - **PR #5509**: fix: emit an error envelope for unreadable/non-UTF-8 eval and yield-sensitivity input
 - **PR #5510**: fix: make generated streams independent of earlier generators in the process
 - **PR #5488**: feat(pex): accept --reference-netlist with --extract-only, forward extract device coverage
@@ -19,6 +26,14 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 - **PR #5505**: refactor: share one window-bound parser across the sim measurement forms
 - **PR #5495**: fix: grade a zero-coverage envelope nothing_checked, not check_failed
 - **PR #5455**: fix(sim): apply the batch pdk_root refusal in --dry-run and scope its warning
+- **Issue #5549** (closed): klt lvs: provenance.pin_order_sources[].path is an absolute host path, so the field cannot be committed as evidence
+- **Issue #5530** (closed): Shared _load_request_json error messages do not name the file that failed to parse/read
+- **Issue #5452** (closed): klt signoff cannot read a gzip-compressed klt sim report (--report-out *.json.gz) as manifest evidence
+- **Issue #5492** (closed): sim: runner-resolved options.osdi_preload entries are dropped when a host-default off-host backend yields to local after the OSDI list is settled
+- **Issue #5521** (closed): klt characterize: level-sensitive latch arcs (transparent D->Q, enable->Q, setup/hold on the closing edge)
+- **Issue #5512** (closed): tests: _stub_subprocess_run in test_sim.py assumes every subprocess.run is an ngspice call
+- **Issue #5522** (closed): klt sim: a split batch request reports its jobs under remote.fleet as a list, so a single-job reader silently loses job identity and runner_compatibility
+- **Issue #5346** (closed): signoff: item 11 reads substrate supply_short + live ERC/LVS agreement, phase 2 E of #5336
 - **Issue #5485** (closed): Route eval and yield-sensitivity JSON loading through the shared _paths loaders: private copies traceback on unreadable/non-UTF-8 files
 - **Issue #5499** (closed): layout_plan_execute: a plan's stream record order depends on which plans ran earlier in the same process (batch run != single-plan run)
 - **Issue #5477** (closed): extract/pex: a device class the curated deck does not declare is silently absent from the extracted netlist, with no coverage disclosure (and no runset-engine alternative)
