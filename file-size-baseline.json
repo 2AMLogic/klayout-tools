@@ -229,7 +229,7 @@
     },
     {
       "path": "src/klayout_tools/decks/asap7_rules.py",
-      "lines": 816
+      "lines": 812
     },
     {
       "path": "src/klayout_tools/decks/extraction.py",
@@ -489,7 +489,7 @@
     },
     {
       "path": "src/klayout_tools/netlist_normalize.py",
-      "lines": 2347
+      "lines": 2319
     },
     {
       "path": "src/klayout_tools/op_sanity.py",
@@ -521,7 +521,7 @@
     },
     {
       "path": "src/klayout_tools/pex.py",
-      "lines": 3743
+      "lines": 3739
     },
     {
       "path": "src/klayout_tools/place_and_route.py",
@@ -573,7 +573,7 @@
     },
     {
       "path": "src/klayout_tools/remote_fleet.py",
-      "lines": 774
+      "lines": 772
     },
     {
       "path": "src/klayout_tools/remote_launcher.py",
@@ -609,7 +609,7 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 12535
+      "lines": 12534
     },
     {
       "path": "src/klayout_tools/sim_batch.py",

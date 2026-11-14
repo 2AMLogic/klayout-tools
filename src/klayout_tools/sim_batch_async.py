@@ -327,13 +327,6 @@ def launch_prepared_job(
     }
 
 
-def _job_exists(
-    config: BatchConfig, job_id: str, run: remote_transport.CommandRunner
-) -> bool:
-    """Whether ``job.json`` exists under this job's prefix."""
-    return _job_head(config, job_id, run) is not None
-
-
 def _job_head(
     config: BatchConfig, job_id: str, run: remote_transport.CommandRunner
 ) -> dict[str, Any] | None:

@@ -7217,7 +7217,6 @@ _ENGINE_VERSION_RE = re.compile(r"ngspice-([\w.]+)")
 _WAVEFORM_KEYWORDS = frozenset(
     {"pwl", "pulse", "sin", "exp", "sffm", "am", "trnoise", "trrandom", "external"}
 )
-_WAVEFORM_RE = re.compile(r"^([a-z]+)\s*(?:\(|$)")
 
 
 def _logical_netlist_lines(netlist_text: str) -> list[str]:
