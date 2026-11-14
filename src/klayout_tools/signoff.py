@@ -6335,9 +6335,19 @@ def _generic_artifact_binding(
     if isinstance(attestation, Mapping) and isinstance(
         attestation.get("producer"), str
     ):
+        # Issue #5571: item 2 (`--attest 2 --inventory`) records the
+        # inventory's schema version nested under `attestation.inventory`
+        # while items 1/8/9/10 write the flat key; resolve flat-if-present,
+        # else nested, so both shapes disclose the same fact. A malformed
+        # nested block yields `null` rather than raising. Disclosure only.
+        inventory_schema_version = attestation.get("inventory_schema_version")
+        if inventory_schema_version is None:
+            inventory = attestation.get("inventory")
+            if isinstance(inventory, Mapping):
+                inventory_schema_version = inventory.get("schema_version")
         binding["attestation"] = {
             "producer": attestation["producer"],
-            "inventory_schema_version": attestation.get("inventory_schema_version"),
+            "inventory_schema_version": inventory_schema_version,
             "check_count": attestation.get("check_count"),
             "passed_count": attestation.get("passed_count"),
         }

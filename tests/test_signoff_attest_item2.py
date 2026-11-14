@@ -410,6 +410,12 @@ def test_declared_checks_recorded_and_pass(tmp_path):
     assert last["argv"] == _PASS["argv"] and last["exit_status"] == 0
     assert env["attestation"]["check_count"] == 4
     assert env["attestation"]["inventory"]["path"]["path"] == "evidence/item2-inv.json"
+    # Issue #5571: the nested-only version reaches the tier record.
+    item = _bind(repo, env)
+    assert (
+        item["citation"]["artifact_binding"]["attestation"]["inventory_schema_version"]
+        == 1
+    )
 
 
 def test_declared_check_failure_fails_envelope(tmp_path):
@@ -439,6 +445,34 @@ def test_no_inventory_envelope_unchanged(tmp_path):
     env = build_stream_attestation(stream)
     assert "inventory" not in env["attestation"]
     assert env["attestation"]["check_count"] == 3
+    # Issue #5571: no declared-checks inventory still discloses `null`.
+    item = _bind(repo, env)
+    assert (
+        item["citation"]["artifact_binding"]["attestation"]["inventory_schema_version"]
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "not-a-mapping",
+        [1, 2],
+        {"path": {"path": "evidence/x.json", "scope": "repo"}},
+    ],
+)
+def test_malformed_nested_inventory_block_yields_null(tmp_path, bad):
+    """Issue #5571: a malformed `attestation.inventory` cannot raise and is
+    never graded -- the disclosure resolves to `null`."""
+    repo, stream = _stream(tmp_path)
+    env = build_stream_attestation(stream)
+    env["attestation"]["inventory"] = bad
+    item = _bind(repo, env)
+    assert item["status"] == "met"
+    assert (
+        item["citation"]["artifact_binding"]["attestation"]["inventory_schema_version"]
+        is None
+    )
 
 
 def test_declared_check_timeout(tmp_path):
