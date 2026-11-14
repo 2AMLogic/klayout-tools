@@ -1422,34 +1422,6 @@ def _convert_bipolar_card(
     return f"{instance} {' '.join(nodes)} {lookup.device_class}{extra}"
 
 
-def _geometry_suffix(
-    instance: str,
-    subckt_name: str,
-    lookup: DeviceLookup,
-    params: dict[str, str],
-    *,
-    geometry_style: str | None = None,
-) -> str:
-    """The ``" L=...U W=...U"`` suffix carried from ``lookup``'s own
-    length/width call-site parameters, or ``""`` when the call supplies
-    neither (the subcircuit's own default geometry then applies).
-
-    A dimension the call omits still resolves when ``lookup`` carries a
-    fixed constant for it (``fixed_length_um``/``fixed_width_um``, issue
-    #2459's fixed-geometry-wrapper support -- see
-    :func:`_resolve_geometry_dimension`) -- e.g. a call supplying only ``L``
-    against a subcircuit whose *name* fixes ``W`` (sky130's
-    ``res_high_po_2p85``) still emits both.
-    """
-    resolved = _resolve_call_geometry(
-        instance, subckt_name, lookup, params, geometry_style=geometry_style
-    )
-    if resolved is None:
-        return ""
-    l_um, w_um = resolved
-    return f" L={_format_um(l_um)} W={_format_um(w_um)}"
-
-
 def _resolve_call_geometry(
     instance: str,
     subckt_name: str,
@@ -1460,8 +1432,8 @@ def _resolve_call_geometry(
 ) -> tuple[float, float] | None:
     """The call's resolved ``(L, W)`` in micrometres, or ``None`` when the
     call supplies neither dimension (the subcircuit's own default geometry
-    then applies). Shared by :func:`_geometry_suffix` and the deck-derived
-    resistor value (issue #2905)."""
+    then applies). Used by the deck-derived resistor value (issue
+    #2905)."""
     has_length_param = lookup.length_param in params
     has_width_param = lookup.width_param in params
     if not (has_length_param or has_width_param):

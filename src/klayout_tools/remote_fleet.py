@@ -420,7 +420,6 @@ class FleetLauncher:
 
         self.per_instance_hourly: float | None = None
         self.per_instance_ceiling: float | None = None
-        self._quota_checked = False
 
         self._created_security_group = False
         self._launchers: list[RemoteLauncher] = []  # every launcher ever made
@@ -473,7 +472,6 @@ class FleetLauncher:
                 spot=self.spot,
                 aws_runner=self._aws,
             )
-        self._quota_checked = True
 
     # -- shared security group (one per fleet, not one per instance) -------
 
