@@ -93,7 +93,12 @@ runs:
 
     - name: Fetch full sky130A PDK (ciel, cache miss only)
       if: steps.pdk-cache.outputs.cache-hit != 'true'
-      timeout-minutes: 20
+      # No step-level `timeout-minutes` here: composite-action steps do not
+      # support it (the runner rejects the manifest with "Unexpected value
+      # 'timeout-minutes'"). The 20-minute fetch cap the inline triples
+      # carried lives on the `uses:` step at each call site instead, which
+      # caps this whole composite -- strictly tighter than capping the fetch
+      # alone, since the install/cache steps ahead of it cost only seconds.
       shell: bash
       run: |
         libs_args=()

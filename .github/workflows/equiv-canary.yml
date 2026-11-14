@@ -126,6 +126,10 @@ jobs:
         # restore the device-models-only entry the nightly sim canaries
         # populate under their own key.
         id: pdk-cache
+        # timeout-minutes caps the whole composite (composite-action
+        # steps cannot carry timeout-minutes themselves); strictly tighter
+        # than the inline triple's fetch-only 20-minute cap.
+        timeout-minutes: 20
         uses: ./.github/actions/setup-sky130a-pdk
         with:
           libs: sky130_fd_pr sky130_fd_sc_hd

@@ -120,9 +120,12 @@ def test_action_defaults_to_the_device_models_only_library_list() -> None:
     assert default.group(1) == "sky130_fd_pr", default.group(1)
 
 
-def test_action_fetch_is_gated_on_cache_hit_and_time_capped() -> None:
-    """Preserves the inline triple's behaviour: the fetch only ran on a cache
-    miss and carried `timeout-minutes: 20`."""
+def test_action_fetch_is_gated_on_cache_miss() -> None:
+    """Preserves the inline triple's cache-miss gate. Composite-action steps
+    cannot carry `timeout-minutes` (the runner rejects the manifest with
+    "Unexpected value 'timeout-minutes'" -- observed live on the first
+    equiv-canary dispatch), so the 20-minute fetch cap the triples carried
+    lives on the `uses:` step at each call site instead (asserted below)."""
     text = _read(ACTION)
     fetch = re.search(r"- name: Fetch full sky130A PDK.*?(?=\Z)", text, re.DOTALL)
     assert fetch is not None, "action has no fetch step"
@@ -130,9 +133,25 @@ def test_action_fetch_is_gated_on_cache_hit_and_time_capped() -> None:
     assert "steps.pdk-cache.outputs.cache-hit != 'true'" in body, (
         "fetch step is not gated on a cache miss"
     )
-    assert "timeout-minutes: 20" in body, "fetch step lost its 20-minute cap"
+    assert not re.search(r"^\s*timeout-minutes:", body, re.MULTILINE), (
+        "composite steps must not carry timeout-minutes (runner rejects it)"
+    )
     assert "ciel enable --pdk-family sky130" in body
     assert PINNED_COMMIT in body or "inputs.pdk-commit" in body
+
+
+def test_every_call_site_carries_the_20_minute_cap() -> None:
+    """The fetch cap the inline triples carried (`timeout-minutes: 20` on the
+    fetch step) must survive at every call site."""
+    expected: dict[str, int] = {**DEVICE_MODEL_SITES, **{k: 1 for k in SC_HD_CONSUMERS}}
+    for name in expected:
+        workflow = _read(WORKFLOWS / name)
+        calls = _call_sites(workflow)
+        assert calls, f"{name} has no setup-sky130a-pdk call site"
+        for call in calls:
+            assert re.search(r"^ +timeout-minutes: 20$", call, re.MULTILINE), (
+                f"{name}: setup-sky130a-pdk call site lost the 20-minute cap"
+            )
 
 
 def test_action_has_no_restore_keys_fallback() -> None:
