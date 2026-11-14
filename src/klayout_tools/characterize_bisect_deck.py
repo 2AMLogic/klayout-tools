@@ -64,6 +64,29 @@ _BEFORE_CLOCK = ("setup", "recovery")
 #: side of the clock edge they land on.
 ASYNC_KINDS = ("recovery", "removal")
 
+#: Absolute current tolerance (amps) a probe deck asks ngspice for, in place
+#: of its 1 pA default.
+#:
+#: A bisection deliberately walks its probes onto the cell's metastability
+#: boundary, where the storage node hovers and the branch currents in the
+#: deck collapse toward zero. ngspice 42 then cannot meet its local
+#: truncation-error check on a *stimulus source's* branch current at the
+#: release ramp's own PWL breakpoint and aborts the whole transient
+#: (``Timestep too small ... trouble with node "vdc2#branch"``) -- which
+#: loses every probe batched into that deck, not just the metastable one,
+#: and fails the run outright. Recovery/removal probes reach that boundary
+#: on an async pin released within picoseconds of the clock edge (#5520),
+#: which is what first exposed it; setup/hold probes share the deck and the
+#: same abort.
+#:
+#: 0.1 nA is still three to four orders of magnitude below the currents that
+#: move a timing node, and it buys accuracy nothing: the measured crossings
+#: are identical for every value over 5e-12..1e-10, and identical to what
+#: ngspice 47 -- which does not abort -- reports at the stock default. The
+#: deck's own ``.options`` card is the narrowest place to say it; no other
+#: ``klt`` deck is affected.
+PROBE_ABSTOL = "1e-10"
+
 
 def _pwl(name: str, node: str, points: list[tuple[float, float]]) -> str:
     body = " ".join(f"{spice_number(t)}n {spice_number(v)}" for t, v in points)
@@ -119,6 +142,7 @@ def build_deck(
     t_final = stop - 0.5 * settle_ns
     lines = [
         "* klt characterize -- constraint probes, do not edit",
+        f".options abstol={PROBE_ABSTOL}",
         f".include {cell['netlist_path']}",
         f"Vdd vdd 0 DC {spice_number(vdd)}",
     ]

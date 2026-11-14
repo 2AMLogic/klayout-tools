@@ -33,7 +33,12 @@ not `klt --version`, if you need to detect this kind of drift. See
   **only for a cell that declares `async_pins`**, an `async_arcs[]` list --
   a request without them emits a byte-identical `.lib` and response. No
   `schema_version` bump. Worked example:
-  `examples/characterize/request-dffsr.json`.
+  `examples/characterize/request-dffsr.json`. Constraint probe decks now
+  carry `.options abstol=1e-10`: a probe on the metastability boundary made
+  ngspice 42 abort the whole transient at the release ramp's PWL breakpoint
+  (`Timestep too small`), losing every probe batched into that deck. The
+  emitted `.lib` is byte-identical with and without the card, on ngspice 42
+  and 47 alike.
 - **`klt stats` reports a `geometry_digest`** (#5551, 2026-11-13): the
   timestamp- and record-order-independent digest of a stream's decoded
   geometry is now a top-level field of `klt stats --format json` (and a

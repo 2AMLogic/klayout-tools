@@ -14,6 +14,7 @@ import pytest
 from klayout_tools import characterize, liberty_writer
 from klayout_tools import characterize_async as ca
 from klayout_tools import characterize_bisect as bisect
+from klayout_tools import characterize_bisect_deck as bisect_deck
 from klayout_tools import characterize_constraints as cc
 from test_characterize_async import (
     _OPTIONS,
@@ -184,6 +185,16 @@ def test_the_release_edge_moves_to_the_other_side_of_the_clock_for_removal():
     assert release(recovery) < release(removal)
     assert "Vdc0 dd_c0 0 PWL(0n 0 " in recovery
     assert "Vdc0 dd_c0 0 PWL(0n 0 " in removal
+
+    # Every probe deck relaxes ngspice's 1 pA default abstol. A probe sitting
+    # on the metastability boundary -- which a removal search reaches by
+    # releasing the async pin within picoseconds of the clock edge -- makes
+    # ngspice 42 abort the whole transient at the release ramp's own PWL
+    # breakpoint ("Timestep too small ... trouble with node "vdc2#branch""),
+    # losing every probe batched into that deck. The card costs no accuracy:
+    # the emitted `.lib` is byte-identical with and without it.
+    for text in (recovery, removal):
+        assert f".options abstol={bisect_deck.PROBE_ABSTOL}" in text
 
 
 def _fake_bisect(monkeypatch, cases, outcome_of):
