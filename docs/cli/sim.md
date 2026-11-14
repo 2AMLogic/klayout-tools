@@ -8656,11 +8656,19 @@ than a standard: sky130 names it `m` + the subcircuit name
 (`msky130_fd_pr__nfet_01v8`), gf180mcu names it `m0`. Both are probed
 automatically — the generated deck `print`s every candidate path and an
 unknown vector name is a harmless log line in ngspice batch mode — so this
-override is only needed for a PDK following neither convention. When no
-candidate answers for a device, a `op_point_unavailable` diagnostic names
-the device and the paths that were tried instead of silently reporting
-nothing. `models.<model>.kind` likewise resolves a model name this tool
-cannot classify as n- or p-channel.
+override is only needed for a PDK following neither convention. When a PDK
+device cell wraps an **OSDI (Verilog-A) instance** instead of a built-in
+MOS element, ngspice exposes its vectors under the `n.` prefix rather than
+`m.`, and the drain saturation voltage is named `vdss` rather than `vdsat`
+(a PSP103-class model exposes no `vdsat` at all); every candidate path is
+probed under both prefixes and both saturation-voltage spellings parse into
+`values.vdsat_v`. Written with a prefix — `"op_point_element": "n.nsg13_hv_pmos"`
+— the override pins the element type as well as the name, which is the way
+to reach an OSDI inner element directly; a bare name is tried under both
+prefixes. When no candidate answers for a device, a `op_point_unavailable`
+diagnostic names the device and the paths that were tried instead of
+silently reporting nothing. `models.<model>.kind` likewise resolves a model
+name this tool cannot classify as n- or p-channel.
 
 ### Response
 

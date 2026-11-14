@@ -540,14 +540,41 @@ def test_model_kind_override_beats_a_conflicting_naming_heuristic():
 def test_op_candidates_cover_both_pdk_inner_element_conventions():
     # sky130 names the inner element `m<subckt>`, gf180mcu names it `m0`
     # (both verified against the installed PDKs -- see op_sanity.py).
-    assert op_sanity._op_candidates("XM1", "sky130_fd_pr__nfet_01v8", None)[0] == (
-        "m.xm1.msky130_fd_pr__nfet_01v8"
+    assert op_sanity._op_candidates("XM1", "sky130_fd_pr__nfet_01v8", None)[:3] == (
+        [
+            "m.xm1.msky130_fd_pr__nfet_01v8",
+            "m.xm1.m0",
+            "m.xm1.msky130_fd_pr__nfet_01v8_0",
+        ]
     )
-    assert "m.xm1.m0" in op_sanity._op_candidates("XM1", "nfet_03v3", None)
-    # A plain `M` element's vectors live directly under its own name.
+    # Issue #5637: a PDK device subcircuit may wrap an OSDI (Verilog-A)
+    # instance -- an `N` element in ngspice, whose vectors answer under the
+    # `n.` prefix. Every subcircuit candidate is probed under both prefixes,
+    # `m.` first (the convention every shipped PDK follows).
+    assert "n.xm1.msky130_fd_pr__nfet_01v8" in op_sanity._op_candidates(
+        "XM1", "sky130_fd_pr__nfet_01v8", None
+    )
+    assert "n.xm1.m0" in op_sanity._op_candidates("XM1", "nfet_03v3", None)
+    # A plain `M` element's vectors live directly under its own name,
+    # byte-identical to the pre-#5637 list: a built-in M is never an OSDI
+    # instance, so probing `n.` there would double the deck for nothing.
     assert op_sanity._op_candidates("M2", "nch", None) == ["m2"]
-    # An explicit override replaces the whole candidate list.
-    assert op_sanity._op_candidates("XM1", "weird", "mcore") == ["m.xm1.mcore"]
+    # An explicit override carrying an `m.`/`n.` prefix pins that prefix
+    # (this is what reaches an OSDI inner element); a bare element name is
+    # tried under both prefixes.
+    assert op_sanity._op_candidates("XM1", "weird", "mcore") == [
+        "m.xm1.mcore",
+        "n.xm1.mcore",
+    ]
+    assert op_sanity._op_candidates("XM1", "weird", "n.nsg13_hv_pmos") == [
+        "n.xm1.nsg13_hv_pmos"
+    ]
+    # `"m."`/`"n."` with an empty remainder does not pin a prefix -- it is a
+    # (never-answering) bare element name like any other.
+    assert op_sanity._op_candidates("XM1", "weird", "n.") == [
+        "m.xm1.n.",
+        "n.xm1.n.",
+    ]
 
 
 # --------------------------------------------------------------------------- #
@@ -974,6 +1001,131 @@ def test_op_point_element_override_resolves_a_nonstandard_pdk(tmp_path, monkeypa
     report = op_sanity.run_op_sanity(str(request))
 
     assert report["devices"][0]["op_point_element"] == "m.xm1.mcore"
+    assert report["devices"][0]["region"] == "saturation"
+
+
+#: A saturated NMOS whose model speaks PSP103-class OSDI instead of BSIM: the
+#: drain saturation voltage is named `vdss`, `vdsat` does not exist, and the
+#: device answers on the `n.`-prefixed candidate (candidate index 3 -- the
+#: `n.` twin of the first `m.` guess, see the candidate-order unit test).
+_OSDI_SATURATED_NMOS = {"vgs": 0.9, "vth": 0.7, "vds": 1.2, "vdss": 0.15, "id": 4.5e-5}
+_OSDI_TRIODE_NMOS = {**_OSDI_SATURATED_NMOS, "vds": 0.10}
+
+
+def test_osdi_device_answers_on_n_prefixed_candidate(tmp_path, monkeypatch):
+    """Issue #5637: a PDK subcircuit wrapping an OSDI (Verilog-A) instance is
+    an `N` element -- its vectors answer under `n.`, and its saturation
+    voltage is named `vdss`. The lint must populate every value, resolve the
+    region, and stay silent about the device."""
+    request = _write_request(tmp_path, _GOOD_NETLIST)
+    _install_fake_ngspice(
+        monkeypatch,
+        {"XM1": _OSDI_SATURATED_NMOS, "XM2": _SATURATED_PMOS},
+        candidate_index=3,
+    )
+
+    report = op_sanity.run_op_sanity(str(request))
+
+    codes = {diagnostic["code"] for diagnostic in report["diagnostics"]}
+    assert codes == set()
+    assert report["devices"][0]["op_point_element"] == "n.xm1.mnmos_demo"
+    assert report["devices"][0]["values"]["vdsat_v"] == pytest.approx(0.15)
+    assert report["devices"][0]["region"] == "saturation"
+    assert report["status"] == "clean"
+
+
+def test_osdi_device_is_reported_triode_via_vdss(tmp_path, monkeypatch):
+    """The triode finding must fire from a `vdss`-reported model exactly as
+    from a `vdsat`-reported one."""
+    request = _write_request(tmp_path, _GOOD_NETLIST)
+    _install_fake_ngspice(
+        monkeypatch,
+        {"XM1": _OSDI_TRIODE_NMOS, "XM2": _SATURATED_PMOS},
+        candidate_index=3,
+    )
+
+    report = op_sanity.run_op_sanity(str(request))
+
+    assert report["devices"][0]["region"] == "triode"
+    (finding,) = _findings(report, "triode")
+    assert finding["device"] == "XM1"
+
+
+def test_corner_all_tabulates_an_osdi_device(tmp_path, monkeypatch):
+    """`--op-lint-corner all` gets a real margin for a device only `vdss`
+    answers for, instead of silently omitting it from the table."""
+    request = _three_corner_request(tmp_path)
+    runners = {}
+    for temp, values in {
+        27.0: {"XM1": _OSDI_SATURATED_NMOS, "XM2": _SATURATED_PMOS},
+        70.0: {"XM1": _OSDI_SATURATED_NMOS, "XM2": _SATURATED_PMOS},
+        125.0: {"XM1": _OSDI_TRIODE_NMOS, "XM2": _SATURATED_PMOS},
+    }.items():
+        capture = _CaptureRun()
+        _install_fake_ngspice(
+            capture,
+            values,
+            candidate_index=3,
+            node_voltages={"vdd": 1.8, "in": 0.9, "out": 1.2},
+        )
+        runners[temp] = capture.run
+
+    def fake_run(cmd, capture_output, text, timeout):
+        deck_path = cmd[cmd.index("-b") + 1]
+        with open(deck_path, encoding="utf-8") as handle:
+            deck = handle.read()
+        match = re.search(r"^\.temp\s+(\S+)", deck, re.MULTILINE)
+        temp = float(match.group(1))
+        return runners[temp](cmd, capture_output, text, timeout)
+
+    monkeypatch.setattr(op_sanity.subprocess, "run", fake_run)
+
+    report = op_sanity.run_op_sanity(str(request), corner="all")
+
+    assert len(report["corner_margins"]) == 3
+    assert all(entry["worst_device"] is not None for entry in report["corner_margins"])
+    hot = [e for e in report["corner_margins"] if e["triode_count"] == 1]
+    assert len(hot) == 1
+    assert hot[0]["worst_margin_v"] == pytest.approx(-0.05)
+
+
+def test_unanswered_n_prefix_is_named_in_the_diagnostic(tmp_path, monkeypatch):
+    """Neither prefix answers: the diagnostic still fires, lists both
+    prefixes' paths, and its advice mentions that `op_point_element` may
+    carry an `m.`/`n.` prefix (issue #5637 -- the old advice sent the reader
+    to an element-name-only override that cannot fix a prefix mismatch)."""
+    request = _write_request(tmp_path, _GOOD_NETLIST)
+    _install_fake_ngspice(
+        monkeypatch,
+        {"XM1": _SATURATED_NMOS, "XM2": _SATURATED_PMOS},
+        candidate_index=99,
+        node_voltages={"out": 1.2},
+    )
+
+    report = op_sanity.run_op_sanity(str(request))
+
+    message = report["diagnostics"][0]["message"]
+    assert "@n.xm1.m0" in message
+    assert "m. or n. prefix" in message
+
+
+def test_a_model_reporting_both_vdsat_and_vdss_is_deterministic(tmp_path, monkeypatch):
+    """Both spellings answering at once is exotic, but must cost exactly one
+    `vdsat_v` and never crash. The parser's standing last-print-wins rule
+    (deck order: `vdsat` prints before `vdss`) resolves it to the `vdss`
+    value."""
+    request = _write_request(tmp_path, _GOOD_NETLIST)
+    _install_fake_ngspice(
+        monkeypatch,
+        {
+            "XM1": {**_SATURATED_NMOS, "vdss": 0.14},
+            "XM2": _SATURATED_PMOS,
+        },
+    )
+
+    report = op_sanity.run_op_sanity(str(request))
+
+    assert report["devices"][0]["values"]["vdsat_v"] == pytest.approx(0.14)
     assert report["devices"][0]["region"] == "saturation"
 
 

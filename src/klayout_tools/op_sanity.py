@@ -61,13 +61,21 @@ Instance-path resolution is the one wrinkle: a PDK device instantiated as
 *PDK convention*, not a standard -- sky130 names it ``m`` + the subcircuit
 name (``msky130_fd_pr__nfet_01v8``), gf180mcu names it ``m0`` (both verified
 against the installed PDKs with ngspice 46 while building this module).
-Rather than guess one and silently report nothing, the generated deck
-``print``s *every* candidate path for each device; an unknown vector name is
+Issue #5637 adds a second wrinkle from the same root: when the PDK device
+cell wraps an **OSDI (Verilog-A) instance** rather than a built-in ``M``
+element -- as PSP103-class libraries do -- ngspice exposes the vectors as an
+``N`` element instead, at ``@n.<instance>.<inner element>[param]``, and the
+saturation voltage is named ``vdss``, not ``vdsat``. Rather than guess one
+prefix/element pair and silently report nothing, the generated deck
+``print``s *every* candidate path (each element-name guess under both the
+``m.`` and ``n.`` prefixes) for each device; an unknown vector name is
 a non-fatal ``Error: no such device or model name`` log line in ngspice's
 batch mode (also verified), so the run costs one process either way and the
 candidate that actually answered is recorded per device in
 ``devices[].op_point_element``. ``op_lint.models.<model>.op_point_element``
-overrides the candidate list for a PDK that follows neither convention.
+overrides the element-name guesses for a PDK that follows neither
+convention; written with an ``m.``/``n.`` prefix (``"n.nsg13_hv_pmos"``) it
+pins the prefix too, which is what reaches an OSDI inner element.
 
 Sign conventions: compare magnitudes
 -------------------------------------
@@ -146,17 +154,30 @@ from .sim import (
 #: JSON shape -- see docs/json-contract.md.
 SCHEMA_VERSION = 1
 
-#: Op-point vectors requested per device. Deliberately the same names
-#: ``size.py``'s ``_OP_PARAMS`` uses (minus ``gm``, which no check here
-#: needs), so both modules read one vocabulary out of ngspice.
-_OP_PARAMS = ("vgs", "vth", "vds", "vdsat", "id")
+#: Element-name prefixes an op-point vector may live under. `m.` addresses a
+#: built-in MOS element; `n.` addresses an OSDI (Verilog-A) instance, which
+#: is how PSP103-class open-PDK model libraries wrap their devices. Only a
+#: PDK-device *subcircuit's* inner element can be either, so the cross-
+#: product is confined to that branch of :func:`_op_candidates`.
+_OP_PREFIXES = ("m", "n")
 
-#: Response-field name each :data:`_OP_PARAMS` entry parses into.
+#: Op-point vectors requested per device. ``size.py``'s ``_OP_PARAMS`` is
+#: this vocabulary minus ``vdss`` (and ``gm``, which no check here needs).
+#: ``vdss`` is deliberate divergence (issue #5637): PSP103-class OSDI models
+#: name the drain saturation voltage ``vdss`` and do not expose ``vdsat`` at
+#: all, so this module probes both spellings for one response field --
+#: something ``size.py`` cannot hit, having no OSDI model-library support.
+_OP_PARAMS = ("vgs", "vth", "vds", "vdsat", "vdss", "id")
+
+#: Response-field name each :data:`_OP_PARAMS` entry parses into. ``vdsat``
+#: and ``vdss`` are per-model alternatives -- only one answers on a given
+#: model -- so both parse into the same field.
 _OP_PARAM_KEYS = {
     "vgs": "vgs_v",
     "vth": "vth_v",
     "vds": "vds_v",
     "vdsat": "vdsat_v",
+    "vdss": "vdsat_v",
     "id": "id_a",
 }
 
@@ -401,17 +422,30 @@ def _op_candidates(instance: str, model: str, override: str | None) -> list[str]
     first. See this module's docstring for why more than one is probed."""
     lowered = instance.lower()
     # A device inside a user subcircuit carries its instance path
-    # (`xdut.m1`); ngspice names its vectors `m.<path>` and, for a PDK cell,
-    # `m.<path>.<inner element>`.
+    # (`xdut.m1`); ngspice names its vectors `m.<path>` for a built-in MOS
+    # element and `n.<path>` for an OSDI (Verilog-A) instance -- which is
+    # what PSP103-class PDK device cells wrap (issue #5637). The inner
+    # element name itself is also a PDK convention, not a standard, so the
+    # probe set is the prefix x element-name cross-product, `m.` first.
     leaf = lowered.rsplit(".", 1)[-1]
     if leaf.startswith("x"):
-        inner = (
-            [override]
-            if override
-            else [f"m{model.lower()}", "m0", f"m{model.lower()}_0"]
-        )
-        return [f"m.{lowered}.{name}" for name in inner]
-    # A plain `M` element's vectors live directly under its own name.
+        if override:
+            # An override starting with `m.`/`n.` pins that prefix; a bare
+            # element name is tried under both.
+            prefix, sep, rest = override.partition(".")
+            if sep and rest and prefix in _OP_PREFIXES:
+                return [f"{prefix}.{lowered}.{rest}"]
+            elements = [override]
+        else:
+            elements = [f"m{model.lower()}", "m0", f"m{model.lower()}_0"]
+        return [
+            f"{prefix}.{lowered}.{element}"
+            for prefix in _OP_PREFIXES
+            for element in elements
+        ]
+    # A plain `M` element's vectors live directly under its own name -- and
+    # a built-in M is never an OSDI instance, so only the `m.` prefix exists
+    # here.
     if override:
         return [override]
     return [f"m.{lowered}" if "." in lowered else lowered]
@@ -1598,7 +1632,9 @@ def run_op_sanity(
                     f"{', '.join('@' + path for path in device.op_candidates)}. "
                     "Set request.op_lint.models."
                     f"{device.model}.op_point_element to this PDK's inner "
-                    "element name to enable the off/triode checks for it."
+                    "element name -- it may carry an m. or n. prefix to pin "
+                    "the element type the PDK device subcircuit wraps -- to "
+                    "enable the off/triode checks for it."
                 ),
             }
         )
