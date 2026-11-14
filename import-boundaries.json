@@ -772,6 +772,7 @@
         "klayout_tools.sim_decks_split",
         "klayout_tools.sim_echo_messages",
         "klayout_tools.sim_energy",
+        "klayout_tools.sim_environment_report",
         "klayout_tools.sim_errors",
         "klayout_tools.sim_exit_reason",
         "klayout_tools.sim_expr_hint",
@@ -878,6 +879,7 @@
       "kind": "verb",
       "description": "`klt stats` implementation: core modules plus CLI adapter.",
       "modules": [
+        "klayout_tools._stats_density",
         "klayout_tools.cli.stats_cmd",
         "klayout_tools.stats"
       ]
