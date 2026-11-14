@@ -167,6 +167,80 @@ def test_geometry_hash_kind_is_recorded(tmp_path):
     assert _bind(repo, envelope)["status"] == "met"
 
 
+def _stats_geometry_digest(stream: str, capsys) -> str:
+    """The digest an attester gets from the public CLI, as documented in
+    ``docs/cli/signoff.md``: ``klt stats --format json | jq -r .geometry_digest``."""
+    assert main(["stats", stream, "--format", "json"]) == 0
+    return json.loads(capsys.readouterr().out)["geometry_digest"]
+
+
+def test_stats_geometry_digest_round_trips_to_a_met_item(tmp_path, capsys):
+    """Issue #5551: the public `klt stats` field is a usable producer for
+    `--regenerated-hash --hash-kind geometry`.
+
+    This is the whole documented workflow with no private import: read the
+    digest off `klt stats --format json`, attest with it, and the manifest
+    grades the item `met` rather than `stale_artifact`.
+    """
+    repo, stream = _stream(tmp_path)
+
+    digest = _stats_geometry_digest(stream, capsys)
+
+    assert digest is not None and digest.startswith("sha256:")
+
+    envelope = build_stream_attestation(
+        stream, generator=_GENERATOR, regenerated_hash=digest, hash_kind="geometry"
+    )
+    item = _bind(repo, envelope)
+
+    assert item["status"] == "met"
+    assert item.get("reason") != "stale_artifact"
+    assert item["citation"]["artifact_binding"]["regeneration"] == {
+        "generator": _GENERATOR,
+        "regenerated_hash": digest,
+        "hash_kind": "geometry",
+        "executed_by_klt": False,
+    }
+
+
+def test_stats_geometry_digest_matches_the_private_grader_input(tmp_path, capsys):
+    """The CLI field is the *same* value the grader recomputes -- not merely
+    one that happens to grade. Pins the two together so a future change to
+    either surface cannot silently diverge."""
+    from klayout_tools._provenance import layout_geometry_digest
+
+    _, stream = _stream(tmp_path)
+
+    assert _stats_geometry_digest(stream, capsys) == layout_geometry_digest(stream)
+
+
+def test_diff_canonical_hash_is_not_the_geometry_digest(tmp_path, capsys):
+    """Issue #5551's trap: `klt diff`'s `canonical_hash` is also a
+    geometry-level digest, looks like the right value, and grades
+    `stale_artifact`. It must stay distinguishable from `klt stats`'
+    `geometry_digest`, which is the supported producer."""
+    repo, stream = _stream(tmp_path)
+
+    geometry_digest = _stats_geometry_digest(stream, capsys)
+    assert main(["diff", stream, stream, "--format", "json"]) == 0
+    canonical_hash = json.loads(capsys.readouterr().out)["a"]["canonical_hash"]
+
+    assert f"sha256:{canonical_hash}" != geometry_digest
+
+    # Substituting it (prefixed into the shape the claim requires) is refused
+    # as a stale artifact, not silently accepted.
+    envelope = build_stream_attestation(
+        stream,
+        generator=_GENERATOR,
+        regenerated_hash=f"sha256:{canonical_hash}",
+        hash_kind="geometry",
+    )
+    item = _bind(repo, envelope)
+
+    assert item["status"] != "met"
+    assert item["reason"] == "stale_artifact"
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
