@@ -19,10 +19,10 @@ Exit codes (see ``docs/cli/gen-compose.md`` for the full table):
 """
 
 import argparse
-import json
 import os
 
 from ..gen_compose import GenComposeError, compose
+from ._parsing import RequestFileError, load_request_file
 from .output import emit_error, emit_success
 
 #: Exit code for a partial-success run (blocks placed, some nets unrouted).
@@ -32,20 +32,9 @@ PARTIAL_SUCCESS_EXIT_CODE = 3
 def run(args: argparse.Namespace) -> int:
     request_dir = os.path.dirname(os.path.abspath(args.request))
     try:
-        with open(args.request, encoding="utf-8") as handle:
-            request = json.load(handle)
-    except OSError as exc:
-        return emit_error(
-            "gen-compose",
-            f"could not read request '{args.request}': {exc}",
-            args.format,
-        )
-    except json.JSONDecodeError as exc:
-        return emit_error(
-            "gen-compose",
-            f"request '{args.request}' is not valid JSON: {exc}",
-            args.format,
-        )
+        request = load_request_file(args.request)
+    except RequestFileError as exc:
+        return emit_error("gen-compose", str(exc), args.format)
 
     try:
         report = compose(request, request_dir=request_dir)

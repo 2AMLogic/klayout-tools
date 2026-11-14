@@ -109,6 +109,7 @@ import re
 from typing import Any
 
 from ._jsonnum import is_int
+from ._paths import _load_request_json
 
 SCHEMA_VERSION = 1
 
@@ -983,15 +984,7 @@ def run_arith_gen(
 
 
 def _load_cell_map(path: str) -> list[list[int]]:
-    try:
-        with open(path, encoding="utf-8") as handle:
-            document = json.load(handle)
-    except FileNotFoundError as exc:
-        raise ArithGenError(f"cell map file not found: {path}") from exc
-    except OSError as exc:
-        raise ArithGenError(f"could not read cell map file '{path}': {exc}") from exc
-    except json.JSONDecodeError as exc:
-        raise ArithGenError(f"cell map file '{path}' is not valid JSON: {exc}") from exc
+    document = _load_request_json(path, ArithGenError)
 
     if isinstance(document, dict):
         document = document.get("cell_map")

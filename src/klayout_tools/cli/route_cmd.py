@@ -15,11 +15,11 @@ Exit codes (see ``docs/cli/route.md``):
 from __future__ import annotations
 
 import argparse
-import json
 import os
 from collections.abc import Callable
 
 from ..route_labelled import RouteError, route
+from ._parsing import RequestFileError, load_request_file
 from .output import emit_error, emit_success
 
 EXIT_FINDINGS = 3
@@ -28,16 +28,9 @@ EXIT_FINDINGS = 3
 def run(args: argparse.Namespace) -> int:
     request_dir = os.path.dirname(os.path.abspath(args.request))
     try:
-        with open(args.request, encoding="utf-8") as handle:
-            request = json.load(handle)
-    except OSError as exc:
-        return emit_error(
-            "route", f"could not read request '{args.request}': {exc}", args.format
-        )
-    except json.JSONDecodeError as exc:
-        return emit_error(
-            "route", f"request '{args.request}' is not valid JSON: {exc}", args.format
-        )
+        request = load_request_file(args.request)
+    except RequestFileError as exc:
+        return emit_error("route", str(exc), args.format)
 
     try:
         report = route(request, request_dir=request_dir)

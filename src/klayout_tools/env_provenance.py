@@ -66,7 +66,6 @@ the evidence is published at all. The fix belongs at the writer.
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import platform
 import re
@@ -74,6 +73,7 @@ import socket
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from ._paths import _load_request_json
 from .env_provenance_walk import walk_lintable_string_fields
 
 __all__ = [
@@ -537,13 +537,7 @@ def lint_envelope_files(
 
 
 def _load_json_envelope(path: str) -> Any:
-    try:
-        with open(path, encoding="utf-8") as handle:
-            return json.load(handle)
-    except OSError as exc:
-        raise EnvironmentProvenanceError(f"could not read {path}: {exc}") from exc
-    except json.JSONDecodeError as exc:
-        raise EnvironmentProvenanceError(f"{path} is not valid JSON: {exc}") from exc
+    return _load_request_json(path, EnvironmentProvenanceError)
 
 
 # --------------------------------------------------------------------------- #

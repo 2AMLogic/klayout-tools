@@ -46,12 +46,12 @@ committing flow evidence next to its request needs to know.
 
 from __future__ import annotations
 
-import json
 import os
 from collections.abc import Mapping
 from typing import Any
 
 from . import env_provenance
+from ._paths import _load_request_json
 
 #: The `provenance` fields every verb's own docstring documents as
 #: legitimately varying between two runs of the identical inputs -- the tool
@@ -125,15 +125,7 @@ def load_committed_report(path: str, error_cls: type[Exception]) -> dict[str, An
     for "an old report predating #331" / a malformed path (issue #1106's
     acceptance criteria).
     """
-    if not os.path.isfile(path):
-        raise error_cls(f"committed report not found: {path}")
-    try:
-        with open(path, encoding="utf-8") as handle:
-            data = json.load(handle)
-    except json.JSONDecodeError as exc:
-        raise error_cls(f"committed report is not valid JSON: {path} ({exc})") from exc
-    except OSError as exc:
-        raise error_cls(f"could not read committed report '{path}': {exc}") from exc
+    data = _load_request_json(path, error_cls)
     if not isinstance(data, dict):
         raise error_cls(f"committed report must be a JSON object: {path}")
     return data

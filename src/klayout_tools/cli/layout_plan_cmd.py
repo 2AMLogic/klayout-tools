@@ -20,7 +20,6 @@ compliant, 1 error, 3 when any plan-compliance check is a violation (see
 """
 
 import argparse
-import json
 import os
 
 from ..layout_plan import LayoutPlanError
@@ -31,26 +30,16 @@ from ..layout_plan_execute import (
     execute_layout_plan_document,
     exit_code_for,
 )
+from ._parsing import RequestFileError, load_request_file
 from .output import emit_error, emit_success
 
 
 def run_execute(args: argparse.Namespace) -> int:
     request_dir = os.path.dirname(os.path.abspath(args.request))
     try:
-        with open(args.request, encoding="utf-8") as handle:
-            request = json.load(handle)
-    except OSError as exc:
-        return emit_error(
-            "layout-plan",
-            f"could not read request '{args.request}': {exc}",
-            args.format,
-        )
-    except json.JSONDecodeError as exc:
-        return emit_error(
-            "layout-plan",
-            f"request '{args.request}' is not valid JSON: {exc}",
-            args.format,
-        )
+        request = load_request_file(args.request)
+    except RequestFileError as exc:
+        return emit_error("layout-plan", str(exc), args.format)
 
     try:
         response = execute_layout_plan_document(request, request_dir=request_dir)
@@ -64,20 +53,9 @@ def run_execute(args: argparse.Namespace) -> int:
 def run_check(args: argparse.Namespace) -> int:
     request_dir = os.path.dirname(os.path.abspath(args.request))
     try:
-        with open(args.request, encoding="utf-8") as handle:
-            request = json.load(handle)
-    except OSError as exc:
-        return emit_error(
-            "layout-plan",
-            f"could not read request '{args.request}': {exc}",
-            args.format,
-        )
-    except json.JSONDecodeError as exc:
-        return emit_error(
-            "layout-plan",
-            f"request '{args.request}' is not valid JSON: {exc}",
-            args.format,
-        )
+        request = load_request_file(args.request)
+    except RequestFileError as exc:
+        return emit_error("layout-plan", str(exc), args.format)
 
     try:
         response = check_layout_plan_document(
