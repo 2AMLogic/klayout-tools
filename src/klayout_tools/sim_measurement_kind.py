@@ -82,3 +82,22 @@ def require_analysis_kind(
             f"{explanation} and so requires "
             f'analysis.kind "{required}" (got {analysis.get("kind")!r})'
         )
+
+
+def require_unique_measurement_names(
+    measurements_spec: list[dict[str, Any]], *, form: str
+) -> None:
+    """Refuse a duplicate (case-insensitive) measurement name while
+    ``measurements_spec`` declares ``form`` entries. ``form`` is the
+    caller's own entry noun phrase exactly as the diagnostic states it
+    (``"a search entry"``, ``"an snm entry"``), so the message reads as the
+    per-kind module wrote it."""
+    seen: set[str] = set()
+    for spec in measurements_spec:
+        key = str(spec.get("name")).lower()
+        if key in seen:
+            raise SimError(
+                f"duplicate measurement name '{spec.get('name')}': names must "
+                f"be unique when measurements[] declares {form}"
+            )
+        seen.add(key)

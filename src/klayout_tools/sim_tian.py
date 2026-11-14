@@ -68,7 +68,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from . import sim_transfer
+from . import sim_measurement_kind, sim_transfer
 from .sim_errors import SimError
 from .sim_forms import validate_exclusive_form
 from .sim_passes import PassResult
@@ -320,15 +320,9 @@ def validate_tian_context(
                     f"is not an analysis.passes name (declared: "
                     f"{sorted(p['name'] for p in passes)})"
                 )
-    seen: set[str] = set()
-    for spec in measurements_spec:
-        key = str(spec.get("name")).lower()
-        if key in seen:
-            raise SimError(
-                f"duplicate measurement name '{spec.get('name')}': names must "
-                "be unique when measurements[] declares a tian entry"
-            )
-        seen.add(key)
+    sim_measurement_kind.require_unique_measurement_names(
+        measurements_spec, form="a tian entry"
+    )
 
 
 # --------------------------------------------------------------------------- #

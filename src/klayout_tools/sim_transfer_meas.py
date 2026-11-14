@@ -181,15 +181,9 @@ def validate_transfer_context(
         required="ac",
         explanation="needs an AC sweep",
     )
-    seen: set[str] = set()
-    for spec in measurements_spec:
-        key = str(spec.get("name")).lower()
-        if key in seen:
-            raise SimError(
-                f"duplicate measurement name '{spec.get('name')}': names must "
-                "be unique when measurements[] declares a transfer entry"
-            )
-        seen.add(key)
+    sim_measurement_kind.require_unique_measurement_names(
+        measurements_spec, form="a transfer entry"
+    )
 
 
 # --------------------------------------------------------------------------- #
