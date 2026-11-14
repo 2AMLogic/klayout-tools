@@ -4877,7 +4877,7 @@ def _parse_anchor_top_level_pins(
     return value, value
 
 
-def _parse_strict_top_level_pin_count(options: Mapping[str, Any], engine: str) -> bool:
+def _parse_strict_top_level_pin_count(options: Mapping[str, Any]) -> bool:
     """Resolve ``options.strict_top_level_pin_count`` (issue #2845); default
     ``False``. A non-boolean is a clean request error. The check compares
     ``Circuit.pin_count()`` of the two selected circuits, which both engines

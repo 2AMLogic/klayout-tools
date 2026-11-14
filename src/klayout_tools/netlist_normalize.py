@@ -1240,7 +1240,6 @@ def _convert_capacitor_card(
     if has_length_param or has_width_param:
         l_um = _resolve_geometry_dimension(
             instance,
-            subckt_name,
             lookup.length_param,
             params,
             has_length_param,
@@ -1249,7 +1248,6 @@ def _convert_capacitor_card(
         )
         w_um = _resolve_geometry_dimension(
             instance,
-            subckt_name,
             lookup.width_param,
             params,
             has_width_param,
@@ -1468,7 +1466,6 @@ def _resolve_call_geometry(
         return None
     l_um = _resolve_geometry_dimension(
         instance,
-        subckt_name,
         lookup.length_param,
         params,
         has_length_param,
@@ -1477,7 +1474,6 @@ def _resolve_call_geometry(
     )
     w_um = _resolve_geometry_dimension(
         instance,
-        subckt_name,
         lookup.width_param,
         params,
         has_width_param,
@@ -1491,7 +1487,6 @@ def _resolve_call_geometry(
 
 def _resolve_geometry_dimension(
     instance: str,
-    subckt_name: str,
     param: str | None,
     params: dict[str, str],
     has_param: bool,

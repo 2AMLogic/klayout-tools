@@ -1043,7 +1043,6 @@ def _classify_region(device: MosInstance, off_current_a: float, margin_v: float)
 def _operating_point_findings(
     devices: list[MosInstance],
     regions: dict[str, str],
-    off_current_a: float,
     margin_v: float,
 ) -> list[dict[str, Any]]:
     """``off``/``triode`` findings, one device at a time, in netlist order."""
@@ -1655,9 +1654,7 @@ def run_op_sanity(
         for device in parsed.devices
     }
 
-    findings = _operating_point_findings(
-        parsed.devices, regions, off_current_a, margin_v
-    )
+    findings = _operating_point_findings(parsed.devices, regions, margin_v)
     findings.extend(_wiring_findings(parsed.devices, ground, supply))
     findings.extend(
         _hygiene_findings(parsed, _declared_nodes(request, op_lint), ground, supply)

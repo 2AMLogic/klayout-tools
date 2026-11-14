@@ -90,7 +90,6 @@ def preflight_batch_request(request_path: str, **overrides: Any) -> dict[str, An
         max_units_per_job=overrides.get("max_units_per_job"),
         max_concurrent_jobs=overrides.get("max_concurrent_jobs"),
         capacity_wait_s=overrides.get("capacity_wait_s"),
-        dry_run=True,
         pdk_root=overrides.get("pdk_root"),
     )
     points = resolved.corner_points

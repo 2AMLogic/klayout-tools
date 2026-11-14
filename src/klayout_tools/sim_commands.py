@@ -518,7 +518,6 @@ def _unit_report(
 
 
 def _build_report(
-    units: list[dict[str, Any]],
     reports: list[dict[str, Any]],
     *,
     backend: str,
@@ -573,7 +572,6 @@ def _failed_units_report(
         )
         reports[-1]["status"] = "error"
     return _build_report(
-        units,
         reports,
         backend="batch",
         outdir=outdir,
@@ -649,7 +647,7 @@ def _run_local(
     else:
         with ThreadPoolExecutor(max_workers=min(max_workers, len(units))) as pool:
             reports = list(pool.map(run, units))
-    return _build_report(units, reports, backend=backend, outdir=outdir)
+    return _build_report(reports, backend=backend, outdir=outdir)
 
 
 # --------------------------------------------------------------------------- #
@@ -880,7 +878,6 @@ def _run_batch(
             )
         reports = _install_units(units, collected=collected, outdir=outdir)
     return _build_report(
-        units,
         reports,
         backend="batch",
         outdir=outdir,

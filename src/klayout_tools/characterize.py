@@ -324,11 +324,9 @@ def run_characterize(
             ) from exc
 
     return _build_response(
-        request_path=request_path,
         grid=grid,
         corner=corner,
         thresholds=thresholds,
-        options=options,
         results=results,
         library=library,
         emitted_path=emitted_path,
@@ -397,7 +395,7 @@ def _characterize_cell(
         batch_shard=batch_shard,
     )
     tables = _build_tables(plan, grid, legs.values, thresholds)
-    _check_settle_margin(plan, grid, tables, options)
+    _check_settle_margin(grid, tables, options)
     power_tables = _build_power_tables(plan, grid, legs.values, corner)
     leakage = _build_leakage(plan, legs.values, corner)
     pin_capacitance = _build_pin_capacitance(plan, legs.values, corner)
@@ -1723,7 +1721,6 @@ def _build_pin_capacitance(
 
 
 def _check_settle_margin(
-    plan: dict[str, Any],
     grid: dict[str, tuple[float, ...]],
     tables: dict[int, dict[str, liberty_writer.Table2D]],
     options: dict[str, Any],
@@ -2141,11 +2138,9 @@ def _cell_entry(result: dict[str, Any]) -> dict[str, Any]:
 
 def _build_response(
     *,
-    request_path: str,
     grid: dict[str, tuple[float, ...]],
     corner: dict[str, Any],
     thresholds: liberty_writer.Thresholds,
-    options: dict[str, Any],
     results: list[dict[str, Any]],
     library: liberty_writer.Library,
     emitted_path: str,
