@@ -183,3 +183,83 @@ def attach_models_lib_comparison(environment: dict[str, Any], backend: str) -> N
         entry["models_lib_comparison"] = _compare_models_lib(
             entry.get("runner_models_lib_sha256"), client_sha, staged=staged
         )
+
+
+# --- sharded-report top-level roll-ups (issue #5522) ---
+
+#: Worst-of precedence for the sharded ``runner_compatibility`` roll-up: a
+#: proven skew outranks an unestablished one, which outranks an all-``match``
+#: fleet. Anything a shard reports that is not one of these -- a lost
+#: (``null``) shard, a block without the field, or a value a newer runner
+#: invents -- folds into ``"unknown"``, so the roll-up can never read as
+#: clean on evidence it does not have.
+_COMPATIBILITY_RANK: tuple[str, ...] = ("mismatch", "unknown", "match")
+
+
+def fleet_runner_compatibility(fleet: list[Any]) -> str:
+    """Worst-of ``runner_compatibility`` across a sharded batch run's
+    ``fleet[]`` (issue #5522): ``"mismatch"`` when any shard proved a skew,
+    else ``"unknown"`` when any shard is lost / ``unknown`` / field-less (or
+    the fleet is empty), else ``"match"``.
+
+    Never ``None`` and never absent -- the point of the roll-up is that a
+    consumer which cannot tell a missing value from ``"match"`` fails safe
+    on a split run instead of recording a skewed runner as a clean one.
+    """
+    statuses = {
+        (
+            entry.get("runner_compatibility")
+            if isinstance(entry, dict)
+            and entry.get("runner_compatibility") in _COMPATIBILITY_RANK
+            else "unknown"
+        )
+        for entry in fleet
+    }
+    if not statuses:
+        return "unknown"
+    return next(status for status in _COMPATIBILITY_RANK if status in statuses)
+
+
+def attach_fleet_rollups(environment: dict[str, Any], backend: str) -> None:
+    """Add the top-level roll-ups a sharded batch run's ``environment.remote``
+    otherwise lacks (issue #5522), in place: ``job_ids`` (every non-``null``
+    shard's ``job_id``, in shard order) and a worst-of
+    ``runner_compatibility`` (:func:`fleet_runner_compatibility`).
+
+    Splitting (``batch.max_units_per_job`` / ``batch.job_ceiling_check:
+    "split"``, or ``remote.hosts > 1``) moves job identity *and* the
+    runner-skew check inside ``fleet[]``, leaving nothing identity-bearing at
+    the top level -- so a consumer written against the single-job shape read
+    ``None`` for both rather than failing, on exactly the large grids where
+    provenance matters most.
+
+    Purely additive, and only on a sharded **batch** block: a single-job
+    report's ``environment.remote`` is left byte-for-byte unchanged (no
+    ``fleet``, no ``job_ids``), the ``fleet[]`` entries themselves are never
+    touched, and the SSH ``remote`` backend -- whose ``fleet[]`` entries carry
+    neither field -- is skipped. Call it where the batch
+    ``environment.remote`` is finalised, beside
+    :func:`attach_models_lib_comparison`.
+    """
+    remote_environment = environment.get("remote")
+    if backend != "batch" or not isinstance(remote_environment, dict):
+        return
+    fleet = remote_environment.get("fleet")
+    if not isinstance(fleet, list):
+        return
+    remote_environment["job_ids"] = [
+        entry["job_id"]
+        for entry in fleet
+        if isinstance(entry, dict) and entry.get("job_id")
+    ]
+    remote_environment["runner_compatibility"] = fleet_runner_compatibility(fleet)
+
+
+def finalize_batch_remote(environment: dict[str, Any], backend: str) -> None:
+    """Every post-processing step the finished ``environment.remote`` block
+    gets, in one call for :func:`klayout_tools.sim.apply_engine_host`:
+    :func:`attach_models_lib_comparison` (#5321) and
+    :func:`attach_fleet_rollups` (#5522). Each is independently a no-op off
+    the batch backend, so this is safe to call for any off-host backend."""
+    attach_models_lib_comparison(environment, backend)
+    attach_fleet_rollups(environment, backend)

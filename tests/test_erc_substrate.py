@@ -13,6 +13,7 @@ import klayout.db as kdb
 import pytest
 
 from klayout_tools.erc import run_erc
+from klayout_tools.erc_substrate import _FAMILY_MISSING
 
 DBU = 0.001
 
@@ -460,3 +461,24 @@ def test_sky130_deck_declares_closure_gated_dnwell_isolation():
     assert SKY130.substrate_isolation == (64, 18)
     assert SKY130.substrate_isolation_needs_nwell_ring is True
     assert GF180.substrate_isolation_needs_nwell_ring is False
+
+
+@pytest.mark.parametrize("family", sorted(_FAMILY_MISSING))
+def test_family_missing_has_no_deck_declared_family(family):
+    """#5336: a ``_FAMILY_MISSING`` entry goes dead the moment that family's
+    built-in extraction deck declares ``substrate_isolation`` --
+    :func:`isolation_missing` returns ``[]`` from the deck before it ever
+    reaches the table, so the string survives only to state the opposite of
+    what the deck does. That is what the sg13g2/sg13cmos5l entries did between
+    #5345/#5359 and #5336."""
+    from klayout_tools.decks import UnknownExtractionDeckError, get_extraction_deck
+
+    try:
+        deck = get_extraction_deck(family)
+    except UnknownExtractionDeckError:
+        return  # no built-in deck for this family: the entry stays reachable
+    assert deck.substrate_isolation is None, (
+        f"_FAMILY_MISSING['{family}'] says the deck declares no isolation layer, "
+        f"but the built-in {family} deck declares "
+        f"substrate_isolation={deck.substrate_isolation}; drop the entry"
+    )
