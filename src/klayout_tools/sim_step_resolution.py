@@ -172,13 +172,13 @@ def validate_step_resolution_context(
     declared = step_resolution_measurements(measurements_spec)
     if not declared:
         return
-    kind = str(analysis.get("kind", "")).lower()
-    if kind != "tran":
-        raise SimError(
-            f"measurement '{declared[0]['name']}' declares 'step_resolution', "
-            "which reports transient time-step sizes and so requires "
-            f'analysis.kind "tran" (got {analysis.get("kind")!r})'
-        )
+    sim_measurement_kind.require_analysis_kind(
+        declared,
+        analysis,
+        form="step_resolution",
+        required="tran",
+        explanation="reports transient time-step sizes",
+    )
 
 
 # --------------------------------------------------------------------------- #

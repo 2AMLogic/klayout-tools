@@ -174,13 +174,13 @@ def validate_transfer_context(
     declared = transfer_measurements(measurements_spec)
     if not declared:
         return
-    kind = str(analysis.get("kind", "")).lower()
-    if kind != "ac":
-        raise SimError(
-            f"measurement '{declared[0]['name']}' declares 'transfer', which "
-            f'needs an AC sweep and so requires analysis.kind "ac" (got '
-            f"{analysis.get('kind')!r})"
-        )
+    sim_measurement_kind.require_analysis_kind(
+        declared,
+        analysis,
+        form="transfer",
+        required="ac",
+        explanation="needs an AC sweep",
+    )
     seen: set[str] = set()
     for spec in measurements_spec:
         key = str(spec.get("name")).lower()

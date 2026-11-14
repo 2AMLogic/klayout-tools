@@ -147,13 +147,13 @@ def validate_snm_context(
     declared = snm_measurements(measurements_spec)
     if not declared:
         return
-    kind = str(analysis.get("kind", "")).lower()
-    if kind != "dc":
-        raise SimError(
-            f"measurement '{declared[0]['name']}' declares 'snm', which needs "
-            f'a DC sweep and so requires analysis.kind "dc" (got '
-            f"{analysis.get('kind')!r})"
-        )
+    sim_measurement_kind.require_analysis_kind(
+        declared,
+        analysis,
+        form="snm",
+        required="dc",
+        explanation="needs a DC sweep",
+    )
     seen: set[str] = set()
     for spec in measurements_spec:
         key = str(spec.get("name")).lower()

@@ -145,13 +145,13 @@ def validate_energy_context(
     declared = energy_measurements(measurements_spec)
     if not declared:
         return
-    kind = str(analysis.get("kind", "")).lower()
-    if kind != "tran":
-        raise SimError(
-            f"measurement '{declared[0]['name']}' declares 'energy', which "
-            "integrates power over a time window and so requires "
-            f'analysis.kind "tran" (got {analysis.get("kind")!r})'
-        )
+    sim_measurement_kind.require_analysis_kind(
+        declared,
+        analysis,
+        form="energy",
+        required="tran",
+        explanation="integrates power over a time window",
+    )
     sim_window.validate_window_inside_tran(declared, analysis, form="energy")
 
 

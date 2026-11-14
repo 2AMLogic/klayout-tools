@@ -23,6 +23,8 @@ import os
 from collections.abc import Callable
 from typing import Any, TypeVar
 
+from .sim_errors import SimError
+
 OutcomeT = TypeVar("OutcomeT")
 
 
@@ -58,3 +60,25 @@ def extract_indexed(
         outcomes[position] = extractor(spec, rawfile_path(corner_dir, prefix, index))
         index += 1
     return outcomes
+
+
+def require_analysis_kind(
+    declared: list[dict[str, Any]],
+    analysis: dict[str, Any],
+    *,
+    form: str,
+    required: str,
+    explanation: str,
+) -> None:
+    """Refuse the ``form`` entries in ``declared`` under any other
+    ``analysis.kind``. ``explanation`` is the form's own reason clause, so
+    the raised diagnostic reads exactly as the per-kind module wrote it.
+    Caller keeps the empty-``declared`` early return; call only when at
+    least one entry declares ``form``."""
+    kind = str(analysis.get("kind", "")).lower()
+    if kind != required:
+        raise SimError(
+            f"measurement '{declared[0]['name']}' declares '{form}', which "
+            f"{explanation} and so requires "
+            f'analysis.kind "{required}" (got {analysis.get("kind")!r})'
+        )

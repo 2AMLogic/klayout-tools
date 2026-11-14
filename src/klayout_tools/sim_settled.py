@@ -235,13 +235,13 @@ def validate_settled_context(
     declared = settled_measurements(measurements_spec)
     if not declared:
         return
-    kind = str(analysis.get("kind", "")).lower()
-    if kind != "tran":
-        raise SimError(
-            f"measurement '{declared[0]['name']}' declares 'settled', which "
-            "compares transient windows and so requires "
-            f'analysis.kind "tran" (got {analysis.get("kind")!r})'
-        )
+    sim_measurement_kind.require_analysis_kind(
+        declared,
+        analysis,
+        form="settled",
+        required="tran",
+        explanation="compares transient windows",
+    )
 
 
 # --------------------------------------------------------------------------- #

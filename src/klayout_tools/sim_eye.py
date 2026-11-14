@@ -170,13 +170,13 @@ def validate_eye_context(
     declared = eye_measurements(measurements_spec)
     if not declared:
         return
-    kind = str(analysis.get("kind", "")).lower()
-    if kind != "tran":
-        raise SimError(
-            f"measurement '{declared[0]['name']}' declares 'eye', which folds "
-            "a transient signal onto a unit interval and so requires "
-            f'analysis.kind "tran" (got {analysis.get("kind")!r})'
-        )
+    sim_measurement_kind.require_analysis_kind(
+        declared,
+        analysis,
+        form="eye",
+        required="tran",
+        explanation="folds a transient signal onto a unit interval",
+    )
     parsed = _parse_tran_window(analysis)
     if parsed is None:
         return

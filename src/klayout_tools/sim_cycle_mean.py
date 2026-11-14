@@ -135,13 +135,13 @@ def validate_cycle_mean_context(
     declared = cycle_mean_measurements(measurements_spec)
     if not declared:
         return
-    kind = str(analysis.get("kind", "")).lower()
-    if kind != "tran":
-        raise SimError(
-            f"measurement '{declared[0]['name']}' declares 'cycle_mean', "
-            "which averages a transient signal over reference cycles and so "
-            f'requires analysis.kind "tran" (got {analysis.get("kind")!r})'
-        )
+    sim_measurement_kind.require_analysis_kind(
+        declared,
+        analysis,
+        form="cycle_mean",
+        required="tran",
+        explanation="averages a transient signal over reference cycles",
+    )
 
 
 # --------------------------------------------------------------------------- #

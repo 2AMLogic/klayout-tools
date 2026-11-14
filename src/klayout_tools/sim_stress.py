@@ -113,13 +113,13 @@ def validate_stress_context(
     declared = stress_measurements(measurements_spec)
     if not declared:
         return
-    kind = str(analysis.get("kind", "")).lower()
-    if kind != "tran":
-        raise SimError(
-            f"measurement '{declared[0]['name']}' declares 'stress', which "
-            "reduces a node-pair voltage over a time window and so requires "
-            f'analysis.kind "tran" (got {analysis.get("kind")!r})'
-        )
+    sim_measurement_kind.require_analysis_kind(
+        declared,
+        analysis,
+        form="stress",
+        required="tran",
+        explanation="reduces a node-pair voltage over a time window",
+    )
     sim_window.validate_window_inside_tran(declared, analysis, form="stress")
 
 
