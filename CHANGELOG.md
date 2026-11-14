@@ -14,6 +14,22 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt signoff --attest --check`: a drift entry names the check that
+  drifted, not only its list index** (#5460, 2026-11-13): a `drift[]` entry
+  pointing at one `attestation.checks[]` entry gains an additive `check`
+  object — the check's `role` plus whichever identity keys its kind carries
+  (`path`, `target` / `name` / `testbench`, `row`, `corner` + `metric`); a
+  check with no identity beyond its role gets `{"role": …}`. `--format text`
+  appends it as a bracketed label after the pointer
+  (`attestation.checks.17.content_hash  [testbench sim/bin/sim_common.py]:`),
+  so a CI log names the file that moved without opening the committed
+  envelope and counting entries — an index that is not even stable, since
+  file-presence checks are sorted by path. `field` / `committed` / `fresh`
+  are unchanged and the key is absent on an entry naming no single check (a
+  whole-list `attestation.checks` entry, `status`, every other verb's drift),
+  so additive with no `schema_version` bump. Details in
+  `docs/cli/signoff.md`'s "CI usage: `--check`".
+
 - **`klt sim`'s per-measurement `min`/`max` skip an infinite value** (#5580,
   2026-11-14): the corner-matrix extremes in the `measurements[]` rollup are
   documented as the extremes over *finite* numeric values, but the predicate

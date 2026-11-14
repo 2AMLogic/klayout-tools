@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from klayout_tools.cli import main
 from klayout_tools.signoff_attest import (
     AttestationError,
     build_attestation,
@@ -146,3 +147,115 @@ def test_check_reports_no_drift_then_drift(tmp_path):
     (repo / "rtl/top.v").write_text("module top2; endmodule\n")
     drifted = check_attestation(1, inv_path, str(committed))
     assert drifted["status"] != "match"
+
+
+# --------------------------------------------------------------------------- #
+# `--attest --check` drift names the check, not only its list index
+# (issue #5460)
+#
+# `drift[].field` is the positional pointer `diff_verdict_fields` produces --
+# contract surface shared with `klt drc`/`extract`/`lvs`, so it is unchanged.
+# The additive `drift[].check` object carries the drifted check's identity, so
+# a CI log (or a reviewer on someone else's PR) names the file that moved
+# without opening the committed envelope and counting entries.
+# --------------------------------------------------------------------------- #
+
+
+def _committed(repo: Path, inventory: dict) -> str:
+    path = repo / "committed.json"
+    path.write_text(render_envelope(_attest(repo, inventory)))
+    return str(path)
+
+
+def _drifted(repo: Path, inventory: dict) -> dict:
+    committed = _committed(repo, inventory)
+    (repo / "rtl/top.v").write_text("module top2; endmodule\n")
+    return check_attestation(1, str(repo / "inv.json"), committed)
+
+
+def test_check_drift_entry_names_the_drifted_source_path(tmp_path):
+    repo = _repo(tmp_path)
+    result = _drifted(repo, _inventory(repo))
+
+    (hashed,) = [
+        e
+        for e in result["drift"]
+        if e["field"].endswith(".content_hash")
+        and e["field"].startswith("attestation.checks.")
+    ]
+    # The pointer is unchanged: still the dotted positional one.
+    assert hashed["field"] == "attestation.checks.1.content_hash"
+    assert hashed["check"] == {"role": "source", "path": "rtl/top.v"}
+    assert hashed["committed"].startswith("sha256:")
+    assert hashed["fresh"].startswith("sha256:")
+    assert hashed["committed"] != hashed["fresh"]
+
+
+def test_check_drift_entry_names_a_drifted_freshness_check_by_target(tmp_path):
+    repo = _repo(tmp_path)
+    result = _drifted(repo, _inventory(repo))
+
+    passed = [e for e in result["drift"] if e["field"].endswith(".3.passed")]
+    assert [e["check"] for e in passed] == [
+        {"role": "freshness", "target": "netlist/top.v"}
+    ]
+    # A leaf nested deeper inside the check is annotated too.
+    (mismatches,) = [e for e in result["drift"] if e["field"].endswith(".mismatches")]
+    assert mismatches["check"] == {"role": "freshness", "target": "netlist/top.v"}
+
+
+def test_check_drift_entries_outside_the_checks_list_carry_no_check_key(tmp_path):
+    repo = _repo(tmp_path)
+    result = _drifted(repo, _inventory(repo))
+
+    outside = [
+        e["field"]
+        for e in result["drift"]
+        if not e["field"].startswith("attestation.checks.")
+    ]
+    # `provenance.input.paths.3.content_hash` is the trap: an indexed pointer
+    # into a *different* list, which must not pick up a `check` identity.
+    assert "provenance.input.paths.3.content_hash" in outside
+    assert "status" in outside
+    assert all("check" not in e for e in result["drift"] if e["field"] in outside)
+
+
+def test_a_matching_check_reports_no_drift_to_annotate(tmp_path):
+    repo = _repo(tmp_path)
+    inventory = _inventory(repo)
+    committed = _committed(repo, inventory)
+
+    clean = check_attestation(1, str(repo / "inv.json"), committed)
+
+    assert clean["status"] == "match"
+    assert clean["drift"] == []
+
+
+def test_check_drift_text_output_names_the_drifted_file_on_the_pointer_line(
+    tmp_path, capsys
+):
+    repo = _repo(tmp_path)
+    inventory = _inventory(repo)
+    committed = _committed(repo, inventory)
+    (repo / "rtl/top.v").write_text("module top2; endmodule\n")
+
+    code = main(
+        [
+            "signoff",
+            "--attest",
+            "1",
+            "--inventory",
+            str(repo / "inv.json"),
+            "--check",
+            committed,
+            "--format",
+            "text",
+        ]
+    )
+    out = capsys.readouterr().out
+
+    assert code == 3
+    assert "attestation.checks.1.content_hash  [source rtl/top.v]:" in out
+    assert "attestation.checks.3.passed  [freshness netlist/top.v]:" in out
+    # An entry naming no single check keeps its bare pointer line.
+    assert "\n  status:\n" in out
