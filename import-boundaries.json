@@ -770,6 +770,7 @@
         "klayout_tools.sim_deck_expand",
         "klayout_tools.sim_decks",
         "klayout_tools.sim_decks_split",
+        "klayout_tools.sim_decks_staging",
         "klayout_tools.sim_echo_messages",
         "klayout_tools.sim_energy",
         "klayout_tools.sim_errors",

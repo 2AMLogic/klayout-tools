@@ -19,14 +19,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import shutil
 import subprocess
 import tarfile
 from pathlib import Path
 
 import pytest
 
-from helpers.subprocess_fakes import fake_completed
+from helpers.subprocess_fakes import fake_completed, keep_uploaded
 from klayout_tools import _provenance, sim_batch
 from klayout_tools import netlist as netlist_module
 from klayout_tools import netlist_batch as nb
@@ -82,10 +81,9 @@ class _FakeRunner:
         if "cp" in argv:
             source, destination = argv[argv.index("cp") + 1 : argv.index("cp") + 3]
             if destination.startswith("s3://"):
-                name = destination.rsplit("/", 1)[-1]
-                kept = self.keep_dir / name
-                shutil.copyfile(source, kept)
-                self.uploads[name] = kept
+                self.uploads.update(
+                    keep_uploaded(argv, source, destination, self.keep_dir)
+                )
                 return fake_completed()
             if source.endswith("/status.json"):
                 if not self.statuses:
@@ -356,7 +354,7 @@ def test_job_json_shape(repo, fake, no_local_xschem, tmp_path):
     # No host-absolute path ever reaches the runner.
     assert str(tmp_path) not in cmd and str(repo) not in cmd
     assert str(repo) not in json.dumps(job)
-    # One input, the tree, uploaded before job.json.
+    # The `inputs/` tree (one recursive call since #5539), then job.json.
     uploads = [
         argv
         for argv in fake.aws_calls()
@@ -365,7 +363,8 @@ def test_job_json_shape(repo, fake, no_local_xschem, tmp_path):
         and not argv[argv.index("cp") + 1].startswith("s3://")
     ]
     targets = [argv[argv.index("cp") + 2].rsplit("/", 1)[-1] for argv in uploads]
-    assert targets == [nb.BATCH_TREE_FILENAME, "job.json"]
+    assert targets == ["inputs", "job.json"]
+    assert nb.BATCH_TREE_FILENAME in fake.uploads
 
 
 def test_launch_runs_the_provision_script_with_the_job_id(repo, fake, tmp_path):
@@ -785,7 +784,7 @@ def test_unsupported_pdk_is_refused_before_upload(
 
 
 def test_upload_failure(repo, fake, no_local_xschem, tmp_path, capsys):
-    fake.failures["inputs/tree.tar.gz"] = fake_completed(
+    fake.failures["/inputs --recursive"] = fake_completed(
         returncode=1, stderr="AccessDenied"
     )
     code, error = _run_failing(repo, tmp_path, capsys)

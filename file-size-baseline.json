@@ -621,7 +621,7 @@
     },
     {
       "path": "src/klayout_tools/sim_decks.py",
-      "lines": 2316
+      "lines": 2297
     },
     {
       "path": "src/klayout_tools/sim_remote.py",
@@ -977,7 +977,7 @@
     },
     {
       "path": "tests/test_netlist_batch.py",
-      "lines": 1119
+      "lines": 1118
     },
     {
       "path": "tests/test_op_sanity.py",
@@ -1073,7 +1073,7 @@
     },
     {
       "path": "tests/test_signoff_generator_batch.py",
-      "lines": 728
+      "lines": 726
     },
     {
       "path": "tests/test_sim.py",
@@ -1081,15 +1081,15 @@
     },
     {
       "path": "tests/test_sim_batch.py",
-      "lines": 8309
+      "lines": 8242
     },
     {
       "path": "tests/test_sim_batch_async.py",
-      "lines": 818
+      "lines": 817
     },
     {
       "path": "tests/test_sim_commands.py",
-      "lines": 514
+      "lines": 511
     },
     {
       "path": "tests/test_sim_crossings.py",

@@ -1756,7 +1756,11 @@ a consumer-repo wrapper does"), and `klt` implements exactly its four steps:
    `inputs/<name>` per staged `.include`/`.inc` target — see "Off-host
    backends stage the netlist's `.include` closure" below), then
    `job.json` — uploaded last, so a launch can never observe a job spec
-   whose inputs are still uploading.
+   whose inputs are still uploading. The whole `inputs/` tree goes up in a
+   **single** `aws s3 cp --recursive` ([#5539](https://github.com/2AMLogic/klayout-tools/issues/5539)),
+   however many inputs there are; the S3 keys are unchanged (each input
+   still lands at `inputs/<name>`, subdirectories included), and `job.json`
+   is still a separate call, still last.
 2. **launch** `batch-fleet-provision.sh launch --job <job-id> --apply
    --profile <profile>`, exactly once per job. `klt` shells out rather than
    issuing its own `CreateFleet`: `launch` enforces the diversification
@@ -2744,6 +2748,19 @@ job id; see "Asynchronous submit and status"); they cannot be combined with
   `.lib <section>` … `.endl` *definition* names no
   file and is left alone; any other `.lib` shape (no arguments, more than
   two, unbalanced quotes) is rejected by name.
+- **Identical staged files are uploaded once per job.** A grid sweeps
+  corners against one model set, so every unit stages the same closure.
+  On `remote` and `batch`, files whose bytes are identical (sha256) are
+  shipped **once** and referenced by every unit that needs them, so a job
+  of N units sharing M identical includes transfers `N + M` files rather
+  than `N × (1 + M)`
+  ([#5539](https://github.com/2AMLogic/klayout-tools/issues/5539)). This is
+  invisible to the deck: each unit's declared in-unit destination is
+  unchanged (the worker *copies* each staged file into every unit
+  directory), two files that share a basename but differ in bytes are still
+  shipped separately, and `deck_sha256` and the `--resume` key are
+  byte-identical either way. A sharded deck-list run dedups within each
+  shard job, which is the granularity that gets uploaded.
 - **Units are isolated.** Each unit runs in its own directory
   (`<outdir>/<id>/`), recreated fresh every run (except a unit `--resume`
   skips, which is left untouched). Its deck, declared

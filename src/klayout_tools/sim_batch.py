@@ -151,6 +151,7 @@ if TYPE_CHECKING:
 from .sim_batch_contract import (  # noqa: E402, F401
     _ATTACH_UNSTARTED_GRACE_S,
     _BATCH_AWS_TIMEOUT_S,
+    _BATCH_INPUTS_TIMEOUT_S,
     _BATCH_JOB_FAILURE_TAIL_BYTES,
     _BATCH_JOB_OVERHEAD_S,
     _BATCH_LAUNCH_TIMEOUT_S,
@@ -1401,6 +1402,13 @@ def submit_job(
     the submission atomic from the fleet's point of view -- a launch can
     never observe a job spec whose inputs are still uploading.
 
+    **One transfer for the inputs (issue #5539).** They are materialised
+    into a local ``inputs/`` tree (:meth:`BatchJobInput.materialize`) and
+    sent by one recursive copy, not one process per object: that
+    per-object latency and process spawn is what made a deck-list grid
+    spend over three hours on 17,000 serial objects. The keys are
+    unchanged (``<prefix>/inputs/<name>``, subdirectories included).
+
     ``progress`` (issue #2992) prints the job id on stderr before uploading;
     a verb whose stderr carries its error envelope (``klt netlist``) passes
     ``False``.
@@ -1412,39 +1420,31 @@ def submit_job(
             f"klt: batch job {job_id} submitting to {report_job_uri(config, job_id)}"
         )
     with tempfile.TemporaryDirectory(prefix="klt-batch-") as staging:
+        inputs_root = os.path.join(staging, "inputs")
         for item in spec.inputs:
-            local_path = item.local_path
-            if local_path is None:
-                local_path = os.path.join(staging, item.name)
-                with open(local_path, "w", encoding="utf-8") as handle:
-                    handle.write(item.content or "")
+            try:
+                item.materialize(inputs_root)
+            except OSError as exc:
+                # One error type for every input-upload failure.
+                raise BatchError(
+                    f"could not stage the {item.label} input for upload: {exc}"
+                ) from exc
+        if spec.inputs:
+            copy = ("s3", "cp", inputs_root, f"{prefix}/inputs", "--recursive")
             _run_checked(
                 run,
-                _aws_argv(
-                    config,
-                    "s3",
-                    "cp",
-                    local_path,
-                    f"{prefix}/inputs/{item.name}",
-                    "--only-show-errors",
-                ),
-                _BATCH_AWS_TIMEOUT_S,
-                f"aws s3 cp ({item.label} input)",
+                _aws_argv(config, *copy, "--only-show-errors"),
+                _BATCH_INPUTS_TIMEOUT_S,
+                f"aws s3 cp ({len(spec.inputs)} input(s))",
                 redact=config.bucket,
             )
         job_json_path = os.path.join(staging, "job.json")
         with open(job_json_path, "w", encoding="utf-8") as handle:
             json.dump(spec.to_job_json(), handle)
+        spec_copy = ("s3", "cp", job_json_path, f"{prefix}/job.json")
         _run_checked(
             run,
-            _aws_argv(
-                config,
-                "s3",
-                "cp",
-                job_json_path,
-                f"{prefix}/job.json",
-                "--only-show-errors",
-            ),
+            _aws_argv(config, *spec_copy, "--only-show-errors"),
             _BATCH_AWS_TIMEOUT_S,
             "aws s3 cp (job.json)",
             redact=config.bucket,
