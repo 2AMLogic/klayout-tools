@@ -27,6 +27,34 @@ not `klt --version`, if you need to detect this kind of drift. See
   `klt signoff --manifest` grades are all unchanged; the field covers the
   whole stream and is not scoped by `--top`. Additive; `klt stats`'
   `schema_version` stays `1`.
+
+- **`klt signoff --attest`: a failing check that re-verifies a tier-verdict
+  record now says so, and the docs give the way out of the record/envelope
+  cycle** (#5538, 2026-11-13): an item-10 inventory may declare, as one of its
+  `checks[]`, a `klt signoff --manifest M --check R` of the record `R` that
+  cites the very envelope being minted. Editing an inventoried file makes both
+  sides stale at once, and the single documented command can no longer
+  regenerate the envelope — `--attest` writes nothing while a check fails, and
+  `R` cannot be regraded until the envelope is rewritten. The exit `3` read
+  like any other failing check. A failing `command` check whose `argv`
+  contains `signoff`, `--manifest` (or `--manifest=…`) and `--check` (or
+  `--check=…`), whatever wrapper prefixes it carries, now carries an advisory
+  `hint` string naming the cycle and the record → envelope → record sequence
+  out of it, printed under the `[FAIL]` line in text output. The hint has
+  exactly the lifecycle `output_tail` has: **live-only** and generate-mode
+  only — never written to an `-o` file, never in a `--check` diff, never
+  built by an attestation builder, and absent on a passing check, on an
+  `--attest --check` run, on a `local_only` command carried under
+  `--skip-local-only`, and on a failing command of any other shape. Exit
+  codes, the `-o` write rule and the envelope bytes are unchanged, and the
+  field is additive, so no `schema_version` bumps.
+  [`docs/cli/signoff.md`](docs/cli/signoff.md) gains the three-step sequence,
+  the convergence signal (both `--check` runs exit `0`, not a byte-comparison
+  of records) and a warning that a pair committed after step 1 or 2 is
+  half-converged. Follow-up to #4532, whose docs-only fix covered the
+  mint-item-10-first order that an edit to an inventoried file leaves no tree
+  for.
+
 - **`klt signoff` reads a gzip-compressed evidence file** (#5452,
   2026-11-13): a `klt sim --report-out report.json.gz` report — the compact
   form `docs/cli/sim.md` recommends committing as evidence — is now citable

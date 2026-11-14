@@ -698,6 +698,7 @@
         "klayout_tools.signoff_attest_carry",
         "klayout_tools.signoff_attest_input",
         "klayout_tools.signoff_attest_item9",
+        "klayout_tools.signoff_attest_live",
         "klayout_tools.signoff_attest_stream",
         "klayout_tools.signoff_attest_text",
         "klayout_tools.signoff_derived_rows",

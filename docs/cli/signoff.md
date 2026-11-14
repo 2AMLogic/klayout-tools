@@ -1943,7 +1943,17 @@ command's merged stdout+stderr is kept as a bounded tail (last 20 lines, at most
 2048 bytes) and emitted as the failing check's additive `output_tail` string in
 the live `--format json` result (issue #4698) -- never in an `--output` file,
 nor in the `--check` diff, so the envelope and its content hash stay
-reproducible across hosts; passing, skipped and unlaunchable checks omit it. `cwd` defaults to the repository root. A command that cannot
+reproducible across hosts; passing, skipped and unlaunchable checks omit it.
+A failing command that re-verifies a tier-verdict record -- its `argv`
+contains `signoff`, `--manifest` (or `--manifest=...`) and `--check` (or
+`--check=...`), whatever wrapper prefixes it carries -- additionally gets an
+advisory `hint` string (issue #5538), with exactly the same lifecycle as
+`output_tail` and under the same `[FAIL]` line in text output. It is attached
+in generate mode only: `--attest --check` mints nothing, a `local_only`
+command carried under `--skip-local-only` was not run, and a passing or
+differently-shaped check is not advised, so none of them carry it. Neither
+field is a `schema_version` change: both are additive, live-only, and absent
+unless the check failed in this run. `cwd` defaults to the repository root. A command that cannot
 be launched or times out fails its check with `exit_status: null` and
 `error: "launch_failed"`/`"timeout"`.
 
@@ -2250,13 +2260,51 @@ This makes one case circular. A check that also verifies committed evidence
 *downstream* of the item-10 envelope (a lint for record freshness, or for
 envelope-to-manifest pins) fails whenever a record citing that envelope is
 stale, and such a record cannot be re-minted until the envelope exists. There
-are two ways out:
+are three ways out:
 
 1. Keep the downstream-verifying lint out of the item-10 `checks[]` inventory
    and run it in CI instead.
 2. Keep it in the inventory and follow the required order: mint item 10 first,
    on a tree whose baseline still holds, then re-mint the downstream records
    that cite the new envelope.
+3. When no such tree is left, run the record → envelope → record sequence
+   below.
+
+**Editing an inventoried file leaves no tree for way out no. 2 (issue
+#5538).** Way out no. 2 needs a moment at which the committed record still
+holds. An edit to an inventoried file (or to the inventory itself, which is
+what adding one means) removes it: the envelope must be re-minted and the
+record that cites it goes stale in the same moment. `--attest` then refuses
+to write, because the record it checks is stale, and the record cannot be
+regraded to a correct value, because it grades an envelope that has not been
+rewritten yet. Break the cycle by running the two producers in this order,
+from the deadlocked tree:
+
+1. **Regenerate the record.** It grades the item `unmet` with
+   `reason: "stale_evidence"` — the honest verdict for an envelope that has
+   not been rewritten yet.
+2. **Re-run `klt signoff --attest ITEM --inventory INV -o OUT`.** The record
+   check passes against that record, so the envelope is written (exit `0`).
+3. **Regenerate the record again.** It grades the item `met` against the
+   envelope step 2 wrote.
+
+**It has converged when `klt signoff --attest ITEM --inventory INV --check
+OUT` and the record's own `klt signoff --manifest M --check R` both exit
+`0`.** Run both. **A pair committed after step 1 or step 2 is
+half-converged** — the record still says `stale_evidence` while the envelope
+is fresh — and neither producer stops you committing it; both `--check` runs
+reject such a pair with exit `3`, so CI running them is the backstop. (The
+step-3 record is not in general byte-identical to the pre-edit one, so a
+byte-comparison against the old record is not the convergence signal; the two
+`--check` runs are.)
+
+Exit `3` on this shape otherwise reads like any other failing check, so a
+**failing `command` check whose `argv` runs a `signoff … --manifest …
+--check …`** carries a live-only `hint` naming the cycle and this sequence
+(see "A **command** is …" above for the field's lifecycle). The hint is
+worded conditionally — *if* that record cites this envelope — because the
+manifest named in `argv` is deliberately not parsed; an unrelated failing
+record check therefore gets advice that is still accurate.
 
 #### Exit codes
 

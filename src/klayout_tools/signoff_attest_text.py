@@ -94,4 +94,9 @@ def attestation_check_line(check: dict) -> str:
         tail = failed_output_tail(check)
         if tail:
             line += "\n" + "\n".join(f"    | {row}" for row in tail.splitlines())
+        # Live-only, and only ever present on a generate-mode result: see
+        # `signoff_attest_live.attach_record_check_hints` (issue #5538).
+        hint = check.get("hint")
+        if hint:
+            line += f"\n    hint: {hint}"
     return line
