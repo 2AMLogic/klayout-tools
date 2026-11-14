@@ -6796,6 +6796,15 @@ a corner grid. A stock ngspice without the module still produces the
     mismatch. `family_mismatch` reports `mosfet` `active: true` only when every
     selected `corners.process` section ends in `_mismatch`, `false` when none
     does, and `null` when the section is unknown or mixed.
+    Within a selected `_mismatch` section, each device subcircuit gates its own
+    draws on an instance parameter, `mm_ok` (`agauss(nom, sigma, (mm_ok != 1 ?
+    0 : 1))`, defaulted to `1` inside the subcircuit), so a *single* instance's
+    mismatch is switched off by putting `mm_ok=0` on its instance line — what
+    `monte_carlo.instances` does (see "Per-instance mismatch selection").
+    Note `sg13g2_hbt_mod_mismatch.lib` is ISO-8859 encoded, so a plain
+    `grep agauss`/`grep mm_ok` reports it as a binary file and prints nothing:
+    the HBT subcircuits **do** carry `mm_ok`-gated `agauss()` terms
+    (`grep -a`, 2026-11-13, #5487).
   - **gf180mcu**: Mismatch works differently — there is **no** corner-suffixed
     `_mm` section to select. `sm141064.ngspice` (`libs.tech/ngspice/`) exposes
     only plain corner sections (`typical`, `ss`, `ff`, `sf`, `fs`, plus
@@ -7469,14 +7478,103 @@ hand-written netlist wrapper:
 `include` and `exclude` are case-insensitive globs over **top-level `X`
 (subcircuit) instance names** of the request netlist. An instance is
 randomised when it matches `include` (or `include` is empty) and does not match
-`exclude`. At least one list must be non-empty. klt wraps every other `X`
-instance in a generated one-instance subcircuit that sets the PDK's mismatch
-switch to `0` locally (`mc_mm_switch` for sky130, `sw_stat_mismatch` for
-gf180mcu); the instance line, including `m` and every other parameter, moves
-*inside* the wrapper verbatim, so nothing is forwarded across the extra
-hierarchy level. The netlist you wrote is not modified; a gated copy runs.
-Hierarchical probes of a wrapped instance gain one level
-(`xm1.xm1_klt`).
+`exclude`. At least one list must be non-empty. The netlist you wrote is not
+modified; a gated copy runs.
+
+How every other `X` instance has its mismatch switched off depends on the PDK,
+because the PDKs differ structurally:
+
+- **sky130, gf180mcu — wrapper mode.** Both decks gate mismatch with a
+  model-level `.param` (`mc_mm_switch`, `sw_stat_mismatch`), so klt wraps the
+  instance in a generated one-instance subcircuit that sets that parameter to
+  `0` locally. The instance line, including `m` and every other parameter,
+  moves *inside* the wrapper verbatim, so nothing is forwarded across the extra
+  hierarchy level. Hierarchical probes of a wrapped instance gain one level
+  (`xm1.xm1_klt`).
+- **ihp-sg13g2 — instance-parameter mode**
+  ([#5487](https://github.com/2AMLogic/klayout-tools/issues/5487)). sg13g2 has
+  no global switch to shadow: its `*_mismatch.lib` device subcircuits write
+  every term as `agauss(nom, sigma, (mm_ok != 1 ? 0 : 1))` and default
+  `mm_ok=1` *inside each subcircuit*, which shadows any enclosing `.param`.
+  klt therefore rewrites the unselected instance's own line to carry
+  `mm_ok=0` (replacing an `mm_ok=` already on the line rather than duplicating
+  it, and folding any `+` continuation into the rewritten line). **No wrapper
+  subcircuit is generated, so hierarchical probe names are unchanged.**
+
+  An end-of-line comment (`$ ...`, `; ...` or `// ...`, on the instance line
+  or on any of its `+` continuations) is separated from the element before the
+  rewrite and re-attached after it, so `mm_ok=0` is always written into the
+  element and never inside the comment — ngspice discards everything after the
+  comment marker, so a parameter written there would leave the instance
+  randomised while the report said `randomised: false`. For the same reason an
+  `mm_ok=` that appears only inside a comment is not treated as an existing
+  assignment. `//` opens a comment anywhere on the line; `$` only at the start
+  of a line or after whitespace (`w=1u$2` is a value, not a comment).
+
+  **Which lines break an element, measured (ngspice-47, 2026-11-13, #5498).**
+  ngspice drops some lines *before* it folds `+` continuations, so a
+  continuation after one of them still belongs to the element above. klt folds
+  the same way; reading it the other way round either attaches the
+  continuation's parameters to a comment (leaving the element's own `mm_ok`
+  untouched) or claims parameters ngspice never applied. Probe: `.subckt rr a
+  b foo=1 mm_ok=1` holding `R1 a b {1k + mm_ok*1k}` across 1 V, deck
+  `X1 n1 0 rr` / *the line below* / `+ mm_ok=0`, where `-1.0e-03` means
+  `mm_ok=0` was honoured and `-5.0e-04` means it was not:
+
+  | Line between the element and its `+` continuation | ngspice | Folds? |
+  | --- | --- | --- |
+  | blank or whitespace-only | `-1.0e-03` | yes |
+  | `*` comment line (any indent) | `-1.0e-03` | yes |
+  | `$ ...` only (any indent, `$note` too) | `-1.0e-03` | yes |
+  | `// ...` only (any indent) | `-1.0e-03` | yes |
+  | `; ...` only (any indent) | `-5.0e-04` | **no** |
+
+  A `;`-only line is the exception: it **breaks** the element, and the `+`
+  after it attaches to the comment and is discarded with no warning. klt ends
+  the element there too, gates the first line alone, and leaves the orphaned
+  continuation exactly as written. For the lines that do fold, the comment or
+  blank line itself is re-emitted after the rewritten element rather than
+  deleted with the continuation it sat inside.
+
+  Because `mm_ok` is only honoured by a subcircuit that declares it, klt
+  writes it **only** onto an instance whose subcircuit definition it has read
+  and found to declare it — on the `.subckt` line (`sg13_lv_nmos`) or in a body
+  `.param` (`cap_cmim`). Definitions are read from the request netlist's
+  `.include` closure and from the `.lib <file> <section>` closure of the
+  sections this run's corners select; klt keeps **no** list of device names, so
+  a PDK pin bump that renames or adds a device needs no change here. An
+  unselected instance whose subcircuit does not declare `mm_ok` — a user
+  subcircuit, or a PDK device with no such gate — is refused with a `SimError`
+  naming the instance and the subcircuit, before any corner is dispatched.
+
+  That refusal is the point, not a limitation: ngspice **aborts** on
+  `mm_ok=0` applied to a subcircuit declaring no parameters at all
+  (`Mismatch: 0 formal but 1 actual params.`), but **silently accepts** it on
+  one declaring any *other* parameter and leaves the devices inside still
+  randomised — so guessing would make klt report `randomised: false` for an
+  instance that was still randomised.
+
+  **What "declares it" does and does not establish.** klt checks that the
+  subcircuit *declares* `mm_ok`, which is what makes the instance-line
+  override legal; it does not trace whether the subcircuit then passes the
+  parameter down to the devices inside it. A subcircuit that declares `mm_ok`
+  and ignores it would be reported as gated while its devices still varied.
+  Every `mm_ok`-bearing sg13g2 device subcircuit does use it (that is what the
+  `(mm_ok != 1 ? 0 : 1)` term is), so this is a caveat for a hand-written
+  wrapper that declares the parameter for pass-through and forgets to forward
+  it — not for PDK devices.
+
+**Verified on ngspice-47 with a real IHP-Open-PDK install (2026-11-13,
+#5487).** Two identical diode-connected `sg13_lv_nmos` (`w=1u l=0.13u`), each
+fed 10 µA, under `corners.process: ["mos_tt_mismatch"]`, `n=12`,
+`seed=20261113`. With `exclude: ["xm2"]`, the randomised device's `v(d1)` had
+`stddev` `8.136e-3` V while the gated `v(d2)` had `stddev` **exactly** `0.0`
+(every sample `0.5495592` V). With `exclude: ["x*"]` (`negative_control:
+true`) both measurements read `0.5495592` V, **identical** to the same deck run
+under the plain `mos_tt` section. A gated instance's operating point can still
+move at the ~4e-9 relative level with what else is in the deck, so treat
+"within 1e-6 relative of the mismatch-off run", not exact equality, as the
+negative-control criterion.
 
 **Verified on ngspice 46 with sky130A (2026-10-16, #3442).** Wrapping every
 `X` instance under `tt_mm` removed all spread (8/8 samples exactly `0.0`, the
@@ -7487,9 +7585,11 @@ ngspice 42 has not been compared (unverified).
 
 Refused up front with a `SimError`: a glob that matches no `X` instance (or
 only non-subcircuit elements), a hierarchical glob (`.`/`/`), `vary:
-"process"`, a `models.pdk` without a known switch, and the `remote`/`batch`
-backends. Instances inside user `.subckt` bodies and in `.include`d files are
-not gated individually.
+"process"`, a `models.pdk` whose family has neither a known mismatch switch nor
+a known instance parameter (supported today: `gf180mcu`, `sg13g2`, `sky130`),
+an unselected sg13g2 instance whose subcircuit does not declare `mm_ok` (above),
+and the `remote`/`batch` backends. Instances inside user `.subckt` bodies and
+in `.include`d files are not gated individually.
 
 The response adds `environment.monte_carlo.instance_mismatch`:
 
@@ -7505,7 +7605,9 @@ The response adds `environment.monte_carlo.instance_mismatch`:
 }
 ```
 
-`negative_control: true` means every `X` instance was excluded: that run should
+`switch` names whichever gate the run used: the shadowed model-level `.param`
+in wrapper mode, or the instance parameter (`"mm_ok"`) in instance-parameter
+mode. `negative_control: true` means every `X` instance was excluded: that run should
 reproduce the mismatch-off run under the same seed, so diff it against one to
 catch a wrapper that drops a parameter. The report states which instances were
 gated, not that the PDK model responded to the switch. Whether the remaining

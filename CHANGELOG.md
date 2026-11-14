@@ -42,6 +42,45 @@ not `klt --version`, if you need to detect this kind of drift. See
   `klt signoff --manifest` grades are all unchanged; the field covers the
   whole stream and is not scoped by `--top`. Additive; `klt stats`'
   `schema_version` stays `1`.
+
+- **`klt sim`: `monte_carlo.instances` now supports ihp-sg13g2, gating by the
+  `mm_ok` instance parameter** (#5487, 2026-11-13): per-instance mismatch
+  attribution was refused for sg13g2 ("needs models.pdk naming a PDK with a
+  known mismatch switch"), because the only gating mechanism was a wrapper
+  subcircuit shadowing a model-level `.param` and sg13g2 has no such switch —
+  its `*_mismatch.lib` device subcircuits default `mm_ok=1` *inside* each
+  subcircuit, which shadows any enclosing scope. An unselected sg13g2 instance
+  is now gated by rewriting its own instance line to carry `mm_ok=0` (an
+  existing `mm_ok=` is replaced, not duplicated; `+` continuations fold in; an
+  end-of-line `$`/`;`/`//` comment is separated from the element first and
+  re-attached after, so the parameter never lands inside a comment, where
+  ngspice would discard it). No wrapper is generated, so **hierarchical probe
+  names are unchanged** for sg13g2. Both readers fold a deck the way
+  ngspice-47 measurably does: `//` ends an element anywhere on the line (no
+  preceding whitespace needed, unlike `$`), and a blank, `*`, `$`-only or
+  `//`-only line between an element and its `+` continuation does **not**
+  break the element, while a `;`-only line does — the `+` after that one
+  attaches to the comment and is discarded with no warning, so klt ends the
+  element there too. Each of those lines is re-emitted after the rewritten
+  element rather than deleted. A comment-blind reader wrote `mm_ok=0` past a
+  `//`, or attached a continuation's `mm_ok=1` to a `*`/blank line so it won
+  — both reporting `randomised: false` for an instance ngspice kept
+  randomised, and both measured end to end here (#5498). klt writes
+  `mm_ok=0` only onto an instance whose subcircuit
+  definition it has read and found to declare the parameter — read from the
+  netlist's `.include` closure and the selected model-library sections, never
+  from a device-name list — and refuses an unselected instance whose
+  subcircuit does not, before any corner is dispatched: ngspice silently
+  accepts `mm_ok=0` on a user subcircuit declaring some *other* parameter and
+  leaves the devices inside randomised, which would have made klt report
+  `randomised: false` for an instance that was still randomised. Additive:
+  `environment.monte_carlo.instance_mismatch` keeps its shape, with
+  `"switch": "mm_ok"`; sky130 and gf180mcu output, refusals and wrapper
+  behaviour are unchanged, and there is no `schema_version` bump. Measured on
+  ngspice-47 against a real IHP-Open-PDK install (gated `stddev` exactly `0.0`
+  vs `8.136e-3` V randomised; negative control identical to a plain `mos_tt`
+  run). See `docs/cli/sim.md` → "Per-instance mismatch selection".
+
 - **`klt signoff` reads a gzip-compressed evidence file** (#5452,
   2026-11-13): a `klt sim --report-out report.json.gz` report — the compact
   form `docs/cli/sim.md` recommends committing as evidence — is now citable
