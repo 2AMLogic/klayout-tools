@@ -894,7 +894,7 @@ disclosed**: the substrate check is *evaluated* when isolation is derived
 |---|---|---|---|
 | gf180mcu | `DNWELL` 12/0 (deck `substrate_isolation`) | always; islands derived (`vsubs_iso<n>`) | — |
 | sky130 | `dnwell` 64/18 (deck `substrate_isolation`, #5344) | always; a `dnwell` island counts only when an n-well ring closes it, otherwise it stays on shared `vsubs` | — |
-| sg13g2 / sg13cmos5l | `nbulay` (layer not yet declared in the deck) | `ties[].isolation_boxes` asserts the isolated bodies | the deck declares no isolation layer, so "none drawn" cannot be measured |
+| sg13g2 / sg13cmos5l | `nbulay` 32/0 (deck `substrate_isolation`, #5345) | always; an `nbulay` island counts only when an `nwell` (31/0) ring closes it (#5359), otherwise it stays on shared `vsubs` | — |
 | asap7 | none | `ties[].isolation_boxes` asserts them | the cells draw no substrate/well tie: nothing to join through |
 | no `--deck` | unknown | `ties[].isolation_boxes` asserts them | the family is unknown, so isolation cannot be measured |
 
@@ -918,7 +918,7 @@ extraction deck declares as `substrate_isolation`:
 | `gf180mcu` | `DNWELL` (12/0) | |
 | `sg13g2` | `nBuLay.drawing` (32/0) | counts only if an NWell (31/0) ring closes it (#5359); layer/datatype from the PDK's `layers_def.drc` / tech `.lyp`; taps are derived from `Activ` (`tap=None`) and the tie logic handles it |
 | `sg13cmos5l` | `nBuLay.drawing` (32/0) | same as `sg13g2` |
-| `sky130` | not declared | |
+| `sky130` | `dnwell` (64/18) | counts only if an `nwell` (64/20) ring closes it (#5344) |
 
 **Ring closure (issues #5344, #5359).** sky130 (DNWELL) and the IHP decks
 (nBuLay) set `substrate_isolation_needs_nwell_ring`: a drawn island isolates
