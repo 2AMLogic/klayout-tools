@@ -3558,7 +3558,7 @@ def test_run_sim_batch_uploads_the_staged_model_closure(tmp_path, monkeypatch):
         "psp103.osdi",
         "request.json",
     }
-    assert list(uploaded)[-1] == "request.json"  # still after every input
+    # Order among inputs is unobservable since #5539: one recursive transfer.
     assert uploaded["psp103.osdi"] == (tmp_path / "psp103.osdi").read_bytes()
     worker = json.loads(uploaded["request.json"])
     assert worker["models"] == {"lib": "top.lib"}
