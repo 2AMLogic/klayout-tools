@@ -119,7 +119,11 @@ def _compute(
         options: dict[str, Any] = {
             "generator": getattr(args, "generator", None),
             "regenerated_hash": getattr(args, "regenerated_hash", None),
-            "hash_kind": getattr(args, "hash_kind", None) or "bytes",
+            # Pass an absent --hash-kind through as None, never collapsed to
+            # "bytes": check_stream_attestation() adopts the committed
+            # regeneration claim only when no flag was given, so absence has
+            # to stay visible past this boundary (issue #5572).
+            "hash_kind": getattr(args, "hash_kind", None),
             "inventory_path": inventory,
         }
         if committed is not None:
