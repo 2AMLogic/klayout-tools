@@ -16096,6 +16096,69 @@ def test_attest_generates_an_anchored_generic_envelope(tmp_path, item):
     assert signoff_module._classify(envelope, "x") == "generic"
 
 
+def test_manifest_resolves_a_nested_only_inventory_block(tmp_path):
+    """Issue #5571: an envelope in the item-2 stream producer's nested-only
+    shape (`attestation.inventory.schema_version`, no flat key) binds with
+    the real version -- already-committed evidence needs no re-attest."""
+    repo = _attest_repo(tmp_path)
+    envelope = build_attestation(9, _write_inventory(repo, 9))
+    attestation = envelope["attestation"]
+    attestation["inventory"] = {
+        "path": envelope["provenance"]["input"]["path"],
+        "content_hash": envelope["provenance"]["input"]["content_hash"],
+        "schema_version": 1,
+    }
+    del attestation["inventory_schema_version"]
+
+    evidence = _write(repo / "evidence", "item9.json", envelope)
+    result = build_tier_report(
+        _manifest(
+            evidence={
+                "9": {
+                    "file": evidence,
+                    "content_hash": envelope["provenance"]["input"]["content_hash"],
+                }
+            }
+        )
+    )
+
+    item = _item(result, 9)
+    assert item["status"] == "met"
+    record = item["citation"]["artifact_binding"]["attestation"]
+    assert record["inventory_schema_version"] == 1
+
+
+def test_manifest_prefers_the_flat_inventory_schema_version_key(tmp_path):
+    """Issue #5571: when an envelope carries both shapes, the flat
+    `inventory_schema_version` key wins (items 1/8/9/10 are unchanged)."""
+    repo = _attest_repo(tmp_path)
+    envelope = build_attestation(9, _write_inventory(repo, 9))
+    attestation = envelope["attestation"]
+    attestation["inventory"] = {
+        "path": envelope["provenance"]["input"]["path"],
+        "content_hash": envelope["provenance"]["input"]["content_hash"],
+        "schema_version": 1,
+    }
+    attestation["inventory_schema_version"] = 7
+
+    evidence = _write(repo / "evidence", "item9.json", envelope)
+    result = build_tier_report(
+        _manifest(
+            evidence={
+                "9": {
+                    "file": evidence,
+                    "content_hash": envelope["provenance"]["input"]["content_hash"],
+                }
+            }
+        )
+    )
+
+    item = _item(result, 9)
+    assert item["status"] == "met"
+    record = item["citation"]["artifact_binding"]["attestation"]
+    assert record["inventory_schema_version"] == 7
+
+
 def test_attest_item_1_records_source_and_derived_hashes_and_freshness(tmp_path):
     repo = _attest_repo(tmp_path)
     envelope = build_attestation(1, _write_inventory(repo, 1))

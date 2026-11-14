@@ -1921,7 +1921,12 @@ depends on its meaning staying fixed:
 - The emitted envelope is an ordinary `generic` evidence envelope plus an
   additive `attestation` block (`producer`, `inventory_schema_version`,
   `hash_algorithm`, `check_count`, `passed_count`, `checks[]`). Its fields
-  follow this document's usual additive rules.
+  follow this document's usual additive rules. The tier record's flat
+  `artifact_binding.attestation.inventory_schema_version` is resolved from
+  that key when present, else from `attestation.inventory.schema_version`
+  (the item-2 `--input`+`--inventory` shape, issue #5571), so a committed
+  envelope in either shape discloses its inventory contract without a
+  re-attest.
 - Hashes are `sha256:<hex>` of raw bytes (`hash_algorithm:
   "sha256-raw-bytes"`). Introducing any normalisation would be a new named
   algorithm recorded in the envelope, never a silent change to this one.
