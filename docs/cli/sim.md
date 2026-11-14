@@ -179,7 +179,12 @@ that cannot be determined or parsed also fails (closed). On `local` and
 `local-parallel` the engine is probed (`ngspice --version` / `Xyce -v`) up
 front. `remote` and `batch` have no pre-submit probe, so the pin is checked
 against the version in the runner's report once the run returns; the job has
-already run by then. Unset, behaviour is unchanged. The pin applies to
+already run by then. Which of the two applies is decided by the backend that
+*executes*, not the one first resolved: when a host-default off-host backend
+steps back to `local` late — a single-unit run, or `options.resume` — the pin
+is probed here up front, exactly as `--backend local` does (issue #5500);
+before that fix neither half ran and the pin passed silently.
+Unset, behaviour is unchanged. The pin applies to
 deck-list requests (see "Pre-composed decks") the same way — decks always run
 on `ngspice`, and an off-host runner that reports no `engine_version` fails
 closed — but `unsupported_analysis` does not, as decks have no `analysis`
@@ -205,6 +210,13 @@ and compares the installed identity *before simulating*; a `mismatch`, an
 `models.pdk` nor `models.pdk_root` set exits 1 with
 `error.code: "pdk_version_unmet"`. `remote` and `batch` reject the field with a
 request error (no silent pass): the worker-side check is tracked in #3462.
+That rejection is keyed on the backend that *executes*: when the off-host
+backend is only a host default (`$KLT_SIM_BACKEND`) that a late yield steps
+back to `local` — a single-unit run, or `options.resume` — the pin is compared
+locally instead of refused (issue #5500), so a host default cannot turn a
+valid request into a refusal. An explicitly named `--backend` /
+`request.backend` is still refused immediately, and a host-default run that
+really does leave this host is refused before anything is submitted.
 Unset, behaviour is unchanged.
 
 **Supported analyses (issue #3041).** `analysis.kind` (and each
