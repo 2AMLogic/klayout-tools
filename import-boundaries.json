@@ -82,7 +82,11 @@
       "description": "`klt components` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.components_cmd",
-        "klayout_tools.components"
+        "klayout_tools.cli.parsers.components",
+        "klayout_tools.components",
+        "klayout_tools.components_errors",
+        "klayout_tools.components_probe",
+        "klayout_tools.components_specs"
       ]
     },
     "corner_matrix": {
