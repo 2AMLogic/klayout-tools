@@ -14,6 +14,24 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt sim --batch-set` names member directories after the request stem**
+  (#5633, 2026-11-15): a member request named `<stem>.request.json` -- the
+  repo's own documented request naming convention -- used to land in
+  `<outdir>/<stem>.request/` (only the last filename suffix was stripped), so
+  a caller deriving `<outdir>/<stem>/report.json` the obvious way found no
+  report and proceeded to a reduction with zero inputs while the envelope
+  still reported `status: "pass"`. The member directory now strips a trailing
+  `.request.json` from the request basename, so `<stem>.request.json` ->
+  `<outdir>/<stem>/`; any other basename is unchanged (`foo.sim.json` ->
+  `foo.sim`, `sim_request.json` -> `sim_request`). `requests[].report` and
+  `set-manifest.json`'s per-request `dir` are unchanged in shape and always
+  name the directory actually written -- read them from the envelope rather
+  than re-deriving the path. **Migration:** a set started on 0.9.2 or
+  earlier and resumed with the new version finds no `batch-shards.json` in
+  the renamed directory and re-runs every member from scratch; move the old
+  directory first (`mv <outdir>/<stem>.request <outdir>/<stem>`) to resume
+  from the recorded shard state. No `schema_version` changes.
+
 - **Every batch job exports a fallback `HOME`, and `klt signoff`'s generator
   path reports an envelope for an unpinnable client version** (#5654,
   2026-11-14): the five `--backend batch` job assemblers (`klt extract`,
