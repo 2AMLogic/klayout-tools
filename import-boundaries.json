@@ -780,6 +780,7 @@
         "klayout_tools.sim_forms",
         "klayout_tools.sim_injected",
         "klayout_tools.sim_merge",
+        "klayout_tools.sim_mismatch_declarations",
         "klayout_tools.sim_mismatch_gate",
         "klayout_tools.sim_measurement_results",
         "klayout_tools.sim_noise",
