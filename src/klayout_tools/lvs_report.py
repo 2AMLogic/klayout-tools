@@ -8,6 +8,7 @@ from typing import Any
 def assemble_lvs_report(
     *,
     mismatches: Any,
+    omit_mismatches: bool,
     status: Any,
     engine: Any,
     engine_version: Any,
@@ -40,7 +41,17 @@ def assemble_lvs_report(
 ) -> dict[str, Any]:
     """Final stage of :func:`run_lvs` (issue #5162): tally ``mismatches[]``
     per category, build provenance, assemble the report and apply the
-    ``portable_paths`` rewrite. Pure extraction -- no logic of its own."""
+    ``portable_paths`` rewrite. Pure extraction -- no logic of its own.
+
+    ``omit_mismatches`` (issue #5610, the ``klt lvs --omit-mismatches`` /
+    ``request.omit_mismatches`` opt-in, mirroring ``klt erc
+    --omit-antenna-tables``) blanks the emitted ``mismatches[]`` to ``[]``
+    so a failing flat compare's report stays small enough to commit
+    verbatim. The tally loop above always runs over the *full* list first,
+    so ``mismatch_count``/``error_count``/``category_counts``/
+    ``category_error_counts`` are byte-identical with and without the flag
+    -- the compare itself is never skipped, only the per-entry echo.
+    """
     # Deferred: these helpers live in ``lvs`` (which imports this module).
     from . import env_provenance
     from ._provenance import build_provenance, sha256_file
@@ -310,6 +321,7 @@ def assemble_lvs_report(
         # matched -- that is precisely the disclosure gap this answers. `null`
         # for `"engine": "netgen"`. See `_device_parameter_coverage`.
         "device_parameter_coverage": device_parameter_coverage,
+        "mismatches_omitted": omit_mismatches,
         "mismatch_count": len(mismatches),
         "error_count": sum(category_error_counts.values()),
         "category_counts": dict(sorted(category_counts.items())),
@@ -333,7 +345,10 @@ def assemble_lvs_report(
         },
         # Issue #2693: built above the return (per-form `pin_order_sources`).
         "provenance": provenance,
-        "mismatches": mismatches,
+        # Issue #5610: `--omit-mismatches` blanks the list (the key stays a
+        # list, and stays present -- `mismatches` is schema-required); every
+        # summary field above was tallied from the full list before this.
+        "mismatches": [] if omit_mismatches else mismatches,
         "net_correspondence": net_correspondence,
     }
     return _finish_response(

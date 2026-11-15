@@ -1215,6 +1215,7 @@ def run_lvs(
     deck_file: str | None = None,
     deck_vars: dict[str, str] | None = None,
     progress: bool | str = False,
+    omit_mismatches: bool = False,
 ) -> dict[str, Any]:
     """Run the netlist compare declared by ``request``.
 
@@ -1227,6 +1228,24 @@ def run_lvs(
     --deck-file``/``--deck-var`` CLI values for ``engine: klayout-runset``;
     they fill the request's ``deck_file``/``deck_vars`` fields, and setting
     both a flag and its request field is a clean :class:`LvsError`.
+
+    ``omit_mismatches`` (issue #5610) is the ``klt lvs --omit-mismatches``
+    CLI value for the compaction knob every verb with a verdict-bearing list
+    eventually needs (``klt erc`` has ``--omit-antenna-tables``): when true
+    -- given as the flag, as the request document's top-level boolean
+    ``omit_mismatches`` (the flag wins when both name it), or both -- the
+    response's ``mismatches[]`` is emitted as ``[]`` (the key stays present;
+    it is schema-required) beside a ``mismatches_omitted: true`` echo, while
+    ``status``, ``mismatch_count``, ``error_count``, ``category_counts``,
+    ``category_error_counts`` and the exit code keep their full-run values:
+    the compare still runs in full and the tally still runs over the full
+    list, only the per-entry echo is dropped, so a failing flat compare's
+    report stays committable. Omitted/false, the response is unchanged
+    apart from the always-present ``mismatches_omitted: false`` echo.
+    ``klt lvs --check`` verifies such a report as-is (cheap mode never reads
+    ``mismatches[]``), and ``--check --rerun`` replays the omission from
+    the report's own echo (see :func:`_reconstruct_lvs_request` /
+    :func:`_reconstruct_runset_request`).
 
     ``request`` accepts the same three forms every ``klt lvs`` request
     argument does (see :func:`load_request_arg` / docs/cli/lvs.md): a path
@@ -1494,6 +1513,12 @@ def run_lvs(
         )
     _merge_deck_flags(loaded, engine, deck_file, deck_vars)
     portable_paths = _validate_portable_paths(loaded.get("portable_paths"))
+    # Issue #5610: the request key is validated even when the CLI flag won,
+    # so a malformed value stays visible; the flag (a `store_true`, so it can
+    # only raise the value to `True`) takes precedence over the request
+    # field.
+    request_omit_mismatches = _validate_omit_mismatches(loaded.get("omit_mismatches"))
+    omit_mismatches = bool(omit_mismatches) or request_omit_mismatches
 
     layout_spec = request["layout"]
     if not isinstance(layout_spec, dict):
@@ -1505,7 +1530,9 @@ def run_lvs(
     if engine == RUNSET_ENGINE:
         # Issue #2849: the PDK's own runset does extraction and compare; the
         # verdict is read back from its .lvsdb (see lvs_runset.py).
-        return _run_runset_response(request, request_dir, portable_paths)
+        return _run_runset_response(
+            request, request_dir, portable_paths, omit_mismatches
+        )
 
     # `layout.deck_options` (issue #600) mirrors `klt extract --deck-option`'s
     # resolved `{key: value}` mapping, one layer down: this is a JSON object
@@ -2006,6 +2033,7 @@ def run_lvs(
 
     return assemble_lvs_report(
         mismatches=mismatches,
+        omit_mismatches=omit_mismatches,
         status=status,
         engine=engine,
         engine_version=engine_version,
@@ -2051,16 +2079,51 @@ def _validate_portable_paths(value: Any) -> bool:
     return value
 
 
+def _validate_omit_mismatches(value: Any) -> bool:
+    """Optional top-level ``request.omit_mismatches`` (issue #5610, the
+    request-document counterpart of ``klt lvs --omit-mismatches``): blank
+    the response's ``mismatches[]`` to ``[]`` beside a ``mismatches_omitted:
+    true`` echo, keeping every summary field (the tally runs over the full
+    list before the blanking, see
+    :func:`klayout_tools.lvs_report.assemble_lvs_report`). Omitted/``None``
+    is ``False``: the response is unchanged apart from the always-present
+    ``mismatches_omitted`` echo. A non-boolean value is a clean
+    :class:`LvsError`, the same discipline ``request.portable_paths``
+    applies -- never a silent no-op."""
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise LvsError("request.omit_mismatches must be a boolean")
+    return value
+
+
 def _run_runset_response(
-    request: dict[str, Any], request_dir: str, portable_paths: bool
+    request: dict[str, Any],
+    request_dir: str,
+    portable_paths: bool,
+    omit_mismatches: bool = False,
 ) -> dict[str, Any]:
     """Run the ``klayout-runset`` engine and finish its response.
 
     Issue #3988: under ``portable_paths`` the tool's identity (its basename)
     is kept for ``environment.klayout_binary`` instead of the generic
     external-path object; the version is recorded separately in
-    ``engine_version``."""
+    ``engine_version``.
+
+    Issue #5610: ``omit_mismatches`` applies here too, so a committed-record
+    flow is uniform across engines. The blanking happens *after*
+    :func:`lvs_runset.run_lvs_klayout_runset` returns, because that builder
+    has already tallied ``mismatch_count``/``category_counts``/
+    ``category_error_counts`` over the full list -- blanking the list here
+    cannot lose a summary value, the same invariant
+    :func:`klayout_tools.lvs_report.assemble_lvs_report` upholds for the
+    other engines. The ``mismatches_omitted`` echo is set unconditionally
+    (``false`` included) so a runset report carries the same always-present
+    field a ``klayout``/``netgen`` report does."""
     runset_report = run_lvs_klayout_runset(request, request_dir)
+    runset_report["mismatches_omitted"] = bool(omit_mismatches)
+    if omit_mismatches:
+        runset_report["mismatches"] = []
     binary = runset_report.get("environment", {}).get("klayout_binary")
     response = _finish_response(
         runset_report, portable=portable_paths, request_dir=request_dir
@@ -2279,6 +2342,11 @@ def _reconstruct_runset_request(
     for key in ("deck_vars", "options"):
         if committed.get(key):
             request[key] = committed[key]
+    # Issue #5610: replay the omission from the committed report's own echo
+    # (same helper as `_reconstruct_lvs_request`; the runset's `options`
+    # echo carries no compaction knob, so without this a flagged runset
+    # report reruns uncompacted and reports its own blanked list as drift).
+    request.update(_omit_mismatches_replay(committed))
     return request
 
 
@@ -2488,6 +2556,17 @@ def _reconstruct_lvs_request(
     # Issue #3014: replay the applied `hints.constant_nets` bindings; other
     # hints are not echoed and stay best-effort (see the docstring).
     request.update(_constant_nets_replay_hints(committed))
+    # Issue #5610: replay the omission from the committed report's own
+    # `mismatches_omitted` echo, the way `klt erc --rerun` replays
+    # `antenna_tables_omitted` (`erc.py`) -- without it a compacted report
+    # (`mismatches: []`) diffs against a fresh, uncompacted list and reports
+    # false drift. This is a response echo replayed as a top-level request
+    # field (the field lives outside `options`, which only echoes
+    # compare-shaping inputs), so it deliberately does not go through the
+    # `_strict_top_level_pin_count_replay_options` helpers, which re-assert
+    # entries of the `options` block. A report without the echo replays
+    # uncompacted, exactly as it was produced.
+    request.update(_omit_mismatches_replay(committed))
     return request
 
 
@@ -2573,6 +2652,25 @@ def _constant_nets_replay_hints(committed: dict[str, Any]) -> dict[str, Any]:
     if isinstance(applied, dict) and applied:
         return {"hints": {"constant_nets": dict(applied)}}
     return {}
+
+
+def _omit_mismatches_replay(committed: dict[str, Any]) -> dict[str, Any]:
+    """``{"omit_mismatches": True}`` when the committed report echoed the
+    ``--omit-mismatches`` compaction, else ``{}`` (issue #5610).
+
+    The replay is what keeps ``--check --rerun`` off the false-drift shape
+    issue #1205 already produced once: a compacted committed report
+    (``mismatches: []``) diffed against a fresh, uncompacted list reports
+    every entry as drift. It follows the ``erc.py`` shape -- read the
+    committed report's own ``mismatches_omitted`` response echo and re-assert
+    it as a top-level *request* field -- rather than the
+    ``_strict_top_level_pin_count_replay_options`` helpers, because this is
+    a response echo, not an entry of the ``options`` block (which only
+    echoes compare-shaping inputs). Used by both
+    :func:`_reconstruct_lvs_request` and
+    :func:`_reconstruct_runset_request`, so a runset report replays the
+    omission too instead of rerunning uncompacted."""
+    return {"omit_mismatches": True} if committed.get("mismatches_omitted") else {}
 
 
 def _anchor_top_level_pins_replay_options(echoed: dict[str, Any]) -> dict[str, Any]:
@@ -2760,6 +2858,11 @@ def rerun_lvs_report(
             # Issue #1983: same rule -- a report committed before the
             # `body_verification` block existed cannot have drifted in it.
             "body_verification",
+            # Issue #5610: same rule -- a report committed before the
+            # `mismatches_omitted` echo existed cannot have drifted on it
+            # (the replay above leaves such a report uncompacted, so the
+            # only difference would be the fresh run's new `false` echo).
+            "mismatches_omitted",
         )
         if field not in committed
     )

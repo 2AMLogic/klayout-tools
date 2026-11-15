@@ -99,6 +99,15 @@ def run(args: argparse.Namespace) -> int:
                 "the deck from the committed report",
                 args.format,
             )
+        if args.omit_mismatches:
+            return emit_error(
+                "lvs",
+                "--omit-mismatches applies to a fresh run; --check reads "
+                "the committed report as-is (a report produced with the "
+                "flag already carries mismatches: [] and mismatches_omitted: "
+                "true, and --rerun replays the omission from that echo)",
+                args.format,
+            )
         return _run_check(args)
 
     if args.rerun:
@@ -119,6 +128,9 @@ def run(args: argparse.Namespace) -> int:
                 if args.progress is not None
                 else ("heartbeat" if not sys.stderr.isatty() else False)
             ),
+            # `--omit-mismatches` (issue #5610), mirroring `klt erc
+            # --omit-antenna-tables`.
+            omit_mismatches=args.omit_mismatches,
         )
     except LvsError as exc:
         return emit_error("lvs", str(exc), args.format)
@@ -191,6 +203,13 @@ def _run_check(args: argparse.Namespace) -> int:
     return EXIT_MATCH if result["status"] == "match" else EXIT_DRIFTED
 
 
+def _print_mismatches_omitted(report: dict) -> None:
+    """The ``--omit-mismatches`` note (issue #5610), printed only when the
+    flag was used."""
+    if report.get("mismatches_omitted"):
+        print("mismatches_omitted: True (--omit-mismatches)")
+
+
 def _print_excluded_pins(power: dict) -> None:
     """Issue #4363: name each well-layer LEF pin the power check skipped."""
     for excluded in power.get("excluded_pins") or []:
@@ -227,6 +246,11 @@ def _print_text(report: dict) -> None:
         print(f"parameter_tolerance: {report['parameter_tolerance']}")
     print(f"status: {report['status']}")
     print(f"mismatches: {report['mismatch_count']}")
+    # Issue #5610: the `--omit-mismatches` note, printed only when the flag
+    # was used -- without it, a compacted report's per-entry section is
+    # empty and would be indistinguishable from a clean report's tail (the
+    # renderer returns early on an empty list, after the counts above).
+    _print_mismatches_omitted(report)
     # Issue #1132: printed unconditionally (like `mismatches` above), even
     # when 0, so a caller skimming text output can tell "0 mismatches" and
     # "N mismatches, 0 of them errors" apart from "no report at all".

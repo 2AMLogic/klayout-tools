@@ -8343,6 +8343,7 @@ def test_lvs_cli_exits_4_on_inconclusive(tmp_path, monkeypatch, capsys):
         deck_var=None,
         layout=None,
         progress=None,
+        omit_mismatches=False,
         output=None,
     )
     assert lvs_cmd.run(args) == lvs_cmd.EXIT_INCONCLUSIVE
@@ -25575,6 +25576,7 @@ _LVS_ALWAYS_REQUIRED = [
     "body_verification",
     "device_parameter_coverage",
     "mismatch_count",
+    "mismatches_omitted",
     "error_count",
     "category_counts",
     "category_error_counts",

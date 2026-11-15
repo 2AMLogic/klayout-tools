@@ -1821,6 +1821,23 @@ def _add_lvs_parser(subparsers: argparse._SubParsersAction) -> None:
             "--no-progress forces off"
         ),
     )
+    lvs_parser.add_argument(
+        "--omit-mismatches",
+        action="store_true",
+        help=(
+            "blank the response's mismatches[] array so a failing compare's "
+            "report stays small enough to commit verbatim (issue #5610): "
+            "mismatches is [] (the key stays present) beside "
+            "mismatches_omitted: true, while status, mismatch_count, "
+            "error_count, category_counts and category_error_counts keep "
+            "their full-run values -- the compare still runs in full, only "
+            "the per-entry echo is dropped. Mirrors klt erc "
+            "--omit-antenna-tables. The request-document equivalent is "
+            "omit_mismatches: true (the flag wins when both are given). "
+            "klt lvs --check verifies such a report as-is, and --check "
+            "--rerun replays the omission from the report's own echo"
+        ),
+    )
     _add_format_arg(lvs_parser)
     lvs_cmd.configure(lvs_parser)  # -o/--output (issue #4984) + func=run
 

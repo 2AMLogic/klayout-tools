@@ -14,6 +14,34 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt lvs --omit-mismatches`: a compact-response mode for failing
+  compares** (#5610, 2026-11-15): the verb had no way to bound, summarise or
+  omit the top-level `mismatches[]` array, so on a failing compare of a
+  flattened gate-level block the array *is* the report — the only workflow
+  for committing it verbatim was post-processing with `jq`, which leaves the
+  committed document something other than what the tool emitted. The new
+  `--omit-mismatches` flag (and the request document's top-level boolean
+  `omit_mismatches`; the flag wins when both name it, mirroring `klt erc
+  --omit-antenna-tables` / `antenna_tables_omitted`) emits `mismatches` as
+  `[]` — the key stays present, it is schema-required — beside an
+  always-present `mismatches_omitted` echo (`false` without the flag),
+  while `status`, `mismatch_count`, `error_count`, `category_counts`,
+  `category_error_counts` and every exit code keep their full-run values:
+  the compare still runs in full and the per-category tally still runs over
+  the complete list, so a reader reaches the same verdict from kilobytes
+  instead of tens of megabytes. Applied for all three engines. Text mode
+  prints a `mismatches_omitted: True (--omit-mismatches)` line rather than
+  degrading into a clean report's tail. Cheap `klt lvs --check` verifies a
+  compacted report as-is (it never reads `mismatches[]`), and
+  `--check --rerun` replays the omission from the report's own echo, both
+  in `_reconstruct_lvs_request` and — explicitly, so a runset report does
+  not rerun uncompacted — in `_reconstruct_runset_request`; a report
+  committed before the echo existed has the field excluded from its drift
+  diff. `docs/schemas/lvs-response.schema.json` gains the required
+  `mismatches_omitted` boolean; `schema_version` stays `3` (additive,
+  opt-in). The committed `examples/signoff/` evidence was regenerated for
+  the new echo field.
+
 - **Every batch job exports a fallback `HOME`, and `klt signoff`'s generator
   path reports an envelope for an unpinnable client version** (#5654,
   2026-11-14): the five `--backend batch` job assemblers (`klt extract`,
