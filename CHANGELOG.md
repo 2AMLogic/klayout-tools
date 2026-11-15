@@ -30,6 +30,8 @@ not `klt --version`, if you need to detect this kind of drift. See
   so additive with no `schema_version` bump. Details in
   `docs/cli/signoff.md`'s "CI usage: `--check`".
 
+## 0.9.2 (2026-11-14)
+
 - **`klt sim`'s per-measurement `min`/`max` skip an infinite value** (#5580,
   2026-11-14): the corner-matrix extremes in the `measurements[]` rollup are
   documented as the extremes over *finite* numeric values, but the predicate
