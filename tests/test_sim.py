@@ -12922,7 +12922,6 @@ def test_staged_worker_directory_reproduces_model_cards_and_provenance(
         str(src / "body.spice"),
         corner_count=len(points),
         timeout_s=30.0,
-        keep_artifacts=False,
         request_dir=str(src),
     )
     # Both transports ship the same assets, in the same order, with the same
