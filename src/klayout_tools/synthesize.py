@@ -1397,8 +1397,14 @@ def run_synthesize(
     # left in place (see `_strip_signed_qualifiers`); rewritten only when
     # something changed, so a clean netlist's mtime is never touched.
     netlist_text = _read_produced_netlist(netlist_path)
-    rewrite_netlist(  # issue #4872: also drops host source dirs
-        netlist_path, netlist_text, _strip_signed_qualifiers(netlist_text), elab_sources
+    rewrite_netlist(  # issue #4872, #5594: drops host source dirs in both
+        # spellings Yosys can record -- the absolute directory, and the
+        # repo-relative one `_script_path_text` embedded for in-repo paths.
+        netlist_path,
+        netlist_text,
+        _strip_signed_qualifiers(netlist_text),
+        elab_sources,
+        repo_root=repo_root,
     )
 
     module_stats = _read_stats(stats_path, hdl_toplevel)
