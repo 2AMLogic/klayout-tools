@@ -8,6 +8,30 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-13
 
+- **PR #5509**: fix: emit an error envelope for unreadable/non-UTF-8 eval and yield-sensitivity input
+- **PR #5510**: fix: make generated streams independent of earlier generators in the process
+- **PR #5488**: feat(pex): accept --reference-netlist with --extract-only, forward extract device coverage
+- **PR #5497**: docs(pex): document the one-extracted-top-per-run limit for link testbenches
+- **PR #5482**: feat(netlist): report a --block port order that is not the schematic's
+- **PR #5471**: feat(signoff): add require_derived_rows to fail manifest-asserted item 5 rows
+- **PR #5454**: feat(drc): derive a native deck's rule-category set via --list-rule-categories
+- **PR #5484**: docs(signoff): replace the "no flag to skip local_only" claim with --skip-local-only
+- **PR #5505**: refactor: share one window-bound parser across the sim measurement forms
+- **PR #5495**: fix: grade a zero-coverage envelope nothing_checked, not check_failed
+- **PR #5455**: fix(sim): apply the batch pdk_root refusal in --dry-run and scope its warning
+- **Issue #5485** (closed): Route eval and yield-sensitivity JSON loading through the shared _paths loaders: private copies traceback on unreadable/non-UTF-8 files
+- **Issue #5499** (closed): layout_plan_execute: a plan's stream record order depends on which plans ran earlier in the same process (batch run != single-plan run)
+- **Issue #5477** (closed): extract/pex: a device class the curated deck does not declare is silently absent from the extracted netlist, with no coverage disclosure (and no runset-engine alternative)
+- **Issue #5524** (closed): tests: test_sim_mismatch_gate's fake subprocess.run rejects pdk.py's check= kwarg (local-only failure)
+- **Issue #5493** (closed): pex: one --top per run cannot express a link testbench that instantiates two drawn cells
+- **Issue #5473** (closed): klt netlist --block: .subckt port order silently follows the sibling .sym (and drops pins it lacks); warn at generation and fix the --check attribution
+- **Issue #5462** (closed): klt signoff item 5: no way to require derived row coverage — an all-asserted item grades identically to a fully tagged one
+- **Issue #5515** (closed): batch --resume re-attaches forever to a Spot-interrupted job; interrupted_grace_s clock is in-memory so a restarted client resets it
+- **Issue #5444** (closed): drc --engine klayout: no way to derive a native deck's declared rule-category set from the deck (only from a run), so --expect-rule-categories-file must be hand-written
+- **Issue #5478** (closed): docs(signoff): --skip-local-only shipped (#5209) but sim.md still says no skip flag exists; CHANGELOG entry and inventory-edit test missing
+- **Issue #5472** (closed): Dedupe sim measurement-form helpers: sim_energy/sim_stress fork sim_crossings._window_bound, and shared callers mislabel errors as 'crossings'
+- **Issue #5479** (closed): signoff: an --extract-only klt pex citation renders item 7 unmet/check_failed with citation: null, indistinguishable from a failed delta run
+- **Issue #5449** (closed): sim (batch): --dry-run misses the models.pdk_root host-path refusal, and the PDK-ambiguity warning advises a pin batch refuses
 - **PR #5475**: feat(pex): add --dry-run, a validate-only mode for klt pex
 - **PR #5483**: fix: stamp the search-resolved PDK install for the batch stamp comparison
 - **PR #5476**: fix(netlist): read a K-less sibling .sym's symbol attributes from G {}

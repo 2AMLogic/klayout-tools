@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://2amlogic.com/klayout-tools/schemas/stats-response.schema.json",
   "title": "klt stats --format json success response, version 1",
-  "description": "Success payload of `klt stats`. `layers` is null unless --per-layer was given. See docs/cli/stats.md.",
+  "description": "Success payload of `klt stats`. `layers` is null unless --per-layer was given. `geometry_digest` is the stream's decoded-geometry digest -- the value `klt signoff --attest 2 --hash-kind geometry` is graded against. See docs/cli/stats.md.",
   "type": "object",
   "required": ["schema_version", "file", "dbu_um", "top_cell", "bbox_um", "total", "layers"],
   "properties": {
@@ -10,6 +10,11 @@
     "file": {"type": "string"},
     "dbu_um": {"type": "number"},
     "top_cell": {"type": ["string", "null"]},
+    "geometry_digest": {
+      "description": "sha256 digest of the stream's decoded geometry (timestamp- and record-order independent), or null when it cannot be computed. Exactly the value `klt signoff --attest 2 --regenerated-hash ... --hash-kind geometry` is graded against; NOT `klt diff`'s `canonical_hash`. Not in `required`: the field is additive at schema_version 1, so payloads captured before it was added still validate.",
+      "type": ["string", "null"],
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
     "bbox_um": {
       "type": "object",
       "required": ["left", "bottom", "right", "top", "width", "height"],

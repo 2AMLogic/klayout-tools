@@ -1534,6 +1534,22 @@ silently passes. The disclosure echoes `hash_kind: "geometry"` (the key is
 absent for byte claims). A geometry claim is never run by the opt-in
 generator execution, which compares bytes; it stays `executed_by_klt: false`.
 
+**Producing the value (issue #5551).** `klt stats --format json` reports the
+same digest as `geometry_digest`, so the supported way to fill
+`--regenerated-hash` for a geometry claim is to run it on the **regenerated**
+stream:
+
+```bash
+klt stats --format json /tmp/scratch/top.gds | jq -r .geometry_digest
+```
+
+See [`docs/cli/stats.md`](stats.md) → "Geometry digest". Two values that look
+like this one are **not** it: the envelope's own
+`provenance.input.content_hash` (a raw-byte SHA-256, which is what
+`hash_kind: "bytes"` compares) and `klt diff`'s `canonical_hash` (a separate
+geometry-level digest with a separate value — substituting it grades
+`stale_artifact`).
+
 **What this does not check.** By default `klt signoff` **never runs**
 `generator`. That holds for file-backed and command-backed evidence alike, and
 it is why `executed_by_klt` is `false`. The regeneration is the attester's own
@@ -1799,7 +1815,10 @@ plus the raw-byte SHA-256) and records the producing KLayout version in
 `status` is `pass` iff all three pass; otherwise the command exits `3` and
 writes no `--output`. `--generator` and `--regenerated-hash` must be given
 together and populate `provenance.regeneration` (`--hash-kind geometry`
-compares the timestamp-independent geometry digest instead of raw bytes).
+compares the timestamp-independent geometry digest instead of raw bytes;
+produce that value with `klt stats --format json <regenerated stream> | jq -r
+.geometry_digest` — **not** `klt diff`'s `canonical_hash`, a different digest,
+see [`docs/cli/stats.md`](stats.md) → "Geometry digest").
 The generator is echoed, never run; the grader reports a hash that differs
 from the committed stream as `stale_artifact`. `--check COMMITTED` re-attests
 and diffs as for items 1/9/10. `--input` is refused with items 1/9/10.
