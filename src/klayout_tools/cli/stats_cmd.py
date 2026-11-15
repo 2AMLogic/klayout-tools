@@ -43,6 +43,8 @@ def _print_text(report: dict) -> None:
     print(f"file: {report['file']}")
     print(f"dbu_um: {report['dbu_um']}")
     print(f"top_cell: {report['top_cell'] if report['top_cell'] is not None else '-'}")
+    digest = report["geometry_digest"]
+    print(f"geometry_digest: {digest if digest is not None else '-'}")
 
     bbox = report["bbox_um"]
     print(
