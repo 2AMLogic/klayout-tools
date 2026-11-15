@@ -837,6 +837,7 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
     """Run ``request`` through the PDK runset and return the ``klt lvs``
     envelope. See this module's docstring; request fields are documented in
     ``docs/cli/lvs.md`` ("klayout-runset")."""
+    from . import env_provenance
     from .lvs import SCHEMA_VERSION, LvsError
 
     layout, reference, deck_file, deck_vars, options = _validate_request(
@@ -920,7 +921,18 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
         **_reference_conversion_echo(
             request["reference"].get("form", "plain-element"), request["reference"]
         ),
-        "layout": request["layout"]["file"],
+        "layout": env_provenance.repo_relative_path(
+            layout, repo_root=env_provenance.repo_root_for(layout)
+        ),
+        # Issue #5666: `layout` is the committable `{path, scope}` envelope,
+        # built from the *resolved* path (the file `environment.layout_sha256`
+        # above hashes) -- the same normalization the curated-deck report
+        # applies (`lvs_report.py`) and the shape `schema_version: 3` /
+        # docs/cli/lvs.md document unconditionally. The bare request echo
+        # crashed `--format text` and left `--check` nothing to resolve.
+        # `reference` stays the request's own verbatim string echo: that is
+        # the documented runset contract (docs/cli/lvs.md), which the text
+        # renderer has always special-cased.
         "reference": request["reference"]["netlist"],
         "top": top or verdict["top"],
         "reference_top": request["reference"].get("top") or verdict["reference_top"],

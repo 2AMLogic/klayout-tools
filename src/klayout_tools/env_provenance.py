@@ -676,7 +676,7 @@ def _assert_no_leaks(report: Mapping[str, Any]) -> None:
             )
 
 
-def render_path_field(entry: Mapping[str, Any] | None) -> str:
+def render_path_field(entry: Mapping[str, Any] | str | None) -> str:
     """Human-readable rendering of one :func:`repo_relative_path` entry.
 
     Shared by :func:`render_text_lines` and any other ``--format text``
@@ -687,7 +687,15 @@ def render_path_field(entry: Mapping[str, Any] | None) -> str:
     renders ``<outside repo>`` (the absolute path is never rendered, even in
     text mode), and anything else (``"absent"``, or a missing/malformed
     entry) renders ``<unresolved>``.
+
+    A bare ``str`` is rendered verbatim (issue #5666): some fields a report
+    legitimately carries as the request's own string echo (a ``klt lvs``
+    ``klayout-runset`` ``reference``; a pre-normalisation committed report's
+    ``layout``), and a schema slip elsewhere must degrade to a
+    less-informative line, never a traceback.
     """
+    if isinstance(entry, str):
+        return entry
     if not entry:
         return "<unresolved>"
     scope = entry.get("scope")
