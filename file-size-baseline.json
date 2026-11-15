@@ -393,15 +393,11 @@
     },
     {
       "path": "src/klayout_tools/gen_pcells/diff_pair.py",
-      "lines": 579
-    },
-    {
-      "path": "src/klayout_tools/gen_pcells/esd_device.py",
-      "lines": 507
+      "lines": 550
     },
     {
       "path": "src/klayout_tools/gen_pcells/mos_array.py",
-      "lines": 843
+      "lines": 813
     },
     {
       "path": "src/klayout_tools/kb.py",

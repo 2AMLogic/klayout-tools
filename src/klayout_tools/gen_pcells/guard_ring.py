@@ -15,6 +15,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import klayout.db as kdb
 
+from ._common_params import declare_cut_and_metal_params
+
 
 def _build_guard_ring_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
     """Build the ``guard_ring`` reference generator's PCell -- a substrate/well
@@ -126,18 +128,7 @@ def _build_guard_ring_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Substrate/well tap drawing layer",
                 default=kdb.LayerInfo(0, 0),
             )
-            self.param(
-                "contact_layer",
-                self.TypeLayer,
-                "Contact drawing layer",
-                default=kdb.LayerInfo(0, 0),
-            )
-            self.param(
-                "metal_layer",
-                self.TypeLayer,
-                "Local routing metal drawing layer",
-                default=kdb.LayerInfo(0, 0),
-            )
+            declare_cut_and_metal_params(self, kdb)
             self.param(
                 "well_layer",
                 self.TypeLayer,
@@ -179,26 +170,6 @@ def _build_guard_ring_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Harness-resolved nwell enclosure of the n-tap guard ring "
                 "(see _PDK_RING_WELL_MARGIN_UM)",
                 default=WELL_ENCLOSURE_MARGIN_UM,
-            )
-            # Fixed drawn side of every cut on contact_layer (issue #2585) --
-            # harness-computed by `_cut_fixed_size_um` from the resolved PDK
-            # family and layer. `0.0` (no upper size bound) leaves the cuts
-            # exactly as laid out; see `gen._clamp_cut_boxes`.
-            self.param(
-                "contact_fixed_size_um",
-                self.TypeDouble,
-                "Fixed drawn side (um) every cut on contact_layer is clamped "
-                "down to on the resolved PDK family -- 0.0 leaves the "
-                "generator's own cut size unchanged",
-                default=0.0,
-            )
-            self.param(
-                "mfg_grid_um",
-                self.TypeDouble,
-                "Manufacturing grid (um) every cut on contact_layer is "
-                "snapped onto (issue #2648) -- 0.0 leaves cut positions "
-                "unchanged",
-                default=0.0,
             )
 
         def display_text_impl(self) -> str:
