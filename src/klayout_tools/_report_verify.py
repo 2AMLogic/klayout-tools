@@ -447,6 +447,18 @@ def diff_verdict_fields(
     determinism. A path exactly matching an entry in ``exclude`` (see
     :data:`VOLATILE_PROVENANCE_PATHS`) is skipped entirely, subtree included.
 
+    ``exclude`` matches by **exact path only** -- lists are walked as literal
+    index strings (``"items.0.run_path"``), so a :data:`LIST_ITEM` wildcard
+    entry (``("items", LIST_ITEM, "run_path")``) could never match anything
+    and is **rejected with :class:`ValueError`** rather than silently ignored
+    (issue #5586: a silently-ignored entry leaves drift reported on a pair a
+    caller believes excluded -- the one direction a verification mode must
+    not fail). A wildcard exclusion belongs on the
+    :func:`strip_path_patterns` side instead, via
+    :func:`build_rerun_result`'s ``committed_for_diff``/``fresh_for_diff``
+    (e.g. ``strip_path_only_keys``), the mechanism every list-walking
+    exclusion in this codebase uses.
+
     Dicts are compared key-by-key (the union of both sides' keys, so a field
     added/removed between the committed and fresh schema surfaces as a
     diff -- see this module's docstring caveat on schema evolution). Lists of
@@ -457,6 +469,16 @@ def diff_verdict_fields(
     misleading index-by-index one. Any other type mismatch (or genuinely
     unequal leaf values) is one diff entry at that path.
     """
+    wildcard_paths = sorted(".".join(path) for path in exclude if LIST_ITEM in path)
+    if wildcard_paths:
+        raise ValueError(
+            "diff_verdict_fields: exclude matches by exact path, so a "
+            f"{LIST_ITEM!r} wildcard entry would be silently ignored; "
+            f"offending path(s): {', '.join(wildcard_paths)}. Wildcard "
+            "exclusion belongs on the strip_path_patterns side "
+            "(build_rerun_result's committed_for_diff/fresh_for_diff, e.g. "
+            "via strip_path_only_keys), not in an exclude set."
+        )
     diffs: list[dict[str, Any]] = []
     _diff_json(committed, fresh, (), exclude, diffs)
     return diffs
