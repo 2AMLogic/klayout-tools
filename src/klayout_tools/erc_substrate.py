@@ -50,11 +50,15 @@ REASON_SUBSTRATE_ISOLATION_UNDECIDABLE = "substrate_isolation_undecidable"
 #: ``missing`` entry when the spec declares no ``ties[]`` at all.
 NO_TIES_MISSING = "ties[] entries declaring the substrate/well tap geometry"
 
+#: Why the substrate check cannot be evaluated for a named PDK family whose
+#: extraction deck declares no ``substrate_isolation`` layer. Only reachable
+#: for a family whose built-in deck leaves ``substrate_isolation`` unset --
+#: :func:`isolation_missing` returns ``[]`` from the deck first -- so a deck
+#: that gains the layer must lose its entry here. ``sg13g2`` / ``sg13cmos5l``
+#: were dropped when the IHP decks declared nBuLay (#5345, #5359) and sky130
+#: never had one (#5344); ``test_family_missing_has_no_deck_declared_family``
+#: fails if a stale entry comes back.
 _FAMILY_MISSING: dict[str, str] = {
-    "sg13g2": "nbulay isolation layer/datatype not declared as substrate_isolation "
-    "in the sg13g2 extraction deck",
-    "sg13cmos5l": "nbulay isolation layer/datatype not declared as "
-    "substrate_isolation in the sg13cmos5l extraction deck",
     "asap7": "no drawn substrate tap geometry to join through (asap7 cells draw "
     "no substrate or well tie)",
 }
