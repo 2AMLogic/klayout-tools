@@ -84,6 +84,14 @@ the same way.
   a SHA-256 over the normalized content. **Equal `canonical_hash` with
   different `stream_sha256` means a timestamp/order-only difference** (the run
   exits `0`, `stream_identical` is `false`).
+- **`canonical_hash` is not the signoff geometry digest (issue #5551).** It is
+  this command's own normalization, meaningful only when compared with another
+  `canonical_hash` from `klt diff`. It is a *different* value from the digest
+  `klt signoff --attest 2 --regenerated-hash ... --hash-kind geometry` is
+  graded against (and carries no `sha256:` prefix), so feeding it to that flag
+  grades `stale_artifact`. Use `klt stats --format json | jq -r
+  .geometry_digest` for that — see [`docs/cli/stats.md`](stats.md) → "Geometry
+  digest".
 - Shape items are `box` (`bbox`), `polygon` (`hull`, `holes`), `path`
   (`width`, `bgn_ext`, `end_ext`, `round`, `points`) or `text` (`string`, `x`,
   `y`, `rotation`, `mirror`), all in database units. Instance items carry
