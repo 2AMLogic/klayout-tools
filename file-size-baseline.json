@@ -865,7 +865,7 @@
     },
     {
       "path": "tests/test_extract.py",
-      "lines": 27794
+      "lines": 26748
     },
     {
       "path": "tests/test_extract_resistance_graph.py",
