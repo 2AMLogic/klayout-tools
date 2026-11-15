@@ -16,7 +16,11 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     import klayout.db as kdb
 
-from ._common_params import declare_cut_and_metal_params
+from ._common_params import (
+    declare_cut_and_metal_params,
+    declare_mos_stack_params,
+    declare_ring_implant_params,
+)
 
 
 def _declare_flavor_and_width_params(pcell: Any) -> None:
@@ -234,18 +238,7 @@ def _build_esd_device_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 default=False,
             )
             _declare_flavor_and_width_params(self)
-            self.param(
-                "active_layer",
-                self.TypeLayer,
-                "Active/diffusion drawing layer",
-                default=kdb.LayerInfo(0, 0),
-            )
-            self.param(
-                "poly_layer",
-                self.TypeLayer,
-                "Poly gate drawing layer",
-                default=kdb.LayerInfo(0, 0),
-            )
+            declare_mos_stack_params(self, kdb)
             declare_cut_and_metal_params(self, kdb)
             self.param(
                 "tap_layer",
@@ -281,34 +274,6 @@ def _build_esd_device_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             )
             _declare_flavor_mark_params(self, kdb, WELL_ENCLOSURE_MARGIN_UM)
             self.param(
-                "contact_gate_offset_um",
-                self.TypeDouble,
-                "Harness-resolved extra S/D-contact-to-gate offset floor "
-                "(see _PDK_CONTACT_GATE_EXTRA_OFFSET_UM)",
-                default=0.0,
-            )
-            self.param(
-                "bottom_endcap_um",
-                self.TypeDouble,
-                "Harness-resolved gate-stripe bottom-edge endcap extension "
-                "(see _PDK_GATE_BOTTOM_ENDCAP_UM)",
-                default=0.0,
-            )
-            self.param(
-                "top_endcap_um",
-                self.TypeDouble,
-                "Harness-resolved gate-stripe top-edge endcap neck "
-                "(see _PDK_GATE_TOP_ENDCAP_UM)",
-                default=0.0,
-            )
-            self.param(
-                "sd_implant_layer",
-                self.TypeLayer,
-                "Source/drain implant drawing layer (only used when "
-                "sd_implant_present)",
-                default=kdb.LayerInfo(0, 0),
-            )
-            self.param(
                 "sd_implant_present",
                 self.TypeBoolean,
                 "Whether sd_implant_layer is a real layer this PDK family "
@@ -323,30 +288,7 @@ def _build_esd_device_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "sd_implant_present)",
                 default=0.0,
             )
-            self.param(
-                "ring_implant_layer",
-                self.TypeLayer,
-                "Tap-ring implant drawing layer, tracking the tap ring's "
-                "own band with ring_implant_margin_um of extension beyond "
-                "every edge of it (only used when add_guard_ring and "
-                "ring_implant_present)",
-                default=kdb.LayerInfo(0, 0),
-            )
-            self.param(
-                "ring_implant_present",
-                self.TypeBoolean,
-                "Whether the resolved PDK needs an implant mask to recognise "
-                "the tap ring's own shape (see _ring_tap_implant_layer)",
-                default=False,
-            )
-            self.param(
-                "ring_implant_margin_um",
-                self.TypeDouble,
-                "Harness-resolved margin the ring implant extends beyond the "
-                "ring's own band on every edge (only used when "
-                "ring_implant_present)",
-                default=0.0,
-            )
+            declare_ring_implant_params(self, kdb)
 
         def display_text_impl(self) -> str:
             return (

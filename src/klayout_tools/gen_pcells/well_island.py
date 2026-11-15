@@ -17,7 +17,11 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import klayout.db as kdb
 
-from ._common_params import declare_cut_and_metal_params
+from ._common_params import (
+    declare_cut_and_metal_params,
+    declare_metal_label_present,
+    declare_tap_and_well_layers,
+)
 
 
 def _build_well_island_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
@@ -179,12 +183,7 @@ def _build_well_island_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "net is equipotential and is not isolated from",
                 default=[],
             )
-            self.param(
-                "tap_layer",
-                self.TypeLayer,
-                "Substrate/well tap drawing layer",
-                default=kdb.LayerInfo(0, 0),
-            )
+            declare_tap_and_well_layers(self, kdb)
             declare_cut_and_metal_params(self, kdb)
             self.param(
                 "metal_label_layer",
@@ -193,18 +192,7 @@ def _build_well_island_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "metal_label_present)",
                 default=kdb.LayerInfo(0, 0),
             )
-            self.param(
-                "metal_label_present",
-                self.TypeBoolean,
-                "Whether metal_label_layer is a real label layer for the resolved PDK",
-                default=False,
-            )
-            self.param(
-                "well_layer",
-                self.TypeLayer,
-                "Well drawing layer (only used when well_present)",
-                default=kdb.LayerInfo(0, 0),
-            )
+            declare_metal_label_present(self)
             self.param(
                 "well_present",
                 self.TypeBoolean,

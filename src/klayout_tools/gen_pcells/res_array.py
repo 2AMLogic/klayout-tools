@@ -15,7 +15,10 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     import klayout.db as kdb
 
-from ._common_params import declare_cut_and_metal_params
+from ._common_params import (
+    declare_cut_and_metal_params,
+    declare_dummy_marker_params,
+)
 
 
 def _pcell_params(pcell: object, *names: str) -> list:
@@ -237,13 +240,7 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "dummy_present)",
                 default=kdb.LayerInfo(0, 0),
             )
-            self.param(
-                "dummy_present",
-                self.TypeBoolean,
-                "Whether dummy_layer is a real layer this PDK's extraction "
-                "deck declares (see ExtractionDeck.dummy)",
-                default=False,
-            )
+            declare_dummy_marker_params(self)
             # `metal_level`'s own per-level geometry floors (issue #1639) --
             # harness-computed from the resolved PDK family/level exactly
             # like `cap_array`'s own `cap_top_via_min_w_um`/friends. `0.0`

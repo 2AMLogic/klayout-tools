@@ -15,7 +15,11 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import klayout.db as kdb
 
-from ._common_params import declare_cut_and_metal_params
+from ._common_params import (
+    declare_cut_and_metal_params,
+    declare_dummy_marker_params,
+    declare_well_present,
+)
 
 
 def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
@@ -149,12 +153,7 @@ def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Shared base well drawing layer (only used when well_present)",
                 default=kdb.LayerInfo(0, 0),
             )
-            self.param(
-                "well_present",
-                self.TypeBoolean,
-                "Whether well_layer is a real, DRC-checked layer for the resolved PDK",
-                default=False,
-            )
+            declare_well_present(self)
             self.param(
                 "ring_implant_layer",
                 self.TypeLayer,
@@ -222,13 +221,7 @@ def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "when dummy_present)",
                 default=kdb.LayerInfo(0, 0),
             )
-            self.param(
-                "dummy_present",
-                self.TypeBoolean,
-                "Whether dummy_layer is a real layer this PDK's extraction "
-                "deck declares (see ExtractionDeck.dummy)",
-                default=False,
-            )
+            declare_dummy_marker_params(self)
 
         def display_text_impl(self) -> str:
             return f"bjt_array({self.rows}x{self.cols},e={self.emitter_um})"

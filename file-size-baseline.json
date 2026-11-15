@@ -392,12 +392,8 @@
       "lines": 1019
     },
     {
-      "path": "src/klayout_tools/gen_pcells/diff_pair.py",
-      "lines": 550
-    },
-    {
       "path": "src/klayout_tools/gen_pcells/mos_array.py",
-      "lines": 813
+      "lines": 658
     },
     {
       "path": "src/klayout_tools/kb.py",

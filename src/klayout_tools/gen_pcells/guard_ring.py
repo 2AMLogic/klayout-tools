@@ -15,7 +15,12 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import klayout.db as kdb
 
-from ._common_params import declare_cut_and_metal_params
+from ._common_params import (
+    declare_cut_and_metal_params,
+    declare_ring_well_margin,
+    declare_tap_and_well_layers,
+    declare_well_present,
+)
 
 
 def _build_guard_ring_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
@@ -122,25 +127,9 @@ def _build_guard_ring_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Enclose the ring in a well tie when the resolved PDK checks one",
                 default=True,
             )
-            self.param(
-                "tap_layer",
-                self.TypeLayer,
-                "Substrate/well tap drawing layer",
-                default=kdb.LayerInfo(0, 0),
-            )
+            declare_tap_and_well_layers(self, kdb)
             declare_cut_and_metal_params(self, kdb)
-            self.param(
-                "well_layer",
-                self.TypeLayer,
-                "Well drawing layer (only used when well_present)",
-                default=kdb.LayerInfo(0, 0),
-            )
-            self.param(
-                "well_present",
-                self.TypeBoolean,
-                "Whether well_layer is a real, DRC-checked layer for the resolved PDK",
-                default=False,
-            )
+            declare_well_present(self)
             self.param(
                 "ring_implant_layer",
                 self.TypeLayer,
@@ -164,13 +153,7 @@ def _build_guard_ring_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "ring_implant_present)",
                 default=0.0,
             )
-            self.param(
-                "ring_well_margin_um",
-                self.TypeDouble,
-                "Harness-resolved nwell enclosure of the n-tap guard ring "
-                "(see _PDK_RING_WELL_MARGIN_UM)",
-                default=WELL_ENCLOSURE_MARGIN_UM,
-            )
+            declare_ring_well_margin(self, WELL_ENCLOSURE_MARGIN_UM)
 
         def display_text_impl(self) -> str:
             return f"guard_ring({self.inner_width_um}x{self.inner_height_um})"
