@@ -14,6 +14,8 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+## Unreleased
+
 - **`klt sim` refuses `measurements[].transfer` declared beside `noise`**
   (#5695, 2026-11-14): the mutually exclusive measurement forms each carried a
   hand-maintained list of "every *other* exclusive form", and `transfer`'s
@@ -26,6 +28,8 @@ not `klt --version`, if you need to detect this kind of drift. See
   `noise` now fails validation with the usual "alternative forms of a
   measurement" error instead of running; every other refusal and message is
   byte-identical. `klt sim`'s `schema_version` is unaffected.
+
+## 0.9.2 (2026-11-14)
 
 - **`klt sim`'s per-measurement `min`/`max` skip an infinite value** (#5580,
   2026-11-14): the corner-matrix extremes in the `measurements[]` rollup are
