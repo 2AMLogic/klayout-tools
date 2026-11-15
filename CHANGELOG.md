@@ -14,6 +14,25 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Every batch job exports a fallback `HOME`, and `klt signoff`'s generator
+  path reports an envelope for an unpinnable client version** (#5654,
+  2026-11-14): the five `--backend batch` job assemblers (`klt extract`,
+  `klt netlist`, `klt place-and-route`, `klt signoff --generator`, `klt sim`'s
+  command jobs) each built the same job shell by hand and had drifted. Two
+  divergences were user-visible. (1) The fleet runner can leave `$HOME` unset,
+  which killed xschem's Tcl init outright; the fix had landed in the
+  `klt netlist` job only, and now applies to all five, so a runner without
+  `$HOME` no longer breaks a tool that reads it. (2) When the submitting
+  client's own `klt` version cannot be pinned against the runner, the
+  preflight raises an error that `klt extract`, `klt netlist` and
+  `klt place-and-route` each translated into their own class -- but
+  `klt signoff`'s generator path did not, and nothing on that path caught it,
+  so it escaped as a Python traceback instead of
+  [`docs/json-contract.md`](docs/json-contract.md)'s error envelope. It is now
+  a `package_failed` generator outcome in the signoff report. The generated
+  job command is otherwise byte-identical for all five backends, and every
+  job's wall-clock cap is unchanged (`klt place-and-route`'s stays exactly
+  `request.batch.job_timeout_s`, as documented). No `schema_version` changes.
 - **`klt signoff --attest 9`: `documented_argv` records a validation-only cold
   start** (#5463, 2026-11-13): an item-9 `cold_start` (top-level or per-bench)
   may declare `documented_argv`, the full invocation that reproduces a bench

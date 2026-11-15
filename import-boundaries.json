@@ -1925,12 +1925,6 @@
     },
     {
       "consumer": "klayout_tools.netlist_batch",
-      "exporter": "klayout_tools._provenance",
-      "symbol": "_klt_version",
-      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
-    },
-    {
-      "consumer": "klayout_tools.netlist_batch",
       "exporter": "klayout_tools.sim_batch",
       "symbol": "_batch_environment",
       "reason": "Issue #3182: the netlist batch backend reuses sim_batch's job-contract helpers as they are (one transport, one config resolver, one preflight)."
@@ -1951,12 +1945,6 @@
       "consumer": "klayout_tools.netlist_batch",
       "exporter": "klayout_tools.sim_batch",
       "symbol": "_read_stderr_envelope",
-      "reason": "Issue #3182: the netlist batch backend reuses sim_batch's job-contract helpers as they are (one transport, one config resolver, one preflight)."
-    },
-    {
-      "consumer": "klayout_tools.netlist_batch",
-      "exporter": "klayout_tools.sim_batch",
-      "symbol": "_runner_preflight_script",
       "reason": "Issue #3182: the netlist batch backend reuses sim_batch's job-contract helpers as they are (one transport, one config resolver, one preflight)."
     },
     {
@@ -2076,12 +2064,6 @@
     {
       "consumer": "klayout_tools.place_and_route_batch",
       "exporter": "klayout_tools.sim_batch",
-      "symbol": "_runner_preflight_script",
-      "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
-    },
-    {
-      "consumer": "klayout_tools.place_and_route_batch",
-      "exporter": "klayout_tools.sim_batch",
       "symbol": "_status_exit_code",
       "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
     },
@@ -2104,18 +2086,6 @@
       "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
     },
     {
-      "consumer": "klayout_tools.place_and_route_batch",
-      "exporter": "klayout_tools._provenance",
-      "symbol": "_klt_version",
-      "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
-    },
-    {
-      "consumer": "klayout_tools.signoff_generator_batch",
-      "exporter": "klayout_tools._provenance",
-      "symbol": "_klt_version",
-      "reason": "Issue #3289: the signoff generator adapter reuses the batch job-contract helpers as they are (one transport, one config resolver, one preflight), as klayout_tools.netlist_batch does."
-    },
-    {
       "consumer": "klayout_tools.signoff_generator_batch",
       "exporter": "klayout_tools.netlist_batch",
       "symbol": "_tracked_files",
@@ -2125,12 +2095,6 @@
       "consumer": "klayout_tools.signoff_generator_batch",
       "exporter": "klayout_tools.netlist_batch",
       "symbol": "_select_files",
-      "reason": "Issue #3289: the signoff generator adapter reuses the batch job-contract helpers as they are (one transport, one config resolver, one preflight), as klayout_tools.netlist_batch does."
-    },
-    {
-      "consumer": "klayout_tools.signoff_generator_batch",
-      "exporter": "klayout_tools.sim_batch",
-      "symbol": "_runner_preflight_script",
       "reason": "Issue #3289: the signoff generator adapter reuses the batch job-contract helpers as they are (one transport, one config resolver, one preflight), as klayout_tools.netlist_batch does."
     },
     {
@@ -2238,20 +2202,8 @@
     {
       "consumer": "klayout_tools.extract_batch",
       "exporter": "klayout_tools.sim_batch",
-      "symbol": "_runner_preflight_script",
-      "reason": "Issue #4613: `klt extract --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
-    },
-    {
-      "consumer": "klayout_tools.extract_batch",
-      "exporter": "klayout_tools.sim_batch",
       "symbol": "_status_exit_code",
       "reason": "Issue #4613: `klt extract --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
-    },
-    {
-      "consumer": "klayout_tools.extract_batch",
-      "exporter": "klayout_tools._provenance",
-      "symbol": "_klt_version",
-      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
     },
     {
       "consumer": "klayout_tools.route_labelled",
@@ -2342,6 +2294,12 @@
       "exporter": "klayout_tools.sim_batch",
       "symbol": "_default_batch_job_timeout_s",
       "reason": "Issue #5238: extract_batch and netlist_batch each wrapped this sim_batch timeout formula; the shared job_timeout_seconds helper now owns that one call so the backends cannot drift. Promote to a public name when sim_batch is next split."
+    },
+    {
+      "consumer": "klayout_tools._batch_common",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_runner_preflight_script",
+      "reason": "Issue #5654: all five batch backends wrapped this one preflight call in their own job-command assembler, and had already drifted (one of the five never translated its SimError). build_job_command now owns the single call, retiring the extract/netlist/place-and-route/signoff-generator grants for it. Promote to a public name when sim_batch is next split."
     },
     {
       "consumer": "klayout_tools.pex_dry_run",
