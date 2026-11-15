@@ -34,6 +34,8 @@ not `klt --version`, if you need to detect this kind of drift. See
   job's wall-clock cap is unchanged (`klt place-and-route`'s stays exactly
   `request.batch.job_timeout_s`, as documented). No `schema_version` changes.
 
+## 0.9.2 (2026-11-14)
+
 - **`klt sim`'s per-measurement `min`/`max` skip an infinite value** (#5580,
   2026-11-14): the corner-matrix extremes in the `measurements[]` rollup are
   documented as the extremes over *finite* numeric values, but the predicate
