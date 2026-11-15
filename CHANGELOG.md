@@ -14,6 +14,43 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Every batch job exports a fallback `HOME`, and `klt signoff`'s generator
+  path reports an envelope for an unpinnable client version** (#5654,
+  2026-11-14): the five `--backend batch` job assemblers (`klt extract`,
+  `klt netlist`, `klt place-and-route`, `klt signoff --generator`, `klt sim`'s
+  command jobs) each built the same job shell by hand and had drifted. Two
+  divergences were user-visible. (1) The fleet runner can leave `$HOME` unset,
+  which killed xschem's Tcl init outright; the fix had landed in the
+  `klt netlist` job only, and now applies to all five, so a runner without
+  `$HOME` no longer breaks a tool that reads it. (2) When the submitting
+  client's own `klt` version cannot be pinned against the runner, the
+  preflight raises an error that `klt extract`, `klt netlist` and
+  `klt place-and-route` each translated into their own class -- but
+  `klt signoff`'s generator path did not, and nothing on that path caught it,
+  so it escaped as a Python traceback instead of
+  [`docs/json-contract.md`](docs/json-contract.md)'s error envelope. It is now
+  a `package_failed` generator outcome in the signoff report. The generated
+  job command is otherwise byte-identical for all five backends, and every
+  job's wall-clock cap is unchanged (`klt place-and-route`'s stays exactly
+  `request.batch.job_timeout_s`, as documented). No `schema_version` changes.
+
+## 0.9.2 (2026-11-14)
+
+- **`klt sim`'s per-measurement `min`/`max` skip an infinite value** (#5580,
+  2026-11-14): the corner-matrix extremes in the `measurements[]` rollup are
+  documented as the extremes over *finite* numeric values, but the predicate
+  behind them tested finiteness with `value == value` -- which rejects NaN and
+  accepts `+/-inf`. A corner whose measurement came back infinite could
+  therefore be reported as `min` or `max` (and would always win, being an
+  extreme by construction), masking the real worst finite corner. The rollup
+  now uses the shared `_jsonnum.is_finite_number` predicate, so booleans, NaN
+  **and** infinities are all skipped alike, and a measurement whose every
+  corner is infinite reports `min`/`max` as `null` rather than naming one.
+  `worst_case` is a margin pointer and is unchanged. `klt sim-merge` shares the
+  rollup and gets the same fix. Report output can change for a run with a
+  non-finite measurement; `klt sim`'s `schema_version` is unaffected (the field
+  shape is the same).
+
 - **`klt stats` reports a `geometry_digest`** (#5551, 2026-11-13): the
   timestamp- and record-order-independent digest of a stream's decoded
   geometry is now a top-level field of `klt stats --format json` (and a
@@ -54,6 +91,44 @@ not `klt --version`, if you need to detect this kind of drift. See
   half-converged. Follow-up to #4532, whose docs-only fix covered the
   mint-item-10-first order that an edit to an inventoried file leaves no tree
   for.
+
+- **`klt sim`: `monte_carlo.instances` now supports ihp-sg13g2, gating by the
+  `mm_ok` instance parameter** (#5487, 2026-11-13): per-instance mismatch
+  attribution was refused for sg13g2 ("needs models.pdk naming a PDK with a
+  known mismatch switch"), because the only gating mechanism was a wrapper
+  subcircuit shadowing a model-level `.param` and sg13g2 has no such switch —
+  its `*_mismatch.lib` device subcircuits default `mm_ok=1` *inside* each
+  subcircuit, which shadows any enclosing scope. An unselected sg13g2 instance
+  is now gated by rewriting its own instance line to carry `mm_ok=0` (an
+  existing `mm_ok=` is replaced, not duplicated; `+` continuations fold in; an
+  end-of-line `$`/`;`/`//` comment is separated from the element first and
+  re-attached after, so the parameter never lands inside a comment, where
+  ngspice would discard it). No wrapper is generated, so **hierarchical probe
+  names are unchanged** for sg13g2. Both readers fold a deck the way
+  ngspice-47 measurably does: `//` ends an element anywhere on the line (no
+  preceding whitespace needed, unlike `$`), and a blank, `*`, `$`-only or
+  `//`-only line between an element and its `+` continuation does **not**
+  break the element, while a `;`-only line does — the `+` after that one
+  attaches to the comment and is discarded with no warning, so klt ends the
+  element there too. Each of those lines is re-emitted after the rewritten
+  element rather than deleted. A comment-blind reader wrote `mm_ok=0` past a
+  `//`, or attached a continuation's `mm_ok=1` to a `*`/blank line so it won
+  — both reporting `randomised: false` for an instance ngspice kept
+  randomised, and both measured end to end here (#5498). klt writes
+  `mm_ok=0` only onto an instance whose subcircuit
+  definition it has read and found to declare the parameter — read from the
+  netlist's `.include` closure and the selected model-library sections, never
+  from a device-name list — and refuses an unselected instance whose
+  subcircuit does not, before any corner is dispatched: ngspice silently
+  accepts `mm_ok=0` on a user subcircuit declaring some *other* parameter and
+  leaves the devices inside randomised, which would have made klt report
+  `randomised: false` for an instance that was still randomised. Additive:
+  `environment.monte_carlo.instance_mismatch` keeps its shape, with
+  `"switch": "mm_ok"`; sky130 and gf180mcu output, refusals and wrapper
+  behaviour are unchanged, and there is no `schema_version` bump. Measured on
+  ngspice-47 against a real IHP-Open-PDK install (gated `stddev` exactly `0.0`
+  vs `8.136e-3` V randomised; negative control identical to a plain `mos_tt`
+  run). See `docs/cli/sim.md` → "Per-instance mismatch selection".
 
 - **`klt signoff` reads a gzip-compressed evidence file** (#5452,
   2026-11-13): a `klt sim --report-out report.json.gz` report — the compact

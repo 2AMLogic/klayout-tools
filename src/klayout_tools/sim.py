@@ -105,6 +105,7 @@ from . import (
     sim_energy,
     sim_eye,
     sim_injected,
+    sim_mismatch_declarations,
     sim_mismatch_gate,
     sim_noise,
     sim_op_args,
@@ -142,11 +143,11 @@ from . import sim_adapt as sim_adapt
 from . import sim_analysis_overrides as _sao
 from . import sim_bin_range as sim_bin_range
 from . import sim_cause as sim_cause
+from . import sim_environment_report as sim_env_report
 from . import sim_op_check as sim_op_check
 from . import sim_peak_rss as sim_peak_rss
 from . import sim_provenance as sim_provenance
 from . import sim_staging as sim_staging
-from ._batch_common import apply_unrun_signal
 from ._jsonnum import is_int, is_number
 from ._paths import (
     _load_request_json,
@@ -3602,6 +3603,9 @@ def _prepare_sim_request(
         models.get("pdk"),
         backend=backend,
         explicit_points=explicit_points_wire is not None,
+        gate_context=sim_mismatch_declarations.gate_context(
+            models, request_dir, corner_points, _resolve_lib_ref
+        ),
     )
 
     # Issue #3919: `.subckt` override of the include closure. Applied on top of
@@ -4462,25 +4466,16 @@ def _run_sim_corners(
     )
     environment.update(_threads_environment(effective_threads))
     environment.update(_corner_coverage_environment(request, corner_points))
-    # Issue #2799: `netlist_sha256` covers only the top-level file, so also
-    # pin the resolved `.include`/`.inc` closure (same resolver the
-    # off-host backends stage with). Additive; an unresolvable closure is
-    # disclosed rather than failing the report.
-    try:
-        environment["netlist_closure"] = sim_staging.netlist_closure(
+    environment.update(
+        sim_env_report.netlist_closure_environment(
             request, netlist_path, repo_root=repo_root
         )
-    except sim_staging.IncludeStagingError as exc:
-        environment["netlist_closure_error"] = str(exc)
+    )
     # Additive/optional (issue #3111): the declared solver options, verbatim,
     # so the setting is part of the report's evidence.
     environment.update({"ngspice_options": ngspice_options} if ngspice_options else {})
     _stamp_netlist_identity(environment, netlist_identity, netlist_identity_error)
-    if netlist_source is not None:
-        # Additive/optional: only present when the request declares it, so
-        # existing consumers of a request that omits netlist_source see an
-        # unchanged environment block (see docs/cli/sim.md).
-        environment["netlist_source"] = netlist_source
+    environment.update(sim_env_report.netlist_source_environment(netlist_source))
     # Additive/optional, one key each and only when the request declared that
     # kind of input: `osdi_preload` (issue #2513) and `corner_section_libs`
     # (issue #2522 -- `models_lib_sha256` alone no longer pins "which models
@@ -4521,18 +4516,18 @@ def _run_sim_corners(
             repo_root=repo_root,
         )
     )
-    if remote_environment is not None:
-        # Additive/optional (`remote`/`batch` only): docs/cli/sim.md.
-        environment["remote"] = apply_unrun_signal(
+    environment.update(
+        sim_env_report.remote_entry_environment(
             remote_environment,
-            corners_lost,
-            artifacts_dir,
-            checkpoint_path if checkpoint_retained else None,
+            corners_lost=corners_lost,
+            artifacts_dir=artifacts_dir,
+            checkpoint_path=checkpoint_path if checkpoint_retained else None,
         )
+    )
     apply_engine_host(
         environment, backend=backend, client_ngspice_binary=ngspice_binary
     )
-    environment["backend"] = backend_provenance
+    environment.update(sim_env_report.backend_environment(backend_provenance))
     # Issue #2977: additive, only when declared; the schedule as applied (skew
     # and transition times resolved, PWL points included) -- see docs/cli/sim.md.
     environment.update(
@@ -4542,62 +4537,31 @@ def _run_sim_corners(
     # `netlist_overrides` -- see docs/cli/sim.md.
     environment.update(_netlist_overrides_environment(netlist_overrides_report))
     environment.update(resolved.adapt_environment)
-    if monte_carlo_info is not None:
-        # Additive/optional: only present when the request declares
-        # `monte_carlo` -- the seed contract's request-level echo, per
-        # docs/cli/sim.md's "Monte Carlo" section. Per-sample seed values
-        # live on each corner (`corners[].monte_carlo`), not here.
-        environment["monte_carlo"] = monte_carlo_info
+    environment.update(sim_env_report.monte_carlo_environment(monte_carlo_info))
     # Additive/optional (issue #2973): the resolved retry policy, only when
     # `options.retry_on_convergence_error` opted in.
     environment.update(_convergence_retry_environment(convergence_retry))
-    if budget_s is not None:
-        # Additive/optional: only present when the request declares
-        # `options.wall_clock_budget_s` (or `--budget-s` overrides it) --
-        # see `run_sim`'s docstring and docs/cli/sim.md's "Wall-clock
-        # budget" section. `exceeded`/`corners_skipped` are always reported
-        # here, never left for a caller to infer from scanning
-        # `corners[].diagnostics` itself.
-        environment["budget"] = {
-            "wall_clock_budget_s": budget_s,
-            "elapsed_s": round(time.monotonic() - sweep_started, 3),
-            "exceeded": budget_exceeded,
-            "corners_skipped": corners_skipped,
-        }
-    if orphaned:
-        # Additive/optional: only present when the always-on orphan check
-        # (see `initial_ppid` above) actually fired -- reported for the
-        # benefit of a later `--resume` invocation inspecting this report;
-        # the process that would have read it live is, by definition, the
-        # one that died.
-        environment["orphaned"] = True
-    if preflight_warning is not None:
-        # Additive/optional: only present when the coarse, pre-grid budget
-        # preflight had something to say (issue #1686, third acceptance
-        # criterion) -- absent for the common case (an `options.timeout_s`
-        # that looks plausible for the declared `tran` window), exactly
-        # like `orphaned` above. Advisory only -- never blocks the sweep.
-        environment["timeout_preflight_warning"] = preflight_warning
-    if probe_result is not None:
-        # Additive/optional: only present when `fail_fast_probe`/
-        # `options.fail_fast_probe` opted in *and* the probe actually ran
-        # and came back conclusive (issue #1694) -- reports the measured
-        # rate/estimate regardless of whether it triggered an abort, so a
-        # caller can see how close a passing sweep came to the margin, not
-        # just learn about it after the fact. See
-        # docs/design/sim-corner-reached-s.md and docs/cli/sim.md's
-        # "Timeout-budget preflight" section.
-        environment["fail_fast_probe"] = probe_result
-    if resume:
-        # Additive/optional: only present when `options.resume`/`--resume`
-        # was requested -- see `run_sim`'s docstring.
-        environment["resume"] = {
-            "resumed_corners": len(pre_completed),
-            "checkpoint_path": env_provenance.repo_relative_path(
-                checkpoint_path, repo_root=repo_root
-            ),
-            "checkpoint_retained": checkpoint_retained,
-        }
+    environment.update(
+        sim_env_report.budget_environment(
+            budget_s,
+            elapsed_s=round(time.monotonic() - sweep_started, 3),
+            exceeded=budget_exceeded,
+            corners_skipped=corners_skipped,
+        )
+    )
+    # `orphaned` reflects the always-on orphan check (see `initial_ppid` above).
+    environment.update(sim_env_report.orphaned_environment(orphaned))
+    environment.update(sim_env_report.timeout_preflight_environment(preflight_warning))
+    environment.update(sim_env_report.fail_fast_probe_environment(probe_result))
+    environment.update(
+        sim_env_report.resume_environment(
+            resume,
+            resumed_corners=len(pre_completed),
+            checkpoint_path=checkpoint_path,
+            checkpoint_retained=checkpoint_retained,
+            repo_root=repo_root,
+        )
+    )
 
     _attach_timeout_budget_hint(environment, corners, timeout_s)
 
@@ -5522,41 +5486,21 @@ def _maybe_gate_instances(
     *,
     backend: str,
     explicit_points: bool,
+    gate_context: tuple[Any, ...] = (),
 ) -> tuple[str, dict[str, Any] | None]:
     """Apply ``request.monte_carlo.instances`` when present (issue #2995):
-    returns ``(netlist_to_dispatch, monte_carlo_info)``, with the gating
-    report attached as ``instance_mismatch``; unchanged when absent."""
-    if mc_spec is None or "instances" not in mc_spec:
-        return netlist_path, monte_carlo_info
-    gated_path, gating = _apply_mismatch_instance_gating(
-        netlist_path,
-        mc_spec,
-        monte_carlo_info,
-        pdk,
-        backend=backend,
-        explicit_points=explicit_points,
-    )
-    if monte_carlo_info is not None:
-        monte_carlo_info = {**monte_carlo_info, "instance_mismatch": gating}
-    return gated_path, monte_carlo_info
-
-
-def _apply_mismatch_instance_gating(
-    netlist_path: str,
-    mc_spec: dict[str, Any],
-    monte_carlo_info: dict[str, Any] | None,
-    pdk: str | None,
-    *,
-    backend: str,
-    explicit_points: bool,
-) -> tuple[str, dict[str, Any]]:
-    """Resolve ``request.monte_carlo.instances`` (issue #2995): validate it,
-    and write a gated copy of the netlist in which every instance not
-    selected has the PDK's mismatch switch shadowed to ``0``. Returns
-    ``(gated_netlist_path, report)``; raises :class:`SimError` for anything
-    unsupported, before any corner is dispatched."""
+    dispatch a gated copy of the netlist in which every instance not selected
+    has its local mismatch switched off, by whichever mechanism the PDK family
+    uses -- a shadowed model-level ``.param`` inside a generated wrapper
+    subcircuit, or ``<param>=0`` on the instance line itself (#5487; see
+    :mod:`klayout_tools.sim_mismatch_gate`). Returns ``(netlist_to_dispatch,
+    monte_carlo_info)`` with the gating report attached as
+    ``instance_mismatch``, unchanged when absent; raises :class:`SimError` for
+    anything unsupported, before any corner is dispatched."""
     import atexit
 
+    if mc_spec is None or "instances" not in mc_spec:
+        return netlist_path, monte_carlo_info
     if backend in _OFFHOST_BACKENDS or explicit_points:
         raise SimError(
             "request.monte_carlo.instances is only supported on local "
@@ -5571,8 +5515,9 @@ def _apply_mismatch_instance_gating(
         )
     family = pdk_variant_family(pdk) if pdk else None
     switch = sim_mismatch_gate.MISMATCH_SWITCH.get(family or "")
-    if switch is None:
-        known_pdks = sorted(sim_mismatch_gate.MISMATCH_SWITCH)
+    instance_param = sim_mismatch_gate.MISMATCH_INSTANCE_PARAM.get(family or "")
+    if switch is None and instance_param is None:
+        known_pdks = sim_mismatch_gate.MISMATCH_GATED_FAMILIES
         raise SimError(
             "request.monte_carlo.instances needs models.pdk naming a PDK with "
             f"a known mismatch switch ({', '.join(known_pdks)}); got {pdk!r}"
@@ -5583,7 +5528,12 @@ def _apply_mismatch_instance_gating(
         )
         with open(netlist_path, encoding="utf-8", errors="surrogateescape") as fh:
             text = fh.read()
-        gated, rows = sim_mismatch_gate.gate_netlist(text, include, exclude, switch)
+        declared = sim_mismatch_declarations.collect(
+            netlist_path, instance_param, *gate_context
+        )
+        gated, rows = sim_mismatch_gate.gate_netlist(
+            text, include, exclude, switch, instance_param, declared
+        )
     except (sim_mismatch_gate.GateError, OSError) as exc:
         raise SimError(str(exc)) from exc
     base = os.path.dirname(os.path.abspath(netlist_path))
@@ -5596,14 +5546,17 @@ def _apply_mismatch_instance_gating(
     with open(gated_path, "w", encoding="utf-8", errors="surrogateescape") as fh:
         fh.write(gated)
     report = {
-        "switch": switch,
+        # Whichever gate this run used: the `.param`, or the instance parameter.
+        "switch": switch or instance_param,
         "include": include,
         "exclude": exclude,
         "instances": rows,
         # All excluded: the run must equal the mismatch-off run (negative control).
         "negative_control": not any(r["randomised"] for r in rows),
     }
-    return gated_path, report
+    if monte_carlo_info is not None:
+        monte_carlo_info = {**monte_carlo_info, "instance_mismatch": report}
+    return gated_path, monte_carlo_info
 
 
 def _netlist_overrides_environment(report: Any) -> dict[str, Any]:
