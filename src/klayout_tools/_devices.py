@@ -50,7 +50,7 @@ import sys
 from typing import Any
 
 from ._layout import region as _region
-from ._paths import _parse_layer_datatype, _reject_unknown_keys
+from ._paths import _reject_unknown_keys, parse_layer_datatype
 
 
 def _validate_device_entry(
@@ -72,7 +72,7 @@ def _validate_device_entry(
         if key not in entry:
             raise error_cls(f"spec '{spec_path}': devices[{index}] missing {key!r}")
 
-    body_layer = _parse_layer_datatype(
+    body_layer = parse_layer_datatype(
         str(entry["body_layer"]), spec_path, f"devices[{index}].body_layer", error_cls
     )
     on = str(entry["on"])

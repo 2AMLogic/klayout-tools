@@ -27,7 +27,7 @@ from typing import Any
 from . import pdk_stackup
 from ._layout import load_layout, select_top_cells
 from ._native import _load_native_extension
-from ._paths import _load_spec_json, _parse_layer_datatype, _reject_unknown_keys
+from ._paths import _load_spec_json, _reject_unknown_keys, parse_layer_datatype
 from .touchstone import TOUCHSTONE_VERSION, format_s2p
 
 #: Mirrors ``native/mom/src/contract.rs``'s ``DEFAULT_PANEL_SIZE_UM`` -- kept
@@ -163,7 +163,7 @@ def _stackup_boxes(
                 raise MomError(
                     f"spec '{spec_path}': stackup entry missing {key!r}: {entry!r}"
                 )
-        layer_datatype = _parse_layer_datatype(
+        layer_datatype = parse_layer_datatype(
             str(entry["layer"]), spec_path, "stackup entry 'layer'", MomError
         )
         name = str(entry["conductor"])

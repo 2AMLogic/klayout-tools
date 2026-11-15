@@ -18,7 +18,10 @@ from klayout_tools._paths import (
     _load_request_json,
     fold_spice_continuations,
     looks_like_request_document,
+    parse_layer_datatype,
+    parse_layer_datatype_strict,
 )
+from klayout_tools.cli._parsing import parse_layer_spec
 
 
 def test_fold_spice_continuations_empty_input():
@@ -169,3 +172,73 @@ def test_load_request_json_valid_document_round_trips(tmp_path):
     path = tmp_path / "ok.json"
     path.write_text(json.dumps({"hello": "world"}))
     assert _load_request_json(str(path), _LoaderError) == {"hello": "world"}
+
+
+class _SpecError(Exception):
+    """Stand-in for a caller's own exception class."""
+
+
+#: The acceptance table from issue #5605 -- every ``"<layer>/<datatype>"``
+#: parser in the package shares one rule, pinned here in exactly one place:
+#: digits only, surrounding whitespace tolerated, signs rejected.
+_LAYER_DATATYPE_ACCEPTANCE_TABLE = [
+    ("68/20", (68, 20)),
+    (" 68 / 20 ", (68, 20)),
+    ("-68/20", None),
+    ("68/-20", None),
+    ("+68/20", None),
+    ("68/20/3", None),
+]
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    _LAYER_DATATYPE_ACCEPTANCE_TABLE,
+    ids=[raw for raw, _ in _LAYER_DATATYPE_ACCEPTANCE_TABLE],
+)
+def test_parse_layer_datatype_acceptance_table(raw, expected):
+    """The shared acceptance rule (issue #5605): ``raw`` parses to
+    ``expected``, or is rejected (``expected is None``). A negative GDS
+    layer or datatype is never valid, so signed input is malformed --
+    previously four of the five hand-rolled parsers accepted ``-68/20``
+    while the fifth rejected it."""
+    if expected is None:
+        with pytest.raises(ValueError):
+            parse_layer_datatype_strict(raw)
+    else:
+        assert parse_layer_datatype_strict(raw) == expected
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    _LAYER_DATATYPE_ACCEPTANCE_TABLE,
+    ids=[raw for raw, _ in _LAYER_DATATYPE_ACCEPTANCE_TABLE],
+)
+def test_parse_layer_datatype_spec_wrapper_follows_the_table(raw, expected):
+    """The spec-file wrapper raises the caller's error class, naming spec,
+    field and offending value, on exactly the rows the shared rule rejects."""
+    if expected is None:
+        with pytest.raises(_SpecError, match=re.escape(repr(raw))) as excinfo:
+            parse_layer_datatype(raw, "stackup.json", "vias[0].layer", _SpecError)
+        assert "spec 'stackup.json': vias[0].layer" in str(excinfo.value)
+    else:
+        assert (
+            parse_layer_datatype(raw, "stackup.json", "vias[0].layer", _SpecError)
+            == expected
+        )
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    _LAYER_DATATYPE_ACCEPTANCE_TABLE,
+    ids=[raw for raw, _ in _LAYER_DATATYPE_ACCEPTANCE_TABLE],
+)
+def test_parse_layer_spec_cli_wrapper_follows_the_table(raw, expected):
+    """The CLI-flag wrapper delegates to the same rule and phrases the
+    error with the flag name and the caller's error class."""
+    if expected is None:
+        with pytest.raises(_SpecError, match=re.escape(repr(raw))) as excinfo:
+            parse_layer_spec(raw, "--window-layer", _SpecError)
+        assert "--window-layer" in str(excinfo.value)
+    else:
+        assert parse_layer_spec(raw, "--window-layer", _SpecError) == expected

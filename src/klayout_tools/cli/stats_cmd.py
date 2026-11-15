@@ -7,13 +7,17 @@ every other ``klt`` subcommand — see ``docs/json-contract.md``.
 import argparse
 
 from ..stats import StatsError, stats_report
+from ._parsing import parse_layer_spec
 from .output import emit_error, emit_success, render_table
 
 
 def run(args: argparse.Namespace) -> int:
     try:
         window_layers = (
-            [_parse_layer_spec(spec) for spec in args.window_layer]
+            [
+                parse_layer_spec(spec, "--window-layer", StatsError)
+                for spec in args.window_layer
+            ]
             if args.window_layer
             else None
         )
@@ -29,14 +33,6 @@ def run(args: argparse.Namespace) -> int:
 
     emit_success(report, args.format, _print_text)
     return 0
-
-
-def _parse_layer_spec(spec: str) -> tuple[int, int]:
-    try:
-        layer, datatype = spec.split("/")
-        return int(layer), int(datatype)
-    except ValueError:
-        raise StatsError(f"--window-layer must look like L/D, got: {spec}") from None
 
 
 def _print_text(report: dict) -> None:

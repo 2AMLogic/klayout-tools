@@ -14,6 +14,25 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **One acceptance rule for every `LAYER/DATATYPE` parser** (#5605,
+  2026-11-15): the five hand-rolled `"<layer>/<datatype>"` string parsers
+  disagreed on what they accept -- the four `split("/")`-based copies took
+  signed numbers (`-68/20` parsed as layer -68, `+68/20` as layer 68) while
+  `klt tap-distance`'s regex rejected them. They now all delegate to one
+  public shared-core rule (`klayout_tools._paths.parse_layer_datatype`,
+  exposed to CLI flags as `klayout_tools.cli._parsing.parse_layer_spec`),
+  which accepts digits only and tolerates surrounding whitespace. This is a
+  user-visible tightening on three verbs: `klt stats --window-layer`,
+  `klt seam-check --layer` and `klt interface-check --pin-layer-a`/
+  `--pin-layer-b` now reject `-68/20`, `68/-20` and `+68/20` with a clean
+  exit-1 error instead of silently accepting a layer that can match no
+  geometry. The same rule applies to the `erc-spec`/`mom`/`power` spec-file
+  layer fields, which were already the strict shape's callers. `klt
+  tap-distance` behaviour is unchanged (its parsers were already strict,
+  including `--net-spec` layer fields, whose error message now comes from
+  the shared helper). No `schema_version` changes: payload shapes are
+  untouched, only flag/spec *validation*.
+
 - **Every batch job exports a fallback `HOME`, and `klt signoff`'s generator
   path reports an envelope for an unpinnable client version** (#5654,
   2026-11-14): the five `--backend batch` job assemblers (`klt extract`,

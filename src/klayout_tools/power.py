@@ -154,9 +154,9 @@ from ._layout import region as _region
 from ._layout import texts as _texts
 from ._paths import (
     _load_spec_json,
-    _parse_layer_datatype,
     _reject_unknown_keys,
     _validate_via_entries,
+    parse_layer_datatype,
 )
 from ._provenance import INPUT_ROLE_LAYOUT, build_provenance, content_hash
 from ._unionfind import UnionFind
@@ -330,12 +330,12 @@ def _validate_stackup(spec: dict[str, Any], spec_path: str) -> list[dict[str, An
             raise PowerError(f"spec '{spec_path}': duplicate stackup name {name!r}")
         names.append(name)
 
-        layer = _parse_layer_datatype(
+        layer = parse_layer_datatype(
             str(entry["layer"]), spec_path, f"stackup[{i}].layer", PowerError
         )
         label_layer = None
         if entry.get("label_layer") is not None:
-            label_layer = _parse_layer_datatype(
+            label_layer = parse_layer_datatype(
                 str(entry["label_layer"]),
                 spec_path,
                 f"stackup[{i}].label_layer",

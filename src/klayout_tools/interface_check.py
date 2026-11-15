@@ -62,15 +62,6 @@ def parse_place(spec: str) -> tuple[float, float]:
     return dx, dy
 
 
-def parse_layer(spec: str, flag: str) -> tuple[int, int]:
-    """Parse ``"L/D"`` into a ``(layer, datatype)`` pair."""
-    try:
-        layer, datatype = spec.split("/")
-        return int(layer), int(datatype)
-    except ValueError:
-        raise InterfaceCheckError(f"{flag} must look like L/D, got: {spec}") from None
-
-
 def parse_pair(spec: str) -> tuple[str, str]:
     """Parse ``"A_REGEX=B_TEMPLATE"`` (split on the last ``=``) and validate it.
 

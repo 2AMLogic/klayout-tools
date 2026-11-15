@@ -15,7 +15,7 @@ import math
 from typing import Any
 
 from ._jsonnum import is_int
-from ._paths import _parse_layer_datatype, _reject_unknown_keys, _validate_via_entries
+from ._paths import _reject_unknown_keys, _validate_via_entries, parse_layer_datatype
 from .erc_spec_boxes import (  # noqa: F401 -- _parse_um_boxes is re-exported
     _parse_isolation_boxes,
     _parse_tap_boxes,
@@ -181,12 +181,12 @@ def _validate_stackup(spec: dict[str, Any], spec_path: str) -> list[dict[str, An
             raise ErcError(f"spec '{spec_path}': duplicate stackup name {name!r}")
         names.append(name)
 
-        layer = _parse_layer_datatype(
+        layer = parse_layer_datatype(
             str(entry["layer"]), spec_path, f"stackup[{i}].layer", ErcError
         )
         label_layer = None
         if entry.get("label_layer") is not None:
-            label_layer = _parse_layer_datatype(
+            label_layer = parse_layer_datatype(
                 str(entry["label_layer"]),
                 spec_path,
                 f"stackup[{i}].label_layer",
@@ -200,7 +200,7 @@ def _validate_stackup(spec: dict[str, Any], spec_path: str) -> list[dict[str, An
                     f"spec '{spec_path}': stackup[{i}].active_layer is only "
                     "valid on stackup[0] (the gate role)"
                 )
-            active_layer = _parse_layer_datatype(
+            active_layer = parse_layer_datatype(
                 str(entry["active_layer"]),
                 spec_path,
                 f"stackup[{i}].active_layer",
@@ -655,7 +655,7 @@ def _parse_tie_layer_list(
     layers *mean*. The layer-list counterpart of :func:`_parse_um_boxes`.
 
     Omitted/``null`` -> ``[]``. Every entry is validated by
-    :func:`~klayout_tools._paths._parse_layer_datatype` rather than coerced:
+    :func:`~klayout_tools._paths.parse_layer_datatype` rather than coerced:
     a silently-dropped layer would weaken a narrowing the caller believes
     they declared.
     """
@@ -668,7 +668,7 @@ def _parse_tie_layer_list(
             "of '<layer>/<datatype>' strings"
         )
     return [
-        _parse_layer_datatype(
+        parse_layer_datatype(
             str(value), spec_path, f"ties[{index}].{key}[{j}]", ErcError
         )
         for j, value in enumerate(raw)
@@ -770,7 +770,7 @@ def _parse_well_complement_of(
             "'<layer>/<datatype>' string or a non-empty array of them"
         )
     return [
-        _parse_layer_datatype(
+        parse_layer_datatype(
             str(value), spec_path, f"ties[{index}].well_complement_of[{j}]", ErcError
         )
         for j, value in enumerate(values)
@@ -955,7 +955,7 @@ def _parse_well_declaration(
             "'well_requires'/'well_excludes' (a marker layer that does)"
         )
     return {
-        "well_layer": _parse_layer_datatype(
+        "well_layer": parse_layer_datatype(
             str(raw), spec_path, f"ties[{index}].well_layer", ErcError
         ),
         **declaration,
@@ -1065,7 +1065,7 @@ def _validate_ties(
         names.append(name)
 
         well = _parse_well_declaration(entry, spec_path, i)
-        tap_layer = _parse_layer_datatype(
+        tap_layer = parse_layer_datatype(
             str(entry["tap_layer"]), spec_path, f"ties[{i}].tap_layer", ErcError
         )
 
