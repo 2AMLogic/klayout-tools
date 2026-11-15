@@ -126,11 +126,13 @@ implemented deliberately rather than rediscovered:
    `docs/design/sdf-annotate-feasibility-spike.md` §3.7 for the live
    evidence: (a) as a *destination*, order-dependent -- fixed by deferring
    every such entry to its own, later ``$sdf_annotate`` call
-   (:func:`_split_sdf_bus_port_interconnects`); (b) as a *source* feeding a
-   ``specify``-bearing destination -- fails even in total isolation,
-   unfixable by reordering, and confirmed sensitive to the testbench itself
-   (a no-op test resolves cleanly; any test that actually drives the DUT and
-   awaits a trigger does not) -- left unfixed and pinned down by
+   (:func:`_split_sdf_bus_port_interconnects`); (b) as a *source* -- the
+   one-modpath-per-bit-selected-port-net cap (issue #5705, measured on raw
+   ``iverilog``/``vvp`` 13.0 with a plain Verilog testbench): on such a net
+   with physical fanout above 1, ``$sdf_annotate`` annotates only the
+   last-declared instance's destination and rejects the rest,
+   deterministically and independently of the testbench -- unfixable by
+   reordering, and left unfixed and pinned down by
    ``test_integration_real_icarus_sdf_bus_port_input_fanout_stays_
    unresolvable`` rather than silently reported as "annotated" or masked.
    The issue's own "wrapper double-binds the net identity" hypothesis is
@@ -2837,8 +2839,9 @@ def run_functional_verification(
         # Issue #2363: an `INTERCONNECT` entry from a bit-selected top-level
         # input port onto a pin of a *physical-only* instance -- a
         # router-inserted antenna diode, or any filler/tapcell whose model
-        # is timing-empty -- is shape (b) of the #1619/#1857 spike and
-        # cannot be annotated by Icarus at all. Unlike the general shape (b)
+        # is timing-empty -- is shape (b) of the #1619/#1857 spike: on a
+        # multi-load port-bit net, #5705's one-modpath cap leaves every
+        # non-survivor entry unannotated. Unlike the general shape (b)
         # case (which stays failing, pinned by
         # `test_integration_real_icarus_sdf_bus_port_input_fanout_stays_
         # unresolvable`), this destination's elaborated model carries no

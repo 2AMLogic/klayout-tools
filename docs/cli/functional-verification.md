@@ -856,10 +856,18 @@ That entry is shape (b) of the bit-selected-port `INTERCONNECT` failure
 neither the `klt_sdf_safe.sdf`/`klt_sdf_deferred_bus_ports.sdf` split nor the
 alias-map normalization above resolves it, and it costs one `SDF ERROR:
 <file>:<line>: Could not find intermodpath!`. Verified live against Icarus
-13.0: the failure needs the port bit's net to carry **more than one**
-`INTERCONNECT` entry — a bus-port net whose only entry is the diode's own
-annotates cleanly, but a real router inserts one diode per violating pin, so
-a multi-load input bit collects several and one of them fails. `klt`
+13.0, re-measured with one-variable-per-case controls in issue #5705: the
+deciding variable is the port bit's net's **physical fanout**, not the
+`INTERCONNECT` entry count — `$sdf_annotate` creates at most **one**
+interconnect modpath per bit-selected top-level port net, for the
+destination of the **last-declared instance on that net**, and rejects
+every other load's entry. A bus-port net whose only load is the diode's
+annotates cleanly (fanout 1), but a real router inserts one diode per
+violating pin, so a multi-load input bit collects several and the
+non-survivors fail. (An earlier revision of this paragraph read the
+precondition as needing **more than one** entry; that holds for this
+fixture by declaration order — a lone entry on a fanout-above-1 net fails
+too when it targets a non-last-declared instance.) `klt`
 **removes** those entries from the SDF text it hands `$sdf_annotate` and
 reports the count as its own `dropped` class, distinct from the alias-port
 one:
@@ -881,8 +889,10 @@ the same **delay-value** bound as the alias-port class above:
   `max`) is left in place, fails to annotate, and still fails the run with
   exit 1.
 - The destination must be a *physical-only* instance. An entry onto an
-  ordinary `specify`-bearing standard cell — the general shape (b) case — is
-  **not** covered by this exemption and still fails the run loudly; that
+  ordinary `specify`-bearing standard cell — the general shape (b) case,
+  which on a fanout-above-1 port-bit net fails whenever it is not the
+  last-declared instance's entry (issue #5705) — is **not** covered by
+  this exemption and still fails the run loudly; that
   remains an open Icarus limitation, not something this drop papers over.
 - Only `INTERCONNECT` entries are eligible, and only entries whose *source*
   is a bit-selected top-level input port (the one shape this failure was

@@ -4502,14 +4502,21 @@ def test_integration_real_icarus_sdf_nonzero_alias_port_interconnect_fails_loud(
 # any real post-route SDF with router-inserted diodes.
 #
 # Reproduced live against Icarus 13.0 through this module (not just read off
-# the issue), which pinned down one thing the issue's own write-up does not
-# say: the failure needs the port bit's net to carry **more than one** entry.
-# A bus-port net whose single entry is the diode's own annotates cleanly even
-# before this fix -- #1619's deferral is enough for it -- but the moment that
-# same net carries a second entry, one of them fails, exactly as #1619 shape
-# (a) describes. That is why this fixture hangs *two* diodes off `ui_in[0]`
-# (a real router inserts one diode per violating pin, so a multi-load input
-# bit collects several) and why the pinned no-fix case
+# the issue). The deciding variable is the port bit's net's *physical
+# fanout*, re-measured with one-variable-per-case controls in issue #5705
+# (raw `iverilog`/`vvp` 13.0): `$sdf_annotate` creates at most one
+# interconnect modpath per bit-selected top-level port net -- the
+# destination of the **last-declared instance** on that net -- and rejects
+# every other load's entry. A bus-port net whose only load is the diode
+# annotates cleanly (fanout 1) even before this fix -- #1619's deferral is
+# enough for it -- but this fixture hangs *two* diodes off `ui_in[0]` (a
+# real router inserts one diode per violating pin, so a multi-load input
+# bit collects several), and on that fanout-2 net the first-declared
+# diode's entry is rejected regardless of how few entries the SDF carries.
+# (An earlier revision of this comment read the precondition as "more than
+# one entry"; the fanout rule explains the same observation without it --
+# a lone entry on a fanout-above-1 net fails too when it targets a
+# non-last-declared instance.) That is also why the pinned no-fix case
 # (`test_integration_real_icarus_sdf_bus_port_input_fanout_stays_
 # unresolvable`, where the second load is a `specify`-bearing cell) keeps
 # failing: dropping the diode entry there leaves the ordinary shape (b) entry
@@ -5300,23 +5307,25 @@ async def test_output_settles_within_two_ns(dut):
 def test_integration_real_icarus_sdf_bus_port_input_fanout_stays_unresolvable(tmp_path):
     """Issue #1619 shape (b), root-caused rather than fixed -- see the
     module-level comment above :func:`_split_sdf_bus_port_interconnects` for
-    the full writeup.
+    the full writeup and issue #5705 for the measured mechanism.
 
-    Live testing found this shape's failure mode is a *different* Icarus
-    behaviour than shape (a)'s, and not one `_split_sdf_bus_port_
-    interconnects`'s deferral strategy can work around: with a **no-op**
-    cocotb testbench (a test coroutine that returns immediately, never
-    `await`s a trigger), the exact same split fixture used here resolves
-    every entry cleanly -- but with *any* testbench that actually drives the
-    DUT and awaits a `Timer` (the realistic case, and every other test in
-    this file), the run deterministically raises with the deferred entry
-    unresolved, reproduced identically across a clean `.klt/` build
-    directory, a fresh Python interpreter, and a fresh `klt` CLI subprocess
-    invocation. The no-op-vs-driven-testbench split points at a genuine race
-    between Icarus's own `$sdf_annotate` intermodpath insertion and VPI
-    callback scheduling once the simulator actually advances past time 0 --
-    not something this module's own generated wrapper/shim/SDF-splitting
-    code can control from the outside. This test pins the *realistic*
+    The failure is Icarus's one-modpath-per-bit-selected-port-net cap, not
+    something `_split_sdf_bus_port_interconnects`'s deferral strategy can
+    work around: measured on raw `iverilog`/`vvp` 13.0 with a plain
+    Verilog testbench (issue #5705, one variable per control case), this
+    fixture's `a[0]` net has physical fanout 2 and carries two SDF
+    entries, and `$sdf_annotate` annotates only the last-declared
+    instance's destination (`u_d`, the diode) -- the `a[0] u1.in` entry is
+    rejected deterministically, in both SDF entry orders and with both a
+    no-op bench and a fully driven one. Which entry survives is fixed by
+    netlist declaration order, which the split never touches, so
+    reordering or deferring the entries cannot help. (An earlier revision
+    of this docstring attributed the outcome to a race between Icarus's
+    `$sdf_annotate` intermodpath insertion and VPI callback scheduling,
+    read off a no-op-vs-driven-testbench split through cocotb; the
+    plain-Verilog measurements superseded that reading -- no race is
+    needed to explain the rejection, though a cocotb-specific sensitivity
+    on top of the cap may still exist.) This test pins the *realistic*
     (driven-testbench) outcome down: it must keep raising, not silently
     start passing (which would mean either Icarus's own behaviour changed,
     or a future change here papered over the failure without actually

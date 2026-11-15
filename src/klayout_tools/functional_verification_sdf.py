@@ -566,21 +566,46 @@ def _write_sdf_dut_wrapper(
 #
 # Shape (b) -- bit-selected port as a *source* (an input net fanning out to
 # an ordinary cell input *and* a single-pin antenna/diode-style load):
-# **not order-dependent, and not fixable from here.** A single such entry,
-# entirely alone with no sibling at all, already fails whenever its
-# destination pin declares its own `specify`/`IOPATH` block (an ordinary
-# standard cell always does) -- reordering or deferring it to its own call
-# changes nothing, ruling out the same workaround shape (a) uses. It is also
-# unexpectedly sensitive to the *testbench*: the identical fixture resolves
-# cleanly with a no-op cocotb test (one that returns without ever `await`ing
-# a trigger) but deterministically fails once the testbench actually drives
-# the DUT and awaits a `Timer` -- reproduced identically across a clean
-# `.klt/` build directory, a fresh Python interpreter, and a fresh `klt` CLI
-# process, so it is not this module's own build-directory or process-state
-# reuse. That points at a genuine Icarus-internal race between
-# `$sdf_annotate`'s own intermodpath insertion and VPI callback scheduling
-# once the simulator advances past time 0 -- outside what a generated
-# wrapper, shim, or SDF split can control. Left unfixed and documented
+# **not order-dependent, and not fixable from here.** The mechanism was
+# re-measured in issue #5705 (2026-11-14) on a raw `iverilog`/`vvp` 13.0
+# fixture -- plain Verilog testbench, no cocotb, no `klt`, the same
+# second-elaboration-root `$sdf_annotate` shape `_write_sdf_annotate_shim`
+# generates -- with one variable changed per control case, and each verdict
+# corroborated against an un-annotated waveform baseline rather than the
+# transcript (`vvp` exits 0 even when it skipped every annotation). The
+# measured rule: `$sdf_annotate` creates **at most one** interconnect
+# modpath per bit-selected top-level port net. On such a net with physical
+# fanout N it annotates exactly one destination -- the one belonging to the
+# **last-declared instance on that net** -- and rejects the other N-1 with
+# `VPI error: Could not insert intermodpath!` plus `SDF ERROR:
+# <file>:<line>: Could not find intermodpath!`. The precondition is
+# therefore **physical fanout above 1**, not the SDF entry count: a lone
+# entry on a fanout-1 net applies cleanly (with a `specify`-bearing
+# destination and identical flags), and a lone entry on a fanout-2 net
+# still fails when it targets a non-last-declared instance (this fixture
+# is fanout 2, so its 1-of-2 rejection is the fanout rule by itself). The
+# destination's own `specify`/`IOPATH` block is neither the trigger nor
+# protective: destinations with no `specify` block at all are rejected
+# exactly like ordinary standard cells when they are not the survivor.
+# The behaviour is deterministic -- byte-identical per-entry verdicts with
+# a bench that drives nothing and `$finish`es at t=1 and one that drives
+# every input across 80 ns, in both SDF entry orders, across repeated
+# runs; reversing the SDF leaves the same entry applied, and reordering
+# the *netlist* declarations moves the survivor to the new last-declared
+# instance, which a race would not do. (An earlier revision of this
+# comment attributed the rejections to a race between `$sdf_annotate`'s
+# intermodpath insertion and VPI callback scheduling, read off a
+# no-op-vs-driven-testbench flip through cocotb; that observation is
+# possibly real *on top of* the cap, but the plain-Verilog measurements
+# show it is not needed to explain any reproduced rejection.) Reordering
+# or deferring the entries changes nothing -- which entry survives is
+# fixed by netlist declaration order, which the split never touches --
+# ruling out the same workaround shape (a) uses. One workaround does
+# exist, but it is a *netlist* change, outside what this module can do to
+# a finished netlist: making the source a cell *output* pin (insert a
+# buffer so the entry reads `<inst>.X -> <inst>.<pin>` instead of
+# `<bus>[i] -> <inst>.<pin>`) makes every entry on the net apply, at any
+# fanout (#5705's last three control rows). Left unfixed and documented
 # (`test_integration_real_icarus_sdf_bus_port_input_fanout_stays_
 # unresolvable` pins the realistic, driven-testbench outcome down so it is
 # never silently "fixed" by an unrelated future change without the
@@ -651,19 +676,22 @@ def _split_sdf_bus_port_interconnects(
     untouched by this function).
 
     See the module-level comment above this function for both confirmed
-    Icarus 13.0 mechanisms (issue #1619) and which one this actually fixes:
-    it reliably resolves shape (a) (bit-selected port as an
-    ``INTERCONNECT`` *destination*, order-dependent poisoning of later
-    same-net entries) but does **not** fix shape (b) (bit-selected port as
-    an ``INTERCONNECT`` *source* feeding a ``specify``-bearing destination,
-    which fails even in total isolation, unaffected by this split). This
-    function still applies the same split to *any* bit-selected-port-
-    touching entry regardless of which shape it is, since doing so never
-    makes a shape (b) entry *worse* (it already fails standing alone) and
-    fully fixes every shape (a) entry -- there is no cheap way to tell the
-    two shapes apart from the SDF text alone (both are just "port token as
-    one of the two endpoints"), and splitting is a no-op safety margin for
-    the shape this function cannot help.
+    Icarus 13.0 mechanisms (issue #1619; shape (b)'s mechanism re-measured
+    in issue #5705) and which one this actually fixes: it reliably resolves
+    shape (a) (bit-selected port as an ``INTERCONNECT`` *destination*,
+    order-dependent poisoning of later same-net entries) but does **not**
+    fix shape (b) (bit-selected port as an ``INTERCONNECT`` *source*: the
+    one-modpath-per-bit-selected-port-net cap rejects every non-survivor
+    entry on a fanout-above-1 net, whichever call annotates it --
+    unaffected by this split). This function still applies the same split
+    to *any* bit-selected-port-touching entry regardless of which shape it
+    is, since doing so never makes a shape (b) entry *worse* (the split
+    reorders SDF entries and never netlist declarations, so it cannot
+    move the last-declared survivor the cap annotates) and fully fixes
+    every shape (a) entry -- there is no cheap way to tell the two shapes
+    apart from the SDF text alone (both are just "port token as one of the
+    two endpoints"), and splitting is a no-op safety margin for the shape
+    this function cannot help.
 
     The first returned text is ``sdf_path``'s own content with every
     bit-selected-port-touching entry *removed* (annotated in the caller's
@@ -1538,9 +1566,12 @@ def _drop_sdf_zero_delay_physical_only_interconnects(
 #
 # A real post-route SDF can carry such entries and Icarus fails the run with
 # `SDF ERROR: ... Could not find intermodpath!` on some of them (the
-# order/race behaviour characterised above for shape (b)). The failure
-# mechanism is not what this pass depends on: it removes only entries whose
-# every `min:typ:max` member is zero, which model no delay at any corner, so
+# one-modpath-per-bit-selected-port-net cap characterised above for shape
+# (b) -- issue #5705: on a fanout-above-1 net, every entry whose
+# destination is not the last-declared instance's is rejected,
+# deterministically). The failure mechanism is not what this pass depends
+# on: it removes only entries whose every `min:typ:max` member is zero,
+# which model no delay at any corner, so
 # dropping one cannot change simulated timing -- the same bound #2285 and
 # #2363 use. The "dropping its entry would change simulated timing" argument
 # for leaving shape (b) failing therefore holds only for NON-zero entries,
