@@ -12243,7 +12243,7 @@ def _open_ascii_rawfile(
     format notes (``Flags: complex`` magnitude reduction in particular).
     """
     try:
-        handle = open(raw_path, encoding="utf-8", errors="replace")  # noqa: SIM115
+        handle = open(raw_path, encoding="utf-8", errors="replace")
     except OSError as exc:
         raise SimError(f"could not read rawfile: {exc}") from exc
     with handle:

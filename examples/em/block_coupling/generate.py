@@ -181,7 +181,7 @@ def resolve_stackup(profile: PdkProfile) -> dict[str, Any]:
                             f" (height {profile.magic_height_layer})"
                         ),
                     }
-    except Exception:  # noqa: BLE001 -- any resolution failure falls back
+    except Exception:  # -- any resolution failure falls back
         pass
     bottom, thickness = profile.stackup_fallback
     return {

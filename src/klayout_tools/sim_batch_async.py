@@ -407,7 +407,7 @@ def _failed_job_exit_reason(
         if result.returncode != 0:
             return {}
         report = json.loads(result.stdout or "")
-    except Exception:  # noqa: BLE001 - best-effort enrichment
+    except Exception:  # - best-effort enrichment
         return {}
     return exit_reason_env(status, report) if isinstance(report, dict) else {}
 
