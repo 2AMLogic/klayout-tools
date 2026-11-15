@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from ._jsonnum import is_finite_number
+
 _ABSENT_STATUS = "absent"
 
 CornerEntry = tuple[dict[str, Any], dict[str, Any]]
@@ -25,14 +27,6 @@ def corner_entries(name: str, corners: list[dict[str, Any]]) -> list[CornerEntry
     return entries
 
 
-def _is_finite_number(value: Any) -> bool:
-    return (
-        isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and value == value
-    )
-
-
 def corner_extremes(entries: list[CornerEntry]) -> dict[str, Any]:
     """``{"min": ..., "max": ...}``: the ``{corner_id, value}`` of the true
     extremes over finite numeric, non-absent values (ties keep the first
@@ -46,7 +40,7 @@ def corner_extremes(entries: list[CornerEntry]) -> dict[str, Any]:
     hi: dict[str, Any] | None = None
     for corner, m in entries:
         value = m.get("value")
-        if m["status"] == _ABSENT_STATUS or not _is_finite_number(value):
+        if m["status"] == _ABSENT_STATUS or not is_finite_number(value):
             continue
         point = {"corner_id": corner["corner_id"], "value": value}
         if lo is None or value < lo["value"]:

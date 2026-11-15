@@ -33,6 +33,56 @@ not `klt --version`, if you need to detect this kind of drift. See
   proven mismatch and klt never fails a run on the verdict. Additive; no
   `schema_version` bump. See `docs/cli/sim.md` "Worker-observed environment".
 
+- **Every batch job exports a fallback `HOME`, and `klt signoff`'s generator
+  path reports an envelope for an unpinnable client version** (#5654,
+  2026-11-14): the five `--backend batch` job assemblers (`klt extract`,
+  `klt netlist`, `klt place-and-route`, `klt signoff --generator`, `klt sim`'s
+  command jobs) each built the same job shell by hand and had drifted. Two
+  divergences were user-visible. (1) The fleet runner can leave `$HOME` unset,
+  which killed xschem's Tcl init outright; the fix had landed in the
+  `klt netlist` job only, and now applies to all five, so a runner without
+  `$HOME` no longer breaks a tool that reads it. (2) When the submitting
+  client's own `klt` version cannot be pinned against the runner, the
+  preflight raises an error that `klt extract`, `klt netlist` and
+  `klt place-and-route` each translated into their own class -- but
+  `klt signoff`'s generator path did not, and nothing on that path caught it,
+  so it escaped as a Python traceback instead of
+  [`docs/json-contract.md`](docs/json-contract.md)'s error envelope. It is now
+  a `package_failed` generator outcome in the signoff report. The generated
+  job command is otherwise byte-identical for all five backends, and every
+  job's wall-clock cap is unchanged (`klt place-and-route`'s stays exactly
+  `request.batch.job_timeout_s`, as documented). No `schema_version` changes.
+
+## 0.9.2 (2026-11-14)
+
+- **`klt sim`'s per-measurement `min`/`max` skip an infinite value** (#5580,
+  2026-11-14): the corner-matrix extremes in the `measurements[]` rollup are
+  documented as the extremes over *finite* numeric values, but the predicate
+  behind them tested finiteness with `value == value` -- which rejects NaN and
+  accepts `+/-inf`. A corner whose measurement came back infinite could
+  therefore be reported as `min` or `max` (and would always win, being an
+  extreme by construction), masking the real worst finite corner. The rollup
+  now uses the shared `_jsonnum.is_finite_number` predicate, so booleans, NaN
+  **and** infinities are all skipped alike, and a measurement whose every
+  corner is infinite reports `min`/`max` as `null` rather than naming one.
+  `worst_case` is a margin pointer and is unchanged. `klt sim-merge` shares the
+  rollup and gets the same fix. Report output can change for a run with a
+  non-finite measurement; `klt sim`'s `schema_version` is unaffected (the field
+  shape is the same).
+
+- **`klt stats` reports a `geometry_digest`** (#5551, 2026-11-13): the
+  timestamp- and record-order-independent digest of a stream's decoded
+  geometry is now a top-level field of `klt stats --format json` (and a
+  `geometry_digest:` line in text output). This gives
+  `klt signoff --attest 2 --regenerated-hash ... --hash-kind geometry` a
+  public producer for the value its grader recomputes -- previously the only
+  way to obtain it was to import the private
+  `klayout_tools._provenance.layout_geometry_digest`, since `klt diff`'s
+  `canonical_hash` is a *different* digest whose substitution grades
+  `stale_artifact`. The digest algorithm, `canonical_hash`, and how
+  `klt signoff --manifest` grades are all unchanged; the field covers the
+  whole stream and is not scoped by `--top`. Additive; `klt stats`'
+  `schema_version` stays `1`.
 - **`klt signoff` reads a gzip-compressed evidence file** (#5452,
   2026-11-13): a `klt sim --report-out report.json.gz` report — the compact
   form `docs/cli/sim.md` recommends committing as evidence — is now citable
@@ -171,6 +221,48 @@ not `klt --version`, if you need to detect this kind of drift. See
   confirmed per check kind and excludes `net_space` and `require_containment`
   `enclosing` rules, where an empty primary region can still report. See
   `docs/cli/drc.md` → "`layer_selection` decides coverage".
+- **`klt erc`: `erc.supply_short` is now evaluated through the substrate**
+  (#5342, 2026-11-12): two `kind: "supply"` nets that are one conductor
+  through a shared p-substrate or well are reported as an `erc.supply_short`
+  finding carrying `via: "substrate"` and `body`
+  (`{"kind", "id", "ties"}`), found by a derived body-merge post-pass over the
+  spec's `ties[]` graph. Only drawn, non-degenerate tap geometry joins
+  anything, and the pass only ever *adds* findings — a blanket well row over a
+  tap row still reports no short (#2169 regression). The measured bodies are
+  echoed in `provenance.substrate_bodies`, and the work identity
+  `erc.supply_short.substrate` is listed in `erc_coverage.checked` when the
+  pass ran. A deck declaring `substrate_isolation` (gf180mcu's `DNWELL` 12/0)
+  splits the shared substrate into `vsubs_iso<n>` islands, matching `klt
+  extract`'s own numbering. Additive keys only; no `schema_version` bump.
+- **sky130's extraction deck declares `dnwell` as `substrate_isolation`**
+  (#5344, 2026-11-12): `dnwell` (64/18) now splits substrate bodies in the
+  substrate post-pass and in `klt extract` / `klt lvs`, so a sky130 run is
+  *evaluated* rather than disclosed as `substrate_isolation_undecidable`. New
+  deck field `substrate_isolation_needs_nwell_ring`: a `dnwell` island
+  isolates its body only when an `nwell` (64/20) ring closes its outline — an
+  unclosed island stays on the shared `vsubs`, so a real short is still
+  reported. gf180mcu's `DNWELL` keeps isolating whether or not a ring closes
+  it. A layout drawing no `dnwell` extracts exactly as before.
+- **sg13g2 / sg13cmos5l extraction decks declare `nBuLay` as
+  `substrate_isolation`** (#5345, #5359, 2026-11-12): `nBuLay.drawing` (32/0,
+  layer/datatype from the PDK's `layers_def.drc` and tech `.lyp`) does the
+  same for the two IHP families, which are now evaluated rather than
+  disclosed. Both set `substrate_isolation_needs_nwell_ring` (#5359), so an
+  island counts only when an `NWell` (31/0) ring closes it; taps are derived
+  from `Activ` (`tap=None`) and the tie logic handles that. A layout drawing
+  no `nBuLay` extracts exactly as before.
+- **`klt signoff` item 11 reads the substrate-path ERC result** (#5346,
+  2026-11-12): a substrate-path `erc.supply_short` (`via: "substrate"`) is a
+  `supply_not_continuous` blocker exactly like a metal one, so a real short is
+  no longer graded `met`. A cited run that disclosed `erc.supply_short` as
+  `substrate_isolation_undecidable` renders the item `unmet` with the new
+  reason `substrate_isolation_undecidable` and the run's own `missing` list in
+  `detail.power_delivery.substrate_isolation_missing`. A met citation whose
+  run evaluated the substrate path carries
+  `power_delivery.substrate_continuity: {"checked": true, "by_assertion":
+  <bool>}`; evidence produced before the substrate pass existed renders
+  unchanged. The live `2AMLogic/sg13g2-ldo` ERC/LVS agreement run is recorded
+  in `docs/design/erc-substrate-continuity-live-run.md`.
 - **`klt erc`: `ties[].isolation_boxes`, `same_net_as` through the substrate,
   and the decidable-or-disclosed substrate rule** (#5343, 2026-11-12): new
   optional `ties[].isolation_boxes` (µm boxes) asserts isolated substrate
