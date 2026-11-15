@@ -2206,26 +2206,6 @@ def test_run_drc_gf180mcu_mim_space_shared_plate_two_top_plates_clean(tmp_path):
     assert report["rule_counts"].get("mim.space.1", 0) == 0
 
 
-def test_run_drc_gf180mcu_mim_enclosing_fusetop_clean(tmp_path):
-    """A FuseTop shape enclosed by its Metal4 bottom plate with >= 600 dbu
-    margin on every side passes."""
-    layout = kdb.Layout()
-    top = layout.create_cell("TOP")
-    metal4 = layout.layer(46, 0)
-    layout.set_info(metal4, kdb.LayerInfo(46, 0, "Metal4"))
-    fusetop = layout.layer(75, 0)
-    layout.set_info(fusetop, kdb.LayerInfo(75, 0, "FuseTop"))
-    top.shapes(metal4).insert(kdb.Box(0, 0, 5000, 5000))
-    top.shapes(fusetop).insert(kdb.Box(1000, 1000, 4000, 4000))  # 1000 margin >= 600
-    path = tmp_path / "mim_enclosing_clean.gds"
-    layout.write(str(path))
-
-    report = run_drc(str(path), "gf180mcu")
-
-    assert report["status"] == "clean"
-    assert report["violation_count"] == 0
-
-
 # --- mim.enclosing.via4.1 (MIMTM.2) (#345) --------------------------------
 #
 # MIMTM.2 ("min. MiM bottom-plate overlap of Via4", 0.4um / 400 dbu) is
@@ -4269,41 +4249,169 @@ def test_run_drc_two_shape_violation(
     assert violation["layer"] == layer_name
 
 
-def test_run_drc_sky130_met1_enclosing_via_clean(tmp_path):
-    """A via1 shape enclosed by its met1 landing pad with >= 55 dbu margin
-    on every side passes `met1.enclosing.via.1`."""
+# ---------------------------------------------------------------------------
+# Consolidated two-shape enclosing/separation clean family (#5646)
+#
+# The clean counterparts of the two-shape violation family above -- the
+# same two-layer construction with the violating dimension pulled back
+# inside its threshold -- used to exist as 9 structurally-identical tests
+# across sky130 (#513, #776), gf180mcu (#188) and sg13g2.  They collapse
+# into the one parametrized body below.  One test node per row, so the
+# collected count is unchanged.  Each row's comment preserves the original
+# test's geometry justification; the per-case docstrings themselves remain
+# in git history.
+# ---------------------------------------------------------------------------
+
+# Row layout: (deck, rule, layer, layer_name, box, other_layer,
+# other_layer_name, other_box)
+_TWO_SHAPE_CLEAN_CASES = [
+    # FuseTop enclosed by its Metal4 bottom plate with a 1000 dbu (>= the
+    # 600 dbu threshold) margin on every side.
+    (
+        "gf180mcu",
+        "mim.enclosing.fusetop.1",
+        (46, 0),
+        "Metal4",
+        (0, 0, 5000, 5000),
+        (75, 0),
+        "FuseTop",
+        (1000, 1000, 4000, 4000),
+    ),
+    # via1 enclosed by its met1 landing pad with a 400 dbu margin on every
+    # side (>= the 55 dbu threshold).
+    (
+        "sky130",
+        "met1.enclosing.via.1",
+        (68, 20),
+        "met1.drawing",
+        (0, 0, 1000, 1000),
+        (68, 44),
+        "via.drawing",
+        (400, 400, 550, 550),
+    ),
+    # via1 enclosed by its met2 landing pad with a 400 dbu margin on every
+    # side (>= the 55 dbu threshold).
+    (
+        "sky130",
+        "met2.enclosing.via.1",
+        (69, 20),
+        "met2.drawing",
+        (0, 0, 1000, 1000),
+        (68, 44),
+        "via.drawing",
+        (400, 400, 550, 550),
+    ),
+    # The violation case's layout with the via3 gap widened to 200 dbu
+    # (>= the 140 dbu threshold).
+    (
+        "sky130",
+        "capm.separation.via3.1",
+        (89, 44),
+        "capm.drawing",
+        (0, 0, 1000, 1000),
+        (70, 44),
+        "via3.drawing",
+        (1200, 0, 1400, 200),
+    ),
+    # GatPoly spaced exactly at the 70 dbu threshold from an unrelated
+    # Activ shape.
+    (
+        "sg13g2",
+        "gatpoly.separation.activ.1",
+        (5, 0),
+        "GatPoly.drawing",
+        (0, 0, 500, 500),
+        (1, 0),
+        "Activ.drawing",
+        (570, 0, 1000, 500),
+    ),
+    # Cont enclosed by its Activ landing region with a 400 dbu margin on
+    # every side (>= the 70 dbu threshold).
+    (
+        "sg13g2",
+        "activ.enclosing.cont.1",
+        (1, 0),
+        "Activ.drawing",
+        (0, 0, 1000, 1000),
+        (6, 0),
+        "Cont.drawing",
+        (400, 400, 560, 560),
+    ),
+    # Cont enclosed by its GatPoly landing region with a 400 dbu margin on
+    # every side (>= the 70 dbu threshold).
+    (
+        "sg13g2",
+        "gatpoly.enclosing.cont.1",
+        (5, 0),
+        "GatPoly.drawing",
+        (0, 0, 1000, 1000),
+        (6, 0),
+        "Cont.drawing",
+        (400, 400, 560, 560),
+    ),
+    # Via1 enclosed by its Metal1 landing pad with a 400 dbu margin on
+    # every side (>= the 10 dbu threshold).
+    (
+        "sg13g2",
+        "metal1.enclosing.via1.1",
+        (8, 0),
+        "Metal1.drawing",
+        (0, 0, 1000, 1000),
+        (19, 0),
+        "Via1.drawing",
+        (400, 400, 590, 590),
+    ),
+    # Via2 enclosed by its Metal2 landing pad with a 400 dbu margin on
+    # every side (>= the 5 dbu threshold).
+    (
+        "sg13g2",
+        "metal2.enclosing.via2.1",
+        (10, 0),
+        "Metal2.drawing",
+        (0, 0, 1000, 1000),
+        (29, 0),
+        "Via2.drawing",
+        (400, 400, 590, 590),
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "deck,rule,layer,layer_name,box,other_layer,other_layer_name,other_box",
+    _TWO_SHAPE_CLEAN_CASES,
+    ids=[case[1] for case in _TWO_SHAPE_CLEAN_CASES],
+)
+def test_run_drc_two_shape_clean(
+    deck,
+    rule,
+    layer,
+    layer_name,
+    box,
+    other_layer,
+    other_layer_name,
+    other_box,
+    tmp_path,
+):
+    """The clean counterpart of the two-shape violation family above: the
+    same two-layer construction with the margin/gap widened back inside
+    its threshold passes cleanly -- no false positive.
+
+    Consolidated from the 9 standalone clones (#5646); see the table's
+    section comment above."""
     layout = kdb.Layout()
     top = layout.create_cell("TOP")
-    met1 = layout.layer(68, 20)
-    layout.set_info(met1, kdb.LayerInfo(68, 20, "met1.drawing"))
-    via = layout.layer(68, 44)
-    layout.set_info(via, kdb.LayerInfo(68, 44, "via.drawing"))
-    top.shapes(met1).insert(kdb.Box(0, 0, 1000, 1000))
-    top.shapes(via).insert(kdb.Box(400, 400, 550, 550))  # 400 margin >= 55
-    path = tmp_path / "met1_enclosing_via_clean.gds"
+    main = layout.layer(*layer)
+    layout.set_info(main, kdb.LayerInfo(layer[0], layer[1], layer_name))
+    other = layout.layer(*other_layer)
+    layout.set_info(
+        other, kdb.LayerInfo(other_layer[0], other_layer[1], other_layer_name)
+    )
+    top.shapes(main).insert(kdb.Box(*box))
+    top.shapes(other).insert(kdb.Box(*other_box))
+    path = tmp_path / f"{rule.replace('.', '_')}_clean.gds"
     layout.write(str(path))
 
-    report = run_drc(str(path), "sky130")
-
-    assert report["status"] == "clean"
-    assert report["violation_count"] == 0
-
-
-def test_run_drc_sky130_met2_enclosing_via_clean(tmp_path):
-    """A via1 shape enclosed by its met2 landing pad with >= 55 dbu margin
-    on every side passes `met2.enclosing.via.1`."""
-    layout = kdb.Layout()
-    top = layout.create_cell("TOP")
-    met2 = layout.layer(69, 20)
-    layout.set_info(met2, kdb.LayerInfo(69, 20, "met2.drawing"))
-    via = layout.layer(68, 44)
-    layout.set_info(via, kdb.LayerInfo(68, 44, "via.drawing"))
-    top.shapes(met2).insert(kdb.Box(0, 0, 1000, 1000))
-    top.shapes(via).insert(kdb.Box(400, 400, 550, 550))  # 400 margin >= 55
-    path = tmp_path / "met2_enclosing_via_clean.gds"
-    layout.write(str(path))
-
-    report = run_drc(str(path), "sky130")
+    report = run_drc(str(path), deck)
 
     assert report["status"] == "clean"
     assert report["violation_count"] == 0
@@ -5369,26 +5477,6 @@ def test_run_drc_space_violation(
     assert violation["rule"] == rule
     assert violation["check"] == check
     assert violation["layer"] == layer_name
-
-
-def test_run_drc_sky130_capm_separation_via3_clean(tmp_path):
-    """The same layout as the violation test above, but with the via3 gap
-    widened to >= 140 dbu, passes `capm.separation.via3.1`."""
-    layout = kdb.Layout()
-    top = layout.create_cell("TOP")
-    capm = layout.layer(89, 44)
-    layout.set_info(capm, kdb.LayerInfo(89, 44, "capm.drawing"))
-    via3 = layout.layer(70, 44)
-    layout.set_info(via3, kdb.LayerInfo(70, 44, "via3.drawing"))
-    top.shapes(capm).insert(kdb.Box(0, 0, 1000, 1000))
-    top.shapes(via3).insert(kdb.Box(1200, 0, 1400, 200))  # 200 dbu gap >= 140
-    path = tmp_path / "capm_separation_via3_clean.gds"
-    layout.write(str(path))
-
-    report = run_drc(str(path), "sky130")
-
-    assert report["status"] == "clean"
-    assert report["violation_count"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -6833,26 +6921,6 @@ def test_run_drc_sg13g2_every_rule_has_provenance():
         assert rule.provenance.commit == "5cccb161f7492697cfa52eb14dc03beb00bdca9e"
 
 
-def test_run_drc_sg13g2_gatpoly_separation_activ_clean(tmp_path):
-    """A GatPoly shape spaced exactly at the 70 dbu threshold from an
-    unrelated Activ shape passes."""
-    layout = kdb.Layout()
-    top = layout.create_cell("TOP")
-    gatpoly = layout.layer(5, 0)
-    layout.set_info(gatpoly, kdb.LayerInfo(5, 0, "GatPoly.drawing"))
-    activ = layout.layer(1, 0)
-    layout.set_info(activ, kdb.LayerInfo(1, 0, "Activ.drawing"))
-    top.shapes(gatpoly).insert(kdb.Box(0, 0, 500, 500))
-    top.shapes(activ).insert(kdb.Box(570, 0, 1000, 500))  # 70 dbu gap == threshold
-    path = tmp_path / "sg13g2_gat_d_clean.gds"
-    layout.write(str(path))
-
-    report = run_drc(str(path), "sg13g2")
-
-    assert report["status"] == "clean"
-    assert report["violation_count"] == 0
-
-
 def test_run_drc_sg13g2_gatpoly_over_activ_not_flagged_as_separation(tmp_path):
     """A GatPoly gate drawn directly over its own Activ (the ordinary
     "transistor gate" case) does not trip `gatpoly.separation.activ.1` --
@@ -6873,26 +6941,6 @@ def test_run_drc_sg13g2_gatpoly_over_activ_not_flagged_as_separation(tmp_path):
     report = run_drc(str(path), "sg13g2")
 
     assert "gatpoly.separation.activ.1" not in report["rule_counts"]
-
-
-def test_run_drc_sg13g2_activ_enclosing_cont_clean(tmp_path):
-    """A Cont shape enclosed by its Activ landing region with >= 70 dbu
-    margin on every side passes `activ.enclosing.cont.1`."""
-    layout = kdb.Layout()
-    top = layout.create_cell("TOP")
-    activ = layout.layer(1, 0)
-    layout.set_info(activ, kdb.LayerInfo(1, 0, "Activ.drawing"))
-    cont = layout.layer(6, 0)
-    layout.set_info(cont, kdb.LayerInfo(6, 0, "Cont.drawing"))
-    top.shapes(activ).insert(kdb.Box(0, 0, 1000, 1000))
-    top.shapes(cont).insert(kdb.Box(400, 400, 560, 560))  # 400 margin >= 70
-    path = tmp_path / "sg13g2_activ_enclosing_cont_clean.gds"
-    layout.write(str(path))
-
-    report = run_drc(str(path), "sg13g2")
-
-    assert report["status"] == "clean"
-    assert report["violation_count"] == 0
 
 
 # --- issue #2688: `Cnt.c`'s `.join(activ_mask)` + square-contact selection --
@@ -7144,66 +7192,6 @@ def test_run_drc_rejects_bad_other_layer_selection(tmp_path, monkeypatch):
         _patch_synthetic_deck(monkeypatch, [rule])
         with pytest.raises(DrcError, match=rule.id):
             run_drc(str(path), "synthetic")
-
-
-def test_run_drc_sg13g2_gatpoly_enclosing_cont_clean(tmp_path):
-    """A Cont shape enclosed by its GatPoly landing region with >= 70 dbu
-    margin on every side passes `gatpoly.enclosing.cont.1`."""
-    layout = kdb.Layout()
-    top = layout.create_cell("TOP")
-    gatpoly = layout.layer(5, 0)
-    layout.set_info(gatpoly, kdb.LayerInfo(5, 0, "GatPoly.drawing"))
-    cont = layout.layer(6, 0)
-    layout.set_info(cont, kdb.LayerInfo(6, 0, "Cont.drawing"))
-    top.shapes(gatpoly).insert(kdb.Box(0, 0, 1000, 1000))
-    top.shapes(cont).insert(kdb.Box(400, 400, 560, 560))  # 400 margin >= 70
-    path = tmp_path / "sg13g2_gatpoly_enclosing_cont_clean.gds"
-    layout.write(str(path))
-
-    report = run_drc(str(path), "sg13g2")
-
-    assert report["status"] == "clean"
-    assert report["violation_count"] == 0
-
-
-def test_run_drc_sg13g2_metal1_enclosing_via1_clean(tmp_path):
-    """A Via1 shape enclosed by its Metal1 landing pad with >= 10 dbu margin
-    on every side passes `metal1.enclosing.via1.1`."""
-    layout = kdb.Layout()
-    top = layout.create_cell("TOP")
-    metal1 = layout.layer(8, 0)
-    layout.set_info(metal1, kdb.LayerInfo(8, 0, "Metal1.drawing"))
-    via1 = layout.layer(19, 0)
-    layout.set_info(via1, kdb.LayerInfo(19, 0, "Via1.drawing"))
-    top.shapes(metal1).insert(kdb.Box(0, 0, 1000, 1000))
-    top.shapes(via1).insert(kdb.Box(400, 400, 590, 590))  # 400 margin >= 10
-    path = tmp_path / "sg13g2_metal1_enclosing_via1_clean.gds"
-    layout.write(str(path))
-
-    report = run_drc(str(path), "sg13g2")
-
-    assert report["status"] == "clean"
-    assert report["violation_count"] == 0
-
-
-def test_run_drc_sg13g2_metal2_enclosing_via2_clean(tmp_path):
-    """A Via2 shape enclosed by its Metal2 landing pad with >= 5 dbu margin
-    on every side passes `metal2.enclosing.via2.1`."""
-    layout = kdb.Layout()
-    top = layout.create_cell("TOP")
-    metal2 = layout.layer(10, 0)
-    layout.set_info(metal2, kdb.LayerInfo(10, 0, "Metal2.drawing"))
-    via2 = layout.layer(29, 0)
-    layout.set_info(via2, kdb.LayerInfo(29, 0, "Via2.drawing"))
-    top.shapes(metal2).insert(kdb.Box(0, 0, 1000, 1000))
-    top.shapes(via2).insert(kdb.Box(400, 400, 590, 590))  # 400 margin >= 5
-    path = tmp_path / "sg13g2_metal2_enclosing_via2_clean.gds"
-    layout.write(str(path))
-
-    report = run_drc(str(path), "sg13g2")
-
-    assert report["status"] == "clean"
-    assert report["violation_count"] == 0
 
 
 # --- Metal3-TopMetal2 enclosure rules (issue #1243) -----------------------
