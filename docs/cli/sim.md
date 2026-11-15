@@ -4430,14 +4430,17 @@ expression. Verified on ngspice-46:
 ```
 
 The failing card logs `Error: measure  bad  when(WHEN) : Expressions like
-0.5*1.62 are not supported.` and no value is printed. `klt sim` does not lint
-card text (parameterized cards are valid); instead, when the log names the
-failing measurement, that error text is appended to its `measurement`
-diagnostic (`measurement 'bad' produced no value -- ngspice reported:
-Expressions like 0.5*1.62 are not supported.`), bounded in length and
+0.5*1.62 are not supported.` and no value is printed. `klt sim` does not lint a
+card's *right-hand side* (parameterized cards are valid there); instead, when
+the log names the failing measurement, that error text is appended to its
+`measurement` diagnostic (`measurement 'bad' produced no value -- ngspice
+reported: Expressions like 0.5*1.62 are not supported.`), bounded in length and
 available without `keep_artifacts`. An engine `.meas` error that cannot be
 matched to a missing measurement is reported once as a corner-level
-`measurement` diagnostic with severity `warning`; grading is unchanged.
+`measurement` diagnostic with severity `warning`; grading is unchanged. (An
+arithmetic expression in a **signal** position is a different case: it is
+decidable from the card text alone and is linted up front -- see the next
+section.)
 
 A `spice` `.meas ... when v(x)=<val>` card therefore cannot follow
 `corners.supply_v`: write the literal for each corner's supply, or declare the
@@ -4449,6 +4452,48 @@ threshold as `measurements[].crossings` with a supply-relative `level`
 literal time or a `.param` reference. This error follows the same
 `Error: measure <name> ...` log format, so it is attached to the measurement's
 diagnostic in the same way.
+
+### An expression in a `.meas` signal position must be wrapped in `par('...')`
+
+A `.meas` card's *signal* positions -- `WHEN`, `FIND`, `AVG`, `MAX`, `TRIG`,
+`TARG` -- accept only a single vector reference: `v(node)`, `i(source)`, or a
+bare vector name. An arithmetic expression over vectors fails **every**
+corner with `Error: no such vector as v(a)-v(b).` (the quoted
+`no such vector as 'v(a)-v(b)'` form on `AVG`/`TRIG`), while the failing
+measurement itself can even read `status=pass value=0.0` -- a wrong zero, not
+a loud failure.
+
+The same quantity is expressible in the same card: wrap the expression in
+`par('...')`. ngspice lifts the quoted expression into an internal helper
+vector, so `rise=`/`fall=`/`cross=` qualifiers keep working:
+
+```
+.meas tran bad  when v(a)-v(b)=0.3                 ; fails every corner
+.meas tran good when par('v(a)-v(b)')=0.3          ; works
+.meas tran diff avg par('v(a)-v(b)') from=0 to=20u ; works
+```
+
+`klt sim` refuses the bare form at request time (exit 1, before any corner
+runs -- `--dry-run` included), quoting the expression and the exact
+`par('...')` rewrite of the card, and also naming
+`measurements[].crossings` for the cases that form serves better: a whole
+crossing *series*, or a supply-relative `level`
+(`{"frac_of": "vdd", "fraction": 0.5}`) resolved per corner. Note a
+`crossings` entry's `value` is the **count** of crossings, not a time; the
+times are on its `crossings.times[]` array.
+
+Inside `.control` scope -- `analysis_steps[].measurements[].spice` cards --
+`par('...')` is **not** accepted (it is a file-scope `.meas` feature). There
+the remedy is a helper vector: declare the expression as an *intermediate*
+measurement before the card
+(`{"name": "vdiff", "expr": "v(a)-v(b)", "intermediate": true}`; `klt sim`
+emits it as a `let vdiff = v(a)-v(b)` control line, in declared order), then
+reference the name -- `meas tran t when vdiff=0.3`. The request-time refusal
+names that route for step-scoped cards.
+
+Two shapes are worse than a failed measurement and must not be used:
+`when 'v(a)-v(b)'=0.3` and `when {v(a)-v(b)}=0.3` each kill the whole deck
+(`ERROR: fatal error in ngspice, exit(1)`).
 
 ### `FIND ... AT=` at a `dc` sweep's end point
 
