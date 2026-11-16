@@ -2765,7 +2765,8 @@ def _annotate_unrecovered_preflight_reject(
         note += (
             f"; the runner ran klt {identity.get('runner_klt_version')} but the "
             f"client is {identity.get('client_klt_version')} -- update the "
-            "runner image or use a compatible client"
+            "runner image, use a compatible client, or set "
+            'request.batch.runner_version_check to "warn" to submit anyway'
         )
     note += gap_note(identity)
     for corner in corners:
