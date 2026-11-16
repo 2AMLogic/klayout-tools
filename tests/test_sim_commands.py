@@ -10,12 +10,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-import shutil
 from pathlib import Path
 
 import pytest
 
-from helpers.subprocess_fakes import fake_completed
+from helpers.subprocess_fakes import fake_completed, keep_uploaded
 from klayout_tools import _provenance, netlist_batch, sim, sim_batch, sim_commands
 from klayout_tools.sim import SimError, run_sim
 
@@ -317,9 +316,7 @@ class _FakeRunner:
         if "cp" in argv:
             source, dest = argv[argv.index("cp") + 1 : argv.index("cp") + 3]
             if dest.startswith("s3://"):
-                kept = self.keep_dir / dest.rsplit("/", 1)[-1]
-                shutil.copyfile(source, kept)
-                self.uploads[kept.name] = kept
+                self.uploads.update(keep_uploaded(argv, source, dest, self.keep_dir))
             elif source.endswith("/status.json"):
                 return fake_completed(
                     stdout=json.dumps(

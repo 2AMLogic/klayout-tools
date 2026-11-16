@@ -835,7 +835,8 @@ When a device name is not one of the curated devices, supply it explicitly:
 The converter recognises four device families through that same curated
 table, never a second, independent device-name mapping — MOS, resistor,
 capacitor, and bipolar (issue #1130 extended the original, MOS-only #280
-converter), plus sky130's junction diodes (issue #4319, below). See `netlist_normalize.py`'s module docstring for the full
+converter), plus sky130's junction diodes (issue #4319) and sg13g2's antenna diodes
+(issue #5491) — both below. See `netlist_normalize.py`'s module docstring for the full
 per-family rationale. It is deliberately narrow and loud (a wrong
 parameter/unit mapping into a sign-off tool must never pass silently):
 
@@ -987,8 +988,20 @@ emits. `area` is um² and `perim` (alias `pj`) um under sky130's ambient
 `.option scale` for bare numbers (`area=1 perim=4`); suffixed/exponent literals
 are SI (`area=1p perim=4u`). Either may be omitted (class default). Anode is the
 first node, cathode the second, and polarity is compared. `mult`/`m` > 1 is
-rejected like resistors/capacitors. Other decks' diodes are not mapped, and
-`device_map`'s `kind` enum has no `diode`.
+rejected like resistors/capacitors. `device_map`'s `kind` enum has no `diode`.
+
+**sg13g2 antenna diodes** (issue #5491). `dantenna`/`dpantenna` resolve from
+their PDK subcircuit names, which on this deck *are* the device-class names.
+Unlike sky130's cells these take `l`/`w` rather than `area`/`perim`, so
+`X<n> anode cathode dantenna l=4.5U w=4.5U` becomes `D<n> anode cathode
+dantenna A=20.25P P=18U` — area `l·w` and perimeter `2(l+w)`, the elementary
+inverse of the equivalent-rectangle recovery `klt extract --pdk` uses when it
+*writes* that call (see `extract.md` → "SPICE model binding"), so an
+extract-written netlist read back here compares on exactly the area and
+perimeter the extractor measured. Both dimensions must be given together; a
+call stating neither leaves `A`/`P` at the class default rather than assuming
+the subcircuit's own `l=780n w=780n` defaults. `mult`/`m` > 1 is rejected as
+above. Other decks' diodes are not mapped.
 
 Anything outside that union — including a subcircuit whose real upstream
 name differs from the deck's device-class label and has no curated entry yet
@@ -2639,7 +2652,7 @@ section this engine buckets rather than fully structures:
 | `abstract_cells` | array\<string\> | Issue #2853. Present **only** when the request gave a non-empty `layout.abstract_cells`, and omitted otherwise, so every other report is unchanged. The cell-name globs, as given. `--check --rerun` replays it. |
 | `abstract_cell_lef` | array\<string\> | Issue #2853. Present **only** when the request gave a non-empty `layout.abstract_cell_lef`: the LEF paths, as given (unresolved). `--check --rerun` replays it. |
 | `abstracted_cells` | array\<object\> | Issue #2853. Present **only** alongside `abstract_cells`. Inline extraction's per-matched-cell-type report, the same entries `klt extract` emits under this name (`{"cell", "instance_count", "pin_count", "resolution_source", "lef_path"}`). `[]` when the globs matched no instantiated cell. |
-| `reference` | object \| string | The resolved reference netlist as the same `{"path", "scope"}` envelope as `layout` (issue #4984, `schema_version` 3), built from the file `environment.reference_sha256` hashes — no longer the request's verbatim, request-relative echo, which only re-hashed from the directory it was relative to. `--check` resolves it from the report's own repo, independent of cwd. A report predating v3 (and a `klayout-runset` report) carries the bare request string and is still checked as before. |
+| `reference` | object \| string | The resolved reference netlist as the same `{"path", "scope"}` envelope as `layout` (issue #4984, `schema_version` 3), built from the file `environment.reference_sha256` hashes — no longer the request's verbatim, request-relative echo, which only re-hashed from the directory it was relative to. `--check` resolves it from the report's own repo, independent of cwd. A report predating v3 (and a `klayout-runset` report) carries the bare request string and is still checked as before. **One root per report (issue #5631):** `layout` and `reference` are normalised against a single repo root -- the innermost root containing every input, i.e. the outermost when inputs sit in nested repos (a vendored clone or submodule), falling back to the layout's root for unrelated sibling repos (the other input then reads `scope: "external"`). Residual limitation: `--check` anchors on the report's own nearest `.git`, so a report committed *inside* the nested repo while its inputs are anchored to the outer root does not re-verify; a report written before this rule with an inner-relative `reference` must be regenerated. |
 | `top` | string | The compared top circuit's name (the layout side's resolved top cell/circuit name). |
 | `reference_top` | string | The **reference** side's resolved top circuit name (issue #1205). Equal to `top` for the ordinary compare, but different by construction for an LVS negative control — a deliberately-broken `<cell>_shorted` layout compared against the *intact* `<cell>`'s reference netlist. Recording only one top made such a report unreconstructable by `--check --rerun` (it applied the single `top` to both sides and failed with "top cell/subcircuit not found in reference netlist"). |
 | `reference_conversion` | object | Issue #2673. Present **only** for `reference.form: "subckt-call"` or `"gate-level-verilog"` (omitted for every other form). `subckt-call`: `{"form": "subckt-call", "deck": <string\|null>, "device_map": <object\|null>}`; `gate-level-verilog` (issue #4353): `{"form": "gate-level-verilog", "library": <string\|null>, "pdk": <string\|null>, "pdk_root": <string\|null>, "pin_order_files": <array of resolved absolute paths\|null>}`. The request-side context the reference conversion depends on, echoed as given. It lets `--check --rerun` re-convert the reference (and, for `subckt-call`, rebuild its placeholder-value exclusions); a report without it replays the reference as plain-element SPICE, as before. |
