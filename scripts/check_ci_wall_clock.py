@@ -115,13 +115,13 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from ci_wall_clock_attempt import (  # noqa: E402
+from ci_wall_clock_attempt import (
     AttemptSelection,
     current_attempt,
     select_attempt,
 )
-from ci_wall_clock_attempt import as_json as attempt_as_json  # noqa: E402
-from ci_wall_clock_guidance import breach_guidance  # noqa: E402
+from ci_wall_clock_attempt import as_json as attempt_as_json
+from ci_wall_clock_guidance import breach_guidance
 
 # The budget file's own schema (`.github/ci-wall-clock-budget.json`). Still 1:
 # #2615 only *added* an optional `rolling_window` block, so a budget file

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from klayout_tools import synthesize
+from klayout_tools import synthesize, synthesize_library_hint
 from klayout_tools.place_and_route import _reject_unsupported_netlist_constructs
 from test_synthesize import (
     _abs_path,
@@ -158,3 +158,110 @@ def test_real_yosys_gf180_7t_all_three_netlist_regressions(tmp_path):
     assert report["timing"]["delay_target_ps"] == 81380
     assert "unsupported_cell_library" not in report["warnings"]["by_category"]
     _reject_unsupported_netlist_constructs(netlist_path)
+
+
+def test_near_miss_cell_library_hint_names_closest_verified_key(tmp_path, monkeypatch):
+    """Issue #5074's confirmed cause: `_TIE_CELLS` is exact-match, so
+    `asap7sc7p5t_28_RVT` misses the verified `asap7sc7p5t_28_R` and silently
+    loses `setundef -zero`/`hilomap`. The warning must name the near miss."""
+    library = "asap7sc7p5t_28_RVT"
+    _stub_install(tmp_path, monkeypatch, library)
+    assert library not in synthesize._TIE_CELLS
+
+    report = synthesize.run_synthesize(_request(tmp_path, library))
+
+    text = next(
+        rep["text"]
+        for rep in report["warnings"]["representatives"]
+        if rep["category"] == "unsupported_cell_library"
+    )
+    assert "closest cell_library with a verified tie-cell mapping is" in text
+    assert "'asap7sc7p5t_28_R'" in text
+    # Every verified key is disclosed, not just the closest one.
+    for key in synthesize._TIE_CELLS:
+        assert key in text
+
+
+def test_unknown_cell_library_hint_lists_keys_without_claiming_a_closest(
+    tmp_path, monkeypatch
+):
+    """A genuinely unrelated name has no near miss: the hint must say so
+    rather than suggesting an unrelated library."""
+    library = "totally_unrelated_xyz"
+    _stub_install(tmp_path, monkeypatch, library)
+
+    report = synthesize.run_synthesize(_request(tmp_path, library))
+
+    text = next(
+        rep["text"]
+        for rep in report["warnings"]["representatives"]
+        if rep["category"] == "unsupported_cell_library"
+    )
+    assert "No verified tie-cell mapping has a name close to this one" in text
+    assert "the keys that do have one are:" in text
+    for key in synthesize._TIE_CELLS:
+        assert key in text
+
+
+def test_cell_library_hint_is_best_effort(tmp_path, monkeypatch):
+    """Mirrors `pdk_cells._other_variants_hint`: a discovery failure must
+    never mask the original `unsupported_cell_library` text."""
+    library = "asap7sc7p5t_28_RVT"
+    _stub_install(tmp_path, monkeypatch, library)
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("hint discovery exploded")
+
+    monkeypatch.setattr(synthesize_library_hint.difflib, "get_close_matches", _boom)
+
+    report = synthesize.run_synthesize(_request(tmp_path, library))
+
+    text = next(
+        rep["text"]
+        for rep in report["warnings"]["representatives"]
+        if rep["category"] == "unsupported_cell_library"
+    )
+    assert f"cell_library '{library}' has no verified mapping for:" in text
+    assert "setundef -zero/hilomap" in text
+    assert "These capabilities were skipped." in text
+    assert "tie-cell mapping is" not in text
+
+
+def test_supported_cell_library_emits_no_tie_cell_hint(tmp_path, monkeypatch):
+    """A key that is in `_TIE_CELLS` gets no hint at all -- and, with its
+    `-constr` entry present too, no `unsupported_cell_library` warning."""
+    _stub_install(tmp_path, monkeypatch, _LIBRARY)
+
+    report = synthesize.run_synthesize(_request(tmp_path, _LIBRARY))
+
+    assert "unsupported_cell_library" not in report["warnings"]["by_category"]
+    assert "verified tie-cell mapping" not in str(report["warnings"])
+
+
+def test_library_capability_warnings_is_a_leaf_of_its_tables():
+    """`synthesize_library_hint` takes both tables as arguments rather than
+    importing `synthesize`, so the disclosure is testable without a run and
+    the module stays import-leaf (issue #5074)."""
+    empty = synthesize_library_hint.library_capability_warnings(
+        "anything", tie_cells={}, constr_inputs={"anything"}
+    )
+    assert "closest cell_library" not in empty["unsupported_cell_library"]
+    assert "setundef" in empty["unsupported_cell_library"]
+    # No tie-cell keys to disclose at all -> the hint stays empty rather than
+    # claiming a closest match.
+    assert "the keys that do have one are" not in empty["unsupported_cell_library"]
+
+    supported = synthesize_library_hint.library_capability_warnings(
+        "acme", tie_cells={"acme"}, constr_inputs={"acme"}
+    )
+    assert supported == {}
+
+
+def test_tie_cell_keys_hint_is_pure_and_bounded():
+    hint = synthesize_library_hint.tie_cell_keys_hint(
+        "asap7sc7p5t_28_RVT", ["asap7sc7p5t_28_R", "sky130_fd_sc_hd"]
+    )
+    assert "is 'asap7sc7p5t_28_R'" in hint
+    # Keys are disclosed in sorted order, independent of the argument's own.
+    assert "are: asap7sc7p5t_28_R, sky130_fd_sc_hd --" in hint
+    assert synthesize_library_hint.tie_cell_keys_hint("whatever", []) == ""
