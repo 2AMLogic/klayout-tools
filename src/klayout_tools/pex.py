@@ -222,6 +222,7 @@ from . import env_provenance, output_lock, pex_async, pex_sim_evidence
 from ._jsonnum import is_number
 from ._paths import _resolve_relative, fold_spice_continuations
 from ._provenance import content_hash, sha256_file
+from ._text import read_text as _read_text
 from .coverage import (
     REASON_NO_DELTA_ROWS,
     build_check_coverage,
@@ -240,7 +241,6 @@ from .pex_netlist_text import (
     _dut_declares_a_circuit,
     _expand_reference_includes,
     _has_include_card,
-    _read_text,
     _reference_is_hierarchical,
     _subckt_interfaces,
 )
