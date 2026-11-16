@@ -390,6 +390,7 @@ def derive_label_ports(
                     "up_to": landing["up_to"],
                     "via_count": landing["via_count"],
                     "via_array": landing["via_array"],
+                    "pad_sides_um": landing["pad_sides_um"],
                     "candidates_evaluated": landing["candidates_evaluated"],
                     "truncated": landing["truncated"],
                 },

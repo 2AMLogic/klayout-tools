@@ -2870,6 +2870,7 @@ and the rules come from the active deck:
 | any footprint overlaps a `keepout_layers` shape | `keep_out` |
 | a cut is closer than the via layer's `space` rule to an existing cut | `via_spacing` |
 | a pad is closer than its metal's `space` rule to a *different* net | `clearance` |
+| a pad, merged with everything drawn on its own layer, leaves a notch narrower than the layer's `space` rule (the port net's own metal included: a pad wider than the run it lands on protrudes past it and notches the merged polygon) | `self_notch` |
 
 The port is reported on the net's own layer at the chosen point, so the
 router's existing via-drop draws the stack there. Candidates are ranked by
@@ -2894,8 +2895,11 @@ by via layer `"layer/datatype"`) and the router draws the same array.
 **Response (additive).** Blocks that used the option carry
 `blocks[].derived_ports[]`:
 `{name, label_um: {x, y}, layer, landing: null | {x_um, y_um, layer, up_to,
-via_count, via_array, candidates_evaluated, truncated}}` (`via_count` is the
-total number of cuts: hops x rows x cols; `via_array` is `[rows, cols]`).
+via_count, via_array, pad_sides_um, candidates_evaluated, truncated}}` (`via_count` is the
+total number of cuts: hops x rows x cols; `via_array` is `[rows, cols]`;
+`pad_sides_um` maps each pad layer to the pad side the search certified, keyed
+`"layer/datatype"` like `ports[].via_array.pitch_um`, so a caller drawing the
+ladder itself draws exactly the footprint that was checked).
 `schema_version` is unchanged.
 
 ## Worked example

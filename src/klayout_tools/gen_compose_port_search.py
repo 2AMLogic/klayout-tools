@@ -124,6 +124,37 @@ def _box(x: int, y: int, half: int, grow: int = 0) -> Any:
     return kdb.Region(kdb.Box(x - h, y - h, x + h, y + h))
 
 
+def _pad_self_notch(
+    x: int,
+    y: int,
+    half: int,
+    spacing_dbu: int,
+    layer_region: Any,
+) -> bool:
+    """Whether inserting the pad footprint at ``(x, y)`` into the *whole*
+    layer's merged metal leaves a same-polygon notch narrower than
+    ``spacing_dbu`` (#5608). A pad wider than the run it lands on protrudes
+    past it, and the merged polygon's concave gap is a real ``klt drc``
+    finding -- a deck ``space`` check is net-agnostic *and* intra-polygon --
+    even though both facing edges are the port net's own metal. Overlap
+    alone is never a violation: the pad is *meant* to merge with the net it
+    lands on. ``False`` when ``spacing_dbu <= 0`` (no ``space`` rule to
+    test, mirroring ``gen_compose_routing._pad_self_notch_violation_um``)
+    or when the pad touches no metal on this layer (nothing to notch)."""
+    import klayout.db as kdb
+
+    if spacing_dbu <= 0:
+        return False
+    pad = kdb.Region(kdb.Box(x - half, y - half, x + half, y + half))
+    if (layer_region & pad).is_empty():
+        return False
+    combined = kdb.Region()
+    combined.insert(layer_region)
+    combined.insert(pad)
+    combined.merge()
+    return not combined.notch_check(spacing_dbu).is_empty()
+
+
 def _first_rejection(
     x: int,
     y: int,
@@ -132,6 +163,7 @@ def _first_rejection(
     space_dbu: dict[_LayerPair, int],
     obstacles: dict[_LayerPair, Any],
     keepout: Any,
+    self_region: dict[_LayerPair, Any],
 ) -> tuple[str, str] | None:
     """``(category, detail)`` for the first rule the candidate breaks, or
     ``None`` when the whole stack at ``(x, y)`` is legal."""
@@ -148,6 +180,12 @@ def _first_rejection(
     for pair, half in pad_half.items():
         if not (obstacles[pair] & _box(x, y, half, space_dbu[pair])).is_empty():
             return "clearance", f"pad {pair[0]}/{pair[1]} too close to another net"
+    for pair, half in pad_half.items():
+        if _pad_self_notch(x, y, half, space_dbu[pair], self_region[pair]):
+            return (
+                "self_notch",
+                f"pad {pair[0]}/{pair[1]} notches the net's own metal",
+            )
     return None
 
 
@@ -215,18 +253,23 @@ def _stack_obstacles(
     net: Any,
     pad_half: dict[_LayerPair, int],
     cut_half: dict[_LayerPair, int],
-) -> dict[_LayerPair, Any]:
-    """Per-layer regions the landing must stay clear of: every *other* net's
-    metal under a pad, and every existing cut under a new cut."""
+) -> tuple[dict[_LayerPair, Any], dict[_LayerPair, Any]]:
+    """``(obstacles, self_region)`` per layer: the regions the landing must
+    stay clear of -- every *other* net's metal under a pad, and every
+    existing cut under a new cut -- plus the *full* merged per-layer region
+    each pad lands in (the self-notch test needs the whole layer, not the
+    net-subtracted obstacle, #5608)."""
     import klayout.db as kdb
 
     obstacles: dict[_LayerPair, Any] = {}
+    self_region: dict[_LayerPair, Any] = {}
     for pair in pad_half:
         layer_region = nets.flat.get(pair, kdb.Region())
         obstacles[pair] = layer_region - nets.net_shapes(net, pair)
+        self_region[pair] = layer_region
     for pair in cut_half:
         obstacles[pair] = nets.flat.get(pair, kdb.Region())
-    return obstacles
+    return obstacles, self_region
 
 
 def _keepout_region(nets: _MacroNets, layers: list[_LayerPair]) -> Any:
@@ -284,7 +327,7 @@ def _search_landing(
         for pair in {**pad_half, **cut_half}
     }
 
-    obstacles = _stack_obstacles(nets, net, pad_half, cut_half)
+    obstacles, self_region = _stack_obstacles(nets, net, pad_half, cut_half)
     keepout = _keepout_region(nets, access["keepout_layers"])
 
     mfg = mfg_grid_um(_pdk_family(variant), net_layer) or dbu
@@ -298,11 +341,16 @@ def _search_landing(
     candidates, truncated = _grid_candidates(
         net_region, label_xy, step, access["max_candidates"], mfg_dbu
     )
-    counts: dict[str, int] = {"keep_out": 0, "via_spacing": 0, "clearance": 0}
+    counts: dict[str, int] = {
+        "keep_out": 0,
+        "via_spacing": 0,
+        "clearance": 0,
+        "self_notch": 0,
+    }
     samples: dict[str, list[str]] = {key: [] for key in counts}
     for x, y in candidates:
         rejection = _first_rejection(
-            x, y, pad_half, cut_half, space_dbu, obstacles, keepout
+            x, y, pad_half, cut_half, space_dbu, obstacles, keepout, self_region
         )
         if rejection is None:
             return {
@@ -314,6 +362,9 @@ def _search_landing(
                 "via_array": list(array),
                 "via_pitch_um": {
                     f"{via[0]}/{via[1]}": pitch for via, pitch in pitches_um.items()
+                },
+                "pad_sides_um": {
+                    f"{pair[0]}/{pair[1]}": side for pair, side in pads_um.items()
                 },
                 "pad_side_um": pads_um.get(net_layer, 0.0),
                 "candidates_evaluated": candidates.index((x, y)) + 1,
