@@ -6442,6 +6442,33 @@ def test_macro_with_a_caller_supplied_verilog_blackbox_is_read_as_lib(
     )
 
 
+def test_lefless_macro_with_a_blackbox_runs_and_echoes_absent_lef(
+    tmp_path, monkeypatch
+):
+    """Issue #5612: a macro with a `verilog_blackbox` and no `lef` validates,
+    keys its instance count on the blackbox module, and discloses the missing
+    abstract as `lef.scope == "absent"`."""
+    request_path = _macro_success_env(
+        tmp_path,
+        monkeypatch,
+        macros=[{"verilog_blackbox": "sram_bb.v"}],
+        liberty_cells={"sky130_fd_sc_hd__xor2_1": 7.5},
+    )
+    _write(
+        tmp_path / "sram_bb.v",
+        "(* blackbox *)\nmodule sram_8x8 (D, Q);\ninput D;\noutput Q;\nendmodule\n",
+    )
+    _stub_yosys_success(monkeypatch, module_stats=_MACRO_MODULE_STATS)
+
+    report = run_synthesize(request_path)
+
+    assert report["macros"][0]["lef"] == {"path": None, "scope": "absent"}
+    assert report["macros"][0]["blackbox_source"] == "verilog_blackbox"
+    assert report["macro_instance_counts_by_type"] == {"sram_8x8": 1}
+    assert report["macro_instance_count"] == 1
+    assert "sram_8x8" in report["cells_without_area"]
+
+
 def test_no_macros_field_emits_no_macro_lines(tmp_path, monkeypatch):
     """Purely additive: a request written before this field existed produces
     the same script it always did."""

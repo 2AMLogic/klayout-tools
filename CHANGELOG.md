@@ -14,6 +14,12 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt synthesize` accepts an abstract-less macro** (#5612, 2026-11-16):
+  a `request.macros[]` entry may omit `lef` when it gives `verilog_blackbox`;
+  identity comes from `cell` or the blackbox's single module, the instance
+  count is keyed on it, and the response echoes `lef` as
+  `{"path": null, "scope": "absent"}`. Additive; `schema_version` unchanged.
+  `klt sta` and `klt place-and-route` still require `lef`.
 - **`klt mcp serve` serves the `docs/schemas/` JSON contract as MCP
   resources** (#5420, 2026-11-13): the server now advertises the resources
   capability and lists one resource per `docs/schemas/*.schema.json` at

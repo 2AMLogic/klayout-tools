@@ -782,6 +782,9 @@ layouts" and "DEF-derived declared pins" sections for the full mechanism.
 
 ## Hard-macro placement (`request.macros`)
 
+`lef` stays required here: the LEF-less (blackbox-only) macro declaration is
+`klt synthesize`-only (issue #5612), and a LEF-less entry is a request error.
+
 Issue #438 (Epic #393 Phase 2 Capability A) turns the "macro placement" line
 in "Out of scope" below into an additive request field, closing that gap
 exactly the way its own note anticipated. `request.macros` is an optional

@@ -32,7 +32,12 @@ Every verb accepts these fields with identical names and semantics:
     omitted -- so a typo is a request error rather than a silent
     "macro you declared is not the macro you supplied".
 ``lef``
-    **Required.** The macro's LEF abstract. Must declare exactly one
+    **Required** -- except in ``klt synthesize``, which alone accepts an
+    entry that omits it (issue #5612) when ``verilog_blackbox`` is given: the
+    macro's identity then comes from ``cell`` / the blackbox's declared
+    module, and the response echoes ``lef`` as ``{"path": null, "scope":
+    "absent"}``. ``klt sta`` and ``klt place-and-route`` still require it.
+    When given, it is the macro's LEF abstract and must declare exactly one
     ``MACRO``. This is the field that fixes ``ORD-2013``.
 ``lib``
     Optional. A **per-corner map** of liberty paths, ``{"<corner>":
@@ -372,24 +377,69 @@ def check_blackbox_declares_cell(
         )
 
 
+def _resolve_lefless_identity(
+    entry: dict[str, Any],
+    blackbox: str | None,
+    *,
+    label: str,
+    error_cls: type[Exception],
+) -> str:
+    """Cell name of an abstract-less macro (issue #5612): ``cell`` when given
+    (required to be a module the ``verilog_blackbox`` declares), else the
+    blackbox's single declared module. Several modules and no ``cell`` is an
+    error listing them -- never a guess."""
+    if blackbox is None:
+        raise error_cls(
+            f"{label} gives no lef, so {label}.verilog_blackbox is required: "
+            "without a LEF the blackbox is the only source of the macro's "
+            "identity and ports"
+        )
+    with open(blackbox, encoding="utf-8", errors="replace") as handle:
+        modules = verilog_declared_modules(handle.read())
+    cell = entry.get("cell")
+    if cell is not None:
+        if not isinstance(cell, str) or not cell:
+            raise error_cls(f"{label}.cell must be a non-empty string when given")
+        if cell not in modules:
+            raise error_cls(
+                f"{label}.cell '{cell}' is not a module its verilog_blackbox "
+                f"declares (declared: {modules})"
+            )
+        return cell
+    if len(modules) != 1:
+        raise error_cls(
+            f"{label} gives no lef and no cell, and its verilog_blackbox "
+            f"declares {len(modules)} modules {modules}; set {label}.cell to "
+            "the macro's module"
+        )
+    return modules[0]
+
+
 def validate_macros(
     macros: Any,
     request_dir: str,
     *,
     error_cls: type[Exception],
     field: str = "request.macros",
+    allow_missing_lef: bool = False,
 ) -> list[dict[str, Any]]:
     """Validate the shared, placement-free ``request.macros`` array that
     ``klt synthesize`` and ``klt sta`` accept, returning one normalized
     entry per macro::
 
-        {"cell": str, "lef": abs, "lib": {corner: abs} | None,
+        {"cell": str, "lef": abs | None, "lib": {corner: abs} | None,
          "gds": abs | None, "verilog_blackbox": abs | None,
          "width_um": float | None, "height_um": float | None}
 
     Returns ``[]`` when the field is omitted or ``None`` -- purely additive,
     so every request written before this field existed behaves exactly as
     it did.
+
+    ``allow_missing_lef`` (default ``False``; only ``klt synthesize`` passes
+    ``True``, issue #5612) lets an entry omit ``lef`` when it gives a
+    ``verilog_blackbox``: ``lef`` is then ``None`` and ``width_um`` /
+    ``height_um`` / ``pins`` are ``None`` / ``None`` / ``[]``. A ``lef`` that is
+    present but unusable is still an error.
 
     ``cell`` values must be unique: two entries for one master would make
     "which liberty is this cell's" ambiguous, and the duplicate is always a
@@ -408,15 +458,6 @@ def validate_macros(
         label = f"{field}[{index}]"
         if not isinstance(entry, dict):
             raise error_cls(f"{label} must be an object")
-        lef_path, macro_record = resolve_macro_lef(
-            entry, label=label, request_dir=request_dir, error_cls=error_cls
-        )
-        cell = resolve_macro_cell_name(
-            entry,
-            label=label,
-            lef_cell_name=macro_record["name"],
-            error_cls=error_cls,
-        )
         blackbox = resolve_optional_macro_file(
             entry,
             "verilog_blackbox",
@@ -424,10 +465,26 @@ def validate_macros(
             request_dir=request_dir,
             error_cls=error_cls,
         )
-        if blackbox is not None:
-            check_blackbox_declares_cell(
-                blackbox, cell, label=label, error_cls=error_cls
+        lef_path: str | None
+        if allow_missing_lef and entry.get("lef") is None:
+            lef_path, macro_record = None, {}
+            cell = _resolve_lefless_identity(
+                entry, blackbox, label=label, error_cls=error_cls
             )
+        else:
+            lef_path, macro_record = resolve_macro_lef(
+                entry, label=label, request_dir=request_dir, error_cls=error_cls
+            )
+            cell = resolve_macro_cell_name(
+                entry,
+                label=label,
+                lef_cell_name=macro_record["name"],
+                error_cls=error_cls,
+            )
+            if blackbox is not None:
+                check_blackbox_declares_cell(
+                    blackbox, cell, label=label, error_cls=error_cls
+                )
         validated.append(
             {
                 "cell": cell,

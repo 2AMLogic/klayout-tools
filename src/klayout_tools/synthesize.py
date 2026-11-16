@@ -2071,7 +2071,9 @@ def _validate_macros(macros: Any, request_dir: str) -> list[dict[str, Any]]:
     across three verbs, and the only thing that differs per verb is which
     exception class a bad request raises.
     """
-    return macro_spec.validate_macros(macros, request_dir, error_cls=SynthesizeError)
+    return macro_spec.validate_macros(
+        macros, request_dir, error_cls=SynthesizeError, allow_missing_lef=True
+    )
 
 
 def _macro_blackbox_inputs(
@@ -2238,7 +2240,8 @@ def _macro_area_warning(
                 " "
                 + ", ".join(without_lib)
                 + " has no macro liberty (response.macros[].lib is null: "
-                "LEF-only or verilog_blackbox), so no area is available "
+                "LEF-only, verilog_blackbox-only or abstract-less), so no "
+                "area is available "
                 "for it here."
             )
         warnings["macro_area_excluded"] = text
