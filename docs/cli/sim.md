@@ -287,6 +287,25 @@ the invoking directory or `$HOME` happened to carry a `.spiceinit` of its
 own). ngspice-only: the `xyce` engine has no equivalent init-file lookup, so
 `options.ngspice_init` is accepted but has no effect when `engine: "xyce"`.
 
+**What was in effect is recorded (issue
+[#5648](https://github.com/2AMLogic/klayout-tools/issues/5648)).** A run-directory
+`.spiceinit` *replaces* `$HOME/.spiceinit` rather than merging with it, and
+klt also writes one on requests that declared nothing whenever it pins the
+thread count (`options.threads_per_worker`, or `local-parallel` with more than
+one worker and unit) — so the same request can read the host's ambient init on
+`--backend local` and ignore it on `--backend local-parallel`. The report's
+`environment.ngspice_init` is `{source, lines, sha256}` (`null` for xyce);
+`source` is `"request"`, `"thread_pin"`, `"home"`, `"none"`, or `"runner"` for
+`remote`/`batch` (resolved by the worker). It reflects what ngspice actually
+reads, never what the request merely declared, and carries no absolute path.
+Two runs whose `sha256` differ read different init files. See
+`docs/json-contract.md`.
+
+Two stderr warnings (stdout JSON unaffected, silent when no
+`$HOME/.spiceinit` exists): the run **inherits** an ambient `$HOME/.spiceinit`
+(declare `options.ngspice_init` to make the request self-contained), or klt's
+own `.spiceinit` **replaced** it rather than merging.
+
 ### Transient noise coverage (ngspice, [#2985](https://github.com/2AMLogic/klayout-tools/issues/2985))
 
 On the **ngspice** engine a transient (`analysis.kind: "tran"`, or a `tran`
