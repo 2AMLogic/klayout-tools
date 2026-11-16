@@ -105,6 +105,7 @@ from . import (
     sim_energy,
     sim_eye,
     sim_injected,
+    sim_mismatch_declarations,
     sim_mismatch_gate,
     sim_noise,
     sim_op_args,
@@ -3602,6 +3603,9 @@ def _prepare_sim_request(
         models.get("pdk"),
         backend=backend,
         explicit_points=explicit_points_wire is not None,
+        gate_context=sim_mismatch_declarations.gate_context(
+            models, request_dir, corner_points, _resolve_lib_ref
+        ),
     )
 
     # Issue #3919: `.subckt` override of the include closure. Applied on top of
@@ -5482,41 +5486,21 @@ def _maybe_gate_instances(
     *,
     backend: str,
     explicit_points: bool,
+    gate_context: tuple[Any, ...] = (),
 ) -> tuple[str, dict[str, Any] | None]:
     """Apply ``request.monte_carlo.instances`` when present (issue #2995):
-    returns ``(netlist_to_dispatch, monte_carlo_info)``, with the gating
-    report attached as ``instance_mismatch``; unchanged when absent."""
-    if mc_spec is None or "instances" not in mc_spec:
-        return netlist_path, monte_carlo_info
-    gated_path, gating = _apply_mismatch_instance_gating(
-        netlist_path,
-        mc_spec,
-        monte_carlo_info,
-        pdk,
-        backend=backend,
-        explicit_points=explicit_points,
-    )
-    if monte_carlo_info is not None:
-        monte_carlo_info = {**monte_carlo_info, "instance_mismatch": gating}
-    return gated_path, monte_carlo_info
-
-
-def _apply_mismatch_instance_gating(
-    netlist_path: str,
-    mc_spec: dict[str, Any],
-    monte_carlo_info: dict[str, Any] | None,
-    pdk: str | None,
-    *,
-    backend: str,
-    explicit_points: bool,
-) -> tuple[str, dict[str, Any]]:
-    """Resolve ``request.monte_carlo.instances`` (issue #2995): validate it,
-    and write a gated copy of the netlist in which every instance not
-    selected has the PDK's mismatch switch shadowed to ``0``. Returns
-    ``(gated_netlist_path, report)``; raises :class:`SimError` for anything
-    unsupported, before any corner is dispatched."""
+    dispatch a gated copy of the netlist in which every instance not selected
+    has its local mismatch switched off, by whichever mechanism the PDK family
+    uses -- a shadowed model-level ``.param`` inside a generated wrapper
+    subcircuit, or ``<param>=0`` on the instance line itself (#5487; see
+    :mod:`klayout_tools.sim_mismatch_gate`). Returns ``(netlist_to_dispatch,
+    monte_carlo_info)`` with the gating report attached as
+    ``instance_mismatch``, unchanged when absent; raises :class:`SimError` for
+    anything unsupported, before any corner is dispatched."""
     import atexit
 
+    if mc_spec is None or "instances" not in mc_spec:
+        return netlist_path, monte_carlo_info
     if backend in _OFFHOST_BACKENDS or explicit_points:
         raise SimError(
             "request.monte_carlo.instances is only supported on local "
@@ -5531,8 +5515,9 @@ def _apply_mismatch_instance_gating(
         )
     family = pdk_variant_family(pdk) if pdk else None
     switch = sim_mismatch_gate.MISMATCH_SWITCH.get(family or "")
-    if switch is None:
-        known_pdks = sorted(sim_mismatch_gate.MISMATCH_SWITCH)
+    instance_param = sim_mismatch_gate.MISMATCH_INSTANCE_PARAM.get(family or "")
+    if switch is None and instance_param is None:
+        known_pdks = sim_mismatch_gate.MISMATCH_GATED_FAMILIES
         raise SimError(
             "request.monte_carlo.instances needs models.pdk naming a PDK with "
             f"a known mismatch switch ({', '.join(known_pdks)}); got {pdk!r}"
@@ -5543,7 +5528,12 @@ def _apply_mismatch_instance_gating(
         )
         with open(netlist_path, encoding="utf-8", errors="surrogateescape") as fh:
             text = fh.read()
-        gated, rows = sim_mismatch_gate.gate_netlist(text, include, exclude, switch)
+        declared = sim_mismatch_declarations.collect(
+            netlist_path, instance_param, *gate_context
+        )
+        gated, rows = sim_mismatch_gate.gate_netlist(
+            text, include, exclude, switch, instance_param, declared
+        )
     except (sim_mismatch_gate.GateError, OSError) as exc:
         raise SimError(str(exc)) from exc
     base = os.path.dirname(os.path.abspath(netlist_path))
@@ -5556,14 +5546,17 @@ def _apply_mismatch_instance_gating(
     with open(gated_path, "w", encoding="utf-8", errors="surrogateescape") as fh:
         fh.write(gated)
     report = {
-        "switch": switch,
+        # Whichever gate this run used: the `.param`, or the instance parameter.
+        "switch": switch or instance_param,
         "include": include,
         "exclude": exclude,
         "instances": rows,
         # All excluded: the run must equal the mismatch-off run (negative control).
         "negative_control": not any(r["randomised"] for r in rows),
     }
-    return gated_path, report
+    if monte_carlo_info is not None:
+        monte_carlo_info = {**monte_carlo_info, "instance_mismatch": report}
+    return gated_path, monte_carlo_info
 
 
 def _netlist_overrides_environment(report: Any) -> dict[str, Any]:
