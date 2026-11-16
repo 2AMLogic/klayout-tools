@@ -12409,3 +12409,36 @@ def test_engine_error_message_ppl_0111_alone_is_unchanged():
         "openroad 'place' stage failed: [ERROR PPL-0111] 2 constraint(s) "
         "does not have available slots"
     )
+
+
+def test_merge_gds_view_avoids_read_bytes_write_bytes(tmp_path):
+    """`_merge_gds_view` must not use the 0.30-only `Layout.read_bytes` /
+    `write_bytes` (issue #5768): `klayout` 0.28.x lacks them."""
+    from klayout_tools import place_and_route_gds_merge as merge
+
+    src = kdb.Layout()
+    src.dbu = 0.001
+    top = src.create_cell("blk")
+    top.shapes(src.layer(1, 0)).insert(kdb.Box(0, 0, 100, 100))
+    gds = tmp_path / "view.gds"
+    src.write(str(gds))
+
+    class NoBytesLayout(kdb.Layout):
+        def read_bytes(self, *a, **k):
+            raise AttributeError("read_bytes")
+
+        def write_bytes(self, *a, **k):
+            raise AttributeError("write_bytes")
+
+    class _Kdb:
+        def __getattr__(self, name):
+            return NoBytesLayout if name == "Layout" else getattr(kdb, name)
+
+    main = NoBytesLayout()
+    main.dbu = 0.0005
+    merge._merge_gds_view(_Kdb(), main, str(gds))
+    cell = main.cell("blk")
+    assert cell is not None
+    box = cell.bbox()
+    assert main.dbu == 0.0005
+    assert (box.width(), box.height()) == (200, 200)

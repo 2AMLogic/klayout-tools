@@ -57,7 +57,9 @@ test suite that used them before this split.
 from __future__ import annotations
 
 import re
+import tempfile
 from collections.abc import Iterable
+from pathlib import Path
 from typing import Any
 
 from ._layout import write_layout
@@ -157,7 +159,7 @@ def _merge_gds_view(kdb: Any, main_layout: Any, gds_path: str) -> None:
 
     Reading the incoming view into its own scratch ``Layout`` first,
     rescaling it (only when its DBU actually differs) to
-    ``main_layout.dbu``, and re-serializing it in-memory before the real
+    ``main_layout.dbu``, and re-serializing it (via a temp file) before the real
     merge keeps both sides in one coordinate system by construction: the
     DBU-adoption behavior above can then only ever apply to the scratch
     layout's own (already-rescaled) content, never to ``main_layout``'s
@@ -171,7 +173,13 @@ def _merge_gds_view(kdb: Any, main_layout: Any, gds_path: str) -> None:
         scratch.dbu = main_layout.dbu
     save_opts = kdb.SaveLayoutOptions()
     save_opts.format = "GDS2"
-    main_layout.read_bytes(scratch.write_bytes(save_opts), kdb.LoadLayoutOptions())
+    # A temp-file round trip rather than ``Layout.write_bytes``/``read_bytes``:
+    # ``read``/``write`` exist on every supported klayout, whereas the
+    # in-memory byte API is 0.30-only (issue #5768).
+    with tempfile.TemporaryDirectory() as tmp:
+        scratch_path = str(Path(tmp) / "scratch.gds")
+        scratch.write(scratch_path, save_opts)
+        main_layout.read(scratch_path, kdb.LoadLayoutOptions())
 
 
 def _cell_library_max_overhang_um(
