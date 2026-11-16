@@ -126,7 +126,7 @@ from .sim_batch_features import (
     refusal_diagnostic,
 )
 from .sim_batch_hints import attribute_modelname, hint_existing_fatal, with_runner_hints
-from .sim_batch_reattach import (  # noqa: F401
+from .sim_batch_reattach import (
     _RESUME_INTERRUPTED_GRACE_S,
     _resume_attach_config,
     _resume_or_submit_one_job,
@@ -148,7 +148,7 @@ if TYPE_CHECKING:
 
 # Contract block moved to sim_batch_contract (issue #4065); re-exported so every
 # existing ``sim_batch`` import path keeps working.
-from .sim_batch_contract import (  # noqa: E402, F401
+from .sim_batch_contract import (  # noqa: F401
     _ATTACH_UNSTARTED_GRACE_S,
     _BATCH_AWS_TIMEOUT_S,
     _BATCH_INPUTS_TIMEOUT_S,
@@ -212,12 +212,12 @@ from .sim_batch_contract import (  # noqa: E402, F401
     BatchPollTimeout,
     _batch_job_tool_label,
 )
-from .sim_batch_contract_jobspec import (  # noqa: E402, F401
+from .sim_batch_contract_jobspec import (
     _build_batch_job_spec,
     _default_batch_job_timeout_s,
     _default_batch_poll_timeout_s,
 )
-from .sim_batch_contract_preflight import (  # noqa: E402, F401
+from .sim_batch_contract_preflight import (  # noqa: F401
     _feature_gate_shell,
     _job_stderr_capture_prefix,
     _mandatory_feature_gate_shell,
@@ -226,7 +226,7 @@ from .sim_batch_contract_preflight import (  # noqa: E402, F401
     assess_remote_runner_features,
     remote_feature_preflight,
 )
-from .sim_batch_contract_spec import (  # noqa: E402, F401
+from .sim_batch_contract_spec import (  # noqa: F401
     _MANDATORY_RUNNER_FEATURES,
     _RELEASED_FEATURE_DETECTORS,
     _RUNNER_REQUEST_FEATURES,
@@ -245,7 +245,7 @@ from .sim_batch_contract_spec import (  # noqa: E402, F401
     _uses_option,
     _uses_process_section_objects,
 )
-from .sim_batch_contract_worker import (  # noqa: E402, F401
+from .sim_batch_contract_worker import (  # noqa: F401
     _WORKER_CAPTURE_PROGRAM,
     BATCH_WORKER_ENVIRONMENT_FILENAME,
     WORKER_CAPTURE_BANNER_MAX,
@@ -1578,7 +1578,7 @@ def _remote_state_note(config: BatchConfig, job_id: str) -> str:
     collect it) or is still ``running`` / ``unknown`` (status unreadable)."""
     try:
         status = _read_status(config, job_id, _run_subprocess)
-    except Exception:  # noqa: BLE001 - a diagnostic probe must never raise
+    except Exception:  # - a diagnostic probe must never raise
         status = None
     state = status.get("state") if status else None
     label = {"done": "finished"}.get(str(state), str(state)) if state else "unknown"

@@ -25,9 +25,9 @@ import pytest
 
 pytest.importorskip("klayout.db")
 
-import klayout.db as kdb  # noqa: E402
+import klayout.db as kdb
 
-from helpers import gf180mcu_comp_spike as sp  # noqa: E402
+from helpers import gf180mcu_comp_spike as sp
 
 KLAYOUT = sp.find_klayout_binary()
 needs_klayout = pytest.mark.skipif(

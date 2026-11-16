@@ -34,7 +34,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import design_agent_benchmark_layout as layout  # noqa: E402
+import design_agent_benchmark_layout as layout
 
 CORPUS = layout.CORPUS_DIR
 REPO = layout.REPO_ROOT
