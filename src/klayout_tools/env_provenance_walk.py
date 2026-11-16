@@ -5,6 +5,7 @@ Split out so ``env_provenance.py`` stays under its per-file size ceiling.
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Iterable, Mapping
 from typing import Any
@@ -61,3 +62,33 @@ def walk_lintable_string_fields(payload: Any) -> Iterable[tuple[str, str]]:
     for field, text in walk_string_fields(payload, ""):
         if not _REMOTE_WORKER_ENV_FIELD_RE.match(field):
             yield field, text
+
+
+def common_repo_root(
+    paths: Iterable[str | os.PathLike[str] | None],
+    *,
+    find_repo_root: Any,
+) -> str | None:
+    """One repo root for a run that records several input paths (#5631).
+
+    Each non-``None`` path contributes ``find_repo_root`` of its own directory
+    (``None`` results are dropped, so an input outside every repo never
+    constrains the others). Returns the candidate that contains every other
+    candidate -- the outermost when repos are nested -- so ``{path, scope}``
+    fields of one report all share one anchor. When no candidate contains the
+    rest (unrelated sibling repos) the first path's root wins and the others
+    normalise to ``scope: "external"``. ``None`` when no path has a root.
+    """
+    roots: list[str] = []
+    for path in paths:
+        if path is None:
+            continue
+        root = find_repo_root(os.path.dirname(os.path.abspath(path)))
+        if root is not None:
+            roots.append(root)
+    if not roots:
+        return None
+    for cand in roots:
+        if all(r == cand or r.startswith(cand.rstrip(os.sep) + os.sep) for r in roots):
+            return cand
+    return roots[0]
