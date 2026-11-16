@@ -282,6 +282,7 @@
         "klayout_tools._artifact_envelope",
         "klayout_tools.cli.functional_verification_cmd",
         "klayout_tools.functional_verification",
+        "klayout_tools.functional_verification_from_synthesize",
         "klayout_tools.functional_verification_initial_state",
         "klayout_tools.functional_verification_mutation",
         "klayout_tools.functional_verification_mutation_proposals",
