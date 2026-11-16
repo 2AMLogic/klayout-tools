@@ -145,9 +145,9 @@ import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
+# Imported as modules, never by name: extract_runset (issue #5481) defers
+# its imports of this module's own helpers to call time.
 from . import extract_dead_metal as _dead_metal
-# The `"klayout-runset"` engine (issue #5481). Imported as a module, never by
-# name: it defers its imports of this module's own helpers to call time.
 from . import extract_runset
 from ._annotation import is_reserved_annotation_layer
 from ._jsonnum import is_int
