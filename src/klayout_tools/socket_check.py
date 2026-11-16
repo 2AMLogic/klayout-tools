@@ -77,8 +77,8 @@ SUPPLY_PIN_USES: frozenset[str] = frozenset({"POWER", "GROUND"})
 #: open_pdks/LEF-spec convention. Shared by `klt lef-abstract`'s emitted
 #: ``PIN USE`` and this module's ``power_ports`` check (issue #2839). See
 #: :func:`classify_pin_by_name`.
-GROUND_NAME_TOKENS: tuple[str, ...] = ("VSS", "VGND", "GND", "VNB")
-POWER_NAME_TOKENS: tuple[str, ...] = ("VDD", "VPWR", "VCC", "VPB")
+GROUND_NAME_TOKENS: tuple[str, ...] = ("VSS", "VGND", "GND", "VNB", "VPW")
+POWER_NAME_TOKENS: tuple[str, ...] = ("VDD", "VPWR", "VCC", "VPB", "VNW")
 
 _NAME_TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
 

@@ -111,3 +111,68 @@ def test_power_connectivity_metal_pin_inconsistency_still_mismatch(
     assert power["status"] == "mismatch"
     assert [f["pin"] for f in power["findings"]] == ["VGND"]
     assert [p["pin"] for p in power["excluded_pins"]] == ["VNB"]
+
+
+# --- Issue #5842: two-step reachability + VNW/VPW tokens ----------------------
+
+
+def test_netlist_shape_accepts_lef_only_as_disclosure():
+    """Issue #5842: `layout.abstract_cell_lef` alone is accepted beside
+    `layout.netlist` (disclosure-only), resolved and echoed; no patterns."""
+    from klayout_tools.lvs import _layout_abstraction_echo, _parse_layout_abstract_cells
+
+    spec = {"netlist": "out.spice", "abstract_cell_lef": "cells.lef"}
+    parsed = _parse_layout_abstract_cells(spec, "/req")
+    assert parsed.patterns == ()
+    assert parsed.lef_paths == ("/req/cells.lef",)
+    assert _layout_abstraction_echo(parsed, []) == {"abstract_cell_lef": ["cells.lef"]}
+
+
+def test_netlist_shape_without_lef_unchanged():
+    from klayout_tools.lvs import _layout_abstraction_echo, _parse_layout_abstract_cells
+
+    parsed = _parse_layout_abstract_cells({"netlist": "out.spice"}, "/req")
+    assert parsed.lef_paths == ()
+    assert _layout_abstraction_echo(parsed, []) == {}
+
+
+def test_netlist_shape_still_rejects_abstract_cells():
+    import pytest
+
+    from klayout_tools.lvs import LvsError, _parse_layout_abstract_cells
+
+    for spec in (
+        {"netlist": "o.spice", "abstract_cells": ["x__*"]},
+        {
+            "netlist": "o.spice",
+            "abstract_cells": ["x__*"],
+            "abstract_cell_lef": "a.lef",
+        },
+    ):
+        with pytest.raises(LvsError, match="applies only to inline extraction"):
+            _parse_layout_abstract_cells(spec, "/req")
+
+
+def test_inline_shape_lef_without_cells_still_rejected():
+    import pytest
+
+    from klayout_tools.lvs import LvsError, _parse_layout_abstract_cells
+
+    with pytest.raises(LvsError, match="abstract_cells is empty"):
+        _parse_layout_abstract_cells(
+            {"file": "a.gds", "deck": "sky130", "abstract_cell_lef": "a.lef"}, "/req"
+        )
+
+
+def test_well_pin_name_tokens_classified():
+    from klayout_tools.socket_check import classify_pin_by_name
+
+    assert classify_pin_by_name("VPW")[1] == "GROUND"
+    assert classify_pin_by_name("VNW")[1] == "POWER"
+
+
+def test_vpw_finding_carries_abstract_artifact_caveat():
+    from klayout_tools.lvs_power import _ground_pin_caveat
+
+    assert "may be an artifact" in _ground_pin_caveat("VPW")
+    assert _ground_pin_caveat("VNW") == ""

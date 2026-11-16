@@ -25440,7 +25440,6 @@ def test_abstract_cells_null_or_empty_is_a_noop(tmp_path, value):
     [
         ("abstract_cells", ["SC_STUB"]),
         ("abstract_cells", "SC_STUB"),
-        ("abstract_cell_lef", ["cells.lef"]),
     ],
 )
 @pytest.mark.parametrize("with_deck", [False, True])
@@ -25456,6 +25455,22 @@ def test_abstract_cells_on_pre_extracted_netlist_is_rejected(
     request = {"layout": layout, "reference": {"netlist": reference_path, "top": "inv"}}
     with pytest.raises(LvsError, match=f"layout.{field} applies only to inline"):
         run_lvs(json.dumps(request))
+
+
+def test_abstract_cell_lef_alone_on_pre_extracted_netlist_is_accepted(tmp_path):
+    """Issue #5842: on the `layout.netlist` shape the LEF is a disclosure-only
+    input -- accepted without `abstract_cells`, echoed for `--check --rerun`,
+    and the verdict is unchanged (no `abstracted_cells`, nothing extracted)."""
+    layout_path, reference_path = _matching_netlist_request(tmp_path)
+    (tmp_path / "cells.lef").write_text("MACRO nothing\nEND nothing\n")
+    base = {"layout": {"netlist": layout_path, "top": "inv"}}
+    base["reference"] = {"netlist": reference_path, "top": "inv"}
+    plain = run_lvs(json.dumps(base))
+    base["layout"]["abstract_cell_lef"] = [str(tmp_path / "cells.lef")]
+    report = run_lvs(json.dumps(base))
+    assert report["status"] == plain["status"]
+    assert report["abstract_cell_lef"] == [str(tmp_path / "cells.lef")]
+    assert "abstracted_cells" not in report
 
 
 def test_abstract_cell_lef_without_abstract_cells_is_a_clean_lvs_error(tmp_path):
