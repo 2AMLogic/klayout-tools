@@ -82,7 +82,11 @@
       "description": "`klt components` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.components_cmd",
-        "klayout_tools.components"
+        "klayout_tools.cli.parsers.components",
+        "klayout_tools.components",
+        "klayout_tools.components_errors",
+        "klayout_tools.components_probe",
+        "klayout_tools.components_specs"
       ]
     },
     "corner_matrix": {
@@ -250,6 +254,7 @@
         "klayout_tools.extract_cap_top_plate",
         "klayout_tools.extract_passive_regions",
         "klayout_tools.extract_progress",
+        "klayout_tools.extract_dead_metal",
         "klayout_tools.extract_report",
         "klayout_tools.extract_resistance_graph",
         "klayout_tools.extract_spef",
@@ -325,6 +330,7 @@
         "klayout_tools.gen_pcells.esd_device",
         "klayout_tools.gen_pcells.guard_ring",
         "klayout_tools.gen_pcells.pdk_cell",
+        "klayout_tools.gen_pcells._common_params",
         "klayout_tools.gen_pcells._mos_array_shapes",
         "klayout_tools.gen_pcells.mos_array",
         "klayout_tools.gen_pcells.res_array",
@@ -665,6 +671,7 @@
         "klayout_tools._request_fields",
         "klayout_tools._provenance",
         "klayout_tools._report_verify",
+        "klayout_tools._report_verify_exclude",
         "klayout_tools._report_verify_hints",
         "klayout_tools._spice_number",
         "klayout_tools._text",
@@ -699,15 +706,21 @@
         "klayout_tools.cli.signoff_cmd",
         "klayout_tools.signoff",
         "klayout_tools.signoff_attest",
+        "klayout_tools.signoff_attest_build",
         "klayout_tools.signoff_attest_carry",
+        "klayout_tools.signoff_attest_drift",
         "klayout_tools.signoff_attest_input",
         "klayout_tools.signoff_attest_item9",
+        "klayout_tools.signoff_attest_live",
         "klayout_tools.signoff_attest_stream",
         "klayout_tools.signoff_attest_text",
         "klayout_tools.signoff_derived_rows",
         "klayout_tools.signoff_details",
         "klayout_tools.signoff_envelopes",
         "klayout_tools.signoff_evidence_pin",
+        "klayout_tools.signoff_fleet",
+        "klayout_tools.signoff_fleet_check",
+        "klayout_tools.signoff_fleet_reduction",
         "klayout_tools.signoff_foundry_cell",
         "klayout_tools.signoff_generator_batch",
         "klayout_tools.signoff_multi_member",
@@ -796,6 +809,7 @@
         "klayout_tools.sim_osdi_pin",
         "klayout_tools.sim_osdi_settle",
         "klayout_tools.sim_pdk_ambiguity",
+        "klayout_tools.sim_pin_settle",
         "klayout_tools.sim_peak_rss",
         "klayout_tools.sim_plan",
         "klayout_tools.sim_plot",
@@ -1007,6 +1021,11 @@
       "consumer": "array_check",
       "exporter": "cli-infra",
       "reason": "CLI adapter uses the shared output envelope and --layers parser, as every verb does."
+    },
+    {
+      "consumer": "array_check",
+      "exporter": "env_provenance",
+      "reason": "`klt array-check` echoes its layout input as env_provenance's committable {path, scope} envelope (issue #5788)."
     },
     {
       "consumer": "fill",

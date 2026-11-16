@@ -92,7 +92,7 @@ def _help_text(parser: argparse.ArgumentParser, action: argparse.Action) -> str:
         return ""
     try:
         return parser._get_formatter()._expand_help(action)
-    except Exception:  # noqa: BLE001 -- never let a malformed help string drop a tool
+    except Exception:  # -- never let a malformed help string drop a tool
         return str(action.help)
 
 

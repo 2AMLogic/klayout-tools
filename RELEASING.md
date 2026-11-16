@@ -240,7 +240,11 @@ Let `X.Y.Z` be the new version.
 4. **Fill in availability notes.** Replace "the next release after 0.7.0"
    in the `--attest` / `--inventory` availability notes in
    `docs/cli/signoff.md` with `X.Y.Z` (and likewise for any later "not in
-   release" note), in the same release PR or a follow-up.
+   release" note), in the same release PR or a follow-up. This step is
+   enforced: `scripts/release_prep.py prepare` refuses (exit 2) when
+   `docs/cli/signoff.md` still contains a "first/next release after" note
+   anchored on a release older than the one being bumped from — a missed
+   note fails the prep rather than shipping silently.
 
 5. **Regenerate the deck history table** now that the new tag exists (the
    generator can only see tags that have already been pushed — see

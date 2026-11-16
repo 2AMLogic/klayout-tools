@@ -349,8 +349,12 @@ def build_job_command(
     status capture, and the job exits 0. ``extra_tail`` runs once the status
     is captured, whether or not ``run`` succeeded (the place-and-route
     artifact copy, the generator output publish); it needs a
-    ``stdout_target``.
+    ``stdout_target`` to run after, so a non-empty ``extra_tail`` paired
+    with ``stdout_target=None`` -- which would drop the tail silently --
+    raises ``ValueError``.
     """
+    if extra_tail and stdout_target is None:
+        raise ValueError("extra_tail needs a stdout_target to run after")
     from . import _provenance, sim_batch
 
     version = (

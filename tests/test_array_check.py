@@ -49,7 +49,7 @@ def test_abutment_clean(tmp_path):
     _write(path)
     r = run_array_check(str(path), cell="BIT", pitch_um=_PITCH, count=4)
     assert r["status"] == "clean" and r["violation_count"] == 0
-    assert r["schema_version"] == 1
+    assert r["schema_version"] == 2
 
 
 def test_abutment_gap_and_length(tmp_path):
@@ -131,6 +131,89 @@ def test_translation_symmetry(tmp_path):
         run_array_check(str(bad), [_L], translate_um=(10.0, 0.0))["status"]
         == "violated"
     )
+
+
+def test_provenance_in_both_shapes_and_modes(tmp_path):
+    """`provenance` (issue #5788) rides every record: clean and violated
+    alike, in both the symmetry and the abutment request."""
+    clean = tmp_path / "a.gds"
+    _write(clean, n=4, mirror_alt=False)
+    bad = tmp_path / "b.gds"
+    _write(bad, n=2, nudge=(12, 3, 14, 5))
+    gapped = tmp_path / "c.gds"
+    _write(gapped, shift=1.0)
+    records = [
+        run_array_check(str(clean), cell="BIT", pitch_um=_PITCH, count=4),
+        run_array_check(str(clean), [_L], translate_um=(10.0, 0.0)),
+        run_array_check(str(gapped), cell="BIT", pitch_um=_PITCH, count=4),
+        run_array_check(str(bad), [_L], mirror_axis="x", at_um=10.0),
+    ]
+    assert [r["status"] for r in records] == [
+        "clean",
+        "clean",
+        "violated",
+        "violated",
+    ]
+    for r in records:
+        prov = r["provenance"]
+        assert {
+            "klt_version",
+            "klayout_version",
+            "pdk",
+            "deck",
+            "input",
+        } <= set(prov)
+        assert prov["pdk"] is None and prov["deck"] is None
+        assert prov["input"]["role"] == "layout"
+        assert prov["input"]["content_hash"].startswith("sha256:")
+
+
+def test_file_anchored_repo_and_external(tmp_path, tmp_path_factory):
+    """`file` is the `{path, scope}` envelope (issue #5788): repo-relative
+    inside a repo, `{"path": null, "scope": "external"}` outside -- the
+    producing host's absolute path never enters the record."""
+    (tmp_path / ".git").mkdir()
+    design = tmp_path / "design"
+    design.mkdir()
+    inside = design / "a.gds"
+    _write(inside)
+    r = run_array_check(str(inside), cell="BIT", pitch_um=_PITCH, count=4)
+    assert r["file"] == {"path": "design/a.gds", "scope": "repo"}
+
+    outside = tmp_path_factory.mktemp("external") / "a.gds"
+    _write(outside)
+    r = run_array_check(str(outside), cell="BIT", pitch_um=_PITCH, count=4)
+    assert r["file"] == {"path": None, "scope": "external"}
+    assert str(outside) not in json.dumps(r)
+
+
+def test_record_is_deterministic(tmp_path):
+    path = tmp_path / "a.gds"
+    _write(path)
+    kw = dict(cell="BIT", pitch_um=_PITCH, count=4)
+    first = run_array_check(str(path), **kw)
+    second = run_array_check(str(path), **kw)
+    assert json.dumps(first) == json.dumps(second)
+
+
+def test_cli_envelope_and_text_path(tmp_path, capsys):
+    path = tmp_path / "a.gds"
+    _write(path)
+    argv = ["array-check", str(path), "--cell", "BIT", "--pitch", "10", "--count", "4"]
+    assert main([*argv, "--format", "json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["schema_version"] == 2
+    assert data["file"] == {"path": None, "scope": "external"}
+    assert data["provenance"]["input"]["role"] == "layout"
+    assert str(path) not in json.dumps(data)
+
+    assert main(argv) == 0
+    (file_line,) = [
+        line
+        for line in capsys.readouterr().out.splitlines()
+        if line.startswith("file:")
+    ]
+    assert file_line == "file: <outside repo>"
 
 
 @pytest.mark.parametrize(
