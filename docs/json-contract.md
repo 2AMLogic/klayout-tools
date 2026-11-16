@@ -69,7 +69,7 @@ Growing value sets are not the only pre-1.0 drift this caveat covers: the
 category's own rules can consolidate or split the entries one event emits —
 e.g. issue #4729 (`v0.9.0`) folded the geometry-derived `as`/`ad`/`ps`/`pd`
 parameter differences into the same `device.property` entry as the primary
-`w_um`/`l_um` difference they duplicated, so a width-only difference that
+`w_um` difference they duplicated, so a width-only difference that
 reported `category_counts["device.property"] == 5` before that release
 reports `1` after, with `status` unchanged. Under this repo's policy such a
 change is additive: it earns no `schema_version` bump, and it is recorded in

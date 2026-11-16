@@ -37,10 +37,11 @@ not `klt --version`, if you need to detect this kind of drift. See
   looking up. Two retroactive records, both shipped before this entry;
   neither changes any current output. (1) **`device.property` count
   granularity** (landed in `v0.9.0`, 2026-11-05): the geometry-derived
-  `as`/`ad`/`ps`/`pd` parameter differences on a matched device pair are no
-  longer reported as their own `device.property` entries — they are folded
-  into the same entry as the primary `w_um`/`l_um` difference they were
-  derived from, preserved in that entry's `details.derived`. A width-only
+  `as`/`ad`/`ps`/`pd` parameter differences on a matched device pair whose
+  `w_um` also differs are no longer reported as their own `device.property`
+  entries — they are folded into that pair's `w_um` entry, preserved in its
+  `details.derived`. A pair whose `w_um` agrees keeps its derived entries as
+  they were. A width-only
   difference on a matched MOS pair therefore emitted **five** `device.property`
   entries before `v0.9.0` and emits **one** after (observed on the two builds
   that surfaced this: `category_counts["device.property"]` `5` -> `1`, with
