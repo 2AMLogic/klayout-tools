@@ -74,8 +74,8 @@ def test_closed_ring_is_continuous(tmp_path):
 
     report = run_ring_check(str(path), [_COMP, _METAL1])
 
+    assert report["schema_version"] == 2
     assert report["file"] == {"path": None, "scope": "external"}
-    assert report["file"] == str(path)
     assert report["layers"] == [[22, 0], [34, 0]]
     assert report["region_um"] is None
     assert report["dbu_um"] == _DBU
