@@ -74,7 +74,7 @@ import socket
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-from .env_provenance_walk import walk_lintable_string_fields
+from .env_provenance_walk import walk_lintable_string_fields, walk_string_fields
 
 __all__ = [
     "DEFAULT_HOST_ID_SALT",
@@ -644,27 +644,13 @@ def _klayout_version() -> str | None:
     return resolve()
 
 
-def _string_values(value: Any) -> list[str]:
-    """Every string leaf in a nested payload -- what the self-check scans."""
-    if isinstance(value, str):
-        return [value]
-    if isinstance(value, Mapping):
-        found: list[str] = []
-        for key, item in value.items():
-            found.extend(_string_values(key))
-            found.extend(_string_values(item))
-        return found
-    if isinstance(value, (list, tuple)):
-        found = []
-        for item in value:
-            found.extend(_string_values(item))
-        return found
-    return []
-
-
 def _assert_no_leaks(report: Mapping[str, Any]) -> None:
     identifiers = _local_identifiers()
-    for value in _string_values(report):
+    # ``walk_string_fields`` ignores non-``str`` mapping keys where the old
+    # ``_string_values`` walk recursed into them; that narrowing is safe here
+    # because this payload is JSON-serialisable by contract
+    # (docs/json-contract.md), and JSON cannot carry a container as a key.
+    for value in (text for _field, text in walk_string_fields(report, "")):
         leaks = find_leaks(value, extra_identifiers=identifiers)
         if leaks:
             kinds = ", ".join(sorted({leak["kind"] for leak in leaks}))

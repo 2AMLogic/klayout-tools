@@ -1650,7 +1650,12 @@ hard-code names from observation. The lists are also importable constants in
 `EXTRACT_PATH_ONLY_PATHS`, `PATH_ONLY_KEYS_BY_VERB`) with a helper
 `strip_path_only_keys(report, verb)`; a test fails if a path-bearing key is
 added without being registered. Paths use dotted notation, `*` standing for
-any list index.
+any list index. The wildcard is meaningful only on this canonicalization
+side: drift exclusion in `--rerun`/`--check` verdicts
+(`diff_verdict_fields(exclude=...)`) matches by exact path, so a `*` entry
+in an `exclude` set is rejected with a `ValueError` rather than silently
+ignored (issue #5586) — a per-list-entry exclusion belongs in a
+`strip_path_patterns` set passed via `committed_for_diff`/`fresh_for_diff`.
 
 | Verb | Key | Meaning |
 |---|---|---|

@@ -8,6 +8,7 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-16
 
+- **Issue #2912** (closed): Friction: sky130 native-Vt NMOS (nfet_05v0_nvt) cannot be drawn by klt gen or compared by klt lvs
 - **PR #5953**: feat: report build_drift on signoff attest --check, add --require-build-match
 - **PR #5920**: docs(lvs): backfill category-count drift in CHANGELOG and guard category coverage
 - **Issue #5875** (closed): klt signoff: --check cannot assert which klt build produced the envelope it checks
