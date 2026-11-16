@@ -126,6 +126,10 @@ klt signoff --attest {1,8,9,10} --inventory <file> --check <committed-envelope> 
   and recompute everything else (issue #5209). See "Refreshing on a host
   lacking the toolchain" below. Refused without `--attest`/`-o`, and with
   `--check`.
+- `--require-build-match` — with `--attest` and `--check` (issue #5875): exit
+  `3` with `status: "drifted"` (a `provenance.klt_version` entry in `drift[]`)
+  when the committed envelope was produced by a different `klt` build. See
+  "Build drift". Refused without `--attest` and `--check`.
 - `--format` — `text` (default, a human-readable pass/fail summary) or
   `json` (this command's own JSON envelope, see below).
 - `--color` — when to colour `--format text` output: `auto` (default),
@@ -418,6 +422,14 @@ The marker is **report-only**: it never changes a check's `passed`, the
 overall `status`, or the exit code, so existing green pipelines do not flip.
 Gate on it by reading `checks[].build_drift.state` from the JSON. It is an
 additive field; no existing field changes.
+
+`klt signoff --attest N --inventory F --check ENV` carries the same object as
+a top-level `build_drift` (computed from ENV's `provenance.klt_version`) and
+prints a `build_drift: <state>` line in text mode. It is report-only unless
+`--require-build-match` is passed, which turns `stale` (only `stale`;
+`current` and `unverifiable` never fail) into `status: "drifted"` and exit
+`3`, naming `provenance.klt_version` in `drift[]`. Content drift is still
+reported alongside.
 
 ### What this does not do yet
 
@@ -1535,12 +1547,12 @@ absent for byte claims). A geometry claim is never run by the opt-in
 generator execution, which compares bytes; it stays `executed_by_klt: false`.
 
 **Producing the value (issue #5551).** `klt stats --format json` reports the
-same digest as `geometry_digest`, so the supported way to fill
+same digest as `klt stats --geometry-digest`'s `geometry_digest`, so the supported way to fill
 `--regenerated-hash` for a geometry claim is to run it on the **regenerated**
 stream:
 
 ```bash
-klt stats --format json /tmp/scratch/top.gds | jq -r .geometry_digest
+klt stats --geometry-digest --format json /tmp/scratch/top.gds | jq -r .geometry_digest
 ```
 
 See [`docs/cli/stats.md`](stats.md) → "Geometry digest". Two values that look
@@ -1816,7 +1828,7 @@ plus the raw-byte SHA-256) and records the producing KLayout version in
 writes no `--output`. `--generator` and `--regenerated-hash` must be given
 together and populate `provenance.regeneration` (`--hash-kind geometry`
 compares the timestamp-independent geometry digest instead of raw bytes;
-produce that value with `klt stats --format json <regenerated stream> | jq -r
+produce that value with `klt stats --geometry-digest --format json <regenerated stream> | jq -r
 .geometry_digest` — **not** `klt diff`'s `canonical_hash`, a different digest,
 see [`docs/cli/stats.md`](stats.md) → "Geometry digest").
 The generator is echoed, never run; the grader reports a hash that differs
