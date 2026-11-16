@@ -14,6 +14,12 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added** (#5875): `klt signoff --attest N --inventory F --check ENV` now
+  reports an additive `build_drift` object (same shape as envelope
+  aggregation, #4223) and a `build_drift: <state>` text line; the opt-in
+  `--require-build-match` fails the check (exit 3, `status: "drifted"`) when
+  ENV's `provenance.klt_version` is from a different build. Report-only
+  without the flag.
 - **Changed** (#5788, breaking — `klt array-check` `schema_version` 1 ->
   **2**): the record's `file` field is now the committable
   `{path, scope}` object `env_provenance.repo_relative_path()` builds
