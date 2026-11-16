@@ -253,6 +253,7 @@ from .functional_verification_sdf_steps import (
     SDF_COND_EXPRESSION_REASONS,
     _apply_sdf_cond_expression_drop,
     _apply_sdf_header_normalization,
+    _sdf_refusal_error,
 )
 from .reset_coverage import ResetCoverageError, sequential_elements
 
@@ -642,6 +643,7 @@ class FunctionalVerificationError(Exception):
     """
 
     code: str | None = None
+    details: dict[str, Any] | None = None
 
     def __init__(self, message: str = "", *, code: str | None = None) -> None:
         super().__init__(message)
@@ -2991,14 +2993,11 @@ def run_functional_verification(
         # run (issue #2285), for which Icarus emits nothing at all.
         sdf_dropped_counts = {**sdf_pre_dropped_counts, **scanned_dropped_counts}
         if diagnostics:
-            shown = " | ".join(diagnostics[:5])
-            more = f" (+{len(diagnostics) - 5} more)" if len(diagnostics) > 5 else ""
-            raise FunctionalVerificationError(
-                f"SDF back-annotation of '{sdf['file']}' did not fully apply: "
-                f"{len(diagnostics)} diagnostic(s) in the {engine} transcript "
-                f"-- {shown}{more}. The simulator exits 0 after skipping an "
-                "annotation it cannot apply, so this run's verdict would have "
-                "been a zero-delay one reported as if it were annotated."
+            raise _sdf_refusal_error(
+                sdf["file"],
+                engine,
+                diagnostics,
+                _sdf_dropped_report(sdf_dropped_counts, sdf_pre_dropped_arcs),
             )
 
     tests, (passed_count, failed_count, skipped_count), run_reports = (
