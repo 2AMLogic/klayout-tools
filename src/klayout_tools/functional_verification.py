@@ -683,18 +683,27 @@ def load_request(request_path: str) -> dict[str, Any]:
     return _validate_request_shape(request, "request file")
 
 
-def load_request_arg(value: str) -> tuple[dict[str, Any], str]:
+def load_request_arg(
+    value: str, base_dir: str | None = None
+) -> tuple[dict[str, Any], str]:
     """Resolve the CLI ``request`` argument into a request dict plus the
     directory relative paths inside it should resolve against -- the same
     three forms ``klt lvs``'s own ``request`` argument accepts (a path to a
     JSON file, ``"-"`` for stdin, or an inline JSON object string), so this
     verb composes into ``klt eval``'s descriptor unchanged.
+
+    ``base_dir`` optionally overrides the form-derived anchor (the request
+    file's own directory, or the cwd for stdin/inline) so a request archived
+    beside an evidence record can re-run from the directory its relative
+    paths were written against (issue #5673). It must exist and be a
+    directory; the default ``None`` keeps today's resolution unchanged.
     """
     return _shared_load_request_arg(
         value,
         error_cls=FunctionalVerificationError,
         required_fields=_REQUIRED_REQUEST_FIELDS,
         load_request_fn=load_request,
+        base_dir=base_dir,
     )
 
 
@@ -2557,7 +2566,7 @@ def _resolve_engine(request_doc: dict[str, Any]) -> str:
 
 
 def run_functional_verification(
-    request: str, output_dir: str | None = None
+    request: str, output_dir: str | None = None, base_dir: str | None = None
 ) -> dict[str, Any]:
     """Run the cocotb regression declared by ``request``.
 
@@ -2565,6 +2574,14 @@ def run_functional_verification(
     argument does (see :func:`load_request_arg`): a path to a request JSON
     file, ``"-"`` to read the request from stdin, or an inline JSON object
     string.
+
+    ``base_dir`` optionally overrides the directory relative paths inside
+    the request resolve against (issue #5673): by default a file request
+    anchors on its own directory and a stdin/inline request on the cwd;
+    with ``base_dir`` every relative path -- and the default
+    ``.klt/functional-verification/`` artifact directory -- anchors there
+    instead, exactly as the stdin form anchored at that directory would.
+    It must exist and be a directory.
 
     Returns a dict matching the documented JSON schema (see
     ``docs/cli/functional-verification.md``). Raises
@@ -2575,11 +2592,11 @@ def run_functional_verification(
 
     Artifacts (the build directory, the raw ``results.xml``, the engine
     transcripts, and any coverage ``.info``) are written to
-    ``.klt/functional-verification/`` next to the request file -- the same
-    "next to the input" default ``klt sim``/``klt synthesize`` already use --
-    and kept, never deleted.
+    ``.klt/functional-verification/`` next to the request file (or under
+    ``base_dir`` when given) -- the same "next to the input" default
+    ``klt sim``/``klt synthesize`` already use -- and kept, never deleted.
     """
-    request_doc, request_dir = load_request_arg(request)
+    request_doc, request_dir = load_request_arg(request, base_dir=base_dir)
     output_dir = _resolve_output_dir(request_dir, output_dir)
 
     engine = _resolve_engine(request_doc)

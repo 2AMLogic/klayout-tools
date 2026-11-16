@@ -58,7 +58,10 @@ def _write_mutant_combined_log(
 
 
 def run_functional_verification_with_mutations(
-    request: str, proposals_path: str, output_dir: str | None = None
+    request: str,
+    proposals_path: str,
+    output_dir: str | None = None,
+    base_dir: str | None = None,
 ) -> dict[str, Any]:
     """Run ``klt functional-verification --mutations`` end to end (issue
     #1592, spike section 3): the unmodified baseline run from
@@ -67,6 +70,13 @@ def run_functional_verification_with_mutations(
     per resolved proposal in ``proposals_path`` (spike §1a's ported seam),
     classified ``killed``/``survived``/``rejected`` (spike §1a/§3c) into the
     additive ``mutation_testing`` response block (spike §3c).
+
+    ``base_dir`` forwards into every request-relative resolution and the
+    baseline run (issue #5673) -- the same override
+    :func:`run_functional_verification` accepts, which on this path is the
+    only way to combine an archived request with mutation testing (the
+    stdin workaround is unavailable: ``--mutations`` consumes stdin before
+    the baseline re-reads the request).
 
     Raises :class:`FunctionalVerificationError` (CLI exit 1) for every
     whole-run failure mode: anything the base contract already raises for
@@ -95,7 +105,7 @@ def run_functional_verification_with_mutations(
     scope, proposal_records = load_mutation_proposals(proposals_path)
     _validate_proposal_indices(proposal_records)
 
-    request_doc, request_dir = _fv.load_request_arg(request)
+    request_doc, request_dir = _fv.load_request_arg(request, base_dir=base_dir)
     _fv._reject_verilog_top_mutations(request_doc.get("testbench"))
     raw_sources = request_doc.get("sources")
     _validate_mutation_scope(
@@ -188,7 +198,7 @@ def run_functional_verification_with_mutations(
     # The baseline-must-pass gate (spike §3d): the exact same request the
     # caller already used for an ordinary (non-mutation) run, reused
     # unchanged -- see `docs/design/mutation-testing-spike.md` §3a.
-    baseline = _fv.run_functional_verification(request, output_dir)
+    baseline = _fv.run_functional_verification(request, output_dir, base_dir=base_dir)
     if baseline["status"] != "pass":
         failing_names = ", ".join(
             test["name"] for test in baseline["tests"] if test["status"] == "failed"

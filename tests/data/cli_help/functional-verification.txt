@@ -11,10 +11,11 @@ cocotb (`pip install cocotb`) plus an `iverilog` or `verilator` binary on
 document (like `klt lvs`/`klt sim`), not positional RTL file args.
 
 positional arguments:
-  request klt functional-verification request: a path to a JSON file, '-' to read the request from stdin, or an inline JSON object string
+  request klt functional-verification request: a path to a JSON file, '-' to read the request from stdin, or an inline JSON object string. Relative paths inside the request resolve against the request file's own directory (stdin/inline: the cwd); --base-dir overrides that anchor
 
 options:
   -h, --help show this help message and exit
+  --base-dir DIR resolve every relative path in the request (sources, testbench module/search_path, options.includes, options.sdf.file, options.initial_state.netlist, options.source_defines keys) and the default `.klt/functional-verification/` artifact directory against DIR instead of the request file's own directory -- e.g. re-run a request archived beside its evidence record from the directory its paths were written against (a file request with --base-dir D resolves exactly as the same document piped on stdin with cwd=D). Default: the request file's directory (stdin/inline: the cwd). Must exist and be a directory
   --mutations PROPOSALS_PATH run mutation testing (issue #1592): a path to a <proposals> JSON document (schema klt.functional_verification.mutation_proposals/1) naming byte-exact source mutations to apply, one at a time, to an isolated build+test of the same <request>. Aborts with exit 1 if the request's own baseline run fails first -- see docs/cli/functional- verification.md, '--mutations'
-  -o, --outdir OUTDIR write run artifacts (results XML, logs, simulator build directory, coverage, trace, mutants/) here instead of `.klt/functional-verification/` next to the request file; created if missing, relative paths resolve against the cwd. Request-relative source paths still resolve against the request's own directory
+  -o, --outdir OUTDIR write run artifacts (results XML, logs, simulator build directory, coverage, trace, mutants/) here instead of `.klt/functional-verification/` next to the request file; created if missing, relative paths resolve against the cwd. Request-relative source paths still resolve against the request's own directory (or the --base-dir override)
   --format {text,json} output format (default: text)

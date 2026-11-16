@@ -9,7 +9,7 @@ flow"), and the hard gate behind
 [`klt eval`](eval.md)'s `valid` field (issue #387).
 
 ```
-klt functional-verification <request> [--mutations <proposals>] [--format text|json]
+klt functional-verification <request> [--base-dir <dir>] [--mutations <proposals>] [--format text|json]
 ```
 
 This is the build phase carried by two accepted Phase 1 spikes — read them
@@ -48,11 +48,51 @@ args.
   accepts). Relative paths inside the request (`sources`, and the
   `testbench.module` file — or, if given, `testbench.search_path`) resolve
   against the **request file's own directory**; for the stdin/inline forms,
-  against the current working directory.
+  against the current working directory. `--base-dir` overrides that anchor.
+- `--base-dir <dir>` — optional: resolve every relative path in the request
+  (`sources`, `testbench.module`/`testbench.search_path`,
+  `options.includes`, `options.sdf.file`, `options.initial_state.netlist`,
+  `options.source_defines` keys) — and the default
+  `.klt/functional-verification/` artifact directory — against `<dir>`
+  instead of the request file's own directory. See
+  "[Archived requests: `--base-dir`](#archived-requests---base-dir)" below.
 - `--format` — `text` (default, a human-readable summary) or `json`.
 - `--mutations <proposals>` — optional, issue #1592: run mutation testing
   against the same `<request>` — see "Mutation testing: `--mutations`"
   below.
+
+## Archived requests: `--base-dir`
+
+The request-file default is the right one when the request lives beside the
+design it names. It is the wrong one for the **archived copy** of a request
+— and archiving the request is exactly what an evidence record is for. A
+record directory is a sibling of the thing it documents, not an ancestor of
+it, so a request that ran correctly from the project root cannot be re-run
+from the directory it is committed in: the same relative paths now point
+somewhere else (`RTL source not found: rtl/counter.sv`), and rewriting them
+on the way into the record would leave the committed request no longer
+byte-identical to the one that produced the committed response.
+
+`--base-dir <dir>` decouples the two: the request document is still read
+from wherever it sits, but every relative path inside it — and the default
+artifact directory (`<dir>/.klt/functional-verification/`, still overridable
+with `-o/--outdir`) — resolves against `<dir>`. The contract is one
+equivalence:
+
+> a file request run with `--base-dir D` resolves every relative path
+> exactly as the same document piped on **stdin** with `cwd=D`.
+
+`<dir>` must exist and be a directory; anything else is exit 1 through the
+standard error envelope, never a silent fallback to the request's own
+directory. A relative `<dir>` resolves against the current working
+directory, and absolute paths inside the request are unaffected.
+
+This also composes with `--mutations`, which the stdin workaround cannot do
+(`--mutations` consumes stdin before the baseline run re-reads the request,
+so `klt functional-verification - --mutations ... < request.json` fails with
+"stdin request is not valid JSON") — an archived request's mutation
+proposals re-run is `klt functional-verification records/r1/request.json
+--mutations proposals.json --base-dir <project root>`.
 
 ## Engines
 
@@ -317,14 +357,17 @@ Worked example: `examples/functional-verification/verilog-tb/`
 
 Everything a run produces is written to `.klt/functional-verification/` next
 to the request file — the same "next to the input" default `klt sim`/`klt
-synthesize` already use — and kept, never deleted.
+synthesize` already use — and kept, never deleted. Under `--base-dir <dir>`
+the default directory follows the anchor instead
+(`<dir>/.klt/functional-verification/`), matching the stdin form rather
+than carving out an exception.
 
 Pass `-o/--outdir DIR` to write them to `DIR` instead (created if missing; a
 relative `DIR` resolves against the current directory, not the request's).
 This keeps the evidence of two runs of the same request apart. Request-relative
-source and testbench paths still resolve against the request's own directory,
-and `--mutations` honours the flag too (`DIR/mutants/`). The run-identity
-digest does not fold in the output directory. The `environment.results_xml`,
+source and testbench paths still resolve against the request's own directory
+(or the `--base-dir` override), and `--mutations` honours the flag too
+(`DIR/mutants/`). The run-identity digest does not fold in the output directory. The `environment.results_xml`,
 `trace.path`, coverage and mutation `log_path` fields report the chosen
 location (`environment.*` and mutation `log_path` as the repo-relative `{path, scope}`
 envelope — see [`docs/json-contract.md`](../json-contract.md)).
@@ -1241,7 +1284,7 @@ analysis.
 ## Mutation testing: `--mutations`
 
 ```
-klt functional-verification <request> --mutations <proposals> [--format text|json]
+klt functional-verification <request> --mutations <proposals> [--base-dir <dir>] [--format text|json]
 ```
 
 Coverage measures what a testbench *executed*, not what it would *notice
@@ -1518,6 +1561,15 @@ exactly.
 | `options.initial_state` | object | Optional. Gate-level power-up state control, Icarus only (`mode`, `seeds`, `netlist`, `clock`) — see "Gate-level power-up state: `options.initial_state`". Not combinable with `options.sdf` or `--mutations` (exit 1). |
 | `options.trace` | boolean | Defaults to `false`. `true` turns on cocotb's own `Runner(waves=True)` on both the build and test steps for whichever engine ran — Icarus dumps `<hdl_toplevel>.fst`, Verilator dumps `dump.vcd` — and the resulting file is contracted in the response's `trace` field, ready to hand to [`klt wave build`](wave.md). Not engine-restricted, unlike `options.coverage`/`options.sdf`: both engines have a waveform-dump path through cocotb. Not currently combinable with `--mutations` (exit 1) — see "Mutation testing: `--mutations`" → "Out of scope". |
 | `parameters` | object | Optional. String key -> scalar value (integer, float, string, or boolean), forwarded unchanged to both `Runner.build(parameters=...)` and `Runner.test(parameters=...)`. Overrides Verilog `parameter` (or VHDL `generic`) values at elaboration time -- e.g. `{"WIDTH": 8}` to elaborate a design's `#(parameter WIDTH = 16)` at 8 bits instead of its default. cocotb's own per-engine backend translates each entry into the right flag (Icarus: `-P<toplevel>.<name>=<value>`; Verilator: `-G<name>=<value>`) -- this verb never needs to know that syntax itself. Omitted/empty is a no-op, identical to today's behavior. Non-empty together with `options.sdf` on Icarus is exit 1 (see "How the annotation is wired") -- the SDF top-level-port workaround elaborates a generated wrapper as the new `-s` root, and cocotb's parameter-override syntax would then silently target that wrapper instead of the real DUT. |
+
+Every path field above whose description says "resolved relative to the
+request" resolves against the **request file's own directory** by default
+(stdin/inline request: the current working directory). The `--base-dir`
+flag overrides that anchor wholesale — see
+"[Archived requests: `--base-dir`](#archived-requests---base-dir)". The
+request document itself has no base-directory key: a relative one would
+re-anchor on exactly the directory this flag exists to escape, and an
+absolute one would embed a host path in committed evidence.
 
 ## Response
 

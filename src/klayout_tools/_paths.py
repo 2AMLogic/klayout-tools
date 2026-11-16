@@ -464,6 +464,7 @@ def load_request_arg(
     error_cls: type[Exception],
     required_fields: tuple[str, ...],
     load_request_fn: Callable[[str], dict[str, Any]],
+    base_dir: str | None = None,
 ) -> tuple[dict[str, Any], str]:
     """Resolve a CLI ``request`` argument into a request dict plus the
     directory relative paths inside it should resolve against.
@@ -483,10 +484,30 @@ def load_request_arg(
       has already said no. Relative paths resolve against the current
       working directory, same as the stdin form.
 
+    ``base_dir``, when given, overrides that form-derived anchor for every
+    form (a file request re-run from an archive keeps resolving against the
+    directory the paths were written against; stdin/inline get an explicit
+    anchor instead of the cwd). It must exist and be a directory --
+    ``error_cls`` is raised otherwise, never a silent fallback. The default
+    ``None`` keeps today's behaviour byte-identical for every existing
+    caller. The request document itself is still read from ``value``; the
+    override changes where relative paths resolve, not where the request
+    is loaded from.
+
     Raises ``error_cls`` for any read/parse/shape failure -- the same
     exception type ``load_request_fn`` raises, so callers do not need to
     distinguish the three forms.
     """
+
+    def _anchor(default: str) -> str:
+        if base_dir is None:
+            return default
+        if not os.path.isdir(base_dir):
+            raise error_cls(
+                f"base directory '{base_dir}' does not exist or is not a directory"
+            )
+        return os.path.abspath(base_dir)
+
     if value == "-":
         try:
             data = json.load(sys.stdin)
@@ -499,11 +520,11 @@ def load_request_arg(
                 error_cls=error_cls,
                 required_fields=required_fields,
             ),
-            os.getcwd(),
+            _anchor(os.getcwd()),
         )
 
     if os.path.isfile(value):
-        return load_request_fn(value), os.path.dirname(os.path.abspath(value))
+        return load_request_fn(value), _anchor(os.path.dirname(os.path.abspath(value)))
 
     if os.path.isdir(value):
         raise error_cls(f"not a file: {value}")
@@ -522,5 +543,5 @@ def load_request_arg(
             error_cls=error_cls,
             required_fields=required_fields,
         ),
-        os.getcwd(),
+        _anchor(os.getcwd()),
     )

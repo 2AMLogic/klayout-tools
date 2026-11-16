@@ -2740,7 +2740,27 @@ def _add_functional_verification_parser(
         "request",
         help=(
             "klt functional-verification request: a path to a JSON file, '-' "
-            "to read the request from stdin, or an inline JSON object string"
+            "to read the request from stdin, or an inline JSON object "
+            "string. Relative paths inside the request resolve against the "
+            "request file's own directory (stdin/inline: the cwd); "
+            "--base-dir overrides that anchor"
+        ),
+    )
+    functional_verification_parser.add_argument(
+        "--base-dir",
+        default=None,
+        metavar="DIR",
+        help=(
+            "resolve every relative path in the request (sources, "
+            "testbench module/search_path, options.includes, options.sdf.file, "
+            "options.initial_state.netlist, options.source_defines keys) and "
+            "the default `.klt/functional-verification/` artifact directory "
+            "against DIR instead of the request file's own directory -- e.g. "
+            "re-run a request archived beside its evidence record from the "
+            "directory its paths were written against (a file request with "
+            "--base-dir D resolves exactly as the same document piped on "
+            "stdin with cwd=D). Default: the request file's directory "
+            "(stdin/inline: the cwd). Must exist and be a directory"
         ),
     )
     functional_verification_parser.add_argument(
@@ -2766,7 +2786,7 @@ def _add_functional_verification_parser(
             "`.klt/functional-verification/` next to the request file; "
             "created if missing, relative paths resolve against the cwd. "
             "Request-relative source paths still resolve against the "
-            "request's own directory"
+            "request's own directory (or the --base-dir override)"
         ),
     )
     _add_format_arg(functional_verification_parser)
