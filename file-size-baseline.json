@@ -1013,7 +1013,7 @@
     },
     {
       "path": "tests/test_place_and_route.py",
-      "lines": 12414
+      "lines": 12411
     },
     {
       "path": "tests/test_place_and_route_batch.py",
