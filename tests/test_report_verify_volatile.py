@@ -155,7 +155,7 @@ def test_exclude_destined_constants_are_list_item_free():
     in this list; one needing a per-list-entry exclusion belongs on the
     strip_path_patterns side instead."""
     from klayout_tools import _report_verify as rv
-    from klayout_tools import equiv, lvs, signoff, signoff_attest
+    from klayout_tools import equiv, lvs, signoff, signoff_attest_drift
 
     exclude_destined = {
         "_report_verify.VOLATILE_PROVENANCE_PATHS": rv.VOLATILE_PROVENANCE_PATHS,
@@ -163,8 +163,8 @@ def test_exclude_destined_constants_are_list_item_free():
         "signoff.VOLATILE_REPORT_PATHS": signoff.VOLATILE_REPORT_PATHS,
         "equiv._EQUIV_RERUN_EXCLUDE_PATHS": equiv._EQUIV_RERUN_EXCLUDE_PATHS,
         "lvs._LVS_RERUN_EXCLUDE_PATHS": lvs._LVS_RERUN_EXCLUDE_PATHS,
-        "signoff_attest.VOLATILE_ATTESTATION_PATHS": (
-            signoff_attest.VOLATILE_ATTESTATION_PATHS
+        "signoff_attest_drift.VOLATILE_ATTESTATION_PATHS": (
+            signoff_attest_drift.VOLATILE_ATTESTATION_PATHS
         ),
     }
     for name, paths in exclude_destined.items():
