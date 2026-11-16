@@ -201,7 +201,7 @@
     },
     {
       "path": "src/klayout_tools/cli/signoff_cmd.py",
-      "lines": 1168
+      "lines": 1166
     },
     {
       "path": "src/klayout_tools/cli/sim_cmd.py",
@@ -485,11 +485,11 @@
     },
     {
       "path": "src/klayout_tools/pdk.py",
-      "lines": 2561
+      "lines": 2545
     },
     {
       "path": "src/klayout_tools/pdk_cells.py",
-      "lines": 807
+      "lines": 804
     },
     {
       "path": "src/klayout_tools/pdk_models.py",

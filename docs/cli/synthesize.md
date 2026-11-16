@@ -560,17 +560,30 @@ downstream reader — is never touched. The netlist file is only rewritten
 when something actually changed, so the common case (no `signed` at all)
 leaves it untouched, mtime included.
 
-### Source-path normalization (issue #4872)
+### Source-path normalization (issue #4872, #5594)
 
 The written netlist depends only on the inputs, not on the directory the
 request ran in. Yosys names some internal nets after the path it read the
-source from (`\f$func$/abs/dir/f.v:3$2.x`, typical of sv2v output with
-functions and casts); after `write_verilog`, `run_synthesize` drops each
-source's directory prefix, leaving `\f$func$f.v:3$2.x`. This runs before
-`netlist_sha256` is computed, so two runs of the same request from different
-directories produce byte-identical `*_synth.v` and equal `netlist_sha256`, and
-no host path leaks into a committed netlist. A netlist containing no such
-path is never rewritten. No JSON field changes.
+source from (`\f$func$<dir>/f.v:3$2.x`, typical of sv2v output with
+functions and casts), and it records whichever spelling the generated
+script used: the absolute path for sources outside the run's repo root,
+the repo-relative path (issue #1844) for sources inside it. After
+`write_verilog`, `run_synthesize` drops each source's directory prefix in
+both spellings, leaving `\f$func$f.v:3$2.x`. This runs before
+`netlist_sha256` is computed, so two runs of the same request from
+different directories — in or out of any git repository, at any depth
+inside one, and with a defaulted (random) `run_id` — produce
+byte-identical `*_synth.v` and equal `netlist_sha256`; `netlist_sha256`
+is a function of the inputs and is reproducible across build roots. No
+host path, absolute or repo-relative, leaks into a committed netlist. A
+netlist containing no such path is never rewritten. No JSON field
+changes.
+
+One-time note for callers upgrading: `netlist_sha256` values recorded by
+in-repo runs before the #5594 fix embedded the repo-relative path and
+change once with this release; digests recorded by out-of-repo runs are
+unchanged. A freshness check (`signoff --check`, issue #4313) should
+re-record its digest from a run of this version.
 
 ## PDK / liberty resolution
 
