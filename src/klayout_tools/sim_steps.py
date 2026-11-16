@@ -615,10 +615,7 @@ def _meas_command(card: str, local: str, step: dict[str, Any]) -> str:
             "'.meas <type> <name> ...' card"
         )
     meas_type, card_name, rest = match.groups()
-    # Issue #5651: a control-scope card gets the signal-position lint with
-    # the control-scope remedy (an intermediate expr/`let` helper, not the
-    # file-scope expression wrapper, which ngspice rejects in .control).
-    _validate_meas_card(local, card, control_scope=True)
+    _validate_meas_card(local, card, control_scope=True)  # issue #5651 lint
     if meas_type.lower() != step["kind"]:
         raise SimError(
             f"step {step['name']!r}: measurement {local!r} is a '.meas "
