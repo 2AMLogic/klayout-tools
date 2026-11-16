@@ -3125,8 +3125,25 @@ def _run_yosys(
     ``None`` reproduces the pre-#1844 behaviour exactly (subprocess's own
     default: the invoking process's cwd), correct for every script that
     embeds only absolute paths.
+
+    The child gets an explicit environment built as a copy of ``os.environ``
+    with ``COLUMNS`` pinned to a generous width (issue #5780). Yosys drives
+    ``yosys-abc`` as an interactive REPL over pipes and synchronizes on abc
+    echoing the ``source <script>`` command line; with klt capturing output
+    that echo goes through readline, which cannot query a window size on a
+    pipe and falls back to 80 columns. When the echoed line's width
+    (``len(TMPDIR) + 43``) reaches column 79 -- i.e. ``$TMPDIR`` is 36+
+    characters -- readline wraps it, the echo arrives with only the tail of
+    the path and no ``source `` token, yosys's handshake never arms, and
+    both processes block until the timeout kills the run. Pinning
+    ``COLUMNS`` removes the length sensitivity entirely (verified
+    netlist-identical on #5780). The pin is applied unconditionally -- an
+    inherited ``COLUMNS=80`` from an interactive shell is exactly the
+    failing case -- but everything else (``PATH``, ``TMPDIR``, PDK vars) is
+    inherited unchanged.
     """
     timeout_s = ytimeout.resolve_timeout(timeout_s, DEFAULT_YOSYS_TIMEOUT_S)
+    env = {**os.environ, "COLUMNS": "4096"}
     try:
         completed = subprocess.run(
             ["yosys", "-s", script_path],
@@ -3134,6 +3151,7 @@ def _run_yosys(
             text=True,
             timeout=timeout_s,
             cwd=cwd,
+            env=env,
         )
     except OSError as exc:
         _write_yosys_log(script_path, "", str(exc))
