@@ -8212,7 +8212,7 @@ def test_compact_without_findings_only_raises(tmp_path):
 
 
 def test_cli_compact_json_and_signoff_classifier(tmp_path, capsys):
-    from klayout_tools.signoff import _is_erc_shape  # noqa: F401
+    from klayout_tools.signoff import _is_erc_shape
 
     gds = tmp_path / "basic.gds"
     spec = tmp_path / "basic.erc.json"
@@ -9265,7 +9265,7 @@ def _rail_row_report(
     top = layout.create_cell("TOP")
     # No gate geometry: a passive-only cell that declares `nets[]`/`ties[]`
     # is a valid run (issue #2896), so the recipe needs no gate at all.
-    del poly  # noqa: F841
+    del poly
     for i in range(3):
         cell = layout.create_cell(f"RAILCELL{i}")
         w = _RAIL_CELL_W_UM

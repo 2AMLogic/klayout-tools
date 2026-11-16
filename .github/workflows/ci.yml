@@ -1864,7 +1864,10 @@ jobs:
       - name: ASAP7 deck fixtures
         run: |
           klayout -v
-          uv run --frozen --extra dev pytest tests/test_drc_asap7_deck.py -q -rs
+          # The via-tip oracle's one @_needs_klayout test
+          # (test_counts_match_the_real_deck) skips without the binary, so it
+          # only executes here (#5762, ~+10 s measured).
+          uv run --frozen --extra dev pytest tests/test_drc_asap7_deck.py tests/test_place_and_route_via_tip.py -q -rs
 
   wall-clock-budget:
     name: CI wall-clock budget
