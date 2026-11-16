@@ -14,6 +14,14 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added** (#5684): `klt functional-verification` accepts
+  `request.options.from_synthesize` (`{"report", "netlist"}`) to re-simulate
+  the netlist a `klt synthesize` run produced. The netlist is re-hashed against
+  the report's `netlist_sha256` before any build and the run is refused (exit
+  1) on a mismatch, a missing hash, an unresolvable netlist, or an
+  `hdl_toplevel` mismatch. `sources` may be empty/omitted only with this key.
+  Additive `from_synthesize` response block; no `schema_version` bump.
+
 - **Changed** (#5788, breaking — `klt array-check` `schema_version` 1 ->
   **2**): the record's `file` field is now the committable
   `{path, scope}` object `env_provenance.repo_relative_path()` builds

@@ -159,7 +159,7 @@ def run_functional_verification_with_mutations(
             "'Open questions')"
         )
 
-    sources = _fv._resolve_sources(request_doc["sources"], request_dir)
+    sources = _fv._resolve_sources(request_doc.get("sources"), request_dir)
     hdl_toplevel = request_doc["hdl_toplevel"]
     if not isinstance(hdl_toplevel, str) or not hdl_toplevel:
         raise _fv.FunctionalVerificationError(
