@@ -41,9 +41,8 @@ So this module layers two sources, and says per field which is which:
   :data:`_SKY130_STACKUP`).
 
 An install whose family has no curated table entry raises
-:class:`PdkStackupError` rather than emitting a partial stack — a stackup
-missing its z axis is not a usable field-solver input, and silently emitting
-one would be worse than saying so.
+:class:`PdkStackupError` rather than emitting a partial stack — a stackup with no z
+axis is not a usable field-solver input, and emitting one silently would be worse.
 """
 
 from __future__ import annotations

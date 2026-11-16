@@ -501,11 +501,11 @@
     },
     {
       "path": "src/klayout_tools/pdk.py",
-      "lines": 2561
+      "lines": 2545
     },
     {
       "path": "src/klayout_tools/pdk_cells.py",
-      "lines": 807
+      "lines": 804
     },
     {
       "path": "src/klayout_tools/pdk_models.py",
