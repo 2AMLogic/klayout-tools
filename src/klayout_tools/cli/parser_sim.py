@@ -221,8 +221,9 @@ def add_sim_parser(
             "shard the expanded corner/Monte-Carlo unit list across this "
             "many hosts and merge the per-shard reports (default: 1, or "
             "the request's `remote.hosts` field); overrides the request "
-            "field when given. Currently implemented for `local`/"
-            "`local-parallel` only -- see docs/cli/sim.md."
+            "field when given. `local`/`local-parallel` shard in-process, "
+            "`remote` provisions this many instances, `batch` submits one "
+            "fleet job per shard -- see docs/cli/sim.md 'Fleet sharding'."
         ),
     )
     sim_parser.add_argument(

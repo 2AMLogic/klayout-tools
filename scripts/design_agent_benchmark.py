@@ -1833,7 +1833,7 @@ def run_attempt(
     error: str | None = None
     try:
         descriptor_arg, candidate_arg = provider(task, attempt_index, repo_root)
-    except Exception as exc:  # noqa: BLE001 -- see docstring: any provider failure is a scored attempt failure, never a crash
+    except Exception as exc:  # see docstring: provider failure is scored, never a crash
         error = f"candidate provider failed: {exc}"
     else:
         cached = None
@@ -2628,7 +2628,7 @@ def _invoke_round_provider(
     try:
         before = _child_directories(scratch_root)
         descriptor_arg, candidate_arg = provider(round_task, round_index, repo_root)
-    except Exception as exc:  # noqa: BLE001 -- see run_attempt's identical rationale
+    except Exception as exc:  # -- see run_attempt's identical rationale
         return (
             None,
             None,
