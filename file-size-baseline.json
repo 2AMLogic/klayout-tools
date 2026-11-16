@@ -169,7 +169,7 @@
     },
     {
       "path": "src/klayout_tools/_paths.py",
-      "lines": 526
+      "lines": 524
     },
     {
       "path": "src/klayout_tools/_provenance.py",
@@ -685,7 +685,7 @@
     },
     {
       "path": "src/klayout_tools/tap_distance.py",
-      "lines": 599
+      "lines": 596
     },
     {
       "path": "src/klayout_tools/trajectory.py",

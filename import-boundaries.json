@@ -653,6 +653,7 @@
         "klayout_tools._digest",
         "klayout_tools._jsongz",
         "klayout_tools._jsonnum",
+        "klayout_tools._layer_spec",
         "klayout_tools._layout",
         "klayout_tools._native",
         "klayout_tools._openroad_engine",

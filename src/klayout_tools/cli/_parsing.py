@@ -23,10 +23,9 @@ share a path into, so it is parsed here from the start rather than in one
 command module a second adopter would have to copy out of.
 
 :func:`parse_layer_spec` (issue #5605) is the same story for the bare
-``LAYER/DATATYPE`` flag value itself: ``klt stats --window-layer``,
-``klt seam-check --layer`` and ``klt interface-check --pin-layer-a/-b``
-each hand-rolled the split, and now delegate here, where acceptance is the
-package-wide rule in ``klayout_tools._paths``.
+``LAYER/DATATYPE`` flag value: ``klt stats --window-layer``, ``klt
+seam-check --layer`` and ``klt interface-check --pin-layer-a/-b`` each
+hand-rolled the split and now delegate here.
 
 Private to the :mod:`klayout_tools.cli` package -- not part of the public
 ``klayout_tools`` API.
@@ -40,7 +39,7 @@ from collections.abc import Callable
 from typing import Any
 
 from .._jsonnum import is_number
-from .._paths import parse_layer_datatype_strict
+from .._layer_spec import parse_layer_datatype_strict
 
 ErrorFactory = Callable[[str], Exception]
 
@@ -131,14 +130,10 @@ def parse_layer_spec(
     error_cls: ErrorFactory,
 ) -> tuple[int, int]:
     """Parse a ``"<layer>/<datatype>"`` CLI-flag value into an
-    ``(layer, datatype)`` int pair.
-
-    ``flag`` is the CLI flag name (e.g. ``"--window-layer"``) embedded in
-    the error message, and ``error_cls`` is the caller's own exception
-    class, raised on anything malformed. Acceptance is the package-wide
-    rule of :func:`klayout_tools._paths.parse_layer_datatype_strict`
-    (issue #5605): digits only, surrounding whitespace tolerated, signs
-    rejected -- so ``-68/20`` is a malformed flag, not layer -68.
+    ``(layer, datatype)`` int pair; acceptance is the package-wide rule of
+    :func:`klayout_tools._layer_spec.parse_layer_datatype_strict` (``flag``
+    names the CLI flag in the error; ``error_cls`` is the caller's own
+    exception class, raised on anything malformed).
     """
     try:
         return parse_layer_datatype_strict(value)

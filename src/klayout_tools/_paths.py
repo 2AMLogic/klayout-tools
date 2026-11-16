@@ -21,6 +21,8 @@ import sys
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
+from ._layer_spec import parse_layer_datatype_strict
+
 
 def _resolve_relative(path: str, base_dir: str) -> str:
     """Expand env vars/``~`` in ``path``; join relative paths against ``base_dir``."""
@@ -211,31 +213,6 @@ def _reject_unknown_keys(
         "misspelt key, a key from a newer klt release, or a key that belongs "
         "to a different section"
     )
-
-
-#: The single acceptance rule for a ``"<layer>/<datatype>"`` string, shared
-#: by every parser in the package (issue #5605): digits only, surrounding
-#: whitespace tolerated, signs rejected -- a negative GDS layer or datatype
-#: is never valid, so ``-68/20`` is a malformed spec, not layer -68.
-_LAYER_DATATYPE_RE = re.compile(r"\s*(\d+)\s*/\s*(\d+)\s*")
-
-
-def parse_layer_datatype_strict(raw: str) -> tuple[int, int]:
-    """Parse a ``"<layer>/<datatype>"`` string into an ``(layer, datatype)``
-    int pair, or raise ``ValueError``.
-
-    This is the one acceptance rule every layer/datatype parser in the
-    package delegates to (issue #5605): exactly one ``/`` separating two
-    integer parts, digits only -- surrounding whitespace is tolerated,
-    signs (``-68/20``, ``+68/20``) are rejected. Callers phrase the error
-    for their own context; see :func:`parse_layer_datatype` for the
-    spec-file shape and :func:`klayout_tools.cli._parsing.parse_layer_spec`
-    for the CLI-flag shape.
-    """
-    match = _LAYER_DATATYPE_RE.fullmatch(str(raw))
-    if match is None:
-        raise ValueError(raw)
-    return int(match.group(1)), int(match.group(2))
 
 
 def parse_layer_datatype(
