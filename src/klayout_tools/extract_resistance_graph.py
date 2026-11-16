@@ -1,11 +1,11 @@
 """Deterministic geometry-to-resistor-graph construction for extraction
 (issue #2980; Stage 3.D5 increment 1 of ``docs/design/extract-fidelity-roadmap.md``),
-plus the thin effective-resistance adapter over it (issue #2981, increment 2)
-and increment 4's per-cut via/contact resistance (``r_cut_ohm``, issue #2983).
+plus the thin effective-resistance adapter over it (issue #2981, increment 2).
 
 Construction turns conductor-role polygons, declared ports (terminals and
-ideal nodes) and via/contact landings into a resistor graph -- nodes, edges,
-and explicit diagnostics -- following the Stage 3.D2 model.
+ideal nodes) and via/contact landings -- graph-level geometry in database
+units (dbu) -- into a resistor graph of nodes, edges and explicit
+diagnostics, following the Stage 3.D2 model.
 :func:`terminal_resistance_matrix` and :func:`effective_resistance` (at the end
 of the module) solve a built graph by reusing
 :func:`klayout_tools.ir_solver.solve_ir_drop`; there is no second solver.
