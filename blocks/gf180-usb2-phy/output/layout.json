@@ -1,0 +1,366 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:09:57.049858+00:00",
+  "slug": "gf180-usb2-phy",
+  "name": "Gf180 Usb2 Phy",
+  "description": "USB 2.0 device PHY on gf180mcu \u2014 2AM Logic canary block",
+  "pdk": "gf180mcu",
+  "layer_count": 15,
+  "cell_count": 23,
+  "instance_count": 22,
+  "layout_file": "differential_receiver.gds",
+  "renders": {
+    "overview": "renders/overview.png",
+    "Nwell": "renders/21_0.png",
+    "Comp": "renders/22_0.png",
+    "Poly2": "renders/30_0.png",
+    "Pplus": "renders/31_0.png",
+    "Nplus": "renders/32_0.png",
+    "Contact": "renders/33_0.png",
+    "Metal1": "renders/34_0.png",
+    "layer_34_10": "renders/34_10.png",
+    "Via1": "renders/35_0.png",
+    "Metal2": "renders/36_0.png",
+    "Via2": "renders/38_0.png",
+    "Metal3": "renders/42_0.png",
+    "SAB": "renders/49_0.png",
+    "Resistor": "renders/62_0.png",
+    "RES_MK": "renders/110_5.png",
+    "center_crop": "renders/center_crop/overview.png"
+  },
+  "signals": {
+    "schema_version": 1,
+    "engine": "ngspice",
+    "engine_version": "46",
+    "status": "error",
+    "corner_count": 7,
+    "default_corner_id": "diff-receiver-sensitivity/tt_27c_2.97v",
+    "passed": 5,
+    "failed": 0,
+    "errored": 2,
+    "measurements": [
+      {
+        "name": "Diff Receiver Sensitivity",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Dplus Pullup Tolerance",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Driver Disabled Leakage",
+        "limits": null,
+        "status": "error",
+        "worst_case": null
+      },
+      {
+        "name": "Driver Signal Quality",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Se Receiver Dm Thresholds",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Se Receiver Dp Thresholds",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Smoke Inverter",
+        "limits": null,
+        "status": "error",
+        "worst_case": null
+      }
+    ],
+    "corners": [
+      {
+        "corner_id": "diff-receiver-sensitivity/tt_27c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "vth_cm080_mv",
+            "value": -19.4565,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vth_cm165_mv",
+            "value": -21.5278,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vth_cm250_mv",
+            "value": -25.4832,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "hi_cm080",
+            "value": 1.0,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "lo_cm080",
+            "value": 2.30056e-10,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "hi_cm165",
+            "value": 1.0,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "lo_cm165",
+            "value": 2.31601e-10,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "hi_cm250",
+            "value": 1.0,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "dplus-pullup-tolerance/tt_27c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "r_code0_ohm",
+            "value": 2141.27,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "r_code31_ohm",
+            "value": 1068.97,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "r_best_ohm",
+            "value": 1484.0,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "best_code",
+            "value": 19.0,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "best_err_pct",
+            "value": 1.06657,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "trim_step_pct",
+            "value": 3.23586,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "driver-disabled-leakage/tt_27c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "error",
+        "runtime_s": 0,
+        "measurements": [],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "driver-signal-quality/tt_27c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "trise_ns",
+            "value": 6.07013,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "tfall_ns",
+            "value": 5.97993,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "trf_ratio",
+            "value": 1.01508,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vcross_rise",
+            "value": 1.46188,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vcross_fall",
+            "value": 1.46188,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "xing_extra_ps",
+            "value": 0.0,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "dp_over_mv",
+            "value": 0.965587,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "dp_under_mv",
+            "value": -0.622033,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "se-receiver-dm-thresholds/tt_27c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "vth_v",
+            "value": 1.22272,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "out_at_vil",
+            "value": 2.30056e-10,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "out_at_vih",
+            "value": 1.0,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "se-receiver-dp-thresholds/tt_27c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "vth_v",
+            "value": 1.22272,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "out_at_vil",
+            "value": 2.30056e-10,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "out_at_vih",
+            "value": 1.0,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "smoke-inverter/tt_27c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "error",
+        "runtime_s": 0,
+        "measurements": [],
+        "diagnostics": []
+      }
+    ]
+  },
+  "source": {
+    "repo": "2AMLogic/gf180-usb2-phy",
+    "ref": "7134cc091abfaffa805f464773c103e9f7378254",
+    "path": "layout/analog/differential_receiver.gds"
+  },
+  "downloadable": true,
+  "status": "ok"
+}

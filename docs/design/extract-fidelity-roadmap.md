@@ -1,6 +1,42 @@
 # Roadmap: extraction fidelity for `klt extract --parasitics`
 
-**Status:** research / proposal, no implementation. Filed for issue #737, a
+**Status (stage states last verified 2026-11-13 against `main` @ `d9bc36811`):**
+partly implemented — this document is no longer "no implementation". Per stage,
+naming the issue that landed each increment and the flag that enables it:
+
+- **Stage 0** — lumped ground C + star R: **shipped**, and still the default
+  (`klt extract --parasitics`).
+- **Stage 1** — measurement scaffolding: **shipped** as `klt pex`, the
+  per-corner, per-spec-row schematic-vs-extracted delta report (Epic #709
+  Phase 1a; Epic #709 is closed).
+- **Stage 2a** — vertical overlap (crossover) coupling + shielded-area
+  correction: **shipped** (#760) — unconditional under `--parasitics` on every
+  deck that curates `PARASITICS.metal_overlaps`.
+- **Stage 2b** — lateral sidewall coupling + fringe shielding: **partial**
+  (#976) — computed only for a same-layer net pair naming a declared
+  `--critical-net` net, sky130 is the only deck curating the coefficients, and
+  the fringe-shielding deduction this stage names is *not* implemented.
+- **Stage 2c** — edge-to-lower-plane fringe (`defaultsideoverlap`): **not
+  started** — no coefficient field on `ParasiticsDeck`, no deck data, no
+  geometry pass.
+- **Stage 3** — distributed RC: **partial** (#977) — `--distributed-rc`
+  (requires `--critical-net`) redistributes each critical net's already-computed
+  lumped totals along a terminal-position proxy, not the geometry-decomposed
+  segment graph this stage describes. Its §3.D terminal-aware resistance-graph
+  design is separately **shipped** behind `--resistance-graph` /
+  `--resistance-graph-r-cut` (#2982, #2983), consumed by `klt pex` (#4037).
+- **Stage 4** — quasi-static field solve: **partial** — `klt mom` ships the
+  quasi-static capacitance solve (#718) with closed-form and
+  convergence-under-refinement validation (#719) plus PEEC partial
+  inductance/resistance (#797), and `klt pex --mom-rlc-net` splices a chosen
+  net's externally-solved R/L/C into the extracted netlist (#988), while `klt
+  extract --mom-net` runs the solve in-process to cross-check and replace one
+  net's ground capacitance (#798, Epic #701 Phase 1b). It is not an automatic
+  or whole-layout oracle for Stages 2–3.
+
+§3's per-stage sections and §3's Summary table carry the same states.
+
+Filed for issue #737, a
 research-and-propose task under the re-scoped
 [Epic #701](https://github.com/2AMLogic/klayout-tools/issues/701) (Method of
 Moments field solver) and
@@ -8,7 +44,8 @@ Moments field solver) and
 post-layout sim flow). It sequences the fidelity stages *between* today's
 shipped lumped-RC extraction and #701's field solver, and names the first
 concrete, measurable increment. It does **not** authorise implementation of
-anything below.
+anything below — each increment listed in the status block above was authorised
+by its own issue, not by this document.
 
 **What this document does not settle.** Both parent epics carry
 `loom:operator-only`. This roadmap does not presume either epic's outcome: it
@@ -137,20 +174,24 @@ of this table; `docs/cli/extract.md` → "Parasitic model scope"):
 |---|---|---|
 | Net-to-substrate **area** capacitance | ✅ modelled, per conductor layer | `model.capacitance` |
 | Net-to-substrate **perimeter/fringe** capacitance | ✅ modelled, isolated-edge coefficient applied to the net's whole perimeter | `model.capacitance` |
-| **Lateral** net-to-net coupling (same layer, sidewall) | ❌ **exactly zero** | `model.coupling` |
-| **Vertical** net-to-net coupling (crossover / plate overlap on adjacent layers) | ❌ **exactly zero** | `model.coupling` |
+| **Lateral** net-to-net coupling (same layer, sidewall) | ⚠️ **partial** (#976) — computed only for a same-layer pair naming a declared `--critical-net` net, and only on a deck curating `metal_sidewalls` (sky130 today); exactly zero for every other pair | `model.coupling` |
+| **Vertical** net-to-net coupling (crossover / plate overlap on adjacent layers) | ✅ **modelled** (#760) — overlap area charged between the two distinct nets and deducted from both nets' own ground area term, unconditionally under `--parasitics` wherever the deck curates `metal_overlaps` | `model.coupling` |
 | **Fringe shielding** (an edge facing a neighbour does not also see full substrate fringe) | ❌ not modelled — full substrate fringe charged regardless of neighbours | implied by `model.capacitance` |
-| Distributed RC (per-segment ladder) | ❌ one lumped R per net, star-apportioned | `model.resistance` |
-| True per-terminal routed-path resistance | ❌ coarse `Device.trans` centroid weighting | `docs/cli/extract.md` → "Per-terminal resistance is coarse" |
-| Via / contact resistance | ❌ not modelled — vias carry connectivity only, no `sheet_res` term (`vias` is not a `PARASITICS` role) | `_compute_parasitics` roles list, `extract.py:4124-4149` |
-| Self / mutual **inductance** | ❌ not modelled at all — no L element exists anywhere in the output | `model.frequency` |
+| Distributed RC (per-segment ladder) | ⚠️ **partial** (#977) — `--distributed-rc` (requires `--critical-net`) emits a multi-segment ladder for a declared critical net, ordered by terminal position rather than by decomposed routed geometry; every other net keeps one lumped R, star-apportioned | `model.resistance` |
+| True per-terminal routed-path resistance | ⚠️ **partial** (#2982, #2983) — `--resistance-graph` additionally reports the net's geometry-derived terminal-pair effective-resistance matrix and can substitute its cross-level scalar; the default lumped path still uses coarse `Device.trans` centroid weighting | `docs/cli/extract.md` → "Per-terminal resistance is coarse" |
+| Via / contact resistance | ⚠️ **partial** (#2983) — modelled inside `--resistance-graph` as one `r_cut / n_cut` edge per landing, from the caller-supplied `--resistance-graph-r-cut` value, because `klt extract` does not yet consume the decks' curated per-cut `cuts` table (#3053); in the default lumped path vias still carry connectivity only, with no `sheet_res` term (`vias` is not a `PARASITICS` role) | `_compute_parasitics` roles list, `extract.py:4124-4149` |
+| Self / mutual **inductance** | ❌ never computed — the geometry pass has no inductance term; an externally-solved value can be spliced in as a series L via `--mom-rlc-net --mom-rlc-inductance-nh` (#988), and `klt mom` can solve one (#797), but nothing in `--parasitics` derives it | `model.frequency` |
 | Frequency dependence (skin effect, distributed T-line behaviour) | ❌ quasi-static, one frequency-independent R and C | `model.frequency` |
 | Temperature / corner dependence of R and C | ❌ single nominal coefficient set per PDK; no corner axis | `decks/sky130.py:951` (one `LayerRC` per level) |
 | Device junction capacitance | ✅ **delegated** to the device model via `AS`/`AD`/`PS`/`PD`; deliberately not double-counted here (#226, #695) | `docs/cli/extract.md` → conductor roles |
 
 Two of these deserve emphasis because they are easy to misread:
 
-- **"No coupling" does not mean "capacitance is uniformly too low."** The
+- **"No coupling" does not mean "capacitance is uniformly too low."** *(Status,
+  2026-11-13: this now describes the still-unmodelled remainder — vertical
+  overlap charge is moved to the net pair rather than grounded (#760), and
+  lateral charge is computed for `--critical-net` pairs (#976) though still not
+  deducted from the substrate fringe term.)* The
   charge that physically terminates on a neighbouring conductor is not
   dropped; it is **charged to ground** through the substrate fringe
   coefficient (see §1.5). Total capacitance can therefore land in a plausible
@@ -167,17 +208,21 @@ The shipped coefficients come from sky130's own magic technology file
 (`libs.tech/magic/sky130A.tech` in a volare/open-pdks install — the file
 `decks/sky130.py`'s comments already cite field-by-field). That file's
 extraction section defines **five** coefficient families per conductor level.
-`--parasitics` reads **two**:
+At filing time `--parasitics` read **two**; as of 2026-11-13 it reads **four**
+of the five (#760, #976), with the scoping each carries given in the table:
 
 | magic keyword | Physical meaning | sky130 example value | Read today? |
 |---|---|---|---|
 | `defaultareacap` | area cap to the substrate plane | `allm1 metal1 25.78` aF/µm² | ✅ `cap_area_ff_um2` |
 | `defaultperimeter` | fringe cap from an edge to the substrate plane | `allm1 metal1 40.57` aF/µm | ✅ `cap_perim_ff_um` |
-| `defaultsidewall` | **lateral** coupling between same-plane conductors | `allm1 metal1 44 0.25` | ❌ |
-| `defaultoverlap` | **vertical** plate coupling to a specific lower plane | `allm1 metal1 allli locali 114.20` aF/µm² | ❌ |
-| `defaultsideoverlap` | fringe from an edge down onto a specific lower plane | `allm1 metal1 allli locali 59.50` aF/µm | ❌ |
+| `defaultsidewall` | **lateral** coupling between same-plane conductors | `allm1 metal1 44 0.25` | ⚠️ **first parameter only**, as `metal_sidewalls` (#976) — sky130 deck only, and only for `--critical-net` pairs; the second parameter is still unread (see the caution below) |
+| `defaultoverlap` | **vertical** plate coupling to a specific lower plane | `allm1 metal1 allli locali 114.20` aF/µm² | ✅ `metal_overlaps` (#760) — read unconditionally under `--parasitics` |
+| `defaultsideoverlap` | fringe from an edge down onto a specific lower plane | `allm1 metal1 allli locali 59.50` aF/µm | ❌ — Stage 2c, not started |
 
-The three unread families are the coefficient set for Stages 2a/2b/2c below.
+Stages 2a and 2b have since transcribed `defaultoverlap` and `defaultsidewall`'s
+first parameter (#760, #976). The one still-unread family,
+`defaultsideoverlap`, is the coefficient set for Stage 2c below; `defaultsidewall`'s
+second parameter also remains unread (see this section's closing caution).
 This matters for cost: **Stage 2 needs no new data source, no new license
 question, and no new curation pattern** — the same public file, the same
 "transcribe with an inline citation" discipline (#547's `metals_without_coefficient`
@@ -428,6 +473,11 @@ additive per #216's accepted interface decision **[REPO]**.
 
 ### Stage 1 — the measurement scaffolding (prerequisite, not this document's to build)
 
+**Shipped as `klt pex` (Epic #709 Phase 1a; Epic #709 closed, 2026-11-13
+check):** the per-corner, per-spec-row schematic-vs-extracted delta report this
+stage asks for exists as its own verb, so later stages' re-sim fidelity claims
+are no longer blocked on it.
+
 **This is Epic #709 Phase 0/1, and it gates every stage below.** A fidelity
 claim needs (a) the same testbenches run against schematic and extracted
 netlists, (b) a per-corner, per-spec-row delta report, and (c) the extraction
@@ -451,6 +501,12 @@ and very different payoffs, and because the split is what makes a *small first
 increment* possible.
 
 #### Stage 2a — vertical overlap (crossover) coupling + shielded-area correction
+
+**Shipped, issue #760 (closed 2026-08-11):** `klt extract --parasitics` charges
+vertical-overlap coupling between distinct nets and deducts the overlapped area
+from both nets' ground area term, unconditionally and whole-layout on every deck
+curating `PARASITICS.metal_overlaps` — no `--critical-net` scoping, unlike
+Stage 2b below. §5 carries the as-shipped measurement.
 
 Per net pair, the area where net A's conductor on level *i* sits directly
 under net B's conductor on level *i+1*: charge it `defaultoverlap(i, i+1)`
@@ -588,7 +644,18 @@ one lumped R and one lumped C.
 
 #### Stage 3 design spike: terminal-aware resistance graph (issues #2391, #2458)
 
-**Status: design and fixture specification only (2026-10-06).** No solver is
+**Status update (2026-11-13): this design has since shipped behind
+`--resistance-graph`.** §3.D5's increments 1–3 landed (#2982:
+`src/klayout_tools/extract_resistance_graph.py`, `src/klayout_tools/resistor_mesh.py`,
+`tests/test_extract_resistance_graph.py`, and the `--resistance-graph` CLI
+flag), and increment 4's cross-level scalar substitution landed as #2983
+(`--resistance-graph-r-cut`, `resistance_source` / `selected_resistance_ohm`),
+consumed by `klt pex` in #4037. Increment 4's remaining items — graph-aware
+ladder segments, per-node capacitance, and the magic `extresist` measurement —
+were not traced for this status pass. The text below is the original design
+record, unchanged.
+
+**Status at filing: design and fixture specification only (2026-10-06).** No solver is
 implemented by this section and no extraction number changes. Verified against
 `origin/main` @ `d28f13f0265cd5c397f136821ca58718d34402c5`: the helpers named
 below exist in `src/klayout_tools/extract_parasitics.py`
@@ -1145,15 +1212,18 @@ Each increment is separately mergeable; none changes default output.
 
 ### Summary
 
-| Stage | Fidelity gain over Stage 0 | Cost | Primary measurement | Blocked on |
-|---|---|---|---|---|
-| **0** shipped | baseline | — | — | — |
-| **1** measurement scaffolding | none (enables all) | owned by #709 | is the measurement | — |
-| **2a** vertical overlap C | 2.1× on the crossover term; first non-zero coupling path | **low** | magic `ext2spice` cross-check + re-sim delta | — |
-| **2b** lateral sidewall C + fringe shielding | **largest** — touches 93.5% of reported C | medium | magic cross-check + crosstalk bench | 2a's plumbing |
-| **2c** side-overlap fringe | small refinement; completes the coefficient set | low (after 2a/2b) | per-net total-C agreement with magic | 2a, 2b |
-| **3** distributed RC | removes ~2× single-section delay bias; fixes branch-count R bias | **high** | node-solve + `extresist` cross-check; R-bound canary row | 2 (ordering), #709 for re-sim claims |
-| **4** quasi-static field solve | bounded error; the oracle for 2–3 | highest | #719's closed-form + convergence criteria | #718 |
+State column as of 2026-11-13 (`main` @ `d9bc36811`); it matches the per-stage
+sections above and the status block at the top of this document.
+
+| Stage | State | Enabled by | Fidelity gain over Stage 0 | Cost | Primary measurement | Blocked on |
+|---|---|---|---|---|---|---|
+| **0** lumped ground C + star R | **shipped** | `klt extract --parasitics` | baseline | — | — | — |
+| **1** measurement scaffolding | **shipped** (Epic #709 Phase 1a) | `klt pex` | none (enables all) | owned by #709 | is the measurement | — |
+| **2a** vertical overlap C | **shipped** (#760) | `--parasitics` (unconditional, decks curating `metal_overlaps`) | 2.1× on the crossover term; first non-zero coupling path | **low** | magic `ext2spice` cross-check + re-sim delta | — |
+| **2b** lateral sidewall C + fringe shielding | **partial** (#976) — critical nets only, sky130 only, no fringe-shielding deduction | `--critical-net` (with `--parasitics`) | **largest** — touches 93.5% of reported C | medium | magic cross-check + crosstalk bench | 2a's plumbing |
+| **2c** side-overlap fringe | **not started** | — | small refinement; completes the coefficient set | low (after 2a/2b) | per-net total-C agreement with magic | 2a, 2b |
+| **3** distributed RC | **partial** (#977) — ladder from existing lumped totals, critical nets only; §3.D resistance graph shipped (#2982, #2983) | `--distributed-rc` (requires `--critical-net`); `--resistance-graph` / `--resistance-graph-r-cut` | removes ~2× single-section delay bias; fixes branch-count R bias | **high** | node-solve + `extresist` cross-check; R-bound canary row | 2 (ordering), #709 for re-sim claims |
+| **4** quasi-static field solve | **partial** — solver shipped as its own verb (#718, #719, #797), plus an opt-in single-net ground-C cross-check/replacement in `klt extract`; not an automatic or whole-layout oracle for Stages 2–3 | `klt mom`; `klt extract --mom-net` for one net's ground C (#798); `klt pex --mom-rlc-net` to splice a solved net's R/L/C (#988) | bounded error; the oracle for 2–3 | highest | #719's closed-form + convergence criteria | #718 |
 
 ## 4. Measurement harness — what already exists here
 

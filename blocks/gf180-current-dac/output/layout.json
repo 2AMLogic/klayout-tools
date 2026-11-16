@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:07:59.446991+00:00",
+  "slug": "gf180-current-dac",
+  "name": "Gf180 Current Dac",
+  "description": "Current-steering DAC with common-centroid arrays on gf180mcu \u2014 2AM Logic canary block",
+  "pdk": "gf180mcu",
+  "layer_count": 17,
+  "cell_count": 78,
+  "instance_count": 1326,
+  "layout_file": "gf180-current-dac-analog.gds",
+  "renders": {
+    "overview": "renders/overview.png",
+    "Nwell": "renders/21_0.png",
+    "Comp": "renders/22_0.png",
+    "Poly2": "renders/30_0.png",
+    "Pplus": "renders/31_0.png",
+    "Nplus": "renders/32_0.png",
+    "Contact": "renders/33_0.png",
+    "Metal1": "renders/34_0.png",
+    "Via1": "renders/35_0.png",
+    "Metal2": "renders/36_0.png",
+    "Via2": "renders/38_0.png",
+    "Via3": "renders/40_0.png",
+    "Via4": "renders/41_0.png",
+    "Metal3": "renders/42_0.png",
+    "layer_42_10": "renders/42_10.png",
+    "Metal4": "renders/46_0.png",
+    "layer_46_10": "renders/46_10.png",
+    "Metal5": "renders/81_0.png",
+    "center_crop": "renders/center_crop/overview.png"
+  },
+  "spec_summary": {
+    "rows": [
+      {
+        "parameter": "Resolution",
+        "target": "10 bits",
+        "fallback": "8 bits",
+        "stretch": "12 bits"
+      },
+      {
+        "parameter": "Update rate",
+        "target": "100 MS/s",
+        "fallback": "50 MS/s",
+        "stretch": "200 MS/s"
+      },
+      {
+        "parameter": "Segmentation",
+        "target": "6 unary MSBs + 4 binary LSBs",
+        "fallback": "4 + 4",
+        "stretch": "not sized"
+      },
+      {
+        "parameter": "INL / DNL (simulated, with mismatch)",
+        "target": "\u2264 0.5 LSB, \u2265 99.7 % yield",
+        "fallback": "\u2264 1 LSB",
+        "stretch": "\u2264 0.25 LSB"
+      },
+      {
+        "parameter": "SFDR near Nyquist (simulated, 0.45 fs tone)",
+        "target": "\u2265 60 dBc",
+        "fallback": "\u2265 50 dBc",
+        "stretch": "\u2265 70 dBc"
+      },
+      {
+        "parameter": "Full-scale output",
+        "target": "2 mA per output (\u00b110 %) into 50 \u03a9 per output"
+      },
+      {
+        "parameter": "Supply / devices",
+        "target": "3.3 V devices on 3.3 V \u00b110 %; 5 V devices not used (DR-0002)"
+      },
+      {
+        "parameter": "Layout",
+        "target": "common-centroid unary array with dummies"
+      },
+      {
+        "parameter": "Signoff",
+        "target": "DRC + LVS clean, post-layout re-verified"
+      }
+    ],
+    "status_note": "PROPOSED \u2014 awaiting operator ratification, see issue #1"
+  },
+  "source": {
+    "repo": "2AMLogic/gf180-current-dac",
+    "ref": "0cddfe0b8af3f98284659bb325c6bd692cf5d3f5",
+    "path": "layout/gf180-current-dac-analog.gds"
+  },
+  "downloadable": true,
+  "status": "ok"
+}

@@ -551,6 +551,7 @@ from . import (
     TapDistanceSpec,
     UnsupportedDeviceMarker,
 )
+from .gf180mcu_bond_pad import BOND_PAD_GUIDELINE_UNMODELED_RULES
 
 # `RuleProvenance.source_repo`/`.commit` shared by every gf180mcu width/space
 # rule's provenance below (issue #747, piloted on this deck's 26 width/space
@@ -2742,11 +2743,9 @@ _UNMODELED_DUALGATE_RULES: tuple[str, ...] = (
     "PL.7_MV",
 )
 
-#: Everything this deck knowingly does not transcribe, surfaced by
-#: `decks.get_unmodeled_rules` as `coverage.unmodeled_rules`: the untranscribed
-#: ESD/guard-ring ids (issue #3792) and 10V LDMOS ids (issue #4569), the
-#: thick-MetalTop and metal-slotting ids (issue #3796), the Metal1-5
-#: wide-metal/end-of-line ids (issue #3968) and the Dualgate ids (issue #3791).
+#: Everything this deck knowingly does not transcribe (`coverage.unmodeled_rules`):
+#: ESD/guard-ring #3792, 10V LDMOS #4569, MT/MSLOT #3796, Metal1-5 EOL #3968,
+#: Dualgate #3791, DRM 9.2 bond-pad guidelines #4001 (see `decks.get_unmodeled_rules`).
 UNMODELED_RULES: tuple[str, ...] = tuple(
     sorted(
         (
@@ -2755,6 +2754,7 @@ UNMODELED_RULES: tuple[str, ...] = tuple(
             *_MT_MSLOT_UNMODELED_RULES,
             *_METAL_EOL_UNMODELED_RULES,
             *_UNMODELED_DUALGATE_RULES,
+            *BOND_PAD_GUIDELINE_UNMODELED_RULES,
         )
     )
 )
@@ -3539,10 +3539,8 @@ EXTRACTION_DECK = ExtractionDeck(
         CapacitorDevice(
             name="cap_mim_2f0_m4m5_noshield",  # official LVS deck's own device name
             top_plate=(75, 0),  # FuseTop
-            top_plate_requires=(
-                (117, 5),  # CAP_MK
-                (117, 10),  # MIM_L_MK
-            ),
+            top_plate_requires=((117, 5), (117, 10)),  # CAP_MK, MIM_L_MK
+            top_plate_requires_interacting=True,  # runset: .interacting (#3440)
             top_plate_excludes=(
                 (80, 5),  # efuse_mk
                 (125, 5),  # plfuse
@@ -3898,10 +3896,8 @@ _MIM_OPTION_A_CAPACITORS = (
     CapacitorDevice(
         name="cap_mim_2f0_m2m3_noshield",
         top_plate=(75, 0),  # FuseTop
-        top_plate_requires=(
-            (117, 5),  # CAP_MK
-            (117, 10),  # MIM_L_MK
-        ),
+        top_plate_requires=((117, 5), (117, 10)),  # CAP_MK, MIM_L_MK
+        top_plate_requires_interacting=True,  # runset: .interacting (#3440)
         top_plate_excludes=(
             (80, 5),  # efuse_mk
             (125, 5),  # plfuse

@@ -705,7 +705,7 @@ def test_cli_grid_and_max_empty_regions_flags(tmp_path, capsys):
 
 REPO_ROOT = Path(__file__).parent.parent
 BANDGAP_GDS = (
-    REPO_ROOT / "blocks" / "sky130-bandgap" / "output" / "bandgap_core_routed.gds"
+    REPO_ROOT / "tests" / "fixtures" / "legacy_bandgap_gds" / "sky130-bandgap.gds"
 )
 BUF4_GDS = (
     REPO_ROOT
@@ -827,3 +827,236 @@ class TestStdCellCanary:
         assert area_eff["checks"]["dead_margins"]["status"] == "pass"
         assert area_eff["checks"]["bbox_tightness"]["status"] == "pass"
         assert area_eff["status"] == "pass"
+
+
+# --- --what-if (issue #4661) -------------------------------------------------
+
+
+def _make_whatif_layout(path):
+    """TOP with two 10x10 um (layer 1/0) child instances A and B, a wire on
+    1/0 joining them, and a label on 1/0 at A's right edge. dbu = 0.001."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    for name in ("A", "B"):
+        c = layout.create_cell(name)
+        c.shapes(layout.layer(1, 0)).insert(kdb.Box(0, 0, 10000, 10000))
+    a = layout.cell("A").cell_index()
+    b = layout.cell("B").cell_index()
+    top.insert(kdb.CellInstArray(a, kdb.Trans(0, 0)))
+    top.insert(kdb.CellInstArray(b, kdb.Trans(20000, 0)))
+    li = layout.layer(1, 0)
+    top.shapes(li).insert(kdb.Box(10000, 4000, 20000, 6000))
+    top.shapes(li).insert(kdb.Text("pin", kdb.Trans(10000, 5000)))
+    layout.write(str(path))
+
+
+def _moves(tmp_path, data):
+    p = tmp_path / "moves.json"
+    p.write_text(json.dumps(data))
+    return str(p)
+
+
+def test_what_if_translate(tmp_path):
+    gds = tmp_path / "w.gds"
+    _make_whatif_layout(gds)
+    before = gds.read_bytes()
+    report = economy_report(
+        str(gds), what_if=_moves(tmp_path, {"moves": [{"instance": "B", "dx_um": 10}]})
+    )
+    assert gds.read_bytes() == before
+    assert report["bbox_um"]["width"] == 40.0
+    assert report["bbox_area_um2"] == 400.0
+    wi = report["what_if"]
+    assert wi["legality"] == "not_checked"
+    assert wi["utilization_basis"] == "measured"
+    assert wi["overlaps"] == []
+    # The wire (10..20) no longer touches B (30..40) on 1/0; it still touches A.
+    assert len(wi["broken_contacts"]) == 1
+    assert wi["broken_contacts"][0]["kind"] == "shape"
+    assert wi["broken_contacts"][0]["instance"] == {"index": 1, "cell": "B"}
+
+
+def test_what_if_overlap_and_label(tmp_path):
+    gds = tmp_path / "w.gds"
+    _make_whatif_layout(gds)
+    report = economy_report(
+        str(gds),
+        what_if=_moves(tmp_path, {"moves": [{"instance": 0, "dx_um": -5}]}),
+    )
+    wi = report["what_if"]
+    # A moved left by 5: the label at x=10 is now outside A (-5..5).
+    texts = [b for b in wi["broken_contacts"] if b["kind"] == "text"]
+    assert [t["text"] for t in texts] == ["pin"]
+    # Move A right into B instead -> overlap.
+    report = economy_report(
+        str(gds),
+        what_if=_moves(tmp_path, {"moves": [{"instance": "A", "dx_um": 15}]}),
+    )
+    ov = report["what_if"]["overlaps"]
+    assert len(ov) == 1
+    assert ov[0]["overlap_area_um2"] == 5.0 * 10.0
+
+
+def test_what_if_reshape(tmp_path):
+    gds = tmp_path / "w.gds"
+    _make_whatif_layout(gds)
+    report = economy_report(
+        str(gds),
+        what_if=_moves(
+            tmp_path, {"reshape": [{"cell": "B", "width_um": 30, "height_um": 10}]}
+        ),
+    )
+    assert report["bbox_um"]["right"] == 50.0
+    wi = report["what_if"]
+    assert wi["utilization_basis"] == "excludes_reshaped_footprints"
+    assert wi["reshaped_cells"][0]["cell"] == "B"
+
+
+def test_what_if_empty_spec_is_baseline(tmp_path):
+    gds = tmp_path / "w.gds"
+    _make_whatif_layout(gds)
+    base = economy_report(str(gds))
+    report = economy_report(str(gds), what_if=_moves(tmp_path, {}))
+    assert "what_if" not in base
+    assert report["what_if"]["moves_applied"] == []
+    assert report["what_if"]["overlaps"] == []
+    for key in ("bbox_area_um2", "utilization", "dead_margins_um"):
+        assert report[key] == base[key]
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        {"moves": [{"instance": "NOPE", "dx_um": 1}]},
+        {"moves": [{"instance": 9, "dx_um": 1}]},
+        {"reshape": [{"cell": "NOPE", "width_um": 1, "height_um": 1}]},
+        {"reshape": [{"cell": "TOP", "width_um": 1, "height_um": 1}]},
+        {"bogus": []},
+        {"moves": [{"instance": "A", "dx_um": "x"}]},
+    ],
+)
+def test_what_if_errors(tmp_path, spec):
+    gds = tmp_path / "w.gds"
+    _make_whatif_layout(gds)
+    with pytest.raises(EconomyError):
+        economy_report(str(gds), what_if=_moves(tmp_path, spec))
+
+
+def test_what_if_malformed_and_array(tmp_path):
+    gds = tmp_path / "w.gds"
+    _make_whatif_layout(gds)
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json")
+    with pytest.raises(EconomyError):
+        economy_report(str(gds), what_if=str(bad))
+
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    c = layout.create_cell("C")
+    c.shapes(layout.layer(1, 0)).insert(kdb.Box(0, 0, 1000, 1000))
+    top.insert(
+        kdb.CellInstArray(
+            c.cell_index(),
+            kdb.Trans(0, 0),
+            kdb.Vector(2000, 0),
+            kdb.Vector(0, 2000),
+            2,
+            1,
+        )
+    )
+    arr = tmp_path / "arr.gds"
+    layout.write(str(arr))
+    with pytest.raises(EconomyError, match="array"):
+        economy_report(
+            str(arr),
+            what_if=_moves(tmp_path, {"moves": [{"instance": "C", "dx_um": 1}]}),
+        )
+
+
+def test_what_if_cli_json(tmp_path, capsys):
+    gds = tmp_path / "w.gds"
+    _make_whatif_layout(gds)
+    moves = _moves(tmp_path, {"moves": [{"instance": "B", "dx_um": 10}]})
+    rc = main(["economy", str(gds), "--what-if", moves, "--format", "json"])
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out)["what_if"]["legality"] == "not_checked"
+    rc = main(["economy", str(gds), "--what-if", moves])
+    assert rc == 0
+    assert "what_if:" in capsys.readouterr().out
+
+
+# --- attribution (--attribute) ------------------------------------------
+
+
+def _make_attribution_layout(overlap: bool = False, children: bool = True):
+    layout = kdb.Layout()
+    li = layout.layer(1, 0)
+    top = layout.create_cell("TOP")
+    if not children:
+        top.shapes(li).insert(kdb.Box(0, 0, 4000, 2000))
+        return layout
+    sub = layout.create_cell("SUB")
+    sub.shapes(li).insert(kdb.Box(0, 0, 1000, 1000))
+    sub.shapes(li).insert(kdb.Box(0, 0, 500, 500))
+    xs = [0, 1500, 3000] if not overlap else [0, 800, 3000]
+    for x in xs:
+        top.insert(kdb.CellInstArray(sub.cell_index(), kdb.Trans(kdb.Vector(x, 0))))
+    # Stretch the top bbox so there is a margin above the instances.
+    top.shapes(li).insert(kdb.Box(0, 1900, 10, 2000))
+    return layout
+
+
+def test_attribution_absent_by_default(tmp_path):
+    path = tmp_path / "a.gds"
+    _make_attribution_layout().write(str(path))
+    assert "attribution" not in economy_report(str(path))
+
+
+def test_attribution_sums_and_labels(tmp_path):
+    path = tmp_path / "a.gds"
+    _make_attribution_layout().write(str(path))
+    attr = economy_report(str(path), attribute=True)["attribution"]
+    assert attr["sums_to_total"] is True
+    assert attr["unattributed_um2"] == 0
+    assert attr["instance_overlap_um2"] == 0
+    assert [c["name"] for c in attr["children"]] == ["SUB[0]", "SUB[1]", "SUB[2]"]
+    total = sum(c["bbox_area_um2"] for c in attr["children"]) + sum(
+        g["area_um2"] for g in attr["gap_components"]
+    )
+    assert total == pytest.approx(4.0 * 2.0)
+    positions = {g["position"] for g in attr["gap_components"]}
+    assert any(p.startswith("margin:") for p in positions)
+    assert attr["children"][0]["own_whitespace_um2"] == pytest.approx(0.0)
+
+
+def test_attribution_overlap_not_double_counted(tmp_path):
+    path = tmp_path / "a.gds"
+    _make_attribution_layout(overlap=True).write(str(path))
+    attr = economy_report(str(path), attribute=True)["attribution"]
+    assert attr["instance_overlap_um2"] == pytest.approx(0.2 * 1.0)
+    assert attr["sums_to_total"] is True
+
+
+def test_attribution_no_children(tmp_path):
+    path = tmp_path / "a.gds"
+    _make_attribution_layout(children=False).write(str(path))
+    attr = economy_report(str(path), attribute=True)["attribution"]
+    assert attr["children"] == []
+    assert len(attr["gap_components"]) == 1
+    assert attr["gap_components"][0]["position"] == "margin:bottom+left+right+top"
+    assert attr["sums_to_total"] is True
+
+
+def test_attribution_cli_deterministic(tmp_path, capsys):
+    path = tmp_path / "a.gds"
+    _make_attribution_layout().write(str(path))
+    outs = []
+    for fmt in ("json", "text"):
+        for _ in range(2):
+            assert main(["economy", str(path), "--attribute", "--format", fmt]) == 0
+            outs.append(capsys.readouterr().out)
+    assert outs[2] == outs[3]
+    first = json.loads(outs[0])
+    assert "attribution" in first
+    assert "attribution:" in outs[2]

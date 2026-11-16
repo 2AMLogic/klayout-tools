@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:09:59.725220+00:00",
+  "slug": "sg13cmos5l-bandgap",
+  "name": "Sg13Cmos5L Bandgap",
+  "description": "CMOS bandgap voltage reference on IHP SG13CMOS5L \u2014 2AM Logic canary block",
+  "layer_count": 10,
+  "cell_count": 1,
+  "instance_count": 0,
+  "layout_file": "sg13cmos5l-bandgap_amp.gds",
+  "renders": {
+    "overview": "renders/overview.png",
+    "layer_1_0": "renders/1_0.png",
+    "layer_5_0": "renders/5_0.png",
+    "layer_6_0": "renders/6_0.png",
+    "layer_7_0": "renders/7_0.png",
+    "layer_8_0": "renders/8_0.png",
+    "layer_8_2": "renders/8_2.png",
+    "layer_14_0": "renders/14_0.png",
+    "layer_31_0": "renders/31_0.png",
+    "layer_44_0": "renders/44_0.png",
+    "layer_63_0": "renders/63_0.png",
+    "center_crop": "renders/center_crop/overview.png"
+  },
+  "spec_summary": {
+    "rows": [
+      {
+        "parameter": "Output reference",
+        "fallback": "nominal set by the core's TC-null point, untrimmed line only",
+        "target": "nominal at the TC-null point; untrimmed line (3\u03c3) from the device-mismatch Monte Carlo on this core; trimmed line with a 1-point trim at 27 \u00b0C",
+        "stretch": "tighter trimmed line"
+      },
+      {
+        "parameter": "Trim",
+        "fallback": "none (untrimmed line only)",
+        "target": "1-point @ 27 \u00b0C, magnitude only; range and resolution derived from this core's Monte Carlo"
+      },
+      {
+        "parameter": "Temp coefficient (\u221240\u2026125 \u00b0C)",
+        "fallback": "< 100 ppm/\u00b0C",
+        "target": "< 50 ppm/\u00b0C",
+        "stretch": "< 20 ppm/\u00b0C"
+      },
+      {
+        "parameter": "PSRR @ DC",
+        "fallback": "> 50 dB",
+        "target": "> 60 dB",
+        "stretch": "> 70 dB"
+      },
+      {
+        "parameter": "Supply",
+        "fallback": "3.3 V \u00b110% (HV devices)",
+        "target": "3.3 V \u00b110% (HV devices)",
+        "stretch": "1.2 V (LV devices)"
+      },
+      {
+        "parameter": "Iq",
+        "fallback": "< 100 \u00b5A",
+        "target": "< 50 \u00b5A",
+        "stretch": "< 20 \u00b5A"
+      },
+      {
+        "parameter": "Startup",
+        "fallback": "self-starting",
+        "target": "self-starting, < 1 ms"
+      },
+      {
+        "parameter": "Area",
+        "fallback": "budget set after the first assembled floorplan",
+        "target": "budget set after the first assembled floorplan"
+      },
+      {
+        "parameter": "Signoff",
+        "fallback": "DRC clean, every LVS gap attributed to a filed klayout-tools issue",
+        "target": "DRC + LVS clean"
+      }
+    ],
+    "status_note": "RATIFIED, targets only; see issue #2"
+  },
+  "source": {
+    "repo": "2AMLogic/sg13cmos5l-bandgap",
+    "ref": "d473f2b071167a35a7256f5843cbec94e8ee1c62",
+    "path": "layout/sg13cmos5l-bandgap_amp/sg13cmos5l-bandgap_amp.gds"
+  },
+  "downloadable": true,
+  "status": "ok"
+}

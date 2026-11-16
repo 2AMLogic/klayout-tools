@@ -53,8 +53,7 @@ already-tested implementation rather than reimplementing any of it:
    module puts back on that report is the spec's own yield-only limit keys
    (:data:`_YIELD_ONLY_LIMIT_KEYS`), which were held out of the dispatched
    request so `klt sim` would not grade its measurement coverage against a
-   bound that was never its to apply -- see
-   :func:`_restore_yield_only_limits`.
+   bound that was never its to apply -- see :func:`_restore_yield_only_limits`.
 
 Pure library: :func:`run_campaign` returns plain Python data and never
 prints -- serialisation and human-readable formatting live in
@@ -69,6 +68,7 @@ import os
 from typing import Any
 
 from . import sim
+from ._jsonnum import is_int
 from ._paths import _load_request_json, _resolve_relative, validate_request_shape
 from .yield_analysis import YieldError, derive_sample_set, run_yield
 
@@ -217,7 +217,7 @@ def _parse_negative_control(spec: dict[str, Any]) -> dict[str, Any] | None:
             "object of monte_carlo overrides (e.g. {'mismatch_scale': 2.5})"
         )
     seed = overrides.get("seed")
-    if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int)):
+    if seed is not None and not is_int(seed):
         raise CampaignError(
             "campaign spec 'negative_control.monte_carlo.seed' must be an integer"
         )

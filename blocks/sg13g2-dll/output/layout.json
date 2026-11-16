@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:10:42.802380+00:00",
+  "slug": "sg13g2-dll",
+  "name": "Sg13G2 Dll",
+  "description": "Delay-locked loop on IHP SG13G2 \u2014 2AM Logic canary block",
+  "pdk": "sg13g2",
+  "spec_summary": {
+    "rows": [
+      {
+        "parameter": "Input clock",
+        "target": "1 GHz",
+        "fallback": "500 MHz",
+        "stretch": "2 GHz"
+      },
+      {
+        "parameter": "Lock range",
+        "target": "\u00b120% around the target input frequency",
+        "fallback": "\u00b120% around 500 MHz",
+        "stretch": "\u00b140%"
+      },
+      {
+        "parameter": "Output phases",
+        "target": "8, evenly spaced over one period",
+        "fallback": "4",
+        "stretch": "16"
+      },
+      {
+        "parameter": "Phase-spacing error",
+        "target": "\u2264 2% of the period, worst corner",
+        "fallback": "\u2264 5%",
+        "stretch": "\u2264 1%"
+      },
+      {
+        "parameter": "Static phase error (output vs input)",
+        "target": "\u2264 2% of the period",
+        "fallback": "\u2264 5%",
+        "stretch": "\u2264 1%"
+      },
+      {
+        "parameter": "Added jitter (rms, simulated)",
+        "target": "\u2264 2 ps",
+        "fallback": "\u2264 5 ps",
+        "stretch": "\u2264 1 ps"
+      },
+      {
+        "parameter": "Lock time",
+        "target": "\u2264 1 \u00b5s from enable",
+        "fallback": "\u2264 5 \u00b5s"
+      },
+      {
+        "parameter": "False lock",
+        "target": "none, from any start state, at any corner"
+      },
+      {
+        "parameter": "Lock-status output",
+        "target": "asserted only when locked"
+      },
+      {
+        "parameter": "Supply / power",
+        "target": "1.2 V thin-oxide (\u00b110 %), no HBT; \u2264 5 mW",
+        "fallback": "\u2264 10 mW",
+        "stretch": "\u2264 2 mW"
+      },
+      {
+        "parameter": "Signoff",
+        "target": "DRC + LVS clean, post-layout re-verified"
+      }
+    ],
+    "status_note": "proposed \u2014 ratified by merge of [0001](spec/decisions/0001-spec-ratification.md"
+  },
+  "source": {
+    "repo": "2AMLogic/sg13g2-dll",
+    "ref": "2d9b4ac3d45e73d005bce6d5727c1cb18881f6d3",
+    "path": "."
+  },
+  "downloadable": true,
+  "status": "in design \u2014 simulation evidence"
+}

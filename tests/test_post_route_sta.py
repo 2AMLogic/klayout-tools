@@ -7272,7 +7272,7 @@ def test_electrical_check_tcl_ends_redirect_on_error_path():
         if line == unsupported:
             assert lines[i - 1] == "  catch {sta::redirect_string_end}"
             assert lines[i - 2] == "} klt_elec_msg]} {"
-    assert lines.count(unsupported) == 2
+    assert lines.count(unsupported) == 4
 
 
 _ELECTRICAL_FIXTURE = Path(__file__).parent / "fixtures" / "sta_electrical_checks"
@@ -7779,7 +7779,7 @@ def test_sta_script_lines_single_clock_unchanged_by_extras_none():
 
 
 def test_clock_targets_echo():
-    assert post_route_sta._clock_targets("clk", 1.1, None) == {
+    assert post_route_sta.clock_targets("clk", 1.1, None) == {
         "clocks": [{"port": "clk", "period_ns": 1.1}],
         "clock_groups": [],
     }

@@ -306,3 +306,104 @@ def test_search_is_a_registered_mandatory_runner_feature():
     assert sim_batch._missing_runner_features(["search"], "0.7.1") == []
     assert sim_batch._missing_runner_features(["search"], None) is None
     assert sim_batch.REQUEST_FEATURE_MIN_RUNNER_VERSION["measurements[].search"] is None
+
+
+# --------------------------------------------------------------------------- #
+# search.param -- a deck .param as the searched quantity (issue #5391)
+# --------------------------------------------------------------------------- #
+
+_PULSE_DECK = ".param td=1n\nVd d 0 PULSE(0 1 {td} 1p 1p 1 2)\nR1 d 0 1k\n"
+# The data edge crosses 0.5 V at td + 0.5p; the probe reads v(d) at 2n.
+_PARAM_SEARCH = {
+    "param": "td",
+    "lo": 0.0,
+    "hi": 4e-9,
+    "tol": 1e-11,
+    "max_iter": 20,
+    "analysis": {"kind": "tran", "args": "10p 2n"},
+    "predicate": {"expr": "v(d) > 0.5", "at": "end"},
+    "direction": "falling",
+}
+
+
+def _param_request(tmp_path: Path, search: dict, **extra) -> Path:
+    path = _request(tmp_path, [{"name": "aperture", "search": search}], **extra)
+    (tmp_path / "body.spice").write_text(_PULSE_DECK)
+    data = json.loads(path.read_text())
+    data["analysis"] = {"kind": "tran", "args": "10p 2n"}
+    path.write_text(json.dumps(data))
+    return path
+
+
+def test_param_and_source_are_exclusive_and_one_is_required():
+    both = {**_SEARCH, "param": "td"}
+    with pytest.raises(SimError, match="exactly one of"):
+        sim_search.validate_search_spec("trip", both)
+    neither = {k: v for k, v in _SEARCH.items() if k != "source"}
+    with pytest.raises(SimError, match="exactly one of"):
+        sim_search.validate_search_spec("trip", neither)
+    with pytest.raises(SimError, match="search.param must name"):
+        sim_search.validate_search_spec("trip", {**neither, "param": "1bad"})
+    sim_search.validate_search_spec("trip", {**neither, "param": "td"})
+
+
+def test_param_probe_uses_alterparam_reset_and_reports_param():
+    spec = {"name": "a", "search": {k: v for k, v in _SEARCH.items() if k != "source"}}
+    spec["search"]["param"] = "td"
+    lines = sim_search.control_lines([spec], ["alterparam c=1", "reset", "save all"])
+    assert any(line.strip().startswith("alterparam td = $&") for line in lines)
+    assert not any(line.strip().startswith("alter ") for line in lines)
+    assert "  save all" in lines or "save all" in lines
+    report = sim_search.SearchOutcome(value=1.0).report(spec)
+    assert report["param"] == "td" and "source" not in report
+
+
+def test_param_on_a_corners_params_axis_is_refused():
+    spec = {"name": "a", "search": {**_SEARCH, "param": "td"}}
+    spec["search"].pop("source")
+    with pytest.raises(SimError, match="corners.params axis"):
+        sim_search.validate_search_targets([spec], {}, set(), {"td"})
+    sim_search.validate_search_targets([spec], {}, set(), {"other"})
+
+
+@_SKIP_NO_NGSPICE
+def test_real_ngspice_param_search_finds_a_pulse_edge_delay(tmp_path):
+    request = _param_request(tmp_path, _PARAM_SEARCH)
+
+    corner, by_name = _only(sim.run_sim(str(request)))
+
+    ap = by_name["aperture"]
+    assert ap["status"] in ("pass", "inconclusive"), corner["diagnostics"]
+    assert ap["value"] == pytest.approx(2e-9, abs=3e-11)
+    assert ap["search"]["param"] == "td"
+    assert ap["search"]["converged"] is True
+
+
+@_SKIP_NO_NGSPICE
+def test_real_ngspice_unknown_param_is_an_error_without_a_value(tmp_path):
+    request = _param_request(tmp_path, {**_PARAM_SEARCH, "param": "nope"})
+
+    corner, by_name = _only(sim.run_sim(str(request)))
+
+    assert by_name["aperture"]["status"] == "error"
+    assert by_name["aperture"]["value"] is None
+    assert any("[search_probe_failed]" in d["message"] for d in corner["diagnostics"])
+
+
+@_SKIP_NO_NGSPICE
+def test_real_ngspice_param_search_on_axis_param_is_refused(tmp_path):
+    request = _param_request(
+        tmp_path, _PARAM_SEARCH, corners={"params": {"td": [1e-9, 2e-9]}}
+    )
+    with pytest.raises(SimError, match="corners.params axis"):
+        sim.run_sim(str(request))
+
+
+def test_search_param_is_a_mandatory_runner_feature():
+    request = {"measurements": [{"name": "a", "search": {"param": "td"}}]}
+    assert "search_param" in sim_batch._request_features(request)
+    assert "search_param" in sim_batch._MANDATORY_RUNNER_FEATURES
+    assert sim_batch._missing_runner_features(["search_param"], "0.9.1") == [
+        "search_param"
+    ]
+    assert sim_batch._missing_runner_features(["search_param"], "0.9.2") == []

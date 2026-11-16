@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from itertools import chain
 from typing import Any
 
+from .._jsonnum import is_int
 from .rules import RuleProvenance
 
 
@@ -380,17 +381,16 @@ class MOSFlavour:
     that PDK-model-name table (kept in separate modules, matching this
     codebase's existing "geometry vs. model binding" module split).
 
-    A transistor's *whole* active-diffusion island (both source and drain,
-    not just the gate -- gf180mcu draws a MOS device's active mask as one
-    continuous polygon spanning source-gate-drain) is classified against
-    ``marker`` as a single unit: an island that ``interacting`` overlaps the
-    marker *at all* is entirely this flavour's, never split mid-island. This
-    is a deliberate, documented choice for the marker-straddling case (the
-    DRM does not contemplate a transistor legally straddling a voltage-
-    domain boundary at all -- every real device is either fully inside or
-    fully outside the marker), and matches the "any overlap counts" idiom
-    ``_detect_voltage_domain_overlap`` (issue #552/#577) already uses for its
-    own marker-interaction gate.
+    Classification is **per gate** (issue #5301): each gate (``poly`` over
+    active) is tested against ``marker`` with the "any overlap counts" idiom
+    ``_detect_voltage_domain_overlap`` (issue #552/#577) uses, so a marker
+    touching any part of a gate claims that whole device, while a marker that
+    only reaches source/drain diffusion shared with a neighbouring gate does
+    not flip that neighbour. Shared source/drain diffusion stays available to
+    both the flavoured and the default pass, so it remains one connected net
+    across the flavour boundary. An island that is wholly inside or wholly
+    outside the marker (every gf180mcu/sg13g2 device, one gate per island)
+    classifies exactly as before.
 
     ``description`` is a short human-readable label for this flavour
     (currently unused by any consumer beyond documentation -- a placeholder
@@ -418,9 +418,9 @@ class MOSFlavour:
 
     - ``and_markers``: the island must also ``interacting``-overlap *every*
       one of these layers to be claimed.
-    - ``not_markers``: an island that ``interacting``-overlaps *any* of these
+    - ``not_markers``: a gate that ``interacting``-overlaps *any* of these
       layers is not claimed (it stays available to later flavours / the
-      default split). Like ``marker``, this is island-level, not a geometric
+      default split). Like ``marker``, this is gate-level, not a geometric
       subtraction -- the same documented straddling policy.
     - ``nfet_only``: the flavour has no PMOS counterpart; an island
       ``interacting`` the deck's ``nwell`` is never claimed (no PMOS is
@@ -672,7 +672,7 @@ class ExtractionDeck:
     of this layer resolves to a *per-island* identity (named
     ``f"{substrate_net}_iso{n}"``, with ``n`` assigned in deterministic
     bounding-box order, not raw ``Region`` iteration order -- see
-    :func:`~klayout_tools.extract._partition_region_by_islands`) instead of
+    :func:`~klayout_tools.erc_islands.partition_region_by_islands`) instead of
     the single, deck-wide ``substrate_net`` global -- letting two physically
     separate, isolated NMOS domains (e.g. deep-nwell/isolated-p-well tubs)
     extract as two genuinely distinct nets rather than always collapsing
@@ -680,19 +680,18 @@ class ExtractionDeck:
     all keeps today's single shared ``substrate_net`` identity, matching
     real silicon (an un-isolated p-substrate genuinely is one continuous
     node) -- this is a per-*isolated-region* split, not a full per-instance
-    one. ``None`` (the default -- every deck as of this field's
-    introduction, until gf180mcu's own module sets it) disables this
-    scoping entirely: a deck that declares no ``substrate_isolation``
-    extracts exactly as it did before this field existed, with every NMOS
-    body/substrate-tie sharing one identity regardless of any well/deep-well
-    geometry drawn in the layout. Applies only to this deck's *default*
-    (non-``mos_flavours``) NMOS device recognition and to the ``tap``/
-    derived-tap substrate-tie slice -- a flavoured NMOS device
-    (``mos_flavours``), a ``bulk_to_substrate`` resistor's ``W`` terminal, or
-    a collector-less :class:`BipolarDevice`'s collector, whose own geometry
-    happens to sit inside an isolated region, still resolves to the single
-    global ``substrate_net`` identity: a known, documented residual gap left
-    for a follow-up rather than this issue's scope.
+    one. ``None`` (the default) disables this scoping entirely: every NMOS
+    body/substrate-tie shares one identity. Applies only to this deck's
+    *default* (non-``mos_flavours``) NMOS device recognition and the ``tap``/
+    derived-tap substrate-tie slice -- a flavoured NMOS device, a
+    ``bulk_to_substrate`` resistor's ``W`` terminal, or a collector-less
+    :class:`BipolarDevice`'s collector inside an isolated region still
+    resolves to the global ``substrate_net``: a known, documented gap.
+
+    ``substrate_isolation_needs_nwell_ring`` (#5344, default ``False``): an
+    island counts only when ``nwell`` closes its outline
+    (:func:`~klayout_tools.erc_islands.is_ring_closed`), as sky130's deep
+    n-well isolates only with a ring; ``False`` keeps every island (gf180mcu).
 
     ``bipolars`` is an optional tuple of :class:`BipolarDevice` entries (empty
     by default) declaring this deck's drawn vertical-BJT device-recognition
@@ -812,6 +811,7 @@ class ExtractionDeck:
     pfet_class: str = "pfet"
     substrate_net: str = "vsubs"
     substrate_isolation: tuple[int, int] | None = None
+    substrate_isolation_needs_nwell_ring: bool = False
     bipolars: tuple[BipolarDevice, ...] = ()
     capacitors: tuple[CapacitorDevice, ...] = ()
     mom_capacitors: tuple[MomCapacitorDevice, ...] = ()
@@ -1227,9 +1227,7 @@ class ExtractionDeck:
             if (
                 not isinstance(layer, tuple)
                 or len(layer) != 2
-                or not all(
-                    isinstance(v, int) and not isinstance(v, bool) for v in layer
-                )
+                or not all(is_int(v) for v in layer)
             ):
                 raise InvalidLabelLayerError(
                     f"{where} label-layer role {role!r} override must be a "
@@ -1387,10 +1385,7 @@ class LayerExpr:
             if (
                 isinstance(operand, tuple)
                 and len(operand) == 2
-                and all(
-                    isinstance(part, int) and not isinstance(part, bool)
-                    for part in operand
-                )
+                and all(is_int(part) for part in operand)
             ):
                 continue
             raise ValueError(
@@ -1969,9 +1964,8 @@ class CapacitorDevice:
     set, ``perim_cap_f_um``) was transcribed from -- the device-recognition
     analogue of :class:`DrcRule.provenance` (see :class:`RuleProvenance`'s
     own docstring). ``None`` (the default) means no structured provenance
-    has been backfilled for this entry yet -- the prose citation in the deck
-    module's own inline comment remains the only record, exactly as for
-    every entry before this field existed.
+    has been backfilled yet -- the deck module's inline prose citation
+    remains the only record, as for every entry before this field existed.
     """
 
     name: str
@@ -1979,6 +1973,7 @@ class CapacitorDevice:
     bottom_plate: tuple[int, int]
     area_cap_f_um2: float
     top_plate_requires: tuple[tuple[int, int], ...] = ()
+    top_plate_requires_interacting: bool = False  # interacting, not AND (#3440)
     top_plate_excludes: tuple[tuple[int, int], ...] = ()
     bottom_plate_requires: tuple[tuple[int, int], ...] = ()
     bottom_plate_excludes: tuple[tuple[int, int], ...] = ()

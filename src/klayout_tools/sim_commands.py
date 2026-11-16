@@ -48,6 +48,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import _batch_common, _provenance, netlist_batch, sim_batch
+from ._jsonnum import is_number
 
 #: Top-level request field and report ``mode`` of a command-list request.
 COMMANDS_FIELD = "commands"
@@ -235,13 +236,6 @@ def resolve_approvals(approvals_path: str | None) -> tuple[CommandApproval, ...]
     return load_approvals(path)
 
 
-def _sha256_file(path: str) -> str:
-    digest = _provenance.sha256_file(path)
-    if digest is None:
-        raise FileNotFoundError(path)
-    return "sha256:" + digest
-
-
 def _match_step(
     approvals: Sequence[CommandApproval],
     argv: Sequence[str],
@@ -303,7 +297,13 @@ def _plan_inputs(
         if dest in seen:
             raise _error(f"{label} duplicates unit input name {dest!r}")
         seen.add(dest)
-        planned.append({"name": dest, "source": source, "sha256": _sha256_file(source)})
+        planned.append(
+            {
+                "name": dest,
+                "source": source,
+                "sha256": _provenance.content_hash_required(source),
+            }
+        )
     return planned
 
 
@@ -434,11 +434,9 @@ def plan_command_units(
 
 
 def _timeout(value: Any, where: str, default: float) -> float:
-    if value is None:
-        return float(default)
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+    if value is not None and (not is_number(value) or value <= 0):
         raise _error(f"{where} must be a positive number of seconds")
-    return float(value)
+    return float(default if value is None else value)
 
 
 # --------------------------------------------------------------------------- #
@@ -724,39 +722,31 @@ def build_job_spec(
     version_check: str = "enforce",
     client_version: str | None = None,
 ) -> sim_batch.BatchJobSpec:
-    version = (
-        client_version if client_version is not None else _provenance._klt_version()
-    )
-    preflight = sim_batch._runner_preflight_script(
-        version, enforce=version_check == "enforce"
-    )
-    setup = " && ".join(
-        [
-            'EDA_INPUT_DIR=$(cd "$EDA_INPUT_DIR" && pwd -P)',
-            'EDA_OUTPUT_DIR=$(cd "$EDA_OUTPUT_DIR" && pwd -P)',
-            "w=$(mktemp -d)",
-            f'tar -xzf "$EDA_INPUT_DIR/{TREE_FILENAME}" -C "$w"',
-            'cd "$w"',
-        ]
-    )
-    command = (
-        preflight
-        + setup
-        + " && "
-        + "; ".join(_unit_script(u) for u in units)
-        + "; exit 0"
-    )
+    """The commands job: every unit's script run in sequence on one job.
+
+    Each unit redirects and publishes its own stdout/stderr/exit code, so the
+    job itself has no ``report.json`` and always exits 0 -- a failed unit is a
+    reported outcome, not a failed job.
+    """
+    from .sim import SimError
+
     serial_worst_s = sum(u["timeout_s"] * len(u["steps"]) for u in units)
-    return sim_batch.BatchJobSpec(
+    command = _batch_common.build_job_command(
+        tree_member=TREE_FILENAME,
+        run="; ".join(_unit_script(u) for u in units),
+        err_cls=SimError,
+        stdout_target=None,
+        client_version=client_version,
+        version_check=version_check,
+    )
+    return _batch_common.build_job_spec(
         cmd=command,
         tool=BATCH_JOB_TOOL,
         pdk_variant=pdk,
-        timeout_seconds=int(math.ceil(serial_worst_s)) + 120,
-        inputs=(
-            sim_batch.BatchJobInput(
-                name=TREE_FILENAME, label="command inputs", local_path=tarball_path
-            ),
-        ),
+        tree_member=TREE_FILENAME,
+        tree_label="command inputs",
+        tarball_path=tarball_path,
+        timeout_s=serial_worst_s,
     )
 
 

@@ -15,6 +15,7 @@ klt economy <file> [--top <cell>] [--grid-cols N] [--grid-rows N]
                     [--area-eff-min-utilization <fraction>]
                     [--area-eff-max-empty-region-fraction <fraction>]
                     [--area-eff-require-bbox-tightness]
+                    [--what-if <moves.json>]
                     [--format text|json]
 ```
 
@@ -225,6 +226,98 @@ cluster's placed footprint area does not exceed its row's own bounding area
 would need `utilization > 1.0` to describe it is not a genuine row and is
 silently discarded rather than reported as an impossible density).
 
+### Attribution block (`--attribute`)
+
+Opt-in (issue #4660). With `--attribute`, the report gains a top-level
+`attribution` object that partitions the top bbox into direct-child
+instance bboxes and the gaps between them; absent without the flag.
+Array instances contribute one child per element.
+
+| Field | Meaning |
+| ----- | ------- |
+| `children[]` | One entry per direct instance: `name` (`<cell>[<n>]`, ordinal by position), `cell`, `bbox_um`, `bbox_area_um2`, `own_whitespace_um2` (instance bbox area minus the child's flattened drawn area). Sorted by `bbox_area_um2` descending, then name. |
+| `gap_components[]` | Connected pieces of the top bbox not covered by any instance bbox: `position`, `bbox_um`, `area_um2`. Zero-area gaps are dropped. Sorted by area descending. |
+| `unattributed_um2` | `bbox_area - (sum(children) - overlap) - sum(gaps)`; expected `0`. |
+| `instance_overlap_um2` | Area double-covered by overlapping instance bboxes (counted once in the partition). |
+| `top_level_drawn_area_um2` | Drawn area of shapes placed directly in the top cell (not an extra partition term). |
+| `sums_to_total` | `true` when `unattributed_um2` is exactly zero (integer dbu² arithmetic). |
+| `bands[]` | Leaf cells only (no child instances; absent otherwise, issue #5189): a Y-axis partition of the bbox into full-width bands, bottom to top. Each has `bbox_um`, `area_um2`, `layers` (sorted `"L/D"` list of drawn, non-annotation layers overlapping the band; `[]` = bare whitespace) and `drawn_area_um2` (merged drawn area inside the band). Adjacent strips with the same `layers` set are merged; band areas sum exactly to the bbox area. |
+
+`position` is `margin:<edges>` (edges joined by `+`, order bottom, left,
+right, top) when the gap touches the top bbox boundary; otherwise
+`between:<a>,<b>` (names sorted) when it abuts two or more instances, or
+`left_of|right_of|above|below:<inst>` for one; `interior` if it abuts none.
+
+#### P&R decomposition (`--pnr-report`)
+
+Issue #5181. `--pnr-report <place-and-route report.json>` (requires
+`--attribute`; otherwise the standard error envelope is emitted, as for an
+unreadable or malformed report) adds `attribution.pnr_decomposition`.
+Without the flag the output is unchanged. Tap/endcap/filler masters are read
+from the report's `power` block (`tapcell_master`, `endcap_master`,
+`filler_masters`, incl. `row_rail`), die/core areas from its top-level or
+last-stage `die_area_um2`/`core_area_um2`.
+
+| Field | Meaning |
+| ----- | ------- |
+| `logical_cells` | `{area_um2, source}`: union of direct-instance bboxes whose master is not physical-only. |
+| `physical_only_cells` | Same, for tap/endcap/filler masters (overlap with logical not double-counted). |
+| `core_whitespace` | Report core area minus the two cell terms (floored at 0). |
+| `die_margin` | Report die area minus core area. |
+| `guard_ring` | Top bbox minus the bbox of non-guard-ring instances (masters whose name contains `guard`); `0` when none. |
+| `sum_um2`, `bbox_area_um2` | Term sum and the top bbox area. |
+| `residual_um2` | `bbox_area_um2 - sum_um2`; nonzero when the report does not describe the layout. |
+| `tolerance_um2` | Absolute tolerance (`0.001`) for `sums_to_total`. |
+| `sums_to_total` | `abs(residual_um2) <= tolerance_um2`. |
+| `logical_cell_area_um2`, `overrun_ratio` | `overrun_ratio` = bbox area / logical cell area (`null` if no logical cells). |
+
+A report whose die or core area exceeds the layout bbox is rejected.
+
+### Cell footprint block (`--cell-footprint`)
+
+Opt-in (issue #5180). `--cell-footprint` adds an additive `cell_footprint`
+object (existing fields unchanged); `--group-by-instance-prefix SEP` implies it
+and fills `grouping`. `--lef PATH` (repeatable; file or directory; first path
+wins) supplies `MACRO ... SIZE w BY h`. The GDS bbox of a std cell includes
+well/implant overhang, so the footprint uses the abutment box instead.
+
+| Field | Meaning |
+| ----- | ------- |
+| `masters[]` | Per placed master: `category`, `footprint_um2`, `source`, `instance_count`, `total_um2`. Arrayed instances count one per member. |
+| `masters[].source` | Fallback chain, observable: `prboundary` (cell draws layer 235/4) -> `lef` (`SIZE` from `--lef`) -> `bbox` (cell bbox, overstates). |
+| `total_footprint_um2` / `share_of_bbox` | Sum over all direct instances of the top cell, and its share of the top bbox area. |
+| `category_um2`, `physical_only_um2` | Footprint per category; `fill`/`tap`/`endcap` (physical-only) are also summed separately. |
+| `grouping` | `null` without `--group-by-instance-prefix`. Otherwise `{status, separator, groups[]}`; each group has `instance_count`, `footprint_um2`, `share_of_bbox`, `category_um2`. |
+
+Categories (sky130_fd_sc_hd masters, by base name; first match wins):
+`tap` (`tap*`), `endcap` (`endcap*`), `fill` (`fill*`, `decap*`, `diode*`),
+`clock-tree` (`clkbuf*`, `clkinv*`, `clkdlybuf*`, `dlclkp`/`sdlclkp`),
+`sequential` (`df*`, `sdf*`, `edf*`, `dl*`, `sdl*`), `buffer` (`buf*`,
+`bufbuf*`, `bufinv*`, `dlygate*`, `dlymetal*`, `probe*`), otherwise `logic`.
+Masters outside `sky130_fd_sc_hd__` are `other`.
+
+Grouping is by the first `SEP`-delimited component of the instance name
+(`u_foo/u1/x` with `/` -> `u_foo`); a name with no `SEP`, or no name, goes to
+`(top)`. Group footprints (physical-only cells included) sum to
+`total_footprint_um2`. Instance names are read from instance user properties
+(key `1`, the GDS `PROPATTR` convention, or `name`/`instance`). Most P&R GDS
+output has none; then `grouping.status` is `unavailable` (with a `reason`)
+and no groups are invented. Only direct instances of the top cell are
+considered; multi-level hierarchy is not walked.
+
+#### `--flatten-wrappers`
+
+Opt-in (issue #5179; requires `--attribute`, otherwise a usage error with the
+standard envelope). A direct child that is a *wrapper* — a cell with two or
+more direct instances — is recursively expanded into its instances (composing
+transforms, array elements included); a cell with fewer than two is a *leaf*.
+`children[]` then lists leaves only, named by hierarchical path such as
+`COMP[0]/OTA[0]` (ordinals per cell name by position, at each level), and gap
+`position` labels name leaves. A wrapper's own whitespace and any shapes it
+draws between inner blocks become ordinary gap components, and the sum
+identity / `sums_to_total` still hold. Without the flag the output is
+unchanged.
+
 ### Budget and reference blocks
 
 With `--budget-um2 <area>`, `budget` is added:
@@ -319,6 +412,52 @@ the opposite failure. See
 "Area-efficiency spec convention (AREA-EFF)" section for the full
 convention this block implements, including how it composes with a block's
 ratified spec (T1 checklist item 5).
+
+## What-if floorplan estimate (`--what-if`)
+
+`--what-if moves.json` (issue #4661) answers "what would the top bbox and
+utilization become if this instance moved, or this sub-cell were re-shaped?"
+without regenerating the layout. The edits are applied to an **in-memory
+copy**: the input is never modified, nothing is written, and no DRC runs. It
+is an **area and overlap estimate only** — never a legality claim.
+
+```json
+{
+  "moves":   [{"instance": "<cell name | index>", "dx_um": 1.5, "dy_um": 0}],
+  "reshape": [{"cell": "<name>", "width_um": 20, "height_um": 10}]
+}
+```
+
+Both keys are optional (`{}` yields the baseline report plus an empty
+`what_if` block). `instance` selects a direct, non-array child of the top
+cell, by child cell name (must match exactly one instance) or by its integer
+index in the top cell's instance order. Array instances, nested instances,
+unknown or ambiguous selectors, unknown cells, unknown keys and malformed
+files fail through the normal error envelope. `reshape` replaces the named
+cell's content with an empty W x H footprint anchored at its current
+lower-left corner.
+
+The report is the normal one for the edited arrangement plus an additive
+`what_if` block (no `schema_version` bump; without `--what-if` the output is
+unchanged):
+
+- `moves_applied[]` — `instance` (`{index, cell}`), `dx_um`, `dy_um`
+  (snapped to the database grid).
+- `reshaped_cells[]` — `cell`, `original_bbox_um`, `width_um`, `height_um`,
+  `anchor_um`.
+- `overlaps[]` — pairs of direct-child instances (`a`, `b`) whose bboxes
+  overlap after the edit, with `overlap_area_um2` and `overlap_bbox_um`.
+- `broken_contacts[]` — for each moved instance, top-cell-level shapes or
+  label/pin texts on the same layer/datatype that touched its geometry before
+  the move and no longer do. Entries: `layer`, `datatype`, `kind`
+  (`shape`/`text`), `text`, `instance`, `bbox_um`. Not a connectivity check.
+- `utilization_basis` — `"measured"`, or `"excludes_reshaped_footprints"`
+  when a reshape was applied: the reshaped footprint adds to the bbox but its
+  area is not invented as drawn geometry, so `utilization` is not a measured
+  figure for that cell.
+- `legality` — always `"not_checked"`.
+
+All lists are sorted, so output is deterministic.
 
 ## Bounding-box tightness vs. dead margins
 

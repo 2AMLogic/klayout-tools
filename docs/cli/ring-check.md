@@ -6,12 +6,12 @@ does not. Purely geometric: the shapes on the given layers are merged and the
 result must be exactly one polygon with exactly one hole.
 
 ```
-klt ring-check <file> --layers <json> [--region <json>] [--top <cell>] [--ignore-enclosed] [--cells <name>]... [--format text|json]
+klt ring-check <file> (--layers <json> | --pdk <pdk>) [--region <json>] [--top <cell>] [--ignore-enclosed] [--cells <name>]... [--format text|json]
 ```
 
 - `<file>` -- path to a GDSII (`.gds`) or OASIS (`.oas`) file. KLayout
   auto-detects the stream format on read; the extension is not authoritative.
-- `--layers` -- **required**. The ring's layer set, as a path to a JSON file
+- `--layers` -- **required unless `--pdk` is given** (the two are mutually exclusive; giving neither exits `1`). The ring's layer set, as a path to a JSON file
   or an inline JSON array of `[layer, datatype]` pairs (e.g.
   `'[[22, 0], [34, 0]]'`) -- the same "path-or-inline-JSON array of
   `[layer, datatype]` pairs" convention `klt precheck --allowed-layers` uses.
@@ -37,6 +37,30 @@ klt ring-check <file> --layers <json> [--region <json>] [--top <cell>] [--ignore
   (existing behaviour, unchanged). An empty/whitespace name or a name absent
   from the stream exits `1`.
 - `--format` -- `text` (default, a human-readable summary) or `json`.
+
+## PDK seal-ring mode -- `--pdk <sg13g2|sky130|gf180mcu>`
+
+`--pdk` checks a drawn **seal ring** against the PDK's own seal-ring rules
+instead of a caller-given layer set (issue #4000). `--top` still applies;
+`--region`, `--cells` and `--ignore-enclosed` are `--layers`-mode only and exit
+`1` with `--pdk`. Each rule in `rules[]` carries `status` (`pass` | `fail` |
+`not_checked`) and a `source` (`file` kit-relative, `tag`, `kind`). Failures
+are in `violations[]` with `rule` = the rule id and `bbox` in database units.
+The tool never draws or fixes a seal ring.
+
+| PDK | Checked | Not checked |
+| --- | --- | --- |
+| `sg13g2` (IHP) | `Seal.n` (EdgeSeal enclosed by unbroken Passiv ring), `Seal.b` (Activ space to EdgeSeal-metal1..5/topmetal1..2/activ/psd, 4.9 um), `Seal.k` (45-degree EdgeSeal edge >= 21 um), `Seal.m` (one ring per top cell), plus `Seal.continuity` (EdgeSeal 39/0 is one closed annulus -- a klayout-tools assertion, `source.kind: klayout_tools_derived`, not a kit rule). Source: `libs.tech/klayout/tech/drc/rule_decks/beol/6_10_sealring.drc`. | `Seal.l` (no structures outside EdgeSeal.boundary): listed as `not_checked`. `Seal.m` is approximated per top cell; the kit decks use the CHIP marker. |
+| `sky130` | nothing | The kit ships only a Magic reference generator (`libs.tech/magic/seal_ring_generator`), no rule table or stream cell: `status: "not_checked"`. |
+| `gf180mcu` | nothing | The kit ships a seal-ring pycell generator (`libs.tech/klayout/tech/pymacros/sealring_cells`) but no published rule table: `status: "not_checked"`. |
+
+Top-level `status` in this mode: `broken` (exit `3`) if any rule fails;
+`not_checked` (exit `4`) when no rule could be evaluated -- never reported as a
+pass; otherwise `continuous` (exit `0`), with any unevaluated rules named in
+`not_checked_rules`. Additive fields: `mode: "pdk"`, `pdk`, `reason`, `rules`,
+`not_checked_rules`; the `--layers` output is unchanged. The kit's own
+`drc/testing/testcases/unit/sealring.gds` is a 12-case file with deliberately
+bad rings, so it is expected to report `broken`.
 
 ## A guard/tap ring usually encloses geometry -- `--ignore-enclosed`
 
@@ -228,8 +252,8 @@ both.
 
 ```json
 {
-  "schema_version": 1,
-  "file": "guard_ring.gds",
+  "schema_version": 2,
+  "file": { "path": "guard_ring.gds", "scope": "repo" },
   "layers": [[22, 0], [34, 0]],
   "region_um": null,
   "cells": null,
@@ -249,7 +273,14 @@ both.
       "bbox": { "left": 16000, "bottom": 8000, "right": 20000, "top": 12000 },
       "polygon": [[16000, 8000], [16000, 12000], [20000, 12000], [20000, 8000]]
     }
-  ]
+  ],
+  "provenance": {
+    "klt_version": "0.8.0",
+    "klayout_version": "0.30.13",
+    "pdk": null,
+    "deck": null,
+    "input": { "content_hash": "sha256:…", "role": "layout" }
+  }
 }
 ```
 
@@ -257,8 +288,9 @@ both.
 
 | Field             | Type                          | Description                                                                 |
 | ----------------- | ----------------------------- | --------------------------------------------------------------------------- |
-| `schema_version`  | integer                       | Version of this command's JSON shape (starts at `1`).                       |
-| `file`            | string                        | The input layout path exactly as provided on the command line.              |
+| `schema_version`  | integer                       | Version of this command's JSON shape (`2` since issue #5650, when `file` became an anchored object; `1` emitted a raw string). |
+| `file`            | object                        | The input layout as `{path, scope}`: `{"path": "<repo-relative POSIX path>", "scope": "repo"}` in-repo, `{"path": null, "scope": "external"}` outside (no absolute path is emitted). Same shape as `klt drc`'s `file`. |
+| `provenance`      | object                        | Additive. The shared `provenance` block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input.content_hash`/`input.role`). In `--pdk` mode `provenance.pdk` is `{"name": "<name>", "source": "built-in", "version": null}`; in `--layers` mode it is `null`. |
 | `layers`          | array\<[int, int]\>           | The `--layers` set, as `[layer, datatype]` pairs, in the order given.       |
 | `region_um`       | array\<number\> \| null       | The `--region` clip window `[left, bottom, right, top]` in micrometres, or `null` when omitted. |
 | `cells`           | array\<string\> \| null    | Additive. The effective `--cells` scope (de-duplicated, in the order given), or `null` when no scope was requested. |
@@ -290,6 +322,7 @@ both.
 | `1`  | Failed to run -- bad layout file, empty/invalid `--layers`, unknown `--top` cell, empty/malformed/unknown `--cells` name, or malformed `--region`. |
 | `2`  | Usage error (missing argument, bad `--format` value) -- from argparse. |
 | `3`  | Ran successfully, the ring is broken.                               |
+| `4`  | `--pdk` only: nothing could be checked (`status: "not_checked"`).   |
 
 **Gate on `status`, not the exit code.** These codes are additive — a
 future release may add a new one above `3` — and the exit code is only a

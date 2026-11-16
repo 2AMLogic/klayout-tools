@@ -1,0 +1,55 @@
+{
+  "version": 3,
+  "id": "tt06",
+  "name": "Tiny Tapeout 6",
+  "repo": "https://github.com/TinyTapeout/tinytapeout-06",
+  "commit": "e489ecbad5ceda454c5b4ca0b86b81bc24bfe40c",
+  "updated": "2025-10-07T19:15:42Z",
+  "_note": "Captured slice of https://index.tinytapeout.com/tt06.json (fetched 2026-11-06): real top-level keys, the first two entries are real (pinout trimmed). Entries with \"_synthetic\": true are hand-written test cases. The real index carries no pdk field; PDK is derived from the shuttle id.",
+  "projects": [
+    {
+      "macro": "tt_um_LFSR_shivam",
+      "address": 228,
+      "title": "10-bit Linear feedback shift register",
+      "author": "Shivam Bhardwaj, Sachin Sharma, Pankaj Lodhi and Ambika Prasad Shah",
+      "description": "This Verilog module implements a 10-bit Linear Feedback Shift Register (LFSR) for generating pseudo-random sequences with clock and reset inputs.",
+      "clock_hz": 50000000,
+      "tiles": "1x1",
+      "analog_pins": [],
+      "repo": "https://github.com/beaprog/tt06-LFSR",
+      "commit": "6bffe5f606707446700dc5dc43db8fa4d6a74394"
+    },
+    {
+      "macro": "tt_um_8bitALU",
+      "address": 679,
+      "title": "8bit ALU",
+      "author": "David Parent,Chih-Kaun Ho, Edric Ong",
+      "description": "Building a simple 8-bit unsigned Arithmetic logic unit (ALU)",
+      "clock_hz": 1000,
+      "tiles": "1x1",
+      "analog_pins": [],
+      "repo": "https://github.com/EdricOngKhaiJieh/8bitALU_verilog",
+      "commit": "f9bcfd7d3cb6da2972d1678d9ec5e9402ae9eecb"
+    },
+    {
+      "_synthetic": true,
+      "macro": "tt_um_nolicense",
+      "title": "No license",
+      "repo": "https://github.com/example/nolicense",
+      "commit": "1111111111111111111111111111111111111111"
+    },
+    {
+      "_synthetic": true,
+      "macro": "tt_um_nocommit",
+      "title": "No commit",
+      "repo": "https://github.com/example/nocommit"
+    },
+    {
+      "_synthetic": true,
+      "macro": "../escape",
+      "title": "Path traversal",
+      "repo": "https://github.com/example/escape",
+      "commit": "3333333333333333333333333333333333333333"
+    }
+  ]
+}

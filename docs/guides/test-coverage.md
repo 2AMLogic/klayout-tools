@@ -29,7 +29,31 @@ Configuration lives in `pyproject.toml` (`[tool.coverage.run]` /
 and `_vendor/` omitted. A subset run reports low numbers for everything it did
 not touch; that is expected.
 
-## What comes next
+## The floor (ratchet)
 
-After a few weeks of data, a follow-up can add a ratcheting per-module floor
-in the style of `complexity-baseline.json`. Nothing here enforces one.
+`coverage-baseline.json` records a line and a branch floor per `src/` module
+(plus a total), in the style of `type-baseline.json`. The `Coverage floor
+(ratchet)` step runs `scripts/check_coverage_baseline.py coverage.json` on the
+3.12 leg and fails when:
+
+- a baselined module drops more than `tolerance_pct` (1.0) below its floor,
+  line or branch, or the total does; or
+- a module not in the baseline lands below `new_module_floor_pct` (80) line
+  coverage.
+
+Improvements and deleted modules never fail. Floors are the **minimum** over
+several completed `main` runs, rounded down, because skip-gated tests make
+coverage vary slightly run to run. To raise or re-seed them, download the
+`coverage-report` artifacts of a few completed `main` runs (CI cancels many
+runs, so pick successful ones) and run:
+
+```bash
+python3 scripts/check_coverage_baseline.py --update-baseline run1/coverage.json run2/coverage.json
+```
+
+Lowering a floor needs reviewer sign-off, as with the type baseline. The
+initial seed used five completed `main` runs from 2026-11-10.
+
+Wall-clock: the check reads an existing JSON file and takes well under a
+second; it adds no test time (coverage collection itself was measured in
+#3223).

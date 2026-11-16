@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:12:49.018850+00:00",
+  "slug": "sky130-process-monitor",
+  "name": "Sky130 Process Monitor",
+  "description": "Process/voltage/temperature monitor on sky130 \u2014 2AM Logic canary block",
+  "pdk": "sky130",
+  "spec_summary": {
+    "rows": [
+      {
+        "parameter": "Oscillator bank",
+        "fallback": "3 oscillators (NMOS, PMOS, plain `hd` chain)",
+        "target": "5 oscillators (NMOS, PMOS, wire, subthreshold, plain `hd` chain)",
+        "stretch": "add a second-library chain"
+      },
+      {
+        "parameter": "Process discrimination",
+        "fallback": "separate the slow and fast global corners",
+        "target": "identify each of the five global corners (tt/ff/ss/sf/fs) at known V and T",
+        "stretch": "estimate NMOS and PMOS skew as continuous values"
+      },
+      {
+        "parameter": "Supply estimate (1.8 V core, 1.62\u20131.98 V)",
+        "fallback": "\u00b150 mV",
+        "target": "\u00b120 mV",
+        "stretch": "\u00b110 mV"
+      },
+      {
+        "parameter": "Temperature estimate (\u221240\u2026125 \u00b0C, one-point calibration)",
+        "fallback": "\u00b110 \u00b0C",
+        "target": "\u00b15 \u00b0C",
+        "stretch": "\u00b12 \u00b0C"
+      },
+      {
+        "parameter": "Readout (reference clock is an input)",
+        "fallback": "24-bit counter, ref \u00b11000 ppm",
+        "target": "24-bit counter, 10 MHz ref \u00b1100 ppm"
+      },
+      {
+        "parameter": "Conversion time",
+        "fallback": "< 10 ms",
+        "target": "< 1 ms",
+        "stretch": "< 100 \u00b5s"
+      },
+      {
+        "parameter": "Active power",
+        "fallback": "< 500 \u00b5W",
+        "target": "< 100 \u00b5W",
+        "stretch": "< 20 \u00b5W"
+      },
+      {
+        "parameter": "Idle power",
+        "fallback": "< 10 \u00b5W",
+        "target": "< 1 \u00b5W",
+        "stretch": "< 100 nW"
+      },
+      {
+        "parameter": "Area",
+        "fallback": "\u2264 0.05 mm\u00b2",
+        "target": "\u2264 0.02 mm\u00b2",
+        "stretch": "\u2264 0.01 mm\u00b2"
+      },
+      {
+        "parameter": "Signoff",
+        "fallback": "DRC + LVS clean",
+        "target": "DRC + LVS clean, post-layout re-verified"
+      }
+    ],
+    "status_note": "ratified by [decision 0001](spec/decisions/0001-ratify-target-spec.md"
+  },
+  "source": {
+    "repo": "2AMLogic/sky130-process-monitor",
+    "ref": "9365bbc9050835e3202018498d89bf5d02fa2b5e",
+    "path": "."
+  },
+  "downloadable": true,
+  "status": "in design \u2014 simulation evidence"
+}

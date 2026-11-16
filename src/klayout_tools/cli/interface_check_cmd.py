@@ -18,6 +18,7 @@ import argparse
 from ..interface_check import (
     InterfaceCheckError,
     parse_layer,
+    parse_pair,
     parse_place,
     run_interface_check,
 )
@@ -25,6 +26,32 @@ from .output import emit_error, emit_success
 
 EXIT_PASS = 0
 EXIT_FAIL = 3
+
+
+def add_matching_arguments(parser: argparse.ArgumentParser) -> None:
+    """Register the pad-matching options (``--tol-um``, ``--pair``).
+
+    Lives here, not in ``parser.py``, to keep that file under its size ceiling.
+    """
+    parser.add_argument(
+        "--tol-um",
+        type=float,
+        default=0.0,
+        metavar="UM",
+        help="largest pad-to-pad gap still counted as mated (default 0: overlap/touch)",
+    )
+    parser.add_argument(
+        "--pair",
+        action="append",
+        default=None,
+        metavar="A_REGEX=B_TEMPLATE",
+        help=(
+            "pair complementary names: an A label fully matching A_REGEX mates "
+            "with the B label named by the re.Match.expand template, e.g. "
+            "'n_out\\[(\\d+)\\]=s_in[\\1]'; repeatable, first match wins; "
+            "both names must match --pins"
+        ),
+    )
 
 
 def run(args: argparse.Namespace) -> int:
@@ -36,6 +63,7 @@ def run(args: argparse.Namespace) -> int:
         layer_b = (
             parse_layer(args.pin_layer_b, "--pin-layer-b") if args.pin_layer_b else None
         )
+        pairs = [parse_pair(spec) for spec in (args.pair or [])]
         report = run_interface_check(
             args.a,
             args.b,
@@ -46,6 +74,7 @@ def run(args: argparse.Namespace) -> int:
             tol_um=args.tol_um,
             top_a=args.top_a,
             top_b=args.top_b,
+            pairs=pairs,
         )
     except InterfaceCheckError as exc:
         return emit_error("interface-check", str(exc), args.format)
@@ -73,4 +102,7 @@ def _print_text(report: dict) -> None:
             detail = f" offset=({dx}, {dy}) gap={pin['gap_um']}"
         elif pin["reason"]:
             detail = f" ({pin['reason']})"
-        print(f"  {pin['name']}: {pin['status']}{detail}")
+        name = pin["name"]
+        if pin.get("b_name", name) != name:
+            name = f"{name} <-> {pin['b_name']}"
+        print(f"  {name}: {pin['status']}{detail}")

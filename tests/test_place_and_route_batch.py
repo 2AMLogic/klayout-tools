@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from helpers.subprocess_fakes import fake_completed
+from helpers.subprocess_fakes import fake_completed, replay_upload
 from klayout_tools import _provenance, place_and_route, sim_batch
 from klayout_tools import place_and_route_batch as par_batch
 from klayout_tools.cli import main
@@ -111,12 +111,12 @@ class _FakeRunner:
         elif "cp" in argv:
             source, destination = argv[argv.index("cp") + 1 : argv.index("cp") + 3]
             if destination.startswith("s3://"):
-                self._upload_file(source, destination)
+                replay_upload(argv, source, destination, self._upload_file)
             else:
                 return self._download(source, destination)
         return fake_completed()
 
-    def _upload_file(self, source: str, destination: str) -> None:
+    def _upload_file(self, source: str | Path, destination: str) -> None:
         job_id, _, rest = destination.split("/", 4)[-1].partition("/")
         kept = self.upload(job_id, rest.removeprefix("inputs/"))
         kept.parent.mkdir(parents=True, exist_ok=True)
@@ -163,7 +163,7 @@ def fake(tmp_path, monkeypatch) -> _FakeRunner:
         liberty, _c, _i = place_and_route._resolve_liberty(
             "sky130_fd_sc_hd", corner, variant=None, root=None
         )
-        deck_hash[corner] = _provenance._content_hash(liberty)
+        deck_hash[corner] = _provenance.content_hash(liberty)
     runner = _FakeRunner(keep, deck_hash)
     monkeypatch.setattr(sim_batch, "_run_subprocess", runner)
 
@@ -444,8 +444,7 @@ def test_manifest_with_only_a_pre_backend_runner_refuses_before_any_cloud_call(
     fake, monkeypatch
 ):
     monkeypatch.setattr(
-        sim_batch,
-        "published_runner_identities",
+        "klayout_tools.sim_batch_contract_worker.published_runner_identities",
         lambda *a, **k: [_image("0.7.1.dev1000")],
     )
 
@@ -461,7 +460,8 @@ def test_manifest_runner_at_or_after_the_floor_or_unreadable_proceeds(
     fake, monkeypatch, version
 ):
     monkeypatch.setattr(
-        sim_batch, "published_runner_identities", lambda *a, **k: [_image(version)]
+        "klayout_tools.sim_batch_contract_worker.published_runner_identities",
+        lambda *a, **k: [_image(version)],
     )
 
     report = _run(fake)
@@ -472,8 +472,7 @@ def test_manifest_runner_at_or_after_the_floor_or_unreadable_proceeds(
 
 def test_mixed_manifest_falls_through_to_the_runner_side_check(fake, monkeypatch):
     monkeypatch.setattr(
-        sim_batch,
-        "published_runner_identities",
+        "klayout_tools.sim_batch_contract_worker.published_runner_identities",
         lambda *a, **k: [_image("0.7.1.dev1000"), _image("0.7.1.dev1200")],
     )
 

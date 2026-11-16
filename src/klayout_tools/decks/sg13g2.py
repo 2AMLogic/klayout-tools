@@ -483,9 +483,8 @@ from . import (
     UnmodelledDeviceFamily,
 )
 
-# `RuleProvenance.source_repo`/`.commit` shared by every rule in this module
-# -- the same "one repo/commit pin, per-rule source_path/rule_id" shape
-# `sky130.py`'s `_sky130_provenance`/`_sky130_lvs_provenance` helpers use.
+# `RuleProvenance.source_repo`/`.commit` shared by every rule in this module:
+# one repo/commit pin, per-rule source_path/rule_id (as `sky130.py`'s helpers).
 _IHP_OPEN_PDK_REPO = "IHP-GmbH/IHP-Open-PDK"
 _IHP_OPEN_PDK_COMMIT = "5cccb161f7492697cfa52eb14dc03beb00bdca9e"  # v0.3.0 tag
 
@@ -619,9 +618,9 @@ DECK: list[DrcRule] = [
     #   * ThickGateOx/DigiBnd scoping selects whole Activ polygons; upstream
     #     clips with a boolean NOT. Only a polygon straddling a marker edge
     #     can differ.
-    #   * SVaricap, schottky_nbl1/nw1, scr1 (text-marker derived) exclusions
-    #     and `NWell_Nsram` (SRAM-marked NWell) are not modelled: those
-    #     structures are held to the ordinary threshold (stricter).
+    #   * schottky_nbl1/nw1, scr1 and `NWell_Nsram` (SRAM-marked NWell) are not
+    #     modelled: held to the ordinary (stricter) threshold. NW.c's SVaricap
+    #     carve-out *is* modelled -- see `sg13g2_svaricap.py`.
     #   * NW.e "tie surrounded entirely by NWell" is the enclosed check on
     #     N+ Activ: N+ Activ wholly outside NWell (NMOS S/D) is not flagged,
     #     one straddling a well edge is. Activ inside the well is the
@@ -1752,7 +1751,8 @@ DECK: list[DrcRule] = [
         provenance=_sg13g2_drc_provenance(f"{_BEOL}/6_11_mim.drc", "MIM.d"),
     ),
 ]
-
+for _hook in ("sg13g2_cont_grid", "sg13g2_svaricap", "sg13g2_runset_notes"):
+    __import__(f"{__package__}.{_hook}", fromlist=["x"]).apply(DECK)
 # Foundry rules this curated deck knows about but cannot evaluate (issue
 # #3571, mirroring #3012): `{rule id: (layer, description)}`. `drc.py`
 # reports each one under `coverage.unchecked_rules` whenever its layer is
@@ -2105,14 +2105,14 @@ EXTRACTION_DECK = ExtractionDeck(
         (134, 25),  # TopMetal2.text
     ),
     # No distinct drawn tap layer (`tap` stays `None`) -- but `tap_nplus`/
-    # `tap_pplus` let `extract.py` derive an equivalent well-/substrate-tie
-    # region from these same implant layers (issue #1273, mirroring
-    # gf180mcu's #1084; see the module docstring note above this deck's
-    # definition for the full derivation, and for issue #2591's correction
-    # of the well-tie half against upstream).
+    # `tap_pplus` let `extract.py` derive an equivalent well-/substrate-tie region
+    # from these same implant layers (issue #1273, mirroring gf180mcu's #1084;
+    # module docstring note above: the derivation and #2591's well-tie correction).
     tap=None,
     tap_nplus=(7, 0),  # nSD.drawing -- well-tie implant (n+ Activ inside NWell)
     tap_pplus=(14, 0),  # pSD.drawing -- substrate-tie implant (p+ Activ outside NWell)
+    substrate_isolation=(32, 0),  # nBuLay.drawing (#5345)
+    substrate_isolation_needs_nwell_ring=True,  # #5359: needs a closing NWell ring
     # Issue #2591: upstream's own well-tie form -- Activ inside NWell with
     # *no* pSD over it (`nactiv = activ.not(psd_drw...)`), unioned with the
     # positive `tap_nplus` form above so either drawing convention extracts.

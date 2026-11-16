@@ -48,10 +48,10 @@ scope-narrowing comment, 2026-10-01) are both now addressed, via #2680:
    (``**.subckt ...`` / ``**.ends``) and always appends a trailing ``.end`` --
    correct when the top sheet is a testbench, wrong when it is a reusable
    block meant to be ``.include``d elsewhere. ``block=True`` post-processes
-   the export: the first commented ``.subckt``/``.ends`` pair is uncommented
-   and the trailing ``.end`` is dropped, so the result is directly
-   ``.include``able without a duplicate ``.end`` terminating the including
-   deck early (:func:`_apply_block_mode`).
+   the export: the commented ``.subckt``/``.ends`` pair is uncommented, the
+   cell's subcircuit parameters restored onto it (#5439), and the trailing
+   ``.end`` dropped, so the result is ``.include``able without a duplicate
+   ``.end`` terminating the including deck early (:func:`apply_block_mode`).
 5. **PDK-root disagreement between the schematic and simulation sides is
    silent** (edge #3). Addressed as a *consistency check*, not
    auto-generation: ``--pdk``/``--pdk-root`` resolve through
@@ -64,7 +64,6 @@ scope-narrowing comment, 2026-10-01) are both now addressed, via #2680:
 from __future__ import annotations
 
 import difflib
-import hashlib
 import os
 import re
 import shutil
@@ -72,9 +71,27 @@ import signal
 import subprocess
 import tempfile
 import time
+from collections.abc import Sequence
 from typing import Any
 
 from . import pdk as pdk_module
+from ._provenance import content_hash_bytes
+from .netlist_diagnostics import diagnostics_block
+from .netlist_inputs import (
+    generation_inputs,
+    inputs_drift,
+    inputs_record_line,
+    split_inputs_record,
+)
+from .netlist_paths import _PATH_COMMENT_RE, postprocess_netlist
+from .netlist_pdk import (
+    _pdk_env_note,
+    _pdk_root_consistent,
+    _rcfile_pdk_root,
+    _with_symbol_path_env,
+)
+from .netlist_port_order import port_order_drift_reason
+from .netlist_port_order import sibling_symbol as _sibling_symbol
 
 #: Payload schema version (``docs/json-contract.md``; versioned per command).
 SCHEMA_VERSION = 1
@@ -155,10 +172,6 @@ class NetlistError(Exception):
         self.code = code
         self.job_id = job_id
         self.details = details
-
-
-def _sha256_file_hash(data: bytes) -> str:
-    return "sha256:" + hashlib.sha256(data).hexdigest()
 
 
 def _validate_schematic(schematic: str) -> None:
@@ -422,7 +435,7 @@ def _netlist_block(path: str | None, data: bytes) -> dict[str, Any]:
         "path": path,
         "bytes": len(data),
         "lines": data.count(b"\n"),
-        "content_hash": _sha256_file_hash(data),
+        "content_hash": content_hash_bytes(data),
     }
 
 
@@ -444,16 +457,6 @@ def _unified_diff(
     if len(lines) > MAX_DIFF_LINES:
         return lines[:MAX_DIFF_LINES], True
     return lines, False
-
-
-#: xschem writes the absolute path of every schematic and symbol it expands
-#: into a SPICE export as a comment line (``** sch_path: /abs/x.sch``,
-#: ``** sym_path: /abs/x.sym``). Those lines name the *checkout*, not the
-#: circuit, so they differ between any two checkouts of the same schematic
-#: (issue #3010). Group 1 is the line up to the path, group 2 the path.
-_PATH_COMMENT_RE = re.compile(
-    rb"^(\*\*[ \t]*(?:sch_path|sym_path):[ \t]*)(.*?)[ \t]*\r?$", re.MULTILINE
-)
 
 
 def _normalize_path_comments(data: bytes) -> bytes:
@@ -591,6 +594,8 @@ def _check_result(
     fresh_data: bytes,
     ignore_comments: bool = False,
     xschem_version: str | None = None,
+    inputs: dict[str, str | None] | None = None,
+    sibling_symbol: str | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """``check=True``'s verdict: does the committed netlist at ``output``
     still match what the schematics produce?
@@ -619,7 +624,14 @@ def _check_result(
     When the only difference is the port order of one or more electrical
     ``.subckt`` cards, ``subckt_port_order`` names them and ``reason`` says so
     (issue #4524); the status stays ``"drifted"``. ``xschem_version`` is the
-    local xschem's version, quoted in that reason.
+    local xschem's version and ``sibling_symbol`` the symbol governing a
+    ``--block`` top sheet's port order, both quoted in that reason
+    (:func:`port_order_drift_reason`, issue #5473).
+
+    ``inputs`` (issue #4945) are the fresh generation inputs; the committed
+    side's record is the ``** klt-netlist-inputs:`` line :func:`run_netlist`
+    wrote, which is excluded from the comparison. ``drift.inputs`` compares
+    the two and ``reason`` says whether they changed.
     """
     if not os.path.isfile(output):
         return STATUS_DRIFTED, {
@@ -633,17 +645,20 @@ def _check_result(
             "diff": [],
             "diff_truncated": False,
             "reason": "no committed netlist at the output path",
+            "inputs": {"committed": None, "fresh": inputs, "changed": None},
         }
 
     with open(output, "rb") as handle:
-        committed = handle.read()
+        committed_raw = handle.read()
+    committed, record = split_inputs_record(committed_raw)
+    inputs_block, inputs_reason = inputs_drift(record, inputs or {})
     committed_paths = _normalize_path_comments(committed)
     fresh_paths = _normalize_path_comments(fresh_data)
     if _normalize_layout(committed_paths) == _normalize_layout(fresh_paths):
         return STATUS_MATCH, {
             "committed_present": True,
-            "committed_bytes": len(committed),
-            "committed_content_hash": _sha256_file_hash(committed),
+            "committed_bytes": len(committed_raw),
+            "committed_content_hash": content_hash_bytes(committed_raw),
             "path_comments_differ": _normalize_layout(committed)
             != _normalize_layout(fresh_data),
             "layout_differs": committed_paths != fresh_paths,
@@ -652,6 +667,7 @@ def _check_result(
             "diff": [],
             "diff_truncated": False,
             "reason": None,
+            "inputs": inputs_block,
         }
 
     if ignore_comments and _normalize_layout(committed, True) == _normalize_layout(
@@ -659,8 +675,8 @@ def _check_result(
     ):
         return STATUS_MATCH, {
             "committed_present": True,
-            "committed_bytes": len(committed),
-            "committed_content_hash": _sha256_file_hash(committed),
+            "committed_bytes": len(committed_raw),
+            "committed_content_hash": content_hash_bytes(committed_raw),
             "path_comments_differ": False,
             "layout_differs": False,
             "comments_differ": True,
@@ -668,28 +684,24 @@ def _check_result(
             "diff": [],
             "diff_truncated": False,
             "reason": None,
+            "inputs": inputs_block,
         }
 
     diff, truncated = _unified_diff(committed, fresh_data, output)
     port_order = _subckt_port_order_drift(committed, fresh_data, ignore_comments)
     if port_order:
-        names = ", ".join(entry["subckt"] for entry in port_order)
-        reason = (
-            f"the .subckt port order of {names} differs from the committed "
-            f"netlist (local xschem {xschem_version or 'version unknown'}); "
-            "different xschem builds order ports differently -- recheck "
-            "positional subckt-call callers and LVS references before "
-            "re-running without --check to refresh it"
-        )
+        reason = port_order_drift_reason(port_order, xschem_version, sibling_symbol)
+        reason += f"; {inputs_reason}"
     else:
         reason = (
             "the committed netlist differs from the one the schematics "
             "produce now -- re-run without --check to refresh it"
         )
+        reason += f"; {inputs_reason}"
     return STATUS_DRIFTED, {
         "committed_present": True,
-        "committed_bytes": len(committed),
-        "committed_content_hash": _sha256_file_hash(committed),
+        "committed_bytes": len(committed_raw),
+        "committed_content_hash": content_hash_bytes(committed_raw),
         "path_comments_differ": False,
         "layout_differs": False,
         "comments_differ": False,
@@ -697,6 +709,7 @@ def _check_result(
         "diff": diff,
         "diff_truncated": truncated,
         "reason": reason,
+        "inputs": inputs_block,
     }
 
 
@@ -795,22 +808,10 @@ def _unevaluated_expr_warnings(
     ]
 
 
-def _pdk_env_note(rcfile: str | None, env: dict[str, str] | None) -> str:
-    """Name what klt can observe about xschem's PDK setup, for error text."""
-    if env is not None:
-        seen = f"PDK_ROOT={env['PDK_ROOT']} PDK={env['PDK']} (exported by klt)"
-    else:
-        root = os.environ.get("PDK_ROOT")
-        variant = os.environ.get("PDK")
-        seen = (
-            f"PDK_ROOT={root or 'not set'} PDK={variant or 'not set'} "
-            "(inherited, not set by klt)"
-        )
-    return f"xschem ran with --rcfile {rcfile or 'none'} and {seen}. "
-
-
 def _check_no_unresolved_symbol(
-    data: bytes, rcfile: str | None = None, env: dict[str, str] | None = None
+    data: bytes,
+    rcfile: str | None = None,
+    exported_pdk_env: dict[str, str] | None = None,
 ) -> None:
     """Fail when xschem could not resolve a symbol (issue #3964).
 
@@ -827,7 +828,7 @@ def _check_no_unresolved_symbol(
             f"the netlist has an unresolved symbol at line {number}: "
             f"{snippet!r}. xschem could not find a symbol an instance refers "
             "to, so the device is missing from the netlist and none was "
-            f"written. {_pdk_env_note(rcfile, env)}"
+            f"written. {_pdk_env_note(rcfile, exported_pdk_env)}"
             "Fix the symbol path or library.",
             code=UNRESOLVED_SYMBOL_CODE,
         )
@@ -841,191 +842,6 @@ def _write_output(output: str, data: bytes) -> None:
             handle.write(data)
     except OSError as exc:
         raise NetlistError(f"could not write netlist to {output}: {exc}") from exc
-
-
-#: xschem comments out the top sheet's own ``.subckt``/``.ends`` pair when it
-#: netlists it as a testbench (``**.subckt ...`` / ``**.ends``). Matches the
-#: first such line so it can be uncommented; the capture group is everything
-#: after the ``**`` (preserving the directive's own arguments verbatim).
-_BLOCK_SUBCKT_COMMENT_RE = re.compile(
-    r"^([ \t]*)\*\*([ \t]*\.subckt\b.*)$", re.IGNORECASE | re.MULTILINE
-)
-#: xschem wraps a long top-sheet header onto commented continuation lines
-#: (``*+ ...``); once the header is uncommented they must become real SPICE
-#: ``+`` continuations or the port list is silently truncated (issue #3899).
-_BLOCK_CONTINUATION_COMMENT_RE = re.compile(r"^([ \t]*)\*{1,2}\+(.*)$")
-_BLOCK_ENDS_COMMENT_RE = re.compile(
-    r"^([ \t]*)\*\*([ \t]*\.ends\b.*)$", re.IGNORECASE | re.MULTILINE
-)
-
-#: xschem always appends a trailing ``.end`` -- correct for a complete deck,
-#: wrong for an includable block (a second ``.end`` in the including
-#: testbench's own deck would terminate it early). Matches only when ``.end``
-#: is the last line of the file.
-_TRAILING_END_RE = re.compile(r"\n[ \t]*\.end[ \t]*\n?\Z", re.IGNORECASE)
-
-
-def _rejoin_header_continuations(text: str) -> str:
-    """Rewrite the commented ``*+``/``**+`` lines contiguous with the
-    just-uncommented ``.subckt`` header into real ``+`` continuations."""
-    lines = text.split("\n")
-    header = next(
-        (
-            i
-            for i, line in enumerate(lines)
-            if re.match(r"[ \t]*\.subckt\b", line, re.IGNORECASE)
-        ),
-        None,
-    )
-    if header is None:
-        return text
-    j = header + 1
-    while j < len(lines):
-        match = _BLOCK_CONTINUATION_COMMENT_RE.match(lines[j])
-        if not match:
-            break
-        lines[j] = f"{match.group(1)}+{match.group(2)}"
-        j += 1
-    return "\n".join(lines)
-
-
-_SUBCKT_HEADER_RE = re.compile(r"[ \t]*\.subckt\b", re.IGNORECASE)
-_PARAMS_RE = re.compile(r"\bparams:", re.IGNORECASE)
-
-
-def _space_separate_subckt_ports(data: bytes) -> bytes:
-    """Rewrite comma-joined bus ports in ``.subckt`` headers to spaces
-    (issue #4490).
-
-    xschem emits a bus port as ``a[1],a[0]``; ngspice mis-maps the ports of a
-    subcircuit with two or more such groups (trailing nodes silently left
-    unconnected). Only the port part of ``.subckt`` header lines and their
-    ``+`` continuations changes -- text from ``params:`` onward, comments and
-    device cards are left alone. A bus-free netlist is returned unchanged.
-    """
-    text = data.decode("utf-8", errors="replace")
-    lines = text.split("\n")
-    in_header = False
-    in_params = False
-    for i, line in enumerate(lines):
-        if _SUBCKT_HEADER_RE.match(line):
-            in_header, in_params = True, False
-        elif not (in_header and line.lstrip().startswith("+")):
-            in_header = False
-            continue
-        if in_params:
-            continue
-        match = _PARAMS_RE.search(line)
-        head, tail = (
-            (line[: match.start()], line[match.start() :]) if match else (line, "")
-        )
-        if match:
-            in_params = True
-        lines[i] = re.sub(r"[ \t]*,[ \t]*", " ", head) + tail
-    return "\n".join(lines).encode("utf-8")
-
-
-def _apply_block_mode(data: bytes) -> tuple[bytes, dict[str, Any]]:
-    """Post-process a testbench-shaped xschem export into an includable block
-    (issue #2680, edge 1).
-
-    xschem comments out the top sheet's own ``.subckt``/``.ends`` pair and
-    always appends a trailing ``.end`` -- correct when the top sheet is a
-    testbench, wrong when it is a reusable block meant to be ``.include``d
-    elsewhere. This uncomments the first commented ``.subckt``/``.ends`` pair
-    found and drops the trailing ``.end``, so the result can be ``.include``d
-    by a separate testbench deck without a duplicate ``.end`` terminating it
-    early.
-
-    Never raises: a schematic that was not shaped like a testbench export
-    (no commented header, no trailing ``.end``) is passed through unchanged,
-    with the gap reported in the returned info dict's ``warning`` rather than
-    failing the whole run -- the netlist itself is still valid output.
-    """
-    text = data.decode("utf-8", errors="replace")
-
-    text, n_subckt = _BLOCK_SUBCKT_COMMENT_RE.subn(r"\1\2", text, count=1)
-    if n_subckt:
-        text = _rejoin_header_continuations(text)
-    text, n_ends = _BLOCK_ENDS_COMMENT_RE.subn(r"\1\2", text, count=1)
-    text, n_end = _TRAILING_END_RE.subn("\n", text, count=1)
-
-    subckt_uncommented = n_subckt > 0
-    ends_uncommented = n_ends > 0
-    trailing_end_removed = n_end > 0
-
-    warning = None
-    missing = []
-    if not subckt_uncommented:
-        missing.append("no commented '**.subckt' header found to uncomment")
-    if not ends_uncommented:
-        missing.append("no commented '**.ends' found to uncomment")
-    if not trailing_end_removed:
-        missing.append("no trailing '.end' line found to remove")
-    if missing:
-        warning = (
-            "--block requested but " + "; ".join(missing) + " -- the export "
-            "may not have been shaped like a testbench netlist; it was "
-            "written as xschem produced it"
-        )
-
-    info = {
-        "requested": True,
-        "subckt_uncommented": subckt_uncommented,
-        "ends_uncommented": ends_uncommented,
-        "trailing_end_removed": trailing_end_removed,
-        "warning": warning,
-    }
-    return text.encode("utf-8"), info
-
-
-_RC_PDK_ROOT_RE = re.compile(
-    r"^\s*set\s+(?:::)?(?:env\(PDK_ROOT\)|PDK_ROOT)\s+(\"[^\"]*\"|\{[^}]*\}|\S+)",
-    re.MULTILINE,
-)
-
-
-def _rcfile_pdk_root(rcfile: str) -> str | None:
-    """The PDK root a ``xschemrc`` statically declares, or ``None``.
-
-    Recognises ``set PDK_ROOT <path>`` and ``set env(PDK_ROOT) <path>`` (the
-    last such assignment wins). A value that is computed (contains ``$`` or
-    ``[``) cannot be evaluated without a Tcl interpreter and is reported as
-    undeclared rather than guessed at.
-    """
-    try:
-        with open(rcfile, encoding="utf-8", errors="replace") as handle:
-            text = handle.read()
-    except OSError:
-        return None
-    found = _RC_PDK_ROOT_RE.findall(text)
-    if not found:
-        return None
-    value = found[-1].strip()
-    if value[:1] in ('"', "{") and value[-1:] in ('"', "}"):
-        value = value[1:-1]
-    if not value or "$" in value or "[" in value:
-        return None
-    return os.path.realpath(os.path.expanduser(value))
-
-
-def _pdk_root_consistent(declared: str, root: str, variant: str) -> bool:
-    """True if a declared ``xschemrc`` PDK root agrees with the resolved PDK.
-
-    Consistent when ``declared`` equals the install ``root`` itself (the
-    ``$PDK_ROOT`` convention), or equals/sits under the resolved variant
-    directory ``root/variant`` (the ``$PDK_ROOT/sky130A`` convention).
-    Deliberately *not* consistent when ``declared`` merely sits above
-    ``root`` (too permissive to mean anything, e.g. ``$PDK_ROOT=/home/me``)
-    or names a different variant under the same install root (e.g. declares
-    ``sky130A`` while the resolved PDK is ``sky130B``).
-    """
-    declared = os.path.realpath(declared)
-    root = os.path.realpath(root)
-    if declared == root:
-        return True
-    variant_dir = os.path.realpath(os.path.join(root, variant))
-    return declared == variant_dir or declared.startswith(variant_dir + os.sep)
 
 
 def _pdk_consistency(
@@ -1081,6 +897,16 @@ def _pdk_consistency(
     }
 
 
+def _resolve_symbol_path(symbol_path: Sequence[str]) -> list[str]:
+    """Absolute-resolve each ``--symbol-path`` DIR, refusing a non-directory."""
+    resolved: list[str] = []
+    for entry in symbol_path:
+        if not os.path.isdir(entry):
+            raise NetlistError(f"--symbol-path is not a directory: {entry}")
+        resolved.append(os.path.realpath(entry))
+    return resolved
+
+
 def run_netlist(
     schematic: str,
     output: str,
@@ -1094,6 +920,10 @@ def run_netlist(
     block: bool = False,
     allow_unevaluated_expr: bool = False,
     ignore_comments: bool = False,
+    erc: bool = False,
+    symbol_path: Sequence[str] = (),
+    relative_paths: bool = False,
+    provenance_header: bool = True,
 ) -> dict[str, Any]:
     """Export ``schematic`` to a SPICE netlist at ``output`` via xschem.
 
@@ -1102,10 +932,10 @@ def run_netlist(
     (with a capped unified diff under ``drift``). This is the staleness gate
     a repo runs in CI over a committed netlist.
 
-    ``block=True`` post-processes the export into an includable block (issue
-    #2680, edge 1): see :func:`_apply_block_mode`. The transform runs before
-    ``check``'s comparison/diff and before the normal write, so both modes
-    operate on the block-shaped netlist, not xschem's raw testbench export.
+    ``block=True`` post-processes the export into an includable block (issues
+    #2680 edge 1, #5439): see :func:`apply_block_mode`. The transform runs
+    before ``check``'s comparison/diff and before the normal write, so both
+    modes operate on the block-shaped netlist, not xschem's raw export.
 
     ``allow_unevaluated_expr=True`` downgrades the unevaluated-``expr()`` gate
     (issue #4305) to a ``warnings`` entry in the payload, for callers that
@@ -1114,6 +944,13 @@ def run_netlist(
     ``ignore_comments=True`` (issue #4525; ``check=True`` only) makes the
     comparison ignore every comment line, for a committed netlist a project
     post-processes (header, rewritten ``sch_path``). Never affects a write.
+
+    ``symbol_path`` (issue #4952) is a list of extra symbol directories,
+    exported to xschem as ``XSCHEM_USER_LIBRARY_PATH`` (prepended to any
+    value already in the environment). Each must be an existing directory.
+
+    ``relative_paths=True`` (issue #5046) writes ``** sch_path:`` / ``** sym_path:``
+    comments relative to the schematic's git toplevel (checkout-independent).
 
     Returns the documented payload (see ``docs/cli/netlist.md``). Raises
     :class:`NetlistError` for every failure mode: unreadable schematic,
@@ -1127,6 +964,7 @@ def run_netlist(
         raise NetlistError(f"--timeout-s must be positive (got {timeout_s})")
     if rcfile is not None and not os.path.isfile(rcfile):
         raise NetlistError(f"xschemrc file not found: {rcfile}")
+    resolved_symbol_path = _resolve_symbol_path(symbol_path)
     pdk_block = _pdk_consistency(rcfile, pdk, pdk_root)
 
     stem = os.path.splitext(os.path.basename(schematic))[0]
@@ -1151,6 +989,10 @@ def run_netlist(
                 "PDK_ROOT": pdk_block["root"],
                 "PDK": pdk_block["variant"],
             }
+        # Only a resolved PDK means klt exported PDK_ROOT/PDK; --symbol-path
+        # alone builds an env that merely inherits them (issue #5441).
+        exported_pdk_env = xschem_env
+        xschem_env = _with_symbol_path_env(xschem_env, resolved_symbol_path)
         exit_status, stdout, stderr, duration_s = _launch_xschem(
             argv, timeout_s, xschem_env
         )
@@ -1165,16 +1007,15 @@ def run_netlist(
         with open(produced, "rb") as handle:
             fresh_data = handle.read()
 
-        block_info: dict[str, Any] | None = None
-        if block:
-            fresh_data, block_info = _apply_block_mode(fresh_data)
-        fresh_data = _space_separate_subckt_ports(fresh_data)
+        fresh_data, block_info = postprocess_netlist(
+            fresh_data, block=block, relative_paths=relative_paths, schematic=schematic
+        )
 
         version = _probe_xschem_version(xschem_binary)
         warnings = _unevaluated_expr_warnings(
             fresh_data, version, allow_unevaluated_expr
         )
-        _check_no_unresolved_symbol(fresh_data, rcfile, xschem_env)
+        _check_no_unresolved_symbol(fresh_data, rcfile, exported_pdk_env)
 
         payload: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
@@ -1187,14 +1028,13 @@ def run_netlist(
                 "argv": argv,
                 "forced_flags": list(FORCED_XSCHEM_FLAGS),
                 "exit_status": exit_status,
-                # Load-bearing, not decoration: xschem exits non-zero on a
-                # successful batch netlist (issue #55, edge #1), so a consumer
-                # reading this payload is told in the payload itself that the
-                # number above is a record, not a verdict.
+                # Not a verdict: xschem exits non-zero on a good netlist (#55).
                 "exit_status_trusted": False,
                 "timeout_s": timeout_s,
                 "duration_s": round(duration_s, 3),
+                "symbol_path": resolved_symbol_path,
             },
+            "diagnostics": diagnostics_block(stdout, stderr, erc=erc),
         }
 
         if pdk_block is not None:
@@ -1204,18 +1044,24 @@ def run_netlist(
         if warnings:
             payload["warnings"] = warnings
 
+        inputs = generation_inputs(version, rcfile, pdk_block)
+        written_data = inputs_record_line(inputs, provenance_header) + fresh_data
         if check:
             status, drift = _check_result(
-                output, fresh_data, ignore_comments, xschem_version=version
+                output,
+                fresh_data,
+                ignore_comments,
+                xschem_version=version,
+                inputs=inputs,
+                sibling_symbol=_sibling_symbol(schematic) if block else None,
             )
-            payload["status"] = status
-            payload["netlist"] = _netlist_block(None, fresh_data)
-            payload["drift"] = drift
+            nb = _netlist_block(None, written_data)
+            payload.update(status=status, netlist=nb, drift=drift)
             return payload
 
-        _write_output(output, fresh_data)
-        payload["status"] = STATUS_GENERATED
-        payload["netlist"] = _netlist_block(output, fresh_data)
+        _write_output(output, written_data)
+        payload.update(status=STATUS_GENERATED, provenance_header=provenance_header)
+        payload["netlist"] = _netlist_block(output, written_data)
         return payload
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)

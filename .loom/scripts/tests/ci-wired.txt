@@ -53,14 +53,17 @@ test-champion-followon-out-of-scope.sh
 test-champion-held-pr-health-pass.sh
 test-champion-issue-promo-escalation-respects-human-hold.sh
 test-champion-markerless-park.sh
+test-champion-merged-before-hold.sh
 test-champion-merge-queue-step-no-fallthrough.sh
 test-champion-out-of-band-ac-gate-switch.sh
+test-champion-merge-risk-self-release.sh
 test-champion-pr-merge-hold-release.sh
 test-champion-pr-merge-negation-guard.sh
 test-champion-post-claim-recheck.sh
 test-champion-premise-false-close.sh
 test-champion-promotion-throughput.sh
 test-champion-ratification-hold.sh
+test-doctor-champion-hold-conflict.sh
 test-champion-resync-waiver.sh
 test-champion-standing-authorization.sh
 test-champion-targeted-modes.sh
@@ -123,6 +126,7 @@ test-guide-docs-pr-exclude-refresh.sh
 test-guide-docs-pr-race.sh
 test-guide-docs-telemetry.sh
 test-guide-operator-attention-fold.sh
+test-guide-awaiting-revision-park.sh
 test-guide-blocked-unblock-limit.sh
 test-guide-operator-hold-exclude.sh
 test-guide-plan-body-stable-sort.sh
@@ -130,6 +134,7 @@ test-guide-pool-pressure-defer.sh
 test-guide-superseding-block-merge-state.sh
 test-guide-work-log-rotation.sh
 test-guide-unblock-merged-blocker.sh
+test-guide-split-parent-unblock.sh
 test-guide-work-log-debounce.sh
 test-guide-work-log-issue-out-of-order.sh
 test-guide-work-log-issue-pagination.sh
@@ -149,7 +154,6 @@ test-install-lock.sh
 test-install-pr-markers.sh
 test-install-source-guard.sh
 test-install-stash-scope.sh
-test-install-sync-labels.sh
 test-jq-reserved-word-args.sh
 test-judge-fallback-cap.sh
 test-judge-payload-drop-guard.sh
@@ -166,13 +170,9 @@ test-mcp-pnpm-selfrepair.sh
 test-memory-budget.sh
 test-merge-admission-telemetry.sh
 test-merge-pr-app-permission-fallback.sh
-test-merge-pr-auto-merge-disabled-fallback.sh
-test-merge-pr-auto-queued-stacked-children.sh
 test-merge-pr-expected-head.sh
 test-merge-pr-pr-state.sh
-test-merge-pr-check-runs-404-fallback.sh
 test-merge-pr-daemon-version-floor.sh
-test-merge-pr-rate-limit-fallback.sh
 test-merge-pr-stacked-child-branch-delete.sh
 test-merge-pr-tree-checks.sh
 test-merge-pr-required-checks.sh
@@ -201,6 +201,7 @@ test-resync-installed-retired-dry-run.sh
 test-resync-installed-retired-migrate.sh
 test-resync-installed-dogfood-symlink.sh
 test-resync-installed-stamp.sh
+test-resync-installed-agents-md-create.sh
 test-resync-installed-output-staging.sh
 test-resync-installed.sh
 test-resync-installed-payload-fallback.sh
@@ -252,6 +253,7 @@ test-worktree-root-override.sh
 test-worktree-sentinel.sh
 
 # tests/hooks/ (repo root) — Claude-path guard suites, wired since #4769.
+tests/hooks/test-guard-cross-tool-champion.sh
 tests/hooks/test-guard-destructive-dispatcher.sh
 tests/hooks/test-guard-install-matrix.sh
 tests/hooks/test-guard-destructive-cargo-and-perf.sh
@@ -265,13 +267,16 @@ tests/hooks/test-guard-destructive-masking.sh
 tests/hooks/test-guard-destructive-matching-precision.sh
 tests/hooks/test-guard-destructive-mkdir-confinement.sh
 tests/hooks/test-guard-destructive-mktemp-canon.sh
+tests/hooks/test-guard-destructive-primary-checkout.sh
 tests/hooks/test-guard-destructive-readonly-fastpath.sh
 tests/hooks/test-guard-destructive-rm-scope.sh
 tests/hooks/test-guard-destructive-sed-operands.sh
 tests/hooks/test-guard-destructive-session-scratch.sh
 tests/hooks/test-guard-destructive-stash-scope.sh
 tests/hooks/test-guard-destructive-write-confinement.sh
+tests/hooks/test-guard-confinement-evidence.sh
 tests/hooks/test-guard-loom-workflow.sh
+tests/hooks/test-guard-worktree-edit-bash-parity.sh
 # Not a Claude-path guard, but the same repo-root tests/hooks/ location and
 # hermetic-fixture pattern (throwaway `git worktree add` trees, fake binaries,
 # no network/forge calls) — covers .loom/hooks/post-worktree.sh's redirected-
@@ -354,3 +359,6 @@ test-tools-first-clean-install.sh
 test-repo-root-alias.sh
 # #11787: create-issue.sh refuses a direct loom:curated write (exits 2 before forge_detect). Hermetic.
 test-create-issue-curated.sh
+# #13414: guide unblock sweep honors a park record over AC checkboxes. Hermetic.
+test-guide-park-record-precedence.sh
+test-guide-transient-first-at.sh

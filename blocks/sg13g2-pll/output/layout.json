@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:11:20.232353+00:00",
+  "slug": "sg13g2-pll",
+  "name": "Sg13G2 Pll",
+  "description": "Canary \u2014 IHP SG13G2 phase-locked loop. AI-designed, open-source.",
+  "pdk": "sg13g2",
+  "source": {
+    "repo": "2AMLogic/sg13g2-pll",
+    "ref": "4305e8be36318d18a9e1a0e4268313b5f10c6b7c",
+    "path": "."
+  },
+  "downloadable": true,
+  "status": "in design \u2014 simulation evidence"
+}

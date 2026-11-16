@@ -11,6 +11,7 @@ import pytest
 from klayout_tools.signoff import build_tier_report
 from klayout_tools.signoff_attest import (
     AttestationError,
+    attach_output_tails,
     build_attestation,
     check_attestation,
     render_envelope,
@@ -264,3 +265,151 @@ def test_report_cited_as_evidence_is_refused(tmp_path):
 
     with pytest.raises(AttestationError):
         _attest(repo, inventory)
+
+
+def _failing_inventory(text: str) -> dict:
+    inventory = _analog_inventory()
+    inventory["envelope_checks"]["evidence/sim_ss.json"] = {
+        "argv": [sys.executable, "-c", f"import sys; print({text!r}); sys.exit(2)"]
+    }
+    return inventory
+
+
+def test_failing_command_tail_is_live_only_and_never_in_built_envelope(tmp_path):
+    repo = _repo(tmp_path)
+    envelope = _attest(repo, _failing_inventory("boom"))
+    checks = envelope["attestation"]["checks"]
+    assert all("output_tail" not in c for c in checks)
+
+    attach_output_tails(envelope)
+
+    failed = [c for c in checks if c["check"] == "command" and not c["passed"]]
+    assert [c["output_tail"] for c in failed] == ["boom"]
+    assert all(
+        "output_tail" not in c
+        for c in checks
+        if c["check"] == "command" and c["passed"]
+    )
+
+
+def test_host_specific_tail_text_does_not_change_the_envelope_bytes(
+    tmp_path, monkeypatch
+):
+    repo = _repo(tmp_path)
+    inventory = _analog_inventory()
+    inventory["envelope_checks"]["evidence/sim_ss.json"] = {
+        "argv": [
+            sys.executable,
+            "-c",
+            "import os, sys; print(os.environ['TAIL_X']); sys.exit(2)",
+        ]
+    }
+    rendered = []
+    for host_text in ("host-a-text", "host-b-text"):
+        monkeypatch.setenv("TAIL_X", host_text)
+        envelope = _attest(repo, inventory)
+        rendered.append(render_envelope(envelope))
+        attach_output_tails(envelope)
+        assert host_text in render_envelope(envelope)  # live result only
+
+    assert rendered[0] == rendered[1]
+    assert "host-" not in rendered[0]
+
+
+def test_text_line_names_failing_citation_row(tmp_path):
+    from klayout_tools.signoff_attest_text import attestation_check_line
+
+    repo = _repo(tmp_path)
+    inventory = _analog_inventory(spec_rows=["gain", "bandwidth", "psrr"])
+
+    envelope = _attest(repo, inventory)
+
+    lines = [
+        attestation_check_line(c)
+        for c in envelope["attestation"]["checks"]
+        if c["check"] == "citation"
+    ]
+    assert "[FAIL] spec row psrr: no envelope cited" in lines
+    assert any(line.startswith("[PASS] spec row gain: ") for line in lines)
+
+
+def test_text_line_per_check_kind():
+    from klayout_tools.signoff_attest_text import attestation_check_line
+
+    assert (
+        attestation_check_line(
+            {
+                "check": "recorded_hash",
+                "role": "freshness",
+                "target": "a.gds",
+                "passed": False,
+                "mismatches": [{"path": "a.gds"}],
+            }
+        )
+        == "[FAIL] freshness a.gds recorded hash mismatch: a.gds"
+    )
+    assert (
+        attestation_check_line(
+            {
+                "check": "metric",
+                "role": "digital",
+                "corner": "tt",
+                "metric": "fmax",
+                "value": None,
+                "passed": False,
+            }
+        )
+        == "[FAIL] digital tt fmax: missing"
+    )
+    with pytest.raises(ValueError):
+        attestation_check_line({"check": "bogus", "passed": True})
+
+
+# --------------------------------------------------------------------------- #
+# `--attest --check` drift names the check, not only its list index
+# (issue #5460). Item 8 is the shape with two identity keys: a metric check is
+# one per corner x metric, so the corner alone would not name it.
+# --------------------------------------------------------------------------- #
+
+
+def _committed_item8(repo: Path, inventory: dict) -> str:
+    committed = repo / "evidence" / "item8.json"
+    committed.write_text(render_envelope(_attest(repo, inventory)))
+    return str(committed)
+
+
+def test_check_drift_names_a_metric_check_by_corner_and_metric(tmp_path):
+    repo = _repo(tmp_path)
+    inventory = _digital_inventory()
+    committed = _committed_item8(repo, inventory)
+    (repo / "evidence" / "sim_tt.json").write_text(
+        json.dumps({"status": "pass", "result": {"fmax": 120, "area": 5, "power": 2}})
+    )
+
+    result = check_attestation(8, str(repo / "inventory.json"), committed)
+
+    (value,) = [e for e in result["drift"] if e["field"].endswith(".value")]
+    assert value["check"] == {"role": "digital", "corner": "tt", "metric": "fmax"}
+    assert (value["committed"], value["fresh"]) == (100, 120)
+    # The evidence file's own presence check names the path that moved.
+    (hashed,) = [
+        e
+        for e in result["drift"]
+        if e["field"].startswith("attestation.checks.")
+        and e["field"].endswith(".content_hash")
+    ]
+    assert hashed["check"] == {"role": "evidence", "path": "evidence/sim_tt.json"}
+
+
+def test_check_drift_names_a_citation_check_by_spec_row(tmp_path):
+    repo = _repo(tmp_path)
+    inventory = _analog_inventory()
+    committed = _committed_item8(repo, inventory)
+    inventory["citations"]["gain"] = ["evidence/sim_ss.json"]
+    (repo / "inventory.json").write_text(json.dumps(inventory))
+
+    result = check_attestation(8, str(repo / "inventory.json"), committed)
+
+    rows = [e for e in result["drift"] if e.get("check", {}).get("role") == "spec_row"]
+    assert rows, result["drift"]
+    assert {e["check"]["row"] for e in rows} == {"gain"}

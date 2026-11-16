@@ -53,6 +53,13 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
+from .liberty_render_pin import (
+    ConstraintArc,
+    constraint_template_lines,
+    render_constraint,
+    render_pin_capacitance,
+)
+
 #: Significant digits every rendered number carries. Matches the precision
 #: IHP's own ``sg13g2_stdcell`` ``.lib`` views use for table values, and is
 #: well inside double precision for the picosecond-scale delays this writer
@@ -203,6 +210,7 @@ class Pin:
     fall_capacitance_pf: float | None = None
     arcs: tuple[TimingArc, ...] = ()
     internal_power: tuple[InternalPower, ...] = ()
+    constraints: tuple[ConstraintArc, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -280,6 +288,8 @@ class Library:
     #: table references. Emitted only when some pin carries an
     #: ``internal_power`` group.
     power_template_name: str = "klt_char_power_template"
+    #: ``lu_table_template`` of setup/hold tables (only when a pin has them).
+    constraint_template_name: str = "klt_char_constraint_template"
 
 
 def render_library(library: Library, *, precision: int = DEFAULT_PRECISION) -> str:
@@ -372,6 +382,7 @@ def _render_header(library: Library, precision: int) -> list[str]:
         lines.append(f'    index_1 ("{_index_text(power_template.index_1, number)}");')
         lines.append(f'    index_2 ("{_index_text(power_template.index_2, number)}");')
         lines.append("  }")
+    lines.extend(constraint_template_lines(library, number, _index_text))
     return lines
 
 
@@ -402,40 +413,23 @@ def _render_pin(pin: Pin, cell: Cell, library: Library, number) -> list[str]:
     lines = [f"    pin ({pin.name}) {{", f'      direction : "{pin.direction}";']
     if pin.function is not None:
         lines.append(f'      function : "{_escape(pin.function)}";')
-    lines.extend(_render_pin_capacitance(pin, cell, number))
+    lines.extend(render_pin_capacitance(pin, cell, number))
     for arc in pin.arcs:
         lines.extend(_render_arc(arc, cell, pin, library, number))
     for power in pin.internal_power:
         lines.extend(_render_internal_power(power, cell, pin, library, number))
-    lines.append("    }")
-    return lines
-
-
-def _render_pin_capacitance(pin: Pin, cell: Cell, number) -> list[str]:
-    """The pin's ``capacitance`` attributes, in the order a vendor library
-    writes them (bare, then the rise/fall split, then ``max_capacitance``).
-
-    The split must be whole or absent: ``native/statime``'s reader resolves
-    ``(Some(rise), Some(fall), _)`` to their mean *before* it looks at the
-    bare attribute, so emitting a lone half would have it read as the whole
-    pin capacitance.
-    """
-    if (pin.rise_capacitance_pf is None) != (pin.fall_capacitance_pf is None):
-        raise LibertyWriteError(
-            f"cell '{cell.name}' pin '{pin.name}': rise_capacitance and "
-            "fall_capacitance must be emitted as a pair -- a reader that "
-            "prefers the split (native/statime's does) averages the two, "
-            "so a lone half would be read as the whole"
+    for constraint in pin.constraints:
+        lines.extend(
+            render_constraint(
+                constraint,
+                cell,
+                pin,
+                library.constraint_template_name,
+                number,
+                _render_table,
+            )
         )
-    lines = []
-    for attribute, value in (
-        ("capacitance", pin.capacitance_pf),
-        ("rise_capacitance", pin.rise_capacitance_pf),
-        ("fall_capacitance", pin.fall_capacitance_pf),
-        ("max_capacitance", pin.max_capacitance_pf),
-    ):
-        if value is not None:
-            lines.append(f"      {attribute} : {number(value)};")
+    lines.append("    }")
     return lines
 
 

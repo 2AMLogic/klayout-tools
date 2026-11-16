@@ -1,0 +1,512 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:09:42.147256+00:00",
+  "slug": "gf180-tmds-tx",
+  "name": "Gf180 Tmds Tx",
+  "description": "TMDS transmitter on gf180mcu \u2014 2AM Logic canary block",
+  "pdk": "gf180mcu",
+  "layer_count": 5,
+  "cell_count": 9,
+  "instance_count": 8,
+  "layout_file": "cml_driver_core.gds",
+  "renders": {
+    "overview": "renders/overview.png",
+    "Comp": "renders/22_0.png",
+    "Poly2": "renders/30_0.png",
+    "Contact": "renders/33_0.png",
+    "Metal1": "renders/34_0.png",
+    "layer_34_10": "renders/34_10.png",
+    "center_crop": "renders/center_crop/overview.png"
+  },
+  "signals": {
+    "schema_version": 1,
+    "engine": "ngspice",
+    "engine_version": "47",
+    "status": "pass",
+    "corner_count": 7,
+    "default_corner_id": "cml-driver-eye/sf_-40c_2.97v_742p5mbps",
+    "passed": 7,
+    "failed": 0,
+    "errored": 0,
+    "measurements": [
+      {
+        "name": "Cml Driver Eye",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Cml Driver Eye Mask",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Cml Driver Eye Realmux",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Esd Clamp Cv",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Esd Diode Clamp Cv",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Smoke Cml Pair",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Tmds Final Mux Eye",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      }
+    ],
+    "corners": [
+      {
+        "corner_id": "cml-driver-eye/sf_-40c_2.97v_742p5mbps",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "ui_ref",
+            "value": 1.3468e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "spa_in",
+            "value": 5.38721e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "spb_in",
+            "value": 4.0404e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "spa_c0",
+            "value": 5.3872e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "spb_c0",
+            "value": 4.04051e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "trise_c0",
+            "value": 4.92326e-11,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "tfall_c0",
+            "value": 4.80605e-11,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "dj_ui_c0",
+            "value": 7.722002e-05,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "cml-driver-eye-mask/tt_27c_2.97v_742p5mbps",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "ui_ref",
+            "value": 1.3468e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "height_c0_0",
+            "value": -0.856288,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "height_c0_1",
+            "value": 0.998327,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "height_c0_2",
+            "value": 0.998327,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "height_c0_3",
+            "value": 0.998327,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "height_c0_4",
+            "value": 0.998327,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "height_c0_5",
+            "value": 0.998327,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "height_c0_6",
+            "value": 0.998327,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "cml-driver-eye-realmux/sf_-40c_2.97v_742p5mbps",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "ui_ref",
+            "value": 1.3468e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "spa_in",
+            "value": 5.38721e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "spb_in",
+            "value": 4.0404e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "spa_c0",
+            "value": 5.38725e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "spb_c0",
+            "value": 4.04045e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "trise_c0",
+            "value": -2.65985e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "tfall_c0",
+            "value": 2.75369e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "dj_ui_c0",
+            "value": 3.415501e-05,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "esd-clamp-cv/tt_27c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "cap_base_0v",
+            "value": 4.143255e-15,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "cap_base_opv",
+            "value": 2.638065e-15,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "cap_w2_0v",
+            "value": 4.142681e-15,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "cap_w2_opv",
+            "value": 2.638066e-15,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "cap_w20_0v",
+            "value": 3.860406e-14,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "cap_w20_opv",
+            "value": 2.396182e-14,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "cap_w100_0v",
+            "value": 1.917657e-13,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "cap_w100_opv",
+            "value": 1.187341e-13,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "esd-diode-clamp-cv/tt_27c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "cap_base_0v",
+            "value": 5.396e-14,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "cap_base_opv",
+            "value": 3.811761e-14,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "cap_w222_0v",
+            "value": 2.70218e-13,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "cap_w222_opv",
+            "value": 1.828642e-13,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "cap_w444_0v",
+            "value": 5.4017e-13,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "cap_w444_opv",
+            "value": 3.654676e-13,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "smoke-cml-pair/tt_27c_2.97v_742p5mbps",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "swing_diff_v",
+            "value": 0.536464,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vcm_v",
+            "value": 2.72009,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "trise_10_90",
+            "value": 1.8145e-11,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "tfall_10_90",
+            "value": 1.81586e-11,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "tmds-final-mux-eye/sf_-40c_2.97v_742p5mbps",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "ui_ref",
+            "value": 1.3468e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "spa_in",
+            "value": 5.38721e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "spb_in",
+            "value": 4.0404e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "spa_m",
+            "value": 5.38725e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "spb_m",
+            "value": 4.04045e-09,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "dj_ui_m",
+            "value": 3.564001e-05,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "trise_m",
+            "value": 7.47001e-11,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "tfall_m",
+            "value": 7.47264e-11,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      }
+    ]
+  },
+  "source": {
+    "repo": "2AMLogic/gf180-tmds-tx",
+    "ref": "2e019a44194d2a1423467c21d14bb6c6cc153583",
+    "path": "layout/gds/cml_driver_core.gds"
+  },
+  "downloadable": true,
+  "status": "ok"
+}

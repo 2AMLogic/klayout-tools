@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:12:51.060718+00:00",
+  "slug": "sky130-riscv-soc",
+  "name": "Sky130 Riscv Soc",
+  "description": "RISC-V microcontroller SoC on sky130 \u2014 2AM Logic canary block",
+  "pdk": "sky130",
+  "spec_summary": {
+    "rows": [
+      {
+        "parameter": "Core",
+        "target": "RV32IMC, CVE2 (pinned, unmodified)",
+        "fallback": "RV32EC",
+        "stretch": "+ RISC-V debug module over JTAG"
+      },
+      {
+        "parameter": "Interconnect",
+        "target": "OBI crossbar, instruction + data managers",
+        "fallback": "single shared OBI bus"
+      },
+      {
+        "parameter": "SRAM",
+        "target": "8 KB instruction + 8 KB data, OpenRAM sky130 macros (macro instance deferred)",
+        "fallback": "4 KB unified",
+        "stretch": "32 KB total"
+      },
+      {
+        "parameter": "Peripherals",
+        "target": "boot ROM, UART, 8-bit GPIO, timer",
+        "fallback": "boot ROM, UART, GPIO",
+        "stretch": "SPI flash execute-in-place"
+      },
+      {
+        "parameter": "Signoff Fmax (post-route STA, slow corner `ss_100C_1v60`)",
+        "target": "50 MHz",
+        "fallback": "25 MHz",
+        "stretch": "100 MHz"
+      },
+      {
+        "parameter": "Standard cells",
+        "target": "`sky130_fd_sc_hd`"
+      },
+      {
+        "parameter": "Signoff",
+        "target": "DRC + LVS clean, STA closed at every ratified corner that has a macro view (see spec)"
+      }
+    ],
+    "status_note": "ratified \u2014 see [spec/soc.md](spec/soc.md"
+  },
+  "source": {
+    "repo": "2AMLogic/sky130-riscv-soc",
+    "ref": "6f1a6b015a455fc6f5bedfd16319e5f72d4fc404",
+    "path": "."
+  },
+  "downloadable": true,
+  "status": "in design \u2014 simulation evidence"
+}

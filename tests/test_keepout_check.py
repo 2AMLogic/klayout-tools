@@ -265,3 +265,79 @@ def test_cli_missing_file_exit_one():
         )
         == 1
     )
+
+
+# --- --allow pin-access windows (#5198) ---------------------------------
+
+_FOREIGN = [(_FORBID, (105, 20, 130, 30))]  # piece in zone: x 105..110, y 20..30
+
+
+def test_allow_covering_window_suppresses_and_is_echoed(tmp_path):
+    path = tmp_path / "a.gds"
+    _write(path, foreign=_FOREIGN)
+    assert _run(path)["status"] == "violated"
+    report = _run(path, allow=[((100.0, 15.0, 115.0, 35.0), None)])
+    assert report["status"] == "clean"
+    assert report["allow"] == [
+        {"bbox_um": [100.0, 15.0, 115.0, 35.0], "layers": [[30, 0]]}
+    ]
+    assert _run(path)["allow"] == []
+
+
+def test_allow_partial_window_reports_only_remainder(tmp_path):
+    path = tmp_path / "a.gds"
+    _write(path, foreign=_FOREIGN)
+    report = _run(path, allow=[((100.0, 15.0, 108.0, 35.0), [(30, 0)])])
+    assert report["violation_count"] == 1
+    bbox = report["violations"][0]["bbox"]
+    assert (bbox["left"], bbox["right"]) == (108.0, 110.0)
+
+
+def test_allow_other_layer_or_far_window_has_no_effect(tmp_path):
+    path = tmp_path / "a.gds"
+    _write(path, foreign=_FOREIGN)
+    for window in (
+        ((100.0, 15.0, 115.0, 35.0), [(31, 0)]),
+        ((500.0, 500.0, 510.0, 510.0), None),
+    ):
+        assert _run(path, allow=[window])["status"] == "violated"
+
+
+def test_allow_multiple_windows(tmp_path):
+    path = tmp_path / "a.gds"
+    _write(path, foreign=_FOREIGN)
+    report = _run(
+        path,
+        allow=[((100.0, 15.0, 108.0, 35.0), None), ((108.0, 15.0, 115.0, 35.0), None)],
+    )
+    assert report["status"] == "clean"
+
+
+def test_cli_allow_json_and_text(tmp_path, capsys):
+    path = tmp_path / "a.gds"
+    _write(path, foreign=_FOREIGN)
+    window = '{"bbox": [100, 15, 115, 35], "layers": [[30, 0]]}'
+    assert _cli(path, "--cells", "SPIRAL", "--allow", window, "--format", "json") == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["allow"][0]["layers"] == [[30, 0]]
+    assert _cli(path, "--cells", "SPIRAL", "--allow", window) == 0
+    assert "allow: (100.0,15.0)-(115.0,35.0) layers 30/0" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "allow",
+    [
+        "not json",
+        "[1,2,3,4]",
+        '{"layers": [[30,0]]}',
+        '{"bbox": [1,2,3]}',
+        '{"bbox": [5,5,1,1]}',
+        '{"bbox": [0,0,1,1], "layers": [[30]]}',
+        '{"bbox": [0,0,1,1], "layers": 3}',
+        '{"bbox": [0,0,1,1], "bogus": 1}',
+    ],
+)
+def test_cli_bad_allow_exit_one(tmp_path, allow):
+    path = tmp_path / "a.gds"
+    _write(path, foreign=_FOREIGN)
+    assert _cli(path, "--cells", "SPIRAL", "--allow", allow) == 1

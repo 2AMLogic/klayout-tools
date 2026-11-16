@@ -211,7 +211,7 @@
     {
       "file": "src/klayout_tools/extract.py",
       "function": "run_extract",
-      "complexity": 67
+      "complexity": 16
     },
     {
       "file": "src/klayout_tools/extract_abstract.py",
@@ -237,6 +237,11 @@
       "file": "src/klayout_tools/extract_parasitics.py",
       "function": "_inject_parasitics",
       "complexity": 20
+    },
+    {
+      "file": "src/klayout_tools/extract_parasitics_block.py",
+      "function": "build_parasitics_report",
+      "complexity": 23
     },
     {
       "file": "src/klayout_tools/extract_passive_regions.py",
@@ -269,12 +274,17 @@
       "complexity": 12
     },
     {
+      "file": "src/klayout_tools/extract_validate.py",
+      "function": "validate_run_extract_args",
+      "complexity": 17
+    },
+    {
       "file": "src/klayout_tools/functional_verification.py",
       "function": "_resolve_testbench",
       "complexity": 12
     },
     {
-      "file": "src/klayout_tools/functional_verification.py",
+      "file": "src/klayout_tools/functional_verification_mutation_proposals.py",
       "function": "load_mutation_proposals",
       "complexity": 17
     },
@@ -284,7 +294,7 @@
       "complexity": 20
     },
     {
-      "file": "src/klayout_tools/functional_verification.py",
+      "file": "src/klayout_tools/functional_verification_mutation.py",
       "function": "run_functional_verification_with_mutations",
       "complexity": 16
     },
@@ -335,7 +345,7 @@
     },
     {
       "file": "src/klayout_tools/gen_compose.py",
-      "function": "_parse_legs",
+      "function": "parse_legs",
       "complexity": 12
     },
     {
@@ -500,6 +510,11 @@
     },
     {
       "file": "src/klayout_tools/lvs.py",
+      "function": "_aggregate_lvs_findings",
+      "complexity": 12
+    },
+    {
+      "file": "src/klayout_tools/lvs.py",
       "function": "_apply_compare_parameters",
       "complexity": 13
     },
@@ -529,9 +544,19 @@
       "complexity": 20
     },
     {
+      "file": "src/klayout_tools/lvs_reference_stage.py",
+      "function": "_read_reference_stage",
+      "complexity": 13
+    },
+    {
+      "file": "src/klayout_tools/lvs.py",
+      "function": "_select_resolve_and_combine",
+      "complexity": 12
+    },
+    {
       "file": "src/klayout_tools/lvs.py",
       "function": "run_lvs",
-      "complexity": 61
+      "complexity": 11
     },
     {
       "file": "src/klayout_tools/lvs_mismatch.py",
@@ -840,13 +865,13 @@
     },
     {
       "file": "src/klayout_tools/yield_analysis.py",
-      "function": "_sampling_from",
-      "complexity": 12
-    },
-    {
-      "file": "src/klayout_tools/yield_analysis.py",
       "function": "run_yield",
       "complexity": 11
+    },
+    {
+      "file": "src/klayout_tools/yield_sampling_fields.py",
+      "function": "_sampling_from",
+      "complexity": 12
     },
     {
       "file": "tests/helpers/extract_klayout_oracle.py",

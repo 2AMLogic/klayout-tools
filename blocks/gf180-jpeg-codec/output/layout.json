@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:08:23.055339+00:00",
+  "slug": "gf180-jpeg-codec",
+  "name": "Gf180 Jpeg Codec",
+  "description": "Baseline JPEG + QOI image codec on gf180mcu \u2014 2AM Logic canary block",
+  "pdk": "gf180mcu",
+  "spec_summary": {
+    "rows": [
+      {
+        "parameter": "JPEG mode",
+        "target": "baseline encoder, YCbCr 4:2:0, 8-bit, RGB in, full JFIF file out",
+        "fallback": "baseline encoder, greyscale",
+        "stretch": "+ baseline decoder (deferred)"
+      },
+      {
+        "parameter": "Lossless path",
+        "target": "QOI encoder, RGB, raster input",
+        "stretch": "+ QOI decoder (deferred)"
+      },
+      {
+        "parameter": "Resolution / rate",
+        "target": "640 x 480 at 30 frames/s: 3.617 cycles/sample at 50 MHz",
+        "fallback": "320 x 240 at 15 frames/s: 21.70 cycles/sample at 25 MHz",
+        "stretch": "1280 x 720 at 30 frames/s: 2.411 cycles/sample at 100 MHz"
+      },
+      {
+        "parameter": "Input order",
+        "target": "block-ordered: 16 x 16 macroblocks, one double-buffered (768 B)",
+        "fallback": "8 x 8 blocks"
+      },
+      {
+        "parameter": "Tables",
+        "target": "runtime-loadable quantization and Huffman tables (DQT/DHT payloads)",
+        "fallback": "fixed standard (Annex K) tables"
+      },
+      {
+        "parameter": "Arithmetic",
+        "target": "libjpeg \"islow\" DCT, 13-bit constants; integer colour conversion; bit for bit in `spec/codec.md`",
+        "fallback": "same"
+      },
+      {
+        "parameter": "Library, supply",
+        "target": "`gf180mcu_fd_sc_mcu9t5v0`, 3.3 V",
+        "fallback": "same",
+        "stretch": "same"
+      },
+      {
+        "parameter": "Signoff clock (post-route STA, slow corner `ss_125C_3v00`)",
+        "target": "50 MHz",
+        "fallback": "25 MHz",
+        "stretch": "100 MHz"
+      },
+      {
+        "parameter": "Memory",
+        "target": "3 x `gf180-sram` 256 x 32 macros (740 words)",
+        "fallback": "same"
+      },
+      {
+        "parameter": "Correctness",
+        "target": "byte-exact against the committed software golden encoder"
+      },
+      {
+        "parameter": "Signoff",
+        "target": "DRC + LVS clean, STA closed at the five library views of `spec/codec.md` \u00a710"
+      }
+    ],
+    "status_note": "ratified 2026-10-17 \u2014 [spec/codec.md](spec/codec.md"
+  },
+  "source": {
+    "repo": "2AMLogic/gf180-jpeg-codec",
+    "ref": "2bad01fefee5c7e2811c5d6361041353c2d7893f",
+    "path": "."
+  },
+  "downloadable": true,
+  "status": "in design \u2014 simulation evidence"
+}

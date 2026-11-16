@@ -56,12 +56,12 @@ breakdown rides a new sibling ``energy`` object on that
 
 from __future__ import annotations
 
-import math
 import os
 import re
 from dataclasses import dataclass
 from typing import Any
 
+from . import sim_window
 from .sim_errors import SimError
 
 #: Keys an ``energy`` object may carry. Anything else is refused by name.
@@ -73,11 +73,6 @@ _VECTOR_PREFIX = "__klt_en_"
 
 #: An independent-source instance name as `i(<source>)` can address it.
 _SOURCE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.$#]*$")
-
-#: Slack, as a fraction of the analysis window, when checking that a
-#: requested edge lies inside the saved samples (float round-off in the
-#: simulator's own final timepoint).
-_EDGE_TOLERANCE = 1e-9
 
 
 def is_energy(spec: dict[str, Any]) -> bool:
@@ -132,34 +127,13 @@ def validate_energy_spec(name: Any, body: Any) -> None:
             "is spliced into one `let` command of the generated .control "
             "block)"
         )
-    start = _window_bound(name, body, "from")
-    stop = _window_bound(name, body, "to")
+    start = sim_window.window_bound(name, body, "from", form="energy")
+    stop = sim_window.window_bound(name, body, "to", form="energy")
     if start is not None and stop is not None and stop <= start:
         raise SimError(
             f"measurement '{name}': energy.to ({stop!r} s) must be after "
             f"energy.from ({start!r} s)"
         )
-
-
-def _window_bound(name: Any, body: dict[str, Any], key: str) -> float | None:
-    """``energy.from``/``.to`` in seconds: a number, or a SPICE time literal
-    such as ``"5n"``. ``None`` when absent."""
-    from .sim import _parse_spice_seconds
-
-    raw = body.get(key)
-    if raw is None:
-        return None
-    seconds: float | None = None
-    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
-        seconds = float(raw)
-    elif isinstance(raw, str):
-        seconds = _parse_spice_seconds(raw)
-    if seconds is None or not math.isfinite(seconds):
-        raise SimError(
-            f"measurement '{name}': energy.{key} must be a time in seconds "
-            f'-- a number or a SPICE time literal such as "5n" (got {raw!r})'
-        )
-    return seconds
 
 
 def validate_energy_context(
@@ -168,8 +142,6 @@ def validate_energy_context(
     """Energy over a window is a transient quantity: refuse any other
     ``analysis.kind`` by name, and a window that is not inside the ``tran``
     analysis (``tstart``..``tstop``) when those tokens can be parsed."""
-    from .sim import _parse_spice_seconds
-
     declared = energy_measurements(measurements_spec)
     if not declared:
         return
@@ -180,25 +152,7 @@ def validate_energy_context(
             "integrates power over a time window and so requires "
             f'analysis.kind "tran" (got {analysis.get("kind")!r})'
         )
-    tokens = str(analysis.get("args") or "").split()
-    tstop = _parse_spice_seconds(tokens[1]) if len(tokens) > 1 else None
-    tstart = _parse_spice_seconds(tokens[2]) if len(tokens) > 2 else 0.0
-    if tstop is None or tstart is None:
-        return
-    for spec in declared:
-        for key in ("from", "to"):
-            bound = _window_bound(spec["name"], spec["energy"], key)
-            if bound is not None and not (
-                tstart - _EDGE_TOLERANCE * tstop
-                <= bound
-                <= tstop * (1 + _EDGE_TOLERANCE)
-            ):
-                raise SimError(
-                    f"measurement '{spec['name']}': energy.{key} ({bound!r} s)"
-                    f" is outside the transient analysis window "
-                    f"[{tstart!r}, {tstop!r}] s (analysis.args "
-                    f"{analysis.get('args')!r})"
-                )
+    sim_window.validate_window_inside_tran(declared, analysis, form="energy")
 
 
 # --------------------------------------------------------------------------- #
@@ -276,7 +230,9 @@ def integrate_energy(
         return EnergyOutcome(error="fewer than two samples")
     lo = scale[0] if start is None else start
     hi = scale[count - 1] if stop is None else stop
-    slack = _EDGE_TOLERANCE * max(abs(scale[count - 1] - scale[0]), abs(hi), 1e-30)
+    slack = sim_window.EDGE_TOLERANCE * max(
+        abs(scale[count - 1] - scale[0]), abs(hi), 1e-30
+    )
     if lo < scale[0] - slack or hi > scale[count - 1] + slack:
         return EnergyOutcome(
             error=(
@@ -377,8 +333,8 @@ def _extract_one(spec: dict[str, Any], raw_path: str) -> EnergyOutcome:
         [point[0] for point in points],
         [point[1] for point in points],
         [point[2] for point in points],
-        start=_window_bound(name, body, "from"),
-        stop=_window_bound(name, body, "to"),
+        start=sim_window.window_bound(name, body, "from", form="energy"),
+        stop=sim_window.window_bound(name, body, "to", form="energy"),
     )
     if outcome.error is not None:
         outcome.error = f"measurement '{name}': {outcome.error}"

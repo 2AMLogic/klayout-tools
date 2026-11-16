@@ -1,0 +1,484 @@
+"""Substrate-continuity post-pass for ``erc.supply_short`` (issue #5342).
+
+Design: ``docs/design/erc-substrate-continuity.md`` sections 3 and 9.
+Fixtures 1-4 plus the monotonicity pin. gf180mcu's deck declares
+``substrate_isolation`` (DNWELL 12/0), so ``deck="gf180mcu"`` enables the pass.
+"""
+
+from __future__ import annotations
+
+import json
+
+import klayout.db as kdb
+import pytest
+
+from klayout_tools.erc import run_erc
+from klayout_tools.erc_substrate import _FAMILY_MISSING
+
+DBU = 0.001
+
+
+def _um(v: float) -> int:
+    return int(round(v / DBU))
+
+
+def _box(top, layout, layer, x0, y0, x1, y1):
+    top.shapes(layout.layer(*layer)).insert(
+        kdb.Box.new(_um(x0), _um(y0), _um(x1), _um(y1))
+    )
+
+
+def _rail(layout, top, y, name, tap_x=2.0):
+    """A li1 rail labelled ``name`` carrying one implant-marked tap contact."""
+    _box(top, layout, (3, 0), 0, y, 20, y + 1)
+    top.shapes(layout.layer(3, 5)).insert(
+        kdb.Text(name, kdb.Trans(_um(1), _um(y + 0.5)))
+    )
+    _box(top, layout, (21, 0), tap_x, y + 0.2, tap_x + 0.6, y + 0.8)
+    _box(top, layout, (22, 0), tap_x - 0.2, y, tap_x + 0.8, y + 1)
+
+
+def _spec(ties, nets=("VSS", "VSS2")):
+    return {
+        "stackup": [
+            {"name": "poly", "layer": "1/0", "role": "gate"},
+            {"name": "li1", "layer": "3/0", "label_layer": "3/5"},
+        ],
+        "vias": [{"name": "licon", "layer": "2/0", "between": ["poly", "li1"]}],
+        "nets": [{"name": n, "kind": "supply"} for n in nets],
+        "ties": ties,
+    }
+
+
+def _ptie(name, net, **over):
+    entry = {
+        "name": name,
+        "well_layer": None,
+        "well_complement_of": ["10/0"],
+        "tap_layer": "21/0",
+        "tap_requires": ["22/0"],
+        "tap_is_dedicated": True,
+        "connect_to": "li1",
+        "net": net,
+    }
+    entry.update(over)
+    return entry
+
+
+def _run(tmp_path, layout, spec, stem="t", deck="gf180mcu"):
+    gds = tmp_path / f"{stem}.gds"
+    layout.write(str(gds))
+    spec_path = tmp_path / f"{stem}.erc.json"
+    spec_path.write_text(json.dumps(spec))
+    return run_erc(str(gds), str(spec_path), deck=deck)
+
+
+def _two_rails(second_tap_x=2.0):
+    layout = kdb.Layout()
+    layout.dbu = DBU
+    top = layout.create_cell("TOP")
+    _rail(layout, top, 0, "VSS")
+    _rail(layout, top, 5, "VSS2", tap_x=second_tap_x)
+    # An unrelated n-well keeps the complement "substrate" a proper subset of
+    # the die (a whole-die substrate assertion is graded degenerate).
+    _box(top, layout, (10, 0), 0, 20, 20, 30)
+    return layout, top
+
+
+def _shorts(report):
+    return [f for f in report["erc_findings"] if f["rule"] == "erc.supply_short"]
+
+
+def test_fixture1_substrate_only_short_is_reported(tmp_path):
+    layout, _ = _two_rails()
+    report = _run(tmp_path, layout, _spec([_ptie("p1", "VSS"), _ptie("p2", "VSS2")]))
+    shorts = _shorts(report)
+    assert len(shorts) == 1
+    assert shorts[0]["via"] == "substrate"
+    assert shorts[0]["body"]["kind"] == "substrate"
+    assert shorts[0]["body"]["id"] == "vsubs"
+    assert shorts[0]["body"]["ties"] == ["p1", "p2"]
+    checked = report["erc_coverage"]["checked"]
+    assert "erc.supply_short.substrate" in checked
+    assert not any(
+        e["id"] == "erc.supply_short" for e in report["erc_coverage"]["inapplicable"]
+    )
+    assert report["status"] != "clean"
+
+
+def test_fixture2_dnwell_island_isolates_the_second_tap(tmp_path):
+    layout, top = _two_rails()
+    _box(top, layout, (12, 0), -1, 4, 21, 7)  # DNWELL around the VSS2 rail
+    report = _run(tmp_path, layout, _spec([_ptie("p1", "VSS"), _ptie("p2", "VSS2")]))
+    assert _shorts(report) == []
+    bodies = {b["id"]: b for b in report["provenance"]["substrate_bodies"]}
+    assert set(bodies) == {"vsubs", "vsubs_iso0"}
+    assert bodies["vsubs_iso0"]["ties"] == ["p2"]
+
+
+def test_fixture3_blanket_well_row_has_no_supply_short(tmp_path):
+    layout = kdb.Layout()
+    layout.dbu = DBU
+    top = layout.create_cell("TOP")
+    _box(top, layout, (10, 0), 0, 8, 20, 12)  # blanket n-well
+    _rail(layout, top, 10, "VDD")
+    _rail(layout, top, 0, "VSS")
+    spec = _spec(
+        [
+            _ptie("n1", "VDD", well_layer="10/0", well_complement_of=None),
+            _ptie("p1", "VSS"),
+        ],
+        nets=("VDD", "VSS"),
+    )
+    report = _run(tmp_path, layout, spec)
+    assert _shorts(report) == []
+
+
+def test_fixture4_degenerate_tie_joins_nothing(tmp_path):
+    layout, _ = _two_rails()
+    # Un-narrowed tap_layer (no tap_requires): degenerate -> no join.
+    ties = [
+        _ptie("p1", "VSS", tap_requires=[], tap_is_dedicated=False),
+        _ptie("p2", "VSS2", tap_requires=[], tap_is_dedicated=False),
+    ]
+    report = _run(tmp_path, layout, _spec(ties))
+    assert _shorts(report) == []
+
+
+def test_pass_never_alters_gates_or_other_findings(tmp_path):
+    layout, _ = _two_rails()
+    ties = [_ptie("p1", "VSS"), _ptie("p2", "VSS2")]
+    with_pass = _run(tmp_path, layout, _spec(ties), "w")
+    without = _run(tmp_path, layout, _spec(ties), "n", deck=None)
+    assert with_pass["gates"] == without["gates"]
+
+    def keep(report):
+        return [
+            f
+            for f in report["erc_findings"]
+            if f["rule"] != "erc.missing_tie" and f.get("via") != "substrate"
+        ]
+
+    assert keep(with_pass) == keep(without)
+
+
+def test_other_families_keep_the_disclosure(tmp_path):
+    layout, _ = _two_rails()
+    report = _run(
+        tmp_path,
+        layout,
+        _spec([_ptie("p1", "VSS"), _ptie("p2", "VSS2")]),
+        deck=None,
+    )
+    assert _shorts(report) == []
+    entry = next(
+        e
+        for e in report["erc_coverage"]["inapplicable"]
+        if e["id"] == "erc.supply_short"
+    )
+    assert entry["reason"] == "substrate_isolation_undecidable"
+    assert entry["missing"]
+    assert "substrate_bodies" not in report["provenance"]
+
+
+def _ihp_ring(top, layout, gap=False):
+    """NWell (31/0) ring around the nBuLay island; `gap` opens its left side."""
+    for box in (
+        (-2, 3, 22, 4),
+        (-2, 7, 22, 8),
+        (21, 3, 22, 8),
+        (-2, 3, -1, 8),
+    ):
+        _box(top, layout, (31, 0), *box)
+    if gap:
+        region = kdb.Region(top.shapes(layout.layer(31, 0)))
+        region -= kdb.Region(kdb.Box(_um(-3), _um(4.5), _um(-0.5), _um(6.5)))
+        top.shapes(layout.layer(31, 0)).clear()
+        top.shapes(layout.layer(31, 0)).insert(region)
+
+
+# --- Issue #5343 (piece C): isolation_boxes, same_net_as, disclosure --------
+
+
+def _isolated_spec(boxes, nets=None):
+    spec = _spec([_ptie("p1", "VSS"), _ptie("p2", "VSS2", isolation_boxes=boxes)])
+    if nets is not None:
+        spec["nets"] = nets
+    return spec
+
+
+def _undecidable(report):
+    return [
+        e
+        for e in report["erc_coverage"]["inapplicable"]
+        if e["id"] == "erc.supply_short"
+    ]
+
+
+def test_sky130_isolation_boxes_pass_checked_by_assertion(tmp_path):
+    layout, _ = _two_rails()
+    spec = _isolated_spec([[-1, 4, 21, 7]])
+    report = _run(tmp_path, layout, spec, deck="sky130")
+    assert _shorts(report) == []
+    cov = report["erc_coverage"]
+    assert "erc.supply_short.substrate" in cov["checked"]
+    assert "erc.supply_short.substrate" in cov["checked_by_assertion"]
+    ids = {b["id"] for b in report["provenance"]["substrate_bodies"]}
+    assert "vsubs" in ids and any(i.startswith("isolation_box[") for i in ids)
+    (echo,) = report["provenance"]["isolation_assertions"]
+    assert echo["tie"] == "p2" and len(echo["bodies"]) == 1
+
+
+def test_sky130_without_assertion_and_no_dnwell_is_evaluated(tmp_path):
+    layout, _ = _two_rails()
+    report = _run(
+        tmp_path,
+        layout,
+        _spec([_ptie("p1", "VSS"), _ptie("p2", "VSS2")]),
+        deck="sky130",
+    )
+    assert len(_shorts(report)) == 1
+    assert (
+        "erc.supply_short.substrate"
+        not in report["erc_coverage"]["checked_by_assertion"]
+    )
+
+
+def test_asap7_is_disclosed_with_missing(tmp_path):
+    layout, _ = _two_rails()
+    report = _run(
+        tmp_path, layout, _spec([_ptie("p1", "VSS"), _ptie("p2", "VSS2")]), deck="asap7"
+    )
+    (entry,) = _undecidable(report)
+    assert entry["reason"] == "substrate_isolation_undecidable"
+    assert any("asap7" in m for m in entry["missing"])
+
+
+def _same_net_nets():
+    return [
+        {"name": "VSS", "kind": "supply"},
+        {"name": "VSS2", "kind": "supply", "same_net_as": "VSS"},
+    ]
+
+
+def test_same_net_as_suppresses_substrate_short_and_expected_missing(tmp_path):
+    layout, _ = _two_rails()
+    spec = _spec([_ptie("p1", "VSS"), _ptie("p2", "VSS2")])
+    spec["nets"] = _same_net_nets()
+    report = _run(tmp_path, layout, spec)
+    assert _shorts(report) == []
+    assert not [
+        f for f in report["erc_findings"] if f["rule"] == "erc.expected_short_missing"
+    ]
+    assert report["provenance"]["substrate_declared_joins"] == [
+        {"net": "VSS", "other_net": "VSS2", "via": "substrate"}
+    ]
+
+
+def test_same_net_as_without_any_short_stays_missing(tmp_path):
+    layout, top = _two_rails()
+    _box(top, layout, (12, 0), -1, 4, 21, 7)  # DNWELL isolates VSS2: no join
+    spec = _spec([_ptie("p1", "VSS"), _ptie("p2", "VSS2")])
+    spec["nets"] = _same_net_nets()
+    report = _run(tmp_path, layout, spec)
+    missing = [
+        f for f in report["erc_findings"] if f["rule"] == "erc.expected_short_missing"
+    ]
+    assert len(missing) == 1
+    assert "substrate_declared_joins" not in report["provenance"]
+
+
+def test_isolation_box_covering_no_tap_has_empty_effect(tmp_path):
+    layout, _ = _two_rails()
+    report = _run(tmp_path, layout, _isolated_spec([[40, 40, 41, 41]]), deck="sky130")
+    assert len(_shorts(report)) == 1  # nothing was isolated
+    (echo,) = report["provenance"]["isolation_assertions"]
+    assert echo["bodies"] == []
+
+
+def test_overlapping_isolation_boxes_merge_into_one_body(tmp_path):
+    layout, _ = _two_rails()
+    report = _run(
+        tmp_path,
+        layout,
+        _isolated_spec([[-1, 4, 10, 7], [5, 4, 21, 7]]),
+        deck="sky130",
+    )
+    assert _shorts(report) == []
+    (echo,) = report["provenance"]["isolation_assertions"]
+    assert echo["boxes"] == 2 and len(echo["bodies"]) == 1
+
+
+@pytest.mark.parametrize("deck", ["sg13g2", "sg13cmos5l"])
+def test_ihp_nbulay_island_isolates_the_second_tap(tmp_path, deck):
+    """Issues #5345/#5359: the IHP decks declare nBuLay (32/0) as
+    ``substrate_isolation`` needing a closed NWell (31/0) ring, so an nBuLay
+    island closed by a ring around the VSS2 rail is a separate body and there
+    is no substrate-only short; without it the two ties share ``vsubs`` and the
+    short is reported."""
+    ties = [_ptie("p1", "VSS"), _ptie("p2", "VSS2")]
+    layout, top = _two_rails()
+    _box(top, layout, (32, 0), -1, 4, 21, 7)
+    _ihp_ring(top, layout)
+    report = _run(tmp_path, layout, _spec(ties), stem="iso", deck=deck)
+    assert _shorts(report) == []
+    bodies = {b["id"] for b in report["provenance"]["substrate_bodies"]}
+    assert bodies == {"vsubs", "vsubs_iso0"}
+
+    layout, _ = _two_rails()
+    report = _run(tmp_path, layout, _spec(ties), stem="noiso", deck=deck)
+    assert len(_shorts(report)) == 1
+
+
+@pytest.mark.parametrize("deck", ["sg13g2", "sg13cmos5l"])
+@pytest.mark.parametrize("ring", ["gap", "none"])
+def test_ihp_unclosed_or_missing_ring_leaves_island_unisolated(tmp_path, deck, ring):
+    """#5359: a gap in (or absence of) the NWell ring leaves the nBuLay island
+    on shared substrate, so the short is still reported."""
+    ties = [_ptie("p1", "VSS"), _ptie("p2", "VSS2")]
+    layout, top = _two_rails()
+    _box(top, layout, (32, 0), -1, 4, 21, 7)
+    if ring == "gap":
+        _ihp_ring(top, layout, gap=True)
+    report = _run(tmp_path, layout, _spec(ties), stem="unclosed", deck=deck)
+    shorts = _shorts(report)
+    assert len(shorts) == 1
+    assert shorts[0]["body"]["id"] == "vsubs"
+
+
+# --- sky130: dnwell island counts only when an n-well ring closes it (#5344) --
+
+
+def _sky130_two_rails():
+    """Like ``_two_rails`` but on sky130 layers: n-well is 64/20, dnwell 64/18."""
+    layout = kdb.Layout()
+    layout.dbu = DBU
+    top = layout.create_cell("TOP")
+    _rail(layout, top, 0, "VSS")
+    _rail(layout, top, 5, "VSS2")
+    _box(top, layout, (64, 20), 0, 20, 20, 30)  # unrelated n-well
+    return layout, top
+
+
+def _sky130_ties():
+    return [
+        _ptie("p1", "VSS", well_complement_of=["64/20"]),
+        _ptie("p2", "VSS2", well_complement_of=["64/20"]),
+    ]
+
+
+def _ring(top, layout, x0, y0, x1, y1, w=1.0):
+    for box in (
+        (x0, y0, x1, y0 + w),
+        (x0, y1 - w, x1, y1),
+        (x0, y0, x0 + w, y1),
+        (x1 - w, y0, x1, y1),
+    ):
+        _box(top, layout, (64, 20), *box)
+
+
+def _sky130_bodies(tmp_path, layout):
+    report = _run(
+        tmp_path,
+        layout,
+        _spec(_sky130_ties()),
+        deck="sky130",
+    )
+    return report, _shorts(report)
+
+
+def test_sky130_closed_nwell_ring_isolates_dnwell_island(tmp_path):
+    layout, top = _sky130_two_rails()
+    _box(top, layout, (64, 18), -1, 4, 21, 7)
+    _ring(top, layout, -2, 3, 22, 8)  # ring enclosing the dnwell
+    report, shorts = _sky130_bodies(tmp_path, layout)
+    assert shorts == []
+    ids = {b["id"] for b in report["provenance"]["substrate_bodies"]}
+    assert ids == {"vsubs", "vsubs_iso0"}
+
+
+def test_sky130_unclosed_ring_leaves_island_unisolated(tmp_path):
+    layout, top = _sky130_two_rails()
+    _box(top, layout, (64, 18), -1, 4, 21, 7)
+    _ring(top, layout, -2, 3, 22, 8)
+    # Open a gap in the ring's left side.
+    region = kdb.Region(top.shapes(layout.layer(64, 20)))
+    region -= kdb.Region(kdb.Box(_um(-3), _um(4.5), _um(-0.5), _um(6.5)))
+    top.shapes(layout.layer(64, 20)).clear()
+    top.shapes(layout.layer(64, 20)).insert(region)
+    report, shorts = _sky130_bodies(tmp_path, layout)
+    assert len(shorts) == 1
+    assert shorts[0]["body"]["id"] == "vsubs"
+
+
+def test_sky130_dnwell_without_any_nwell_is_not_isolated(tmp_path):
+    layout, top = _sky130_two_rails()
+    layout.clear_layer(layout.layer(64, 20))
+    _box(top, layout, (64, 20), 0, 20, 20, 30)
+    _box(top, layout, (64, 18), -1, 4, 21, 7)
+    _, shorts = _sky130_bodies(tmp_path, layout)
+    assert len(shorts) == 1
+
+
+def test_sky130_no_dnwell_is_one_substrate(tmp_path):
+    layout, _ = _sky130_two_rails()
+    report, shorts = _sky130_bodies(tmp_path, layout)
+    assert len(shorts) == 1
+    assert {b["id"] for b in report["provenance"]["substrate_bodies"]} == {"vsubs"}
+
+
+def test_sky130_nested_islands_are_numbered_independently(tmp_path):
+    layout, top = _sky130_two_rails()
+    _box(top, layout, (64, 18), -1, 4, 21, 7)
+    _ring(top, layout, -2, 3, 22, 8)
+    _box(top, layout, (64, 18), -1, -1, 21, 2)  # closed island around VSS
+    _ring(top, layout, -2, -2, 22, 2.5)
+    report, _ = _sky130_bodies(tmp_path, layout)
+    ids = {b["id"] for b in report["provenance"]["substrate_bodies"]}
+    assert "vsubs_iso0" in ids and "vsubs_iso1" in ids
+
+
+def test_island_closure_helper_empty_and_abutting():
+    from klayout_tools.erc_islands import is_ring_closed, sorted_islands
+
+    island = kdb.Region(kdb.Box(0, 0, 100, 100))
+    assert not is_ring_closed(island, kdb.Region())
+    assert sorted_islands(kdb.Region(), kdb.Region()) == []
+    abutting = kdb.Region(kdb.Box(-20, -20, 120, 120)) - kdb.Region(
+        kdb.Box(0, 0, 100, 100)
+    )
+    assert is_ring_closed(island, abutting)
+    assert len(sorted_islands(island, abutting)) == 1
+    assert sorted_islands(island, None) != []
+
+
+def test_sky130_deck_declares_closure_gated_dnwell_isolation():
+    """#5344: sky130 declares dnwell (64/18) as ``substrate_isolation`` and
+    gates islands on an n-well ring; gf180mcu keeps every island."""
+    from klayout_tools.decks.gf180mcu import EXTRACTION_DECK as GF180
+    from klayout_tools.decks.sky130 import EXTRACTION_DECK as SKY130
+
+    assert SKY130.substrate_isolation == (64, 18)
+    assert SKY130.substrate_isolation_needs_nwell_ring is True
+    assert GF180.substrate_isolation_needs_nwell_ring is False
+
+
+@pytest.mark.parametrize("family", sorted(_FAMILY_MISSING))
+def test_family_missing_has_no_deck_declared_family(family):
+    """#5336: a ``_FAMILY_MISSING`` entry goes dead the moment that family's
+    built-in extraction deck declares ``substrate_isolation`` --
+    :func:`isolation_missing` returns ``[]`` from the deck before it ever
+    reaches the table, so the string survives only to state the opposite of
+    what the deck does. That is what the sg13g2/sg13cmos5l entries did between
+    #5345/#5359 and #5336."""
+    from klayout_tools.decks import UnknownExtractionDeckError, get_extraction_deck
+
+    try:
+        deck = get_extraction_deck(family)
+    except UnknownExtractionDeckError:
+        return  # no built-in deck for this family: the entry stays reachable
+    assert deck.substrate_isolation is None, (
+        f"_FAMILY_MISSING['{family}'] says the deck declares no isolation layer, "
+        f"but the built-in {family} deck declares "
+        f"substrate_isolation={deck.substrate_isolation}; drop the entry"
+    )

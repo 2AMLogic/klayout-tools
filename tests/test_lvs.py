@@ -702,7 +702,7 @@ def test_clean_self_compare_reports_match(tmp_path):
     )
     report = run_lvs(path)
 
-    assert report["schema_version"] == 2
+    assert report["schema_version"] == 3
     assert report["engine"] == "klayout"
     assert report["status"] == "match"
     assert report["mismatch_count"] == 0
@@ -1437,12 +1437,19 @@ def test_pure_width_change_reports_device_property_on_both_request_shapes(tmp_pa
         ("pre-extracted", preextracted_report),
     ):
         assert report["status"] == "mismatch", label
-        # Five parameter entries on both shapes: `w_um`, plus the deck-
-        # measured `as`/`ad`/`ps`/`pd` against the reader's implicit zeros
-        # (the reference declares only L/W). Same category, same count.
-        assert report["category_counts"]["device.property"] == 5, label
+        # One parameter entry on both shapes (issue #4729): `w_um`, with the
+        # deck-measured `as`/`ad`/`ps`/`pd` (against the reader's implicit
+        # zeros -- the reference declares only L/W) grouped under it as
+        # `details.derived`. Same category, same count.
+        assert report["category_counts"]["device.property"] == 1, label
         errors = [m for m in report["mismatches"] if m["severity"] == "error"]
-        assert [m["category"] for m in errors] == ["device.property"] * 5, label
+        assert [m["category"] for m in errors] == ["device.property"], label
+        assert [d["name"] for d in errors[0]["details"]["derived"]] == [
+            "as",
+            "ad",
+            "ps",
+            "pd",
+        ], label
         # The recovery fired on this shape: the unmatched device pair and
         # the nets it dragged in are collateral warnings, not errors.
         collateral = [
@@ -5906,7 +5913,9 @@ def test_multifinger_device_mismatches_without_combine_devices(tmp_path):
     report = run_lvs(path)
 
     assert report["status"] == "mismatch"
-    assert report["category_counts"].get("device.unmatched", 0) >= 1
+    # Issue #4729: the unmerged fingers are reported as one grouped finding
+    # naming the summed width, rather than as per-finger `device.unmatched`.
+    assert report["category_counts"].get("device.unmerged_fingers", 0) == 1
     assert report["counts"]["devices"]["layout"] == 3
     assert report["counts"]["devices"]["reference"] == 2
 
@@ -6302,7 +6311,7 @@ def test_neither_global_combine_devices_setting_satisfies_both_composed_macros(
     )
     report_false = run_lvs(path_false)
     assert report_false["status"] == "mismatch"
-    assert report_false["category_counts"].get("device.unmatched", 0) >= 1
+    assert report_false["category_counts"].get("device.unmerged_fingers", 0) >= 1
 
     path_true = _write_request(
         tmp_path / "request_true.json",
@@ -8334,6 +8343,7 @@ def test_lvs_cli_exits_4_on_inconclusive(tmp_path, monkeypatch, capsys):
         deck_var=None,
         layout=None,
         progress=None,
+        output=None,
     )
     assert lvs_cmd.run(args) == lvs_cmd.EXIT_INCONCLUSIVE
     payload = json.loads(capsys.readouterr().out)
@@ -12482,7 +12492,7 @@ def test_normalize_capacitor_wrong_terminal_count_fails():
 
 
 def test_normalize_capacitor_multiplicity_gt_one_rejected():
-    with pytest.raises(NormalizeError, match="multi-finger/multiplied"):
+    with pytest.raises(NormalizeError, match="mf=2 with no m"):
         normalize_reference_netlist(
             "XC1 c0 c1 sky130_fd_pr__cap_mim_m3_1 w=5u l=5u mf=2\n", deck="sky130"
         )
@@ -12513,14 +12523,6 @@ def test_normalize_capacitor_bad_m_rejected(bad):
     with pytest.raises(NormalizeError, match="'m'|m="):
         normalize_reference_netlist(
             f"XC1 c0 c1 sky130_fd_pr__cap_mim_m3_1 w=5u l=5u m={bad}\n",
-            deck="sky130",
-        )
-
-
-def test_normalize_capacitor_m_with_mf_still_rejected():
-    with pytest.raises(NormalizeError, match="multi-finger/multiplied"):
-        normalize_reference_netlist(
-            "XC1 c0 c1 sky130_fd_pr__cap_mim_m3_1 w=5u l=5u m=2 mf=2\n",
             deck="sky130",
         )
 
@@ -12811,24 +12813,9 @@ def test_build_device_binding_map_derived_fallback_shape():
         "rppd",
         "rhigh",
     }
-    # sg13g2's capacitor family is now fully curated too (issue #1470), so
-    # neither capacitor key comes from the derived fallback any more. The
-    # dict is keyed by *subcircuit* name, not device-class name: `rfcmim`'s
-    # real subcircuit is `cap_rfcmim`, so that is the key that appears here,
-    # even though the device-class name `rfcmim` is unchanged.
-    assert set(build_device_binding_map("sg13g2")) == {
-        "sg13_lv_nmos",
-        "sg13_lv_pmos",
-        "sg13_hv_nmos",
-        "sg13_hv_pmos",
-        "rsil",
-        "rppd",
-        "rhigh",
-        "cap_cmim",
-        "cap_rfcmim",
-    }
-    # Both fully-curated decks are byte-for-byte unchanged: no derived entry
-    # is added to either.
+    # sg13g2's own arm lives in tests/test_extract_sg13g2_antenna_diodes.py
+    # (issue #5491), with the two antenna-diode keys that binding added.
+    # Both fully-curated decks are unchanged: no derived entry is added.
     assert set(build_device_binding_map("gf180mcu")) == {
         "nfet_03v3",
         "pfet_03v3",
@@ -12871,6 +12858,8 @@ def test_build_device_binding_map_derived_fallback_shape():
         "sky130_fd_pr__pfet_g5v0d10v5",
         # Native-Vt 5V NMOS via marker combination (issue #3599).
         "sky130_fd_pr__nfet_05v0_nvt",
+        "sky130_fd_pr__nfet_01v8_lvt",
+        "sky130_fd_pr__pfet_01v8_lvt",
         "sky130_fd_pr__res_generic_po",
         "sky130_fd_pr__res_high_po",
         "sky130_fd_pr__res_xhigh_po",
@@ -12891,7 +12880,7 @@ def test_build_device_binding_map_derived_fallback_shape():
         "sky130_fd_pr__cap_mim_m3_2",
         "sky130_fd_pr__pnp_05v5_W0p68L0p68",
         "sky130_fd_pr__pnp_05v5_W3p40L3p40",
-        # Junction diodes (issue #4319) -- curated in `_DIODE_MODEL_TABLE`.
+        # Junction diodes (issue #4319) -- curated in `pdk_diode_models.py`.
         "sky130_fd_pr__diode_pw2nd_05v5",
         "sky130_fd_pr__diode_pw2nd_05v5_lvt",
         "sky130_fd_pr__diode_pw2nd_05v5_nvt",
@@ -15917,7 +15906,7 @@ def test_check_lvs_report_detects_moved_layout_hash(tmp_path):
     assert by_field["environment.layout_sha256"]["match"] is False
 
 
-def _portable_pair(tmp_path: Path) -> tuple[Path, Path]:
+def _portable_pair(tmp_path: Path, legacy_reference: bool = False) -> tuple[Path, Path]:
     """Issue #2595's repro shape: a self-contained directory holding a
     request whose `layout`/`reference` are relative to the request *file's
     own* directory, its two netlists, and the report that run produced.
@@ -15934,7 +15923,10 @@ def _portable_pair(tmp_path: Path) -> tuple[Path, Path]:
         },
     )
     report_path = pair / "lvs.json"
-    _write_report(report_path, run_lvs(request_path))
+    report = run_lvs(request_path)
+    if legacy_reference:  # pre-#4984: request-relative bare string
+        report["reference"] = "ref.spice"
+    _write_report(report_path, report)
     return pair, report_path
 
 
@@ -15950,14 +15942,10 @@ def test_check_lvs_report_names_unresolvable_input_path(tmp_path, monkeypatch):
     just carries an additional `input_not_found` block naming the resolved
     path, plus the report-relative path that *does* exist when one does.
 
-    Issue #2659 removed the trap for `layout`, which is now the
-    `{path, scope}` envelope resolved against the repo root of the committed
-    report's own directory rather than the cwd -- so this test now also pins
-    the *asymmetry* between the two sides, which is the whole point of
-    leaving `reference` alone (it is pinned by
-    `environment.reference_sha256`, not by `provenance.input`).
+    Uses a pre-#4984 bare-string `reference`; `layout` (#2659) and v3
+    `reference` (#4984) are `{path, scope}` and have no such trap.
     """
-    pair, report_path = _portable_pair(tmp_path)
+    pair, report_path = _portable_pair(tmp_path, legacy_reference=True)
 
     monkeypatch.chdir(tmp_path)
     result = check_lvs_report(os.path.join("pair", "lvs.json"))
@@ -16411,12 +16399,12 @@ def test_run_lvs_echoes_reference_top_and_options(tmp_path):
         "compare_parameters": None,
         # Issue #1952: `null` when the option was omitted.
         "power_connectivity": None,
-        # Issue #2692: `null` when the option was omitted -- the
-        # form-dependent default applies (off for this `plain-element`
-        # reference, on for `gate-level-verilog`).
+        # Issue #2692: `null` when omitted -- the form-dependent default applies
+        # (off for this `plain-element` reference, on for `gate-level-verilog`).
         "anchor_top_level_pins": None,
         "strict_top_level_pin_count": False,
         "compare_mos_flavour": False,
+        "ignore_mos_bulk": False,
         "supply_nets": ["GND", "VCC", "VDD", "VGND", "VPWR", "VSS"],
         "finfet_bulk": None,
     }
@@ -16424,7 +16412,7 @@ def test_run_lvs_echoes_reference_top_and_options(tmp_path):
     # earned no `schema_version` bump of its own (docs/json-contract.md,
     # "additive envelope"). The envelope is at `2` because issue #2659
     # separately retyped `layout`.
-    assert report["schema_version"] == 2
+    assert report["schema_version"] == 3
     assert report["parameter_tolerance"] is None
 
 
@@ -16787,7 +16775,7 @@ def test_cli_lvs_check_text_names_unresolvable_input(tmp_path, capsys, monkeypat
     a committed pair from its parent directory still exits 3, but the text
     rendering says the input was not found (and where it really is) instead
     of the bare `actual: None` the report reads as a lost hash."""
-    pair, _report_path = _portable_pair(tmp_path)
+    pair, _report_path = _portable_pair(tmp_path, legacy_reference=True)
     monkeypatch.chdir(tmp_path)
     capsys.readouterr()
 
@@ -23083,9 +23071,9 @@ def test_run_lvs_layout_is_repo_relative_inside_a_repo(tmp_path):
 
     report = run_lvs(request_path)
 
-    assert report["schema_version"] == 2
+    assert report["schema_version"] == 3
     assert report["layout"] == {"path": "blocks/layout.spice", "scope": "repo"}
-    assert report["reference"] == reference_path
+    assert report["reference"] == {"path": "ref.spice", "scope": "repo"}
 
 
 def test_run_lvs_layout_is_external_outside_any_repo(tmp_path_factory):
@@ -23116,7 +23104,7 @@ def test_run_lvs_layout_scope_follows_the_layout_not_the_request(
 ):
     """`layout`'s scope answers "is the *layout* inside a repo", so it is
     anchored on the layout's own location rather than the request document's
-    (`_report_repo_root`). The two are genuinely different questions -- and
+    (`env_provenance.repo_root_for`). The two are genuinely different questions -- and
     the inline/stdin request forms have no document directory at all -- so
     anchoring on the request would make the field depend on where `klt` was
     invoked from. This is also the anchor `klt drc`/`klt extract`/`klt pex`
@@ -23230,9 +23218,9 @@ def test_check_lvs_report_reports_an_external_layout_as_unverifiable(
     by_field = {check["field"]: check for check in result["checks"]}
     assert by_field["environment.layout_sha256"]["actual"] is None
     assert by_field["environment.layout_sha256"]["match"] is False
-    # The reference side is unaffected -- still the verbatim echo, still
-    # re-hashed against the cwd, and here it resolves and matches.
-    assert by_field["environment.reference_sha256"]["match"] is True
+    # #4984: the reference is outside any repo too: unverifiable.
+    assert by_field["environment.reference_sha256"]["actual"] is None
+    assert by_field["environment.reference_sha256"]["match"] is False
     assert result["status"] == "drifted"
 
 
@@ -23283,6 +23271,7 @@ def test_check_lvs_report_still_resolves_a_pre_2659_bare_string_layout(
     )
     report["schema_version"] = 1
     report["layout"] = layout_path  # the pre-#2659 shape
+    report["reference"] = reference_path  # the pre-#4984 shape
     report_path = outside / "lvs.json"
     _write_report(report_path, report)
 
@@ -23336,7 +23325,7 @@ def test_lvs_text_output_renders_the_layout_envelope_not_a_dict_repr(
     outside_text = capsys.readouterr().out
 
     assert "layout: layout.spice\n" in inside
-    assert f"reference: {reference_path}\n" in inside
+    assert "reference: ref.spice\n" in inside
     assert "layout: <outside repo>\n" in outside_text
 
 
@@ -25869,18 +25858,17 @@ def _external_lvs_report(tmp_path_factory):
     layout_path = _write(outside / "layout.spice", _INVERTER_SPICE)
     reference_path = _write(outside / "ref.spice", _INVERTER_SPICE)
     report_path = outside / "lvs.json"
-    _write_report(
-        report_path,
-        run_lvs(
-            _write_request(
-                outside / "request.json",
-                {
-                    "layout": {"netlist": layout_path, "top": "inv"},
-                    "reference": {"netlist": reference_path, "top": "inv"},
-                },
-            )
-        ),
+    report = run_lvs(
+        _write_request(
+            outside / "request.json",
+            {
+                "layout": {"netlist": layout_path, "top": "inv"},
+                "reference": {"netlist": reference_path, "top": "inv"},
+            },
+        )
     )
+    report["reference"] = reference_path  # pre-#4984 bare string (no override)
+    _write_report(report_path, report)
     return layout_path, report_path
 
 
@@ -26231,102 +26219,3 @@ def test_rerun_request_replays_def_fields(tmp_path):
     layout_spec = _reconstruct_lvs_request(committed)["layout"]
     assert layout_spec["def_net_names"] is True
     assert layout_spec["def_pins"] == "top.def"
-
-
-# --- Issue #4363: well/substrate-layer LEF pins are disclosed, not checked ----
-
-_WELL_PIN_LAYOUT_SPICE = """\
-.SUBCKT mylib__inv_1 A Y VGND VNB
-.ENDS
-.SUBCKT top in mid out VGND VNB sig
-X1 in mid VGND VNB mylib__inv_1
-X2 mid out VGND sig mylib__inv_1
-.ENDS
-"""
-
-_WELL_PIN_LEF = """\
-MACRO mylib__inv_1
-  PIN VGND
-    PORT
-      LAYER met1 ;
-        RECT 0 0 1 1 ;
-    END
-  END VGND
-  PIN VNB
-    PORT
-      LAYER {layer} ;
-        RECT 0 0 1 1 ;
-    END
-  END VNB
-END mylib__inv_1
-"""
-
-
-def _well_pin_power_report(tmp_path, monkeypatch, vnb_layer, vgnd_second_net="VGND"):
-    import klayout.db as kdb
-
-    from klayout_tools import lvs as lvs_module
-    from klayout_tools.lvs_power import _power_connectivity_report, _well_layer_lef_pins
-
-    spice = _WELL_PIN_LAYOUT_SPICE
-    if vgnd_second_net != "VGND":
-        spice = spice.replace(
-            "X2 mid out VGND sig", f"X2 mid out {vgnd_second_net} sig"
-        )
-    netlist = kdb.Netlist()
-    netlist.read(_write(tmp_path / "layout.spice", spice), kdb.NetlistSpiceReader())
-    lef = _write(tmp_path / "cells.lef", _WELL_PIN_LEF.format(layer=vnb_layer))
-    monkeypatch.setattr(
-        lvs_module,
-        "_gate_level_power_pin_evidence_detail",
-        lambda *_args: ({"VGND", "VNB"}, ["MYLIB__INV_1"], True, None),
-    )
-    well_pins = _well_layer_lef_pins((lef,))
-    report = _power_connectivity_report(
-        netlist, None, None, expected_nets=None, well_layer_pins=well_pins
-    )
-    return well_pins, report
-
-
-def test_power_connectivity_excludes_and_discloses_pwell_layer_pin(
-    tmp_path, monkeypatch
-):
-    """Issue #4363: a pwell-layer `VNB` on differing nets is disclosed in
-    `excluded_pins`, and the metal pins still drive a `match`."""
-    well_pins, power = _well_pin_power_report(tmp_path, monkeypatch, "pwell")
-    assert well_pins == {("MYLIB__INV_1", "VNB")}
-    assert power["status"] == "match"
-    assert power["findings"] == []
-    assert power["power_pins"] == ["VGND"]
-    (excluded,) = power["excluded_pins"]
-    assert excluded["pin"] == "VNB"
-    assert excluded["cells"] == ["MYLIB__INV_1"]
-    assert excluded["instance_count"] == 2
-    assert "well/substrate-layer" in excluded["reason"]
-
-
-def test_power_connectivity_excludes_nwell_layer_pin_by_layer_not_name(
-    tmp_path, monkeypatch
-):
-    """Issue #4363: the exclusion follows the LEF layer (an `nwell` layer
-    excludes it whatever the pin is called); a metal-layer pin is kept."""
-    well_pins, _ = _well_pin_power_report(tmp_path, monkeypatch, "nwell")
-    assert well_pins == {("MYLIB__INV_1", "VNB")}
-    well_pins, power = _well_pin_power_report(tmp_path, monkeypatch, "met1")
-    assert well_pins == frozenset()
-    assert power["status"] == "mismatch"
-    assert power["excluded_pins"] == []
-    assert [f["pin"] for f in power["findings"]] == ["VNB"]
-
-
-def test_power_connectivity_metal_pin_inconsistency_still_mismatch(
-    tmp_path, monkeypatch
-):
-    """Issue #4363 negative control: excluding the pwell pin must not hide a
-    real inconsistency on a metal power pin."""
-    _, power = _well_pin_power_report(
-        tmp_path, monkeypatch, "pwell", vgnd_second_net="sig"
-    )
-    assert power["status"] == "mismatch"
-    assert [f["pin"] for f in power["findings"]] == ["VGND"]
-    assert [p["pin"] for p in power["excluded_pins"]] == ["VNB"]

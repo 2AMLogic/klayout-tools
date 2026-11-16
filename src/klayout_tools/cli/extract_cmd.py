@@ -31,19 +31,21 @@ fresh extraction into *verifying a previously committed* ``--format json``
 report still reproduces -- see ``docs/cli/extract.md``, "--check". The input
 path is read from the committed report itself unless the positional ``file``
 is also given (issue #2699), which then overrides it unconditionally. Cheap
-mode (default): re-hash the input/deck named in the report and compare
-against its own recorded ``content_hash`` values, no extraction engine re-run. Full
-mode (``--check
-<report> --rerun``): actually re-run the extraction the report describes
-and diff verdict-bearing fields. Both reuse ``status: "match"`` /
+mode (default): re-hash the input/deck named in the report and compare against
+its own recorded ``content_hash`` values, no extraction engine re-run. Full
+mode (``--check <report> --rerun``): actually re-run the extraction the report
+describes and diff verdict-bearing fields. Both reuse ``status: "match"`` /
 ``"drifted"`` and the same 0/3 exit-code split described above (see
 ``klayout_tools._report_verify``).
 """
 
 import argparse
+import os
 import sys
 from typing import Any
 
+from .. import extract_batch
+from .._jsonnum import is_int
 from .._paths import looks_like_request_document
 from ..env_provenance import render_path_field
 from ..extract import (
@@ -67,6 +69,7 @@ from .output import (
     EXIT_USAGE_ERROR,
     emit_error,
     emit_success,
+    fail_on_unmodelled_exit,
     render_check_text,
     render_rerun_drift,
 )
@@ -269,7 +272,7 @@ def _request_int(request: dict, key: str) -> int | None:
     value = request.get(key)
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, int):
+    if not is_int(value):
         raise ExtractError(
             f"`klt extract` request field {key!r} must be an integer (got "
             f"{type(value).__name__}: {value!r})"
@@ -378,6 +381,7 @@ _REQUEST_FIELD_DESTS = {
         "critical_net_excludes",
         "parasitics_net_patterns",
         "strict_net_patterns",
+        "fail_on_unmodelled",
         "parasitic_variants",
         "parasitics_top_cell_only",
         "resistance_graph",
@@ -404,6 +408,7 @@ _REQUEST_FIELD_DESTS = {
         "device_models",
         "probes",
         "defer_resistor_fixed_offset",
+        "omit_dead_metal",
         "abstract_cells",
         "abstract_cell_lef",
         "subcircuit",
@@ -493,6 +498,7 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
             "critical_net_excludes": _str_list("critical_net_excludes"),
             "parasitics_net_patterns": _str_list("parasitics_net_patterns"),
             "strict_net_patterns": _bool("strict_net_patterns"),
+            "fail_on_unmodelled": _bool("fail_on_unmodelled"),
             "parasitic_variants": _str_list("parasitic_variants"),
             "parasitics_top_cell_only": _bool("parasitics_top_cell_only"),
             "resistance_graph": _bool("resistance_graph"),
@@ -541,6 +547,7 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
             ),
             "probes": _request_probes(request),
             "defer_resistor_fixed_offset": _bool("defer_resistor_fixed_offset"),
+            "omit_dead_metal": _bool("omit_dead_metal"),
             "abstract_cells": _str_list("abstract_cells"),
             "abstract_cell_lef": _str_list("abstract_cell_lef", paths=True),
             "subcircuit": _str("subcircuit"),
@@ -563,12 +570,25 @@ def run(args: argparse.Namespace) -> int:
     # called. `file` may accompany `--check` (issue #2699) as an explicit
     # input override.
     if args.check is not None:
+        if getattr(args, "backend", None) == "batch":
+            return emit_error(
+                "extract",
+                "--backend batch only runs fresh extractions; --check "
+                "re-verifies a committed report on this host",
+                args.format,
+            )
         return _run_check(args)
 
     if args.rerun:
         return emit_error("extract", "--rerun requires --check <report>", args.format)
 
     try:
+        # `--backend` > $KLT_EXTRACT_BACKEND > local (issue #4613). `batch`
+        # never falls back to a local run: every batch failure is exit 1.
+        if extract_batch.resolve_backend(getattr(args, "backend", None)) == "batch":
+            report = _run_batch(args)
+            emit_success(report, args.format, _print_text)
+            return EXIT_OK
         # Issue #1867: the positional slot carries either a layout path or a
         # request document; `_apply_request` normalizes the latter into the
         # same namespace fields the argv form produces, so everything below
@@ -626,10 +646,12 @@ def run(args: argparse.Namespace) -> int:
             # correction), `run_extract`'s kwarg as "apply" (default `True`),
             # so the CLI default stays today's always-applied behavior.
             apply_resistor_fixed_offset=not args.defer_resistor_fixed_offset,
-            # `--deck-option` (issue #595): selects a caller-visible flavour
-            # of a shared-geometry device family (e.g. gf180mcu's
-            # `poly_res`). `None` when the flag was never given, unchanged
-            # from every call site that predates it.
+            # `--omit-dead-metal` (issue #5545): drops `dead_metal[]`'s
+            # per-cluster rows, keeps `dead_metal_summary`. `False` by default.
+            omit_dead_metal=args.omit_dead_metal,
+            # `--deck-option` (issue #595): selects a caller-visible flavour of a
+            # shared-geometry device family (e.g. gf180mcu's `poly_res`). `None` when
+            # the flag was never given, unchanged from every call site that predates it.
             deck_options=deck_options,
             # `--label-layer` (issue #2656): reads net/pin name text for one
             # label role off a different GDS purpose than this deck's own
@@ -647,34 +669,31 @@ def run(args: argparse.Namespace) -> int:
             # given, unchanged from every call site that predates them.
             abstract_cell_patterns=tuple(args.abstract_cells or ()),
             abstract_cell_lef_paths=tuple(args.abstract_cell_lef or ()),
-            # `--mom-net` (issue #798): cross-checks (and replaces) one
-            # net's --parasitics ground capacitance against `klt mom`.
-            # `None` when the flag was never given, unchanged from every
-            # call site that predates it.
+            # `--mom-net` (issue #798): cross-checks (and replaces) one net's
+            # --parasitics ground capacitance against `klt mom`. `None` when the flag
+            # was never given, unchanged from every call site that predates it.
             mom_net=args.mom_net,
             # `--spef` (issue #948): writes --parasitics's per-net R/C model
             # as a SPEF file at this path. `None` when the flag was never
             # given, unchanged from every call site that predates it.
             spef_output=args.spef,
-            # `--substrate-spreading` (issue #2561): two-terminal closed-form
-            # estimate of the bulk resistance between this net's substrate
-            # taps. `None` when the flag was never given, unchanged from
-            # every call site that predates it.
+            # `--substrate-spreading` (issue #2561): two-terminal closed-form estimate
+            # of the bulk resistance between this net's substrate taps. `None` when the
+            # flag was never given, unchanged from every call site that predates it.
             substrate_spreading_net=args.substrate_spreading,
             # `--def-net-names` (issue #951): names routed nets from the DEF
             # net name their geometry carries as a GDS shape property instead
             # of from text labels. `False` when the flag was never given,
             # unchanged from every call site that predates it.
             def_net_names=args.def_net_names,
-            # `--critical-net` (issue #976, Epic #709 Phase 2a): scopes the
-            # lateral (same-layer sidewall) coupling pass onto these net
-            # names. `None` when the flag was never given, unchanged from
-            # every call site that predates it.
+            # `--critical-net` (issue #976, Epic #709 Phase 2a): scopes the lateral
+            # (same-layer sidewall) coupling pass onto these net names. `None` when the
+            # flag was never given, unchanged from every call site that predates it.
             critical_nets=args.critical_nets,
-            # `--parasitics-net` (issue #1700): scopes --parasitics' per-net
-            # ground R/C pass onto these net names instead of measuring
-            # every net in the design. `None` when the flag was never given,
-            # unchanged from every call site that predates it.
+            # `--parasitics-net` (issue #1700): scopes --parasitics' per-net ground R/C
+            # pass onto these net names instead of measuring every net in the design.
+            # `None` when the flag was never given, unchanged from every call site that
+            # predates it.
             parasitics_nets=args.parasitics_nets,
             # Issue #2974: glob / all-nets selectors resolved against the
             # extracted nets. Defaults leave every earlier call unchanged.
@@ -734,28 +753,20 @@ def run(args: argparse.Namespace) -> int:
             # post-extraction for equal `params`. `None` when the flag was
             # never given, unchanged from every call site that predates it.
             matched_device_groups=matched_device_groups,
-            # `--def-pins` (issue #1390): the automatic, DEF-merge-aware
-            # counterpart to `--pins` -- derives the declared top-level
-            # port set from a routed DEF's own `PINS` section instead of
-            # requiring a caller to hand-derive it. `None` when the flag
-            # was never given, unchanged from every call site that
-            # predates it.
+            # `--def-pins` (issue #1390): the DEF-merge-aware counterpart to
+            # `--pins` -- derives the declared top-level port set from a
+            # routed DEF's `PINS` section. `None` when never given.
             def_pins=def_pins,
-            # `--rename-declared-pins` (issue #2854): renames each
-            # surviving promoted pin net to its declared name, so the
-            # written `.SUBCKT` header carries canonical interface names.
-            # `False` when the flag was never given, unchanged from every
-            # call site that predates it.
+            # `--rename-declared-pins` (issue #2854): renames each surviving
+            # promoted pin net to its declared name, so the written
+            # `.SUBCKT` header carries canonical names. `False` when never given.
             rename_declared_pins=args.rename_declared_pins,
             # `--tie-declared-pins` (issue #4383).
             tie_declared_pins=args.tie_declared_pins,
             # `--pin-source-cells` (issue #1513): the positional, probe-based
-            # declared-pin mechanism for a `klt gen-compose`d assembly with
-            # no governing top-level DEF -- derives the declared top-level
-            # port set from which specific labels physically live inside the
-            # named cell(s), instead of matching a promoted net's string.
-            # `None` when the flag was never given, unchanged from every
-            # call site that predates it.
+            # declared-pin mechanism for a `klt gen-compose`d assembly with no
+            # governing top-level DEF -- derives the port set from which labels
+            # live inside the named cell(s). `None` when never given.
             pin_source_cells=pin_source_cells,
             # `--subcircuit`/`--subcircuit-output` (issue #2245): additionally
             # writes one named `.SUBCKT <cell>` deck for a sub-cell's own
@@ -773,12 +784,74 @@ def run(args: argparse.Namespace) -> int:
         # FinFET geometry refusals); every other error keeps the two-field
         # envelope byte-for-byte.
         return emit_error(
-            "extract", str(exc), args.format, code=getattr(exc, "code", None)
+            "extract",
+            str(exc),
+            args.format,
+            code=getattr(exc, "code", None),
+            details=getattr(exc, "details", None),
         )
+
+    if (rc := fail_on_unmodelled_exit(report, args)) is not None:  # issue #5388
+        return rc
 
     emit_success(report, args.format, _print_text)
 
     return EXIT_OK
+
+
+def _run_batch(args: argparse.Namespace) -> dict[str, Any]:
+    """The ``--backend batch`` run (issue #4613): the request document is
+    forwarded whole; the argv form forwards ``extract_batch.ARGV_FORWARDED``
+    plus ``--deck-option`` and refuses any other flag, since the runner's
+    request is built from exactly what is shipped."""
+    if args.file is not None and looks_like_request_document(args.file):
+        request, base_dir = load_request_arg(args.file)
+        reqdoc.check_schema(
+            request, expected=REQUEST_SCHEMA, verb="extract", error_cls=ExtractError
+        )
+        reqdoc.check_known_fields(
+            request, tuple(_REQUEST_FIELD_DESTS), verb="extract", error_cls=ExtractError
+        )
+        reqdoc.reject_argv_flags(args, verb="extract", error_cls=ExtractError)
+        output = reqdoc.get_path(
+            request, "output", base_dir=base_dir, verb="extract", error_cls=ExtractError
+        )
+    else:
+        flags = getattr(args, "request_argv_flags", None) or {}
+        unsupported = sorted(
+            option
+            for dest, (option, default) in flags.items()
+            if getattr(args, dest, default) != default
+            and dest not in extract_batch.ARGV_FORWARDED
+            and dest not in ("deck_options", "output", "progress")
+        )
+        if unsupported:
+            raise ExtractError(
+                f"{', '.join(unsupported)} cannot be forwarded by --backend "
+                "batch from the command line; put the run in a request "
+                "document (docs/cli/extract.md, 'Request document'), or use "
+                "--backend local"
+            )
+        if not args.deck:
+            raise ExtractError("argument --deck is required")
+        request = extract_batch.argv_request(
+            {
+                **vars(args),
+                "deck_options": _parse_deck_options(args.deck_options),
+            }
+        )
+        base_dir, output = os.getcwd(), args.output
+    if not request.get("deck"):
+        raise ExtractError("argument --deck is required")
+    return extract_batch.run_extract_batch(
+        request,
+        base_dir,
+        output=output,
+        timeout_s=args.timeout_s,
+        batch_root=args.batch_root,
+        batch_include=args.batch_include or (),
+        batch_exclude=args.batch_exclude or (),
+    )
 
 
 def _run_check(args: argparse.Namespace) -> int:

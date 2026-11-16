@@ -89,6 +89,8 @@ import re
 from typing import Any
 
 from .sim_errors import SimError
+from .sim_op_args import default_op_args
+from .sim_step_shadow import validate_step_measurement_name
 
 #: The internal ``analysis["kind"]`` a resolved step sequence carries. Never
 #: a request value: the request declares ``analysis_steps[]`` instead, and
@@ -161,92 +163,43 @@ _STEP_MARKER_RE = re.compile(
 )
 
 
-def _refuse_crossings(spec: dict[str, Any]) -> None:
-    """Issue #2868: a ``crossings`` series reads one transient plot's
-    rawfile; no per-step equivalent is implemented, so it is refused by
-    name rather than silently reduced to something else."""
-    if spec.get("crossings") is not None:
-        raise SimError(
-            f"measurement {spec.get('name')!r}: 'crossings' is not supported "
-            "with analysis_steps -- use the scalar analysis "
-            '(kind "tran") for a threshold-crossing series'
-        )
-    if spec.get("energy") is not None:
-        # Issue #3033: same reason -- one transient plot's rawfile.
-        raise SimError(
-            f"measurement {spec.get('name')!r}: 'energy' is not supported "
-            "with analysis_steps -- use the scalar analysis "
-            '(kind "tran") for a source-energy measurement'
-        )
+#: Measurement keys the ``analysis_steps`` path refuses by name rather than
+#: silently ignoring: (key, tail of the "use the scalar analysis ..." hint,
+#: ``strict_true``). ``strict_true`` refuses only a literal ``True`` (the
+#: ``optional`` flag); otherwise any non-``None`` value is refused. Order is the
+#: order refusals are checked in, so it is part of the error contract.
+#: - crossings (#2868), energy (#3033), stress (#4592), cycle_mean (#2947),
+#:   eye (#4292), step_resolution (#4773), settled (#4780): each reads one
+#:   transient plot's rawfile; no per-step equivalent.
+#: - search (#4121): bisection loop is scalar-deck only.
+#: - optional (#2925): scalar analysis only; a step's no-value paths also
+#:   carry ``step_failed`` / ``derived_input_unavailable`` causes that must
+#:   stay errors.
+#: - noise (#2938): reads one noise analysis' spectrum plot.
+_UNSUPPORTED_IN_STEPS: tuple[tuple[str, str, bool], ...] = (
+    ("crossings", '(kind "tran") for a threshold-crossing series', False),
+    ("energy", '(kind "tran") for a source-energy measurement', False),
+    ("stress", '(kind "tran") for a windowed node-pair voltage stress', False),
+    ("search", "for a bisection/threshold-search measurement", False),
+    ("optional", "for a measurement that may legitimately be absent", True),
+    ("cycle_mean", '(kind "tran") for a cycle-aligned mean', False),
+    ("eye", '(kind "tran") for an eye measurement', False),
+    ("step_resolution", '(kind "tran") for a step-resolution report', False),
+    ("settled", '(kind "tran") for a settled-window verdict', False),
+    ("noise", '(kind "noise") for a noise-spectrum measurement', False),
+)
 
 
-def _refuse_stress(spec: dict[str, Any]) -> None:
-    """Issue #4592: a ``stress`` window reads one transient plot's rawfile;
-    no per-step equivalent is implemented."""
-    if spec.get("stress") is not None:
-        raise SimError(
-            f"measurement {spec.get('name')!r}: 'stress' is not supported "
-            "with analysis_steps -- use the scalar analysis "
-            '(kind "tran") for a windowed node-pair voltage stress'
-        )
-
-
-def _refuse_search(spec: dict[str, Any]) -> None:
-    """Issue #4121: a ``search`` bisection loop is emitted into the scalar
-    analysis' deck; search inside a step is not implemented."""
-    if spec.get("search") is not None:
-        raise SimError(
-            f"measurement {spec.get('name')!r}: 'search' is not supported "
-            "with analysis_steps -- use the scalar analysis for a "
-            "bisection/threshold-search measurement"
-        )
-
-
-def _refuse_optional(spec: dict[str, Any]) -> None:
-    """Issue #2925: ``optional: true`` (a value-less measurement grades
-    ``absent`` instead of ``error``) is implemented for the scalar analysis
-    only; a step measurement's no-value paths also carry ``step_failed`` /
-    ``derived_input_unavailable`` causes that must stay errors, so the flag is
-    refused by name rather than silently ignored."""
-    if spec.get("optional") is True:
-        raise SimError(
-            f"measurement {spec.get('name')!r}: 'optional' is not supported "
-            "with analysis_steps -- use the scalar analysis for a measurement "
-            "that may legitimately be absent"
-        )
-
-
-def _refuse_cycle_mean(spec: dict[str, Any]) -> None:
-    """Issue #2947: like ``crossings``, a ``cycle_mean`` reads one transient
-    plot's rawfile and has no per-step equivalent -- refused by name."""
-    if spec.get("cycle_mean") is not None:
-        raise SimError(
-            f"measurement {spec.get('name')!r}: 'cycle_mean' is not supported "
-            "with analysis_steps -- use the scalar analysis "
-            '(kind "tran") for a cycle-aligned mean'
-        )
-
-
-def _refuse_eye(spec: dict[str, Any]) -> None:
-    """Issue #4292: an ``eye`` folds one transient plot's rawfile and has no
-    per-step equivalent -- refused by name."""
-    if spec.get("eye") is not None:
-        raise SimError(
-            f"measurement {spec.get('name')!r}: 'eye' is not supported "
-            "with analysis_steps -- use the scalar analysis "
-            '(kind "tran") for an eye measurement'
-        )
-
-
-def _refuse_noise(spec: dict[str, Any]) -> None:
-    """Issue #2938: a ``noise`` measurement reads one noise analysis'
-    spectrum plot; no per-step equivalent is implemented."""
-    if spec.get("noise") is not None:
-        raise SimError(
-            f"measurement {spec.get('name')!r}: 'noise' is not supported "
-            "with analysis_steps -- use the scalar analysis "
-            '(kind "noise") for a noise-spectrum measurement'
-        )
+def _refuse_unsupported(spec: dict[str, Any]) -> None:
+    """Raise ``SimError`` for the first key in ``_UNSUPPORTED_IN_STEPS`` set
+    on a measurement under ``analysis_steps``."""
+    for key, hint, strict_true in _UNSUPPORTED_IN_STEPS:
+        value = spec.get(key)
+        if (value is True) if strict_true else (value is not None):
+            raise SimError(
+                f"measurement {spec.get('name')!r}: '{key}' is not supported "
+                f"with analysis_steps -- use the scalar analysis {hint}"
+            )
 
 
 def is_steps_analysis(analysis: dict[str, Any]) -> bool:
@@ -411,16 +364,12 @@ def _resolve_arg_refs(
 
 
 def _resolve_step_analysis(analysis: Any, step: str) -> tuple[str, str]:
-    if (
-        not isinstance(analysis, dict)
-        or "kind" not in analysis
-        or "args" not in analysis
-    ):
-        raise SimError(f"step {step!r}: analysis requires 'kind' and 'args'")
-    kind = analysis["kind"]
-    args = analysis["args"]
     from .sim import reject_unsupported_analysis
 
+    analysis = default_op_args(analysis)  # issue #5078
+    if not isinstance(analysis, dict) or not {"kind", "args"} <= analysis.keys():
+        raise SimError(f"step {step!r}: analysis requires 'kind' and 'args'")
+    kind, args = analysis["kind"], analysis["args"]
     reject_unsupported_analysis(kind)
     if not isinstance(kind, str) or kind.lower() not in STEP_ANALYSIS_KINDS:
         raise SimError(
@@ -550,30 +499,17 @@ def _resolve_step_measurements(
             f"step {step['name']!r}: measurements must be an array of objects"
         )
     resolved: list[dict[str, Any]] = []
-    local_names: set[str] = set()
+    # Lower-cased local name -> the name as written, for the siblings already
+    # resolved; `validate_step_measurement_name` refuses every collision a
+    # new name can cause against them (illegal, duplicate, shadowing #5446).
+    local_names: dict[str, str] = {}
     for spec in specs:
         _validate_measurement_form(spec)
-        _refuse_crossings(spec)
-        _refuse_stress(spec)
-        _refuse_search(spec)
-        _refuse_optional(spec)
-        _refuse_cycle_mean(spec)
-        _refuse_eye(spec)
-        _refuse_noise(spec)
+        _refuse_unsupported(spec)
         _check_intermediate(spec, f"step {step['name']!r}")
         local = spec["name"]
-        if not isinstance(local, str) or not _NAME_RE.match(local):
-            raise SimError(
-                f"step {step['name']!r}: measurement name {local!r} must match "
-                "[A-Za-z_][A-Za-z0-9_]* (it is referenced as "
-                f"'{step['name']}.<name>' and becomes an ngspice vector name)"
-            )
-        if local.lower() in local_names:
-            raise SimError(
-                f"step {step['name']!r}: measurement name {local!r} is declared "
-                "more than once (compared case-insensitively)"
-            )
-        local_names.add(local.lower())
+        validate_step_measurement_name(spec, local, local_names, step)
+        local_names[local.lower()] = local
         resolved.append(_flatten_step_measurement(spec, step, index, known))
     return resolved
 
@@ -829,13 +765,7 @@ def _resolve_derived_measurements(
     intermediates: dict[str, list[str]] = {}
     for position, spec in enumerate(specs):
         name = spec["name"]
-        _refuse_crossings(spec)
-        _refuse_stress(spec)
-        _refuse_search(spec)
-        _refuse_optional(spec)
-        _refuse_cycle_mean(spec)
-        _refuse_eye(spec)
-        _refuse_noise(spec)
+        _refuse_unsupported(spec)
         _check_intermediate(spec, "derived")
         if spec.get("spice") is not None:
             raise SimError(

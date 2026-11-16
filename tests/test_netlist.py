@@ -181,6 +181,17 @@ def _recorded_argv(log: Path) -> list[str]:
 # --------------------------------------------------------------------------- #
 
 
+_NULL_RECORD = (
+    '** klt-netlist-inputs: {"pdk_variant": null, "rcfile": null, '
+    '"xschem_version": null}\n'
+)
+
+
+def _written(body: str) -> str:
+    """What a stub-xschem run writes: the inputs record, then the body."""
+    return _NULL_RECORD + body
+
+
 def test_forced_flags_are_always_passed(tmp_path, argv_log):
     """The caller never spells the xschem command line, so a copy-paste that
     omits `-x` (issue #55's silent hang) is not expressible."""
@@ -269,10 +280,10 @@ def test_nonzero_exit_on_success_is_still_success(tmp_path, argv_log):
     assert report["xschem"]["exit_status"] == 1
     # Stated in the payload itself, so a consumer is not left to infer it.
     assert report["xschem"]["exit_status_trusted"] is False
-    assert output.read_text(encoding="utf-8") == _NETLIST_BODY + "\n"
+    assert output.read_text(encoding="utf-8") == _written(_NETLIST_BODY + "\n")
     assert report["netlist"]["path"] == str(output)
     assert report["netlist"]["content_hash"].startswith("sha256:")
-    assert report["netlist"]["lines"] == 4
+    assert report["netlist"]["lines"] == 5  # inputs record + 4 body lines
 
 
 def test_zero_exit_with_no_output_file_is_a_failure(tmp_path, argv_log):
@@ -300,7 +311,7 @@ def test_single_unexpected_filename_is_accepted_and_named(tmp_path, argv_log):
     report = run_netlist(schematic, str(output), xschem_binary=binary)
 
     assert report["status"] == "generated"
-    assert output.read_text(encoding="utf-8") == _NETLIST_BODY + "\n"
+    assert output.read_text(encoding="utf-8") == _written(_NETLIST_BODY + "\n")
 
 
 def test_ambiguous_output_files_fail_rather_than_guess(tmp_path, argv_log):
@@ -472,7 +483,7 @@ def test_check_reports_match_for_an_up_to_date_netlist(tmp_path, argv_log):
     schematic = _write_schematic(tmp_path)
     binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
     output = tmp_path / "block.spice"
-    output.write_text(_NETLIST_BODY + "\n", encoding="utf-8")
+    output.write_text(_written(_NETLIST_BODY + "\n"), encoding="utf-8")
 
     report = run_netlist(schematic, str(output), check=True, xschem_binary=binary)
 
@@ -884,51 +895,6 @@ _TESTBENCH_SHAPED_BODY = (
 )
 
 
-def test_block_mode_uncomments_subckt_and_drops_trailing_end(
-    tmp_path, argv_log, monkeypatch
-):
-    monkeypatch.setenv("NETLIST_BODY", _TESTBENCH_SHAPED_BODY)
-    schematic = _write_schematic(tmp_path)
-    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
-    output = tmp_path / "block.spice"
-
-    report = run_netlist(schematic, str(output), xschem_binary=binary, block=True)
-
-    written = output.read_text(encoding="utf-8")
-    assert written == "* stub netlist\n.subckt block a b\n.something x\n.ends\n"
-    # includable: no trailing .end to terminate an including testbench deck.
-    assert ".end" not in written.splitlines()
-
-    block = report["block"]
-    assert block == {
-        "requested": True,
-        "subckt_uncommented": True,
-        "ends_uncommented": True,
-        "trailing_end_removed": True,
-        "warning": None,
-    }
-
-
-def test_block_mode_rejoins_wrapped_header_continuations(
-    tmp_path, argv_log, monkeypatch
-):
-    body = (
-        "* stub netlist\n**.subckt block a b\n*+ c d\n**+ e f\n.something x\n"
-        "**.ends\n.end"
-    )
-    monkeypatch.setenv("NETLIST_BODY", body)
-    schematic = _write_schematic(tmp_path)
-    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
-    output = tmp_path / "block.spice"
-
-    report = run_netlist(schematic, str(output), xschem_binary=binary, block=True)
-
-    assert output.read_text(encoding="utf-8") == (
-        "* stub netlist\n.subckt block a b\n+ c d\n+ e f\n.something x\n.ends\n"
-    )
-    assert report["block"]["warning"] is None
-
-
 def test_bus_ports_in_subckt_headers_are_space_separated(
     tmp_path, argv_log, monkeypatch
 ):
@@ -975,38 +941,6 @@ def test_check_reports_drift_for_committed_comma_joined_ports(
     report = run_netlist(schematic, str(output), xschem_binary=binary, check=True)
 
     assert report["status"] == "drifted"
-
-
-def test_block_mode_leaves_non_adjacent_continuation_comment_alone(
-    tmp_path, argv_log, monkeypatch
-):
-    body = "* stub netlist\n**.subckt block a b\n.something x\n*+ note\n**.ends\n.end"
-    monkeypatch.setenv("NETLIST_BODY", body)
-    schematic = _write_schematic(tmp_path)
-    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
-    output = tmp_path / "block.spice"
-
-    run_netlist(schematic, str(output), xschem_binary=binary, block=True)
-
-    assert output.read_text(encoding="utf-8") == (
-        "* stub netlist\n.subckt block a b\n.something x\n*+ note\n.ends\n"
-    )
-
-
-def test_without_block_flag_testbench_shape_is_unchanged(
-    tmp_path, argv_log, monkeypatch
-):
-    """Regression: `--block` is off by default, so the raw (commented
-    subckt/ends, trailing .end) testbench export is unaffected."""
-    monkeypatch.setenv("NETLIST_BODY", _TESTBENCH_SHAPED_BODY)
-    schematic = _write_schematic(tmp_path)
-    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
-    output = tmp_path / "block.spice"
-
-    report = run_netlist(schematic, str(output), xschem_binary=binary)
-
-    assert output.read_text(encoding="utf-8") == _TESTBENCH_SHAPED_BODY + "\n"
-    assert "block" not in report
 
 
 def test_block_mode_warns_when_not_testbench_shaped(tmp_path, argv_log, monkeypatch):

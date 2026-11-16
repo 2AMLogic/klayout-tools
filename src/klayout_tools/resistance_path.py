@@ -38,6 +38,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from ._jsonnum import is_int
+
 #: The quantity every result reports, stated machine-readably so a consumer
 #: cannot mistake it for an effective (two-port) resistance.
 QUANTITY = "shortest_series_path_resistance"
@@ -87,7 +89,7 @@ def validate_limits(max_nodes: Any, max_resistors: Any) -> None:
     """Raise :class:`ValueError` unless both caps are positive integers
     (``bool`` is rejected even though it is an ``int`` subclass)."""
     for label, value in (("max_nodes", max_nodes), ("max_resistors", max_resistors)):
-        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        if not is_int(value) or value < 1:
             raise ValueError(f"{label} must be a positive integer (got {value!r})")
 
 

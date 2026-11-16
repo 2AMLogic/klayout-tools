@@ -32,7 +32,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from . import env_provenance
-from ._provenance import sha256_file
+from ._provenance import sha256_file_required
 
 SCHEMA = "evidence-record/1"
 
@@ -112,13 +112,6 @@ def _git(root: str, *args: str) -> str:
             CODE_NOT_GIT,
         )
     return proc.stdout
-
-
-def _sha256_file(path: str) -> str:
-    digest = sha256_file(path)
-    if digest is None:
-        raise FileNotFoundError(path)
-    return digest
 
 
 def _load_json(path: str, what: str) -> Any:
@@ -356,7 +349,7 @@ def write_record(
             "block": block,
             "scope": scope,
             "request_path": request_rel,
-            "request_sha256": _sha256_file(request_path),
+            "request_sha256": sha256_file_required(request_path),
             "subset_reason": subset_reason,
             **pins,
             "supersedes": supersedes_rel,

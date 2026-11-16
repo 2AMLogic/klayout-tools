@@ -8,7 +8,7 @@ This document maps each `klt` verb implementation to its constituent modules, id
 
 This map is **mechanically assisted, hand-verified**:
 
-1. **CLI parser registration** in `src/klayout_tools/cli/parser.py`: each verb's entry point via `set_defaults(func=<verb>_cmd.run)`
+1. **CLI parser registration** in `src/klayout_tools/cli/parser.py` and the per-verb `src/klayout_tools/cli/parsers/<verb>.py` modules: each verb's entry point via `set_defaults(func=<verb>_cmd.run)`
 2. **Import graph analysis**: tracing the `from .. import` chains in each `<verb>_cmd.py` module to find all related modules
 3. **Module docstrings**: extracting the first paragraph from each module's `"""..."""` to document ownership boundaries
 

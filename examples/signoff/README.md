@@ -87,7 +87,11 @@ pins exactly this shape so the example cannot rot.
   `provenance.input.content_hash`. Re-run DRC against a *different* layout
   revision and the pin no longer matches, so the item renders `unmet`
   (`stale_evidence`) instead of quietly claiming a pass against the wrong
-  layout. Pin it whenever you can.
+  layout. Pin it whenever you can. The pin is the hash of the *input* the
+  evidence was produced from (for an attested item, the input-set digest in
+  `provenance.input.content_hash`), never the sha256 of the evidence envelope
+  file itself; a `stale_evidence` item's `detail.hint` and
+  `detail.compared_against` say which.
 - **Item 4 does not pin one**, deliberately — but not because it *can't*.
   `klt lvs` used to populate no `provenance.input` block at all, and this
   file used to say a pinned hash there could only ever render `unmet`. That

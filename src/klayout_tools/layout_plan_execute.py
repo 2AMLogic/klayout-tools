@@ -96,15 +96,12 @@ description alone):
 5. **Open question -- how ``unmapped_netlist_nets[]`` treats a
    deliberately-unrouted supply net**: no ``netlist.ignore_nets[]``-style
    opt-out is added -- Phase B's already-merged schema and validator have no
-   such field, and this phase does not extend the request shape to add one.
-   A net every one of whose touching device terminals falls outside this
-   module's known per-generator terminal map (MOS ``B``/bulk, BJT ``C``/
-   collector -- both conventionally tied to a shared substrate/well tap a
-   ``guard_ring``/``bjt_array`` collector ring already owns, not a
-   per-device port) lands in ``unmapped_netlist_nets[]`` unconditionally,
-   ``VDD``/``VSS``-style supply nets included, per the response field's own
-   "always report the array, never silently drop... let the caller judge it
-   benign" description in the spike.
+   such field. A net every one of whose touching device terminals falls
+   outside this module's per-generator terminal map lands there
+   unconditionally, supply nets included ("always report the array, never
+   silently drop... let the caller judge it benign"). Only BJT ``C`` is
+   still such a terminal; MOS ``B`` was too until #5546 bound it
+   group-level -- see :func:`~klayout_tools.layout_plan_ports.bind_body_nets`.
 6. **No ``klt`` CLI subcommand is added this phase**, mirroring Phase B's
    own decision and for the same reason: :func:`execute_layout_plan`/
    :func:`execute_layout_plan_document` are a complete library surface, and
@@ -125,8 +122,9 @@ description alone):
    primary-plane net too. This module only validates its shape (a positive
    number, mirroring ``width_um``'s own check); :func:`gen_compose.compose`
    re-validates it against the cross-block layer's own deck minimum, and
-   defaults it to that layer's own minimum when omitted. These four are the
-   only keys :data:`_ALLOWED_ROUTING_KEYS` recognises; an unrecognised
+   defaults it to that layer's own minimum when omitted. These four plus
+   ``nets`` (#5094, :mod:`layout_plan_routing`) are the only keys
+   :data:`_ALLOWED_ROUTING_KEYS` recognises; an unrecognised
    ``request.routing`` key is a usage error, mirroring
    ``layout_plan._ALLOWED_PDK_KEYS``/``_ALLOWED_NETLIST_KEYS``. Every other
    request field is untouched -- Phase B's validator already ignores
@@ -179,11 +177,20 @@ import tempfile
 from collections.abc import Callable
 from typing import Any
 
-from . import layout_plan
+from . import layout_plan, layout_plan_ports
+from . import layout_plan_routing as nr
+from ._jsonnum import is_number
 from ._paths import _resolve_relative
 from .gen import GenError, _pdk_family, _resolve_expected_device_class, generate
 from .gen_compose import GenComposeError, _translate_bbox, compose
-from .netlist_digest import build_netlist_digest
+from .layout_plan_fields import ingest_netlist
+from .layout_plan_ports import (
+    apply_gate_contact,
+    device_owned_port_names,
+    extract_raw_params_by_id,
+    port_pins,
+    unrouted_reasons,
+)
 from .pdk import PdkNotFoundError
 
 #: Bumped only on a non-additive (breaking) change to this module's own
@@ -207,6 +214,7 @@ _ALLOWED_ROUTING_KEYS = {
     "width_um",
     "cross_block_layer_role",
     "cross_block_width_um",
+    "nets",
 }
 
 #: Which digest terminal names map onto which generated-port suffix, per
@@ -214,9 +222,9 @@ _ALLOWED_ROUTING_KEYS = {
 #: absent from this table (``guard_ring``, ``bond_pad``, ``resistor_strip``
 #: -- the last has no per-unit port at all, see scope decision 1) has no
 #: per-device port concept for connectivity derivation; a terminal name
-#: absent from a present generator's own sub-dict (MOS ``B``, BJT ``C``) is
-#: a deliberately unmapped terminal, not an oversight -- see scope decision
-#: 5.
+#: absent from a present generator's own sub-dict (MOS ``B``, BJT ``C``) has
+#: no *per-device* port to map onto -- MOS ``B`` is bound group-level
+#: instead (``layout_plan_ports.bind_body_nets``, #5546); see decision 5.
 _TERMINAL_SUFFIXES: dict[str, dict[str, str]] = {
     "mos_array": {"S": "S", "D": "D", "G": "G"},
     "diff_pair": {"S": "S", "D": "D", "G": "G"},
@@ -305,16 +313,12 @@ def _resolve_routing_spec(raw: Any) -> dict[str, Any]:
         raise LayoutPlanExecuteError(
             "request.routing.layer_role must be a non-empty string when given"
         )
-    width_um = raw.get("width_um", _DEFAULT_ROUTING["width_um"])
-    if (
-        isinstance(width_um, bool)
-        or not isinstance(width_um, (int, float))
-        or width_um <= 0
-    ):
-        raise LayoutPlanExecuteError(
-            "request.routing.width_um must be a positive number when given"
-        )
-    resolved = {"layer_role": layer_role, "width_um": float(width_um)}
+    width_um = nr.require_positive_number(
+        raw.get("width_um", _DEFAULT_ROUTING["width_um"]),
+        "request.routing.width_um",
+        LayoutPlanExecuteError,
+    )
+    resolved = {"layer_role": layer_role, "width_um": width_um}
 
     # cross_block_layer_role (#1502): forwarded through unchanged --
     # gen_compose.compose() re-validates its type/non-emptiness itself
@@ -336,17 +340,14 @@ def _resolve_routing_spec(raw: Any) -> dict[str, Any]:
     # own deck minimum and defaults it to that layer's own minimum when
     # omitted, so it need not be given at all to get correct behavior.
     if "cross_block_width_um" in raw:
-        cross_block_width_um = raw["cross_block_width_um"]
-        if (
-            isinstance(cross_block_width_um, bool)
-            or not isinstance(cross_block_width_um, (int, float))
-            or cross_block_width_um <= 0
-        ):
-            raise LayoutPlanExecuteError(
-                "request.routing.cross_block_width_um must be a positive "
-                "number when given"
-            )
-        resolved["cross_block_width_um"] = float(cross_block_width_um)
+        resolved["cross_block_width_um"] = nr.require_positive_number(
+            raw["cross_block_width_um"],
+            "request.routing.cross_block_width_um",
+            LayoutPlanExecuteError,
+        )
+
+    if "nets" in raw:
+        resolved["nets"] = nr.resolve_net_routing(raw["nets"], LayoutPlanExecuteError)
 
     return resolved
 
@@ -373,48 +374,23 @@ def _netlist_derived_size_params(
     resolved: dict[str, float] = {}
     for digest_key, gen_param in targets.items():
         value = device_params.get(digest_key)
-        is_number = isinstance(value, (int, float)) and not isinstance(value, bool)
-        if is_number and value > 0:
+        value_is_number = is_number(value)
+        if value_is_number and value > 0:
             resolved[gen_param] = float(value)
     return resolved
-
-
-def _extract_raw_params_by_id(request: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """``{device_groups[].id: device_groups[].params}`` read from the
-    **original** request, not the validated response.
-
-    :func:`klayout_tools.layout_plan.validate_layout_plan`'s own response
-    deliberately echoes only the fields it validates in detail (``id``,
-    ``generator``, ``topology``, ``devices``, ``encloses``) -- ``params`` is
-    checked for JSON-object shape only and not echoed back, so this module
-    reads it from ``request`` directly (already known well-typed, since it
-    passed Phase B's own validation) rather than trying to smuggle it
-    through the validated response.
-    """
-    raw_groups = request.get("device_groups")
-    if not isinstance(raw_groups, list):
-        return {}
-    result: dict[str, dict[str, Any]] = {}
-    for raw_group in raw_groups:
-        if not isinstance(raw_group, dict):
-            continue
-        group_id = raw_group.get("id")
-        params = raw_group.get("params")
-        if isinstance(group_id, str) and isinstance(params, dict):
-            result[group_id] = params
-    return result
 
 
 def _resolve_group_params(
     group: dict[str, Any],
     digest_devices_by_key: dict[tuple[str, str], dict[str, Any]],
     overrides: dict[str, Any],
+    digest: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     """Resolve one ``device_groups[]`` entry's ``klt gen`` ``params`` --
     netlist-derived sizing first (from every device the group declares, per
     the module docstring's scope decision 1), then ``overrides`` (the
     group's own ``params``, read from the original request -- see
-    :func:`_extract_raw_params_by_id`) layered on top, every divergence
+    :func:`extract_raw_params_by_id`) layered on top, every divergence
     between the two surfaced as a ``warnings[]`` entry (never silent, per
     the spike's own precedence rule).
     """
@@ -439,7 +415,11 @@ def _resolve_group_params(
                     f"resolved {derived[gen_param]}) -- using {derived[gen_param]}"
                 )
 
-    resolved = dict(derived)
+    resolved: dict[str, Any] = dict(derived)
+    # gate_contact (#5093): derived from gate-net fan-out; overrides win below.
+    warnings.extend(
+        apply_gate_contact(resolved, group, digest, digest_devices_by_key, overrides)
+    )
     # `device_groups[].topology` is a top-level plan field (Phase B's own
     # matching-pattern concept, already validated against the named
     # generator's own support table) but only `mos_array`/`bjt_array` accept
@@ -612,32 +592,20 @@ def _device_class_mismatch_warnings(
     return mismatch_warnings
 
 
-def _device_owned_port_names(ports: list[dict[str, Any]], suffix: str) -> list[str]:
-    """Every ``ports[]`` entry whose name ends with ``_<suffix>``, in the
-    order ``generate()`` reported them -- see the module docstring's scope
-    decision 3 for why this is generator-agnostic (no hardcoded name
-    prefix) and why it degrades gracefully (rather than mis-binding) for a
-    port-naming shape it does not expect (e.g. ``mos_array``'s
-    ``finger_topology: "series"`` mode).
-    """
-    marker = f"_{suffix}"
-    return [
-        port["name"]
-        for port in ports
-        if isinstance(port, dict)
-        and isinstance(port.get("name"), str)
-        and port["name"].endswith(marker)
-    ]
-
-
 def _build_connectivity(
     device_groups: list[dict[str, Any]],
     digest: dict[str, Any],
     generated: dict[str, dict[str, Any]],
-) -> tuple[list[dict[str, Any]], list[str], list[str]]:
+) -> tuple[list[dict[str, Any]], list[str], list[str], list[dict[str, str]]]:
     """Derive ``gen_compose``-shaped ``connectivity[]`` from the netlist
     digest's own device-to-net map (the module docstring's core job) --
-    returns ``(connectivity, unmapped_netlist_nets, warnings)``.
+    returns ``(connectivity, unmapped_netlist_nets, warnings, pins)``.
+
+    ``pins`` is the ``gen_compose`` ``pins[]`` list promoting each subckt
+    port net (``is_pin``) to a labelled top-level pin on its first resolved
+    device port (#4966), so the GDS carries a label per netlist port for
+    ``klt lvs``; a port net with no resolved device port gets a
+    ``warnings[]`` entry and no label.
 
     A net with two resolved pins becomes an ordinary two-pin
     ``connectivity[]`` entry; a net with three or more becomes a bundle
@@ -651,9 +619,8 @@ def _build_connectivity(
         (d["name"], d["device_class"]): d for d in digest["devices"]
     }
     warnings: list[str] = []
-
     # Per group, per terminal suffix: the ordered candidate port names
-    # (see _device_owned_port_names). Built once per group up front.
+    # (see device_owned_port_names). Built once per group up front.
     candidates_by_group: dict[str, dict[str, list[str]]] = {}
     for group in device_groups:
         suffix_map = _TERMINAL_SUFFIXES.get(group["generator"])
@@ -668,7 +635,7 @@ def _build_connectivity(
             continue
         ports = generated[group["id"]].get("ports") or []
         candidates_by_group[group["id"]] = {
-            suffix: _device_owned_port_names(ports, suffix)
+            suffix: device_owned_port_names(ports, suffix)
             for suffix in set(suffix_map.values())
         }
 
@@ -714,6 +681,10 @@ def _build_connectivity(
                     {"block": group["id"], "port": port_name}
                 )
 
+    layout_plan_ports.bind_ring_nets(device_groups, generated, net_pins, warnings)
+    layout_plan_ports.bind_body_nets(
+        device_groups, digest_devices_by_key, generated, net_pins, warnings
+    )
     connectivity: list[dict[str, Any]] = []
     for net in digest["nets"]:
         pins = net_pins.get(net["name"], [])
@@ -724,7 +695,10 @@ def _build_connectivity(
         net["name"] for net in digest["nets"] if not net_pins.get(net["name"])
     )
 
-    return connectivity, unmapped_netlist_nets, warnings
+    pins, pin_warnings = port_pins(digest, net_pins)
+    warnings.extend(pin_warnings)
+
+    return connectivity, unmapped_netlist_nets, warnings, pins
 
 
 def _abutment_target_offset(
@@ -791,7 +765,7 @@ def _group_min_spacing_um(generator_report: dict[str, Any]) -> float:
     if not isinstance(drc_hints, dict):
         return 0.0
     spacing = drc_hints.get("min_spacing_um")
-    if isinstance(spacing, bool) or not isinstance(spacing, (int, float)):
+    if not is_number(spacing):
         return 0.0
     return max(0.0, float(spacing))
 
@@ -1075,7 +1049,7 @@ def execute_layout_plan(
     pdk_spec = validated["pdk"]
 
     warnings: list[str] = []
-    raw_params_by_id = _extract_raw_params_by_id(request)
+    raw_params_by_id = extract_raw_params_by_id(request)
 
     def _run(work_directory: str) -> dict[str, Any]:
         digest_devices_by_key = {
@@ -1086,7 +1060,10 @@ def execute_layout_plan(
         resolved_params_by_id: dict[str, dict[str, Any]] = {}
         for group in device_groups:
             params, param_warnings = _resolve_group_params(
-                group, digest_devices_by_key, raw_params_by_id.get(group["id"], {})
+                group,
+                digest_devices_by_key,
+                raw_params_by_id.get(group["id"], {}),
+                digest,
             )
             warnings.extend(param_warnings)
             resolved_params_by_id[group["id"]] = params
@@ -1136,10 +1113,13 @@ def execute_layout_plan(
         )
         warnings.extend(placement_warnings)
 
-        connectivity, unmapped_netlist_nets, connectivity_warnings = (
+        connectivity, unmapped_netlist_nets, connectivity_warnings, port_pins = (
             _build_connectivity(device_groups, digest, generated)
         )
         warnings.extend(connectivity_warnings)
+        nets = routing_spec.pop("nets", {})
+        net_warnings = nr.apply_net_routing(connectivity, nets, LayoutPlanExecuteError)
+        warnings.extend(net_warnings)
 
         order = [group["id"] for group in device_groups]
         compose_request: dict[str, Any] = {
@@ -1158,6 +1138,7 @@ def execute_layout_plan(
                 "origins_um": offsets_um,
             },
             "connectivity": connectivity,
+            "pins": port_pins,
             "options": {
                 "cell_name": options.get("cell_name") or "layout_plan_0",
                 "output": options.get("output"),
@@ -1194,6 +1175,7 @@ def execute_layout_plan(
             "nets": composed["nets"],
             "pins": composed["pins"],
             "unrouted_nets": composed["unrouted_nets"],
+            "unrouted_reasons": unrouted_reasons(composed),
             "unmapped_netlist_nets": unmapped_netlist_nets,
             "drc_hints": composed["drc_hints"],
             "warnings": [*warnings, *composed["warnings"]],
@@ -1214,7 +1196,7 @@ def execute_layout_plan_document(
     work_dir: str | None = None,
 ) -> dict[str, Any]:
     """:func:`execute_layout_plan`, but ingesting ``request.netlist`` itself
-    (via :func:`klayout_tools.netlist_digest.build_netlist_digest`) rather
+    (via :func:`klayout_tools.layout_plan_fields.ingest_netlist`) rather
     than requiring the caller to have already built a digest -- mirrors
     :func:`klayout_tools.layout_plan.validate_layout_plan_document`'s own
     convenience-wrapper shape.
@@ -1234,20 +1216,7 @@ def execute_layout_plan_document(
     netlist_spec = layout_plan._parse_netlist(request["netlist"])
     resolved_path = _resolve_relative(netlist_spec["path"], request_dir or os.getcwd())
 
-    from .lvs import LvsError
-
-    try:
-        digest = build_netlist_digest(
-            resolved_path,
-            top=netlist_spec["top"],
-            form=netlist_spec["form"],
-            deck=netlist_spec["deck"],
-            device_map=netlist_spec["device_map"],
-        )
-    except LvsError as exc:
-        raise layout_plan.LayoutPlanError(
-            f"request.netlist could not be ingested: {exc}"
-        ) from exc
+    digest = ingest_netlist(netlist_spec, resolved_path)
 
     return execute_layout_plan(
         request, digest, request_dir=request_dir, work_dir=work_dir

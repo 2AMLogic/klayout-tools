@@ -64,6 +64,19 @@ acceptance data keyed on `category_counts`), key that pin off the shared
 fields below — not `klt --version` — until `klt` reaches `1.0` and this
 caveat is retired.
 
+Growing value sets are not the only pre-1.0 drift this caveat covers: the
+**count under an already-shipped key can change what it counts**. A
+category's own rules can consolidate or split the entries one event emits —
+e.g. issue #4729 (`v0.9.0`) folded the geometry-derived `as`/`ad`/`ps`/`pd`
+parameter differences into the same `device.property` entry as the primary
+`w_um` difference they duplicated, so a width-only difference that
+reported `category_counts["device.property"] == 5` before that release
+reports `1` after, with `status` unchanged. Under this repo's policy such a
+change is additive: it earns no `schema_version` bump, and it is recorded in
+`CHANGELOG.md`. A caller comparing `category_counts` (or `error_count`)
+values across versions therefore needs the same `provenance.deck` /
+`provenance.klayout_version` pin described above.
+
 The same rule applies on the **request** side for the commands that take a
 JSON request document (`klt lvs`, `klt place-and-route`, `klt synthesize`,
 …): a new accepted value for an already-shipped request enum — e.g. `klt
@@ -117,13 +130,17 @@ No `schema_version` bump. See [`docs/cli/sim.md`](cli/sim.md)'s
 `measurements[].search` (issue #4121) is a scalar form like `snm`: `value` stays
 a number (the midpoint of the converged bisection bracket) and is graded by
 `limits`, `monte_carlo` statistics and `klt yield` unchanged. The response
-entry gains one optional `search` object (`source`, `direction`, `iterations`,
+entry gains one optional `search` object (`source` or `param`, `direction`, `iterations`,
 `lo`, `hi`, `converged`), present on a converged entry and, with
 `converged: false`, on an errored one that ran probes; absent otherwise. A
 failure is `status: "error"` with `value: null` and a `code: "measurement"`
 diagnostic led by a `[search_*]` token. Additive; no `schema_version` bump. See
 [`docs/cli/sim.md`](cli/sim.md)'s "Bisection / threshold search
 (`measurements[].search`)".
+
+`analysis.args` is optional for `analysis.kind: "op"` (and an `analysis_steps[]`
+`op` step; issue #5078) and defaults to `""`; every other kind still requires it.
+Additive; no `schema_version` bump.
 
 `analysis.kind: "twoport"` (issue #3338) is a new accepted value of the
 already-shipped `klt sim` `analysis.kind`, with its own `ports`/`freq` fields.
@@ -163,6 +180,20 @@ the message. No `schema_version` bump. See [`docs/cli/sim.md`](cli/sim.md)'s
 the runner publishes one. Additive and absent otherwise; the existing fields
 and `schema_version` are unchanged. See [`docs/cli/sim.md`](cli/sim.md)'s
 "Asynchronous submit and status".
+
+`klt sim` on a **sharded** `batch` run (issue #5522) adds two top-level
+roll-ups to `environment.remote` beside the existing `fleet[]` array:
+`job_ids` (every non-`null` shard's `job_id`, in shard order) and a worst-of
+`runner_compatibility` (`mismatch` > `unknown` > `match`, so a lost or
+unknown shard never reads as clean). Additive, and narrower than the
+opt-in-flag rule above: they appear only where `fleet[]` already does, so an
+unsplit single-job report is byte-identical, the `fleet[]` entries are
+unchanged, and the SSH `remote` backend gets neither. No `schema_version`
+bump. The motivation is a reader, not a writer: splitting moved job identity
+and the runner-skew check inside `fleet[]`, where a consumer written against
+the single-job shape read `None` rather than failing -- and `None` is
+indistinguishable from `"match"` in the obvious skew check. See
+[`docs/cli/sim.md`](cli/sim.md)'s "Fleet sharding".
 
 `measurements[].on_unreached` (issue #3108) is the same shape: an optional
 request field (`"error"` default, `"null"` opt-in) whose default reproduces
@@ -287,6 +318,15 @@ reports `"unconstrained"` alongside it, and neither command's
 `schema_version` moved. See `docs/cli/place-and-route.md`'s "I/O timing
 constraints ... and `timing_status`" section for the full derivation.
 
+`klt gen res_array` additionally reports `drc_hints.length_snap` (issue #4666;
+additive, absent unless a poly-body `length_um` was changed): `{requested_um,
+realised_um, grid_um, resistance_delta_pct, reasons}`, where `reasons` is a
+subset of `snapped_to_grid` / `lengthened_to_floor` (the latter only with
+`params.short_length="lengthen"`). `realised_um` is the length actually drawn,
+for comparing against the schematic/netlist `L`; `resistance_delta_pct` is
+`(realised / requested - 1) * 100`. `params.snap=false` omits it and keeps the
+#4203 warnings. No `schema_version` bump.
+
 **Disambiguating an overloaded numeric field follows the same rule — add the
 sibling, never retype or redefine the original.** `klt gen`'s
 `drc_hints.min_spacing_um` carries two different quantities depending on the
@@ -367,7 +407,10 @@ each value `{count, reason}`. Issue #2885 added the
 only modpaths Icarus discards at elaboration) and, on that class's entry
 only, an `arcs` list (`{celltype, from, to}` per distinct dropped arc) so a
 caller can see which arcs ran with no module-path delay. Every other class's
-entry is byte-identical to before (no `arcs` key), and a run with no such
+entry is byte-identical to before (no `arcs` key). Issue #5296 added the
+`iopath_cond_expression` class (`COND`-wrapped `IOPATH` entries whose
+condition is an operator expression Icarus rejects), which carries `arcs` the
+same way. A run with no such
 arc never carries the class, so **no `schema_version` bump**. A consumer
 must keep treating `dropped` as an open map and read `arcs` as optional. See
 `docs/cli/functional-verification.md`'s "SDF back-annotation" section.
@@ -539,13 +582,12 @@ and [#2124](https://github.com/2AMLogic/klayout-tools/issues/2124).
 
 Verbs whose verdict depends on the exact tool build, PDK release, and rule
 deck — currently `drc`, `lvs`, `extract`, `sim`, `size`, `precheck`, `erc`,
-`power`, `gen`, and `gen-compose` — emit a shared top-level `provenance`
-block so a
-"clean"/"pass"/"match" result is auditable and reproducible later. Two runs
-made against different deck revisions or PDK releases are otherwise
-indistinguishable in the output, so a signoff claim can't be checked or
-reproduced. This block is **additive** (see above): adopting it required no
-`schema_version` bump on any verb.
+`power`, `economy`, `ring-check`, `gen`, `gen-compose`, and `array-check` — emit a
+shared top-level `provenance` block so a "clean"/"pass"/"match" result is
+auditable and reproducible later. Two runs made against different deck
+revisions or PDK releases are otherwise indistinguishable in the output, so a
+signoff claim can't be checked or reproduced. This block is **additive** (see
+above): adopting it required no `schema_version` bump on any verb.
 
 **Build drift in `klt signoff` (issue #4223).** `klt signoff` compares each
 cited check's `provenance.klt_version` with the running build and reports an
@@ -568,8 +610,18 @@ environment" for the field names and limits.
 Under `options.stage_model_inputs` the worker's `pdk.stamp_*` still describes
 the image tree; `pdk.stamp_scope` (`image` / `executed`) says so, and
 `pdk_stamp_comparison` gains `basis: "staged_model_inputs"` (plus optional
-`client_stamp`, `differing`) comparing the staged file digests. Additive
-fields only; no `schema_version` bump (issue #4020).
+`client_stamp`, `differing`) comparing the staged file digests. A caller that
+can name the revision behind those staged models sets `options.pdk_revision`
+and gets it back as `environment.pdk_revision_asserted` (`{value, scope:
+"caller-asserted"}`, issue #5325) -- a *claim*, kept out of the
+worker-observed `worker_environment.pdk` so the two are never confused;
+`cli/sim.md`'s option and `environment` tables are the field-level record.
+Additive fields only; no `schema_version` bump (issue #4020).
+
+`environment.remote` (and each `fleet[]` member) also gains the additive
+`runner_models_lib_sha256` (string or `null`) and `models_lib_comparison`
+(`status` `match` / `mismatch` / `not_comparable`); no `schema_version` bump
+(issue #5321).
 
 **No bucket in batch reports (issue #3777).** `environment.remote` (and each
 `fleet[]` member) no longer carries `bucket` on any batch verb. The bucket name
@@ -710,6 +762,42 @@ when `"geometry"`; unknown values are `unanchored_evidence`); `local_only`
 were not run. See
 [`docs/cli/signoff.md`](cli/signoff.md)'s "Items 1 and 2: attesting that
 the artifact was regenerated".
+
+Issue #5460 adds an optional `check` object to a `drift[]` entry of the
+`klt signoff --attest --check` response, naming the `attestation.checks[]`
+entry the entry is about: its `role`, plus whichever identity keys that check
+kind carries — `path` (a `present` file check), `target` / `name` /
+`testbench` (a `command` or `recorded_hash` check), `row` (an item-8 citation
+check), `corner` + `metric` (an item-8 metric check, one per corner ×
+metric). A check with no identity beyond its role — item 9's `pdk` / `tools`
+pins, a top-level `cold_start` — gets `{"role": …}`. **Additive; no
+`schema_version` bump**: `field` stays the dotted positional pointer
+(`attestation.checks.17.content_hash`) it has always been, and `committed` /
+`fresh` are untouched, so a consumer that never reads `check` sees the bytes
+it saw before. The key is **absent** on an entry that names no single check —
+a whole-list `attestation.checks` entry (the index-by-index diff only applies
+when both lists have the same length, so an inventory that *gained or lost* a
+file still yields one whole-list entry), a `status` entry, anything outside
+`attestation.checks`, and every `drift[]` entry the other `--check` verbs
+produce. `--format text` renders it as a bracketed label after the pointer
+(`attestation.checks.17.content_hash  [testbench sim/bin/sim_common.py]:`) so
+a CI log names the file that moved without a second lookup — the index alone
+is not even stable, since file-presence checks are sorted by path. See
+[`docs/cli/signoff.md`](cli/signoff.md)'s "CI usage: `--check`".
+
+Issue #5463 adds two more additive, optional fields on the same principle (no
+`schema_version` bump; absent they change nothing): `documented_argv` on an
+item-9 `cold_start` in an attestation inventory — the full invocation that
+reproduces a bench whose declared `argv` only validates it, recorded and never
+executed — and, on the emitted `attestation.checks[]` entry for such a command,
+`reproduces: "validates"` plus the `documented_argv` verbatim. A cold start
+that does not declare it emits the entry it always did, so committed envelopes
+show no `--attest --check` drift, and item 9's `status` and T1 grade are
+unchanged either way. The two fields also appear on the matching
+`skipped_checks[]` entry, taken from the current inventory rather than the
+committed envelope. The key is refused (exit `1`) on any non-item-9 command.
+See [`docs/cli/signoff.md`](cli/signoff.md)'s "A cold start that only
+validates its bench".
 
 `klt erc` since issue #2183 also carries a second verb-local key,
 `provenance.devices`: one entry per `devices[]` spec declaration (`{name,
@@ -914,7 +1002,7 @@ stability statement, concrete precedents, and drift-detection guidance, and
     provenance for any other install is byte-identical to before. `version`
     stays `fetched:<tag>`. Like `version`, excluded from `--rerun` drift
     comparison. Additive; no `schema_version` bump. The fleet-bundle
-    `.pdk-store.json` is written outside this repo.
+    `.pdk-store.json` is read, never written, here (issue #5318).
   - `version` (issue #3070) is a self-describing stamp, or `null` when no
     revision can be read mechanically (never guessed): an open_pdks `SOURCES`
     file (the lines joined with `"; "`, unchanged), else `fetched:<marker>`
@@ -923,7 +1011,9 @@ stability statement, concrete precedents, and drift-detection guidance, and
     `-dirty` suffix when the work tree has uncommitted changes — when the
     variant dir or its parent *is* a git work tree root. A tree nested inside
     an unrelated checkout (e.g. klt's own) never reports that checkout's
-    `HEAD`; a missing or failing `git` yields `null`.
+    `HEAD`; a missing or failing `git` yields `null`. Last, a bundle's
+    `.pdk-store.json` string `version` (one level above the real variant dir)
+    gives `store:<version>`; absent/malformed yields `null`.
   - `linked_trees` (issue #3070) — present **only** when the model library the
     run resolved (`provenance.deck`) realpath-resolves into a *different* PDK
     variant tree than `name` (a cross-variant symlink): a list of
@@ -1250,6 +1340,60 @@ install without any `klt`-specific flag — see
 `docs/design/klayout-engine-version-pin.md` for why this, rather than a new
 override mechanism, is the documented fix.
 
+## Stream-stability contract: layout stream bytes are not stable across klt versions
+
+Everything above contracts on JSON *report* payloads. The **layout streams**
+(`GDS`/`OASIS`) that the write-side verbs produce are contracted separately,
+and the contract is: **`klt` does not guarantee that a generated stream's
+bytes are stable across `klt` versions.** The drawn geometry is meant to be
+stable — every cross-version divergence on record is a reordering or a
+bookkeeping change, not a geometry change — but *record order within a cell*
+and the presence of non-geometry structures are KLayout-writer
+implementation details that an upgrade may change.
+
+Worked instance: #5499 (commit `7d1a262fb`, released in
+[`CHANGELOG.md`](../CHANGELOG.md)'s `## 0.9.2 (2026-11-14)` section) pinned
+`gen`'s layer table to a sorted order and stopped `write_layout()` from
+emitting the `$$$CONTEXT_INFO$$$` structure. Streams written before and after
+that commit are geometrically identical (zero XOR area on every layer) yet
+differ byte-for-byte, so a consumer gate that regenerated a committed stream
+and byte-compared it went red for a tool-churn reason indistinguishable from
+a real generator regression.
+
+**A raw byte hash (`sha256sum`, or `provenance.input.content_hash`) or a
+`cmp` against a committed stream is therefore not a supported
+reproducibility gate across a `klt` upgrade.** Within one pinned `klt` build
+bytes *are* deterministic — stream write timestamps are suppressed — which is
+what this repo's own within-version drift guard
+(`tests/test_gen.py::test_dogbone_terminal_example_regenerates_byte_identical`)
+relies on: a byte compare pins record order, which a geometry compare cannot
+see. Across an upgrade, gate on one of the two supported
+order-insensitive comparisons instead:
+
+- **`klt diff a.gds b.gds`** ([`docs/cli/diff.md`](cli/diff.md)) — exit `0`/`3`
+  answers "same layout?", ignoring stream timestamps and record order within
+  a cell; equal `canonical_hash` with `stream_identical: false` is the
+  precise "bytes reordered, layout unchanged" verdict. Two known limits, so
+  the gate is not oversold: `klt diff` deliberately never ignores **cell
+  names**, so a release that renames an emitted inner cell reports
+  `equivalent: false` even with identical drawn geometry (open #5729; the
+  live instance is #5627); and `canonical_hash` is this verb's own
+  normalization — **not** interchangeable with the digest below (issue
+  #5551), meaningful only against another `canonical_hash`.
+- **`klt stats --format json | jq -r .geometry_digest`**
+  ([`docs/cli/stats.md`](cli/stats.md) → "Geometry digest") — the
+  `geometry_digest` field `klt stats` reports is a SHA-256 over the stream's
+  **decoded geometry** that never reads the write timestamp, record order
+  within a cell, cell-table indices or the stream format, and is the value
+  `klt signoff --attest 2 --hash-kind geometry` is graded against. (Its
+  computation costs runtime; #5583 proposes gating it behind a flag — phrase
+  your gate around the field, which survives either way.)
+
+Emission-affecting changes are called out in `CHANGELOG.md` as a practice,
+and the #5499 entry above is the model — mechanism, every affected verb,
+regenerated goldens — so a consumer pinning a version can see when an
+upgrade will invalidate committed streams before taking it.
+
 ## Declared metric namespace (`metrics` block, issue #247)
 
 Every verb's numeric fields are named ad hoc today (`violation_count`,
@@ -1388,27 +1532,28 @@ which reads the input field only (`signoff.py`'s `_INPUT_ARTIFACT_FIELDS`).
 | `characterize` | `cell.netlist`, `cells[].cell.netlist` | 1 | #2502 (`cells[]` #2503) |
 | `drc` | `file` (the hashed input layout; both engines) | 3 | #2659 |
 | `extract` | `file` (the hashed input layout; both response builders) | 4 | #2659 |
-| `lvs` | `layout` (the hashed layout side — **not** `reference`) | 2 | #2659 |
+| `lvs` | `layout` (the hashed layout side, `schema_version` 2, #2659); `reference` (the resolved reference netlist, `schema_version` 3, #4984; the `klayout-runset` engine keeps both as plain strings) | 3 | #2659, #4984 |
 | `erc` | `file` (the hashed input layout; `spec` stays a plain string) | 2 | #2703 |
 | `lef-abstract` | `file` (the hashed input layout; `socket` and `output` stay plain strings) | 2 | #2703 |
 | `place-and-route` | `netlist` — the input netlist `provenance.input.content_hash` pins (additive, no bump) | 1 | #3751 |
 | `sta` | `def_path`, `verilog_path`, `spef_path` (`null` when the request does not use that input) | 2 | #2879 (moved from the plain-string table; schema-1 evidence carries absolute strings) |
 | `sta` | `sdf` / `corners[].sdf` — a written output: the envelope plus `content_hash` (`null` unless `request.sdf: true`; additive, no bump) | 2 | #2886 |
-| `functional-verification` | `environment.{results_xml,test_log,build_log}`, `environment.initial_state.runs[].results_xml`, `mutation_testing.results[].log_path` (`{path: null, scope: "absent"}` when there is none, e.g. `results_xml` on the Verilog-bench path; `--format text` still prints the real paths) | 2 | #4279 (moved from the plain-string table; schema-1 evidence carries absolute strings) |
+| `functional-verification` | `environment.{results_xml,test_log,build_log}`, `environment.initial_state.runs[].results_xml`, `mutation_testing.results[].log_path` (`{path: null, scope: "absent"}` when there is none, e.g. `results_xml` on the Verilog-bench path; `--format text` still prints the real paths). The `environment.{results_xml,test_log,build_log}` and `initial_state.runs[].results_xml` envelopes also carry an additive `sha256` (`sha256:<hex>` of the file as written, `null` when it was not produced, #4931) | 2 | #4279 (moved from the plain-string table; schema-1 evidence carries absolute strings) |
+| `array-check` | `file` (the hashed input layout) | 2 | #5788 |
 
 **Plain-string fields** — intentionally unchanged:
 
 | Command | Field(s) | `SCHEMA_VERSION` |
 |---|---|---|
-| `place-and-route` | `def_path`, `unrouted_def_path`, `gds_path`, `verilog_path` | 1 |
+| `place-and-route` | `def_path`, `unrouted_def_path`, `gds_path`, `verilog_path` (plain strings by default; a request with `portable_paths: true` rewrites these and the other path fields to `{path, scope}` / `$PDK_ROOT/...` so the report is committable, issue #3820 — see `cli/place-and-route.md` → Response) | 1 |
 | `place-and-route` (nested `spef_sta` block) | `spef_path`, `sdf_path` | (parent's `SCHEMA_VERSION` = 1) |
 | `extract` | `netlist_path`, `spef_path`, `abstracted_cells[].lef_path` | 4 |
-| `lvs` | `reference` (pinned by `environment.reference_sha256`, not `provenance.input` — see issue #2659 above) | 2 |
 | `equiv` | `artifacts.{script_path,netlist_path,log_path}`, `artifacts.stage2_{script_path,log_path}` | 1 |
 | `gen` | `gds_path` | 1 |
 | `gen-compose` | `gds_path` (top-level and per-block) | 1 |
 | `draw` | `gds_path` | 1 |
 | `layout-plan-execute` | `gds_path` | 1 |
+| `layout-plan-check` | `gds_path` | 1 |
 | `lef-abstract` | `output`, `socket` | 2 |
 | `arith-gen` | `verilog_path`, `reference_path`, `testbench_path`, `techmap_path`, `equiv_request_path`, `output_dir` | 1 |
 | `functional-verification` | `info_path`, `options.trace.path` | 2 (`log_path` moved to the envelope table) |
@@ -1505,7 +1650,12 @@ hard-code names from observation. The lists are also importable constants in
 `EXTRACT_PATH_ONLY_PATHS`, `PATH_ONLY_KEYS_BY_VERB`) with a helper
 `strip_path_only_keys(report, verb)`; a test fails if a path-bearing key is
 added without being registered. Paths use dotted notation, `*` standing for
-any list index.
+any list index. The wildcard is meaningful only on this canonicalization
+side: drift exclusion in `--rerun`/`--check` verdicts
+(`diff_verdict_fields(exclude=...)`) matches by exact path, so a `*` entry
+in an `exclude` set is rejected with a `ValueError` rather than silently
+ignored (issue #5586) — a per-list-entry exclusion belongs in a
+`strip_path_patterns` set passed via `committed_for_diff`/`fresh_for_diff`.
 
 | Verb | Key | Meaning |
 |---|---|---|
@@ -1528,9 +1678,35 @@ is unchanged: these fields are still emitted as before (no `schema_version`
 change). A `--path-root` option that records them relative to a caller-given
 root is tracked separately.
 
+## Run-specific fields (issue #5182)
+
+Some envelope fields describe the run or the machine, not the layout/input.
+A consumer that commits an envelope as evidence and compares it with a fresh
+run should drop these before comparing; `--check --rerun` already does
+(`_report_verify.VOLATILE_PROVENANCE_PATHS` is the single source of truth, and
+a test keeps this table equal to it). Dotted paths:
+
+<!-- run-specific-fields:begin -->
+| Run-specific path | Varies with |
+| ----------------- | ----------- |
+| `timing` | wall-clock of this run (issue #3181) |
+| `provenance.klt_version` | tool build |
+| `provenance.klt_git_commit` | tool build (issue #4412) |
+| `provenance.klt_reinstall_spec` | tool build (issue #4412) |
+| `provenance.klayout_version` | KLayout build |
+| `provenance.pdk.version` | PDK release stamp |
+| `provenance.pdk.commit` | PDK upstream commit (issue #3786) |
+| `provenance.pdk.linked_trees` | host PDK install layout |
+| `provenance.pdk.ambiguous_sources` | other PDK roots on this machine (issue #2564) |
+<!-- run-specific-fields:end -->
+
+No field is added or removed by this list; `schema_version` is unchanged.
+Verb-specific extras (e.g. `engine_version` for the flow verbs) are
+documented with their verb.
+
 ## Verifying committed evidence: `--check` / `--rerun`
 
-Seven verbs let a consumer verify that a previously committed `--format json`
+Eight verbs let a consumer verify that a previously committed `--format json`
 report still reproduces, built on one shared implementation
 (`src/klayout_tools/_report_verify.py`):
 
@@ -1543,8 +1719,20 @@ report still reproduces, built on one shared implementation
 | `place-and-route` | `klt place-and-route REQUEST --check REPORT [--rerun]` | #2224 |
 | `signoff` | `klt signoff --manifest\|--fleet M --check REPORT` | #2249 |
 | `equiv` | `klt equiv REQUEST --check REPORT [--rerun]` | #2280 |
+| `erc` | `klt erc --check REPORT [--rerun]` | #3060 |
 
-All six share one contract:
+**Seven of those eight also take `--rerun`** — every verb in the table except
+`signoff`, which is in it as a `--check`-only verb because re-grading a
+manifest *is* the whole verification (the `klt signoff` bullet below). So a
+consumer asking "does my verb have a regenerate-and-diff mode?" reads yes for
+`drc`, `lvs`, `extract`, `synthesize`, `place-and-route`, `equiv` and `erc`,
+and no for `signoff`. A boolean `--check` elsewhere in the CLI is a different
+mechanism and is deliberately absent above: `klt netlist --check` diffs a
+regenerated netlist against the committed artifact at `-o`, and `klt evidence
+render --check` is a doc-staleness flag — neither verifies a committed
+`--format json` report.
+
+All eight share one contract:
 
 - **Cheap mode (`--check`)** re-derives the recorded input/deck content hashes
   and compares them. No engine runs.
@@ -1639,8 +1827,8 @@ surface, **not** by `diff`-ing a committed report against a fresh render. See
 [`cli/signoff.md`](cli/signoff.md)'s "`build` describes the *install*, not
 only the commit".
 
-**The flow verbs take the request back.** `drc`/`lvs`/`extract` echo their own
-inputs into the report, so `--check REPORT` is self-sufficient. A
+**The flow verbs take the request back.** `drc`/`lvs`/`extract`/`erc` echo
+their own inputs into the report, so `--check REPORT` is self-sufficient. A
 `synthesize`/`place-and-route`/`equiv` report echoes *outputs* and
 provenance hashes but never the request document or the source paths it
 resolved — so those three keep their positional `REQUEST` argument
@@ -1663,6 +1851,7 @@ Per-verb detail:
 [`cli/synthesize.md`](cli/synthesize.md),
 [`cli/place-and-route.md`](cli/place-and-route.md),
 [`cli/equiv.md`](cli/equiv.md),
+[`cli/erc.md`](cli/erc.md),
 [`cli/signoff.md`](cli/signoff.md).
 
 ## Functional-verification run identity (**proposed** — not yet emitted, issue #2097)
@@ -1911,9 +2100,9 @@ the exit code alone is authoritative.
   | `sim` | `unsupported_analysis` | The request names a periodic analysis (`pss`, `pnoise`, `pac`) that `klt sim` does not implement. The *capability* is absent regardless of simulator build. Raised before any corner runs. See [docs/cli/sim.md](cli/sim.md) "Supported analyses". |
   | `sim` | `batch_no_capacity` | `--backend batch`: 2am's fleet launcher refused the job for lack of Spot capacity in every pool, or because the shared vCPU/Spot-quota budget (`BATCH_MAX_VCPU`) is exhausted (after any `batch.capacity_wait_s` budget was spent). A fleet-wide, usually transient condition — retrying later is reasonable. See [docs/cli/sim.md](cli/sim.md) "Batch backend". |
   | `sim` | `batch_concurrency_cap` | `--backend batch`: 2am's fleet launcher refused the job because the shared fleet is at `BATCH_MAX_CONCURRENT_INSTANCES` (after any `batch.capacity_wait_s` budget was spent). Transient slot contention, distinct from a Spot shortage; retrying later is reasonable. See [docs/cli/sim.md](cli/sim.md) "Batch backend". |
-  | `sim` | `batch_runner_version_mismatch` | `--backend batch` under `batch.runner_version_check: "enforce"` (the default): the AMI manifest publishes a runner `klt` whose major.minor differs from this client's, for every image the request could boot. Refused once, before any upload or launch, so no report and no per-corner diagnostics exist (issue #2851). Not retryable without a matching runner image or client. A mismatch found only on the runner keeps reporting through per-corner `batch_job_failed` diagnostics with `runner_code`. See [docs/cli/sim.md](cli/sim.md) "Pre-launch check from the AMI manifest". |
+  | `sim` | `batch_runner_version_mismatch` | `--backend batch` under `batch.runner_version_check: "enforce"` (the default): the AMI manifest publishes a runner `klt` whose major.minor differs from this client's, for every image the request could boot. Refused once, before any upload or launch, so no report and no per-corner diagnostics exist (issue #2851). Not retryable without a matching runner image or client. A mismatch found only on the runner (refused with exit `87`) keeps reporting through per-corner `batch_job_failed` diagnostics with `runner_code` and, additively, one top-level `diagnostics[]` entry with this code (severity `error`, `accepted_client_release`, remedy in `message`; issue #5061). See [docs/cli/sim.md](cli/sim.md) "Pre-launch check from the AMI manifest". |
   | `netlist` | `batch_no_capacity` | `--backend batch`: the fleet launcher refused the job for lack of Spot capacity or shared vCPU/Spot-quota budget. Usually transient; retrying later is reasonable. Nothing ran locally. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
-  | `sim` | `batch_runner_feature_unsupported` | `--backend batch` under `batch.runner_version_check: "enforce"`: the request uses a feature (currently `analysis_steps`) that every runner image the AMI manifest publishes predates. Refused once, before any upload or launch (issue #3249). The same code appears as `runner_code` on per-corner `batch_job_failed` diagnostics when the runner-side preflight finds it. See [docs/cli/sim.md](cli/sim.md) "Request-feature capability check". |
+  | `sim` | `batch_runner_feature_unsupported` | `--backend batch` under `batch.runner_version_check: "enforce"`: the request uses a feature (currently `analysis_steps`) that every runner image the AMI manifest publishes predates. Refused once, before any upload or launch (issue #3249). The same code appears as `runner_code` on per-corner `batch_job_failed` diagnostics when the runner-side preflight finds it. Those diagnostics also carry additive `missing_features[]` (the request-feature keys the runner predates; issue #4863). See [docs/cli/sim.md](cli/sim.md) "Request-feature capability check". |
   | `sim` | `batch_runner_request_feature_predated` | A **warning** (top-level `diagnostics[]` entry, not an error code): `--backend batch` under `batch.runner_version_check: "warn"` and the request uses fields (`options.osdi_preload`, `measurements[].expr`, ...) the fleet runner `klt` predates. Lists `features[]`, `runner_klt_version`, `source` (`manifest` before launch, `runner` post-run). See [docs/cli/sim.md](cli/sim.md) "Request-feature capability check" (issue #2901). |
   | `netlist` | `batch_concurrency_cap` | `--backend batch`: the fleet launcher refused the job because the shared fleet is at `BATCH_MAX_CONCURRENT_INSTANCES`. Usually transient; retrying later is reasonable. Nothing ran locally. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
   | `sim` | `batch_runner_lacks_decks` | `--backend batch` with a deck-list (`decks[]`) request: the AMI manifest publishes only runner images whose `klt` predates `decks[]` support, so the request was refused once, before any upload or launch (issue #3303). Also the `error.code` of a runner-side preflight envelope (exit 87) when the runner's own `klt --version` lacks `decks[]`; `runner_version_check: "warn"` does not relax it. Not retryable without a rebuilt runner image. See [docs/cli/sim.md](cli/sim.md) "Runner support for `decks[]` on the batch backend". |
@@ -1929,9 +2118,9 @@ the exit code alone is authoritative.
   | `functional-verification` | `missing_optional_dependency` | The `functional-verification` extra (cocotb) is not importable in the interpreter running `klt`. The message names that interpreter and the remedy per install route: put `klayout-tools[functional-verification]` on the install spec for `uv tool install` / `pipx install` / `uvx --from`, or `uv sync --extra functional-verification` for a source checkout. See [docs/cli/functional-verification.md](cli/functional-verification.md#requirements). |
   | `extract` | `finfet_malformed_geometry` | A FinFET deck (`--deck asap7`) found device geometry it refuses to approximate (no crossing fin, clipped fin, wrong gate length, missing select, VT conflict, ...). `error.message` lists each finding with its bounding box. Not retryable: the layout must change. See [docs/cli/extract.md](cli/extract.md) "ASAP7 FinFET extraction". |
   | `extract` | `finfet_dbu_mismatch` | A FinFET deck was run on a layout whose database unit differs from the deck's; it is refused rather than rescaled. See [docs/cli/extract.md](cli/extract.md) "ASAP7 FinFET extraction". |
-  | `pex` | `schematic_flatten_cycle`, `schematic_flatten_pin_count_mismatch`, `schematic_flatten_unsupported_card`, `schematic_flatten_malformed` | `--flatten-schematic` (issue #2889): the schematic DUT could not be flattened faithfully — a subcircuit instantiation cycle, an `X` call whose node count differs from the subcircuit's pin count, a card the flattener cannot rename safely, or unbalanced/duplicate `.subckt` definitions. Raised before anything simulates; no partial flatten is written. Not retryable without changing the DUT netlist. See [docs/cli/pex.md](cli/pex.md) "Flattening a hierarchical schematic DUT". |
+  | `pex` | `schematic_flatten_cycle`, `schematic_flatten_pin_count_mismatch`, `schematic_flatten_unsupported_card`, `schematic_flatten_wrapper_pin_unconnected`, `schematic_flatten_malformed` | `--flatten-schematic` (issue #2889): the schematic DUT could not be flattened faithfully — a subcircuit instantiation cycle, an `X` call whose node count differs from the subcircuit's pin count, a card the flattener cannot rename safely, unbalanced/duplicate `.subckt` definitions, or (issue #4625) a fragment DUT with no net for a pin of the synthesized `.subckt <top>` wrapper. Raised before anything simulates; no partial flatten is written. Not retryable without changing the DUT netlist. See [docs/cli/pex.md](cli/pex.md) "Flattening a hierarchical schematic DUT". |
   | `drc` | `klayout_unavailable` | `--engine klayout` (issue #3076): the standalone `klayout` application binary is missing or could not be launched (run or `--min-klayout-version` probe) — the second opinion could not run. Exit `1`, never a verdict; not a bad-input error. See [docs/cli/drc.md](cli/drc.md) "Machine-readable failure codes". |
-  | `drc` | `klayout_version_too_old` | `--engine klayout`: the `klayout` on `PATH` is older than `--min-klayout-version`. Exit `1`; the deck is never launched. See [docs/cli/drc.md](cli/drc.md) "Machine-readable failure codes". |
+  | `drc` | `klayout_version_too_old` | `--engine klayout`: the `klayout` application (`--klayout-binary`, `$KLT_KLAYOUT_BINARY` or `PATH`; an override is recorded as additive `environment.klayout_binary`, issue #4950) is older than `--min-klayout-version`. Exit `1`; the deck is never launched. See [docs/cli/drc.md](cli/drc.md) "Machine-readable failure codes". |
   | `drc` | `negative_control_failed` | `--engine klayout --negative-control`: the known-bad fixture produced no violations (or missed a `--negative-control-categories` entry) under the same deck, so a clean verdict cannot be trusted. See [docs/cli/drc.md](cli/drc.md) "Negative control". |
   | `pex`, `sim`, `place-and-route` | `outdir_locked` | Another cooperating `klt` run owns this run's persistent output directory (or an ancestor/descendant of it). Exit `1`, empty stdout. Transient: retry after the owner finishes. See "Output-directory ownership" below. |
   | `pex`, `sim`, `place-and-route` | `outdir_lock_unavailable` | Ownership could not be established for a reason other than contention (unwritable lock registry, no `flock` on this platform or filesystem). Not retryable without changing the environment. Exit `1`, empty stdout. |
@@ -1959,6 +2148,10 @@ artifacts:
   }
 }
 ```
+
+`klt pex` additionally merges the lock's structured owner into `error`
+(issue #4692; additive): `owner_pid` and `owner_acquired_at` (`null` when
+unknown), `locked_directory` and `relation` (`same`/`ancestor`/`descendant`).
 
 - **Exit code and streams.** Contention is an application error without a
   report: exit `1`, stdout empty, the envelope above on stderr (`--format
@@ -2111,7 +2304,8 @@ A verb's success payload may ship a machine-readable JSON Schema (Draft
 [`cells-response`](schemas/cells-response.schema.json),
 [`stats-response`](schemas/stats-response.schema.json),
 [`drc-response`](schemas/drc-response.schema.json) (verdict reports from both
-engines plus the non-verdict `--list-rules` listing; its `coverage` block
+engines plus the non-verdict `--list-rules` and `--list-rule-categories`
+listings; its `coverage` block
 `$ref`s [`coverage.schema.json`](schemas/coverage.schema.json)) and
 [`lvs-response`](schemas/lvs-response.schema.json).
 
@@ -2173,6 +2367,41 @@ roles from `provenance.input.content_hash` (the layout) and must not take
 part in layout-consistency comparisons; `klt signoff` verifies them per role
 (`citation.pex_inputs`). Pre-change envelopes omit them and stay readable.
 See [`cli/pex.md`](cli/pex.md).
+
+### `klt pex --dry-run` (issue #5464)
+
+`klt pex --dry-run` emits a **different payload** from a graded run, not a
+superset of one: `dry_run: true`, `status: "valid"`, `layout`, `deck`,
+`top`, `deck_options`, `declared_pins`, `legs`, `reference_netlist`,
+`testbenches[]` (each `{request, schematic_netlist, sim}`, where `sim` is
+the nested `klt sim --dry-run` report verbatim) and `not_checked[]`. It
+rides the same envelope at the same `SCHEMA_VERSION` (`2`) — **no bump**.
+
+This is additive under the opt-in-flag rule above: the payload exists only
+when `--dry-run` is given, no field of the graded report changes name, type
+or meaning, and a consumer that never passes the flag sees a byte-identical
+report. `dry_run` is the discriminator — it is absent from every graded
+report, so a reader can tell the two apart without looking at the argv.
+`not_checked[]` is a closed set of fixed string codes (new codes are
+additive); it exists so a dry run states what it did not verify rather than
+letting a `"valid"` status imply more than it earned. See
+[`cli/pex.md`](cli/pex.md)'s "Validating an invocation without running it".
+
+### `klt corner-matrix check` coverage verdict (issue #5865)
+
+`klt corner-matrix check` adds the always-present boolean
+`coverage_complete` next to `complete`: true iff `missing[]`, `extra[]` and
+`duplicate[]` are all empty — *did the run exercise the declared matrix,
+once each*. `complete` keeps its published meaning (coverage **and**
+outcome quality: no `not_simulated[]`, no `non_finite[]`, no
+`out_of_bounds[]`), so a report that covered its matrix but recorded one
+legitimate failing corner is `coverage_complete: true` with
+`complete: false`. The field is emitted in both modes; in `--request` mode
+`coverage_complete == complete` by construction. Exit codes are unchanged,
+which is the point: the exit status follows `complete` and cannot serve as
+a coverage gate. Additive — no existing field changes name, type or
+meaning, so **no `schema_version` bump** (the command's success payload
+carries none today). See [`cli/corner-matrix.md`](cli/corner-matrix.md).
 
 ## Static typing of the envelope
 

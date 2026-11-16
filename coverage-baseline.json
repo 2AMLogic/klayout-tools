@@ -1,0 +1,1916 @@
+{
+  "schema_version": 1,
+  "generated_by": "scripts/check_coverage_baseline.py --update-baseline (5 report(s))",
+  "tolerance_pct": 1.0,
+  "new_module_floor_pct": 80.0,
+  "total": {
+    "line": 94.0,
+    "branch": 88.4
+  },
+  "modules": {
+    "src/klayout_tools/__init__.py": {
+      "line": 100.0,
+      "branch": null
+    },
+    "src/klayout_tools/_annotation.py": {
+      "line": 100.0,
+      "branch": null
+    },
+    "src/klayout_tools/_artifact_envelope.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/_batch_common.py": {
+      "line": 94.2,
+      "branch": 83.3
+    },
+    "src/klayout_tools/_capacitor_mf.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/_check_result.py": {
+      "line": 100.0,
+      "branch": null
+    },
+    "src/klayout_tools/_devices.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/_digest.py": {
+      "line": 95.6,
+      "branch": 83.3
+    },
+    "src/klayout_tools/_jsonnum.py": {
+      "line": 83.3,
+      "branch": 100.0
+    },
+    "src/klayout_tools/_layout.py": {
+      "line": 96.7,
+      "branch": 97.6
+    },
+    "src/klayout_tools/_native.py": {
+      "line": 88.2,
+      "branch": 86.6
+    },
+    "src/klayout_tools/_openroad_engine.py": {
+      "line": 95.6,
+      "branch": 92.0
+    },
+    "src/klayout_tools/_paths.py": {
+      "line": 92.3,
+      "branch": 89.7
+    },
+    "src/klayout_tools/_power_activity.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/_provenance.py": {
+      "line": 93.3,
+      "branch": 92.5
+    },
+    "src/klayout_tools/_report_verify.py": {
+      "line": 94.8,
+      "branch": 93.1
+    },
+    "src/klayout_tools/_report_verify_hints.py": {
+      "line": 100.0,
+      "branch": 90.0
+    },
+    "src/klayout_tools/_request_fields.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/_spice_number.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/_sta_request_diag.py": {
+      "line": 100.0,
+      "branch": null
+    },
+    "src/klayout_tools/_sv2v.py": {
+      "line": 90.5,
+      "branch": 94.4
+    },
+    "src/klayout_tools/_text.py": {
+      "line": 85.7,
+      "branch": 50.0
+    },
+    "src/klayout_tools/_unionfind.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/_verilog_params.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/_verilog_top.py": {
+      "line": 92.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/_version_scheme.py": {
+      "line": 93.0,
+      "branch": 91.6
+    },
+    "src/klayout_tools/arith_gen.py": {
+      "line": 95.4,
+      "branch": 91.6
+    },
+    "src/klayout_tools/array_check.py": {
+      "line": 92.4,
+      "branch": 83.6
+    },
+    "src/klayout_tools/artifact_store.py": {
+      "line": 87.2,
+      "branch": 73.6
+    },
+    "src/klayout_tools/asap7_bsimcmg.py": {
+      "line": 98.4,
+      "branch": 96.1
+    },
+    "src/klayout_tools/build_identity.py": {
+      "line": 95.8,
+      "branch": 95.6
+    },
+    "src/klayout_tools/cells.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/characterize.py": {
+      "line": 89.0,
+      "branch": 81.0
+    },
+    "src/klayout_tools/characterize_arcs.py": {
+      "line": 97.4,
+      "branch": 93.1
+    },
+    "src/klayout_tools/characterize_bisect.py": {
+      "line": 99.0,
+      "branch": 96.4
+    },
+    "src/klayout_tools/characterize_cards.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/characterize_constraints.py": {
+      "line": 96.5,
+      "branch": 86.8
+    },
+    "src/klayout_tools/characterize_instances.py": {
+      "line": 98.4,
+      "branch": 96.4
+    },
+    "src/klayout_tools/characterize_osdi.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/characterize_sequential.py": {
+      "line": 84.8,
+      "branch": 63.3
+    },
+    "src/klayout_tools/cli/__init__.py": {
+      "line": 93.3,
+      "branch": 83.3
+    },
+    "src/klayout_tools/cli/__main__.py": {
+      "line": 0.0,
+      "branch": 0.0
+    },
+    "src/klayout_tools/cli/_argv_flags.py": {
+      "line": 100.0,
+      "branch": null
+    },
+    "src/klayout_tools/cli/_drc_native.py": {
+      "line": 97.9,
+      "branch": 94.4
+    },
+    "src/klayout_tools/cli/_drc_parser_args.py": {
+      "line": 100.0,
+      "branch": null
+    },
+    "src/klayout_tools/cli/_parsing.py": {
+      "line": 91.7,
+      "branch": 91.0
+    },
+    "src/klayout_tools/cli/_request_document.py": {
+      "line": 91.0,
+      "branch": 87.5
+    },
+    "src/klayout_tools/cli/arith_gen_cmd.py": {
+      "line": 100.0,
+      "branch": 75.0
+    },
+    "src/klayout_tools/cli/array_check_cmd.py": {
+      "line": 74.1,
+      "branch": 68.7
+    },
+    "src/klayout_tools/cli/artifact_cmd.py": {
+      "line": 84.7,
+      "branch": 45.4
+    },
+    "src/klayout_tools/cli/cells_cmd.py": {
+      "line": 96.0,
+      "branch": 75.0
+    },
+    "src/klayout_tools/cli/characterize_cmd.py": {
+      "line": 77.6,
+      "branch": 66.6
+    },
+    "src/klayout_tools/cli/clip_cmd.py": {
+      "line": 88.0,
+      "branch": 50.0
+    },
+    "src/klayout_tools/cli/color.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/cli/components_cmd.py": {
+      "line": 90.9,
+      "branch": 50.0
+    },
+    "src/klayout_tools/cli/corner_matrix_cmd.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/cli/deck_cmd.py": {
+      "line": 96.3,
+      "branch": 76.0
+    },
+    "src/klayout_tools/cli/design_centering_cmd.py": {
+      "line": 78.3,
+      "branch": 42.8
+    },
+    "src/klayout_tools/cli/diff_cmd.py": {
+      "line": 75.0,
+      "branch": 61.1
+    },
+    "src/klayout_tools/cli/draw_cmd.py": {
+      "line": 92.6,
+      "branch": 66.6
+    },
+    "src/klayout_tools/cli/drc_cmd.py": {
+      "line": 97.0,
+      "branch": 96.2
+    },
+    "src/klayout_tools/cli/drc_text.py": {
+      "line": 76.7,
+      "branch": 68.5
+    },
+    "src/klayout_tools/cli/economy_cmd.py": {
+      "line": 75.4,
+      "branch": 56.8
+    },
+    "src/klayout_tools/cli/env_provenance_cmd.py": {
+      "line": 86.9,
+      "branch": 68.7
+    },
+    "src/klayout_tools/cli/equiv_cmd.py": {
+      "line": 32.9,
+      "branch": 15.7
+    },
+    "src/klayout_tools/cli/erc_cmd.py": {
+      "line": 96.7,
+      "branch": 91.6
+    },
+    "src/klayout_tools/cli/eval_cmd.py": {
+      "line": 85.7,
+      "branch": 75.0
+    },
+    "src/klayout_tools/cli/evidence_cmd.py": {
+      "line": 68.9,
+      "branch": 0.0
+    },
+    "src/klayout_tools/cli/extract_cmd.py": {
+      "line": 89.6,
+      "branch": 80.8
+    },
+    "src/klayout_tools/cli/fill_cmd.py": {
+      "line": 77.3,
+      "branch": 50.0
+    },
+    "src/klayout_tools/cli/formal_cmd.py": {
+      "line": 48.3,
+      "branch": 0.0
+    },
+    "src/klayout_tools/cli/functional_verification_cmd.py": {
+      "line": 80.2,
+      "branch": 65.7
+    },
+    "src/klayout_tools/cli/gen_cmd.py": {
+      "line": 85.1,
+      "branch": 73.8
+    },
+    "src/klayout_tools/cli/gen_compose_cmd.py": {
+      "line": 55.5,
+      "branch": 32.1
+    },
+    "src/klayout_tools/cli/interface_check_cmd.py": {
+      "line": 94.8,
+      "branch": 62.5
+    },
+    "src/klayout_tools/cli/kb_cmd.py": {
+      "line": 80.0,
+      "branch": 57.5
+    },
+    "src/klayout_tools/cli/keepout_check_cmd.py": {
+      "line": 97.3,
+      "branch": 81.2
+    },
+    "src/klayout_tools/cli/layers_cmd.py": {
+      "line": 93.0,
+      "branch": 66.6
+    },
+    "src/klayout_tools/cli/layout_metrics_cmd.py": {
+      "line": 91.4,
+      "branch": 68.7
+    },
+    "src/klayout_tools/cli/layout_plan_cmd.py": {
+      "line": 85.2,
+      "branch": 75.0
+    },
+    "src/klayout_tools/cli/lef_abstract_cmd.py": {
+      "line": 89.3,
+      "branch": 75.0
+    },
+    "src/klayout_tools/cli/lvs_cmd.py": {
+      "line": 95.1,
+      "branch": 84.0
+    },
+    "src/klayout_tools/cli/mcp_cmd.py": {
+      "line": 22.7,
+      "branch": 0.0
+    },
+    "src/klayout_tools/cli/mom_cmd.py": {
+      "line": 12.9,
+      "branch": 0.0
+    },
+    "src/klayout_tools/cli/netlist_cmd.py": {
+      "line": 84.6,
+      "branch": 58.8
+    },
+    "src/klayout_tools/cli/output.py": {
+      "line": 98.8,
+      "branch": 94.7
+    },
+    "src/klayout_tools/cli/parser.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/cli/parser_economy.py": {
+      "line": 100.0,
+      "branch": null
+    },
+    "src/klayout_tools/cli/parser_netlist.py": {
+      "line": 100.0,
+      "branch": null
+    },
+    "src/klayout_tools/cli/parser_sim.py": {
+      "line": 100.0,
+      "branch": null
+    },
+    "src/klayout_tools/cli/parsers/__init__.py": {
+      "line": 100.0,
+      "branch": null
+    },
+    "src/klayout_tools/cli/parsers/extract.py": {
+      "line": 100.0,
+      "branch": null
+    },
+    "src/klayout_tools/cli/parsers/extract_args_part2.py": {
+      "line": 100.0,
+      "branch": null
+    },
+    "src/klayout_tools/cli/parsers/extract_args_part3.py": {
+      "line": 100.0,
+      "branch": null
+    },
+    "src/klayout_tools/cli/pdk_cmd.py": {
+      "line": 89.4,
+      "branch": 75.5
+    },
+    "src/klayout_tools/cli/pex_cmd.py": {
+      "line": 93.2,
+      "branch": 86.1
+    },
+    "src/klayout_tools/cli/place_and_route_cmd.py": {
+      "line": 81.3,
+      "branch": 73.5
+    },
+    "src/klayout_tools/cli/power_cmd.py": {
+      "line": 96.4,
+      "branch": 90.9
+    },
+    "src/klayout_tools/cli/power_intent_cmd.py": {
+      "line": 53.8,
+      "branch": 0.0
+    },
+    "src/klayout_tools/cli/precheck_cmd.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/cli/render_cmd.py": {
+      "line": 95.0,
+      "branch": 93.7
+    },
+    "src/klayout_tools/cli/report_cmd.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/cli/reset_coverage_cmd.py": {
+      "line": 53.8,
+      "branch": 0.0
+    },
+    "src/klayout_tools/cli/ring_check_cmd.py": {
+      "line": 91.3,
+      "branch": 81.8
+    },
+    "src/klayout_tools/cli/route_cmd.py": {
+      "line": 63.4,
+      "branch": 0.0
+    },
+    "src/klayout_tools/cli/seam_check_cmd.py": {
+      "line": 90.4,
+      "branch": 37.5
+    },
+    "src/klayout_tools/cli/signoff_cmd.py": {
+      "line": 93.2,
+      "branch": 88.6
+    },
+    "src/klayout_tools/cli/sim_cmd.py": {
+      "line": 79.5,
+      "branch": 68.0
+    },
+    "src/klayout_tools/cli/sim_job_text.py": {
+      "line": 10.0,
+      "branch": 0.0
+    },
+    "src/klayout_tools/cli/sim_merge_cmd.py": {
+      "line": 92.3,
+      "branch": 75.0
+    },
+    "src/klayout_tools/cli/sim_pdk_text.py": {
+      "line": 100.0,
+      "branch": 87.5
+    },
+    "src/klayout_tools/cli/sim_plan_cmd.py": {
+      "line": 64.7,
+      "branch": 0.0
+    },
+    "src/klayout_tools/cli/size_cmd.py": {
+      "line": 97.3,
+      "branch": 77.5
+    },
+    "src/klayout_tools/cli/socket_check_cmd.py": {
+      "line": 98.0,
+      "branch": 85.0
+    },
+    "src/klayout_tools/cli/sta_cmd.py": {
+      "line": 93.6,
+      "branch": 89.2
+    },
+    "src/klayout_tools/cli/stats_cmd.py": {
+      "line": 88.0,
+      "branch": 33.3
+    },
+    "src/klayout_tools/cli/synthesize_cmd.py": {
+      "line": 76.8,
+      "branch": 55.5
+    },
+    "src/klayout_tools/cli/tap_distance_cmd.py": {
+      "line": 90.9,
+      "branch": 62.5
+    },
+    "src/klayout_tools/cli/techmap_cmd.py": {
+      "line": 17.8,
+      "branch": 0.0
+    },
+    "src/klayout_tools/cli/trajectory_cmd.py": {
+      "line": 86.9,
+      "branch": 100.0
+    },
+    "src/klayout_tools/cli/version_cmd.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/cli/wave_cmd.py": {
+      "line": 18.0,
+      "branch": 0.0
+    },
+    "src/klayout_tools/cli/yield_campaign_cmd.py": {
+      "line": 28.1,
+      "branch": 0.0
+    },
+    "src/klayout_tools/cli/yield_cmd.py": {
+      "line": 17.7,
+      "branch": 2.7
+    },
+    "src/klayout_tools/cli/yield_csv_cmd.py": {
+      "line": 66.6,
+      "branch": 0.0
+    },
+    "src/klayout_tools/cli/yield_samples_cmd.py": {
+      "line": 97.3,
+      "branch": 75.0
+    },
+    "src/klayout_tools/cli/yield_sensitivity_cmd.py": {
+      "line": 36.5,
+      "branch": 18.7
+    },
+    "src/klayout_tools/cli/yield_threshold_cmd.py": {
+      "line": 92.1,
+      "branch": 60.0
+    },
+    "src/klayout_tools/clip.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/components.py": {
+      "line": 94.6,
+      "branch": 87.7
+    },
+    "src/klayout_tools/congestion.py": {
+      "line": 22.3,
+      "branch": 0.0
+    },
+    "src/klayout_tools/corner_matrix.py": {
+      "line": 87.3,
+      "branch": 73.0
+    },
+    "src/klayout_tools/coverage.py": {
+      "line": 98.7,
+      "branch": 96.9
+    },
+    "src/klayout_tools/decks/__init__.py": {
+      "line": 97.7,
+      "branch": 95.4
+    },
+    "src/klayout_tools/decks/asap7.py": {
+      "line": 100.0,
+      "branch": null
+    },
+    "src/klayout_tools/decks/asap7_rules.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/decks/extraction.py": {
+      "line": 98.7,
+      "branch": 93.2
+    },
+    "src/klayout_tools/decks/finfet.py": {
+      "line": 100.0,
+      "branch": 50.0
+    },
+    "src/klayout_tools/decks/gf180mcu.py": {
+      "line": 100.0,
+      "branch": null
+    },
+    "src/klayout_tools/decks/gf180mcu_bond_pad.py": {
+      "line": 100.0,
+      "branch": null
+    },
+    "src/klayout_tools/decks/history.py": {
+      "line": 98.5,
+      "branch": 99.1
+    },
+    "src/klayout_tools/decks/parasitics.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/decks/rules.py": {
+      "line": 97.9,
+      "branch": 87.5
+    },
+    "src/klayout_tools/decks/sg13cmos5l.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/decks/sg13g2.py": {
+      "line": 100.0,
+      "branch": null
+    },
+    "src/klayout_tools/decks/sg13g2_runset_notes.py": {
+      "line": 100.0,
+      "branch": null
+    },
+    "src/klayout_tools/decks/sky130.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/design_centering.py": {
+      "line": 95.3,
+      "branch": 91.0
+    },
+    "src/klayout_tools/design_evidence_tiers.py": {
+      "line": 98.4,
+      "branch": 94.6
+    },
+    "src/klayout_tools/digital_fleet.py": {
+      "line": 95.9,
+      "branch": 87.5
+    },
+    "src/klayout_tools/draw.py": {
+      "line": 92.0,
+      "branch": 84.8
+    },
+    "src/klayout_tools/drc.py": {
+      "line": 97.0,
+      "branch": 93.2
+    },
+    "src/klayout_tools/drc_check_kinds.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/drc_crosscheck.py": {
+      "line": 99.0,
+      "branch": 96.8
+    },
+    "src/klayout_tools/drc_klayout_abort.py": {
+      "line": 100.0,
+      "branch": 81.2
+    },
+    "src/klayout_tools/drc_klayout_app.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/drc_klayout_engine.py": {
+      "line": 93.7,
+      "branch": 88.8
+    },
+    "src/klayout_tools/drc_report_check.py": {
+      "line": 95.8,
+      "branch": 87.5
+    },
+    "src/klayout_tools/economy.py": {
+      "line": 97.6,
+      "branch": 95.5
+    },
+    "src/klayout_tools/economy_bands.py": {
+      "line": 91.8,
+      "branch": 83.3
+    },
+    "src/klayout_tools/economy_footprint.py": {
+      "line": 95.5,
+      "branch": 90.0
+    },
+    "src/klayout_tools/economy_leaves.py": {
+      "line": 69.5,
+      "branch": 45.4
+    },
+    "src/klayout_tools/economy_pnr.py": {
+      "line": 92.3,
+      "branch": 75.0
+    },
+    "src/klayout_tools/economy_whatif.py": {
+      "line": 90.1,
+      "branch": 79.5
+    },
+    "src/klayout_tools/env_provenance.py": {
+      "line": 96.8,
+      "branch": 91.1
+    },
+    "src/klayout_tools/env_provenance_walk.py": {
+      "line": 100.0,
+      "branch": 93.7
+    },
+    "src/klayout_tools/equiv.py": {
+      "line": 92.4,
+      "branch": 89.4
+    },
+    "src/klayout_tools/equiv_errors.py": {
+      "line": 100.0,
+      "branch": null
+    },
+    "src/klayout_tools/equiv_replay.py": {
+      "line": 94.4,
+      "branch": 90.0
+    },
+    "src/klayout_tools/equiv_sequential.py": {
+      "line": 88.6,
+      "branch": 84.0
+    },
+    "src/klayout_tools/equiv_stage.py": {
+      "line": 87.5,
+      "branch": 90.6
+    },
+    "src/klayout_tools/erc.py": {
+      "line": 98.1,
+      "branch": 93.9
+    },
+    "src/klayout_tools/erc_antenna_gf180mcu.py": {
+      "line": 100.0,
+      "branch": null
+    },
+    "src/klayout_tools/erc_disclosure.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/erc_spec.py": {
+      "line": 95.6,
+      "branch": 92.1
+    },
+    "src/klayout_tools/eval.py": {
+      "line": 86.6,
+      "branch": 79.6
+    },
+    "src/klayout_tools/evidence_lint.py": {
+      "line": 93.1,
+      "branch": 88.8
+    },
+    "src/klayout_tools/evidence_record.py": {
+      "line": 86.6,
+      "branch": 71.6
+    },
+    "src/klayout_tools/extract.py": {
+      "line": 94.9,
+      "branch": 89.2
+    },
+    "src/klayout_tools/extract_abstract.py": {
+      "line": 95.2,
+      "branch": 88.8
+    },
+    "src/klayout_tools/extract_assemble.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/extract_batch.py": {
+      "line": 88.7,
+      "branch": 78.7
+    },
+    "src/klayout_tools/extract_cap_top_plate.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/extract_finfet.py": {
+      "line": 96.1,
+      "branch": 85.0
+    },
+    "src/klayout_tools/extract_hierarchy.py": {
+      "line": 96.4,
+      "branch": 92.2
+    },
+    "src/klayout_tools/extract_netselect.py": {
+      "line": 95.9,
+      "branch": 90.0
+    },
+    "src/klayout_tools/extract_orient.py": {
+      "line": 94.4,
+      "branch": 85.7
+    },
+    "src/klayout_tools/extract_parasitics.py": {
+      "line": 97.1,
+      "branch": 91.2
+    },
+    "src/klayout_tools/extract_parasitics_block.py": {
+      "line": 96.8,
+      "branch": 90.9
+    },
+    "src/klayout_tools/extract_passive_regions.py": {
+      "line": 97.9,
+      "branch": 95.0
+    },
+    "src/klayout_tools/extract_progress.py": {
+      "line": 96.1,
+      "branch": 87.5
+    },
+    "src/klayout_tools/extract_report.py": {
+      "line": 99.5,
+      "branch": 97.2
+    },
+    "src/klayout_tools/extract_resistance_graph.py": {
+      "line": 97.7,
+      "branch": 93.1
+    },
+    "src/klayout_tools/extract_spef.py": {
+      "line": 99.1,
+      "branch": 97.3
+    },
+    "src/klayout_tools/extract_subcircuit.py": {
+      "line": 95.5,
+      "branch": 88.5
+    },
+    "src/klayout_tools/extract_validate.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/extract_warnings.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/fill.py": {
+      "line": 93.2,
+      "branch": 83.3
+    },
+    "src/klayout_tools/formal.py": {
+      "line": 87.8,
+      "branch": 86.3
+    },
+    "src/klayout_tools/functional_verification.py": {
+      "line": 94.8,
+      "branch": 92.7
+    },
+    "src/klayout_tools/functional_verification_initial_state.py": {
+      "line": 95.0,
+      "branch": 90.9
+    },
+    "src/klayout_tools/functional_verification_mutation.py": {
+      "line": 86.4,
+      "branch": 88.4
+    },
+    "src/klayout_tools/functional_verification_mutation_proposals.py": {
+      "line": 90.2,
+      "branch": 86.9
+    },
+    "src/klayout_tools/functional_verification_mutation_variant.py": {
+      "line": 65.5,
+      "branch": 75.0
+    },
+    "src/klayout_tools/functional_verification_sdf.py": {
+      "line": 93.9,
+      "branch": 91.0
+    },
+    "src/klayout_tools/functional_verification_sdf_instance.py": {
+      "line": 95.0,
+      "branch": 85.7
+    },
+    "src/klayout_tools/functional_verification_sdf_rename.py": {
+      "line": 97.5,
+      "branch": 90.4
+    },
+    "src/klayout_tools/functional_verification_verilog_top.py": {
+      "line": 91.6,
+      "branch": 87.5
+    },
+    "src/klayout_tools/gen.py": {
+      "line": 96.6,
+      "branch": 91.3
+    },
+    "src/klayout_tools/gen_asap7.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/gen_asap7_tap.py": {
+      "line": 91.2,
+      "branch": 94.1
+    },
+    "src/klayout_tools/gen_cap_stack.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/gen_cap_vpp.py": {
+      "line": 95.6,
+      "branch": 79.4
+    },
+    "src/klayout_tools/gen_compose.py": {
+      "line": 94.0,
+      "branch": 88.7
+    },
+    "src/klayout_tools/gen_compose_boundary.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/gen_compose_port_access.py": {
+      "line": 91.7,
+      "branch": 84.1
+    },
+    "src/klayout_tools/gen_compose_port_request.py": {
+      "line": 90.9,
+      "branch": 71.4
+    },
+    "src/klayout_tools/gen_compose_routing.py": {
+      "line": 91.8,
+      "branch": 84.7
+    },
+    "src/klayout_tools/gen_describe.py": {
+      "line": 98.2,
+      "branch": 96.2
+    },
+    "src/klayout_tools/gen_diode.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/gen_hbt.py": {
+      "line": 91.9,
+      "branch": 79.1
+    },
+    "src/klayout_tools/gen_layer_params.py": {
+      "line": 96.1,
+      "branch": 92.6
+    },
+    "src/klayout_tools/gen_layer_params_checks.py": {
+      "line": 93.0,
+      "branch": 89.2
+    },
+    "src/klayout_tools/gen_layer_tables.py": {
+      "line": 100.0,
+      "branch": null
+    },
+    "src/klayout_tools/gen_pcells/__init__.py": {
+      "line": 100.0,
+      "branch": null
+    },
+    "src/klayout_tools/gen_pcells/_mos_array_shapes.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/gen_pcells/asap7_finfet.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/gen_pcells/asap7_tap.py": {
+      "line": 74.0,
+      "branch": 0.0
+    },
+    "src/klayout_tools/gen_pcells/bjt_array.py": {
+      "line": 100.0,
+      "branch": 83.3
+    },
+    "src/klayout_tools/gen_pcells/bond_pad.py": {
+      "line": 100.0,
+      "branch": null
+    },
+    "src/klayout_tools/gen_pcells/cap_array.py": {
+      "line": 100.0,
+      "branch": 87.5
+    },
+    "src/klayout_tools/gen_pcells/cap_vpp_array.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/gen_pcells/diff_pair.py": {
+      "line": 99.0,
+      "branch": 95.4
+    },
+    "src/klayout_tools/gen_pcells/diode.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/gen_pcells/esd_device.py": {
+      "line": 98.9,
+      "branch": 83.3
+    },
+    "src/klayout_tools/gen_pcells/guard_ring.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/gen_pcells/mos_array.py": {
+      "line": 100.0,
+      "branch": 96.1
+    },
+    "src/klayout_tools/gen_pcells/res_array.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/gen_pcells/resistor_strip.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/gen_pcells/well_island.py": {
+      "line": 100.0,
+      "branch": 87.5
+    },
+    "src/klayout_tools/gen_snap.py": {
+      "line": 100.0,
+      "branch": null
+    },
+    "src/klayout_tools/gen_spec.py": {
+      "line": 100.0,
+      "branch": null
+    },
+    "src/klayout_tools/interface_check.py": {
+      "line": 92.6,
+      "branch": 92.3
+    },
+    "src/klayout_tools/ir_solver.py": {
+      "line": 98.2,
+      "branch": 96.2
+    },
+    "src/klayout_tools/kb.py": {
+      "line": 96.3,
+      "branch": 93.7
+    },
+    "src/klayout_tools/keepout_check.py": {
+      "line": 94.0,
+      "branch": 88.2
+    },
+    "src/klayout_tools/layers.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/layout_diff.py": {
+      "line": 98.4,
+      "branch": 95.4
+    },
+    "src/klayout_tools/layout_metrics.py": {
+      "line": 97.7,
+      "branch": 89.5
+    },
+    "src/klayout_tools/layout_plan.py": {
+      "line": 87.5,
+      "branch": 77.3
+    },
+    "src/klayout_tools/layout_plan_check.py": {
+      "line": 91.4,
+      "branch": 79.5
+    },
+    "src/klayout_tools/layout_plan_execute.py": {
+      "line": 91.1,
+      "branch": 83.1
+    },
+    "src/klayout_tools/layout_plan_fields.py": {
+      "line": 89.1,
+      "branch": 80.0
+    },
+    "src/klayout_tools/layout_plan_ports.py": {
+      "line": 93.1,
+      "branch": 86.8
+    },
+    "src/klayout_tools/layout_plan_routing.py": {
+      "line": 100.0,
+      "branch": 94.4
+    },
+    "src/klayout_tools/lef_abstract.py": {
+      "line": 98.2,
+      "branch": 94.0
+    },
+    "src/klayout_tools/lef_header.py": {
+      "line": 97.6,
+      "branch": 96.4
+    },
+    "src/klayout_tools/liberty_compare.py": {
+      "line": 91.8,
+      "branch": 81.6
+    },
+    "src/klayout_tools/liberty_leakage.py": {
+      "line": 82.5,
+      "branch": 95.0
+    },
+    "src/klayout_tools/liberty_merge.py": {
+      "line": 93.4,
+      "branch": 88.8
+    },
+    "src/klayout_tools/liberty_render_pin.py": {
+      "line": 95.6,
+      "branch": 90.0
+    },
+    "src/klayout_tools/liberty_units.py": {
+      "line": 95.1,
+      "branch": 80.0
+    },
+    "src/klayout_tools/liberty_writer.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/lvs.py": {
+      "line": 96.7,
+      "branch": 92.9
+    },
+    "src/klayout_tools/lvs_combine.py": {
+      "line": 97.3,
+      "branch": 93.0
+    },
+    "src/klayout_tools/lvs_finfet.py": {
+      "line": 91.9,
+      "branch": 85.4
+    },
+    "src/klayout_tools/lvs_finfet_flatten.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/lvs_gate_level.py": {
+      "line": 95.1,
+      "branch": 90.0
+    },
+    "src/klayout_tools/lvs_gate_level_convert.py": {
+      "line": 85.2,
+      "branch": 75.0
+    },
+    "src/klayout_tools/lvs_known_limits.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/lvs_layout_stage.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/lvs_mismatch.py": {
+      "line": 96.9,
+      "branch": 91.3
+    },
+    "src/klayout_tools/lvs_mismatch_tolerance.py": {
+      "line": 91.2,
+      "branch": 85.0
+    },
+    "src/klayout_tools/lvs_mos_options.py": {
+      "line": 96.5,
+      "branch": 87.5
+    },
+    "src/klayout_tools/lvs_netgen.py": {
+      "line": 94.5,
+      "branch": 89.1
+    },
+    "src/klayout_tools/lvs_netgen_branch.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/lvs_pin_anchors.py": {
+      "line": 95.7,
+      "branch": 88.0
+    },
+    "src/klayout_tools/lvs_power.py": {
+      "line": 93.9,
+      "branch": 91.8
+    },
+    "src/klayout_tools/lvs_reference_stage.py": {
+      "line": 98.6,
+      "branch": 91.6
+    },
+    "src/klayout_tools/lvs_report.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/lvs_run_options.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/lvs_runset.py": {
+      "line": 93.3,
+      "branch": 87.2
+    },
+    "src/klayout_tools/lvs_runset_reference.py": {
+      "line": 89.4,
+      "branch": 84.6
+    },
+    "src/klayout_tools/lvs_short_nets.py": {
+      "line": 100.0,
+      "branch": 50.0
+    },
+    "src/klayout_tools/lvs_supply.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/lvs_timeout.py": {
+      "line": 85.0,
+      "branch": 75.0
+    },
+    "src/klayout_tools/lvs_unmerged_fingers.py": {
+      "line": 98.4,
+      "branch": 96.1
+    },
+    "src/klayout_tools/macros.py": {
+      "line": 97.1,
+      "branch": 93.4
+    },
+    "src/klayout_tools/mcp_server.py": {
+      "line": 35.4,
+      "branch": 0.0
+    },
+    "src/klayout_tools/mcp_tools.py": {
+      "line": 88.2,
+      "branch": 81.5
+    },
+    "src/klayout_tools/metrics.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/mom.py": {
+      "line": 71.2,
+      "branch": 61.1
+    },
+    "src/klayout_tools/netlist.py": {
+      "line": 95.7,
+      "branch": 95.0
+    },
+    "src/klayout_tools/netlist_batch.py": {
+      "line": 92.8,
+      "branch": 87.8
+    },
+    "src/klayout_tools/netlist_batch_select.py": {
+      "line": 96.5,
+      "branch": 91.6
+    },
+    "src/klayout_tools/netlist_block.py": {
+      "line": 96.8,
+      "branch": 88.4
+    },
+    "src/klayout_tools/netlist_capacitor_recovery.py": {
+      "line": 94.7,
+      "branch": 89.7
+    },
+    "src/klayout_tools/netlist_diagnostics.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/netlist_digest.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/netlist_inputs.py": {
+      "line": 93.7,
+      "branch": 100.0
+    },
+    "src/klayout_tools/netlist_normalize.py": {
+      "line": 93.4,
+      "branch": 88.3
+    },
+    "src/klayout_tools/netlist_normalize_scan.py": {
+      "line": 98.2,
+      "branch": 88.4
+    },
+    "src/klayout_tools/netlist_paths.py": {
+      "line": 94.1,
+      "branch": 93.7
+    },
+    "src/klayout_tools/netlist_pdk.py": {
+      "line": 94.1,
+      "branch": 100.0
+    },
+    "src/klayout_tools/op_sanity.py": {
+      "line": 92.5,
+      "branch": 84.6
+    },
+    "src/klayout_tools/output_lock.py": {
+      "line": 94.3,
+      "branch": 88.6
+    },
+    "src/klayout_tools/parasitic_integrity.py": {
+      "line": 98.4,
+      "branch": 93.2
+    },
+    "src/klayout_tools/pdk.py": {
+      "line": 95.5,
+      "branch": 92.5
+    },
+    "src/klayout_tools/pdk_capabilities.py": {
+      "line": 98.7,
+      "branch": 97.6
+    },
+    "src/klayout_tools/pdk_cells.py": {
+      "line": 93.4,
+      "branch": 89.3
+    },
+    "src/klayout_tools/pdk_compat.py": {
+      "line": 92.5,
+      "branch": 90.9
+    },
+    "src/klayout_tools/pdk_descriptor.py": {
+      "line": 88.7,
+      "branch": 78.0
+    },
+    "src/klayout_tools/pdk_families.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/pdk_models.py": {
+      "line": 95.8,
+      "branch": 90.1
+    },
+    "src/klayout_tools/pdk_native_drc.py": {
+      "line": 94.4,
+      "branch": 87.5
+    },
+    "src/klayout_tools/pdk_pcell.py": {
+      "line": 90.5,
+      "branch": 81.1
+    },
+    "src/klayout_tools/pdk_stackup.py": {
+      "line": 98.7,
+      "branch": 96.6
+    },
+    "src/klayout_tools/pex.py": {
+      "line": 97.8,
+      "branch": 93.5
+    },
+    "src/klayout_tools/pex_asap7.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/pex_async.py": {
+      "line": 99.2,
+      "branch": 97.8
+    },
+    "src/klayout_tools/place_and_route.py": {
+      "line": 96.3,
+      "branch": 87.8
+    },
+    "src/klayout_tools/place_and_route_batch.py": {
+      "line": 88.6,
+      "branch": 71.4
+    },
+    "src/klayout_tools/place_and_route_clock.py": {
+      "line": 95.8,
+      "branch": 91.6
+    },
+    "src/klayout_tools/place_and_route_gds_merge.py": {
+      "line": 90.1,
+      "branch": 90.0
+    },
+    "src/klayout_tools/place_and_route_groups.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/place_and_route_hints.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/place_and_route_layers.py": {
+      "line": 90.4,
+      "branch": 75.0
+    },
+    "src/klayout_tools/place_and_route_min_area.py": {
+      "line": 99.2,
+      "branch": 94.8
+    },
+    "src/klayout_tools/place_and_route_pdn_fit.py": {
+      "line": 96.3,
+      "branch": 92.3
+    },
+    "src/klayout_tools/place_and_route_pins.py": {
+      "line": 95.5,
+      "branch": 91.6
+    },
+    "src/klayout_tools/place_and_route_portable.py": {
+      "line": 100.0,
+      "branch": 95.0
+    },
+    "src/klayout_tools/place_and_route_power_audit.py": {
+      "line": 95.9,
+      "branch": 89.0
+    },
+    "src/klayout_tools/place_and_route_reports.py": {
+      "line": 98.6,
+      "branch": 94.4
+    },
+    "src/klayout_tools/place_and_route_request.py": {
+      "line": 96.1,
+      "branch": 95.4
+    },
+    "src/klayout_tools/place_and_route_resume.py": {
+      "line": 92.4,
+      "branch": 100.0
+    },
+    "src/klayout_tools/place_and_route_script.py": {
+      "line": 98.4,
+      "branch": 96.2
+    },
+    "src/klayout_tools/place_and_route_sta.py": {
+      "line": 96.7,
+      "branch": 88.8
+    },
+    "src/klayout_tools/place_and_route_via_pad.py": {
+      "line": 90.9,
+      "branch": 82.5
+    },
+    "src/klayout_tools/post_route_sta.py": {
+      "line": 97.6,
+      "branch": 96.9
+    },
+    "src/klayout_tools/power.py": {
+      "line": 94.9,
+      "branch": 90.7
+    },
+    "src/klayout_tools/power_intent.py": {
+      "line": 84.3,
+      "branch": 74.1
+    },
+    "src/klayout_tools/precheck.py": {
+      "line": 97.8,
+      "branch": 93.9
+    },
+    "src/klayout_tools/probit.py": {
+      "line": 93.5,
+      "branch": 79.5
+    },
+    "src/klayout_tools/remote_fleet.py": {
+      "line": 95.6,
+      "branch": 91.1
+    },
+    "src/klayout_tools/remote_launcher.py": {
+      "line": 96.9,
+      "branch": 93.3
+    },
+    "src/klayout_tools/remote_transport.py": {
+      "line": 96.2,
+      "branch": 86.1
+    },
+    "src/klayout_tools/render.py": {
+      "line": 88.2,
+      "branch": 97.2
+    },
+    "src/klayout_tools/report.py": {
+      "line": 96.3,
+      "branch": 81.8
+    },
+    "src/klayout_tools/reset_coverage.py": {
+      "line": 86.9,
+      "branch": 75.0
+    },
+    "src/klayout_tools/resistance_path.py": {
+      "line": 99.2,
+      "branch": 97.9
+    },
+    "src/klayout_tools/resistor_mesh.py": {
+      "line": 89.0,
+      "branch": 75.0
+    },
+    "src/klayout_tools/restructure.py": {
+      "line": 93.5,
+      "branch": 97.7
+    },
+    "src/klayout_tools/ring_check.py": {
+      "line": 99.2,
+      "branch": 98.5
+    },
+    "src/klayout_tools/route_instances.py": {
+      "line": 86.6,
+      "branch": 78.5
+    },
+    "src/klayout_tools/route_labelled.py": {
+      "line": 91.3,
+      "branch": 75.0
+    },
+    "src/klayout_tools/route_overlap.py": {
+      "line": 82.8,
+      "branch": 57.6
+    },
+    "src/klayout_tools/route_request.py": {
+      "line": 84.0,
+      "branch": 53.8
+    },
+    "src/klayout_tools/seal_ring_check.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/seal_ring_rules.py": {
+      "line": 100.0,
+      "branch": null
+    },
+    "src/klayout_tools/seam_check.py": {
+      "line": 97.0,
+      "branch": 94.4
+    },
+    "src/klayout_tools/signoff.py": {
+      "line": 97.9,
+      "branch": 95.3
+    },
+    "src/klayout_tools/signoff_attest.py": {
+      "line": 94.7,
+      "branch": 90.3
+    },
+    "src/klayout_tools/signoff_attest_carry.py": {
+      "line": 97.9,
+      "branch": 95.4
+    },
+    "src/klayout_tools/signoff_attest_input.py": {
+      "line": 100.0,
+      "branch": 90.0
+    },
+    "src/klayout_tools/signoff_attest_item9.py": {
+      "line": 98.9,
+      "branch": 95.2
+    },
+    "src/klayout_tools/signoff_attest_stream.py": {
+      "line": 94.8,
+      "branch": 87.0
+    },
+    "src/klayout_tools/signoff_attest_text.py": {
+      "line": 97.8,
+      "branch": 75.0
+    },
+    "src/klayout_tools/signoff_details.py": {
+      "line": 96.4,
+      "branch": 75.0
+    },
+    "src/klayout_tools/signoff_envelopes.py": {
+      "line": 100.0,
+      "branch": null
+    },
+    "src/klayout_tools/signoff_evidence_pin.py": {
+      "line": 98.0,
+      "branch": 91.6
+    },
+    "src/klayout_tools/signoff_foundry_cell.py": {
+      "line": 87.8,
+      "branch": 81.5
+    },
+    "src/klayout_tools/signoff_generator_batch.py": {
+      "line": 90.8,
+      "branch": 81.9
+    },
+    "src/klayout_tools/signoff_multi_member.py": {
+      "line": 100.0,
+      "branch": 87.5
+    },
+    "src/klayout_tools/signoff_na.py": {
+      "line": 90.8,
+      "branch": 79.5
+    },
+    "src/klayout_tools/signoff_power_delivery.py": {
+      "line": 94.9,
+      "branch": 88.5
+    },
+    "src/klayout_tools/signoff_runset.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/sim.py": {
+      "line": 96.8,
+      "branch": 94.7
+    },
+    "src/klayout_tools/sim_adapt.py": {
+      "line": 97.7,
+      "branch": 86.3
+    },
+    "src/klayout_tools/sim_analysis_overrides.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/sim_attach.py": {
+      "line": 93.3,
+      "branch": 90.0
+    },
+    "src/klayout_tools/sim_batch.py": {
+      "line": 96.7,
+      "branch": 91.6
+    },
+    "src/klayout_tools/sim_batch_async.py": {
+      "line": 93.3,
+      "branch": 94.1
+    },
+    "src/klayout_tools/sim_batch_contract.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/sim_batch_contract_jobspec.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/sim_batch_contract_preflight.py": {
+      "line": 96.9,
+      "branch": 100.0
+    },
+    "src/klayout_tools/sim_batch_contract_spec.py": {
+      "line": 98.8,
+      "branch": 90.9
+    },
+    "src/klayout_tools/sim_batch_contract_worker.py": {
+      "line": 95.7,
+      "branch": 92.8
+    },
+    "src/klayout_tools/sim_batch_features.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/sim_batch_hints.py": {
+      "line": 98.0,
+      "branch": 85.0
+    },
+    "src/klayout_tools/sim_batch_observer.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/sim_batch_plan.py": {
+      "line": 100.0,
+      "branch": null
+    },
+    "src/klayout_tools/sim_batch_receipt.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/sim_batch_shards.py": {
+      "line": 92.8,
+      "branch": 90.6
+    },
+    "src/klayout_tools/sim_batch_warn.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/sim_bin_range.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/sim_cause.py": {
+      "line": 95.6,
+      "branch": 91.6
+    },
+    "src/klayout_tools/sim_commands.py": {
+      "line": 87.5,
+      "branch": 72.8
+    },
+    "src/klayout_tools/sim_complex_vectors.py": {
+      "line": 96.6,
+      "branch": 95.4
+    },
+    "src/klayout_tools/sim_convergence_retry.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/sim_corner_extremes.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/sim_corner_keys.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/sim_crossings.py": {
+      "line": 97.0,
+      "branch": 95.1
+    },
+    "src/klayout_tools/sim_crossings_reduce.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/sim_cycle_mean.py": {
+      "line": 94.9,
+      "branch": 90.0
+    },
+    "src/klayout_tools/sim_deck_expand.py": {
+      "line": 82.7,
+      "branch": 71.8
+    },
+    "src/klayout_tools/sim_decks.py": {
+      "line": 93.3,
+      "branch": 85.2
+    },
+    "src/klayout_tools/sim_echo_messages.py": {
+      "line": 92.8,
+      "branch": 80.0
+    },
+    "src/klayout_tools/sim_energy.py": {
+      "line": 96.6,
+      "branch": 93.1
+    },
+    "src/klayout_tools/sim_errors.py": {
+      "line": 100.0,
+      "branch": null
+    },
+    "src/klayout_tools/sim_exit_reason.py": {
+      "line": 97.7,
+      "branch": 93.7
+    },
+    "src/klayout_tools/sim_eye.py": {
+      "line": 80.7,
+      "branch": 66.6
+    },
+    "src/klayout_tools/sim_forms.py": {
+      "line": 93.3,
+      "branch": 83.3
+    },
+    "src/klayout_tools/sim_injected.py": {
+      "line": 97.0,
+      "branch": 93.7
+    },
+    "src/klayout_tools/sim_measurement_results.py": {
+      "line": 99.0,
+      "branch": 94.7
+    },
+    "src/klayout_tools/sim_merge.py": {
+      "line": 91.8,
+      "branch": 82.1
+    },
+    "src/klayout_tools/sim_mismatch_gate.py": {
+      "line": 93.1,
+      "branch": 84.7
+    },
+    "src/klayout_tools/sim_model_bins.py": {
+      "line": 98.9,
+      "branch": 97.2
+    },
+    "src/klayout_tools/sim_noise.py": {
+      "line": 96.2,
+      "branch": 93.1
+    },
+    "src/klayout_tools/sim_op_args.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/sim_op_check.py": {
+      "line": 95.7,
+      "branch": 92.1
+    },
+    "src/klayout_tools/sim_param_file.py": {
+      "line": 94.5,
+      "branch": 90.9
+    },
+    "src/klayout_tools/sim_passes.py": {
+      "line": 95.5,
+      "branch": 96.3
+    },
+    "src/klayout_tools/sim_peak_rss.py": {
+      "line": 92.3,
+      "branch": 100.0
+    },
+    "src/klayout_tools/sim_plan.py": {
+      "line": 87.9,
+      "branch": 81.8
+    },
+    "src/klayout_tools/sim_plot.py": {
+      "line": 100.0,
+      "branch": 95.4
+    },
+    "src/klayout_tools/sim_portable.py": {
+      "line": 92.8,
+      "branch": 80.0
+    },
+    "src/klayout_tools/sim_raw.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/sim_remote.py": {
+      "line": 96.7,
+      "branch": 91.6
+    },
+    "src/klayout_tools/sim_request_overrides.py": {
+      "line": 90.0,
+      "branch": 81.8
+    },
+    "src/klayout_tools/sim_search.py": {
+      "line": 96.7,
+      "branch": 93.4
+    },
+    "src/klayout_tools/sim_set.py": {
+      "line": 95.7,
+      "branch": 76.7
+    },
+    "src/klayout_tools/sim_settled.py": {
+      "line": 95.8,
+      "branch": 90.0
+    },
+    "src/klayout_tools/sim_slug.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/sim_snm.py": {
+      "line": 98.4,
+      "branch": 95.8
+    },
+    "src/klayout_tools/sim_snm_meas.py": {
+      "line": 99.0,
+      "branch": 93.7
+    },
+    "src/klayout_tools/sim_staging.py": {
+      "line": 95.5,
+      "branch": 93.3
+    },
+    "src/klayout_tools/sim_step_resolution.py": {
+      "line": 94.5,
+      "branch": 88.6
+    },
+    "src/klayout_tools/sim_steps.py": {
+      "line": 95.7,
+      "branch": 91.5
+    },
+    "src/klayout_tools/sim_stimulus.py": {
+      "line": 94.6,
+      "branch": 86.1
+    },
+    "src/klayout_tools/sim_stress.py": {
+      "line": 94.8,
+      "branch": 89.6
+    },
+    "src/klayout_tools/sim_subckt_override.py": {
+      "line": 93.9,
+      "branch": 88.2
+    },
+    "src/klayout_tools/sim_supply_relative.py": {
+      "line": 96.7,
+      "branch": 92.8
+    },
+    "src/klayout_tools/sim_supply_waveform.py": {
+      "line": 97.1,
+      "branch": 94.0
+    },
+    "src/klayout_tools/sim_tian.py": {
+      "line": 98.7,
+      "branch": 97.2
+    },
+    "src/klayout_tools/sim_transfer.py": {
+      "line": 97.6,
+      "branch": 94.7
+    },
+    "src/klayout_tools/sim_transfer_meas.py": {
+      "line": 97.2,
+      "branch": 95.0
+    },
+    "src/klayout_tools/sim_twoport.py": {
+      "line": 97.2,
+      "branch": 95.0
+    },
+    "src/klayout_tools/sim_validate.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/sim_waveform_opts.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/sim_xyce_refusals.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/size.py": {
+      "line": 93.3,
+      "branch": 86.2
+    },
+    "src/klayout_tools/size_topology.py": {
+      "line": 93.3,
+      "branch": 85.8
+    },
+    "src/klayout_tools/socket_check.py": {
+      "line": 92.9,
+      "branch": 85.6
+    },
+    "src/klayout_tools/spice_flatten.py": {
+      "line": 93.4,
+      "branch": 86.7
+    },
+    "src/klayout_tools/sta.py": {
+      "line": 100.0,
+      "branch": null
+    },
+    "src/klayout_tools/stats.py": {
+      "line": 96.4,
+      "branch": 89.7
+    },
+    "src/klayout_tools/substrate_resistance.py": {
+      "line": 97.0,
+      "branch": 90.9
+    },
+    "src/klayout_tools/synthesize.py": {
+      "line": 94.6,
+      "branch": 90.8
+    },
+    "src/klayout_tools/synthesize_abc_timing.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/synthesize_arithmetic.py": {
+      "line": 88.7,
+      "branch": 84.4
+    },
+    "src/klayout_tools/synthesize_memory.py": {
+      "line": 97.5,
+      "branch": 93.1
+    },
+    "src/klayout_tools/synthesize_netlist_normalize.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/synthesize_x_scan.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/tap_distance.py": {
+      "line": 86.7,
+      "branch": 80.2
+    },
+    "src/klayout_tools/techmap.py": {
+      "line": 74.1,
+      "branch": 55.5
+    },
+    "src/klayout_tools/touchstone.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/trajectory.py": {
+      "line": 95.1,
+      "branch": 88.5
+    },
+    "src/klayout_tools/verilog_module_names.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/verilog_netlist.py": {
+      "line": 92.9,
+      "branch": 87.3
+    },
+    "src/klayout_tools/verilog_pin_bind.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
+    "src/klayout_tools/wave.py": {
+      "line": 73.2,
+      "branch": 41.6
+    },
+    "src/klayout_tools/yield_analysis.py": {
+      "line": 84.8,
+      "branch": 80.0
+    },
+    "src/klayout_tools/yield_campaign.py": {
+      "line": 93.2,
+      "branch": 81.6
+    },
+    "src/klayout_tools/yield_provenance.py": {
+      "line": 72.7,
+      "branch": 58.3
+    },
+    "src/klayout_tools/yield_sampling_fields.py": {
+      "line": 92.5,
+      "branch": 89.4
+    },
+    "src/klayout_tools/yield_sensitivity.py": {
+      "line": 75.3,
+      "branch": 75.0
+    }
+  }
+}

@@ -44,6 +44,8 @@ import json
 import os
 from typing import Any
 
+from . import env_provenance
+from ._jsonnum import is_int
 from ._verilog_params import chparam_lines, read_verilog_line
 
 #: The memory outcome vocabulary, per module and overall. Fixed (a caller may
@@ -131,7 +133,7 @@ def memory_evidence_script_text(
             lines.append(
                 f"tee -q -o {rel(library_cells_path)} select -list =A:blackbox"
             )
-    lines += [read_verilog_line(rel(path), defines) for path in sources]
+    lines += [read_verilog_line(rel(path), defines, parameters) for path in sources]
     for macro_input in macro_inputs:
         reader = (
             "read_liberty -lib"
@@ -167,7 +169,7 @@ def _load_modules(stats_path: str) -> dict[str, Any] | None:
 
 
 def _int(value: Any) -> int:
-    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+    return value if is_int(value) else 0
 
 
 def memory_counts(modules: dict[str, Any]) -> dict[str, dict[str, int]]:
@@ -407,7 +409,6 @@ def collect_memory_evidence(
     """
     from .synthesize import (
         SynthesizeError,
-        _report_path,
         _run_yosys,
         _write_script_text,
     )
@@ -427,7 +428,9 @@ def collect_memory_evidence(
     pre_lowering_path = os.path.join(
         output_dir, f"{hdl_toplevel}{_PRE_LOWERING_STATS_SUFFIX}"
     )
-    reported_script = _report_path(script_path, repo_root=repo_root)
+    reported_script = env_provenance.repo_relative_path(
+        script_path, repo_root=repo_root
+    )
     try:
         _write_script_text(
             script_path,

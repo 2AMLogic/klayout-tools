@@ -18,11 +18,23 @@ from __future__ import annotations
 
 import functools
 import importlib
+import importlib.metadata
 import json
 import os
 import shutil
 import subprocess
 from typing import Any
+
+
+def native_provenance(module_name: str, dist_name: str) -> dict[str, Any]:
+    """Which native build produced a report: module name plus the installed
+    ``dist_name`` distribution version, ``None`` when no distribution
+    metadata exists (e.g. a ``maturin develop`` build)."""
+    try:
+        version: str | None = importlib.metadata.version(dist_name)
+    except importlib.metadata.PackageNotFoundError:
+        version = None
+    return {"module": module_name, "version": version}
 
 
 def _load_native_extension(
@@ -31,6 +43,7 @@ def _load_native_extension(
     build_dir: str,
     install_hint: str,
     docs_link: str | None = None,
+    extra: str | None = None,
 ) -> Any:
     """Import ``module_name`` (a native Rust extension), raising
     ``error_cls`` with a build-instructions message if it is not installed.
@@ -41,13 +54,28 @@ def _load_native_extension(
     ./native/mom``) quoted in the message's ``(or ...)`` clause;
     ``docs_link`` -- when given -- is appended as a trailing ``; see
     <docs_link>``, matching the two callers whose message links a docs page.
+    ``extra`` -- when given -- names the ``klayout-tools[<extra>]`` extra that
+    ships a prebuilt wheel of the extension; the message then leads with the
+    installed-tool / ``uvx`` install path (a repo-checkout recipe alone is
+    useless to a release-pinned consumer).
     """
     try:
         return importlib.import_module(module_name)
     except ImportError as exc:
+        prefix = f"the {module_name} extension is not installed -- "
+        if extra is not None:
+            prefix += (
+                f"installed tool / uvx users: re-run with the extra "
+                f"(`pip install 'klayout-tools[{extra}]'`, or `uvx --from "
+                f'"klayout-tools[{extra}]" klt ...`); prebuilt wheels cover '
+                "Linux x86_64 and macOS arm64 only, other platforms build "
+                "from source. "
+            )
+            prefix += "From a repo checkout, run"
+        else:
+            prefix += "from a repo checkout, run"
         message = (
-            f"the {module_name} extension is not installed -- from a repo "
-            f"checkout, run `maturin develop --release` inside {build_dir} "
+            f"{prefix} `maturin develop --release` inside {build_dir} "
             f"(or `{install_hint}`)"
         )
         if docs_link is not None:

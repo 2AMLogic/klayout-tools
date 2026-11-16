@@ -105,6 +105,7 @@ never be confused with "the analysis never ran".
 
 from __future__ import annotations
 
+import copy
 import os
 import re
 import subprocess
@@ -113,11 +114,12 @@ from collections.abc import Callable
 from typing import Any
 
 from . import _spice_number as spice_number
-from . import env_provenance
+from . import env_provenance, sim_osdi_pin
+from ._jsonnum import is_number
 from ._paths import (
-    _fold_spice_continuations,
     _load_request_json,
     _resolve_relative,
+    fold_spice_continuations,
     validate_request_shape,
 )
 from ._provenance import build_provenance, sha256_file
@@ -135,7 +137,7 @@ from .sim import (
     _resolve_corner_section_libs,
     _resolve_models_lib,
     _resolve_netlist_include,
-    _resolve_osdi_preload,
+    _resolve_param_file,
     _scale_supply_waveforms,
     _supply_alter_lines,
 )
@@ -330,6 +332,10 @@ class ParsedNetlist:
         self.expansion_truncated = False
 
 
+#: ``--op-lint-corner`` sentinel: bias every expanded corner (issue #4650).
+ALL_CORNERS = "all"
+
+
 def _strip_comment(line: str) -> str:
     """Drop a trailing ``;``/``$`` SPICE inline comment."""
     for marker in (";", "$ "):
@@ -347,7 +353,7 @@ def _logical_lines(text: str) -> list[str]:
     very first non-blank/non-comment line of ``text`` starts with ``+``) is
     dropped, matching this function's pre-#1741 behaviour -- unlike
     ``pex.py``/``netlist_normalize.py``, which keep such an orphan
-    continuation as a literal line. :func:`_fold_spice_continuations` keeps
+    continuation as a literal line. :func:`fold_spice_continuations` keeps
     an orphan verbatim (``+`` prefix intact) rather than dropping it, so the
     post-pass below filters any still-``+``-prefixed entry it returns.
     """
@@ -358,7 +364,7 @@ def _logical_lines(text: str) -> list[str]:
             continue
         lines.append(line)
     return [
-        line for line in _fold_spice_continuations(lines) if not line.startswith("+")
+        line for line in fold_spice_continuations(lines) if not line.startswith("+")
     ]
 
 
@@ -421,7 +427,7 @@ _MAX_EXPANDED_INSTANCES = 20000
 
 _SUBCKT_CARD_RE = re.compile(r"^\.subckt\b", re.IGNORECASE)
 _ENDS_CARD_RE = re.compile(r"^\.(ends|eom)\b", re.IGNORECASE)
-_INCLUDE_CARD_RE = re.compile(r"^\.(include|inc)\s+(.+)$", re.IGNORECASE)
+INCLUDE_CARD_RE = re.compile(r"^\.(include|inc)\s+(.+)$", re.IGNORECASE)
 
 
 class _SubcktDef:
@@ -438,7 +444,7 @@ class _SubcktDef:
         self.from_include = from_include
 
 
-class _IncludeState:
+class IncludeState:
     """Bookkeeping for one parse's include expansion."""
 
     __slots__ = ("seen", "base_dir")
@@ -448,8 +454,8 @@ class _IncludeState:
         self.base_dir = base_dir
 
 
-def _expand_includes(
-    lines: list[str], base_dir: str | None, state: _IncludeState
+def expand_includes(
+    lines: list[str], base_dir: str | None, state: IncludeState
 ) -> list[str]:
     """Replace each resolvable ``.include``/``.inc`` card with the logical
     lines of the file it names (recursively, relative to that file's own
@@ -458,7 +464,7 @@ def _expand_includes(
     never assumes more than it can read."""
     out: list[str] = []
     for line in lines:
-        card = _INCLUDE_CARD_RE.match(line)
+        card = INCLUDE_CARD_RE.match(line)
         if card is None:
             out.append(line)
             continue
@@ -479,7 +485,7 @@ def _expand_includes(
                 text = handle.read()
         except OSError:
             continue
-        out.extend(_expand_includes(_logical_lines(text), os.path.dirname(path), state))
+        out.extend(expand_includes(_logical_lines(text), os.path.dirname(path), state))
     return out
 
 
@@ -534,17 +540,17 @@ def parse_netlist(
     """
     parsed = ParsedNetlist()
     model_kinds: dict[str, str] = {}
-    state = _IncludeState(base_dir)
+    state = IncludeState(base_dir)
 
     body_lines = _logical_lines(text)
     defs: dict[str, _SubcktDef] = {}
     # Definitions in the body win over same-named ones from an include.
     top_lines = _split_subckts(body_lines, defs, from_include=False)
-    top_lines = _expand_includes(top_lines, base_dir, state)
+    top_lines = expand_includes(top_lines, base_dir, state)
     # Includes can also sit inside a subckt body; expand those before the
     # definitions are used so the flat DUT file is visible to the walk.
     for definition in list(defs.values()):
-        definition.lines = _expand_includes(definition.lines, base_dir, state)
+        definition.lines = expand_includes(definition.lines, base_dir, state)
     top_lines = _split_subckts(top_lines, defs, from_include=True)
     for definition in list(defs.values()):
         if any(_SUBCKT_CARD_RE.match(entry) for entry in definition.lines):
@@ -974,7 +980,7 @@ def _triode_margin_v(temperature_c: float, thresholds: dict[str, Any]) -> float:
     comment for why the thermal voltage is the right scale.
     """
     explicit = thresholds.get("triode_margin_v")
-    if isinstance(explicit, (int, float)) and not isinstance(explicit, bool):
+    if is_number(explicit):
         return float(explicit)
     multiple = thresholds.get("triode_margin_kt", _DEFAULT_TRIODE_MARGIN_KT)
     if not isinstance(multiple, (int, float)) or isinstance(multiple, bool):
@@ -1332,6 +1338,124 @@ def _refuse_param_axis(point: Any) -> None:
         )
 
 
+def _corner_margin_entry(
+    corner_id: str,
+    devices: list[MosInstance],
+    diagnostics: list[dict[str, str]],
+) -> dict[str, Any]:
+    """One ``corner_margins`` row: the worst ``|Vds| - |Vdsat|`` over the MOS
+    devices that answered both values (``null`` when none did -- never a
+    fabricated margin), the device owning it, and how many sit in triode."""
+    worst_device: str | None = None
+    worst_margin: float | None = None
+    triode_count = 0
+    for device in devices:
+        vds = device.values.get("vds_v")
+        vdsat = device.values.get("vdsat_v")
+        if vds is None or vdsat is None:
+            continue
+        margin = abs(vds) - abs(vdsat)
+        if margin < 0:
+            triode_count += 1
+        if worst_margin is None or margin < worst_margin:
+            worst_margin = margin
+            worst_device = device.name
+    return {
+        "corner_id": corner_id,
+        "worst_device": worst_device,
+        "worst_margin_v": None if worst_margin is None else round(worst_margin, 6),
+        "triode_count": triode_count,
+        "diagnostics": [d for d in diagnostics if d["severity"] == "error"],
+    }
+
+
+def _other_corner_entry(
+    other: Any,
+    *,
+    pristine_devices: list[MosInstance],
+    netlist_path: str,
+    models_lib: str | None,
+    probe_nodes: Any,
+    timeout_s: Any,
+    osdi_preload: Any,
+) -> dict[str, Any]:
+    """Bias one additional expanded corner and return its ``corner_margins`` row."""
+    other_devices = copy.deepcopy(pristine_devices)
+    other_log, _, _, other_launch = _run_op(
+        netlist_path=netlist_path,
+        models_lib=models_lib if _needs_models_lib(other) else None,
+        point=other,
+        devices=other_devices,
+        probe_nodes=probe_nodes,
+        timeout_s=timeout_s,
+        osdi_preload=osdi_preload,
+    )
+    other_resolved, other_voltages = _parse_op_log(other_log, other_devices)
+    other_diagnostics = list(other_launch)
+    other_diagnostics.extend(_classify_diagnostics(other_log, netlist_path))
+    produced = bool(other_voltages or other_resolved)
+    if produced and not _SIMULATION_ABORTED_RE.search(other_log):
+        for diagnostic in other_diagnostics:
+            if diagnostic["code"] in ("singular_matrix", "nonconvergence"):
+                diagnostic["severity"] = "warning"
+    if other_devices and not produced:
+        other_diagnostics.append(
+            {
+                "severity": "error",
+                "code": "op_point_unavailable",
+                "message": "the operating point produced no values",
+            }
+        )
+    return _corner_margin_entry(other.corner_id, other_devices, other_diagnostics)
+
+
+def _margin_sort_key(entry: dict[str, Any]) -> tuple[bool, float, str]:
+    margin = entry["worst_margin_v"]
+    return (margin is None, 0.0 if margin is None else margin, entry["corner_id"])
+
+
+def _corner_margins_table(
+    points: list[Any],
+    first: Any,
+    first_devices: list[MosInstance],
+    first_diagnostics: list[dict[str, str]],
+    **bias: Any,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Build the ``corner_margins`` table (worst margin first) and report
+    whether any corner other than the first raised an error diagnostic."""
+    table = [_corner_margin_entry(first.corner_id, first_devices, first_diagnostics)]
+    other_error = False
+    for other in points:
+        if other is first:
+            continue
+        entry = _other_corner_entry(other, **bias)
+        table.append(entry)
+        other_error = other_error or bool(entry["diagnostics"])
+    table.sort(key=_margin_sort_key)
+    return table, other_error
+
+
+def _select_points(points: list[Any], corner: str | None) -> tuple[Any, list[Any]]:
+    """Pick the first-reported point and the points to bias (all of them for
+    ``corner="all"``), refusing a ``params`` axis on any biased point."""
+    all_corners = corner == ALL_CORNERS
+    if corner is not None and not all_corners:
+        selected = [point for point in points if point.corner_id == corner]
+        if not selected:
+            available = ", ".join(point.corner_id for point in points)
+            raise OpSanityError(
+                f"corner '{corner}' is not in this request's matrix "
+                f"(available: {available})"
+            )
+        point = selected[0]
+    else:
+        point = points[0]
+    biased_points = points if all_corners else [point]
+    for biased in biased_points:
+        _refuse_param_axis(biased)
+    return point, biased_points
+
+
 def run_op_sanity(
     request_path: str,
     *,
@@ -1344,7 +1468,10 @@ def run_op_sanity(
     ``corners`` matrix to bias at, by ``corner_id``; the first expanded
     point is used when omitted. Exactly one corner is run -- this is a
     diagnostic meant to be cheap enough to run on every Loop A miss, not a
-    second corner sweep.
+    second corner sweep -- except for ``corner="all"`` (:data:`ALL_CORNERS`),
+    which additionally biases every other expanded corner, sequentially, to
+    fill the report's ``corner_margins`` table (issue #4650). The top-level
+    ``corner``/``devices``/``findings`` still describe the first corner.
 
     Returns a dict matching the documented JSON schema (see
     ``docs/cli/sim.md``'s "Operating-point lint"). Raises
@@ -1387,31 +1514,21 @@ def run_op_sanity(
             "this request's `exclude` rules leave no corner to bias the "
             "operating point at"
         )
-    if corner is not None:
-        selected = [point for point in points if point.corner_id == corner]
-        if not selected:
-            available = ", ".join(point.corner_id for point in points)
-            raise OpSanityError(
-                f"corner '{corner}' is not in this request's matrix "
-                f"(available: {available})"
-            )
-        point = selected[0]
-    else:
-        point = points[0]
-    _refuse_param_axis(point)
+    all_corners = corner == ALL_CORNERS
+    point, biased_points = _select_points(points, corner)
 
     models = request.get("models") or {}
     models_lib: str | None = None
     try:
-        # Issue #2522: resolve (and existence-check) any per-section corner
-        # library this point's bundle names, then the request's own
-        # `models.lib` -- needed only when some selected section actually
-        # reads from it (`_needs_models_lib`).
-        _resolve_corner_section_libs([point], models, request_dir)
-        if _needs_models_lib(point):
+        # Issues #2522/#4759: resolve per-section corner libs and
+        # `models.param_file`, then `models.lib` iff a section reads it.
+        _resolve_corner_section_libs(biased_points, models, request_dir)
+        _resolve_param_file([point, *biased_points], models, request_dir)
+        if any(_needs_models_lib(biased) for biased in biased_points):
             models_lib = _resolve_models_lib(models, request_dir)
     except SimError as exc:
         raise OpSanityError(str(exc)) from exc
+    point_models_lib = models_lib if _needs_models_lib(point) else None
 
     provenance_pdk: dict[str, Any] | None = None
     if models.get("pdk") or models.get("pdk_root"):
@@ -1424,11 +1541,11 @@ def run_op_sanity(
 
     options = request.get("options") or {}
     timeout_s = op_lint.get("timeout_s", options.get("timeout_s", DEFAULT_TIMEOUT_S))
-    # Issue #2513: the same request document drives the sweep and this lint,
-    # so an OSDI-model PDK's preload must reach this deck too -- otherwise
-    # every device would be an undefined model here and only here.
+    # Issue #2513: the sweep's OSDI preload must reach this deck too.
     try:
-        osdi_preload = _resolve_osdi_preload(options, request_dir)
+        osdi_preload = sim_osdi_pin.resolve_osdi_preload(
+            options, request_dir, pdk_root=sim_osdi_pin.osdi_pdk_root_pin(request)
+        )
     except SimError as exc:
         raise OpSanityError(str(exc)) from exc
 
@@ -1437,9 +1554,12 @@ def run_op_sanity(
     )
 
     probe_nodes = sorted(node for node in parsed.nodes if node != "0")
+    # Corners other than the first are biased on pristine device copies,
+    # since `_parse_op_log` fills `values` in place.
+    pristine_devices = copy.deepcopy(parsed.devices) if all_corners else []
     log_text, engine_version, runtime_s, launch_diagnostics = _run_op(
         netlist_path=netlist_path,
-        models_lib=models_lib,
+        models_lib=point_models_lib,
         point=point,
         devices=parsed.devices,
         probe_nodes=probe_nodes,
@@ -1561,6 +1681,23 @@ def run_op_sanity(
         for index, device in enumerate(parsed.devices)
     ]
 
+    corner_margins: list[dict[str, Any]] | None = None
+    if all_corners:
+        corner_margins, other_error = _corner_margins_table(
+            points,
+            point,
+            parsed.devices,
+            diagnostics,
+            pristine_devices=pristine_devices,
+            netlist_path=netlist_path,
+            models_lib=models_lib,
+            probe_nodes=probe_nodes,
+            timeout_s=timeout_s,
+            osdi_preload=osdi_preload,
+        )
+        if other_error:
+            status = "error"
+
     return {
         "schema_version": SCHEMA_VERSION,
         "status": status,
@@ -1571,6 +1708,7 @@ def run_op_sanity(
             "supply_v": dict(point.supply_v),
             "temperature_c": point.temperature_c,
         },
+        "corner_margins": corner_margins,
         "device_count": len(parsed.devices),
         "finding_count": len(findings),
         "error_count": error_count,

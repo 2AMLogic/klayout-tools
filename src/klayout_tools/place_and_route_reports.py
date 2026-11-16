@@ -154,6 +154,10 @@ _NOT_REPORTED = "the engine did not print this figure in the stage log"
 _NO_GCELL_USAGE = (
     "OpenROAD's global router reports usage per routing layer, not per GCell"
 )
+_NO_CONGESTION_REPORT = (
+    "no `global_route -congestion_report_file` report was produced or it held "
+    "no congestion violations"
+)
 _NO_PARTIAL_ROUTE_CHECK = (
     "OpenROAD exposes no per-net connectivity check; only nets with no routed "
     "wire at all are counted"
@@ -196,6 +200,85 @@ def parse_routing_completeness(stdout: str) -> dict[str, int] | None:
         "signal_net_count": int(match.group(1)),
         "unrouted_net_count": int(match.group(2)),
     }
+
+
+# One violation record of `global_route -congestion_report_file` (captured
+# live from OpenROAD 26Q3-1510-g6cb3f2b704, fixture
+# tests/fixtures/place_and_route/gcd_global_route_congestion.rpt):
+#   violation type: Horizontal congestion
+#       srcs: net:_005_ net:_118_
+#       comment: capacity:3 usage:7 congestion:4
+#       bbox = (48.3000, 27.6000) - (55.2000, 34.5000) on Layer -
+# The layer is printed as ``-`` in that capture, so it is reported as null
+# rather than guessed.
+_CONG_RECORD_RE = re.compile(
+    r"violation type:\s*(?P<dir>\w+) congestion\s*\n"
+    r"(?:\s*srcs:[^\n]*\n)?"
+    r"\s*comment:\s*capacity:(?P<cap>-?\d+)\s+usage:(?P<use>-?\d+)\s+"
+    r"congestion:(?P<cong>-?\d+)\s*\n"
+    r"\s*bbox\s*=\s*\((?P<x1>[-\d.]+),\s*(?P<y1>[-\d.]+)\)\s*-\s*"
+    r"\((?P<x2>[-\d.]+),\s*(?P<y2>[-\d.]+)\)\s+on Layer\s+(?P<layer>\S+)"
+)
+OVERFLOW_REGIONS_TOP_N = 20
+
+
+def _attribute_region(
+    cx: float, cy: float, macro_boxes: list[dict[str, Any]]
+) -> dict[str, str] | None:
+    for box in macro_boxes:
+        x1, y1, x2, y2 = box["footprint"]
+        if x1 <= cx <= x2 and y1 <= cy <= y2:
+            return {"macro": box["instance"], "where": "inside_footprint"}
+    for box in macro_boxes:
+        x1, y1, x2, y2 = box["footprint"]
+        m = box["margin"]
+        if (
+            x1 - m["left"] <= cx <= x2 + m["right"]
+            and y1 - m["bottom"] <= cy <= y2 + m["top"]
+        ):
+            return {"macro": box["instance"], "where": "keepout_band"}
+    return None
+
+
+def parse_congestion_report(
+    report_path: str,
+    macro_boxes: list[dict[str, Any]],
+    top_n: int = OVERFLOW_REGIONS_TOP_N,
+) -> list[dict[str, Any]] | None:
+    """Worst-``top_n`` overflow regions from a ``-congestion_report_file``;
+    ``None`` when the file is absent/unreadable or holds no violation.
+
+    ``macro_boxes`` is ``[{instance, footprint=(x1,y1,x2,y2), margin}]``; a
+    region is attributed to the first macro whose footprint holds its GCell
+    centre (``inside_footprint``), else whose footprint + keep-out margin does
+    (``keepout_band``); otherwise ``macro`` is ``null``.
+    """
+    try:
+        with open(report_path, encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    except OSError:
+        return None
+    regions: list[dict[str, Any]] = []
+    for m in _CONG_RECORD_RE.finditer(text):
+        x1, y1, x2, y2 = (float(m[k]) for k in ("x1", "y1", "x2", "y2"))
+        attribution = _attribute_region((x1 + x2) / 2, (y1 + y2) / 2, macro_boxes)
+        regions.append(
+            {
+                "direction": m["dir"].lower(),
+                "layer": None if m["layer"] == "-" else m["layer"],
+                "bbox_um": [x1, y1, x2, y2],
+                "capacity": int(m["cap"]),
+                "usage": int(m["use"]),
+                "overflow": int(m["cong"]),
+                "macro": attribution["macro"] if attribution else None,
+                "where": attribution["where"] if attribution else None,
+            }
+        )
+    if not regions:
+        return None
+    # Stable: worst overflow first, ties keep report order.
+    regions.sort(key=lambda r: -r["overflow"])
+    return regions[:top_n]
 
 
 def parse_global_route_congestion(stdout: str) -> dict[str, Any] | None:
@@ -296,6 +379,7 @@ def build_congestion(
     completeness: dict[str, int] | None,
     placement: dict[str, Any],
     detailed: dict[str, Any],
+    overflow_regions: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Assemble the route-stage ``congestion`` block. Every field the engine
     could not produce is ``null`` and named, with its reason, in
@@ -315,6 +399,9 @@ def build_congestion(
         gr[key] = None if global_route is None else global_route[key]
         if gr[key] is None:
             reasons[f"global_route.{key}"] = _NOT_REPORTED
+    gr["overflow_regions"] = overflow_regions
+    if overflow_regions is None:
+        reasons["global_route.overflow_regions"] = _NO_CONGESTION_REPORT
     gr["max_gcell_usage_pct"] = None
     reasons["global_route.max_gcell_usage_pct"] = _NO_GCELL_USAGE
 

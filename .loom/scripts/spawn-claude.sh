@@ -106,8 +106,8 @@
 #                          of asking the local daemon for it. A test hook,
 #                          and the escape hatch for a host whose concurrent
 #                          agents this daemon does not track.
-#   LOOM_SWEEP_INFLIGHT_PROBE_TIMEOUT_SECS  Hard bound on that daemon probe
-#                          (default `10`). On timeout the divisor falls back
+#   LOOM_SWEEP_INFLIGHT_PROBE_TIMEOUT_SECS  Hang-guard bound on that daemon probe
+#                          (default `60`, above the CLI budget). On timeout the divisor falls back
 #                          to `1`, i.e. exactly pre-#5979 behavior.
 #   LOOM_SWEEP_CPU_BUDGET_CORES  OUTPUT, not an input: exported into the
 #                          spawned session with the computed per-sweep core
@@ -1165,7 +1165,7 @@ if [[ -z "${LOOM_SPAWN_NO_EXPORT:-}" && -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; th
     _account_provider="$(_loom_account_provider_for_runtime claude)"
     _select_args=(tokens select --workspace "$WORKSPACE" --provider "$_account_provider" --export)
     # Pre-flight: auto-unpin if every allowlisted account has hit the
-    # consecutive-failure threshold (default 5). Without this, an
+    # failure-count threshold (default 5). Without this, an
     # operator-set pin can trap the spawner once all pinned accounts
     # exhaust their weekly quota. Empty-pool guard: we never silently
     # clear .bad_tokens — if that file blocks every account, the user

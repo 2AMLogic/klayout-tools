@@ -1,0 +1,92 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:12:00.143300+00:00",
+  "slug": "sky130-droop-detector",
+  "name": "Sky130 Droop Detector",
+  "description": "Supply droop detector on sky130 \u2014 2AM Logic canary block",
+  "pdk": "sky130",
+  "spec_summary": {
+    "rows": [
+      {
+        "parameter": "Monitored rail",
+        "fallback": "1.8 V (`sky130-ldo` output)",
+        "target": "1.8 V",
+        "stretch": "any rail 1.6\u20131.95 V"
+      },
+      {
+        "parameter": "Detector supply",
+        "fallback": "3.3 V LDO input rail",
+        "target": "3.3 V LDO input rail"
+      },
+      {
+        "parameter": "Threshold reference",
+        "fallback": "generated in-tree",
+        "target": "generated in-tree, no sibling `consumes` edge",
+        "stretch": "external pin (operator decision)"
+      },
+      {
+        "parameter": "Threshold settings",
+        "fallback": "1 fixed level, \u2265 5% below nominal",
+        "target": "4 levels, at 4 / 6 / 9 / 12% below nominal",
+        "stretch": "8 levels, programmable"
+      },
+      {
+        "parameter": "Threshold accuracy over PVT",
+        "fallback": "\u00b13% of nominal",
+        "target": "\u00b11.5% of nominal",
+        "stretch": "\u00b10.75%"
+      },
+      {
+        "parameter": "Detection latency (100 mV overdrive)",
+        "fallback": "< 20 ns",
+        "target": "< 5 ns",
+        "stretch": "< 1 ns"
+      },
+      {
+        "parameter": "Minimum detected droop width",
+        "fallback": "50 ns",
+        "target": "10 ns",
+        "stretch": "2 ns"
+      },
+      {
+        "parameter": "False-flag immunity",
+        "fallback": "no flag for excursions inside the LDO's \u00b12% window",
+        "target": "same, across PVT and noise"
+      },
+      {
+        "parameter": "Glitch filter",
+        "fallback": "rejects comparator pulses shorter than a designed width",
+        "target": "same; must pass the minimum-width droop, delay counted in latency"
+      },
+      {
+        "parameter": "Quiescent current",
+        "fallback": "< 100 \u00b5A",
+        "target": "< 50 \u00b5A",
+        "stretch": "< 20 \u00b5A"
+      },
+      {
+        "parameter": "Output",
+        "fallback": "sticky digital flag + clear",
+        "target": "same, plus a live (non-sticky) flag"
+      },
+      {
+        "parameter": "Area",
+        "fallback": "deferred (no floorplan yet)",
+        "target": "deferred"
+      },
+      {
+        "parameter": "Signoff",
+        "fallback": "DRC + LVS clean",
+        "target": "DRC + LVS clean, post-layout re-verified"
+      }
+    ],
+    "status_note": "ratified \u2014 see [`spec/target-spec.md`](spec/target-spec.md"
+  },
+  "source": {
+    "repo": "2AMLogic/sky130-droop-detector",
+    "ref": "8bfd35df8878bbf4d8136dfa978337b0fec74219",
+    "path": "."
+  },
+  "downloadable": true,
+  "status": "in design \u2014 simulation evidence"
+}

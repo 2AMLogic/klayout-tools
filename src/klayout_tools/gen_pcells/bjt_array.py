@@ -15,6 +15,12 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import klayout.db as kdb
 
+from ._common_params import (
+    declare_cut_and_metal_params,
+    declare_dummy_marker_params,
+    declare_well_present,
+)
+
 
 def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
     """Build the ``bjt_array`` reference generator's PCell -- a matched BJT
@@ -69,6 +75,14 @@ def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.TypeDouble,
                 "Emitter diffusion side length (um)",
                 default=0.6,
+            )
+            self.param(
+                "flavor",
+                self.TypeString,  # type: ignore[attr-defined]
+                "sg13g2 only: SiGe HBT cell to instantiate from the PDK's "
+                "sg13g2_pr.gds ('npn13G2' (default), 'npn13G2l' or "
+                "'npn13G2v'); must be empty on every other PDK family",
+                default="",
             )
             self.param("rows", self.TypeInt, "Array rows", default=3)
             self.param("cols", self.TypeInt, "Array columns", default=3)
@@ -125,18 +139,7 @@ def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Emitter/base/collector diffusion (COMP) drawing layer",
                 default=kdb.LayerInfo(0, 0),
             )
-            self.param(
-                "contact_layer",
-                self.TypeLayer,
-                "Contact drawing layer",
-                default=kdb.LayerInfo(0, 0),
-            )
-            self.param(
-                "metal_layer",
-                self.TypeLayer,
-                "Local routing metal drawing layer",
-                default=kdb.LayerInfo(0, 0),
-            )
+            declare_cut_and_metal_params(self, kdb)
             self.param(
                 "tap_layer",
                 self.TypeLayer,
@@ -150,12 +153,7 @@ def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Shared base well drawing layer (only used when well_present)",
                 default=kdb.LayerInfo(0, 0),
             )
-            self.param(
-                "well_present",
-                self.TypeBoolean,
-                "Whether well_layer is a real, DRC-checked layer for the resolved PDK",
-                default=False,
-            )
+            declare_well_present(self)
             self.param(
                 "ring_implant_layer",
                 self.TypeLayer,
@@ -223,33 +221,7 @@ def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "when dummy_present)",
                 default=kdb.LayerInfo(0, 0),
             )
-            self.param(
-                "dummy_present",
-                self.TypeBoolean,
-                "Whether dummy_layer is a real layer this PDK's extraction "
-                "deck declares (see ExtractionDeck.dummy)",
-                default=False,
-            )
-            # Fixed drawn side of every cut on contact_layer (issue #2585) --
-            # harness-computed by `_cut_fixed_size_um` from the resolved PDK
-            # family and layer. `0.0` (no upper size bound) leaves the cuts
-            # exactly as laid out; see `gen._clamp_cut_boxes`.
-            self.param(
-                "contact_fixed_size_um",
-                self.TypeDouble,
-                "Fixed drawn side (um) every cut on contact_layer is clamped "
-                "down to on the resolved PDK family -- 0.0 leaves the "
-                "generator's own cut size unchanged",
-                default=0.0,
-            )
-            self.param(
-                "mfg_grid_um",
-                self.TypeDouble,
-                "Manufacturing grid (um) every cut on contact_layer is "
-                "snapped onto (issue #2648) -- 0.0 leaves cut positions "
-                "unchanged",
-                default=0.0,
-            )
+            declare_dummy_marker_params(self)
 
         def display_text_impl(self) -> str:
             return f"bjt_array({self.rows}x{self.cols},e={self.emitter_um})"

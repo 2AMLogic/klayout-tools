@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:08:37.240974+00:00",
+  "slug": "gf180-opamp",
+  "name": "Gf180 Opamp",
+  "description": "Two-stage Miller op-amp on GF180MCU \u2014 agent-built, open-tool verified",
+  "pdk": "gf180mcu",
+  "layer_count": 8,
+  "cell_count": 2,
+  "instance_count": 1,
+  "layout_file": "pilot_mim_cc.gds",
+  "renders": {
+    "overview": "renders/overview.png",
+    "Via4": "renders/41_0.png",
+    "Metal4": "renders/46_0.png",
+    "layer_46_10": "renders/46_10.png",
+    "FuseTop": "renders/75_0.png",
+    "Metal5": "renders/81_0.png",
+    "layer_81_10": "renders/81_10.png",
+    "CAP_MK": "renders/117_5.png",
+    "MIM_L_MK": "renders/117_10.png",
+    "center_crop": "renders/center_crop/overview.png"
+  },
+  "source": {
+    "repo": "2AMLogic/gf180-opamp",
+    "ref": "957fb2fd37e43b0d737a2979bd01c63c7a44b041",
+    "path": "layout/pilot/gds/pilot_mim_cc.gds"
+  },
+  "downloadable": true,
+  "status": "ok"
+}

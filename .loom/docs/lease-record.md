@@ -36,6 +36,7 @@ documented here.
 - [Publish-side yield-exclusion (Loom #7639; kicad-tools #5331)](#publish-side-yield-exclusion-loom-7639-kicad-tools-5331)
 - [Reclaim instrumentation: absent vs. stale (#6320)](#reclaim-instrumentation-absent-vs-stale-6320)
 - [PR-phase leases (#9401)](#pr-phase-leases-9401)
+- [Dead-record pruning keeps comment volume bounded (#13245)](#dead-record-pruning-keeps-comment-volume-bounded-13245)
 <!-- toc:end -->
 
 ## What a lease record is
@@ -877,3 +878,20 @@ duplicated work.
   read against the reader's clock. The renewer's own offset cancels out, but a
   peer whose clock runs ahead of the forge by more than the remaining margin
   sees the lease expire early and may claim. Keep skew well under the margin.
+
+## Dead-record pruning keeps comment volume bounded (#13245)
+
+Every claim posts a new lease comment (the earliest-`id` tie-break needs
+that), so a repeatedly redrawn issue or PR would otherwise grow without bound
+toward GitHub's per-thread comment cap. A successful claim therefore deletes
+its **own host's** dead records beyond the newest 3, best-effort (a failed
+delete only logs; the claim proceeds):
+
+- Issue leases (`loom:lease`): comments whose own `updated_at` is past the TTL.
+- PR/step leases (`loom:pr-lease*`): released records, expired leases, and
+  yields whose lease is no longer live.
+
+A live lease, another host's record and the newest 3 dead ones are never
+deleted, so the released markers the Judge backstop and step-lease owner
+read back survive. The Builder step-outcome comment
+(`loom:builder-step-outcome`) is edited in place instead of re-posted.

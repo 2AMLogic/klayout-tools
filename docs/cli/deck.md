@@ -609,9 +609,9 @@ field by field, which two separate passes on a real design had to do
   of them fails identically and silently.
 - `topology` — `resistor` entries only (issue #2679): how the `body`
   terminal's layer relates to the `marker`. `"overlap"` (the default, and
-  every resistor class except sg13g2's poly resistors) means the marker is drawn *on* the
+  every resistor class except the sg13g2/sg13cmos5l poly resistors) means the marker is drawn *on* the
   body conductor and the resistor is their overlap, narrowed by `requires`/
-  `excludes`. `"abutting_heads"` (sg13g2's `rsil`/`rppd`/`rhigh`) means the
+  `excludes`. `"abutting_heads"` (sg13g2's and sg13cmos5l's `rsil`/`rppd`/`rhigh`) means the
   marker layer *is* the resistive body — `requires`/`excludes` narrow the
   marker region — and the `body` layer is only the contact heads: it must
   touch that body in two separate head regions (abutting with zero overlap,
@@ -676,6 +676,10 @@ python scripts/generate_deck_history.py
 git add src/klayout_tools/decks/_history.json
 git commit -m "chore(decks): regenerate deck history table for vX.Y.Z"
 ```
+
+`python scripts/generate_deck_history.py --as-release vX.Y.Z` records `HEAD`
+as the not-yet-tagged release `vX.Y.Z`; the automated release PR uses it so no
+follow-up push is needed (issue #4920).
 
 Idempotent — re-running it against unchanged tag history reproduces
 byte-identical output, so it is safe to run speculatively. A standalone

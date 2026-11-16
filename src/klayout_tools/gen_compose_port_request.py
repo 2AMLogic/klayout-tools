@@ -27,6 +27,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from ._jsonnum import is_number
+
 #: Error codes (``error.code`` in the JSON envelope), documented in
 #: ``docs/cli/gen-compose.md``.
 CODE_INVALID = "port_request_invalid"
@@ -46,10 +48,6 @@ def _error(message: str, code: str, **details: Any) -> Exception:
     return GenComposeError(message, code=code, details=details or None)
 
 
-def _is_number(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
-
-
 def parse_port_request(raw: Any, where: str) -> dict[str, Any]:
     """Validate one ``pins[].request`` object; returns ``{x_um?, y_um?,
     layer_role?}`` holding only the keys the caller supplied."""
@@ -66,7 +64,7 @@ def parse_port_request(raw: Any, where: str) -> dict[str, Any]:
     for axis in ("x_um", "y_um"):
         if axis in raw:
             value = raw[axis]
-            if not _is_number(value) or value != value or abs(value) == float("inf"):
+            if not is_number(value) or value != value or abs(value) == float("inf"):
                 raise _error(
                     f"{where}.request.{axis} must be a finite number", CODE_INVALID
                 )

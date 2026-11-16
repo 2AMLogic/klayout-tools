@@ -92,7 +92,15 @@ import re
 import subprocess
 from typing import Any
 
+from ._text import read_text as _read_text
 from .lef_header import parse_lef_header
+
+#: Re-exported (self-aliased so linters recognise the re-export as
+#: intentional) from the module they were split into for the file-size
+#: ratchet (issue #5449): `pdk.ambiguity_warning` / `pdk.AMBIGUITY_REMEDY`
+#: are the spellings `klt sim`, `klt netlist` and the docs use.
+from .pdk_ambiguity import AMBIGUITY_REMEDY as AMBIGUITY_REMEDY
+from .pdk_ambiguity import ambiguity_warning as ambiguity_warning
 from .pdk_compat import (
     check_compatibility,
     check_expected_version,
@@ -106,6 +114,7 @@ from .pdk_families import (
     pdk_variant_family,
     pdk_variant_install_names,
 )
+from .pdk_store import read_store_stamp
 
 #: The ciel/volare stores, in resolution order (step 3). ``~`` is expanded at
 #: call time against ``$HOME``. Exposed at module scope so tests can override
@@ -345,36 +354,6 @@ def _ambiguous_roots(
         if any(entry["name"] == variant_name for entry in _probe_root(root_path)):
             matches.append({"root": root_path, "resolved_via": resolved_via})
     return matches
-
-
-def ambiguity_warning(report: dict[str, Any]) -> str | None:
-    """Render a one-line warning for a :func:`find_pdk` report whose
-    ``ambiguous_roots`` is non-empty, or ``None`` when the resolution was
-    unambiguous (issue #2564).
-
-    Pure formatter: this module never prints (see the module docstring), so a
-    caller emits the returned string itself -- to stderr for a CLI verb, or
-    into its own diagnostics channel. The message names the **absolute** root
-    actually read and every root skipped, because that is the only form of
-    the information a caller can act on; the JSON reports carry the
-    path-free ``resolved_via`` labels instead (see ``docs/json-contract.md``'s
-    path-privacy rule for committed evidence).
-    """
-    skipped = report.get("ambiguous_roots") or []
-    if not skipped:
-        return None
-    others = ", ".join(
-        f"{entry['root']} ({entry['resolved_via']})" for entry in skipped
-    )
-    return (
-        f"klt: warning: {len(skipped) + 1} installs provide PDK variant "
-        f"{report['variant']!r}; read {report['root']} "
-        f"({report['resolved_via']}), skipped {others}. Resolution is "
-        "first-match-wins, so a pinned open_pdks build may not be the one "
-        "this run read -- pin the root explicitly (--pdk-root, or a "
-        "request's models.pdk_root) to disable the search and choose "
-        "deliberately."
-    )
 
 
 def alternative_variants_warning(report: dict[str, Any]) -> str | None:
@@ -701,16 +680,15 @@ def read_version(variant_dir: str) -> str | None:
     to before the fallbacks existed); (2) a ``.fetched-version`` marker
     (``scripts/fetch-*.sh``) as ``fetched:<marker>``; (3) when the variant
     directory or its parent is itself a git work tree root, ``git:<40-hex
-    HEAD>`` with a ``-dirty`` suffix for uncommitted changes (issue #3070).
+    HEAD>`` with a ``-dirty`` suffix for uncommitted changes (issue #3070);
+    (4) the bundle ``.pdk-store.json`` ``version`` as ``store:<v>`` (#5318).
     Absent/unreadable/empty → ``None`` (never guessed).
     """
-    sources = read_sources(variant_dir)
-    if sources:
+    if sources := read_sources(variant_dir):
         return sources
-    marker = read_fetched_marker(variant_dir)
-    if marker:
+    if marker := read_fetched_marker(variant_dir):
         return f"fetched:{marker}"
-    return _git_version(variant_dir)
+    return _git_version(variant_dir) or read_store_stamp(variant_dir)
 
 
 _HEX40 = re.compile(r"^[0-9a-f]{40}$")
@@ -943,20 +921,16 @@ def drc_deck_file(variant: str | None = None, root: str | None = None) -> str | 
     same "prefer the specific name" precedence :func:`netgen_setup_file`
     uses) and falls back to a bare ``<variant>.drc``.
 
-    Not every PDK's native deck fits that single-file shape: gf180mcu (also
-    verified against a real fetched install) ships its native deck instead as
-    ~60 topic fragments under ``drc/rule_decks/*.drc`` plus a Python
-    assembly/CLI wrapper (``drc/run_drc.py``) that concatenates the right
-    subset at run time -- a distinct, PDK-specific invocation contract (its
-    own ``--variant``/``--table``/``--run_dir`` flags) this function
-    deliberately does not attempt to drive generically, the same "avoid
-    hand-assembling rule-table fragments ourselves" boundary
-    ``docs/cli/drc.md``'s "Engine" section draws for the curated-deck engine.
-    For a variant shaped like that, this function returns ``None`` rather
-    than guessing or reimplementing that assembly -- a caller who has already
-    produced a merged single-file deck (e.g. by running the PDK's own
-    ``run_drc.py --macro_gen`` ahead of time) can still reach it via `klt
-    drc`'s ``--deck-file`` override, which bypasses this resolver entirely.
+    Not every PDK's native deck fits that single-file, variant-named shape:
+    gf180mcu ships a single main script named for the *family*
+    (``tech/drc/gf180mcu.drc``) that selects the metal stack from a ``variant``
+    ``-rd`` global, not a variant-named file. That shape is resolved by
+    :func:`.pdk_native_drc.native_drc_main_script` (issue #4002), not by this
+    function, which keeps its "``None`` means no variant-named deck" contract. An older
+    gf180mcu layout (topic fragments under ``drc/rule_decks/*.drc`` plus a
+    ``drc/run_drc.py`` wrapper) is not driven by either; reach it with `klt
+    drc`'s ``--deck-file`` override after running the PDK's own ``run_drc.py
+    --macro_gen``.
 
     A single-PDK flat install (:func:`_probe_flat_variant`, e.g. IHP-Open-
     PDK's SG13G2/SG13CMOS5L) nests its ``drc/`` one directory deeper, at
@@ -1898,23 +1872,6 @@ def _not_found_message(candidates: list[tuple[str, str]], variant: str | None) -
         "`ciel enable --pdk-family sky130 <version>` "
         "(or build open_pdks with `make install`)."
     )
-
-
-def _read_text(path: str) -> str | None:
-    """Read ``path`` as UTF-8 text, or ``None`` if missing/unreadable.
-
-    Stays defined here (rather than moving into :mod:`klayout_tools.pdk_cells`
-    with the rest of the `klt pdk cells` region, issue #1884) because
-    :func:`lef_files` below also calls it -- :mod:`klayout_tools.pdk_cells`
-    imports it back from here instead.
-    """
-    if not os.path.isfile(path):
-        return None
-    try:
-        with open(path, encoding="utf-8", errors="replace") as handle:
-            return handle.read()
-    except OSError:
-        return None
 
 
 # --------------------------------------------------------------------------- #

@@ -52,17 +52,16 @@ from collections.abc import Mapping
 from typing import Any
 
 from . import env_provenance
+from ._report_verify_exclude import LIST_ITEM, reject_wildcard_exclude
 
 #: The `provenance` fields every verb's own docstring documents as
 #: legitimately varying between two runs of the identical inputs -- the tool
 #: build and the PDK release string, never the deck/input content hashes or
-#: any verdict-bearing field. Curator's own analysis (issue #1106): these are
-#: the fields inferred from the schema, not a pre-existing coded precedent
-#: (`klt signoff`'s consistency check goes the other way -- it *requires*
-#: these to agree *across* checks in one signoff bundle; here we deliberately
-#: allow them to disagree between one committed report and a fresh rerun of
-#: the same report, which is the whole reason `--rerun` needs an exclusion
-#: list at all).
+#: any verdict-bearing field. Inferred from the schema (issue #1106), not a
+#: coded precedent: `klt signoff`'s consistency check *requires* these to
+#: agree *across* checks in one bundle; here we deliberately allow them to
+#: differ between a committed report and a fresh rerun of it, which is the
+#: whole reason `--rerun` needs an exclusion list at all.
 VOLATILE_PROVENANCE_PATHS: frozenset[tuple[str, ...]] = frozenset(
     {
         ("provenance", "klt_version"),
@@ -78,6 +77,8 @@ VOLATILE_PROVENANCE_PATHS: frozenset[tuple[str, ...]] = frozenset(
         # a measurement of the run, never part of the evidence.
         ("timing",),
         ("provenance", "pdk", "linked_trees"),
+        # Issue #5182: other PDK roots on the resolving host (#2564) -- machine-local.
+        ("provenance", "pdk", "ambiguous_sources"),
     }
 )
 
@@ -332,15 +333,6 @@ def strip_keys(value: Any, keys: frozenset[str]) -> Any:
     return value
 
 
-#: The path component standing for "any list index" in a
-#: :func:`strip_path_patterns` pattern (issue #2526). Spelled as a literal
-#: ``"*"`` so a pattern reads the way the dotted field name it targets does
-#: (``("items", "*", "text")`` for ``items.2.text``); no report shape any
-#: caller passes has a mapping key literally named ``*``, so the wildcard can
-#: never collide with a real key.
-LIST_ITEM = "*"
-
-
 def strip_path_patterns(value: Any, patterns: frozenset[tuple[str, ...]]) -> Any:
     """``value`` with every mapping entry whose *path* matches an entry in
     ``patterns`` removed, recursively (issue #2526) -- the path-keyed sibling
@@ -445,7 +437,9 @@ def diff_verdict_fields(
     per leaf field whose value differs -- ``{"field": "a.b.c", "committed":
     ..., "fresh": ...}``, dotted-path field names, sorted-key traversal for
     determinism. A path exactly matching an entry in ``exclude`` (see
-    :data:`VOLATILE_PROVENANCE_PATHS`) is skipped entirely, subtree included.
+    :data:`VOLATILE_PROVENANCE_PATHS`) is skipped entirely, subtree included;
+    a :data:`LIST_ITEM` wildcard entry is rejected outright -- see
+    :func:`reject_wildcard_exclude`.
 
     Dicts are compared key-by-key (the union of both sides' keys, so a field
     added/removed between the committed and fresh schema surfaces as a
@@ -457,6 +451,7 @@ def diff_verdict_fields(
     misleading index-by-index one. Any other type mismatch (or genuinely
     unequal leaf values) is one diff entry at that path.
     """
+    reject_wildcard_exclude(exclude)
     diffs: list[dict[str, Any]] = []
     _diff_json(committed, fresh, (), exclude, diffs)
     return diffs

@@ -338,34 +338,9 @@ def _pitch_hints_and_warnings(
     return hints, warnings
 
 
-def _validate_mos_array_width(params: dict[str, Any]) -> None:
-    from .gen import GenError
-
-    if params["mos_cap"]:
-        # The width floor of a MOS capacitor is the deck's own COMP min-width
-        # rule for the selected oxide, resolved once the PDK is known (see
-        # `_device_layer_params`); the flat generator-side floor below applies
-        # to plain transistors only.
-        if params["w_um"] <= 0:
-            raise GenError("generator 'mos_array': params.w_um must be > 0")
-        if not params["add_guard_ring"]:
-            raise GenError(
-                "generator 'mos_array': params.mos_cap requires "
-                "params.add_guard_ring (the guard ring is the capacitor's "
-                "body tie)"
-            )
-        if params["gate_contact"]:
-            raise GenError(
-                "generator 'mos_array': params.mos_cap does not support "
-                "params.gate_contact"
-            )
-    elif params["w_um"] < UNIT_MIN_W_UM:
-        raise GenError(
-            f"generator 'mos_array': params.w_um must be >= {UNIT_MIN_W_UM} "
-            "(the smallest width that fits an enclosed contact with margin -- "
-            "a generator-side structural floor, not the target PDK's own "
-            "diffusion-width rule)"
-        )
+from .gen_layer_params_checks import (  # noqa: E402 -- re-exported name
+    validate_mos_array_width as _validate_mos_array_width,
+)
 
 
 def _mos_array_validate(params: dict[str, Any]) -> None:
@@ -487,7 +462,7 @@ def _sd_implant_hints(
     flavor = params.get("flavor", "nfet")
     sd_implant_role = "nplus" if flavor == "nfet" else "pplus"
     sd_implant = _role_layer_info(family, sd_implant_role)
-    if sd_implant is None:
+    if sd_implant is None or _sd_implant_margin_um(family) <= 0:
         notes.append(
             f"family '{family}' declares no S/D implant role "
             f"('{sd_implant_role}') for flavor '{flavor}' -- no implant "
@@ -714,6 +689,7 @@ def _mos_array_describe(
         tap_reach_um=_tap_reach_um(family),
         share_sd=params["share_sd"],
         mirror=params["mirror"],
+        dogbone_terminals=params["dogbone_terminals"],
     )
     unit = info["unit"]
     metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
@@ -969,6 +945,10 @@ def _res_array_validate(params: dict[str, Any]) -> None:
         raise GenError("generator 'res_array': params.dummy must be >= 0")
     if params["rows"] < 1:
         raise GenError("generator 'res_array': params.rows must be >= 1")
+    if params["short_length"] not in ("refuse", "lengthen"):
+        raise GenError(
+            "generator 'res_array': params.short_length must be 'refuse' or 'lengthen'"
+        )
     if not (0 <= params["metal_level"] <= _MAX_METAL_RES_LEVEL):
         raise GenError(
             "generator 'res_array': params.metal_level must be between 0 "
@@ -1042,23 +1022,33 @@ def _res_array_series_note(joints: list[dict[str, Any]], num: int) -> str:
     )
 
 
-def _res_short_length_warnings(family: str, params: dict[str, Any]) -> list[str]:
-    """Advisory ``warnings[]`` entry when a poly ``res_array``'s ``length_um``
-    is below the deck's minimum width of a body-sized mask (issue #4203).
-
-    Only where a salicide block is drawn (:func:`_res_sab_geometry_um`; today
-    gf180mcu): the SAB and the implant masks of the flavour span the resistor
-    body segment, whose length is exactly ``length_um``, so a shorter length
-    draws a mask narrower than the deck's ``*.width.*`` minimum. The minimum is
-    read from the deck rule, never restated."""
+def _res_min_length_floor_um(
+    family: str, params: dict[str, Any]
+) -> tuple[str, float] | None:
+    """``(rule id, um)`` of the largest deck minimum mask width among the
+    body-sized masks of a poly ``res_array``'s flavour (issue #4203), or
+    ``None`` where no salicide block is drawn (:func:`_res_sab_geometry_um`;
+    today only gf180mcu has one) or the deck declares no such rule. The
+    minimum is read from the deck rule, never restated."""
     flavor = params.get("flavor", _DEFAULT_RES_FLAVOR)
     if _res_sab_geometry_um(family, flavor) == (0.0, 0.0):
-        return []
+        return None
     worst: tuple[str, float] | None = None
     for pair in _res_flavor_layers(family, flavor):
         rule = _deck_min_width_um(family, pair)
         if rule is not None and (worst is None or rule[1] > worst[1]):
             worst = rule
+    return worst
+
+
+def _res_short_length_warnings(family: str, params: dict[str, Any]) -> list[str]:
+    """Advisory ``warnings[]`` entry when a poly ``res_array``'s ``length_um``
+    is below the deck's minimum width of a body-sized mask (issue #4203).
+
+    The SAB and the implant masks of the flavour span the resistor body
+    segment, whose length is exactly ``length_um``, so a shorter length draws a
+    mask narrower than the deck's ``*.width.*`` minimum."""
+    worst = _res_min_length_floor_um(family, params)
     if worst is None or params["length_um"] >= worst[1]:
         return []
     return [
@@ -1067,6 +1057,79 @@ def _res_short_length_warnings(family: str, params: dict[str, Any]) -> list[str]
         f"({_fmt_um(worst[1])}) -- the body-length SAB/implant mask will be "
         "drawn narrower than that rule and expect a width DRC finding"
     ]
+
+
+def _res_array_snap_length(
+    params: dict[str, Any], pdk_info: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Snap a poly ``res_array``'s ``length_um`` to the manufacturing grid and
+    enforce the deck's minimum drawable length (issue #4666), rewriting
+    ``params["length_um"]`` in place.
+
+    Returns the ``drc_hints.length_snap`` record (requested/realised length,
+    resistance delta, reasons), or ``None`` when nothing applies: a metal
+    resistor, ``params.snap`` false (today's #4203 warnings stay), or a length
+    already on-grid and above the floor. Raises :class:`GenError` for a
+    below-floor length under ``short_length='refuse'``."""
+    from .gen import GenError, _mfg_grid_neighbours
+
+    if params.get("metal_level", 0) or not params.get("snap", True):
+        return None
+    family = _pdk_family(pdk_info["variant"])
+    requested = params["length_um"]
+    grid_um = mfg_grid_um(family, _PDK_ROLE_LAYERS[family].get("poly"))
+    realised = requested
+    reasons: list[str] = []
+    if _mfg_grid_neighbours(grid_um, requested) is not None:
+        # Round half up (float-safe: the epsilon keeps 0.0125 -> 0.015).
+        realised = round(math.floor(requested / grid_um + 0.5 + 1e-9) * grid_um, 9)
+        reasons.append("snapped_to_grid")
+    floor = _res_min_length_floor_um(family, params)
+    if floor is not None and realised < floor[1] - 1e-9:
+        if params["short_length"] == "refuse":
+            raise GenError(
+                f"generator 'res_array': params.length_um={_fmt_um(requested)}"
+                + (
+                    f" (snapped to {_fmt_um(realised)})"
+                    if realised != requested
+                    else ""
+                )
+                + f" is below the '{family}' deck's {floor[0]} minimum mask "
+                f"width ({_fmt_um(floor[1])}) -- raise length_um to at least "
+                f"{_fmt_um(floor[1])} or pass params.short_length='lengthen'"
+            )
+        realised = (
+            round(math.ceil(floor[1] / grid_um - 1e-9) * grid_um, 9)
+            if grid_um > 0
+            else floor[1]
+        )
+        reasons.append("lengthened_to_floor")
+    if not reasons:
+        return None
+    params["length_um"] = realised
+    return {
+        "requested_um": requested,
+        "realised_um": realised,
+        "grid_um": grid_um,
+        "resistance_delta_pct": round((realised / requested - 1.0) * 100.0, 6),
+        "reasons": reasons,
+    }
+
+
+def _res_array_apply_snap_report(
+    described: dict[str, Any], snap: dict[str, Any]
+) -> None:
+    """Attach ``drc_hints.length_snap`` and a ``warnings[]`` entry stating the
+    snap to a ``res_array`` describe result (issue #4666)."""
+    described["drc_hints"]["length_snap"] = snap
+    described["warnings"].append(
+        f"generator 'res_array': params.length_um={_fmt_um(snap['requested_um'])} "
+        f"was drawn as {_fmt_um(snap['realised_um'])} "
+        f"({', '.join(snap['reasons'])}; resistance "
+        f"{snap['resistance_delta_pct']:+.4g}%) "
+        "-- update the netlist length to the realised value or record the "
+        "deviation; pass params.snap=false to draw verbatim"
+    )
 
 
 def _res_array_describe(

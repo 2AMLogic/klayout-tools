@@ -974,6 +974,8 @@ def test_checked_in_history_table_covers_every_release():
     import subprocess
     from pathlib import Path
 
+    from _pending_release_tag import with_pending_tag
+
     repo_root = Path(__file__).resolve().parent.parent
     real_path = repo_root / "src" / "klayout_tools" / "decks" / "_history.json"
     data = json.loads(real_path.read_text())
@@ -1004,11 +1006,9 @@ def test_checked_in_history_table_covers_every_release():
         "the table -- rerun scripts/generate_deck_history.py"
     )
 
-    # The table is a well-formed, up-to-date reflection of *tagged* history
-    # -- it need not (and for an unreleased dev checkout, generally won't)
-    # include the current working tree's hash, only what git tag --list
-    # reports. Confirm the tag set matches reality so the fixture doesn't
-    # silently drift from a real `git tag` run.
+    # The table reflects *tagged* history (not the working tree's hash).
+    # Confirm the tag set matches reality so the fixture doesn't silently
+    # drift from a real `git tag` run.
     result = subprocess.run(
         ["git", "tag", "--sort=v:refname", "--list", "v*"],
         cwd=repo_root,
@@ -1016,7 +1016,7 @@ def test_checked_in_history_table_covers_every_release():
         capture_output=True,
         text=True,
     )
-    real_tags = [line for line in result.stdout.splitlines() if line.strip()]
+    real_tags = with_pending_tag(repo_root, tags, result.stdout)
     if real_tags:
         assert tags == real_tags, (
             "checked-in _history.json is stale relative to `git tag` -- "

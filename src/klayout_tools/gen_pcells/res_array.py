@@ -15,6 +15,11 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     import klayout.db as kdb
 
+from ._common_params import (
+    declare_cut_and_metal_params,
+    declare_dummy_marker_params,
+)
+
 
 def _pcell_params(pcell: object, *names: str) -> list:
     """Read declared PCell parameters by name (they are attached dynamically,
@@ -122,7 +127,8 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "by which implant/precision-resistor masks cover each body: "
                 "'generic' (default, the base sheet-rho flavour -- "
                 "res_generic_po on sky130, ppolyf_u on gf180mcu, rsil on "
-                "sg13g2), or, on sky130, 'high' (res_high_po) / 'xhigh' "
+                "sg13g2/sg13cmos5l; also spelled 'rsil' on both), or, on "
+                "sky130, 'high' (res_high_po) / 'xhigh' "
                 "(res_xhigh_po), or, on gf180mcu, '1k' / '2k' / '3k' "
                 "(ppolyf_u_1k/_2k/_3k, selected at extraction time via "
                 "'klt extract --deck-option poly_res='), or, on sg13g2, "
@@ -143,23 +149,32 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 default=0,
             )
             self.param(
+                "snap",
+                kdb.PCellParameterDeclaration.TypeBoolean,
+                "Poly-body only: round length_um to the nearest multiple of "
+                "the PDK manufacturing grid before drawing (default True; "
+                "the requested/realised lengths and the resistance delta are "
+                "reported in drc_hints.length_snap). False draws length_um "
+                "verbatim and only warns (issue #4666)",
+                default=True,
+            )
+            self.param(
+                "short_length",
+                kdb.PCellParameterDeclaration.TypeString,
+                "Poly-body only: what to do when the (snapped) length_um is "
+                "below the deck's SAB/implant minimum mask width -- 'refuse' "
+                "(default, error naming the floor) or 'lengthen' (raise to "
+                "the smallest on-grid length >= the floor and report the "
+                "delta). Ignored when snap is False (issue #4666)",
+                default="refuse",
+            )
+            self.param(
                 "poly_layer",
                 self.TypeLayer,
                 "Resistor body drawing layer",
                 default=kdb.LayerInfo(0, 0),
             )
-            self.param(
-                "contact_layer",
-                self.TypeLayer,
-                "Contact drawing layer",
-                default=kdb.LayerInfo(0, 0),
-            )
-            self.param(
-                "metal_layer",
-                self.TypeLayer,
-                "Local routing metal drawing layer",
-                default=kdb.LayerInfo(0, 0),
-            )
+            declare_cut_and_metal_params(self, kdb)
             self.param(
                 "res_mark_layer",
                 self.TypeLayer,
@@ -225,13 +240,7 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "dummy_present)",
                 default=kdb.LayerInfo(0, 0),
             )
-            self.param(
-                "dummy_present",
-                self.TypeBoolean,
-                "Whether dummy_layer is a real layer this PDK's extraction "
-                "deck declares (see ExtractionDeck.dummy)",
-                default=False,
-            )
+            declare_dummy_marker_params(self)
             # `metal_level`'s own per-level geometry floors (issue #1639) --
             # harness-computed from the resolved PDK family/level exactly
             # like `cap_array`'s own `cap_top_via_min_w_um`/friends. `0.0`
@@ -260,18 +269,6 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Minimum spacing (um) between metal_level's end vias on "
                 "adjacent unit resistors on the resolved PDK family -- 0.0 "
                 "draws exactly the requested spacing_um",
-                default=0.0,
-            )
-            # Fixed drawn side of every cut on contact_layer (issue #2585) --
-            # harness-computed by `_cut_fixed_size_um` from the resolved PDK
-            # family and layer. `0.0` (no upper size bound) leaves the cuts
-            # exactly as laid out; see `gen._clamp_cut_boxes`.
-            self.param(
-                "contact_fixed_size_um",
-                self.TypeDouble,
-                "Fixed drawn side (um) every cut on contact_layer is clamped "
-                "down to on the resolved PDK family -- 0.0 leaves the "
-                "generator's own cut size unchanged",
                 default=0.0,
             )
             # Issue #2449: rectangular precision-poly end contact (sky130
@@ -305,14 +302,6 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "body is the res_mark_layer segment alone, abutting them) -- "
                 "the IHP sg13g2 PCell convention (issue #2679)",
                 default=False,
-            )
-            self.param(
-                "mfg_grid_um",
-                self.TypeDouble,
-                "Manufacturing grid (um) every cut on contact_layer is "
-                "snapped onto (issue #2648) -- 0.0 leaves cut positions "
-                "unchanged",
-                default=0.0,
             )
 
         def display_text_impl(self) -> str:

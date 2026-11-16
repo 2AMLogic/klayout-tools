@@ -136,9 +136,34 @@ def test_non_convergence_errors_are_never_retried(tmp_path, monkeypatch):
         decks=decks,
     )
     # Sample 0: singular_matrix only -> measurement missing, different class.
-    sim.run_sim(str(_request(tmp_path, {"retry_on_convergence_error": True})))
+    report = sim.run_sim(str(_request(tmp_path, {"retry_on_convergence_error": True})))
     assert attempts[0] == 1
     assert attempts[1] == 2
+    unit = next(c for c in report["corners"] if c["monte_carlo"]["sample_index"] == 0)
+    assert unit["status"] == "error"
+    (note,) = [d for d in unit["diagnostics"] if d["code"] == "convergence_retry"]
+    assert note["severity"] == "info"
+    assert "not retried" in note["message"]
+    assert "singular_matrix" in note["message"]
+
+
+def test_timestep_too_small_with_analysis_aborted_is_retried(tmp_path, monkeypatch):
+    decks: list[str] = []
+    attempts = _stub(
+        monkeypatch,
+        fail_first={
+            1: "Error: time step too small\n"
+            "run simulation(s) aborted\n"
+            "Timestep too small; time = 1e-9, timestep = 5e-23"
+        },
+        decks=decks,
+    )
+    report = sim.run_sim(str(_request(tmp_path, {"retry_on_convergence_error": True})))
+    assert attempts[1] == 2
+    unit = next(c for c in report["corners"] if c["monte_carlo"]["sample_index"] == 1)
+    assert unit["status"] == "pass"
+    (note,) = [d for d in unit["diagnostics"] if d["code"] == "convergence_retry"]
+    assert "recovered" in note["message"]
 
 
 @pytest.mark.parametrize(

@@ -41,6 +41,21 @@ def _warn(message: str) -> None:
     print(f"klt netlist: warning: {message}", file=sys.stderr)
 
 
+def register(parser: argparse.ArgumentParser) -> None:
+    """Add the ``--erc`` flag (issue #4953) and bind :func:`run` to ``parser``."""
+    parser.add_argument(
+        "--erc",
+        action="store_true",
+        default=False,
+        help=(
+            "fail (error.code erc_findings) when xschem reports ERC findings "
+            "such as 'Error: undriven node' on its stdout/stderr. Local "
+            "backend only (issue #4953)"
+        ),
+    )
+    parser.set_defaults(func=run)
+
+
 def run(args: argparse.Namespace) -> int:
     if getattr(args, "ignore_comments", False) and not args.check:
         # argparse-style usage failure (stderr message, SystemExit(2)).
@@ -52,7 +67,18 @@ def run(args: argparse.Namespace) -> int:
         backend = resolve_backend(getattr(args, "backend", None))
         allow_expr = bool(getattr(args, "allow_unevaluated_expr", False))
         ignore_comments = bool(getattr(args, "ignore_comments", False))
+        erc = bool(getattr(args, "erc", False))
+        no_header = bool(getattr(args, "no_provenance_header", False))
         if backend == "batch":
+            if erc:
+                raise NetlistError(
+                    "--erc is not supported with --backend batch; use --backend local"
+                )
+            if no_header:
+                raise NetlistError(
+                    "--no-provenance-header is not supported with --backend "
+                    "batch; use --backend local"
+                )
             if allow_expr:
                 raise NetlistError(
                     "--allow-unevaluated-expr is not supported with "
@@ -73,6 +99,8 @@ def run(args: argparse.Namespace) -> int:
                 batch_exclude=getattr(args, "batch_exclude", None) or (),
                 xschem_binary=args.xschem_binary,
                 ignore_comments=ignore_comments,
+                symbol_path=getattr(args, "symbol_path", None) or (),
+                relative_paths=args.relative_paths,
                 warn=_warn,
             )
         else:
@@ -88,6 +116,10 @@ def run(args: argparse.Namespace) -> int:
                 block=args.block,
                 allow_unevaluated_expr=allow_expr,
                 ignore_comments=ignore_comments,
+                symbol_path=getattr(args, "symbol_path", None) or (),
+                erc=erc,
+                relative_paths=args.relative_paths,
+                provenance_header=not no_header,
             )
     except NetlistError as exc:
         return emit_error(

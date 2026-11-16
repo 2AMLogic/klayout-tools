@@ -1,0 +1,57 @@
+Query kb/, the flat-files corpus of published circuit designs (topology,
+sizing strategy, layout idioms) the LLM reasoning module draws on -- see
+kb/README.md for the schema and sourcing rules. Runs entirely against the
+local repo checkout; no network access.
+
+positional arguments:
+  <subcommand> list list id, title, spec_class for every kb entry show show the full kb entry for <id> search keyword and/or numeric search over kb entries validate validate every kb entry against the schema
+
+options:
+  -h, --help show this help message and exit
+
+--- klt kb list ---
+
+Enumerate every kb/entries/*.json entry, id-sorted.
+
+options:
+  -h, --help show this help message and exit
+  --format {text,json} output format (default: text)
+
+--- klt kb show ---
+
+Print the full kb/entries/<id>.json entry.
+
+positional arguments:
+  id entry id (kb/entries/<id>.json's filename stem)
+
+options:
+  -h, --help show this help message and exit
+  --format {text,json} output format (default: text)
+
+--- klt kb search ---
+
+Case-insensitive keyword match over title, topology, spec_class,
+layout_idioms, and notes, optionally narrowed by numeric --where filters over
+an entry's measured.figures and/or an exact --pdk match against measured.pdk.
+Plain substring search for the keyword -- no embeddings, no index
+(kb/README.md's flat-files design).
+
+positional arguments:
+  query keyword to search for (optional)
+
+options:
+  -h, --help show this help message and exit
+  --where <figure><op><value> Numeric filter over measured.figures, e.g. 'av_db>=40'. op is one of >=, <=, ==, !=, >, <. Repeatable -- every --where must match (AND). An entry with no measured block never matches.
+  --pdk <pdk> Exact (case-insensitive) match against measured.pdk, e.g. 'sky130'.
+  --format {text,json} output format (default: text)
+
+--- klt kb validate ---
+
+Validate that every kb/entries/*.json entry parses, conforms to
+kb/schema/entry.schema.json, and has an id matching its filename stem. Exits
+nonzero if any entry is invalid -- suitable for a CI gate.
+
+options:
+  -h, --help show this help message and exit
+  --recheck-measured Additionally re-run every distinct measured.figures[].testbench via klt sim and fail if a recorded figure value has drifted beyond a fixed relative tolerance from what the testbench now produces. Expensive (actually simulates every measured entry) -- intended for the nightly kb-drift-canary workflow, not every-PR CI.
+  --format {text,json} output format (default: text)

@@ -1,13 +1,10 @@
 """Pure-input validation of ``klt sim``'s measurement specs (split out of sim.py).
 
-Everything here validates the ``measurements[]`` / ``options.fail_on_diagnostic``
-request fields and raises :class:`~klayout_tools.sim_errors.SimError` on a bad
-spec; nothing depends on ``run_sim`` or the corner runner. ``sim.py`` re-exports
-every name (self-aliased) so ``klayout_tools.sim.<name>`` keeps working for
-callers and tests, and ``sim_steps`` imports from here directly instead of via
-function-local ``from .sim import ...`` (issue #3689; precedent
-``sim_remote.py``, issue #1764).
-"""
+Validates the ``measurements[]`` / ``options.fail_on_diagnostic`` request fields
+and raises :class:`~klayout_tools.sim_errors.SimError`; nothing depends on
+``run_sim`` or the corner runner. ``sim.py`` re-exports every name (self-aliased)
+and ``sim_steps`` imports from here directly (issue #3689; precedent
+``sim_remote.py``, #1764)."""
 
 from __future__ import annotations
 
@@ -21,11 +18,14 @@ from . import (
     sim_eye,
     sim_noise,
     sim_search,
+    sim_settled,
     sim_snm_meas,
+    sim_step_resolution,
     sim_stress,
     sim_tian,
     sim_transfer_meas,
 )
+from .sim_case_names import validate_case_variant_names
 from .sim_errors import SimError
 
 #: A `.meas` card's declared analysis type (the token right after
@@ -213,14 +213,13 @@ def _validate_measurement_forms(measurements_spec: list[dict[str, Any]]) -> None
     boundary ``spice`` already has -- hand-written SPICE is passed through,
     not parsed.
 
-    Split across three helpers (:func:`_validate_measurement_form`,
-    :func:`_validate_expr_body`, :func:`_validate_expr_names_unique`) rather
-    than written as one loop, so no single function carries the whole rule
-    set's branch count -- see ``scripts/check_complexity_baseline.py``.
+    Split into helpers so no one function carries the whole rule set's
+    branch count (see ``scripts/check_complexity_baseline.py``).
     """
     for spec in measurements_spec:
         _validate_measurement_form(spec)
     _validate_expr_names_unique(measurements_spec)
+    validate_case_variant_names(measurements_spec)
 
 
 def _validate_optional_flag(name: Any, spec: dict[str, Any]) -> None:
@@ -303,6 +302,8 @@ def _require_measurement_form(name: Any, has_form: bool) -> None:
 
 
 _EXCLUSIVE_FORM_VALIDATORS = (
+    sim_settled.validate_form_exclusive,
+    sim_step_resolution.validate_form_exclusive,
     sim_eye.validate_form_exclusive,
     sim_search.validate_form_exclusive,
     sim_snm_meas.validate_form_exclusive,
@@ -316,7 +317,6 @@ def _validate_measurement_form(spec: dict[str, Any]) -> None:
     one of ``spice``/``expr``, and -- for an ``expr`` -- a name that survives
     the round trip through the deck and back out of the log. See
     :func:`_validate_measurement_forms` for why each rule exists."""
-    # Newest-first: #4292 eye, #4121 search, #3895 snm, #3160 tian, #2923 transfer.
     for validator in _EXCLUSIVE_FORM_VALIDATORS:
         if validator(spec):
             return

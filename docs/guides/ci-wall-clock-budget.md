@@ -32,7 +32,8 @@ Read the `basis` column in the job's step summary first, then:
    and merge: the rolling baseline absorbs it by itself within a few `main`
    runs. **Do not hand-edit `.github/ci-wall-clock-budget.json` — for a job on
    the rolling basis, nothing in its `jobs` map is consulted.**
-2. **Believe the pool was busy?** — **re-run the job.** This is a real answer,
+2. **Believe the pool was busy?** — **re-run the whole run** (or push a fresh
+   head); re-running only this job (`--failed`) re-reads the same timings. This is a real answer,
    not a shrug: the check reads other runs of the *same commit*, and a clean
    one downgrades the breach to `UNCONFIRMED`, which exits 0. If it breaches
    again on identical code, the slowness is in the code and the build stays
@@ -289,7 +290,16 @@ This is the "require the breach to repeat" half of #2615, kept as a filter
 rather than as the whole model: it costs a run of latency, so it is not used
 to gate the *first* observation (run `36003284901` is a single `main` push and
 must still fail), only to absorb the residual false positives the pool factor
-cannot see. It is also what makes "re-run the job" a real instruction.
+cannot see. It is also what makes "re-run the run" a real instruction.
+
+Only the run's *current attempt* is measured (#4751). GitHub's `/jobs`
+default `filter=latest` keeps earlier attempts' rows next to the fresh ones,
+so rows whose `run_attempt` differs from the run's own are dropped (the report
+says how many), as are rows a `--failed` rerun carried over with their old
+timestamps. A `--failed` rerun of the budget job alone therefore measures
+nothing new: the report says so (`NOTHING NEW WAS MEASURED`) and the earlier
+timings are re-read. A full rerun, or a fresh head, is what clears a
+pool-contention breach.
 
 ### What stays fixed
 

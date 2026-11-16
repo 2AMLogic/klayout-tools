@@ -30,6 +30,8 @@ import math
 import re
 from typing import Any
 
+from ._jsonnum import is_number
+
 SUPPORTED_DISTRIBUTIONS = ("gaussian", "uniform")
 
 _ALLOWED_KEYS = {"instance", "pattern", "parameter", "relative_sigma", "distribution"}
@@ -100,7 +102,7 @@ def validate(mc_spec: dict[str, Any]) -> tuple[list[dict[str, Any]], float]:
         raise InjectedError(
             "request.monte_carlo.injected_scale requires request.monte_carlo.injected"
         )
-    if isinstance(scale, bool) or not isinstance(scale, (int, float)) or scale < 0:
+    if not is_number(scale) or scale < 0:
         raise InjectedError(
             f"request.monte_carlo.injected_scale must be a non-negative number "
             f"(got {scale!r})"

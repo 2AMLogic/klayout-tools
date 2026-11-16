@@ -322,9 +322,9 @@ def _sd_implant_margin_um(family: str) -> float:
 #: byte-for-byte unchanged.
 _PDK_RING_IMPLANT_MARGIN_UM: dict[str, float] = {
     "gf180mcu": 0.16,  # NP.5b/PP.5b (extension beyond COMP) are 0.16um
-    # sky130 (issue #2934): n/psdm.5b, "min. n/psdm enclosure tap except
-    # butting edge", 0.125um (sky130A.lydrc, PDK c6d73a35).
+    # sky130 (issue #2934): n/psdm.5b, 0.125um (sky130A.lydrc, PDK c6d73a35).
     "sky130": 0.125,
+    "sg13g2": 0.18,  # pSD.c (#5231); P-substrate tap ring only
 }
 
 
@@ -338,11 +338,10 @@ _DISTINCT_TAP_IMPLANT_FAMILIES = frozenset({"sky130"})
 
 
 #: Margin (um) the ``npc`` box grows beyond each poly-contact licon (issue
-#: #2934): 0.095um, the amount ``sky130A.tech``'s own ``cifoutput`` grows NPC
-#: around ``xpc`` (the same figure :data:`_PDK_RES_FLAVOR_MASK_ENCLOSURE_UM`
-#: uses for resistor heads). The official ``sky130A_mr.drc`` carries no
-#: npc-enclosure-of-licon rule. A family absent here draws no ``npc``.
-_PDK_NPC_MARGIN_UM: dict[str, float] = {"sky130": 0.095}
+#: #2934): 0.1um, sky130 rule ``licon.15`` from the PDK's ``sky130A.lydrc``
+#: (``sky130A.tech``'s cifoutput grows only 0.095um; ``sky130A_mr.drc`` has
+#: no such rule). A family absent here draws no ``npc``.
+_PDK_NPC_MARGIN_UM: dict[str, float] = {"sky130": 0.1}
 
 #: ``npc.2`` same-layer spacing (um); closer ``npc`` shapes are merged
 #: (``sky130A_mr.drc`` marks it "should be manually merged").
@@ -589,7 +588,7 @@ def _cap_top_plate_requires(family: str) -> tuple[tuple[int, int], ...]:
 #: ``guard_ring``/``diff_pair`` avoid above into this module's own clear
 #: ``GenError``.
 _GENERATOR_FAMILY_DEFERRED: dict[str, tuple[str, ...]] = {
-    "bjt_array": ("sg13g2", "sg13cmos5l"),
+    "bjt_array": ("sg13cmos5l",),
     "esd_device": ("sg13g2", "sg13cmos5l"),
     "well_island": ("sg13g2", "sg13cmos5l"),
     "guard_ring": ("sg13cmos5l",),
@@ -703,12 +702,12 @@ _PDK_RES_FLAVOR_LAYERS: dict[str, dict[str, tuple[tuple[int, int], ...]]] = {
         # nSD/nSD_block, so drawing exactly one flavour's `requires` set can
         # only ever match that flavour.
         #
-        # rsil (7 ohm/sq): the lowest-sheet-rho class, and this family's
-        # default -- `EXTRACTION_DECK.resistors["rsil"].requires`.
+        # rsil (7 ohm/sq), the default: `EXTRACTION_DECK.resistors["rsil"].requires`.
         "generic": (
             (111, 0),  # EXTBlock -- upstream's `polyres_mk` head term
             (24, 0),  # Res       -- the silicided-resistor marker itself
         ),
+        "rsil": ((111, 0), (24, 0)),  # alias of "generic" (issue #5288)
         # rppd (260 ohm/sq): p+ doped, unsalicided poly --
         # `EXTRACTION_DECK.resistors["rppd"].requires` (issue #1451). Three
         # masks; rsil's own `excludes` (pSD, SalBlock) rule it out here.
@@ -959,7 +958,7 @@ def _res_sab_geometry_um(
 #: is only the two abutting contact heads. Must match the families whose
 #: extraction-deck poly ``ResistorDevice`` entries declare
 #: ``topology="abutting_heads"`` (asserted in ``tests/test_sg13g2_deck.py``).
-_PDK_RES_POLY_HEADS_ONLY: frozenset[str] = frozenset({"sg13g2"})
+_PDK_RES_POLY_HEADS_ONLY: frozenset[str] = frozenset({"sg13g2", "sg13cmos5l"})
 
 
 def _res_end_contact_um(
@@ -2056,25 +2055,10 @@ def _device_layer_params(
     # must clear the deck's own COMP min-width rule for the selected oxide,
     # else the request fails here rather than drawing an unmarked or
     # sub-rule capacitor.
-    mos_cap_mark = None
-    if params.get("mos_cap"):
-        from .gen import GenError
+    from .gen_layer_params_checks import check_dogbone_width, resolve_mos_cap_mark
 
-        pair = _PDK_MOS_CAP_MARK_LAYERS.get(family)
-        if pair is None:
-            raise GenError(
-                f"generator 'mos_array': params.mos_cap is not supported on "
-                f"PDK family '{family}' (no MOS-capacitor marker layer is "
-                "declared for it)"
-            )
-        mos_cap_mark = kdb.LayerInfo(*pair)
-        floor = _mos_cap_min_width_um(family, voltage_flavor_mark)
-        if floor is not None and params["w_um"] < floor[0]:
-            raise GenError(
-                f"generator 'mos_array': params.w_um must be >= {floor[0]} for "
-                f"a MOS capacitor on '{family}' (deck rule '{floor[1]}', the "
-                "minimum COMP width for the selected oxide)"
-            )
+    mos_cap_mark = resolve_mos_cap_mark(family, params, voltage_flavor_mark)
+    check_dogbone_width(family, params)
     layer_params = {
         "active_layer": _role_layer_info(family, "active"),
         "poly_layer": _role_layer_info(family, "poly"),

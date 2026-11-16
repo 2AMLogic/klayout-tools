@@ -1,0 +1,112 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:13:00.837387+00:00",
+  "slug": "sky130-sigma-delta-adc",
+  "name": "Sky130 Sigma Delta Adc",
+  "description": "Switched-capacitor delta-sigma ADC on sky130 \u2014 2AM Logic canary block",
+  "pdk": "sky130",
+  "layer_count": 37,
+  "cell_count": 118,
+  "instance_count": 67284,
+  "layout_file": "decimator.gds",
+  "renders": {
+    "overview": "renders/overview.png",
+    "layer_64_5": "renders/64_5.png",
+    "layer_64_16": "renders/64_16.png",
+    "nwell.drawing": "renders/64_20.png",
+    "layer_64_59": "renders/64_59.png",
+    "diff.drawing": "renders/65_20.png",
+    "tap.drawing": "renders/65_44.png",
+    "poly.drawing": "renders/66_20.png",
+    "licon1.drawing": "renders/66_44.png",
+    "layer_67_5": "renders/67_5.png",
+    "layer_67_16": "renders/67_16.png",
+    "li1.drawing": "renders/67_20.png",
+    "mcon.drawing": "renders/67_44.png",
+    "layer_68_5": "renders/68_5.png",
+    "layer_68_16": "renders/68_16.png",
+    "met1.drawing": "renders/68_20.png",
+    "via.drawing": "renders/68_44.png",
+    "met2.drawing": "renders/69_20.png",
+    "via2.drawing": "renders/69_44.png",
+    "layer_70_5": "renders/70_5.png",
+    "layer_70_16": "renders/70_16.png",
+    "met3.drawing": "renders/70_20.png",
+    "via3.drawing": "renders/70_44.png",
+    "met4.drawing": "renders/71_20.png",
+    "via4.drawing": "renders/71_44.png",
+    "layer_72_5": "renders/72_5.png",
+    "layer_72_16": "renders/72_16.png",
+    "met5.drawing": "renders/72_20.png",
+    "hvtp.drawing": "renders/78_44.png",
+    "layer_81_4": "renders/81_4.png",
+    "layer_81_23": "renders/81_23.png",
+    "layer_83_44": "renders/83_44.png",
+    "nsdm.drawing": "renders/93_44.png",
+    "psdm.drawing": "renders/94_20.png",
+    "npc.drawing": "renders/95_20.png",
+    "layer_122_16": "renders/122_16.png",
+    "layer_235_4": "renders/235_4.png",
+    "layer_236_0": "renders/236_0.png",
+    "center_crop": "renders/center_crop/overview.png"
+  },
+  "spec_summary": {
+    "rows": [
+      {
+        "parameter": "Signal bandwidth",
+        "target": "20 kHz",
+        "fallback": "10 kHz",
+        "stretch": "50 kHz"
+      },
+      {
+        "parameter": "Peak SNDR over BW (simulated)",
+        "target": "\u2265 80 dB",
+        "fallback": "\u2265 70 dB",
+        "stretch": "\u2265 90 dB"
+      },
+      {
+        "parameter": "Modulator",
+        "target": "2nd-order, single-bit, SC",
+        "fallback": "same",
+        "stretch": "higher order or multi-bit"
+      },
+      {
+        "parameter": "OSR",
+        "target": "128",
+        "fallback": "256",
+        "stretch": "64"
+      },
+      {
+        "parameter": "Modulator clock",
+        "target": "5.12 MHz",
+        "fallback": "5.12 MHz",
+        "stretch": "6.4 MHz"
+      },
+      {
+        "parameter": "Output word rate",
+        "target": "80 kSps",
+        "fallback": "40 kSps",
+        "stretch": "200 kSps"
+      },
+      {
+        "parameter": "Supply",
+        "target": "1.8 V \u00b1 10 %",
+        "fallback": "same",
+        "stretch": "same"
+      },
+      {
+        "parameter": "Analog power",
+        "target": "\u2264 1 mW",
+        "fallback": "\u2264 2 mW",
+        "stretch": "\u2264 0.5 mW"
+      }
+    ]
+  },
+  "source": {
+    "repo": "2AMLogic/sky130-sigma-delta-adc",
+    "ref": "df150e01e572228e7e69e1083967b8e787345210",
+    "path": "layout/digital/decimator.gds"
+  },
+  "downloadable": true,
+  "status": "ok"
+}

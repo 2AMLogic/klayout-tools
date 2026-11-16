@@ -140,7 +140,10 @@ from dataclasses import replace
 from typing import Any, NamedTuple
 
 from . import _spice_number as spice_number
-from ._paths import _fold_spice_continuations
+from ._capacitor_mf import capacitor_mf_is_m_alias
+from ._diode_card import convert_diode_card
+from ._jsonnum import is_number
+from ._paths import fold_spice_continuations
 from .pdk_models import (
     GEOMETRY_STYLE_BARE_UM,
     DeviceLookup,
@@ -186,8 +189,8 @@ _DEVICE_LIKE_PARAMS = _CARRIED_PARAMS + ("r_length", "r_width", "c_length", "c_w
 #: :func:`_convert_capacitor_card` call :func:`_reject_multiplicity`), so a
 #: resistor/capacitor ``nf>1`` is still a hard error. A capacitor's instance
 #: multiplier ``m`` is the exception: it is excluded and expanded into ``m``
-#: parallel plain ``C`` cards (issue #4318), so only its ``nf``/``mult``/``mf``
-#: are still rejected.
+#: parallel plain ``C`` cards (issue #4318), so only its ``nf``/``mult`` are still
+#: rejected; ``mf`` equal to ``m`` is the same multiplier (issue #4951).
 _MULTIPLICITY_PARAMS = ("nf", "m", "mult", "mf")
 
 #: The multiplicity parameters :func:`_reject_multiplicity` never rejects for
@@ -849,7 +852,7 @@ def _convert_passive_or_bipolar_card(
     diode, an ``inductor``/``varactor`` call (issue #3206) or, otherwise, a
     bipolar."""
     if lookup.kind == "diode":
-        return _convert_diode_card(
+        return convert_diode_card(
             instance, nodes, subckt_name, lookup, params, geometry_style=geometry_style
         )
     if lookup.kind in _PASSIVE_X_TERMINALS:
@@ -1211,7 +1214,8 @@ def _convert_capacitor_card(
 
     An instance multiplier ``m`` (issue #4318, mirroring #3123 for MOS)
     expands into ``m`` parallel cards named ``<instance>_m0``, ...; ``A``/``P``
-    stay per copy. ``mf``/``nf``/``mult`` greater than 1 are still rejected.
+    stay per copy. ``mf`` equal to ``m`` is the same multiplier (issue #4951); other
+    ``mf``/``nf``/``mult`` greater than 1 are still rejected.
     """
     if len(nodes) != _CAPACITOR_TERMINALS:
         raise NormalizeError(
@@ -1226,12 +1230,10 @@ def _convert_capacitor_card(
         "m",
         "to expand into that many parallel plain-element devices",
     )
-    _reject_multiplicity(
-        instance,
-        subckt_name,
-        params,
-        exclude=_CAPACITOR_EXCLUDED_MULTIPLICITY_PARAMS,
-    )
+    exclude: tuple[str, ...] = _CAPACITOR_EXCLUDED_MULTIPLICITY_PARAMS
+    if capacitor_mf_is_m_alias(instance, subckt_name, params, multiplier):
+        exclude += ("mf",)
+    _reject_multiplicity(instance, subckt_name, params, exclude=exclude)
 
     has_length_param = lookup.length_param in params
     has_width_param = lookup.width_param in params
@@ -1268,80 +1270,6 @@ def _convert_capacitor_card(
         f"{instance}_m{j} {' '.join(nodes)} 0 {lookup.device_class}{extra}"
         for j in range(multiplier)
     )
-
-
-def _parse_um2(
-    raw_value: str,
-    *,
-    device: str,
-    param: str,
-    geometry_style: str | None = None,
-) -> float:
-    """Parse a SPICE area literal to square micrometres, with the same
-    bare-literal convention as :func:`_parse_um` (a suffixed/exponent literal
-    is SI m^2; a bare one is already um^2 under a ``BARE_UM`` deck such as
-    sky130's ``.option scale=1.0u``)."""
-    match = spice_number.NUMBER_RE.match(raw_value.strip())
-    if match is None:
-        raise NormalizeError(
-            f"device '{device}': parameter '{param}' value '{raw_value}' is "
-            "not a plain numeric literal"
-        )
-    mantissa_text, raw_suffix = match.group(1), match.group(2)
-    mantissa = float(mantissa_text)
-    if not raw_suffix and "e" not in mantissa_text.lower():
-        if geometry_style is None:
-            raise NormalizeError(
-                f"device '{device}': parameter '{param}' value '{raw_value}' "
-                "has no unit suffix or exponent, so it is ambiguous whether it "
-                "is SI m^2 or already um^2 under an ambient '.option scale' -- "
-                'pass reference.deck (e.g. "sky130") or write an explicit '
-                "unit-suffixed literal (e.g. area=1p)"
-            )
-        if geometry_style == GEOMETRY_STYLE_BARE_UM:
-            return mantissa
-    return mantissa * spice_number.suffix_scale(raw_suffix) * 1e12
-
-
-def _convert_diode_card(
-    instance: str,
-    nodes: list[str],
-    subckt_name: str,
-    lookup: DeviceLookup,
-    params: dict[str, str],
-    *,
-    geometry_style: str | None = None,
-) -> str:
-    """Convert a PDK junction-diode call (``X<n> anode cathode <subckt>
-    area=.. perim=..``, issue #4319) to a plain ``D<n> anode cathode <class>
-    A=.. P=..`` card, which KLayout's reader reads as ``DeviceClassDiode``
-    (terminals ``A``, ``C``; parameters ``A`` um^2, ``P`` um) -- the class the
-    layout-side ``DeviceExtractorDiode`` emits. ``perim`` may be spelled
-    ``pj``. An omitted parameter is left off the card (class default).
-    ``mult``/``m`` > 1 is rejected, as for resistors/capacitors."""
-    if len(nodes) != 2:
-        raise NormalizeError(
-            f"device '{instance}' (subcircuit '{subckt_name}'): expected 2 "
-            f"terminals (anode cathode), found {len(nodes)} "
-            f"({' '.join(nodes) or '<none>'})"
-        )
-    _reject_multiplicity(instance, subckt_name, params)
-    extra = ""
-    if "area" in params:
-        area_um2 = _parse_um2(
-            params["area"],
-            device=instance,
-            param="area",
-            geometry_style=geometry_style,
-        )
-        extra += f" A={_format_um2(area_um2)}"
-    perim = params.get("perim", params.get("pj"))
-    if perim is not None:
-        perim_um = _parse_um(
-            perim, device=instance, param="perim", geometry_style=geometry_style
-        )
-        extra += f" P={_format_um(perim_um)}"
-    return f"{instance} {' '.join(nodes)} {lookup.device_class}{extra}"
 
 
 def _convert_bipolar_card(
@@ -1421,34 +1349,6 @@ def _convert_bipolar_card(
     return f"{instance} {' '.join(nodes)} {lookup.device_class}{extra}"
 
 
-def _geometry_suffix(
-    instance: str,
-    subckt_name: str,
-    lookup: DeviceLookup,
-    params: dict[str, str],
-    *,
-    geometry_style: str | None = None,
-) -> str:
-    """The ``" L=...U W=...U"`` suffix carried from ``lookup``'s own
-    length/width call-site parameters, or ``""`` when the call supplies
-    neither (the subcircuit's own default geometry then applies).
-
-    A dimension the call omits still resolves when ``lookup`` carries a
-    fixed constant for it (``fixed_length_um``/``fixed_width_um``, issue
-    #2459's fixed-geometry-wrapper support -- see
-    :func:`_resolve_geometry_dimension`) -- e.g. a call supplying only ``L``
-    against a subcircuit whose *name* fixes ``W`` (sky130's
-    ``res_high_po_2p85``) still emits both.
-    """
-    resolved = _resolve_call_geometry(
-        instance, subckt_name, lookup, params, geometry_style=geometry_style
-    )
-    if resolved is None:
-        return ""
-    l_um, w_um = resolved
-    return f" L={_format_um(l_um)} W={_format_um(w_um)}"
-
-
 def _resolve_call_geometry(
     instance: str,
     subckt_name: str,
@@ -1459,8 +1359,8 @@ def _resolve_call_geometry(
 ) -> tuple[float, float] | None:
     """The call's resolved ``(L, W)`` in micrometres, or ``None`` when the
     call supplies neither dimension (the subcircuit's own default geometry
-    then applies). Shared by :func:`_geometry_suffix` and the deck-derived
-    resistor value (issue #2905)."""
+    then applies). Used by the deck-derived resistor value (issue
+    #2905)."""
     has_length_param = lookup.length_param in params
     has_width_param = lookup.width_param in params
     if not (has_length_param or has_width_param):
@@ -1846,8 +1746,7 @@ def _parse_device_map_fixed_um(
     """
     if key not in value:
         return None
-    raw = value[key]
-    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+    if not is_number(raw := value[key]):
         raise NormalizeError(
             f"device_map entry '{name}': '{key}' must be a number (the "
             "fixed dimension in micrometres this subcircuit's name bakes "
@@ -2044,6 +1943,150 @@ def _rewrite_m_card_model(line: str, sim_model_classes: dict[str, str]) -> str:
     return " ".join(tokens)
 
 
+def _deck_plain_resistor_classes(deck: str | None) -> dict[str, str]:
+    """``deck``'s lower-cased resistor model name -> canonical device class,
+    used to give a valueless foundry-style ``R`` card its value token (issue
+    #4670). Empty without ``deck`` or for an unresolvable deck."""
+    if deck is None:
+        return {}
+    from .decks import (
+        InvalidDeckOptionError,
+        UnknownExtractionDeckError,
+        get_extraction_deck,
+    )
+    from .netlist_capacitor_recovery import resistor_classes_for_deck
+
+    try:
+        resolved = get_extraction_deck(deck)
+    except (UnknownExtractionDeckError, InvalidDeckOptionError):
+        return {}
+    return {
+        name.lower(): canonical
+        for name, canonical in resistor_classes_for_deck(resolved).items()
+    }
+
+
+def _is_r_value_token(token: str) -> bool:
+    """Whether ``token`` is an ``R`` card's value (a SPICE number or a
+    ``{expr}``/``'expr'`` expression) rather than a third terminal. The bare
+    ``0`` stays a node name: it is ground, a plausible bulk terminal."""
+    if token == "0":
+        return False
+    return token[:1] in "{'" or spice_number.parse(token) is not None
+
+
+def _convert_plain_r_card(
+    line: str,
+    resistor_classes: dict[str, str],
+    geometry_style: str | None,
+    resistor_values: dict[str, Callable[[float, float], float]],
+    placeholder_value_classes: dict[str, str],
+) -> str:
+    """Give a foundry-style ``R<name> n1 n2 [n3] <model> W=.. L=..`` card (no
+    value token) the ``R... <value> <class> L= W=`` shape KLayout's reader
+    needs, through the same value/placeholder logic as the ``X``-call route
+    (issue #4670). A card with a value token, or whose model names no deck
+    resistor class, is returned unchanged."""
+    tokens = _tokenize(line.strip())
+    positional, params = _split_params(tokens)
+    # name + 2 or 3 terminals + model
+    if len(positional) not in (4, 5):
+        return line
+    if len(positional) == 5 and _is_r_value_token(positional[3]):
+        # `R<name> n1 n2 <value> <model>`: a valued card, left byte-identical
+        return line
+    device_class = resistor_classes.get(positional[-1].lower())
+    if device_class is None:
+        return line
+    lookup = DeviceLookup("resistor", device_class, "l", "w")
+    card, is_placeholder = _convert_geometry_card(
+        positional[0],
+        positional[1:-1],
+        positional[-1],
+        lookup,
+        params,
+        geometry_style=geometry_style,
+        resistor_value=resistor_values.get(device_class.lower()),
+    )
+    if is_placeholder:
+        placeholder_value_classes[device_class] = "resistor"
+    return card
+
+
+def _convert_plain_c_card(
+    line: str,
+    subckt_to_binding: dict[str, DeviceLookup] | None,
+    geometry_style: str | None,
+    placeholder_value_classes: dict[str, str],
+    param_scopes: ParamScopes,
+    subckt_scope: str,
+    call_overrides: CallOverrides,
+) -> str:
+    """Give a foundry-style ``C<name> n1 n2 <model> W=.. L=.. [M=..]`` card (no
+    value token) the shape KLayout's reader needs, by routing it through the
+    ``X``-call capacitor conversion (issue #4729). A card with a value token,
+    or whose model names no curated capacitor, is returned unchanged."""
+    tokens = _tokenize(line.strip())
+    positional, _ = _split_params(tokens)
+    # name + 2 terminals + model
+    if len(positional) != 4 or not subckt_to_binding:
+        return line
+    lookup = subckt_to_binding.get(positional[-1]) or subckt_to_binding.get(
+        positional[-1].lower()
+    )
+    if lookup is None or lookup.kind != "capacitor":
+        return line
+    as_x = "X" + tokens[0][1:] + line.strip()[len(tokens[0]) :]
+    return _convert_x_card(
+        as_x,
+        subckt_to_binding,
+        geometry_style=geometry_style,
+        placeholder_value_classes=placeholder_value_classes,
+        param_scopes=param_scopes,
+        subckt_scope=subckt_scope,
+        call_overrides=call_overrides,
+    )
+
+
+def _convert_plain_card(
+    line: str,
+    first: str,
+    sim_model_classes,
+    subckt_to_binding,
+    geometry_style,
+    placeholder_value_classes,
+    param_scopes,
+    subckt_scope,
+    call_overrides,
+    plain_resistor_classes,
+    resistor_values,
+) -> str:
+    """Route one non-``X`` element card (plain ``M``/``C``/``R``) to its
+    converter; any other card passes through unchanged."""
+    letter = first[:1]
+    if sim_model_classes and letter in ("M", "m"):
+        return _rewrite_m_card_model(line, sim_model_classes)
+    if subckt_to_binding and letter in ("C", "c"):
+        return _convert_plain_c_card(
+            line,
+            subckt_to_binding,
+            geometry_style,
+            placeholder_value_classes,
+            param_scopes,
+            subckt_scope,
+            call_overrides,
+        )
+    if plain_resistor_classes and letter in ("R", "r"):
+        return _convert_plain_r_card(
+            line,
+            plain_resistor_classes,
+            geometry_style,
+            resistor_values,
+            placeholder_value_classes,
+        )
+    return line
+
+
 def convert_reference_netlist(
     text: str,
     *,
@@ -2118,7 +2161,8 @@ def convert_reference_netlist(
     geometry_style = geometry_style_for_family(deck) if deck is not None else None
     custom_device_classes = _resolve_custom_device_classes(deck)
     sim_model_classes = _sim_model_classes(deck)
-    logical_lines = _fold_spice_continuations(text.splitlines())
+    plain_resistor_classes = _deck_plain_resistor_classes(deck)
+    logical_lines = fold_spice_continuations(text.splitlines())
     param_scopes = _collect_param_scopes(logical_lines)
     call_overrides = _collect_call_overrides(logical_lines, param_scopes)
     subckt_scope = ""
@@ -2159,10 +2203,22 @@ def convert_reference_netlist(
             except _UnknownSubcircuitError as exc:
                 unknown_subckts.append(exc)
                 out.append(line)
-        elif sim_model_classes and first and first[0] in "Mm":
-            out.append(_rewrite_m_card_model(line, sim_model_classes))
         else:
-            out.append(line)
+            out.append(
+                _convert_plain_card(
+                    line,
+                    first,
+                    sim_model_classes,
+                    subckt_to_binding,
+                    geometry_style,
+                    placeholder_value_classes,
+                    param_scopes,
+                    subckt_scope,
+                    call_overrides,
+                    plain_resistor_classes,
+                    resistor_values,
+                )
+            )
     if unknown_subckts:
         raise _aggregate_unknown_subcircuits(unknown_subckts)
     return ReferenceConversion("\n".join(out) + "\n", placeholder_value_classes)
@@ -2182,71 +2238,9 @@ def normalize_reference_netlist(
     return convert_reference_netlist(text, deck=deck, device_map=device_map).text
 
 
-def defined_subckt_names(text: str) -> set[str]:
-    """The upper-cased name of every ``.subckt`` defined in SPICE ``text``
-    (issue #2952) -- upper-cased because ``NetlistSpiceReader`` reads circuit
-    names back that way, so a caller can compare against
-    ``kdb.Circuit.name`` directly. ``.include``-d files are not followed."""
-    defined: set[str] = set()
-    for line in _fold_spice_continuations(text.splitlines()):
-        parts = line.split()
-        if len(parts) >= 2 and parts[0].lower() == ".subckt":
-            defined.add(parts[1].upper())
-    return defined
-
-
-def detect_subckt_call_devices(text: str) -> list[str]:
-    """Return the curated PDK device subcircuit names an ``X`` card in ``text``
-    instantiates *without* a matching ``.subckt`` definition in the same file.
-
-    Used by ``klt lvs`` to turn the silent subckt-call degradation into a
-    specific, actionable error when the caller did *not* opt into conversion:
-    a non-empty result means the reference netlist is in the simulation
-    (subckt-call) form, not the plain-element form ``klt lvs`` requires. A
-    device subcircuit that *is* defined in the file is not reported -- the
-    reader can at least read it as a subcircuit, a different (out-of-scope)
-    case.
-
-    Covers every curated device family (issue #1130: MOS, resistor,
-    capacitor, bipolar), not just MOS -- a reference netlist whose only
-    subckt-call devices are e.g. resistors is now detected the same way a
-    MOS-only one always was.
-
-    A card whose instance name contains ``$`` (``X$1``, the name KLayout's
-    own extractor writes) is reported only when it is a MOS call: bare
-    ``klt extract`` round-trips resistors/capacitors/bipolars as such cards
-    under the same curated names (issues #1157/#1942), so those are not
-    evidence of the simulation form. Only ``klt extract --pdk`` emits MOS
-    ``X`` cards (issue #2972).
-    """
-    known = known_device_subckt_names()
-    defined: set[str] = set()
-    used: list[str] = []
-    seen: set[str] = set()
-
-    for line in _fold_spice_continuations(text.splitlines()):
-        stripped = line.strip()
-        if not stripped or stripped.startswith("*"):
-            continue
-        lowered = stripped.lower()
-        if lowered.startswith(".subckt"):
-            parts = stripped.split()
-            if len(parts) >= 2:
-                defined.add(parts[1])
-            continue
-        first = stripped.split(None, 1)[0]
-        if not first or first[0] not in "Xx":
-            continue
-        tokens = _tokenize(line)
-        positional, _params = _split_params(tokens[1:])
-        if not positional:
-            continue
-        subckt_name = positional[-1]
-        if subckt_name not in known or subckt_name in seen:
-            continue
-        if "$" in tokens[0] and known[subckt_name][1].kind != "mos":
-            continue
-        used.append(subckt_name)
-        seen.add(subckt_name)
-
-    return [name for name in used if name not in defined]
+from .netlist_normalize_scan import (  # noqa: E402,F401  (re-exported)
+    _INCLUDE_LINE_RE,
+    defined_subckt_names,
+    detect_subckt_call_devices,
+    quote_spice_includes,
+)

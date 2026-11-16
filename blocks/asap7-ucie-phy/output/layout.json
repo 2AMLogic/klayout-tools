@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:07:39.259743+00:00",
+  "slug": "asap7-ucie-phy",
+  "name": "Asap7 Ucie Phy",
+  "description": "UCIe-class die-to-die PHY on predictive ASAP7, layout/timing only \u2014 2AM Logic canary block",
+  "layer_count": 29,
+  "cell_count": 53,
+  "instance_count": 52747,
+  "layout_file": "slice_routed.gds",
+  "renders": {
+    "overview": "renders/overview.png",
+    "layer_1_0": "renders/1_0.png",
+    "layer_1_251": "renders/1_251.png",
+    "layer_2_0": "renders/2_0.png",
+    "layer_3_251": "renders/3_251.png",
+    "layer_7_0": "renders/7_0.png",
+    "layer_10_0": "renders/10_0.png",
+    "layer_11_0": "renders/11_0.png",
+    "layer_12_0": "renders/12_0.png",
+    "layer_13_0": "renders/13_0.png",
+    "layer_16_0": "renders/16_0.png",
+    "layer_17_0": "renders/17_0.png",
+    "layer_18_0": "renders/18_0.png",
+    "layer_19_0": "renders/19_0.png",
+    "layer_19_251": "renders/19_251.png",
+    "layer_20_0": "renders/20_0.png",
+    "layer_20_251": "renders/20_251.png",
+    "layer_21_0": "renders/21_0.png",
+    "layer_25_0": "renders/25_0.png",
+    "layer_30_0": "renders/30_0.png",
+    "layer_35_0": "renders/35_0.png",
+    "layer_40_0": "renders/40_0.png",
+    "layer_40_251": "renders/40_251.png",
+    "layer_45_0": "renders/45_0.png",
+    "layer_50_0": "renders/50_0.png",
+    "layer_55_0": "renders/55_0.png",
+    "layer_60_0": "renders/60_0.png",
+    "layer_88_0": "renders/88_0.png",
+    "layer_100_0": "renders/100_0.png",
+    "layer_235_5": "renders/235_5.png",
+    "center_crop": "renders/center_crop/overview.png"
+  },
+  "spec_summary": {
+    "rows": [
+      {
+        "parameter": "Data lanes per direction",
+        "target": "16",
+        "fallback": "8",
+        "stretch": "full-width module (64)"
+      },
+      {
+        "parameter": "Rate per lane (equivalent to)",
+        "target": "16 GT/s",
+        "fallback": "4 GT/s",
+        "stretch": "32 GT/s"
+      },
+      {
+        "parameter": "Parallel (core-side) clock",
+        "target": "4 GHz",
+        "fallback": "1 GHz",
+        "stretch": "8 GHz"
+      },
+      {
+        "parameter": "Serialization ratio",
+        "target": "4:1",
+        "fallback": "4:1",
+        "stretch": "4:1"
+      },
+      {
+        "parameter": "Bump pitch the lane column matches",
+        "target": "45 um",
+        "fallback": "55 um",
+        "stretch": "25 um"
+      },
+      {
+        "parameter": "Lane cell (width x height)",
+        "target": "45 x 90 um",
+        "fallback": "55 x 110 um",
+        "stretch": "25 x 50 um"
+      },
+      {
+        "parameter": "PVT corners",
+        "target": "TT, SS, FF (RVT)",
+        "fallback": "same",
+        "stretch": "same"
+      }
+    ]
+  },
+  "source": {
+    "repo": "2AMLogic/asap7-ucie-phy",
+    "ref": "4fd0b93660d19984bc702824527408e77d91b961",
+    "path": "layout/slice_routed.gds"
+  },
+  "downloadable": true,
+  "status": "ok"
+}

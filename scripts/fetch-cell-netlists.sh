@@ -116,7 +116,7 @@ for row in "${MANIFEST[@]}"; do
     mkdir -p "$(dirname "$dest")"
 
     tmp="$(mktemp)"
-    if ! curl -fsL --retry 3 -o "$tmp" "$url"; then
+    if ! curl -fsL --connect-timeout 15 --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 60 -o "$tmp" "$url"; then
         echo "error: failed to fetch $url" >&2
         rm -f "$tmp"
         fail=1

@@ -436,7 +436,7 @@ def test_load_request_rejects_unknown_top_level_key(tmp_path, key):
 def test_load_request_accepts_comment_and_every_allowed_key(tmp_path):
     from klayout_tools.place_and_route import _ALLOWED_REQUEST_KEYS
 
-    assert len(_ALLOWED_REQUEST_KEYS) == 23
+    assert len(_ALLOWED_REQUEST_KEYS) == 26
     request = _base_request(_comment="note", schema="klt.place_and_route.request/1")
     for key in _ALLOWED_REQUEST_KEYS:
         request.setdefault(key, {} if key in ("backend", "batch", "outputs") else 1)
@@ -793,11 +793,9 @@ def test_signal_routing_layers_covers_every_supported_library():
         routable = place_and_route._signal_routing_layers(cell_library)
         assert routable is not None, cell_library
         low, _, high = layer_range.partition("-")
-        assert routable[0] == low
-        assert routable[-1] == high
+        assert (routable[0], routable[-1]) == (low, high)
         stack = place_and_route._ROUTING_LAYER_STACK[cell_library]
-        # Every library reserves at least its bottom layer for pin access,
-        # which is exactly the class of io-layer mistake #2473 reports.
+        # Every library reserves its bottom layer for pin access (#2473).
         assert set(routable).issubset(stack)
         assert stack[0] not in routable
 
@@ -2389,7 +2387,7 @@ _OUTPUT_DRC_RE = re.compile(r"^detailed_route -output_drc (\S+) -output_maze")
 
 def _script_lines(script_path: str) -> list[str]:
     with open(script_path, encoding="utf-8") as handle:
-        return [line.rstrip("\n") for line in handle]
+        return [re.sub(r" -congestion_report_file \S+|\n", "", ln) for ln in handle]
 
 
 def _script_write_db_path(script_path: str) -> str:
@@ -4638,10 +4636,9 @@ def test_stubbed_full_route_with_macro_emits_read_lef_and_place_macro(
 
     report = run_place_and_route(request_path)
 
-    # `cell`/`lib`/`halo` are issue #2635's additive per-entry fields: the
-    # macro's master name (shared with `klt synthesize`/`klt sta`) plus the
-    # two newly-accepted request fields, `null` here because this request
-    # declares neither.
+    # `cell`/`lib`/`halo` (#2635) and `keepout` (#5313) are additive per-entry
+    # fields: the master name plus the newly-accepted request fields, `null`
+    # here because this request declares none of them.
     assert report["macros"] == [
         {
             "instance": "u_analog",
@@ -4652,6 +4649,7 @@ def test_stubbed_full_route_with_macro_emits_read_lef_and_place_macro(
             "cell": "analog_block",
             "lib": None,
             "halo": None,
+            "keepout": None,
         }
     ]
 
@@ -4670,7 +4668,7 @@ def test_stubbed_full_route_with_macro_emits_read_lef_and_place_macro(
     assert read_lef_idx < read_verilog_idx
 
     place_macro_line = (
-        "place_macro -macro_name u_analog -location {12.5 3.0} -orientation MX -exact"
+        "place_macro -macro_name {u_analog} -location {12.5 3.0} -orientation MX -exact"
     )
     assert place_macro_line in lines
     link_design_idx = next(
@@ -5653,9 +5651,9 @@ def test_io_delay_lines_helper_emits_only_given_fields():
         *_IO_INPUT_DELAY_LINES,
         _IO_OUTPUT_DELAY_LINE,
     ]
-    # Defensive: `_validate_constraints` never lets a delay through without
-    # a clock, but the helper stays total either way.
-    assert place_and_route._io_delay_lines(None, 0.2, 0.3) == []
+    # No `clock_port` (#4913): delays bind to the virtual clock (exact Tcl is
+    # asserted in test_place_and_route_virtual_clock.py).
+    assert len(place_and_route._io_delay_lines(None, 0.2, 0.3)) == 2
 
 
 def test_io_delay_input_set_excludes_the_clock_port():
@@ -7689,6 +7687,85 @@ def test_route_critical_nets_percentage_rejects_invalid_values(
         run_place_and_route(request_path)
 
 
+def test_congestion_and_density_knobs_default_to_prior_tcl(tmp_path, monkeypatch):
+    """Issue #4716: omitted fields leave the generated Tcl unchanged."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    place_lines = _script_lines(_stage_script(request_path, "place"))
+    route_lines = _script_lines(_stage_script(request_path, "route"))
+    assert any(
+        line.startswith("global_placement -density 0.6 ") for line in place_lines
+    )
+    assert "global_route -verbose" in route_lines
+    assert report["applied"] == {
+        "placement_density": 0.6,
+        "route_congestion_iterations": None,
+        "route_allow_congestion": False,
+        "signal_layers": "met1-met5",
+    }
+
+
+def test_congestion_and_density_knobs_emitted_when_requested(tmp_path, monkeypatch):
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        placement_density=0.45,
+        route_congestion_iterations=60,
+        route_allow_congestion=True,
+    )
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    place_lines = _script_lines(_stage_script(request_path, "place"))
+    route_lines = _script_lines(_stage_script(request_path, "route"))
+    assert any(
+        line.startswith("global_placement -density 0.45 ") for line in place_lines
+    )
+    assert (
+        "global_route -verbose -congestion_iterations 60 -allow_congestion"
+        in route_lines
+    )
+    assert report["applied"] == {
+        "placement_density": 0.45,
+        "route_congestion_iterations": 60,
+        "route_allow_congestion": True,
+        "signal_layers": "met1-met5",
+    }
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("placement_density", 0),
+        ("placement_density", -0.1),
+        ("placement_density", 1.5),
+        ("placement_density", True),
+        ("placement_density", "0.5"),
+        ("route_congestion_iterations", 0),
+        ("route_congestion_iterations", -3),
+        ("route_congestion_iterations", 2.5),
+        ("route_congestion_iterations", True),
+        ("route_allow_congestion", 1),
+        ("route_allow_congestion", "true"),
+    ],
+)
+def test_congestion_and_density_knobs_reject_invalid_values(
+    tmp_path, monkeypatch, field, value
+):
+    request_path = _setup_success_env(tmp_path, monkeypatch, **{field: value})
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    with pytest.raises(PlaceAndRouteError, match=field):
+        run_place_and_route(request_path)
+
+
 def test_route_stage_repeats_antenna_repair_pass_bounded_multi_pass(
     tmp_path, monkeypatch
 ):
@@ -8631,16 +8708,21 @@ def test_merge_def_to_gds_success(tmp_path):
             "rules": [],
             "unrepaired": [],
         },
-        # Issue #4495: non-ASAP7 PDK -> named no-op, GDS untouched.
-        "via_pad_trim": {
-            "status": "skipped",
-            "reason": "PDK family of 'sky130A' is not ASAP7; no-op",
-            "cells_touched": 0,
-            "pads_trimmed": 0,
-            "pads_shrunk": 0,
-            "pads_left": 0,
-        },
+        "via_pad_trim": _skipped_via_pad_trim("sky130A"),
     }
+
+
+def _skipped_via_pad_trim(variant: str) -> dict:
+    """Issue #4495: off ASAP7 both halves of the via-pad pass are a *named*
+    no-op -- the trim leaves the GDS untouched and `tip_check` (which writes
+    no geometry on any PDK) reports that skip, never a misleading clean."""
+    s = {
+        "status": "skipped",
+        "reason": f"PDK family of '{variant}' is not ASAP7; no-op",
+    }
+    counts = {"cells_touched": 0, "pads_trimmed": 0, "pads_shrunk": 0, "pads_left": 0}
+    tip = {"violations": 0, "via_pad_violations": 0, "rules": []}
+    return {**s, **counts, "layers": [], "tip_check": {**s, **tip}}
 
 
 def test_merge_def_to_gds_is_byte_reproducible_across_runs(tmp_path):
@@ -8755,15 +8837,7 @@ def test_merge_def_to_gds_applies_family_fallback_layer_map_for_gf180mcu(tmp_pat
             "rules": [],
             "unrepaired": [],
         },
-        # Issue #4495: non-ASAP7 PDK -> named no-op, GDS untouched.
-        "via_pad_trim": {
-            "status": "skipped",
-            "reason": "PDK family of 'gf180mcuC' is not ASAP7; no-op",
-            "cells_touched": 0,
-            "pads_trimmed": 0,
-            "pads_shrunk": 0,
-            "pads_left": 0,
-        },
+        "via_pad_trim": _skipped_via_pad_trim("gf180mcuC"),
     }
 
 
@@ -11714,6 +11788,63 @@ def test_stubbed_macro_halo_with_power_emits_a_macro_pdn_grid(tmp_path, monkeypa
     )
 
 
+def test_stubbed_bracketed_macro_instance_is_escaped_for_pdn_instances(
+    tmp_path, monkeypatch
+):
+    """Issues #4701/#4715: a bracketed instance (single backslash per bracket)
+    reaches `place_macro` literally, and `define_pdn_grid -instances` with the
+    glob + list escaping (six backslashes before each bracket)."""
+    instance = "top/blk/gen\\[0\\].inst"
+    _write_macro_lef_with_power_pins(tmp_path / "sram.lef", pg_layer="met1")
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        target_stage="floorplan",
+        power={"preset": "sky130hd", "power_net": "VPWR", "ground_net": "VGND"},
+        macros=[
+            {
+                "instance": instance,
+                "lef": "sram.lef",
+                "x_um": 10.0,
+                "y_um": 20.0,
+                "halo": {"left": 2, "bottom": 1.84, "right": 2, "top": 2},
+            }
+        ],
+    )
+    _stub_openroad_success(monkeypatch, stages=("floorplan",))
+
+    run_place_and_route(request_path)
+
+    lines = _script_lines(
+        os.path.join(
+            os.path.dirname(request_path),
+            ".klt",
+            "place-and-route",
+            "pnr_gcd_floorplan.tcl",
+        )
+    )
+    assert (
+        f"place_macro -macro_name {{{instance}}} -location {{10.0 20.0}} "
+        "-orientation R0 -exact"
+    ) in lines
+    pdn_instance = "top/blk/gen\\\\\\\\\\\\[0\\\\\\\\\\\\].inst"
+    assert any(f"-instances {{{pdn_instance}}} -halo" in ln for ln in lines)
+
+
+def test_pdn_instances_arg_escapes_glob_and_list_metacharacters():
+    from klayout_tools.place_and_route_script import _pdn_instances_arg
+
+    bs = "\\"
+    assert _pdn_instances_arg("u_sram") == "u_sram"
+    assert _pdn_instances_arg(f"g{bs}[0{bs}]") == f"g{bs * 6}[0{bs * 6}]"
+    assert (
+        _pdn_instances_arg(f"a{bs}[0{bs}].b{bs}[1{bs}]")
+        == f"a{bs * 6}[0{bs * 6}].b{bs * 6}[1{bs * 6}]"
+    )
+    assert _pdn_instances_arg("a*b?c") == f"a{bs * 2}*b{bs * 2}?c"
+    assert _pdn_instances_arg(f"x{bs}y") == f"x{bs * 4}y"
+
+
 def test_stubbed_macro_halo_without_power_emits_no_macro_pdn_grid(
     tmp_path, monkeypatch
 ):
@@ -11774,9 +11905,11 @@ def test_macro_halo_with_power_but_no_pg_pins_is_rejected(tmp_path, monkeypatch)
         run_place_and_route(request_path)
 
 
-def test_macro_halo_with_power_on_an_unstrapped_layer_is_rejected(
+def test_macro_halo_with_power_on_an_unstrapped_layer_connects_to_next_strap(
     tmp_path, monkeypatch
 ):
+    """Issue #4703: only the *upper* layer of the macro connect needs a core
+    strap, so a met3 pin (sky130hd straps met1/met4/met5) joins met4."""
     _write_macro_lef_with_power_pins(tmp_path / "sram.lef", pg_layer="met3")
     request_path = _setup_success_env(
         tmp_path,
@@ -11795,7 +11928,67 @@ def test_macro_halo_with_power_on_an_unstrapped_layer_is_rejected(
     )
     _stub_openroad_success(monkeypatch, stages=("floorplan",))
 
-    with pytest.raises(PlaceAndRouteError, match="strap on the macro's own P/G layer"):
+    run_place_and_route(request_path)
+
+    lines = _script_lines(
+        os.path.join(
+            os.path.dirname(request_path),
+            ".klt",
+            "place-and-route",
+            "pnr_gcd_floorplan.tcl",
+        )
+    )
+    assert "add_pdn_connect -grid {macro_u_sram} -layers {met3 met4}" in lines
+    assert not any("met3" in line and "add_pdn_stripe" in line for line in lines)
+
+
+def test_macro_halo_with_power_above_every_strap_is_rejected(tmp_path, monkeypatch):
+    _write_macro_lef_with_power_pins(tmp_path / "sram.lef", pg_layer="met6")
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        target_stage="floorplan",
+        power={"preset": "sky130hd", "power_net": "VPWR", "ground_net": "VGND"},
+        macros=[
+            {
+                "instance": "u_sram",
+                "lef": "sram.lef",
+                "x_um": 10.0,
+                "y_um": 20.0,
+                "halo": 2.0,
+            }
+        ],
+    )
+    _stub_openroad_success(monkeypatch, stages=("floorplan",))
+
+    with pytest.raises(
+        PlaceAndRouteError, match="strap \\*above\\* the macro's own P/G"
+    ):
+        run_place_and_route(request_path)
+
+
+def test_macro_halo_with_power_on_unparseable_layer_is_rejected(tmp_path, monkeypatch):
+    _write_macro_lef_with_power_pins(tmp_path / "sram.lef", pg_layer="mettop")
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        target_stage="floorplan",
+        power={"preset": "sky130hd", "power_net": "VPWR", "ground_net": "VGND"},
+        macros=[
+            {
+                "instance": "u_sram",
+                "lef": "sram.lef",
+                "x_um": 10.0,
+                "y_um": 20.0,
+                "halo": 2.0,
+            }
+        ],
+    )
+    _stub_openroad_success(monkeypatch, stages=("floorplan",))
+
+    with pytest.raises(
+        PlaceAndRouteError, match="strap \\*above\\* the macro's own P/G"
+    ):
         run_place_and_route(request_path)
 
 
@@ -11929,13 +12122,13 @@ def test_macro_pdn_connects_every_supply_pin_layer():
     ]
 
 
-def test_macro_pdn_rejects_supply_layer_missing_from_straps():
-    """A second supply layer with no matching strap is rejected up front
-    rather than silently left unconnected."""
+def test_macro_pdn_connects_unstrapped_supply_layer_to_next_strap_above():
+    """A second supply layer with no matching strap connects to the lowest
+    strap above it (issue #4703) rather than being rejected."""
     power = {"straps": [{"layer": "met1"}, {"layer": "met4"}, {"layer": "met5"}]}
-    with pytest.raises(place_and_route.PlaceAndRouteError) as excinfo:
-        place_and_route._macro_pdn_grid_lines([_pdn_macro(["met1", "met3"])], power)
-    assert "met3" in str(excinfo.value)
+    lines = place_and_route._macro_pdn_grid_lines([_pdn_macro(["met1", "met3"])], power)
+    assert "add_pdn_connect -grid {macro_u_sram} -layers {met1 met4}" in lines
+    assert "add_pdn_connect -grid {macro_u_sram} -layers {met3 met4}" in lines
 
 
 # --------------------------------------------------------------------------- #

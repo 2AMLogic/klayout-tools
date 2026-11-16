@@ -51,6 +51,8 @@ import json
 import os
 from typing import Any
 
+from ._jsonnum import is_number
+
 __all__ = [
     "TrajectoryError",
     "SCHEMA_VERSION",
@@ -172,7 +174,7 @@ def _validate_record(record: dict[str, Any], source: str, lineno: int) -> None:
     if not isinstance(name, str) or not name:
         fail("'objective.name' is required and must be a non-empty string")
     value = objective.get("value")  # type: ignore[union-attr]
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if not is_number(value):
         fail("'objective.value' is required and must be a number")
     polarity = objective.get("polarity")  # type: ignore[union-attr]
     if polarity not in _POLARITIES:
@@ -182,7 +184,7 @@ def _validate_record(record: dict[str, Any], source: str, lineno: int) -> None:
     if gate_results is not None:
         if not isinstance(gate_results, list):
             fail("'gate_results', when present, must be a list")
-        for entry in gate_results:  # type: ignore[union-attr]
+        for entry in gate_results:
             if (
                 not isinstance(entry, dict)
                 or "check" not in entry
@@ -194,9 +196,7 @@ def _validate_record(record: dict[str, Any], source: str, lineno: int) -> None:
                 )
 
     wall = record.get("wall_clock_s")
-    if wall is not None and (
-        isinstance(wall, bool) or not isinstance(wall, (int, float))
-    ):
+    if wall is not None and (not is_number(wall)):
         fail("'wall_clock_s', when present, must be a number")
 
 

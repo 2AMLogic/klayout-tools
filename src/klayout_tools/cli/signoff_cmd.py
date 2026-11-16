@@ -129,15 +129,15 @@ from ..signoff import (
     check_tier_report,
     describe_grader,
 )
-from ..signoff_attest import (
-    STREAM_ATTESTABLE_ITEM,
-    build_attestation,
-    build_stream_attestation,
-    check_attestation,
-    check_stream_attestation,
-    failed_output_tail,
-    write_attestation,
-)
+from ..signoff_attest import STREAM_ATTESTABLE_ITEM, write_attestation
+from ..signoff_attest_build import attach_build_drift, build_drift_line
+from ..signoff_attest_carry import compute_attestation as _compute_attestation
+from ..signoff_attest_carry import flag_problem as _skip_local_only_problem
+from ..signoff_attest_carry import skip_lines
+from ..signoff_attest_input import input_line, with_entry
+from ..signoff_attest_live import attach_live_fields
+from ..signoff_attest_text import attestation_check_line as _attestation_check_line
+from ..signoff_attest_text import check_label
 from ..signoff_generator_batch import (
     GeneratorApprovalError,
     GeneratorExecution,
@@ -235,6 +235,8 @@ def _maybe_run_attest(
             ("--input", "attest_input"),
             ("--generator", "generator"),
             ("--regenerated-hash", "regenerated_hash"),
+            ("--skip-local-only", "skip_local_only"),
+            ("--require-build-match", "require_build_match"),
         )
         if getattr(args, attr, None)
     ]
@@ -242,7 +244,8 @@ def _maybe_run_attest(
         return emit_error(
             "signoff",
             "--inventory/--output/--input/--generator/--regenerated-hash/"
-            "--hash-kind only apply to --attest",
+            "--hash-kind/--skip-local-only/--require-build-match only apply to "
+            "--attest",
             args.format,
         )
     return None
@@ -288,16 +291,12 @@ def _run_describe_grader(
 
 
 def _attest_flag_problem(
-    args: argparse.Namespace, inventory: str | None, stream: str | None
+    args: argparse.Namespace, inventory: str | None, stream: list[str] | None
 ) -> str | None:
-    """The refusal message for an invalid ``--attest`` flag combination (item 2
-    takes ``--input``; items 1, 8, 9 and 10 take ``--inventory``), else ``None``."""
+    """The refusal message for an invalid ``--attest`` flag combination, else
+    ``None``. Item 2 takes ``--input`` plus an optional ``--inventory`` of
+    declared checks; items 1, 8, 9 and 10 take ``--inventory``."""
     if args.attest == STREAM_ATTESTABLE_ITEM:
-        if inventory:
-            return (
-                "--inventory does not apply to --attest 2: the layout stream is "
-                "the artifact -- pass it with --input <stream>"
-            )
         if not stream:
             return (
                 "--attest 2 requires --input <stream> (the committed GDS/OASIS "
@@ -319,39 +318,6 @@ def _attest_flag_problem(
             "inventory; see docs/cli/signoff.md)"
         )
     return None
-
-
-def _compute_attestation(
-    args: argparse.Namespace,
-    inventory: str | None,
-    stream: str | None,
-    committed: str | None,
-) -> dict:
-    """Build (or, with ``committed``, re-check) the attestation. The flag
-    combination was validated by :func:`_attest_flag_problem`."""
-    if args.attest == STREAM_ATTESTABLE_ITEM:
-        assert stream is not None
-        generator = getattr(args, "generator", None)
-        regenerated_hash = getattr(args, "regenerated_hash", None)
-        hash_kind = getattr(args, "hash_kind", None) or "bytes"
-        if committed is not None:
-            return check_stream_attestation(
-                stream,
-                committed,
-                generator=generator,
-                regenerated_hash=regenerated_hash,
-                hash_kind=hash_kind,
-            )
-        return build_stream_attestation(
-            stream,
-            generator=generator,
-            regenerated_hash=regenerated_hash,
-            hash_kind=hash_kind,
-        )
-    assert inventory is not None
-    if committed is not None:
-        return check_attestation(args.attest, inventory, committed)
-    return build_attestation(args.attest, inventory)
 
 
 def _run_attest(
@@ -388,87 +354,55 @@ def _run_attest(
         return emit_error("signoff", problem, args.format)
     committed = getattr(args, "check", None)
     output = getattr(args, "output", None)
-    if committed is not None and output:
-        return emit_error(
-            "signoff",
-            "--check and --output are mutually exclusive with --attest: "
-            "--check verifies a committed envelope and never writes",
-            args.format,
-        )
+    problem = _skip_local_only_problem(args)
+    if problem is not None:
+        return emit_error("signoff", problem, args.format)
     try:
         result = _compute_attestation(args, inventory, stream, committed)
     except SignoffError as exc:
         return emit_error("signoff", str(exc), args.format)
 
     if committed is not None:
+        attach_live_fields(result.get("fresh") or {}, hints=False)
+        attach_build_drift(result, committed, args.require_build_match)
         emit_success(result, args.format, _print_attestation_check_text)
         ok = result["status"] == "match" and result["fresh_status"] == "pass"
         return EXIT_PASS if ok else EXIT_FAIL
 
     if result["status"] == "pass" and output:
         try:
-            write_attestation(result, output)
+            envelope = {k: v for k, v in result.items() if k != "skipped_checks"}
+            write_attestation(envelope, output)
         except OSError as exc:
             return emit_error(
                 "signoff", f"could not write --output '{output}': {exc}", args.format
             )
-    emit_success(result, args.format, _print_attestation_text)
+    attach_live_fields(result)
+    emit_success(with_entry(result, output), args.format, _print_attestation_text)
     return EXIT_PASS if result["status"] == "pass" else EXIT_FAIL
-
-
-def _attestation_check_line(check: dict) -> str:
-    marker = "PASS" if check["passed"] else "FAIL"
-    if check.get("skipped"):
-        marker = "SKIP"
-    if check["check"] == "present":
-        what = f"{check['role']} {check['path']} present"
-    elif check["check"] == "stream_readable":
-        what = f"layout stream readable ({check['content_hash']})"
-    elif check["check"] == "top_cell_non_empty":
-        what = f"non-empty top cell(s): {', '.join(check['top_cells']) or 'none'}"
-    elif check["check"] == "dbu_on_grid":
-        what = f"dbu on grid ({check['dbu']})"
-    elif check["check"] == "command":
-        label = check.get("target") or check.get("name") or check["role"]
-        status = check.get("error") or f"exit {check['exit_status']}"
-        what = f"{check['role']} {label}: {' '.join(check['argv'])} ({status})"
-    else:
-        what = (
-            f"pin {check['role']}: {check['value'] if check['passed'] else 'missing'}"
-        )
-    line = f"[{marker}] {what}"
-    if check["check"] == "command" and not check["passed"]:
-        tail = failed_output_tail(check)
-        if tail:
-            line += "\n" + "\n".join(f"    | {row}" for row in tail.splitlines())
-    return line
 
 
 def _print_attestation_text(result: dict) -> None:
     print(f"attest: T1 item {result['t1_item']}  status: {result['status']}")
     attestation = result["attestation"]
     print(f"checks: {attestation['passed_count']}/{attestation['check_count']} passed")
-    binding = result["provenance"]["input"]
-    label = "stream" if result["t1_item"] == STREAM_ATTESTABLE_ITEM else "inventory"
-    print(f"{label}: {binding['path']['path']} ({binding['content_hash']})")
+    print(input_line(result, STREAM_ATTESTABLE_ITEM))
     print()
     for check in attestation["checks"]:
         print(_attestation_check_line(check))
+    for line in skip_lines(result, check_label):
+        print(line)
 
 
 def _print_attestation_check_text(result: dict) -> None:
     render_rerun_drift(result)
     print(f"fresh_status: {result['fresh_status']}")
+    print(build_drift_line(result))
     failed = [c for c in result["fresh"]["attestation"]["checks"] if not c["passed"]]
     for check in failed:
         print(_attestation_check_line(check))
-    for check in result.get("skipped_checks", []):
-        label = check.get("target") or check.get("name") or check["role"]
-        outcome = "pass" if check["passed"] else "fail"
-        print(
-            f"[SKIP] {check['role']} {label}: {' '.join(check['argv'])} "
-            f"(local_only, not run; committed outcome: {outcome})"
-        )
+    for line in skip_lines(result, check_label):
+        print(line)
 
 
 def _run_envelope_aggregation(args: argparse.Namespace) -> int:

@@ -131,6 +131,16 @@ The timer half is **detection, not convergence** by default: it reports drift
 and writes nothing unless `fleet.autoApply` is on. A change that must take
 effect without waiting for a restart still needs one.
 
+### Per-write `autoApply` flags (#13228)
+
+`fleet.autoApply` is the umbrella for four timer writes — roster (register,
+deregister, missing-clone clone), config (machine, host-local and per-repo
+tiers, and the restart that follows), resync and checkout fast-forward. Each has
+its own key (`fleet.autoApplyRoster|Config|Resync|Checkout`, env
+`LOOM_FLEET_AUTO_APPLY_<NAME>`) that overrides the umbrella either way, so a
+fleet can enable them one at a time; a registration-only host sets just
+`autoApplyRoster`. See the daemon-reference `fleet.*` table.
+
 ### Restart-required changes restart the daemon on a `fleet.autoApply` host (#12425)
 
 A host that writes its config (`fleet.autoApply`) also applies what needs a
@@ -206,7 +216,7 @@ supplied the value.
 
 ## Where fleet config lives
 
-Tier 1 (fleet-gitops `config.defaults` / `config.hosts.<h>`, rendered to the
+Tier 1 (the fleet state store `config.defaults` / `config.hosts.<h>`, rendered to the
 machine-level `defaults.json`) is where fleet-wide settings are decided. Config
 resolution is plain tier order and nothing else: tier 1 < `.loom/config.json`
 < `.loom-project/project.json` < `.loom-local/fleet-repo.json` (the per-repo

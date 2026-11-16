@@ -694,11 +694,8 @@ _SG13G2_DUMMY_LAYER = (99, 50)
 
 
 def test_list_generators_includes_all_four_phase2_families():
-    """`klt gen --list` must show all four analog primitive families the
-    issue scopes, alongside phase 1's `resistor_strip`, phase 4's
-    `bjt_array`, the chip-boundary `bond_pad` (issue #568), `esd_device`
-    (issue #569), and the named-net `well_island` (issue #1421) (acceptance
-    criterion #1)."""
+    """`klt gen --list` must show every registered generator family (incl.
+    `pdk_cell`, #5290): the analog primitives, `bond_pad`, `esd_device`, ASAP7."""
     report = list_generators()
     names = {g["name"] for g in report["generators"]}
     assert names == {
@@ -713,7 +710,10 @@ def test_list_generators_includes_all_four_phase2_families():
         "esd_device",
         "cap_array",
         "cap_vpp_array",
+        "pdk_cell",
         "well_island",
+        "asap7_finfet",
+        "asap7_tap",
     }
 
 
@@ -7804,12 +7804,11 @@ def test_families_without_gate_pad_clearance_are_unchanged(family):
     )
 
 
-@pytest.mark.parametrize("generator_name", ("bjt_array", "esd_device", "well_island"))
+@pytest.mark.parametrize("generator_name", ("esd_device", "well_island"))
 def test_sg13g2_deferred_generators_rejected(generator_name, tmp_path, sg13g2_pdk_root):
-    """`bjt_array` (no bipolar device recognition in this deck's curated
-    extraction deck -- `EXTRACTION_DECK.bipolars` is empty), `esd_device`,
-    and `well_island` (neither attempted by this issue) are all explicitly
-    deferred rather than silently accepted with untested geometry."""
+    """`esd_device` and `well_island` (neither attempted by this issue) are
+    explicitly deferred rather than silently accepted with untested geometry.
+    (`bjt_array` is no longer deferred: issue #4850 -- see the HBT tests.)"""
     with pytest.raises(GenError, match="not yet supported by this generator"):
         generate(
             {
@@ -8634,6 +8633,7 @@ def test_list_generators_bjt_array_params_schema():
     generator = next(g for g in report["generators"] if g["name"] == "bjt_array")
     params = {p["name"]: p for p in generator["params"]}
     assert set(params) == {
+        "flavor",  # sg13g2 HBT cell selector (#4850)
         "emitter_um",
         "rows",
         "cols",
@@ -10265,10 +10265,10 @@ def test_dogbone_terminal_example_regenerates_byte_identical(tmp_path, family):
     on both families, silently invalidating the committed streams while
     every existing test stayed green.
 
-    A byte compare (rather than a geometry compare) is deliberate: the GDS
-    carries `mos_array`'s PCell context-info properties too, so a parameter
-    added to the generator drifts the fixture without moving a single
-    polygon. When this fails, regenerate with
+    A byte compare (rather than a geometry compare) is deliberate: it pins the
+    stream's *record order*, which a `klayout.db` compare cannot see -- the
+    #5499 gap. PCell context info is no longer pinned (`write_layout()` stopped
+    writing it), so parameter drift is invisible. When this fails, regenerate with
     `uv run --extra dev python3 examples/dogbone-terminal/generate.py` and
     review the resulting diff as a deliberate fixture update.
     """
@@ -10563,8 +10563,8 @@ def test_mos_array_sd_implant_absence_noted_on_sg13g2(
     # dummy marker (99/50, issue #2590) joins it because this repro requests
     # `dummy: 1`; it is a deck-local extraction marker, not an implant.
     expected = {(1, 0), (5, 0), (6, 0), (8, 0), _SG13G2_DUMMY_LAYER}
-    if flavor == "pfet":
-        expected.add((31, 0))
+    # nfet: the guard ring's P-substrate tap carries its own pSD (issue #5231)
+    expected.add((31, 0) if flavor == "pfet" else (14, 0))
     assert present == expected
 
 
@@ -12089,7 +12089,7 @@ def test_sky130_ring_tap_implant_and_npc_geometry(
     """Phase B of issue #2934: the guard ring's tap is covered by the implant
     matching the well underneath it (nsdm for the pfet's n-tap well tie, psdm
     for the nfet's p-tap substrate tie) with ``n/psdm.5b``'s 0.125um margin,
-    and ``npc`` caps every poly-contact licon with ``npc.2`` spacing met."""
+    and ``npc`` caps every poly-contact licon (licon.15) with ``npc.2`` met."""
     import klayout.db as kdb
 
     output = tmp_path / f"{generator}_sky130_phase_b_{flavor}.gds"
@@ -12126,7 +12126,7 @@ def test_sky130_ring_tap_implant_and_npc_geometry(
 
     gate_licons = licon.inside(poly)
     assert not gate_licons.is_empty()
-    assert (gate_licons.sized(95) - npc).is_empty()
+    assert (gate_licons.sized(100) - npc).is_empty()
     assert npc.space_check(270).count() == 0
     assert npc.width_check(270).count() == 0
     # No npc over source/drain or tap licons.
@@ -12272,7 +12272,7 @@ def _gen_res(tmp_path, root, tag, variant="gf180mcuD", **params):
 
 
 def test_res_array_off_mfg_grid_length_warns(tmp_path, both_pdk_root):
-    report = _gen_res(tmp_path, both_pdk_root, "off", length_um=3.343)
+    report = _gen_res(tmp_path, both_pdk_root, "off", length_um=3.343, snap=False)
     (warning,) = _mfg_grid_warnings_of(report)
     assert "params.length_um=3.343um" in warning
     assert "0.005um" in warning
@@ -12298,9 +12298,9 @@ def test_res_array_off_grid_warning_leaves_geometry_unchanged(
 ):
     from klayout_tools import gen_describe
 
-    warned = _gen_res(tmp_path, both_pdk_root, "warned", length_um=3.343)
+    warned = _gen_res(tmp_path, both_pdk_root, "warned", length_um=3.343, snap=False)
     monkeypatch.setattr(gen_describe, "mfg_grid_um", lambda family, layer: 0.0)
-    silent = _gen_res(tmp_path, both_pdk_root, "silent", length_um=3.343)
+    silent = _gen_res(tmp_path, both_pdk_root, "silent", length_um=3.343, snap=False)
     assert _mfg_grid_warnings_of(warned) and not _mfg_grid_warnings_of(silent)
     assert (tmp_path / "res_warned.gds").read_bytes() == (
         tmp_path / "res_silent.gds"
@@ -12308,7 +12308,7 @@ def test_res_array_off_grid_warning_leaves_geometry_unchanged(
 
 
 def test_res_array_short_length_warns_on_gf180mcu(tmp_path, both_pdk_root):
-    short = _gen_res(tmp_path, both_pdk_root, "short", length_um=0.3)
+    short = _gen_res(tmp_path, both_pdk_root, "short", length_um=0.3, snap=False)
     assert any("minimum mask width" in w for w in short["warnings"])
     long = _gen_res(tmp_path, both_pdk_root, "long", length_um=3.0)
     assert not any("minimum mask width" in w for w in long["warnings"])
@@ -12317,3 +12317,76 @@ def test_res_array_short_length_warns_on_gf180mcu(tmp_path, both_pdk_root):
 def test_res_array_sky130_has_no_short_length_warning(tmp_path, pdk_root):
     report = _gen_res(tmp_path, pdk_root, "sky", variant="sky130A", length_um=0.5)
     assert not any("minimum mask width" in w for w in report["warnings"])
+
+
+# --------------------------------------------------------------------------- #
+# Issue #4666: res_array length_um snap + minimum drawable length
+# --------------------------------------------------------------------------- #
+
+
+def test_res_array_off_grid_length_snaps_and_reports(tmp_path, both_pdk_root):
+    report = _gen_res(tmp_path, both_pdk_root, "snap", length_um=3.343)
+    snap = report["drc_hints"]["length_snap"]
+    assert snap["requested_um"] == 3.343
+    assert snap["realised_um"] == 3.345
+    assert snap["grid_um"] == 0.005
+    assert snap["resistance_delta_pct"] == pytest.approx(0.0598, abs=1e-3)
+    assert snap["reasons"] == ["snapped_to_grid"]
+    assert _mfg_grid_warnings_of(report) == []
+    assert any("was drawn as 3.345um" in w for w in report["warnings"])
+    _gen_res(tmp_path, both_pdk_root, "ongrid", length_um=3.345)
+    assert (tmp_path / "res_snap.gds").read_bytes() == (
+        tmp_path / "res_ongrid.gds"
+    ).read_bytes()
+
+
+def test_res_array_on_grid_length_has_no_snap_record(tmp_path, both_pdk_root):
+    report = _gen_res(tmp_path, both_pdk_root, "noop", length_um=3.345)
+    assert "length_snap" not in report["drc_hints"]
+
+
+def test_res_array_snap_false_draws_verbatim(tmp_path, both_pdk_root):
+    report = _gen_res(tmp_path, both_pdk_root, "verb", length_um=3.343, snap=False)
+    assert "length_snap" not in report["drc_hints"]
+    assert len(_mfg_grid_warnings_of(report)) == 1
+
+
+def test_res_array_snap_rounds_half_up(tmp_path, both_pdk_root):
+    report = _gen_res(tmp_path, both_pdk_root, "half", length_um=3.3425)
+    assert report["drc_hints"]["length_snap"]["realised_um"] == 3.345
+
+
+def test_res_array_below_floor_refuses_by_default(tmp_path, both_pdk_root):
+    with pytest.raises(GenError, match="minimum mask width"):
+        _gen_res(tmp_path, both_pdk_root, "refuse", length_um=0.3)
+
+
+def test_res_array_below_floor_lengthens_on_opt_in(tmp_path, both_pdk_root):
+    report = _gen_res(
+        tmp_path, both_pdk_root, "lengthen", length_um=0.3, short_length="lengthen"
+    )
+    snap = report["drc_hints"]["length_snap"]
+    assert "lengthened_to_floor" in snap["reasons"]
+    assert snap["realised_um"] > snap["requested_um"]
+    assert snap["resistance_delta_pct"] > 0
+    assert not any("minimum mask width" in w for w in report["warnings"])
+    again = _gen_res(tmp_path, both_pdk_root, "again", length_um=snap["realised_um"])
+    assert "length_snap" not in again["drc_hints"]
+
+
+def test_res_array_invalid_short_length_value(tmp_path, both_pdk_root):
+    with pytest.raises(GenError, match="short_length"):
+        _gen_res(tmp_path, both_pdk_root, "bad", length_um=3.0, short_length="x")
+
+
+def test_res_array_no_ongrid_rule_does_not_snap(tmp_path, both_pdk_root, monkeypatch):
+    from klayout_tools import gen_describe
+
+    monkeypatch.setattr(gen_describe, "mfg_grid_um", lambda family, layer: 0.0)
+    report = _gen_res(tmp_path, both_pdk_root, "g0", length_um=3.343)
+    assert "length_snap" not in report["drc_hints"]
+
+
+def test_res_array_metal_level_is_not_snapped(tmp_path, both_pdk_root):
+    report = _gen_res(tmp_path, both_pdk_root, "met", length_um=3.343, metal_level=1)
+    assert "length_snap" not in report["drc_hints"]

@@ -71,6 +71,72 @@ def parse_layer(spec: str, flag: str) -> tuple[int, int]:
         raise InterfaceCheckError(f"{flag} must look like L/D, got: {spec}") from None
 
 
+def parse_pair(spec: str) -> tuple[str, str]:
+    """Parse ``"A_REGEX=B_TEMPLATE"`` (split on the last ``=``) and validate it.
+
+    The template is a :meth:`re.Match.expand` template (``\\1``, ``\\g<n>``).
+    """
+    regex, sep, template = spec.rpartition("=")
+    if not sep or not regex:
+        raise InterfaceCheckError(
+            f"--pair must look like 'A_REGEX=B_TEMPLATE', got: {spec}"
+        )
+    try:
+        compiled = re.compile(regex)
+    except re.error as exc:
+        raise InterfaceCheckError(
+            f"--pair regex is not valid ({spec}): {exc}"
+        ) from None
+    try:
+        # Validate the template (e.g. nonexistent group) without needing a match.
+        _check_template(compiled, template)
+    except (re.error, IndexError) as exc:
+        raise InterfaceCheckError(
+            f"--pair template is not valid ({spec}): {exc}"
+        ) from None
+    return regex, template
+
+
+def _check_template(compiled: re.Pattern[str], template: str) -> None:
+    """Raise if ``template`` references a group ``compiled`` does not have."""
+    for ref in re.finditer(r"\\(\d+)|\\g<([^>]*)>", template):
+        group = ref.group(1) or ref.group(2)
+        if group.isdigit():
+            if int(group) > compiled.groups:
+                raise IndexError(f"invalid group reference {group}")
+        elif group not in compiled.groupindex:
+            raise IndexError(f"unknown group name {group!r}")
+
+
+def _apply_pairs(
+    side_a: dict[str, dict[str, Any]], pairs: list[tuple[str, str]]
+) -> dict[str, tuple[str, dict[str, Any]]]:
+    """``{B-side key: (A name, A item)}``. The first pair whose regex fully
+    matches an A label's base name wins; unmapped labels keep their name. The
+    ``#k`` occurrence suffix is carried over to the renamed key."""
+    compiled = [(re.compile(rx), tpl) for rx, tpl in pairs]
+    mapped: dict[str, tuple[str, dict[str, Any]]] = {}
+    for key, item in side_a.items():
+        base, hash_, occ = key.partition("#")
+        target = key
+        for rx, tpl in compiled:
+            match = rx.fullmatch(base)
+            if match is not None:
+                try:
+                    target = match.expand(tpl) + hash_ + occ
+                except (re.error, IndexError) as exc:
+                    raise InterfaceCheckError(
+                        f"--pair template failed on {base!r}: {exc}"
+                    ) from None
+                break
+        if target in mapped:
+            raise InterfaceCheckError(
+                f"--pair maps both {mapped[target][0]!r} and {key!r} to {target!r}"
+            )
+        mapped[target] = (key, item)
+    return mapped
+
+
 def run_interface_check(
     a_path: str,
     b_path: str,
@@ -82,6 +148,7 @@ def run_interface_check(
     tol_um: float = 0.0,
     top_a: str | None = None,
     top_b: str | None = None,
+    pairs: list[tuple[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Check that the pins of ``a_path`` mate with those of ``b_path`` when B
     is placed at ``place`` (micrometres, in A's frame).
@@ -114,6 +181,13 @@ def run_interface_check(
     A pin name that occurs several times in one stream is paired by
     occurrence, ordered bottom-to-top then left-to-right in A's frame; the
     occurrence index is appended as ``name#k`` (k >= 1) only for such names.
+
+    ``pairs`` is an optional list of ``(a_regex, b_template)``: an A label that
+    fully matches ``a_regex`` is paired with the B label named by the expanded
+    template (complementary names, e.g. ``n_out[0]`` <-> ``s_in[0]``). Entries
+    are reported under A's name; ``b_name`` is the B-side name. The declared
+    pairs are echoed as ``"pairs": [{"a", "b"}]``. Both names must match
+    ``pins``. Without ``pairs`` labels are paired by identical string.
     """
     if tol_um < 0 or not math.isfinite(tol_um):
         raise InterfaceCheckError(f"--tol-um must be >= 0, got: {tol_um}")
@@ -133,10 +207,13 @@ def run_interface_check(
     if not side_a and not side_b:
         raise InterfaceCheckError(f"--pins {pins!r} matches no label in either stream")
 
-    entries = [
-        _pin_entry(name, side_a.get(name), side_b.get(name), tol_um)
-        for name in sorted(set(side_a) | set(side_b), key=_natural_key)
-    ]
+    mapped = _apply_pairs(side_a, pairs or [])
+    entries = []
+    for key in sorted(set(mapped) | set(side_b), key=_natural_key):
+        a_name, a_item = mapped.get(key, (key, None))
+        entry = _pin_entry(a_name, a_item, side_b.get(key), tol_um)
+        entry["b_name"] = key
+        entries.append(entry)
     counts = {
         status: sum(1 for e in entries if e["status"] == status) for status in STATUSES
     }
@@ -153,6 +230,7 @@ def run_interface_check(
         "ok_count": counts["ok"],
         "misaligned_count": counts["misaligned"],
         "no_partner_count": counts["no_partner"],
+        "pairs": [{"a": rx, "b": tpl} for rx, tpl in (pairs or [])],
         "pins": entries,
     }
 

@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:11:50.912261+00:00",
+  "slug": "sky130-ble-baseband",
+  "name": "Sky130 Ble Baseband",
+  "description": "BLE LE 1M and IEEE 802.15.4 digital baseband on sky130 \u2014 2AM Logic canary block",
+  "pdk": "sky130",
+  "spec_summary": {
+    "rows": [
+      {
+        "parameter": "PHYs",
+        "target": "LE 1M GFSK + 802.15.4 O-QPSK",
+        "fallback": "LE 1M only",
+        "stretch": "LE 2M"
+      },
+      {
+        "parameter": "RX input",
+        "target": "8 Msps complex I/Q, \u2264 8-bit",
+        "fallback": "4 Msps"
+      },
+      {
+        "parameter": "LE 1M demod",
+        "target": "BER \u2264 1e-3 at a ratified Eb/N0 in AWGN, with frequency offset",
+        "stretch": "coded PHY"
+      },
+      {
+        "parameter": "802.15.4 demod",
+        "target": "PER < 1 % (20-octet PSDU) at a ratified SNR"
+      },
+      {
+        "parameter": "Turnaround",
+        "target": "meets LE T_IFS and 802.15.4 turnaround with margin, in hardware"
+      },
+      {
+        "parameter": "Clock (all sky130_fd_sc_hd corners)",
+        "target": "32 MHz",
+        "fallback": "16 MHz"
+      },
+      {
+        "parameter": "Signoff",
+        "target": "DRC + LVS clean"
+      }
+    ],
+    "status_note": "RATIFIED, revision 1 \u2014 see [spec/](spec/README.md"
+  },
+  "source": {
+    "repo": "2AMLogic/sky130-ble-baseband",
+    "ref": "cc9e741cca1f1a50ed1e8bca0335d4369ea55b8f",
+    "path": "."
+  },
+  "downloadable": true,
+  "status": "in design \u2014 simulation evidence"
+}

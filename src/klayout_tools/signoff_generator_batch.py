@@ -74,7 +74,11 @@ BATCH_JOB_TOOL = "generator"
 #: The single input the job receives under ``inputs/``.
 TREE_FILENAME = "tree.tar.gz"
 
-#: Files the job writes under ``$EDA_OUTPUT_DIR``.
+#: Files the job writes under ``$EDA_OUTPUT_DIR``. ``STDOUT_FILENAME`` is the
+#: approved argv's stdout: a generator writes its artifact to a file, not to
+#: stdout, so this is a diagnostic channel where a ``klt <verb>`` job would
+#: put ``report.json``.
+STDOUT_FILENAME = "generator.stdout"
 OUTPUT_FILENAME = "generated.artifact"
 OUTPUT_HASH_FILENAME = "generated.sha256"
 
@@ -381,10 +385,6 @@ def _fail(failure: str, message: str, evidence: dict[str, Any]) -> GeneratorOutc
 # --------------------------------------------------------------------------- #
 
 
-def _sha256_bytes(data: bytes) -> str:
-    return "sha256:" + hashlib.sha256(data).hexdigest()
-
-
 def _select_tree(root: str, approval: GeneratorApproval) -> netlist_batch.BatchTree:
     """The git-tracked files the approval ships, capped in size; the approved
     script must be among them."""
@@ -447,12 +447,14 @@ def _package(
                 continue
             handle = archive.extractfile(member)
             data = handle.read() if handle is not None else b""
-            digest.update(f"{member.name}\0{_sha256_bytes(data)}\n".encode())
+            digest.update(
+                f"{member.name}\0{_provenance.content_hash_bytes(data)}\n".encode()
+            )
             if member.name == approval.script:
                 shipped_script = data
     if (
         shipped_script is None
-        or _sha256_bytes(shipped_script) != approval.script_sha256
+        or _provenance.content_hash_bytes(shipped_script) != approval.script_sha256
     ):
         raise netlist_batch.NetlistError(
             f"approved script {approval.script} does not hash to the approved "
@@ -482,57 +484,40 @@ def build_job_spec(
     element is ``shlex``-quoted; nothing the manifest wrote reaches the shell
     except through the approved ``interpreter`` / ``script`` / argument
     strings. No credential is read from, or written to, the job environment.
+
+    A client version the fleet cannot pin raises
+    :class:`GeneratorApprovalError` -- ``run_approved_generator`` turns it
+    into a ``failed`` outcome, so ``klt signoff`` reports
+    ``docs/json-contract.md``'s error envelope rather than letting the
+    preflight's ``SimError`` escape as a traceback.
     """
-    version = (
-        client_version if client_version is not None else _provenance._klt_version()
-    )
-    preflight = sim_batch._runner_preflight_script(
-        version, enforce=version_check == "enforce"
-    )
-    out = '"$EDA_OUTPUT_DIR/{}"'
-    setup = " && ".join(
-        [
-            'EDA_INPUT_DIR=$(cd "$EDA_INPUT_DIR" && pwd -P)',
-            'EDA_OUTPUT_DIR=$(cd "$EDA_OUTPUT_DIR" && pwd -P)',
-            "w=$(mktemp -d)",
-            f'tar -xzf "$EDA_INPUT_DIR/{TREE_FILENAME}" -C "$w"',
-            'cd "$w"',
-        ]
-    )
     argv = " ".join(
         shlex.quote(item)
         for item in (approval.interpreter, approval.script, *arguments)
     )
-    run = (
-        f"timeout -k {_KILL_AFTER_S} {int(approval.timeout_s)} {argv}"
-        f" > {out.format('generator.stdout')}"
-        f" 2> >(tee {out.format(sim_batch.BATCH_STDERR_FILENAME)} >&2)"
+    out = '"$EDA_OUTPUT_DIR/{}"'
+    command = _batch_common.build_job_command(
+        tree_member=TREE_FILENAME,
+        run=f"timeout -k {_KILL_AFTER_S} {int(approval.timeout_s)} {argv}",
+        err_cls=GeneratorApprovalError,
+        stdout_target=STDOUT_FILENAME,
+        client_version=client_version,
+        version_check=version_check,
+        extra_tail=(
+            f"if [ $rc -eq 0 ]; then cp -- {shlex.quote(approval.output)} "
+            f"{out.format(OUTPUT_FILENAME)} && "
+            f"printf 'sha256:%s\\n' \"$(sha256sum {out.format(OUTPUT_FILENAME)} "
+            f"| cut -d' ' -f1)\" > {out.format(OUTPUT_HASH_FILENAME)}; rc=$?; fi"
+        ),
     )
-    publish = (
-        f"if [ $rc -eq 0 ]; then cp -- {shlex.quote(approval.output)} "
-        f"{out.format(OUTPUT_FILENAME)} && "
-        f"printf 'sha256:%s\\n' \"$(sha256sum {out.format(OUTPUT_FILENAME)} "
-        f"| cut -d' ' -f1)\" > {out.format(OUTPUT_HASH_FILENAME)}; rc=$?; fi"
-    )
-    command = (
-        preflight
-        + setup
-        + " && "
-        + run
-        + "; rc=$?; wait $! 2>/dev/null; "
-        + publish
-        + "; exit $rc"
-    )
-    return sim_batch.BatchJobSpec(
+    return _batch_common.build_job_spec(
         cmd=command,
         tool=BATCH_JOB_TOOL,
         pdk_variant=approval.pdk,
-        timeout_seconds=netlist_batch._job_timeout_seconds(approval.timeout_s),
-        inputs=(
-            sim_batch.BatchJobInput(
-                name=TREE_FILENAME, label="generator tree", local_path=tarball_path
-            ),
-        ),
+        tree_member=TREE_FILENAME,
+        tree_label="generator tree",
+        tarball_path=tarball_path,
+        timeout_s=approval.timeout_s,
     )
 
 
@@ -601,7 +586,12 @@ def run_approved_generator(
                 tarball_path=tarball,
                 version_check=config.runner_version_check,
             )
-        except (netlist_batch.NetlistError, sim_batch.BatchError, OSError) as exc:
+        except (
+            GeneratorApprovalError,
+            netlist_batch.NetlistError,
+            sim_batch.BatchError,
+            OSError,
+        ) as exc:
             return _fail(FAIL_PACKAGE, str(exc), evidence)
         evidence["input_tree"] = input_tree
 
@@ -664,7 +654,7 @@ def _compare(
             f"batch job {job_id} finished without collected generator output",
             evidence,
         )
-    output_hash = _sha256_bytes(data)
+    output_hash = _provenance.content_hash_bytes(data)
     try:
         with open(
             os.path.join(collected, OUTPUT_HASH_FILENAME), encoding="utf-8"

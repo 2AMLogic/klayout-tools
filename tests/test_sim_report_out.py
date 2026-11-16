@@ -78,3 +78,18 @@ def test_yield_reads_gz_report_identically(tmp_path):
     write_json_file(_report(), str(plain))
     write_json_file(_report(), str(gz))
     assert _read_samples(str(gz)) == _read_samples(str(plain))
+
+
+def test_batch_report_with_remote_environment_is_written_verbatim(
+    tmp_path, capsys, monkeypatch
+):
+    """Issue #3057: a batch report (``environment.remote``) lands in the file."""
+    report = _report()
+    report["environment"]["remote"] = {"backend": "batch", "job_id": "job-123"}
+    monkeypatch.setattr("klayout_tools.cli.sim_cmd.run_sim", lambda *a, **k: report)
+    path = tmp_path / "nested" / "r.json"
+    path.parent.mkdir()
+    code, out = _run(tmp_path, capsys, "--backend", "batch", "--report-out", str(path))
+    assert code == 0
+    assert path.read_text() == out.out
+    assert json.loads(path.read_text())["environment"]["remote"]["job_id"] == "job-123"

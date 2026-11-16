@@ -1,0 +1,103 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:09:51.955273+00:00",
+  "slug": "gf180-trng",
+  "name": "Gf180 Trng",
+  "description": "True random number generator on gf180mcu \u2014 2AM Logic canary block",
+  "pdk": "gf180mcu",
+  "layer_count": 11,
+  "cell_count": 9,
+  "instance_count": 8,
+  "layout_file": "combiner_sampler.gds",
+  "renders": {
+    "overview": "renders/overview.png",
+    "Nwell": "renders/21_0.png",
+    "Comp": "renders/22_0.png",
+    "Poly2": "renders/30_0.png",
+    "Contact": "renders/33_0.png",
+    "Metal1": "renders/34_0.png",
+    "layer_34_10": "renders/34_10.png",
+    "Via1": "renders/35_0.png",
+    "Metal2": "renders/36_0.png",
+    "layer_36_10": "renders/36_10.png",
+    "Via2": "renders/38_0.png",
+    "Metal3": "renders/42_0.png",
+    "center_crop": "renders/center_crop/overview.png"
+  },
+  "spec_summary": {
+    "rows": [
+      {
+        "parameter": "Entropy source",
+        "target": "**N-way array of independent free-running ring oscillators, XOR-combined ahead of a single sampler**, N fixed by the jitter-budget sizing law `Q_array \u2265 1.5 \u00d7 4.0\u00d710\u207b\u00b3` at the entropy-binding corner ([DR-0007])",
+        "stretch": "metastability hybrid, scoped as a *secondary tap on the RO core* \u2014 not a free-standing source",
+        "status": "specified ([DR-0007]) \u2014 [evidence](docs/spec-row-status.md#entropy-source)"
+      },
+      {
+        "parameter": "Raw rate",
+        "target": "**> 2 kbps** sustained at the raw tap (sampler output), binding at the slowest-RO corner: `ss` / \u221210 % / +125 \u00b0C. Value from [DR-0011-raw-rate-at-the-measured-starved-cell-jitter-energy][DR-0011-rate] \u00a71 (superseding [DR-0010] \u00a71's > 500 bps, which superseded the original > 1 Mbps); measurement point, *sustained* and binding corner unchanged from [DR-0003]. The row is a floor **and the same law sets its ceiling \u2014 a maximum sample clock**: DR-0007 \u00a72 holds only up to **~2.77 kHz raw** (2773 bps at the entropy-binding corner `ss` / +125 \u00b0C / 3.63 V with a = 7.32, `array_sizing.py --check`); an integrator must not clock the sampler above it, because past it the entropy bound the row rests on no longer holds",
+        "stretch": "> 4 Mbps, same definition \u2014 [DR-0003]'s original stretch, not re-derived by either rate decision: **unattainable under the measured jitter-energy law**, far above the ~2.77 kHz sample-clock ceiling at which the shipped array still satisfies DR-0007 \u00a72 (`array_sizing.py`)",
+        "status": "**unmeasured** \u2014 a derived target, not a measured rate: DR-0007 \u00a72 holds at all 27 covered corners at 2 kbps, minimum margin 1.39\u00d7 at `ss` / +125 \u00b0C / 3.63 V (`array_sizing.py --check`, a = 7.32) \u2014 [evidence](docs/spec-row-status.md#raw-rate)"
+      },
+      {
+        "parameter": "Raw min-entropy per bit",
+        "target": "**placeholder \u2014 H\u2080 = 0.5 bit/sample is a design *target*, not a measurement.** Stated at the entropy-binding corner, **`ss` / +125 \u00b0C / 3.63 V** ([DR-0015]; `fs`/`sf` remain uncovered per [DR-0006]). Still owed: measured silicon ([DR-0004] Tier 3)",
+        "status": "**unmeasured placeholder** \u2014 no `H` figure is supportable by transistor-level simulation (#12, #406); owed to measured silicon \u2014 [evidence](docs/spec-row-status.md#raw-min-entropy-per-bit)"
+      },
+      {
+        "parameter": "Quality",
+        "target": "designed-for-SP 800-90B (raw access + RCT/APT + entropy-source model), plus a **simulation-derived design-stage min-entropy estimate** within the #10 claim limits; 90B validation itself deferred to measured silicon ([DR-0004])",
+        "stretch": "AIS-31 PTG.2 \u2014 same three-tier treatment (structure now, conformance deferred)",
+        "status": "specified; 90B validation deferred to measured silicon ([DR-0004]) \u2014 [evidence](docs/spec-row-status.md#quality)"
+      },
+      {
+        "parameter": "Conditioning",
+        "target": "**non-vetted** 32-bit CRC-32 LFSR compression (Galois, poly `0xEDB88320`), state cleared every block, **K = 8** \u2014 256 raw bits in : one 32-bit word out. Creditable output entropy **0.85 bit per output bit** (SP 800-90B's non-vetted cap) for any raw stream at or above **H = 0.107 bit/sample**; a 4.70\u00d7 margin under the H\u2080 = 0.5 target. ~0.005\u20130.008 mm\u00b2 ([DR-0008])",
+        "stretch": "a 90B-*vetted* conditioning function \u2014 **rejected on area**: a compact serialised AES-128 is 88\u2013124 % of the whole block budget ([DR-0008] \u00a74). Live again only if the area budget grows",
+        "status": "specified ([DR-0008]) \u2014 [evidence](docs/spec-row-status.md#conditioning)"
+      },
+      {
+        "parameter": "Delivered (post-conditioning) rate",
+        "target": "**`R_cond = R_raw / K` > 250 bps** at the raw-rate row's binding corner (`ss` / \u221210 % / +125 \u00b0C), K = 8 (re-derived at 2 kbps and retained: [K disposition](design/conditioner/README.md#k-at-the-2-kbps-raw-rate)); [DR-0003]'s original > 500 kbps at the stretch raw rate is **unattainable under the measured jitter-energy law** \u2014 it presupposes the > 4 Mbps raw stretch, itself unattainable (Raw rate row) ([DR-0003] \u00a76, [DR-0008] \u00a73, [DR-0011-rate])",
+        "status": "**derived from target** \u2014 not measured; inherits the raw-rate row's status \u2014 [evidence](docs/spec-row-status.md#delivered-post-conditioning-rate)"
+      },
+      {
+        "parameter": "Health tests",
+        "target": "continuous RCT + APT on the **raw** stream, \u03b1 = 2\u207b\u2074\u2070, APT window W = 1024, cutoffs as formulas in min-entropy H (at H\u2080 = 0.5 \u2192 `C_RCT` = 81, `C_APT` = 824); failure latches a flag and gates the conditioned path until explicit clear + start-up test. The parameterization has a hard floor: **no valid APT cutoff exists at H \u2264 0.03** ([DR-0002])",
+        "status": "specified ([DR-0002]) \u2014 [evidence](docs/spec-row-status.md#health-tests)"
+      },
+      {
+        "parameter": "Time-to-first-valid",
+        "target": "**\u2265 ~0.640 s** at 2 kbps \u2014 an arithmetic floor: 1024 consecutive raw samples for the start-up health test (0.512 s) plus 256 samples of conditioner latency (0.128 s), which do **not** overlap because the conditioner is held flushed while gated. Applies at power-on and after every alarm clear; binds at `ss` / \u221210 % / +125 \u00b0C (slowest sampling) ([DR-0002] \u00a7Failure behavior, [DR-0008] \u00a77; rate from [DR-0011-rate]).",
+        "status": "**derived from target** \u2014 640.5 ms at 2 kbps: #14's measured oscillator start-up (\u2264 12.41 ns) plus 1281 sample periods (`time_to_first_valid.py --check`), arithmetic at the target rate, not a 2 kbps run. #14's measured 1.281 ms was at 1 Mbps and is historical \u2014 [evidence](docs/spec-row-status.md#time-to-first-valid)"
+      },
+      {
+        "parameter": "Power",
+        "target": "< 500 \u00b5W active, binding at `ff` / +10 % supply (fastest RO \u2014 max measured `f_osc` 2.30 GHz at \u221240 \u00b0C); < 1 \u00b5A idle, binding at `ff` / +10 % / +125 \u00b0C (max leakage)",
+        "status": "**missed** \u2014 active 758.2 \u00b5W, missed by 1.5\u00d7; idle 2.21 \u00b5A, missed by ~2.2\u00d7 ([DR-0023], [DR-0017]) \u2014 [evidence](docs/spec-row-status.md#power)"
+      },
+      {
+        "parameter": "Area",
+        "target": "< 0.05 mm\u00b2",
+        "status": "**missed** \u2014 the regenerated floorplan misses by 3.5\u00d7: 175 789.9 \u00b5m\u00b2 including isolation channels, 351.6 % of the row ([DR-0019]) \u2014 [evidence](docs/spec-row-status.md#area)"
+      },
+      {
+        "parameter": "Operating envelope",
+        "target": "\u221240 \u2026 +125 \u00b0C, 3.3 V \u00b1 10 % (2.97\u20133.63 V). Every entropy, rate and health-test claim above holds **over this envelope and only over it**; the envelope is the security boundary, since an attacker chooses the operating point. Outside it, behavior is health-test-detected, not specified",
+        "status": "specified \u2014 [evidence](docs/spec-row-status.md#operating-envelope)"
+      },
+      {
+        "parameter": "Interface",
+        "target": "streaming, mode-selectable raw / conditioned (`OUT_MODE`), + register read (`DATA` conditioned, `RAW_DATA` raw); raw access always available and never gated ([DR-0001]). Instantiated as four word-addressed registers \u2014 `CTRL`, `STATUS`, `DATA`, `RAW_DATA` \u2014 plus a 32-bit valid/ready streaming port, with a health-test gate that flushes the conditioned path and **never** the raw one ([DR-0013])",
+        "status": "specified ([DR-0001], [DR-0013]) \u2014 [evidence](docs/spec-row-status.md#interface)"
+      }
+    ],
+    "status_note": "ratified 2026-07-31"
+  },
+  "source": {
+    "repo": "2AMLogic/gf180-trng",
+    "ref": "0bb7e75314af6b56e03c9ea555d4944361b9e333",
+    "path": "layout/blocks/combiner_sampler/combiner_sampler.gds"
+  },
+  "downloadable": true,
+  "status": "ok"
+}

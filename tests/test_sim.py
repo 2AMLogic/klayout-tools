@@ -35,10 +35,15 @@ from pathlib import Path
 
 import pytest
 
-from helpers.subprocess_fakes import fake_completed
+from helpers.subprocess_fakes import (
+    _STUB_VERSION_BANNER,
+    _stub_subprocess_run,
+    fake_completed,
+)
 from klayout_tools import _paths as paths_module
 from klayout_tools import pdk, remote_transport, sim, sim_batch, sim_remote, sim_steps
 from klayout_tools import remote_launcher as rl
+from klayout_tools import sim_measurement_results as smr
 from klayout_tools.cli import main
 
 pytestmark = pytest.mark.usefixtures(
@@ -2329,16 +2334,16 @@ def test_classify_diagnostics_modelname_with_wide_w_names_culprit(tmp_path):
 
 
 def test_classify_diagnostics_modelname_with_wide_nf_names_culprit(tmp_path):
-    # nf= hits the identical bin-range check w= does (issue #1214) -- the
-    # diagnostic must report the *effective* width (w * nf), not just w.
+    # Keys on w as written (issue #4976): nf= is reported, never multiplied.
     netlist = tmp_path / "netlist.spice"
-    netlist.write_text("X5 d g s b nfet_06v0 w=50u l=0.6u nf=450 m=1\n")
+    netlist.write_text("X5 d g s b nfet_06v0 w=128u l=0.6u nf=64 m=1\n")
 
     (diag,) = sim._classify_diagnostics(_MODELNAME_LOG, str(netlist))
 
     assert diag["code"] == "model_bin_range"
-    assert "nf=450" in diag["message"]
-    assert "22500" in diag["message"]  # 50 um * 450 fingers
+    assert "nf=64" in diag["message"]
+    assert "w=128u" in diag["message"]
+    assert "effective" not in diag["message"]
 
 
 def test_classify_diagnostics_modelname_with_m_workaround_finds_no_culprit(tmp_path):
@@ -2400,7 +2405,7 @@ def test_run_sim_stubbed_modelname_failure_reports_actionable_diagnostic(
     body.write_text(
         ".param vdd=1.0\n"
         "Vdd vdd 0 DC {vdd}\n"
-        "X5 vdd g out 0 nfet_06v0 w=50u l=0.6u nf=450 m=1\n"
+        "X5 vdd g out 0 nfet_06v0 w=128u l=0.6u nf=64 m=1\n"
     )
     request = _write_request(
         tmp_path,
@@ -2421,7 +2426,7 @@ def test_run_sim_stubbed_modelname_failure_reports_actionable_diagnostic(
     assert corner["status"] == "error"
     (diag,) = [d for d in corner["diagnostics"] if d["code"] == "model_bin_range"]
     assert "X5" in diag["message"]
-    assert "nf=450" in diag["message"]
+    assert "nf=64" in diag["message"]
     assert "m=" in diag["message"]
 
 
@@ -3515,30 +3520,6 @@ def test_parse_ascii_rawfile_missing_file_raises(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
-_STUB_VERSION_BANNER = "ngspice-99 : stub banner\n"
-
-
-def _stub_subprocess_run(
-    monkeypatch,
-    *,
-    log_text: str = "",
-    stdout: str = "** ngspice-99\n",
-    side_effect=None,
-    returncode: int = 0,
-):
-    def fake_run(cmd, capture_output, text, timeout, cwd=None, env=None, **_kw):
-        if "--version" in cmd:  # the once-per-sweep engine_build probe (#3095)
-            return fake_completed(_STUB_VERSION_BANNER)
-        log_path = cmd[cmd.index("-o") + 1]
-        if side_effect is not None:
-            raise side_effect
-        with open(log_path, "w", encoding="utf-8") as handle:
-            handle.write(log_text)
-        return fake_completed(stdout, returncode=returncode)
-
-    monkeypatch.setattr(sim.subprocess, "run", fake_run)
-
-
 def test_run_sim_stubbed_missing_binary_is_corner_error(tmp_path, monkeypatch):
     _write_body(tmp_path)
     request = _write_request(
@@ -3825,6 +3806,28 @@ _PARSE_ABORT_LOG = (
     "  m1 d g s b nfet_bad w=1u l=1u\n"
     "Simulation interrupted due to error!\n"
 )
+
+
+def test_bare_fatal_error_message_carries_cause_lines():
+    """Issue #4623: a bare `fatal error in ngspice` gets the log's cause
+    lines, bounded in count and length, wherever they sit relative to it."""
+    log = (
+        "warning, can't find model 'nfet' from line x1\r\n"
+        "Undefined parameter [r_w]\n"
+        "Error: third " + "x" * 500 + "\n"
+        "fatal error in ngspice, exit(1)\n"
+    )
+    (diag,) = sim._classify_diagnostics(log)
+    assert diag["code"] == "ngspice_fatal"
+    assert diag["message"].startswith("fatal error in ngspice, exit(1)")
+    assert "can't find model 'nfet'" in diag["message"]
+    assert "Undefined parameter [r_w]" in diag["message"]
+    assert "third" not in diag["message"]
+
+
+def test_bare_fatal_error_without_cause_is_unchanged():
+    (diag,) = sim._classify_diagnostics("fatal error in ngspice, exit(1)\n")
+    assert diag["message"] == "fatal error in ngspice, exit(1)"
 
 
 def test_corner_deck_parse_abort_gets_one_ngspice_fatal_cause(tmp_path, monkeypatch):
@@ -5658,7 +5661,7 @@ def test_rollup_measurements_without_monte_carlo_config_is_unchanged():
         [{"name": "vref", "unit": "V", "limits": {"max": 1.21}}], corners
     )
 
-    assert set(entry) == {"name", "unit", "limits", "status", "worst_case"}
+    assert set(entry) == set("name unit limits status worst_case min max".split())
 
 
 def test_rollup_measurements_monte_carlo_config_but_no_sampled_corners():
@@ -6000,7 +6003,7 @@ def test_run_sim_without_monte_carlo_has_no_statistics_block(tmp_path, monkeypat
     report = sim.run_sim(str(request))
 
     (entry,) = report["measurements"]
-    assert set(entry) == {"name", "unit", "limits", "status", "worst_case"}
+    assert set(entry) == set("name unit limits status worst_case min max".split())
 
 
 def test_run_sim_monte_carlo_sigma_window_pass_keeps_run_passing(tmp_path, monkeypatch):
@@ -10242,61 +10245,6 @@ def test_integration_waveform_artifact(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
-def test_measurement_diagnostic_hints_extracts_signal_window_and_target():
-    hints = sim._measurement_diagnostic_hints(
-        ".meas tran vout_avg AVG v(out) FROM=100n TO=900n"
-    )
-    assert hints["signal"] == "v(out)"
-    assert hints["window"] == pytest.approx((1e-7, 9e-7))
-    assert hints["target"] is None
-
-
-def test_measurement_diagnostic_hints_extracts_when_target():
-    hints = sim._measurement_diagnostic_hints(
-        ".meas tran startup_time WHEN v(out)=1.5 RISE=1"
-    )
-    assert hints["signal"] == "v(out)"
-    assert hints["window"] is None
-    assert hints["target"] == pytest.approx(1.5)
-
-
-def test_measurement_diagnostic_hints_unrecognised_card_returns_all_none():
-    """A `TRIG`/`TARG` delay measurement has no single window/target this
-    simple parser understands, and no `v(...)`/`i(...)` token at all when
-    both endpoints are parameters -- must degrade to all-`None`, never
-    raise."""
-    hints = sim._measurement_diagnostic_hints(".meas tran tphl PARAM='a+b'")
-    assert hints == {"signal": None, "window": None, "target": None}
-
-
-def test_measurement_diagnostic_hints_is_case_insensitive_and_lowercases_signal():
-    hints = sim._measurement_diagnostic_hints(
-        ".MEAS TRAN VOUT FIND V(OUT) WHEN V(OUT)=1"
-    )
-    assert hints["signal"] == "v(out)"
-
-
-@pytest.mark.parametrize(
-    ("corner_id", "expected"),
-    [
-        ("tt/1.800V/27C", "tt_1p800V_27C"),
-        ("ss/1.620V/-40C", "ss_1p620V_n40C"),
-        ("tt/1.800V/27C/mc3", "tt_1p800V_27C_mc3"),
-    ],
-)
-def test_slugify_corner_id_matches_cornerpoint_slug(corner_id, expected):
-    """Mirrors :attr:`sim.CornerPoint.slug`'s own transform exactly -- a
-    plain corner report dict has no live `CornerPoint` to ask, so this is a
-    deliberate, tested duplication of that same string transform."""
-    assert sim._slugify_corner_id(corner_id) == expected
-
-
-def test_slugify_signal_produces_filesystem_safe_name():
-    assert sim._slugify_signal("v(out)") == "v_out"
-    assert sim._slugify_signal("I(Vdd)") == "i_vdd"
-    assert sim._slugify_signal("") == "signal"
-
-
 def _write_ascii_rawfile(
     path: Path, *, plotname: str, sweep_name: str, signal_name: str, points
 ) -> None:
@@ -10885,7 +10833,7 @@ def test_examples_sim_remote_reference_reports_agree_across_backends():
 
 
 #: The modules that can put a `diagnostics[].code` into a `klt sim` report.
-_DIAGNOSTIC_SOURCE_MODULES = (sim, sim_remote, sim_batch, sim_steps)
+_DIAGNOSTIC_SOURCE_MODULES = (sim, sim_remote, sim_batch, sim_steps, smr)
 
 #: Emission sites where the code is supplied by the site's *caller* or by a
 #: table it iterates, so the literal cannot be read off the site itself --
@@ -12076,9 +12024,8 @@ def test_run_sim_runner_resolved_osdi_preload_goes_offhost_unchecked(
     assert seen["request_dir"] == str(tmp_path)
     environment = report["environment"]
     assert "osdi_preload" not in environment  # nothing hashed on this host
-    assert environment["osdi_preload_runner_resolved"] == [
-        {"entry": entry, "reason": "env_var"}
-    ]
+    expected = {"entry": entry, "index": 0, "reason": "env_var", "sha256": None}
+    assert environment["osdi_preload_runner_resolved"] == [expected]
 
 
 def test_run_sim_osdi_preload_under_models_pdk_root_goes_offhost(tmp_path, monkeypatch):
@@ -12099,9 +12046,8 @@ def test_run_sim_osdi_preload_under_models_pdk_root_goes_offhost(tmp_path, monke
 
     report = sim.run_sim(str(request), backend="batch")
 
-    assert report["environment"]["osdi_preload_runner_resolved"] == [
-        {"entry": entry, "reason": "pdk_root"}
-    ]
+    expected = {"entry": entry, "index": 0, "reason": "pdk_root", "sha256": None}
+    assert report["environment"]["osdi_preload_runner_resolved"] == [expected]
 
 
 def test_run_sim_runner_resolved_osdi_keeps_a_host_default_batch_backend(
@@ -14841,9 +14787,9 @@ def test_apply_engine_host_xyce_stays_null_and_client_null():
 
 
 def test_pex_side_environment_carries_engine_host():
-    from klayout_tools import pex
+    from klayout_tools.pex_sim_evidence import SIDE_ENVIRONMENT_KEYS
 
-    assert {"engine_host", "client_ngspice_binary"} <= set(pex._SIDE_ENVIRONMENT_KEYS)
+    assert {"engine_host", "client_ngspice_binary"} <= set(SIDE_ENVIRONMENT_KEYS)
 
 
 # ---------------------------------------------------------------------------
@@ -15682,8 +15628,6 @@ def test_param_brace_in_analysis_args_rejected_for_ngspice(tmp_path):
 
 
 def test_param_brace_in_step_analysis_args_rejected():
-    from klayout_tools import sim_steps
-
     with pytest.raises(sim.SimError, match="brace"):
         sim_steps._resolve_step_analysis({"kind": "tran", "args": "1n {stop_s}"}, "s1")
 
@@ -15862,3 +15806,38 @@ def test_read_osdi_abi_reads_the_exported_version_symbols(tmp_path):
     if built.returncode != 0:
         pytest.skip("cannot build a shared library here")
     assert sim._read_osdi_abi(str(lib)) == (0, 4)
+
+
+def test_with_thread_pin_prepends_num_threads_line():
+    """Issue #3619: the resolved thread count is also written as a
+    `.spiceinit` line, ahead of user lines so a user `set num_threads` wins."""
+    assert sim._with_thread_pin((), 1, "ngspice") == ("set num_threads=1",)
+    assert sim._with_thread_pin(("set num_threads=4",), 1, "ngspice") == (
+        "set num_threads=1",
+        "set num_threads=4",
+    )
+
+
+def test_with_thread_pin_is_inert_without_a_pin_or_for_xyce():
+    assert sim._with_thread_pin(("a",), None, "ngspice") == ("a",)
+    assert sim._with_thread_pin((), 1, "xyce") == ()
+
+
+def test_pinned_run_writes_num_threads_into_spiceinit(tmp_path, monkeypatch):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "options": {"keep_artifacts": True, "threads_per_worker": 1},
+        },
+    )
+    _stub_subprocess_run(monkeypatch)
+
+    report = sim.run_sim(str(request), artifacts_dir=str(tmp_path / "artifacts"))
+
+    (corner,) = report["corners"]
+    corner_dir = os.path.dirname(corner["artifacts"]["log"])
+    text = Path(corner_dir, ".spiceinit").read_text()
+    assert text == "set num_threads=1\n"

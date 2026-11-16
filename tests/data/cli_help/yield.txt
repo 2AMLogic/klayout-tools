@@ -1,0 +1,24 @@
+Turn a Monte Carlo sample set and its spec limits into a yield estimate that
+always carries its confidence interval, Cpk/sigma-to-spec, and a sample-size
+verdict -- issue #816, Phase 1a of the statistical/yield epic #710. A `klt
+sim` Monte Carlo report is consumed directly (no intermediate format). The
+tool never emits a bare point estimate: a request that could only produce one
+-- a single sample, a confidence level of 0 or 1, a measurement with no limits
+-- is an error, not a warning. Statistics run in the klt_yield_native Rust
+extension (native/yield/). Install it with the extra: `pip install 'klayout-
+tools[yield]'` pulls the prebuilt `klt-yield-native` wheel (Linux x86_64,
+macOS arm64); other platforms need a repo checkout plus a Rust toolchain. See
+docs/cli/yield.md#building-the-native-extension for the input/output schema
+and install/build options.
+
+positional arguments:
+  samples path to a `klt sim --format json` Monte Carlo report, or a sample-set document ({'measurements': [{'name', 'samples', 'limits'}, ...]}) -- auto-detected; see docs/cli/yield.md
+
+options:
+  -h, --help show this help message and exit
+  --limits LIMITS path to a spec-limits file supplying (or overriding) each measurement's min/max/target_yield, plus optional run-level confidence/target_ci_halfwidth/min_samples defaults. Required when the sample document carries no limits of its own
+  --confidence CONFIDENCE two-sided confidence level for every reported interval, strictly between 0 and 1 (default: 0.95). A value of 1 admits no finite interval and is rejected
+  --target-ci-halfwidth TARGET_CI_HALFWIDTH half-width, in absolute yield, the sample-size verdict is measured against (default: 0.01, i.e. +/-1 percentage point)
+  --min-samples MIN_SAMPLES minimum usable samples per measurement (default and hard floor: 2 -- below that no confidence interval exists)
+  --measurement NAME restrict the analysis to this measurement; repeatable, and comma-separated names are accepted. A named measurement with no spec limits is an error rather than a silent skip
+  --format {text,json} output format (default: text)

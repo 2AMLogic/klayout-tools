@@ -392,3 +392,15 @@ def test_integration_windowed_peak_excludes_the_early_overshoot(tmp_path):
     assert settled["value"] == pytest.approx(0.5, abs=1e-3)
     assert settled["status"] == "pass"
     assert whole["value"] == pytest.approx(1.5, abs=1e-3)
+
+
+def test_runner_feature_gate_registered():
+    from klayout_tools import sim_batch
+
+    assert "stress" in sim_batch._RUNNER_REQUEST_FEATURES
+    assert "stress" in sim_batch._MANDATORY_RUNNER_FEATURES
+    detect = sim_batch._RUNNER_REQUEST_FEATURES["stress"][1]
+    assert detect({"measurements": [{"name": "s", "stress": {"a": "x", "b": "y"}}]})
+    assert not detect({"measurements": [{"name": "e", "expr": "v(a)"}]})
+    assert sim_batch._missing_runner_features(["stress"], "0.8.0") == ["stress"]
+    assert sim_batch._missing_runner_features(["stress"], "0.8.1.dev3") == []

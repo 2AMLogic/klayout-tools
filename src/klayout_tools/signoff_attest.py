@@ -64,21 +64,16 @@ import sys
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
+from . import signoff_attest_item9 as item9
+from ._jsonnum import is_int, is_number
 from ._provenance import sha256_file
-from ._report_verify import (
-    VOLATILE_PROVENANCE_PATHS,
-    build_rerun_result,
-    load_committed_report,
-)
-from .build_identity import build_version, klayout_version
+from ._report_verify import load_committed_report
+from .build_identity import build_version
 from .env_provenance import find_repo_root
 from .signoff import (
     _COMMAND_EVIDENCE_TIMEOUT_S,
-    _HASH_KIND_BYTES,
-    _HASH_KIND_GEOMETRY,
     _ITEMS_REQUIRING_ANCHORED_GENERIC_EVIDENCE,
     _ITEMS_REQUIRING_ATTESTED_EVIDENCE,
-    _REGENERATED_HASH_RE,
     SCHEMA_VERSION,
     SignoffError,
     _classify,
@@ -86,6 +81,8 @@ from .signoff import (
     _generic_item_binding_refusal,
     _reject_json_constant,
 )
+from .signoff_attest_drift import drift_result
+from .signoff_attest_input import input_binding
 
 #: The attestation-inventory schema versions this build reads. An inventory
 #: declaring any other version is refused (exit ``1``) rather than read with
@@ -130,9 +127,6 @@ ATTESTABLE_ITEMS: tuple[int, ...] = tuple(
 #: the stream itself, so there is no inventory to hand-write.
 STREAM_ATTESTABLE_ITEM = 2
 
-#: ``--hash-kind`` values a stream attestation's regeneration claim accepts.
-REGENERATION_HASH_KINDS: tuple[str, ...] = (_HASH_KIND_BYTES, _HASH_KIND_GEOMETRY)
-
 _ITEM_TITLES = {
     1: "Design sources",
     2: "Layout",
@@ -148,10 +142,13 @@ _ITEM_TITLES = {
 _COMMON_KEYS = frozenset({"schema_version", "kind", "t1_item", "description"})
 _ITEM_KEYS: dict[int, frozenset[str]] = {
     1: frozenset({"sources", "derived"}),
+    # Item 2's inventory is optional (issue #4767) and declares only commands;
+    # the stream is always the ``--input`` artifact, never an inventory field.
+    2: frozenset({"checks"}),
     8: frozenset(
         {"report", "spec_rows", "citations", "envelope_checks", "corners", "metrics"}
     ),
-    9: frozenset({"testbenches", "cold_start", "pins"}),
+    9: item9.ITEM9_KEYS,
     10: frozenset({"hygiene", "checks"}),
 }
 
@@ -166,11 +163,6 @@ _PATH_LISTS: dict[int, tuple[tuple[str, str], ...]] = {
     9: (("testbenches", "testbench"),),
     10: (("hygiene", "hygiene"),),
 }
-
-#: Volatile envelope paths ``--check`` excludes from drift: the producing
-#: build's version strings. A `klt` upgrade that attests byte-identical
-#: inputs with identical outcomes is not evidence drift.
-VOLATILE_ATTESTATION_PATHS = VOLATILE_PROVENANCE_PATHS
 
 
 class AttestationError(SignoffError):
@@ -229,7 +221,7 @@ def _read_inventory(path: str) -> tuple[dict[str, Any], str]:
 
 def _validate_header(inventory: Mapping[str, Any], item: int, source: str) -> None:
     version = inventory.get("schema_version")
-    if isinstance(version, bool) or not isinstance(version, int):
+    if not is_int(version):
         raise AttestationError(
             f"inventory '{source}' has no integer 'schema_version' (this build "
             f"reads {sorted(SUPPORTED_INVENTORY_SCHEMA_VERSIONS)})"
@@ -246,7 +238,7 @@ def _validate_header(inventory: Mapping[str, Any], item: int, source: str) -> No
             f'inventory \'{source}\' must declare "kind": "{INVENTORY_KIND}"'
         )
     declared = inventory.get("t1_item")
-    if isinstance(declared, bool) or not isinstance(declared, int):
+    if not is_int(declared):
         raise AttestationError(
             f"inventory '{source}' must declare an integer 't1_item'"
         )
@@ -325,13 +317,17 @@ def _path_list(
 COMMAND_TIMEOUT_CEILING_S = 21600
 
 
-def _command_spec(raw: Any, field: str, root: str) -> dict[str, Any]:
+def _command_spec(
+    raw: Any, field: str, root: str, *, documented_argv: bool = False
+) -> dict[str, Any]:
     """Validate one declared command: ``{"argv": [str, ...], "cwd"?: path}``.
 
     ``argv`` is run directly (never through a shell) with ``cwd`` resolved
     against the repository root. Optional ``local_only: true`` marks a check
     that needs a toolchain the ``--check`` runner may lack: ``--attest`` runs
-    it, ``--attest --check`` skips it and carries the committed outcome."""
+    it, ``--attest --check`` skips it and carries the committed outcome.
+    ``documented_argv`` enables the item-9 ``documented_argv`` disclosure
+    (:func:`item9.documented_spec`); elsewhere the key is refused."""
     if not isinstance(raw, Mapping):
         raise AttestationError(f"'{field}' must be an object with an 'argv' list")
     argv = raw.get("argv")
@@ -368,7 +364,34 @@ def _command_spec(raw: Any, field: str, root: str) -> dict[str, Any]:
                 f"no greater than {COMMAND_TIMEOUT_CEILING_S}"
             )
         spec["timeout_s"] = timeout_s
+    spec.update(item9.documented_spec(raw, field, documented_argv))
     return spec
+
+
+def _validated_command_checks(
+    inventory: Mapping[str, Any], root: str, item: int
+) -> list[dict[str, Any]]:
+    """The inventory's non-empty ``checks`` list as named command specs
+    (shared by items 10 and 2): each entry ``{name, argv, cwd?, timeout_s?,
+    local_only?}`` with a unique non-empty ``name``."""
+    checks = inventory.get("checks")
+    if not isinstance(checks, list) or not checks:
+        raise AttestationError(
+            f"item {item} inventory must declare a non-empty 'checks' list -- "
+            "the commands whose result this attestation reports"
+        )
+    names: set[str] = set()
+    specs = []
+    for index, raw in enumerate(checks):
+        spec = _command_spec(raw, f"checks[{index}]", root)
+        name = raw.get("name")
+        if not isinstance(name, str) or not name:
+            raise AttestationError(f"'checks[{index}].name' must be a non-empty string")
+        if name in names:
+            raise AttestationError(f"check name '{name}' is declared more than once")
+        names.add(name)
+        specs.append({"name": name, **spec})
+    return specs
 
 
 def _validated_inventory(
@@ -378,6 +401,11 @@ def _validated_inventory(
     normalised form the checks run against. Raises :class:`AttestationError`
     for anything malformed."""
     _validate_header(inventory, item, source)
+    bench_specs: dict[str, Any] = {}
+    if item == 9:
+        inventory, bench_specs = item9.split_testbenches(
+            inventory, root, _normalize_repo_path, _command_spec
+        )
     seen: dict[str, str] = {}
     normalized: dict[str, Any] = {}
     for field, _role in _PATH_LISTS[item]:
@@ -389,38 +417,9 @@ def _validated_inventory(
     elif item == CHARACTERIZATION_ITEM:
         normalized.update(_validated_characterization(inventory, root))
     elif item == 9:
-        if "cold_start" not in inventory:
-            raise AttestationError(
-                "item 9 inventory must declare 'cold_start' -- the invocation "
-                "that reproduces the claimed measurements from a clean checkout"
-            )
-        normalized["cold_start"] = _command_spec(
-            inventory["cold_start"], "cold_start", root
-        )
-        normalized["pins"] = inventory.get("pins")
+        item9.validate_into(normalized, inventory, bench_specs, root, _command_spec)
     else:
-        checks = inventory.get("checks")
-        if not isinstance(checks, list) or not checks:
-            raise AttestationError(
-                "item 10 inventory must declare a non-empty 'checks' list -- the "
-                "CI/audit commands whose result this attestation reports"
-            )
-        names: set[str] = set()
-        specs = []
-        for index, raw in enumerate(checks):
-            spec = _command_spec(raw, f"checks[{index}]", root)
-            name = raw.get("name")
-            if not isinstance(name, str) or not name:
-                raise AttestationError(
-                    f"'checks[{index}].name' must be a non-empty string"
-                )
-            if name in names:
-                raise AttestationError(
-                    f"check name '{name}' is declared more than once"
-                )
-            names.add(name)
-            specs.append({"name": name, **spec})
-        normalized["checks"] = specs
+        normalized["checks"] = _validated_command_checks(inventory, root, 10)
     return normalized
 
 
@@ -732,9 +731,11 @@ def _recorded_hash_check(root: str, entry: Mapping[str, Any]) -> dict[str, Any]:
     return check
 
 
-# Bounded tail of a failing command's captured output, for the text renderer
-# only. Held out of band (never in a check dict) because it is host-specific
-# and the envelope -- and its content hash -- must stay reproducible.
+# Bounded tail of a failing command's captured output (issue #4698). Held out
+# of band (never in a check dict built here) because it is host-specific and
+# the envelope -- and its content hash -- must stay reproducible. The CLI adds
+# it to the live ``--format json`` result via :func:`attach_output_tails`,
+# after any ``--output`` write and ``--check`` diff.
 _OUTPUT_TAIL_MAX_LINES = 20
 _OUTPUT_TAIL_MAX_BYTES = 2048
 _failed_output: dict[tuple[tuple[str, ...], str], str] = {}
@@ -752,11 +753,21 @@ def _bounded_tail(text: str) -> str:
 def failed_output_tail(check: Mapping[str, Any]) -> str:
     """Bounded tail of the captured stdout+stderr of the failing command
     ``check`` in the most recent attestation run, or ``""`` (a passing,
-    skipped or unlaunchable check has none). Render-only: never part of the
-    envelope."""
+    skipped or unlaunchable check has none)."""
     return _failed_output.get(
         (tuple(check.get("argv") or ()), check.get("cwd", "")), ""
     )
+
+
+def attach_output_tails(envelope: Mapping[str, Any]) -> None:
+    """Add the additive ``output_tail`` string to each failing command check of
+    ``envelope`` (in place). Live-result only: call after the envelope has
+    been written or diffed, never before."""
+    for check in (envelope.get("attestation") or {}).get("checks") or []:
+        if check.get("check") == "command" and not check.get("passed"):
+            tail = failed_output_tail(check)
+            if tail:
+                check["output_tail"] = tail
 
 
 def _command_env() -> dict[str, str]:
@@ -823,6 +834,7 @@ def _command_check(
         check["error"] = error
     if spec.get("local_only"):
         check["local_only"] = True
+    check.update(item9.documented_fields(spec))
     return check
 
 
@@ -835,7 +847,8 @@ def _skipped_check(
     """A ``local_only`` command that ``--check`` did not run: the committed
     check with the same identity is carried through (its outcome is the
     attest-time one, never a result of this run) and marked ``skipped``. With
-    no committed counterpart the check is a failure -- nothing vouches for it."""
+    no committed counterpart the check is a failure -- nothing vouches for it.
+    The ``documented_argv`` disclosure is overlaid from the current spec."""
     for committed in committed_checks:
         if (
             committed.get("check") == "command"
@@ -843,7 +856,7 @@ def _skipped_check(
             and list(committed.get("argv") or []) == list(spec["argv"])
             and all(committed.get(key) == value for key, value in identity.items())
         ):
-            return {**committed, "local_only": True, "skipped": True}
+            return item9.carried_check(committed, spec)
     return {
         "check": "command",
         "role": role,
@@ -854,46 +867,8 @@ def _skipped_check(
         "passed": False,
         "local_only": True,
         "skipped": True,
+        **item9.documented_fields(spec),
     }
-
-
-def _pin_checks(pins: Any) -> list[dict[str, Any]]:
-    """Item 9's reproducibility pins: the PDK name + revision, and at least
-    one tool version. A missing or empty pin is a failed check, not a
-    malformed inventory -- the inventory is well-formed, it just does not
-    yet say how to reproduce the run."""
-    pins = pins if isinstance(pins, Mapping) else {}
-    pdk = pins.get("pdk")
-    pdk_value = None
-    if isinstance(pdk, Mapping):
-        name, revision = pdk.get("name"), pdk.get("revision")
-        if isinstance(name, str) and name and isinstance(revision, str) and revision:
-            pdk_value = {"name": name, "revision": revision}
-    tools = pins.get("tools")
-    tools_value = None
-    if (
-        isinstance(tools, Mapping)
-        and tools
-        and all(
-            isinstance(key, str) and key and isinstance(value, str) and value
-            for key, value in tools.items()
-        )
-    ):
-        tools_value = {key: tools[key] for key in sorted(tools)}
-    return [
-        {
-            "check": "pin",
-            "role": "pdk",
-            "passed": pdk_value is not None,
-            "value": pdk_value,
-        },
-        {
-            "check": "pin",
-            "role": "tools",
-            "passed": tools_value is not None,
-            "value": tools_value,
-        },
-    ]
 
 
 def _metric_value(root: str, path: str, field: str) -> float | int | None:
@@ -915,9 +890,7 @@ def _metric_value(root: str, path: str, field: str) -> float | int | None:
             node = node[int(segment)]
         else:
             return None
-    if isinstance(node, bool) or not isinstance(node, (int, float)):
-        return None
-    return node
+    return node if is_number(node) else None
 
 
 def _characterization_checks(
@@ -987,6 +960,21 @@ def _derived_freshness_check(
     )
 
 
+def _audit_command_checks(
+    specs: Sequence[Mapping[str, Any]],
+    command: Callable[..., dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """One ``role: "audit"`` command check per declared spec (items 10 and 2)."""
+    return [
+        command(
+            {k: v for k, v in spec.items() if k != "name"},
+            "audit",
+            name=spec["name"],
+        )
+        for spec in specs
+    ]
+
+
 def _run_checks(
     item: int,
     root: str,
@@ -1018,17 +1006,10 @@ def _run_checks(
     elif item == CHARACTERIZATION_ITEM:
         checks.extend(_characterization_checks(root, normalized, command))
     elif item == 9:
-        checks.append(command(normalized["cold_start"], "cold_start"))
-        checks.extend(_pin_checks(normalized["pins"]))
+        checks.extend(item9.item9_checks(normalized, command))
+        checks.extend(item9.pin_checks(normalized["pins"]))
     else:
-        for spec in normalized["checks"]:
-            checks.append(
-                command(
-                    {k: v for k, v in spec.items() if k != "name"},
-                    "audit",
-                    name=spec["name"],
-                )
-            )
+        checks.extend(_audit_command_checks(normalized["checks"], command))
     return checks
 
 
@@ -1073,6 +1054,7 @@ def build_attestation(
     checks = _run_checks(item, root, normalized, committed_checks)
     passed_count = sum(1 for check in checks if check["passed"])
     status = "pass" if passed_count == len(checks) else "fail"
+    prov, digest = input_binding(item, root, normalized, inventory_rel, inventory_hash)
     envelope: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "kind": "generic",
@@ -1096,13 +1078,10 @@ def build_attestation(
             "klayout_version": None,
             "pdk": None,
             "deck": None,
-            "input": {
-                "path": {"path": inventory_rel, "scope": "repo"},
-                "content_hash": inventory_hash,
-            },
+            "input": prov,
         },
     }
-    _self_check(envelope, item, inventory_hash)
+    _self_check(envelope, item, digest)
     return envelope
 
 
@@ -1164,8 +1143,9 @@ def check_attestation(
     CLI exits ``0`` only for ``status: "match"`` *and* ``fresh_status:
     "pass"``: a faithfully reproduced failing attestation is still not a
     passing gate. Only the producing build's version strings are excluded
-    from the diff (:data:`VOLATILE_ATTESTATION_PATHS`); a change to the
-    inventory, to any inventoried file, to a check's outcome, or to the
+    from the diff
+    (:data:`~.signoff_attest_drift.VOLATILE_ATTESTATION_PATHS`); a change to
+    the inventory, to any inventoried file, to a check's outcome, or to the
     committed envelope itself is drift.
 
     A ``local_only`` command is not run: it is listed in ``skipped_checks``
@@ -1178,7 +1158,7 @@ def check_attestation(
         inventory_path,
         committed_checks if isinstance(committed_checks, list) else [],
     )
-    return _drift_result(committed_path, committed, fresh)
+    return drift_result(committed_path, committed, fresh)
 
 
 def _load_committed_attestation(committed_path: str) -> dict[str, Any]:
@@ -1190,226 +1170,3 @@ def _load_committed_attestation(committed_path: str) -> dict[str, Any]:
             "check the path"
         )
     return committed
-
-
-def _drift_result(
-    committed_path: str, committed: dict[str, Any], fresh: dict[str, Any]
-) -> dict[str, Any]:
-    # ``skipped`` marks a local_only check this run did not execute; its
-    # (carried-through) outcome is the committed one, so it is reported beside
-    # the diff rather than as a difference from the committed envelope.
-    skipped = []
-    for check in fresh["attestation"]["checks"]:
-        if check.pop("skipped", False):
-            skipped.append(
-                {
-                    key: check[key]
-                    for key in ("role", "name", "target", "argv", "cwd", "passed")
-                    if key in check
-                }
-            )
-    result = build_rerun_result(
-        report_path=committed_path,
-        committed=committed,
-        fresh=fresh,
-        exclude=VOLATILE_ATTESTATION_PATHS,
-        mode="check",
-    )
-    fresh_payload = result.pop("fresh")
-    result["fresh_status"] = fresh_payload["status"]
-    result["skipped_checks"] = skipped
-    result["fresh"] = fresh_payload
-    return result
-
-
-# --------------------------------------------------------------------------- #
-# Item 2: attest a committed layout stream (issue #4188)
-# --------------------------------------------------------------------------- #
-
-#: A database unit counts as "on grid" when it is a positive length that
-#: divides one micron into a whole number of database units (0.001 -> 1000),
-#: within this relative tolerance for float representation.
-_DBU_GRID_TOLERANCE = 1e-6
-
-
-def _stream_checks(stream: str, digest: str) -> list[dict[str, Any]]:
-    """The three item-2 checks, in fixed order: stream readable (loads in
-    ``pya``), non-empty top cell(s), database unit on grid. A stream that
-    cannot be read fails all three -- nothing else can be said about it."""
-    layout = None
-    try:
-        import klayout.db as kdb
-
-        layout = kdb.Layout()
-        layout.read(stream)
-    except Exception:
-        layout = None
-    checks: list[dict[str, Any]] = [
-        {
-            "check": "stream_readable",
-            "role": "layout",
-            "passed": layout is not None,
-            "content_hash": digest,
-        }
-    ]
-    top_names: list[str] = []
-    non_empty = False
-    dbu = None
-    if layout is not None:
-        tops = list(layout.top_cells())
-        top_names = sorted(cell.name for cell in tops)
-        non_empty = bool(tops) and all(not cell.bbox().empty() for cell in tops)
-        dbu = float(layout.dbu)
-    checks.append(
-        {
-            "check": "top_cell_non_empty",
-            "role": "layout",
-            "passed": non_empty,
-            "top_cells": top_names,
-        }
-    )
-    on_grid = False
-    if dbu is not None and dbu > 0:
-        per_micron = 1.0 / dbu
-        on_grid = abs(per_micron - round(per_micron)) <= _DBU_GRID_TOLERANCE * max(
-            per_micron, 1.0
-        )
-    checks.append(
-        {"check": "dbu_on_grid", "role": "layout", "passed": on_grid, "dbu": dbu}
-    )
-    return checks
-
-
-def _validate_regeneration_claim(
-    generator: str | None, regenerated_hash: str | None, hash_kind: str
-) -> None:
-    """Refuse a malformed ``--generator`` / ``--regenerated-hash`` /
-    ``--hash-kind`` combination with :class:`AttestationError`."""
-    if (generator is None) != (regenerated_hash is None):
-        raise AttestationError(
-            "--generator and --regenerated-hash must be given together: a "
-            "regeneration claim needs both the command and the hash it produced"
-        )
-    if hash_kind not in REGENERATION_HASH_KINDS:
-        raise AttestationError(
-            f"--hash-kind must be one of {', '.join(REGENERATION_HASH_KINDS)}; "
-            f"got '{hash_kind}'"
-        )
-    if generator is not None and not generator.strip():
-        raise AttestationError("--generator must be a non-empty command string")
-    if regenerated_hash is not None and not _REGENERATED_HASH_RE.match(
-        regenerated_hash
-    ):
-        raise AttestationError(
-            "--regenerated-hash must be 'sha256:' followed by 64 lowercase hex digits"
-        )
-
-
-def _resolve_stream(stream_path: str) -> tuple[str, str]:
-    """``(absolute path, repository-relative path)`` of a committed stream, or
-    :class:`AttestationError` for a missing, symlinked, non-file or
-    non-repository path."""
-    if not os.path.exists(stream_path):
-        raise AttestationError(f"stream not found: {stream_path}")
-    if os.path.islink(stream_path):
-        raise AttestationError(
-            f"stream '{stream_path}' is a symlink -- attest the real file so "
-            "the pinned path names the bytes that were hashed"
-        )
-    if not os.path.isfile(stream_path):
-        raise AttestationError(f"stream is not a file: {stream_path}")
-    absolute = os.path.realpath(os.path.abspath(stream_path))
-    root = find_repo_root(os.path.dirname(absolute))
-    if root is None:
-        raise AttestationError(
-            f"stream '{stream_path}' is not inside a git repository -- the "
-            "envelope pins it as a repository-relative path"
-        )
-    return absolute, os.path.relpath(absolute, root).replace(os.sep, "/")
-
-
-def build_stream_attestation(
-    stream_path: str,
-    *,
-    generator: str | None = None,
-    regenerated_hash: str | None = None,
-    hash_kind: str = _HASH_KIND_BYTES,
-) -> dict[str, Any]:
-    """``klt signoff --attest 2 --input STREAM``: run the item-2 checks on a
-    committed GDS/OASIS stream and return the artifact-anchored generic
-    envelope (``status`` ``"pass"`` iff every check passed).
-
-    ``generator`` and ``regenerated_hash`` must be given together; they
-    populate ``provenance.regeneration`` exactly as the grader reads it
-    (:func:`~.signoff._regeneration_claim`). The generator is echoed, never
-    run. Raises :class:`AttestationError` for a missing, symlinked or
-    non-repository stream or a malformed regeneration claim."""
-    _validate_regeneration_claim(generator, regenerated_hash, hash_kind)
-    absolute, stream_rel = _resolve_stream(stream_path)
-    raw_digest = sha256_file(absolute)
-    if raw_digest is None:
-        raise AttestationError(f"could not read stream '{stream_path}'")
-    stream_hash = f"sha256:{raw_digest}"
-    checks = _stream_checks(absolute, stream_hash)
-    passed_count = sum(1 for check in checks if check["passed"])
-    status = "pass" if passed_count == len(checks) else "fail"
-    provenance: dict[str, Any] = {
-        "klt_version": build_version(),
-        "klayout_version": klayout_version(),
-        "pdk": None,
-        "deck": None,
-        "input": {
-            "path": {"path": stream_rel, "scope": "repo"},
-            "content_hash": stream_hash,
-        },
-    }
-    if generator is not None:
-        regeneration: dict[str, Any] = {
-            "generator": generator,
-            "regenerated_hash": regenerated_hash,
-        }
-        if hash_kind != _HASH_KIND_BYTES:
-            regeneration["hash_kind"] = hash_kind
-        provenance["regeneration"] = regeneration
-    envelope: dict[str, Any] = {
-        "schema_version": SCHEMA_VERSION,
-        "kind": "generic",
-        "status": status,
-        "t1_item": STREAM_ATTESTABLE_ITEM,
-        "summary": (
-            f"T1 item 2 ({_ITEM_TITLES[2]}): {passed_count}/{len(checks)} "
-            f"attestation checks passed ({PRODUCER})"
-        ),
-        "source": stream_rel,
-        "attestation": {
-            "producer": PRODUCER,
-            "hash_algorithm": HASH_ALGORITHM,
-            "check_count": len(checks),
-            "passed_count": passed_count,
-            "checks": checks,
-        },
-        "provenance": provenance,
-    }
-    _self_check(envelope, STREAM_ATTESTABLE_ITEM, stream_hash)
-    return envelope
-
-
-def check_stream_attestation(
-    stream_path: str,
-    committed_path: str,
-    *,
-    generator: str | None = None,
-    regenerated_hash: str | None = None,
-    hash_kind: str = _HASH_KIND_BYTES,
-) -> dict[str, Any]:
-    """``klt signoff --attest 2 --input STREAM --check COMMITTED``: re-attest
-    and diff against the committed envelope, writing nothing. Same result
-    shape as :func:`check_attestation`."""
-    committed = _load_committed_attestation(committed_path)
-    fresh = build_stream_attestation(
-        stream_path,
-        generator=generator,
-        regenerated_hash=regenerated_hash,
-        hash_kind=hash_kind,
-    )
-    return _drift_result(committed_path, committed, fresh)

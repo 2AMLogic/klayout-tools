@@ -1023,6 +1023,22 @@ into the circuit.)
   spacing rule against each other, so they are no longer compared at all.
   Like #1057, this remains an advisory heuristic, not a substitute for
   `klt drc` — see "Geometry is advisory" above.
+- **A via drop that crowds the target block's own via cuts is now rejected
+  (#5398, fixed).** The own-block checks above compared only *metal*. A via
+  drop landing on a pin inside a PDK-authored cell with its own cut array
+  (sg13g2's `npn13G2` emitter/base `Via1` arrays) could place its cut a few
+  nm from — without overlapping — the cell's own cuts, composing `routed:
+  true` with one `via1.space.1` finding per neighbouring cut. The same
+  deck-driven same-layer `"space"` lookup is now applied to each drop's cut
+  layer against the block's own cuts on it (cuts the new cut overlaps merge
+  with it and are exempt). A near miss reports the net in `unrouted_nets[]`
+  (so the composition is `partial`, exit code `3`) with a `legs[].reason` /
+  `drc_hints.notes[]` entry of the form `"draws a via cut on layer (19, 0) at
+  (x, y) that comes within 0.018um of block 'a''s own via cuts on that layer
+  -- closer than the resolved deck's own 'via1.space.1' minimum same-layer
+  spacing rule ..."`. Reach the net at a port outside the array, or route on
+  the block's own metal plane so no via is needed. Like the checks above this
+  is advisory — see "Geometry is advisory".
 - **A route-vs-route collision now retries onto `routing.cross_block_layer_role`
   instead of failing the net outright (#1680, fixed).** #1057/#1386 above only
   ever *rejected* a leg that collided with a different net's already-accepted
@@ -2087,6 +2103,7 @@ exit codes).
 | `routing.cross_block_layer_role` | string | Optional (issue #1168). A *second* layer role, resolved the same way as `routing.layer_role`, that a same-block self-net leg falls back to when it would otherwise short across another of that block's own pads on `routing.layer_role` (the exact rejection "Bussing this net across the block would draw a silent short" names as the fix) — see "Cross-block bus routing (`routing.cross_block_layer_role`, #1168)" below. Must resolve to a distinct layer connectable to `routing.layer_role` by some via-drop ladder in the resolved PDK family's own metals/vias stack (an application error, exit 1, otherwise; issue #1567 lifted the earlier single-via-hop-only restriction here). Every other net in the same request is unaffected — this is a per-leg fallback, not a whole-composition layer switch like selecting `routing.layer_role: "metal2"` directly. Configuring it also arms the same-block multi-self-net detour retry (#1393, "More than one same-block self-net per block" below), which is what lets a *second* self-net on the same block route when its own fixed-shape backbone would collide with the first's, and (issue #1680) the general route-vs-route collision retry — any leg, same-block or inter-block, rejected for crossing a *different* net's already-accepted route is retried once with `routing.layer_role`/`routing.cross_block_layer_role` swapped before the net is failed outright. Either retry can land a leg back on the primary `routing.layer_role`, so read the drawn geometry rather than assuming a leg's layer. |
 | `routing.cross_block_width_um` | number | Optional (issue #1620). The width a leg draws at once it actually falls back to `routing.cross_block_layer_role` — independent of `routing.width_um`, so naming a cross-block layer with a stricter deck minimum never forces the *primary* plane's own routing wider than requested. Defaults to `routing.cross_block_layer_role`'s own deck minimum-width rule when omitted; when given, must be `> 0` and floored the same way `routing.width_um` is against `routing.layer_role` (an application error, exit 1, naming this field, the offending value, and the resolved deck's own rule id and threshold). Ignored (and meaningless) without `routing.cross_block_layer_role` also configured. |
 | `options.cell_name`/`options.output` | string | Same semantics as `klt gen`'s own `options` fields — see [`docs/cli/gen.md`](gen.md). `cell_name` defaults to `"gen_compose_0"`; `output` defaults to `"<cell_name>.gds"`. |
+| `options.boundary` | object | Optional (#3998). `{"bbox_um": {"x0", "y0", "x1", "y1"}}` draws exactly one rectangle on layer 235/4 (`prBoundary.boundary`, shared by sky130 and gf180mcu) in the top cell. The extent is exactly the caller-given `bbox_um`, never derived from the placed content (containment is advisory, not enforced). Density decks (e.g. `gf180mcu_density.lydrc`) need this layer to evaluate their whole-design ratios; without it they silently check nothing. Invalid (`boundary` not an object, missing/non-numeric corner, `x1 <= x0` or `y1 <= y0`) is an application error (exit 1). Omitted or `null`: output is unchanged. Example: `"options": {"cell_name": "chip_top", "output": "chip_top.gds", "boundary": {"bbox_um": {"x0": 0, "y0": 0, "x1": 2000, "y1": 2000}}}`. |
 
 ### Response
 

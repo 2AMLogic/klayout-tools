@@ -129,10 +129,16 @@ def test_run_sim_reports_instances_and_runs_gated_netlist(tmp_path, monkeypatch)
 
     real_run = subprocess.run
 
-    def fake_run(cmd, capture_output, text, timeout, cwd=None):
+    def fake_run(cmd, capture_output, text, timeout, cwd=None, **kw):
         if "-o" not in cmd:
+            # `**kw` forwards `pdk._git_run`'s `check=False` (issue #5512).
             return real_run(
-                cmd, capture_output=capture_output, text=text, timeout=timeout, cwd=cwd
+                cmd,
+                capture_output=capture_output,
+                text=text,
+                timeout=timeout,
+                cwd=cwd,
+                **kw,
             )
         with open(cmd[cmd.index("-o") + 1], "w", encoding="utf-8") as handle:
             handle.write("")

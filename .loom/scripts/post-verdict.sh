@@ -99,7 +99,7 @@
 #   post-verdict.sh <pr-number> <approved|changes-requested> <sha> \
 #       (--body TEXT | --body-file PATH) [--reviews-reconciled TEXT] \
 #       [--overrules-prior TEXT] [--review-started RFC3339] \
-#       [--issue-body-sha N=HASH]...
+#       [--issue-body-sha N=HASH]... [--acknowledged-comment ID]...
 #
 #   PATH may be "-" to read the body from stdin.
 #
@@ -127,6 +127,13 @@
 #       current spec and either end without a verdict (a fresh dispatch approves)
 #       or post changes-requested. With no start resolvable at all (no epoch, no
 #       lease, no flag) the approval is refused.
+#
+#   --acknowledged-comment ID   Approvals only (#13134), repeatable: a PR or
+#       issue comment id the Judge re-read and confirmed spec-neutral (the
+#       refusal names the id). Excluded from the stale-read comment check
+#       only: it never excuses a body edit, an --issue-body-sha mismatch or an
+#       unlisted comment. Use it only after confirming the body hash is
+#       unchanged.
 #
 #   --issue-body-sha N=HASH   (repeatable) Issue N's body as you reviewed it:
 #       `printf %s "$(gh api repos/OWNER/REPO/issues/N --jq .body)" | sha256sum | cut -d' ' -f1`.
@@ -200,7 +207,7 @@ esac
 BODY=""
 BODY_FILE=""
 HAVE_BODY=false
-RECONCILED="" OVERRULE="" REVIEW_STARTED="" ISSUE_HASHES=()
+RECONCILED="" OVERRULE="" REVIEW_STARTED="" ISSUE_HASHES=() ACKED=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -217,6 +224,7 @@ while [[ $# -gt 0 ]]; do
     --overrules-prior) OVERRULE="${2:-}"; shift 2 ;;
     --review-started) REVIEW_STARTED="${2:-}"; shift 2 ;;
     --issue-body-sha) ISSUE_HASHES+=("${2:-}"); shift 2 ;;
+    --acknowledged-comment) ACKED+=("${2:-}"); shift 2 ;;
     *)
       echo "post-verdict.sh: unknown argument: $1" >&2
       exit 2
@@ -435,6 +443,12 @@ if [[ "$VERDICT" == "approved" ]]; then
       [[ -n "$CI_DETAIL" ]] && printf '%s\n' "${CI_DETAIL:0:4000}" | sed 's/^/  /'
       echo "$2"
     } >&2
+    # Telemetry (#13274): journal the refusal (5 = incomplete, 6 = red) for the
+    # step's pass.verdict. Best-effort: an older daemon or a failed write
+    # never changes the exit code, and nothing is posted.
+    "${LOOM_DAEMON_BIN:-loom-daemon}" forge journal-ci-refusal "$PR" \
+      --class "$([[ "$3" -eq 6 ]] && echo ci_red || echo ci_incomplete)" \
+      ${CI_SHA:+--head "$CI_SHA"} >/dev/null 2>&1 || true
     exit "$3"
   }
   PENDING_NEXT="Nothing was posted. Do NOT add loom:pr: release your claim, leave loom:review-requested, and re-evaluate once CI settles on this head."
@@ -463,7 +477,7 @@ if [[ "$VERDICT" == "approved" ]]; then
   else
     LEASE_STATE="$(printf '%s\n' "$LEASE_OUT" | sed -n 's/^PR_LEASE_STATE=\([a-z-]*\).*/\1/p' | head -n1)"
     if [[ "$LEASE_STATE" != "held-self" ]]; then
-      echo "post-verdict.sh: REFUSING to post an approval on PR #$PR — the caller does not hold a live Judge lease (PR_LEASE_STATE=${LEASE_STATE:-unknown}, exit $LEASE_RC) (#13055). Nothing was posted. Stand down: do NOT retry; release the lease (loom-daemon lease pr release $PR --role judge --watch-pid ...)." >&2
+      echo "post-verdict.sh: REFUSING to post an approval on PR #$PR — the caller does not hold a live Judge lease (PR_LEASE_STATE=${LEASE_STATE:-unknown}, exit $LEASE_RC) (#13055). Nothing was posted. Stand down: do NOT retry; release the lease with the gate-refused reason so the no-verdict backstop holds the PR only briefly (loom-daemon lease pr release $PR --role judge --watch-pid ... --skip-reason gate-refused:lease)." >&2
       exit 10
     fi
   fi
@@ -566,7 +580,7 @@ fi
 # the build that merges #10684; no version floor is declared for them, because the
 # capability probe above checks them on the resolved binary. Roll loom-daemon
 # before (or with) these scripts: until then, verdicts take the legacy path.
-VG_RC=0; VG_OUT="$("${LOOM_DAEMON_BIN:-loom-daemon}" forge verdict-gate "$PR" --repo "$REPO" --verdict "$VERDICT" --sha "$SHA" --overrules-prior "$OVERRULE" ${REVIEW_STARTED:+--review-started "$REVIEW_STARTED"} ${ISSUE_HASHES[@]+"${ISSUE_HASHES[@]/#/--issue-body-sha=}"} 2>&1)" || VG_RC=$?  # set -e is on (forge-helpers.sh)
+VG_RC=0; VG_OUT="$("${LOOM_DAEMON_BIN:-loom-daemon}" forge verdict-gate "$PR" --repo "$REPO" --verdict "$VERDICT" --sha "$SHA" --overrules-prior "$OVERRULE" ${REVIEW_STARTED:+--review-started "$REVIEW_STARTED"} ${ISSUE_HASHES[@]+"${ISSUE_HASHES[@]/#/--issue-body-sha=}"} ${ACKED[@]+"${ACKED[@]/#/--acknowledged-comment=}"} 2>&1)" || VG_RC=$?  # set -e is on (forge-helpers.sh)
 case "$VG_RC:$VG_OUT" in
   "0:LOOM-VERDICT-GATE PROCEED"*) forge_gh_comment_rl_safe "$REPO" "$PR" "$FULL_BODY" 1 || exit 1 ;;
   "10:LOOM-VERDICT-GATE DEDUPE"*) NONCE=""; echo "post-verdict.sh: not posting a duplicate verdict on PR #$PR (applying its labels only): $VG_OUT" >&2 ;;
@@ -580,13 +594,21 @@ esac
 # beats an approval, and of two identical verdicts the lowest comment id stands
 # (the other withdraws its comment). An approval stays non-actionable (no loom:pr)
 # until this succeeds, so an unreadable arbitration never leaves one live.
+# Telemetry (#12362): hand `verdict-labels` the head so the run's pick journal
+# records it. A daemon older than the script (a script roll) does not know
+# `--sha`, and clap would reject the call, so only pass it when advertised.
+VL_SHA_ARGS=()
+if "${LOOM_DAEMON_BIN:-loom-daemon}" forge verdict-labels --help 2>/dev/null | grep -q -- '--sha'; then
+  VL_SHA_ARGS=(--sha "$SHA")
+fi
+
 # An approval that lost a cross-host race: post the superseding marker, flip the
 # labels to changes-requested, exit 7. Used before AND after the label write.
 superseded_approval() {
   forge_gh_comment_rl_safe "$REPO" "$PR" "**Approval superseded (#10581)** — $1. A changes-requested verdict at this same head landed concurrently from another Judge; changes-requested wins. Read it, and re-review after the next push.
 
 <!-- loom:verdict-sha sha=$SHA verdict=changes-requested -->" 1 || true
-  "${LOOM_DAEMON_BIN:-loom-daemon}" forge verdict-labels "$PR" --repo "$REPO" --verdict changes-requested >/dev/null 2>&1 || echo "post-verdict.sh: could not flip the labels; run: loom-daemon forge verdict-labels $PR --repo $REPO --verdict changes-requested" >&2
+  "${LOOM_DAEMON_BIN:-loom-daemon}" forge verdict-labels "$PR" --repo "$REPO" --verdict changes-requested ${VL_SHA_ARGS[@]+"${VL_SHA_ARGS[@]}"} >/dev/null 2>&1 || echo "post-verdict.sh: could not flip the labels; run: loom-daemon forge verdict-labels $PR --repo $REPO --verdict changes-requested" >&2
   echo "post-verdict.sh: the approval on PR #$PR was SUPERSEDED by a concurrent changes-requested verdict at the same head; it does not stand: $1" >&2
   exit 7
 }
@@ -599,7 +621,7 @@ case "$RC_RC:$RC_OUT" in
   *) printf 'post-verdict.sh: %s verdict on PR #%s posted, but the cross-host reconcile was unconfirmed (#10581): %s\n' "$VERDICT" "$PR" "${RC_OUT:0:300}" >&2
      [[ "$VERDICT" == "approved" ]] && { echo "The approval is NOT live (no loom:pr applied). Re-run this command; the gate dedupes the comment and retries the arbitration." >&2; exit 8; } ;; # changes-requested: labels below, the safe side
 esac
-VL_OUT="$("${LOOM_DAEMON_BIN:-loom-daemon}" forge verdict-labels "$PR" --repo "$REPO" --verdict "$VERDICT" 2>&1)" || { printf 'post-verdict.sh: the %s verdict on PR #%s is posted, but its label transition did not complete (#10581):\n%s\nRe-run: loom-daemon forge verdict-labels %s --repo %s --verdict %s\n' "$VERDICT" "$PR" "$VL_OUT" "$PR" "$REPO" "$VERDICT" >&2; exit 8; }
+VL_OUT="$("${LOOM_DAEMON_BIN:-loom-daemon}" forge verdict-labels "$PR" --repo "$REPO" --verdict "$VERDICT" ${VL_SHA_ARGS[@]+"${VL_SHA_ARGS[@]}"} 2>&1)" || { printf 'post-verdict.sh: the %s verdict on PR #%s is posted, but its label transition did not complete (#10581):\n%s\nRe-run: loom-daemon forge verdict-labels %s --repo %s --verdict %s\n' "$VERDICT" "$PR" "$VL_OUT" "$PR" "$REPO" "$VERDICT" >&2; exit 8; }
 # Post-label re-arbitration (#10581): the reconcile above ran BEFORE the label
 # write, and another host can post a changes-requested verdict in between. Re-read
 # once the approval's labels are on: a rival that landed since then supersedes it
@@ -615,4 +637,14 @@ if [[ "$VERDICT" == "approved" ]]; then
        gh api -X DELETE "repos/$REPO/issues/$PR/labels/loom%3Apr" >/dev/null 2>&1 || WITHDRAWN="loom:pr could NOT be withdrawn (the DELETE failed), so the unconfirmed approval may still be actionable. Remove it now: gh pr edit $PR --repo $REPO --remove-label loom:pr"
        echo "post-verdict.sh: the approval on PR #$PR was posted and labelled, but the post-label re-arbitration was unconfirmed (#10581): ${RC2_OUT:0:300}. $WITHDRAWN. Re-run this command." >&2; exit 8 ;;
   esac
+fi
+
+# --- Release the Judge lease once the verdict is posted (#13264) ------------
+# Best-effort: a subagent can skip the prompt's release step, and a surviving
+# Judge lease blocks the Doctor's `lease pr claim` (exit 7) until it expires.
+# Never fails the verdict: an older binary (exit 2) or any error only warns.
+REL_RC=0
+REL_OUT="$("${LOOM_DAEMON_BIN:-loom-daemon}" lease pr release "$PR" --role judge --watch-pid "${LOOM_AGENT_SESSION_PID:-${CLAUDE_PID:-$PPID}}" 2>&1)" || REL_RC=$?
+if [[ "$REL_RC" -ne 0 ]]; then
+  echo "post-verdict.sh: WARNING — the $VERDICT verdict on PR #$PR is posted, but releasing the Judge lease failed (exit $REL_RC): ${REL_OUT:0:200}. Release it yourself: loom-daemon lease pr release $PR --role judge --watch-pid ..." >&2
 fi

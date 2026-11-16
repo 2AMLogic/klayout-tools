@@ -1697,3 +1697,124 @@ def test_integration_gf180_resolves_its_own_inner_element_convention(tmp_path):
     assert device["values"]["vth_v"] is not None
     assert device["values"]["vdsat_v"] is not None
     assert device["region"] in ("saturation", "triode")
+
+
+# --------------------------------------------------------------------------- #
+# --op-lint-corner all: per-corner saturation margin table (issue #4650)
+# --------------------------------------------------------------------------- #
+
+
+class _CaptureRun:
+    """Stand-in for ``monkeypatch`` that captures the fake ngspice runner."""
+
+    run = None
+
+    def setattr(self, _target, _name, value):
+        self.run = value
+
+
+def _install_temp_dispatched_ngspice(monkeypatch, by_temp, *, fail_temps=()):
+    """Fake ngspice whose answers depend on the deck's ``.temp`` card."""
+    runners = {}
+    for temp, values in by_temp.items():
+        capture = _CaptureRun()
+        _install_fake_ngspice(
+            capture, values, node_voltages={"vdd": 1.8, "in": 0.9, "out": 1.2}
+        )
+        runners[temp] = capture.run
+
+    def fake_run(cmd, capture_output, text, timeout):
+        deck_path = cmd[cmd.index("-b") + 1]
+        with open(deck_path, encoding="utf-8") as handle:
+            deck = handle.read()
+        match = re.search(r"^\.temp\s+(\S+)", deck, re.MULTILINE)
+        temp = float(match.group(1))
+        if temp in fail_temps:
+            log_path = cmd[cmd.index("-o") + 1]
+            with open(log_path, "w", encoding="utf-8") as handle:
+                handle.write("Error: no convergence\nsimulation(s) aborted\n")
+            return fake_completed("** ngspice-99\n")
+        return runners[temp](cmd, capture_output, text, timeout)
+
+    monkeypatch.setattr(op_sanity.subprocess, "run", fake_run)
+
+
+def _triode_at(vds: float) -> dict:
+    return {**_SATURATED_NMOS, "vds": vds, "vdsat": 0.15}
+
+
+def _three_corner_request(tmp_path):
+    return _write_request(
+        tmp_path,
+        _GOOD_NETLIST,
+        corners={"supply_v": {"vdd": [1.8]}, "temperature_c": [27, 70, 125]},
+    )
+
+
+def test_corner_all_tabulates_worst_margin_per_corner(tmp_path, monkeypatch):
+    request = _three_corner_request(tmp_path)
+    _install_temp_dispatched_ngspice(
+        monkeypatch,
+        {
+            27.0: {"XM1": _SATURATED_NMOS, "XM2": _SATURATED_PMOS},
+            70.0: {"XM1": _SATURATED_NMOS, "XM2": {**_SATURATED_PMOS, "vds": 0.5}},
+            125.0: {"XM1": _triode_at(0.1), "XM2": _SATURATED_PMOS},
+        },
+    )
+
+    report = op_sanity.run_op_sanity(str(request), corner="all")
+
+    margins = report["corner_margins"]
+    assert len(margins) == 3
+    by_id = {entry["corner_id"]: entry for entry in margins}
+    assert margins[0]["worst_margin_v"] <= margins[1]["worst_margin_v"]
+    assert margins[0]["worst_device"] == "XM1"
+    assert margins[0]["worst_margin_v"] == pytest.approx(-0.05)
+    assert margins[0]["triode_count"] == 1
+    other = [e for e in margins if e["triode_count"] == 0]
+    assert {e["worst_device"] for e in other} == {"XM2"}
+    assert by_id[margins[0]["corner_id"]] is margins[0]
+    # Top-level report still describes the first corner.
+    assert report["corner"]["temperature_c"] == 27
+    assert report["status"] == "clean"
+
+
+def test_corner_default_has_null_corner_margins(tmp_path, monkeypatch):
+    request = _write_request(tmp_path, _GOOD_NETLIST)
+    _install_fake_ngspice(monkeypatch, {"XM1": _SATURATED_NMOS, "XM2": _SATURATED_PMOS})
+    assert op_sanity.run_op_sanity(str(request))["corner_margins"] is None
+
+
+def test_corner_all_failing_corner_has_null_margin(tmp_path, monkeypatch):
+    request = _three_corner_request(tmp_path)
+    ok = {"XM1": _SATURATED_NMOS, "XM2": _SATURATED_PMOS}
+    _install_temp_dispatched_ngspice(
+        monkeypatch, {27.0: ok, 70.0: ok, 125.0: ok}, fail_temps=(125.0,)
+    )
+
+    report = op_sanity.run_op_sanity(str(request), corner="all")
+
+    failed = [e for e in report["corner_margins"] if e["worst_margin_v"] is None]
+    assert len(failed) == 1
+    assert failed[0]["worst_device"] is None
+    assert failed[0]["diagnostics"]
+    assert report["corner_margins"][-1] is failed[0]
+    assert report["status"] == "error"
+
+
+def test_corner_all_single_corner_matrix(tmp_path, monkeypatch):
+    request = _write_request(tmp_path, _GOOD_NETLIST)
+    _install_fake_ngspice(monkeypatch, {"XM1": _SATURATED_NMOS, "XM2": _SATURATED_PMOS})
+    report = op_sanity.run_op_sanity(str(request), corner="all")
+    assert len(report["corner_margins"]) == 1
+
+
+def test_corner_all_refuses_param_axis(tmp_path, monkeypatch):
+    request = _write_request(
+        tmp_path,
+        _GOOD_NETLIST,
+        corners={"supply_v": {"vdd": [1.8]}, "params": {"w": [1, 2]}},
+    )
+    _install_fake_ngspice(monkeypatch, {})
+    with pytest.raises(op_sanity.OpSanityError, match="corners.params"):
+        op_sanity.run_op_sanity(str(request), corner="all")

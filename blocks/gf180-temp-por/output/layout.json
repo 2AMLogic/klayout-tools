@@ -1,0 +1,1456 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:09:36.771954+00:00",
+  "slug": "gf180-temp-por",
+  "name": "Gf180 Temp Por",
+  "description": "Temperature sensor + power-on-reset pair on gf180mcu \u2014 2AM Logic canary block",
+  "pdk": "gf180mcu",
+  "layer_count": 22,
+  "cell_count": 1,
+  "instance_count": 0,
+  "layout_file": "bias_core.gds",
+  "renders": {
+    "overview": "renders/overview.png",
+    "Nwell": "renders/21_0.png",
+    "Comp": "renders/22_0.png",
+    "Poly2": "renders/30_0.png",
+    "Pplus": "renders/31_0.png",
+    "Contact": "renders/33_0.png",
+    "Metal1": "renders/34_0.png",
+    "layer_34_10": "renders/34_10.png",
+    "Via1": "renders/35_0.png",
+    "Metal2": "renders/36_0.png",
+    "Via2": "renders/38_0.png",
+    "Via3": "renders/40_0.png",
+    "Via4": "renders/41_0.png",
+    "Metal3": "renders/42_0.png",
+    "Metal4": "renders/46_0.png",
+    "SAB": "renders/49_0.png",
+    "Resistor": "renders/62_0.png",
+    "FuseTop": "renders/75_0.png",
+    "Metal5": "renders/81_0.png",
+    "RES_MK": "renders/110_5.png",
+    "CAP_MK": "renders/117_5.png",
+    "MIM_L_MK": "renders/117_10.png",
+    "DRC_BJT": "renders/127_5.png",
+    "center_crop": "renders/center_crop/overview.png"
+  },
+  "signals": {
+    "schema_version": 1,
+    "engine": "ngspice",
+    "engine_version": "sets",
+    "status": "error",
+    "corner_count": 23,
+    "default_corner_id": "bias-core-designer-check/tt_27c_2.97v",
+    "passed": 14,
+    "failed": 7,
+    "errored": 2,
+    "measurements": [
+      {
+        "name": "Bias Core Designer Check",
+        "limits": null,
+        "status": "fail",
+        "worst_case": null
+      },
+      {
+        "name": "Bias Core Ibias Sharing",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Bias Core Startup",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Por Brownout",
+        "limits": null,
+        "status": "fail",
+        "worst_case": null
+      },
+      {
+        "name": "Por Brownout Slew",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Por Brownout Spurious",
+        "limits": null,
+        "status": "error",
+        "worst_case": null
+      },
+      {
+        "name": "Por Comparator Designer Check",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Por Glitch",
+        "limits": null,
+        "status": "fail",
+        "worst_case": null
+      },
+      {
+        "name": "Por Iq",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Por Output Chain Deglitch",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Por Output Chain Floor",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Por Output Chain Ibias Sharing",
+        "limits": null,
+        "status": "fail",
+        "worst_case": null
+      },
+      {
+        "name": "Por Output Chain Pulse",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Por Ramp Rate",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Por Threshold Mc",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Por Vth",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Smoke Bias",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Temp Accuracy Mc",
+        "limits": null,
+        "status": "fail",
+        "worst_case": null
+      },
+      {
+        "name": "Temp Accuracy Vt",
+        "limits": null,
+        "status": "fail",
+        "worst_case": null
+      },
+      {
+        "name": "Temp Core Designer Check",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Temp Core Loop Stability",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Temp Core Startup",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Temp Por Top Release",
+        "limits": null,
+        "status": "fail",
+        "worst_case": null
+      }
+    ],
+    "corners": [
+      {
+        "corner_id": "bias-core-designer-check/tt_27c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "fail",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "vref_op_v",
+            "value": 1.19941,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "vref_v",
+            "value": 1.19941,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "ok_droop_mv",
+            "value": 0.0,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "iq_por_ua",
+            "value": 0.981679,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "ibias_na",
+            "value": 536.997,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "iq_own_ua",
+            "value": 0.444682,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "t_settle_us",
+            "value": 18.6381,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "err_at_relv_mv",
+            "value": 143.733,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "bias-core-ibias-sharing/tt_27c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "vibias_shared_v",
+            "value": 0.714174,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vibias_control_v",
+            "value": 0.714174,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "por_raw_shared_droop_mv",
+            "value": 0.001,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "por_raw_control_droop_mv",
+            "value": 0.001,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "bias_ok_shared_droop_mv",
+            "value": 0.0,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "bias_ok_control_droop_mv",
+            "value": 0.0,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vref_shared_v",
+            "value": 1.19941,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "ibias_delivered_na",
+            "value": 536.997,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "bias-core-startup/tt_27c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "v_core_up_v",
+            "value": 1.14812,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "v_bias_ok_v",
+            "value": 1.1568,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "ok_chatter_mv",
+            "value": 0.0,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "startup_margin_v",
+            "value": 0.008676,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "release_margin_v",
+            "value": 1.3132,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "relv_qs_v",
+            "value": 2.6062,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "qs_rate_delta_mv",
+            "value": 102.049,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "qs_lag_est_mv",
+            "value": 34.0163,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "por-brownout/tt_27c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "fail",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "resetn_pre_dip_v",
+            "value": 2.97,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "vdd_dip_v",
+            "value": 1.0,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "resetn_floor_in_dip_mv",
+            "value": 1000.0,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "t_reassert_us",
+            "value": 52.08,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "t_pulse_regen_ms",
+            "value": 8.47552,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "release_chatter_us",
+            "value": 0.0,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "resetn_final_v",
+            "value": 2.97,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "por-brownout-slew/tt_27c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "resetn_pre_dip_v",
+            "value": 2.97,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vdd_dip_v",
+            "value": 1.0,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "bias_ok_ratio_min_in_dip",
+            "value": -2.338875e-07,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "resetn_ratio_min_in_dip",
+            "value": -5.557649e-07,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "por_raw_ratio_min_in_dip",
+            "value": -0.0001540086,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "resetn_ratio_min_overall",
+            "value": -5.557649e-07,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "resetn_floor_in_dip_mv",
+            "value": 1.142452e-06,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "por-brownout-spurious/tt_27c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "error",
+        "runtime_s": 0,
+        "measurements": [],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "por-comparator-designer-check/tt_27c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "vpor_rise_v",
+            "value": 2.5982,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vpor_fall_v",
+            "value": 2.44454,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "v_hys_mv",
+            "value": 153.652,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vref_gain_frac",
+            "value": 0.99663,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "rise_chatter_mv",
+            "value": 0.0,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "fall_chatter_mv",
+            "value": 0.0,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "por_hi_droop_mv",
+            "value": 0.0,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "por_reassert_mv",
+            "value": 2.205559e-05,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "por-glitch/tt_27c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "fail",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "resetn_pre_glitch_v",
+            "value": 2.97,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "vdd_glitch_v",
+            "value": 0.2,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "resetn_droop_during_glitch_v",
+            "value": 1.364335e-08,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "resetn_min_after_glitch_v",
+            "value": -9.6259e-07,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "resetn_post_glitch_v",
+            "value": 2.97,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "por_raw_min_after_glitch_v",
+            "value": 2.97,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "por-iq/tt_27c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "por_iq_ua",
+            "value": 1.156224,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "por-output-chain-deglitch/tt_27c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "dwell_pgdg_1x_us",
+            "value": 2.87,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "pgdg_min_during_halfib_dip_v",
+            "value": 0.00857514,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "dwell_pgdg_stress_us",
+            "value": 14.17,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "dwell_resetn_1x_us",
+            "value": 2.86,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "reassert_validlow_us",
+            "value": 2.87,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "dwell_rise_1x_us",
+            "value": 10.7989,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "tpulse_after_chatter_ms",
+            "value": 5.30982,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "pgdg_min_during_chatter",
+            "value": 2.96911,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "por-output-chain-floor/tt_27c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "floor_ratio_porlow",
+            "value": 0.00233371,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "floor_mv_porlow",
+            "value": 1.16322,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "floor_ratio_porhigh",
+            "value": 0.00233369,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "floor_mv_porhigh",
+            "value": 1.16324,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "floor_ratio_sub100mv",
+            "value": 0.00231616,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "iq_ramp_top_na",
+            "value": 27.5769,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vdd_top",
+            "value": 2.97,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "por-output-chain-ibias-sharing/tt_27c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "fail",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "vibias_asserted_v",
+            "value": 0.667025,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "vibias_released_v",
+            "value": 0.632528,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "ibias_core_asserted_na",
+            "value": 537.145,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "ibias_core_released_na",
+            "value": 537.246,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "ibias_temp_asserted_na",
+            "value": 0.0008219436,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "ibias_temp_released_na",
+            "value": 257.183,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "ibias_cmp_asserted_na",
+            "value": 243.117,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "ibias_cmp_released_na",
+            "value": 124.666,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "por-output-chain-pulse/tt_27c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "tpulse_1x_ms",
+            "value": 5.3104,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "tpulse_3x_ms",
+            "value": 1.94968,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "iq_asserted_1x_na",
+            "value": 27.5769,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "iq_asserted_3x_na",
+            "value": 75.3575,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "iq_released_1x_na",
+            "value": 21.6026,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "v_asserted_1x_mv",
+            "value": 3.415833e-06,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "v_released_1x",
+            "value": 2.97,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "v_released_3x",
+            "value": 2.97,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "por-ramp-rate/tt_27c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "vddrel_1vs_v",
+            "value": 2.59842,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vddrel_10vs_v",
+            "value": 2.66719,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vddrel_100kvs_v",
+            "value": 2.97,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vddrel_1mvs_v",
+            "value": 2.97,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "chatter_1vs_us",
+            "value": 0.0,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "chatter_10vs_us",
+            "value": 0.0,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "chatter_100kvs_us",
+            "value": 0.0,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "chatter_1mvs_us",
+            "value": 0.0,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "por-threshold-mc/overall",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "por-vth/tt_27c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "vpor_rise_v",
+            "value": 2.61283,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vpor_fall_v",
+            "value": 2.42274,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "v_hys_mv",
+            "value": 190.097,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "rise_chatter_guard_ms",
+            "value": 21.9677,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "fall_chatter_guard_ms",
+            "value": 31.4125,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vpor_rise_guard_v",
+            "value": 2.60234,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vpor_fall_guard_v",
+            "value": 2.43499,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "v_hys_guard_mv",
+            "value": 167.35,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "smoke-bias/tt_27c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "vdiv_ratio",
+            "value": 0.5,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vbias",
+            "value": 0.94381,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vbe",
+            "value": 0.689307,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "isup_ua",
+            "value": 69.6112,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "temp-accuracy-mc/overall",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "fail",
+        "runtime_s": 0,
+        "measurements": [],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "temp-accuracy-vt/tt_27c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "fail",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "vptat_v",
+            "value": 1.2929,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "vctat_v",
+            "value": 0.653274,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "ptat_k_mvk",
+            "value": 4.30752,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "terr_untrim_c",
+            "value": -0.0923511,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "terr_supply_c",
+            "value": -0.0440954,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "vctat_supply_mv",
+            "value": -0.0003,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "vout_margin_v",
+            "value": 0.453274,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "resetn_released_v",
+            "value": 2.97,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "temp-core-designer-check/tt_27c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "vptat",
+            "value": 1.29398,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vctat",
+            "value": 0.653274,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "ptat_k_mvk",
+            "value": 4.3111,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "terr_untrim_c",
+            "value": 0.157019,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "terr_supply_c",
+            "value": -0.00298872,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vout_margin_v",
+            "value": 0.453274,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "iq_ua",
+            "value": 10.9483,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "iq_dis_ua",
+            "value": 4.683617e-05,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "temp-core-loop-stability/tt_27c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "vptat_dc_v",
+            "value": 1.29398,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vctat_dc_v",
+            "value": 0.653274,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vpg_dc_v",
+            "value": 1.904,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vpgfb_dc_v",
+            "value": 1.904,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "dc_bias_delta_mv",
+            "value": 0.0,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "dc_loopgain_db",
+            "value": 104.42,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "fc0db_mhz",
+            "value": 1.00087,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "phase_margin_deg",
+            "value": 32.4738,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "temp-core-startup/tt_27c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "vptat_run1",
+            "value": 1.29344,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vctat_run1",
+            "value": 0.653274,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vptat_pre_mv",
+            "value": 2.702233e-05,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "iq_pre_own_ua",
+            "value": 0.0001034,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "iq_pre_pin_ua",
+            "value": 0.500103,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "ibias_pre_dis_na",
+            "value": 0.00142519,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vibias_pre_v",
+            "value": 0.699363,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "iq_run_ua",
+            "value": 9.98062,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "temp-por-top-release/tt_27c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "fail",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "vibias_asserted_v",
+            "value": 0.667025,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "vibias_released_v",
+            "value": 0.632528,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "vref_asserted_v",
+            "value": 1.19941,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "resetn_asserted_mv",
+            "value": 6.590639e-07,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "resetn_released_v",
+            "value": 2.97,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "t_release_ms",
+            "value": 9.39004,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "vptat_asserted_mv",
+            "value": 2.592499e-05,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          },
+          {
+            "name": "vptat_released_v",
+            "value": 1.2929,
+            "unit": null,
+            "status": "fail",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      }
+    ]
+  },
+  "source": {
+    "repo": "2AMLogic/gf180-temp-por",
+    "ref": "03f2e43b0cb750d3251d2d0eeec7445310cd65d4",
+    "path": "layout/cells/bias_core.gds"
+  },
+  "downloadable": true,
+  "status": "ok"
+}

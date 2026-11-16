@@ -228,6 +228,15 @@ number is not actionable on a one-line JSON document.
   the document side of the `#` is still a finding.
 - **Mapping keys are scanned too.** A dict *keyed* by an absolute path leaks
   exactly as thoroughly as one valued by it.
+- **Remote worker observations are not flagged** (issue #5133). Everything
+  under `environment.remote.worker_environment` (and, for a sharded run,
+  `environment.remote.fleet.<i>.worker_environment`) — the worker's PDK root,
+  `simulator.selected_path`, version banner, diagnostics — describes the
+  remote host, not the author's checkout, so a batch-sim report lints clean
+  without `--allow-prefix`. The exemption is path-scoped: a
+  `worker_environment` key anywhere other than directly under
+  `environment.remote`, and every other field in the same envelope, is still
+  linted.
 - **`--allow-prefix` is explicit, never inferred from the environment.** Pass
   `--allow-prefix /usr/share/pdk` for a genuinely machine-wide install root.
   Reading `$PDK_ROOT` instead would make the verdict depend on the linting
@@ -302,6 +311,11 @@ klt: 0.2.0 (klayout 0.30.10)
 path pdk: <outside repo>
 path netlist: sim/bandgap/bandgap.spice
 ```
+
+`env_provenance_walk.common_repo_root(paths, find_repo_root=...)` (issue #5631) picks
+one repo root for a verb that records several input paths (the outermost when the
+inputs sit in nested repos), so every `{path, scope}` field in one report shares an
+anchor; `klt lvs` uses it for `layout` and `reference`.
 
 Also exported: `opaque_host_id()`, `repo_relative_path()`, `find_repo_root()`,
 `find_leaks()`, `scan_files()`, `find_absolute_path_fields()`,

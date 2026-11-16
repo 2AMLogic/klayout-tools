@@ -1,0 +1,35 @@
+Place and route a gate-level netlist (`klt synthesize`'s own `netlist_path`
+output) against a resolved standard-cell LEF/liberty deck via OpenROAD's
+native Tcl API, stage by stage (floorplan -> global/detailed placement ->
+clock-tree synthesis -> global/detailed routing) -- see docs/design/digital-
+flow-contracts-spike.md section 5 for the request/response contract and
+docs/cli/place-and-route.md for the CLI surface. Phase 4 of Epic #391.
+`pdk.cell_library`/ `corner` resolve via the same `find_pdk()`/`libs_ref`
+discovery `klt synthesize` uses -- any standard-cell library the resolved PDK
+install ships resolves the same way (sky130 is the first proven example, not
+the only one); reaching the `cts`/`route` stages additionally needs a verified
+clock-buffer/routing-layer table entry for that cell library. `target_stage`
+(default `route`) controls how far the run goes; a run that reaches (or
+exceeds) the requested stage is always a success, even short of a full route.
+`def_path` is populated once `write_def` has run; `gds_path` only once the DEF
+is also merged with the standard-cell GDS views via KLayout's `pya`, in-
+process -- never a `klayout` subprocess; `verilog_path` is the matching
+`write_verilog` as-built gate-level netlist (CTS buffers, resizes, and antenna
+diodes included), the netlist a golden-reference LVS run should use as its
+reference instead of `klt synthesize`'s pre-CTS one. Runs `openroad` as a
+subprocess (once per stage) -- requires an `openroad` binary on `$PATH`. Takes
+a request-document path (like `klt synthesize`/`klt lvs`/`klt sim`), not
+positional file args.
+
+positional arguments:
+  request path to a klt place-and-route request JSON file
+
+options:
+  -h, --help show this help message and exit
+  --pdk PDK PDK variant to resolve (e.g. sky130A); overrides $PDK
+  --pdk-root PDK_ROOT explicit PDK install root; overrides $PDK_ROOT and the search order
+  --backend {local,batch} where the units of a `pdk.rebuild_corners` request run (default: the request's `backend` field, then $KLT_SIM_BACKEND, then local). `batch` submits one job per corner to the Spot batch fleet and never falls back to running OpenROAD on this host; a single-unit request stays local under a host-default batch. See docs/cli/place-and-route.md, 'Physical rebuild per corner'
+  --resume resume an interrupted run (issue #4411): reuse each leading stage whose <top>_<stage>.commit.json record matches a hash of its inputs and whose artifacts are on disk, re-run the rest (a fully-resumed run only redoes the DEF->GDS merge). Lifts the populated outputs.dir refusal; adds a `resume` response block. Not combinable with --check or pdk.rebuild_corners. See docs/cli/place-and-route.md, 'Resuming an interrupted run'
+  --check REPORT verify a previously committed 'klt place-and-route --format json' report (REPORT) instead of running a fresh flow, against the request given positionally (issue #2224). Cheap mode (default): re-resolve and re-hash the request's gate-level netlist and standard- cell liberty and compare against REPORT's recorded pro venance.input.content_hash/provenance.deck.content_has h -- no OpenROAD run. Combine with --rerun for full mode. Exits 0 if still consistent, 3 if drifted -- see docs/cli/place-and-route.md, '--check'
+  --rerun full mode for --check (issue #2224): re-run the place- and-route flow the positional request declares and diff verdict-bearing fields against the committed report, excluding provenance.klt_version/klayout_version/pdk.version, engine_version, and run-scoped bookkeeping (see docs/cli/place-and-route.md). Requires --check; a clean error (exit 1) otherwise
+  --format {text,json} output format (default: text)

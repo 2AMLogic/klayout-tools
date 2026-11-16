@@ -1,0 +1,1090 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:12:25.125056+00:00",
+  "slug": "sky130-ldo",
+  "name": "Sky130 Ldo",
+  "description": "Canary \u2014 sky130 LDO. Design canary + klayout-tools dogfood.",
+  "pdk": "sky130",
+  "layer_count": 13,
+  "cell_count": 1,
+  "instance_count": 0,
+  "layout_file": "cap_rail_demo.gds",
+  "renders": {
+    "overview": "renders/overview.png",
+    "met1.drawing": "renders/68_20.png",
+    "via.drawing": "renders/68_44.png",
+    "layer_69_5": "renders/69_5.png",
+    "met2.drawing": "renders/69_20.png",
+    "via2.drawing": "renders/69_44.png",
+    "met3.drawing": "renders/70_20.png",
+    "via3.drawing": "renders/70_44.png",
+    "met4.drawing": "renders/71_20.png",
+    "via4.drawing": "renders/71_44.png",
+    "met5.drawing": "renders/72_20.png",
+    "capm.drawing": "renders/89_44.png",
+    "capm2.drawing": "renders/97_44.png",
+    "layer_235_4": "renders/235_4.png",
+    "center_crop": "renders/center_crop/overview.png"
+  },
+  "spec_summary": {
+    "rows": [
+      {
+        "parameter": "Input",
+        "target": "3.3 V \u00b110% (2.97\u20133.63 V)",
+        "stretch": "5 V flavor \u2014 separate follow-on variant (DR-001)"
+      },
+      {
+        "parameter": "Output",
+        "target": "1.8 V \u00b12% (fixed; divider as a unit-resistor string)",
+        "stretch": "programmable 1.2\u20133.0 V \u2014 deferred"
+      },
+      {
+        "parameter": "Load",
+        "target": "0\u201350 mA (0 mA = no external load; feedback divider is the only inherent preload)",
+        "stretch": "100 mA"
+      },
+      {
+        "parameter": "Dropout @ 50 mA",
+        "target": "< 300 mV (note 1)",
+        "stretch": "< 200 mV"
+      },
+      {
+        "parameter": "Line regulation",
+        "target": "< 5 mV/V over 2.97\u20133.63 V, at 1 mA and 50 mA (note 2)"
+      },
+      {
+        "parameter": "Load regulation (0\u201350 mA)",
+        "target": "< 1% (18 mV), counted inside the \u00b12% window (note 2)"
+      },
+      {
+        "parameter": "Load transient",
+        "target": "1\u219450 mA step, ~1 \u00b5s edges: peak excursion \u2264 150 mV, recover to \u00b11% in \u2264 20 \u00b5s, over the ratified C_out/ESR window (note 3)",
+        "stretch": "peak \u2264 100 mV"
+      },
+      {
+        "parameter": "PSRR",
+        "target": "> 50 dB @ 1 kHz and > 20 dB @ 100 kHz, at 1 mA and 50 mA (note 4)",
+        "stretch": "> 60 dB @ 1 kHz, > 30 dB @ 100 kHz"
+      },
+      {
+        "parameter": "Iq (excl. load current)",
+        "target": "< 30 \u00b5A at no load and at full load (50 mA), every PVT corner (note 5)",
+        "stretch": "< 10 \u00b5A"
+      },
+      {
+        "parameter": "Current limit",
+        "target": "constant-current (brickwall) clamp, window TBD over PVT; never engages for I_load \u2264 50 mA; survives continuous Vout = 0 short at Vin_max (note 6)"
+      },
+      {
+        "parameter": "Startup / soft-start",
+        "target": "monotonic into any load 0\u201350 mA and any C_out in the stability window; controlled ramp; inside \u00b12% within a few ms of enable; overshoot \u2264 +2% (note 6)"
+      },
+      {
+        "parameter": "Enable / shutdown",
+        "target": "shutdown Iq < 3 \u00b5A worst corner; disabled output = pass device fully off, no active discharge; Vin\u2192Vout leakage \u2264 1 \u00b5A (note 6)"
+      },
+      {
+        "parameter": "Thermal",
+        "target": "continuous worst-case dissipation set by Vin_max \u00d7 I_load; specified to Tj \u2264 125 \u00b0C; fault-only shutdown backstop 150 \u00b0C trip / 135 \u00b0C reset (note 7)"
+      },
+      {
+        "parameter": "Output noise",
+        "target": "not specified \u2014 waived unless a consumer states a requirement",
+        "stretch": "\u00b5Vrms row if a consumer asks"
+      },
+      {
+        "parameter": "Area",
+        "target": "< 0.1 mm\u00b2 total core area, pass FET included, excluding pads and sealring"
+      },
+      {
+        "parameter": "Stability",
+        "target": "stable 0\u201350 mA over the ratified C_out/ESR window; PM \u2265 45\u00b0, GM \u2265 10 dB worst corner (note 4)",
+        "stretch": "capless variant (separate fork)"
+      }
+    ],
+    "status_note": "RATIFIED \u2014 see [`spec/target-spec.md`](spec/target-spec.md"
+  },
+  "signals": {
+    "schema_version": 1,
+    "engine": "ngspice",
+    "engine_version": "46",
+    "status": "error",
+    "corner_count": 22,
+    "default_corner_id": "current-limit/tt_27c_2.97v",
+    "passed": 13,
+    "failed": 8,
+    "errored": 1,
+    "measurements": [
+      {
+        "name": "Current Limit",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Dropout Vs Load",
+        "limits": null,
+        "status": "fail",
+        "worst_case": null
+      },
+      {
+        "name": "Enable Shutdown",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Ic Screen 125C B",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Ic Screen 125C C",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Ic Screen 125C F",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Ic Screen 125C H",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Ic Screen 125C V",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Iq",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Line Regulation",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Load Regulation",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Load Transient",
+        "limits": null,
+        "status": "fail",
+        "worst_case": null
+      },
+      {
+        "name": "Loop Gain",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Mc Ic Screen A",
+        "limits": null,
+        "status": "error",
+        "worst_case": null
+      },
+      {
+        "name": "Mc Ic Screen B",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Mc Ic Screen D",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Mc Output Accuracy Engine Check",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Mc Output Accuracy Negctl",
+        "limits": null,
+        "status": "fail",
+        "worst_case": null
+      },
+      {
+        "name": "Pdk Smoke",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Psrr Dc",
+        "limits": null,
+        "status": "fail",
+        "worst_case": null
+      },
+      {
+        "name": "Startup",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      },
+      {
+        "name": "Thermal",
+        "limits": null,
+        "status": "pass",
+        "worst_case": null
+      }
+    ],
+    "corners": [
+      {
+        "corner_id": "current-limit/tt_27c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "vout_50ma_v",
+            "value": 1.79784,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "cl_margin_50ma_v",
+            "value": 0.0424544,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "ilim_short_ma",
+            "value": 139.575,
+            "unit": "mA",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "ilim_knee_ma",
+            "value": 112.933,
+            "unit": "mA",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "ilim_droop_pct",
+            "value": -23.5915,
+            "unit": "%",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "ishort_sustained_ma",
+            "value": 139.612,
+            "unit": "mA",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "ishort_ripple_pct",
+            "value": 0.000143254,
+            "unit": "%",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vout_short_mv",
+            "value": 0.139571,
+            "unit": "mV",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "dropout-vs-load/overall",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "fail",
+        "runtime_s": 0,
+        "measurements": [],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "enable-shutdown/tt_27c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "iq_shutdown_static_ua",
+            "value": 0.0001492,
+            "unit": "uA",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "iq_shutdown_after_edge_ua",
+            "value": 0.000395087,
+            "unit": "uA",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "iq_shutdown_after_edge_mean_ua",
+            "value": 0.000188702,
+            "unit": "uA",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "leak_vin_vout_ua",
+            "value": 7.94485e-05,
+            "unit": "uA",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vout_pre_disable_v",
+            "value": 1.81478,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vout_hold_2ms_v",
+            "value": 1.81357,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vout_disabled_static_v",
+            "value": 0.000248039,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "ivout_held_1v8_ua",
+            "value": 0.576652,
+            "unit": "uA",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "ic-screen-125c-b/tt_125c_3.30v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "vout_ss",
+            "value": 1.79856,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vout_tail_span",
+            "value": 1e-06,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vin_ss",
+            "value": 3.3,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vout_800u",
+            "value": 1.79856,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "fb_ss",
+            "value": 1.19923,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "n_fbb_ss",
+            "value": 0.599709,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "ea_out_ss",
+            "value": 2.04369,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "ea_cz_ss",
+            "value": 2.04369,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "ic-screen-125c-c/tt_125c_3.30v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "vout_ss",
+            "value": 1.79855,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vout_tail_span",
+            "value": 0.0,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vin_ss",
+            "value": 3.3,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vout_preload",
+            "value": 1.81975,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "fb_ss",
+            "value": 1.19922,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "n_fbb_ss",
+            "value": 0.599707,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "ea_out_ss",
+            "value": 2.04369,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "ea_cz_ss",
+            "value": 2.04369,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "ic-screen-125c-f/tt_125c_3.30v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "vout_ss",
+            "value": 1.79855,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vout_tail_span",
+            "value": 0.0,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vin_ss",
+            "value": 3.3,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vout_800u",
+            "value": 1.79855,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "fb_ss",
+            "value": 1.19922,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "n_fbb_ss",
+            "value": 0.599707,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "ea_out_ss",
+            "value": 2.04369,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "ea_cz_ss",
+            "value": 2.04369,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "ic-screen-125c-h/tt_125c_3.60v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "vout_ss",
+            "value": 1.79758,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vout_tail_span",
+            "value": 0.0,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vin_ss",
+            "value": 3.6,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vout_800u",
+            "value": 1.79756,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "fb_ss",
+            "value": 1.19858,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "n_fbb_ss",
+            "value": 0.599383,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "ea_out_ss",
+            "value": 2.09267,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "ea_cz_ss",
+            "value": 2.09267,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "ic-screen-125c-v/tt_125c_3.30v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "vout_ss",
+            "value": 1.79855,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vout_tail_span",
+            "value": 0.0,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vin_ss",
+            "value": 3.3,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vout_800u",
+            "value": 1.79849,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "fb_ss",
+            "value": 1.19922,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "n_fbb_ss",
+            "value": 0.599707,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "ea_out_ss",
+            "value": 2.04369,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "ea_cz_ss",
+            "value": 2.04369,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "iq/tt_27c_3.30v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "iq_no_load_ua",
+            "value": 13.7325,
+            "unit": "uA",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "iq_full_load_ua",
+            "value": 25.9237,
+            "unit": "uA",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vout_no_load_v",
+            "value": 1.80221,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vout_full_load_v",
+            "value": 1.79799,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "line-regulation/tt_27c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "line_reg_1ma_mv_per_v",
+            "value": 0.315151,
+            "unit": "mV/V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "line_reg_50ma_mv_per_v",
+            "value": 0.29697,
+            "unit": "mV/V",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "load-regulation/tt_27c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "load_reg_v",
+            "value": 0.0035,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "load_reg_pct",
+            "value": 0.194444,
+            "unit": "%",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "load-transient/overall",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "fail",
+        "runtime_s": 0,
+        "measurements": [],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "loop-gain/tt_125c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "pm_c033_50ma_deg",
+            "value": 52.9022,
+            "unit": "deg",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "gm_c033_50ma_db",
+            "value": 19.631,
+            "unit": "dB",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "fc_c033_50ma_hz",
+            "value": 138323.0,
+            "unit": "Hz",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "dcgain_c033_50ma_db",
+            "value": 60.2712,
+            "unit": "dB",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "pm_c033_1ma_deg",
+            "value": 89.583,
+            "unit": "deg",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "pm_c033_0ma_deg",
+            "value": 54.2638,
+            "unit": "deg",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "gm_c033_0ma_db",
+            "value": 69.7472,
+            "unit": "dB",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "pm_c47_50ma_deg",
+            "value": 90.519,
+            "unit": "deg",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "mc-ic-screen-a/overall",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "error",
+        "runtime_s": 0,
+        "measurements": [],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "mc-ic-screen-b/overall",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "mc-ic-screen-d/overall",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "mc-output-accuracy-engine-check/overall",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "mc-output-accuracy-negctl/overall",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "fail",
+        "runtime_s": 0,
+        "measurements": [],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "pdk-smoke/tt_27c_1.62v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "vgs",
+            "value": 0.622881,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "isup",
+            "value": 9.97119e-07,
+            "unit": "A",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "psrr-dc/overall",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "fail",
+        "runtime_s": 0,
+        "measurements": [],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "startup/tt_27c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "vpk_c033_0ma_v",
+            "value": 1.81384,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vfloor_c033_0ma_v",
+            "value": 1.80847,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "tramp_c033_0ma_ms",
+            "value": 0.367779,
+            "unit": "ms",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vpk_c033_50ma_v",
+            "value": 1.79785,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vfloor_c033_50ma_v",
+            "value": 1.79785,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "tramp_c033_50ma_ms",
+            "value": 0.39579,
+            "unit": "ms",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vpk_c47_0ma_v",
+            "value": 1.82505,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vfloor_c47_0ma_v",
+            "value": 1.82466,
+            "unit": "V",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "corner_id": "thermal/tt_27c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "trip_temp_c",
+            "value": 169.0,
+            "unit": "C",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "reset_temp_c",
+            "value": 169.0,
+            "unit": "C",
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "hysteresis_c",
+            "value": 0.0,
+            "unit": "C",
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      }
+    ]
+  },
+  "source": {
+    "repo": "2AMLogic/sky130-ldo",
+    "ref": "4d347c28e34aaa09550cd91421a81371dfc58c23",
+    "path": "layout/cap-rail-demo/reports/20261010-033947-80bc87e/cap_rail_demo.gds"
+  },
+  "downloadable": true,
+  "status": "ok"
+}

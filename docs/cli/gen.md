@@ -48,6 +48,17 @@ klt gen --pdk-pcell <library>/<cell> [--params <path-or-inline>] [--pdk <variant
   that one resolver, never a private lookup. Omitting both falls back to
   `$PDK`/`$PDK_ROOT`, same as `klt pdk find` with no flags.
 - `--cell-name` — name for the generated top cell (default: `<generator>_0`).
+  For generators that emit a PCell child — every generator except
+  `asap7_finfet` and `asap7_tap` (which flatten their output into the top
+  cell and carry no child) and `bjt_array` on sg13g2 (which instantiates the
+  PDK's own HBT cell under its PDK name, independent of `--cell-name`) —
+  that child is named `<cell-name>__core` (since v0.9.0, issue #4251;
+  earlier releases left it as the library cell name, e.g. `mos_array`). The
+  suffix keeps the children of streams generated under different
+  `--cell-name`s from merging when they are read into one `Layout`. This
+  naming is part of `klt gen`'s documented output: a change to it is a
+  CHANGELOG-recorded event, since structure names are written into the
+  stream.
 - `-o`/`--output` — output GDS/OASIS path (default: `<cell_name>.gds`, written
   to the current directory). Format (`.gds`/`.oas`) is inferred from the
   extension, matching `klt render`'s auto-detection posture. The containing
@@ -135,8 +146,9 @@ dimension is now independently checkable — see the note itself.)
 | `diff_pair` | yes | yes | yes | no |
 | `esd_device` | yes | yes | no | no |
 | `bond_pad` | yes | yes | no | no |
-| `bjt_array` | yes | yes | no | no |
+| `bjt_array` | yes | yes | yes (HBT, PDK cell) | no |
 | `diode` | yes | no | no | no |
+| `pdk_cell` | yes | yes | yes | yes (family-agnostic, reads `libs.ref`) |
 
 **gf180mcu — `mos_array`'s unit-device geometry was margined against the
 six-rule signoff gap (issue #1577), but this remains an *unverified*
@@ -305,12 +317,21 @@ untranscribed; see [`klt drc`](drc.md)'s "Coverage" section for the full
 modeled/unmodeled split and the one documented residue in `MIM.c`'s
 two-term construct.
 
+**sg13g2 P-substrate tap (issue #5231).** `guard_ring` with `"add_well": false`
+draws a P-substrate tap on `ihp-sg13g2`: the Activ ring plus a `pSD` (14/0)
+implant extending 0.18 µm (`pSD.c`) beyond it, Cont and Metal1 as usual, no
+NWell. Name the net with the ring's usual port naming. The default
+(`add_well` true) stays an n-well tie. Use it to close `LU.b` (20 µm from
+N+ Activ in PWell to a pSD-PWell tie); the caller sizes and places the ring.
+Ring `Cont` is also snapped to the 5 nm grid (`cont.ongrid.1`, native
+`cont_drw_Offgrid`).
+
 **sg13g2 (IHP-Open-PDK, issues #1448/#1450/#1455).** `res_array`/`guard_ring`
 (#1448), `mos_array`/`diff_pair` (#1450), and `cap_array` (#1455) are wired
 up against this family's curated deck (`klayout_tools.decks.sg13g2`) today;
-`bjt_array`/`esd_device`/`bond_pad`/`well_island` are not:
-
-- `bjt_array` has no recognised device class in this deck's
+`esd_device`/`bond_pad`/`well_island` are not (`bjt_array` is, as a SiGe
+HBT placed from the PDK's own cell — issue #4850, see its section below). For
+the record, the old reason `bjt_array` was deferred: no recognised device class in this deck's
   `EXTRACTION_DECK` at all (it declares `nfet`/`pfet`/three drawn poly
   resistors/two junction diodes/two MiM capacitors only — see that module's
   own "Device-class coverage" note — no bipolars). `cap_array` was
@@ -895,6 +916,18 @@ it is of the ring, and still reports `comp.tap_distance.*`. With
 `add_guard_ring: true` the ring is the tap and no pads are drawn. sky130 and
 the other families draw no pads and are byte-for-byte unchanged.
 
+**Below `UNIT_MIN_W_UM`: `dogbone_terminals` (issue #4851).** Set
+`"dogbone_terminals": true` to let `w_um` drop below `0.42` µm down to the
+resolved PDK's own active min width (sg13g2 `activ.width.1`: 0.15 µm; smaller
+still raises a `GenError` naming that rule). Each source/drain segment grows a
+local active/contact/metal head `0.42` µm tall while the channel keeps `w_um`,
+and the gate is offset from the head so poly never abuts unrelated active.
+Works with `gate_contact`, `rows`/`cols`, `dummy`, `nfet`/`pfet` and series
+multi-finger units; `finger_topology: "parallel"` with `fingers > 1` raises, and
+`w_um >= 0.42` or `mos_cap` makes it a no-op. Default `false` is byte-for-byte
+unchanged. `diff_pair` keeps its floor. The hand-drawn recipe below remains
+for other cases.
+
 **Below `UNIT_MIN_W_UM`: dog-bone terminals drawn by hand (issue #1574).**
 `w_um` below `0.42` µm is rejected outright, with no override — that floor is
 about the *contact*, not the target PDK's own diffusion-width minimum (sky130
@@ -1016,7 +1049,7 @@ device additionally requires; sg13g2's `PolyRes.drawing` `(128, 0)`, plus
 the `EXTBlock`/`Res` layers its own `rsil` device additionally requires — see
 below), so `klt gen res_array`'s output is directly recognised as a resistor
 device by `klt extract --deck <pdk>` rather than being absorbed into ordinary
-poly interconnect as a short (issue #369). On sg13g2 (issue #2679) the
+poly interconnect as a short (issue #369). On sg13g2 (issue #2679) and sg13cmos5l (issue #3094) the
 poly layer (`GatPoly`) is drawn as only the two end heads, abutting the
 `PolyRes` body with zero overlap, matching IHP's own `rsil`/`rppd`/`rhigh`
 PCells (where `PolyRes` is the resistive body itself) rather than one
@@ -1098,7 +1131,7 @@ salicide-block rules.) sky130 and sg13g2 output is unchanged.
 
 | `flavor` | sg13g2 device class | Sheet ρ | Masks drawn over each body |
 | -------- | ------------------- | ------- | -------------------------- |
-| `"generic"` (default) | `rsil` | 7 Ω/□ | `EXTBlock` `(111, 0)` + `Res` `(24, 0)` |
+| `"generic"` (default), or `"rsil"` (issue #5288) | `rsil` | 7 Ω/□ | `EXTBlock` `(111, 0)` + `Res` `(24, 0)` |
 | `"rppd"` | `rppd` | 260 Ω/□ | `EXTBlock` + `pSD` `(14, 0)` + `SalBlock` `(28, 0)` |
 | `"rhigh"` | `rhigh` | 1360 Ω/□ | `EXTBlock` + `pSD` + `nSD` `(7, 0)` + `SalBlock` |
 
@@ -1248,8 +1281,10 @@ see the `met5` discussion above) rather than sourced from this flavour table.
 | `num`          | int    | `4`     | Number of matched unit resistors. Must be `>= 1`. |
 | `dummy`        | int    | `1`     | Dummy unit resistors added at each end. Must be `>= 0`. |
 | `rows`         | int    | `1`     | Fold the `num` unit resistors into this many parallel rows (boustrophedon order) instead of one long row. Must be `>= 1`. |
+| `snap`         | bool   | `true`  | Poly body only: round `length_um` to the nearest multiple of the PDK manufacturing grid (deck `ongrid` rule; ties round up; no snap where the deck declares none) before drawing. The snap is reported in `drc_hints.length_snap` and a `warnings[]` entry. `false` draws verbatim and keeps the advisory #4203 warnings. Metal-level resistors are never snapped (issue #4666). |
+| `short_length` | string | `"refuse"` | Poly body only, when `snap` is true: what to do when the (snapped) length is below the deck's SAB/implant minimum mask width (gf180mcu). `"refuse"` fails with a `GenError` naming the floor; `"lengthen"` raises the length to the smallest on-grid value `>=` the floor and reports the delta (issue #4666). |
 | `series`       | bool   | `false` | Join the `num` units end to end (`R<i>_B` to `R<i+1>_A`) with local-metal jumpers (issue #2997): one logical series resistor. Default `false` is byte-for-byte unchanged. See "Series strings" below. |
-| `flavor`       | string | `"generic"` | Poly-resistor flavour / recognised device class: `"generic"` (base sheet-rho — `res_generic_po` on sky130, `ppolyf_u` on gf180mcu, `rsil` on sg13g2/sg13cmos5l — also reachable on sg13cmos5l as `"rsil"`); on sky130, `"high"` (`res_high_po`) / `"xhigh"` (`res_xhigh_po`); on gf180mcu, `"1k"` / `"2k"` / `"3k"` (`ppolyf_u_1k`/`_2k`/`_3k`, 1000/2000/3000 Ω/□ — pair with `klt extract --deck-option poly_res=<value>`); on sg13g2/sg13cmos5l, `"rppd"` (260 Ω/□) / `"rhigh"` (1360 Ω/□). Must be a flavour the resolved PDK family exposes. Ignored when `metal_level` is non-zero. |
+| `flavor`       | string | `"generic"` | Poly-resistor flavour / recognised device class: `"generic"` (base sheet-rho — `res_generic_po` on sky130, `ppolyf_u` on gf180mcu, `rsil` on sg13g2/sg13cmos5l — also reachable on both as `"rsil"`); on sky130, `"high"` (`res_high_po`) / `"xhigh"` (`res_xhigh_po`); on gf180mcu, `"1k"` / `"2k"` / `"3k"` (`ppolyf_u_1k`/`_2k`/`_3k`, 1000/2000/3000 Ω/□ — pair with `klt extract --deck-option poly_res=<value>`); on sg13g2/sg13cmos5l, `"rppd"` (260 Ω/□) / `"rhigh"` (1360 Ω/□). Must be a flavour the resolved PDK family exposes. Ignored when `metal_level` is non-zero. |
 | `metal_level`  | int    | `0`     | Draw a metal-layer resistor body instead of poly: `0` (default) draws the original poly-body resistor selected by `flavor`; `1`..`5` on sky130 draws that level's `res_generic_mN` device (`met1`..`met5`) instead (issue #1639); `1`..`2` on sg13g2 draws `res_metal1`/`res_metal2` (`Metal1`/`Metal2`) instead (issue #1758); `1`..`3` on gf180mcu draws `rm1`/`rm2`/`rm3` (`Metal1`/`Metal2`/`Metal3`) instead (issue #1731). Must be between `0` and `5`; a level a resolved PDK family does not expose (every non-zero value on sg13cmos5l, `3`..`5` on sg13g2, or `4`..`5` on gf180mcu, today) raises a clear error. |
 
 ### `cap_array` (MiM capacitor array, issue #1117)
@@ -1280,6 +1315,13 @@ any currently-supported family — falls back to the old, unroutable interior
 centre with a fixed `direction_deg` and a `drc_hints.notes` warning, mirroring
 `mos_array`'s interior gate-contact port.) `device_count` is `num`.
 `drc_hints.matched_group_id` is `"cap_array:<num>"`.
+
+Both ports are therefore reported on the MiM stack's **own** metal levels —
+the bottom-plate conductor for `C<i>_BOT` and the top-plate landing metal for
+`C<i>_TOP` — not on the base routing metal every other analog generator in
+this family reports its terminals on. Landing either terminal on another
+routing level takes no extra generator parameter and no hand-built riser: see
+"Landing a terminal on another routing level" below.
 
 `sky130`, `sg13g2` and `gf180mcu` are supported; requesting `cap_array` for
 any other PDK family raises a clear application error (exit code `1`) rather
@@ -1346,6 +1388,111 @@ three are the identical drawn geometry, selected at extraction time with
 | `connect`      | string | `"independent"` | `"independent"` draws `num` separate capacitors (the output described above, unchanged). `"parallel"` draws one capacitor of `num × C_unit` — see below (#3022). |
 | `stack` | int | `1` | `1` draws one MiM level (unchanged). `2` (sky130 only, requires `connect: "parallel"`) stacks the `capm2`/met4 level over the `capm`/met3 one — see below (#3332). Other values and other families are rejected with a `GenError`. |
 | `top_via_pitch_um` | double | `0.0` | `connect: "parallel"` only: pitch (µm) of the top-plate via grid over each unit. `0.0` = twice the drawn via side. A nonzero value must be `>= 0.44`; rejected with `connect: "independent"`. |
+
+#### Landing a terminal on another routing level (#5556)
+
+Both terminals sit on the MiM stack's **own** metal levels, one level apart,
+while every sibling analog generator (`mos_array`, `diff_pair`, `res_array`,
+`guard_ring`) reports its terminals on the base routing metal (sky130 li1
+`67/20`, or poly `66/20` for a gate contact). Per family:
+
+| family | `C<i>_BOT` — bottom-plate conductor | `C<i>_TOP` — top-plate landing metal |
+| ------ | ----------------------------------- | ------------------------------------ |
+| `sky130` | met3 `70/20` | met4 `71/20` |
+| `gf180mcu` | Metal4 `46/0` | Metal5 `81/0` |
+| `sg13g2` | Metal5 `67/0` | TopMetal1 `126/0` |
+
+(`connect: "parallel"` reports the same two levels as `C_BOT`/`C_TOP`;
+`stack: 2` reports met5 `72/20` for `C_OUTER` and met4 `71/20` for `C_MID`.)
+
+**The supported way to land either terminal on another routing level is a
+[`klt gen-compose`](gen-compose.md) `connectivity[]` net** — not a hand-built
+riser in the caller's own geometry, and not a `cap_array` parameter (there is
+none, deliberately: it would be a second implementation of a via stack this
+repo already draws). Every level in the table above is a member of its
+family's own `ExtractionDeck.metals` stack — the stack (paired with its
+`.vias`) that `gen-compose`'s via ladder walks — so a backbone on a declared
+`routing.layer_role` reaches the terminal by dropping the **full** ladder at
+the pin's own composed-frame position: one via per hop, plus a landing pad on
+every level in between, each pad sized against the resolved family's own DRC
+deck (including the met3/met4 minimum-**area** rules, which bind well before
+minimum width at these sizes). See [`gen-compose.md` § "Multi-level via-drop
+(#1567)"](gen-compose.md#multi-level-via-drop-1567) for the ladder's own
+contract, and § "Via-drop routing (metal2/via, #454)" for how a single hop is
+drawn and sized.
+
+A minimal sky130A request landing `C0_TOP` (met4) on an li1-level
+transistor terminal. Both reports are `klt gen`'s **JSON** response, written
+next to the request file (a relative `generator_report` path resolves against
+the request's own directory):
+
+```sh
+klt gen cap_array --pdk sky130A -o caps.gds --format json \
+  --params '{"num":1,"plate_w_um":7.07,"plate_h_um":7.07}' > caps.json
+klt gen mos_array --pdk sky130A -o mos.gds --format json > mos.json
+```
+
+```json
+{
+  "pdk": { "variant": "sky130A" },
+  "blocks": [
+    { "id": "mos", "generator_report": "mos.json" },
+    { "id": "caps", "generator_report": "caps.json" }
+  ],
+  "placement": {
+    "strategy": "explicit",
+    "order": ["mos", "caps"],
+    "origins_um": {
+      "mos": { "x": 0.0, "y": 0.0 },
+      "caps": { "x": 10.0, "y": 0.0 }
+    }
+  },
+  "connectivity": [
+    {
+      "net": "CTERM",
+      "pins": [
+        { "block": "mos", "port": "U0_D" },
+        { "block": "caps", "port": "C0_TOP" }
+      ]
+    }
+  ],
+  "routing": { "layer_role": "metal", "width_um": 0.42 },
+  "options": { "cell_name": "cap_tap", "output": "cap_tap.gds" }
+}
+```
+
+`CTERM` comes back `status: "routed"` with `landed_on_block: true`, and the
+composed top cell carries the whole li1→met4 ladder it drew — a via cut on
+each of mcon `67/44`, via `68/44`, via2 `69/44` and via3 `70/44`, with a
+landing pad on li1, met1, met2, met3 and met4. `klt drc --deck sky130` on the output reports
+`violation_count: 0`, and `klt extract --deck sky130` returns the transistor's
+drain and the `sky130_fd_pr__model__cap_mim` device's top plate as **one**
+node, named `CTERM` — the connection is electrical, not just a clean stream
+(a riser that misses the plate passes DRC and shows up only as an extra
+dangling node in the extracted netlist). Naming `C0_BOT` (met3) instead does
+the same with one hop fewer, landing on the capacitor's bottom plate and
+leaving the top plate its own distinct node. Both directions are pinned by
+`test_compose_lands_cap_array_terminal_on_li1_via_ladder` in
+`tests/test_gen_compose_cap_ladder.py`.
+
+**Verified end to end on sky130 only.** `gf180mcu`'s and `sg13g2`'s terminal
+levels are members of their own decks' `metals` stacks too, so the same
+resolution applies there by construction — but neither family's ladder onto a
+MiM terminal is covered by a test, and neither has been checked for
+DRC-cleanliness or extracted connectivity on those upper levels. Treat a
+non-sky130 composition as unproven until it is.
+
+**Mind the terminal's declared direction when placing the neighbour.**
+`C<i>_BOT` faces `180` (due west, off the bottom plate's left edge) and
+`C<i>_TOP` faces `90` (due north, off the escape pad), so the neighbour has
+to sit on the faced side with a channel wide enough for the backbone's
+midpoint jog — hence `"explicit"` placement at a 10µm gap, rather than
+a tight `"row"`. Crowding the capacitor instead gets the net rejected for
+routing *topology* (approaching a pin from behind, threading the neighbour's
+own drawn metal), which is a placement problem and not a layer-stack one; see
+[`gen-compose.md`](gen-compose.md) § "Known limitations" and
+[`layout-plan-execute.md`](layout-plan-execute.md)'s mixed-device routing
+note.
 
 #### `connect: "parallel"` — one capacitor from many units (#3022)
 
@@ -1427,7 +1574,7 @@ and 4).
 | `inner_height_um`        | double | `3.0`   | Height of the protected inner area (µm). Must be `> 0`. |
 | `ring_width_um`          | double | `0.42`  | Tap ring thickness (µm). Must be `>= 0.42`. |
 | `contacts_per_side`      | int    | `4`     | Tap contacts evenly spaced along each ring side, applied uniformly to all four sides unless overridden per-axis below. Must be `>= 1`. |
-| `contacts_per_side_ns`   | int    | `0`     | Tap contacts on the N/S (top/bottom) sides, spaced along `inner_width_um`. `0` (the default) inherits `contacts_per_side`, so existing single-scalar callers are unaffected. Must be `>= 0`. |
+| `contacts_per_side_ns`   | int    | `0`     | Tap contacts on the N/S (top/bottom) sides, spaced along `inner_width_um`. `0` (the default) inherits `contacts_per_side`. Must be `>= 0`. |
 | `contacts_per_side_ew`   | int    | `0`     | Tap contacts on the E/W (left/right) sides, spaced along `inner_height_um`. `0` (the default) inherits `contacts_per_side`. Must be `>= 0`. |
 | `ring_gap_side`          | string | `""`    | Cut one routing opening through the ring on this side: `""` (a closed ring), `"N"`, `"S"`, `"E"` or `"W"`. See "Ring routing openings" below. |
 | `ring_gap_um`            | double | `0.0`   | Length of the opening along its side (µm). Required (and must be `>= 0.4`, the minimum same-layer spacing) when `ring_gap_side` is set; must be `0` otherwise. |
@@ -1790,6 +1937,23 @@ reporting it as a spurious unmatched device under `klt lvs`. These are the
 only two families `bjt_array` runs on at all (see "PDK-family support"
 above), so it always draws the marker where it is supported.
 
+**sg13g2 — SiGe HBT (issue #4850).** On `sg13g2` the generator does not draw
+from base layers. `params.flavor` selects `npn13G2` (default), `npn13G2l` or
+`npn13G2v`, and the PDK's own cell of that name (`npn13G2`/`npn13G2L`/
+`npn13G2V`) is read from `libs.ref/sg13g2_pr/gds/sg13g2_pr.gds` of the
+resolved install and instantiated on a `rows` × `cols` grid (bbox pitch plus
+a 2 µm gap). No PyCell shim is needed and no PDK data is vendored. Only
+`flavor`, `rows`, `cols` apply; `emitter_um`, `topology`, `dummy`, `ratio`
+and the collector ring are ignored (noted in `drc_hints.notes`). `flavor` on
+any other family is an error. A missing/unreadable GDS or absent cell is an
+application error (exit 1), never an empty cell. Ports are `Q<i>_E`/`_B`/`_C`
+from the cell's pin labels. The report gains an additive `hbt` object
+`{"flavor", "cell", "source_gds", "count"}`. Extraction/LVS recognition of
+`npn13G2` is not claimed here (tracked by #4397). Against IHP-Open-PDK
+v0.3.0, `klt drc --deck sg13g2` is clean for `npn13G2` and `npn13G2v`;
+`npn13G2L` shows one `via1.width.1` violation per unit, identical to the bare
+PDK cell.
+
 Ports are named `Q<i>_E` (emitter) and `Q<i>_B` (base) per unit device, plus
 `COLL_N`/`COLL_S`/`COLL_E`/`COLL_W` on the collector ring when
 `add_collector_ring` is `true` (and a `GAP_<side>` marker when that ring
@@ -1868,6 +2032,35 @@ device depends on the sky130 deck and is not claimed here.
 klt gen cap_vpp_array --pdk sky130A \
   --params '{"pdk_cell":"sky130_fd_pr__cap_vpp_02p4x04p6_m1m2_noshield","num":4,"pitch_um":3}' \
   -o caps.gds --format json
+```
+
+### `pdk_cell` (any PDK fixed GDS cell, issue #5290)
+
+Places one of a PDK's **fixed, pre-drawn** GDS cells (bondpad, ESD diode, ...)
+as drawn, for any PDK family — the generalisation of `cap_vpp_array`. The cell
+is read from `libs.ref/<library>/gds/` of the resolved PDK at request time
+(never vendored), and **no pcell library is imported**, so it works when a
+family's pycell library is unavailable (e.g. `klt gen --list-pdk-pcells`
+reporting `sg13g2_pycell_lib` unavailable on a release tarball).
+
+| Param      | Type   | Default | Meaning |
+|------------|--------|---------|---------|
+| `library`  | string | — (required) | A `libs.ref/<library>` directory name holding a `gds/` folder (e.g. `sg13g2_io`). The GDS is `gds/<library>.gds`, or the only `.gds` there. An unknown library lists the available ones. |
+| `pdk_cell` | string | — (required) | Cell name in that GDS. An unknown name fails with the standard error envelope listing every available cell. |
+| `num`      | int    | `1`     | Instances in the row; must be `>= 1`. |
+| `pitch_um` | double | `0.0`   | Same semantics as `cap_vpp_array`: `0` abuts at the cell's bbox width; a non-zero pitch below the cell width (with `num > 1`) is rejected. |
+
+Ports, origin shift and notes follow `cap_vpp_array` exactly: pin labels
+become `U<i>_<label>` ports (with an additive `bbox_um`), a cell without
+labels reports no ports and says so. The report composes into `gen-compose`
+like any other generator. As the compose-side alternative, a `gen-compose`
+`blocks[].cell` entry with `ports_from_labels` (#2927) reads the same labels
+without going through `klt gen`.
+
+```bash
+klt gen pdk_cell --pdk ihp-sg13g2 \
+  --params '{"library":"sg13g2_io","pdk_cell":"<cell name>","num":2}' \
+  -o pads.gds --format json
 ```
 
 ### `bond_pad` (chip-boundary bond pad, issue #568)
@@ -2049,6 +2242,80 @@ schematic, label the two ports' `li1` (positions are in `ports[]`), run
 `klt extract`, and compare with a `D` element of the matching class under
 `klt lvs`.
 
+### `asap7_finfet` (ASAP7 FinFET nFET/pFET, issue #2762)
+
+A multi-fin, multi-finger FinFET on the ASAP7 grids. **ASAP7 only** — it needs
+a resolved `asap7` PDK tree (`klt pdk find`); any other family raises a clear
+`GenError`. Width is quantized by fin count, not drawn in µm.
+
+- Output database unit is `0.00025` µm; every coordinate is an integer dbu, so
+  gates (20 nm wide, 54 nm pitch), fins (7 nm, 27 nm pitch), the active
+  height (`nfin` × 27 nm) and S/D columns sit on the grids by construction.
+- One dummy gate at each end, `nf` live gates, `nf + 1` S/D columns (even =
+  source, odd = drain) with SDT/LISD/V0/M1, strapped on M1 so the fingers
+  extract as one parallel device; one LIG/V0/M1 gate contact. GCut bands end
+  the gates, as in the pinned ASAP7 standard cells.
+- `device="pfet"` adds `Pselect` and the well; `vt="lvt"`/`"slvt"` add the
+  matching VT marker (extracts as `*_lvt`/`*_slvt`).
+- **`nfin` is fins per gate finger.** `klt extract` reports `nfin` as the
+  total over parallel fingers, so the response's `expected` block gives
+  `nfin_total = nfin * nf` to compare against.
+- The output is a single flat cell (the FinFET extractor reads the top cell).
+- Ports `S`, `D`, `G` on M1 (19/0). `device_count` is `1`.
+- Verified DRC-clean under `asap7.drc` and extracting the requested
+  `nfin * nf` / `nf` for a bounded sweep (`tests/test_gen_asap7.py`).
+- **Not generated here:** SRAM/thick-oxide flavours, routing between devices.
+  Substrate/well taps are the separate [`asap7_tap`](#asap7_tap-asap7-substratewell-tap-issue-4841) generator.
+
+| `params` field | Type   | Default  | Description |
+| -------------- | ------ | -------- | ----------- |
+| `device`       | string | `"nfet"` | `"nfet"` or `"pfet"`. |
+| `nfin`         | int    | `2`      | Fins per gate finger, `1..16`. |
+| `nf`           | int    | `1`      | Gate fingers, `1..16`. |
+| `vt`           | string | `"rvt"`  | `"rvt"`, `"lvt"` or `"slvt"`. |
+
+```
+klt gen asap7_finfet --pdk-root <lambdapdk>/asap7 \
+  --params '{"device":"nfet","nfin":3,"nf":2}' -o nfet.gds --format json
+```
+
+### `asap7_tap` (ASAP7 substrate/well tap, issue #4841)
+
+A gate-free ACTIVE tap that ties a body to its supply, on the same ASAP7 fin
+(27 nm) and S/D column (54 nm) grids as `asap7_finfet`. **ASAP7 only**, same
+PDK gate and `0.00025` µm output dbu.
+
+- `device="ptap"`: p+ tap (`Pselect`) in the p-substrate, no WELL; ties an
+  nFET body. `device="ntap"`: n+ tap (`Nselect`) inside a WELL; ties a pFET
+  body.
+- ACTIVE is `nfin` fins tall and spans `ncol` S/D columns; each column has
+  SDT/LISD/V0/M1, joined by an M1 rail. Body port `B` on M1 (19/0).
+- `ring=true` draws a rectangular ACTIVE ring: `nfin`-fin top/bottom bars,
+  one-column left/right bars, `inner_nfin` fins of hole between the bars, with
+  M1 straps tying both rails. A ring needs `ncol >= 2`.
+- `nfin` starts at `2`: a one-column tap is 16 nm wide, so ACTIVE.A.1A
+  (864 nm²) needs two fins.
+- **Extraction caveat:** `klt extract` recognises no device for a tap and does
+  not model substrate/WELL connectivity (`_NET_MODEL` in
+  `decks/asap7_rules.py`), so the body tie is not visible to extraction. The
+  tests assert the tap layers on the drawn geometry instead. The `expected`
+  block names the tap type and the body it ties.
+- Verified DRC-clean under `asap7.drc` for single taps (n and p, 2/3/5 fins,
+  1/2/3 columns) and rings (`tests/test_gen_asap7_taps.py`).
+
+| `params` field | Type   | Default  | Description |
+| -------------- | ------ | -------- | ----------- |
+| `device`       | string | `"ptap"` | `"ptap"` or `"ntap"`. |
+| `nfin`         | int    | `2`      | Tap (bar) height in fins, `2..16`. |
+| `ncol`         | int    | `1`      | S/D contact columns, `1..16`. |
+| `ring`         | bool   | `false`  | Draw a tap ring. |
+| `inner_nfin`   | int    | `2`      | Ring hole height in fins, `1..16`. |
+
+```
+klt gen asap7_tap --pdk-root <lambdapdk>/asap7 \
+  --params '{"device":"ntap","nfin":2,"ncol":3,"ring":true}' -o tap.gds --format json
+```
+
 ## Output database unit (dbu)
 
 **Every generator writes its GDS at the resolved PDK's own database unit,
@@ -2195,7 +2462,7 @@ family/variant split the resolver doesn't have. The response's
 | `device_count` | integer | Number of unit instances placed (`resistor_strip`'s `num`). |
 | `ports` | array\<object\> | Named terminals for downstream connection — see below. |
 | `drc_hints` | object | DRC-relevant metadata the generator itself already knows — see below. Advisory only; `klt drc` remains the actual authority on rule compliance. |
-| `warnings` | array\<string\> | Non-fatal generator notes (e.g. a requested dimension was snapped to the technology grid). Always present, empty when there is nothing to report. `mos_array`/`diff_pair` also warn when `w_um`/`l_um` is not a multiple of the resolved family's manufacturing grid (read from the curated deck's `ongrid` rule; none for a family without one), naming the nearest representable values -- for `diff_pair` `splits` (and parallel `mos_array` `fingers`) the total width must be a multiple of `splits x grid` (issue #2933). `res_array` likewise warns when a poly resistor's `length_um` is off that grid (nearest lengths below/above named), and on gf180mcu when `length_um` is below the deck's minimum SAB/Pplus mask width (read from the deck rule, e.g. `sab.width.1`); advisory only, the geometry is unchanged (issue #4203). |
+| `warnings` | array\<string\> | Non-fatal generator notes (e.g. a requested dimension was snapped to the technology grid). Always present, empty when there is nothing to report. `mos_array`/`diff_pair` also warn when `w_um`/`l_um` is not a multiple of the resolved family's manufacturing grid (read from the curated deck's `ongrid` rule; none for a family without one), naming the nearest representable values -- for `diff_pair` `splits` (and parallel `mos_array` `fingers`) the total width must be a multiple of `splits x grid` (issue #2933). `res_array` snaps a poly resistor's off-grid `length_um` by default (see `drc_hints.length_snap`; `params.snap=false` restores the warning path) and likewise warns when it is drawn verbatim off that grid's `length_um` is off that grid (nearest lengths below/above named), and on gf180mcu when `length_um` is below the deck's minimum SAB/Pplus mask width (read from the deck rule, e.g. `sab.width.1`); advisory only, the geometry is unchanged (issue #4203). |
 | `provenance` | object | The shared `provenance` block (issue #2035) — see [`json-contract.md`](../json-contract.md#shared-provenance-block). A generator request involves no rule/model deck and no single input layout stream (the request is parameters, not a layout file), so `provenance.deck`/`provenance.input` are always `null`; `provenance.pdk` mirrors the top-level `pdk` field's identity. |
 
 #### `ports[]` entries

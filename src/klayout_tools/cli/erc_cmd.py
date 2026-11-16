@@ -47,13 +47,13 @@ import argparse
 
 from ..env_provenance import render_path_field
 from ..erc import (
-    DISCLOSURE_KIND_UNEXPRESSIBLE,
     ErcError,
     check_erc_report,
     rerun_erc_report,
     run_erc,
     validate_erc_spec,
 )
+from ..erc_spec import DISCLOSURE_KIND_UNEXPRESSIBLE
 from .output import emit_error, emit_success, render_check_text, render_rerun_drift
 
 #: `status` -> exit code (issue #2115, applying the common rollup rule's

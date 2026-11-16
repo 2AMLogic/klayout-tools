@@ -132,11 +132,11 @@
       ]
     },
     "klayout_tools": {
-      "version": "0.4.0",
+      "version": "0.9.0",
       "_comment": [
         "This repo's own CLI (`klt`), installed from PyPI. It brings the KLayout",
-        "Python module headless -- no GUI, no Qt, no apt package. 0.4.0 is the",
-        "latest published release as of 2026-09-09."
+        "Python module headless -- no GUI, no Qt, no apt package. 0.9.0 is the",
+        "latest published release as of 2026-11-05; it includes `klt sim --command-approvals`."
       ]
     }
   },

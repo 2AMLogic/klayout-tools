@@ -5,7 +5,8 @@ Mechanically generates a mapping of which source files own which pieces of
 functionality for verbs implemented across multiple Python modules.
 
 Uses:
-1. cli/parser.py's set_defaults(func=...) wiring to find registered verbs
+1. cli/parser.py's and cli/parsers/<verb>.py's set_defaults(func=...) wiring
+   to find registered verbs
 2. AST import graph analysis to find related modules
 3. Module docstrings to document ownership boundaries
 
@@ -31,12 +32,17 @@ def find_repo_root() -> Path:
 
 
 def extract_verbs_from_parser(parser_file: Path) -> dict[str, str]:
-    """Extract verb name -> cmd_module mapping from parser.py.
+    """Extract verb name -> cmd_module mapping from parser.py and parsers/*.py.
 
     Looks for patterns like: verb_parser.set_defaults(func=verb_cmd.run)
     Returns: {verb_name: cmd_module_name, ...}
     """
     content = parser_file.read_text(encoding="utf-8")
+    # Per-verb registration modules live in cli/parsers/<verb>.py (issue #3962).
+    parsers_dir = parser_file.parent / "parsers"
+    if parsers_dir.is_dir():
+        for extra in sorted(parsers_dir.glob("*.py")):
+            content += "\n" + extra.read_text(encoding="utf-8")
     verbs = {}
 
     for match in re.finditer(

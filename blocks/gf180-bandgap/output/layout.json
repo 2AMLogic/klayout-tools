@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-08-12T08:29:18.414261+00:00",
+  "generated_at": "2026-10-30T19:07:48.132585+00:00",
   "slug": "gf180-bandgap",
   "name": "Gf180 Bandgap",
   "description": "Bandgap reference on gf180mcu \u2014 first 2AM Logic canary block",
@@ -9,10 +9,6 @@
   "cell_count": 1,
   "instance_count": 0,
   "layout_file": "bandgap_top.gds",
-  "schematic": {
-    "path": "schematic.svg",
-    "provenance": "Source: 2AMLogic/gf180-bandgap @ 04c59f1 (design/bandgap_core.sch)."
-  },
   "renders": {
     "overview": "renders/overview.png",
     "Nwell": "renders/21_0.png",
@@ -30,11 +26,11 @@
     "Via4": "renders/41_0.png",
     "Metal3": "renders/42_0.png",
     "Metal4": "renders/46_0.png",
-    "layer_49_0": "renders/49_0.png",
-    "layer_62_0": "renders/62_0.png",
+    "SAB": "renders/49_0.png",
+    "Resistor": "renders/62_0.png",
     "FuseTop": "renders/75_0.png",
     "Metal5": "renders/81_0.png",
-    "layer_110_5": "renders/110_5.png",
+    "RES_MK": "renders/110_5.png",
     "CAP_MK": "renders/117_5.png",
     "MIM_L_MK": "renders/117_10.png",
     "DRC_BJT": "renders/127_5.png",
@@ -94,7 +90,7 @@
       },
       {
         "parameter": "Area",
-        "target": "< 0.05 mm\u00b2",
+        "target": "< 0.066 mm\u00b2 (interim ceiling, DR-0006)",
         "corner_binding": "n/a (not a PVT line)"
       },
       {
@@ -113,11 +109,11 @@
   "signals": {
     "schema_version": 1,
     "engine": "ngspice",
-    "engine_version": "46",
+    "engine_version": "47",
     "status": "fail",
-    "corner_count": 18,
+    "corner_count": 19,
     "default_corner_id": "amp-loop-stability/tt_27c_2.97v",
-    "passed": 17,
+    "passed": 18,
     "failed": 1,
     "errored": 0,
     "measurements": [
@@ -128,7 +124,7 @@
         "status": "pass",
         "worst_case": {
           "corner_id": "bjt_ff_125c_3.63v",
-          "value": 1.18142,
+          "value": 1.18859,
           "margin": null
         }
       },
@@ -139,7 +135,61 @@
         "status": "pass",
         "worst_case": {
           "corner_id": "bjt_ff_-40c_3.63v",
-          "value": 29.8447,
+          "value": 44.6557,
+          "margin": null
+        }
+      },
+      {
+        "name": "PSRR",
+        "unit": "dB",
+        "limits": null,
+        "status": "pass",
+        "worst_case": {
+          "corner_id": "res_ss_125c_3.63v",
+          "value": 77.524,
+          "margin": null
+        }
+      },
+      {
+        "name": "Line regulation",
+        "unit": "mV/V",
+        "limits": null,
+        "status": "pass",
+        "worst_case": {
+          "corner_id": "res_ss_125c_3.30v",
+          "value": 0.027133,
+          "margin": null
+        }
+      },
+      {
+        "name": "Supply / Output reference over supply",
+        "unit": "V",
+        "limits": null,
+        "status": "pass",
+        "worst_case": {
+          "corner_id": "bjt_ff_125c_3.30v",
+          "value": 1.18859,
+          "margin": null
+        }
+      },
+      {
+        "name": "Quiescent current",
+        "unit": "uA",
+        "limits": null,
+        "status": "pass",
+        "worst_case": {
+          "corner_id": "ff_125c_3.63v",
+          "value": 33.8425,
+          "margin": null
+        }
+      },
+      {
+        "name": "Startup",
+        "limits": null,
+        "status": "pass (bench's own verdict)",
+        "worst_case": {
+          "corner_id": "\u2014",
+          "value": null,
           "margin": null
         }
       }
@@ -155,28 +205,28 @@
         "measurements": [
           {
             "name": "dc_gain_db",
-            "value": 105.804,
+            "value": 106.617,
             "unit": null,
             "status": "pass",
             "margin": null
           },
           {
             "name": "min_loopgain_db",
-            "value": -24.5808,
+            "value": -20.183,
             "unit": null,
             "status": "pass",
             "margin": null
           },
           {
             "name": "min_loopgain_freq_hz",
-            "value": 359088.0,
+            "value": 166246.3,
             "unit": null,
             "status": "pass",
             "margin": null
           },
           {
             "name": "pm_deg",
-            "value": 115.516,
+            "value": 164.77,
             "unit": null,
             "status": "pass",
             "margin": null
@@ -201,7 +251,7 @@
         "measurements": [
           {
             "name": "dvref_dvos",
-            "value": 16.0912,
+            "value": 16.0913,
             "unit": null,
             "status": "pass",
             "margin": null
@@ -226,14 +276,14 @@
         "measurements": [
           {
             "name": "psrr_dc_db",
-            "value": 111.02,
+            "value": 112.747,
             "unit": null,
             "status": "pass",
             "margin": null
           },
           {
             "name": "psrr_worst_db",
-            "value": 96.4077,
+            "value": 95.0722,
             "unit": null,
             "status": "pass",
             "margin": null
@@ -297,56 +347,56 @@
         "measurements": [
           {
             "name": "dvref_dvos_m_servo",
-            "value": 8.86677,
+            "value": 8.82854,
             "unit": null,
             "status": "pass",
             "margin": null
           },
           {
             "name": "dvref_dvos_m_vref",
-            "value": -4.97595,
+            "value": -4.95454,
             "unit": null,
             "status": "pass",
             "margin": null
           },
           {
             "name": "dvref_dvos_m_ibias",
-            "value": -0.0001830735,
+            "value": -0.000110636,
             "unit": null,
             "status": "pass",
             "margin": null
           },
           {
             "name": "dvref_dvos_mc_vref",
-            "value": -0.0328259,
+            "value": -0.0316961,
             "unit": null,
             "status": "pass",
             "margin": null
           },
           {
             "name": "dvref_dvos_m_sns1",
-            "value": -3.89141,
+            "value": -3.87462,
             "unit": null,
             "status": "pass",
             "margin": null
           },
           {
             "name": "dvref_dvos_m_sum",
-            "value": -0.0007688782,
+            "value": -0.0007246981,
             "unit": null,
             "status": "pass",
             "margin": null
           },
           {
             "name": "margin_m1_mv",
-            "value": 111.228,
+            "value": 111.587,
             "unit": null,
             "status": "pass",
             "margin": null
           },
           {
             "name": "margin_mc1_mv",
-            "value": 1849.1,
+            "value": 1849.34,
             "unit": null,
             "status": "pass",
             "margin": null
@@ -389,14 +439,14 @@
         "measurements": [
           {
             "name": "iq_ua",
-            "value": 20.5381,
+            "value": 20.588,
             "unit": null,
             "status": "pass",
             "margin": null
           },
           {
             "name": "vref",
-            "value": 1.19249,
+            "value": 1.20198,
             "unit": null,
             "status": "pass",
             "margin": null
@@ -414,35 +464,35 @@
         "measurements": [
           {
             "name": "linereg_mv_per_v",
-            "value": 0.0155026,
+            "value": 0.0101664,
             "unit": null,
             "status": "pass",
             "margin": null
           },
           {
             "name": "vref_min",
-            "value": 1.19248,
+            "value": 1.20198,
             "unit": null,
             "status": "pass",
             "margin": null
           },
           {
             "name": "vref_max",
-            "value": 1.19249,
+            "value": 1.20198,
             "unit": null,
             "status": "pass",
             "margin": null
           },
           {
             "name": "vref_lo",
-            "value": 1.19249,
+            "value": 1.20198,
             "unit": null,
             "status": "pass",
             "margin": null
           },
           {
             "name": "vref_hi",
-            "value": 1.19248,
+            "value": 1.20198,
             "unit": null,
             "status": "pass",
             "margin": null
@@ -465,6 +515,73 @@
         "diagnostics": []
       },
       {
+        "corner_id": "output-noise/tt_27c_2.97v",
+        "process": null,
+        "supply_v": {},
+        "temperature_c": 27,
+        "status": "pass",
+        "runtime_s": 0,
+        "measurements": [
+          {
+            "name": "onoise_int_0p1_10hz_uvrms",
+            "value": 5198.55,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "onoise_1khz_nv_rthz",
+            "value": 967109.4,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "onoise_10khz_nv_rthz",
+            "value": 927518.2,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "onoise_100khz_nv_rthz",
+            "value": 870805.7,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vref_op",
+            "value": 1.23361,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "f_band_lo_hz",
+            "value": 0.1,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "f_band_hi_hz",
+            "value": 10.0,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "f_spot_1khz_hz",
+            "value": 1000.0,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
         "corner_id": "output-voltage-tc/tt_27c_2.97v",
         "process": null,
         "supply_v": {},
@@ -473,50 +590,43 @@
         "runtime_s": 0,
         "measurements": [
           {
-            "name": "vref",
-            "value": 1.19249,
-            "unit": null,
-            "status": "pass",
-            "margin": null
-          },
-          {
-            "name": "tc_ppm",
-            "value": 13.6852,
-            "unit": null,
-            "status": "pass",
-            "margin": null
-          },
-          {
-            "name": "vref_box_max",
-            "value": 1.19249,
-            "unit": null,
-            "status": "pass",
-            "margin": null
-          },
-          {
-            "name": "vref_box_min",
-            "value": 1.1898,
-            "unit": null,
-            "status": "pass",
-            "margin": null
-          },
-          {
-            "name": "vref_m40",
-            "value": 1.19043,
+            "name": "vref_40",
+            "value": 1.20203,
             "unit": null,
             "status": "pass",
             "margin": null
           },
           {
             "name": "vref_27",
-            "value": 1.19249,
+            "value": 1.20198,
             "unit": null,
             "status": "pass",
             "margin": null
           },
           {
             "name": "vref_125",
-            "value": 1.1898,
+            "value": 1.19728,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vref_box_min",
+            "value": 1.19728,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vref_box_max",
+            "value": 1.20242,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "tc_ppm",
+            "value": 25.917,
             "unit": null,
             "status": "pass",
             "margin": null
@@ -534,56 +644,56 @@
         "measurements": [
           {
             "name": "psrr_1hz_db",
-            "value": 111.755,
+            "value": 113.414,
             "unit": null,
             "status": "pass",
             "margin": null
           },
           {
             "name": "psrr_1khz_db",
-            "value": 96.8106,
+            "value": 96.2625,
             "unit": null,
             "status": "pass",
             "margin": null
           },
           {
             "name": "psrr_10hz_db",
-            "value": 111.734,
+            "value": 113.384,
             "unit": null,
             "status": "pass",
             "margin": null
           },
           {
             "name": "psrr_100hz_db",
-            "value": 110.607,
+            "value": 111.639,
             "unit": null,
             "status": "pass",
             "margin": null
           },
           {
             "name": "psrr_10khz_db",
-            "value": 76.4018,
+            "value": 74.4647,
             "unit": null,
             "status": "pass",
             "margin": null
           },
           {
             "name": "psrr_100khz_db",
-            "value": 47.4505,
+            "value": 38.5925,
             "unit": null,
             "status": "pass",
             "margin": null
           },
           {
             "name": "psrr_1mhz_db",
-            "value": 31.7659,
+            "value": 31.421,
             "unit": null,
             "status": "pass",
             "margin": null
           },
           {
             "name": "vref_op",
-            "value": 1.19249,
+            "value": 1.20198,
             "unit": null,
             "status": "pass",
             "margin": null
@@ -640,35 +750,35 @@
         "measurements": [
           {
             "name": "startup_time_s",
-            "value": 1.348096e-05,
+            "value": 1.41413e-05,
             "unit": null,
             "status": "pass",
             "margin": null
           },
           {
             "name": "vref_final_v",
-            "value": 1.19249,
+            "value": 1.20198,
             "unit": null,
             "status": "pass",
             "margin": null
           },
           {
             "name": "iq_total_final_ua",
-            "value": 20.9679,
+            "value": 21.1237,
             "unit": null,
             "status": "pass",
             "margin": null
           },
           {
             "name": "iq_startup_branch_final_ua",
-            "value": 1.45833,
+            "value": 1.45836,
             "unit": null,
             "status": "pass",
             "margin": null
           },
           {
             "name": "det_final_v",
-            "value": 0.0149346,
+            "value": 0.0148785,
             "unit": null,
             "status": "pass",
             "margin": null
@@ -682,7 +792,14 @@
           },
           {
             "name": "t_settle_s",
-            "value": 1.448096e-05,
+            "value": 1.51413e-05,
+            "unit": null,
+            "status": "pass",
+            "margin": null
+          },
+          {
+            "name": "vdd_final_v",
+            "value": 2.97,
             "unit": null,
             "status": "pass",
             "margin": null
@@ -984,7 +1101,7 @@
   },
   "source": {
     "repo": "2AMLogic/gf180-bandgap",
-    "ref": "40321ca88211a461bf3c55caa7bb4280c21431eb",
+    "ref": "557e0a6f82fe3556d68cf722f0d6da40fe76e462",
     "path": "layout/bandgap_top/bandgap_top.gds"
   },
   "downloadable": true,

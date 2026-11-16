@@ -46,8 +46,8 @@ an agent needs instead:
 
 ## Status
 
-Early alpha — [v0.5.0 is on PyPI](https://pypi.org/project/klayout-tools/)
-(44 verbs at release; see [`docs/cli/`](docs/cli/) for the set). The
+Early alpha — [v0.9.2 is on PyPI](https://pypi.org/project/klayout-tools/);
+`main` has 68 verbs (see [`docs/cli/`](docs/cli/) for the set). The
 pattern is proven (see the kicad-tools [gallery](https://kicad-tools.org) of
 boards designed end-to-end by agents); this repo is where it meets silicon.
 See [ROADMAP.md](ROADMAP.md) for the build order and [CLAUDE.md](CLAUDE.md)
@@ -78,18 +78,21 @@ uv tool install git+https://github.com/2AMLogic/klayout-tools
 > **`klt yield` (and its `yield-campaign`/`yield-sensitivity` siblings) need
 > the `yield` extra.** Both install commands above ship the pure-Python
 > package only — `klt yield`'s statistics run in a Rust extension
-> (`klt_yield_native`). **Today the supported route is a full repo checkout
-> plus a Rust toolchain**; see
+> (`klt_yield_native`). **Install with the extra**:
+> `pip install 'klayout-tools[yield]'` or
+> `uvx --from "klayout-tools[yield]" klt yield ...`. Platforms without a
+> prebuilt wheel need a repo checkout plus a Rust toolchain; see
 > [`docs/cli/yield.md#building-the-native-extension`](docs/cli/yield.md#building-the-native-extension).
 > `klt mom` and `klt synthesize --restructure-timing` have the same
 > from-source gap for their own Rust extensions; every other verb works
 > from the commands above alone.
 >
-> A prebuilt `klt-yield-native` wheel (Linux x86_64, macOS arm64) is planned
-> but **not yet on PyPI**, so `pip install 'klayout-tools[yield]'` does not
-> resolve for any release to date (0.6.0 and 0.7.0 included). It will only
-> resolve for klayout-tools releases published after the wheel is (issue
-> #2900, [`docs/releasing-native.md`](docs/releasing-native.md)).
+> As of 2026-11-06 the prebuilt `klt-yield-native` 0.1.0 wheel (Linux
+> x86_64, macOS arm64) is on PyPI, so `[yield]` resolves for klayout-tools
+> 0.9.1 and later. Linux aarch64, Windows and Intel macOS have no wheel and
+> build from source. Without the `[yield]` extra, `klt yield` fails with
+> "the klt_yield_native extension is not installed"
+> ([`docs/releasing-native.md`](docs/releasing-native.md)).
 
 ### Container image (`klt` + the analog sim toolchain)
 
@@ -110,10 +113,12 @@ for the version pins and the full contract.
 klt layers design.gds                    # enumerate layers, JSON out
 klt cells design.gds --top               # cell hierarchy
 klt drc design.gds --deck sky130        # run a DRC deck, structured results
+klt diff a.gds b.gds                     # same layout? order-insensitive compare for regenerate-and-compare gates (byte hashes drift across klt upgrades)
 klt precheck design.gds --grid-um 0.005  # off-grid/zero-area/naming hygiene checks
 klt ring-check design.gds --layers '[[22,0],[34,0]]'  # guard/tap ring is a closed annulus
 klt seam-check row.gds --tiling TILE --layer 68/20 --band 0,0,30,2  # abutting cells tile and the rail is continuous across seams
 klt keepout-check design.gds --forbidden '[[67,20]]' --margin 10 --cells SPIRAL  # nothing on the forbidden layers within a margin of a cell
+klt fill design.gds --pdk sky130 --layers '[[68,20]]' --boundary prBoundary --spacing 0.5 -o filled.gds  # density fill on the PDK fill layers (not a sign-off density check)
 klt array-check column.gds --cell BIT --pitch 2.72 --count 8  # unit-cell placements abut at the pitch; add --mirror-axis x --at 10 --layers '[[68,20]]' for layer-wise symmetry
 klt tap-distance design.gds --subject '65/20' --taps '65/44' --max-distance-um 15  # every diffusion point within a Euclidean distance of a tap
 klt components design.gds --conductors '[{"name":"m1","layer":[68,20]}]'  # connected components, no deck
@@ -171,9 +176,9 @@ klt version --format json                # which build is this: version, commit,
 ```
 
 Every verb is documented in [`docs/cli/`](docs/cli/) (`klt yield-campaign`
-shares the `yield.md` / `yield-sensitivity.md` pages). PyPI 0.5.0 shipped
-with 44 verbs; the from-source install above tracks `main`, which may be
-ahead of the latest release.
+shares the `yield.md` / `yield-sensitivity.md` pages). The latest release is
+PyPI 0.9.2; `main` has 68 verbs, and the from-source install above tracks
+`main`, so it may be ahead of the release.
 
 ## Development
 

@@ -41,6 +41,7 @@ from typing import Any
 
 from . import sim_raw, sim_transfer
 from .sim_errors import SimError
+from .sim_forms import validate_exclusive_form
 
 #: The six first-crossing metric tokens, exactly
 #: :mod:`klayout_tools.sim_transfer`'s names. Unchanged by issue #3088.
@@ -131,21 +132,12 @@ def validate_form_exclusive(spec: dict[str, Any]) -> bool:
     """For an entry declaring ``transfer``: refuse any other form beside it
     and validate the body. Returns ``True`` when the entry is a transfer
     entry (so the caller has nothing more to validate)."""
-    if not is_transfer(spec):
-        return False
-    name = spec.get("name")
-    if name is None:
-        raise SimError("each request.measurements[] entry requires 'name'")
-    others = [form for form in _FORMS if spec.get(form) is not None]
-    if others:
-        raise SimError(
-            f"measurement '{name}' declares 'transfer' together with "
-            f"'{others[0]}': they are alternative forms of a measurement -- "
-            "declare exactly one (use a separate measurements[] entry for "
-            "the other)"
-        )
-    validate_transfer_spec(name, spec["transfer"])
-    return True
+    return validate_exclusive_form(
+        spec,
+        "transfer",
+        _FORMS,
+        lambda name, spec: validate_transfer_spec(name, spec["transfer"]),
+    )
 
 
 def validate_transfer_spec(name: Any, body: Any) -> None:

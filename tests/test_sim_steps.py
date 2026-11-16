@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 
 from helpers.subprocess_fakes import fake_completed
-from klayout_tools import sim, sim_remote, sim_steps
+from klayout_tools import sim, sim_measurement_results, sim_remote, sim_steps
 
 pytestmark = pytest.mark.usefixtures(
     "real_build_identity_git", "bare_name_ngspice_resolution"
@@ -132,7 +132,7 @@ def test_scalar_analysis_resolves_to_the_requests_own_objects():
 
 def test_scalar_analysis_still_requires_kind_and_args():
     with pytest.raises(sim.SimError, match="requires 'kind' and 'args'"):
-        sim._resolve_analysis_and_measurements({"analysis": {"kind": "op"}})
+        sim._resolve_analysis_and_measurements({"analysis": {"kind": "dc"}})
 
 
 def test_scalar_run_report_gains_no_step_fields(tmp_path, monkeypatch):
@@ -311,7 +311,7 @@ _INVALID = [
     ),
     (
         "missing analysis args",
-        lambda r: r["analysis_steps"][0].update(analysis={"kind": "op"}),
+        lambda r: r["analysis_steps"][0].update(analysis={"kind": "dc"}),
         "requires 'kind' and 'args'",
     ),
     (
@@ -915,7 +915,7 @@ def test_step_outcomes_from_markers():
 
 def _grade(request: dict, log_text: str, *, save_mode: str = "all"):
     analysis, specs = _resolve(request)
-    return sim._corner_measurement_results(
+    return sim_measurement_results._corner_measurement_results(
         sim._parse_measurements(log_text),
         specs,
         analysis=analysis,
@@ -1685,3 +1685,34 @@ def test_real_ngspice_intermediate_feeds_later_exprs_unreported(tmp_path):
     assert values["sweep.top"] == pytest.approx(2.0)
     assert values["twice"] == pytest.approx(4 / 3)
     assert not any("slope" in d["message"] for d in corner["diagnostics"])
+
+
+_TRAN = '(kind "tran")'
+
+
+@pytest.mark.parametrize(
+    "key,value,tail",
+    [
+        ("crossings", {}, f"{_TRAN} for a threshold-crossing series"),
+        ("energy", {}, f"{_TRAN} for a source-energy measurement"),
+        ("stress", {}, f"{_TRAN} for a windowed node-pair voltage stress"),
+        ("search", {}, "for a bisection/threshold-search measurement"),
+        ("optional", True, "for a measurement that may legitimately be absent"),
+        ("cycle_mean", {}, f"{_TRAN} for a cycle-aligned mean"),
+        ("eye", {}, f"{_TRAN} for an eye measurement"),
+        ("noise", {}, '(kind "noise") for a noise-spectrum measurement'),
+    ],
+)
+def test_refuse_unsupported_message_is_stable(key, value, tail):
+    # The per-key text is part of the JSON error contract.
+    with pytest.raises(sim.SimError) as exc:
+        sim_steps._refuse_unsupported({"name": "m", key: value})
+    assert str(exc.value) == (
+        f"measurement 'm': '{key}' is not supported with analysis_steps -- "
+        f"use the scalar analysis {tail}"
+    )
+
+
+def test_refuse_unsupported_ignores_optional_false_and_absent_keys():
+    sim_steps._refuse_unsupported({"name": "m", "optional": False})
+    sim_steps._refuse_unsupported({"name": "m", "expr": "v(out)"})

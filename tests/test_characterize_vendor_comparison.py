@@ -107,8 +107,8 @@ def _inverter_lib(
     return (
         "/* synthetic */\n"
         "library (synthetic) {\n"
-        '  time_unit : "1ns";\n'
-        "  capacitive_load_unit (1, pf);\n"
+        '  time_unit : "1ns"; voltage_unit : "1V";\n'
+        '  capacitive_load_unit (1, pf); leakage_power_unit : "1pW";\n'
         "  cell (inv) {\n"
         "    area : 1;\n"
         + leak
@@ -240,8 +240,7 @@ def test_a_subset_of_the_reference_grid_is_read_directly(tmp_path):
 
     def timing_only(rows, i1, i2):
         return (
-            "library (synthetic) {\n"
-            "  cell (inv) {\n"
+            _inverter_lib().split("  cell (inv)")[0] + "  cell (inv) {\n"
             '    pin (A) { direction : "input"; }\n'
             '    pin (Y) {\n      direction : "output";\n      function : "!A";\n'
             '      timing () {\n        related_pin : "A";\n'

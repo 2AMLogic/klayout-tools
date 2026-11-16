@@ -59,6 +59,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from . import sim_raw, touchstone
+from ._jsonnum import is_finite_number, is_int, is_number
 from .sim_errors import SimError
 
 KIND = "twoport"
@@ -113,9 +114,9 @@ def is_twoport(analysis: dict[str, Any]) -> bool:
 
 
 def _number(value: Any, where: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if not is_number(value):
         raise SimError(f"{where} must be a number (got {value!r})")
-    if not math.isfinite(value):
+    if not is_finite_number(value):
         raise SimError(f"{where} must be finite (got {value!r})")
     return float(value)
 
@@ -169,7 +170,7 @@ def _resolve_freq(freq: Any) -> dict[str, Any]:
             f"analysis.freq.sweep must be one of {list(SWEEPS)} (got {sweep!r})"
         )
     points = freq.get("points")
-    if isinstance(points, bool) or not isinstance(points, int) or points < 1:
+    if not is_int(points) or points < 1:
         raise SimError(
             f"analysis.freq.points must be a positive integer (got {points!r})"
         )

@@ -36,7 +36,10 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from . import env_provenance
+from ._jsonnum import is_int, is_number
 from ._layout import bbox_um_dict, load_layout, select_top_cells
+from ._provenance import build_provenance
 
 #: Stable rule ids carried by the violations this module emits.
 RULE_SYMMETRY = "array.symmetry_residual"
@@ -55,7 +58,7 @@ class ArrayCheckError(Exception):
 
 
 def _finite(value: Any, flag: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if not is_number(value):
         raise ArrayCheckError(f"{flag} must be a number, got {value!r}")
     if not math.isfinite(value):
         raise ArrayCheckError(f"{flag} must be finite, got {value!r}")
@@ -95,7 +98,7 @@ def _validate_abutment(
         raise ArrayCheckError("abutment needs both --pitch and --count")
     if _finite(pitch_um, "--pitch") <= 0:
         raise ArrayCheckError(f"--pitch must be > 0 um, got {pitch_um}")
-    if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+    if not is_int(count) or count < 1:
         raise ArrayCheckError(f"--count must be an integer >= 1, got {count!r}")
     if direction not in ("x", "y"):
         raise ArrayCheckError(f"--direction must be 'x' or 'y', got {direction!r}")
@@ -205,8 +208,14 @@ def run_array_check(
         )
     )
     return {
-        "schema_version": 1,
-        "file": layout_path,
+        # schema_version 2 (issue #5788): `file` was re-shaped from the raw
+        # input string to the committable `{path, scope}` envelope. The bump
+        # is attributable to that re-shape alone -- the additive `provenance`
+        # block below requires no bump (docs/json-contract.md).
+        "schema_version": 2,
+        "file": env_provenance.repo_relative_path(
+            layout_path, repo_root=env_provenance.repo_root_for(layout_path)
+        ),
         "layers": [list(p) for p in layers] if layers else None,
         "cell": cell,
         "mirror_axis": mirror_axis,
@@ -220,6 +229,7 @@ def run_array_check(
         "status": "violated" if violations else "clean",
         "violation_count": len(violations),
         "violations": violations,
+        "provenance": build_provenance(input_path=layout_path),
     }
 
 
