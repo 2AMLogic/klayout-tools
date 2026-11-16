@@ -977,11 +977,11 @@
     },
     {
       "path": "tests/test_pdk.py",
-      "lines": 3303
+      "lines": 3160
     },
     {
       "path": "tests/test_pdk_cells.py",
-      "lines": 1183
+      "lines": 1041
     },
     {
       "path": "tests/test_pdk_pcell_diagnostics.py",
