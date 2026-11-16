@@ -2399,6 +2399,7 @@ family/variant split the resolver doesn't have. The response's
   "pdk": { "name": "sky130A", "variant": "sky130A", "version": "open_pdks 0fe599b" },
   "dbu_um": 0.001,
   "bbox_um": { "x0": 0.0, "y0": 0.0, "x1": 9.68, "y1": 0.42 },
+  "subcell_naming_scheme": "core-suffix-v1",
   "device_count": 4,
   "ports": [
     {
@@ -2481,6 +2482,13 @@ family/variant split the resolver doesn't have. The response's
 | `well_box_um` | object \| null | `well_island` only: `{x0, y0, x1, y1}` of the well rectangle actually drawn, at the resolved (possibly trimmed) enclosure. `null` on a PDK family with no well layer. |
 | `well_separation_um` | number \| null | `well_island` only: the well-to-well clearance actually enforced against `params.isolate_from` — the resolved family's own different-potential rule unless `params.separation_um` raised it. |
 | `well_keepout_box_um` | object \| null | `well_island` only: `well_box_um` grown by `well_separation_um` on every side — the region no *other* well may enter. |
+
+`subcell_naming_scheme` (issue #5808) is a stable id of how the written
+stream names its sub-cells: `"core-suffix-v1"` (`<cell_name>__core`),
+`"pdk-cell-v1"` (sg13g2 `bjt_array`: the PDK cell's own name) or `null`
+(flattened output, no sub-cell). It changes whenever the naming changes, so a
+caller committing GDS can compare it across klt versions instead of diffing
+bytes.
 
 ### Semantics and guarantees
 

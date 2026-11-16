@@ -3948,6 +3948,9 @@ def generate(request: dict[str, Any]) -> dict[str, Any]:
         },
         "dbu_um": dbu,
         "bbox_um": bbox_um,
+        # Issue #5808: stable id of the sub-cell naming scheme this stream
+        # used, so callers committing GDS can detect naming drift.
+        "subcell_naming_scheme": _subcell_naming_scheme(spec, pdk_info),
         "device_count": described["device_count"],
         "ports": described["ports"],
         "navigable_regions": described.get("navigable_regions", []),
@@ -4038,6 +4041,24 @@ def _coerce_param(generator: str, name: str, value: Any, ptype: int) -> Any:
         f"generator '{generator}': params.{name} has an unsupported PCell "
         "parameter type"
     )
+
+
+# Issue #5808: the id of the sub-cell naming scheme `_produce` applies. It MUST
+# change whenever the naming below changes (e.g. the `__core` rename, #4251),
+# and CHANGELOG.md must record the change.
+SUBCELL_SCHEME_CORE_SUFFIX = "core-suffix-v1"  # sub-cell is `<cell_name>__core`
+SUBCELL_SCHEME_PDK_CELL = "pdk-cell-v1"  # sub-cell keeps the PDK cell's own name
+
+
+def _subcell_naming_scheme(
+    spec: _GeneratorSpec, pdk_info: dict[str, Any]
+) -> str | None:
+    """Scheme id for ``spec``'s sub-cell naming, ``None`` if no sub-cell remains."""
+    if spec.name == "bjt_array" and _pdk_family(pdk_info["variant"]) == "sg13g2":
+        return SUBCELL_SCHEME_PDK_CELL
+    if spec.flatten_output:
+        return None
+    return SUBCELL_SCHEME_CORE_SUFFIX
 
 
 def _produce(

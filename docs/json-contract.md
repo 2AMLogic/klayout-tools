@@ -887,6 +887,9 @@ there is no rule/model deck and no single input layout stream to pin — so
 Unlike `klt wave`, both do resolve a PDK, and unconditionally (a generator
 cannot draw geometry without one), so `provenance.pdk` is always populated
 and mirrors the identity the report's own top-level `pdk` field carries.
+`klt gen` also reports an additive top-level `subcell_naming_scheme` (issue
+#5808): a string id of its sub-cell naming (`null` when none remains) — see
+`docs/cli/gen.md`.
 `klt_version` and `klayout_version` are what these two verbs gained the
 block for: a consumer that commits generated geometry plus its report as
 evidence and re-runs the generator later can otherwise not tell a real
