@@ -12641,9 +12641,10 @@ def test_compose_cell_block_non_zero_origin_geometry_is_bbox_anchored(
 
     # The load-bearing assertion: what was actually drawn, read back through
     # the instance transforms, agrees with that reported metadata.
-    assert _composed_li1_boxes_um(output, "offset_origin_0") == pytest.approx(
-        [(0.0, 0.0, 2.0, 1.2), (3.0, 0.0, 5.0, 1.2)]
-    )
+    assert _composed_li1_boxes_um(output, "offset_origin_0") == [
+        pytest.approx((0.0, 0.0, 2.0, 1.2)),
+        pytest.approx((3.0, 0.0, 5.0, 1.2)),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -12707,9 +12708,9 @@ def test_compose_cell_block_non_zero_origin_oriented_geometry_is_bbox_anchored(
             "y1": expected_box_um[3],
         }
     )
-    assert _composed_li1_boxes_um(output, cell_name) == pytest.approx(
-        sorted([(0.0, 0.0, 2.0, 1.2), expected_box_um])
-    )
+    assert _composed_li1_boxes_um(output, cell_name) == [
+        pytest.approx(box) for box in sorted([(0.0, 0.0, 2.0, 1.2), expected_box_um])
+    ]
 
 
 def test_compose_cell_block_non_zero_origin_explicit_origin_translates_verbatim(
@@ -12743,9 +12744,9 @@ def test_compose_cell_block_non_zero_origin_explicit_origin_translates_verbatim(
     assert report["blocks"][0]["bbox_um"] == pytest.approx(
         {"x0": 4.84, "y0": 2.0, "x1": 6.84, "y1": 3.2}
     )
-    assert _composed_li1_boxes_um(output, "offset_origin_explicit_0") == pytest.approx(
-        [(4.84, 2.0, 6.84, 3.2)]
-    )
+    assert _composed_li1_boxes_um(output, "offset_origin_explicit_0") == [
+        pytest.approx((4.84, 2.0, 6.84, 3.2))
+    ]
 
 
 def test_compose_cell_block_non_zero_origin_explicit_bbox_target_lands_geometry_at_target(  # noqa: E501
@@ -12787,9 +12788,9 @@ def test_compose_cell_block_non_zero_origin_explicit_bbox_target_lands_geometry_
     )
     # The load-bearing assertion (AC2): the *drawn* geometry lands with its
     # bbox corner exactly at the requested target, unrotated.
-    assert _composed_li1_boxes_um(
-        output, "offset_origin_target_bbox_0"
-    ) == pytest.approx([(5.0, 2.0, 7.0, 3.2)])
+    assert _composed_li1_boxes_um(output, "offset_origin_target_bbox_0") == [
+        pytest.approx((5.0, 2.0, 7.0, 3.2))
+    ]
 
 
 @pytest.mark.parametrize(
@@ -12834,9 +12835,9 @@ def test_compose_cell_block_non_zero_origin_explicit_bbox_target_oriented_geomet
     io = next(block for block in report["blocks"] if block["id"] == "io")
     assert io["orientation"] == orientation
     assert io["bbox_um"] == pytest.approx({"x0": 5.0, "y0": 2.0, "x1": 7.0, "y1": 3.2})
-    assert _composed_li1_boxes_um(output, cell_name) == pytest.approx(
-        [(5.0, 2.0, 7.0, 3.2)]
-    )
+    assert _composed_li1_boxes_um(output, cell_name) == [
+        pytest.approx((5.0, 2.0, 7.0, 3.2))
+    ]
 
 
 def test_compose_cell_block_relative_gds_path_resolves_against_request_dir(
