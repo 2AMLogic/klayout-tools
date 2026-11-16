@@ -1833,8 +1833,7 @@ def run_attempt(
     error: str | None = None
     try:
         descriptor_arg, candidate_arg = provider(task, attempt_index, repo_root)
-    # -- see docstring: any provider failure is a scored attempt failure, never a crash
-    except Exception as exc:
+    except Exception as exc:  # see docstring: provider failure is scored, never a crash
         error = f"candidate provider failed: {exc}"
     else:
         cached = None
