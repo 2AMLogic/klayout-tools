@@ -184,7 +184,7 @@ def _validate_record(record: dict[str, Any], source: str, lineno: int) -> None:
     if gate_results is not None:
         if not isinstance(gate_results, list):
             fail("'gate_results', when present, must be a list")
-        for entry in gate_results:  # type: ignore[union-attr]
+        for entry in gate_results:
             if (
                 not isinstance(entry, dict)
                 or "check" not in entry

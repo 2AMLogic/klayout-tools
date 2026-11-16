@@ -25,17 +25,6 @@ from .pex_asap7 import DEVICE_MODEL_CARD_PREFIXES
 _SUBCKT_RE = re.compile(r"^\s*\.subckt\s+(?P<body>\S.*?)\s*$", re.IGNORECASE)
 
 
-def _read_text(path: str) -> str | None:
-    """``path``'s text, or ``None`` if it cannot be read -- every caller here
-    is building a *diagnostic*, so an unreadable file degrades the diagnostic
-    rather than raising over it."""
-    try:
-        with open(path, encoding="utf-8", errors="replace") as handle:
-            return handle.read()
-    except OSError:
-        return None
-
-
 def _logical_lines(netlist_text: str) -> list[str]:
     """``netlist_text``'s lines with SPICE ``+`` continuation lines folded
     into the line they continue, and inline ``$``/``;`` comments stripped --
