@@ -14,6 +14,16 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added** (#5644, 2026-11-16): `klt sim --op-lint` now reports an additive
+  top-level `unexpanded_instance_count` — the number of `X` instances whose
+  `.subckt` was found in neither the netlist body nor its `.include` closure
+  and which are not recognised MOS models (typically PDK passive primitives
+  defined only in `models.lib`, which the hierarchy walk does not read), so
+  lint coverage is measurable without parsing `diagnostics[]`. When a
+  `models.lib` was resolved, each such instance's `unsupported_hierarchy`
+  warning now says its definition may live in the model library instead of
+  implying the netlist alone was searched; without a model library the
+  wording is unchanged.
 - **`klt mcp serve` serves the `docs/schemas/` JSON contract as MCP
   resources** (#5420, 2026-11-13): the server now advertises the resources
   capability and lists one resource per `docs/schemas/*.schema.json` at

@@ -114,7 +114,7 @@ from collections.abc import Callable
 from typing import Any
 
 from . import _spice_number as spice_number
-from . import env_provenance, sim_osdi_pin
+from . import env_provenance, op_sanity_diagnostics, sim_osdi_pin
 from ._jsonnum import is_number
 from ._paths import (
     _load_request_json,
@@ -1616,19 +1616,14 @@ def run_op_sanity(
             }
         )
 
-    for name in parsed.unexpanded:
-        diagnostics.append(
-            {
-                "severity": "warning",
-                "code": "unsupported_hierarchy",
-                "message": (
-                    f"could not expand subcircuit instance {name}: its "
-                    "definition was not found in the netlist or its "
-                    "`.include`d files and it is not a recognised MOS model, "
-                    "so any devices inside it were not linted."
-                ),
-            }
+    # Issue #5644: the construction (and its model-library-aware wording)
+    # lives in `op_sanity_diagnostics` -- a pure move that keeps this file
+    # under its `file-size-baseline.json` ceiling.
+    diagnostics.extend(
+        op_sanity_diagnostics.unexpanded_instance_diagnostics(
+            parsed.unexpanded, models_lib
         )
+    )
 
     if parsed.expansion_truncated:
         diagnostics.append(
@@ -1710,6 +1705,7 @@ def run_op_sanity(
         },
         "corner_margins": corner_margins,
         "device_count": len(parsed.devices),
+        "unexpanded_instance_count": len(parsed.unexpanded),
         "finding_count": len(findings),
         "error_count": error_count,
         "warning_count": warning_count,

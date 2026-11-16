@@ -8782,9 +8782,16 @@ klt sim <request.json> --op-lint [--op-lint-corner <corner_id>|all] [--format te
 line instantiates it: its MOS devices are reported with hierarchical names
 (`Xdut.M1`), probed at ngspice's `@m.xdut.m1[...]` path, and checked like
 top-level devices. A definition nothing instantiates contributes nothing; `.lib`
-sections and `params:` value propagation are not followed. An `X` instance that
-is neither a recognised MOS model nor a resolvable subcircuit gets a
-`unsupported_hierarchy` warning in `diagnostics[]` naming it, and a netlist
+sections and `params:` value propagation are not followed — and neither is the
+model library: the hierarchy walk does not read `models.lib`'s own include
+closure, which is where an open PDK ships its non-MOS device primitives (a
+resistor as a `.subckt` wrapper, say), so an instance of one cannot be
+expanded. An `X` instance that is neither a recognised MOS model nor a
+resolvable subcircuit gets a `unsupported_hierarchy` warning in
+`diagnostics[]` naming it — when a `models.lib` was resolved, saying the
+definition may live in the model library rather than implying the netlist
+alone was searched — and is counted in `unexpanded_instance_count`, so a
+resistively biased design cannot read as silently "clean". A netlist
 with no enumerated device and such an instance reports `status: "findings"`,
 never `clean`. Expansion is bounded: nesting depth 16, 64 `.include`d files,
 and 20 000 expanded subcircuit instances in total. A hierarchy that would
@@ -8847,6 +8854,7 @@ cannot classify as n- or p-channel.
   "netlist": { "path": "examples/design-pipeline/ota_5t.spice", "scope": "repo" },
   "corner": { "corner_id": "ss/1.620V/125C", "process": "ss", "supply_v": { "vdd": 1.62 }, "temperature_c": 125 },
   "device_count": 6,
+  "unexpanded_instance_count": 0,
   "finding_count": 1,
   "error_count": 0,
   "warning_count": 1,
@@ -8887,6 +8895,7 @@ cannot classify as n- or p-channel.
 | --- | --- |
 | `status` | `"clean"` (no findings), `"findings"` (at least one, of any severity), or `"error"` (the operating point itself produced no trustworthy result). |
 | `finding_count` / `error_count` / `warning_count` | Totals. `error_count` is what the exit code and the `klt eval` gate key off; `finding_count` is the headline number. |
+| `unexpanded_instance_count` | `X` instances the hierarchy walk could not expand — their `.subckt` was in neither the netlist body nor its `.include` closure, and they are not recognised MOS models. Typically PDK passive primitives defined only in `models.lib`, which the walk does not read (see "Hierarchy" above); `0` on a fully expanded netlist. Describes the netlist, not a corner. |
 | `devices[]` | Every MOS instance found at the netlist body's top level, in netlist order, with its four terminal nodes, model-reported values (`null` for any the model does not expose), the resolved `op_point_element`, and its `region` (`off`/`subthreshold`/`triode`/`saturation`/`unknown`). |
 | `findings[]` | One entry per finding, in device-then-node order. `device`/`kind`/`nodes`/`values` are `null` on a node-level finding and `node` is `null` on a device-level one — every key is always present. |
 | `node_voltages` | Every probed node's DC voltage, for the agent's own reasoning. |
