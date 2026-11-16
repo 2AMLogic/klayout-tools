@@ -1013,6 +1013,11 @@
       "reason": "CLI adapter uses the shared output envelope and --layers parser, as every verb does."
     },
     {
+      "consumer": "array_check",
+      "exporter": "env_provenance",
+      "reason": "`klt array-check` echoes its layout input as env_provenance's committable {path, scope} envelope (issue #5788)."
+    },
+    {
       "consumer": "fill",
       "exporter": "cli-infra",
       "reason": "CLI adapter uses the shared output envelope and --layers/--region parsers, as every verb does."
