@@ -8,6 +8,22 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-16
 
+- **PR #5906**: refactor: consolidate four duplicate _read_text helpers into _text.read_text
+- **PR #5940**: fix: always report dead_metal_summary total area as a float
+- **PR #5832**: fix(synthesize): make netlist_sha256 build-root independent by stripping repo-relative source dirs
+- **PR #5952**: fix: ignore --wait-for-capacity under klt pex --attach
+- **PR #5929**: ci: run via-tip differential oracle in asap7-drc-deck job
+- **PR #5931**: build(deps-dev): Bump the npm-minor-patch group across 1 directory with 2 updates
+- **PR #5576**: fix(layout-plan): bind a MOS group's body terminal to its own tap/ring port
+- **PR #5722**: feat(sim): report the runner's OSDI digest on batch provenance
+- **Issue #5623** (closed): Remove four dead private symbols orphaned by later refactors
+- **Issue #5755** (closed): Consolidate four duplicate _read_text helpers into _text.py (one silently lacks errors=replace)
+- **Issue #5790** (closed): klt extract: dead_metal_summary.area_um2 serializes as int 0 on the zero case, docs example shows 0.0
+- **Issue #5594** (closed): synthesize: netlist_sha256 depends on the build root when sv_frontend is sv2v, because frontend-derived wire names embed the intermediate's path
+- **Issue #5683** (closed): klt pex --attach refuses --wait-for-capacity, but its help says to re-run the same command
+- **Issue #5762** (closed): CI: the ASAP7 tip-check differential oracle never runs (gated on a klayout binary no job provides it)
+- **Issue #5546** (closed): layout-plan execute: a device group's body terminal cannot be bound to a net, so mos_array's own tap pads stay floating and the result silently fails LVS
+- **Issue #5562** (closed): klt sim: runner-resolved osdi_preload entries carry no digest, so an off-host report cannot say which OSDI bytes were loaded
 - **PR #5921**: fix(sim): replace stale --hosts local-only help with per-backend sharding summary
 - **PR #5589**: fix: settle engine_version and pdk_version pins against the executing backend
 - **PR #5943**: fix: align guard_ring contacts_per_side_ns description with well_island
