@@ -582,13 +582,12 @@ and [#2124](https://github.com/2AMLogic/klayout-tools/issues/2124).
 
 Verbs whose verdict depends on the exact tool build, PDK release, and rule
 deck — currently `drc`, `lvs`, `extract`, `sim`, `size`, `precheck`, `erc`,
-`power`, `gen`, and `gen-compose` — emit a shared top-level `provenance`
-block so a
-"clean"/"pass"/"match" result is auditable and reproducible later. Two runs
-made against different deck revisions or PDK releases are otherwise
-indistinguishable in the output, so a signoff claim can't be checked or
-reproduced. This block is **additive** (see above): adopting it required no
-`schema_version` bump on any verb.
+`power`, `gen`, `gen-compose`, and `array-check` — emit a shared top-level
+`provenance` block so a "clean"/"pass"/"match" result is auditable and
+reproducible later. Two runs made against different deck revisions or PDK
+releases are otherwise indistinguishable in the output, so a signoff claim
+can't be checked or reproduced. This block is **additive** (see above):
+adopting it required no `schema_version` bump on any verb.
 
 **Build drift in `klt signoff` (issue #4223).** `klt signoff` compares each
 cited check's `provenance.klt_version` with the running build and reports an
@@ -1464,6 +1463,7 @@ which reads the input field only (`signoff.py`'s `_INPUT_ARTIFACT_FIELDS`).
 | `sta` | `def_path`, `verilog_path`, `spef_path` (`null` when the request does not use that input) | 2 | #2879 (moved from the plain-string table; schema-1 evidence carries absolute strings) |
 | `sta` | `sdf` / `corners[].sdf` — a written output: the envelope plus `content_hash` (`null` unless `request.sdf: true`; additive, no bump) | 2 | #2886 |
 | `functional-verification` | `environment.{results_xml,test_log,build_log}`, `environment.initial_state.runs[].results_xml`, `mutation_testing.results[].log_path` (`{path: null, scope: "absent"}` when there is none, e.g. `results_xml` on the Verilog-bench path; `--format text` still prints the real paths). The `environment.{results_xml,test_log,build_log}` and `initial_state.runs[].results_xml` envelopes also carry an additive `sha256` (`sha256:<hex>` of the file as written, `null` when it was not produced, #4931) | 2 | #4279 (moved from the plain-string table; schema-1 evidence carries absolute strings) |
+| `array-check` | `file` (the hashed input layout) | 2 | #5788 |
 
 **Plain-string fields** — intentionally unchanged:
 

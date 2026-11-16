@@ -326,6 +326,7 @@
         "klayout_tools.gen_pcells.esd_device",
         "klayout_tools.gen_pcells.guard_ring",
         "klayout_tools.gen_pcells.pdk_cell",
+        "klayout_tools.gen_pcells._common_params",
         "klayout_tools.gen_pcells._mos_array_shapes",
         "klayout_tools.gen_pcells.mos_array",
         "klayout_tools.gen_pcells.res_array",
@@ -708,6 +709,9 @@
         "klayout_tools.signoff_details",
         "klayout_tools.signoff_envelopes",
         "klayout_tools.signoff_evidence_pin",
+        "klayout_tools.signoff_fleet",
+        "klayout_tools.signoff_fleet_check",
+        "klayout_tools.signoff_fleet_reduction",
         "klayout_tools.signoff_foundry_cell",
         "klayout_tools.signoff_generator_batch",
         "klayout_tools.signoff_multi_member",
@@ -1007,6 +1011,11 @@
       "consumer": "array_check",
       "exporter": "cli-infra",
       "reason": "CLI adapter uses the shared output envelope and --layers parser, as every verb does."
+    },
+    {
+      "consumer": "array_check",
+      "exporter": "env_provenance",
+      "reason": "`klt array-check` echoes its layout input as env_provenance's committable {path, scope} envelope (issue #5788)."
     },
     {
       "consumer": "fill",

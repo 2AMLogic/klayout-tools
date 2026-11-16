@@ -14,6 +14,20 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Changed** (#5788, breaking — `klt array-check` `schema_version` 1 ->
+  **2**): the record's `file` field is now the committable
+  `{path, scope}` object `env_provenance.repo_relative_path()` builds
+  (`{"path": "<repo-relative POSIX path>", "scope": "repo"}` inside the
+  invoking repo, `{"path": null, "scope": "external"}` outside), not the raw
+  input string — so a committed verdict no longer embeds the producing
+  host's absolute path. The bump is attributable to that re-shape alone:
+  the same change also adds the shared `provenance` block
+  (`klt_version`, `klayout_version`, `pdk`/`deck` always `null` here,
+  `input.content_hash` pinning the checked layout), which is additive per
+  `docs/json-contract.md` and carries no bump of its own. `--format text`
+  still prints a path (`<outside repo>` for an external input), never the
+  envelope object.
+
 - **`klt lvs` retroactive records: the `device.property` count-granularity
   change of issue #4729, and six `mismatches[].category` values that shipped
   unlisted** (#4729, 2026-11-16): this file's header designates it the source
