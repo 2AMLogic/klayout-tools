@@ -32,6 +32,7 @@ from ._report_verify import (
     strip_path_patterns,
 )
 from .signoff_generator_batch import GeneratorExecution
+from .signoff_unmet_reasons import DERIVED_REPORT_PATHS
 
 #: The tier/fleet-report paths ``--check`` excludes from its drift diff
 #: (issue #2249): the ``build`` block, and only it.
@@ -207,8 +208,11 @@ def _check_signoff_report(
     applies to the comparison, never to what the response shows.
     """
     # Run identity is dropped from both diffs (and so is never doc drift).
-    committed_graded = strip_path_patterns(committed, RUN_IDENTITY_REPORT_PATHS)
-    fresh_graded = strip_path_patterns(fresh, RUN_IDENTITY_REPORT_PATHS)
+    # Also dropped: fields derived from `items[]` (issue #5903), which stay
+    # compared through the items themselves.
+    ignored = RUN_IDENTITY_REPORT_PATHS | DERIVED_REPORT_PATHS
+    committed_graded = strip_path_patterns(committed, ignored)
+    fresh_graded = strip_path_patterns(fresh, ignored)
     result = build_rerun_result(
         report_path=report_path,
         committed=committed,

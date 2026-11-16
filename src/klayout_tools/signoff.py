@@ -211,6 +211,7 @@ from .signoff_sta_constraints import (
     sta_annotation_refusal,
     sta_constraint_refusal,
 )
+from .signoff_unmet_reasons import unmet_reason_counts
 
 __all__ = [
     "SignoffError",
@@ -4566,15 +4567,14 @@ def build_tier_report(
         # t1_item_count`. `None` when the shipped doc is unreadable.
         "build_t1_item_count": _build_t1_row_count(build_item_ids, len(partitions)),
         "t1_met_count": met_count,
-        # Issue #2865: items satisfied by a recorded "not applicable", never
-        # folded into `t1_met_count`. Omitted when zero so a report with none
-        # is byte-identical to what this build rendered before the field
-        # existed (absent means 0).
+        # Issue #2865: recorded "not applicable" items, never in `t1_met_count`;
+        # omitted when zero (absent means 0).
         **(
             {"t1_not_applicable_count": not_applicable_count}
             if not_applicable_count
             else {}
         ),
+        **unmet_reason_counts(items),  # issue #5903; absent when nothing is unmet
         "source_doc": doc_source_label(tiers_doc),
         "source_doc_content_hash": doc["content_hash"],
         "build": _build_identity(),
