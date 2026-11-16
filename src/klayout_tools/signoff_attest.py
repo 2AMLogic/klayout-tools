@@ -81,7 +81,7 @@ from .signoff import (
     _generic_item_binding_refusal,
     _reject_json_constant,
 )
-from .signoff_attest_drift import SKIPPED_CHECK_KEYS, drift_result
+from .signoff_attest_drift import drift_result
 from .signoff_attest_input import input_binding
 
 #: The attestation-inventory schema versions this build reads. An inventory

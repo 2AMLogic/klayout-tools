@@ -38,10 +38,9 @@ from ._report_verify import VOLATILE_PROVENANCE_PATHS, build_rerun_result
 VOLATILE_ATTESTATION_PATHS = VOLATILE_PROVENANCE_PATHS
 
 #: The keys a ``skipped_checks[]`` entry reports for a carried command check.
-#: Re-exported through :mod:`.signoff_attest` for
-#: :mod:`.signoff_attest_carry`; a carried command check may now disclose the
-#: item-9 ``documented_argv`` fields (issue #5463), so they survive the
-#: skip-list filter too.
+#: A carried command check may disclose the item-9 ``documented_argv`` fields
+#: (issue #5463), so they survive the skip-list filter too;
+#: :mod:`.signoff_attest_carry` imports the tuple from here.
 SKIPPED_CHECK_KEYS = (
     "role",
     "name",
