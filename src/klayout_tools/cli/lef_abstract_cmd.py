@@ -18,7 +18,9 @@ Exit codes (see ``docs/cli/lef-abstract.md`` for the full table):
         ``--require-power-pins`` (issue #2839), the supply-pin verdict
         failed (``power_pins.status == "fail"``)
 (2 is reserved for argparse usage errors, as with every other ``klt``
-subcommand. A pin resolving to synthesized geometry, or to no PORT at all
+subcommand -- including neither/both of ``<file>`` and ``--no-layout``, and
+``--no-layout`` with ``--top``/``--obs-mode``/``--require-power-pins``,
+issue #5714. A pin resolving to synthesized geometry, or to no PORT at all
 (``unroutable_pins``), is reported in ``warnings`` and is not a structural
 failure.)
 """
@@ -35,7 +37,26 @@ from .output import emit_error, emit_success
 EXIT_SELF_CHECK_FAILED = 3
 
 
+def _check_layout_args(args: argparse.Namespace) -> None:
+    """Usage errors (argparse exit 2) for the layout / ``--no-layout`` split
+    (issue #5714)."""
+    parser = args._lef_abstract_parser
+    if args.file is None and not args.no_layout:
+        parser.error("a layout file or --no-layout is required")
+    if args.file is not None and args.no_layout:
+        parser.error("<file> and --no-layout are mutually exclusive")
+    if args.no_layout:
+        for flag, given in (
+            ("--top", args.top is not None),
+            ("--obs-mode", args.obs_mode is not None),
+            ("--require-power-pins", args.require_power_pins),
+        ):
+            if given:
+                parser.error(f"{flag} cannot be combined with --no-layout")
+
+
 def run(args: argparse.Namespace) -> int:
+    _check_layout_args(args)
     output_path = args.output or _default_output_path(args.macro_name)
     try:
         report = run_lef_abstract(
@@ -49,7 +70,7 @@ def run(args: argparse.Namespace) -> int:
             symmetry=args.symmetry.split() if args.symmetry else None,
             pdk_variant=args.pdk,
             pdk_root=args.pdk_root,
-            obs_mode=args.obs_mode,
+            obs_mode=args.obs_mode or "detailed",
         )
     except LefAbstractError as exc:
         return emit_error("lef-abstract", str(exc), args.format)

@@ -2320,7 +2320,27 @@ def _add_lef_abstract_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     lef_abstract_parser.add_argument(
-        "file", help="path to a GDSII or OASIS layout file"
+        "file",
+        nargs="?",
+        default=None,
+        help=(
+            "path to a GDSII or OASIS layout file; omit it and pass "
+            "--no-layout to emit a layout-free black-box abstract from the "
+            "socket descriptor alone"
+        ),
+    )
+    lef_abstract_parser.add_argument(
+        "--no-layout",
+        dest="no_layout",
+        action="store_true",
+        help=(
+            "emit the abstract from the socket descriptor alone (issue "
+            "#5714): footprint = the descriptor outline, every pin "
+            "synthesized, OBS = the whole outline on each routing layer "
+            "minus the pin ports. Exactly one of <file> / --no-layout is "
+            "required; incompatible with --top, --obs-mode and "
+            "--require-power-pins."
+        ),
     )
     lef_abstract_parser.add_argument(
         "--socket",
@@ -2379,7 +2399,7 @@ def _add_lef_abstract_parser(subparsers: argparse._SubParsersAction) -> None:
         "--obs-mode",
         dest="obs_mode",
         choices=["detailed", "coarse"],
-        default="detailed",
+        default=None,
         help=(
             "obstruction granularity (issue #4283): 'detailed' (default) "
             "emits every merged routing-layer region; 'coarse' emits one "
@@ -2398,7 +2418,9 @@ def _add_lef_abstract_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     _add_format_arg(lef_abstract_parser)
-    lef_abstract_parser.set_defaults(func=lef_abstract_cmd.run)
+    lef_abstract_parser.set_defaults(
+        func=lef_abstract_cmd.run, _lef_abstract_parser=lef_abstract_parser
+    )
 
 
 def _add_render_parser(subparsers: argparse._SubParsersAction) -> None:

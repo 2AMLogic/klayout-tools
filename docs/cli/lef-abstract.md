@@ -8,7 +8,7 @@ Capability A of [Epic #393](https://github.com/2AMLogic/klayout-tools/issues/393
 ("mixed-signal as a first-class path"), issue #438.
 
 ```
-klt lef-abstract <file> --socket <descriptor.json> --macro-name <name>
+klt lef-abstract (<file> | --no-layout) --socket <descriptor.json> --macro-name <name>
                   --cell-library <library> [--top <cell>] [--class <CLASS>]
                   [--symmetry "<axes>"] [--pdk <variant>] [--pdk-root <root>]
                   [-o/--output <path.lef>] [--obs-mode {detailed,coarse}]
@@ -18,6 +18,9 @@ klt lef-abstract <file> --socket <descriptor.json> --macro-name <name>
 
 - `<file>` — path to a GDSII (`.gds`) or OASIS (`.oas`) file. KLayout
   auto-detects the stream format on read.
+- `--no-layout` — emit a layout-free black-box abstract from the socket
+  descriptor alone (issue #5714); see "Layout-free mode" below. Exactly one
+  of `<file>` / `--no-layout` is required.
 - `--socket` — required. Path to a socket descriptor JSON file (see
   [`docs/schemas/socket.schema.json`](../schemas/socket.schema.json), the
   same descriptor `klt socket-check` validates a layout against). Not
@@ -325,8 +328,8 @@ envelope for the GDS side) to check that every declared supply has a LEF
 | Code | Meaning |
 | --- | --- |
 | `0` | The LEF abstract was written and `self_check.status` is `"pass"`. |
-| `1` | Failed to run — bad layout/socket descriptor, an ambiguous/missing top cell, an unresolvable PDK/tech-LEF/layer-map for `--cell-library`, an unwritable output path, or the written file could not be read back for its self-check. Error envelope on stderr; no report. |
-| `2` | Usage error (missing argument, bad `--format` value) — from argparse. |
+| `1` | Failed to run — bad layout/socket descriptor, a tech LEF with no `DATABASE MICRONS` under `--no-layout`, an ambiguous/missing top cell, an unresolvable PDK/tech-LEF/layer-map for `--cell-library`, an unwritable output path, or the written file could not be read back for its self-check. Error envelope on stderr; no report. |
+| `2` | Usage error (missing argument, bad `--format` value, neither/both of `<file>` and `--no-layout`, or `--no-layout` with `--top`/`--obs-mode`/`--require-power-pins`) — from argparse. |
 | `3` | The LEF abstract was written and the full report emitted, but `self_check.status` is `"fail"` (issue #2769). Do not consume the file. Also returned, with `--require-power-pins` only, when `power_pins.status` is `"fail"` (issue #2839). |
 
 A pin resolving to synthesized (rather than drawn) geometry, or to no
@@ -337,6 +340,32 @@ Per [`docs/json-contract.md`](../json-contract.md#exit-codes)'s additive
 contract, a future release may still add a code above `2`; a consumer
 should gate on the payload's own fields rather than assume the codes above
 are exhaustive forever.
+
+## Layout-free mode (`--no-layout`, issue #5714)
+
+For a block that has no layout and will not get one (a compiled memory, a
+third-party hard macro, a deliberately scoped-out sub-block), the socket
+descriptor alone is a sufficient declaration — no second schema:
+
+- **Footprint** — the descriptor `outline`, as always.
+- **Pins** — every pin is `geometry_source: "synthesized"` (sized from the
+  pin's `width_um`/`height_um`, else the tech-LEF routing layer `WIDTH`); a
+  pin whose layer does not resolve to a routing LEF layer is still
+  `"none"` and listed in `unroutable_pins`. `pins: []` gives a footprint-only
+  black box.
+- **OBS** — one rectangle per routing LEF layer covering the whole outline,
+  minus the declared pin ports (the `coarse` shape with the outline as the
+  region): the interior is out of scope and the pins are the only way in.
+- **Database unit** — taken from the tech LEF's `DATABASE MICRONS`.
+- **Report** — `file` is `{"path": null, "scope": "absent"}`;
+  `provenance.input` pins the socket descriptor with role `source`.
+  `schema_version` is unchanged.
+- **`power_pins`** is still reported but can only fail (`port_not_drawn`
+  for every supply pin), so `--require-power-pins` is rejected as a usage
+  error. `--top` and `--obs-mode` are rejected too (nothing to select or
+  vary).
+
+SITE/row/track quantisation of the footprint is not performed in either mode.
 
 ## Round-tripping through `klt place-and-route`
 
