@@ -17,8 +17,8 @@
  *   node scripts/gen-gds-layer-styles.mjs                 # auto-discovers installed PDKs
  *   node scripts/gen-gds-layer-styles.mjs --sky130 <path> --gf180mcu <path>
  *
- * Source PDKs are Apache-2.0 licensed open PDKs (sky130 via volare, gf180mcu
- * via volare/ciel) — only layer numbers, display colors, and layer names are
+ * Source PDKs are Apache-2.0 licensed open PDKs (installed via ciel, preferred,
+ * or volare) — only layer numbers, display colors, and layer names are
  * extracted, all of which are public PDK metadata.
  */
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
@@ -35,16 +35,17 @@ const FAMILIES = [
     family: "sky130",
     flag: "--sky130",
     // ~/.ciel/ciel/sky130/versions/<hash>/sky130A/libs.tech/klayout/tech/sky130A.lyp
-    discover: () => discoverVolare("sky130", "sky130A", "sky130A.lyp"),
+    discover: () => discoverLyp("sky130", "sky130A", "sky130A.lyp"),
   },
   {
     family: "gf180mcu",
     flag: "--gf180mcu",
-    discover: () => discoverVolare("gf180mcu", "gf180mcuD", "gf180mcu.lyp"),
+    discover: () => discoverLyp("gf180mcu", "gf180mcuD", "gf180mcu.lyp"),
   },
 ];
 
-function discoverVolare(pdk, variant, lypName) {
+/** Finds the PDK's `.lyp` under a ciel (`~/.ciel/ciel`, preferred) or volare (`~/.volare/volare`) install. */
+function discoverLyp(pdk, variant, lypName) {
   for (const root of [join(homedir(), ".ciel", "ciel"), join(homedir(), ".volare", "volare")]) {
     const versionsDir = join(root, pdk, "versions");
     if (!existsSync(versionsDir)) continue;
