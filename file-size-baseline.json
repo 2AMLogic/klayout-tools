@@ -13,7 +13,7 @@
     },
     {
       "path": "examples/em/block_coupling/generate.py",
-      "lines": 1148
+      "lines": 1137
     },
     {
       "path": "examples/em/block_coupling/geode_driver/src/main.rs",
@@ -21,15 +21,7 @@
     },
     {
       "path": "examples/em/interconnect_coupling/generate.py",
-      "lines": 542
-    },
-    {
-      "path": "examples/em/patch_antenna/generate.py",
-      "lines": 580
-    },
-    {
-      "path": "examples/em/spiral_inductor/generate.py",
-      "lines": 571
+      "lines": 529
     },
     {
       "path": "examples/kb/pfd-charge-pump-tri-state/design-centering-validation/run_validation.py",
