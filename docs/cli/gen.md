@@ -1411,9 +1411,15 @@ contract, and § "Via-drop routing (metal2/via, #454)" for how a single hop is
 drawn and sized.
 
 A minimal sky130A request landing `C0_TOP` (met4) on an li1-level
-transistor terminal — `caps.json` is `klt gen cap_array --pdk sky130A
---params '{"num":1,"plate_w_um":7.07,"plate_h_um":7.07}'`, `mos.json` a
-default `klt gen mos_array`:
+transistor terminal. Both reports are `klt gen`'s **JSON** response, written
+next to the request file (a relative `generator_report` path resolves against
+the request's own directory):
+
+```sh
+klt gen cap_array --pdk sky130A -o caps.gds --format json \
+  --params '{"num":1,"plate_w_um":7.07,"plate_h_um":7.07}' > caps.json
+klt gen mos_array --pdk sky130A -o mos.gds --format json > mos.json
+```
 
 ```json
 {
@@ -1469,7 +1475,7 @@ non-sky130 composition as unproven until it is.
 `C<i>_BOT` faces `180` (due west, off the bottom plate's left edge) and
 `C<i>_TOP` faces `90` (due north, off the escape pad), so the neighbour has
 to sit on the faced side with a channel wide enough for the backbone's
-midpoint jog — hence `"explicit"` placement at a 10µm gap above, rather than
+midpoint jog — hence `"explicit"` placement at a 10µm gap, rather than
 a tight `"row"`. Crowding the capacitor instead gets the net rejected for
 routing *topology* (approaching a pin from behind, threading the neighbour's
 own drawn metal), which is a placement problem and not a layer-stack one; see
