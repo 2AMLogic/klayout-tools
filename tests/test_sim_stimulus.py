@@ -159,6 +159,14 @@ def test_negative_time_is_refused():
     )
 
 
+def test_number_too_large_for_a_float_is_refused_not_a_traceback():
+    # A 400-digit int literal parses to an int too large for a float
+    # (issue #5891): refused as an error envelope, not an OverflowError.
+    request = _stim(events=[{"t_s": 10**400, "level": 1}])
+    with pytest.raises(sim_stimulus.StimulusError, match="t_s must be finite"):
+        _resolve(request)
+
+
 def test_skew_pushing_an_edge_negative_is_refused():
     assert _code(_stim(skew_s=-2e-9)) == sim_stimulus.CODE_BAD_TIME
 

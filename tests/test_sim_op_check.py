@@ -49,6 +49,9 @@ def _analysis(**op_check) -> dict:
         (_analysis(nodes=["a"], band=0), "band"),
         (_analysis(nodes=["a"], band=0.9), "band"),
         (_analysis(nodes=["a"], band=float("nan")), "finite"),
+        # A 400-digit int literal parses to an int too large for a float
+        # (issue #5891): refused as an error envelope, not an OverflowError.
+        (_analysis(nodes=["a"], band=10**400), "must be finite"),
         (_analysis(nodes=["a"], band=True), "number"),
         (_analysis(nodes=["a"], rail="vdd", supply=1.0), "mutually exclusive"),
         (_analysis(nodes=["a"], supply=-1), "positive"),
