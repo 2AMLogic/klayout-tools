@@ -466,11 +466,20 @@ application error naming the instance and cell, never a silent skip.
   unconnected net.
 - `options.flatten_reference` defaults to **true** on this route (the
   FinFET layout is extracted flat); it is echoed and can be set `false`.
-- **`power_connectivity` is `unchecked`** with a reason saying so: the
-  stub-form pin-to-net audit does not apply because the expanded cells carry
-  their own power pins, so supply connectivity takes part in the ordinary
-  compare and a `match` is the evidence. There is no separate FinFET
-  evaluator.
+- **`power_connectivity` starts `unchecked`, and is graded after the
+  compare** (issue #5757): the stub-form pin-to-net audit does not apply
+  because the expanded cells carry their own power pins, so supply
+  connectivity takes part in the ordinary compare. When that compare
+  matched and every declared supply net (`options.supply_nets`, defaults
+  included) pairs in the report's `net_correspondence`, the verdict is
+  **derived**: `power_connectivity.status` is `"match"` with a `reason`
+  naming the expanded-cell derivation and the paired supplies. It stays
+  `unchecked` — with the original reason — when the compare mismatched,
+  the run opted out via `options.power_connectivity: false`, or a declared
+  supply never paired (a reference whose expanded rails float on internal
+  nets proves nothing about the top-level grid). The derived block keeps
+  the block's usual key set; `klt signoff` item 11 grades it exactly as a
+  stub-form `"match"`.
 - **Tap-less blocks.** ASAP7 cells draw no taps, so the CDL bulk (`VSS` /
   `VDD`) has no counterpart in the layout and the compare mismatches on the
   bulk nets. Grade such a block with `options.finfet_bulk` (see below); the
@@ -1868,7 +1877,7 @@ would silently exempt them.
 | Field | Type | Description |
 | ----- | ---- | ----------- |
 | `status` | `"match"` \| `"mismatch"` \| `"unchecked"` | The power/ground verdict, **independent of the report's top-level `status`** (which stays exactly `NetlistComparer.compare()`'s own signal-connectivity result). `"match"` when the check ran and found nothing; `"mismatch"` when it produced findings; `"unchecked"` when it did not run — never a clean verdict on absent evidence. |
-| `reason` | string \| `null` | Why the check did not run, for `status: "unchecked"`; `null` otherwise. One of: a `reference.form` other than `"gate-level-verilog"` (that form's reference carries its own power pins and nets, which the ordinary compare already checks; when the layout instantiates pin-only black-box cells (issue #2853), the reason also names them and says their pins, power/ground included, were compared by name as ordinary subcircuit-pin connectivity); `options.power_connectivity: false`; no power-pin universe derivable from the reference library's pin-order data; or a layout netlist whose instances declare none of those pins (e.g. an `--abstract-cell-lef` that never declared PG pins). |
+| `reason` | string \| `null` | Why the check did not run, for `status: "unchecked"`; the derivation note on the FinFET `gate-level-verilog` route's derived `"match"` (issue #5757 — the expanded-cell compare matched and every declared supply net paired in `net_correspondence`); `null` otherwise. The `unchecked` reasons, one of: a `reference.form` other than `"gate-level-verilog"` (that form's reference carries its own power pins and nets, which the ordinary compare already checks; when the layout instantiates pin-only black-box cells (issue #2853), the reason also names them and says their pins, power/ground included, were compared by name as ordinary subcircuit-pin connectivity); `options.power_connectivity: false`; a `gate-level-verilog` reference on a FinFET deck whose compare did not match, which ran with `options.power_connectivity: false`, or whose declared supply nets did not pair in `net_correspondence` (issue #5757 — the route grades a matched, supply-paired compare as a derived `"match"` and leaves this stub reason only when one of those inputs does not hold); no power-pin universe derivable from the reference library's pin-order data; or a layout netlist whose instances declare none of those pins (e.g. an `--abstract-cell-lef` that never declared PG pins). |
 | `power_pins` | array\<string\> | The power/ground pin names actually found on layout-side instances, upper-cased and sorted — what was checked, not what the library declares. `[]` when `status` is `"unchecked"`. |
 | `power_pins_derivation` | object \| `null` | Issue #2076. Where `power_pins` came from: `rule` (a stable identifier for the derivation — `"declared-by-every-instantiated-master"` for a single-library reference, or — issue #2707 — `"declared-by-every-instantiated-master-per-library"` when the masters span several pin-order libraries; a future rule would be a new value, never a silent change of meaning for an existing one), `masters` (the library cells the reference instantiates, upper-cased and sorted — the evidence the rule was applied to), `master_count`, `corroborated` (`true` only when the instantiated masters include at least two genuinely distinct declared-pin shapes — not merely more than one master *name*; two drive-strength variants of one logical cell declare the same shape and corroborate nothing), and `reason` (`null` when corroborated; otherwise what the evidence could not establish, including a same-shape-only multi-master case). Populated — never `null` — whenever `reference.form` is `"gate-level-verilog"` and `power_connectivity` was not disabled, even when the reference instantiates no cell of the resolved library at all (`masters: []`, `reason` naming that). `null` only when the check never attempted a derivation: a non-gate-level `reference.form`, or the `power_connectivity: false` opt-out. Under the per-library rule the object additionally carries `libraries` (additive; absent under the original rule): one `{library, masters, master_count, corroborated, power_pins}` record per library, `library` being `null` for cells from `reference.pin_order_files`. **Read `corroborated` before quoting `power_pins` as a coverage claim**: a `false` means this design gave the derivation nothing to cross-check against (see "How the power-pin universe is derived" above). |
 | `instance_count` | integer | How many distinct layout-side instances carried at least one of those pins. `0` when `status` is `"unchecked"`. |
