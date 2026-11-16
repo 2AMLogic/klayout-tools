@@ -28,6 +28,7 @@ from .lvs_combine import (
     _parse_combine_devices_per_circuit,
 )
 from .lvs_finfet import prepare_finfet_request
+from .lvs_layout_short_nets import parse_layout_short_nets
 from .lvs_mismatch import _parse_parameter_tolerance
 from .lvs_mos_options import parse_ignore_mos_bulk
 from .lvs_power import _parse_power_connectivity
@@ -73,6 +74,7 @@ class _LvsRunOptions:
     compare_timeout_s: Any
     flatten_layout: Any
     netgen_setup_echo: Any
+    layout_short_nets: Any
 
 
 def _parse_flatten_reference(
@@ -244,6 +246,13 @@ def _parse_lvs_run_options(
     # exactly as it was given. `null` for every `"klayout"`-engine run (and
     # for a netgen run that let netgen use its own trivial default setup).
     netgen_setup_echo = options.get("netgen_setup")
+    # Issue #5632: `hints.layout_short_nets` -- the layout-side dual of
+    # `hints.short_nets`, applied by `_resolve_layout_stage` before flatten
+    # and combine. Parsed unconditionally here (the same discipline
+    # `ignore_mos_bulk` above follows) so a malformed value is a clean
+    # request error for every engine, with the netgen rejection inside the
+    # parser.
+    layout_short_nets = parse_layout_short_nets(request.get("hints") or {}, engine)
     return _LvsRunOptions(
         deck_options=deck_options,
         label_layers=label_layers,
@@ -275,4 +284,5 @@ def _parse_lvs_run_options(
         compare_timeout_s=compare_timeout_s,
         flatten_layout=flatten_layout,
         netgen_setup_echo=netgen_setup_echo,
+        layout_short_nets=layout_short_nets,
     )

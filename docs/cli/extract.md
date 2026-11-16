@@ -1010,6 +1010,21 @@ the deck does not read — reaches the `.SUBCKT`. A merged pin on a
 point (issue #4571: a routed signal over the LEF box centre cannot capture
 it), and the warning above is not emitted for that cell. No new flag or JSON field.
 
+**Isolated substrate global (issue #5632).** That unprobed binding has one
+blind spot the extractor itself can see and now reports: nothing in the
+emitted netlist ties the substrate global to a rail. The well/substrate tap
+cell is itself abstracted, and its PDK LEF declares only `VGND`/`VPWR` — no
+body pins — so `vsubs` reaches the abstracted instances' substrate pins and
+nothing else: an isolated node. When that is the case, `warnings[]` gains
+one aggregated entry naming the net, how many instances across how many
+cell types reached it, and the two fixes: assert the tie in the downstream
+compare with `hints.layout_short_nets` (`{"nets": [["vsubs", "VGND"]]}`,
+see `docs/cli/lvs.md`) — disclosed there as a warning, never silently
+assumed — or draw and label a substrate tie in the cells. The warning does
+**not** fire when the substrate global carries real connectivity (a
+non-abstracted device body, a drawn tap) or when no substrate-role pin was
+merged at all, and it never changes the run's status or exit code.
+
 Dropping the port only loses *that terminal's* connectivity on *that*
 instance. It must not perturb anything else, and since issue #1911 it does
 not — see "Abstraction never changes net identity outside the black box"

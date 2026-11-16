@@ -131,3 +131,88 @@ def test_routed_conductor_over_lef_substrate_box_does_not_capture_the_pin(tmp_pa
     assert len(x_lines) == 2
     for x_line in x_lines:
         assert x_line.split()[1 + idx] == "vsubs", x_line
+
+
+def _add_tapless_nmos_in_top(layout):
+    """Draw one plain NMOS directly in ``TOP`` (the `_make_inverter_layout`
+    shape: active strip crossed by a poly bar, contacted up to li1), far
+    from the abstracted-cell instances. Its body has no drawn tap, so
+    extraction synthesizes the deck's substrate global for it -- a *device
+    terminal* on that net (issue #5632's negative case)."""
+    import klayout.db as kdb
+
+    top = layout.cell("TOP")
+    dx = 20000  # nm -- clear of the abstracted instances at 0 and 5000
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box.moved(kdb.Vector(dx, 0)))
+
+    def label(layer, datatype, text, x, y):
+        top.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x + dx, y))
+        )
+
+    draw(65, 20, kdb.Box(0, 0, 2000, 1000))  # diff.drawing
+    draw(66, 20, kdb.Box(800, -200, 1200, 1200))  # poly.drawing (gate bar)
+    draw(66, 44, kdb.Box(100, 300, 300, 700))  # licon1 (source side)
+    draw(67, 20, kdb.Box(0, 200, 400, 800))  # li1 (source side)
+    label(67, 5, "GNDB", 200, 500)
+    label(67, 5, "GA", 1000, 500)
+
+
+def test_isolated_substrate_global_warns(tmp_path):
+    """Issue #5632: when the LEF-merged substrate pin's net carries no other
+    connection, `warnings[]` names the net, the instance/cell counts and the
+    two fixes -- without changing the run's outcome."""
+    report, spice = _extract(tmp_path, "isolated", _LEF_WITH_VNB)
+    (warning,) = [
+        w
+        for w in report["warnings"]
+        if "substrate-role pin" in w and "isolated node" in w
+    ]
+    assert "'vsubs'" in warning
+    assert "2 instances" in warning
+    assert "1 cell type: SC_BUF" in warning
+    assert "hints.layout_short_nets" in warning
+    # Status and exit are unchanged: a normal extracted report with the
+    # substrate pin still tied to vsubs (the pin-merge assertions above).
+    assert ".SUBCKT SC_BUF" in spice
+    x_lines = [x for x in spice.splitlines() if x.startswith("X")]
+    assert all("vsubs" in x_line for x_line in x_lines)
+
+
+def test_isolated_substrate_global_warning_not_fired_with_device_on_net(tmp_path):
+    """A non-abstracted NMOS body also landing on the substrate global means
+    the net carries real connectivity -- no warning."""
+    layout = _make_abstract_cells_layout()
+    _add_tapless_nmos_in_top(layout)
+    path = _write_gds(layout, tmp_path / "with_nmos.gds")
+    lef_path = tmp_path / "with_nmos.lef"
+    lef_path.write_text(_LEF_WITH_VNB)
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "with_nmos.spice"),
+        abstract_cell_patterns=("SC_BUF",),
+        abstract_cell_lef_paths=(str(lef_path),),
+    )
+    spice = Path(report["netlist_path"]).read_text()
+    # The drawn NMOS is really there, its bulk on vsubs.
+    assert "vsubs nfet" in spice
+    assert not [
+        w
+        for w in report["warnings"]
+        if "substrate-role pin" in w and "isolated node" in w
+    ]
+
+
+def test_isolated_substrate_global_warning_not_fired_without_lef(tmp_path):
+    """No LEF means no substrate pin merged at all (the pre-#3749 drop, with
+    its own warning) -- the isolated-node warning must stay silent."""
+    report, spice = _extract(tmp_path, "no_lef_isolated")
+    assert "VNB" not in spice
+    assert not [
+        w
+        for w in report["warnings"]
+        if "substrate-role pin" in w and "isolated node" in w
+    ]
