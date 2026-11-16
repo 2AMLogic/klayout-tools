@@ -1,9 +1,15 @@
-"""Every ``mismatches[].category`` value ``klt lvs`` can emit is in ``CHANGELOG.md``.
+"""Every ``CATEGORY_*`` value in ``lvs.py`` is recorded in ``CHANGELOG.md``.
 
 ``CHANGELOG.md``'s own header and ``docs/json-contract.md``'s pre-1.0 caveat
 designate it the source of truth for which categories exist as of a given
 date. This guard makes that promise mechanical: a new ``CATEGORY_*`` constant
 in ``src/klayout_tools/lvs.py`` cannot ship without a ``CHANGELOG.md`` mention.
+
+Scope is that one file, per issue #5864's acceptance criteria -- it is **not**
+yet the full "every ``mismatches[].category`` value ``klt lvs`` can emit"
+invariant. Four such values are defined in sibling modules
+(``lvs_runset.py``, ``lvs_mos_options.py``, ``lvs_gate_level_convert.py``) and
+are not checked here; issue #5927 tracks widening this guard to cover them.
 
 Matching is plain substring containment, so a category string that appears in
 ``CHANGELOG.md`` only inside a fenced code block (e.g. an example report)
