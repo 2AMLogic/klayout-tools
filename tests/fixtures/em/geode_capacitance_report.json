@@ -1,0 +1,7 @@
+{
+  "terminals": ["sig", "gnd"],
+  "capacitance_matrix_f": [
+    [2.0e-14, -1.5e-14],
+    [-1.5e-14, 3.0e-14]
+  ]
+}

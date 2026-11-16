@@ -31,6 +31,7 @@ from . import (
     diff_cmd,
     draw_cmd,
     drc_cmd,
+    em_cmd,
     env_provenance_cmd,
     equiv_cmd,
     erc_cmd,
@@ -340,6 +341,8 @@ def create_parser() -> argparse.ArgumentParser:
     _add_kb_parser(subparsers)
 
     _add_mom_parser(subparsers)
+
+    _add_em_parser(subparsers)
 
     _add_power_parser(subparsers)
 
@@ -752,6 +755,24 @@ def _add_mom_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(mom_parser)
     mom_parser.set_defaults(func=mom_cmd.run)
+
+
+def _add_em_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``em`` verb (issue #5616, Epic #708 brief 1.A): wraps
+    the ``geode`` binary for quasi-static capacitance. See docs/cli/em.md."""
+    em_parser = subparsers.add_parser(
+        "em",
+        help="field-solver wrapper (geode-fem quasi-static capacitance)",
+        description=(
+            "Run a field-solver request: engine geode_fem, solve_mode "
+            "quasi_static, outputs [c], on a caller-supplied mesh. Needs the "
+            "geode binary (options.geode_binary, $KLT_GEODE_BINARY, or PATH). "
+            "See docs/cli/em.md."
+        ),
+    )
+    em_parser.add_argument("request", help="path to the klt em request JSON")
+    _add_format_arg(em_parser)
+    em_parser.set_defaults(func=em_cmd.run)
 
 
 def _add_power_parser(subparsers: argparse._SubParsersAction) -> None:
