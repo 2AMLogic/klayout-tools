@@ -1317,6 +1317,17 @@ command instead of N invocations that each back off alone:
 klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
 ```
 
+- **Member directories.** Each member writes into its own directory under
+  `-o`, named after its request file's stem: a trailing `.request.json` is
+  stripped (the usual request naming convention, so `foo.request.json` ->
+  `out/foo/`), otherwise only the last filename suffix is stripped
+  (`foo.sim.json` -> `out/foo.sim/`). Without `-o` the directories live under the
+  single-request default (`.klt/sim/<stem>/` next to each request file). A
+  repeated stem gets the member's index appended (`foo-1`) so two members
+  never share a directory or an output lock. `requests[].report` in the
+  aggregate envelope (and each request's `dir` in `set-manifest.json`) is
+  the authoritative path to a member's `report.json` -- read it from the
+  envelope rather than re-deriving the stem.
 - **Bounded in flight.** At most `--max-in-flight` requests (default **4**)
   run at once -- submit, launch, and poll; the rest queue and start as slots
   free. The bound is a client-side politeness knob, not the fleet's cap.
@@ -1391,8 +1402,8 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   combined with it.
 - **Partial collection (`--collect-partial`,
   [#5014](https://github.com/2AMLogic/klayout-tools/issues/5014)).** Allowed
-  with `--batch-set`. Each member whose directory (`<outdir>/<request-stem>/`)
-  holds a `batch-shards.json` is collected through the single-request
+  with `--batch-set`. Each member whose directory (`<outdir>/<stem>/`, see
+  "Member directories" above) holds a `batch-shards.json` is collected through the single-request
   `--attach <map> --collect-partial` path: every shard is read once, nothing is
   relaunched, finished shards are merged and the rest come back `lost_shard`
   (listed in that member's `environment.remote.unfinished_shards[]`; no value is
@@ -1406,7 +1417,8 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   are never inferred). Empty when this client observed no job. The text output
   prints one `shard ...` line per row.
 - **Resuming a set (`--resume`).** `--resume` is forwarded to every request and
-  each one resumes from its own directory, `<outdir>/<request-stem>/`. Re-run
+  each one resumes from its own directory, `<outdir>/<stem>/` (see "Member
+  directories" above). Re-run
   the same set with the same `-o`: a sharded request re-attaches to the shard
   jobs recorded in its `batch-shards.json` (`fleet[].resumed: true`) and
   resubmits only the shards it cannot collect; a request with no prior
@@ -1437,8 +1449,9 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   true), distinguishing it from a shard that really failed; its unfinished
   shards are `lost_shard` units.
 - **Per-request reports.** Each request writes its full single-request report
-  to `report.json` in its own directory, `<outdir>/<request-stem>/` (without
-  `-o`: `.klt/sim/<request-stem>/` next to the request file).
+  to `report.json` in its own member directory, `<outdir>/<stem>/` (see
+  "Member directories" above; without
+  `-o`: `.klt/sim/<stem>/` next to the request file).
 - **Invalid request.** A request that fails validation (before any S3 write) or
   is refused becomes an `error` entry; the others proceed.
 

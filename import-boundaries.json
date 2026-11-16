@@ -484,6 +484,7 @@
       "description": "`klt netlist` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools._capacitor_mf",
+        "klayout_tools._diode_card",
         "klayout_tools.cli.netlist_cmd",
         "klayout_tools.cli.parser_netlist",
         "klayout_tools.netlist",
@@ -530,6 +531,7 @@
         "klayout_tools.pdk_cells",
         "klayout_tools.pdk_compat",
         "klayout_tools.pdk_descriptor",
+        "klayout_tools.pdk_diode_models",
         "klayout_tools.pdk_families",
         "klayout_tools.pdk_models",
         "klayout_tools.pdk_native_drc",
@@ -579,7 +581,8 @@
         "klayout_tools.place_and_route_route_overflow",
         "klayout_tools.place_and_route_script",
         "klayout_tools.place_and_route_sta",
-        "klayout_tools.place_and_route_via_pad"
+        "klayout_tools.place_and_route_via_pad",
+        "klayout_tools.place_and_route_via_tip"
       ]
     },
     "power": {
@@ -896,6 +899,7 @@
         "klayout_tools.synthesize",
         "klayout_tools.synthesize_abc_timing",
         "klayout_tools.synthesize_arithmetic",
+        "klayout_tools.synthesize_library_hint",
         "klayout_tools.synthesize_memory",
         "klayout_tools.synthesize_netlist_normalize",
         "klayout_tools.synthesize_timeout",

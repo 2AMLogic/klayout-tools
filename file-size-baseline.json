@@ -429,7 +429,7 @@
     },
     {
       "path": "src/klayout_tools/lvs.py",
-      "lines": 6471
+      "lines": 6469
     },
     {
       "path": "src/klayout_tools/lvs_combine.py",
@@ -489,7 +489,7 @@
     },
     {
       "path": "src/klayout_tools/netlist_normalize.py",
-      "lines": 2347
+      "lines": 2274
     },
     {
       "path": "src/klayout_tools/op_sanity.py",
@@ -509,7 +509,7 @@
     },
     {
       "path": "src/klayout_tools/pdk_models.py",
-      "lines": 2088
+      "lines": 2080
     },
     {
       "path": "src/klayout_tools/pdk_pcell.py",
@@ -597,7 +597,7 @@
     },
     {
       "path": "src/klayout_tools/signoff_attest.py",
-      "lines": 1236
+      "lines": 1216
     },
     {
       "path": "src/klayout_tools/signoff_generator_batch.py",
@@ -677,7 +677,7 @@
     },
     {
       "path": "src/klayout_tools/synthesize.py",
-      "lines": 4676
+      "lines": 4651
     },
     {
       "path": "src/klayout_tools/synthesize_arithmetic.py",
@@ -829,7 +829,7 @@
     },
     {
       "path": "tests/test_drc.py",
-      "lines": 11707
+      "lines": 11048
     },
     {
       "path": "tests/test_drc_asap7_deck.py",
@@ -933,7 +933,7 @@
     },
     {
       "path": "tests/test_lvs.py",
-      "lines": 26234
+      "lines": 26221
     },
     {
       "path": "tests/test_lvs_device_provenance.py",
@@ -1013,7 +1013,7 @@
     },
     {
       "path": "tests/test_place_and_route.py",
-      "lines": 12414
+      "lines": 12411
     },
     {
       "path": "tests/test_place_and_route_batch.py",
