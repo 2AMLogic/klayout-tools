@@ -28,6 +28,24 @@ not `klt --version`, if you need to detect this kind of drift. See
   still prints a path (`<outside repo>` for an external input), never the
   envelope object.
 
+- **`klt synthesize`'s `netlist_sha256` no longer depends on the build root
+  or on `run_id`** (#5594, 2026-11-15): Yosys names function-derived nets
+  (`$func$…`) after the source path spelling its script used, and since the
+  #1844 path rewriting that spelling is repo-relative for in-repo sources —
+  a form the #4872 normalizer never stripped, so in-repo netlists embedded
+  the repo-relative directory (sv2v intermediates: the run directory itself,
+  which defaults to a random `run-<uuid>`, making the digest differ on every
+  run). The normalizer now strips each source's repo-relative directory as
+  well as its absolute one, so a `$func$` net name always collapses to the
+  bare basename: the same request synthesizes byte-identical netlists and an
+  equal `netlist_sha256` from any build root, in or out of a git repository,
+  at any depth inside one, and with a defaulted `run_id`. **In-repo
+  digests change once**: a `netlist_sha256` recorded by an in-repo run of a
+  previous version will not match a run of this version (out-of-repo
+  digests are unchanged); callers holding a recorded digest for the
+  `signoff --check` freshness pattern should re-record it from a run of
+  this version. No JSON field changes.
+
 - **`klt sim --batch-set` names member directories after the request stem**
   (#5633, 2026-11-15): a member request named `<stem>.request.json` -- the
   repo's own documented request naming convention -- used to land in
