@@ -78,6 +78,15 @@ def test_unresolvable_hostname_is_reported_as_unknown_not_fabricated(monkeypatch
     assert ep.opaque_host_id() == ep.UNKNOWN_HOST_ID
 
 
+def test_hostname_that_normalises_to_empty_is_unknown_not_fabricated():
+    """A hostname that is only dots (`"."`, `".local"`, or whitespace)
+    normalises to the empty string; there is no host name to hash, so the id
+    is UNKNOWN_HOST_ID rather than a hash of the salt alone."""
+    assert ep.opaque_host_id(".") == ep.UNKNOWN_HOST_ID
+    assert ep.opaque_host_id(".local") == ep.UNKNOWN_HOST_ID
+    assert ep.opaque_host_id("   ") == ep.UNKNOWN_HOST_ID
+
+
 # --------------------------------------------------------------------------- #
 # repo-relative path normalisation
 # --------------------------------------------------------------------------- #
@@ -88,6 +97,12 @@ def _make_repo(tmp_path):
     (root / ".git").mkdir(parents=True)
     (root / "sim" / "bandgap").mkdir(parents=True)
     return root
+
+
+def test_repo_root_for_none_is_none():
+    """`repo_root_for(None)` is the "no input path was resolved" case; it must
+    stay `None` rather than falling back to the process cwd."""
+    assert ep.repo_root_for(None) is None
 
 
 def test_path_inside_the_repo_is_reported_repo_relative(tmp_path):
