@@ -1784,6 +1784,19 @@ def _add_lvs_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     lvs_parser.add_argument(
+        "--deck",
+        dest="deck",
+        default=None,
+        metavar="NAME",
+        help=(
+            f"extraction deck to run (currently: {_deck_names_str()}); the "
+            "command-line spelling of the request's layout.deck field "
+            "(issue #5733). A clean error (exit 1) if the request already "
+            "sets layout.deck. Does not set reference.deck -- the "
+            "reference-netlist rewriting deck is a different knob"
+        ),
+    )
+    lvs_parser.add_argument(
         "--deck-file",
         dest="deck_file",
         default=None,

@@ -915,6 +915,26 @@ def _merge_deck_flags(
         request["deck_vars"] = dict(deck_vars)
 
 
+def _merge_layout_deck(request: dict[str, Any], deck: str | None) -> None:
+    """Fold ``--deck`` (issue #5733) into ``request["layout"]["deck"]`` in
+    place -- the command-line spelling of the request field, nothing more.
+    Conflicting with the request's own ``layout.deck`` is a clean
+    :class:`LvsError` (the same flag-vs-request rule ``--deck-file`` and
+    ``--deck-var`` apply); ``reference.deck`` is a different knob and is
+    never touched."""
+    if deck is None:
+        return
+    layout_spec = request.get("layout")
+    if layout_spec is None or not isinstance(layout_spec, dict):
+        raise LvsError("request.layout must be a JSON object")
+    if layout_spec.get("deck") is not None:
+        raise LvsError(
+            "--deck conflicts with request.layout.deck: set one, not "
+            "both (a flag never silently overrides the request document)"
+        )
+    layout_spec["deck"] = deck
+
+
 def _aggregate_lvs_findings(
     *,
     status: Any,
@@ -1212,6 +1232,7 @@ def _aggregate_lvs_findings(
 def run_lvs(
     request: str,
     *,
+    deck: str | None = None,
     deck_file: str | None = None,
     deck_vars: dict[str, str] | None = None,
     progress: bool | str = False,
@@ -1227,6 +1248,15 @@ def run_lvs(
     --deck-file``/``--deck-var`` CLI values for ``engine: klayout-runset``;
     they fill the request's ``deck_file``/``deck_vars`` fields, and setting
     both a flag and its request field is a clean :class:`LvsError`.
+
+    ``deck`` (issue #5733) carries the ``klt lvs --deck`` CLI value: the
+    command-line spelling of the request's ``layout.deck`` field, filling
+    exactly that field. Setting both the flag and a request-side
+    ``layout.deck`` is a clean :class:`LvsError` -- a flag never silently
+    overrides the request document. ``reference.deck`` (the
+    reference-netlist rewriting deck) is a different knob and is never
+    touched; an unknown deck name surfaces from the existing
+    unknown-deck path as a clean :class:`LvsError`.
 
     ``request`` accepts the same three forms every ``klt lvs`` request
     argument does (see :func:`load_request_arg` / docs/cli/lvs.md): a path
@@ -1493,6 +1523,7 @@ def run_lvs(
             f"unsupported engine '{engine}' (supported: {', '.join(SUPPORTED_ENGINES)})"
         )
     _merge_deck_flags(loaded, engine, deck_file, deck_vars)
+    _merge_layout_deck(loaded, deck)
     portable_paths = _validate_portable_paths(loaded.get("portable_paths"))
 
     layout_spec = request["layout"]
