@@ -86,6 +86,25 @@ def _with_capacity_wait_override(
     }
 
 
+def _with_capacity_retries_override(
+    request: dict[str, Any], capacity_retries: int | None
+) -> dict[str, Any]:
+    """Fold the ``--capacity-retries`` CLI value into the batch config for a
+    sharded single request (issue #5567), leaving the loaded request
+    untouched. Validated by the resolver the batch config uses, so a bad
+    value is refused before any S3 write. A CLI knob only: the request file
+    has no such key."""
+    if capacity_retries is None:
+        return request
+    from .sim_batch import resolve_capacity_retries
+
+    value = resolve_capacity_retries({"capacity_retries": capacity_retries})
+    return {
+        **request,
+        "batch": {**(request.get("batch") or {}), "capacity_retries": value},
+    }
+
+
 def _with_timeout_override(
     request: dict[str, Any], timeout_s: float | None
 ) -> dict[str, Any]:
@@ -154,4 +173,21 @@ def _refuse_corner_only_deck_flags(
         raise SimError(
             "--fail-on-diagnostic grades corner diagnostics, which "
             "deck-list requests do not produce"
+        )
+
+
+def _check_capacity_wait_applies(
+    capacity_wait_s: Any, backend: str, attach_job_id: Any
+) -> None:
+    """Refuse ``--wait-for-capacity`` where it has nothing to wait for."""
+    if capacity_wait_s is None:
+        return
+    if backend != "batch":
+        raise SimError(
+            f"--wait-for-capacity requires backend 'batch' (got '{backend}')"
+        )
+    if attach_job_id is not None:
+        raise SimError(
+            "--wait-for-capacity cannot be combined with --attach: attach "
+            "launches nothing, so there is no capacity to wait for"
         )

@@ -118,6 +118,7 @@ from .remote_launcher import (
     _signal_handlers_restore,
     published_runner_identities,
 )
+from .sim_batch_capacity_watch import _CapacityWatch
 from .sim_batch_features import (
     annotate_gap,
     annotate_unrecovered_failure,
@@ -287,6 +288,9 @@ class BatchConfig:
     #: (``request.batch.capacity_wait_s``,
     #: issue #2721). ``0`` -- the default -- is one launch attempt.
     capacity_wait_s: float = 0.0
+    #: Extra passes over capacity-refused shards of a sharded run
+    #: (``--capacity-retries``, issue #5567). ``0`` -- the default -- is off.
+    capacity_retries: int = 0
     #: ``request.batch.runner_version_check`` (issue #2719).
     runner_version_check: str = "enforce"
     #: The fleet's whole-job ceiling in seconds and where it came from
@@ -699,6 +703,7 @@ def _resolve_batch_config(
             )
         ),
         capacity_wait_s=capacity_wait_s,
+        capacity_retries=resolve_capacity_retries(batch_spec),
         runner_version_check=runner_version_check,
         max_job_seconds=max_job_seconds,
         max_job_seconds_source=max_job_seconds_source,
@@ -1217,6 +1222,18 @@ def resolve_capacity_wait_s(batch_spec: dict[str, Any]) -> float:
             f"seconds (got {value!r})"
         )
     return float(value)
+
+
+def resolve_capacity_retries(batch_spec: dict[str, Any]) -> int:
+    """The ``--capacity-retries`` value for a sharded request (issue #5567):
+    a non-negative integer (default ``0``, off), else
+    :class:`~klayout_tools.sim.SimError`. A ``bool`` is refused."""
+    from .sim import SimError
+
+    value = batch_spec.get("capacity_retries", 0)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise SimError(f"--capacity-retries must be >= 0 (got {value!r})")
+    return value
 
 
 def _resolve_interrupted_grace_s(batch_spec: dict[str, Any]) -> float:
@@ -3727,143 +3744,6 @@ def _warn_unlaunched(manifest: _ShardManifest | None, hosts: int) -> None:
     )
 
 
-class _CapacityWatch:
-    """Fleet-wide view of shards waiting out a capacity refusal (issue #4018).
-
-    Each shard's :func:`launch_job` retries on its own thread; this folds
-    their refusals into one stderr line -- ``K of M shards pending`` and the
-    last refusal's code -- printed when the number of waiting shards changes
-    and otherwise at most once per :data:`BATCH_HEARTBEAT_INTERVAL_S`.
-    """
-
-    def __init__(
-        self,
-        total: int,
-        *,
-        monotonic: Callable[[], float] = time.monotonic,
-        emit: Callable[[str], None] = _progress,
-    ) -> None:
-        self._total = total
-        self._monotonic = monotonic
-        self._emit = emit
-        self._lock = threading.Lock()
-        self._waiting: set[int] = set()
-        self._finished = 0
-        self._last_emit: float | None = None
-        self._last_waiting = 0
-        self._states: dict[int, str] = {}
-        self._launch_events = 0
-        self._first_launch_at: float | None = None
-        self._last_counts: tuple[int, int, int, int] = (0, 0, total, 0)
-        self._last_progress: float | None = None
-        self._final_emitted = False
-
-    def seed(self, index: int, state: str | None) -> None:
-        """Record the state a resumed shard starts in (no progress line)."""
-        if state in ("launching", "launched", "collected"):
-            with self._lock:
-                self._states[index] = str(state)
-
-    def phase(self, index: int, state: str) -> None:
-        """Fold one shard lifecycle event into the launch-progress line
-        (issue #4349): per-state counts and a launch-rate ETA on stderr,
-        printed when the counts change, at most once per
-        :data:`BATCH_HEARTBEAT_INTERVAL_S`, and once more when the last shard
-        has launched. Single-shard runs print nothing."""
-        with self._lock:
-            if state == "launch_refused":
-                state = "submitted"
-            if state == "launched":
-                self._launch_events += 1
-                if self._first_launch_at is None:
-                    self._first_launch_at = self._monotonic()
-            self._states[index] = state
-            self._progress_locked()
-
-    def _counts(self) -> tuple[int, int, int, int]:
-        values = list(self._states.values())
-        launching = values.count("launching")
-        launched = values.count("launched")
-        collected = values.count("collected")
-        pending = self._total - launching - launched - collected
-        return launched, launching, pending, collected
-
-    def _progress_locked(self) -> None:
-        if self._total <= 1:
-            return
-        counts = self._counts()
-        if counts == self._last_counts:
-            return
-        now = self._monotonic()
-        final = counts[1] == 0 and counts[2] == 0 and not self._final_emitted
-        if (
-            not final
-            and self._last_progress is not None
-            and now - self._last_progress < BATCH_HEARTBEAT_INTERVAL_S
-        ):
-            return
-        self._last_counts = counts
-        self._last_progress = now
-        self._final_emitted = self._final_emitted or final
-        launched, launching, pending, collected = counts
-        rate = self._rate_per_min(now)
-        rate_text = "unknown" if rate is None else f"{rate:.1f}/min"
-        self._emit(
-            f"klt sim: shards {launched + collected}/{self._total} launched, "
-            f"{launching} launching, {pending} pending, {collected} collected; "
-            f"launch rate {rate_text}, ETA {self._eta_text(rate, pending + launching)}"
-        )
-
-    def _rate_per_min(self, now: float) -> float | None:
-        if self._first_launch_at is None or self._launch_events < 2:
-            return None
-        elapsed = now - self._first_launch_at
-        if elapsed <= 0:
-            return None
-        return (self._launch_events - 1) / elapsed * 60.0
-
-    @staticmethod
-    def _eta_text(rate: float | None, remaining: int) -> str:
-        if remaining <= 0:
-            return "0m"
-        if not rate:
-            return "unknown"
-        hours, mins = divmod(max(1, round(remaining / rate)), 60)
-        return f"{hours}h {mins}m" if hours else f"{mins}m"
-
-    def refused(self, index: int, exc: BatchError) -> None:
-        with self._lock:
-            self._waiting.add(index)
-            now = self._monotonic()
-            if (
-                self._last_emit is not None
-                and len(self._waiting) == self._last_waiting
-                and now - self._last_emit < BATCH_HEARTBEAT_INTERVAL_S
-            ):
-                return
-            self._last_emit = now
-            self._last_waiting = len(self._waiting)
-            reason = exc.code or str(exc).splitlines()[0]
-            self._emit(
-                "klt sim: waiting for capacity: "
-                f"{self._total - self._finished} of {self._total} shards "
-                f"pending, {len(self._waiting)} waiting on a launch "
-                f"(last refusal: {reason})"
-            )
-
-    def launched(self, index: int) -> None:
-        with self._lock:
-            self._waiting.discard(index)
-
-    def finished(self, index: int) -> None:
-        with self._lock:
-            self._waiting.discard(index)
-            self._finished += 1
-            if self._states.get(index) == "launched":
-                self._states[index] = "collected"
-                self._progress_locked()
-
-
 def _abortable_sleep(abort: threading.Event) -> Callable[[float], None]:
     """A ``sleep`` that raises :class:`BatchClientInterrupted` once ``abort``
     is set, in slices of at most one second, so a shard thread left behind by
@@ -3946,6 +3826,9 @@ class _BatchFleetRun:
         self.started = time.monotonic()
         self.abort = threading.Event()
         self.budget_spent = threading.Event()
+        #: Shards whose last attempt was refused for fleet capacity
+        #: (issue #5567): the set a ``--capacity-retries`` pass re-runs.
+        self.capacity_refused: set[int] = set()
         self.watch = _CapacityWatch(len(shard_indexes))
         if manifest is not None:
             for index in shard_indexes.values():
@@ -4045,17 +3928,57 @@ class _BatchFleetRun:
                 f"{exc}{_remote_state_note(shard_config, job_id)}", code=exc.code
             ) from exc
 
+    def start_retry_pass(self) -> list[int]:
+        """Begin a ``--capacity-retries`` pass (issue #5567): hand back the
+        shards the last pass lost to a capacity refusal, in shard order, and
+        give the pass a fresh ``--wait-for-capacity`` budget (the run-wide
+        one is long spent, which would make every retry a single no-wait
+        attempt)."""
+        refused = sorted(self.capacity_refused)
+        self.started = time.monotonic()
+        self.budget_spent.clear()
+        return refused
+
     def run_shard_points(self, shard_points: list[CornerPoint]) -> _ShardResult:
+        return self._guarded(shard_points, self._run_one_shard)
+
+    def retry_shard_points(self, shard_points: list[CornerPoint]) -> _ShardResult:
+        """Re-run a shard a capacity refusal lost: launch the job this run
+        already submitted (never a second submit under another id)."""
+        return self._guarded(shard_points, self._relaunch_shard)
+
+    def _relaunch_shard(
+        self, shard_points: list[CornerPoint], index: int
+    ) -> _ShardResult:
+        manifest = self.manifest
+        job_id = None if manifest is None else manifest.planned_job_id(index)
+        if job_id is None:
+            return self._run_one_shard(shard_points, index)
+        result = self._run_job(
+            shard_points, job_id, attach=True, index=index, launch_if_unlaunched=True
+        )
+        _mark_collected(manifest, index, result)
+        return _mark_resumed(result, False)
+
+    def _guarded(
+        self,
+        shard_points: list[CornerPoint],
+        body: Callable[[list[CornerPoint], int], _ShardResult],
+    ) -> _ShardResult:
         index = self.shard_indexes[_units_digest(shard_points)]
         try:
             with sim_batch_observer.observe_batch_jobs(self.job_observer):
-                return self._run_one_shard(shard_points, index)
+                result = body(shard_points, index)
+            self.capacity_refused.discard(index)
+            return result
         except BatchError as exc:
             # The lost-shard diagnostic carries the refusal code.
             if exc.code in _RETRYABLE_LAUNCH_CODES:
+                self.capacity_refused.add(index)
                 raise BatchError(
                     f"{exc}{self._budget_note(exc)} [{exc.code}]", code=exc.code
                 ) from exc
+            self.capacity_refused.discard(index)
             raise
         finally:
             self.watch.finished(index)
@@ -4245,6 +4168,17 @@ def _run_batch_fleet(
             max_concurrent=config.max_concurrent_jobs,
             on_interrupt=fleet.on_interrupt,
         )
+        if config.capacity_retries > 0 and fleet.capacity_refused:
+            from .sim_batch_capacity_retry import retry_capacity_refused
+
+            corners, engine_version, environment = retry_capacity_refused(
+                fleet,
+                _shard_corner_points(corner_points, hosts),
+                (corners, engine_version, environment),
+                retries=config.capacity_retries,
+                measurements_spec=measurements_spec,
+                max_concurrent=config.max_concurrent_jobs,
+            )
         if fleet.abort.is_set():
             environment = {**(environment or {}), "interrupted": True}
         if environment is not None and config.max_concurrent_jobs is not None:

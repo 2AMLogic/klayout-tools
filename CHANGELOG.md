@@ -14,6 +14,15 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt sim --capacity-retries N` now works on a sharded single request**
+  (#5567, 2026-11-16): a sharded batch run whose `--wait-for-capacity` budget
+  ran out left the refused shards as `lost_shard` corners, recoverable only
+  by a second `--attach` / `--resume` invocation. With `--capacity-retries N`
+  the shards lost to `batch_no_capacity` / `batch_concurrency_cap` are
+  launched again, in up to `N` further passes after the other shards finish,
+  with doubling backoff and a fresh capacity-wait budget per pass; their
+  already-submitted jobs are launched, never re-submitted. Default `0` is
+  unchanged, and `--batch-set` behaves as before.
 - **`klt sim --batch-set` names member directories after the request stem**
   (#5633, 2026-11-15): a member request named `<stem>.request.json` -- the
   repo's own documented request naming convention -- used to land in

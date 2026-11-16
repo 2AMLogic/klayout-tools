@@ -278,8 +278,10 @@ from .sim_remote import (
 from .sim_remote import _run_remote_dispatch as _run_remote_dispatch
 from .sim_remote import _shard_corner_points as _shard_corner_points
 from .sim_request_overrides import (
+    _check_capacity_wait_applies,
     _refuse_corner_only_deck_flags,
     _refuse_corner_only_flags,
+    _with_capacity_retries_override,
     _with_capacity_wait_override,
 )
 from .sim_request_overrides import (
@@ -2389,6 +2391,7 @@ def run_sim(
     submit_only: bool = False,
     attach_job_id: str | None = None,
     capacity_wait_s: float | None = None,
+    capacity_retries: int | None = None,
     command_approvals: str | None = None,
     pdk_root: str | None = None,
     collect_partial: bool = False,
@@ -2715,6 +2718,7 @@ def run_sim(
         submit_only=submit_only,
         attach_job_id=attach_job_id,
         capacity_wait_s=capacity_wait_s,
+        capacity_retries=capacity_retries,
         pdk_root=pdk_root,
         collect_partial=collect_partial,
         timeout_s=timeout_s,
@@ -3032,23 +3036,6 @@ def _stamp_netlist_identity(
         environment["netlist_identity_error"] = netlist_identity_error
 
 
-def _check_capacity_wait_applies(
-    capacity_wait_s: Any, backend: str, attach_job_id: Any
-) -> None:
-    """Refuse ``--wait-for-capacity`` where it has nothing to wait for."""
-    if capacity_wait_s is None:
-        return
-    if backend != "batch":
-        raise SimError(
-            f"--wait-for-capacity requires backend 'batch' (got '{backend}')"
-        )
-    if attach_job_id is not None:
-        raise SimError(
-            "--wait-for-capacity cannot be combined with --attach: attach "
-            "launches nothing, so there is no capacity to wait for"
-        )
-
-
 @dataclass(frozen=True)
 class _ResolvedSimRequest:
     """Everything :func:`_prepare_sim_request` validated and resolved, before any
@@ -3131,6 +3118,7 @@ def _prepare_sim_request(
     capacity_wait_s: float | None,
     dry_run: bool,
     pdk_root: str | None = None,
+    capacity_retries: int | None = None,
     timeout_s: float | None = None,
 ) -> _ResolvedSimRequest:
     """The up-front validate-and-resolve phase of :func:`_run_sim_corners`.
@@ -3141,6 +3129,7 @@ def _prepare_sim_request(
     request = _with_max_units_override(load_request(request_path), max_units_per_job)
     request = _with_max_concurrent_override(request, max_concurrent_jobs)
     request = _with_capacity_wait_override(request, capacity_wait_s)
+    request = _with_capacity_retries_override(request, capacity_retries)
     request = _with_pdk_root_override(request, pdk_root)
     request = _with_timeout_override(request, timeout_s)
     request_dir = os.path.dirname(os.path.abspath(request_path))
@@ -3796,6 +3785,7 @@ def _run_sim_corners(
     submit_only: bool = False,
     attach_job_id: str | None = None,
     capacity_wait_s: float | None = None,
+    capacity_retries: int | None = None,
     pdk_root: str | None = None,
     collect_partial: bool = False,
     timeout_s: float | None = None,
@@ -3819,6 +3809,7 @@ def _run_sim_corners(
         max_units_per_job=max_units_per_job,
         max_concurrent_jobs=max_concurrent_jobs,
         capacity_wait_s=capacity_wait_s,
+        capacity_retries=capacity_retries,
         dry_run=dry_run,
         pdk_root=pdk_root,
         timeout_s=timeout_s,

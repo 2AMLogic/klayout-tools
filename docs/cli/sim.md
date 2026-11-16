@@ -1340,6 +1340,21 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   re-submits such a request up to `N` more times with doubling backoff
   (5s, 10s, ...). Only those two codes are retried -- never another failure,
   and never on local ngspice.
+
+  On a **sharded single request** (`remote.hosts > 1`, or a split job)
+  `--capacity-retries N` ([#5567](https://github.com/2AMLogic/klayout-tools/issues/5567))
+  recovers shards lost to a capacity refusal inside the same invocation: once
+  every other shard has finished and released its instance, the shards lost
+  with `batch_no_capacity` / `batch_concurrency_cap` are launched again, in up
+  to `N` further passes with doubling backoff (5s, 10s, ...), each pass with a
+  fresh `--wait-for-capacity` budget. The already-submitted job of each such
+  shard is launched (nothing is submitted twice, so `batch-shards.json` and a
+  later `--resume` stay consistent). A recovered shard reports its real
+  corners in global order with no `lost_shard`; a shard still refused after
+  `N` passes is reported exactly as before and stays resumable. Shards lost
+  for any other reason are never retried, and an interrupt during a backoff
+  returns the partial report. Default `0` (off) is byte-identical to before; an
+  unsharded single job has nothing to retry.
 - **All-or-nothing preflight** ([#4972](https://github.com/2AMLogic/klayout-tools/issues/4972)).
   Before anything is submitted, every member is resolved (with
   `--max-units-per-job` / `--max-concurrent-jobs` applied) and run through the

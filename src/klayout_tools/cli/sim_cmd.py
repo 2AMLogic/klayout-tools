@@ -89,15 +89,10 @@ def _reject_single_request_misuse(args: argparse.Namespace) -> int | None:
             "request (or --batch-set REQUEST...)\n"
         )
         raise SystemExit(2)
-    for flag, name in (
-        ("max_in_flight", "--max-in-flight"),
-        ("capacity_retries", "--capacity-retries"),
-    ):
-        if getattr(args, flag, None) is None:
-            continue
+    if getattr(args, "max_in_flight", None) is not None:
         return emit_error(
             "sim",
-            f"{name} only applies with --batch-set",
+            "--max-in-flight only applies with --batch-set",
             args.format,
             exit_code=EXIT_USAGE_ERROR,
         )
@@ -144,6 +139,7 @@ def _run_sweep(args: argparse.Namespace) -> int:
             submit_only=getattr(args, "submit_only", False),
             attach_job_id=getattr(args, "attach_job_id", None),
             capacity_wait_s=getattr(args, "wait_for_capacity", None),
+            capacity_retries=getattr(args, "capacity_retries", None),
             command_approvals=getattr(args, "command_approvals", None),
             pdk_root=getattr(args, "pdk_root", None),
             collect_partial=getattr(args, "collect_partial", False),
