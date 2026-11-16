@@ -48,6 +48,17 @@ klt gen --pdk-pcell <library>/<cell> [--params <path-or-inline>] [--pdk <variant
   that one resolver, never a private lookup. Omitting both falls back to
   `$PDK`/`$PDK_ROOT`, same as `klt pdk find` with no flags.
 - `--cell-name` — name for the generated top cell (default: `<generator>_0`).
+  For generators that emit a PCell child — every generator except
+  `asap7_finfet` and `asap7_tap` (which flatten their output into the top
+  cell and carry no child) and `bjt_array` on sg13g2 (which instantiates the
+  PDK's own HBT cell under its PDK name, independent of `--cell-name`) —
+  that child is named `<cell-name>__core` (since v0.9.0, issue #4251;
+  earlier releases left it as the library cell name, e.g. `mos_array`). The
+  suffix keeps the children of streams generated under different
+  `--cell-name`s from merging when they are read into one `Layout`. This
+  naming is part of `klt gen`'s documented output: a change to it is a
+  CHANGELOG-recorded event, since structure names are written into the
+  stream.
 - `-o`/`--output` — output GDS/OASIS path (default: `<cell_name>.gds`, written
   to the current directory). Format (`.gds`/`.oas`) is inferred from the
   extension, matching `klt render`'s auto-detection posture. The containing
