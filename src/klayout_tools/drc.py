@@ -2671,6 +2671,10 @@ def rerun_drc_report(
                 f"deck not found: {missing['resolved']} (packaged name "
                 f"{missing['name']!r}); {missing['hint']}"
             )
+        if deck is None:
+            raise DrcError(
+                f"committed report has no resolvable deck to rerun: {report_path}"
+            )
         from .drc_klayout_engine import _rerun_assertion_kwargs, run_drc_klayout_engine
 
         # A committed report carrying `engine_deck_errors` was produced with
