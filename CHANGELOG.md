@@ -23,6 +23,12 @@ not `klt --version`, if you need to detect this kind of drift. See
   variant name (e.g. `mos_array`, or `$N`-suffixed in older builds) to
   `<cell_name>__core`. The scheme id must change whenever the naming changes.
 
+- **Added** (#5875): `klt signoff --attest N --inventory F --check ENV` now
+  reports an additive `build_drift` object (same shape as envelope
+  aggregation, #4223) and a `build_drift: <state>` text line; the opt-in
+  `--require-build-match` fails the check (exit 3, `status: "drifted"`) when
+  ENV's `provenance.klt_version` is from a different build. Report-only
+  without the flag.
 - **Changed** (#5788, breaking — `klt array-check` `schema_version` 1 ->
   **2**): the record's `file` field is now the committable
   `{path, scope}` object `env_provenance.repo_relative_path()` builds
@@ -54,6 +60,37 @@ not `klt --version`, if you need to detect this kind of drift. See
   digests are unchanged); callers holding a recorded digest for the
   `signoff --check` freshness pattern should re-record it from a run of
   this version. No JSON field changes.
+- **`klt lvs` retroactive records: the `device.property` count-granularity
+  change of issue #4729, and six `mismatches[].category` values that shipped
+  unlisted** (#4729, 2026-11-16): this file's header designates it the source
+  of truth for which `mismatches[].category` values exist as of a given date,
+  and a consumer who followed that policy while comparing two `klt lvs`
+  reports across versions found it silent on exactly the delta they were
+  looking up. Two retroactive records, both shipped before this entry;
+  neither changes any current output. (1) **`device.property` count
+  granularity** (landed in `v0.9.0`, 2026-11-05): the geometry-derived
+  `as`/`ad`/`ps`/`pd` parameter differences on a matched device pair whose
+  `w_um` also differs are no longer reported as their own `device.property`
+  entries — they are folded into that pair's `w_um` entry, preserved in its
+  `details.derived`. A pair whose `w_um` agrees keeps its derived entries as
+  they were. A width-only
+  difference on a matched MOS pair therefore emitted **five** `device.property`
+  entries before `v0.9.0` and emits **one** after (observed on the two builds
+  that surfaced this: `category_counts["device.property"]` `5` -> `1`, with
+  `status` and the per-class `counts` identical in both). Because every
+  `device.property` entry is `severity: "error"`, `mismatch_count` and
+  `error_count` move the same way for such an event (`5` -> `1` each) — only
+  the redundancy was removed; `status` is unchanged. (2) **Six
+  `mismatches[].category` values shipped without an entry here**:
+  `device.unmerged_fingers`, `device.flavour_mismatch`,
+  `topology.hierarchy_mismatch` and `topology.dangling_output_ambiguous`
+  (all first released in `v0.9.0`, 2026-11-05),
+  `hints.constant_nets_declared` (first released in `v0.8.0`, 2026-10-24),
+  and `pin.unmatched` (first released in `v0.2.0`, 2026-08-04 — the one
+  predating this file's category-record policy, listed for completeness).
+  Each is documented in [`docs/cli/lvs.md`](docs/cli/lvs.md) (four have their
+  own per-category sections; `pin.unmatched` and `hints.constant_nets_declared`
+  are covered in its field tables). No `schema_version` changes.
 
 - **`klt sim --batch-set` names member directories after the request stem**
   (#5633, 2026-11-15): a member request named `<stem>.request.json` -- the
