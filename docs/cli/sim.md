@@ -5,6 +5,7 @@ report per-corner measurement pass/fail as structured data.
 
 ```
 klt sim <request.json> [-o|--outdir <dir>] [--report-out <path>] [--backend <name>] [--max-workers <n>] [--hosts <n>] [--max-units-per-job <n>] [--max-concurrent-jobs <n>] [--budget-s <seconds>] [--timeout-s <seconds>] [--resume] [--fail-fast-probe] [--fail-on-diagnostic <code>] [--dry-run] [--plot <dir>] [--op-lint [--op-lint-corner <corner_id>|all]] [--format text|json]
+klt sim --check <report.json> [--root <dir>] [--format text|json]
 ```
 
 This is the build carried by the accepted spike,
@@ -140,6 +141,28 @@ this document (and the code) win.
   off/triode region, wiring smells, and netlist hygiene. Run it first when a
   measurement misses. `--op-lint-corner` picks which corner to bias at (`all` tabulates the worst margin per corner). See
   "Operating-point lint" below.
+- `--check <report.json>` (issue #5821) — **re-verify a finished report's
+  netlist evidence without simulating** (no engine, network or PDK). Compares
+  each `environment.netlist_closure` entry's recorded raw `sha256` against the
+  file now on disk, and the recorded `environment.netlist_identity` against one
+  recomputed with the writer's own normalization. Emits the shared `--check`
+  payload (`schema_version`, `mode: "check"`, `report`, `status`, `checks[]`,
+  `skipped[]`) plus `diagnosis`:
+
+  | raw `sha256` | `netlist_identity` | `diagnosis` |
+  |---|---|---|
+  | all match | match | `intact` |
+  | some mismatch | match | `cosmetic` (comment/whitespace/case edit only) |
+  | some mismatch | mismatch | `electrical` (recorded measurements are stale) |
+  | all match | mismatch | `normalization_changed` (the tool's normalization moved, not the netlist; see #5438) |
+
+  `skipped[]` lists entries that cannot be re-hashed — a host-resolved
+  `{target, sha256: null}` include, a `scope: "external"`/`"absent"` entry
+  (`path: null`) — and any skipped entry prevents `status: "match"`. A report
+  with `netlist_identity_error`/`netlist_closure_error`, no closure, or a
+  closure file missing from the tree is `drifted`, never `match`. `--root`
+  re-anchors `scope: "repo"` entries; otherwise they resolve from the report's
+  own location. Exit `0` match, `3` drifted, `1` missing/unparseable report.
 - `--format` — `text` (default, a human-readable summary) or `json`.
 
 ## Engine

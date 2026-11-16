@@ -6,7 +6,7 @@ import argparse
 from collections.abc import Callable
 from typing import Any
 
-from . import sim_cmd
+from . import sim_check_cmd
 
 
 def add_wait_for_capacity_arg(parser: argparse.ArgumentParser, tail: str) -> None:
@@ -415,4 +415,22 @@ def add_sim_parser(
         ),
     )
     _add_format_arg(sim_parser)
-    sim_parser.set_defaults(func=sim_cmd.run)
+    sim_parser.add_argument(
+        "--check",
+        dest="check",
+        metavar="REPORT",
+        default=None,
+        help=(
+            "instead of simulating, re-verify a finished klt sim report's "
+            "environment.netlist_closure/netlist_identity against the working "
+            "tree (no engine, network or PDK). Exit 0 match, 3 drifted, 1 "
+            "unreadable report. See docs/cli/sim.md."
+        ),
+    )
+    sim_parser.add_argument(
+        "--root",
+        dest="root",
+        default=None,
+        help="with --check: directory to anchor scope=repo closure entries to",
+    )
+    sim_parser.set_defaults(func=sim_check_cmd.run)
