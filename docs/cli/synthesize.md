@@ -507,8 +507,11 @@ Two consequences worth knowing:
 
 A `cell_library` with no `_TIE_CELLS` entry emits no `hilomap` line at all,
 rather than a guessed cell name. Its `unsupported_cell_library` warning
-states that `setundef -zero` and `hilomap` were skipped and that bare
-0/1/x constants may remain unroutable in place-and-route.
+states that `setundef -zero` and `hilomap` were skipped, that bare
+0/1/x constants may remain unroutable in place-and-route, and (issue #5074)
+which `cell_library` keys *do* carry a verified tie-cell mapping — led by
+the closest one to the key passed, so a near miss such as
+`asap7sc7p5t_28_RVT` for `asap7sc7p5t_28_R` is self-correcting.
 A design that needs no constant tie (the
 repo's own `gcd.v`) is unaffected: its netlist and `stat` output are
 byte-identical with and without the pass.
@@ -1469,7 +1472,7 @@ same check applies to `--check` and `--rerun`. Nested objects (`pdk`,
 | `structural` | object | **Always present** (issue #1588) — a pass/fail verdict over the three unambiguously-wrong synchronous-design conditions Yosys's own `synth`/`stat` already know about: `{latches, expected_latches, unexpected_latches, comb_loops, multi_driven, has_critical}`. `latches` is the total instance count of every `stat -json` cell type whose name contains `"dlatch"` (case-insensitive) — `dfflibmap` maps only flip-flops, so an inferred latch survives, unmapped, as a bare gate-level primitive (`$_DLATCH_P_` and siblings). `expected_latches` echoes the request's `structural.expected_latches` (default `0`); `unexpected_latches` is `max(0, latches - expected_latches)`. `comb_loops`/`multi_driven` count the **distinct** `Warning: found logic loop` / `Warning: multiple conflicting drivers` lines `synth -top <top>`'s own internal `check` sub-stages print. `has_critical` is `true` iff `comb_loops > 0 \|\| multi_driven > 0 \|\| unexpected_latches > 0` — see "`structural`" below and "Exit codes". |
 | `cell_exclusions` | object | **Always present** (issue #2382) — the standard-cell exclusion this run actually applied, and how it was arrived at: `{mode, requested, library_defaults, effective, validated, engine_supports_dont_use}`. `mode` is the resolved `constraints.dont_use_mode` (`"additive"` by default); `requested` is the request's own `constraints.dont_use`, normalized and deduplicated; `library_defaults` is the built-in per-library table's entry for the resolved `pdk.cell_library` (always reported, even when `mode` suppressed it, so a report says what was *not* excluded too); **`effective` is exactly the `-dont_use` glob list handed to ABC**, deduplicated and order-preserved. `validated` is `true` when every `requested` pattern was matched against the resolved liberty's cell names, or `null` when there was nothing to check or that cell list could not be established. `engine_supports_dont_use` is the `yosys -p 'help abc'` probe result, or `null` when there was nothing to exclude and no probe was made — `false` with a non-empty `requested` and an empty `effective` is the "older Yosys build dropped it" case, also surfaced as a `dont_use_unsupported` warning. Additive field, no `schema_version` bump. See "Request-level cell exclusion" above. |
 | `abc_constr` | object | **Always present** (issue #4662) — where the `abc -constr` inputs came from: `{source, driving_cell, load_ff}`. `source` is `"request"` (`constraints.abc_constr`), `"builtin"` (the per-library table), or `null` (no `-constr` passed; `driving_cell`/`load_ff` are then `null` and the `unsupported_cell_library` warning names the skipped capability). Additive field, no `schema_version` bump. |
-| `warnings` | object | **Always present** (issue #1588) — a bounded, deterministic summary of every `Warning: ` line in the captured Yosys run log plus missing-library-capability warnings, never the raw log itself: `{total, by_category, representatives}`. `total` counts engine warning lines plus capability warnings (Yosys can reprint an unresolved problem's identical warning text at more than one of `synth`'s internal `check` calls, so this is "how noisy was this run", not a distinct-problem count — see `structural`'s own dedup discipline above for that). `by_category` is `{category: count}`, keys sorted for determinism, grouped into a small taxonomy (`latch_inferred`, `logic_loop`, `multiple_drivers`, `undriven_wire`, `other`, `unsupported_cell_library`, `dont_use_unsupported`, `netlist_x_constants`). `representatives` is `[{category, count, text}]`, one entry per category (the first message text seen), sorted by category and capped at 10 entries. |
+| `warnings` | object | **Always present** (issue #1588) — a bounded, deterministic summary of every `Warning: ` line in the captured Yosys run log plus missing-library-capability warnings, never the raw log itself: `{total, by_category, representatives}`. `total` counts engine warning lines plus capability warnings (Yosys can reprint an unresolved problem's identical warning text at more than one of `synth`'s internal `check` calls, so this is "how noisy was this run", not a distinct-problem count — see `structural`'s own dedup discipline above for that). `by_category` is `{category: count}`, keys sorted for determinism, grouped into a small taxonomy (`latch_inferred`, `logic_loop`, `multiple_drivers`, `undriven_wire`, `other`, `unsupported_cell_library`, `dont_use_unsupported`, `netlist_x_constants`). `representatives` is `[{category, count, text}]`, one entry per category (the first message text seen), sorted by category and capped at 10 entries. An `unsupported_cell_library` entry whose missing capability is the tie-cell mapping also names the `cell_library` keys that do have one, closest first (issue #5074), and a `netlist_x_constants` entry's advice names that missing mapping as the cause instead of blaming the RTL — message text only, category names unchanged. |
 | `memory_mapping` | object | **Always present** (issue #2745) — bounded evidence of what happened to inferred memories: `{status, reason, modules, script_path}`. `status` is one of `"none_detected"`, `"lowered_to_logic"`, `"optimized_away"`, `"surviving"`, `"mixed"`, `"indeterminate"`; `reason` is a free-text explanation, non-`null` only when something is `"indeterminate"`. `modules` is one row per module definition with at least one memory at any stage, sorted by name: `{module, status, elaborated_memories, elaborated_memory_bits, pre_lowering_memories, final_memories}`. `script_path` is the side evidence script, the same `{path, scope}` shape as `script_path`. See "`memory_mapping`" below for the stages, the classification rules, overhead, and limitations. Additive field, no `schema_version` bump. |
 | `blackbox_modules` | array\<string\> \| null | **Always present** (issue #2745) — sorted names of modules declared `(* blackbox *)`/`(* whitebox *)` that still have at least one instance in the final mapped design. **Their area is not included in `area_um2`** (Yosys's `stat -liberty` has no area for them) and they are never counted as memories. `[]` when there are none; `null` when the evidence invocation failed and the list could not be established. Additive field, no `schema_version` bump. |
 | `netlist_path` | object | The mapped gate-level netlist (`write_verilog -noattr`'s output), normalized to the `{path, scope}` shape `env_provenance.repo_relative_path()` defines (issue #1844, matching the precedent `klt pex`/`klt sim` set in issue #1261): `path` is repo-relative and `scope` is `"repo"` when the netlist resolves inside the invocation's repo, else `{"path": null, "scope": "external"}` — the absolute path is never echoed, so a committed evidence record never leaks it. Never re-derive `instance_count`/`area_um2` by parsing this file. |
@@ -1768,6 +1771,35 @@ checked independently, so a partially supported library reports only
 what it lacks. An absent `-dont_use` entry is intentional for gf180 and
 does not trigger this warning.
 
+When the **tie-cell** mapping is the missing one, the text carries a
+further hint ([issue #5074](https://github.com/2AMLogic/klayout-tools/issues/5074)):
+the `cell_library` keys that *do* have a verified tie-cell mapping, led by
+the closest one to the key you passed. The tie-cell table is looked up by
+**exact** string match, while a `klt-pdk.json` descriptor may map any name
+to a Liberty file — so a key one character off a verified one
+(`asap7sc7p5t_28_RVT` for `asap7sc7p5t_28_R`) silently loses the `setundef
+-zero`/`hilomap` pass, and without the hint a near miss is
+indistinguishable from a genuinely unsupported library:
+
+```
+cell_library 'asap7sc7p5t_28_RVT' has no verified mapping for: ... setundef
+-zero/hilomap (bare 0/1/x constants may remain unroutable in
+place-and-route). These capabilities were skipped. The closest cell_library
+with a verified tie-cell mapping is 'asap7sc7p5t_28_R'; the keys that do
+have one are: asap7sc7p5t_28_R, asap7sc7p5t_rvt, gf180mcu_fd_sc_mcu7t5v0,
+gf180mcu_fd_sc_mcu9t5v0, sg13g2_stdcell, sky130_fd_sc_hd -- pass one of
+these as pdk.cell_library if it is the library you meant.
+```
+
+With no close name the hint says so rather than suggesting an unrelated
+library, and it is **best-effort**: if building it fails the original
+warning text is still emitted intact. The hint is advisory — it never
+substitutes a library or folds a flavour suffix, because tie cells differ
+per flavour (`TIEHIx1_ASAP7_75t_R` *is* the RVT cell), so a blanket fold
+would emit the wrong cell silently. Nothing about the `warnings` JSON shape
+changes: the category stays `unsupported_cell_library`, only the message
+text grows.
+
 These capability entries follow the shared
 [requested-but-unperformed analysis contract](../json-contract.md#requested-but-unperformed-analysis).
 They retain the existing `{category, count, text}` shape inside
@@ -1779,8 +1811,18 @@ netlist still contains a bare x-valued constant assign (`assign w =
 24'hxxxxxx;`) after `setundef -zero`/`hilomap` ran. It is found by the same
 pattern `klt place-and-route`'s netlist pre-flight uses, names the count, the
 first five line numbers and the first offending line, and means P&R will
-refuse the netlist; re-running `klt synthesize` will not clear it, so remove
-or drive the undriven source signal in the RTL.
+refuse the netlist; re-running `klt synthesize` will not clear it.
+
+Its closing **advice depends on the cause**, because the two causes need
+opposite fixes. With a `cell_library` that *has* a verified tie-cell
+mapping, `setundef -zero`/`hilomap` did run and the x bits survived it, so
+the advice is to remove or drive the undriven source signal in the RTL.
+With a `cell_library` that has **no** tie-cell mapping, that pass never ran
+at all — the advice then names the unsupported library as the cause and
+points at the companion `unsupported_cell_library` warning for the keys
+that would have worked, rather than sending you after RTL that is not at
+fault. Check `warnings.by_category` for `unsupported_cell_library`
+alongside `netlist_x_constants` to tell the two apart programmatically.
 
 ## `baseline`: optional QoR delta against a prior run
 
