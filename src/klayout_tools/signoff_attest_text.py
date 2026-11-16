@@ -6,7 +6,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from .signoff_attest import failed_output_tail
+from .signoff_attest_command import failed_output_tail
 
 
 def check_label(check: Mapping[str, Any]) -> str:
@@ -49,7 +49,9 @@ def _what_command(c: dict) -> str:
     label = check_label(c)
     status = c.get("error") or f"exit {c['exit_status']}"
     argv = " ".join(c["argv"])
-    return f"{c['role']} {label}: {argv} ({status}){documented_suffix(c)}"
+    duration = c.get("duration_s")
+    ran = f" in {duration:.1f}s" if duration is not None else ""
+    return f"{c['role']} {label}: {argv} ({status}){ran}{documented_suffix(c)}"
 
 
 def _what_unbenched(c: dict) -> str:

@@ -11,11 +11,11 @@ import pytest
 from klayout_tools.signoff import build_tier_report
 from klayout_tools.signoff_attest import (
     AttestationError,
-    attach_output_tails,
     build_attestation,
     check_attestation,
     render_envelope,
 )
+from klayout_tools.signoff_attest_command import attach_output_tails
 
 _PASS = {"argv": [sys.executable, "-c", "pass"]}
 _FAIL = {"argv": [sys.executable, "-c", "raise SystemExit(1)"]}

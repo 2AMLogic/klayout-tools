@@ -59,8 +59,6 @@ import json
 import math
 import os
 import re
-import subprocess
-import sys
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
@@ -71,7 +69,6 @@ from ._report_verify import load_committed_report
 from .build_identity import build_version
 from .env_provenance import find_repo_root
 from .signoff import (
-    _COMMAND_EVIDENCE_TIMEOUT_S,
     _ITEMS_REQUIRING_ANCHORED_GENERIC_EVIDENCE,
     _ITEMS_REQUIRING_ATTESTED_EVIDENCE,
     SCHEMA_VERSION,
@@ -81,6 +78,7 @@ from .signoff import (
     _generic_item_binding_refusal,
     _reject_json_constant,
 )
+from .signoff_attest_command import _run_command, reset_durations
 from .signoff_attest_drift import drift_result
 from .signoff_attest_input import input_binding
 
@@ -731,92 +729,6 @@ def _recorded_hash_check(root: str, entry: Mapping[str, Any]) -> dict[str, Any]:
     return check
 
 
-# Bounded tail of a failing command's captured output (issue #4698). Held out
-# of band (never in a check dict built here) because it is host-specific and
-# the envelope -- and its content hash -- must stay reproducible. The CLI adds
-# it to the live ``--format json`` result via :func:`attach_output_tails`,
-# after any ``--output`` write and ``--check`` diff.
-_OUTPUT_TAIL_MAX_LINES = 20
-_OUTPUT_TAIL_MAX_BYTES = 2048
-_failed_output: dict[tuple[tuple[str, ...], str], str] = {}
-
-
-def _bounded_tail(text: str) -> str:
-    lines = text.rstrip().splitlines()[-_OUTPUT_TAIL_MAX_LINES:]
-    tail = "\n".join(lines)
-    encoded = tail.encode("utf-8")
-    if len(encoded) > _OUTPUT_TAIL_MAX_BYTES:
-        tail = encoded[-_OUTPUT_TAIL_MAX_BYTES:].decode("utf-8", errors="replace")
-    return tail
-
-
-def failed_output_tail(check: Mapping[str, Any]) -> str:
-    """Bounded tail of the captured stdout+stderr of the failing command
-    ``check`` in the most recent attestation run, or ``""`` (a passing,
-    skipped or unlaunchable check has none)."""
-    return _failed_output.get(
-        (tuple(check.get("argv") or ()), check.get("cwd", "")), ""
-    )
-
-
-def attach_output_tails(envelope: Mapping[str, Any]) -> None:
-    """Add the additive ``output_tail`` string to each failing command check of
-    ``envelope`` (in place). Live-result only: call after the envelope has
-    been written or diffed, never before."""
-    for check in (envelope.get("attestation") or {}).get("checks") or []:
-        if check.get("check") == "command" and not check.get("passed"):
-            tail = failed_output_tail(check)
-            if tail:
-                check["output_tail"] = tail
-
-
-def _command_env() -> dict[str, str]:
-    """Environment for a declared command: the caller's, minus the tool
-    venv's ``bin`` directory on ``PATH`` when running inside a venv (as under
-    ``uvx``/pipx), so a bare ``python3`` resolves to the repo's interpreter
-    rather than the tool's. Outside a venv the environment is unchanged."""
-    env = dict(os.environ)
-    if sys.prefix == sys.base_prefix or "PATH" not in env:
-        return env
-    venv_bin = os.path.normcase(os.path.dirname(sys.executable))
-    env["PATH"] = os.pathsep.join(
-        entry
-        for entry in env["PATH"].split(os.pathsep)
-        if os.path.normcase(entry) != venv_bin
-    )
-    return env
-
-
-def _run_command(root: str, spec: Mapping[str, Any]) -> tuple[int | None, str | None]:
-    """Run one declared command; return ``(exit_status, error)``. ``error``
-    is ``"launch_failed"``/``"timeout"`` (stable tokens, not host-specific
-    messages, so the envelope stays reproducible) or ``None``. A failing
-    command's output tail is kept for :func:`failed_output_tail`."""
-    cwd = os.path.join(root, spec["cwd"]) if spec["cwd"] != "." else root
-    key = (tuple(spec["argv"]), spec["cwd"])
-    _failed_output.pop(key, None)
-    try:
-        completed = subprocess.run(
-            spec["argv"],
-            cwd=cwd,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            timeout=spec.get("timeout_s", _COMMAND_EVIDENCE_TIMEOUT_S),
-            check=False,
-            env=_command_env(),
-        )
-    except subprocess.TimeoutExpired:
-        return None, "timeout"
-    except OSError:
-        return None, "launch_failed"
-    if completed.returncode != 0:
-        tail = _bounded_tail(completed.stdout.decode("utf-8", errors="replace"))
-        if tail:
-            _failed_output[key] = tail
-    return completed.returncode, None
-
-
 def _command_check(
     root: str, spec: Mapping[str, Any], role: str, **identity: Any
 ) -> dict[str, Any]:
@@ -985,6 +897,7 @@ def _run_checks(
     checks sorted by path (independent of inventory listing order), then
     the item's command and pin checks. With ``committed_checks`` (the
     ``--check`` path) every ``local_only`` command is skipped, not run."""
+    reset_durations()
     checks: list[dict[str, Any]] = []
 
     def command(spec: Mapping[str, Any], role: str, **identity: Any) -> dict[str, Any]:

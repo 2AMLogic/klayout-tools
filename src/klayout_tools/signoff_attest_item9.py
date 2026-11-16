@@ -250,7 +250,10 @@ def with_progress(
     run: Callable[..., dict[str, Any]], label_of: Callable[..., str]
 ) -> Callable[..., dict[str, Any]]:
     """Wrap a command-check runner so each run writes a start and finish line
-    to stderr. Timing stays out of the returned check (reproducible envelope)."""
+    to stderr. Timing stays out of the returned check (reproducible envelope);
+    the observed wall time reaches the live ``--format json`` result only, as
+    each command check's additive ``duration_s`` (issue #5817), never the
+    committed envelope or the ``--check`` diff."""
 
     def wrapped(spec: Mapping[str, Any], role: str, **identity: Any) -> dict[str, Any]:
         label = label_of(role, identity)

@@ -3,11 +3,12 @@
 
 A check dict built by :mod:`.signoff_attest` carries only reproducible,
 host-independent facts, because the envelope -- and its content hash -- must
-be identical on every host. Two fields are therefore attached by the CLI to
+be identical on every host. Three fields are therefore attached by the CLI to
 the *live* result only, after any ``--output`` write and after the ``--check``
-diff: ``output_tail`` (a failing command's captured output, issue #4698) and
-``hint`` (this module). Neither is ever written to an ``-o`` file, appears in
-a ``--check`` diff, or is produced by an attestation builder.
+diff: ``output_tail`` (a failing command's captured output, issue #4698),
+``duration_s`` (every launched command's observed wall time, issue #5817) and
+``hint`` (this module). None is ever written to an ``-o`` file, appears in a
+``--check`` diff, or is produced by an attestation builder.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from .signoff_attest import attach_output_tails
+from .signoff_attest_command import attach_durations, attach_output_tails
 
 #: Advice for a failing ``command`` check that re-verifies a tier-verdict
 #: record. Deliberately conditional ("if that record cites ..."): the check's
@@ -87,8 +88,9 @@ def attach_live_fields(result: Mapping[str, Any], *, hints: bool = True) -> None
     Call after the envelope has been written and after any ``--check`` diff
     was built, never before. ``hints=False`` is ``--attest --check``'s form:
     that mode mints nothing, so the circular-record advice does not apply and
-    only ``output_tail`` is attached.
+    only ``output_tail`` and ``duration_s`` are attached.
     """
+    attach_durations(result)
     attach_output_tails(result)
     if hints:
         attach_record_check_hints(result)
