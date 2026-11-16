@@ -3678,13 +3678,40 @@ def _add_artifact_parser(subparsers: argparse._SubParsersAction) -> None:
 
     verify_parser = artifact_sub.add_parser(
         "verify",
-        help="check every manifest entry's size and sha256 against the store",
+        help="check every manifest entry's size and sha256 against the "
+        "store, or re-hash local files in place with --local",
         description=(
-            "stat each entry, then fetch and re-hash it. Exits 3 if any entry "
-            "is missing or mismatched, 1 on a broker refusal or bad manifest."
+            "Against the broker: stat each entry, then fetch and re-hash "
+            "it. With --local no broker is contacted at all: each entry "
+            "whose name resolves to a file under --root is re-hashed in "
+            "place and its sha256 and size compared to the manifest, so a "
+            "committed summary can be checked in a clean checkout with no "
+            "credential. Exits 3 if any checked entry is missing or "
+            "mismatched, 1 on a broker refusal, a bad manifest, a local "
+            "run in which no entry resolved, or a local entry name that "
+            "escapes the verify root."
         ),
     )
-    verify_parser.add_argument("manifest", metavar="MANIFEST")
+    verify_parser.add_argument(
+        "manifest",
+        metavar="MANIFEST",
+        help="manifest to check; with --local, MANIFEST[#SELECTOR] checks "
+        "one entry (SELECTOR is an entry's sha256 or name)",
+    )
+    verify_parser.add_argument(
+        "--local",
+        action="store_true",
+        help="verify against files under --root instead of the store: no "
+        "broker, no network, no credential",
+    )
+    verify_parser.add_argument(
+        "--root",
+        metavar="DIR",
+        default=None,
+        help="directory entry names resolve against (with --local; "
+        "default: the manifest's git checkout root, else the current "
+        "directory)",
+    )
     _add_artifact_common_args(verify_parser, repo=False)
     verify_parser.set_defaults(func=artifact_cmd.run_verify)
 

@@ -13,6 +13,8 @@ klt artifact put FILE... [--manifest PATH] [--repo OWNER/NAME] [--name N]
 klt artifact get REF -o OUT|- [--repo OWNER/NAME] [--force] [--broker URL]
     [--format text|json]
 klt artifact verify MANIFEST [--broker URL] [--format text|json]
+klt artifact verify MANIFEST[#SELECTOR] --local [--root DIR]
+    [--format text|json]
 ```
 
 Access: evidence bytes are **private** and manifests are **public**. A manifest
@@ -137,6 +139,91 @@ broker refusal other than a missing object. A throttled broker (HTTP 429) is
 retried with backoff first (see below), so a rate limit that persists fails the
 run as `broker_rate_limited`, not as an unverified or mismatched entry.
 
+### Local verification (`--local`)
+
+```
+klt artifact verify MANIFEST[#SELECTOR] --local [--root DIR]
+```
+
+`--local` is an explicit, opt-in mode, not a fallback: a broker-backed
+`verify` still never falls back to a local copy on a broker refusal. With
+`--local` the broker is not contacted at all — no network, no credential, and
+no broker URL needs to be configured. Each entry whose `name` resolves to a
+file under `--root` (default: the manifest's git checkout root, else the
+current directory) is re-hashed in place and its sha256 and size compared to
+the manifest entry. This is how a report check re-establishes a record's
+committed summary in a clean CI checkout, where the broker is unreachable by
+policy (CI holds no broker credential — see § Configuration).
+
+Per-entry statuses: `ok`, `absent` (no file under `--root` at that name),
+`hash_mismatch` (same-length or appended content differs), `size_mismatch`
+(the file is shorter than the manifest's `size`), and `no_name` (the entry
+has no `name`, so nothing can be resolved for it — reported, never a crash).
+A `name` that would resolve outside the verify root — an absolute path, a
+`..` climb, or a symlink whose target escapes the root — refuses the whole
+run with `name_escapes_root` before anything is read.
+
+Exit codes for `--local`:
+
+- `0` — every checked entry is `ok`.
+- `3` — a checked entry is not `ok`. With a `#SELECTOR`, exactly one entry is
+  checked and an `absent` one is a failure: you named an entry you need.
+  Without a selector every entry is checked and `absent`/`no_name` entries
+  are reported but expected: the large objects live in the store, not in git.
+- `1` — malformed or unreadable manifest, an unreadable file
+  (`unreadable_input`), an entry name escaping the root
+  (`name_escapes_root`), or — only without a selector — a run in which **no**
+  entry resolved to a file (`nothing_verified`). An empty checkout must
+  never look like a pass.
+- `2` — usage (e.g. `--root` without `--local`).
+
+`--format json`: the same payload shape as broker-backed `verify`, plus
+`mode: "local"`, the resolved `root`, and a per-entry `path`.
+
+#### What a local verify proves — and what it does not
+
+The manifest is the committed root of trust: editing a committed file changes
+its sha256, so the local verify fails against the manifest entry; swapping
+the manifest breaks the digests the record itself cites and fails the
+broker-side `verify` wherever the store is reachable. What a local verify
+does **not** prove is that a committed file's contents were actually computed
+from the record's raw samples — that re-establishment needs the store, and
+stays with the broker-backed `verify` (on the batch fleet or another
+credentialed job).
+
+#### The committed-summary convention
+
+`klt` cannot compute a chip's published statistics: per-point worst cases,
+knee accounting and stray-sample rejection are chip-defined compositions (see
+your report extractor), not a generic rollup. The division of labor is: the
+chip owns the payload, `klt` owns the binding.
+
+- **At record time** (where the store is reachable): write a small
+  `summary.json` beside the large objects carrying exactly the statistics the
+  record publishes, store every object into the manifest with
+  `klt artifact put FILE... --manifest MANIFEST`, and **commit both the
+  manifest and `summary.json`** to git. The summary is small; the large
+  objects stay store-only.
+- **At check time** (clean checkout, no credentials): run
+  `klt artifact verify --local MANIFEST#sim/…/summary.json`, then have the
+  report check read the committed summary and compare the published figures
+  to it. The selector guarantees the summary named by the check is the one
+  bound to that manifest.
+- **Full cross-check** (batch fleet or any store-reachable job): the plain
+  broker-backed `klt artifact verify MANIFEST` re-hashes the raw samples and
+  closes the loop the local check cannot.
+
+Migration recipe for a chip repo whose report `--check` re-reads per-sample
+bytes from the checkout:
+
+1. Add the summary write at record time, next to the existing
+   `artifact put --manifest` call, and commit it beside the manifest.
+2. Point the check's evidence binding at
+   `klt artifact verify --local MANIFEST#<summary name>` (exit `0` required),
+   then compare against the summary instead of the raw bytes.
+3. Keep the raw-bytes crosscheck on a store-reachable job; it moves, it does
+   not disappear.
+
 ### Rate limiting
 
 Every broker call (`put`, `get`, `stat`, so `verify` too) retries HTTP 429 up to
@@ -202,8 +289,8 @@ Campaign outputs are cited the same way.
 | Code | Meaning |
 |---|---|
 | `0` | Done: stored, fetched and verified, every entry ok, or delete (dry run, deleted or absent) |
-| `1` | Not done: no broker, a broker refusal (`error.code: "broker_refused"` with `broker_status`, `broker_error` and `broker_message`), a broker still rate-limiting after retries (`broker_rate_limited`), an unreachable broker (`broker_unreachable`), a malformed manifest, unreadable input, a `get` whose bytes failed verification, or a `delete` of a still-referenced object (`still_referenced`) |
+| `1` | Not done: no broker, a broker refusal (`error.code: "broker_refused"` with `broker_status`, `broker_error` and `broker_message`), a broker still rate-limiting after retries (`broker_rate_limited`), an unreachable broker (`broker_unreachable`), a malformed manifest, unreadable input, a `get` whose bytes failed verification, a `delete` of a still-referenced object (`still_referenced`), or — `verify --local` only — a run in which no entry resolved (`nothing_verified`) or an entry name escaping the verify root (`name_escapes_root`) |
 | `2` | Usage error |
-| `3` | `verify` only: at least one entry is missing or mismatched |
+| `3` | `verify` only: at least one checked entry is missing or mismatched (broker-backed or `--local`) |
 
 The library behind the verb is `klayout_tools.artifact_store`.
