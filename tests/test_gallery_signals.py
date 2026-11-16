@@ -103,7 +103,7 @@ def test_gf180_cells_get_documented_device_substitution():
         cfg = gs.CELL_CONFIGS[slug]
         if cfg.pdk != "gf180mcu":
             continue
-        body = gs._cell_body_text(cfg)  # noqa: SLF001 -- unit-testing the helper directly
+        body = gs._cell_body_text(cfg)  # -- unit-testing the helper directly
         assert "nfet_05v0" not in body
         assert "pfet_05v0" not in body
         assert "nmos_6p0" in body or "pmos_6p0" in body
@@ -175,7 +175,7 @@ def test_trim_waveform_projects_onto_testbench_pins(tmp_path):
             }
         )
     )
-    trimmed = gs._trim_waveform(str(source), cfg)  # noqa: SLF001 -- unit-testing the helper
+    trimmed = gs._trim_waveform(str(source), cfg)  # -- unit-testing the helper
 
     assert [v["name"] for v in trimmed["variables"]] == ["time", "v(a)", "v(y)"]
     # Re-indexed 0..n-1 so the artifact stays self-consistent.
@@ -186,7 +186,7 @@ def test_trim_waveform_projects_onto_testbench_pins(tmp_path):
 def test_trim_waveform_returns_none_for_unusable_artifact(tmp_path):
     cfg = gs.CELL_CONFIGS["sky130_fd_sc_hd__inv_1"]
     missing = tmp_path / "nope.json"
-    assert gs._trim_waveform(str(missing), cfg) is None  # noqa: SLF001
+    assert gs._trim_waveform(str(missing), cfg) is None
 
     unrelated = tmp_path / "unrelated.json"
     unrelated.write_text(
@@ -198,7 +198,7 @@ def test_trim_waveform_returns_none_for_unusable_artifact(tmp_path):
             }
         )
     )
-    assert gs._trim_waveform(str(unrelated), cfg) is None  # noqa: SLF001
+    assert gs._trim_waveform(str(unrelated), cfg) is None
 
 
 def test_stage_waveforms_writes_nominal_corners_and_drops_artifacts(tmp_path):
@@ -227,7 +227,7 @@ def test_stage_waveforms_writes_nominal_corners_and_drops_artifacts(tmp_path):
         {"corner_id": "tt/1.620V/-40C", "artifacts": {"waveform": str(raw)}},
     ]
     block_dir = tmp_path / "block"
-    gs._stage_waveforms(cfg, corners, str(block_dir))  # noqa: SLF001
+    gs._stage_waveforms(cfg, corners, str(block_dir))
 
     assert corners[0]["waveform"] == f"signals/{nominal_id.replace('/', '_')}.json"
     assert "waveform" not in corners[1]  # a non-nominal corner is not staged
