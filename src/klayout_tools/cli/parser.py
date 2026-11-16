@@ -4126,6 +4126,15 @@ def _add_stats_parser(subparsers: argparse._SubParsersAction) -> None:
         help="also report the same statistics broken down per layer",
     )
     stats_parser.add_argument(
+        "--geometry-digest",
+        action="store_true",
+        help=(
+            "also compute geometry_digest, a sha256 of the stream's decoded "
+            "geometry (null otherwise; it re-reads the whole layout and "
+            "roughly 2.5x's the runtime on large flat layouts)"
+        ),
+    )
+    stats_parser.add_argument(
         "--top",
         default=None,
         help=(
