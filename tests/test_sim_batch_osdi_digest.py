@@ -202,3 +202,30 @@ def test_finalize_batch_remote_performs_the_join():
 
     assert resolved[0]["sha256"] == _SHA_A
     assert environment["remote"]["models_lib_comparison"]["status"] == "not_comparable"
+
+
+def test_join_keeps_later_digests_when_a_lifted_slot_is_not_a_dict():
+    """A non-dict lifted element at the declared index yields ``None`` for
+    that entry only; later indices still get their own digest (the slot is
+    kept, never shifted)."""
+    lifted = [None, {"name": "b.osdi", "sha256": _SHA_B}]
+    assert _join(
+        [_resolved("$PDK_ROOT/a.osdi", 0), _resolved("$PDK_ROOT/b.osdi", 1)],
+        {"runner_osdi_preload": lifted},
+    ) == [None, _SHA_B]
+
+
+def test_join_passes_over_a_non_dict_resolved_element():
+    """A non-dict element in ``osdi_preload_runner_resolved`` is left
+    untouched and the surrounding dict entries are still joined."""
+    lifted = [{"name": "a.osdi", "sha256": _SHA_A}]
+    resolved = ["not-a-dict", _resolved("$PDK_ROOT/a.osdi", 0)]
+    sbf.attach_runner_osdi_digests(
+        {
+            "osdi_preload_runner_resolved": resolved,
+            "remote": {"runner_osdi_preload": lifted},
+        },
+        "batch",
+    )
+    assert resolved[0] == "not-a-dict"
+    assert resolved[1]["sha256"] == _SHA_A
