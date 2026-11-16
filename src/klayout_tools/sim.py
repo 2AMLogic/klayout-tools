@@ -148,6 +148,7 @@ from . import sim_op_check as sim_op_check
 from . import sim_peak_rss as sim_peak_rss
 from . import sim_provenance as sim_provenance
 from . import sim_staging as sim_staging
+from . import sim_transient_noise as sim_tn
 from ._jsonnum import is_int, is_number
 from ._paths import (
     _load_request_json,
@@ -2033,43 +2034,6 @@ def _validate_ngspice_init(value: Any) -> tuple[str, ...]:
     return tuple(lines)
 
 
-def _validate_transient_noise_seed(value: Any, engine: str) -> int | None:
-    """Validate ``options.transient_noise_seed`` (issue #5772).
-
-    The value becomes ngspice's ``setseed N`` control command, emitted first
-    in every corner deck's ``.control`` block -- measured on ngspice-47 to be
-    the one placement that pins a ``trrandom`` stream through a ``klt sim``
-    run (``.spiceinit`` and ``.options seed=`` are both too early or
-    otherwise ignored; see docs/cli/sim.md's #3957 section). It does **not**
-    make ``trnoise`` reproducible -- no known route does -- so the option's
-    echo and scope statement live on ``environment.transient_noise``.
-
-    ``None``/absent (the house convention for an undeclared optional field)
-    normalises to ``None`` -- no ``setseed`` line, decks byte-identical to
-    before this issue. Anything else must be an integer (a bool is a JSON
-    ``true``/``false``, not the integer ngspice's command takes, so it is
-    refused like every other bool-impersonating-an-int value). ``engine:
-    "xyce"`` refuses a declared value outright -- the command has no Xyce
-    equivalent and the Xyce deck has no ``.control`` block to carry it --
-    rather than silently accepting it with no effect.
-    """
-    if value is None:
-        return None
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise SimError(
-            "options.transient_noise_seed must be an integer (the value "
-            "ngspice's `setseed` control command takes), got " + json.dumps(value)
-        )
-    if engine == "xyce":
-        raise SimError(
-            "options.transient_noise_seed is not supported for engine "
-            "'xyce': it emits `setseed` in the ngspice `.control` block, "
-            "which the Xyce deck does not have; use engine 'ngspice' or "
-            "drop the option"
-        )
-    return value
-
-
 #: ``options.save_mode`` (issue #2732): who owns the corner's saved
 #: node/branch set. ``"all"`` (the default) keeps issue #2521's generated
 #: ``save all`` -- emitted whenever the corner has measurements or a rawfile
@@ -2265,38 +2229,6 @@ def _ngspice_options_card(ngspice_options: dict[str, Any] | None) -> str | None:
     return ".options " + " ".join(terms) if terms else None
 
 
-def check_transient_noise_seed_echo(
-    request: dict[str, Any], report: dict[str, Any]
-) -> None:
-    """Fail loudly when an off-host report did not honour
-    ``options.transient_noise_seed`` (issue #5772).
-
-    A runner that predates the field drops it silently: its corners run with
-    unpinned noise streams while the caller believes them seed-keyed. The
-    collected inner report's ``environment.transient_noise`` block is the
-    runner's own disclosure (issue #2985 predates this option by far), so a
-    block that carries no ``seed`` -- or a different one -- while the request
-    declared the option is that silent drop, turned into a named
-    :class:`SimError`. A report with no -- or an empty -- ``transient_noise``
-    block is not checked: the run had no qualifying transient-noise source,
-    and the option is then inert by design.
-    """
-    declared = (request.get("options") or {}).get("transient_noise_seed")
-    if declared is None:
-        return
-    block = (report.get("environment") or {}).get("transient_noise") or {}
-    if not block:
-        return
-    echoed = block.get("seed")
-    if echoed != declared:
-        raise SimError(
-            "off-host runner did not honour options.transient_noise_seed: "
-            f"declared {json.dumps(declared)}, runner echoed "
-            f"{json.dumps(echoed)} (the runner is likely older than this "
-            "client and dropped the option)"
-        )
-
-
 def check_ngspice_options_echo(request: dict[str, Any], report: dict[str, Any]) -> None:
     """Fail loudly when an off-host report did not honour
     ``options.ngspice_options`` (issue #3111).
@@ -2323,6 +2255,13 @@ def check_ngspice_options_echo(request: dict[str, Any], report: dict[str, Any]) 
             f"{json.dumps(echoed, sort_keys=True)}, which differs from the "
             f"declared {json.dumps(declared, sort_keys=True)}"
         )
+
+
+def check_runner_option_echoes(request: dict[str, Any], report: dict[str, Any]) -> None:
+    """Both silent-drop echo checks (issues #3111, #5772) on a collected
+    off-host report."""
+    check_ngspice_options_echo(request, report)
+    sim_tn.check_transient_noise_seed_echo(request, report)
 
 
 def _own_persistent_roots(
@@ -3435,8 +3374,8 @@ def _prepare_sim_request(
     # Issue #5772: same up-front validation; an off-host worker re-reads it
     # from the forwarded request document (it only acts when a corner deck is
     # written, which happens on the worker), and
-    # `check_transient_noise_seed_echo` verifies the collected inner report.
-    transient_noise_seed = _validate_transient_noise_seed(
+    # `sim_tn.check_transient_noise_seed_echo` verifies the collected inner report.
+    transient_noise_seed = sim_tn.validate_seed(
         options.get("transient_noise_seed"), engine
     )
     # Issue #3036: the rule grammar is validated up front; the rules are
@@ -3566,7 +3505,7 @@ def _prepare_sim_request(
         )
         # Issue #2963: disclose transient-noise sources the seed contract
         # does not cover, whatever `vary` asks for.
-        monte_carlo_info = _with_unseeded_noise(
+        monte_carlo_info = sim_tn.with_unseeded_noise(
             monte_carlo_info, netlist_path, request=request, repo_root=repo_root
         )
         quantiles, k_sigma = _validate_mc_statistics_spec(monte_carlo_spec)
@@ -4532,7 +4471,7 @@ def _run_sim_corners(
     # the #5772 seed echo, so a run with no `monte_carlo` gets both too (the
     # MC-scoped note's call site is the only other emitter, unchanged).
     environment.update(
-        _transient_noise_environment(
+        sim_tn.transient_noise_environment(
             netlist_path,
             request=request,
             analysis=analysis,
@@ -6369,15 +6308,6 @@ def _key_in_mc_seed_options(
             payload[key] = sorted(values)
 
 
-def _key_in_transient_noise_seed(payload: dict[str, Any], seed: int | None) -> None:
-    """Issue #5772: the seed changes every corner deck's bytes (the
-    ``setseed`` card), so a checkpoint written under another seed -- or none
-    -- never applies. Keyed in off ``None`` only, so an existing checkpoint
-    stays valid for a request that omits the field."""
-    if seed is not None:
-        payload["transient_noise_seed"] = seed
-
-
 def _checkpoint_fingerprint(
     *,
     netlist_path: str,
@@ -6443,7 +6373,7 @@ def _checkpoint_fingerprint(
         # checkpoint written under other options never applies. Only keyed
         # in when declared, leaving existing fingerprints untouched.
         payload["ngspice_options"] = ngspice_options
-    _key_in_transient_noise_seed(payload, transient_noise_seed)
+    sim_tn.key_in_fingerprint(payload, transient_noise_seed)
     _key_in_mc_seed_options(payload, corner_points)
     _key_in_mc_mismatch_scale(payload, corner_points)
     if stimulus_lines:
@@ -7232,189 +7162,6 @@ def _logical_netlist_lines(netlist_text: str) -> list[str]:
             continue
         logical.append(line)
     return logical
-
-
-_NOISE_SOURCE_RE = re.compile(r"\b(trnoise|trrandom)\s*\(", re.IGNORECASE)
-
-
-def _noise_sources_in_text(netlist_text: str) -> list[tuple[str, str]]:
-    """``(lower-cased name, keyword)`` of every independent ``V*``/``I*``
-    source declaring a ``trnoise``/``trrandom`` waveform (issue #2963),
-    including inside ``.subckt`` bodies. Lexical, via
-    :func:`_logical_netlist_lines`."""
-    found: list[tuple[str, str]] = []
-    for line in _logical_netlist_lines(netlist_text):
-        if line[0].lower() not in ("v", "i"):
-            continue
-        match = _NOISE_SOURCE_RE.search(line)
-        if match:
-            found.append((line.split(None, 1)[0].lower(), match.group(1).lower()))
-    return found
-
-
-def _scan_noise_sources(
-    netlist_path: str, *, request: dict[str, Any], repo_root: str | None
-) -> tuple[set[tuple[str, str]], list[dict[str, str]]]:
-    """``(sources, not_scanned)``: every ``trnoise``/``trrandom`` source
-    declared in the netlist's scanned ``.include`` closure (issues #2963,
-    #2985), and what part of the closure could not be scanned."""
-    files, not_scanned = _mismatch_scan_closure(request, netlist_path, repo_root)
-    sources: set[tuple[str, str]] = set()
-    for _label, path in files:
-        try:
-            with open(path, encoding="utf-8") as handle:
-                sources.update(_noise_sources_in_text(handle.read()))
-        except (OSError, UnicodeDecodeError):
-            not_scanned.append({"target": _label, "reason": "unreadable"})
-    return sources, not_scanned
-
-
-def _unseeded_noise_report(
-    netlist_path: str, *, request: dict[str, Any], repo_root: str | None
-) -> dict[str, Any] | None:
-    """Additive ``environment.monte_carlo`` fields for transient-noise
-    sources the ``monte_carlo.seed`` contract does not govern (issue #2963),
-    or ``None`` when no scanned file declares one (shape unchanged)."""
-    sources, not_scanned = _scan_noise_sources(
-        netlist_path, request=request, repo_root=repo_root
-    )
-    if not sources:
-        return None
-    report: dict[str, Any] = {
-        "unseeded_sources": [
-            {"name": name, "keyword": keyword} for name, keyword in sorted(sources)
-        ],
-        "unseeded_sources_note": _UNSEEDED_NOISE_NOTE,
-    }
-    if not_scanned:
-        report["unseeded_sources_not_scanned"] = not_scanned
-    return report
-
-
-def _analysis_runs_tran(analysis: dict[str, Any]) -> bool:
-    """Does the resolved analysis run a transient (scalar ``tran`` or an
-    ``analysis_steps[]`` tran step)?"""
-    if sim_steps.is_steps_analysis(analysis):
-        return any(
-            str(step.get("kind", "")).lower() == "tran"
-            for step in analysis.get("steps", [])
-        )
-    return str(analysis.get("kind", "")).lower() == "tran"
-
-
-def _transient_noise_reproducibility_note(kinds: set[str], *, seed: int | None) -> str:
-    """The issue #5772 reproducibility statement for
-    ``environment.transient_noise``, composed from the source kinds actually
-    found and whether the request pinned the stream.
-
-    Per-kind, measured (issues #3957/#5772): ``trnoise`` is not replayable
-    through any known ngspice seeding route; ``trrandom`` is replayable only
-    via a ``.control`` ``setseed`` command, which
-    ``options.transient_noise_seed`` emits. The note must never claim a
-    ``trnoise`` stream is pinnable, and never claim ``trrandom`` is inherently
-    unpinnable -- the two half-truths the note replaces (the #2963 wording
-    said both sources were unseedable).
-    """
-    sentences: list[str] = []
-    if "trnoise" in kinds:
-        sentences.append(
-            "trnoise streams are not replayable through any known ngspice "
-            "seeding route (measured, issues #3957/#5772): re-running this "
-            "request redraws them."
-        )
-    if "trrandom" in kinds:
-        if seed is not None:
-            sentences.append(
-                f"trrandom streams are replayable via a `.control` `setseed` "
-                f"command; this run emitted `setseed {seed}` first in each "
-                "corner's `.control` block, so its trrandom measurements "
-                "replay at this seed."
-            )
-        else:
-            sentences.append(
-                "trrandom streams are replayable only via a `.control` "
-                "`setseed` command; this run declares no "
-                "options.transient_noise_seed, so its trrandom stream is not "
-                "reproducible either."
-            )
-    if seed is not None and "trnoise" in kinds:
-        sentences.append(
-            "options.transient_noise_seed pins the trrandom stream only; it "
-            "does not make the trnoise stream reproducible."
-        )
-    return " ".join(sentences)
-
-
-def _transient_noise_environment(
-    netlist_path: str,
-    *,
-    request: dict[str, Any],
-    analysis: dict[str, Any],
-    engine: str,
-    repo_root: str | None,
-    transient_noise_seed: int | None = None,
-) -> dict[str, Any]:
-    """Additive ``environment.transient_noise`` (issue #2985): what noise an
-    ngspice transient contains -- only the declared ``trnoise``/``trrandom``
-    sources, no intrinsic device or resistor noise. ``{}`` (field absent)
-    unless the engine is ngspice, a transient runs and a scanned file
-    declares such a source.
-
-    Issue #5772: the block also carries the reproducibility disclosure
-    (``reproducibility_note``, keyed on the kinds actually found) on every
-    qualifying run -- the #2963 note only reached runs with a
-    ``monte_carlo`` block -- and, when the request declared
-    ``options.transient_noise_seed``, the effective seed as ``seed``.
-    """
-    if engine != "ngspice" or not _analysis_runs_tran(analysis):
-        return {}
-    sources, not_scanned = _scan_noise_sources(
-        netlist_path, request=request, repo_root=repo_root
-    )
-    if not sources:
-        return {}
-    report: dict[str, Any] = {
-        "engine": engine,
-        "sources": [
-            {"name": name, "kind": keyword} for name, keyword in sorted(sources)
-        ],
-        "intrinsic_device_noise": False,
-        "intrinsic_resistor_noise": False,
-        "reproducibility_note": _transient_noise_reproducibility_note(
-            {keyword for _name, keyword in sources}, seed=transient_noise_seed
-        ),
-    }
-    if transient_noise_seed is not None:
-        report["seed"] = transient_noise_seed
-    if not_scanned:
-        report["sources_not_scanned"] = not_scanned
-    return {"transient_noise": report}
-
-
-def _with_unseeded_noise(
-    monte_carlo_info: dict[str, Any],
-    netlist_path: str,
-    *,
-    request: dict[str, Any],
-    repo_root: str | None,
-) -> dict[str, Any]:
-    """``monte_carlo_info`` plus the issue #2963 unseeded-noise disclosure
-    (and its stderr warning) when a scanned file declares such a source."""
-    noise_report = _unseeded_noise_report(
-        netlist_path, request=request, repo_root=repo_root
-    )
-    if noise_report is None:
-        return monte_carlo_info
-    print(f"warning: {_UNSEEDED_NOISE_NOTE}", file=sys.stderr)
-    return {**monte_carlo_info, **noise_report}
-
-
-_UNSEEDED_NOISE_NOTE = (
-    "trnoise()/trrandom() sources are not governed by monte_carlo.seed "
-    "(ngspice seeds them from the process id): re-running this request "
-    "redraws their noise, and samples run in separate batch jobs or hosts "
-    "may share a noise stream."
-)
 
 
 def _top_level_waveform_sources(netlist_text: str) -> dict[str, str]:
@@ -9966,24 +9713,6 @@ def _write_corner_deck(
         handle.write("\n".join(lines) + "\n")
 
 
-def _transient_noise_seed_lines(seed: int | None) -> list[str]:
-    """The ``setseed N`` command line for a corner deck's ``.control`` block
-    (issue #5772), or no lines when the request declared no seed -- decks
-    stay byte-identical to pre-#5772 then.
-
-    Emitted as the block's **first** command, before the ``pre_osdi`` lines,
-    the ``alterparam``/``reset`` prefix, the ``save`` card and every supply
-    ``alter``: the measured configuration (issues #3957/#5772, ngspice-47)
-    is ``setseed N`` first in ``.control``; ``.spiceinit`` placement is
-    measured not to pin the stream (the interpreter sources it before the
-    deck is parsed), and the prefix commands themselves draw nothing from
-    the RNG, so seeding ahead of them is equivalent to seeding immediately
-    before the analysis. This is the placement that makes a ``trrandom``
-    stream replayable; it does **not** make ``trnoise`` replayable -- no
-    known route does (see ``environment.transient_noise``'s note)."""
-    return [] if seed is None else [f"setseed {seed}"]
-
-
 def _param_reset_lines(point: CornerPoint) -> list[str]:
     """Issue #3035: `alterparam` rewrites the named top-level `.param`
     defaults, and ONE `reset` re-parses the deck so every expression that
@@ -10059,7 +9788,7 @@ def _corner_deck_control_lines(
     0. ``setseed N`` first, when the request declared
        ``options.transient_noise_seed`` (issue #5772) -- the measured
        configuration that pins a ``trrandom`` stream; see
-       :func:`_transient_noise_seed_lines`. Never emitted for a request
+       :func:`sim_transient_noise.seed_lines`. Never emitted for a request
        without the option, so every pre-#5772 deck is byte-identical.
     1. ``pre_osdi <lib>`` per ``options.osdi_preload`` entry, in declared
        order. Order-free in practice -- a ``pre_``-prefixed command is
@@ -10153,8 +9882,8 @@ def _corner_deck_control_lines(
     for a step sequence, so ``raw_path`` is always ``None`` there.)
     """
     lines = [".control"]
-    # Issue #5772: `setseed N` first -- see `_transient_noise_seed_lines`.
-    lines.extend(_transient_noise_seed_lines(transient_noise_seed))
+    # Issue #5772: `setseed N` first -- see `sim_tn.seed_lines`.
+    lines.extend(sim_tn.seed_lines(transient_noise_seed))
     for path in osdi_preload:
         lines.append(f"pre_osdi {path}")
     # Issue #3035: the parameter reset must come first -- `reset` reloads the

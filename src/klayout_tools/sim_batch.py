@@ -3432,12 +3432,11 @@ def _poll_and_collect(
 
     with tempfile.TemporaryDirectory(prefix="klt-batch-outputs-") as collected:
         collect_outputs(config, job_id, collected, runner=runner)
-        from .sim import check_ngspice_options_echo, check_transient_noise_seed_echo
+        from .sim import check_runner_option_echoes
 
         environment["client_collected_at"] = now()
         report = read_collected_report(collected)
-        check_ngspice_options_echo(request, report)
-        check_transient_noise_seed_echo(request, report)
+        check_runner_option_echoes(request, report)
         environment = {**environment, **_read_job_identity(collected, request)}
         environment.update(collected_report_env(status, report))
         corners = report.get("corners") or []
