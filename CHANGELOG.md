@@ -20,6 +20,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   `--require-build-match` fails the check (exit 3, `status: "drifted"`) when
   ENV's `provenance.klt_version` is from a different build. Report-only
   without the flag.
+- **Changed** (#5583, additive-compatible — `klt stats` `schema_version`
+  unchanged): `geometry_digest` is now opt-in via `klt stats
+  --geometry-digest` and is `null` by default (text output `geometry_digest:
+  -`). Computing it re-reads and walks the whole layout (~2.5x the rest of
+  the report on large flat layouts). The field and its `["string","null"]`
+  schema type are unchanged; consumers that relied on the default value (e.g.
+  the `klt signoff --attest 2 --hash-kind geometry` recipe) must now pass the
+  flag.
 - **Changed** (#5788, breaking — `klt array-check` `schema_version` 1 ->
   **2**): the record's `file` field is now the committable
   `{path, scope}` object `env_provenance.repo_relative_path()` builds

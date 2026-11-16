@@ -93,7 +93,7 @@ the same way.
   `canonical_hash` from `klt diff`. It is a *different* value from the digest
   `klt signoff --attest 2 --regenerated-hash ... --hash-kind geometry` is
   graded against (and carries no `sha256:` prefix), so feeding it to that flag
-  grades `stale_artifact`. Use `klt stats --format json | jq -r
+  grades `stale_artifact`. Use `klt stats --geometry-digest --format json | jq -r
   .geometry_digest` for that — see [`docs/cli/stats.md`](stats.md) → "Geometry
   digest".
 - Shape items are `box` (`bbox`), `polygon` (`hull`, `holes`), `path`

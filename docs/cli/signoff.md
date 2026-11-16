@@ -1547,12 +1547,12 @@ absent for byte claims). A geometry claim is never run by the opt-in
 generator execution, which compares bytes; it stays `executed_by_klt: false`.
 
 **Producing the value (issue #5551).** `klt stats --format json` reports the
-same digest as `geometry_digest`, so the supported way to fill
+same digest as `klt stats --geometry-digest`'s `geometry_digest`, so the supported way to fill
 `--regenerated-hash` for a geometry claim is to run it on the **regenerated**
 stream:
 
 ```bash
-klt stats --format json /tmp/scratch/top.gds | jq -r .geometry_digest
+klt stats --geometry-digest --format json /tmp/scratch/top.gds | jq -r .geometry_digest
 ```
 
 See [`docs/cli/stats.md`](stats.md) → "Geometry digest". Two values that look
@@ -1828,7 +1828,7 @@ plus the raw-byte SHA-256) and records the producing KLayout version in
 writes no `--output`. `--generator` and `--regenerated-hash` must be given
 together and populate `provenance.regeneration` (`--hash-kind geometry`
 compares the timestamp-independent geometry digest instead of raw bytes;
-produce that value with `klt stats --format json <regenerated stream> | jq -r
+produce that value with `klt stats --geometry-digest --format json <regenerated stream> | jq -r
 .geometry_digest` — **not** `klt diff`'s `canonical_hash`, a different digest,
 see [`docs/cli/stats.md`](stats.md) → "Geometry digest").
 The generator is echoed, never run; the grader reports a hash that differs
