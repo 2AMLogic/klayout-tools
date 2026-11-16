@@ -248,7 +248,11 @@ Two consequences follow, and they are the reason the field exists:
 So `geometry_digest` answers "is this the same layout?", where a raw-byte
 SHA-256 (`provenance.input.content_hash` on every `klt` envelope, and what
 `klt drc`/`lvs`/`extract`/`sim` record) answers the narrower "is this the same
-file?".
+file?". For the regenerate-and-compare gate this field is built for — and why
+that raw byte compare is within-version only, not a contract across a `klt`
+upgrade — see
+[`docs/json-contract.md`](../json-contract.md#stream-stability-contract-layout-stream-bytes-are-not-stable-across-klt-versions)
+→ "Stream-stability contract".
 
 The digest covers the **whole stream** and is never scoped by `--top`, unlike
 the area/density/count figures. Two runs over the same file with different

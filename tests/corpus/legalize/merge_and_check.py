@@ -45,9 +45,9 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "src"))
 
-from klayout_tools.drc import run_drc  # noqa: E402
-from klayout_tools.pdk import find_pdk, lef_files  # noqa: E402
-from klayout_tools.place_and_route import _merge_def_to_gds  # noqa: E402
+from klayout_tools.drc import run_drc
+from klayout_tools.pdk import find_pdk, lef_files
+from klayout_tools.place_and_route import _merge_def_to_gds
 
 CORPUS_DIR = os.path.dirname(os.path.abspath(__file__))
 DESIGNS = ("gcd", "modexp")

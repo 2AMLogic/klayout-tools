@@ -145,6 +145,7 @@ import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
+from . import extract_dead_metal as _dead_metal
 # The `"klayout-runset"` engine (issue #5481). Imported as a module, never by
 # name: it defers its imports of this module's own helpers to call time.
 from . import extract_runset
@@ -1602,6 +1603,7 @@ def run_extract(
     no_netlist: bool = False,
     substrate_tie_ohms: float | None = None,
     probes: Sequence[Mapping[str, Any]] = (),
+    omit_dead_metal: bool = False,
     engine: str = "klayout",
     deck_file: str | None = None,
     deck_vars: Mapping[str, str] | None = None,
@@ -2812,6 +2814,10 @@ def run_extract(
     ``docs/cli/extract.md``'s "Dead metal" section. Always a list, empty when
     every metal/via shape joins a net.
 
+    ``omit_dead_metal`` (``--omit-dead-metal``, issue #5545) emits that list
+    as ``[]`` with ``dead_metal_omitted: True``, keeping the always-present
+    ``dead_metal_summary``. See :mod:`klayout_tools.extract_dead_metal`.
+
     ``matched_device_groups`` (issue #1018) is one entry per ``--matched-
     group`` declaration, in the order given -- see ``matched_device_groups``
     above ``run_extract``'s own parameter docstring for the full contract.
@@ -3083,6 +3089,9 @@ def run_extract(
         dotted_renames_out=dotted_renames,
     )
 
+    dead_metal_summary = _dead_metal.summarize_dead_metal(dead_metal)
+    dead_metal = _dead_metal.drop_dead_metal_rows(dead_metal, warnings, omit_dead_metal)
+
     # `--critical-net-pattern`/`--parasitics-net-pattern` (issue #2974): the
     # selectors were resolved against the extracted nets inside the call above.
     critical_nets_set, parasitics_nets_set = _adopt_resolved_net_selectors(
@@ -3303,6 +3312,8 @@ def run_extract(
         black_box_regions=black_box_regions,
         dbu_um=dbu_um,
         dead_metal=dead_metal,
+        dead_metal_omitted=omit_dead_metal,
+        dead_metal_summary=dead_metal_summary,
         deck=deck,
         deck_name=deck_name,
         deck_options=deck_options,
@@ -4027,8 +4038,9 @@ def rerun_extract_report(
     report -- while a block without the separate echoes, i.e. one produced
     by an earlier build of this unreleased feature or hand-edited, replays
     its ``declared`` union as ``--pins`` alone) -- when the committed report
-    carries a ``pin_renames`` block,
-    writing the fresh netlist to a private temp directory deleted afterward
+    carries a ``pin_renames`` block, plus ``--omit-dead-metal`` (issue #5545,
+    from its own ``dead_metal_omitted`` echo) -- writing the fresh netlist
+    to a private temp directory deleted afterward
     (issue #3061: the committed ``netlist_path`` file is never modified;
     ``netlist_sha256`` is still computed, and ``fresh.netlist_path`` reports
     the committed path so that field is not an incidental path difference).
@@ -4175,6 +4187,9 @@ def rerun_extract_report(
             tie_declared_pins=isinstance(
                 (committed.get("pin_renames") or {}).get("ties"), list
             ),
+            # Issue #5545: a flagged report must rerun flagged, else it
+            # drifts on its own omission. Absent/non-`true` runs unflagged.
+            omit_dead_metal=bool(committed.get("dead_metal_omitted")),
         )
     finally:
         if scratch_dir is not None:
@@ -10170,22 +10185,7 @@ def _extract_netlist(
         ],
     )
     if dead_metal:
-        cluster_word = "cluster" if len(dead_metal) == 1 else "clusters"
-        total_shapes = sum(entry["shapes"] for entry in dead_metal)
-        shape_word = "shape" if total_shapes == 1 else "shapes"
-        layers_str = ", ".join(
-            sorted({f"{entry['layer']}/{entry['datatype']}" for entry in dead_metal})
-        )
-        warnings.append(
-            f"{len(dead_metal)} routing-stack {cluster_word} ({total_shapes} "
-            f"{shape_word} on {layers_str}) join no extracted net -- no via "
-            "lands on this geometry and no same-layer wiring touches it, so "
-            "it is invisible to the extracted netlist and to every downstream "
-            "`klt lvs`/`klt sim` view; deliberate dead metal (artwork, fill) "
-            "is expected here, unexplained dead metal usually means the "
-            "connection you intended is missing -- see dead_metal[] for the "
-            "per-cluster layer/bbox/shape count."
-        )
+        warnings.append(_dead_metal.dead_metal_warning(dead_metal, omitted=False))
 
     # Parasitics geometry must be read *before* `l2n` (which owns the shape
     # database `polygons_of_net` reads) is garbage-collected below, so compute

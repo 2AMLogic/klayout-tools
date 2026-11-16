@@ -409,6 +409,7 @@ def test_deck_is_refused_under_the_runset_engine(tmp_path):
         ({"declared_pins": frozenset({"A"})}, "--pins"),
         ({"rename_declared_pins": True}, "--rename-declared-pins"),
         ({"apply_resistor_fixed_offset": False}, "--defer-resistor-fixed-offset"),
+        ({"omit_dead_metal": True}, "--omit-dead-metal"),
     ],
 )
 def test_curated_only_flags_are_refused_by_name(tmp_path, kwargs, flag):
@@ -472,6 +473,7 @@ def test_curated_engine_is_unchanged_by_the_new_parameters():
                 "deck_options": {},
                 "probes": [],
                 "apply_resistor_fixed_offset": True,
+                "omit_dead_metal": False,
                 "hierarchical_cells": (),
             }
         )

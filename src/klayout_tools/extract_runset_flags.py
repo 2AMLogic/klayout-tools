@@ -68,6 +68,7 @@ REFUSED_FLAG_BY_PARAM: dict[str, str] = {
     "top_cell_pins_only": "--top-cell-pins",
     "declared_pins": "--pins",
     "apply_resistor_fixed_offset": "--defer-resistor-fixed-offset",
+    "omit_dead_metal": "--omit-dead-metal",
     "deck_options": "--deck-option",
     "label_layers": "--label-layer",
     "abstract_cell_patterns": "--abstract-cells",
