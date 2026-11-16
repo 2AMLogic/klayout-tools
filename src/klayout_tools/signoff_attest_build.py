@@ -26,7 +26,7 @@ def add_require_build_match_argument(parser: Any) -> None:
             "with --attest and --check (issue #5875): also fail (exit 3, status "
             "'drifted') when the committed envelope's provenance.klt_version "
             "names a different klt build than the one running. A missing or "
-            "+unknown version is 'unverifiable' and never fails. Without it "
+            "unknown version is 'unverifiable' and never fails. Without it "
             "build_drift is report-only."
         ),
     )
