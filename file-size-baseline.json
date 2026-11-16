@@ -829,7 +829,7 @@
     },
     {
       "path": "tests/test_env_provenance.py",
-      "lines": 726
+      "lines": 678
     },
     {
       "path": "tests/test_equiv.py",
