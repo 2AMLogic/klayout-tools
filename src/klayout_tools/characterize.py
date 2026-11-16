@@ -2131,6 +2131,7 @@ def _cell_entry(result: dict[str, Any]) -> dict[str, Any]:
             "runtime_s": corner_entry["runtime_s"],
             "engine": environment.get("engine"),
             "engine_version": environment.get("engine_version"),
+            "engine_build": environment.get("engine_build"),
             "window": {
                 "settle_ns": window["rise_start_ns"],
                 "tran_step_ns": window["step_ns"],
