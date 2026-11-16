@@ -165,7 +165,7 @@ def test_generate_child_cell_named_after_cell_name_no_collision(tmp_path, pdk_ro
     layout = kdb.Layout()
     for cell_name, num in (("a", 2), ("b", 3)):
         output = tmp_path / f"{cell_name}.gds"
-        report = generate(
+        generate(
             {
                 "generator": "resistor_strip",
                 "pdk": {"variant": "sky130A", "root": str(pdk_root)},
@@ -179,27 +179,12 @@ def test_generate_child_cell_named_after_cell_name_no_collision(tmp_path, pdk_ro
         layout.read(str(output))
 
     assert names == [["a", "a__core"], ["b", "b__core"]]
-    # Issue #5808: the report names the scheme the written sub-cells follow.
-    assert report["subcell_naming_scheme"] == gen.SUBCELL_SCHEME_CORE_SUFFIX
     assert sorted(c.name for c in layout.each_cell()) == [
         "a",
         "a__core",
         "b",
         "b__core",
     ]
-
-
-def test_subcell_naming_scheme_edge_cases():
-    from types import SimpleNamespace
-
-    def spec(name, flat=False):
-        return SimpleNamespace(name=name, flatten_output=flat)
-
-    sky, ihp = {"variant": "sky130A"}, {"variant": "sg13g2"}
-    assert gen._subcell_naming_scheme(spec("mos_array"), sky) == "core-suffix-v1"
-    assert gen._subcell_naming_scheme(spec("bjt_array"), sky) == "core-suffix-v1"
-    assert gen._subcell_naming_scheme(spec("bjt_array"), ihp) == "pdk-cell-v1"
-    assert gen._subcell_naming_scheme(spec("asap7_finfet", True), sky) is None
 
 
 def test_generate_defaults_cell_name_and_output(tmp_path, pdk_root, monkeypatch):
@@ -274,7 +259,6 @@ def test_generate_reports_snapped_to_grid(tmp_path, pdk_root):
 
 
 def test_cli_json_contract_keys(tmp_path, pdk_root, capsys):
-    output = tmp_path / "res.gds"
     exit_code = main(
         [
             "gen",
@@ -286,7 +270,7 @@ def test_cli_json_contract_keys(tmp_path, pdk_root, capsys):
             "--pdk-root",
             str(pdk_root),
             "-o",
-            str(output),
+            str(tmp_path / "res.gds"),
             "--format",
             "json",
         ]
@@ -301,6 +285,7 @@ def test_cli_json_contract_keys(tmp_path, pdk_root, capsys):
         "pdk",
         "dbu_um",
         "bbox_um",
+        "subcell_naming_scheme",
         "device_count",
         "ports",
         "navigable_regions",

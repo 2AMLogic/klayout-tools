@@ -83,3 +83,33 @@ def _snap_offset_um(
     edge derive from the same grid as the un-shifted box, so per-edge
     rounding can never drift an edge pair apart."""
     return (round(ox_um / dbu_um) * dbu_um, round(oy_um / dbu_um) * dbu_um)
+
+
+def _clamp_span(lo: int, hi: int, fixed_dbu: int) -> tuple[int, int]:
+    """Clamp one axis ``[lo, hi]`` (integer dbu) of a cut down to
+    ``fixed_dbu`` about its own centre, for :func:`_clamp_cut_boxes`. The
+    odd-dbu remainder goes on the high side. A no-op for ``fixed_dbu <= 0``
+    or a span already at or under ``fixed_dbu``."""
+    span = hi - lo
+    if fixed_dbu > 0 and span > fixed_dbu:
+        lo += (span - fixed_dbu) // 2
+        hi = lo + fixed_dbu
+    return lo, hi
+
+
+def _snap_span(lo: int, hi: int, grid_dbu: int) -> tuple[int, int]:
+    """Snap one axis ``[lo, hi]`` (integer dbu) of a cut onto a ``grid_dbu``
+    manufacturing grid, for :func:`_clamp_cut_boxes`: *translate* the span to
+    the nearest grid-aligned origin when its length is a grid multiple (size
+    preserved), else round each edge to the grid independently. A no-op for
+    ``grid_dbu == 0``."""
+    if not grid_dbu:
+        return lo, hi
+
+    def _snap(v: int) -> int:
+        return int(round(v / grid_dbu)) * grid_dbu
+
+    if (hi - lo) % grid_dbu == 0:
+        shift = _snap(lo) - lo
+        return lo + shift, hi + shift
+    return _snap(lo), _snap(hi)
