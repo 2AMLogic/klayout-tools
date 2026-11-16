@@ -473,3 +473,16 @@ def test_text_output_marks_a_validation_only_cold_start(tmp_path, capsys):
 
     out = capsys.readouterr().out
     assert f"(validates only; documented: {' '.join(_DOCUMENTED)})" in out
+
+
+def test_string_pdk_pin_reports_wrong_type_not_missing(tmp_path):
+    from klayout_tools.signoff_attest_text import attestation_check_line
+
+    check = _pdk_pin_check(_with_pdk(tmp_path, "some-pdk"))
+    assert check["passed"] is False
+    assert "wrong type" in check["reason"]
+    assert "missing" not in attestation_check_line(check)
+
+
+def test_absent_pdk_pin_has_no_reason(tmp_path):
+    assert "reason" not in _pdk_pin_check(_with_pdk(tmp_path, None))

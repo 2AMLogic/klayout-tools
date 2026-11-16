@@ -106,6 +106,13 @@ def pin_checks(pins: Any) -> list[dict[str, Any]]:
     it just does not yet say how to reproduce the run."""
     pins = pins if isinstance(pins, Mapping) else {}
     pdk_value = pdk_pin(pins.get("pdk"))
+    pdk_extra: dict[str, Any] = {}
+    if "pdk" in pins and not isinstance(pins["pdk"], Mapping):
+        # Present but the wrong shape (issue #5688): say so, not "missing".
+        pdk_extra["reason"] = (
+            "wrong type: expected {name, revision} or {none, reason}, "
+            f"got {type(pins['pdk']).__name__}"
+        )
     tools = pins.get("tools")
     tools_value = None
     if (
@@ -123,6 +130,7 @@ def pin_checks(pins: Any) -> list[dict[str, Any]]:
             "role": "pdk",
             "passed": pdk_value is not None,
             "value": pdk_value,
+            **pdk_extra,
         },
         {
             "check": "pin",

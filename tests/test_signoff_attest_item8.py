@@ -18,6 +18,7 @@ from klayout_tools.signoff_attest import (
 )
 
 _PASS = {"argv": [sys.executable, "-c", "pass"]}
+_ENV = {"schema_version": 1, "kind": "generic"}
 _FAIL = {"argv": [sys.executable, "-c", "raise SystemExit(1)"]}
 
 
@@ -29,7 +30,11 @@ def _repo(tmp_path) -> Path:
     for name in ("sim_tt", "sim_ss"):
         (repo / "evidence" / f"{name}.json").write_text(
             json.dumps(
-                {"status": "pass", "result": {"fmax": 100, "area": 5, "power": 2}}
+                {
+                    **_ENV,
+                    "status": "pass",
+                    "result": {"fmax": 100, "area": 5, "power": 2},
+                }
             )
         )
     return repo
@@ -205,7 +210,9 @@ def test_mixed_signal_style_inventory_with_duplicate_citation(tmp_path):
 
     assert envelope["status"] == "pass"
     cited_once = [
-        c for c in envelope["attestation"]["checks"] if c["role"] == "evidence"
+        c
+        for c in envelope["attestation"]["checks"]
+        if c["role"] == "evidence" and c["check"] == "present"
     ]
     assert len(cited_once) == 2
 
@@ -244,12 +251,16 @@ def test_check_reports_drift_on_cited_envelope_and_row_map(tmp_path):
     assert clean["status"] == "match"
     assert clean["fresh_status"] == "pass"
 
-    (repo / "evidence" / "sim_tt.json").write_text(json.dumps({"status": "pass"}))
+    (repo / "evidence" / "sim_tt.json").write_text(
+        json.dumps({**_ENV, "status": "pass"})
+    )
     drifted = check_attestation(8, inv_path, str(committed))
     assert drifted["status"] != "match"
 
     (repo / "evidence" / "sim_tt.json").write_text(
-        json.dumps({"status": "pass", "result": {"fmax": 100, "area": 5, "power": 2}})
+        json.dumps(
+            {**_ENV, "status": "pass", "result": {"fmax": 100, "area": 5, "power": 2}}
+        )
     )
     inventory["citations"]["gain"] = ["evidence/sim_ss.json"]
     (repo / "inventory.json").write_text(json.dumps(inventory))
@@ -383,7 +394,9 @@ def test_check_drift_names_a_metric_check_by_corner_and_metric(tmp_path):
     inventory = _digital_inventory()
     committed = _committed_item8(repo, inventory)
     (repo / "evidence" / "sim_tt.json").write_text(
-        json.dumps({"status": "pass", "result": {"fmax": 120, "area": 5, "power": 2}})
+        json.dumps(
+            {**_ENV, "status": "pass", "result": {"fmax": 120, "area": 5, "power": 2}}
+        )
     )
 
     result = check_attestation(8, str(repo / "inventory.json"), committed)
@@ -413,3 +426,74 @@ def test_check_drift_names_a_citation_check_by_spec_row(tmp_path):
     rows = [e for e in result["drift"] if e.get("check", {}).get("role") == "spec_row"]
     assert rows, result["drift"]
     assert {e["check"]["row"] for e in rows} == {"gain"}
+
+
+# --------------------------------------------------------------------------- #
+# Cited paths must be recognised envelopes (issue #5688)
+# --------------------------------------------------------------------------- #
+
+
+def test_cited_prose_file_fails_even_with_a_true_command(tmp_path):
+    repo = _repo(tmp_path)
+    (repo / "evidence" / "NOTES.txt").write_text("looks fine to me\n")
+    inventory = _analog_inventory(
+        spec_rows=["gain"],
+        citations={"gain": ["evidence/NOTES.txt"]},
+        envelope_checks={"evidence/NOTES.txt": _PASS},
+    )
+    envelope = _attest(repo, inventory)
+    assert envelope["status"] == "fail"
+    checks = envelope["attestation"]["checks"]
+    env = [c for c in checks if c["check"] == "envelope"]
+    assert env == [
+        {
+            "check": "envelope",
+            "role": "evidence",
+            "path": "evidence/NOTES.txt",
+            "kind": None,
+            "passed": False,
+        }
+    ]
+    assert [c["passed"] for c in checks if c["check"] == "citation"] == [False]
+
+
+def test_real_generic_envelope_passes_and_records_kind(tmp_path):
+    envelope = _attest(_repo(tmp_path), _analog_inventory())
+    assert envelope["status"] == "pass"
+    kinds = {
+        c["path"]: c["kind"]
+        for c in envelope["attestation"]["checks"]
+        if c["check"] == "envelope"
+    }
+    assert kinds == {
+        "evidence/sim_tt.json": "generic",
+        "evidence/sim_ss.json": "generic",
+    }
+
+
+@pytest.mark.parametrize(
+    "text", ["{not json", "[1, 2]", json.dumps({"status": "pass"})]
+)
+def test_malformed_or_schemaless_citation_fails(tmp_path, text):
+    repo = _repo(tmp_path)
+    (repo / "evidence" / "sim_tt.json").write_text(text)
+    envelope = _attest(repo, _analog_inventory())
+    assert envelope["status"] == "fail"
+    assert ("envelope", "evidence") in [
+        (c["check"], c["role"])
+        for c in envelope["attestation"]["checks"]
+        if not c["passed"]
+    ]
+
+
+def test_envelope_check_text_line():
+    from klayout_tools.signoff_attest_text import attestation_check_line
+
+    base = {"check": "envelope", "role": "evidence", "path": "a.json"}
+    assert (
+        attestation_check_line({**base, "kind": "generic", "passed": True})
+        == "[PASS] evidence a.json envelope (generic)"
+    )
+    assert attestation_check_line({**base, "kind": None, "passed": False}) == (
+        "[FAIL] evidence a.json envelope: not a recognised envelope"
+    )

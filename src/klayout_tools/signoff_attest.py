@@ -64,6 +64,7 @@ import sys
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
+from . import signoff_attest_item8 as item8
 from . import signoff_attest_item9 as item9
 from ._jsonnum import is_int, is_number
 from ._provenance import sha256_file
@@ -896,22 +897,21 @@ def _metric_value(root: str, path: str, field: str) -> float | int | None:
 def _characterization_checks(
     root: str, normalized: Mapping[str, Any], command: Any
 ) -> list[dict[str, Any]]:
-    """Item 8's checks, in fixed order: report present, cited envelopes
-    present, one citation check per spec row, each envelope's own freshness
-    command, then (digital) one metric check per corner x required metric."""
+    """Item 8's checks, in order: report, cited envelopes present + recognised,
+    a citation per spec row, each freshness command, then (digital) metrics."""
     checks: list[dict[str, Any]] = [_file_check(root, normalized["report"], "report")]
-    cited = sorted({p for paths in normalized["citations"].values() for p in paths})
-    present = {path: _file_check(root, path, "evidence") for path in cited}
-    checks.extend(present.values())
+    cites = normalized["citations"]
+    cited, present, envelopes = item8.evidence_checks(root, cites, _file_check)
+    checks.extend((*present.values(), *envelopes.values()))
     for row in sorted(normalized["spec_rows"]):
-        paths = normalized["citations"][row]
+        paths = cites[row]
         checks.append(
             {
                 "check": "citation",
                 "role": "spec_row",
                 "row": row,
                 "envelopes": paths,
-                "passed": bool(paths) and all(present[p]["passed"] for p in paths),
+                "passed": bool(paths) and all(envelopes[p]["passed"] for p in paths),
             }
         )
     for path in cited:
