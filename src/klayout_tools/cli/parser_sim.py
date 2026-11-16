@@ -66,9 +66,12 @@ def add_sim_parser(
             "submit several independent request files to the batch fleet in "
             "one invocation (issue #2869) instead of the single positional "
             "request: at most --max-in-flight run at once, the rest queue, "
-            "and one aggregate JSON envelope reports every request. Always "
-            "backend `batch`; never falls back to local ngspice. See "
-            "docs/cli/sim.md 'Submitting a set of requests'."
+            "and one aggregate JSON envelope reports every request. Each "
+            "member gets its own directory under -o named after the request "
+            "stem (a trailing `.request.json` is stripped); read "
+            "`requests[].report` from the envelope to locate a member's "
+            "report. Always backend `batch`; never falls back to local "
+            "ngspice. See docs/cli/sim.md 'Submitting a set of requests'."
         ),
     )
     sim_parser.add_argument(
@@ -129,7 +132,12 @@ def add_sim_parser(
         help=(
             "override where per-corner logs/rawfiles are written when the "
             "request sets options.keep_artifacts "
-            "(default: a `.klt/sim/` directory next to the request file)"
+            "(default: a `.klt/sim/` directory next to the request file). "
+            "With --batch-set, -o is instead the parent of one directory "
+            "per member, each named after its request's stem (a trailing "
+            "`.request.json` is stripped); `requests[].report` in the "
+            "aggregate envelope is the authoritative path to each member's "
+            "report. See docs/cli/sim.md 'Submitting a set of requests'."
         ),
     )
     sim_parser.add_argument(
