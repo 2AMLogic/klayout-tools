@@ -14,6 +14,27 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt sim` refuses capability-gated request fields before the grid runs,
+  not after** (#5645, 2026-11-16): five request fields whose only worker
+  guard was a post-run `*_unsupported_worker` echo check are now registered
+  in `REQUEST_FEATURE_MIN_RUNNER_VERSION` (all **mandatory**, mirroring their
+  echo checks' severity), so a submit against a fleet whose AMI-manifest
+  images predate the field is refused with `batch_runner_feature_unsupported`
+  before any S3 write or instance launch, `--dry-run` reports the refusal,
+  and the `remote` backend refuses pre-launch the same way:
+  `analysis.op_check` (minimum `0.9.2`), `analysis_overrides` (`0.9.1`),
+  `options.nodeset`, `options.initial_conditions`, `corners.options`
+  (`0.8.0`). Previously an old runner image ran the whole grid and the
+  result was then refused wholesale, with nothing reported -- and
+  `--dry-run` reported `status: valid`, because the registry had no row to
+  compare. The post-run echo checks stay unchanged as the backstop for an
+  unreadable manifest or disagreeing images. A new ratchet test
+  (`tests/test_sim_runner_feature_registry_coverage.py`) fails when a new
+  `*_UNSUPPORTED_WORKER_CODE` echo check lands without a registry row or a
+  reasoned waiver, so the next capability-gated field cannot repeat the gap.
+  No `schema_version` bump: the fields appear only as new values inside the
+  existing `runner_request_features.required` / `missing` arrays and as the
+  existing `batch_runner_feature_unsupported` error code.
 - **`klt mcp serve` serves the `docs/schemas/` JSON contract as MCP
   resources** (#5420, 2026-11-13): the server now advertises the resources
   capability and lists one resource per `docs/schemas/*.schema.json` at
