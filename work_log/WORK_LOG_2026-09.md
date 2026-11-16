@@ -2,6 +2,212 @@
 
 Sections moved byte-for-byte from [WORK_LOG.md](../WORK_LOG.md) by `loom-daemon work-docs archive`.
 
+### 2026-09-16
+
+- **PR #1951**: fix(drc): fail --engine klayout runs on a partially-executed deck
+- **PR #1950**: refactor(power): use ir_solver.worst_deviation for island worst droop
+- **PR #1949**: fix(hermit): recognize annotated self-assignment as instance state
+- **PR #1947**: fix(extract): carry resistor L/W geometry onto the written R card
+- **PR #1945**: fix(gen-compose): accurate ring-gap clearance messages; fund ring-gap reach in own-block allowance
+- **PR #1944**: fix(lvs): recognise round-tripped custom device classes as devices, not abstract circuits
+- **PR #1943**: feat(lvs): add options.compare_parameters to scope device-class parameter compares
+- **PR #1940**: scripts: add checksum-pinned fetch script for ihp-sg13cmos5l
+- **PR #1939**: fix(drc,extract): stop bare filename starting with '{' misclassifying as inline JSON
+- **PR #1938**: test: lock in clean bundle-net routing through a nested gen-compose block
+- **PR #1937**: fix(gen-compose): compare a via-drop ladder's intermediate landing pads too
+- **PR #1936**: fix(gen-compose): hold a leg's own-block approach to the resolved deck's spacing rule
+- **PR #1935**: fix(gen): resolve sky130 hvi marker for voltage_flavor
+- **PR #1934**: fix(extract): stop --abstract-cells from corrupting unrelated net names
+- **PR #1933**: fix(lvs): let a subckt-call reference's placeholder-0 value pair on topology
+- **PR #1932**: fix(drc,lvs): populate provenance.pdk when --pdk/reference.pdk resolves
+- **PR #1931**: fix(gen-compose): reject a leg that reaches a pin from the side it doesn't face
+- **PR #1930**: fix(gen-compose): draw a real contact for diffusion-role via-drops (COLL_*)
+- **PR #1926**: fix(functional-verification): guard against Icarus's escaped-divider INTERCONNECT crash
+- **PR #1925**: docs(lvs): clarify counts.{nets,pins}.matched is hierarchy-wide, not top-circuit-scoped
+- **PR #1924**: docs(lvs): sharpen combine_devices_per_circuit no-op caveat for klt extract composed netlists
+- **PR #1923**: refactor(pdk): split standard-cell/liberty subsystem into pdk_cells.py
+- **PR #1921**: fix: recover capacitor device class across bare-C-card SPICE round trip
+- **PR #1920**: fix: write commit-safe $PDK_ROOT-relative liberty in synthesize scripts
+- **PR #1919**: feat(sta): add pdk.corners for N-corner characterization in one request
+- **PR #1918**: feat(drc,extract): add optional request-document input form
+- **PR #1916**: refactor(functional-verification): split SDF timing-annotation subsystem into functional_verification_sdf.py
+- **PR #1915**: feat(place-and-route,sta): add I/O delay constraints and timing_status
+- **PR #1914**: fix(place-and-route): surface container-mount hints on openroad file-read failures
+- **Issue #1948** (closed): Hermit stateless_ceremony detector: recognize annotated self-assignment (self.x: T = v) as instance state
+- **Issue #1946** (closed): Simplify: wire power.py's inline worst-deviation loop to ir_solver.worst_deviation
+- **Issue #1942** (closed): Friction: a custom-extractor device class (MoM cap) round-trips through klt extract -> klt lvs as a name-mangled abstract subcircuit, so it never reaches device-level compare
+- **Issue #1941** (closed): klt drc --engine klayout reports a partially-executed deck as clean: the klayout exit status and its ERROR output are both ignored when a report file exists
+- **Issue #1929** (closed): scripts: no checksum-pinned fetch script for ihp-sg13cmos5l, so no CI can provision the PDK its curated deck targets
+- **Issue #1928** (closed): Friction: klt lvs has no request-level way to scope which device parameters are compared (DeviceClass.enable_parameter is unreachable)
+- **Issue #1927** (closed): klt extract: the SPICE netlist it writes drops a drawn resistor's L/W, so the two-step flow reports the layout as 0-geometry
+- **Issue #1922** (closed): klt drc/extract: bare filename starting with '{' misclassified as inline JSON request
+- **Issue #1917** (closed): gen-compose: promoting a from_stage block's pins[] ports through a bundle net at a different layer_role spuriously fails via-drop spacing (single-pass per-net layer_role does not)
+- **Issue #1913** (closed): gen-compose: a via-ladder's intermediate landing pad can silently short an unrelated net -- and klt drc, the documented backstop, cannot see a merge
+- **Issue #1912** (closed): klt gen: voltage_flavor resolves to no marker on the sky130 family, so a generated MOS can only ever be the 01v8 thin-oxide class
+- **Issue #1911** (closed): extract: --abstract-cells on a macro with a label-less (global-net-only) port corrupts net-name synthesis for unrelated nets
+- **Issue #1909** (closed): Split functional_verification.py's SDF timing-annotation subsystem (~670 lines) into functional_verification_sdf.py
+- **Issue #1908** (closed): klt extract: SPICE netlist writer drops a MiM capacitor's device-class/model-name token from its C card (present on resistor R cards, absent on capacitor C cards)
+- **Issue #1907** (closed): klt lvs: subckt-call's placeholder-0 resistor/capacitor value blocks device pairing entirely, not just parameter comparison
+- **Issue #1904** (closed): gen-compose: routed:true leg into a diff_pair's own Q1_1_G port can be a real, unflagged metal1.space.1 violation
+- **Issue #1902** (closed): Friction: ring_gap_side/ring_gap_um routing checks reject a same-net bus between two guard-ringed blocks
+- **Issue #1901** (closed): klt drc / klt lvs leave provenance.pdk null despite an explicit --pdk, unlike klt sta / place-and-route / extract
+- **Issue #1895** (closed): gen-compose: routing.cross_block_layer_role via-drop can short an unrelated net, undetected by routed:true/unrouted_nets/warnings
+- **Issue #1894** (closed): gen-compose: bjt_array collector-ring (diffusion-role) via-drop draws no contact, and can short an unrelated net when combined with one
+- **Issue #1890** (closed): functional-verification: $sdf_annotate crashes vvp (NULL handle to vpi_scan) on an escaped INTERCONNECT identifier containing '.' or '[]'
+- **Issue #1887** (closed): Friction: klt lvs's counts.pins.matched (and counts.nets.matched) can exceed both sides' declared layout/reference counts
+- **Issue #1884** (closed): Split pdk.py's standard-cell/liberty subsystem (~583 lines) into pdk_cells.py
+- **Issue #1878** (closed): lvs: combine_devices_per_circuit is a no-op for the layout side of any klt extract-produced composed netlist (extract has no hierarchical mode, #1085)
+- **Issue #1876** (closed): klt lvs: pre-extracted layout.netlist loses capacitor device-class identity after #1558's bare-C-card fix
+- **Issue #1871** (closed): Friction: `klt sta` analyses one corner per invocation, so the corner characterization it exists for still needs an external N-run loop
+- **Issue #1870** (closed): klt synthesize's generated .ys still embeds an absolute liberty path, so the script is not byte-for-byte scan-clean
+- **Issue #1868** (closed): Friction: place-and-route resolves the PDK via a search root but the documented openroad container wrapper only mounts $PDK_ROOT — every stage dies on an opaque 'cannot read file <liberty>'
+- **Issue #1867** (closed): Friction: klt drc and klt extract are the only physical-flow stages with no request-document surface, so a data-driven flow must invent its own JSON and an argv translator
+- **Issue #1865** (closed): Friction: place-and-route/sta have no set_input_delay/set_output_delay or SDC surface, so a design with no reg-to-reg path silently reports the 1e+39 unconstrained sentinel as if it were slack
+- **Issue #1363** (closed): Champion: Merge-Risk Hold Digest
+
+### 2026-09-15
+
+- **PR #1910**: feat(signoff): consume declared critical metrics from the metric-namespace registry
+- **PR #1906**: test(loom): enlarge Fixture 5b's fixture repo to actually trigger the SIGPIPE race it guards
+- **PR #1905**: feat(place-and-route): add per-corner TNS to post-route corner sweep
+- **PR #1903**: fix: restore SIGPIPE race fix in verify-proposal-refs.sh (#1898)
+- **PR #1900**: ci: gate native legs on an extension freshness fingerprint (#1889)
+- **PR #1899**: feat(extract): adopt the declared metric namespace registry (extract__* metrics)
+- **PR #1897**: feat(sim): adopt declared metric namespace registry (sim__corner__* metrics)
+- **PR #1896**: docs(synthesize): fix netlist_path.path resolution base in place-and-route bullet
+- **PR #1893**: spec-review: promote verdict to EE key of two-key ratification
+- **PR #1891**: refactor(gen): split PDK layer-parameter lookup into gen_layer_params.py
+- **PR #1888**: docs(functional-verification): attribute the all-tests-fail SDF shape to timing, not annotation
+- **PR #1882**: refactor(extract): split RC-parasitics subsystem into extract_parasitics.py
+- **PR #1881**: fix(loom): verify-proposal-refs.sh cache never persists, flaky false MISSING FILE reports
+- **PR #1879**: feat(mom): PEEC increment (ii) -- arbitrary orientation/offset filament pairs
+- **PR #1877**: feat(drc): adopt declared metric namespace registry (drc__error__count)
+- **PR #1873**: fix(synthesize): report artifact paths as {path, scope}, not absolute paths
+- **PR #1872**: feat: detect and warn on KLayout engine version drift
+- **PR #1864**: docs(wave): add waveform-first debugging guide for agents
+- **PR #1862**: feat(functional-verification): options.trace contracts the waveform artifact
+- **PR #1861**: refactor(pdk): dedupe _resolve_liberty into shared resolve_liberty_for_cell_library
+- **PR #1860**: feat(place-and-route): add max_transition_ns/max_capacitance_pf/max_fanout constraints
+- **PR #1859**: feat(sim): two-pass fail-fast probe for unmeetable timeout budgets
+- **PR #1858**: feat(gen-compose): connectivity[].layer_role routes non-planar net graphs in one call
+- **PR #1857**: fix(functional-verification): defer bit-selected top-level-port INTERCONNECT entries to a later $sdf_annotate call
+- **PR #1856**: extract: implement --parasitics-top-cell-only R/C attribution (ground terms only)
+- **PR #1855**: feat(gen-compose): subtract a block's navigable_regions from its obstacle bbox
+- **PR #1853**: fix(wave): harden gen_fixtures against fst-writer size-tie defect, draft upstream report
+- **PR #1852**: feat(mom): resolve klt mom stackup from an installed PDK
+- **PR #1851**: feat(metrics): declared metric namespace registry, piloted on layout-metrics
+- **PR #1843**: docs(design): record path-1 decision for klt mom non-bar conductor support
+- **PR #1840**: feat(gen-compose): channel track assignment for inter-block route-vs-route contention (#1467)
+- **PR #1836**: feat(gen): mos_array interior_channel_um reserves an interior routing channel (#1531)
+- **PR #1834**: chore(release): bump version to 0.5.0
+- **PR #1833**: feat(wave): wire klt wave build/query into the CLI, schemas, docs
+- **PR #1832**: feat(sta): from-scratch netlist input mode for klt sta
+- **PR #1831**: feat: pre-route timing checkpoint via nominal hold slack + unrouted DEF
+- **Issue #1898** (closed): chore(loom): resync (fcbf52f8) reverted verify-proposal-refs.sh's #1879 SIGPIPE fix and its Fixture 5b regression test
+- **Issue #1892** (closed): ci: native-statime leg can test a stale klt_statime_native (missing --reinstall-package)
+- **Issue #1889** (closed): CI: native-engine Python tier can run against a stale cached extension (false green)
+- **Issue #1885** (closed): CI: uv cache can serve a stale native-extension wheel, so Python legs may validate old Rust code
+- **Issue #1883** (closed): verify-proposal-refs.sh tests: Fixture 5b's hermetic repo is too small to reproduce the SIGPIPE regression it's meant to guard
+- **Issue #1875** (closed): Split gen.py's PDK layer-parameter/design-rule lookup subsystem (~2,732 lines) into gen_layer_params.py
+- **Issue #1874** (closed): docs(synthesize): place-and-route handoff note resolves netlist_path.path against the wrong base
+- **Issue #1866** (closed): place-and-route: the per-corner sweep reports WNS only — no per-corner TNS, so recovering it costs one extra klt sta run per corner
+- **Issue #1863** (closed): verify-proposal-refs.sh: full_tree() cache never persists (subshell-in-pipe), causing flaky false MISSING FILE reports
+- **Issue #1854** (closed): functional-verification: characterize the constant-zero result once any $sdf_annotate call exists (second-order effect flagged by #1619)
+- **Issue #1850** (closed): klt signoff: consume declared 'critical' metrics from the metric-namespace registry
+- **Issue #1849** (closed): klt sim: adopt the declared metric namespace registry (sim__corner__* metrics)
+- **Issue #1848** (closed): klt extract: adopt the declared metric namespace registry (extract__* metrics)
+- **Issue #1847** (closed): klt drc: adopt the declared metric namespace registry (drc__error__count)
+- **Issue #1846** (closed): [Epic #1585] Phase 3b: waveform-first debugging guide for agents
+- **Issue #1845** (closed): [Epic #1585] Phase 3a: klt functional-verification gains options.trace contract
+- **Issue #1844** (closed): klt synthesize's JSON response and generated .ys script embed absolute paths, so neither can be committed to an evidence record unmodified
+- **Issue #1842** (closed): klt mom: PEEC increment (ii) — arbitrary orientation/offset filament pairs (Grover generalization)
+- **Issue #1839** (closed): klt sim: emit declared metric names in a parallel `metrics` block
+- **Issue #1838** (closed): klt extract: emit declared metric names in a parallel `metrics` block
+- **Issue #1837** (closed): klt drc: emit declared metric names in a parallel `metrics` block
+- **Issue #1835** (closed): gen-compose: subtract a block's declared navigable_regions from its obstacle bbox (Phase 2 of #1531)
+- **Issue #1826** (closed): klt sta has no pre-route path: requires a routed DEF, and no hold-slack-in-ns exists before target_stage=route
+- **Issue #1825** (closed): Friction: klt sta has no pre-route mode — SDC-constrained setup/hold slack is only obtainable from an already-routed DEF
+- **Issue #1744** (closed): design-agent benchmark: live-agent provider's device-model prompt is stale for medium-tier (PMOS) tasks
+- **Issue #1738** (closed): Provision CLAUDE_CODE_OAUTH_TOKEN secret for design-agent-benchmark-live CI job
+- **Issue #1709** (closed): place-and-route: request.constraints cannot express a design-rule constraint (max transition / capacitance / fanout)
+- **Issue #1704** (closed): extract: implement --parasitics top-cell-only R/C attribution (ground terms only)
+- **Issue #1699** (closed): Friction: klt extract --parasitics is whole-layout and total-only, so pricing a few top-level nets costs a full pass and needs hand-subtraction to avoid double-counting
+- **Issue #1694** (closed): sim corner runner: reached_s/fail-fast for unmeetable timeout budgets needs a design decision (follow-up to #1686)
+- **Issue #1658** (closed): Fleet dispatch is thrashing on issue #1651: ~25+ claim/yield cycles over 2.5h, risking concurrent-builder worktree collision
+- **Issue #1655** (closed): gen-compose: routing.layer_role is one value per composition — no way to route a non-planar net graph in one call
+- **Issue #1652** (closed): Deduplicate _resolve_liberty: identical logic copied across 3 verb modules
+- **Issue #1619** (closed): functional-verification: sibling INTERCONNECT entries on a port-touching net fail after the #1069 wrapper fix
+- **Issue #1617** (closed): klt mom: build a spec's stackup[] from klt pdk stackup instead of hand-authoring it
+- **Issue #1606** (closed): fst-writer 0.3.1 / fst-reader 0.17.0: zlib-compressed time-table size-tie silently corrupts on read
+- **Issue #1601** (closed): [Epic #1585] Phase 2c: wire klt wave into the CLI, schemas, docs, and end-to-end tests
+- **Issue #1585** (closed): Epic: `klt wave` — waveform query surface for functional-verification traces (port the bwave design under Apache-2.0 attribution, no dependency)
+- **Issue #1572** (closed): Split extract.py's parasitics subsystem (~1650 lines) into extract_parasitics.py
+- **Issue #1563** (closed): gen-compose silently ignores connectivity[].legs[] on some installs, recurring #1548 symptom
+- **Issue #1531** (closed): Friction: mos_array's own multi-row/column footprint blocks routing to interior unit pins
+- **Issue #1517** (closed): klt mom: PEEC/full-wave/S-parameter extraction rejects non-bar-shaped (e.g. coiled/spiral) conductor geometry; no Touchstone/.s2p export
+- **Issue #1490** (closed): Friction: pinning klayout-tools to a git commit SHA does not pin the KLayout engine version, breaking report reproducibility
+- **Issue #1467** (closed): Friction: gen-compose routes 1 of 13 nets on a real block — no track or layer assignment between nets, so the first routed net rejects the rest
+- **Issue #892** (closed): [Epic #840] Add a bounded tweak-geometry → re-solve → see-field-update interaction
+- **Issue #840** (closed): Epic: real E&M results in the browser on klayout-tools.org — integrate geode-fem (WebGPU)
+- **Issue #654** (closed): spec-review already renders a ratify verdict but is forbidden from acting on it — promote it to binding ratification with an operator veto
+- **Issue #524** (closed): Curated SG13G2 (IHP-Open-PDK) DRC/LVS deck for klt drc / klt lvs
+- **Issue #247** (closed): Idea: adopt a declared metric namespace (METRICS2.1-style names + aggregator/polarity registry) across klt verbs
+
+### 2026-09-14
+
+- **PR #1824**: refactor(decks): split decks/__init__.py into rules/extraction/parasitics submodules
+- **PR #1823**: refactor(place-and-route): split DEF->GDS merge subsystem into place_and_route_gds_merge.py
+- **PR #1822**: feat(design-agent): device-level sky130 relaxation oscillator, 18/18 corners
+- **PR #1819**: refactor(place-and-route): split corner-sweep/post-route-SPEF STA into place_and_route_sta.py
+- **PR #1818**: refactor(cli): extract 5 generation-verb parsers into _add_<verb>_parser() helpers
+- **PR #1817**: refactor(cli): extract analysis-cluster parsers into _add_<verb>_parser() helpers
+- **PR #1816**: test(place-and-route): gate a real ihp-sg13g2 GCD integration test
+- **PR #1815**: docs(design-agent): split-polarity dual comparator clears the sky130A ss/-40C/1.62V headroom ceiling (#1813)
+- **PR #1812**: docs(kb): document sky130 binned nfet L=0.15/nf>=3 BSIM4 fatal footgun
+- **PR #1811**: refactor(cli): extract 'misc' cluster parsers into _add_X_parser() helpers
+- **PR #1809**: refactor(cli): extract 'extraction/verification' cluster parsers into _add_*_parser() helpers
+- **PR #1807**: refactor(cli): extract checks-cluster parsers into _add_X_parser() helpers
+- **PR #1806**: refactor(lvs): split netgen engine subsystem into lvs_netgen.py
+- **PR #1805**: kb: add reference netlist + measured figures for sky130-lc-vco-cross-coupled
+- **PR #1802**: refactor(cli): extract 5 inspection-verb parsers into _add_<verb>_parser() helpers
+- **PR #1796**: fix(pdk): resolve IHP sg13g2_stdcell naming convention in liberty/LEF resolvers
+- **PR #1794**: perf(benchmarks): cross-step cache for design-agent-benchmark reference solutions
+- **PR #1792**: perf(benchmarks): cache deterministic reference-provider attempts, re-tune CI timeout from measured run
+- **PR #1791**: feat(synthesize,place-and-route): add sg13g2_stdcell platform-table entries
+- **PR #1788**: fix: recognize curator:named-dependency markers in dep-recheck idempotency check
+- **PR #1787**: refactor(cli): consolidate duplicated _print_rerun_text into output.render_rerun_drift
+- **PR #1782**: feat(benchmarks): swap design-agent reference solutions to real sky130 devices
+- **PR #1659**: fix(buildgate): skip real ngspice/openroad tiers locally, raise timeout
+- **PR #1607**: feat(wave): port VCD ingest and implement klt wave build
+- **PR #1602**: feat(wave): port bwave FST query engine, implement klt-wave query
+- **Issue #1821** (closed): Split decks/__init__.py (2163 lines) into rules/extraction/parasitics submodules
+- **Issue #1820** (closed): Split place_and_route.py's DEF->GDS merge subsystem (~596 lines) into place_and_route_gds_merge.py
+- **Issue #1814** (closed): Assemble a full device-level sky130 relaxation oscillator around #1813's split-polarity comparator core
+- **Issue #1813** (closed): Comparator headroom/gain ceiling at sky130A ss/-40C/1.62V blocks any simple-topology fix for the relaxation-oscillator core (successor to #1795)
+- **Issue #1810** (closed): CI runs stuck queued for 2+ hours across every open PR (and main) — self-hosted runner likely down
+- **Issue #1808** (closed): Split place_and_route.py's corner-sweep/post-route-SPEF STA subsystem (~750 lines) into place_and_route_sta.py
+- **Issue #1804** (closed): ngspice: repeated identical sky130 nfet/pfet binned-model instance triggers spurious BSIM4 fatal error at L=0.15, nf>=3, small per-finger W
+- **Issue #1803** (closed): Split lvs.py's netgen engine subsystem (~590 lines) into lvs_netgen.py
+- **Issue #1801** (closed): refactor(cli): extract 'misc' cluster (components/clip/render/lef-abstract/synthesize/functional-verification/place-and-route) parsers into _add_X_parser() helpers
+- **Issue #1800** (closed): refactor(cli): extract 'analysis' cluster (sim/sta/eval/mom/power/yield*/trajectory/design-centering/report/size) parsers into _add_X_parser() helpers
+- **Issue #1799** (closed): refactor(cli): extract 'generation' cluster (gen/gen-compose/draw/arith-gen/techmap) parsers into _add_X_parser() helpers
+- **Issue #1798** (closed): refactor(cli): extract 'extraction/verification' cluster (extract/lvs/equiv/pex/signoff) parsers into _add_X_parser() helpers
+- **Issue #1797** (closed): refactor(cli): extract 'checks' cluster (drc/precheck/socket-check/ring-check/erc) parsers into _add_X_parser() helpers
+- **Issue #1793** (closed): refactor(cli): extract create_parser()'s 39 inline verb blocks into per-verb _add_X_parser() helpers
+- **Issue #1790** (closed): synthesize/place-and-route liberty/LEF resolver assumes open_pdks naming; IHP sg13g2_stdcell's real naming convention differs
+- **Issue #1786** (closed): klt synthesize / klt pdk cells hardcode SkyWater-style _fd_sc_ / double-underscore corner naming, rejecting other PDKs' standard-cell libraries
+- **Issue #1785** (closed): Deduplicate _print_rerun_text: identical rerun-drift renderer copied across 3 CLI verb modules
+- **Issue #1784** (closed): synthesize/PAR platform table has no IHP CMOS5L (sg13g2/SG13CMOS5L) entry
+- **Issue #1783** (closed): design-agent benchmark: cross-step reference-solution caching + persistent-ngspice-session investigation (follow-ups from #1781)
+- **Issue #1781** (closed): design-agent benchmark: real-sky130 model swap made CI cost explode; needs caching/parallelism, not just a bigger timeout
+- **Issue #1780** (closed): check-dep-recheck-idempotency.sh doesn't recognize curator:named-dependency markers, silently defeating idempotency
+- **Issue #1748** (closed): kb: add reference netlists + measured figures for remaining KB entries (batch 4)
+- **Issue #1736** (closed): Design-agent benchmark: swap generic reference models for sky130 PDK models
+- **Issue #1728** (closed): Design-agent benchmark: live S4->S6->S10 agent wiring + medium/hard-tier tasks
+- **Issue #1651** (closed): buildGate: local 'npm run check:ci' exceeds the 900s timeout, stalling ~20 builder attempts on #1633
+- **Issue #1600** (closed): [Epic #1585] Phase 2b: port VCD ingest and implement klt wave build
+- **Issue #1599** (closed): [Epic #1585] Phase 2a: port the FST query engine and implement klt wave query
+
 ### 2026-09-13
 
 - **PR #1778**: kb: add reference netlist + measured figures for multi-ro-xor-entropy-source

@@ -129,15 +129,12 @@ from ..signoff import (
     check_tier_report,
     describe_grader,
 )
-from ..signoff_attest import (
-    STREAM_ATTESTABLE_ITEM,
-    attach_output_tails,
-    write_attestation,
-)
+from ..signoff_attest import STREAM_ATTESTABLE_ITEM, write_attestation
 from ..signoff_attest_carry import compute_attestation as _compute_attestation
 from ..signoff_attest_carry import flag_problem as _skip_local_only_problem
 from ..signoff_attest_carry import skip_lines
 from ..signoff_attest_input import input_line, with_entry
+from ..signoff_attest_live import attach_live_fields
 from ..signoff_attest_text import attestation_check_line as _attestation_check_line
 from ..signoff_attest_text import check_label
 from ..signoff_generator_batch import (
@@ -370,7 +367,7 @@ def _run_attest(
         return emit_error("signoff", str(exc), args.format)
 
     if committed is not None:
-        attach_output_tails(result.get("fresh") or {})
+        attach_live_fields(result.get("fresh") or {}, hints=False)
         emit_success(result, args.format, _print_attestation_check_text)
         ok = result["status"] == "match" and result["fresh_status"] == "pass"
         return EXIT_PASS if ok else EXIT_FAIL
@@ -383,7 +380,7 @@ def _run_attest(
             return emit_error(
                 "signoff", f"could not write --output '{output}': {exc}", args.format
             )
-    attach_output_tails(result)
+    attach_live_fields(result)
     emit_success(with_entry(result, output), args.format, _print_attestation_text)
     return EXIT_PASS if result["status"] == "pass" else EXIT_FAIL
 

@@ -65,6 +65,46 @@ def test_missing_unreleased_heading_is_an_error() -> None:
         rp.add_changelog_heading("# Changelog\n", "0.9.0", "2026-11-09")
 
 
+def test_prepare_refuses_stale_anchor(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    (repo / "docs/cli/signoff.md").write_text(
+        "intro\n\nfirst ships in the first release after `v0.7.0`.\n"
+    )
+    with pytest.raises(rp.PrepError, match=r"0\.7\.0") as excinfo:
+        rp.prepare(repo, None, "2026-11-09")
+    assert ":3:" in str(excinfo.value)  # names the offending line
+
+
+def test_prepare_leaves_newer_anchor_untouched(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    (repo / "docs/cli/signoff.md").write_text(
+        "first ships in the first release after `v0.8.0` "
+        "and later the next release after v0.9.5 too.\n"
+    )
+    rp.prepare(repo, None, "2026-11-09")
+    text = (repo / "docs/cli/signoff.md").read_text()
+    assert "`klt 0.9.0` and later the next release after v0.9.5" in text
+
+
+def test_prepare_rerun_skips_stale_anchor_check(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    rp.prepare(repo, None, "2026-11-09")  # current is now 0.9.0
+    (repo / "docs/cli/signoff.md").write_text(
+        "first ships in the first release after `v0.7.0`.\n"
+    )
+    rp.prepare(repo, "0.9.0", "2026-11-10")  # idempotent re-run: no raise
+    assert "v0.7.0" in (repo / "docs/cli/signoff.md").read_text()
+
+
+def test_releasing_convention_prose_is_not_scanned(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    (repo / "RELEASING.md").write_text(
+        'Fill in availability notes. Replace "the next release after 0.7.0"\n'
+        "in docs/cli/signoff.md with X.Y.Z.\n"
+    )
+    rp.prepare(repo, None, "2026-11-09")  # must not raise: only signoff.md is scanned
+
+
 @pytest.mark.parametrize(
     ("subject", "expected"),
     [

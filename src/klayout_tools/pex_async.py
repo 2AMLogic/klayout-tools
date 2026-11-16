@@ -163,8 +163,8 @@ class AsyncLegs:
                 manifest = json.load(handle)
             legs = manifest["legs"]
             for leg in legs:
-                leg["testbench"], leg["side"], leg["attach"]  # noqa: B018
-            manifest["testbenches"], manifest["extracted_netlist_sha256"]  # noqa: B018
+                leg["testbench"], leg["side"], leg["attach"]
+            manifest["testbenches"], manifest["extracted_netlist_sha256"]
         except (OSError, ValueError, KeyError, TypeError) as exc:
             raise PexError(
                 f"{flag}: cannot read pex submit manifest '{path}': {exc!r}",

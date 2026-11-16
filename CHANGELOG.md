@@ -14,6 +14,20 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Changed** (#5788, breaking — `klt array-check` `schema_version` 1 ->
+  **2**): the record's `file` field is now the committable
+  `{path, scope}` object `env_provenance.repo_relative_path()` builds
+  (`{"path": "<repo-relative POSIX path>", "scope": "repo"}` inside the
+  invoking repo, `{"path": null, "scope": "external"}` outside), not the raw
+  input string — so a committed verdict no longer embeds the producing
+  host's absolute path. The bump is attributable to that re-shape alone:
+  the same change also adds the shared `provenance` block
+  (`klt_version`, `klayout_version`, `pdk`/`deck` always `null` here,
+  `input.content_hash` pinning the checked layout), which is additive per
+  `docs/json-contract.md` and carries no bump of its own. `--format text`
+  still prints a path (`<outside repo>` for an external input), never the
+  envelope object.
+
 - **`klt sim --batch-set` names member directories after the request stem**
   (#5633, 2026-11-15): a member request named `<stem>.request.json` -- the
   repo's own documented request naming convention -- used to land in
@@ -62,6 +76,21 @@ not `klt --version`, if you need to detect this kind of drift. See
   ...)`. Additive: without the key the envelope is unchanged, grading is
   unchanged, no `schema_version` bump. The key is refused on any non-item-9
   command. See `docs/cli/signoff.md`.
+- **`klt signoff --attest --check`: a drift entry names the check that
+  drifted, not only its list index** (#5460, 2026-11-13): a `drift[]` entry
+  pointing at one `attestation.checks[]` entry gains an additive `check`
+  object — the check's `role` plus whichever identity keys its kind carries
+  (`path`, `target` / `name` / `testbench`, `row`, `corner` + `metric`); a
+  check with no identity beyond its role gets `{"role": …}`. `--format text`
+  appends it as a bracketed label after the pointer
+  (`attestation.checks.17.content_hash  [testbench sim/bin/sim_common.py]:`),
+  so a CI log names the file that moved without opening the committed
+  envelope and counting entries — an index that is not even stable, since
+  file-presence checks are sorted by path. `field` / `committed` / `fresh`
+  are unchanged and the key is absent on an entry naming no single check (a
+  whole-list `attestation.checks` entry, `status`, every other verb's drift),
+  so additive with no `schema_version` bump. Details in
+  `docs/cli/signoff.md`'s "CI usage: `--check`".
 
 - **`klt extract --pdk` / `klt pex` on `sg13g2`: the antenna diodes are now
   written as calls on their real PDK subcircuits** (#5491, 2026-11-13):
@@ -82,6 +111,27 @@ not `klt --version`, if you need to detect this kind of drift. See
   diode cards, the `area=`/`pj=` rewrite `klt pex` applies to `D` cards
   (#5178), and the JSON `devices[]` entry (`area_um2`/`perimeter_um`). No
   JSON field is added, renamed or removed; no `schema_version` bump.
+
+- **`klt extract --omit-dead-metal`: a committable report without the
+  per-cluster dead-metal list** (#5545, 2026-11-13): `dead_metal[]` carries one
+  entry per routing-stack cluster that joins no extracted net, and under
+  `--abstract-cells` that is one entry per *instance* — cell abstraction keeps
+  each matched cell's `contact`/`metals`/`vias` while erasing its device
+  layers, so every abstracted cell's internal wiring is correctly reported as
+  dead. On a standard-cell block the list scales with the instance count and
+  dominates a report committed as a provenance record (the document
+  `klt extract --check` reads). The new opt-in flag (request field
+  `omit_dead_metal`) emits `dead_metal` as `[]` with `dead_metal_omitted: true`
+  and keeps the counts in the new, **always-present** per-layer
+  `dead_metal_summary` (`clusters`, `shapes`, `area_um2`, `by_layer[]`), which
+  is byte-identical with and without the flag. The aggregate dead-metal
+  `warnings[]` line keeps its counts and layers and points at that summary
+  instead of at `dead_metal[]`; the netlist, `devices[]`, `nets[]`, every other
+  field and the exit code are unchanged. `--check` passes on a flagged report
+  and `--check --rerun` replays the flag from the committed
+  `dead_metal_omitted`, so it shows no drift. Detection itself is unchanged, as
+  is every run without the flag. Mirrors `klt erc --omit-antenna-tables`;
+  additive and opt-in, no `schema_version` bump.
 
 ## 0.9.2 (2026-11-14)
 
@@ -113,6 +163,33 @@ not `klt --version`, if you need to detect this kind of drift. See
   `klt signoff --manifest` grades are all unchanged; the field covers the
   whole stream and is not scoped by `--top`. Additive; `klt stats`'
   `schema_version` stays `1`.
+
+- **`klt signoff --attest`: a failing check that re-verifies a tier-verdict
+  record now says so, and the docs give the way out of the record/envelope
+  cycle** (#5538, 2026-11-13): an item-10 inventory may declare, as one of its
+  `checks[]`, a `klt signoff --manifest M --check R` of the record `R` that
+  cites the very envelope being minted. Editing an inventoried file makes both
+  sides stale at once, and the single documented command can no longer
+  regenerate the envelope — `--attest` writes nothing while a check fails, and
+  `R` cannot be regraded until the envelope is rewritten. The exit `3` read
+  like any other failing check. A failing `command` check whose `argv`
+  contains `signoff`, `--manifest` (or `--manifest=…`) and `--check` (or
+  `--check=…`), whatever wrapper prefixes it carries, now carries an advisory
+  `hint` string naming the cycle and the record → envelope → record sequence
+  out of it, printed under the `[FAIL]` line in text output. The hint has
+  exactly the lifecycle `output_tail` has: **live-only** and generate-mode
+  only — never written to an `-o` file, never in a `--check` diff, never
+  built by an attestation builder, and absent on a passing check, on an
+  `--attest --check` run, on a `local_only` command carried under
+  `--skip-local-only`, and on a failing command of any other shape. Exit
+  codes, the `-o` write rule and the envelope bytes are unchanged, and the
+  field is additive, so no `schema_version` bumps.
+  [`docs/cli/signoff.md`](docs/cli/signoff.md) gains the three-step sequence,
+  the convergence signal (both `--check` runs exit `0`, not a byte-comparison
+  of records) and a warning that a pair committed after step 1 or 2 is
+  half-converged. Follow-up to #4532, whose docs-only fix covered the
+  mint-item-10-first order that an edit to an inventoried file leaves no tree
+  for.
 
 - **`klt sim`: `monte_carlo.instances` now supports ihp-sg13g2, gating by the
   `mm_ok` instance parameter** (#5487, 2026-11-13): per-instance mismatch

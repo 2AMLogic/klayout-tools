@@ -13,13 +13,13 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from .signoff_attest import (
-    SKIPPED_CHECK_KEYS,
     STREAM_ATTESTABLE_ITEM,
     AttestationError,
     _load_committed_attestation,
     build_attestation,
     check_attestation,
 )
+from .signoff_attest_drift import SKIPPED_CHECK_KEYS
 from .signoff_attest_stream import build_stream_attestation, check_stream_attestation
 from .signoff_attest_text import documented_suffix
 
@@ -120,7 +120,11 @@ def _compute(
         options: dict[str, Any] = {
             "generator": getattr(args, "generator", None),
             "regenerated_hash": getattr(args, "regenerated_hash", None),
-            "hash_kind": getattr(args, "hash_kind", None) or "bytes",
+            # Pass an absent --hash-kind through as None, never collapsed to
+            # "bytes": check_stream_attestation() adopts the committed
+            # regeneration claim only when no flag was given, so absence has
+            # to stay visible past this boundary (issue #5572).
+            "hash_kind": getattr(args, "hash_kind", None),
             "inventory_path": inventory,
         }
         if committed is not None:

@@ -7170,7 +7170,6 @@ _ENGINE_VERSION_RE = re.compile(r"ngspice-([\w.]+)")
 _WAVEFORM_KEYWORDS = frozenset(
     {"pwl", "pulse", "sin", "exp", "sffm", "am", "trnoise", "trrandom", "external"}
 )
-_WAVEFORM_RE = re.compile(r"^([a-z]+)\s*(?:\(|$)")
 
 
 def _logical_netlist_lines(netlist_text: str) -> list[str]:
@@ -12236,7 +12235,7 @@ def _open_ascii_rawfile(
     format notes (``Flags: complex`` magnitude reduction in particular).
     """
     try:
-        handle = open(raw_path, encoding="utf-8", errors="replace")  # noqa: SIM115
+        handle = open(raw_path, encoding="utf-8", errors="replace")
     except OSError as exc:
         raise SimError(f"could not read rawfile: {exc}") from exc
     with handle:

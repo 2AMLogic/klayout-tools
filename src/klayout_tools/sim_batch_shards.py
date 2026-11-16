@@ -198,7 +198,7 @@ def gate_partial_shard(fleet: Any, index: int, prior: dict[str, Any]) -> None:
             status = sim_batch._read_status(
                 fleet.config, job_id, sim_batch._run_subprocess
             )
-        except Exception:  # noqa: BLE001 - an unreadable status is "unknown"
+        except Exception:  # - an unreadable status is "unknown"
             status = None
         raw = status.get("state") if status else None
         state = str(raw) if raw else "unknown"
