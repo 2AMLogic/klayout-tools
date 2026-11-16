@@ -257,7 +257,7 @@
     },
     {
       "path": "src/klayout_tools/decks/sky130.py",
-      "lines": 3062
+      "lines": 2858
     },
     {
       "path": "src/klayout_tools/digital_fleet.py",

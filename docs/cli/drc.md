@@ -1127,8 +1127,17 @@ side is the existing `topmetal1.enclosing.topvia1.1`).
 
 Remaining limitations: `Cont` against `Activ | GatPoly` (Contact layer `6/0` is
 still unread by the sg13cmos5l deck) needs compound-region/population
-semantics and is **not** covered; other PDKs' via stacks (including sg13g2) have
-not been reviewed for this opt-in and keep the legacy behaviour.
+semantics and is **not** covered. sky130's via stack (#5737) is now reviewed and
+opted in on eight single-population sides (`li1.enclosing.licon1.1`,
+`met1.enclosing.mcon.1`, `met1.`/`met2.enclosing.via.1`,
+`met2.`/`met3.enclosing.via2.1`, `met4.enclosing.via3.1`,
+`met5.enclosing.via4.1`). Six sky130 cut sides stay legacy because each is one
+of several disjoint populations: `diff.`/`tap.`/`poly.enclosing.licon.1` (a
+diffusion licon never touches poly), `met3.enclosing.via3.1` and
+`capm.enclosing.via3.1` (a capm via3 lands on capm, not met3),
+`met4.enclosing.via4.1` and `capm2.enclosing.via4.1` (likewise for capm2). Other
+PDKs' via stacks (gf180mcu, sg13g2, asap7) have not been reviewed for this
+opt-in and keep the legacy behaviour.
 
 ### Sized/derived-layer rules (`DerivedLayer`)
 
