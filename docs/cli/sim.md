@@ -1320,8 +1320,8 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
 - **Member directories.** Each member writes into its own directory under
   `-o`, named after its request file's stem: a trailing `.request.json` is
   stripped (the usual request naming convention, so `foo.request.json` ->
-  `out/foo/`), otherwise the last filename suffix is (`foo.sim.json` ->
-  `out/foo.sim/`). Without `-o` the directories live under the
+  `out/foo/`), otherwise only the last filename suffix is stripped
+  (`foo.sim.json` -> `out/foo.sim/`). Without `-o` the directories live under the
   single-request default (`.klt/sim/<stem>/` next to each request file). A
   repeated stem gets the member's index appended (`foo-1`) so two members
   never share a directory or an output lock. `requests[].report` in the
