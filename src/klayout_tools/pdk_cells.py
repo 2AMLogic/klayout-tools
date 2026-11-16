@@ -309,7 +309,7 @@ def _other_variants_hint(cell_library: str, resolved: dict[str, Any]) -> str:
             f"; other installed variants ship it: {', '.join(candidates)} -- "
             "pass --pdk <variant> (and --pdk-root <root> if needed) to select one"
         )
-    except Exception:  # noqa: BLE001 -- best-effort hint only
+    except Exception:  # -- best-effort hint only
         return ""
 
 
@@ -333,7 +333,7 @@ def _default_variant_shipping(
         return info
     try:
         shipping = _variants_shipping(cell_library, root=root)
-    except Exception:  # noqa: BLE001 -- fall through to the original error
+    except Exception:  # -- fall through to the original error
         return info
     return shipping[0] if shipping else info
 
