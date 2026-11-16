@@ -4349,8 +4349,8 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
         dest="deck_file",
         default=None,
         help=(
-            "explicit path to a KLayout DRC-DSL script (.lydrc/.drc) to run "
-            "with --engine klayout, overriding --pdk/--pdk-root resolution"
+            "KLayout DRC-DSL script (.lydrc/.drc) for --engine klayout, "
+            "overriding --pdk/--pdk-root; with --check, the deck to re-hash"
         ),
     )
     _add_pdk_args(

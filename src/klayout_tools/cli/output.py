@@ -223,7 +223,15 @@ def render_check_text(result: dict) -> None:
             # relative paths were written against the report's own directory
             # -- where the input really is.
             missing = check.get("input_not_found")
-            if missing is None:
+            deck_missing = check.get("deck_not_found")
+            if deck_missing is not None:
+                print(
+                    "      actual:   None (deck not found: "
+                    f"{deck_missing['resolved']}; packaged name "
+                    f"{deck_missing['name']!r} not in {deck_missing['packaged_dir']})"
+                )
+                print(f"      note:     {deck_missing['hint']}")
+            elif missing is None:
                 print(f"      actual:   {check['actual']}")
             else:
                 print(f"      actual:   None (input not found: {missing['resolved']})")

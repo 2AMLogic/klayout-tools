@@ -181,7 +181,7 @@
     },
     {
       "path": "src/klayout_tools/cli/drc_cmd.py",
-      "lines": 565
+      "lines": 563
     },
     {
       "path": "src/klayout_tools/cli/extract_cmd.py",
@@ -257,7 +257,7 @@
     },
     {
       "path": "src/klayout_tools/drc.py",
-      "lines": 3764
+      "lines": 3755
     },
     {
       "path": "src/klayout_tools/drc_klayout_engine.py",

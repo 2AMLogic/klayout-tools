@@ -4140,10 +4140,26 @@ klt drc --check design.drc.json                  # cheap mode (default)
 klt drc --check design.drc.json --rerun           # full mode
 ```
 
-`--check` takes no `--deck`/`--top`/`--engine`/etc. (those are ignored) — the
-deck and engine are always read from `<report.json>` itself, not given again
-on the command line, and so is the input path unless you pass the positional
-`<file>` (below).
+`--check` takes no `--deck`/`--top`/`--engine`: the deck and engine are
+always read from `<report.json>` itself, and so is the input path unless you
+pass the positional `<file>` (below). `-o/--output`, `--waivers`, `--tile` and
+`--rules` are clean exit-1 errors (the report's own recorded values are
+replayed). The two honoured overrides are the positional `<file>` (input) and
+`--deck-file` (deck).
+
+**Deck resolution order (issue #5709)**, shared by `--check`, `--check
+--rerun` and the native side of an `--engine both` report: (1) `--deck-file
+<path>`, which always wins; (2) the report's recorded `deck` -- a deck name for
+`--engine curated`, the producing host's script path for `--engine klayout` --
+when it exists; (3) for `--engine klayout`, `provenance.deck.name` looked up as
+a plain basename among the decks packaged with klt (`asap7.drc`). Resolution
+never decides a verdict: the resolved bytes are still compared to the recorded
+`content_hash`, so a changed deck is `[DRIFTED]` with its real hash. When none
+of the three resolves, the deck check stays failed (`match: false`, `status:
+"drifted"`, exit 3) and carries an additive `deck_not_found` key (`recorded`,
+`resolved`, `name`, `packaged_dir`, `hint`); `--rerun` raises an exit-1 error
+instead. Pass `--deck-file` to verify a vendor runset that has no packaged
+counterpart. `--rerun` on a curated report rejects `--deck-file`.
 
 **Both modes resolve the committed report's `file` field from *this*
 checkout (issue #2659).** Since `schema_version` 3 that field is the
