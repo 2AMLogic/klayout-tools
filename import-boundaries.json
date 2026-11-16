@@ -250,6 +250,7 @@
         "klayout_tools.extract_cap_top_plate",
         "klayout_tools.extract_passive_regions",
         "klayout_tools.extract_progress",
+        "klayout_tools.extract_dead_metal",
         "klayout_tools.extract_report",
         "klayout_tools.extract_resistance_graph",
         "klayout_tools.extract_spef",
@@ -484,6 +485,7 @@
       "description": "`klt netlist` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools._capacitor_mf",
+        "klayout_tools._diode_card",
         "klayout_tools.cli.netlist_cmd",
         "klayout_tools.cli.parser_netlist",
         "klayout_tools.netlist",
@@ -530,6 +532,7 @@
         "klayout_tools.pdk_cells",
         "klayout_tools.pdk_compat",
         "klayout_tools.pdk_descriptor",
+        "klayout_tools.pdk_diode_models",
         "klayout_tools.pdk_families",
         "klayout_tools.pdk_models",
         "klayout_tools.pdk_native_drc",
@@ -579,7 +582,8 @@
         "klayout_tools.place_and_route_route_overflow",
         "klayout_tools.place_and_route_script",
         "klayout_tools.place_and_route_sta",
-        "klayout_tools.place_and_route_via_pad"
+        "klayout_tools.place_and_route_via_pad",
+        "klayout_tools.place_and_route_via_tip"
       ]
     },
     "power": {
@@ -704,6 +708,9 @@
         "klayout_tools.signoff_details",
         "klayout_tools.signoff_envelopes",
         "klayout_tools.signoff_evidence_pin",
+        "klayout_tools.signoff_fleet",
+        "klayout_tools.signoff_fleet_check",
+        "klayout_tools.signoff_fleet_reduction",
         "klayout_tools.signoff_foundry_cell",
         "klayout_tools.signoff_generator_batch",
         "klayout_tools.signoff_multi_member",
@@ -770,6 +777,7 @@
         "klayout_tools.sim_deck_expand",
         "klayout_tools.sim_decks",
         "klayout_tools.sim_decks_split",
+        "klayout_tools.sim_decks_staging",
         "klayout_tools.sim_echo_messages",
         "klayout_tools.sim_energy",
         "klayout_tools.sim_environment_report",
@@ -780,6 +788,7 @@
         "klayout_tools.sim_forms",
         "klayout_tools.sim_injected",
         "klayout_tools.sim_merge",
+        "klayout_tools.sim_mismatch_declarations",
         "klayout_tools.sim_mismatch_gate",
         "klayout_tools.sim_measurement_results",
         "klayout_tools.sim_noise",
@@ -894,6 +903,7 @@
         "klayout_tools.synthesize",
         "klayout_tools.synthesize_abc_timing",
         "klayout_tools.synthesize_arithmetic",
+        "klayout_tools.synthesize_library_hint",
         "klayout_tools.synthesize_memory",
         "klayout_tools.synthesize_netlist_normalize",
         "klayout_tools.synthesize_timeout",

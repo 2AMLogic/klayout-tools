@@ -243,7 +243,7 @@ def build_stream_attestation(
     *,
     generator: str | None = None,
     regenerated_hash: str | None = None,
-    hash_kind: str = _HASH_KIND_BYTES,
+    hash_kind: str | None = None,
     inventory_path: str | None = None,
     committed_checks: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
@@ -254,8 +254,11 @@ def build_stream_attestation(
     ``generator`` and ``regenerated_hash`` must be given together; they
     populate ``provenance.regeneration`` exactly as the grader reads it
     (:func:`~.signoff._regeneration_claim`). The generator is echoed, never
-    run. Raises :class:`AttestationError` for a missing, symlinked or
-    non-repository stream or a malformed regeneration claim.
+    run. ``hash_kind`` defaults to ``"bytes"`` here rather than at the call
+    boundary, so an absent ``--hash-kind`` stays distinguishable from an
+    explicit ``--hash-kind bytes`` for :func:`check_stream_attestation`
+    (issue #5572). Raises :class:`AttestationError` for a missing, symlinked
+    or non-repository stream or a malformed regeneration claim.
 
     ``inventory_path`` (issue #4767) is an optional item-2 inventory declaring
     ``checks`` -- the user's own geometric / net-width checkers, run as item-10
@@ -264,6 +267,8 @@ def build_stream_attestation(
     ``committed_checks`` is passed only by :func:`check_stream_attestation`
     (``local_only`` commands skip). Without an inventory the envelope is
     unchanged."""
+    if hash_kind is None:
+        hash_kind = _HASH_KIND_BYTES
     _validate_regeneration_claim(generator, regenerated_hash, hash_kind)
     stream_paths = [stream_path] if isinstance(stream_path, str) else list(stream_path)
     if not stream_paths:
@@ -329,19 +334,77 @@ def build_stream_attestation(
     return envelope
 
 
+def _adopted_regeneration_claim(
+    committed: Mapping[str, Any],
+) -> tuple[str | None, str | None, str | None]:
+    """The committed ``provenance.regeneration`` claim as ``(generator,
+    regenerated_hash, hash_kind)``, for a ``--check`` that passed none of the
+    three flags (issue #5572).
+
+    ``provenance.regeneration`` is part of what ``--check`` compares, but
+    :func:`build_stream_attestation` only ever writes it from its arguments --
+    so without this a flag-less check builds a claim-less fresh envelope and
+    reports drift on an envelope that is actually fresh. Re-checking "what was
+    claimed" means reading the claim back out of the one place it is already
+    committed. ``(None, None, None)`` when there is no claim, so a claim-less
+    envelope checks exactly as it did before.
+
+    Whether the claim is *true* is not decided here and never was: the grader
+    compares ``regenerated_hash`` against the bound stream
+    (:func:`~.signoff._regeneration_claim`, ``stale_artifact``). This only
+    refuses a claim too malformed to re-attest from, so a bad committed block
+    can never read as ``status: "match"``."""
+    provenance = committed.get("provenance")
+    if not isinstance(provenance, Mapping):
+        return None, None, None
+    claim = provenance.get("regeneration")
+    if claim is None:
+        return None, None, None
+    if not isinstance(claim, Mapping):
+        raise AttestationError(
+            "committed provenance.regeneration must be an object holding the "
+            "regeneration claim; got "
+            f"{type(claim).__name__} -- re-attest the envelope"
+        )
+    adopted: list[str] = []
+    for field, value in (
+        ("generator", claim.get("generator")),
+        ("regenerated_hash", claim.get("regenerated_hash")),
+        ("hash_kind", claim.get("hash_kind", _HASH_KIND_BYTES)),
+    ):
+        if not isinstance(value, str):
+            raise AttestationError(
+                f"committed provenance.regeneration.{field} must be a string; "
+                f"got {type(value).__name__} -- re-attest the envelope, or pass "
+                "--generator/--regenerated-hash to check against explicit values"
+            )
+        adopted.append(value)
+    return adopted[0], adopted[1], adopted[2]
+
+
 def check_stream_attestation(
     stream_path: str | Sequence[str],
     committed_path: str,
     *,
     generator: str | None = None,
     regenerated_hash: str | None = None,
-    hash_kind: str = _HASH_KIND_BYTES,
+    hash_kind: str | None = None,
     inventory_path: str | None = None,
 ) -> dict[str, Any]:
     """``klt signoff --attest 2 --input STREAM --check COMMITTED``: re-attest
     and diff against the committed envelope, writing nothing. Same result
-    shape as :func:`check_attestation`."""
+    shape as :func:`check_attestation`.
+
+    With none of ``generator`` / ``regenerated_hash`` / ``hash_kind`` given,
+    the committed ``provenance.regeneration`` claim is adopted as recorded
+    (:func:`_adopted_regeneration_claim`), so a bare ``--check`` re-checks
+    what was attested instead of requiring the claim to be retyped on the
+    command line (issue #5572). Given any of the three, the fresh envelope is
+    built from the arguments alone exactly as before, which makes passing
+    them an explicit cross-check of the committed claim."""
     committed = _load_committed_attestation(committed_path)
+    if generator is None and regenerated_hash is None and hash_kind is None:
+        generator, regenerated_hash, hash_kind = _adopted_regeneration_claim(committed)
     committed_checks = (committed.get("attestation") or {}).get("checks")
     fresh = build_stream_attestation(
         stream_path,
