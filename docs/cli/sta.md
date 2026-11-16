@@ -310,6 +310,7 @@ bump. Reports without the field still verify, and `--check` treats
 | `spef_annotation` | object \| null | `null` unless `request.spef` was given. See "Annotation evidence" below for the field shapes — and read it before quoting a SPEF-annotated timing number as a real-parasitics measurement. |
 | `sdf` | object \| null | Additive field (issue #2886). `null` unless `request.sdf: true`. Otherwise `{path, scope, content_hash}`: the `{path, scope}` identity of the SDF this corner's session wrote (the same envelope `spef_path` uses — never an absolute host path) plus the `sha256:`-prefixed digest of its bytes, so it can be cited as an input. On a `corners` response the field is not hoisted — one per `corners[]` entry. See "Post-route SDF per corner" below. |
 | `electrical_checks` | object \| null | Additive field (issue #3005). **`def` mode only** (`null` with `verilog`). Max-transition, max-capacitance, min-pulse-width and min-period checks from the same OpenSTA session as the timing numbers, so with a `spef` they are against the extracted parasitics. Per `corners[]` entry on a multi-corner response. See "Electrical limit checks" below. |
+| `blackboxed_cells` | array | Additive field (issue #5707), always present (hoisted to the top level on a `corners` response). `[{"cell": "<name>"}]` for every `macros[]` entry declared as an untimed black box (`cell` with no `lef`/`lib`, `verilog` mode only); `[]` when none. Numbers in this response exclude those cells' delay and power. See "Untimed black boxes" below. |
 | `provenance` | object | The shared envelope block (`docs/json-contract.md`). `deck` names the resolved liberty file (`<cell_library>__<corner>`); `pdk` is `find_pdk()`'s resolved triple; `input` is the content hash of `def` (`input.role: "layout"`) — or of `verilog` in netlist mode, where the role is `"netlist"` instead (issue #2027, so a consumer never compares a netlist digest against a layout one). On a `pdk.corners` (list) response this block carries `deck: null` at the top level — see "Multi-corner characterization" below for where the per-corner `deck` block actually lives. |
 
 ## Hard macros (`request.macros`)
@@ -337,6 +338,35 @@ analysed** (and no `"default"` key) is a request error naming the macro,
 the corner, and the keys that are available — never a silent fallback to
 another corner's timing, which matters most in a `pdk.corners` sweep, where
 one corner's macro liberty is the wrong answer for the next.
+
+### Untimed black boxes: a macro with no LEF (issue #5707)
+
+In `verilog` mode an entry may carry **only `cell`** — neither `lef` nor
+`lib` — to declare that master an explicit, untimed black box:
+
+```json
+"macros": [{"cell": "vendor_ip_stub"}]
+```
+
+Without it, a netlist instantiating a cell with no physical view fails at
+`link_design` with `ORD-2013`. With it, this command writes a pin-less stub
+`MACRO` LEF into the run directory and reads it with the other macro LEFs, so
+the design links and the instance is carried as an untimed cell (OpenROAD
+logs `STA-0201`/`ORD-2011` warnings for it; verified against OpenROAD 26Q3).
+**Reported slack, `fmax_mhz` and `estimated_power_mw` exclude the black-boxed
+cells' delay and power** — they are numbers for the rest of the design only.
+Nets on the black box's pins are not connected to anything in the engine.
+
+The declaration is opt-in on purpose: a forgotten LEF on an ordinary entry is
+still a loud request error (and the `ORD-2013` hint now names this form).
+Rejected with a request error naming the field: a LEF-less entry in `def` mode
+(a DEF carries placed geometry), and a LEF-less entry that also gives `lib`,
+`gds` or `verilog_blackbox` (supply the `lef` to use those).
+
+The response lists every black-boxed cell in `blackboxed_cells`
+(`[{"cell": "<name>"}]` in request order; always present, `[]` when none;
+hoisted to the top level on a `pdk.corners` response). Such an entry echoes in
+`macros[]` with `lef: null`.
 
 `gds`/`verilog_blackbox` are accepted (for shape-compatibility with the
 other two verbs) but unused by this command — it reads physical/timing

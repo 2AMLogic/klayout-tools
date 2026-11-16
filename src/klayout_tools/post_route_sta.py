@@ -672,7 +672,7 @@ def run_sta(
     # before any PDK resolution or engine invocation; the corner-dependent
     # half (which of a macro's per-corner liberties applies) is resolved
     # per corner inside `_run_corner_session`.
-    macros = _validate_macros(request.get("macros"), request_dir)
+    macros = _validate_macros(request.get("macros"), request_dir, has_def=has_def)
 
     (
         clock_port,
@@ -1109,6 +1109,11 @@ def _dispatch_sta(
         # declaration round-trips through both verbs' reports unchanged.
         # `[]` when the request declared none.
         "macros": macro_spec.macros_response(macros),
+        # Additive field (issue #5707): every cell linked as an untimed
+        # black box (a `macros[]` entry with `cell` and no `lef`/`lib`), in
+        # request order. Always present; `[]` when none. The numbers above
+        # exclude these cells' delay and power.
+        "blackboxed_cells": macro_spec.blackboxed_cells_response(macros),
         # Additive field (issue #2739): which clock mode every analyzed
         # corner was timed with -- "ideal" (the default, this command's
         # pre-#2739 behaviour) or "propagated". Present on both response
@@ -1268,7 +1273,14 @@ def _run_corner_session(
         cell_library, corner_name, variant=pdk_variant, root=pdk_root
     )
     tech_lef, cell_lef = _resolve_lef(cell_library, pdk_info)
-    macro_lefs = [macro["lef"] for macro in macros]
+    macro_lefs = [macro["lef"] for macro in macros if macro["lef"] is not None]
+    # Issue #5707: each black-boxed cell gets a generated pin-less stub LEF so
+    # `link_design` resolves it (without one it fails with ORD-2013).
+    for index, macro in enumerate(m for m in macros if m["lef"] is None):
+        stub_path = os.path.join(output_dir, f"blackbox_{script_tag}_{index}.lef")
+        with open(stub_path, "w", encoding="utf-8") as handle:
+            handle.write(macro_spec.blackbox_stub_lef_text(macro["cell"]))
+        macro_lefs.append(stub_path)
     macro_liberty_paths = _macro_liberty_paths(macros, corner)
 
     script_path = os.path.join(output_dir, f"sta_{script_tag}.tcl")
@@ -1353,7 +1365,9 @@ def _run_corner_session(
         if port_errors:
             raise PostRouteStaError(_port_check_error_message(port_errors))
         if completed.returncode != 0:
-            raise PostRouteStaError(_engine_error_message(completed))
+            raise PostRouteStaError(
+                _engine_error_message(completed, verilog_mode=not has_def)
+            )
 
         metrics = _read_metrics(metrics_path)
     setup_violation_count = _count_violations(
@@ -1645,6 +1659,11 @@ def _run_multi_corner(
         # liberties was loaded varies, and that is already determined by
         # each corner's own name plus this one `macros` block.
         "macros": macro_spec.macros_response(macros),
+        # Additive field (issue #5707): every cell linked as an untimed
+        # black box (a `macros[]` entry with `cell` and no `lef`/`lib`), in
+        # request order. Always present; `[]` when none. The numbers above
+        # exclude these cells' delay and power.
+        "blackboxed_cells": macro_spec.blackboxed_cells_response(macros),
         # Additive field (issue #2739): one clock mode for the whole
         # characterization -- every per-corner session runs the same
         # request-level `constraints.propagated_clock`, so this is hoisted
@@ -2757,7 +2776,9 @@ def _validate_wire_load_estimate(
     return wire_load_model, wire_load_mode
 
 
-def _validate_macros(macros: Any, request_dir: str) -> list[dict[str, Any]]:
+def _validate_macros(
+    macros: Any, request_dir: str, *, has_def: bool = False
+) -> list[dict[str, Any]]:
     """Validate the optional ``request.macros`` array (issue #2635) -- the
     same shared hard-macro declaration ``klt synthesize`` accepts, field for
     field, documented once in :mod:`klayout_tools.macros`.
@@ -2766,8 +2787,27 @@ def _validate_macros(macros: Any, request_dir: str) -> list[dict[str, Any]]:
     before this field existed analyses exactly as it did. A thin wrapper
     rather than a second validator: only the exception class differs per
     verb.
+
+    Issue #5707: in ``verilog`` mode an entry with ``cell`` and neither
+    ``lef`` nor ``lib`` is accepted as an explicit untimed black box. In
+    ``def`` mode every entry still needs its ``lef`` -- a DEF carries
+    placed geometry -- and a LEF-less one is rejected naming the field.
     """
-    return macro_spec.validate_macros(macros, request_dir, error_cls=PostRouteStaError)
+    if has_def and isinstance(macros, list):
+        for index, entry in enumerate(macros):
+            if isinstance(entry, dict) and entry.get("lef") is None:
+                raise PostRouteStaError(
+                    f"request.macros[{index}].lef is required in def mode: a "
+                    "DEF carries placed geometry, so a macro cannot be "
+                    "declared as an untimed black box without a LEF (that "
+                    "form is verilog mode only)"
+                )
+    return macro_spec.validate_macros(
+        macros,
+        request_dir,
+        error_cls=PostRouteStaError,
+        allow_blackbox=not has_def,
+    )
 
 
 def _macro_liberty_paths(macros: list[dict[str, Any]], corner: str) -> list[str]:
@@ -3971,7 +4011,9 @@ def _spef_name_map(text: str) -> dict[str, str]:
 # --------------------------------------------------------------------------- #
 
 
-def _engine_error_message(completed: _OpenRoadResult) -> str:
+def _engine_error_message(
+    completed: _OpenRoadResult, *, verilog_mode: bool = False
+) -> str:
     """Build an actionable error message from a failed OpenROAD run.
 
     Prefers a bracketed ``[ERROR ...]`` diagnostic OpenROAD itself printed
@@ -4015,7 +4057,8 @@ def _engine_error_message(completed: _OpenRoadResult) -> str:
     # hits first. Appended as a further `--` clause, the same
     # recognized-hint structure `container_runtime_hint` above uses.
     macro_hint = macro_spec.missing_lef_master_hint(
-        (completed.stdout or "") + "\n" + (completed.stderr or "")
+        (completed.stdout or "") + "\n" + (completed.stderr or ""),
+        blackbox_form=verilog_mode,
     )
     if macro_hint is not None:
         message = f"{message} -- {macro_hint}"
