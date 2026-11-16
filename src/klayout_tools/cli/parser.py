@@ -623,9 +623,9 @@ def _add_report_parser(subparsers: argparse._SubParsersAction) -> None:
         description=(
             "Read one or more `klt` JSON envelope files (or '-' for stdin) "
             "and render them into a single combined report. Each envelope's "
-            "kind (a klt drc/lvs-style violations/mismatches report, a klt "
-            "layout-metrics-style key-metrics report, or a captured error "
-            "envelope) is detected from its own JSON structure, per "
+            "kind (a klt drc/lvs-style report, a klt sim/yield-style "
+            "measurements rollup, a klt layout-metrics-style report, or a "
+            "captured error envelope) is detected from its own JSON structure, per "
             "docs/json-contract.md -- not hardcoded per verb. "
             "`--format github-summary` emits GitHub Flavored Markdown "
             "suitable for `$GITHUB_STEP_SUMMARY`. See docs/cli/report.md."

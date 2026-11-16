@@ -28,6 +28,13 @@ produced it:
   violations-style reports (a table of structured findings) under a
   different table schema (category/severity/side/description instead of
   rule/cell/layer/bbox/description).
+- an object with a top-level ``measurements`` list is a *measurements-style*
+  report -- the rollup shape ``klt sim`` (``schema_version=3``) and
+  ``klt yield`` (``schema_version=1``) share -- rendered as a
+  Measurement/Unit/Limits/Worst/Margin/Corner/Status table (plus per-entry
+  yield columns when present), built by ``report_measurements.py``; the
+  builder lives in its own module only because this file sits against its
+  500-line hard limit (issue #5839).
 - an object carrying ``slug``/``name``/``status`` together (the fields
   ``klt layout-metrics``'s ``layout.json`` documents as *always* present,
   see ``layout_metrics.py``) is a *metrics-style* report -- key/value
@@ -49,6 +56,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from .env_provenance import render_path_field
+from .report_measurements import section_measurements
 
 __all__ = ["ReportError", "build_report"]
 
@@ -94,7 +102,8 @@ def build_report(sources: list[str]) -> dict[str, Any]:
             "envelope_count": <int>,
             "sections": [
                 {
-                    "kind": "drc" | "lvs" | "layout-metrics" | "error",
+                    "kind": "drc" | "lvs" | "layout-metrics" | "measurements"
+                    | "error",
                     "source": <str, the entry from `sources`>,
                     "title": <str>,
                     "status": <str> | None,
@@ -185,13 +194,16 @@ def _classify(envelope: dict[str, Any], source: str) -> str:
     if isinstance(envelope.get("mismatches"), list):
         return "lvs"
 
+    if isinstance(envelope.get("measurements"), list):
+        return "measurements"
+
     if "slug" in envelope and "name" in envelope and "status" in envelope:
         return "layout-metrics"
 
     raise ReportError(
         f"envelope '{source}' has an unrecognized shape (schema_version="
         f"{envelope.get('schema_version')!r}): no violations[], mismatches[], "
-        "or layout-metrics-style (slug/name/status) fields found"
+        "measurements[], or layout-metrics-style (slug/name/status) fields found"
     )
 
 
@@ -205,6 +217,7 @@ def _build_section(kind: str, envelope: dict[str, Any], source: str) -> dict[str
         "drc": _section_drc,
         "lvs": _section_lvs,
         "layout-metrics": _section_layout_metrics,
+        "measurements": section_measurements,
         "error": _section_error,
     }[kind]
     return builder(envelope, source)
