@@ -95,9 +95,9 @@ def parse_bins(library_path: str | None) -> dict[str, list[Bin]]:
             bins.setdefault(name.group("base").lower(), []).append(
                 (
                     keys.get("lmin") if keys.get("lmin") is not None else 0.0,  # type: ignore[arg-type]
-                    keys.get("lmax") if keys.get("lmax") is not None else inf,  # type: ignore[arg-type]
-                    keys.get("wmin") if keys.get("wmin") is not None else 0.0,  # type: ignore[arg-type]
-                    keys.get("wmax") if keys.get("wmax") is not None else inf,  # type: ignore[arg-type]
+                    keys.get("lmax") if keys.get("lmax") is not None else inf,
+                    keys.get("wmin") if keys.get("wmin") is not None else 0.0,
+                    keys.get("wmax") if keys.get("wmax") is not None else inf,
                 )
             )
     return bins

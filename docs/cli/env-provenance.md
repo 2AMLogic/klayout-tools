@@ -312,6 +312,11 @@ path pdk: <outside repo>
 path netlist: sim/bandgap/bandgap.spice
 ```
 
+`env_provenance_walk.common_repo_root(paths, find_repo_root=...)` (issue #5631) picks
+one repo root for a verb that records several input paths (the outermost when the
+inputs sit in nested repos), so every `{path, scope}` field in one report shares an
+anchor; `klt lvs` uses it for `layout` and `reference`.
+
 Also exported: `opaque_host_id()`, `repo_relative_path()`, `find_repo_root()`,
 `find_leaks()`, `scan_files()`, `find_absolute_path_fields()`,
 `lint_envelope_files()`, and `render_path_field()` (the same

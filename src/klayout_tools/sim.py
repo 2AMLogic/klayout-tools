@@ -105,6 +105,7 @@ from . import (
     sim_energy,
     sim_eye,
     sim_injected,
+    sim_mismatch_declarations,
     sim_mismatch_gate,
     sim_noise,
     sim_op_args,
@@ -232,6 +233,12 @@ from .sim_osdi_settle import (
     resettle_osdi_preload_for_local,
 )
 from .sim_pdk_ambiguity import warn_pdk_ambiguity as _warn_pdk_ambiguity
+from .sim_pin_settle import (
+    check_local_engine_version_pin,
+    check_offhost_engine_version_pin,
+    check_pdk_version_pin_early,
+    settle_version_pins,
+)
 from .sim_process_legs import attach_process_leg_check
 
 from .sim_analysis_overrides import (  # isort: skip
@@ -1380,101 +1387,6 @@ def _check_engine_version_pin(
     raise SimError(
         f"pinned simulator unavailable: request requires {engine} {required}; {detail}",
         code=ENGINE_VERSION_UNMET_CODE,
-    )
-
-
-def _check_local_engine_version_pin(
-    pin: tuple[int, ...] | None, backend: str, engine: str, binary: str
-) -> None:
-    """Enforce the pin before any corner runs, where this process can see the
-    engine (local backends); a no-op when unset or for off-host backends."""
-    if pin is None or backend in _OFFHOST_BACKENDS:
-        return
-    _check_engine_version_pin(
-        pin,
-        _probe_engine_version(engine, binary),
-        engine,
-        where="the local engine probe",
-    )
-
-
-def _check_offhost_engine_version_pin(
-    pin: tuple[int, ...] | None,
-    backend: str,
-    engine: str,
-    engine_version: str | None,
-) -> None:
-    """Enforce the pin for off-host backends. No pre-submit probe exists for a
-    remote/batch runner, so it is checked against the version its reports
-    carried (after the run)."""
-    if pin is None or backend not in _OFFHOST_BACKENDS:
-        return
-    _check_engine_version_pin(
-        pin, engine_version, engine, where=f"the {backend} runner's report"
-    )
-
-
-def _validate_pdk_version_pin(models: Any) -> str | None:
-    """The request's ``models.pdk_version`` pin (issue #4046), ``None`` when
-    unset. Same value forms as ``klt pdk check --expect-version``."""
-    if not isinstance(models, dict):
-        return None
-    pin = models.get("pdk_version")
-    if pin is None:
-        return None
-    if not isinstance(pin, str) or not pin.strip():
-        raise SimError(
-            f"request.models.pdk_version must be a non-empty string (got {pin!r})"
-        )
-    return pin.strip()
-
-
-def _check_pdk_version_pin(pin: str | None, models: Any, backend: str) -> None:
-    """Enforce ``models.pdk_version`` before any corner runs (issue #4046).
-
-    Local backends resolve the PDK the way ``provenance.pdk`` does and fail
-    closed (``pdk_version_unmet``) on ``mismatch``/``unknown`` or when no PDK
-    resolves. Off-host backends reject the field: the worker-side comparison
-    is tracked in #3462, and silently passing would hide drift."""
-    if pin is None:
-        return
-    if backend in _OFFHOST_BACKENDS:
-        raise SimError(
-            f"models.pdk_version is not supported for backend {backend!r}: "
-            "the PDK is resolved on the runner, and the worker-side pin check "
-            "is not implemented yet (see issue #3462) -- use backend 'local' "
-            "or 'local-parallel', or drop the pin"
-        )
-    variant = models.get("pdk")
-    root = models.get("pdk_root")
-    if not (variant or root):
-        raise SimError(
-            f"models.pdk_version pins {pin!r} but no PDK is named: set "
-            "models.pdk and/or models.pdk_root so the installed revision can "
-            "be checked",
-            code=PDK_VERSION_UNMET_CODE,
-        )
-    try:
-        found = find_pdk(variant=variant, root=root, expect_version=pin)
-    except PdkNotFoundError as exc:
-        raise SimError(
-            f"models.pdk_version pins {pin!r} but the PDK could not be resolved: {exc}",
-            code=PDK_VERSION_UNMET_CODE,
-        ) from exc
-    expectation = found.get("version_expectation") or {}
-    status = expectation.get("status")
-    if status == "match":
-        return
-    installed = expectation.get("installed")
-    if status == "mismatch":
-        detail = f"installed PDK is {installed!r}"
-    elif installed:
-        detail = f"installed PDK {installed!r} could not be compared"
-    else:
-        detail = "installed PDK identity could not be determined"
-    raise SimError(
-        f"pinned PDK unavailable: request requires {pin!r}; {detail}",
-        code=PDK_VERSION_UNMET_CODE,
     )
 
 
@@ -2883,7 +2795,7 @@ def _dispatch_deck_request(
     # before anything runs; off-host ones are checked against the report below.
     engine_version_pin = _validate_engine_version_pin(request)
     if engine_version_pin is not None and resolved_backend not in _OFFHOST_BACKENDS:
-        _check_local_engine_version_pin(
+        check_local_engine_version_pin(
             engine_version_pin,
             resolved_backend,
             "ngspice",
@@ -2912,7 +2824,7 @@ def _dispatch_deck_request(
         dry_run=dry_run,
         collect_partial=collect_partial,
     )
-    _check_offhost_engine_version_pin(
+    check_offhost_engine_version_pin(
         engine_version_pin,
         resolved_backend,
         "ngspice",
@@ -3330,7 +3242,7 @@ def _prepare_sim_request(
     # where this process can see the engine (local backends); off-host
     # backends are checked against the report's `engine_version` afterwards.
     engine_version_pin = _validate_engine_version_pin(request)
-    _check_local_engine_version_pin(
+    check_local_engine_version_pin(
         engine_version_pin, backend, engine, ngspice_binary or XYCE_BINARY
     )
     # Issue #4438: an OSDI ABI the local ngspice cannot load is refused up
@@ -3338,7 +3250,11 @@ def _prepare_sim_request(
     _check_local_osdi_abi(osdi_preload, backend, engine, ngspice_binary or XYCE_BINARY)
     # Issue #4046: a `models.pdk_version` pin is checked the same way, before
     # any corner runs; off-host backends reject it rather than pass silently.
-    _check_pdk_version_pin(_validate_pdk_version_pin(models), models, backend)
+    # Issue #5500: unless the off-host backend is a host default a late yield
+    # may still step back to `local` -- then only the pin's *value* is
+    # validated here and the comparison waits for `settle_version_pins` at
+    # the last yield, so a host default cannot refuse a valid local run.
+    check_pdk_version_pin_early(models, backend, backend_from_host_default)
     timeout_s = options.get("timeout_s", DEFAULT_TIMEOUT_S)
     # Issue #3337: the complex-vector sidecar is the result, so declared
     # vectors force artifacts on (validated in full below).
@@ -3607,6 +3523,9 @@ def _prepare_sim_request(
         models.get("pdk"),
         backend=backend,
         explicit_points=explicit_points_wire is not None,
+        gate_context=sim_mismatch_declarations.gate_context(
+            models, request_dir, corner_points, _resolve_lib_ref
+        ),
     )
 
     # Issue #3919: `.subckt` override of the include closure. Applied on top of
@@ -3710,6 +3629,16 @@ def _prepare_sim_request(
         )
         if yielded_on_host and osdi_runner_environment
         else (osdi_preload, osdi_runner_environment)
+    )
+    # Issue #5500: the same yield decides which engine and PDK the
+    # `engine_version` / `models.pdk_version` pins must be checked against.
+    settle_version_pins(
+        request,
+        backend,
+        engine,
+        ngspice_binary or XYCE_BINARY,
+        engine_version_pin,
+        settle=yielded_on_host,
     )
     if resume and backend == "remote":
         raise SimError(
@@ -3948,6 +3877,20 @@ def _run_sim_corners(
         )
         if yielded_on_host and osdi_runner_environment
         else (osdi_preload, osdi_runner_environment)
+    )
+    # Issue #5500: this is the *last* yield, so `backend` is final here. Both
+    # version pins are settled against it when the yield just moved the run
+    # on-host, and the `models.pdk_version` comparison deferred by
+    # `check_pdk_version_pin_early` is due now for a run that really is
+    # leaving this host -- either way before anything is dispatched.
+    settle_version_pins(
+        request,
+        backend,
+        engine,
+        ngspice_binary or XYCE_BINARY,
+        engine_version_pin,
+        settle=yielded_on_host
+        or (backend_from_host_default and backend in _OFFHOST_BACKENDS),
     )
     # Issue #2977: which backend actually ran, and where the request for it
     # came from -- so a host-policy audit can spot a `local` run although
@@ -4307,7 +4250,7 @@ def _run_sim_corners(
         if backend_engine_version is not None
         else loaded_engine_version
     )
-    _check_offhost_engine_version_pin(
+    check_offhost_engine_version_pin(
         engine_version_pin, backend, engine, engine_version
     )
 
@@ -5487,41 +5430,21 @@ def _maybe_gate_instances(
     *,
     backend: str,
     explicit_points: bool,
+    gate_context: tuple[Any, ...] = (),
 ) -> tuple[str, dict[str, Any] | None]:
     """Apply ``request.monte_carlo.instances`` when present (issue #2995):
-    returns ``(netlist_to_dispatch, monte_carlo_info)``, with the gating
-    report attached as ``instance_mismatch``; unchanged when absent."""
-    if mc_spec is None or "instances" not in mc_spec:
-        return netlist_path, monte_carlo_info
-    gated_path, gating = _apply_mismatch_instance_gating(
-        netlist_path,
-        mc_spec,
-        monte_carlo_info,
-        pdk,
-        backend=backend,
-        explicit_points=explicit_points,
-    )
-    if monte_carlo_info is not None:
-        monte_carlo_info = {**monte_carlo_info, "instance_mismatch": gating}
-    return gated_path, monte_carlo_info
-
-
-def _apply_mismatch_instance_gating(
-    netlist_path: str,
-    mc_spec: dict[str, Any],
-    monte_carlo_info: dict[str, Any] | None,
-    pdk: str | None,
-    *,
-    backend: str,
-    explicit_points: bool,
-) -> tuple[str, dict[str, Any]]:
-    """Resolve ``request.monte_carlo.instances`` (issue #2995): validate it,
-    and write a gated copy of the netlist in which every instance not
-    selected has the PDK's mismatch switch shadowed to ``0``. Returns
-    ``(gated_netlist_path, report)``; raises :class:`SimError` for anything
-    unsupported, before any corner is dispatched."""
+    dispatch a gated copy of the netlist in which every instance not selected
+    has its local mismatch switched off, by whichever mechanism the PDK family
+    uses -- a shadowed model-level ``.param`` inside a generated wrapper
+    subcircuit, or ``<param>=0`` on the instance line itself (#5487; see
+    :mod:`klayout_tools.sim_mismatch_gate`). Returns ``(netlist_to_dispatch,
+    monte_carlo_info)`` with the gating report attached as
+    ``instance_mismatch``, unchanged when absent; raises :class:`SimError` for
+    anything unsupported, before any corner is dispatched."""
     import atexit
 
+    if mc_spec is None or "instances" not in mc_spec:
+        return netlist_path, monte_carlo_info
     if backend in _OFFHOST_BACKENDS or explicit_points:
         raise SimError(
             "request.monte_carlo.instances is only supported on local "
@@ -5536,8 +5459,9 @@ def _apply_mismatch_instance_gating(
         )
     family = pdk_variant_family(pdk) if pdk else None
     switch = sim_mismatch_gate.MISMATCH_SWITCH.get(family or "")
-    if switch is None:
-        known_pdks = sorted(sim_mismatch_gate.MISMATCH_SWITCH)
+    instance_param = sim_mismatch_gate.MISMATCH_INSTANCE_PARAM.get(family or "")
+    if switch is None and instance_param is None:
+        known_pdks = sim_mismatch_gate.MISMATCH_GATED_FAMILIES
         raise SimError(
             "request.monte_carlo.instances needs models.pdk naming a PDK with "
             f"a known mismatch switch ({', '.join(known_pdks)}); got {pdk!r}"
@@ -5548,7 +5472,12 @@ def _apply_mismatch_instance_gating(
         )
         with open(netlist_path, encoding="utf-8", errors="surrogateescape") as fh:
             text = fh.read()
-        gated, rows = sim_mismatch_gate.gate_netlist(text, include, exclude, switch)
+        declared = sim_mismatch_declarations.collect(
+            netlist_path, instance_param, *gate_context
+        )
+        gated, rows = sim_mismatch_gate.gate_netlist(
+            text, include, exclude, switch, instance_param, declared
+        )
     except (sim_mismatch_gate.GateError, OSError) as exc:
         raise SimError(str(exc)) from exc
     base = os.path.dirname(os.path.abspath(netlist_path))
@@ -5561,14 +5490,17 @@ def _apply_mismatch_instance_gating(
     with open(gated_path, "w", encoding="utf-8", errors="surrogateescape") as fh:
         fh.write(gated)
     report = {
-        "switch": switch,
+        # Whichever gate this run used: the `.param`, or the instance parameter.
+        "switch": switch or instance_param,
         "include": include,
         "exclude": exclude,
         "instances": rows,
         # All excluded: the run must equal the mismatch-off run (negative control).
         "negative_control": not any(r["randomised"] for r in rows),
     }
-    return gated_path, report
+    if monte_carlo_info is not None:
+        monte_carlo_info = {**monte_carlo_info, "instance_mismatch": report}
+    return gated_path, monte_carlo_info
 
 
 def _netlist_overrides_environment(report: Any) -> dict[str, Any]:
@@ -7184,7 +7116,6 @@ _ENGINE_VERSION_RE = re.compile(r"ngspice-([\w.]+)")
 _WAVEFORM_KEYWORDS = frozenset(
     {"pwl", "pulse", "sin", "exp", "sffm", "am", "trnoise", "trrandom", "external"}
 )
-_WAVEFORM_RE = re.compile(r"^([a-z]+)\s*(?:\(|$)")
 
 
 def _logical_netlist_lines(netlist_text: str) -> list[str]:
@@ -12200,7 +12131,7 @@ def _open_ascii_rawfile(
     format notes (``Flags: complex`` magnitude reduction in particular).
     """
     try:
-        handle = open(raw_path, encoding="utf-8", errors="replace")  # noqa: SIM115
+        handle = open(raw_path, encoding="utf-8", errors="replace")
     except OSError as exc:
         raise SimError(f"could not read rawfile: {exc}") from exc
     with handle:

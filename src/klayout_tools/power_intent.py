@@ -554,9 +554,9 @@ def run_power_intent(
         raise PowerIntentError(str(exc)) from exc
     except VerilogNetlistError as exc:
         raise PowerIntentError(f"cannot parse netlist {netlist_path!r}: {exc}") from exc
-    module = _select_module(modules, models, top)  # type: ignore[arg-type]
+    module = _select_module(modules, models, top)
 
-    design = _Design(module, models, intent)  # type: ignore[arg-type]
+    design = _Design(module, models, intent)
     isolation = _check_isolation(design)
     state = _check_state(design)
     seq_status, seq_findings = _check_sequence(intent)
