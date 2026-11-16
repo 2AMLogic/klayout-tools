@@ -101,7 +101,10 @@ klt pex <layout> --deck <deck> --extract-only [--reference-netlist <schematic.sp
   as `klt sim --wait-for-capacity`. Forwarded to every `klt sim` call
   (schematic, extracted and device-only legs) and overrides each testbench
   request's `batch.capacity_wait_s`. A negative value or a non-`batch`
-  backend is refused before anything is extracted. Omitted, behavior is
+  backend is refused before anything is extracted. Accepted and ignored
+  under `--attach` (nothing is launched), so the collect command can be the
+  submit command verbatim ([#5683](https://github.com/2AMLogic/klayout-tools/issues/5683)).
+  Omitted, behavior is
   unchanged ([#5280](https://github.com/2AMLogic/klayout-tools/issues/5280)).
 - `--submit-only`, `--attach MANIFEST` — asynchronous batch runs, the pex
   counterpart of `klt sim --submit-only` / `--attach`

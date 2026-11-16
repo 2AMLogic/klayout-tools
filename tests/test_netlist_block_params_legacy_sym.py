@@ -21,7 +21,7 @@ import pytest
 
 from klayout_tools.netlist import run_netlist
 from klayout_tools.netlist_block import subckt_params
-from test_netlist_block_params import (  # noqa: F401
+from test_netlist_block_params import (
     _PIN_SYMS,
     _real_card,
 )

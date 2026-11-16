@@ -14,10 +14,7 @@ own docstrings/callers for how this is used.
 
 PDK root/variant discovery (:func:`klayout_tools.pdk.find_pdk`) and the
 :class:`klayout_tools.pdk.PdkNotFoundError` exception it raises stay in
-:mod:`klayout_tools.pdk`, imported here; likewise :func:`klayout_tools.pdk._read_text`,
-which :mod:`klayout_tools.pdk`'s own :func:`klayout_tools.pdk.lef_files` also
-depends on and so cannot move here without leaving a back-reference the other
-way.
+:mod:`klayout_tools.pdk`, imported here.
 """
 
 from __future__ import annotations
@@ -27,10 +24,10 @@ import os
 import re
 from typing import Any
 
+from ._text import read_text as _read_text
 from .liberty_merge import LibertyMergeError, merge_liberty
 from .pdk import (
     PdkNotFoundError,
-    _read_text,
     find_pdk,
     list_pdks,
     variant_dir_of,
@@ -309,7 +306,7 @@ def _other_variants_hint(cell_library: str, resolved: dict[str, Any]) -> str:
             f"; other installed variants ship it: {', '.join(candidates)} -- "
             "pass --pdk <variant> (and --pdk-root <root> if needed) to select one"
         )
-    except Exception:  # noqa: BLE001 -- best-effort hint only
+    except Exception:  # -- best-effort hint only
         return ""
 
 
@@ -333,7 +330,7 @@ def _default_variant_shipping(
         return info
     try:
         shipping = _variants_shipping(cell_library, root=root)
-    except Exception:  # noqa: BLE001 -- fall through to the original error
+    except Exception:  # -- fall through to the original error
         return info
     return shipping[0] if shipping else info
 
