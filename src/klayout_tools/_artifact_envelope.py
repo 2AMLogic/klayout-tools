@@ -20,3 +20,14 @@ def hashed_path_envelope(path: str | None) -> dict[str, Any]:
         envelope = repo_relative_path(path, repo_root=root)
     envelope["sha256"] = content_hash(path)
     return envelope
+
+
+def source_defines_envelope(source_defines: dict[str, Any]) -> list[dict[str, Any]]:
+    """A **path-keyed** mapping as the committable list form (issue #5784): an
+    envelope cannot be a JSON object key, and a source outside the repo has no
+    path to key on at all. Each resolved absolute key becomes its own
+    :func:`hashed_path_envelope` under ``source``; ``[]`` when empty."""
+    return [
+        {"source": hashed_path_envelope(path), "defines": defines}
+        for path, defines in source_defines.items()
+    ]

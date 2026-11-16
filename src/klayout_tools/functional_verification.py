@@ -209,6 +209,7 @@ import xml.etree.ElementTree as ElementTree
 from typing import Any
 
 from ._artifact_envelope import hashed_path_envelope as _hashed_path_envelope
+from ._artifact_envelope import source_defines_envelope as _source_defines_envelope
 from ._jsonnum import is_int
 from ._paths import _load_request_json
 from ._paths import load_request_arg as _shared_load_request_arg
@@ -258,7 +259,7 @@ from .reset_coverage import ResetCoverageError, sequential_elements
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 #: ``"icarus"`` first: it is the documented default, per the spike's own
 #: CI-cost finding (~0.7 s vs. Verilator's ~8 s for the worked example).
@@ -1132,14 +1133,13 @@ def _initial_state_echo(
     runs: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
     """``environment.initial_state`` (additive, issue #2998): ``None`` unless
-    requested; ``seeds`` is the effective seed list (empty for mode "x") and
-    ``runs`` has one entry per seed."""
+    requested; ``seeds`` the effective seeds (empty for "x"), ``runs`` per seed."""
     if initial_state is None:
         return None
     return {
         "mode": initial_state["mode"],
         "seeds": initial_state["seeds"],
-        "netlist": initial_state["netlist"],
+        "netlist": _hashed_path_envelope(initial_state["netlist"]),
         "clock": info["clock"],
         "state_elements": info["state_elements"],
         "d_nets": info["d_nets"],
@@ -3048,20 +3048,16 @@ def run_functional_verification(
                 "cocotb_version": _cocotb_version(),
                 "results_xml": _hashed_path_envelope(results_xml),
                 # Additive (issue #3013): the simulator/cocotb console transcript
-                # and the build transcript the run wrote, named by path (never
-                # inlined) like `results_xml`.
+                # and the build transcript the run wrote, like `results_xml`.
                 "test_log": _hashed_path_envelope(test_log),
                 "build_log": _hashed_path_envelope(build_log),
                 "random_seed": _extract_random_seed_property(results_xml),
-                # Additive (issue #3290): `options.source_defines` keyed by the
-                # request.sources entry as resolved to an absolute path; `{}`
-                # when absent.
-                "source_defines": source_defines,
+                # Retyped (issue #5784) to [{source, defines}]; `[]` when absent.
+                "source_defines": _source_defines_envelope(source_defines),
                 # Additive (issue #4338): `request.env` as given; `{}` when absent.
                 "env": env,
-                # Additive (issue #2998): `null` unless the request set
-                # `options.initial_state`. `seeds` echoes the effective seeds
-                # (empty for mode "x"); `runs` has one entry per seed.
+                # Additive (issue #2998): `null` unless requested; `seeds` is
+                # the effective seed list (empty for "x"), `runs` one per seed.
                 "initial_state": _initial_state_echo(
                     initial_state, initial_state_info, run_reports
                 ),
@@ -3069,10 +3065,8 @@ def run_functional_verification(
                 # ordinary run, an object on an SDF-annotated one -- so a caller
                 # can tell an annotated run from an unannotated one *from the
                 # JSON*, without reading a transcript. `annotated: true` is
-                # load-bearing rather than redundant: reaching this point at all
-                # means the diagnostic scan above found nothing *actionable*,
-                # i.e. every non-benign diagnostic class applied cleanly.
-                #
+                # load-bearing: reaching this point means the diagnostic scan
+                # above found nothing *actionable* (nothing non-benign left).
                 # `annotated: true` alone cannot distinguish "every delay and
                 # every timing check applied" from "every IOPATH applied and
                 # every TIMINGCHECK section was dropped" -- the normal case on
@@ -3080,15 +3074,14 @@ def run_functional_verification(
                 # #1102). `partial`/`dropped` make that distinction
                 # machine-readable: `partial` is true whenever any benign class
                 # was filtered out of the diagnostic gate above, and `dropped`
-                # names each such class with the count of diagnostic lines
-                # filtered and a human-readable reason
-                # (:data:`SDF_BENIGN_DIAGNOSTIC_REASONS`). An ordinary fully
-                # -clean run reports `partial: false` and `dropped: {}`.
+                # names each class with its filtered-line count and a
+                # human-readable reason (:data:`SDF_BENIGN_DIAGNOSTIC_REASONS`).
                 "sdf": (
                     None
                     if sdf is None
                     else {
-                        "file": sdf["file"],
+                        # Retyped to the hashed envelope (issue #5784).
+                        "file": _hashed_path_envelope(sdf["file"]),
                         "corner": sdf["corner"],
                         # Additive (issue #2364): echoes the request's entry
                         # population -- "all" (every delay entry) or
@@ -3116,6 +3109,10 @@ def run_functional_verification(
         "results_xml": results_xml,
         "test_log": test_log,
         "build_log": build_log,
+        "sdf": None if sdf is None else sdf["file"],
+        "initial_state_netlist": (
+            None if initial_state is None else initial_state["netlist"]
+        ),
     }
     return report
 

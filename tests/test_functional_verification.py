@@ -659,7 +659,9 @@ def test_stubbed_run_substitutes_wrapper_and_echoes_source_defines(
     assert built[0] == str((tmp_path / "gcd.v").resolve())
     assert built[1] != macro and macro in Path(built[1]).read_text()
     assert runner.build_kwargs["defines"] == {}
-    assert report["environment"]["source_defines"] == {macro: {"FUNCTIONAL": "1"}}
+    assert report["environment"]["source_defines"] == [
+        {"source": _envelope(None, "external"), "defines": {"FUNCTIONAL": "1"}}
+    ]
 
 
 def test_stubbed_run_without_source_defines_echoes_empty(tmp_path, monkeypatch):
@@ -669,7 +671,7 @@ def test_stubbed_run_without_source_defines_echoes_empty(tmp_path, monkeypatch):
 
     report = run_functional_verification(request_path)
 
-    assert report["environment"]["source_defines"] == {}
+    assert report["environment"]["source_defines"] == []
     assert all(
         not Path(s).name.startswith("scoped_defines_")
         for s in runner.build_kwargs["sources"]
@@ -1243,7 +1245,7 @@ def test_stubbed_run_reports_the_full_contract_shape(tmp_path, monkeypatch):
 
     report = run_functional_verification(request_path)
 
-    assert report["schema_version"] == 2
+    assert report["schema_version"] == 3
     assert report["engine"] == "icarus"
     assert report["hdl_toplevel"] == "gcd"
     assert report["testbench"] == "test_gcd"
@@ -1254,8 +1256,7 @@ def test_stubbed_run_reports_the_full_contract_shape(tmp_path, monkeypatch):
     assert report["skipped_count"] == 0
     assert report["coverage"] is None
     # Additive (Epic #1585 Phase 3, issue #1845): `null` when `options.trace`
-    # was not requested -- see `test_stubbed_trace_run_populates_the_trace_block`
-    # for the present case.
+    # was not requested -- see the trace-block test below for the present case.
     assert report["trace"] is None
     assert report["environment"] == {
         "engine": "icarus",
@@ -1266,12 +1267,11 @@ def test_stubbed_run_reports_the_full_contract_shape(tmp_path, monkeypatch):
         "results_xml": _envelope(None, "external"),
         "test_log": _envelope(None, "external"),
         "build_log": _envelope(None, "external"),
-        # `_RESULTS_XML_WITH_FAILURE` carries the exact `random_seed` value
-        # the spike captured live (section 4) -- this is the authoritative
-        # echo, read back from `results.xml` itself.
+        # `_RESULTS_XML_WITH_FAILURE` carries the exact `random_seed` value the
+        # spike captured live (section 4) -- the authoritative echo, from results.xml.
         "random_seed": 1785780800,
-        # Additive (issue #3290): `{}` without `options.source_defines`.
-        "source_defines": {},
+        # Retyped (issue #5784): `[]` without `options.source_defines`.
+        "source_defines": [],
         "env": {},
         # Additive (issue #1002): `null` on any run without `options.sdf`,
         # so an unannotated verdict is never mistakable for an annotated one.
@@ -1281,8 +1281,7 @@ def test_stubbed_run_reports_the_full_contract_shape(tmp_path, monkeypatch):
         "initial_state": None,
     }
     results_xml = report.local_paths["results_xml"]
-    assert os.path.isabs(results_xml)
-    assert os.path.isfile(results_xml)
+    assert os.path.isabs(results_xml) and os.path.isfile(results_xml)
     assert ".klt/functional-verification" in results_xml.replace(os.sep, "/")
 
     # The build/test kwargs the contract's gotchas are about.
@@ -2565,7 +2564,7 @@ def test_stubbed_sdf_defaults_to_the_typ_corner(tmp_path, monkeypatch):
 
     assert runner.build_kwargs["build_args"][-2:] == ["-T", "typ"]
     assert report["environment"]["sdf"] == {
-        "file": str(tmp_path / "route.sdf"),
+        "file": _envelope(None, "external"),
         "corner": "typ",
         "entries": "all",
         "annotated": True,
@@ -2585,7 +2584,8 @@ def test_stubbed_sdf_absolute_file_path_is_accepted_verbatim(tmp_path, monkeypat
 
     report = run_functional_verification(request_path)
 
-    assert report["environment"]["sdf"]["file"] == sdf_path
+    assert report["environment"]["sdf"]["file"] == _envelope(None, "external")
+    assert report.local_paths["sdf"] == sdf_path
 
 
 def test_stubbed_sdf_fails_loud_on_an_sdf_error_in_the_transcript(
@@ -3404,7 +3404,7 @@ def test_integration_real_icarus_sdf_annotation_changes_the_verdict(tmp_path):
     assert plain_report["environment"]["sdf"] is None
     assert annotated_report["status"] == "fail"
     assert annotated_report["environment"]["sdf"] == {
-        "file": str(tmp_path / "route.sdf"),
+        "file": _envelope(None, "external"),
         "corner": "typ",
         "entries": "all",
         "annotated": True,
@@ -3521,7 +3521,7 @@ def test_integration_real_icarus_sdf_opensta_header_triples_apply_at_every_corne
     assert report["status"] == expected_status
     sdf = report["environment"]["sdf"]
     assert sdf["corner"] == corner
-    assert sdf["file"] == str(tmp_path / "route.sdf")
+    assert sdf["file"] == _envelope(None, "external")
     assert sdf["partial"] is False
     assert sdf["dropped"] == {}
 
@@ -3869,7 +3869,7 @@ def test_integration_real_icarus_sdf_resolves_a_toplevel_port_interconnect(tmp_p
     # FunctionalVerificationError instead of returning a report at all.
     assert annotated_report["status"] == "fail"
     assert annotated_report["environment"]["sdf"] == {
-        "file": str(tmp_path / "route.sdf"),
+        "file": _envelope(None, "external"),
         "corner": "typ",
         "entries": "all",
         "annotated": True,
@@ -4315,7 +4315,7 @@ def test_stubbed_sdf_counts_a_dropped_alias_port_interconnect(tmp_path, monkeypa
     report = run_functional_verification(request_path)
 
     sdf = report["environment"]["sdf"]
-    assert sdf["file"] == str(tmp_path / "route.sdf")
+    assert sdf["file"] == _envelope(None, "external")
     assert sdf["annotated"] is True
     assert sdf["partial"] is True
     assert sdf["dropped"].keys() == {"zero_delay_alias_port_interconnect"}
@@ -4358,7 +4358,7 @@ def test_stubbed_sdf_interconnect_mode_counts_dropped_iopath_entries(
     report = run_functional_verification(request_path)
 
     sdf = report["environment"]["sdf"]
-    assert sdf["file"] == str(tmp_path / "route.sdf")
+    assert sdf["file"] == _envelope(None, "external")
     assert sdf["entries"] == "interconnect"
     assert sdf["annotated"] is True
     assert sdf["partial"] is True
@@ -4448,7 +4448,7 @@ def test_integration_real_icarus_sdf_drops_a_zero_delay_alias_port_interconnect(
     assert plain_report["environment"]["sdf"] is None
     assert annotated_report["status"] == "fail"
     assert annotated_report["environment"]["sdf"] == {
-        "file": str(tmp_path / "route.sdf"),
+        "file": _envelope(None, "external"),
         "corner": "typ",
         "entries": "all",
         "annotated": True,
@@ -4949,7 +4949,7 @@ def test_stubbed_sdf_counts_a_dropped_physical_only_interconnect(tmp_path, monke
     report = run_functional_verification(request_path)
 
     sdf = report["environment"]["sdf"]
-    assert sdf["file"] == str(tmp_path / "route.sdf")
+    assert sdf["file"] == _envelope(None, "external")
     assert sdf["annotated"] is True
     assert sdf["partial"] is True
     assert sdf["dropped"].keys() == {"zero_delay_physical_only_interconnect"}
@@ -5035,7 +5035,7 @@ def test_integration_real_icarus_sdf_drops_a_zero_delay_physical_only_interconne
     assert plain_report["environment"]["sdf"] is None
     assert annotated_report["status"] == "fail"
     assert annotated_report["environment"]["sdf"] == {
-        "file": str(tmp_path / "route.sdf"),
+        "file": _envelope(None, "external"),
         "corner": "typ",
         "entries": "all",
         "annotated": True,

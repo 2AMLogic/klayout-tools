@@ -1538,7 +1538,7 @@ which reads the input field only (`signoff.py`'s `_INPUT_ARTIFACT_FIELDS`).
 | `place-and-route` | `netlist` — the input netlist `provenance.input.content_hash` pins (additive, no bump) | 1 | #3751 |
 | `sta` | `def_path`, `verilog_path`, `spef_path` (`null` when the request does not use that input) | 2 | #2879 (moved from the plain-string table; schema-1 evidence carries absolute strings) |
 | `sta` | `sdf` / `corners[].sdf` — a written output: the envelope plus `content_hash` (`null` unless `request.sdf: true`; additive, no bump) | 2 | #2886 |
-| `functional-verification` | `environment.{results_xml,test_log,build_log}`, `environment.initial_state.runs[].results_xml`, `mutation_testing.results[].log_path` (`{path: null, scope: "absent"}` when there is none, e.g. `results_xml` on the Verilog-bench path; `--format text` still prints the real paths). The `environment.{results_xml,test_log,build_log}` and `initial_state.runs[].results_xml` envelopes also carry an additive `sha256` (`sha256:<hex>` of the file as written, `null` when it was not produced, #4931) | 2 | #4279 (moved from the plain-string table; schema-1 evidence carries absolute strings) |
+| `functional-verification` | `environment.{results_xml,test_log,build_log}`, `environment.initial_state.runs[].results_xml`, `mutation_testing.results[].log_path` (`{path: null, scope: "absent"}` when there is none, e.g. `results_xml` on the Verilog-bench path; `--format text` still prints the real paths), and (schema_version 3, #5784) the echoed *inputs*: `environment.sdf.file`, `environment.initial_state.netlist`, and `environment.source_defines` — the last retyped from an absolute-path-keyed object to a list of `{"source": <envelope>, "defines": {...}}` (an envelope cannot be a JSON object key, and a source outside the repo has no path to key on; `[]` when absent). The `environment.{results_xml,test_log,build_log}` and `initial_state.runs[].results_xml` envelopes also carry an additive `sha256` (`sha256:<hex>` of the file as written, `null` when it was not produced, #4931) | 3 | #4279 (moved from the plain-string table; schema-1 evidence carries absolute strings), #5784 (the echoed inputs; schema-2 evidence carries absolute strings) |
 | `array-check` | `file` (the hashed input layout) | 2 | #5788 |
 
 **Plain-string fields** — intentionally unchanged:
@@ -1556,7 +1556,7 @@ which reads the input field only (`signoff.py`'s `_INPUT_ARTIFACT_FIELDS`).
 | `layout-plan-check` | `gds_path` | 1 |
 | `lef-abstract` | `output`, `socket` | 2 |
 | `arith-gen` | `verilog_path`, `reference_path`, `testbench_path`, `techmap_path`, `equiv_request_path`, `output_dir` | 1 |
-| `functional-verification` | `info_path`, `options.trace.path` | 2 (`log_path` moved to the envelope table) |
+| `functional-verification` | `info_path`, `options.trace.path` | 3 (`log_path` moved to the envelope table; the echoed inputs joined them in #5784) |
 | `yield-campaign` | `campaign.sim_report_path`, `campaign.request_path` | 1 (`yield_analysis.py`) |
 | `characterize` | `liberty.path`, `liberty.roundtrip.probe_netlist`, `simulation.{testbench,request,report}`, `cells[].simulation.{testbench,request,report}`, `comparison.{ours,reference}` | 1 |
 

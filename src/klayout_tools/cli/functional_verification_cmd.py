@@ -187,7 +187,12 @@ def _print_text(report: dict) -> None:
         entries_note = (
             "" if sdf.get("entries", "all") == "all" else f"  entries: {sdf['entries']}"
         )
-        print(f"sdf: {sdf['file']}  corner: {sdf['corner']}{entries_note}")
+        # `file` is the committable {path, scope} envelope (#5784), so the
+        # absolute path comes from the run's own `local_paths` side-channel,
+        # like `test_log`/`results_xml` above.
+        print(
+            f"sdf: {_local_path(report, 'sdf')}  corner: {sdf['corner']}{entries_note}"
+        )
         # Printed only when a benign diagnostic class was dropped (issue
         # #1102): `annotated: true` alone cannot distinguish "every check in
         # the SDF applied" from "every TIMINGCHECK section was dropped" --

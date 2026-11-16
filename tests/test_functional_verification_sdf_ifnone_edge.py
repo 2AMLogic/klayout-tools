@@ -33,6 +33,7 @@ from pathlib import Path
 
 import pytest
 
+from helpers.artifact_envelope import env as _envelope
 from helpers.cocotb_fakes import FakeCocotbRunner as _FakeRunner
 from klayout_tools import functional_verification as fv
 from klayout_tools import functional_verification_sdf as fvs
@@ -454,8 +455,7 @@ def _request(tmp_path: Path, name: str, sdf: dict | None) -> str:
 def test_stubbed_sdf_reports_the_dropped_ifnone_edge_arcs(tmp_path, monkeypatch):
     """The JSON contract for issue #2885: `partial: true`, a counted
     `iopath_ifnone_edge_modpath` class with its reason, and an additive
-    `arcs` list naming every dropped cell arc -- the drop is never silent.
-    `environment.sdf.file` still names the caller's own SDF."""
+    `arcs` list (never silent); `sdf.file` names the caller's own SDF."""
     _stage(tmp_path)
     _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML))
 
@@ -464,7 +464,7 @@ def test_stubbed_sdf_reports_the_dropped_ifnone_edge_arcs(tmp_path, monkeypatch)
     )
 
     sdf = report["environment"]["sdf"]
-    assert sdf["file"] == str(tmp_path / "route.sdf")
+    assert sdf["file"] == _envelope(None, "external")
     assert sdf["annotated"] is True
     assert sdf["partial"] is True
     assert sdf["dropped"] == {

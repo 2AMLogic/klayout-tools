@@ -15,6 +15,7 @@ import subprocess
 from typing import Any
 
 from ._artifact_envelope import hashed_path_envelope as _hashed_path_envelope
+from ._artifact_envelope import source_defines_envelope as _source_defines_envelope
 from ._verilog_top import plusargs, require_module_declared
 
 VERILOG_TOP_FIELDS = (
@@ -349,14 +350,16 @@ def _run_verilog_top(
                 "test_log": _hashed_path_envelope(test_log),
                 "build_log": _hashed_path_envelope(build_log),
                 "random_seed": None,
-                "source_defines": source_defines,
+                # Retyped (issue #5784) to [{source, defines}]; `[]` when absent.
+                "source_defines": _source_defines_envelope(source_defines),
                 "plusargs": plusargs,  # issue #5006; `[]` when absent
                 "initial_state": None,
                 "sdf": (
                     None
                     if sdf is None
                     else {
-                        "file": sdf["file"],
+                        # Retyped to the hashed envelope (issue #5784).
+                        "file": _hashed_path_envelope(sdf["file"]),
                         "corner": sdf["corner"],
                         "entries": sdf["entries"],
                         **({"scope": sdf["scope"]} if "scope" in sdf else {}),
@@ -375,6 +378,8 @@ def _run_verilog_top(
         "results_xml": None,
         "test_log": test_log,
         "build_log": build_log,
+        "sdf": None if sdf is None else sdf["file"],
+        "initial_state_netlist": None,
     }
     return report
 

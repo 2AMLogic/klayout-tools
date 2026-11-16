@@ -14,6 +14,22 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Changed** (#5784, breaking — `klt functional-verification` `schema_version`
+  2 → 3): the three request-resolved *input* paths the response echoes no
+  longer leak the producing checkout's absolute layout. `environment.sdf.file`
+  and `environment.initial_state.netlist` are now the hashed
+  `{path, scope, sha256}` envelope (repo-relative `path`, `{"path": null,
+  "scope": "external"}` outside the repo), and `environment.source_defines`
+  is retyped from an absolute-path-keyed object to a list of
+  `{"source": <envelope>, "defines": {...}}` (`[]` when absent) — an envelope
+  cannot be a JSON object key, and a source outside the repo has no path to
+  key on. Both response builders (cocotb and Verilog-bench) emit the new
+  shape, and a committed report now passes `klt env-provenance
+  lint-envelope` clean. Path *resolution* is unchanged — the engine still
+  receives the absolute path (the `$sdf_annotate` shim, the define wrappers)
+  — and `--format text` still prints the real absolute paths, via the
+  `local_paths` side-channel. Consumers reading these three fields as
+  strings (schema-2 evidence) must adapt; completing #4279.
 - **`klt mcp serve` serves the `docs/schemas/` JSON contract as MCP
   resources** (#5420, 2026-11-13): the server now advertises the resources
   capability and lists one resource per `docs/schemas/*.schema.json` at
