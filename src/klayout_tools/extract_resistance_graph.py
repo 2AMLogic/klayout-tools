@@ -1,6 +1,7 @@
 """Deterministic geometry-to-resistor-graph construction for extraction
 (issue #2980; Stage 3.D5 increment 1 of ``docs/design/extract-fidelity-roadmap.md``),
-plus the thin effective-resistance adapter over it (issue #2981, increment 2).
+plus the thin effective-resistance adapter over it (issue #2981, increment 2)
+and increment 4's per-cut via/contact resistance (``r_cut_ohm``, issue #2983).
 
 Construction turns conductor-role polygons, declared ports (terminals and
 ideal nodes) and via/contact landings into a resistor graph -- nodes, edges,
@@ -8,11 +9,13 @@ and explicit diagnostics -- following the Stage 3.D2 model.
 :func:`terminal_resistance_matrix` and :func:`effective_resistance` (at the end
 of the module) solve a built graph by reusing
 :func:`klayout_tools.ir_solver.solve_ir_drop`; there is no second solver.
-Nothing here is wired to ``klt extract`` (increment 3) or changes a default
-extraction output or JSON field. The construction inputs are graph-level
-geometry in database units (dbu); an
-adapter from ``_region_n_squares`` / ``_net_port_regions`` /
-``_fragment_port_points_um`` output is part of the integration increment.
+The module is live and wired: ``klt extract --resistance-graph`` reaches
+:func:`build_resistance_graph` and :func:`terminal_resistance_matrix` through
+:func:`klayout_tools.extract_parasitics._resistance_graph_report`, which
+adapts the per-net geometry Pass 1 already holds into :class:`RoleInput` /
+ports / landings. The emitted ``resistance_graph`` object is opt-in and
+additive -- off by default, byte-identical output without the flag -- so no
+default extraction output or JSON field changes.
 
 **Model (3.D2 steps 3-7).**
 
