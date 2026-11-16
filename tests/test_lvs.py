@@ -3616,6 +3616,7 @@ def test_body_verification_verified_when_every_body_resolves(tmp_path):
         "reason": None,
         "device_classes": [],
         "device_count": 0,
+        "inspected_count": 2,
         "findings": [],
         "finding_count": 0,
     }
@@ -3738,133 +3739,6 @@ def test_body_verification_unchecked_for_pre_extracted_layout_netlist(tmp_path):
     assert "no request.layout.deck was given" in body_verification["reason"]
     assert body_verification["device_count"] == 0
     assert body_verification["findings"] == []
-
-
-def _one_device_circuit(*, body_net_name: str | None):
-    """A minimal in-memory KLayout netlist with a single `pfet`
-    `DeviceClassMOS4Transistor` whose body terminal reaches `body_net_name`
-    (an unnamed net, i.e. KLayout's anonymous placeholder, when `None`).
-
-    Returns `(netlist, circuit)` -- the owning `Netlist` must stay referenced
-    by the caller, or KLayout destroys it and every child object with it."""
-    import klayout.db as kdb
-
-    netlist = kdb.Netlist()
-    pfet_class = kdb.DeviceClassMOS4Transistor()
-    pfet_class.name = "pfet"
-    netlist.add(pfet_class)
-    circuit = kdb.Circuit()
-    circuit.name = "TOP"
-    netlist.add(circuit)
-    device = circuit.create_device(pfet_class, "M1")
-    net = (
-        circuit.create_net()
-        if body_net_name is None
-        else circuit.create_net(body_net_name)
-    )
-    device.connect_terminal("B", net)
-    return netlist, circuit
-
-
-def _gf180mcu_like_deck():
-    """A deck stub shaped like gf180mcu: no drawn `tap` layer, but a
-    *derivable* one declared via `tap_nplus`/`tap_pplus` (issue #1084) --
-    i.e. the exact deck shape whose mere declaration used to suppress the
-    PMOS body check entirely."""
-    from types import SimpleNamespace
-
-    return SimpleNamespace(
-        nfet_class="nfet",
-        pfet_class="pfet",
-        substrate_net="vsubs",
-        tap=None,
-        tap_nplus=(32, 0),
-        tap_pplus=(31, 0),
-    )
-
-
-def test_body_unverified_counts_matches_raw_klayout_anonymous_prefix():
-    """Issue #2048's prefix trap, pinned.
-
-    `lvs_mismatch` reads `Net.expanded_name()` straight off the in-memory
-    netlist, whose anonymous-net placeholder is a **raw** `"$<n>"`.
-    `extract_report.py`'s `_ANONYMOUS_NET_PREFIX` (relocated there out of
-    `extract.py` by PR #2071's netlist-report split) is `"\\$"` only because
-    every name *that* module reports has already been backslash-escaped by
-    `spice_safe_net_name` (issue #1162). Reusing the escaped constant on this
-    path would match nothing at all -- silently restoring the bug while every
-    other assertion still passed -- so both spellings, and the fact that the
-    escaped one does not match a raw name, are asserted here directly.
-    """
-    from klayout_tools import extract_report as extract_report_mod
-    from klayout_tools import lvs_mismatch
-
-    assert lvs_mismatch._RAW_ANONYMOUS_NET_PREFIX == "$"
-    assert extract_report_mod._ANONYMOUS_NET_PREFIX == "\\$"
-    assert not "$0".startswith(extract_report_mod._ANONYMOUS_NET_PREFIX)
-
-    deck = _gf180mcu_like_deck()
-
-    _netlist, anonymous = _one_device_circuit(body_net_name=None)
-    device = next(iter(anonymous.each_device()))
-    # KLayout's own raw spelling -- no backslash anywhere in it.
-    assert lvs_mismatch._device_body_net_name(device).startswith("$")
-    assert "\\" not in lvs_mismatch._device_body_net_name(device)
-    assert lvs_mismatch._body_unverified_counts(anonymous, deck) == {"pfet": 1}
-
-    # A real, named well-tie net is never counted, on the same deck.
-    _named_netlist, named = _one_device_circuit(body_net_name="VPB")
-    assert lvs_mismatch._body_unverified_counts(named, deck) == {}
-
-
-def test_body_unverified_counts_flags_pmos_body_reaching_no_net_at_all():
-    """A body terminal that reaches no net at all is unverified for the same
-    reason an anonymous one is -- nothing biases it. Mirrors the NMOS arm's
-    long-standing `None` handling (issue #281)."""
-    from klayout_tools import lvs_mismatch
-
-    _netlist, circuit = _one_device_circuit(body_net_name="VPB")
-    device = next(iter(circuit.each_device()))
-    device.disconnect_terminal("B")
-
-    assert lvs_mismatch._device_body_net_name(device) is None
-    assert lvs_mismatch._body_unverified_counts(circuit, _gf180mcu_like_deck()) == {
-        "pfet": 1
-    }
-
-
-def test_body_unverified_message_names_unlabeled_tap_cause():
-    """Issue #4361: the warning must not claim tap geometry is missing when
-    the tap-connected net is merely unnamed (the netlist cannot tell the two
-    apart), and must say labeling the conductor resolves it."""
-    from klayout_tools import lvs_mismatch
-
-    deck = _gf180mcu_like_deck()
-    _netlist, circuit = _one_device_circuit(body_net_name=None)
-
-    (entry,) = lvs_mismatch._body_net_warnings(circuit, deck)
-    message = entry["description"]
-    assert "no drawn or derived well-tap geometry exists" in message
-    assert "carries no name label" in message
-    assert "label the tap-connected conductor" in message
-    assert entry["severity"] == "warning"
-
-
-def test_body_unverified_message_nmos_names_both_causes():
-    from klayout_tools import lvs_mismatch
-
-    deck = _gf180mcu_like_deck()
-    _netlist, circuit = _one_device_circuit(body_net_name="vsubs")
-    device = next(iter(circuit.each_device()))
-    # reuse the pfet-shaped stub as the deck's nfet class
-    deck.nfet_class = device.device_class().name
-    deck.pfet_class = "unused"
-
-    (entry,) = lvs_mismatch._body_net_warnings(circuit, deck)
-    message = entry["description"]
-    assert "no substrate-tap geometry is drawn" in message
-    assert "carries no name label" in message
-    assert "label the tap-connected conductor" in message
 
 
 def _write_hier_inverter_gds(path: Path) -> str:

@@ -437,7 +437,7 @@
     },
     {
       "path": "src/klayout_tools/lvs_mismatch.py",
-      "lines": 2423
+      "lines": 2210
     },
     {
       "path": "src/klayout_tools/lvs_netgen.py",
@@ -445,7 +445,7 @@
     },
     {
       "path": "src/klayout_tools/lvs_power.py",
-      "lines": 823
+      "lines": 734
     },
     {
       "path": "src/klayout_tools/lvs_runset.py",
@@ -925,7 +925,7 @@
     },
     {
       "path": "tests/test_lvs.py",
-      "lines": 26221
+      "lines": 26095
     },
     {
       "path": "tests/test_lvs_device_provenance.py",

@@ -386,6 +386,27 @@ inputs are unchanged can flip from `"match"` to `"mismatch"` on upgrade —
 callers gating on `status` should expect that (see `docs/cli/lvs.md`,
 "`reference.unresolved_subckt_call`").
 
+`klt lvs`'s `body_verification` block gains an `inspected_count` integer
+(issue #5749): how many MOS devices the body check actually examined, across
+every eligible class (generic and `compare_mos_flavour`-flavoured), present
+in every branch (`0` for `"unchecked"`) so a `"verified"` states its own
+coverage instead of being inferred from the absence of findings. The same
+issue also stops the block from rendering the *vacuous* `"verified"`: a run
+that reached the check (a `layout.deck` was given) but found zero eligible
+MOS devices — a passives-only layout — now reads `"unchecked"` with a
+`reason`, and the check now sees flavoured classes, so a flavoured-only
+layout is inspected (and honestly `"unverified"` when a body tie is missing)
+rather than silently skipped. Both halves are additive-plus-honesty: no
+field is removed or retyped, no `status` value is added or removed, and
+`status`/`mismatch_count`/`error_count`/`category_counts`/
+`category_error_counts` are untouched — but a consumer that read
+`body_verification.status: "verified"` as "this run inspected bodies" must
+now also read `inspected_count`, because a pre-#5749 `"verified"` may have
+inspected nothing. No `schema_version` bump;
+`docs/schemas/lvs-response.schema.json`'s `body_verification` definition
+describes the new field. See `docs/cli/lvs.md`'s `body_verification` field
+table.
+
 **A new key in a documented open map, and a new member on one class of that
 map's entries, are additive.** `klt functional-verification`'s
 `environment.sdf.dropped` is documented as an open map keyed by class name,
