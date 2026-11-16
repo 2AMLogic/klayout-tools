@@ -6248,6 +6248,18 @@ _GEOMETRY_DISCLOSURE_CLASS_KINDS: tuple[tuple[str, str], ...] = (
     ("DeviceClassCapacitor", "capacitor"),
 )
 
+#: Issue #5653: the device-class families that appear in the
+#: ``device_parameter_coverage`` block *without* ever raising a
+#: :data:`CATEGORY_DEVICE_GEOMETRY_NOT_COMPARED` warning. A MOS class's
+#: ``L``/``W`` are primary and compared, so a warning would be per-run noise
+#: (the #2461 decision stands); but the block must still say so positively,
+#: or ``[]`` is ambiguous between "verified" and "nothing verified".
+#: ``DeviceClassMOS4Transistor`` subclasses the 3-terminal class, so one
+#: entry covers both.
+_COVERAGE_ONLY_CLASS_KINDS: tuple[tuple[str, str], ...] = (
+    ("DeviceClassMOS3Transistor", "mos"),
+)
+
 #: Issue #2461: the stable ``device_parameter_coverage[].not_compared[].reason``
 #: values -- why one declared parameter of a participating class took no part
 #: in the compare.
@@ -6288,6 +6300,21 @@ def _geometry_disclosure_kind(device_class: Any, kdb_module: Any) -> str | None:
     return None
 
 
+def _coverage_kind(device_class: Any, kdb_module: Any) -> str | None:
+    """The ``device_kind`` for ``device_class``'s ``device_parameter_coverage``
+    entry: a warning-bearing kind (:func:`_geometry_disclosure_kind`) or a
+    coverage-only one (:data:`_COVERAGE_ONLY_CLASS_KINDS`, issue #5653), else
+    ``None``."""
+    kind = _geometry_disclosure_kind(device_class, kdb_module)
+    if kind is not None:
+        return kind
+    for class_name, kind in _COVERAGE_ONLY_CLASS_KINDS:
+        klayout_class = getattr(kdb_module, class_name, None)
+        if klayout_class is not None and isinstance(device_class, klayout_class):
+            return kind
+    return None
+
+
 def _participating_device_classes(netlist: Any) -> dict[str, tuple[Any, int]]:
     """``{<lower-cased class name>: (<class object>, <instance count>)}`` for
     every device class this netlist actually *instantiates*.
@@ -6317,7 +6344,8 @@ def _device_parameter_coverage(
     compare_scoped_narrowed: AbstractSet[tuple[str, str]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Which parameters of each participating resistor/capacitor class this
-    compare actually covered (issue #2461).
+    compare actually covered (issue #2461). Issue #5653: the coverage block
+    also reports MOS classes, but the warning stays resistor/capacitor-only.
 
     Returns ``(mismatch entries, coverage block)``:
 
@@ -6327,7 +6355,8 @@ def _device_parameter_coverage(
       already discloses as excluded -- so the human-readable half of the
       report stops implying the geometry was checked;
     * the machine-checkable ``device_parameter_coverage`` block, built from
-      the same determination so the two renderings cannot disagree (the same
+      the same per-parameter determination so the two renderings cannot
+      disagree on a class both cover (the same
       one-source-of-truth discipline ``body_verification``/
       ``device.body_unverified`` follow, issue #1983).
 
@@ -6379,9 +6408,11 @@ def _device_parameter_coverage(
         layout_entry = layout_classes.get(key)
         reference_entry = reference_classes.get(key)
         device_class = (layout_entry or reference_entry)[0]  # type: ignore[index]
-        kind = _geometry_disclosure_kind(device_class, kdb)
+        kind = _coverage_kind(device_class, kdb)
         if kind is None:
             continue
+        # Issue #5653: coverage-only kinds (MOS) never raise the warning.
+        warns = _geometry_disclosure_kind(device_class, kdb) is not None
 
         class_name = device_class.name
         compared: list[str] = []
@@ -6412,7 +6443,7 @@ def _device_parameter_coverage(
             }
         )
 
-        if not secondary:
+        if not secondary or not warns:
             # Every uncompared parameter of this class is already disclosed
             # by its own, more specific warning -- nothing left to say.
             continue
