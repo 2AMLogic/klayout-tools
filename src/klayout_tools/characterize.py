@@ -102,8 +102,7 @@ from .characterize_sequential import (
 from .characterize_split import resolve_split_grid, run_cell_legs
 from .env_provenance import repo_relative_path
 
-#: Version of this command's JSON response shape (per-command, per
-#: ``docs/json-contract.md``).
+#: Version of this command's JSON response shape (per ``docs/json-contract.md``).
 SCHEMA_VERSION = 1
 
 #: Name of the native extension whose Liberty reader the round-trip check
