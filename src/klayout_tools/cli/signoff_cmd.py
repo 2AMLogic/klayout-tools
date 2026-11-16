@@ -113,7 +113,9 @@ Exit codes (see ``docs/cli/signoff.md`` for the full table):
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import tempfile
 from typing import Any
 
 from ..design_evidence_tiers import DesignEvidenceTiersError
@@ -224,16 +226,19 @@ def _maybe_run_attest(
     """``--attest`` dispatch (issue #2844) -- run it, or refuse its flags.
 
     Returns the exit code when the invocation is an ``--attest`` one (run it)
-    or an ``--inventory``/``--output`` misuse (refuse them), and ``None``
-    otherwise so ``run`` can fall through to the other modes.
+    or an ``--inventory`` misuse (refuse it), and ``None`` otherwise so
+    ``run`` can fall through to the other modes. ``--output`` is refused
+    here only when it pairs with ``--check`` (which never writes) or with
+    no ``--attest``/``--manifest``/``--fleet`` mode at all (issue #5867);
+    a ``--manifest``/``--fleet`` render falls through and consumes it.
     """
     if getattr(args, "attest", None) is not None:
         return _run_attest(args, manifest_source, fleet_source)
+    output = getattr(args, "output", None)
     stray = [
         flag
         for flag, attr in (
             ("--inventory", "inventory"),
-            ("--output", "output"),
             ("--input", "attest_input"),
             ("--generator", "generator"),
             ("--regenerated-hash", "regenerated_hash"),
@@ -244,8 +249,22 @@ def _maybe_run_attest(
     if stray or getattr(args, "hash_kind", None) is not None:
         return emit_error(
             "signoff",
-            "--inventory/--output/--input/--generator/--regenerated-hash/"
+            "--inventory/--input/--generator/--regenerated-hash/"
             "--hash-kind/--skip-local-only only apply to --attest",
+            args.format,
+        )
+    if output and getattr(args, "check", None):
+        return emit_error(
+            "signoff",
+            "--check and --output are mutually exclusive: --check verifies "
+            "a committed report and never writes",
+            args.format,
+        )
+    if output and not (manifest_source or fleet_source):
+        return emit_error(
+            "signoff",
+            "--output only applies to --attest, --manifest, or --fleet "
+            "(it writes the JSON envelope to a file; see docs/cli/signoff.md)",
             args.format,
         )
     return None
@@ -493,6 +512,15 @@ def _run_tier_report(
         emit_success(result, args.format, render_rerun_drift)
         return _CHECK_EXIT_CODES[result["status"]]
 
+    output = getattr(args, "output", None)
+    if output:
+        try:
+            _write_report_file(result, output)
+        except OSError as exc:
+            return emit_error(
+                "signoff", f"could not write --output '{output}': {exc}", args.format
+            )
+
     palette = resolve_palette(args)
     emit_success(
         result, args.format, lambda payload: _print_tier_report_text(payload, palette)
@@ -544,6 +572,15 @@ def _run_fleet_report(
         emit_success(result, args.format, render_rerun_drift)
         return _CHECK_EXIT_CODES[result["status"]]
 
+    output = getattr(args, "output", None)
+    if output:
+        try:
+            _write_report_file(result, output)
+        except OSError as exc:
+            return emit_error(
+                "signoff", f"could not write --output '{output}': {exc}", args.format
+            )
+
     palette = resolve_palette(args)
     emit_success(
         result, args.format, lambda payload: _print_fleet_report_text(payload, palette)
@@ -555,6 +592,44 @@ def _run_fleet_report(
 def _read_manifest(source: str, *, description: str = "manifest") -> Any:
     """Use the same strict JSON reader for manifest, fleet, and evidence."""
     return _read_json_source(source, description)
+
+
+def _write_report_file(payload: dict, output: str) -> bool:
+    """Write ``payload``'s JSON envelope to ``output`` **only if its bytes
+    would change**; return whether the file was written.
+
+    This is the ``--manifest``/``--fleet`` twin of ``write_attestation``
+    (issue #5867): the bytes are exactly what ``--format json`` prints
+    (the same rendering :func:`~.output.write_json_file` produces), the
+    file is never rewritten when the render is unchanged (mtime included),
+    and the write itself is atomic -- temp file in the target directory
+    plus ``os.replace`` -- so a death mid-write can never leave a
+    truncated verdict-of-record behind. Only called after a successful
+    render, so a committed report is never replaced by an error.
+    """
+    rendered = (json.dumps(payload, indent=2) + "\n").encode("utf-8")
+    try:
+        with open(output, "rb") as handle:
+            if handle.read() == rendered:
+                return False
+    except OSError:
+        pass
+    directory = os.path.dirname(os.path.abspath(output))
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(
+        dir=directory, prefix=os.path.basename(output) + ".", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(rendered)
+        os.replace(tmp, output)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return True
 
 
 def _print_describe_grader_text(result: dict) -> None:

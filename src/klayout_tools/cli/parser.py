@@ -2208,7 +2208,10 @@ def _add_signoff_parser(subparsers: argparse._SubParsersAction) -> None:
         help=(
             "with --attest: also write the envelope to FILE when it passes, "
             "only if its bytes changed (an unchanged attestation leaves the "
-            "committed file untouched)."
+            "committed file untouched). with --manifest/--fleet: also write "
+            "the rendered report's JSON envelope to FILE after a successful "
+            "render (exit 0 or 3), only if its bytes changed -- FILE always "
+            "receives JSON, whatever --format says. Refused with --check."
         ),
     )
     signoff_parser.add_argument(
