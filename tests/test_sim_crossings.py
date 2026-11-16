@@ -171,7 +171,7 @@ def test_crossings_window_accepts_numbers_and_spice_literals():
     )
 
 
-@pytest.mark.parametrize("kind", ["op", "dc", "ac"])
+@pytest.mark.parametrize("kind", ["op", "ac"])
 def test_crossings_requires_a_transient(tmp_path, kind):
     _write_body(tmp_path)
     request = _write_request(

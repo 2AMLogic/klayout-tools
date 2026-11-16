@@ -8577,7 +8577,7 @@ def _run_corner(
     # directory now, before it is cleaned up below -- so the reduced array is
     # what leaves the corner, on every backend, whatever `keep_artifacts` is.
     crossings = sim_crossings.extract_corner_crossings(
-        measurements_spec, corner_dir, point.supply_v
+        measurements_spec, corner_dir, point.supply_v, analysis.get("kind")
     )
     # Issue #3033: same for the energy reduction.
     energy = sim_energy.extract_corner_energy(measurements_spec, corner_dir)
@@ -9089,11 +9089,11 @@ def _crossings_measurement_result(
             {"severity": "error", "code": "measurement", "message": message}
         ]
     m_status, margin, grading_diagnostics = _grade_measurement_value(
-        spec, outcome.total
+        spec, outcome.graded_value()
     )
     result = {
         "name": name,
-        "value": outcome.total,
+        "value": outcome.graded_value(),
         "unit": unit,
         "status": m_status,
         "margin": margin,
