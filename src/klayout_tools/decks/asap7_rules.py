@@ -517,10 +517,6 @@ OPT_IN_RULES: tuple[tuple[str, str, Asap7Rule], ...] = (
 OPT_IN_DECK_VARS: tuple[str, ...] = tuple(v for v, _, _ in OPT_IN_RULES)
 OPT_IN_RULE_IDS: tuple[str, ...] = tuple(r.id for _, _, r in OPT_IN_RULES)
 
-_SRAM = (
-    "SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM "
-    "says SRAM rules may be waived for other cells"
-)
 _GATE_DISCONTINUOUS = (
     "no distance bound, but a topological condition (a GATE column split into "
     "separate polygons, Fig. 3.4.2(a)); the DRM does not say how far two GATE "

@@ -434,7 +434,7 @@ def parse_probes(
     return probes
 
 
-class OrderedPinSet(frozenset):  # type: ignore[type-arg]
+class OrderedPinSet(frozenset):
     """A ``frozenset`` of declared pin names that remembers the order the
     caller gave them in (``order``, issue #5255). Set semantics are unchanged,
     so every existing ``declared_pins`` consumer is unaffected; only the

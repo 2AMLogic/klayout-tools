@@ -163,8 +163,8 @@ class AsyncLegs:
                 manifest = json.load(handle)
             legs = manifest["legs"]
             for leg in legs:
-                leg["testbench"], leg["side"], leg["attach"]  # noqa: B018
-            manifest["testbenches"], manifest["extracted_netlist_sha256"]  # noqa: B018
+                leg["testbench"], leg["side"], leg["attach"]
+            manifest["testbenches"], manifest["extracted_netlist_sha256"]
         except (OSError, ValueError, KeyError, TypeError) as exc:
             raise PexError(
                 f"{flag}: cannot read pex submit manifest '{path}': {exc!r}",
@@ -237,6 +237,10 @@ class AsyncLegs:
                     f"{side}-side leg for testbench '{testbench}'",
                     code=LEG_MISSING_CODE,
                 )
+            # Attach launches nothing, so there is no capacity to wait for;
+            # `sim` refuses the flag with --attach, but "re-run the same
+            # command" must stay true (issue #5683). Validation already ran.
+            kwargs.pop("capacity_wait_s", None)
             return run_sim(
                 request_path,
                 artifacts_dir=artifacts_dir,
