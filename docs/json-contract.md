@@ -2293,6 +2293,22 @@ additive); it exists so a dry run states what it did not verify rather than
 letting a `"valid"` status imply more than it earned. See
 [`cli/pex.md`](cli/pex.md)'s "Validating an invocation without running it".
 
+### `klt corner-matrix check` coverage verdict (issue #5865)
+
+`klt corner-matrix check` adds the always-present boolean
+`coverage_complete` next to `complete`: true iff `missing[]`, `extra[]` and
+`duplicate[]` are all empty — *did the run exercise the declared matrix,
+once each*. `complete` keeps its published meaning (coverage **and**
+outcome quality: no `not_simulated[]`, no `non_finite[]`, no
+`out_of_bounds[]`), so a report that covered its matrix but recorded one
+legitimate failing corner is `coverage_complete: true` with
+`complete: false`. The field is emitted in both modes; in `--request` mode
+`coverage_complete == complete` by construction. Exit codes are unchanged,
+which is the point: the exit status follows `complete` and cannot serve as
+a coverage gate. Additive — no existing field changes name, type or
+meaning, so **no `schema_version` bump** (the command's success payload
+carries none today). See [`cli/corner-matrix.md`](cli/corner-matrix.md).
+
 ## Static typing of the envelope
 
 The envelope modules (`klayout_tools.cli.output`,
