@@ -445,15 +445,18 @@ not `klt --version`, if you need to detect this kind of drift. See
 ## 0.9.0 (2026-11-05)
 
 - **`klt gen` names its PCell child cell `<cell-name>__core`** (issue #4251,
-  documented in [`docs/cli/gen.md`](docs/cli/gen.md)): the child that the
-  generated top cell instantiates was previously left with KLayout's
-  generator-named default (the library cell name, e.g. `mos_array`) and is now
-  `<cell-name>__core`, so streams from differently named `--cell-name` runs can
-  be read into one `Layout` without their children merging. This changes the
-  structure names written to the stream, and therefore its bytes, while the
-  drawn geometry is unchanged. A consumer that pins a released stream's
-  structure names or byte hash will see the difference across this boundary.
-  (Recorded retroactively; the rename shipped in 0.9.0 without an entry.)
+  documented in [`docs/cli/gen.md`](docs/cli/gen.md)): on generators that
+  emit a PCell child (all except `asap7_finfet`/`asap7_tap`, which flatten
+  their output, and `bjt_array` on sg13g2, which instantiates the PDK's own
+  HBT cell), the child that the generated top cell instantiates was
+  previously left with KLayout's generator-named default (the library cell
+  name, e.g. `mos_array`) and is now `<cell-name>__core`, so streams from
+  differently named `--cell-name` runs can be read into one `Layout` without
+  their children merging. This changes the structure names written to the
+  stream, and therefore its bytes, while the drawn geometry is unchanged. A
+  consumer that pins a released stream's structure names or byte hash will
+  see the difference across this boundary. (Recorded retroactively; the
+  rename shipped in 0.9.0 without an entry.)
 - **`klt signoff --attest 9` accepts an explicit no-PDK pin** (issue #4904,
   documented in [`docs/cli/signoff.md`](docs/cli/signoff.md)): `pins.pdk` may
   be `{"none": true, "reason": "<non-empty>"}` for a partition whose cold
