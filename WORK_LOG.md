@@ -8,6 +8,10 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-16
 
+- **PR #5953**: feat: report build_drift on signoff attest --check, add --require-build-match
+- **PR #5920**: docs(lvs): backfill category-count drift in CHANGELOG and guard category coverage
+- **Issue #5875** (closed): klt signoff: --check cannot assert which klt build produced the envelope it checks
+- **Issue #5864** (closed): lvs: category_counts for device.property mismatches changed granularity between 0.7.x and 0.9.x
 - **PR #5906**: refactor: consolidate four duplicate _read_text helpers into _text.read_text
 - **PR #5940**: fix: always report dead_metal_summary total area as a float
 - **PR #5832**: fix(synthesize): make netlist_sha256 build-root independent by stripping repo-relative source dirs
