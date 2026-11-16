@@ -19,6 +19,7 @@ import subprocess
 import time
 from typing import Any
 
+from ._engine_proc import run_in_group
 from ._provenance import (
     INPUT_ROLE_SOURCE,
     _combined_content_hash,
@@ -157,7 +158,7 @@ def _run_yosys_subprocess(
     stderr = ""
     returncode: int | None = None
     try:
-        completed = subprocess.run(
+        completed = run_in_group(
             [binary, "-s", script_path],
             capture_output=True,
             text=True,
