@@ -116,13 +116,13 @@ def _resolve_verilog_top(
 
 def _resolve_testbench_target(
     verilog_tb: dict[str, Any] | None, testbench: Any, request_dir: str
-) -> tuple[str, str, str | list[str] | None]:
-    """``(module, module_dir, testcase)`` for either testbench form."""
+) -> tuple[str, list[str], str | list[str] | None]:
+    """``(module, module_dirs, testcase)`` for either testbench form."""
     if verilog_tb is None:
         return _fv._resolve_testbench(testbench, request_dir)
     top = verilog_tb["verilog_top"]
     assert top is not None
-    return top, request_dir, None
+    return top, [request_dir], None
 
 
 def _sdf_annotate_scope(
