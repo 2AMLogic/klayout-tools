@@ -250,6 +250,7 @@
         "klayout_tools.extract_cap_top_plate",
         "klayout_tools.extract_passive_regions",
         "klayout_tools.extract_progress",
+        "klayout_tools.extract_dead_metal",
         "klayout_tools.extract_report",
         "klayout_tools.extract_resistance_graph",
         "klayout_tools.extract_spef",
