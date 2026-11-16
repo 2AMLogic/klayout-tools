@@ -1826,6 +1826,33 @@ A cited item-2 envelope carries the same `artifact_binding.attestation`
 disclosure (`inventory_schema_version` is `null` unless a declared-checks
 inventory was given).
 
+`provenance.regeneration` is part of what `--check` compares, so how a
+regeneration claim is re-checked depends on whether you pass the flags again
+(issue #5572):
+
+| `--check` invocation | What the claim is compared against |
+| -------------------- | ---------------------------------- |
+| None of `--generator` / `--regenerated-hash` / `--hash-kind` | The committed claim is **re-checked as recorded** — read back out of the envelope, so it never contributes drift on its own. A committed item-2 envelope is therefore verifiable from the repo alone. |
+| Any of the three given | An **explicit cross-check**: the fresh envelope is built from the flags alone, so a value that differs from the committed claim (or flags passed against an envelope that carries no claim) is reported as drift on `provenance.regeneration`. |
+
+So the CI step that runs the check does not have to carry a second copy of the
+hash literal:
+
+```bash
+# Re-checks the committed claim as attested; no flags to keep in sync.
+klt signoff --attest 2 --input layout/top.gds --check evidence/item2.json
+```
+
+Adopting the claim is **not** a verification of it. Whether
+`regenerated_hash` actually matches the stream is decided by the grader, which
+reports a mismatch as `stale_artifact` (see
+[Items 1 and 2: attesting that the artifact was regenerated](#items-1-and-2-attesting-that-the-artifact-was-regenerated)
+above) — `--check` never runs the generator, so its own comparison of this
+block could only ever echo what the caller typed. A committed claim too
+malformed to re-attest from (not an object, or a non-string `generator`,
+`regenerated_hash` or `hash_kind`) is a usage error on a flag-less `--check`,
+never a `match`.
+
 ##### Item 2 over several streams (repeat `--input`, issue #4935)
 
 A block whose layout evidence is a library of per-cell streams repeats
