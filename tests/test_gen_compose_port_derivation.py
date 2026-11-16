@@ -138,11 +138,12 @@ def test_long_thin_wire_coarse_grid_derives_port(tmp_path):
 
 
 def test_no_candidate_error_names_cause(tmp_path, monkeypatch):
-    import klayout_tools.gen_compose_port_access as access_mod
+    import klayout_tools.gen_compose_port_search as search_mod
 
     # Force the enumerator to yield nothing so _search_landing reaches the
     # empty-candidate error instead of the per-category rejection summary.
-    monkeypatch.setattr(access_mod, "_grid_candidates", lambda *a, **k: ([], False))
+    # (#5608 moved the landing search into gen_compose_port_search.)
+    monkeypatch.setattr(search_mod, "_grid_candidates", lambda *a, **k: ([], False))
     gds = _two_strip_macro(tmp_path)
     with pytest.raises(
         GenComposeError,

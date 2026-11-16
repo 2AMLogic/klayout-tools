@@ -364,10 +364,6 @@
       "lines": 5119
     },
     {
-      "path": "src/klayout_tools/gen_compose_port_access.py",
-      "lines": 706
-    },
-    {
       "path": "src/klayout_tools/gen_compose_routing.py",
       "lines": 4946
     },
