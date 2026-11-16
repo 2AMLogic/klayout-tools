@@ -4,14 +4,15 @@ A MOS body is not a per-device port -- it is one well/substrate tie shared by
 every device a ``device_groups[]`` entry declares -- so
 ``layout_plan_execute`` binds it group-level, via
 ``layout_plan_ports.bind_body_nets``, to the group's own ``TAP_PAD<k>`` pad
-(#4143) or, for a group that draws its own guard ring, that ring's first
-``TAP_<side>`` port.
+(#4143), the shared ``WELL_TAP`` port a ring-less pfet array draws on
+sg13cmos5l (#1473, #5948), or, for a group that draws its own guard ring,
+that ring's first ``TAP_<side>`` port.
 
 Split out of `test_layout_plan_execute.py` to keep it under its file-size
 ceiling. Like its siblings, PDK resolution runs against a fabricated
 open_pdks-layout install under `tmp_path` -- CI never downloads a real PDK.
-The extraction round-trip at the bottom needs no install at all: `klt
-extract` reads the curated in-tree gf180mcu deck.
+The extraction round-trips at the bottom need no install at all: `klt
+extract` reads the curated in-tree gf180mcu and sg13cmos5l decks.
 """
 
 from __future__ import annotations
@@ -51,6 +52,16 @@ def sky130_pdk_root(tmp_path):
     return root
 
 
+@pytest.fixture()
+def sg13cmos5l_pdk_root(tmp_path):
+    # The standalone IHP cmos5l clone's own directory name -- the variant
+    # `klt pdk` resolves (#1231's alias table maps it back to the sg13cmos5l
+    # family whose pfet arrays draw `WELL_TAP`, #1473).
+    root = tmp_path / "ihp-sg13cmos5l_pdk_install"
+    _make_install(root, "ihp-sg13cmos5l")
+    return root
+
+
 # One PMOS and one NMOS, each on its own output net so no route has to cross
 # the other block (the `klt gen-compose` behind-the-pin guard, #1895), and
 # each with its bulk on the supply its source already sits on -- the ordinary
@@ -76,6 +87,16 @@ MP2 OUTP INP VDD VDDA pfet_03v3 L=0.28U W=0.42U
 _NO_SEPARATE_BODY_NETLIST = """
 .subckt amp VDD VSS INP OUTP
 MP1 OUTP INP VDD VDD pfet_03v3 L=0.28U W=0.42U
+.ends
+"""
+
+# The sg13cmos5l stand-in for `_AMP_NETLIST` -- IHP's own 4-terminal LV/HV
+# model names (`pdk_models._MOS_MODEL_TABLE` binds them for the sg13cmos5l
+# deck), so the digest reports a separate `B` terminal per device.
+_SG13_AMP_NETLIST = """
+.subckt amp VDD VSS INP OUTP
+MP1 OUTP INP VDD VDD sg13_hv_pmos L=0.4U W=1.0U
+MN1 OUTN INP VSS VSS sg13_hv_nmos L=0.4U W=1.0U
 .ends
 """
 
@@ -129,6 +150,26 @@ def _gf180mcu_amp_request(tmp_path, gf180mcu_pdk_root, routing=None, **params):
     )
 
 
+def _sg13_amp_request(tmp_path, sg13cmos5l_pdk_root):
+    """The sg13cmos5l amp, routed on metal2 throughout: the pfet's `WELL_TAP`
+    port sits past the unit's own drain on the same metal1 line, so a
+    same-layer route from the source pad to the in-array tap would cross that
+    drain pad -- the behind-the-pin guard (#1895) rightly refuses, and the
+    unrouted reason itself names the metal2/via-stack alternative."""
+    groups = [
+        _mos_group("mp", [{"name": "P1", "device_class": "SG13_HV_PMOS"}], "pfet"),
+        _mos_group("mn", [{"name": "N1", "device_class": "SG13_HV_NMOS"}], "nfet"),
+    ]
+    return _amp_request(
+        tmp_path,
+        sg13cmos5l_pdk_root,
+        "ihp-sg13cmos5l",
+        _SG13_AMP_NETLIST,
+        groups,
+        {"layer_role": "metal2", "width_um": 0.44},
+    )
+
+
 def _pins_of(response, net_name):
     net = next((n for n in response["nets"] if n["net"] == net_name), None)
     return [] if net is None else [(p["block"], p["port"]) for p in net["pins"]]
@@ -160,6 +201,41 @@ def test_tap_pad_is_bound_to_the_declared_bulk_net(tmp_path, gf180mcu_pdk_root):
 
 def test_tap_pad_binding_routes_and_exits_zero(tmp_path, gf180mcu_pdk_root):
     request = _gf180mcu_amp_request(tmp_path, gf180mcu_pdk_root)
+    response = execute_layout_plan_document(request, request_dir=str(tmp_path))
+
+    assert response["unrouted_nets"] == []
+    assert response["unmapped_netlist_nets"] == []
+    assert partial_success(response) is False
+    assert exit_code_for(response) == 0
+
+
+def test_well_tap_is_bound_to_the_declared_bulk_net(tmp_path, sg13cmos5l_pdk_root):
+    """A ring-less sg13cmos5l pfet `mos_array` draws one shared `WELL_TAP` port
+    (#1473) -- a third group-level tie shape the binder used to miss (#5948),
+    warning that the generator reported no tap/ring port at all. It now binds
+    like a tap pad: one pin on the declared bulk net, no untied-body warning.
+
+    The nfet group of the same plan genuinely has no tie port on this family
+    (only the pfet well is tapped), so its warning stays -- the remaining case
+    the warning's cause clause describes."""
+    request = _sg13_amp_request(tmp_path, sg13cmos5l_pdk_root)
+    response = execute_layout_plan_document(request, request_dir=str(tmp_path))
+
+    assert ("mp", "WELL_TAP") in _pins_of(response, "VDD")
+    # One tie per group, never more -- the array draws a single well tap.
+    taps = [
+        port
+        for owner, port in _pins_of(response, "VDD")
+        if owner == "mp" and (port.startswith("TAP_") or port == "WELL_TAP")
+    ]
+    assert taps == ["WELL_TAP"]
+    body_warnings = [w for w in response["warnings"] if "left untied" in w]
+    assert len(body_warnings) == 1
+    assert "'mn'" in body_warnings[0] and "'VSS'" in body_warnings[0]
+
+
+def test_well_tap_binding_routes_and_exits_zero(tmp_path, sg13cmos5l_pdk_root):
+    request = _sg13_amp_request(tmp_path, sg13cmos5l_pdk_root)
     response = execute_layout_plan_document(request, request_dir=str(tmp_path))
 
     assert response["unrouted_nets"] == []
@@ -324,6 +400,19 @@ def test_body_tie_port_prefers_a_tap_pad_over_a_ring_tap():
     assert body_tie_port([]) is None
 
 
+def test_body_tie_port_recognizes_a_well_tap():
+    """`mos_array`'s ring-less sg13cmos5l pfet reports one group-level
+    `WELL_TAP` port (#1473) -- a tie shape `body_tie_port` used to miss,
+    leaving the array's body untied with a false "no tap/ring port" warning
+    (#5948). Pads and the well tap sit in the same precedence tier ahead of a
+    ring's `TAP_<side>` ports; the tiers only matter if a generator ever
+    reported both -- today they are family-scoped and mutually exclusive."""
+    assert body_tie_port([{"name": "U0_S"}, {"name": "WELL_TAP"}]) == "WELL_TAP"
+    assert body_tie_port([{"name": "TAP_N"}, {"name": "WELL_TAP"}]) == "WELL_TAP"
+    assert body_tie_port([{"name": "WELL_TAP"}, {"name": "TAP_PAD0"}]) == "WELL_TAP"
+    assert body_tie_port([{"name": "TAP_PAD0"}, {"name": "WELL_TAP"}]) == "TAP_PAD0"
+
+
 def test_group_body_nets_skips_null_terminals_and_foreign_generators():
     digest_devices_by_key = {
         ("P1", "PFET_03V3"): {"terminals": {"S": "VDD", "B": "VDD"}},
@@ -345,10 +434,10 @@ def test_group_body_nets_skips_null_terminals_and_foreign_generators():
 # ---------------------------------------------------------------------------
 
 
-def _extracted_bodies(gds_path, tmp_path, name):
+def _extracted_bodies(gds_path, tmp_path, name, deck="gf180mcu"):
     from klayout_tools.extract import run_extract
 
-    report = run_extract(gds_path, "gf180mcu", output=str(tmp_path / f"{name}.spice"))
+    report = run_extract(gds_path, deck, output=str(tmp_path / f"{name}.spice"))
     bodies = {device["class"]: device["nets"]["b"] for device in report["devices"]}
     return bodies, report
 
@@ -392,4 +481,30 @@ def test_own_guard_ring_binding_extracts_bodies_onto_named_nets(
     bodies, report = _extracted_bodies(response["gds_path"], tmp_path, "ring")
     assert bodies["pfet"] == "VDD"
     assert bodies["nfet"] == "VSS"
+    assert report["unbiased_pmos_body_nets"] == []
+
+
+def test_well_tap_binding_extracts_bodies_onto_a_named_net(
+    tmp_path, sg13cmos5l_pdk_root
+):
+    """The evidence behind the sg13cmos5l criterion (#5948): with `WELL_TAP`
+    bound, the pfet body extracts onto a *named* net carrying the declared
+    bulk net -- not onto an anonymous `$` well -- and
+    `unbiased_pmos_body_nets[]` stays empty (the deck's own tap-derived tie
+    check, #1414). KLayout names the merged conductor `VDD|WELL_TAP` because
+    the generator draws its own fixed `WELL_TAP` label on the tap metal
+    (#1473) and both texts survive the merge; only the presence of a real
+    label matters, and the `$`-free assertion is what rules the anonymous
+    well out. The nfet body stays on the deck-synthesized `vsubs` global --
+    sg13cmos5l draws no substrate tie for it, and this issue does not claim
+    one."""
+    request = _sg13_amp_request(tmp_path, sg13cmos5l_pdk_root)
+    response = execute_layout_plan_document(request, request_dir=str(tmp_path))
+    assert response["unrouted_nets"] == []
+
+    bodies, report = _extracted_bodies(
+        response["gds_path"], tmp_path, "welltap", deck="sg13cmos5l"
+    )
+    assert "VDD" in bodies["pfet"]
+    assert "$" not in bodies["pfet"]
     assert report["unbiased_pmos_body_nets"] == []
