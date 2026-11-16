@@ -74,6 +74,7 @@ import socket
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from .env_provenance_scrub import scrub_payload
 from .env_provenance_walk import walk_lintable_string_fields, walk_string_fields
 
 __all__ = [
@@ -95,6 +96,7 @@ __all__ = [
     "render_text_lines",
     "repo_relative_path",
     "scan_files",
+    "scrub_payload",
 ]
 
 #: ``klt env-provenance``'s own payload version (``docs/json-contract.md``).
