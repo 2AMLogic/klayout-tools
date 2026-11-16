@@ -8,8 +8,10 @@ Exit codes (see ``docs/cli/components.md`` for the full table):
     0 - ran successfully (the components report was produced, even if it is
         empty -- this is a report, not a pass/fail check)
     1 - failed to run (bad file, malformed --conductors/--vias/--label-layers,
-        unknown --top, malformed --region, or an unknown conductor name
-        referenced by a via or by a --label-layers entry's "conductor" field)
+        unknown --top, malformed --region, an unknown conductor name
+        referenced by a via, by a --label-layers entry's "conductor" field or
+        by a --probe's "layer", a malformed/duplicate --probe spec, or
+        --probe with more than one top cell in scope)
         -- returned by ``emit_error`` as ``output.ERROR_EXIT_CODE``
 (2 is reserved for argparse usage errors, as with every other ``klt`` subcommand.)
 """
@@ -19,7 +21,7 @@ from __future__ import annotations
 import argparse
 
 from ..components import ComponentsError, run_components_report
-from ._parsing import load_json_path_or_inline, load_region
+from ._parsing import load_json_path_or_inline, load_region, parse_probes
 from .output import emit_error, emit_success, render_table
 
 
@@ -33,6 +35,7 @@ def run(args: argparse.Namespace) -> int:
             else []
         )
         region_um = _load_region(args.region)
+        probes = parse_probes(args.probes, ComponentsError)
         report = run_components_report(
             args.file,
             conductors,
@@ -40,6 +43,7 @@ def run(args: argparse.Namespace) -> int:
             label_layers=label_layers,
             region_um=region_um,
             top=args.top,
+            probes=probes,
         )
     except ComponentsError as exc:
         return emit_error("components", str(exc), args.format)
@@ -72,11 +76,12 @@ def _print_text(report: dict) -> None:
         print(f"region_um: ({left},{bottom})-({right},{top})")
     print(f"dbu_um: {report['dbu_um']}")
     print(f"components: {report['component_count']}")
+    # Conditional, like `region_um` above: a run with no --probe keeps
+    # byte-identical text output.
+    if report["probes"]:
+        print(f"probes: {len(report['probes'])}")
 
     components = report["components"]
-    if not components:
-        return
-
     rows = [
         (
             entry["id"],
@@ -94,4 +99,26 @@ def _print_text(report: dict) -> None:
         ("Id", "Cell", "BBox (um)", "Conductors", "Vias", "Labels", "Touches Crop"),
         rows,
         left_aligned={0, 1, 3, 4, 5},
+    )
+    _print_probes(report["probes"])
+
+
+def _print_probes(probes: list) -> None:
+    """One table row per ``--probe`` result (issue #5552), or nothing when
+    none was given. A not-found probe renders its component column as ``-``,
+    the same placeholder the component table uses for an absent value."""
+    render_table(
+        ("Probe", "Layer", "Point (um)", "Component"),
+        [
+            (
+                probe["name"],
+                probe["layer"],
+                f"({probe['x_um']},{probe['y_um']})",
+                probe["component_id"] or "-",
+            )
+            for probe in probes
+        ],
+        # The component id column is last and right-aligned, so a short `-`
+        # does not leave trailing whitespace on a not-found row.
+        left_aligned={0, 1},
     )

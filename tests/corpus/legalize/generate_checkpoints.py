@@ -63,7 +63,7 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "src"))
 
-from klayout_tools.place_and_route import (  # noqa: E402
+from klayout_tools.place_and_route import (
     _GLOBAL_PLACEMENT_DENSITY,
     _clock_lines,
     _floorplan_init_lines,
