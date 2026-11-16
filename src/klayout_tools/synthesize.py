@@ -294,6 +294,9 @@ from .synthesize_arithmetic import (
     _select_arithmetic_candidate as _select_arithmetic_candidate,
 )
 from .synthesize_arithmetic import _verify_generated_adder as _verify_generated_adder
+from .synthesize_library_hint import (
+    library_capability_warnings as _library_capability_warnings,
+)
 
 # Issue #2745: same one-directional split as `synthesize_arithmetic.py` --
 # `synthesize_memory.py` imports this module's helpers at call time only.
@@ -1431,9 +1434,18 @@ def run_synthesize(
     warnings_summary = _summarize_warnings(
         yosys_log,
         capability_warnings={
-            **_library_capability_warnings(cell_library, constr_inputs is not None),
+            **_library_capability_warnings(
+                cell_library,
+                constr_inputs is not None,
+                tie_cells=_TIE_CELLS,
+                constr_inputs=_ABC_CONSTR_INPUTS,
+            ),
             **_missing_timing_warning(abc_log_path, timing),
-            **netlist_x_constant_warning(_read_produced_netlist(netlist_path)),
+            **netlist_x_constant_warning(
+                _read_produced_netlist(netlist_path),
+                cell_library=cell_library,
+                has_tie_cells=cell_library in _TIE_CELLS,
+            ),
             **_dont_use_unsupported_warning(cell_exclusions),
             **_macro_area_warning(
                 cells_without_area,
@@ -4012,43 +4024,6 @@ def _categorize_warning(message: str) -> str:
         if pattern.search(message):
             return category
     return "other"
-
-
-def _library_capability_warnings(
-    cell_library: str, has_constr: bool | None = None
-) -> dict[str, str]:
-    """Disclose skipped synthesis capabilities without guessing library data.
-
-    Combine missing capabilities into one representative so neither is
-    hidden by warning aggregation. An absent ``dont_use`` entry is not a
-    missing capability: e.g. gf180 intentionally allows minimum-drive cells.
-
-    ``has_constr`` says whether this run passed ``-constr`` at all (a request
-    ``constraints.abc_constr`` supplies it for a library with no built-in
-    entry, issue #4662); ``None`` falls back to the built-in table.
-    """
-    if has_constr is None:
-        has_constr = cell_library in _ABC_CONSTR_INPUTS
-    skipped = []
-    if not has_constr:
-        skipped.append(
-            "ABC -constr (driving cell/output load), load-driven sizing/buffering "
-            "and ABC timing (timing is null)"
-        )
-    if cell_library not in _TIE_CELLS:
-        skipped.append(
-            "setundef -zero/hilomap (bare 0/1/x constants may remain unroutable "
-            "in place-and-route)"
-        )
-    if not skipped:
-        return {}
-    return {
-        "unsupported_cell_library": (
-            f"cell_library '{cell_library}' has no verified mapping for: "
-            + "; ".join(skipped)
-            + ". These capabilities were skipped."
-        )
-    }
 
 
 def _summarize_warnings(

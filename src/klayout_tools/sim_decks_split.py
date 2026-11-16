@@ -342,7 +342,7 @@ def _attach_shard(
                 status = sim_batch._read_status(
                     config, job_id, sim_batch._run_subprocess
                 )
-            except Exception:  # noqa: BLE001 - an unreadable status is "unknown"
+            except Exception:  # - an unreadable status is "unknown"
                 status = None
             raw = status.get("state") if status else None
             state = str(raw) if raw else "unknown"

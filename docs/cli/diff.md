@@ -3,7 +3,11 @@
 Compare two GDSII or OASIS layout streams and report whether they hold the
 same geometry, labels and hierarchy. Built for regenerate-and-compare
 (`--check`) gates: DRC/LVS status cannot tell "same layout" from "different
-layout that also passes", and a raw byte hash trips on stream timestamps.
+layout that also passes", and a raw byte hash trips on stream timestamps —
+and, across a `klt` upgrade, on record order within a cell. See
+[`docs/json-contract.md`](../json-contract.md#stream-stability-contract-layout-stream-bytes-are-not-stable-across-klt-versions)
+→ "Stream-stability contract" for why a byte-compare gate is within-version
+only, and why this verb is the supported cross-upgrade gate.
 
 ```
 klt diff <file_a> <file_b> [--top <cell>] [--max-items N] [--format text|json]
