@@ -78,16 +78,19 @@ proposing a third:
    CLI — documented as an explicit, unresolved gap in `drc.md`, not a
    hypothetical this proposal is raising for the first time.
 2. **Ad hoc golden violate/pass test pairs already exist, per rule, informally.**
-   `tests/test_drc.py` (2,899 lines) already contains a `_violation`/`_clean`
-   test pair for most individual rules (e.g.
-   `test_run_drc_gf180mcu_metal2_width_violation` /
-   `test_run_drc_gf180mcu_metal2_clean`), each hand-building a tiny layout
-   that trips or clears exactly one rule. This is precisely the "golden
-   violate/pass pairs per rule" item 2 of the issue asks about — it already
-   exists, just as unstructured Python test functions rather than a
-   declarative, rule-keyed manifest, and with no enforcement that *every*
-   `DECK` entry has one (some rules only have a `_violation` test, not both;
-   confirmed by scanning the file's `def test_` list).
+   `tests/test_drc.py` already contains a `_violation`/`_clean` test pair for
+   most individual rules: since the #5646 consolidation the violation side is
+   rows of parametrized tables (e.g.
+   `test_run_drc_single_shape_violation[metal2.width.1]`), each row
+   hand-building a tiny layout that trips exactly one rule, while `_clean`
+   counterparts exist both as standalone functions (e.g.
+   `test_run_drc_gf180mcu_metal2_clean`) and further parametrized tables.
+   This is precisely the "golden violate/pass pairs per rule" item 2 of the
+   issue asks about — it already exists, just as unstructured Python test
+   tables and functions rather than a declarative, rule-keyed manifest, and
+   with no enforcement that *every* `DECK` entry has one (some rules only
+   have a `_violation` case, not both; confirmed by scanning the file's test
+   list).
 
 ## 2. How the three PDKs' rule sources are actually structured
 

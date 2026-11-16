@@ -763,6 +763,28 @@ were not run. See
 [`docs/cli/signoff.md`](cli/signoff.md)'s "Items 1 and 2: attesting that
 the artifact was regenerated".
 
+Issue #5460 adds an optional `check` object to a `drift[]` entry of the
+`klt signoff --attest --check` response, naming the `attestation.checks[]`
+entry the entry is about: its `role`, plus whichever identity keys that check
+kind carries — `path` (a `present` file check), `target` / `name` /
+`testbench` (a `command` or `recorded_hash` check), `row` (an item-8 citation
+check), `corner` + `metric` (an item-8 metric check, one per corner ×
+metric). A check with no identity beyond its role — item 9's `pdk` / `tools`
+pins, a top-level `cold_start` — gets `{"role": …}`. **Additive; no
+`schema_version` bump**: `field` stays the dotted positional pointer
+(`attestation.checks.17.content_hash`) it has always been, and `committed` /
+`fresh` are untouched, so a consumer that never reads `check` sees the bytes
+it saw before. The key is **absent** on an entry that names no single check —
+a whole-list `attestation.checks` entry (the index-by-index diff only applies
+when both lists have the same length, so an inventory that *gained or lost* a
+file still yields one whole-list entry), a `status` entry, anything outside
+`attestation.checks`, and every `drift[]` entry the other `--check` verbs
+produce. `--format text` renders it as a bracketed label after the pointer
+(`attestation.checks.17.content_hash  [testbench sim/bin/sim_common.py]:`) so
+a CI log names the file that moved without a second lookup — the index alone
+is not even stable, since file-presence checks are sorted by path. See
+[`docs/cli/signoff.md`](cli/signoff.md)'s "CI usage: `--check`".
+
 Issue #5463 adds two more additive, optional fields on the same principle (no
 `schema_version` bump; absent they change nothing): `documented_argv` on an
 item-9 `cold_start` in an attestation inventory — the full invocation that
@@ -1317,6 +1339,60 @@ uv tool install "klayout-tools @ git+https://github.com/2AMLogic/klayout-tools@<
 install without any `klt`-specific flag — see
 `docs/design/klayout-engine-version-pin.md` for why this, rather than a new
 override mechanism, is the documented fix.
+
+## Stream-stability contract: layout stream bytes are not stable across klt versions
+
+Everything above contracts on JSON *report* payloads. The **layout streams**
+(`GDS`/`OASIS`) that the write-side verbs produce are contracted separately,
+and the contract is: **`klt` does not guarantee that a generated stream's
+bytes are stable across `klt` versions.** The drawn geometry is meant to be
+stable — every cross-version divergence on record is a reordering or a
+bookkeeping change, not a geometry change — but *record order within a cell*
+and the presence of non-geometry structures are KLayout-writer
+implementation details that an upgrade may change.
+
+Worked instance: #5499 (commit `7d1a262fb`, released in
+[`CHANGELOG.md`](../CHANGELOG.md)'s `## 0.9.2 (2026-11-14)` section) pinned
+`gen`'s layer table to a sorted order and stopped `write_layout()` from
+emitting the `$$$CONTEXT_INFO$$$` structure. Streams written before and after
+that commit are geometrically identical (zero XOR area on every layer) yet
+differ byte-for-byte, so a consumer gate that regenerated a committed stream
+and byte-compared it went red for a tool-churn reason indistinguishable from
+a real generator regression.
+
+**A raw byte hash (`sha256sum`, or `provenance.input.content_hash`) or a
+`cmp` against a committed stream is therefore not a supported
+reproducibility gate across a `klt` upgrade.** Within one pinned `klt` build
+bytes *are* deterministic — stream write timestamps are suppressed — which is
+what this repo's own within-version drift guard
+(`tests/test_gen.py::test_dogbone_terminal_example_regenerates_byte_identical`)
+relies on: a byte compare pins record order, which a geometry compare cannot
+see. Across an upgrade, gate on one of the two supported
+order-insensitive comparisons instead:
+
+- **`klt diff a.gds b.gds`** ([`docs/cli/diff.md`](cli/diff.md)) — exit `0`/`3`
+  answers "same layout?", ignoring stream timestamps and record order within
+  a cell; equal `canonical_hash` with `stream_identical: false` is the
+  precise "bytes reordered, layout unchanged" verdict. Two known limits, so
+  the gate is not oversold: `klt diff` deliberately never ignores **cell
+  names**, so a release that renames an emitted inner cell reports
+  `equivalent: false` even with identical drawn geometry (open #5729; the
+  live instance is #5627); and `canonical_hash` is this verb's own
+  normalization — **not** interchangeable with the digest below (issue
+  #5551), meaningful only against another `canonical_hash`.
+- **`klt stats --format json | jq -r .geometry_digest`**
+  ([`docs/cli/stats.md`](cli/stats.md) → "Geometry digest") — the
+  `geometry_digest` field `klt stats` reports is a SHA-256 over the stream's
+  **decoded geometry** that never reads the write timestamp, record order
+  within a cell, cell-table indices or the stream format, and is the value
+  `klt signoff --attest 2 --hash-kind geometry` is graded against. (Its
+  computation costs runtime; #5583 proposes gating it behind a flag — phrase
+  your gate around the field, which survives either way.)
+
+Emission-affecting changes are called out in `CHANGELOG.md` as a practice,
+and the #5499 entry above is the model — mechanism, every affected verb,
+regenerated goldens — so a consumer pinning a version can see when an
+upgrade will invalidate committed streams before taking it.
 
 ## Declared metric namespace (`metrics` block, issue #247)
 
@@ -2305,6 +2381,22 @@ report, so a reader can tell the two apart without looking at the argv.
 additive); it exists so a dry run states what it did not verify rather than
 letting a `"valid"` status imply more than it earned. See
 [`cli/pex.md`](cli/pex.md)'s "Validating an invocation without running it".
+
+### `klt corner-matrix check` coverage verdict (issue #5865)
+
+`klt corner-matrix check` adds the always-present boolean
+`coverage_complete` next to `complete`: true iff `missing[]`, `extra[]` and
+`duplicate[]` are all empty — *did the run exercise the declared matrix,
+once each*. `complete` keeps its published meaning (coverage **and**
+outcome quality: no `not_simulated[]`, no `non_finite[]`, no
+`out_of_bounds[]`), so a report that covered its matrix but recorded one
+legitimate failing corner is `coverage_complete: true` with
+`complete: false`. The field is emitted in both modes; in `--request` mode
+`coverage_complete == complete` by construction. Exit codes are unchanged,
+which is the point: the exit status follows `complete` and cannot serve as
+a coverage gate. Additive — no existing field changes name, type or
+meaning, so **no `schema_version` bump** (the command's success payload
+carries none today). See [`cli/corner-matrix.md`](cli/corner-matrix.md).
 
 ## Static typing of the envelope
 

@@ -193,7 +193,7 @@
     },
     {
       "path": "src/klayout_tools/cli/parser.py",
-      "lines": 5480
+      "lines": 5386
     },
     {
       "path": "src/klayout_tools/cli/pdk_cmd.py",
@@ -201,7 +201,7 @@
     },
     {
       "path": "src/klayout_tools/cli/signoff_cmd.py",
-      "lines": 1171
+      "lines": 1168
     },
     {
       "path": "src/klayout_tools/cli/sim_cmd.py",
@@ -209,7 +209,7 @@
     },
     {
       "path": "src/klayout_tools/components.py",
-      "lines": 606
+      "lines": 532
     },
     {
       "path": "src/klayout_tools/coverage.py",
@@ -485,11 +485,11 @@
     },
     {
       "path": "src/klayout_tools/pdk.py",
-      "lines": 2561
+      "lines": 2545
     },
     {
       "path": "src/klayout_tools/pdk_cells.py",
-      "lines": 807
+      "lines": 804
     },
     {
       "path": "src/klayout_tools/pdk_models.py",
@@ -581,7 +581,7 @@
     },
     {
       "path": "src/klayout_tools/signoff_attest.py",
-      "lines": 1216
+      "lines": 1172
     },
     {
       "path": "src/klayout_tools/signoff_generator_batch.py",
@@ -593,7 +593,7 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 12487
+      "lines": 12426
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
@@ -1061,7 +1061,7 @@
     },
     {
       "path": "tests/test_sim.py",
-      "lines": 15845
+      "lines": 15843
     },
     {
       "path": "tests/test_sim_batch.py",
