@@ -1061,7 +1061,7 @@
     },
     {
       "path": "tests/test_sim.py",
-      "lines": 15845
+      "lines": 15843
     },
     {
       "path": "tests/test_sim_batch.py",
