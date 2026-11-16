@@ -569,7 +569,7 @@
     },
     {
       "path": "src/klayout_tools/ring_check.py",
-      "lines": 585
+      "lines": 552
     },
     {
       "path": "src/klayout_tools/signoff.py",
