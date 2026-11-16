@@ -81,7 +81,7 @@ from .signoff import (
     _generic_item_binding_refusal,
     _reject_json_constant,
 )
-from .signoff_attest_drift import drift_result
+from .signoff_attest_drift import SKIPPED_CHECK_KEYS, drift_result
 from .signoff_attest_input import input_binding
 
 #: The attestation-inventory schema versions this build reads. An inventory
@@ -317,13 +317,17 @@ def _path_list(
 COMMAND_TIMEOUT_CEILING_S = 21600
 
 
-def _command_spec(raw: Any, field: str, root: str) -> dict[str, Any]:
+def _command_spec(
+    raw: Any, field: str, root: str, *, documented_argv: bool = False
+) -> dict[str, Any]:
     """Validate one declared command: ``{"argv": [str, ...], "cwd"?: path}``.
 
     ``argv`` is run directly (never through a shell) with ``cwd`` resolved
     against the repository root. Optional ``local_only: true`` marks a check
     that needs a toolchain the ``--check`` runner may lack: ``--attest`` runs
-    it, ``--attest --check`` skips it and carries the committed outcome."""
+    it, ``--attest --check`` skips it and carries the committed outcome.
+    ``documented_argv`` enables the item-9 ``documented_argv`` disclosure
+    (:func:`item9.documented_spec`); elsewhere the key is refused."""
     if not isinstance(raw, Mapping):
         raise AttestationError(f"'{field}' must be an object with an 'argv' list")
     argv = raw.get("argv")
@@ -360,6 +364,7 @@ def _command_spec(raw: Any, field: str, root: str) -> dict[str, Any]:
                 f"no greater than {COMMAND_TIMEOUT_CEILING_S}"
             )
         spec["timeout_s"] = timeout_s
+    spec.update(item9.documented_spec(raw, field, documented_argv))
     return spec
 
 
@@ -829,6 +834,7 @@ def _command_check(
         check["error"] = error
     if spec.get("local_only"):
         check["local_only"] = True
+    check.update(item9.documented_fields(spec))
     return check
 
 
@@ -841,7 +847,8 @@ def _skipped_check(
     """A ``local_only`` command that ``--check`` did not run: the committed
     check with the same identity is carried through (its outcome is the
     attest-time one, never a result of this run) and marked ``skipped``. With
-    no committed counterpart the check is a failure -- nothing vouches for it."""
+    no committed counterpart the check is a failure -- nothing vouches for it.
+    The ``documented_argv`` disclosure is overlaid from the current spec."""
     for committed in committed_checks:
         if (
             committed.get("check") == "command"
@@ -849,7 +856,7 @@ def _skipped_check(
             and list(committed.get("argv") or []) == list(spec["argv"])
             and all(committed.get(key) == value for key, value in identity.items())
         ):
-            return {**committed, "local_only": True, "skipped": True}
+            return item9.carried_check(committed, spec)
     return {
         "check": "command",
         "role": role,
@@ -860,42 +867,8 @@ def _skipped_check(
         "passed": False,
         "local_only": True,
         "skipped": True,
+        **item9.documented_fields(spec),
     }
-
-
-def _pin_checks(pins: Any) -> list[dict[str, Any]]:
-    """Item 9's reproducibility pins: the PDK name + revision (or the explicit
-    ``{"none": true, "reason": "..."}`` no-PDK form -- an absent ``pdk`` never
-    means "no PDK"), and at least one tool version. A missing or empty pin is
-    a failed check, not a malformed inventory -- the inventory is well-formed,
-    it just does not yet say how to reproduce the run."""
-    pins = pins if isinstance(pins, Mapping) else {}
-    pdk_value = item9.pdk_pin(pins.get("pdk"))
-    tools = pins.get("tools")
-    tools_value = None
-    if (
-        isinstance(tools, Mapping)
-        and tools
-        and all(
-            isinstance(key, str) and key and isinstance(value, str) and value
-            for key, value in tools.items()
-        )
-    ):
-        tools_value = {key: tools[key] for key in sorted(tools)}
-    return [
-        {
-            "check": "pin",
-            "role": "pdk",
-            "passed": pdk_value is not None,
-            "value": pdk_value,
-        },
-        {
-            "check": "pin",
-            "role": "tools",
-            "passed": tools_value is not None,
-            "value": tools_value,
-        },
-    ]
 
 
 def _metric_value(root: str, path: str, field: str) -> float | int | None:
@@ -1034,7 +1007,7 @@ def _run_checks(
         checks.extend(_characterization_checks(root, normalized, command))
     elif item == 9:
         checks.extend(item9.item9_checks(normalized, command))
-        checks.extend(_pin_checks(normalized["pins"]))
+        checks.extend(item9.pin_checks(normalized["pins"]))
     else:
         checks.extend(_audit_command_checks(normalized["checks"], command))
     return checks

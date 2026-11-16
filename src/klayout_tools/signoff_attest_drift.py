@@ -29,12 +29,28 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from . import signoff_attest_item9 as item9
 from ._report_verify import VOLATILE_PROVENANCE_PATHS, build_rerun_result
 
 #: Volatile envelope paths ``--check`` excludes from drift: the producing
 #: build's version strings. A `klt` upgrade that attests byte-identical
 #: inputs with identical outcomes is not evidence drift.
 VOLATILE_ATTESTATION_PATHS = VOLATILE_PROVENANCE_PATHS
+
+#: The keys a ``skipped_checks[]`` entry reports for a carried command check.
+#: Re-exported through :mod:`.signoff_attest` for
+#: :mod:`.signoff_attest_carry`; a carried command check may now disclose the
+#: item-9 ``documented_argv`` fields (issue #5463), so they survive the
+#: skip-list filter too.
+SKIPPED_CHECK_KEYS = (
+    "role",
+    "name",
+    "target",
+    "argv",
+    "cwd",
+    "passed",
+    *item9.DOCUMENTED_KEYS,
+)
 
 #: Keys beyond ``role`` that identify one ``attestation.checks[]`` entry, in
 #: the order a ``drift[].check`` object lists them: ``path`` for a ``present``
@@ -119,11 +135,7 @@ def drift_result(
     for check in fresh["attestation"]["checks"]:
         if check.pop("skipped", False):
             skipped.append(
-                {
-                    key: check[key]
-                    for key in ("role", "name", "target", "argv", "cwd", "passed")
-                    if key in check
-                }
+                {key: check[key] for key in SKIPPED_CHECK_KEYS if key in check}
             )
     result = build_rerun_result(
         report_path=committed_path,
