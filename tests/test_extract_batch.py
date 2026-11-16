@@ -11,14 +11,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import shutil
 import subprocess
 import tarfile
 from pathlib import Path
 
 import pytest
 
-from helpers.subprocess_fakes import fake_completed
+from helpers.subprocess_fakes import fake_completed, keep_uploaded
 from klayout_tools import _provenance, extract, sim_batch
 from klayout_tools import extract_batch as eb
 from klayout_tools.cli import main
@@ -42,9 +41,9 @@ class _FakeRunner:
         if "cp" in argv:
             source, destination = argv[argv.index("cp") + 1 : argv.index("cp") + 3]
             if destination.startswith("s3://"):
-                kept = self.keep_dir / destination.rsplit("/", 1)[-1]
-                shutil.copyfile(source, kept)
-                self.uploads[kept.name] = kept
+                self.uploads.update(
+                    keep_uploaded(argv, source, destination, self.keep_dir)
+                )
                 return fake_completed()
             if source.endswith("/status.json"):
                 if not self.statuses:
