@@ -64,6 +64,19 @@ acceptance data keyed on `category_counts`), key that pin off the shared
 fields below — not `klt --version` — until `klt` reaches `1.0` and this
 caveat is retired.
 
+Growing value sets are not the only pre-1.0 drift this caveat covers: the
+**count under an already-shipped key can change what it counts**. A
+category's own rules can consolidate or split the entries one event emits —
+e.g. issue #4729 (`v0.9.0`) folded the geometry-derived `as`/`ad`/`ps`/`pd`
+parameter differences into the same `device.property` entry as the primary
+`w_um`/`l_um` difference they duplicated, so a width-only difference that
+reported `category_counts["device.property"] == 5` before that release
+reports `1` after, with `status` unchanged. Under this repo's policy such a
+change is additive: it earns no `schema_version` bump, and it is recorded in
+`CHANGELOG.md`. A caller comparing `category_counts` (or `error_count`)
+values across versions therefore needs the same `provenance.deck` /
+`provenance.klayout_version` pin described above.
+
 The same rule applies on the **request** side for the commands that take a
 JSON request document (`klt lvs`, `klt place-and-route`, `klt synthesize`,
 …): a new accepted value for an already-shipped request enum — e.g. `klt
