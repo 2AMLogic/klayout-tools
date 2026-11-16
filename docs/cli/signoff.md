@@ -126,6 +126,10 @@ klt signoff --attest {1,8,9,10} --inventory <file> --check <committed-envelope> 
   and recompute everything else (issue #5209). See "Refreshing on a host
   lacking the toolchain" below. Refused without `--attest`/`-o`, and with
   `--check`.
+- `--require-build-match` — with `--attest` and `--check` (issue #5875): exit
+  `3` with `status: "drifted"` (a `provenance.klt_version` entry in `drift[]`)
+  when the committed envelope was produced by a different `klt` build. See
+  "Build drift". Refused without `--attest` and `--check`.
 - `--format` — `text` (default, a human-readable pass/fail summary) or
   `json` (this command's own JSON envelope, see below).
 - `--color` — when to colour `--format text` output: `auto` (default),
@@ -418,6 +422,14 @@ The marker is **report-only**: it never changes a check's `passed`, the
 overall `status`, or the exit code, so existing green pipelines do not flip.
 Gate on it by reading `checks[].build_drift.state` from the JSON. It is an
 additive field; no existing field changes.
+
+`klt signoff --attest N --inventory F --check ENV` carries the same object as
+a top-level `build_drift` (computed from ENV's `provenance.klt_version`) and
+prints a `build_drift: <state>` line in text mode. It is report-only unless
+`--require-build-match` is passed, which turns `stale` (only `stale`;
+`current` and `unverifiable` never fail) into `status: "drifted"` and exit
+`3`, naming `provenance.klt_version` in `drift[]`. Content drift is still
+reported alongside.
 
 ### What this does not do yet
 

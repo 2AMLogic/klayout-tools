@@ -130,6 +130,7 @@ from ..signoff import (
     describe_grader,
 )
 from ..signoff_attest import STREAM_ATTESTABLE_ITEM, write_attestation
+from ..signoff_attest_build import attach_build_drift, build_drift_line
 from ..signoff_attest_carry import compute_attestation as _compute_attestation
 from ..signoff_attest_carry import flag_problem as _skip_local_only_problem
 from ..signoff_attest_carry import skip_lines
@@ -235,6 +236,7 @@ def _maybe_run_attest(
             ("--generator", "generator"),
             ("--regenerated-hash", "regenerated_hash"),
             ("--skip-local-only", "skip_local_only"),
+            ("--require-build-match", "require_build_match"),
         )
         if getattr(args, attr, None)
     ]
@@ -242,7 +244,8 @@ def _maybe_run_attest(
         return emit_error(
             "signoff",
             "--inventory/--output/--input/--generator/--regenerated-hash/"
-            "--hash-kind/--skip-local-only only apply to --attest",
+            "--hash-kind/--skip-local-only/--require-build-match only apply to "
+            "--attest",
             args.format,
         )
     return None
@@ -354,13 +357,6 @@ def _run_attest(
     problem = _skip_local_only_problem(args)
     if problem is not None:
         return emit_error("signoff", problem, args.format)
-    if committed is not None and output:
-        return emit_error(
-            "signoff",
-            "--check and --output are mutually exclusive with --attest: "
-            "--check verifies a committed envelope and never writes",
-            args.format,
-        )
     try:
         result = _compute_attestation(args, inventory, stream, committed)
     except SignoffError as exc:
@@ -368,6 +364,7 @@ def _run_attest(
 
     if committed is not None:
         attach_live_fields(result.get("fresh") or {}, hints=False)
+        attach_build_drift(result, committed, args.require_build_match)
         emit_success(result, args.format, _print_attestation_check_text)
         ok = result["status"] == "match" and result["fresh_status"] == "pass"
         return EXIT_PASS if ok else EXIT_FAIL
@@ -400,6 +397,7 @@ def _print_attestation_text(result: dict) -> None:
 def _print_attestation_check_text(result: dict) -> None:
     render_rerun_drift(result)
     print(f"fresh_status: {result['fresh_status']}")
+    print(build_drift_line(result))
     failed = [c for c in result["fresh"]["attestation"]["checks"] if not c["passed"]]
     for check in failed:
         print(_attestation_check_line(check))
