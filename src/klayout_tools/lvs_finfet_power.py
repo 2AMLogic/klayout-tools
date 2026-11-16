@@ -22,12 +22,19 @@ A ``match`` is derived only when every input that could refute it holds:
 * the compare itself matched (never a clean verdict on a failed compare),
 * the run did not opt out via ``options.power_connectivity: false`` (the
   caller asked for no power-connectivity evidence at all),
-* and every declared supply net (``options.supply_nets``, the resolved
-  list the report already echoes) pairs to a reference-side net in
-  ``net_correspondence`` -- the same alias-membership rule
+* and at least one requested supply net -- an entry of ``options.supply_nets``,
+  the resolved allowlist the report already echoes -- is proven on a matched
+  ``net_correspondence`` row: the same alias-membership rule
   ``signoff_power_delivery._lvs_reference_carries_supplies`` applies on the
   grading side, so the producer and the grader agree on what "the supplies
-  took part in the compare" means.
+  took part in the compare" means. ``options.supply_nets`` is a candidate
+  allowlist (it scopes the additive ``net.supply_fragmented`` finding), not a
+  declaration that this block has all of those rails, so the guard grades the
+  intersection -- the allowlist entries the matched compare actually proved --
+  and requires it non-empty. An empty allowlist
+  (``options.supply_nets: []``, the documented way to disable the
+  fragmentation finding) proves nothing and never derives a verdict, and
+  rails floating under names the allowlist does not cover are never counted.
 
 Any input not holding leaves the ``unchecked`` block exactly as
 ``lvs_reference_stage`` wrote it, byte-identical -- including its reason --
@@ -40,24 +47,31 @@ from __future__ import annotations
 from typing import Any
 
 
-def supplies_pair_in_net_correspondence(
-    net_correspondence: Any, supply_nets: list[str]
-) -> bool:
-    """Whether every declared supply net pairs in an LVS report's
-    ``net_correspondence`` -- the same rule
+def paired_supply_names(net_correspondence: Any, supply_nets: list[str]) -> list[str]:
+    """The entries of a resolved ``options.supply_nets`` allowlist that a
+    LVS report's ``net_correspondence`` proves, sorted -- the same rule
     :func:`klayout_tools.signoff_power_delivery._lvs_reference_carries_supplies`
-    applies to a committed envelope on the grading side (issue #2405).
+    applies to a committed envelope on the grading side (issue #2405), with
+    the proof set reported instead of a boolean so the caller can require it
+    non-empty and name it.
 
     A row proves a supply when the row's ``reference`` side is non-empty
     and its ``layout`` alias names the supply: ``klt lvs`` writes a
     label-merged net as ``|``-joined aliases (e.g.
-    ``"G_VDDR_M1|MNT_G|VDDR|VDDR1"``), so the declared name qualifies when
+    ``"G_VDDR_M1|MNT_G|VDDR|VDDR1"``), so the requested name qualifies when
     it is *any one* of the row's aliases, not only the full joined string.
     Name comparison is case-insensitive, matching how `klt lvs` itself
-    compares power net names. An empty ``supply_nets`` declaration is
-    vacuously satisfied -- the same convention the grading-side function
-    uses.
+    compares power net names.
+
+    ``supply_nets`` is a candidate allowlist -- ``parse_supply_nets``'s
+    resolution of ``options.supply_nets``, whose default is the whole
+    six-name fragmentation universe -- not a declaration that this block
+    has those rails, so nothing here requires every entry to be proven;
+    the caller decides what the intersection means. An empty allowlist
+    (or no qualifying row) returns ``[]`` -- no supply is proven, and the
+    caller must not grade that as evidence.
     """
+    requested = {name.upper() for name in supply_nets}
     paired: set[str] = set()
     for row in net_correspondence or []:
         if not isinstance(row, dict):
@@ -66,7 +80,7 @@ def supplies_pair_in_net_correspondence(
         reference = row.get("reference")
         if isinstance(layout, str) and isinstance(reference, str) and reference:
             paired.update(alias.upper() for alias in layout.split("|") if alias)
-    return all(name.upper() in paired for name in supply_nets)
+    return sorted(requested & paired)
 
 
 def derive_finfet_gate_level_power(
@@ -96,12 +110,16 @@ def derive_finfet_gate_level_power(
       evidence, and stays ``unchecked``;
     * the final compare ``status`` is ``"match"`` -- a failed compare
       evidences nothing;
-    * every declared supply net (``supply_nets``, the resolved
-      ``options.supply_nets``) pairs in ``net_correspondence``
-      (:func:`supplies_pair_in_net_correspondence`) -- the guard that keeps
-      a trivially-matching reference (its expanded rails floating on
-      internal nets, never tied to the declared top-level supplies) from
-      grading as a verified power grid.
+    * the requested supply nets (``supply_nets``, the resolved
+      ``options.supply_nets`` allowlist) intersected with the matched rows'
+      layout-side names is non-empty
+      (:func:`paired_supply_names`) -- the guard that keeps a
+      trivially-matching reference (its expanded rails floating on internal
+      nets under names the allowlist does not cover) from grading as a
+      verified power grid, and that keeps an empty allowlist from deriving
+      a verdict on no evidence at all. The intersection, not the whole
+      allowlist, is what the ``match`` claims: the reason names exactly
+      the supplies the compare proved.
 
     The derived block keeps the stub's exact key set (no new field -- the
     block's shape is a report contract), flipping ``status`` to ``"match"``
@@ -116,7 +134,8 @@ def derive_finfet_gate_level_power(
         return power_connectivity
     if status != "match":
         return power_connectivity
-    if not supplies_pair_in_net_correspondence(net_correspondence, supply_nets):
+    paired_supplies = paired_supply_names(net_correspondence, supply_nets)
+    if not paired_supplies:
         return power_connectivity
 
     from .lvs import POWER_STATUS_MATCH
@@ -127,8 +146,9 @@ def derive_finfet_gate_level_power(
         "derived from the expanded-cell compare (issue #5757): the "
         "reference's library cells were expanded to transistor-level CDL "
         "bodies whose power/ground pins take part in the ordinary compare, "
-        "which matched, and every declared supply net "
-        f"({', '.join(sorted(supply_nets))}) paired in net_correspondence "
-        "-- the stub-form pin-to-net check does not apply on this route"
+        "which matched, and the requested supply nets that paired in "
+        f"net_correspondence ({', '.join(paired_supplies)}) tie the layout "
+        "grid to its reference supplies -- the stub-form pin-to-net check "
+        "does not apply on this route"
     )
     return derived

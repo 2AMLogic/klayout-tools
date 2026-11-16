@@ -15,8 +15,9 @@ from types import SimpleNamespace
 
 from klayout_tools.lvs_finfet_power import (
     derive_finfet_gate_level_power,
-    supplies_pair_in_net_correspondence,
+    paired_supply_names,
 )
+from klayout_tools.lvs_supply import DEFAULT_SUPPLY_NETS, parse_supply_nets
 
 #: The ``unchecked`` stub ``lvs_reference_stage`` writes on the FinFET
 #: gate-level route (shape per ``_power_connectivity_unchecked``).
@@ -109,12 +110,12 @@ def test_explicit_false_stays_unchecked():
 
 
 def test_unpaired_supply_stays_unchecked():
-    # `VPWR` never pairs: a reference whose expanded rails float on
-    # internal nets must not grade as a verified power grid.
+    # `VPWR` and `VGND` never pair: rails floating under names the
+    # allowlist does not cover prove nothing about the top-level grid.
     stub = dict(FINFET_STUB)
     block = _derive(
         net_correspondence=[
-            {"layout": "VGND", "reference": "VGND"},
+            {"layout": "cell_internal_rail_1", "reference": "VPWR"},
             {"layout": "net_a", "reference": "net_a"},
         ],
         power_connectivity=stub,
@@ -122,21 +123,81 @@ def test_unpaired_supply_stays_unchecked():
 
     assert block is stub
     assert block["status"] == "unchecked"
+    assert block["reason"] == FINFET_STUB["reason"]
+
+
+def test_partial_supply_pairing_derives_and_names_what_paired():
+    # The allowlist is a candidate universe, not a declaration of this
+    # block's rails: the guard grades the intersection, so a matched
+    # compare that proves only `VGND` of {`VPWR`, `VGND`} still derives --
+    # with a reason naming exactly the supply the compare proved.
+    block = _derive(
+        supply_nets=["VPWR", "VGND"],
+        net_correspondence=[
+            {"layout": "VGND", "reference": "VGND"},
+            {"layout": "net_a", "reference": "net_a"},
+        ],
+    )
+
+    assert block["status"] == "match"
+    paired_note = block["reason"].rsplit("(", 1)[1].split(")")[0]
+    assert paired_note == "VGND"
 
 
 def test_supply_paired_to_an_empty_reference_side_does_not_count():
-    assert not supplies_pair_in_net_correspondence(
-        [{"layout": "VPWR", "reference": ""}], ["VPWR"]
-    )
+    assert paired_supply_names([{"layout": "VPWR", "reference": ""}], ["VPWR"]) == []
 
 
 def test_alias_membership_and_case_insensitivity():
-    assert supplies_pair_in_net_correspondence(
+    assert paired_supply_names(
         [{"layout": "g_vpwr_m1|mnt_g|vpwr", "reference": "VPWR"}], ["vpwr"]
+    ) == ["VPWR"]
+    assert (
+        paired_supply_names(
+            [{"layout": "g_vpwr_m1|mnt_g", "reference": "VPWR"}], ["VPWR"]
+        )
+        == []
     )
-    assert not supplies_pair_in_net_correspondence(
-        [{"layout": "g_vpwr_m1|mnt_g", "reference": "VPWR"}], ["VPWR"]
+
+
+def test_default_supply_allowlist_resolves_and_derives():
+    """The shipped default: `run_lvs` resolves `options.supply_nets` through
+    `parse_supply_nets({})` -- the whole six-name fragmentation universe --
+    and a real routed grid pairs only the rails it actually has. The
+    derivation must fire on that default path (this is the shape of the
+    tiers doc's own recipe), grading the intersection."""
+    supply_nets = parse_supply_nets({})
+    assert supply_nets == sorted(DEFAULT_SUPPLY_NETS)
+
+    block = _derive(
+        supply_nets=supply_nets,
+        net_correspondence=[
+            {"layout": "VDD|VDD_strap|G_VDD_M2", "reference": "VDD"},
+            {"layout": "VSS", "reference": "VSS"},
+            {"layout": "net_a", "reference": "net_a"},
+        ],
     )
+
+    assert block["status"] == "match"
+    assert "VDD" in block["reason"]
+    assert "VSS" in block["reason"]
+    # The allowlist's non-rails (GND, VCC, VGND, VPWR) are not claimed as
+    # proven: the reason names exactly the intersection.
+    paired_note = block["reason"].rsplit("(", 1)[1].split(")")[0]
+    assert paired_note == "VDD, VSS"
+
+
+def test_empty_supply_allowlist_never_derives():
+    """`options.supply_nets: []` -- the documented way to disable the
+    supply-fragmentation finding -- must never grade as power evidence: the
+    vacuous-truth hole (an empty `all(...)` deriving `match` on an empty
+    `net_correspondence`) is closed by construction."""
+    stub = dict(FINFET_STUB)
+    block = _derive(supply_nets=[], net_correspondence=[], power_connectivity=stub)
+
+    assert block is stub
+    assert block["status"] == "unchecked"
+    assert block["reason"] == FINFET_STUB["reason"]
 
 
 def test_non_finfet_and_other_reference_forms_are_untouched():

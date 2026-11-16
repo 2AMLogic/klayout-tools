@@ -300,7 +300,7 @@ def assemble_lvs_report(
         # Issue #5757: on the FinFET gate-level route the stub block this
         # stage starts from is graded here, after the compare -- the one
         # place the final `status` and the `net_correspondence` are both in
-        # scope -- so a matched compare whose declared supplies paired
+        # scope -- so a matched compare whose requested supplies paired
         # reports the evidence the compare itself produced. Every
         # non-deriving path returns the block unchanged (byte-identical).
         "power_connectivity": derive_finfet_gate_level_power(
