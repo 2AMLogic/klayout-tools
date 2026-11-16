@@ -76,7 +76,7 @@ def summarize_dead_metal(dead_metal: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "clusters": sum(row["clusters"] for row in by_layer),
         "shapes": sum(row["shapes"] for row in by_layer),
-        "area_um2": round(sum(row["area_um2"] for row in by_layer), _AREA_PRECISION_UM),
+        "area_um2": round(sum((row["area_um2"] for row in by_layer), 0.0), _AREA_PRECISION_UM),
         "by_layer": by_layer,
     }
 
