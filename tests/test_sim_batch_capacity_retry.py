@@ -237,6 +237,37 @@ def test_cli_forwards_capacity_retries_on_a_single_request(tmp_path, monkeypatch
     assert seen["capacity_retries"] is None
 
 
+def test_capacity_retries_override_folds_into_the_batch_config():
+    from klayout_tools.sim_request_overrides import _with_capacity_retries_override
+
+    request = {"netlist": "body.spice", "batch": {"bucket": "fake-bucket"}}
+    out = _with_capacity_retries_override(request, 2)
+    assert out["batch"]["capacity_retries"] == 2
+    assert request["batch"] == {"bucket": "fake-bucket"}  # not mutated
+
+
+def test_capacity_retries_override_unset_returns_the_request_itself():
+    from klayout_tools.sim_request_overrides import _with_capacity_retries_override
+
+    request = {"netlist": "body.spice"}
+    assert _with_capacity_retries_override(request, None) is request
+
+
+def test_capacity_retries_override_creates_the_batch_block():
+    from klayout_tools.sim_request_overrides import _with_capacity_retries_override
+
+    assert _with_capacity_retries_override({}, 1)["batch"] == {"capacity_retries": 1}
+
+
+def test_capacity_retries_override_refuses_invalid_values():
+    from klayout_tools.sim_request_overrides import _with_capacity_retries_override
+
+    with pytest.raises(sim.SimError, match="--capacity-retries must be >= 0"):
+        _with_capacity_retries_override({}, -1)
+    with pytest.raises(sim.SimError, match="--capacity-retries must be >= 0"):
+        _with_capacity_retries_override({}, True)
+
+
 def test_interrupt_during_backoff_returns_the_partial_report(tmp_path, monkeypatch):
     def _interrupted(abort):
         def _sleep(_seconds):
