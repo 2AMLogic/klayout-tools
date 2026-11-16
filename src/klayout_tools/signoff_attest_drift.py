@@ -31,6 +31,7 @@ from typing import Any
 
 from . import signoff_attest_item9 as item9
 from ._report_verify import VOLATILE_PROVENANCE_PATHS, build_rerun_result
+from .signoff_attest_input import legacy_binding_detail
 
 #: Volatile envelope paths ``--check`` excludes from drift: the producing
 #: build's version strings. A `klt` upgrade that attests byte-identical
@@ -144,6 +145,12 @@ def drift_result(
         mode="check",
     )
     annotate_check_drift(result["drift"], fresh["attestation"]["checks"])
+    legacy = legacy_binding_detail(committed, fresh, result["drift"])
+    if legacy is not None:
+        # Pre-v0.9.0 item-1 envelope (#5730): still a failure, but named.
+        result["status"] = "schema-mismatch"
+        result["legacy_binding"] = True
+        result["legacy_binding_detail"] = legacy
     fresh_payload = result.pop("fresh")
     result["fresh_status"] = fresh_payload["status"]
     result["skipped_checks"] = skipped

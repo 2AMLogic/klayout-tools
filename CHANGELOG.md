@@ -14,6 +14,16 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt signoff --attest 1 --check` names a pre-v0.9.0 envelope
+  `schema-mismatch`** (#5730, #5767, 2026-11-16): when the committed item-1
+  envelope still carries the singular `provenance.input.path` (before #4764)
+  and that binding is the only drift, `status` is the new value
+  `"schema-mismatch"` instead of `"drifted"`, with additive `legacy_binding`
+  and `legacy_binding_detail` keys and the remedy printed before the `drift:`
+  block in text. Still exit `3`. Additive pre-1.0 enum value, so no
+  `schema_version` bump (see `docs/json-contract.md`). Migrating 0.8.x -> 0.9.x:
+  regenerate committed item-1 envelopes and re-pin manifest `content_hash` to
+  the input-set digest.
 - **`klt mcp serve` serves the `docs/schemas/` JSON contract as MCP
   resources** (#5420, 2026-11-13): the server now advertises the resources
   capability and lists one resource per `docs/schemas/*.schema.json` at

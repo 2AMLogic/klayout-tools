@@ -184,6 +184,9 @@ def render_rerun_drift(result: dict) -> None:
     """
     print(f"report: {result['report']}")
     print(f"status: {result['status']}")
+    if result.get("legacy_binding"):
+        # Before the drift block: the remedy is the point (issue #5730).
+        print(f"legacy_binding: {result['legacy_binding_detail']['remedy']}")
     if "doc_drift" in result:
         print(f"doc_drift: {str(result['doc_drift']).lower()}")
     drift = result["drift"]
