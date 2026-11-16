@@ -38,7 +38,10 @@ import re
 import shlex
 import subprocess
 import sys
-from collections.abc import Callable, Iterable, Mapping
+import tempfile
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from functools import cache
 from pathlib import Path
 from typing import (
@@ -51,6 +54,7 @@ from typing import (
 )
 
 from . import _report_verify_hints as hints
+from . import artifact_store
 from . import signoff_foundry_cell as foundry_cell
 from . import signoff_nothing_checked as vacuous
 from ._jsongz import READ_ERRORS, open_text
@@ -975,6 +979,12 @@ _DEFAULT_INPUT_ROLE = INPUT_ROLE_LAYOUT
 _REASON_NO_EVIDENCE = "no_evidence"
 _REASON_INVALID_EVIDENCE = "invalid_evidence"
 _REASON_UNREADABLE_EVIDENCE = "unreadable_evidence"
+#: Issue #5882: a cited ``artifact:<key>`` URI could not be resolved to bytes
+#: through ``--artifact-manifest`` and the artifact broker (no manifest, no
+#: matching entry, broker failure, or a hash/size mismatch). The evidence may
+#: well exist; it was not *obtained* -- not the same as "unreadable_evidence"
+#: (a path that does not open).
+_REASON_ARTIFACT_UNAVAILABLE = "artifact_unavailable"
 _REASON_UNRECOGNIZED_ENVELOPE = "unrecognized_envelope"
 _REASON_CHECK_ERRORED = "check_errored"
 _REASON_CHECK_FAILED = "check_failed"
@@ -5191,6 +5201,109 @@ _INPUT_ARTIFACT_FIELDS: dict[str, tuple[str, ...]] = {
 }
 
 
+# --------------------------------------------------------------------------- #
+# artifact:<key> citations (issue #5882)
+# --------------------------------------------------------------------------- #
+
+#: The cause of the most recent unresolvable ``artifact:`` citation, read by
+#: :func:`_unresolved_evidence_detail` right after the grading step that set it.
+_LAST_ARTIFACT_FAILURE: dict[str, str] | None = None
+
+
+class _ArtifactResolver:
+    """Resolves ``artifact:<key>`` URIs to verified temporary files for the
+    duration of one :func:`artifact_resolution` block. Bytes come only from
+    the broker through :func:`artifact_store.fetch_to`, which refuses any that
+    fail the manifest-pinned sha256/size/key; a failure is remembered, never
+    raised, so grading renders ``artifact_unavailable``."""
+
+    def __init__(self, manifests: list[str], directory: str) -> None:
+        self.manifests = manifests
+        self.directory = directory
+        self.cache: dict[str, str] = {}
+        self.failures: dict[str, str] = {}
+
+    def _entry(self, uri: str) -> dict[str, Any]:
+        if not self.manifests:
+            raise artifact_store.ArtifactError(
+                "no artifact manifest given (pass --artifact-manifest)",
+                "no_manifest",
+            )
+        key = artifact_store.uri_key(uri)
+        for path in self.manifests:
+            for entry in artifact_store.load_manifest(path)["entries"]:
+                if artifact_store.uri_key(entry["uri"]) == key:
+                    return entry
+        raise artifact_store.ArtifactError(
+            f"no entry for {uri} in the given artifact manifest(s)", "no_entry"
+        )
+
+    def resolve(self, uri: str) -> tuple[str | None, str | None]:
+        """``(local path, None)`` or ``(None, cause)``."""
+        if uri in self.cache:
+            return self.cache[uri], None
+        if uri not in self.failures:
+            try:
+                target = artifact_store.target_for_entry(self._entry(uri))
+                client = artifact_store.resolve_broker(None)
+                destination = os.path.join(
+                    self.directory, f"{len(self.cache)}-{target.sha256}"
+                )
+                artifact_store.fetch_to(client, target, destination)
+                self.cache[uri] = destination
+                return destination, None
+            except artifact_store.ArtifactError as exc:
+                self.failures[uri] = f"{exc.code}: {exc}"
+        return None, self.failures[uri]
+
+
+_ARTIFACT_RESOLVER: ContextVar[_ArtifactResolver | None] = ContextVar(
+    "klt_signoff_artifact_resolver", default=None
+)
+
+
+@contextmanager
+def artifact_resolution(manifests: Iterable[str] | None) -> Iterator[None]:
+    """Make ``artifact:<key>`` citations resolvable (``klt signoff
+    --artifact-manifest``, issue #5882) for grading done inside the block.
+    Fetched bytes live in a temporary directory removed on exit."""
+    with tempfile.TemporaryDirectory(prefix=".klt-signoff-artifact-") as directory:
+        token = _ARTIFACT_RESOLVER.set(
+            _ArtifactResolver(list(manifests or []), directory)
+        )
+        try:
+            yield
+        finally:
+            _ARTIFACT_RESOLVER.reset(token)
+
+
+def _artifact_uri(value: Any) -> str | None:
+    """The ``artifact:<key>`` URI a citation path value names, else ``None``
+    (a string, or the repo-scoped ``{path, scope}`` form)."""
+    if isinstance(value, Mapping) and value.get("scope") == "repo":
+        value = value.get("path")
+    if isinstance(value, str) and value.startswith(f"{artifact_store.URI_SCHEME}:"):
+        return value
+    return None
+
+
+def _materialize_artifact(uri: str) -> str | None:
+    """A verified local copy of ``uri``'s bytes, or ``None`` with the cause
+    recorded in :data:`_LAST_ARTIFACT_FAILURE`."""
+    global _LAST_ARTIFACT_FAILURE
+    resolver = _ARTIFACT_RESOLVER.get()
+    if resolver is None:
+        path, problem = (
+            None,
+            ("no_manifest: no artifact manifest given (pass --artifact-manifest)"),
+        )
+    else:
+        path, problem = resolver.resolve(uri)
+    if path is None:
+        _LAST_ARTIFACT_FAILURE = {"artifact": uri, "problem": problem or ""}
+    return path
+
+
 def _resolve_input_artifact_value(
     value: Any,
     spec: Mapping[str, Any],
@@ -5244,6 +5357,10 @@ def _resolve_input_artifact_value(
     prefix, so it verifies only where that exact path still exists.
     """
     candidates: list[str] = []
+    uri = _artifact_uri(value)
+    if uri is not None:
+        local = _materialize_artifact(uri)
+        return [local] if local is not None else []
     if isinstance(value, str) and value:
         candidates.append(_resolve_relative_to_spec(value, spec))
         if evidence_dir is not None and not os.path.isabs(value):
@@ -5278,6 +5395,18 @@ def _input_artifact_candidates(
     evidence_dir = (
         os.path.dirname(os.path.abspath(evidence_file)) if evidence_file else None
     )
+    found, value = _input_artifact_raw_value(kind, envelope)
+    if not found:
+        return []
+    return _resolve_input_artifact_value(value, spec, evidence_dir, repo_root)
+
+
+def _input_artifact_raw_value(
+    kind: str, envelope: Mapping[str, Any]
+) -> tuple[bool, Any]:
+    """``(found, value)``: the cited envelope's own input-artifact path value
+    -- the first present :data:`_INPUT_ARTIFACT_FIELDS` field, or a
+    ``generic``/``model-run`` envelope's opt-in ``provenance.input.path``."""
     for field in _INPUT_ARTIFACT_FIELDS.get(kind, ()):
         value = envelope.get(field)
         if value is None:
@@ -5287,27 +5416,18 @@ def _input_artifact_candidates(
         # The first *present* field decides: it is the one the producing run
         # hashed, so falling through to another on a failed resolution would
         # verify the wrong artifact.
-        return _resolve_input_artifact_value(value, spec, evidence_dir, repo_root)
+        return True, value
     if kind in ("generic", "model-run"):
-        # Issue #2403 (and #4859 for `model-run`, whose model record is
-        # likewise author-named): a `generic` envelope names its own fields by
-        # definition (`_INPUT_ARTIFACT_FIELDS` above has no entry for it),
-        # so the only field this module ever reads for it is this one
-        # explicit, opt-in name -- never `source` (documented as purely
-        # informational, `docs/cli/signoff.md`) and never a guess at some
-        # other author-chosen key. An envelope that omits
-        # `provenance.input.path` is unaffected: `[]` here means
-        # `_verify_input_artifact` reports `input_verified: null`, exactly
-        # as it did before this field existed.
+        # Issue #2403 (and #4859 for `model-run`): only this explicit, opt-in
+        # name is ever read for these kinds -- never `source`, never a guess
+        # at another author-chosen key. Absent => `input_verified: null`.
         provenance = envelope.get("provenance")
         input_block = (
             provenance.get("input") if isinstance(provenance, Mapping) else None
         )
         if isinstance(input_block, Mapping) and "path" in input_block:
-            return _resolve_input_artifact_value(
-                input_block.get("path"), spec, evidence_dir, repo_root
-            )
-    return []
+            return True, input_block.get("path")
+    return False, None
 
 
 def _verify_input_artifact(
@@ -5432,6 +5552,8 @@ def _unresolved_evidence_detail(
     """The ``failure_detail`` for evidence :func:`_resolve_evidence` could not
     resolve: an unreadable evidence file names both the resolved path and the
     process cwd it resolved against (evidence paths are cwd-relative)."""
+    if reason == _REASON_ARTIFACT_UNAVAILABLE:
+        return dict(_LAST_ARTIFACT_FAILURE or {})
     if reason == _REASON_UNREADABLE_EVIDENCE and spec.get("file") is not None:
         return {"path": os.path.abspath(spec["file"]), "cwd": os.getcwd()}
     return {}
@@ -6502,11 +6624,20 @@ def _resolve_evidence(
             return None, _REASON_COMMAND_FAILED
 
         file_label: str | None = None
+        local_file: str | None = None
         source_label = command_label
     else:
         file = spec["file"]
+        local_file = file
+        cited_uri = _artifact_uri(file)
+        if cited_uri is not None:
+            # Issue #5882: bytes held in the artifact store, named by manifest.
+            fetched = _materialize_artifact(cited_uri)
+            if fetched is None:
+                return None, _REASON_ARTIFACT_UNAVAILABLE
+            local_file = fetched
         try:
-            envelope = _read_envelope(file)
+            envelope = _read_envelope(local_file)
         except SignoffError:
             return None, _REASON_UNREADABLE_EVIDENCE
 
@@ -6532,6 +6663,14 @@ def _resolve_evidence(
         # klt") is not the remedy for a foreign document.
         return None, _classify_failure_reason(exc)
 
+    found_input, input_value = _input_artifact_raw_value(check_kind, envelope)
+    input_uri = _artifact_uri(input_value) if found_input else None
+    if input_uri is not None and _materialize_artifact(input_uri) is None:
+        # Issue #5882: the envelope names its audited input by `artifact:` URI
+        # that cannot be obtained -- say so, rather than the misleading
+        # "no such file" / `unverifiable_provenance` a literal join gives.
+        return None, _REASON_ARTIFACT_UNAVAILABLE
+
     provenance = envelope.get("provenance") or {}
     input_block = provenance.get("input") or {}
     actual_hash = input_block.get("content_hash")
@@ -6556,15 +6695,15 @@ def _resolve_evidence(
         # against the artifact the envelope names. Disclosure only -- see
         # this module's "Input-artifact verification" docstring section.
         input_verified = _verify_input_artifact(
-            check_kind, envelope, spec, actual_hash, file_label, repo_root
+            check_kind, envelope, spec, actual_hash, local_file, repo_root
         )
 
     actual_hash, content_hash_basis, input_verified = rehash_evidence_file(
-        check_kind, spec, file_label, actual_hash, input_verified
+        check_kind, spec, local_file, actual_hash, input_verified
     )
 
     pex_inputs, input_members, input_verified = _fold_kind_inputs(
-        check_kind, envelope, spec, file_label, actual_hash, input_verified, repo_root
+        check_kind, envelope, spec, local_file, actual_hash, input_verified, repo_root
     )
 
     return (

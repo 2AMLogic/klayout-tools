@@ -2538,6 +2538,35 @@ like any other path argument. Evidence files need not live under the root —
 only the `scope: "repo"` echoes are joined against it — but naming the tree
 the evidence was actually produced from is the intended use.
 
+### Citing stored evidence: `--artifact-manifest`
+
+A manifest-forward repo keeps only artifact-store manifests (`klt artifact`,
+[`artifact.md`](artifact.md)) in git; the evidence bytes live in the store.
+`--artifact-manifest PATH` (repeatable; issue #5882; only with
+`--manifest`/`--fleet`) lets two citation shapes name such bytes by their
+`artifact:<key>` URI:
+
+- a file-backed evidence entry, `{"file": "artifact:<key>", "content_hash": ...}`
+  or the bare string form;
+- a cited envelope's own input path, e.g. a `generic` envelope's
+  `provenance.input.path` of `{"path": "artifact:<key>", "scope": "repo"}`.
+
+The URI is looked up by key in the given manifest(s), fetched through the
+broker (`$KLT_ARTIFACT_BROKER`) into a temporary file that is deleted when
+the run ends, and read exactly like a file on disk — so
+`citation.input_verified` keeps its meaning (`true` means the fetched bytes
+were really re-hashed). The fetch verifies sha256, key and size against the
+manifest entry before anything is written; gzip bytes are read directly.
+The citation's `file` stays the URI.
+
+Anything that stops the bytes being obtained — no `--artifact-manifest`, no
+entry for the key, no broker configured or reachable, a hash/size mismatch —
+grades `unmet` with reason `artifact_unavailable` and
+`detail: {"artifact": "<uri>", "problem": "<code>: <message>"}`; it never
+falls back to a literal path and is never `met`. There is no broker-free
+mode: a manifest's pinned hash is not the bytes. Without the flag, and with no
+`artifact:` path cited, behaviour is unchanged.
+
 ### An overridden doc can outrun the build: `graded_by_build`
 
 The item list comes from the parsed doc; the grading rules come from the
@@ -4459,6 +4488,7 @@ actually ran and failed):
 | `"no_evidence"`           | yes | The manifest's `evidence` map has no entry for this item at all. |
 | `"invalid_evidence"`      | yes | The manifest's entry for this item is present but malformed (neither a string, nor an object with a string `"file"`, nor an object with a non-empty list-of-strings `"command"`; or, issue #2342, one carrying a `"pointer"` that is not a string). |
 | `"unreadable_evidence"`   | yes | A file-backed entry's named file does not exist, is not readable, or is not valid JSON; or a command-backed entry's subprocess exited zero but its stdout was not valid JSON. A gzip-compressed file is read directly (issue #5452) — only a *truncated* or *damaged* gzip stream lands here on that account. A `not_applicable` object (item 6) also lands here under a grader older than 0.8.0, which predates that form. |
+| `"artifact_unavailable"`  | yes | **(issue #5882)** A cited `artifact:<key>` URI — the evidence file, or the input path of a cited envelope — could not be turned into verified bytes: no `--artifact-manifest`, no entry for the key, no broker configured or reachable, or the fetched bytes failed the manifest's sha256/size. `detail` carries `artifact` and `problem`. See "Citing stored evidence: `--artifact-manifest`" above. |
 | `"unrecognized_envelope"` | yes | The resolved evidence parsed as JSON but is not a JSON object, does not match any recognised `klt` envelope shape, or matches one but is malformed for it — missing a required field, or carrying one of the wrong type (see "Envelope validation" above). |
 | `"envelope_version_skew"` | yes | **(issue #2198)** The resolved evidence *is* a `klt` envelope, carrying a kind's **primary** marker but none of the shape discriminators that marker is paired with — the shape a response written before those (additive) fields existed has. Today this applies to one kind: **`sta`**, whose `geometry_source` marker shipped with the verb but whose `timing_status`/`corners` discriminators are additive (issues #1865/#1915), so any `klt sta` response committed before them lands here. Refused exactly like `"unrecognized_envelope"` — it is never graded as that kind's evidence — but reported distinguishably, because the remedy differs: re-run the check under the current `klt`, rather than fix a citation pointing at the wrong artifact. A kind whose markers are *both* original (`place-and-route`'s `stage_reached`+`power`) has no version-skew shape and is unaffected. See "Digital-flow evidence" above. |
 | `"invalid_pointer"`       | yes | **(issue #2342)** The evidence entry carried a `"pointer"` (an RFC 6901 JSON Pointer naming where inside the cited document the envelope lives) that did not resolve to a JSON object: malformed syntax (no leading `/`, a `~` followed by neither `0` nor `1`), a path the document does not contain, or a value that is not an object (a string, number, array, or `null` — none of which can ever be a `klt` envelope). Deliberately distinct from `"unrecognized_envelope"`: nothing was ever classified, so this says nothing about the cited bytes, and the remedy is to fix the pointer rather than the citation. See "Citing an envelope nested inside a composite report" above. |

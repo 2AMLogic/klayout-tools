@@ -122,6 +122,7 @@ from ..signoff import (
     _ITEMS_REQUIRING_ANCHORED_GENERIC_EVIDENCE,
     SignoffError,
     _read_json_source,
+    artifact_resolution,
     build_fleet_report,
     build_signoff,
     build_tier_report,
@@ -207,10 +208,20 @@ def run(args: argparse.Namespace) -> int:
             f"--repo-root '{repo_root}' is not an existing directory",
             args.format,
         )
+    artifact_manifests = getattr(args, "artifact_manifest", None)
+    if artifact_manifests and not (manifest_source or fleet_source):
+        return emit_error(
+            "signoff",
+            "--artifact-manifest only applies to --manifest/--fleet (envelope "
+            "aggregation resolves no citations)",
+            args.format,
+        )
     if fleet_source:
-        return _run_fleet_report(args, fleet_source, repo_root=repo_root)
+        with artifact_resolution(artifact_manifests):
+            return _run_fleet_report(args, fleet_source, repo_root=repo_root)
     if manifest_source:
-        return _run_tier_report(args, manifest_source, repo_root=repo_root)
+        with artifact_resolution(artifact_manifests):
+            return _run_tier_report(args, manifest_source, repo_root=repo_root)
     return _run_envelope_aggregation(args)
 
 
