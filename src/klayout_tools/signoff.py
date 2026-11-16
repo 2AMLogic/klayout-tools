@@ -7831,6 +7831,34 @@ RUN_IDENTITY_REPORT_PATHS: frozenset[tuple[str, ...]] = frozenset(
 )
 
 
+def _build_skew(committed: dict[str, Any], fresh: dict[str, Any]) -> dict[str, Any]:
+    """The report-only ``build_skew`` signal ``--check`` carries (issue #5868).
+
+    ``--check`` excludes the whole ``build`` block from its verdict
+    (:data:`VOLATILE_REPORT_PATHS`), which leaves it silent on whether the
+    committed report was rendered by a different klt build -- or graded under a
+    different ruleset. This names that, never grades it: ``state`` is
+    ``"same"`` (no ``build.*`` field differs), ``"build_only"`` (some do, but
+    not ``grading_ruleset_id``), ``"ruleset"`` (``grading_ruleset_id`` differs)
+    or ``"unknown"`` (the committed report carries no ``build`` block, so
+    there is nothing to compare). ``fields`` lists each differing field in the
+    ``{field, committed, fresh}`` shape of ``drift``.
+    """
+    committed_build = committed.get("build")
+    if not isinstance(committed_build, dict):
+        return {"state": "unknown", "fields": []}
+    fields = diff_verdict_fields(
+        {"build": committed_build}, {"build": fresh.get("build")}
+    )
+    if not fields:
+        state = "same"
+    elif any(entry["field"] == "build.grading_ruleset_id" for entry in fields):
+        state = "ruleset"
+    else:
+        state = "build_only"
+    return {"state": state, "fields": fields}
+
+
 def _check_signoff_report(
     report_path: str, committed: dict[str, Any], fresh: dict[str, Any]
 ) -> dict[str, Any]:
@@ -7857,6 +7885,9 @@ def _check_signoff_report(
 
     ``fresh`` is embedded un-stripped, exactly as before -- the exclusion
     applies to the comparison, never to what the response shows.
+
+    ``build_skew`` (issue #5868) is a third, report-only signal: whether the
+    excluded ``build`` block differs (see :func:`_build_skew`).
     """
     # Run identity is dropped from both diffs (and so is never doc drift).
     committed_graded = strip_path_patterns(committed, RUN_IDENTITY_REPORT_PATHS)
@@ -7885,6 +7916,8 @@ def _check_signoff_report(
     fresh_payload = result.pop("fresh")
     result["doc_drift"] = bool(doc_drift_fields)
     result["doc_drift_fields"] = doc_drift_fields
+    # Report-only (issue #5868): never feeds `status`, so never the exit code.
+    result["build_skew"] = _build_skew(committed, fresh)
     result["fresh"] = fresh_payload
     return result
 

@@ -13833,6 +13833,7 @@ def test_check_matches_a_report_committed_by_another_provisioning_route(tmp_path
         "drift": [],
         "doc_drift": False,
         "doc_drift_fields": [],
+        "build_skew": result["build_skew"],
         "fresh": fresh,
     }
 
