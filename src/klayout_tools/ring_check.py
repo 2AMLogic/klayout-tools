@@ -56,6 +56,8 @@ from typing import Any
 from ._layout import clip_box as _clip_box
 from ._layout import load_layout
 from ._layout import select_top_cells as _select_top_cells_shared
+from ._provenance import build_provenance
+from .env_provenance import repo_relative_path
 
 #: Stable rule id carried by every ring-continuity violation this module
 #: emits -- the same contract guarantee a ``klt drc`` rule id or a ``klt lvs``
@@ -120,8 +122,9 @@ def run_ring_check(
     ``docs/cli/ring-check.md``)::
 
         {
-            "schema_version": 1,
-            "file": <path as provided>,
+            "schema_version": 2,
+            "file": {"path": <repo-relative POSIX path> | None,
+                     "scope": "repo" | "external"},
             "layers": [[layer, datatype], ...],
             "region_um": [left, bottom, right, top] | None,
             "cells": ["<name>", ...] | None,  # the effective --cells scope
@@ -236,8 +239,11 @@ def run_ring_check(
     )
 
     return {
-        "schema_version": 1,
-        "file": layout_path,
+        # schema_version 2 (issue #5650): `file` re-shaped from the raw input
+        # string to the anchored `{path, scope}` object -- a breaking change.
+        # The additive `provenance` block alone would not have bumped it.
+        "schema_version": 2,
+        "file": repo_relative_path(layout_path),
         "layers": [[layer, datatype] for layer, datatype in layers],
         "region_um": list(region_um) if region_um is not None else None,
         "cells": list(selected_cells) if selected_cells is not None else None,
@@ -245,6 +251,7 @@ def run_ring_check(
         "status": "broken" if violations else "continuous",
         "violation_count": len(violations),
         "violations": violations,
+        "provenance": build_provenance(input_path=layout_path),
     }
 
 

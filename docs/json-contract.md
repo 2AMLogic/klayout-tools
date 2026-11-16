@@ -569,7 +569,7 @@ and [#2124](https://github.com/2AMLogic/klayout-tools/issues/2124).
 
 Verbs whose verdict depends on the exact tool build, PDK release, and rule
 deck — currently `drc`, `lvs`, `extract`, `sim`, `size`, `precheck`, `erc`,
-`power`, `gen`, and `gen-compose` — emit a shared top-level `provenance`
+`power`, `economy`, `ring-check`, `gen`, and `gen-compose` — emit a shared top-level `provenance`
 block so a
 "clean"/"pass"/"match" result is auditable and reproducible later. Two runs
 made against different deck revisions or PDK releases are otherwise
