@@ -112,7 +112,7 @@ from urllib.parse import quote
 # The cache-miss convention (#2617) has exactly one definition: the check's.
 # Importing it keeps the history and the judged run on the same compute figure.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from check_ci_wall_clock import measure_cache_miss  # noqa: E402
+from check_ci_wall_clock import measure_cache_miss
 
 HISTORY_SCHEMA_VERSION = 1
 DEFAULT_BUDGET_FILE = (

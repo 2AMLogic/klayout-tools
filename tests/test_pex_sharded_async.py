@@ -17,7 +17,7 @@ from test_pex import (
 def test_run_pex_hosts_shards_every_leg_on_submit_and_attach(
     tmp_path,
     resistor_layout,
-    monkeypatch,  # noqa: F811
+    monkeypatch,
 ):
     calls: list = []
     _fake_async_sim(monkeypatch, calls, sharded=True)
