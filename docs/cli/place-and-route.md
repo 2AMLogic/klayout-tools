@@ -232,6 +232,15 @@ that test **passed**, not skipped, in this environment.
 real synthesized gf180mcu netlist reaches a routed GDS end-to-end" claim with
 an actual tool run rather than corrected configuration data alone.
 
+> **Superseded revision (historical, `c6d73a3`).** Re-qualified 2026-10-29 under open_pdks `f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7` (ciel 2.6.1), issue #3420:
+> `test_integration_real_openroad_gcd_worked_example_gf180mcu` re-run against
+> the `~/.ciel` `gf180mcuD` tree with the local `openroad` and **passed**
+> (not skipped). The routing metrics above were not re-recorded. The
+> sky130 met1 minimum-area margin cited further below (issue #2139
+> reproducer, `c6d73a35`) was **not** re-run: it needs that specific
+> OpenROAD build and the 48-stage reproducer, and remains a c6d73a3
+> measurement.
+
 Two things that run surfaced, both of which a stubbed test could not have
 caught:
 

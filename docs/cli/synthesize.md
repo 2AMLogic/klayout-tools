@@ -73,6 +73,24 @@ binding for Yosys the way `klayout.db` already is for `klt lvs`/`klt
 extract`. Requires a `yosys` binary on `$PATH`; a missing binary is a clear,
 actionable error (exit 1), never a traceback.
 
+**Pinned child environment: `COLUMNS`.** klt spawns Yosys with an explicit
+environment that is a copy of its own with `COLUMNS` pinned to `4096`
+(issue #5780). Yosys drives `yosys-abc` as an interactive REPL over pipes
+and synchronizes on abc echoing the `source <tmpdir>/…/abc.script` command
+line; because that echo goes through readline with stdout a pipe (no
+window size to query), it falls back to 80 columns. When the echoed line's
+width — `len($TMPDIR) + 43` — reaches column 79 (i.e. `$TMPDIR` is 36+
+characters), readline wraps the echo: it arrives as a prompt, a carriage
+return, and only the tail of the path, with no `source ` token. Yosys's
+handshake then never arms and both processes block until the run's
+`yosys_timeout_s` watchdog kills it with a bare "did not complete within
+Ns" — the run log's last line is
+``2.22.1. Extracting gate netlist of module `…' to `<abc-temp-dir>/input.blif'.``.
+The pin removes the length sensitivity entirely (mapping results are
+unchanged); an inherited `COLUMNS=80` from an interactive shell is
+overridden for the child, everything else (`PATH`, `TMPDIR`, PDK vars) is
+inherited unchanged.
+
 **Which `yosys` matters.** If the `yosys` resolved from `$PATH` is a YoWASP
 (WASI-sandboxed) build — e.g. `yowasp-yosys`, commonly pulled in by `pip
 install --user` and installed to `~/.local/bin/yosys`, shadowing a native
