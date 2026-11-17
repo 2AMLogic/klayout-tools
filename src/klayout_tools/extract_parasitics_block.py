@@ -299,6 +299,18 @@ def build_parasitics_report(
             if _selects_critical(net_selectors)
             else (list(critical_nets) if critical_nets else [])
         )
+        # Additive field (issue #5742): machine-readable capability signal
+        # for the `--critical-net` lateral coupling pass -- "computed" when
+        # the deck curates a `metal_sidewalls` coefficient, "unmodelled"
+        # when it curates none, `null` when no critical-net selection was
+        # requested (requested-ness, not matched-ness; full contract in
+        # docs/cli/extract.md). Same `any(...)` predicate as the warning
+        # below, which only fires for a resolved critical set.
+        parasitics_report["lateral_coupling"] = (
+            ("computed" if any(parasitics_deck.metal_sidewalls) else "unmodelled")
+            if (_selects_critical(net_selectors) or bool(critical_nets))
+            else None
+        )
         # Additive field (issue #1700): echoes the `--parasitics-net` request
         # back verbatim (as given, not sorted/deduplicated) -- `[]` when the
         # flag was never given. Without it a scoped run's deliberately-short

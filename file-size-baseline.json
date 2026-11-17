@@ -225,7 +225,7 @@
     },
     {
       "path": "src/klayout_tools/decks/gf180mcu.py",
-      "lines": 4030
+      "lines": 3877
     },
     {
       "path": "src/klayout_tools/decks/history.py",
@@ -457,7 +457,7 @@
     },
     {
       "path": "src/klayout_tools/netlist.py",
-      "lines": 1066
+      "lines": 1054
     },
     {
       "path": "src/klayout_tools/netlist_batch.py",
@@ -505,11 +505,11 @@
     },
     {
       "path": "src/klayout_tools/place_and_route.py",
-      "lines": 3352
+      "lines": 3349
     },
     {
       "path": "src/klayout_tools/place_and_route_batch.py",
-      "lines": 682
+      "lines": 677
     },
     {
       "path": "src/klayout_tools/place_and_route_gds_merge.py",
@@ -533,7 +533,7 @@
     },
     {
       "path": "src/klayout_tools/post_route_sta.py",
-      "lines": 4651
+      "lines": 4611
     },
     {
       "path": "src/klayout_tools/power.py",
@@ -557,7 +557,7 @@
     },
     {
       "path": "src/klayout_tools/remote_launcher.py",
-      "lines": 1789
+      "lines": 1787
     },
     {
       "path": "src/klayout_tools/remote_transport.py",
@@ -577,7 +577,7 @@
     },
     {
       "path": "src/klayout_tools/signoff_attest.py",
-      "lines": 1168
+      "lines": 1152
     },
     {
       "path": "src/klayout_tools/signoff_generator_batch.py",
@@ -845,7 +845,7 @@
     },
     {
       "path": "tests/test_extract.py",
-      "lines": 26734
+      "lines": 26719
     },
     {
       "path": "tests/test_extract_resistance_graph.py",
@@ -993,7 +993,7 @@
     },
     {
       "path": "tests/test_place_and_route_batch.py",
-      "lines": 613
+      "lines": 605
     },
     {
       "path": "tests/test_place_and_route_min_area.py",
@@ -1045,7 +1045,7 @@
     },
     {
       "path": "tests/test_signoff.py",
-      "lines": 18337
+      "lines": 18303
     },
     {
       "path": "tests/test_signoff_generator_batch.py",
