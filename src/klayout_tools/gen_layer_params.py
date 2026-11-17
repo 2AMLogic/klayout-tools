@@ -1872,6 +1872,27 @@ def _voltage_flavor_mark_layer(family: str, voltage_flavor: str) -> Any:
     return kdb.LayerInfo(*pair) if pair is not None else None
 
 
+def _voltage_flavor_layer_params(family: str, voltage_flavor: str) -> dict[str, Any]:
+    """Hidden ``voltage_flavor_mark_*``/``voltage_flavor_extra_mark_*`` params
+    for ``voltage_flavor`` (``""`` or an unresolved name: ``present=False``)."""
+    import klayout.db as kdb
+
+    mark, extra = (
+        (
+            _voltage_flavor_mark_layer(family, voltage_flavor),
+            _voltage_flavor_extra_mark_layer(family, voltage_flavor),
+        )
+        if voltage_flavor
+        else (None, None)
+    )
+    return {
+        "voltage_flavor_mark_layer": mark or kdb.LayerInfo(0, 0),
+        "voltage_flavor_mark_present": mark is not None,
+        "voltage_flavor_extra_mark_layer": extra or kdb.LayerInfo(0, 0),
+        "voltage_flavor_extra_mark_present": extra is not None,
+    }
+
+
 #: Per-PDK-family MOS-capacitor marker layer drawn over a ``mos_array`` built
 #: with ``params.mos_cap`` (issue #3283): the layer that lets a deck recognise
 #: the gate-over-diffusion structure as a capacitor rather than a transistor.
@@ -2021,11 +2042,6 @@ def _device_layer_params(
     voltage_flavor_mark = (
         _voltage_flavor_mark_layer(family, voltage_flavor) if voltage_flavor else None
     )
-    voltage_flavor_extra_mark = (
-        _voltage_flavor_extra_mark_layer(family, voltage_flavor)
-        if voltage_flavor
-        else None
-    )
     if (family, voltage_flavor) in _NFET_ONLY_VOLTAGE_FLAVORS and (
         params.get("flavor", "nfet") != "nfet"
     ):
@@ -2091,18 +2107,7 @@ def _device_layer_params(
             metal_label if metal_label is not None else kdb.LayerInfo(0, 0)
         ),
         "metal_label_present": metal_label is not None,
-        "voltage_flavor_mark_layer": (
-            voltage_flavor_mark
-            if voltage_flavor_mark is not None
-            else kdb.LayerInfo(0, 0)
-        ),
-        "voltage_flavor_mark_present": voltage_flavor_mark is not None,
-        "voltage_flavor_extra_mark_layer": (
-            voltage_flavor_extra_mark
-            if voltage_flavor_extra_mark is not None
-            else kdb.LayerInfo(0, 0)
-        ),
-        "voltage_flavor_extra_mark_present": voltage_flavor_extra_mark is not None,
+        **_voltage_flavor_layer_params(family, voltage_flavor),
         "voltage_flavor_mark_margin_um": _voltage_flavor_mark_margin_um(family),
         "gate_pad_clearance_um": _gate_pad_clearance_um(family),
         "contact_gate_offset_um": _contact_gate_extra_offset_um(family),
@@ -2523,7 +2528,15 @@ def _ring_layer_params(
     else:
         well_tie = well is not None and params.get("flavor") == "pfet"
     ring_implant = _ring_tap_implant_layer(family, well_tie)
+    # Issue #6025: `guard_ring`'s own optional `voltage_flavor` marker over
+    # its well tie (`diff_pair`/`mos_array` already resolve theirs).
+    flavor_params = (
+        _voltage_flavor_layer_params(family, params.get("voltage_flavor", ""))
+        if generator_name == "guard_ring"
+        else {}
+    )
     return {
+        **flavor_params,
         "tap_layer": _role_layer_info(family, "tap"),
         "contact_layer": _role_layer_info(family, "contact"),
         "mfg_grid_um": mfg_grid_um(family, _PDK_ROLE_LAYERS[family].get("contact")),
@@ -2788,27 +2801,8 @@ def _esd_device_layer_params(
     # Optional `voltage_flavor` marker (issue #4299), resolved exactly like
     # `_device_layer_params` does for `mos_array`.
     voltage_flavor = params.get("voltage_flavor", "")
-    voltage_flavor_mark = (
-        _voltage_flavor_mark_layer(family, voltage_flavor) if voltage_flavor else None
-    )
-    voltage_flavor_extra_mark = (
-        _voltage_flavor_extra_mark_layer(family, voltage_flavor)
-        if voltage_flavor
-        else None
-    )
     return {
-        "voltage_flavor_mark_layer": (
-            voltage_flavor_mark
-            if voltage_flavor_mark is not None
-            else kdb.LayerInfo(0, 0)
-        ),
-        "voltage_flavor_mark_present": voltage_flavor_mark is not None,
-        "voltage_flavor_extra_mark_layer": (
-            voltage_flavor_extra_mark
-            if voltage_flavor_extra_mark is not None
-            else kdb.LayerInfo(0, 0)
-        ),
-        "voltage_flavor_extra_mark_present": voltage_flavor_extra_mark is not None,
+        **_voltage_flavor_layer_params(family, voltage_flavor),
         "voltage_flavor_mark_margin_um": _voltage_flavor_mark_margin_um(family),
         "active_layer": _role_layer_info(family, "active"),
         "poly_layer": _role_layer_info(family, "poly"),

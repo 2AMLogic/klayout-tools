@@ -282,6 +282,31 @@ def declare_voltage_flavor_mark_params(pcell: Any, kdb: Any) -> None:
     )
 
 
+def declare_guard_ring_voltage_flavor_params(pcell: Any, kdb: Any) -> None:
+    """Declare ``guard_ring``'s optional ``voltage_flavor`` marker (issue
+    #6025): the request param, its harness-resolved layer and the shared
+    ``*_present`` flags. The marker covers the ring's well tie."""
+    pcell.param(
+        "voltage_flavor",
+        pcell.TypeString,
+        "Optional medium-voltage/thick-oxide device-class marker drawn "
+        "over the ring's well tie (needs add_well on a PDK family that "
+        "checks a well): '' (default, no marker) or a name the resolved "
+        "PDK family's role-layer table recognises (e.g. 'hvi' on "
+        "sky130). A name the family doesn't recognise draws nothing and "
+        "is reported via drc_hints.notes, never silently dropped",
+        default="",
+    )
+    pcell.param(
+        "voltage_flavor_mark_layer",
+        pcell.TypeLayer,
+        "Harness-resolved marker layer for params.voltage_flavor "
+        "(only used when voltage_flavor_mark_present)",
+        default=kdb.LayerInfo(0, 0),
+    )
+    declare_voltage_flavor_mark_params(pcell, kdb)
+
+
 def declare_dummy_marker_params(pcell: Any) -> None:
     """Declare ``dummy_present``, the harness-computed flag for the PDK's
     dummy-device marker layer (``ExtractionDeck.dummy``). The
@@ -316,4 +341,19 @@ def declare_vpp_gds_path(pcell: Any) -> None:
         pcell.TypeString,
         "Resolved PDK GDS holding the cell (harness-computed)",
         default="",
+    )
+
+
+def union_box(
+    box: tuple[float, float, float, float],
+    other: tuple[float, float, float, float] | None,
+) -> tuple[float, float, float, float]:
+    """Bounding box of ``box`` and ``other`` (``other=None`` returns ``box``)."""
+    if other is None:
+        return box
+    return (
+        min(box[0], other[0]),
+        min(box[1], other[1]),
+        max(box[2], other[2]),
+        max(box[3], other[3]),
     )

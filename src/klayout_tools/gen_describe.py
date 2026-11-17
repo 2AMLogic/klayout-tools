@@ -87,9 +87,9 @@ from .gen_layer_params import (
     _role_layer_info,
     _sd_implant_margin_um,
     _tap_pads_wanted,
-    _voltage_flavor_mark_layer,
     mfg_grid_um,
 )
+from .gen_voltage_flavor import _voltage_flavor_hints
 
 
 def _resistor_strip_validate(params: dict[str, Any]) -> None:
@@ -416,32 +416,6 @@ def _mos_array_validate(params: dict[str, Any]) -> None:
         inner_w_um,
         inner_h_um,
     )
-
-
-def _voltage_flavor_hints(
-    family: str, params: dict[str, Any], notes: list[str]
-) -> dict[str, Any]:
-    """``drc_hints`` fields for the optional ``voltage_flavor`` marker (issue
-    #1054), shared by :func:`_mos_array_describe`/:func:`_diff_pair_describe`:
-    echoes the requested flavour (``None`` when omitted) and whether a real
-    marker layer was resolved for it, appending an explanatory entry to
-    ``notes`` (in place) when a non-empty request resolved to no layer --
-    mirrors ``esd_device``'s own ``esd_mark``/``salicide_block`` "notes it,
-    never silently drops it" precedent rather than rejecting the request."""
-    voltage_flavor = params["voltage_flavor"]
-    mark_present = False
-    if voltage_flavor:
-        mark_present = _voltage_flavor_mark_layer(family, voltage_flavor) is not None
-        if not mark_present:
-            notes.append(
-                f"params.voltage_flavor '{voltage_flavor}' has no marker layer "
-                f"resolved for the resolved PDK family ('{family}') -- no marker "
-                "was drawn"
-            )
-    return {
-        "voltage_flavor": voltage_flavor or None,
-        "voltage_flavor_mark_present": mark_present,
-    }
 
 
 def _sd_implant_hints(
@@ -1934,6 +1908,9 @@ def _guard_ring_describe(
             "no well layer checked by its curated DRC deck -- no well shape was drawn"
         )
 
+    voltage_flavor_hints = _voltage_flavor_hints(
+        family, params, notes, params["add_well"] and well_supported
+    )
     snapped = _grid_snapped(
         dbu,
         params["inner_width_um"],
@@ -1952,6 +1929,7 @@ def _guard_ring_describe(
             "matched_group_id": None,
             "snapped_to_grid": snapped,
             "notes": notes,
+            **voltage_flavor_hints,
         },
         "warnings": (
             ["one or more dimensions were rounded to the technology grid"]

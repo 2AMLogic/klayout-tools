@@ -369,11 +369,11 @@
     },
     {
       "path": "src/klayout_tools/gen_describe.py",
-      "lines": 3206
+      "lines": 3184
     },
     {
       "path": "src/klayout_tools/gen_layer_params.py",
-      "lines": 2879
+      "lines": 2873
     },
     {
       "path": "src/klayout_tools/gen_layer_tables.py",
@@ -381,7 +381,7 @@
     },
     {
       "path": "src/klayout_tools/gen_pcells/mos_array.py",
-      "lines": 658
+      "lines": 642
     },
     {
       "path": "src/klayout_tools/kb.py",
