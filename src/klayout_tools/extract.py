@@ -10202,39 +10202,39 @@ def _extract_netlist(
             critical_nets, parasitics_nets = net_selectors.resolve(
                 circuit, deck, critical_nets, parasitics_nets
             )
-        parasitic_nets = _compute_parasitics(
-            l2n,
-            circuit,
-            layout.dbu,
-            deck,
-            parasitics_deck,
-            layer_index,
-            metal_index,
-            layout=layout,
-            top_cell=top_cell,
-            critical_nets=critical_nets,
-            parasitics_nets=parasitics_nets,
-            parasitics_top_cell_only=parasitics_top_cell_only,
-            resistance_graph=resistance_graph,
-            resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
-            # Per-fragment square counting (issue #2359): `via_index` lets
-            # the parasitics pass read each net's own via landings back
-            # through `polygons_of_net`, so it can tell where current enters
-            # and leaves a conductor fragment. The device-interface half of
-            # that question is answered from the *drawn* layers, which
-            # `_compute_parasitics` re-reads off `layout`/`top_cell` itself
-            # -- deliberately not from this function's `poly`/`active`
-            # locals, which by this point have had the recognised device
-            # geometry (resistor bodies, gates) cut out of them and so no
-            # longer show where a conductor abuts a device at all.
-            via_index=via_index,
-            # Issue #3021: recognised MiM top-plate footprints, so the
-            # vertical-overlap pass does not charge coupling on top of the
-            # device's own capacitance inside them.
-            capacitor_top_regions=_recognised_capacitor_top_regions(
-                layout, top_cell, deck
-            ),
-        )
+        with stage("parasitics_compute"):
+            parasitic_nets = _compute_parasitics(
+                l2n,
+                circuit,
+                layout.dbu,
+                deck,
+                parasitics_deck,
+                layer_index,
+                metal_index,
+                layout=layout,
+                top_cell=top_cell,
+                critical_nets=critical_nets,
+                parasitics_nets=parasitics_nets,
+                parasitics_top_cell_only=parasitics_top_cell_only,
+                resistance_graph=resistance_graph,
+                resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
+                # Per-fragment square counting (issue #2359): `via_index` lets
+                # the parasitics pass read each net's own via landings back
+                # through `polygons_of_net`, so it can tell where current enters
+                # and leaves a conductor fragment. The device-interface half is
+                # answered from the *drawn* layers, which `_compute_parasitics`
+                # re-reads off `layout`/`top_cell` itself -- deliberately not
+                # from this function's `poly`/`active` locals, whose recognised
+                # device geometry (resistor bodies, gates) is already cut out,
+                # so they no longer show where a conductor abuts a device.
+                via_index=via_index,
+                # Issue #3021: recognised MiM top-plate footprints, so the
+                # vertical-overlap pass does not charge coupling on top of the
+                # device's own capacitance inside them.
+                capacitor_top_regions=_recognised_capacitor_top_regions(
+                    layout, top_cell, deck
+                ),
+            )
         # `klt extract --mom-net <net>` (issue #798): computed here, not in
         # `run_extract`, for the same "`l2n` must still be alive" reason as
         # `parasitic_nets` immediately above -- `polygons_of_net` is a live

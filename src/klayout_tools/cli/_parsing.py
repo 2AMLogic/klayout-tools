@@ -60,7 +60,7 @@ def load_json_path_or_inline(
         try:
             with open(value, encoding="utf-8") as handle:
                 data = json.load(handle)
-        except OSError as exc:
+        except (OSError, UnicodeDecodeError) as exc:
             raise error_cls(f"could not read {flag} file '{value}': {exc}") from exc
         except json.JSONDecodeError as exc:
             raise error_cls(f"{flag} file '{value}' is not valid JSON: {exc}") from exc

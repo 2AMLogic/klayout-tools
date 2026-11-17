@@ -20,7 +20,7 @@ import bisect
 import math
 from typing import Any
 
-from ._jsonnum import is_number
+from ._jsonnum import is_finite_number
 from .sim_errors import SimError
 
 #: Slack, as a fraction of the analysis window, when checking that a requested
@@ -75,7 +75,7 @@ def window_bound(
     if raw is None:
         return None
     seconds: float | None = None
-    if is_number(raw):
+    if is_finite_number(raw):
         seconds = float(raw)
     elif isinstance(raw, str):
         seconds = _parse_spice_seconds(raw)

@@ -3043,6 +3043,18 @@ edge grids. Measured result: zero `V4.M5.AUX.2`, `M4.AUX.1`, `M4.AUX.2`,
 `M4.W.3`, `M5.AUX.1`, `M6.AUX.1`. **Not deck-clean:** the tech LEF's wide
 `V4` bar has zero `M4` enclosure, so `V4.M4.EN.1` (~370) and `V4.M5.EN.2`
 (~13) remain, plus 1-2 `M5.W.3`; no existing request field changes that.
+At block scale `M3.S.2` is a further known residual (issue #6030): ~15
+markers per ~10^3 `M2`->`M5` crossings, measured at klayout-tools 0.9.2 (a
+count that scales with block size, not a fixed number). They sit on
+`pdngen`'s own `M2`->`M5` stub patches, not on router metal, where two stack
+stubs can land closer than the deck's 25 nm tip-to-side `M3` spacing
+(`M3.S.2`, Table 3.12.1); they are report-only.
+No `power.connects[]` field moves them: `max_columns` is already minimal and
+is across-track, `ongrid {M3 M4}` is the recipe's purpose (dropping it
+re-introduces the families above), `split_cuts` is measured DRC-dirty on
+gf180mcu (issue #4301), and the stub patch shape comes from the tech LEF.
+This is an upstream
+OpenROAD `pdngen` limitation; the preset is unchanged here.
 `pdngen` offsets are core-origin relative: the edge-grid result was measured
 with core origin 0.96 um, and other origins can leave `M5.AUX.1`/`M6.AUX.1`
 hits (adjust `power.straps` explicitly in that case).
@@ -3485,13 +3497,23 @@ being reported, a changed `provenance.input.content_hash`.
 
 Excluded from the diff: `provenance.klt_version`/`klt_git_commit`/`klt_reinstall_spec`/`klayout_version`/
 `pdk.version` and `engine_version` (an OpenROAD upgrade that leaves the result
-untouched is tool churn, not evidence drift), plus the whole `engine_logs[]`
-block — every entry is keyed by a fresh `uuid4` `invocation_id` with its
-retained log directory named after it, so leaving it in would make `--rerun`
-report `"drifted"` unconditionally. The output artifact paths
-(`def_path`/`gds_path`/`verilog_path`) are **not** excluded: this verb writes
-to a fixed `.klt/place-and-route/` directory, so they are stable across
-re-runs from the same request and a change in one is real drift.
+untouched is tool churn, not evidence drift), `provenance.pdk.source` (*how*
+the PDK was resolved — search roots vs `$PDK_ROOT` vs `--pdk-root`; the
+identical install resolved through a different mechanism on another host is
+not drift, issue #5863), plus the whole `engine_logs[]` block — every entry
+is keyed by a fresh `uuid4` `invocation_id` with its retained log directory
+named after it, so leaving it in would make `--rerun` report `"drifted"`
+unconditionally. The output artifact paths (`def_path`/`gds_path`/
+`verilog_path` and the other path-bearing fields) are **not** excluded — but
+they are compared by **file name only**, on both sides (issue #5863): a
+committed report is lint-clean, so a consumer has scrubbed its paths
+repo-relative or to `~/`-form (`env-provenance lint-envelope` requires
+exactly that), while the fresh side echoes absolute host paths; the directory
+is host- and scrub-shape-specific and never verdict-bearing. The file name
+keeps the identity check — this verb writes to a fixed `.klt/place-and-route/`
+directory under names derived from the top module, so a renamed artifact, or
+one going `null` ↔ path (missing or newly appearing), still reports
+`"drifted"`.
 
 **`--rerun` overwrites this request's own artifacts.** Unlike `klt
 synthesize`'s retained per-`run_id` directories, the output directory is

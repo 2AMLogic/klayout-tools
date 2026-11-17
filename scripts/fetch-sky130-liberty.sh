@@ -34,6 +34,9 @@
 
 set -euo pipefail
 
+# shellcheck source=scripts/_install_common.sh
+source "$(dirname "${BASH_SOURCE[0]}")/_install_common.sh"
+
 # Pinned upstream release -- bump this tag, the asset checksum below, and
 # CHANGELOG.md together in the same change if this is ever refreshed. Fails
 # closed on checksum mismatch, same discipline as fetch-pdks.sh/
@@ -69,17 +72,6 @@ if [[ -f "$MARKER" && $FORCE -eq 0 ]]; then
     fi
 fi
 
-sha256_of() {
-    if command -v shasum &>/dev/null; then
-        shasum -a 256 "$1" | awk '{print $1}'
-    elif command -v sha256sum &>/dev/null; then
-        sha256sum "$1" | awk '{print $1}'
-    else
-        echo "error: no sha256 command found (need shasum or sha256sum)" >&2
-        return 1
-    fi
-}
-
 if ! command -v zstd &>/dev/null && ! command -v unzstd &>/dev/null; then
     echo "error: zstd (or unzstd) is required to unpack $ASSET_URL" >&2
     echo "  Ubuntu/Debian: sudo apt-get install -y zstd" >&2
@@ -91,19 +83,7 @@ tmp_tarball="$(mktemp)"
 extract_dir="$(mktemp -d)"
 trap 'rm -f "$tmp_tarball"; rm -rf "$extract_dir"' EXIT
 
-echo "Fetching $ASSET_URL ..."
-if ! curl -fsL --retry 3 -o "$tmp_tarball" "$ASSET_URL"; then
-    echo "error: failed to fetch $ASSET_URL" >&2
-    exit 1
-fi
-
-actual_sha256="$(sha256_of "$tmp_tarball")"
-if [[ "$actual_sha256" != "$ASSET_SHA256" ]]; then
-    echo "error: checksum mismatch for $ASSET_URL" >&2
-    echo "  expected: $ASSET_SHA256" >&2
-    echo "  actual:   $actual_sha256" >&2
-    exit 1
-fi
+fetch_and_verify "$ASSET_URL" "$ASSET_SHA256" "$tmp_tarball"
 
 # `tar`, given a single named member, exits as soon as it has extracted it
 # without draining the rest of the (large, ~700 MB decompressed) stream --
