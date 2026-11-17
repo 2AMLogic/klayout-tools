@@ -3915,6 +3915,10 @@ def _run_sim_corners(
     # Issues #3159/#3161: `analysis.passes` / `measurements[].tian` are gated
     # the same way (the `dual_injection` mandatory runner feature).
 
+    # Hoisted above the probe (issue #6047): it takes the corners' pinned init.
+    effective_threads = _effective_threads_per_worker(
+        threads_per_worker, backend, max_workers, len(dispatch_points)
+    )
     # Two-pass fail-fast probe (issue #1694, opt-in via `fail_fast_probe`/
     # `options.fail_fast_probe`): run once per grid, before any real corner
     # is dispatched -- not per backend/shard/host, and not for `remote`/
@@ -3939,7 +3943,9 @@ def _run_sim_corners(
             artifacts_dir=artifacts_dir,
             keep_artifacts=keep_artifacts,
             ngspice_binary=ngspice_binary,
-            ngspice_init=ngspice_init_lines,
+            ngspice_init=_with_thread_pin(
+                ngspice_init_lines, effective_threads, engine
+            ),
             osdi_preload=osdi_preload,
             save_mode=save_mode,
             ngspice_options=ngspice_options,
@@ -4010,9 +4016,6 @@ def _run_sim_corners(
         models_lib=models_lib,
         corner_points=corner_points,
         osdi_preload=osdi_preload,
-    )
-    effective_threads = _effective_threads_per_worker(
-        threads_per_worker, backend, max_workers, len(dispatch_points)
     )
     ngspice_init_env = sim_spiceinit.record(  # Issue #5648
         ngspice_init_lines, effective_threads, engine, backend in _OFFHOST_BACKENDS
@@ -10577,16 +10580,13 @@ def _run_calibration_probe(
     misconfiguration surfaces at the (cheap) probe stage rather than only
     after every real corner is dispatched.
 
-    ``ngspice_init`` (issue #2520, the already-validated
-    ``options.ngspice_init`` lines -- see :func:`_validate_ngspice_init`) is
-    materialized as ``probe_dir/.spiceinit`` the same way :func:`_run_corner`
-    does for a real corner, and the probe's own ``subprocess.run`` call
-    passes ``cwd=probe_dir`` so it is actually read. The probe otherwise
-    runs the same compatibility mode a real corner would, and this issue's
-    other half (the missing ``cwd=``) applied here too -- without it, the
-    probe's own convergence behaviour (and thus its rate estimate) would
-    silently diverge from the real corners it is meant to be representative
-    of whenever a caller sets ``options.ngspice_init``.
+    ``ngspice_init`` (issues #2520, #6047) is the init-file lines the real
+    corners get, thread pin included (:func:`_with_thread_pin`; a run-dir
+    ``.spiceinit`` replaces ``$HOME``'s). It is materialized as
+    ``probe_dir/.spiceinit`` and the probe's ``subprocess.run`` passes
+    ``cwd=probe_dir`` so it is read -- otherwise the probe's convergence
+    behaviour (and rate estimate) would diverge from the corners it is meant
+    to be representative of.
     """
     probe_dir = (
         os.path.join(artifacts_dir, f"{point.slug}__probe")

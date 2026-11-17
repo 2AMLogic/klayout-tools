@@ -17,6 +17,7 @@ import pytest
 
 from helpers.snm_oracle import brute_force_eye, tanh_inverter
 from helpers.subprocess_fakes import fake_completed
+from helpers.tool_probes import SKIP_NO_NGSPICE
 from klayout_tools import _paths as paths_module
 from klayout_tools import sim, sim_batch, sim_snm_meas
 
@@ -317,7 +318,7 @@ def test_unique_triple_is_computed_once(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.skipif(shutil.which("ngspice") is None, reason="ngspice not installed")
+@SKIP_NO_NGSPICE
 def test_real_ngspice_behavioural_inverters_match_the_geometric_search(tmp_path):
     specs = [
         {**_DECL, "limits": {"min": 0.1, "max": 1.0}},
