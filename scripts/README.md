@@ -17,6 +17,7 @@ scripts/
   fetch-cell-netlists.sh         # pinned, checksum-verified fetch of real gallery-cell SPICE netlists/models
   fetch-sky130-liberty.sh        # pinned, checksum-verified fetch of the real sky130_fd_sc_hd liberty klt synthesize needs
   install-yosys.sh               # build + install a pinned, checksum-verified Yosys from source (CI provisioning)
+  install-xschem.sh              # install the fleet-pinned xschem from this repo's public release asset, sha256-verified before unpack; self-contained for chip-CI copy (#6219)
   install-sv2v.sh                # install the pinned, checksum-verified sv2v release binary `klt synthesize`'s sv2v front end shells out to (CI provisioning, #5956)
   install-icarus-verilog.sh      # build + install a pinned, checksum-verified Icarus Verilog from source (CI provisioning)
   install-verilator.sh           # build + install a pinned, checksum-verified Verilator from source (CI provisioning)
@@ -144,6 +145,20 @@ upstream release's prebuilt, checksum-verified `sv2v-Linux.zip` binary
 ```
 scripts/install-sv2v.sh
 uv run pytest tests/test_synthesize_netlist_normalize.py -rs
+```
+
+## `install-xschem.sh`
+
+Credential-free install of the fleet's pinned xschem (issue #6219, fleet rule
+2am#7275): downloads the public `xschem-<tag>` release asset built by
+`.github/workflows/publish-xschem-asset.yml`, checks it against
+`tools.xschem.sha256` in `docker/eda-sim/pdk-versions.json` **before**
+unpacking, and installs a relocatable wrapper. Self-contained so chip CI can
+copy the single file. See `docker/eda-sim/README.md` for the full route.
+
+```
+scripts/install-xschem.sh [--force]
+uv run pytest tests/test_xschem_release_asset.py
 ```
 
 ## `install-icarus-verilog.sh` / `install-verilator.sh`

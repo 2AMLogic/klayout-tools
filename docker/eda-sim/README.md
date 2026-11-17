@@ -220,6 +220,41 @@ Each architecture is built and smoke-tested on **native** hardware
 compiles ngspice and xschem from source, which under arm64 emulation is a
 30-minutes-plus proposition that routinely trips job timeouts.
 
+## Installing the pinned xschem without Docker (chip CI)
+
+Issue #6219 (fleet rule 2am#7275): `tools.xschem` is the fleet's master xschem
+pin, and chip CI installs that exact build **credential-free** from a public
+release asset of this repo -- not from the batch image's private S3 artifact.
+
+| | |
+|---|---|
+| release | `xschem-3.4.7` (`tools.xschem.release_tag`; deliberately not `v*`, which would trigger the PyPI publish workflow) |
+| asset | `xschem-3.4.7-noble-x86_64.tar.gz` (`tools.xschem.asset`), Ubuntu 24.04 x86_64 |
+| integrity | `tools.xschem.sha256`, verified **before** unpacking |
+| built by | `.github/workflows/publish-xschem-asset.yml` (`workflow_dispatch`; same recipe as the Dockerfile's stage-1 xschem block, fails if the tag resolves to anything but the pinned commit) |
+
+Copy [`scripts/install-xschem.sh`](../../scripts/install-xschem.sh) into the chip
+repo (it is self-contained; needs `curl`, `jq`, `tar`) and run it:
+
+```bash
+scripts/install-xschem.sh                 # -> ~/.cache/xschem-3.4.7
+export PATH="$HOME/.cache/xschem-3.4.7/bin:$PATH"
+xschem --version                          # XSCHEM V3.4.7
+xschem -q -n -x -o out/ top.sch           # headless netlist
+```
+
+The script reads the pin from this repo's manifest (the local copy when run
+inside this repo, else `main`'s; override with `XSCHEM_MANIFEST`), fails closed
+if `sha256` is absent or mismatches, and installs `bin/xschem` as a wrapper that
+exports `XSCHEM_SHAREDIR`, so the tree is relocatable even though it was built
+with `--prefix=/opt/eda/xschem`. Runtime libraries on a bare runner: `libcairo2
+libx11-6 libxcb1 libxpm4 libxrender1 tcl tk`.
+
+**Publishing / re-pinning** is two steps because the sha256 is the hash of the
+uploaded bytes: run the workflow, then copy the sha256 from its job summary into
+`tools.xschem.sha256`. The tarball is not bit-reproducible, so a re-dispatch
+changes the sha256.
+
 ## Known gap
 
 Issue #509's acceptance criteria include *"one real sim from a gf180 repo runs

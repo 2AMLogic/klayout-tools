@@ -117,11 +117,20 @@
       "tag": "3.4.7",
       "commit": "92dd8fe5f4d5c1057489710d8a22f18fdc9d7ed0",
       "repo": "https://github.com/StefanSchippers/xschem",
+      "asset": "xschem-3.4.7-noble-x86_64.tar.gz",
+      "release_tag": "xschem-3.4.7",
       "_comment": [
         "Same pin 2AMLogic/gf180-sar-adc's sim/toolchain.json carries. Tag ->",
         "commit re-verified live against the upstream GitHub API on 2026-09-09:",
         "refs/tags/3.4.7 is an annotated tag (3851bc5a...) dereferencing to",
-        "92dd8fe5f4d5c1057489710d8a22f18fdc9d7ed0."
+        "92dd8fe5f4d5c1057489710d8a22f18fdc9d7ed0.",
+        "",
+        "`asset` / `release_tag` / `sha256` (issue #6219) name the PUBLIC release",
+        "asset chip CI installs credential-free via scripts/install-xschem.sh;",
+        ".github/workflows/publish-xschem-asset.yml builds and uploads it. `sha256`",
+        "is the hash of the uploaded bytes, so it is recorded AFTER the first",
+        "publish run (the job summary prints it). `release_tag` must not start with",
+        "`v` -- that namespace triggers the PyPI publish workflow."
       ]
     },
     "ciel": {

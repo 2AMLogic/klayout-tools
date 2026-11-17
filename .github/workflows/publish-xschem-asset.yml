@@ -1,0 +1,187 @@
+name: Publish pinned xschem release asset
+
+# Issue #6219 (fleet rule: 2AMLogic/2am#7275). `docker/eda-sim/pdk-versions.json`
+# `tools.xschem` is the fleet's master xschem pin. Chip CI installs that exact
+# build CREDENTIAL-FREE: this workflow builds it (same recipe as the eda-sim
+# Dockerfile's stage-1 xschem block) and attaches it to a PUBLIC release of this
+# repo; `scripts/install-xschem.sh` downloads it and verifies the sha256
+# recorded beside the pin.
+#
+# Manual only (`workflow_dispatch`). Two-step by necessity: the sha256 is the
+# hash of the uploaded bytes, so it exists only after the first run. Run this,
+# copy the sha256 from the job summary into `tools.xschem.sha256`, commit.
+# Re-dispatching replaces the asset (`--clobber`) and the sha256 changes with
+# it -- the tarball is deliberately not bit-reproducible.
+#
+# Tag namespace: the release tag is `xschem-<tag>`. It must NOT start with `v`
+# (`publish.yml` publishes to PyPI on `v*`, `release.yml` owns `vX.Y.Z`) nor
+# match `klt-*-native-v*` (`publish-native.yml`). tests/test_eda_sim_image.py
+# asserts this.
+#
+# Every pin is read from the manifest with jq; nothing is restated here.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write # create the release + upload the asset
+
+concurrency:
+  group: publish-xschem-asset
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Build and publish xschem asset
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Read pins from the manifest
+        id: pins
+        run: |
+          set -euo pipefail
+          m=docker/eda-sim/pdk-versions.json
+          {
+            echo "tag=$(jq -er '.tools.xschem.tag' "$m")"
+            echo "commit=$(jq -er '.tools.xschem.commit' "$m")"
+            echo "repo=$(jq -er '.tools.xschem.repo' "$m")"
+            echo "asset=$(jq -er '.tools.xschem.asset' "$m")"
+            echo "release_tag=$(jq -er '.tools.xschem.release_tag' "$m")"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Guard the release tag namespace
+        env:
+          RELEASE_TAG: ${{ steps.pins.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          case "$RELEASE_TAG" in
+            v* | klt-*-native-v*)
+              echo "::error::release tag '$RELEASE_TAG' would trigger publish.yml / publish-native.yml"
+              exit 1;;
+          esac
+
+      - name: Install build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential git bison flex libcairo2-dev libx11-dev libxcb1-dev \
+            libxpm-dev libxrender-dev tcl-dev tk-dev
+
+      - name: Build xschem at the pinned commit
+        env:
+          XSCHEM_REPO: ${{ steps.pins.outputs.repo }}
+          XSCHEM_TAG: ${{ steps.pins.outputs.tag }}
+          XSCHEM_COMMIT: ${{ steps.pins.outputs.commit }}
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "$XSCHEM_TAG" "$XSCHEM_REPO" "$RUNNER_TEMP/xschem-src"
+          cd "$RUNNER_TEMP/xschem-src"
+          resolved="$(git rev-parse HEAD)"
+          if [[ "$resolved" != "$XSCHEM_COMMIT" ]]; then
+            echo "::error::xschem tag $XSCHEM_TAG resolved to $resolved, pinned to $XSCHEM_COMMIT"
+            exit 1
+          fi
+          # Same prefix as the eda-sim image. The install script wraps the
+          # binary with XSCHEM_SHAREDIR so the unpacked tree is relocatable.
+          ./configure --prefix=/opt/eda/xschem
+          make -j"$(nproc)"
+          sudo make install
+
+      - name: Package the install prefix
+        id: pack
+        env:
+          ASSET: ${{ steps.pins.outputs.asset }}
+          XSCHEM_TAG: ${{ steps.pins.outputs.tag }}
+          XSCHEM_COMMIT: ${{ steps.pins.outputs.commit }}
+        run: |
+          set -euo pipefail
+          printf 'xschem %s (%s)\nbuilt by %s run %s on ubuntu-24.04\n' \
+            "$XSCHEM_TAG" "$XSCHEM_COMMIT" "$GITHUB_WORKFLOW" "$GITHUB_RUN_ID" \
+            | sudo tee /opt/eda/xschem/ARTIFACT-INFO > /dev/null
+          # Archive paths are relative to the prefix (bin/, share/, ...), so
+          # the consumer chooses where to unpack.
+          tar -C /opt/eda/xschem -czf "$RUNNER_TEMP/$ASSET" .
+          sha256="$(sha256sum "$RUNNER_TEMP/$ASSET" | awk '{print $1}')"
+          echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke-test the packaged asset before publishing it
+        env:
+          ASSET: ${{ steps.pins.outputs.asset }}
+          XSCHEM_TAG: ${{ steps.pins.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # Unpack at a DIFFERENT prefix than the build prefix to prove the
+          # relocation claim, and take the real binary off the build tree.
+          sudo rm -rf /opt/eda/xschem
+          dest="$RUNNER_TEMP/relocated"
+          mkdir -p "$dest"
+          tar -C "$dest" -xzf "$RUNNER_TEMP/$ASSET"
+          export XSCHEM_SHAREDIR="$dest/share/xschem"
+          out="$("$dest/bin/xschem" --version 2>&1 | head -n 1)"
+          echo "$out"
+          case "$out" in
+            *"V$XSCHEM_TAG"*) ;;
+            *) echo "::error::expected xschem V$XSCHEM_TAG, got: $out"; exit 1;;
+          esac
+          # Headless netlist of a shipped example schematic (no display).
+          sch="$(find "$dest/share/xschem" -name '*.sch' -path '*examples*' | sort | head -n 1)"
+          [[ -n "$sch" ]] || { echo "::error::no example schematic shipped"; exit 1; }
+          mkdir -p "$RUNNER_TEMP/netlist"
+          "$dest/bin/xschem" -q -n -x -o "$RUNNER_TEMP/netlist" "$sch"
+          ls -l "$RUNNER_TEMP/netlist"
+          [[ -n "$(ls -A "$RUNNER_TEMP/netlist")" ]] \
+            || { echo "::error::headless netlist produced no output"; exit 1; }
+
+      - name: Create or update the release and upload the asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ASSET: ${{ steps.pins.outputs.asset }}
+          RELEASE_TAG: ${{ steps.pins.outputs.release_tag }}
+          XSCHEM_TAG: ${{ steps.pins.outputs.tag }}
+          XSCHEM_COMMIT: ${{ steps.pins.outputs.commit }}
+        run: |
+          set -euo pipefail
+          notes="Pinned xschem ${XSCHEM_TAG} (${XSCHEM_COMMIT}), built for Ubuntu 24.04 x86_64. Install with scripts/install-xschem.sh, which verifies the sha256 in docker/eda-sim/pdk-versions.json (tools.xschem.sha256). Not a klayout-tools release."
+          if gh release view "$RELEASE_TAG" > /dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "$RUNNER_TEMP/$ASSET" --clobber
+          else
+            gh release create "$RELEASE_TAG" "$RUNNER_TEMP/$ASSET" \
+              --target "$GITHUB_SHA" \
+              --title "xschem ${XSCHEM_TAG} (pinned build)" \
+              --notes "$notes" \
+              --latest=false
+          fi
+
+      - name: Verify the public asset downloads with no token
+        env:
+          ASSET: ${{ steps.pins.outputs.asset }}
+          RELEASE_TAG: ${{ steps.pins.outputs.release_tag }}
+          EXPECTED: ${{ steps.pack.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          unset GH_TOKEN GITHUB_TOKEN
+          url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/${ASSET}"
+          curl -fL --retry 3 --retry-all-errors -o "$RUNNER_TEMP/dl.tar.gz" "$url"
+          actual="$(sha256sum "$RUNNER_TEMP/dl.tar.gz" | awk '{print $1}')"
+          [[ "$actual" == "$EXPECTED" ]] \
+            || { echo "::error::public download sha256 $actual != uploaded $EXPECTED"; exit 1; }
+
+      - name: Report the sha256 to record in the manifest
+        env:
+          ASSET: ${{ steps.pins.outputs.asset }}
+          SHA256: ${{ steps.pack.outputs.sha256 }}
+        run: |
+          {
+            echo "### xschem asset published"
+            echo
+            echo "Record in \`docker/eda-sim/pdk-versions.json\` under \`tools.xschem\`:"
+            echo
+            echo '```'
+            echo "\"sha256\": \"$SHA256\""
+            echo '```'
+            echo
+            echo "asset: \`$ASSET\`"
+          } >> "$GITHUB_STEP_SUMMARY"
