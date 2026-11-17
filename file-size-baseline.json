@@ -649,7 +649,7 @@
     },
     {
       "path": "src/klayout_tools/spice_flatten.py",
-      "lines": 847
+      "lines": 798
     },
     {
       "path": "src/klayout_tools/substrate_resistance.py",
@@ -1049,7 +1049,7 @@
     },
     {
       "path": "tests/test_signoff.py",
-      "lines": 18366
+      "lines": 18343
     },
     {
       "path": "tests/test_signoff_generator_batch.py",

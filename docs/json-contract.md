@@ -1834,6 +1834,12 @@ All eight share one contract:
   item still fails, via the counts and per-item `id`s that stay compared.
   See [`cli/signoff.md`](cli/signoff.md)'s "A reworded checklist is not
   evidence drift".
+- **`klt signoff --check` also carries a report-only `build_skew`** (issue
+  #5868; additive, no `schema_version` bump): `{state, fields}` where `state`
+  is `"same"`, `"build_only"`, `"ruleset"` (`build.grading_ruleset_id`
+  differs) or `"unknown"` (the committed report has no `build` block), and
+  `fields` lists each differing `build.*` field in the `{field, committed,
+  fresh}` shape of `drift`. It never affects `status` or the exit code.
 
 **Build identity is route-dependent, so committed reports must not be
 byte-compared (issue #2249).** A `klt signoff` tier/fleet report's `build`
