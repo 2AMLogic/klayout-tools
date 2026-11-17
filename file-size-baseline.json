@@ -221,7 +221,7 @@
     },
     {
       "path": "src/klayout_tools/decks/gf180mcu.py",
-      "lines": 3877
+      "lines": 3876
     },
     {
       "path": "src/klayout_tools/decks/history.py",
@@ -229,7 +229,7 @@
     },
     {
       "path": "src/klayout_tools/decks/rules.py",
-      "lines": 860
+      "lines": 856
     },
     {
       "path": "src/klayout_tools/decks/sg13cmos5l.py",
@@ -253,7 +253,7 @@
     },
     {
       "path": "src/klayout_tools/drc.py",
-      "lines": 3737
+      "lines": 3735
     },
     {
       "path": "src/klayout_tools/drc_klayout_engine.py",
