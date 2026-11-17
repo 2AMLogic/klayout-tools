@@ -226,7 +226,7 @@
           }
         },
         "warnings": {"type": "array", "description": "Same shape a run emits (issue #3816): present only when the deck reads caller-supplied `-rd` globals and no `--deck-var` supplied any of them -- the one way this listing is silently wrong in the same direction a run is.", "items": {"type": "object"}},
-        "environment": {"type": "object", "description": "Present only when `--klayout-binary`/`$KLT_KLAYOUT_BINARY` was in force (issue #4950).", "properties": {"klayout_binary": {"type": "string"}}, "additionalProperties": true},
+        "environment": {"type": "object", "description": "Always present for this engine (issues #4950/#5844): `klayout_binary` is the resolved override path when `--klayout-binary`/`$KLT_KLAYOUT_BINARY` was in force, else the PATH-resolved absolute path of the `klayout` that ran (the bare name when nothing on PATH resolves).", "properties": {"klayout_binary": {"type": "string"}}, "additionalProperties": true},
         "native_deck": {"type": "object", "description": "Same additive block a run records (issue #4002) when the PDK's family main script was resolved."},
         "provenance": {"$ref": "#/$defs/provenance"}
       },
@@ -414,12 +414,13 @@
       "additionalProperties": true
     },
     "provenance": {
-      "description": "Shared reproducibility block. `klayout_version_mismatch` is emitted on verdict reports only.",
+      "description": "Shared reproducibility block. `klayout_version_mismatch` is emitted on verdict reports only. For `--engine klayout`, `klayout_version` is the standalone application that ran the deck and `klayout_module_version` (additive, issue #5660) is the pip wheel in klt's own env; for every other engine `klayout_version` is the wheel and `klayout_module_version` is absent.",
       "type": "object",
       "required": ["klt_version", "klayout_version", "pdk", "deck", "input"],
       "properties": {
         "klt_version": {"type": ["string", "null"]},
-        "klayout_version": {"type": ["string", "null"]},
+        "klayout_version": {"type": ["string", "null"], "description": "The KLayout engine that produced this run: the standalone application's own `-v` version for `--engine klayout` (issue #5660), else `klayout.__version__` (the pip wheel, which is the engine for `--engine curated`/`klt lvs`). `null` when unresolvable (no wheel importable, or a soft-failed binary probe with no `--min-klayout-version` declared)."},
+        "klayout_module_version": {"type": ["string", "null"], "description": "Additive (issue #5660), `--engine klayout` only: `klayout.__version__`, the pip wheel in klt's own environment -- recorded so the wheel's version is not lost, without presenting it as the engine that ran the deck."},
         "pdk": {
           "type": ["object", "null"],
           "required": ["name", "source", "version"],

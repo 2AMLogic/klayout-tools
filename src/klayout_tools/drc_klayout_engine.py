@@ -39,7 +39,12 @@ from .drc import (
 )
 from .drc_deck_includes import _deck_script_files
 from .drc_klayout_abort import deck_abort_info, deck_aborted_error
-from .drc_klayout_app import _preflight_klayout_version, _resolve_klayout_executable
+from .drc_klayout_app import (
+    _preflight_klayout_version,
+    _recorded_klayout_binary,
+    _resolve_klayout_executable,
+    _warn_binary_mismatch,
+)
 from .drc_klayout_launch import launch_klayout_deck
 from .pdk import PdkNotFoundError, find_pdk_for_deck
 
@@ -1468,10 +1473,9 @@ def run_drc_klayout_engine(
     # names the wrong thing. Fail before the subprocess, naming the utility.
     _preflight_deck_host_tools(deck_file, allow_missing_host_tools)
 
-    # Issue #2689: opt-in application-version floor, probed on the very
-    # executable launched below, before any deck work.
     klayout_exe, klayout_override = _resolve_klayout_executable(klayout_binary)
-    _preflight_klayout_version(klayout_exe, min_klayout_version)
+    klayout_app_version = _preflight_klayout_version(klayout_exe, min_klayout_version)
+    recorded_binary = _recorded_klayout_binary(klayout_exe, klayout_override)
 
     negative_control_result = None
     if negative_control is not None:
@@ -1571,6 +1575,18 @@ def run_drc_klayout_engine(
     )
     deck_global_warnings = _missing_deck_globals_warning(deck_file, deck_vars)
     rollup = coverage_rollup({"coverage": coverage}, failed=bool(violation_count))
+    provenance = build_provenance(
+        deck_name=os.path.basename(deck_file),
+        deck_path=deck_file,
+        pdk=pdk_info,
+        input_path=path,
+        deck_options=deck_vars,
+        include_klayout_version_mismatch=True,
+        klayout_version_override=klayout_app_version,
+        klayout_version_override_active=True,
+    )
+    _with_deck_tree(provenance, deck_file)  # adds deck.tree, in place
+    _warn_binary_mismatch(provenance)
     return {
         "schema_version": SCHEMA_VERSION,
         # Issue #2659: same `{path, scope}` normalization the curated engine's
@@ -1580,13 +1596,7 @@ def run_drc_klayout_engine(
         ),
         "deck": deck_file,
         "engine": "klayout",
-        # Additive (issue #4950): present only when a binary override
-        # (--klayout-binary / $KLT_KLAYOUT_BINARY) was in force.
-        **(
-            {"environment": {"klayout_binary": klayout_override}}
-            if klayout_override is not None
-            else {}
-        ),
+        "environment": {"klayout_binary": recorded_binary},
         # Additive, and present *only* when --allow-deck-errors actually
         # tolerated a failed deck run (issue #1941) -- an ordinary run's
         # payload is unchanged, and a tolerated one is self-describing
@@ -1628,17 +1638,7 @@ def run_drc_klayout_engine(
             if negative_control_result is not None
             else {}
         ),
-        "provenance": _with_deck_tree(
-            build_provenance(
-                deck_name=os.path.basename(deck_file),
-                deck_path=deck_file,
-                pdk=pdk_info,
-                input_path=path,
-                deck_options=deck_vars,
-                include_klayout_version_mismatch=True,
-            ),
-            deck_file,
-        ),
+        "provenance": provenance,
     }
 
 

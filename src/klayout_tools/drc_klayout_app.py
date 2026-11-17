@@ -4,8 +4,12 @@ to keep that module under its file-size ceiling)."""
 
 import os
 import re
+import shutil
 import subprocess
+import sys
+from typing import Any
 
+from . import build_identity
 from ._paths import resolve_tool_binary
 from .drc import CODE_KLAYOUT_UNAVAILABLE, CODE_KLAYOUT_VERSION_TOO_OLD, DrcError
 
@@ -46,6 +50,50 @@ def _resolve_klayout_executable(
     return resolved, resolved
 
 
+def _recorded_klayout_binary(exe: str, override: str | None) -> str:
+    """The value recorded as ``environment.klayout_binary`` (issues
+    #4950/#5844): the resolved override path when one was in force, else the
+    PATH-resolved absolute path of ``exe``, else ``exe`` itself (the bare
+    name the deck launch will use, when nothing on PATH resolves). Every
+    ``--engine klayout`` report records which binary ran -- a no-override
+    run is no longer silent about it (#5844).
+    """
+    if override is not None:
+        return override
+    return shutil.which(exe) or exe
+
+
+def _warn_binary_mismatch(provenance: dict[str, Any]) -> None:
+    """The ``--engine klayout`` wording of the version-mismatch warning
+    (issue #5660), printed by both klayout-engine call sites on the block
+    :func:`klayout_tools._provenance.build_provenance` returned.
+
+    ``build_provenance`` computes ``klayout_version_mismatch`` from the same
+    binary-derived value (``klayout_version_override``) but suppresses its
+    own warning for those runs: its ``--with klayout==<expected>`` remedy
+    pins the pip wheel, which is *not* the engine here and would not
+    reproduce the run. No-op unless the block says ``klayout_version_mismatch``.
+    """
+    if not provenance.get("klayout_version_mismatch"):
+        return
+    actual = provenance.get("klayout_version")
+    expected = build_identity._recorded_klayout_version_expected()
+    print(
+        f"klt: warning: the standalone KLayout application that ran this "
+        f"deck reports version {actual!r}, but this klayout-tools build/"
+        f"commit was tested against KLayout {expected} -- DRC/LVS report "
+        "counts (deck content hash, rules_skipped, category_counts, ...) "
+        f"may differ from a report generated with KLayout {expected}, even "
+        "though the verdict itself is unaffected. To reproduce the exact "
+        "engine: point --klayout-binary/$KLT_KLAYOUT_BINARY at (or "
+        f"install) a KLayout {expected} application "
+        "(https://www.klayout.de/build.html); the pip `klayout` package is "
+        "a separate install and does not pin this engine. See "
+        "docs/cli/drc.md, 'Engine' -> 'klayout'.",
+        file=sys.stderr,
+    )
+
+
 KLAYOUT_VERSION_PROBE_TIMEOUT_S = 15.0
 """Wall-clock budget for the ``klayout -v`` version probe (issue #2689)."""
 
@@ -75,21 +123,26 @@ def _klayout_version_at_least(
     return pad(found) >= pad(required)
 
 
-def _preflight_klayout_version(executable: str, min_version: str | None) -> None:
+def _preflight_klayout_version(executable: str, min_version: str | None) -> str | None:
     """Refuse to run a deck on a standalone ``klayout`` application older than
-    the caller-declared minimum (issue #2689).
+    the caller-declared minimum (issue #2689), and return the version the
+    *same* executable reported from its ``-v`` probe (issue #5660) so the
+    caller's provenance can name the binary that actually ran the deck.
 
-    A no-op when ``min_version`` is ``None`` (existing behaviour: no
-    compatibility is claimed or checked). Otherwise probes the *same*
-    executable the deck will run with (``<executable> -v``, bounded by
-    :data:`KLAYOUT_VERSION_PROBE_TIMEOUT_S`) and raises :class:`DrcError` for
-    an invalid minimum, a missing/failed/timed-out/unparseable probe, or a
-    detected version below the minimum. Never bypassed by
-    ``allow_deck_errors`` or ``allow_missing_host_tools``. Passing proves only
-    the version, not that an arbitrary deck is compatible.
+    The probe runs on every call -- exactly once per run, shared by the
+    floor check and provenance. With ``min_version`` declared, every failure
+    mode is fatal exactly as before: :class:`DrcError` for an invalid
+    minimum, a missing/failed/timed-out/unparseable probe, or a detected
+    version below the minimum. Never bypassed by ``allow_deck_errors`` or
+    ``allow_missing_host_tools``; passing proves only the version, not that
+    an arbitrary deck is compatible. Without a declared minimum the same
+    probe fails *soft*: any failure returns ``None`` (recorded by the caller
+    as ``klayout_version: null``) rather than failing a run that passed no
+    floor and would otherwise succeed -- no new failure mode on the default
+    path.
     """
     if min_version is None:
-        return
+        return _klayout_app_version(executable)
     required = _parse_requested_klayout_version(min_version)
     required_text = ".".join(str(c) for c in required)
     try:
@@ -145,3 +198,33 @@ def _preflight_klayout_version(executable: str, min_version: str | None) -> None
             "klayout. See docs/cli/drc.md, 'Engine' -> 'klayout'.",
             code=CODE_KLAYOUT_VERSION_TOO_OLD,
         )
+    return match.group(0)
+
+
+def _klayout_app_version(binary: str) -> str | None:
+    """The standalone KLayout application's own reported version token
+    (``<binary> -v``, parsed with :data:`_REPORTED_VERSION_RE`), or ``None``
+    if unresolvable -- never raises. The issue #5660 counterpart of
+    ``_provenance._yosys_version`` (issue #2423): ``--engine klayout``
+    records this value as ``provenance.klayout_version`` so the envelope
+    names the binary that ran the deck, never klt's own pip ``klayout``
+    wheel. Fails soft on every failure mode (missing, failed, timed-out,
+    unparseable) because it runs even when no ``--min-klayout-version``
+    floor was declared. Sits here rather than beside ``_yosys_version`` so
+    it shares this module's regex and timeout instead of importing them
+    across the ``drc`` -> ``_provenance`` edge.
+    """
+    try:
+        probe = subprocess.run(
+            [binary, "-v"],
+            capture_output=True,
+            text=True,
+            timeout=KLAYOUT_VERSION_PROBE_TIMEOUT_S,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if probe.returncode != 0:
+        return None
+    output = ((probe.stdout or "") + "\n" + (probe.stderr or "")).strip()
+    match = _REPORTED_VERSION_RE.search(output)
+    return match.group(0) if match else None

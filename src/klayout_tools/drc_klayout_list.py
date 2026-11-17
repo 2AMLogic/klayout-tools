@@ -55,7 +55,12 @@ from typing import Any
 
 from ._provenance import build_provenance
 from .drc import SCHEMA_VERSION, DrcError
-from .drc_klayout_app import _preflight_klayout_version, _resolve_klayout_executable
+from .drc_klayout_app import (
+    _preflight_klayout_version,
+    _recorded_klayout_binary,
+    _resolve_klayout_executable,
+    _warn_binary_mismatch,
+)
 from .drc_klayout_engine import (
     KLAYOUT_ENGINE_DEFAULT_TIMEOUT_S,
     _check_klayout_run,
@@ -199,7 +204,8 @@ def list_klayout_deck_rule_categories(
     # just as surely when it is being listed (issues #2333, #2689).
     _preflight_deck_host_tools(deck_file, allow_missing_host_tools)
     klayout_exe, klayout_override = _resolve_klayout_executable(klayout_binary)
-    _preflight_klayout_version(klayout_exe, min_klayout_version)
+    # #2689's floor probe; #5660: its value is the engine provenance records.
+    klayout_app_version = _preflight_klayout_version(klayout_exe, min_klayout_version)
 
     work_dir = tempfile.mkdtemp(prefix="klt-drc-list-categories-")
     try:
@@ -239,6 +245,19 @@ def list_klayout_deck_rule_categories(
 
     effective_deck_vars = dict(deck_vars or {})
     deck_global_warnings = _missing_deck_globals_warning(deck_file, deck_vars)
+    provenance = _with_deck_tree(
+        build_provenance(
+            deck_name=os.path.basename(deck_file),
+            deck_path=deck_file,
+            pdk=pdk_info,
+            deck_options=effective_deck_vars,
+            include_klayout_version_mismatch=True,
+            klayout_version_override=klayout_app_version,
+            klayout_version_override_active=True,
+        ),
+        deck_file,
+    )
+    _warn_binary_mismatch(provenance)
     return {
         "schema_version": SCHEMA_VERSION,
         "mode": LIST_RULE_CATEGORIES_MODE,
@@ -246,13 +265,11 @@ def list_klayout_deck_rule_categories(
         "deck_file": deck_file,
         "deck_vars": effective_deck_vars,
         "basis": LIST_RULE_CATEGORIES_BASIS,
-        # Additive (issue #4950), same shape a run records: present only
-        # when --klayout-binary/$KLT_KLAYOUT_BINARY was in force.
-        **(
-            {"environment": {"klayout_binary": klayout_override}}
-            if klayout_override is not None
-            else {}
-        ),
+        # Issues #4950/#5844: always recorded -- the override path when in
+        # force, else the PATH-resolved absolute path of what ran.
+        "environment": {
+            "klayout_binary": _recorded_klayout_binary(klayout_exe, klayout_override)
+        },
         "rule_category_count": len(rule_categories),
         "rule_categories": rule_categories,
         "limitations": [dict(entry) for entry in _LIMITATIONS],
@@ -260,14 +277,5 @@ def list_klayout_deck_rule_categories(
         # silently wrong in the same direction a run is, so the run's own
         # missing-globals warning is surfaced here too.
         **({"warnings": deck_global_warnings} if deck_global_warnings else {}),
-        "provenance": _with_deck_tree(
-            build_provenance(
-                deck_name=os.path.basename(deck_file),
-                deck_path=deck_file,
-                pdk=pdk_info,
-                deck_options=effective_deck_vars,
-                include_klayout_version_mismatch=True,
-            ),
-            deck_file,
-        ),
+        "provenance": provenance,
     }

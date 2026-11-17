@@ -970,8 +970,21 @@ stability statement, concrete precedents, and drift-detection guidance, and
   `klt_version` is not published to an index, so `uvx --from
   "klayout-tools==<version>"` fails by design; use `klt_reinstall_spec`. Both are
   excluded from `--rerun`/`--check` drift like `klt_version`.
-- `klayout_version` — the KLayout Python engine build (`klayout.__version__`),
-  or `null` if unresolvable.
+- `klayout_version` — the KLayout engine that actually produced the run.
+  For `klt drc --engine klayout` (issue #5660) this is the standalone
+  application's own `-v` version — the binary the deck ran under, tracked
+  through `--klayout-binary`/`$KLT_KLAYOUT_BINARY`, probed once per run even
+  without `--min-klayout-version`, `null` when the probe fails softly and no
+  floor was declared — with the pip wheel's version recorded beside it as
+  the additive `klayout_module_version` (`--engine klayout` only). For every
+  other engine (`--engine curated`, `klt lvs`, `klt extract`, ...) this is
+  the KLayout Python engine build (`klayout.__version__`), or `null` if
+  unresolvable — the wheel genuinely is the engine there.
+- `klayout_module_version` (issue #5660, additive, `--engine klayout` only)
+  — `klayout.__version__`, the pip `klayout` wheel in klt's own environment,
+  recorded next to `klayout_version` so the wheel's version is not lost
+  without presenting it as the engine that ran the deck. Absent for every
+  other engine, so their provenance is byte-identical to before.
 - `klayout_version_mismatch` (issue #1490, `klt drc`/`klt lvs` only — see
   below) — `true` when this run's `klayout_version` differs from
   `klayout_version_expected` (`klt version --format json`, next section):
@@ -980,8 +993,10 @@ stability statement, concrete precedents, and drift-detection guidance, and
   version (e.g. an editable/dev checkout with no build-time record) renders
   as `false` — "no *confirmed* mismatch" — not a fabricated signal. A `true`
   result also prints a one-line warning to stderr, so the drift is visible
-  even without inspecting the JSON. See "Pinning the KLayout engine version"
-  below.
+  even without inspecting the JSON — for `--engine klayout` runs the warning
+  names the standalone application and its remedy, not `--with klayout==`
+  (issue #5660: pinning the wheel does not pin that engine). See "Pinning
+  the KLayout engine version" below.
 - `pdk` — the resolved PDK, as `{name, source, version}` (`name` is the
   variant, `source` is how it was found, `version` is the `SOURCES` stamp), or
   `null` when the run resolved no PDK. `klt drc` (issue #1901) populates it

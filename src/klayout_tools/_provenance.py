@@ -50,21 +50,11 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from . import build_identity
-from ._digest import (
-    content_hash as content_hash,
-)
-from ._digest import (
-    content_hash_bytes as content_hash_bytes,
-)
-from ._digest import (
-    content_hash_required as content_hash_required,
-)
-from ._digest import (
-    sha256_file as sha256_file,
-)
-from ._digest import (
-    sha256_file_required as sha256_file_required,
-)
+from ._digest import content_hash as content_hash
+from ._digest import content_hash_bytes as content_hash_bytes
+from ._digest import content_hash_required as content_hash_required
+from ._digest import sha256_file as sha256_file
+from ._digest import sha256_file_required as sha256_file_required
 from ._report_verify import get_path
 from .decks.history import is_deck_hash_released
 
@@ -893,6 +883,8 @@ def build_provenance(
     deck_options: Mapping[str, str] | None = None,
     resolve_deck_options: bool = False,
     include_klayout_version_mismatch: bool = False,
+    klayout_version_override: str | None = None,
+    klayout_version_override_active: bool = False,
     deck_path_envelope: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the shared ``provenance`` envelope block.
@@ -953,6 +945,10 @@ def build_provenance(
     not every ``build_provenance`` caller. A ``True`` result also prints a
     one-line warning to stderr (:func:`_warn_klayout_version_mismatch`) so a
     caller sees the drift even without inspecting the JSON.
+    ``klayout_version_override`` (+ ``..._active``, issue #5660; the
+    ``--engine klayout`` call sites) repopulate ``klayout_version`` and the mismatch
+    advisory from the binary that ran the deck; the wheel's version moves to
+    ``klayout_module_version`` (``None`` = soft-failed probe, recorded ``null``).
     """
     if input_role not in INPUT_ROLES:
         raise ValueError(
@@ -960,6 +956,8 @@ def build_provenance(
             f"(expected one of {', '.join(sorted(INPUT_ROLES))})"
         )
     actual_klayout_version = _klayout_version()
+    if klayout_version_override_active:
+        actual_klayout_version = klayout_version_override
     git_commit, reinstall_spec = _klt_build_handle()
     block: dict[str, Any] = {
         "klt_version": _klt_version(),
@@ -998,8 +996,10 @@ def build_provenance(
             actual_klayout_version, expected_klayout_version
         )
         block["klayout_version_mismatch"] = mismatch
-        if mismatch:
+        if mismatch and not klayout_version_override_active:
             _warn_klayout_version_mismatch(
                 actual_klayout_version, expected_klayout_version
             )
+    if klayout_version_override_active:
+        block["klayout_module_version"] = _klayout_version()
     return block
