@@ -215,6 +215,12 @@ from ._paths import load_request_arg as _shared_load_request_arg
 from ._paths import validate_request_shape as _shared_validate_request_shape
 from ._provenance import sha256_file
 from .env_provenance import find_repo_root, repo_relative_path
+from .functional_verification_from_synthesize import (  # noqa: F401
+    _resolve_sources,
+    has_from_synthesize,
+    resolve_sources_with_synthesize,
+    with_from_synthesize,
+)
 from .functional_verification_initial_state import (
     INITIAL_STATE_MODULE,
     SEED_PLUSARG,
@@ -654,19 +660,27 @@ class FunctionalVerificationError(Exception):
 # ---------------------------------------------------------------------------
 
 
-_REQUIRED_REQUEST_FIELDS = ("sources", "hdl_toplevel", "testbench")
+# "sources" is checked in _resolve_sources: options.from_synthesize may omit it.
+_REQUIRED_REQUEST_FIELDS = ("hdl_toplevel", "testbench")
 
 
 def _validate_request_shape(data: Any, source: str) -> dict[str, Any]:
     """Shared shape check for a JSON-decoded request, however it was sourced
     (file, inline JSON, stdin). ``source`` is folded into the "must be a JSON
     object" error for context."""
-    return _shared_validate_request_shape(
+    doc = _shared_validate_request_shape(
         data,
         source,
         error_cls=FunctionalVerificationError,
         required_fields=_REQUIRED_REQUEST_FIELDS,
     )
+    return _require_sources(doc)
+
+
+def _require_sources(doc: dict[str, Any]) -> dict[str, Any]:
+    if "sources" not in doc and not has_from_synthesize(doc.get("options")):
+        raise FunctionalVerificationError("request is missing required field: sources")
+    return doc
 
 
 def load_request(request_path: str) -> dict[str, Any]:
@@ -690,46 +704,18 @@ def load_request_arg(value: str) -> tuple[dict[str, Any], str]:
     JSON file, ``"-"`` for stdin, or an inline JSON object string), so this
     verb composes into ``klt eval``'s descriptor unchanged.
     """
-    return _shared_load_request_arg(
+    doc, request_dir = _shared_load_request_arg(
         value,
         error_cls=FunctionalVerificationError,
         required_fields=_REQUIRED_REQUEST_FIELDS,
         load_request_fn=load_request,
     )
+    return _require_sources(doc), request_dir
 
 
 # ---------------------------------------------------------------------------
 # request field validation
 # ---------------------------------------------------------------------------
-
-
-def _resolve_sources(sources: Any, request_dir: str) -> list[str]:
-    """Validate ``request.sources`` and resolve each entry to an absolute,
-    readable path (relative to ``request_dir`` -- the same convention every
-    other request-taking verb uses)."""
-    if not isinstance(sources, list) or not sources:
-        raise FunctionalVerificationError(
-            "request.sources must be a non-empty array of paths"
-        )
-    if not all(isinstance(entry, str) and entry for entry in sources):
-        raise FunctionalVerificationError(
-            "request.sources entries must be non-empty strings"
-        )
-
-    resolved: list[str] = []
-    for entry in sources:
-        path = entry if os.path.isabs(entry) else os.path.join(request_dir, entry)
-        if not os.path.isfile(path):
-            raise FunctionalVerificationError(f"RTL source not found: {entry}")
-        try:
-            with open(path, "rb"):
-                pass
-        except OSError as exc:
-            raise FunctionalVerificationError(
-                f"could not read RTL source '{entry}': {exc}"
-            ) from exc
-        resolved.append(os.path.abspath(path))
-    return resolved
 
 
 def _resolve_testbench(
@@ -2584,13 +2570,15 @@ def run_functional_verification(
 
     engine = _resolve_engine(request_doc)
 
-    sources = _resolve_sources(request_doc["sources"], request_dir)
-
     hdl_toplevel = request_doc["hdl_toplevel"]
     if not isinstance(hdl_toplevel, str) or not hdl_toplevel:
         raise FunctionalVerificationError(
             "request.hdl_toplevel must be a non-empty string"
         )
+    # Issue #5684: verify the synthesized netlist before anything is built.
+    sources, synth_block = resolve_sources_with_synthesize(
+        request_doc, request_dir, hdl_toplevel, _path_envelope
+    )
 
     verilog_tb = _resolve_verilog_top(
         request_doc["testbench"], sources, engine, request_doc.get("options")
@@ -2913,23 +2901,26 @@ def run_functional_verification(
     includes = [*includes, *scoped_include_dirs]
 
     if verilog_tb is not None:
-        return _run_verilog_top(
-            verilog_tb,
-            engine=engine,
-            hdl_toplevel=hdl_toplevel,
-            sources=sources,
-            build_args=build_args,
-            defines=defines,
-            includes=includes,
-            build_dir=build_dir,
-            build_log=build_log,
-            test_log=test_log,
-            sdf=sdf,
-            sdf_pre_dropped_counts=sdf_pre_dropped_counts,
-            sdf_pre_dropped_arcs=sdf_pre_dropped_arcs,
-            sdf_renamed=sdf_renamed,
-            source_defines=source_defines,
-            tools=tools,
+        return with_from_synthesize(
+            _run_verilog_top(
+                verilog_tb,
+                engine=engine,
+                hdl_toplevel=hdl_toplevel,
+                sources=sources,
+                build_args=build_args,
+                defines=defines,
+                includes=includes,
+                build_dir=build_dir,
+                build_log=build_log,
+                test_log=test_log,
+                sdf=sdf,
+                sdf_pre_dropped_counts=sdf_pre_dropped_counts,
+                sdf_pre_dropped_arcs=sdf_pre_dropped_arcs,
+                sdf_renamed=sdf_renamed,
+                source_defines=source_defines,
+                tools=tools,
+            ),
+            synth_block,
         )
 
     runner_module = _import_runner()
@@ -3112,6 +3103,7 @@ def run_functional_verification(
             },
         }
     )
+    with_from_synthesize(report, synth_block)  # issue #5684, additive
     report.local_paths = {
         "results_xml": results_xml,
         "test_log": test_log,
