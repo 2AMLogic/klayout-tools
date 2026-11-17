@@ -70,6 +70,8 @@ def _find(text: str, name: str = "vdd"):
         "title\n   ; indented comment only\nvdd vdd 0 pwl(0 0 1n 1.8)\n",
         "vdd vdd 0 pwl(0 0 1n 1.8)\n; trailing comment-only line\n",
         ".subckt cell a\n; comment inside subckt\n.ends\nvdd vdd 0 pwl(0 0 1n 1.8)\n",
+        "$ dollar comment\nvdd vdd 0 pwl(0 0 1n 1.8)\n.end\n",
+        "title\n   $ indented dollar comment\nvdd vdd 0 pwl(0 0 1n 1.8)\n",
     ],
 )
 def test_find_source_skips_comment_only_lines(netlist):
