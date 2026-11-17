@@ -90,6 +90,25 @@ def test_pin_matching_two_declared_names_is_emitted_once_at_earliest(tmp_path):
     assert ".SUBCKT top a|b z y\n" in open(path).read()
 
 
+def test_whole_token_pipe_declared_name_hoists(tmp_path):
+    """Issue #6021: a declared name that itself contains `|` (a caller may
+    declare a two-label net by its joined spelling) hoists the header token
+    it names whole -- the pre-#5534 comparison -- which the per-component
+    rule alone cannot match (the token's *parts* are `a` and `b`, neither of
+    which equals `a|b`)."""
+    path = _write(tmp_path, ".SUBCKT top z a|b y")
+    _apply_pin_order_to_spice(path, "top", ("a|b",))
+    assert ".SUBCKT top a|b z y\n" in open(path).read()
+
+
+def test_whole_token_match_stays_case_insensitive(tmp_path):
+    """Issue #6021: the whole-token fallback keeps #5255's
+    case-insensitivity, like the component match."""
+    path = _write(tmp_path, ".SUBCKT top z a|b y")
+    _apply_pin_order_to_spice(path, "top", ("A|B",))
+    assert ".SUBCKT top a|b z y\n" in open(path).read()
+
+
 def test_component_label_match_is_case_insensitive(tmp_path):
     """Issue #5534: component matching keeps #5255's case-insensitivity."""
     path = _write(tmp_path, ".SUBCKT top q VGND|vss")

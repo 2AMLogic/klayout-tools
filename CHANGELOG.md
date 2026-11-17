@@ -14,6 +14,22 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt extract --pins` hoists a header token on a whole-token match too**
+  (#6021, 2026-11-17): #5534 made the top `.SUBCKT` header ordering match
+  per component label, but that rule alone cannot match a declared name
+  that itself contains `|` -- a caller may declare a two-label net by its
+  joined spelling (`a|b`), and the header token's *parts* (`a`, `b`) are
+  neither equal to it, so the declared pin silently stayed in its old
+  position. The pre-#5534 whole-token comparison is restored alongside the
+  per-label one, making the match a true superset: pipe-free headers
+  behave exactly as before, since the two comparisons coincide there.
+  `docs/cli/extract.md` also qualifies its "fully determined by `--pins`"
+  wording for the #2000 duplicate-label carve-out: a declared name
+  matching 2+ physically disconnected same-label nets keeps all of them
+  promoted, hoisted in their existing header order, so `pin_count` can
+  exceed the declared set's size. No JSON field or `schema_version`
+  change.
+
 - **`klt drc` gf180mcu deck: `DF.1c` (MOSCAP COMP min width) is now checked,
   and `comp.width.mv.1` exempts `MVSD`/`MVPSD`-marked LDMOS drains** (#5719,
   2026-11-17). New rule `comp.width.moscap.1` (`DF.1c`, 1.0 um,
@@ -38,8 +54,6 @@ not `klt --version`, if you need to detect this kind of drift. See
   devices now report the genuine `comp.width.moscap.1` finding (the native
   deck flags the same shapes) — the generator cannot yet draw a MOSCAP that
   passes it (#6170). No JSON field added or removed; `schema_version` unchanged.
-
-
 - **Fixed** (#5664, `klt lvs` `--engine klayout-runset`; no JSON field
   changes, `schema_version` stays 3): a `pin.unmatched` finding whose pin
   pair KLayout's own comparer graded `Match`/`MatchWithWarning` — a
@@ -179,7 +193,8 @@ not `klt --version`, if you need to detect this kind of drift. See
   **Re-baseline note**: this moves the header once more for joined-label
   layouts, so a committed extracted netlist produced with `--pins` on such a
   layout needs regenerating once; after that the header depends only on
-  `--pins`. `docs/cli/extract.md` also now records that *without* `--pins` the
+  `--pins` (with the #2000 duplicate-label exception the #6021 entry above
+  records). `docs/cli/extract.md` also now records that *without* `--pins` the
   top-level port order is the extractor's own and is not a cross-build
   contract, alongside the existing `$N` caveat (#1063). Additive; no
   `schema_version` bump.

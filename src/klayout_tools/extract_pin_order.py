@@ -17,7 +17,13 @@ def _apply_pin_order_to_spice(
     A header pin matches a declared name when **any** of its component labels
     does (issue #5534) -- the same per-label rule ``--pins`` already uses to
     decide *which* nets promote (issue #1687), rather than the whole-token
-    comparison this function used before. ``Net.expanded_name()`` joins the
+    comparison this function used before. A declared name may also match a
+    header token as a whole (issue #6021), restoring the pre-#5534
+    comparison as a true superset: the per-label rule alone cannot match a
+    declared name that itself contains ``|`` -- a caller may declare a
+    two-label net by its joined spelling -- because such a token's *parts*
+    are the split labels, none of which equals the joined name.
+    ``Net.expanded_name()`` joins the
     distinct labels on one net with ``,``, which the SPICE writer respells as
     ``|`` for a node/pin token (see
     :func:`~klayout_tools.extract_parasitics.spice_safe_net_name`), so a
@@ -47,7 +53,9 @@ def _apply_pin_order_to_spice(
     for name in order:
         wanted = name.lower()
         for pin in [
-            p for p in pool if wanted in {part.lower() for part in p.split("|")}
+            p
+            for p in pool
+            if wanted == p.lower() or wanted in {part.lower() for part in p.split("|")}
         ]:
             pool.remove(pin)
             first.append(pin)
