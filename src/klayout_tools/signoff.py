@@ -55,7 +55,12 @@ from . import signoff_foundry_cell as foundry_cell
 from . import signoff_nothing_checked as vacuous
 from ._jsongz import READ_ERRORS, open_text
 from ._jsonnum import is_number
-from ._provenance import INPUT_ROLE_LAYOUT, layout_geometry_digest, sha256_file
+from ._provenance import (
+    INPUT_ROLE_LAYOUT,
+    is_untracked_working_tree_file,
+    layout_geometry_digest,
+    sha256_file,
+)
 from .build_identity import build_version, version_report
 from .coverage import (
     RESULT_PARTIAL,
@@ -5242,6 +5247,18 @@ def _resolve_input_artifact_value(
     A plain absolute string (schema-1 `klt sta` evidence, issue #2879) is
     tried only as written: it is never re-rooted by stripping a guessed host
     prefix, so it verifies only where that exact path still exists.
+
+    **The grading basis is the git index, not the working tree** (issue
+    #5857): a candidate that sits inside a functioning git checkout whose
+    index does not track it is dropped here, before anything reads it.
+    Reading such a candidate made the render a function of the producing
+    host's working tree -- a gitignored scratch artifact verified ``True``
+    where it happened to lie and ``None`` in a fresh clone, moving
+    ``input_verified`` and, through it, the artifact-anchored T1 verdicts
+    between hosts. A candidate outside any functioning checkout keeps the
+    filesystem-presence behaviour: ``--repo-root`` (issue #2878) exists
+    precisely so a ``.git``-less copy still verifies, and trackedness
+    cannot be asked of a tree that has no index.
     """
     candidates: list[str] = []
     if isinstance(value, str) and value:
@@ -5258,7 +5275,11 @@ def _resolve_input_artifact_value(
             )
             if root is not None:
                 candidates.append(os.path.join(root, repo_relative))
-    return list(dict.fromkeys(candidates))
+    return [
+        candidate
+        for candidate in dict.fromkeys(candidates)
+        if not is_untracked_working_tree_file(candidate)
+    ]
 
 
 def _input_artifact_candidates(
@@ -5336,6 +5357,13 @@ def _verify_input_artifact(
     digest computed differently from the one the producing run recorded
     would report drift that is an artifact of this module, not of the
     evidence.
+
+    The candidates come from :func:`_resolve_input_artifact_value`, whose
+    grading basis is the git index (issue #5857): a path inside a
+    functioning checkout that the index does not track is never read, so a
+    gitignored artifact beside the evidence reports ``None`` on every host
+    -- deterministically, not only in a fresh clone -- and the
+    artifact-anchored T1 items render their refusal identically everywhere.
     """
     if not isinstance(recorded_hash, str) or not recorded_hash:
         return None

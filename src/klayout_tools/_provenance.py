@@ -32,6 +32,11 @@ WASI-sandboxed-yosys detection had only been added to ``synthesize.py``,
 leaving ``equiv.py``'s independent error-formatting function without it;
 issue #2453 narrowed it for scripts under the host temp dir).
 
+It also owns ``is_untracked_working_tree_file`` (issue #5857) -- the
+git-index trackedness predicate ``klt signoff`` filters its input-artifact
+candidates through, so an evidence render is a function of the commit
+rather than of the producing host's working tree.
+
 Alongside the raw-byte ``sha256_file`` it also owns ``layout_geometry_digest``
 (issue #2065) -- a *layout-aware* digest for reports that pin the input streams
 they were built from (``klt gen-compose``'s ``blocks[].source_digest``), where
@@ -67,6 +72,7 @@ from ._digest import (
 )
 from ._report_verify import get_path
 from .decks.history import is_deck_hash_released
+from .env_provenance import find_repo_root
 
 _YOSYS_VERSION_RE = re.compile(r"Yosys\s+(\S+)")
 
@@ -155,6 +161,123 @@ def wasi_sandbox_hint_if_applicable(error_line: str) -> str:
     if _is_under_host_tempdir(script_path):
         return _WASI_SANDBOX_TEMPDIR_HINT.format(tempdir=tempfile.gettempdir())
     return _WASI_SANDBOX_HINT
+
+
+# --------------------------------------------------------------------------- #
+# git-index trackedness (issue #5857)
+# --------------------------------------------------------------------------- #
+
+#: Memoized ``git ls-files`` listing per checkout root, keyed by the root's
+#: real path *and* its git index's stat signature -- so a mid-process
+#: ``git add`` (tests do this between two grades) invalidates exactly that
+#: root's entry while an unchanged index is answered from memory. One render
+#: is one process, which is what makes this the "one ``ls-files`` per
+#: distinct root per render" budget issue #5857 sets for ``klt signoff``'s
+#: citations, however many of them name artifacts under the same root.
+_TRACKED_FILES_CACHE: dict[tuple[str, int, int, int], frozenset[str] | None] = {}
+
+
+def _git_stdout(cwd: str, *args: str) -> bytes | None:
+    """Stdout of ``git -C <cwd> <args>``, or ``None`` when git is missing
+    from ``$PATH``, the command fails, or it does not finish promptly.
+    Never raises -- the trackedness probe below must not be able to break a
+    render (:func:`klayout_tools.build_identity._git` is the precedent for
+    this never-raise contract)."""
+    try:
+        completed = subprocess.run(
+            ["git", "-C", cwd, *args], capture_output=True, timeout=60
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    return completed.stdout
+
+
+def _git_index_signature(root: str) -> tuple[int, int, int] | None:
+    """``(st_ino, st_size, st_mtime_ns)`` of the git index behind ``root``
+    -- the file a ``git add`` rewrites -- or ``None`` when there is no
+    index to stat. A ``.git`` directory names its index directly; a
+    ``.git`` *file* (a linked worktree) points at the gitdir holding it."""
+    entry = os.path.join(root, ".git")
+    try:
+        if os.path.isdir(entry):
+            index = os.path.join(entry, "index")
+        else:
+            with open(entry, encoding="utf-8", errors="replace") as handle:
+                pointer = handle.readline().strip()
+            if not pointer.startswith("gitdir:"):
+                return None
+            gitdir = pointer[len("gitdir:") :].strip()
+            if not os.path.isabs(gitdir):
+                gitdir = os.path.join(root, gitdir)
+            index = os.path.join(gitdir, "index")
+        stat = os.stat(index)
+        return (stat.st_ino, stat.st_size, stat.st_mtime_ns)
+    except OSError:
+        return None
+
+
+def _tracked_files_under(root: str) -> frozenset[str] | None:
+    """The set of POSIX ``root``-relative paths git's index tracks, or
+    ``None`` when ``root`` is not a functioning checkout of its own.
+
+    Memoized per root (see :data:`_TRACKED_FILES_CACHE`). ``git ls-files``
+    searches upwards when its ``-C`` directory is not itself a repository,
+    so ``rev-parse --show-toplevel`` must name ``root`` back before the
+    listing is believed: anything else (a ``.git``-marked directory with no
+    repository behind it) is "not a checkout here" -- never the parent
+    repository's paths re-keyed against ``root``."""
+    signature = _git_index_signature(root)
+    if signature is None:
+        return None
+    real_root = os.path.realpath(root)
+    key = (real_root, *signature)
+    if key not in _TRACKED_FILES_CACHE:
+        top = _git_stdout(root, "rev-parse", "--show-toplevel")
+        listing = (
+            _git_stdout(root, "ls-files", "-z")
+            if top is not None
+            and os.path.realpath(top.decode("utf-8", errors="surrogateescape").strip())
+            == real_root
+            else None
+        )
+        _TRACKED_FILES_CACHE[key] = (
+            frozenset(
+                item.decode("utf-8", errors="surrogateescape")
+                for item in listing.split(b"\0")
+                if item
+            )
+            if listing is not None
+            else None
+        )
+    return _TRACKED_FILES_CACHE[key]
+
+
+def is_untracked_working_tree_file(path: str) -> bool:
+    """Whether ``path`` names a file inside a functioning git checkout
+    whose index does not track it (issue #5857) -- gitignored scratch, a
+    never-``git add``ed file, a stale leftover.
+
+    ``False`` -- never an exception -- in every case that is not that:
+    ``path`` with no ``.git`` ancestry at all (a ``.git``-less archive
+    copy, a vendored tree), a ``.git`` entry with no functioning repository
+    behind it, git absent from ``$PATH``, or a git failure. Callers keep
+    their filesystem-presence behaviour in all of those, so grading over a
+    tree without VCS metadata is unchanged. Symlinks are resolved first:
+    the file that would be hashed is the file git is asked about, and the
+    containing checkout is found from that file's own directory, the way
+    :func:`~klayout_tools.env_provenance.find_repo_root` walks it."""
+    root = find_repo_root(os.path.dirname(os.path.realpath(path)))
+    if root is None:
+        return False
+    tracked = _tracked_files_under(root)
+    if tracked is None:
+        return False
+    relative = os.path.relpath(os.path.realpath(path), os.path.realpath(root))
+    if relative == os.pardir or relative.startswith(os.pardir + os.sep):
+        return False
+    return relative.replace(os.sep, "/") not in tracked
 
 
 # Bumped whenever the canonical serialisation below changes shape, so a digest
