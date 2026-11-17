@@ -145,6 +145,7 @@
         "klayout_tools.cli._drc_parser_args",
         "klayout_tools.cli.drc_cmd",
         "klayout_tools.cli.drc_text",
+        "klayout_tools._drc_edge_pair_hull",
         "klayout_tools.drc",
         "klayout_tools.drc_check_kinds",
         "klayout_tools.drc_crosscheck",
@@ -179,6 +180,7 @@
       "modules": [
         "klayout_tools.cli.env_provenance_cmd",
         "klayout_tools.env_provenance",
+        "klayout_tools.env_provenance_scrub",
         "klayout_tools.env_provenance_walk"
       ]
     },
@@ -282,6 +284,7 @@
         "klayout_tools._artifact_envelope",
         "klayout_tools.cli.functional_verification_cmd",
         "klayout_tools.functional_verification",
+        "klayout_tools.functional_verification_from_synthesize",
         "klayout_tools.functional_verification_initial_state",
         "klayout_tools.functional_verification_mutation",
         "klayout_tools.functional_verification_mutation_proposals",
@@ -432,7 +435,8 @@
       "description": "`klt lef_abstract` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.lef_abstract_cmd",
-        "klayout_tools.lef_abstract"
+        "klayout_tools.lef_abstract",
+        "klayout_tools.lef_abstract_no_layout"
       ]
     },
     "lvs": {
@@ -442,8 +446,10 @@
         "klayout_tools.cli.lvs_cmd",
         "klayout_tools.lvs",
         "klayout_tools.lvs_combine",
+        "klayout_tools.lvs_coverage",
         "klayout_tools.lvs_finfet",
         "klayout_tools.lvs_finfet_flatten",
+        "klayout_tools.lvs_finfet_power",
         "klayout_tools.lvs_flatten",
         "klayout_tools.lvs_gate_level",
         "klayout_tools.lvs_gate_level_convert",
@@ -662,6 +668,7 @@
         "klayout_tools._check_result",
         "klayout_tools._devices",
         "klayout_tools._digest",
+        "klayout_tools._git_tracked",
         "klayout_tools._jsongz",
         "klayout_tools._jsonnum",
         "klayout_tools._layout",
@@ -728,6 +735,7 @@
         "klayout_tools.signoff_multi_member",
         "klayout_tools.signoff_na",
         "klayout_tools.signoff_nothing_checked",
+        "klayout_tools.signoff_output",
         "klayout_tools.signoff_power_delivery",
         "klayout_tools.signoff_power_delivery_substrate",
         "klayout_tools.signoff_runset",
@@ -830,6 +838,7 @@
         "klayout_tools.sim_slug",
         "klayout_tools.sim_snm",
         "klayout_tools.sim_snm_meas",
+        "klayout_tools.sim_spiceinit",
         "klayout_tools.sim_staging",
         "klayout_tools.sim_step_resolution",
         "klayout_tools.sim_step_shadow",

@@ -53,6 +53,7 @@ from typing import (
 from . import _report_verify_hints as hints
 from . import signoff_foundry_cell as foundry_cell
 from . import signoff_nothing_checked as vacuous
+from ._git_tracked import is_untracked_working_tree_file, repo_scoped_candidates
 from ._jsongz import READ_ERRORS, open_text
 from ._jsonnum import is_number
 from ._provenance import INPUT_ROLE_LAYOUT, layout_geometry_digest, sha256_file
@@ -134,9 +135,9 @@ from .signoff_evidence_pin import (
     PIN_UNVERIFIABLE,
     content_hash_pin_state,
     generic_binding_check,
+    pin_disclosure,
     rehash_evidence_file,
     unanchored_detail,
-    unverifiable_pin_note,
 )
 
 # The fleet roll-up subsystem (issue #827, Phase 1c of epic #706) lives in
@@ -5242,6 +5243,11 @@ def _resolve_input_artifact_value(
     A plain absolute string (schema-1 `klt sta` evidence, issue #2879) is
     tried only as written: it is never re-rooted by stripping a guessed host
     prefix, so it verifies only where that exact path still exists.
+
+    **The grading basis is the git index, not the working tree** (issue
+    #5857): a candidate inside a functioning checkout whose index does
+    not track it is dropped here -- :mod:`klayout_tools._git_tracked`
+    holds the contract and the fallbacks.
     """
     candidates: list[str] = []
     if isinstance(value, str) and value:
@@ -5249,16 +5255,10 @@ def _resolve_input_artifact_value(
         if evidence_dir is not None and not os.path.isabs(value):
             candidates.append(os.path.join(evidence_dir, value))
     elif isinstance(value, Mapping) and value.get("scope") == "repo":
-        repo_relative = value.get("path")
-        if isinstance(repo_relative, str) and repo_relative:
-            root = (
-                repo_root
-                if repo_root is not None
-                else find_repo_root(evidence_dir or spec.get("cwd") or os.getcwd())
-            )
-            if root is not None:
-                candidates.append(os.path.join(root, repo_relative))
-    return list(dict.fromkeys(candidates))
+        candidates.extend(repo_scoped_candidates(value, spec, evidence_dir, repo_root))
+    return [
+        c for c in dict.fromkeys(candidates) if not is_untracked_working_tree_file(c)
+    ]
 
 
 def _input_artifact_candidates(
@@ -5613,15 +5613,8 @@ def _grade_evidence(
     )
     if pin_state == PIN_UNVERIFIABLE:
         # Issue #3747: say why -- the pin itself is ungradable for this kind.
-        return (
-            "unmet",
-            _REASON_UNVERIFIABLE_PROVENANCE,
-            None,
-            {
-                "content_hash_pin": PIN_UNVERIFIABLE,
-                "content_hash_pin_note": unverifiable_pin_note(check_kind, resolution),
-            },
-        )
+        pin = pin_disclosure(spec, resolution, check_kind=check_kind)
+        return "unmet", _REASON_UNVERIFIABLE_PROVENANCE, None, pin
     if pin_state == PIN_STALE:
         return "unmet", _REASON_STALE_EVIDENCE, None, hints.stale_pin(spec, resolution)
 
@@ -5667,7 +5660,14 @@ def _grade_check_outcome(
     :func:`_build_tier_item`'s own kind gate, as :func:`_kind_gated_refusal`
     does; that verdict carries
     :func:`~.signoff_nothing_checked.nothing_checked_item_detail` (issue
-    #5479), naming the artifact read though ``citation`` stays ``None``."""
+    #5479), naming the artifact read though ``citation`` stays ``None``.
+
+    Issue #5598: this return precedes :func:`_grade_evidence`'s staleness
+    gate, so it would otherwise hide the manifest ``content_hash`` pin --
+    a comparable, genuinely stale one included -- behind the envelope's own
+    failure, for every kind. :func:`~.signoff_evidence_pin.pin_disclosure`
+    carries it beside the verdict, never changing it; a stale pin also names
+    the failed comparison, as the staleness verdict's own detail does."""
     if _check_passed(kind, checked):
         return {}, None
     failure_detail = _critical_metric_detail(envelope)
@@ -5686,7 +5686,11 @@ def _grade_check_outcome(
             **failure_detail,
             **vacuous.nothing_checked_item_detail(envelope, _citation(resolution)),
         }
-    return {}, ("unmet", reason, None, failure_detail)
+    pin = pin_disclosure(spec, resolution, check_kind=kind)
+    if pin.get("content_hash_pin") == PIN_STALE:
+        # Name the failed comparison, exactly as the staleness verdict does.
+        pin = hints.stale_pin(spec, resolution)
+    return {}, ("unmet", reason, None, {**failure_detail, **pin})
 
 
 def _foundry_cell_exception_eligible(kind: str, envelope: dict[str, Any]) -> bool:
@@ -5721,7 +5725,8 @@ def _kind_gated_failure_detail(
 
     Issue #3063: the early return would otherwise hide a stale
     ``content_hash`` pin behind the campaign refusal until the sample is
-    raised. Disclosed beside the verdict, never changing it.
+    raised. Disclosed beside the verdict, never changing it -- via the
+    shared :func:`~.signoff_evidence_pin.pin_disclosure` since issue #5598.
 
     Issue #5479: a :data:`_REASON_NOTHING_CHECKED` refusal carries
     :func:`~.signoff_nothing_checked.nothing_checked_item_detail`, so this
@@ -5737,13 +5742,7 @@ def _kind_gated_failure_detail(
         _REASON_NEGATIVE_CONTROL_NOT_DETECTED,
     ):
         return {}
-    detail: dict[str, Any] = {"yield_campaign": campaign}
-    pin_state = content_hash_pin_state(
-        spec.get("content_hash"), resolution["content_hash"]
-    )
-    if pin_state is not None:
-        detail["content_hash_pin"] = pin_state
-    return detail
+    return {"yield_campaign": campaign, **pin_disclosure(spec, resolution)}
 
 
 def _bind_anchored_citation(
