@@ -36,6 +36,7 @@ from .signoff_attest import (
     _validate_header,
     _validated_command_checks,
 )
+from .signoff_attest_command import reset_durations
 from .signoff_attest_drift import drift_result
 
 #: ``--hash-kind`` values a stream attestation's regeneration claim accepts.
@@ -210,6 +211,7 @@ def _inventory_checks(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Run the item-2 inventory's declared checks; return them with the
     ``attestation.inventory`` block."""
+    reset_durations()
     inventory, inventory_hash = _read_inventory(inventory_path)
     inv_absolute = os.path.realpath(os.path.abspath(inventory_path))
     root = find_repo_root(os.path.dirname(absolute))

@@ -24,6 +24,11 @@ from klayout_tools.signoff_attest import (
 from klayout_tools.signoff_attest_command import (
     attach_durations,
 )
+from klayout_tools.signoff_attest_stream import (
+    build_stream_attestation,
+    check_stream_attestation,
+)
+from test_signoff_attest_item2 import _inv, _stream
 from test_signoff_attest_item8 import _analog_inventory, _attest, _repo
 
 
@@ -203,3 +208,40 @@ def test_text_line_names_the_observed_runtime():
     assert attestation_check_line({**failed, "duration_s": 3.4}).endswith(
         "timeout) in 3.4s"
     )
+
+
+def test_stream_skipped_local_only_check_has_no_duration(tmp_path):
+    # Stream sibling of test_skipped_local_only_check_has_no_duration: the
+    # item-2 builder reaches _command_check via _inventory_checks, which never
+    # entered _run_checks' reset, so an earlier build in the same process
+    # could serve its wall time to a carried check (#6250).
+    repo, stream = _stream(tmp_path)
+    local = {
+        "name": "lo",
+        "argv": ["python3", "-c", "print('lo')"],
+        "local_only": True,
+    }
+    inv = _inv(repo, [{"name": "ok", "argv": ["python3", "-c", "pass"]}, local])
+    envelope = build_stream_attestation(stream, inventory_path=inv)  # runs both
+    committed = repo / "evidence" / "item2.json"
+    committed.write_text(render_envelope(envelope))
+
+    result = check_stream_attestation(stream, str(committed), inventory_path=inv)
+    assert result["status"] == "match"
+    assert [c["name"] for c in result["skipped_checks"]] == ["lo"]
+    attach_durations(result["fresh"])
+    assert all("duration_s" not in c for c in result["skipped_checks"])
+    # The carried local_only check also stays in checks[], marked only by
+    # local_only: it never ran in this build, so it has no duration either.
+    carried = next(
+        c
+        for c in result["fresh"]["attestation"]["checks"]
+        if c["check"] == "command" and c.get("local_only")
+    )
+    assert "duration_s" not in carried
+    ran = [
+        c
+        for c in result["fresh"]["attestation"]["checks"]
+        if c["check"] == "command" and not c.get("local_only")
+    ]
+    assert all("duration_s" in c for c in ran)

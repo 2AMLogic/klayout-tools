@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Shared fetch/checksum/build boilerplate for scripts/install-*.sh (Icarus
-# Verilog, Verilator, Yosys) -- issue #687.
+# Verilog, Verilator, Yosys) -- issue #687 -- and, since #5635, the
+# scripts/fetch-*.sh PDK-data fetchers too.
 #
 # Diffing the three CI toolchain installers (added for Epic #391, issues
 # #417/#423) found the "pin a release, fetch it, verify its checksum,
@@ -34,6 +35,16 @@ sha256_of() {
     fi
 }
 
+# Upstream commit id from a GitHub tag tarball's pax global header (`git
+# archive` writes `comment=<40-hex>` there). Prints nothing when absent --
+# never guessed (issue #3786).
+tarball_commit() {
+    local sha
+    sha="$(gzip -dc "$1" 2>/dev/null | head -c 1024 | grep -aoE 'comment=[0-9a-f]{40}' | head -n1 | cut -d= -f2 || true)"
+    [[ "$sha" =~ ^[0-9a-f]{40}$ ]] && printf '%s\n' "$sha"
+    return 0
+}
+
 # check_marker <marker-file> <tag> <force> <tool-name>
 # Idempotency check shared by all three installers: if <marker-file>
 # exists, <force> is 0, and it already records <tag>, print the "already
@@ -51,14 +62,25 @@ check_marker() {
     fi
 }
 
-# fetch_and_verify <url> <expected-sha256> <dest-file>
+# fetch_and_verify <url> <expected-sha256> <dest-file> [progress]
 # Download <url> to <dest-file> with retry, then verify its SHA-256 matches
 # <expected-sha256>. Fails closed (non-zero exit, matching wording) on
 # fetch failure or checksum mismatch.
+#
+# The optional fourth argument turns on a progress bar for large downloads:
+# it swaps the silent `-fsL` for `-fL --progress-bar` while keeping every
+# retry flag -- a progress bar must never be the reason a multi-hundred-MB
+# fetch loses its retries (issue #5635: the inline copies this file
+# replaced gave a ~KB model file five retries while the ~400 MB PDK
+# tarballs got one attempt under `set -e`).
 fetch_and_verify() {
-    local url="$1" expected_sha256="$2" dest="$3"
+    local url="$1" expected_sha256="$2" dest="$3" progress="${4:-}"
+    local curl_flags=(-fsL --connect-timeout 15 --retry 3 --retry-all-errors)
+    if [[ -n "$progress" ]]; then
+        curl_flags=(-fL --progress-bar --connect-timeout 15 --retry 3 --retry-all-errors)
+    fi
     echo "Fetching $url ..."
-    if ! curl -fsL --retry 3 -o "$dest" "$url"; then
+    if ! curl "${curl_flags[@]}" -o "$dest" "$url"; then
         echo "error: failed to fetch $url" >&2
         exit 1
     fi
