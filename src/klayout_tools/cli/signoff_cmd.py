@@ -133,17 +133,18 @@ from ..signoff_attest import STREAM_ATTESTABLE_ITEM, write_attestation
 from ..signoff_attest_build import attach_build_drift, build_drift_line
 from ..signoff_attest_carry import compute_attestation as _compute_attestation
 from ..signoff_attest_carry import flag_problem as _skip_local_only_problem
-from ..signoff_attest_carry import skip_lines
-from ..signoff_attest_input import input_line, with_entry
+from ..signoff_attest_input import with_entry
 from ..signoff_attest_live import attach_live_fields
 from ..signoff_attest_text import attestation_check_line as _attestation_check_line
-from ..signoff_attest_text import check_label
+from ..signoff_attest_text import check_label, skip_lines
+from ..signoff_attest_text import print_attestation_text as _print_attestation_text
 from ..signoff_generator_batch import (
     GeneratorApprovalError,
     GeneratorExecution,
     resolve_execution,
 )
 from ..signoff_output import non_attest_problem, write_output_or_message
+from ..signoff_require_build import require_grading_ruleset_problem
 from .color import Palette, resolve_palette
 from .output import emit_error, emit_success, render_rerun_drift
 
@@ -165,6 +166,16 @@ _CHECK_EXIT_CODES = {"match": EXIT_PASS, "drifted": EXIT_FAIL}
 def run(args: argparse.Namespace) -> int:
     manifest_source = getattr(args, "manifest", None)
     fleet_source = getattr(args, "fleet", None)
+    # Issue #5847: assert the grading build before *anything* runs -- the
+    # guard also refuses the flag in the modes that produce no grade, so it
+    # must fire before --attest dispatch and --describe-grader too.
+    required = getattr(args, "require_grading_ruleset", None)
+    if required is not None:
+        problem = require_grading_ruleset_problem(
+            required, manifest_source, fleet_source
+        )
+        if problem:
+            return emit_error("signoff", problem, args.format)
     attest_result = _maybe_run_attest(args, manifest_source, fleet_source)
     if attest_result is not None:
         return attest_result
@@ -364,18 +375,6 @@ def _run_attest(
     attach_live_fields(result)
     emit_success(with_entry(result, output), args.format, _print_attestation_text)
     return EXIT_PASS if result["status"] == "pass" else EXIT_FAIL
-
-
-def _print_attestation_text(result: dict) -> None:
-    print(f"attest: T1 item {result['t1_item']}  status: {result['status']}")
-    attestation = result["attestation"]
-    print(f"checks: {attestation['passed_count']}/{attestation['check_count']} passed")
-    print(input_line(result, STREAM_ATTESTABLE_ITEM))
-    print()
-    for check in attestation["checks"]:
-        print(_attestation_check_line(check))
-    for line in skip_lines(result, check_label):
-        print(line)
 
 
 def _print_attestation_check_text(result: dict) -> None:

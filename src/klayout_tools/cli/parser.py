@@ -18,6 +18,7 @@ from ..equiv import SUPPORTED_SIM_BACKENDS
 from ..extract_parasitics import parse_parasitic_variants
 from ..render import DEFAULT_HEIGHT, DEFAULT_WIDTH
 from ..signoff_attest_carry import add_skip_local_only_argument
+from ..signoff_require_build import add_require_grading_ruleset_argument
 from . import (
     arith_gen_cmd,
     array_check_cmd,
@@ -2037,8 +2038,7 @@ def _add_signoff_parser(subparsers: argparse._SubParsersAction) -> None:
         default=[],
         help=(
             "path(s) to klt drc/lvs/extract/sim JSON envelope files, or "
-            "'-' to read one from stdin (mutually exclusive with "
-            "--manifest/--fleet)"
+            "'-' to read one from stdin (mutually exclusive with --manifest/--fleet)"
         ),
     )
     signoff_parser.add_argument(
@@ -2074,8 +2074,7 @@ def _add_signoff_parser(subparsers: argparse._SubParsersAction) -> None:
             "for grading evidence copied outside any git checkout (a source "
             "archive, a vendored copy, an unpacked CI artifact). Must be an "
             "existing directory. Only meaningful with --manifest/--fleet. "
-            "See docs/cli/signoff.md's 'Grading outside a git checkout' "
-            "section."
+            "See docs/cli/signoff.md's 'Grading outside a git checkout' section."
         ),
     )
     signoff_parser.add_argument(
@@ -2225,6 +2224,7 @@ def _add_signoff_parser(subparsers: argparse._SubParsersAction) -> None:
             "'Identifying the grading build' section."
         ),
     )
+    add_require_grading_ruleset_argument(signoff_parser)
     _add_format_arg(signoff_parser)
     # Issue #2227: `signoff` is the one verb that colours its `--format text`
     # rendering, and the rendering it colours is also a *committed* artifact.

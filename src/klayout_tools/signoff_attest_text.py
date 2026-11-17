@@ -1,12 +1,14 @@
-"""Text rendering of one ``klt signoff --attest`` check (split out of the CLI
-module for the file-size ratchet; issue #4848)."""
+"""Text rendering of ``klt signoff --attest`` (split out of the CLI module
+for the file-size ratchet; issue #4848, extended in issue #5847): one
+check's line, the ``[SKIP]`` lines, and a fresh attestation result."""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
-from .signoff_attest import failed_output_tail
+from .signoff_attest import STREAM_ATTESTABLE_ITEM, failed_output_tail
+from .signoff_attest_input import input_line
 
 
 def check_label(check: Mapping[str, Any]) -> str:
@@ -111,3 +113,30 @@ def attestation_check_line(check: dict) -> str:
         if hint:
             line += f"\n    hint: {hint}"
     return line
+
+
+def skip_lines(result: Mapping[str, Any], label: Callable[[Any], str]) -> list[str]:
+    """``[SKIP]`` text lines for a result's ``skipped_checks``."""
+    lines = []
+    for check in result.get("skipped_checks", []):
+        outcome = "pass" if check["passed"] else "fail"
+        lines.append(
+            f"[SKIP] {check['role']} {label(check)}: {' '.join(check['argv'])} "
+            f"(local_only, not run; committed outcome: {outcome})"
+            f"{documented_suffix(check)}"
+        )
+    return lines
+
+
+def print_attestation_text(result: dict) -> None:
+    """``--format text`` rendering of a fresh ``--attest`` result. Moved
+    verbatim out of the CLI module for the file-size ratchet (issue #5847)."""
+    print(f"attest: T1 item {result['t1_item']}  status: {result['status']}")
+    attestation = result["attestation"]
+    print(f"checks: {attestation['passed_count']}/{attestation['check_count']} passed")
+    print(input_line(result, STREAM_ATTESTABLE_ITEM))
+    print()
+    for check in attestation["checks"]:
+        print(attestation_check_line(check))
+    for line in skip_lines(result, check_label):
+        print(line)

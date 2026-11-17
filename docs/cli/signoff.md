@@ -137,6 +137,14 @@ klt signoff --attest {1,8,9,10} --inventory <file> --check <committed-envelope> 
   `3` with `status: "drifted"` (a `provenance.klt_version` entry in `drift[]`)
   when the committed envelope was produced by a different `klt` build. See
   "Build drift". Refused without `--attest` and `--check`.
+- `--require-grading-ruleset` — with `--manifest`/`--fleet` (render or
+  `--check`; issue #5847): refuse (exit `1`, error envelope on stderr,
+  nothing on stdout, no evidence command run) unless the running build's
+  `grading_ruleset_id` equals the given `sha256:<hex>` id — checked before
+  the manifest is read. Print the id with `--describe-grader` or
+  `klt version --format json`. Refused with `--attest`,
+  `--describe-grader` and plain envelope aggregation. See "Pinning the
+  grading build" below.
 - `--format` — `text` (default, a human-readable pass/fail summary) or
   `json` (this command's own JSON envelope, see below).
 - `--color` — when to colour `--format text` output: `auto` (default),
@@ -3118,6 +3126,55 @@ fleet-report schema, matching the same "adding new fields does not require a
 bump" rule under which `build`/`graded_by_build`/`build_t1_item_count`
 themselves landed (issues #2176, #2202) — see
 [`../json-contract.md`](../json-contract.md).
+
+### Pinning the grading build: `--require-grading-ruleset` (issue #5847)
+
+**A `--manifest`/`--fleet` render — or a `--check` re-grade — can be told
+which grading build it must be.** Passing
+`--require-grading-ruleset sha256:<grading_ruleset_id>` makes the command
+refuse — exit `1`, the error envelope on stderr, **zero bytes on stdout** —
+unless the running build's own `grading_ruleset_id` equals the given id. The
+check runs before the manifest is read and before any evidence command
+executes, so a refused render costs nothing and touches nothing. On a match,
+the output is byte-identical to the same run without the flag.
+
+The id to pin is what `--describe-grader` prints (above), or
+`klt version --format json`'s `grading_ruleset_id` field:
+
+```bash
+$ klt signoff --manifest manifest.json \
+    --require-grading-ruleset "$(klt version --format json | jq -r .grading_ruleset_id)"
+```
+
+The flag is refused (exit `1`) with `--attest`, `--describe-grader` and
+plain envelope aggregation — those modes produce no grade to pin. The value
+must be `sha256:` + 64 hex digits; case is normalised, anything else is
+refused naming that shape, as is a build that cannot compute its own id at
+all (`grading_ruleset_id: null` — never fabricated, see above).
+
+Why the id and not a version string: `klt_version` differs by provisioning
+route (wheel vs `git+…` vs editable — see "`build` describes the *install*"
+above), while two installs of byte-identical grading code report the *same*
+`grading_ruleset_id`. A version pin would refuse legitimate installs and
+accept illegitimate ones; the id does neither.
+
+**The redirect-truncation hazard is the caller's to close, not the tool's.**
+The typical verdict-of-record invocation redirects stdout
+(`klt signoff … > report.json`), and the shell truncates that target before
+`klt` starts — so even a refusing render cannot protect the file. Render to
+a temp file and move it into place only on success, or write with
+`-o FILE` (issue #5867, above), which writes only after a successful render
+and atomically:
+
+```bash
+klt signoff --manifest manifest.json \
+  --require-grading-ruleset "$(klt version --format json | jq -r .grading_ruleset_id)" \
+  --format json > report.tmp && mv report.tmp report.json
+```
+
+Under `--check` the flag means the same thing — the committed report is only
+re-graded by the pinned grading build (`--check` itself still never writes;
+exit `0` match, `3` drifted, unchanged).
 
 ### Item 7 is kind-restricted, per block kind
 
