@@ -2163,8 +2163,8 @@ interpreter and fails:
 ```
 
 This is deliberate (#4192, #5860, #5565), not a bug, and no inventory field
-or flag overrides it. Only `klt` itself is ever re-exposed from that directory
-(#5565); `python3`, `pip` and every other name stay stripped. Name the
+or flag overrides it. Every name in that directory stays stripped, `python3`
+and `pip` included. Name the
 interpreter that has the module instead — declare an **absolute interpreter
 path** in `argv` (e.g. `["/abs/path/to/venv/bin/python", "tools/check.py",
 "layout/top.gds"]`), or provision the module in an environment the declared
