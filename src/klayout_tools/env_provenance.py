@@ -662,18 +662,18 @@ def _assert_no_leaks(report: Mapping[str, Any]) -> None:
             )
 
 
-def render_path_field(entry: Mapping[str, Any] | None) -> str:
+def render_path_field(entry: Mapping[str, Any] | str | None) -> str:
     """Human-readable rendering of one :func:`repo_relative_path` entry.
 
-    Shared by :func:`render_text_lines` and any other ``--format text``
-    renderer that reports a normalised ``{path, scope}`` input field (e.g.
-    ``klt pex``/``klt sim``'s own ``layout``/``netlist``/``reference_netlist``/
-    ``request``/``schematic_netlist``/``checkpoint_path`` fields, issue
-    #1261) -- ``"repo"`` renders the repo-relative path itself, ``"external"``
-    renders ``<outside repo>`` (the absolute path is never rendered, even in
-    text mode), and anything else (``"absent"``, or a missing/malformed
-    entry) renders ``<unresolved>``.
+    Shared by :func:`render_text_lines` and any ``--format text`` renderer
+    of a normalised ``{path, scope}`` field (issue #1261): ``"repo"`` renders
+    the repo-relative path, ``"external"`` ``<outside repo>`` (never the
+    absolute path), anything else ``<unresolved>``; a bare ``str`` (a
+    request's own string echo) renders verbatim (issue #5666) so a schema
+    slip degrades to a less-informative line, never a traceback.
     """
+    if isinstance(entry, str):
+        return entry
     if not entry:
         return "<unresolved>"
     scope = entry.get("scope")

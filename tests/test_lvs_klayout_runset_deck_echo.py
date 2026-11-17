@@ -8,6 +8,7 @@ import os
 
 import pytest
 
+import lvs_tmp_repo
 from klayout_tools import lvs_runset
 from klayout_tools.env_provenance import lint_envelope_files
 from klayout_tools.lvs import check_lvs_report, rerun_lvs_report, run_lvs
@@ -15,6 +16,8 @@ from test_lvs_klayout_runset import (  # noqa: F401  (fixture used via pytestmar
     _request,
     fake_klayout,
 )
+
+tmp_path = lvs_tmp_repo.tmp_path  # #5666: the runset layout echo is repo-relative
 
 pytestmark = pytest.mark.usefixtures("fake_klayout")
 
@@ -59,7 +62,10 @@ def test_deck_file_flag_edge_forms_echo_verbatim(tmp_path, monkeypatch, request)
     )
     assert dotted["deck_file"] == "./pdk.lvs"
     assert dotted["provenance"]["runset"]["deck_file"] == "./pdk.lvs"
-    assert dotted["layout"] == "./l.gds" and dotted["reference"] == "./ref.sp"
+    # #5666: ``layout`` is the committable {path, scope} envelope; the caller's
+    # ``reference`` string echo is untouched and stays asserted verbatim.
+    assert dotted["layout"] == {"path": "l.gds", "scope": "repo"}
+    assert dotted["reference"] == "./ref.sp"
     assert dotted["deck_vars"] == {"feol": "true"}
     assert "feol=true" in fake["cmd"]
 

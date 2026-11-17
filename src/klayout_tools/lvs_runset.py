@@ -45,6 +45,7 @@ from typing import TYPE_CHECKING, Any
 
 from ._paths import resolve_tool_binary
 from ._provenance import build_provenance, sha256_file
+from .env_provenance import repo_relative_path, repo_root_for
 from .lvs_mismatch import _mismatch
 from .lvs_runset_census import _build_coverage, _class_census
 
@@ -539,14 +540,13 @@ POWER_PINS_RULE_NAMED_SUBCIRCUIT_PINS = "named-power-ground-pin-of-extracted-sub
 
 
 def runset_power_connectivity(netlist: Any) -> dict[str, Any]:
-    """The ``power_connectivity`` block for the runset's own extracted
-    netlist (``LayoutVsSchematic.netlist()``, issue #3206), via the same
-    :mod:`.lvs_power` walk the ``klayout`` engine uses: every extracted
-    subcircuit instance's power/ground pins must reach one consistent net.
-    ``unchecked`` (with a reason) when there is no extracted netlist, or it
-    holds no subcircuit instance with a supply-named pin -- a flat
-    transistor-level extraction has no instance pins to walk, and "no
-    evidence" is never reported as a clean verdict.
+    """The ``power_connectivity`` block for the runset's own extracted netlist
+    (``LayoutVsSchematic.netlist()``, issue #3206), via the same :mod:`.lvs_power` walk
+    the ``klayout`` engine uses: every extracted subcircuit instance's power/ground pins
+    must reach one consistent net. ``unchecked`` (with a reason) when there is no
+    extracted netlist, or it holds no subcircuit instance with a supply-named pin -- a
+    flat transistor-level extraction has no instance pins to walk, and "no evidence" is
+    never reported as a clean verdict.
     """
     from .lvs_power import (
         _power_connectivity_findings,
@@ -605,13 +605,12 @@ def runset_power_connectivity(netlist: Any) -> dict[str, Any]:
 
 
 def _empty_extraction_verdict(l2n: Any, reference_path: str | None) -> dict[str, Any]:
-    """Verdict for a db with no cross-reference whose extracted netlist holds
-    no devices: the runset recognized nothing, so its compare step never ran.
-    The layout side is empty and every reference device is an unmatched
-    ``device.unmatched`` finding (issue #4081). The reference netlist is the
-    one stored in the db when present, else ``reference_path`` parsed as SPICE.
-    ``{}`` when no reference netlist can be obtained (the caller then raises
-    its "no cross-reference" error).
+    """Verdict for a db with no cross-reference whose extracted netlist holds no
+    devices: the runset recognized nothing, so its compare step never ran. The layout
+    side is empty and every reference device is an unmatched ``device.unmatched``
+    finding (issue #4081). The reference netlist is the one stored in the db when
+    present, else ``reference_path`` parsed as SPICE. ``{}`` when no reference netlist
+    can be obtained (the caller then raises its "no cross-reference" error).
     """
     import klayout.db as kdb
 
@@ -692,13 +691,12 @@ def _empty_extraction_verdict(l2n: Any, reference_path: str | None) -> dict[str,
 def read_lvsdb_verdict(
     lvsdb_path: str, reference_path: str | None = None
 ) -> dict[str, Any]:
-    """Read ``lvsdb_path`` and derive the verdict, mismatches, census and
-    coverage from its cross-reference. Raises ``LvsError`` when the database
-    is unreadable or carries no cross-reference.
-    A db with no cross-reference *and no extracted layout devices* (the runset
-    recognized nothing, so it never compared) is graded instead: see
-    :func:`_empty_extraction_verdict`. ``reference_path`` is the reference
-    SPICE, used when the db does not carry the reference netlist.
+    """Read ``lvsdb_path`` and derive the verdict, mismatches, census and coverage from
+    its cross-reference. Raises ``LvsError`` when the database is unreadable or carries
+    no cross-reference. A db with no cross-reference *and no extracted layout devices*
+    (the runset recognized nothing, so it never compared) is graded instead: see
+    :func:`_empty_extraction_verdict`. ``reference_path`` is the reference SPICE, used
+    when the db does not carry the reference netlist.
     """
     import klayout.db as kdb
 
@@ -830,7 +828,12 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
     """Run ``request`` through the PDK runset and return the ``klt lvs``
     envelope. See this module's docstring; request fields are documented in
     ``docs/cli/lvs.md`` ("klayout-runset")."""
-    from .lvs import _DECK_FILE_GIVEN_KEY, SCHEMA_VERSION, LvsError
+    from .lvs import (
+        _DECK_FILE_GIVEN_KEY,
+        SCHEMA_VERSION,
+        LvsError,
+        _reference_conversion_echo,
+    )
 
     # Issue #5795: echo the caller's own relative --deck-file form (_merge_
     # deck_flags shadows the absolutized value); popped so no echo sees it.
@@ -842,7 +845,6 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
     timeout_s = float(options.get("runset_timeout_s", RUNSET_DEFAULT_TIMEOUT_S))
     binary = _resolve_klayout_binary(options, request_dir)
 
-    from .lvs import _reference_conversion_echo
     from .lvs_runset_reference import convert_reference
 
     work_dir = tempfile.mkdtemp(prefix="klt-lvs-runset-")
@@ -916,7 +918,7 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
         **_reference_conversion_echo(
             request["reference"].get("form", "plain-element"), request["reference"]
         ),
-        "layout": request["layout"]["file"],
+        "layout": repo_relative_path(layout, repo_root=repo_root_for(layout)),
         "reference": request["reference"]["netlist"],
         "top": top or verdict["top"],
         "reference_top": request["reference"].get("top") or verdict["reference_top"],
