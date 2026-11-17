@@ -50,7 +50,7 @@ from pathlib import Path
 
 import pytest
 
-from helpers.subprocess_fakes import fake_completed
+from helpers.subprocess_fakes import _patch_yosys_run, fake_completed
 from klayout_tools import env_provenance, synthesize
 from klayout_tools import pdk as pdk_module
 from klayout_tools.cli import main
@@ -697,39 +697,6 @@ def _write_memory_evidence_stats(
         handle.write(blackbox_listing)
 
 
-def _patch_yosys_run(monkeypatch, fake) -> None:
-    """Install a ``subprocess.run``-shaped fake across both Yosys seams.
-
-    Issue #5798: ``_run_yosys`` no longer spawns the ``yosys -s`` script run
-    through ``subprocess.run`` -- it goes through ``synthesize._spawn_yosys``
-    (``Popen`` in its own process group, so a timeout can SIGKILL a hung
-    ``yosys-abc`` grandchild with it). The ``yosys -V`` and ``help abc``
-    capability probes still go through ``subprocess.run`` directly. The
-    run-shaped fakes in this file were written against the single
-    ``subprocess.run`` seam, so this patches ``run`` exactly as before AND
-    routes the spawn seam through it -- late-bound at call time, so helpers
-    that re-patch ``run`` afterwards (e.g. ``_route_sv2v_to_real_subprocess``)
-    keep intercepting spawn calls too, and fakes that delegate to a captured
-    ``inner`` behave as they did before.
-
-    Tests exercising the REAL spawn path (the process-group regression tests
-    in ``test_synthesize_timeout.py``) patch neither seam and put a stub
-    ``yosys`` binary on ``PATH`` instead.
-    """
-    monkeypatch.setattr(synthesize.subprocess, "run", fake)
-
-    def spawn_via_run(cmd, **kwargs):
-        return synthesize.subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=kwargs.get("timeout"),
-            cwd=kwargs.get("cwd"),
-        )
-
-    monkeypatch.setattr(synthesize, "_spawn_yosys", spawn_via_run)
-
-
 def _stub_yosys_success(
     monkeypatch,
     *,
@@ -834,11 +801,10 @@ def _stub_yosys_success(
 
 def _record_yosys_scripts(monkeypatch) -> list[str]:
     """Wrap whatever `synthesize._spawn_yosys` stub is already installed so
-    every `yosys -s <script>` invocation's script path is appended to the
-    returned list (issue #1870: which of the two generated scripts Yosys is
-    actually handed is the behaviour under test, not an implementation
-    detail). Call *after* `_stub_yosys_success`; the seam is captured at
-    install time, so the recording chains through the installed stub."""
+    every `yosys -s <script>` script path is appended to the returned list
+    (issue #1870: which of the two generated scripts Yosys is handed is the
+    behaviour under test, not an implementation detail). Call *after*
+    `_stub_yosys_success`; install-time capture chains through the stub."""
     scripts: list[str] = []
     inner = synthesize._spawn_yosys
 

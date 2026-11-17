@@ -46,7 +46,7 @@ import klayout.db as kdb
 import pytest
 
 from helpers.cocotb_fakes import FakeCocotbRunner as _FakeRunner
-from helpers.subprocess_fakes import fake_completed
+from helpers.subprocess_fakes import _patch_yosys_run, fake_completed
 from klayout_tools import functional_verification as fv
 from klayout_tools import pdk as pdk_module
 from klayout_tools import place_and_route, synthesize
@@ -57,7 +57,6 @@ from klayout_tools.trajectory import (
     read_log,
     record_from_eval,
 )
-from test_synthesize import _patch_yosys_run
 
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
 

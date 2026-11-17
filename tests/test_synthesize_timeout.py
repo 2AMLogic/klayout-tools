@@ -8,13 +8,12 @@ import time
 
 import pytest
 
-from helpers.subprocess_fakes import fake_completed
-from klayout_tools import synthesize, synthesize_timeout
+from helpers.subprocess_fakes import _patch_yosys_run, fake_completed
+from klayout_tools import synthesize, synthesize_spawn, synthesize_timeout
 from klayout_tools.synthesize import SynthesizeError, run_synthesize
 from test_synthesize import (
     _ABC_HELP_WITH_DONT_USE,
     _base_request,
-    _patch_yosys_run,
     _setup_success_env,
     _stub_yosys_success,
     _write_request,
@@ -154,7 +153,7 @@ exec sleep 120
 
 
 @pytest.mark.skipif(
-    not synthesize._CAN_KILL_PROCESS_GROUP,
+    not synthesize_spawn._CAN_KILL_PROCESS_GROUP,
     reason="POSIX process groups required",
 )
 def test_timed_out_run_kills_the_grandchild_and_drains_streams(tmp_path, monkeypatch):
@@ -194,7 +193,7 @@ def test_timed_out_run_kills_the_grandchild_and_drains_streams(tmp_path, monkeyp
 
 
 @pytest.mark.skipif(
-    not synthesize._CAN_KILL_PROCESS_GROUP,
+    not synthesize_spawn._CAN_KILL_PROCESS_GROUP,
     reason="POSIX process groups required",
 )
 def test_group_kill_failure_never_masks_the_timeout(tmp_path, monkeypatch):
@@ -212,7 +211,7 @@ def test_group_kill_failure_never_masks_the_timeout(tmp_path, monkeypatch):
     def refusing_kill(proc):
         raise ProcessLookupError("no such process group")
 
-    monkeypatch.setattr(synthesize, "_kill_yosys_process_group", refusing_kill)
+    monkeypatch.setattr(synthesize_spawn, "_kill_yosys_process_group", refusing_kill)
     script = tmp_path / "synth.ys"
     script.write_text("")
 
@@ -231,7 +230,7 @@ def test_spawn_degrades_to_subprocess_run_without_process_groups(tmp_path, monke
         return fake_completed(returncode=0, stdout="ok\n")
 
     monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
-    monkeypatch.setattr(synthesize, "_CAN_KILL_PROCESS_GROUP", False)
+    monkeypatch.setattr(synthesize_spawn, "_CAN_KILL_PROCESS_GROUP", False)
     script = tmp_path / "s.ys"
     script.write_text("")
 

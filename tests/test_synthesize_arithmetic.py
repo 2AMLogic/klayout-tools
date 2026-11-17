@@ -20,6 +20,7 @@ import shutil
 
 import pytest
 
+from helpers.subprocess_fakes import _patch_yosys_run
 from klayout_tools import pdk as pdk_module
 from klayout_tools import synthesize
 from klayout_tools.synthesize import (
@@ -35,10 +36,8 @@ from klayout_tools.synthesize import (
     _write_script,
     run_synthesize,
 )
-from test_synthesize import _patch_yosys_run
 
 HAVE_YOSYS = shutil.which("yosys") is not None
-
 
 # --------------------------------------------------------------------------- #
 # request.arithmetic validation

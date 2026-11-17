@@ -225,7 +225,6 @@ import json
 import math
 import os
 import re
-import signal
 import subprocess
 import tempfile
 import uuid
@@ -303,6 +302,7 @@ from .synthesize_library_hint import (
 # `synthesize_memory.py` imports this module's helpers at call time only.
 from .synthesize_memory import collect_memory_evidence
 from .synthesize_netlist_normalize import rewrite_netlist
+from .synthesize_spawn import _spawn_yosys
 from .synthesize_x_scan import netlist_x_constant_warning
 
 #: Bumped only on a non-additive (breaking) change to this command's own
@@ -3090,87 +3090,6 @@ def _write_script_text(script_path: str, text: str) -> None:
 DEFAULT_YOSYS_TIMEOUT_S = 300.0
 
 
-#: Whether this platform can kill a child's whole process group -- the
-#: orphan-prevention mechanism of issue #5798. ``os.killpg``/``os.getpgid``
-#: exist on POSIX (Linux, macOS) and not on Windows, where the spawn degrades
-#: to a plain ``subprocess.run`` (single-child kill, today's behaviour).
-_CAN_KILL_PROCESS_GROUP = hasattr(os, "killpg") and hasattr(os, "getpgid")
-
-
-def _kill_yosys_process_group(proc: subprocess.Popen) -> None:
-    """SIGKILL the spawned child's whole process group (issue #5798).
-
-    ``proc`` was started in its own session (:func:`_spawn_yosys`), so its
-    process group holds every grandchild too -- Yosys runs ``yosys-abc`` as
-    a child during ``abc`` passes, and killing the direct child alone is
-    what orphaned a spinning abc past a watchdog kill (measured: one such
-    orphan at 88% CPU five hours after its run died).
-
-    May raise ``OSError`` (``ProcessLookupError`` if the group is already
-    gone, ``PermissionError`` if the sandbox refuses the signal); the
-    caller -- :func:`_spawn_yosys` -- is the best-effort boundary and must
-    never let that mask the error it is about to raise.
-    """
-    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-
-
-def _spawn_yosys(
-    cmd: list[str],
-    *,
-    timeout: float | None,
-    cwd: str | None,
-) -> subprocess.CompletedProcess:
-    """Run ``cmd`` to completion with both streams captured -- the seam
-    :func:`_run_yosys` spawns every ``yosys -s`` script run through
-    (issue #5798).
-
-    Where process groups are available (:data:`_CAN_KILL_PROCESS_GROUP`)
-    the child starts in its own session (``start_new_session=True``), so a
-    timeout can SIGKILL the whole group -- Yosys runs ``yosys-abc`` as a
-    grandchild, and a direct-child-only kill orphaned it. Otherwise this is
-    ``subprocess.run`` verbatim. The ``yosys -V`` and ``help abc``
-    capability probes spawn no abc child and never go through this seam.
-
-    A raised ``subprocess.TimeoutExpired`` carries the drained
-    stdout/stderr: ``communicate`` stops mid-read at the timeout, so after
-    the group kill both pipes are drained to EOF and the partial output
-    read so far is attached to the exception -- the fields a bare
-    ``Popen`` timeout leaves as ``None``, and which
-    :func:`_write_yosys_log` would otherwise silently drop.
-    """
-    if not _CAN_KILL_PROCESS_GROUP:
-        return subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd
-        )
-    proc = subprocess.Popen(
-        cmd,
-        cwd=cwd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        start_new_session=True,
-    )
-    try:
-        stdout, stderr = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        try:
-            _kill_yosys_process_group(proc)
-        except OSError:
-            # ProcessLookupError (group already gone) / PermissionError
-            # (sandbox refuses the signal): best effort by contract -- the
-            # timeout error below must never be masked.
-            pass
-        proc.wait()
-        # The group is dead (or the kill was refused and the child exited on
-        # its own), so both pipes reach EOF and this second communicate()
-        # returns what buffered before the timeout fired.
-        stdout, stderr = proc.communicate()
-        raise subprocess.TimeoutExpired(
-            cmd, timeout, output=stdout, stderr=stderr
-        ) from None
-    return subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
-
-
 def _run_yosys(
     script_path: str,
     *,
@@ -3196,21 +3115,13 @@ def _run_yosys(
     what lets :func:`_measure_candidate` (issue #1775) treat one hung
     arithmetic-architecture candidate's trial synthesis the same way it
     already treats any other failed trial: disqualified, not fatal to the
-    rest of the ``"auto"`` sweep.
-
-    A timed-out run raises :class:`SynthesizeError` exactly like any other
-    Yosys failure (never a bare ``subprocess.TimeoutExpired``) -- this is
-    what lets :func:`_measure_candidate` (issue #1775) treat one hung
-    arithmetic-architecture candidate's trial synthesis the same way it
-    already treats any other failed trial: disqualified, not fatal to the
     rest of the ``"auto"`` sweep. The kill takes the child's whole process
     group (issue #5798), so a ``yosys-abc`` grandchild mid-``abc`` pass
     cannot outlive the watchdog that ended its parent.
 
     ``cwd`` (issue #1844) is passed straight through to the spawn's own
-    ``cwd`` (:func:`_spawn_yosys` forwards it to ``subprocess``);
-    ``script_path`` itself is always
-    given as an absolute path, so ``cwd`` never affects locating the script
+    ``cwd``; ``script_path`` itself is always given as an absolute path,
+    so ``cwd`` never affects locating the script
     -- it only matters for a script :func:`_write_script` wrote with any
     relative-form embedded path (``repo_root`` given), which must be run
     with ``cwd=<that same repo_root>`` to resolve correctly. The default
@@ -3230,9 +3141,8 @@ def _run_yosys(
         _write_yosys_log(script_path, exc.stdout, exc.stderr)
         raise SynthesizeError(
             f"yosys did not complete within {timeout_s}s (script "
-            f"'{script_path}') -- process killed (if the run made no "
-            "progress, Yosys may be deadlocked reading yosys-abc's stdout; "
-            "the abc child has been killed with its process group)"
+            f"'{script_path}') -- process killed (a run hung on yosys-abc's "
+            "stdout has its abc child killed with the whole process group)"
         ) from exc
 
     _write_yosys_log(script_path, completed.stdout, completed.stderr)

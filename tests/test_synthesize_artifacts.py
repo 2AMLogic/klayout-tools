@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from helpers.subprocess_fakes import _patch_yosys_run
 from klayout_tools import synthesize
 from klayout_tools.synthesize import SynthesizeError, run_synthesize
 from test_synthesize import (
@@ -16,7 +17,6 @@ from test_synthesize import (
     _GCD_MODULE_STATS,
     _GCD_RTL,
     _abs_path,
-    _patch_yosys_run,
     _script_abc_log_path,
     _script_output_paths,
     _setup_success_env,
