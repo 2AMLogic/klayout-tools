@@ -17,6 +17,7 @@ import jsonschema
 import klayout.db as kdb
 import pytest
 
+from helpers.gf180mcu_landings import landed
 from klayout_tools.cli import main
 from klayout_tools.decks import (
     get_deck,
@@ -1714,7 +1715,7 @@ def _make_gf180mcu_four_layer_clean_layout() -> kdb.Layout:
 
     metal1 = layout.layer(34, 0)
     layout.set_info(metal1, kdb.LayerInfo(34, 0, "Metal1"))
-    top.shapes(metal1).insert(kdb.Box(3000, 0, 3300, 2000))
+    top.shapes(metal1).insert(kdb.Box(1900, -100, 2320, 2000))  # lands the contact
 
     _exempt_gf180mcu_comp_from_df12(layout)
     return layout
@@ -2274,7 +2275,7 @@ def test_run_drc_gf180mcu_mim_enclosing_via4_clean(tmp_path):
     path = tmp_path / "mim_enclosing_via4_clean.gds"
     layout.write(str(path))
 
-    report = run_drc(str(path), "gf180mcu")
+    report = run_drc(landed(path), "gf180mcu")
 
     assert report["status"] == "clean"
     assert report["violation_count"] == 0
@@ -2369,7 +2370,7 @@ def test_run_drc_gf180mcu_via_width_violation(
     path = tmp_path / f"{rule_prefix}_width_violation.gds"
     layout.write(str(path))
 
-    report = run_drc(str(path), "gf180mcu")
+    report = run_drc(landed(path), "gf180mcu")
 
     assert report["status"] == "violations"
     assert report["rule_counts"] == {f"{rule_prefix}.width.1": 1}
@@ -2400,7 +2401,7 @@ def test_run_drc_gf180mcu_via_space_violation(
     path = tmp_path / f"{rule_prefix}_space_violation.gds"
     layout.write(str(path))
 
-    report = run_drc(str(path), "gf180mcu")
+    report = run_drc(landed(path), "gf180mcu")
 
     assert report["status"] == "violations"
     assert report["rule_counts"] == {f"{rule_prefix}.space.1": 1}
@@ -2428,7 +2429,7 @@ def test_run_drc_gf180mcu_via_clean(rule_prefix, layer_tuple, layer_name, tmp_pa
     path = tmp_path / f"{rule_prefix}_clean.gds"
     layout.write(str(path))
 
-    report = run_drc(str(path), "gf180mcu")
+    report = run_drc(landed(path), "gf180mcu")
 
     assert report["status"] == "clean"
     assert report["violation_count"] == 0
@@ -2466,7 +2467,7 @@ def test_run_drc_gf180mcu_via_layers_now_covered_by_their_own_rules(tmp_path):
     path = tmp_path / "via_layers_covered.gds"
     layout.write(str(path))
 
-    report = run_drc(str(path), "gf180mcu")
+    report = run_drc(landed(path), "gf180mcu")
 
     assert report["status"] == "clean"
     for _rule_prefix, layer_tuple, _layer_name in _GF180MCU_VIA_LAYERS:
@@ -2592,7 +2593,7 @@ def test_run_drc_gf180mcu_contact_fixed_size_boundaries(
     path = tmp_path / f"contact_{case_id}.gds"
     layout.write(str(path))
 
-    report = run_drc(str(path), "gf180mcu")
+    report = run_drc(landed(path), "gf180mcu")
 
     assert report["rule_counts"].get("contact.width.1", 0) == expected_count
     if expected_count == 0:
@@ -2624,7 +2625,7 @@ def test_run_drc_gf180mcu_via_width_max_violation(
     path = tmp_path / f"{rule_prefix}_width_max_violation.gds"
     layout.write(str(path))
 
-    report = run_drc(str(path), "gf180mcu")
+    report = run_drc(landed(path), "gf180mcu")
 
     assert report["status"] == "violations"
     assert report["rule_counts"] == {f"{rule_prefix}.width.1": 1}
@@ -2654,7 +2655,7 @@ def test_run_drc_gf180mcu_via_width_max_elongated_bar_violation(
     path = tmp_path / f"{rule_prefix}_width_max_bar.gds"
     layout.write(str(path))
 
-    report = run_drc(str(path), "gf180mcu")
+    report = run_drc(landed(path), "gf180mcu")
 
     assert report["status"] == "violations"
     assert report["rule_counts"] == {f"{rule_prefix}.width.1": 1}
@@ -2741,12 +2742,11 @@ def _gf180mcu_legal_cut_box(cut: tuple[int, int], left: int, bottom: int) -> kdb
     """A cut square of exactly the size its own fixed-size rule requires --
     0.22um for Contact (`CO.1`), 0.26um for Via1-Via4 (`Vn.1`).
 
-    Both rules bound the cut from *both* sides (issue #2370), so there is no
-    single "comfortably legal" size that works for every cut layer the
-    enclosure fixtures below parametrize over: the one 300x300 dbu square
-    they shared while only the minimum half was enforced is now over CO.1's
-    and Vn.1's maxima alike, and would add a `<cut>.width.1` violation to
-    every enclosure case.
+    Both rules bound the cut from *both* sides (issue #2370), so no single
+    "comfortably legal" size works for every cut layer parametrized below:
+    the 300x300 dbu square they shared while only the minimum half was
+    enforced is over CO.1's and Vn.1's maxima alike, and would add a
+    `<cut>.width.1` violation to every enclosure case.
     """
     size = 220 if cut == (33, 0) else 260
     return kdb.Box(left, bottom, left + size, bottom + size)
@@ -2792,7 +2792,7 @@ def test_run_drc_gf180mcu_cut_enclosure_escape_violation(
         _gf180mcu_legal_cut_box(cut, 1000, 1000),  # exactly CO.1/Vn.1 size
     )
 
-    report = run_drc(str(path), "gf180mcu")
+    report = run_drc(landed(path), "gf180mcu")
 
     assert report["status"] == "violations"
     assert report["rule_counts"] == {rule_id: 1}
@@ -2846,7 +2846,7 @@ def test_run_drc_gf180mcu_cut_enclosure_marginal_violation(
         _gf180mcu_legal_cut_box(cut, 1000, 1000),
     )
 
-    report = run_drc(str(path), "gf180mcu")
+    report = run_drc(landed(path), "gf180mcu")
     rule_counts, violations = _without_grid_findings(report)
 
     assert report["status"] == "violations"
@@ -2876,7 +2876,7 @@ def test_run_drc_gf180mcu_cut_enclosure_clean(
         _gf180mcu_legal_cut_box(cut, 1000, 1000),
     )
 
-    report = run_drc(str(path), "gf180mcu")
+    report = run_drc(landed(path), "gf180mcu")
 
     assert report["status"] == "clean"
     assert report["violation_count"] == 0

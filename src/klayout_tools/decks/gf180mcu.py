@@ -552,6 +552,7 @@ from . import (
     UnsupportedDeviceMarker,
 )
 from .gf180mcu_bond_pad import BOND_PAD_GUIDELINE_UNMODELED_RULES
+from .gf180mcu_unmodeled import UNMODELED_DUALGATE_RULES
 
 # `RuleProvenance.source_repo`/`.commit` shared by every gf180mcu width/space
 # rule's provenance below (issue #747, piloted on this deck's 26 width/space
@@ -839,6 +840,7 @@ DECK: list[DrcRule] = [
         layer=(34, 0),  # Metal1 -- the conductor *above* the cut
         other_layer=(33, 0),  # Contact
         check="enclosing",
+        require_containment=True,  # #5915: cut lands on Metal1 only
         threshold_dbu=5,  # 0.005 um
         # DRM 7.12 Contact, rule "CO.6": "Metal1 overlap of contact" ->
         # 0.005um. Re-derived from the PDK's own executable rule deck (see
@@ -891,6 +893,7 @@ DECK: list[DrcRule] = [
         layer=(34, 0),  # Metal1
         other_layer=(35, 0),  # Via1
         check="enclosing",
+        require_containment=True,  # #5915: cut lands on Metal1 only
         threshold_dbu=0,  # 0.0 um
         # DRM 7.14 Vian (n = 1 to 5), rule "V1.3a": "metal1 overlap of via1"
         # -> 0.0um, i.e. the cut must land on metal1 but needs no margin.
@@ -909,6 +912,7 @@ DECK: list[DrcRule] = [
         layer=(36, 0),  # Metal2
         other_layer=(35, 0),  # Via1
         check="enclosing",
+        require_containment=True,  # #5915: cut lands on Metal2 only
         threshold_dbu=10,  # 0.01 um
         # DRM 7.14 Vian (n = 1 to 5), rule "V1.4a": "metal2 overlap of via1"
         # -> 0.01um. Re-derived from `rule_decks/via1.drc`, whose V1.4a is
@@ -949,6 +953,7 @@ DECK: list[DrcRule] = [
         layer=(36, 0),  # Metal2
         other_layer=(38, 0),  # Via2
         check="enclosing",
+        require_containment=True,  # #5915: cut lands on Metal2 only
         threshold_dbu=10,  # 0.01 um
         # DRM 7.14 Vian (n = 1 to 5), rule "V2.3b": "metal2 overlap of via2"
         # -> 0.01um. Re-derived from `rule_decks/via2.drc`, whose V2.3b is
@@ -962,6 +967,7 @@ DECK: list[DrcRule] = [
         layer=(42, 0),  # Metal3
         other_layer=(38, 0),  # Via2
         check="enclosing",
+        require_containment=True,  # #5915: cut lands on Metal3 only
         threshold_dbu=10,  # 0.01 um
         # DRM 7.14 Vian (n = 1 to 5), rule "V2.4a": "metal3 overlap of via2"
         # -> 0.01um. Re-derived from `rule_decks/via2.drc` (same
@@ -999,6 +1005,7 @@ DECK: list[DrcRule] = [
         layer=(42, 0),  # Metal3
         other_layer=(40, 0),  # Via3
         check="enclosing",
+        require_containment=True,  # #5915: cut lands on Metal3 only
         threshold_dbu=10,  # 0.01 um
         # DRM 7.14 Vian (n = 1 to 5), rule "V3.3b": "metal3 overlap of via3"
         # -> 0.01um. Re-derived from `rule_decks/via3.drc` (same
@@ -1011,6 +1018,7 @@ DECK: list[DrcRule] = [
         layer=(46, 0),  # Metal4
         other_layer=(40, 0),  # Via3
         check="enclosing",
+        require_containment=True,  # #5915: cut lands on Metal4 only
         threshold_dbu=10,  # 0.01 um
         # DRM 7.14 Vian (n = 1 to 5), rule "V3.4a": "metal4 overlap of via3"
         # -> 0.01um. Re-derived from `rule_decks/via3.drc`.
@@ -1071,6 +1079,7 @@ DECK: list[DrcRule] = [
         layer=(81, 0),  # Metal5
         other_layer=(41, 0),  # Via4
         check="enclosing",
+        require_containment=True,  # #5915: cut lands on Metal5 only
         threshold_dbu=10,  # 0.01 um
         # DRM 7.14 Vian (n = 1 to 5), rule "V4.4a": "metal5 overlap of via4"
         # -> 0.01um. Re-derived from `rule_decks/via4.drc`. Scoped, like
@@ -2692,57 +2701,6 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
     (226, 0): "LDMOS_XTOR",
 }
 
-#: Official gf180mcu rule ids this curated deck knowingly does *not*
-#: transcribe (issue #3791): the Dualgate (`dualgate.drc`) rules that need
-#: compound/cross-layer expressions `DrcRule` cannot evaluate (DV.1, DV.3,
-#: DV.6-DV.9) and the 5V/6V `_MV` columns of the Comp/Poly2/Nwell/LPW
-#: families, of which only DF.1a/DF.3a/DF.13/DF.14 are transcribed. Listed as
-#: `coverage.unmodeled_rules` so a `clean` verdict on a Dualgate layout is not
-#: read as full 5V/6V coverage. Remove an id here when its rule is added.
-_UNMODELED_DUALGATE_RULES: tuple[str, ...] = (
-    "DF.15a_MV",
-    "DF.15b_MV",
-    "DF.16_MV",
-    "DF.17_MV",
-    "DF.19_MV",
-    "DF.1b_MV",
-    "DF.2a_MV",
-    "DF.3c_MV",
-    "DF.4a_MV",
-    "DF.4b_MV",
-    "DF.4c_MV",
-    "DF.4d_MV",
-    "DF.4e_MV",
-    "DF.5_MV",
-    "DF.6_MV",
-    "DF.7_MV",
-    "DF.8_MV",
-    "DV.1",
-    "DV.3",
-    "DV.6",
-    "DV.7",
-    "DV.8",
-    "DV.9",
-    "LPW.1_MV",
-    "LPW.2a_MV",
-    "LPW.2b_MV",
-    "NW.1a_MV",
-    "NW.1b_MV",
-    "NW.2a_MV",
-    "NW.2b_MV",
-    "NW.5_MV",
-    "NW.6_MV",
-    "NW.7_MV",
-    "PL.1_MV",
-    "PL.1a_MV",
-    "PL.2_MV",
-    "PL.3b_MV",
-    "PL.4_MV",
-    "PL.5a_MV",
-    "PL.5b_MV",
-    "PL.7_MV",
-)
-
 #: Everything this deck knowingly does not transcribe (`coverage.unmodeled_rules`):
 #: ESD/guard-ring #3792, 10V LDMOS #4569, MT/MSLOT #3796, Metal1-5 EOL #3968,
 #: Dualgate #3791, DRM 9.2 bond-pad guidelines #4001 (see `decks.get_unmodeled_rules`).
@@ -2753,7 +2711,7 @@ UNMODELED_RULES: tuple[str, ...] = tuple(
             *_EFUSE_UNMODELED_RULES,
             *_MT_MSLOT_UNMODELED_RULES,
             *_METAL_EOL_UNMODELED_RULES,
-            *_UNMODELED_DUALGATE_RULES,
+            *UNMODELED_DUALGATE_RULES,
             *BOND_PAD_GUIDELINE_UNMODELED_RULES,
         )
     )

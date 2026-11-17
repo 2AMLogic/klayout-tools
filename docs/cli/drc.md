@@ -1127,8 +1127,32 @@ side is the existing `topmetal1.enclosing.topvia1.1`).
 
 Remaining limitations: `Cont` against `Activ | GatPoly` (Contact layer `6/0` is
 still unread by the sg13cmos5l deck) needs compound-region/population
-semantics and is **not** covered; other PDKs' via stacks (including sg13g2) have
-not been reviewed for this opt-in and keep the legacy behaviour.
+semantics and is **not** covered.
+
+gf180mcu is opted in (#5915) on every single-population cut side:
+`metal1.enclosing.contact.1`, `metal1.`/`metal2.enclosing.via1.1`,
+`metal2.`/`metal3.enclosing.via2.1`, `metal3.`/`metal4.enclosing.via3.1` and
+`metal5.enclosing.via4.1` (plus the pre-existing non-cut
+`ldmos_xtor.enclosing.mvpsd.1`). Four sides stay on the legacy behaviour
+because the cut lands on one of several disjoint populations and the engine
+has no compound-layer expression for "one of": `poly2.enclosing.contact.1` /
+`comp.enclosing.contact.1` (a contact lands on poly2 *or* comp), and
+`metal4.enclosing.via4.1` / `mim.enclosing.via4.1` (a MiM via4 lands on the
+`mim` plate rather than on Metal4). A fully orphan cut is therefore still not
+reported by those four rules. sky130 and sg13g2 have their own opt-in issues
+(#5737 and a sibling child of #5883) and keep the legacy behaviour until they
+land.
+
+asap7 has **no** cut-containment gap, and `require_containment` does not apply
+to it: it is a native KLayout DRC-DSL deck (`decks/asap7.drc`), not a curated
+`DrcRule` deck, and carries no `enclosing`/`enclosed` rule of the curated kind.
+Its via-level containment rules already report a fully orphan via:
+`V1.AUX.1`-`V3.AUX.1` and `V4.AUX.1`-`V7.AUX.1` are
+`via.not_inside(lower & upper)`, `V8.AUX.1`/`V9.AUX.1` the same against
+`M8 & M9` / `M9 & PAD`, and `V0.AUX.1` flags a V0 that does not interact with
+M1 and LISD/LIG. (A hand-drawn `V1` with no `M1`/`M2` nearby reports
+`V1.AUX.1` under `--engine klayout`.) The per-side `*.EN.*` rules there only
+measure a margin on vias that already land, so they need no flag.
 
 ### Sized/derived-layer rules (`DerivedLayer`)
 

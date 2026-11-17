@@ -452,13 +452,9 @@ def _separation_pair(
 #: `"violate"`. Both Via4 boxes are exactly 260x260 dbu -- `Vn.1`'s fixed
 #: size, whose maximum half is enforced as of issue #2370, so the larger
 #: Via4 boxes this fixture used before that would now trip `via4.width.1`
-#: on their own. Verified (this
-#: issue) to not incidentally trip any other gf180mcu `DrcRule` -- neither
-#: fixture draws Via1/Via2/Via3/MetalTop/Pad/Nwell/Comp/Poly2/Contact, the
-#: only other layers any *other* rule in this deck reads, and every
-#: single-layer width/space rule on Metal4/FuseTop/Via4 clears its own
-#: threshold by construction (a lone polygon has no `space_check` neighbour;
-#: `_ENCLOSED_SHAPE_SIZE_DBU`-plus geometry clears every width threshold).
+#: on their own. Both fixtures also draw a Metal5 landing over the Via4
+#: (`metal5.enclosing.via4.1` is `require_containment`, issue #5915); no other
+#: gf180mcu `DrcRule` trips.
 #: gf180mcu's `mim.space.1` (issue #1033) scopes its "separation" check's
 #: `region` side the same way, but its `other_layer` is *also* `Metal4` --
 #: `run_drc()` additionally excludes any `Metal4` polygon that itself
@@ -479,6 +475,7 @@ _DERIVED_LAYER_FIXTURES: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
                 {"layer": [75, 0], "box": [0, 0, 6000, 6000]},  # FuseTop
                 {"layer": [46, 0], "box": [-3000, -3000, 9000, 9000]},  # Metal4
                 {"layer": [41, 0], "box": [6900, 0, 7160, 260]},  # Via4 (escapes)
+                {"layer": [81, 0], "box": [-3000, -3000, 9000, 9000]},  # M5
             ]
         },
         {  # clean: Via4 sits >= 500 dbu inside the derived region on every side
@@ -486,6 +483,7 @@ _DERIVED_LAYER_FIXTURES: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
                 {"layer": [75, 0], "box": [0, 0, 6000, 6000]},  # FuseTop
                 {"layer": [46, 0], "box": [-3000, -3000, 9000, 9000]},  # Metal4
                 {"layer": [41, 0], "box": [2870, 2870, 3130, 3130]},  # Via4
+                {"layer": [81, 0], "box": [-3000, -3000, 9000, 9000]},  # M5
             ]
         },
     ),
@@ -498,12 +496,14 @@ _DERIVED_LAYER_FIXTURES: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
             "shapes": [
                 {"layer": [49, 0], "box": [0, 0, 1000, 1000]},  # SAB
                 {"layer": [33, 0], "box": [1100, 400, 1320, 620]},  # Contact
+                {"layer": [34, 0], "box": [1050, 300, 1700, 720]},  # M1
             ]
         },
         {  # clean: contact 250 dbu (> 150) from the SAB's right edge
             "shapes": [
                 {"layer": [49, 0], "box": [0, 0, 1000, 1000]},  # SAB
                 {"layer": [33, 0], "box": [1250, 400, 1470, 620]},  # Contact
+                {"layer": [34, 0], "box": [1050, 300, 1700, 720]},  # M1
             ]
         },
     ),

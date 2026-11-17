@@ -225,7 +225,7 @@
     },
     {
       "path": "src/klayout_tools/decks/gf180mcu.py",
-      "lines": 4096
+      "lines": 4054
     },
     {
       "path": "src/klayout_tools/decks/history.py",
