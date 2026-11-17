@@ -45,6 +45,7 @@ from typing import TYPE_CHECKING, Any
 
 from ._paths import resolve_tool_binary
 from ._provenance import build_provenance, sha256_file
+from .env_provenance import repo_relative_path, repo_root_for
 from .lvs_mismatch import _mismatch
 from .lvs_runset_census import _build_coverage, _class_census
 
@@ -919,7 +920,7 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
         "schema_version": SCHEMA_VERSION,
         "engine": RUNSET_ENGINE,
         **rr.reference_conversion_echo(request["reference"], passthrough),
-        "layout": request["layout"]["file"],
+        "layout": repo_relative_path(layout, repo_root=repo_root_for(layout)),
         "reference": request["reference"]["netlist"],
         "top": top or verdict["top"],
         "reference_top": request["reference"].get("top") or verdict["reference_top"],
