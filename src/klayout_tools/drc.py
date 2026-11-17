@@ -96,7 +96,7 @@ from .drc_layer_selection import (
     select_other_region,
     selection_empties_every_top_cell,
 )
-from .drc_report_check import _report_hash_checks
+from .drc_report_check import report_checks, resolve_report_deck
 from .drc_text_exempt import text_exempt
 from .layers import layers_report
 from .metrics import is_registered
@@ -2534,14 +2534,14 @@ def drc_exit_code(report: dict[str, Any]) -> int:
 
 
 def check_drc_report(
-    report_path: str, *, input_path: str | None = None
+    report_path: str, *, input_path: str | None = None, deck_path: str | None = None
 ) -> dict[str, Any]:
     """``klt drc --check`` (cheap mode, issue #1106): verify a previously
     committed ``klt drc --format json`` report at ``report_path`` still
     reproduces, without re-running the DRC engine at all.
 
     Re-hashes the input layout stream (``committed["file"]``) and the deck
-    (:func:`_deck_path_for_report`) named in the committed report and
+    (:func:`resolve_report_deck`; ``deck_path`` = ``--deck-file`` wins) and
     compares each against the ``sha256:``-prefixed digest already recorded
     in its own ``provenance.input.content_hash``/``provenance.deck
     .content_hash`` -- reusing :func:`klayout_tools._provenance
@@ -2560,33 +2560,13 @@ def check_drc_report(
     traceback.
     """
     committed = _load_committed_report(report_path, DrcError)
-    if committed.get("mode") == "crosscheck":
-        # Issue #4986: an ``--engine both`` envelope nests each engine's own
-        # report under ``reports.<engine>``; check each with the same logic,
-        # naming fields with the engine prefix. A null native side (engine
-        # failed / unavailable) is skipped, never reported as drift.
-        reports = committed.get("reports")
-        reports = reports if isinstance(reports, dict) else {}
-        checks = []
-        for engine in ("curated", "native"):
-            sub = reports.get(engine)
-            if isinstance(sub, dict):
-                checks.extend(
-                    _report_hash_checks(
-                        sub,
-                        report_path=report_path,
-                        input_path=input_path,
-                        prefix=f"reports.{engine}.",
-                    )
-                )
-        if not checks:
-            raise DrcError(
-                f"crosscheck report has no embedded 'reports.curated' report "
-                f"to check: {report_path}"
-            )
-    else:
-        checks = _report_hash_checks(
-            committed, report_path=report_path, input_path=input_path, prefix=""
+    checks = report_checks(
+        committed, report_path=report_path, input_path=input_path, deck_path=deck_path
+    )
+    if not checks:
+        raise DrcError(
+            f"crosscheck report has no embedded 'reports.curated' report "
+            f"to check: {report_path}"
         )
     return build_check_result(report_path=report_path, checks=checks)
 
@@ -2629,7 +2609,7 @@ def _recorded_tile(committed: dict[str, Any]) -> tuple[int, int] | None:
 
 
 def rerun_drc_report(
-    report_path: str, *, input_path: str | None = None
+    report_path: str, *, input_path: str | None = None, deck_path: str | None = None
 ) -> dict[str, Any]:
     """``klt drc --check <report> --rerun`` (full mode, issue #1106):
     verify a previously committed ``klt drc --format json`` report at
@@ -2679,7 +2659,22 @@ def rerun_drc_report(
     if not deck:
         raise DrcError(f"committed report has no 'deck' field to rerun: {report_path}")
 
+    if deck_path is not None and committed.get("engine") != "klayout":
+        raise DrcError(
+            "--deck-file cannot be combined with --check --rerun on a curated report"
+        )
     if committed.get("engine") == "klayout":
+        # Issue #5709: same resolver as --check (override, recorded, packaged).
+        deck, missing = resolve_report_deck(committed, deck_path)
+        if missing is not None:
+            raise DrcError(
+                f"deck not found: {missing['resolved']} (packaged name "
+                f"{missing['name']!r}); {missing['hint']}"
+            )
+        if deck is None:
+            raise DrcError(
+                f"committed report has no resolvable deck to rerun: {report_path}"
+            )
         from .drc_klayout_engine import _rerun_assertion_kwargs, run_drc_klayout_engine
 
         # A committed report carrying `engine_deck_errors` was produced with
