@@ -278,15 +278,15 @@ class _MemberScheduler:
                 return job_id
         return None
 
-    def _admit_replacements(self) -> None:
+    def _admit_replacements(self, budget: float) -> None:
         """Issue #5849: a replacement member is admitted only while no
         abandoned member still holds a ``pending`` job, so the set's fleet
         footprint matches its thread footprint instead of growing once per
         abandonment under congestion. A job that never launches cannot starve
-        the rest: once one stays ``pending`` a further ``launch_budget`` past
-        its member's abandonment, the unstarted members become
-        ``not_launched`` entries naming the held job rather than being
-        submitted (caller holds ``cond``)."""
+        the rest: once one stays ``pending`` a further ``budget`` (the launch
+        budget, narrowed by the caller) past its member's abandonment, the
+        unstarted members become ``not_launched`` entries naming the held job
+        rather than being submitted (caller holds ``cond``)."""
         held = self._held_job()
         if held is None:
             while self.replacement_debt > 0 and self.pending:
@@ -300,12 +300,12 @@ class _MemberScheduler:
             if (
                 abandoned_at is None
                 or job_id is None
-                or now - abandoned_at <= self.launch_budget
+                or now - abandoned_at <= budget
             ):
                 continue  # inside the grace window, or not scan-abandoned
             message = (
                 f"batch job {job_id} of abandoned member {index} is still "
-                f"pending {self.launch_budget:g}s after its abandonment; "
+                f"pending {budget:g}s after its abandonment; "
                 "not submitting the remaining members while it holds fleet "
                 "capacity -- cancel or attach it by job id"
             )
@@ -334,7 +334,7 @@ class _MemberScheduler:
             )
             self.abandoned_at[index] = time.monotonic()
             self.replacement_debt += 1
-        self._admit_replacements()
+        self._admit_replacements(self.launch_budget)
 
     def _flush_interrupted(self, exc: BaseException) -> None:
         with self.cond:
