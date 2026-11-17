@@ -1931,7 +1931,7 @@ from klayout_tools.pdk import resolve_output_dbu, resolve_pdk_dbu
 
 info = find_pdk(variant="gf180mcuA")
 
-resolve_pdk_dbu(info)     # 0.0005 -- the tech LEF's DATABASE MICRONS 2000 truth
+resolve_pdk_dbu(info)  # 0.0005 -- the tech LEF's DATABASE MICRONS 2000 truth
 resolve_output_dbu(info)  # 0.001  -- the dbu a *stream for* this PDK must be at
 ```
 
