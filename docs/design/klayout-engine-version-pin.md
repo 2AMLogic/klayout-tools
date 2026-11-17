@@ -254,7 +254,8 @@ written by the 0.28.x serializer, issue
   `src/klayout_tools/extract_parasitics.py:622,624,991,993,1603,2058`;
   `src/klayout_tools/power.py:1287,1327,2138`;
   `src/klayout_tools/tap_distance.py:266` — re-derive with
-  `git grep -n 'polygons_of_net(net,' -- src`.
+  `git grep -nE 'polygons_of_net\([a-z_]+,' -- src`, dropping the two
+  docstring/comment mentions it also matches.
 
   Installing an older engine anyway means bypassing the floor
   (`pip install --no-deps klayout-tools==<ver>` next to the older
