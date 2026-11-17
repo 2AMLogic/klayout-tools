@@ -1938,15 +1938,18 @@ resubmitted (that job may still be running). Each
 written before these fields existed carries no `state` and is only ever polled.
 
 The fingerprint is the resume checkpoint's own, so a changed request (units,
-seed, `hosts`, netlist) or an unreadable `batch-shards.json` is refused with
+seed, netlist) or an unreadable `batch-shards.json` is refused with
 exit 1 and error code `resume_fingerprint_mismatch` before any S3 write; delete
 the file or drop `--resume`. Without `--resume` an existing map is ignored and
 overwritten. The map is removed when the sweep finishes with no unrun corner;
 a sharded `--attach` keeps it (a multi-leg caller such as `klt pex --attach`
 removes it once every leg has collected, so an interrupted attach can be re-run).
-A refusal names what differed: `hosts` (map vs. request) and/or the fingerprint
-(shown as hash prefixes; it is one hash of units, seed, netlist and settings, so
-which of those changed is not recoverable). A shard lost at the collect stage
+A refusal names the fingerprint (shown as hash prefixes; it is one hash of
+units, seed, netlist and settings, so which of those changed is not
+recoverable). `hosts` is not compared on resume
+([#4821](https://github.com/2AMLogic/klayout-tools/issues/4821)): a changed
+shard count re-splits the remaining units under the new count. A shard lost
+at the collect stage
 ends its `lost_shard` message with `[remote job <id>: finished|failed|timeout|
 running|unknown]`, the job's `status.json` state at that moment: `finished`
 means re-attaching can collect it, `unknown` means no status was readable.
