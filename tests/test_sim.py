@@ -6279,13 +6279,13 @@ def _stripped_report(report: dict) -> dict:
     compared for byte-identical equality (see docs/cli/sim.md's
     byte-exact-fixture caveat)."""
     clone = json.loads(json.dumps(report))
-    clone["environment"].pop("engine_version", None)
     # `environment.backend.source` (issue #2977) records how the backend was
     # chosen (flag/request/default), which differs by design between runs
     # that otherwise execute identically.
     clone["environment"].pop("backend", None)
-    # Issue #2970: legitimately differs between `local` and `local-parallel`.
-    clone["environment"].pop("threads_per_worker", None)
+    # Issues #2970/#5648: thread pin + its `.spiceinit` differ by backend.
+    for key in ("engine_version", "threads_per_worker", "ngspice_init"):
+        clone["environment"].pop(key, None)
     for corner in clone["corners"]:
         corner.pop("runtime_s", None)
     return clone
