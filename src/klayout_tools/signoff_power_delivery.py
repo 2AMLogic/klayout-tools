@@ -667,7 +667,8 @@ def _resolve_power_delivery_parts(
     :data:`~klayout_tools.signoff._REASON_INVALID_EVIDENCE` instead of
     letting the last one named win. Last-wins was order-dependent -- a
     failing stream cited *first* beside a clean one graded ``"met"`` on the
-    clean one alone -- and once the grouped form (:func:`_normalize_evidence_parts`)
+    clean one alone -- and once the grouped form
+    (:func:`~klayout_tools.signoff_grouped_citations.normalize_evidence_groups`)
     gives several streams a shape of their own, the mistake is unambiguous.
     """
     from .signoff import (
@@ -1641,35 +1642,6 @@ def _port_accessibility_verdict(
     )
 
 
-def _missing_parts_verdict(
-    by_kind: dict[str, Any],
-) -> tuple[str, str | None, None, dict[str, Any]]:
-    """The ``"unmet"`` verdict for a cited set lacking the ``erc`` and/or
-    ``lvs`` part (issue #4193). An ERC part whose spec does not resolve
-    reports its own, more actionable reason first; otherwise
-    :data:`_REASON_POWER_DELIVERY_PARTS_MISSING` names the absent parts and
-    credits the supplies a resolved ERC spec proved. Never ``"met"``.
-    """
-    erc = by_kind.get("erc")
-    supply_spec = None
-    if erc is not None:
-        supply_spec, reason, detail = _resolve_erc_supply_spec(erc)
-        if supply_spec is None:
-            return "unmet", reason, None, detail
-    block: dict[str, Any] = {
-        "missing_parts": [k for k in ("erc", "lvs") if k not in by_kind],
-        "cited_parts": [k for k in _POWER_DELIVERY_PART_ORDER if k in by_kind],
-    }
-    if supply_spec is not None:
-        block["supply_nets"] = list(supply_spec["supply_nets"])
-    return (
-        "unmet",
-        _REASON_POWER_DELIVERY_PARTS_MISSING,
-        None,
-        {"power_delivery": block},
-    )
-
-
 def _par_tapless_field(par: dict[str, Any] | None) -> dict[str, Any]:
     """``{"tapless": True}`` when the cited ``place-and-route`` part states
     ``power.tapless`` is ``true`` (issue #4199), else ``{}``; split out of
@@ -1816,22 +1788,18 @@ def _grade_power_delivery(
     renders ``citation: null``, as it always has.
     """
     from .signoff import _citation
+    from .signoff_grouped_citations import (
+        missing_parts_verdict as _missing_parts_verdict,
+    )
+    from .signoff_grouped_citations import (
+        parts_citation_or_none,
+    )
 
     by_kind, reason = _resolve_power_delivery_parts(specs, repo_root)
     if by_kind is None:
         return "unmet", reason, None, {}
 
-    parts_citation = (
-        {
-            "parts": [
-                _citation(by_kind[kind])
-                for kind in _POWER_DELIVERY_PART_ORDER
-                if kind in by_kind
-            ]
-        }
-        if failed_parts_citation
-        else None
-    )
+    parts_citation = parts_citation_or_none(by_kind) if failed_parts_citation else None
 
     erc = by_kind.get("erc")
     lvs = by_kind.get("lvs")
@@ -1870,12 +1838,7 @@ def _grade_power_delivery(
         by_kind, supply_spec["supply_nets"], power_port_policy
     )
     if port_reason is not None:
-        return (
-            "unmet",
-            port_reason,
-            parts_citation,
-            {"power_ports": power_ports_block},
-        )
+        return "unmet", port_reason, parts_citation, {"power_ports": power_ports_block}
 
     # The compound citation keeps the single-citation contract every existing
     # consumer reads (`file`/`command`/`kind`/`check_status`/`content_hash`/
@@ -1955,70 +1918,6 @@ def _grade_power_delivery(
     return "met", None, citation, {}
 
 
-def _grade_power_delivery_groups(
-    groups: list[list[dict[str, Any]]],
-    *,
-    partition_kind: str,
-    power_port_policy: dict[str, Any] | None = None,
-    repo_root: str | Path | None = None,
-) -> tuple[str, str | None, dict[str, Any] | None, dict[str, Any], dict[str, Any]]:
-    """Grade T1 item 11 over a **set of groups** (issue #5597) -- each group
-    independently through :func:`_grade_power_delivery`, exactly as
-    :func:`~klayout_tools.signoff._grade_multi_citation` aggregates item 4's
-    per-cell list -- and return ``(status, reason, citation, failure_detail,
-    extra)``.
-
-    The item is ``"met"`` only when **every** group grades ``met``; a
-    failing group makes it ``"unmet"`` with that group's reason (the first
-    failing one named) and every failing group's label under
-    ``detail.failed_citations`` -- so the order of groups in the manifest can
-    no longer decide the verdict. ``extra`` carries the multi-citation keys
-    item 4's list form already emits: ``citations_graded`` (one entry per
-    group, on ``met`` and ``unmet` alike, labelled by the group's leading
-    part), ``citations`` (one compound citation per group; a failing group
-    carries only its resolved ``parts``, since ``power_delivery`` states
-    facts about a proven grid), and the item-level ``citation`` is the
-    leading group's -- the contract every pre-existing consumer reads.
-    """
-    from .signoff import _citation_label
-
-    graded = [
-        (group,)
-        + _grade_power_delivery(
-            group,
-            partition_kind=partition_kind,
-            power_port_policy=power_port_policy,
-            repo_root=repo_root,
-            failed_parts_citation=True,
-        )
-        for group in groups
-    ]
-    extra: dict[str, Any] = {
-        "citations_graded": [
-            {
-                "citation": _citation_label(group[0]),
-                "status": status,
-                "reason": reason,
-            }
-            for group, status, reason, _, _ in graded
-        ]
-    }
-    failed = [entry for entry in graded if entry[1] != "met"]
-    if failed:
-        detail = {
-            **failed[0][4],
-            "failed_citations": [_citation_label(entry[0][0]) for entry in failed],
-        }
-        # Unmet still accounts for every resolved group's cited envelopes
-        # (`citations` entries in group order; a group whose *resolution*
-        # failed -- stale, errored, unreadable -- has no citation to carry,
-        # and its reason names it instead).
-        extra["citations"] = [entry[3] for entry in graded if entry[3] is not None]
-        return "unmet", failed[0][2], None, detail, extra
-    extra["citations"] = [entry[3] for entry in graded]
-    return "met", None, graded[0][3], {}, extra
-
-
 def _build_power_delivery_item(
     *,
     tier: str,
@@ -2044,7 +1943,7 @@ def _build_power_delivery_item(
     the whole item :data:`~klayout_tools.signoff._REASON_INVALID_EVIDENCE`
     rather than being
     silently dropped from the cited set), and that grading is delegated to
-    :func:`_grade_power_delivery`.
+    :func:`~klayout_tools.signoff_grouped_citations.grade_grouped_power_delivery`.
 
     ``partition_kind`` -- the partition being graded -- both selects the
     per-block-kind rule :func:`_grade_power_delivery` applies and (issue
@@ -2065,13 +1964,11 @@ def _build_power_delivery_item(
     source of truth for every rendered item.
     """
     from .signoff import (
-        _REASON_INVALID_EVIDENCE,
         _REASON_NO_EVIDENCE,
         _REASON_UNGRADEABLE_BY_BUILD,
         _lookup_evidence,
-        _normalize_evidence_parts,
-        with_member_coverage,
     )
+    from .signoff_grouped_citations import grade_grouped_power_delivery
 
     citation = None
     failure_detail: dict[str, Any] = {}
@@ -2083,31 +1980,13 @@ def _build_power_delivery_item(
     if raw_entry is not None and not graded_by_build:
         reason = _REASON_UNGRADEABLE_BY_BUILD
     elif raw_entry is not None:
-        # `_normalize_evidence_parts` returns groups (issue #5597): the flat
-        # form is the one-group case, the nested form one compound citation
-        # per element. One group grades exactly as always -- byte-identical
-        # output, no grouped keys -- and only a multi-group citation gains
-        # the per-group aggregation.
-        groups = _normalize_evidence_parts(raw_entry)
-        if groups is None:
-            reason = _REASON_INVALID_EVIDENCE
-        elif len(groups) == 1:
-            status, reason, citation, failure_detail = _grade_power_delivery(
-                groups[0],
-                partition_kind=partition_kind,
-                power_port_policy=power_port_policy,
-                repo_root=repo_root,
-            )
-        else:
-            status, reason, citation, failure_detail, extra = (
-                _grade_power_delivery_groups(
-                    groups,
-                    partition_kind=partition_kind,
-                    power_port_policy=power_port_policy,
-                    repo_root=repo_root,
-                )
-            )
-            extra = with_member_coverage(item_id, True, raw_entry, extra)
+        status, reason, citation, failure_detail, extra = grade_grouped_power_delivery(
+            item_id,
+            raw_entry,
+            partition_kind=partition_kind,
+            power_port_policy=power_port_policy,
+            repo_root=repo_root,
+        )
 
     return {
         "tier": tier,

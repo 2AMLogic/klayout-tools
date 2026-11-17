@@ -145,6 +145,8 @@ from ..signoff_generator_batch import (
     GeneratorExecution,
     resolve_execution,
 )
+from ..signoff_grouped_citations import print_group_coverage as _print_group_coverage
+from ..signoff_grouped_citations import print_power_delivery as _print_power_delivery
 from ..signoff_output import non_attest_problem, write_output_or_message
 from .color import Palette, resolve_palette
 from .output import emit_error, emit_success, render_rerun_drift
@@ -738,89 +740,6 @@ def _print_regeneration(regeneration: Any) -> None:
     )
 
 
-def _print_power_delivery(citation: dict) -> None:
-    """Print T1 item 11's compound-citation summary (issue #2025), or
-    nothing at all for every other item's single-artifact citation.
-
-    Its own function for the same reason :func:`_print_input_verified` is
-    (and since issue #2234's extra line, the same C901 budget reason):
-    the caller, :func:`_print_tier_report_text`, is already at the
-    complexity ratchet's limit.
-
-    The second line (issue #2234) names the ties whose tap geometry rested
-    on a caller **assertion** (``ties[].tap_boxes``) rather than on a drawn
-    PDK marker. It is disclosure only -- such a tie is graded ``met``
-    exactly as a marker-derived one, and `klt erc` has already rejected a
-    degenerate or unmatched assertion before the citation could reach here
-    -- but leaving that provenance reachable only through the JSON would
-    make the two indistinguishable in the rendering a reviewer actually
-    reads. Printed only when non-empty, so a purely marker-derived report
-    (and every report produced before the field existed) renders exactly as
-    it did before.
-
-    The third line (issue #2255) does the same for the *well* side: the ties
-    whose substrate region was itself asserted (``ties[].well_layer: null``
-    + ``ties[].well_boxes``), for a block that draws no well/tub layer at
-    all. Same disclosure-only status, same print-when-non-empty rule, and
-    deliberately its own line rather than being folded into the tap one --
-    "which drawn geometry is the tap" and "where the substrate is" are
-    different claims, and the second is the weaker of the two.
-    """
-    power_delivery = citation.get("power_delivery")
-    if not power_delivery:
-        return
-    print(
-        "        power delivery: supplies="
-        f"{', '.join(power_delivery['supply_nets']) or 'none'}, "
-        f"pdn={'yes' if power_delivery['pdn'] else 'no (no P&R cited)'}, "
-        f"power_connectivity={power_delivery['power_connectivity_status']}"
-    )
-    asserted = power_delivery.get("ties_checked_by_assertion") or []
-    if asserted:
-        print(
-            f"        taps asserted by the caller: {len(asserted)} "
-            f"({', '.join(asserted)})"
-        )
-    well_asserted = power_delivery.get("ties_checked_by_well_assertion") or []
-    if well_asserted:
-        # Issue #2540 widened this list from "the substrate region was
-        # asserted" (no drawn well at all) to "the well side rested on
-        # caller-named coordinates", which now also covers a *drawn* well
-        # whose bias class was selected by boxes. The line names both rather
-        # than only the older form, so the count can never read as a claim
-        # the spec did not make.
-        print(
-            "        well side rested on the caller's word (asserted region, "
-            f"or a box-selected class): {len(well_asserted)} "
-            f"({', '.join(well_asserted)})"
-        )
-
-
-def _print_group_coverage(item: dict) -> None:
-    """Print T1 item 11's per-group coverage for a multi-group citation
-    (issue #5597): the grouped form's ``members_covered``/``members_total``
-    -- groups cited vs. groups that individually graded ``met`` -- are
-    otherwise reachable only through the JSON, and a reviewer reading the
-    terminal rendering must see the count a `met` (or `unmet`) verdict
-    rests on. Absent for a single-group citation, whose rendering is
-    unchanged, and for items 2/3/4, whose member counts stay JSON-only as
-    before."""
-    # Item 11 only: items 2/3/4 also carry member counts (issue #5031),
-    # but their members are per-cell reports, not citation groups -- a
-    # "groups:" line would misdescribe them and change rendering that
-    # issue leaves untouched. The guard lives here, not at the call site
-    # in `_print_tier_report_text`, so the renderer stays exactly at the
-    # complexity ratchet's max (issue #5597 review).
-    if item.get("id") != 11:
-        return
-    total = item.get("members_total")
-    if not total or total < 2:
-        return
-    print(
-        f"        groups: {item.get('members_covered')}/{total} cited groups graded met"
-    )
-
-
 def _format_body_bias(body_bias: dict) -> str:
     """One line summarising a `pex` citation's `body_bias` statement (issue
     #1983): the verdict, and -- when it is `"unbiased"` -- how many devices
@@ -1027,9 +946,6 @@ def _print_tier_report_text(result: dict, palette: Palette) -> None:
                 f"; it is in {result['source_doc']}, not this build's own doc)"
             )
         _print_not_applicable(item)
-        # Issue #5597: a multi-group item-11 citation states its group
-        # coverage in the text rendering too (the count is not JSON-only);
-        # the item-11-only guard lives inside `_print_group_coverage`.
         _print_group_coverage(item)
         citation = item["citation"]
         if citation:
