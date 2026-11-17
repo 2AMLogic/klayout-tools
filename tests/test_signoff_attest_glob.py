@@ -212,8 +212,8 @@ def test_a_bad_pattern_is_refused(tmp_path, pattern, message):
 @pytest.mark.parametrize(
     ("entry", "message"),
     [
-        ({"path": "records/a.md"}, "exactly a 'glob' key"),
-        ({}, "exactly a 'glob' key"),
+        ({"glob": "records/*.md", "path": "records/a.md"}, "exactly a 'glob' key"),
+        ({"glob": "records/*.md", "attest": "presence"}, "exactly a 'glob' key"),
         ({"glob": "records/*.md", "exclude": "x"}, "exactly a 'glob' key"),
     ],
 )
@@ -322,3 +322,54 @@ def test_an_item_1_sources_glob_reaches_the_input_set(tmp_path):
     }
     by_path = {m["path"]["path"]: m["content_hash"] for m in members}
     assert by_path["design/ota.sch"] == _hash_of(repo / "design/ota.sch")
+
+
+# --------------------------------------------------------------------------- #
+# Seam with presence-only entries (issue #5615, merged between): a hygiene
+# list may mix bare strings, {"path", "attest"} objects and {"glob"} objects
+# --------------------------------------------------------------------------- #
+
+
+def test_a_glob_expands_alongside_presence_and_literal_entries(tmp_path):
+    """One hygiene list, three entry forms: the glob's matches join the
+    literal and presence-only members, each keeping its own check shape."""
+    repo = _tracked_repo(tmp_path)
+    (repo / "README.md").write_text("# repo\n")
+    (repo / "NOTES.md").write_text("# notes\n")
+    _git("add", "-A", cwd=repo)
+    _git("commit", "-qm", "notes", cwd=repo)
+    inventory = _inv(
+        repo,
+        hygiene=[
+            "README.md",
+            {"path": "NOTES.md", "attest": "presence"},
+            {"glob": "records/*.md"},
+        ],
+    )
+
+    envelope = build_attestation(10, inventory)
+
+    assert envelope["status"] == "pass"
+    checks = {c["path"]: c for c in _present(envelope)}
+    assert checks["README.md"]["content_hash"] == _hash_of(repo / "README.md")
+    assert checks["NOTES.md"]["attest"] == "presence"
+    assert "content_hash" not in checks["NOTES.md"]
+    assert checks["records/a.md"]["content_hash"] == _hash_of(repo / "records/a.md")
+    assert checks["records/b.md"]["content_hash"] == _hash_of(repo / "records/b.md")
+
+
+def test_a_glob_matching_a_presence_entry_is_the_ordinary_duplicate(tmp_path):
+    """The presence reduction runs before expansion, but both paths claim
+    through the same ``seen`` bookkeeping: a glob naming a presence-listed
+    file is the ordinary duplicate refusal, not a silent double bind."""
+    repo = _tracked_repo(tmp_path)
+    inventory = _inv(
+        repo,
+        hygiene=[
+            {"path": "records/a.md", "attest": "presence"},
+            {"glob": "records/*.md"},
+        ],
+    )
+
+    with pytest.raises(AttestationError, match="more than once"):
+        build_attestation(10, inventory)

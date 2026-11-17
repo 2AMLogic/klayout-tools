@@ -169,7 +169,7 @@
     },
     {
       "path": "src/klayout_tools/arith_gen.py",
-      "lines": 1010
+      "lines": 1003
     },
     {
       "path": "src/klayout_tools/artifact_verify.py",
@@ -197,11 +197,11 @@
     },
     {
       "path": "src/klayout_tools/cli/signoff_cmd.py",
-      "lines": 1156
+      "lines": 1154
     },
     {
       "path": "src/klayout_tools/cli/sim_cmd.py",
-      "lines": 566
+      "lines": 548
     },
     {
       "path": "src/klayout_tools/components.py",
@@ -241,7 +241,7 @@
     },
     {
       "path": "src/klayout_tools/decks/sg13g2.py",
-      "lines": 2948
+      "lines": 2941
     },
     {
       "path": "src/klayout_tools/decks/sky130.py",
@@ -269,7 +269,7 @@
     },
     {
       "path": "src/klayout_tools/env_provenance.py",
-      "lines": 714
+      "lines": 708
     },
     {
       "path": "src/klayout_tools/equiv.py",
@@ -345,7 +345,7 @@
     },
     {
       "path": "src/klayout_tools/functional_verification.py",
-      "lines": 3153
+      "lines": 3152
     },
     {
       "path": "src/klayout_tools/functional_verification_sdf.py",
@@ -357,7 +357,7 @@
     },
     {
       "path": "src/klayout_tools/gen_compose.py",
-      "lines": 5119
+      "lines": 5108
     },
     {
       "path": "src/klayout_tools/gen_compose_port_access.py",
@@ -413,7 +413,7 @@
     },
     {
       "path": "src/klayout_tools/lvs_combine.py",
-      "lines": 1609
+      "lines": 1569
     },
     {
       "path": "src/klayout_tools/lvs_finfet.py",
@@ -437,7 +437,7 @@
     },
     {
       "path": "src/klayout_tools/lvs_runset.py",
-      "lines": 977
+      "lines": 774
     },
     {
       "path": "src/klayout_tools/macros.py",
@@ -505,7 +505,7 @@
     },
     {
       "path": "src/klayout_tools/place_and_route.py",
-      "lines": 3355
+      "lines": 3352
     },
     {
       "path": "src/klayout_tools/place_and_route_batch.py",
@@ -525,7 +525,7 @@
     },
     {
       "path": "src/klayout_tools/place_and_route_script.py",
-      "lines": 1429
+      "lines": 1359
     },
     {
       "path": "src/klayout_tools/place_and_route_sta.py",
@@ -577,7 +577,7 @@
     },
     {
       "path": "src/klayout_tools/signoff_attest.py",
-      "lines": 1171
+      "lines": 1167
     },
     {
       "path": "src/klayout_tools/signoff_generator_batch.py",
@@ -593,7 +593,7 @@
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
-      "lines": 4454
+      "lines": 4441
     },
     {
       "path": "src/klayout_tools/sim_commands.py",
@@ -645,7 +645,7 @@
     },
     {
       "path": "src/klayout_tools/socket_check.py",
-      "lines": 1133
+      "lines": 1117
     },
     {
       "path": "src/klayout_tools/spice_flatten.py",
@@ -665,7 +665,7 @@
     },
     {
       "path": "src/klayout_tools/tap_distance.py",
-      "lines": 599
+      "lines": 593
     },
     {
       "path": "src/klayout_tools/trajectory.py",
@@ -920,10 +920,6 @@
       "lines": 1398
     },
     {
-      "path": "tests/test_lvs_klayout_runset.py",
-      "lines": 576
-    },
-    {
       "path": "tests/test_lvs_magic_oracle.py",
       "lines": 839
     },
@@ -993,7 +989,7 @@
     },
     {
       "path": "tests/test_place_and_route.py",
-      "lines": 12411
+      "lines": 12398
     },
     {
       "path": "tests/test_place_and_route_batch.py",
