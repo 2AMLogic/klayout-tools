@@ -1267,18 +1267,18 @@ def test_stubbed_run_reports_the_full_contract_shape(tmp_path, monkeypatch):
         "results_xml": _envelope(None, "external"),
         "test_log": _envelope(None, "external"),
         "build_log": _envelope(None, "external"),
-        # `_RESULTS_XML_WITH_FAILURE` carries the exact `random_seed` value the
-        # spike captured live (section 4) -- the authoritative echo, from results.xml.
+        # the exact `random_seed` `_RESULTS_XML_WITH_FAILURE` captured live.
         "random_seed": 1785780800,
         # Retyped (issue #5784): `[]` without `options.source_defines`.
         "source_defines": [],
         "env": {},
-        # Additive (issue #1002): `null` on any run without `options.sdf`,
-        # so an unannotated verdict is never mistakable for an annotated one.
+        # Additive (issue #5697): `{}` without `request.parameters`.
+        "parameters": {},
+        # Additive (issue #1002): `null` without `options.sdf` -- never mistakable.
         "sdf": None,
-        # Additive (issue #2998): `null` on any run without
-        # `options.initial_state`.
+        # Additive (issue #2998): `null` without `options.initial_state`.
         "initial_state": None,
+        "sources": [_envelope(None, "external")],  # additive (#5771)
     }
     results_xml = report.local_paths["results_xml"]
     assert os.path.isabs(results_xml) and os.path.isfile(results_xml)
