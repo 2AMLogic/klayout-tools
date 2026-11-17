@@ -336,6 +336,7 @@
         "klayout_tools.gen_pcells.res_array",
         "klayout_tools.gen_pcells.resistor_strip",
         "klayout_tools.gen_pcells.well_island",
+        "klayout_tools.gen_ring_ports",
         "klayout_tools.gen_snap",
         "klayout_tools.gen_spec"
       ]

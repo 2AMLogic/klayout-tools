@@ -104,48 +104,6 @@ def _min_width_um_for_layer(
     return best
 
 
-def _min_spacing_um_for_layer(
-    variant: str, layer: tuple[int, int] | None
-) -> tuple[float, str] | None:
-    """Resolve the tightest applicable minimum same-*spacing* DRC rule for
-    ``layer`` from the resolved PDK family's own curated deck -- the *same*
-    ``ExtractionDeck``/``DrcRule`` set ``klt drc`` judges generated and
-    composed geometry with, never a private, hard-coded threshold.
-
-    Mirrors :func:`_min_width_um_for_layer` above, generalised to ``"space"``
-    rules -- the exact lookup ``compose()`` runs through its own
-    ``_min_spacing_um_for_layer`` closure (issue #1386) for the same deck,
-    lifted here so ``klt gen``'s reported ring-opening strap window
-    (`gen_describe._ring_ports`, issue #5656) can inset by the identical
-    threshold ``klt drc`` will judge a strap with. Returns
-    ``(threshold_um, rule_id)`` for the largest matching same-layer
-    ``"space"`` rule on ``layer``, or ``None`` when ``layer`` is ``None``,
-    the layer has no such rule in the resolved deck, or the PDK
-    family/deck cannot be resolved at all -- an unresolvable family degrades
-    this lookup to a no-op, exactly like #1386's spacing lookup does.
-    """
-    if layer is None:
-        return None
-    try:
-        family = _pdk_family(variant)
-        deck_rules = get_deck(family)
-        nominal_dbu_um = get_nominal_dbu(family)
-    except (GenError, UnknownDeckError):
-        return None
-    best: tuple[float, str] | None = None
-    for rule in deck_rules:
-        if (
-            rule.check == "space"
-            and rule.layer == layer
-            and rule.other_layer is None
-            and rule.derived_layer is None
-        ):
-            threshold_um = rule.threshold_dbu * nominal_dbu_um
-            if best is None or threshold_um > best[0]:
-                best = (threshold_um, rule.id)
-    return best
-
-
 def _min_area_um2_for_layer(
     variant: str, layer: tuple[int, int] | None
 ) -> tuple[float, str] | None:

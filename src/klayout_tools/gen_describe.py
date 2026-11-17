@@ -16,8 +16,10 @@ out-of-bounds request before any geometry is built) and the
 ``_<family>_describe()`` functions (which turn a built layout into the
 response envelope's ``device_count``/``ports``/``drc_hints`` fields) -- plus
 the helpers used exclusively by them (``_voltage_flavor_hints``, the
-``_ring_*`` port/note builders, ``_ring_params_validate``, the
-``_well_island_*`` isolation solver, and ``_format_box_um``/``_box_um_field``).
+``_ring_*`` note builders, ``_ring_params_validate``, the
+``_well_island_*`` isolation solver, and ``_format_box_um``/``_box_um_field``;
+``_ring_ports`` lives next door in :mod:`klayout_tools.gen_ring_ports`,
+which also holds the strap-window spacing lookup it insets by).
 ``_well_island_layer_params`` comes along too: it is the one ``layer_params``
 resolver #1875 had to leave behind, because it calls
 :func:`_well_island_isolation` to reject an unsatisfiable isolation request
@@ -90,6 +92,7 @@ from .gen_layer_params import (
     _voltage_flavor_mark_layer,
     mfg_grid_um,
 )
+from .gen_ring_ports import _ring_ports
 
 
 def _resistor_strip_validate(params: dict[str, Any]) -> None:
@@ -1681,104 +1684,6 @@ def _tap_pad_ports(
                 "y_um": (y0 + y1) / 2.0,
                 "width_um": x1 - x0,
                 "direction_deg": direction,
-            }
-        )
-    return ports
-
-
-def _ring_ports(
-    ring: dict[str, Any],
-    offset_um: tuple[float, float],
-    tap_prefix: str,
-    tap_layer: dict[str, Any],
-    tap_width_um: float,
-    gap_layer: dict[str, Any],
-    tap_net: str | None = None,
-    pdk_variant: str = "",
-) -> list[dict[str, Any]]:
-    """Reported ``ports[]`` entries for a drawn ring.
-
-    One ``<tap_prefix><side>`` tap port at the midpoint of every side that is
-    still covered by ring metal there, plus -- when the ring was cut with
-    ``ring_gap_side`` (#434) -- one ``GAP_<side>`` entry marking the opening
-    itself. A ``GAP_*`` entry is a *marker, not a conductor*: it reports where
-    a route may cross the ring (``x_um``/``y_um`` = the opening's centre on
-    the ring's own centre line, ``width_um`` = the opening's length along that
-    side, ``direction_deg`` = the side's outward normal) on the layer a route
-    would cross it on, and `klt gen-compose` rejects any attempt to wire or
-    label it.
-
-    A ``GAP_*`` entry also carries ``strap_window_um`` (issue #5656): the
-    opening's own box inset along the ring side -- never across it -- by the
-    resolved deck's minimum same-layer spacing for ``gap_layer``
-    (:func:`~klayout_tools.gen_compose_layer_rules._min_spacing_um_for_layer`,
-    the same lookup and threshold a ``klt drc`` run judges a strap with), in
-    the composed frame like every other port field. A strap whose footprint
-    stays inside the window is spacing-clean against the ring metal on both
-    sides of the opening; the window's extent across the side is the ring
-    band's full thickness, since a strap crossing the ring is constrained
-    only along it. A window whose along-side extent is <= 0 (an opening
-    narrower than two spacings) means no same-layer-legal strap fits.
-    An unresolvable PDK family -- or a deck with no ``"space"`` rule for
-    ``gap_layer`` -- insets by ``0.0``, reporting the opening's own box, the
-    same degrade-to-no-op the #1386 spacing lookup established.
-
-    ``tap_net`` (issue #1421) names the net every tap port carries, reported
-    as each entry's ``net``. ``None`` (the default, and every caller that
-    predates ``well_island``) keeps the historical ``"net": null`` -- a ring
-    whose tie net the generator has no way to know. It is never applied to a
-    ``GAP_*`` entry: that marks the *absence* of ring conductor, so it carries
-    no net by construction.
-    """
-    from .gen import RING_SIDE_DIRECTIONS
-    from .gen_compose_layer_rules import _min_spacing_um_for_layer
-
-    ox, oy = offset_um
-    ports: list[dict[str, Any]] = []
-    for side, direction in RING_SIDE_DIRECTIONS.items():
-        xy = ring["ports"].get(side)
-        if xy is None:
-            continue  # this side's midpoint sits inside the ring opening
-        ports.append(
-            {
-                "name": f"{tap_prefix}{side}",
-                "net": tap_net,
-                "layer": tap_layer,
-                "x_um": xy[0] + ox,
-                "y_um": xy[1] + oy,
-                "width_um": tap_width_um,
-                "direction_deg": direction,
-            }
-        )
-
-    gap = ring["gap"]
-    if gap is not None:
-        spacing = _min_spacing_um_for_layer(
-            pdk_variant, (gap_layer["layer"], gap_layer["datatype"])
-        )
-        inset = spacing[0] if spacing is not None else 0.0
-        x0, y0, x1, y1 = gap["box_um"]
-        if gap["side"] in ("N", "S"):
-            window = (x0 + inset, y0, x1 - inset, y1)
-        else:
-            window = (x0, y0 + inset, x1, y1 - inset)
-        ports.append(
-            {
-                "name": f"GAP_{gap['side']}",
-                "net": None,
-                "layer": gap_layer,
-                "x_um": gap["x_um"] + ox,
-                "y_um": gap["y_um"] + oy,
-                "width_um": gap["opening_um"],
-                "direction_deg": RING_SIDE_DIRECTIONS[gap["side"]],
-                "strap_window_um": _box_um_field(
-                    (
-                        window[0] + ox,
-                        window[1] + oy,
-                        window[2] + ox,
-                        window[3] + oy,
-                    )
-                ),
             }
         )
     return ports
