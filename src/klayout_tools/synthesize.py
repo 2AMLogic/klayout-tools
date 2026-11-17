@@ -1046,6 +1046,7 @@ def run_synthesize(
     verify_equivalence: bool = False,
     equiv_timeout_s: float | None = None,
     equiv_engine: str | None = None,
+    yosys_timeout_s: float | None = None,
     restructure_timing: bool = False,
     restructure_max_iterations: int | None = None,
     _scratch_run_dir: bool = False,
@@ -1104,6 +1105,13 @@ def run_synthesize(
     ``restructure_max_iterations`` overrides
     :data:`klayout_tools.restructure.DEFAULT_MAX_ITERATIONS`; ``None``
     (default) leaves that default in effect.
+
+    ``yosys_timeout_s`` (the CLI's ``--yosys-timeout-s``, issue #5773)
+    overrides the per-invocation Yosys wall-clock budget from the CLI
+    without touching the request document; ``None`` (the default) leaves
+    the request field / ``$KLT_YOSYS_TIMEOUT_S`` / 300 s default
+    precedence in effect (see :func:`klayout_tools.synthesize_timeout.
+    bind_yosys_timeout` for the full precedence and validation).
 
     Returns a dict matching the documented JSON schema (see
     ``docs/cli/synthesize.md`` / ``docs/design/digital-flow-contracts-spike.md``
@@ -1164,7 +1172,9 @@ def run_synthesize(
     )
 
     sv_frontend = validate_sv_frontend(request.get("sv_frontend"), SynthesizeError)
-    yosys_timeout_s = ytimeout.bind_yosys_timeout(request, SynthesizeError)
+    yosys_timeout_s = ytimeout.bind_yosys_timeout(
+        request, SynthesizeError, flag_value=yosys_timeout_s
+    )
 
     pdk_spec = request["pdk"]
     if not isinstance(pdk_spec, dict):
@@ -3142,7 +3152,9 @@ def _run_yosys(
         _write_yosys_log(script_path, exc.stdout, exc.stderr)
         raise SynthesizeError(
             f"yosys did not complete within {timeout_s}s (script "
-            f"'{script_path}') -- process killed"
+            f"'{script_path}') -- process killed (raise --yosys-timeout-s, "
+            "$KLT_YOSYS_TIMEOUT_S or request.yosys_timeout_s to allow "
+            "more time)"
         ) from exc
 
     _write_yosys_log(script_path, completed.stdout, completed.stderr)
@@ -4355,6 +4367,15 @@ RERUN_BOOKKEEPING_KEYS: frozenset[str] = frozenset(
         # the diff -- a committed report whose macro declaration changed
         # *should* fail the rerun check.
         "blackbox_path",
+        # Issue #5773: the per-invocation Yosys budget is host-level
+        # bookkeeping, not a verdict field -- the whole point of the
+        # `--yosys-timeout-s` / `KLT_YOSYS_TIMEOUT_S` overrides is that an
+        # operator on a loaded box can raise the watchdog on a rerun
+        # without touching the committed report or the request, so a
+        # different budget on the fresh side is not drift. The synthesis
+        # *result* the rerun verifies is budget-independent; a consumer
+        # wanting the fresh budget reads the embedded `fresh` report.
+        "yosys_timeout_s",
     }
 )
 
@@ -4593,6 +4614,7 @@ def rerun_synthesize_report(
     verify_equivalence: bool = False,
     equiv_timeout_s: float | None = None,
     equiv_engine: str | None = None,
+    yosys_timeout_s: float | None = None,
     restructure_timing: bool = False,
     restructure_max_iterations: int | None = None,
 ) -> dict[str, Any]:
@@ -4637,6 +4659,7 @@ def rerun_synthesize_report(
         verify_equivalence=verify_equivalence,
         equiv_timeout_s=equiv_timeout_s,
         equiv_engine=equiv_engine,
+        yosys_timeout_s=yosys_timeout_s,
         restructure_timing=restructure_timing,
         restructure_max_iterations=restructure_max_iterations,
         _scratch_run_dir=True,

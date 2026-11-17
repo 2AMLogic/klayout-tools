@@ -10,6 +10,7 @@ flow").
 klt synthesize <request> [--pdk VARIANT] [--pdk-root ROOT] \
     [--verify-equivalence] [--equiv-timeout-s SECONDS] \
     [--equiv-engine yosys|yosys-sequential] \
+    [--yosys-timeout-s SECONDS] \
     [--restructure-timing] [--restructure-max-iterations N] \
     [--format text|json]
 ```
@@ -51,6 +52,11 @@ flag line carries cleanly — not positional RTL file args.
   (register-correspondence proof, for designs with flip-flops). No effect
   unless `--verify-equivalence` is given. The `--restructure-timing` check
   stays combinational. Must be re-passed with `--check --rerun`.
+- `--yosys-timeout-s` — per-invocation Yosys wall-clock budget in seconds
+  for this run (default `300`, cap `3600`); overrides the request
+  document's `yosys_timeout_s` field, with `$KLT_YOSYS_TIMEOUT_S` between
+  them. See "Yosys budget overrides" below. Must be re-passed with
+  `--check --rerun`, like `--equiv-timeout-s`.
 - `--restructure-timing` — close (or reduce) a setup violation on the
   native `sta` critical path via a bounded cell-resizing loop, when it
   exceeds `constraints.clock_period_ns`. Requires
@@ -1305,7 +1311,7 @@ separately if it turns out to matter for evidence-record committing.
 | `hdl_toplevel` | string | The design's top module name. Required; must not contain path separators. |
 | `parameters` | object \| omitted | Top-level Verilog `parameter` overrides, `name -> value` (issue #3466), applied with Yosys `chparam -set` after the `read_verilog` lines and before `hierarchy`, so one committed RTL file can be synthesised at several parameterisations without per-point source rewrites. Keys must be Verilog identifiers; values must be integers or plain strings (booleans, floats, and strings containing quotes, backslashes, `;`, `#` or control characters are rejected — values land in a generated `.ys` script). A name the top module does not declare fails the run (`yosys synthesis failed: … Can't find object for defparam`). Unqualified keys target `hdl_toplevel`. A module-qualified key `module.PARAM` (issue #4698) overrides a parameter of another module (e.g. `"sub.INIT_FILE": "init.hex"` for a sub-module `$readmemh(INIT_FILE)`): when any key is qualified every RTL source is read with `read_verilog -defer`, so the override lands before the sub-module is elaborated, and each target module is checked to exist (`select -assert-any`) so an unknown module fails the run with `Assertion failed: selection is empty: $abstract\<module>`. Only one qualification level is accepted (`module.PARAM`); top-only requests keep their script unchanged. The same override is applied to every pass that re-elaborates the sources (arithmetic probe and trial runs, the memory-mapping evidence pass, and the `--verify-equivalence` gold side), so all reported numbers describe one elaboration. Echoed as the response's `parameters` and `provenance.parameters`. |
 | `defines` | object \| omitted | Verilog preprocessor defines, `name -> string \| null` (issue #4196): each is passed as `read_verilog -D NAME[=VALUE]` (`null` = bare `-D NAME`) on every `read_verilog` of the RTL sources, in sorted-name order, so a source that selects a variant with `` `ifdef `` can be synthesised in that variant. Keys must be Verilog identifiers; values may use only letters, digits and `_ . , : / + - = @ %` (quotes, backslashes, whitespace, `;`, `#` and control characters are rejected — values land in a generated `.ys` script). Applied to every pass that re-elaborates the sources (arithmetic probe and trial runs, the memory-mapping evidence pass, and the `--verify-equivalence` gold side via `gold.defines`). Echoed as the response's `defines` and `provenance.defines`. Recorded separately from `provenance.input.content_hash`, so existing committed reports keep their hash. |
-| `yosys_timeout_s` | number \| omitted | Wall-clock budget, in seconds, for **each** `yosys -s` invocation of the run (main synthesis, arithmetic trials, memory evidence pass, STA flatten, baseline stats). Finite, `> 0` and `<= 3600`; a bool, string, `NaN`, `inf`, non-positive or over-cap value is a structured error naming the field and the cap. Default `300` when omitted. A run that exceeds it fails with `yosys did not complete within <N>s` (an error, exit 1, not a verdict). With `arithmetic: auto` the budget is paid **per trial** (10+ runs), so a raised value multiplies the worst-case wall time. The `help abc` capability probe keeps the default. |
+| `yosys_timeout_s` | number \| omitted | Wall-clock budget, in seconds, for **each** `yosys -s` invocation of the run (main synthesis, arithmetic trials, memory evidence pass, STA flatten, baseline stats). Finite, `> 0` and `<= 3600`; a bool, string, `NaN`, `inf`, non-positive or over-cap value is a structured error naming the field and the cap. Default `300` when omitted. A run that exceeds it fails with `yosys did not complete within <N>s` (an error, exit 1, not a verdict). With `arithmetic: auto` the budget is paid **per trial** (10+ runs), so a raised value multiplies the worst-case wall time. The `help abc` capability probe keeps the default. The request field is the **lowest-precedence** source: `--yosys-timeout-s` and the `KLT_YOSYS_TIMEOUT_S` environment variable override it — see "Yosys budget overrides" below. |
 | `run_id` | string \| omitted | Optional safe identifier for an exclusively created invocation directory; see "Artifacts". Omit to allocate a new ID automatically. Reusing an existing ID fails. |
 | `pdk.cell_library` | string | Standard-cell library name. Required. |
 | `pdk.corner` | string \| omitted | Liberty corner selector; defaults to the nominal corner when omitted. |
@@ -1335,6 +1341,54 @@ note below on build-platform sensitivity): untargeted maps to 3238.11 µm² at
 2485.93 ps; `clock_period_ns: 10` maps to 3001.63 µm² at 3072.40 ps — a
 relaxed target buys area back at the cost of delay, so the value is a real
 caller decision rather than something this command should pick.
+
+### Yosys budget overrides (issue #5773)
+
+Three sources set the per-invocation Yosys wall-clock budget, resolved in
+precedence order. The budget is a property of **where the run happens** as
+much as of the design, so a caller driving `klt synthesize` from a shell
+script, a CI step, or a `--check` gate that fixes the argv can still raise
+it without authoring or editing a request document:
+
+| `--yosys-timeout-s` | `KLT_YOSYS_TIMEOUT_S` | request `yosys_timeout_s` | Effective budget |
+| ------------------- | --------------------- | ------------------------- | ---------------- |
+| no                  | unset (or empty)      | no                        | `300` (default) |
+| no                  | unset (or empty)      | yes                       | request field |
+| no                  | set                   | no                        | env var |
+| no                  | set                   | yes                       | **env var** — the variable is a property of the *host*, not of the design, so an operator on a loaded shared box with a committed (fixed) request can still raise the watchdog |
+| yes                 | any                    | any                       | **flag** — the most deliberate act wins |
+
+The override is a straight replacement, not a clamp: whichever source wins,
+its value **is** the budget, and any *provided* source that is invalid (a
+bool, a non-numeric string, `NaN`, `inf`, `0`, a negative value, or
+anything over the shared `3600` cap) is a structured application error
+naming that source and the cap — never a silently-ignored value, and
+invalid values in a *losing* source are refused too. This is deliberately
+the opposite direction from `klt sim`'s `KLT_SIM_MAX_WORKERS`, which clamps
+a request down instead of refusing: there the request is a preference and
+the cap a fact about the box; here an override that quietly degrades to the
+default would re-create exactly the flaky shared-host kill this knob
+exists to fix.
+
+```bash
+export KLT_YOSYS_TIMEOUT_S=1800   # every yosys -s on this host gets 30 min
+```
+
+Unset **or empty** (`KLT_YOSYS_TIMEOUT_S=`, what an empty entry in a shell
+env file produces) means "no override": behaviour is identical to a host
+without the variable, and the report carries no `yosys_timeout_s` field.
+
+Whichever source set the budget, the run echoes it as the response's
+`yosys_timeout_s` / `provenance.yosys_timeout_s` — an evidence-producing
+run records the budget it actually used. With no override anywhere the
+fields stay absent, so existing committed reports are unchanged.
+
+The budget reaches every entry point that runs Yosys: the CLI, a direct
+`klayout_tools.synthesize.run_synthesize(...)` library call (env var
+included — it is read from the environment per run, never cached at import
+time), and `--check --rerun`. The `help abc` capability probe keeps the
+`300` default regardless: it never raises, and a timeout there just means
+"assume the ABC capability is unsupported".
 
 ### Unknown request keys are errors (issue #3466)
 
@@ -1453,7 +1507,7 @@ same check applies to `--check` and `--rerun`. Nested objects (`pdk`,
 | `hdl_toplevel` | string | Echo of the request. |
 | `parameters` | object | The top-level parameter overrides this run elaborated with (`{}` when none; issue #3466). Additive; no `schema_version` bump. Also recorded as `provenance.parameters`. |
 | `defines` | object | The preprocessor defines this run elaborated with (`{}` when none; issue #4196). Additive; no `schema_version` bump. Also recorded as `provenance.defines`. |
-| `yosys_timeout_s` | number | Present **only when the request set `yosys_timeout_s`**: the per-invocation Yosys budget this run used, in seconds. Also recorded as `provenance.yosys_timeout_s`. Absent by default, so existing committed reports are unchanged. Additive; no `schema_version` bump. |
+| `yosys_timeout_s` | number | Present **only when an override set the budget** — the `--yosys-timeout-s` flag, the `KLT_YOSYS_TIMEOUT_S` environment variable, or the request's `yosys_timeout_s` field (flag > env > request, see "Yosys budget overrides"): the per-invocation Yosys budget this run used, in seconds. Also recorded as `provenance.yosys_timeout_s`. Absent by default, so existing committed reports are unchanged. Additive; no `schema_version` bump. |
 | `run_id` | string | Identifier of this invocation's retained directory, relative to `<request_dir>/.klt/synthesize/`. Additive; includes failed-run collision protection when supplied in a request. |
 | `status` | string | Always `"ok"` — synthesis has no pass/fail concept of its own from *this field's* point of view; a failed run never emits this envelope at all. The response-level pass/fail signal issue #1588 adds is `structural.has_critical`/exit code `3` below — `status` itself is unaffected and stays `"ok"` either way. |
 | `instance_count` | integer | Total standard-cell instances after liberty mapping, rolled up over the **whole design hierarchy** — `stat -json`'s per-module `num_cells` aggregated recursively across every sub-module Yosys left un-flattened, each level scaled by its instance count (issue #821; the top module's own `num_cells` alone is `0` for a design whose top is a pure wrapper). Matches `stat -json`'s own `design.num_cells` rollup. **Deliberately not named `cell_count`**: `klt layout-metrics`'s existing `cell_count` field counts *distinct cell definitions* in a GDS hierarchy, a different concept. |

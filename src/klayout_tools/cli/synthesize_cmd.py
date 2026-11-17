@@ -91,6 +91,7 @@ def run(args: argparse.Namespace) -> int:
             verify_equivalence=args.verify_equivalence,
             equiv_timeout_s=args.equiv_timeout_s,
             equiv_engine=args.equiv_engine,
+            yosys_timeout_s=args.yosys_timeout_s,
             restructure_timing=args.restructure_timing,
             restructure_max_iterations=args.restructure_max_iterations,
         )
@@ -129,6 +130,7 @@ def _run_check(args: argparse.Namespace) -> int:
                 verify_equivalence=args.verify_equivalence,
                 equiv_timeout_s=args.equiv_timeout_s,
                 equiv_engine=args.equiv_engine,
+                yosys_timeout_s=args.yosys_timeout_s,
                 restructure_timing=args.restructure_timing,
                 restructure_max_iterations=args.restructure_max_iterations,
             )
