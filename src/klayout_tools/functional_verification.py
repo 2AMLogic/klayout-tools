@@ -218,8 +218,6 @@ from .env_provenance import find_repo_root, repo_relative_path
 from .functional_verification_from_synthesize import (  # noqa: F401
     _resolve_sources,
     has_from_synthesize,
-    resolve_sources_with_synthesize,
-    with_from_synthesize,
 )
 from .functional_verification_initial_state import (
     INITIAL_STATE_MODULE,
@@ -227,6 +225,7 @@ from .functional_verification_initial_state import (
     build_initial_state_verilog,
     count_d_nets,
 )
+from .functional_verification_run_inputs import resolve_run_inputs, with_run_inputs
 from .functional_verification_sdf import (
     _check_sdf_engine_capability,
     _collect_sdf_alias_port_bits,
@@ -261,6 +260,7 @@ from .functional_verification_sdf_steps import (
     _apply_sdf_header_normalization,
     _sdf_refusal_error,
 )
+from .request_paths import RequestPaths
 from .reset_coverage import ResetCoverageError, sequential_elements
 
 #: Bumped only on a non-additive (breaking) change to this command's own
@@ -657,6 +657,9 @@ class FunctionalVerificationError(Exception):
             self.code = code
 
 
+_rpath = RequestPaths(FunctionalVerificationError)
+
+
 # ---------------------------------------------------------------------------
 # request loading (same file / "-" / inline-JSON convention as `klt lvs`)
 # ---------------------------------------------------------------------------
@@ -761,11 +764,7 @@ def _resolve_testbench(
             raise FunctionalVerificationError(
                 "request.testbench.search_path must be a non-empty string when given"
             )
-        search_dir = (
-            search_path
-            if os.path.isabs(search_path)
-            else os.path.join(request_dir, search_path)
-        )
+        search_dir = _rpath(search_path, request_dir, "request.testbench.search_path")
     else:
         search_dir = request_dir
 
@@ -978,9 +977,7 @@ def _resolve_initial_state(
             f"options.initial_state requires engine 'icarus' -- engine "
             f"'{engine}' cannot force cell-model pins hierarchically"
         )
-    netlist_path = (
-        netlist if os.path.isabs(netlist) else os.path.join(request_dir, netlist)
-    )
+    netlist_path = _rpath(netlist, request_dir, "request.options.initial_state.netlist")
     if not os.path.isfile(netlist_path):
         raise FunctionalVerificationError(
             f"request.options.initial_state.netlist '{netlist_path}' not found"
@@ -1274,7 +1271,7 @@ def _resolve_source_defines(
                 "request.options.source_defines keys must be non-empty strings"
             )
         path = os.path.abspath(
-            key if os.path.isabs(key) else os.path.join(request_dir, key)
+            _rpath(key, request_dir, "request.options.source_defines key")
         )
         if path not in sources:
             raise FunctionalVerificationError(
@@ -1395,7 +1392,7 @@ def _resolve_includes(includes: Any, request_dir: str) -> list[str]:
 
     resolved: list[str] = []
     for entry in includes:
-        path = entry if os.path.isabs(entry) else os.path.join(request_dir, entry)
+        path = _rpath(entry, request_dir, "request.options.includes entry")
         if not os.path.isdir(path):
             raise FunctionalVerificationError(f"include directory not found: {entry}")
         resolved.append(os.path.abspath(path))
@@ -2578,7 +2575,7 @@ def run_functional_verification(
             "request.hdl_toplevel must be a non-empty string"
         )
     # Issue #5684: verify the synthesized netlist before anything is built.
-    sources, synth_block = resolve_sources_with_synthesize(
+    sources, run_inputs = resolve_run_inputs(
         request_doc, request_dir, hdl_toplevel, _path_envelope
     )
 
@@ -2903,7 +2900,7 @@ def run_functional_verification(
     includes = [*includes, *scoped_include_dirs]
 
     if verilog_tb is not None:
-        return with_from_synthesize(
+        return with_run_inputs(
             _run_verilog_top(
                 verilog_tb,
                 engine=engine,
@@ -2922,7 +2919,7 @@ def run_functional_verification(
                 source_defines=source_defines,
                 tools=tools,
             ),
-            synth_block,
+            run_inputs,
         )
 
     runner_module = _import_runner()
@@ -3037,18 +3034,18 @@ def run_functional_verification(
                 "tools": tools,
                 "cocotb_version": _cocotb_version(),
                 "results_xml": _hashed_path_envelope(results_xml),
-                # Additive (issue #3013): the simulator/cocotb console transcript
-                # and the build transcript the run wrote, named by path (never
-                # inlined) like `results_xml`.
+                # Additive (issue #3013): the simulator/cocotb console and build
+                # transcripts, named by path (never inlined) like `results_xml`.
                 "test_log": _hashed_path_envelope(test_log),
                 "build_log": _hashed_path_envelope(build_log),
                 "random_seed": _extract_random_seed_property(results_xml),
                 # Additive (issue #3290): `options.source_defines` keyed by the
-                # request.sources entry as resolved to an absolute path; `{}`
-                # when absent.
+                # request.sources entry as resolved; `{}` when absent.
                 "source_defines": source_defines,
                 # Additive (issue #4338): `request.env` as given; `{}` when absent.
                 "env": env,
+                # Additive (issue #5697): `request.parameters` echo; `{}` when absent.
+                "parameters": parameters,
                 # Additive (issue #2998): `null` unless the request set
                 # `options.initial_state`. `seeds` echoes the effective seeds
                 # (empty for mode "x"); `runs` has one entry per seed.
@@ -3102,7 +3099,7 @@ def run_functional_verification(
             },
         }
     )
-    with_from_synthesize(report, synth_block)  # issue #5684, additive
+    with_run_inputs(report, run_inputs)  # #5684/#5771, additive
     report.local_paths = {
         "results_xml": results_xml,
         "test_log": test_log,

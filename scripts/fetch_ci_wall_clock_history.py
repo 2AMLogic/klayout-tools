@@ -91,10 +91,10 @@ later of:
 
 A run without a parseable `created_at` is dropped rather than trusted.
 
-Job durations here exclude `actions/cache`-miss rebuild time exactly as the
-check excludes it from the run being judged (issue #2617, via the check's own
-`measure_cache_miss`), so a cache outage in the window can neither inflate a
-baseline nor fake a busy pool.
+Job durations here exclude the same non-compute time the check excludes from
+the run being judged -- `actions/cache`-miss rebuilds (#2617) and
+`actions/checkout` (#5964), via the shared `ci_wall_clock_steps` module -- so
+neither can inflate a baseline nor fake a busy pool.
 
 Standard library only, like the check it feeds.
 """
@@ -109,10 +109,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote
 
-# The cache-miss convention (#2617) has exactly one definition: the check's.
-# Importing it keeps the history and the judged run on the same compute figure.
+# The step-measurement conventions (#2617 cache miss, #5964 checkout) have
+# exactly one definition: ci_wall_clock_steps's, which both importers share.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from check_ci_wall_clock import measure_cache_miss
+from ci_wall_clock_steps import measure_cache_miss, measure_checkout
 
 HISTORY_SCHEMA_VERSION = 1
 DEFAULT_BUDGET_FILE = (
@@ -213,9 +213,9 @@ def job_durations(
             continue
         if seconds < 0:
             continue
-        # Cache-miss recovery is cache-service time, not compute (#2617).
-        cache_seconds, _ = measure_cache_miss(job)
-        seconds -= min(cache_seconds, seconds)
+        # Cache-miss (#2617) and checkout (#5964) time is not compute.
+        excluded = measure_cache_miss(job)[0] + measure_checkout(job)[0]
+        seconds -= min(excluded, seconds)
         # A matrix leg can appear twice across re-run attempts; keep the last.
         durations[name] = seconds
         if is_partial:
