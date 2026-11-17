@@ -41,7 +41,7 @@ from typing import Any
 
 from . import sim_raw, sim_slope_band
 from .sim_errors import SimError
-from .sim_forms import validate_exclusive_form
+from .sim_forms import other_forms, validate_exclusive_form
 
 #: Reason tokens a failed ``slope_band`` entry's diagnostic message leads with.
 ERROR_CODES = (
@@ -67,26 +67,10 @@ _SELECTOR_RE = re.compile(r"^[vV]\(([^\s\x00-\x1f\x7f,()]+)\)$")
 
 _VECTOR_PREFIX = "__klt_sband_"
 
-#: Every other measurement form an entry must not also declare. ``slope_band``
-#: is the newest form, so (as for every form before it) its own tuple is the
-#: complete one and its validator runs first in
-#: ``sim_validate._EXCLUSIVE_FORM_VALIDATORS``.
-_FORMS = (
-    "spice",
-    "expr",
-    "crossings",
-    "cycle_mean",
-    "energy",
-    "stress",
-    "noise",
-    "transfer",
-    "tian",
-    "snm",
-    "search",
-    "eye",
-    "step_resolution",
-    "settled",
-)
+#: Every other measurement form an entry must not also declare, derived from
+#: the registry like every other exclusive-form module -- a hand-copied tuple
+#: here is what let a missing ``EXCLUSIVE_FORMS`` registration ship quietly.
+_FORMS = other_forms("slope_band")
 
 
 def is_slope_band(spec: dict[str, Any]) -> bool:
