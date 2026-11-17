@@ -70,56 +70,26 @@ class ResistorDevice:
     Geometry (all fields are ``(layer, datatype)`` pairs, matching the
     layout's own GDS numbering):
 
-    - ``body`` -- the drawn conductor layer the resistor lives on. **Must**
-      be one of the owning deck's own conductor layers (``poly``,
-      ``active``, or one of ``metals``), because the recognised resistor
-      body is *subtracted* from that layer's connectivity region: leaving it
-      in would short the two terminals together through the conductor and
-      defeat the whole point.
-    - ``marker`` -- the resistor-ID layer. The resistive segment is
-      ``body & marker`` (further narrowed by ``requires``/``excludes``); the
-      **terminals** are the rest of that conductor layer (``body`` minus the
-      recognised segment), i.e. the contacted heads on either side. This
-      mirrors both PDKs' own KLayout LVS decks, which derive the terminal
-      layer the same way (sky130's ``poly_con = poly.not(poly_res)``,
-      gf180mcu's ``poly2_con = poly2.not(res_mk)``).
-    - ``requires`` -- additional layers that must **all** cover the segment
-      for it to be this device (e.g. gf180mcu's ``Pplus`` + ``SAB``, which
-      are what distinguish a 350 ohm/sq *unsalicided* p+ poly resistor from
-      a 7.3 ohm/sq salicided one).
-    - ``excludes`` -- layers that disqualify the segment (subtracted from
-      it), e.g. sky130's ``rpm``/``urpm`` precision-resistor implant masks,
-      which mark the *other*, much-higher-sheet-rho poly resistor flavours.
-      A segment excluded here is left as ordinary connected conductor (it
-      keeps today's short) rather than extracted with the wrong resistance
-      -- a wrong value passing LVS with high confidence is worse than a
-      known-unmodelled device.
-    - ``terminal`` -- optional override naming a *different* deck conductor
-      layer to take the terminals from (defaults to ``body``). Like
-      ``body``, it must be one of the deck's own conductor layers.
-    - ``terminal_enclosure_um`` (issue #5889) -- optional width, in
-      micrometres, of a terminal-conductor halo the PDK's own DRC
-      *mandates* around this device's body. ``0.0`` (the default, every
-      entry before this field existed) means no such rule is declared and
-      the terminal derivation is exactly what it was. gf180mcu's SB.10
-      (``poly2.enclosing.sab.1``) is the motivating case: Poly2 must
-      extend >= 220 nm beyond every SAB edge, so a DRC-clean drawing
-      surrounds the recognised body with an unmarked Poly2 band 220 nm
-      wide on every side -- and that band wraps the body, touches it along
-      its entire perimeter, and merges both contacted leads into ONE
-      terminal component, so the native resistor extractor finds a single
-      contact region and forms no device at all (the resistor silently
-      vanishes while ``klt drc`` reports the layout clean). With this
-      field set, :func:`~klayout_tools.extract_passive_regions
-      ._resolve_resistors` narrows the terminal region to the conductor
-      lying within the declared distance of conductor drawn *beyond* the
-      mandated band -- the leads and their channels through the band --
-      and severs the band's side flanks from the terminal conductor's
-      connectivity region, so each lead is its own terminal on its own
-      net. Set-theoretically there is no drawn shape that escapes the
-      conflict (any single-polygon marked region under an enclosure rule
-      carries a connected unmarked band), so the derivation, not the
-      drawing, is the only place the two requirements can coexist.
+    - ``body`` -- the drawn conductor layer (``poly``, ``active``, or a
+      member of ``metals``). Extraction subtracts the recognised segment
+      from its connectivity region to separate the terminals.
+    - ``marker`` -- the resistor-ID layer. The default topology takes the
+      segment from ``body & marker``. The remaining conductor provides the
+      terminal heads, as in sky130's ``poly.not(poly_res)`` and gf180mcu's
+      ``poly2.not(res_mk)`` KLayout LVS derivations.
+    - ``requires`` -- layers that must all cover the segment. For example,
+      gf180mcu uses ``Pplus`` and ``SAB`` to distinguish its 350 ohm/sq
+      unsalicided p+ poly resistor from the 7.3 ohm/sq salicided device.
+    - ``excludes`` -- layers subtracted from the segment, e.g. sky130
+      ``rpm`` and ``urpm`` for higher-sheet-resistance flavours. Excluded
+      segments remain ordinary conductor.
+    - ``terminal`` -- optional deck conductor layer for the terminal heads.
+      Defaults to ``body``.
+    - ``terminal_enclosure_um`` (#5889) -- minimum terminal-conductor
+      enclosure required by the PDK, in micrometres. With a positive value,
+      extraction severs the band flanks that would join the two heads and
+      retains the leads through the band. The default ``0.0`` applies no
+      enclosure correction. See ``docs/cli/extract.md``, "Drawn resistors".
 
     ``sheet_rho_ohm_sq`` is the device's sheet resistance in ohms per
     square; KLayout computes ``R = L / W * sheet_rho`` from the recognised
@@ -287,7 +257,6 @@ class ResistorDevice:
     requires: tuple[tuple[int, int], ...] = ()
     excludes: tuple[tuple[int, int], ...] = ()
     terminal: tuple[int, int] | None = None
-    terminal_enclosure_um: float = 0.0
     bulk_to_substrate: bool = False
     fixed_offset_ohm: float = 0.0
     end_term_ohm_um: float = 0.0
@@ -296,6 +265,7 @@ class ResistorDevice:
     flavours: tuple[ResistorFlavour, ...] = ()
     provenance: RuleProvenance | None = None
     topology: str = "overlap"
+    terminal_enclosure_um: float = 0.0
 
     def __post_init__(self) -> None:
         if self.topology not in RESISTOR_TOPOLOGIES:

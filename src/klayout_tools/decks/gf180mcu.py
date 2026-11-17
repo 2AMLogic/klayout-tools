@@ -2878,12 +2878,10 @@ UNMODELED_VOLTAGE_MARKERS: dict[tuple[int, int], str] = {
 #                          poly mark; this is the layer the DRC deck's own
 #                          `hres.drc` rule file keys off)
 #
-# The one resistor device modelled below is `ppolyf_u` -- the DRM's "P+ poly,
-# unsalicided" precision resistor (DRM chapter "10.0 Analog Device Related
-# Rules", and `magic/gf180mcuD.tech`'s device list comment
-# "#  ppolyf_u  resistor (P+ poly, unsalicided)"). The official KLayout LVS
-# deck derives and extracts it (`lvs/rule_decks/res_derivations.lvs` +
-# `res_extraction.lvs`) as:
+# `ppolyf_u` is the DRM's "P+ poly, unsalicided" precision resistor
+# ("10.0 Analog Device Related Rules"; also `magic/gf180mcuD.tech`). KLayout
+# LVS derives and extracts it in `lvs/rule_decks/res_derivations.lvs` and
+# `res_extraction.lvs`:
 #
 #     ppoly_exclude   = comp.join(res_exclude).join(nplus)
 #     ppolyf_u_layer  = pplus.and(poly2).and(sab).and(res_mk)
@@ -2921,22 +2919,10 @@ UNMODELED_VOLTAGE_MARKERS: dict[tuple[int, int], str] = {
 #   ldmos_xtor, schottky_diode) is **not** modelled -- none of those layers
 #   are in this curated starter subset. A resistor-marked poly segment also
 #   carrying one of them extracts as `ppolyf_u` rather than being excluded.
-# - The terminal ("C") region is `Poly2` minus the recognised body rather
-#   than upstream's `poly2.not(res_mk).not(plfuse)`; the two agree except on
-#   marked poly this deck does not recognise as a resistor, which stays
-#   ordinary connected poly here rather than being cut out of connectivity.
-#   For an SB.10-compliant drawing this alone is not enough: the DRM's own
-#   `poly2.enclosing.sab.1` (SB.10) *mandates* a >= 220 nm unmarked Poly2
-#   band around every SAB edge, and that band wraps the body and merges
-#   both leads into one terminal component, so the resistor silently
-#   vanishes (issue #5889 -- the same shape upstream's `poly2.not(res_mk)`
-#   has). Both poly entries therefore declare
-#   `terminal_enclosure_um=0.22`: `_resolve_resistors` narrows the terminal
-#   region to the Poly2 within 220 nm of Poly2 drawn beyond the mandated
-#   band (the leads and their channels through it) and severs the band's
-#   dead flanks from connectivity, so a DRC-clean drawing still extracts
-#   as a two-terminal device -- see `ResistorDevice.terminal_enclosure_um`
-#   and docs/cli/extract.md's "Drawn resistors" section.
+# - The terminal ("C") region starts as Poly2 minus the recognised body.
+#   Unrecognised marked poly stays connected. SB.10 (`poly2.enclosing.sab.1`)
+#   requires 220 nm of Poly2 around SAB. Both poly entries declare that
+#   enclosure to keep leads separate (#5889, docs/cli/extract.md).
 #
 # `ppolyf_u_1k` (issue #299): the high-sheet-rho flavour `ppolyf_u`'s own
 # `excludes` above rules out. The official LVS deck's own `res_derivations.lvs`
@@ -3577,11 +3563,6 @@ EXTRACTION_DECK = ExtractionDeck(
                 (12, 0),  # DNWELL -> the `_dw` (deep-nwell) device variants
             ),
             bulk_to_substrate=True,  # upstream extracts it with 'W' => sub
-            # SB.10 (`poly2.enclosing.sab.1`, 220 nm) mandates a Poly2 halo
-            # around every SAB edge; the halo band around this body is
-            # severed from the terminal region so a DRC-clean drawing still
-            # extracts as a two-terminal device (issue #5889) -- see
-            # `ResistorDevice.terminal_enclosure_um`'s own docstring.
             terminal_enclosure_um=0.22,
             provenance=_gf180mcu_lvs_provenance(
                 "libs.tech/klayout/tech/lvs/rule_decks/res_extraction.lvs",
@@ -3614,9 +3595,6 @@ EXTRACTION_DECK = ExtractionDeck(
                 (12, 0),  # DNWELL -> the `_dw` (deep-nwell) device variants
             ),
             bulk_to_substrate=True,  # upstream extracts it with 'W' => sub
-            # Same SB.10-mandated halo severing as `ppolyf_u` above (the
-            # rule constrains every SAB edge identically); shared
-            # derivation, issue #5889.
             terminal_enclosure_um=0.22,
             flavour_option="poly_res",
             flavours=(

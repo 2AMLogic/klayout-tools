@@ -43,35 +43,14 @@ def _resistor_body_region(
     base: kdb.Region | None = None,
     heads: kdb.Region | None = None,
 ) -> kdb.Region:
-    """The recognised device-body region for one :class:`ResistorDevice`
-    entry against this layout: ``body & marker``, narrowed by ``requires``
-    (every layer must also cover it) and ``excludes`` (each subtracted) --
-    see :class:`ResistorDevice`'s own docstring.
+    """Recognise the same resistor body in extraction and ERC (#2204).
 
-    Factored out of :func:`_resolve_resistors`'s own inline computation
-    (issue #2204) so ``erc.py``'s deck-driven device-body auto-detection
-    computes the *exact same* region this deck's own extraction recognises
-    a resistor body as, rather than a second, potentially drifting
-    reimplementation -- the issue's own "Marker-to-role mapping" design
-    note's explicit requirement ("the same one `klt extract` uses").
-
-    ``base`` is the conductor region to intersect the marker against.
-    :func:`_resolve_resistors` passes its own (possibly black-box-masked)
-    ``poly``/``active``/metal region here, so this refactor changes nothing
-    about its result. Omitted (the default, every caller outside the main
-    extraction pipeline), this recomputes ``resistor.body`` fresh via
-    :func:`_region` -- there is no black-box masking to inherit outside
-    ``run_extract``'s own pipeline.
-
-    For a ``topology="abutting_heads"`` entry (issue #2679) the region is
-    instead ``marker & requires - excludes`` restricted to components that
-    touch the head conductor (``heads``, defaulting to the entry's
-    ``terminal``/``body`` layer) in two or more
-    separate regions; ``extract`` and ``erc`` share this one definition.
-
-    Empty when the resistor's ``marker`` (or any ``requires`` layer) is not
-    drawn anywhere on this layout -- matching :func:`_capacitor_plate_regions`'s
-    own "no PDK marker drawn" convention.
+    Intersect the body conductor, marker and every required layer, then
+    subtract each excluded layer. For ``abutting_heads`` (#2679), start
+    from the marker and keep components touching two separate heads.
+    Extraction supplies the possibly black-box-masked ``base`` and ``heads``.
+    Otherwise read the drawn body conductor and terminal layer directly,
+    defaulting the terminal layer to the body layer.
     """
     if resistor.topology == "abutting_heads":
         # Issue #2679: the marker *is* the resistive body (sg13g2 polyres);
@@ -123,57 +102,16 @@ def _sever_terminal_enclosure_bands(
     recognised: list[tuple[ResistorDevice, kdb.Region, tuple[int, int]]],
     bases: dict[tuple[int, int], kdb.Region],
 ) -> None:
-    """Sever each enclosure-mandated halo band (issue #5889) from its
-    terminal conductor layer, in place on ``bases``.
+    """Cut enclosure-band flanks from terminal and connectivity regions (#5889).
 
-    For every recognised :class:`ResistorDevice` entry declaring
-    ``terminal_enclosure_um > 0`` (a PDK DRC rule that *mandates* the
-    terminal conductor extend that far beyond the body on every side --
-    gf180mcu's SB.10, ``poly2.enclosing.sab.1``, 220 nm of Poly2 beyond
-    every SAB edge), the conductor drawn around the body forms an
-    unmarked band that wraps the body and touches it along its whole
-    perimeter. Left whole, that band merges both contacted leads into one
-    terminal component: the native resistor extractor sees a single
-    contact region, reports "Expected two polygons on contacts interacting
-    with one resistor shape", and forms **no device** -- a DRC-clean
-    resistor silently vanishes from the extracted netlist.
+    Keep band conductor within one enclosure width of conductor outside
+    the band. This keeps leads crossing the band and preserves a real
+    short where conductor continues around the body beyond the band.
 
-    The fix distinguishes the two *leads* crossing the band from the
-    band's dead *flanks* by reachability: a band point is kept as terminal
-    conductor exactly when it lies within the declared enclosure distance
-    of conductor drawn **beyond** the mandated band (``outer`` below) --
-    which is precisely "the lead continues outward past the band here".
-    A lead's channel through the band is never wider than the band itself,
-    so every point of it is within the enclosure distance of ``outer``,
-    while a flank's midpoint is farther than that from any outer
-    conductor. The severed mid-flank region
-
-    ``(conductor & dilate(body, enclosure)) - dilate(outer, enclosure)``
-
-    is subtracted from the terminal conductor layer, which both narrows
-    the ``C`` region every resistor of that layer is extracted against
-    (the two leads become two components, each still touching the body
-    across its own end) and cuts the same flanks out of the connectivity
-    graph, so the two heads resolve to two distinct nets instead of one
-    net shorted through the band.
-
-    Degenerate by construction, all matching today's no-device behaviour:
-
-    - a body drawn with no band at all (SB.10 violated, the pre-#5889
-      fixture convention) has no band to sever -- ``outer`` reaches the
-      body, nothing is cut, extraction is bit-for-bit what it was;
-    - a body whose halo is *conductor beyond the band everywhere* (a bar
-      uniformly wider than the dilated body) is genuinely shorted through
-      its own conductor: the whole band stays within reach of ``outer``,
-      nothing is severed, and no device forms -- the drawn shape really is
-      one terminal component;
-    - a body so short the two leads' corner slivers meet along a flank
-      (body shorter than ~2 x enclosure) is left unsevered for the same
-      reason.
-
-    Module-level rather than inline in :func:`_resolve_resistors` so its
-    branching does not count against that function's own baselined
-    cyclomatic complexity (``complexity-baseline.json``).
+    The caller has already removed the bodies from ``bases``, so intersecting
+    a sized body with its conductor gives just the drawn enclosure band.
+    Each cut is computed against the same conductor before any cuts are
+    applied, so nearby bodies can use the shared poly as a series lead.
     """
     import klayout.db as kdb
 
@@ -184,13 +122,7 @@ def _sever_terminal_enclosure_bands(
         conductor = bases[terminal_layer]
         enc_dbu = max(1, int(round(spec.terminal_enclosure_um / layout.dbu)))
         layer_severed = severed_by_layer.setdefault(terminal_layer, kdb.Region())
-        # One ring per *connected component* of the body, not per body
-        # region: two same-flavour bodies drawn closer than 2x the
-        # enclosure distance share the halo band between them, and a ring
-        # merged across both would sever their shared lead (the series
-        # connection through the salicided gap) along with the flanks.
-        # `body` was already subtracted from `conductor` by the caller, so
-        # `ring & conductor` is exactly the drawn halo band.
+        # Per-component rings preserve the series lead between nearby bodies.
         for component in body.merged().each():
             ring = kdb.Region(component).sized(enc_dbu)
             band = conductor & ring
@@ -221,56 +153,19 @@ def _resolve_resistors(
 ]:
     """Resolve the deck's drawn-resistor declarations against this layout.
 
-    Returns ``(resistors, poly, active, metals, poly_candidate_bodies,
-    dummy_devices_dropped)`` where ``resistors`` is one ``(spec,
-    body_region, terminal_region)`` triple per *recognised* device class and
-    the three conductor regions are the deck's originals with every
-    recognised resistor body **subtracted** -- so the caller's connectivity
-    graph (and its MOS gate/source-drain split) sees the resistor's heads as
-    ordinary conductor and the resistive segment as a hole, instead of one
-    continuous short (see :class:`~klayout_tools.decks.ResistorDevice`).
-    For an entry declaring ``terminal_enclosure_um`` (issue #5889), the
-    mandated halo band around its body is additionally **severed** from the
-    terminal conductor layer -- see
-    :func:`_sever_terminal_enclosure_bands`, which runs between the body
-    subtraction and the returned terminal regions.
+    Return ``(resistors, poly, active, metals, poly_candidate_bodies,
+    dummy_devices_dropped)``. Each resistor triple contains its spec, body
+    and terminals. The conductor regions have recognised bodies removed and
+    declared enclosure bands severed. The connectivity graph uses these
+    same regions, including for the MOS gate/source-drain split.
+    A body or terminal layer outside the deck conductors raises
+    :class:`ExtractError`.
 
-    A resistor body is ``body_layer & marker & all(requires) - any(excludes)``
-    (or, for a ``topology="abutting_heads"`` spec, issue #2679, ``marker &
-    all(requires) - any(excludes)`` kept only where it touches two separate
-    terminal-layer heads -- see :func:`_resistor_body_region`). A spec
-    whose body region comes out empty on this layout (the common case -- no
-    PDK resistor marker drawn anywhere) is dropped entirely and
-    subtracts nothing, so extraction of a resistor-free layout is bit-for-bit
-    what it was before this feature existed.
-
-    ``dummy`` is the deck's optional dummy-device marker region (see
-    ``ExtractionDeck.dummy``, issue #295) -- possibly empty when the deck
-    declares no ``dummy`` layer or the layout draws no such geometry.
-    Mirroring the MOS gate-suppression idiom in ``_extract_netlist``, a
-    resistor body's *candidate* region (after ``requires``/``excludes`` but
-    before the ``dummy`` cut) has ``dummy`` subtracted before it is handed
-    off as a recognised device: any *connected component* of the candidate
-    fully consumed by ``dummy`` is dropped outright (counted into
-    ``dummy_devices_dropped``, issue #462) rather than registered as a
-    device, while a component only partially covered survives as a clean
-    geometric cut -- the same all-or-nothing distinction the MOS path
-    already makes. Whatever ``dummy`` removes from a candidate body is *not*
-    subtracted from the caller's conductor region, so it stays present as
-    ordinary conductor, exactly like a suppressed MOS gate's poly.
-
-    ``poly_candidate_bodies`` is the union of every *candidate* body region
-    (post ``requires``/``excludes``, but **before** the ``dummy`` cut) whose
-    ``spec.body`` is the deck's ``poly`` layer -- used by
-    :func:`_detect_unmodelled_poly_bodies` to recognise a fully
-    dummy-suppressed poly resistor's own footprint as "claimed" (so it is
-    never misflagged as an unmodelled-device gap, issue #462), distinct from
-    the narrower post-dummy body carried in ``resistors`` itself.
-
-    Raises :class:`ExtractError` for a deck-authoring mistake (a ``body``/
-    ``terminal`` layer that is not one of the deck's own conductor layers),
-    since the terminal region must be a layer the connectivity graph already
-    carries.
+    Subtract the optional dummy marker from each candidate body, counting
+    fully covered components as dropped (#462). Dummy-covered areas stay
+    ordinary conductor. Return the union of pre-dummy poly candidates as
+    well so the unmodelled-device check counts their footprints as claimed,
+    including when the dummy marker covers an entire candidate.
     """
     import klayout.db as kdb
 
@@ -319,10 +214,6 @@ def _resolve_resistors(
     for spec, body, _terminal_layer in recognised:
         bases[spec.body] = bases[spec.body] - body
 
-    # Enclosure-mandated halo bands (issue #5889): sever the band a
-    # PDK-mandated enclosure rule forces around each declaring entry's
-    # body out of the terminal conductor layer, so the two leads stop
-    # being one merged terminal component (and one shorted net).
     _sever_terminal_enclosure_bands(layout, recognised, bases)
 
     resistors = [
