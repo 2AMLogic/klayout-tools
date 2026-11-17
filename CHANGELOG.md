@@ -24,11 +24,13 @@ not `klt --version`, if you need to detect this kind of drift. See
   error formatters fell through to the generic tail-of-output branch and
   the caller was handed `yosys exited with code 1:  Caused by:     thrown
   Wasm exception`, naming no cause, no engine, and no remedy. The new
-  shared `wasm_trap_hint_if_applicable` helper (beside
-  `wasi_sandbox_hint_if_applicable`, so the detection cannot diverge
-  between the verbs — the #1755 lesson) is appended by the no-`ERROR:`
-  tail branch of both `_yosys_error_message` and
-  `_synthesis_error_message` when the captured output carries the trap
+  shared `wasm_trap_hint_if_applicable` helper (in the new
+  `_yosys_error_messages` module, which now co-hosts both verbs'
+  formatters `_yosys_error_message` and `_synthesis_error_message` so the
+  detection cannot diverge between the verbs — the #1755 lesson; the
+  extraction keeps `equiv.py`, `synthesize.py`, and `_provenance.py`
+  within the per-file size ratchet) is appended by the no-`ERROR:`
+  tail branch of both formatters when the captured output carries the trap
   signature: the hint names the WASI build, the ~4 GiB ceiling, and
   `request.yosys_binary`/`$KLT_YOSYS_BINARY` as the native-build remedy.
   A run that *does* carry a yosys `ERROR:` line is unchanged (the

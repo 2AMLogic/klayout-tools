@@ -30,11 +30,7 @@ and silently diverged -- between ``equiv.py`` and ``synthesize.py``; issue
 #1112), plus ``wasi_sandbox_hint_if_applicable`` (issue #1755 -- the #1368
 WASI-sandboxed-yosys detection had only been added to ``synthesize.py``,
 leaving ``equiv.py``'s independent error-formatting function without it;
-issue #2453 narrowed it for scripts under the host temp dir), and
-``wasm_trap_hint_if_applicable`` (issue #5804 -- a WASI yosys dying as a
-bare wasmtime trap, typically the wasm32 ~4 GiB memory ceiling being
-exceeded, is now named with its native-build remedy instead of echoed
-verbatim by both verbs' no-``ERROR:`` tail branches).
+issue #2453 narrowed it for scripts under the host temp dir).
 
 Alongside the raw-byte ``sha256_file`` it also owns ``layout_geometry_digest``
 (issue #2065) -- a *layout-aware* digest for reports that pin the input streams
@@ -159,50 +155,6 @@ def wasi_sandbox_hint_if_applicable(error_line: str) -> str:
     if _is_under_host_tempdir(script_path):
         return _WASI_SANDBOX_TEMPDIR_HINT.format(tempdir=tempfile.gettempdir())
     return _WASI_SANDBOX_HINT
-
-
-# Issue #5804: a WASI yosys (e.g. ``yowasp-yosys``) runs inside a wasm32
-# guest whose linear memory is capped at ~4 GiB. A heavy ``sat -seq <depth>``
-# query over a large flattened netlist allocates roughly with design size x
-# unroll depth and can exceed that ceiling; the guest's allocation failure
-# unwinds out of the guest as a bare wasmtime trap -- no yosys ``ERROR:``
-# line anywhere -- so the traceback shape below is the only signal. The
-# boundary is design-dependent (the same script passes at one design size and
-# traps two steps up), so no numeric ceiling is claimed anywhere.
-_WASM_TRAP_RE = re.compile(r"wasmtime\._trap\.Trap|thrown Wasm exception")
-
-_WASM_TRAP_HINT = (
-    "; yosys died with a WebAssembly trap and no yosys ERROR of its own -- "
-    "the 'yosys' on $PATH is a WASI/wasm build (e.g. yowasp-yosys), and the "
-    "most likely cause is that the query exceeded the wasm32 guest's ~4 GiB "
-    "linear-memory ceiling (e.g. a sat -seq <depth> unroll over a large "
-    "flattened netlist). Point request.yosys_binary (or $KLT_YOSYS_BINARY) "
-    "at a native yosys build, which has no such ceiling."
-)
-
-
-def wasm_trap_hint_if_applicable(output: str) -> str:
-    """The wasm-trap hint if ``output`` carries the wasmtime trap signature
-    (``wasmtime._trap.Trap`` or ``thrown Wasm exception``) -- otherwise
-    ``""``.
-
-    Shared by ``synthesize.py`` and ``equiv.py`` (issue #5804) so the
-    wasm-memory-ceiling detection cannot silently diverge between verbs,
-    the same failure mode issue #1755 fixed for
-    ``wasi_sandbox_hint_if_applicable`` above. Callers consult this only in
-    their no-``ERROR:`` tail branch: a run that produced a yosys ``ERROR:``
-    line keeps that line's message and never sees the hint.
-
-    A WASI yosys runs inside a wasm32 guest whose linear memory is capped
-    at ~4 GiB; a query that allocates past the ceiling dies as a bare
-    ``thrown Wasm exception`` trap with no yosys-side message, which the
-    generic tail-of-output branch would otherwise echo verbatim. The hint
-    names the ceiling and the ``request.yosys_binary``/
-    ``$KLT_YOSYS_BINARY`` native-build remedy.
-    """
-    if not _WASM_TRAP_RE.search(output):
-        return ""
-    return _WASM_TRAP_HINT
 
 
 # Bumped whenever the canonical serialisation below changes shape, so a digest
