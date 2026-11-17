@@ -891,7 +891,8 @@
         "klayout_tools._sta_sdc_check",
         "klayout_tools.post_route_sta",
         "klayout_tools.post_route_sta_electrical",
-        "klayout_tools.post_route_sta_path_groups"
+        "klayout_tools.post_route_sta_path_groups",
+        "klayout_tools.post_route_sta_stages"
       ]
     },
     "stats": {

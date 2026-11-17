@@ -333,6 +333,11 @@ from .post_route_sta_path_groups import (  # noqa: F401 -- re-exported names
     _worst_paths,
     _worst_paths_by_group,
 )
+from .post_route_sta_stages import (  # noqa: F401 -- re-exported names
+    _attach_worst_path_stages,
+    _worst_path_lines,
+    _worst_path_stage_lines,
+)
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- versioned independently of every other verb's own
@@ -692,6 +697,7 @@ def run_sta(
         request["constraints"], clock_port, input_transition_ns, input_transitions
     )
     report_ports = _validate_report_ports(request["constraints"], clock_port)
+    report_path_stages = _validate_report_path_stages(request["constraints"])
     false_path_from = _validate_false_path_from(request["constraints"], clock_port)
     wire_load_model, wire_load_mode = _validate_wire_load_estimate(
         request["constraints"], has_verilog
@@ -781,6 +787,7 @@ def run_sta(
             input_transitions=input_transitions,
             boundary=boundary,
             report_ports=report_ports,
+            report_path_stages=report_path_stages,
             false_path_from=false_path_from,
             spef_path=spef_path,
             spef_map=spef_map,
@@ -973,6 +980,7 @@ def _dispatch_sta(
     output_dir: str,
     input_path: str,
     basename: str,
+    report_path_stages: bool = False,
     write_sdf: bool = False,
 ) -> dict[str, Any]:
     """Run the single- or multi-corner analysis :func:`run_sta` resolved,
@@ -1006,6 +1014,7 @@ def _dispatch_sta(
             input_transitions=input_transitions,
             boundary=boundary,
             report_ports=report_ports,
+            report_path_stages=report_path_stages,
             false_path_from=false_path_from,
             spef_path=spef_path,
             spef_map=spef_map,
@@ -1043,6 +1052,7 @@ def _dispatch_sta(
         input_transitions=input_transitions,
         boundary=boundary,
         report_ports=report_ports,
+        report_path_stages=report_path_stages,
         false_path_from=false_path_from,
         spef_path=spef_path,
         wire_load_model=wire_load_model,
@@ -1194,6 +1204,7 @@ def _run_corner_session(
     input_transitions: dict[str, float] | None,
     boundary: dict[str, Any] | None,
     report_ports: list[str] | None,
+    report_path_stages: bool,
     false_path_from: list[str] | None,
     spef_path: str | None,
     wire_load_model: str | None,
@@ -1307,6 +1318,7 @@ def _run_corner_session(
             input_transitions=input_transitions,
             boundary=boundary,
             report_ports=report_ports,
+            report_path_stages=report_path_stages,
             false_path_from=false_path_from,
             propagated_clock=propagated_clock,
             clock_extras=clock_extras,
@@ -1337,6 +1349,7 @@ def _run_corner_session(
             input_transitions=input_transitions,
             boundary=boundary,
             report_ports=report_ports,
+            report_path_stages=report_path_stages,
             false_path_from=false_path_from,
             power_activity=power_activity,
             clock_extras=clock_extras,
@@ -1373,6 +1386,10 @@ def _run_corner_session(
     worst_setup_path, worst_hold_path = _worst_paths(
         completed.stdout or "", worst_slack, worst_hold_slack
     )
+    if report_path_stages:  # issue #5783
+        worst_setup_path, worst_hold_path = _attach_worst_path_stages(
+            completed.stdout or "", worst_setup_path, worst_hold_path
+        )
 
     corner_fields: dict[str, Any] = {
         "engine_log": completed.engine_log,
@@ -1474,6 +1491,7 @@ def _run_multi_corner(
     input_transitions: dict[str, float] | None,
     boundary: dict[str, Any] | None,
     report_ports: list[str] | None,
+    report_path_stages: bool,
     false_path_from: list[str] | None,
     spef_path: str | None,
     spef_map: dict[str, str] | None,
@@ -1563,6 +1581,7 @@ def _run_multi_corner(
             input_transitions=input_transitions,
             boundary=boundary,
             report_ports=report_ports,
+            report_path_stages=report_path_stages,
             false_path_from=false_path_from,
             spef_path=pair_spef,
             wire_load_model=wire_load_model,
@@ -2445,6 +2464,18 @@ def _validate_report_ports(
     return list(value) or None
 
 
+def _validate_report_path_stages(constraints: dict[str, Any]) -> bool:
+    """``constraints.report_path_stages`` (issue #5783): optional boolean;
+    ``False`` when omitted, so an unrequested session is byte-identical."""
+    field = "request.constraints.report_path_stages"
+    value = constraints.get("report_path_stages")
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise PostRouteStaError(f"{field} must be a boolean")
+    return value
+
+
 def _validate_false_path_from(
     constraints: dict[str, Any], clock_port: str
 ) -> list[str] | None:
@@ -3289,41 +3320,6 @@ def _boundary_lines(
     return lines
 
 
-def _worst_path_lines() -> list[str]:
-    """Per-path-group worst setup (``max``) and hold (``min``) path ends,
-    marker-delimited (issue #2740).
-
-    ``find_timing_paths -group_path_count 1 -endpoint_path_count 1`` returns
-    the single worst constrained path end of every path group (data clock
-    groups, ``asynchronous``, ``gated clock``, ...); every constrained path
-    end belongs to exactly one group, so the minimum over these records is
-    the same population ``report_worst_slack_metric`` reduces over --
-    :func:`_worst_path_record` re-checks that equality per run rather than
-    assuming it. ``check_role`` is OpenSTA's own name for the check at the
-    endpoint (``setup``, ``recovery``, ``clock gating hold``, ...), so
-    recovery/removal are never relabelled as data setup/hold. Output is
-    bounded by the number of path groups, not design size. The whole query
-    is ``catch``-wrapped: an engine without these commands yields an
-    ``ERROR`` row (reported as ``status: "unavailable"``), never a fabricated
-    path."""
-    return [
-        f'puts "{_WORST_PATHS_BEGIN}"',
-        "if {[catch {",
-        "    foreach klt_path_side {max min} {",
-        "        foreach klt_pe [find_timing_paths -path_delay $klt_path_side "
-        "-group_path_count 1 -endpoint_path_count 1] {",
-        '            puts "PATH\\t$klt_path_side\\t[$klt_pe check_role]\\t'
-        "[$klt_pe slack]\\t[get_full_name [get_property $klt_pe startpoint]]\\t"
-        '[get_full_name [get_property $klt_pe endpoint]]"',
-        "        }",
-        "    }",
-        "} klt_worst_path_error]} {",
-        '    puts "ERROR\\t[string map [list \\n { } \\t { }] $klt_worst_path_error]"',
-        "}",
-        f'puts "{_WORST_PATHS_END}"',
-    ]
-
-
 def _port_path_lines(report_ports: list[str] | None) -> list[str]:
     """Per-port worst setup (``max``) and hold (``min``) path ends,
     marker-delimited (issue #3042); no lines at all without
@@ -3661,6 +3657,7 @@ def _sta_script_lines(
     input_transitions: dict[str, float] | None = None,
     boundary: dict[str, Any] | None = None,
     report_ports: list[str] | None = None,
+    report_path_stages: bool = False,
     false_path_from: list[str] | None = None,
     propagated_clock: bool = False,
     clock_extras: dict[str, Any] | None = None,
@@ -3770,6 +3767,7 @@ def _sta_script_lines(
     ]
     lines += _violation_count_lines()
     lines += _worst_path_lines()
+    lines += _worst_path_stage_lines(report_path_stages)  # issue #5783
     lines += _port_path_lines(report_ports)
     # Before the completeness query, which must stay the script's last
     # statements (issue #2780): it can take the session down.
@@ -3799,6 +3797,7 @@ def _sta_netlist_script_lines(
     input_transitions: dict[str, float] | None = None,
     boundary: dict[str, Any] | None = None,
     report_ports: list[str] | None = None,
+    report_path_stages: bool = False,
     false_path_from: list[str] | None = None,
     power_activity: dict[str, float] | None = None,
     clock_extras: dict[str, Any] | None = None,
@@ -3886,6 +3885,7 @@ def _sta_netlist_script_lines(
     ]
     lines += _violation_count_lines()
     lines += _worst_path_lines()
+    lines += _worst_path_stage_lines(report_path_stages)  # issue #5783
     lines += _port_path_lines(report_ports)
     lines += _constraint_completeness_lines()
     return lines
