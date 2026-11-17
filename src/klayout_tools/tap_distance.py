@@ -44,12 +44,12 @@ The distance is Euclidean (corner-to-corner diagonals count as
 
 from __future__ import annotations
 
-import json
 import math
 import re
 from typing import Any
 
 from ._layout import bbox_um_dict, clip_box, load_layout, region, resolve_top_cell
+from ._paths import _load_request_json
 from ._provenance import sha256_file
 
 #: Stable rule ids -- never renumbered/repurposed once shipped.
@@ -170,13 +170,7 @@ def _parse_vias(
 def _load_net_spec(path: str) -> dict[str, Any]:
     """Validate a ``--net-spec`` file: ``stackup`` (name/layer/label_layer),
     optional ``vias`` and ``tap_connect_to`` (a stackup name)."""
-    try:
-        with open(path, encoding="utf-8") as handle:
-            spec = json.load(handle)
-    except OSError as exc:
-        raise TapDistanceError(f"could not read --net-spec '{path}': {exc}") from exc
-    except json.JSONDecodeError as exc:
-        raise TapDistanceError(f"--net-spec '{path}' is not valid JSON: {exc}") from exc
+    spec = _load_request_json(path, TapDistanceError)
     if not isinstance(spec, dict):
         raise TapDistanceError(f"--net-spec '{path}' must be a JSON object")
 
