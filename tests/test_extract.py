@@ -25634,6 +25634,22 @@ def test_normalized_hash_has_its_own_stage_only_when_netlist_written(tmp_path):
     assert "netlist_normalized_hash" not in skipped["timing"]["stages"]
 
 
+def test_unsupported_and_unmodeled_diagnostics_have_their_own_stages(tmp_path):
+    # Issue #5893: both diagnostics re-read whole-chip marker layers and
+    # (for the unsupported-device one) re-run MOS-capacitor recognition, so
+    # an unstaged run attributed them to `unattributed_seconds` -- ~70% of
+    # wall time on a routed gf180mcu block. They must be attributed, the
+    # same contract #3408 set for the normalized hash.
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    result = run_extract(path, "sky130")
+    assert {
+        "unsupported_device_diagnostic",
+        "unmodeled_marker_diagnostic",
+    } <= set(result["timing"]["stages"])
+    assert result["timing"]["stages"]["unsupported_device_diagnostic"] >= 0
+    assert result["timing"]["stages"]["unmodeled_marker_diagnostic"] >= 0
+
+
 def test_progress_lines_go_to_stderr_and_stdout_stays_json(tmp_path, capsys):
     path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
     code = main(["extract", path, "--deck", "sky130", "--progress", "--format", "json"])

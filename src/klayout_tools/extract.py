@@ -4778,12 +4778,28 @@ def extract_netlist_from_layout(
 
     # Unsupported devices (issue #2919): additive diagnostic through the
     # optional `unsupported_devices` out-parameter, same idiom as above.
-    warnings = warnings + _detect_unsupported_devices(
-        layout, top_cell, deck, unsupported_devices
+    # Staged (issue #5893) so its wall time lands in `timing.stages` -- this
+    # was the dominant, unattributed cost of real runs (it re-reads marker
+    # layers and re-runs `_resolve_mos_capacitors` on the whole cell), the
+    # same "the timing object understated the cost" gap #3408 closed for the
+    # normalized hash.
+    warnings = warnings + _staged(
+        "unsupported_device_diagnostic",
+        _detect_unsupported_devices,
+        layout,
+        top_cell,
+        deck,
+        unsupported_devices,
     )
 
     # Unmodelled device markers (issue #3858): prose-only diagnostic.
-    warnings = warnings + _detect_unmodeled_device_markers(layout, top_cell, deck_name)
+    warnings = warnings + _staged(
+        "unmodeled_marker_diagnostic",
+        _detect_unmodeled_device_markers,
+        layout,
+        top_cell,
+        deck_name,
+    )
 
     # Issue #2722: per-device placement attribution for
     # `--hierarchical-cells`, keyed by `Device.id()`, filled into the
@@ -7127,6 +7143,13 @@ def _resolve_mos_capacitors(
     claiming entry stays an ordinary MOS device (the unsupported-marker
     residue still reports it).
 
+    The walk visits only the islands that interact with the union of the
+    entries' marker layers: a claim requires ``touches(entry.marker)``, so
+    islands outside them can only return ``None`` (issue #5893 -- the
+    unrestricted walk was ~95% of wall time on marker-free digital blocks).
+    ``active_without_capacitors`` is computed as the full island set minus
+    the recognised union, so it is exactly what the unfiltered walk built.
+
     Returns ``(capacitors, active_without_capacitors, recognised, dropped)``:
     ``capacitors`` is one ``(entry, gate, source_drain)`` triple per entry
     that claimed at least one island (``gate`` = ``island & poly``,
@@ -7147,18 +7170,30 @@ def _resolve_mos_capacitors(
         return layers[layer]
 
     claimed: dict[int, kdb.Region] = {}
-    remaining = kdb.Region()
-    for component in active.merged().each():
-        island = kdb.Region(component)
-        chosen = (
-            _mos_capacitor_entry_index(island, deck, poly, nwell, region_of)
-            if not (island & poly).is_empty()
-            else None
-        )
-        if chosen is None:
-            remaining += island
-        else:
-            claimed[chosen] = claimed.get(chosen, kdb.Region()) + island
+    # Claim-scan over *candidate* islands only (issue #5893): a claim
+    # requires the island to touch the entry's marker layer
+    # (`_mos_capacitor_entry_index`'s `touches(entry.marker)`), so only the
+    # merged islands that interact with the union of the cap markers can
+    # ever be claimed -- on a typical digital block (gf180mcu, no MOS caps
+    # drawn) the marker union is empty and the scan collapses to nothing,
+    # where the pre-#5893 full-island walk cost ~12 of the ~12.3 wall
+    # minutes on a 166 KB ttgf0p2 block. `remaining` stays exhaustive: it is
+    # recomputed below as `merged_islands - recognised`, the same island set
+    # the unfiltered walk produced, not restricted to the candidates.
+    merged_islands = active.merged()
+    cap_markers = kdb.Region()
+    for entry in deck.mos_capacitors:
+        cap_markers += region_of(entry.marker)
+    if not cap_markers.is_empty():
+        for component in merged_islands.interacting(cap_markers).each():
+            island = kdb.Region(component)
+            chosen = (
+                _mos_capacitor_entry_index(island, deck, poly, nwell, region_of)
+                if not (island & poly).is_empty()
+                else None
+            )
+            if chosen is not None:
+                claimed[chosen] = claimed.get(chosen, kdb.Region()) + island
 
     capacitors: list[tuple[MosCapacitorDevice, kdb.Region, kdb.Region]] = []
     recognised = kdb.Region()
@@ -7173,7 +7208,11 @@ def _resolve_mos_capacitors(
                     dropped += 1
             gate = gate - dummy
         capacitors.append((deck.mos_capacitors[index], gate, island_region - poly))
-    return capacitors, remaining, recognised, dropped
+    # Islands that no entry claimed stay ordinary MOS devices; computing
+    # them as the set difference (instead of accumulating during the scan)
+    # is what lets the scan itself be candidate-restricted. The components
+    # are already maximal merges, so nothing re-merges across the boundary.
+    return capacitors, merged_islands - recognised, recognised, dropped
 
 
 def _flavour_recognised_islands(
@@ -7195,16 +7234,56 @@ def _flavour_recognised_islands(
     active = _region(layout, top_cell, deck.active)
     poly = _region(layout, top_cell, deck.poly)
     nwell = _region(layout, top_cell, deck.nwell)
+    # Merged once, shared by every flavour below (the per-flavour merge was
+    # the dominant cost of the whole diagnostic on real routed layouts --
+    # issue #5893: ~26 of 37 wall minutes on a 166 KB ttgf0p2 block, all in
+    # re-merging the same `active` per flavour).
+    merged_islands = active.merged()
+    # The gate area, computed once for every flavour below (issue #5893):
+    # its merged components are per-island, so a component interacting with
+    # an island is exactly that island's `island & poly` merge.
+    all_gates = merged_islands & poly.merged()
     for flavour in flavours:
-        marker_region = _region(layout, top_cell, flavour.marker)
-        and_regions = [_region(layout, top_cell, m) for m in flavour.and_markers]
-        not_regions = [_region(layout, top_cell, m) for m in flavour.not_markers]
-        for component in active.merged().each():
+        # Merged once per flavour -- coverage-based consumers only (the
+        # split's shortcut subtract and the per-gate `interacting` claim
+        # tests; see the same idiom in `_extract_netlist`'s flavour split,
+        # issue #5893).
+        marker_region = _region(layout, top_cell, flavour.marker).merged()
+        # A flavour whose own marker carries no shapes can claim nothing:
+        # both the island-level and per-gate claim tests require an
+        # interaction with `marker_region` (`_flavour_claims_island`'s first
+        # conjunct), so skipping the pass outright is result-preserving.
+        if marker_region.is_empty():
+            continue
+        and_regions = [
+            _region(layout, top_cell, m).merged() for m in flavour.and_markers
+        ]
+        not_regions = [
+            _region(layout, top_cell, m).merged() for m in flavour.not_markers
+        ]
+        # Same invariant, used to shrink the iteration domain: a gate is
+        # inside its island, so any island yielding a claimed part must
+        # interact with `marker_region` itself. `interacting` over the merged
+        # islands returns exactly those whole islands, so iterating them is
+        # the same walk as before minus the islands that can only return an
+        # empty claim -- on a typical digital block the marker layers
+        # (LDMOS/MVSD/MVPSD) are near-empty and nearly every island drops
+        # out. Issue #5893.
+        for component in merged_islands.interacting(marker_region).each():
             island = kdb.Region(component)
-            if (island & poly).is_empty():
+            # Same region as `(island & poly)` -- `all_gates`' components
+            # are per-island, so interacting ones lie inside `island` -- but
+            # without the whole-chip boolean per island (issue #5893).
+            if all_gates.interacting(island).is_empty():
                 continue
             claimed_part, _ = _flavour_split_island(
-                island, poly, flavour, marker_region, and_regions, not_regions, nwell
+                island,
+                all_gates,
+                flavour,
+                marker_region,
+                and_regions,
+                not_regions,
+                nwell.merged(),
             )
             recognised += claimed_part
     return recognised
@@ -8517,24 +8596,47 @@ def _extract_netlist(
     # A flavour may refine its `marker` with `and_markers`/`not_markers`/
     # `nfet_only` (issue #3599, sky130 native-Vt); all empty/False for every
     # other flavour, so the claim test below reduces to `interacting(marker)`.
+    # Merged once for the split below (issue #5893): `_flavour_split_island`
+    # consumes coverage-only, and the gate area is intersected once per
+    # flavour (`active & poly`, one whole-chip boolean) instead of once per
+    # island -- against the raw reads that was thousands of overlapping
+    # shapes per island, ~95% of `device_extraction` on routed gf180mcu
+    # blocks.
+    split_poly = poly.merged()
+    split_nwell = nwell.merged()
     flavour_active: list[kdb.Region] = []
     for flavour in deck.mos_flavours:
-        marker_region = _region(layout, top_cell, flavour.marker)
-        and_regions = [_region(layout, top_cell, m) for m in flavour.and_markers]
-        not_regions = [_region(layout, top_cell, m) for m in flavour.not_markers]
+        # Merged once per flavour: every consumer below (the split's
+        # shortcut subtract, the per-gate `interacting` claim tests) is
+        # coverage-based, so merging changes no result -- but it turns the
+        # per-island booleans from whole-chip unmerged-region scans (the
+        # raw marker can carry thousands of overlapping drawn shapes) into
+        # queries against one merged layer. Issue #5893.
+        marker_region = _region(layout, top_cell, flavour.marker).merged()
+        and_regions = [
+            _region(layout, top_cell, m).merged() for m in flavour.and_markers
+        ]
+        not_regions = [
+            _region(layout, top_cell, m).merged() for m in flavour.not_markers
+        ]
         claimed = kdb.Region()
         if not marker_region.is_empty() and not active.is_empty():
+            merged_active = active.merged()
+            # One whole-chip boolean per flavour, then per-island gates come
+            # out of `gates_region.interacting(island)` inside the split
+            # (issue #5893).
+            gates_region = merged_active & split_poly
             remaining = kdb.Region()
-            for component in active.merged().each():
+            for component in merged_active.each():
                 component_region = kdb.Region(component)
                 claimed_part, remaining_part = _flavour_split_island(
                     component_region,
-                    poly,
+                    gates_region,
                     flavour,
                     marker_region,
                     and_regions,
                     not_regions,
-                    nwell,
+                    split_nwell,
                 )
                 claimed += claimed_part
                 remaining += remaining_part

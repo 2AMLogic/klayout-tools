@@ -14,6 +14,24 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt extract` no longer spends ~95% of its wall time re-walking every
+  active island on marker-flavoured decks** (#5893, 2026-11-17): three
+  Python-level scans around KLayout's `LayoutToNetlist` pass intersected
+  whole-chip unmerged regions once per active island — the MOS-capacitor
+  claim scan (inside `device_extraction`), the unsupported-device
+  diagnostic's flavour-island re-scan, and the per-gate flavour split's
+  gate build. Each now computes its whole-chip region once (merged, and
+  restricted to islands that can actually claim), and the split returns a
+  wholly-inside-the-marker island without touching gate geometry. Two new
+  additive `timing.stages` keys, `unsupported_device_diagnostic` and
+  `unmodeled_marker_diagnostic`, attribute the previously unattributed
+  diagnostic cost (the same contract #3408 set for the normalized hash).
+  Measured on the 166 KB ttgf0p2 `tt_um_MATTHIAS_M_PAL_TOP_WRAPPER` block
+  (33,582 devices): 2,262.7 s → 83.6 s total, netlist byte-identical; the
+  2x2 `tt_um_2048_vga_game` (66,459 devices) went from a 300 s timeout to
+  112.0 s. No JSON field is added, renamed or removed; no `schema_version`
+  bump.
+
 - **`klt pex` and `klt sim --monte-carlo` now read a SPICE card the same way
   the flattener does: `w = 1` and `w=(2 * 1u)` are parameters, not device
   names** (#5461, 2026-11-13): three hand-rolled card tokenizers lived in

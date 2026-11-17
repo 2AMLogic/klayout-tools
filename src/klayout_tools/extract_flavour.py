@@ -37,7 +37,7 @@ def _flavour_claims_island(
 
 def _flavour_split_island(
     island: kdb.Region,
-    poly: kdb.Region,
+    gates_region: kdb.Region,
     flavour: MOSFlavour,
     marker_region: kdb.Region,
     and_regions: list[kdb.Region],
@@ -51,10 +51,40 @@ def _flavour_split_island(
     gate does not flip that neighbour. Shared source/drain diffusion stays in
     both halves. An island with no gate falls back to the island-level test;
     a wholly covered/uncovered island returns the whole island on one side.
+
+    ``gates_region`` is the caller-precomputed ``active & poly`` gate area
+    (issue #5893 -- per-island whole-chip intersections dominated
+    ``device_extraction``); its merged components are per-island, so the
+    ones interacting with ``island`` are exactly ``island & poly`` merged.
+    The other region arguments are used coverage-only, so callers may pass
+    them merged (and do).
     """
     import klayout.db as kdb
 
-    gates = [kdb.Region(c) for c in (island & poly).merged().each()]
+    # Wholly inside the marker, with a claim test that carries no
+    # and/not/`nfet_only` modifier (it reduces to "the gate touches the
+    # marker"): every gate of the island touches the marker too, so the
+    # per-gate walk below can only return the whole island as claimed --
+    # return that directly, before any gate geometry is built. Issue
+    # #5893: on gf180mcu the `Dualgate` 55/0 flavour covers a routed
+    # block's entire core, and the per-island gate intersection cost ~300
+    # of ~360 device-extraction seconds on the 166 KB ttgf0p2
+    # PAL_TOP_WRAPPER layout. The flags are tested before the subtract, so
+    # flavours with modifiers (e.g. sky130 native-Vt) pay nothing.
+    if (
+        not flavour.and_markers
+        and not flavour.not_markers
+        and not flavour.nfet_only
+        and (island - marker_region).is_empty()
+    ):
+        return island, kdb.Region()
+    # `gates_region` is the deck's `(active & poly)` gate area, precomputed
+    # by the caller (issue #5893): intersecting the whole-chip poly with
+    # every island separately repeated one whole-chip boolean per island.
+    # The region's components are merged per island already -- islands are
+    # disjoint and every gate lies inside one island -- so the components
+    # that interact with `island` are exactly `(island & poly).merged()`.
+    gates = [kdb.Region(c) for c in gates_region.interacting(island).each()]
     if not gates:
         if _flavour_claims_island(
             island, flavour, marker_region, and_regions, not_regions, nwell

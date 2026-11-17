@@ -790,7 +790,12 @@ two things let a caller tell a slow run from a hang and budget the step:
   `sum(stages) + unattributed_seconds ≈ total_seconds`). Stages, in order:
   `read_layout`, `device_extraction` (the `LayoutToNetlist` run plus dead-metal,
   passive-region and `--parasitics` computation), `diagnostics` (voltage-domain
-  and flavour-marker checks), `netlist_write`, `netlist_hash` (the raw-file
+  and flavour-marker checks), `unsupported_device_diagnostic` (the
+  unsupported-device marker scan, issue #5893: it re-reads whole-chip marker
+  layers and re-runs MOS-capacitor recognition, so it was the dominant
+  unattributed cost of real runs before it got its own stage),
+  `unmodeled_marker_diagnostic` (the #3858 prose-only scan, staged for the same
+  reason), `netlist_write`, `netlist_hash` (the raw-file
   SHA-256), and `netlist_normalized_hash` (the numbering-independent
   `netlist_normalized_sha256` canonicalization, issue #3408; present only when a
   netlist is written, absent under `--no-netlist`).
@@ -826,6 +831,22 @@ earlier `device_extraction`-dominated numbers).
 and its growth is close to linear, so the data does not warrant it. Making the
 normalized hash itself sub-quadratic is a separate change and is out of scope
 here; this section only records and attributes the cost.
+
+**gf180mcu flavour/marker decks** (issue #5893, measured 2026-11-17 on the
+shared 8-vCPU dispatch host, one serial run per row): the Python-level
+per-island scans around the L2N pass were the cliff, not the engine. On the
+166 KB ttgf0p2 `tt_um_MATTHIAS_M_PAL_TOP_WRAPPER` block (33,582 devices,
+19,638 nets), before the fix: 2,262.7 s total, `device_extraction` 674.9 s,
+and ~1,586 s unattributed (all of it in the unstaged unsupported-device
+diagnostic, py-spy attributed). After the candidate-restricted MOS-capacitor
+claim scan and the per-gate flavour split's whole-island shortcut: 83.6 s
+total, `device_extraction` 80.4 s (of which `l2n.extract_netlist()` — the
+KLayout C++ engine — is the bulk; the remaining Python leg is
+`apportion_shared_sd`'s per-device pass over mixed S/D polygons), ~1.3 s
+unattributed, netlist byte-identical (same SHA-256), warnings identical.
+The 2x2 `tt_um_2048_vga_game` (66,459 devices) runs in 112.0 s; both were
+250–300 s timeouts before. The netlist is a 5.2 MB 33k-device file, so
+`netlist_normalized_hash` stays sub-second at this size on gf180mcu.
 
 ### Reserved annotation layer
 
