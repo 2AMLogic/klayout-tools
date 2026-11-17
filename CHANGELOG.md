@@ -68,6 +68,17 @@ not `klt --version`, if you need to detect this kind of drift. See
   devices now report the genuine `comp.width.moscap.1` finding (the native
   deck flags the same shapes) — the generator cannot yet draw a MOSCAP that
   passes it (#6170). No JSON field added or removed; `schema_version` unchanged.
+
+- **HDL verbs expand `$VAR` / `~` in request path fields** (#5678, 2026-11-17):
+  `klt functional-verification`, `synthesize`, `formal` and `equiv` resolved
+  `sources` (and `liberty`, `netlist_path`, `testbench.search_path`,
+  `options.includes`, `options.sdf.file`, `baseline.*` paths) with a hand-rolled
+  `isabs`/`join`, so a committed request naming `$PDK_ROOT/...` could not run
+  as-is. They now use the same `_resolve_relative` convention `klt lvs` / `drc` /
+  `extract` / `sim` document, and an unset `$VAR` is a request error naming the
+  variable instead of a bare "not found". Additive: a literal path keeps its
+  meaning, no `schema_version` bump.
+
 - **Fixed** (#5664, `klt lvs` `--engine klayout-runset`; no JSON field
   changes, `schema_version` stays 3): a `pin.unmatched` finding whose pin
   pair KLayout's own comparer graded `Match`/`MatchWithWarning` — a

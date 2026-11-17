@@ -1032,21 +1032,42 @@ layer (the local-metal role for a poly body; the body layer for
 `metal_level > 0`), as wide as the pad is tall. Only the two outer terminals
 are reported as ports, `R0_A` and `R<num-1>_B`; interior ports are omitted.
 `device_count` stays `num` (`klt extract` reports the chain as `num` series
-devices; merging them into one logical device is not done). `drc_hints.notes`
-states the joint count and per-joint overhead.
+devices — merging them into one logical device is not done *there*; that is
+the compare's job, below). `drc_hints.notes` states the joint count and
+per-joint overhead.
+
+**Folding one long resistor (issue #5555).** The series string *is* the fold
+for a single body too long for the cell's other axis: to draw one logical
+resistor of total length `L`, request `length_um = L / k`, `num = k`,
+`series: true`, and `rows >= 2` — the jumpers above chain the `k` segments
+into one device spanning `k` rows instead of one strip `L` long. Keep the
+schematic netlist unmodified (one resistor sized for the full `L`) and
+compare with [`klt lvs`](lvs.md) `options.combine_devices: true`, which folds
+the chain back into one device and matches it (with `false`, the chain's `k`
+layout devices mismatch the reference's 1 — see the
+[`combine_devices` request field](lvs.md#request) for what combining does and
+why it is opt-in). Three limits: `klt extract` alone still reports `k`
+devices; the interior joints must stay unlabelled — the generator omits their
+ports, and a label on a joint promotes it to a declared pin (see the declared
+pin set, `--pins`, in [`klt extract`](extract.md)) and blocks the fold; and
+the folded device has `k` head pairs where the schematic device has one,
+which `klt lvs` discloses as a `device.series_fold_offset_absorbed` warning
+(issue #3017) instead of a mismatch.
 
 `rows` (default `1`, the original single-row layout) folds the `num` unit
 resistors into that many parallel rows in boustrophedon ("snake") order —
 row 0 runs left to right, row 1 right to left, and so on — instead of one
 long row, mirroring how `mos_array`/`bjt_array` use `rows`/`cols` to keep an
-array roughly square. Without it, a resistor string with a realistic
-unit-segment count (dummies and trim taps included) produces a bounding box
-dominated by one axis, which can blow a floorplan's area budget even though
-the drawn area itself is small (issue #415). Row-to-row pitch is fixed (unit
-height plus the same `MIN_SAME_LAYER_SPACING_UM` margin `mos_array` uses for
-its own row pitch), independent of `spacing_um`, which stays scoped to
-within-row unit spacing. Port naming keeps the physically-adjacent pad pair
-short across every row transition: on a right-to-left (odd) row, `R<i>_A`
+array roughly square. `rows` folds the unit *count*; it does not fold one
+unit's *length* — a single body that is too long is folded by `series: true`
+instead (see "Series strings" above). Without it, a resistor string with a
+realistic unit-segment count (dummies and trim taps included) produces a
+bounding box dominated by one axis, which can blow a floorplan's area budget
+even though the drawn area itself is small (issue #415). Row-to-row pitch is
+fixed (unit height plus the same `MIN_SAME_LAYER_SPACING_UM` margin
+`mos_array` uses for its own row pitch), independent of `spacing_um`, which stays
+scoped to within-row unit spacing. Port naming keeps the physically-adjacent pad
+pair short across every row transition: on a right-to-left (odd) row, `R<i>_A`
 and `R<i>_B` report the *opposite* physical pad from an even row (the unit's
 own drawn geometry never mirrors), so `R<i>_B` stays next to `R<i + 1>_A` in
 every row, not just even ones — the same short-hop connection a downstream
@@ -1657,6 +1678,25 @@ opening through the ring's band so a route can pass through it instead:
   marks the *absence* of metal, so it is a marker rather than a connectable
   port — `klt gen-compose` rejects any attempt to wire (`connectivity[]`) or
   label (`pins[]`) one.
+- The same `GAP_<side>` entry carries `strap_window_um` (issue #5656) — the
+  opening's own box inset **along the ring side** (never across it) by the
+  resolved PDK deck's minimum same-layer spacing for the opening's layer
+  (`{x0, y0, x1, y1}` in the composed frame, like every port field, each
+  coordinate rounded to 6 decimals so exact-equality comparison is safe). A
+  hand drawn strap (`klt draw`, or a `rect_um` in a composed stream) whose
+  extent **along the ring side** stays within the window is spacing-clean
+  against the ring metal on both sides of the opening — so a caller can
+  assert clearance up front, per sweep point, instead of discovering a
+  violation in `klt drc` after the fact. The window's extent across the
+  side is the ring band's full thickness (a strap crossing the ring is
+  constrained only along it, so its footprint extends past the window
+  across the side by construction), and the field is `null` when the
+  along-side extent would be ≤ 0 — the opening is narrower than two
+  spacings, so no same-layer-legal strap fits. The inset is looked up from
+  the same curated deck `klt drc` judges with (e.g. sky130's `li1.space.1`
+  0.17 µm, gf180mcu's `metal1.space.1` 0.23 µm); when the family or a
+  spacing rule for the layer cannot be resolved, the window degrades to the
+  opening's own box (inset 0).
 - A `drc_hints.notes[]` entry records the opening (and that substrate
   isolation is interrupted there), or — when `ring_gap_side` is set on a
   block whose ring is switched off — that no opening was cut.
@@ -2498,6 +2538,7 @@ family/variant split the resolver doesn't have. The response's
 | `x_um`/`y_um` | number | Port location in micrometres, relative to the cell origin. |
 | `width_um` | number | Port width. |
 | `direction_deg` | number | Outward-facing direction in degrees (`0`/`90`/`180`/`270`). |
+| `strap_window_um` | object \| null | `GAP_*` markers only (issue #5656; absent on every other port): `{x0, y0, x1, y1}` — the ring opening's box inset along the ring side by the resolved deck's minimum same-layer spacing for the marker's layer, in the composed frame, each coordinate rounded to 6 decimals. A strap whose extent along the ring side stays within the window is spacing-clean against the ring metal on both sides of the opening; `null` when the along-side extent would be ≤ 0 — no same-layer-legal strap fits the opening. Degenerates to the opening's own box (inset 0) when no spacing rule for the layer can be resolved from the family's deck. |
 
 #### `drc_hints` fields
 
