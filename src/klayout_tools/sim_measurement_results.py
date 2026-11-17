@@ -30,6 +30,13 @@ from . import (
     sim_tian,
     sim_transfer_meas,
 )
+from .sim_measurement_template import expand_request as expand_request
+
+#: Re-exported for ``sim.py``'s load path (``load_request``), which applies
+#: the issue #5731 case expansion before anything else reads a request; this
+#: module is the measurement-side seam ``sim.py`` already imports names from,
+#: and ``sim.py``'s own size ratchet has no line to spare for a new import
+#: statement. Self-aliased per the repo's re-export convention.
 
 #: The ``code`` of the info diagnostic an ``on_unreached: "null"`` measurement
 #: whose target was never reached carries (its status is
@@ -232,7 +239,29 @@ def _corner_measurement_results(
                     + "; ".join(unattributed[: _sim._MEAS_ERROR_MAX_ENTRIES]),
                 }
             )
+    # Additive per-result provenance (issue #5731): a measurement expanded
+    # from a `{case}` template carries its `case` on every result entry, the
+    # same additive move `grade_step_measurements` makes with `step`.
+    _attach_provenance(measurements_spec, measurement_results)
     return measurement_results, diagnostics, {}
+
+
+def _attach_provenance(
+    measurements_spec: list[dict[str, Any]],
+    measurement_results: list[dict[str, Any]],
+) -> None:
+    """Attach each spec's additive provenance fields (``case`` for a
+    measurement expanded from a `{case}` template, issue #5731) onto its
+    result entry, in declared order -- one result per spec, so the zip is
+    exact. ``measurement_provenance`` is empty for every plain
+    scalar-``analysis`` spec, so requests declaring neither keep these
+    entries byte-identical. (``step``/``derived_from`` on the steps path are
+    attached by ``grade_step_measurements`` itself, which returns before this
+    runs.)"""
+    for spec, result in zip(measurements_spec, measurement_results, strict=True):
+        provenance = sim_steps.measurement_provenance(spec)
+        if provenance:
+            result.update(provenance)
 
 
 def _transfer_measurement_result(
