@@ -14,6 +14,24 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt lvs` names its pipeline stages in native-crash tracebacks (#5630,
+  2026-11-17)**: a deterministic SIGSEGV (exit 139, empty stdout *and*
+  stderr, no report file) was reported on a routed ~1070-instance ASAP7
+  block under the documented "Routed multi-cell blocks" recipe
+  (`options.finfet_bulk` + `flatten_layout` + `flatten_reference`), with
+  each half of the recipe completing to a verdict on the same input. Not
+  reproduced on any shape available to this repo (routed 44-type chains to
+  1056 instances reach `match`; the in-repo `asap7-ucie-phy` canary slice,
+  2427 logic instances, reaches `mismatch`), so no call was located and no
+  fix is claimed. What changed for callers: `klt lvs` now enables
+  `faulthandler` and wraps its stages (`klt_lvs_stage_finfet_bulk_join`,
+  `klt_lvs_stage_flatten_layout_combine`, ...) so a native crash prints the
+  Python traceback, naming the stage it died in, to **stderr** before the
+  process dies. stdout stays empty and the exit code stays the OS signal
+  status (139) -- read "stderr traceback + 139" as a tool crash to report,
+  never as a layout verdict. See `docs/cli/lvs.md`'s #5630 note for the
+  size/shape record and the v0.9.0 -> v0.9.1 suspect analysis.
+
 - **`klt sim --batch-set` names member directories after the request stem**
   (#5633, 2026-11-15): a member request named `<stem>.request.json` -- the
   repo's own documented request naming convention -- used to land in

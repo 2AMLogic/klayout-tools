@@ -41,6 +41,7 @@ import sys
 
 from ..env_provenance import render_path_field
 from ..lvs import LvsError, check_lvs_report, rerun_lvs_report, run_lvs
+from ..lvs_crash_diagnostics import enable as enable_crash_diagnostics
 from .output import (
     emit_error,
     emit_success,
@@ -88,6 +89,12 @@ def configure(parser: argparse.ArgumentParser) -> None:
 
 
 def run(args: argparse.Namespace) -> int:
+    # Issue #5630: a native crash inside KLayout kills the process with
+    # empty streams and exit 139 -- indistinguishable from the host killing
+    # us. faulthandler makes the crash print its Python traceback (naming
+    # the lvs stage wrappers) to stderr before it dies; stdout's JSON
+    # contract is untouched and the exit code stays the OS signal status.
+    enable_crash_diagnostics()
     # `request` and `--check` are a required, mutually exclusive argparse
     # group (parser.py) -- omitting both, or giving both, is already a usage
     # error (exit 2) by the time `run()` is ever called.

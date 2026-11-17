@@ -546,6 +546,28 @@ not the tooling's. So a routed ASAP7 block that mismatches should be bisected
 the same way (cells only, then +M1/V0, then +V1/M2, then labels) before
 suspecting extraction.
 
+- **Known native-crash report at scale (#5630, unresolved).** At v0.9.1 /
+  KLayout 0.30.12 the full three-option recipe was reported to SIGSEGV
+  (exit 139, empty stdout and stderr, no report file) on a routed
+  ~1070-instance, 44-cell-type DEF-merged block, while each half of the
+  recipe completed to a verdict on the same input (`finfet_bulk` only:
+  mismatch; flatten only: mismatch). It has not been reproduced on any
+  shape available to this repo: routed 44-type synthetic chains up to 1056
+  instances reach `match` (`tests/test_lvs_crash_diagnostics.py`), and the
+  in-repo routed canary `blocks/asap7-ucie-phy` slice (2427 logic
+  instances, 43 types, tapcells, fillers, router vias, reference CDL
+  derived from its own extracted netlist) reaches `mismatch`. The
+  v0.9.0 -> v0.9.1 delta on this path is the post-flatten
+  `combine_devices()` (#4954), which stays the prime suspect together with
+  the per-circuit bulk join (#4514). Until a reproducer lands: `klt lvs`
+  enables `faulthandler` and names its pipeline stages, so a native crash
+  prints the Python traceback -- with the stage it died in
+  (`klt_lvs_stage_finfet_bulk_join`, `klt_lvs_stage_flatten_layout_combine`,
+  ...) -- to stderr before the process dies. stdout stays empty and the
+  exit code stays the OS signal status (139): read "stderr traceback +
+  exit 139" as a tool crash to report (with that stderr attached), never
+  as a layout verdict.
+
 - **Cell rails must abut.** The fixture's cells share the 648-dbu (0.162 um)
   pitch of the cell's `100/0` boundary so the M1 rails touch; with a gap the
   supplies are separate nets.

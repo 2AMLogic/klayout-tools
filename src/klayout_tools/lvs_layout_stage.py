@@ -12,13 +12,20 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from ._provenance import INPUT_ROLE_LAYOUT, INPUT_ROLE_NETLIST
-from .lvs import _apply_finfet_bulk_policy, _resolve_layout, _select_circuit
+from .lvs import (
+    _apply_finfet_bulk_policy as _finfet_bulk_policy_unwrapped,
+)
+from .lvs import (
+    _resolve_layout,
+    _select_circuit,
+)
 from .lvs_combine import (
     _combine_circuit_devices_safely,
     _correct_combine_parameters,
     _resolve_combine_devices_per_circuit_targets,
     _unmatched_combine_devices_per_circuit_warnings,
 )
+from .lvs_crash_diagnostics import stage
 from .lvs_finfet_flatten import flatten_layout_netlist
 from .lvs_mos_options import split_layout_mos_flavours
 from .lvs_supply import supply_fragmentation_findings
@@ -27,6 +34,11 @@ if TYPE_CHECKING:
     import klayout.db as kdb
 
     from .lvs_run_options import _LvsRunOptions
+
+#: Issue #5630: the per-circuit bulk-join step, named for crash tracebacks
+#: (see `lvs_crash_diagnostics`) -- the #4514 pre-flatten `join_nets` pass is
+#: one arm of the three-option recipe combination the issue bisects.
+_apply_finfet_bulk_policy = stage("finfet_bulk_join")(_finfet_bulk_policy_unwrapped)
 
 
 class _LayoutStage(NamedTuple):
@@ -48,6 +60,7 @@ class _LayoutStage(NamedTuple):
     finfet_bulk_records: Any
 
 
+@stage("layout_resolve")
 def _resolve_layout_stage(
     layout_spec: dict[str, Any],
     reference_spec: dict[str, Any],
