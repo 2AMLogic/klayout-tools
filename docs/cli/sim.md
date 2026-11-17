@@ -225,12 +225,14 @@ that cannot be determined or parsed also fails (closed). On `local` and
 front. `remote` and `batch` have no *submit-side* probe, but the pin is not
 post-run-only either: the job command is a plain
 `klt sim --backend local-parallel` on the runner, with the request
-forwarded verbatim, so a runner whose `klt` knows the field (0.8.0 and
+forwarded to the runner and the `engine_version` pin carried through
+unchanged, so a runner whose `klt` knows the field (0.8.0 and
 newer) enforces the pin there *before any corner simulates* and fails the
 job with `engine_version_unmet`. The refusal surfaces through the normal
 failed-job path — every unit of the job reports `batch_job_failed`, quoting
 the runner's error, with `runner_code: "engine_version_unmet"` — and,
-because the runner wrote no report, the submit-side check below then also
+because the recovered `report.json` is an error envelope carrying no
+`environment.engine_version`, the submit-side check below then also
 fails closed with a top-level `engine_version_unmet`. That submit-side
 comparison against the report's `environment.engine_version` stays as the
 backstop for a runner too old to know the field: a pre-0.8.0 runner ignores
