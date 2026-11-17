@@ -1767,32 +1767,25 @@ _MOS_ARRAY_WELL_TAP_NET_LABEL = "WELL_TAP"
 #: subcircuits -- so requesting ``voltage_flavor="hvi"`` here draws the
 #: identical marker the deck already extracts a device-class split on,
 #: mirroring gf180mcu's/sg13g2's own "reuse the deck's own marker citation"
-#: precedent above rather than inventing a new one. Before #1912, sky130 had
-#: no entry here at all: this deck's own transcription cited no numbered
-#: medium/high-voltage transistor marker layer (the same gap
-#: :data:`_PDK_ROLE_LAYERS`'s ``esd_mark`` role still documents -- sky130's
-#: ``hvtr``/``hvtp`` *implant* names remain cited only as unnumbered
-#: exclusions in the official ``sky130.lvs``, never with a transcribed
-#: layer/datatype pair this module could cite without guessing; ``hvi`` is a
-#: distinct, numbered *identification* layer #1369 separately transcribed and
-#: verified, not one of those two names). A ``voltage_flavor`` request naming
-#: anything other than ``"hvi"`` still resolves to no layer on this family --
-#: reported via ``drc_hints.notes``, never silently dropped (see
-#: :func:`_voltage_flavor_mark_layer`). Needs no
-#: :data:`_PDK_VOLTAGE_FLAVOR_MARK_MARGIN_UM` entry of its own: like
-#: sg13g2/sg13cmos5l's ``"hv"`` marker, no rule in this deck's own curated DRC
-#: deck reads ``hvi`` at all (`decks/sky130.py`'s own ``hvi`` layer-name
-#: comment: "no DRC rule here reads hvi, so every rule still applies its
-#: general-case threshold to geometry drawn inside hvi"), so the default
-#: :data:`WELL_ENCLOSURE_MARGIN_UM` box never needs the gf180mcu-only
+#: precedent above rather than inventing a new one. Before #1912, sky130 had no entry
+#: here at all: this deck's own transcription cited no numbered medium/high-voltage
+#: transistor marker layer (the same gap :data:`_PDK_ROLE_LAYERS`'s ``esd_mark`` role
+#: still documents -- sky130's ``hvtr``/``hvtp`` *implant* names remain cited only as
+#: unnumbered exclusions in the official ``sky130.lvs``, never with a transcribed
+#: layer/datatype pair this module could cite without guessing; ``hvi`` is a distinct,
+#: numbered *identification* layer #1369 separately transcribed and verified, not one of
+#: those two names). A ``voltage_flavor`` request naming anything other than ``"hvi"``
+#: still resolves to no layer on this family -- reported via ``drc_hints.notes``, never
+#: silently dropped (see :func:`_voltage_flavor_mark_layer`). Needs no
+#: :data:`_PDK_VOLTAGE_FLAVOR_MARK_MARGIN_UM` entry of its own: like sg13g2/sg13cmos5l's
+#: ``"hv"`` marker, no rule in this deck's own curated DRC deck reads ``hvi`` at all
+#: (`decks/sky130.py`'s own ``hvi`` layer-name comment: "no DRC rule here reads hvi, so
+#: every rule still applies its general-case threshold to geometry drawn inside hvi"),
+#: so the default :data:`WELL_ENCLOSURE_MARGIN_UM` box never needs the gf180mcu-only
 #: enlargement.
 #:
-#: ``"lvt"`` (issue #5607) draws ``lvtn.drawing`` (125/44) alone, the marker
-#: ``decks.sky130_lvt.lvt_mos_flavour`` keys the low-Vt device class on; it is
-#: valid for both ``flavor="nfet"`` and ``"pfet"`` (``pfet_01v8_lvt`` exists),
-#: so it is not in :data:`_NFET_ONLY_VOLTAGE_FLAVORS`. The ``"native"``/
-#: ``"nvt"`` names (issue #3600) draw hvi plus lvtn (see
-#: :data:`_PDK_VOLTAGE_FLAVOR_EXTRA_LAYERS`).
+#: ``"lvt"`` (issue #5607) draws ``lvtn.drawing`` (125/44) alone (no
+#: ``EXTRA_LAYERS`` hvi half), for nfet and pfet (``pfet_01v8_lvt`` exists).
 #:
 #: ``sg13g2``/``sg13cmos5l`` (issue #1472) both share the single flavour name
 #: ``"hv"``, transcribed directly from the curated decks' own
@@ -1814,17 +1807,11 @@ _PDK_VOLTAGE_FLAVOR_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
     "sky130": {
         "hvi": (75, 20),  # hvi.drawing -- same citation as
         # decks.sky130.EXTRACTION_DECK.mos_flavours' MOSFlavour(flavour="hvi").
-        # Native-Vt NMOS (issue #3600): hvi AND lvtn. This is the primary
-        # (hvi) half; the lvtn half lives in
-        # :data:`_PDK_VOLTAGE_FLAVOR_EXTRA_LAYERS`.
+        # Native-Vt NMOS (issue #3600): hvi AND lvtn; this is the primary (hvi)
+        # half; the lvtn half lives in _PDK_VOLTAGE_FLAVOR_EXTRA_LAYERS.
         "native": (75, 20),
         "nvt": (75, 20),
-        # Low-Vt (issue #5607): lvtn alone -- ``decks.sky130_lvt.lvt_mos_flavour``
-        # keys ``lvt`` on lvtn.drawing with hvi/hvtp/areaid_ed/areaid_ce as
-        # exclusions. Unlike native/nvt there is no hvi half, no EXTRA_LAYERS
-        # entry, and (``sky130_fd_pr__pfet_01v8_lvt`` exists) no NMOS-only
-        # restriction.
-        "lvt": (125, 44),  # lvtn.drawing
+        "lvt": (125, 44),  # lvtn.drawing -- decks.sky130_lvt.lvt_mos_flavour's key
     },
     "sg13g2": {
         "hv": (44, 0),  # ThickGateOx.drawing -- same citation as
