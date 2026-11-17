@@ -16,6 +16,7 @@ breaches.
 
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -25,8 +26,10 @@ REPO_ROOT = Path(__file__).parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "check_ci_wall_clock.py"
 STEPS_MODULE = REPO_ROOT / "scripts" / "ci_wall_clock_steps.py"
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+BUDGET_FILE = REPO_ROOT / ".github" / "ci-wall-clock-budget.json"
 
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
+from ci_wall_clock_steps import CHECKOUT_STEP_PREFIXES  # noqa: E402
 from fetch_ci_wall_clock_history import job_durations  # noqa: E402
 
 # Exit-code contract, mirroring scripts/check-release-lag.sh's tiering.
@@ -187,6 +190,49 @@ def test_a_normal_checkout_is_excluded_but_names_no_stall(tmp_path: Path) -> Non
     assert by_name["checkout_seconds"] == 5
     assert by_name["seconds"] == 40  # 45 s wall minus the 5 s checkout
     assert "CHECKOUT STALL" not in result.stdout
+
+
+def test_named_checkout_steps_are_excluded_like_bare_ones(tmp_path: Path) -> None:
+    """`ci.yml`'s two double-checkout compute jobs give their checkout steps
+    explicit `name:`s, so GitHub reports those names, not
+    `Run actions/checkout@<sha>` -- the exclusion must cover both shapes.
+    Review's repro: a 313 s named checkout plus 29 s of work breached the
+    job's real 120 s budget with `checkout_seconds: 0` before the fix."""
+    job = _job(
+        "Golden artifacts (hash seed + path varied)",
+        started="2026-11-16T19:15:12Z",
+        completed="2026-11-16T19:20:55Z",  # 343 s wall = 313 + 1 + 29
+        steps=[
+            _step(
+                "Check out the primary copy",
+                started="2026-11-16T19:15:12Z",
+                completed="2026-11-16T19:20:25Z",  # 313 s, the stall
+            ),
+            _step(
+                "Post Check out the primary copy",
+                started="2026-11-16T19:20:25Z",
+                completed="2026-11-16T19:20:26Z",  # 1 s cleanup half
+            ),
+            _step(
+                "hash-seed sweep",
+                started="2026-11-16T19:20:26Z",
+                completed="2026-11-16T19:20:55Z",  # 29 s of real work
+            ),
+        ],
+    )
+    jobs_json = _write(tmp_path / "jobs.json", {"total_count": 1, "jobs": [job]})
+    run_json = _write(tmp_path / "run.json", {"run_started_at": job["started_at"]})
+    budget = _budget(tmp_path, jobs={"Golden artifacts (hash seed + path varied)": 120})
+    cli = ["--jobs-json", str(jobs_json), "--run-json", str(run_json)]
+    cli += ["--budget", str(budget), "--format", "json"]
+    result = _run(*cli)
+    assert result.returncode == EXIT_OK, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    by_name = {j["name"]: j for j in payload["jobs"]}[job["name"]]
+    assert by_name["checkout_seconds"] == 314  # 313 named + 1 Post
+    assert by_name["seconds"] == 29  # 343 s wall minus the 314 s checkout
+    assert by_name["total_seconds"] == 343
+    assert payload["breaches"] == []
 
 
 def test_a_job_without_steps_excludes_nothing(tmp_path: Path) -> None:
@@ -367,11 +413,87 @@ def test_cache_miss_step_naming_convention_still_holds_in_ci_yml() -> None:
 def test_checkout_step_naming_convention_still_holds_in_ci_yml() -> None:
     """Same for the checkout exclusion (#5964): the module matches GitHub's
     auto-generated names for a bare `- uses: actions/checkout@<sha>` step
-    (confirmed against a recorded `/jobs` payload, run 43967976263). Renaming
-    the workflow's usage away from the bare form must be mirrored there."""
+    *and* the `Check out ` names `ci.yml` gives its double-checkout jobs;
+    a workflow rename must be mirrored there. Reverse direction, since
+    `Check out ` is a generic prefix: a step *named* `Check out ...` that
+    is not a checkout would have its time silently excluded."""
     workflow = WORKFLOW.read_text()
     module = STEPS_MODULE.read_text()
     assert '"Run actions/checkout"' in module
     assert '"Post Run actions/checkout"' in module
+    assert '"Check out "' in module
+    assert '"Post Check out "' in module
     assert "uses: actions/checkout@" in workflow
     assert workflow.count("- uses: actions/checkout@") >= 4
+    lines = workflow.splitlines()
+    for index, line in enumerate(lines):
+        named = re.match(r"^\s*- name: (Check out .+)$", line)
+        if named is None:
+            continue
+        body = ""
+        for follow in lines[index + 1 : index + 8]:
+            stripped = follow.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            body = stripped
+            break
+        assert body.startswith("uses: actions/checkout@"), (
+            f"step {named.group(1).strip()!r} matches "
+            "CHECKOUT_STEP_PREFIXES but is not an actions/checkout step: "
+            "its time would be excluded from the compute figure"
+        )
+
+
+def _reported_step_name(lines: list[str], index: int) -> str:
+    """The name a `/jobs` payload reports for the `uses:` line at `index`:
+    the step's explicit `name:` (skipping interleaved comments), else the
+    auto-generated `Run ...` form."""
+    for above in reversed(lines[max(0, index - 8) : index]):
+        stripped = above.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        named = re.match(r"^- name: (.+)$", stripped)
+        if named:
+            return named.group(1).strip()
+        break
+    ref = lines[index].split("actions/checkout@", 1)[1].split()[0]
+    return f"Run actions/checkout@{ref}"
+
+
+def _ci_job_display_names(lines: list[str]) -> dict[str, str]:
+    names: dict[str, str] = {}
+    current: str | None = None
+    for line in lines:
+        keyed = re.match(r"^  ([A-Za-z0-9_-]+):", line)
+        if keyed:
+            current = keyed.group(1)
+        elif re.match(r"^    name: ", line) and current and current not in names:
+            names[current] = line.split(":", 1)[1].strip()
+    return names
+
+
+def test_every_checkout_step_in_ci_yml_is_matched_or_its_job_excluded() -> None:
+    """The direction the blocking finding exposed: the old guard only
+    checked that bare checkouts existed, so the named checkouts of
+    `test-numerical` and `artifact-determinism` were charged to compute.
+    Every `actions/checkout` step in `ci.yml`, named or bare, must be
+    matched by `CHECKOUT_STEP_PREFIXES` unless its job is in
+    `exclude_jobs` -- the next named checkout fails here, not silently."""
+    lines = WORKFLOW.read_text().splitlines()
+    excludes = set(json.loads(BUDGET_FILE.read_text())["exclude_jobs"])
+    display = _ci_job_display_names(lines)
+    current: str | None = None
+    for index, line in enumerate(lines):
+        keyed = re.match(r"^  ([A-Za-z0-9_-]+):", line)
+        if keyed:
+            current = keyed.group(1)
+            continue
+        if "uses: actions/checkout@" not in line:
+            continue
+        reported = _reported_step_name(lines, index)
+        job = display.get(current or "", current or "")
+        assert reported.startswith(CHECKOUT_STEP_PREFIXES) or job in excludes, (
+            f"job {job!r}: actions/checkout step reported as {reported!r} "
+            "matches no CHECKOUT_STEP_PREFIXES entry, so its time would be "
+            "charged to compute (rename, extend the prefixes, or exclude)"
+        )

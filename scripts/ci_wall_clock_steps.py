@@ -24,9 +24,13 @@ The exact step names were confirmed from a recorded `/jobs` payload (run
 as `Run actions/checkout@<sha>`, and the action's cleanup pass as
 `Post Run actions/checkout@<sha>` (0-1 s normally, matched for symmetry with
 the `Post Cache ` prefix). A checkout step given an explicit `name:` in the
-workflow is reported under that name and is *not* matched -- as of this
-writing `ci.yml` names only the budget job's own two checkouts, which are not
-compute jobs.
+workflow is reported under that name (its cleanup half as `Post ` + that
+name), so those are matched too: `ci.yml`'s two double-checkout jobs --
+`test-numerical` (`Tests (numpy cross-check)`) and `artifact-determinism`
+(`Golden artifacts (hash seed + path varied)`), both budgeted compute jobs --
+name theirs `Check out the primary copy` / `Check out a second copy at a
+different filesystem path`. The guard test walks `ci.yml` and fails on any
+`actions/checkout` step, named or bare, that no prefix matches.
 
 Everything is standard library on purpose, like the gate this serves.
 """
@@ -51,12 +55,23 @@ UNMEASURABLE_CONCLUSIONS = frozenset({"skipped", "cancelled", "neutral"})
 CACHE_MISS_STEP_SUFFIX = " (cache miss only)"
 CACHE_STEP_PREFIXES = ("Cache ", "Post Cache ")
 
-# GitHub's auto-generated names for the two halves of a `uses:
-# actions/checkout@<sha>` step (#5964). Load-bearing the same way: a workflow
-# rename away from the bare `- uses:` form must be mirrored here.
+# The step names GitHub reports for an `actions/checkout` step (#5964), in
+# both shapes and both halves:
+#
+#   "Run actions/checkout@<sha>"      <- a bare `- uses: actions/checkout@<sha>`
+#   "Post Run actions/checkout@<sha>" <- that step's cleanup pass
+#   "Check out the primary copy"      <- an explicitly `name:`d checkout, as
+#   "Post Check out the primary copy"    ci.yml's two double-checkout jobs use
+#                                        (test-numerical, artifact-determinism)
+#
+# Load-bearing like the cache prefixes above: a workflow rename must be
+# mirrored here, and the ci.yml guard test fails on any checkout step --
+# named or bare -- that no prefix matches.
 CHECKOUT_STEP_PREFIXES = (
     "Run actions/checkout",
     "Post Run actions/checkout",
+    "Check out ",
+    "Post Check out ",
 )
 
 
@@ -80,6 +95,10 @@ def _step_seconds(step: dict) -> int:
 
 
 def _parse_iso(stamp: str) -> datetime:
+    # Deliberately duplicated in `check_ci_wall_clock.py` and
+    # `fetch_ci_wall_clock_history.py`: both sit at their file-size-baseline
+    # ceilings, so importing it from here would shrink them without a
+    # re-snapshotted baseline. Keep the copies in sync; do not consolidate.
     return datetime.fromisoformat(stamp.replace("Z", "+00:00"))
 
 

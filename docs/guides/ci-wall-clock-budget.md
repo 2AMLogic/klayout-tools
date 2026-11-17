@@ -510,11 +510,17 @@ matches GitHub's auto-generated names for a bare
 `- uses: actions/checkout@<sha>` step (`Run actions/checkout@<sha>` plus its
 `Post Run actions/checkout@<sha>` cleanup), confirmed against a recorded
 `/jobs` payload (run 43967976263, 2026-11-17). A checkout step given an
-explicit `name:` is reported under that name and is *not* matched (as of
-this writing `ci.yml` names only the budget job's own two checkouts, which
-are not compute jobs).
+explicit `name:` is reported under that name (its cleanup half as `Post ` +
+that name), so those are matched too: `ci.yml`'s two double-checkout jobs --
+`Tests (numpy cross-check)` and `Golden artifacts (hash seed + path varied)`,
+each budgeted 120 s -- name theirs `Check out the primary copy` /
+`Check out a second copy at a different filesystem path`, and the
+`Check out ` / `Post Check out ` prefixes cover them and their cleanup
+halves.
 `test_checkout_step_naming_convention_still_holds_in_ci_yml` guards the
-link.
+link: it fails on any `actions/checkout` step in `ci.yml`, named or bare,
+that no prefix matches (unless its job is in `exclude_jobs`), and on any
+`name: Check out` step that is not a checkout.
 
 ## Fork PRs are report-only
 
