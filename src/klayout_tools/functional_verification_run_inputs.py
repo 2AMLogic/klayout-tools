@@ -22,10 +22,8 @@ Lives apart from ``functional_verification.py`` (size-ratchet baseline): both
 report builders (cocotb and Verilog-top) take the echo through the one
 :func:`with_run_inputs` post-step.
 
-Issue #5550 adds the shared ``provenance`` block to the cocotb report through
-the same post-step (``provenance=True``; the Verilog-top report is unchanged):
-:func:`input_provenance` was moved here verbatim from
-``functional_verification.py`` for the same size-ratchet reason.
+Both builders also attach the shared ``provenance`` block through this
+post-step (issue #5550).
 """
 
 from __future__ import annotations
@@ -118,18 +116,9 @@ def input_provenance(
     return provenance
 
 
-def with_run_inputs(
-    report: dict[str, Any], inputs: RunInputs, *, provenance: bool = False
-) -> dict[str, Any]:
-    """Attach ``from_synthesize`` and ``environment.sources`` (in place).
-
-    ``provenance=True`` (the cocotb report, issue #5550) also attaches the
-    shared ``provenance`` block, digesting :attr:`RunInputs.source_paths`.
-    """
+def with_run_inputs(report: dict[str, Any], inputs: RunInputs) -> dict[str, Any]:
+    """Attach the resolved inputs and their provenance to the report in place."""
     with_from_synthesize(report, inputs.from_synthesize)
     report["environment"]["sources"] = inputs.sources
-    if provenance:
-        report["provenance"] = input_provenance(
-            inputs.source_paths, inputs.from_synthesize
-        )
+    report["provenance"] = input_provenance(inputs.source_paths, inputs.from_synthesize)
     return report

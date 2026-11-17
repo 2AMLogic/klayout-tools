@@ -3099,7 +3099,7 @@ def run_functional_verification(
             },
         }
     )
-    with_run_inputs(report, run_inputs, provenance=True)  # #5684/#5771/#5550
+    with_run_inputs(report, run_inputs)
     report.local_paths = {
         "results_xml": results_xml,
         "test_log": test_log,

@@ -302,6 +302,8 @@ entry named after `verilog_top` (a failure carries
 `error_type: "VerilogBenchFailure"`). `environment.cocotb_version` is `null` and
 `environment.results_xml` is the absent envelope (`{path: null, scope: "absent"}`); `environment.test_log`/`build_log`
 name the transcripts and `environment.sdf` is populated as on the cocotb path.
+`provenance.input.content_hash` covers the resolved `request.sources`,
+including the Verilog bench file listed there.
 `environment.parameters` is `{}` — the field is carried for shape parity with
 the cocotb path, but a non-empty `request.parameters` is a request error here.
 The SDF diagnostic gate is unchanged: a partial annotation is still exit 1.
