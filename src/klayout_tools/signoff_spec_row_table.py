@@ -137,13 +137,11 @@ def _active_bound(limits: Any, value: Any, margin: Any) -> float | int | None:
         return None
     low = limits.get("min")
     high = limits.get("max")
-    has_low = is_number(low)
-    has_high = is_number(high)
-    if has_low and not has_high:
+    if is_number(low) and not is_number(high):
         return low
-    if has_high and not has_low:
+    if is_number(high) and not is_number(low):
         return high
-    if has_low and has_high:
+    if is_number(low) and is_number(high):
         if value - low == margin:
             return low
         if high - value == margin:
