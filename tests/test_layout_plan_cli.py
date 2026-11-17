@@ -120,9 +120,12 @@ def test_cli_partial_success_exits_3_with_payload(tmp_path, pdk_root, capsys):
 
 
 def test_cli_missing_request_file_exits_1(tmp_path, capsys):
+    """Reads through the shared loader since issue #5540, so the message is
+    the loader's own "file not found" wording (it still names the path)."""
     code, captured = _run(capsys, str(tmp_path / "nope.json"), "--format", "json")
     assert code == 1
-    assert "could not read request" in captured.out + captured.err
+    assert "file not found" in captured.out + captured.err
+    assert "nope.json" in captured.out + captured.err
 
 
 def test_cli_invalid_json_exits_1(tmp_path, capsys):
