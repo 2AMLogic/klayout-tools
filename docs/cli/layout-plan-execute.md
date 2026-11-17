@@ -242,7 +242,9 @@ no `_B`-suffixed per-device port to bind. It is therefore bound
 group-level, automatically, with no request field. For each `mos_array` /
 `diff_pair` / `esd_device` group, the `B` net its declared devices sit on
 gets **one** pin on that group's own tie port — the first `TAP_PAD<k>` pad a
-ring-less array draws on a family with a tap-distance rule (gf180mcu), or,
+ring-less array draws on a family with a tap-distance rule (gf180mcu), the
+shared `WELL_TAP` port a ring-less pfet array draws on a family whose deck
+derives the tie from an in-well implant tap (sg13cmos5l, #1473/#5948), or,
 when the group draws its own guard ring instead (`params.add_guard_ring`,
 which suppresses the pads), that ring's first `TAP_<side>` port. The pin
 then flows through `connectivity[]` / `pins[]` /
@@ -255,19 +257,24 @@ Two cases do not bind:
   the conflicting nets, rather than the silent short one shared tie would
   draw between them. Split the group so each body net gets its own.
 - **The group has no tie port at all** — a ring-less array on a family with
-  no tap-distance rule (sky130). Nothing is bound and one `warnings[]` entry
-  names the group and the untied net, so the gap is a same-run signal
-  instead of a later LVS surprise. The warning is suppressed when a
-  `guard_ring` group's own `net` (above) already names that net.
+  no tap-distance rule (sky130), or either flavor on a family whose only
+  drawn tie is the pfet well tap (sg13cmos5l's nfet). Nothing is bound and
+  one `warnings[]` entry names the group and the untied net, so the gap is a
+  same-run signal instead of a later LVS surprise. The warning is suppressed
+  when a `guard_ring` group's own `net` (above) already names that net.
 
-**This is a behaviour change for gf180mcu plans.** A plan whose MOS bodies
-used to be left untied now gains a pin per MOS group on its bulk net, which
-the router has to reach. A plan that exited `0` before can exit `3` with the
-bulk net in `unrouted_nets[]` and a reason in `unrouted_reasons[]` — an
-honest report of a tie that was previously missing, not a regression. A
-group whose own ring encloses its devices usually needs
+**This is a behaviour change for gf180mcu and sg13cmos5l plans.** A plan
+whose MOS bodies used to be left untied now gains a pin per MOS group on its
+bulk net, which the router has to reach. A plan that exited `0` before can
+exit `3` with the bulk net in `unrouted_nets[]` and a reason in
+`unrouted_reasons[]` — an honest report of a tie that was previously missing,
+not a regression. A group whose own ring encloses its devices usually needs
 `routing.cross_block_layer_role` (a metal2/via stack) for the tie to route
-out past the gate pad.
+out past the gate pad, and so does a sg13cmos5l `WELL_TAP` tie (#5948): the
+tap sits just past the array's outermost diffusion on the same metal1 line as
+the source/drain pads, so a same-layer route from a source pad to it crosses
+that drain pad and the behind-the-pin guard (#1895) refuses — route the plan
+on a metal2/via stack instead.
 
 A BJT `C`/collector terminal is still **deliberately** unmapped — it
 conventionally ties to a shared substrate tap a `guard_ring`/collector ring

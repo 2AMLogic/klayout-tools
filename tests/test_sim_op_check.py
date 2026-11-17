@@ -7,23 +7,17 @@ and skip without it (like `tests/test_sim_nodeset.py`).
 from __future__ import annotations
 
 import json
-import os
-import shutil
 from pathlib import Path
 
 import pytest
 
+from helpers.tool_probes import SKIP_NO_NGSPICE as _SKIP_NO_NGSPICE
 from klayout_tools import sim, sim_op_check
 from klayout_tools.sim_errors import SimError
 
 OFFHOST = ("remote", "batch")
 
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
-
-HAVE_NGSPICE = shutil.which("ngspice") is not None and (
-    os.environ.get("KLT_SKIP_NGSPICE_TESTS") != "1"
-)
-_SKIP_NO_NGSPICE = pytest.mark.skipif(not HAVE_NGSPICE, reason="no ngspice")
 
 #: A 0..1 V bistable latch: stable at (a, b) = (0, 1) or (1, 0); unstable
 #: mid-rail solution at 0.5 V.
@@ -49,6 +43,9 @@ def _analysis(**op_check) -> dict:
         (_analysis(nodes=["a"], band=0), "band"),
         (_analysis(nodes=["a"], band=0.9), "band"),
         (_analysis(nodes=["a"], band=float("nan")), "finite"),
+        # A 400-digit int literal parses to an int too large for a float
+        # (issue #5891): refused as an error envelope, not an OverflowError.
+        (_analysis(nodes=["a"], band=10**400), "must be finite"),
         (_analysis(nodes=["a"], band=True), "number"),
         (_analysis(nodes=["a"], rail="vdd", supply=1.0), "mutually exclusive"),
         (_analysis(nodes=["a"], supply=-1), "positive"),

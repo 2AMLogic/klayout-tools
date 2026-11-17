@@ -1276,9 +1276,9 @@ def test_stubbed_run_reports_the_full_contract_shape(tmp_path, monkeypatch):
         # Additive (issue #1002): `null` on any run without `options.sdf`,
         # so an unannotated verdict is never mistakable for an annotated one.
         "sdf": None,
-        # Additive (issue #2998): `null` on any run without
-        # `options.initial_state`.
+        # Additive (issue #2998): `null` without `options.initial_state`.
         "initial_state": None,
+        "sources": [_envelope(None, "external")],  # additive (#5771)
     }
     results_xml = report.local_paths["results_xml"]
     assert os.path.isabs(results_xml)
