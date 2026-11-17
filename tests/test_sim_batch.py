@@ -8187,7 +8187,6 @@ def test_unrecovered_preflight_reject_is_named_and_classified_as_mismatch(
     diagnostic = corners[0]["diagnostics"][0]
     assert diagnostic["code"] == "batch_job_failed"
     assert "runner preflight reject" in diagnostic["message"]
-    assert 'runner_version_check to "warn" to submit anyway' in diagnostic["message"]
     assert diagnostic["runner_code"] == sb.BATCH_RUNNER_MISMATCH_CODE
     assert diagnostic["runner_klt_version"] == "0.7.0"
     assert diagnostic["client_klt_version"] == _CLIENT_VERSION

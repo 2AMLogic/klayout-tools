@@ -63,8 +63,13 @@ def test_unrecovered_exit_87_mismatch_also_carries_the_diagnostic(
         _status("failed", exit_code="87", detail="job command exited 87")
     )
     runner.outputs = {"runner_identity.json": _identity("0.7.0")}
-    _, _, environment = _run_one_job(tmp_path, monkeypatch, runner)
+    corners, _, environment = _run_one_job(tmp_path, monkeypatch, runner)
     assert environment["runner_version_diagnostic"]["accepted_client_release"] == "0.7"
+    # The per-unit remedy names the warn opt-out too (moved here from
+    # test_sim_batch.py to stay under its file-size ceiling, #5750).
+    unit = corners[0]["diagnostics"][0]
+    assert unit["code"] == "batch_job_failed"
+    assert 'runner_version_check to "warn" to submit anyway' in unit["message"]
 
 
 def test_failed_exit_87_job_reports_and_writes_report_out(
