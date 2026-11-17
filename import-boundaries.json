@@ -185,6 +185,7 @@
       "description": "`klt em` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.em_cmd",
+        "klayout_tools.cli.parsers.em",
         "klayout_tools._geode",
         "klayout_tools.em"
       ]
@@ -999,6 +1000,7 @@
       "kind": "verb",
       "description": "`klt version` implementation: core modules plus CLI adapter.",
       "modules": [
+        "klayout_tools.cli.parsers.version",
         "klayout_tools.cli.version_cmd"
       ]
     },
