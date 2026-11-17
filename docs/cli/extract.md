@@ -5792,16 +5792,16 @@ Output, additive:
 | Field | Meaning |
 |---|---|
 | `parasitics.critical_nets` | The `--critical-net` request, echoed back verbatim. `[]` when the flag was never given. When a pattern / `--critical-net-all` was given: the resolved concrete names, sorted (exact names included). |
-| `parasitics.lateral_coupling` | Capability signal for this pass (`"computed"` / `"unmodelled"`): `"computed"` when the deck curates at least one `metal_sidewalls` coefficient, `"unmodelled"` when it curates none (the pass reports zero lateral coupling for every requested net), `null` when no critical-net selection was requested. Lets a consumer distinguish "no coupling at this separation" from "this deck cannot model coupling" without string-matching `warnings` — the deck-level `warnings` entry below stays as back-compat, and both read the same predicate so they cannot disagree. |
+| `parasitics.lateral_coupling` | Capability signal for this pass (`"computed"` / `"unmodelled"`): `"computed"` when the deck curates at least one `metal_sidewalls` coefficient, `"unmodelled"` when it curates none (the pass reports zero lateral coupling for every requested net), `null` when no critical-net selection was requested. Lets a consumer distinguish "no coupling at this separation" from "this deck cannot model coupling" without string-matching `warnings` — the deck-level `warnings` entry below stays as back-compat; both read the same predicate, so neither can report a capability the other denies for a resolved selection. |
 | `parasitics.critical_net_patterns` / `.critical_net_all` / `.critical_net_excludes` / `.parasitics_net_patterns` | The requested selectors, present only when given. (`parasitics.parasitics_nets` likewise echoes the resolved sorted names when `--parasitics-net-pattern` was given.) |
 | `parasitics.nets[].coupled[].lateral_levels` | Per coupling counterpart, the sorted list of same-`metal_index` levels that contributed lateral coupling to that pair — `[]` unless one side was named `--critical-net`. |
 
 Both `sky130` and `gf180mcu` curate `metal_sidewalls`/its lookback distance
-for every metal level today (gf180mcu's table was the last gap, issue
-#5742); a deck that does not populates neither, so `--critical-net` on it
-reports zero lateral coupling for every requested net,
-`parasitics.lateral_coupling` reads `"unmodelled"`, and a `warnings` entry
-names the gap (mirroring `overlap_pairs_without_coefficient`'s
+for every metal level (gf180mcu joins as of issue #5742; `sg13g2`,
+`sg13cmos5l` and `asap7` curate none); a deck that does not populates
+neither, so `--critical-net` on it reports zero lateral coupling for every
+requested net, `parasitics.lateral_coupling` reads `"unmodelled"`, and a
+`warnings` entry names the gap (mirroring `overlap_pairs_without_coefficient`'s
 gap-reporting discipline rather than silently zeroing).
 
 ### Distributed (multi-segment) RC ladder for critical nets (`--distributed-rc`, issue #977)

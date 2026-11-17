@@ -243,6 +243,31 @@ distance/scaling parameter whose exact magic semantics must be read out of
 magic's own tech-file manual before transcription. This roadmap deliberately
 does not assume it, and Stage 2b's cost estimate includes reading it.
 
+#### gf180mcu transcription and 2× lookback rationale (#5742)
+
+The gf180mcu `metal_sidewalls` table (in `decks/gf180mcu_parasitics.py`)
+is transcribed from the resolved, pre-built `gf180mcuD.tech` for the
+pinned PDK commit `f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7` — the same
+source and nominal `variants ()` corner block the deck's `metal_overlaps`
+entry is cited from — with every row re-checked character-for-character
+against the generic `gf180mcu.tech` source at that same commit and against
+the `c6d73a35f524070e85faff4a6a9eef49553ebc2b` resolved install: the
+`defaultsidewall allm*` rows are unconditional across the #3540 re-pin.
+Metal5's entry is the `#ifdef METALS5` row (`114.86`), not the
+`#ifdef METALS6` alternative (`31.121`) — this deck's stack is the
+5-level one (`EXTRACTION_DECK.metals`). Only the first parameter is
+transcribed (aF/µm ÷ 1000 → fF/µm, the `cap_perim_ff_um` convention); the
+second parameter remains the open question above.
+
+The deck's `metal_sidewall_lookback_um` uses **2×** each level's own
+same-layer minimum-spacing rule — `metal1.space.1` 0.23 µm → 0.46 µm,
+`metal2-5.space.1` 0.28 µm → 0.56 µm — sky130's convention, in preference
+to magic's unread second parameter. 2× the bare minimum rather than the
+minimum itself because a `separation_check(d)` only reports edges *closer
+than* `d`, so a lookback of exactly the legal minimum could only ever
+fire on a DRC-illegal layout; the measured `gcd` corpus evidence behind
+the 2× choice is recorded on sky130's own table (`decks/sky130.py`).
+
 ### 1.5 What the measurements say the model *is* **[REPO-RUN]**
 
 Decomposing the ground capacitance of the routed `gcd` block into its two
