@@ -179,6 +179,7 @@
       "modules": [
         "klayout_tools.cli.env_provenance_cmd",
         "klayout_tools.env_provenance",
+        "klayout_tools.env_provenance_scrub",
         "klayout_tools.env_provenance_walk"
       ]
     },
@@ -282,6 +283,7 @@
         "klayout_tools._artifact_envelope",
         "klayout_tools.cli.functional_verification_cmd",
         "klayout_tools.functional_verification",
+        "klayout_tools.functional_verification_from_synthesize",
         "klayout_tools.functional_verification_initial_state",
         "klayout_tools.functional_verification_mutation",
         "klayout_tools.functional_verification_mutation_proposals",
@@ -435,7 +437,8 @@
       "description": "`klt lef_abstract` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.lef_abstract_cmd",
-        "klayout_tools.lef_abstract"
+        "klayout_tools.lef_abstract",
+        "klayout_tools.lef_abstract_no_layout"
       ]
     },
     "lvs": {
@@ -447,6 +450,7 @@
         "klayout_tools.lvs_combine",
         "klayout_tools.lvs_finfet",
         "klayout_tools.lvs_finfet_flatten",
+        "klayout_tools.lvs_finfet_power",
         "klayout_tools.lvs_flatten",
         "klayout_tools.lvs_gate_level",
         "klayout_tools.lvs_gate_level_convert",
@@ -834,6 +838,7 @@
         "klayout_tools.sim_slug",
         "klayout_tools.sim_snm",
         "klayout_tools.sim_snm_meas",
+        "klayout_tools.sim_spiceinit",
         "klayout_tools.sim_staging",
         "klayout_tools.sim_step_resolution",
         "klayout_tools.sim_step_shadow",

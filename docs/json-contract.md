@@ -618,6 +618,19 @@ worker-observed `worker_environment.pdk` so the two are never confused;
 `cli/sim.md`'s option and `environment` tables are the field-level record.
 Additive fields only; no `schema_version` bump (issue #4020).
 
+`klt sim`'s `environment.ngspice_init` (issue #5648) records the ngspice init
+file that was **in effect** -- always present on corner-mode runs, `null` for
+`engine: "xyce"` -- as `{source, lines, sha256}`. `source` is a path-free label
+(the same rule as `provenance.pdk.ambiguous_sources`: committed evidence must
+not carry the resolving machine's `$HOME`): `"request"` (klt wrote a
+`.spiceinit` including declared `options.ngspice_init` lines), `"thread_pin"`
+(klt wrote only the `set num_threads=N` pin), `"home"` (klt wrote none and
+`$HOME/.spiceinit` exists), `"none"`, or `"runner"` (off-host backends
+`remote`/`batch`: the worker resolves the file, which the client cannot
+observe). `lines` is the written file's lines for `request`/`thread_pin`, else
+`null`; `sha256` is `sha256:<hex>` of the effective file's bytes, `null` for
+`none`/`runner`. Additive; no `schema_version` bump.
+
 `environment.remote` (and each `fleet[]` member) also gains the additive
 `runner_models_lib_sha256` (string or `null`) and `models_lib_comparison`
 (`status` `match` / `mismatch` / `not_comparable`); no `schema_version` bump
@@ -1534,7 +1547,7 @@ which reads the input field only (`signoff.py`'s `_INPUT_ARTIFACT_FIELDS`).
 | `extract` | `file` (the hashed input layout; both response builders) | 4 | #2659 |
 | `lvs` | `layout` (the hashed layout side, `schema_version` 2, #2659); `reference` (the resolved reference netlist, `schema_version` 3, #4984; the `klayout-runset` engine keeps both as plain strings) | 3 | #2659, #4984 |
 | `erc` | `file` (the hashed input layout; `spec` stays a plain string) | 2 | #2703 |
-| `lef-abstract` | `file` (the hashed input layout; `socket` and `output` stay plain strings) | 2 | #2703 |
+| `lef-abstract` | `file` (the hashed input layout; `socket` and `output` stay plain strings; `{path: null, scope: "absent"}` under `--no-layout`, #5714) | 2 | #2703 |
 | `place-and-route` | `netlist` — the input netlist `provenance.input.content_hash` pins (additive, no bump) | 1 | #3751 |
 | `sta` | `def_path`, `verilog_path`, `spef_path` (`null` when the request does not use that input) | 2 | #2879 (moved from the plain-string table; schema-1 evidence carries absolute strings) |
 | `sta` | `sdf` / `corners[].sdf` — a written output: the envelope plus `content_hash` (`null` unless `request.sdf: true`; additive, no bump) | 2 | #2886 |
