@@ -9,16 +9,12 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 from pathlib import Path
 
-import pytest
-
+from helpers.tool_probes import SKIP_NO_NGSPICE
 from klayout_tools import sim
 
-pytestmark = pytest.mark.skipif(
-    shutil.which("ngspice") is None, reason="ngspice is not installed"
-)
+pytestmark = SKIP_NO_NGSPICE
 
 _STRIDE = 10
 

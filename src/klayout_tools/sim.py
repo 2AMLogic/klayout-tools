@@ -114,6 +114,7 @@ from . import (
     sim_search,
     sim_settled,
     sim_snm_meas,
+    sim_spiceinit,
     sim_step_resolution,
     sim_steps,
     sim_stimulus,
@@ -239,6 +240,7 @@ from .sim_pin_settle import (
     settle_version_pins,
 )
 from .sim_process_legs import attach_process_leg_check
+from .sim_spiceinit import with_thread_pin as _with_thread_pin
 
 from .sim_analysis_overrides import (  # isort: skip
     AO_LABEL as _AO_LABEL,  # noqa: F401
@@ -3908,6 +3910,10 @@ def _run_sim_corners(
     # Issues #3159/#3161: `analysis.passes` / `measurements[].tian` are gated
     # the same way (the `dual_injection` mandatory runner feature).
 
+    # Hoisted above the probe (issue #6047): it takes the corners' pinned init.
+    effective_threads = _effective_threads_per_worker(
+        threads_per_worker, backend, max_workers, len(dispatch_points)
+    )
     # Two-pass fail-fast probe (issue #1694, opt-in via `fail_fast_probe`/
     # `options.fail_fast_probe`): run once per grid, before any real corner
     # is dispatched -- not per backend/shard/host, and not for `remote`/
@@ -3932,7 +3938,9 @@ def _run_sim_corners(
             artifacts_dir=artifacts_dir,
             keep_artifacts=keep_artifacts,
             ngspice_binary=ngspice_binary,
-            ngspice_init=ngspice_init_lines,
+            ngspice_init=_with_thread_pin(
+                ngspice_init_lines, effective_threads, engine
+            ),
             osdi_preload=osdi_preload,
             save_mode=save_mode,
             ngspice_options=ngspice_options,
@@ -4004,8 +4012,8 @@ def _run_sim_corners(
         corner_points=corner_points,
         osdi_preload=osdi_preload,
     )
-    effective_threads = _effective_threads_per_worker(
-        threads_per_worker, backend, max_workers, len(dispatch_points)
+    ngspice_init_env = sim_spiceinit.record(  # Issue #5648
+        ngspice_init_lines, effective_threads, engine, backend in _OFFHOST_BACKENDS
     )
     local_engine_kwargs = (
         {
@@ -4099,7 +4107,7 @@ def _run_sim_corners(
             shard_fingerprint=_checkpoint_fingerprint(**fingerprint_inputs),
         )
 
-    if hosts == 1:
+    if hosts == 1 or attach_job_id is not None:  # #5777: attach never fans out
         # The exact pre-#376 call for the default case (no budget, no
         # resume, hosts=1, no fail-fast probe) -- `dispatch_points`/the four
         # new-since kwargs are identity no-ops then (`dispatch_points is
@@ -4378,6 +4386,7 @@ def _run_sim_corners(
         "ngspice_binary": ngspice_binary,
         # Issue #3095: build identity of that binary (``null`` for xyce).
         "engine_build": engine_build,
+        "ngspice_init": ngspice_init_env,
         # Issue #1274: normalised like every other path field this response
         # echoes -- the resolved library usually lives outside the repo (a
         # PDK under the user's home directory), which reports
@@ -8207,21 +8216,6 @@ def _worker_env_kwargs(threads_per_worker: int | None) -> dict[str, Any]:
     return {"env": {**os.environ, "OMP_NUM_THREADS": str(threads_per_worker)}}
 
 
-def _with_thread_pin(
-    ngspice_init: tuple[str, ...], threads_per_worker: int | None, engine: str
-) -> tuple[str, ...]:
-    """Also pin the thread count through ``.spiceinit`` (issue #3619).
-
-    ``OMP_NUM_THREADS`` alone did not stop ngspice-46 from oversubscribing
-    on the batch fleet, while ``set num_threads=1`` did. The pin line goes
-    first so a user ``options.ngspice_init`` line still wins; a netlist
-    ``.control`` ``set num_threads`` runs later still.
-    """
-    if threads_per_worker is None or engine == "xyce":
-        return ngspice_init
-    return (f"set num_threads={threads_per_worker}", *ngspice_init)
-
-
 def _threads_environment(effective: int | None) -> dict[str, int]:
     """Additive/optional ``environment.threads_per_worker`` (issue #2970): the
     OpenMP thread count each ngspice worker actually ran with. Absent when the
@@ -10629,16 +10623,13 @@ def _run_calibration_probe(
     misconfiguration surfaces at the (cheap) probe stage rather than only
     after every real corner is dispatched.
 
-    ``ngspice_init`` (issue #2520, the already-validated
-    ``options.ngspice_init`` lines -- see :func:`_validate_ngspice_init`) is
-    materialized as ``probe_dir/.spiceinit`` the same way :func:`_run_corner`
-    does for a real corner, and the probe's own ``subprocess.run`` call
-    passes ``cwd=probe_dir`` so it is actually read. The probe otherwise
-    runs the same compatibility mode a real corner would, and this issue's
-    other half (the missing ``cwd=``) applied here too -- without it, the
-    probe's own convergence behaviour (and thus its rate estimate) would
-    silently diverge from the real corners it is meant to be representative
-    of whenever a caller sets ``options.ngspice_init``.
+    ``ngspice_init`` (issues #2520, #6047) is the init-file lines the real
+    corners get, thread pin included (:func:`_with_thread_pin`; a run-dir
+    ``.spiceinit`` replaces ``$HOME``'s). It is materialized as
+    ``probe_dir/.spiceinit`` and the probe's ``subprocess.run`` passes
+    ``cwd=probe_dir`` so it is read -- otherwise the probe's convergence
+    behaviour (and rate estimate) would diverge from the corners it is meant
+    to be representative of.
     """
     probe_dir = (
         os.path.join(artifacts_dir, f"{point.slug}__probe")
