@@ -9,7 +9,7 @@ import time
 import pytest
 
 from helpers.subprocess_fakes import _patch_yosys_run, fake_completed
-from klayout_tools import synthesize, synthesize_spawn, synthesize_timeout
+from klayout_tools import synthesize, synthesize_timeout
 from klayout_tools.synthesize import SynthesizeError, run_synthesize
 from test_synthesize import (
     _ABC_HELP_WITH_DONT_USE,
@@ -23,17 +23,18 @@ pytestmark = pytest.mark.usefixtures("real_build_identity_git")
 
 
 def _record_yosys_timeouts(monkeypatch) -> list:
-    """Wrap the installed ``_spawn_yosys`` seam; record each ``yosys -s``
-    timeout (issue #5798 moved the spawn off ``subprocess.run``)."""
+    """Wrap the installed ``run_in_group`` spawn helper; record each
+    ``yosys -s`` timeout (issue #5871 routes the spawn through
+    ``_engine_proc.run_in_group``)."""
     seen: list = []
-    inner = synthesize._spawn_yosys
+    inner = synthesize.run_in_group
 
     def recording_spawn(cmd, **kwargs):
         if cmd[:2] == ["yosys", "-s"]:
             seen.append(kwargs.get("timeout"))
         return inner(cmd, **kwargs)
 
-    monkeypatch.setattr(synthesize, "_spawn_yosys", recording_spawn)
+    monkeypatch.setattr(synthesize, "run_in_group", recording_spawn)
     return seen
 
 
@@ -90,7 +91,7 @@ def test_run_yosys_default_resolves_to_bound_budget(tmp_path, monkeypatch):
         seen.append(kwargs.get("timeout"))
         return fake_completed(returncode=0)
 
-    monkeypatch.setattr(synthesize, "_spawn_yosys", fake_spawn)
+    monkeypatch.setattr(synthesize, "run_in_group", fake_spawn)
     script = str(tmp_path / "s.ys")
     token = synthesize_timeout._YOSYS_TIMEOUT_VAR.set(900.0)
     try:
@@ -135,7 +136,9 @@ def test_yosys_timeout_error_names_the_budget(tmp_path, monkeypatch):
 # Issue #5798: a timed-out run must kill the whole process group -- the
 # `yosys-abc` grandchild of an `abc` pass may not outlive the watchdog that
 # ended its parent -- and the raised timeout error must keep both drained
-# streams for `_write_yosys_log`.
+# streams for `_write_yosys_log`. The kill rides on `_engine_proc.run_in_group`
+# (issue #5871, merged from main while this PR was open); these tests pin the
+# guarantee at the `_run_yosys` level so the seam cannot silently uncouple.
 # --------------------------------------------------------------------------- #
 
 
@@ -151,16 +154,18 @@ echo "orphan-test stderr marker" >&2
 exec sleep 120
 """
 
-
-@pytest.mark.skipif(
-    not synthesize_spawn._CAN_KILL_PROCESS_GROUP,
+_POSIX_PG = pytest.mark.skipif(
+    not (hasattr(os, "killpg") and hasattr(os, "getpgid")),
     reason="POSIX process groups required",
 )
+
+
+@_POSIX_PG
 def test_timed_out_run_kills_the_grandchild_and_drains_streams(tmp_path, monkeypatch):
     """Issue #5798 regression: `_run_yosys` on timeout SIGKILLs the whole
     process group, so the `yosys-abc` stand-in grandchild is reaped, and the
-    timeout log still carries both streams (a plain `Popen` port would leave
-    `TimeoutExpired.stdout`/`.stderr` as `None` and write an empty log)."""
+    timeout log still carries both streams (`run_in_group`'s underlying
+    ``subprocess.run`` attaches the partial output to ``TimeoutExpired``)."""
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     orphan_pid_file = tmp_path / "orphan.pid"
@@ -192,76 +197,28 @@ def test_timed_out_run_kills_the_grandchild_and_drains_streams(tmp_path, monkeyp
                 pass
 
 
-@pytest.mark.skipif(
-    not synthesize_spawn._CAN_KILL_PROCESS_GROUP,
-    reason="POSIX process groups required",
-)
-def test_group_kill_failure_never_masks_the_timeout(tmp_path, monkeypatch):
-    """Issue #5798: a ProcessLookupError/PermissionError from the group kill
-    is swallowed -- the original timeout error is what surfaces."""
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    yosys = fake_bin / "yosys"
-    # Exits on its own shortly after the budget expires, so the post-kill
-    # drain terminates even though the kill was refused.
-    yosys.write_text("#!/bin/sh\nsleep 2\n")
-    yosys.chmod(0o755)
-    monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ['PATH']}")
-
-    def refusing_kill(proc):
-        raise ProcessLookupError("no such process group")
-
-    monkeypatch.setattr(synthesize_spawn, "_kill_yosys_process_group", refusing_kill)
-    script = tmp_path / "synth.ys"
-    script.write_text("")
-
-    with pytest.raises(SynthesizeError, match=r"did not complete within 1"):
-        synthesize._run_yosys(str(script), timeout_s=1.0)
-
-
-def test_spawn_degrades_to_subprocess_run_without_process_groups(tmp_path, monkeypatch):
-    """Issue #5798: where ``os.killpg``/``os.getpgid`` are unavailable the
-    spawn is today's ``subprocess.run`` verbatim (single-child kill)."""
-    seen: dict = {}
-
-    def fake_run(cmd, **kwargs):
-        seen["cmd"] = cmd
-        seen.update(kwargs)
-        return fake_completed(returncode=0, stdout="ok\n")
-
-    monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
-    monkeypatch.setattr(synthesize_spawn, "_CAN_KILL_PROCESS_GROUP", False)
-    script = tmp_path / "s.ys"
-    script.write_text("")
-
-    completed = synthesize._spawn_yosys(
-        ["yosys", "-s", str(script)], timeout=5.0, cwd=None
-    )
-
-    assert completed.returncode == 0
-    assert seen["cmd"] == ["yosys", "-s", str(script)]
-    assert seen["timeout"] == 5.0
-    assert "start_new_session" not in seen
+# Kill-failure masking (`ProcessLookupError` from the group kill) and the
+# no-process-group degradation are owned -- and tested with real processes
+# -- by `_engine_proc` and its suite (``tests/test_engine_proc.py``), so they
+# are not re-tested here at the `_run_yosys` level.
 
 
 # --------------------------------------------------------------------------- #
 # Issue #5780 (merged via #5975): `_run_yosys` pins the child's COLUMNS to
 # 4096 -- an inherited COLUMNS=80 wedges the abc handshake -- and the pin
-# must ride through the #5798 spawn seam on BOTH spawn branches, so the seam
-# cannot silently uncouple from the pin again.
+# must ride through the `run_in_group` spawn on both the real-process path
+# and the mocked-``subprocess.run`` path, so the spawn cannot silently
+# uncouple from the pin again.
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.skipif(
-    not synthesize_spawn._CAN_KILL_PROCESS_GROUP,
-    reason="POSIX process groups required",
-)
+@_POSIX_PG
 def test_run_yosys_pins_child_columns_4096_on_process_group_branch(
     tmp_path, monkeypatch
 ):
-    """The Popen branch (``start_new_session``) spawns the child with
-    COLUMNS=4096 even when the parent inherited COLUMNS=80 (#5780's exact
-    failing case)."""
+    """The ``run_in_group`` child (own session via ``start_new_session``)
+    spawns with COLUMNS=4096 even when the parent inherited COLUMNS=80
+    (#5780's exact failing case)."""
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     yosys = fake_bin / "yosys"
@@ -277,12 +234,12 @@ def test_run_yosys_pins_child_columns_4096_on_process_group_branch(
     assert "cols=4096" in stdout
 
 
-def test_run_yosys_pins_child_columns_4096_on_the_degraded_branch(
+def test_run_yosys_pins_child_columns_4096_through_the_spawn_helper(
     tmp_path, monkeypatch
 ):
-    """The no-process-group branch (``_CAN_KILL_PROCESS_GROUP`` False)
-    degrades to ``subprocess.run`` and must carry the same COLUMNS=4096
-    pin."""
+    """The pin rides through ``run_in_group``'s underlying ``subprocess.run``
+    call: a mocked run (which records no pid, so nothing is killed) must
+    still receive the COLUMNS=4096 env."""
     seen: dict = {}
 
     def fake_run(cmd, **kwargs):
@@ -290,7 +247,6 @@ def test_run_yosys_pins_child_columns_4096_on_the_degraded_branch(
         return fake_completed(returncode=0, stdout="ok\n")
 
     monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
-    monkeypatch.setattr(synthesize_spawn, "_CAN_KILL_PROCESS_GROUP", False)
     script = tmp_path / "s.ys"
     script.write_text("")
 

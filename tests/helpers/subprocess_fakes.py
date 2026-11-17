@@ -178,33 +178,17 @@ def uploaded_request_of(argv: list[str]) -> tuple[dict, str] | None:
 
 
 def _patch_yosys_run(monkeypatch, fake) -> None:
-    """Install a ``subprocess.run``-shaped fake across both Yosys seams.
+    """Install a ``subprocess.run``-shaped fake across the Yosys spawns.
 
-    Issue #5798: ``synthesize._run_yosys`` no longer spawns the ``yosys -s``
-    script run through ``subprocess.run`` -- it goes through
-    ``synthesize._spawn_yosys`` (``Popen`` in its own process group, so a
-    timeout can SIGKILL a hung ``yosys-abc`` grandchild with it). The
-    ``yosys -V`` and ``help abc`` capability probes still go through
-    ``subprocess.run`` directly. The run-shaped fakes in the Yosys test
-    files were written against the single ``subprocess.run`` seam, so this
-    patches ``run`` exactly as before AND routes the spawn seam through it
-    -- late-bound at call time, so helpers that re-patch ``run`` afterwards
-    keep intercepting spawn calls too, and fakes that delegate to a
-    captured ``inner`` behave as they did before.
+    Every Yosys invocation -- the ``yosys -s`` script run and the ``yosys
+    -V`` / ``help abc`` capability probes -- spawns through
+    ``_engine_proc.run_in_group``, which delegates to ``subprocess.run``
+    (start_new_session + group kill, issue #5871). Patching ``run`` on the
+    shared stdlib module intercepts all of them; a mocked ``run`` spawns
+    nothing, so ``run_in_group`` records no pid and kills nothing.
 
     Tests exercising the REAL spawn path (the process-group regression
-    tests in ``test_synthesize_timeout.py``) patch neither seam and put a
-    stub ``yosys`` binary on ``PATH`` instead.
+    tests in ``test_synthesize_timeout.py``) patch nothing and put a stub
+    ``yosys`` binary on ``PATH`` instead.
     """
     monkeypatch.setattr(synthesize.subprocess, "run", fake)
-
-    def spawn_via_run(cmd, **kwargs):
-        return synthesize.subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=kwargs.get("timeout"),
-            cwd=kwargs.get("cwd"),
-        )
-
-    monkeypatch.setattr(synthesize, "_spawn_yosys", spawn_via_run)

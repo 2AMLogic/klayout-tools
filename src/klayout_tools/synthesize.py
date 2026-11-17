@@ -233,6 +233,7 @@ from typing import Any
 from . import env_provenance
 from . import macros as macro_spec
 from . import synthesize_timeout as ytimeout
+from ._engine_proc import run_in_group
 from ._jsonnum import is_int, is_number
 from ._paths import _load_request_json, _reject_unknown_keys, validate_request_shape
 from ._provenance import (
@@ -302,7 +303,6 @@ from .synthesize_library_hint import (
 # `synthesize_memory.py` imports this module's helpers at call time only.
 from .synthesize_memory import collect_memory_evidence
 from .synthesize_netlist_normalize import rewrite_netlist
-from .synthesize_spawn import _spawn_yosys
 from .synthesize_x_scan import netlist_x_constant_warning
 
 #: Bumped only on a non-additive (breaking) change to this command's own
@@ -2509,7 +2509,7 @@ def _abc_supports_dont_use() -> bool:
     right below.
     """
     try:
-        completed = subprocess.run(
+        completed = run_in_group(
             ["yosys", "-p", "help abc"],
             capture_output=True,
             text=True,
@@ -3128,8 +3128,10 @@ def _run_yosys(
     """
     timeout_s = ytimeout.resolve_timeout(timeout_s, DEFAULT_YOSYS_TIMEOUT_S)
     try:
-        completed = _spawn_yosys(
+        completed = run_in_group(
             ["yosys", "-s", script_path],
+            capture_output=True,
+            text=True,
             timeout=timeout_s,
             cwd=cwd,
             env={**os.environ, "COLUMNS": "4096"},
@@ -3158,11 +3160,9 @@ def _write_yosys_log(
     """Keep both streams next to every executed script, including failed trials."""
 
     def text(stream: str | bytes | None) -> str:
-        return (
-            stream.decode("utf-8", errors="replace")
-            if isinstance(stream, bytes)
-            else stream or ""
-        )
+        if isinstance(stream, bytes):
+            return stream.decode("utf-8", errors="replace")
+        return stream or ""
 
     _write_text_file(
         os.path.splitext(script_path)[0] + ".log",

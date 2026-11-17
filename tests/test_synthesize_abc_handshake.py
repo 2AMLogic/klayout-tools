@@ -21,11 +21,9 @@ the echo can never wrap regardless of ``$TMPDIR`` length. The pin is
 applied unconditionally -- an inherited ``COLUMNS=80`` from an interactive
 shell is exactly the failing case, so a pre-set ``COLUMNS`` must not win.
 
-These tests stub the spawn seam (``_spawn_yosys`` -- ``subprocess.run``
-before #5798, ``Popen`` in its own process-group session after) and assert
-on the ``env`` keyword `_run_yosys` passes, so they stay correct across
-any change to the primitive the seam uses internally; the seam's own env
-plumbing is covered end-to-end in ``tests/test_synthesize_timeout.py``.
+These tests stub the spawn primitive (``subprocess.run`` today; ``Popen``
+if #5798 lands second and rebases this call) and assert on the ``env``
+keyword `_run_yosys` passes, so they stay correct across that refactor.
 """
 
 from __future__ import annotations
@@ -41,15 +39,15 @@ pytestmark = pytest.mark.usefixtures("real_build_identity_git")
 
 
 def _record_yosys_env(monkeypatch) -> list:
-    """Stub the spawn seam; record the ``env`` each ``yosys -s`` got."""
+    """Stub the spawn primitive; record the ``env`` each ``yosys -s`` got."""
     seen: list = []
 
-    def fake_spawn(cmd, **kwargs):
+    def fake_run(cmd, **kwargs):
         if cmd[:2] == ["yosys", "-s"]:
             seen.append(kwargs.get("env"))
         return fake_completed(returncode=0)
 
-    monkeypatch.setattr(synthesize, "_spawn_yosys", fake_spawn)
+    monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
     return seen
 
 
