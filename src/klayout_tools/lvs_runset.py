@@ -633,8 +633,7 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
         _reference_conversion_echo,
     )
 
-    # Issue #5795: echo the caller's own relative --deck-file form (_merge_
-    # deck_flags shadows the absolutized value); popped so no echo sees it.
+    # Issue #5795: the caller's own --deck-file form, stashed by _merge_deck_flags.
     deck_file_echo = request.pop(_DECK_FILE_GIVEN_KEY, None) or request.get("deck_file")
     layout, reference, deck_file, deck_vars, options = _validate_request(
         request, request_dir
