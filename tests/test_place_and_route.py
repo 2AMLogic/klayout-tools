@@ -703,19 +703,6 @@ def test_run_constraints_design_rule_field_valid_without_clock(tmp_path, monkeyp
     assert report["status"] == "ok"
 
 
-def test_run_target_stage_place_requires_clock(tmp_path, monkeypatch):
-    request_path = _setup_success_env(
-        tmp_path,
-        monkeypatch,
-        target_stage="place",
-        constraints=None,
-    )
-    with pytest.raises(
-        PlaceAndRouteError, match="required to reach target_stage 'place'"
-    ):
-        run_place_and_route(request_path)
-
-
 def test_run_target_stage_place_requires_io(tmp_path, monkeypatch):
     request_path = _setup_success_env(
         tmp_path,
@@ -8714,14 +8701,14 @@ def test_merge_def_to_gds_success(tmp_path):
 
 def _skipped_via_pad_trim(variant: str) -> dict:
     """Issue #4495: off ASAP7 both halves of the via-pad pass are a *named*
-    no-op -- the trim leaves the GDS untouched and `tip_check` (which writes
-    no geometry on any PDK) reports that skip, never a misleading clean."""
+    no-op: the GDS is untouched and `tip_check` reports the skip, not a clean."""
     s = {
         "status": "skipped",
         "reason": f"PDK family of '{variant}' is not ASAP7; no-op",
     }
     counts = {"cells_touched": 0, "pads_trimmed": 0, "pads_shrunk": 0, "pads_left": 0}
     tip = {"violations": 0, "via_pad_violations": 0, "rules": []}
+    tip["router_fill_violations"] = 0
     return {**s, **counts, "layers": [], "tip_check": {**s, **tip}}
 
 

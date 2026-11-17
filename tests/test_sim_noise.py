@@ -3,19 +3,13 @@
 from __future__ import annotations
 
 import json
-import os
-import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from helpers.tool_probes import SKIP_NO_NGSPICE as _SKIP_NO_NGSPICE
 from klayout_tools import sim, sim_noise
-
-_SKIP_NO_NGSPICE = pytest.mark.skipif(
-    shutil.which("ngspice") is None or os.environ.get("KLT_SKIP_NGSPICE_TESTS") == "1",
-    reason="ngspice is not installed on this machine",
-)
 
 
 def _write_request(tmp_path: Path, request: dict) -> Path:
