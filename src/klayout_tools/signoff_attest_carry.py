@@ -19,13 +19,17 @@ from .signoff_attest import (
     build_attestation,
     check_attestation,
 )
+from .signoff_attest_build import add_require_build_match_argument
+from .signoff_attest_build import flag_problem as _build_match_problem
+from .signoff_attest_drift import SKIPPED_CHECK_KEYS
 from .signoff_attest_stream import build_stream_attestation, check_stream_attestation
-
-_SKIPPED_KEYS = ("role", "name", "target", "argv", "cwd", "passed")
+from .signoff_attest_text import documented_suffix
 
 
 def add_skip_local_only_argument(parser: Any) -> None:
-    """Register ``--skip-local-only`` on the ``klt signoff`` parser."""
+    """Register ``--skip-local-only`` (and ``--require-build-match``, issue
+    #5875) on the ``klt signoff`` parser."""
+    add_require_build_match_argument(parser)
     parser.add_argument(
         "--skip-local-only",
         action="store_true",
@@ -41,8 +45,18 @@ def add_skip_local_only_argument(parser: Any) -> None:
 
 
 def flag_problem(args: Any) -> str | None:
-    """The refusal message for an invalid ``--skip-local-only`` combination
+    """The refusal message for an invalid ``--attest`` flag combination
     (``--attest`` presence is checked by the caller), else ``None``."""
+    problem = _skip_local_only_problem(args) or _build_match_problem(args)
+    if problem is None and args.check is not None and args.output:
+        return (
+            "--check and --output are mutually exclusive with --attest: "
+            "--check verifies a committed envelope and never writes"
+        )
+    return problem
+
+
+def _skip_local_only_problem(args: Any) -> str | None:
     if not getattr(args, "skip_local_only", False):
         return None
     if getattr(args, "check", None) is not None:
@@ -73,7 +87,7 @@ def attest_carrying(
     skipped = []
     for check in result["attestation"]["checks"]:
         if check.pop("skipped", False):
-            skipped.append({k: check[k] for k in _SKIPPED_KEYS if k in check})
+            skipped.append({k: check[k] for k in SKIPPED_CHECK_KEYS if k in check})
     result["skipped_checks"] = skipped
     return result
 
@@ -86,6 +100,7 @@ def skip_lines(result: Mapping[str, Any], label: Callable[[Any], str]) -> list[s
         lines.append(
             f"[SKIP] {check['role']} {label(check)}: {' '.join(check['argv'])} "
             f"(local_only, not run; committed outcome: {outcome})"
+            f"{documented_suffix(check)}"
         )
     return lines
 
@@ -119,7 +134,11 @@ def _compute(
         options: dict[str, Any] = {
             "generator": getattr(args, "generator", None),
             "regenerated_hash": getattr(args, "regenerated_hash", None),
-            "hash_kind": getattr(args, "hash_kind", None) or "bytes",
+            # Pass an absent --hash-kind through as None, never collapsed to
+            # "bytes": check_stream_attestation() adopts the committed
+            # regeneration claim only when no flag was given, so absence has
+            # to stay visible past this boundary (issue #5572).
+            "hash_kind": getattr(args, "hash_kind", None),
             "inventory_path": inventory,
         }
         if committed is not None:

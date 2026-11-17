@@ -47,6 +47,7 @@ import json
 import math
 import os
 from typing import Any
+from zlib import error as zerror
 
 from ._jsonnum import is_int, is_number
 from ._native import _load_native_extension, native_provenance
@@ -110,11 +111,10 @@ def _load_json(path: str, what: str) -> Any:
         raise YieldError(f"not a file: {path}")
     try:
         with open(path, "rb") as raw:
-            gzipped = raw.read(2) == b"\x1f\x8b"
-        opener = gzip.open if gzipped else open
+            opener = gzip.open if raw.read(2) == b"\x1f\x8b" else open
         with opener(path, "rt", encoding="utf-8") as f:
             return json.load(f)
-    except (OSError, EOFError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (OSError, EOFError, zerror, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise YieldError(f"could not read {what} '{path}': {exc}") from exc
 
 

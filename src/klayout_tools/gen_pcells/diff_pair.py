@@ -15,6 +15,16 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     import klayout.db as kdb
 
+from ._common_params import (
+    declare_cut_and_metal_params,
+    declare_mos_array_extra_params,
+    declare_mos_stack_params,
+    declare_ring_implant_params,
+    declare_ring_well_margin,
+    declare_voltage_flavor_mark_params,
+    declare_well_present,
+)
+
 
 def _insert_voltage_flavor_marks(
     pcell: Any, dbu: float, mark_box: tuple[float, float, float, float]
@@ -109,45 +119,7 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "and for the routing styles that do work",
                 default=2,
             )
-            # getattr: keeps this new hidden param out of the mypy type
-            # baseline (PCellDeclarationHelper's dynamic attrs are untyped).
-            self.param(
-                "sd_implant_min_space_um",
-                getattr(self, "TypeDouble"),  # noqa: B009
-                "Harness-resolved minimum spacing between separate source/"
-                "drain implant shapes; closer ones are merged (only used "
-                "when sd_implant_present)",
-                default=0.0,
-            )
-            # getattr: keeps these new hidden params out of the mypy type
-            # baseline (PCellDeclarationHelper's dynamic attrs are untyped).
-            self.param(
-                "npc_layer",
-                getattr(self, "TypeLayer"),  # noqa: B009
-                "npc drawing layer (only used when npc_present)",
-                default=kdb.LayerInfo(0, 0),
-            )
-            self.param(
-                "npc_present",
-                getattr(self, "TypeBoolean"),  # noqa: B009
-                "Whether npc_layer is a real layer this PDK family needs "
-                "over each poly-contact licon",
-                default=False,
-            )
-            self.param(
-                "npc_margin_um",
-                getattr(self, "TypeDouble"),  # noqa: B009
-                "Harness-resolved margin npc grows beyond each poly-contact "
-                "licon (only used when npc_present)",
-                default=0.0,
-            )
-            self.param(
-                "npc_min_space_um",
-                getattr(self, "TypeDouble"),  # noqa: B009
-                "Harness-resolved minimum npc spacing; closer shapes merge "
-                "(only used when npc_present)",
-                default=0.0,
-            )
+            declare_mos_array_extra_params(self, kdb)
             self.param(
                 "add_guard_ring",
                 self.TypeBoolean,
@@ -223,30 +195,8 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "device (and any automatically-sized guard ring) grows taller",
                 default=False,
             )
-            self.param(
-                "active_layer",
-                self.TypeLayer,
-                "Active/diffusion drawing layer",
-                default=kdb.LayerInfo(0, 0),
-            )
-            self.param(
-                "poly_layer",
-                self.TypeLayer,
-                "Poly gate drawing layer",
-                default=kdb.LayerInfo(0, 0),
-            )
-            self.param(
-                "contact_layer",
-                self.TypeLayer,
-                "Contact drawing layer",
-                default=kdb.LayerInfo(0, 0),
-            )
-            self.param(
-                "metal_layer",
-                self.TypeLayer,
-                "Local routing metal drawing layer",
-                default=kdb.LayerInfo(0, 0),
-            )
+            declare_mos_stack_params(self, kdb)
+            declare_cut_and_metal_params(self, kdb)
             self.param(
                 "tap_layer",
                 self.TypeLayer,
@@ -259,36 +209,8 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Guard ring well drawing layer (only used when well_present)",
                 default=kdb.LayerInfo(0, 0),
             )
-            self.param(
-                "well_present",
-                self.TypeBoolean,
-                "Whether well_layer is a real, DRC-checked layer for the resolved PDK",
-                default=False,
-            )
-            self.param(
-                "ring_implant_layer",
-                self.TypeLayer,
-                "Guard-ring implant drawing layer, tracking the tap ring's "
-                "own band with ring_implant_margin_um of extension beyond "
-                "every edge of it (only used when add_guard_ring and "
-                "ring_implant_present)",
-                default=kdb.LayerInfo(0, 0),
-            )
-            self.param(
-                "ring_implant_present",
-                self.TypeBoolean,
-                "Whether the resolved PDK needs an implant mask to recognise "
-                "the guard ring's own shape (see _ring_tap_implant_layer)",
-                default=False,
-            )
-            self.param(
-                "ring_implant_margin_um",
-                self.TypeDouble,
-                "Harness-resolved margin the ring implant extends beyond the "
-                "ring's own band on every edge (only used when "
-                "ring_implant_present)",
-                default=0.0,
-            )
+            declare_well_present(self)
+            declare_ring_implant_params(self, kdb)
             self.param(
                 "voltage_flavor_mark_layer",
                 self.TypeLayer,
@@ -297,28 +219,7 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "(only used when voltage_flavor_mark_present)",
                 default=kdb.LayerInfo(0, 0),
             )
-            self.param(
-                "voltage_flavor_mark_present",
-                self.TypeBoolean,
-                "Whether voltage_flavor_mark_layer is a real layer resolved "
-                "for params.voltage_flavor on this PDK family",
-                default=False,
-            )
-            self.param(
-                "voltage_flavor_extra_mark_layer",
-                self.TypeLayer,
-                "Second voltage_flavor marker layer drawn over the same box "
-                "(sky130 native-Vt: lvtn alongside hvi; only used when "
-                "voltage_flavor_extra_mark_present)",
-                default=kdb.LayerInfo(0, 0),
-            )
-            self.param(
-                "voltage_flavor_extra_mark_present",
-                self.TypeBoolean,
-                "Whether voltage_flavor_extra_mark_layer is a real layer "
-                "resolved for params.voltage_flavor on this PDK family",
-                default=False,
-            )
+            declare_voltage_flavor_mark_params(self, kdb)
             self.param(
                 "voltage_flavor_mark_margin_um",
                 self.TypeDouble,
@@ -327,83 +228,7 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "_PDK_VOLTAGE_FLAVOR_MARK_MARGIN_UM)",
                 default=WELL_ENCLOSURE_MARGIN_UM,
             )
-            self.param(
-                "ring_well_margin_um",
-                self.TypeDouble,
-                "Harness-resolved nwell enclosure of the n-tap guard ring "
-                "(see _PDK_RING_WELL_MARGIN_UM)",
-                default=WELL_ENCLOSURE_MARGIN_UM,
-            )
-            self.param(
-                "gate_pad_clearance_um",
-                self.TypeDouble,
-                "Harness-resolved clearance the gate-poly landing pad keeps "
-                "off the diffusion edge (see _PDK_GATE_PAD_ACTIVE_CLEARANCE_UM)",
-                default=0.0,
-            )
-            self.param(
-                "contact_gate_offset_um",
-                self.TypeDouble,
-                "Harness-resolved extra S/D-contact-to-gate offset floor "
-                "(see _PDK_CONTACT_GATE_EXTRA_OFFSET_UM)",
-                default=0.0,
-            )
-            self.param(
-                "bottom_endcap_um",
-                self.TypeDouble,
-                "Harness-resolved gate-stripe bottom-edge endcap extension "
-                "(see _PDK_GATE_BOTTOM_ENDCAP_UM)",
-                default=0.0,
-            )
-            self.param(
-                "top_endcap_um",
-                self.TypeDouble,
-                "Harness-resolved gate-stripe top-edge endcap neck "
-                "(see _PDK_GATE_TOP_ENDCAP_UM)",
-                default=0.0,
-            )
-            self.param(
-                "sd_implant_layer",
-                self.TypeLayer,
-                "Source/drain implant drawing layer (only used when "
-                "sd_implant_present)",
-                default=kdb.LayerInfo(0, 0),
-            )
-            self.param(
-                "sd_implant_present",
-                self.TypeBoolean,
-                "Whether sd_implant_layer is a real layer this PDK family "
-                "needs over each unit device's own active body",
-                default=False,
-            )
-            self.param(
-                "sd_implant_margin_um",
-                self.TypeDouble,
-                "Harness-resolved margin the source/drain implant box grows "
-                "beyond each unit device's own active box (only used when "
-                "sd_implant_present)",
-                default=0.0,
-            )
-            # Fixed drawn side of every cut on contact_layer (issue #2585) --
-            # harness-computed by `_cut_fixed_size_um` from the resolved PDK
-            # family and layer. `0.0` (no upper size bound) leaves the cuts
-            # exactly as laid out; see `gen._clamp_cut_boxes`.
-            self.param(
-                "contact_fixed_size_um",
-                self.TypeDouble,
-                "Fixed drawn side (um) every cut on contact_layer is clamped "
-                "down to on the resolved PDK family -- 0.0 leaves the "
-                "generator's own cut size unchanged",
-                default=0.0,
-            )
-            self.param(
-                "mfg_grid_um",
-                self.TypeDouble,
-                "Manufacturing grid (um) every cut on contact_layer is "
-                "snapped onto (issue #2648) -- 0.0 leaves cut positions "
-                "unchanged",
-                default=0.0,
-            )
+            declare_ring_well_margin(self, WELL_ENCLOSURE_MARGIN_UM)
 
         def display_text_impl(self) -> str:
             return f"diff_pair(w={self.w_um},l={self.l_um},splits={self.splits})"

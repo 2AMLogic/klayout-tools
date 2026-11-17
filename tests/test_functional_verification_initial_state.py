@@ -18,17 +18,17 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from helpers.cocotb_fakes import FakeCocotbRunner  # noqa: E402
-from klayout_tools import functional_verification as fv  # noqa: E402
-from klayout_tools.functional_verification import (  # noqa: E402
+from helpers.cocotb_fakes import FakeCocotbRunner
+from klayout_tools import functional_verification as fv
+from klayout_tools.functional_verification import (
     FunctionalVerificationError,
     run_functional_verification,
     run_functional_verification_with_mutations,
 )
-from klayout_tools.functional_verification_initial_state import (  # noqa: E402
+from klayout_tools.functional_verification_initial_state import (
     build_initial_state_verilog,
 )
-from klayout_tools.reset_coverage import sequential_elements  # noqa: E402
+from klayout_tools.reset_coverage import sequential_elements
 
 MODELS = """\
 primitive sky130_fd_sc_hd__udp_dff$PR_pp$PG$N (Q, D, CLK, RESET, NOTIFIER, VPWR, VGND);

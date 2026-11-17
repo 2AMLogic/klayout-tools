@@ -77,15 +77,27 @@ SET_POLL_INTERVAL_S = 1.0
 def _request_dirs(paths: list[str], outdir: str | None) -> list[str]:
     """One distinct artifacts directory per request.
 
+    The member directory stem strips a trailing ``.request.json`` from the
+    request basename (the repo's own request naming convention, so
+    ``foo.request.json`` -> ``foo``) before falling back to
+    :func:`os.path.splitext` (``foo.sim.json`` -> ``foo.sim``); an empty stem
+    (a request literally named ``.request.json``) becomes ``request-<index>``.
+
     ``outdir`` given: ``<outdir>/<stem>``; else the single-request default
     (``.klt/sim/`` next to the request file) with ``<stem>`` appended, so
     requests sharing a directory never contend for one output lock. A repeated
-    stem gets its index appended.
+    stem gets its index appended. Each member's ``report.json`` sits in its
+    directory, so ``requests[].report`` is the authoritative path to it.
     """
     dirs: list[str] = []
     seen: set[str] = set()
     for index, path in enumerate(paths):
-        stem = os.path.splitext(os.path.basename(path))[0] or f"request-{index}"
+        name = os.path.basename(path)
+        if name.endswith(".request.json"):
+            stem = name[: -len(".request.json")]
+        else:
+            stem = os.path.splitext(name)[0]
+        stem = stem or f"request-{index}"
         base = (
             outdir
             if outdir is not None

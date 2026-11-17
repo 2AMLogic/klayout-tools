@@ -261,6 +261,7 @@ def stats_report(
     top: str | None = None,
     density_window: float | None = None,
     window_layers: list[tuple[int, int]] | None = None,
+    geometry_digest: bool = False,
 ) -> dict[str, Any]:
     """Compute area/density/polygon/vertex statistics for a GDSII or OASIS stream.
 
@@ -276,7 +277,8 @@ def stats_report(
             "dbu_um": <database unit in micrometres, float>,
             "top_cell": <top cell name, or None if the layout has no cells>,
             "geometry_digest": <"sha256:<64 hex>" of the stream's decoded
-                                geometry, or None if it cannot be computed>,
+                                geometry when geometry_digest=True, else
+                                None (also None if it cannot be computed)>,
             "bbox_um": {"left": .., "bottom": .., "right": .., "top": ..,
                         "width": .., "height": ..},
             "total": {"area_um2": .., "density": .., "polygon_count": ..,
@@ -339,7 +341,9 @@ def stats_report(
     public producer of the value ``klt signoff --attest 2 --hash-kind
     geometry`` is graded against (``docs/cli/signoff.md``), which previously
     had none -- note it is **not** ``klt diff``'s ``canonical_hash``, a
-    different digest. ``None`` when the digest cannot be computed.
+    different digest. ``None`` unless ``geometry_digest=True`` (opt-in: the
+    digest re-reads and walks the whole layout, ~2.5x the cost of the rest of
+    the report on large flat layouts), and when the digest cannot be computed.
 
     ``layers`` is ``None`` unless ``per_layer=True``, in which case it is a
     list sorted by ``(layer, datatype)`` ascending for deterministic output.
@@ -456,7 +460,7 @@ def stats_report(
         "file": path,
         "dbu_um": dbu,
         "top_cell": top_cell.name if top_cell is not None else None,
-        "geometry_digest": layout_geometry_digest(path),
+        "geometry_digest": layout_geometry_digest(path) if geometry_digest else None,
         "bbox_um": bbox_um_dict(bbox, dbu),
         "total": {
             "area_um2": total_area_dbu2 * dbu * dbu,

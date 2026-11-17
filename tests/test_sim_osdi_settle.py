@@ -264,3 +264,54 @@ def test_run_sim_single_unit_host_default_applies_the_local_osdi_abi_check(
     sim.run_sim(str(request))
 
     assert ((osdi,), "local") in seen
+
+
+# Issue #5562: the declared index of each runner-resolved entry is what the
+# batch report joins the runner's own digest on (see
+# `tests/test_sim_batch_osdi_digest.py`), so the settling must carry it, and
+# every reported entry must carry an explicit `sha256` -- a present `null`
+# says "unknown", where a missing field invites a consumer to substitute the
+# submitting host's hash of a file the runner never read.
+
+
+def test_finalize_osdi_preload_carries_the_declared_index():
+    from klayout_tools import sim_osdi_settle
+
+    options = {"osdi_preload": ["local.osdi", "$PDK_ROOT/a.osdi", "${PDK_ROOT}/b.osdi"]}
+
+    preload, environment = sim_osdi_settle.finalize_osdi_preload(
+        options,
+        "/nonexistent",
+        True,
+        ("/abs/local.osdi",),
+        {2: "env_var", 1: "pdk_root"},
+    )
+
+    assert preload == ("/abs/local.osdi",)
+    assert environment == [
+        {"entry": "$PDK_ROOT/a.osdi", "index": 1, "reason": "pdk_root"},
+        {"entry": "${PDK_ROOT}/b.osdi", "index": 2, "reason": "env_var"},
+    ]
+
+
+def test_osdi_runner_environment_fields_report_an_explicit_null_digest():
+    from klayout_tools import sim_osdi_settle
+
+    settled = [{"entry": "$PDK_ROOT/a.osdi", "index": 0, "reason": "env_var"}]
+
+    fields = sim_osdi_settle.osdi_runner_environment_fields(settled)
+
+    assert fields == {
+        "osdi_preload_runner_resolved": [
+            {
+                "entry": "$PDK_ROOT/a.osdi",
+                "index": 0,
+                "reason": "env_var",
+                "sha256": None,
+            }
+        ]
+    }
+    # The settled list itself is not mutated, and an on-host run reports
+    # nothing at all (`_settle_on_host` returns `[]`).
+    assert "sha256" not in settled[0]
+    assert sim_osdi_settle.osdi_runner_environment_fields([]) == {}

@@ -56,7 +56,24 @@
     ],
     "finding_count": 1
   },
-  "device_parameter_coverage": [],
+  "device_parameter_coverage": [
+    {
+      "class": "nfet",
+      "device_kind": "mos",
+      "layout_devices": 5,
+      "reference_devices": 5,
+      "compared": [
+        "L",
+        "W"
+      ],
+      "not_compared": [
+        {"parameter": "AS", "reason": "secondary"},
+        {"parameter": "AD", "reason": "secondary"},
+        {"parameter": "PS", "reason": "secondary"},
+        {"parameter": "PD", "reason": "secondary"}
+      ]
+    }
+  ],
   "mismatch_count": 3,
   "error_count": 0,
   "category_counts": {
