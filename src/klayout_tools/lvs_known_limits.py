@@ -6,6 +6,10 @@ from typing import Any
 
 from .lvs_mismatch import _mismatch, _sort_key
 
+#: Issue #4819: a mismatching FinFET compare whose top cell is a pinned
+#: unsupported ASAP7 cell (always a warning; never changes ``status``).
+CATEGORY_TOPOLOGY_KNOWN_LIMITATION = "topology.known_limitation"
+
 #: Issue #4819: ASAP7 RVT library cells whose drawn stack topology differs from
 #: the library CDL (11 folded-stack, 6 series-order). They stay
 #: ``status: "mismatch"`` -- nothing is turned green -- and ``klt lvs`` adds a
@@ -44,7 +48,7 @@ def note_known_limit(
         if kind:
             mismatches.append(
                 _mismatch(
-                    "topology.known_limitation",
+                    CATEGORY_TOPOLOGY_KNOWN_LIMITATION,
                     "warning",
                     f"cell '{cell}' is a known ASAP7 RVT library limitation: its "
                     f"drawn {kind} transistor topology differs from the library "
