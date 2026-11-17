@@ -21,7 +21,10 @@ Broker wire contract (the broker is not part of this repo):
   ``stat`` answers ``{exists, size}``. ``delete`` takes the ``stat`` body and
   answers any 200 JSON object; the broker owns authorization and retention.
 - A refusal is ``{"error", "message"}`` with a 4xx/5xx status, surfaced
-  verbatim as :class:`ArtifactError` code ``broker_refused``. HTTP 429 is
+  verbatim as :class:`ArtifactError` code ``broker_refused`` -- except that
+  a route-level 404/405/501 on ``delete`` (the broker has no ``/v1/delete``;
+  ``stat`` had already confirmed the object present) is re-raised as code
+  ``unsupported_operation``. HTTP 429 is
   retried with bounded backoff (honoring ``Retry-After``); when the retries run
   out it is code ``broker_rate_limited`` instead. There is no
   local fallback and no direct object-store path (no cloud SDK, no cloud
@@ -324,6 +327,35 @@ def _refusal(op: str, status: int, raw: bytes) -> ArtifactError:
         f"artifact broker refused {op} (HTTP {status}): {error}: {message}",
         "broker_refused",
         {"broker_status": status, "broker_error": error, "broker_message": message},
+    )
+
+
+#: Statuses that mean the broker has no ``/v1/delete`` route at all (vs. an
+#: authorization refusal or fleet trouble): route not found, method not
+#: allowed, or not implemented.
+UNIMPLEMENTED_DELETE_STATUSES = (404, 405, 501)
+
+
+def _unsupported_delete(exc: ArtifactError) -> ArtifactError:
+    """Re-raise a route-level ``delete`` refusal as ``unsupported_operation``.
+
+    ``stat`` already answered ``exists: true`` for the same object, so a 404
+    on the follow-up ``delete`` is the route being missing, not the object.
+    The refusal's ``broker_*`` details pass through so a caller can still
+    tell the broker exactly what it answered.
+    """
+    if (
+        exc.code != "broker_refused"
+        or exc.details.get("broker_status") not in UNIMPLEMENTED_DELETE_STATUSES
+    ):
+        return exc
+    status = exc.details["broker_status"]
+    return ArtifactError(
+        "the artifact broker does not implement the delete op "
+        f"(HTTP {status}: {exc.details.get('broker_error')}: "
+        f"{exc.details.get('broker_message')}); nothing was deleted",
+        "unsupported_operation",
+        dict(exc.details),
     )
 
 
@@ -971,6 +1003,14 @@ def delete_objects(
     referenced target refuses the whole batch with ``still_referenced``
     unless ``force_referenced``. An absent object is success. The client
     cannot enumerate the store, so only objects the caller names are touched.
+
+    A route-level refusal (404/405/501 on the ``delete`` call itself) means
+    the broker has no ``/v1/delete`` at all -- ``stat`` already reported the
+    object present -- and is re-raised as code ``unsupported_operation``;
+    other refusals (403 authorization, 5xx fleet trouble, ...) stay
+    ``broker_refused``. A stat→delete race (the object removed between the
+    two calls) would be misreported as it; acceptable, since such a race
+    leaves nothing to delete anyway.
     """
     unique: dict[tuple[str, str, str], FetchTarget] = {}
     for target in targets:
@@ -1009,10 +1049,13 @@ def delete_objects(
             )
             continue
         if stat.exists:
-            client.call(
-                "delete",
-                {"kind": target.kind, "repo": target.repo, "sha256": target.sha256},
-            )
+            try:
+                client.call(
+                    "delete",
+                    {"kind": target.kind, "repo": target.repo, "sha256": target.sha256},
+                )
+            except ArtifactError as exc:
+                raise _unsupported_delete(exc) from exc
         objects.append({**item, "status": "deleted" if stat.exists else "absent"})
     return {
         "status": "deleted" if yes else "dry_run",

@@ -957,12 +957,35 @@ def test_delete_keep_refuses_all_then_force_overrides(broker, report, tmp_path, 
 
 def test_delete_refusal_and_missing_selector(broker, report, tmp_path, capsys):
     manifest, sha = _stored(broker, report, tmp_path, capsys)
-    broker.refuse["delete"] = (404, "not_found", "no delete op")
+    # Route-level refusals (404/405/501) mean the broker has no /v1/delete.
+    for status in (404, 405, 501):
+        broker.objects[_key(REPO, sha)] = b"payload"  # re-store after each run
+        broker.refuse["delete"] = (
+            status,
+            "http_404",
+            "only POST /v1/{put,get,stat,list}",
+        )
+        code, _, err = _run(
+            ["artifact", "delete", sha, "--repo", REPO, "--yes", "--format", "json"],
+            capsys,
+        )
+        error = json.loads(err)["error"]
+        assert code == 1 and error["code"] == "unsupported_operation"
+        assert error["broker_status"] == status
+        assert error["broker_error"] == "http_404"
+        assert "does not implement" in error["message"]
+        assert "nothing was deleted" in error["message"]
+    # An authorization refusal (403) keeps broker_refused.
+    broker.objects[_key(REPO, sha)] = b"payload"
+    broker.refuse["delete"] = (403, "not_granted", "not your repo")
     code, _, err = _run(
         ["artifact", "delete", sha, "--repo", REPO, "--yes", "--format", "json"],
         capsys,
     )
-    assert code == 1 and json.loads(err)["error"]["code"] == "broker_refused"
+    error = json.loads(err)["error"]
+    assert code == 1 and error["code"] == "broker_refused"
+    assert error["broker_status"] == 403
+    broker.refuse.clear()
     code, _, err = _run(
         ["artifact", "delete", f"{manifest}#nope", "--yes", "--format", "json"],
         capsys,

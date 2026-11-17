@@ -3697,7 +3697,9 @@ def _add_artifact_parser(subparsers: argparse._SubParsersAction) -> None:
             "deleted. Each --keep MANIFEST protects the objects it names: a "
             "referenced target refuses the whole batch unless "
             "--force-referenced. An absent object is success. The broker "
-            "decides whether the caller may delete."
+            "must implement POST /v1/delete: a broker without it fails with "
+            "error.code unsupported_operation (exit 1) and nothing is "
+            "deleted; whether the caller may delete stays the broker's call."
         ),
     )
     delete_parser.add_argument(

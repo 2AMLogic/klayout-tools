@@ -16,7 +16,9 @@ Exit codes:
         bytes that did not re-hash to the manifest's digest and the key's
         (nothing is written) -- ``output.ERROR_EXIT_CODE``
     (delete: 0 - dry run reported, or objects deleted / already absent; 1 - a
-        referenced object, a broker refusal or an unreachable broker.)
+        referenced object, a broker refusal or an unreachable broker -- a
+        broker without a delete op (404/405/501) is code
+        ``unsupported_operation``, other refusals ``broker_refused``.)
     3 - verify only: ran, and at least one entry is missing or mismatched
 (2 is reserved for argparse usage errors.)
 """
