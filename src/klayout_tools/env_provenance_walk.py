@@ -46,17 +46,6 @@ def walk_string_fields(value: Any, path: str) -> Iterable[tuple[str, str]]:
         yield (path or "<root>"), value
 
 
-# Fields under ``environment.remote.worker_environment`` (or, for a sharded run,
-# ``environment.remote.fleet.<i>.worker_environment``) are observations of the
-# *remote worker host* (its PDK root, simulator path, banner), not paths of the
-# author's checkout, so a committer cannot make them non-reproducible (#5133).
-# Anchored at the envelope root so a ``worker_environment`` key elsewhere is
-# still linted.
-_REMOTE_WORKER_ENV_FIELD_RE = re.compile(
-    r"^environment\.remote\.(?:fleet\.\d+\.)?worker_environment(?:\.|$)"
-)
-
-
 def walk_lintable_string_fields(payload: Any) -> Iterable[tuple[str, str]]:
     """:func:`walk_string_fields` minus the remote-worker observations."""
     for field, text in walk_string_fields(payload, ""):

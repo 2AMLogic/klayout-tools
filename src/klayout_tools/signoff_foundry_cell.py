@@ -30,7 +30,6 @@ from typing import Any
 from ._provenance import cell_geometry_digest, sha256_file
 
 #: Failure tokens, listed in ``failure_detail.foundry_cell_exceptions.lapsed``.
-LAPSE_MALFORMED = "malformed_exception"
 LAPSE_LAYOUT_UNREADABLE = "layout_unreadable"
 LAPSE_CELL_HASH_MISMATCH = "cell_hash_mismatch"
 LAPSE_BARE_LAYOUT_HASH_MISMATCH = "bare_cell_layout_hash_mismatch"
