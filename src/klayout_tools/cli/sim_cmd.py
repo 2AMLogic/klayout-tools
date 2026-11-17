@@ -46,11 +46,10 @@ from typing import Any
 from ..env_provenance import render_path_field
 from ..op_sanity import OpSanityError, run_op_sanity
 from ..output_lock import OutputLockError
-from ..sim import SimError, load_request, run_sim
-from ..sim_batch_async import read_job_status
+from ..sim import SimError, run_sim
 from ..sim_set import DEFAULT_MAX_IN_FLIGHT, print_set_text, run_sim_set
 from .output import EXIT_USAGE_ERROR, emit_error, emit_success
-from .sim_job_text import _print_job_status_text as _print_job_status_text
+from .sim_job_status import _run_job_status as _run_job_status
 from .sim_measurement_text import print_measurement_head
 from .sim_pdk_text import _print_pdk as _print_pdk
 from .sim_pdk_text import _print_worker_pdk as _print_worker_pdk
@@ -200,48 +199,6 @@ def _exit_code_for(report: dict, deck_mode: bool) -> int:
         return EXIT_CORNER_ERRORED
     if report["status"] == "fail":
         return EXIT_MEASUREMENT_FAILED
-    return EXIT_PASS
-
-
-def _run_job_status(args: argparse.Namespace) -> int:
-    """``klt sim [REQUEST] --job-status JOB_ID``: one state read (issue #3073).
-
-    The request file is optional here (issue #5810): without one, the
-    bucket/region/profile resolve from the ``KLT_BATCH_*`` environment and
-    the fleet config, exactly as ``read_job_status`` resolves them.
-
-    Exit ``0`` whenever the read succeeded -- whatever state the *job* is in
-    (``failed`` included): the exit code reports this read, the ``state``
-    field reports the job. ``1`` for an unknown job id or a transport error.
-    """
-    if getattr(args, "submit_only", False):
-        return emit_error(
-            "sim",
-            "--job-status cannot be combined with --submit-only",
-            args.format,
-            exit_code=EXIT_USAGE_ERROR,
-        )
-    if getattr(args, "wait_for_capacity", None) is not None:
-        return emit_error(
-            "sim",
-            "--job-status cannot be combined with --wait-for-capacity: it "
-            "launches nothing",
-            args.format,
-            exit_code=EXIT_USAGE_ERROR,
-        )
-    if args.backend not in (None, "batch"):
-        return emit_error(
-            "sim",
-            f"--job-status reads a batch job (got --backend {args.backend})",
-            args.format,
-            exit_code=EXIT_USAGE_ERROR,
-        )
-    try:
-        request = load_request(args.request) if args.request is not None else {}
-        status = read_job_status(request, args.job_status)
-    except SimError as exc:
-        return emit_error("sim", str(exc), args.format, code=exc.code)
-    emit_success(status, args.format, _print_job_status_text)
     return EXIT_PASS
 
 
