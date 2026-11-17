@@ -14,6 +14,26 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed** (#5664, `klt lvs` `--engine klayout-runset`; no JSON field
+  changes, `schema_version` stays 3): a `pin.unmatched` finding whose pin
+  pair KLayout's own comparer graded `Match`/`MatchWithWarning` — a
+  reference pin with no layout counterpart, i.e. an *unlabelled* layout pin,
+  the shape a runset global like IHP sg13g2's `ignore_top_ports_mismatch`
+  exists to accept — is now disclosed with `severity: "warning"` instead of
+  `error`, so it no longer flips the wrapper's verdict to `mismatch`
+  (exit 3) on a compare the wrapped runset itself reports as PASS. The
+  finding stays listed in `mismatches[]` and `category_counts`, but
+  `error_count`/`category_error_counts` and the `status` now agree with the
+  engine's own grade; `counts.pins` still reports structural pin presence,
+  and a pin pair the comparer itself graded otherwise remains an error.
+- **`klt sim --attach <batch-shards.json>` accepts a map written by a
+  `--hosts N` / `remote.hosts: N` run** (#5777, 2026-11-17): `--attach` and
+  `--collect-partial` refused every `hosts != 1` request with "requires backend
+  'batch' with a single job", contradicting `--help`, and even once past that
+  gate a `hosts > 1` dispatch would have submitted a fresh fleet instead of
+  attaching. A shard map now attaches under any `hosts` (the shard count is read
+  from the map); a bare job id still requires `hosts = 1`. Additive: a call that
+  used to fail now succeeds.
 - **`klt sim --fail-fast-probe` reads the same `.spiceinit` as the corners it
   screens** (#6047, 2026-11-17): `_run_corner` pins the thread count by writing
   a run-directory `.spiceinit`, which *replaces* `$HOME/.spiceinit`, but the
@@ -24,6 +44,15 @@ not `klt --version`, if you need to detect this kind of drift. See
   When no pin applies (a single local corner with no explicit
   `options.threads_per_worker`) nothing is written, as before. No new request
   option or response field.
+- **`klt functional-verification` reports name what they simulated** (#5771,
+  2026-11-17): the report recorded the engine, results and environment but not
+  the simulated files, so an RTL run and a gate-level run of the same testbench
+  module differed only in `real_time_s` jitter. `environment.sources` is a new
+  additive array -- one `{path, scope, sha256}` entry per resolved source, in
+  build order (the `options.from_synthesize` netlist first), on both the cocotb
+  and the Verilog-top path. `path`/`scope` is the repo-relative shape, so a
+  source outside the repo reads `{"path": null, "scope": "external"}` and never
+  leaks a host path. No `schema_version` bump.
 - **Added** (#5808, additive — no `schema_version` bump): `klt gen` reports a
   top-level `subcell_naming_scheme` string id (`"core-suffix-v1"`: the PCell
   sub-cell is `<cell_name>__core`; `"pdk-cell-v1"`: sg13g2 `bjt_array` keeps
@@ -32,6 +61,7 @@ not `klt --version`, if you need to detect this kind of drift. See
   Sub-cell naming itself changed earlier (#4251) from KLayout's default
   variant name (e.g. `mos_array`, or `$N`-suffixed in older builds) to
   `<cell_name>__core`. The scheme id must change whenever the naming changes.
+
 
 - **`klt sim` refuses `measurements[].transfer` declared beside `noise`**
   (#5695, 2026-11-14): the mutually exclusive measurement forms each carried a
@@ -171,6 +201,21 @@ not `klt --version`, if you need to detect this kind of drift. See
   `docs/json-contract.md` and carries no bump of its own. `--format text`
   still prints a path (`<outside repo>` for an external input), never the
   envelope object.
+- **Changed** (#5666, emission-affecting, **no** `schema_version` bump): a
+  `klt lvs` report from `engine: "klayout-runset"` now emits `layout` as the
+  committable `{path, scope}` envelope `env_provenance.repo_relative_path()`
+  builds from the **resolved** layout path — the same file
+  `environment.layout_sha256` hashes (`{"path": "<repo-relative POSIX path>",
+  "scope": "repo"}` inside the invoking repo, `{"path": null, "scope":
+  "external"}` outside) — not the request's bare-string echo. No bump:
+  `docs/cli/lvs.md` already documents `layout` as an unconditional object at
+  `schema_version: 3`, so the string was the non-compliance and this is a
+  compliance fix. `reference` is unchanged and still the documented
+  bare-string echo. A newly produced report for an out-of-repo layout reads
+  `{"path": null, "scope": "external"}` and needs an explicit `--layout` to
+  `--rerun` (already-committed old reports still resolve: the committed-path
+  reader accepts the bare string). `--format text` (the default) no longer
+  crashes with an `AttributeError` on a runset report.
 
 - **`klt synthesize`'s `netlist_sha256` no longer depends on the build root
   or on `run_id`** (#5594, 2026-11-15): Yosys names function-derived nets

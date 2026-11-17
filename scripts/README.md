@@ -23,7 +23,7 @@ scripts/
   install-symbiyosys.sh          # install a pinned SymbiYosys (sby) + Bitwuzla backend for sequential equivalence checking (CI provisioning, #1312)
   install-magic.sh               # build + install a pinned, checksum-verified magic from source for the DRC/extract cross-validation oracle (#2014)
   fetch-magic-tech.sh            # generate the open_pdks magic decks (sky130A, gf180mcuC) that oracle runs against, from pinned open_pdks source (#2014)
-  _install_common.sh             # shared fetch/checksum/build boilerplate sourced by the install-*.sh scripts (#687)
+  _install_common.sh             # shared fetch/checksum/build boilerplate sourced by the install-*.sh and fetch-*.sh scripts (#687, #5635)
   ci-apt-install.sh              # mirror-resilient `apt-get update && apt-get install` for CI's package steps
   bootstrap-auditor-python.sh    # pinned, checksum-verified uv + managed CPython + host-local .venv + `klt` startup smoke for a Python-less Linux audit host (#2829)
   release_prep.py                # mechanical release edits for release.yml (#4920)

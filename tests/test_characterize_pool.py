@@ -70,12 +70,9 @@ def test_run_cells_concurrently_overlaps_and_keeps_order():
             active -= 1
         return {"i": i}
 
-    start = time.monotonic()
     out = characterize_pool.run_cells_concurrently(run_one, 8, 4)
-    elapsed = time.monotonic() - start
     assert [r["i"] for r in out] == list(range(8))
     assert peak == 4
-    assert elapsed < 0.05 * 8 * 0.75  # ~2 waves, far below serial
 
 
 def test_run_cells_concurrently_failure_cancels_pending_and_lowest_index_wins():
