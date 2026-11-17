@@ -43,6 +43,8 @@ from __future__ import annotations
 import os
 import re
 
+from ._text import read_text as _read_text
+
 #: One SDF hierarchical path token: escaped characters or anything that is
 #: neither whitespace nor a paren.
 _SDF_PATH_TOKEN = r"((?:\\.|[^\s()\\])+)"
@@ -162,14 +164,6 @@ def _rewrite_sdf_paths(text: str, divider: str, mapping: dict[str, str]) -> str:
         lambda m: m.group(1) + _path(m.group(2)) + m.group(3) + _path(m.group(4)),
         text,
     )
-
-
-def _read_text(path: str) -> str | None:
-    try:
-        with open(path, encoding="utf-8", errors="replace") as handle:
-            return handle.read()
-    except OSError:
-        return None
 
 
 def _rewrite_sources(

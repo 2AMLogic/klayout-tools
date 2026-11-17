@@ -1555,7 +1555,6 @@ def run_lvs(
         combine_per_circuit_warnings,
     )
     reference_netlist_path = ref_stage.reference_netlist_path
-    reference_echo = ref_stage.reference_echo
     reference_form = ref_stage.reference_form
     anchor_top_level_pins = ref_stage.anchor_top_level_pins
     power_connectivity = ref_stage.power_connectivity
@@ -2016,7 +2015,6 @@ def run_lvs(
         layout_circuit=layout_circuit,
         layout_abstracted_cells=layout_abstracted_cells,
         reference_circuit=reference_circuit,
-        reference_echo=reference_echo,
         reference_form=reference_form,
         reference_spec=reference_spec,
         reference_pdk_info=reference_pdk_info,
