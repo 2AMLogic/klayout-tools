@@ -86,6 +86,53 @@ def pin_disclosure(
     return detail
 
 
+#: ``citation.input_verified_note`` for a ``generic``/``model-run`` envelope
+#: that declares ``provenance.input.content_hash`` with no usable
+#: ``provenance.input.path`` (issue #6403): the declared hash is silently
+#: never re-hashed, and ``input_verified: null`` also means "nothing to
+#: hash", so it cannot say "declared, never checked" on its own.
+DECLARED_HASH_UNBOUND = "declared_hash_unbound"
+
+
+def _usable_input_path(path: Any) -> bool:
+    """Whether a ``provenance.input.path`` value is a shape the opt-in
+    branch (issue #2403) can even attempt: a non-empty string, or a
+    ``{path, scope: "repo"}`` object -- the same shapes
+    ``signoff._generic_binding_path`` accepts, so this note cannot fire on
+    a declaration the resolution machinery treats as a real (if
+    unsuccessful) attempt."""
+    if isinstance(path, str) and path:
+        return True
+    return isinstance(path, Mapping) and path.get("scope") == "repo"
+
+
+def declared_hash_unbound_disclosure(
+    resolution: Mapping[str, Any],
+) -> dict[str, str]:
+    """Issue #6403: a ``generic``/``model-run`` envelope that declares
+    ``provenance.input.content_hash`` (non-empty string) with no usable
+    ``provenance.input.path`` and no ``provenance.input.paths`` set has
+    that hash silently never re-hashed -- the citation renders
+    ``input_verified: null`` exactly like one declaring no hash at all.
+    Returns ``{"input_verified_note": DECLARED_HASH_UNBOUND}`` so the
+    declared-but-never-checked case is visible beside the unchanged
+    ``null``; ``{}`` (no key) for every envelope the note does not
+    describe. Disclosure only, like every citation field -- never
+    consulted by any grading rule."""
+    if resolution["kind"] not in ("generic", "model-run"):
+        return {}
+    provenance = resolution["envelope"].get("provenance")
+    input_block = provenance.get("input") if isinstance(provenance, Mapping) else None
+    if not isinstance(input_block, Mapping) or "paths" in input_block:
+        return {}
+    declared = input_block.get("content_hash")
+    if not isinstance(declared, str) or not declared:
+        return {}
+    if _usable_input_path(input_block.get("path")):
+        return {}
+    return {"input_verified_note": DECLARED_HASH_UNBOUND}
+
+
 def rehash_evidence_file(
     check_kind: str,
     spec: Mapping[str, Any],

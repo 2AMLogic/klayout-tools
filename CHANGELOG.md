@@ -14,6 +14,20 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt signoff`: a declared-but-never-checked evidence hash is now
+  disclosed** (#6403, 2026-11-17). A `generic`/`model-run` envelope that
+  records `provenance.input.content_hash` with no usable
+  `provenance.input.path` (or `paths` set) has that hash silently never
+  re-hashed: its `met` citation rendered `input_verified: null`
+  identically to an envelope declaring no hash at all. Those citations now
+  carry the additive `input_verified_note: "declared_hash_unbound"`
+  (`input_verified` unchanged at `null`, no item verdict moves, no
+  `schema_version` bump), and `--format text` prints an
+  `input note: declared_hash_unbound -- …` line under the `input:` one.
+  Documented in `docs/cli/signoff.md`'s `input_verified` table and the
+  generic-evidence section, and in `docs/json-contract.md`'s
+  `provenance.input` notes.
+
 - **`klt drc` gf180mcu deck: `DF.1c` (MOSCAP COMP min width) is now checked,
   and `comp.width.mv.1` exempts `MVSD`/`MVPSD`-marked LDMOS drains** (#5719,
   2026-11-17). New rule `comp.width.moscap.1` (`DF.1c`, 1.0 um,
