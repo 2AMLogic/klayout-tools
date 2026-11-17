@@ -181,7 +181,7 @@
     },
     {
       "path": "src/klayout_tools/cli/extract_cmd.py",
-      "lines": 1188
+      "lines": 918
     },
     {
       "path": "src/klayout_tools/cli/parser.py",
@@ -193,7 +193,7 @@
     },
     {
       "path": "src/klayout_tools/cli/signoff_cmd.py",
-      "lines": 1154
+      "lines": 1099
     },
     {
       "path": "src/klayout_tools/cli/sim_cmd.py",
@@ -301,7 +301,7 @@
     },
     {
       "path": "src/klayout_tools/extract_batch.py",
-      "lines": 575
+      "lines": 542
     },
     {
       "path": "src/klayout_tools/extract_finfet.py",
@@ -457,7 +457,7 @@
     },
     {
       "path": "src/klayout_tools/netlist_batch.py",
-      "lines": 824
+      "lines": 753
     },
     {
       "path": "src/klayout_tools/netlist_capacitor_recovery.py",
@@ -569,7 +569,7 @@
     },
     {
       "path": "src/klayout_tools/signoff.py",
-      "lines": 7310
+      "lines": 7281
     },
     {
       "path": "src/klayout_tools/signoff_attest.py",
@@ -581,7 +581,7 @@
     },
     {
       "path": "src/klayout_tools/signoff_power_delivery.py",
-      "lines": 2013
+      "lines": 2009
     },
     {
       "path": "src/klayout_tools/sim.py",
@@ -997,7 +997,7 @@
     },
     {
       "path": "tests/test_post_route_sta.py",
-      "lines": 7821
+      "lines": 7802
     },
     {
       "path": "tests/test_power.py",
