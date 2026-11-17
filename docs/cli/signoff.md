@@ -1806,6 +1806,26 @@ that a resync does not touch may still be listed even if Loom also installs
 other workflows. `--attest` does not hash "the file minus managed blocks";
 the fix is to list fewer files.
 
+**Listed files must be stable by construction (issue #5603).** A `hygiene`
+path is bound by its full bytes, so a listed file must change only when the
+owner means to change the evidence. A file that is also a living status
+surface — a README carrying a status paragraph, current counts, or "what's
+new" notes — churns on routine documentation passes, and each such edit
+re-renders the envelope stale with no agent able to discharge it (the
+re-attest rule below). Keep that content in an uninventoried file (for
+example `STATUS.md`) and link to it; the inventoried README carries only the
+durable evidence — what the block is, the spec table, how to reproduce
+results — which is exactly what item 10 grades
+(`docs/design-evidence-tiers.md`).
+
+**No durable-portion binding (issue #5603).** `--attest` cannot pin part of
+a file. Marker-region hashing and a companion-checklist inventory were both
+considered and rejected: a region hash reintroduces exactly the partial
+drift `--check` exists to catch, and a companion checklist would displace
+the README as the pinned artifact item 10 names. The answer to a churning
+file is the same as for resync-managed paths above — list fewer files: move
+the churn out and list a stable file instead.
+
 **Migration for existing item 10 inventories:** remove resync-managed paths
 from `hygiene`, then re-attest once and commit the new envelope
 (`klt signoff --attest 10 --inventory <inv> -o <envelope>`). That re-attest
@@ -1820,7 +1840,12 @@ attested and when is the git/PR record of the commit that changed
 for the repo owner. An agent must not regenerate an envelope to clear a red
 `signoff` or CI check, and an envelope diff inside an unrelated PR is a
 review red flag. If a stale envelope is blocking CI, escalate it to the
-owner instead.
+owner instead. The rule bars exactly those two things (issue #5603):
+regenerating an envelope to clear a red check, and an envelope diff inside
+an *unrelated* PR. A PR whose declared subject **is** the hygiene-evidence
+edit may carry the re-attested envelope: an agent may open such a PR, but
+the owner must review and approve it, the PR body must name the hygiene
+files changed, and an agent must not merge it itself.
 
 #### Item 2: attest a committed layout stream (`--input`, issue #4188)
 
