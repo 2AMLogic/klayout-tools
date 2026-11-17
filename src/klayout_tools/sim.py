@@ -4979,11 +4979,11 @@ def _resolve_param_file(points: list[CornerPoint], models: Any, request_dir: str
 def _resolve_lib_ref(lib: str, models: dict[str, Any], request_dir: str) -> str:
     """Apply ``models.lib``'s own resolution rule (see
     :func:`_resolve_models_lib`) to one library reference, without the
-    existence check -- shared with issue #2522's per-section corner libraries
-    so a ``corners.process`` bundle's ``{"lib": ...}`` entry resolves
-    *identically* to the ``models.lib`` it stands in for: joined against the
-    resolved PDK variant directory when the request names a PDK, otherwise
-    ``$VAR``/``~``-expanded and joined against the request file's directory.
+    existence check -- shared with #2522's per-section corner libraries
+    so a ``corners.process`` ``{"lib": ...}`` entry resolves *identically*:
+    joined against the layout-aware variant directory (``variant_dir_of``;
+    a flat install's variant *is* the root, #522/#6256) when the request
+    names a PDK, else ``$VAR``/``~``-expanded against the request dir.
     """
     pdk_variant = models.get("pdk")
     pdk_root = models.get("pdk_root")
@@ -4992,10 +4992,6 @@ def _resolve_lib_ref(lib: str, models: dict[str, Any], request_dir: str) -> str:
             resolution = find_pdk(variant=pdk_variant, root=pdk_root)
         except PdkNotFoundError as exc:
             raise SimError(str(exc)) from exc
-        # A flat single-PDK install (issue #522) resolves ``variant`` to the
-        # root itself, so the variant directory is layout-aware
-        # (:func:`klayout_tools.pdk.variant_dir_of`), not ``root/<variant>``
-        # -- that join is a phantom path there (issue #6256).
         variant_dir = variant_dir_of(resolution) or resolution["root"]
         return lib if os.path.isabs(lib) else os.path.join(variant_dir, lib)
     return _resolve_relative(lib, request_dir)
