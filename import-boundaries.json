@@ -720,6 +720,7 @@
         "klayout_tools.signoff_attest_live",
         "klayout_tools.signoff_attest_stream",
         "klayout_tools.signoff_attest_text",
+        "klayout_tools.signoff_coverage_disclosure",
         "klayout_tools.signoff_derived_rows",
         "klayout_tools.signoff_details",
         "klayout_tools.signoff_envelopes",
