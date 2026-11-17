@@ -35,7 +35,7 @@ from test_netlist import (  # noqa: F401  (argv_log is a fixture)
     _write_stub,
     argv_log,
 )
-from test_netlist_batch import (  # noqa: F401  (some are used by name only)
+from test_netlist_batch import (
     RUNNER_TREE,
     _argv,
     _runner_outputs,
