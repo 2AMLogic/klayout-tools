@@ -26,6 +26,23 @@ not `klt --version`, if you need to detect this kind of drift. See
   gains an additive `pad_sides_um` map (`"layer/datatype"` -> pad side
   certified) so a caller drawing the ladder itself draws exactly the checked
   footprint. `schema_version` is unchanged.
+- **`klt env-provenance lint-envelope --json-stream` lints concatenated JSON
+  document streams** (#5887, 2026-11-17): each FILE argument is parsed as a
+  single JSON document, so a file holding several whitespace-separated
+  documents (e.g. one `json.dumps(...)` printed per record) failed with
+  `Extra data` / `... is not valid JSON` -- indistinguishable at the CLI
+  surface from a corrupt file, leaving such repositories no `lint-envelope`
+  validity gate. The new opt-in `--json-stream` flag reads each FILE as one
+  or more whitespace-separated JSON documents (`raw_decode` walk; no
+  separator required between documents, bare strings/numbers allowed -- a
+  document stream, not JSON Lines) and runs the lint over every document;
+  per-document findings gain an additive 0-based `document` key, `field`
+  stays relative to its own document, and the text report names the index
+  (`FILE[i]: field: match`). Default mode is unchanged: single-document
+  parse, no `document` key, exit `1` on a concatenated stream. A truncated
+  or corrupt document anywhere in the stream, or an empty/whitespace-only
+  FILE, is still exit `1` under `--json-stream` -- never a silent clean
+  verdict. No `schema_version` changes.
 - **`openroad` Docker wrapper keeps `/tmp` mounted when `$TMPDIR` differs**
   (issue #5878, 2026-11-17): the wrapper `scripts/install-openroad-docker.sh`
   writes, mounted only `${TMPDIR:-/tmp}`, so while `$TMPDIR` was unset (or
