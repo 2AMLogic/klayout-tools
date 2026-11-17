@@ -6,9 +6,14 @@ import pytest
 
 from klayout_tools.cli import main
 from klayout_tools.cli.output import render_rerun_drift
-from klayout_tools.signoff import _check_signoff_report, build_tier_report
+from klayout_tools.signoff import (
+    _check_signoff_report,
+    build_tier_report,
+    check_tier_report,
+)
 from test_signoff import (
     DRC_CLEAN_ENVELOPE,
+    _committed_from_other_provisioning_route,
     _manifest,
     _write,
 )
@@ -104,6 +109,26 @@ def test_running_tarball_identity_is_unverifiable():
     result = _check_signoff_report("r.json", _report(), fresh)
     assert result["build_skew"]["state"] == "unverifiable"
     assert result["status"] == "match"
+
+
+def test_check_tier_report_marks_another_provisioning_route_unverifiable(tmp_path):
+    """End to end through `check_tier_report`: a report committed by a
+    source-tarball install of the same commit (the `+unknown` build block of
+    test_signoff.py's provisioning-route test) still verifies as `"match"`,
+    and its report-only `build_skew` is `unverifiable` -- never `build_only`
+    (which would assert "a different klt build" the committed side records no
+    git facts to support) and never `same`."""
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    manifest = _manifest(evidence={"3": drc_path})
+    committed_path = _committed_from_other_provisioning_route(
+        tmp_path, build_tier_report(manifest), "committed.json"
+    )
+
+    result = check_tier_report(committed_path, manifest)
+
+    assert result["status"] == "match"
+    assert result["drift"] == []
+    assert result["build_skew"]["state"] == "unverifiable"
 
 
 def test_skew_does_not_mask_real_drift():

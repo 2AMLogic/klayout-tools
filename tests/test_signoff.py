@@ -13818,9 +13818,6 @@ def test_check_matches_a_report_committed_by_another_provisioning_route(tmp_path
 
     result = check_tier_report(committed_path, manifest)
 
-    # Issue #5852: the `+unknown` committed identity makes the report-only
-    # `build_skew` `unverifiable`, never an asserted difference (the state
-    # vocabulary is pinned in test_signoff_check_build_skew.py).
     assert result == {
         "schema_version": 1,
         "mode": "check",
@@ -13832,7 +13829,6 @@ def test_check_matches_a_report_committed_by_another_provisioning_route(tmp_path
         "build_skew": result["build_skew"],
         "fresh": fresh,
     }
-    assert result["build_skew"]["state"] == "unverifiable"
 
 
 def test_check_reports_drift_in_a_graded_field(tmp_path):
@@ -13874,6 +13870,26 @@ def test_check_reports_drift_when_the_cited_evidence_itself_changed(tmp_path):
     drifted_fields = {entry["field"] for entry in result["drift"]}
     assert "t1_met_count" in drifted_fields
     assert any(field.startswith("items.2.") for field in drifted_fields)
+
+
+def test_check_verifies_a_report_predating_the_build_block(tmp_path):
+    """A report committed before issue #2176 (no `build` key at all) still
+    verifies on its graded content -- an excluded path is skipped whether or
+    not either side carries it, so its absence is not one spurious drift
+    entry."""
+    drc_path, _ = _drc_evidence_beside_its_layout(tmp_path)
+    manifest = _manifest(evidence={"3": drc_path})
+    legacy = {
+        key: value
+        for key, value in build_tier_report(manifest).items()
+        if key != "build"
+    }
+    committed_path = _write(tmp_path, "committed.json", legacy)
+
+    result = check_tier_report(committed_path, manifest)
+
+    assert result["status"] == "match"
+    assert result["drift"] == []
 
 
 def test_check_fleet_matches_across_provisioning_routes_and_names_real_drift(

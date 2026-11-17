@@ -3089,9 +3089,13 @@ klt signoff --manifest manifest.json --check reports/block.signoff.json \
   install — so neither `"same"` nor a difference state is an assertion the
   evidence supports; two `+unknown` builds that agree on every recorded
   field would otherwise read as `"same"`) or `"unknown"` (the committed
-  report has no `build` block). `fields` lists each differing field, kept
-  even under `"unverifiable"` — there it is what the recorded values say,
-  not a claim. It never changes `status` or the exit code, and `--format
+  report has no `build` block). `"unverifiable"` takes precedence over
+  `"build_only"` and `"ruleset"`: a `+unknown` side that also moved
+  `build.grading_ruleset_id` reads `"unverifiable"`, so a consumer that
+  alarms specifically on a ruleset move must also look for
+  `build.grading_ruleset_id` in `fields`. `fields` lists each differing
+  field, kept even under `"unverifiable"` — there it is what the recorded
+  values say, not a claim. It never changes `status` or the exit code, and `--format
   text` prints one `build_skew:` line when the state is `build_only`,
   `ruleset` or `unverifiable`. This one field is the whole report-only
   story of the excluded `build` block: gate on `.build_skew.state` — a
