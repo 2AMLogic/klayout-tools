@@ -549,7 +549,7 @@
     },
     {
       "path": "src/klayout_tools/probit.py",
-      "lines": 838
+      "lines": 837
     },
     {
       "path": "src/klayout_tools/remote_fleet.py",
@@ -629,7 +629,7 @@
     },
     {
       "path": "src/klayout_tools/sim_twoport.py",
-      "lines": 657
+      "lines": 651
     },
     {
       "path": "src/klayout_tools/sim_validate.py",
