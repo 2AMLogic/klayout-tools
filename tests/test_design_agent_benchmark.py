@@ -69,7 +69,7 @@ def _have_sky130_ngspice_pdk() -> bool:
         from klayout_tools.pdk import find_pdk
 
         resolution = find_pdk(variant="sky130A")
-    except Exception:  # noqa: BLE001 -- any resolution failure means "no"
+    except Exception:  # -- any resolution failure means "no"
         return False
     variant_dir = Path(resolution["root"]) / resolution["variant"]
     return (variant_dir / "libs.tech" / "ngspice" / "sky130.lib.spice").is_file()

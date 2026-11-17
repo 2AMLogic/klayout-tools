@@ -82,7 +82,11 @@
       "description": "`klt components` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.components_cmd",
-        "klayout_tools.components"
+        "klayout_tools.cli.parsers.components",
+        "klayout_tools.components",
+        "klayout_tools.components_errors",
+        "klayout_tools.components_probe",
+        "klayout_tools.components_specs"
       ]
     },
     "corner_matrix": {
@@ -250,6 +254,7 @@
         "klayout_tools.extract_cap_top_plate",
         "klayout_tools.extract_passive_regions",
         "klayout_tools.extract_progress",
+        "klayout_tools.extract_dead_metal",
         "klayout_tools.extract_report",
         "klayout_tools.extract_resistance_graph",
         "klayout_tools.extract_spef",
@@ -325,6 +330,7 @@
         "klayout_tools.gen_pcells.esd_device",
         "klayout_tools.gen_pcells.guard_ring",
         "klayout_tools.gen_pcells.pdk_cell",
+        "klayout_tools.gen_pcells._common_params",
         "klayout_tools.gen_pcells._mos_array_shapes",
         "klayout_tools.gen_pcells.mos_array",
         "klayout_tools.gen_pcells.res_array",
@@ -467,6 +473,7 @@
       "description": "`klt mcp` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.mcp_cmd",
+        "klayout_tools.mcp_resources",
         "klayout_tools.mcp_server",
         "klayout_tools.mcp_tools"
       ]
@@ -484,6 +491,7 @@
       "description": "`klt netlist` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools._capacitor_mf",
+        "klayout_tools._diode_card",
         "klayout_tools.cli.netlist_cmd",
         "klayout_tools.cli.parser_netlist",
         "klayout_tools.netlist",
@@ -530,6 +538,7 @@
         "klayout_tools.pdk_cells",
         "klayout_tools.pdk_compat",
         "klayout_tools.pdk_descriptor",
+        "klayout_tools.pdk_diode_models",
         "klayout_tools.pdk_families",
         "klayout_tools.pdk_models",
         "klayout_tools.pdk_native_drc",
@@ -579,7 +588,8 @@
         "klayout_tools.place_and_route_route_overflow",
         "klayout_tools.place_and_route_script",
         "klayout_tools.place_and_route_sta",
-        "klayout_tools.place_and_route_via_pad"
+        "klayout_tools.place_and_route_via_pad",
+        "klayout_tools.place_and_route_via_tip"
       ]
     },
     "power": {
@@ -621,6 +631,7 @@
       "modules": [
         "klayout_tools.cli.ring_check_cmd",
         "klayout_tools.ring_check",
+        "klayout_tools.ring_check_enclosed",
         "klayout_tools.seal_ring_check",
         "klayout_tools.seal_ring_rules"
       ]
@@ -661,8 +672,10 @@
         "klayout_tools._request_fields",
         "klayout_tools._provenance",
         "klayout_tools._report_verify",
+        "klayout_tools._report_verify_exclude",
         "klayout_tools._report_verify_hints",
         "klayout_tools._spice_number",
+        "klayout_tools._spice_tokens",
         "klayout_tools._text",
         "klayout_tools._unionfind",
         "klayout_tools._vendor",
@@ -695,20 +708,27 @@
         "klayout_tools.cli.signoff_cmd",
         "klayout_tools.signoff",
         "klayout_tools.signoff_attest",
+        "klayout_tools.signoff_attest_build",
         "klayout_tools.signoff_attest_carry",
+        "klayout_tools.signoff_attest_drift",
         "klayout_tools.signoff_attest_input",
         "klayout_tools.signoff_attest_item9",
+        "klayout_tools.signoff_attest_live",
         "klayout_tools.signoff_attest_stream",
         "klayout_tools.signoff_attest_text",
         "klayout_tools.signoff_derived_rows",
         "klayout_tools.signoff_details",
         "klayout_tools.signoff_envelopes",
         "klayout_tools.signoff_evidence_pin",
+        "klayout_tools.signoff_fleet",
+        "klayout_tools.signoff_fleet_check",
+        "klayout_tools.signoff_fleet_reduction",
         "klayout_tools.signoff_foundry_cell",
         "klayout_tools.signoff_generator_batch",
         "klayout_tools.signoff_multi_member",
         "klayout_tools.signoff_na",
         "klayout_tools.signoff_nothing_checked",
+        "klayout_tools.signoff_output",
         "klayout_tools.signoff_power_delivery",
         "klayout_tools.signoff_power_delivery_substrate",
         "klayout_tools.signoff_runset",
@@ -770,6 +790,7 @@
         "klayout_tools.sim_deck_expand",
         "klayout_tools.sim_decks",
         "klayout_tools.sim_decks_split",
+        "klayout_tools.sim_decks_staging",
         "klayout_tools.sim_echo_messages",
         "klayout_tools.sim_energy",
         "klayout_tools.sim_environment_report",
@@ -780,6 +801,7 @@
         "klayout_tools.sim_forms",
         "klayout_tools.sim_injected",
         "klayout_tools.sim_merge",
+        "klayout_tools.sim_mismatch_declarations",
         "klayout_tools.sim_mismatch_gate",
         "klayout_tools.sim_measurement_results",
         "klayout_tools.sim_noise",
@@ -790,6 +812,7 @@
         "klayout_tools.sim_osdi_pin",
         "klayout_tools.sim_osdi_settle",
         "klayout_tools.sim_pdk_ambiguity",
+        "klayout_tools.sim_pin_settle",
         "klayout_tools.sim_peak_rss",
         "klayout_tools.sim_plan",
         "klayout_tools.sim_plot",
@@ -894,6 +917,7 @@
         "klayout_tools.synthesize",
         "klayout_tools.synthesize_abc_timing",
         "klayout_tools.synthesize_arithmetic",
+        "klayout_tools.synthesize_library_hint",
         "klayout_tools.synthesize_memory",
         "klayout_tools.synthesize_netlist_normalize",
         "klayout_tools.synthesize_timeout",
@@ -1000,6 +1024,11 @@
       "consumer": "array_check",
       "exporter": "cli-infra",
       "reason": "CLI adapter uses the shared output envelope and --layers parser, as every verb does."
+    },
+    {
+      "consumer": "array_check",
+      "exporter": "env_provenance",
+      "reason": "`klt array-check` echoes its layout input as env_provenance's committable {path, scope} envelope (issue #5788)."
     },
     {
       "consumer": "fill",
@@ -1492,6 +1521,11 @@
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
     },
     {
+      "consumer": "ring_check",
+      "exporter": "env_provenance",
+      "reason": "`klt ring-check` echoes its layout input as env_provenance's committable {path, scope} envelope (issue #5650)."
+    },
+    {
       "consumer": "seam_check",
       "exporter": "cli-infra",
       "reason": "Verb CLI adapter uses the shared output envelope helpers, as every other verb does."
@@ -1925,12 +1959,6 @@
     },
     {
       "consumer": "klayout_tools.netlist_batch",
-      "exporter": "klayout_tools._provenance",
-      "symbol": "_klt_version",
-      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
-    },
-    {
-      "consumer": "klayout_tools.netlist_batch",
       "exporter": "klayout_tools.sim_batch",
       "symbol": "_batch_environment",
       "reason": "Issue #3182: the netlist batch backend reuses sim_batch's job-contract helpers as they are (one transport, one config resolver, one preflight)."
@@ -1951,12 +1979,6 @@
       "consumer": "klayout_tools.netlist_batch",
       "exporter": "klayout_tools.sim_batch",
       "symbol": "_read_stderr_envelope",
-      "reason": "Issue #3182: the netlist batch backend reuses sim_batch's job-contract helpers as they are (one transport, one config resolver, one preflight)."
-    },
-    {
-      "consumer": "klayout_tools.netlist_batch",
-      "exporter": "klayout_tools.sim_batch",
-      "symbol": "_runner_preflight_script",
       "reason": "Issue #3182: the netlist batch backend reuses sim_batch's job-contract helpers as they are (one transport, one config resolver, one preflight)."
     },
     {
@@ -2076,12 +2098,6 @@
     {
       "consumer": "klayout_tools.place_and_route_batch",
       "exporter": "klayout_tools.sim_batch",
-      "symbol": "_runner_preflight_script",
-      "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
-    },
-    {
-      "consumer": "klayout_tools.place_and_route_batch",
-      "exporter": "klayout_tools.sim_batch",
       "symbol": "_status_exit_code",
       "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
     },
@@ -2104,18 +2120,6 @@
       "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
     },
     {
-      "consumer": "klayout_tools.place_and_route_batch",
-      "exporter": "klayout_tools._provenance",
-      "symbol": "_klt_version",
-      "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
-    },
-    {
-      "consumer": "klayout_tools.signoff_generator_batch",
-      "exporter": "klayout_tools._provenance",
-      "symbol": "_klt_version",
-      "reason": "Issue #3289: the signoff generator adapter reuses the batch job-contract helpers as they are (one transport, one config resolver, one preflight), as klayout_tools.netlist_batch does."
-    },
-    {
       "consumer": "klayout_tools.signoff_generator_batch",
       "exporter": "klayout_tools.netlist_batch",
       "symbol": "_tracked_files",
@@ -2125,12 +2129,6 @@
       "consumer": "klayout_tools.signoff_generator_batch",
       "exporter": "klayout_tools.netlist_batch",
       "symbol": "_select_files",
-      "reason": "Issue #3289: the signoff generator adapter reuses the batch job-contract helpers as they are (one transport, one config resolver, one preflight), as klayout_tools.netlist_batch does."
-    },
-    {
-      "consumer": "klayout_tools.signoff_generator_batch",
-      "exporter": "klayout_tools.sim_batch",
-      "symbol": "_runner_preflight_script",
       "reason": "Issue #3289: the signoff generator adapter reuses the batch job-contract helpers as they are (one transport, one config resolver, one preflight), as klayout_tools.netlist_batch does."
     },
     {
@@ -2238,20 +2236,8 @@
     {
       "consumer": "klayout_tools.extract_batch",
       "exporter": "klayout_tools.sim_batch",
-      "symbol": "_runner_preflight_script",
-      "reason": "Issue #4613: `klt extract --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
-    },
-    {
-      "consumer": "klayout_tools.extract_batch",
-      "exporter": "klayout_tools.sim_batch",
       "symbol": "_status_exit_code",
       "reason": "Issue #4613: `klt extract --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
-    },
-    {
-      "consumer": "klayout_tools.extract_batch",
-      "exporter": "klayout_tools._provenance",
-      "symbol": "_klt_version",
-      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
     },
     {
       "consumer": "klayout_tools.route_labelled",
@@ -2342,6 +2328,12 @@
       "exporter": "klayout_tools.sim_batch",
       "symbol": "_default_batch_job_timeout_s",
       "reason": "Issue #5238: extract_batch and netlist_batch each wrapped this sim_batch timeout formula; the shared job_timeout_seconds helper now owns that one call so the backends cannot drift. Promote to a public name when sim_batch is next split."
+    },
+    {
+      "consumer": "klayout_tools._batch_common",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_runner_preflight_script",
+      "reason": "Issue #5654: all five batch backends wrapped this one preflight call in their own job-command assembler, and had already drifted (one of the five never translated its SimError). build_job_command now owns the single call, retiring the extract/netlist/place-and-route/signoff-generator grants for it. Promote to a public name when sim_batch is next split."
     },
     {
       "consumer": "klayout_tools.pex_dry_run",

@@ -16,6 +16,7 @@ from klayout_tools import sim_batch_async as sba
 from klayout_tools.cli import main
 from test_sim_batch import (
     FAKE_BUCKET,
+    INPUTS_UPLOAD_ARGV,
     _batch_request,
     _ceiling_request,
     _Clock,
@@ -217,7 +218,7 @@ def test_submit_status_attach_round_trip(tmp_path, monkeypatch):
 
     job_id = _submit(path)["job_id"]
     launches = len(runner.argvs_matching("launch"))
-    uploads = [a for a in runner.argvs_matching("s3", "cp") if "inputs/" in " ".join(a)]
+    uploads = runner.argvs_matching("s3", "cp", INPUTS_UPLOAD_ARGV)
     assert uploads
 
     # An interrupted job is reported, and nothing re-launches or re-uploads.
@@ -234,9 +235,7 @@ def test_submit_status_attach_round_trip(tmp_path, monkeypatch):
 
     assert report["environment"]["remote"]["job_id"] == job_id
     assert len(runner.argvs_matching("launch")) == launches
-    assert [
-        a for a in runner.argvs_matching("s3", "cp") if "inputs/" in " ".join(a)
-    ] == uploads
+    assert runner.argvs_matching("s3", "cp", INPUTS_UPLOAD_ARGV) == uploads
 
 
 def test_cli_job_status_unknown_job_exits_1_with_code(tmp_path, monkeypatch, capsys):
