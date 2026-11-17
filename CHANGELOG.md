@@ -24,6 +24,25 @@ not `klt --version`, if you need to detect this kind of drift. See
   When no pin applies (a single local corner with no explicit
   `options.threads_per_worker`) nothing is written, as before. No new request
   option or response field.
+- **`klt signoff --attest 2 --check` re-checks the committed regeneration claim
+  without the flags** (#5572 / PR #5611, 2026-11-16): `provenance.regeneration`
+  is part of what `--check` compares, but the fresh envelope was built only from
+  its command-line arguments — so a flag-less `--check` of a committed item-2
+  envelope carrying a regeneration claim reported `drifted` (exit 3) on
+  `provenance.regeneration` unless `--generator` / `--regenerated-hash` (and
+  `--hash-kind` for a geometry claim) were retyped verbatim, meaning the claim
+  lived a second time outside the evidence chain and an item-2 envelope could
+  not be verified from the repo alone. A flag-less `--check` now adopts the
+  committed claim as recorded and reports `match` (exit 0). Passing any of the
+  three flags is unchanged and is now an explicit cross-check: a value
+  differing from the committed claim, or flags against a claim-less envelope,
+  still reports drift (exit 3). No JSON field is added, renamed or removed and
+  no `schema_version` changes; an envelope written by the previous version
+  re-checks clean without being re-attested. **Migration:** if your CI treated
+  exit 3 from a flag-less `--check` as "needs re-attest", a fresh repository no
+  longer triggers that; and if you worked around the old behaviour by copying
+  the committed hash into the `--check` invocation, that duplicate literal can
+  now be dropped.
 - **`klt sim` refuses `measurements[].transfer` declared beside `noise`**
   (#5695, 2026-11-14): the mutually exclusive measurement forms each carried a
   hand-maintained list of "every *other* exclusive form", and `transfer`'s
