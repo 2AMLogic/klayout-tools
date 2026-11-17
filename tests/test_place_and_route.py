@@ -4301,6 +4301,25 @@ def test_asap7_cell_library_resolves_to_the_asap7_extract_deck():
         place_and_route._require_extract_deck_for_cell_library("nope")
 
 
+def test_gf180mcu_7t_cell_library_resolves_to_the_gf180mcu_extract_deck():
+    """Issue #5825: the 7-track 5V library is accepted at validation time --
+    the gf180mcu parasitics deck is metal-stack-level RC data shared by both
+    gf180mcu cell families (same ``Metal2-Metal5`` routing range), so 7t
+    resolves to the same ``"gf180mcu"`` deck the 9t library already uses."""
+    assert (
+        place_and_route._require_extract_deck_for_cell_library(
+            "gf180mcu_fd_sc_mcu7t5v0"
+        )
+        == "gf180mcu"
+    )
+    assert (
+        place_and_route._require_extract_deck_for_cell_library(
+            "gf180mcu_fd_sc_mcu9t5v0"
+        )
+        == "gf180mcu"
+    )
+
+
 def test_post_route_spef_unsupported_cell_library_raises(tmp_path, monkeypatch):
     """An unrecognised `cell_library` (no `_EXTRACT_DECK_FOR_CELL_LIBRARY`
     entry) fails loudly -- never a silent skip of the requested A/B pass."""

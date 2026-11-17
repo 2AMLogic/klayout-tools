@@ -1408,9 +1408,13 @@ commits to disk.
 
 `post_route_spef` / `post_route_sdf` also accept `asap7sc7p5t_rvt` (issue
 #4559): the pass extracts with `klt extract --deck asap7`, whose FinFET path
-honours the `--def-net-names` and `--pins` options the pass passes. A library
-with no extract-deck entry still fails at request validation, before any
-engine runs.
+honours the `--def-net-names` and `--pins` options the pass passes. Both
+gf180mcu standard-cell families are supported —
+`gf180mcu_fd_sc_mcu9t5v0` and `gf180mcu_fd_sc_mcu7t5v0` (issue #5825)
+resolve to the same `klt extract --deck gf180mcu` parasitics deck, which is
+metal-stack-level first-order RC data shared by the two families (both route
+over `Metal2-Metal5`). A library with no extract-deck entry still fails at
+request validation, before any engine runs.
 
 The optional boolean `post_route_spef` request field (default `false`) opts
 in to a real-parasitics **A/B** pass on top of that existing behaviour, never
