@@ -1408,16 +1408,16 @@ def _spef_warnings(
     """Warnings for the ``--spef`` writer (issue #3257 gaps A and C)."""
     out: list[str] = []
     # Gap A: DEF connectivity without a declared-port set leaves every
-    # labelled net a bare-name port, which OpenSTA cannot attach
-    # (`STA-1656`). A warning only -- the SPEF bytes are unchanged.
+    # labelled net a bare-name port; whether OpenSTA attaches it is
+    # layout-dependent. A warning only -- the SPEF bytes are unchanged.
     if def_net_connections and def_pins is None and declared_pins is None:
         out.append(
             "--def-net-connections without --def-pins/--pins: every "
-            "labelled net is written as a top-level port, so OpenSTA "
-            "read_spef cannot attach the nets (bare-name port hubs, "
-            "STA-1656) and timing stays identical to an unannotated "
-            "run. Pass --def-pins <routed.def> (or --pins) to declare "
-            "only the real ports."
+            "labelled net is written as a top-level port, so whether "
+            "OpenSTA read_spef attaches the nets is layout-dependent "
+            "(bare-name port hubs, STA-1656), not a stable signature. "
+            "Pass --def-pins <routed.def> (or --pins) to declare only "
+            "the real ports."
         )
     # Gap C: same-named floating nets omitted from the SPEF.
     if skipped_nets:

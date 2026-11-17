@@ -804,10 +804,13 @@ measurement.
 lumped capacitance per net with no wire resistance between DEF-level pins
 (zero-ohm legs), so `read_spef` adds wire load but not pin-to-pin wire delay.
 Build it with `--def-net-connections`, `--def-pins` **and** `--def-net-names`;
-without `--def-pins`, most nets cannot attach (`STA-1656`) and `delay_changed`
-stays false, and without `--def-net-names` the extracted names are `$N` so
-almost nothing correlates (52 / 537 `gcd` nets annotated).
-See `docs/cli/extract.md`, "SPEF export".
+without `--def-pins`, whether OpenSTA attaches the nets at all is
+layout-dependent, not a guaranteed "nothing annotates" (the #3560 `gcd` run
+annotated 537 / 537 and still reported `delay_changed: true`), and without
+`--def-net-names` the extracted names are `$N` so almost nothing correlates
+(52 / 537 `gcd` nets annotated).
+See `docs/cli/extract.md`, "SPEF export" ("Pair it with `--def-pins`" for
+what a `--def-pins`-omitted negative control can stably assert).
 
 `klt sta` answers that with **four independent pieces of evidence**, three
 of which gate `annotation_complete`. One of them — the name-correlation

@@ -6337,11 +6337,18 @@ from the same routed DEF `declared_pins` already reads.
 
 **Pair it with `--def-pins` (issue #3257).** `--def-net-connections` alone
 leaves every labelled net a top-level port, and OpenSTA resolves a bare-name
-port hub through the design's *pin* names, so most nets fail to attach
-(`STA-1656`) and timing comes out byte-identical to the unannotated run.
+port hub through the design's *pin* names. Whether such a net then attaches
+is **layout-dependent** -- it hinges on whether the label happens to match a
+real design pin or port name in the routed DEF (one layout drops every RC
+element, `STA-1656`; the #3560 `gcd` run annotated 537 / 537 with
+`delay_changed: true`), so the no-`--def-pins`/`--pins` annotation outcome
+is not a stable signature and must not be asserted on in either direction.
 Pass `--def-pins <routed.def>` (or `--pins`) too. Without either, the
 response's `warnings[]` carries a `--def-net-connections without
---def-pins/--pins` entry; the SPEF bytes are unchanged by the warning.
+--def-pins/--pins` entry -- a pure function of the flags, and the stable
+invariant a `--def-pins`-omitted negative control should assert on (the
+SPEF's `*PORTS` count exceeding the routed DEF's `PINS` count is a second).
+The SPEF bytes are unchanged by the warning.
 
 **Live OpenSTA check (issue #3560).** Measured on the `gcd` corpus design
 (`klt place-and-route` to `route`, OpenROAD `26Q3-1510-g6cb3f2b704`, tt
