@@ -59,8 +59,8 @@ import re
 from collections.abc import Callable
 from typing import Any
 
-from ._paths import _resolve_request_path
 from .functional_verification_sdf_rename import _sdf_unresolvable_pin_tokens
+from .request_paths import resolve_request_path
 
 
 def _reject_sdf_with_functional_models(
@@ -171,11 +171,8 @@ def _resolve_sdf_file(file_value: Any, request_dir: str) -> str:
         raise FunctionalVerificationError(
             "request.options.sdf.file must be a non-empty string"
         )
-    path = _resolve_request_path(
-        file_value,
-        request_dir,
-        error_cls=FunctionalVerificationError,
-        field="request.options.sdf.file",
+    path = resolve_request_path(
+        file_value, request_dir, FunctionalVerificationError, "request.options.sdf.file"
     )
     if not os.path.isfile(path):
         raise FunctionalVerificationError(f"SDF file not found: {file_value}")

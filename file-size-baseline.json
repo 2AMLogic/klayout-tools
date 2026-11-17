@@ -345,11 +345,11 @@
     },
     {
       "path": "src/klayout_tools/functional_verification.py",
-      "lines": 3154
+      "lines": 3152
     },
     {
       "path": "src/klayout_tools/functional_verification_sdf.py",
-      "lines": 2531
+      "lines": 2530
     },
     {
       "path": "src/klayout_tools/gen.py",
@@ -441,7 +441,7 @@
     },
     {
       "path": "src/klayout_tools/macros.py",
-      "lines": 668
+      "lines": 667
     },
     {
       "path": "src/klayout_tools/mcp_tools.py",
@@ -657,7 +657,7 @@
     },
     {
       "path": "src/klayout_tools/synthesize.py",
-      "lines": 4651
+      "lines": 4647
     },
     {
       "path": "src/klayout_tools/synthesize_arithmetic.py",

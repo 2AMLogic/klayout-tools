@@ -55,12 +55,7 @@ import subprocess
 import time
 from typing import Any
 
-from ._paths import (
-    _load_request_json,
-    _resolve_request_path,
-    resolve_tool_binary,
-    validate_request_shape,
-)
+from ._paths import _load_request_json, resolve_tool_binary, validate_request_shape
 from ._paths import load_request_arg as _shared_load_request_arg
 from ._provenance import (
     INPUT_ROLE_SOURCE,
@@ -96,7 +91,9 @@ from .equiv_replay import (  # noqa: F401 -- sim-backend constants stay public h
     resolve_sim_backend,
 )
 from .equiv_stage import stage_record_path
+from .request_paths import RequestPaths
 
+_rpath = RequestPaths(EquivError)
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
 SCHEMA_VERSION = 1
@@ -574,12 +571,7 @@ def _resolve_side(spec: Any, request_dir: str, label: str) -> dict[str, Any]:
 
     resolved: list[str] = []
     for entry in sources:
-        path = _resolve_request_path(
-            entry,
-            request_dir,
-            error_cls=EquivError,
-            field=f"request.{label}.sources entry",
-        )
+        path = _rpath(entry, request_dir, f"request.{label}.sources entry")
         if not os.path.isfile(path):
             raise EquivError(f"{label} source not found: {entry}")
         try:
@@ -591,12 +583,7 @@ def _resolve_side(spec: Any, request_dir: str, label: str) -> dict[str, Any]:
 
     resolved_liberty = None
     if liberty is not None:
-        liberty_path = _resolve_request_path(
-            liberty,
-            request_dir,
-            error_cls=EquivError,
-            field=f"request.{label}.liberty",
-        )
+        liberty_path = _rpath(liberty, request_dir, f"request.{label}.liberty")
         if not os.path.isfile(liberty_path):
             raise EquivError(f"{label} liberty file not found: {liberty}")
         resolved_liberty = os.path.abspath(liberty_path)

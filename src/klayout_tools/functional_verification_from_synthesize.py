@@ -18,9 +18,9 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from ._paths import _resolve_request_path
 from ._provenance import sha256_file
 from ._report_verify import hash_check, load_committed_report, resolve_committed_path
+from .request_paths import resolve_request_path
 
 FROM_SYNTHESIZE_KEYS = ("report", "netlist")
 
@@ -37,9 +37,7 @@ def _request_relative(entry: str, request_dir: str, field: str = "request path")
     ``$VAR`` / ``~`` are expanded first (issue #5678), the same convention
     ``klt lvs`` / ``drc`` / ``extract`` / ``sim`` document.
     """
-    return os.path.abspath(
-        _resolve_request_path(entry, request_dir, error_cls=_err, field=field)
-    )
+    return os.path.abspath(resolve_request_path(entry, request_dir, _err, field))
 
 
 def _resolve_sources(

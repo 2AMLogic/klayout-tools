@@ -3,8 +3,8 @@
 ``klt functional-verification`` / ``synthesize`` / ``formal`` / ``equiv`` used to
 hand-roll ``isabs``/``join`` for ``sources``, so a committed request naming
 ``$PDK_ROOT/...`` could not run as-is. They now route through
-``_paths._resolve_request_path`` (``_resolve_relative`` plus a named error for
-an unset variable), matching ``klt lvs``/``drc``/``extract``/``sim``.
+``request_paths.resolve_request_path`` (``_paths._resolve_relative`` plus a
+named error for an unset variable), matching ``klt lvs``/``drc``/``extract``/``sim``.
 """
 
 from __future__ import annotations
@@ -12,10 +12,10 @@ from __future__ import annotations
 import pytest
 
 from klayout_tools import equiv, formal, functional_verification, synthesize
-from klayout_tools._paths import _resolve_request_path, _unset_env_vars
 from klayout_tools.equiv import EquivError
 from klayout_tools.formal import FormalError
 from klayout_tools.functional_verification import FunctionalVerificationError
+from klayout_tools.request_paths import _unset_env_vars, resolve_request_path
 from klayout_tools.synthesize import SynthesizeError
 
 _VERBS = [
@@ -118,7 +118,7 @@ def test_literal_relative_and_absolute_paths_unchanged(tmp_path, resolve, _err):
 
 def test_dollar_not_a_variable_reference_is_literal(tmp_path):
     assert _unset_env_vars("a$/b$") == []
-    assert _resolve_request_path(
+    assert resolve_request_path(
         "a$/b", str(tmp_path), error_cls=ValueError, field="f"
     ) == str(tmp_path / "a$" / "b")
 
@@ -127,7 +127,7 @@ def test_multiple_unset_vars_are_all_named(tmp_path, monkeypatch):
     monkeypatch.delenv("KLT_A", raising=False)
     monkeypatch.delenv("KLT_B", raising=False)
     with pytest.raises(ValueError, match=r"\$KLT_A, \$KLT_B"):
-        _resolve_request_path(
+        resolve_request_path(
             "$KLT_A/$KLT_B/x.v", str(tmp_path), error_cls=ValueError, field="f"
         )
 
