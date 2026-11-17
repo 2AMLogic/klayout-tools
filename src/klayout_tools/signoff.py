@@ -174,6 +174,14 @@ from .signoff_generator_batch import (
     match_approval,
     run_approved_generator,
 )
+from .signoff_justified_gap import (
+    _ITEMS_ACCEPTING_MULTI_CITATION,
+    _check_justified_gap_rationales,
+    _na_document,
+    _read_spec_rows,
+    _SpecRowsKey,
+    justified_gap_report_fields,
+)
 
 # Per-cell DRC/LVS member-coverage counts (issue #5031); kept out of this file
 # for its size-ratchet ceiling.
@@ -187,7 +195,6 @@ from .signoff_na import (
     _na_parse_markdown,
     _na_reviewed_ids,
     _na_scan_statistical,
-    _na_spec_format,
     _na_statistical_detail,
 )
 
@@ -1291,6 +1298,13 @@ _REASON_NEGATIVE_CONTROL_NOT_DETECTED = "negative_control_not_detected"
 #: "cite a different artifact" really is the more actionable answer.
 _REASON_PARTIAL_COVERAGE = "partial_coverage"
 
+# --- Justified declared gaps (issue #5599) ---------------------------------- #
+# The manifest's `spec_rows` reader, the justified object form of `gap`, and
+# the rationale hash-check live in `signoff_justified_gap.py` (split out for
+# this module's size ratchet, like `signoff_derived_rows.py` and
+# `signoff_na.py` before it); every name is re-imported below, so
+# `signoff.<name>` keeps resolving exactly as before the split.
+
 # Most ``skipped`` records a ``coverage_qualification`` quotes verbatim
 # (issue #4286). A run with no antenna table emits one record per
 # (gate, level), so an uncapped quote made the committed tier report
@@ -1323,30 +1337,6 @@ _REASON_NOT_APPLICABLE_STATISTICAL_ROW = "not_applicable_statistical_row"
 #: with no statement row, a statement row naming no spec row, a row without
 #: a ``class``/``reason``, or a spec with no rows at all).
 _REASON_NOT_APPLICABLE_STATEMENT_INCOMPLETE = "not_applicable_statement_incomplete"
-
-
-def _na_document(
-    raw: Any, label: str
-) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    """Normalize one ``{"file", "content_hash"}`` reference of the
-    ``not_applicable`` form; ``(ref, None)`` or ``(None, detail)``."""
-    if (
-        not isinstance(raw, dict)
-        or not isinstance(raw.get("file"), str)
-        or not raw["file"]
-        or not isinstance(raw.get("content_hash"), str)
-        or not raw["content_hash"]
-    ):
-        return None, {
-            "document": label,
-            "problem": "needs a string 'file' and a string 'content_hash'",
-        }
-    ref = {"file": raw["file"], "content_hash": raw["content_hash"]}
-    if label == "spec" and ("format" in raw or "id_column" in raw):
-        problem = _na_spec_format(raw, ref)
-        if problem is not None:
-            return None, {"document": label, "problem": problem}
-    return ref, None
 
 
 def _na_load(
@@ -4399,6 +4389,12 @@ def build_tier_report(
             not_applicable_count += entry["status"] == STATUS_NOT_APPLICABLE
             items.append(entry)
 
+    # Issue #5599: justified gaps are counted at the top level, and one
+    # naming no issue is reported as a finding (operator ruling on #5858,
+    # 2026-11-17) -- a declared gap is pending work, so the issue that would
+    # close it should be recorded.
+    justified_gap_count, findings = justified_gap_report_fields(items)
+
     for ladder_row in doc["ladder"]:
         if ladder_row["tier"] == "T1":
             continue  # T1 is the itemized checklist above, not a ladder row
@@ -4446,6 +4442,16 @@ def build_tier_report(
             if not_applicable_count
             else {}
         ),
+        # Issue #5599: justified declared gaps, counted as the set a reviewer
+        # audits -- omitted when zero so a report declaring none is
+        # byte-identical to this build's previous rendering (absent means 0,
+        # exactly like `t1_not_applicable_count` above).
+        **(
+            {"t1_justified_gap_count": justified_gap_count}
+            if justified_gap_count
+            else {}
+        ),
+        **({"findings": findings} if findings else {}),
         "source_doc": doc_source_label(tiers_doc),
         "source_doc_content_hash": doc["content_hash"],
         "build": _build_identity(),
@@ -6833,11 +6839,6 @@ def _build_tier_item(
     }
 
 
-#: T1 items whose manifest entry may be a **list** of citations with optional
-#: ``spec_rows`` coverage (issue #2959). Item 5, and item 6 (issue #2908: a
-#: block whose spec has several statistical rows, only some evidenced).
-_ITEMS_ACCEPTING_MULTI_CITATION: frozenset[int] = frozenset({5, 6})
-
 #: T1 item 4 (LVS): accepts a list of ``klt lvs`` reports -- one per cell of
 #: an analog partition (issue #4354) -- but never ``spec_rows``, so it is
 #: kept out of :data:`_ITEMS_ACCEPTING_MULTI_CITATION`.
@@ -6862,78 +6863,6 @@ _REPORT_LIST_ITEMS: frozenset[int] = frozenset(
 #: digital entry citing either must cite both; a ``sim``-only entry (the
 #: full-custom digital sub-case) is exempt.
 _ITEM5_DIGITAL_RTL_KINDS: tuple[str, ...] = ("sta", "functional-verification")
-
-
-_SpecRowsKey = tuple[int, "str | None"]
-
-
-def _read_spec_rows(
-    manifest: dict[str, Any],
-) -> dict[_SpecRowsKey, list[dict[str, Any]] | None]:
-    """Read the manifest's optional ``spec_rows`` declaration (issue #2959):
-    ``{"<item id>": [{"id": "<row>", "gap": "<reason>"?, "ratified": bool?,
-    "timing_margin": bool?}, ...]}``. A key may be partition-qualified
-    (``"5.analog"``, issue #3768), mirroring the evidence-key convention of
-    :func:`_lookup_evidence`; see :func:`_resolve_spec_rows`.
-
-    Returns ``(item id, partition | None) -> rows``; a malformed declaration
-    maps to ``None`` so only that item degrades to ``invalid_evidence``, never
-    the whole report. A ``gap`` row is one no producible envelope can cover; it
-    is reported as a declared gap and never counts as covered. ``ratified``
-    (default ``true``, issue #2908) is ``false`` for a row whose target is a
-    proposed, unratified limit: evidence against it is provisional and never
-    grades ``met``. ``timing_margin`` (default ``false``, issue #4314) marks the
-    row a digital ``sim``-only item 5 must evidence with a measured per-corner
-    timing margin; see :func:`_missing_timing_margin`.
-    """
-    raw = manifest.get("spec_rows")
-    if raw is None:
-        return {}
-    if not isinstance(raw, dict):
-        return {(item_id, None): None for item_id in _ITEMS_ACCEPTING_MULTI_CITATION}
-    out: dict[_SpecRowsKey, list[dict[str, Any]] | None] = {}
-    for key, rows in raw.items():
-        head, sep, suffix = str(key).partition(".")
-        try:
-            item_id = int(head)
-        except ValueError:
-            continue
-        slot: _SpecRowsKey = (item_id, suffix if sep else None)
-        parsed: list[dict[str, Any]] | None = []
-        if not isinstance(rows, list) or not rows:
-            parsed = None
-        else:
-            valid: list[dict[str, Any]] = []
-            seen: set[str] = set()
-            for row in rows:
-                row_id = row.get("id") if isinstance(row, dict) else None
-                gap = row.get("gap") if isinstance(row, dict) else None
-                ratified = row.get("ratified", True) if isinstance(row, dict) else True
-                margin = (
-                    row.get("timing_margin", False) if isinstance(row, dict) else False
-                )
-                if (
-                    not isinstance(row_id, str)
-                    or not row_id
-                    or row_id in seen
-                    or (gap is not None and (not isinstance(gap, str) or not gap))
-                    or not isinstance(ratified, bool)
-                    or not isinstance(margin, bool)
-                ):
-                    valid = []
-                    break
-                seen.add(row_id)
-                valid.append(
-                    {
-                        "id": row_id,
-                        "gap": gap,
-                        "ratified": ratified,
-                        "timing_margin": margin,
-                    }
-                )
-            parsed = valid or None
-        out[slot] = parsed
-    return out
 
 
 def _resolve_spec_rows(
@@ -7049,17 +6978,23 @@ def _grade_multi_citation(
             **row_info,
         }
         return "unmet", first[1], None, detail, extra
-    margin_unmet = _grade_timing_margin(
-        required_kind_pair, graded, spec_rows, met_envelopes, row_info, extra
+    # Issue #5599 + #4314: the justified-gap declaration check and the
+    # timing-margin rule are the two outcomes decided after every member has
+    # graded but before partial coverage.
+    post_member = _post_member_outcome(
+        spec_rows, required_kind_pair, graded, met_envelopes, row_info, extra
     )
-    if margin_unmet is not None:
-        return margin_unmet
+    if post_member is not None:
+        return post_member
     # Issue #5462: under the ratchet a row credited on the manifest's word
     # alone is not coverage, so it joins the other provisional conditions.
     asserted = asserted_rows(row_info) if require_derived else []
     if row_info and (
         row_info["uncovered_rows"]
         or row_info["declared_gaps"]
+        # Issue #5599: a justified gap is still a gap -- it forces
+        # `partial_coverage` exactly as the free-text form does.
+        or row_info.get("justified_gaps")
         or row_info["unratified_rows"]
         or asserted
     ):
@@ -7122,6 +7057,43 @@ def _grade_required_kinds(
         None,
         {**row_info, "missing_kinds": missing},
         extra,
+    )
+
+
+def _justified_gap_rationale_outcome(
+    spec_rows: list[dict[str, Any]] | None,
+    row_info: dict[str, Any],
+    extra: dict[str, Any],
+) -> tuple[str, str | None, None, dict[str, Any], dict[str, Any]] | None:
+    """The ``unmet`` outcome when a justified gap's rationale artifact fails
+    to check (issue #5599); ``None`` when every one checks. A broken
+    declaration is a distinct documented reason -- it is never silently
+    demoted to the free-text form, whose reason would be
+    ``partial_coverage``."""
+    failure = _check_justified_gap_rationales(spec_rows)
+    if failure is None:
+        return None
+    reason, detail = failure
+    return "unmet", reason, None, {**row_info, **detail}, extra
+
+
+def _post_member_outcome(
+    spec_rows: list[dict[str, Any]] | None,
+    required_kind_pair: tuple[str, ...] | None,
+    graded: list[tuple[Any, Any, Any]],
+    met_envelopes: dict[int, dict[str, Any]] | None,
+    row_info: dict[str, Any],
+    extra: dict[str, Any],
+) -> tuple[str, str | None, None, dict[str, Any], dict[str, Any]] | None:
+    """The ``unmet`` outcomes decided after every member has graded but
+    before partial coverage: the justified-gap declaration check (issue
+    #5599) first, then the timing-margin rule (issue #4314). ``None`` when
+    neither applies."""
+    rationale_unmet = _justified_gap_rationale_outcome(spec_rows, row_info, extra)
+    if rationale_unmet is not None:
+        return rationale_unmet
+    return _grade_timing_margin(
+        required_kind_pair, graded, spec_rows, met_envelopes, row_info, extra
     )
 
 
@@ -7276,12 +7248,15 @@ def _members_rows_declared(
     members: list[tuple[dict[str, Any], list[str] | None]],
     spec_rows: list[dict[str, Any]] | None,
 ) -> bool:
-    """True unless a member names an undeclared (or declared-``gap``) row."""
+    """True unless a member names an undeclared (or declared-``gap`` --
+    either form, issue #5599) row."""
     if spec_rows is None:
         return True
     declared = {row["id"]: row for row in spec_rows}
     return all(
-        row_id in declared and declared[row_id]["gap"] is None
+        row_id in declared
+        and declared[row_id]["gap"] is None
+        and declared[row_id]["justified_gap"] is None
         for _, rows in members
         for row_id in rows or []
     )

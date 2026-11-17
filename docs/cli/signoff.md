@@ -3598,6 +3598,70 @@ new. Outcomes:
   or a citation naming an undeclared or `gap` row -> `unmet` /
   `invalid_evidence` for item 5 only.
 
+#### Declared gaps: the free-text and justified forms (issue #5599)
+
+A declared gap is **pending work, never permanent** (operator ruling on
+#5858, 2026-11-17): what is owed is the feature, tool or data that would let
+the row be graded, so the justified form records the open issue that would
+close it. Both forms keep the item `unmet` / `partial_coverage` -- a gap is
+never covered and never grades `met`, even when every row is one. Whether a
+justified gap should ever stop blocking was #5858, and that ruling settled
+it: gaps keep blocking T1.
+
+The free-text form is unchanged and keeps its exact `detail.declared_gaps`
+shape (`[{id, gap}]`):
+
+```json
+{"id": "noise_mc", "gap": "statistical reduction a klt sim request cannot express"}
+```
+
+The justified form is an object carrying a human **reason**, a **rationale
+artifact** pinned by content hash (the same `{file, content_hash}` binding
+the item-6 `not_applicable` form uses -- checked like any cited artifact),
+and the **issue** that would close the gap:
+
+```json
+{
+  "id": "pvt_ss_125c",
+  "gap": {
+    "reason": "no liberty file ships for this PVT point",
+    "rationale": {"file": "gaps/pvt_ss_125c.md", "content_hash": "sha256:..."},
+    "issue": "#1234"
+  }
+}
+```
+
+Outcomes:
+
+- a justified gap is listed under `detail.justified_gaps`
+  (`[{id, reason, rationale, issue}]`, `issue` `null` when absent -- never
+  mixed into `declared_gaps`) and counted at the top level as
+  `t1_justified_gap_count`, omitted when zero exactly like
+  `t1_not_applicable_count`, so a report declaring none is byte-identical
+  to this build's previous rendering (`--check` sees no drift);
+  `--format text` appends ", N justified gaps" to the T1 line and lists each
+  gap's reason, rationale file + hash and issue beside the item;
+- a justified gap whose rationale file is missing or unreadable grades
+  `unmet` / `justified_gap_rationale_unreadable`; one whose content hash
+  does not match grades `unmet` / `justified_gap_rationale_stale` (`detail`
+  names the row, the file, and both hashes). A broken declaration is never
+  silently demoted to the free-text form;
+- an object `gap` without a `reason`, without a `rationale`, with a
+  malformed rationale reference, or with a non-string `issue` is
+  `invalid_evidence`, as is a citation naming a justified-gap row (a gap
+  row cannot be covered, either form);
+- a justified gap that names **no issue** is accepted but reported as a
+  top-level **finding** (`findings[]`: `finding` =
+  `justified_gap_without_issue_link` with the item, partition when present,
+  and row); `--format text` prints the finding beside the gap. New
+  manifests should prefer the justified form and name the issue that would
+  close each gap.
+
+Item 6 rows accept the same two forms with the same outcomes. The rationale
+path resolves as given (like a `not_applicable` document), so a relative
+path is read against the process working directory. `schema_version`: no
+bump; every new report field is omitted when unused.
+
 **Derived coverage (issue #3778).** A `klt sim` measurement may declare the
 spec row it grades (`measurements[].spec_row`, echoed on the report's
 `measurements[]`; see `docs/cli/sim.md`). When a citation carries `rows` **and**
@@ -3775,7 +3839,10 @@ Item 6 reuses the item-5 list form and `spec_rows` schema above, with
 - otherwise, with no failing citation -> `unmet` / `partial_coverage`; the
   `detail` lists `uncovered_rows`, `declared_gaps` (`[{id, gap}]`) and
   `unratified_rows` (every `ratified: false` row, covered or not -- evidence
-  against a proposed limit is provisional) separately;
+  against a proposed limit is provisional) separately; item 6's rows also
+  accept the justified object form of `gap` (issue #5599, listed under
+  `detail.justified_gaps` with the same outcomes as item 5's -- see
+  "Declared gaps" above);
 - a failing citation keeps its own `reason` (e.g. `check_failed`) with
   `detail.failed_citations` / `detail.failed_rows`, as for item 5; the #2467
   campaign-discipline gate applies per citation, unchanged;
@@ -4553,6 +4620,8 @@ distinguishable from "no samples document was ever named" (see
 | `build_t1_item_count` | integer \| null | Number of T1 rows **this build's own shipped doc** would have rendered for this block (issue #2202) — the same multiplication by partition count `t1_item_count` gets, so the two are directly comparable. Equal to `t1_item_count` for the shipped doc and for any `--tiers-doc`/`$KLT_TIERS_DOC` copy with the same item list; *larger* when the parsed doc lists fewer items than this build grades, which is the whole point of the field (see "A doc the build has outrun" above). `null` — never a fabricated count — when this build cannot read its own doc at all, the same rule `graded_by_build` applies in the other direction. Additive: no `schema_version` bump, per [`../json-contract.md`](../json-contract.md). |
 | `t1_met_count`  | integer              | Number of those items with `status: "met"`. **Never includes `not_applicable` items** (issue #2865). |
 | `t1_not_applicable_count` | integer    | **Present only when at least one item is `not_applicable`** (issue #2865; absent means `0`, so a report with none is byte-identical to a pre-#2865 one). `tier` is `"T1"` when `t1_met_count + t1_not_applicable_count == t1_item_count`. |
+| `t1_justified_gap_count` | integer     | **Present only when at least one justified gap is declared** (issue #5599; absent means `0`, byte-identical when none): the count of `spec_rows` rows declared with the justified object form of `gap`, across all items and partitions. A declared gap is pending work, never permanent (operator ruling on #5858, 2026-11-17); it never counts as coverage and never moves an item off `unmet`. See "Declared gaps" above. |
+| `findings`      | array\<object\>      | **Present only when at least one finding exists** (issue #5599): one entry per justified gap that names no issue — `{"finding": "justified_gap_without_issue_link", "item", "partition" (when the block is mixed-signal), "row"}`. A declared gap is pending work, so the open issue that would close it should be recorded; its absence is reported here, never refused. |
 | `source_doc`    | string               | Which doc the item list was parsed from: `"docs/design-evidence-tiers.md"` for the shipped doc (the same string whether this install reads its bundled copy or a source checkout), or the override path when `--tiers-doc`/`$KLT_TIERS_DOC` names a different doc. |
 | `source_doc_content_hash` | string \| null | `sha256:`-prefixed SHA-256 of `source_doc`'s resolved bytes on disk (issue #2175) — pins *what the checklist said*, not just which file it was, so two reports naming the same `source_doc` can be diffed to tell whether a changed verdict came from changed evidence or a changed checklist. `null` only if the doc became unreadable as bytes between the parse and the hash (e.g. deleted mid-run) — never fabricated. |
 | `build`         | object               | Which build produced this report (issue #2176): `{"version", "package_version", "git_commit", "git_tag", "dirty", "is_release", "grading_ruleset_id"}`, exactly as `klt version --format json` reports them — see "Which build graded this" and "Identifying the grading build" above. `grading_ruleset_id` (issue #2216) is a content hash identifying the grading code, distinct from `git_commit`/`git_tag`. Additive: no `schema_version` bump, per [`../json-contract.md`](../json-contract.md). **Route-dependent** (issue #2249): it describes the install, not only the commit, so two byte-legitimate installs of the same pinned commit can carry different blocks — never byte-compare a report across installs; use `--check`, which excludes exactly this block. |
@@ -4874,6 +4943,8 @@ under `3` as it did under `2`; only `blocking_item` moved.
 | `build_t1_item_count` | integer \| null | As in tier-report mode (issue #2202): how many T1 rows **this build's own shipped doc** would have rendered for this block, so a row reading `T1: 9/9 items met` against a doc older than this build is distinguishable from one reading `11/11`. Carried here — unlike per-item `graded_by_build`, which is `--manifest`-only — because `t1_item_count` is carried here, and the shortfall is a property of that count. Identical across rows of the same `kind` within one roll-up (`tiers_doc` and the build are both shared), and doubled for a `mixed-signal` row exactly as `t1_item_count` is. |
 | `t1_met_count`  | integer              | This block's `"met"` T1 item count (never includes `not_applicable`).                     |
 | `t1_not_applicable_count` | integer    | Present only when non-zero (issue #2865): this block's `"not_applicable"` T1 item count. The text roll-up prints `T1: 10/11 items met, 1 not_applicable`. |
+| `t1_justified_gap_count` | integer     | Present only when non-zero (issue #5599): this block's justified declared-gap count — `spec_rows` rows declared with the justified object form of `gap`. The text roll-up prints `, N justified gaps` beside the count. A declared gap is pending work, never permanent (operator ruling on #5858, 2026-11-17). |
+| `findings`      | array\<object\>      | Present only when non-empty (issue #5599): this block's tier report findings, carried verbatim — today, one entry per justified gap that names no issue (`finding: "justified_gap_without_issue_link"`). |
 | `source_doc_content_hash` | string \| null | This block's tier report's own `source_doc_content_hash` (issue #2175), echoed verbatim — useful when this row is later extracted from a committed roll-up captured at a different time than another row's. |
 | `blocking_item` | object \| null       | `null` when `tier: "T1"`; otherwise the unmet T1 item this roll-up names as the blocker: an item this build cannot grade at all (`graded_by_build: false`) if there is one (issue #2203), else the first unmet *gradeable* one, else a structurally ungradeable one (issue #2178). See below. |
 | `ungraded_items`| array\<object\>      | Every unmet T1 item with **no runnable check behind it** — the structurally ungradeable 1, 2, 9, 10 (no `klt` verb at all) *and* any `graded_by_build: false` item (no rules in this build) — in render order, each in `blocking_item`'s own `{"id", "title", "partition", "reason"}` shape (issues #2178, #2203). These are the rows the blocker reduction ranks separately: listed so that ranking them never silently hides them, and so that demoting an honestly-uncited item 1 never masks a real gap. The named `blocking_item` is itself one of these rows whenever it came from either ungradeable class. `[]` for a block that cites all four and that this build grades fully, and for a block at `tier: "T1"`. Reduced from this block's own tier report, never re-graded; it changes no block's `tier` — every T1 item, these included, still has to be `"met"` for `tier: "T1"`. |
