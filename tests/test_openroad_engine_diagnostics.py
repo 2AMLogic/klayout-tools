@@ -111,7 +111,7 @@ def test_launch_failure_named(monkeypatch, tmp_path, exc, needle):
     def boom(*a, **k):
         raise exc
 
-    monkeypatch.setattr(subprocess, "run", boom)
+    monkeypatch.setattr(subprocess, "Popen", boom)
     script = tmp_path / "s.tcl"
     script.write_text("exit\n")
     with pytest.raises(_Err, match="could not launch openroad") as info:
@@ -123,7 +123,7 @@ def test_launch_failure_other_oserror_unchanged(monkeypatch, tmp_path):
     def boom(*a, **k):
         raise OSError("weird")
 
-    monkeypatch.setattr(subprocess, "run", boom)
+    monkeypatch.setattr(subprocess, "Popen", boom)
     script = tmp_path / "s.tcl"
     script.write_text("exit\n")
     with pytest.raises(_Err) as info:

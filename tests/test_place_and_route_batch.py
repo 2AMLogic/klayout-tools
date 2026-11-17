@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from helpers.subprocess_fakes import fake_completed, replay_upload
+from helpers.subprocess_fakes import fake_completed, fake_popen, replay_upload
 from klayout_tools import _provenance, place_and_route, sim_batch
 from klayout_tools import place_and_route_batch as par_batch
 from klayout_tools.cli import main
@@ -171,6 +171,7 @@ def fake(tmp_path, monkeypatch) -> _FakeRunner:
         raise AssertionError(f"OpenROAD launched on the batch path: {cmd}")
 
     monkeypatch.setattr(place_and_route.subprocess, "run", _no_openroad)
+    monkeypatch.setattr(place_and_route.subprocess, "Popen", fake_popen(_no_openroad))
     runner.request_path = request_path  # type: ignore[attr-defined]
     return runner
 

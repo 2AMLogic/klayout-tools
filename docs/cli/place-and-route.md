@@ -84,19 +84,70 @@ docker run --rm --platform linux/amd64 openroad/orfs:latest \
 ```
 
 The simplest way to get a plain `openroad` on the **host's** `$PATH` is a
-one-line wrapper script that runs the container per invocation:
+one-line wrapper script that runs the container per invocation. Keep the
+three container-lifetime pieces below intact (`--cidfile`, the `trap`
+handlers, and the backgrounded client instead of `exec`): `klt
+place-and-route` stages can run for hours, and if the `klt` process is
+killed while one runs, a wrapper without them leaks the container — the
+docker client dies with `klt` but OpenROAD keeps routing to completion and
+writes `*.def`/`*.odb`/`*_route_drc.rpt` into your repository hours later,
+with no `klt` process and no `invocation.json` to attribute them to
+(issue #5726). `exec docker run` cannot host the trap — `exec` replaces the
+shell with the docker client, so no handler survives to run — which is why
+the client is backgrounded and `wait`ed instead:
 
 ```bash
 cat > /usr/local/bin/openroad <<'WRAPPER'
 #!/usr/bin/env bash
-exec docker run --rm -i \
+set -euo pipefail
+CID_FILE="$(mktemp "${TMPDIR:-/tmp}/klt-openroad-cid.XXXXXX")"
+rm -f "$CID_FILE"
+CLIENT_PID=
+cleanup() {
+  # Only kill on an unfinished run: after `wait` reaped the client the
+  # container is already gone (--rm); the cid file is all that is left.
+  if [[ -n "$CLIENT_PID" ]] && kill -0 "$CLIENT_PID" 2>/dev/null; then
+    CID="$(cat "$CID_FILE" 2>/dev/null || true)"
+    if [[ -n "$CID" ]]; then
+      docker kill "$CID" >/dev/null 2>&1 &
+    fi
+    kill "$CLIENT_PID" >/dev/null 2>&1 || true
+  fi
+  rm -f "$CID_FILE" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+docker run --rm -i \
   --platform linux/amd64 \
+  --cidfile "$CID_FILE" \
   -v "$PWD":"$PWD" -w "$PWD" \
   openroad/orfs:latest \
-  /OpenROAD-flow-scripts/tools/install/OpenROAD/bin/openroad "$@"
+  /OpenROAD-flow-scripts/tools/install/OpenROAD/bin/openroad "$@" &
+CLIENT_PID=$!
+STATUS=0
+wait "$CLIENT_PID" || STATUS=$?
+exit "$STATUS"
 WRAPPER
 chmod +x /usr/local/bin/openroad
 ```
+
+`--cidfile` records the container id; the `trap` handlers `docker kill` it
+whenever the wrapper dies before the client completes (INT/TERM/HUP exit
+into the same EXIT handler). The signal split matters: a catchable signal
+(SIGTERM/SIGINT/SIGHUP) to the wrapper — including a process-group kill
+aimed at a whole `klt` run — now leaves **no** running container. SIGKILL
+is uncatchable by any shell handler, so a SIGKILLed wrapper still leaks the
+container; against that case the id itself is the mitigation —
+`klt place-and-route` writes `openroad-logs/<id>/invocation.json` when the
+stage *launches* (see "Resuming an interrupted run" below), carrying the
+container id parsed from the wrapper's stderr, so an orphan is identifiable
+and precisely reapable from the run's own record instead of by guessing.
+The generated wrapper
+(`scripts/install-openroad-docker.sh`) carries the same shape, plus a
+stderr marker line (`klt-openroad-cid <id>`) the engine scans for; if you
+installed an older wrapper, regenerate it to pick this up.
 
 `-v "$PWD":"$PWD" -w "$PWD"` mounts and enters the caller's current
 directory inside the container **at the identical path** — `klt
@@ -506,6 +557,23 @@ generated Tcl script text, and the content hashes of the netlist, tech/cell
 LEF, liberty, and any macro LEF/liberty. A stage killed mid-run has no record
 (it is written last, and any stale one is deleted before the stage re-runs),
 so a partial `.odb` is never reused.
+
+**Hazard: a killed stage may still have a live writer.** The "never reused"
+guarantee is about reading a stage's artifacts; it does not cover *writing*
+into the directory. `klt` cannot always prevent the OpenROAD container from
+outliving the `klt` process that started it — an uncatchable SIGKILL to
+`klt` defeats the wrapper's own cleanup handler, and a wrapper installed
+before the container-lifetime fix (issue #5726) has no handler at all. The
+per-invocation record is written when the stage **launches**, not only when
+it completes: a stage's `openroad-logs/<id>/invocation.json` whose
+`"outcome"` is still `"running"` (and whose `container_id` names a
+container) means the stage's output files may still be growing. `--resume`
+re-runs such a stage while the orphan writes the **same filenames
+concurrently**, and nothing in the resume machinery detects that race.
+Before resuming after a kill, check the newest
+`openroad-logs/*/invocation.json` under the output directory: a non-final
+`outcome` with a `container_id` identifies the live writer, and
+`docker kill <id>` reaps it precisely.
 
 * `--resume` lifts the populated-`outputs.dir` refusal (like `--rerun`). On an
   empty or missing directory it behaves as a normal run.

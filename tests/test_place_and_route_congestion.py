@@ -11,7 +11,7 @@ import json
 
 import pytest
 
-from helpers.subprocess_fakes import fake_completed
+from helpers.subprocess_fakes import fake_completed, fake_popen
 from klayout_tools import place_and_route
 from klayout_tools import place_and_route_reports as reports
 from test_place_and_route import (
@@ -195,6 +195,7 @@ def _wrap_route_stdout(monkeypatch, extra_stdout: str, extra_metrics: dict) -> N
         return completed
 
     monkeypatch.setattr(place_and_route.subprocess, "run", run)
+    monkeypatch.setattr(place_and_route.subprocess, "Popen", fake_popen(run))
 
 
 def _route_with(tmp_path, monkeypatch, table: str, unrouted: int) -> dict:

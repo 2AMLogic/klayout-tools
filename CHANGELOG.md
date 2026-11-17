@@ -41,6 +41,35 @@ not `klt --version`, if you need to detect this kind of drift. See
   and the Verilog-top path. `path`/`scope` is the repo-relative shape, so a
   source outside the repo reads `{"path": null, "scope": "external"}` and never
   leaks a host path. No `schema_version` bump.
+
+- **OpenROAD Docker wrapper no longer leaks its container when `klt` is killed**
+  (#5726, 2026-11-17): the wrapper `scripts/install-openroad-docker.sh`
+  generates used to `exec docker run --rm -i`, so killing the `klt` process
+  (a caller's timeout, a harness reaping its agent) killed the docker client
+  but **not** the container: OpenROAD kept routing for hours and wrote
+  `*.def`/`*.odb`/`*_route_drc.rpt` into the caller's repository with no
+  `klt` process and no `invocation.json` to attribute them to. The generated
+  wrapper now starts the container with `--cidfile`, backgrounds the client
+  and `wait`s on it (an `exec`ed client leaves no shell to run a trap), and
+  kills the recorded container from an EXIT/INT/TERM/HUP handler whenever the
+  wrapper dies before the client completes; a normal completion is unchanged
+  (same exit code, `--rm` still removes the container, no kill). A
+  process-group SIGTERM to a `klt` run now leaves no running container.
+  SIGKILL remains uncatchable — there the new launch-time
+  `openroad-logs/<id>/invocation.json` takes over: it is written when the
+  stage launches with `"outcome": "running"` and the wrapper-reported
+  `container_id`, and atomically replaced with the final
+  `outcome`/`returncode` by completion, so an interrupted stage reads as
+  interrupted (and its surviving container is named) rather than as a gap.
+  `_run_openroad` also launches the engine under `start_new_session=True`
+  and owns the kill on `TimeoutExpired`/`KeyboardInterrupt`: it signals the
+  engine's process group **and** `docker kill`s the recorded id before
+  re-raising. The `invocation.json` additions (`container_id`, launch-time
+  `outcome` values) are additive; existing consumers are unaffected. An
+  installed wrapper must be regenerated
+  (`scripts/install-openroad-docker.sh`) to pick the container-lifetime
+  behavior up.
+
 - **`klt sim` refuses `measurements[].transfer` declared beside `noise`**
   (#5695, 2026-11-14): the mutually exclusive measurement forms each carried a
   hand-maintained list of "every *other* exclusive form", and `transfer`'s

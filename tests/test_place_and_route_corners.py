@@ -13,7 +13,7 @@ import os
 
 import pytest
 
-from helpers.subprocess_fakes import fake_completed
+from helpers.subprocess_fakes import fake_completed, fake_popen
 from klayout_tools import place_and_route
 from klayout_tools.cli import main
 from klayout_tools.place_and_route import (
@@ -60,6 +60,7 @@ def _fail_corner(monkeypatch, corner: str) -> None:
         return inner(cmd, **kwargs)
 
     monkeypatch.setattr(place_and_route.subprocess, "run", fake_run)
+    monkeypatch.setattr(place_and_route.subprocess, "Popen", fake_popen(fake_run))
 
 
 def test_two_corners_get_isolated_dirs_and_one_report(tmp_path, monkeypatch):

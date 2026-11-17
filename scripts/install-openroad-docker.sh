@@ -66,6 +66,32 @@
 # host state and break reproducibility). Because values are verbatim, a
 # host-path `PLATFORM_DIR` only resolves in the container if it lies under a
 # mounted path ($PWD, $PDK_ROOT, $TMPDIR).
+#
+# Container lifetime (issue #5726): the container is started with `--cidfile`
+# and is killed by the wrapper's own EXIT/INT/TERM/HUP handler whenever the
+# wrapper is signalled before the `docker run` client completes. Without
+# this, a caller that kills `klt` (its timeout, or a harness reaping its
+# agent) kills the docker client but NOT the container: OpenROAD keeps
+# routing for hours and writes `*.def`/`*.odb`/`*_route_drc.rpt` into the
+# caller's repository with no `klt` process and no `invocation.json` to
+# attribute them to. Two things make that window close or at least
+# attributable:
+#
+# 1. The client is backgrounded and `wait`ed instead of `exec`ed. `exec`
+#    replaces the wrapper's shell with the docker client, so no shell
+#    survives to run a `trap`; a signalled client dies with default signal
+#    disposition and the container outlives it.
+# 2. A background poller emits `klt-openroad-cid <64-hex>` on the wrapper's
+#    stderr as soon as the runtime records the cid file.
+#    `src/klayout_tools/_openroad_engine.py` scans the retained stderr log
+#    for that line and records the id in `invocation.json`, so a container
+#    that DOES outlive its caller (the signal was SIGKILL, which no handler
+#    can catch) is identifiable -- and precisely reapable -- from the run's
+#    own record instead of by guessing.
+#
+# The trap deliberately does NOT `docker kill` after a normal (unsignalled)
+# completion: the client was reaped, `--rm` already removed the container,
+# and the handler only cleans up the cid file.
 
 set -euo pipefail
 
@@ -127,6 +153,17 @@ cat >"$WRAPPER" <<WRAPPER_EOF
 # mounts are owned by the caller on Linux (a root-owned directory there blocks
 # worktree/scratch cleanup -- issue #3151). \$HOME is pointed at \$TMPDIR
 # because that uid usually has no passwd entry (hence no home) in the image.
+#
+# The container is RECORDED and KILLED when this wrapper dies before the
+# client completes (issue #5726): \`--cidfile\` names it, and the EXIT/INT/
+# TERM/HUP handler below \`docker kill\`s whatever the cid file recorded.
+# The client is backgrounded and waited (not exec'd) precisely so this
+# shell survives to run the handler. After a normal completion the handler
+# only removes the cid file: the client was reaped and \`--rm\` already
+# removed the container. A SIGKILL to this wrapper is uncatchable -- the
+# container then survives, but the stderr marker line
+# (\`klt-openroad-cid <id>\`, emitted by the poller below) leaves it
+# identifiable and precisely reapable from the run's own logs.
 set -euo pipefail
 MOUNTS=(-v "\$PWD:\$PWD" -w "\$PWD")
 if [[ -n "\${PDK_ROOT:-}" ]]; then
@@ -150,14 +187,63 @@ fi
 while IFS= read -r v; do
     [[ -n "\$v" ]] && ENV_ARGS+=(-e "\$v")
 done < <(compgen -e OPENROAD_ || true)
-exec docker run --rm -i \\
+# mktemp guarantees a unique --cidfile path that cannot collide with a
+# concurrent invocation; the file itself is removed again because the
+# runtime refuses to start a container whose cid file already exists.
+CID_FILE="\$(mktemp "\${TMPDIR:-/tmp}/klt-openroad-cid.XXXXXX")"
+rm -f "\$CID_FILE"
+CLIENT_PID=
+MARKER_PID=
+cleanup() {
+    # Only kill on an unfinished run: after \`wait\` reaped the client the
+    # container is already gone (--rm); the cid file is all that is left.
+    if [[ -n "\$CLIENT_PID" ]] && kill -0 "\$CLIENT_PID" 2>/dev/null; then
+        CID="\$(cat "\$CID_FILE" 2>/dev/null || true)"
+        if [[ -n "\$CID" ]]; then
+            # Async on purpose: the runtime daemon performs the kill, and a
+            # slow or hung daemon must not delay this wrapper's exit -- the
+            # shell is inside its EXIT trap here.
+            docker kill "\$CID" >/dev/null 2>&1 &
+        fi
+        kill "\$CLIENT_PID" >/dev/null 2>&1 || true
+    fi
+    if [[ -n "\$MARKER_PID" ]]; then
+        kill "\$MARKER_PID" >/dev/null 2>&1 || true
+    fi
+    rm -f "\$CID_FILE" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+docker run --rm -i \\
     --platform linux/amd64 \\
+    --cidfile "\$CID_FILE" \\
     --user "\$(id -u):\$(id -g)" \\
     -e HOME="\${TMPDIR:-/tmp}" \\
     \${ENV_ARGS[@]+"\${ENV_ARGS[@]}"} \\
     "\${MOUNTS[@]}" \\
     $IMAGE \\
-    $IN_IMAGE_BINARY "\$@"
+    $IN_IMAGE_BINARY "\$@" &
+CLIENT_PID=\$!
+(
+    # Emit the container id on stderr as soon as the runtime records it,
+    # and stop once the client is gone. klayout_tools'
+    # _openroad_engine scans the retained stderr log for this line and
+    # records the id in invocation.json (issue #5726) -- including after a
+    # SIGKILL, where the poller itself is the only surviving witness.
+    while kill -0 "\$CLIENT_PID" 2>/dev/null; do
+        if [[ -s "\$CID_FILE" ]]; then
+            printf 'klt-openroad-cid %s\\n' "\$(cat "\$CID_FILE")" >&2
+            exit 0
+        fi
+        sleep 0.1
+    done
+) &
+MARKER_PID=\$!
+STATUS=0
+wait "\$CLIENT_PID" || STATUS=\$?
+exit "\$STATUS"
 WRAPPER_EOF
 chmod +x "$WRAPPER"
 

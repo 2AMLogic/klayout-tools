@@ -23,7 +23,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import subprocess
+import time
 import uuid
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
@@ -142,12 +144,14 @@ def container_runtime_hint(completed: _OpenRoadResult) -> str | None:
     Every OpenROAD-driving ``klt`` verb shells out to a bare ``openroad``
     argv, which -- per this repo's own documented, CI-used install path
     (``scripts/install-openroad-docker.sh``) -- is very often actually a
-    wrapper script whose last line is ``exec docker run --rm -i ... $IMAGE
-    ...``. Because ``exec`` replaces the wrapper process, whatever ``docker``
-    itself prints when it cannot reach its daemon becomes the captured
-    ``stderr`` of the run *unchanged*: there is no wrapper-added text to
-    strip, and no distinct exit code to key off (``docker`` exits ``1``, the
-    same as a genuine OpenROAD/Tcl failure).
+    wrapper script around ``docker run --rm -i ... $IMAGE ...``. The wrapper
+    adds almost nothing to the streams: it emits at most its own
+    ``klt-openroad-cid`` marker line (issue #5726) and otherwise forwards
+    the client's stdout/stderr and exit status unchanged, so whatever
+    ``docker`` itself prints when it cannot reach its daemon becomes the
+    captured ``stderr`` of the run essentially *unchanged*: there is no
+    wrapper-added text to strip, and no distinct exit code to key off
+    (``docker`` exits ``1``, the same as a genuine OpenROAD/Tcl failure).
 
     Read alone, that is indistinguishable from "the engine ran and the design
     failed analysis" -- yet the two call for opposite responses. A design or
@@ -313,6 +317,130 @@ def _log_path(path: Path | None) -> dict[str, Any]:
     return repo_relative_path(path, repo_root=root)
 
 
+#: The stderr line the generated wrapper (``scripts/install-openroad-docker.sh``)
+#: emits as soon as the container runtime records the invocation's container
+#: id (issue #5726). The wrapper's background poller prints
+#: ``klt-openroad-cid <64-hex>`` exactly once; scanning for it is how the
+#: engine attributes a container -- including one that outlives this process
+#: after an uncatchable SIGKILL -- to this invocation. A non-Docker
+#: ``openroad`` never produces the line, and the id stays ``null``.
+_CONTAINER_ID_RE = re.compile(r"^klt-openroad-cid ([0-9a-fA-F]{64})$", re.MULTILINE)
+
+#: How long :func:`_poll_container_id` waits for the wrapper's marker line
+#: before giving up for the launch-time record. The wrapper prints it as
+#: soon as the container is created -- sub-second on a warm image, which is
+#: the steady state (the image is pulled once per host). Cold pulls exceed
+#: any sane bound; :meth:`_LiveLogs.finish` re-scans the completed stderr
+#: for them. A bare (non-wrapper) ``openroad`` never prints the marker, so
+#: this whole wait is wasted on such hosts -- bounded here, and skipped
+#: entirely once the process has already exited.
+_CONTAINER_ID_WAIT_S = 2.0
+
+#: Seconds between polls of the growing stderr log.
+_CONTAINER_ID_POLL_INTERVAL_S = 0.05
+
+#: Seconds :func:`_kill_openroad_run` waits after the process-group SIGTERM
+#: before escalating to SIGKILL -- enough for the wrapper's EXIT/INT/TERM
+#: handler to run its own ``docker kill``.
+_KILL_GRACE_S = 5.0
+
+
+def _scan_container_id(stderr_text: str) -> str | None:
+    """The container id a wrapper recorded on stderr, or ``None``."""
+    match = _CONTAINER_ID_RE.search(stderr_text)
+    return match.group(1).lower() if match else None
+
+
+def _poll_container_id(
+    logs: _LiveLogs, proc: subprocess.Popen, wait_s: float
+) -> str | None:
+    """Best-effort container id from the stderr log *while the stage runs*.
+
+    Reads whatever the wrapper has flushed to the retained ``stderr.log``
+    so far, in a bounded loop: the marker line appears once the runtime
+    creates the container (after image resolution, so a cold pull delays
+    it past this bound -- :meth:`_LiveLogs.finish` re-scans the full
+    stderr then). Gives up early when the process has already exited,
+    so fast failures (an unreachable runtime, ``openroad -version``) pay
+    nothing like the full bound. Returns ``None`` when the stderr stream
+    is pipe-backed (nothing retained to read while running) or the
+    directory itself could not be created.
+    """
+    if logs.directory is None or logs.handles.get("stderr") is None:
+        return None
+    path = logs.directory / "stderr.log"
+    deadline = time.monotonic() + wait_s
+    while True:
+        try:
+            container_id = _scan_container_id(
+                path.read_bytes().decode("utf-8", errors="replace")
+            )
+        except OSError:
+            return None
+        if container_id is not None:
+            return container_id
+        if proc.poll() is not None or time.monotonic() >= deadline:
+            return None
+        time.sleep(_CONTAINER_ID_POLL_INTERVAL_S)
+
+
+def _kill_container(container_id: str) -> None:
+    """Best-effort ``docker kill`` of a recorded container; never raises.
+
+    Runs as a subprocess rather than through the group kill because a
+    container belongs to no process group of this caller (issue #5726).
+    ``docker`` may be absent (the engine cannot know whether ``openroad``
+    is a wrapper) -- that failure is as silent as every other
+    best-effort step here.
+    """
+    try:
+        subprocess.run(
+            ["docker", "kill", container_id],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=_KILL_GRACE_S,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def _kill_openroad_run(proc: subprocess.Popen, container_id: str | None) -> None:
+    """Kill a running engine invocation as thoroughly as possible.
+
+    The child runs under ``start_new_session=True``, so its process group
+    (pgid == ``proc.pid``) contains only the wrapper shell and the docker
+    client it spawned -- never this process's own group. Three steps, each
+    alone sufficient for a working setup, together covering the rest:
+
+    1. SIGTERM to that group: the wrapper's own EXIT/INT/TERM handler
+       ``docker kill``s its container on it.
+    2. A direct ``docker kill`` of the recorded id: covers an installed
+       wrapper *older* than that handler (regenerating is a manual step,
+       so stale wrappers persist on hosts) and a handler that failed.
+    3. SIGKILL escalation after :data:`_KILL_GRACE_S`, then a final reap.
+    """
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        pass
+    if container_id:
+        _kill_container(container_id)
+    try:
+        proc.wait(timeout=_KILL_GRACE_S)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+    try:
+        proc.wait(timeout=_KILL_GRACE_S)
+    except subprocess.TimeoutExpired:
+        pass
+
+
 def _retention_error(record: dict[str, Any], artifact: str, exc: OSError) -> None:
     # str(exc) can include an absolute filename; keep the new diagnostic
     # paths subject to the same privacy rule as successful artifact paths.
@@ -324,6 +452,7 @@ def _retention_error(record: dict[str, Any], artifact: str, exc: OSError) -> Non
 def _write_log_artifact(
     directory: Path, name: str, content: str | bytes | None, record: dict[str, Any]
 ) -> dict[str, Any]:
+    """Create a retained artifact exclusively (never overwrite)."""
     path = directory / name
     data = content.encode("utf-8") if isinstance(content, str) else content or b""
     try:
@@ -331,6 +460,32 @@ def _write_log_artifact(
             handle.write(data)
     except OSError as exc:
         _retention_error(record, name, exc)
+        return _log_path(None)
+    return _log_path(path)
+
+
+def _replace_log_artifact(
+    directory: Path, name: str, content: str | bytes | None, record: dict[str, Any]
+) -> dict[str, Any]:
+    """Atomically (re)write a retained artifact (issue #5726).
+
+    ``finish()`` overwrites the launch-time snapshot of ``invocation.json``;
+    writing to a temp file and ``os.replace``ing it keeps the swap atomic,
+    so a post-mortem reader of a killed run's snapshot never sees a
+    half-written record."""
+    path = directory / name
+    tmp = directory / f"{name}.tmp"
+    data = content.encode("utf-8") if isinstance(content, str) else content or b""
+    try:
+        with tmp.open("wb") as handle:
+            handle.write(data)
+        os.replace(tmp, path)
+    except OSError as exc:
+        _retention_error(record, name, exc)
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
         return _log_path(None)
     return _log_path(path)
 
@@ -363,6 +518,7 @@ class _LiveLogs:
             "metrics_path": _log_path(Path(metrics_path)),
             "outcome": None,
             "returncode": None,
+            "container_id": None,
             "directory": _log_path(None),
             "stdout_path": _log_path(None),
             "stderr_path": _log_path(None),
@@ -370,6 +526,7 @@ class _LiveLogs:
             "retention_errors": [],
         }
         self.handles: dict[str, Any] = dict.fromkeys(self._STREAMS)
+        self._snapshot_written = False
         try:
             self.directory.mkdir(parents=True, exist_ok=False)
         except OSError as exc:
@@ -391,6 +548,36 @@ class _LiveLogs:
             stream: handle if handle is not None else subprocess.PIPE
             for stream, handle in self.handles.items()
         }
+
+    def write_launch_snapshot(self) -> None:
+        """Write ``invocation.json`` *now*, while the stage runs (issue #5726).
+
+        Records the non-final ``"outcome": "running"``; ``finish()`` later
+        atomically replaces this file with the final record. A ``klt``
+        process killed before that leaves the launch-time snapshot behind:
+        ``"outcome"`` still reads as running and, when the wrapper recorded
+        one, ``container_id`` names the container that may outlive this
+        process. An interrupted stage therefore reads as interrupted rather
+        than as a gap, and the surviving container is identifiable -- and
+        precisely reapable -- from the record.
+
+        The first write creates the file exclusively; a later call in the
+        same invocation (the container id arriving mid-poll) atomically
+        replaces it."""
+        if self.directory is None:
+            return
+        self.record["outcome"] = "running"
+        self.record["metadata_path"] = _log_path(self.directory / "invocation.json")
+        writer = (
+            _replace_log_artifact if self._snapshot_written else _write_log_artifact
+        )
+        self._snapshot_written = True
+        self.record["metadata_path"] = writer(
+            self.directory,
+            "invocation.json",
+            json.dumps(self.record, indent=2) + "\n",
+            self.record,
+        )
 
     def finish(
         self,
@@ -429,9 +616,16 @@ class _LiveLogs:
                 data[stream] = extra_bytes
         self.record["outcome"] = outcome
         self.record["returncode"] = returncode
+        if not self.record.get("container_id"):
+            # Re-scan the completed stderr: a cold image pull delays the
+            # wrapper's marker past the launch-time poll bound, but the
+            # marker lands in the retained log whenever it appears.
+            self.record["container_id"] = _scan_container_id(
+                _captured_text(data.get("stderr"))
+            )
         if self.directory is not None:
             self.record["metadata_path"] = _log_path(self.directory / "invocation.json")
-            self.record["metadata_path"] = _write_log_artifact(
+            self.record["metadata_path"] = _replace_log_artifact(
                 self.directory,
                 "invocation.json",
                 json.dumps(self.record, indent=2) + "\n",
@@ -446,6 +640,7 @@ def _run_openroad(
     *,
     error_cls: type[Exception],
     engine_logs: list[dict[str, Any]] | None = None,
+    container_id_wait_s: float = _CONTAINER_ID_WAIT_S,
 ) -> _OpenRoadResult:
     """Run ``openroad -no_init -exit -metrics <metrics_path> <script_path>``,
     streaming raw stdout/stderr into separately retained log files *while the
@@ -459,7 +654,20 @@ def _run_openroad(
     returned result's ``returncode``. No timeout is introduced. If a runner
     supplies a timeout exception, its available partial streams are retained;
     KeyboardInterrupt retains available data and keeps its interruption type.
-    Logs are local debugging evidence, not a successful-stage signal."""
+    Logs are local debugging evidence, not a successful-stage signal.
+
+    The child runs under ``start_new_session=True`` (issue #5726): its
+    process group contains only the engine invocation -- this process and
+    its own children are never in it -- and :func:`_kill_openroad_run` owns
+    the kill on ``TimeoutExpired``/``KeyboardInterrupt``, signaling the
+    group *and* ``docker kill``ing the recorded container, if the wrapper
+    printed its id. ``invocation.json`` is written at launch
+    (``write_launch_snapshot``, ``"outcome": "running"``) and atomically
+    replaced by ``finish()`` -- a ``klt`` killed outright leaves a record
+    that says so, naming the container that may still be running.
+    ``container_id_wait_s`` bounds that launch-time poll of the retained
+    stderr for the wrapper's marker line (tests shrink it; a caller that
+    knows no wrapper is present may pass ``0``)."""
     invocation_id = uuid.uuid4().hex
     script_hash = sha256_file(script_path)
     logs = _LiveLogs(
@@ -477,11 +685,13 @@ def _run_openroad(
             engine_logs.append(record)
         return data, record
 
+    argv = ["openroad", "-no_init", "-exit", "-metrics", metrics_path, script_path]
     try:
-        completed = subprocess.run(
-            ["openroad", "-no_init", "-exit", "-metrics", metrics_path, script_path],
-            **logs.popen_streams(),
-        )
+        # start_new_session: the engine invocation gets its own process
+        # group (pgid == proc.pid), so a caller's group signal no longer
+        # reaches it directly and _kill_openroad_run owns the kill
+        # (issue #5726).
+        proc = subprocess.Popen(argv, start_new_session=True, **logs.popen_streams())
     except OSError as exc:
         _, record = retain("launch_failed", None, None, None)
         raise error_cls(
@@ -490,12 +700,36 @@ def _run_openroad(
                 record,
             )
         ) from exc
+
+    # Launch-time evidence record (issue #5726): written while the stage
+    # runs, not only when it completes -- "absence is not a record". The
+    # snapshot lands before the container-id poll so it exists even if the
+    # poll itself is interrupted.
+    logs.write_launch_snapshot()
+    try:
+        container_id = _poll_container_id(logs, proc, container_id_wait_s)
+    except KeyboardInterrupt as exc:
+        _kill_openroad_run(proc, logs.record.get("container_id"))
+        _, record = retain("interrupted", None, None, None)
+        exc.args = (*exc.args, _log_error_context("openroad interrupted", record))
+        raise
+    except BaseException:
+        _kill_openroad_run(proc, logs.record.get("container_id"))
+        raise
+    if container_id:
+        logs.record["container_id"] = container_id
+        logs.write_launch_snapshot()
+
+    try:
+        stdout, stderr = proc.communicate()
     except subprocess.TimeoutExpired as exc:
+        _kill_openroad_run(proc, logs.record.get("container_id"))
         _, record = retain("timed_out", None, exc.stdout, exc.stderr)
         raise error_cls(
             _log_error_context(f"openroad timed out: {exc}", record)
         ) from exc
     except KeyboardInterrupt as exc:
+        _kill_openroad_run(proc, logs.record.get("container_id"))
         _, record = retain(
             "interrupted",
             None,
@@ -504,11 +738,9 @@ def _run_openroad(
         )
         exc.args = (*exc.args, _log_error_context("openroad interrupted", record))
         raise
-    data, record = retain(
-        "exited", completed.returncode, completed.stdout, completed.stderr
-    )
+    data, record = retain("exited", proc.returncode, stdout, stderr)
     return _OpenRoadResult(
-        completed.returncode,
+        proc.returncode,
         _captured_text(data["stdout"]),
         _captured_text(data["stderr"]),
         record,

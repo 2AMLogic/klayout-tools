@@ -10,6 +10,7 @@ import os
 
 import pytest
 
+from helpers.subprocess_fakes import fake_popen
 from klayout_tools import place_and_route
 from klayout_tools.place_and_route import PlaceAndRouteError, run_place_and_route
 from test_place_and_route import (
@@ -45,6 +46,7 @@ def _record_stage_runs(monkeypatch) -> list[str]:
         return base(cmd, **kwargs)
 
     monkeypatch.setattr(place_and_route.subprocess, "run", fake_run)
+    monkeypatch.setattr(place_and_route.subprocess, "Popen", fake_popen(fake_run))
     return ran
 
 
