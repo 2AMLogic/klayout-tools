@@ -301,17 +301,19 @@ def _trim(
 
 def _drcfill_regions(
     kdb: Any, *, variant: str, def_path: str | None, dbu_um: float
-) -> dict[str, Any] | None:
-    """The routed DEF's reconstructed ``SHAPE DRCFILL`` patch regions, or
-    ``None`` when this pass must not attribute any: no DEF was handed in,
-    the PDK family is not ASAP7 (the scan would be dead work on a pass
-    whose GDS outcome is a documented no-op), or the scan itself skipped
-    (unreadable file, no ``UNITS`` statement) -- all reported as absence,
-    never guessed."""
-    if def_path is None or pdk_variant_family(variant) != _ASAP7_FAMILY:
-        return None
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """The routed DEF's reconstructed ``SHAPE DRCFILL`` patch regions and full scan report.
+    Returns (regions, scan_report)."""
+    if def_path is None:
+        return None, {"status": "skipped", "reason": "no DEF handed in", "unresolved": 0}
+    if pdk_variant_family(variant) != _ASAP7_FAMILY:
+        return None, {
+            "status": "skipped",
+            "reason": f"PDK family of '{variant}' is not ASAP7; no-op",
+            "unresolved": 0,
+        }
     scanned = scan_def_drcfill(kdb, def_path=def_path, dbu_um=dbu_um)
-    return scanned["regions"] or None
+    return scanned.get("regions") or None, scanned
 
 
 def trim_via_pads(
@@ -343,14 +345,16 @@ def trim_via_pads(
         variant=variant,
         lef_to_gds=lef_to_gds,
     )
+    drc_regions, drc_scan = _drcfill_regions(
+        kdb, variant=variant, def_path=def_path, dbu_um=layout.dbu
+    )
     report["tip_check"] = check_via_pad_tips(
         kdb,
         layout=layout,
         top_cell=top_cell,
         variant=variant,
         lef_to_gds=lef_to_gds,
-        drcfill_regions=_drcfill_regions(
-            kdb, variant=variant, def_path=def_path, dbu_um=layout.dbu
-        ),
+        drcfill_regions=drc_regions,
+        drcfill_scan=drc_scan,
     )
     return report

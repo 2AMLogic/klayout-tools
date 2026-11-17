@@ -136,6 +136,11 @@ def _report(status: str, reason: str | None = None) -> dict[str, Any]:
         "violations": 0,
         "via_pad_violations": 0,
         "router_fill_violations": 0,
+        "router_fill_scan": {
+            "status": "skipped",
+            "reason": "no DEF handed in",
+            "unresolved": 0,
+        },
         "rules": [],
     }
 
@@ -236,6 +241,7 @@ def check_via_pad_tips(
     variant: str,
     lef_to_gds: dict[str, tuple[int, int]],
     drcfill_regions: dict[str, Any] | None = None,
+    drcfill_scan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Count the deck's ``M1``-``M3`` tip-spacing violations in the merged
     layout, and how many of them touch a ``VIA_*`` landing pad or a
@@ -261,6 +267,18 @@ def check_via_pad_tips(
         return _report("skipped", f"PDK family of '{variant}' is not ASAP7; no-op")
 
     report = _report("clean")
+    if drcfill_scan is not None:
+        report["router_fill_scan"] = {
+            "status": drcfill_scan.get("status", "skipped"),
+            "reason": drcfill_scan.get("reason"),
+            "unresolved": drcfill_scan.get("unresolved", 0),
+        }
+    elif drcfill_regions is not None:
+        report["router_fill_scan"] = {
+            "status": "scanned",
+            "reason": None,
+            "unresolved": 0,
+        }
     checked = 0
     for lef_layer in _TIP_RULE_LEF_LAYERS:
         gds = lef_to_gds.get(lef_layer)
