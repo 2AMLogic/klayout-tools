@@ -388,9 +388,7 @@ def test_job_cmd_is_valid_bash_syntax(tmp_path):
         timeout_s=30.0,
         client_version="0.7.0",
     )
-    proc = subprocess.run(
-        [bash, "-n", "-c", spec.cmd], capture_output=True, text=True
-    )
+    proc = subprocess.run([bash, "-n", "-c", spec.cmd], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr
 
 
