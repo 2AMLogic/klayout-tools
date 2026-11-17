@@ -12642,8 +12642,7 @@ def test_compose_cell_block_non_zero_origin_geometry_is_bbox_anchored(
     # The load-bearing assertion: what was actually drawn, read back through
     # the instance transforms, agrees with that reported metadata.
     assert _composed_li1_boxes_um(output, "offset_origin_0") == [
-        pytest.approx((0.0, 0.0, 2.0, 1.2)),
-        pytest.approx((3.0, 0.0, 5.0, 1.2)),
+        pytest.approx(box) for box in [(0.0, 0.0, 2.0, 1.2), (3.0, 0.0, 5.0, 1.2)]
     ]
 
 
