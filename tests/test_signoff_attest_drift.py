@@ -95,7 +95,7 @@ def test_check_drift_names_a_drifted_command_by_its_testbench(tmp_path):
         }
 
 
-def test_pins_are_identified_by_role_alone(tmp_path):
+def test_pins_are_identified_by_role_and_pin_kind(tmp_path):
     """The `pdk`/`tools` pins carry no identity key beyond `role`, so their
     `check` object is the shared `pin` kind plus the role that tells the two
     apart -- `{"role": ..., "check": "pin"}` -- not an absent key."""
@@ -141,7 +141,7 @@ def test_an_added_testbench_still_reports_one_unannotated_whole_list_entry(tmp_p
     )
 
 
-def test_a_top_level_cold_start_is_identified_by_role_alone(tmp_path):
+def test_a_top_level_cold_start_is_identified_by_role_and_kind(tmp_path):
     """A top-level `cold_start` is one check covering every bench, so it has
     no `testbench` to name: `{"role": "cold_start", "check": "command"}` is
     its whole identity."""
@@ -179,3 +179,9 @@ def test_stream_check_identities_are_pairwise_distinct(tmp_path):
         {"role": "layout", "check": "top_cell_non_empty"},
         {"role": "layout", "check": "dbu_on_grid"},
     ]
+
+
+def test_a_check_with_no_kind_keeps_a_role_only_identity():
+    """The kind is read defensively: a check that carries no `check` key
+    still gets a stable `{"role": ...}` identity, not a KeyError."""
+    assert check_identity({"role": "layout"}) == {"role": "layout"}
