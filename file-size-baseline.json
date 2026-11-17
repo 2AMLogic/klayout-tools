@@ -601,7 +601,7 @@
     },
     {
       "path": "src/klayout_tools/sim_decks.py",
-      "lines": 2297
+      "lines": 2264
     },
     {
       "path": "src/klayout_tools/sim_remote.py",
