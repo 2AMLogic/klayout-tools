@@ -8520,14 +8520,15 @@ it is present even when every corner passed. The entry has `severity: "warning"`
 `code: "model_bin_range_preflight"`, and `instance`, `model`, `w_um`, `nf`
 fields. It never rejects the run; a `w` given as an expression is skipped.
 
-A `w` literal's unit follows the card it sits on (issue #5802). A literal with
-a unit suffix (`50u`, `100n`, `5e-5`) is read as written — an absolute
-SPICE quantity in metres, converted to µm for `w_um` — on every card kind. A
-**bare** number is read as micrometres on an `X` subckt call, the convention
-PDK device wrappers with micrometre parameters use (sky130: `W=13` is 13 µm,
-and the genuinely oversized `W=150` still warns at `w_um: 150`), and as metres
-on an `M` card (`w=1e-4` is 100 µm), matching SPICE's bare-number convention
-for primitive MOS cards.
+A `w` literal's unit follows the card it sits on (issue #5802). A literal that
+carries a **unit suffix** (`50u`, `100n`, `128u`) is read as written — an
+absolute SPICE quantity in metres, converted to µm for `w_um` — on every card
+kind. A **bare** literal — no suffix, including plain exponential notation
+(`13`, `150`, `1e-4`) — is read as micrometres on an `X` subckt call, the
+convention PDK device wrappers with micrometre parameters use (sky130: `W=13`
+is 13 µm, and the genuinely oversized `W=150` still warns at `w_um: 150`), and
+as metres on an `M` card (`w=1e-4` is 100 µm), matching SPICE's bare-number
+convention for primitive MOS cards.
 
 When ngspice's log matches this failure, `klt sim` re-scans the corner's own
 netlist for MOS-shaped instances (`M`/`X` cards) and picks out the one with

@@ -71,6 +71,21 @@ def test_bare_w_on_m_card_keeps_metres_reading():
     assert sim._parse_width_um("1e-4") == pytest.approx(100.0)
 
 
+def test_bare_exponential_follows_card_kind():
+    # Exponential notation without a suffix is still bare: on an X call it
+    # is um as written (1e-3 um is below the ceiling), on an M card it is
+    # metres (1e-3 m == 1000 um, flags).
+    assert (
+        sim._find_width_ceiling_culprit(
+            "XM1 d g s b sky130_fd_pr__nfet_01v8 W=1e-3 L=0.5\n"
+        )
+        is None
+    )
+    culprit = sim._find_width_ceiling_culprit("M1 d g s b nfet_06v0 w=1e-3 l=0.6u\n")
+    assert culprit is not None
+    assert culprit[2] == pytest.approx(1000.0)
+
+
 def test_suffixed_w_on_x_subckt_call_unchanged():
     # Regression guard on #4976/#1214: the suffixed path (every pre-#5802
     # test) keeps today's behaviour byte-for-byte on X instances.
