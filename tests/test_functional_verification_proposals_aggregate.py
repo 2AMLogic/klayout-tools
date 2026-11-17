@@ -19,6 +19,7 @@ from klayout_tools.functional_verification import FunctionalVerificationError
 from klayout_tools.functional_verification_mutation_proposals import (
     MUTATION_PROPOSALS_EXAMPLE,
     functional_verification_doc_location,
+    parse_mutation_proposals,
 )
 
 _FIELDS = ("index", "category", "file", "line", "original_code", "mutated_code")
@@ -166,7 +167,7 @@ def test_help_example_is_complete_and_valid(tmp_path, capsys):
     assert functional_verification_doc_location() in out
     # The example is copy-pasteable: it validates as a document.
     path = _write(tmp_path / "example.json", MUTATION_PROPOSALS_EXAMPLE)
-    _scope, _proposals, _indices, errors = fv.parse_mutation_proposals(path)
+    _scope, _proposals, _indices, errors = parse_mutation_proposals(path)
     assert errors == []
 
 

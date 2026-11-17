@@ -13,7 +13,7 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from ._vendor import mutation_variants as _mutation_variants
 
@@ -119,9 +119,15 @@ def _raise_collected(errors: list[str]) -> None:
     validation failure (issue #5679: the author sees the whole schema gap in
     one run, not one field per run). A single failure raises its message
     unchanged; several are joined with ``"; "``, each message's text kept
-    intact so substring matchers still find it."""
-    if not errors:
-        return
+    intact so substring matchers still find it. No-op when ``errors`` is
+    empty."""
+    if errors:
+        _raise_all_collected(errors)
+
+
+def _raise_all_collected(errors: list[str]) -> NoReturn:
+    """The always-raising half of :func:`_raise_collected`, for call sites
+    that know the list is non-empty and read better typed as diverging."""
     if len(errors) == 1:
         raise _fv.FunctionalVerificationError(errors[0])
     raise _fv.FunctionalVerificationError(
@@ -303,6 +309,38 @@ def _validate_mutation_scope(scope: list[str], request_sources: list[str]) -> No
     (expensive) baseline ever runs.
     """
     _raise_collected(_scope_errors(scope, request_sources))
+
+
+def _load_request_and_proposals(
+    request: str, proposals_path: str
+) -> tuple[dict[str, Any], str, list[str], list[_ProposalRecord]]:
+    """Load both ``--mutations`` input documents and validate them as one
+    report (issue #5679): cheap, whole-document checks before the expensive
+    baseline ever runs -- a malformed proposals document or an out-of-scope
+    entry should never cost a full build+test cycle to discover. The
+    ``<request>`` is parsed (a cheap JSON read) *before* the proposals are
+    judged so the ``scope`` subset check joins the same accumulated report:
+    one run names every failure, in both documents at once.
+
+    Returns ``(request_doc, request_dir, scope, proposal_records)``; raises
+    :class:`FunctionalVerificationError` naming every failure otherwise.
+    """
+    scope, proposal_records, indices, errors = parse_mutation_proposals(proposals_path)
+    try:
+        request_doc, request_dir = _fv.load_request_arg(request)
+    except _fv.FunctionalVerificationError as exc:
+        # Both documents malformed: report the proposals failures too rather
+        # than hiding them behind the request's own. `_raise_all_collected`
+        # always raises here (`str(exc)` keeps the list non-empty).
+        _raise_all_collected([*errors, *_index_errors(indices), str(exc)])
+    _fv._reject_verilog_top_mutations(request_doc.get("testbench"))
+    raw_sources = request_doc.get("sources")
+    errors.extend(_index_errors(indices))
+    errors.extend(
+        _scope_errors(scope, raw_sources if isinstance(raw_sources, list) else [])
+    )
+    _raise_collected(errors)
+    return request_doc, request_dir, scope, proposal_records
 
 
 def _resolve_mutation_proposals(

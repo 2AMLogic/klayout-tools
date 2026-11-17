@@ -15,11 +15,8 @@ import os
 from typing import Any
 
 from .functional_verification_mutation_proposals import (
-    _index_errors,
-    _raise_collected,
+    _load_request_and_proposals,
     _resolve_mutation_proposals,
-    _scope_errors,
-    parse_mutation_proposals,
 )
 from .functional_verification_mutation_variant import (
     _first_new_failure,
@@ -108,27 +105,13 @@ def run_functional_verification_with_mutations(
     module's own docstring's "Exit codes" table replicated in
     ``docs/cli/functional-verification.md``.
     """
-    # Cheap, whole-document validation first -- before the (expensive)
-    # baseline ever runs. Order matters: a malformed proposals document or
-    # an out-of-scope entry should never cost a full build+test cycle to
-    # discover. The `<request>` is parsed (a cheap JSON read) *before* the
-    # proposals are judged so the `scope` subset check joins the same
-    # accumulated report (issue #5679): one run names every failure.
-    scope, proposal_records, indices, errors = parse_mutation_proposals(proposals_path)
-    try:
-        request_doc, request_dir = _fv.load_request_arg(request)
-    except _fv.FunctionalVerificationError as exc:
-        # Both documents malformed: report the proposals failures too rather
-        # than hiding them behind the request's own.
-        _raise_collected([*errors, *_index_errors(indices), str(exc)])
-        raise
-    raw_sources = request_doc.get("sources")
-    errors.extend(_index_errors(indices))
-    errors.extend(
-        _scope_errors(scope, raw_sources if isinstance(raw_sources, list) else [])
+    # Cheap, whole-document validation of both input documents first -- before
+    # the (expensive) baseline ever runs; see
+    # :func:`.functional_verification_mutation_proposals._load_request_and_proposals`
+    # (issue #5679: one run names every failure, in both documents at once).
+    request_doc, request_dir, scope, proposal_records = _load_request_and_proposals(
+        request, proposals_path
     )
-    _raise_collected(errors)
-    _fv._reject_verilog_top_mutations(request_doc.get("testbench"))
 
     engine = request_doc.get("engine", _fv.DEFAULT_ENGINE)
     if engine not in _fv.SUPPORTED_ENGINES:

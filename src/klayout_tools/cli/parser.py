@@ -6,7 +6,6 @@ defaulting to ``text``. New subcommands register themselves here and point their
 """
 
 import argparse
-import json
 import sys
 
 from .. import (
@@ -35,7 +34,6 @@ from . import (
     evidence_cmd,
     fill_cmd,
     formal_cmd,
-    functional_verification_cmd,
     gen_cmd,
     gen_compose_cmd,
     interface_check_cmd,
@@ -88,6 +86,7 @@ from .parser_artifact import add_artifact_parser
 from .parser_characterize import add_characterize_parser
 from .parser_diff import add_diff_parser
 from .parser_economy import add_economy_parser
+from .parser_functional_verification import add_functional_verification_parser
 from .parser_netlist import add_netlist_parser
 from .parser_pex import add_pex_parser
 from .parser_sim import add_sim_parser
@@ -138,22 +137,6 @@ def _deck_names_str() -> str:
     from ..decks import deck_names
 
     return ", ".join(deck_names())
-
-
-class _RawText(str):
-    """Marks help text :class:`_RawEpilogFormatter` must not re-wrap."""
-
-
-class _RawEpilogFormatter(argparse.HelpFormatter):
-    """Wrap ``description`` like the default formatter but keep an epilog
-    built from :class:`_RawText` verbatim (a JSON example loses its layout
-    under re-wrapping; ``RawDescriptionHelpFormatter`` would instead stop
-    wrapping the long description)."""
-
-    def _fill_text(self, text: str, width: int, indent: str) -> str:
-        if isinstance(text, _RawText):
-            return "".join(indent + line for line in text.splitlines(keepends=True))
-        return super()._fill_text(text, width, indent)
 
 
 class _BuildVersionAction(argparse.Action):
@@ -314,7 +297,7 @@ def create_parser() -> argparse.ArgumentParser:
 
     _add_erc_parser(subparsers)
 
-    _add_functional_verification_parser(subparsers)
+    add_functional_verification_parser(subparsers, _add_format_arg)
     _add_place_and_route_parser(subparsers)
     _add_wave_parser(subparsers)
 
@@ -2521,85 +2504,6 @@ def _add_synthesize_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(synthesize_parser)
     synthesize_parser.set_defaults(func=synthesize_cmd.run)
-
-
-def _add_functional_verification_parser(
-    subparsers: argparse._SubParsersAction,
-) -> None:
-    """Register the ``functional-verification`` verb: run a cocotb
-    regression against Icarus/Verilator.
-    """
-    from klayout_tools.functional_verification_mutation_proposals import (
-        MUTATION_PROPOSALS_EXAMPLE,
-        functional_verification_doc_location,
-    )
-
-    doc_location = functional_verification_doc_location()
-    functional_verification_parser = subparsers.add_parser(
-        "functional-verification",
-        formatter_class=_RawEpilogFormatter,
-        epilog=_RawText(
-            "--mutations <proposals> example (every required field filled):\n"
-            + json.dumps(MUTATION_PROPOSALS_EXAMPLE, indent=2)
-            + "\n`index` is 1-based and unique; `scope` entries and `file` must "
-            "repeat a `request.sources` string exactly.\n"
-            "All validation errors are reported in one run.\n"
-            f"Full field table: {doc_location}"
-        ),
-        help="run a cocotb regression against Icarus/Verilator",
-        description=(
-            "Run a cocotb testbench against RTL sources through Icarus "
-            "Verilog (default) or Verilator, reporting a per-test "
-            "passed/failed/skipped breakdown plus optional Verilator "
-            "coverage -- see docs/design/cocotb-verification-spike.md "
-            "section 7 for the request/response contract and "
-            "docs/cli/functional-verification.md for the CLI surface. Phase "
-            "3 of Epic #391, and the hard gate behind `klt eval`'s `valid` "
-            "field (#387). Invoked exclusively through cocotb 2.0's "
-            "first-party Python `Runner` API, never a generated Makefile; "
-            "the verdict is always derived from the run's own `results.xml`, "
-            "never from a simulator's exit code. Requires cocotb (`pip "
-            "install cocotb`) plus an `iverilog` or `verilator` binary on "
-            '`$PATH`. `options.coverage` requires `engine: "verilator"`. '
-            "Takes a request document (like `klt lvs`/`klt sim`), not "
-            "positional RTL file args."
-        ),
-    )
-    functional_verification_parser.add_argument(
-        "request",
-        help=(
-            "klt functional-verification request: a path to a JSON file, '-' "
-            "to read the request from stdin, or an inline JSON object string"
-        ),
-    )
-    functional_verification_parser.add_argument(
-        "--mutations",
-        metavar="PROPOSALS_PATH",
-        help=(
-            "run mutation testing (issue #1592): a path to a <proposals> "
-            "JSON document (schema "
-            "klt.functional_verification.mutation_proposals/1) naming "
-            "byte-exact source mutations to apply, one at a time, to an "
-            "isolated build+test of the same <request>. Aborts with exit 1 "
-            "if the request's own baseline run fails first -- see "
-            f"{doc_location}, '--mutations' (example below)"
-        ),
-    )
-    functional_verification_parser.add_argument(
-        "-o",
-        "--outdir",
-        default=None,
-        help=(
-            "write run artifacts (results XML, logs, simulator build "
-            "directory, coverage, trace, mutants/) here instead of "
-            "`.klt/functional-verification/` next to the request file; "
-            "created if missing, relative paths resolve against the cwd. "
-            "Request-relative source paths still resolve against the "
-            "request's own directory"
-        ),
-    )
-    _add_format_arg(functional_verification_parser)
-    functional_verification_parser.set_defaults(func=functional_verification_cmd.run)
 
 
 def _add_place_and_route_parser(subparsers: argparse._SubParsersAction) -> None:
