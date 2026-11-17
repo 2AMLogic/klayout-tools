@@ -2647,17 +2647,17 @@ klt signoff --manifest manifest.json --check reports/block.signoff.json \
     { "field": "items.2.status", "committed": "met", "fresh": "unmet" },
     { "field": "t1_met_count", "committed": 11, "fresh": 10 }
   ],
+  "doc_drift": true,
+  "doc_drift_fields": [
+    { "field": "items.7.text", "committed": "…", "fresh": "… (reworded)" },
+    { "field": "source_doc_content_hash", "committed": "sha256:…", "fresh": "sha256:…" }
+  ],
   "build_skew": {
     "state": "build_only",
     "fields": [
       { "field": "build.git_commit", "committed": "d5d57daf…", "fresh": "5dbbad05…" }
     ]
   },
-  "doc_drift": true,
-  "doc_drift_fields": [
-    { "field": "items.7.text", "committed": "…", "fresh": "… (reworded)" },
-    { "field": "source_doc_content_hash", "committed": "sha256:…", "fresh": "sha256:…" }
-  ],
   "fresh": { "…": "the full freshly-graded report" }
 }
 ```

@@ -33,7 +33,6 @@ from klayout_tools import signoff_attest as attest_module
 from klayout_tools._provenance import layout_geometry_digest
 from klayout_tools._report_verify import strip_path_patterns
 from klayout_tools.cli import main
-from klayout_tools.cli.output import render_rerun_drift
 from klayout_tools.coverage import build_check_coverage
 from klayout_tools.design_evidence_tiers import (
     DesignEvidenceTiersError,
@@ -14368,29 +14367,6 @@ def test_doc_prose_exclusion_is_path_keyed_not_name_keyed():
         "items": [{"id": 3, "citation": {"text": "not prose"}}],
         "text": "top-level, not an item's",
     }
-
-
-def test_cli_check_text_output_omits_doc_drift_for_the_other_verbs(capsys):
-    """`render_rerun_drift` is shared with five other verbs' `--rerun`, whose
-    payloads carry no `doc_drift` key -- their output must stay byte-identical
-    to what it was before issue #2526."""
-    render_rerun_drift(
-        {
-            "report": "committed.json",
-            "status": "drifted",
-            "drift": [{"field": "violation_count", "committed": 0, "fresh": 2}],
-        }
-    )
-
-    assert capsys.readouterr().out == (
-        "report: committed.json\n"
-        "status: drifted\n"
-        "\n"
-        "drift:\n"
-        "  violation_count:\n"
-        "      committed: 0\n"
-        "      fresh:     2\n"
-    )
 
 
 # --------------------------------------------------------------------------- #

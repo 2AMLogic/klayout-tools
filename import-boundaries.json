@@ -695,6 +695,7 @@
       "kind": "verb",
       "description": "`klt signoff` implementation: core modules plus CLI adapter.",
       "modules": [
+        "klayout_tools._signoff_check_skew",
         "klayout_tools.cli.signoff_cmd",
         "klayout_tools.signoff",
         "klayout_tools.signoff_attest",

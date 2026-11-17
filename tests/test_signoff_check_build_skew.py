@@ -69,6 +69,10 @@ def test_skew_does_not_mask_real_drift():
         ({**_BUILD, "git_commit": "bbb"}, "different klt build"),
         ({**_BUILD, "grading_ruleset_id": "x"}, "different ruleset"),
         (_BUILD, None),
+        # `unknown` (committed report predates the `build` block) is silent
+        # too: there is nothing to name, so the text gate narrows to the two
+        # states above.
+        (None, None),
     ],
 )
 def test_text_line(capsys, build, needle):
@@ -78,3 +82,26 @@ def test_text_line(capsys, build, needle):
         assert "build_skew" not in out
     else:
         assert "build_skew:" in out and needle in out
+
+
+def test_cli_check_text_output_omits_doc_drift_for_the_other_verbs(capsys):
+    """`render_rerun_drift` is shared with five other verbs' `--rerun`, whose
+    payloads carry no `doc_drift` key -- their output must stay byte-identical
+    to what it was before issue #2526."""
+    render_rerun_drift(
+        {
+            "report": "committed.json",
+            "status": "drifted",
+            "drift": [{"field": "violation_count", "committed": 0, "fresh": 2}],
+        }
+    )
+
+    assert capsys.readouterr().out == (
+        "report: committed.json\n"
+        "status: drifted\n"
+        "\n"
+        "drift:\n"
+        "  violation_count:\n"
+        "      committed: 0\n"
+        "      fresh:     2\n"
+    )
