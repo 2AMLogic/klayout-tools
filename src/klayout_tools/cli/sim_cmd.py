@@ -40,6 +40,7 @@ see ``docs/cli/sim.md``'s "Operating-point lint" section.
 """
 
 import argparse
+import os
 import sys
 from typing import Any
 
@@ -152,7 +153,9 @@ def _run_sweep(args: argparse.Namespace) -> int:
     except (SimError, OutputLockError) as exc:
         return emit_error("sim", str(exc), args.format, code=exc.code)
 
-    if (write_failure := _write_report_out(report, args)) is not None:
+    if (
+        write_failure := _write_report_out(report, args, implicit_outdir=True)
+    ) is not None:
         return write_failure
     if report.get("status") == "submitted" and getattr(args, "submit_only", False):
         # Issue #3073: submitted, not run -- there is no verdict to grade.
@@ -194,17 +197,47 @@ def _exit_code_for(report: dict, deck_mode: bool) -> int:
     return EXIT_PASS
 
 
-def _write_report_out(report: dict, args: argparse.Namespace) -> int | None:
+def _implicit_report_out(report: dict, args: argparse.Namespace) -> str | None:
+    """The implicit ``<outdir>/report.json`` path (issue #5776), or ``None``.
+
+    An explicit ``-o`` on a single-request sweep now also receives the
+    report envelope -- the same filename ``--batch-set`` members write
+    (``sim_set.py``) -- so a completed run can no longer exit 0 having put
+    its evidence only on stdout. A run that only validated or only
+    submitted (``--dry-run``/``--submit-only``) has no completed envelope
+    to save and writes nothing.
+    """
+    if not getattr(args, "outdir", None):
+        return None
+    if report.get("dry_run") or report.get("status") == "submitted":
+        return None
+    return os.path.join(args.outdir, "report.json")
+
+
+def _write_report_out(
+    report: dict, args: argparse.Namespace, *, implicit_outdir: bool = False
+) -> int | None:
     """Write the ``--report-out`` file copy; return an exit code only on failure.
 
     Issue #2975: an additive file copy of the envelope; stdout is unchanged.
     Written before emitting so an unwritable path fails cleanly with the error
     envelope rather than after a full report.
+
+    Issue #5776: with ``implicit_outdir`` (the single-request sweep only --
+    ``--batch-set`` members already write their own ``report.json``), an
+    explicit ``-o`` without ``--report-out`` writes ``<outdir>/report.json``
+    as well, creating the directory if missing. A write failure there is the
+    same error envelope a ``--report-out`` failure is, never a silent skip.
     """
-    report_out = getattr(args, "report_out", None)
+    explicit = getattr(args, "report_out", None)
+    report_out = explicit or (
+        _implicit_report_out(report, args) if implicit_outdir else None
+    )
     if not report_out:
         return None
     try:
+        if implicit_outdir and not explicit:
+            os.makedirs(args.outdir, exist_ok=True)
         write_json_file(report, report_out)
     except OSError as exc:
         return emit_error(
