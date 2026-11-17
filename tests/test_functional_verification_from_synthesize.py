@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
 
 import pytest
 
@@ -68,6 +69,66 @@ def _refused(work, from_synthesize, match, **kw):
     assert not (work / ".klt").exists(), "a build directory was created"
 
 
+def _git(repo, *args):
+    subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+
+
+@pytest.fixture
+def repo(tmp_path, monkeypatch):
+    """A real git repo in the production layout: netlist under
+    ``build/run-abc/``, report in ``reports/``, request in ``req/`` -- three
+    different directories, so a resolution anchored on anything but the
+    report's own location misses the netlist."""
+    root = tmp_path / "repo"
+    (root / "build" / "run-abc").mkdir(parents=True)
+    (root / "reports").mkdir()
+    (root / "req").mkdir()
+    (root / "build" / "run-abc" / "gcd_synth.v").write_bytes(NETLIST)
+    (root / "req" / "test_gcd.py").write_text("# testbench\n")
+
+    def _stop(*_a, **_k):
+        raise _PastGate
+
+    monkeypatch.setattr(fv, "_import_runner", _stop)
+    _git(root, "init", "-q")
+    return root
+
+
+def _repo_report(root):
+    """A report in the shape ``klt synthesize`` actually writes:
+    ``netlist_path`` as the ``{path, scope: "repo"}`` envelope, not a bare
+    absolute string."""
+    path = root / "reports" / "report.json"
+    path.write_text(
+        json.dumps(
+            {
+                "hdl_toplevel": "gcd",
+                "netlist_path": {
+                    "path": "build/run-abc/gcd_synth.v",
+                    "scope": "repo",
+                },
+                "netlist_sha256": _digest(NETLIST),
+            }
+        )
+    )
+    return path
+
+
+def _repo_request(repo):
+    path = repo / "req" / "request.json"
+    path.write_text(
+        json.dumps(
+            {
+                "hdl_toplevel": "gcd",
+                "testbench": {"module": "test_gcd"},
+                "options": {"from_synthesize": {"report": "../reports/report.json"}},
+                "sources": [],
+            }
+        )
+    )
+    return path
+
+
 def test_matching_hash_passes_gate(work):
     _report(work)
     with pytest.raises(_PastGate):
@@ -90,6 +151,93 @@ def test_block_and_netlist_prepended(work):
     assert block["netlist_sha256"] == _digest(NETLIST)
     assert block["hash_check"]["match"] is True
     assert block["netlist"] == {"path": "gcd_synth.v", "scope": "repo"}
+
+
+def test_repo_scope_envelope_anchors_on_the_report_location(repo, monkeypatch):
+    """The production report shape -- ``netlist_path`` as ``{path, scope:
+    "repo"}`` -- resolves against the repo root discovered from the report's
+    own location, from a cwd outside the repo entirely. Anchoring on the cwd
+    (no repo there -> unresolvable) or on the request's directory
+    (``req/build/...`` -> netlist not found) would refuse instead."""
+    from klayout_tools.functional_verification_from_synthesize import (
+        resolve_from_synthesize,
+    )
+
+    _repo_report(repo)
+    request = _repo_request(repo)
+    monkeypatch.chdir(repo.parent)
+
+    netlist, _ = resolve_from_synthesize(
+        {"from_synthesize": {"report": "../reports/report.json"}},
+        str(repo / "req"),
+        "gcd",
+        fv._path_envelope,
+    )
+    assert netlist == os.path.join(
+        os.path.realpath(repo), "build", "run-abc", "gcd_synth.v"
+    )
+    with pytest.raises(_PastGate):
+        fv.run_functional_verification(str(request))
+
+
+def test_effective_sources_prepend_netlist_first(work):
+    """``resolve_sources_with_synthesize`` -- the function the run itself
+    uses -- prepends the verified netlist to a non-empty ``sources`` list,
+    netlist first."""
+    from klayout_tools.functional_verification_from_synthesize import (
+        resolve_sources_with_synthesize,
+    )
+
+    _report(work)
+    (work / "dut.v").write_text("module dut(); endmodule\n")
+    sources, block = resolve_sources_with_synthesize(
+        {
+            "options": {"from_synthesize": {"report": "report.json"}},
+            "sources": ["dut.v"],
+        },
+        str(work),
+        "gcd",
+        fv._path_envelope,
+    )
+    assert sources == [str(work / "gcd_synth.v"), str(work / "dut.v")]
+    assert block["hash_check"]["match"] is True
+
+
+def test_response_block_through_the_real_path_envelope(repo, monkeypatch):
+    """The ``from_synthesize`` response block built with the module's own
+    ``_path_envelope`` (the exact argument the production call site passes),
+    run from inside the repo so both envelopes come out repo-relative --
+    then attached to a response by ``with_from_synthesize``."""
+    from klayout_tools.functional_verification_from_synthesize import (
+        resolve_sources_with_synthesize,
+        with_from_synthesize,
+    )
+
+    _repo_report(repo)
+    request = {
+        "hdl_toplevel": "gcd",
+        "testbench": {"module": "test_gcd"},
+        "options": {"from_synthesize": {"report": "../reports/report.json"}},
+        "sources": [],
+    }
+    monkeypatch.chdir(repo)
+
+    sources, block = resolve_sources_with_synthesize(
+        request, str(repo / "req"), "gcd", fv._path_envelope
+    )
+    assert sources == [
+        os.path.join(os.path.realpath(repo), "build", "run-abc", "gcd_synth.v")
+    ]
+    assert block["report"] == {"path": "reports/report.json", "scope": "repo"}
+    assert block["netlist"] == {"path": "build/run-abc/gcd_synth.v", "scope": "repo"}
+    assert block["netlist_sha256"] == _digest(NETLIST)
+    assert block["hash_check"]["match"] is True
+
+    response = with_from_synthesize({"status": "pass"}, block)
+    assert response["from_synthesize"]["netlist"] == {
+        "path": "build/run-abc/gcd_synth.v",
+        "scope": "repo",
+    }
 
 
 def test_stale_netlist_refused_naming_both_digests(work):
