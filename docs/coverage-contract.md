@@ -35,15 +35,28 @@ coverage fields remain alongside the common fields.
 | `known` | Boolean: the producer can account for this coverage scope's execution. Exactly equivalent to an empty `unknown` array. |
 | `checked` | Unique stable string identities for work actually checked, including checks that failed. A declaration or an attempted engine launch alone does not count. |
 | `skipped` | Requested work not checked, each `{id, reason}`. Reasons are nonempty stable codes matching `[a-z][a-z0-9_]*`. |
-| `inapplicable` | Work outside this invocation's applicable assessment, with the same identity/reason shape. These entries do not make otherwise complete work partial. | A record may carry an optional non-empty `missing` list of strings (e.g. `klt erc`'s `substrate_isolation_undecidable`) naming the information still needed.
+| `inapplicable` | Work outside this invocation's applicable assessment, with the same identity/reason shape. These entries do not make otherwise complete work partial. |
 | `unknown` | Execution whose extent cannot be measured, with the same shape. Unknown is neither zero nor full coverage. Actual findings can coexist with unknown coverage. |
 | `nothing_checked` | Exactly `known && checked.length == 0`. An unknown run must report `false`, even if it cannot prove a single check. |
 | `nothing_checked_reasons` | Nonempty unique reason codes only for known zero checked work; otherwise `[]`. |
 
-All eight fields are required in a versioned block. Identities are disjoint
-across the four work arrays. The Python validator additionally checks this
-cross-array constraint, which the JSON Schema cannot express. Producers sort
-identities deterministically; identity is not a count or free-form prose.
+All eight fields are required in a versioned block. Work records may carry a
+non-empty `missing` list of strings naming information still needed, as in
+`klt erc`'s `substrate_isolation_undecidable` record.
+
+A `skipped` or `inapplicable` record can also carry a positive integer `count`.
+Omitting `count` represents one unit. Consumers sum the counts for unit
+totals and use the list length for record totals. `checked` stays an array of
+identities. `unknown` records have no `count`.
+
+Every emitted ID is unique within and across the four work arrays,
+regardless of reason or count. The Python validator enforces ID uniqueness.
+An aggregate ID identifies the group. Producers must emit disjoint groups and
+omit the individual records represented by each group. The validator can
+detect repeated IDs among emitted records. Checking membership overlap is the
+producer's responsibility because a group ID and count carry no member list.
+
+Producers sort identities deterministically.
 DRC uses its rule IDs. Other adapters use `domain:` followed by a compact JSON
 array of scope components (for example
 `limit:[0,"tt/1.800V/27C","vout","max"]`). JSON quoting prevents names

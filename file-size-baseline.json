@@ -281,7 +281,7 @@
     },
     {
       "path": "src/klayout_tools/erc.py",
-      "lines": 3524
+      "lines": 3517
     },
     {
       "path": "src/klayout_tools/erc_spec.py",
@@ -569,7 +569,7 @@
     },
     {
       "path": "src/klayout_tools/signoff.py",
-      "lines": 7281
+      "lines": 7268
     },
     {
       "path": "src/klayout_tools/signoff_attest.py",
