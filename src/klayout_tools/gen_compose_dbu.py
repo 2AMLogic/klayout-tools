@@ -3,7 +3,7 @@
 module's file-size ratchet (issue #2766).
 
 ``klt gen-compose`` writes the composed cell at the PDK's required **stream**
-dbu (:func:`klayout_tools.pdk_output_dbu.resolve_output_dbu`) whenever the
+dbu (:func:`klayout_tools.pdk_output_dbu.required_stream_dbu`) whenever the
 family declares one. A block still sitting at a finer, evenly-related dbu
 (e.g. a gf180mcu place-and-route stream at the LEF's 0.0005 meeting the
 family's required 0.001) is rescaled *down* onto the target -- the direction
@@ -64,25 +64,39 @@ def _reachable_cells(layout: Any, top_cell: Any) -> list[Any]:
 
 
 def _shape_vertex_offender(
-    layout: Any, top_cell: Any, ratio: int
+    layout: Any, cells: list[Any], ratio: int
 ) -> tuple[str, int, int] | None:
-    """The first ``(layer name, x, y)`` polygon vertex under ``top_cell``'s
-    tree that is off the ratio-``ratio`` grid, via ``kdb.Region.grid_check``
-    -- the primitive the open PDKs' DRC-DSL ``ongrid`` checks compile to
-    (:func:`klayout_tools.drc._run_grid_check`) -- or ``None`` when every
-    vertex is on it."""
+    """The first ``(layer name, x, y)`` polygon vertex in any reachable
+    cell's *own* shapes that is off the ratio-``ratio`` grid, via
+    ``kdb.Region.grid_check`` -- the primitive the open PDKs' DRC-DSL
+    ``ongrid`` checks compile to (:func:`klayout_tools.drc._run_grid_check`)
+    -- or ``None`` when every vertex is on it.
+
+    Measured per reachable cell, non-recursively, rather than over the
+    flattened top region: ``kdb.Layout.transform`` divides each cell's own
+    coordinates, and the flattened region hides a cell-local offender behind
+    a magnified instance -- ``transform`` divides the child's coordinates by
+    the ratio regardless of the magnification the instance applies, so a
+    ``mag != 1`` instance over on-grid-looking geometry can carry off-grid
+    cell-local coordinates the flattened pass never sees.
+    """
     import klayout.db as kdb
 
-    for layer_index in layout.layer_indexes():
-        info = layout.get_info(layer_index)
-        layer_name = f"layer {info.layer}/{info.datatype}"
-        region = kdb.Region(top_cell.begin_shapes_rec(layer_index)).merged()
-        if region.is_empty():
-            continue
-        offenders = region.grid_check(ratio, ratio)
-        if not offenders.is_empty():
-            point = next(iter(offenders.each())).first.p1
-            return (f"a shape vertex on {layer_name}", point.x, point.y)
+    for cell in cells:
+        for layer_index in layout.layer_indexes():
+            info = layout.get_info(layer_index)
+            layer_name = f"layer {info.layer}/{info.datatype}"
+            region = kdb.Region(cell.shapes(layer_index)).merged()
+            if region.is_empty():
+                continue
+            offenders = region.grid_check(ratio, ratio)
+            if not offenders.is_empty():
+                point = next(iter(offenders.each())).first.p1
+                return (
+                    f"a shape vertex on {layer_name} in cell '{cell.name}'",
+                    point.x,
+                    point.y,
+                )
     return None
 
 
@@ -147,7 +161,7 @@ def _assert_grid_exact(layout: Any, top_cell: Any, ratio: int) -> None:
     coordinate. A pass returns ``None`` and the caller may divide safely."""
     cells = _reachable_cells(layout, top_cell)
     checks = (
-        _shape_vertex_offender(layout, top_cell, ratio),
+        _shape_vertex_offender(layout, cells, ratio),
         _text_offender(layout, cells, ratio),
         _instance_vector_offender(layout, cells, ratio),
     )

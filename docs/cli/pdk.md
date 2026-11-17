@@ -1928,12 +1928,13 @@ different dbu answers:
 
 ```python
 from klayout_tools.pdk import resolve_pdk_dbu
-from klayout_tools.pdk_output_dbu import resolve_output_dbu
+from klayout_tools.pdk_output_dbu import required_stream_dbu, resolve_output_dbu
 
 info = find_pdk(variant="gf180mcuA")
 
 resolve_pdk_dbu(info)  # 0.0005 -- the tech LEF's DATABASE MICRONS 2000 truth
 resolve_output_dbu(info)  # 0.001  -- the dbu a *stream for* this PDK must be at
+required_stream_dbu(info)  # 0.001 for gf180mcu; None when the family declares none
 ```
 
 - **`resolve_pdk_dbu(pdk_info)`** is the tech LEF's `DATABASE MICRONS` truth
@@ -1951,9 +1952,17 @@ resolve_output_dbu(info)  # 0.001  -- the dbu a *stream for* this PDK must be at
   `extent.output('DBU', ...) if dbu != 0.001`) that rejects a 0.0005 stream
   whole-cell — falling through to `resolve_pdk_dbu` for every family with no
   declared requirement, and returning `None` exactly where `resolve_pdk_dbu`
-  would. `klt gen` and `klt gen-compose` write at it (see
-  [`gen.md`](gen.md)'s "Output database unit (dbu)" and
-  [`gen-compose.md`](gen-compose.md)'s "Reconciling mismatched `dbu`s").
+  would. `klt gen` writes at it (see
+  [`gen.md`](gen.md)'s "Output database unit (dbu)"), where the fall-through
+  reproduces the pre-#5721 stream byte-for-byte.
+- **`required_stream_dbu(pdk_info)`** is that answer's narrower half: only a
+  *declared* requirement, `None` with no fall-through. `klt gen-compose`
+  resolves its composed-dbu target with it, because compose's own fallback
+  when no requirement is declared is the *finest block's* dbu (issue #1514)
+  — falling through to the tech LEF there would silently replace that
+  refinement target for every family whose install ships a readable tech
+  LEF (see [`gen-compose.md`](gen-compose.md)'s "Reconciling mismatched
+  `dbu`s").
 
 Why the two disagree on gf180mcu and both are still kept: the tech LEF's
 `DATABASE MICRONS 2000` is LEF headroom nothing in the install uses (every

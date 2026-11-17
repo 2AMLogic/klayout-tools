@@ -13,9 +13,15 @@ questions**, and both are needed:
 - :func:`resolve_output_dbu` (here) is "what dbu a stream **for** this PDK
   must be written at": the family's entry in :data:`_REQUIRED_STREAM_DBU_UM`
   when one is declared, falling through to :func:`klayout_tools.pdk.
-  resolve_pdk_dbu` otherwise. ``klt gen``/``klt gen-compose`` write at this
-  value (issue #5721); ``klt place_and_route``'s DEF reading keeps
-  ``resolve_pdk_dbu``.
+  resolve_pdk_dbu` otherwise. ``klt gen`` writes at this value (issue
+  #5721); ``klt place_and_route``'s DEF reading keeps ``resolve_pdk_dbu``.
+- :func:`required_stream_dbu` (here too) is the narrower half of that
+  answer -- only a *declared* requirement, ``None`` with no fall-through.
+  ``klt gen-compose`` resolves its target with it: its fallback when no
+  requirement is declared is the *finest block's* own dbu (issue #1514),
+  not the tech LEF's, so falling through to ``resolve_pdk_dbu`` there would
+  silently replace that refinement target for every family whose install
+  ships a readable tech LEF (sky130 et al.).
 """
 
 from __future__ import annotations
@@ -68,3 +74,23 @@ def resolve_output_dbu(pdk_info: dict[str, Any]) -> float | None:
     if required is not None:
         return required
     return resolve_pdk_dbu(pdk_info)
+
+
+def required_stream_dbu(pdk_info: dict[str, Any]) -> float | None:
+    """The family's *declared* required stream dbu -- its entry in
+    :data:`_REQUIRED_STREAM_DBU_UM` -- or ``None`` when it declares none,
+    with **no** fall-through to :func:`klayout_tools.pdk.resolve_pdk_dbu`.
+
+    ``klt gen-compose`` resolves its composed-dbu target with this narrower
+    accessor rather than :func:`resolve_output_dbu`: when no requirement is
+    declared its fallback is the *finest block's* own dbu (issue #1514) --
+    the refinement direction ``klt place_and_route``'s ``output_dbu_um``
+    (#4482) exists to request -- and falling through to the tech LEF there
+    would silently replace that fallback with the PDK's LEF dbu for every
+    family whose install ships a readable tech LEF. ``klt gen`` keeps
+    :func:`resolve_output_dbu`, whose fall-through is exactly
+    behaviour-preserving there (#1496).
+    """
+    return _REQUIRED_STREAM_DBU_UM.get(
+        pdk_variant_family(pdk_info.get("variant") or "")
+    )

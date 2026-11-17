@@ -259,7 +259,7 @@ from .gen_compose_routing import route_two_pin as route_two_pin
 from .gen_compose_via_cuts import own_via_cut_clearance_reason, via_drop_cut_side_um
 from .gen_layer_params import mfg_grid_um
 from .pdk import PdkNotFoundError, find_pdk
-from .pdk_output_dbu import resolve_output_dbu
+from .pdk_output_dbu import required_stream_dbu
 
 #: Contract identifier for the request envelope (spike section 2).
 REQUEST_SCHEMA = "klt.gen_compose.request/1"
@@ -4474,7 +4474,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         via_drop_size_um=via_drop_size_um,
         landing_pad_size_um=landing_pad_size_um,
         boundary_bbox_um=boundary_bbox_um,
-        required_output_dbu_um=resolve_output_dbu(pdk_info),
+        required_output_dbu_um=required_stream_dbu(pdk_info),
     )
     warnings.extend(dbu_rescale_warnings)
 
@@ -4832,9 +4832,11 @@ def _write_composed_gds(
     routed metal. Returns ``(dbu, rescale_warnings)`` -- ``dbu`` is the
     composed layout's own dbu (:func:`compose` echoes it as the response's
     ``dbu_um``, issue #1496), resolved as the PDK's required stream dbu when
-    ``required_output_dbu_um`` is given (issue #5721:
-    :func:`~klayout_tools.pdk_output_dbu.resolve_output_dbu`, e.g. 0.001 for gf180mcu
-    even though every gf180mcu block's own stream is finer), else the
+    ``required_output_dbu_um`` is given (issue #5721: the family's
+    *declared* requirement only,
+    :func:`~klayout_tools.pdk_output_dbu.required_stream_dbu` -- 0.001 for gf180mcu
+    even though every gf180mcu block's own stream is finer; ``None`` for
+    every family with no declared entry, e.g. sky130), else the
     *finest* dbu among all blocks (issue #1514); ``rescale_warnings``
     is one string per block whose own dbu differed and was rescaled onto it,
     which :func:`compose` folds into the response's top-level ``warnings``.

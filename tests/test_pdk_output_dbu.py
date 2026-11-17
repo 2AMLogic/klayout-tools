@@ -15,7 +15,7 @@ rather than one replacing the other.
 import pytest
 
 from klayout_tools import pdk
-from klayout_tools.pdk_output_dbu import resolve_output_dbu
+from klayout_tools.pdk_output_dbu import required_stream_dbu, resolve_output_dbu
 
 
 def _make_install(root, variant):
@@ -100,3 +100,36 @@ def test_resolve_output_dbu_falls_through_to_none_without_requirement(tmp_path):
 
     assert pdk.resolve_pdk_dbu(info) is None
     assert resolve_output_dbu(info) is None
+
+
+def test_required_stream_dbu_declared_family(tmp_path):
+    """The compose-side accessor returns the declared family requirement and
+    nothing else: gf180mcu resolves 0.001 even with no tech LEF at all --
+    the same install on which the fall-through accessor also resolves 0.001
+    (its table entry), so the two only differ for undeclared families."""
+    root = tmp_path / "install"
+    _make_install(root, "gf180mcuD")  # no techlef/ written
+
+    info = pdk.find_pdk(variant="gf180mcuD", root=str(root))
+
+    assert required_stream_dbu(info) == pytest.approx(0.001)
+    assert resolve_output_dbu(info) == pytest.approx(0.001)
+
+
+def test_required_stream_dbu_no_requirement_is_none_even_with_tech_lef(tmp_path):
+    """`klt gen-compose`'s target accessor has **no** fall-through: a sky130A
+    install whose tech LEF declares `DATABASE MICRONS 1000` resolves `None`,
+    so compose keeps its finest-across-blocks fallback (#1514) instead of
+    inheriting the LEF's 0.001 -- which would have replaced the refinement
+    target for every family with a readable LEF (`resolve_output_dbu` keeps
+    the fall-through, because `klt gen` genuinely writes at the LEF's
+    answer for such a family)."""
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A")
+    _write_tech_lef(variant_dir, "sky130_fd_sc_hd", "tt", 1000)
+
+    info = pdk.find_pdk(variant="sky130A", root=str(root))
+
+    assert pdk.resolve_pdk_dbu(info) == pytest.approx(0.001)
+    assert required_stream_dbu(info) is None
+    assert resolve_output_dbu(info) == pytest.approx(0.001)

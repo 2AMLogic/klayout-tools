@@ -20,12 +20,17 @@ not `klt --version`, if you need to detect this kind of drift. See
   rule (`rule_decks/geom.rb`: `extent.output('DBU', ...) if dbu != 0.001`),
   so every `klt gen`/`klt gen-compose` stream this flow produced for the
   family carried a whole-cell `DBU` marker under the PDK's own deck and could
-  not be handed to it without a rewrite. `klt gen` and `klt gen-compose` now
-  write at `pdk_output_dbu.resolve_output_dbu`'s answer — the family's required stream
+  not be handed to it without a rewrite. `klt gen` now writes at
+  `pdk_output_dbu.resolve_output_dbu`'s answer — the family's required stream
   dbu (`0.001` for gf180mcu, the only declared entry today), falling through
   to the tech LEF `DATABASE MICRONS` for families with no requirement
-  (sky130/asap7/sg13g2 unchanged), and to the historical `0.001` default when
-  neither resolves. `pdk.resolve_pdk_dbu` is **unchanged** and remains the
+  (byte-identical to the pre-#5721 stream for every such family), and to the
+  historical `0.001` default when neither resolves. `klt gen-compose` targets
+  the family's *declared* requirement only (`pdk_output_dbu.required_stream_dbu`,
+  no fall-through), keeping its #1514 finest-across-blocks target — and
+  therefore its streams byte-identical — for every family with no declared
+  entry (sky130/asap7/sg13g2 unchanged), even when their installs ship a
+  readable tech LEF. `pdk.resolve_pdk_dbu` is **unchanged** and remains the
   tech-LEF truth a DEF reader must use (`klt place-and-route` keeps reading
   DEFs at it). `gen-compose` targeting gf180mcu coarsens a finer
   (0.0005 `place-and-route`-style) block onto `0.001` — but only after
