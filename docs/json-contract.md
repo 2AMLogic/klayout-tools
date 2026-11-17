@@ -175,6 +175,21 @@ refused before simulating (exit 1, usual error envelope) with both stamps in
 the message. No `schema_version` bump. See [`docs/cli/sim.md`](cli/sim.md)'s
 "`environment.netlist_identity`".
 
+`klt sim` also gains an additive `environment.device_multiplier` (issue
+#5779): the device-multiplier lint's findings for instances whose vendor
+`mult` parameter and SPICE `m=` drive multiplier disagree on a subcircuit
+that declares `mult` but never forwards it to drive — a new finding class,
+warning-only. `findings` carry the instance, target subcircuit, both raw
+values and a note; a `note` (never an error) discloses instances whose
+subcircuit text is absent from the scanned include closure, `unevaluated`
+lists non-numeric `m=`/`mult=` values that cannot be compared, and
+`not_scanned` discloses closure parts that could not be read. The field is
+absent when there is nothing to disclose, the exit code and every existing
+field are unchanged, and the note wording never suggests dropping either
+multiplier form (`mult` is live in mismatch Monte Carlo runs). No
+`schema_version` bump. See [`docs/cli/sim.md`](cli/sim.md)'s "Device
+multiplier warnings".
+
 `klt sim --job-status` (issue #4291) passes an optional `progress` object
 (e.g. `sim_time_s`, `stop_time_s`) through from the fleet's `status.json` when
 the runner publishes one. Additive and absent otherwise; the existing fields
