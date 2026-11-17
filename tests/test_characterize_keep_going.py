@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 
 import pytest
 
@@ -187,3 +188,35 @@ def test_text_output_lists_failed_cells(tmp_path, monkeypatch, capsys):
     assert characterize_cmd.run(args) == 0
     out = capsys.readouterr().out
     assert "FAILED" in out and "failed: inv_demo" in out
+
+
+_ENGINE_BUILD = {
+    "version_banner": None,
+    "binary_sha256": None,
+    "probe": "error",
+    "reason": "probe failed",
+}
+
+
+def test_engine_build_forwarded_verbatim_per_cell(tmp_path, monkeypatch):
+    sim_report = {
+        **_SIM_REPORT,
+        "environment": {**_SIM_REPORT["environment"], "engine_build": _ENGINE_BUILD},
+    }
+    monkeypatch.setattr(sys.modules[__name__], "_SIM_REPORT", sim_report)
+    request = _batch_request(tmp_path)
+    _fake_cells(monkeypatch, tmp_path, request)
+    report = characterize.run_characterize(str(_write_request(tmp_path, request)))
+    assert report["simulation"] is None
+    assert [c["simulation"]["engine_build"] for c in report["cells"]] == [
+        _ENGINE_BUILD,
+        _ENGINE_BUILD,
+    ]
+
+
+def test_engine_build_is_null_when_report_has_none(tmp_path, monkeypatch):
+    request = _batch_request(tmp_path)
+    _fake_cells(monkeypatch, tmp_path, request)
+    report = characterize.run_characterize(str(_write_request(tmp_path, request)))
+    for cell in report["cells"]:
+        assert cell["simulation"]["engine_build"] is None

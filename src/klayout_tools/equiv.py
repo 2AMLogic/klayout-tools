@@ -55,6 +55,7 @@ import subprocess
 import time
 from typing import Any
 
+from ._engine_proc import run_in_group
 from ._paths import _load_request_json, resolve_tool_binary, validate_request_shape
 from ._paths import load_request_arg as _shared_load_request_arg
 from ._provenance import (
@@ -398,11 +399,10 @@ def run_equiv(
 
     started = time.monotonic()
     timed_out = False
-    stdout = ""
-    stderr = ""
+    stdout = stderr = ""
     returncode: int | None = None
     try:
-        completed = subprocess.run(
+        completed = run_in_group(
             [yosys_binary, "-s", script_path],
             capture_output=True,
             text=True,

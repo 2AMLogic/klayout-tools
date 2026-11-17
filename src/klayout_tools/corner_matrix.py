@@ -79,7 +79,19 @@ def _duplicates(ids: list[str]) -> list[str]:
 
 
 def _measurement_nonfinite(corner: dict[str, Any]) -> bool:
-    for measurement in corner.get("measurements") or []:
+    corner_id = corner.get("corner_id")
+    measurements = corner.get("measurements")
+    if measurements is None:
+        return False
+    if not isinstance(measurements, list) or not all(
+        isinstance(measurement, dict) for measurement in measurements
+    ):
+        # Route malformed shapes through CornerMatrixError so the CLI emits
+        # its documented error envelope instead of a traceback (issue #5872).
+        raise CornerMatrixError(
+            f"report corner {corner_id!r}: measurements must be an array of objects"
+        )
+    for measurement in measurements:
         value = measurement.get("value")
         if isinstance(value, bool):
             continue
