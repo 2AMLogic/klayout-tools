@@ -50,22 +50,25 @@ The value is computed by the same code path a real run records
 `klt drc --deck sky130 <layout>` would report in its
 `provenance.deck.content_hash`.
 
+This excerpt from `klt deck hash --deck sky130 --format json` uses
+`sha256:...` for this build's deck hash.
+
 ```json
 {
   "schema_version": 1,
   "deck": "sky130",
-  "content_hash": "sha256:2e78949d63f03012c505528158948a250e18c2c21c8710c85a23a8243649f4d0",
-  "released": false
+  "content_hash": "sha256:..."
 }
 ```
 
 - `deck` / `content_hash` — the deck name and its `sha256:`-prefixed content
   hash, named exactly as `provenance.deck` names them so a consumer comparing
   against a committed report compares like with like.
-- `released` — the same tri-state signal `provenance.deck.released` carries
-  (`true`/`false`/`null`; see [`../json-contract.md`](../json-contract.md)),
-  from the generated release-history table. The *hash* never depends on that
-  table: a missing or malformed table yields `released: null`, not an error.
+- `released` — the full response includes the same tri-state signal as
+  `provenance.deck.released`. It is `true` when the generated release-history
+  table records the hash, `false` when the table has no matching entry, and
+  `null` when the table is missing or malformed. The hash is computed
+  independently of the table. See [`../json-contract.md`](../json-contract.md).
 
 An unknown deck name is a clean error (exit 1) through the standard envelope,
 and names what is available:
@@ -370,11 +373,14 @@ comment by hand, producing a copy that silently stops tracking the deck the
 moment the deck moves, and a citation ("0.15 µm, `poly.1a`") that no reviewer
 could re-check mechanically.
 
+This excerpt from `klt deck rules --deck sky130 --rule poly.width.1 --format json`
+uses `sha256:...` for this build's deck hash.
+
 ```json
 {
   "schema_version": 1,
   "deck": "sky130",
-  "content_hash": "sha256:a1d90e066e822d0a8f36e2d4f4969b83df4360692f689b5815be9c3f151f7c8e",
+  "content_hash": "sha256:...",
   "nominal_dbu_um": 0.001,
   "rules": [
     {
