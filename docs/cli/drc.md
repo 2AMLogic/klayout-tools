@@ -1127,8 +1127,16 @@ side is the existing `topmetal1.enclosing.topvia1.1`).
 
 Remaining limitations: `Cont` against `Activ | GatPoly` (Contact layer `6/0` is
 still unread by the sg13cmos5l deck) needs compound-region/population
-semantics and is **not** covered; other PDKs' via stacks (including sg13g2) have
-not been reviewed for this opt-in and keep the legacy behaviour.
+semantics and is **not** covered; other PDKs' via stacks have
+not been reviewed for this opt-in and keep the legacy behaviour. The sg13g2
+deck opts in for every cut side it models (issue #5916): Cont's Metal1 upper
+landing (new curated `metal1.enclosing.cont.1`), Via1-Via4's modelled lower
+landings plus new curated upper landings (`metal2.enclosing.via1.1`,
+`metal3.enclosing.via2.1`, `metal4.enclosing.via3.1`, `metal5.enclosing.via4.1`),
+TopVia1 both sides, and TopVia2 both sides; its `mim.enclosing.topvia1.1`
+keeps the legacy behaviour (TopVia1 is shared between the MIM-cap population
+and ordinary Metal5->TopMetal1 routing) and its Cont lower side stays
+uncovered exactly as sg13cmos5l's does above.
 
 ### Sized/derived-layer rules (`DerivedLayer`)
 
@@ -3735,7 +3743,7 @@ zero-violation case (where `drc__error__count` is `0`).
 | `source_cell` | string \| null       | Cell-definition name of the *innermost placed instance* whose bounding box fully contains this violation's `bbox` — the originating standard cell for a hierarchical, machine-generated layout. `null` when the violation is contained in no single instance: top-level geometry, or a `bbox` that straddles an instance boundary (a violation *between* two placements belongs to neither). See "Per-instance attribution" below. |
 | `source_path` | array\<string\> \| null | The instance chain from the top cell's direct child down to `source_cell` (inclusive), e.g. `["block_a", "sky130_fd_sc_hd__inv_2"]`; a single-element list for a directly-placed leaf. `null` exactly when `source_cell` is `null`. |
 | `bbox`        | object (dbu ints)    | `{"left", "bottom", "right", "top"}`, in database units.                     |
-| `polygon`     | array\<[x,y]\> \| null | Vertices in database units, or `null` if the check produced a degenerate edge pair that could not be converted to a polygon. |
+| `polygon`     | array\<[x,y]\> \| null | Vertices in database units, or `null` if the check produced a degenerate edge pair that could not be converted to a polygon. A marker whose hull is zero-area — every vertex collinear on the failing edge, which a total-deficit edge pair produces (e.g. an `enclosing` violation where the enclosed edge is exactly coincident with the enclosing edge, zero extension) — is reported as a 2-point segment `[min, max]` spanning the failing edge's full extent, not as the self-touching quad the hull literally is. |
 
 `violations` is sorted by
 `(rule, cell, bbox.left, bbox.bottom, bbox.right, bbox.top)` so repeated runs
