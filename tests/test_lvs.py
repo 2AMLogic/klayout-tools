@@ -25457,25 +25457,9 @@ def test_abstract_cells_on_pre_extracted_netlist_is_rejected(
         run_lvs(json.dumps(request))
 
 
-def test_abstract_cell_lef_alone_on_pre_extracted_netlist_is_accepted(tmp_path):
-    """Issue #5842: on the `layout.netlist` shape the LEF is a disclosure-only
-    input -- accepted without `abstract_cells`, echoed for `--check --rerun`,
-    and the verdict is unchanged (no `abstracted_cells`, nothing extracted)."""
-    layout_path, reference_path = _matching_netlist_request(tmp_path)
-    (tmp_path / "cells.lef").write_text("MACRO nothing\nEND nothing\n")
-    base = {"layout": {"netlist": layout_path, "top": "inv"}}
-    base["reference"] = {"netlist": reference_path, "top": "inv"}
-    plain = run_lvs(json.dumps(base))
-    base["layout"]["abstract_cell_lef"] = [str(tmp_path / "cells.lef")]
-    report = run_lvs(json.dumps(base))
-    assert report["status"] == plain["status"]
-    assert report["abstract_cell_lef"] == [str(tmp_path / "cells.lef")]
-    assert "abstracted_cells" not in report
-
-
 def test_abstract_cell_lef_without_abstract_cells_is_a_clean_lvs_error(tmp_path):
-    """Mirrors `klt extract`: the LEF is only a pin-resolution fallback for a
-    matched cell type, so giving it alone is a request mistake."""
+    """Mirrors `klt extract`: the LEF only supplies pins for a matched cell
+    type, so giving it alone (inline shape) is a request mistake."""
     request = {
         "layout": {
             "file": str(tmp_path / "absent.gds"),

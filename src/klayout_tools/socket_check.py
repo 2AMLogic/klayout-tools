@@ -72,11 +72,11 @@ SUPPLY_PIN_USES: frozenset[str] = frozenset({"POWER", "GROUND"})
 #: Name substrings (checked case-insensitively against each alphanumeric
 #: token, e.g. ``AVDD33`` matches ``VDD``, ``VD`` does not) that classify a
 #: pin as a supply when the descriptor does not declare an explicit
-#: ``use``/``direction`` -- this repo's own documented heuristic (there is
-#: no mechanical way to derive this from geometry alone), not an
-#: open_pdks/LEF-spec convention. Shared by `klt lef-abstract`'s emitted
-#: ``PIN USE`` and this module's ``power_ports`` check (issue #2839). See
-#: :func:`classify_pin_by_name`.
+#: ``use``/``direction`` -- this repo's own documented heuristic, not an
+#: open_pdks/LEF-spec convention. POWER is matched *before* GROUND so the
+#: well tie ``VPW`` (a substring of sky130's ``VPWR``/``VPWRA``) cannot
+#: reclassify the rail as ground (#5842). Shared by `klt lef-abstract`'s
+#: emitted ``PIN USE`` and the ``power_ports`` check (issue #2839).
 GROUND_NAME_TOKENS: tuple[str, ...] = ("VSS", "VGND", "GND", "VNB", "VPW")
 POWER_NAME_TOKENS: tuple[str, ...] = ("VDD", "VPWR", "VCC", "VPB", "VNW")
 
@@ -86,20 +86,20 @@ _NAME_TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
 def classify_pin_by_name(name: str) -> tuple[str, str]:
     """``(direction, use)`` heuristic for a pin the descriptor does not
     explicitly classify. Name tokens are matched case-insensitively as whole
-    alphanumeric runs (``AVDD33`` matches ``VDD`` via its ``AVDD`` token
-    containing it; ``VD`` alone does not match anything) against
-    :data:`GROUND_NAME_TOKENS`/:data:`POWER_NAME_TOKENS`. Falls back to
-    ``("INOUT", "ANALOG")`` -- LEF has no way to derive true signal
-    direction from geometry alone, and ``ANALOG`` is the LEF-spec ``USE``
-    value for exactly this class of pin (`klt lef-abstract`'s macros are
-    analog blocks, per Epic #393's own scope).
+    alphanumeric runs (``AVDD33`` matches ``VDD``, ``VD`` does not) against
+    :data:`POWER_NAME_TOKENS` first, then :data:`GROUND_NAME_TOKENS` -- the
+    order keeps the well tie ``VPW`` from capturing sky130's ``VPWR`` as
+    ground (issue #5842). Falls back to ``("INOUT", "ANALOG")`` -- LEF has
+    no way to derive true signal direction from geometry alone, and
+    ``ANALOG`` is the LEF-spec ``USE`` value for this class of pin (`klt
+    lef-abstract`'s macros are analog blocks, per Epic #393's scope).
     """
     tokens = [tok.upper() for tok in _NAME_TOKEN_RE.findall(name)]
     for token in tokens:
-        if any(marker in token for marker in GROUND_NAME_TOKENS):
-            return "INOUT", "GROUND"
         if any(marker in token for marker in POWER_NAME_TOKENS):
             return "INOUT", "POWER"
+        if any(marker in token for marker in GROUND_NAME_TOKENS):
+            return "INOUT", "GROUND"
     return "INOUT", "ANALOG"
 
 

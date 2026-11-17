@@ -2559,12 +2559,9 @@ def run_extract(
     :func:`_wire_abstract_cells`. ``abstract_cell_patterns`` empty (the
     default) skips this mode entirely; the written SPICE and every other
     field are then byte-identical to before this feature existed.
-    ``abstract_cell_lef_paths`` is a pin source *merged* with the label-derived
-    pins (issue #3749): a pin drawn as an in-cell label wins per pin name, and
-    LEF-only pins (e.g. sky130's ``VNB``, drawn on a layer the deck does not
-    read) are appended. It therefore also adds a LEF's well/substrate ports
-    to types whose label pins were already complete; ``klt lvs`` discloses
-    those in ``power_connectivity.excluded_pins`` when given the same LEF.
+    ``abstract_cell_lef_paths`` is a pin source *merged* with the
+    label-derived pins (#3749): labels win per pin name, LEF-only pins are
+    appended, and `klt lvs` discloses the LEF's well/substrate ports (#5842).
 
     ``abstracted_cells`` reports this mode's own result: one entry per
     *distinct* matched cell type (sorted by cell name), each
