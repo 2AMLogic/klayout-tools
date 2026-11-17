@@ -44,9 +44,10 @@ def resolve_report_deck(
 
     Order: (1) ``deck_override`` (``--deck-file``) wins -- for a
     ``klayout``-engine report only, so an ``--engine both`` envelope's
-    curated side keeps its name-resolved deck and a curated single report
-    ignores the flag, exactly as ``--rerun`` already rejects it -- and only
-    when it names an existing file; a missing override is itself the
+    curated side keeps its name-resolved deck; a curated *single* report
+    never reaches here with an override, because :func:`report_checks`
+    rejects the combination exactly as ``--rerun`` does (issue #6070) -- and
+    only when it names an existing file; a missing override is itself the
     ``deck_not_found`` diagnostic, never a silent ``None`` hash; (2) the
     report's own ``deck`` -- for ``--engine curated`` a deck *name*
     resolved to its module source via :func:`deck_source_path`, for
@@ -143,11 +144,21 @@ def report_checks(
 
     Issue #4986: an ``--engine both`` envelope nests each engine's own report
     under ``reports.<engine>``; each is checked with the same logic, fields
-    prefixed with the engine. A null native side (engine failed / unavailable)
+    prefixed with the engine. ``deck_path`` (``--deck-file``) on a curated
+    single-engine report raises :class:`klayout_tools.drc.DrcError` (issue
+    #6070). A null native side (engine failed / unavailable)
     is skipped, never reported as drift. Returns ``[]`` for a crosscheck
     envelope with no embedded report (the caller raises).
     """
     if committed.get("mode") != "crosscheck":
+        if deck_path is not None and committed.get("engine") != "klayout":
+            # Issue #6070: same contract as ``--check --rerun`` -- never a
+            # silently ignored flag. (Function-local: drc imports this module.)
+            from .drc import DrcError
+
+            raise DrcError(
+                "--deck-file cannot be combined with --check on a curated report"
+            )
         return _report_hash_checks(
             committed,
             report_path=report_path,

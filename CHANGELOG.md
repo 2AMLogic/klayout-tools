@@ -14,6 +14,14 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt drc --check --deck-file` on a curated report is now an error** (#6070,
+  2026-11-17): `--check` silently ignored `--deck-file` for a single-engine
+  curated report while `--check --rerun` rejected it, so the same input had two
+  contracts. `--check` now exits `1` with the standard error envelope
+  (`--deck-file cannot be combined with --check on a curated report`), matching
+  `--rerun`. A `klayout`-engine report and an `--engine both` report (the
+  override still reaches the native side only) behave as before. No JSON field
+  changed.
 - **`klt sim --fail-fast-probe` reads the same `.spiceinit` as the corners it
   screens** (#6047, 2026-11-17): `_run_corner` pins the thread count by writing
   a run-directory `.spiceinit`, which *replaces* `$HOME/.spiceinit`, but the
