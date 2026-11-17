@@ -179,7 +179,12 @@ that cannot be determined or parsed also fails (closed). On `local` and
 `local-parallel` the engine is probed (`ngspice --version` / `Xyce -v`) up
 front. `remote` and `batch` have no pre-submit probe, so the pin is checked
 against the version in the runner's report once the run returns; the job has
-already run by then. Unset, behaviour is unchanged. The pin applies to
+already run by then. Which of the two applies is decided by the backend that
+*executes*, not the one first resolved: when a host-default off-host backend
+steps back to `local` late — a single-unit run, or `options.resume` — the pin
+is probed here up front, exactly as `--backend local` does (issue #5500);
+before that fix neither half ran and the pin passed silently.
+Unset, behaviour is unchanged. The pin applies to
 deck-list requests (see "Pre-composed decks") the same way — decks always run
 on `ngspice`, and an off-host runner that reports no `engine_version` fails
 closed — but `unsupported_analysis` does not, as decks have no `analysis`
@@ -205,6 +210,13 @@ and compares the installed identity *before simulating*; a `mismatch`, an
 `models.pdk` nor `models.pdk_root` set exits 1 with
 `error.code: "pdk_version_unmet"`. `remote` and `batch` reject the field with a
 request error (no silent pass): the worker-side check is tracked in #3462.
+That rejection is keyed on the backend that *executes*: when the off-host
+backend is only a host default (`$KLT_SIM_BACKEND`) that a late yield steps
+back to `local` — a single-unit run, or `options.resume` — the pin is compared
+locally instead of refused (issue #5500), so a host default cannot turn a
+valid request into a refusal. An explicitly named `--backend` /
+`request.backend` is still refused immediately, and a host-default run that
+really does leave this host is refused before anything is submitted.
 Unset, behaviour is unchanged.
 
 **Supported analyses (issue #3041).** `analysis.kind` (and each
@@ -274,6 +286,35 @@ from before this issue, modulo the `cwd=` fix itself (which only matters if
 the invoking directory or `$HOME` happened to carry a `.spiceinit` of its
 own). ngspice-only: the `xyce` engine has no equivalent init-file lookup, so
 `options.ngspice_init` is accepted but has no effect when `engine: "xyce"`.
+
+The option applies to **deck-list requests** too (see "Pre-composed decks"):
+each unit's own directory gets the same `.spiceinit` before `ngspice -b`
+runs there, on every backend — an off-host job forwards the option in its
+worker request. A unit that itself stages a deck, input, or include named
+`.spiceinit` while the option is set is rejected by name rather than
+silently dropping one side. Note the file ngspice reads from its working
+directory *replaces* `$HOME/.spiceinit` — ngspice does not merge the two —
+so the requested lines must be complete, not mode-only additions to
+whatever the host's own init file sets.
+
+**What was in effect is recorded (issue
+[#5648](https://github.com/2AMLogic/klayout-tools/issues/5648)).** A run-directory
+`.spiceinit` *replaces* `$HOME/.spiceinit` rather than merging with it, and
+klt also writes one on requests that declared nothing whenever it pins the
+thread count (`options.threads_per_worker`, or `local-parallel` with more than
+one worker and unit) — so the same request can read the host's ambient init on
+`--backend local` and ignore it on `--backend local-parallel`. The report's
+`environment.ngspice_init` is `{source, lines, sha256}` (`null` for xyce);
+`source` is `"request"`, `"thread_pin"`, `"home"`, `"none"`, or `"runner"` for
+`remote`/`batch` (resolved by the worker). It reflects what ngspice actually
+reads, never what the request merely declared, and carries no absolute path.
+Two runs whose `sha256` differ read different init files. See
+`docs/json-contract.md`.
+
+Two stderr warnings (stdout JSON unaffected, silent when no
+`$HOME/.spiceinit` exists): the run **inherits** an ambient `$HOME/.spiceinit`
+(declare `options.ngspice_init` to make the request self-contained), or klt's
+own `.spiceinit` **replaced** it rather than merging.
 
 ### Transient noise coverage (ngspice, [#2985](https://github.com/2AMLogic/klayout-tools/issues/2985))
 
@@ -1948,10 +1989,15 @@ runner silently drops them ([#4212](https://github.com/2AMLogic/klayout-tools/is
 | `corners.params` | 0.8.0 |
 | `corners.units` | 0.8.0 |
 | `corners.temperature_param` | 0.8.0 |
+| `corners.options` | 0.8.0 |
 | `options.ngspice_init` | 0.7.0 |
 | `options.ngspice_options` | 0.8.0 |
+| `options.nodeset` | 0.8.0 |
+| `options.initial_conditions` | 0.8.0 |
 | `options.osdi_preload` | 0.7.0 |
 | `options.stage_model_inputs` | 0.7.0 |
+| `analysis_overrides` | 0.9.1 |
+| `analysis.op_check` | 0.9.2 |
 | `analysis_steps[].measurements[]` (noise analysis `.meas` cards) | unreleased |
 | `measurements[].search` | unreleased |
 
@@ -2086,12 +2132,17 @@ release segment:
 | `measurements[].expr` | any `measurements[]` entry has `expr` | `0.7.0` |
 | `corners.process[].sections[]` | a `corners.process[]` bundle has an object-form `sections[]` entry | `0.7.0` |
 | `corners.params` ([#4097](https://github.com/2AMLogic/klayout-tools/issues/4097)) | `corners.params` is present and non-empty; checked before launch against the AMI manifest (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `params_unsupported_worker` check stays) | `0.8.0` (**mandatory**, see below) |
+| `corners.options` ([#3125](https://github.com/2AMLogic/klayout-tools/issues/3125)) | `corners.options` is present and non-empty; checked before launch against the AMI manifest (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `options_unsupported_worker` check stays) | `0.8.0` (**mandatory**, see below) |
+| `options.nodeset` ([#3036](https://github.com/2AMLogic/klayout-tools/issues/3036)) | `options.nodeset` is set and non-empty; checked before launch against the AMI manifest (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `nodeset_unsupported_worker` check stays) | `0.8.0` (**mandatory**, see below) |
+| `options.initial_conditions` ([#3881](https://github.com/2AMLogic/klayout-tools/issues/3881)) | `options.initial_conditions` is set and non-empty; checked before launch against the AMI manifest (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `initial_conditions_unsupported_worker` check stays) | `0.8.0` (**mandatory**, see below) |
+| `analysis_overrides` ([#4970](https://github.com/2AMLogic/klayout-tools/issues/4970)) | `analysis_overrides` is present and non-empty; checked before launch against the AMI manifest (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `analysis_overrides_unsupported_worker` check stays) | `0.9.1` (**mandatory**, see below) |
+| `analysis.op_check` ([#5077](https://github.com/2AMLogic/klayout-tools/issues/5077)) | `analysis.op_check` is declared; checked before launch against the AMI manifest (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `op_check_unsupported_worker` check stays) | `0.9.2` (**mandatory**, see below) |
 | `options.ngspice_init` | `options.ngspice_init` is set and non-empty | `0.7.0` |
 | `options.ngspice_options` ([#4212](https://github.com/2AMLogic/klayout-tools/issues/4212)) | `options.ngspice_options` is set and non-empty | `0.8.0` |
 | `options.osdi_preload` | `options.osdi_preload` is set and non-empty | `0.7.0` |
 | `options.stage_model_inputs` | `options.stage_model_inputs` is set | `0.7.0` |
 
-The last six rows are the released entries of
+The rows from `measurements[].expr` down are the released entries of
 `REQUEST_FEATURE_MIN_RUNNER_VERSION` ([#2877](https://github.com/2AMLogic/klayout-tools/issues/2877)),
 the same table the checks below read ([#2901](https://github.com/2AMLogic/klayout-tools/issues/2901)).
 An entry whose minimum is `unreleased` has no detector and never counts as
@@ -2351,7 +2402,7 @@ contents), size-capped, serialised with a JSON encoder, errors recorded as
 | --- | --- |
 | `capture` | `ok`, `absent` (older worker, no artifact, poll timeout) or `malformed`. When not `ok`, all observations are `null` -- never the client's values. |
 | `simulator` | `requested_binary`, `binary_source` (`request` / `KLT_NGSPICE_BINARY` / `PATH`), `selected_path` (binary actually selected on the worker), `version_banner` (full `--version` text, bounded to 2000 chars), `version_probe` (`ok` / `timeout` / `exit_N` / `error` / `unavailable`). |
-| `model_inputs` | Under `options.stage_model_inputs`: `[{name, sha256}]` digests of the staged model files in `$EDA_INPUT_DIR` (bounded to 64); `null` otherwise or when an older worker does not report it. Lifted to `environment.remote.runner_model_inputs`. |
+| `model_inputs` | Under `options.stage_model_inputs`: `[{name, sha256}]` digests of the staged model files in `$EDA_INPUT_DIR` (bounded to 64); `null` otherwise or when an older worker does not report it. Lifted to `environment.remote.runner_model_inputs`. **Staged files only**: a runner-resolved, image-baked `.osdi` (issue #3819) is never staged, so it can never appear here -- its digest is `environment.remote.runner_osdi_preload` instead. |
 | `pdk` | `variant`, worker `root`, `stamp_scheme` (`sources-sha256`), `stamp_sha256`, `stamp_text` (bounded `SOURCES` text) for the resolved variant, `models_staged` (true under `options.stage_model_inputs`: the executed models then came from the request, not the image tree), `stamp_scope` (`image` when `models_staged` is true: `stamp_*` then describes the worker image's tree, not the models that ran; `executed` otherwise). Stamp fields are `null` when neither `SOURCES` nor a bundle `.pdk-store.json` is readable; with only the latter, `stamp_scheme` is `store-version-sha256` (sha256 of its `version` string; `stamp_text` is `store:<version>`). |
 | `cpu_model` | First `model name` from the worker's `/proc/cpuinfo`, else `null`. CPU count stays `physical_cores` / `concurrency` from `status.json`. |
 | `omp_num_threads` | The worker's effective `OMP_NUM_THREADS`, `null` when unset. |
@@ -2373,6 +2424,21 @@ runner whose image has no readable `SOURCES` stamp:
   `environment.models_lib_sha256`. Missing data is never a proven mismatch,
   and klt does not fail the run on `mismatch`. `pdk_stamp_comparison` is
   unchanged. Text output prints a `models_lib:` line next to `pdk_stamp:`.
+
+A third sibling covers the OSDI objects the runner loaded (issue #5562):
+
+- `runner_osdi_preload`: the runner's own `environment.osdi_preload` lifted to
+  `[{name, sha256}]` in declared order -- the digests of the `.osdi` files the
+  worker actually opened, which for a runner-resolved, image-baked object the
+  submitting host never sees. `null` when the runner does not report it
+  (older runner, error envelope, malformed report), so "unknown" is
+  distinguishable from "this request declared no OSDI objects". A malformed
+  entry keeps its slot with `null` fields rather than being dropped: the
+  array is index-aligned with the declared `options.osdi_preload`, and that
+  alignment is what joins each digest onto
+  `environment.osdi_preload_runner_resolved[].sha256` (see "OSDI (Verilog-A)
+  model preload" below). Present on `environment.remote` for a single job and
+  on each `fleet[]` member under sharding.
 
 `pdk_stamp_comparison` compares the worker's stamp with the `SOURCES` stamp
 the submitter resolves locally and reports a `mismatch` only when both sides
@@ -2402,6 +2468,7 @@ comparison's status, so a divergence can be attributed from the report alone:
 | Runner | `environment.remote.worker_environment.pdk.stamp_text` (plus `stamp_scheme` / `stamp_sha256`, and under sharding the same block on each `fleet[]` member). |
 | Submitter's model library | `environment.models_lib_sha256` -- a content hash of the top model library file actually loaded. |
 | Runner's model library | `environment.remote.runner_models_lib_sha256`, compared in `models_lib_comparison`. |
+| Runner's OSDI objects | `environment.remote.runner_osdi_preload` (`[{name, sha256}]`), joined onto `environment.osdi_preload_runner_resolved[].sha256`. |
 
 When `pdk.models_staged` is true the image stamp says nothing about the
 executed models, so `pdk_stamp_comparison` instead compares the client's
@@ -2709,6 +2776,7 @@ in the deck path), exactly as corner jobs do.
 | `options.timeout_s` | number | Default per-unit timeout (see `decks[].timeout_s`). |
 | `options.max_workers` | integer | Worker-pool size for `local-parallel`; overridable with `--max-workers`, capped by `$KLT_SIM_MAX_WORKERS`, same as corners. |
 | `options.ngspice_binary` | string | Same resolution rules as corners (issue #2423). Interpreted on the *executing* host. |
+| `options.ngspice_init` | array\<string\> | Same meaning as corners (issue #2520): each string becomes one line of the `.spiceinit` written into every unit's own directory before `ngspice -b` runs there (issue #5738), on every backend. Replaces the executing host's `$HOME/.spiceinit` — lines must be complete. A unit staging its own `.spiceinit` while this is set is rejected by name. |
 | `remote.*` / `batch.*` | object | The same backend blocks corner requests carry; only read for the matching backend. `remote.hosts` sharding is refused for deck requests — one off-host job runs the whole list across its own worker pool. |
 
 A deck-list request must not also declare `netlist`, `corners`, `analysis`,
@@ -3776,7 +3844,12 @@ the `options.resume` fingerprint (changing it invalidates a stored result) and
 is forwarded to `remote`/`batch` workers; omitting it leaves decks, corner IDs
 and fingerprints byte-identical. A worker built before the field would drop it,
 so the client requires `op_check` on every corner that ran and otherwise fails
-with `error.code: "op_check_unsupported_worker"`.
+with `error.code: "op_check_unsupported_worker"`. It is also a **mandatory**
+runner feature (`analysis.op_check`, minimum `0.9.2`), so a submit against an
+AMI manifest whose every image predates it is refused with
+`batch_runner_feature_unsupported` before anything is uploaded or launched --
+and `--dry-run` reports the refusal -- rather than the grid running first and
+the echo check refusing the result afterward.
 
 **Pinning a node (the deterministic workaround).** `op_check` only detects.
 To make the solution deterministic, hold the latch node with an ideal source at
@@ -6591,9 +6664,25 @@ fails with `Unable to find definition of model …` and every corner errors.
   mismatch there still surfaces as the per-corner `osdi_abi_mismatch`
   diagnostic (no client-side check is possible for an image-baked file).
   `environment.osdi_preload_runner_resolved`
-  lists them as `{entry, reason}` (no sha256; additive, present only when
-  such entries ran off-host). A mixed list keeps today's behavior for its
-  host-local entries (refused, or staged under `stage_model_inputs`).
+  lists them as `{entry, index, reason, sha256}` (additive, present only when
+  such entries ran off-host). `index` is the entry's position in the declared
+  `options.osdi_preload`, so an entry can be related back to the request even
+  when a list names the same entry twice. `sha256` is the digest the *runner*
+  computed over the bytes it opened, lifted from its own report (issue #5562
+  -- see `environment.remote.runner_osdi_preload` below), and `null` whenever
+  that cannot be established: an older runner that does not report it, a
+  report whose entry is missing or malformed, a sharded run whose shards
+  disagree, or the `remote` (SSH) backend, which is not covered. It is never
+  the submitting host's hash of its own copy -- that file is not the one the
+  runner read, so it would pin the wrong bytes; a `null` says "unknown", and
+  a digest that cannot be established never fails the run or raises a
+  diagnostic. The resolved *path* on the runner is deliberately not reported:
+  an image-baked `.osdi` lies outside the runner's repo, which
+  `environment.osdi_preload` normalises to `{"path": null, "scope":
+  "external"}` like every other external input (`models_lib` included), so
+  the digest pins the bytes and nothing claims to pin the location. A mixed
+  list keeps today's behavior for its host-local entries (refused, or staged
+  under `stage_model_inputs`).
   `local`/`local-parallel` are unchanged: every entry is expanded and
   existence-checked on this host. No new runner-version row is needed: a
   runner that predates this loads the same image-baked file through
@@ -6815,7 +6904,9 @@ a corner grid. A stock ngspice without the module still produces the
     Poly resistors (`sky130_fd_pr__res_*`) are covered too: their subcircuits
     draw per-instance `AGAUSS` terms (`res_match`, `rend`) scaled by
     `MC_MM_SWITCH`, so two identical instances differ under `tt_mm` (measured
-    on the volare sky130A build `c6d73a35…`; note the term is upper-case, so a
+    on the volare sky130A build `c6d73a35…`, re-checked 2026-10-29 on `f6eeac7…`:
+    `res_high_po.model.spice` still carries 3 upper-case `AGAUSS` terms and no
+    lower-case `agauss` (#3420); note the term is upper-case, so a
     case-sensitive `grep agauss` misses it). The corner-level `var_mult` is a
     separate term shared by all instances.
   - **ihp-sg13g2**: Section-based like sky130. `cornerMOSlv.lib` /

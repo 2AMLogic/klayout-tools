@@ -4,7 +4,7 @@ Report bounding box, drawn area, density, and polygon/vertex counts of a
 GDSII or OASIS layout stream, in total and optionally per layer.
 
 ```
-klt stats <file> [--per-layer] [--top <cell>] [--density-window <um>]
+klt stats <file> [--per-layer] [--geometry-digest] [--top <cell>] [--density-window <um>]
           [--window-layer L/D ...] [--format text|json]
 ```
 
@@ -13,6 +13,10 @@ klt stats <file> [--per-layer] [--top <cell>] [--density-window <um>]
 - `--per-layer` — also report the same statistics broken down per layer.
   Without this flag, only the `total` figures are computed (`layers` is
   `null`).
+- `--geometry-digest` — also compute `geometry_digest` (a sha256 of the
+  stream's decoded geometry). Off by default: it re-reads and walks the whole
+  layout (~2.5x the runtime of the rest of the report on large flat layouts),
+  so the field is `null` unless this flag is given.
 - `--top` — top cell to report on when the stream has more than one
   (required in that case; optional otherwise), matching `klt extract --top`.
   When given, **both** `bbox_um` and every area/polygon/vertex count
@@ -126,7 +130,7 @@ With `--per-layer`, `layers` is a list instead of `null`:
 | `file`           | string                  | The input path exactly as provided on the command line.                     |
 | `dbu_um`         | number (float)          | Database unit in micrometres (e.g. `0.001` = 1 nm).                         |
 | `top_cell`       | string \| null          | Name of the layout's single top cell, or `null` if the layout has no cells. |
-| `geometry_digest`| string \| null          | `"sha256:<64 hex>"` digest of the stream's **decoded geometry**, or `null` if it cannot be computed. See "Geometry digest" below. |
+| `geometry_digest`| string \| null          | `"sha256:<64 hex>"` digest of the stream's **decoded geometry** when `--geometry-digest` is given; `null` otherwise, or if it cannot be computed. See "Geometry digest" below. |
 | `bbox_um`        | object                  | The top cell's bounding box (hierarchy-inclusive), in micrometres. See below. |
 | `total`          | object                  | Aggregate area/density/polygon/vertex figures across all layers. See below. |
 | `layers`         | array\<object\> \| null | Per-layer breakdown; `null` unless `--per-layer` was given.                 |
@@ -248,12 +252,16 @@ Two consequences follow, and they are the reason the field exists:
 So `geometry_digest` answers "is this the same layout?", where a raw-byte
 SHA-256 (`provenance.input.content_hash` on every `klt` envelope, and what
 `klt drc`/`lvs`/`extract`/`sim` record) answers the narrower "is this the same
-file?".
+file?". For the regenerate-and-compare gate this field is built for — and why
+that raw byte compare is within-version only, not a contract across a `klt`
+upgrade — see
+[`docs/json-contract.md`](../json-contract.md#stream-stability-contract-layout-stream-bytes-are-not-stable-across-klt-versions)
+→ "Stream-stability contract".
 
 The digest covers the **whole stream** and is never scoped by `--top`, unlike
 the area/density/count figures. Two runs over the same file with different
-`--top` values report the same `geometry_digest`. It is `null` only when the
-digest cannot be computed.
+`--top` values report the same `geometry_digest`. It is `null` unless
+`--geometry-digest` is given (or the digest cannot be computed).
 
 ### Producing a signoff regeneration hash (issue #5551)
 
@@ -268,7 +276,7 @@ python gen.py -o /tmp/scratch/top.gds
 klt signoff --attest 2 --input layout/top.gds -o evidence/item2.json \
     --generator "python gen.py -o layout/top.gds" \
     --hash-kind geometry \
-    --regenerated-hash "$(klt stats --format json /tmp/scratch/top.gds \
+    --regenerated-hash "$(klt stats --geometry-digest --format json /tmp/scratch/top.gds \
                           | jq -r .geometry_digest)"
 ```
 
@@ -321,7 +329,7 @@ table when `--per-layer` is given. It is intended for human eyes and its
 exact layout is **not** part of the contract — parse the JSON instead.
 
 ```
-$ klt stats design.gds --per-layer
+$ klt stats design.gds --per-layer --geometry-digest
 file: design.gds
 dbu_um: 0.001
 top_cell: TOP

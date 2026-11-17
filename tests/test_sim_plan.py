@@ -20,7 +20,7 @@ from klayout_tools.cli import main
 # Fixture (stub_ngspice) and request writer.
 from test_sim_merge import (  # noqa: F401
     _write_grid_request,
-    stub_ngspice,  # noqa: F401
+    stub_ngspice,
 )
 
 pytestmark = pytest.mark.usefixtures(

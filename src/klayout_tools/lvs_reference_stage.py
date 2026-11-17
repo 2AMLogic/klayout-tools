@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from typing import Any, NamedTuple
 
-from . import env_provenance
 from . import lvs as _lvs
 from .lvs_crash_diagnostics import stage
 
@@ -19,7 +18,6 @@ class _ReferenceStage(NamedTuple):
     """Values `run_lvs` reads after the reference-read stage (issue #5158)."""
 
     reference_netlist_path: str
-    reference_echo: dict[str, Any]
     reference_form: str
     anchor_top_level_pins: bool
     power_connectivity: dict[str, Any]
@@ -55,10 +53,6 @@ def _read_reference_stage(
     """
     reference_netlist_path = _lvs._require_path(
         reference_spec, "netlist", "reference", request_dir
-    )
-    reference_echo = env_provenance.repo_relative_path(
-        reference_netlist_path,
-        repo_root=env_provenance.repo_root_for(reference_netlist_path),
     )
     reference_form = reference_spec.get("form", "plain-element")
     if reference_form not in _lvs._REFERENCE_FORMS:
@@ -333,7 +327,6 @@ def _read_reference_stage(
             flatten_warnings.append(reference_flatten_warning)
     return _ReferenceStage(
         reference_netlist_path=reference_netlist_path,
-        reference_echo=reference_echo,
         reference_form=reference_form,
         anchor_top_level_pins=anchor_top_level_pins,
         power_connectivity=power_connectivity,

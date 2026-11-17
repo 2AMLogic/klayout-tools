@@ -985,6 +985,13 @@ ngspice 46), against the canary's measured spec of
 | `input_pair` (`M1`) | 8 um | 8.74 um | 1.09x |
 | `mirror` (`M3`) | 6 um | 6.41 um | 1.07x |
 
+> **Superseded revision (historical, `c6d73a3`).** Re-qualified 2026-10-29 under open_pdks `f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7` (ciel 2.6.1), issue #3420, ngspice 46: the
+> single-device canary sizes 5.44 um (target 17.02 S/A) and the joint
+> topology test measures a spec of `gm/Id = 14.23 / 19.13 / 8.93 S/A` and
+> widths of 9.83 / 8.74 / 6.41 um for tail / input pair / mirror. Both
+> tests pass. Every figure above is unchanged to the digits quoted: nothing
+> moved past tolerance. The c6d73a3 numbers above are kept as measured.
+
 with every role's control device inside the requested 5% gm/Id tolerance in
 the assembled circuit, a measured 50.2/49.8% tail split, and a measured
 0.99 mirror ratio -- 3 characterization sweeps plus 1 coupled iteration,

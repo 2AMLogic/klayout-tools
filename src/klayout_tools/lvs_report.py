@@ -18,7 +18,6 @@ def assemble_lvs_report(
     layout_circuit: Any,
     layout_abstracted_cells: Any,
     reference_circuit: Any,
-    reference_echo: Any,
     reference_form: Any,
     reference_spec: Any,
     reference_pdk_info: Any,
@@ -45,6 +44,7 @@ def assemble_lvs_report(
     from . import env_provenance
     from ._provenance import build_provenance, sha256_file
     from .decks import deck_source_path
+    from .env_provenance_walk import common_repo_root
     from .lvs import (
         SCHEMA_VERSION,
         _compare_timeout_replay_options,
@@ -54,6 +54,7 @@ def assemble_lvs_report(
         _layout_abstraction_echo,
         _reference_conversion_echo,
     )
+    from .lvs_finfet_power import derive_finfet_gate_level_power
     from .verilog_module_names import reference_module_names
 
     category_counts: dict[str, int] = {}
@@ -136,6 +137,10 @@ def assemble_lvs_report(
         # all -- never a spuriously present empty list.
         provenance["pin_order_sources"] = reference_pin_order_sources
 
+    repo_root = common_repo_root(
+        [layout_hash_source, reference_netlist_path],
+        find_repo_root=env_provenance.find_repo_root,
+    )
     report = {
         "schema_version": SCHEMA_VERSION,
         "engine": engine,
@@ -145,9 +150,9 @@ def assemble_lvs_report(
         # request's own cwd-dependent echo. See `env_provenance.repo_relative_path`.
         # Issue #4984: `reference` takes the same shape, built from the
         # resolved path `environment.reference_sha256` hashes.
+        # Issue #5631: one repo root per report, shared by both fields.
         "layout": env_provenance.repo_relative_path(
-            layout_hash_source,
-            repo_root=env_provenance.repo_root_for(layout_hash_source),
+            layout_hash_source, repo_root=repo_root
         ),
         # Issue #2686: the applied `layout.label_layers` override (which GDS
         # purpose inline extraction read net/pin names from, per role) --
@@ -163,7 +168,9 @@ def assemble_lvs_report(
         # -- see `_layout_abstraction_echo`. Absent when no abstraction was
         # requested, so those reports stay byte-identical to before.
         **_layout_abstraction_echo(opts.layout_abstraction, layout_abstracted_cells),
-        "reference": reference_echo,
+        "reference": env_provenance.repo_relative_path(
+            reference_netlist_path, repo_root=repo_root
+        ),
         "top": layout_circuit.name,
         # Issue #1205: the *reference* side's resolved top circuit name,
         # alongside the layout side's `top` above. The two are equal for the
@@ -289,7 +296,22 @@ def assemble_lvs_report(
         # `status == "match" and power_connectivity["status"] == "match"`.
         # See `_power_connectivity_report` and
         # `docs/design/pg-connectivity-check-decision.md`.
-        "power_connectivity": power_connectivity,
+        #
+        # Issue #5757: on the FinFET gate-level route the stub block this
+        # stage starts from is graded here, after the compare -- the one
+        # place the final `status` and the `net_correspondence` are both in
+        # scope -- so a matched compare whose requested supplies paired
+        # reports the evidence the compare itself produced. Every
+        # non-deriving path returns the block unchanged (byte-identical).
+        "power_connectivity": derive_finfet_gate_level_power(
+            power_connectivity,
+            status,
+            net_correspondence,
+            finfet_layout=opts.finfet_layout,
+            reference_form=reference_form,
+            power_connectivity_enabled=opts.power_connectivity_enabled,
+            supply_nets=opts.supply_nets,
+        ),
         # Issue #1983: whether this layout's MOS body terminals were resolved
         # from real drawn/labelled geometry or from a deck-synthesized net --
         # the gradeable form of the `device.body_unverified` warning, which
