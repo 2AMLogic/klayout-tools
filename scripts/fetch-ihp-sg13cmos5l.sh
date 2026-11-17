@@ -95,26 +95,15 @@
 
 set -euo pipefail
 
+# shellcheck source=scripts/_install_common.sh
+source "$(dirname "${BASH_SOURCE[0]}")/_install_common.sh"
+
 # IHP-Open-PDK `dev` branch commit (a branch SHA, not a release tag).
 IHP_SG13CMOS5L_COMMIT="f7bca32694fe3d58be0cc7d9df4b9f5db7161a14"
 IHP_SG13CMOS5L_URL="https://codeload.github.com/IHP-GmbH/IHP-Open-PDK/tar.gz/${IHP_SG13CMOS5L_COMMIT}"
 # Computed by downloading the pinned commit's codeload tarball once and
 # hashing it (recipe above, with IHP_SG13CMOS5L_COMMIT substituted):
 IHP_SG13CMOS5L_SHA256="5eb6f8a9b0b2ecc4fa08cc30627668406f85b1a97834f278036c43f0c0dbc70b"
-
-# Detect a portable sha256 command (macOS ships shasum, Linux sha256sum).
-# Mirrors scripts/fetch-ihp-sg13g2.sh's / scripts/fetch-pdks.sh's /
-# .loom/scripts/verify-install.sh's compute_sha256 helper.
-sha256_of() {
-    if command -v shasum &>/dev/null; then
-        shasum -a 256 "$1" | awk '{print $1}'
-    elif command -v sha256sum &>/dev/null; then
-        sha256sum "$1" | awk '{print $1}'
-    else
-        echo "error: no sha256 command found (need shasum or sha256sum)" >&2
-        return 1
-    fi
-}
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PDKS_DIR="${IHP_PDKS_DIR:-$REPO_ROOT/pdks}"
@@ -197,17 +186,7 @@ fi
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-echo "Downloading ihp-sg13cmos5l @ $IHP_SG13CMOS5L_COMMIT (~400 MB whole-repo tarball) ..."
-curl -fL --progress-bar -o "$tmp/ihp-sg13cmos5l.tar.gz" "$IHP_SG13CMOS5L_URL"
-
-echo "Verifying checksum ..."
-actual_sha256="$(sha256_of "$tmp/ihp-sg13cmos5l.tar.gz")"
-if [[ "$actual_sha256" != "$IHP_SG13CMOS5L_SHA256" ]]; then
-    echo "error: checksum mismatch for ihp-sg13cmos5l @ $IHP_SG13CMOS5L_COMMIT" >&2
-    echo "  expected: $IHP_SG13CMOS5L_SHA256" >&2
-    echo "  actual:   $actual_sha256" >&2
-    exit 1
-fi
+fetch_and_verify "$IHP_SG13CMOS5L_URL" "$IHP_SG13CMOS5L_SHA256" "$tmp/ihp-sg13cmos5l.tar.gz" progress
 
 echo "Extracting ..."
 mkdir -p "$tmp/extract"
