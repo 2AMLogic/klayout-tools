@@ -90,6 +90,7 @@ from .gen_layer_params import (
     _voltage_flavor_mark_layer,
     mfg_grid_um,
 )
+from .gen_pitch import _pitch_hints_and_warnings
 
 
 def _resistor_strip_validate(params: dict[str, Any]) -> None:
@@ -306,63 +307,6 @@ def _share_sd_hints(
             "series chain"
         )
     return {"share_sd": True, "shared_sd_nodes": shared_nodes}
-
-
-def _pitch_hints_and_warnings(
-    params: dict[str, Any], info: dict[str, Any]
-) -> tuple[dict[str, Any], list[str]]:
-    """Issue #3299 (Phase 1): only when a pitch override was requested, report
-    the effective pitch and whether it was clamped up to the legal minimum
-    (empty otherwise, so default reports are unchanged)."""
-    if params["pitch_x_um"] <= 0 and params["pitch_y_um"] <= 0:
-        return {}, []
-    hints = {
-        "pitch": {
-            "col_pitch_um": info["col_pitch_um"],
-            "row_pitch_um": info["row_pitch_um"],
-            "min_col_pitch_um": info["min_col_pitch_um"],
-            "min_row_pitch_um": info["min_row_pitch_um"],
-            "pitch_x_clamped": info["pitch_x_clamped"],
-            "pitch_y_clamped": info["pitch_y_clamped"],
-        }
-    }
-    warnings = [
-        f"params.{name}={params[name]} is below the legal minimum "
-        f"pitch {minimum}um; clamped up to {minimum}um"
-        for axis, name, minimum in (
-            ("x", "pitch_x_um", info["min_col_pitch_um"]),
-            ("y", "pitch_y_um", info["min_row_pitch_um"]),
-        )
-        if info[f"pitch_{axis}_clamped"]
-    ]
-    return hints, warnings
-
-
-def _diff_pair_pitch_hints_and_warnings(
-    params: dict[str, Any], info: dict[str, Any]
-) -> tuple[dict[str, Any], list[str]]:
-    """Issue #5764: the x-only variant of :func:`_pitch_hints_and_warnings`
-    for ``diff_pair``, whose only pitch override is ``pitch_x_um`` -- its row
-    spacing is the existing ``row_spacing_um`` param, so there is no
-    ``pitch_y_um`` to report. Same contract: hints/warnings are empty unless
-    an override was requested, so default reports are unchanged."""
-    if params["pitch_x_um"] <= 0:
-        return {}, []
-    hints = {
-        "pitch": {
-            "col_pitch_um": info["col_pitch_um"],
-            "min_col_pitch_um": info["min_col_pitch_um"],
-            "pitch_x_clamped": info["pitch_x_clamped"],
-        }
-    }
-    warnings = []
-    if info["pitch_x_clamped"]:
-        minimum = info["min_col_pitch_um"]
-        warnings.append(
-            f"params.pitch_x_um={params['pitch_x_um']} is below the legal "
-            f"minimum pitch {minimum}um; clamped up to {minimum}um"
-        )
-    return hints, warnings
 
 
 from .gen_layer_params_checks import (  # noqa: E402 -- re-exported name
@@ -2625,7 +2569,7 @@ def _diff_pair_describe(
 
     voltage_flavor_hints = _voltage_flavor_hints(family, params, notes)
     sd_implant_hints = _sd_implant_hints(family, params, notes)
-    pitch_hints, pitch_warnings = _diff_pair_pitch_hints_and_warnings(params, info)
+    pitch_hints, pitch_warnings = _pitch_hints_and_warnings(params, info, axes=("x",))
 
     snapped = _grid_snapped(dbu, params["w_um"], params["l_um"])
     kind = "mirror" if params["mirror"] else "pair"

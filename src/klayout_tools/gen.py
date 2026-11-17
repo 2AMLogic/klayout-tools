@@ -331,6 +331,7 @@ from .gen_pcells import (
     _build_well_island_pcell,
 )
 from .gen_pdk_cell import _PDK_CELL_SPEC
+from .gen_pitch import _clamp_pitch_override
 from .gen_spec import _GeneratorSpec
 from .pdk import PdkNotFoundError, find_pdk, resolve_pdk_dbu
 
@@ -1448,17 +1449,6 @@ def _mos_array_well_tap_layout(
         "width_um": contact_region_um,
         "xy": (cx, cy),
     }
-
-
-def _clamp_pitch_override(override_um: float, minimum_um: float) -> tuple[float, bool]:
-    """Resolve a pitch override against its legal minimum (issue #3299).
-
-    Returns ``(effective_pitch_um, clamped)``: ``0.0`` means "no override"
-    (the minimum, not clamped); a positive value below ``minimum_um`` is
-    clamped up to it and reported as clamped."""
-    if override_um <= 0.0:
-        return minimum_um, False
-    return max(override_um, minimum_um), override_um < minimum_um
 
 
 def _shared_sd_col_pitch(
@@ -2772,18 +2762,9 @@ def _diff_pair_layout(
     byte-for-byte; a caller that needs more room to route both matched
     devices' gate nets out of the block can grow either and pay the area.
     ``pitch_x_um`` (issue #5764) overrides the within-row column pitch
-    (otherwise unit extent plus :data:`MIN_SAME_LAYER_SPACING_UM`), the gap
-    a ``gen-compose`` route needs for its own port stub plus via-drop
-    landing pads when it wires two different nets to adjacent units of one
-    row. Like ``mos_array``'s ``pitch_x_um`` (issue #3299), a value below
-    that legal minimum is *clamped up* to it -- never emitted as
-    DRC-violating geometry -- and the clamp is reported via
-    ``pitch_x_clamped``/``min_col_pitch_um``; ``0.0`` (the default) means
-    "no override" and is a strict no-op. The override is safe for the
-    common-centroid property above precisely because it is uniform: it
-    scales every column's ``x0_um`` in *both* rows by the same step, so the
-    two legs' x centroids stay identical -- only a *per-leg* x offset would
-    break them.
+    (the room a ``gen-compose`` route needs between adjacent units); like
+    ``mos_array``'s #3299 knob it is clamped up to the legal minimum and
+    ``0.0`` (default) is a strict no-op, uniform so common-centroid holds.
 
     ``gate_contact`` (issue #492) is forwarded to :func:`_mos_unit_layout`;
     it grows each unit's ``bbox_height_um``, so both the row pitch and the
@@ -2809,10 +2790,6 @@ def _diff_pair_layout(
     )
     min_col_pitch = unit["total_len_um"] + MIN_SAME_LAYER_SPACING_UM
     row_pitch = unit["bbox_height_um"] + row_spacing_um
-    # Issue #5764: an explicit column-pitch override, clamped up to the
-    # legal minimum exactly as `_mos_array_layout` clamps its #3299 knob.
-    # `0.0` (the default) leaves the pitch -- and thus every cell's
-    # `x0_um` -- byte-for-byte unchanged.
     col_pitch, pitch_x_clamped = _clamp_pitch_override(pitch_x_um, min_col_pitch)
 
     counts = {"A": 0, "B": 0}
@@ -2832,11 +2809,8 @@ def _diff_pair_layout(
                 }
             )
 
-    # True core extent, not `splits * col_pitch - MIN_SAME_LAYER_SPACING_UM`:
-    # that shortcut is algebraically equal to this only at the default pitch
-    # (`col_pitch == min_col_pitch`), and #5764's override can push `col_pitch`
-    # beyond it -- the core box (ring sizing, pfet well, tap pads) must wrap
-    # the units' actual footprint at any pitch.
+    # True units' footprint at any pitch (#5764): the old shortcut only
+    # equals this at the default pitch (`col_pitch == min_col_pitch`).
     core_w = (splits - 1) * col_pitch + unit["total_len_um"]
     core_h = 2 * row_pitch - row_spacing_um
 
