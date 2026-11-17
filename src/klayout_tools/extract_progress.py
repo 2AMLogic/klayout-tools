@@ -47,6 +47,9 @@ class StageTimer:
         self._stages: dict[str, float] = {}
         self._current: str | None = None
         self._current_t0 = 0.0
+        # Wall seconds already credited to stages nested inside the open one;
+        # subtracted on close so a parent reports exclusive time (issue #5716).
+        self._child_seconds = 0.0
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -88,27 +91,34 @@ class StageTimer:
     @contextlib.contextmanager
     def stage(self, name: str) -> Iterator[None]:
         previous, previous_t0 = self._current, self._current_t0
+        previous_child = self._child_seconds
         self._current, self._current_t0 = name, time.monotonic()
+        self._child_seconds = 0.0
         if self._narrate_stages:
             self._emit(f"{name} started ({self._elapsed():.0f}s total)")
         try:
             yield
         finally:
             took = time.monotonic() - self._current_t0
-            self._stages[name] = self._stages.get(name, 0.0) + took
+            # Exclusive time: a nested stage's seconds belong to the nested
+            # stage alone, so sum(stages) never exceeds the wall total.
+            exclusive = max(took - self._child_seconds, 0.0)
+            self._stages[name] = self._stages.get(name, 0.0) + exclusive
             if self._narrate_stages:
                 self._emit(
                     f"{name} finished in {took:.1f}s ({self._elapsed():.0f}s total)"
                 )
             self._current, self._current_t0 = previous, previous_t0
+            self._child_seconds = previous_child + took
 
     def report(self) -> dict[str, Any]:
         """The envelope's ``timing`` object.
 
-        ``stages`` is per-stage wall seconds, ``total_seconds`` the whole
-        run, and ``unattributed_seconds`` the remainder no named stage covers
-        (report assembly, parasitics injection and the like) so the three
-        always reconcile.
+        ``stages`` is per-stage wall seconds -- *exclusive* of any stage nested
+        inside it, so ``sum(stages) + unattributed_seconds == total_seconds``
+        under nesting -- ``total_seconds`` the whole run, and
+        ``unattributed_seconds`` the remainder no named stage covers (report
+        assembly and the like) so the three always reconcile.
         """
         total = self._elapsed()
         return {
