@@ -792,6 +792,7 @@ def _mos_array_describe(
                 metal_layer,
                 GUARD_RING_DEFAULT_WIDTH_UM,
                 metal_layer,
+                pdk_variant=pdk_info["variant"],
             )
         )
 
@@ -1693,6 +1694,7 @@ def _ring_ports(
     tap_width_um: float,
     gap_layer: dict[str, Any],
     tap_net: str | None = None,
+    pdk_variant: str = "",
 ) -> list[dict[str, Any]]:
     """Reported ``ports[]`` entries for a drawn ring.
 
@@ -1706,6 +1708,21 @@ def _ring_ports(
     would cross it on, and `klt gen-compose` rejects any attempt to wire or
     label it.
 
+    A ``GAP_*`` entry also carries ``strap_window_um`` (issue #5656): the
+    opening's own box inset along the ring side -- never across it -- by the
+    resolved deck's minimum same-layer spacing for ``gap_layer``
+    (:func:`~klayout_tools.gen_compose_layer_rules._min_spacing_um_for_layer`,
+    the same lookup and threshold a ``klt drc`` run judges a strap with), in
+    the composed frame like every other port field. A strap whose footprint
+    stays inside the window is spacing-clean against the ring metal on both
+    sides of the opening; the window's extent across the side is the ring
+    band's full thickness, since a strap crossing the ring is constrained
+    only along it. A window whose along-side extent is <= 0 (an opening
+    narrower than two spacings) means no same-layer-legal strap fits.
+    An unresolvable PDK family -- or a deck with no ``"space"`` rule for
+    ``gap_layer`` -- insets by ``0.0``, reporting the opening's own box, the
+    same degrade-to-no-op the #1386 spacing lookup established.
+
     ``tap_net`` (issue #1421) names the net every tap port carries, reported
     as each entry's ``net``. ``None`` (the default, and every caller that
     predates ``well_island``) keeps the historical ``"net": null`` -- a ring
@@ -1714,6 +1731,7 @@ def _ring_ports(
     no net by construction.
     """
     from .gen import RING_SIDE_DIRECTIONS
+    from .gen_compose_layer_rules import _min_spacing_um_for_layer
 
     ox, oy = offset_um
     ports: list[dict[str, Any]] = []
@@ -1735,6 +1753,15 @@ def _ring_ports(
 
     gap = ring["gap"]
     if gap is not None:
+        spacing = _min_spacing_um_for_layer(
+            pdk_variant, (gap_layer["layer"], gap_layer["datatype"])
+        )
+        inset = spacing[0] if spacing is not None else 0.0
+        x0, y0, x1, y1 = gap["box_um"]
+        if gap["side"] in ("N", "S"):
+            window = (x0 + inset, y0, x1 - inset, y1)
+        else:
+            window = (x0, y0 + inset, x1, y1 - inset)
         ports.append(
             {
                 "name": f"GAP_{gap['side']}",
@@ -1744,6 +1771,14 @@ def _ring_ports(
                 "y_um": gap["y_um"] + oy,
                 "width_um": gap["opening_um"],
                 "direction_deg": RING_SIDE_DIRECTIONS[gap["side"]],
+                "strap_window_um": _box_um_field(
+                    (
+                        window[0] + ox,
+                        window[1] + oy,
+                        window[2] + ox,
+                        window[3] + oy,
+                    )
+                ),
             }
         )
     return ports
@@ -1917,6 +1952,7 @@ def _guard_ring_describe(
         metal_layer,
         params["ring_width_um"],
         metal_layer,
+        pdk_variant=pdk_info["variant"],
     )
 
     notes = _ring_gap_notes(info, params["ring_gap_side"])
@@ -2318,6 +2354,7 @@ def _well_island_describe(
         params["ring_width_um"],
         metal_layer,
         net,
+        pdk_variant=pdk_info["variant"],
     )
 
     isolation = _well_island_isolation(params, family)
@@ -2572,6 +2609,7 @@ def _diff_pair_describe(
                 metal_layer,
                 GUARD_RING_DEFAULT_WIDTH_UM,
                 metal_layer,
+                pdk_variant=pdk_info["variant"],
             )
         )
 
@@ -2751,6 +2789,7 @@ def _bjt_array_describe(
                 tap_layer,
                 ring_w,
                 metal_layer,
+                pdk_variant=pdk_info["variant"],
             )
         )
 
@@ -3078,6 +3117,7 @@ def _esd_device_describe(
                 metal_layer,
                 GUARD_RING_DEFAULT_WIDTH_UM,
                 metal_layer,
+                pdk_variant=pdk_info["variant"],
             )
         )
 

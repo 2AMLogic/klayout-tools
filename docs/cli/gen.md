@@ -1635,6 +1635,22 @@ opening through the ring's band so a route can pass through it instead:
   marks the *absence* of metal, so it is a marker rather than a connectable
   port — `klt gen-compose` rejects any attempt to wire (`connectivity[]`) or
   label (`pins[]`) one.
+- The same `GAP_<side>` entry carries `strap_window_um` (issue #5656) — the
+  opening's own box inset **along the ring side** (never across it) by the
+  resolved PDK deck's minimum same-layer spacing for the opening's layer
+  (`{x0, y0, x1, y1}` in the composed frame, like every port field). A hand
+  drawn strap (`klt draw`, or a `rect_um` in a composed stream) whose
+  footprint stays inside the window is spacing-clean against the ring metal
+  on both sides of the opening — so a caller can assert clearance up front,
+  per sweep point, instead of discovering a violation in `klt drc` after the
+  fact. The window's extent across the side is the ring band's full
+  thickness (a strap crossing the ring is constrained only along it), and a
+  window whose along-side extent is ≤ 0 means the opening is narrower than
+  two spacings — no same-layer-legal strap fits. The inset is looked up from
+  the same curated deck `klt drc` judges with (e.g. sky130's `li1.space.1`
+  0.17 µm, gf180mcu's `metal1.space.1` 0.23 µm); when the family or a
+  spacing rule for the layer cannot be resolved, the window degrades to the
+  opening's own box (inset 0).
 - A `drc_hints.notes[]` entry records the opening (and that substrate
   isolation is interrupted there), or — when `ring_gap_side` is set on a
   block whose ring is switched off — that no opening was cut.
@@ -2475,6 +2491,7 @@ family/variant split the resolver doesn't have. The response's
 | `x_um`/`y_um` | number | Port location in micrometres, relative to the cell origin. |
 | `width_um` | number | Port width. |
 | `direction_deg` | number | Outward-facing direction in degrees (`0`/`90`/`180`/`270`). |
+| `strap_window_um` | object \| null | `GAP_*` markers only (issue #5656; absent on every other port): `{x0, y0, x1, y1}` — the ring opening's box inset along the ring side by the resolved deck's minimum same-layer spacing for the marker's layer, in the composed frame. A strap kept inside the window is spacing-clean against the ring metal on both sides of the opening; a ≤ 0 along-side extent means no same-layer-legal strap fits the opening. Degenerates to the opening's own box (inset 0) when no spacing rule for the layer can be resolved from the family's deck. |
 
 #### `drc_hints` fields
 

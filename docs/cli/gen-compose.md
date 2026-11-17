@@ -784,7 +784,12 @@ into the circuit.)
   never relaxed: with no opening declared, the behavior is exactly #199's.
   A `GAP_*` port itself is a marker for the absence of metal, not a
   conductor — naming one in `connectivity[]` or `pins[]` is an application
-  error (exit `1`).
+  error (exit `1`). For straps drawn *outside* `connectivity[]` — a hand
+  sized `rect_um` crossing the opening — the marker's `strap_window_um`
+  field (issue #5656, see [`klt gen`](gen.md)'s "Ring routing openings") is
+  the legal footprint to keep the strap inside: it is the opening inset by
+  the deck's own same-layer spacing, so a strap within it clears the ring
+  metal on both cut ends at every sweep point.
 
   ```bash
   # A guard-ringed pair whose ring is opened on the east side, on the row
