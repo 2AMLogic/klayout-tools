@@ -37,7 +37,19 @@ not `klt --version`, if you need to detect this kind of drift. See
   `lint-envelope`'s recommendation names `request.portable_paths: true` as
   the first-choice remedy for a `klt`-produced envelope. No field is added,
   removed or retyped; no `schema_version` bump.
-
+- **`openroad` Docker wrapper keeps `/tmp` mounted when `$TMPDIR` differs**
+  (issue #5878, 2026-11-17): the wrapper `scripts/install-openroad-docker.sh`
+  writes, mounted only `${TMPDIR:-/tmp}`, so while `$TMPDIR` was unset (or
+  `/tmp`) that mount incidentally made `/tmp` visible as a whole — but the
+  moment a caller exported any other `TMPDIR` (this fleet's daemon exports
+  one for every child process), `/tmp` stopped being mounted and an input
+  under `/tmp` failed inside the container with an opaque
+  `[ERROR STA-0340] cannot open '<path>'` for a file the caller could read
+  on the host. The wrapper now also mounts `/tmp:/tmp` whenever `$TMPDIR`
+  resolves to anything else (skipped when it equals `/tmp`, including
+  trailing-slash forms like `/tmp/` or `/tmp//`, since docker rejects a
+  duplicate mount point). Hosts with an older wrapper should re-run
+  `scripts/install-openroad-docker.sh` to upgrade it in place.
 - **`klt drc` gf180mcu deck: `DF.1c` (MOSCAP COMP min width) is now checked,
   and `comp.width.mv.1` exempts `MVSD`/`MVPSD`-marked LDMOS drains** (#5719,
   2026-11-17). New rule `comp.width.moscap.1` (`DF.1c`, 1.0 um,
@@ -62,7 +74,6 @@ not `klt --version`, if you need to detect this kind of drift. See
   devices now report the genuine `comp.width.moscap.1` finding (the native
   deck flags the same shapes) — the generator cannot yet draw a MOSCAP that
   passes it (#6170). No JSON field added or removed; `schema_version` unchanged.
-
 - **Fixed** (#5664, `klt lvs` `--engine klayout-runset`; no JSON field
   changes, `schema_version` stays 3): a `pin.unmatched` finding whose pin
   pair KLayout's own comparer graded `Match`/`MatchWithWarning` — a
