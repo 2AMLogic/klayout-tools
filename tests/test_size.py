@@ -8,7 +8,7 @@ Two tiers, mirroring `tests/test_sim.py`'s own split:
   level classification, and sweep-log parsing as pure functions -- either
   directly, or by stubbing `subprocess.run` so `run_size`'s evaluator-error
   path is exercised without ever invoking the real `ngspice` binary.
-- **Integration tests** (`@pytest.mark.skipif(not HAVE_NGSPICE, ...)`) run
+- **Integration tests** (`@_SKIP_NO_NGSPICE`) run
   the real `ngspice -b` subprocess end to end against the tiny synthetic
   device library in `examples/size/` (see that directory's `generate.py`
   docstring for why it is a bare SPICE `level=1` model, not a real PDK) --
@@ -33,30 +33,20 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import re
-import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
 from helpers.subprocess_fakes import fake_completed
+from helpers.tool_probes import HAVE_NGSPICE
+from helpers.tool_probes import SKIP_NO_NGSPICE as _SKIP_NO_NGSPICE
 from klayout_tools import size, size_topology
 from klayout_tools.cli import main
 from klayout_tools.pdk import PdkNotFoundError, find_pdk
 
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
-
-#: `KLT_SKIP_NGSPICE_TESTS=1` (local-only, set by `npm run check:ci` -- never
-#: by CI) opts a host with ngspice installed out of this slow tier too; see
-#: `tests/test_extract.py`'s `HAVE_NGSPICE` for the full rationale (issue #1651).
-HAVE_NGSPICE = shutil.which("ngspice") is not None and (
-    os.environ.get("KLT_SKIP_NGSPICE_TESTS") != "1"
-)
-_SKIP_NO_NGSPICE = pytest.mark.skipif(
-    not HAVE_NGSPICE, reason="ngspice is not installed on this machine"
-)
 
 EXAMPLES_DIR = Path(__file__).parent.parent / "examples" / "size"
 CANARY_DIR = Path(__file__).parent.parent / "examples" / "design-pipeline"

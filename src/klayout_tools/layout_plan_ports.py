@@ -188,8 +188,11 @@ def bind_ring_nets(
 
 #: Generators whose declared devices carry a MOS body (``B``) terminal *and*
 #: whose generated ``ports[]`` can expose a group-level tie to it -- the
-#: contacted ``TAP_PAD<k>`` pads a ring-less array draws (#4143), or, when the
-#: group draws its own guard ring instead, that ring's ``TAP_<side>`` ports.
+#: contacted ``TAP_PAD<k>`` pads a ring-less array draws (#4143), the one
+#: shared ``WELL_TAP`` port a ring-less pfet array draws on a family whose
+#: curated deck derives the tie from an in-well implant tap (#1473,
+#: ``gen_layer_params._MOS_ARRAY_WELL_TAP_FAMILIES``), or, when the group
+#: draws its own guard ring instead, that ring's ``TAP_<side>`` ports.
 #: Exactly the generators ``layout_plan_execute._TERMINAL_SUFFIXES`` gives an
 #: ``S``/``D``/``G`` map (#5546).
 BODY_TIE_GENERATORS = frozenset({"mos_array", "diff_pair", "esd_device"})
@@ -202,6 +205,17 @@ BODY_TERMINAL = "B"
 #: :data:`_RING_TAP_PREFIX`, of which it is a prefix-extension.
 _TAP_PAD_PREFIX = "TAP_PAD"
 
+#: The one shared well-tie tap port a ring-less ``mos_array`` draws on a
+#: family whose curated deck derives the tie from an implant-covered active
+#: shape inside the well (#1473 -- sg13cmos5l today; see
+#: ``gen_layer_params._MOS_ARRAY_WELL_TAP_FAMILIES``). ``gen_describe``'s own
+#: comment states why it is group-level: one pad ties every unit device's
+#: PMOS body in the array, so there is no ``U<i>_B``-per-unit port to
+#: resolve. Matched exactly, not by prefix -- unlike the two shapes around it
+#: this is a single fixed name, reported beside the port itself as
+#: ``gen_layer_params._MOS_ARRAY_WELL_TAP_NET_LABEL``.
+_WELL_TAP_PORT_NAME = "WELL_TAP"
+
 #: A ``mos_array``/``diff_pair``/``esd_device`` guard ring's own tap port
 #: (``gen_describe._ring_ports`` is called with ``tap_prefix="TAP_"`` by all
 #: three). ``GAP_<side>`` -- a marker, never a conductor -- cannot collide.
@@ -212,24 +226,28 @@ def body_tie_port(ports: list[dict[str, Any]]) -> str | None:
     """The single generated port a group's body net should be bound to, or
     ``None`` when the generator drew no tie (#5546).
 
-    A ring-less array's ``TAP_PAD<k>`` pads win over a drawn ring's
-    ``TAP_<side>`` ports purely so the choice is stable if a generator ever
-    reports both -- today they are mutually exclusive
-    (``gen._optional_tap_pads`` returns ``None`` whenever a ring is drawn).
-    **One** port per group is enough either way, exactly as for
-    :func:`bind_ring_nets`: a group's pads all contact the one well (pfet) or
-    the one substrate (nfet), and a ring is a single conductor, so binding
-    more would only wire the tie to itself.
+    A ring-less array's ``TAP_PAD<k>`` pads (#4143) or shared ``WELL_TAP``
+    port (#1473, #5948) win over a drawn ring's ``TAP_<side>`` ports purely
+    so the choice is stable if a generator ever reports both -- today the
+    three are mutually exclusive: pads and the well tap are family-scoped
+    (``gen_layer_params._TAP_DISTANCE_FAMILIES`` /
+    ``_MOS_ARRAY_WELL_TAP_FAMILIES``), and ``gen._optional_tap_pads`` returns
+    ``None`` whenever a ring is drawn. **One** port per group is enough
+    either way, exactly as for :func:`bind_ring_nets`: a group's ties all
+    contact the one well (pfet) or the one substrate (nfet), and a ring is a
+    single conductor, so binding more would only wire the tie to itself.
     """
     names = [
         port["name"]
         for port in ports
         if isinstance(port, dict) and isinstance(port.get("name"), str)
     ]
-    for prefix in (_TAP_PAD_PREFIX, _RING_TAP_PREFIX):
-        for name in names:
-            if name.startswith(prefix):
-                return name
+    for name in names:
+        if name == _WELL_TAP_PORT_NAME or name.startswith(_TAP_PAD_PREFIX):
+            return name
+    for name in names:
+        if name.startswith(_RING_TAP_PREFIX):
+            return name
     return None
 
 
@@ -300,11 +318,12 @@ def bind_body_nets(
       exit 1) naming the group and the nets, rather than the silent short
       one shared tie would draw between them.
     * **No tie port** (a family with no tap-distance rule and no requested
-      ring, e.g. a ring-less sky130 array) -- one ``warnings[]`` entry per
-      untied body net, so the caller learns in this run that the bodies are
-      untied rather than from a later LVS compare. Suppressed for a net a
-      ``guard_ring`` group's own ``net`` (#5095) already names: the plan
-      ties it.
+      ring, e.g. a ring-less sky130 array -- or either flavor on a family
+      whose only drawn tie is the pfet well tap, like sg13cmos5l's nfet) --
+      one ``warnings[]`` entry per untied body net, so the caller learns in
+      this run that the bodies are untied rather than from a later LVS
+      compare. Suppressed for a net a ``guard_ring`` group's own ``net``
+      (#5095) already names: the plan ties it.
     """
     from .layout_plan_execute import LayoutPlanExecuteError
 

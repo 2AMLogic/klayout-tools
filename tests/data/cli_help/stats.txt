@@ -12,7 +12,7 @@ positional arguments:
 options:
   -h, --help show this help message and exit
   --per-layer also report the same statistics broken down per layer
-  --geometry-digest also compute geometry_digest, a sha256 of the stream's decoded geometry (null otherwise; it re-reads the whole layout and roughly 2.5x's the runtime on large flat layouts)
+  --geometry-digest also compute geometry_digest, a sha256 of the stream's decoded geometry (null otherwise; it re-reads the whole layout and roughly 2.5x the runtime on large flat layouts)
   --top TOP top cell to report on when the stream has more than one (required in that case; optional otherwise)
   --density-window UM also report per-layer drawn-area fraction (merged geometry) over square windows of this size in um tiled over the top-cell bbox; edge windows are clipped and judged against their clipped area
   --window-layer L/D restrict --density-window to this layer/datatype (repeatable); default: every non-annotation layer with geometry
