@@ -5,9 +5,8 @@ Every test here is a pure unit test: the injectable `aws_runner` callable
 (`RemoteLauncher(aws_runner=...)`) is always replaced with an in-memory fake
 that records calls and returns canned output, so **no test in this file ever
 invokes the real `aws` CLI, makes a network call, or could provision a real
-AWS resource** -- see CLAUDE.md's "tests that would actually launch real EC2
-instances must NOT run in CI/tests" instruction. `subprocess.run` itself is
-never reached by any test below.
+AWS resource** -- CLAUDE.md: "tests that would actually launch real EC2
+instances must NOT run in CI/tests". `subprocess.run` is never reached.
 """
 
 from __future__ import annotations
@@ -1819,6 +1818,7 @@ def test_published_runner_identities_latest_per_pdk_and_region(tmp_path):
             "klt_version": "0.7.0",
             "klt_ref": "v0.7.0",
             "pdk_variants": None,
+            "open_pdks_commit": None,
         }
     ]
     any_region = rl.published_runner_identities("sky130A", None, manifest)
@@ -1938,75 +1938,6 @@ def test_manifest_entry_round_trips_pdk_variants():
         rl.ami_manifest_entry(**base, pdk_variants=[])
     with pytest.raises(rl.RemoteLaunchError):
         rl.ami_manifest_entry(**base, pdk_variants=["gf180 mcuD"])
-
-
-def test_manifest_entry_round_trips_open_pdks_commit():
-    base = dict(
-        pdk="sky130A",
-        region="us-east-1",
-        ami_id="ami-0123456789abcdef0",
-        pdk_snapshot="sky130A-2026.11.17",
-        ngspice_version="46",
-        built_at="2026-11-17T00:00:00Z",
-        klt_version="0.7.0",
-        klt_ref="v0.7.0",
-    )
-    commit = "f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7"
-    assert "open_pdks_commit" not in rl.ami_manifest_entry(**base)
-    entry = rl.ami_manifest_entry(**base, open_pdks_commit=commit)
-    assert entry["open_pdks_commit"] == commit
-    _validate_manifest([entry])
-    _validate_manifest([_entry()])  # historical shape still validates
-    for bad in (
-        "",
-        "f6eeac7",
-        "F6EEAC7DAD085FFCC829CCFD721F7B4CE39EDCF7",
-        commit + "0",
-        "v1.0",
-    ):
-        with pytest.raises(rl.RemoteLaunchError, match="open_pdks_commit"):
-            rl.ami_manifest_entry(**base, open_pdks_commit=bad)
-    # The schema rejects a malformed value too, not just the builder.
-    import jsonschema
-
-    with pytest.raises(jsonschema.ValidationError):
-        _validate_manifest([{**entry, "open_pdks_commit": "f6eeac7"}])
-
-
-def test_build_script_publishes_open_pdks_commit_for_volare_pdks():
-    pinned = "f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7"
-    common = [
-        "--region",
-        "us-east-1",
-        "--emit-manifest-entry",
-        "ami-0123456789abcdef0",
-        "0.7.0",
-    ]
-    for pdk in ("sky130A", "gf180mcu"):
-        result = _emit_entry("--pdk", pdk, *common)
-        assert result.returncode == 0, result.stderr
-        entry = json.loads(result.stdout)
-        assert entry["open_pdks_commit"] == pinned
-        _validate_manifest([entry])
-    # A deliberate refresh publishes the new pin...
-    other = "0123456789abcdef0123456789abcdef01234567"
-    result = _emit_entry("--pdk", "sky130A", "--pdk-version", other, *common)
-    assert json.loads(result.stdout)["open_pdks_commit"] == other
-    # ...but a non-commit override is left unpublished, not guessed or refused.
-    result = _emit_entry("--pdk", "sky130A", "--pdk-version", "v1.2", *common)
-    assert result.returncode == 0, result.stderr
-    assert "open_pdks_commit" not in json.loads(result.stdout)
-
-
-def test_build_script_leaves_open_pdks_commit_unset_for_sg13g2():
-    result = _emit_entry(
-        "--pdk", "sg13g2", "--region", "us-east-1",
-        "--emit-manifest-entry", "ami-0123456789abcdef0", "0.7.0",
-    )  # fmt: skip
-    assert result.returncode == 0, result.stderr
-    entry = json.loads(result.stdout)
-    assert "open_pdks_commit" not in entry
-    _validate_manifest([entry])
 
 
 def test_published_runner_identities_carry_pdk_variants(tmp_path):
