@@ -3142,8 +3142,7 @@ def _run_yosys(
     except subprocess.TimeoutExpired as exc:
         _write_yosys_log(script_path, exc.stdout, exc.stderr)
         raise SynthesizeError(
-            f"yosys did not complete within {timeout_s}s (script "
-            f"'{script_path}') -- process killed"
+            ytimeout.timeout_message(timeout_s, script_path, exc.stdout)
         ) from exc
 
     _write_yosys_log(script_path, completed.stdout, completed.stderr)
