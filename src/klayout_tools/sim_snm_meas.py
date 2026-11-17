@@ -48,8 +48,6 @@ ERROR_CODES = (
 _KEYS = ("x", "y1", "y2")
 _ALLOWED_KEYS = frozenset(_KEYS)
 
-#: Single-ended ``v(node)``: one non-empty token without whitespace, control
-#: characters, commas or parentheses.
 _VECTOR_PREFIX = "__klt_snm_"
 
 

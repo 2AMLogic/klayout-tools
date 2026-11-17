@@ -80,8 +80,6 @@ ERROR_CODES = (
 
 _ALLOWED_KEYS = frozenset({"num", "den", "metric"})
 
-#: Single-ended ``v(node)``: one non-empty token without whitespace, control
-#: characters, commas or parentheses.
 _VECTOR_PREFIX = "__klt_xfer_"
 
 
