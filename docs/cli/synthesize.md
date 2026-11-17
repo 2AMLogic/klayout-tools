@@ -1669,7 +1669,9 @@ command emits one line per declared macro, in precedence order:
    LEF `PIN DIRECTION`s and written into the run directory as
    `<cell>_blackbox.v`, then loaded the same way. A caller with only a LEF
    never has to hand-write (or hand-maintain, against a vendor's own port
-   list) a stub.
+   list) a stub. Disposition 3 is unreachable for a LEF-less entry (issue
+   #5612) — with no LEF there is nothing to generate the stub from, so such
+   an entry always takes disposition 1 or 2.
 
 Every disposition has the same effect: the macro survives
 `hierarchy`/`synth`/`abc`/`clean` as one opaque instance in
@@ -1698,8 +1700,9 @@ instantiated type (macro or otherwise) `area_um2` does not account for, and
 a non-empty result also surfaces as a `macro_area_excluded` /
 `cells_without_liberty_area` entry in `warnings` — see "`warnings`" below.
 The `macro_area_excluded` text sends the caller to `response.macros[].lib`
-only for macros that have one; a LEF-only (or `verilog_blackbox`-only) macro
-has `lib: null`, so the warning says no area is available for it here.
+only for macros that have one; a LEF-only, `verilog_blackbox`-only or
+abstract-less macro has `lib: null`, so the warning says no area is
+available for it here.
 
 See `docs/cli/sta.md`'s and `docs/cli/place-and-route.md`'s own "Hard
 macros"/"Hard-macro placement" sections for how the other two verbs consume

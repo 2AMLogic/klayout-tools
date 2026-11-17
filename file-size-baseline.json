@@ -441,7 +441,7 @@
     },
     {
       "path": "src/klayout_tools/macros.py",
-      "lines": 668
+      "lines": 651
     },
     {
       "path": "src/klayout_tools/mcp_tools.py",
@@ -937,7 +937,7 @@
     },
     {
       "path": "tests/test_macros.py",
-      "lines": 543
+      "lines": 542
     },
     {
       "path": "tests/test_mom.py",
