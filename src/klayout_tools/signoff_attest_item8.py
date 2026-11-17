@@ -11,21 +11,24 @@ restriction stay with the caller's ``envelope_checks`` command.
 
 from __future__ import annotations
 
-import json
 import os
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
-from .signoff import SignoffError, _classify
+from .signoff import SignoffError, _classify, _read_envelope
 
 
 def _recognised_kind(root: str, path: str) -> str | None:
-    """The envelope kind of ``root/path``, or ``None`` when the file is
-    missing, is not a JSON object, or is not a recognised envelope."""
+    """The envelope kind of ``root/path``, or ``None`` when the file cannot
+    be read (missing, directory, bad gzip), is not valid JSON or carries
+    nonfinite literals, is not a JSON object, or is not a recognised
+    envelope. The read goes through :func:`klayout_tools.signoff._read_envelope`
+    -- the same gzip-transparent, nonfinite-refusing reader ``--manifest``
+    grading applies to a citation -- so the two agree on which committed
+    forms are evidence (issue #5452)."""
     try:
-        with open(os.path.join(root, path), encoding="utf-8") as handle:
-            envelope = json.load(handle)
-    except (OSError, ValueError):
+        envelope = _read_envelope(os.path.join(root, path))
+    except SignoffError:
         return None
     if not isinstance(envelope, Mapping):
         return None

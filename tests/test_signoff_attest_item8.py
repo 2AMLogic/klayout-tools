@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from klayout_tools.cli.output import write_json_file
 from klayout_tools.signoff import build_tier_report
 from klayout_tools.signoff_attest import (
     AttestationError,
@@ -483,6 +484,64 @@ def test_malformed_or_schemaless_citation_fails(tmp_path, text):
         (c["check"], c["role"])
         for c in envelope["attestation"]["checks"]
         if not c["passed"]
+    ]
+
+
+def test_gzip_committed_citation_is_recognised(tmp_path):
+    # `klt sim --report-out report.json.gz` is the documented compact form
+    # for a report committed as evidence (docs/cli/signoff.md, #5452), so a
+    # cited .json.gz must read exactly like its plain .json twin.
+    repo = _repo(tmp_path)
+    write_json_file(
+        {**_ENV, "status": "pass", "result": {"fmax": 100, "area": 5, "power": 2}},
+        str(repo / "evidence" / "sim.json.gz"),
+    )
+    inventory = _analog_inventory(
+        spec_rows=["gain"],
+        citations={"gain": ["evidence/sim.json.gz"]},
+        envelope_checks={"evidence/sim.json.gz": _PASS},
+    )
+
+    envelope = _attest(repo, inventory)
+
+    assert envelope["status"] == "pass"
+    checks = envelope["attestation"]["checks"]
+    assert [c for c in checks if c["check"] == "envelope"] == [
+        {
+            "check": "envelope",
+            "role": "evidence",
+            "path": "evidence/sim.json.gz",
+            "kind": "generic",
+            "passed": True,
+        }
+    ]
+
+
+def test_cited_nonfinite_json_fails(tmp_path):
+    # The shared reader refuses nonstandard numeric constants; the
+    # recogniser inherits that via _read_envelope, like `--manifest` grading.
+    repo = _repo(tmp_path)
+    (repo / "evidence" / "sim_nan.json").write_text(
+        '{"schema_version": 1, "kind": "generic", "status": "pass", "x": NaN}'
+    )
+    inventory = _analog_inventory(
+        spec_rows=["gain"],
+        citations={"gain": ["evidence/sim_nan.json"]},
+        envelope_checks={"evidence/sim_nan.json": _PASS},
+    )
+
+    envelope = _attest(repo, inventory)
+
+    assert envelope["status"] == "fail"
+    checks = envelope["attestation"]["checks"]
+    assert [c for c in checks if c["check"] == "envelope"] == [
+        {
+            "check": "envelope",
+            "role": "evidence",
+            "path": "evidence/sim_nan.json",
+            "kind": None,
+            "passed": False,
+        }
     ]
 
 
