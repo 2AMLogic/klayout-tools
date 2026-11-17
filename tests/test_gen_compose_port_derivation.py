@@ -33,7 +33,7 @@ def _make_macro(tmp_path, shapes, labels):
     return str(path)
 
 
-def _blocks(gds, spec, ports=None):
+def _blocks(gds, spec, ports=None, variant="sky130A"):
     cell = {
         "gds_path": gds,
         "cell_name": "macro",
@@ -42,7 +42,7 @@ def _blocks(gds, spec, ports=None):
     }
     if ports is not None:
         cell["ports"] = ports
-    return _parse_blocks([{"id": "m", "cell": cell}], None, "sky130A")
+    return _parse_blocks([{"id": "m", "cell": cell}], None, variant)
 
 
 def _spec(names, access=None, layers=((68, 5),)):
