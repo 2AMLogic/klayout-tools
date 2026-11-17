@@ -92,8 +92,9 @@ def _with_capacity_retries_override(
     """Fold the ``--capacity-retries`` CLI value into the batch config for a
     sharded single request (issue #5567), leaving the loaded request
     untouched. Validated by the resolver the batch config uses, so a bad
-    value is refused before any S3 write. A CLI knob only: the request file
-    has no such key."""
+    value is refused before any S3 write. The CLI value overrides any
+    ``batch.capacity_retries`` the request file carries, which the batch
+    config resolves the same way as ``batch.capacity_wait_s``."""
     if capacity_retries is None:
         return request
     from .sim_batch import resolve_capacity_retries

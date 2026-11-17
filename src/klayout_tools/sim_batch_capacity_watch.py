@@ -6,7 +6,6 @@ Split from :mod:`klayout_tools.sim_batch` (file-size ratchet, issue #5567);
 
 from __future__ import annotations
 
-import sys
 import threading
 import time
 from collections.abc import Callable
@@ -18,8 +17,12 @@ if TYPE_CHECKING:
 
 def _progress(line: str) -> None:
     """One progress line on stderr (never stdout: that carries the JSON
-    envelope). Resolves ``sys.stderr`` at call time so it can be captured."""
-    print(line, file=sys.stderr, flush=True)
+    envelope). Delegates to :func:`sim_batch._progress`, resolved at call
+    time so the module cycle is not tripped and there is one emitter for
+    the whole of ``sim_batch`` (a monkeypatch of it is honored here too)."""
+    from .sim_batch import _progress as _sim_batch_progress
+
+    _sim_batch_progress(line)
 
 
 def _heartbeat_interval_s() -> float:

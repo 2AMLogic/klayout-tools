@@ -107,5 +107,5 @@ def _run_pass(
 def _outcome(future: Future[Any]) -> tuple[Any, str | None]:
     try:
         return future.result(), None
-    except Exception as exc:  # noqa: BLE001 - "shard never returned"
+    except Exception as exc:  # "shard never returned"
         return None, str(exc)
