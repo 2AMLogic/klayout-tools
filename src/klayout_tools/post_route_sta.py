@@ -1401,9 +1401,7 @@ def _run_corner_session(
         completed.stdout or "", worst_slack, worst_hold_slack
     )
     worst_setup_path, worst_hold_path = _attach_worst_path_stages(  # issue #5783
-        completed.stdout or "",
-        worst_setup_path,
-        worst_hold_path,
+        completed.stdout or "", worst_setup_path, worst_hold_path,
         enabled=report_path_stages,
     )
 
