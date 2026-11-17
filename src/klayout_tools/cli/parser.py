@@ -2992,14 +2992,14 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
 
     decks_parser = pdk_sub.add_parser(
         "decks",
-        help="list the KLayout DRC decks a PDK ships and the -rd globals each reads",
+        help="list a PDK's KLayout DRC decks/LVS runsets and their -rd globals",
         description=(
-            "List the `.lydrc`/`.drc` KLayout DRC deck files under the "
-            "resolved variant's libs.tech/klayout/drc, which one `klt drc "
-            "--pdk` runs (`is_default`), and a best-effort static scan of the "
-            "`-rd` globals each consumes (`required_by_caller`, `default`). "
-            "Use it to pick a sibling deck for `klt drc --deck-file` and the "
-            "`--deck-var` flags it needs."
+            "List the `.lydrc`/`.drc` KLayout DRC decks and `.lvs` LVS runsets "
+            "(kind `lvs`) under the resolved variant's libs.tech/klayout, which "
+            "one `klt drc`/`klt lvs --pdk` runs (`is_default`), and a static "
+            "scan of the `-rd` globals each consumes (`required_by_caller`, "
+            "`default`). Use it to pick a sibling deck for `klt drc --deck-file` "
+            "and the `--deck-var` flags it needs; filter on `kind` for DRC only."
         ),
     )
     _add_pdk_args(
