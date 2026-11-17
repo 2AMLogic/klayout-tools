@@ -14,6 +14,12 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed** (#6227, `klt route`; no JSON field changes): a `routing.width_um`
+  or `pins[].direction_deg` too large for a float (e.g. `10**400`) raised an
+  uncaught `OverflowError` instead of the contract's `RouteError`; both now
+  use the shared finite-number check. `width_um` of `inf`/`nan`, previously
+  accepted, is now rejected with the same `RouteError`.
+
 - **Fixed** (#5664, `klt lvs` `--engine klayout-runset`; no JSON field
   changes, `schema_version` stays 3): a `pin.unmatched` finding whose pin
   pair KLayout's own comparer graded `Match`/`MatchWithWarning` — a
