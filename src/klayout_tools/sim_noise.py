@@ -48,8 +48,7 @@ import math
 from typing import Any
 
 from . import _spice_number as spice_number
-from . import sim_measurement_kind
-from . import sim_noise_mechanism
+from . import sim_measurement_kind, sim_noise_mechanism
 from .sim_errors import SimError
 
 #: Spectrum vectors of ngspice's first noise plot, aliased by bare name
