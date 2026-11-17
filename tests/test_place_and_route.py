@@ -6521,7 +6521,7 @@ def test_engine_error_message_names_mount_rule_for_path_outside_cwd(
     message = place_and_route._engine_error_message("floorplan", completed)
 
     assert f"'{outside}' is outside the invocation directory" in message
-    assert "$PWD, $PDK_ROOT and $TMPDIR" in message
+    assert "$PWD, $PDK_ROOT and $TMPDIR (plus /tmp when $TMPDIR differs)" in message
     assert "common ancestor" in message
 
     inside = cwd / "macro.lef"
@@ -8708,7 +8708,7 @@ def _skipped_via_pad_trim(variant: str) -> dict:
     }
     counts = {"cells_touched": 0, "pads_trimmed": 0, "pads_shrunk": 0, "pads_left": 0}
     tip = {"violations": 0, "via_pad_violations": 0, "rules": []}
-    tip["router_fill_violations"] = 0
+    tip |= {"router_fill_violations": 0, "router_fill_scan": None}
     return {**s, **counts, "layers": [], "tip_check": {**s, **tip}}
 
 
