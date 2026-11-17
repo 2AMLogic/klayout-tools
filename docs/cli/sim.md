@@ -297,6 +297,25 @@ directory *replaces* `$HOME/.spiceinit` — ngspice does not merge the two —
 so the requested lines must be complete, not mode-only additions to
 whatever the host's own init file sets.
 
+**What was in effect is recorded (issue
+[#5648](https://github.com/2AMLogic/klayout-tools/issues/5648)).** A run-directory
+`.spiceinit` *replaces* `$HOME/.spiceinit` rather than merging with it, and
+klt also writes one on requests that declared nothing whenever it pins the
+thread count (`options.threads_per_worker`, or `local-parallel` with more than
+one worker and unit) — so the same request can read the host's ambient init on
+`--backend local` and ignore it on `--backend local-parallel`. The report's
+`environment.ngspice_init` is `{source, lines, sha256}` (`null` for xyce);
+`source` is `"request"`, `"thread_pin"`, `"home"`, `"none"`, or `"runner"` for
+`remote`/`batch` (resolved by the worker). It reflects what ngspice actually
+reads, never what the request merely declared, and carries no absolute path.
+Two runs whose `sha256` differ read different init files. See
+`docs/json-contract.md`.
+
+Two stderr warnings (stdout JSON unaffected, silent when no
+`$HOME/.spiceinit` exists): the run **inherits** an ambient `$HOME/.spiceinit`
+(declare `options.ngspice_init` to make the request self-contained), or klt's
+own `.spiceinit` **replaced** it rather than merging.
+
 ### Transient noise coverage (ngspice, [#2985](https://github.com/2AMLogic/klayout-tools/issues/2985))
 
 On the **ngspice** engine a transient (`analysis.kind: "tran"`, or a `tran`
@@ -6870,7 +6889,9 @@ a corner grid. A stock ngspice without the module still produces the
     Poly resistors (`sky130_fd_pr__res_*`) are covered too: their subcircuits
     draw per-instance `AGAUSS` terms (`res_match`, `rend`) scaled by
     `MC_MM_SWITCH`, so two identical instances differ under `tt_mm` (measured
-    on the volare sky130A build `c6d73a35…`; note the term is upper-case, so a
+    on the volare sky130A build `c6d73a35…`, re-checked 2026-10-29 on `f6eeac7…`:
+    `res_high_po.model.spice` still carries 3 upper-case `AGAUSS` terms and no
+    lower-case `agauss` (#3420); note the term is upper-case, so a
     case-sensitive `grep agauss` misses it). The corner-level `var_mult` is a
     separate term shared by all instances.
   - **ihp-sg13g2**: Section-based like sky130. `cornerMOSlv.lib` /
