@@ -6124,6 +6124,109 @@ def test_compose_gf180mcu_metal2_via_drop_uses_deck_via_width_floor_and_is_drc_c
     assert drc_report["status"] == "clean", drc_report["violations"]
 
 
+def _diff_pair_two_net_row_request(both_pdk_root, tmp_path, output, pitch_x_um=None):
+    """Issue #5764's reproduction: one `diff_pair` block (splits=2) on
+    gf180mcuD, its two rows wired so two *different* nets both own fixtures
+    in the single inter-unit column gap -- OUTN on the column-0 drains
+    (endpoint stubs extend east into the gap, its backbone threads the gap
+    channel vertically) and TAIL on the column-1 sources (endpoint stubs
+    extend west into the same gap, its backbone runs down the gap's east
+    side). At the generator's default inter-unit pitch the router's own
+    stub lane plus endpoint pads leave 0.19um where gf180mcu's deck demands
+    0.28um (metal{1,2}.space.1); `params.pitch_x_um` is the knob that buys
+    the room back."""
+    params = {"splits": 2, "add_guard_ring": False}
+    if pitch_x_um is not None:
+        params["pitch_x_um"] = pitch_x_um
+    block = _gen_block_variant(
+        tmp_path, both_pdk_root, "gf180mcuD", "diff_pair", "dp", **params
+    )
+    return {
+        "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+        "blocks": [{"id": "dp", "generator_report": block}],
+        "placement": {"strategy": "row", "order": ["dp"], "spacing_um": 1.0},
+        "connectivity": [
+            {
+                "net": "OUTN",
+                "pins": [
+                    {"block": "dp", "port": "Q1_1_D"},
+                    {"block": "dp", "port": "Q2_2_D"},
+                ],
+            },
+            {
+                "net": "TAIL",
+                "pins": [
+                    {"block": "dp", "port": "Q2_1_S"},
+                    {"block": "dp", "port": "Q1_2_S"},
+                ],
+            },
+        ],
+        "routing": {"layer_role": "metal2", "width_um": 0.28},
+        "options": {"cell_name": "diff_pair_two_net_row", "output": str(output)},
+    }
+
+
+def test_compose_gf180mcu_diff_pair_two_net_row_default_pitch_cannot_route(
+    tmp_path, both_pdk_root
+):
+    # The same composition at the generator's default pitch must still fail,
+    # so the widened-pitch regression below cannot pass vacuously: the
+    # second net's stub lane comes within gf180mcu's same-layer spacing of
+    # the first net's already-routed footprint inside the inter-unit gap.
+    output = tmp_path / "diff_pair_two_net_row_default.gds"
+    request = _diff_pair_two_net_row_request(both_pdk_root, tmp_path, output)
+    report = compose(request)
+    assert report["unrouted_nets"], (
+        "the default-pitch composition is expected to leave a net unrouted"
+    )
+
+
+def test_compose_gf180mcu_diff_pair_two_net_row_widened_pitch_routes_drc_clean(
+    tmp_path, both_pdk_root
+):
+    # Issue #5764 acceptance: at an effective pitch of at least
+    # `unit extent + 0.49um` (delta = 0.09um over the legal minimum, derived
+    # in the issue from the pure endpoint-pad arithmetic), the same two-net
+    # composition composes fully routed and reports zero
+    # metal{1,2,3,4}.space.1 violations from `klt drc`. This wiring asks a
+    # little more than that arithmetic: OUTN's backbone also threads the gap
+    # channel vertically between the two nets' fixtures, a constraint the
+    # endpoint-only derivation does not count, so the test uses delta = 0.5
+    # (effective pitch `unit extent + 0.9um` -- still "at least"
+    # `unit extent + 0.49um`, with margin over every near-miss the router
+    # actually draws; verified at delta = 0.09 the composition still refuses
+    # with the issue's own `metal2.space.1` near-miss message).
+    block = _gen_block_variant(
+        tmp_path, both_pdk_root, "gf180mcuD", "diff_pair", "dp_probe", splits=2
+    )
+    min_col_pitch = next(
+        p["x_um"] for p in block["ports"] if p["name"] == "Q1_2_S"
+    ) - next(p["x_um"] for p in block["ports"] if p["name"] == "Q1_1_S")
+
+    output = tmp_path / "diff_pair_two_net_row_wide.gds"
+    request = _diff_pair_two_net_row_request(
+        both_pdk_root, tmp_path, output, pitch_x_um=min_col_pitch + 0.5
+    )
+    report = compose(request)
+    assert report["unrouted_nets"] == []
+    assert all(net["routed"] for net in report["nets"])
+
+    drc_report = run_drc(str(output), "gf180mcu")
+    space_rules = {
+        v["rule"]
+        for v in drc_report["violations"]
+        if v["rule"]
+        in {
+            "metal1.space.1",
+            "metal2.space.1",
+            "metal3.space.1",
+            "metal4.space.1",
+        }
+    }
+    assert space_rules == set(), drc_report["violations"]
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
 def test_compose_route_two_pin_waypoints_um_rejects_malformed_entries(
     tmp_path, pdk_root
 ):

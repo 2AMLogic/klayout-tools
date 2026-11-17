@@ -338,6 +338,33 @@ def _pitch_hints_and_warnings(
     return hints, warnings
 
 
+def _diff_pair_pitch_hints_and_warnings(
+    params: dict[str, Any], info: dict[str, Any]
+) -> tuple[dict[str, Any], list[str]]:
+    """Issue #5764: the x-only variant of :func:`_pitch_hints_and_warnings`
+    for ``diff_pair``, whose only pitch override is ``pitch_x_um`` -- its row
+    spacing is the existing ``row_spacing_um`` param, so there is no
+    ``pitch_y_um`` to report. Same contract: hints/warnings are empty unless
+    an override was requested, so default reports are unchanged."""
+    if params["pitch_x_um"] <= 0:
+        return {}, []
+    hints = {
+        "pitch": {
+            "col_pitch_um": info["col_pitch_um"],
+            "min_col_pitch_um": info["min_col_pitch_um"],
+            "pitch_x_clamped": info["pitch_x_clamped"],
+        }
+    }
+    warnings = []
+    if info["pitch_x_clamped"]:
+        minimum = info["min_col_pitch_um"]
+        warnings.append(
+            f"params.pitch_x_um={params['pitch_x_um']} is below the legal "
+            f"minimum pitch {minimum}um; clamped up to {minimum}um"
+        )
+    return hints, warnings
+
+
 from .gen_layer_params_checks import (  # noqa: E402 -- re-exported name
     validate_mos_array_width as _validate_mos_array_width,
 )
@@ -2455,6 +2482,8 @@ def _diff_pair_validate(params: dict[str, Any]) -> None:
         raise GenError("generator 'diff_pair': params.ring_padding_um must be >= 0")
     if params["row_spacing_um"] < 0:
         raise GenError("generator 'diff_pair': params.row_spacing_um must be >= 0")
+    if params["pitch_x_um"] < 0:
+        raise GenError("generator 'diff_pair': params.pitch_x_um must be >= 0")
 
     # `gate_pad_clearance_um` is deliberately left at its default here: this
     # validator runs before the PDK family is resolved (the same PDK-agnostic
@@ -2471,6 +2500,7 @@ def _diff_pair_validate(params: dict[str, Any]) -> None:
             ring_padding_um=params["ring_padding_um"],
             row_spacing_um=params["row_spacing_um"],
             gate_contact=params["gate_contact"],
+            pitch_x_um=params["pitch_x_um"],
         )
     )
     _validate_ring_gap(
@@ -2511,6 +2541,7 @@ def _diff_pair_describe(
         _gate_bottom_endcap_um(family),
         top_endcap_um=_gate_top_endcap_um(family),
         tap_reach_um=_tap_reach_um(family),
+        pitch_x_um=params["pitch_x_um"],
     )
     unit = info["unit"]
     metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
@@ -2594,6 +2625,7 @@ def _diff_pair_describe(
 
     voltage_flavor_hints = _voltage_flavor_hints(family, params, notes)
     sd_implant_hints = _sd_implant_hints(family, params, notes)
+    pitch_hints, pitch_warnings = _diff_pair_pitch_hints_and_warnings(params, info)
 
     snapped = _grid_snapped(dbu, params["w_um"], params["l_um"])
     kind = "mirror" if params["mirror"] else "pair"
@@ -2611,6 +2643,7 @@ def _diff_pair_describe(
             "notes": notes,
             **voltage_flavor_hints,
             **sd_implant_hints,
+            **pitch_hints,
         },
         "warnings": (
             (
@@ -2618,6 +2651,7 @@ def _diff_pair_describe(
                 if snapped
                 else []
             )
+            + pitch_warnings
             + _mfg_grid_warnings(
                 "diff_pair",
                 family,

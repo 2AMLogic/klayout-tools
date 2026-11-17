@@ -2742,6 +2742,7 @@ def _diff_pair_layout(
     contact_gate_offset_um: float = 0.0,
     bottom_endcap_um: float = 0.0,
     sd_implant_margin_um: float = 0.0,
+    pitch_x_um: float = 0.0,
     top_endcap_um: float = 0.0,
     tap_reach_um: float = 0.0,
 ) -> dict[str, Any]:
@@ -2770,8 +2771,19 @@ def _diff_pair_layout(
     present-day values by default so omitting them reproduces prior geometry
     byte-for-byte; a caller that needs more room to route both matched
     devices' gate nets out of the block can grow either and pay the area.
-    ``col_pitch`` (the within-row gap between interleaved splits) stays
-    fixed to ``MIN_SAME_LAYER_SPACING_UM`` -- out of scope for #484.
+    ``pitch_x_um`` (issue #5764) overrides the within-row column pitch
+    (otherwise unit extent plus :data:`MIN_SAME_LAYER_SPACING_UM`), the gap
+    a ``gen-compose`` route needs for its own port stub plus via-drop
+    landing pads when it wires two different nets to adjacent units of one
+    row. Like ``mos_array``'s ``pitch_x_um`` (issue #3299), a value below
+    that legal minimum is *clamped up* to it -- never emitted as
+    DRC-violating geometry -- and the clamp is reported via
+    ``pitch_x_clamped``/``min_col_pitch_um``; ``0.0`` (the default) means
+    "no override" and is a strict no-op. The override is safe for the
+    common-centroid property above precisely because it is uniform: it
+    scales every column's ``x0_um`` in *both* rows by the same step, so the
+    two legs' x centroids stay identical -- only a *per-leg* x offset would
+    break them.
 
     ``gate_contact`` (issue #492) is forwarded to :func:`_mos_unit_layout`;
     it grows each unit's ``bbox_height_um``, so both the row pitch and the
@@ -2795,8 +2807,13 @@ def _diff_pair_layout(
         sd_implant_margin_um=sd_implant_margin_um,
         top_endcap_um=top_endcap_um,
     )
-    col_pitch = unit["total_len_um"] + MIN_SAME_LAYER_SPACING_UM
+    min_col_pitch = unit["total_len_um"] + MIN_SAME_LAYER_SPACING_UM
     row_pitch = unit["bbox_height_um"] + row_spacing_um
+    # Issue #5764: an explicit column-pitch override, clamped up to the
+    # legal minimum exactly as `_mos_array_layout` clamps its #3299 knob.
+    # `0.0` (the default) leaves the pitch -- and thus every cell's
+    # `x0_um` -- byte-for-byte unchanged.
+    col_pitch, pitch_x_clamped = _clamp_pitch_override(pitch_x_um, min_col_pitch)
 
     counts = {"A": 0, "B": 0}
     cells = []
@@ -2815,7 +2832,12 @@ def _diff_pair_layout(
                 }
             )
 
-    core_w = splits * col_pitch - MIN_SAME_LAYER_SPACING_UM
+    # True core extent, not `splits * col_pitch - MIN_SAME_LAYER_SPACING_UM`:
+    # that shortcut is algebraically equal to this only at the default pitch
+    # (`col_pitch == min_col_pitch`), and #5764's override can push `col_pitch`
+    # beyond it -- the core box (ring sizing, pfet well, tap pads) must wrap
+    # the units' actual footprint at any pitch.
+    core_w = (splits - 1) * col_pitch + unit["total_len_um"]
     core_h = 2 * row_pitch - row_spacing_um
 
     ring = None
@@ -2842,6 +2864,8 @@ def _diff_pair_layout(
         "unit": unit,
         "cells": cells,
         "col_pitch_um": col_pitch,
+        "min_col_pitch_um": min_col_pitch,
+        "pitch_x_clamped": pitch_x_clamped,
         "row_pitch_um": row_pitch,
         "core_w_um": core_w,
         "core_h_um": core_h,

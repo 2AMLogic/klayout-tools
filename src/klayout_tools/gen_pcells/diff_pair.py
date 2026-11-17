@@ -161,6 +161,14 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 default=MIN_SAME_LAYER_SPACING_UM,
             )
             self.param(
+                "pitch_x_um",
+                self.TypeDouble,
+                "Inter-unit column pitch override (um), clamped up to the "
+                "legal minimum (unit extent + min same-layer spacing) "
+                "(issue #5764). 0.0 (default) = no override",
+                default=0.0,
+            )
+            self.param(
                 "mirror",
                 self.TypeBoolean,
                 "Label devices M1/M2 (current mirror) instead of Q1/Q2 "
@@ -254,6 +262,7 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.contact_gate_offset_um,
                 self.bottom_endcap_um,
                 self.sd_implant_margin_um if self.sd_implant_present else 0.0,
+                pitch_x_um=self.pitch_x_um,
                 top_endcap_um=self.top_endcap_um,
                 tap_reach_um=_pcell_tap_reach_um(self),
             )
