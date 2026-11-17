@@ -53,6 +53,16 @@ not `klt --version`, if you need to detect this kind of drift. See
   and the Verilog-top path. `path`/`scope` is the repo-relative shape, so a
   source outside the repo reads `{"path": null, "scope": "external"}` and never
   leaks a host path. No `schema_version` bump.
+- **Added** (#5644, 2026-11-16): `klt sim --op-lint` now reports an additive
+  top-level `unexpanded_instance_count` — the number of `X` instances whose
+  `.subckt` was found in neither the netlist body nor its `.include` closure
+  and which are not recognised MOS models (typically PDK passive primitives
+  defined only in `models.lib`, which the hierarchy walk does not read), so
+  lint coverage is measurable without parsing `diagnostics[]`. When a
+  `models.lib` was resolved, each such instance's `unsupported_hierarchy`
+  warning now says its definition may live in the model library instead of
+  implying the netlist alone was searched; without a model library the
+  wording is unchanged.
 - **`klt sim` refuses `measurements[].transfer` declared beside `noise`**
   (#5695, 2026-11-14): the mutually exclusive measurement forms each carried a
   hand-maintained list of "every *other* exclusive form", and `transfer`'s
