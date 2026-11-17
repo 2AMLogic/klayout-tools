@@ -29,8 +29,9 @@ Row-scoped credit from a failing envelope (issue #6027)
     ``limits``-bearing, passing measurements grade now count as ``derived``
     coverage (and leave ``failed_rows``) instead of being mis-reported as
     failed. Only derived rows are credited -- a failed citation never covers
-    a row on the manifest's word alone, and an envelope captured on a
-    stale-pin, binding, kind or provenance refusal is not recorded at all.
+    a row on the manifest's word alone, and an envelope that a stale-pin,
+    binding, kind or provenance refusal would reject is not captured at all
+    (:func:`_maybe_record_failed_sim` decides).
 
 The envelope-capture plumbing (:func:`_record_envelope` /
 :func:`_remember_envelope`) lives here too, moved out of :mod:`.signoff` for
@@ -40,6 +41,13 @@ the same ceiling: it exists to feed the derived-row check.
 from __future__ import annotations
 
 from typing import Any
+
+from .coverage import coverage_refusal_reason
+from .signoff_evidence_pin import (
+    PIN_STALE,
+    PIN_UNVERIFIABLE,
+    content_hash_pin_state,
+)
 
 #: The one T1 item whose row coverage ``require_derived_rows`` ratchets. The
 #: manifest key is top-level, but item 6 reuses the same list form and is
@@ -111,14 +119,63 @@ def _record_envelope(
 ) -> None:
     """Append ``envelope`` to ``sink`` when one was given (issue #3778).
 
-    Called on the ``met`` return and -- issue #6027 -- on the
-    ``check_failed`` return for a ``sim`` envelope, the only non-passing
-    verdict whose envelope still carries trustworthy per-row truth. The
-    stale-pin, binding, kind and provenance refusals record nothing: those
-    envelopes are not evidence for any row.
+    Called on the ``met`` return and -- issue #6027 -- through
+    :func:`_maybe_record_failed_sim` on a ``check_failed`` ``sim`` grading
+    that survived every trust gate, the only non-passing verdict whose
+    envelope still carries trustworthy per-row truth. The stale-pin,
+    binding, kind and provenance refusals record nothing: those envelopes
+    are not evidence for any row.
     """
     if sink is not None:
         sink.append(envelope)
+
+
+#: Mirrors ``signoff._REASON_CHECK_FAILED`` -- not importable from here,
+#: because :mod:`.signoff` imports this module.
+_CHECK_FAILED = "check_failed"
+
+
+def _maybe_record_failed_sim(
+    sink: list[dict[str, Any]] | None,
+    unmet: tuple[str, str, Any, Any] | None,
+    check_kind: str,
+    envelope: dict[str, Any],
+    spec: dict[str, Any],
+    resolution: dict[str, Any],
+    allowed_kinds: set[str] | None,
+) -> None:
+    """Capture a failing ``sim`` envelope for the derived-row credit
+    (issue #6027) -- but only when its per-row truth is trustworthy
+    evidence. A no-op for every other verdict and kind.
+
+    The verdict itself is never touched: the trust gates are ordered
+    *after* the pass/fail check on purpose, so a run that failed is
+    reported as the failure it is, with a stale pin or a vacuous verdict
+    disclosed beside it (:func:`signoff._grade_check_outcome`). The
+    *capture* however waits on those gates: a refused envelope is not
+    evidence for any row, and records nothing.
+
+    Only the gates that can fire for ``sim`` are consulted. The ``sta``
+    annotation/constraint refusals self-gate on ``sta``, the generic
+    binding check on ``generic``, the post-layout requirement is item 7's
+    and item 7 accepts no ``sim`` citation, and the runset/yield gates are
+    kind-matched -- leaving the kind acceptance (a citation the item
+    rejects as ``wrong_kind`` must not credit rows), the vacuous-verdict
+    gate -- :func:`~.coverage.coverage_refusal_reason`, exactly what
+    ``sim`` sees of ``signoff._coverage_refusal`` -- and the
+    ``content_hash`` pin state: the same trio the ``met`` path applies to
+    a ``sim`` envelope.
+    """
+    if unmet is None or unmet[1] != _CHECK_FAILED or check_kind != "sim":
+        return
+    if allowed_kinds is not None and check_kind not in allowed_kinds:
+        return
+    if coverage_refusal_reason(envelope) is not None:
+        return
+    pin = content_hash_pin_state(spec.get("content_hash"), resolution["content_hash"])
+    if pin in (PIN_UNVERIFIABLE, PIN_STALE):
+        return
+    _record_envelope(sink, envelope)
 
 
 def _remember_envelope(

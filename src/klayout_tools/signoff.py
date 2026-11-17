@@ -88,10 +88,10 @@ from .signoff_coverage_disclosure import (
 )
 
 # Item 5's spec-row coverage sources (issue #3778) and the manifest ratchet
-# that requires them machine-derived (issue #5462); out of this file for its
-# size-ratchet ceiling, same as `signoff_multi_member` and `signoff_na`.
+# requiring them machine-derived (#5462); out of file for its size ceiling.
 from .signoff_derived_rows import (
     DERIVED_ROWS_ITEM_ID,
+    _maybe_record_failed_sim,
     _record_envelope,
     _remember_envelope,
     asserted_rows,
@@ -5423,9 +5423,9 @@ def _grade_evidence(
         allowed_kinds=allowed_kinds,
     )
     if unmet is not None:
-        if unmet[1] == _REASON_CHECK_FAILED and check_kind == "sim":
-            # Issue #6027: the failed envelope still carries per-row truth.
-            _record_envelope(envelope_sink, envelope)
+        _maybe_record_failed_sim(
+            envelope_sink, unmet, check_kind, envelope, spec, resolution, allowed_kinds
+        )
         return unmet
 
     sta_refusal = sta_annotation_refusal(

@@ -12,6 +12,7 @@ from test_signoff import (
     SIM_PASS_ENVELOPE,
     _write,
 )
+from test_signoff_derived_rows import TWO_ROW_FAIL_SIM
 
 
 def _item(item_id, entry):
@@ -132,3 +133,68 @@ def test_layout_item2_single_entry_unchanged(tmp_path):
     assert item["status"] == "met"
     assert "members_total" not in item
     assert "citations_graded" not in item
+
+
+# Issue #6027: a `check_failed` `sim` citation's envelope is captured for the
+# row credit only when it survives the trust gates (`_maybe_record_failed_sim`
+# in `signoff_derived_rows`): a stale pin, a vacuous verdict or an
+# unverifiable pin still grades `check_failed`, but credits nothing. These
+# live beside the member-grading tests for size-ratchet room, not scope.
+
+
+def _failing_item5(entry, spec_rows):
+    manifest = {
+        "block": "lib",
+        "kind": "analog",
+        "evidence": {"5": entry},
+        "spec_rows": {"5": spec_rows},
+    }
+    report = build_tier_report(manifest)
+    return next(i for i in report["items"] if i["id"] == 5)
+
+
+def test_failing_stale_pinned_sim_credits_nothing(tmp_path):
+    bad = _write(tmp_path, "bad.json", TWO_ROW_FAIL_SIM)
+    item = _failing_item5(
+        [{"file": bad, "rows": ["tdec"], "content_hash": "sha256:stale-revision"}],
+        [{"id": "tdec"}],
+    )
+
+    # The failure outranks the pin (issue #5598: the pin is disclosed beside
+    # the verdict, never as the verdict) -- but the pin refusal keeps the
+    # envelope out of the credit, so the passing row stays in `failed_rows`.
+    assert item["status"] == "unmet"
+    assert item["reason"] == "check_failed"
+    assert item["detail"]["failed_rows"] == ["tdec"]
+    assert item["detail"]["row_sources"] == {}
+
+
+def test_failing_nothing_checked_sim_credits_nothing(tmp_path):
+    bad = _write(
+        tmp_path,
+        "bad.json",
+        {**TWO_ROW_FAIL_SIM, "coverage": {"nothing_checked": True}},
+    )
+    item = _failing_item5([{"file": bad, "rows": ["tdec"]}], [{"id": "tdec"}])
+
+    # Same verdict as a trustworthy failure (issue #5479 orders the trust
+    # gates after the pass/fail check) -- but a vacuous-verdict envelope is
+    # not evidence for any row, so nothing is credited.
+    assert item["reason"] == "check_failed"
+    assert item["detail"]["failed_rows"] == ["tdec"]
+    assert item["detail"]["row_sources"] == {}
+
+
+def test_failing_unverifiable_pin_sim_credits_nothing(tmp_path):
+    bare = {k: v for k, v in TWO_ROW_FAIL_SIM.items() if k != "provenance"}
+    bad = _write(tmp_path, "bad.json", bare)
+    item = _failing_item5(
+        [{"file": bad, "rows": ["tdec"], "content_hash": "sha256:pinned"}],
+        [{"id": "tdec"}],
+    )
+
+    # No `provenance.input.content_hash` to compare the pin against -- the
+    # provenance refusal records nothing, like the stale pin above.
+    assert item["reason"] == "check_failed"
+    assert item["detail"]["failed_rows"] == ["tdec"]
+    assert item["detail"]["row_sources"] == {}
