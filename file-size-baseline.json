@@ -853,7 +853,7 @@
     },
     {
       "path": "tests/test_functional_verification.py",
-      "lines": 6588
+      "lines": 6541
     },
     {
       "path": "tests/test_functional_verification_identity_contract.py",
@@ -861,7 +861,7 @@
     },
     {
       "path": "tests/test_functional_verification_sdf_ifnone_edge.py",
-      "lines": 586
+      "lines": 574
     },
     {
       "path": "tests/test_gen.py",
