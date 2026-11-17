@@ -60,7 +60,6 @@ import math
 import os
 import re
 import subprocess
-import sys
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
@@ -82,7 +81,10 @@ from .signoff import (
     _reject_json_constant,
 )
 from .signoff_attest_drift import drift_result
+from .signoff_attest_env import command_env, klt_shim_scope
 from .signoff_attest_input import input_binding
+from .signoff_attest_presence import file_check as _file_check
+from .signoff_attest_presence import split_entries
 
 #: The attestation-inventory schema versions this build reads. An inventory
 #: declaring any other version is refused (exit ``1``) rather than read with
@@ -406,8 +408,11 @@ def _validated_inventory(
         inventory, bench_specs = item9.split_testbenches(
             inventory, root, _normalize_repo_path, _command_spec
         )
+    inventory, presence = split_entries(
+        inventory, item, _PATH_LISTS[item], root, _normalize_repo_path
+    )
     seen: dict[str, str] = {}
-    normalized: dict[str, Any] = {}
+    normalized: dict[str, Any] = {"presence": sorted(presence)} if presence else {}
     for field, _role in _PATH_LISTS[item]:
         normalized[field] = _path_list(inventory, field, root, seen)
     if item == 1:
@@ -695,17 +700,6 @@ def _validated_derived(
 # --------------------------------------------------------------------------- #
 
 
-def _file_check(root: str, path: str, role: str) -> dict[str, Any]:
-    digest = sha256_file(os.path.join(root, path))
-    return {
-        "check": "present",
-        "role": role,
-        "path": path,
-        "passed": digest is not None,
-        "content_hash": f"sha256:{digest}" if digest is not None else None,
-    }
-
-
 def _recorded_hash_check(root: str, entry: Mapping[str, Any]) -> dict[str, Any]:
     """Compare the derived file and each recorded source against the digests
     the inventory recorded; no command is run. ``mismatches`` names every
@@ -770,23 +764,6 @@ def attach_output_tails(envelope: Mapping[str, Any]) -> None:
                 check["output_tail"] = tail
 
 
-def _command_env() -> dict[str, str]:
-    """Environment for a declared command: the caller's, minus the tool
-    venv's ``bin`` directory on ``PATH`` when running inside a venv (as under
-    ``uvx``/pipx), so a bare ``python3`` resolves to the repo's interpreter
-    rather than the tool's. Outside a venv the environment is unchanged."""
-    env = dict(os.environ)
-    if sys.prefix == sys.base_prefix or "PATH" not in env:
-        return env
-    venv_bin = os.path.normcase(os.path.dirname(sys.executable))
-    env["PATH"] = os.pathsep.join(
-        entry
-        for entry in env["PATH"].split(os.pathsep)
-        if os.path.normcase(entry) != venv_bin
-    )
-    return env
-
-
 def _run_command(root: str, spec: Mapping[str, Any]) -> tuple[int | None, str | None]:
     """Run one declared command; return ``(exit_status, error)``. ``error``
     is ``"launch_failed"``/``"timeout"`` (stable tokens, not host-specific
@@ -804,7 +781,7 @@ def _run_command(root: str, spec: Mapping[str, Any]) -> tuple[int | None, str | 
             stderr=subprocess.STDOUT,
             timeout=spec.get("timeout_s", _COMMAND_EVIDENCE_TIMEOUT_S),
             check=False,
-            env=_command_env(),
+            env=command_env(),
         )
     except subprocess.TimeoutExpired:
         return None, "timeout"
@@ -993,8 +970,10 @@ def _run_checks(
         return _command_check(root, spec, role, **identity)
 
     for field, role in _PATH_LISTS[item]:
+        presence = normalized.get("presence", ())
         checks.extend(
-            _file_check(root, path, role) for path in sorted(normalized[field])
+            _file_check(root, path, role, presence=path in presence)
+            for path in sorted(normalized[field])
         )
     if item == 1:
         for entry in normalized["derived"]:
@@ -1051,7 +1030,8 @@ def build_attestation(
         )
     inventory_rel = os.path.relpath(absolute, root).replace(os.sep, "/")
     normalized = _validated_inventory(inventory, item, root, inventory_path)
-    checks = _run_checks(item, root, normalized, committed_checks)
+    with klt_shim_scope():
+        checks = _run_checks(item, root, normalized, committed_checks)
     passed_count = sum(1 for check in checks if check["passed"])
     status = "pass" if passed_count == len(checks) else "fail"
     prov, digest = input_binding(item, root, normalized, inventory_rel, inventory_hash)
