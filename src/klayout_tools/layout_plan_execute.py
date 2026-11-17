@@ -185,7 +185,9 @@ from .gen import GenError, _pdk_family, _resolve_expected_device_class, generate
 from .gen_compose import GenComposeError, _translate_bbox, compose
 from .layout_plan_fields import ingest_netlist
 from .layout_plan_ports import (
+    apply_diff_pair_unit_w_um,
     apply_gate_contact,
+    apply_strap_splits,
     device_owned_port_names,
     extract_raw_params_by_id,
     port_pins,
@@ -420,6 +422,10 @@ def _resolve_group_params(
     warnings.extend(
         apply_gate_contact(resolved, group, digest, digest_devices_by_key, overrides)
     )
+    # strap_splits (#5557): derived for diff_pair groups resolving splits > 1;
+    # recorded in `derived` so a diverging explicit override still gets the
+    # generic divergence warning from the loop below.
+    warnings.extend(apply_strap_splits(resolved, derived, group, overrides))
     # `device_groups[].topology` is a top-level plan field (Phase B's own
     # matching-pattern concept, already validated against the named
     # generator's own support table) but only `mos_array`/`bjt_array` accept
@@ -453,46 +459,11 @@ def _resolve_group_params(
             )
         resolved[param_name] = value
 
-    # `diff_pair`'s `w_um` PCell param is the *unit sub-instance* width, not
-    # the whole matched device's width -- `gen.py`'s `_diff_pair_layout()`
-    # draws each matched device as `splits` unit instances wide (default
-    # `splits=2`). `_netlist_derived_size_params()` above maps the digest's
-    # `W` straight onto `w_um` with no `splits` awareness, so a netlist
-    # device with `W=20` would otherwise resolve `w_um=20.0` and draw a 40 um
-    # device -- 2x the schematic. Only divide the netlist-derived value: an
-    # explicit `params.w_um` override (checked above, already layered into
-    # `resolved`) is the caller directly setting the per-unit PCell param and
-    # is left alone. `splits` itself resolves the same way any other
-    # override does -- default `2` (matching `gen.py`'s own PCell default)
-    # or the group's own `params.splits` override.
-    is_diff_pair_derived_w_um = (
-        group["generator"] == "diff_pair"
-        and "w_um" in derived
-        and "w_um" not in overrides
-    )
-    if is_diff_pair_derived_w_um:
-        resolved_splits = overrides.get("splits", 2)
-        is_valid_splits = (
-            isinstance(resolved_splits, (int, float))
-            and not isinstance(resolved_splits, bool)
-            and resolved_splits > 0
-        )
-        if is_valid_splits:
-            netlist_w = derived["w_um"]
-            unit_w = netlist_w / resolved_splits
-            resolved["w_um"] = unit_w
-            if resolved_splits != 1:
-                warnings.append(
-                    f"device_groups (id '{group['id']}'): diff_pair draws each "
-                    f"matched device as 'splits' unit instances wide, so the "
-                    f"netlist-derived w_um ({netlist_w}) was auto-divided by "
-                    f"the resolved splits ({resolved_splits}) to w_um="
-                    f"{unit_w} so the drawn device reproduces the netlist W"
-                )
-        # An invalid `splits` override (non-numeric, non-positive) is left
-        # for `gen_describe.py`'s own `_diff_pair_validate` to reject
-        # (`params.splits must be >= 1`) rather than this module dividing by
-        # a value it cannot itself validate.
+    # `diff_pair`'s netlist-derived `w_um` is the *whole matched device's*
+    # width but its PCell param is the *unit sub-instance* width -- divide by
+    # the resolved splits (see `apply_diff_pair_unit_w_um`; moved beside the
+    # other derived-param helpers in `layout_plan_ports.py`).
+    warnings.extend(apply_diff_pair_unit_w_um(resolved, derived, group, overrides))
 
     return resolved, warnings
 

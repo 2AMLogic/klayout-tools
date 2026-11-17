@@ -424,6 +424,24 @@ gate. An explicit `device_groups[].params.gate_contact` (true or false) always
 wins. The derived choice shows in the group's `resolved_params` and as one
 `warnings[]` entry; plans with no such gate net resolve as before.
 
+**`strap_splits` derivation (#5557).** For `diff_pair` groups, `execute` sets
+`params.strap_splits: true` when the group's resolved `splits` is greater
+than one *and* the resolved unit `w_um` (netlist-derived `w_um` divided by
+the resolved `splits`, or an explicit `params.w_um` override taken as
+already-unit) is at least the strap's track floor — an unstrapped
+`splits > 1` group leaves every sub-instance but one per device floating,
+and `gen-compose` cannot strap the interleaved splits itself (measured,
+issue #5557). A plan whose width cannot fit the strap derives nothing and
+keeps the unstrapped sub-instance-level binding rather than failing a
+request the caller never made; a caller who wants the strap regardless sets
+`params.strap_splits` explicitly and hears about an unmet width from the
+generator's own validation. An explicit `device_groups[].params.strap_splits`
+override always wins, with the same divergence warning any other
+derived-param override gets. The derived choice shows in the group's
+`resolved_params` and as one `warnings[]` entry; the group's connectivity
+then binds the generator's device-level `Q1_S`-style ports with no change to
+the k-th-device ↔ k-th-candidate binding rule itself.
+
 **Scope.** Routing runs between the generated groups' ports exactly as in
 `gen-compose`; there is no "row of unlike devices" topology, and each
 single-device `mos_array`/`res_array`/`cap_array` group is one unit.

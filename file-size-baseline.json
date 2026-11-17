@@ -353,7 +353,7 @@
     },
     {
       "path": "src/klayout_tools/gen.py",
-      "lines": 4355
+      "lines": 4254
     },
     {
       "path": "src/klayout_tools/gen_compose.py",
@@ -369,11 +369,11 @@
     },
     {
       "path": "src/klayout_tools/gen_describe.py",
-      "lines": 3206
+      "lines": 3016
     },
     {
       "path": "src/klayout_tools/gen_layer_params.py",
-      "lines": 2879
+      "lines": 2875
     },
     {
       "path": "src/klayout_tools/gen_layer_tables.py",
@@ -393,7 +393,7 @@
     },
     {
       "path": "src/klayout_tools/layout_plan_execute.py",
-      "lines": 1223
+      "lines": 1194
     },
     {
       "path": "src/klayout_tools/lef_abstract.py",

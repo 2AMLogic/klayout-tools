@@ -14,6 +14,26 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt gen diff_pair` gains `strap_splits` (issue #5557)**: an opt-in
+  (default `false`, so every existing report and stream is unchanged) that
+  straps each matched device's `splits` sub-instances together in-cell on
+  the family's second routing plane (sky130: met1 rails + mcon cuts, with
+  vertical trunks in grown core margins) and reports one `Q1_S`-style
+  S/D/G port triple per device instead of one triple per sub-instance —
+  making the generator's port list match the netlist's device list and
+  closing the mirrored-row-order strap trap for callers who strapped the
+  splits by hand. Requires `gate_contact` and a device width the S/D strap
+  tracks fit (`w_um` >= `2.35` µm); verified on sky130 only — any other
+  family is rejected with a named error before any geometry is drawn.
+  `klt layout-plan execute` derives `strap_splits: true` for a `diff_pair`
+  group resolving `splits > 1` at a strap-fitting width (explicit
+  `params.strap_splits` override wins, divergence warned), so the plan's
+  connectivity binds the device-level ports with no change to its
+  k-th-device ↔ k-th-candidate binding rule. DRC-clean and
+  extract-verified (one net per leg, six pairwise-distinct nets) on sky130
+  for `splits` in {2, 3, 8}, nfet and pfet, with and without the
+  automatically-sized guard ring.
+
 - **`klt pex` and `klt sim --monte-carlo` now read a SPICE card the same way
   the flattener does: `w = 1` and `w=(2 * 1u)` are parameters, not device
   names** (#5461, 2026-11-13): three hand-rolled card tokenizers lived in
