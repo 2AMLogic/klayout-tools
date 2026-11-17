@@ -47,13 +47,25 @@ def _patch_synthetic_deck(monkeypatch, rules):
 
 
 def _cont_layout(tmp_path: Path, name: str, boxes) -> str:
-    """A one-top-cell sg13g2 stream drawing `boxes` on Cont (6/0)."""
+    """A one-top-cell sg13g2 stream drawing `boxes` on Cont (6/0) with the
+    Metal1 landing enclosing them, so `metal1.enclosing.cont.1` (#5916)
+    stays quiet and the fixtures exercise only the selection rules."""
     layout = kdb.Layout()
     top = layout.create_cell("TOP")
     cont = layout.layer(6, 0)
     layout.set_info(cont, kdb.LayerInfo(6, 0, "Cont.drawing"))
     for box in boxes:
         top.shapes(cont).insert(box)
+    metal1 = layout.layer(8, 0)
+    layout.set_info(metal1, kdb.LayerInfo(8, 0, "Metal1.drawing"))
+    top.shapes(metal1).insert(
+        kdb.Box(
+            min(b.left for b in boxes),
+            min(b.bottom for b in boxes),
+            max(b.right for b in boxes),
+            max(b.top for b in boxes),
+        ).enlarged(500, 500)
+    )
     path = tmp_path / f"{name}.gds"
     layout.write(str(path))
     return str(path)
@@ -187,11 +199,22 @@ def test_run_drc_sg13g2_selection_grading_spans_every_top_cell(
     layout = kdb.Layout()
     cont = layout.layer(6, 0)
     layout.set_info(cont, kdb.LayerInfo(6, 0, "Cont.drawing"))
+    metal1 = layout.layer(8, 0)
+    layout.set_info(metal1, kdb.LayerInfo(8, 0, "Metal1.drawing"))
     first = layout.create_cell("TOP1")
     first.shapes(cont).insert(kdb.Box(0, 0, 160, 400))  # a bar
+    first.shapes(metal1).insert(kdb.Box(-500, -500, 660, 900))
     second = layout.create_cell("TOP2")
     for box in second_top_boxes:
         second.shapes(cont).insert(box)
+    second.shapes(metal1).insert(
+        kdb.Box(
+            min(b.left for b in second_top_boxes),
+            min(b.bottom for b in second_top_boxes),
+            max(b.right for b in second_top_boxes),
+            max(b.top for b in second_top_boxes),
+        ).enlarged(500, 500)
+    )
     path = tmp_path / f"{name}.gds"
     layout.write(str(path))
 

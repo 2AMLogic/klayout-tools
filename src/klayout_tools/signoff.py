@@ -1126,18 +1126,18 @@ _HASH_KIND_GEOMETRY = "geometry"
 _REASON_INVALID_POINTER = "invalid_pointer"
 
 _REASON_TIER_NOT_SUPPORTED = "tier_not_supported"
-#: Issue #825 (Phase 1 of epic #706): a command-backed evidence entry's
-#: subprocess itself did not complete usably -- it could not be launched, it
-#: timed out, or it exited nonzero *without* leaving a parseable envelope on
-#: stdout (per docs/json-contract.md, exit code 1/2 leaves stdout empty).
-#: A nonzero exit that *does* carry a parseable envelope on stdout -- e.g.
-#: `klt drc`'s `EXIT_VIOLATIONS = 3`, a successful run that found violations
-#: -- is not this case; it flows into :func:`_classify`/:func:`_check_passed`
-#: exactly like the file-backed path, landing on :data:`_REASON_CHECK_ERRORED`
-#: or :data:`_REASON_CHECK_FAILED`. Distinct from
-#: :data:`_REASON_UNREADABLE_EVIDENCE` (the command exited *zero* but its
-#: stdout wasn't valid JSON) -- different ways "no runnable check proves this
-#: item" can happen, kept distinguishable per issue #826's invariant.
+#: Issue #5763: the entry's subprocess ran but was killed by
+#: :data:`_COMMAND_EVIDENCE_TIMEOUT_S` -- the bound, not the check,
+#: produced the unmet grade, so a hung gate reads differently from a
+#: failing one (split from :data:`_REASON_COMMAND_FAILED`).
+_REASON_COMMAND_TIMEOUT = "command_timeout"
+#: Issue #825 (Phase 1 of epic #706): could not be launched or exited
+#: nonzero without a parseable stdout envelope (exit 1/2 leaves stdout
+#: empty per docs/json-contract.md) -- a timeout is
+#: :data:`_REASON_COMMAND_TIMEOUT`; a nonzero exit *with* a parseable
+#: envelope flows into :func:`_classify`/:func:`_check_passed` like the
+#: file-backed path; distinct from :data:`_REASON_UNREADABLE_EVIDENCE`
+#: (zero exit, stdout not valid JSON) -- kept distinguishable per #826.
 _REASON_COMMAND_FAILED = "command_failed"
 
 #: Issue #871 (Phase 2b of epic #706): the evidence resolved to a readable,
@@ -1625,10 +1625,10 @@ _PARTIAL_STATUS_BY_KIND: dict[str, str] = {
 }
 
 #: Wall-clock cap on a command-backed evidence entry's subprocess (issue
-#: #825) -- a hung `klt drc`/`klt lvs`/`klt sim` gate must not hang `klt
-#: signoff` itself. Generous (corner-matrix sims are slow) but finite; a
-#: timeout renders that item "unmet" (see :func:`_grade_evidence`), never an
-#: exception that aborts the whole report.
+#: #825) -- a hung gate must not hang `klt signoff`. Generous (corner-matrix
+#: sims are slow) but finite; a timeout renders the item
+#: "unmet"/:data:`_REASON_COMMAND_TIMEOUT` (#5763), never an aborting
+#: exception.
 _COMMAND_EVIDENCE_TIMEOUT_S = 1800
 
 
@@ -4111,13 +4111,13 @@ def build_tier_report(
       which says the resolved bytes are not a shape this build recognises:
       here nothing was ever classified, and the remedy is to fix the
       pointer, not the citation.
-    - ``"command_failed"`` -- a command-backed entry's subprocess could not
-      be launched, timed out, or exited nonzero *without* leaving a
-      parseable envelope on stdout. A nonzero exit whose stdout *does* parse
-      (e.g. a ``klt drc``/``klt lvs``/``klt sim`` extension exit code for a
-      successful run that found a violation/mismatch/failure) is not this
-      case -- it is graded by its envelope content instead, landing on
-      ``"check_errored"`` or ``"check_failed"`` below.
+    - ``"command_timeout"`` (issue #5763) -- the subprocess was killed by the
+      :data:`_COMMAND_EVIDENCE_TIMEOUT_S` cap (the bound, not the check,
+      produced the grade).
+    - ``"command_failed"`` -- launch failure or nonzero exit *without* a
+      parseable stdout envelope (timeouts are ``"command_timeout"``); a
+      nonzero exit whose stdout *does* parse (a ``klt drc`` extension exit
+      for a found violation) is graded by envelope content instead.
     - ``"check_errored"`` -- the evidence resolved to a ``klt`` ``error``
       envelope: the underlying command itself failed to run to completion.
     - ``"check_failed"`` -- the evidence resolved to a recognised, non-error
@@ -5355,24 +5355,23 @@ def _grade_evidence(
 
     **Command-backed** (``spec["kind"] == "command"``, issue #825): actually
     runs the given argv as a subprocess (``cwd=spec["cwd"]`` when given),
-    bounded by :data:`_COMMAND_EVIDENCE_TIMEOUT_S`. A launch failure or
-    timeout renders :data:`_REASON_COMMAND_FAILED`. Stdout is parsed as JSON
-    *before* the exit status is ever inspected -- exactly like the
-    file-backed path, which does not gate on an inferred exit code at all --
-    because a ``klt`` verb's own nonzero exit can mean "ran successfully and
-    found a problem" (e.g. ``klt drc``'s ``EXIT_VIOLATIONS = 3``) just as
-    easily as it can mean a genuine failure; per docs/json-contract.md, both
-    shapes leave a documented envelope on stdout. If stdout parses, the
-    envelope flows into :func:`_classify`/:func:`_check_passed` regardless of
-    ``exit_status``, so :data:`_REASON_CHECK_ERRORED`/:data:`_REASON_CHECK_FAILED`
-    work correctly whether the verb exited 0 or with an extension code. Only
-    when stdout does *not* parse as JSON does ``exit_status`` matter: a zero
-    exit with unparsable stdout renders :data:`_REASON_UNREADABLE_EVIDENCE`
-    (the command-backed analogue of an unreadable evidence file); a nonzero
-    exit with unparsable stdout renders :data:`_REASON_COMMAND_FAILED` (per
-    the contract, an application-level error leaves stdout empty, so there is
-    genuinely no evidence to grade). ``exit_status`` is the subprocess's
-    *actually observed* return code, never inferred.
+    bounded by :data:`_COMMAND_EVIDENCE_TIMEOUT_S`; a timeout renders
+    :data:`_REASON_COMMAND_TIMEOUT` (issue #5763) and a launch failure
+    :data:`_REASON_COMMAND_FAILED`. Stdout is parsed as JSON *before* the
+    exit status is ever inspected -- exactly like the file-backed path,
+    which does not gate on an inferred exit code -- because a ``klt`` verb's
+    own nonzero exit can mean "ran successfully and found a problem" (e.g.
+    ``klt drc``'s ``EXIT_VIOLATIONS = 3``) just as easily as it can mean a
+    genuine failure; per docs/json-contract.md, both shapes leave a
+    documented envelope on stdout. If stdout parses, the envelope flows into
+    :func:`_classify`/:func:`_check_passed` regardless of ``exit_status``,
+    so :data:`_REASON_CHECK_ERRORED`/:data:`_REASON_CHECK_FAILED` work
+    correctly whether the verb exited 0 or with an extension code. Only when
+    stdout does *not* parse as JSON does ``exit_status`` matter: a zero exit
+    with unparsable stdout renders :data:`_REASON_UNREADABLE_EVIDENCE`; a
+    nonzero exit with unparsable stdout renders :data:`_REASON_COMMAND_FAILED`
+    (an application-level error leaves stdout empty -- genuinely no evidence
+    to grade). ``exit_status`` is the observed return code, never inferred.
 
     **Content hash** (either binding): normally read from the resolved
     envelope's own ``provenance.input.content_hash``. A ``klt yield`` kind
@@ -6344,17 +6343,18 @@ def _resolve_evidence(
     """
     pointer = spec.get("pointer")
     if spec["kind"] == "command":
-        command = spec["command"]
-        command_label = shlex.join(command)
+        command_label = shlex.join(spec["command"])
         try:
             completed = subprocess.run(
-                command,
+                spec["command"],
                 cwd=spec.get("cwd"),
                 capture_output=True,
                 text=True,
                 timeout=_COMMAND_EVIDENCE_TIMEOUT_S,
             )
-        except (OSError, subprocess.TimeoutExpired):
+        except subprocess.TimeoutExpired:
+            return None, _REASON_COMMAND_TIMEOUT
+        except OSError:
             return None, _REASON_COMMAND_FAILED
 
         exit_status = completed.returncode
