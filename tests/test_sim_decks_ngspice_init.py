@@ -34,6 +34,32 @@ class TestNgspiceInit:
                 encoding="utf-8"
             ) == "set ngbehavior=hsa\nset numdgt=12\n"
 
+    def test_engine_sees_spiceinit_in_cwd(self, tmp_path):
+        # Pins the write-before-spawn ordering: the stub reads .spiceinit
+        # from its cwd *while the engine runs*, so a declared output
+        # copied from it proves the file existed at spawn time -- not
+        # merely that its contents are right after the run (issue #6154).
+        request = deck_request(
+            tmp_path,
+            decks=[
+                {
+                    "id": "u0",
+                    "deck": "deck.spice",
+                    "outputs": ["seen.spiceinit"],
+                }
+            ],
+        )
+        (tmp_path / "deck.spice").write_text(
+            "* caller-composed deck\n* stub-copy-input: .spiceinit seen.spiceinit\n",
+            encoding="utf-8",
+        )
+        request["options"]["ngspice_init"] = ["set ngbehavior=hsa"]
+        report = run_local(tmp_path, request)
+        assert report["status"] == "pass", report["units"]
+        assert (tmp_path / "out" / "u0" / "seen.spiceinit").read_text(
+            encoding="utf-8"
+        ) == "set ngbehavior=hsa\n"
+
     def test_absent_option_writes_no_file(self, tmp_path):
         report = run_local(tmp_path, deck_request(tmp_path))
         assert report["status"] == "pass"
