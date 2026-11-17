@@ -140,18 +140,29 @@ def corner_coverage_environment(
         ]
         if not devices:
             continue
-        unmoved = [d["flavour"] for d in devices if d["skew"] == "typical"]
-        unknown = [d["flavour"] for d in devices if d["skew"] == "unknown"]
-        if name != "typical" and (unmoved or unknown):
-            entry: dict[str, Any] = {"process": name}
-            if unmoved:
-                entry["unmoved_devices"] = unmoved
-            if unknown:
-                entry["unknown_devices"] = unknown
+        entry = _corner_coverage_entry(name, devices)
+        if entry is not None:
             entries.append(entry)
     if not entries:
         return {}
     return {"corner_coverage": {"pdk": report["pdk"], "sections": entries}}
+
+
+def _corner_coverage_entry(
+    name: str, devices: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    """One ``corner_coverage.sections[]`` row, or ``None`` when it must be
+    omitted (the typical section, or nothing to report either way)."""
+    unmoved = [d["flavour"] for d in devices if d["skew"] == "typical"]
+    unknown = [d["flavour"] for d in devices if d["skew"] == "unknown"]
+    if name == "typical" or not (unmoved or unknown):
+        return None
+    entry: dict[str, Any] = {"process": name}
+    if unmoved:
+        entry["unmoved_devices"] = unmoved
+    if unknown:
+        entry["unknown_devices"] = unknown
+    return entry
 
 
 def netlist_source_environment(netlist_source: Any) -> dict[str, Any]:
