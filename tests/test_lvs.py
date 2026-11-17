@@ -119,13 +119,12 @@ def _without_geometry_disclosure(report: dict) -> list[dict]:
     ``device.geometry_not_compared`` entries.
 
     That disclosure is emitted once per participating resistor/capacitor
-    device class on *every* run (KLayout declares those classes' `L`/`W`/
-    `A`/`P` secondary, so no default compare covers them), independently of
-    what the compare found. Tests whose subject is the compare itself -- "this
-    pairing produces no finding", "this hint removes the only warning" --
-    filter it out here rather than restating it, which keeps their intent
-    readable; the disclosure's own behaviour is pinned by the dedicated
-    `device.geometry_not_compared` tests further down.
+    device class on *every* run (KLayout declares those classes'
+    `L`/`W`/`A`/`P` secondary, so no default compare covers them).
+    Tests whose subject is the compare itself -- "this pairing produces
+    no finding", "this hint removes the only warning" -- filter it out
+    here rather than restating it; the disclosure's own behaviour is
+    pinned by the dedicated `device.geometry_not_compared` tests below.
     """
     return [
         entry
@@ -8339,6 +8338,7 @@ def test_lvs_cli_exits_4_on_inconclusive(tmp_path, monkeypatch, capsys):
         format="json",
         check=None,
         rerun=False,
+        deck=None,
         deck_file=None,
         deck_var=None,
         layout=None,
