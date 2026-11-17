@@ -192,3 +192,77 @@ uv tool install "klayout-tools @ git+https://github.com/2AMLogic/klayout-tools@<
 See `docs/json-contract.md`'s "Shared `provenance` block" section for the
 field reference and this same recipe alongside the existing
 `provenance.klayout_version` guidance.
+
+## Engine version compatibility
+
+*(Added 2026-11-17, against commit `59096013d`. Line numbers cited below
+drift — re-run the grep before relying on them.)*
+
+`klayout-tools` declares its KLayout dependency as the floor
+`klayout>=0.30` (`pyproject.toml`, issue
+[#217](https://github.com/2AMLogic/klayout-tools/issues/217): the
+`LayoutToNetlist.polygons_of_net(net, layer_index)` layer-index form that
+klt's parasitic-extraction and ERC paths are built on was introduced in
+KLayout 0.30). This section states what that floor means in practice —
+including for a downstream that wants to co-install an *older* engine
+(e.g. a byte-reproducibility consumer whose committed layout artifacts were
+written by the 0.28.x serializer, issue
+[#5761](https://github.com/2AMLogic/klayout-tools/issues/5761)).
+
+- **`klayout>=0.30` is supported.** The engine version CI actually runs the
+  test suite against is `uv.lock`'s pinned `klayout` entry — `0.30.12` at
+  the commit this section was written — surfaced as
+  `klt version --format json`'s `klayout_version_expected`. Any other
+  `>=0.30` version resolves normally and is expected to work, but is **not
+  tested** by this repo; `klt drc`/`klt lvs` reports flag a
+  resolved-but-untested engine via `provenance.klayout_version_mismatch`
+  (see "Why only `drc`/`lvs`" above), and "Reproducing the exact engine"
+  below pins it.
+
+- **Below 0.30 is unsupported.** The verbs that read per-net/per-layer
+  geometry through `polygons_of_net(net, layer_index)` are expected to
+  fail against a 0.28.x module: `klt extract` (including
+  `--parasitics`/substrate paths), `klt pex`, `klt erc` (components, ties,
+  substrate), `klt components`, `klt power` and `klt tap-distance`. Call
+  sites as of `59096013d`: `src/klayout_tools/components.py:445,461,490`;
+  `src/klayout_tools/erc.py:1331,1367,1601,1605,1875,2988`;
+  `src/klayout_tools/erc_substrate.py:217`; `src/klayout_tools/erc_ties.py:134`;
+  `src/klayout_tools/extract.py:877,1094`;
+  `src/klayout_tools/extract_parasitics.py:622,624,991,993,1603,2058`;
+  `src/klayout_tools/power.py:1287,1327,2138`;
+  `src/klayout_tools/tap_distance.py:266` — re-derive with
+  `git grep -n 'polygons_of_net(net,' -- src`.
+
+  Installing an older engine anyway means bypassing the floor
+  (`pip install --no-deps klayout-tools==<ver>` next to the older
+  `klayout` module, with the remaining runtime dependencies —
+  `jsonschema` at minimum — installed explicitly). That is a **best-effort,
+  unverified configuration, not a supported contract**: a future klt
+  release may add runtime dependencies that `--no-deps` silently skips,
+  and the floor deliberately does not promise anything about API surface
+  below 0.30. As a downstream observation (issue #5761, not a tested
+  claim — no CI lane covers 0.28.x): `klt gen` and `klt signoff` ran
+  against `klayout==0.28.17.post1`, and `klt signoff` envelopes were
+  byte-identical between module versions 0.28.17 and 0.30.13.
+
+- **Layout stream bytes are an engine-version concern on top of all this.**
+  The serializer that writes a layout artifact is the `klayout` module
+  itself (`ly.write()`), and its byte output can change between engine
+  versions — downstream observation: a TEXT `MAG` real8 re-encoding
+  between 0.28.x and 0.30.x, 2 differing records out of ~177k on a
+  stock-PDK cell. Independently of engine version, `klt` does not
+  guarantee that generated stream bytes are stable across *klt* versions —
+  see `docs/json-contract.md`'s "Stream-stability contract" section (issue
+  [#5682](https://github.com/2AMLogic/klayout-tools/issues/5682)). A
+  byte-level reproducibility gate on a layout artifact therefore pins the
+  **engine** exactly ("Reproducing the exact engine" above) as well as the
+  `klayout-tools` version; neither pin alone suffices.
+
+Widening the floor to `klayout>=0.28` was considered and rejected when this
+section was added: it would make the unsupported `polygons_of_net` call
+paths installable without any signal, and a 0.28 compatibility claim would
+need a 0.28 CI lane to be more than hope. A `klt doctor`-style
+dependency check was also considered and rejected as already covered:
+`klt version --format json` reports the pair (`klayout_version`,
+`klayout_version_expected`), and `klt drc`/`klt lvs` provenance flags the
+mismatch (`docs/cli/version.md`).
