@@ -36,6 +36,19 @@ not `klt --version`, if you need to detect this kind of drift. See
   subcircuits absent from the closure are disclosed, never guessed. See
   [`docs/cli/sim.md`](docs/cli/sim.md)'s "Device multiplier warnings" and
   [`docs/json-contract.md`](docs/json-contract.md).
+- **`klt yield`: a damaged gzip input is an error envelope, not a traceback**
+  (#5543, 2026-11-13): a gzip samples or `--limits` file whose deflate stream
+  is *corrupt* — as opposed to truncated, or carrying a bad CRC trailer, both
+  of which already reported correctly — made `klt yield` print a raw
+  `zlib.error` traceback and exit 1 with no JSON on either stream, breaking
+  the error contract in [`docs/json-contract.md`](docs/json-contract.md) for a
+  caller that parses the envelope. `yield_analysis._load_json` converted
+  `(OSError, EOFError, UnicodeDecodeError, json.JSONDecodeError)` into
+  `YieldError`, and `zlib.error` subclasses none of them, so it escaped
+  `yield_cmd.run`'s handler. It is now in that tuple: the input reports
+  `could not read samples '<path>': …` like every other unreadable input, and
+  `run_yield` raises `YieldError` rather than leaking `zlib.error` at the
+  library surface. No output-shape change; no `schema_version` bump.
 
 - **`klt pex` and `klt sim --monte-carlo` now read a SPICE card the same way
   the flattener does: `w = 1` and `w=(2 * 1u)` are parameters, not device

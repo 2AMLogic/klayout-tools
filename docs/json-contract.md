@@ -633,6 +633,19 @@ worker-observed `worker_environment.pdk` so the two are never confused;
 `cli/sim.md`'s option and `environment` tables are the field-level record.
 Additive fields only; no `schema_version` bump (issue #4020).
 
+`klt sim`'s `environment.ngspice_init` (issue #5648) records the ngspice init
+file that was **in effect** -- always present on corner-mode runs, `null` for
+`engine: "xyce"` -- as `{source, lines, sha256}`. `source` is a path-free label
+(the same rule as `provenance.pdk.ambiguous_sources`: committed evidence must
+not carry the resolving machine's `$HOME`): `"request"` (klt wrote a
+`.spiceinit` including declared `options.ngspice_init` lines), `"thread_pin"`
+(klt wrote only the `set num_threads=N` pin), `"home"` (klt wrote none and
+`$HOME/.spiceinit` exists), `"none"`, or `"runner"` (off-host backends
+`remote`/`batch`: the worker resolves the file, which the client cannot
+observe). `lines` is the written file's lines for `request`/`thread_pin`, else
+`null`; `sha256` is `sha256:<hex>` of the effective file's bytes, `null` for
+`none`/`runner`. Additive; no `schema_version` bump.
+
 `environment.remote` (and each `fleet[]` member) also gains the additive
 `runner_models_lib_sha256` (string or `null`) and `models_lib_comparison`
 (`status` `match` / `mismatch` / `not_comparable`); no `schema_version` bump
