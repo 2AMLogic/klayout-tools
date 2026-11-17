@@ -76,11 +76,40 @@ returned as `isError: true` with the same envelope shape.
   account you are comfortable exposing.
 - `--timeout SECONDS` bounds each call (default 900).
 
+## Resources: the JSON-contract schemas
+
+Verbs that take a JSON request document expose the document *path* as a
+string, so the server also serves every `docs/schemas/*.schema.json` file as
+an MCP **resource** (issue #5420). A client can fetch the contract it needs to
+write a valid request without a checkout of this repository.
+
+| | |
+|---|---|
+| URI | `klt://schemas/<file name>`, e.g. `klt://schemas/socket.schema.json` |
+| MIME type | `application/json` |
+| `resources/list` | one entry per `*.schema.json`, ordered by file name; `title` and `description` are the schema's own keywords, `size` its byte length |
+| `resources/read` | the schema document verbatim, as `text` |
+
+A URI is resolved by lookup in that enumerated listing, never by joining it
+onto a directory, so an unlisted or traversal URI
+(`klt://schemas/../../etc/passwd`) is refused with a JSON-RPC
+`InvalidParams` error rather than reading anything. Resource subscriptions and
+resource templates are not served.
+
+The schemas are shipped inside the wheel (`pyproject.toml` force-includes
+`docs/schemas` to `klayout_tools/data/schemas`), so a `pip install
+'klayout-tools[mcp]'` with no source checkout serves the same listing as a
+checkout does.
+
 ## Limits of the generic schema
 
 Verbs that take a JSON request document (`sim`, `lvs`, `wave`, ...) expose the
-document *path* as a string; the request's own schema lives under
-`docs/schemas/`. Argparse mutually-exclusive groups are not encoded in the
-schema (the CLI rejects bad combinations with exit `2`). Richer per-verb
-tools, MCP resources and prompts, an HTTP transport, and the LLM reasoning
-module are out of scope for this first increment.
+document *path* as a string. The request schemas that exist live under
+`docs/schemas/` and are served as resources (above) --
+`layout-plan-request`, `wave-build-request` and `wave-query-request`; the rest
+of `docs/schemas/` describes responses, reports, manifests and descriptors, and
+not every request-taking verb has a schema yet. Nothing links a tool to its
+schema automatically. Argparse mutually-exclusive groups are not encoded in
+the schema (the CLI rejects bad combinations with exit `2`). Richer per-verb
+tools, MCP prompts, an HTTP transport, and the LLM reasoning module remain out
+of scope.
