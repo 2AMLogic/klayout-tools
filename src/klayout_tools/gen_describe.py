@@ -16,8 +16,10 @@ out-of-bounds request before any geometry is built) and the
 ``_<family>_describe()`` functions (which turn a built layout into the
 response envelope's ``device_count``/``ports``/``drc_hints`` fields) -- plus
 the helpers used exclusively by them (``_voltage_flavor_hints``, the
-``_ring_*`` port/note builders, ``_ring_params_validate``, the
-``_well_island_*`` isolation solver, and ``_format_box_um``/``_box_um_field``).
+``_ring_*`` note builders, ``_ring_params_validate``, the
+``_well_island_*`` isolation solver, and ``_format_box_um``/``_box_um_field``;
+``_ring_ports`` lives next door in :mod:`klayout_tools.gen_ring_ports`,
+which also holds the strap-window spacing lookup it insets by).
 ``_well_island_layer_params`` comes along too: it is the one ``layer_params``
 resolver #1875 had to leave behind, because it calls
 :func:`_well_island_isolation` to reject an unsatisfiable isolation request
@@ -90,6 +92,7 @@ from .gen_layer_params import (
     _voltage_flavor_mark_layer,
     mfg_grid_um,
 )
+from .gen_ring_ports import _ring_ports
 
 
 def _resistor_strip_validate(params: dict[str, Any]) -> None:
@@ -792,6 +795,7 @@ def _mos_array_describe(
                 metal_layer,
                 GUARD_RING_DEFAULT_WIDTH_UM,
                 metal_layer,
+                pdk_variant=pdk_info["variant"],
             )
         )
 
@@ -1685,70 +1689,6 @@ def _tap_pad_ports(
     return ports
 
 
-def _ring_ports(
-    ring: dict[str, Any],
-    offset_um: tuple[float, float],
-    tap_prefix: str,
-    tap_layer: dict[str, Any],
-    tap_width_um: float,
-    gap_layer: dict[str, Any],
-    tap_net: str | None = None,
-) -> list[dict[str, Any]]:
-    """Reported ``ports[]`` entries for a drawn ring.
-
-    One ``<tap_prefix><side>`` tap port at the midpoint of every side that is
-    still covered by ring metal there, plus -- when the ring was cut with
-    ``ring_gap_side`` (#434) -- one ``GAP_<side>`` entry marking the opening
-    itself. A ``GAP_*`` entry is a *marker, not a conductor*: it reports where
-    a route may cross the ring (``x_um``/``y_um`` = the opening's centre on
-    the ring's own centre line, ``width_um`` = the opening's length along that
-    side, ``direction_deg`` = the side's outward normal) on the layer a route
-    would cross it on, and `klt gen-compose` rejects any attempt to wire or
-    label it.
-
-    ``tap_net`` (issue #1421) names the net every tap port carries, reported
-    as each entry's ``net``. ``None`` (the default, and every caller that
-    predates ``well_island``) keeps the historical ``"net": null`` -- a ring
-    whose tie net the generator has no way to know. It is never applied to a
-    ``GAP_*`` entry: that marks the *absence* of ring conductor, so it carries
-    no net by construction.
-    """
-    from .gen import RING_SIDE_DIRECTIONS
-
-    ox, oy = offset_um
-    ports: list[dict[str, Any]] = []
-    for side, direction in RING_SIDE_DIRECTIONS.items():
-        xy = ring["ports"].get(side)
-        if xy is None:
-            continue  # this side's midpoint sits inside the ring opening
-        ports.append(
-            {
-                "name": f"{tap_prefix}{side}",
-                "net": tap_net,
-                "layer": tap_layer,
-                "x_um": xy[0] + ox,
-                "y_um": xy[1] + oy,
-                "width_um": tap_width_um,
-                "direction_deg": direction,
-            }
-        )
-
-    gap = ring["gap"]
-    if gap is not None:
-        ports.append(
-            {
-                "name": f"GAP_{gap['side']}",
-                "net": None,
-                "layer": gap_layer,
-                "x_um": gap["x_um"] + ox,
-                "y_um": gap["y_um"] + oy,
-                "width_um": gap["opening_um"],
-                "direction_deg": RING_SIDE_DIRECTIONS[gap["side"]],
-            }
-        )
-    return ports
-
-
 def _ring_gap_notes(ring: dict[str, Any] | None, ring_gap_side: str) -> list[str]:
     """``drc_hints.notes`` entries about a requested ring opening (#434)."""
     if not ring_gap_side:
@@ -1917,6 +1857,7 @@ def _guard_ring_describe(
         metal_layer,
         params["ring_width_um"],
         metal_layer,
+        pdk_variant=pdk_info["variant"],
     )
 
     notes = _ring_gap_notes(info, params["ring_gap_side"])
@@ -2318,6 +2259,7 @@ def _well_island_describe(
         params["ring_width_um"],
         metal_layer,
         net,
+        pdk_variant=pdk_info["variant"],
     )
 
     isolation = _well_island_isolation(params, family)
@@ -2572,6 +2514,7 @@ def _diff_pair_describe(
                 metal_layer,
                 GUARD_RING_DEFAULT_WIDTH_UM,
                 metal_layer,
+                pdk_variant=pdk_info["variant"],
             )
         )
 
@@ -2751,6 +2694,7 @@ def _bjt_array_describe(
                 tap_layer,
                 ring_w,
                 metal_layer,
+                pdk_variant=pdk_info["variant"],
             )
         )
 
@@ -3078,6 +3022,7 @@ def _esd_device_describe(
                 metal_layer,
                 GUARD_RING_DEFAULT_WIDTH_UM,
                 metal_layer,
+                pdk_variant=pdk_info["variant"],
             )
         )
 
