@@ -63,8 +63,8 @@ from collections.abc import Callable
 from typing import Any
 
 from . import _batch_common, _provenance, output_lock, remote_transport, sim, sim_batch
+from ._batch_collect import remote_stderr_tail, runner_error
 from ._jsonnum import is_number
-from .netlist_batch import _remote_stderr_tail, _runner_error
 from .place_and_route import (
     SCHEMA_VERSION,
     PlaceAndRouteError,
@@ -369,15 +369,15 @@ def _job_failure(
 ) -> _UnitFailed:
     """A job that did not finish ``done``: the runner's own klt error when one
     can be recovered from the collected outputs, else a stderr tail."""
-    runner_error, error_note = _runner_error(collected)
+    error, error_note = runner_error(collected)
     message, code, _ = _batch_common.job_failure_parts(
         job_id=job_id,
         state=str(status.get("state") or ""),
         exit_code=sim_batch._status_exit_code(status),
         detail="",
-        runner_error=runner_error,
+        runner_error=error,
         note="; ".join(item for item in (note, error_note) if item),
-        stderr_tail=_remote_stderr_tail(collected),
+        stderr_tail=remote_stderr_tail(collected),
         harness_log=sim_batch.report_job_uri(config, job_id).rstrip("/")
         + "/harness.log",
     )

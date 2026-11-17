@@ -1340,6 +1340,61 @@ The same residual gap as #1942 applies: omit the relevant side's `deck` and
 this recognition cannot run. Give `layout.deck`/`reference.deck` whenever a
 pre-extracted netlist may contain drawn-resistor `X` cards.
 
+## When every device of one class reports `device.unmatched`: check scoped parameter values first (issue #6313)
+
+The most alarming-looking LVS report shape is also the one with the most
+misleading first impression: every instance of one device class fails to
+pair — a `device.unmatched` entry per layout-side device *and* per
+reference-side device, their resistor nets cascading into `net.unmatched`
+— while every device of an unaffected class still pairs. Two things about
+that signature are worth knowing before debugging it:
+
+- **The two class spellings are not a cause.** The report names each side's
+  own spelling of the class — a deck-declared resistor keeps its
+  lower-case deck name (`rppd`) on the layout side, while a reference
+  `R` card's model name is upper-cased by `NetlistSpiceReader` (`RPPD`).
+  `kdb.NetlistComparer` pairs device classes whose names differ only in
+  case, so this spelling split pairs fine and never caused a mismatch — a
+  request whose compare reached `status: "match"` under klt 0.6.0 had the
+  same two spellings in it.
+- **A parameter named in `options.compare_parameters` takes part in device
+  pairing, not just in post-compare reporting.** The option enables exactly
+  the listed parameters on both sides' class (see its field documentation
+  above), and a device whose enabled parameters differ does not pair at
+  all — it is reported as unmatched on both sides, not as a
+  `device.property` entry. So one stale value on the reference side fails
+  the whole class, and the report does not name the differing parameter.
+
+The concrete instance that motivated issue #6313: the sg13g2 deck gained
+its current poly-resistor extraction (`rsil`/`rppd`/`rhigh`) inside the
+0.6.0 -> 0.8.0 window the issue measured across — IHP's abutting-heads
+recognition topology at 0.8.0 (issue #2679) and the transcription of IHP's
+device-symbol resistance formulas at 0.7.0 (issue #2652):
+`R = end_term/W + sheet_rho * L/(W + width_offset)` per flavour; the
+constants and their upstream citations are in `decks/sg13g2.py`. The
+pre-0.8.0 deck measured a plain sheet-rho body, so
+a reference netlist committed against a 0.6.0-era extraction carries
+resistor values that no longer match what the deck extracts from the same
+GDS — and under a `compare_parameters` scope naming `R` (and/or `L`,`W`)
+every resistor fails exactly as the bullet above describes, with MOS
+devices untouched. The values moved *toward* the PDK's own simulation
+models: the current extraction reproduces the pinned IHP `rspec` formula
+to full precision, so a schematic-authored reference built from the same
+device-symbol formula matches it without adjustment.
+
+**Migration**: re-derive the reference's resistor values from the current
+deck — either `klt extract` the same GDS and read each device's `r_ohm`/
+`l_um`/`w_um` from its report, or evaluate the flavour's formula above at
+the schematic's `L`/`W` — and update the reference cards. Narrowing the
+`options.compare_parameters` scope to drop `R` also restores a verdict, at
+the cost of no longer verifying resistance at all; prefer re-deriving the
+values. `tests/test_lvs_sg13g2_resistor_reference.py::test_sg13g2_resistor_value_drift_reports_the_class_cascade`
+pins this signature, and the
+`test_inline_extracted_sg13g2_resistor_pairs_plain_element_reference` /
+`test_mixed_sg13g2_mos_and_resistor_inline_pairs_plain_element_reference`
+guards in the same file pin the pairing working end to end for all three
+flavours.
+
 ## Digital gate-level LVS: `reference.form = "gate-level-verilog"` (issue #1336)
 
 `klt place-and-route`'s `verilog_path` (issue #996) writes the as-built,
