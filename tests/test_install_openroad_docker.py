@@ -19,7 +19,7 @@ exit 0
 """
 
 
-def _install(tmp_path: Path, extra_env: dict[str, str]) -> list[str]:
+def _install(tmp_path: Path, extra_env: dict[str, str | None]) -> list[str]:
     stub_dir = tmp_path / "stub"
     stub_dir.mkdir()
     docker = stub_dir / "docker"
@@ -33,6 +33,9 @@ def _install(tmp_path: Path, extra_env: dict[str, str]) -> list[str]:
         "DOCKER_ARGV_LOG": str(log),
         **extra_env,
     }
+    # A None value unsets the key entirely (e.g. HOME, to prove the
+    # wrapper never dereferences it bare under `set -u`).
+    env = {k: v for k, v in env.items() if v is not None}
     # The installer ends by running `openroad -version` through the wrapper,
     # which hits the stub's `run` branch and records the argv.
     subprocess.run(
@@ -126,3 +129,22 @@ def test_wrapper_skips_cache_mount_duplicate_of_tmpdir(tmp_path: Path) -> None:
     argv = _install(tmp_path, {"TMPDIR": str(tmp_path), "KLT_CACHE_DIR": str(tmp_path)})
     specs = [m for m in _mounts(argv) if m.startswith(f"{tmp_path}:{tmp_path}")]
     assert specs == [f"{tmp_path}:{tmp_path}"]
+
+
+def test_wrapper_survives_unset_home(tmp_path: Path) -> None:
+    """Review of #6195: the cache-root resolution runs on EVERY invocation
+    under `set -euo pipefail`, so a bare `$HOME` must not make `openroad
+    -version` (the installer's final smoke run) exit 1 in an environment
+    with HOME unset."""
+    argv = _install(tmp_path, {"HOME": None})
+    assert argv  # the wrapper ran to completion and recorded its argv
+
+
+def test_wrapper_degrades_when_home_unwritable(tmp_path: Path) -> None:
+    """Review of #6195: an unwritable HOME must degrade to "no cache mount",
+    not a hard mkdir failure -- the cache root only matters for list-form
+    corners, which produce their own diagnostic. /proc is unwritable even
+    for root, so this holds however the suite is run."""
+    argv = _install(tmp_path, {"HOME": "/proc/nonexistent"})
+    assert argv
+    assert not any(m.startswith("/proc/nonexistent") for m in _mounts(argv))

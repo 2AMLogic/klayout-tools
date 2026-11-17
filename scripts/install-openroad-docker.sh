@@ -174,8 +174,13 @@ MOUNTED_PATHS+=("\${TMPDIR:-/tmp}")
 # source as root (issue #3151). The mount is skipped when the path already
 # equals one mounted above -- docker run rejects a duplicate mount point,
 # so e.g. KLT_CACHE_DIR=\$TMPDIR must not become a second -v for it.
-KLT_CACHE_ROOT="\${KLT_CACHE_DIR:-\${XDG_CACHE_HOME:-\$HOME/.cache}/klt}"
-mkdir -p "\$KLT_CACHE_ROOT"
+# \$HOME is defaulted (\${HOME:-/tmp}) and a failed mkdir degrades to no
+# cache mount instead of killing the run: this block executes on EVERY
+# invocation under \`set -euo pipefail\`, and an unset or unwritable HOME
+# must not stop \`openroad -version\` et al. A missing cache root only
+# matters for list-form corners, which produce their own diagnostic.
+KLT_CACHE_ROOT="\${KLT_CACHE_DIR:-\${XDG_CACHE_HOME:-\${HOME:-/tmp}/.cache}/klt}"
+mkdir -p "\$KLT_CACHE_ROOT" 2>/dev/null || KLT_CACHE_ROOT=""
 CACHE_DUPE=0
 for m in "\${MOUNTED_PATHS[@]}"; do
     if [[ "\$KLT_CACHE_ROOT" == "\$m" ]]; then
@@ -183,7 +188,7 @@ for m in "\${MOUNTED_PATHS[@]}"; do
         break
     fi
 done
-if [[ "\$CACHE_DUPE" -eq 0 ]]; then
+if [[ -n "\$KLT_CACHE_ROOT" && "\$CACHE_DUPE" -eq 0 ]]; then
     MOUNTS+=(-v "\$KLT_CACHE_ROOT:\$KLT_CACHE_ROOT:ro")
 fi
 # Forward PLATFORM_DIR and OPENROAD_* by name (issue #3821).
