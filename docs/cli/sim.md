@@ -7100,7 +7100,11 @@ a corner grid. A stock ngspice without the module still produces the
   the dispatched `corner_id`, otherwise the request fails with error code
   `supply_precision_unsupported_worker` and reports no result. A grid whose
   values are all exactly representable at three decimals keeps its legacy
-  IDs byte-for-byte and is not gated.
+  IDs byte-for-byte and is not gated. The spelling is also a **mandatory**
+  registry feature (`lossless supply_v corner_id spelling`, unreleased): a
+  release that contains it pins the minimum runner version and adds the
+  pre-launch detector, so `--dry-run` refuses an older runner image before
+  anything is submitted.
 - **`corners.supply_waveforms`** (`array<string>`, optional; issue #2902) —
   names of `corners.supply_v` keys whose top-level **`PWL(...)`/`PULSE(...)`**
   source is *rescaled* per corner instead of `alter`ed. Every entry must also

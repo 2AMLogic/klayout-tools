@@ -33,6 +33,9 @@ _CODE_TO_FEATURE = {
     "IC_UNSUPPORTED_WORKER_CODE": "options.initial_conditions",
     "AO_UNSUPPORTED_WORKER_CODE": "analysis_overrides",
     "OP_CHECK_UNSUPPORTED_WORKER_CODE": "analysis.op_check",
+    "SUPPLY_PRECISION_UNSUPPORTED_WORKER_CODE": (
+        "lossless supply_v corner_id spelling"
+    ),
 }
 
 #: Echo-check constants that deliberately carry no registry row, each with a

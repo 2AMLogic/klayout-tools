@@ -295,11 +295,18 @@ def test_supply_echo_gates_only_on_supply_values():
 
 
 def test_registry_entry_is_present_and_untagged():
-    from klayout_tools import sim_batch_contract
+    from klayout_tools import sim_batch_contract, sim_batch_contract_spec
 
     assert (
         sim_batch_contract.REQUEST_FEATURE_MIN_RUNNER_VERSION[
             "lossless supply_v corner_id spelling"
         ]
         is None
+    )
+    # Mirrors its echo check's severity (#5645 ratchet): the spelling is
+    # mandatory, but with no pinned version the echo check is the gate
+    # until a release adds the pre-launch detector row.
+    assert (
+        "lossless supply_v corner_id spelling"
+        in sim_batch_contract_spec._MANDATORY_RUNNER_FEATURES
     )
