@@ -1822,8 +1822,12 @@ All eight share one contract:
   missing from the fresh report (`violation_count`, `violations`,
   `coverage`, …) still drifts, because dropping a verdict-bearing field is
   exactly the regression the diff exists to catch; a key the *fresh*
-  report grew (schema evolution in the other direction) still drifts; and
-  a fresh report missing its entire `provenance` block still drifts. The
+  report grew (schema evolution in the other direction) still drifts; a
+  fresh report missing its entire `provenance` block still drifts; and
+  the carve-out covers scalar keys only — a committed `provenance`
+  *sub-block* (a dict or list, e.g. a `regeneration` claim the fresh run
+  declined to adopt) absent from fresh is one absent verdict-bearing
+  structure and still drifts. The
   `--format text` renderer lists the skipped field names in a
   `not compared:` block, so a non-zero exit always means "something that
   could be compared did not match".

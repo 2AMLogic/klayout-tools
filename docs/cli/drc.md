@@ -4241,7 +4241,11 @@ actually carry can drift. The rule is provenance-only and
 one-directional — a verdict-bearing key missing from the fresh report
 (`violation_count`, `violations`, `coverage`, …) still drifts, a key the
 *fresh* report grew still drifts, and a fresh report missing its entire
-`provenance` block still drifts. `--format text` lists the skipped fields
+`provenance` block still drifts. The carve-out covers scalar keys only: a
+committed `provenance` *sub-block* (a dict or list — e.g. a
+`regeneration` claim the fresh run declined to adopt) absent from the
+fresh report is one absent verdict-bearing structure and still drifts.
+`--format text` lists the skipped fields
 in a `not compared:` block, so a non-zero exit always means "something
 that could be compared did not match".
 Response shape:

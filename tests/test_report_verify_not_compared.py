@@ -115,6 +115,60 @@ def test_whole_provenance_block_missing_from_fresh_still_drifts():
     assert [entry["field"] for entry in result["drift"]] == ["provenance"]
 
 
+def test_absent_provenance_subblock_still_drifts():
+    """Granularity guard: `_diff_json` recurses only when *both* sides are
+    dicts, so a committed provenance value absent from the fresh report
+    arrives at the carve-out whole -- a structured sub-block (a
+    `provenance.regeneration` claim the fresh run declined to adopt, issue
+    #5572's explicit-`--hash-kind` cross-check) is a verdict-bearing
+    absence and stays drift, never `not_compared`."""
+    from klayout_tools import _report_verify as rv
+
+    committed = _report()
+    committed["provenance"]["regeneration"] = {
+        "generator": "python gen.py -o layout/top.gds",
+        "regenerated_hash": "sha256:" + "ae8c" * 16,
+    }
+    fresh = _report()
+
+    result = rv.build_rerun_result(
+        report_path="drc.json", committed=committed, fresh=fresh
+    )
+
+    assert result["status"] == "drifted"
+    assert result["drift"] == [
+        {
+            "field": "provenance.regeneration",
+            "committed": {
+                "generator": "python gen.py -o layout/top.gds",
+                "regenerated_hash": "sha256:" + "ae8c" * 16,
+            },
+            "fresh": None,
+        }
+    ]
+    assert "not_compared" not in result
+
+
+def test_absent_provenance_sublist_still_drifts():
+    """Same granularity guard for a list-valued sub-block: an absent
+    committed list under `provenance` is one structured absence, not a set
+    of not-comparable leaves."""
+    from klayout_tools import _report_verify as rv
+
+    committed = _report(waivers=["W-1", "W-2"])
+    fresh = _report()
+
+    result = rv.build_rerun_result(
+        report_path="drc.json", committed=committed, fresh=fresh
+    )
+
+    assert result["status"] == "drifted"
+    assert result["drift"] == [
+        {"field": "provenance.waivers", "committed": ["W-1", "W-2"], "fresh": None}
+    ]
+    assert "not_compared" not in result
+
+
 def test_fresh_only_provenance_key_still_drifts():
     """Asymmetric by design: a key the *fresh* report grew (`schema grew`)
     still drifts -- only a committed key the fresh run cannot produce is

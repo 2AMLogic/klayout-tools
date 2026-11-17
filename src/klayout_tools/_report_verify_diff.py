@@ -38,9 +38,9 @@ def diff_verdict_fields(
     included; a :data:`LIST_ITEM` wildcard entry is rejected outright -- see
     :func:`reject_wildcard_exclude`.
 
-    Provenance-only absence (issue #5866): a leaf key **present in the
-    committed report, absent from the fresh one, and somewhere under the
-    top-level ``provenance`` subtree** is *not* drift. A committed report
+    Provenance-only absence (issue #5866): a **scalar leaf key** present in
+    the committed report, absent from the fresh one, and somewhere under the
+    top-level ``provenance`` subtree is *not* drift. A committed report
     may carry provenance keys the fresh run never writes -- spliced in by a
     downstream wrapper (``gds_sha256``), emitted by a newer/older klt, or
     populated by a different verb -- and "a field this run does not
@@ -56,6 +56,11 @@ def diff_verdict_fields(
       key (``violations``, ``violation_count``, ``coverage``) the fresh
       report dropped, which is exactly the regression the diff exists to
       catch;
+    - only *scalar* leaves -- a committed ``provenance`` *sub-block* (a
+      dict or list, e.g. a ``provenance.regeneration`` claim the fresh run
+      declined to adopt) arrives at this rule whole (``_diff_json``
+      recurses only when both sides carry the value) and is one absent
+      verdict-bearing structure, which still drifts;
     - only committed-present/fresh-absent -- a key the fresh report *grew*
       (schema evolution in the other direction) still drifts;
     - a value that merely changed (including to a genuine JSON ``null``)
@@ -81,9 +86,9 @@ def diff_verdict_fields(
 def _provenance_absent_in_fresh(
     committed: Any, fresh: Any, path: tuple[str, ...]
 ) -> bool:
-    """Whether this leaf is a *provenance* field the committed report
-    carries and the fresh one does not (issue #5866) -- not comparable,
-    rather than drift against ``null``.
+    """Whether this *scalar leaf* is a *provenance* field the committed
+    report carries and the fresh one does not (issue #5866) -- not
+    comparable, rather than drift against ``null``.
 
     ``len(path) > 1`` keeps the rule *under* ``provenance``: a fresh report
     missing its entire ``provenance`` block is a degenerate report (the
@@ -91,10 +96,19 @@ def _provenance_absent_in_fresh(
     nested ``provenance`` key somewhere else in the report does not
     qualify -- only the top-level subtree the verbs' own provenance lives
     in.
+
+    Scalar leaves only: ``_diff_json`` recurses into a dict (or compares a
+    list element-wise) only when **both** sides carry the value, so a
+    committed dict or list absent from fresh arrives here *whole*. A
+    structured claim -- a ``provenance.regeneration`` block the fresh run
+    declined to adopt (issue #5572's explicit-``--hash-kind`` cross-check)
+    -- is verdict-bearing, and its absence *is* the drift; treating it as
+    not-comparable would silently pass a cross-check that must fail.
     """
     return (
         committed is not _MISSING
         and fresh is _MISSING
+        and not isinstance(committed, (dict, list))
         and len(path) > 1
         and path[0] == "provenance"
     )
