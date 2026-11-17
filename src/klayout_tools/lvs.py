@@ -3504,14 +3504,12 @@ def _resolve_layout(
     # Issue #1942: recognise a round-tripped `X ... PARAMS:` card naming one
     # of `layout.deck`'s own custom (`GenericDeviceExtractor`-shaped) device
     # classes -- e.g. a MoM capacitor -- as a device of that class instead
-    # of letting it degrade into a mangled-name abstract circuit. A best-
-    # effort lookup only: an unresolvable `deck_name`/`deck_options` here is
-    # deliberately swallowed rather than raised -- `run_lvs` re-resolves
-    # `layout.deck` itself right after this function returns (see its own
-    # `layout_deck` comment) and raises the authoritative `LvsError` there,
-    # so this must not duplicate (and potentially reorder) that validation.
-    # `None`/empty when `layout.deck` was never given, unchanged from every
-    # request that predates this parameter.
+    # of a mangled-name abstract circuit. A best-effort lookup only: an
+    # unresolvable `deck_name`/`deck_options` here is deliberately swallowed
+    # rather than raised -- `run_lvs` re-resolves `layout.deck` right after
+    # this function returns and raises the authoritative `LvsError`, so
+    # this must not duplicate (and potentially reorder) that validation.
+    # Empty when `layout.deck` was never given, unchanged for old requests.
     custom_device_classes: dict[str, str] = {}
     resistor_classes: dict[str, str] = {}
     deck_name = layout_spec.get("deck")
@@ -3525,15 +3523,9 @@ def _resolve_layout(
                 layout_deck_for_recovery
             )
             # Issue #1157: recognise a round-tripped bulk-bearing drawn-
-            # resistor class's `X` card (the bare-mode card shape ngspice
-            # can parse) as a real 3-terminal resistor device again -- the
-            # exact recovery the MoM-capacitor table above established,
-            # keyed off `layout.deck`'s own `resistors` table.
+            # resistor class's `X` card as a real 3-terminal device again.
             resistor_classes = resistor_classes_for_deck(layout_deck_for_recovery)
     netlist = kdb.Netlist()
-    # Issue #5665: a `.SUBCKT` the layout netlist itself defines must survive
-    # the recovery reader's `wants_subcircuit` claim above (a name matching a
-    # deck resistor/MoM class is a real circuit when the file defines it).
     from .netlist_normalize import defined_subckt_names
 
     reader = make_capacitor_class_recovery_reader(
@@ -3701,6 +3693,7 @@ def _read_reference_netlist(
     from .netlist_normalize import (
         NormalizeError,
         convert_reference_netlist,
+        defined_subckt_names,
         detect_subckt_call_devices,
     )
 
@@ -3827,13 +3820,6 @@ def _read_reference_netlist(
     read_path, read_text, tmp_path = sliced_reference_file(
         finfet, finfet_top, read_path, read_text, tmp_path
     )
-    # Issue #5665: scan the text actually handed to the reader below (the
-    # converted text for the conversion forms, post-`sliced_reference_file`)
-    # so a `.SUBCKT` the reference itself defines survives the recovery
-    # reader's `wants_subcircuit` claim -- a name matching a deck
-    # resistor/MoM class is a real circuit when the file defines it.
-    from .netlist_normalize import defined_subckt_names
-
     reader = reference_reader(
         finfet,
         lambda: make_capacitor_class_recovery_reader(
