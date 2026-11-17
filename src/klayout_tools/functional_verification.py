@@ -118,27 +118,24 @@ implemented deliberately rather than rediscovered:
 
 9. **A bit-selected top-level-port ``INTERCONNECT`` entry can poison a
    sibling entry on the same net** (issue #1619, live on Icarus 13.0) --
-   distinct from finding 7's *scalar* bare-port fix, and only reachable once
-   that fix let a *vector* port bit (``y[0]``, ``a[0]``) resolve at all. Two
-   separate mechanisms, depending on which side of the entry carries the
-   bit-selected port -- see the module comment above
-   :func:`_split_sdf_bus_port_interconnects` for the full write-up and
-   `docs/design/sdf-annotate-feasibility-spike.md` §3.7 for the live
-   evidence: (a) as a *destination*, order-dependent -- fixed by deferring
-   every such entry to its own, later ``$sdf_annotate`` call
-   (:func:`_split_sdf_bus_port_interconnects`); (b) as a *source* -- the
-   one-modpath-per-bit-selected-port-net cap (issue #5705, measured on raw
-   ``iverilog``/``vvp`` 13.0 with a plain Verilog testbench): on such a net
-   with physical fanout above 1, ``$sdf_annotate`` annotates only the
-   last-declared instance's destination and rejects the rest,
-   deterministically and independently of the testbench -- unfixable by
-   reordering, and left unfixed and pinned down by
-   ``test_integration_real_icarus_sdf_bus_port_input_fanout_stays_
-   unresolvable`` rather than silently reported as "annotated" or masked.
-   The issue's own "wrapper double-binds the net identity" hypothesis is
-   refuted by shape (a) alone: reordering the entries (bit-selected-port
-   entry last instead of first) resolves everything, which a genuine
-   identity double-bind would not fix.
+   distinct from finding 7's *scalar* bare-port fix, and only reachable
+   once that fix let a *vector* port bit (``y[0]``, ``a[0]``) resolve.
+   Two separate mechanisms, depending on which side of the entry carries
+   the bit-selected port -- full write-up in the module comment above
+   :func:`_split_sdf_bus_port_interconnects` and
+   `docs/design/sdf-annotate-feasibility-spike.md` §3.7:
+   (a) as a *destination*, order-dependent -- fixed by deferring every
+   such entry to its own, later ``$sdf_annotate`` call; (b) as a *source*
+   -- the one-modpath-per-port-net cap (issue #5705, raw
+   ``iverilog``/``vvp`` 13.0): on a fanout-above-1 net ``$sdf_annotate``
+   annotates only the last-declared instance's destination and rejects
+   the rest, deterministically -- unfixable by reordering, left unfixed,
+   pinned down by ``test_integration_real_icarus_sdf_bus_port_input_
+   fanout_stays_unresolvable`` rather than silently reported as
+   "annotated" or masked. The issue's "wrapper double-binds the net
+   identity" hypothesis is refuted by shape (a) alone: reordering
+   (bit-selected-port entry last) resolves everything, which a genuine
+   double-bind would not fix.
 
 10. **A run that fails on every test case under ``options.sdf`` -- often
     with the design's outputs reading a constant zero -- while the
@@ -2839,9 +2836,8 @@ def run_functional_verification(
         # Issue #2363: an `INTERCONNECT` entry from a bit-selected top-level
         # input port onto a pin of a *physical-only* instance -- a
         # router-inserted antenna diode, or any filler/tapcell whose model
-        # is timing-empty -- is shape (b) of the #1619/#1857 spike: on a
-        # multi-load port-bit net, #5705's one-modpath cap leaves every
-        # non-survivor entry unannotated. Unlike the general shape (b)
+        # is timing-empty -- is shape (b) of the #1619/#1857 spike: #5705's
+        # one-modpath cap leaves it unannotated. Unlike the general shape (b)
         # case (which stays failing, pinned by
         # `test_integration_real_icarus_sdf_bus_port_input_fanout_stays_
         # unresolvable`), this destination's elaborated model carries no
