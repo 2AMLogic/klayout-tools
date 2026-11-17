@@ -3126,7 +3126,7 @@ from .functional_verification_mutation_variant import (  # noqa: E402, F401
     _mutation_subprocess_entry,
     _run_isolated_variant,
 )
-from .functional_verification_search_path import (  # noqa: E402, F401
+from .functional_verification_search_path import (  # noqa: E402
     _reject_env_pythonpath,
     resolve_testbench_search_dirs,
 )
