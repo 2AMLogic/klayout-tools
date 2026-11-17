@@ -10,7 +10,7 @@ import sys
 
 from .. import (
     arith_gen,
-    artifact_store,
+    artifact_objects,
     pdk_stackup,
 )
 from ..equiv import SUPPORTED_ENGINES as SUPPORTED_EQUIV_ENGINES
@@ -27,7 +27,6 @@ from . import (
     corner_matrix_cmd,
     deck_cmd,
     design_centering_cmd,
-    diff_cmd,
     draw_cmd,
     drc_cmd,
     env_provenance_cmd,
@@ -87,6 +86,7 @@ from ._argv_flags import _require_one_input as _require_one_input
 from ._drc_parser_args import add_klayout_app_args, add_rule_listing_args
 from .color import add_color_args
 from .parser_characterize import add_characterize_parser
+from .parser_diff import add_diff_parser
 from .parser_economy import add_economy_parser
 from .parser_netlist import add_netlist_parser
 from .parser_pex import add_pex_parser
@@ -235,7 +235,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_layers_parser(subparsers)
 
     _add_stats_parser(subparsers)
-    _add_diff_parser(subparsers)
+    add_diff_parser(subparsers, _add_format_arg)
 
     add_economy_parser(subparsers, _add_format_arg)
 
@@ -1741,16 +1741,13 @@ def _add_lvs_parser(subparsers: argparse._SubParsersAction) -> None:
         metavar="REPORT",
         help=(
             "verify a previously committed 'klt lvs --format json' report "
-            "(REPORT) instead of running a fresh compare: mutually "
-            "exclusive with the positional 'request' argument, since "
-            "inputs are read from REPORT itself (issue #1106). Cheap mode "
-            "(default): re-hash REPORT's layout/reference netlists (and "
-            "extraction deck, when one was used) and compare against the "
-            "recorded environment.layout_sha256/reference_sha256/"
-            "provenance.deck.content_hash values, no compare engine "
-            "re-run. Combine with --rerun for full mode (re-run the "
-            "compare and diff verdict-bearing fields). Exits 0 if still "
-            "consistent, 3 if drifted -- see docs/cli/lvs.md, '--check'"
+            "(REPORT) instead of running a fresh compare: mutually exclusive "
+            "with the positional 'request', since inputs are read from "
+            "REPORT itself (issue #1106). Cheap mode (default) re-hashes "
+            "REPORT's recorded inputs; combine with --rerun for full mode "
+            "(re-run the compare and diff verdict-bearing fields). Exits 0 "
+            "if still consistent, 3 if drifted -- see docs/cli/lvs.md, "
+            "'--check'"
         ),
     )
     lvs_parser.add_argument(
@@ -1760,13 +1757,10 @@ def _add_lvs_parser(subparsers: argparse._SubParsersAction) -> None:
         help=(
             "explicit layout/netlist input for --check/--rerun (issue "
             "#2699): overrides the layout path REPORT recorded, "
-            "unconditionally (same rule as the positional 'file' of 'klt "
-            "drc --check'/'klt extract --check'). Use it when REPORT's "
-            "layout is outside any repository (recorded as scope "
-            "'external', so it cannot be located) or the verifying clone "
-            "is laid out differently. A layout that no longer hashes to "
-            "the recorded value reports 'drifted'. Requires --check; a "
-            "clean error (exit 1) otherwise"
+            "unconditionally -- use it when REPORT's layout is outside any "
+            "repository or the verifying clone is laid out differently; a "
+            "layout that no longer hashes to the recorded value reports "
+            "'drifted'. Requires --check; a clean error (exit 1) otherwise"
         ),
     )
     lvs_parser.add_argument(
@@ -1776,12 +1770,19 @@ def _add_lvs_parser(subparsers: argparse._SubParsersAction) -> None:
             "full mode for --check (issue #1106): best-effort re-run of "
             "the compare REPORT names (reconstructed from REPORT's own "
             "echoed layout/reference/engine/deck/parameter_tolerance "
-            "fields -- see docs/cli/lvs.md, '--check', for reconstruction "
-            "limits) and diff verdict-bearing fields against the "
-            "committed report, excluding provenance.klt_version/"
-            "klayout_version/pdk.version. Requires --check; a clean error "
-            "(exit 1) otherwise"
+            "fields -- see docs/cli/lvs.md for reconstruction limits) and "
+            "diff verdict-bearing fields against the committed report, "
+            "excluding the provenance version echoes. Requires --check; a "
+            "clean error (exit 1) otherwise"
         ),
+    )
+    lvs_parser.add_argument(
+        "--deck",
+        default=None,
+        metavar="NAME",
+        help=f"extraction deck to run (currently: {_deck_names_str()}); fills "
+        "the request's layout.deck only, never reference.deck (issue "
+        "#5733); a clean error (exit 1) if the request sets layout.deck too",
     )
     lvs_parser.add_argument(
         "--deck-file",
@@ -1805,8 +1806,8 @@ def _add_lvs_parser(subparsers: argparse._SubParsersAction) -> None:
         help=(
             "extra '-rd NAME=VALUE' global passed to the runset (engine "
             "'klayout-runset' only; issue #3206). Repeatable; fills "
-            "request.deck_vars, and is a clean error (exit 1) if the "
-            "request already sets it or uses another engine"
+            "request.deck_vars; a clean error (exit 1) if the request "
+            "already sets it or uses another engine"
         ),
     )
     lvs_parser.add_argument(
@@ -1817,8 +1818,7 @@ def _add_lvs_parser(subparsers: argparse._SubParsersAction) -> None:
             "write stage start/finish lines and a periodic heartbeat for "
             "inline layout extraction to stderr (stdout stays the pure "
             "response). Default: heartbeat lines only (every 30s of a long "
-            "stage) when stderr is not a TTY, nothing on a TTY; "
-            "--no-progress forces off"
+            "stage) when stderr is not a TTY; --no-progress forces off"
         ),
     )
     _add_format_arg(lvs_parser)
@@ -3495,7 +3495,7 @@ def _add_artifact_parser(subparsers: argparse._SubParsersAction) -> None:
         description=(
             "Evidence bytes go to the artifact store through its broker; git "
             "keeps a manifest naming each object by sha256. The broker URL "
-            f"comes from --broker or ${artifact_store.ENV_BROKER}; there is "
+            f"comes from --broker or ${artifact_objects.ENV_BROKER}; there is "
             "no default. No credential is held: the broker identifies the "
             "caller by its network identity. Presigned URLs stay in-process "
             "and are never printed."
@@ -3523,7 +3523,7 @@ def _add_artifact_parser(subparsers: argparse._SubParsersAction) -> None:
         help="merge the entries into this manifest JSON (created if absent)",
     )
     put_parser.add_argument(
-        "--kind", choices=list(artifact_store.CLIENT_KINDS), default="evidence"
+        "--kind", choices=list(artifact_objects.CLIENT_KINDS), default="evidence"
     )
     put_parser.add_argument(
         "--name",
@@ -3619,7 +3619,7 @@ def _add_artifact_common_args(parser: argparse.ArgumentParser, *, repo: bool) ->
         "--broker",
         metavar="URL",
         default=None,
-        help=f"artifact broker base URL (default: ${artifact_store.ENV_BROKER})",
+        help=f"artifact broker base URL (default: ${artifact_objects.ENV_BROKER})",
     )
     if repo:
         parser.add_argument(
@@ -3627,7 +3627,7 @@ def _add_artifact_common_args(parser: argparse.ArgumentParser, *, repo: bool) ->
             metavar="OWNER/NAME",
             default=None,
             help=f"repo the objects are stored under (default: "
-            f"${artifact_store.ENV_REPO}, else the git origin remote)",
+            f"${artifact_objects.ENV_REPO}, else the git origin remote)",
         )
     _add_format_arg(parser)
 
@@ -4047,36 +4047,6 @@ def _add_stats_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(stats_parser)
     stats_parser.set_defaults(func=stats_cmd.run)
-
-
-def _add_diff_parser(subparsers: argparse._SubParsersAction) -> None:
-    """Register the ``diff`` verb: compare two layout streams for equal geometry."""
-    diff_parser = subparsers.add_parser(
-        "diff",
-        help="compare two GDSII/OASIS streams for equal geometry, labels and hierarchy",
-        description=(
-            "Compare two layout streams shape-for-shape. Ignores stream "
-            "timestamps, element order and library name; never ignores "
-            "coordinates, path widths, text, instance transforms, the "
-            "database unit or cell names. Exit 0 = equivalent, 3 = layouts "
-            "differ, 1 = unreadable file or unknown --top."
-        ),
-    )
-    diff_parser.add_argument("file_a", help="first GDSII or OASIS layout file")
-    diff_parser.add_argument("file_b", help="second GDSII or OASIS layout file")
-    diff_parser.add_argument(
-        "--top",
-        default=None,
-        help="compare only this cell's hierarchy (must exist in both streams)",
-    )
-    diff_parser.add_argument(
-        "--max-items",
-        type=int,
-        default=50,
-        help="cap on listed differences per list (counts stay exact; default 50)",
-    )
-    _add_format_arg(diff_parser)
-    diff_parser.set_defaults(func=diff_cmd.run)
 
 
 def _add_cells_parser(subparsers: argparse._SubParsersAction) -> None:

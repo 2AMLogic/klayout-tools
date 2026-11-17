@@ -28,6 +28,7 @@ from pathlib import Path
 import pytest
 
 from helpers.subprocess_fakes import fake_completed
+from helpers.tool_probes import SKIP_NO_NGSPICE as requires_ngspice
 from klayout_tools import signoff as signoff_module
 from klayout_tools import signoff_attest as attest_module
 from klayout_tools._provenance import layout_geometry_digest
@@ -65,13 +66,6 @@ pytestmark = pytest.mark.usefixtures("real_build_identity_git")
 #: tests below (issue #825) to locate `examples/design-pipeline/`'s
 #: already-passing artifacts without depending on pytest's cwd.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-
-# Match the real-engine tier in test_sim.py and test_pex.py. CI installs
-# ngspice; the local check:ci command deliberately opts out of this tier.
-requires_ngspice = pytest.mark.skipif(
-    shutil.which("ngspice") is None or os.environ.get("KLT_SKIP_NGSPICE_TESTS") == "1",
-    reason="ngspice is unavailable or disabled by KLT_SKIP_NGSPICE_TESTS=1",
-)
 
 DRC_CLEAN_ENVELOPE = {
     "schema_version": 1,
@@ -14427,12 +14421,12 @@ def test_pointer_resolved_envelope_grades_identically_to_the_same_file_unnested(
     plain_item = next(item for item in plain["items"] if item["id"] == 3)
     pointed_item = next(item for item in pointed["items"] if item["id"] == 3)
 
-    # Same fields, same values -- except `citation.file`, which necessarily
-    # names the document each manifest actually cited.
-    assert set(plain_item["citation"]) == set(pointed_item["citation"])
-    assert {k: v for k, v in plain_item["citation"].items() if k != "file"} == {
-        k: v for k, v in pointed_item["citation"].items() if k != "file"
-    }
+    # Same fields, same values -- except `citation.file` (naming the
+    # document each manifest cited) and `citation.pointer` (#5815: only a
+    # pointed citation records its selector).
+    normalized = dict(pointed_item["citation"], file=plain_item["citation"]["file"])
+    normalized.pop("pointer")
+    assert plain_item["citation"] == normalized
     assert plain_item["status"] == pointed_item["status"] == "met"
 
 

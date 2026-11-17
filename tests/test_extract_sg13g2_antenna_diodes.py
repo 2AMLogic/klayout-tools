@@ -17,13 +17,13 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 from pathlib import Path
 
 import klayout.db as kdb
 import pytest
 
+from helpers.tool_probes import HAVE_NGSPICE
 from klayout_tools.decks.sg13g2 import EXTRACTION_DECK
 from klayout_tools.extract import run_extract
 from klayout_tools.lvs import run_lvs
@@ -149,7 +149,7 @@ def test_without_pdk_antenna_diodes_keep_their_bare_d_card(tmp_path: Path):
 
 
 @pytest.mark.skipif(
-    shutil.which("ngspice") is None or not _IHP_NGSPICE_DIODES_LIB.is_file(),
+    not HAVE_NGSPICE or not _IHP_NGSPICE_DIODES_LIB.is_file(),
     reason="needs ngspice and a real IHP-Open-PDK install ($IHP_SG13G2_PDK)",
 )
 def test_pdk_resolved_antenna_diode_cards_load_in_ngspice(tmp_path: Path):
