@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Any, NamedTuple
 
 from . import lvs as _lvs
+from .netlist_normalize import _sim_model_classes
 
 
 class _ReferenceStage(NamedTuple):
@@ -175,6 +176,17 @@ def _read_reference_stage(
         finfet_top=reference_spec.get("top"),
         mos_flavour_classes=opts.compare_mos_flavour,
     )
+    # Issue #5676: the mirror image of the X-card form guard inside
+    # `_read_reference_netlist` -- a plain-element reference whose `M` cards
+    # name the PDK's own simulation models cannot pair with a curated-deck
+    # extraction's class names, so refuse it here rather than let the compare
+    # spend a full unmatched-device/net cascade on it.
+    _reject_unpairable_sim_model_classes(
+        reference_netlist,
+        layout_netlist,
+        deck=reference_spec.get("deck"),
+        form=reference_form,
+    )
     # Issue #2952: scanned now, before any flatten/prune below erases the
     # hierarchy that names each offending instance. Appended to
     # `mismatches[]` and applied to `status` at the end of the compare.
@@ -337,4 +349,65 @@ def _read_reference_stage(
         unresolved_subckt_call_findings=unresolved_subckt_call_findings,
         reference_pin_order_files=reference_pin_order_files,
         reference_netlist=reference_netlist,
+    )
+
+
+def _reject_unpairable_sim_model_classes(
+    reference_netlist: Any,
+    layout_netlist: Any,
+    deck: str | None,
+    form: str,
+) -> None:
+    """Issue #5676: refuse a ``plain-element`` reference whose device classes
+    are the PDK's own MOS **simulation model** names (each plain ``M`` card's
+    model token, upper-cased by ``NetlistSpiceReader``) while the
+    ``layout_netlist`` -- a curated-deck extraction -- names its MOS classes
+    by the deck's generic names (``nfet``/``pfet``). The two class-name sets
+    are disjoint, so the compare provably pairs nothing and would report a
+    device/net-unmatched cascade that reads like a layout bug. Best-effort,
+    like ``_reject_bare_resistor_x_cards``: without a ``deck`` or for one
+    with no curated model table, return early and leave validation to the
+    reference read itself. Four clauses, all required:
+
+    1. ``form`` is ``plain-element`` (the two conversion forms already
+       rewrite the model tokens);
+    2. ``deck``'s lower-cased model-name -> device-class table
+       (:func:`klayout_tools.netlist_normalize._sim_model_classes`, issue
+       #3882) is non-empty;
+    3. some reference class name, case-folded, is a model in that table
+       *and* the class it maps to is registered on the layout side -- the
+       layout really does use the deck's generic class naming;
+    4. the reference does *not* itself register a class of that mapped
+       name -- a mixed reference (both ``sg13_lv_nmos`` and ``nfet``) keeps
+       its generic-named devices pairable, so it is not refused.
+    """
+    if form != "plain-element" or not deck:
+        return
+    sim_model_classes = _sim_model_classes(deck)
+    if not sim_model_classes:
+        return
+    reference_names = _lvs._device_class_names(reference_netlist)
+    reference_lowered = {name.lower() for name in reference_names}
+    layout_lowered = {name.lower() for name in _lvs._device_class_names(layout_netlist)}
+    offending = sorted(
+        (name, target)
+        for name in reference_names
+        if (target := sim_model_classes.get(name.lower())) is not None
+        and target.lower() in layout_lowered
+        and target.lower() not in reference_lowered
+    )
+    if not offending:
+        return
+    raise _lvs.LvsError(
+        "reference netlist is in plain-element form but names PDK "
+        "simulation model(s) "
+        + ", ".join(name for name, _ in offending)
+        + " as device classes, which cannot pair with the layout side's "
+        "deck class name(s) "
+        + ", ".join(target for _, target in offending)
+        + " -- every device and net would come back unmatched. Set "
+        'request.reference.form to "subckt-call", which rewrites an M '
+        "card's model token to the deck's device class even when the "
+        'reference contains no X cards -- see docs/cli/lvs.md, "Netlist '
+        'form".'
     )
