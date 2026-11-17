@@ -3,16 +3,16 @@
 plus the thin effective-resistance adapter over it (issue #2981, increment 2).
 
 Construction turns conductor-role polygons, declared ports (terminals and
-ideal nodes) and via/contact landings into a resistor graph -- nodes, edges,
-and explicit diagnostics -- following the Stage 3.D2 model.
+ideal nodes) and via/contact landings -- graph-level geometry in database
+units (dbu) -- into a resistor graph of nodes, edges and explicit
+diagnostics, following the Stage 3.D2 model.
 :func:`terminal_resistance_matrix` and :func:`effective_resistance` (at the end
 of the module) solve a built graph by reusing
 :func:`klayout_tools.ir_solver.solve_ir_drop`; there is no second solver.
-Nothing here is wired to ``klt extract`` (increment 3) or changes a default
-extraction output or JSON field. The construction inputs are graph-level
-geometry in database units (dbu); an
-adapter from ``_region_n_squares`` / ``_net_port_regions`` /
-``_fragment_port_points_um`` output is part of the integration increment.
+The module is live and wired: ``klt extract --resistance-graph`` reaches
+:func:`build_resistance_graph` and :func:`terminal_resistance_matrix` through
+:func:`klayout_tools.extract_parasitics._resistance_graph_report`. The opt-in
+``resistance_graph`` output is additive -- no default output or JSON field changes.
 
 **Model (3.D2 steps 3-7).**
 

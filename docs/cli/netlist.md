@@ -156,12 +156,36 @@ downgrades this one gate to a warning: the netlist is written (or, with
 `--check`, compared) as xschem produced it and the run exits `0`/`3` as usual.
 The condition is never silent: a `klt netlist: warning:` line goes to stderr
 and `--format json` gains an additive `warnings` array (present only when
-non-empty) with an entry
+non-empty; entries are discriminated by their `code`, see the next section)
+with an entry
 `{"code": "unevaluated_expr", "line": N, "snippet": "...", "xschem_version": "..."}`
 for the first offending line. A netlist with no `expr(` is unchanged. It works
 with `--block`, does **not** relax the `unresolved_symbol` gate, and combined
 with `--backend batch` is a usage error (exit `1`) — the runner applies the
 gate itself.
+
+### `pdk_variant_unestablished` — a defaulted PDK variant is a warning, not a fact
+
+When no PDK variant was selected (`--pdk` and `$PDK` both unset) and the
+resolved root holds more than one variant, the variant `klt netlist` resolves
+is a sorted first-match default — a guess, not something the run can stand
+behind (issue #5639). A provenance record asserting the guess would be worse
+than none, so the netlist is still written, the exit code is unchanged, but
+the run never asserts it as fact:
+
+- the `** klt-netlist-inputs:` record line carries `"pdk_variant": null`
+  (the other fields are unaffected);
+- the additive `warnings` array gains an entry
+  `{"code": "pdk_variant_unestablished", "variant": "<default taken>", "alternative_variants": ["..."], "root": "<abs root>", "message": "..."}`
+  naming the default and the alternatives;
+- a `klt netlist: warning:` line goes to stderr, in both output formats.
+
+Passing `--pdk <variant>` — as `--backend batch` already requires — or
+exporting `$PDK` records that variant and silences the warning. A
+single-variant root, and a run with no PDK in play (`pdk_variant` was already
+`null` there), behave exactly as before. This is never a gate: `--check`'s
+`status` is unchanged, and on a committed netlist written before this
+behaviour only `drift.inputs.changed` gains `pdk_variant`.
 
 ## An unresolved symbol is a failure, not a netlist
 
@@ -280,10 +304,49 @@ When the files match only because of this, `drift.layout_differs` is `true`. Thi
 real `.subckt`, pass `--block`, which `--check` applies before comparing
 ([Block mode](#block-mode-an-includable-subckt)).
 
+**`--canonical-wrap` (issue #5715)** makes the *written* netlist
+layout-independent too: every `+` continuation line is folded onto the card it
+continues and whitespace runs inside non-comment lines are collapsed to single
+spaces — exactly the layout `--check` compares — so two hosts whose xschem
+builds wrap long cards differently write byte-identical files from the same
+schematic. Comment lines are left byte-intact: the informational
+`**.subckt <name> <ports...>` port order is not rewritten, a `+` line is never
+joined onto a comment, and a quoted expression with embedded spaces
+(`ad='int((nf+1)/2) * w/nf * 0.29'`) survives verbatim. The fold is idempotent,
+so canonical output is a fixed point of the comparison: a netlist written with
+the flag still checks `match` (with or without the flag on the checking run).
+It is honoured under `--backend batch` too, applied client-side after the
+runner's paths are mapped back. Default off, like the other write-side flags:
+without it no written byte changes. In generate mode the payload reports
+`canonical_wrap` (`false` by default), and `netlist.content_hash` /
+`netlist.bytes` describe the folded bytes.
+
+Three parts of a written netlist are a property of the **host or the
+checkout** rather than of the circuit, and `--check` forgives all three. Each
+has its own opt-in write-side flag:
+
+| Host/checkout-dependent surface | Written without a flag | Write-side flag |
+| --- | --- | --- |
+| `+` continuation wrapping | the host xschem's wrap column | `--canonical-wrap` (issue #5715) |
+| `** sch_path:` / `** sym_path:` absolute paths | this checkout's absolute paths | `--relative-paths` (issue #5046) |
+| `** klt-netlist-inputs:` line (embeds `xschem_version`) | this xschem build's version | `--no-provenance-header` (issue #5085) |
+
+So `klt netlist <sch> -o out.spice --canonical-wrap --relative-paths
+--no-provenance-header` is the form whose regenerations are byte-identical
+across hosts and checkouts. The combination is required: the provenance
+header embeds `xschem_version`, so with the header enabled two hosts running
+different xschem builds differ on that line whatever the wrapping. Without
+the flags the written netlist keeps the generating host's form, and
+`--check` still forgives all three surfaces when comparing.
+
 **Generation inputs are recorded** (issue #4945). The line is a stable, strippable contract; pass `--no-provenance-header` (issue #5085) to omit it, so the written netlist is byte-identical to xschem's own export (for projects that hash-pin committed netlists). The payload reports `provenance_header` (`true` by default), and `netlist.content_hash` and `netlist.bytes` describe the bytes actually written. `--check` is unaffected, and a headerless committed netlist still checks cleanly. Not supported with `--backend batch`. A written netlist starts with
 one comment line, `** klt-netlist-inputs: {"pdk_variant": ..., "rcfile": ...,
 "xschem_version": ...}`: the xschem version, the `--rcfile` *basename* (its
-directory is checkout-specific) and the PDK variant that produced it. xschem's
+directory is checkout-specific) and the PDK variant that produced it —
+recorded as `null` when the variant was defaulted, not selected (no
+`--pdk`/`$PDK` with more than one variant under the resolved root; see the
+[`pdk_variant_unestablished`](#pdk_variant_unestablished--a-defaulted-pdk-variant-is-a-warning-not-a-fact)
+warning). xschem's
 own output carries no such record, so klt writes it. `--check` excludes that
 line from the comparison and from `drift.diff`, and compares it with the
 current inputs in `drift.inputs`; `drift.reason` then says whether the inputs
@@ -700,6 +763,15 @@ resolves its own `$PDK_ROOT`.
   unresolvable PDK is silently skipped.
 - No PDK in play: no `pdk` field, exactly as before.
 
+With no `--pdk`/`$PDK` and more than one variant under the resolved root, the
+resolved variant is a first-match default, and the run says so rather than
+recording it as provenance: `pdk.variant_established` is `false`, the
+generation-inputs record says `"pdk_variant": null`, and a
+`pdk_variant_unestablished` entry is appended to `payload.warnings` with a
+matching `klt netlist: warning:` line on stderr (issue #5639; details above).
+This warning is independent of #2680's declared-root mismatch warning — an
+rcfile declaring the other variant's directory fires both.
+
 ## JSON output
 
 ```json
@@ -736,6 +808,7 @@ resolves its own `$PDK_ROOT`.
 | `output` | string | The `--output` path exactly as provided. Written in `generate` mode; read and compared in `check` mode. |
 | `mode` | `"generate"` \| `"check"` | Which mode ran (`"check"` iff `--check` was passed). |
 | `status` | `"generated"` \| `"match"` \| `"drifted"` | `"generated"` in `generate` mode; `"match"`/`"drifted"` in `check` mode. |
+| `canonical_wrap` | boolean | **`generate` mode only**: whether `--canonical-wrap` folded the written netlist onto the layout `--check` compares (issue #5715). Absent in `check` mode. |
 | `xschem` | object | How xschem was invoked and what it returned — see below. |
 | `netlist` | object | Identity of the netlist this run produced — see below. |
 | `pdk` | object | **Only when a PDK resolved** (see [PDK-root consistency](#pdk-root-consistency)); absent otherwise. Additive. |
@@ -778,6 +851,8 @@ resolves its own `$PDK_ROOT`.
 | `consistent` | boolean \| null | Whether `rcfile_pdk_root` matches `root`; `null` when there is nothing to compare. |
 | `warning` | string \| null | Mismatch explanation when `consistent` is `false`. |
 | `ambiguity_warning` | string \| null | `klt pdk`'s multiple-installs warning, when applicable. |
+| `variant_established` | boolean | `false` when the variant was defaulted, not selected (no `--pdk`/`$PDK` and the root holds more than one) — the record's `pdk_variant` is then `null`. Additive (issue #5639). |
+| `unestablished_warning` | object \| null | The `pdk_variant_unestablished` entry also carried in `payload.warnings`; `null` when the variant was established. Additive (issue #5639). |
 
 ### `drift` (`--check` only)
 

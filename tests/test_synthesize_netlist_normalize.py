@@ -177,9 +177,12 @@ def test_netlist_is_identical_across_directories(tmp_path, monkeypatch):
 HAVE_GIT = shutil.which("git") is not None
 
 _in_repo = pytest.mark.skipif(not HAVE_GIT, reason="needs git")
-# No CI job installs sv2v, so the `sv_frontend: "sv2v"` cases below skip there
-# and are verified locally only (PR #5832); `test_synthesize.py` covers the
-# sv2v route in CI through a stub `sv2v` on PATH.
+# CI's `test` job installs a pinned sv2v (scripts/install-sv2v.sh, issue
+# #5956), so the `sv_frontend: "sv2v"` cases below run there -- with a
+# no-silent-skip assert step (ci.yml) failing the leg if they ever skip
+# again. Hosts without a real sv2v on PATH still skip them;
+# `test_synthesize.py` separately covers the sv2v route in CI through a
+# stub `sv2v` on PATH.
 _needs_sv2v = pytest.mark.skipif(shutil.which("sv2v") is None, reason="needs sv2v")
 _needs_pdk = pytest.mark.skipif(
     _REAL_SKY130_VARIANT is None, reason="needs sky130 liberty"

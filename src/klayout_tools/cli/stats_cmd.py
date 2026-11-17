@@ -23,6 +23,7 @@ def run(args: argparse.Namespace) -> int:
             top=args.top,
             density_window=args.density_window,
             window_layers=window_layers,
+            geometry_digest=args.geometry_digest,
         )
     except StatsError as exc:
         return emit_error("stats", str(exc), args.format)
