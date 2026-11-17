@@ -2710,8 +2710,8 @@ def run_pex(
     ``{net, net_id, resistance_source, selected_resistance_ohm,
     legacy_resistance_ohm, terminals, pair_resistance_ohm}`` entry per net,
     only when the flag was given -- otherwise the report and netlist are
-    byte-identical. ``distributed_rc`` raises :class:`PexError` (the ladder stays on the
-    legacy scalar, so a critical net would mix resistance sources).
+    byte-identical. Combining it with ``distributed_rc`` raises :class:`PexError`
+    (the ladder stays on the legacy scalar, so a critical net would mix sources).
 
     ``critical_net_all``/``critical_net_excludes`` (``klt pex
     --critical-net-pattern``/``--critical-net-all``/``--critical-net-exclude``,
