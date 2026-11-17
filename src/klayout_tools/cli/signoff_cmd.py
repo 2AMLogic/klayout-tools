@@ -805,6 +805,14 @@ def _print_group_coverage(item: dict) -> None:
     rests on. Absent for a single-group citation, whose rendering is
     unchanged, and for items 2/3/4, whose member counts stay JSON-only as
     before."""
+    # Item 11 only: items 2/3/4 also carry member counts (issue #5031),
+    # but their members are per-cell reports, not citation groups -- a
+    # "groups:" line would misdescribe them and change rendering that
+    # issue leaves untouched. The guard lives here, not at the call site
+    # in `_print_tier_report_text`, so the renderer stays exactly at the
+    # complexity ratchet's max (issue #5597 review).
+    if item.get("id") != 11:
+        return
     total = item.get("members_total")
     if not total or total < 2:
         return
@@ -1020,13 +1028,9 @@ def _print_tier_report_text(result: dict, palette: Palette) -> None:
             )
         _print_not_applicable(item)
         # Issue #5597: a multi-group item-11 citation states its group
-        # coverage in the text rendering too (the count is not JSON-only).
-        # Item 11 only: items 2/3/4 also carry member counts (issue #5031),
-        # but their members are per-cell reports, not citation groups --
-        # a "groups:" line would misdescribe them and change rendering
-        # that issue leaves untouched.
-        if item.get("id") == 11:
-            _print_group_coverage(item)
+        # coverage in the text rendering too (the count is not JSON-only);
+        # the item-11-only guard lives inside `_print_group_coverage`.
+        _print_group_coverage(item)
         citation = item["citation"]
         if citation:
             _print_cite_line(citation)
