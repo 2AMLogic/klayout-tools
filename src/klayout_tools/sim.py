@@ -418,6 +418,12 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         # Waveform JSON conversion skipped over options.waveform_max_bytes
         # (issue #3211); always a warning.
         "waveform_too_large",
+        # A `noise.mechanism` share decomposition whose leaf power-sum
+        # disagrees with the plot's `onoise_spectrum` beyond
+        # `COMPLETENESS_TOLERANCE`, or that leaves unclassified power
+        # (issue #5553); always a warning -- the reported share stays a
+        # sound lower bound.
+        "noise_mechanism_incomplete",
         # Step-sequence outcomes (`analysis_steps[]`, issue #2482), synthesized
         # by `sim_steps.grade_step_measurements`: a step whose analysis
         # produced no plot, and a result whose inputs produced no value.

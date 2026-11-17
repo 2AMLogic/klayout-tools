@@ -107,8 +107,9 @@ def mechanism_measurements(
 def has_pts_per_summary(analysis: dict[str, Any]) -> bool:
     """Whether the noise analysis' ``args`` carry the trailing
     ``pts_per_summary`` token (``v(out) V1 dec 20 10 1e7 **1**``). False when
-    ``args`` cannot be read as a noise sweep -- the caller refuses on the
-    swept-range check first."""
+    ``args`` cannot be read as a noise sweep either -- the caller's
+    pts-per-summary refusal runs before its swept-range check, so unparseable
+    ``args`` surface here as a missing token."""
     tokens = str(analysis.get("args", "")).split()
     for index, token in enumerate(tokens):
         if token.lower() in ("dec", "oct", "lin") and len(tokens) >= index + 4:

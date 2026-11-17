@@ -252,6 +252,13 @@ def test_an_unclassified_leaf_carrying_power_raises_the_diagnostic(tmp_path):
     assert "id" in message and "n0" in message
 
 
+def test_the_incomplete_code_is_registered_for_fail_on_diagnostic():
+    """The completeness warning is part of the `options.fail_on_diagnostic`
+    vocabulary (`sim.DIAGNOSTIC_CODES`) -- the registry's docstring and
+    `docs/cli/sim.md`'s classification table mirror it (issue #5553)."""
+    assert sim_noise_mechanism.INCOMPLETE_DIAGNOSTIC_CODE in sim.DIAGNOSTIC_CODES
+
+
 def test_an_unclassified_leaf_carrying_no_power_stays_quiet(tmp_path):
     """sky130 emits `igb`/`igd`/`igs` for every MOSFET but they are identically
     zero at ordinary biases -- naming them would make the diagnostic useless."""
