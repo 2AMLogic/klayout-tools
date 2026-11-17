@@ -409,27 +409,50 @@ verification.py` **[REPO]**).
 
 **Shape (b) — bit-selected port as a source** (an input net fanning out to
 an ordinary cell input *and* a single-pin antenna/diode-style load):
-**not order-dependent, and not fixable from this module.** A *single* such
-entry, entirely alone with no sibling at all, already fails whenever its
-destination pin declares its own `specify`/`IOPATH` block — which an
-ordinary standard cell always does; it resolves cleanly only against a
-destination with no `specify` block at all (an antenna/diode-style cell).
-Reordering or deferring the entry to its own call changes nothing here,
-ruling out shape (a)'s workaround. More surprising still: **the outcome
-depends on the testbench**, not just the SDF/netlist. The identical fixture,
-run through this repo's actual wrapper/shim/split pipeline, resolves cleanly
-with a **no-op** cocotb test (a coroutine that returns without ever
-`await`ing a trigger) but **deterministically fails** once the testbench
-actually drives the DUT and `await`s a `Timer` — reproduced identically
-across a clean `.klt/` build directory, a fresh Python interpreter, and a
-fresh `klt` CLI subprocess (**[RUN]**, ruling out build-directory or
-process-state reuse as the cause). This points at a genuine race inside
-Icarus itself between `$sdf_annotate`'s own intermodpath insertion and VPI
-callback scheduling once the simulator actually advances past time 0 — not
-something a generated wrapper, shim, or SDF split can control from the
-outside. **Left unfixed, deliberately**: implementing a workaround for a
-mechanism this module cannot observe or control would risk papering over a
-still-unresolved entry rather than actually fixing it. Pinned down by
+**not order-dependent, and not fixable from this module.** The mechanism
+was re-measured in issue #5705 (2026-11-14) on a raw `iverilog`/`vvp` 13.0
+fixture — plain Verilog testbench, no cocotb, no `klt`, the same
+second-elaboration-root `$sdf_annotate` shape `_write_sdf_annotate_shim`
+generates — with one variable changed per control case, and each verdict
+corroborated against an un-annotated waveform baseline rather than the
+transcript, since `vvp` exits 0 even when it skipped every annotation
+(**[RUN]**; #5705 carries the full fanout/entry/rejection control table).
+The measured rule: `$sdf_annotate` creates **at most one** interconnect
+modpath per bit-selected top-level port net. On such a net with physical
+fanout *N* it annotates exactly one destination — the one belonging to the
+**last-declared instance on that net** — and rejects the other *N*−1 with
+`VPI error: Could not insert intermodpath!` plus `SDF ERROR: … Could not
+find intermodpath!`. The precondition is therefore **physical fanout above
+1**, not the SDF entry count: a lone entry on a fanout-1 net applies
+cleanly (with a `specify`-bearing destination and identical flags), and a
+lone entry on a fanout-2 net still fails when it targets a
+non-last-declared instance — this section's own fixture is fanout 2, so
+its 1-of-2 rejection is the fanout rule by itself. The destination's own
+`specify`/`IOPATH` block is neither the trigger nor protective:
+destinations with no `specify` block at all are rejected exactly like
+ordinary standard cells when they are not the survivor. The behaviour is
+deterministic — byte-identical per-entry verdicts with a bench that drives
+nothing and `$finish`es at t=1 and one that drives every input across
+80 ns, in both SDF entry orders, across repeated runs; reversing the SDF
+leaves the same entry applied, and reordering the *netlist* declarations
+moves the survivor to the new last-declared instance — which a race could
+not do. (An earlier revision of this paragraph, recorded through cocotb in
+#1619's era, attributed the failures to a race inside Icarus between
+`$sdf_annotate`'s own intermodpath insertion and VPI callback scheduling
+and to a no-op-vs-driven-testbench flip; that observation is possibly real
+*on top of* the cap, but the plain-Verilog measurements show neither part
+is needed to explain any reproduced rejection.) Reordering or deferring
+the entry to its own call changes nothing here — which entry survives is
+fixed by netlist declaration order, which the split never touches — ruling
+out shape (a)'s workaround. One workaround does exist, but it is a
+*netlist* change outside this module's reach on a finished netlist:
+making the source a cell *output* pin (insert a buffer so the entry reads
+`<inst>.X -> <inst>.<pin>` instead of `<bus>[i] -> <inst>.<pin>`) makes
+every entry on the net apply, at any fanout — measured on the same fixture
+(#5705's last three control rows). **Left unfixed, deliberately**:
+implementing a workaround for a mechanism this module cannot observe or
+control would risk papering over a still-unresolved entry rather than
+actually fixing it. Pinned down by
 `test_integration_real_icarus_sdf_bus_port_input_fanout_stays_unresolvable`
 (`tests/test_functional_verification.py` **[REPO]**), which must keep
 raising — a future change making it pass silently would need to *explain*
@@ -461,7 +484,12 @@ class, but reproducing the specific "constant-zero on any partial-failure
 run" shape needs a design closer to the sky130-scale one the issue's own
 run used (1927 `INTERCONNECT` entries), not a hand-written unit fixture, to
 be confident it is the same mechanism rather than a superficially similar
-one. Filed as its own follow-up rather than guessed at here — issue #1854.
+one. (**Premise note, 2026-11-15:** #5705's plain-Verilog measurements
+superseded shape (b)'s testbench-sensitivity as its mechanism — shape (b)
+is deterministic on a plain bench, per the one-modpath cap above — so that
+supporting reading no longer holds. The deferral itself stands and stays
+closed; §3.8 answered the constant-zero question on its own evidence.)
+Filed as its own follow-up rather than guessed at here — issue #1854.
 **Answered in §3.8 below** (2026-09-15): reproduced at sky130 scale, and it
 is *not* the same mechanism — not an annotation failure at all.
 
@@ -582,8 +610,13 @@ independent axes, which is #1854's other acceptance criterion:
    constant-zero shape leaves **zero** actionable diagnostics; the only dropped
    class is the benign `TIMINGCHECK` one, and `environment.sdf` reports
    `annotated: true` with every delay applied.
-2. **Testbench sensitivity.** Shape (b) flips on whether the cocotb test ever
-   `await`s a trigger, against a byte-identical SDF. The constant-zero shape is
+2. **Testbench sensitivity.** Shape (b) was recorded (cocotb-side, in
+   #1619's era) as flipping on whether the cocotb test ever `await`s a
+   trigger, against a byte-identical SDF — an observation #5705's
+   plain-Verilog measurements superseded as shape (b)'s mechanism: shape
+   (b) is deterministic on a plain bench (the one-modpath cap), so the
+   flip, if real, is a possibly-cocotb-specific effect on top of it. The
+   constant-zero shape is
    a deterministic function of one number — the testbench's clock period versus
    the annotated critical path — and reproduces on any testbench that drives
    the design.
@@ -653,8 +686,11 @@ delayed-signal outputs, which Icarus replaces with "copies of the original
 signals" (a warning per cell at build). With `IOPATH` module-path delays
 annotated on top, the copies and the path-delay scheduling interact so some
 cells' outputs settle to stale values — run-to-run nondeterministically in a
-driven testbench, matching the §3.7 shape-(b) testbench-sensitivity recorded
-by #1619. `INTERCONNECT`-only annotation never touches a module path and is
+driven testbench, an analogy to the §3.7 shape-(b) testbench-sensitivity
+#1619 recorded through cocotb (an observation #5705 superseded as shape
+(b)'s mechanism — shape (b) itself is deterministic on a plain bench — so
+this cites the historical record, not a confirmed shared mechanism).
+`INTERCONNECT`-only annotation never touches a module path and is
 stable.
 
 **Consequences.**
