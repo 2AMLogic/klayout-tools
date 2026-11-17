@@ -14957,6 +14957,125 @@ def test_expect_netlist_identity_match_runs_and_mismatch_refuses(tmp_path, monke
     assert "mismatch" in str(err.value)
 
 
+# --- issue #5569: netlist digests are captured before dispatch ---------------
+
+
+def _stub_subprocess_run_editing_netlist(monkeypatch, edits, remove=()):
+    """Like `_stub_subprocess_run`, but the (faked) corner run edits the
+    netlist files on disk before returning -- reproducing #5569's
+    submit-at-T / edit-at-T+5min / collect-at-T+16min ordering in-process,
+    with no cloud access."""
+
+    def fake_run(cmd, capture_output, text, timeout, cwd=None, env=None, **kw):
+        if "--version" in cmd:  # engine_build probe (#3095), not a corner
+            return fake_completed(_STUB_VERSION_BANNER)
+        if "-o" not in cmd:
+            real_run = subprocess.run
+            kw.update(capture_output=capture_output, text=text, timeout=timeout)
+            return real_run(cmd, cwd=cwd, env=env, **kw)
+        log_path = cmd[cmd.index("-o") + 1]
+        with open(log_path, "w", encoding="utf-8") as handle:
+            handle.write("clean run\n")
+        for path, text in edits.items():
+            Path(path).write_text(text)
+        for path in remove:
+            Path(path).unlink()
+        return fake_completed()
+
+    monkeypatch.setattr(sim.subprocess, "run", fake_run)
+
+
+def _midrun_edit_report(tmp_path, monkeypatch, *, edits=(), remove=()):
+    body = ".include shared.spice\n.param vdd=1.0\nR1 vdd out 1k\n"
+    shared = "R2 out 0 2k\n"
+    (tmp_path / "shared.spice").write_text(shared)
+    (tmp_path / "body.spice").write_text(body)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "measurements": [{"name": "vmax", "spice": "meas tran vmax MAX v(out)"}],
+        },
+    )
+    pre_edit = {
+        "body.spice": hashlib.sha256(body.encode()).hexdigest(),
+        "shared.spice": hashlib.sha256(shared.encode()).hexdigest(),
+    }
+    _stub_subprocess_run_editing_netlist(monkeypatch, dict(edits), remove=list(remove))
+    return sim.run_sim(str(request)), pre_edit
+
+
+def test_netlist_digests_captured_before_dispatch_survive_midrun_edit(
+    tmp_path, monkeypatch
+):
+    """The report cites the netlist bytes the job was staged with (#5569),
+    not whatever stands on disk when the report is assembled: the faked
+    backend rewrites both netlist files mid-run, and the report still pins
+    the pre-edit digests -- in `environment.netlist_sha256`,
+    `environment.netlist_closure[]` and `provenance.input.content_hash`."""
+    report, pre_edit = _midrun_edit_report(
+        tmp_path,
+        monkeypatch,
+        edits=[
+            (tmp_path / "body.spice", "* a comment\nR1 vdd out 3k\n"),
+            (tmp_path / "shared.spice", "R2 out 0 9k\n"),
+        ],
+    )
+
+    env = report["environment"]
+    assert env["netlist_sha256"] == pre_edit["body.spice"]
+    assert env["netlist_sha256_scope"] == "staged"
+    # Resolution order: the netlist first, then each include (issue #2799).
+    assert [entry["sha256"] for entry in env["netlist_closure"]] == [
+        pre_edit["body.spice"],
+        pre_edit["shared.spice"],
+    ]
+    # Equal by construction now, not by coincidence of timing.
+    assert report["provenance"]["input"]["content_hash"] == (
+        f"sha256:{pre_edit['body.spice']}"
+    )
+
+
+def test_netlist_deleted_between_dispatch_and_assembly_does_not_raise(
+    tmp_path, monkeypatch
+):
+    """The digest was captured pre-dispatch, so a netlist deleted mid-run
+    leaves the report assemblable (with the captured digest) instead of
+    crashing the epilogue after the corners already ran."""
+    report, pre_edit = _midrun_edit_report(
+        tmp_path,
+        monkeypatch,
+        remove=[tmp_path / "body.spice", tmp_path / "shared.spice"],
+    )
+
+    env = report["environment"]
+    assert env["netlist_sha256"] == pre_edit["body.spice"]
+    assert env["netlist_sha256_scope"] == "staged"
+
+
+def test_checkpoint_fingerprint_payload_is_stable(tmp_path):
+    """#5569 guard: the sweep digest capture moved pre-dispatch, but
+    `_checkpoint_fingerprint` must keep hashing the *live* netlist file --
+    an edited-in-place netlist has to invalidate an existing checkpoint.
+    Pin a fixed request's fingerprint so any payload change fails here
+    instead of silently invalidating every on-disk checkpoint/shard map."""
+    netlist = tmp_path / "n.cir"
+    netlist.write_text("* x\n.end\n")
+    assert (
+        sim._checkpoint_fingerprint(
+            netlist_path=str(netlist),
+            models_lib=None,
+            analysis={"type": "op"},
+            measurements_spec=[],
+            corner_points=[],
+            timeout_s=1.0,
+            engine="ngspice",
+        )
+        == "0d58abc92cfaea155034103a75e335c56ba1541c4cd26887a74e66f404e7eed4"
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Waveform-only recovered stepping (#3246)
 # --------------------------------------------------------------------------- #

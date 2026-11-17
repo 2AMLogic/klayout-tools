@@ -6939,6 +6939,24 @@ def test_run_sim_attach_end_to_end_and_unknown_job_envelope(tmp_path, monkeypatc
     assert excinfo.value.code == sb.BATCH_UNKNOWN_JOB_CODE
 
 
+def test_run_sim_attach_reports_client_at_collection_scope(tmp_path, monkeypatch):
+    """A collection-only `--attach` did not stage this job's inputs (#5569):
+    the submission happened in another process, so the report's netlist
+    digest describes the file as *this* process found it -- disclosed as
+    `netlist_sha256_scope: "client-at-collection"` rather than silently
+    claiming a pre-dispatch ("staged") capture it cannot have made."""
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    runner.outputs = {"report.json": _sim_report()}
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    _write_body(tmp_path)
+    path = _write_request(tmp_path, _batch_request(tmp_path))
+
+    report = sim.run_sim(str(path), attach_job_id="klt-sim-abc123")
+
+    assert report["environment"]["netlist_sha256_scope"] == "client-at-collection"
+
+
 def test_run_sim_attach_requires_batch_backend(tmp_path):
     _write_body(tmp_path)
     request = _batch_request(tmp_path)

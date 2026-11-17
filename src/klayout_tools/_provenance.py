@@ -836,7 +836,11 @@ INPUT_ROLE_SOURCE = "source"
 INPUT_ROLES = frozenset({INPUT_ROLE_LAYOUT, INPUT_ROLE_NETLIST, INPUT_ROLE_SOURCE})
 
 
-def _input_block(path: str | None, role: str) -> dict[str, Any] | None:
+def _input_block(
+    path: str | None,
+    role: str,
+    precomputed_hash: str | None = None,
+) -> dict[str, Any] | None:
     """The provenance ``input`` shape ``{content_hash, role}``, mirroring
     ``deck``'s ``{name, content_hash, released}``; ``None`` when no input
     path was given (or it can't be hashed).
@@ -845,10 +849,18 @@ def _input_block(path: str | None, role: str) -> dict[str, Any] | None:
     :data:`INPUT_ROLES`. It is always present when the block is, so a
     consumer never has to infer the kind from a file extension or from which
     verb produced the envelope.
+
+    ``precomputed_hash`` (issue #5569) is a caller-captured
+    ``sha256:``-prefixed digest used instead of hashing ``path`` at call
+    time -- for callers that read the input bytes earlier (e.g. before
+    dispatching work) and must report what they captured, not whatever the
+    file has become by the time the report is assembled. ``None`` (the
+    default) keeps the hash-the-path behaviour every other caller relies on.
     """
     if path is None:
         return None
-    return {"content_hash": content_hash(path), "role": role}
+    digest = precomputed_hash if precomputed_hash is not None else content_hash(path)
+    return {"content_hash": digest, "role": role}
 
 
 class UnknownProvenanceDeckError(Exception):
@@ -890,6 +902,7 @@ def build_provenance(
     pdk: dict[str, Any] | None = None,
     input_path: str | None = None,
     input_role: str = INPUT_ROLE_LAYOUT,
+    input_content_hash: str | None = None,
     deck_options: Mapping[str, str] | None = None,
     resolve_deck_options: bool = False,
     include_klayout_version_mismatch: bool = False,
@@ -933,6 +946,15 @@ def build_provenance(
     false alarm rather than caught staleness. Raises :class:`ValueError` for
     a role outside :data:`INPUT_ROLES` -- a silently-unknown role would
     disable the cross-check for that verb instead of failing loudly.
+
+    ``input_content_hash`` (issue #5569) overrides the hash-the-path default
+    with a caller-captured ``sha256:``-prefixed digest: for a verb whose run
+    spans a submit-to-collect window (``klt sim`` on an off-host backend),
+    the caller reads the input bytes once up front and passes that capture
+    here, so ``provenance.input.content_hash`` pins the bytes the run was
+    staged with even when the file has since changed on disk. ``None`` (the
+    default) hashes ``input_path`` at call time, exactly as before, so every
+    existing caller is unchanged.
     ``deck_options`` (issue #595) is recorded onto ``provenance.deck.options``
     via :func:`_deck_block`; ``resolve_deck_options`` (issue #2394) additionally
     fills in the options the deck resolved *by default* and records which of
@@ -976,7 +998,7 @@ def build_provenance(
             resolve_deck_options,
             deck_path_envelope,
         ),
-        "input": _input_block(input_path, input_role),
+        "input": _input_block(input_path, input_role, input_content_hash),
     }
     if include_klayout_version_mismatch:
         # Build-time-recorded only -- deliberately *not*

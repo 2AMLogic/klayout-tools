@@ -2992,8 +2992,10 @@ class _ResolvedSimRequest:
     models_lib: Any
     monte_carlo_info: Any
     monte_carlo_stats: Any
+    netlist_closure_environment: Any
     netlist_identity: Any
     netlist_identity_error: Any
+    netlist_sha256: Any
     adapt_environment: Any
     netlist_overrides_report: Any
     netlist_path: Any
@@ -3128,6 +3130,20 @@ def _prepare_sim_request(
         netlist_identity,
         netlist_identity_error,
         netlist_ref,
+    )
+
+    # Issue #5569: the byte digests the report cites are captured once,
+    # here, before any corner is dispatched -- the same moment the
+    # `netlist_identity` above is computed (that one is already carried to
+    # the report pre-dispatch; these were not, so a netlist edited between
+    # submission and collection -- minutes to hours on `batch` -- silently
+    # changed what the report claimed to pin). The closure fragment uses the
+    # same `*_environment` helper the report epilogue used to call, so the
+    # `netlist_closure`/`netlist_closure_error` disclosure semantics are
+    # unchanged; only the moment of capture moved.
+    netlist_sha256 = sha256_file(netlist_path)
+    netlist_closure_environment = sim_env_report.netlist_closure_environment(
+        request, netlist_path, repo_root=repo_root
     )
 
     corners_spec = request.get("corners") or {}
@@ -3669,8 +3685,10 @@ def _prepare_sim_request(
         models_lib=models_lib,
         monte_carlo_info=monte_carlo_info,
         monte_carlo_stats=monte_carlo_stats,
+        netlist_closure_environment=netlist_closure_environment,
         netlist_identity=netlist_identity,
         netlist_identity_error=netlist_identity_error,
+        netlist_sha256=netlist_sha256,
         adapt_environment=adapt_env,
         netlist_overrides_report=netlist_overrides_report,
         netlist_path=netlist_path,
@@ -3776,6 +3794,8 @@ def _run_sim_corners(
     monte_carlo_stats = resolved.monte_carlo_stats
     netlist_identity = resolved.netlist_identity
     netlist_identity_error = resolved.netlist_identity_error
+    netlist_sha256 = resolved.netlist_sha256
+    netlist_closure_environment = resolved.netlist_closure_environment
     netlist_overrides_report = resolved.netlist_overrides_report
     netlist_path = resolved.netlist_path
     netlist_source = resolved.netlist_source
@@ -4404,7 +4424,23 @@ def _run_sim_corners(
         "models_lib_sha256_scope": (
             "client" if remote_environment is not None else "local"
         ),
-        "netlist_sha256": sha256_file(netlist_path),
+        # Issue #5569: the pre-dispatch capture from `_prepare_sim_request`,
+        # never a re-read of the file at assembly time -- between submit and
+        # collect (a window of minutes to hours on `batch`) a caller may
+        # have edited the netlist, and this field's job is to pin the bytes
+        # the job was staged with.
+        "netlist_sha256": netlist_sha256,
+        # Additive: what the digest above describes, in the vocabulary
+        # `models_lib_sha256_scope` already established two keys up.
+        # "staged" -- captured before this process dispatched any work
+        # (every local/remote run and every batch submit-and-collect run);
+        # "client-at-collection" -- this process only collected an earlier
+        # submission (`--attach`), whose staging happened in another
+        # process, so the digest describes the file as this process found
+        # it and is not binding on what ran.
+        "netlist_sha256_scope": (
+            "client-at-collection" if attach_job_id is not None else "staged"
+        ),
     }
     environment.update(
         param_file_environment(
@@ -4415,9 +4451,10 @@ def _run_sim_corners(
     environment.update(_threads_environment(effective_threads))
     environment.update(_corner_coverage_environment(request, corner_points))
     environment.update(
-        sim_env_report.netlist_closure_environment(
-            request, netlist_path, repo_root=repo_root
-        )
+        # Issue #5569: the closure fragment captured pre-dispatch (same
+        # moment as `netlist_sha256`), so the entries pin the staged files
+        # rather than whatever stands on disk at collection.
+        netlist_closure_environment
     )
     # Additive/optional (issue #3111): the declared solver options, verbatim,
     # so the setting is part of the report's evidence.
@@ -4557,6 +4594,16 @@ def _run_sim_corners(
             pdk=provenance_pdk,
             input_path=netlist_path,
             input_role=INPUT_ROLE_NETLIST,
+            # Issue #5569: the same pre-dispatch digest the environment
+            # block reports, so `provenance.input.content_hash` (which
+            # `klt signoff --manifest`'s staleness gate reads) equals
+            # `sha256:<environment.netlist_sha256>` by construction, even
+            # when the file changed on disk mid-run. `None` (a netlist
+            # that could not be hashed at capture time) falls back to the
+            # hash-the-path default.
+            input_content_hash=(
+                f"sha256:{netlist_sha256}" if netlist_sha256 is not None else None
+            ),
         ),
         "measurements": measurements_rollup,
         "corners": corners,
