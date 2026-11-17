@@ -25,6 +25,18 @@ not `klt --version`, if you need to detect this kind of drift. See
   `--deck` the number would come from the deck, so the citation would assert
   false provenance. Additive — `klt power`'s `schema_version` stays `1`.
 
+- **`klt sim` refuses `measurements[].transfer` declared beside `noise`**
+  (#5695, 2026-11-14): the mutually exclusive measurement forms each carried a
+  hand-maintained list of "every *other* exclusive form", and `transfer`'s
+  predated `noise` and never gained it. Because the form validators return on
+  the first match, an entry declaring both was accepted as a plain `transfer`
+  entry and the `noise` request was silently dropped -- one measurement came
+  back where two were asked for. All seven lists are now derived from one
+  ordered registry (`sim_forms.FORMS`), so every pair of forms is refused in
+  both declaration orders. A request declaring `transfer` together with
+  `noise` now fails validation with the usual "alternative forms of a
+  measurement" error instead of running; every other refusal and message is
+  byte-identical. `klt sim`'s `schema_version` is unaffected.
 - **`klt yield`: a damaged gzip input is an error envelope, not a traceback**
   (#5543, 2026-11-13): a gzip samples or `--limits` file whose deflate stream
   is *corrupt* — as opposed to truncated, or carrying a bad CRC trailer, both
@@ -38,7 +50,6 @@ not `klt --version`, if you need to detect this kind of drift. See
   `could not read samples '<path>': …` like every other unreadable input, and
   `run_yield` raises `YieldError` rather than leaking `zlib.error` at the
   library surface. No output-shape change; no `schema_version` bump.
-
 - **`klt pex` and `klt sim --monte-carlo` now read a SPICE card the same way
   the flattener does: `w = 1` and `w=(2 * 1u)` are parameters, not device
   names** (#5461, 2026-11-13): three hand-rolled card tokenizers lived in
