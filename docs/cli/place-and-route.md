@@ -3044,15 +3044,17 @@ edge grids. Measured result: zero `V4.M5.AUX.2`, `M4.AUX.1`, `M4.AUX.2`,
 `V4` bar has zero `M4` enclosure, so `V4.M4.EN.1` (~370) and `V4.M5.EN.2`
 (~13) remain, plus 1-2 `M5.W.3`; no existing request field changes that.
 At block scale `M3.S.2` is a further known residual (issue #6030): ~15
-markers per ~10^3 `M2`->`M5` crossings at the 0.9.2 pin (a count that
-scales with block size, not a fixed number). They sit on `pdngen`'s own
-`M2`->`M5` stub patches, not on router metal, where two stack stubs can land
-closer than the deck's 40 nm `M3` along-track spacing; they are report-only.
+markers per ~10^3 `M2`->`M5` crossings, measured at klayout-tools 0.9.2 (a
+count that scales with block size, not a fixed number). They sit on
+`pdngen`'s own `M2`->`M5` stub patches, not on router metal, where two stack
+stubs can land closer than the deck's 25 nm tip-to-side `M3` spacing
+(`M3.S.2`, Table 3.12.1); they are report-only.
 No `power.connects[]` field moves them: `max_columns` is already minimal and
 is across-track, `ongrid {M3 M4}` is the recipe's purpose (dropping it
-re-introduces the families above), `split_cuts` is measured DRC-dirty
-(issue #4301), and the stub patch shape comes from the tech LEF. This is an
-upstream OpenROAD `pdngen` limitation; the preset is unchanged here.
+re-introduces the families above), `split_cuts` is measured DRC-dirty on
+gf180mcu (issue #4301), and the stub patch shape comes from the tech LEF.
+This is an upstream
+OpenROAD `pdngen` limitation; the preset is unchanged here.
 `pdngen` offsets are core-origin relative: the edge-grid result was measured
 with core origin 0.96 um, and other origins can leave `M5.AUX.1`/`M6.AUX.1`
 hits (adjust `power.straps` explicitly in that case).
