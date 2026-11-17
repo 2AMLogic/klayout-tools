@@ -16,7 +16,8 @@ def expect_deck_hash_arg_type(value: str) -> str:
     """argparse ``type=`` for ``--expect-deck-hash``: a malformed value is a
     usage error (exit 2) before any deck runs, not a guaranteed mismatch
     after one."""
-    return parse_expected(value, argparse.ArgumentTypeError)
+    parse_expected(value, argparse.ArgumentTypeError)
+    return value
 
 
 def add_expect_deck_hash_arg(parser: argparse.ArgumentParser) -> None:
