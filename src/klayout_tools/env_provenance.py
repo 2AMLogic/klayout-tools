@@ -285,28 +285,6 @@ def repo_relative_path(
     return {"path": relative.replace(os.sep, "/"), "scope": "repo"}
 
 
-def repo_relative_str(
-    path: str | os.PathLike[str],
-    *,
-    repo_root: str | os.PathLike[str] | None = None,
-) -> str:
-    """The plain-string counterpart of :func:`repo_relative_path`: the
-    repo-relative POSIX path when ``path`` lies inside a repo, else the
-    unchanged absolute path.
-
-    For a string-typed field that must not change shape (``environment
-    .remote.shard_map``, issue #5542): :func:`repo_relative_path`'s
-    ``{"path": null, "scope": "external"}`` answer would retype the field to
-    ``null``, so the absolute path is kept instead. Such a field honours the
-    committed-artifact rule only when the run's outdir lies inside a repo --
-    the caller documents that boundary; the stderr hints keep printing the
-    absolute path either way, since those are read at a terminal, not
-    committed.
-    """
-    entry = repo_relative_path(path, repo_root=repo_root)
-    return entry["path"] if entry["path"] is not None else str(path)
-
-
 # --------------------------------------------------------------------------- #
 # the leak scan
 # --------------------------------------------------------------------------- #

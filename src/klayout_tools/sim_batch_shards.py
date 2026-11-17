@@ -8,7 +8,7 @@ import json
 import os
 from typing import Any
 
-from . import env_provenance, sim_batch
+from . import _batch_common, sim_batch
 
 #: ``request.batch`` fields that steer submission only (how long to wait for
 #: spot capacity, how many jobs to keep in flight) and never change what a
@@ -228,7 +228,7 @@ def with_unfinished(
         **(environment or {}),
         "unfinished_shards": [unfinished[i] for i in sorted(unfinished)],
         "resumable": True,
-        "shard_map": env_provenance.repo_relative_str(manifest.path),
+        "shard_map": _batch_common.repo_relative_str(manifest.path),
     }
 
 

@@ -26,7 +26,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, cast
 
 from . import (
-    env_provenance,
+    _batch_common,
     sim_batch,
     sim_batch_plan,
     sim_batch_shards,
@@ -236,7 +236,7 @@ def run_split(
         [report for report, _s in results],
         [summary for _r, summary in results],
         outdir=outdir,
-        shard_map=env_provenance.repo_relative_str(manifest.path),
+        shard_map=_batch_common.repo_relative_str(manifest.path),
     )
 
 

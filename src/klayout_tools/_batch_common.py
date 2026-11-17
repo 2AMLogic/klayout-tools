@@ -33,6 +33,30 @@ def _ctor(err_cls: type[_E]) -> Any:
     return err_cls
 
 
+def repo_relative_str(
+    path: str | os.PathLike[str],
+    *,
+    repo_root: str | os.PathLike[str] | None = None,
+) -> str:
+    """The plain-string counterpart of
+    ``env_provenance.repo_relative_path``: the repo-relative POSIX path
+    when ``path`` lies inside a repo, else the unchanged absolute path.
+
+    For a string-typed field that must not change shape (``environment
+    .remote.shard_map``, issue #5542): ``repo_relative_path``'s
+    ``{"path": null, "scope": "external"}`` answer would retype the field to
+    ``null``, so the absolute path is kept instead. Such a field honours the
+    committed-artifact rule only when the run's outdir lies inside a repo --
+    the caller documents that boundary; the stderr hints keep printing the
+    absolute path either way, since those are read at a terminal, not
+    committed.
+
+    Hosted here, not in ``env_provenance``, so that module stays within its
+    file-size ratchet ceiling (714 lines)."""
+    entry = env_provenance.repo_relative_path(path, repo_root=repo_root)
+    return entry["path"] if entry["path"] is not None else str(path)
+
+
 def make_job_id(kind: str) -> str:
     """A fresh ``klt-<kind>-<12 hex>`` job id, in the ``[A-Za-z0-9._-]+``
     alphabet the launch script accepts (it becomes an S3 prefix and an EC2
@@ -160,7 +184,7 @@ def resumable(
         **(environment or {}),
         "unlaunched_shards": count,
         "resumable": True,
-        "shard_map": env_provenance.repo_relative_str(manifest.path),
+        "shard_map": repo_relative_str(manifest.path),
     }
 
 
@@ -178,7 +202,7 @@ def with_unrun_signal(
     if not unrun or not state_path or environment is None:
         return environment, False
     out = {**environment, "unrun_units": unrun, "resumable": True}
-    out.setdefault("shard_map", env_provenance.repo_relative_str(state_path))
+    out.setdefault("shard_map", repo_relative_str(state_path))
     return out, "unlaunched_shards" not in environment
 
 
