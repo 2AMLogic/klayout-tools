@@ -2,7 +2,9 @@
 producer's nested ``attestation.inventory.schema_version`` into the tier
 record's ``inventory_schema_version`` disclosure -- the flat key still wins
 when an envelope carries both shapes, and a malformed nested block yields
-``null`` without failing the row. Split from ``test_signoff.py`` /
+``null`` without failing the row. Issue #6167 pins the flat-key edges: an
+explicitly ``null`` flat key falls back to the nested block, while a
+falsy-but-valid flat ``0`` still wins. Split from ``test_signoff.py`` /
 ``test_signoff_attest_item2.py`` (size ratchet); reuses their fixtures."""
 
 from __future__ import annotations
@@ -15,11 +17,29 @@ from klayout_tools.signoff_attest_stream import build_stream_attestation
 from test_signoff import _attest_repo, _item, _manifest, _write, _write_inventory
 from test_signoff_attest_item2 import _PASS, _bind, _inv, _stream
 
+# Sentinel for "the flat key is not in the mapping at all", so the parametrized
+# nested-resolution test can distinguish key-absent from key-present-and-None.
+_FLAT_ABSENT = object()
 
-def test_manifest_resolves_a_nested_only_inventory_block(tmp_path):
+
+@pytest.mark.parametrize(
+    ("flat", "expected"),
+    [
+        pytest.param(_FLAT_ABSENT, 1, id="key-absent"),
+        pytest.param(None, 1, id="key-null"),
+        pytest.param(0, 0, id="key-zero"),
+    ],
+)
+def test_manifest_resolves_inventory_schema_version_flat_or_nested(
+    tmp_path, flat, expected
+):
     """Issue #5571: an envelope in the item-2 stream producer's nested-only
     shape (`attestation.inventory.schema_version`, no flat key) binds with
-    the real version -- already-committed evidence needs no re-attest."""
+    the real version -- already-committed evidence needs no re-attest.
+    Issue #6167 pins the flat-key edges on top: an explicitly ``null`` flat
+    key still falls back to the nested block (the discriminator is the
+    value, not the key's presence), while a falsy-but-valid flat ``0``
+    still wins (the test is ``is not None``, not truthiness)."""
     repo = _attest_repo(tmp_path)
     envelope = build_attestation(9, _write_inventory(repo, 9))
     attestation = envelope["attestation"]
@@ -28,7 +48,10 @@ def test_manifest_resolves_a_nested_only_inventory_block(tmp_path):
         "content_hash": envelope["provenance"]["input"]["content_hash"],
         "schema_version": 1,
     }
-    del attestation["inventory_schema_version"]
+    if flat is _FLAT_ABSENT:
+        del attestation["inventory_schema_version"]
+    else:
+        attestation["inventory_schema_version"] = flat
 
     evidence = _write(repo / "evidence", "item9.json", envelope)
     result = build_tier_report(
@@ -45,7 +68,7 @@ def test_manifest_resolves_a_nested_only_inventory_block(tmp_path):
     item = _item(result, 9)
     assert item["status"] == "met"
     record = item["citation"]["artifact_binding"]["attestation"]
-    assert record["inventory_schema_version"] == 1
+    assert record["inventory_schema_version"] == expected
 
 
 def test_manifest_prefers_the_flat_inventory_schema_version_key(tmp_path):
