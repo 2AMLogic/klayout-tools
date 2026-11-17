@@ -198,7 +198,7 @@ def test_check_missing_or_unparseable_report_is_a_clean_error(
     request_path = _setup_success_env(tmp_path, monkeypatch)
 
     assert main(["sta", request_path, "--check", str(tmp_path / "nope.json")]) == 1
-    assert "committed report not found" in capsys.readouterr().err
+    assert "file not found" in capsys.readouterr().err
 
     bad = tmp_path / "bad.json"
     bad.write_text("{not json", encoding="utf-8")
