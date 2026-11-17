@@ -44,10 +44,10 @@
 #     maintaining the AMI, distinct from the per-job spend RemoteLauncher
 #     gates in src/klayout_tools/remote_launcher.py.
 #
-# Deferred/not run in this change: no AMI has been built by this script yet
-# (no AWS credentials/spend available while authoring #264/#265) — see
-# data/README.md. The shipped manifest's `images` array is empty; operators
-# run this once per (pdk, region) needed and real entries accrue from there.
+# Manifest status: the checked-in manifest's `images` array carries real
+# operator-built entries; operators run this script once per (pdk, region)
+# needed and further entries accrue from there (see data/README.md). The
+# batch fleet's image is baked separately by 2am infra, not this manifest.
 #
 # Usage:
 #   scripts/aws/build-remote-sim-ami.sh --pdk sky130A --region us-east-1 \
@@ -501,7 +501,7 @@ write_manifest_entry() {  # <manifest-path> <ami_id> <region>
     || die 4 "could not build the manifest entry for ${ami} (${region})"
   mkdir -p "$(dirname "$target")"
   # $USER_MANIFEST may not exist yet on a fresh machine -- $MANIFEST always
-  # does (checked into the repo with an empty "images" array), but seeding
+  # does (it is checked into the repo, entries or not), but seeding
   # unconditionally keeps this one code path correct for both.
   [[ -f "$target" ]] || printf '%s' '{"schema_version": 1, "images": []}' > "$target"
   tmp="$(mktemp)"
