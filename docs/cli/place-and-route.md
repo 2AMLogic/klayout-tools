@@ -135,9 +135,8 @@ unexplained. **Rule (issue #4191):** the container wrapper mounts `$PWD`,
 `$PDK_ROOT` and `$TMPDIR` (plus `/tmp` itself whenever `$TMPDIR` is set to
 something else — issue #5878), so every input the request references
 (netlist, macro LEF, `--abstract-cell-lef`) must live under one of those.
-When the
-unreadable path is outside the invocation directory, the hint names that
-path and says to run `klt place-and-route` from a common ancestor of the
+When the unreadable path is outside the invocation directory, the hint names
+that path and says to run `klt place-and-route` from a common ancestor of the
 request and its inputs. [`scripts/install-openroad-docker.sh`](../../scripts/install-openroad-docker.sh)'s
 wrapper (below) already automates this fallback; only the bare snippet
 above needs it spelled out manually.
