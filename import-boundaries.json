@@ -347,6 +347,7 @@
         "klayout_tools.cli.gen_compose_cmd",
         "klayout_tools.gen_compose",
         "klayout_tools.gen_compose_boundary",
+        "klayout_tools.gen_compose_derived_frame",
         "klayout_tools.gen_compose_layer_rules",
         "klayout_tools.gen_compose_plane_change",
         "klayout_tools.gen_compose_port_access",
