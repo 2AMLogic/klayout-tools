@@ -64,6 +64,49 @@ def test_liberty_writer_refuses_a_timing_arc_with_no_table():
         liberty_writer.render_library(_library((empty,)))
 
 
+def _library_arcs_in_order(*arcs):
+    """A library whose output pin's arcs appear in exactly the given order,
+    so the header's table-template derivation meets them in that order too."""
+    out = liberty_writer.Pin("Q", "output", arcs=tuple(arcs))
+    pin = liberty_writer.Pin("R", "input")
+    return liberty_writer.Library(
+        name="t",
+        operating_conditions=liberty_writer.OperatingConditions("tt", 1.0, 25.0, 1.8),
+        cells=(liberty_writer.Cell("dffsr", (pin, out)),),
+    )
+
+
+def test_template_axes_skip_a_forced_arc_s_unmeasured_direction():
+    # The header derives its lu_table_template axes from the first non-None
+    # table, so a one-direction forced arc *first* must not break the render:
+    # the axes come from its measured pair (or a later arc), never fabricated.
+    table = liberty_writer.Table2D((0.02,), (0.005,), ((0.1,),))
+    clear = liberty_writer.TimingArc(
+        "R",
+        "positive_unate",
+        cell_fall=table,
+        fall_transition=table,
+        timing_type="clear",
+    )
+    text = liberty_writer.render_library(_library_arcs_in_order(clear))
+    assert "lu_table_template" in text
+    assert "timing_type : clear;" in text
+
+
+def test_template_axes_skip_an_arc_with_no_tables_at_all():
+    # An all-None arc ahead of a measured one only fails where it is
+    # rendered; the axis derivation must walk past it to the next arc.
+    table = liberty_writer.Table2D((0.02,), (0.005,), ((0.1,),))
+    empty = liberty_writer.TimingArc("R", "positive_unate", timing_type="clear")
+    clk_to_q = liberty_writer.TimingArc(
+        "CLK", "non_unate", table, table, table, table, timing_type="rising_edge"
+    )
+    with pytest.raises(
+        liberty_writer.LibertyWriteError, match="needs at least one table"
+    ):
+        liberty_writer.render_library(_library_arcs_in_order(empty, clk_to_q))
+
+
 def test_liberty_writer_renders_recovery_and_removal_groups():
     table = liberty_writer.Table2D((0.02,), (0.02,), ((0.1,),))
     arcs = tuple(
