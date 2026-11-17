@@ -74,6 +74,10 @@ from .design_evidence_tiers import (
 from .env_provenance import find_repo_root
 from .metrics import get_metric, is_registered
 
+# Item 5's spec-row coverage sources (issue #3778) and the manifest ratchet
+# requiring them machine-derived (#5462); out of file for its size ceiling.
+from .signoff_attest_binding import attestation_record
+
 # Item 3's DRC coverage disclosure and its #5789 ratchet, split out for
 # the size-ratchet ceiling like `signoff_derived_rows` below.
 from .signoff_coverage_disclosure import (
@@ -86,9 +90,6 @@ from .signoff_coverage_disclosure import (
     item3_key_invalid,
     read_require_coverage_disclosure,
 )
-
-# Item 5's spec-row coverage sources (issue #3778) and the manifest ratchet
-# requiring them machine-derived (#5462); out of file for its size ceiling.
 from .signoff_derived_rows import (
     DERIVED_ROWS_ITEM_ID,
     _maybe_record_failed_sim,
@@ -6204,12 +6205,7 @@ def _generic_artifact_binding(
     if isinstance(attestation, Mapping) and isinstance(
         attestation.get("producer"), str
     ):
-        binding["attestation"] = {
-            "producer": attestation["producer"],
-            "inventory_schema_version": attestation.get("inventory_schema_version"),
-            "check_count": attestation.get("check_count"),
-            "passed_count": attestation.get("passed_count"),
-        }
+        binding["attestation"] = attestation_record(attestation)
     return binding
 
 
