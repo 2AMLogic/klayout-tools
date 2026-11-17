@@ -14,6 +14,22 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt signoff --attest 2` inventories can pin the generator's input files**
+  (#5724, 2026-11-17): an item-2 inventory may declare `inputs`, a non-empty
+  list of repo-relative paths. Each becomes a hash-pinned `{"check": "present",
+  "role": "input"}` entry (path order, after the built-in checks, before the
+  `role: "audit"` commands; a missing input fails the envelope, exit `3`) and a
+  role-tagged member (`"role": "stream"` / `"input"`) of
+  `provenance.input.paths`, bound by the set digest in
+  `provenance.input.content_hash`. Editing an input with the stream untouched
+  grades the manifest row `unmet` / `stale_evidence` and makes `--check` report
+  drift even when every command is `local_only`. `checks` is now optional when
+  `inputs` is declared (an inventory declaring neither is refused). Additive;
+  an envelope without `inputs` is byte-identical. **Pin change:** an envelope
+  that declares `inputs` reports `provenance.input.paths` instead of
+  `provenance.input.path`, so a manifest citing it must re-pin. No grader
+  change. Docs: `docs/cli/signoff.md`, "Pinning the generator's inputs".
+
 - **`klt sim --fail-fast-probe` reads the same `.spiceinit` as the corners it
   screens** (#6047, 2026-11-17): `_run_corner` pins the thread count by writing
   a run-directory `.spiceinit`, which *replaces* `$HOME/.spiceinit`, but the

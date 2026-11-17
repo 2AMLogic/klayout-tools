@@ -2037,6 +2037,54 @@ carried, as for item 10. Without `--inventory` the envelope is unchanged.
 klt ships no built-in geometry engine for these checks — the declared command
 is the authority.
 
+**Pinning the generator's inputs (`inputs`, issue #5724).** An inventory may
+also declare `inputs`: a non-empty list of repo-relative paths the layout
+generator consumed (generator script, cell library, sub-cell streams,
+configuration).
+
+```json
+{
+  "schema_version": 1,
+  "kind": "t1-attestation-inventory",
+  "t1_item": 2,
+  "inputs": ["tools/gen.py", "tools/cells.json"]
+}
+```
+
+`inputs` is accepted with or without `checks`; an inventory declaring neither
+is refused (exit `1`), as is an empty list, a path listed twice, an absolute or
+repository-escaping path, a path through a symlink, or a path that is also an
+`--input` stream. Each input yields one `attestation.checks[]` entry
+`{"check": "present", "role": "input", "path", "content_hash", "passed"}`,
+ordered by path, after the built-in checks and before the `role: "audit"`
+commands; a missing input fails its check and the envelope (exit `3`).
+
+Like item 1, an envelope that declares `inputs` pins its whole input set:
+`provenance.input.paths` holds one member per `--input` stream
+(`"role": "stream"`) and per declared input (`"role": "input"`), sorted by
+path, and `provenance.input.content_hash` is the combined set digest (see "Set
+binding" above); `provenance.input.path` is not emitted. Editing a declared
+input while every stream stays byte-identical therefore renders the manifest
+row `unmet` / `stale_evidence` (the changed member is named in
+`detail.artifact_binding.members`), and `--attest 2 --check` reports drift, even
+when every declared command is `local_only` and skipped. A member that cannot
+be read is left out of the set; its `present` check already fails the
+attestation. `inputs` is a hash pin, not a rebuild: klt neither runs the
+generator nor verifies that the stream regenerates from the inputs (declare a
+`checks` command for that).
+
+`inputs` composes with repeated `--input`. It also composes with `--generator` /
+`--regenerated-hash` on a single stream, with one caveat: the grader compares
+`regenerated_hash` to the *bound* hash, which for an envelope that declares
+`inputs` is the set digest (`provenance.input.content_hash`), not the bare
+stream hash, and a `geometry` hash kind is unavailable for a set binding.
+
+> **Pin change.** An item-2 envelope that declares `inputs` reports
+> `provenance.input.paths` plus a set digest instead of a single
+> `provenance.input.path`, so a manifest citing it must re-pin the evidence
+> `content_hash` to the new `provenance.input.content_hash`. An envelope
+> without `inputs` is byte-for-byte unchanged.
+
 Declared `argv` commands run with the tool virtualenv's `bin` directory
 removed from `PATH` when klt itself runs inside a venv (`uvx`, pipx), so a bare
 `python3` in an `argv` is the repository's interpreter, not klt's. Outside a
@@ -2077,6 +2125,8 @@ an inventory the author did not write.
 | | `citations`: `{row: [envelope path, ...]}` | yes | keys must be declared rows; a declared row with no entry fails its `citation` check |
 | | `envelope_checks`: `{envelope path: command}` | yes, one per cited envelope | each command exits `0` (`command`, role `freshness`) — e.g. the cited verb's own `--check` |
 | | `corners`: list of names, with `metrics`: `{corner: {fmax\|area\|power: {"envelope": path, "field": "dotted.path"}}}` | digital partitions only (both or neither) | for every corner and each of `area`, `fmax`, `power`, the named field of the named cited envelope is a finite number (`metric`, role `digital`; the value is recorded). A missing binding or non-numeric field is a **failed check**. Digit segments index lists, e.g. `result.0.fmax_mhz`. |
+| **2** Layout (optional inventory, with `--input`) | `checks`: list of `{name, argv, cwd?, local_only?, timeout_s?}` | `checks` and/or `inputs` — at least one | each exits `0` (`command`, role `audit`); `name` must be unique |
+| | `inputs`: list of paths (first ships in the first release after `v0.9.2`) | `checks` and/or `inputs` — at least one | each file exists and is hash-pinned (`present`, role `input`), and joins the role-tagged `provenance.input.paths` set digest; see "Pinning the generator's inputs" |
 | **9** Testbenches shipped | `testbenches`: list of paths, or `{"path", "cold_start"}` objects (mixing is fine; the object form first ships in 0.9.0) | yes, non-empty | each file exists (`present`, role `testbench`) |
 | | `cold_start`: command | yes, unless **every** testbench entry carries its own `cold_start` | exits `0` (`command`, role `cold_start`). A per-bench `cold_start` is a command too and yields a `command` check with `testbench: "<path>"`, so a failure names its bench. When both forms are present, the top-level command runs as well. A cold start (either form) may add `documented_argv` — the full reproducing invocation, recorded and never run; see "A cold start that only validates its bench" below. *First ships in the first release after `v0.9.2`.* |
 | | `unbenched_rows`: list of `{"row": "<id>", "issue": <positive int>}` | no | one `unbenched_row` check per entry (role `row`), **passing**: the gap and its owner issue are visible to the grader, not refused. Empty/duplicate `row` or a non-positive `issue` is refused (exit `1`). Whether bench-less rows should fail T1 item 9 is a grading-policy decision this producer does not make. *First ships in 0.9.0; 0.8.0 refuses `unbenched_rows` as an unknown field.* |

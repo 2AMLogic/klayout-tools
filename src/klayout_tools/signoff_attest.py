@@ -142,9 +142,9 @@ _ITEM_TITLES = {
 _COMMON_KEYS = frozenset({"schema_version", "kind", "t1_item", "description"})
 _ITEM_KEYS: dict[int, frozenset[str]] = {
     1: frozenset({"sources", "derived"}),
-    # Item 2's inventory is optional (issue #4767) and declares only commands;
-    # the stream is always the ``--input`` artifact, never an inventory field.
-    2: frozenset({"checks"}),
+    # Item 2's inventory is optional (#4767): commands (``checks``) and/or the
+    # generator's input files (``inputs``, #5724); the stream is the ``--input``.
+    2: frozenset({"checks", "inputs"}),
     8: frozenset(
         {"report", "spec_rows", "citations", "envelope_checks", "corners", "metrics"}
     ),

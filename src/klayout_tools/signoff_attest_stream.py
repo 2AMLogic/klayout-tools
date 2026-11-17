@@ -34,9 +34,14 @@ from .signoff_attest import (
     _self_check,
     _skipped_check,
     _validate_header,
-    _validated_command_checks,
 )
 from .signoff_attest_drift import drift_result
+from .signoff_attest_inputs import (
+    bound_input,
+    input_checks,
+    validated_checks,
+    validated_inputs,
+)
 
 #: ``--hash-kind`` values a stream attestation's regeneration claim accepts.
 REGENERATION_HASH_KINDS: tuple[str, ...] = (_HASH_KIND_BYTES, _HASH_KIND_GEOMETRY)
@@ -206,10 +211,13 @@ def _input_binding(
 def _inventory_checks(
     inventory_path: str,
     absolute: str,
+    stream_rels: Sequence[str],
     committed_checks: Sequence[Mapping[str, Any]] | None,
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Run the item-2 inventory's declared checks; return them with the
-    ``attestation.inventory`` block."""
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    """Run the item-2 inventory's declarations; return ``(input checks, audit
+    command checks, attestation.inventory block)``. The input checks are the
+    hash-pinned ``role: "input"`` pins of ``inputs`` (issue #5724); empty when
+    the inventory declares none."""
     inventory, inventory_hash = _read_inventory(inventory_path)
     inv_absolute = os.path.realpath(os.path.abspath(inventory_path))
     root = find_repo_root(os.path.dirname(absolute))
@@ -220,7 +228,8 @@ def _inventory_checks(
             "repository as the stream"
         )
     _validate_header(inventory, STREAM_ATTESTABLE_ITEM, inventory_path)
-    specs = _validated_command_checks(inventory, root, STREAM_ATTESTABLE_ITEM)
+    inputs = validated_inputs(inventory, root, stream_rels)
+    specs = validated_checks(inventory, root, inputs)
 
     def command(spec: Mapping[str, Any], role: str, **identity: Any) -> dict[str, Any]:
         if committed_checks is not None and spec.get("local_only"):
@@ -235,7 +244,7 @@ def _inventory_checks(
         "content_hash": inventory_hash,
         "schema_version": inventory["schema_version"],
     }
-    return _audit_command_checks(specs, command), block
+    return input_checks(root, inputs), _audit_command_checks(specs, command), block
 
 
 def build_stream_attestation(
@@ -262,7 +271,10 @@ def build_stream_attestation(
 
     ``inventory_path`` (issue #4767) is an optional item-2 inventory declaring
     ``checks`` -- the user's own geometric / net-width checkers, run as item-10
-    style commands (``role: "audit"``) after the three built-in checks. The
+    style commands (``role: "audit"``) after the three built-in checks -- and/or
+    ``inputs`` (issue #5724): the generator's input files, pinned by hash as
+    ``role: "input"`` checks and folded into the set-bound
+    ``provenance.input.paths`` so editing one grades the item stale. The
     stream is not an inventory field: a command names it in its own ``argv``.
     ``committed_checks`` is passed only by :func:`check_stream_attestation`
     (``local_only`` commands skip). Without an inventory the envelope is
@@ -287,19 +299,27 @@ def build_stream_attestation(
         absolute, stream_rel = streams[0][1], streams[0][2]
     checks = _member_checks(streams, multi)
     inventory_block: dict[str, Any] | None = None
+    declared_inputs: list[dict[str, Any]] = []
     if inventory_path is not None:
-        extra, inventory_block = _inventory_checks(
-            inventory_path, absolute, committed_checks
+        declared_inputs, audit, inventory_block = _inventory_checks(
+            inventory_path, absolute, [s[2] for s in streams], committed_checks
         )
-        checks.extend(extra)
+        checks.extend(declared_inputs)
+        checks.extend(audit)
     passed_count = sum(1 for check in checks if check["passed"])
     status = "pass" if passed_count == len(checks) else "fail"
+    if declared_inputs:
+        input_binding, stream_hash = bound_input(
+            [(rel, h) for _g, _a, rel, h in streams], declared_inputs
+        )
+    else:
+        input_binding = _input_binding(streams, multi, stream_hash)
     provenance: dict[str, Any] = {
         "klt_version": build_version(),
         "klayout_version": klayout_version(),
         "pdk": None,
         "deck": None,
-        "input": _input_binding(streams, multi, stream_hash),
+        "input": input_binding,
     }
     if generator is not None:
         regeneration: dict[str, Any] = {
