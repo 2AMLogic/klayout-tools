@@ -313,6 +313,29 @@ sources), `request.parameters`, and `--mutations`.
 Worked example: `examples/functional-verification/verilog-tb/`
 (`request-rtl.json` and `request-sdf.json`).
 
+## What was simulated: `environment.sources`
+
+Every report (cocotb and Verilog-top path alike) carries `environment.sources`,
+an additive array (no `schema_version` bump, issue #5771) naming the files the
+run simulated, in build order — the resolved `request.sources`, preceded by the
+verified netlist when `options.from_synthesize` is used:
+
+```json
+"sources": [
+  {"path": "rtl/adder.v", "scope": "repo", "sha256": "9f2c…64 hex…"}
+]
+```
+
+`path`/`scope` is the repo-relative `{path, scope}` shape
+([`docs/json-contract.md`](../json-contract.md)): a source outside the repo
+reads `{"path": null, "scope": "external", "sha256": "…"}` — the absolute host
+path is never emitted. `sha256` is the digest of the file's bytes at run time,
+so two runs of one testbench against different sources (an RTL run and a
+gate-level run) produce reports that differ in-band, and a source edited after
+the run can be detected by re-hashing it. The list names the caller's own
+inputs only: files the tool generates for the build (the SDF wrapper, the
+initial-state shim, scoped-define wrappers) are not listed.
+
 ## Artifacts
 
 Everything a run produces is written to `.klt/functional-verification/` next
@@ -1629,7 +1652,7 @@ block"), and `environment` is the contract's own reproducibility surface.
 | Code | Meaning |
 | --- | --- |
 | `0` | At least one test executed and every executed test passed (`status: "pass"`); skipped tests are allowed. |
-| `1` | Failed to run — bad request, a `request.requires_tools` entry that is unmet (`error.code` `missing_tool`; `error.details.unmet_tools` lists every unmet tool with what was wanted and what was found, and no build starts), unresolvable RTL source or testbench module, coverage requested on an engine that has none, `options.sdf` on an engine (or an Icarus older than 13.0) that has no usable `$sdf_annotate` path, `options.sdf` alongside a `FUNCTIONAL` define, an unresolvable/unreadable SDF file, an SDF annotation that did not fully apply (`SDF WARNING`/`SDF ERROR` in the transcript), `options.trace` requested but the run produced no waveform file, a bad `options.initial_state` (bad shape, `verilator`, a state element it cannot drive, an ambiguous clock), missing cocotb/simulator install, build or elaboration error, simulator crash, no `results.xml` produced, or a regression that registered zero tests or skipped every test. |
+| `1` | Failed to run — bad request, a `request.requires_tools` entry that is unmet (`error.code` `missing_tool`; `error.unmet_tools` lists every unmet tool with what was wanted and what was found, and no build starts), unresolvable RTL source or testbench module, coverage requested on an engine that has none, `options.sdf` on an engine (or an Icarus older than 13.0) that has no usable `$sdf_annotate` path, `options.sdf` alongside a `FUNCTIONAL` define, an unresolvable/unreadable SDF file, an SDF annotation that did not fully apply (`SDF WARNING`/`SDF ERROR` in the transcript; the error envelope then also carries `error.sdf.dropped` — the same per-class `{count, reason[, arcs]}` shape the success path reports as `environment.sdf.dropped` — omitted when no class was dropped, so the fidelity accounting survives the refusal instead of having to be reconstructed from the outdir's intermediate SDFs), `options.trace` requested but the run produced no waveform file, a bad `options.initial_state` (bad shape, `verilator`, a state element it cannot drive, an ambiguous clock), missing cocotb/simulator install, build or elaboration error, simulator crash, no `results.xml` produced, or a regression that registered zero tests or skipped every test. |
 | `2` | Usage error (missing argument, bad `--format` value) — from argparse. |
 | `3` | Ran successfully; at least one test failed (`status: "fail"`). |
 

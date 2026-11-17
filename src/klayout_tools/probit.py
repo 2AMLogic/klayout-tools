@@ -44,7 +44,7 @@ from collections.abc import Callable
 from statistics import NormalDist
 from typing import Any
 
-from ._jsonnum import is_finite_number
+from ._jsonnum import require_finite_number
 
 SCHEMA_VERSION = 1
 
@@ -666,9 +666,8 @@ def _load(path: str) -> tuple[Any, str]:
 
 
 def _number(value: Any, where: str) -> float:
-    if not is_finite_number(value):
-        raise ThresholdError(f"{where} must be a finite number, got {value!r}")
-    return float(value)
+    msg = "{field} must be a finite number, got {value!r}"
+    return require_finite_number(value, ThresholdError, where, message=msg)
 
 
 def _outcome(
