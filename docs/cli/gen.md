@@ -1863,6 +1863,36 @@ placing `2 * splits` units at distinct multiples of one pitch and splitting
 them into two halves with an equal x centroid requires the position sum
 `splits * (2 * splits - 1)` to be even, which fails for every odd `splits`.
 
+**Strapping the splits (`strap_splits`).** Unstrapped, the generator reports
+one `Q<d>_<n>_S`/`_D`/`_G` triple *per sub-instance* — `splits=8` yields 48
+ports for the two devices the netlist names — and a caller strapping the
+sub-instances themselves must re-derive the per-row strap from the reported
+port **x coordinates, never from list order**: the numbering ascends with x
+in both rows, but the rows are *staggered by one column* (the checkerboard),
+so a strap spanned from a row's first to last port *by name* leaves that
+row's outermost sub-instance outside the strap — a quiet failure the stream
+still DRC-passes and only the extracted device count catches. With
+`strap_splits: true` the generator draws the strap itself: each device's
+`splits` sub-instances are tied per terminal in-cell on the family's second
+routing plane (sky130: met1 rails landed on each pad through mcon cuts, with
+vertical trunks in the grown core's x margins), the gate landing pads grow
+taller to host the gate tracks, and the report carries exactly one
+`Q1_S`/`Q1_D`/`Q1_G`, `Q2_S`/`Q2_D`/`Q2_G` triple (`M1_*`/`M2_*` with
+`mirror`), emitted device 1 first, each port sitting on its strap rail and
+reporting the strap metal (`metal2`, met1 on sky130) as its layer.
+`device_count` stays `2 * splits`; the guard ring's `TAP_*` ports are
+unaffected. The cell grows to fit the strap (the core widens by the trunk
+margins, the rows grow by the gate-pad growth, and the automatically-sized
+ring, tap pads and well box follow). Constraints, all enforced as clean
+errors: `gate_contact` is required (the gate strap lands on the gate pads'
+local metal — a bare-poly gate has nothing to strap onto), `w_um` must be at
+least the four S/D tracks' floor (`2.35` µm), and the family must be one the
+strapped geometry is verified on (`sky130` — any other family is rejected
+before any geometry is drawn, never drawn unverified). `splits=1` draws no
+strap rails beyond the single pads it has but still reports the same
+device-level names, so a caller's port list shape does not change with the
+split count.
+
 `flavor="pfet"` (composable with `mirror` — a mirror-labelled `pfet` pair is
 a PMOS current mirror) encloses the device pair's own active footprint in a
 well, independent of `add_guard_ring` (a PMOS pair with no automatic ring
@@ -1907,6 +1937,7 @@ above for why, and the hand-drawn-recipe workaround.
 | `flavor`           | string | `"nfet"`| Device flavor: `"nfet"` (no additional well drawn) or `"pfet"` (device pair enclosed in a well on PDK families that check one). Must be `"nfet"` or `"pfet"`. |
 | `voltage_flavor`   | string | `""`    | Optional medium-voltage/thick-oxide device-class marker — same semantics as `mos_array`'s own `voltage_flavor` above. `"medium_voltage"` resolves on `gf180mcu`, `"hv"` resolves on `ihp-sg13g2`/`ihp-sg13cmos5l`, `"hvi"` resolves on `sky130`; any other value draws nothing and is flagged via `drc_hints.notes`. |
 | `gate_contact`     | bool   | `false` | Draw a contact + local-metal pad on each gate landing pad and report `*_G` on the `metal` role instead of `poly` — see `mos_array`'s equivalent note above. Grows each device row (and the automatically-sized guard ring with it) by `0.4` µm. |
+| `strap_splits`     | bool   | `false` | Strap each device's `splits` sub-instances together in-cell on the second routing plane (met1 via mcon on sky130) and report one `S`/`D`/`G` port triple per device on the strap rails instead of one triple per sub-instance — see "Strapping the splits" above. Requires `gate_contact`, `w_um` >= the S/D track floor, and a verified family (`sky130`); anything else is rejected with a named error, never drawn unverified. |
 
 ### `bjt_array` (phase 4: matched vertical-bipolar / PNP array)
 

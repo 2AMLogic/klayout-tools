@@ -41,6 +41,29 @@ def _insert_voltage_flavor_marks(
         _insert_boxes(pcell.cell, pcell.layout.layer(layer), dbu, [mark_box])
 
 
+def _draw_pcell_strap(
+    pcell: Any,
+    strap: dict[str, Any] | None,
+    li_strap_metal: Any,
+    li_strap_via: Any,
+) -> None:
+    """Draw ``_diff_pair_layout``'s strap result (issue #5557): met1 rails
+    and trunks on ``li_strap_metal``, fixed-size mcons on ``li_strap_via``.
+    ``strap`` is ``None`` unless ``strap_splits`` was requested, in which
+    case this draws nothing -- the same always-call/empty-input shape
+    ``_draw_pcell_tap_pads`` uses. Box coordinates arrive pre-snapped to the
+    family grid from the layout math, so ``_insert_boxes``' per-edge dbu
+    rounding is exact.
+    """
+    if strap is None:
+        return
+    from klayout_tools.gen import _insert_boxes
+
+    dbu = pcell.layout.dbu
+    _insert_boxes(pcell.cell, li_strap_metal, dbu, strap["metal_boxes_um"])
+    _insert_boxes(pcell.cell, li_strap_via, dbu, strap["via_boxes_um"])
+
+
 def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
     """Build the ``diff_pair`` reference generator's PCell -- a differential
     pair / current mirror cell.
@@ -168,6 +191,17 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 default=False,
             )
             self.param(
+                "strap_splits",
+                self.TypeBoolean,
+                "Strap each device's splits together in-cell on the second "
+                "routing plane (met1 via mcon on sky130) and report one "
+                "S/D/G port triple per device on the strap rails instead of "
+                "one triple per sub-instance. Requires gate_contact and a "
+                "device width the S/D strap tracks fit; verified on sky130 "
+                "only -- every other family is rejected (issue #5557)",
+                default=False,
+            )
+            self.param(
                 "flavor",
                 self.TypeString,
                 "Device flavor: 'nfet' (default, no well drawn) or 'pfet' "
@@ -201,6 +235,20 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "tap_layer",
                 self.TypeLayer,
                 "Guard ring tap drawing layer",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "strap_metal_layer",
+                self.TypeLayer,
+                "Second routing metal (metal2 role) the split straps draw on "
+                "(hidden harness-resolved param, issue #5557)",
+                default=kdb.LayerInfo(0, 0),
+            )
+            self.param(
+                "strap_via_layer",
+                self.TypeLayer,
+                "Via joining the local-metal pads to the strap metal (via1 "
+                "role; hidden harness-resolved param, issue #5557)",
                 default=kdb.LayerInfo(0, 0),
             )
             self.param(
@@ -239,6 +287,8 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             li_poly = self.layout.layer(self.poly_layer)
             li_contact = self.layout.layer(self.contact_layer)
             li_metal = self.layout.layer(self.metal_layer)
+            li_strap_metal = self.layout.layer(self.strap_metal_layer)
+            li_strap_via = self.layout.layer(self.strap_via_layer)
             info = _diff_pair_layout(
                 self.w_um,
                 self.l_um,
@@ -256,6 +306,8 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.sd_implant_margin_um if self.sd_implant_present else 0.0,
                 top_endcap_um=self.top_endcap_um,
                 tap_reach_um=_pcell_tap_reach_um(self),
+                strap_splits=self.strap_splits,
+                strap_grid_um=self.mfg_grid_um,
             )
             unit_boxes = info["unit"]["boxes_um"]
             for c in info["cells"]:
@@ -268,6 +320,11 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     _insert_boxes(
                         self.cell, li, dbu, unit_boxes[role], c["x0_um"], c["y0_um"]
                     )
+
+            # Split straps (issue #5557): met1 rails + trunks and the
+            # mcons landing them on each unit's S/D/gate pads -- no-op when
+            # strap_splits is off (`info["strap"]` is None).
+            _draw_pcell_strap(self, info["strap"], li_strap_metal, li_strap_via)
 
             # Source/drain implant (issue #1577): drawn over every unit
             # device's own active body, mirroring mos_array's own treatment.
