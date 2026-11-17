@@ -273,11 +273,14 @@ impl StoreWriter {
 
     /// Finish writing the store: flushes the final value-change section
     /// and updates the FST header in place (seeking back into `W`).
-    /// `FstBodyWriter::finish` does not hand the underlying writer back,
-    /// so a caller that needs to measure/hash the finished file (as
-    /// `build.rs` does) reopens it by path afterward rather than reusing
-    /// this method's `W`.
+    /// `FstBodyWriter::finish` hands the underlying writer back, but this
+    /// method discards it, so a caller that needs to measure/hash the
+    /// finished file (as `build.rs` does) reopens it by path afterward
+    /// rather than reusing this method's `W`.
     pub fn finish(self) -> Result<(), String> {
-        self.body.finish().map_err(|e| format!("fst finish: {e}"))
+        self.body
+            .finish()
+            .map(|_| ())
+            .map_err(|e| format!("fst finish: {e}"))
     }
 }
