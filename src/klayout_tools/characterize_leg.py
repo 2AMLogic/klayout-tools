@@ -9,15 +9,8 @@ from collections.abc import Callable
 from typing import Any
 
 from . import sim
+from ._text import read_text as _read_text
 from .pdk import PdkNotFoundError, find_pdk
-
-
-def _read_text(path: str) -> str | None:
-    try:
-        with open(path, encoding="utf-8") as handle:
-            return handle.read()
-    except OSError:
-        return None
 
 
 def _without_timeout(request_text: str | None) -> Any:
