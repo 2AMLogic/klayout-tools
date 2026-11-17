@@ -3712,10 +3712,15 @@ which the check then did not see) rendered byte-identically to a genuine
 now reads `"unchecked"` with a `reason`, and `inspected_count` makes a
 `"verified"` self-evidencing in every branch.
 
-**This changes no verdict.** `status`, `mismatch_count`, `error_count` and
-the category counts are exactly what they were — a layout with unverified
-bodies still reports `status: "match"` when the compare matched, and the
-warnings are still `severity: "warning"`. `klt signoff` surfaces
+**This changes no verdict.** `status`, `error_count` and
+`category_error_counts` are exactly what they were — a layout with
+unverified bodies still reports `status: "match"` when the compare
+matched, and the warnings are still `severity: "warning"`, so the block
+does not feed grading. But the warning is now emitted for flavoured
+classes it previously skipped: on a `compare_mos_flavour: true` run over
+a layout with untied flavoured bodies, `mismatch_count` increases by one
+per newly-seen class and `category_counts` gains a
+`device.body_unverified` key. `klt signoff` surfaces
 `body_verification.status` on an `lvs` check (`detail.body_verification_
 status`) but does not grade on it; see [`signoff.md`](signoff.md) and
 [`../design-evidence-tiers.md`](../design-evidence-tiers.md) item 7 for why

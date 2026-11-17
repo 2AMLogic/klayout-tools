@@ -441,6 +441,7 @@
       "modules": [
         "klayout_tools.cli.lvs_cmd",
         "klayout_tools.lvs",
+        "klayout_tools.lvs_body",
         "klayout_tools.lvs_combine",
         "klayout_tools.lvs_finfet",
         "klayout_tools.lvs_finfet_flatten",

@@ -36,12 +36,15 @@ not `klt --version`, if you need to detect this kind of drift. See
   naming the deck's MOS class names. Genuinely verified layouts are
   unchanged apart from the new field (e.g. `inspected_count: 2` on the
   gf180mcu drawn-tie inverter). The block remains a disclosure field: no
-  `status` value is added or removed, and `status`, `mismatch_count`,
-  `error_count`, `category_counts` and `category_error_counts` are
-  untouched — but a consumer that read `body_verification.status:
-  "verified"` as "this run inspected bodies" must now also read
-  `inspected_count`, because a pre-#5749 `"verified"` may have inspected
-  nothing. No `schema_version` change (`docs/schemas/lvs-response.schema.json`
+  `status` value is added or removed, and the block does not feed grading —
+  `status`, `error_count` and `category_error_counts` are untouched. But
+  the previously-skipped flavoured warning now fires, so on a
+  `compare_mos_flavour: true` run over a layout with untied flavoured
+  bodies `mismatch_count` increases by one per newly-seen class and
+  `category_counts` gains a `device.body_unverified` key. A consumer that
+  read `body_verification.status: "verified"` as "this run inspected
+  bodies" must now also read `inspected_count`, because a pre-#5749
+  `"verified"` may have inspected nothing. No `schema_version` change (`docs/schemas/lvs-response.schema.json`
   describes the new field). The determination moved from `lvs_mismatch.py`/
   `lvs_power.py` into the new `klayout_tools/lvs_body.py` with no behavior
   change beyond the above.

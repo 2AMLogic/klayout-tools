@@ -56,6 +56,7 @@
     "reason": "no request.layout.deck was given (the pre-extracted request.layout.netlist form), so nothing establishes this layout's substrate/well-tap convention and no synthesized body net can be told apart from a real one -- this run verified nothing about the device bodies either way",
     "device_classes": [],
     "device_count": 0,
+    "inspected_count": 0,
     "findings": [],
     "finding_count": 0
   },

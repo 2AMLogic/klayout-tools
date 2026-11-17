@@ -411,11 +411,14 @@ MOS devices — a passives-only layout — now reads `"unchecked"` with a
 layout is inspected (and honestly `"unverified"` when a body tie is missing)
 rather than silently skipped. Both halves are additive-plus-honesty: no
 field is removed or retyped, no `status` value is added or removed, and
-`status`/`mismatch_count`/`error_count`/`category_counts`/
-`category_error_counts` are untouched — but a consumer that read
-`body_verification.status: "verified"` as "this run inspected bodies" must
-now also read `inspected_count`, because a pre-#5749 `"verified"` may have
-inspected nothing. No `schema_version` bump;
+`status`/`error_count`/`category_error_counts` are untouched (the block
+does not feed grading) — but the previously-skipped flavoured warning now
+fires, so on a `compare_mos_flavour: true` run over a layout with untied
+flavoured bodies `mismatch_count` increases by one per newly-seen class
+and `category_counts` gains a `device.body_unverified` key. A consumer
+that read `body_verification.status: "verified"` as "this run inspected
+bodies" must now also read `inspected_count`, because a pre-#5749
+`"verified"` may have inspected nothing. No `schema_version` bump;
 `docs/schemas/lvs-response.schema.json`'s `body_verification` definition
 describes the new field. See `docs/cli/lvs.md`'s `body_verification` field
 table.
