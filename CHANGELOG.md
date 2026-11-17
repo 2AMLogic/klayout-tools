@@ -42,6 +42,15 @@ not `klt --version`, if you need to detect this kind of drift. See
   When no pin applies (a single local corner with no explicit
   `options.threads_per_worker`) nothing is written, as before. No new request
   option or response field.
+- **`klt functional-verification` reports name what they simulated** (#5771,
+  2026-11-17): the report recorded the engine, results and environment but not
+  the simulated files, so an RTL run and a gate-level run of the same testbench
+  module differed only in `real_time_s` jitter. `environment.sources` is a new
+  additive array -- one `{path, scope, sha256}` entry per resolved source, in
+  build order (the `options.from_synthesize` netlist first), on both the cocotb
+  and the Verilog-top path. `path`/`scope` is the repo-relative shape, so a
+  source outside the repo reads `{"path": null, "scope": "external"}` and never
+  leaks a host path. No `schema_version` bump.
 - **`klt sim` refuses `measurements[].transfer` declared beside `noise`**
   (#5695, 2026-11-14): the mutually exclusive measurement forms each carried a
   hand-maintained list of "every *other* exclusive form", and `transfer`'s
