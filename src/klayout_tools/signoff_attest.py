@@ -68,7 +68,7 @@ from . import signoff_attest_item9 as item9
 from ._jsonnum import is_int, is_number
 from ._provenance import sha256_file
 from ._report_verify import load_committed_report
-from .build_identity import build_version
+from .build_identity import build_version, klayout_version
 from .env_provenance import find_repo_root
 from .signoff import (
     _COMMAND_EVIDENCE_TIMEOUT_S,
@@ -1006,7 +1006,7 @@ def _run_checks(
     elif item == CHARACTERIZATION_ITEM:
         checks.extend(_characterization_checks(root, normalized, command))
     elif item == 9:
-        checks.extend(item9.item9_checks(normalized, command))
+        checks.extend(item9.item9_checks(normalized, command, root, _file_check))
         checks.extend(item9.pin_checks(normalized["pins"]))
     else:
         checks.extend(_audit_command_checks(normalized["checks"], command))
@@ -1075,7 +1075,7 @@ def build_attestation(
         },
         "provenance": {
             "klt_version": build_version(),
-            "klayout_version": None,
+            "klayout_version": klayout_version(),
             "pdk": None,
             "deck": None,
             "input": prov,
