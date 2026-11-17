@@ -185,7 +185,12 @@ and `schema_version` are unchanged. See [`docs/cli/sim.md`](cli/sim.md)'s
 roll-ups to `environment.remote` beside the existing `fleet[]` array:
 `job_ids` (every non-`null` shard's `job_id`, in shard order) and a worst-of
 `runner_compatibility` (`mismatch` > `unknown` > `match`, so a lost or
-unknown shard never reads as clean). Additive, and narrower than the
+unknown shard never reads as clean). Each `fleet[]` member is typed
+`object | null`: `null` is the slot of a shard that returned no remote block
+(lost mid-run, or submitted but never launched), at its own index -- the
+array is positional (index *i* is shard *i*, in the shard map's order), so a
+client iterating it must skip the `null` slots and take identity and skew
+from the roll-ups above. Additive, and narrower than the
 opt-in-flag rule above: they appear only where `fleet[]` already does, so an
 unsplit single-job report is byte-identical, the `fleet[]` entries are
 unchanged, and the SSH `remote` backend gets neither. No `schema_version`
@@ -968,7 +973,11 @@ stability statement, concrete precedents, and drift-detection guidance, and
   populated on a dirty tree; `klt_reinstall_spec` is `null` when the tree is
   dirty or the commit is unrecoverable. Never fabricated. A `.devN+g<sha>`
   `klt_version` is not published to an index, so `uvx --from
-  "klayout-tools==<version>"` fails by design; use `klt_reinstall_spec`. Both are
+  "klayout-tools==<version>"` fails by design; use `klt_reinstall_spec`. The
+  spec re-obtains the **klt axis only**; the canonical both-axes
+  reconstruction of a recording adds `--with "klayout==<klayout_version>"`
+  (issue #5884) — see [`docs/cli/version.md`](cli/version.md)'s
+  "Reproducing a recorded pin". Both are
   excluded from `--rerun`/`--check` drift like `klt_version`.
 - `klayout_version` — the KLayout engine that actually produced the run.
   For `klt drc --engine klayout` (issue #5660) this is the standalone
@@ -976,10 +985,17 @@ stability statement, concrete precedents, and drift-detection guidance, and
   through `--klayout-binary`/`$KLT_KLAYOUT_BINARY`, probed once per run even
   without `--min-klayout-version`, `null` when the probe fails softly and no
   floor was declared — with the pip wheel's version recorded beside it as
-  the additive `klayout_module_version` (`--engine klayout` only). For every
-  other engine (`--engine curated`, `klt lvs`, `klt extract`, ...) this is
-  the KLayout Python engine build (`klayout.__version__`), or `null` if
-  unresolvable — the wheel genuinely is the engine there.
+  the additive `klayout_module_version` (`--engine klayout` only); the
+  `--with "klayout==<klayout_version>"` pin (issue #5884) reproduces the
+  *wheel* axis of a recording, not that engine — see
+  [`docs/cli/drc.md`](cli/drc.md), 'Engine' -> 'klayout'. For every other
+  engine (`--engine curated`, `klt lvs`, `klt extract`, ...) this is the
+  KLayout Python engine build (`klayout.__version__`), or `null` if
+  unresolvable — the wheel genuinely is the engine there, and reproducing a
+  recording byte-for-byte passes this recorded value to `uv`'s
+  `--with "klayout==<klayout_version>"` next to `klt_reinstall_spec`
+  (issue #5884) — see [`docs/cli/version.md`](cli/version.md)'s
+  "Reproducing a recorded pin".
 - `klayout_module_version` (issue #5660, additive, `--engine klayout` only)
   — `klayout.__version__`, the pip `klayout` wheel in klt's own environment,
   recorded next to `klayout_version` so the wheel's version is not lost
@@ -1733,6 +1749,7 @@ a test keeps this table equal to it). Dotted paths:
 | `provenance.pdk.commit` | PDK upstream commit (issue #3786) |
 | `provenance.pdk.linked_trees` | host PDK install layout |
 | `provenance.pdk.ambiguous_sources` | other PDK roots on this machine (issue #2564) |
+| `provenance.pdk.source` | how the PDK was resolved — search roots vs `$PDK_ROOT` vs `--pdk-root` (issue #5863) |
 <!-- run-specific-fields:end -->
 
 No field is added or removed by this list; `schema_version` is unchanged.
@@ -1831,6 +1848,31 @@ All eight share one contract:
   (`engine`) is not excluded: swapping engines is a different run. For
   `signoff` the same rule lands on the field *its* reports carry tool
   identity in — the whole `build` block (issue #2249).
+- **`provenance.pdk.source` is excluded as resolution provenance (issue
+  #5863).** It records *how* the PDK install was found (search roots vs
+  `$PDK_ROOT` vs `--pdk-root`), in the shared
+  `VOLATILE_PROVENANCE_PATHS` set: the identical install (same
+  `provenance.pdk.version` hash) resolved through a different mechanism on
+  another host must not read as drift — the same rationale one field over
+  for `provenance.pdk.ambiguous_sources` (issue #5182).
+- **Flow-verb output paths compare by file name (issue #5863).** A consumer
+  commits lint-clean evidence with output paths rewritten repo-relative or
+  to `~/`/`$PDK_ROOT/...`-form (what `env-provenance lint-envelope`
+  requires), while the fresh side of a `--rerun` diff echoes absolute host
+  paths — the directory is host- and scrub-shape-specific and never
+  verdict-bearing. `klt place-and-route --check --rerun` therefore reduces
+  every output-path field (`netlist`/`provenance.deck.path`/`layer_map.path`
+  `{path, scope}` envelopes, `def_path`/`unrouted_def_path`/`gds_path`/
+  `verilog_path` at the top level, under `power.placed` and inside every
+  `corner_runs[]` entry, `corner_runs[].output_dir`, `macros[].lef`/`.lib`,
+  `spef_sta.spef_path`/`sdf_path`) to its file name on **both** sides
+  before diffing. The identity check stays: a different file *name* drifts,
+  and so does an artifact going `null` ↔ path (missing or newly appearing).
+  Message prose that embeds a path (`warnings[]`,
+  `power.placed.unavailable_reason`) is not reduced — scrub-shape drift
+  there remains visible, by design. The other flow verbs (`synthesize`) and
+  the analysis verbs (`drc`/`lvs`/`extract`/`equiv`/`erc`) have not needed
+  this and are unchanged; a follow-up issue covers them if reproduced.
 - **`klt signoff` excludes one more surface, and reports it separately**
   (issue #2526): the report's verbatim quotation of the checklist doc — each
   `items[]` entry's `title`/`text`/`notes`, and `source_doc_content_hash`.
@@ -2136,7 +2178,7 @@ the exit code alone is authoritative.
 
   | Command | `error.code` | Meaning |
   |---------|--------------|---------|
-  | `sim` | `engine_version_unmet` | The request's `engine_version` pin (`"MAJOR"` or `"MAJOR.MINOR"`) is not satisfied by the engine that would run it, or the version could not be determined (fail closed). Raised before any corner simulates on the `local`/`local-parallel` backends; on `remote`/`batch` the pin is checked against the runner report's `engine_version` after the run. The *tool* is unavailable. See [docs/cli/sim.md](cli/sim.md) "Pinning the simulator version". |
+  | `sim` | `engine_version_unmet` | The request's `engine_version` pin (`"MAJOR"` or `"MAJOR.MINOR"`) is not satisfied by the engine that would run it, or the version could not be determined (fail closed). Raised before any corner simulates on the `local`/`local-parallel` backends. On `remote`/`batch` the pin travels with the job: the runner's own `local-parallel` `klt sim` raises it there before any corner simulates (0.8.0+ runners), surfacing per unit as `batch_job_failed` with `runner_code: "engine_version_unmet"` and then as this top-level code when the submitter's post-run check finds no report version; the submitter's post-run check against the report's `environment.engine_version` remains the fail-closed backstop for a runner too old to enforce the field. The *tool* is unavailable. See [docs/cli/sim.md](cli/sim.md) "Pinning the simulator version". |
   | `sim` | `pdk_version_unmet` | The request's `models.pdk_version` pin is not satisfied by the installed PDK (`mismatch` or `unknown` identity), the PDK could not be resolved, or the pin was given with neither `models.pdk` nor `models.pdk_root`. Raised before any corner simulates on `local`/`local-parallel`; `remote`/`batch` reject the field with an uncoded request error (worker-side check tracked in #3462). See [docs/cli/sim.md](cli/sim.md) "Pinning the PDK revision". |
   | `sim` | `unsupported_analysis` | The request names a periodic analysis (`pss`, `pnoise`, `pac`) that `klt sim` does not implement. The *capability* is absent regardless of simulator build. Raised before any corner runs. See [docs/cli/sim.md](cli/sim.md) "Supported analyses". |
   | `sim` | `batch_no_capacity` | `--backend batch`: 2am's fleet launcher refused the job for lack of Spot capacity in every pool, or because the shared vCPU/Spot-quota budget (`BATCH_MAX_VCPU`) is exhausted (after any `batch.capacity_wait_s` budget was spent). A fleet-wide, usually transient condition — retrying later is reasonable. See [docs/cli/sim.md](cli/sim.md) "Batch backend". |

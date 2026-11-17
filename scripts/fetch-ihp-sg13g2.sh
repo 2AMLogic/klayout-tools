@@ -60,6 +60,9 @@
 
 set -euo pipefail
 
+# shellcheck source=scripts/_install_common.sh
+source "$(dirname "${BASH_SOURCE[0]}")/_install_common.sh"
+
 IHP_OPEN_PDK_VERSION="0.3.0"
 # Computed by downloading the pinned tag archive once and hashing it:
 #   curl -fL -o /tmp/ihp-open-pdk-v0.3.0.tar.gz \
@@ -115,30 +118,6 @@ if [[ -n "${IHP_OPEN_PDK_PIN_FILE:-}" ]]; then
 fi
 IHP_OPEN_PDK_URL="https://github.com/IHP-GmbH/IHP-Open-PDK/archive/refs/tags/v${IHP_OPEN_PDK_VERSION}.tar.gz"
 
-# Detect a portable sha256 command (macOS ships shasum, Linux sha256sum).
-# Mirrors scripts/fetch-pdks.sh's / .loom/scripts/verify-install.sh's
-# compute_sha256 helper.
-sha256_of() {
-    if command -v shasum &>/dev/null; then
-        shasum -a 256 "$1" | awk '{print $1}'
-    elif command -v sha256sum &>/dev/null; then
-        sha256sum "$1" | awk '{print $1}'
-    else
-        echo "error: no sha256 command found (need shasum or sha256sum)" >&2
-        return 1
-    fi
-}
-
-# Upstream commit id from a GitHub tag tarball's pax global header (`git
-# archive` writes `comment=<40-hex>` there). Prints nothing when absent --
-# never guessed (issue #3786).
-tarball_commit() {
-    local sha
-    sha="$(gzip -dc "$1" 2>/dev/null | head -c 1024 | grep -aoE 'comment=[0-9a-f]{40}' | head -n1 | cut -d= -f2 || true)"
-    [[ "$sha" =~ ^[0-9a-f]{40}$ ]] && printf '%s\n' "$sha"
-    return 0
-}
-
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PDKS_DIR="${IHP_PDKS_DIR:-$REPO_ROOT/pdks}"
 DEST="$PDKS_DIR/ihp-open-pdk"
@@ -160,17 +139,7 @@ fi
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-echo "Downloading IHP-Open-PDK v$IHP_OPEN_PDK_VERSION (~350 MB) ..."
-curl -fL --progress-bar -o "$tmp/ihp-open-pdk.tar.gz" "$IHP_OPEN_PDK_URL"
-
-echo "Verifying checksum ..."
-actual_sha256="$(sha256_of "$tmp/ihp-open-pdk.tar.gz")"
-if [[ "$actual_sha256" != "$IHP_OPEN_PDK_SHA256" ]]; then
-    echo "error: checksum mismatch for IHP-Open-PDK v$IHP_OPEN_PDK_VERSION" >&2
-    echo "  expected: $IHP_OPEN_PDK_SHA256" >&2
-    echo "  actual:   $actual_sha256" >&2
-    exit 1
-fi
+fetch_and_verify "$IHP_OPEN_PDK_URL" "$IHP_OPEN_PDK_SHA256" "$tmp/ihp-open-pdk.tar.gz" progress
 
 commit="$(tarball_commit "$tmp/ihp-open-pdk.tar.gz")"
 

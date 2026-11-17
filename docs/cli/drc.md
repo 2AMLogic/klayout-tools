@@ -1137,8 +1137,16 @@ side is the existing `topmetal1.enclosing.topvia1.1`).
 
 Remaining limitations: `Cont` against `Activ | GatPoly` (Contact layer `6/0` is
 still unread by the sg13cmos5l deck) needs compound-region/population
-semantics and is **not** covered; other PDKs' via stacks (including sg13g2) have
-not been reviewed for this opt-in and keep the legacy behaviour.
+semantics and is **not** covered; other PDKs' via stacks have
+not been reviewed for this opt-in and keep the legacy behaviour. The sg13g2
+deck opts in for every cut side it models (issue #5916): Cont's Metal1 upper
+landing (new curated `metal1.enclosing.cont.1`), Via1-Via4's modelled lower
+landings plus new curated upper landings (`metal2.enclosing.via1.1`,
+`metal3.enclosing.via2.1`, `metal4.enclosing.via3.1`, `metal5.enclosing.via4.1`),
+TopVia1 both sides, and TopVia2 both sides; its `mim.enclosing.topvia1.1`
+keeps the legacy behaviour (TopVia1 is shared between the MIM-cap population
+and ordinary Metal5->TopMetal1 routing) and its Cont lower side stays
+uncovered exactly as sg13cmos5l's does above.
 
 ### Sized/derived-layer rules (`DerivedLayer`)
 
