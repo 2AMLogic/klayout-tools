@@ -120,6 +120,7 @@ _EXPECTED_DECK_SCOPES: dict[str, frozenset[str]] = {
         {
             "Act",
             "Cnt",
+            "Cont upper-landing containment (curated)",
             "Gat",
             "M1",
             "M2",
@@ -137,6 +138,10 @@ _EXPECTED_DECK_SCOPES: dict[str, frozenset[str]] = {
             "V2",
             "V3",
             "V4",
+            "Via1 upper-landing containment (curated)",
+            "Via2 upper-landing containment (curated)",
+            "Via3 upper-landing containment (curated)",
+            "Via4 upper-landing containment (curated)",
             "pSD",
         }
     ),
