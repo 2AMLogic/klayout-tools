@@ -466,5 +466,6 @@ def test_slope_band_is_a_registered_mandatory_runner_feature():
     )
     assert "slope_band" in sim_batch._MANDATORY_RUNNER_FEATURES
     assert sim_batch._missing_runner_features(["slope_band"], "0.9.1") == ["slope_band"]
-    assert sim_batch._missing_runner_features(["slope_band"], "0.9.2") == []
+    assert sim_batch._missing_runner_features(["slope_band"], "0.9.2") == ["slope_band"]
+    assert sim_batch._missing_runner_features(["slope_band"], "0.9.3") == []
     assert sim_batch._missing_runner_features(["slope_band"], None) is None

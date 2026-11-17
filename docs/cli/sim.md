@@ -5369,7 +5369,7 @@ post-processing:
   a yield is computed over.
 - **Backends.** `local`, `local-parallel`, `remote` and `batch` all run
   `slope_band`; the worker computes it. It is a mandatory runner feature
-  (`slope_band`, first `klt` release segment `0.9.2`): see "Mandatory features"
+  (`slope_band`, first `klt` release segment `0.9.3`): see "Mandatory features"
   under "Runner/client `klt` version skew". An older or unreadable runner
   refuses the request instead of omitting the measurement.
 - **Out of scope.** `tran` (or any non-`dc`) analysis — every named row shape is
