@@ -2340,16 +2340,16 @@ build's version strings (`provenance.klt_version`/`klayout_version`) are
 excluded. Any change to the inventory, to an inventoried file's bytes, to a
 check's outcome, or to the committed envelope itself is drift. The response
 is the shared `--check` drift shape (`schema_version`, `mode: "check"`,
-`report`, `status: "match"|"drifted"`, `drift[]`, `fresh`) plus
+`report`, `status: "match"|"drifted"|"schema_mismatch"`, `drift[]`, `fresh`) plus
 `fresh_status`, the re-attested envelope's own `status`.
 
-**A pre-v0.9.0 item-1 envelope reports `schema-mismatch`, not `drifted`
+**A pre-v0.9.0 item-1 envelope reports `schema_mismatch`, not `drifted`
 (issue #5730).** `v0.9.0` (#4764) moved T1 item 1's `provenance.input` from
 the singular `path` (hash of the inventory alone) to `paths` (a combined
 input-set digest), without a `schema_version` bump. Checking an older item-1
 envelope therefore differs only in `provenance.input.{path,paths,content_hash}`
 even though no attested file changed. When *that is the only drift*, `status`
-is `"schema-mismatch"` (still exit `3`: nothing in the legacy envelope's input
+is `"schema_mismatch"` (still exit `3`: nothing in the legacy envelope's input
 set was verified) and the response adds `legacy_binding: true` and
 `legacy_binding_detail` (`boundary`, `attested_klt_version`,
 `checking_klt_version`, `remedy`). `--format text` prints the
@@ -2514,7 +2514,7 @@ record check therefore gets advice that is still accurate.
 | Mode | `0` | `1` | `2` | `3` |
 | ---- | --- | --- | --- | --- |
 | `--attest` | `status: "pass"` (written to `-o` if given and changed) | malformed/unreadable inventory, inventory outside a repository, or a flag conflict; error envelope, nothing on stdout | usage error (e.g. `--attest 2`) from argparse | `status: "fail"`: a check failed; the envelope is printed, nothing is written |
-| `--attest --check` | `status: "match"` and `fresh_status: "pass"` | as above, plus a missing/unparseable committed envelope or one without `"kind": "generic"` and an `attestation` block | as above | `status: "drifted"`, or a faithfully reproduced `fresh_status: "fail"` |
+| `--attest --check` | `status: "match"` and `fresh_status: "pass"` | as above, plus a missing/unparseable committed envelope or one without `"kind": "generic"` and an `attestation` block | as above | `status: "drifted"`, `status: "schema_mismatch"` (a pre-v0.9.0 item-1 envelope, #5730), or a faithfully reproduced `fresh_status: "fail"` |
 
 ### Where the tier doc comes from
 
@@ -5038,7 +5038,7 @@ Fleet roll-up mode (`--fleet`):
 | `0`       | `status: "pass"` — every declared check passed. Under `--check`: `status: "match"` **and** `fresh_status: "pass"`. |
 | `1`       | The inventory was missing/unreadable/not valid JSON/not a JSON object, declared an unsupported `schema_version`, the wrong `kind` or `t1_item`, an unknown field, an empty or duplicate path list, a path outside the repository or through a symlink; the inventory is not inside a git repository; `--attest` was combined with `<file>...`/`--manifest`/`--fleet`/`--describe-grader`/`--tiers-doc`, or `--check` with `-o`; `--inventory`/`-o` was given without `--attest`. Under `--check`, also a missing/unparseable committed envelope or one that is not an attestation. |
 | `2`       | Usage error (bad `--format` value, or `--attest` other than `1`/`9`/`10`) — from argparse. |
-| `3`       | `status: "fail"` — at least one check failed (nothing written). Under `--check`: `status: "drifted"`, `status: "schema-mismatch"` (a pre-v0.9.0 item-1 envelope, #5730), or `fresh_status: "fail"`. |
+| `3`       | `status: "fail"` — at least one check failed (nothing written). Under `--check`: `status: "drifted"`, `status: "schema_mismatch"` (a pre-v0.9.0 item-1 envelope, #5730), or `fresh_status: "fail"`. |
 
 **Gate on `status`/`tier`/`not_t1_count`, not the exit code, in every mode
 above.** These codes are additive — a future release may add a new one

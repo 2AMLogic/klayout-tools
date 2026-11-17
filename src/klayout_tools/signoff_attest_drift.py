@@ -148,7 +148,7 @@ def drift_result(
     legacy = legacy_binding_detail(committed, fresh, result["drift"])
     if legacy is not None:
         # Pre-v0.9.0 item-1 envelope (#5730): still a failure, but named.
-        result["status"] = "schema-mismatch"
+        result["status"] = "schema_mismatch"
         result["legacy_binding"] = True
         result["legacy_binding_detail"] = legacy
     fresh_payload = result.pop("fresh")

@@ -1,4 +1,4 @@
-"""``--attest 1 --check`` names a pre-v0.9.0 envelope ``schema-mismatch`` (#5730).
+"""``--attest 1 --check`` names a pre-v0.9.0 envelope ``schema_mismatch`` (#5730).
 
 The legacy envelope is minted by rewriting a current one's
 ``provenance.input`` to the singular shape, so no old ``klt`` is needed."""
@@ -43,7 +43,7 @@ def test_legacy_shape_is_schema_mismatch_and_still_fails(tmp_path, capsys):
     _repo, inventory, committed = _legacy(tmp_path)
     code, out = _check(inventory, committed, capsys)
     assert code == 3
-    assert out["status"] == "schema-mismatch"
+    assert out["status"] == "schema_mismatch"
     assert out["legacy_binding"] is True
     detail = out["legacy_binding_detail"]
     assert detail["attested_klt_version"] == "0.8.0"
@@ -57,7 +57,7 @@ def test_text_prints_remedy_before_drift_block(tmp_path, capsys):
     _repo, inventory, committed = _legacy(tmp_path)
     assert _attest_cli(1, inventory, "--check", str(committed)) == 3
     text = capsys.readouterr().out
-    assert "status: schema-mismatch" in text
+    assert "status: schema_mismatch" in text
     assert text.index("legacy_binding:") < text.index("drift:")
 
 
