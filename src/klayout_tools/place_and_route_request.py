@@ -7,8 +7,7 @@ precedent of ``place_and_route_sta.py`` (issue #1808). Nothing here invokes
 OpenROAD or emits a stage script -- that stays in ``place_and_route.py``. Every
 public-by-convention name here is re-exported from
 :mod:`klayout_tools.place_and_route`, so ``place_and_route.<name>`` (the CLI,
-:mod:`klayout_tools.eval`, the batch backend and the test suite) keeps
-resolving unchanged.
+:mod:`klayout_tools.eval`, the batch backend, tests) keeps resolving unchanged.
 
 :class:`PlaceAndRouteError` and the validation-only tables
 (``_MACRO_ORIENTATIONS``, ``_FLOORPLAN_METHOD_FIELDS``,
@@ -34,6 +33,7 @@ from .pdk import descriptor_views, lef_files
 from .pdk_cells import resolve_liberty_for_cell_library
 from .place_and_route_clock import validate_clock_constraints
 from .place_and_route_groups import reject_unknown_group_keys, validate_group_geometry
+from .place_and_route_hints import NETLIST_HINT
 from .place_and_route_layers import (
     _ROUTING_LAYER_STACK as _ROUTING_LAYER_STACK,
 )
@@ -447,7 +447,7 @@ def _resolve_netlist(netlist: Any, request_dir: str) -> str:
         raise PlaceAndRouteError("request.netlist must be a non-empty string")
     path = netlist if os.path.isabs(netlist) else os.path.join(request_dir, netlist)
     if not os.path.isfile(path):
-        raise PlaceAndRouteError(f"netlist not found: {netlist}")
+        raise PlaceAndRouteError(f"netlist not found: {netlist} ({NETLIST_HINT})")
     try:
         with open(path, "rb"):
             pass
@@ -529,15 +529,15 @@ _TRACK_KEYS = ("x_offset_um", "x_pitch_um", "y_offset_um", "y_pitch_um")
 
 
 def _validate_floorplan_tracks(tracks: Any) -> None:
-    """Issue #4088: validate ``request.floorplan.tracks``, the optional
-    per-layer ``make_tracks`` definitions that replace the bare
-    ``make_tracks`` (which aborts on a tech LEF with a negative ``OFFSET``)."""
+    """Issue #4088/#5671: validate ``request.floorplan.tracks``, the per-layer
+    ``make_tracks`` definitions replacing the bare ``make_tracks`` (negative
+    ``OFFSET`` abort); a layer may repeat, only byte-identical entries error."""
 
     if not isinstance(tracks, list) or not tracks:
         raise PlaceAndRouteError(
             "request.floorplan.tracks must be a non-empty array of objects"
         )
-    seen: set[str] = set()
+    seen: dict[tuple[str, float, float, float, float], int] = {}
     for index, entry in enumerate(tracks):
         where = f"request.floorplan.tracks[{index}]"
         if not isinstance(entry, dict):
@@ -545,11 +545,6 @@ def _validate_floorplan_tracks(tracks: Any) -> None:
         layer = entry.get("layer")
         if not isinstance(layer, str) or not layer:
             raise PlaceAndRouteError(f"{where}.layer must be a non-empty string")
-        if layer in seen:
-            raise PlaceAndRouteError(
-                f"request.floorplan.tracks names layer '{layer}' more than once"
-            )
-        seen.add(layer)
         for key in _TRACK_KEYS:
             value = entry.get(key)
             if (
@@ -562,6 +557,11 @@ def _validate_floorplan_tracks(tracks: Any) -> None:
                 raise PlaceAndRouteError(f"{where}.{key} must be > 0")
             if key.endswith("offset_um") and value < 0:
                 raise PlaceAndRouteError(f"{where}.{key} must be >= 0")
+        if (sig := (layer, *(entry[k] for k in _TRACK_KEYS))) in seen:
+            raise PlaceAndRouteError(
+                f"{where} duplicates request.floorplan.tracks[{seen[sig]}]"
+            )
+        seen[sig] = index
 
 
 def validate_tech_lef_track_offsets(

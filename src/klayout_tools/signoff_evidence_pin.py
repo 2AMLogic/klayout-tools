@@ -58,6 +58,34 @@ def unverifiable_pin_note(check_kind: str, resolution: Mapping[str, Any]) -> str
     )
 
 
+def pin_disclosure(
+    spec: Mapping[str, Any],
+    resolution: Mapping[str, Any],
+    *,
+    check_kind: str | None = None,
+) -> dict[str, Any]:
+    """The manifest ``content_hash`` pin state, disclosed beside a refusal
+    that does not itself grade the pin (issues #3063, #3747, #5598).
+
+    ``{}`` when the manifest entry pins nothing -- no staleness claim was
+    made, so none is answered. Otherwise ``content_hash_pin`` from
+    :func:`content_hash_pin_state`, plus, when ``check_kind`` is given and
+    the pin is uncomparable, the :func:`unverifiable_pin_note` saying why.
+
+    The single implementation behind every site that surfaces a pin without
+    letting it move the verdict, so those sites cannot drift.
+    """
+    pin_state = content_hash_pin_state(
+        spec.get("content_hash"), resolution["content_hash"]
+    )
+    if pin_state is None:
+        return {}
+    detail: dict[str, Any] = {"content_hash_pin": pin_state}
+    if pin_state == PIN_UNVERIFIABLE and check_kind is not None:
+        detail["content_hash_pin_note"] = unverifiable_pin_note(check_kind, resolution)
+    return detail
+
+
 def rehash_evidence_file(
     check_kind: str,
     spec: Mapping[str, Any],

@@ -50,6 +50,21 @@ from .output import emit_error, emit_success, render_check_text, render_rerun_dr
 EXIT_MATCH = 0
 EXIT_DRIFTED = 3
 
+#: Appended to the shared flow-verb `--rerun` help (parser.py passes it as
+#: `_add_flow_verify_args`'s `rerun_extra`): the two exclusions only this
+#: verb applies to the diff (issue #5863). A lint-clean committed report has
+#: its output paths scrubbed (repo-relative / `~/` / `$PDK_ROOT/...`, what
+#: `env-provenance lint-envelope` requires), so the raw fresh envelope's
+#: absolute paths must not read as drift.
+RERUN_HELP_EXTRA = (
+    "Output-path fields (def_path/gds_path/verilog_path/unrouted_def_path, "
+    "layer_map.path, netlist and provenance.deck.path envelopes, "
+    "corner_runs[].output_dir, macros[].lef/.lib, spef_sta.spef_path/"
+    ".sdf_path) compare by file name only, so a path-scrubbed committed "
+    "report still matches; provenance.pdk.source is excluded as resolution "
+    "provenance (issue #5863)"
+)
+
 
 def run(args: argparse.Namespace) -> int:
     if args.check is not None:

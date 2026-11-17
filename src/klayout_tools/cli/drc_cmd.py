@@ -250,10 +250,8 @@ def _run_check(args: argparse.Namespace) -> int:
             args.format,
         )
     try:
-        if args.rerun:
-            result = rerun_drc_report(args.check, input_path=args.file)
-        else:
-            result = check_drc_report(args.check, input_path=args.file)
+        run = rerun_drc_report if args.rerun else check_drc_report
+        result = run(args.check, input_path=args.file, deck_path=args.deck_file)
     except DrcError as exc:
         return emit_error("drc", str(exc), args.format)
     except pdk_module.PdkNotFoundError as exc:
