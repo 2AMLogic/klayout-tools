@@ -2649,6 +2649,7 @@ def _add_place_and_route_parser(subparsers: argparse._SubParsersAction) -> None:
         inputs="gate-level netlist and standard-cell liberty",
         engine="OpenROAD",
         docs="docs/cli/place-and-route.md",
+        rerun_extra=place_and_route_cmd.RERUN_HELP_EXTRA,
     )
     _add_format_arg(place_and_route_parser)
     place_and_route_parser.set_defaults(func=place_and_route_cmd.run)
@@ -2661,16 +2662,14 @@ def _add_flow_verify_args(
     inputs: str,
     engine: str,
     docs: str,
+    rerun_extra: str = "",
 ) -> None:
     """Register the shared ``--check``/``--rerun`` committed-evidence
     verification flags on a *flow* verb (issue #2224).
 
-    Deliberately **not** the mutually-exclusive-with-the-input group ``klt
-    drc``/``klt lvs``/``klt extract`` use: those reports echo their own
-    inputs, so ``--check REPORT`` is self-sufficient there. A flow verb's
-    report echoes outputs and provenance hashes only, so the positional
-    ``request`` stays required and supplies the inputs to re-hash/re-run
-    against. See ``_report_verify.py``'s module docstring.
+    Deliberately **not** the input-exclusive group ``klt drc``/``klt lvs``/
+    ``klt extract`` use: their reports echo their own inputs; a flow verb's
+    report does not, so ``request`` stays required for the re-run inputs.
     """
     parser.add_argument(
         "--check",
@@ -2697,6 +2696,7 @@ def _add_flow_verify_args(
             "provenance.klt_version/klayout_version/pdk.version, "
             "engine_version, and run-scoped bookkeeping (see "
             f"{docs}). Requires --check; a clean error (exit 1) otherwise"
+            + (f" {rerun_extra}" if rerun_extra else "")
         ),
     )
 
@@ -4019,7 +4019,7 @@ def _add_stats_parser(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         help="also compute geometry_digest, a sha256 of the stream's decoded "
         "geometry (null otherwise; it re-reads the whole layout and "
-        "roughly 2.5x's the runtime on large flat layouts)",
+        "roughly 2.5x the runtime on large flat layouts)",
     )
     stats_parser.add_argument(
         "--top",
