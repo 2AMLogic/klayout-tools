@@ -358,3 +358,48 @@ def test_only_the_commands_job_manages_its_own_redirects_and_exit_status():
             continue
         assert cmd.endswith("; exit $rc"), name
         assert "; rc=$?; wait $! 2>/dev/null" in cmd, name
+
+
+@pytest.mark.parametrize("tail", ["; cp a b", "   "])
+def test_an_extra_tail_without_a_stdout_target_raises(tail):
+    """Issue #5801: ``extra_tail`` is consulted only in the status-capture
+    branch, so pairing it with ``stdout_target=None`` used to drop it from the
+    generated ``cmd`` silently. Any non-empty tail (whitespace included) is
+    now a loud ``ValueError`` rather than an omitted one."""
+    with pytest.raises(ValueError, match="stdout_target"):
+        _batch_common.build_job_command(
+            tree_member="inputs/tree.tgz",
+            run="true",
+            err_cls=SimError,
+            stdout_target=None,
+            extra_tail=tail,
+        )
+
+
+def test_an_empty_extra_tail_with_no_stdout_target_still_ends_exit_zero():
+    """The live ``sim_commands.build_job_spec`` call shape: no ``extra_tail``,
+    no ``stdout_target`` -- the guard must not fire and the command must keep
+    its ``; exit 0`` tail."""
+    cmd = _batch_common.build_job_command(
+        tree_member="inputs/tree.tgz",
+        run="true",
+        err_cls=SimError,
+        stdout_target=None,
+    )
+    assert cmd.endswith("; exit 0")
+    assert "cp a b" not in cmd
+
+
+def test_an_extra_tail_with_a_stdout_target_is_kept():
+    """The three real callers' shape (extract, place-and-route,
+    signoff-generator): a non-empty ``extra_tail`` plus a ``stdout_target``
+    must not raise, and the tail must survive into ``cmd`` ahead of
+    ``exit $rc``."""
+    cmd = _batch_common.build_job_command(
+        tree_member="inputs/tree.tgz",
+        run="true",
+        err_cls=SimError,
+        stdout_target=sim_batch.BATCH_REPORT_FILENAME,
+        extra_tail="; cp a b",
+    )
+    assert "; cp a b; exit $rc" in cmd

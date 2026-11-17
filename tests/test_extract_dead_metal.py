@@ -76,6 +76,11 @@ def test_summarize_dead_metal_empty_is_zeroed_not_none():
     }
 
 
+def test_summarize_dead_metal_empty_total_area_is_a_float():
+    """``0 == 0.0`` hides an int total; the documented example shows ``0.0``."""
+    assert isinstance(summarize_dead_metal([])["area_um2"], float)
+
+
 def test_drop_dead_metal_rows_is_a_no_op_without_the_flag():
     """`omit=False` returns the same list object and leaves `warnings` alone."""
     rows = [_cluster("metal1", 68, 20, 1, 0.5)]

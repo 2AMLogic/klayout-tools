@@ -247,7 +247,7 @@ def _in_other_thread(path: Path) -> None:
         try:
             with output_lock.hold_output_dir(path):
                 pass
-        except BaseException as exc:  # noqa: BLE001
+        except BaseException as exc:
             caught.append(exc)
 
     thread = threading.Thread(target=target)

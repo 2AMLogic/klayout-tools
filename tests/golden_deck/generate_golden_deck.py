@@ -71,10 +71,12 @@ from typing import Any
 GOLDEN_DECK_DIR = Path(__file__).resolve().parent
 REPO_ROOT = GOLDEN_DECK_DIR.parent.parent
 
-sys.path.insert(0, str(REPO_ROOT / "src"))
+sys.path[0:0] = [str(REPO_ROOT / "src"), str(GOLDEN_DECK_DIR)]
+
+from _allowed_checks import ALLOWED_CHECKS  # noqa: E402  (data table; see below)
 
 from klayout_tools.decks import (  # noqa: E402
-    DrcRule,  # noqa: E402
+    DrcRule,
     gf180mcu,
     sg13cmos5l,
     sg13g2,
@@ -88,35 +90,9 @@ DECKS: dict[str, list[DrcRule]] = {
     "sg13cmos5l": sg13cmos5l.DECK,
 }
 
-#: Per-deck set of `DrcRule.check` kinds this manifest covers -- see the
-#: module docstring's "deliberately per-deck" note above.
-ALLOWED_CHECKS: dict[str, tuple[str, ...]] = {
-    "sky130": ("width", "space"),
-    # `"enclosed"` joins the set with issue #2369's Nplus/Pplus implant
-    # rules -- the first rules in any deck to use it (the direction the PDK's
-    # own `ngate.enclosed(nplus, ...)`/`ncomp.edges.enclosed(nplus, ...)`
-    # statements are written in). All four are `DerivedLayer`-scoped, so all
-    # four are hand-authored in `_DERIVED_LAYER_FIXTURES` below.
-    "gf180mcu": (
-        "width",
-        "space",
-        "enclosing",
-        "separation",
-        "enclosed",
-        "comp_coverage",
-        "tap_distance",
-    ),
-    # sg13g2 (issue #905/#911, Epic #711 Phase 3b): width/space rules go
-    # through this manifest mechanism (14 entries); its 5 enclosing/
-    # separation rules ship as hand-written violate/clean pairs directly in
-    # `tests/test_drc.py` instead -- see that deck's own module docstring.
-    "sg13g2": ("width", "space"),
-    # sg13cmos5l (issue #1400, width/space on Activ/GatPoly/Metal1; issue
-    # #1417 extends coverage to the Metal2-TopMetal1 stack's width/space
-    # rules plus every via level's width/space/enclosing rules) -- see that
-    # deck's own module docstring.
-    "sg13cmos5l": ("width", "space", "enclosing"),
-}
+# `ALLOWED_CHECKS` (per-deck manifest check-kind table, data only) lives in
+# :mod:`_allowed_checks` (per-file size ratchet); re-exported here.
+
 
 #: Fixed bar dimensions (database units), independent of any individual
 #: rule's own threshold -- chosen once, verified safe for every rule in the
@@ -552,6 +528,27 @@ _DERIVED_LAYER_FIXTURES: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
     # 280 dbu `_LV` threshold, so -- as for the width pair above -- a clean
     # `comp.space.1` verdict on this fixture is itself part of what the
     # split is asserting.
+    # `comp.width.moscap.1` (DF.1c, 1000 dbu, issue #5719): the checked region
+    # is `Comp AND MOS_CAP_MK`, so generic `_width_pair` geometry (a bare
+    # `Comp` bar) would derive an empty region and never fire. The 900/1100
+    # dbu bars (both above the 220 `_LV`/300 `_MV` widths) sit under a
+    # covering `MOS_CAP_MK` (166/5) box, so the derived AND is exactly the
+    # bar; no `Dualgate` is drawn, so `comp.width.mv.1` is skipped: only
+    # this rule can fire.
+    "comp.width.moscap.1": (
+        {  # violate: 900 dbu wide (< 1000) Comp fully under MOS_CAP_MK
+            "shapes": [
+                {"layer": [22, 0], "box": [0, 0, 900, 4000]},  # Comp
+                {"layer": [166, 5], "box": [-1000, -1000, 1900, 5000]},  # MOS_CAP_MK
+            ]
+        },
+        {  # clean: 1100 dbu wide (>= 1000) Comp fully under MOS_CAP_MK
+            "shapes": [
+                {"layer": [22, 0], "box": [0, 0, 1100, 4000]},  # Comp
+                {"layer": [166, 5], "box": [-1000, -1000, 2100, 5000]},  # MOS_CAP_MK
+            ]
+        },
+    ),
     # The six `DerivedLayer`-scoped Nplus/Pplus implant rules (issue #2369).
     # None of them can use a generic builder: their checked region is a
     # boolean of two *other* drawn layers (PCOMP = `Comp AND Pplus`, NCOMP =

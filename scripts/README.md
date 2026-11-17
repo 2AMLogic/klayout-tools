@@ -17,12 +17,13 @@ scripts/
   fetch-cell-netlists.sh         # pinned, checksum-verified fetch of real gallery-cell SPICE netlists/models
   fetch-sky130-liberty.sh        # pinned, checksum-verified fetch of the real sky130_fd_sc_hd liberty klt synthesize needs
   install-yosys.sh               # build + install a pinned, checksum-verified Yosys from source (CI provisioning)
+  install-sv2v.sh                # install the pinned, checksum-verified sv2v release binary `klt synthesize`'s sv2v front end shells out to (CI provisioning, #5956)
   install-icarus-verilog.sh      # build + install a pinned, checksum-verified Icarus Verilog from source (CI provisioning)
   install-verilator.sh           # build + install a pinned, checksum-verified Verilator from source (CI provisioning)
   install-symbiyosys.sh          # install a pinned SymbiYosys (sby) + Bitwuzla backend for sequential equivalence checking (CI provisioning, #1312)
   install-magic.sh               # build + install a pinned, checksum-verified magic from source for the DRC/extract cross-validation oracle (#2014)
   fetch-magic-tech.sh            # generate the open_pdks magic decks (sky130A, gf180mcuC) that oracle runs against, from pinned open_pdks source (#2014)
-  _install_common.sh             # shared fetch/checksum/build boilerplate sourced by the install-*.sh scripts (#687)
+  _install_common.sh             # shared fetch/checksum/build boilerplate sourced by the install-*.sh and fetch-*.sh scripts (#687, #5635)
   ci-apt-install.sh              # mirror-resilient `apt-get update && apt-get install` for CI's package steps
   bootstrap-auditor-python.sh    # pinned, checksum-verified uv + managed CPython + host-local .venv + `klt` startup smoke for a Python-less Linux audit host (#2829)
   release_prep.py                # mechanical release edits for release.yml (#4920)
@@ -124,6 +125,25 @@ lambdapdk payload.
 scripts/install-yosys.sh
 scripts/fetch-sky130-liberty.sh
 PDK_ROOT="$PWD/pdks/sky130-liberty" PDK=sky130A uv run pytest tests/test_synthesize.py -k integration
+```
+
+## `install-sv2v.sh`
+
+CI provisioning for `klt synthesize`'s `sv_frontend: "sv2v"` route (issue
+#5956): `.github/workflows/ci.yml`'s `test` job runs it so
+[`tests/test_synthesize_netlist_normalize.py`](../tests/test_synthesize_netlist_normalize.py)'s
+two real-sv2v reproducibility tests (issue #5594's AC2/AC4) — previously
+host-only, silently skipping on every CI leg — run there; the job also
+asserts that file reports zero skips. Unlike the source-building installers
+above, sv2v is a Haskell/Stack application, so this installs the pinned
+upstream release's prebuilt, checksum-verified `sv2v-Linux.zip` binary
+(Linux/CI only; macOS dev hosts: `brew install sv2v`) — same
+`--force`/idempotent/`$SV2V_INSTALL_PREFIX` conventions as
+`install-yosys.sh`.
+
+```
+scripts/install-sv2v.sh
+uv run pytest tests/test_synthesize_netlist_normalize.py -rs
 ```
 
 ## `install-icarus-verilog.sh` / `install-verilator.sh`

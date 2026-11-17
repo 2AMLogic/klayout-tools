@@ -302,7 +302,7 @@ def _collect_shard(
     try:
         results[index] = future.result()
         lost_reasons[index] = None
-    except Exception as exc:  # noqa: BLE001 - "shard never returned"
+    except Exception as exc:  # - "shard never returned"
         lost_reasons[index] = str(exc)
 
 

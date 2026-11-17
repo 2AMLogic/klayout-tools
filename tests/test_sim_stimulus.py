@@ -9,22 +9,14 @@ single-corner ``ngspice -b`` and skips when ngspice is not installed.
 from __future__ import annotations
 
 import json
-import os
-import shutil
 from pathlib import Path
 
 import pytest
 
+from helpers.tool_probes import SKIP_NO_NGSPICE as _SKIP_NO_NGSPICE
 from klayout_tools import sim, sim_stimulus
 
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
-
-HAVE_NGSPICE = shutil.which("ngspice") is not None and (
-    os.environ.get("KLT_SKIP_NGSPICE_TESTS") != "1"
-)
-_SKIP_NO_NGSPICE = pytest.mark.skipif(
-    not HAVE_NGSPICE, reason="ngspice is not installed on this machine"
-)
 
 _TRAN = {"kind": "tran", "args": "1n 10n"}
 
@@ -157,6 +149,14 @@ def test_negative_time_is_refused():
     assert _code(_stim(events=[{"t_s": -1e-9, "level": 1}])) == (
         sim_stimulus.CODE_BAD_TIME
     )
+
+
+def test_number_too_large_for_a_float_is_refused_not_a_traceback():
+    # A 400-digit int literal parses to an int too large for a float
+    # (issue #5891): refused as an error envelope, not an OverflowError.
+    request = _stim(events=[{"t_s": 10**400, "level": 1}])
+    with pytest.raises(sim_stimulus.StimulusError, match="t_s must be finite"):
+        _resolve(request)
 
 
 def test_skew_pushing_an_edge_negative_is_refused():

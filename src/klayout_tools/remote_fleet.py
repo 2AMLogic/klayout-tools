@@ -621,7 +621,7 @@ class FleetLauncher:
                     attempts=attempts,
                     environment=info,
                 )
-            except Exception as exc:  # noqa: BLE001 -- any shard-run failure retries once
+            except Exception as exc:  # -- any shard-run failure retries once
                 last_error = str(exc)
                 launcher.terminate()  # drop the bad instance immediately
 

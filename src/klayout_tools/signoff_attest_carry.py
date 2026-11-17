@@ -13,19 +13,23 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from .signoff_attest import (
-    SKIPPED_CHECK_KEYS,
     STREAM_ATTESTABLE_ITEM,
     AttestationError,
     _load_committed_attestation,
     build_attestation,
     check_attestation,
 )
+from .signoff_attest_build import add_require_build_match_argument
+from .signoff_attest_build import flag_problem as _build_match_problem
+from .signoff_attest_drift import SKIPPED_CHECK_KEYS
 from .signoff_attest_stream import build_stream_attestation, check_stream_attestation
 from .signoff_attest_text import documented_suffix
 
 
 def add_skip_local_only_argument(parser: Any) -> None:
-    """Register ``--skip-local-only`` on the ``klt signoff`` parser."""
+    """Register ``--skip-local-only`` (and ``--require-build-match``, issue
+    #5875) on the ``klt signoff`` parser."""
+    add_require_build_match_argument(parser)
     parser.add_argument(
         "--skip-local-only",
         action="store_true",
@@ -41,8 +45,18 @@ def add_skip_local_only_argument(parser: Any) -> None:
 
 
 def flag_problem(args: Any) -> str | None:
-    """The refusal message for an invalid ``--skip-local-only`` combination
+    """The refusal message for an invalid ``--attest`` flag combination
     (``--attest`` presence is checked by the caller), else ``None``."""
+    problem = _skip_local_only_problem(args) or _build_match_problem(args)
+    if problem is None and args.check is not None and args.output:
+        return (
+            "--check and --output are mutually exclusive with --attest: "
+            "--check verifies a committed envelope and never writes"
+        )
+    return problem
+
+
+def _skip_local_only_problem(args: Any) -> str | None:
     if not getattr(args, "skip_local_only", False):
         return None
     if getattr(args, "check", None) is not None:
