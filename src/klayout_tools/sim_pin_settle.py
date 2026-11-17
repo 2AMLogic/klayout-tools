@@ -67,12 +67,22 @@ def check_offhost_engine_version_pin(
     engine: str,
     engine_version: str | None,
 ) -> None:
-    """Enforce the pin for off-host backends. There is still no pre-submit
-    probe of the *launched* instance: ``batch`` refuses a pin every AMI
-    manifest image's published ``ngspice_version`` fails before submitting
-    (issue #5851), but a ``remote`` runner -- and any manifest-less or
-    unknown-version image -- is checked here, against the version the
-    runner's reports carried (after the run)."""
+    """Enforce the pin for off-host backends.
+
+    This process cannot probe a remote/batch runner's engine, and the pin is
+    not post-run-only. ``batch`` refuses a pin every AMI manifest image's
+    published ``ngspice_version`` fails before submitting
+    (:func:`_enforce_published_engine_version_pin`, issue #5851), and the
+    forwarded request runs on the runner as
+    ``klt sim --backend local-parallel``, whose own
+    :func:`check_local_engine_version_pin` refuses the job before any corner
+    simulates there (issue #5853). This check is the backstop: it compares
+    the version the runner's reports carried after the run, which is also
+    what fails closed for a runner too old to know the field (its reports
+    carry no version), what raises the submitter's own
+    ``engine_version_unmet`` when a runner-side refusal left no report at
+    all, and what catches everything the pre-submit manifest check let
+    through."""
     from . import sim
 
     if pin is None or backend not in sim._OFFHOST_BACKENDS:

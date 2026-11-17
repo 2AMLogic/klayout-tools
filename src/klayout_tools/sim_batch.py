@@ -255,6 +255,8 @@ from .sim_batch_contract_worker import (  # noqa: F401
     WORKER_CAPTURE_STR_MAX,
     _assess_capability_support,
     _assess_deck_support,
+    _bounded_model_inputs,
+    _bounded_str,
     _capability_preflight_lines,
     _deck_preflight_lines,
     _runner_supports_decks,
@@ -263,6 +265,7 @@ from .sim_batch_contract_worker import (  # noqa: F401
     _worker_capture_command,
     assess_par_backend_support,
     par_backend_preflight_lines,
+    runner_ngspice_init,
 )
 
 # --------------------------------------------------------------------------- #
@@ -2048,15 +2051,6 @@ def _batch_environment(
     }
 
 
-def _bounded_str(value: Any, limit: int = WORKER_CAPTURE_STR_MAX) -> str | None:
-    """A JSON-safe, bounded, control-character-free copy of a captured string
-    (``None`` for anything that is not a string)."""
-    if not isinstance(value, str):
-        return None
-    cleaned = "".join(ch if (ch >= " " or ch in "\n\t") else "?" for ch in value)
-    return cleaned[:limit]
-
-
 def _client_pdk_stamp(request: dict[str, Any] | None) -> dict[str, Any] | None:
     """The submitter's local view of the requested PDK variant's stamp (``SOURCES``,
     else bundle ``.pdk-store.json``, #5318); ``None`` when nothing comparable is
@@ -2194,22 +2188,6 @@ def attach_staged_model_comparison(
             worker_env["pdk_stamp_comparison"] = _compare_staged_model_inputs(
                 staged_model_inputs, worker_env.get("model_inputs"), client_stamp
             )
-
-
-def _bounded_model_inputs(doc: dict[str, Any]) -> list[dict[str, str | None]] | None:
-    """The worker-reported ``model_inputs`` list, re-validated and bounded.
-    ``None`` (not ``[]``) when the capture carries no list at all."""
-    models_in = doc.get("model_inputs")
-    if not isinstance(models_in, list):
-        return None
-    return [
-        {
-            "name": _bounded_str(entry.get("name")),
-            "sha256": _bounded_str(entry.get("sha256"), 64),
-        }
-        for entry in models_in[:WORKER_CAPTURE_MODEL_INPUTS_MAX]
-        if isinstance(entry, dict)
-    ]
 
 
 def _compare_engine_builds(
@@ -2463,11 +2441,15 @@ def _read_runner_identity(
 
 
 def _read_job_identity(
-    local_dir: str | None, request: dict[str, Any] | None = None
+    local_dir: str | None,
+    request: dict[str, Any] | None = None,
+    *,
+    report: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Runner identity plus the worker-observed environment capture, merged
     into ``environment.remote``. Neither reader can raise."""
     worker_environment = _read_worker_environment(local_dir, request)
+    worker_environment["ngspice_init"] = runner_ngspice_init(report)
     return {
         **_read_runner_identity(local_dir, request),
         "worker_environment": worker_environment,
@@ -2743,9 +2725,11 @@ def _recover_failed_job_corners(
             identity = _read_job_identity(collected, request)
             log_note, log_diagnostic = _engine_log_note(collected)
             try:
-                kind, runner_error = _classify_collected_report(
-                    read_collected_report(collected)
+                report = read_collected_report(collected)
+                identity["worker_environment"]["ngspice_init"] = runner_ngspice_init(
+                    report
                 )
+                kind, runner_error = _classify_collected_report(report)
                 if kind == "report":
                     note = "collected report is not a klt error envelope"
                 elif kind == "unusable":
@@ -2811,13 +2795,12 @@ def _annotate_unrecovered_preflight_reject(
     status: dict[str, Any],
     identity: dict[str, Any],
 ) -> None:
-    """Issue #4161: a job that exited :data:`_BATCH_PREFLIGHT_REJECT_EXIT`
-    but whose klt error envelope could not be recovered (no ``report.json``,
-    no ``stderr.log``) would otherwise read as the bare ``job command exited
-    87``. Say what the exit means and, when the post-run runner identity
-    shows a major.minor mismatch, classify the failure as a version mismatch
-    (``runner_code`` :data:`BATCH_RUNNER_MISMATCH_CODE` plus both klt
-    identities). Any other non-zero exit code gets the generic
+    """Issue #4161: a job that exited :data:`_BATCH_PREFLIGHT_REJECT_EXIT` but whose
+    klt error envelope could not be recovered (no ``report.json``, no ``stderr.log``)
+    would otherwise read as the bare ``job command exited 87``. Say what the exit means
+    and, when the post-run runner identity shows a major.minor mismatch, classify the
+    failure as a version mismatch (``runner_code`` :data:`BATCH_RUNNER_MISMATCH_CODE`
+    plus both klt identities). Any other non-zero exit code gets the generic
     :func:`.sim_batch_features.annotate_unrecovered_failure` wording (issue #4217)."""
     exit_code = _status_exit_code(status)
     if exit_code is None or exit_code == 0:
@@ -2835,7 +2818,8 @@ def _annotate_unrecovered_preflight_reject(
         note += (
             f"; the runner ran klt {identity.get('runner_klt_version')} but the "
             f"client is {identity.get('client_klt_version')} -- update the "
-            "runner image or use a compatible client"
+            "runner image, use a compatible client, or set "
+            'request.batch.runner_version_check to "warn" to submit anyway'
         )
     note += gap_note(identity)
     for corner in corners:
@@ -3507,7 +3491,10 @@ def _poll_and_collect(
         environment["client_collected_at"] = now()
         report = read_collected_report(collected)
         check_ngspice_options_echo(request, report)
-        environment = {**environment, **_read_job_identity(collected, request)}
+        environment = {
+            **environment,
+            **_read_job_identity(collected, request, report=report),
+        }
         environment.update(collected_report_env(status, report))
         corners = report.get("corners") or []
         _surface_log_fatal(corners, collected)
