@@ -4149,11 +4149,11 @@ replayed). The two honoured overrides are the positional `<file>` (input) and
 
 **Deck resolution order (issue #5709)**, shared by `--check`, `--check
 --rerun` and both sides of an `--engine both` report: (1) `--deck-file
-<path>`, which wins for a `klayout`-engine report only. On a curated single-engine
-report `--check --deck-file` is a clean exit-1 error (issue #6070), the same
-as `--rerun`; the curated side of an `--engine both` report keeps resolving
-its recorded deck *name* and ignores the flag -- and only when
-it names an existing file; (2) the report's recorded `deck` -- a deck name for
+<path>`, which wins for a `klayout`-engine report only, and only when it
+names an existing file. On a curated single-engine report `--check
+--deck-file` is a clean exit-1 error (issue #6070), the same as `--rerun`;
+the curated side of an `--engine both` report keeps resolving its recorded
+deck *name* and ignores the flag; (2) the report's recorded `deck` -- a deck name for
 `--engine curated`, the producing host's script path for `--engine klayout` --
 when it exists; (3) for `--engine klayout`, `provenance.deck.name` looked up as
 a plain basename among the decks packaged with klt (`asap7.drc`). Resolution
