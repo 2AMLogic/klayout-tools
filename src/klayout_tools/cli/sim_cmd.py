@@ -330,9 +330,9 @@ def _print_op_lint_text(report: dict) -> None:
     print(f"status: {report['status']}")
     print(f"corner: {report['corner']['corner_id']}")
     print(
-        f"devices: {report['device_count']}  "
-        f"findings: {report['finding_count']} "
+        f"devices: {report['device_count']}  findings: {report['finding_count']} "
         f"(errors: {report['error_count']}, warnings: {report['warning_count']})"
+        + (f"  unexpanded: {n}" if (n := report["unexpanded_instance_count"]) else "")
     )
 
     devices = report["devices"]
