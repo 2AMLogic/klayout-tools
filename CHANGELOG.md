@@ -21,7 +21,7 @@ not `klt --version`, if you need to detect this kind of drift. See
   so every `klt gen`/`klt gen-compose` stream this flow produced for the
   family carried a whole-cell `DBU` marker under the PDK's own deck and could
   not be handed to it without a rewrite. `klt gen` and `klt gen-compose` now
-  write at `pdk.resolve_output_dbu`'s answer — the family's required stream
+  write at `pdk_output_dbu.resolve_output_dbu`'s answer — the family's required stream
   dbu (`0.001` for gf180mcu, the only declared entry today), falling through
   to the tech LEF `DATABASE MICRONS` for families with no requirement
   (sky130/asap7/sg13g2 unchanged), and to the historical `0.001` default when

@@ -353,11 +353,11 @@
     },
     {
       "path": "src/klayout_tools/gen.py",
-      "lines": 4365
+      "lines": 4355
     },
     {
       "path": "src/klayout_tools/gen_compose.py",
-      "lines": 5297
+      "lines": 5111
     },
     {
       "path": "src/klayout_tools/gen_compose_port_access.py",
@@ -481,7 +481,7 @@
     },
     {
       "path": "src/klayout_tools/pdk.py",
-      "lines": 2606
+      "lines": 2545
     },
     {
       "path": "src/klayout_tools/pdk_cells.py",
@@ -865,11 +865,11 @@
     },
     {
       "path": "tests/test_gen.py",
-      "lines": 12453
+      "lines": 12232
     },
     {
       "path": "tests/test_gen_compose.py",
-      "lines": 17643
+      "lines": 17212
     },
     {
       "path": "tests/test_gen_pdk_pcell.py",
@@ -973,7 +973,7 @@
     },
     {
       "path": "tests/test_pdk.py",
-      "lines": 3245
+      "lines": 3160
     },
     {
       "path": "tests/test_pdk_cells.py",

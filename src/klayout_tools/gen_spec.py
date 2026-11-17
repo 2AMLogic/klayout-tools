@@ -24,7 +24,7 @@ class _GeneratorSpec:
     summary: str
     #: Fallback output database unit (um) -- used only when the resolved
     #: PDK resolves no output dbu at all (:func:
-    #: `~klayout_tools.pdk.resolve_output_dbu` returns ``None``: no family
+    #: `~klayout_tools.pdk_output_dbu.resolve_output_dbu` returns ``None``: no family
     #: stream requirement -- issue #5721 -- and no tech LEF ``DATABASE
     #: MICRONS`` -- issue #1496). Every registered generator declares
     #: ``0.001``, the dbu `klt gen` unconditionally wrote at before those

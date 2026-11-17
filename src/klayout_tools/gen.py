@@ -332,7 +332,7 @@ from .gen_pcells import (
 )
 from .gen_pdk_cell import _PDK_CELL_SPEC
 from .gen_spec import _GeneratorSpec
-from .pdk import PdkNotFoundError, find_pdk, resolve_output_dbu
+from .pdk import PdkNotFoundError, find_pdk
 
 if TYPE_CHECKING:
     import klayout.db as kdb
@@ -542,13 +542,8 @@ CONTACT_SIZE_UM = 0.22
 #: threshold, so a single dbu of rounding slop is enough to trip it).
 #:
 #: This stays a *fixed* 0.001 even though :func:`_produce` now resolves the
-#: output layout's own dbu from the resolved PDK (:func:
-#: `~klayout_tools.pdk.resolve_output_dbu`, issue #5721 -- the family's
-#: required stream dbu, e.g. 0.001 for gf180mcu, else its tech LEF's
-#: ``DATABASE MICRONS`` per issue #1496), and it is exactly as safe there:
-#: a coordinate pre-snapped to a 0.001 grid is *exactly*
-#: representable on any dbu that divides 0.001 (a finer one, or 0.001
-#: itself), so ``int(round())``
+#: output dbu from the PDK (#5721/#1496) -- a 0.001-pre-snapped coordinate
+#: is exactly representable on any dbu dividing 0.001, so ``int(round())``
 #: introduces no error at all rather than the sub-dbu slop #685 fixed. It is
 #: deliberately not re-derived per-request from the resolved dbu -- doing so
 #: would move geometry (a finer snap grid moves a contact's centre) on the
@@ -3855,15 +3850,11 @@ def generate(request: dict[str, Any]) -> dict[str, Any]:
     ``schema_version`` bump.
 
     ``dbu_um`` (issue #1496) reports the database unit the output stream was
-    actually written at -- the resolved PDK's required **stream** dbu
-    (:func:`~klayout_tools.pdk.resolve_output_dbu`, issue #5721: 0.001 for
-    gf180mcu, whose native runset rejects any other dbu), falling through to
-    the PDK's tech LEF ``DATABASE MICRONS`` for families with no declared
-    requirement, and to a fixed ``0.001`` when neither resolves -- so a
-    caller can confirm two blocks agree before
-    handing them to ``klt gen-compose`` (which requires one shared dbu across
-    every block) without a separate ``klt stats`` round-trip. Additive field,
-    no ``schema_version`` bump (see ``docs/json-contract.md``).
+    actually written at -- the PDK's required **stream** dbu
+    (:func:`~klayout_tools.pdk_output_dbu.resolve_output_dbu`, #5721: 0.001
+    for gf180mcu, else its tech LEF ``DATABASE MICRONS``, else ``0.001``) --
+    so a caller can confirm two blocks agree for ``klt gen-compose`` without
+    a ``klt stats`` round-trip. Additive, no ``schema_version`` bump.
 
     ``navigable_regions`` (issue #1531, Phase 1) reports metal-free
     rectangles ``{"x0_um", "y0_um", "x1_um", "y1_um"}`` inside the emitted
@@ -4067,13 +4058,12 @@ def _produce(
     :func:`_device_layer_params` and friends.
 
     The output dbu comes from ``pdk_info`` via
-    :func:`~klayout_tools.pdk.resolve_output_dbu` (issue #5721): the PDK
-    family's required **stream** dbu when it declares one (gf180mcu's native
-    runset rejects any dbu but 0.001), else its tech LEF's ``DATABASE
-    MICRONS`` via :func:`~klayout_tools.pdk.resolve_pdk_dbu` (issue #1496).
-    It falls back to ``spec.dbu`` when neither resolves.
+    :func:`~klayout_tools.pdk_output_dbu.resolve_output_dbu` (#5721: the
+    family's required stream dbu, else the LEF dbu per #1496, else spec.dbu).
     """
     import klayout.db as kdb
+
+    from .pdk_output_dbu import resolve_output_dbu
 
     if spec.name == "bjt_array" and _pdk_family(pdk_info["variant"]) == "sg13g2":
         dbu = resolve_output_dbu(pdk_info) or spec.dbu  # #4850: PDK-authored HBT

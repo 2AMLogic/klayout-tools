@@ -209,6 +209,7 @@ from .gen import (
     _fixed_cut_side_um as _fixed_cut_side_um,
 )
 from .gen_compose_boundary import draw_pins_and_boundary, parse_boundary
+from .gen_compose_dbu import DbuReconcileError, reconcile_block_dbu
 from .gen_compose_port_access import derive_label_ports, parse_ports_from_labels
 
 # The rest of this module never calls these directly -- they are re-exported
@@ -257,7 +258,8 @@ from .gen_compose_routing import manhattan_backbone as manhattan_backbone
 from .gen_compose_routing import route_two_pin as route_two_pin
 from .gen_compose_via_cuts import own_via_cut_clearance_reason, via_drop_cut_side_um
 from .gen_layer_params import mfg_grid_um
-from .pdk import PdkNotFoundError, find_pdk, resolve_output_dbu
+from .pdk import PdkNotFoundError, find_pdk
+from .pdk_output_dbu import resolve_output_dbu
 
 #: Contract identifier for the request envelope (spike section 2).
 REQUEST_SCHEMA = "klt.gen_compose.request/1"
@@ -4622,176 +4624,6 @@ def _collect_matched_groups(
     ]
 
 
-#: Relative tolerance for :func:`_integer_dbu_ratio`'s float-division check.
-#: Every dbu value this module ever sees comes from ``1.0 / DATABASE
-#: MICRONS`` (an integer denominator, #1512) or a hardcoded decimal
-#: constant (``klt draw``'s ``0.001``), so a genuine integer ratio lands
-#: within float noise of the nearest whole number -- this tolerance is many
-#: orders of magnitude looser than that noise while still being far tighter
-#: than any *non*-integer ratio a real DATABASE MICRONS mismatch could
-#: produce (e.g. 1000 vs. 1500 -> ratio 1.5).
-_DBU_RATIO_TOLERANCE = 1e-6
-
-
-def _integer_dbu_ratio(coarse_dbu: float, fine_dbu: float) -> int | None:
-    """Whether ``coarse_dbu`` is an exact whole-number multiple of
-    ``fine_dbu`` -- i.e. every ``fine_dbu``-grid coordinate maps onto the
-    ``coarse_dbu`` grid with zero remainder -- returning that integer
-    multiplier, or ``None`` when it is not (issue #1514).
-
-    Order matters: this only ever answers "how many ``fine_dbu`` steps make
-    up one ``coarse_dbu`` step" -- callers must pass the larger dbu value as
-    ``coarse_dbu``. Scaling a block's own integer database-unit coordinates
-    *up* by this returned integer (coarser grid -> finer grid) is always
-    exact; the reverse direction (finer -> coarser) divides those
-    coordinates, which is exact only when every single coordinate happens to
-    be a multiple of the ratio. Issue #5721 added that direction for the one
-    case that needs it -- composing onto a PDK's required stream dbu -- and
-    it never assumes exactness: :func:`_assert_block_grid_exact` measures the
-    whole block before the divide, and refuses by name instead of rounding.
-    """
-    if fine_dbu <= 0:
-        return None
-    ratio = coarse_dbu / fine_dbu
-    nearest = round(ratio)
-    if nearest < 1:
-        return None
-    if abs(ratio - nearest) > _DBU_RATIO_TOLERANCE * max(1, nearest):
-        return None
-    return int(nearest)
-
-
-def _block_reachable_cells(layout: Any, top_cell: Any) -> list[Any]:
-    """Every cell in ``top_cell``'s instance tree -- exactly the set
-    :meth:`kdb.Cell.copy_tree` will carry into the composed layout."""
-    seen: set[int] = set()
-    cells: list[Any] = []
-    stack = [top_cell.cell_index()]
-    while stack:
-        index = stack.pop()
-        if index in seen:
-            continue
-        seen.add(index)
-        cell = layout.cell(index)
-        cells.append(cell)
-        for inst in cell.each_inst():
-            stack.append(inst.cell_index)
-    return cells
-
-
-def _block_shape_vertex_offender(
-    layout: Any, top_cell: Any, ratio: int
-) -> tuple[str, int, int] | None:
-    """The first ``(layer name, x, y)`` polygon vertex under ``top_cell``'s
-    tree that is off the ratio-``ratio`` grid, via ``kdb.Region.grid_check``
-    -- the primitive the open PDKs' DRC-DSL ``ongrid`` checks compile to
-    (:func:`klayout_tools.drc._run_grid_check`) -- or ``None`` when every
-    vertex is on it."""
-    import klayout.db as kdb
-
-    for layer_index in layout.layer_indexes():
-        info = layout.get_info(layer_index)
-        layer_name = f"layer {info.layer}/{info.datatype}"
-        region = kdb.Region(top_cell.begin_shapes_rec(layer_index)).merged()
-        if region.is_empty():
-            continue
-        offenders = region.grid_check(ratio, ratio)
-        if not offenders.is_empty():
-            point = next(iter(offenders.each())).first.p1
-            return (f"a shape vertex on {layer_name}", point.x, point.y)
-    return None
-
-
-def _block_text_offender(
-    layout: Any, cells: list[Any], ratio: int
-) -> tuple[str, int, int] | None:
-    """The first ``(description, x, y)`` text position across ``cells`` that
-    is off the ratio-``ratio`` grid, or ``None``. Checked separately from the
-    polygon pass because ``kdb.Region`` is blind to texts (verified against
-    KLayout 0.30.12: a Shapes collection holding only a text builds an empty
-    region)."""
-    for cell in cells:
-        for layer_index in layout.layer_indexes():
-            info = layout.get_info(layer_index)
-            for shape in cell.shapes(layer_index).each():
-                if not shape.is_text():
-                    continue
-                text = shape.text
-                if text.x % ratio or text.y % ratio:
-                    return (
-                        f"text '{text.string}' in cell '{cell.name}' on "
-                        f"layer {info.layer}/{info.datatype}",
-                        text.x,
-                        text.y,
-                    )
-    return None
-
-
-def _block_instance_vector_offender(
-    layout: Any, cells: list[Any], ratio: int
-) -> tuple[str, int, int] | None:
-    """The first ``(description, x, y)`` instance displacement or regular-
-    array ``a``/``b`` step vector across ``cells`` that is off the
-    ratio-``ratio`` grid, or ``None``. The counts (``na``/``nb``) are
-    dimensionless; the vectors are coordinates like any other, and
-    ``Layout.transform`` would round them exactly as it rounds a shape."""
-    for cell in cells:
-        for inst in cell.each_inst():
-            inst_name = (
-                f"instance of cell '{layout.cell(inst.cell_index).name}' "
-                f"in cell '{cell.name}'"
-            )
-            vectors: list[tuple[str, Any]] = [("displacement", inst.trans.disp)]
-            if inst.is_regular_array():
-                vectors.append(("array a-vector", inst.a))
-                vectors.append(("array b-vector", inst.b))
-            for tag, vector in vectors:
-                if vector.x % ratio or vector.y % ratio:
-                    return (f"{inst_name}'s {tag}", vector.x, vector.y)
-    return None
-
-
-def _assert_block_grid_exact(
-    block_id: str, gds_path: str, layout: Any, top_cell: Any, ratio: int
-) -> None:
-    """Refuse unless everything :meth:`kdb.Cell.copy_tree` will carry out of
-    ``top_cell``'s cell tree lies exactly on the coarser grid the composed
-    cell is written at -- i.e. every coordinate is a multiple of ``ratio``
-    database units (``ratio`` = target-dbu / this layout's own dbu, from
-    :func:`_integer_dbu_ratio`).
-
-    This is the #5721 coarsening path's gate: ``kdb.Layout.transform`` would
-    otherwise *silently round* any off-ratio coordinate to the nearest
-    surviving database unit (verified against KLayout 0.30.12: a (5, 7)
-    displacement at dbu 0.0005 lands at (3, 4) after a 0.5x transform) -- the
-    exact silent-rounding this direction must never do. The measurement is
-    split across the ``_block_*_offender`` helpers (polygon vertices, texts,
-    instance vectors -- each needing its own read-out because
-    ``kdb.Region`` sees only polygons), and the first offender raises
-    :class:`GenComposeError` naming the block, the offending layer (or
-    text/instance vector) and one offending coordinate; a pass returns
-    ``None`` and the caller may divide safely.
-    """
-    cells = _block_reachable_cells(layout, top_cell)
-    checks = (
-        _block_shape_vertex_offender(layout, top_cell, ratio),
-        _block_text_offender(layout, cells, ratio),
-        _block_instance_vector_offender(layout, cells, ratio),
-    )
-    for offender in checks:
-        if offender is None:
-            continue
-        what, x, y = offender
-        composed_dbu_um = layout.dbu * ratio
-        raise GenComposeError(
-            f"block '{block_id}': gds '{gds_path}' cannot be composed at the "
-            f"required dbu={composed_dbu_um}: {what} carries coordinate "
-            f"({x}, {y}) dbu, which is not on the ratio-{ratio} "
-            f"({composed_dbu_um}um) grid -- composing would silently round "
-            "it, so the request is refused and no output is written"
-        )
-
-
 def _insert_via_cuts(
     shapes: Any, drop: dict[str, Any], cx: int, cy: int, half: int, dbu: float
 ) -> None:
@@ -5001,7 +4833,7 @@ def _write_composed_gds(
     composed layout's own dbu (:func:`compose` echoes it as the response's
     ``dbu_um``, issue #1496), resolved as the PDK's required stream dbu when
     ``required_output_dbu_um`` is given (issue #5721:
-    :func:`~klayout_tools.pdk.resolve_output_dbu`, e.g. 0.001 for gf180mcu
+    :func:`~klayout_tools.pdk_output_dbu.resolve_output_dbu`, e.g. 0.001 for gf180mcu
     even though every gf180mcu block's own stream is finer), else the
     *finest* dbu among all blocks (issue #1514); ``rescale_warnings``
     is one string per block whose own dbu differed and was rescaled onto it,
@@ -5175,43 +5007,25 @@ def _write_composed_gds(
             # a required stream dbu *coarser* than this block's own (a
             # gf180mcu place-and-route block at 0.0005 meeting the family's
             # required 0.001), the rescale *divides* coordinates -- exact
-            # only when every coordinate is already a multiple of the ratio.
-            # That is measured, never assumed: `_assert_block_grid_exact`
-            # runs `kdb.Region.grid_check` (the primitive the decks' `ongrid`
-            # checks use) per layer over the block's whole reachable cell
-            # tree, plus every instance displacement/array vector and text
-            # position, and raises naming the block, the layer and one
-            # offending coordinate -- never silently rounds -- before the
-            # transform is applied, so a losing transform never reaches the
-            # output stream.
+            # only when every coordinate is already a multiple of the ratio,
+            # so `gen_compose_dbu.reconcile_block_dbu` measures the whole
+            # reachable cell tree (`kdb.Region.grid_check` -- the primitive
+            # the decks' `ongrid` checks use -- per layer, plus every text
+            # position and instance displacement/array vector) and refuses
+            # by name -- never silently rounds -- before the transform is
+            # applied, so a losing transform never reaches the output
+            # stream. The mechanics live in `gen_compose_dbu.py` (this
+            # file's file-size ratchet, #2766); its `DbuReconcileError`
+            # messages deliberately start mid-sentence ("has dbu=..." /
+            # "cannot be composed at...") so this wrapper's block/gds prefix
+            # completes them byte-identically to the pre-split errors.
             original_dbu = src_layout.dbu
-            if src_layout.dbu > dbu:
-                ratio = _integer_dbu_ratio(src_layout.dbu, dbu)
-                if ratio is None:
-                    raise GenComposeError(
-                        f"block '{block_id}': gds '{gds_path}' has "
-                        f"dbu={src_layout.dbu}, which does not evenly divide "
-                        f"the composed cell's dbu={dbu} -- every block's dbu "
-                        "must be an exact integer multiple of the finest "
-                        "block's own dbu to be losslessly reconciled"
-                    )
-                src_layout.transform(kdb.ICplxTrans(float(ratio)))
-            else:
-                ratio = _integer_dbu_ratio(dbu, src_layout.dbu)
-                if ratio is None:
-                    raise GenComposeError(
-                        f"block '{block_id}': gds '{gds_path}' has "
-                        f"dbu={src_layout.dbu}, which the composed cell's "
-                        f"dbu={dbu} does not evenly divide -- a finer block "
-                        "can only be losslessly coarsened onto the composed "
-                        "dbu when the ratio is an exact integer and every "
-                        "coordinate lies on that coarser grid"
-                    )
-                _assert_block_grid_exact(
-                    block_id, gds_path, src_layout, src_cell, ratio
-                )
-                src_layout.transform(kdb.ICplxTrans(1.0 / float(ratio)))
-            src_layout.dbu = dbu
+            try:
+                ratio = reconcile_block_dbu(src_layout, src_cell, dbu)
+            except DbuReconcileError as exc:
+                raise GenComposeError(
+                    f"block '{block_id}': gds '{gds_path}' {exc}"
+                ) from exc
             dbu_rescale_warnings.append(
                 f"block '{block_id}' gds '{gds_path}' was rescaled from its own "
                 f"dbu={original_dbu} onto the composed cell's dbu={dbu} "

@@ -1927,7 +1927,8 @@ deliberately **two** functions, because a PDK can legitimately carry two
 different dbu answers:
 
 ```python
-from klayout_tools.pdk import resolve_output_dbu, resolve_pdk_dbu
+from klayout_tools.pdk import resolve_pdk_dbu
+from klayout_tools.pdk_output_dbu import resolve_output_dbu
 
 info = find_pdk(variant="gf180mcuA")
 

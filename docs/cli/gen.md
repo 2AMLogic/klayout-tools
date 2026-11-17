@@ -2337,7 +2337,7 @@ coarser write is exact by construction.
 The stream dbu and the tech-LEF dbu answer **different questions**, and the
 toolkit keeps both:
 
-- **Stream dbu** (this section — `pdk.resolve_output_dbu`): what `klt gen`
+- **Stream dbu** (this section — `pdk_output_dbu.resolve_output_dbu`): what `klt gen`
   and [`klt gen-compose`](gen-compose.md) *write* at.
 - **Tech-LEF dbu** (`pdk.resolve_pdk_dbu`): the `DATABASE MICRONS` truth a
   DEF *reader* must use — [`klt place-and-route`](place-and-route.md)'s
