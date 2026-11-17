@@ -2124,9 +2124,11 @@ def _compare_engine_builds(
     worker_simulator: dict[str, Any] | None, client_build: dict[str, Any] | None
 ) -> dict[str, Any]:
     """Compare the worker's ``--version`` banner with the client's local
-    ``environment.engine_build`` banner (issue #3095). ``not_comparable``
-    unless both sides captured one -- never a proven mismatch. Whitespace is
-    normalised; a match proves the same banner, not the same build options."""
+    ``environment.client_engine_build`` banner (issue #3095) -- the
+    ``client_*`` key the submitter's probe lands in on an off-host report
+    (#5566). ``not_comparable`` unless both sides captured one -- never a
+    proven mismatch. Whitespace is normalised; a match proves the same
+    banner, not the same build options."""
     worker = (worker_simulator or {}).get("version_banner")
     client = (client_build or {}).get("version_banner")
     if not isinstance(worker, str) or not isinstance(client, str):

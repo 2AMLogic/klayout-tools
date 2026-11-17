@@ -10135,9 +10135,12 @@ def _engine_build_with_comparison(
 
 
 def _probe_engine_build(ngspice_binary: str | None) -> dict[str, Any] | None:
-    """``environment.engine_build`` (issue #3095): the local ngspice build
-    identity -- ``--version`` banner plus binary sha256 -- probed once per
-    sweep. ``engine_version`` is the major version only and two builds of one
+    """The local ngspice build identity (issue #3095) -- ``--version``
+    banner plus binary sha256 -- probed once per sweep. The result lands in
+    ``environment.engine_build`` on a ``local`` report and in
+    ``environment.client_engine_build`` on an off-host one, where #5566
+    rewrites ``engine_build`` to the worker's (``apply_worker_engine_build``).
+    ``engine_version`` is the major version only and two builds of one
     major can differ in options (FFTW vs. padded FFT). ``None`` for engines
     without a probe (xyce). A failed probe never fails the run: the banner is
     ``None`` and ``probe`` / ``reason`` say why."""
