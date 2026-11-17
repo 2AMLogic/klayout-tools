@@ -103,6 +103,7 @@ from .pdk_ambiguity import AMBIGUITY_REMEDY as AMBIGUITY_REMEDY
 from .pdk_ambiguity import ambiguity_warning as ambiguity_warning
 from .pdk_compat import (
     check_compatibility,
+    check_expected_bundle,
     check_expected_version,
     read_fetched_commit,
     read_fetched_marker,
@@ -176,6 +177,7 @@ def find_pdk(
     variant: str | None = None,
     root: str | None = None,
     expect_version: str | None = None,
+    expect_bundle_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Resolve one PDK install/variant and return its discovery payload.
 
@@ -270,6 +272,11 @@ def find_pdk(
     ``{"status": match|mismatch|unknown, "expected", "installed"}`` -- only
     when given; see :func:`klayout_tools.pdk_compat.check_expected_version`.
 
+    ``expect_bundle_sha256`` (issue #5624) adds a ``bundle_expectation``
+    object of the same shape, comparing the pin with the ``sha256`` the
+    install's ``.pdk-store.json`` records -- only when given; see
+    :func:`klayout_tools.pdk_compat.check_expected_bundle`.
+
     Raises :class:`PdkNotFoundError` when nothing resolves.
     """
     effective_variant = variant if variant is not None else os.environ.get("PDK")
@@ -324,6 +331,10 @@ def find_pdk(
         if expect_version is not None:
             report["version_expectation"] = check_expected_version(
                 expect_version, variant_dir, chosen["_sources"]
+            )
+        if expect_bundle_sha256 is not None:
+            report["bundle_expectation"] = check_expected_bundle(
+                variant_dir, expect_bundle_sha256
             )
         return report
 

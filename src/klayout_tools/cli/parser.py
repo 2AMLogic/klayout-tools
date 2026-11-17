@@ -212,6 +212,23 @@ def _add_expect_version_arg(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_expect_bundle_arg(parser: argparse.ArgumentParser) -> None:
+    """Register ``--expect-bundle-sha256`` on ``klt pdk check`` (issue #5624)."""
+    parser.add_argument(
+        "--expect-bundle-sha256",
+        dest="expect_bundle_sha256",
+        default=None,
+        metavar="SHA256",
+        help=(
+            "assert the install was provisioned from the bundle whose "
+            "recorded sha256 this is (full 64-hex digest, compared exactly "
+            "with the nearest .pdk-store.json; the stamp is trusted, the "
+            "tree is not rehashed). Exit 6 (payload still emitted) on "
+            "mismatch or unknown (no recorded sha256)"
+        ),
+    )
+
+
 def create_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="klt",
@@ -2936,6 +2953,7 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
         pdk_root_help="explicit install root; overrides $PDK_ROOT and the search order",
     )
     _add_expect_version_arg(check_parser)
+    _add_expect_bundle_arg(check_parser)
     _add_format_arg(check_parser)
     check_parser.set_defaults(func=pdk_cmd.run_check)
 

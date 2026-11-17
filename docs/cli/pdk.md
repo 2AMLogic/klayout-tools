@@ -196,8 +196,12 @@ installs, tarballs without the header, other install kinds) — never guessed.
 `version` is unchanged. The fleet-bundle `.pdk-store.json` is written outside
 this repo (2AMLogic/2am) -- read, never written, here (issue #5318): when
 `SOURCES`, `.fetched-version` and git give nothing, `version` falls back to
-`store:<version>` from that file's string `version` (one level above the real
-variant dir). It carries no commit; recording one is out of scope here.
+`store:<version>` from that file's string `version`. Both placements are
+accepted (issue #5624): at the variant root (`<root>/<variant>/.pdk-store.json`,
+where the fleet's provisioner writes it) and one level above the real
+(symlink-resolved) variant dir (issue #5318's documented placement); the
+nearest one wins, and a present-but-unusable stamp is never skipped in favour
+of a farther one. It carries no commit; recording one is out of scope here.
 
 ## PDK layouts: what resolves and what doesn't
 
@@ -555,6 +559,52 @@ unreadable or in another namespace; `installed` is `null` when unreadable).
 emitted, one stderr line names both revisions, and the verb exits `6`. If
 `check` also finds dangling symlinks, the lower code `4` wins. Without the
 flag nothing changes.
+
+A third identity namespace serves object-store installs (issue #5624). An
+install provisioned from a bundle carries no `SOURCES`; its identity is the
+string `version` (an upstream commit SHA) of the nearest `.pdk-store.json` --
+accepted at the variant root or one level above the real variant dir, nearest
+wins (see "Version stamp (`version`)" above). The installed identity is
+resolved in this order: `SOURCES`, then `.fetched-version`, then the store
+stamp, so an install carrying a real `SOURCES` stamp behaves exactly as
+before. A bare hex pin against a store install names the store's commit (both
+are SHAs), so it resolves into the store namespace and matches by the same
+7+ hex prefix rule — `--expect-version <sha>` works on precisely the installs
+a fleet provisions. An explicit `open_pdks <sha>` stamp against a store
+install stays `unknown` (different namespaces, by design), and a store
+install against a lambdapdk `.fetched-version` string is compared exactly in
+the store namespace.
+
+### Asserting a bundle (`--expect-bundle-sha256`, issue #5624)
+
+`check` (not `find`) additionally accepts a content-integrity pin:
+
+```bash
+klt pdk check --pdk sky130A --expect-bundle-sha256 64-hex-digest || exit 1
+```
+
+The value is compared exactly with the string `sha256` the install's nearest
+`.pdk-store.json` records — the digest of the bundle the provisioner
+installed from. With the flag, `--format json` adds an additive
+`bundle_expectation` object of the same shape as `version_expectation`
+(absent otherwise; no paths, no `schema_version` change); text output adds a
+`bundle_expectation:` line. Exit `0` on a match; `6` on a mismatch and on
+`unknown` (no stamp, or none recording a string `sha256` — fail closed), with
+one stderr line per failing expectation. Precedence is unchanged: dangling
+symlinks still win with `4`, and both flags may be given together.
+
+**Limitation — the stamp is trusted, the tree is not rehashed.** This
+compares the install's *recorded* bundle hash, so it detects "provisioned
+from a bundle other than the one my pin names" — the mis-bundling failure
+this issue was filed over. It cannot detect in-place edits to already-
+unpacked files: an unpacked tree cannot be hashed back to its tar bytes
+reproducibly, so recorded-stamp comparison is the honest ceiling for a local
+check. It also cannot detect upstream relative symlinks that were
+*materialized* into regular files during bundling — that would need to know
+which paths upstream holds as symlinks at the declared revision, which no
+local signal provides. A faithful bundle and a symlink-materialized one are
+different bundles with different hashes, so pinning the hash of the bundle
+you verified is what makes this leg bite.
 
 ### Several installs of one variant (`ambiguous_roots`, issue #2564)
 
@@ -1930,7 +1980,7 @@ libraries ship no `techlef/` directory at all, returns an empty
 | `3` | `cells --supply <volts>` ran fine, but no library is compatible with the stated supply (see "Compatibility verdict" above). |
 | `4` | `check` resolved an install, but one or more of its asset directories contain a dangling symlink (see "Dangling symlinks" above). |
 | `5` | `pcell-check` resolved an install, but one or more of its KLayout PyCell packages could not be imported here (see "`klt pdk pcell-check`" above). |
-| `6` | `find`/`check --expect-version` ran fine, but the installed PDK identity is a `mismatch` or `unknown` against the supplied value (see "Asserting a pin"). `check`'s `4` takes precedence. |
+| `6` | `find`/`check --expect-version` or `check --expect-bundle-sha256` ran fine, but the installed PDK identity (or the recorded bundle sha256) is a `mismatch` or `unknown` against the supplied value (see "Asserting a pin" / "Asserting a bundle"). `check`'s `4` takes precedence. |
 
 On a `find`/`env` failure the error names the search order tried and points at
 a concrete way to install a PDK, so a downstream tool never crashes deep in a
