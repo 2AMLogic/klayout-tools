@@ -7454,7 +7454,7 @@ def test_command_evidence_launch_failure_renders_command_failed(monkeypatch):
     assert item_3["citation"] is None
 
 
-def test_command_evidence_timeout_renders_command_failed(monkeypatch):
+def test_command_evidence_timeout_renders_command_timeout(monkeypatch):
     def fake_run(command, **kwargs):
         raise subprocess.TimeoutExpired(cmd=command, timeout=kwargs.get("timeout"))
 
@@ -7464,7 +7464,7 @@ def test_command_evidence_timeout_renders_command_failed(monkeypatch):
 
     item_3 = next(item for item in result["items"] if item["id"] == 3)
     assert item_3["status"] == "unmet"
-    assert item_3["reason"] == "command_failed"
+    assert item_3["reason"] == "command_timeout"
     assert item_3["citation"] is None
 
 
