@@ -898,21 +898,21 @@ _FILLER_CELLS: dict[str, tuple[str, ...]] = {
 #: Phase 3) -- used only by the optional ``request.post_route_spef`` path
 #: (see :func:`_post_route_spef_metrics`) to resolve which curated
 #: ``klayout_tools.decks`` extraction deck matches this run's PDK family.
-#: Same "not derivable from the resolved PDK install itself" posture as
-#: :data:`_CTS_BUFFER_CELLS`/:data:`_ROUTING_LAYER_RANGE` above -- a standard
-#: cell library name (LEF/liberty naming) and an extraction deck name
-#: (``klayout_tools.decks``' own family key) are two independent naming
-#: conventions this module has to bridge explicitly. Matches
-#: :func:`klayout_tools.decks.get_extraction_deck`'s/``get_parasitics_deck``'s
-#: own accepted names exactly (``"sky130"``/``"gf180mcu"``).
+#: Like :data:`_CTS_BUFFER_CELLS`/:data:`_ROUTING_LAYER_RANGE` above, this
+#: bridges LEF/liberty cell-library names to ``klayout_tools.decks`` family
+#: keys, matching ``get_parasitics_deck``'s own accepted names exactly.
 #:
 #: ``sg13g2_stdcell`` (issue #1784) -> ``"sg13g2"`` -- the IHP SG13G2 deck
 #: family already registered in ``klayout_tools.decks.__init__`` (used
 #: today by ``klt extract``/``klt drc``/``klt lvs`` for this same PDK); no
 #: new deck family is introduced here, this table just bridges to it.
+#:
+#: ``gf180mcu_fd_sc_mcu7t5v0`` (issue #5825) -> ``"gf180mcu"`` -- 7t and 9t
+#: route over the same ``Metal2-Metal5`` stack, so one deck serves both.
 _EXTRACT_DECK_FOR_CELL_LIBRARY: dict[str, str] = {
     "sky130_fd_sc_hd": "sky130",
     "gf180mcu_fd_sc_mcu9t5v0": "gf180mcu",
+    "gf180mcu_fd_sc_mcu7t5v0": "gf180mcu",
     "sg13g2_stdcell": "sg13g2",
     "asap7sc7p5t_rvt": "asap7",
 }
@@ -1399,7 +1399,8 @@ def run_place_and_route(
     ``pdk.rebuild_corners`` units run; ``batch`` submits one job per corner
     to the Spot batch fleet (:mod:`klayout_tools.place_and_route_batch`) and
     never falls back to running a unit on this host. A single-unit request
-    stays local under a host-default ``batch``.
+    stays local under a host-default ``batch``; an explicit ``batch`` runs
+    the whole flow as one job (issue #5799).
 
     **Resume (issue #4411).** ``resume`` (``--resume``) skips each leading
     stage whose commit record (:mod:`klayout_tools.place_and_route_resume`)
@@ -1422,22 +1423,18 @@ def run_place_and_route(
             "re-runs in full)"
         )
 
-    from . import place_and_route_batch
+    from . import place_and_route_batch, place_and_route_batch_single
 
     selected = place_and_route_batch.resolve_backend(
         backend, request, units=len(rebuild_corners) if rebuild_corners else 1
     )
     if selected == "batch":
-        if "dir" in request.get("outputs", {}):
-            raise PlaceAndRouteError(
-                "request.outputs.dir is not supported with the batch backend "
-                "(the fleet copies artifacts back into .klt/place-and-route/)"
-            )
-        assert rebuild_corners is not None and _ownership is not None
-        return place_and_route_batch.run_rebuild_corners_batch(
+        assert _ownership is not None
+        return place_and_route_batch_single.run_batch(
             request_path,
             request,
             rebuild_corners,
+            resume=resume,
             pdk_variant=pdk_variant,
             ownership=_ownership,
         )
