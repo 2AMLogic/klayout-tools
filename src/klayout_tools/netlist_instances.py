@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ._paths import fold_spice_continuations
+from .netlist_paths import fold_continuations
 
 #: How many instance entries the payload's ``instances`` array keeps. Above
 #: this the array truncates and the sibling ``instances_truncated`` flag is
@@ -53,24 +53,20 @@ def instances_payload(data: bytes, *, cap: int = INSTANCES_CAP) -> dict[str, Any
 def parse_instance_cards(text: str) -> list[dict[str, Any]]:
     """Parse ``text`` (a SPICE netlist) into one entry per device instance.
 
-    Whole-line ``*`` comments and blank lines are dropped first, then ``+``
-    continuation lines are folded onto their entry via the shared
-    :func:`klayout_tools._paths.fold_spice_continuations` -- the same
+    ``+`` continuation lines are folded onto their entry via the shared
+    :func:`klayout_tools.netlist_paths.fold_continuations` -- the same
     primitive ``--check``'s layout normalization uses -- so a parameter
     emitted on a continuation line lands in its instance's ``params``. What
     remains after folding is an instance card unless it starts with ``+``
-    (an orphan continuation with no entry to fold onto) or ``.`` (a SPICE
-    control card: ``.subckt``, ``.param``, ``.include``, ...).
+    (an orphan continuation with no entry to fold onto), ``*`` (a comment,
+    which the fold leaves byte-intact) or ``.`` (a SPICE control card:
+    ``.subckt``, ``.param``, ``.include``, ...).
     """
-    body = [
-        line
-        for line in text.splitlines()
-        if line.strip() and not line.lstrip().startswith("*")
-    ]
+    folded = fold_continuations(text.encode("utf-8", errors="replace"))
     entries: list[dict[str, Any]] = []
-    for line in fold_spice_continuations(body):
-        card = line.strip()
-        if card.startswith(("+", ".")):
+    for raw in folded.split(b"\n"):
+        card = raw.decode("utf-8", errors="replace").strip()
+        if not card or card.startswith(("*", "+", ".")):
             continue
         entry = _parse_card(card)
         if entry is not None:

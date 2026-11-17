@@ -84,7 +84,7 @@ from .netlist_inputs import (
     split_inputs_record,
 )
 from .netlist_instances import instances_payload
-from .netlist_paths import _PATH_COMMENT_RE, postprocess_netlist
+from .netlist_paths import _PATH_COMMENT_RE, fold_continuations, postprocess_netlist
 from .netlist_pdk import (
     _pdk_env_note,
     _pdk_root_consistent,
@@ -492,40 +492,29 @@ def _sort_subckt_comment_ports(line: bytes) -> bytes:
 
 
 def _normalize_layout(data: bytes, ignore_comments: bool = False) -> bytes:
-    """``data`` with ``+`` continuation lines joined onto their predecessor and
-    whitespace runs collapsed, so a netlist re-wrapped by a post-processor
-    compares equal to the original (issue #3324).
-
-    Comment lines (``*``) are kept as their own lines with only trailing
-    whitespace (and any CR) dropped; a ``+`` line is never joined onto a
-    comment. Only line layout changes, never a token of a non-comment line,
-    so an electrical change (device card, parameter, node or pin order) still
-    compares unequal. The one comment-token normalization is the port order of
-    xschem's ``**.subckt <name> <ports...>`` comment, which varies across
-    xschem versions (:func:`_sort_subckt_comment_ports`).
-
-    ``ignore_comments=True`` (issue #4525) drops every comment line and every
-    blank line instead, so a project-added header or a rewritten
-    ``** sch_path:`` comment cannot cause drift; non-comment lines are still
-    compared token for token.
+    """``data`` laid out the way ``--check`` compares it (issue #3324): ``+``
+    continuations joined, whitespace runs collapsed -- via
+    :func:`klayout_tools.netlist_paths.fold_continuations`, the helper the
+    writer applies under ``--canonical-wrap`` (issue #5715), so canonical
+    output is a fixed point of this comparison. The compare-only comment
+    behaviours stay here: a ``+`` never joins onto a comment, comments keep
+    their sorted ``**.subckt`` port order (:func:`_sort_subckt_comment_ports`)
+    and lose trailing whitespace (and any CR), and ``ignore_comments=True``
+    (issue #4525) drops comment and blank lines entirely, so a ``+`` folds
+    across a dropped comment onto the card before it.
     """
-    lines: list[bytes] = []
-    prev_joinable = False
-    for raw in data.split(b"\n"):
-        if ignore_comments and (not raw.strip() or raw.lstrip().startswith(b"*")):
-            continue
-        if raw.lstrip().startswith(b"*"):
-            lines.append(_sort_subckt_comment_ports(raw.rstrip()))
-            prev_joinable = False
-            continue
-        tokens = raw.split()
-        if tokens and tokens[0].startswith(b"+") and prev_joinable:
-            rest = [tokens[0][1:]] + tokens[1:]
-            lines[-1] = b" ".join([lines[-1]] + [t for t in rest if t])
-            continue
-        lines.append(b" ".join(tokens))
-        prev_joinable = bool(tokens)
-    return b"\n".join(lines)
+    if ignore_comments:
+        data = b"\n".join(
+            line
+            for line in data.split(b"\n")
+            if line.strip() and not line.lstrip().startswith(b"*")
+        )
+    return b"\n".join(
+        _sort_subckt_comment_ports(line.rstrip())
+        if line.lstrip().startswith(b"*")
+        else line
+        for line in fold_continuations(data).split(b"\n")
+    )
 
 
 def _subckt_card(line: bytes) -> tuple[bytes, list[bytes], list[bytes]] | None:
@@ -923,6 +912,7 @@ def run_netlist(
     erc: bool = False,
     symbol_path: Sequence[str] = (),
     relative_paths: bool = False,
+    canonical_wrap: bool = False,
     provenance_header: bool = True,
 ) -> dict[str, Any]:
     """Export ``schematic`` to a SPICE netlist at ``output`` via xschem.
@@ -951,6 +941,10 @@ def run_netlist(
 
     ``relative_paths=True`` (issue #5046) writes ``** sch_path:`` / ``** sym_path:``
     comments relative to the schematic's git toplevel (checkout-independent).
+
+    ``canonical_wrap=True`` (issue #5715) writes the layout ``--check``
+    compares, so two hosts whose ``--check`` says ``match`` write identical
+    files (combine with ``--relative-paths`` and ``--no-provenance-header``).
 
     Returns the documented payload (see ``docs/cli/netlist.md``). Raises
     :class:`NetlistError` for every failure mode: unreadable schematic,
@@ -1007,7 +1001,11 @@ def run_netlist(
             fresh_data = handle.read()
 
         fresh_data, block_info = postprocess_netlist(
-            fresh_data, block=block, relative_paths=relative_paths, schematic=schematic
+            fresh_data,
+            block=block,
+            relative_paths=relative_paths,
+            schematic=schematic,
+            canonical_wrap=canonical_wrap,
         )
 
         version = _probe_xschem_version(xschem_binary)
@@ -1061,6 +1059,7 @@ def run_netlist(
 
         _write_output(output, written_data)
         payload.update(status=STATUS_GENERATED, provenance_header=provenance_header)
+        payload["canonical_wrap"] = canonical_wrap
         payload["netlist"] = _netlist_block(output, written_data)
         return payload
     finally:
