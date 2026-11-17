@@ -1831,9 +1831,14 @@ licons by an approximation (see the `licon1.width.1` note below), not
 replaced by `licon.1b/c`. A `klt gen res_array` `high`/`xhigh` cell therefore
 reads `clean` here while the PDK's own Magic `drc(full)` still reports those
 head rules; a `klt drc --deck sky130` pass is not evidence the heads meet
-them. `klt drc --engine klayout` (the PDK's own `sky130A_mr.drc`) is the
-independent check. This gap is documentation-only: no field of the JSON
-`coverage` object changes.
+them. Both `licon.1c` and `rpm.1` are head-geometry-derived — measured
+2026-11-15 (Magic 8.3.683, open_pdks sky130A `c6d73a35f524`, klt
+`0.9.3.dev3+gd5d57daf9a14`), a uniform 0.2 µm marker (`spacing_um` <= 0.4)
+leaves `rpm.1` unchanged while head length alone clears it — so the marker
+overhang is ruled out and the head-length fix is tracked in #5704. `klt
+drc --engine klayout` (the PDK's own `sky130A_mr.drc`) is the independent
+check. This gap is documentation-only: no field of the JSON `coverage`
+object changes.
 
 Nine of these rules approximate official rules our engine cannot transcribe
 literally. `diff.width.1` and `tap.width.1` (issue #2321) are the two
