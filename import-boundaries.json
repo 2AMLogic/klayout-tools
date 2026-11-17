@@ -145,6 +145,7 @@
         "klayout_tools.cli._drc_parser_args",
         "klayout_tools.cli.drc_cmd",
         "klayout_tools.cli.drc_text",
+        "klayout_tools._drc_edge_pair_hull",
         "klayout_tools.drc",
         "klayout_tools.drc_check_kinds",
         "klayout_tools.drc_crosscheck",
@@ -179,6 +180,7 @@
       "modules": [
         "klayout_tools.cli.env_provenance_cmd",
         "klayout_tools.env_provenance",
+        "klayout_tools.env_provenance_scrub",
         "klayout_tools.env_provenance_walk"
       ]
     },
@@ -433,7 +435,8 @@
       "description": "`klt lef_abstract` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.lef_abstract_cmd",
-        "klayout_tools.lef_abstract"
+        "klayout_tools.lef_abstract",
+        "klayout_tools.lef_abstract_no_layout"
       ]
     },
     "lvs": {
@@ -443,6 +446,7 @@
         "klayout_tools.cli.lvs_cmd",
         "klayout_tools.lvs",
         "klayout_tools.lvs_combine",
+        "klayout_tools.lvs_coverage",
         "klayout_tools.lvs_finfet",
         "klayout_tools.lvs_finfet_flatten",
         "klayout_tools.lvs_finfet_power",
@@ -665,6 +669,7 @@
         "klayout_tools._check_result",
         "klayout_tools._devices",
         "klayout_tools._digest",
+        "klayout_tools._git_tracked",
         "klayout_tools._jsongz",
         "klayout_tools._jsonnum",
         "klayout_tools._layout",

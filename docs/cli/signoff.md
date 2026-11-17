@@ -622,7 +622,7 @@ the answer to "was that hash checked against the artifact itself?"
 | ----- | ------- |
 | `true` | The input artifact the envelope names was found, re-hashed (`sha256`, the same digest the producing run recorded), and **matches**. The freshness claim is anchored to a file. |
 | `false` | The artifact was found and re-hashed, and it **disagrees** with the hash the envelope recorded — the report describes a revision that is no longer on disk. |
-| `null`  | Nothing was re-hashed, so the pinned hash was only ever compared to another claim. Either the envelope records no input hash, its kind names no input path this command can resolve, or the path it names does not resolve to a readable file from the grading context. |
+| `null`  | Nothing was re-hashed, so the pinned hash was only ever compared to another claim. Either the envelope records no input hash, its kind names no input path this command can resolve, or the path it names does not resolve to a readable file from the grading context — including one git does not track (see the index basis below). |
 
 ```
 $ klt signoff --manifest manifest.json --format json | jq '.items[] | select(.id == 3) | .citation | {content_hash, input_verified}'
@@ -693,6 +693,22 @@ and is therefore unverifiable here, with or without the flag. A *match* on
 any candidate always wins over a mismatch on another, so a coincidentally
 same-named file beside the envelope can never turn a genuinely fresh
 citation into a reported one.
+
+**The grading basis is the git index, not the working tree** (issue
+#5857). A candidate that sits inside a functioning git checkout whose
+index does not track it — gitignored scratch output, a never-committed
+leftover — is dropped before anything reads it, so an untracked input
+grades `input_verified: null` **by design**, identically on the host that
+happens to have the file and in a fresh clone; for the artifact-anchored
+generic items (T1 1/2/9/10) that means the `unverifiable_provenance`
+refusal renders the same everywhere too, instead of the block grading T1
+on the producing host and not-T1 in CI. The `.git`-less fallback: a tree
+with no functioning checkout above the candidate — a
+`/archive/<sha>.tar.gz` unpack, a vendored copy, a `--repo-root` tree
+without VCS metadata — keeps the filesystem-presence behaviour, since
+trackedness cannot be asked of a tree that has no index; repo-scoped
+resolution there works exactly as
+[`--repo-root`](#grading-outside-a-git-checkout---repo-root) describes.
 
 **Cost**: one streamed `sha256` of the named artifact per citation — the
 same read `klt drc --check`/`klt lvs --check` already do, and never an
@@ -2563,10 +2579,14 @@ $ klt signoff --manifest manifest.json --repo-root /tmp/archive-copy
 
 Every `scope: "repo"` input in the manifest's evidence then resolves
 against `<dir>` instead of a `.git` walk, and a manifest that grades `met`
-inside its checkout grades `met` over the copy. The flag applies to both
-doc-parsing modes (`--manifest` and `--fleet`, including their `--check`
-re-grades); envelope aggregation re-hashes no input artifacts, so the flag
-is refused there, as `--tiers-doc`/`--check` are. Rules:
+inside its checkout grades `met` over the copy. The git-index
+trackedness filter (issue #5857) does not apply over such a root: a tree
+without functioning VCS metadata has no index to ask, so candidates there
+keep the filesystem-presence behaviour — committed artifacts verify in
+both places, which is the parity #2878 bought and #5857 keeps. The flag
+applies to both doc-parsing modes (`--manifest` and `--fleet`, including
+their `--check` re-grades); envelope aggregation re-hashes no input
+artifacts, so the flag is refused there, as `--tiers-doc`/`--check` are. Rules:
 
 - The explicit root **replaces** the `.git`-ancestor discovery — it is the
   repo root, full stop. No fallback to a discovered checkout: a caller that
@@ -4510,7 +4530,7 @@ distinguishable from "no samples document was ever named" (see
 | `kind`          | string          | `"drc"`, `"lvs"`, `"extract"`, `"sim"`, `"yield"`, `"pex"`, `"sta"`, `"functional-verification"`, `"erc"`, `"place-and-route"`, `"socket-check"`, `"lef-abstract"`, `"synthesize"`, or `"generic"` — the resolved envelope's classified kind. For item 11's compound citation this is the **leading** part's kind (always `"erc"`); see `parts` below. |
 | `check_status`  | string \| null  | The resolved envelope's own `status` field.                                           |
 | `content_hash`  | string \| null  | The resolved envelope's `provenance.input.content_hash`, when populated; for a `yield` envelope (which populates no `provenance` block), the hash of the samples document it names instead — see "`klt yield` evidence and content hashing" above. |
-| `input_verified`| boolean \| null | Whether that `content_hash` was itself checked against the **input artifact the envelope names**, or only against the envelope's own claim about it (issue #2196): `true` — re-hashed and matched; `false` — re-hashed and disagreed; `null` — nothing was re-hashed (no recorded hash, no resolvable input path for this kind, or a path that does not resolve to a readable file from the grading context). **Always present**, `null` included: an omitted key would leave the unverified case exactly as silent as it was before this field existed. Never consulted by any grading rule — see "A pinned hash is checked against the artifact, not only against the envelope" above. |
+| `input_verified`| boolean \| null | Whether that `content_hash` was itself checked against the **input artifact the envelope names**, or only against the envelope's own claim about it (issue #2196): `true` — re-hashed and matched; `false` — re-hashed and disagreed; `null` — nothing was re-hashed (no recorded hash, no resolvable input path for this kind, or a path that does not resolve to a readable file from the grading context — including one inside a functioning git checkout whose index does not track it, the index being the grading basis since issue #5857: an untracked input grades `null` by design). **Always present**, `null` included: an omitted key would leave the unverified case exactly as silent as it was before this field existed. Never consulted by any grading rule — see "A pinned hash is checked against the artifact, not only against the envelope" above. |
 | `content_hash_unresolved` | object | **`yield` citations only**, and only when the report names a samples document (`report["samples"]`) that could not be found in either place `klt signoff` looked (report-relative, then cwd-relative — issue #2197): `{"samples", "searched"}`, the named path and the candidate paths tried, in order. **Absent** whenever `content_hash` was successfully computed, and whenever the report names no samples document at all — an absent key never means "the input was verified", only that this particular failure mode did not occur; it distinguishes "this input could not be located" from any other reason `content_hash` might be `null`. Quoted, never graded on — a manifest that pins `content_hash` for this item still renders `unmet`/`unverifiable_provenance` on its own, independent of this field. |
 | `exit_status`   | integer         | `0`, *inferred*, for a file-backed entry (a readable, passing envelope implies its producing command exited zero); the subprocess's *actually observed* return code, for a command-backed entry. |
 | `body_bias`     | object          | **`pex` citations only**, and only when the cited envelope carries a `body_bias` block (issue #1983): `{"status", "unbiased_device_count", "unbiased_nets"}`, reduced from it — whether the extracted netlist these post-layout numbers were measured on had a DC bias path for every device body. **Absent** for any other kind, and for `pex` evidence committed before `klt pex` reported it — an absent `body_bias` means "this artifact made no body-bias statement", never "every device body was biased". See "Device-body bias is reported, not graded" above. |
