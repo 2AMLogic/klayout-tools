@@ -2,20 +2,16 @@
 latch form -- referenced to the enable's closing edge (issue #5521)."""
 
 import json
-import shutil
 from pathlib import Path
 
 import pytest
 
+from helpers.tool_probes import SKIP_NO_NGSPICE as _SKIP_NO_NGSPICE
 from klayout_tools import characterize, liberty_writer
 from klayout_tools import characterize_bisect as bisect
 from klayout_tools import characterize_constraints as cc
 from klayout_tools.characterize_arcs import derive_arcs, derive_sequential_arc
 from klayout_tools.characterize_sequential import closing_edge
-
-_SKIP_NO_NGSPICE = pytest.mark.skipif(
-    shutil.which("ngspice") is None, reason="ngspice is not installed"
-)
 
 _OPTIONS = {"degradation": 0.1, "window_ns": (-1.0, 2.0), "tolerance_ns": 0.002}
 
