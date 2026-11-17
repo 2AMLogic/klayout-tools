@@ -132,6 +132,7 @@ def test_post_commands_refused_with_transient_plot_measurements(tmp_path):
 
 
 def test_post_commands_gate_requires_runner_0_9_3():
+    assert "post_commands" in spec._MANDATORY_RUNNER_FEATURES
     declared = {"analysis": {**_TRAN, "post_commands": _POST}}
     assert spec._request_features(declared) == ["post_commands"]
     assert spec._request_features({"analysis": _TRAN}) == []

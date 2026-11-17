@@ -271,7 +271,10 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
 #: ``twoport_noise`` is mandatory because an older runner would reject
 #: ``analysis.noise`` or omit ``nf_db`` (#3339). ``corners.params`` is
 #: mandatory because an older runner ignores the axis, running one corner per
-#: process x temperature with ``status: pass`` (#4235). The #5645 five
+#: process x temperature with ``status: pass`` (#4235). ``post_commands`` is
+#: mandatory because an older runner ignores the field, composing the deck
+#: without ``linearize``/``fft`` and evaluating ``expr`` measurements against
+#: the transient plot with ``status: pass`` (#6080). The #5645 five
 #: (``corners.options``, ``options.nodeset``,
 #: ``options.initial_conditions``, ``analysis_overrides``,
 #: ``analysis.op_check``) are mandatory because each one's post-run
@@ -299,6 +302,7 @@ _MANDATORY_RUNNER_FEATURES = frozenset(
         "options.initial_conditions",
         "analysis_overrides",
         "analysis.op_check",
+        "post_commands",
     }
 )
 
