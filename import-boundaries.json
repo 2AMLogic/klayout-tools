@@ -17,7 +17,9 @@
       "modules": [
         "klayout_tools.artifact_objects",
         "klayout_tools.artifact_verify",
-        "klayout_tools.cli.artifact_cmd"
+        "klayout_tools.artifact_verify_local",
+        "klayout_tools.cli.artifact_cmd",
+        "klayout_tools.cli.parser_artifact"
       ]
     },
     "cells": {
@@ -571,6 +573,7 @@
         "klayout_tools.pex",
         "klayout_tools.pex_async",
         "klayout_tools.pex_netlist_text",
+        "klayout_tools.pex_resistance_graph",
         "klayout_tools.pex_asap7",
         "klayout_tools.pex_sim_evidence",
         "klayout_tools.spice_flatten",
@@ -715,6 +718,7 @@
         "klayout_tools.macros",
         "klayout_tools.metrics",
         "klayout_tools.op_sanity",
+        "klayout_tools.op_sanity_diagnostics",
         "klayout_tools.output_lock",
         "klayout_tools.resistor_mesh",
         "klayout_tools.touchstone",
@@ -833,6 +837,7 @@
         "klayout_tools.sim_merge",
         "klayout_tools.sim_mismatch_declarations",
         "klayout_tools.sim_mismatch_gate",
+        "klayout_tools.sim_measurement_kind",
         "klayout_tools.sim_measurement_results",
         "klayout_tools.sim_noise",
         "klayout_tools.sim_op_args",
