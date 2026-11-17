@@ -63,7 +63,7 @@ from typing import Any
 
 from . import liberty_writer, sim
 from ._paths import _load_request_json, _resolve_relative, fold_spice_continuations
-from ._provenance import INPUT_ROLE_NETLIST, build_provenance
+from ._provenance import INPUT_ROLE_NETLIST, build_provenance, sha256_file
 from .characterize_arcs import DerivedArc, FunctionError, derive_arcs
 from .characterize_capacity import capacity_shard, with_batch_passthrough
 from .characterize_cards import (
@@ -2218,6 +2218,12 @@ def _build_response(
             # use each. `cell.netlist` above is an *input* and does use the
             # envelope, matching `klt sim`'s own `netlist`.
             "path": emitted_path,
+            # Bare-hex SHA-256 of the emitted `.lib` bytes (additive field, no
+            # `schema_version` bump -- same convention as `klt synthesize`'s
+            # `netlist_sha256`, #2452). The `.lib` is written once and only
+            # read afterwards (round-trip, `--compare-to`), so this describes
+            # the final on-disk bytes; a later in-place edit breaks the pin.
+            "sha256": sha256_file(emitted_path),
             "library_name": library.name,
             "cell_count": len(library.cells),
             "time_unit": library.time_unit,

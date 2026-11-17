@@ -34,6 +34,7 @@ import pytest
 
 from helpers.tool_probes import SKIP_NO_NGSPICE as _SKIP_NO_NGSPICE
 from klayout_tools import characterize, liberty_writer
+from klayout_tools._provenance import sha256_file
 from klayout_tools.characterize_arcs import FunctionError, derive_arcs, parse_function
 from klayout_tools.cli import main
 
@@ -1020,6 +1021,22 @@ def test_example_emits_a_lib_that_round_trips_through_statime(example_run):
     if _have_statime():
         assert roundtrip["status"] == "pass", roundtrip["message"]
         assert "interpolated" in roundtrip["message"]
+
+
+@_SKIP_NO_NGSPICE
+def test_example_liberty_sha256_pins_the_emitted_bytes(example_run):
+    """`liberty.sha256` is the bare-hex digest of the file at `liberty.path`,
+    and a post-run edit of the `.lib` breaks the pin (#5835)."""
+    report, _ = example_run
+    lib_path = report["liberty"]["path"]
+    digest = report["liberty"]["sha256"]
+
+    assert digest == sha256_file(lib_path)
+    assert len(digest) == 64 and not digest.startswith("sha256:")
+
+    with open(lib_path, "ab") as handle:
+        handle.write(b"\n")
+    assert sha256_file(lib_path) != digest
 
 
 @_SKIP_NO_NGSPICE
@@ -2184,6 +2201,7 @@ def test_batch_emits_one_combined_lib_that_round_trips(batch_run):
 
     assert report["liberty"]["cell_count"] == 2
     assert text.count("library (") == 1
+    assert report["liberty"]["sha256"] == sha256_file(report["liberty"]["path"])
     assert "cell (inv_demo) {" in text and "cell (nand2_demo) {" in text
     roundtrip = report["liberty"]["roundtrip"]
     assert roundtrip["status"] != "fail", roundtrip["message"]
