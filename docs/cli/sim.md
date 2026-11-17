@@ -299,7 +299,11 @@ capture records no digest. With no usable worker banner, `version_banner` is
 `null` and `probe`/`reason` say why (`"absent"` for a runner that predates
 #2834 or the SSH `remote` backend, the worker's own `version_probe` code for
 a probe that failed there, `"disagreement"` for sharded members that do not
-agree) — never the submitter's banner. The submitting host's probe is kept
+agree, and `"error"` with every member's code named in `reason` when sharded
+members each failed the probe for *different* reasons — issue
+[#6260](https://github.com/2AMLogic/klayout-tools/issues/6260)) — never the
+submitter's banner. `"absent"` therefore always means no worker probe code was
+reported at all. The submitting host's probe is kept
 verbatim under `environment.client_engine_build`, with the same four keys and
 present only on off-host reports. `worker_environment.engine_build_comparison`
 (below) compares the two for you. A `local` report is unchanged: there

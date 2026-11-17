@@ -469,6 +469,15 @@ def _no_worker_banner(codes: list[str]) -> tuple[str, str]:
         return "error", "the worker's --version probe reported 'ok' but no banner"
     if len(codes) == 1:
         return codes[0], f"the worker's --version probe reported {codes[0]!r}"
+    if codes:
+        # Several members each recorded a concrete reason for the missing banner,
+        # and the reasons differ (#6260): "absent" would read as "no capture at all".
+        named = ", ".join(repr(code) for code in codes)
+        return (
+            "error",
+            f"the sharded members' --version probes failed for different "
+            f"reasons: {named}",
+        )
     return "absent", "the worker reported no --version banner"
 
 
