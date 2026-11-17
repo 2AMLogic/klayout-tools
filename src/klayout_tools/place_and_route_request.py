@@ -530,14 +530,19 @@ _TRACK_KEYS = ("x_offset_um", "x_pitch_um", "y_offset_um", "y_pitch_um")
 
 def _validate_floorplan_tracks(tracks: Any) -> None:
     """Issue #4088: validate ``request.floorplan.tracks``, the optional
-    per-layer ``make_tracks`` definitions that replace the bare
-    ``make_tracks`` (which aborts on a tech LEF with a negative ``OFFSET``)."""
+    ``make_tracks`` definitions that replace the bare ``make_tracks``
+    (which aborts on a tech LEF with a negative ``OFFSET``). A layer may
+    be named by several entries (issue #5671: OpenROAD's repeated
+    ``make_tracks`` on one layer accumulates track patterns, which is
+    how e.g. the ASAP7 7.5-track row is expressed); only a byte-identical
+    repeated entry -- same layer *and* all four numbers -- is an error,
+    since it is a transcription mistake and a no-op in OpenROAD."""
 
     if not isinstance(tracks, list) or not tracks:
         raise PlaceAndRouteError(
             "request.floorplan.tracks must be a non-empty array of objects"
         )
-    seen: set[str] = set()
+    seen: dict[tuple[str, float, float, float, float], int] = {}
     for index, entry in enumerate(tracks):
         where = f"request.floorplan.tracks[{index}]"
         if not isinstance(entry, dict):
@@ -545,11 +550,6 @@ def _validate_floorplan_tracks(tracks: Any) -> None:
         layer = entry.get("layer")
         if not isinstance(layer, str) or not layer:
             raise PlaceAndRouteError(f"{where}.layer must be a non-empty string")
-        if layer in seen:
-            raise PlaceAndRouteError(
-                f"request.floorplan.tracks names layer '{layer}' more than once"
-            )
-        seen.add(layer)
         for key in _TRACK_KEYS:
             value = entry.get(key)
             if (
@@ -562,6 +562,20 @@ def _validate_floorplan_tracks(tracks: Any) -> None:
                 raise PlaceAndRouteError(f"{where}.{key} must be > 0")
             if key.endswith("offset_um") and value < 0:
                 raise PlaceAndRouteError(f"{where}.{key} must be >= 0")
+        identity = (
+            layer,
+            entry["x_offset_um"],
+            entry["x_pitch_um"],
+            entry["y_offset_um"],
+            entry["y_pitch_um"],
+        )
+        first = seen.get(identity)
+        if first is not None:
+            raise PlaceAndRouteError(
+                f"{where} duplicates request.floorplan.tracks[{first}]: "
+                f"identical layer '{layer}' and offsets/pitches"
+            )
+        seen[identity] = index
 
 
 def validate_tech_lef_track_offsets(
