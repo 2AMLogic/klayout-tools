@@ -6668,6 +6668,33 @@ them with the job
   staged files. The array is present only when the option staged inputs for
   an off-host backend.
 
+### Pinning a PDK build on batch
+
+To make a `batch` run execute a specific PDK build rather than whatever the
+runner image baked, set `options.stage_model_inputs: true` together with
+`options.pdk_revision` (your own revision/stamp string, echoed as
+`environment.pdk_revision_asserted`). The runner then executes the files your
+client uploaded, and the report lets you verify that:
+
+- Compare `environment.staged_model_inputs[].sha256` (what was uploaded) with
+  `environment.remote.runner_model_inputs[].sha256` (what the runner reports
+  having received); `source_sha256` is the digest of your original,
+  pre-rewrite bytes.
+- Do **not** use `environment.remote.runner_models_lib_sha256` against a
+  pinned install digest as the key. Under staging `models_lib_comparison` is
+  deliberately `not_comparable` with reason `models_staged`, because the
+  runner's model card is then your staged copy, not the image's.
+
+To judge *before* a run whether an image carries the PDK build you need
+without staging, read the AMI manifest entry (`data/remote-sim-ami-manifest.json`):
+for sky130A/gf180mcu images built after
+[#6156](https://github.com/2AMLogic/klayout-tools/issues/6156), the optional
+`open_pdks_commit` is the 40-hex open_pdks commit the build pinned
+(`build-remote-sim-ami.sh`'s `PDK_VERSION`), alongside the date-label
+`pdk_snapshot`. It is absent on historical entries (unknown, never guessed)
+and on sg13g2 images, which have no single commit. It is publication
+metadata, not proof of the bytes a job executes; the digests above are.
+
 ## OSDI (Verilog-A) model preload
 
 ngspice can only instantiate a Verilog-A compact model through an OSDI

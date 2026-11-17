@@ -74,6 +74,10 @@
 #   (issue #3251), so the batch backend can refuse an unshipped variant
 #   before any S3 write. Omit it and the entry stays variant-unknown.
 #
+#   For sky130A/gf180mcu the entry also publishes `open_pdks_commit` (issue
+#   #6156): the pinned PDK_VERSION, when it is a 40-hex commit. sg13g2
+#   entries leave it unset.
+#
 #   --emit-manifest-entry <ami_id> <klt_version>: print, as JSON, the
 #   manifest entry this build would publish for <ami_id> in --region, from
 #   the resolved --pdk/--klt-ref, and exit -- no AWS call, no file written.
@@ -239,8 +243,20 @@ if [[ "$PDK" == "sg13g2" ]]; then
   # actual IHP-Open-PDK/openvaf-r versions this build baked, so it belongs
   # in the manifest's own snapshot identity, not just this script's log.
   PDK_SNAPSHOT="${SG13G2_PDK_SNAPSHOT_PREFIX}-${KLT_REF:0:12}-$(date -u +%Y.%m.%d)"
+  # No single open_pdks commit exists for SG13G2 -- leave it unpublished.
+  OPEN_PDKS_COMMIT=""
 else
   PDK_SNAPSHOT="${PDK}-$(date -u +%Y.%m.%d)"
+  # Publish the pinned open_pdks commit (issue #6156) so a client can read
+  # which PDK build the image carries. Only a full 40-hex commit is
+  # publishable; a `--pdk-version` override of any other shape (a tag, a
+  # short sha) is left unpublished rather than guessed at or refused.
+  if [[ "$PDK_VERSION" =~ ^[0-9a-f]{40}$ ]]; then
+    OPEN_PDKS_COMMIT="$PDK_VERSION"
+  else
+    OPEN_PDKS_COMMIT=""
+    log "note: --pdk-version '${PDK_VERSION}' is not a 40-hex commit; the manifest entry will not publish open_pdks_commit"
+  fi
 fi
 
 # One manifest entry as JSON (issue #2851). Built by
@@ -256,12 +272,14 @@ from klayout_tools.remote_launcher import RemoteLaunchError, ami_manifest_entry
 keys = ("pdk", "region", "ami_id", "pdk_snapshot", "ngspice_version",
         "built_at", "klt_version", "klt_ref")
 variants = [v for v in sys.argv[9].split(",") if v] if len(sys.argv) > 9 and sys.argv[9] else None
+commit = sys.argv[10] if len(sys.argv) > 10 and sys.argv[10] else None
 try:
-    entry = ami_manifest_entry(**dict(zip(keys, sys.argv[1:9])), pdk_variants=variants)
+    entry = ami_manifest_entry(**dict(zip(keys, sys.argv[1:9])), pdk_variants=variants,
+                               open_pdks_commit=commit)
 except RemoteLaunchError as exc:
     sys.exit(f"manifest entry refused: {exc}")
 print(json.dumps(entry))
-' "$PDK" "$2" "$1" "$PDK_SNAPSHOT" "$NGSPICE_VERSION_HINT" "$BUILT_AT" "$3" "$KLT_REF" "$PDK_VARIANTS")
+' "$PDK" "$2" "$1" "$PDK_SNAPSHOT" "$NGSPICE_VERSION_HINT" "$BUILT_AT" "$3" "$KLT_REF" "$PDK_VARIANTS" "$OPEN_PDKS_COMMIT")
 }
 
 if [[ "$EMIT_ENTRY" == true ]]; then

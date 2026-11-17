@@ -679,6 +679,7 @@ def ami_pdk_key(pdk: str, *, backend: str = "remote") -> str:
 #: (``0.7.0``, ``0.7.1.dev3+gabc1234``). Mirrors the ``pattern`` in
 #: docs/schemas/remote-sim-ami-manifest.schema.json.
 _MANIFEST_KLT_VERSION_RE = re.compile(r"[0-9][A-Za-z0-9._+-]{0,79}")
+_MANIFEST_OPEN_PDKS_COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 
 #: Marker the AMI build's user-data prints (``<marker>[<klt version>]``) after
 #: installing ``klayout-tools`` from the pinned ``--klt-ref``, so
@@ -806,6 +807,7 @@ def ami_manifest_entry(
     klt_version: str,
     klt_ref: str,
     pdk_variants: list[str] | None = None,
+    open_pdks_commit: str | None = None,
 ) -> dict[str, Any]:
     """One AMI-manifest ``images[]`` entry, as
     ``scripts/aws/build-remote-sim-ami.sh`` publishes it (issue #2851).
@@ -822,6 +824,13 @@ def ami_manifest_entry(
     refuses a request for an unlisted variant before any S3 write. It is
     left out of the entry when not given, so the entry stays loadable by
     older clients.
+
+    ``open_pdks_commit`` (issue #6156) optionally records the open_pdks
+    commit (40 lowercase hex) the image's PDK was fetched at, so a client
+    can tell which PDK build an image carries before launching a run. It is
+    left out of the entry when not given (SG13G2 has no single commit, and
+    historical builds are never back-filled with a guess), and a value that
+    is not 40-hex is refused rather than published.
     """
     version = (klt_version or "").strip()
     if version.startswith("klt "):
@@ -858,6 +867,14 @@ def ami_manifest_entry(
                 "PDK variant directory names without whitespace"
             )
         entry["pdk_variants"] = variants
+    if open_pdks_commit is not None:
+        commit = open_pdks_commit.strip()
+        if not _MANIFEST_OPEN_PDKS_COMMIT_RE.fullmatch(commit):
+            raise RemoteLaunchError(
+                f"open_pdks_commit {open_pdks_commit!r} must be a 40-character "
+                "lowercase hex git commit"
+            )
+        entry["open_pdks_commit"] = commit
     return entry
 
 
