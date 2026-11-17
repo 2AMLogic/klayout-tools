@@ -250,13 +250,15 @@ are always the real, unmodified DRM values:
   ``v5_xtor`` (112/1) half, which this deck's curated layer set does not
   draw -- so ``Comp`` marked only by ``v5_xtor`` is checked here against the
   3.3V column, exactly as it was before the ``Dualgate`` split.
-- ``comp.width.mv.1``: the PDK deck's ``DF.1a_MV`` additionally excludes the
-  LDMOS drain markers ``mvsd`` (210/0) / ``mvpsd`` (11/39). Both markers are
-  now curated layers (issue #4569, ``MDN.1``/``MDN.14``/``MDP.6``), but a
-  ``DerivedLayer`` selects against one marker and cannot subtract two, so
-  the exclusion is still not modelled: a 5V LDMOS drift region is checked
-  here where the official rule would not check it (conservative: a false
-  positive, never a missed violation).
+- ``comp.width.mv.1``: the PDK deck's ``DF.1a_MV`` excludes the
+  LDMOS drain markers ``mvsd`` (210/0) / ``mvpsd`` (11/39) by boolean
+  clip (``comp_56v.not(mvsd.or(mvpsd))``). Both markers are curated
+  layers (issue #4569, ``MDN.1``/``MDN.14``/``MDP.6``); since issue
+  #5719 the exclusion is modelled with ``DerivedLayer``'s whole-polygon
+  context stage, which matches the official clip wherever the PDK's own
+  LDMOS PCells draw (marked drain COMP lies fully under the marker) but
+  drops a marker-straddling polygon whole where the official rule would
+  check its clipped remainder.
 - ``poly2.space.1``: the official ``PL.3a`` splits into "space on COMP" vs.
   "space on field" sub-cases (context our engine can't distinguish without
   a boolean layer expression); both sub-cases share the same 3.3V value
@@ -726,23 +728,80 @@ DECK: list[DrcRule] = [
         # column), the `_MV` half of the pair `comp.width.1` above is the
         # `_LV` half of (issue #1110, closing issue #552's DRC gap). The
         # checked region is whole `Comp` polygons that overlap `Dualgate`
-        # (55/0) -- the PDK's own `comp_56v` derivation. Approximation: the
-        # PDK deck's `DF.1a_MV` additionally excludes polygons under the
-        # LDMOS drain markers `mvsd` (210/0) / `mvpsd` (11/39). Both markers
-        # are curated layers since issue #4569, but a `DerivedLayer` selects
-        # against one marker and cannot subtract two, so a 5V LDMOS drift
-        # region drawn on those markers is still checked here where the
-        # official rule would not check it (the conservative direction -- a
-        # false positive, never a missed violation). Threshold value
-        # unmodified.
+        # (55/0) -- the PDK's own `comp_56v` derivation -- with the LDMOS
+        # drain markers excluded (issue #5719): the PDK deck checks
+        # `comp_56v.not(mvsd.or(mvpsd))`, a boolean clip against the joined
+        # `mvsd` (210/0) / `mvpsd` (11/39) regions. `DerivedLayer` has no
+        # boolean-subtraction mode, so the exclusion is the whole-polygon
+        # context stage (issue #3484) instead: a `Comp` polygon touching
+        # either marker is dropped entire. Both derivations agree everywhere
+        # the PDK's own LDMOS PCells actually draw -- `nfet_10v0_asym`'s
+        # marked drain polygons lie fully under the marker, where dropping
+        # whole and clipping agree exactly; before #5719 that PCell's
+        # 0.22um drain stripe was a `comp.width.mv.1` false positive the
+        # caller cannot edit. The documented divergence: a polygon
+        # straddling a marker boundary is dropped whole where the official
+        # rule would still check its outside part -- rare geometry (the
+        # PDK draws drift COMP fully under the marker), accepted over the
+        # status quo's false-positive direction on uneditable PCell
+        # geometry. Context layers absent from the stream contribute an
+        # empty region and never skip the rule, so layouts drawing no LDMOS
+        # markers are checked exactly as before. Threshold value unmodified.
         derived_layer=DerivedLayer(
             base=(22, 0),  # Comp
             sized_by_um=0.0,  # unsized marker, as in the PDK's own deck
             intersect_with=(55, 0),  # Dualgate
             mode="overlapping",
+            # The 10V LDMOS drain markers, joined (boolean OR) and matched
+            # whole-polygon -- see the comment above for why "far" is the
+            # faithful shape this engine can give the PDK's `.not(...)` clip.
+            context_layers=((210, 0), (11, 39)),  # MVSD, MVPSD
+            context_sized_by_um=0.0,
+            context="far",
         ),
         scope="7.5 Comp",  # DRM section this rule is transcribed from (#566)
         provenance=_gf180mcu_klayout_deck_provenance("comp", "DF.1a_MV"),
+    ),
+    DrcRule(
+        id="comp.width.moscap.1",
+        description="minimum COMP width under the MOS-capacitor marker (MOSCAP)",
+        layer=(22, 0),  # Comp
+        check="width",
+        threshold_dbu=1000,  # 1.0 um
+        # DRM 7.5 Comp, rule "DF.1c": "Min. COMP Width for MOSCAP." -> 1.0
+        # (issue #5719 -- before it this rule was neither checked nor
+        # disclosed, so a MOSCAP-marked `Comp` island below 1 um reported
+        # `status: clean` with nothing in the coverage block to warn the
+        # caller, while `MOS_CAP_MK` itself read under
+        # `coverage.layers_in_stream_without_rules`). The checked region is
+        # the boolean AND of `Comp` and the MOS-capacitor marker
+        # `MOS_CAP_MK` (166/5) -- the PDK deck's own
+        # `comp.and(mos_cap_mk)` -- which `DerivedLayer`'s default
+        # `"sized_intersection"` mode expresses exactly: whole marker
+        # polygons touching `Comp`, clipped to `Comp`'s unsized outline.
+        # Unlike the marker-scoped *selection* modes this derivation is
+        # deliberately a clip -- the official rule measures the width of
+        # the clipped shape, marker-cut edges included -- so the
+        # whole-polygon modes would diverge here, not be conservative. A
+        # stream drawing no `MOS_CAP_MK` derives an empty region and skips
+        # the rule like any other missing-layer rule. Not a `DF.1a`-style
+        # `_LV`/`_MV` pair: the PDK deck publishes a single 1 um value,
+        # conditioned on nothing but the marker. `klt gen mos_array`'s own
+        # `w_um` floor (0.42 um) is below this minimum, so the generator
+        # cannot currently emit a MOSCAP-marked device that passes it
+        # (raising the floor is generator work, out of scope for #5719).
+        derived_layer=DerivedLayer(
+            base=(22, 0),  # Comp
+            sized_by_um=0.0,  # unsized marker, as in the PDK's own deck
+            intersect_with=(166, 5),  # MOS_CAP_MK
+        ),
+        scope="7.5 Comp",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_klayout_deck_provenance("comp", "DF.1c"),
+        # DF.1c publishes a single value (no 3.3V/5V/6V column split), and
+        # the PDK's own executable deck conditions it on nothing but the
+        # MOS-capacitor marker, so it cannot have read the wrong voltage
+        # column -- see `DrcRule.voltage_independent`.
+        voltage_independent=True,
     ),
     DrcRule(
         id="comp.space.1",

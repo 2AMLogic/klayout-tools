@@ -552,6 +552,29 @@ _DERIVED_LAYER_FIXTURES: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
     # 280 dbu `_LV` threshold, so -- as for the width pair above -- a clean
     # `comp.space.1` verdict on this fixture is itself part of what the
     # split is asserting.
+    # `comp.width.moscap.1` (DF.1c, 1000 dbu, issue #5719): the checked
+    # region is `Comp AND MOS_CAP_MK` (`comp.and(mos_cap_mk)`), so the
+    # generic `_width_pair` geometry (a bare `Comp` bar) would derive an
+    # empty region and never fire. A `Comp` bar of `threshold -/+
+    # _margin_dbu(1000)(100)` = 900/1100 dbu width -- both above the 220
+    # `_LV` and 300 `_MV` widths, so no sibling width rule fires -- plus a
+    # `MOS_CAP_MK` (166/5) box comfortably covering it, which is what makes
+    # the derived AND exactly the `Comp` bar. No `Dualgate` is drawn, so
+    # `comp.width.mv.1` is skipped and only this rule can fire.
+    "comp.width.moscap.1": (
+        {  # violate: 900 dbu wide (< 1000) Comp fully under MOS_CAP_MK
+            "shapes": [
+                {"layer": [22, 0], "box": [0, 0, 900, 4000]},  # Comp
+                {"layer": [166, 5], "box": [-1000, -1000, 1900, 5000]},  # MOS_CAP_MK
+            ]
+        },
+        {  # clean: 1100 dbu wide (>= 1000) Comp fully under MOS_CAP_MK
+            "shapes": [
+                {"layer": [22, 0], "box": [0, 0, 1100, 4000]},  # Comp
+                {"layer": [166, 5], "box": [-1000, -1000, 2100, 5000]},  # MOS_CAP_MK
+            ]
+        },
+    ),
     # The six `DerivedLayer`-scoped Nplus/Pplus implant rules (issue #2369).
     # None of them can use a generic builder: their checked region is a
     # boolean of two *other* drawn layers (PCOMP = `Comp AND Pplus`, NCOMP =
