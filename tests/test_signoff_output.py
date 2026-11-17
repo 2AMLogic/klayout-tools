@@ -171,5 +171,3 @@ def test_cli_fleet_output_writes_the_json_envelope(tmp_path, capsys):
     stdout = capsys.readouterr().out
     assert output.read_bytes() == stdout.encode("utf-8")
     assert json.loads(stdout)["t1_count"] == 1
-
-

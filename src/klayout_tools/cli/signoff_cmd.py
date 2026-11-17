@@ -472,9 +472,7 @@ def _run_tier_report(
         emit_success(result, args.format, render_rerun_drift)
         return _CHECK_EXIT_CODES[result["status"]]
 
-    return _finish_render(
-        result, args, _print_tier_report_text, result["tier"] == "T1"
-    )
+    return _finish_render(result, args, _print_tier_report_text, result["tier"] == "T1")
 
 
 def _run_fleet_report(
