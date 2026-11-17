@@ -2,11 +2,13 @@
 ``klt lef-abstract`` (issue #5677).
 
 :func:`resolve_obs_regions` builds the per-LEF-layer obstruction regions
-exactly as ``lef_abstract._resolve_obs`` always did -- every shape drawn on
+exactly as ``lef_abstract``'s OBS assembly always did -- every shape drawn on
 a GDS layer that maps to a routing-type LEF layer, unioned per LEF layer,
 shifted into macro-local coordinates, clipped to the outline, and with the
-declared pin ports subtracted back out. It moved here (behaviour unchanged)
-so ``lef_abstract.py`` -- pinned by ``file-size-baseline.json``'s ratchet --
+declared pin ports subtracted back out; with ``layout=None`` (the
+layout-free ``--no-layout`` mode, issue #5714) it seeds the whole outline
+onto every routing layer instead. It moved here (behaviour unchanged) so
+``lef_abstract.py`` -- pinned by ``file-size-baseline.json``'s ratchet --
 could absorb issue #5677's wiring without growing.
 
 :func:`routing_resource` then reads those same final regions to answer the
@@ -23,6 +25,8 @@ from the abstract itself instead of from a multi-hour top-level route.
 from __future__ import annotations
 
 from typing import Any
+
+from .lef_abstract_no_layout import seed_outline_obs
 
 #: The ``DIRECTION`` values a tech-LEF routing layer may declare (LEF 5.7
 #: grammar, uppercase) -- anything else leaves the preferred direction
@@ -47,7 +51,9 @@ def resolve_obs_regions(
     """Build the obstruction regions: every shape drawn on a GDS layer that
     maps to a routing-type LEF layer, unioned per LEF layer, shifted into
     macro-local coordinates, clipped to the outline, and with the declared
-    pin ports subtracted back out.
+    pin ports subtracted back out. ``layout=None`` (issue #5714's
+    layout-free black-box mode) seeds the whole outline onto every routing
+    layer instead, mirroring ``lef_abstract``'s own no-layout OBS.
 
     Returns ``{lef_layer_name: merged kdb.Region}`` in **macro-local dbu** --
     the exact OBS geometry ``_write_lef`` turns into shapes, so
@@ -64,7 +70,13 @@ def resolve_obs_regions(
     import klayout.db as kdb
 
     regions_by_layer: dict[str, Any] = {}
-    for layer_index in layout.layer_indexes():
+    if layout is None:
+        # Issue #5714: black-box semantics -- the whole outline blocks every
+        # routing layer; declared pin ports are subtracted below.
+        regions_by_layer = seed_outline_obs(
+            routing_layers, origin_x_dbu, origin_y_dbu, width_dbu, height_dbu
+        )
+    for layer_index in layout.layer_indexes() if layout is not None else ():
         info = layout.get_info(layer_index)
         lef_layer = gds_to_lef.get((info.layer, info.datatype))
         if lef_layer is None or lef_layer not in routing_layers:
