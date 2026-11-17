@@ -477,7 +477,6 @@ application error naming the instance and cell, never a silent skip.
   module-level net of that name; any other unconnected pin gets its own
   unconnected net.
 - `options.flatten_reference` defaults to **true** on this route (the
-- `options.flatten_reference` defaults to **true** on this route (the
   FinFET layout is extracted flat); it is echoed and can be set `false`. A
   request that supplies its own hierarchical `layout.netlist` under this
   default gets a `topology.hierarchy_mismatch` advisory naming
