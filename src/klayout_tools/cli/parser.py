@@ -2667,8 +2667,9 @@ def _add_flow_verify_args(
     verification flags on a *flow* verb (issue #2224).
 
     Deliberately **not** the input-exclusive group ``klt drc``/``klt lvs``/
-    ``klt extract`` use: their reports echo their own inputs; a flow verb's
-    report does not, so ``request`` stays required for the re-run inputs.
+    ``klt extract``/``klt erc`` use: their reports echo their own inputs; a
+    flow verb's report does not, so ``request`` stays required for the
+    re-run inputs.
     """
     parser.add_argument(
         "--check",
