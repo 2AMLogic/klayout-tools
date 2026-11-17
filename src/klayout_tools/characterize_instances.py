@@ -12,7 +12,7 @@ from typing import Any
 
 from .characterize_arcs import DerivedArc
 from .characterize_cards import slug, spice_number
-from .characterize_sequential import clock_pwl_line, data_pwl_line
+from .characterize_stimulus import clock_pwl_line, data_pwl_line
 
 
 def _metered_rail_nodes(

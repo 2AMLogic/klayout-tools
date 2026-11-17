@@ -47,6 +47,7 @@
         "klayout_tools.characterize_pool",
         "klayout_tools.characterize_probe",
         "klayout_tools.characterize_sequential",
+        "klayout_tools.characterize_stimulus",
         "klayout_tools.cli.characterize_cmd",
         "klayout_tools.cli.parser_characterize",
         "klayout_tools.liberty_compare",

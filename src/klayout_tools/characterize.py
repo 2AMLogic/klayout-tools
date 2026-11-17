@@ -90,11 +90,7 @@ from .characterize_instances import (
     _leakage_states,
     _rail_nodes,
 )
-from .characterize_leg import (
-    best_effort_pdk,
-    make_deck_runner,
-    resolve_resume,
-)
+from .characterize_leg import best_effort_pdk, make_deck_runner, resolve_resume
 from .characterize_osdi import resolve_osdi_preload
 from .characterize_pool import run_cells_partitioned
 from .characterize_probe import probe_netlist_cells as _probe_netlist_cells
@@ -104,9 +100,9 @@ from .characterize_sequential import (
     derive_sequential_arcs,
     resolve_async_pins,
     resolve_sequential,
-    stimulus_schedule,
 )
 from .characterize_split import resolve_split_grid, run_cell_legs
+from .characterize_stimulus import stimulus_schedule
 from .env_provenance import repo_relative_path
 
 #: Version of this command's JSON response shape (per ``docs/json-contract.md``).
