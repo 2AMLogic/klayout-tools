@@ -39,7 +39,16 @@ not `klt --version`, if you need to detect this kind of drift. See
   deck flags the same shapes) — the generator cannot yet draw a MOSCAP that
   passes it (#6170). No JSON field added or removed; `schema_version` unchanged.
 
-
+- **`klt sim` warns when the generated `save all` supersedes a body `.save`
+  while waveforms are on, and reports `artifacts.raw_bytes`** (#5622,
+  2026-11-17): the default `save_mode: "all"` silently widened a netlist body's
+  `.save v(a) v(b)` to every node of the design, turning a 4.7 MB rawfile into
+  7.9 GB with nothing in the report. A request-level `save_all_supersedes`
+  warning (also in `--dry-run`) now names both facts and the remedies
+  (`save_mode: "netlist"`, `save_vectors`); it fires only for a top-level
+  `.save` with `save_mode` `"all"`, no `save_vectors` and `options.waveforms`
+  on. `corners[].artifacts.raw_bytes` is added when a rawfile is kept. Additive;
+  no emitted deck changes and the default `save_mode` is unchanged.
 - **Fixed** (#5664, `klt lvs` `--engine klayout-runset`; no JSON field
   changes, `schema_version` stays 3): a `pin.unmatched` finding whose pin
   pair KLayout's own comparer graded `Match`/`MatchWithWarning` — a

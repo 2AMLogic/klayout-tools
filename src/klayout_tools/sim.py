@@ -149,6 +149,7 @@ from . import sim_environment_report as sim_env_report
 from . import sim_op_check as sim_op_check
 from . import sim_peak_rss as sim_peak_rss
 from . import sim_provenance as sim_provenance
+from . import sim_save_diagnostic as sim_save_diagnostic
 from . import sim_staging as sim_staging
 from ._jsonnum import is_int, is_number
 from ._paths import (
@@ -402,6 +403,7 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         "netlist",
         "model_bin_range",
         "model_bin_range_preflight",
+        "save_all_supersedes",
         "ngspice_fatal",
         "netlist_title_line",
         "no_such_vector",
@@ -4025,12 +4027,8 @@ def _run_sim_corners(
     )
     _check_capacity_wait_applies(capacity_wait_s, backend, attach_job_id)
 
-    # Issue #2668: stage the complete job closure once, here, before any
-    # backend runs -- so a missing model input, unresolvable dependency or
-    # exceeded cap is a named SimError before any S3 write, SSH push or
-    # instance launch on every off-host path (single job, remote fleet,
-    # batch shards alike). The result's asset list is also this report's
-    # provenance for what the worker actually received.
+    # Issue #2668: stage the complete job closure once, before any backend
+    # runs; see `_preflight_staged_model_inputs` for the rationale.
     staged_model_environment = _preflight_staged_model_inputs(
         request,
         netlist_path,
@@ -4042,6 +4040,9 @@ def _run_sim_corners(
 
     bin_diagnostic = sim_bin_range.preflight_with_bins(
         netlist_path, models_lib, _find_width_ceiling_culprit, _MODEL_WIDTH_CEILING_UM
+    )
+    save_diagnostic = sim_save_diagnostic.preflight(
+        netlist_path, engine, save_mode, save_vectors, want_waveforms
     )
     if dry_run:
         published_runner: dict[str, Any] = {}
@@ -4059,6 +4060,7 @@ def _run_sim_corners(
             request,
             feature_diagnostic=feature_diagnostic,
             bin_range_diagnostic=bin_diagnostic,
+            save_diagnostic=save_diagnostic,
             published_runner=published_runner or None,
             engine=engine,
             backend=backend,
@@ -4541,14 +4543,8 @@ def _run_sim_corners(
         "corners": corners,
     }
     # Additive/optional (#2901 runner feature, #4976 bin-range preflight).
-    if top_diags := [
-        d
-        for d in (
-            *remote_diagnostics,
-            bin_diagnostic,
-        )
-        if d
-    ]:
+    diag_candidates = (*remote_diagnostics, bin_diagnostic, save_diagnostic)
+    if top_diags := [d for d in diag_candidates if d]:
         report["diagnostics"] = top_diags
     _attach_expr_runner_hint(report, measurements_spec, corners, backend=backend)
     attach_process_leg_check(report, corners)
@@ -4820,6 +4816,7 @@ def _build_dry_run_report(
     staged_model_environment: dict[str, Any],
     feature_diagnostic: dict[str, Any] | None = None,
     bin_range_diagnostic: dict[str, Any] | None = None,
+    save_diagnostic: dict[str, Any] | None = None,
     published_runner: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The ``klt sim --dry-run`` response (issue #3064): the request as
@@ -4870,7 +4867,9 @@ def _build_dry_run_report(
     }
     if published_runner is not None:
         report["published_runner"] = published_runner
-    if dry_diags := [d for d in (feature_diagnostic, bin_range_diagnostic) if d]:
+    if dry_diags := [
+        d for d in (feature_diagnostic, bin_range_diagnostic, save_diagnostic) if d
+    ]:
         report["diagnostics"] = dry_diags
     return report
 
@@ -8635,7 +8634,7 @@ def _run_corner(
 
     status = _grade_corner(diagnostics, measurement_results, disqualifying)
 
-    artifacts: dict[str, str | None] = {
+    artifacts: dict[str, str | int | None] = {
         "log": None,
         "raw": None,
         "waveform": None,
@@ -8653,6 +8652,7 @@ def _run_corner(
         if raw_path is not None and os.path.isfile(raw_path):
             artifacts["raw"] = raw_path
             raw_size = os.path.getsize(raw_path)
+            artifacts["raw_bytes"] = raw_size  # issue #5622
             try:
                 waveform_path = _persist_waveform_artifact(
                     raw_path,
