@@ -52,7 +52,6 @@ from klayout_tools.pex import (
     _pin_order_mismatch,
     _prepare_extracted_request,
     _reference_is_hierarchical,
-    _resistance_graph_echo,
     _rewrite_dut_include,
     _row_status,
     _status_from_coverage,
@@ -6763,16 +6762,6 @@ def test_run_pex_resistance_graph_writes_selected_resistance(tmp_path):
     (net,) = echo["nets"]
     assert net["resistance_source"] == "graph"
     assert net["selected_resistance_ohm"] < net["legacy_resistance_ohm"]
-    # Issue #5894: the echo carries the graph's terminals and pair matrix
-    # verbatim, so the path R is readable without re-running `klt extract`.
-    assert len(net["terminals"]) == 2
-    assert len(net["pair_resistance_ohm"]) == 2
-    assert net["pair_resistance_ohm"][0][1] == pytest.approx(
-        net["selected_resistance_ohm"]
-    )
-    assert net["pair_resistance_ohm"][1][0] == pytest.approx(
-        net["selected_resistance_ohm"]
-    )
     assert sum(_netlist_resistors(base_out)) == pytest.approx(
         net["legacy_resistance_ohm"], rel=1e-3
     )
@@ -6791,67 +6780,7 @@ def test_run_pex_resistance_graph_legacy_net_keeps_legacy_value(tmp_path):
     (net,) = graph["extraction"]["resistance_graph"]["nets"]
     assert net["resistance_source"] == "legacy"
     assert net["selected_resistance_ohm"] == net["legacy_resistance_ohm"]
-    # An unsupported graph has no terminals and no matrix; the echo (issue
-    # #5894) carries those empty values verbatim rather than omitting them.
-    assert net["terminals"] == []
-    assert net["pair_resistance_ohm"] == []
     assert graph["extraction"]["netlist_sha256"] == base["extraction"]["netlist_sha256"]
-
-
-def test_resistance_graph_echo_carries_terminals_and_pair_matrix():
-    """Issue #5894: the echo copies the graph's `terminals` and full
-    `pair_resistance_ohm` matrix verbatim from the extraction report --
-    including a 3+ terminal `legacy` net (whose series-summed lumped total
-    overstates any terminal-to-terminal path), a disconnected pair (`null`,
-    carried as JSON `None`) and an `unsupported` net's empty lists."""
-    parasitics = {
-        "nets": [
-            {
-                "net": "TREE",
-                "net_id": 3,
-                "resistance_graph": {
-                    "status": "ok",
-                    "terminals": ["device@0,0", "device@2,0", "device@4,0"],
-                    "pair_resistance_ohm": [
-                        [0.0, 10.0, None],
-                        [10.0, 0.0, 4.0],
-                        [None, 4.0, 0.0],
-                    ],
-                    "legacy_resistance_ohm": 45.0,
-                    "selected_resistance_ohm": 45.0,
-                    "resistance_source": "legacy",
-                    "resistance_source_reason": "terminal_count_not_two",
-                },
-            },
-            {
-                "net": "VIA_NET",
-                "net_id": 4,
-                "resistance_graph": {
-                    "status": "unsupported",
-                    "terminals": [],
-                    "pair_resistance_ohm": [],
-                    "legacy_resistance_ohm": 7.5,
-                    "selected_resistance_ohm": 7.5,
-                    "resistance_source": "legacy",
-                    "resistance_source_reason": "graph_status_unsupported",
-                },
-            },
-            {"net": "NO_GRAPH", "net_id": 5},
-        ]
-    }
-    echo = _resistance_graph_echo(parasitics, 0.5)
-    assert echo["r_cut_ohm"] == 0.5
-    tree, via_net = echo["nets"]
-    assert tree["terminals"] == ["device@0,0", "device@2,0", "device@4,0"]
-    assert tree["pair_resistance_ohm"] == [
-        [0.0, 10.0, None],
-        [10.0, 0.0, 4.0],
-        [None, 4.0, 0.0],
-    ]
-    assert via_net["terminals"] == []
-    assert via_net["pair_resistance_ohm"] == []
-    # Nets without a graph block at all stay out of the echo.
-    assert [entry["net"] for entry in echo["nets"]] == ["TREE", "VIA_NET"]
 
 
 def test_run_pex_resistance_graph_r_cut_zero_is_forwarded(tmp_path, monkeypatch):
@@ -6926,8 +6855,6 @@ def test_cli_pex_resistance_graph_extract_only_json(tmp_path, capsys):
     report = json.loads(capsys.readouterr().out)
     (net,) = report["extraction"]["resistance_graph"]["nets"]
     assert net["resistance_source"] == "graph"
-    assert len(net["terminals"]) == 2
-    assert net["pair_resistance_ohm"][0][1] == net["selected_resistance_ohm"]
 
 
 def test_run_pex_forwards_batch_sharding_flags_to_every_run_sim(

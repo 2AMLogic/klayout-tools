@@ -337,8 +337,8 @@ klt pex <layout> --deck <deck> --extract-only [--reference-netlist <schematic.sp
   from the graph) give the path resistance between two named terminals —
   exactly what a net with three or more terminals (always `legacy`: no
   unique scalar to select) needs. Cannot be combined with `--distributed-rc`
-  (the
-  ladder stays on the legacy scalar, so a critical net would mix sources):
+  (the ladder stays on the legacy scalar, so a critical net would mix
+  sources):
   `PexError`. Off by default -- the netlist and JSON report are byte-identical
   to a run without the flags. Echoed under `extraction.resistance_graph`.
 - `--distributed-rc` — passed through to `klt extract --distributed-rc`

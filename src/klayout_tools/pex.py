@@ -556,17 +556,8 @@ def _parasitic_integrity_report(
 def _resistance_graph_echo(
     parasitics: Mapping[str, Any], r_cut_ohm: float | None
 ) -> dict[str, Any]:
-    """The ``extraction.resistance_graph`` block (issue #4037): the request
-    (``r_cut_ohm``) and, per net with a graph result, which scalar the
-    extracted netlist's lumped R used (``resistance_source``) next to both
-    candidate values. Since issue #5894 each entry also carries the graph's
-    ``terminals`` and full ``pair_resistance_ohm`` matrix verbatim, so a
-    caller can read the path resistance between two named terminals of a
-    net with three or more terminals -- exactly the nets whose
-    ``resistance_source`` is necessarily ``legacy`` (only two-terminal
-    nets select the graph scalar), and whose legacy series sum overstates
-    the terminal-to-terminal path. ``klt extract`` is the source of every
-    value."""
+    """The ``extraction.resistance_graph`` echo (#4037, #5894), verbatim
+    from ``klt extract``: the request plus per-net source and graph fields."""
     nets = []
     for entry in parasitics.get("nets") or []:
         graph = entry.get("resistance_graph") if isinstance(entry, dict) else None
@@ -2717,12 +2708,9 @@ def run_pex(
     ``selected_resistance_ohm`` as its lumped R (``legacy`` nets keep the
     legacy scalar). ``extraction.resistance_graph`` echoes the request and one
     ``{net, net_id, resistance_source, selected_resistance_ohm,
-    legacy_resistance_ohm, terminals, pair_resistance_ohm}`` entry per net
-    (the graph's terminal list and full pair matrix verbatim, issue #5894, so
-    the path R between two named terminals is readable on a 3+ terminal net,
-    whose legacy series sum overstates that path), only when the flag was
-    given -- otherwise the report and netlist are byte-identical. Combining it
-    with ``distributed_rc`` raises :class:`PexError` (the ladder stays on the
+    legacy_resistance_ohm, terminals, pair_resistance_ohm}`` entry per net,
+    only when the flag was given -- otherwise the report and netlist are
+    byte-identical. ``distributed_rc`` raises :class:`PexError` (the ladder stays on the
     legacy scalar, so a critical net would mix resistance sources).
 
     ``critical_net_all``/``critical_net_excludes`` (``klt pex
