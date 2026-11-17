@@ -251,6 +251,7 @@ from .pex_netlist_text import (
     _reference_is_hierarchical,
     _subckt_interfaces,
 )
+from .pex_resistance_graph import _resistance_graph_echo
 from .sim import SimError, load_request, run_sim
 from .spice_flatten import SpiceFlattenError, flatten_spice
 
@@ -558,30 +559,6 @@ def _parasitic_integrity_report(
         if isinstance(entry, dict) and entry.get("integrity") is not None
     ]
     return {**summary, "nets": nets}
-
-
-def _resistance_graph_echo(
-    parasitics: Mapping[str, Any], r_cut_ohm: float | None
-) -> dict[str, Any]:
-    """The ``extraction.resistance_graph`` block (issue #4037): the request
-    (``r_cut_ohm``) and, per net with a graph result, which scalar the
-    extracted netlist's lumped R used (``resistance_source``) next to both
-    candidate values. ``klt extract`` is the source of every value."""
-    nets = []
-    for entry in parasitics.get("nets") or []:
-        graph = entry.get("resistance_graph") if isinstance(entry, dict) else None
-        if not isinstance(graph, dict):
-            continue
-        nets.append(
-            {
-                "net": entry.get("net"),
-                "net_id": entry.get("net_id"),
-                "resistance_source": graph.get("resistance_source"),
-                "selected_resistance_ohm": graph.get("selected_resistance_ohm"),
-                "legacy_resistance_ohm": graph.get("legacy_resistance_ohm"),
-            }
-        )
-    return {"r_cut_ohm": r_cut_ohm, "nets": nets}
 
 
 def _strip_quotes(token: str) -> str:
