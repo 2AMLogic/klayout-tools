@@ -172,10 +172,9 @@ _STEP_MARKER_RE = re.compile(
 #:   eye (#4292), step_resolution (#4773), settled (#4780): each reads one
 #:   transient plot's rawfile; no per-step equivalent.
 #: - search (#4121): bisection loop is scalar-deck only.
-#: - optional (#2925): scalar analysis only; a step's no-value paths also
-#:   carry ``step_failed`` / ``derived_input_unavailable`` causes that must
-#:   stay errors.
-#: - noise (#2938): reads one noise analysis' spectrum plot.
+#: - optional (#2925): scalar analysis only; a step's no-value paths also carry
+#:   ``step_failed`` / ``derived_input_unavailable`` causes that must stay errors.
+#: - noise (#2938): one noise plot's spectrum; slope_band (#5518): one dc sweep.
 _UNSUPPORTED_IN_STEPS: tuple[tuple[str, str, bool], ...] = (
     ("crossings", '(kind "tran") for a threshold-crossing series', False),
     ("energy", '(kind "tran") for a source-energy measurement', False),
@@ -187,6 +186,7 @@ _UNSUPPORTED_IN_STEPS: tuple[tuple[str, str, bool], ...] = (
     ("step_resolution", '(kind "tran") for a step-resolution report', False),
     ("settled", '(kind "tran") for a settled-window verdict', False),
     ("noise", '(kind "noise") for a noise-spectrum measurement', False),
+    ("slope_band", '(kind "dc") for a local-slope-band run', False),
 )
 
 
@@ -210,11 +210,10 @@ def is_steps_analysis(analysis: dict[str, Any]) -> bool:
 def measurement_provenance(spec: dict[str, Any]) -> dict[str, Any]:
     """The additive provenance fields a measurement result/rollup entry
     carries: ``step`` for a step-scoped measurement, ``derived_from`` for one
-    computed from other results. Empty for every scalar-``analysis``
+    computed from other results, ``case`` for one expanded from a ``{case}``
+    template (issue #5731). Empty for every plain scalar-``analysis``
     measurement, so those report entries keep their exact shape."""
-    fields: dict[str, Any] = {}
-    if "step" in spec:
-        fields["step"] = spec["step"]
+    fields: dict[str, Any] = {k: spec[k] for k in ("step", "case") if k in spec}
     if "derived_from" in spec:
         fields["derived_from"] = list(spec["derived_from"])
     return fields
