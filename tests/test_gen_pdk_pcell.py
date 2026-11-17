@@ -2,11 +2,10 @@
 
 Every PDK here is **fabricated** under ``tmp_path`` -- a minimal open_pdks
 variant plus a hand-written ``libs.tech/klayout/python/<package>/`` toy PyCell
-package -- mirroring `test_gen.py`'s `_isolate`/`pdk_root`/`_make_install`
-fixtures. CI never downloads a real PDK, and the two real vendor PyCell
-libraries this feature targets (sky130A's ``cells``, ihp-sg13g2's
-``sg13g2_native_pcell_lib``) are not importable in a bare CI environment
-anyway -- see the module docstring of ``klayout_tools.pdk_pcell``.
+package mirroring `test_gen.py`'s fixtures. CI never downloads a real PDK,
+and the two real vendor PyCell libraries this feature targets (sky130A's
+``cells``, ihp-sg13g2's ``sg13g2_native_pcell_lib``) are not importable in a
+bare CI environment anyway -- see ``klayout_tools.pdk_pcell``'s docstring.
 
 Registering a ``pya.Library`` and importing a Python package are both
 process-global and permanent, so every fixture package below gets a unique
@@ -37,10 +36,8 @@ def _unique(prefix: str) -> str:
 
 
 #: A plain-``pya`` toy vendor PyCell package: one ``PCellDeclarationHelper``
-#: subclass drawing a parametrized box, registered into a ``pya.Library``
-#: subclass. Mirrors the shape of both real PDK PyCell libraries verified for
-#: issue #1535 (sky130A's ``cells``, ihp-sg13g2's
-#: ``sg13g2_native_pcell_lib``), minus their third-party imports.
+#: drawing a parametrized box, registered into a ``pya.Library``. Mirrors
+#: both real PDK PyCell libraries of issue #1535, minus third-party imports.
 _TOY_PACKAGE = '''\
 import pya
 
@@ -111,10 +108,9 @@ def _toy_pdk(tmp_path, *, self_registering=True, variant="sky130A"):
     """A fabricated install shipping one loadable toy PyCell package.
 
     Returns ``(root, package, library, cell)``. ``self_registering`` picks
-    which of the two real-world registration shapes the package uses: a bare
-    constructor call at module scope (ihp-sg13g2's
-    ``sg13g2_native_pcell_lib``) or a library class the importer is expected
-    to construct (sky130A's ``cells``, constructed by the PDK's own
+    which real-world registration shape the package uses: a bare constructor
+    call at module scope (ihp-sg13g2's ``sg13g2_native_pcell_lib``) or a
+    library class the importer constructs (sky130A's ``cells``, via the PDK's
     ``.lym`` autoload macro).
     """
     root = tmp_path / "pdk_install"
@@ -304,11 +300,9 @@ def test_list_pdk_pcells_loads_a_define_only_library(tmp_path):
 
 def _sibling_pdk(tmp_path):
     """Two packages where importing ``A`` also imports ``B`` (IHP sg13g2's
-    native/pycell pair, issue #2944). ``A`` sorts first and registers nothing
-    itself, so ``B``'s self-registered library is attributed to ``A`` by the
-    name diff, and ``B``'s own turn is a ``sys.modules`` hit.
-
-    Returns ``(root, b_package, library, cell)``.
+    native/pycell pair, issue #2944): ``A`` sorts first and registers
+    nothing, so ``B``'s library is attributed to ``A``, and ``B``'s own turn
+    is a ``sys.modules`` hit. Returns ``(root, b_package, library, cell)``.
     """
     root, b_package, library, cell = _toy_pdk(tmp_path)
     variant_dir = root / "sky130A"
@@ -361,8 +355,7 @@ def test_load_libraries_does_not_reconstruct_a_sibling_imported_package(tmp_path
 
     assert len(loaded) == 1
     assert all(entry["handle"] is not None for entry in loaded)
-    # The sibling whose import already ran the vendor's registration must
-    # never be probed by the fallback constructor.
+    # The sibling whose import already registered must never be re-probed.
     assert not any(name.startswith("toylib") for name in calls)
 
 
@@ -599,11 +592,9 @@ def test_generate_pdk_pcell_accepts_a_layer_param(tmp_path):
 # (issue #1630)
 # --------------------------------------------------------------------------- #
 
-#: A toy vendor PCell that raises if `tkinter` is present in `sys.modules`
-#: at produce time -- mirrors pycell4klayout-api's own
-#: `PCellWrapper.coerce_parameters` branch, which is unconditionally taken
-#: (and crashes) whenever `"tkinter" in sys.modules`, even in pure headless
-#: batch mode with no widget ever created.
+#: A toy vendor PCell that raises if `tkinter` is in `sys.modules` at produce
+#: time -- mirrors pycell4klayout-api's `PCellWrapper.coerce_parameters`
+#: branch, unconditionally taken (and crashing) when `"tkinter" in sys.modules`.
 _TKINTER_SENSITIVE_PACKAGE = """\
 import sys
 
@@ -639,11 +630,9 @@ class {libklass}(pya.Library):
 def test_generate_pdk_pcell_applies_tkinter_workaround_for_known_compat_shim(
     tmp_path, monkeypatch
 ):
-    """A package listed in `_VENDOR_COMPAT_SHIMS` with
-    `needs_tkinter_workaround=True` must have `tkinter` removed from
-    `sys.modules` before KLayout calls into the vendor PCell's
-    `produce_impl` -- otherwise ihp-sg13g2's `pycell4klayout-api` shim
-    crashes on every PCell in the package."""
+    """A `_VENDOR_COMPAT_SHIMS` package with `needs_tkinter_workaround=True`
+    must have `tkinter` removed from `sys.modules` before `produce_impl` runs
+    -- otherwise ihp-sg13g2's `pycell4klayout-api` shim crashes on every PCell."""
     root = tmp_path / "pdk_install"
     variant_dir = _make_install(root, "ihp-sg13g2")
     package = _unique("tkshimlib")
@@ -685,9 +674,8 @@ def test_generate_pdk_pcell_applies_tkinter_workaround_for_known_compat_shim(
 def test_generate_pdk_pcell_leaves_tkinter_untouched_for_unrelated_packages(
     tmp_path, monkeypatch
 ):
-    """Regression guard: the `tkinter` workaround is scoped to packages
-    named in `_VENDOR_COMPAT_SHIMS` -- an ordinary toy vendor package (no
-    entry in that table) must never have `tkinter` touched."""
+    """Regression guard: the `tkinter` workaround is scoped to packages named
+    in `_VENDOR_COMPAT_SHIMS`; an ordinary toy package keeps it untouched."""
     root, _package, library, cell = _toy_pdk(tmp_path)
     sentinel = object()
     monkeypatch.setitem(sys.modules, "tkinter", sentinel)
@@ -727,8 +715,7 @@ def test_cli_pdk_pcell_json_contract_keys(tmp_path, capsys):
 
     assert exit_code == 0
     data = json.loads(capsys.readouterr().out)
-    # Same envelope a built-in generator emits, plus the additive `pdk_pcell`
-    # object -- an existing `klt gen-compose` block consumer needs no change.
+    # Same envelope a built-in generator emits, plus the additive `pdk_pcell` object.
     assert set(data.keys()) == {
         "schema_version",
         "generator",
@@ -834,6 +821,21 @@ def test_cli_unknown_pdk_pcell_cell_is_application_error(tmp_path, capsys):
     assert not output.exists()
 
 
+def test_cli_cell_name_equal_to_vendor_cell_is_application_error(tmp_path, capsys):
+    root, _package, library, cell = _toy_pdk(tmp_path)
+    output = tmp_path / "toy.gds"
+
+    exit_code = main(
+        ["gen", "--pdk-pcell", f"{library}/{cell}", "--cell-name", cell]
+        + ["--pdk-root", str(root), "-o", str(output), "--format", "json"]
+    )
+
+    assert exit_code == 1
+    message = json.loads(capsys.readouterr().err)["error"]["message"]
+    assert cell in message and "--cell-name" in message
+    assert not output.exists()
+
+
 def test_unknown_pdk_pcell_library_raises(tmp_path):
     root, _package, _library, _cell = _toy_pdk(tmp_path)
 
@@ -860,9 +862,8 @@ def test_pdk_without_pcell_library_is_application_error(tmp_path):
 
 
 def test_unimportable_package_is_named_application_error(tmp_path, capsys):
-    """A vendor PyCell package needing a compat layer klt does not ship (the
-    real `cni` / `gdsfactory` case) must fail as a named application error,
-    never a raw traceback -- and klt must not vendor the shim."""
+    """A vendor PyCell package needing a compat layer klt does not ship must
+    fail as a named application error, never a traceback; klt must not vendor it."""
     root = tmp_path / "pdk_install"
     variant_dir = _make_install(root, "sky130A")
     package = _unique("shimlib")
@@ -898,10 +899,9 @@ def test_unimportable_package_is_named_application_error(tmp_path, capsys):
 
 
 def test_unimportable_package_is_listed_as_unavailable(tmp_path):
-    """`--list-pdk-pcells` reports an unloadable package structurally instead
-    of failing the whole enumeration -- one broken package must not hide the
-    libraries that did load, and "ships PCells but needs X installed" is
-    exactly what this listing exists to answer."""
+    """`--list-pdk-pcells` reports an unloadable package structurally, never
+    failing the enumeration -- one broken package must not hide the libraries
+    that did load; "ships PCells but needs X installed" is the point."""
     root = tmp_path / "pdk_install"
     variant_dir = _make_install(root, "sky130A")
     broken = _unique("shimlib")
