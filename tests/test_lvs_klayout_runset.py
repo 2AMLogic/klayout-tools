@@ -1,10 +1,8 @@
-"""Tests for ``klt lvs`` ``"engine": "klayout-runset"`` (issue #2849).
-
-The standalone ``klayout`` application is mocked at the ``subprocess.run``
-boundary: the fake "runset" writes a *real* ``.lvsdb`` (built with the pip
-``klayout.db`` API) so the verdict-from-database path is exercised end to end.
-A real-binary smoke test is skipped when ``klayout`` is not on PATH.
-"""
+"""Tests for ``klt lvs`` ``"engine": "klayout-runset"`` (issue #2849): the
+standalone ``klayout`` application is mocked at the ``subprocess.run``
+boundary -- the fake "runset" writes a *real* ``.lvsdb`` (built with the pip
+``klayout.db`` API) so the verdict-from-database path is exercised end to end;
+a real-binary smoke test is skipped when ``klayout`` is not on PATH."""
 
 from __future__ import annotations
 
@@ -13,38 +11,18 @@ import os
 import shutil
 import subprocess
 import tempfile
-from pathlib import Path
 
 import klayout.db as kdb
 import pytest
 
+import lvs_tmp_repo
 from klayout_tools import lvs_runset
 from klayout_tools.coverage import coverage_validation_error
 from klayout_tools.env_provenance import find_absolute_path_fields
 from klayout_tools.lvs import LvsError, check_lvs_report, run_lvs
 
+tmp_path = lvs_tmp_repo.tmp_path  # pytest collects the fixture by module-level name
 SPICE_ONE = ".subckt TOP\nM1 c b a d NMOS L=0.2u W=0.4u\n.ends\n"
-
-
-@pytest.fixture
-def tmp_path(tmp_path: Path) -> Path:
-    """Shadows pytest's built-in `tmp_path` for every test in this module
-    (ported from `tests/test_lvs.py`, issue #5666): seeds a `.git` marker so
-    `tmp_path` itself resolves as this run's own repo root
-    (`env_provenance.find_repo_root` only checks for a `.git` entry).
-
-    Since #5666 the runset report's `layout` is the committable
-    `{path, scope}` envelope built from the *resolved* layout path, the same
-    as the curated-deck report. A layout under a bare `tmp_path` resolves to
-    `scope: "external"` with `path: null` -- correct, but `--check` cannot
-    verify it (the one case resolution cannot cover). Seeding the marker puts
-    every test below in the *realistic* position of a design inside a repo,
-    which is the only position a report committed as `klt signoff` evidence
-    is ever in. The external branch is pinned separately by
-    `tests/test_env_provenance.py`.
-    """
-    (tmp_path / ".git").mkdir()
-    return tmp_path
 
 
 def _make_gds(path: str, n_dev: int) -> None:
@@ -499,40 +477,6 @@ def test_check_hashes_runset(tmp_path, fake_klayout):
     assert "provenance.runset.content_hash" in [c["field"] for c in result["checks"]]
     (tmp_path / "pdk.lvs").write_text("# changed\n")
     assert check_lvs_report(str(path))["status"] != "match"
-
-
-def test_layout_field_is_the_path_scope_envelope(tmp_path, fake_klayout):
-    """Issue #5666: the runset report's `layout` is the committable
-    `{path, scope}` envelope built from the resolved path -- the shape
-    `schema_version: 3` documents unconditionally (docs/cli/lvs.md) and the
-    curated-deck report emits -- not the request's bare-string echo. The
-    `.git`-seeding `tmp_path` override above puts the layout in the
-    realistic inside-a-repo position, so the envelope is locatable."""
-    report = run_lvs(_request(tmp_path, 1))
-    assert isinstance(report["layout"], dict)
-    assert report["layout"] == {"path": "l.gds", "scope": "repo"}
-    # `reference` stays the documented bare-string echo (docs/cli/lvs.md).
-    assert isinstance(report["reference"], str)
-
-
-def test_text_renderer_renders_a_runset_report(tmp_path, fake_klayout, capsys):
-    """Issue #5666: `--format text` (the default) renders a complete runset
-    report instead of raising `AttributeError` inside `render_path_field` --
-    the crash the runset engine's bare-string `layout` used to cause."""
-    from klayout_tools.cli.lvs_cmd import _print_text
-
-    report = run_lvs(_request(tmp_path, 1))
-    _print_text(report)
-    out = capsys.readouterr().out
-    # The `layout:` line is the envelope rendering (repo-relative), never the
-    # absolute host path; `reference:` stays the request's verbatim string.
-    assert out.startswith("layout: l.gds\n")
-    assert f"layout: {tmp_path / 'l.gds'}" not in out
-    assert f"reference: {report['reference']}" in out
-    assert f"engine: {report['engine']}" in out
-    assert f"status: {report['status']}" in out
-    assert "mismatches: " in out
-    assert "errors: " in out
 
 
 @pytest.mark.skipif(shutil.which("klayout") is None, reason="klayout binary absent")

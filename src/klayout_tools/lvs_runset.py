@@ -45,6 +45,7 @@ from typing import TYPE_CHECKING, Any
 
 from ._paths import resolve_tool_binary
 from ._provenance import build_provenance, sha256_file
+from .env_provenance import repo_relative_path, repo_root_for
 from .lvs_mismatch import _mismatch
 from .lvs_runset_census import _build_coverage, _class_census
 
@@ -837,8 +838,7 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
     """Run ``request`` through the PDK runset and return the ``klt lvs``
     envelope. See this module's docstring; request fields are documented in
     ``docs/cli/lvs.md`` ("klayout-runset")."""
-    from . import env_provenance
-    from .lvs import SCHEMA_VERSION, LvsError
+    from .lvs import SCHEMA_VERSION, LvsError, _reference_conversion_echo
 
     layout, reference, deck_file, deck_vars, options = _validate_request(
         request, request_dir
@@ -847,7 +847,6 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
     timeout_s = float(options.get("runset_timeout_s", RUNSET_DEFAULT_TIMEOUT_S))
     binary = _resolve_klayout_binary(options, request_dir)
 
-    from .lvs import _reference_conversion_echo
     from .lvs_runset_reference import convert_reference
 
     work_dir = tempfile.mkdtemp(prefix="klt-lvs-runset-")
@@ -921,18 +920,7 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
         **_reference_conversion_echo(
             request["reference"].get("form", "plain-element"), request["reference"]
         ),
-        "layout": env_provenance.repo_relative_path(
-            layout, repo_root=env_provenance.repo_root_for(layout)
-        ),
-        # Issue #5666: `layout` is the committable `{path, scope}` envelope,
-        # built from the *resolved* path (the file `environment.layout_sha256`
-        # above hashes) -- the same normalization the curated-deck report
-        # applies (`lvs_report.py`) and the shape `schema_version: 3` /
-        # docs/cli/lvs.md document unconditionally. The bare request echo
-        # crashed `--format text` and left `--check` nothing to resolve.
-        # `reference` stays the request's own verbatim string echo: that is
-        # the documented runset contract (docs/cli/lvs.md), which the text
-        # renderer has always special-cased.
+        "layout": repo_relative_path(layout, repo_root=repo_root_for(layout)),
         "reference": request["reference"]["netlist"],
         "top": top or verdict["top"],
         "reference_top": request["reference"].get("top") or verdict["reference_top"],
