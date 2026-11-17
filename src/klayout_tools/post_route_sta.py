@@ -344,7 +344,7 @@ from .post_route_sta_path_groups import (  # noqa: F401 -- re-exported names
     _worst_paths,
     _worst_paths_by_group,
 )
-from .post_route_sta_stages import (  # noqa: F401 -- re-exported names
+from .post_route_sta_stages import (
     _attach_worst_path_stages,
     _worst_path_lines,
     _worst_path_stage_lines,
@@ -1400,9 +1400,9 @@ def _run_corner_session(
     worst_setup_path, worst_hold_path = _worst_paths(
         completed.stdout or "", worst_slack, worst_hold_slack
     )
+    stdout = completed.stdout or ""
     worst_setup_path, worst_hold_path = _attach_worst_path_stages(  # issue #5783
-        completed.stdout or "", worst_setup_path, worst_hold_path,
-        enabled=report_path_stages,
+        stdout, worst_setup_path, worst_hold_path, enabled=report_path_stages
     )
 
     corner_fields: dict[str, Any] = {

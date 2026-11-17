@@ -293,9 +293,7 @@ def _parse_path_stage_region(
         if record["reason"]:
             reason += f": {record['reason']}"
         return _unavailable_stage_block(reason)
-    rows, stage_reason = _stage_rows(
-        region, record["startpoint"], record["endpoint"]
-    )
+    rows, stage_reason = _stage_rows(region, record["startpoint"], record["endpoint"])
     if rows is None:
         return _unavailable_stage_block(stage_reason or "stage report unparseable")
     arrival = _first_number(region, _ARRIVAL_RE)
