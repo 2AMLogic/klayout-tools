@@ -204,9 +204,7 @@ def _validate_measurement_forms(measurements_spec: list[dict[str, Any]]) -> None
       both response entries would report the *second* expression's value.
       Byte-identical duplicates among any entries are refused as well
       (issue #6289, by :func:`validate_case_variant_names`) -- before that
-      issue a request whose duplicate names were all ``spice`` cards crashed
-      coverage's work-identity check as an unhandled ``ValueError`` outside
-      the JSON error envelope.
+      issue, a spice-only duplicate crashed coverage as an unhandled ``ValueError``.
 
     Does **not** validate the expression's ngspice syntax or that it reduces
     to a scalar: neither is knowable without running the engine, and both

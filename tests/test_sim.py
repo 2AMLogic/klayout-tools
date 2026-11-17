@@ -935,10 +935,8 @@ def test_validate_measurement_forms_rejects_expr_colliding_with_a_later_card():
 
 
 def test_validate_measurement_forms_rejects_duplicate_spice_only_names():
-    """Issue #6289: two `.meas` cards sharing a byte-identical name are
-    refused up front -- before that issue such a request crashed coverage's
-    work-identity check as an unhandled `ValueError` outside the JSON error
-    envelope, so no caller could rely on ngspice's last-card-wins behaviour."""
+    """Issue #6289: two `.meas` cards sharing a byte-identical name are refused
+    up front -- before that issue they crashed coverage as a bare `ValueError`."""
     with pytest.raises(sim.SimError, match="'vout' is declared more than once"):
         sim._validate_measurement_forms(
             [
