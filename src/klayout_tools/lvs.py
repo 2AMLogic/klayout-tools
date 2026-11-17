@@ -163,7 +163,6 @@ from .lvs_combine import (
     _combine_devices_safely,
     _correct_combine_parameters,
     _flatten_netlist_safely,  # noqa: F401
-    _hierarchy_mismatch_warnings,
     _parse_combine_devices,  # noqa: F401
     _parse_combine_devices_max_attempts,  # noqa: F401
     _parse_combine_devices_per_circuit,  # noqa: F401
@@ -172,6 +171,10 @@ from .lvs_combine import (
     _series_fold_offset_absorbed_warnings,
     _unmatched_combine_devices_per_circuit_warnings,  # noqa: F401
     _validate_combine_device_classes,
+)
+from .lvs_coverage import (
+    _coverage_kind,
+    _geometry_disclosure_kind,
 )
 from .lvs_finfet import (
     apply_finfet_bulk_hierarchy,
@@ -208,6 +211,7 @@ from .lvs_gate_level_convert import (  # noqa: F401
     _convert_gate_level_reference,
     _gate_level_port_case_fold_warnings,
 )
+from .lvs_hierarchy import _hierarchy_mismatch_warnings
 from .lvs_known_limits import note_known_limit
 from .lvs_mismatch import (
     _annotate_case_collision_merges,
@@ -295,10 +299,10 @@ if TYPE_CHECKING:
 #: use (often that host's absolute path), so `klt signoff`'s
 #: `input_verified` freshness gate (issue #2196) could re-verify such a
 #: citation only there and reported drift from every other checkout.
-#: Bumped 2 -> 3 (issue #4984): top-level `reference` became the same
-#: `{path, scope}` shape, built from the resolved path `environment.
-#: reference_sha256` hashes, so `--check` is cwd-independent. Readers still
-#: accept the bare string of an older report; `klayout-runset` keeps strings.
+#: Bumped 2 -> 3 (issue #4984): top-level `reference` became `{path, scope}`
+#: built from the resolved path `environment.reference_sha256` hashes
+#: (`--check` cwd-independent; readers accept the older bare string);
+#: `klayout-runset` keeps its `reference` bare, `layout` normalised (#5666).
 SCHEMA_VERSION = 3
 
 #: ``klayout`` (in-process ``NetlistComparer``) is the primary engine;
@@ -442,9 +446,9 @@ CATEGORY_HINTS_REJECTED = "hints.rejected"
 #: structural flatten rather than the netlist's original hierarchy (see
 #: `_flatten_netlist_safely`).
 CATEGORY_TOPOLOGY_FLATTENED = "topology.flattened"
-#: Issue #4548: a flat layout netlist against a still-hierarchical reference
-#: with `options.flatten_reference` unset -- advisory naming that option (see
-#: `_hierarchy_mismatch_warnings`).
+#: Issues #4548/#5756: a hierarchy asymmetry between the compared sides --
+#: flat layout vs hierarchical reference, or the inverse after the tool's own
+#: flatten -- advisory naming the fix (see `_hierarchy_mismatch_warnings`).
 CATEGORY_TOPOLOGY_HIERARCHY_MISMATCH = "topology.hierarchy_mismatch"
 #: Issue #1552: one of `options.combine_devices_per_circuit`'s own glob
 #: patterns matched zero circuits on this side -- most often a typo'd
@@ -3504,14 +3508,12 @@ def _resolve_layout(
     # Issue #1942: recognise a round-tripped `X ... PARAMS:` card naming one
     # of `layout.deck`'s own custom (`GenericDeviceExtractor`-shaped) device
     # classes -- e.g. a MoM capacitor -- as a device of that class instead
-    # of letting it degrade into a mangled-name abstract circuit. A best-
-    # effort lookup only: an unresolvable `deck_name`/`deck_options` here is
-    # deliberately swallowed rather than raised -- `run_lvs` re-resolves
-    # `layout.deck` itself right after this function returns (see its own
-    # `layout_deck` comment) and raises the authoritative `LvsError` there,
-    # so this must not duplicate (and potentially reorder) that validation.
-    # `None`/empty when `layout.deck` was never given, unchanged from every
-    # request that predates this parameter.
+    # of a mangled-name abstract circuit. A best-effort lookup only: an
+    # unresolvable `deck_name`/`deck_options` here is deliberately swallowed
+    # rather than raised -- `run_lvs` re-resolves `layout.deck` right after
+    # this function returns and raises the authoritative `LvsError`, so
+    # this must not duplicate (and potentially reorder) that validation.
+    # Empty when `layout.deck` was never given, unchanged for old requests.
     custom_device_classes: dict[str, str] = {}
     resistor_classes: dict[str, str] = {}
     deck_name = layout_spec.get("deck")
@@ -3525,16 +3527,16 @@ def _resolve_layout(
                 layout_deck_for_recovery
             )
             # Issue #1157: recognise a round-tripped bulk-bearing drawn-
-            # resistor class's `X` card (the bare-mode card shape ngspice
-            # can parse) as a real 3-terminal resistor device again -- the
-            # exact recovery the MoM-capacitor table above established,
-            # keyed off `layout.deck`'s own `resistors` table.
+            # resistor class's `X` card as a real 3-terminal device again.
             resistor_classes = resistor_classes_for_deck(layout_deck_for_recovery)
     netlist = kdb.Netlist()
+    from .netlist_normalize import defined_subckt_names
+
     reader = make_capacitor_class_recovery_reader(
         recovered_capacitor_classes,
         custom_device_classes=custom_device_classes,
         resistor_classes=resistor_classes,
+        defined_subckt_names=defined_subckt_names(layout_netlist_text),
     )
     try:
         netlist.read(layout_netlist_path, reader)
@@ -3695,6 +3697,7 @@ def _read_reference_netlist(
     from .netlist_normalize import (
         NormalizeError,
         convert_reference_netlist,
+        defined_subckt_names,
         detect_subckt_call_devices,
     )
 
@@ -3827,6 +3830,7 @@ def _read_reference_netlist(
             recovered_capacitor_classes,
             custom_device_classes=custom_device_classes,
             resistor_classes=resistor_classes,
+            defined_subckt_names=defined_subckt_names(read_text),
         ),
     )
     try:
@@ -6229,25 +6233,6 @@ def _apply_compare_parameters(
 # say which of a resistor/capacitor class's parameters the compare covered
 # --------------------------------------------------------------------------- #
 
-#: Issue #2461: the device-class families whose *geometry* sits entirely
-#: outside a default compare, keyed by the `klayout.db` class name (resolved
-#: lazily, the way :data:`_COMBINE_PARAMETER_CONSERVATION_RULES` is) to the
-#: `device_kind` label reported for them. Both are matched with `isinstance`,
-#: so each one's `*WithBulk` flavour -- a subclass declaring the identical
-#: parameter set -- is covered without being listed.
-#:
-#: Deliberately *only* these two. A MOS class's own geometry (`L`/`W`) is
-#: primary and therefore compared; its secondary `AS`/`AD`/`PS`/`PD` diffusion
-#: parameters are a genuinely narrower gap and reporting them here would add a
-#: warning to essentially every `klt lvs` run for no new information about
-#: whether the device was *sized* correctly. For a resistor/capacitor there is
-#: no such consolation: `R`/`C` is the only primary parameter, so no dimension
-#: of the drawn device is compared at all.
-_GEOMETRY_DISCLOSURE_CLASS_KINDS: tuple[tuple[str, str], ...] = (
-    ("DeviceClassResistor", "resistor"),
-    ("DeviceClassCapacitor", "capacitor"),
-)
-
 #: Issue #2461: the stable ``device_parameter_coverage[].not_compared[].reason``
 #: values -- why one declared parameter of a participating class took no part
 #: in the compare.
@@ -6276,16 +6261,6 @@ _GEOMETRY_DISCLOSURE_CLASS_KINDS: tuple[tuple[str, str], ...] = (
 PARAMETER_NOT_COMPARED_SECONDARY = "secondary"
 PARAMETER_NOT_COMPARED_PLACEHOLDER_VALUE = "placeholder_value"
 PARAMETER_NOT_COMPARED_COMPARE_PARAMETERS = "compare_parameters"
-
-
-def _geometry_disclosure_kind(device_class: Any, kdb_module: Any) -> str | None:
-    """The :data:`_GEOMETRY_DISCLOSURE_CLASS_KINDS` label for ``device_class``
-    (``"resistor"``/``"capacitor"``), or ``None`` for every other class."""
-    for class_name, kind in _GEOMETRY_DISCLOSURE_CLASS_KINDS:
-        klayout_class = getattr(kdb_module, class_name, None)
-        if klayout_class is not None and isinstance(device_class, klayout_class):
-            return kind
-    return None
 
 
 def _participating_device_classes(netlist: Any) -> dict[str, tuple[Any, int]]:
@@ -6317,7 +6292,8 @@ def _device_parameter_coverage(
     compare_scoped_narrowed: AbstractSet[tuple[str, str]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Which parameters of each participating resistor/capacitor class this
-    compare actually covered (issue #2461).
+    compare actually covered (issue #2461). Issue #5653: the coverage block
+    also reports MOS classes, but the warning stays resistor/capacitor-only.
 
     Returns ``(mismatch entries, coverage block)``:
 
@@ -6327,7 +6303,8 @@ def _device_parameter_coverage(
       already discloses as excluded -- so the human-readable half of the
       report stops implying the geometry was checked;
     * the machine-checkable ``device_parameter_coverage`` block, built from
-      the same determination so the two renderings cannot disagree (the same
+      the same per-parameter determination so the two renderings cannot
+      disagree on a class both cover (the same
       one-source-of-truth discipline ``body_verification``/
       ``device.body_unverified`` follow, issue #1983).
 
@@ -6379,9 +6356,11 @@ def _device_parameter_coverage(
         layout_entry = layout_classes.get(key)
         reference_entry = reference_classes.get(key)
         device_class = (layout_entry or reference_entry)[0]  # type: ignore[index]
-        kind = _geometry_disclosure_kind(device_class, kdb)
+        kind = _coverage_kind(device_class, kdb)
         if kind is None:
             continue
+        # Issue #5653: coverage-only kinds (MOS) never raise the warning.
+        warns = _geometry_disclosure_kind(device_class, kdb) is not None
 
         class_name = device_class.name
         compared: list[str] = []
@@ -6412,7 +6391,7 @@ def _device_parameter_coverage(
             }
         )
 
-        if not secondary:
+        if not secondary or not warns:
             # Every uncompared parameter of this class is already disclosed
             # by its own, more specific warning -- nothing left to say.
             continue
