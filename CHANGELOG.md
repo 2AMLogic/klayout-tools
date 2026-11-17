@@ -72,7 +72,6 @@ not `klt --version`, if you need to detect this kind of drift. See
   variant name (e.g. `mos_array`, or `$N`-suffixed in older builds) to
   `<cell_name>__core`. The scheme id must change whenever the naming changes.
 
-
 - **`klt sim` refuses `measurements[].transfer` declared beside `noise`**
   (#5695, 2026-11-14): the mutually exclusive measurement forms each carried a
   hand-maintained list of "every *other* exclusive form", and `transfer`'s
