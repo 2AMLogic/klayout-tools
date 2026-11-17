@@ -17,8 +17,12 @@ modes and ``.include $VAR/...``):
 3. a ``$`` *inside* a token is part of its name -- ``R$3 a 0 2k`` parses
    -- in every mode;
 4. ``.include $VAR/...`` keeps the ``$VAR`` path and expands the
-   environment variable (mode-independently), which is why the shared
-   rule must keep a glued ``$`` token rather than strip it.
+   environment variable (mode-independently) on ngspice-47, where this
+   was measured; ngspice-42 instead drops the token outright
+   (``Error: .include filename missing``), so the expansion is
+   *version*-, not mode-, dependent. Either way the card only reaches
+   ngspice's include handling if a glued ``$`` token survives klt's
+   strip, which is why the shared rule keeps it.
 
 Each test also asserts the shared rule's own take on the same card, so
 the documented divergence is pinned against the simulator rather than
@@ -33,14 +37,20 @@ did.
 
 Skipped when ngspice is absent or ``KLT_SKIP_NGSPICE_TESTS=1`` (the
 local-only opt-out, never set by CI); CI installs ngspice, so the pins
-run there.
+run there -- except the two ``.include $VAR`` pins, which additionally
+probe whether the local ngspice expands env vars in include paths and
+skip on builds that do not (ngspice-42, CI's current apt pin, vs. the
+ngspice-47 these were measured on; issue #6110 tracks the general
+version-gate question).
 """
 
 from __future__ import annotations
 
+import functools
 import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -161,12 +171,48 @@ def test_ngspice_keeps_a_dollar_inside_a_token(tmp_path):
     assert strip_spice_inline_comment("R$3 a 0 2k") == "R$3 a 0 2k"
 
 
+@functools.lru_cache(maxsize=1)
+def _ngspice_expands_include_env_vars() -> bool:
+    """Whether the local ngspice expands ``$VAR`` in ``.include`` paths.
+
+    True on ngspice-47, where the divider include loads and ``v(b)``
+    resolves to 0.5 V; false on ngspice-42 -- CI's apt pin -- where the
+    ``$VAR`` token never survives to become a filename (``Error:
+    .include filename missing``). The two ``.include $VAR`` pins below
+    describe the expanding builds and skip elsewhere (#6110 tracks
+    giving the shared presence gate a version dimension)."""
+    if not HAVE_NGSPICE:
+        return False
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        (tmp_path / "inc.cir").write_text("Rinc b 0 5k\n")
+        out = _run_ngspice(
+            tmp_path,
+            "include-var-capability",
+            "* title\n.include $KLT5427_INC/inc.cir\nRser a b 5k\nV1 a 0 1\n"
+            ".op\n.print v(a) v(b)\n.end\n",
+            env={**os.environ, "KLT5427_INC": str(tmp_path)},
+        )
+        return "5.000000e-01" in out
+
+
+_INCLUDE_VAR_CAPABLE = pytest.mark.skipif(
+    not _ngspice_expands_include_env_vars(),
+    reason="ngspice build does not expand $VAR in .include paths "
+    "(ngspice-42 drops the token; pin targets expanding builds, "
+    "e.g. ngspice-47 -- #6110)",
+)
+
+
+@_INCLUDE_VAR_CAPABLE
 def test_ngspice_expands_an_include_dollar_var(tmp_path):
     """``.include $VAR/...`` survives verbatim and is environment-expanded
-    by ngspice itself (mode-independently): the divider only resolves to
-    0.5 V if the included ``Rinc`` actually loaded. The shared rule keeping
-    such lines intact is therefore *matching* the simulator, not diverging
-    from it."""
+    by ngspice itself (mode-independently) on builds that expand include
+    env vars -- ngspice-47, where this was measured; ngspice-42 drops
+    the token instead, which is why this pin is capability-gated. The
+    divider only resolves to 0.5 V if the included ``Rinc`` actually
+    loaded: where it runs, the shared rule keeping such lines intact is
+    *matching* the simulator, not diverging from it."""
     (tmp_path / "inc.cir").write_text("Rinc b 0 5k\n")
     out = _run_ngspice(
         tmp_path,
@@ -184,11 +230,14 @@ def test_ngspice_expands_an_include_dollar_var(tmp_path):
     )
 
 
+@_INCLUDE_VAR_CAPABLE
 def test_ngspice_reports_an_unset_include_dollar_var(tmp_path):
     """An unset ``$VAR`` in an include path is an ngspice env-var error,
     not a silent truncation of the card to ``.include`` -- the failure the
     pre-#5417 whitespace-``$`` strippers used to produce in klt's own
-    readers."""
+    readers. The exact message is the expanding builds' shape (ngspice-47;
+    a non-expanding ngspice-42 fails earlier with ``.include filename
+    missing``, so this pin is capability-gated with the one above)."""
     env = {k: v for k, v in os.environ.items() if k != "KLT5427_INC"}
     out = _run_ngspice(
         tmp_path,

@@ -47,15 +47,20 @@ import re
 #: than its default one. Two further ngspice behaviours agree with the
 #: pattern in every mode: a ``$`` inside a token is part of its name
 #: (``R$3 a 0 2k`` parses), and ``.include``/``.lib`` keep a ``$VAR``
-#: filename and expand the environment variable themselves.
+#: filename and expand the environment variable themselves -- the
+#: expansion as measured on ngspice-47; ngspice-42 instead drops the
+#: token outright, so that half is *version*-, not mode-, dependent
+#: (``tests/test_spice_text_ngspice.py`` capability-gates its pin).
 #:
 #: The stricter token-delimited ``$`` is load-bearing against what klt's
 #: readers actually consume:
 #:
 #: * a ``$`` glued to the next token is a shell-style variable reference,
 #:   not a comment -- ``.include $PDK_ROOT/...`` and ``.lib $SKY130/... tt``
-#:   must survive intact, which is also what ngspice's own include
-#:   handling does;
+#:   must survive intact; ngspice-47's include handling expands them
+#:   itself, and on a non-expanding build (ngspice-42 drops the token)
+#:   no klt-side stripping could rescue the card anyway -- it is
+#:   unreadable to the simulator either way there;
 #: * a ``$`` glued to the *previous* token is part of that token's name --
 #:   KLayout writes cards as ``X$1``/``M$1``/``C$1`` (issue #2972) and
 #:   anonymous-net names as ``.subckt cell $1 $2`` (``extract.py``'s
