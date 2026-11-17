@@ -4958,10 +4958,10 @@ def _yield_samples_content_hash(
     recorded", per issue #2197 -- previously both collapsed into the same
     silent ``content_hash: null``.
 
-    Follow-up reconciliation: if a later #710 phase adds its own
-    ``provenance.input.content_hash`` to `klt yield`'s JSON shape, the
-    generic ``input_block`` lookup in :func:`_grade_evidence` finds it first
-    and this fallback simply never fires again -- no change needed here.
+    Drop untracked candidates before hashing and from ``searched`` so both
+    disclosures use the same git-index basis (issue #6139). If `klt yield`
+    later adds ``provenance.input.content_hash``, :func:`_grade_evidence`
+    finds it first and this fallback never fires again.
     """
     samples = envelope.get("samples")
     if not isinstance(samples, str):
@@ -4974,7 +4974,7 @@ def _yield_samples_content_hash(
     cwd_relative = _resolve_relative_to_spec(samples, spec)
     if cwd_relative not in candidates:
         candidates.append(cwd_relative)
-
+    candidates = [c for c in candidates if not is_untracked_working_tree_file(c)]
     for candidate in candidates:
         digest = sha256_file(candidate)
         if digest is not None:
