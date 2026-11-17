@@ -354,12 +354,8 @@ def test_mismatch_params_floor_is_its_first_release_segment():
     ``KeyError: 'mismatch_param'`` on the wire (#5504 review). The floor is
     the feature's first release segment, ``0.9.3``."""
     assert _RUNNER_REQUEST_FEATURES["mismatch_params"][0] == (0, 9, 3)
-    assert _missing_runner_features(["mismatch_params"], "0.9.1") == [
-        "mismatch_params"
-    ]
-    assert _missing_runner_features(["mismatch_params"], "0.9.2") == [
-        "mismatch_params"
-    ]
+    assert _missing_runner_features(["mismatch_params"], "0.9.1") == ["mismatch_params"]
+    assert _missing_runner_features(["mismatch_params"], "0.9.2") == ["mismatch_params"]
     assert _missing_runner_features(["mismatch_params"], "0.9.3.dev1") == []
 
 
