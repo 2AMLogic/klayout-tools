@@ -790,8 +790,9 @@ into the circuit.)
   the legal envelope for the strap's extent along the ring side: it is the
   opening inset by the deck's own same-layer spacing, so a strap whose
   along-side extent stays within it clears the ring metal on both cut ends
-  at every sweep point (`null` when the opening is narrower than two
-  spacings — no same-layer-legal strap fits).
+  at every sweep point (`null` when the along-side extent is narrower than
+  the layer's minimum width, or ≤ 0 after the spacing inset — no
+  same-layer-legal strap fits; issue #6425).
 
   ```bash
   # A guard-ringed pair whose ring is opened on the east side, on the row
