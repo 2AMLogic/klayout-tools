@@ -17,7 +17,10 @@ CONT_ONGRID_RULE = DrcRule(
     grid_um=0.005,
     # geometry/3_1_offgrid.drc: `offgrid_check(layer, name)` ->
     # "3.1 cont_drw_Offgrid: ... on a drawing grid of 5 nm"
-    scope="x",
+    # -> scope names the upstream offgrid rule family, not a layer (and not
+    # the `Cnt.*` section from feol/5_14_cont.drc, which this deck does not
+    # implement); sky130's own offgrid rules use scope="x" for its "x.*" ids
+    scope="Offgrid",
     provenance=RuleProvenance(
         source_repo="IHP-GmbH/IHP-Open-PDK",
         source_path="ihp-sg13g2/libs.tech/klayout/tech/drc/rule_decks/geometry/3_1_offgrid.drc",

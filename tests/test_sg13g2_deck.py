@@ -43,8 +43,9 @@ from pathlib import Path
 import klayout.db as kdb
 import pytest
 
-from klayout_tools.decks import RuleProvenance
+from klayout_tools.decks import RuleProvenance, get_deck
 from klayout_tools.decks import sg13g2 as sg13g2_deck_module
+from klayout_tools.decks import sg13g2_cont_grid as sg13g2_cont_grid_module
 from klayout_tools.decks.sg13g2 import EXTRACTION_DECK
 from klayout_tools.drc import run_drc
 from klayout_tools.extract import run_extract
@@ -391,6 +392,24 @@ def test_sg13g2_poly_label_is_gatpoly_label():
     `L_GATPOLY_LABEL = (5, 1)` -- see the deck module's own note directly
     above `EXTRACTION_DECK`'s definition for the full citation."""
     assert EXTRACTION_DECK.poly_label == (5, 1)  # GatPoly.label
+
+
+# --------------------------------------------------------------------------- #
+# cont.ongrid.1 scope provenance (issue #5723)
+# --------------------------------------------------------------------------- #
+
+
+def test_sg13g2_cont_ongrid_scope_is_offgrid_family():
+    """`cont.ongrid.1`'s `scope` names sg13g2's upstream offgrid rule family
+    (`cont_drw_Offgrid`, `rule_decks/geometry/3_1_offgrid.drc`) -- not the
+    `"x"` copy-pasted from sky130's own legitimate `x.*` family (#5723), and
+    not `"Cnt"`, which would claim the `Cnt.a`-`Cnt.d` section from
+    `feol/5_14_cont.drc` that this deck does not implement. A scope token
+    names an upstream DRM section or rule-id family, never a layer."""
+    assert sg13g2_cont_grid_module.CONT_ONGRID_RULE.scope == "Offgrid"
+    scopes = {rule.scope for rule in get_deck("sg13g2") if rule.scope}
+    assert "x" not in scopes
+    assert "Offgrid" in scopes
 
 
 # --------------------------------------------------------------------------- #

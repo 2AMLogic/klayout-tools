@@ -4023,6 +4023,18 @@ contents to see which chapters this curated deck does not attempt at all —
 something no per-layer field can express, since one layer (e.g. gf180mcu's
 `Metal4`) can be referenced by rules spanning several different DRM sections.
 
+**A `scope` token is not a layer name.** It names an upstream DRM section or
+rule-id family — the layer a rule applies to is carried separately by
+`DrcRule.layer` / `coverage.deck_layers`. The offgrid rules across the three
+curated decks are the worked example: sky130's two offgrid rules declare
+`scope="x"` (its `sky130.lydrc` OFFGRID block emits `x.1b`/`x.2c` rule ids),
+gf180mcu's declare `"OFFGRID"` (its `<layer>_OFFGRID` ids), and sg13g2's
+`cont.ongrid.1` declares `"Offgrid"` (upstream `cont_drw_Offgrid`, from
+`rule_decks/geometry/3_1_offgrid.drc`) — none names the layer being gridded
+(sg13g2's rule runs on `Cont.drawing`), and `"Cnt"` there would wrongly claim
+the `Cnt.a`-`Cnt.d` section from `feol/5_14_cont.drc`, which the deck does
+not implement (issue #5723).
+
 `deck_scope` is purely additive (see
 [`docs/json-contract.md`](../json-contract.md)): the existing
 `layers_in_stream_without_rules` field is unchanged, byte-identical output
