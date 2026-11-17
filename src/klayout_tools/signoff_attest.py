@@ -83,6 +83,8 @@ from .signoff import (
 )
 from .signoff_attest_drift import drift_result
 from .signoff_attest_input import input_binding
+from .signoff_attest_presence import file_check as _file_check
+from .signoff_attest_presence import split_entries
 
 #: The attestation-inventory schema versions this build reads. An inventory
 #: declaring any other version is refused (exit ``1``) rather than read with
@@ -406,8 +408,11 @@ def _validated_inventory(
         inventory, bench_specs = item9.split_testbenches(
             inventory, root, _normalize_repo_path, _command_spec
         )
+    inventory, presence = split_entries(
+        inventory, item, _PATH_LISTS[item], root, _normalize_repo_path
+    )
     seen: dict[str, str] = {}
-    normalized: dict[str, Any] = {}
+    normalized: dict[str, Any] = {"presence": sorted(presence)} if presence else {}
     for field, _role in _PATH_LISTS[item]:
         normalized[field] = _path_list(inventory, field, root, seen)
     if item == 1:
@@ -693,17 +698,6 @@ def _validated_derived(
 # --------------------------------------------------------------------------- #
 # Checks
 # --------------------------------------------------------------------------- #
-
-
-def _file_check(root: str, path: str, role: str) -> dict[str, Any]:
-    digest = sha256_file(os.path.join(root, path))
-    return {
-        "check": "present",
-        "role": role,
-        "path": path,
-        "passed": digest is not None,
-        "content_hash": f"sha256:{digest}" if digest is not None else None,
-    }
 
 
 def _recorded_hash_check(root: str, entry: Mapping[str, Any]) -> dict[str, Any]:
@@ -993,8 +987,10 @@ def _run_checks(
         return _command_check(root, spec, role, **identity)
 
     for field, role in _PATH_LISTS[item]:
+        presence = normalized.get("presence", ())
         checks.extend(
-            _file_check(root, path, role) for path in sorted(normalized[field])
+            _file_check(root, path, role, presence=path in presence)
+            for path in sorted(normalized[field])
         )
     if item == 1:
         for entry in normalized["derived"]:
