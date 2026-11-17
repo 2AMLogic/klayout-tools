@@ -49,7 +49,6 @@ unit, so that rule would make the setting a no-op.
 from __future__ import annotations
 
 import os
-import re
 import shlex
 import subprocess
 import tarfile
@@ -59,7 +58,13 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from . import _batch_common, _provenance, remote_transport, sim_batch
+from . import (
+    _batch_collect,
+    _batch_common,
+    _provenance,
+    remote_transport,
+    sim_batch,
+)
 from .netlist import (
     DEFAULT_XSCHEM_BINARY,
     SCHEMA_VERSION,
@@ -75,6 +80,7 @@ from .netlist import (
 from .netlist_batch_select import _relative_symbol_dirs, _select_files
 from .netlist_paths import (
     _rewrite_runner_paths,
+    fold_continuations,
     relativize_schematic_paths,
 )
 
@@ -128,12 +134,10 @@ _NO_FALLBACK = "(no local fallback: xschem was not run on this host)"
 
 
 def resolve_backend(flag: str | None) -> str:
-    """``--backend`` > ``$KLT_NETLIST_BACKEND`` > ``"local"``.
-
-    A hard routing choice: unlike ``klt sim``'s ``$KLT_SIM_BACKEND``, an
-    env-sourced ``batch`` is never stepped back to ``local``. An unknown
-    value from the environment is an error naming the variable (argparse
-    already validates the flag).
+    """``--backend`` > ``$KLT_NETLIST_BACKEND`` > ``"local"``. A hard routing
+    choice: an env-sourced ``batch`` is never stepped back to ``local``; an
+    unknown env value is an error naming the variable (argparse validates
+    the flag).
     """
     return _batch_common.resolve_backend_value(
         flag, BACKEND_ENV, SUPPORTED_BACKENDS, NetlistError
@@ -149,10 +153,9 @@ def resolve_backend(flag: str | None) -> str:
 class BatchTree:
     """The git-tracked input tree a batch export ships, fully validated.
 
-    ``files`` are root-relative POSIX paths. ``rcfile_arg`` is the shell
+    ``files`` are root-relative POSIX paths; ``rcfile_arg`` is the shell
     fragment the job command passes as ``--rcfile`` (a quoted root-relative
-    path, or ``"$PDK_ROOT"/<rest>`` for a PDK-relative rcfile), ``None``
-    without one.
+    path, or ``"$PDK_ROOT"/<rest>`` for a PDK-relative rcfile), else ``None``.
     """
 
     root: str
@@ -281,9 +284,8 @@ def package_tree(
 
     Raises :class:`NetlistError` -- before any archive is built or any S3
     write -- for a root outside git, a schematic or project rcfile outside
-    the root or untracked, a schematic or project rcfile that ``include`` /
-    ``exclude`` leaves out of the selected set, or an uncompressed total of
-    the selected set above ``max_bytes`` (default
+    the root or untracked or left out of the selected set, or an uncompressed
+    total of the selected set above ``max_bytes`` (default
     :data:`MAX_BATCH_TREE_BYTES`).
     """
     if max_bytes is None:
@@ -386,12 +388,12 @@ def build_job_spec(
 ) -> sim_batch.BatchJobSpec:
     """The netlist job as a :class:`~klayout_tools.sim_batch.BatchJobSpec`.
 
-    ``cmd`` is the runner-version preflight, then: extract the tree into a
-    fresh directory, record that directory's path, and run ``klt netlist``
-    there with ``--backend local`` and ``--format json``, its report
-    redirected to ``report.json`` and its stderr teed to ``stderr.log``
-    (where klt writes an error envelope), the same channels ``klt sim``'s
-    batch job uses. ``pdk_root`` is never set: the runner resolves its own.
+    ``cmd`` is the runner-version preflight, then: extract the tree, record
+    the directory's path, and run ``klt netlist`` there with ``--backend
+    local`` and ``--format json``, report to ``report.json``, stderr teed to
+    ``stderr.log`` (where klt writes an error envelope) -- the same channels
+    ``klt sim``'s batch job uses. ``pdk_root`` is never set: the runner
+    resolves its own.
     """
     argv = [
         "klt netlist",
@@ -448,49 +450,6 @@ def _resolve_config(pdk: str, timeout_s: float) -> sim_batch.BatchConfig:
     )
 
 
-def _runner_error(collected: str) -> tuple[dict[str, Any] | None, str]:
-    """The runner klt's own error envelope (``message`` and maybe ``code``):
-    from ``report.json`` (where the preflight writes its rejection), else
-    from the tail of ``stderr.log`` (where ``klt netlist`` writes one)."""
-    note = ""
-    try:
-        kind, error = sim_batch._classify_collected_report(
-            sim_batch.read_collected_report(collected)
-        )
-        if kind == "error":
-            return error, ""
-    except sim_batch.BatchError as exc:
-        note = str(exc)
-    error, stderr_note = sim_batch._read_stderr_envelope(collected)
-    if error is not None:
-        return error, ""
-    return None, "; ".join(item for item in (note, stderr_note) if item)
-
-
-#: Bytes of ``stderr.log`` quoted back when the job left no klt envelope.
-REMOTE_STDERR_TAIL_BYTES = 2048
-
-_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
-_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
-
-
-def _remote_stderr_tail(collected: str) -> str:
-    """The last :data:`REMOTE_STDERR_TAIL_BYTES` of the collected
-    ``stderr.log`` as sanitized text: invalid UTF-8 replaced, ANSI escapes and
-    control characters (other than newline and tab) dropped. ``""`` when the
-    file is missing or empty. Only used when no klt envelope was recovered."""
-    path = os.path.join(collected, sim_batch.BATCH_STDERR_FILENAME)
-    try:
-        with open(path, "rb") as handle:
-            handle.seek(0, os.SEEK_END)
-            handle.seek(max(0, handle.tell() - REMOTE_STDERR_TAIL_BYTES))
-            raw = handle.read()
-    except OSError:
-        return ""
-    text = raw.decode("utf-8", errors="replace").replace("\r\n", "\n")
-    return _CONTROL_CHARS.sub("", _ANSI_ESCAPE.sub("", text)).strip()
-
-
 def _job_failure(
     *,
     job_id: str,
@@ -518,34 +477,18 @@ def _job_failure(
 
 
 def _read_runner_report(collected: str, job_id: str) -> dict[str, Any]:
-    try:
-        report = sim_batch.read_collected_report(collected)
-    except sim_batch.BatchError as exc:
-        raise NetlistError(
-            f"batch job {job_id}: {exc} {_NO_FALLBACK}",
-            code=BATCH_JOB_FAILED_CODE,
-            job_id=job_id,
-        ) from exc
-    kind, error = sim_batch._classify_collected_report(report)
-    if kind == "error" and error is not None:
-        raise NetlistError(
-            f"batch job {job_id}: the runner's klt reported: "
-            f"{error['message']} {_NO_FALLBACK}",
-            code=error.get("code") or BATCH_JOB_FAILED_CODE,
-            job_id=job_id,
-        )
-    if (
-        report.get("status") != STATUS_GENERATED
-        or not isinstance(report.get("xschem"), dict)
-        or not isinstance(report.get("netlist"), dict)
-    ):
-        raise NetlistError(
-            f"batch job {job_id}: the collected {sim_batch.BATCH_REPORT_FILENAME} "
-            f"is not a `klt netlist` generate report {_NO_FALLBACK}",
-            code=BATCH_JOB_FAILED_CODE,
-            job_id=job_id,
-        )
-    return report
+    return _batch_collect.read_collected_unit_report(
+        collected,
+        job_id,
+        err_cls=NetlistError,
+        no_fallback=_NO_FALLBACK,
+        validate=lambda report: (
+            report.get("status") == STATUS_GENERATED
+            and isinstance(report.get("xschem"), dict)
+            and isinstance(report.get("netlist"), dict)
+        ),
+        what="a `klt netlist` generate report",
+    )
 
 
 def _read_collected_netlist(
@@ -639,35 +582,17 @@ def _collect(
     *,
     runner: remote_transport.CommandRunner | None,
 ) -> None:
-    """Collect ``outputs/``. A job that did not finish ``done`` is turned
-    into a :class:`NetlistError` carrying the runner's own error, when one
-    can be recovered."""
-    done = status.get("state") == "done" and (
-        sim_batch._status_exit_code(status) in (0, None)
-    )
-    if done:
-        try:
-            sim_batch.collect_outputs(config, job_id, collected, runner=runner)
-        except sim_batch.BatchError as exc:
-            raise _transport_error(job_id, exc) from exc
-        return
-    runner_error: dict[str, Any] | None = None
-    stderr_tail = ""
-    try:
-        sim_batch.collect_outputs(config, job_id, collected, runner=runner)
-        runner_error, note = _runner_error(collected)
-        if runner_error is None:
-            stderr_tail = _remote_stderr_tail(collected)
-    except sim_batch.BatchError as exc:
-        note = str(exc)
-    raise _job_failure(
-        job_id=job_id,
-        status=status,
-        runner_error=runner_error,
-        note=note,
-        stderr_tail=stderr_tail,
-        harness_log=sim_batch.report_job_uri(config, job_id).rstrip("/")
-        + "/harness.log",
+    """Collect ``outputs/``; a job that did not finish ``done`` becomes a
+    :class:`NetlistError` carrying the runner's own error, if recoverable."""
+    _batch_collect.collect(
+        config,
+        job_id,
+        status,
+        collected,
+        runner=runner,
+        err_cls=NetlistError,
+        no_fallback=_NO_FALLBACK,
+        job_failure=_job_failure,
     )
 
 
@@ -681,17 +606,16 @@ def _payload(
     remote: dict[str, Any],
     ignore_comments: bool = False,
     symbol_path: Sequence[str] = (),
+    canonical_wrap: bool = False,
 ) -> dict[str, Any]:
-    """The ``schema_version: 1`` payload a local run returns, from the
-    runner's report, plus ``environment.remote``; writes ``output`` unless
-    ``check``."""
+    """The ``schema_version: 1`` payload, from the runner's report plus
+    ``environment.remote``; writes ``output`` unless ``check``."""
     payload: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "schematic": schematic,
         "output": output,
         "mode": "check" if check else "generate",
-        # ``symbol_path`` is the root-relative list the client forwarded
-        # (the runner's own absolute paths are meaningless here).
+        # ``symbol_path``: the root-relative list the client forwarded.
         "xschem": {**report["xschem"], "symbol_path": list(symbol_path)},
     }
     for key in ("pdk", "block"):
@@ -708,6 +632,7 @@ def _payload(
 
     _write_output(output, data)
     payload["status"] = STATUS_GENERATED
+    payload["canonical_wrap"] = canonical_wrap
     payload["netlist"] = _netlist_block(output, data)
     return payload
 
@@ -729,6 +654,7 @@ def run_netlist_batch(
     ignore_comments: bool = False,
     symbol_path: Sequence[str] = (),
     relative_paths: bool = False,
+    canonical_wrap: bool = False,
     runner: remote_transport.CommandRunner | None = None,
     sleep: Callable[[float], None] = time.sleep,
     warn: Callable[[str], None] | None = None,
@@ -739,7 +665,7 @@ def run_netlist_batch(
     ``runner`` is the injectable command runner every ``aws`` / launch-script
     call goes through (tests pass a fake; ``None`` is a real subprocess).
     Raises :class:`NetlistError` for every failure, before any upload when
-    the cause is local, and never runs xschem on this host.
+    the cause is local; never runs xschem on this host.
     """
     if ignore_comments and not check:
         raise NetlistError("--ignore-comments only applies with --check")
@@ -785,6 +711,8 @@ def run_netlist_batch(
         )
         if relative_paths:
             data = relativize_schematic_paths(data, schematic)
+        if canonical_wrap:
+            data = fold_continuations(data)
         # The runner's klt gates too; this keeps the guarantee client-side.
         _check_no_unevaluated_expr(data, report["xschem"].get("version"))
         _check_no_unresolved_symbol(data)
@@ -805,6 +733,7 @@ def run_netlist_batch(
         remote=remote,
         ignore_comments=ignore_comments,
         symbol_path=list(tree.symbol_paths),
+        canonical_wrap=canonical_wrap,
     )
 
 

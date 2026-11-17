@@ -52,6 +52,39 @@ def input_not_found_entry(
     }
 
 
+def deck_not_found_entry(
+    recorded: str, name: Any, *, override: bool = False
+) -> dict[str, Any]:
+    """The ``deck_not_found`` diagnostic for a ``--engine klayout`` report
+    whose deck resolves by no route (issue #5709). Additive key on the
+    still-failing ``provenance.deck.content_hash`` check; never a skip.
+
+    - ``recorded`` -- the ``deck`` path the report recorded; ``resolved`` its
+      absolute form (what was looked for first).
+    - ``name`` -- ``provenance.deck.name``, the basename looked up among the
+      packaged decks (``packaged_dir``); ``None`` when the report has none.
+    - ``hint`` -- how to supply the deck.
+    - ``override`` -- ``recorded`` is the ``--deck-file`` path itself, the
+      thing that was looked for (a miss is the flag's, not the report's);
+      ``name`` is ``None`` (no packaged lookup happened) and the hint names
+      the flag instead of suggesting it.
+    """
+    return {
+        "recorded": recorded,
+        "resolved": os.path.abspath(recorded),
+        "name": None if override else name,
+        "packaged_dir": os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "decks"
+        ),
+        "hint": (
+            "--deck-file names no existing file; point it at the deck "
+            "script to verify against"
+            if override
+            else "pass --deck-file <path to the deck script> to verify against it"
+        ),
+    }
+
+
 def stale_pin(spec: Mapping[str, Any], resolution: Mapping[str, Any]) -> dict[str, Any]:
     """``detail`` for a ``stale_evidence`` verdict: names the failed
     comparison (field / expected / actual, the entry shape ``--check`` emits)
@@ -61,6 +94,12 @@ def stale_pin(spec: Mapping[str, Any], resolution: Mapping[str, Any]) -> dict[st
     computed over) and ``hint`` (which hash ``content_hash`` must be), plus
     ``pin_is_envelope_file_hash`` when the pin is the cited envelope file's own
     sha256 -- the usual mistake.
+
+    Issue #5837 extends both to a ``provenance.input`` that carries only
+    ``content_hash``/``role`` -- the shape ``build_provenance`` emits, with no
+    ``path``/``paths`` to name in ``compared_against``: the hint states the pin
+    must be the envelope's recorded input hash, and the envelope-own-hash check
+    still flags a pin of the evidence file's own sha256.
     """
     expected = spec.get("content_hash")
     samples_path = resolution.get("yield_samples_path")
@@ -79,6 +118,7 @@ def stale_pin(spec: Mapping[str, Any], resolution: Mapping[str, Any]) -> dict[st
     block = provenance.get("input") if isinstance(provenance, Mapping) else None
     block = block if isinstance(block, Mapping) else {}
     members = block.get("paths")
+    what = None
     if isinstance(members, list) and members:
         names = []
         for member in members:
@@ -96,13 +136,22 @@ def stale_pin(spec: Mapping[str, Any], resolution: Mapping[str, Any]) -> dict[st
         # over the samples document the report names.
         detail["compared_against"] = samples_path
         what = f"the sha256 of the samples document {samples_path}"
+    if what is None:
+        # Issue #5837: no path to name in compared_against -- either
+        # provenance.input carries only content_hash/role (the
+        # `build_provenance` shape) or there is no input block at all. The
+        # hint and the own-hash check below still apply.
+        hint = (
+            "content_hash must be the envelope's provenance.input.content_hash "
+            "(the recorded input hash), not the hash of the evidence envelope "
+            "file"
+        )
     else:
-        return detail
-    field = "samples document" if samples_path else "provenance.input.content_hash"
-    hint = (
-        f"content_hash must be {what} ({field}), "
-        "not the hash of the evidence envelope file"
-    )
+        field = "samples document" if samples_path else "provenance.input.content_hash"
+        hint = (
+            f"content_hash must be {what} ({field}), "
+            "not the hash of the evidence envelope file"
+        )
     evidence_file = resolution.get("file")
     own = sha256_file(evidence_file) if isinstance(evidence_file, str) else None
     if own is not None and expected == f"sha256:{own}":

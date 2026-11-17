@@ -552,8 +552,10 @@ CONTACT_SIZE_UM = 0.22
 #: very PDKs this constant was validated against.
 from .gen_snap import (  # noqa: E402 -- re-exported
     _GRID_DBU_UM,
+    _clamp_span,
     _snap_offset_um,
     _snap_rect_box_um,
+    _snap_span,
     _snap_square_box_um,
 )
 
@@ -3367,36 +3369,6 @@ def _fixed_cut_side_um(side_um: float, fixed_size_um: float) -> float:
     return side_um
 
 
-def _clamp_span(lo: int, hi: int, fixed_dbu: int) -> tuple[int, int]:
-    """Clamp one axis ``[lo, hi]`` (integer dbu) of a cut down to
-    ``fixed_dbu`` about its own centre, for :func:`_clamp_cut_boxes`. The
-    odd-dbu remainder goes on the high side. A no-op for ``fixed_dbu <= 0``
-    or a span already at or under ``fixed_dbu``."""
-    span = hi - lo
-    if fixed_dbu > 0 and span > fixed_dbu:
-        lo += (span - fixed_dbu) // 2
-        hi = lo + fixed_dbu
-    return lo, hi
-
-
-def _snap_span(lo: int, hi: int, grid_dbu: int) -> tuple[int, int]:
-    """Snap one axis ``[lo, hi]`` (integer dbu) of a cut onto a ``grid_dbu``
-    manufacturing grid, for :func:`_clamp_cut_boxes`: *translate* the span to
-    the nearest grid-aligned origin when its length is a grid multiple (size
-    preserved), else round each edge to the grid independently. A no-op for
-    ``grid_dbu == 0``."""
-    if not grid_dbu:
-        return lo, hi
-
-    def _snap(v: int) -> int:
-        return int(round(v / grid_dbu)) * grid_dbu
-
-    if (hi - lo) % grid_dbu == 0:
-        shift = _snap(lo) - lo
-        return lo + shift, hi + shift
-    return _snap(lo), _snap(hi)
-
-
 def _clamp_cut_boxes(
     cell: Any,
     layer_index: int,
@@ -3785,7 +3757,7 @@ def load_params_arg(value: str | None) -> dict[str, Any]:
         try:
             with open(value, encoding="utf-8") as handle:
                 data = json.load(handle)
-        except OSError as exc:
+        except (OSError, UnicodeDecodeError) as exc:
             raise GenError(f"could not read params file '{value}': {exc}") from exc
         except json.JSONDecodeError as exc:
             raise GenError(f"params file '{value}' is not valid JSON: {exc}") from exc
@@ -3919,7 +3891,9 @@ def generate(request: dict[str, Any]) -> dict[str, Any]:
         else None
     )
 
-    layout, top_cell = _produce(spec, cell_name, resolved_params, pdk_info)
+    layout, top_cell, subcell_scheme = _produce(
+        spec, cell_name, resolved_params, pdk_info
+    )
 
     write_layout(layout, output_path, GenError)
 
@@ -3948,6 +3922,7 @@ def generate(request: dict[str, Any]) -> dict[str, Any]:
         },
         "dbu_um": dbu,
         "bbox_um": bbox_um,
+        "subcell_naming_scheme": subcell_scheme,  # #5808
         "device_count": described["device_count"],
         "ports": described["ports"],
         "navigable_regions": described.get("navigable_regions", []),
@@ -4045,7 +4020,7 @@ def _produce(
     cell_name: str,
     resolved_params: dict[str, Any],
     pdk_info: dict[str, Any],
-) -> tuple[kdb.Layout, kdb.Cell]:
+) -> tuple[kdb.Layout, kdb.Cell, str | None]:
     """Instantiate ``spec``'s PCell into a fresh layout as cell ``cell_name``.
 
     This is the harness's one KLayout-specific step: register (once per
@@ -4064,12 +4039,16 @@ def _produce(
     :func:`~klayout_tools.pdk.resolve_pdk_dbu` (issue #1496, e.g. 0.0005 for
     gf180mcu), agreeing by construction with ``klt place_and_route`` (#1032);
     it falls back to ``spec.dbu`` when the LEF is missing or unparsable.
+
+    The third element is the sub-cell naming-scheme id (#5808) -- change it
+    with the naming (and CHANGELOG.md); ``None`` once flattened.
     """
     import klayout.db as kdb
 
     if spec.name == "bjt_array" and _pdk_family(pdk_info["variant"]) == "sg13g2":
         dbu = resolve_pdk_dbu(pdk_info) or spec.dbu  # #4850: PDK-authored HBT
-        return produce_hbt_array(cell_name, resolved_params, pdk_info, dbu)
+        layout, top = produce_hbt_array(cell_name, resolved_params, pdk_info, dbu)
+        return layout, top, "pdk-cell-v1"
 
     lib = _pcell_library()
     decl = lib.layout().pcell_declaration(spec.name)
@@ -4088,7 +4067,7 @@ def _produce(
         # The FinFET extractor recognises devices only from shapes in (or
         # flattened into) the extracted top cell, so ship one flat cell.
         top.flatten(-1, True)
-    return layout, top
+    return layout, top, None if spec.flatten_output else "core-suffix-v1"
 
 
 def _pcell_library() -> kdb.Library:
