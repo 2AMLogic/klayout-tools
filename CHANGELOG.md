@@ -32,6 +32,26 @@ not `klt --version`, if you need to detect this kind of drift. See
   that minted it. `--resume` alone is now enough for the
   `environment.remote.resumable: true` recovery the report advertises;
   `--attach <map> --collect-partial` remains the non-blocking form.
+- **Fixed** (#5664, `klt lvs` `--engine klayout-runset`; no JSON field
+  changes, `schema_version` stays 3): a `pin.unmatched` finding whose pin
+  pair KLayout's own comparer graded `Match`/`MatchWithWarning` — a
+  reference pin with no layout counterpart, i.e. an *unlabelled* layout pin,
+  the shape a runset global like IHP sg13g2's `ignore_top_ports_mismatch`
+  exists to accept — is now disclosed with `severity: "warning"` instead of
+  `error`, so it no longer flips the wrapper's verdict to `mismatch`
+  (exit 3) on a compare the wrapped runset itself reports as PASS. The
+  finding stays listed in `mismatches[]` and `category_counts`, but
+  `error_count`/`category_error_counts` and the `status` now agree with the
+  engine's own grade; `counts.pins` still reports structural pin presence,
+  and a pin pair the comparer itself graded otherwise remains an error.
+- **`klt sim --attach <batch-shards.json>` accepts a map written by a
+  `--hosts N` / `remote.hosts: N` run** (#5777, 2026-11-17): `--attach` and
+  `--collect-partial` refused every `hosts != 1` request with "requires backend
+  'batch' with a single job", contradicting `--help`, and even once past that
+  gate a `hosts > 1` dispatch would have submitted a fresh fleet instead of
+  attaching. A shard map now attaches under any `hosts` (the shard count is read
+  from the map); a bare job id still requires `hosts = 1`. Additive: a call that
+  used to fail now succeeds.
 - **`klt sim --fail-fast-probe` reads the same `.spiceinit` as the corners it
   screens** (#6047, 2026-11-17): `_run_corner` pins the thread count by writing
   a run-directory `.spiceinit`, which *replaces* `$HOME/.spiceinit`, but the
@@ -42,6 +62,15 @@ not `klt --version`, if you need to detect this kind of drift. See
   When no pin applies (a single local corner with no explicit
   `options.threads_per_worker`) nothing is written, as before. No new request
   option or response field.
+- **`klt functional-verification` reports name what they simulated** (#5771,
+  2026-11-17): the report recorded the engine, results and environment but not
+  the simulated files, so an RTL run and a gate-level run of the same testbench
+  module differed only in `real_time_s` jitter. `environment.sources` is a new
+  additive array -- one `{path, scope, sha256}` entry per resolved source, in
+  build order (the `options.from_synthesize` netlist first), on both the cocotb
+  and the Verilog-top path. `path`/`scope` is the repo-relative shape, so a
+  source outside the repo reads `{"path": null, "scope": "external"}` and never
+  leaks a host path. No `schema_version` bump.
 - **`klt sim` refuses `measurements[].transfer` declared beside `noise`**
   (#5695, 2026-11-14): the mutually exclusive measurement forms each carried a
   hand-maintained list of "every *other* exclusive form", and `transfer`'s
