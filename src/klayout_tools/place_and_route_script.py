@@ -54,6 +54,22 @@ def _write_script(script_path: str, lines: list[str]) -> None:
 # the metric procs read back are Liberty-``time_unit``-independent (#4089).
 _UNIT_PIN_LINE = "set_cmd_units -time ns -capacitance pF"
 
+_TCL_SPECIAL = frozenset(' \t\r\n\\"$[]{};#')
+
+
+def _tcl_literal(text: str) -> str:
+    """Backslash-quote ``text`` into one literal Tcl word: no word
+    splitting, no ``$``/``[...]``/backslash substitution, no brace
+    matching. Module-local copy of ``post_route_sta._tcl_literal`` /
+    ``lvs_netgen._tcl_word`` per this module's self-contained convention
+    (issue #5708): every caller-supplied string interpolated into a
+    generated script here -- ``link_design``'s ``hdl_toplevel`` and the
+    ``hdl_toplevel``-bearing checkpoint paths -- goes through it, so a
+    Yosys ``$paramod\\...`` escaped identifier reaches OpenROAD verbatim.
+    Ordinary spellings contain no Tcl-special character and pass through
+    unchanged, so pre-#5708 scripts are byte-identical."""
+    return "".join("\\" + ch if ch in _TCL_SPECIAL else ch for ch in text)
+
 
 def _clock_lines(clock_port: str | None, clock_period_ns: float | None) -> list[str]:
     """``create_clock`` (OpenROAD's minimal SDC-equivalent input, contract
@@ -66,10 +82,13 @@ def _clock_lines(clock_port: str | None, clock_period_ns: float | None) -> list[
     """
     if clock_port is None:
         return _vclk.virtual_clock_lines(clock_period_ns, _UNIT_PIN_LINE)  # issue #4913
+    # Issue #5708: one literal Tcl word, byte-identical for ordinary names
+    # -- kept spelling-identical to `post_route_sta._clock_lines` (the two
+    # copies' drift is asserted by the test suite).
     return [
         _UNIT_PIN_LINE,
-        f"create_clock -name {clock_port} -period {clock_period_ns} "
-        f"[get_ports {clock_port}]",
+        f"create_clock -name {_tcl_literal(clock_port)} "
+        f"-period {clock_period_ns} [get_ports {_tcl_literal(clock_port)}]",
     ]
 
 
@@ -160,15 +179,16 @@ def _io_delay_lines(
     lines: list[str] = []
     if input_delay_ns is not None:
         lines += [
-            f"set klt_clock_port [get_ports {clock_port}]",
+            f"set klt_clock_port [get_ports {_tcl_literal(clock_port)}]",
             "set klt_non_clock_inputs "
             "[lsearch -inline -all -not -exact [all_inputs] $klt_clock_port]",
-            f"set_input_delay {input_delay_ns} -clock {clock_port} "
-            "$klt_non_clock_inputs",
+            f"set_input_delay {input_delay_ns} "
+            f"-clock {_tcl_literal(clock_port)} $klt_non_clock_inputs",
         ]
     if output_delay_ns is not None:
         lines.append(
-            f"set_output_delay {output_delay_ns} -clock {clock_port} [all_outputs]"
+            f"set_output_delay {output_delay_ns} "
+            f"-clock {_tcl_literal(clock_port)} [all_outputs]"
         )
     return lines
 
@@ -1006,7 +1026,9 @@ def _stage_script_lines(
     # stages would make this verb's own `-metrics`/repair steps see a
     # different design than the floorplan did. Empty for every pre-#2635
     # request, leaving each stage script byte-identical.
-    macro_liberty_lines = [f"read_liberty {path}" for path in macro_liberty_paths or []]
+    macro_liberty_lines = [
+        f"read_liberty {_tcl_literal(path)}" for path in macro_liberty_paths or []
+    ]
     if stage == "floorplan":
         # `create_clock` (`_clock_lines`) must come after `link_design` --
         # see that helper's own docstring; `read_liberty` itself is read
@@ -1015,16 +1037,21 @@ def _stage_script_lines(
         # LEFs (issue #438) are read alongside the tech/cell LEF, before
         # `read_verilog` -- `link_design` needs every macro's physical view
         # already loaded to resolve the netlist's own macro instances.
-        lines = [f"read_liberty {liberty_path}"]
+        lines = [f"read_liberty {_tcl_literal(liberty_path)}"]
         lines += macro_liberty_lines
         lines += [
-            f"read_lef {tech_lef}",
-            f"read_lef {cell_lef}",
+            f"read_lef {_tcl_literal(tech_lef)}",
+            f"read_lef {_tcl_literal(cell_lef)}",
         ]
-        lines += [f"read_lef {macro['lef']}" for macro in macros]
+        lines += [f"read_lef {_tcl_literal(macro['lef'])}" for macro in macros]
+        # Issue #5708: `hdl_toplevel` is one literal Tcl word -- a Yosys
+        # `$paramod\...` escaped identifier must reach `link_design` exactly
+        # as written, never `$`-substituted. Same for the checkpoint paths
+        # below, which embed `hdl_toplevel` in their filename (the
+        # orchestrator names `{hdl_toplevel}_{stage}.odb` after it).
         lines += [
-            f"read_verilog {netlist_path}",
-            f"link_design {hdl_toplevel}",
+            f"read_verilog {_tcl_literal(netlist_path)}",
+            f"link_design {_tcl_literal(hdl_toplevel)}",
         ]
         lines += _clock_lines(clock_port, clock_period_ns)
         lines += _design_rule_constraint_lines(
@@ -1063,14 +1090,19 @@ def _stage_script_lines(
         if power is not None:
             lines += _power_delivery_lines(power, cell_library, library, macros)
         lines += _metrics_report_lines(include_fmax=False, include_power=False)
-        lines += [f"write_db {checkpoint_out}"]
+        # Issue #5708: `checkpoint_out` embeds `hdl_toplevel` in its
+        # filename -- one literal Tcl word, same reason as `link_design`.
+        lines += [f"write_db {_tcl_literal(checkpoint_out)}"]
         return lines
 
     assert checkpoint_in is not None  # every non-floorplan stage has a checkpoint
     # `read_db` already restores a linked network (built by the floorplan
     # stage's own `link_design`), so `create_clock` may safely follow
     # `read_liberty` directly here -- unlike the floorplan stage above.
-    lines = [f"read_db {checkpoint_in}", f"read_liberty {liberty_path}"]
+    lines = [
+        f"read_db {_tcl_literal(checkpoint_in)}",  # issue #5708
+        f"read_liberty {_tcl_literal(liberty_path)}",
+    ]
     lines += macro_liberty_lines
     # Issue #2378: `set_dont_use` must come after liberty is loaded and before
     # the first resizer-driven step (`global_placement -timing_driven`,
@@ -1353,7 +1385,7 @@ def _stage_script_lines(
         # out-of-band caller that already located it directly (as #785
         # intended) keeps working unmodified.
         place_def_path = os.path.join(output_dir, f"{hdl_toplevel}.place.def")
-        lines += [f"write_def {place_def_path}"]
+        lines += [f"write_def {_tcl_literal(place_def_path)}"]  # issue #5708
 
-    lines += [f"write_db {checkpoint_out}"]
+    lines += [f"write_db {_tcl_literal(checkpoint_out)}"]  # issue #5708
     return lines
