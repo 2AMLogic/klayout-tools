@@ -116,6 +116,39 @@ def test_label_change_detected_outside_the_polygon_xor(tmp_path: Path) -> None:
     assert layer["only_in_b"][0]["text"] == "VSS"
 
 
+def test_label_in_transformed_child_equals_flat_label(tmp_path: Path) -> None:
+    """Label comparison is hierarchy-insensitive, like the polygon XOR."""
+    nested = kdb.Layout()
+    top = nested.create_cell("TOP")
+    child = nested.create_cell("C")
+    child.shapes(nested.layer(1, 0)).insert(kdb.Text("VDD", 5, 5))
+    top.insert(kdb.CellInstArray(child.cell_index(), kdb.Trans(2000, 1000)))
+    flat = kdb.Layout()
+    flat.create_cell("TOP").shapes(flat.layer(1, 0)).insert(kdb.Text("VDD", 2005, 1005))
+    a = _write(nested, tmp_path / "nested.gds")
+    report = _flat(a, tmp_path, flat)
+    assert report["equivalent"] is True
+    assert "labels" not in report or not report["labels"]["layers"]
+    # guard against a vacuous pass: moving the flat label must be seen
+    flat_off = kdb.Layout()
+    flat_off.create_cell("TOP").shapes(flat_off.layer(1, 0)).insert(
+        kdb.Text("VDD", 2006, 1005)
+    )
+    assert _flat(a, tmp_path, flat_off)["equivalent"] is False
+
+
+@pytest.mark.parametrize("tabbed", ["A\tB", "\tX", "X\t", "\t", "A\t\tB"])
+def test_tab_in_label_is_a_difference_entry_not_a_crash(
+    tmp_path: Path, tabbed: str
+) -> None:
+    a = _write(_layout(label=tabbed), tmp_path / "a.gds")
+    report = _flat(a, tmp_path, _layout(label="C"))
+    assert report["equivalent"] is False
+    (layer,) = report["labels"]["layers"]
+    assert layer["only_in_a"] == [{"text": tabbed, "x": 5, "y": 5}]
+    assert layer["only_in_b"] == [{"text": "C", "x": 5, "y": 5}]
+
+
 def test_label_only_pair_not_in_drawn_set(tmp_path: Path, a: str) -> None:
     report = _flat(a, tmp_path, _layout(label_only=True))
     assert report["drawn_layers"] == {"equal": True, "only_in_a": [], "only_in_b": []}
