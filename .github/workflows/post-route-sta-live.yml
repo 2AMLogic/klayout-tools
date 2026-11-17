@@ -6,7 +6,7 @@ name: Live klt sta engine checks (SPEF *NAME_MAP, driving cell / load, instance 
 # `set_driving_cell -lib_cell/-pin/-from_pin` and `set_load`) need a real
 # `openroad` and the sky130A PDK, so they skip in the ordinary `ci.yml` `test`
 # job. Issue #5754's `test_live_engine_report_instances` (in
-# `tests/test_post_route_sta_instance_paths.py`) has the same requirement, and
+# `tests/test_post_route_sta_instance_paths_run.py`) has the same requirement, and
 # no other lane runs that file. This manually-triggered job provisions both,
 # exactly as `equiv-canary.yml` does (minus Yosys, which these tests do not
 # use), and fails if any test is skipped. Trigger from the Actions tab, or
@@ -80,7 +80,7 @@ jobs:
           PDK_ROOT: /home/runner/.ciel
         run: |
           uv run --frozen --extra dev pytest tests/test_post_route_sta.py \
-            tests/test_post_route_sta_instance_paths.py \
+            tests/test_post_route_sta_instance_paths_run.py \
             -k "test_live_engine_spef_name_map_annotation or test_live_engine_driving_cell_and_output_load or test_live_engine_report_instances" \
             -v -rs | tee pytest-post-route-sta-live.log
 
