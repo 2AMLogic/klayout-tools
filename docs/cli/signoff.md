@@ -2753,6 +2753,12 @@ klt signoff --manifest manifest.json --check reports/block.signoff.json \
     { "field": "items.7.text", "committed": "…", "fresh": "… (reworded)" },
     { "field": "source_doc_content_hash", "committed": "sha256:…", "fresh": "sha256:…" }
   ],
+  "build_skew": {
+    "state": "build_only",
+    "fields": [
+      { "field": "build.git_commit", "committed": "d5d57daf…", "fresh": "5dbbad05…" }
+    ]
+  },
   "fresh": { "…": "the full freshly-graded report" }
 }
 ```
@@ -2764,6 +2770,16 @@ klt signoff --manifest manifest.json --check reports/block.signoff.json \
   `place-and-route` — see
   [`../json-contract.md`](../json-contract.md)'s "Verifying committed
   evidence"), and it renders through the same `--format text` drift report.
+- **`build_skew` names version skew without grading it** (issue #5868).
+  `--check` is the version-tolerant freshness gate; a raw diff of two
+  `--format json` renders is not, because the `build` block differs whenever
+  the rendering klt differs. `build_skew.state` is `"same"`, `"build_only"`
+  (some `build.*` field moved, the grading ruleset did not), `"ruleset"`
+  (`build.grading_ruleset_id` moved: graded under different rules, not just
+  rendered by a different build) or `"unknown"` (the committed report has no
+  `build` block). `fields` lists each differing field. It never changes
+  `status` or the exit code, and `--format text` prints one `build_skew:` line
+  when the state is `build_only` or `ruleset`.
 - **The tier verdict does not decide this mode's exit code.** A faithful
   report of a block that is *not* yet at T1 is `"match"`/exit `0` — the
   question is drift, not tier. Gate on `status`.
