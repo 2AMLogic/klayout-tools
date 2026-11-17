@@ -224,7 +224,7 @@ def _circuit_findings(xref: Any, cp: Any) -> tuple[list[dict[str, Any]], bool]:
         + _net_findings(xref, cp, cname)
         + _pin_findings(xref, cp, cname)
     )
-    if not found and status not in _ok_statuses():
+    if not any(f["severity"] == "error" for f in found) and status not in _ok_statuses():
         # The circuit's own status says no-match but no finer-grained pair
         # explains it: still a mismatch, and say so.
         found.append(

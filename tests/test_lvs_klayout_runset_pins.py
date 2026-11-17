@@ -29,7 +29,8 @@ from helpers.lvs_runset_fixtures import (
     request as _request,
 )
 from klayout_tools.lvs import check_lvs_report, run_lvs
-from klayout_tools.lvs_runset_findings import _pin_findings
+from klayout_tools.lvs_runset import _classify
+from klayout_tools.lvs_runset_findings import _circuit_findings, _pin_findings
 
 
 @pytest.fixture
@@ -64,6 +65,40 @@ class _StubXref:
 
     def each_pin_pair(self, _cp):
         return list(self._pin_pairs)
+
+
+class _StubCircuitPair:
+    """Minimal ``NetlistCrossReference.CircuitPair`` stand-in."""
+
+    def __init__(self, first, second, status):
+        self._first, self._second, self._status = first, second, status
+
+    def first(self):
+        return self._first
+
+    def second(self):
+        return self._second
+
+    def status(self):
+        return self._status
+
+
+class _StubCircuitXref(_StubXref):
+    """``_StubXref`` plus one circuit pair, for ``_circuit_findings`` /
+    ``_classify``-level tests (no devices or nets beyond pins)."""
+
+    def __init__(self, circuit_pair, pin_pairs):
+        super().__init__(pin_pairs)
+        self._circuit_pair = circuit_pair
+
+    def each_circuit_pair(self):
+        return [self._circuit_pair]
+
+    def each_device_pair(self, _cp):
+        return []
+
+    def each_net_pair(self, _cp):
+        return []
 
 
 def _x_status(name):
@@ -160,3 +195,29 @@ def test_reference_side_absent_pin_graded_matched_is_also_a_warning(tmp_path):
     assert len(out) == 1
     assert out[0]["severity"] == "warning"
     assert "MatchWithWarning" in out[0]["description"]
+
+
+def test_no_match_circuit_with_only_pin_warnings_stays_mismatch(tmp_path):
+    """A circuit pair graded ``NoMatch`` whose only finer-grained findings
+    are demoted pin warnings must keep the ``topology`` fallback error --
+    a non-empty list of warnings never silences a NoMatch circuit (#5664).
+    Regression guard for the severity-blind ``found`` check."""
+    cp = _StubCircuitPair(_StubPin("TOP"), _StubPin("TOP"), _x_status("NoMatch"))
+    xref = _StubCircuitXref(
+        cp,
+        [
+            _StubPinPair(_StubPin("A"), None, _x_status("Match")),
+            _StubPinPair(_StubPin("B"), None, _x_status("Match")),
+        ],
+    )
+    found, skipped = _circuit_findings(xref, cp)
+    assert not skipped
+    severities = {(m["category"], m["severity"]) for m in found}
+    assert ("pin.unmatched", "warning") in severities
+    assert ("topology", "error") in severities, (
+        "a NoMatch circuit must keep its topology fallback even when the "
+        "only pair findings are demoted warnings"
+    )
+    mismatches, any_error, not_compared = _classify(xref)
+    assert not not_compared
+    assert any_error, "the verdict must stay mismatch (any_error True)"
