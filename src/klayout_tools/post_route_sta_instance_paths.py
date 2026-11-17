@@ -146,7 +146,12 @@ def _instance_path_lines(report_instances: list[str] | None) -> list[str]:
     by (instances x 2 sides x 2 check sides), never by design size or pin
     count. Pins are collected through ``get_pins -of_objects`` on the
     dict-resolved instance object (never a name re-parse) into plain Tcl
-    lists, so a side whose direction the instance has no pins of is skipped
+    lists, branched on each pin's own ``direction`` with the exclusion form
+    :func:`post_route_sta._port_path_lines` uses -- ``into`` takes every
+    pin that is not output-only, ``out_of`` every pin that is not
+    input-only -- so an ``inout``/``bidirect`` pin is queried on both sides
+    instead of matching neither equality filter and being silently dropped.
+    A side whose direction the instance has no pins of is skipped
     (an empty pin list queries nothing -- it is ``no_paths``, not an error)
     instead of falling back to an unconstrained design-wide search. Every
     instance is ``catch``-wrapped on its own: a failed query yields an
@@ -170,14 +175,15 @@ def _instance_path_lines(report_instances: list[str] | None) -> list[str]:
         "    if {[catch {",
         "        set klt_ri_cell [dict get $klt_instances_by_name $klt_ri_name]",
         "        set klt_ri_in_pins {}",
-        "        foreach klt_ri_pin [get_pins -of_objects $klt_ri_cell "
-        "-filter {direction == input}] {",
-        "            lappend klt_ri_in_pins $klt_ri_pin",
-        "        }",
         "        set klt_ri_out_pins {}",
-        "        foreach klt_ri_pin [get_pins -of_objects $klt_ri_cell "
-        "-filter {direction == output}] {",
-        "            lappend klt_ri_out_pins $klt_ri_pin",
+        "        foreach klt_ri_pin [get_pins -of_objects $klt_ri_cell] {",
+        "            set klt_ri_dir [get_property $klt_ri_pin direction]",
+        '            if {$klt_ri_dir ne "output"} {',
+        "                lappend klt_ri_in_pins $klt_ri_pin",
+        "            }",
+        '            if {$klt_ri_dir ne "input"} {',
+        "                lappend klt_ri_out_pins $klt_ri_pin",
+        "            }",
         "        }",
         "        foreach klt_ri_side {max min} {",
     ]

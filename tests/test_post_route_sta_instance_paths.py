@@ -156,8 +156,15 @@ def test_instance_path_lines_queries_into_and_out_of_with_bounded_counts():
     assert text.count("-group_path_count 1 -endpoint_path_count 1") == 2
     assert "find_timing_paths -to $klt_ri_in_pins" in text
     assert "find_timing_paths -from $klt_ri_out_pins" in text
-    assert "-filter {direction == input}" in text
-    assert "-filter {direction == output}" in text
+    # Direction-aware collection, the exclusion form `_port_path_lines`
+    # uses: a pin lands in a side's list unless it is the opposite
+    # unidirectional direction, so an `inout`/`bidirect` pin is queried on
+    # both sides instead of matching neither equality filter and being
+    # silently dropped.
+    assert "get_property $klt_ri_pin direction" in text
+    assert 'if {$klt_ri_dir ne "output"}' in text
+    assert 'if {$klt_ri_dir ne "input"}' in text
+    assert "-filter {direction ==" not in text
     # One catch wrapping the whole per-instance body.
     assert text.count("if {[catch {") == 1
 
@@ -261,6 +268,30 @@ def test_parse_instance_paths_out_of_side_reports_launch_path():
     assert out_of["setup"]["startpoint"] == "ff_a/Q"
     assert out_of["setup"]["endpoint"] == "q_a"
     assert out_of["hold"]["status"] == "ok"
+
+
+def test_parse_instance_paths_bidirectional_pin_reports_on_both_sides():
+    """A ``bidirect`` pin -- macro and pad territory, exactly where the
+    issue's motivating question lives -- lands in *both* pin lists the
+    emitter builds (``ne`` the opposite unidirectional direction on each
+    side), so one session reports the same pin as an ``into`` endpoint
+    *and* an ``out_of`` startpoint; each group keeps its own record and
+    the sides are never merged."""
+    stdout = _ipath_block(
+        "IPATH\tu_pad\tinto\tmax\tsetup\t1.2e-09\tsig\tu_pad/PAD",
+        "IPATH\tu_pad\tinto\tmin\thold\t3e-10\tsig\tu_pad/PAD",
+        "IPATH\tu_pad\tout_of\tmax\toutput setup\t1.4e-09\tu_pad/PAD\tsig",
+        "IPATH\tu_pad\tout_of\tmin\thold\t5e-10\tu_pad/PAD\tsig",
+    )
+
+    entry = _instance_paths(stdout, ["u_pad"])["u_pad"]
+
+    assert entry["into"]["setup"]["status"] == "ok"
+    assert entry["into"]["setup"]["endpoint"] == "u_pad/PAD"
+    assert entry["into"]["hold"]["check_type"] == "hold"
+    assert entry["out_of"]["setup"]["check_type"] == "output_setup"
+    assert entry["out_of"]["setup"]["startpoint"] == "u_pad/PAD"
+    assert entry["out_of"]["hold"]["status"] == "ok"
 
 
 @pytest.mark.parametrize(
