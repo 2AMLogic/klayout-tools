@@ -44,7 +44,10 @@ Four modes, one verb:
 5. **Attest T1 items 1, 8, 9 and 10** (`--attest {1,8,9,10} --inventory FILE`,
    issues #2844, #4311) — run the item-specific mechanical checks a versioned
    inventory declares and emit the artifact-anchored `generic` envelope
-   `--manifest` binds for that item. Its `status` is derived from the
+   `--manifest` binds for that item. Item 2 is attested from the committed
+   stream instead (`--attest 2 --input FILE`, issue #4188 — first ships in
+   `klt` 0.9.0 (PyPI); see "Minting above the grading pin" below). Its
+   `status` is derived from the
    checks, not asserted. Since this producer exists, items 1, 9 and 10
    **no longer accept native envelopes** (item 2 still does; item 8 still
    accepts a bare generic envelope — `--attest 8` is the tool-produced
@@ -69,6 +72,9 @@ klt signoff --fleet <fleet-manifest-file> --check <committed-report> [--tiers-do
 klt signoff --describe-grader [--format text|json]
 klt signoff --attest {1,8,9,10} --inventory <file> [-o <envelope> [--skip-local-only]] [--format text|json]
 klt signoff --attest {1,8,9,10} --inventory <file> --check <committed-envelope> [--format text|json]
+# The --attest 2 (stream) forms first ship in klt 0.9.0 (PyPI); 0.8.0 and earlier refuse --attest 2.
+klt signoff --attest 2 --input <stream> [--inventory <file>] [--generator CMD --regenerated-hash sha256:<hash>] [-o <envelope> [--skip-local-only]] [--format text|json]
+klt signoff --attest 2 --input <stream> --check <committed-envelope> [--format text|json]
 ```
 
 - `<file>...` — one or more paths to `klt drc`/`klt lvs`/`klt extract`/`klt
@@ -111,7 +117,10 @@ klt signoff --attest {1,8,9,10} --inventory <file> --check <committed-envelope> 
   `<file>...`/`--manifest`/`--fleet`/`--tiers-doc`/`--check`. See
   "Identifying the grading build" below.
 - `--attest` — **first ships in `klt` 0.8.0 (PyPI); not in 0.7.0 and earlier.** `1`, `8`, `9` or `10`: produce the attestation envelope for
-  that T1 item from `--inventory` (issues #2844, #4311). Any other value is a usage error
+  that T1 item from `--inventory` (issues #2844, #4311). `2`: attest a committed layout
+  stream from `--input` instead of an inventory (issue #4188) — **the item-2 form first
+  ships in `klt` 0.9.0 (PyPI)**; 0.8.0 and earlier refuse `--attest 2` as an invalid
+  choice (exit `2`). Any other value is a usage error
   (exit `2`). Mutually exclusive with
   `<file>...`/`--manifest`/`--fleet`/`--describe-grader`/`--tiers-doc`.
   With `--check <committed-envelope>`, re-attests and diffs instead of
@@ -2008,6 +2017,12 @@ files changed, and an agent must not merge it itself.
 
 #### Item 2: attest a committed layout stream (`--input`, issue #4188)
 
+**`--attest 2`, `--input`, `--generator`, `--regenerated-hash` and
+`--hash-kind` first ship in `klt` 0.9.0 (PyPI)**; 0.8.0 and earlier refuse
+`--attest 2` as an invalid choice (exit `2`), so a release pinned that far
+back cannot mint or re-check an item-2 envelope — see
+[Minting above the grading pin](#minting-above-the-grading-pin) below.
+
 Item 2 (Layout) needs no inventory — the committed stream is the artifact
 (an optional inventory of declared checks is described
 [below](#item-2-declared-checks-optional---inventory-issue-4767)):
@@ -2131,6 +2146,46 @@ Declared `argv` commands run with the tool virtualenv's `bin` directory
 removed from `PATH` when klt itself runs inside a venv (`uvx`, pipx), so a bare
 `python3` in an `argv` is the repository's interpreter, not klt's. Outside a
 venv the environment is unchanged. The same applies to item 10 commands.
+
+##### Minting above the grading pin
+
+The item-2 mint path first ships in `klt` 0.9.0 (PyPI), so a consumer that
+pins an older release for grading — to keep a committed `--manifest` report's
+diff stable — must mint item-2 envelopes with a newer release than it grades
+with. What that cross-version pair does, measured 2026-11-17 by minting a
+single-stream item-2 envelope (a committed GDS, no `--generator` claim) with
+`klt` 0.9.1, citing it in a block manifest, and grading the manifest with
+`klt signoff --manifest` at 0.8.0:
+
+- **It grades.** 0.8.0 accepts the envelope as `kind: "generic"` evidence for
+  item 2, renders `met` with `input_verified: true`, and every item verdict
+  and the `t1_met_count` match what the minting release itself renders for
+  the same manifest. The envelope's `attestation` block is extra surface the
+  older grader does not read.
+- **The rendered report's bytes are not stable across grader versions, and
+  no release promises that.** The `build` block — which names the grading
+  install, including its `grading_ruleset_id` hash — and the embedded
+  checklist wording (`items[].text`, parsed from the tier doc this install
+  ships) both moved between 0.8.0 and 0.9.1, and the two builds'
+  `grading_ruleset_id` hashes differ. The verdict agreement above is one
+  measured pair, not a guarantee: a newer grader may grade differently.
+  Compare reports with `--check` — which excludes exactly these moving
+  surfaces — never bytewise, when the two renders came from different
+  grader builds.
+- **The pin cannot re-check the envelope.** 0.8.0 and earlier refuse
+  `--attest 2` as an invalid choice (exit `2`), so the drift gate for an
+  item-2 envelope (`--attest 2 --input ... --check`) has to run on a release
+  that can mint it. The inventory-minted items' equivalent guard is
+  `--require-build-match` (issue #5875), which needs `--attest` and
+  `--check` too — so it does not reach item 2 at such a pin either.
+- **The envelope records who minted it.** `provenance.klt_version` (with
+  `provenance.klayout_version`) is the version surface a consumer can read
+  from the envelope itself and compare against its grading pin before
+  trusting the citation — there is no per-envelope schema-version table to
+  consult. For envelope-aggregation and `--attest ... --check` grading the
+  same pairing surfaces as the report-only `build_drift` marker (see
+  "Build drift" above); it never changes a verdict, so gate on it by
+  reading the JSON, not the exit code.
 
 
 #### How manifest `file` paths resolve
@@ -3066,6 +3121,7 @@ produced the same red.
 | `items[].title`, `items[].text`, `items[].notes` | No — `doc_drift` | The report's verbatim quotation of the doc, parsed straight out of it and echoed on unmodified. No grading rule reads any of them. |
 | `source_doc_content_hash` (top level, and per block in `--fleet`) | No — `doc_drift` | Hashes the doc's whole bytes, so it moves on a typo fix in a section this report does not even render. It cannot distinguish "the checklist changed what it requires" from "the checklist was reworded". |
 | `blocks[].blocking_item.title`, `blocks[].ungraded_items[].title` (`--fleet`) | No — `doc_drift` | The same doc-sourced prose, in the roll-up's reduced item views. Their `id`/`reason` — what actually names the blocker — stay in the verdict. |
+| `unmet_reason_counts` (issue #5903) | No — neither verdict nor `doc_drift` | A pure function of `items[]`' `status`/`reason`, which stay compared, so it cannot hide a change; excluding it keeps a report committed before the field existed from reading `drifted` on an upgrade alone. |
 | `items[].id` / `status` / `reason` / `citation` / `tier` / `partition` | **Yes** | The verdict itself. |
 | `t1_item_count`, `build_t1_item_count`, `t1_met_count` | **Yes** | A checklist that *gained, lost or renumbered* an item — as opposed to being reworded — moves these. That is a real change to the yardstick and still fails. |
 
@@ -4686,6 +4742,7 @@ distinguishable from "no samples document was ever named" (see
 | `build_t1_item_count` | integer \| null | Number of T1 rows **this build's own shipped doc** would have rendered for this block (issue #2202) — the same multiplication by partition count `t1_item_count` gets, so the two are directly comparable. Equal to `t1_item_count` for the shipped doc and for any `--tiers-doc`/`$KLT_TIERS_DOC` copy with the same item list; *larger* when the parsed doc lists fewer items than this build grades, which is the whole point of the field (see "A doc the build has outrun" above). `null` — never a fabricated count — when this build cannot read its own doc at all, the same rule `graded_by_build` applies in the other direction. Additive: no `schema_version` bump, per [`../json-contract.md`](../json-contract.md). |
 | `t1_met_count`  | integer              | Number of those items with `status: "met"`. **Never includes `not_applicable` items** (issue #2865). |
 | `t1_not_applicable_count` | integer    | **Present only when at least one item is `not_applicable`** (issue #2865; absent means `0`, so a report with none is byte-identical to a pre-#2865 one). `tier` is `"T1"` when `t1_met_count + t1_not_applicable_count == t1_item_count`. |
+| `unmet_reason_counts` | object\<string, integer\> | **Present only when at least one T1 item is `unmet`** (issue #5903; a report with none is byte-identical to a pre-#5903 one). Maps each `reason` token to how many unmet T1 items carry it, e.g. `{"no_evidence": 3, "stale_evidence": 1}`; values sum to the number of unmet T1 items. `not_applicable` items and T2–T4 ladder rows (`tier_not_supported`) are not counted. Separates a block that is mid-progress from one whose pin went stale without changing the exit code (still `3`): `jq -e '(.unmet_reason_counts.stale_evidence // 0) == 0' report.json`. Additive: no `schema_version` bump. Derived from `items[]`, so `--check` leaves it out of the comparison. |
 | `source_doc`    | string               | Which doc the item list was parsed from: `"docs/design-evidence-tiers.md"` for the shipped doc (the same string whether this install reads its bundled copy or a source checkout), or the override path when `--tiers-doc`/`$KLT_TIERS_DOC` names a different doc. |
 | `source_doc_content_hash` | string \| null | `sha256:`-prefixed SHA-256 of `source_doc`'s resolved bytes on disk (issue #2175) — pins *what the checklist said*, not just which file it was, so two reports naming the same `source_doc` can be diffed to tell whether a changed verdict came from changed evidence or a changed checklist. `null` only if the doc became unreadable as bytes between the parse and the hash (e.g. deleted mid-run) — never fabricated. |
 | `build`         | object               | Which build produced this report (issue #2176): `{"version", "package_version", "git_commit", "git_tag", "dirty", "is_release", "grading_ruleset_id"}`, exactly as `klt version --format json` reports them — see "Which build graded this" and "Identifying the grading build" above. `grading_ruleset_id` (issue #2216) is a content hash identifying the grading code, distinct from `git_commit`/`git_tag`. Additive: no `schema_version` bump, per [`../json-contract.md`](../json-contract.md). **Route-dependent** (issue #2249): it describes the install, not only the commit, so two byte-legitimate installs of the same pinned commit can carry different blocks — never byte-compare a report across installs; use `--check`, which excludes exactly this block. |
