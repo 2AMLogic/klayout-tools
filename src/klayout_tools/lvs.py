@@ -173,6 +173,10 @@ from .lvs_combine import (
     _unmatched_combine_devices_per_circuit_warnings,  # noqa: F401
     _validate_combine_device_classes,
 )
+from .lvs_coverage import (
+    _coverage_kind,
+    _geometry_disclosure_kind,
+)
 from .lvs_finfet import (
     apply_finfet_bulk_hierarchy,
     bulk_disclosures,
@@ -6229,25 +6233,6 @@ def _apply_compare_parameters(
 # say which of a resistor/capacitor class's parameters the compare covered
 # --------------------------------------------------------------------------- #
 
-#: Issue #2461: the device-class families whose *geometry* sits entirely
-#: outside a default compare, keyed by the `klayout.db` class name (resolved
-#: lazily, the way :data:`_COMBINE_PARAMETER_CONSERVATION_RULES` is) to the
-#: `device_kind` label reported for them. Both are matched with `isinstance`,
-#: so each one's `*WithBulk` flavour -- a subclass declaring the identical
-#: parameter set -- is covered without being listed.
-#:
-#: Deliberately *only* these two. A MOS class's own geometry (`L`/`W`) is
-#: primary and therefore compared; its secondary `AS`/`AD`/`PS`/`PD` diffusion
-#: parameters are a genuinely narrower gap and reporting them here would add a
-#: warning to essentially every `klt lvs` run for no new information about
-#: whether the device was *sized* correctly. For a resistor/capacitor there is
-#: no such consolation: `R`/`C` is the only primary parameter, so no dimension
-#: of the drawn device is compared at all.
-_GEOMETRY_DISCLOSURE_CLASS_KINDS: tuple[tuple[str, str], ...] = (
-    ("DeviceClassResistor", "resistor"),
-    ("DeviceClassCapacitor", "capacitor"),
-)
-
 #: Issue #2461: the stable ``device_parameter_coverage[].not_compared[].reason``
 #: values -- why one declared parameter of a participating class took no part
 #: in the compare.
@@ -6276,16 +6261,6 @@ _GEOMETRY_DISCLOSURE_CLASS_KINDS: tuple[tuple[str, str], ...] = (
 PARAMETER_NOT_COMPARED_SECONDARY = "secondary"
 PARAMETER_NOT_COMPARED_PLACEHOLDER_VALUE = "placeholder_value"
 PARAMETER_NOT_COMPARED_COMPARE_PARAMETERS = "compare_parameters"
-
-
-def _geometry_disclosure_kind(device_class: Any, kdb_module: Any) -> str | None:
-    """The :data:`_GEOMETRY_DISCLOSURE_CLASS_KINDS` label for ``device_class``
-    (``"resistor"``/``"capacitor"``), or ``None`` for every other class."""
-    for class_name, kind in _GEOMETRY_DISCLOSURE_CLASS_KINDS:
-        klayout_class = getattr(kdb_module, class_name, None)
-        if klayout_class is not None and isinstance(device_class, klayout_class):
-            return kind
-    return None
 
 
 def _participating_device_classes(netlist: Any) -> dict[str, tuple[Any, int]]:
@@ -6317,7 +6292,8 @@ def _device_parameter_coverage(
     compare_scoped_narrowed: AbstractSet[tuple[str, str]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Which parameters of each participating resistor/capacitor class this
-    compare actually covered (issue #2461).
+    compare actually covered (issue #2461). Issue #5653: the coverage block
+    also reports MOS classes, but the warning stays resistor/capacitor-only.
 
     Returns ``(mismatch entries, coverage block)``:
 
@@ -6327,7 +6303,8 @@ def _device_parameter_coverage(
       already discloses as excluded -- so the human-readable half of the
       report stops implying the geometry was checked;
     * the machine-checkable ``device_parameter_coverage`` block, built from
-      the same determination so the two renderings cannot disagree (the same
+      the same per-parameter determination so the two renderings cannot
+      disagree on a class both cover (the same
       one-source-of-truth discipline ``body_verification``/
       ``device.body_unverified`` follow, issue #1983).
 
@@ -6379,9 +6356,11 @@ def _device_parameter_coverage(
         layout_entry = layout_classes.get(key)
         reference_entry = reference_classes.get(key)
         device_class = (layout_entry or reference_entry)[0]  # type: ignore[index]
-        kind = _geometry_disclosure_kind(device_class, kdb)
+        kind = _coverage_kind(device_class, kdb)
         if kind is None:
             continue
+        # Issue #5653: coverage-only kinds (MOS) never raise the warning.
+        warns = _geometry_disclosure_kind(device_class, kdb) is not None
 
         class_name = device_class.name
         compared: list[str] = []
@@ -6412,7 +6391,7 @@ def _device_parameter_coverage(
             }
         )
 
-        if not secondary:
+        if not secondary or not warns:
             # Every uncompared parameter of this class is already disclosed
             # by its own, more specific warning -- nothing left to say.
             continue

@@ -27,7 +27,6 @@ from . import (
     corner_matrix_cmd,
     deck_cmd,
     design_centering_cmd,
-    diff_cmd,
     draw_cmd,
     drc_cmd,
     env_provenance_cmd,
@@ -87,6 +86,7 @@ from ._argv_flags import _require_one_input as _require_one_input
 from ._drc_parser_args import add_klayout_app_args, add_rule_listing_args
 from .color import add_color_args
 from .parser_characterize import add_characterize_parser
+from .parser_diff import add_diff_parser
 from .parser_economy import add_economy_parser
 from .parser_netlist import add_netlist_parser
 from .parser_pex import add_pex_parser
@@ -235,7 +235,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_layers_parser(subparsers)
 
     _add_stats_parser(subparsers)
-    _add_diff_parser(subparsers)
+    add_diff_parser(subparsers, _add_format_arg)
 
     add_economy_parser(subparsers, _add_format_arg)
 
@@ -4047,36 +4047,6 @@ def _add_stats_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(stats_parser)
     stats_parser.set_defaults(func=stats_cmd.run)
-
-
-def _add_diff_parser(subparsers: argparse._SubParsersAction) -> None:
-    """Register the ``diff`` verb: compare two layout streams for equal geometry."""
-    diff_parser = subparsers.add_parser(
-        "diff",
-        help="compare two GDSII/OASIS streams for equal geometry, labels and hierarchy",
-        description=(
-            "Compare two layout streams shape-for-shape. Ignores stream "
-            "timestamps, element order and library name; never ignores "
-            "coordinates, path widths, text, instance transforms, the "
-            "database unit or cell names. Exit 0 = equivalent, 3 = layouts "
-            "differ, 1 = unreadable file or unknown --top."
-        ),
-    )
-    diff_parser.add_argument("file_a", help="first GDSII or OASIS layout file")
-    diff_parser.add_argument("file_b", help="second GDSII or OASIS layout file")
-    diff_parser.add_argument(
-        "--top",
-        default=None,
-        help="compare only this cell's hierarchy (must exist in both streams)",
-    )
-    diff_parser.add_argument(
-        "--max-items",
-        type=int,
-        default=50,
-        help="cap on listed differences per list (counts stay exact; default 50)",
-    )
-    _add_format_arg(diff_parser)
-    diff_parser.set_defaults(func=diff_cmd.run)
 
 
 def _add_cells_parser(subparsers: argparse._SubParsersAction) -> None:
