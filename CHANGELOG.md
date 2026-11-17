@@ -14,12 +14,31 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt mcp serve` serves the `docs/schemas/` JSON contract as MCP
+  resources** (#5420, 2026-11-13): the server now advertises the resources
+  capability and lists one resource per `docs/schemas/*.schema.json` at
+  `klt://schemas/<file name>` (MIME type `application/json`), so a client can
+  fetch the schema for a verb's request document without a checkout of this
+  repository. `resources/read` returns the schema verbatim; a URI that is not
+  in the listing — including a traversal attempt — is refused with
+  `InvalidParams`. The schemas are force-included into the wheel
+  (`klayout_tools/data/schemas`), so a wheel-only install serves the same
+  listing as a source checkout. Tools, their names and their schemas are
+  unchanged. See `docs/guides/mcp-server.md`.
 - **Added** (#5875): `klt signoff --attest N --inventory F --check ENV` now
   reports an additive `build_drift` object (same shape as envelope
   aggregation, #4223) and a `build_drift: <state>` text line; the opt-in
   `--require-build-match` fails the check (exit 3, `status: "drifted"`) when
   ENV's `provenance.klt_version` is from a different build. Report-only
   without the flag.
+- **Changed** (#5583, additive-compatible — `klt stats` `schema_version`
+  unchanged): `geometry_digest` is now opt-in via `klt stats
+  --geometry-digest` and is `null` by default (text output `geometry_digest:
+  -`). Computing it re-reads and walks the whole layout (~2.5x the rest of
+  the report on large flat layouts). The field and its `["string","null"]`
+  schema type are unchanged; consumers that relied on the default value (e.g.
+  the `klt signoff --attest 2 --hash-kind geometry` recipe) must now pass the
+  flag.
 - **Changed** (#5788, breaking — `klt array-check` `schema_version` 1 ->
   **2**): the record's `file` field is now the committable
   `{path, scope}` object `env_provenance.repo_relative_path()` builds

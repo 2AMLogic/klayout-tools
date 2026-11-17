@@ -168,10 +168,6 @@
       "lines": 1005
     },
     {
-      "path": "src/klayout_tools/_report_verify.py",
-      "lines": 501
-    },
-    {
       "path": "src/klayout_tools/arith_gen.py",
       "lines": 1010
     },
@@ -193,7 +189,7 @@
     },
     {
       "path": "src/klayout_tools/cli/parser.py",
-      "lines": 5386
+      "lines": 5385
     },
     {
       "path": "src/klayout_tools/cli/pdk_cmd.py",
@@ -273,7 +269,7 @@
     },
     {
       "path": "src/klayout_tools/env_provenance.py",
-      "lines": 728
+      "lines": 714
     },
     {
       "path": "src/klayout_tools/equiv.py",
@@ -573,7 +569,7 @@
     },
     {
       "path": "src/klayout_tools/ring_check.py",
-      "lines": 585
+      "lines": 552
     },
     {
       "path": "src/klayout_tools/signoff.py",
@@ -829,7 +825,7 @@
     },
     {
       "path": "tests/test_env_provenance.py",
-      "lines": 726
+      "lines": 678
     },
     {
       "path": "tests/test_equiv.py",
@@ -977,11 +973,11 @@
     },
     {
       "path": "tests/test_pdk.py",
-      "lines": 3303
+      "lines": 3160
     },
     {
       "path": "tests/test_pdk_cells.py",
-      "lines": 1183
+      "lines": 1041
     },
     {
       "path": "tests/test_pdk_pcell_diagnostics.py",

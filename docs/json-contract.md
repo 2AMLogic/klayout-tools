@@ -582,12 +582,12 @@ and [#2124](https://github.com/2AMLogic/klayout-tools/issues/2124).
 
 Verbs whose verdict depends on the exact tool build, PDK release, and rule
 deck — currently `drc`, `lvs`, `extract`, `sim`, `size`, `precheck`, `erc`,
-`power`, `gen`, `gen-compose`, and `array-check` — emit a shared top-level
-`provenance` block so a "clean"/"pass"/"match" result is auditable and
-reproducible later. Two runs made against different deck revisions or PDK
-releases are otherwise indistinguishable in the output, so a signoff claim
-can't be checked or reproduced. This block is **additive** (see above):
-adopting it required no `schema_version` bump on any verb.
+`power`, `economy`, `ring-check`, `gen`, `gen-compose`, and `array-check` — emit a
+shared top-level `provenance` block so a "clean"/"pass"/"match" result is
+auditable and reproducible later. Two runs made against different deck
+revisions or PDK releases are otherwise indistinguishable in the output, so a
+signoff claim can't be checked or reproduced. This block is **additive** (see
+above): adopting it required no `schema_version` bump on any verb.
 
 **Build drift in `klt signoff` (issue #4223).** `klt signoff` compares each
 cited check's `provenance.klt_version` with the running build and reports an
@@ -1650,7 +1650,12 @@ hard-code names from observation. The lists are also importable constants in
 `EXTRACT_PATH_ONLY_PATHS`, `PATH_ONLY_KEYS_BY_VERB`) with a helper
 `strip_path_only_keys(report, verb)`; a test fails if a path-bearing key is
 added without being registered. Paths use dotted notation, `*` standing for
-any list index.
+any list index. The wildcard is meaningful only on this canonicalization
+side: drift exclusion in `--rerun`/`--check` verdicts
+(`diff_verdict_fields(exclude=...)`) matches by exact path, so a `*` entry
+in an `exclude` set is rejected with a `ValueError` rather than silently
+ignored (issue #5586) — a per-list-entry exclusion belongs in a
+`strip_path_patterns` set passed via `committed_for_diff`/`fresh_for_diff`.
 
 | Verb | Key | Meaning |
 |---|---|---|

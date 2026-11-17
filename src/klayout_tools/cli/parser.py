@@ -4107,17 +4107,15 @@ def _add_stats_parser(subparsers: argparse._SubParsersAction) -> None:
     stats_parser = subparsers.add_parser(
         "stats",
         help="report area, density, and polygon/vertex counts of a GDSII/OASIS stream",
-        description=(
-            "Report bounding box, drawn area, density, and polygon/vertex "
-            "counts of a GDSII or OASIS layout file, in total and optionally "
-            "per layer. polygon_count/vertex_count are per cell definition "
-            "(not instance-resolved); flattened_polygon_count/"
-            "flattened_vertex_count are the instance-resolved counterparts, "
-            "weighted by CellInstArray multiplicity like area_um2, matching "
-            "'klt layers --flattened'. area_um2 is the raw sum of shape "
-            "areas (overlaps double-counted); merged_area_um2 is the "
-            "unioned area."
-        ),
+        description="Report bounding box, drawn area, density, and polygon/vertex "
+        "counts of a GDSII or OASIS layout file, in total and optionally "
+        "per layer. polygon_count/vertex_count are per cell definition "
+        "(not instance-resolved); flattened_polygon_count/"
+        "flattened_vertex_count are the instance-resolved counterparts, "
+        "weighted by CellInstArray multiplicity like area_um2, matching "
+        "'klt layers --flattened'. area_um2 is the raw sum of shape "
+        "areas (overlaps double-counted); merged_area_um2 is the "
+        "unioned area.",
     )
     stats_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
     stats_parser.add_argument(
@@ -4126,33 +4124,34 @@ def _add_stats_parser(subparsers: argparse._SubParsersAction) -> None:
         help="also report the same statistics broken down per layer",
     )
     stats_parser.add_argument(
+        "--geometry-digest",
+        action="store_true",
+        help="also compute geometry_digest, a sha256 of the stream's decoded "
+        "geometry (null otherwise; it re-reads the whole layout and "
+        "roughly 2.5x's the runtime on large flat layouts)",
+    )
+    stats_parser.add_argument(
         "--top",
         default=None,
-        help=(
-            "top cell to report on when the stream has more than one "
-            "(required in that case; optional otherwise)"
-        ),
+        help="top cell to report on when the stream has more than one "
+        "(required in that case; optional otherwise)",
     )
     stats_parser.add_argument(
         "--density-window",
         type=float,
         default=None,
         metavar="UM",
-        help=(
-            "also report per-layer drawn-area fraction (merged geometry) over "
-            "square windows of this size in um tiled over the top-cell bbox; "
-            "edge windows are clipped and judged against their clipped area"
-        ),
+        help="also report per-layer drawn-area fraction (merged geometry) over "
+        "square windows of this size in um tiled over the top-cell bbox; "
+        "edge windows are clipped and judged against their clipped area",
     )
     stats_parser.add_argument(
         "--window-layer",
         action="append",
         default=None,
         metavar="L/D",
-        help=(
-            "restrict --density-window to this layer/datatype (repeatable); "
-            "default: every non-annotation layer with geometry"
-        ),
+        help="restrict --density-window to this layer/datatype (repeatable); "
+        "default: every non-annotation layer with geometry",
     )
     _add_format_arg(stats_parser)
     stats_parser.set_defaults(func=stats_cmd.run)
