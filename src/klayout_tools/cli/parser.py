@@ -83,11 +83,11 @@ from ._argv_flags import _record_request_argv_flags as _record_request_argv_flag
 from ._argv_flags import _require_one_input as _require_one_input
 from ._drc_parser_args import add_klayout_app_args, add_rule_listing_args
 from .color import add_color_args
+from .parser_artifact import add_artifact_parser
 from .parser_characterize import add_characterize_parser
 from .parser_diff import add_diff_parser
 from .parser_economy import add_economy_parser
 from .parser_netlist import add_netlist_parser
-from .parser_artifact import add_artifact_parser
 from .parser_pex import add_pex_parser
 from .parser_sim import add_sim_parser
 from .parsers.components import add_components_parser
