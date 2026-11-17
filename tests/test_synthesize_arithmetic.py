@@ -35,6 +35,7 @@ from klayout_tools.synthesize import (
     _write_script,
     run_synthesize,
 )
+from test_synthesize import _patch_yosys_run
 
 HAVE_YOSYS = shutil.which("yosys") is not None
 
@@ -277,7 +278,7 @@ def test_measure_candidate_disqualifies_on_yosys_timeout(tmp_path, monkeypatch):
         assert cmd[:2] == ["yosys", "-s"]
         raise synthesize.subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
 
-    monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
+    _patch_yosys_run(monkeypatch, fake_run)
 
     engine_options = _EngineOptions(
         liberty_path="/abs/lib.lib",

@@ -16,6 +16,7 @@ from test_synthesize import (
     _GCD_MODULE_STATS,
     _GCD_RTL,
     _abs_path,
+    _patch_yosys_run,
     _script_abc_log_path,
     _script_output_paths,
     _setup_success_env,
@@ -92,7 +93,7 @@ def test_concurrent_same_top_runs_keep_their_own_outputs(prepared, monkeypatch):
             barrier.wait(timeout=10)  # Both engines write before either result is read.
         return result
 
-    monkeypatch.setattr(synthesize.subprocess, "run", interleaved)
+    _patch_yosys_run(monkeypatch, interleaved)
 
     def invoke(area):
         local.area = area
@@ -177,7 +178,7 @@ def test_failed_runs_retain_script_stdout_and_stderr(prepared, monkeypatch, fail
             )
         return original(cmd, **kwargs)
 
-    monkeypatch.setattr(synthesize.subprocess, "run", failed)
+    _patch_yosys_run(monkeypatch, failed)
     with pytest.raises(SynthesizeError):
         run_synthesize(request)
     assert _evidence(prior_dir) == prior

@@ -697,6 +697,39 @@ def _write_memory_evidence_stats(
         handle.write(blackbox_listing)
 
 
+def _patch_yosys_run(monkeypatch, fake) -> None:
+    """Install a ``subprocess.run``-shaped fake across both Yosys seams.
+
+    Issue #5798: ``_run_yosys`` no longer spawns the ``yosys -s`` script run
+    through ``subprocess.run`` -- it goes through ``synthesize._spawn_yosys``
+    (``Popen`` in its own process group, so a timeout can SIGKILL a hung
+    ``yosys-abc`` grandchild with it). The ``yosys -V`` and ``help abc``
+    capability probes still go through ``subprocess.run`` directly. The
+    run-shaped fakes in this file were written against the single
+    ``subprocess.run`` seam, so this patches ``run`` exactly as before AND
+    routes the spawn seam through it -- late-bound at call time, so helpers
+    that re-patch ``run`` afterwards (e.g. ``_route_sv2v_to_real_subprocess``)
+    keep intercepting spawn calls too, and fakes that delegate to a captured
+    ``inner`` behave as they did before.
+
+    Tests exercising the REAL spawn path (the process-group regression tests
+    in ``test_synthesize_timeout.py``) patch neither seam and put a stub
+    ``yosys`` binary on ``PATH`` instead.
+    """
+    monkeypatch.setattr(synthesize.subprocess, "run", fake)
+
+    def spawn_via_run(cmd, **kwargs):
+        return synthesize.subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=kwargs.get("timeout"),
+            cwd=kwargs.get("cwd"),
+        )
+
+    monkeypatch.setattr(synthesize, "_spawn_yosys", spawn_via_run)
+
+
 def _stub_yosys_success(
     monkeypatch,
     *,
@@ -796,24 +829,25 @@ def _stub_yosys_success(
                 handle.write(abc_log + "\n")
         return fake_completed(returncode=0, stdout=yosys_log)
 
-    monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
+    _patch_yosys_run(monkeypatch, fake_run)
 
 
 def _record_yosys_scripts(monkeypatch) -> list[str]:
-    """Wrap whatever `synthesize.subprocess.run` stub is already installed so
+    """Wrap whatever `synthesize._spawn_yosys` stub is already installed so
     every `yosys -s <script>` invocation's script path is appended to the
     returned list (issue #1870: which of the two generated scripts Yosys is
     actually handed is the behaviour under test, not an implementation
-    detail). Call *after* `_stub_yosys_success`."""
+    detail). Call *after* `_stub_yosys_success`; the seam is captured at
+    install time, so the recording chains through the installed stub."""
     scripts: list[str] = []
-    inner = synthesize.subprocess.run
+    inner = synthesize._spawn_yosys
 
-    def recording_run(cmd, **kwargs):
+    def recording_spawn(cmd, **kwargs):
         if cmd[:2] == ["yosys", "-s"]:
             scripts.append(cmd[2])
         return inner(cmd, **kwargs)
 
-    monkeypatch.setattr(synthesize.subprocess, "run", recording_run)
+    monkeypatch.setattr(synthesize, "_spawn_yosys", recording_spawn)
     return scripts
 
 
@@ -1306,7 +1340,7 @@ def test_arithmetic_trial_scripts_keep_the_absolute_liberty(tmp_path, monkeypatc
     def fail_to_launch(cmd, **kwargs):
         raise OSError("no yosys here")
 
-    monkeypatch.setattr(synthesize.subprocess, "run", fail_to_launch)
+    _patch_yosys_run(monkeypatch, fail_to_launch)
     trial_dir = tmp_path / ".klt" / "synthesize" / "arith" / "brent_kung"
 
     measured = synthesize._measure_candidate(
@@ -1730,7 +1764,7 @@ def test_run_synthesize_stubbed_elaboration_error(tmp_path, monkeypatch):
             returncode=1, stderr="ERROR: Module `not_a_module' not found!\n"
         )
 
-    monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
+    _patch_yosys_run(monkeypatch, fake_run)
 
     with pytest.raises(SynthesizeError, match=r"yosys synthesis failed:.*not_a_module"):
         run_synthesize(request_path)
@@ -1758,7 +1792,7 @@ def test_run_synthesize_stubbed_wasi_sandbox_script_not_found_hint(
             ),
         )
 
-    monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
+    _patch_yosys_run(monkeypatch, fake_run)
 
     with pytest.raises(SynthesizeError) as exc_info:
         run_synthesize(request_path)
@@ -1789,7 +1823,7 @@ def test_run_synthesize_stubbed_missing_script_no_hint(tmp_path, monkeypatch):
             ),
         )
 
-    monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
+    _patch_yosys_run(monkeypatch, fake_run)
 
     with pytest.raises(SynthesizeError) as exc_info:
         run_synthesize(request_path)
@@ -1891,7 +1925,7 @@ def test_run_synthesize_stubbed_wasi_hint_tempdir_branch(tmp_path, monkeypatch, 
             ),
         )
 
-    monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
+    _patch_yosys_run(monkeypatch, fake_run)
 
     with pytest.raises(SynthesizeError) as exc_info:
         run_synthesize(request_path)
@@ -1925,7 +1959,7 @@ def test_run_synthesize_stubbed_missing_script_inside_tempdir_no_hint(
             ),
         )
 
-    monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
+    _patch_yosys_run(monkeypatch, fake_run)
 
     with pytest.raises(SynthesizeError) as exc_info:
         run_synthesize(request_path)
@@ -1962,7 +1996,7 @@ def test_run_synthesize_stubbed_generic_engine_failure(tmp_path, monkeypatch):
         assert cmd[:2] == ["yosys", "-s"]
         return fake_completed(returncode=2, stdout="something went wrong\n")
 
-    monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
+    _patch_yosys_run(monkeypatch, fake_run)
 
     with pytest.raises(SynthesizeError, match="yosys exited with code 2"):
         run_synthesize(request_path)
@@ -1974,7 +2008,7 @@ def test_run_synthesize_stubbed_missing_binary(tmp_path, monkeypatch):
     def fake_run(cmd, **kwargs):
         raise FileNotFoundError("no such file: yosys")
 
-    monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
+    _patch_yosys_run(monkeypatch, fake_run)
 
     with pytest.raises(SynthesizeError, match="could not launch yosys"):
         run_synthesize(request_path)
@@ -1992,7 +2026,7 @@ def test_run_synthesize_stubbed_yosys_timeout(tmp_path, monkeypatch):
         assert kwargs.get("timeout") == synthesize.DEFAULT_YOSYS_TIMEOUT_S
         raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
 
-    monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
+    _patch_yosys_run(monkeypatch, fake_run)
 
     with pytest.raises(SynthesizeError, match="did not complete within"):
         run_synthesize(request_path)
@@ -2009,7 +2043,7 @@ def test_run_synthesize_stubbed_missing_netlist_output(tmp_path, monkeypatch):
             return fake_completed(returncode=0)
         return fake_completed(stdout="Yosys 0.67+post\n")
 
-    monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
+    _patch_yosys_run(monkeypatch, fake_run)
 
     with pytest.raises(SynthesizeError, match="did not produce"):
         run_synthesize(request_path)
@@ -2027,7 +2061,7 @@ def test_run_synthesize_stubbed_missing_stats_output(tmp_path, monkeypatch):
             return fake_completed(returncode=0)
         return fake_completed(stdout="Yosys 0.67+post\n")
 
-    monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
+    _patch_yosys_run(monkeypatch, fake_run)
 
     with pytest.raises(SynthesizeError, match="did not produce the expected stats"):
         run_synthesize(request_path)
@@ -2053,7 +2087,7 @@ def test_run_synthesize_stubbed_stats_missing_top_module(tmp_path, monkeypatch):
             return fake_completed(returncode=0)
         return fake_completed(stdout="Yosys 0.67+post\n")
 
-    monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
+    _patch_yosys_run(monkeypatch, fake_run)
 
     with pytest.raises(SynthesizeError, match="could not find synthesis statistics"):
         run_synthesize(request_path)
@@ -2083,7 +2117,7 @@ def test_run_synthesize_stubbed_engine_version_unresolvable(tmp_path, monkeypatc
             return fake_completed(returncode=0)
         raise FileNotFoundError("no yosys")
 
-    monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
+    _patch_yosys_run(monkeypatch, fake_run)
 
     report = run_synthesize(request_path)
     assert report["engine_version"] is None
@@ -2187,7 +2221,7 @@ def _stub_hierarchical_yosys(
                 handle.write(_ABC_STIME_LINE + "\n")
         return fake_completed(returncode=0)
 
-    monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
+    _patch_yosys_run(monkeypatch, fake_run)
 
 
 def _setup_hierarchical_env(tmp_path, monkeypatch, hdl_toplevel: str) -> str:
@@ -2624,7 +2658,7 @@ def _route_sv2v_to_real_subprocess(monkeypatch):
             return real_run(cmd, *args, **kwargs)
         return yosys_stub(cmd, *args, **kwargs)
 
-    monkeypatch.setattr(synthesize.subprocess, "run", run)
+    _patch_yosys_run(monkeypatch, run)
 
 
 def _sv2v_request(tmp_path, request_path):
@@ -6693,7 +6727,7 @@ def test_undeclared_module_error_points_at_request_macros(tmp_path, monkeypatch)
             ),
         )
 
-    monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
+    _patch_yosys_run(monkeypatch, fake_run)
 
     with pytest.raises(SynthesizeError) as excinfo:
         run_synthesize(request_path)
@@ -6862,7 +6896,7 @@ def test_memory_evidence_failure_is_indeterminate_and_never_fails_run(
             )
         return inner(cmd, **kwargs)
 
-    monkeypatch.setattr(synthesize.subprocess, "run", failing_evidence)
+    _patch_yosys_run(monkeypatch, failing_evidence)
 
     report = run_synthesize(request_path)
 
@@ -6887,7 +6921,7 @@ def test_memory_evidence_missing_stage_is_indeterminate(tmp_path, monkeypatch):
             return fake_completed(returncode=0)  # exits 0, writes nothing
         return inner(cmd, **kwargs)
 
-    monkeypatch.setattr(synthesize.subprocess, "run", silent_evidence)
+    _patch_yosys_run(monkeypatch, silent_evidence)
 
     report = run_synthesize(request_path)
 
@@ -6916,7 +6950,7 @@ def test_unsupported_design_error_preserved_without_evidence_run(tmp_path, monke
             )
         return inner(cmd, **kwargs)
 
-    monkeypatch.setattr(synthesize.subprocess, "run", failing_production)
+    _patch_yosys_run(monkeypatch, failing_production)
 
     with pytest.raises(SynthesizeError, match="is not part of the design"):
         run_synthesize(request_path)

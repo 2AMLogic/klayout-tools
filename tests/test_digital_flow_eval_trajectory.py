@@ -57,6 +57,7 @@ from klayout_tools.trajectory import (
     read_log,
     record_from_eval,
 )
+from test_synthesize import _patch_yosys_run
 
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
 
@@ -371,7 +372,7 @@ def _stub_engines(monkeypatch, *, engines: tuple[str, ...]) -> None:
         raise AssertionError(f"unexpected subprocess invocation: {cmd!r}")
 
     assert synthesize.subprocess is place_and_route.subprocess
-    monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
+    _patch_yosys_run(monkeypatch, fake_run)
 
 
 def _make_layout(clean: bool) -> kdb.Layout:
