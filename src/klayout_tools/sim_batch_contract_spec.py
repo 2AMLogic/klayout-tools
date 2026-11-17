@@ -16,6 +16,7 @@ from . import (
     remote_transport,
     sim_eye,
     sim_mismatch_scale,
+    sim_op_check,
     sim_search,
     sim_settled,
     sim_snm_meas,
@@ -274,6 +275,13 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
 #: is mandatory because an older runner drops the scanned sigma cards off the
 #: pushed points and runs the sweep at *nominal* sigma while the response
 #: still echoes the scale -- a silently invalid negative control (#5486).
+#: The #5645 five
+#: (``corners.options``, ``options.nodeset``,
+#: ``options.initial_conditions``, ``analysis_overrides``,
+#: ``analysis.op_check``) are mandatory because each one's post-run
+#: ``*_unsupported_worker`` echo check already hard-fails the whole request
+#: -- mandatory membership mirrors that severity, moving the identical
+#: refusal from after the grid ran to before anything is launched.
 _MANDATORY_RUNNER_FEATURES = frozenset(
     {
         "mismatch_params",
@@ -291,6 +299,11 @@ _MANDATORY_RUNNER_FEATURES = frozenset(
         "twoport",
         "twoport_noise",
         "corners.params",
+        "corners.options",
+        "options.nodeset",
+        "options.initial_conditions",
+        "analysis_overrides",
+        "analysis.op_check",
     }
 )
 
@@ -345,6 +358,21 @@ _RELEASED_FEATURE_DETECTORS: dict[str, Any] = {
     "options.ngspice_options": _uses_option("ngspice_options"),
     "options.osdi_preload": _uses_option("osdi_preload"),
     "options.stage_model_inputs": _uses_option("stage_model_inputs"),
+    # The five #5645 rows: fields whose only worker guard was a post-run
+    # *_unsupported_worker echo check, so an old runner image ran the whole
+    # grid and the result was then refused wholesale. Each detector mirrors
+    # the predicate its echo check uses (sim_op_check.is_declared for
+    # analysis.op_check), so "declared" means the same thing pre-launch and
+    # post-run.
+    "analysis.op_check": lambda request: sim_op_check.is_declared(
+        request.get("analysis") or {}
+    ),
+    "analysis_overrides": lambda request: bool(request.get("analysis_overrides")),
+    "options.nodeset": _uses_option("nodeset"),
+    "options.initial_conditions": _uses_option("initial_conditions"),
+    "corners.options": lambda request: bool(
+        (request.get("corners") or {}).get("options")
+    ),
 }
 
 # One registry, not two: the #3232 minimum versions feed the same table the

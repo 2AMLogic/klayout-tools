@@ -246,7 +246,7 @@ def plan_deck_units(
     Raises ``sim.SimError`` naming the offending ``request.decks[i]`` field
     for every rejection.
     """
-    from .sim import DEFAULT_TIMEOUT_S
+    from .sim import DEFAULT_TIMEOUT_S, _validate_ngspice_init
 
     decks = request.get(DECKS_FIELD)
     if not isinstance(decks, list) or not decks:
@@ -274,6 +274,12 @@ def plan_deck_units(
         default_timeout = _validated_timeout(
             options.get("timeout_s"), "request.options.timeout_s"
         )
+    # Issue #5738: the deck path honours options.ngspice_init exactly as the
+    # corner path does. Validate it here -- plan_deck_units is the check
+    # every backend (and the off-host worker's own run) funnels through, so
+    # a malformed value is a named error before any unit runs or anything
+    # is uploaded, never a silently dropped option.
+    ngspice_init_lines = _validate_ngspice_init(options.get("ngspice_init"))
 
     roots = sim_staging.host_resolved_roots(request)
     seen_ids: set[str] = set()
@@ -300,7 +306,32 @@ def plan_deck_units(
                 allow_worker_form=allow_worker_form,
             )
         )
+    if ngspice_init_lines:
+        _refuse_staged_spiceinit(units)
     return units
+
+
+def _refuse_staged_spiceinit(units: list[dict[str, Any]]) -> None:
+    """Refuse a unit that stages its own ``.spiceinit`` while
+    ``options.ngspice_init`` is set (issue #5738): the runner materializes
+    the option at exactly ``<unit_dir>/.spiceinit``, and a staged deck,
+    input, or include landing on that same name would be silently
+    overwritten -- letting either side win silently is this issue's own
+    defect class, so the combination is rejected by name instead (the
+    ``_reject_corner_only_fields`` reasoning)."""
+    for unit in units:
+        staged = (
+            unit["deck"]["name"],
+            *(item["name"] for item in unit["inputs"]),
+            *(item["name"] for item in unit["includes"]),
+        )
+        if ".spiceinit" in staged:
+            raise _deck_error(
+                f"deck unit {unit['id']!r} stages a file named '.spiceinit' "
+                "while options.ngspice_init is set -- both write the same "
+                "file in the unit's directory; remove the staged file or "
+                "the option"
+            )
 
 
 def _reject_corner_only_fields(request: dict[str, Any]) -> None:
@@ -770,9 +801,13 @@ def stage_deck_job(
             }
         )
     options = request.get("options") or {}
+    # Issue #5738: ngspice_init ships in the worker request so the worker's
+    # own local-parallel deck run materializes it -- and so the generic
+    # runner feature detector (`_uses_option("ngspice_init")`, min runner
+    # 0.7.0) sees it in the request document this job actually runs.
     worker_options = {
         key: options[key]
-        for key in ("timeout_s", "max_workers", "ngspice_binary")
+        for key in ("timeout_s", "max_workers", "ngspice_binary", "ngspice_init")
         if options.get(key) is not None
     }
     worker_request = {
@@ -813,6 +848,7 @@ def run_deck_unit(
     unit_dir: str,
     staging_root: str,
     ngspice_binary: str,
+    ngspice_init: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Run one deck unit in isolation and return its evidence-first result.
 
@@ -821,13 +857,22 @@ def run_deck_unit(
     in, and ``ngspice -b <deck>`` runs with ``unit_dir`` as ``cwd`` --
     exactly the invocation a local ``ngspice -b`` in the caller's own
     harness would be, so its stdout/stderr bytes are comparable evidence.
+    ``ngspice_init`` (issue #5738, the already-validated
+    ``options.ngspice_init`` lines -- see
+    ``sim._validate_ngspice_init``) is materialized as
+    ``unit_dir/.spiceinit`` after the unit's files are copied in and
+    before the engine spawns, so ``cwd=unit_dir`` makes ngspice read it.
     Streams are captured as raw bytes and written unmodified; a timeout
     keeps whatever the engine emitted before it was killed; a spawn failure
     leaves empty stream files so the result shape is uniform. Never raises
     for anything the *engine* did -- only evidence, statuses, and
     diagnostics.
     """
-    from .sim import _extract_engine_version, _probe_engine_version
+    from .sim import (
+        _extract_engine_version,
+        _probe_engine_version,
+        _write_spiceinit,
+    )
 
     shutil.rmtree(unit_dir, ignore_errors=True)
     os.makedirs(unit_dir, exist_ok=True)
@@ -836,6 +881,14 @@ def run_deck_unit(
         if parent:
             os.makedirs(parent, exist_ok=True)
     _copy_unit_files(unit, unit_dir=unit_dir, staging_root=staging_root)
+    # Issue #5738: materialize options.ngspice_init in the unit's own
+    # directory -- `_spawn_engine` runs with cwd=unit_dir, so ngspice reads
+    # exactly this file before touching the deck. Only called with lines
+    # set: the directory was just recreated (no stale file can exist), and
+    # a caller-staged '.spiceinit' input -- the documented pre-#5738
+    # workaround -- must survive untouched when the option is unset.
+    if ngspice_init:
+        _write_spiceinit(unit_dir, ngspice_init)
     input_key = _unit_input_key(unit, staging_root=staging_root)
 
     deck_name = unit["deck"]["name"]
@@ -1026,74 +1079,6 @@ def _load_complete_unit(
         return {**result, "resumed": True}
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return None
-
-
-def _find_resumable(
-    units: list[dict[str, Any]],
-    *,
-    staging_root: str,
-    outdir: str,
-    engine_version: str | None,
-) -> dict[int, dict[str, Any]]:
-    """Index -> recorded result for every unit already complete under
-    ``outdir``."""
-    resumed: dict[int, dict[str, Any]] = {}
-    for index, unit in enumerate(units):
-        key = {
-            **_unit_input_key(unit, staging_root=staging_root),
-            "engine_version": engine_version,
-        }
-        done = _load_complete_unit(
-            unit, unit_dir=os.path.join(outdir, unit["id"]), key=key
-        )
-        if done is not None:
-            resumed[index] = done
-    return resumed
-
-
-def _apply_resume(
-    report: dict[str, Any],
-    units: list[dict[str, Any]],
-    resumed: dict[int, dict[str, Any]],
-) -> dict[str, Any]:
-    """Fold skipped units into a report that covers only the units that ran:
-    request-order ``units`` (``resumed: false`` on the ones that ran),
-    recomputed counts, and the additive ``environment.resume`` block."""
-    ran = {item["id"]: item for item in report["units"]}
-    merged = []
-    for index, unit in enumerate(units):
-        if index in resumed:
-            merged.append(resumed[index])
-        elif unit["id"] in ran:
-            merged.append({**ran[unit["id"]], "resumed": False})
-    report["units"] = merged
-    _recount(report)
-    environment = report.setdefault("environment", {})
-    if not environment.get("engine_version"):
-        environment["engine_version"] = next(
-            (item["engine_version"] for item in merged if item["engine_version"]),
-            None,
-        )
-    environment["resume"] = {
-        "resumed_units": len(resumed),
-        "resumed_ids": [units[index]["id"] for index in sorted(resumed)],
-    }
-    return report
-
-
-def _recount(report: dict[str, Any]) -> None:
-    filled = report["units"]
-    errored = sum(1 for item in filled if item["status"] == "error")
-    timed_out = sum(1 for item in filled if item["status"] == "timeout")
-    report.update(
-        {
-            "status": "error" if (errored or timed_out) else "pass",
-            "unit_count": len(filled),
-            "passed": sum(1 for item in filled if item["status"] == "pass"),
-            "errored": errored,
-            "timed_out": timed_out,
-        }
-    )
 
 
 class _EngineSpawn:
@@ -1330,12 +1315,14 @@ def _run_decks_local(
     ngspice_binary: str,
     max_workers: int,
     backend: str,
+    ngspice_init: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Run every unit locally -- serially for ``backend="local"`` (one unit
     at a time, results strictly in request order) or across a bounded
     thread pool for ``local-parallel`` (still reported in request order;
     each unit's fresh directory is its isolation, so pool width changes
-    nothing about the evidence)."""
+    nothing about the evidence). ``ngspice_init`` (issue #5738) is
+    materialized per unit by :func:`run_deck_unit`."""
     os.makedirs(outdir, exist_ok=True)
     results: list[dict[str, Any] | None] = [None] * len(units)
     if max_workers <= 1 or len(units) <= 1:
@@ -1345,6 +1332,7 @@ def _run_decks_local(
                 unit_dir=os.path.join(outdir, unit["id"]),
                 staging_root=staging_root,
                 ngspice_binary=ngspice_binary,
+                ngspice_init=ngspice_init,
             )
     else:
         with ThreadPoolExecutor(max_workers=min(max_workers, len(units))) as pool:
@@ -1355,6 +1343,7 @@ def _run_decks_local(
                     unit_dir=os.path.join(outdir, unit["id"]),
                     staging_root=staging_root,
                     ngspice_binary=ngspice_binary,
+                    ngspice_init=ngspice_init,
                 ): index
                 for index, unit in enumerate(units)
             }
@@ -2001,37 +1990,6 @@ def resolve_deck_outdir(artifacts_dir: str | None, request_dir: str) -> str:
     return artifacts_dir or os.path.join(request_dir, ".klt", "sim")
 
 
-def _resolve_resumed(
-    units: list[dict[str, Any]],
-    *,
-    backend: str,
-    request_dir: str,
-    outdir: str,
-    ngspice_binary: str,
-) -> dict[int, dict[str, Any]]:
-    """The ``--resume`` lookup of :func:`run_deck_request`: unit index ->
-    completion record for every unit that can be skipped."""
-    from .sim import SimError, _probe_engine_version
-
-    if backend == "remote":
-        raise SimError(
-            "options.resume is not yet supported for backend 'remote' -- "
-            "use resume with backend 'local', 'local-parallel' or 'batch'"
-        )
-    return _find_resumable(
-        units,
-        staging_root=request_dir,
-        outdir=outdir,
-        # The fleet's engine cannot be probed before submit; its units
-        # are matched on everything else (see docs/cli/sim.md).
-        engine_version=(
-            None
-            if backend == "batch"
-            else _probe_engine_version("ngspice", ngspice_binary)
-        ),
-    )
-
-
 def _deck_dry_run_report(
     request: dict[str, Any],
     units: list[dict[str, Any]],
@@ -2168,7 +2126,9 @@ def _run_decks_offhost(
             ngspice_binary=ngspice_binary,
         )
     if resume:
-        _apply_resume(report, units, resumed)
+        from . import sim_decks_resume
+
+        sim_decks_resume._apply_resume(report, units, resumed)
     apply_engine_host(
         report.setdefault("environment", {}),
         backend=backend,
@@ -2214,10 +2174,12 @@ def run_deck_request(
     payload of :func:`sim_batch_async.launch_prepared_job`; attach collects
     an already-submitted job's report.
     """
+    from . import sim_decks_resume
     from .sim import (
         SimError,
         _resolve_max_workers,
         _resolve_ngspice_binary,
+        _validate_ngspice_init,
         apply_engine_host,
     )
 
@@ -2240,6 +2202,10 @@ def run_deck_request(
     )
     options = request.get("options") or {}
     ngspice_binary = _resolve_ngspice_binary(options, request_dir)
+    # Issue #5738: plan_deck_units already rejected a malformed value; this
+    # re-read of the (now known-good) option is what threads the lines into
+    # the local runner, so each unit's directory gets its .spiceinit.
+    ngspice_init_lines = _validate_ngspice_init(options.get("ngspice_init"))
     outdir = resolve_deck_outdir(artifacts_dir, request_dir)
 
     if dry_run:
@@ -2248,7 +2214,7 @@ def run_deck_request(
         )
 
     resumed = (
-        _resolve_resumed(
+        sim_decks_resume._resolve_resumed(
             units,
             backend=backend,
             request_dir=request_dir,
@@ -2288,9 +2254,10 @@ def run_deck_request(
         ngspice_binary=ngspice_binary,
         max_workers=workers,
         backend=backend,
+        ngspice_init=ngspice_init_lines,
     )
     if resume:
-        _apply_resume(report, units, resumed)
+        sim_decks_resume._apply_resume(report, units, resumed)
     apply_engine_host(
         report["environment"], backend=backend, client_ngspice_binary=None
     )

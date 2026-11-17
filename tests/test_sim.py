@@ -9,7 +9,7 @@ Two tiers, per the issue's testing requirement (#91):
   exercised without ever invoking the real `ngspice` binary. These always
   run, everywhere, and are the ones a classification/parsing regression
   actually gets caught by.
-- **Integration tests** (`@pytest.mark.skipif(not HAVE_NGSPICE, ...)`) run
+- **Integration tests** (`@_SKIP_NO_NGSPICE`) run
   the real `ngspice -b` subprocess end to end -- corner expansion, `.lib`
   process-corner selection, `alter`-based supply sweep, `.temp`, `.meas`
   extraction, and the optional waveform artifact -- against tiny, synthetic,
@@ -40,6 +40,7 @@ from helpers.subprocess_fakes import (
     _stub_subprocess_run,
     fake_completed,
 )
+from helpers.tool_probes import SKIP_NO_NGSPICE as _SKIP_NO_NGSPICE
 from klayout_tools import _paths as paths_module
 from klayout_tools import pdk, remote_transport, sim, sim_batch, sim_remote, sim_steps
 from klayout_tools import remote_launcher as rl
@@ -50,16 +51,6 @@ pytestmark = pytest.mark.usefixtures(
     "real_build_identity_git", "bare_name_ngspice_resolution"
 )
 
-
-#: `KLT_SKIP_NGSPICE_TESTS=1` (local-only, set by `npm run check:ci` -- never
-#: by CI) opts a host with ngspice installed out of this slow tier too; see
-#: `tests/test_extract.py`'s `HAVE_NGSPICE` for the full rationale (issue #1651).
-HAVE_NGSPICE = shutil.which("ngspice") is not None and (
-    os.environ.get("KLT_SKIP_NGSPICE_TESTS") != "1"
-)
-_SKIP_NO_NGSPICE = pytest.mark.skipif(
-    not HAVE_NGSPICE, reason="ngspice is not installed on this machine"
-)
 
 EXAMPLES_DIR = Path(__file__).parent.parent / "examples" / "sim"
 
@@ -649,7 +640,7 @@ def test_run_sim_netlist_source_invalid_value_raises(tmp_path):
             "analysis": {"kind": "tran", "args": "1n 1u"},
         },
     )
-    with pytest.raises(sim.SimError, match="unsupported netlist_source"):
+    with pytest.raises(sim.SimError, match="unsupported netlist_source .*gate-level"):
         sim.run_sim(str(request))
 
 
@@ -4839,14 +4830,14 @@ def test_run_sim_stubbed_pass(tmp_path, monkeypatch):
     }
 
 
-@pytest.mark.parametrize("netlist_source", ["schematic", "extracted"])
+@pytest.mark.parametrize("netlist_source", ["schematic", "extracted", "gate-level"])
 def test_run_sim_stubbed_netlist_source_echoed_in_environment(
     tmp_path, monkeypatch, netlist_source
 ):
     # request.netlist_source, when present and valid, is echoed verbatim
     # into environment.netlist_source (see docs/cli/sim.md's "Post-layout
     # verification" section) -- this is how a caller distinguishes a
-    # pre-layout (S6) sim pass from a post-layout (S9) one.
+    # pre-layout (S6), post-layout (S9), or gate-level (#5638) sim pass.
     _write_body(tmp_path)
     request = _write_request(
         tmp_path,
