@@ -42,7 +42,6 @@ def test_submit_uploads_every_staged_include_under_inputs(tmp_path):
         str(_write_body_including_dut(tmp_path)),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=False,
     )
 
     staged: dict[str, bytes] = {}
@@ -70,7 +69,6 @@ def test_submit_uploads_inputs_then_job_json_to_the_documented_keys(tmp_path):
         str(netlist),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=False,
     )
 
     staged: dict[str, bytes] = {}
@@ -105,7 +103,6 @@ def test_submit_failure_raises_batch_error(tmp_path):
         str(_write_body(tmp_path)),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=False,
     )
     with pytest.raises(sb.BatchError, match="denied"):
         sb.submit_job(_config(tmp_path), "job-1", spec, runner=runner)

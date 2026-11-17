@@ -48,7 +48,6 @@ def _build_batch_job_spec(
     *,
     corner_count: int,
     timeout_s: float,
-    keep_artifacts: bool,
     request_dir: str | None = None,
     client_version: str | None = None,
     version_check: str = "enforce",
@@ -62,9 +61,11 @@ def _build_batch_job_spec(
     expansion, ordering, measurement extraction, or pass/fail
     classification), pointed at the uploaded request document and
     **redirected to a file under ``$EDA_OUTPUT_DIR``** -- see this module's
-    docstring on why stdout cannot be used. When the caller wants artifacts,
-    ``--outdir`` is pointed inside ``$EDA_OUTPUT_DIR`` too, so the harness's
-    ``outputs/`` collection picks them up with no second channel.
+    docstring on why stdout cannot be used. ``--outdir`` is always pointed
+    inside ``$EDA_OUTPUT_DIR`` too (#4369), so the harness's ``outputs/``
+    collection picks the artifacts up with no second channel; whether they
+    reach the caller's artifact dir is the client side's keep-or-discard
+    decision.
 
     ``cores_per_job`` is the same per-corner sizing assumption
     ``remote_launcher.select_instance_type`` derives its instance size from
@@ -131,7 +132,8 @@ def _build_batch_job_spec(
         command += ' ${EDA_PHYSICAL_CORES:+--max-workers "$EDA_PHYSICAL_CORES"}'
     # Always collect the per-corner engine logs: without them a deck abort
     # (`could not find a valid modelname`) never reaches the report (#4369).
-    # Only `keep_artifacts` installs them into the caller's artifact dir.
+    # Whether they are installed into the caller's artifact dir is decided
+    # client-side, from the request's artifact-retention option.
     command += f' --outdir "$EDA_OUTPUT_DIR/{BATCH_ARTIFACTS_DIRNAME}"'
     # stdout -> report.json (the success channel); stderr was teed into
     # stderr.log from the job command's first line (see

@@ -252,7 +252,6 @@ def test_build_batch_job_spec_shape(tmp_path):
         str(netlist),
         corner_count=5,
         timeout_s=120.0,
-        keep_artifacts=False,
     )
     document = spec.to_job_json()
 
@@ -289,7 +288,6 @@ def test_build_batch_job_spec_tool_echoes_ngspice_binary_override(tmp_path):
         str(netlist),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=False,
     )
     assert spec.to_job_json()["tool"] == "/opt/ngspice-custom"
 
@@ -301,7 +299,6 @@ def test_build_batch_job_spec_tool_falls_back_without_an_override(tmp_path):
         str(netlist),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=False,
     )
     assert spec.to_job_json()["tool"] == sb.BATCH_JOB_TOOL == "ngspice"
 
@@ -312,7 +309,6 @@ def test_job_cmd_redirects_report_to_output_dir(tmp_path):
         str(_write_body(tmp_path)),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=False,
     )
     # The redirect is load-bearing: the harness merges all stdout/stderr into
     # harness.log, so only $EDA_OUTPUT_DIR is a structured channel back.
@@ -328,7 +324,6 @@ def test_job_cmd_tees_stderr_into_outputs(tmp_path):
         str(_write_body(tmp_path)),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=False,
     )
     # klt's --format json error envelope goes to stderr, so it must reach a
     # collected file -- while still being forwarded to harness.log.
@@ -351,7 +346,6 @@ def test_job_cmd_stderr_capture_runs_under_bash_c(tmp_path):
         str(_write_body(tmp_path)),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=False,
         client_version="0.7.0",
     )
     klt = (
@@ -372,7 +366,6 @@ def _exit_trap_spec(tmp_path, **request_extra):
         str(_write_body(tmp_path)),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=False,
         client_version="0.7.0",
     )
 
@@ -388,19 +381,15 @@ def test_job_cmd_is_valid_bash_syntax(tmp_path):
     bash = shutil.which("bash")
     if bash is None:
         pytest.skip("bash not available")
-    for keep in (False, True):
-        spec = sb._build_batch_job_spec(
-            {"models": {}},
-            str(_write_body(tmp_path)),
-            corner_count=1,
-            timeout_s=30.0,
-            keep_artifacts=keep,
-            client_version="0.7.0",
-        )
-        proc = subprocess.run(
-            [bash, "-n", "-c", spec.cmd], capture_output=True, text=True
-        )
-        assert proc.returncode == 0, proc.stderr
+    spec = sb._build_batch_job_spec(
+        {"models": {}},
+        str(_write_body(tmp_path)),
+        corner_count=1,
+        timeout_s=30.0,
+        client_version="0.7.0",
+    )
+    proc = subprocess.run([bash, "-n", "-c", spec.cmd], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
 
 
 def _bash_n(script):
@@ -432,22 +421,20 @@ def test_runner_preflight_with_required_features_is_valid_bash(features, enforce
 
 def test_job_cmd_with_gated_request_features_is_valid_bash(tmp_path):
     """Issue #3993: ngspice_init + measurement expr is the reporter's shape."""
-    for keep in (False, True):
-        spec = sb._build_batch_job_spec(
-            {
-                "models": {},
-                "options": {"ngspice_init": "x"},
-                "measurements": [{"name": "a", "expr": "1"}],
-                "analysis": {"kind": "op"},
-            },
-            str(_write_body(tmp_path)),
-            corner_count=1,
-            timeout_s=30.0,
-            keep_artifacts=keep,
-            client_version="0.7.1.dev2264+gcba5e957d9ed",
-        )
-        proc = _bash_n(spec.cmd)
-        assert proc.returncode == 0, proc.stderr
+    spec = sb._build_batch_job_spec(
+        {
+            "models": {},
+            "options": {"ngspice_init": "x"},
+            "measurements": [{"name": "a", "expr": "1"}],
+            "analysis": {"kind": "op"},
+        },
+        str(_write_body(tmp_path)),
+        corner_count=1,
+        timeout_s=30.0,
+        client_version="0.7.1.dev2264+gcba5e957d9ed",
+    )
+    proc = _bash_n(spec.cmd)
+    assert proc.returncode == 0, proc.stderr
 
 
 def test_job_cmd_with_gated_features_refuses_an_older_runner(tmp_path):
@@ -463,7 +450,6 @@ def test_job_cmd_with_gated_features_refuses_an_older_runner(tmp_path):
         str(_write_body(tmp_path)),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=False,
         client_version="0.7.1.dev2264+gcba5e957d9ed",
     )
     klt = '#!/bin/bash\nif [ "$1" = "--version" ]; then echo "klt 0.7.0"; exit 0; fi\n'
@@ -546,7 +532,6 @@ def test_job_cmd_runs_one_worker_per_physical_core_on_the_job_instance(tmp_path)
         str(_write_body(tmp_path)),
         corner_count=5,
         timeout_s=30.0,
-        keep_artifacts=False,
     )
     assert '${EDA_PHYSICAL_CORES:+--max-workers "$EDA_PHYSICAL_CORES"}' in spec.cmd
     # ...and it lands before the redirect, as a klt argument.
@@ -563,7 +548,6 @@ def test_job_cmd_physical_core_workers_expand_as_intended_in_a_shell(tmp_path):
         str(_write_body(tmp_path)),
         corner_count=5,
         timeout_s=30.0,
-        keep_artifacts=False,
     )
     flag = spec.cmd.split("--format json", 1)[1].split("--outdir", 1)[0].strip()
     probe = f'printf "%s|" {flag}'
@@ -587,35 +571,25 @@ def test_job_cmd_respects_an_explicit_request_max_workers(tmp_path):
         str(_write_body(tmp_path)),
         corner_count=5,
         timeout_s=30.0,
-        keep_artifacts=False,
     )
     assert "--max-workers" not in spec.cmd
 
 
-def test_job_cmd_points_outdir_into_output_dir_when_keeping_artifacts(tmp_path):
+def test_job_cmd_always_collects_engine_logs_into_the_output_dir(tmp_path):
+    """Issue #4369: the log must be collected so a deck abort is diagnosable.
+    The install-into-the-caller's-artifact-dir choice is client-side; this
+    function's cmd is unconditional, and `--outdir` must precede the stdout
+    redirect so the report does not clobber the artifacts tree."""
     spec = sb._build_batch_job_spec(
         {"models": {}},
         str(_write_body(tmp_path)),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=True,
     )
     assert '--outdir "$EDA_OUTPUT_DIR/artifacts"' in spec.cmd
     assert spec.cmd.index("--outdir") < spec.cmd.index(
         '> "$EDA_OUTPUT_DIR/report.json"'
     )
-
-
-def test_job_cmd_collects_engine_logs_without_keep_artifacts(tmp_path):
-    """Issue #4369: the log must be collected so a deck abort is diagnosable."""
-    spec = sb._build_batch_job_spec(
-        {"models": {}},
-        str(_write_body(tmp_path)),
-        corner_count=1,
-        timeout_s=30.0,
-        keep_artifacts=False,
-    )
-    assert '--outdir "$EDA_OUTPUT_DIR/artifacts"' in spec.cmd
 
 
 def test_job_json_omits_unset_optional_fields(tmp_path):
@@ -624,7 +598,6 @@ def test_job_json_omits_unset_optional_fields(tmp_path):
         str(_write_body(tmp_path)),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=False,
     )
     document = spec.to_job_json()
     assert "pdk_variant" not in document
@@ -638,7 +611,6 @@ def test_job_json_round_trips_and_validates_against_schema(tmp_path):
         str(_write_body(tmp_path)),
         corner_count=3,
         timeout_s=60.0,
-        keep_artifacts=True,
     )
     document = spec.to_job_json()
     assert json.loads(json.dumps(document)) == document
@@ -653,7 +625,6 @@ def test_job_json_inputs_are_not_part_of_the_contract(tmp_path):
         str(_write_body(tmp_path)),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=False,
     )
     assert [item.name for item in spec.inputs] == ["netlist.cir", "request.json"]
     assert "inputs" not in spec.to_job_json()
@@ -696,7 +667,6 @@ def test_build_batch_job_spec_stages_the_netlists_include_closure(tmp_path):
         str(_write_body_including_dut(tmp_path)),
         corner_count=5,
         timeout_s=120.0,
-        keep_artifacts=False,
     )
 
     by_name = {item.name: item for item in spec.inputs}
@@ -724,7 +694,6 @@ def test_build_batch_job_spec_refuses_an_unresolvable_include(tmp_path):
             str(netlist),
             corner_count=5,
             timeout_s=120.0,
-            keep_artifacts=False,
         )
     message = str(excinfo.value)
     assert "backend 'batch'" in message
@@ -746,7 +715,6 @@ def test_build_batch_job_spec_leaves_pdk_rooted_includes_to_the_job_instance(tmp
         str(netlist),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=False,
     )
 
     assert [item.name for item in spec.inputs] == ["netlist.cir", "request.json"]
@@ -3531,7 +3499,6 @@ def test_build_batch_job_spec_without_opt_in_uploads_no_model_inputs(tmp_path):
         str(_write_body(tmp_path)),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=False,
         request_dir=str(tmp_path),
     )
     assert [item.name for item in spec.inputs] == ["netlist.cir", "request.json"]
@@ -3955,7 +3922,6 @@ def test_unusable_client_version_is_a_sim_error_not_a_traceback(tmp_path, versio
             str(_write_body(tmp_path)),
             corner_count=1,
             timeout_s=30.0,
-            keep_artifacts=False,
             client_version=version,
         )
 
@@ -3966,7 +3932,6 @@ def test_forwarded_request_keeps_ngspice_init_lines_unchanged(tmp_path):
         str(_write_body(tmp_path)),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=False,
         client_version=_CLIENT_VERSION,
     )
     uploaded = next(i for i in spec.inputs if i.name == sb.BATCH_REQUEST_FILENAME)
@@ -4031,7 +3996,6 @@ def _init_spec(tmp_path, **kwargs):
         str(_write_body(tmp_path)),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=True,
         client_version=_CLIENT_VERSION,
         **kwargs,
     )
@@ -4170,7 +4134,6 @@ def _gate_spec(tmp_path, client_version, **kwargs):
         str(_write_body(tmp_path)),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=True,
         client_version=client_version,
         **kwargs,
     )
@@ -5981,7 +5944,6 @@ def _feature_spec(tmp_path, request, client="0.7.1.dev384+gf386aca", **kwargs):
         str(_write_body(tmp_path)),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=True,
         client_version=client,
         **kwargs,
     )
@@ -6198,7 +6160,6 @@ def test_submit_progress_line_does_not_leak_the_bucket(tmp_path, capsys):
         str(_write_body(tmp_path)),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=False,
     )
     sb.submit_job(_config(tmp_path), "job-1", spec, runner=_FakeRunner())
     err = capsys.readouterr().err
