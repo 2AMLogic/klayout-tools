@@ -299,9 +299,7 @@ def test_run_lvs_netlist_shape_lef_discloses_well_pins_end_to_end(tmp_path):
     without = run_lvs(json.dumps(request))["power_connectivity"]
     assert without["status"] == "mismatch"
     assert [f["pin"] for f in without["findings"]] == ["VNB", "VPB"]
-    assert {f["rule"] for f in without["findings"]} == {
-        "power.inconsistent_pin_net"
-    }
+    assert {f["rule"] for f in without["findings"]} == {"power.inconsistent_pin_net"}
     assert without["excluded_pins"] == []
 
     request["layout"]["abstract_cell_lef"] = [lef_path]
@@ -317,4 +315,3 @@ def test_run_lvs_netlist_shape_lef_discloses_well_pins_end_to_end(tmp_path):
     # `abstracted_cells` accompanies it.
     assert report["abstract_cell_lef"] == [lef_path]
     assert "abstracted_cells" not in report
-
