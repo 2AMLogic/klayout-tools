@@ -26,6 +26,21 @@ not `klt --version`, if you need to detect this kind of drift. See
   `error_count`/`category_error_counts` and the `status` now agree with the
   engine's own grade; `counts.pins` still reports structural pin presence,
   and a pin pair the comparer itself graded otherwise remains an error.
+- **`klt sim` accepts `request.netlist_source: "gate-level"`** (#5638,
+  2026-11-17): a third caller-declared provenance for `request.netlist`
+  beside `"schematic"` (pre-layout) and `"extracted"` (post-layout) — a
+  netlist assembled from a structural post-synthesis/post-route netlist plus
+  a timing library, i.e. event-driven primitives (XSPICE `d_*` models behind
+  `adc_bridge`/`dac_bridge`) whose delays were reduced from a Liberty deck,
+  the shape a digital block co-simulated beside an analog macro needs —
+  without claiming either that a schematic produced the netlist or that
+  layout extraction did. `klt sim` builds no such netlist itself; the value
+  only declares provenance, is echoed back verbatim in
+  `environment.netlist_source`, and every other field is unaffected (an
+  unrecognized value remains an application error, exit 1). Additive enum
+  value; no `schema_version` bump. See
+  [`docs/cli/sim.md`](docs/cli/sim.md)'s "Post-layout verification
+  (`netlist_source`)" section.
 - **`klt lvs --deck` is the command-line spelling of the request's
   `layout.deck` field** (#5899, 2026-11-17): the curated extraction deck for
   inline layout extraction, the same knob `klt extract --deck` sets (issue
