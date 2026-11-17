@@ -172,7 +172,9 @@ def test_unrecognised_residue_still_compared(tmp_path):
     b = _write(tmp_path, "groupB.lib", b_text)
     with pytest.raises(liberty_merge.LibertyMergeError) as exc:
         liberty_merge.merge_liberty([a, b])
-    assert "Liberty headers differ" not in str(exc.value)
+    msg = str(exc.value)
+    # The fail-closed path is the residue key, not some other field.
+    assert liberty_merge._RESIDUE_KEY in msg and "Liberty headers differ" not in msg
 
 
 def test_templates_union_by_name(tmp_path):
@@ -377,3 +379,104 @@ def test_find_matching_skips_comments_and_nested_braces():
     open_line = "{ // never closed"
     assert liberty_merge._find_matching(open_line, 0, "{", "}") == len(open_line)
     assert liberty_merge._find_matching("{ a", 0, "{", "}") == len("{ a")
+
+
+def _colon_date_lib(
+    tag: str,
+    *,
+    date: str = "$Date: N $",
+    time_unit: str = "1ns",
+    max_trans: str = "320",
+) -> str:
+    """A cell-group ``.lib`` whose ``date`` value is *unquoted* and holds a
+    second ':' (an RCS keyword, or a bare ``hh:mm:ss`` stamp)."""
+    return (
+        f"library (lib_{tag}) {{\n"
+        f"  date : {date};\n"
+        "  delay_model : table_lookup;\n"
+        f'  time_unit : "{time_unit}";\n'
+        f"  default_max_transition : {max_trans};\n"
+        f"  cell (X_{tag}) {{ area : 1; }}\n"
+        "}\n"
+    )
+
+
+def test_unquoted_colon_in_date_keeps_following_fields(tmp_path):
+    """A second ':' in an ignored attribute's value must not make the
+    statement scan run on and swallow the rest of the header."""
+    path = _write(tmp_path, "colon.lib", _colon_date_lib("E"))
+    header = _read(path).split("cell (")[0]
+    assert liberty_merge._header_fields(path, header) == {
+        "delay_model": "table_lookup",
+        "time_unit": '"1ns"',
+        "default_max_transition": "320",
+    }
+
+
+def test_unquoted_colon_in_date_does_not_hide_conflicts(tmp_path):
+    """Same-quirk files (every file of one vendor release shares the writer)
+    with genuinely conflicting electrical headers are still refused, as
+    ``main`` refuses them."""
+    both = {"time_unit": "1ps", "max_trans": "4000"}
+    a = _write(tmp_path, "groupA.lib", _colon_date_lib("A"))
+    b = _write(tmp_path, "groupB.lib", _colon_date_lib("B", **both))
+    with pytest.raises(liberty_merge.LibertyMergeError) as exc:
+        liberty_merge.merge_liberty([a, b])
+    assert "time_unit" in str(exc.value)
+
+    c = _write(tmp_path, "groupC.lib", _colon_date_lib("C", max_trans="4000"))
+    with pytest.raises(liberty_merge.LibertyMergeError) as exc:
+        liberty_merge.merge_liberty([a, c])
+    msg = str(exc.value)
+    assert "default_max_transition" in msg and "320" in msg and "4000" in msg
+
+
+def test_unquoted_colon_dates_only_difference_merges(tmp_path):
+    a = _write(
+        tmp_path, "groupA.lib", _colon_date_lib("A", date="Fri Nov 27 23:17:09 2020")
+    )
+    b = _write(
+        tmp_path, "groupB.lib", _colon_date_lib("B", date="Mon Dec  7 13:53:54 2020")
+    )
+    text = _read(liberty_merge.merge_liberty([a, b]))
+    assert "cell (X_A)" in text and "cell (X_B)" in text
+    assert "13:53:54" not in text
+
+
+def test_header_of_only_ignored_attributes_is_refused(tmp_path):
+    """Statements present but nothing comparable parsed: refuse rather than
+    compare an empty field map against another empty one."""
+    only_ignored = (
+        'library (lib_{0}) {{\n  date : "d{0}";\n  revision : "1";\n'
+        "  cell (X_{0}) {{ area : 1; }}\n}}\n"
+    )
+    a = _write(tmp_path, "groupA.lib", only_ignored.format("A"))
+    b = _write(tmp_path, "groupB.lib", only_ignored.format("B"))
+    with pytest.raises(liberty_merge.LibertyMergeError) as exc:
+        liberty_merge.merge_liberty([a, b])
+    msg = str(exc.value)
+    assert "no comparable header field" in msg and "groupA.lib" in msg
+    assert "comment, date, revision" in msg
+
+
+def test_header_without_statements_still_merges(tmp_path):
+    """The empty-field-map guard needs statements to have been consumed: a
+    bare ``library (x) {`` opener has nothing to compare and is not an error."""
+    bare = "library (lib_{0}) {{\n  cell (X_{0}) {{ area : 1; }}\n}}\n"
+    a = _write(tmp_path, "groupA.lib", bare.format("A"))
+    b = _write(tmp_path, "groupB.lib", bare.format("B"))
+    text = _read(liberty_merge.merge_liberty([a, b]))
+    assert "cell (X_A)" in text and "cell (X_B)" in text
+
+
+def test_find_terminator_ignores_colons_strings_and_comments():
+    text = 'x : a: b "q;" /* ; */ // ;\n c ; tail'
+    assert liberty_merge._find_terminator(text, 0) == text.index("c ;") + 2
+    assert liberty_merge._find_terminator('"a\\";" ;', 0) == len('"a\\";" ;') - 1
+    assert liberty_merge._find_terminator("a ; b ;", 0) == 2
+    assert liberty_merge._find_terminator("a ; b ;", 3) == 6
+
+
+def test_find_terminator_unterminated_runs_to_end_of_text():
+    for text in ("a b", '"never closed ;', "a /* never closed ;", "a // never ;"):
+        assert liberty_merge._find_terminator(text, 0) == len(text)

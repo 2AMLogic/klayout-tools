@@ -105,7 +105,7 @@ def _collect(paths: list[str], texts: list[str]) -> tuple[str, list[str], list[s
     for path, text in zip(paths, texts, strict=True):
         file_header, body, cells = _split(path, text)
         stripped, file_templates = _extract_templates(file_header)
-        fields = _header_fields(stripped)
+        fields = _header_fields(path, stripped)
         if path is first_path:
             header, header_fields = file_header, fields
         else:
@@ -133,7 +133,7 @@ def _collect(paths: list[str], texts: list[str]) -> tuple[str, list[str], list[s
     return header, extra, bodies
 
 
-def _header_fields(header: str) -> dict[str, str]:
+def _header_fields(path: str, header: str) -> dict[str, str]:
     """Depth-1 fields of a template-stripped header, keyed by name.
 
     ``attr : value ;`` statements map to their normalised value (quoted
@@ -143,8 +143,14 @@ def _header_fields(header: str) -> dict[str, str]:
     :data:`_IGNORED_HEADER_ATTRS` are dropped; anything unrecognised is
     carried under :data:`_RESIDUE_KEY` so it still takes part in the
     comparison.
+
+    Raises :class:`LibertyMergeError` when the header has statements yet
+    yields no field at all (only ignored attributes, or text the parser
+    swallowed): an empty map would compare equal to every other empty map, so
+    the comparator has understood nothing and must refuse instead.
     """
     fields: dict[str, str] = {}
+    statements = 0
     cursor = depth = 0
     for kind, pos, end in _tokens(header):
         if pos < cursor:
@@ -161,8 +167,17 @@ def _header_fields(header: str) -> dict[str, str]:
             continue
         if cursor < pos:
             _add_residue(header[cursor:pos], fields)
-        cursor = _take_field(header, pos, end, cursor, fields)
+        taken = _take_field(header, pos, end, cursor, fields)
+        statements += taken != cursor
+        cursor = taken
     _add_residue(header[cursor:], fields)
+    if statements and not fields:
+        ignored = ", ".join(sorted(_IGNORED_HEADER_ATTRS))
+        raise LibertyMergeError(
+            f"cannot merge: no comparable header field found in '{path}' "
+            f"(only ignored {ignored} statements, or a header that could not "
+            "be parsed)"
+        )
     return fields
 
 
@@ -176,7 +191,9 @@ def _take_field(
     nxt, ch = _next_significant(header, end)
     n = len(header)
     if ch == ":":
-        semi = _find_matching(header, nxt, ":", ";")
+        # A terminator scan, not a bracket match: a second unquoted ':' in the
+        # value (``date : $Date: N $;``) must not look like a nested opener.
+        semi = _find_terminator(header, nxt + 1)
         if name not in _IGNORED_HEADER_ATTRS:
             fields[name] = _normalize_header(header[nxt + 1 : min(semi, n)])
         return min(semi + 1, n)
@@ -395,6 +412,34 @@ def _find_matching(text: str, start: int, open_ch: str, close_ch: str) -> int:
             if depth == 0:
                 return i
             i += 1
+        else:
+            i += 1
+    return n
+
+
+def _find_terminator(text: str, start: int) -> int:
+    """Index of the ``;`` ending the statement whose value begins at ``start``
+    (strings and comments skipped), or ``len(text)`` when it never ends.
+
+    Unlike :func:`_find_matching` this does not nest: a ``:`` inside the value
+    is ordinary text, so the first unquoted ``;`` always ends the statement.
+    """
+    i, n = start, len(text)
+    while i < n:
+        ch = text[i]
+        if ch == '"':
+            i += 1
+            while i < n and text[i] != '"':
+                i += 2 if text[i] == "\\" else 1
+            i += 1
+        elif text.startswith("/*", i):
+            stop = text.find("*/", i + 2)
+            i = n if stop < 0 else stop + 2
+        elif text.startswith("//", i):
+            stop = text.find("\n", i)
+            i = n if stop < 0 else stop
+        elif ch == ";":
+            return i
         else:
             i += 1
     return n
