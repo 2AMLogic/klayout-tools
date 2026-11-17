@@ -751,6 +751,18 @@ claim renders the new `reason` value `stale_artifact`, and a malformed one
 renders the existing `unanchored_evidence`. An envelope that makes no
 claim grades and renders exactly as before. No `schema_version` bump.
 
+Issue #5640 adds the item-1 coverage floor to the manifest grader: an
+item-1 `generic` citation whose envelope enumerates at least one `present`
+file in `attestation.checks[]` but declares no `provenance.input.paths`
+(the pre-0.9.0 producer's inventory-only binding) renders the new `reason`
+value `provenance_narrower_than_attested` with `detail` naming the breadth
+gap (`missing`, `attested_members`, `bound_paths`). Post-#4764 envelopes,
+hand-written envelopes without an `attestation` block, attestations with no
+`present` check, and items 2, 8, 9 and 10 (single-artifact binding by
+design) are unaffected. A new value in the existing `reason` enum, additive
+like #2718's: no `schema_version` bump. See
+[`docs/cli/signoff.md`](cli/signoff.md)'s "Item 1's coverage floor".
+
 Issue #3743 adds three additive, optional fields (no `schema_version`
 bump; absent they change nothing): `provenance.regeneration.hash_kind`
 (`"bytes"` default, or `"geometry"` to compare `regenerated_hash` with the

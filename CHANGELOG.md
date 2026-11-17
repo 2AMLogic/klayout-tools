@@ -14,6 +14,20 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Changed** (#5640, grading rule — new `signoff --manifest` reason): an
+  item-1 envelope that enumerates attested members but binds only its
+  inventory (the pre-0.9.0 producer's `provenance.input` shape, no
+  `provenance.input.paths`) now grades `unmet`/
+  `provenance_narrower_than_attested` instead of `met`, with `detail`
+  naming the breadth gap (`missing`, `attested_members`, `bound_paths`).
+  The floor is derived from the envelope's own `attestation.checks[]`, so
+  #4764's `paths`-binding envelopes are unaffected, as are hand-written
+  envelopes without an `attestation` block, attestations listing no
+  `present` check, and items 2, 8, 9 and 10 (single-artifact binding by
+  design). **A committed pre-0.9.0 item-1 envelope flips `met` -> `unmet`;
+  the remedy is one re-attest with klt >= 0.9.0 plus the manifest re-pin.**
+  No `schema_version` bump: a new value in the existing `reason` enum, the
+  same additive class as #2718's `unanchored_evidence`/`wrong_item`.
 - **Added** (#5875): `klt signoff --attest N --inventory F --check ENV` now
   reports an additive `build_drift` object (same shape as envelope
   aggregation, #4223) and a `build_drift: <state>` text line; the opt-in

@@ -1345,6 +1345,7 @@ or item-2 attestation that makes a regeneration claim:
 | The manifest entry pins the same `content_hash` | manifest | not pinned: `unanchored_evidence`; pinned but different: `stale_evidence` |
 | The named artifact re-hashes to that value from the grading context (`input_verified: true`) | filesystem | changed since the envelope was written: `stale_evidence`; not found or not readable here: `unverifiable_provenance` — including a `scope: "repo"` path over a `.git`-less copy of the tree, which [`--repo-root`](#grading-outside-a-git-checkout---repo-root) exists to name a root for |
 | **Items 1 and 2, only when claimed** (issue #2887): `provenance.regeneration.regenerated_hash` equals the hash the artifact re-hashed to | envelope | differs: `stale_artifact`; malformed block: `unanchored_evidence`. See "Items 1 and 2: attesting that the artifact was regenerated" below |
+| **Item 1, attested envelopes only** (issue #5640): the envelope binds the set its own `attestation.checks[]` enumerates — `provenance.input.paths` is present whenever a `present` check names a file | envelope | binds its inventory alone (the pre-0.9.0 shape, no `paths` key): `provenance_narrower_than_attested`, with `detail` naming `attested_members` and `bound_paths` |
 
 **Which condition failed** (issue #5124). An `unanchored_evidence` binding
 refusal carries `detail.missing`, a list drawn from the fixed vocabulary
@@ -1354,6 +1355,24 @@ carries `manifest_entry` — `{"file": "<path>", "content_hash": "sha256:<hex>"}
 the entry shape to cite, using the hash of the resolved artifact. Additive:
 `wrong_item` and every other reason keep their detail shape, and a `met` item
 gains no `detail`.
+
+**Item 1's coverage floor** (issue #5640). `klt signoff --attest 1` binds
+every inventory member (`provenance.input.paths`, below), but a pre-0.9.0
+producer bound the inventory file alone — and the gap is invisible in a
+`met` row, because the inventory is still pinned and its hash still matches.
+The grader therefore reads the breadth off the envelope itself: an item-1
+envelope whose `attestation.checks[]` enumerates at least one `present`
+file while `provenance.input` declares no `paths` key grades
+`unmet`/`provenance_narrower_than_attested`. The envelope proves, in its
+own bytes, that it knew about members it pinned nothing for. `detail`
+carries `missing: ["provenance.input.paths"]`, `attested_members` (how many
+files the envelope enumerated) and `bound_paths` (`0`). The remedy is one
+re-attest with klt ≥ 0.9.0 (`klt signoff --attest 1 --inventory ... -o ...`)
+plus the manifest re-pin. Hand-written envelopes without an `attestation`
+block, and attestations whose `checks[]` list no `present` file, enumerate
+nothing and are not refused; a present-but-malformed `paths` key keeps its
+own `unanchored_evidence` refusal (below); and items 2, 8, 9 and 10 bind a
+single artifact by design, so the floor never applies to them.
 
 `klt signoff --attest` (both `--inventory` and `--input`) adds a top-level
 `manifest_entry` (`{"file": <--output or null>, "content_hash": "sha256:<hex>"}`)
@@ -1429,6 +1448,11 @@ Rejected examples:
   `unmet`/`stale_evidence`.
 - A bare characterization-style `generic` envelope with none of the binding:
   `unmet`/`unanchored_evidence`.
+- An item-1 attested envelope whose `provenance.input` binds only the
+  inventory (the pre-0.9.0 shape, no `paths`) while its
+  `attestation.checks[]` enumerate sources and derived files:
+  `unmet`/`provenance_narrower_than_attested` — re-attest with klt ≥ 0.9.0
+  and re-pin (issue #5640).
 
 Command-backed evidence follows the same rules. The binding is read from
 the command's stdout envelope, and a relative `provenance.input.path` is
@@ -1767,6 +1791,12 @@ member is named in `detail.artifact_binding.members`) without running
 > **Pin change.** Existing manifests citing an item-1 envelope must re-pin the
 > evidence `content_hash` to the new `provenance.input.content_hash`; the old
 > inventory-only hash now grades `stale_evidence`.
+>
+> **Pre-0.9.0 envelopes.** An item-1 envelope produced before this change
+> (klt < 0.9.0) binds its inventory alone while still enumerating the same
+> members in its `attestation.checks[]`; `--manifest` grades it
+> `unmet`/`provenance_narrower_than_attested` (issue #5640). The remedy is
+> the same re-attest the pin change above calls for.
 
 #### Item 10: what belongs in a hygiene inventory, and who re-attests (issue #4839)
 

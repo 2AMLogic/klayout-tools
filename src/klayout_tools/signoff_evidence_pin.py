@@ -92,6 +92,16 @@ MISSING_T1_ITEM = "t1_item"
 MISSING_INPUT_PATH = "provenance.input.path"
 MISSING_CONTENT_HASH = "manifest content_hash"
 
+#: Refusal for an item-1 envelope that enumerates attested members it does
+#: not bind (issue #5640): a pre-0.9.0 producer wrote only the
+#: inventory-file binding, so the envelope's own ``attestation.checks[]``
+#: prove it knew about sources and derived files it pinned nothing for.
+REASON_PROVENANCE_NARROWER = "provenance_narrower_than_attested"
+
+#: ``detail.missing`` entry for that refusal: the binding key a current
+#: ``klt signoff --attest 1`` envelope carries.
+MISSING_PROVENANCE_PATHS = "provenance.input.paths"
+
 
 def generic_binding_check(
     item_id: int | None,
@@ -103,9 +113,12 @@ def generic_binding_check(
     """``(refusal, missing)`` for a generic citation bound to T1 ``item_id``
     (issues #2718, #5124). ``refusal`` is ``"wrong_item"`` for a declared
     ``t1_item`` naming another item, ``"unanchored_evidence"`` when a field
-    is missing, else ``None``. ``missing`` names the absent fields: a
-    ``t1_item`` absent (anchored item only) or not an integer,
-    ``provenance.input.path`` unusable, and no manifest ``content_hash``."""
+    is missing, ``REASON_PROVENANCE_NARROWER`` for an item-1 envelope that
+    enumerates attested members it does not bind (issue #5640), else
+    ``None``. ``missing`` names the absent fields: a ``t1_item`` absent
+    (anchored item only) or not an integer, ``provenance.input.path``
+    unusable, no manifest ``content_hash``, or
+    ``MISSING_PROVENANCE_PATHS`` for the narrow-binding refusal."""
     declared = envelope.get("t1_item")
     if is_int(declared) and declared != item_id:
         return "wrong_item", []
@@ -118,7 +131,46 @@ def generic_binding_check(
         missing.append(MISSING_INPUT_PATH)
     if anchored and not isinstance(spec.get("content_hash"), str):
         missing.append(MISSING_CONTENT_HASH)
+    if not missing and item_id == 1 and provenance_narrowing(envelope) is not None:
+        return REASON_PROVENANCE_NARROWER, [MISSING_PROVENANCE_PATHS]
     return ("unanchored_evidence" if missing else None), missing
+
+
+def attested_present_members(envelope: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """The ``attestation.checks[]`` entries recording a ``present`` file with
+    a usable path -- the members a ``klt signoff --attest`` envelope
+    enumerated (the set issue #4197 re-hashes, counted for #5640's breadth
+    floor). ``[]`` for an envelope with no ``attestation.checks[]`` or none
+    that enumerates a file."""
+    attestation = envelope.get("attestation")
+    checks = attestation.get("checks") if isinstance(attestation, Mapping) else None
+    if not isinstance(checks, list):
+        return []
+    return [
+        check
+        for check in checks
+        if isinstance(check, Mapping)
+        and check.get("check") == "present"
+        and isinstance(check.get("path"), str)
+        and check["path"]
+    ]
+
+
+def provenance_narrowing(envelope: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The coverage loss an envelope proves about itself (issue #5640), or
+    ``None`` when it does not narrow: ``{"attested_members", "bound_paths"}``
+    when it enumerates ``present`` checks but declares no
+    ``provenance.input.paths`` set -- the pre-0.9.0 producer's shape, which
+    binds its inventory alone. A present-but-malformed ``paths`` key is not
+    narrowing: the binding is there and its own refusal applies."""
+    present = attested_present_members(envelope)
+    if not present:
+        return None
+    provenance = envelope.get("provenance")
+    input_block = provenance.get("input") if isinstance(provenance, Mapping) else None
+    if isinstance(input_block, Mapping) and "paths" in input_block:
+        return None
+    return {"attested_members": len(present), "bound_paths": 0}
 
 
 def unanchored_detail(
@@ -126,10 +178,15 @@ def unanchored_detail(
 ) -> dict[str, Any]:
     """``detail`` for a binding refusal: ``{}`` when nothing is missing, else
     ``missing`` plus, when the pin is what is missing, the manifest entry
-    shape to cite."""
+    shape to cite, and, for the narrow-binding refusal, the breadth counts
+    the record states the loss with (issue #5640)."""
     if not missing:
         return {}
     detail: dict[str, Any] = {"missing": list(missing)}
+    if MISSING_PROVENANCE_PATHS in missing:
+        counts = provenance_narrowing(resolution.get("envelope") or {})
+        if counts is not None:
+            detail.update(counts)
     live_hash = resolution["content_hash"]
     if MISSING_CONTENT_HASH in missing and live_hash is not None:
         detail["manifest_entry"] = {
