@@ -29,6 +29,18 @@ not `klt --version`, if you need to detect this kind of drift. See
   that declares `inputs` reports `provenance.input.paths` instead of
   `provenance.input.path`, so a manifest citing it must re-pin. No grader
   change. Docs: `docs/cli/signoff.md`, "Pinning the generator's inputs".
+- **`klt gen-compose` label-derived-port landing search (`ports_from_labels`
+  `access`) rejects a same-net notch (#5608)**: a landing pad wider than the run
+  it lands on protrudes past it, and the merged polygon's concave gap —
+  net-agnostic and intra-polygon to the deck's `space` rule — is a real
+  `met*.space.*` finding the search used to certify as legal. Every pad layer of
+  the ladder is now also notch-checked at its own pad size and spacing
+  (`self_notch`, a new category in the no-legal-landing error's per-category
+  counts), so the search can no longer certify a point `compose()`'s own #1520
+  self-notch check (or signoff DRC) later rejects. `derived_ports[].landing`
+  gains an additive `pad_sides_um` map (`"layer/datatype"` -> pad side
+  certified) so a caller drawing the ladder itself draws exactly the checked
+  footprint. `schema_version` is unchanged.
 - **`klt env-provenance lint-envelope --json-stream` lints concatenated JSON
   document streams** (#5887, 2026-11-17): each FILE argument is parsed as a
   single JSON document, so a file holding several whitespace-separated
