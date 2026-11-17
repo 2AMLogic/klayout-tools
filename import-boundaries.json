@@ -869,6 +869,7 @@
         "klayout_tools.sim_tian",
         "klayout_tools.sim_transfer",
         "klayout_tools.sim_transfer_meas",
+        "klayout_tools.sim_transient_noise",
         "klayout_tools.sim_twoport",
         "klayout_tools.sim_validate",
         "klayout_tools.sim_waveform_opts",

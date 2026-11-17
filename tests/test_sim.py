@@ -5370,7 +5370,7 @@ def test_noise_sources_in_text_covers_v_i_subckt_continuation_case():
         "Vplain d 0 DC 1 ; trnoise(1 1 1 1)\n"
         "R1 a b 1k\n"
     )
-    assert sim._noise_sources_in_text(text) == [
+    assert sim.sim_tn._noise_sources_in_text(text) == [
         ("vn1", "trnoise"),
         ("iq", "trrandom"),
         ("vin", "trnoise"),
@@ -5418,7 +5418,7 @@ def test_run_sim_tran_discloses_transient_noise_coverage(tmp_path, monkeypatch):
     _stub_subprocess_run(monkeypatch)
 
     env = sim.run_sim(str(request))["environment"]
-
+    del env["transient_noise"]["reproducibility_note"]  # test_sim_transient_noise.py
     assert env["transient_noise"] == {
         "engine": "ngspice",
         "sources": [
