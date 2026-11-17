@@ -173,7 +173,7 @@
     },
     {
       "path": "src/klayout_tools/artifact_store.py",
-      "lines": 1025
+      "lines": 1002
     },
     {
       "path": "src/klayout_tools/characterize.py",

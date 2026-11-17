@@ -88,6 +88,7 @@ from urllib.parse import SplitResult, urlsplit
 
 from . import build_identity
 from ._jsonnum import is_int
+from .artifact_errors import ArtifactError, _refusal, _unsupported_delete
 
 #: Environment variable naming the broker's base URL (``http(s)://host:port``).
 ENV_BROKER = "KLT_ARTIFACT_BROKER"
@@ -135,21 +136,6 @@ URI_SCHEME = "artifact"
 _URI_RE = re.compile(r"^artifact:([^/\s]\S*)$")
 _S3_CODE_RE = re.compile(r"<Code>([A-Za-z0-9_.-]{1,64})</Code>")
 _REMOTE_RE = re.compile(r"[:/]([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+?)(?:\.git)?/?$")
-
-
-class ArtifactError(Exception):
-    """A failure with a machine-readable ``code`` and optional ``details``.
-
-    Messages never contain a presigned URL: every place that builds one
-    describes the failure (status, error code), not the request.
-    """
-
-    def __init__(
-        self, message: str, code: str, details: dict[str, Any] | None = None
-    ) -> None:
-        super().__init__(message)
-        self.code = code
-        self.details = details or {}
 
 
 @dataclass(frozen=True)
@@ -304,58 +290,6 @@ def _rate_limited(
         details["retry_after_s"] = retry_after
     return ArtifactError(
         f"{refusal} (gave up after {attempts} attempts)", "broker_rate_limited", details
-    )
-
-
-def _refusal(op: str, status: int, raw: bytes) -> ArtifactError:
-    """The broker's ``{"error", "message"}`` refusal as an ArtifactError. A
-    refusal never carries a URL, so its text is safe to surface verbatim."""
-    error: str = f"http_{status}"
-    message = ""
-    try:
-        payload = json.loads(raw)
-    except ValueError:
-        payload = None
-    if isinstance(payload, dict):
-        if isinstance(payload.get("error"), str):
-            error = payload["error"]
-        if isinstance(payload.get("message"), str):
-            message = payload["message"]
-    else:
-        message = raw[:200].decode("utf-8", "replace").strip()
-    return ArtifactError(
-        f"artifact broker refused {op} (HTTP {status}): {error}: {message}",
-        "broker_refused",
-        {"broker_status": status, "broker_error": error, "broker_message": message},
-    )
-
-
-#: Statuses that mean the broker has no ``/v1/delete`` route at all (vs. an
-#: authorization refusal or fleet trouble): route not found, method not
-#: allowed, or not implemented.
-UNIMPLEMENTED_DELETE_STATUSES = (404, 405, 501)
-
-
-def _unsupported_delete(exc: ArtifactError) -> ArtifactError:
-    """Re-raise a route-level ``delete`` refusal as ``unsupported_operation``.
-
-    ``stat`` already answered ``exists: true`` for the same object, so a 404
-    on the follow-up ``delete`` is the route being missing, not the object.
-    The refusal's ``broker_*`` details pass through so a caller can still
-    tell the broker exactly what it answered.
-    """
-    if (
-        exc.code != "broker_refused"
-        or exc.details.get("broker_status") not in UNIMPLEMENTED_DELETE_STATUSES
-    ):
-        return exc
-    status = exc.details["broker_status"]
-    return ArtifactError(
-        "the artifact broker does not implement the delete op "
-        f"(HTTP {status}: {exc.details.get('broker_error')}: "
-        f"{exc.details.get('broker_message')}); nothing was deleted",
-        "unsupported_operation",
-        dict(exc.details),
     )
 
 

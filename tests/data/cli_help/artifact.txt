@@ -69,9 +69,7 @@ REF is a sha256 (under --repo) or MANIFEST[#SELECTOR], as for `get`. Without
 --yes only `stat` is called and nothing is deleted. Each --keep MANIFEST
 protects the objects it names: a referenced target refuses the whole batch
 unless --force-referenced. An absent object is success. The broker must
-implement POST /v1/delete: a broker without it fails with error.code
-unsupported_operation (exit 1) and nothing is deleted; whether the caller may
-delete stays the broker's call.
+implement POST /v1/delete (else unsupported_operation).
 
 positional arguments:
   REF sha256 or MANIFEST[#SELECTOR]
