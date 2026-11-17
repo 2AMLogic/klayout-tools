@@ -1803,8 +1803,7 @@ def _grade_power_delivery(
     if by_kind is None:
         return "unmet", reason, None, {}
 
-    erc = by_kind.get("erc")
-    lvs = by_kind.get("lvs")
+    erc, lvs = by_kind.get("erc"), by_kind.get("lvs")
     if erc is None or lvs is None:
         return _missing_parts_verdict(by_kind)
 
