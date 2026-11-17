@@ -14,6 +14,20 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`openroad` Docker wrapper keeps `/tmp` mounted when `$TMPDIR` differs**
+  (issue #5878, 2026-11-17): the wrapper `scripts/install-openroad-docker.sh`
+  writes mounted only `${TMPDIR:-/tmp}`, so while `$TMPDIR` was unset (or
+  `/tmp`) that mount incidentally made `/tmp` visible as a whole — but the
+  moment a caller exported any other `TMPDIR` (this fleet's daemon exports
+  one for every child process), `/tmp` stopped being mounted and an input
+  under `/tmp` failed inside the container with an opaque
+  `[ERROR STA-0340] cannot open '<path>'` for a file the caller could read
+  on the host. The wrapper now also mounts `/tmp:/tmp` whenever `$TMPDIR`
+  resolves to anything else (skipped when it equals `/tmp`, including a
+  trailing-slash form like `/tmp/`, since docker rejects a duplicate mount
+  point). Hosts with an older wrapper should re-run
+  `scripts/install-openroad-docker.sh` to upgrade it in place.
+
 - **`klt sim --fail-fast-probe` reads the same `.spiceinit` as the corners it
   screens** (#6047, 2026-11-17): `_run_corner` pins the thread count by writing
   a run-directory `.spiceinit`, which *replaces* `$HOME/.spiceinit`, but the

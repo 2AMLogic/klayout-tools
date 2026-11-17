@@ -131,9 +131,11 @@ nothing about the real cause (issue #1868). `klt place-and-route` itself
 now recognizes this exact failure shape — a path `openroad` reports it
 cannot read that this process can itself still read — and appends a hint
 about mount coverage rather than passing the raw Tcl error through
-unexplained. **Rule (issue #4191):** the container wrapper mounts only `$PWD`,
-`$PDK_ROOT` and `$TMPDIR`, so every input the request references (netlist,
-macro LEF, `--abstract-cell-lef`) must live under one of those. When the
+unexplained. **Rule (issue #4191):** the container wrapper mounts `$PWD`,
+`$PDK_ROOT` and `$TMPDIR` (plus `/tmp` itself whenever `$TMPDIR` is set to
+something else — issue #5878), so every input the request references
+(netlist, macro LEF, `--abstract-cell-lef`) must live under one of those.
+When the
 unreadable path is outside the invocation directory, the hint names that
 path and says to run `klt place-and-route` from a common ancestor of the
 request and its inputs. [`scripts/install-openroad-docker.sh`](../../scripts/install-openroad-docker.sh)'s
