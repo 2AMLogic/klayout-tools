@@ -113,7 +113,6 @@ Exit codes (see ``docs/cli/signoff.md`` for the full table):
 from __future__ import annotations
 
 import argparse
-import os
 from typing import Any
 
 from ..design_evidence_tiers import DesignEvidenceTiersError
@@ -138,12 +137,15 @@ from ..signoff_attest_live import attach_live_fields
 from ..signoff_attest_text import attestation_check_line as _attestation_check_line
 from ..signoff_attest_text import check_label, skip_lines
 from ..signoff_attest_text import print_attestation_text as _print_attestation_text
+from ..signoff_coverage_disclosure import format_coverage as _format_coverage
+from ..signoff_coverage_disclosure import format_undisclosed
 from ..signoff_generator_batch import (
     GeneratorApprovalError,
     GeneratorExecution,
     resolve_execution,
 )
 from ..signoff_output import non_attest_problem, write_output_or_message
+from ..signoff_output import repo_root_problem
 from ..signoff_require_build import require_grading_ruleset_problem
 from .color import Palette, resolve_palette
 from .output import emit_error, emit_success, render_rerun_drift
@@ -168,14 +170,15 @@ def run(args: argparse.Namespace) -> int:
     fleet_source = getattr(args, "fleet", None)
     # Issue #5847: assert the grading build before *anything* runs -- the
     # guard also refuses the flag in the modes that produce no grade, so it
-    # must fire before --attest dispatch and --describe-grader too.
-    required = getattr(args, "require_grading_ruleset", None)
-    if required is not None:
-        problem = require_grading_ruleset_problem(
-            required, manifest_source, fleet_source
-        )
-        if problem:
-            return emit_error("signoff", problem, args.format)
+    # must fire before --attest dispatch and --describe-grader too. The
+    # absent-flag case is the helper's, not a branch here.
+    problem = require_grading_ruleset_problem(
+        getattr(args, "require_grading_ruleset", None),
+        manifest_source,
+        fleet_source,
+    )
+    if problem:
+        return emit_error("signoff", problem, args.format)
     attest_result = _maybe_run_attest(args, manifest_source, fleet_source)
     if attest_result is not None:
         return attest_result
@@ -203,22 +206,9 @@ def run(args: argparse.Namespace) -> int:
             args.format,
         )
     repo_root = getattr(args, "repo_root", None)
-    if repo_root is not None and not (manifest_source or fleet_source):
-        return emit_error(
-            "signoff",
-            "--repo-root only applies to --manifest/--fleet (envelope "
-            "aggregation re-hashes no input artifacts)",
-            args.format,
-        )
-    if repo_root is not None and not os.path.isdir(repo_root):
-        # Issue #2878: an explicit root that is not an existing directory is
-        # refused, never silently ignored -- grading that *looks* right while
-        # resolving against nothing would be worse than the error.
-        return emit_error(
-            "signoff",
-            f"--repo-root '{repo_root}' is not an existing directory",
-            args.format,
-        )
+    problem = repo_root_problem(repo_root, manifest_source, fleet_source)
+    if problem:
+        return emit_error("signoff", problem, args.format)
     if fleet_source:
         return _run_fleet_report(args, fleet_source, repo_root=repo_root)
     if manifest_source:
@@ -793,33 +783,6 @@ def _print_power_delivery(citation: dict) -> None:
         )
 
 
-def _format_coverage(coverage: dict) -> str:
-    """One line summarising a `drc` citation's three disclosed `coverage`
-    fields (issue #2002): each field's entry count, plus the first few
-    entries by name.
-
-    Counts first so a non-zero gap is visible without reading the names, and
-    every field is always shown -- including a `0` -- because "this deck
-    skipped no rules" is exactly the statement item 3 asks a claim to make,
-    and it must not be indistinguishable from a field that went unreported
-    (an envelope with no `coverage` block at all prints no coverage line at
-    all; see the call site).
-    """
-    parts = []
-    for field in (
-        "layers_in_stream_without_rules",
-        "rules_skipped",
-        "deck_scope",
-    ):
-        entries = coverage.get(field) or []
-        shown = ", ".join(str(entry) for entry in entries[:_COVERAGE_PREVIEW])
-        if len(entries) > _COVERAGE_PREVIEW:
-            shown += f", +{len(entries) - _COVERAGE_PREVIEW} more"
-        suffix = f" ({shown})" if entries else ""
-        parts.append(f"{field}={len(entries)}{suffix}")
-    return ", ".join(parts)
-
-
 def _format_body_bias(body_bias: dict) -> str:
     """One line summarising a `pex` citation's `body_bias` statement (issue
     #1983): the verdict, and -- when it is `"unbiased"` -- how many devices
@@ -949,6 +912,40 @@ def _print_foundry_cell_exceptions(citation: dict) -> None:
         )
 
 
+def _print_cite_line(citation: dict) -> None:
+    """The ``cite:`` line naming what an item's evidence was: command-backed
+    evidence (issue #825) has no static file, so the executed command is
+    shown instead; file-backed evidence (issue #722) has no command, so the
+    evidence file is shown, as before."""
+    source = citation["file"] if citation["file"] is not None else citation["command"]
+    print(
+        f"        cite: {source} "
+        f"(kind={citation['kind']}, status={citation['check_status']}, "
+        f"content_hash={citation['content_hash']}, "
+        f"exit_status={citation['exit_status']})"
+    )
+
+
+def _print_coverage_undisclosed(item: dict) -> None:
+    """Issue #5789: an item 3 refused under ``require_coverage_disclosure``
+    prints what a ``met`` one would have -- the ``cite:`` line and its
+    ``coverage:`` statement, read from ``detail.cited_evidence`` (``citation``
+    itself is documented as present only on a ``met`` item) -- then the
+    entries the claim left undisclosed, beside the ``coverage:`` line they
+    qualify."""
+    detail = item.get("detail") or {}
+    refusal = detail.get("coverage_undisclosed")
+    if not refusal:
+        return
+    cited = detail.get("cited_evidence") or {}
+    if cited:
+        _print_cite_line(cited)
+        coverage = cited.get("coverage")
+        if coverage:
+            print(f"        coverage: {_format_coverage(coverage)}")
+    print(f"        coverage undisclosed: {format_undisclosed(refusal)}")
+
+
 def _print_tier_report_text(result: dict, palette: Palette) -> None:
     block = result["block"] or "(unnamed block)"
     print(f"block: {block}  kind: {result['kind']}")
@@ -994,21 +991,7 @@ def _print_tier_report_text(result: dict, palette: Palette) -> None:
         _print_not_applicable(item)
         citation = item["citation"]
         if citation:
-            # Command-backed evidence (issue #825) has no static file --
-            # show the executed command instead; file-backed evidence
-            # (issue #722) has no command -- show the evidence file, as
-            # before.
-            source = (
-                citation["file"]
-                if citation["file"] is not None
-                else citation["command"]
-            )
-            print(
-                f"        cite: {source} "
-                f"(kind={citation['kind']}, status={citation['check_status']}, "
-                f"content_hash={citation['content_hash']}, "
-                f"exit_status={citation['exit_status']})"
-            )
+            _print_cite_line(citation)
             # Issue #2196: whether that `content_hash` was checked against
             # the input artifact itself or only against the envelope's own
             # claim about it. Shown beside the hash it qualifies, because a
@@ -1061,6 +1044,9 @@ def _print_tier_report_text(result: dict, palette: Palette) -> None:
             # from "a check ran and did not pass" (e.g. check_failed) even
             # in the terminal-first text rendering, not just the JSON.
             print(f"        {palette.red}reason: {item['reason']}{palette.reset}")
+            # Issue #5789: an item 3 refused under the coverage ratchet
+            # names exactly which entries it left undisclosed.
+            _print_coverage_undisclosed(item)
             # Issue #2865: a refused `not_applicable` names the offending row.
             row = (item.get("detail") or {}).get("row")
             if row:

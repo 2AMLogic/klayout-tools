@@ -53,10 +53,12 @@ def add_require_grading_ruleset_argument(parser: Any) -> None:
 
 
 def require_grading_ruleset_problem(
-    required: str, manifest_source: str | None, fleet_source: str | None
+    required: str | None, manifest_source: str | None, fleet_source: str | None
 ) -> str | None:
     """The refusal message for ``--require-grading-ruleset``, or ``None``
-    to proceed exactly as if the flag had not been given.
+    to proceed exactly as if the flag had not been given -- including
+    when ``required`` itself is ``None`` (flag absent), so the caller is
+    a single call with no guard of its own.
 
     Mode is judged first: the flag only applies to a ``--manifest``/
     ``--fleet`` render or ``--check`` (envelope aggregation, ``--attest``
@@ -67,6 +69,8 @@ def require_grading_ruleset_problem(
     (:func:`grading_ruleset_id` returns ``None`` only then); and a
     differing id is refused with both ids in the message.
     """
+    if required is None:
+        return None
     if not (manifest_source or fleet_source):
         return (
             "--require-grading-ruleset only applies to --manifest/--fleet "
