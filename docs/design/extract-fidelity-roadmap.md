@@ -174,7 +174,7 @@ of this table; `docs/cli/extract.md` → "Parasitic model scope"):
 |---|---|---|
 | Net-to-substrate **area** capacitance | ✅ modelled, per conductor layer | `model.capacitance` |
 | Net-to-substrate **perimeter/fringe** capacitance | ✅ modelled, isolated-edge coefficient applied to the net's whole perimeter | `model.capacitance` |
-| **Lateral** net-to-net coupling (same layer, sidewall) | ⚠️ **partial** (#976) — computed only for a same-layer pair naming a declared `--critical-net` net, and only on a deck curating `metal_sidewalls` (sky130 today); exactly zero for every other pair | `model.coupling` |
+| **Lateral** net-to-net coupling (same layer, sidewall) | ⚠️ **partial** (#976) — computed only for a same-layer pair naming a declared `--critical-net` net, and only on a deck curating `metal_sidewalls` (sky130 and gf180mcu today, #5742); exactly zero for every other pair | `model.coupling` |
 | **Vertical** net-to-net coupling (crossover / plate overlap on adjacent layers) | ✅ **modelled** (#760) — overlap area charged between the two distinct nets and deducted from both nets' own ground area term, unconditionally under `--parasitics` wherever the deck curates `metal_overlaps` | `model.coupling` |
 | **Fringe shielding** (an edge facing a neighbour does not also see full substrate fringe) | ❌ not modelled — full substrate fringe charged regardless of neighbours | implied by `model.capacitance` |
 | Distributed RC (per-segment ladder) | ⚠️ **partial** (#977) — `--distributed-rc` (requires `--critical-net`) emits a multi-segment ladder for a declared critical net, ordered by terminal position rather than by decomposed routed geometry; every other net keeps one lumped R, star-apportioned | `model.resistance` |
@@ -215,7 +215,7 @@ of the five (#760, #976), with the scoping each carries given in the table:
 |---|---|---|---|
 | `defaultareacap` | area cap to the substrate plane | `allm1 metal1 25.78` aF/µm² | ✅ `cap_area_ff_um2` |
 | `defaultperimeter` | fringe cap from an edge to the substrate plane | `allm1 metal1 40.57` aF/µm | ✅ `cap_perim_ff_um` |
-| `defaultsidewall` | **lateral** coupling between same-plane conductors | `allm1 metal1 44 0.25` | ⚠️ **first parameter only**, as `metal_sidewalls` (#976) — sky130 deck only, and only for `--critical-net` pairs; the second parameter is still unread (see the caution below) |
+| `defaultsidewall` | **lateral** coupling between same-plane conductors | `allm1 metal1 44 0.25` | ⚠️ **first parameter only**, as `metal_sidewalls` (#976) — sky130 and gf180mcu decks (#5742), and only for `--critical-net` pairs; the second parameter is still unread (see the caution below) |
 | `defaultoverlap` | **vertical** plate coupling to a specific lower plane | `allm1 metal1 allli locali 114.20` aF/µm² | ✅ `metal_overlaps` (#760) — read unconditionally under `--parasitics` |
 | `defaultsideoverlap` | fringe from an edge down onto a specific lower plane | `allm1 metal1 allli locali 59.50` aF/µm | ❌ — Stage 2c, not started |
 
@@ -242,6 +242,31 @@ number (`0.25` for met1, `0.3` for met2, `0.14` for li1) is a
 distance/scaling parameter whose exact magic semantics must be read out of
 magic's own tech-file manual before transcription. This roadmap deliberately
 does not assume it, and Stage 2b's cost estimate includes reading it.
+
+#### gf180mcu transcription and 2× lookback rationale (#5742)
+
+The gf180mcu `metal_sidewalls` table (in `decks/gf180mcu_parasitics.py`)
+is transcribed from the resolved, pre-built `gf180mcuD.tech` for the
+pinned PDK commit `f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7` — the same
+source and nominal `variants ()` corner block the deck's `metal_overlaps`
+entry is cited from — with every row re-checked character-for-character
+against the generic `gf180mcu.tech` source at that same commit and against
+the `c6d73a35f524070e85faff4a6a9eef49553ebc2b` resolved install: the
+`defaultsidewall allm*` rows are unconditional across the #3540 re-pin.
+Metal5's entry is the `#ifdef METALS5` row (`114.86`), not the
+`#ifdef METALS6` alternative (`31.121`) — this deck's stack is the
+5-level one (`EXTRACTION_DECK.metals`). Only the first parameter is
+transcribed (aF/µm ÷ 1000 → fF/µm, the `cap_perim_ff_um` convention); the
+second parameter remains the open question above.
+
+The deck's `metal_sidewall_lookback_um` uses **2×** each level's own
+same-layer minimum-spacing rule — `metal1.space.1` 0.23 µm → 0.46 µm,
+`metal2-5.space.1` 0.28 µm → 0.56 µm — sky130's convention, in preference
+to magic's unread second parameter. 2× the bare minimum rather than the
+minimum itself because a `separation_check(d)` only reports edges *closer
+than* `d`, so a lookback of exactly the legal minimum could only ever
+fire on a DRC-illegal layout; the measured `gcd` corpus evidence behind
+the 2× choice is recorded on sky130's own table (`decks/sky130.py`).
 
 ### 1.5 What the measurements say the model *is* **[REPO-RUN]**
 
