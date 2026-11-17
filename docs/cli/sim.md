@@ -1055,7 +1055,13 @@ shards and merges them exactly as the blocking sharded run does. The request
 must be the one submitted (a `request_sha256` or fingerprint mismatch is
 `error.code: "resume_fingerprint_mismatch"`). `--attach` only re-attaches: a
 shard whose job is gone is reported as lost, other shards are still reported,
-and nothing is resubmitted.
+and nothing is resubmitted. A map written by a `--hosts N` / `remote.hosts: N`
+run attaches the same way ([#5777](https://github.com/2AMLogic/klayout-tools/issues/5777)):
+pass the request (and `--hosts`, if it was given at submit) the shards were
+submitted from; the shard count is read from the map itself, so `--hosts` is not
+compared on attach, while a changed `remote.hosts` in the request file is a
+`request_sha256` mismatch naming `remote`. `--collect-partial` takes such a
+map too.
 
 **Worked example: a 135-unit grid** ([#4878](https://github.com/2AMLogic/klayout-tools/issues/4878)).
 A job is capped by the whole-job ceiling (`max_job_seconds`, default `3600`
@@ -1910,7 +1916,9 @@ which of those changed is not recoverable). A shard lost at the collect stage
 ends its `lost_shard` message with `[remote job <id>: finished|failed|timeout|
 running|unknown]`, the job's `status.json` state at that moment: `finished`
 means re-attaching can collect it, `unknown` means no status was readable.
-`--attach` still takes a single job id; recover a split request with
+A bare `--attach <job_id>` still takes a single job (`hosts = 1`) and is
+refused for `hosts != 1`; re-attach a sharded run (`--hosts N` or a
+`--max-units-per-job` split) with its `batch-shards.json`, or recover it with
 `--resume`.
 
 The dispatch-time fail-fast probe is skipped for `batch` —
@@ -1989,10 +1997,15 @@ runner silently drops them ([#4212](https://github.com/2AMLogic/klayout-tools/is
 | `corners.params` | 0.8.0 |
 | `corners.units` | 0.8.0 |
 | `corners.temperature_param` | 0.8.0 |
+| `corners.options` | 0.8.0 |
 | `options.ngspice_init` | 0.7.0 |
 | `options.ngspice_options` | 0.8.0 |
+| `options.nodeset` | 0.8.0 |
+| `options.initial_conditions` | 0.8.0 |
 | `options.osdi_preload` | 0.7.0 |
 | `options.stage_model_inputs` | 0.7.0 |
+| `analysis_overrides` | 0.9.1 |
+| `analysis.op_check` | 0.9.2 |
 | `analysis_steps[].measurements[]` (noise analysis `.meas` cards) | unreleased |
 | `measurements[].search` | unreleased |
 
@@ -2127,12 +2140,17 @@ release segment:
 | `measurements[].expr` | any `measurements[]` entry has `expr` | `0.7.0` |
 | `corners.process[].sections[]` | a `corners.process[]` bundle has an object-form `sections[]` entry | `0.7.0` |
 | `corners.params` ([#4097](https://github.com/2AMLogic/klayout-tools/issues/4097)) | `corners.params` is present and non-empty; checked before launch against the AMI manifest (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `params_unsupported_worker` check stays) | `0.8.0` (**mandatory**, see below) |
+| `corners.options` ([#3125](https://github.com/2AMLogic/klayout-tools/issues/3125)) | `corners.options` is present and non-empty; checked before launch against the AMI manifest (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `options_unsupported_worker` check stays) | `0.8.0` (**mandatory**, see below) |
+| `options.nodeset` ([#3036](https://github.com/2AMLogic/klayout-tools/issues/3036)) | `options.nodeset` is set and non-empty; checked before launch against the AMI manifest (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `nodeset_unsupported_worker` check stays) | `0.8.0` (**mandatory**, see below) |
+| `options.initial_conditions` ([#3881](https://github.com/2AMLogic/klayout-tools/issues/3881)) | `options.initial_conditions` is set and non-empty; checked before launch against the AMI manifest (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `initial_conditions_unsupported_worker` check stays) | `0.8.0` (**mandatory**, see below) |
+| `analysis_overrides` ([#4970](https://github.com/2AMLogic/klayout-tools/issues/4970)) | `analysis_overrides` is present and non-empty; checked before launch against the AMI manifest (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `analysis_overrides_unsupported_worker` check stays) | `0.9.1` (**mandatory**, see below) |
+| `analysis.op_check` ([#5077](https://github.com/2AMLogic/klayout-tools/issues/5077)) | `analysis.op_check` is declared; checked before launch against the AMI manifest (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `op_check_unsupported_worker` check stays) | `0.9.2` (**mandatory**, see below) |
 | `options.ngspice_init` | `options.ngspice_init` is set and non-empty | `0.7.0` |
 | `options.ngspice_options` ([#4212](https://github.com/2AMLogic/klayout-tools/issues/4212)) | `options.ngspice_options` is set and non-empty | `0.8.0` |
 | `options.osdi_preload` | `options.osdi_preload` is set and non-empty | `0.7.0` |
 | `options.stage_model_inputs` | `options.stage_model_inputs` is set | `0.7.0` |
 
-The last six rows are the released entries of
+The rows from `measurements[].expr` down are the released entries of
 `REQUEST_FEATURE_MIN_RUNNER_VERSION` ([#2877](https://github.com/2AMLogic/klayout-tools/issues/2877)),
 the same table the checks below read ([#2901](https://github.com/2AMLogic/klayout-tools/issues/2901)).
 An entry whose minimum is `unreleased` has no detector and never counts as
@@ -3834,7 +3852,12 @@ the `options.resume` fingerprint (changing it invalidates a stored result) and
 is forwarded to `remote`/`batch` workers; omitting it leaves decks, corner IDs
 and fingerprints byte-identical. A worker built before the field would drop it,
 so the client requires `op_check` on every corner that ran and otherwise fails
-with `error.code: "op_check_unsupported_worker"`.
+with `error.code: "op_check_unsupported_worker"`. It is also a **mandatory**
+runner feature (`analysis.op_check`, minimum `0.9.2`), so a submit against an
+AMI manifest whose every image predates it is refused with
+`batch_runner_feature_unsupported` before anything is uploaded or launched --
+and `--dry-run` reports the refusal -- rather than the grid running first and
+the echo check refusing the result afterward.
 
 **Pinning a node (the deterministic workaround).** `op_check` only detects.
 To make the solution deterministic, hold the latch node with an ideal source at
