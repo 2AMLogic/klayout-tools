@@ -21,8 +21,11 @@ named algorithm, never a silent change to ``sha256-raw-bytes``):
    silently empty hash;
 3. canonicalise recursively: every mapping key becomes
    ``f"{type(k).__name__}:{k!r}"`` (``on:`` -> ``bool:True``, ``"on":`` ->
-   ``str:'on'`` stay distinct), and each non-JSON scalar
-   (``datetime.date``/``datetime``) its ISO string;
+   ``str:'on'`` stay distinct), sequences recurse element-wise (so a key
+   reorder *inside* a list element -- a step of ``steps:`` -- is not
+   load-bearing either), and each non-JSON scalar gets its canonical
+   string: ``datetime.date``/``datetime`` the ISO string, ``!!binary``
+   bytes the hex of the decoded value;
 4. ``json.dumps(..., sort_keys=True, separators=(",", ":"))`` and SHA-256
    the UTF-8 bytes.
 
@@ -32,9 +35,12 @@ envelope's yaml checks through this same digest, exactly as
 checks (issue #4197) -- without it, a comment edit would leave the
 ``--manifest`` row ``stale_evidence`` even with ``--check`` at ``match``.
 
-Nothing here falls back to byte-hashing: a file that cannot be
-canonicalised deterministically (unparseable, multi-document, unresolvable
-``select``) is an error naming the path, per the mode's contract.
+Nothing here falls back to byte-hashing, and nothing silently hashes a
+non-deterministic value either: a file that cannot be canonicalised
+deterministically (unparseable, multi-document, unresolvable ``select``, or
+a node type with no canonical form -- e.g. ``!!set``, whose ``repr`` order
+varies with ``PYTHONHASHSEED``) is an error naming the path, per the mode's
+contract.
 
 This module deliberately imports nothing from :mod:`klayout_tools.signoff`
 or :mod:`klayout_tools.signoff_attest` at module level (both import it);
@@ -81,11 +87,23 @@ def _canonical_value(value: Any) -> Any:
         return {
             _canonical_key(key): _canonical_value(item) for key, item in value.items()
         }
+    if isinstance(value, (list, tuple)):
+        # recurse, so a mapping's key order *inside* a list element (a step
+        # of ``steps:``) is canonicalised away like everywhere else
+        return [_canonical_value(item) for item in value]
     if isinstance(value, (str, int, float, bool, type(None))):
         return value
     if isinstance(value, date):  # datetime subclasses date; YAML 1.1 timestamps
         return value.isoformat()
-    return f"{type(value).__name__}:{value!r}"  # !!binary bytes and friends
+    if isinstance(value, bytes):  # !!binary: the decoded bytes, deterministically
+        return f"bytes:{value.hex()}"
+    # e.g. a YAML !!set: a Python set whose repr order varies with
+    # PYTHONHASHSEED -- hashing it would be an attestation that can never
+    # reproduce, so refuse (the contract's error path), never repr it.
+    raise CanonicalYamlError(
+        f"cannot be canonicalised deterministically: unsupported node type "
+        f"{type(value).__name__!r} (e.g. a YAML !!set)"
+    )
 
 
 def canonical_dumps(node: Any) -> str:
@@ -138,7 +156,10 @@ def content_digest(data: bytes, select: str | None, where: str) -> str:
     but deterministic."""
     document = parse_document(data, where)
     node = resolve_select(document, select, where) if select else document
-    encoded = canonical_dumps(node).encode("utf-8")
+    try:
+        encoded = canonical_dumps(node).encode("utf-8")
+    except CanonicalYamlError as exc:  # an unsupported node type (e.g. !!set)
+        raise CanonicalYamlError(f"{where} {exc}") from exc
     return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
 
 

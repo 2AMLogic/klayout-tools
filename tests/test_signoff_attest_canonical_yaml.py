@@ -9,12 +9,14 @@ still is. Item 10 ``hygiene`` only, like ``presence`` (#5615).
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 from klayout_tools.signoff import build_tier_report
 from klayout_tools.signoff_attest import (
@@ -23,7 +25,12 @@ from klayout_tools.signoff_attest import (
     check_attestation,
     render_envelope,
 )
-from klayout_tools.signoff_attest_canonical_yaml import HASH_ALGORITHM, content_digest
+from klayout_tools.signoff_attest_canonical_yaml import (
+    HASH_ALGORITHM,
+    CanonicalYamlError,
+    canonical_dumps,
+    content_digest,
+)
 from klayout_tools.signoff_attest_text import note_lines
 
 _OK = [sys.executable, "-c", "import sys; sys.exit(0)"]
@@ -210,6 +217,68 @@ def test_comment_reorder_and_reflow_edits_stay_at_match_with_a_note(tmp_path):
     ]
 
 
+_STEP_ORIGINAL = (
+    "      - name: attest-check\n"
+    "        run: klt signoff --attest 10 --inventory inv.json"
+    " --check evidence/item10.json\n"
+)
+_STEP_KEYS_SWAPPED = (
+    "      - run: klt signoff --attest 10 --inventory inv.json"
+    " --check evidence/item10.json\n"
+    "        name: attest-check\n"
+)
+
+
+def test_key_reorder_inside_a_list_element_stays_at_match(tmp_path):
+    """AC: reordering keys *inside a list element* (the step's ``run:``
+    before its ``name:``) is not drift -- the canonicaliser recurses into
+    sequences, so mapping key order inside ``steps:`` is not load-bearing.
+    The axis the reflow fixture above never exercised."""
+    for select in ("jobs.signoff", None):
+        repo = _repo(tmp_path / (select or "whole-document"))
+        inventory = _yaml_inv(repo, select)
+        committed = _committed(repo, inventory)
+        _edit_workflow(repo, lambda s: s.replace(_STEP_ORIGINAL, _STEP_KEYS_SWAPPED))
+        result = check_attestation(10, inventory, committed)
+        assert result["status"] == "match", (select, result.get("drift"))
+        assert result["fresh_status"] == "pass"
+        assert result["notes"] == [
+            {
+                "check": {"role": "hygiene", "path": _CI},
+                "path": _CI,
+                "note": "raw bytes differ; canonical yaml hash unchanged "
+                '(attest: "yaml")',
+            }
+        ]
+
+
+def test_safe_dump_reformat_of_the_real_workflow_stays_at_match(tmp_path):
+    """AC: a ``yaml.safe_dump(sort_keys=True)`` reformat of this repo's
+    real workflow -- key order sorted at every level, *including inside
+    list items* -- is semantics-preserving (parse-equal), so ``match``
+    with the informational note, never drift."""
+    real = Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml"
+    original = real.read_bytes()
+    reformatted = yaml.safe_dump(
+        yaml.safe_load(original.decode("utf-8")), sort_keys=True
+    ).encode("utf-8")
+    assert yaml.safe_load(reformatted.decode("utf-8")) == yaml.safe_load(
+        original.decode("utf-8")
+    )
+    repo = _repo(tmp_path)
+    workflow = repo / ".github/workflows/ci.yml"
+    workflow.write_bytes(original)
+    inventory = _yaml_inv(repo, "jobs.signoff-example")
+    committed = _committed(repo, inventory)
+    workflow.write_bytes(reformatted)
+    result = check_attestation(10, inventory, committed)
+    assert result["status"] == "match", result.get("drift")
+    assert note_lines(result) == [
+        f"[NOTE] {_CI}: raw bytes differ; canonical yaml hash unchanged "
+        '(attest: "yaml")'
+    ]
+
+
 def test_continue_on_error_added_fails_check(tmp_path):
     """AC: adding ``continue-on-error: true`` to the selected job fails
     ``--check`` -- the exact edit the raw-byte pin exists for."""
@@ -357,6 +426,17 @@ def test_multi_document_file_is_refused(tmp_path):
         build_attestation(10, _yaml_inv(repo))
 
 
+def test_set_node_is_an_attest_time_error_naming_the_path(tmp_path):
+    """AC: a node with no deterministic canonical form (``!!set`` -- its
+    ``repr`` order varies with ``PYTHONHASHSEED``, so a hashed digest could
+    never reproduce) is an ``AttestationError`` naming the path, never a
+    silently hashed fallback."""
+    repo = _repo(tmp_path)
+    _edit_workflow(repo, lambda s: s + "\nmatrix: !!set\n  ? a\n  ? b\n")
+    with pytest.raises(AttestationError, match=r"ci\.yml.*unsupported node type 'set'"):
+        build_attestation(10, _yaml_inv(repo))
+
+
 def test_absent_select_path_is_an_attest_time_error(tmp_path):
     repo = _repo(tmp_path)
     with pytest.raises(AttestationError, match=r"jobs\.nope.*does not resolve"):
@@ -395,6 +475,61 @@ def test_malformed_yaml_entries_are_refused(tmp_path, entry, needle):
     repo = _repo(tmp_path)
     with pytest.raises(AttestationError, match=needle):
         build_attestation(10, _inv(repo, [entry]))
+
+
+# --- sequences and unsupported node types at digest level --------------------- #
+
+
+def test_key_order_inside_a_list_element_is_not_load_bearing():
+    """Two spellings of the same document that differ only in the key
+    order of a mapping *inside a list element* share a digest, whole-file
+    and ``select``-scoped alike."""
+    ordered = b"jobs:\n  build:\n    steps:\n      - name: x\n        run: make\n"
+    swapped = b"jobs:\n  build:\n    steps:\n      - run: make\n        name: x\n"
+    assert yaml.safe_load(ordered) == yaml.safe_load(swapped)
+    for select in ("jobs.build", None):
+        assert content_digest(ordered, select, "<where>") == content_digest(
+            swapped, select, "<where>"
+        )
+
+
+def test_a_list_and_its_repr_shaped_string_hash_differently():
+    """A string that spells a list's would-be ``repr`` fallback is a
+    *string*: structural sequence canonicalisation keeps the two documents
+    distinct (no digest collision)."""
+    as_list = b"branches: [main]\n"
+    as_string = b"branches: \"list:['main']\"\n"
+    assert content_digest(as_list, None, "<where>") != content_digest(
+        as_string, None, "<where>"
+    )
+
+
+def test_date_inside_a_list_canonicalises_to_its_iso_string():
+    """A ``date`` inside a list gets its ISO string exactly like a mapping
+    value would -- the recursion covers sequence elements."""
+    document = yaml.safe_load("schedule:\n  - 2026-11-15\n  - plain\n")
+    assert canonical_dumps(document) == '{"str:\'schedule\'":["2026-11-15","plain"]}'
+
+
+def test_binary_node_digest_ignores_base64_spelling():
+    """``!!binary`` canonicalises to the decoded bytes' hex, so two
+    spellings of the same payload (line-wrapped base64) share a digest."""
+    encoded = base64.b64encode(b"\x00\x01klt").decode("ascii")
+    one_line = f"blob: !!binary {encoded}\n"
+    wrapped = f"blob: !!binary {encoded[:3]}\n    {encoded[3:]}\n"
+    assert yaml.safe_load(one_line) == yaml.safe_load(wrapped)
+    assert content_digest(one_line.encode(), None, "<where>") == content_digest(
+        wrapped.encode(), None, "<where>"
+    )
+
+
+def test_set_node_is_refused_at_digest_level():
+    """The refusal names the file: a digest that cannot reproduce is an
+    error, not an attestation."""
+    with pytest.raises(
+        CanonicalYamlError, match=r"ci\.yml.*unsupported node type 'set'"
+    ):
+        content_digest(b"matrix: !!set\n  ? a\n  ? b\n", None, "ci.yml")
 
 
 def test_yaml_refused_on_items_1_and_9(tmp_path):

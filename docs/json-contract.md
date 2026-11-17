@@ -2145,8 +2145,10 @@ depends on its meaning staying fixed:
   the one such algorithm is `sha256-canonical-yaml-v1` (issue #5862): an
   inventory `hygiene` entry `{"attest": "yaml", "select"?}` records it,
   with `attest` and `select`, beside that check's own `content_hash` (the
-  digest of the canonical parse — type-tagged keys, sorted, compact — of
-  the whole file or the `select` subtree) plus an informational
+  digest of the canonical parse — type-tagged keys, sequences recursed
+  element-wise, sorted, compact — of the whole file or the `select`
+  subtree; a node with no deterministic canonical form, e.g. `!!set`, is
+  an error naming the path) plus an informational
   `raw_content_hash`, which the `--check` drift diff excludes and reports
   as a live note instead. The envelope-level `attestation.hash_algorithm`
   stays `sha256-raw-bytes` for every other check, and no inventory
