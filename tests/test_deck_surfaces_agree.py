@@ -14,6 +14,7 @@ from klayout_tools.decks import (
     drc_deck_names,
     get_deck,
 )
+from klayout_tools.decks import sg13g2_cont_grid as sg13g2_cont_grid_module
 from klayout_tools.decks.history import deck_info
 
 
@@ -180,3 +181,16 @@ def test_deck_scope_tokens_match_frozen_expected_sets() -> None:
             f"{name}: declared {sorted(declared)}, "
             f"expected {sorted(_EXPECTED_DECK_SCOPES[name])}"
         )
+
+
+def test_sg13g2_cont_ongrid_scope_is_offgrid_family() -> None:
+    """`cont.ongrid.1`'s `scope` names sg13g2's upstream offgrid rule family
+    (`cont_drw_Offgrid`, `rule_decks/geometry/3_1_offgrid.drc`) -- not the
+    `"x"` copy-pasted from sky130's own legitimate `x.*` family (#5723), and
+    not `"Cnt"`, which would claim the `Cnt.a`-`Cnt.d` section from
+    `feol/5_14_cont.drc` that this deck does not implement. A scope token
+    names an upstream DRM section or rule-id family, never a layer."""
+    assert sg13g2_cont_grid_module.CONT_ONGRID_RULE.scope == "Offgrid"
+    scopes = {rule.scope for rule in get_deck("sg13g2") if rule.scope}
+    assert "x" not in scopes
+    assert "Offgrid" in scopes
