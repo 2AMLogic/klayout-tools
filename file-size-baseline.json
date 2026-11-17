@@ -953,7 +953,7 @@
     },
     {
       "path": "tests/test_netlist_batch.py",
-      "lines": 1118
+      "lines": 1061
     },
     {
       "path": "tests/test_op_sanity.py",
@@ -1049,7 +1049,7 @@
     },
     {
       "path": "tests/test_signoff_generator_batch.py",
-      "lines": 726
+      "lines": 665
     },
     {
       "path": "tests/test_sim.py",
@@ -1062,10 +1062,6 @@
     {
       "path": "tests/test_sim_batch_async.py",
       "lines": 817
-    },
-    {
-      "path": "tests/test_sim_commands.py",
-      "lines": 511
     },
     {
       "path": "tests/test_sim_crossings.py",
