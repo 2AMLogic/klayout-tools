@@ -1,10 +1,10 @@
-"""Tests for ``klt lvs`` ``"engine": "klayout-runset"`` (issue #2849).
+"""Tests for ``klt lvs`` ``"engine": "klayout-runset"`` (issue #2849): the
+standalone ``klayout`` application is mocked at the ``subprocess.run``
+boundary -- the fake "runset" writes a *real* ``.lvsdb`` (built with the pip
+``klayout.db`` API) so the verdict-from-database path is exercised end to end;
+a real-binary smoke test is skipped when ``klayout`` is not on PATH.
 
-The standalone ``klayout`` application is mocked at the ``subprocess.run``
-boundary: the fake "runset" writes a *real* ``.lvsdb`` (built with the pip
-``klayout.db`` API) so the verdict-from-database path is exercised end to end.
-A real-binary smoke test is skipped when ``klayout`` is not on PATH. The
-fixture preamble lives in ``helpers/lvs_runset_fixtures.py``, shared with
+The fixture preamble lives in ``helpers/lvs_runset_fixtures.py``, shared with
 ``tests/test_lvs_klayout_runset_pins.py`` (issue #5664, split for the
 file-size ratchet).
 """
@@ -20,6 +20,7 @@ import tempfile
 import klayout.db as kdb
 import pytest
 
+import lvs_tmp_repo
 from helpers import lvs_runset_fixtures as fx
 from helpers.lvs_runset_fixtures import SPICE_ONE
 from helpers.lvs_runset_fixtures import request as _request
@@ -27,6 +28,8 @@ from klayout_tools import lvs_runset
 from klayout_tools.coverage import coverage_validation_error
 from klayout_tools.env_provenance import find_absolute_path_fields
 from klayout_tools.lvs import LvsError, check_lvs_report, run_lvs
+
+tmp_path = lvs_tmp_repo.tmp_path  # pytest collects the fixture by module-level name
 
 
 @pytest.fixture

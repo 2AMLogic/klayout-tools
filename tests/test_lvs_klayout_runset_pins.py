@@ -20,6 +20,7 @@ from pathlib import Path
 import klayout.db as kdb
 import pytest
 
+import lvs_tmp_repo
 from helpers import lvs_runset_fixtures as fx
 from helpers.lvs_runset_fixtures import (
     SPICE_PINNED,
@@ -31,6 +32,8 @@ from helpers.lvs_runset_fixtures import (
 from klayout_tools.lvs import check_lvs_report, run_lvs
 from klayout_tools.lvs_runset import _classify
 from klayout_tools.lvs_runset_findings import _circuit_findings, _pin_findings
+
+tmp_path = lvs_tmp_repo.tmp_path  # pytest collects the fixture by module-level name
 
 
 @pytest.fixture

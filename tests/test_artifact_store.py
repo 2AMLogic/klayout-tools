@@ -4,8 +4,7 @@ also plays the object store behind its presigned URLs. No network, no cloud
 SDK, no credential.
 
 Every presigned URL the fake mints carries :data:`SECRET`; :func:`_run` fails
-on it in stdout or stderr and the ``no_url_leak`` fixture on it in any log
-record.
+on it in stdout or stderr, the ``no_url_leak`` fixture in any log record.
 """
 
 from __future__ import annotations
@@ -24,7 +23,8 @@ from urllib.parse import urlsplit
 
 import pytest
 
-from klayout_tools import artifact_store as store
+from klayout_tools import artifact_objects as store
+from klayout_tools import artifact_verify as av
 from klayout_tools import signoff
 from klayout_tools.cli import main
 
@@ -443,7 +443,7 @@ def test_broker_refusal_is_surfaced_verbatim(broker, report, tmp_path, capsys, o
 @pytest.fixture
 def sleeps(monkeypatch):
     slept: list[float] = []
-    monkeypatch.setattr(store, "_sleep", slept.append)
+    monkeypatch.setattr(av, "_sleep", slept.append)
     return slept
 
 
@@ -520,7 +520,7 @@ def test_retry_after_is_honored_and_clamped(monkeypatch, sleeps):
 
         def close(self): ...
 
-    monkeypatch.setattr(store, "_connection", lambda *a, **k: Conn())
+    monkeypatch.setattr(av, "_connection", lambda *a, **k: Conn())
     out = store.BrokerClient("http://x").call("stat", {})
 
     assert out == {}
@@ -555,7 +555,7 @@ def test_concurrent_publishers_finish_within_budget(monkeypatch, sleeps):
         def close(self): ...
 
     for i in range(callers):
-        monkeypatch.setattr(store, "_connection", lambda *a, i=i, **k: Conn(i))
+        monkeypatch.setattr(av, "_connection", lambda *a, i=i, **k: Conn(i))
         assert store.BrokerClient("http://x").call("put", {}) == {}
 
     assert len(sleeps) == callers * 5

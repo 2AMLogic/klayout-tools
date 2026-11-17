@@ -45,6 +45,7 @@ from typing import TYPE_CHECKING, Any
 
 from ._paths import resolve_tool_binary
 from ._provenance import build_provenance, sha256_file
+from .env_provenance import repo_relative_path, repo_root_for
 from .lvs_mismatch import _mismatch
 from .lvs_runset_census import _build_coverage, _class_census
 from .lvs_runset_findings import _circuit_findings, _device_label, _paired_ok
@@ -634,7 +635,7 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
     """Run ``request`` through the PDK runset and return the ``klt lvs``
     envelope. See this module's docstring; request fields are documented in
     ``docs/cli/lvs.md`` ("klayout-runset")."""
-    from .lvs import SCHEMA_VERSION, LvsError
+    from .lvs import SCHEMA_VERSION, LvsError, _reference_conversion_echo
 
     layout, reference, deck_file, deck_vars, options = _validate_request(
         request, request_dir
@@ -643,7 +644,6 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
     timeout_s = float(options.get("runset_timeout_s", RUNSET_DEFAULT_TIMEOUT_S))
     binary = _resolve_klayout_binary(options, request_dir)
 
-    from .lvs import _reference_conversion_echo
     from .lvs_runset_reference import convert_reference
 
     work_dir = tempfile.mkdtemp(prefix="klt-lvs-runset-")
@@ -717,7 +717,7 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
         **_reference_conversion_echo(
             request["reference"].get("form", "plain-element"), request["reference"]
         ),
-        "layout": request["layout"]["file"],
+        "layout": repo_relative_path(layout, repo_root=repo_root_for(layout)),
         "reference": request["reference"]["netlist"],
         "top": top or verdict["top"],
         "reference_top": request["reference"].get("top") or verdict["reference_top"],
