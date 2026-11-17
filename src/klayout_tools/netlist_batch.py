@@ -49,7 +49,6 @@ unit, so that rule would make the setting a no-op.
 from __future__ import annotations
 
 import os
-import re
 import shlex
 import subprocess
 import tarfile
@@ -59,7 +58,13 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from . import _batch_common, _provenance, remote_transport, sim_batch
+from . import (
+    _batch_collect,
+    _batch_common,
+    _provenance,
+    remote_transport,
+    sim_batch,
+)
 from .netlist import (
     DEFAULT_XSCHEM_BINARY,
     SCHEMA_VERSION,
@@ -445,49 +450,6 @@ def _resolve_config(pdk: str, timeout_s: float) -> sim_batch.BatchConfig:
     )
 
 
-def _runner_error(collected: str) -> tuple[dict[str, Any] | None, str]:
-    """The runner klt's own error envelope (``message`` and maybe ``code``):
-    from ``report.json`` (where the preflight writes its rejection), else
-    from the tail of ``stderr.log`` (where ``klt netlist`` writes one)."""
-    note = ""
-    try:
-        kind, error = sim_batch._classify_collected_report(
-            sim_batch.read_collected_report(collected)
-        )
-        if kind == "error":
-            return error, ""
-    except sim_batch.BatchError as exc:
-        note = str(exc)
-    error, stderr_note = sim_batch._read_stderr_envelope(collected)
-    if error is not None:
-        return error, ""
-    return None, "; ".join(item for item in (note, stderr_note) if item)
-
-
-#: Bytes of ``stderr.log`` quoted back when the job left no klt envelope.
-REMOTE_STDERR_TAIL_BYTES = 2048
-
-_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
-_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
-
-
-def _remote_stderr_tail(collected: str) -> str:
-    """The last :data:`REMOTE_STDERR_TAIL_BYTES` of the collected
-    ``stderr.log`` as sanitized text: invalid UTF-8 replaced, ANSI escapes and
-    control characters (other than newline and tab) dropped. ``""`` when the
-    file is missing or empty. Only used when no klt envelope was recovered."""
-    path = os.path.join(collected, sim_batch.BATCH_STDERR_FILENAME)
-    try:
-        with open(path, "rb") as handle:
-            handle.seek(0, os.SEEK_END)
-            handle.seek(max(0, handle.tell() - REMOTE_STDERR_TAIL_BYTES))
-            raw = handle.read()
-    except OSError:
-        return ""
-    text = raw.decode("utf-8", errors="replace").replace("\r\n", "\n")
-    return _CONTROL_CHARS.sub("", _ANSI_ESCAPE.sub("", text)).strip()
-
-
 def _job_failure(
     *,
     job_id: str,
@@ -515,34 +477,18 @@ def _job_failure(
 
 
 def _read_runner_report(collected: str, job_id: str) -> dict[str, Any]:
-    try:
-        report = sim_batch.read_collected_report(collected)
-    except sim_batch.BatchError as exc:
-        raise NetlistError(
-            f"batch job {job_id}: {exc} {_NO_FALLBACK}",
-            code=BATCH_JOB_FAILED_CODE,
-            job_id=job_id,
-        ) from exc
-    kind, error = sim_batch._classify_collected_report(report)
-    if kind == "error" and error is not None:
-        raise NetlistError(
-            f"batch job {job_id}: the runner's klt reported: "
-            f"{error['message']} {_NO_FALLBACK}",
-            code=error.get("code") or BATCH_JOB_FAILED_CODE,
-            job_id=job_id,
-        )
-    if (
-        report.get("status") != STATUS_GENERATED
-        or not isinstance(report.get("xschem"), dict)
-        or not isinstance(report.get("netlist"), dict)
-    ):
-        raise NetlistError(
-            f"batch job {job_id}: the collected {sim_batch.BATCH_REPORT_FILENAME} "
-            f"is not a `klt netlist` generate report {_NO_FALLBACK}",
-            code=BATCH_JOB_FAILED_CODE,
-            job_id=job_id,
-        )
-    return report
+    return _batch_collect.read_collected_unit_report(
+        collected,
+        job_id,
+        err_cls=NetlistError,
+        no_fallback=_NO_FALLBACK,
+        validate=lambda report: (
+            report.get("status") == STATUS_GENERATED
+            and isinstance(report.get("xschem"), dict)
+            and isinstance(report.get("netlist"), dict)
+        ),
+        what="a `klt netlist` generate report",
+    )
 
 
 def _read_collected_netlist(
@@ -638,32 +584,15 @@ def _collect(
 ) -> None:
     """Collect ``outputs/``; a job that did not finish ``done`` becomes a
     :class:`NetlistError` carrying the runner's own error, if recoverable."""
-    done = status.get("state") == "done" and (
-        sim_batch._status_exit_code(status) in (0, None)
-    )
-    if done:
-        try:
-            sim_batch.collect_outputs(config, job_id, collected, runner=runner)
-        except sim_batch.BatchError as exc:
-            raise _transport_error(job_id, exc) from exc
-        return
-    runner_error: dict[str, Any] | None = None
-    stderr_tail = ""
-    try:
-        sim_batch.collect_outputs(config, job_id, collected, runner=runner)
-        runner_error, note = _runner_error(collected)
-        if runner_error is None:
-            stderr_tail = _remote_stderr_tail(collected)
-    except sim_batch.BatchError as exc:
-        note = str(exc)
-    raise _job_failure(
-        job_id=job_id,
-        status=status,
-        runner_error=runner_error,
-        note=note,
-        stderr_tail=stderr_tail,
-        harness_log=sim_batch.report_job_uri(config, job_id).rstrip("/")
-        + "/harness.log",
+    _batch_collect.collect(
+        config,
+        job_id,
+        status,
+        collected,
+        runner=runner,
+        err_cls=NetlistError,
+        no_fallback=_NO_FALLBACK,
+        job_failure=_job_failure,
     )
 
 
