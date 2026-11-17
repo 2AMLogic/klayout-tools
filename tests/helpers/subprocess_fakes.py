@@ -73,6 +73,42 @@ def _stub_subprocess_run(
     monkeypatch.setattr(sim.subprocess, "run", fake_run)
 
 
+_COVERAGE_SUMMARY = """\
+Coverage Summary:
+  line      : 100.0% (  6/  6)
+  toggle    : 60.0% (102/170)
+  branch    : 100.0% (  4/  4)
+  expr      : 100.0% (  5/  5)
+  fsm_state : 0.0% (  0/  0)
+  fsm_arc   : 0.0% (  0/  0)
+"""
+
+
+def _stub_verilator_coverage(monkeypatch, *, summary=_COVERAGE_SUMMARY, returncode=0):
+    """Patch `subprocess.run` so a `klt functional-verification` run reads a
+    canned `verilator_coverage` summary without the binary.
+
+    Moved verbatim from `test_functional_verification.py` (size-ratchet
+    baseline) with one addition (issue #5550): anything that is not
+    `verilator_coverage` goes to the real `subprocess.run` untouched, as
+    `_stub_subprocess_run` does -- the response's `provenance` block runs a
+    build-identity `git` probe on a dev checkout through the same patched
+    module attribute.
+    """
+    real_run = subprocess.run
+
+    def fake_run(cmd, **kwargs):
+        if cmd[0] != "verilator_coverage":
+            return real_run(cmd, **kwargs)
+        if cmd[1] == "--write-info":
+            with open(cmd[2], "w", encoding="utf-8") as handle:
+                handle.write("TN:verilator_coverage\nSF:gcd.v\nDA:15,538\n")
+            return fake_completed(returncode=returncode)
+        return fake_completed(returncode=returncode, stdout=summary)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+
 def _upload_objects(
     argv: list[str], source: str, destination: str
 ) -> list[tuple[Path, str]]:

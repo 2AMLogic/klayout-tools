@@ -6,13 +6,30 @@ from __future__ import annotations
 
 import hashlib
 
-from klayout_tools.signoff import build_tier_report
+from klayout_tools.signoff import build_signoff, build_tier_report
 from test_signoff import (
     FUNCTIONAL_VERIFICATION_SDF_ENVELOPE,
-    FUNCTIONAL_VERIFICATION_SDF_PROVENANCE_ENVELOPE,
     _manifest,
+    _synthesize_envelope,
     _write,
 )
+
+#: The same SDF envelope from a `klt` that records the shared `provenance`
+#: block (issue #5550): `provenance.input.content_hash` digests the RTL the
+#: run built (role `source`), not the report's own bytes -- the value a
+#: manifest `content_hash` pin binds for this kind.
+FUNCTIONAL_VERIFICATION_SDF_PROVENANCE_ENVELOPE = {
+    **FUNCTIONAL_VERIFICATION_SDF_ENVELOPE,
+    "provenance": {
+        "klt_version": "0.9.2",
+        "klt_git_commit": None,
+        "klt_reinstall_spec": None,
+        "klayout_version": "0.30.12",
+        "pdk": None,
+        "deck": None,
+        "input": {"content_hash": "sha256:rtl-a", "role": "source"},
+    },
+}
 
 #: The RTL digest the provenance-bearing fixture records -- what a manifest
 #: `content_hash` pin binds for this kind since issue #5550.
@@ -175,3 +192,43 @@ def test_null_rtl_digest_pin_is_unverifiable_with_null_note(tmp_path):
     assert "null" in note
     assert "could not be hashed" in note
     assert "legacy" not in note
+
+
+def test_functional_verification_source_digest_agrees_with_synthesize(tmp_path):
+    """Issue #5550: an FV envelope's `source`-role digest joins
+    `_provenance_consistency`'s per-role comparison, so an FV citation and a
+    `klt synthesize` citation over the same RTL set agree instead of the FV
+    report being invisible to the gate."""
+    fv_path = _write(
+        tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_SDF_PROVENANCE_ENVELOPE
+    )
+    synth = _synthesize_envelope()
+    synth["provenance"] = {"input": {"content_hash": "sha256:rtl-a", "role": "source"}}
+    synth_path = _write(tmp_path, "synth.json", synth)
+
+    result = build_signoff([fv_path, synth_path])
+
+    assert result["provenance_consistency"]["ok"] is True
+    assert result["status"] == "pass"
+
+
+def test_functional_verification_source_digest_disagreement_refuses(tmp_path):
+    """The same bundle with the RTL edited under one report only -- the
+    per-role comparison now catches what a provenance-less FV envelope could
+    never participate in (issue #5550, the #2027 per-role comparison)."""
+    fv_path = _write(
+        tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_SDF_PROVENANCE_ENVELOPE
+    )
+    synth = _synthesize_envelope()
+    synth["provenance"] = {"input": {"content_hash": "sha256:rtl-b", "role": "source"}}
+    synth_path = _write(tmp_path, "synth.json", synth)
+
+    result = build_signoff([fv_path, synth_path])
+
+    assert result["provenance_consistency"]["ok"] is False
+    mismatches = result["provenance_consistency"]["mismatches"]
+    assert {
+        "field": "input.content_hash",
+        "role": "source",
+    }.items() <= mismatches[0].items()
+    assert result["status"] == "refused"

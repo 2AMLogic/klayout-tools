@@ -213,12 +213,7 @@ from ._jsonnum import is_int
 from ._paths import _load_request_json
 from ._paths import load_request_arg as _shared_load_request_arg
 from ._paths import validate_request_shape as _shared_validate_request_shape
-from ._provenance import (
-    INPUT_ROLE_SOURCE,
-    _combined_content_hash,
-    build_provenance,
-    sha256_file,
-)
+from ._provenance import sha256_file
 from .env_provenance import find_repo_root, repo_relative_path
 from .functional_verification_from_synthesize import (  # noqa: F401
     _resolve_sources,
@@ -2546,41 +2541,6 @@ def _resolve_engine(request_doc: dict[str, Any]) -> str:
     return engine
 
 
-def _input_provenance(
-    resolved_sources: list[str], synth_block: dict[str, Any] | None
-) -> dict[str, Any]:
-    """The shared ``provenance`` block for a functional-verification response
-    (issue #5550): ``input.content_hash`` digests the RTL ``request.sources``
-    as resolved *before* the SDF/initial-state shims, escaped-divider renames,
-    and scoped-define wrappers are substituted, under the same ``source``
-    role and the same
-    ``_combined_content_hash`` scheme ``klt synthesize``/``klt equiv`` use --
-    so a committed report is hash-pinnable in a signoff manifest, and a
-    ``klt signoff`` bundle can bind an FV citation to the very sources a
-    cited synthesis/equivalence run checked (``_provenance_consistency``'s
-    per-role comparison).
-
-    ``options.from_synthesize`` runs record ``input: null`` instead: their
-    design input is the synthesized netlist, already pinned by the additive
-    ``from_synthesize.netlist_sha256`` block -- a ``source``-role digest here
-    could only ever disagree with the synthesize report's own RTL digest (the
-    netlist is that run's *output*) and refuse a coherent bundle, the exact
-    #2027 false-alarm mode the per-role comparison exists to avoid.
-    """
-    if synth_block is not None:
-        return build_provenance()
-    if len(resolved_sources) == 1:
-        return build_provenance(
-            input_path=resolved_sources[0], input_role=INPUT_ROLE_SOURCE
-        )
-    provenance = build_provenance()
-    provenance["input"] = {
-        "content_hash": _combined_content_hash(resolved_sources),
-        "role": INPUT_ROLE_SOURCE,
-    }
-    return provenance
-
-
 def run_functional_verification(
     request: str, output_dir: str | None = None
 ) -> dict[str, Any]:
@@ -2618,12 +2578,6 @@ def run_functional_verification(
     sources, run_inputs = resolve_run_inputs(
         request_doc, request_dir, hdl_toplevel, _path_envelope
     )
-    # Issue #5550: the request's own RTL as resolved, captured *before* the
-    # SDF/initial-state shims, escaped-divider renames, and scoped-define
-    # wrappers below substitute generated files from `output_dir` into
-    # `sources` -- this is the list the response's
-    # `provenance.input.content_hash` digests.
-    provenance_sources = list(sources)
 
     verilog_tb = _resolve_verilog_top(
         request_doc["testbench"], sources, engine, request_doc.get("options")
@@ -3074,14 +3028,6 @@ def run_functional_verification(
             "tests": tests,
             "coverage": coverage,
             "trace": trace,
-            # Issue #5550: the shared provenance block -- `input.content_hash`
-            # digests the resolved RTL sources (see `_input_provenance`), so a
-            # committed report is hash-pinnable and binds to the design inputs
-            # rather than its own bytes. `pdk`/`deck` are always `null`: this
-            # verb resolves neither.
-            "provenance": _input_provenance(
-                provenance_sources, run_inputs.from_synthesize
-            ),
             "environment": {
                 "engine": engine,
                 "engine_version": _engine_version(engine),
@@ -3153,7 +3099,7 @@ def run_functional_verification(
             },
         }
     )
-    with_run_inputs(report, run_inputs)  # #5684/#5771, additive
+    with_run_inputs(report, run_inputs, provenance=True)  # #5684/#5771/#5550
     report.local_paths = {
         "results_xml": results_xml,
         "test_log": test_log,

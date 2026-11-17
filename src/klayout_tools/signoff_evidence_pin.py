@@ -104,8 +104,7 @@ def rehash_evidence_file(
     file_label: str | None,
     actual_hash: str | None,
     input_verified: bool | None,
-    *,
-    envelope_has_provenance: bool = False,
+    provenance: Mapping[str, Any],
 ) -> tuple[str | None, str | None, bool | None]:
     """Issue #4893: a ``functional-verification`` envelope records no input
     hash, so a file-backed citation that the manifest pins is re-hashed and the
@@ -116,11 +115,12 @@ def rehash_evidence_file(
     Legacy-only since issue #5550: an envelope that carries a ``provenance``
     block pins its *RTL* digest instead (``provenance.input.content_hash``),
     so the re-hash applies only to a report committed by an older ``klt`` --
-    ``envelope_has_provenance`` suppresses it otherwise, keeping the pin's
-    meaning from silently flipping back to the report's own bytes."""
+    a non-empty ``provenance`` (the envelope's block, ``{}`` when absent)
+    suppresses it, keeping the pin's meaning from silently flipping back to
+    the report's own bytes."""
     if (
         actual_hash is None
-        and not envelope_has_provenance
+        and not provenance
         and check_kind == "functional-verification"
         and file_label is not None
         and spec.get("content_hash") is not None
