@@ -165,7 +165,7 @@
     },
     {
       "path": "src/klayout_tools/_provenance.py",
-      "lines": 1005
+      "lines": 991
     },
     {
       "path": "src/klayout_tools/arith_gen.py",
@@ -189,7 +189,7 @@
     },
     {
       "path": "src/klayout_tools/cli/parser.py",
-      "lines": 5246
+      "lines": 5096
     },
     {
       "path": "src/klayout_tools/cli/pdk_cmd.py",
@@ -225,7 +225,7 @@
     },
     {
       "path": "src/klayout_tools/decks/gf180mcu.py",
-      "lines": 4096
+      "lines": 4030
     },
     {
       "path": "src/klayout_tools/decks/history.py",
@@ -297,7 +297,7 @@
     },
     {
       "path": "src/klayout_tools/extract.py",
-      "lines": 10779
+      "lines": 9856
     },
     {
       "path": "src/klayout_tools/extract_abstract.py",
@@ -353,7 +353,7 @@
     },
     {
       "path": "src/klayout_tools/gen.py",
-      "lines": 4355
+      "lines": 4334
     },
     {
       "path": "src/klayout_tools/gen_compose.py",
@@ -473,7 +473,7 @@
     },
     {
       "path": "src/klayout_tools/op_sanity.py",
-      "lines": 1848
+      "lines": 1844
     },
     {
       "path": "src/klayout_tools/parasitic_integrity.py",
@@ -501,7 +501,7 @@
     },
     {
       "path": "src/klayout_tools/pex.py",
-      "lines": 3739
+      "lines": 3716
     },
     {
       "path": "src/klayout_tools/place_and_route.py",
@@ -573,7 +573,7 @@
     },
     {
       "path": "src/klayout_tools/signoff.py",
-      "lines": 7314
+      "lines": 7310
     },
     {
       "path": "src/klayout_tools/signoff_attest.py",
@@ -609,7 +609,7 @@
     },
     {
       "path": "src/klayout_tools/sim_search.py",
-      "lines": 529
+      "lines": 523
     },
     {
       "path": "src/klayout_tools/sim_staging.py",
@@ -617,11 +617,11 @@
     },
     {
       "path": "src/klayout_tools/sim_steps.py",
-      "lines": 1314
+      "lines": 1313
     },
     {
       "path": "src/klayout_tools/sim_tian.py",
-      "lines": 547
+      "lines": 541
     },
     {
       "path": "src/klayout_tools/sim_transfer.py",
@@ -697,7 +697,7 @@
     },
     {
       "path": "tests/golden_deck/generate_golden_deck.py",
-      "lines": 1084
+      "lines": 1081
     },
     {
       "path": "tests/helpers/asap7_drc_fixtures.py",
@@ -853,7 +853,7 @@
     },
     {
       "path": "tests/test_functional_verification.py",
-      "lines": 6588
+      "lines": 6589
     },
     {
       "path": "tests/test_functional_verification_identity_contract.py",
@@ -913,7 +913,7 @@
     },
     {
       "path": "tests/test_lvs.py",
-      "lines": 26199
+      "lines": 26198
     },
     {
       "path": "tests/test_lvs_device_provenance.py",
@@ -985,7 +985,7 @@
     },
     {
       "path": "tests/test_pex.py",
-      "lines": 7547
+      "lines": 7535
     },
     {
       "path": "tests/test_place_and_route.py",

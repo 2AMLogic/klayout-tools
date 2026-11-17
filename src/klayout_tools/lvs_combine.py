@@ -500,30 +500,24 @@ def _combine_failure_identifiers(
     ``mismatches[]`` fields (issue #1370), resolving each against ``netlist``
     where the message alone is not enough.
 
-    The message embeds three fields --
-    ``name=<device>, circuit=<circuit>, terminal=<terminal>`` (see
-    :data:`_COMBINE_DEVICES_ERROR_FIELDS_RE`) -- which are parsed and then
-    resolved as far as the (partially combined) netlist allows:
-
-    * ``circuit`` -- taken straight from the message, on ``side``'s key.
-    * ``device`` -- the named device, when KLayout printed a name *and* that
-      device is still present in the named circuit; its ``class`` is that
-      device's device-class name.
-    * ``net`` -- the net wired to the reported terminal of that device.
+    The message embeds ``name=<device>, circuit=<circuit>,
+    terminal=<terminal>`` (see :data:`_COMBINE_DEVICES_ERROR_FIELDS_RE`),
+    parsed and resolved as far as the (partially combined) netlist allows:
+    ``circuit`` straight from the message; ``device`` the named device when
+    KLayout printed a name *and* it is still present in the named circuit
+    (its ``class`` that device's device-class name); ``net`` the net wired
+    to the reported terminal of that device.
 
     KLayout frequently reports an **empty** ``name=`` (the device is mid-
-    removal when the invariant trips, so there is nothing to print). In that
-    case the device's own name is unrecoverable, but the *class* usually is
-    not: if exactly one device class present in the named circuit declares a
-    terminal with the reported name, that class is the failing group's class,
-    and it is reported as ``device.class`` with both name keys ``null`` (the
-    same shape ``device.body_unverified`` already uses for a class-level,
-    instance-less finding). Anything that cannot be resolved this way stays
-    ``null`` -- never guessed.
+    removal when the invariant trips). The device name is then
+    unrecoverable, but the *class* usually is not: if exactly one device
+    class present in the named circuit declares a terminal with the
+    reported name, that class is reported as ``device.class`` with both
+    name keys ``null`` (the shape ``device.body_unverified`` uses).
+    Anything else stays ``null`` -- never guessed.
 
-    Returns the ``_mismatch`` keyword arguments as a dict, always including
-    a ``details`` block with the parsed terminal name and KLayout's raw
-    message, so a caller has the unparsed original too.
+    Returns the ``_mismatch`` keyword arguments, always with a ``details``
+    block carrying the parsed terminal name and KLayout's raw message.
     """
     match = _COMBINE_DEVICES_ERROR_FIELDS_RE.search(message)
     device_name = (match.group("device").strip() if match else "") or None
@@ -552,7 +546,13 @@ def _combine_failure_identifiers(
         if terminal_name:
             net = _net_for_terminal_or_none(device, terminal_name)
             if net is not None:
-                net_field = {side: net.expanded_name(), other: None}
+                # Issue #5833: pre-compare finding -- ids null (none recorded yet).
+                net_field = {
+                    side: net.expanded_name(),
+                    other: None,
+                    "layout_id": None,
+                    "reference_id": None,
+                }
     elif circuit is not None and terminal_name:
         class_names = _device_classes_declaring_terminal(circuit, terminal_name)
         if len(class_names) == 1:

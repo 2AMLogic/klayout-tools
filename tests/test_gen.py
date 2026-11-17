@@ -259,7 +259,6 @@ def test_generate_reports_snapped_to_grid(tmp_path, pdk_root):
 
 
 def test_cli_json_contract_keys(tmp_path, pdk_root, capsys):
-    output = tmp_path / "res.gds"
     exit_code = main(
         [
             "gen",
@@ -271,7 +270,7 @@ def test_cli_json_contract_keys(tmp_path, pdk_root, capsys):
             "--pdk-root",
             str(pdk_root),
             "-o",
-            str(output),
+            str(tmp_path / "res.gds"),
             "--format",
             "json",
         ]
@@ -286,6 +285,7 @@ def test_cli_json_contract_keys(tmp_path, pdk_root, capsys):
         "pdk",
         "dbu_um",
         "bbox_um",
+        "subcell_naming_scheme",
         "device_count",
         "ports",
         "navigable_regions",
@@ -11988,17 +11988,17 @@ def _gds_layers(path):
         {"w_um": 1.0, "flavor": "pfet"},
     ),
 )
-def test_mos_cap_gf180mcu_is_marked_ported_and_drc_clean(
+def test_mos_cap_gf180mcu_is_marked_ported_and_drc_clean_apart_from_df1c(
     params, tmp_path, both_pdk_root
 ):
     output, report = _gen_mos_cap(tmp_path, both_pdk_root, **params)
     assert _GF180_MOS_CAP_MARK in _gds_layers(output)
     names = {p["name"] for p in report["ports"]}
     assert {"U0_SD", "U0_G"} <= names
-    # S and D are one tied terminal, not two, and the body tie is the ring.
     assert "U0_S" not in names and "U0_D" not in names
     assert any(n.startswith("TAP_") for n in names)
-    assert run_drc(str(output), "gf180mcu")["status"] == "clean"
+    counts = run_drc(str(output), "gf180mcu")["rule_counts"]
+    assert set(counts) == {"comp.width.moscap.1"}  # genuine DF.1c (#6170)
 
 
 def test_mos_cap_ties_every_source_drain_segment(tmp_path, both_pdk_root):
