@@ -180,7 +180,6 @@ still never read from its stream.
 
 from __future__ import annotations
 
-import json
 import math
 import os
 from collections.abc import Callable
@@ -189,7 +188,7 @@ from typing import Any
 from . import gen_compose_port_request as _pr
 from ._jsonnum import is_int, is_number
 from ._layout import write_layout
-from ._paths import _resolve_relative
+from ._paths import _load_request_json, _resolve_relative
 from ._provenance import build_provenance, layout_geometry_digest
 from .decks import (
     ExtractionDeck,
@@ -446,17 +445,7 @@ def load_generator_report_arg(
     if not os.path.isfile(resolved):
         raise GenComposeError(f"generator_report file not found: '{resolved}'")
 
-    try:
-        with open(resolved, encoding="utf-8") as handle:
-            data = json.load(handle)
-    except OSError as exc:
-        raise GenComposeError(
-            f"could not read generator_report '{resolved}': {exc}"
-        ) from exc
-    except json.JSONDecodeError as exc:
-        raise GenComposeError(
-            f"generator_report '{resolved}' is not valid JSON: {exc}"
-        ) from exc
+    data = _load_request_json(resolved, GenComposeError)
 
     if not isinstance(data, dict):
         raise GenComposeError(

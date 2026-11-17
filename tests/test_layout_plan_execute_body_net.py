@@ -4,14 +4,16 @@ A MOS body is not a per-device port -- it is one well/substrate tie shared by
 every device a ``device_groups[]`` entry declares -- so
 ``layout_plan_execute`` binds it group-level, via
 ``layout_plan_ports.bind_body_nets``, to the group's own ``TAP_PAD<k>`` pad
-(#4143) or, for a group that draws its own guard ring, that ring's first
-``TAP_<side>`` port.
+(#4143), the shared ``WELL_TAP`` port a ring-less pfet array draws on
+sg13cmos5l (#1473, #5948), or, for a group that draws its own guard ring,
+that ring's first ``TAP_<side>`` port.
 
 Split out of `test_layout_plan_execute.py` to keep it under its file-size
-ceiling. Like its siblings, PDK resolution runs against a fabricated
-open_pdks-layout install under `tmp_path` -- CI never downloads a real PDK.
-The extraction round-trip at the bottom needs no install at all: `klt
-extract` reads the curated in-tree gf180mcu deck.
+ceiling; the sg13cmos5l `WELL_TAP` round-trips live in
+`test_layout_plan_execute_well_tap.py`. Like its siblings, PDK resolution runs
+against a fabricated open_pdks-layout install under `tmp_path` -- CI never
+downloads a real PDK. The extraction round-trips at the bottom need no install
+at all: `klt extract` reads the curated in-tree gf180mcu deck.
 """
 
 from __future__ import annotations
@@ -324,6 +326,19 @@ def test_body_tie_port_prefers_a_tap_pad_over_a_ring_tap():
     assert body_tie_port([]) is None
 
 
+def test_body_tie_port_recognizes_a_well_tap():
+    """`mos_array`'s ring-less sg13cmos5l pfet reports one group-level
+    `WELL_TAP` port (#1473) -- a tie shape `body_tie_port` used to miss,
+    leaving the array's body untied with a false "no tap/ring port" warning
+    (#5948). Pads and the well tap sit in the same precedence tier ahead of a
+    ring's `TAP_<side>` ports; the tiers only matter if a generator ever
+    reported both -- today they are family-scoped and mutually exclusive."""
+    assert body_tie_port([{"name": "U0_S"}, {"name": "WELL_TAP"}]) == "WELL_TAP"
+    assert body_tie_port([{"name": "TAP_N"}, {"name": "WELL_TAP"}]) == "WELL_TAP"
+    assert body_tie_port([{"name": "WELL_TAP"}, {"name": "TAP_PAD0"}]) == "WELL_TAP"
+    assert body_tie_port([{"name": "TAP_PAD0"}, {"name": "WELL_TAP"}]) == "TAP_PAD0"
+
+
 def test_group_body_nets_skips_null_terminals_and_foreign_generators():
     digest_devices_by_key = {
         ("P1", "PFET_03V3"): {"terminals": {"S": "VDD", "B": "VDD"}},
@@ -345,10 +360,10 @@ def test_group_body_nets_skips_null_terminals_and_foreign_generators():
 # ---------------------------------------------------------------------------
 
 
-def _extracted_bodies(gds_path, tmp_path, name):
+def _extracted_bodies(gds_path, tmp_path, name, deck="gf180mcu"):
     from klayout_tools.extract import run_extract
 
-    report = run_extract(gds_path, "gf180mcu", output=str(tmp_path / f"{name}.spice"))
+    report = run_extract(gds_path, deck, output=str(tmp_path / f"{name}.spice"))
     bodies = {device["class"]: device["nets"]["b"] for device in report["devices"]}
     return bodies, report
 
