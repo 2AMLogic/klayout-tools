@@ -21,7 +21,14 @@ this document (and the code) win.
   next to the request file (the same "next to the input" convention as `klt
   render`'s default output directory). `-o` names a **directory**, never the
   report file, on every backend (including `--backend batch`): the report goes
-  to stdout, and `--report-out <path>` writes a copy to a file.
+  to stdout. Without `--report-out`, a completed single-request run
+  ([#5776](https://github.com/2AMLogic/klayout-tools/issues/5776)) also
+  writes the report envelope to `<outdir>/report.json` — the directory is
+  created if missing, `--dry-run`/`--submit-only` write nothing, and a write
+  failure exits 1 with the error envelope — so a finished run's evidence is
+  on disk even when the caller forgot `--report-out`. `--report-out <path>`
+  remains the way to choose another path (`.gz` included) and wins outright
+  when both are given.
 - `--backend` — execution backend for the corner matrix, overriding the
   request's own `backend` field when given. See "Execution backends" below.
 - `--max-workers` — worker-pool size for the `local-parallel` backend,
@@ -132,7 +139,9 @@ this document (and the code) win.
   yield` and `klt signoff` accept the `.json.gz` file directly
   ([#5452](https://github.com/2AMLogic/klayout-tools/issues/5452)), so the
   compressed report is citable as manifest evidence with no decompressed
-  second copy.
+  second copy. Given together with `-o`, `--report-out` wins outright and
+  no implicit `<outdir>/report.json` copy is written (see `--outdir`
+  above).
 - `--plot` — write one self-contained, dependency-free waveform SVG per
   non-sweep signal per corner to this directory, forcing
   `options.waveforms`/`keep_artifacts` on for this run. See "Waveform
@@ -165,9 +174,15 @@ not hardcoded — first runnable candidate wins:
 
 An explicitly-named binary (option or env var) that is not runnable is a
 clear, actionable error naming which source named it — never a silent
-fallback to the next source. The resolved path is recorded in the response
-as `environment.ngspice_binary` (alongside `engine_version`), `null` for
-`engine: "xyce"` (below), which this issue adds no override for. Mirrors
+fallback to the next source. That strictness applies on the submitting host
+too, before any dispatch — an override naming a path only the runner has is
+refused at submit, so name a path (or bare `PATH` name) valid on both
+hosts. The runner re-resolves the override fresh from its own filesystem
+and `$PATH`, so what actually executes is the runner's copy — reported back
+as `environment.ngspice_binary` (alongside `engine_version`), with the
+submitter's own resolution kept as `environment.client_ngspice_binary`;
+`null` for `engine: "xyce"` (below), which this issue adds no override for.
+Mirrors
 `klt lvs`'s `options.netgen_binary`/`$KLT_NETGEN_BINARY`/
 `environment.netgen_binary` (issue #2373). `klt sim` has no `--check`/
 `--rerun` mode, so there is no drift-diff exclusion to add for this field.
@@ -179,9 +194,22 @@ with the engine it resolved and, on a mismatch, exits 1 *before simulating*
 with `error.code: "engine_version_unmet"` naming required vs found. A version
 that cannot be determined or parsed also fails (closed). On `local` and
 `local-parallel` the engine is probed (`ngspice --version` / `Xyce -v`) up
-front. `remote` and `batch` have no pre-submit probe, so the pin is checked
-against the version in the runner's report once the run returns; the job has
-already run by then. Which of the two applies is decided by the backend that
+front. `remote` and `batch` have no *submit-side* probe, but the pin is not
+post-run-only either: the job command is a plain
+`klt sim --backend local-parallel` on the runner, with the request
+forwarded verbatim, so a runner whose `klt` knows the field (0.8.0 and
+newer) enforces the pin there *before any corner simulates* and fails the
+job with `engine_version_unmet`. The refusal surfaces through the normal
+failed-job path — every unit of the job reports `batch_job_failed`, quoting
+the runner's error, with `runner_code: "engine_version_unmet"` — and,
+because the runner wrote no report, the submit-side check below then also
+fails closed with a top-level `engine_version_unmet`. That submit-side
+comparison against the report's `environment.engine_version` stays as the
+backstop for a runner too old to know the field: a pre-0.8.0 runner ignores
+the pin silently but reports no version either, so it still fails closed
+after the run (never a wrong-solver report), and the default
+`batch.runner_version_check: enforce` gate refuses such a version-skewed
+runner at submit. Which of the two applies is decided by the backend that
 *executes*, not the one first resolved: when a host-default off-host backend
 steps back to `local` late — a single-unit run, or `options.resume` — the pin
 is probed here up front, exactly as `--backend local` does (issue #5500);
@@ -6796,7 +6824,12 @@ x86-64 (elsewhere set `OPENVAF_R_BIN`). The `.osdi` lands in the ignored
   multiply `NFIN`). KLayout's `\$11` / `VDD$1` names become `11` / `VDD_1`.
   The extractor's `M` card (`finfet_card`) is unchanged: it stays the
   CDL-shaped card LVS compares. Measured: `NFIN=6` draws exactly twice the
-  drain current of `NFIN=3`.
+  drain current of `NFIN=3`. `*` comment lines pass through verbatim, so a
+  `* Generated by …` provenance header from the source lands unchanged in
+  the adapted copy: the adapted bytes are the adapter's output, not its
+  authorship claim. The adapted copy is a private work-dir artefact derived
+  from the request's `netlist` (`netlist_sha256_in`); `environment.adapt`'s
+  `netlist_sha256_out` pins the adapted bytes, inherited header included.
 - The extracted cell's separate `VDD`/`VDD$1` (tap vs. source) and
   `vsubs`/`VSS` pins are distinct nets; the testbench ties them.
 
