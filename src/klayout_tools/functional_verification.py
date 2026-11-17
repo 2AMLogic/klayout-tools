@@ -775,42 +775,9 @@ def _resolve_testbench(
             f"path: {module!r}"
         )
 
-    search_path = testbench.get("search_path")
-    if search_path is not None:
-        shape_error = FunctionalVerificationError(
-            "request.testbench.search_path must be a non-empty string or a "
-            "non-empty array of non-empty strings when given"
-        )
-        entries = [search_path] if isinstance(search_path, str) else search_path
-        if (
-            not isinstance(entries, list)
-            or not entries
-            or not all(isinstance(e, str) and e for e in entries)
-        ):
-            raise shape_error
-        search_dirs = [
-            os.path.abspath(e if os.path.isabs(e) else os.path.join(request_dir, e))
-            for e in entries
-        ]
-    else:
-        search_dirs = [os.path.abspath(request_dir)]
-    # Collapse resolved duplicates to their first occurrence (order-stable).
-    search_dirs = list(dict.fromkeys(search_dirs))
-
-    module_dirs = search_dirs
-    if not any(os.path.isfile(os.path.join(d, f"{module}.py")) for d in search_dirs):
-        location = (
-            "request.testbench.search_path"
-            if search_path is not None
-            else "next to the request"
-        )
-        expected = ", ".join(
-            f"'{os.path.join(d, f'{module}.py')}'" for d in search_dirs
-        )
-        raise FunctionalVerificationError(
-            f"testbench module not found: expected {expected} "
-            f"(request.testbench.module names a Python module resolved via {location})"
-        )
+    module_dirs = resolve_testbench_search_dirs(
+        testbench.get("search_path"), request_dir, module
+    )
 
     testcase = testbench.get("testcase")
     if testcase is not None:
@@ -1514,12 +1481,7 @@ def _resolve_env(env: Any, *, verilog_top: bool = False) -> dict[str, str]:
                 f"request.env[{key!r}] must be a string -- got a {type(value).__name__}"
             )
 
-    if "PYTHONPATH" in env:
-        raise FunctionalVerificationError(
-            "request.env cannot set PYTHONPATH -- cocotb overwrites it from the "
-            "calling process's sys.path, so it would silently do nothing; list "
-            "the directories in request.testbench.search_path instead"
-        )
+    _reject_env_pythonpath(env)
 
     if verilog_top and env:
         raise FunctionalVerificationError(
@@ -3173,6 +3135,10 @@ from .functional_verification_mutation_variant import (  # noqa: E402, F401
     _kill_process_tree,
     _mutation_subprocess_entry,
     _run_isolated_variant,
+)
+from .functional_verification_search_path import (  # noqa: E402, F401
+    _reject_env_pythonpath,
+    resolve_testbench_search_dirs,
 )
 from .functional_verification_verilog_top import (  # noqa: E402, F401
     _VERILOG_TOP_REJECTED_OPTIONS,
