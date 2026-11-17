@@ -85,14 +85,11 @@ from typing import Any
 
 from . import env_provenance
 from ._layout import load_layout, resolve_top_cell
-from ._provenance import build_provenance
-from .lef_header import read_lef_header
-from .pdk import (
-    PdkNotFoundError,
-    find_pdk,
-    lef_files,
-    load_gds_to_lef_layer_map,
-    resolve_klayout_layer_map,
+from ._provenance import INPUT_ROLE_LAYOUT, INPUT_ROLE_SOURCE, build_provenance
+from .lef_abstract_no_layout import (
+    resolve_dbu_um,
+    resolve_tech_context,
+    seed_outline_obs,
 )
 from .socket_check import (
     GROUND_NAME_TOKENS,
@@ -143,7 +140,7 @@ class LefAbstractError(Exception):
 
 
 def run_lef_abstract(
-    layout_path: str,
+    layout_path: str | None,
     socket_path: str,
     *,
     macro_name: str,
@@ -237,8 +234,16 @@ def run_lef_abstract(
     an unresolvable PDK or tech LEF for ``cell_library``, a write failure, or
     a failure to read the written file back for its self-check.
     """
-    layout = load_layout(layout_path, LefAbstractError)
-    top_cell = resolve_top_cell(layout, top, LefAbstractError, path=layout_path)
+    # Issue #5714: ``layout_path=None`` is the layout-free (``--no-layout``)
+    # mode -- a black-box abstract emitted from the socket descriptor alone.
+    layout: Any = None
+    top_cell: Any = None
+    if layout_path is None:
+        if top is not None:
+            raise LefAbstractError("top has no meaning without a layout")
+    else:
+        layout = load_layout(layout_path, LefAbstractError)
+        top_cell = resolve_top_cell(layout, top, LefAbstractError, path=layout_path)
 
     try:
         descriptor = _load_descriptor(socket_path)
@@ -254,36 +259,10 @@ def run_lef_abstract(
     if symmetry is not None and not all(isinstance(s, str) and s for s in symmetry):
         raise LefAbstractError("symmetry must be a list of non-empty strings")
 
-    try:
-        pdk_info = find_pdk(variant=pdk_variant, root=pdk_root)
-    except PdkNotFoundError as exc:
-        raise LefAbstractError(str(exc)) from exc
-
-    lefs = lef_files(cell_library, variant=pdk_info["variant"], root=pdk_info["root"])
-    tech_lef = lefs["tech_lef"]
-    if tech_lef is None:
-        raise LefAbstractError(
-            f"tech LEF not found for standard-cell library '{cell_library}' "
-            f"under resolved PDK install '{pdk_info['variant']}' at "
-            f"'{pdk_info['root']}'"
-        )
-    tech_header = read_lef_header(tech_lef)
-    routing_layers = {
-        layer["name"]: layer
-        for layer in tech_header["layers"]
-        if layer["type"] == "ROUTING"
-    }
-
-    layer_map_path, _layer_map_resolution = resolve_klayout_layer_map(pdk_info)
-    if layer_map_path is None:
-        raise LefAbstractError(
-            f"no KLayout GDS<->LEF layer map found for resolved PDK install "
-            f"'{pdk_info['variant']}' -- cannot translate socket descriptor "
-            "layers into LEF layer names"
-        )
-    gds_to_lef = load_gds_to_lef_layer_map(layer_map_path)
-
-    dbu_um = layout.dbu
+    pdk_info, tech_lef, tech_header, routing_layers, gds_to_lef = resolve_tech_context(
+        cell_library, pdk_variant, pdk_root, LefAbstractError
+    )
+    dbu_um = resolve_dbu_um(layout, tech_header, tech_lef, LefAbstractError)
     outline = descriptor["outline"]
     origin_x_dbu = round(outline["x0"] / dbu_um)
     origin_y_dbu = round(outline["y0"] / dbu_um)
@@ -343,13 +322,15 @@ def run_lef_abstract(
         deck_name=cell_library,
         deck_path=tech_lef,
         pdk=pdk_info,
-        input_path=layout_path,
+        input_path=layout_path if layout_path is not None else socket_path,
+        # Layout-free mode pins the descriptor (role "source") instead.
+        input_role=INPUT_ROLE_SOURCE if layout_path is None else INPUT_ROLE_LAYOUT,
     )
 
     return {
         "schema_version": SCHEMA_VERSION,
         # `{path, scope}` (issue #2703): the layout `provenance.input` hashes.
-        "file": env_provenance.repo_relative_path(layout_path),
+        "file": env_provenance.repo_relative_path(layout_path),  # None -> absent
         "socket": socket_path,
         "output": output_path,
         "macro_name": macro_name,
@@ -530,7 +511,11 @@ def _resolve_pins(
         y_dbu = round(pin["y"] / dbu_um)
         point = kdb.Point(x_dbu, y_dbu)
 
-        drawn_boxes = _match_drawn_boxes(layout, top_cell, search_layers, point)
+        drawn_boxes = (
+            _match_drawn_boxes(layout, top_cell, search_layers, point)
+            if layout is not None
+            else []
+        )
 
         if drawn_boxes:
             geometry_source = "drawn"
@@ -543,7 +528,9 @@ def _resolve_pins(
                     pin, lef_layer, routing_layers, x_dbu, y_dbu, dbu_um
                 )
             ]
-            if len(search_layers) > 1:
+            if layout is None:
+                searched_desc = "no layout (declaration-only abstract)"
+            elif len(search_layers) > 1:
                 sibling_desc = ", ".join(
                     f"{layer}/{datatype}" for layer, datatype in search_layers[1:]
                 )
@@ -727,7 +714,13 @@ def _resolve_obs(
     import klayout.db as kdb
 
     regions_by_layer: dict[str, Any] = {}
-    for layer_index in layout.layer_indexes():
+    if layout is None:
+        # Issue #5714: black-box semantics -- the whole outline blocks every
+        # routing layer; declared pin ports are subtracted below.
+        regions_by_layer = seed_outline_obs(
+            routing_layers, origin_x_dbu, origin_y_dbu, width_dbu, height_dbu
+        )
+    for layer_index in layout.layer_indexes() if layout is not None else ():
         info = layout.get_info(layer_index)
         lef_layer = gds_to_lef.get((info.layer, info.datatype))
         if lef_layer is None or lef_layer not in routing_layers:
