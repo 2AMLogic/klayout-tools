@@ -5,19 +5,14 @@ issue #4970). Unit tests need no simulator; the integration test runs the real
 from __future__ import annotations
 
 import json
-import os
-import shutil
 from pathlib import Path
 
 import pytest
 
+from helpers.tool_probes import SKIP_NO_NGSPICE as _SKIP_NO_NGSPICE
 from klayout_tools import sim, sim_steps
 
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
-
-HAVE_NGSPICE = shutil.which("ngspice") is not None and (
-    os.environ.get("KLT_SKIP_NGSPICE_TESTS") != "1"
-)
 
 _TRAN = {"kind": "tran", "args": "1u 1m"}
 _CORNERS = {"temperature_c": [27, 85, 125]}
@@ -143,7 +138,7 @@ def test_nodeset_echo_check_still_handles_dict_maps():
     sim._require_nodeset_echo(points, [{"nodeset": {"a": 1.0}}], backend="remote")
 
 
-@pytest.mark.skipif(not HAVE_NGSPICE, reason="ngspice is not installed")
+@_SKIP_NO_NGSPICE
 def test_real_run_uses_a_different_tran_card_per_corner(tmp_path: Path):
     (tmp_path / "body.spice").write_text("V1 in 0 1\nR1 in out 1k\nC1 out 0 1u\n")
     request = {

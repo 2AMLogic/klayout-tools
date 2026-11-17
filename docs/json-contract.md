@@ -980,10 +980,17 @@ stability statement, concrete precedents, and drift-detection guidance, and
   populated on a dirty tree; `klt_reinstall_spec` is `null` when the tree is
   dirty or the commit is unrecoverable. Never fabricated. A `.devN+g<sha>`
   `klt_version` is not published to an index, so `uvx --from
-  "klayout-tools==<version>"` fails by design; use `klt_reinstall_spec`. Both are
+  "klayout-tools==<version>"` fails by design; use `klt_reinstall_spec`. The
+  spec re-obtains the **klt axis only**; the canonical both-axes
+  reconstruction of a recording adds `--with "klayout==<klayout_version>"`
+  (issue #5884) — see [`docs/cli/version.md`](cli/version.md)'s
+  "Reproducing a recorded pin". Both are
   excluded from `--rerun`/`--check` drift like `klt_version`.
 - `klayout_version` — the KLayout Python engine build (`klayout.__version__`),
-  or `null` if unresolvable.
+  or `null` if unresolvable. To reproduce a recording byte-for-byte, pass
+  this recorded value to `uv`'s `--with "klayout==<klayout_version>"` next to
+  `klt_reinstall_spec` (issue #5884) — see
+  [`docs/cli/version.md`](cli/version.md)'s "Reproducing a recorded pin".
 - `klayout_version_mismatch` (issue #1490, `klt drc`/`klt lvs` only — see
   below) — `true` when this run's `klayout_version` differs from
   `klayout_version_expected` (`klt version --format json`, next section):
