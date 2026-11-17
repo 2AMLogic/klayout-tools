@@ -4998,9 +4998,9 @@ def _unescape_json_pointer_token(token: str) -> tuple[str, bool]:
     return "".join(out), True
 
 
-def _normalize_evidence_parts(raw: Any) -> list[dict[str, Any]] | None:
+def _normalize_evidence_parts(raw: Any) -> list[list[dict[str, Any]]] | None:
     """Normalize a **compound** item's manifest entry (issue #2025, T1 item
-    11 only) into a list of :func:`_normalize_evidence_entry` specs, or
+    11 only) into **groups** of :func:`_normalize_evidence_entry` specs, or
     ``None`` if any part matches neither evidence shape.
 
     A JSON array is the compound shape: every element is an ordinary
@@ -5011,20 +5011,38 @@ def _normalize_evidence_parts(raw: Any) -> list[dict[str, Any]] | None:
     reach ``"met"`` without the artifact that was mistyped. An empty array is
     likewise invalid: it cites nothing, but says it cites something.
 
-    A non-array entry is accepted too, as a one-element list -- so the
+    A non-array entry is accepted too, as a one-element group -- so the
     ordinary ``"11": "erc.json"`` shape is a well-formed (if, on its own,
     insufficient) citation rather than a schema error.
+
+    Issue #5597 adds the **grouped** form: an array whose every element is
+    itself such an array, one independent compound citation per element.
+    Nesting is all-or-nothing -- an outer list mixing a group with a bare
+    entry, or carrying an empty inner list, is ``None`` (invalid), mirroring
+    the rule that one malformed part fails the whole item rather than being
+    dropped. The result is always a list of groups, so the flat form is the
+    one-group case and nothing downstream needs two shapes.
     """
     if isinstance(raw, list):
         if not raw:
             return None
+        if any(isinstance(part, list) for part in raw):
+            groups: list[list[dict[str, Any]]] = []
+            for part in raw:
+                if not isinstance(part, list) or not part:
+                    return None
+                specs = [_normalize_evidence_entry(entry) for entry in part]
+                if any(spec is None for spec in specs):
+                    return None
+                groups.append([spec for spec in specs if spec is not None])
+            return groups
         specs = [_normalize_evidence_entry(part) for part in raw]
         if any(spec is None for spec in specs):
             return None
-        return [spec for spec in specs if spec is not None]
+        return [[spec for spec in specs if spec is not None]]
 
     spec = _normalize_evidence_entry(raw)
-    return None if spec is None else [spec]
+    return None if spec is None else [[spec]]
 
 
 def _resolve_relative_to_report(path: str, spec: dict[str, Any]) -> str | None:

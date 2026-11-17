@@ -804,6 +804,23 @@ def _print_power_delivery(citation: dict) -> None:
         )
 
 
+def _print_group_coverage(item: dict) -> None:
+    """Print T1 item 11's per-group coverage for a multi-group citation
+    (issue #5597): the grouped form's ``members_covered``/``members_total``
+    -- groups cited vs. groups that individually graded ``met`` -- are
+    otherwise reachable only through the JSON, and a reviewer reading the
+    terminal rendering must see the count a `met` (or `unmet`) verdict
+    rests on. Absent for a single-group citation, whose rendering is
+    unchanged, and for items 2/3/4, whose member counts stay JSON-only as
+    before."""
+    total = item.get("members_total")
+    if not total or total < 2:
+        return
+    print(
+        f"        groups: {item.get('members_covered')}/{total} cited groups graded met"
+    )
+
+
 def _format_coverage(coverage: dict) -> str:
     """One line summarising a `drc` citation's three disclosed `coverage`
     fields (issue #2002): each field's entry count, plus the first few
@@ -1003,6 +1020,9 @@ def _print_tier_report_text(result: dict, palette: Palette) -> None:
                 f"; it is in {result['source_doc']}, not this build's own doc)"
             )
         _print_not_applicable(item)
+        # Issue #5597: a multi-group item-11 citation states its group
+        # coverage in the text rendering too (the count is not JSON-only).
+        _print_group_coverage(item)
         citation = item["citation"]
         if citation:
             # Command-backed evidence (issue #825) has no static file --
