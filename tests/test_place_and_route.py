@@ -8708,8 +8708,7 @@ def _skipped_via_pad_trim(variant: str) -> dict:
     }
     counts = {"cells_touched": 0, "pads_trimmed": 0, "pads_shrunk": 0, "pads_left": 0}
     tip = {"violations": 0, "via_pad_violations": 0, "rules": []}
-    tip["router_fill_violations"] = 0
-    tip["router_fill_scan"] = None
+    tip |= {"router_fill_violations": 0, "router_fill_scan": None}
     return {**s, **counts, "layers": [], "tip_check": {**s, **tip}}
 
 
