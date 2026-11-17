@@ -4,6 +4,7 @@ the `--deck-file` override, and the `deck_not_found` diagnostic."""
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -12,7 +13,7 @@ import klayout_tools.drc_report_check as rc
 from klayout_tools._provenance import content_hash
 from klayout_tools.cli import main
 from klayout_tools.cli.output import render_check_text
-from klayout_tools.decks import asap7_rules
+from klayout_tools.decks import asap7_rules, deck_source_path
 from klayout_tools.drc import DrcError, check_drc_report, rerun_drc_report
 
 DECK = str(asap7_rules.DECK_PATH)
@@ -137,3 +138,103 @@ def test_crosscheck_native_side_resolves_packaged_deck(tmp_path):
     result = check_drc_report(str(path))
     assert result["status"] == "match"
     assert _deck_check(result)["field"] == "reports.native.provenance.deck.content_hash"
+
+
+def _curated_report(tmp_path: Path) -> str:
+    """A curated report whose ``deck`` is a name resolved through
+    :func:`deck_source_path` -- the shape an ``--engine both`` envelope's
+    curated side carries."""
+    layout = tmp_path / "top.gds"
+    layout.write_bytes(b"gds-bytes")
+    deck_path = deck_source_path("sky130")
+    doc = {
+        "engine": "curated",
+        "file": str(layout),
+        "deck": "sky130",
+        "provenance": {
+            "input": {"content_hash": content_hash(str(layout))},
+            "deck": {"content_hash": content_hash(deck_path)},
+        },
+    }
+    path = tmp_path / "curated.json"
+    path.write_text(json.dumps(doc))
+    return str(path)
+
+
+def test_crosscheck_override_applies_to_native_side_only(tmp_path):
+    vendor = tmp_path / "vendor.drc"
+    vendor.write_text("# vendor runset")
+    native = json.loads(
+        Path(
+            _report(
+                tmp_path, deck_hash=content_hash(str(vendor)), name="vendor_runset.drc"
+            )
+        ).read_text()
+    )
+    curated = json.loads(Path(_curated_report(tmp_path)).read_text())
+    path = tmp_path / "cc.json"
+    path.write_text(
+        json.dumps(
+            {"mode": "crosscheck", "reports": {"curated": curated, "native": native}}
+        )
+    )
+    result = check_drc_report(str(path), deck_path=str(vendor))
+    assert result["status"] == "match"
+    by_field = {c["field"]: c for c in result["checks"]}
+    # The override reaches the native side (its only recorded identity is
+    # the vendor runset) and must NOT replace the curated side's
+    # name-resolved deck with the vendor bytes.
+    assert by_field["reports.curated.provenance.deck.content_hash"]["match"] is True
+    native_check = by_field["reports.native.provenance.deck.content_hash"]
+    assert native_check["match"] is True
+    assert "deck_not_found" not in native_check
+
+
+def test_override_ignored_for_curated_report(tmp_path):
+    assert (
+        check_drc_report(_curated_report(tmp_path), deck_path=DECK)["status"] == "match"
+    )
+
+
+def test_nonexistent_override_is_a_failed_check_with_diagnostic(tmp_path):
+    missing = str(tmp_path / "typo.drc")
+    result = check_drc_report(_report(tmp_path), deck_path=missing)
+    check = _deck_check(result)
+    assert (result["status"], check["match"], check["actual"]) == (
+        "drifted",
+        False,
+        None,
+    )
+    entry = check["deck_not_found"]
+    assert entry["resolved"] == os.path.abspath(missing)
+    assert entry["name"] is None
+    assert "--deck-file" in entry["hint"]
+    assert "skipped" not in result
+
+
+def test_rerun_nonexistent_override_is_a_clean_error(tmp_path):
+    with pytest.raises(DrcError, match="deck not found"):
+        rerun_drc_report(_report(tmp_path), deck_path=str(tmp_path / "typo.drc"))
+
+
+def test_tree_deck_identity_uses_the_resolved_deck(tmp_path):
+    from klayout_tools.drc_klayout_engine import _deck_tree_identity
+
+    entry = tmp_path / "vendor.drc"
+    entry.write_text('# %include "tier.drc"\n')
+    (tmp_path / "tier.drc").write_text("# tier rules\n")
+    identity = _deck_tree_identity(str(entry))
+    assert identity is not None  # entry + include: a tree, not a single file
+    doc = json.loads(
+        Path(
+            _report(
+                tmp_path, deck_hash=content_hash(str(entry)), name="vendor_runset.drc"
+            )
+        ).read_text()
+    )
+    doc["provenance"]["deck"]["tree"] = {"content_hash": identity["content_hash"]}
+    path = tmp_path / "tree.json"
+    path.write_text(json.dumps(doc))
+    result = check_drc_report(str(path), deck_path=str(entry))
+    tree = next(c for c in result["checks"] if c["field"].endswith("tree.content_hash"))
+    assert (result["status"], tree["match"]) == ("match", True)

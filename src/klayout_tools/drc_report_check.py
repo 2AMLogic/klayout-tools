@@ -42,16 +42,24 @@ def resolve_report_deck(
     #5709). One resolver for ``--check``, ``--check --rerun`` and both sides of
     an ``--engine both`` report.
 
-    Order: (1) ``deck_override`` (``--deck-file``) always wins, existing or
-    not; (2) the report's own ``deck`` -- for ``--engine curated`` a deck
-    *name* resolved to its module source via :func:`deck_source_path`, for
-    ``--engine klayout`` the producing host's script path -- when it exists;
-    (3) ``provenance.deck.name`` against the packaged ``klayout_tools.decks``
-    scripts (``klayout`` engine only). Returns ``(None, diagnostic)`` when
-    none resolves; the check then fails (never skips).
+    Order: (1) ``deck_override`` (``--deck-file``) wins -- for a
+    ``klayout``-engine report only, so an ``--engine both`` envelope's
+    curated side keeps its name-resolved deck and a curated single report
+    ignores the flag, exactly as ``--rerun`` already rejects it -- and only
+    when it names an existing file; a missing override is itself the
+    ``deck_not_found`` diagnostic, never a silent ``None`` hash; (2) the
+    report's own ``deck`` -- for ``--engine curated`` a deck *name*
+    resolved to its module source via :func:`deck_source_path`, for
+    ``--engine klayout`` the producing host's script path -- when it
+    exists; (3) ``provenance.deck.name`` against the packaged
+    ``klayout_tools.decks`` scripts (``klayout`` engine only). Returns
+    ``(None, diagnostic)`` when none resolves; the check then fails
+    (never skips).
     """
-    if deck_override is not None:
-        return deck_override, None
+    if deck_override is not None and committed.get("engine") == "klayout":
+        if os.path.isfile(deck_override):
+            return deck_override, None
+        return None, deck_not_found_entry(deck_override, None, override=True)
     deck = committed.get("deck")
     if deck is None:
         return None, None

@@ -4148,14 +4148,19 @@ replayed). The two honoured overrides are the positional `<file>` (input) and
 `--deck-file` (deck).
 
 **Deck resolution order (issue #5709)**, shared by `--check`, `--check
---rerun` and the native side of an `--engine both` report: (1) `--deck-file
-<path>`, which always wins; (2) the report's recorded `deck` -- a deck name for
+--rerun` and both sides of an `--engine both` report: (1) `--deck-file
+<path>`, which wins for a `klayout`-engine report only -- a curated report
+(curated side included) ignores it and keeps resolving its recorded deck
+*name*, the same treatment `--rerun` already gives the flag -- and only when
+it names an existing file; (2) the report's recorded `deck` -- a deck name for
 `--engine curated`, the producing host's script path for `--engine klayout` --
 when it exists; (3) for `--engine klayout`, `provenance.deck.name` looked up as
 a plain basename among the decks packaged with klt (`asap7.drc`). Resolution
 never decides a verdict: the resolved bytes are still compared to the recorded
 `content_hash`, so a changed deck is `[DRIFTED]` with its real hash. When none
-of the three resolves, the deck check stays failed (`match: false`, `status:
+of the three resolves -- or `--deck-file` names no existing file, in which
+case the diagnostic names the override as the thing looked for -- the deck
+check stays failed (`match: false`, `status:
 "drifted"`, exit 3) and carries an additive `deck_not_found` key (`recorded`,
 `resolved`, `name`, `packaged_dir`, `hint`); `--rerun` raises an exit-1 error
 instead. Pass `--deck-file` to verify a vendor runset that has no packaged

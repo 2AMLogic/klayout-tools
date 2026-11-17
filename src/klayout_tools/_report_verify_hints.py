@@ -52,7 +52,9 @@ def input_not_found_entry(
     }
 
 
-def deck_not_found_entry(recorded: str, name: Any) -> dict[str, Any]:
+def deck_not_found_entry(
+    recorded: str, name: Any, *, override: bool = False
+) -> dict[str, Any]:
     """The ``deck_not_found`` diagnostic for a ``--engine klayout`` report
     whose deck resolves by no route (issue #5709). Additive key on the
     still-failing ``provenance.deck.content_hash`` check; never a skip.
@@ -62,15 +64,24 @@ def deck_not_found_entry(recorded: str, name: Any) -> dict[str, Any]:
     - ``name`` -- ``provenance.deck.name``, the basename looked up among the
       packaged decks (``packaged_dir``); ``None`` when the report has none.
     - ``hint`` -- how to supply the deck.
+    - ``override`` -- ``recorded`` is the ``--deck-file`` path itself, the
+      thing that was looked for (a miss is the flag's, not the report's);
+      ``name`` is ``None`` (no packaged lookup happened) and the hint names
+      the flag instead of suggesting it.
     """
     return {
         "recorded": recorded,
         "resolved": os.path.abspath(recorded),
-        "name": name,
+        "name": None if override else name,
         "packaged_dir": os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "decks"
         ),
-        "hint": "pass --deck-file <path to the deck script> to verify against it",
+        "hint": (
+            "--deck-file names no existing file; point it at the deck "
+            "script to verify against"
+            if override
+            else "pass --deck-file <path to the deck script> to verify against it"
+        ),
     }
 
 
