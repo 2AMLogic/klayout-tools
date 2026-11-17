@@ -3672,6 +3672,40 @@ before the circuit is even parsed. A request declaring neither `measurements[]`
 nor `options.waveforms` omits `save all` entirely, leaving that path
 byte-identical to before (issue #2521).
 
+### Warning when `save all` supersedes a body `.save` (issue #5622)
+
+That widening is silent in the report unless waveform capture is on, which is
+where it gets expensive: with `options.waveforms: true`, the generated `save all`
+makes `waveform.raw` hold every node of the flattened design rather than the few
+vectors the body's `.save` named (one reported run: 7.9 GB against 4.7 MB with
+`save_mode: "netlist"`). When **all four** of these hold, the run's
+request-level `diagnostics` array (and the `--dry-run` report, so it is visible
+before any corner runs) carries a `severity: "warning"`, `code:
+"save_all_supersedes"` entry naming both facts — the body restricted the set and
+the request widened it — and both remedies (`options.save_mode: "netlist"`,
+`options.save_vectors`):
+
+- the netlist body declares a top-level `.save` card;
+- `options.save_mode` resolves to `"all"` (declared or defaulted);
+- `options.save_vectors` is empty (a non-empty list already states the retained
+  set and emits `save <named vectors>`, not `save all`);
+- `options.waveforms` is true. A measurements-only request that supersedes a
+  body `.save` is the intended rescue described above, and its cost is not in
+  the rawfile, so it does not warn.
+
+Only a `.save` card counts. A `save` command inside a `.control` … `.endc`
+block, a `.save` inside a `.subckt`, and a `.probe` card do not (ngspice-47 does
+not treat `.probe` as a retention directive). Several `.save` cards produce one
+warning. Only the netlist body itself is scanned, not its `.include`/`.lib`
+closure, so a `.save` reachable only through an include is a documented miss.
+The warning is request-level, so `options.fail_on_diagnostic` (which grades
+per-corner diagnostics) does not turn a passing run into a failing one. It
+changes nothing ngspice receives.
+
+Each corner that keeps a rawfile also reports its size as
+`corners[].artifacts.raw_bytes`, so a surprise artifact size is visible without
+stat-ing the files.
+
 ### Solver options: `options.ngspice_options` (issue #3111)
 
 `options.ngspice_options` declares ngspice solver/convergence `.options` for
@@ -8310,6 +8344,7 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `no_such_vector`   | ngspice's own `Error: no such vector as ...` — emitted *alongside* `measurement` when the missing signal's name never resolved to a vector at all (issue #2521). See "Saved signal set (`save all`)" below for what this can and cannot tell you. |
 | `step_failed`      | An `analysis_steps[]` step's analysis produced no plot of its own (it failed, or the run ended before it) — read from `klt`'s own step markers in the log, never inferred from measurements. The step's own measurements are reported `value: null`/`status: "error"` under this one diagnostic (issue #2482). See "Several solves per corner" above. |
 | `derived_input_unavailable` | A measurement computed from other results (a derived measurement, or a step `expr` reading an earlier step) was **not graded** because at least one of its inputs produced no value in this corner (issue #2482). Distinguishes "an input was missing" from a derived expression that itself failed, which is an ordinary `measurement` diagnostic. |
+| `save_all_supersedes` | Issue #5622. The generated `save all` supersedes a `.save` card in the netlist body while `options.waveforms` is on, so `waveform.raw` holds every node rather than the body's restricted set. Request-level (not per-corner), always `severity: "warning"`; emitted in `--dry-run` too. See "Warning when `save all` supersedes a body `.save`" above. |
 | `waveform_too_large` | `waveform.raw` exceeded `options.waveform_max_bytes`, so the `waveform.raw.json` conversion was skipped (issue #3211). Always `severity: "warning"`; measurements and `status` are unaffected. See "Waveform size guard" above. |
 | `pass_failed` | An `analysis.passes` pass left no AC-analysis rawfile (the solve failed or never ran); the corner grades `error` (issue #3159). See "Multi-pass AC acquisition" above. A `tian` measurement naming that pass reports `[tian_pass_missing]` (issue #3160). |
 | `op_metastable` | `analysis.op_check` (issue #5077): a declared node of an `op` solution sits within `band * supply` of mid-rail, so the engine may have converged onto the unstable solution of a bistable circuit. `severity: "warning"` — grade unchanged unless listed in `options.fail_on_diagnostic`. See "Detecting a metastable operating point" above. |
@@ -9232,7 +9267,7 @@ corner-sweep rollup fields above are declared.
 | `measurements[]` | array\<object\>  | `name`, `value` (number, or `null` when unextractable), `unit`, `status` (`"pass"`/`"fail"`/`"error"`, plus `"absent"` for an `optional` measurement with no value — issue #2925, `value`/`margin` `null`, info diagnostic `measurement_absent` — and `"inconclusive"` when this value fell outside its declared plausibility bound — issue #2493), `margin` (`null` on that `"inconclusive"` path — `limits` never ran). An `options.fail_on_diagnostic` disqualification (issue #2492) leaves each measurement's own `status` alone — it applies to the whole corner — so a `pass` measurement inside an `inconclusive` corner is expected, and is exactly what the corner's marker diagnostic explains. Additive/optional (issue #2482, `analysis_steps[]` requests only): a step-scoped entry also carries `step` (its source step's name; its `name` is `<step>.<measurement>`), and any entry computed from other results carries `derived_from` (the `name`s of its inputs, in first-reference order). Absent for every scalar-`analysis` request. Additive/optional (issue #2868): an entry declared with `crossings` carries `value` = the crossing count and a `crossings` object `{times, edges, truncated}` (see "Threshold-crossing time series" above); absent on every other entry and when no series was extracted. Additive/optional (issue #2947): an entry declared with `cycle_mean` carries `value` = the cycle-aligned mean and a `cycle_mean` object `{t_start, t_end, cycles_used}` (see "Cycle-aligned mean" above); absent on every other entry and when no mean was computed. Additive/optional (issue #3033): an entry declared with `energy` carries `value` = the net energy (J) and an `energy` object `{net, gross, recovered, charge, from, to}` (see "Source energy over a transient window" above); absent on every other entry and when nothing was extracted. |
 | `steps`          | array\<object\>  | Additive/optional (issue #2482): present only on a corner of an `analysis_steps[]` request that was dispatched to the engine — one `{name, kind, status}` per declared step, in declaration order, `status` `"ok"` when that step's analysis produced its own plot and `"error"` otherwise (it failed, or the run was killed before reaching it). Absent for scalar-`analysis` requests and for corners that never started (`budget_exceeded`, `orphaned`, …). |
 | `diagnostics`    | array\<object\>  | `{ "severity": "error"\|"warning", "code": "...", "message": "..." }` — see the classification table above. `"warning"` occurs for a recovered `singular_matrix`/`nonconvergence` (does not affect `status`) and for the two grading markers, `inconclusive` and `implausible_solution` (issues #2492/#2493) — neither marker *causes* the status by itself; each records which of the two reasons graded this corner `inconclusive`. `waveform_too_large` (issue #3211) is also always a warning. Every other code is always `"error"`. A few codes carry additional code-specific fields beside these three (additive, no `schema_version` bump): `timeout_budget_unreachable`'s `reached_s`/`fraction`, `timestep_too_small`'s `time_s`/`timestep_s`/`node` (issue #2918). Empty for a clean run. |
-| `artifacts`      | object           | `{"log": ..., "raw": ..., "waveform": ..., "deck": ...}`, each an absolute path or `null`. All `null` unless `options.keep_artifacts` is true; `raw`/`waveform` additionally require `options.waveforms`. `deck` is the exact per-corner ngspice deck synthesized for this corner (`.lib`/`.temp`/`alter` lines included) -- the file ngspice actually consumed, not a hash of the unexpanded source netlist (see `environment.netlist_sha256` for that). Raw log text is **never** inlined into the JSON. Additive/optional (issue #1723): also carries `plots` (array of `{signal, path}`) when `--plot` was used and this corner's waveform rendered at least one signal. |
+| `artifacts`      | object           | `{"log": ..., "raw": ..., "waveform": ..., "deck": ...}`, each an absolute path or `null`. All `null` unless `options.keep_artifacts` is true; `raw`/`waveform` additionally require `options.waveforms`. `deck` is the exact per-corner ngspice deck synthesized for this corner (`.lib`/`.temp`/`alter` lines included) -- the file ngspice actually consumed, not a hash of the unexpanded source netlist (see `environment.netlist_sha256` for that). Raw log text is **never** inlined into the JSON. Additive/optional (issue #5622): `raw_bytes` (integer, the rawfile's size in bytes) is present only when a rawfile was kept. Additive/optional (issue #1723): also carries `plots` (array of `{signal, path}`) when `--plot` was used and this corner's waveform rendered at least one signal. |
 | `monte_carlo`    | object \| null   | `null` unless this corner is a Monte Carlo sample, else `{sample_index, seed, process_seed, mismatch_seed}` (plus `seed_scope`/`seed_mode`/`mismatch_scale` when the request declared them) — this sample's index and its derived seed components (`seed` is the combined value written as `.options seed=` in the generated deck). See "Monte Carlo sampling" above for the seed contract and the scope of the negative control (it does not cover decks that draw mismatch from ngspice's own RNG). |
 
 ### `coverage`

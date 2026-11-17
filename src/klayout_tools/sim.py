@@ -396,6 +396,7 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         "netlist",
         "model_bin_range",
         "model_bin_range_preflight",
+        "save_all_supersedes",
         "ngspice_fatal",
         "netlist_title_line",
         "no_such_vector",
@@ -4064,6 +4065,13 @@ def _run_sim_corners(
     bin_diagnostic = sim_bin_range.preflight_with_bins(
         netlist_path, models_lib, _find_width_ceiling_culprit, _MODEL_WIDTH_CEILING_UM
     )
+    save_diagnostic = _save_supersede_diagnostic(
+        netlist_path,
+        engine=engine,
+        save_mode=save_mode,
+        save_vectors=save_vectors,
+        want_waveforms=want_waveforms,
+    )
     if dry_run:
         published_runner: dict[str, Any] = {}
         feature_diagnostic = (
@@ -4080,6 +4088,7 @@ def _run_sim_corners(
             request,
             feature_diagnostic=feature_diagnostic,
             bin_range_diagnostic=bin_diagnostic,
+            save_diagnostic=save_diagnostic,
             published_runner=published_runner or None,
             engine=engine,
             backend=backend,
@@ -4567,6 +4576,7 @@ def _run_sim_corners(
         for d in (
             *remote_diagnostics,
             bin_diagnostic,
+            save_diagnostic,
         )
         if d
     ]:
@@ -4841,6 +4851,7 @@ def _build_dry_run_report(
     staged_model_environment: dict[str, Any],
     feature_diagnostic: dict[str, Any] | None = None,
     bin_range_diagnostic: dict[str, Any] | None = None,
+    save_diagnostic: dict[str, Any] | None = None,
     published_runner: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The ``klt sim --dry-run`` response (issue #3064): the request as
@@ -4891,7 +4902,9 @@ def _build_dry_run_report(
     }
     if published_runner is not None:
         report["published_runner"] = published_runner
-    if dry_diags := [d for d in (feature_diagnostic, bin_range_diagnostic) if d]:
+    if dry_diags := [
+        d for d in (feature_diagnostic, bin_range_diagnostic, save_diagnostic) if d
+    ]:
         report["diagnostics"] = dry_diags
     return report
 
@@ -7324,6 +7337,9 @@ class _NetlistDeclarations(NamedTuple):
     voltage_specs: dict[str, str]
     #: Raw file references of ``.include``/``.inc``/``.lib <file> <sect>``.
     includes: list[str]
+    #: Top-level ``.save`` cards (issue #5622). ``.probe`` is deliberately not
+    #: recorded: ngspice-47 does not treat it as a retention directive.
+    save_cards: list[str]
 
 
 def _netlist_declarations(netlist_text: str) -> _NetlistDeclarations:
@@ -7331,7 +7347,7 @@ def _netlist_declarations(netlist_text: str) -> _NetlistDeclarations:
     include references. ``.subckt`` bodies and ``.control`` blocks are
     skipped; ``.lib`` *section* bodies (``.lib tt`` ... ``.endl``) count as
     top level, since a loaded section is."""
-    decl = _NetlistDeclarations(set(), set(), {}, [])
+    decl = _NetlistDeclarations(set(), set(), {}, [], [])
     depth = 0
     for line in _top_level_cards(_logical_netlist_lines(netlist_text)):
         word = line.split(None, 1)[0].lower()
@@ -7342,6 +7358,59 @@ def _netlist_declarations(netlist_text: str) -> _NetlistDeclarations:
         elif not depth:
             _record_declaration(decl, line)
     return decl
+
+
+def _save_supersede_diagnostic(
+    netlist_path: str,
+    *,
+    engine: str,
+    save_mode: str,
+    save_vectors: tuple[str, ...],
+    want_waveforms: bool,
+) -> dict[str, Any] | None:
+    """Request-level warning when the generated ``save all`` supersedes a
+    ``.save`` card of the netlist body while waveform capture is on (issue
+    #5622). Never raises; reports presence only, so a ``.save`` reachable only
+    through ``.include``/``.lib`` is a documented miss.
+
+    Gated on every condition that makes the widening real *and* costly: a
+    top-level body ``.save``; ``save_mode`` ``"all"`` (``"netlist"`` emits no
+    card); no ``save_vectors`` (those emit ``save <named vectors>``, not
+    ``save all``); and ``waveforms`` on -- a measurements-only request that
+    supersedes a ``.save`` is #2521's intended rescue, and its cost is not in
+    the rawfile.
+    """
+    if (
+        engine == "xyce"
+        or save_mode != DEFAULT_SAVE_MODE
+        or save_vectors
+        or not want_waveforms
+    ):
+        return None
+    try:
+        with open(netlist_path, encoding="utf-8", errors="replace") as handle:
+            cards = _netlist_declarations(handle.read()).save_cards
+    except Exception:  # advisory only
+        return None
+    if not cards:
+        return None
+    return {
+        "severity": "warning",
+        "code": "save_all_supersedes",
+        "message": (
+            f"the netlist body restricts the saved signal set ({cards[0]}) but "
+            "the request widens it: the generated 'save all' supersedes the "
+            'body\'s .save card(s) (options.save_mode defaults to "all"), so '
+            "with options.waveforms on the waveform.raw artifact holds every "
+            "node of the flattened design and can be orders of magnitude "
+            "larger than the body's own .save implies. Set options.save_mode "
+            'to "netlist" to honor the body\'s .save, or options.save_vectors '
+            "to name the signals to keep; leave both unset to keep 'save all' "
+            "deliberately"
+        ),
+        "save_cards": len(cards),
+        "source": "netlist_save_cards",
+    }
 
 
 def _top_level_cards(lines: list[str]) -> list[str]:
@@ -7368,6 +7437,8 @@ def _record_declaration(decl: _NetlistDeclarations, line: str) -> None:
         decl.includes.append(line.split(None, 1)[1].strip())
     elif word == ".lib" and len(parts) >= 3:
         decl.includes.append(" ".join(parts[1:-1]))
+    elif word == ".save":
+        decl.save_cards.append(line)
     elif word == ".param" and len(parts) > 1:
         body = _PARAM_DECL_EXPR_RE.sub(" 0 ", lowered.split(None, 1)[1])
         decl.params.update(_PARAM_DECL_NAME_RE.findall(body))
@@ -8656,7 +8727,7 @@ def _run_corner(
 
     status = _grade_corner(diagnostics, measurement_results, disqualifying)
 
-    artifacts: dict[str, str | None] = {
+    artifacts: dict[str, str | int | None] = {
         "log": None,
         "raw": None,
         "waveform": None,
@@ -8674,6 +8745,7 @@ def _run_corner(
         if raw_path is not None and os.path.isfile(raw_path):
             artifacts["raw"] = raw_path
             raw_size = os.path.getsize(raw_path)
+            artifacts["raw_bytes"] = raw_size  # issue #5622
             try:
                 waveform_path = _persist_waveform_artifact(
                     raw_path,
