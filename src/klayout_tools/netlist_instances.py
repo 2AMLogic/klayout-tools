@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ._spice_tokens import split_spice_tokens
 from .netlist_paths import fold_continuations
 
 #: How many instance entries the payload's ``instances`` array keeps. Above
@@ -84,8 +85,15 @@ def _parse_card(card: str) -> dict[str, Any] | None:
     folded card, verbatim strings, last one winning on a duplicate key. A
     card with no ``key=value`` token (a bare resistor, a source) yields an
     empty ``params`` and a ``null`` ``model`` -- it is still an instance.
+
+    Tokens come from the shared :func:`klayout_tools._spice_tokens.split_spice_tokens`
+    -- never plain ``str.split`` -- so a quoted/parenthesised expression
+    value (``ad='int((nf+1)/2) * w/nf * 0.29'``) stays one verbatim value
+    instead of being truncated mid-quote, and ngspice's four ``w = 1``
+    spellings collapse to ``w=1`` before ``model`` is resolved (the failure
+    family issue #5461 converged the tokenizer for).
     """
-    tokens = card.split()
+    tokens = split_spice_tokens(card)
     name = tokens[0]
     if not name[0].isalpha():
         return None

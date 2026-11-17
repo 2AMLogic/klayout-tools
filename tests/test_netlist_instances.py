@@ -81,6 +81,39 @@ def test_wrapped_card_folds_continuations_into_params_and_model():
     assert entry["multiplier"] == {"m": "6", "mult": "6", "agree": True}
 
 
+def test_quoted_expression_value_survives_verbatim():
+    """A quoted area expression contains spaces -- ``ad='int((nf+1)/2) * w/nf
+    * 0.29'``, the sky130 shape ``netlist_paths.fold_continuations``'s own
+    docstring cites. Plain ``str.split`` truncated it mid-quote (params["ad"]
+    became the unbalanced ``'int((nf+1)/2)``) and silently dropped the rest,
+    while ``multiplier`` still reported ``agree`` -- a confident wrong value
+    in a documented-verbatim contract field. The shared tokenizer (#5461)
+    keeps the expression one token."""
+    card = (
+        "XM2 n1 n2 n3 n4 sky130_fd_pr__nfet_01v8 L=0.15 "
+        "ad='int((nf+1)/2) * w/nf * 0.29' mult=6 m=6\n"
+    )
+    (entry,) = parse_instance_cards(card)
+    assert entry["model"] == "sky130_fd_pr__nfet_01v8"
+    assert entry["params"]["L"] == "0.15"
+    assert entry["params"]["ad"] == "'int((nf+1)/2) * w/nf * 0.29'"
+    assert entry["multiplier"] == {"m": "6", "mult": "6", "agree": True}
+
+
+def test_spaced_equals_spellings_collapse_before_model_resolution():
+    """ngspice accepts four spellings of one assignment (``w=1``, ``w =1``,
+    ``w= 1``, ``w = 1``). Naive whitespace splitting read ``w`` as the
+    ``model`` (the exact failure ``_spice_tokens``' docstring records) and
+    lost the value; ``split_spice_tokens`` collapses them to ``w=1``
+    first."""
+    card = "XM1 d g s b sky130_fd_pr__nfet_01v8 w = 1 l = 0.15 mult=6 m=6\n"
+    (entry,) = parse_instance_cards(card)
+    assert entry["model"] == "sky130_fd_pr__nfet_01v8"
+    assert entry["params"]["w"] == "1"
+    assert entry["params"]["l"] == "0.15"
+    assert entry["multiplier"] == {"m": "6", "mult": "6", "agree": True}
+
+
 def test_multiplier_agree_is_false_when_the_forms_disagree():
     entry = parse_instance_cards("XM1 a b c d mod L=1 W=1\n+ mult=6 m=1\n")[0]
     assert entry["multiplier"] == {"m": "1", "mult": "6", "agree": False}
