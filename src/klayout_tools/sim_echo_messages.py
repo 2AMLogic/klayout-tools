@@ -54,6 +54,11 @@ def echo_identity(remote_environment: dict[str, Any] | None) -> str:
 _AXES = {
     "params": ("parameter", 3035, "the netlist default for every row"),
     "options": ("options", 3125, "the default solver tolerances for every rung"),
+    "supply_v": (
+        "supply-precision",
+        5870,
+        "every sub-milli rail rung under the legacy three-decimal corner_id",
+    ),
 }
 
 

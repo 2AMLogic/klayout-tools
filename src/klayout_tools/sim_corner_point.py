@@ -175,17 +175,25 @@ class CornerPoint:
         ``process`` defaults to ``"default"`` when the request declares no
         process axis. Multiple supply rails (an extension beyond the spike's
         single-``vdd`` example) are joined ``key=value`` pairs, sorted by key
-        for determinism.
+        for determinism. Each rail value is spelled ``.3f`` when that
+        spelling round-trips and at full precision otherwise (issue #5870 --
+        see :func:`_format_supply_value`), so two declared points whose rail
+        values differ only below three decimals keep distinct IDs and
+        distinct artifact directories.
         """
         process_label = self.process if self.process is not None else "default"
         if not self.supply_v:
             supply_label = "novdd"
         elif len(self.supply_v) == 1:
             (value,) = self.supply_v.values()
-            supply_label = f"{value:.3f}V"
+            supply_label = f"{_format_supply_value(value)}V"
         else:
             supply_label = (
-                "_".join(f"{k}={v:.3f}" for k, v in sorted(self.supply_v.items())) + "V"
+                "_".join(
+                    f"{k}={_format_supply_value(v)}"
+                    for k, v in sorted(self.supply_v.items())
+                )
+                + "V"
             )
         temp_label = _format_number(self.temperature_c)
         base = f"{process_label}/{supply_label}/{temp_label}C"
@@ -255,6 +263,30 @@ def _format_param_value(value: int | float) -> str:
     an integer, negative zero as ``0`` -- never a rounded or unit-suffixed
     form, so close-valued parameters keep distinct IDs."""
     return repr(_normalize_param_value(value))
+
+
+def _supply_value_needs_full_precision(value: int | float) -> bool:
+    """True when ``value`` differs from its legacy three-decimal supply
+    spelling, i.e. :func:`_format_supply_value` falls back to the round-trip
+    form to keep the point's :attr:`CornerPoint.corner_id` distinct
+    (issue #5870). This is what the off-host echo check gates on: a grid
+    with no such value cannot tell a legacy-``.3f`` runner image apart from
+    an updated one, and is not gated."""
+    spelled = f"{float(value):.3f}"
+    return float(spelled) != float(value)
+
+
+def _format_supply_value(value: int | float) -> str:
+    """Corner-ID text of one swept ``supply_v`` rail value (issue #5870): the
+    legacy ``.3f`` spelling when it round-trips, else the shortest round-trip
+    decimal (:func:`_format_param_value` -- the rule ``corners.params`` set
+    in #3035), so two points whose rail values differ only below three
+    decimals keep distinct IDs instead of silently sharing one artifact
+    directory. Every supply value exactly representable at three decimals
+    keeps its byte-identical legacy label."""
+    if _supply_value_needs_full_precision(value):
+        return _format_param_value(value)
+    return f"{float(value):.3f}"
 
 
 def _normalize_param_value(value: int | float) -> int | float:

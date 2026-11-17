@@ -109,12 +109,15 @@ def test_request_extra_tuple(tmp_path, matrix):
 
 
 def test_request_duplicate_tuple(tmp_path, matrix):
+    # Issue #5870: ``klt sim`` refuses a request whose declared points
+    # resolve to duplicate corner_ids, so corner-matrix reports the request
+    # itself as invalid instead of diffing tuples sim would never dispatch
+    # (the matrix side refuses its own duplicates the same way).
     req = _write(
         tmp_path / "r.json", {"corners": {**AXES, "process": ["tt", "ss", "tt"]}}
     )
-    out = check_corner_matrix(matrix, request_path=req)
-    assert len(out["duplicate"]) == 4 and not out["complete"]
-    assert out["coverage_complete"] is False
+    with pytest.raises(CornerMatrixError, match="request corners are invalid"):
+        check_corner_matrix(matrix, request_path=req)
 
 
 def test_request_mode_coverage_complete_equals_complete(tmp_path, matrix):

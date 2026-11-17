@@ -146,6 +146,16 @@ REQUEST_FEATURE_MIN_RUNNER_VERSION: dict[str, str | None] = {
     # older runner would drop the measurement). Untagged; its runner-side
     # detector is the "search" row of _RUNNER_REQUEST_FEATURES.
     "measurements[].search": None,
+    # Lossless supply corner_id spelling (#5870), 2026-11-16, after v0.9.0:
+    # a supply_v rail value finer than three decimals is spelled at full
+    # precision in corner_id instead of .3f, so sub-milli rungs keep distinct
+    # IDs and artifact directories. Untagged; its detector is the client-side
+    # _require_supply_echo check, which refuses a legacy-.3f runner response
+    # per dispatched point instead of merging mis-attributed units. Pin the
+    # first shipped version here (with a detector row in
+    # _RELEASED_FEATURE_DETECTORS) when a release contains it, so --dry-run
+    # refuses an older runner pre-submit.
+    "lossless supply_v corner_id spelling": None,
 }
 
 #: Upper bound on how much of the collected stderr file recovery reads (its

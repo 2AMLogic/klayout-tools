@@ -174,6 +174,34 @@ def _corner_points_from_wire(data: Any) -> list[CornerPoint]:
     return points
 
 
+def _refuse_duplicate_corner_id(
+    seen: dict[str, int], points: list[CornerPoint], point: CornerPoint
+) -> None:
+    """Record ``point``'s ``corner_id`` in ``seen``, refusing a point whose
+    ID a previous crossed point already claimed (issue #5870).
+
+    ``corners.units`` refuses duplicates the same way
+    (``_expand_corner_units``): colliding points would share one artifact
+    directory and one ``--resume`` checkpoint key, and one simulation would
+    be mis-attributed to every one of them. The lossless supply spelling
+    makes this unreachable for well-formed grids; it is the invariant
+    backstop that keeps a future lossy formatter from silently corrupting
+    a grid again.
+    """
+    corner_id = point.corner_id
+    if corner_id not in seen:
+        seen[corner_id] = len(points)
+        return
+    raise SimError(
+        f"corner point {len(points)} duplicates point "
+        f"{seen[corner_id]} (both resolve to corner_id "
+        f"'{corner_id}'): distinct declared points must "
+        "resolve to distinct corner_ids, or they would "
+        "share one artifact directory and one "
+        "simulation would be mis-attributed to each"
+    )
+
+
 def _expand_corners(
     corners_spec: dict[str, Any], exclude_spec: list[dict[str, Any]]
 ) -> list[CornerPoint]:
@@ -196,6 +224,12 @@ def _expand_corners(
 
     ``corners.units`` (issue #2993) is the alternative, non-crossing form: an
     explicit list of points executed exactly as given -- see `_expand_corner_units`.
+
+    Like ``corners.units``, duplicates are judged on ``corner_id``
+    (issue #5870): two crossed points that resolve to one ID are refused
+    rather than silently merged -- colliding points would otherwise share one
+    artifact directory and one checkpoint key, and one simulation would be
+    mis-attributed to every one of them.
     """
     sim_echo_messages.require_corners_object(corners_spec)
     if "units" in corners_spec:
@@ -237,6 +271,7 @@ def _expand_corners(
     _validate_exclude_options(exclude_spec, set(option_rows[0]))
 
     points: list[CornerPoint] = []
+    seen: dict[str, int] = {}
     for process, process_sections, process_section_libs in processes:
         for supply_v in supply_points:
             for variant_name, variant_sources in variants:
@@ -260,6 +295,7 @@ def _expand_corners(
                             supply_waveforms=supply_waveforms,
                         )
                         if not _is_excluded(point, exclude_spec):
+                            _refuse_duplicate_corner_id(seen, points, point)
                             points.append(point)
     return points
 

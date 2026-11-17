@@ -1966,6 +1966,7 @@ runner silently drops them ([#4212](https://github.com/2AMLogic/klayout-tools/is
 | `options.stage_model_inputs` | 0.7.0 |
 | `analysis_steps[].measurements[]` (noise analysis `.meas` cards) | unreleased |
 | `measurements[].search` | unreleased |
+| `lossless supply_v corner_id spelling` | unreleased |
 
 Safe on an old runner: a plain `measurements[]` `{name, spice}` `.meas` card
 and the plain-string `sections[]` form. Prefer them over `expr` when the
@@ -6970,6 +6971,21 @@ a corner grid. A stock ngspice without the module still produces the
   is never assumed to be DC. The rejection message names
   `corners.supply_waveforms` for a PWL/PULSE source; to sweep a ramped supply
   see the next entry.
+  **Corner identity ([#5870](https://github.com/2AMLogic/klayout-tools/issues/5870)).**
+  Each swept value is spelled into the `corner_id` (and hence the
+  artifact-directory slug) as `X.XXX` when that three-decimal spelling
+  round-trips, and at full precision otherwise — `0`, `1.5e-9` and `5e-7`
+  produce three distinct IDs where the legacy three-decimal formatting
+  collapsed all sub-milli rungs into one. Two declared points that still
+  resolve to one `corner_id` are refused with a `SimError` naming both
+  (mirroring `corners.units`), so one simulation can never be mis-attributed
+  to several corners through a shared artifact directory. On
+  `remote`/`batch`, a grid containing such a value must be answered by a
+  runner image that spells it the same way: every returned corner must echo
+  the dispatched `corner_id`, otherwise the request fails with error code
+  `supply_precision_unsupported_worker` and reports no result. A grid whose
+  values are all exactly representable at three decimals keeps its legacy
+  IDs byte-for-byte and is not gated.
 - **`corners.supply_waveforms`** (`array<string>`, optional; issue #2902) —
   names of `corners.supply_v` keys whose top-level **`PWL(...)`/`PULSE(...)`**
   source is *rescaled* per corner instead of `alter`ed. Every entry must also

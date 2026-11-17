@@ -222,6 +222,13 @@ from .sim_corners import (
 )
 from .sim_corners import _corner_points_to_wire as _corner_points_to_wire
 from .sim_decks import run_deck_request
+from .sim_echo_checks import (  # noqa: F401 -- codes stay public on ``sim``
+    _OFFHOST_BACKENDS,
+    PARAMS_UNSUPPORTED_WORKER_CODE,
+    SUPPLY_PRECISION_UNSUPPORTED_WORKER_CODE,
+    _require_params_echo,
+    _require_supply_echo,
+)
 from .sim_echo_messages import echo_unsupported_message
 from .sim_expr_hint import attach_expr_runner_hint as _attach_expr_runner_hint
 from .sim_osdi_pin import osdi_pdk_root_pin
@@ -553,14 +560,6 @@ SUPPORTED_NETLIST_SOURCES = ("schematic", "extracted")
 #: contract instead of provisioning an instance itself -- see
 #: :mod:`klayout_tools.sim_batch` and docs/cli/sim.md's "Batch backend".
 SUPPORTED_BACKENDS = ("local", "local-parallel", "remote", "batch")
-
-#: Backends whose corner reports this process does **not** construct: the
-#: corners come back from an independently-run box (``remote``) or job
-#: instance (``batch``) as a JSON report, so there is no local
-#: :class:`CornerPoint`-keyed dispatch loop here to gate on a checkpoint, a
-#: deadline, or a calibration probe of *this* host's hardware. Both
-#: ``options.resume`` and the fail-fast probe are refused/skipped for these.
-_OFFHOST_BACKENDS = ("remote", "batch")
 
 #: Host-level default backend (2am#1004): consulted only when neither the
 #: ``--backend`` flag nor the request's own ``backend`` field names one. A
@@ -4198,6 +4197,9 @@ def _run_sim_corners(
         )
 
     _require_params_echo(
+        dispatch_points, corners_new, backend=backend, env=remote_environment
+    )
+    _require_supply_echo(
         dispatch_points, corners_new, backend=backend, env=remote_environment
     )
     _require_nodeset_echo(dispatch_points, corners_new, backend=backend)
@@ -7920,53 +7922,6 @@ def _classify_engine_diagnostics(
     if engine == "xyce":
         return _classify_xyce_diagnostics(log_text)
     return _classify_diagnostics(log_text, netlist_path)
-
-
-PARAMS_UNSUPPORTED_WORKER_CODE = "params_unsupported_worker"
-
-
-def _require_params_echo(
-    points: list[CornerPoint],
-    corners: list[dict[str, Any]],
-    *,
-    backend: str = "remote",
-    env: dict[str, Any] | None = None,
-) -> None:
-    """Fail the request when an off-host worker did not honor a parameter
-    axis (issue #3035).
-
-    A worker that predates ``corners.params`` ignores the field -- it would
-    run every row at the netlist's default and report ``pass`` under the
-    legacy corner ID. A worker that supports it echoes each point's
-    normalized ``params`` and its parameter-suffixed ``corner_id``, so the
-    caller compares both against what it dispatched. This is independent of
-    any version check (which compares only major.minor), so it also catches
-    a same-release runner image built before the feature landed.
-    """
-    if backend not in _OFFHOST_BACKENDS or not any(p.params for p in points):
-        return
-    problem: str | None = None
-    if len(corners) != len(points):
-        problem = (
-            f"it returned {len(corners)} corner report(s) for "
-            f"{len(points)} dispatched point(s)"
-        )
-    else:
-        for point, corner in zip(points, corners, strict=True):
-            if corner.get("corner_id") != point.corner_id or (
-                corner.get("params") or {}
-            ) != (point.params or {}):
-                problem = (
-                    f"corner {point.corner_id!r} came back as "
-                    f"{corner.get('corner_id')!r} with params "
-                    f"{corner.get('params')!r}"
-                )
-                break
-    if problem is not None:
-        raise SimError(
-            echo_unsupported_message("params", problem, env),
-            code=PARAMS_UNSUPPORTED_WORKER_CODE,
-        )
 
 
 OPTIONS_UNSUPPORTED_WORKER_CODE = "options_unsupported_worker"

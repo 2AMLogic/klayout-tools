@@ -14530,11 +14530,6 @@ def test_expand_corners_units_defaults_and_bundle():
         ({"units": [{"temperature_c": "hot"}]}, [], "temperature_c"),
         ({"units": [{"bogus": 1}]}, [], "unknown key"),
         ({"units": [{"process": "tt"}, {"process": "tt"}]}, [], "duplicates"),
-        (
-            {"units": [{"supply_v": {"vdd": 0.1004}}, {"supply_v": {"vdd": 0.1001}}]},
-            [],
-            "duplicates",
-        ),
     ],
 )
 def test_expand_corners_units_validation(corners, exclude, match):
