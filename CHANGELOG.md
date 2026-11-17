@@ -31,6 +31,18 @@ not `klt --version`, if you need to detect this kind of drift. See
   `not_comparable`; per-`fleet[]` under sharding) beside
   `pdk_revision_asserted` -- it never changes the run's outcome. See
   `docs/cli/sim.md`.
+- **Fixed** (#5664, `klt lvs` `--engine klayout-runset`; no JSON field
+  changes, `schema_version` stays 3): a `pin.unmatched` finding whose pin
+  pair KLayout's own comparer graded `Match`/`MatchWithWarning` — a
+  reference pin with no layout counterpart, i.e. an *unlabelled* layout pin,
+  the shape a runset global like IHP sg13g2's `ignore_top_ports_mismatch`
+  exists to accept — is now disclosed with `severity: "warning"` instead of
+  `error`, so it no longer flips the wrapper's verdict to `mismatch`
+  (exit 3) on a compare the wrapped runset itself reports as PASS. The
+  finding stays listed in `mismatches[]` and `category_counts`, but
+  `error_count`/`category_error_counts` and the `status` now agree with the
+  engine's own grade; `counts.pins` still reports structural pin presence,
+  and a pin pair the comparer itself graded otherwise remains an error.
 - **`klt sim --attach <batch-shards.json>` accepts a map written by a
   `--hosts N` / `remote.hosts: N` run** (#5777, 2026-11-17): `--attach` and
   `--collect-partial` refused every `hosts != 1` request with "requires backend
@@ -58,6 +70,16 @@ not `klt --version`, if you need to detect this kind of drift. See
   and the Verilog-top path. `path`/`scope` is the repo-relative shape, so a
   source outside the repo reads `{"path": null, "scope": "external"}` and never
   leaks a host path. No `schema_version` bump.
+- **Added** (#5644, 2026-11-16): `klt sim --op-lint` now reports an additive
+  top-level `unexpanded_instance_count` — the number of `X` instances whose
+  `.subckt` was found in neither the netlist body nor its `.include` closure
+  and which are not recognised MOS models (typically PDK passive primitives
+  defined only in `models.lib`, which the hierarchy walk does not read), so
+  lint coverage is measurable without parsing `diagnostics[]`. When a
+  `models.lib` was resolved, each such instance's `unsupported_hierarchy`
+  warning now says its definition may live in the model library instead of
+  implying the netlist alone was searched; without a model library the
+  wording is unchanged.
 - **`klt sim` refuses `measurements[].transfer` declared beside `noise`**
   (#5695, 2026-11-14): the mutually exclusive measurement forms each carried a
   hand-maintained list of "every *other* exclusive form", and `transfer`'s
@@ -70,6 +92,30 @@ not `klt --version`, if you need to detect this kind of drift. See
   `noise` now fails validation with the usual "alternative forms of a
   measurement" error instead of running; every other refusal and message is
   byte-identical. `klt sim`'s `schema_version` is unaffected.
+- **`klt sim`: an off-host report's `environment.engine_build` now describes
+  the worker, not the submitting client** (#5566, 2026-11-13): on an
+  `engine_host: "worker"` report (`--backend batch`/`remote`),
+  `environment.engine_version` has always been the worker's, while
+  `engine_build` was the submitter's own `ngspice --version` probe — so one
+  report could pair a worker-sourced version with a client-sourced banner
+  naming a different ngspice, and a consumer recording both emitted
+  self-contradicting simulator provenance. `engine_build` is now taken from
+  `environment.remote.worker_environment.simulator.version_banner` under the
+  same rule `ngspice_binary` uses (capture `"ok"`; a sharded run only when
+  every member agrees), with `binary_sha256: null` because the worker capture
+  carries no digest, and `probe`/`reason` explaining any missing banner rather
+  than falling back to the client's. The client's probe is kept verbatim under
+  the new `environment.client_engine_build`, present only on off-host reports.
+  This is the same correction #3110 made for `ngspice_binary` and is treated
+  as a bug fix against the already-documented `engine_host` contract, not a
+  new one — but it **changes what `environment.engine_build` means on an
+  off-host report**: a consumer that read it as the client's build must read
+  `client_engine_build` instead. Keys are otherwise unchanged;
+  `worker_environment.engine_build_comparison` still compares the worker's
+  banner with the client's probe, `engine_host: "local"` reports are
+  identical, `engine: "xyce"` keeps `engine_build: null`, and deck-list
+  reports gain no field. No `schema_version` bump (additive key; the
+  re-pointed field is a correction).
 - **`klt yield`: a damaged gzip input is an error envelope, not a traceback**
   (#5543, 2026-11-13): a gzip samples or `--limits` file whose deflate stream
   is *corrupt* — as opposed to truncated, or carrying a bad CRC trailer, both
@@ -805,6 +851,13 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## 0.9.0 (2026-11-05)
 
+- **`klt lvs` emits `topology.known_limitation`** (issue #6162, recorded
+  retroactively; introduced in #4819 and shipped in 0.9.0 without an entry):
+  a `warning`-severity `mismatches[].category` added when a mismatching
+  FinFET compare's top cell is one of the pinned unsupported ASAP7 RVT library
+  cells (drawn folded-stack or series-order topology differs from the library
+  CDL). It names the cell and never changes `status`, so the compare stays
+  `mismatch`.
 - **`klt gen` names its PCell child cell `<cell-name>__core`** (issue #4251,
   documented in [`docs/cli/gen.md`](docs/cli/gen.md)): on generators that
   emit a PCell child (all except `asap7_finfet`/`asap7_tap`, which flatten
@@ -5360,6 +5413,13 @@ conventional-commit breaking marker (`!:` / `BREAKING CHANGE`) and no
 1→2 bumps plus a new constant at 1; `FLEET_REPORT_SCHEMA_VERSION` rose 1→3);
 compatibility notes, where they matter, are in the entries below.
 
+- **`klt lvs` emits `net.supply_fragmented`** (issue #6162, recorded
+  retroactively; introduced in #2078 and shipped in 0.6.0 without an entry):
+  a `warning`-severity `mismatches[].category` added when a supply name from
+  `options.supply_nets` (default `GND`/`VCC`/`VDD`/`VGND`/`VPWR`/`VSS`) spans
+  more than one disconnected layout net in a circuit. One entry per circuit
+  and supply, with `details.supply` and `details.fragment_count`; it does not
+  change `status`.
 - **Fixed** (#2312, `klt gen bjt_array` geometry + `klt gen-compose`
   via-drop, **no** `schema_version` bump — but the `COLL_*` ports' reported
   `layer` and the drawn collector-ring layer both change on sky130, see
