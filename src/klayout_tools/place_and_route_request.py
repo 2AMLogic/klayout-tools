@@ -529,15 +529,15 @@ _TRACK_KEYS = ("x_offset_um", "x_pitch_um", "y_offset_um", "y_pitch_um")
 
 
 def _validate_floorplan_tracks(tracks: Any) -> None:
-    """Issue #4088: validate ``request.floorplan.tracks``, the optional
-    per-layer ``make_tracks`` definitions that replace the bare
-    ``make_tracks`` (which aborts on a tech LEF with a negative ``OFFSET``)."""
+    """Issue #4088/#5671: validate ``request.floorplan.tracks``, the per-layer
+    ``make_tracks`` definitions replacing the bare ``make_tracks`` (negative
+    ``OFFSET`` abort); a layer may repeat, only byte-identical entries error."""
 
     if not isinstance(tracks, list) or not tracks:
         raise PlaceAndRouteError(
             "request.floorplan.tracks must be a non-empty array of objects"
         )
-    seen: set[str] = set()
+    seen: dict[tuple[str, float, float, float, float], int] = {}
     for index, entry in enumerate(tracks):
         where = f"request.floorplan.tracks[{index}]"
         if not isinstance(entry, dict):
@@ -545,11 +545,6 @@ def _validate_floorplan_tracks(tracks: Any) -> None:
         layer = entry.get("layer")
         if not isinstance(layer, str) or not layer:
             raise PlaceAndRouteError(f"{where}.layer must be a non-empty string")
-        if layer in seen:
-            raise PlaceAndRouteError(
-                f"request.floorplan.tracks names layer '{layer}' more than once"
-            )
-        seen.add(layer)
         for key in _TRACK_KEYS:
             value = entry.get(key)
             if (
@@ -562,6 +557,11 @@ def _validate_floorplan_tracks(tracks: Any) -> None:
                 raise PlaceAndRouteError(f"{where}.{key} must be > 0")
             if key.endswith("offset_um") and value < 0:
                 raise PlaceAndRouteError(f"{where}.{key} must be >= 0")
+        if (sig := (layer, *(entry[k] for k in _TRACK_KEYS))) in seen:
+            raise PlaceAndRouteError(
+                f"{where} duplicates request.floorplan.tracks[{seen[sig]}]"
+            )
+        seen[sig] = index
 
 
 def validate_tech_lef_track_offsets(
