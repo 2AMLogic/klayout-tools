@@ -171,7 +171,7 @@ def _read_runset_netlist(lvsdb_path: str) -> tuple[Any, Any]:
     owner = kdb.LayoutVsSchematic()
     try:
         owner.read(lvsdb_path)
-    except Exception as exc:  # noqa: BLE001 - any read failure is one error
+    except Exception as exc:  # any read failure is one error
         raise ExtractError(
             f"could not read the runset's .lvsdb database '{lvsdb_path}': {exc}"
         ) from exc
@@ -299,7 +299,7 @@ def _write_netlist(
     try:
         with stage("netlist_write"):
             netlist.write(netlist_path, writer, description)
-    except Exception as exc:  # noqa: BLE001 - one error envelope
+    except Exception as exc:  # one error envelope
         if scratch_dir is not None:
             shutil.rmtree(scratch_dir, ignore_errors=True)
         raise ExtractError(f"could not write netlist '{netlist_path}': {exc}") from exc
