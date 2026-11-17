@@ -199,6 +199,31 @@ def test_unknown_pdk_raises(tmp_path):
         run_seal_ring_check(_write(tmp_path / "a.gds", _clean_shapes()), "nope")
 
 
+def test_pdk_mode_envelope_has_provenance_and_anchored_file(tmp_path):
+    path = _write(tmp_path / "a.gds", _clean_shapes())
+
+    report = run_seal_ring_check(path, "sg13g2")
+
+    assert report["schema_version"] == 2
+    assert report["file"] == {"path": None, "scope": "external"}
+    assert str(tmp_path) not in json.dumps(report)
+    prov = report["provenance"]
+    assert prov["pdk"]["name"] == "sg13g2"
+    assert prov["pdk"]["source"] == "built-in"
+    assert prov["deck"] is None
+    assert prov["input"]["role"] == "layout"
+
+
+def test_pdk_not_checked_carries_envelope(tmp_path):
+    path = _write(tmp_path / "a.gds", _clean_shapes())
+
+    report = run_seal_ring_check(path, "sky130")
+
+    assert report["status"] == "not_checked"
+    assert report["schema_version"] == 2
+    assert "provenance" in report
+
+
 def test_layers_mode_output_unchanged(tmp_path):
     path = _write(tmp_path / "a.gds", {_EDGESEAL: _ring()})
     assert main(["ring-check", path, "--layers", "[[39,0]]"]) == 0

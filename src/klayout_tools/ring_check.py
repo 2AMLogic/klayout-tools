@@ -56,6 +56,9 @@ from typing import Any
 from ._layout import clip_box as _clip_box
 from ._layout import load_layout
 from ._layout import select_top_cells as _select_top_cells_shared
+from ._provenance import build_provenance
+from .env_provenance import repo_relative_path
+from .ring_check_enclosed import _partition_enclosed
 
 #: Stable rule id carried by every ring-continuity violation this module
 #: emits -- the same contract guarantee a ``klt drc`` rule id or a ``klt lvs``
@@ -120,8 +123,9 @@ def run_ring_check(
     ``docs/cli/ring-check.md``)::
 
         {
-            "schema_version": 1,
-            "file": <path as provided>,
+            "schema_version": 2,
+            "file": {"path": <repo-relative POSIX path> | None,
+                     "scope": "repo" | "external"},
             "layers": [[layer, datatype], ...],
             "region_um": [left, bottom, right, top] | None,
             "cells": ["<name>", ...] | None,  # the effective --cells scope
@@ -236,8 +240,11 @@ def run_ring_check(
     )
 
     return {
-        "schema_version": 1,
-        "file": layout_path,
+        # schema_version 2 (issue #5650): `file` re-shaped from the raw input
+        # string to the anchored `{path, scope}` object -- a breaking change.
+        # The additive `provenance` block alone would not have bumped it.
+        "schema_version": 2,
+        "file": repo_relative_path(layout_path),
         "layers": [[layer, datatype] for layer, datatype in layers],
         "region_um": list(region_um) if region_um is not None else None,
         "cells": list(selected_cells) if selected_cells is not None else None,
@@ -245,6 +252,7 @@ def run_ring_check(
         "status": "broken" if violations else "continuous",
         "violation_count": len(violations),
         "violations": violations,
+        "provenance": build_provenance(input_path=layout_path),
     }
 
 
@@ -459,47 +467,6 @@ def _assert_annulus(
             polygon=polygon,
         )
     ]
-
-
-def _partition_enclosed(kdb: Any, polygons: list[Any]) -> tuple[list[Any], list[Any]]:
-    """Split ``polygons`` into ``(outer, enclosed)``.
-
-    ``enclosed`` is every polygon that lies strictly inside a hole of another
-    polygon in the same list -- the "outermost annulus" classification step
-    for ``--ignore-enclosed`` (issue #550). A guard/tap ring drawn around a
-    device that shares the ring's own drawn layer merges to two disjoint
-    polygons: the annulus, plus whatever sits inside its hole. That second
-    polygon is the protected circuit, not a ring fragment, so it belongs in
-    ``enclosed`` rather than counting toward the annulus assertion.
-
-    For each polygon that has holes, every *other* polygon whose shape is
-    fully contained in one of those holes (checked via ``Region`` boolean
-    subtraction: ``other - hole_region`` is empty) is classified as enclosed.
-    A polygon that is only partially inside a hole, or lies entirely outside
-    every hole (a genuine break in the ring's own perimeter), is never
-    reclassified -- so this cannot mask a real fragmentation.
-    """
-    enclosed_indices: set[int] = set()
-    for outer_index, outer in enumerate(polygons):
-        hole_count = outer.holes()
-        if hole_count == 0:
-            continue
-
-        hole_region = kdb.Region()
-        for hole_index in range(hole_count):
-            hole_points = list(outer.each_point_hole(hole_index))
-            hole_region += kdb.Region(kdb.SimplePolygon(hole_points))
-        hole_region.merge()
-
-        for other_index, other in enumerate(polygons):
-            if other_index == outer_index or other_index in enclosed_indices:
-                continue
-            if (kdb.Region(other) - hole_region).is_empty():
-                enclosed_indices.add(other_index)
-
-    outer_polygons = [p for i, p in enumerate(polygons) if i not in enclosed_indices]
-    enclosed_polygons = [p for i, p in enumerate(polygons) if i in enclosed_indices]
-    return outer_polygons, enclosed_polygons
 
 
 def _locate_gaps(kdb: Any, region: Any) -> list[Any]:
