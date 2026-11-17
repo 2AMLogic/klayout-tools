@@ -293,6 +293,9 @@ ignore_missing_imports = false
 show_error_codes = true
 show_column_numbers = true
 pretty = false
+# Error out on `# type: ignore` comments mypy proves unnecessary (issue #5939
+# follow-up to #5685); the baseline ratchet cannot see these, so gate them here.
+warn_unused_ignores = true
 
 # KLayout's Python bindings ship no usable type information.
 [[tool.mypy.overrides]]
@@ -361,6 +364,9 @@ select = [
     "S602",  # subprocess shell=True
     "S604",  # shell=True call
     "S605",  # os.system-style shell
+    # Flag `# noqa` directives whose violation ruff no longer reports, so the
+    # suppression surface cannot re-accrete (issue #5939, #5685 follow-up).
+    "RUF100",  # unused noqa directive
 ]
 
 [tool.ruff.lint.mccabe]
