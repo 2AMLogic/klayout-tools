@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from helpers.artifact_envelope import env as _envelope
 from helpers.cocotb_fakes import FakeCocotbRunner as _FakeRunner
 from klayout_tools import functional_verification as fv
 from klayout_tools import functional_verification_sdf_rename as fvr
@@ -320,7 +321,7 @@ def test_stubbed_report_names_every_renamed_instance(tmp_path, monkeypatch):
     )
 
     sdf = report["environment"]["sdf"]
-    assert sdf["file"] == str(tmp_path / "route.sdf")
+    assert sdf["file"] == _envelope(None, "external")
     assert sdf["renamed"] == _expected_renamed()
     assert sdf["partial"] is False
 
