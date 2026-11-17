@@ -296,7 +296,13 @@ def _execute_members(
     cannot hold the process open) while a replacement worker keeps the
     concurrency; an interrupt (``KeyboardInterrupt``/``SystemExit``) turns every
     unfinished member into a ``set_interrupted`` entry instead of exiting
-    silently."""
+    silently.
+
+    Issue #5849: the replacement is admitted only while no abandoned member
+    still holds a ``pending`` job -- the set then holds no more fleet capacity
+    than it has member threads. A job that never launches cannot starve the
+    set: past one more ``launch_budget`` the unstarted members become
+    ``not_launched`` entries instead of being submitted."""
     return _MemberScheduler(
         paths, manifest, launch_budget, SET_POLL_INTERVAL_S, run_member
     ).run(workers)

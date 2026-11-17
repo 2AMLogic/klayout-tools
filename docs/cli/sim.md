@@ -1405,7 +1405,16 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   whose job was accepted but stays `pending` longer than that budget becomes an
   entry with `status: "error"`, `exit_code: 4` and `error.code: "not_launched"`;
   its job id stays in `job_ids` and the manifest so it can be cancelled or
-  attached. Finished members keep their results. An interrupt
+  attached. Finished members keep their results.
+  Admission rule ([#5849](https://github.com/2AMLogic/klayout-tools/issues/5849)):
+  a replacement member is admitted only while no abandoned member still holds a
+  `pending` job, so the set never holds more fleet capacity than
+  `--max-in-flight × --max-concurrent-jobs` plus the abandoned members'
+  already-submitted jobs. If a held job never launches, the remaining unstarted
+  members become `not_launched` entries naming that job id (with no job ids of
+  their own) one more `--wait-for-capacity` window after the abandonment,
+  instead of being submitted; the set then terminates.
+  An interrupt
   (`KeyboardInterrupt`/`SystemExit`) turns every unfinished member into a
   `set_interrupted` entry; the envelope and manifest are still written. Without
   a wait budget the pending wait is unbounded, as before.

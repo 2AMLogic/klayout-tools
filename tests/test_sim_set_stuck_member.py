@@ -1,7 +1,9 @@
 """``--batch-set`` with a member stuck pending / an interrupt (issue #5324)."""
 
 import json
+import os
 import threading
+import time
 
 from klayout_tools import sim_set
 from klayout_tools.sim_batch_observer import current_job_observer
@@ -51,7 +53,13 @@ def test_stuck_member_becomes_not_launched_entry(tmp_path, monkeypatch):
     assert manifest["requests"][2]["error_code"] == sim_set.NOT_LAUNCHED_CODE
 
 
-def test_stuck_member_with_max_in_flight_one_still_runs_the_rest(tmp_path, monkeypatch):
+def test_never_launching_job_ends_unstarted_members_as_not_launched(
+    tmp_path, monkeypatch
+):
+    """Issue #5849: with ``max_in_flight=1`` the unstarted members must not be
+    submitted while an abandoned member's job still holds fleet capacity. A
+    job that never leaves ``pending`` ends them as ``not_launched`` entries
+    (naming the held job) instead of piling more submissions onto the fleet."""
     _fast_poll(monkeypatch)
     paths = _write_set(tmp_path, 3)
     release = threading.Event()
@@ -65,7 +73,122 @@ def test_stuck_member_with_max_in_flight_one_still_runs_the_rest(tmp_path, monke
         )
     finally:
         release.set()
-    assert [e["status"] for e in report["requests"]] == ["error", "pass", "pass"]
+    entries = report["requests"]
+    assert [e["status"] for e in entries] == ["error", "error", "error"]
+    assert entries[0]["error"]["code"] == sim_set.NOT_LAUNCHED_CODE
+    for entry in entries[1:]:
+        assert entry["error"]["code"] == sim_set.NOT_LAUNCHED_CODE
+        assert "job-stuck" in entry["error"]["message"]
+        assert entry["job_ids"] == []
+    assert report["status"] == "error"
+    manifest = json.loads((tmp_path / "out" / sim_set.MANIFEST_FILENAME).read_text())
+    for i in (1, 2):
+        assert manifest["requests"][i]["error_code"] == sim_set.NOT_LAUNCHED_CODE
+        assert manifest["requests"][i]["job_ids"] == []
+
+
+def _manifest_entry(tmp_path, index: int) -> dict:
+    manifest = json.loads((tmp_path / "out" / sim_set.MANIFEST_FILENAME).read_text())
+    return manifest["requests"][index]
+
+
+def test_replacement_waits_for_held_pending_job_then_admits(tmp_path, monkeypatch):
+    """Issue #5849: the admission gate. While an abandoned member's job is
+    last seen ``pending``, no replacement is admitted; once it leaves
+    ``pending``, the set resumes and runs the rest."""
+    _fast_poll(monkeypatch)
+    paths = _write_set(tmp_path, 3)
+    held = threading.Event()
+    proceed = threading.Event()
+    admitted: list[str] = []
+
+    def fake_run(path, **kwargs):
+        admitted.append(os.path.basename(path))
+        observer = current_job_observer()
+        if "req0" in path:
+            observer.on_job("job-held")
+            observer.on_state("job-held", "pending")
+            held.set()
+            proceed.wait(30)
+            observer.on_state("job-held", "running")
+        return _fake_report()
+
+    result: dict = {}
+
+    def drive() -> None:
+        result["report"] = sim_set.run_sim_set(
+            paths,
+            outdir=str(tmp_path / "out"),
+            max_in_flight=1,
+            run=fake_run,
+            capacity_wait_s=0.2,
+        )
+
+    worker = threading.Thread(target=drive, daemon=True)
+    worker.start()
+    try:
+        assert held.wait(5)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if (
+                _manifest_entry(tmp_path, 0).get("error_code")
+                == sim_set.NOT_LAUNCHED_CODE
+            ):
+                break
+            time.sleep(0.01)
+        assert _manifest_entry(tmp_path, 0)["error_code"] == sim_set.NOT_LAUNCHED_CODE
+        time.sleep(0.08)  # several scheduler scans with the gate closed
+        assert admitted == ["req0.json"]
+        assert _manifest_entry(tmp_path, 1)["status"] == "pending"
+    finally:
+        proceed.set()
+    worker.join(10)
+    assert [e["status"] for e in result["report"]["requests"]] == [
+        "error",
+        "pass",
+        "pass",
+    ]
+    assert admitted == ["req0.json", "req1.json", "req2.json"]
+
+
+def test_interrupt_while_gate_held_still_terminates(tmp_path, monkeypatch):
+    """Issue #5849 edge: an interrupt landing while another member is held
+    pending still gives every member an entry and returns (no hang). A member
+    admitted through the normal pipeline before the gate closed keeps its
+    result; only replacement admissions wait."""
+    _fast_poll(monkeypatch)
+    paths = _write_set(tmp_path, 3)
+    held = threading.Event()
+    release = threading.Event()
+
+    def fake_run(path, **kwargs):
+        observer = current_job_observer()
+        if "req0" in path:
+            observer.on_job("job-held")
+            observer.on_state("job-held", "pending")
+            held.set()
+            release.wait(30)
+            return _fake_report()
+        if "req1" in path:
+            raise KeyboardInterrupt
+        return _fake_report()
+
+    try:
+        report = sim_set.run_sim_set(
+            paths,
+            outdir=str(tmp_path / "out"),
+            max_in_flight=2,
+            run=fake_run,
+            capacity_wait_s=0.05,
+        )
+    finally:
+        release.set()
+    assert len(report["requests"]) == 3
+    by_index = {e["index"]: e for e in report["requests"]}
+    assert by_index[0]["error"]["code"] == sim_set.NOT_LAUNCHED_CODE
+    assert by_index[1]["error"]["code"] == sim_set.SET_INTERRUPTED_CODE
+    assert by_index[2]["status"] == "pass"
+    assert report["status"] == "error"
 
 
 def test_single_member_set_stuck(tmp_path, monkeypatch):

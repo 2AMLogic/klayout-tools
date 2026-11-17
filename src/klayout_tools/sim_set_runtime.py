@@ -1,7 +1,7 @@
 """Runtime pieces of ``klt sim --batch-set``: the incremental manifest, the
 per-member shard tracker and the worker-thread scheduler (split out of
 :mod:`klayout_tools.sim_set` to keep that module under the file-size ceiling;
-issues #3520, #5014, #5324)."""
+issues #3520, #5014, #5324, #5849)."""
 
 from __future__ import annotations
 
@@ -153,6 +153,16 @@ class _ShardTracker:
                     return job_id
         return None
 
+    def pending_job(self) -> str | None:
+        """A job id last seen ``pending``, in first-sight order (issue
+        #5849). Last *seen*: once the member's worker stops observing (its
+        ``run`` returned), the frozen state is what the gate acts on."""
+        with self._lock:
+            for job_id, job in self._jobs.items():
+                if job["last_state"] == "pending":
+                    return job_id
+        return None
+
     def summary(self, report: dict[str, Any] | None) -> list[dict[str, Any]]:
         """Per-shard rows (job id order of first sight); shards a
         ``--collect-partial`` read left unfinished carry the state it read."""
@@ -219,6 +229,8 @@ class _MemberScheduler:
         self.results: list[dict[str, Any] | None] = [None] * len(paths)
         self.started: set[int] = set()
         self.abandoned: set[int] = set()
+        self.abandoned_at: dict[int, float] = {}
+        self.replacement_debt = 0
         self.pending = list(range(len(paths)))
         self.cond = threading.Condition()
         self.stopping = False
@@ -257,8 +269,54 @@ class _MemberScheduler:
     def _spawn(self) -> None:
         threading.Thread(target=self._worker, daemon=True).start()
 
+    def _held_job(self) -> str | None:
+        """A job of an abandoned member last seen ``pending`` -- fleet
+        capacity the set still holds beyond its live members (issue #5849)."""
+        for index in sorted(self.abandoned):
+            job_id = self.trackers[index].pending_job()
+            if job_id is not None:
+                return job_id
+        return None
+
+    def _admit_replacements(self) -> None:
+        """Issue #5849: a replacement member is admitted only while no
+        abandoned member still holds a ``pending`` job, so the set's fleet
+        footprint matches its thread footprint instead of growing once per
+        abandonment under congestion. A job that never launches cannot starve
+        the rest: once one stays ``pending`` a further ``launch_budget`` past
+        its member's abandonment, the unstarted members become
+        ``not_launched`` entries naming the held job rather than being
+        submitted (caller holds ``cond``)."""
+        held = self._held_job()
+        if held is None:
+            while self.replacement_debt > 0 and self.pending:
+                self.replacement_debt -= 1
+                self._spawn()
+            return
+        now = time.monotonic()
+        for index in sorted(self.abandoned):
+            abandoned_at = self.abandoned_at.get(index)
+            job_id = self.trackers[index].pending_job()
+            if (
+                abandoned_at is None
+                or job_id is None
+                or now - abandoned_at <= self.launch_budget
+            ):
+                continue  # inside the grace window, or not scan-abandoned
+            message = (
+                f"batch job {job_id} of abandoned member {index} is still "
+                f"pending {self.launch_budget:g}s after its abandonment; "
+                "not submitting the remaining members while it holds fleet "
+                "capacity -- cancel or attach it by job id"
+            )
+            while self.pending:
+                self._finish(self.pending.pop(0), NOT_LAUNCHED_CODE, message)
+            self.replacement_debt = 0
+            return
+
     def _scan_stalled(self) -> None:
-        """Abandon members whose job sat pending past the budget (holds ``cond``)."""
+        """Abandon members whose job sat pending past the budget, then apply
+        the admission gate (holds ``cond``)."""
         if self.launch_budget is None:
             return
         for index in sorted(self.started):
@@ -274,7 +332,9 @@ class _MemberScheduler:
                 f"within {self.launch_budget:g}s (still pending); cancel or "
                 "attach it by job id",
             )
-            self._spawn()
+            self.abandoned_at[index] = time.monotonic()
+            self.replacement_debt += 1
+        self._admit_replacements()
 
     def _flush_interrupted(self, exc: BaseException) -> None:
         with self.cond:
