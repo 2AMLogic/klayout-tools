@@ -189,7 +189,7 @@
     },
     {
       "path": "src/klayout_tools/cli/parser.py",
-      "lines": 5247
+      "lines": 5097
     },
     {
       "path": "src/klayout_tools/cli/pdk_cmd.py",
@@ -473,7 +473,7 @@
     },
     {
       "path": "src/klayout_tools/op_sanity.py",
-      "lines": 1848
+      "lines": 1844
     },
     {
       "path": "src/klayout_tools/parasitic_integrity.py",
@@ -501,7 +501,7 @@
     },
     {
       "path": "src/klayout_tools/pex.py",
-      "lines": 3739
+      "lines": 3716
     },
     {
       "path": "src/klayout_tools/place_and_route.py",
@@ -985,7 +985,7 @@
     },
     {
       "path": "tests/test_pex.py",
-      "lines": 7547
+      "lines": 7535
     },
     {
       "path": "tests/test_place_and_route.py",
