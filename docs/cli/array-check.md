@@ -50,8 +50,8 @@ Emitted through the shared envelope (`docs/json-contract.md`).
 
 ```json
 {
-  "schema_version": 1,
-  "file": "column.gds",
+  "schema_version": 2,
+  "file": {"path": "column.gds", "scope": "repo"},
   "layers": [[68, 20]],
   "cell": "BIT",
   "mirror_axis": "x",
@@ -75,9 +75,33 @@ Emitted through the shared envelope (`docs/json-contract.md`).
       "bbox": {"left": 12.0, "bottom": 3.0, "right": 14.0, "top": 5.0,
                "width": 2.0, "height": 2.0}
     }
-  ]
+  ],
+  "provenance": {
+    "klt_version": "0.9.2",
+    "klayout_version": "0.30.13",
+    "pdk": null,
+    "deck": null,
+    "input": {"content_hash": "sha256:f2ff80...", "role": "layout"}
+  }
 }
 ```
+
+### Top-level fields
+
+| Field             | Type                    | Description |
+| ----------------- | ----------------------- | ----------- |
+| `schema_version`  | integer                 | `2`. Version 2 (issue #5788): `file` was re-shaped from the raw input string to the `{path, scope}` envelope; the `provenance` block was added additively and carries no bump of its own. |
+| `file`            | object                  | The checked layout, as the committable `{"path", "scope"}` envelope: `scope: "repo"` with a repo-relative POSIX `path` when the layout lives inside the repo the invocation resolved, `{"path": null, "scope": "external"}` when it does not. The producing host's absolute path is never echoed; pin an external input by `provenance.input.content_hash` instead. |
+| `layers`          | array \| null           | The checked layer set as `[layer, datatype]` pairs; `null` for a pure abutment request. |
+| `cell`            | string \| null          | `--cell` as given (the flattened root for symmetry, the unit cell for abutment). |
+| `mirror_axis` / `at_um` / `translate_um` | string \| number \| array \| null | The symmetry request echoed back; the two `null` when only abutment ran. |
+| `tolerance_um`    | number (float)          | As given (default `0.0`). |
+| `pitch_um` / `count` / `direction` | number \| integer \| string \| null | The abutment request echoed back; `direction` is `null` when `--pitch` was not given. |
+| `dbu_um`          | number (float)          | Database unit in micrometres. |
+| `status`          | string                  | `clean` \| `violated` — the verdict. Gate on this, not the exit code. |
+| `violation_count` | integer                 | Number of violations. |
+| `violations`      | array\<object\>         | Sorted deterministically; see the bullets below. |
+| `provenance`      | object                  | The shared provenance block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) — see [`docs/json-contract.md`](../json-contract.md). `pdk`/`deck` are always `null` (this command resolves neither); `input.content_hash` is the input file's own SHA-256. |
 
 - `layer` is `null` for abutment violations, which also carry `measured_um`
   and `expected_um`.

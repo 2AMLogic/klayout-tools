@@ -387,7 +387,7 @@ def supply_key(supply_v: dict[str, Any] | None) -> tuple[tuple[str, float], ...]
     return tuple(sorted((str(k), float(v)) for k, v in (supply_v or {}).items()))
 
 
-class CornerStimulusLines(tuple):  # type: ignore[type-arg]
+class CornerStimulusLines(tuple):
     """Deck lines of a supply-relative schedule (issue #3918).
 
     As a tuple it holds the distinct lines across corners (so a checkpoint

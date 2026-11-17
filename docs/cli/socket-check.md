@@ -151,7 +151,7 @@ derivation, lives in [`klt lef-abstract`'s own doc](lef-abstract.md#socket-descr
 | Socket descriptor field | LEF translation |
 | --- | --- |
 | `outline` | The macro's `ORIGIN 0 0` + `SIZE`. |
-| `pins[]` | One `PIN <name>` block each — `direction`/`use` from the descriptor when given, else a documented name-based heuristic; `PORT` geometry from real drawn metal at the pin's position, else a synthesized placeholder box. |
+| `pins[]` | One `PIN <name>` block each — `direction`/`use` from the descriptor when given, else a documented name-based heuristic; `PORT` geometry from real drawn metal at the pin's position, else a synthesized placeholder box (with `klt lef-abstract --no-layout`, always synthesized — the descriptor alone is sufficient input). |
 | `reserved_layers[]` | **Not translated** — describes layers reserved *for the integrator*, the opposite of a macro's own `OBS`. |
 | `budgets[]` | **Not translated** — no LEF representation for an unverified interface budget. |
 | (everything else drawn, on a routing-type layer) | `OBS`, per LEF layer. |
