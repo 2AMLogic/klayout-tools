@@ -780,7 +780,7 @@ says which input edge produces the *rising* output edge under this arc's own
 | `options.keep_artifacts` | boolean | Keep the ngspice log/deck. Default `false`; `--keep-artifacts` overrides. |
 | `options.resume` | boolean | Same as `--resume`. Default `false`. |
 | `options.osdi_preload` | array of string | `.osdi` shared libraries to `pre_osdi`, forwarded to `klt sim`'s `options.osdi_preload`. See "OSDI (Verilog-A) model preload". |
-| `netlist_source` | string | Forwarded to `klt sim` (`"schematic"` / `"extracted"`), for provenance on a post-extraction run. |
+| `netlist_source` | string | Forwarded to `klt sim` (`"schematic"` / `"extracted"` / `"gate-level"`), for provenance on a post-extraction or gate-level run. |
 | `batch` | object | Forwarded verbatim to every generated `klt sim` request (each cell's main sweep and constraint decks), e.g. `{"capacity_wait_s": 600}`; `--wait-for-capacity` overrides it. |
 
 ### Non-unate arcs

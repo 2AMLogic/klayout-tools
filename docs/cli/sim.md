@@ -8678,7 +8678,8 @@ of the follow-up wiring (tracked on #3088).
 
 ## Post-layout verification (`netlist_source`)
 
-`request.netlist_source` (optional, `"schematic"` | `"extracted"`) lets a
+`request.netlist_source` (optional, `"schematic"` | `"extracted"` |
+`"gate-level"`) lets a
 caller declare which side of the design loop a given `netlist` represents. It
 is a plain data field — `klt sim` never tries to infer provenance from the
 netlist file itself (a schematic-level netlist and one extracted from a
@@ -8688,6 +8689,17 @@ provided, it is echoed back verbatim in the response's
 `environment.netlist_source`; when omitted, `environment` has no such key and
 every other field is unaffected — this is an additive, backward-compatible
 change.
+
+`"schematic"` is the pre-layout declaration and `"extracted"` the post-layout
+one (below). `"gate-level"` (issue #5638) declares the third kind of
+provenance a mixed-level campaign needs: a netlist assembled from a
+structural (post-synthesis or post-route) netlist plus a timing library —
+event-driven primitives (e.g. XSPICE `d_*` models with `adc_bridge`/
+`dac_bridge`) whose delays were reduced from a Liberty deck — so a digital
+block can be co-simulated beside an analog macro without claiming either
+that a schematic produced it or that layout extraction did. `klt sim` builds
+no such netlist itself; the value only states, truthfully, where the one in
+`request.netlist` came from.
 
 The intended use is the post-layout re-verification pass: after Loop B
 converges (DRC/LVS clean), run `klt extract` on the layout and re-run the
@@ -9000,7 +9012,7 @@ the *response* echoes back.
 | `options.ngspice_init`   | array\<string\>   | Issue #2520. Lines materialized as a `.spiceinit` file inside each corner's own artifact directory (`cwd=` for that corner's `ngspice` invocation), most commonly `["set ngbehavior=hsa"]` to select a compatibility mode for vendor decks written in HSPICE style. Defaults to unset — no `.spiceinit` is written (no behavior change). `engine: "ngspice"` only; accepted-and-ignored for `"xyce"`. See "ngspice's working directory, and `.spiceinit` compatibility mode" above. |
 | *(CLI-only)* `--plot <dir>` | string         | No request-document equivalent (like `trajectory --plot`) — writes one waveform SVG per non-sweep signal per corner to `<dir>`, forcing `options.waveforms`/`keep_artifacts` on for this run. See "Waveform plots" above. |
 | `expect_netlist_identity` | string           | Optional (issue #3074). The `environment.netlist_identity` stamp of the record this run is compared against. When present and different from the identity computed for this request, `klt sim` refuses before simulating (application error, exit 1) with a message naming both stamps. Absent or matching changes nothing. Also refused if the identity cannot be computed (see `netlist_identity_error`). |
-| `netlist_source`         | string            | Optional caller-declared provenance of `netlist`: `"schematic"` (pre-layout, e.g. an S6 sizing netlist) or `"extracted"` (post-layout, from `klt extract`). Omit for unchanged behavior — the field is purely additive. An unrecognized value is an application error (exit 1). See "Post-layout verification" below. |
+| `netlist_source`         | string            | Optional caller-declared provenance of `netlist`: `"schematic"` (pre-layout, e.g. an S6 sizing netlist), `"extracted"` (post-layout, from `klt extract`), or `"gate-level"` (a netlist assembled from a structural post-synthesis/post-route netlist plus a timing library — event-driven primitives with Liberty-derived delays; issue #5638). Omit for unchanged behavior — the field is purely additive. An unrecognized value is an application error (exit 1). See "Post-layout verification" below. |
 | `decks[]`                | array\<object\>   | Issue #2804. **Deck-list request**: declares pre-composed caller-owned ngspice decks to transport, instead of the corner matrix above. When present, `netlist`/`corners`/`analysis`/`measurements` and friends must be absent, and the report takes the deck shape (`mode: "decks"`). Per-unit fields (`id`, `deck`, `inputs`, `outputs`, `timeout_s`) and the preservation/isolation contract are documented in "Pre-composed decks" above. |
 
 ### Response

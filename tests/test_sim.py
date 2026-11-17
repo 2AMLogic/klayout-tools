@@ -649,7 +649,13 @@ def test_run_sim_netlist_source_invalid_value_raises(tmp_path):
             "analysis": {"kind": "tran", "args": "1n 1u"},
         },
     )
-    with pytest.raises(sim.SimError, match="unsupported netlist_source"):
+    with pytest.raises(
+        sim.SimError,
+        match=(
+            r"unsupported netlist_source 'post-layout' "
+            r"\(supported: schematic, extracted, gate-level\)"
+        ),
+    ):
         sim.run_sim(str(request))
 
 
@@ -4841,14 +4847,16 @@ def test_run_sim_stubbed_pass(tmp_path, monkeypatch):
     }
 
 
-@pytest.mark.parametrize("netlist_source", ["schematic", "extracted"])
+@pytest.mark.parametrize("netlist_source", ["schematic", "extracted", "gate-level"])
 def test_run_sim_stubbed_netlist_source_echoed_in_environment(
     tmp_path, monkeypatch, netlist_source
 ):
     # request.netlist_source, when present and valid, is echoed verbatim
     # into environment.netlist_source (see docs/cli/sim.md's "Post-layout
     # verification" section) -- this is how a caller distinguishes a
-    # pre-layout (S6) sim pass from a post-layout (S9) one.
+    # pre-layout (S6) sim pass from a post-layout (S9) one, or a gate-level
+    # netlist assembled from a structural netlist plus a timing library
+    # (issue #5638) from either.
     _write_body(tmp_path)
     request = _write_request(
         tmp_path,

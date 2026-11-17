@@ -527,12 +527,16 @@ SUPPORTED_ENGINES = ("ngspice", "xyce")
 #: Recognised values for the optional ``request.netlist_source`` field --
 #: caller-declared provenance of ``request.netlist``, distinguishing a
 #: pre-layout schematic-level netlist (S6 in the stage graph) from a
-#: post-layout netlist extracted from the laid-out design (S9). Mirrors the
+#: post-layout netlist extracted from the laid-out design (S9), and from a
+#: gate-level netlist assembled from a structural (post-synthesis or
+#: post-route) netlist plus a timing library (issue #5638) -- event-driven
+#: cards whose delays were reduced from a Liberty deck, neither from a
+#: schematic nor from layout extraction. Mirrors the
 #: caller-declares-intent pattern already used for ``engine``/``backend``
 #: rather than trying to auto-detect provenance from the netlist file itself
 #: (fragile -- a schematic and an extracted netlist can look syntactically
 #: identical). See docs/cli/sim.md and docs/design/design-pipeline.md.
-SUPPORTED_NETLIST_SOURCES = ("schematic", "extracted")
+SUPPORTED_NETLIST_SOURCES = ("schematic", "extracted", "gate-level")
 
 #: Execution backends behind ``run_sim``. ``local`` runs the corner matrix
 #: sequentially in-process (the original behaviour). ``local-parallel`` fans
