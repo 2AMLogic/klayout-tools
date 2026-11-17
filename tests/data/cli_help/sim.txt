@@ -36,3 +36,5 @@ options:
   --op-lint-corner OP_LINT_CORNER corner_id from this request's own corner matrix to bias the --op-lint operating point at (default: the first expanded corner), or 'all' to also bias every other corner and report the worst Vds-Vdsat margin per corner in corner_margins. Ignored without --op-lint.
   --pdk-root PDK_ROOT pin the PDK install root for this run, as if the request had models.pdk_root (wins over it; relative paths resolve against the CWD); disables the first- match-wins search and its ambiguity warning
   --format {text,json} output format (default: text)
+  --check REPORT instead of simulating, re-verify a finished klt sim report's environment.netlist_closure/netlist_identity against the working tree (no engine, network or PDK). Exit 0 match, 3 drifted, 1 unreadable report. See docs/cli/sim.md.
+  --root ROOT with --check: directory to anchor scope=repo closure entries to

@@ -114,6 +114,15 @@ not `klt --version`, if you need to detect this kind of drift. See
   warning now says its definition may live in the model library instead of
   implying the netlist alone was searched; without a model library the
   wording is unchanged.
+- **Added** (#5808, additive — no `schema_version` bump): `klt gen` reports a
+  top-level `subcell_naming_scheme` string id (`"core-suffix-v1"`: the PCell
+  sub-cell is `<cell_name>__core`; `"pdk-cell-v1"`: sg13g2 `bjt_array` keeps
+  the PDK cell's own name; `null`: output flattened, no sub-cell remains) so
+  callers committing generated GDS can detect naming drift mechanically.
+  Sub-cell naming itself changed earlier (#4251) from KLayout's default
+  variant name (e.g. `mos_array`, or `$N`-suffixed in older builds) to
+  `<cell_name>__core`. The scheme id must change whenever the naming changes.
+
 - **`klt sim` refuses `measurements[].transfer` declared beside `noise`**
   (#5695, 2026-11-14): the mutually exclusive measurement forms each carried a
   hand-maintained list of "every *other* exclusive form", and `transfer`'s

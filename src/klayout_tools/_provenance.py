@@ -44,17 +44,27 @@ import hashlib
 import os
 import re
 import subprocess
-import sys
 import tempfile
 from collections.abc import Callable, Mapping
 from typing import Any
 
 from . import build_identity
-from ._digest import content_hash as content_hash
-from ._digest import content_hash_bytes as content_hash_bytes
-from ._digest import content_hash_required as content_hash_required
-from ._digest import sha256_file as sha256_file
-from ._digest import sha256_file_required as sha256_file_required
+from ._digest import (
+    content_hash as content_hash,
+)
+from ._digest import (
+    content_hash_bytes as content_hash_bytes,
+)
+from ._digest import (
+    content_hash_required as content_hash_required,
+)
+from ._digest import (
+    sha256_file as sha256_file,
+)
+from ._digest import (
+    sha256_file_required as sha256_file_required,
+)
+from ._engine_remedy import _warn_klayout_version_mismatch
 from ._report_verify import get_path
 from .decks.history import is_deck_hash_released
 
@@ -502,25 +512,6 @@ def _klayout_version_mismatch(actual: str | None, expected: str | None) -> bool:
     if actual is None or expected is None:
         return False
     return actual != expected
-
-
-def _warn_klayout_version_mismatch(actual: str | None, expected: str | None) -> None:
-    """The stderr warning printed once per report when
-    :func:`_klayout_version_mismatch` is ``True`` (issue #1490) -- a caller
-    piping ``--format json`` to a file still sees this on the terminal,
-    since JSON output goes to stdout only (``docs/json-contract.md``)."""
-    message = (
-        f"klt: warning: resolved klayout engine version {actual!r} differs "
-        f"from klayout=={expected}, the version this klayout-tools build/"
-        "commit was tested against -- DRC/LVS report counts (deck content "
-        "hash, rules_skipped, category_counts, ...) may differ from a "
-        f"report generated with klayout=={expected}, even though the "
-        "verdict itself is unaffected. To reproduce the exact engine: "
-        f'`uv tool install "klayout-tools @ git+...@<sha>" '
-        f"--with klayout=={expected}` -- see docs/json-contract.md's "
-        '"Shared `provenance` block".'
-    )
-    print(message, file=sys.stderr)
 
 
 def _pdk_block(
@@ -998,7 +989,12 @@ def build_provenance(
         block["klayout_version_mismatch"] = mismatch
         if mismatch and not klayout_version_override_active:
             _warn_klayout_version_mismatch(
-                actual_klayout_version, expected_klayout_version
+                actual_klayout_version,
+                expected_klayout_version,
+                # Already computed above for `klt_reinstall_spec` -- the
+                # warning reuses it instead of re-deriving, so the hot path
+                # gains no probe (issue #5601).
+                reinstall_spec,
             )
     if klayout_version_override_active:
         block["klayout_module_version"] = _klayout_version()
