@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from .place_and_route_portable import PDK_ROOT_TOKEN, _under
+from .place_and_route_portable import PDK_ROOT_TOKEN, path_under_root
 
 
 def _tokenise_pdk_pin_order_sources(sources: Any, pdk_root: str | None) -> Any:
@@ -22,7 +22,7 @@ def _tokenise_pdk_pin_order_sources(sources: Any, pdk_root: str | None) -> Any:
     for entry in sources:
         path = entry.get("path") if isinstance(entry, dict) else None
         if isinstance(path, str) and os.path.isabs(path):
-            relative = _under(path, pdk_root)
+            relative = path_under_root(path, pdk_root)
             if relative is not None and relative != ".":
                 entry = {**entry, "path": f"{PDK_ROOT_TOKEN}/{relative}"}
         out.append(entry)
