@@ -299,10 +299,10 @@ if TYPE_CHECKING:
 #: use (often that host's absolute path), so `klt signoff`'s
 #: `input_verified` freshness gate (issue #2196) could re-verify such a
 #: citation only there and reported drift from every other checkout.
-#: Bumped 2 -> 3 (issue #4984): top-level `reference` became the same
-#: `{path, scope}` shape, built from the resolved path `environment.
-#: reference_sha256` hashes, so `--check` is cwd-independent. Readers still
-#: accept the bare string of an older report; `klayout-runset` keeps strings.
+#: Bumped 2 -> 3 (issue #4984): top-level `reference` became `{path, scope}`
+#: built from the resolved path `environment.reference_sha256` hashes
+#: (`--check` cwd-independent; readers accept the older bare string);
+#: `klayout-runset` keeps its `reference` bare, `layout` normalised (#5666).
 SCHEMA_VERSION = 3
 
 #: ``klayout`` (in-process ``NetlistComparer``) is the primary engine;
@@ -3508,14 +3508,12 @@ def _resolve_layout(
     # Issue #1942: recognise a round-tripped `X ... PARAMS:` card naming one
     # of `layout.deck`'s own custom (`GenericDeviceExtractor`-shaped) device
     # classes -- e.g. a MoM capacitor -- as a device of that class instead
-    # of letting it degrade into a mangled-name abstract circuit. A best-
-    # effort lookup only: an unresolvable `deck_name`/`deck_options` here is
-    # deliberately swallowed rather than raised -- `run_lvs` re-resolves
-    # `layout.deck` itself right after this function returns (see its own
-    # `layout_deck` comment) and raises the authoritative `LvsError` there,
-    # so this must not duplicate (and potentially reorder) that validation.
-    # `None`/empty when `layout.deck` was never given, unchanged from every
-    # request that predates this parameter.
+    # of a mangled-name abstract circuit. A best-effort lookup only: an
+    # unresolvable `deck_name`/`deck_options` here is deliberately swallowed
+    # rather than raised -- `run_lvs` re-resolves `layout.deck` right after
+    # this function returns and raises the authoritative `LvsError`, so
+    # this must not duplicate (and potentially reorder) that validation.
+    # Empty when `layout.deck` was never given, unchanged for old requests.
     custom_device_classes: dict[str, str] = {}
     resistor_classes: dict[str, str] = {}
     deck_name = layout_spec.get("deck")
@@ -3529,16 +3527,16 @@ def _resolve_layout(
                 layout_deck_for_recovery
             )
             # Issue #1157: recognise a round-tripped bulk-bearing drawn-
-            # resistor class's `X` card (the bare-mode card shape ngspice
-            # can parse) as a real 3-terminal resistor device again -- the
-            # exact recovery the MoM-capacitor table above established,
-            # keyed off `layout.deck`'s own `resistors` table.
+            # resistor class's `X` card as a real 3-terminal device again.
             resistor_classes = resistor_classes_for_deck(layout_deck_for_recovery)
     netlist = kdb.Netlist()
+    from .netlist_normalize import defined_subckt_names
+
     reader = make_capacitor_class_recovery_reader(
         recovered_capacitor_classes,
         custom_device_classes=custom_device_classes,
         resistor_classes=resistor_classes,
+        defined_subckt_names=defined_subckt_names(layout_netlist_text),
     )
     try:
         netlist.read(layout_netlist_path, reader)
@@ -3699,6 +3697,7 @@ def _read_reference_netlist(
     from .netlist_normalize import (
         NormalizeError,
         convert_reference_netlist,
+        defined_subckt_names,
         detect_subckt_call_devices,
     )
 
@@ -3831,6 +3830,7 @@ def _read_reference_netlist(
             recovered_capacitor_classes,
             custom_device_classes=custom_device_classes,
             resistor_classes=resistor_classes,
+            defined_subckt_names=defined_subckt_names(read_text),
         ),
     )
     try:

@@ -41,6 +41,78 @@ WORKER_CAPTURE_PROBE_TIMEOUT_S = 10
 #: Most staged model files the worker capture digests / the client re-reads.
 WORKER_CAPTURE_MODEL_INPUTS_MAX = 64
 
+#: Bounds for init lines retained from the worker's simulation report.
+WORKER_INIT_LINES_MAX = 256
+WORKER_INIT_LINE_MAX = 2000
+WORKER_INIT_CHARS_MAX = 32768
+
+
+def _bounded_str(value: Any, limit: int = WORKER_CAPTURE_STR_MAX) -> str | None:
+    """A JSON-safe, bounded, control-character-free copy of a captured string
+    (``None`` for anything that is not a string)."""
+    if not isinstance(value, str):
+        return None
+    cleaned = "".join(ch if (ch >= " " or ch in "\n\t") else "?" for ch in value)
+    return cleaned[:limit]
+
+
+def _bounded_model_inputs(doc: dict[str, Any]) -> list[dict[str, str | None]] | None:
+    """The worker-reported ``model_inputs`` list, re-validated and bounded.
+    ``None`` (not ``[]``) when the capture carries no list at all."""
+    models_in = doc.get("model_inputs")
+    if not isinstance(models_in, list):
+        return None
+    return [
+        {
+            "name": _bounded_str(entry.get("name")),
+            "sha256": _bounded_str(entry.get("sha256"), 64),
+        }
+        for entry in models_in[:WORKER_CAPTURE_MODEL_INPUTS_MAX]
+        if isinstance(entry, dict)
+    ]
+
+
+def _bounded_init_lines(value: Any) -> list[str] | None:
+    """Reject oversized/malformed content rather than truncating a hashed file."""
+    if not isinstance(value, list) or not 0 < len(value) <= WORKER_INIT_LINES_MAX:
+        return None
+    if any(not isinstance(line, str) for line in value):
+        return None
+    if any(len(line) > WORKER_INIT_LINE_MAX for line in value):
+        return None
+    if sum(len(line) + 1 for line in value) > WORKER_INIT_CHARS_MAX:
+        return None
+    if any(ch < " " and ch not in "\n\t" for line in value for ch in line):
+        return None
+    return list(value)
+
+
+def runner_ngspice_init(report: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Bounded init provenance from the worker's own on-host report (#6045).
+
+    Preflight runs before klt writes its per-corner init files. Use the
+    collected report instead of guessing from the client request or HOME.
+    Source is a closed, path-free vocabulary; home contents and extra keys
+    are never copied. Missing/legacy/Xyce/malformed observations stay null.
+    """
+    env = report.get("environment") if isinstance(report, dict) else None
+    block = env.get("ngspice_init") if isinstance(env, dict) else None
+    if not isinstance(block, dict):
+        return None
+    source = block.get("source")
+    if source == "none":
+        return {"source": "none", "lines": None, "sha256": None}
+    if source not in ("request", "thread_pin", "home"):
+        return None
+    digest = block.get("sha256")
+    if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        return None
+    lines = _bounded_init_lines(block.get("lines")) if source != "home" else None
+    if source != "home" and lines is None:
+        return None
+    return {"source": source, "lines": lines, "sha256": digest}
+
+
 #: The worker-side capture program. It is passed to ``python3 -I -c`` as one
 #: shell-quoted argument (never interpolated with untrusted text); request
 #: values arrive as ``sys.argv`` and everything it observes is serialised with
