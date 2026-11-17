@@ -38,7 +38,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from ._jsonnum import is_int
+from ._jsonnum import is_finite_number, is_int
 
 #: The quantity every result reports, stated machine-readably so a consumer
 #: cannot mistake it for an effective (two-port) resistance.
@@ -135,12 +135,7 @@ def _validate_graph(
                     "of the graph"
                 )
         value = resistor.resistance_ohm
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, (int, float))
-            or not math.isfinite(value)
-            or value < 0
-        ):
+        if not is_finite_number(value) or value < 0:
             raise ResistanceGraphError(
                 f"resistor {resistor.id!r} resistance_ohm must be a finite, "
                 f"non-negative number (got {value!r})"

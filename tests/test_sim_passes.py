@@ -111,6 +111,12 @@ def _deck(tmp_path: Path, passes) -> list[str]:
             [{"name": "a", "alter": [{"target": "VA", "value": float("inf")}]}],
             "finite number",
         ),
+        # A 400-digit int literal parses to an int too large for a float
+        # (issue #5994): refused as the SimError envelope, not an OverflowError.
+        (
+            [{"name": "a", "alter": [{"target": "VA", "value": 10**400}]}],
+            "finite number",
+        ),
         ([{"name": "a", "alter": [{"target": "VA", "value": 1, "x": 1}]}], "unknown"),
         (
             [{"name": "a", "alter": [{"target": "VA", "value": 1, "field": "q"}]}],

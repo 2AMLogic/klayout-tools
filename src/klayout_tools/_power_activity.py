@@ -6,8 +6,9 @@ implementation so both verbs validate and report power activity identically.
 
 from __future__ import annotations
 
-import math
 from typing import Any
+
+from ._jsonnum import is_finite_number
 
 POWER_ACTIVITY_KEYS = ("activity", "duty")
 
@@ -48,11 +49,7 @@ def validate_power_activity(
         if key not in value:
             continue
         number = value[key]
-        if (
-            isinstance(number, bool)
-            or not isinstance(number, (int, float))
-            or not math.isfinite(number)
-        ):
+        if not is_finite_number(number):
             raise error(f"constraints.power_activity.{key} must be a finite number")
         if number < 0 or (key == "duty" and number > 1):
             bound = ">= 0" if key == "activity" else "in [0, 1]"

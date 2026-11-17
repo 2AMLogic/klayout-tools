@@ -12,10 +12,10 @@ Every public name here is re-exported from ``klayout_tools.sim``, so
 
 from __future__ import annotations
 
-import math
 import re
 from typing import Any
 
+from ._jsonnum import is_finite_number
 from .sim_echo_messages import zipped_length_message
 from .sim_errors import SimError
 from .sim_slug import _readable_slug, _slugify_corner_id
@@ -273,11 +273,7 @@ def _format_params_label(params: dict[str, int | float]) -> str:
 
 
 def _validate_param_scalar(value: Any, where: str) -> int | float:
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not math.isfinite(value)
-    ):
+    if not is_finite_number(value):
         raise SimError(f"{where} must be a finite number (booleans excluded)")
     return _normalize_param_value(value)
 

@@ -69,6 +69,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import sim_transfer
+from ._jsonnum import is_finite_number
 from .sim_errors import SimError
 from .sim_forms import validate_exclusive_form
 from .sim_passes import PassResult
@@ -249,12 +250,7 @@ def _validate_from(name: Any, body: dict[str, Any]) -> None:
             "alternative ways to choose the start: declare one"
         )
     value = body[given[0]]
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not math.isfinite(value)
-        or value <= 0
-    ):
+    if not is_finite_number(value) or value <= 0:
         raise SimError(
             f"measurement '{name}': tian.{given[0]} must be a finite number "
             f"> 0 (got {value!r})"

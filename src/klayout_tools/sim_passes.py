@@ -43,13 +43,13 @@ carries each pass's status and sample count (and ``raw`` path when
 
 from __future__ import annotations
 
-import math
 import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from . import sim_raw, sim_steps
+from ._jsonnum import is_finite_number
 from .sim_errors import SimError
 
 #: What an ``alter`` entry changes.
@@ -158,11 +158,7 @@ def _resolve_alter_entry(item: Any, name: str) -> tuple[str, Any, str]:
             "not supported"
         )
     value = item.get("value")
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not math.isfinite(value)
-    ):
+    if not is_finite_number(value):
         raise SimError(
             f"pass {name!r}: alter value for {target!r} must be a finite "
             f"number (got {value!r})"

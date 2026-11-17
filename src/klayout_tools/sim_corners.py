@@ -15,13 +15,12 @@ none of them draws on it.
 from __future__ import annotations
 
 import itertools
-import math
 import re
 from typing import Any
 
 from . import sim_analysis_overrides as _sao
 from . import sim_echo_messages, sim_supply_waveform
-from ._jsonnum import is_number
+from ._jsonnum import is_finite_number
 from .sim_corner_axes import (
     _expand_corner_units,
     _expand_options_axis,
@@ -292,7 +291,7 @@ def _normalize_nodeset_values(raw: Any, where: str) -> dict[str, float]:
                 f"{where} names node {lowered!r} more than once "
                 "(node names are case-insensitive)"
             )
-        if not is_number(volts) or not math.isfinite(volts):
+        if not is_finite_number(volts):
             raise SimError(f"{where}.{node} must be a finite number of volts")
         values[lowered] = float(volts)
     return dict(sorted(values.items()))

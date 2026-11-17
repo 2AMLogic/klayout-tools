@@ -45,13 +45,12 @@ fields.
 
 from __future__ import annotations
 
-import math
 import os
 from dataclasses import dataclass, field
 from typing import Any
 
 from . import sim_supply_relative, sim_window
-from ._jsonnum import is_number
+from ._jsonnum import is_finite_number
 from .sim_crossings_reduce import reduce_crossings, validate_reduce
 from .sim_errors import SimError
 
@@ -139,11 +138,7 @@ def _validate_signal(name: Any, signal: Any) -> None:
 
 
 def _validate_level(name: Any, level: Any) -> None:
-    if (
-        not isinstance(level, (int, float))
-        or isinstance(level, bool)
-        or not math.isfinite(level)
-    ):
+    if not is_finite_number(level):
         raise SimError(
             f"measurement '{name}': crossings.level is required and must be "
             f"a finite number in the signal's own unit (got {level!r})"
@@ -168,7 +163,7 @@ def _validate_sampled_offset(name: Any, level: dict[str, Any]) -> None:
         name, level, "sample_at", form="crossings", field="level.sample_at"
     )
     offset = level["offset"]
-    if not is_number(offset) or not math.isfinite(offset):
+    if not is_finite_number(offset):
         raise SimError(
             f"{where}.offset must be a finite number in the signal's own "
             f"unit (got {offset!r})"

@@ -11,10 +11,9 @@ lives here. ``erc.py`` imports these names back, so
 
 from __future__ import annotations
 
-import math
 from typing import Any
 
-from ._jsonnum import is_int
+from ._jsonnum import is_finite_number, is_int
 from ._paths import _parse_layer_datatype, _reject_unknown_keys, _validate_via_entries
 from .erc_spec_boxes import (  # -- _parse_um_boxes is re-exported
     _parse_isolation_boxes,
@@ -310,12 +309,7 @@ def _validate_antenna_limit_entry(
 
 
 def _validate_antenna_max_ratio(max_ratio: Any, spec_path: str, where: str) -> float:
-    if (
-        isinstance(max_ratio, bool)
-        or not isinstance(max_ratio, (int, float))
-        or not math.isfinite(max_ratio)
-        or max_ratio <= 0
-    ):
+    if not is_finite_number(max_ratio) or max_ratio <= 0:
         raise ErcError(
             f"spec '{spec_path}': {where}.max_ratio must be a finite "
             f"number > 0 (got {max_ratio!r})"

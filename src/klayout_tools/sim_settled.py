@@ -66,6 +66,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from . import sim_crossings, sim_cycle_mean, sim_window
+from ._jsonnum import is_finite_number
 from .sim_errors import SimError
 
 #: Reason tokens a failed ``settled`` entry's diagnostic message leads with.
@@ -151,12 +152,7 @@ def _validate_tracked(name: Any, key: str, body: Any) -> None:
         )
     sim_crossings._validate_signal(name, body.get("signal"))
     tol = body.get("tol_pct")
-    if (
-        isinstance(tol, bool)
-        or not isinstance(tol, (int, float))
-        or not math.isfinite(tol)
-        or tol < 0
-    ):
+    if not is_finite_number(tol) or tol < 0:
         raise SimError(
             f"measurement '{name}': settled.{key}.tol_pct is required and "
             f"must be a finite number >= 0, in percent (got {tol!r})"

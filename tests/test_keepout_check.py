@@ -166,6 +166,10 @@ def test_multiple_top_cells_checked(tmp_path):
         ({"cells": [" "]}, "malformed"),
         ({"margin": -1.0}, ">= 0"),
         ({"margin": float("nan")}, "finite"),
+        # A 400-digit int literal parses to an int too large for a float
+        # (issue #5994): refused as the KeepoutCheckError envelope, not an
+        # OverflowError.
+        ({"margin": 10**400}, "finite"),
         ({"cells": None}, "no guard"),
         ({"top": "NOPE"}, "top cell not found"),
     ],

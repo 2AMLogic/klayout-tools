@@ -149,7 +149,7 @@ from . import sim_op_check as sim_op_check
 from . import sim_peak_rss as sim_peak_rss
 from . import sim_provenance as sim_provenance
 from . import sim_staging as sim_staging
-from ._jsonnum import is_int, is_number
+from ._jsonnum import is_finite_number, is_int, is_number
 from ._paths import (
     _load_request_json,
     _resolve_relative,
@@ -2201,7 +2201,7 @@ def _validate_ngspice_options(value: Any) -> dict[str, Any]:
         if isinstance(item, bool):
             continue
         if isinstance(item, (int, float)):
-            if not math.isfinite(item):
+            if not is_finite_number(item):
                 raise SimError(
                     f"options.ngspice_options.{name} must be finite (got {item!r})"
                 )
@@ -5143,7 +5143,7 @@ def _nodeset_match_process(value: Any, where: str) -> str:
 
 
 def _nodeset_match_number(value: Any, where: str) -> Any:
-    if not is_number(value) or not math.isfinite(value):
+    if not is_finite_number(value):
         raise SimError(f"{where} must be a finite number")
     return value
 
@@ -5657,9 +5657,9 @@ def _resolve_mismatch_scale(
         return None
     value = mc_spec["mismatch_scale"]
     field = "request.monte_carlo.mismatch_scale"
-    if not is_number(value):
+    if not is_finite_number(value):
         raise SimError(f"{field} must be a finite non-negative number (got {value!r})")
-    if not math.isfinite(value) or value < 0:
+    if value < 0:
         raise SimError(f"{field} must be a finite non-negative number (got {value!r})")
     family = pdk_variant_family(pdk) if pdk else None
     param = sim_mismatch_gate.MISMATCH_SWITCH.get(family or "")

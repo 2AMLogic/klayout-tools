@@ -110,6 +110,7 @@ from . import (
     sim_batch_receipt,
     sim_staging,
 )
+from ._jsonnum import is_finite_number
 from .pdk_families import family_subset, pdk_variant_family
 from .pdk_store import client_pdk_stamp
 from .remote_launcher import (
@@ -970,12 +971,7 @@ def _resolve_max_job_seconds(
                 value = float(raw.strip())
             except ValueError:
                 value = None
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, (int, float))
-            or not math.isfinite(value)
-            or value <= 0
-        ):
+        if not is_finite_number(value) or value <= 0:
             raise SimError(
                 f"{label} must be a positive number of seconds (got {raw!r})"
             )
@@ -1206,12 +1202,7 @@ def resolve_capacity_wait_s(batch_spec: dict[str, Any]) -> float:
     from .sim import SimError
 
     value = batch_spec.get("capacity_wait_s", 0)
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not math.isfinite(value)
-        or value < 0
-    ):
+    if not is_finite_number(value) or value < 0:
         raise SimError(
             "request.batch.capacity_wait_s must be a non-negative number of "
             f"seconds (got {value!r})"
@@ -1227,12 +1218,7 @@ def _resolve_interrupted_grace_s(batch_spec: dict[str, Any]) -> float:
     from .sim import SimError
 
     value = batch_spec.get("interrupted_grace_s", DEFAULT_INTERRUPTED_GRACE_S)
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not math.isfinite(value)
-        or value < 0
-    ):
+    if not is_finite_number(value) or value < 0:
         raise SimError(
             "request.batch.interrupted_grace_s must be a non-negative number "
             f"of seconds (got {value!r})"

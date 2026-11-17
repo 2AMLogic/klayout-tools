@@ -84,10 +84,10 @@ result in the same corner stays inspectable.
 
 from __future__ import annotations
 
-import math
 import re
 from typing import Any
 
+from ._jsonnum import is_finite_number
 from .sim_errors import SimError
 from .sim_op_args import default_op_args
 from .sim_step_shadow import validate_step_measurement_name
@@ -406,12 +406,7 @@ def _resolve_pwl_alter(value: dict[str, Any], target: str, step: str) -> dict[st
         not isinstance(vector, list)
         or len(vector) < 4
         or len(vector) % 2
-        or any(
-            isinstance(v, bool)
-            or not isinstance(v, (int, float))
-            or not math.isfinite(v)
-            for v in vector
-        )
+        or any(not is_finite_number(v) for v in vector)
     ):
         raise SimError(
             f"step {step!r}: alter pwl for {target!r} must be an even-length "
@@ -468,11 +463,7 @@ def _resolve_alter(alter: Any, step: str) -> list[list[Any]]:
             )
         if isinstance(value, dict):
             value = _resolve_pwl_alter(value, target, step)
-        elif (
-            isinstance(value, bool)
-            or not isinstance(value, (int, float))
-            or not math.isfinite(value)
-        ):
+        elif not is_finite_number(value):
             raise SimError(
                 f"step {step!r}: alter value for {target!r} must be a finite "
                 f'number or a {{"pwl": [t0, v0, t1, v1, ...]}} object '

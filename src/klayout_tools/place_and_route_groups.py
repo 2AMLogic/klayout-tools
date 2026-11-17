@@ -7,18 +7,15 @@ this module does not import it (which would be circular).
 
 from __future__ import annotations
 
-import math
 from typing import Any
+
+from ._jsonnum import is_finite_number
 
 _GROUP_KEYS = frozenset({"name", "instances", "max_extent_um", "region_um", "order"})
 
 
 def _is_finite_number(value: Any) -> bool:
-    return (
-        not isinstance(value, bool)
-        and isinstance(value, (int, float))
-        and math.isfinite(value)
-    )
+    return is_finite_number(value)
 
 
 def _check_region_um(region: Any, where: str, error: type[Exception]) -> None:

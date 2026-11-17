@@ -127,6 +127,10 @@ def test_power_activity_omitted_leaves_scripts_unchanged(tmp_path, monkeypatch):
         ({"activity": -0.1}, "activity must be >= 0"),
         ({"duty": 1.5}, r"duty must be in \[0, 1\]"),
         ({"density": 1}, "unknown key"),
+        # A 400-digit int literal parses to an int too large for a float
+        # (issue #5994): refused as the request error envelope, not an
+        # OverflowError.
+        ({"activity": 10**400}, "must be a finite number"),
     ],
 )
 def test_power_activity_rejected(tmp_path, monkeypatch, value, match):
