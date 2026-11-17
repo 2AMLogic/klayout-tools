@@ -21,7 +21,14 @@ this document (and the code) win.
   next to the request file (the same "next to the input" convention as `klt
   render`'s default output directory). `-o` names a **directory**, never the
   report file, on every backend (including `--backend batch`): the report goes
-  to stdout, and `--report-out <path>` writes a copy to a file.
+  to stdout. Without `--report-out`, a completed single-request run
+  ([#5776](https://github.com/2AMLogic/klayout-tools/issues/5776)) also
+  writes the report envelope to `<outdir>/report.json` — the directory is
+  created if missing, `--dry-run`/`--submit-only` write nothing, and a write
+  failure exits 1 with the error envelope — so a finished run's evidence is
+  on disk even when the caller forgot `--report-out`. `--report-out <path>`
+  remains the way to choose another path (`.gz` included) and wins outright
+  when both are given.
 - `--backend` — execution backend for the corner matrix, overriding the
   request's own `backend` field when given. See "Execution backends" below.
 - `--max-workers` — worker-pool size for the `local-parallel` backend,
@@ -132,7 +139,9 @@ this document (and the code) win.
   yield` and `klt signoff` accept the `.json.gz` file directly
   ([#5452](https://github.com/2AMLogic/klayout-tools/issues/5452)), so the
   compressed report is citable as manifest evidence with no decompressed
-  second copy.
+  second copy. Given together with `-o`, `--report-out` wins outright and
+  no implicit `<outdir>/report.json` copy is written (see `--outdir`
+  above).
 - `--plot` — write one self-contained, dependency-free waveform SVG per
   non-sweep signal per corner to this directory, forcing
   `options.waveforms`/`keep_artifacts` on for this run. See "Waveform
