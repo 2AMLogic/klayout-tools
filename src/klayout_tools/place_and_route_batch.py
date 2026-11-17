@@ -87,9 +87,11 @@ MAX_BATCH_TREE_BYTES = 256 * 1024 * 1024
 BATCH_TREE_FILENAME = "tree.tar.gz"
 BATCH_REQUEST_FILENAME = "request.json"
 
-#: Under ``$EDA_OUTPUT_DIR``: the runner's absolute stage-output path(s), and
-#: the copied ``.klt/place-and-route/`` tree.
-BATCH_TREE_ROOT_FILENAME = "tree_root.txt"
+#: The stage-output directory the runner writes under the extracted tree:
+#: recorded in ``_batch_common.BATCH_TREE_ROOT_FILENAME`` so collected
+#: reports can be re-rooted, and copied out to
+#: ``$EDA_OUTPUT_DIR/artifacts/``.
+STAGE_DIRNAME = ".klt/place-and-route"
 
 #: ``job.json``'s ``tool`` label.
 BATCH_JOB_TOOL = "openroad"
@@ -247,59 +249,43 @@ def build_job_spec(
     ``klt sim``'s batch job uses; the stage output is copied to
     ``$EDA_OUTPUT_DIR/artifacts/`` whether or not the run succeeded.
     """
-    try:
-        preflight = (
-            sim_batch._runner_preflight_script(
-                _provenance._klt_version(), enforce=version_check == "enforce"
-            )
-            + sim_batch.par_backend_preflight_lines()
-        )
-    except Exception as exc:  # SimError: a client version unsafe to embed
-        raise PlaceAndRouteError(str(exc)) from exc
-    out = '"$EDA_OUTPUT_DIR/{}"'
     name = shlex.quote(request_name)
-    setup = " && ".join(
-        [
-            'EDA_INPUT_DIR=$(cd "$EDA_INPUT_DIR" && pwd -P)',
-            'EDA_OUTPUT_DIR=$(cd "$EDA_OUTPUT_DIR" && pwd -P)',
-            "w=$(mktemp -d)",
-            f'tar -xzf "$EDA_INPUT_DIR/{BATCH_TREE_FILENAME}" -C "$w"',
-            f'cp "$EDA_INPUT_DIR/{BATCH_REQUEST_FILENAME}" "$w/"{name}',
-            'cd "$w"',
-            "printf '%s\\n%s\\n' \"$w/.klt/place-and-route\" "
-            '"$(pwd -P)/.klt/place-and-route" >' + out.format(BATCH_TREE_ROOT_FILENAME),
-        ]
-    )
     argv = ["klt place-and-route", name]
     if pdk_variant:
         argv += ["--pdk", shlex.quote(pdk_variant)]
     argv += ["--backend local --format json"]
-    collect = (
-        "if [ -d .klt/place-and-route ]; then "
-        f'mkdir -p "$EDA_OUTPUT_DIR/{sim_batch.BATCH_ARTIFACTS_DIRNAME}" && '
-        "cp -a .klt/place-and-route/. "
-        f'"$EDA_OUTPUT_DIR/{sim_batch.BATCH_ARTIFACTS_DIRNAME}/"; fi'
+    command = _batch_common.build_job_command(
+        tree_member=BATCH_TREE_FILENAME,
+        run=" ".join(argv),
+        err_cls=PlaceAndRouteError,
+        stdout_target=sim_batch.BATCH_REPORT_FILENAME,
+        version_check=version_check,
+        preflight_extra=sim_batch.par_backend_preflight_lines(),
+        extra_setup=(f'cp "$EDA_INPUT_DIR/{BATCH_REQUEST_FILENAME}" "$w/"{name}',),
+        tree_root_subdir=STAGE_DIRNAME,
+        extra_tail=(
+            f"if [ -d {STAGE_DIRNAME} ]; then "
+            f'mkdir -p "$EDA_OUTPUT_DIR/{sim_batch.BATCH_ARTIFACTS_DIRNAME}" && '
+            f"cp -a {STAGE_DIRNAME}/. "
+            f'"$EDA_OUTPUT_DIR/{sim_batch.BATCH_ARTIFACTS_DIRNAME}/"; fi'
+        ),
     )
-    command = (
-        preflight
-        + setup
-        + " && "
-        + " ".join(argv)
-        + f' > "$EDA_OUTPUT_DIR/{sim_batch.BATCH_REPORT_FILENAME}"'
-        + f' 2> >(tee "$EDA_OUTPUT_DIR/{sim_batch.BATCH_STDERR_FILENAME}" >&2)'
-        + f"; rc=$?; wait $! 2>/dev/null; {collect}; exit $rc"
-    )
-    return sim_batch.BatchJobSpec(
+    return _batch_common.build_job_spec(
         cmd=command,
         tool=BATCH_JOB_TOOL,
         pdk_variant=pdk_variant,
+        tree_member=BATCH_TREE_FILENAME,
+        tree_label="request tree",
+        tarball_path=tarball_path,
+        timeout_s=timeout_s,
+        # Deliberately NOT _batch_common.job_timeout_seconds': unlike every
+        # sibling backend this command wraps `klt place-and-route` in no inner
+        # `timeout`, so there is nothing for that headroom to fire ahead of,
+        # and `request.batch.job_timeout_s` is documented as the bound on one
+        # job (docs/cli/place-and-route.md). Adding the overhead would push
+        # the real cap past the number the operator set.
         timeout_seconds=int(timeout_s),
-        inputs=(
-            sim_batch.BatchJobInput(
-                name=BATCH_TREE_FILENAME,
-                label="request tree",
-                local_path=tarball_path,
-            ),
+        extra_inputs=(
             sim_batch.BatchJobInput(
                 name=BATCH_REQUEST_FILENAME,
                 label="unit request",

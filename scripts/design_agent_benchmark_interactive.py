@@ -489,7 +489,7 @@ def _default_invoke_interactive_agent(
 
     try:
         try:
-            proc = subprocess.Popen(  # noqa: S603 -- caller-controlled agent CLI
+            proc = subprocess.Popen(  # -- caller-controlled agent CLI
                 cmd,
                 cwd=str(request.workdir),
                 env=env,
