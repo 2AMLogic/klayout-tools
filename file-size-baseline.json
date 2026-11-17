@@ -413,7 +413,7 @@
     },
     {
       "path": "src/klayout_tools/lvs_combine.py",
-      "lines": 1609
+      "lines": 1569
     },
     {
       "path": "src/klayout_tools/lvs_finfet.py",
@@ -765,7 +765,7 @@
     },
     {
       "path": "tests/test_ci_wall_clock.py",
-      "lines": 2054
+      "lines": 2035
     },
     {
       "path": "tests/test_components.py",
