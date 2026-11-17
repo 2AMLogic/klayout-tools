@@ -284,8 +284,7 @@ class BatchConfig:
     aws_binary: str = "aws"
     #: Wall-clock budget :func:`launch_job` keeps re-launching through a
     #: ``batch_no_capacity`` / ``batch_concurrency_cap`` refusal
-    #: (``request.batch.capacity_wait_s``,
-    #: issue #2721). ``0`` -- the default -- is one launch attempt.
+    #: (``request.batch.capacity_wait_s``, issue #2721; ``0`` = one try).
     capacity_wait_s: float = 0.0
     #: ``request.batch.runner_version_check`` (issue #2719).
     runner_version_check: str = "enforce"
@@ -297,11 +296,10 @@ class BatchConfig:
     #: ``request.batch.job_ceiling_check`` (issue #2833).
     job_ceiling_check: str = "warn"
     #: ``request.batch.max_units_per_job`` (issue #3446): opt-in cap on the
-    #: units of one job; ``None`` -- the default -- leaves the split to
-    #: ``job_ceiling_check: "split"`` (or to no split at all).
+    #: units of one job; ``None`` leaves the split to ``job_ceiling_check``.
     max_units_per_job: int | None = None
     #: ``request.batch.max_concurrent_jobs`` (issue #3914): opt-in bound on
-    #: the shard jobs in flight at once; ``None`` submits every shard at once.
+    #: the shard jobs in flight at once; ``None`` submits all at once.
     max_concurrent_jobs: int | None = None
     #: ``request.batch.interrupted_grace_s`` (issue #2992); ``0`` disables.
     interrupted_grace_s: float = DEFAULT_INTERRUPTED_GRACE_S
@@ -345,12 +343,10 @@ def _read_fleet_config(provision_script: str) -> dict[str, str]:
 def _resolve_provision_script(batch_spec: dict[str, Any]) -> str:
     """``request.batch.provision_script_path`` > ``$KLT_BATCH_PROVISION_SCRIPT``
     > :class:`SimError` naming both -- never a guessed path into a sibling
-    checkout (too fragile across hosts/usernames).
-
-    Raised **before** any S3 write by :func:`_resolve_batch_config`'s
-    caller, mirroring ``_run_remote``'s missing-``ssh_key_path`` check: a
-    partial upload must never happen because the launch script turned out to
-    be unfindable.
+    checkout (too fragile across hosts/usernames). Raised **before** any S3
+    write, mirroring ``_run_remote``'s missing-``ssh_key_path`` check: a
+    partial upload must never happen because the launch script turned out
+    to be unfindable.
     """
     from .sim import SimError
 
@@ -635,11 +631,10 @@ def _resolve_batch_config(
 
     Last, the runner ``klt`` the AMI manifest publishes is compared with
     this client (:func:`_assess_published_runner`, issue #2851): under
-    ``runner_version_check: "enforce"`` a known mismatch raises
-    ``batch_runner_version_mismatch`` here, so neither ``klt sim`` (one job
-    or every shard) nor ``klt netlist`` uploads or launches anything.
-    ``check_runner=False`` skips that last comparison for a read-only caller
-    (``klt sim --job-status``, issue #3073) that submits nothing.
+    ``enforce`` a known mismatch raises ``batch_runner_version_mismatch``
+    here, so neither ``klt sim`` (one job or every shard) nor ``klt
+    netlist`` uploads or launches anything. ``check_runner=False`` skips
+    that comparison for a read-only caller (``--job-status``, #3073).
     """
     from .sim import SimError
 
@@ -727,6 +722,7 @@ def dry_run_runner_check(
     corner_count: int,
     timeout_s: float,
     runner_out: dict[str, Any] | None = None,
+    config_out: dict[str, BatchConfig] | None = None,
 ) -> dict[str, Any] | None:
     """The pre-launch runner checks for ``klt sim --backend batch --dry-run``
     (issue #4120): the same :func:`_resolve_batch_config` comparison a real
@@ -736,16 +732,22 @@ def dry_run_runner_check(
     Returns the feature diagnostic a ``warn`` run reports, else ``None``. A
     host with no resolvable batch configuration (no bucket, no provision
     script) cannot run the check and is left to dry-run clean, as before;
-    only the runner version/feature refusals propagate.
-
+    only the runner version/feature refusals propagate -- plus
+    ``batch_max_units_per_job_invalid`` (issue #5674): a malformed
+    ``max_units_per_job``, or one combined with ``job_ceiling_check:
+    "enforce"``, is raised during config resolution and the ceiling/split
+    plan built on that config must refuse the dry run like the submit does.
     When ``runner_out`` is given it is filled with the published runner
     identity (``status``, ``client_klt_version``, ``images``) for ``match``,
     ``unknown`` and, under ``runner_version_check: "warn"``, ``mismatch``, so
     the report can answer "which ``klt`` does the fleet accept" without a
-    submit (issue #4675). A ``mismatch`` under the default ``"enforce"`` is
+    submit (issue #4675); a ``mismatch`` under the default ``"enforce"`` is
     refused with ``BATCH_RUNNER_MISMATCH_CODE`` before ``runner_out`` is
-    filled; the client and published runner versions are in that error's
-    message (issue #4680).
+    filled, both versions in the error's message (issue #4680). When
+    ``config_out`` is given it is filled with ``{"config": config}`` once
+    the config resolves, so the caller can run the ceiling/split plan
+    (:func:`sim_batch_plan.plan_batch_job`) on the config already in hand --
+    re-resolving it would resolve and warn twice (issue #5674).
     """
     from .sim import SimError
 
@@ -757,6 +759,7 @@ def dry_run_runner_check(
         if getattr(exc, "code", None) in (
             BATCH_RUNNER_FEATURE_CODE,
             BATCH_RUNNER_MISMATCH_CODE,
+            BATCH_MAX_UNITS_CODE,
         ):
             raise
         return None
@@ -767,6 +770,8 @@ def dry_run_runner_check(
             client_klt_version=assessment["client_klt_version"],
             images=assessment["images"],
         )
+    if config_out is not None:
+        config_out["config"] = config
     return config.feature_diagnostic
 
 
@@ -781,9 +786,8 @@ def _assess_published_runner(
     request's ``models.pdk`` (every PDK when it names none) and the batch
     ``region`` (every region when none is configured, because the fleet
     picks its own Spot pool). Versions are compared with the runner gate's
-    own release-segment rule, :func:`_runner_gate_release` (issue #3184), so
-    this check and the runner-side preflight can never disagree about what
-    counts as compatible.
+    own release-segment rule, :func:`_runner_gate_release` (issue #3184),
+    so the two checks cannot disagree.
 
     Returns ``{"status", "check", "client_klt_version", "images",
     "message"}``. ``status`` is ``"mismatch"`` only when *every* candidate
@@ -792,8 +796,7 @@ def _assess_published_runner(
     might boot. Anything less certain -- no manifest, no candidate, a legacy
     entry without ``klt_version``, a mix of matching and mismatching images,
     an unparseable version -- is ``"unknown"`` (or ``"match"``) and the
-    request proceeds to the existing runner-side preflight unchanged. This
-    function never raises.
+    request proceeds to the runner-side preflight unchanged. Never raises.
     """
     client = _provenance._klt_version()
     assessment: dict[str, Any] = {
@@ -945,10 +948,9 @@ def _resolve_max_job_seconds(
     the ``batch-fleet.env`` beside the provision script (``"fleet_config"``,
     the value 2am's ``launch`` tags the instance with), else
     :data:`DEFAULT_BATCH_MAX_JOB_SECONDS` (``"default"``, the harness's own
-    fallback). A value that is present but not a positive, finite number is
-    a :class:`~klayout_tools.sim.SimError` naming its source -- raised
-    before any S3 write -- rather than silently falling through to a less
-    specific source.
+    fallback). A present but not positive-finite number is a SimError
+    naming its source, raised before any S3 write, never a silent fall
+    through to a less specific source.
     """
     from .sim import SimError
 
@@ -1021,10 +1023,10 @@ def _resolve_max_units_per_job(
     batch_spec: dict[str, Any], job_ceiling_check: str
 ) -> int | None:
     """``request.batch.max_units_per_job`` (issue #3446): a positive integer
-    cap on the units of one job, which opts the request into splitting; else
-    :class:`~klayout_tools.sim.SimError` before any S3 write. Combining it
-    with ``job_ceiling_check: "enforce"`` is contradictory (one refuses an
-    over-ceiling request, the other splits it) and is refused."""
+    cap on the units of one job, which opts the request into splitting;
+    else :class:`~klayout_tools.sim.SimError` before any S3 write. Combining
+    it with ``job_ceiling_check: "enforce"`` is contradictory (one refuses
+    an over-ceiling request, the other splits it) and is refused."""
     from .sim import SimError
 
     value = batch_spec.get("max_units_per_job")
@@ -1051,13 +1053,12 @@ def _plan_job_split(assessment: dict[str, Any], config: BatchConfig) -> int:
 
     The shard cap is ``config.max_units_per_job`` when given, else the
     largest shard the ceiling allows (``assessment["max_units_per_job"]``),
-    and the answer is the fewest balanced shards that respect it. Returns
-    ``1`` when nothing needs splitting. Raises
-    :class:`~klayout_tools.sim.SimError` before any S3 write when no split
-    can keep every job inside the ceiling: code
-    :data:`BATCH_JOB_CEILING_CODE` when even one unit exceeds it (lower
-    ``options.timeout_s``). An explicit cap whose shards exceed the (serial
-    upper-bound) ceiling is honored with a stderr warning (issue #4982).
+    and the answer is the fewest balanced shards that respect it; ``1``
+    when nothing needs splitting. Raises before any S3 write with
+    :data:`BATCH_JOB_CEILING_CODE` when even one unit exceeds the ceiling
+    (no split can help; lower ``options.timeout_s``). An explicit cap whose
+    shards exceed the (serial upper-bound) ceiling is honored with a stderr
+    warning (issue #4982).
     """
     from .sim import SimError
 
@@ -1098,10 +1099,9 @@ def _assess_job_ceiling(
     ``max_units_per_job`` is the largest shard whose own bound stays within
     the ceiling (``0`` when even one unit's bound exceeds it), and
     ``recommended_hosts`` the smallest ``remote.hosts`` whose largest shard
-    -- :func:`sim_remote._shard_corner_points` balances shards to at most
-    ``ceil(units / hosts)`` -- fits it, or ``None`` when no ``hosts`` value
-    can (lower ``options.timeout_s`` instead). When the bound exceeds the
-    ceiling the result carries a human-readable ``warning``.
+    (:func:`sim_remote._shard_corner_points` balances shards to at most
+    ``ceil(units / hosts)``) fits it, or ``None`` when no ``hosts`` value
+    can. An exceeded ceiling also carries a human-readable ``warning``.
     """
     units = max(1, unit_count)
     ceiling = config.max_job_seconds
@@ -1160,11 +1160,10 @@ def _assess_job_ceiling(
 
 def _enforce_job_ceiling(assessment: dict[str, Any]) -> None:
     """Act on :func:`_assess_job_ceiling`'s result before any S3 write:
-    under ``"enforce"`` an exceeded ceiling is a
-    :class:`~klayout_tools.sim.SimError` with code
+    under ``"enforce"`` an exceeded ceiling raises
     :data:`BATCH_JOB_CEILING_CODE`; under ``"warn"`` the same message is
     printed to stderr (so a caller piping ``--format json`` to a file still
-    sees it before the job launches) and the assessment is reported in
+    sees it) and the assessment is reported in
     ``environment.remote.job_ceiling``."""
     from .sim import SimError
 
@@ -3537,10 +3536,10 @@ def _run_batch(
 
     Before submitting, the job's conservative bound is checked against the
     fleet's whole-job ceiling (:func:`_assess_job_ceiling`, issue #2833):
-    ``request.batch.job_ceiling_check: "enforce"`` refuses an overlong job,
-    the default ``"warn"`` submits it with a stderr warning, and either way
-    the assessment is reported as ``environment.remote.job_ceiling``. The
-    ``hosts > 1`` path (:func:`_run_batch_fleet`) is unchanged.
+    ``"enforce"`` refuses an overlong job, the default ``"warn"`` submits
+    with a stderr warning, and either way the assessment is reported as
+    ``environment.remote.job_ceiling``. The ``hosts > 1`` path
+    (:func:`_run_batch_fleet`) is unchanged.
 
     ``shard_fingerprint`` (issue #3896) is the request's resume fingerprint for
     a split reroute that has no checkpoint (a run without ``--resume``): it

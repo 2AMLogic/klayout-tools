@@ -14,6 +14,25 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt sim --dry-run` runs the batch ceiling/split plan** (#5674,
+  2026-11-17): the single-request batch dry run now reaches the same
+  `plan_batch_job` the submit path runs, so a request the fleet would
+  refuse is refused by the dry run with the submit path's own
+  `error.code` and message — `batch_max_units_per_job_invalid` for a
+  malformed `batch.max_units_per_job` or one combined with
+  `job_ceiling_check: "enforce"` (both used to dry-run clean), and
+  `batch_job_ceiling_exceeded` for a request whose bound exceeds
+  `max_job_seconds` under `"enforce"` (never checked on this path at
+  all). The dry-run report gains an additive `job_ceiling` field — the
+  `environment.remote.job_ceiling` name and shape, including
+  `split`/`effective_hosts` when a split mode is active — present only
+  when a batch configuration resolves on this host, so a configless host
+  dry-runs clean exactly as before. The warn / serial-bound (#4982) /
+  split stderr notices print as a submit would print them. `hosts` keeps
+  its meaning (the request's `remote.hosts`; the planned shard count is
+  `job_ceiling.effective_hosts`, never a redefinition), and `--format
+  text` prints a `batch plan:` line with the unit count and planned job
+  count. `schema_version` is unchanged; the field is additive.
 - **`klt sim --fail-fast-probe` reads the same `.spiceinit` as the corners it
   screens** (#6047, 2026-11-17): `_run_corner` pins the thread count by writing
   a run-directory `.spiceinit`, which *replaces* `$HOME/.spiceinit`, but the

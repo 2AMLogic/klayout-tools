@@ -91,7 +91,9 @@ this document (and the code) win.
   simulating or submitting anything ([#3064](https://github.com/2AMLogic/klayout-tools/issues/3064)).
   Every pre-dispatch check a real run performs still runs (request shape,
   Monte Carlo spec, measurement forms, model/OSDI resolution, the
-  `stage_model_inputs` closure and the off-host PDK check), and a failure
+  `stage_model_inputs` closure, the off-host PDK check and, on `batch`, the
+  whole-job ceiling/split plan
+  ([#5674](https://github.com/2AMLogic/klayout-tools/issues/5674))), and a failure
   exits 1 with the same message a real run gives. It then returns before
   the fail-fast probe, the output-directory lock and any backend, so no
   ngspice, SSH, S3 or EC2 is touched. A `decks` request is validated the same
@@ -108,7 +110,14 @@ this document (and the code) win.
   `staged_files[]` (the staged model inputs, as in
   `environment.staged_model_inputs`), and `warnings[]` (unknown top-level
   request keys and unknown keys under `corners`; a warning only, never an
-  error). `exclude` is a top-level request key, not a `corners` key: nested
+  error). On `batch`, when this host can resolve a batch configuration, the
+  report also carries `job_ceiling` -- the submit path's own whole-job
+  ceiling assessment, under the `environment.remote.job_ceiling` name and
+  shape, including `split` / `effective_hosts` when a split mode is active
+  ([#5674](https://github.com/2AMLogic/klayout-tools/issues/5674)); the planned job count it
+  reports never redefines `hosts` (still the request's `remote.hosts`), and
+  a `--format text` dry run prints a `batch plan:` line with the unit count
+  and planned job count. `exclude` is a top-level request key, not a `corners` key: nested
   under `corners` it is ignored (and warned about), so the full crossed
   matrix runs.
 - `--fail-on-diagnostic` — grade any corner that emitted this diagnostic
@@ -2275,7 +2284,17 @@ the packaged `data/` copy. See
   client and published runner versions are in the error message
   ([#4680](https://github.com/2AMLogic/klayout-tools/issues/4680)). A host with no resolvable
   batch configuration (no bucket or provision script) skips the check and
-  dry-runs as before. `options.initial_conditions` has no
+  dry-runs as before. Since [#5674](https://github.com/2AMLogic/klayout-tools/issues/5674) the
+  dry run is not limited to the runner gate: when the batch configuration
+  resolves it also runs the submit path's own ceiling/split plan
+  (`plan_batch_job`), so a malformed `max_units_per_job` (or one combined
+  with `job_ceiling_check: "enforce"`) is refused with
+  `batch_max_units_per_job_invalid` and an over-ceiling request behaves
+  exactly as a submit would — refused under `"enforce"`, warned under the
+  default `"warn"`, planned under `"split"` — and the assessment is
+  reported as `job_ceiling` (see the `--dry-run` flag above). A configless
+  host skips the plan too, staying dry-run clean.
+  `options.initial_conditions` has no
   registry row: its first-supported runner release is not recorded, so a
   stale worker is still caught post-run by `initial_conditions_unsupported_worker`.
 - **Stderr progress.** The `submitting to` line shows the bucket as

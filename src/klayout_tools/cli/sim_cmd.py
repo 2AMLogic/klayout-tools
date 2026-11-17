@@ -23,9 +23,8 @@ Exit codes (see ``docs/cli/sim.md`` for the full table):
         incomplete/untrustworthy
 (2 is reserved for argparse usage errors, as with every other ``klt`` subcommand.)
 
-Exit codes 3/4 extend drc's precedent (0/1/2/3) rather than reusing 2, per
-the spike's flagged open question -- see docs/cli/sim.md's "Exit codes"
-section for the reasoning.
+Exit codes 3/4 extend drc's precedent (0/1/2/3) rather than reusing 2 -- see
+docs/cli/sim.md's "Exit codes" section for the spike's flagged open question.
 
 ``--op-lint`` (issue #1718) runs the per-device operating-point sanity lint
 (:func:`klayout_tools.op_sanity.run_op_sanity`) on the *same request
@@ -34,9 +33,8 @@ It is a deliberately separate mode rather than an extra key on the sweep
 payload: the whole point is to be the cheap *first* thing an agent runs when
 a measurement misses, so it must be able to say "fail" on its own exit code
 rather than hiding a dead device inside an otherwise-passing sweep report.
-Its exit codes keep the same meaning as the sweep's (0 ran-and-clean,
-1 could not run, 3 real finding, 4 the analysis itself is untrustworthy) --
-see ``docs/cli/sim.md``'s "Operating-point lint" section.
+Its exit codes keep the sweep's meanings (see ``docs/cli/sim.md``'s
+"Operating-point lint" section).
 """
 
 import argparse
@@ -48,6 +46,7 @@ from ..op_sanity import OpSanityError, run_op_sanity
 from ..output_lock import OutputLockError
 from ..sim import SimError, load_request, run_sim
 from ..sim_batch_async import read_job_status
+from ..sim_batch_plan import print_dry_run_plan_line
 from ..sim_set import DEFAULT_MAX_IN_FLIGHT, print_set_text, run_sim_set
 from .output import EXIT_USAGE_ERROR, emit_error, emit_success, write_json_file
 from .sim_job_text import _print_job_status_text as _print_job_status_text
@@ -74,6 +73,7 @@ def _print_dry_run_text(report: dict[str, Any]) -> None:
         print(f"  {unit.get('corner_id') or unit['id']}{seeds}")
     for staged in report["staged_files"]:
         print(f"  stage: {staged['name']} ({staged['kind']})")
+    print_dry_run_plan_line(report)
     for warning in report["warnings"]:
         print(f"  warning: {warning}")
 

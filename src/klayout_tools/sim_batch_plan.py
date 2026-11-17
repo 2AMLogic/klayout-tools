@@ -17,6 +17,7 @@ from .sim_batch import (
     _assess_deck_support,
     _assess_job_ceiling,
     _resolve_batch_config,
+    dry_run_runner_check,
 )
 
 
@@ -49,6 +50,59 @@ def plan_batch_job(
             unit_count=unit_count, per_unit_timeout_s=timeout_s, config=config
         )
         return _apply_job_split(job_ceiling, config)
+
+
+def dry_run_job_ceiling(
+    request: dict[str, Any],
+    *,
+    corner_count: int,
+    timeout_s: float,
+    runner_out: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """The batch half of ``klt sim --dry-run`` (issue #5674): the runner
+    check (:func:`sim_batch.dry_run_runner_check`) followed by the same
+    :func:`plan_batch_job` the submit path runs, so the dry run refuses what
+    the submit refuses and the report can carry the assessment. Returns
+    ``(feature_diagnostic, job_ceiling)``; the ceiling is ``None`` on a host
+    with no resolvable batch configuration, which keeps such hosts
+    dry-running clean. The plan is *not* quiet: the warn / serial-bound /
+    split stderr notices are part of the submit behaviour the dry run
+    mirrors (issue #4982), and this path is single-threaded, before any
+    worker starts.
+    """
+    config_out: dict[str, BatchConfig] = {}
+    diagnostic = dry_run_runner_check(
+        request,
+        corner_count=corner_count,
+        timeout_s=timeout_s,
+        runner_out=runner_out,
+        config_out=config_out,
+    )
+    config = config_out.get("config")
+    if config is None:
+        return diagnostic, None
+    job_ceiling, _hosts = plan_batch_job(
+        config, unit_count=corner_count, timeout_s=timeout_s
+    )
+    return diagnostic, job_ceiling
+
+
+def print_dry_run_plan_line(report: dict[str, Any]) -> None:
+    """The ``--format text`` shard plan (issue #5674): the unit count and
+    the planned job count, read from the report's ``job_ceiling``
+    assessment. No-op when none was made (non-batch backend, decks or
+    command-list request, unresolvable batch configuration)."""
+    ceiling = report.get("job_ceiling")
+    if not ceiling:
+        return
+    jobs = ceiling.get("effective_hosts", 1)
+    units = ceiling["unit_count"]
+    print(
+        f"  batch plan: {units} unit(s) in {jobs} job(s) of at most "
+        f"{(units + jobs - 1) // jobs} unit(s) each (bound "
+        f"{ceiling['job_bound_s']:g}s of the "
+        f"{ceiling['max_job_seconds']:g}s ceiling)"
+    )
 
 
 def preflight_batch_request(request_path: str, **overrides: Any) -> dict[str, Any]:
