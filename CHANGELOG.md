@@ -30,6 +30,16 @@ not `klt --version`, if you need to detect this kind of drift. See
   docs/json-contract.md's pre-1.0 caveat (the old answer was factually
   wrong about the deck), but consumers pinning on `"typical"` will see
   different output for the same PDK.
+- **`klt sim --fail-fast-probe` reads the same `.spiceinit` as the corners it
+  screens** (#6047, 2026-11-17): `_run_corner` pins the thread count by writing
+  a run-directory `.spiceinit`, which *replaces* `$HOME/.spiceinit`, but the
+  probe was handed the unpinned init and so fell through to `$HOME` -- an init
+  setting that changes device interpretation (e.g. `set wnflag=1`) could apply
+  to the probe and not the corners, or the reverse. The probe now receives the
+  same thread-pinned init lines (pin first, then any `options.ngspice_init`).
+  When no pin applies (a single local corner with no explicit
+  `options.threads_per_worker`) nothing is written, as before. No new request
+  option or response field.
 - **`klt sim` refuses `measurements[].transfer` declared beside `noise`**
   (#5695, 2026-11-14): the mutually exclusive measurement forms each carried a
   hand-maintained list of "every *other* exclusive form", and `transfer`'s
