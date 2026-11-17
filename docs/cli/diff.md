@@ -10,7 +10,7 @@ and, across a `klt` upgrade, on record order within a cell. See
 only, and why this verb is the supported cross-upgrade gate.
 
 ```
-klt diff <file_a> <file_b> [--top <cell>] [--max-items N] [--format text|json]
+klt diff <file_a> <file_b> [--top <cell>] [--max-items N] [--flattened] [--format text|json]
 ```
 
 - `--top` — compare only this cell's hierarchy (the cell plus everything it
@@ -19,6 +19,8 @@ klt diff <file_a> <file_b> [--top <cell>] [--max-items N] [--format text|json]
 - `--max-items` — cap on every listed difference list (default `50`). The
   `*_count` fields always carry the true totals; `truncated` is `true` when any
   list was cut.
+- `--flattened` — compare the flattened geometry instead of the cell-by-cell
+  content (see [Flattened mode](#flattened-mode---flattened)).
 
 ## Exit codes
 
@@ -42,6 +44,9 @@ text size/font/alignment.
 extensions (and round-ends flag), text string/position/rotation/mirror,
 instance transform (displacement, angle, mirror, magnification) and array
 parameters, the database unit, cell names, layer/datatype numbers.
+
+This is the default mode's contract. **`--flattened` is the only mode that
+ignores cell names and hierarchy** — the default never does.
 
 Duplicates count: two identical boxes differ from one. Polygons are compared
 after rotating each contour to start at its smallest point. A rectangular
@@ -106,5 +111,61 @@ the same way.
   A differing `dbu` sets `dbu_equal` to `false` and makes the run `different`.
 - `differences` is sorted by cell name, then layer/datatype; items are sorted.
 
-Not provided: a flattened per-layer XOR ("same mask, different hierarchy")
-mode and tolerance-based comparison.
+Not provided: tolerance-based comparison.
+
+## Flattened mode (`--flattened`)
+
+Answers "do the two streams hold the same drawn geometry, however it is
+partitioned into cells?" — e.g. after a release renamed an emitted inner cell
+that the default mode reports as `different` although nothing drawn moved.
+Read-only; the default mode's output is unchanged.
+
+Everything is taken on the instance-placed geometry under `--top` (without it,
+every top cell). The run is `equivalent` (exit `0`) only if **all four** agree:
+
+1. **per-layer XOR** — each side's polygon-bearing shapes (boxes, polygons,
+   paths) on a layer/datatype are merged and XOR-ed. Exact; no tolerance.
+2. **drawn layer/datatype set** — compared as its own field, over the *union*
+   of both streams' pairs, so a layer only one stream drew is visible as itself
+   and not merely as a non-empty XOR. Label-only pairs are not drawn layers.
+3. **flattened bounding box** of the drawn geometry.
+4. **labels** — compared outside the polygon XOR (text is not a polygon), per
+   `(layer, texttype)`, as the multiset of `(string, x, y)` after flattening.
+
+Exit codes are unchanged (`0` equivalent, `3` differ, `1` unreadable file or
+`--top` absent from either stream). A differing `dbu` is `different`; the XOR
+fields are then `null` because an XOR across database units is undefined.
+`--max-items` caps the `layers[]` and per-layer label lists (differing layers
+are listed first); `layer_count`, `different_layer_count` and every
+`*_count` stay exact, and `truncated` says whether anything was cut.
+
+```json
+{
+  "schema_version": 1,
+  "mode": "flattened",
+  "top": "TOP",
+  "status": "equivalent",
+  "equivalent": true,
+  "a": {"file": "a.gds", "dbu_um": 0.001, "drawn_layers": [{"layer": 1, "datatype": 0}],
+        "flattened_shapes": 2, "bbox_um": {"left": 0.0, "bottom": 0.0, "right": 3.0, "top": 0.5, "width": 3.0, "height": 0.5},
+        "label_count": 0},
+  "b": {"...": "same shape as a"},
+  "dbu_equal": true,
+  "drawn_layers": {"equal": true, "only_in_a": [], "only_in_b": []},
+  "bbox": {"equal": true},
+  "layer_count": 1,
+  "different_layer_count": 0,
+  "layers": [
+    {"layer": 1, "datatype": 0, "shapes_a": 2, "shapes_b": 2,
+     "xor_polygon_count": 0, "xor_area_dbu2": 0, "xor_area_um2": 0.0, "equivalent": true}
+  ],
+  "labels": {"equal": true, "different_layer_count": 0, "layers": []},
+  "truncated": false,
+  "max_items": 50
+}
+```
+
+`xor_area_um2` is `xor_area_dbu2 × dbu²`; `shapes_a`/`shapes_b` are the
+flattened polygon-bearing shape counts before merging. A flattened-compare is
+not the signoff geometry digest either: `klt stats --geometry-digest` is
+hierarchy-sensitive, so it differs across a cell rename.

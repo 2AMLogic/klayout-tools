@@ -250,13 +250,15 @@ are always the real, unmodified DRM values:
   ``v5_xtor`` (112/1) half, which this deck's curated layer set does not
   draw -- so ``Comp`` marked only by ``v5_xtor`` is checked here against the
   3.3V column, exactly as it was before the ``Dualgate`` split.
-- ``comp.width.mv.1``: the PDK deck's ``DF.1a_MV`` additionally excludes the
-  LDMOS drain markers ``mvsd`` (210/0) / ``mvpsd`` (11/39). Both markers are
-  now curated layers (issue #4569, ``MDN.1``/``MDN.14``/``MDP.6``), but a
-  ``DerivedLayer`` selects against one marker and cannot subtract two, so
-  the exclusion is still not modelled: a 5V LDMOS drift region is checked
-  here where the official rule would not check it (conservative: a false
-  positive, never a missed violation).
+- ``comp.width.mv.1``: the PDK deck's ``DF.1a_MV`` excludes the
+  LDMOS drain markers ``mvsd`` (210/0) / ``mvpsd`` (11/39) by boolean
+  clip (``comp_56v.not(mvsd.or(mvpsd))``). Both markers are curated
+  layers (issue #4569, ``MDN.1``/``MDN.14``/``MDP.6``); since issue
+  #5719 the exclusion is modelled with ``DerivedLayer``'s whole-polygon
+  context stage, which matches the official clip wherever the PDK's own
+  LDMOS PCells draw (marked drain COMP lies fully under the marker) but
+  drops a marker-straddling polygon whole where the official rule would
+  check its clipped remainder.
 - ``poly2.space.1``: the official ``PL.3a`` splits into "space on COMP" vs.
   "space on field" sub-cases (context our engine can't distinguish without
   a boolean layer expression); both sub-cases share the same 3.3V value
@@ -540,15 +542,12 @@ from . import (
     CapacitorFlavour,
     CapacitorVariant,
     CompCoverageSpec,
-    CutRC,
     DerivedLayer,
     DiodeDevice,
     DrcRule,
     ExtractionDeck,
-    LayerRC,
     MosCapacitorDevice,
     MOSFlavour,
-    ParasiticsDeck,
     ResistorDevice,
     ResistorFlavour,
     RuleProvenance,
@@ -556,6 +555,8 @@ from . import (
     UnsupportedDeviceMarker,
 )
 from .gf180mcu_bond_pad import BOND_PAD_GUIDELINE_UNMODELED_RULES
+from .gf180mcu_parasitics import PARASITICS  # noqa: F401  (size-split re-export, #5742)
+from .gf180mcu_untranscribed import UNTRANSCRIBED_RULES
 
 # `RuleProvenance.source_repo`/`.commit` shared by every gf180mcu width/space
 # rule's provenance below (issue #747, piloted on this deck's 26 width/space
@@ -758,23 +759,80 @@ DECK: list[DrcRule] = [
         # column), the `_MV` half of the pair `comp.width.1` above is the
         # `_LV` half of (issue #1110, closing issue #552's DRC gap). The
         # checked region is whole `Comp` polygons that overlap `Dualgate`
-        # (55/0) -- the PDK's own `comp_56v` derivation. Approximation: the
-        # PDK deck's `DF.1a_MV` additionally excludes polygons under the
-        # LDMOS drain markers `mvsd` (210/0) / `mvpsd` (11/39). Both markers
-        # are curated layers since issue #4569, but a `DerivedLayer` selects
-        # against one marker and cannot subtract two, so a 5V LDMOS drift
-        # region drawn on those markers is still checked here where the
-        # official rule would not check it (the conservative direction -- a
-        # false positive, never a missed violation). Threshold value
-        # unmodified.
+        # (55/0) -- the PDK's own `comp_56v` derivation -- with the LDMOS
+        # drain markers excluded (issue #5719): the PDK deck checks
+        # `comp_56v.not(mvsd.or(mvpsd))`, a boolean clip against the joined
+        # `mvsd` (210/0) / `mvpsd` (11/39) regions. `DerivedLayer` has no
+        # boolean-subtraction mode, so the exclusion is the whole-polygon
+        # context stage (issue #3484) instead: a `Comp` polygon touching
+        # either marker is dropped entire. Both derivations agree everywhere
+        # the PDK's own LDMOS PCells actually draw -- `nfet_10v0_asym`'s
+        # marked drain polygons lie fully under the marker, where dropping
+        # whole and clipping agree exactly; before #5719 that PCell's
+        # 0.22um drain stripe was a `comp.width.mv.1` false positive the
+        # caller cannot edit. The documented divergence: a polygon
+        # straddling a marker boundary is dropped whole where the official
+        # rule would still check its outside part -- rare geometry (the
+        # PDK draws drift COMP fully under the marker), accepted over the
+        # status quo's false-positive direction on uneditable PCell
+        # geometry. Context layers absent from the stream contribute an
+        # empty region and never skip the rule, so layouts drawing no LDMOS
+        # markers are checked exactly as before. Threshold value unmodified.
         derived_layer=DerivedLayer(
             base=(22, 0),  # Comp
             sized_by_um=0.0,  # unsized marker, as in the PDK's own deck
             intersect_with=(55, 0),  # Dualgate
             mode="overlapping",
+            # The 10V LDMOS drain markers, joined (boolean OR) and matched
+            # whole-polygon -- see the comment above for why "far" is the
+            # faithful shape this engine can give the PDK's `.not(...)` clip.
+            context_layers=((210, 0), (11, 39)),  # MVSD, MVPSD
+            context_sized_by_um=0.0,
+            context="far",
         ),
         scope="7.5 Comp",  # DRM section this rule is transcribed from (#566)
         provenance=_gf180mcu_klayout_deck_provenance("comp", "DF.1a_MV"),
+    ),
+    DrcRule(
+        id="comp.width.moscap.1",
+        description="minimum COMP width under the MOS-capacitor marker (MOSCAP)",
+        layer=(22, 0),  # Comp
+        check="width",
+        threshold_dbu=1000,  # 1.0 um
+        # DRM 7.5 Comp, rule "DF.1c": "Min. COMP Width for MOSCAP." -> 1.0
+        # (issue #5719 -- before it this rule was neither checked nor
+        # disclosed, so a MOSCAP-marked `Comp` island below 1 um reported
+        # `status: clean` with nothing in the coverage block to warn the
+        # caller, while `MOS_CAP_MK` itself read under
+        # `coverage.layers_in_stream_without_rules`). The checked region is
+        # the boolean AND of `Comp` and the MOS-capacitor marker
+        # `MOS_CAP_MK` (166/5) -- the PDK deck's own
+        # `comp.and(mos_cap_mk)` -- which `DerivedLayer`'s default
+        # `"sized_intersection"` mode expresses exactly: whole marker
+        # polygons touching `Comp`, clipped to `Comp`'s unsized outline.
+        # Unlike the marker-scoped *selection* modes this derivation is
+        # deliberately a clip -- the official rule measures the width of
+        # the clipped shape, marker-cut edges included -- so the
+        # whole-polygon modes would diverge here, not be conservative. A
+        # stream drawing no `MOS_CAP_MK` derives an empty region and skips
+        # the rule like any other missing-layer rule. Not a `DF.1a`-style
+        # `_LV`/`_MV` pair: the PDK deck publishes a single 1 um value,
+        # conditioned on nothing but the marker. `klt gen mos_array`'s own
+        # `w_um` floor (0.42 um) is below this minimum, so the generator
+        # cannot currently emit a MOSCAP-marked device that passes it
+        # (raising the floor is generator work, out of scope for #5719).
+        derived_layer=DerivedLayer(
+            base=(22, 0),  # Comp
+            sized_by_um=0.0,  # unsized marker, as in the PDK's own deck
+            intersect_with=(166, 5),  # MOS_CAP_MK
+        ),
+        scope="7.5 Comp",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_klayout_deck_provenance("comp", "DF.1c"),
+        # DF.1c publishes a single value (no 3.3V/5V/6V column split), and
+        # the PDK's own executable deck conditions it on nothing but the
+        # MOS-capacitor marker, so it cannot have read the wrong voltage
+        # column -- see `DrcRule.voltage_independent`.
+        voltage_independent=True,
     ),
     DrcRule(
         id="comp.space.1",
@@ -2490,136 +2548,10 @@ _EFUSE_UNMODELED_RULES: dict[str, str] = {
     "EF.22b": "edge-length test on the derived `anode` region",
 }
 
-#: Upstream `esd.rb` / `guard_ring.rb` rule ids this deck knowingly does not
-#: transcribe, with the reason each is out of reach of the existing check kinds
-#: (issue #3792). `UNMODELED_RULES` below surfaces every key (plus the MT30/MSLOT
-#: ids) as `coverage.unmodeled_rules` (informational, not graded, so `status` stays
-#: `clean`). Remove an id when its rule is added.
-UNTRANSCRIBED_RULES: dict[str, str] = {
-    "ESD.3a": "measured to NCOMP, a derived layer (COMP inside Nplus), not a drawn one",
-    "ESD.3b": (
-        "`esd.not_outside(pcomp)`: PCOMP is derived and the rule is a "
-        "min/max-space polygon selector"
-    ),
-    "ESD.4a": (
-        "edge-to-edge enclosure of NCOMP edges filtered by `not_interacting(pcomp)`"
-    ),
-    "ESD.6": "needs `tgate` edges (MOS gate recognition) and a projection check",
-    "ESD.7": "`esd.not_outside(pcomp)`: PCOMP is derived",
-    "ESD.9": "`esd.not_overlapping(dualgate)`: no polygon-selector check kind",
-    "ESD.10": "needs LVS_IO (119/5) and a COMP & ESD derivation",
-    "ESD.pl": "needs `tgate` edges (MOS gate recognition) on Dualgate poly",
-    "GR.1": (
-        "`guard_ring_mk.not_in(comp.interacting(guard_ring_mk))`: no "
-        "polygon-selector check kind"
-    ),
-    "GR.3": "`guard_ring_comp.not_in(pplus)`: no polygon-selector check kind",
-    "GR.4": "metal width restricted to `not_outside(guard_ring_mk)` shapes",
-    "GR.6": "COMP width restricted to `not_outside(guard_ring_mk)` shapes",
-    "GR.11": "`guard_ring_mk.not_interacting(pad)`: no polygon-selector check kind",
-    # `ldnmos.rb` / `ldpmos.rb` (issue #4569); transcribed: MDN.1, MDN.14, MDP.6
-    "MDN.2a": "connectivity-aware `conn_space` (same-potential MVSD space)",
-    "MDN.2b": "connectivity-aware `conn_space` (different-potential MVSD space)",
-    "MDN.3a": (
-        "`mvsd.enclosed(poly_mdn)` on the derived `poly_mdn` (Poly2 & "
-        "LDMOS_XTOR & Dualgate & NCOMP)"
-    ),
-    "MDN.3b": "max channel length on the derived `ldnmos` region (`poly_mdn - mvsd`)",
-    "MDN.4a": "channel width on the derived `ldnmos` gate-end edges",
-    "MDN.4b": "channel width on the derived `ldnmos` gate-end edges",
-    "MDN.5ai": (
-        "derived PCOMP/NCOMP interaction "
-        "(`pcomp_mdn.not_interacting(ncomp)`) and MVSD polygon output"
-    ),
-    "MDN.5aii": (
-        "derived PCOMP/NCOMP interaction (`pcomp_mdn.interacting(ncomp)`) "
-        "and MVSD polygon output"
-    ),
-    "MDN.5b": "spacing from the derived `ldnmos_source` region",
-    "MDN.5c": "sized-extents and `separation(pcomp)` selector on derived NCOMP",
-    "MDN.6": "Boolean union of NCOMP/Poly2/MVSD minus Dualgate; NCOMP is derived",
-    "MDN.6a": (
-        "`ncomp_ld.enclosed(dualgate)`: NCOMP is a derived layer (COMP inside Nplus)"
-    ),
-    "MDN.7": "derived NCOMP/NGATE Boolean union minus LDMOS_XTOR",
-    "MDN.7a": (
-        "`dualgate.not_outside(ldmos_xtor)` polygon selector plus a "
-        "`dualgate & mvsd` term"
-    ),
-    "MDN.8a": "connectivity-aware `conn_separation` (same-potential Nwell)",
-    "MDN.8b": "connectivity-aware `conn_separation` (different-potential Nwell)",
-    "MDN.9": "separation to `ncomp.not_interacting(mvsd)`: NCOMP is derived",
-    "MDN.10a": (
-        "width on `poly2 & dualgate & ldmos_xtor.interacting(mvsd)`, a derived region"
-    ),
-    "MDN.10b": "edge selection on derived NCOMP and Poly2 edges",
-    "MDN.10c": "min/max (`!=`) enclosure of derived NCOMP edges",
-    "MDN.10d": "min/max field-poly space on derived NCOMP and sized regions",
-    "MDN.10ei": "separation from `pcomp.not_interacting(ncomp)`: derived PCOMP/NCOMP",
-    "MDN.10eii": "separation from `pcomp.interacting(ncomp)`: derived PCOMP/NCOMP",
-    "MDN.10f": "`interacting(..., 2)` count selector on derived Poly2 minus Nplus",
-    "MDN.11": (
-        "min/max overlap on the derived LDMOS_XTOR & MVSD & COMP & Poly2 & Nplus region"
-    ),
-    "MDN.12": "enclosure of derived NCOMP in the drain direction (`transparent` mode)",
-    "MDN.13a": "finger-length selector on the derived `poly_mdn - mvsd` region",
-    "MDN.13b": "count selectors on derived source/drain regions",
-    "MDN.13c": "count selectors on derived source/drain regions",
-    "MDN.13d": "`pcomp.holes` guard-ring covering count selectors",
-    "MDN.15a": "width on the derived `comp & ldmos_xtor & dualgate & mvsd` region",
-    "MDN.15b": (
-        "`contact.interacting(ncomp_mdn & mvsd) - (ncomp & mvsd)`: derived NCOMP"
-    ),
-    "MDN.17": "`pcomp.holes` guard-ring recommendation on derived regions",
-    "MDP.1": (
-        "`mvpsd.enclosed(poly_mdp)` on the derived `poly_mdp` (Poly2 & "
-        "PCOMP inside LDMOS_XTOR)"
-    ),
-    "MDP.1a": "max channel length on the derived `ldpmos` region",
-    "MDP.2": "channel width on the derived `ldpmos` gate-end edges",
-    "MDP.3": "non-broken Nplus guard-ring (`nplus.holes`) polygon selectors",
-    "MDP.3ai": "separation from `ncomp.not_interacting(pcomp)`: derived NCOMP/PCOMP",
-    "MDP.3aii": "separation from `ncomp.interacting(pcomp)`: derived NCOMP/PCOMP",
-    "MDP.3b": "separation between derived NCOMP and PCOMP-in-DNWELL regions",
-    "MDP.3c": "`separation(pcomp.inside(dnwell))` selector on derived NCOMP",
-    "MDP.3d": "metal-gap edge-length test on derived NCOMP",
-    "MDP.4": "guard-ring edge/metal-gap test on derived PCOMP",
-    "MDP.4a": "separation between derived PCOMP and `dnwell & dualgate & ldmos_xtor`",
-    "MDP.4b": "DNWELL edge `centers` and `pcomp.holes` selectors",
-    "MDP.5": "Boolean union of PCOMP/Poly2/MVPSD minus Dualgate; PCOMP is derived",
-    "MDP.5a": (
-        "`pcomp.inside(ldmos_xtor).enclosed(dualgate & ldmos_xtor)`: PCOMP is derived"
-    ),
-    "MDP.6a": "`ldmos_xtor.not_covering(dualgate)`: no polygon-selector check kind",
-    "MDP.7": "separation to `nwell.outside(ldmos_xtor)`: polygon selector on Nwell",
-    "MDP.8": (
-        "separation to `ncomp.outside(ldmos_xtor)`: derived NCOMP and polygon selector"
-    ),
-    "MDP.9a": (
-        "width on `poly2.inside(dnwell & dualgate & ldmos_xtor)`, a derived region"
-    ),
-    "MDP.9b": "edge selection on derived Poly2 edges",
-    "MDP.9c": "min/max (`== 0.2um`) enclosure of COMP by derived Poly2 edges",
-    "MDP.9d": "min/max field-poly space on derived sized MVPSD & PCOMP region",
-    "MDP.9ei": "separation from the derived non-butted NCOMP region",
-    "MDP.9eii": "separation from the derived butted NCOMP region",
-    "MDP.9f": "`interacting(..., 2)` count selector on derived Poly2 minus Pplus",
-    "MDP.10": "min/max (`== 0.4um`) MVPSD overlap of the derived channel region",
-    "MDP.10a": "connectivity-aware `conn_space` (different-potential MVPSD space)",
-    "MDP.10b": "connectivity-aware `conn_space` (same-potential MVPSD space)",
-    "MDP.11": "enclosure of PCOMP edges by MVPSD edges: PCOMP is derived",
-    "MDP.12": "DNWELL enclosure of derived NCOMP guard ring",
-    "MDP.13a": "finger-length selector on derived Poly2 & PCOMP region",
-    "MDP.13b": "count selectors on derived source/drain regions",
-    "MDP.13c": "count selectors on derived source/drain regions",
-    "MDP.15": (
-        "separation between DNWELLs selected by `covering(mvpsd)` polygon selector"
-    ),
-    "MDP.16a": "width on the derived `comp.inside(mvpsd)` region",
-    "MDP.16b": "`contact.interacting(pcomp inside mvpsd)` selector: derived PCOMP",
-    "MDP.17a": "latch-up guard-ring recommendation on derived MVPSD/NCOMP regions",
-    "MDP.17c": "latch-up guard-ring recommendation on derived DNWELL/NCOMP regions",
-}
+# `UNTRANSCRIBED_RULES` (the esd.rb/guard_ring.rb/MDN./MDP. untranscribed
+# disclosures) lives in :mod:`.gf180mcu_untranscribed` -- data only, split
+# out for the per-file size ratchet; re-exported here, so importers of
+# `klayout_tools.decks.gf180mcu.UNTRANSCRIBED_RULES` are unaffected.
 
 
 #: Official gf180mcu DRM rule ids this curated deck knowingly does *not*
@@ -3977,156 +3909,5 @@ EXTRACTION_DECK = dataclasses.replace(
     capacitor_variants=(
         CapacitorVariant("mim_option", "B", EXTRACTION_DECK.capacitors),
         CapacitorVariant("mim_option", "A", _MIM_OPTION_A_CAPACITORS),
-    ),
-)
-
-# --------------------------------------------------------------------------- #
-# `klt extract --parasitics` first-order lumped-RC coefficients
-# --------------------------------------------------------------------------- #
-#
-# Sourced, citable values transcribed from the *public* gf180mcu magic
-# technology file `gf180mcu/magic/gf180mcu.tech` in fossi-foundation/open-pdks
-# (GPLv3 -- the same upstream the DRC decks are transcribed from), nominal
-# corner (the `variants ()` block). Sheet resistances come from that file's
-# `resist <layer> <milliohms per square>` entries; area/fringe capacitances
-# from its `defaultareacap` (aF/um^2) and `defaultperimeter` (aF/um) entries.
-# The .tech header credits GlobalFoundries' PDS_035_03; nothing NDA'd. Values
-# remain order-of-magnitude and uncalibrated-to-silicon: calibrating
-# parasitic-extraction accuracy against silicon is an explicit non-goal of
-# this first cut (issue #216 "Non-goals"). `metals` is index-aligned with
-# EXTRACTION_DECK's `metals` stack: index 0 is Metal1. Values expressed as
-# (sheet ohms/square, area cap fF/um^2, fringe cap fF/um).
-PARASITICS = ParasiticsDeck(
-    # No diffusion role (issue #226): the M cards' AS/AD/PS/PD already feed the
-    # device model's junction capacitance, so an area/perimeter cap term on the
-    # Comp source/drain diffusion here would double-count it. gf180mcu.tech
-    # comments its own active-layer cap out for the same reason.
-    diffusion=None,
-    # Poly2 gate/interconnect. sheet from `resist (allpolynonres)/active 7300`
-    # (7300 milliohm/sq = 7.3 ohm/sq); area from `defaultareacap` poly2
-    # (110.67 aF/um^2).
-    poly=LayerRC(sheet_res_ohm_sq=7.3, cap_area_ff_um2=0.11067, cap_perim_ff_um=0.05),
-    metals=(
-        # Metal1. perim from `defaultperimeter` Metal1 (39.431 aF/um).
-        LayerRC(
-            sheet_res_ohm_sq=0.09,
-            sheet_res_high_ohm_sq=0.104,
-            sheet_res_low_ohm_sq=0.076,
-            cap_area_ff_um2=0.03,
-            cap_perim_ff_um=0.039431,
-        ),
-        # Metal2 (issue #547). sheet from `resist (allm2)/metal2 90`
-        # (unconditional -- M2 is never the top/thick metal in any gf180mcu
-        # stack option); area/perim from `defaultareacap`/`defaultperimeter`
-        # allm2 metal2 (15.016 aF/um^2, 33.298 aF/um).
-        LayerRC(
-            sheet_res_ohm_sq=0.09,
-            sheet_res_high_ohm_sq=0.104,
-            sheet_res_low_ohm_sq=0.076,
-            cap_area_ff_um2=0.015016,
-            cap_perim_ff_um=0.033298,
-        ),
-        # Metal3 (issue #547). sheet from `resist (allm3)/metal3 90`, the
-        # `#ifdef METALS4 || METALS5 || METALS6` row -- this deck's 5-metal
-        # stack (`EXTRACTION_DECK.metals` has 5 entries) means M3 is not the
-        # top metal, so it takes the fixed 90 milliohm/sq row rather than the
-        # THICKMET-dependent one reserved for a 3-metal-only stack. area/perim
-        # from `defaultareacap`/`defaultperimeter` allm3 metal3 (10.094
-        # aF/um^2, 30.021 aF/um) -- unconditional; thickness options only vary
-        # M3's sheet resistance, never its cap coefficients.
-        LayerRC(
-            sheet_res_ohm_sq=0.09,
-            sheet_res_high_ohm_sq=0.104,
-            sheet_res_low_ohm_sq=0.076,
-            cap_area_ff_um2=0.010094,
-            cap_perim_ff_um=0.030021,
-        ),
-        # Metal4 (issue #547). sheet from `resist (allm4)/metal4 90`, the
-        # `#ifdef METALS5 || METALS6` row (same reasoning as Metal3 -- not the
-        # top metal in a 5-level stack). area/perim from
-        # `defaultareacap`/`defaultperimeter` allm4 metal4 (7.602 aF/um^2,
-        # 28.153 aF/um).
-        LayerRC(
-            sheet_res_ohm_sq=0.09,
-            sheet_res_high_ohm_sq=0.104,
-            sheet_res_low_ohm_sq=0.076,
-            cap_area_ff_um2=0.007602,
-            cap_perim_ff_um=0.028153,
-        ),
-        # Metal5 (issue #547, revised by #572 and again by #3540), the top
-        # metal of this 5-level stack. sheet from the resolved, pre-built
-        # `gf180mcuD.tech` for the pinned PDK commit
-        # f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7 (nominal `variants ()`
-        # corner block, line 3347): `resist (allm5)/metal5    40` (40
-        # milliohm/sq = 0.04 ohm/sq). At the earlier pin
-        # c6d73a35f524070e85faff4a6a9eef49553ebc2b that same resolved row read
-        # 60 (the other two corner blocks 70 -> 49 and 50 -> 31), which #572
-        # adopted over #571's 40 taken from the unresolved generic
-        # `gf180mcu.tech`; f6eeac7's resolved file now carries 40, matching
-        # the value #572 rejected, so 0.04 here is a re-pin delta rather than
-        # a return to #571's derivation. No other `resist`/`defaultareacap`/
-        # `defaultperimeter`/`defaultoverlap allm[2-5]` row changed between
-        # the two pins. area/perim from `defaultareacap`/`defaultperimeter`
-        # allm5 metal5 (5.798 aF/um^2, 30.386 aF/um) -- unconditional across
-        # every THICKMET option.
-        LayerRC(
-            sheet_res_ohm_sq=0.04,
-            sheet_res_high_ohm_sq=0.049,
-            sheet_res_low_ohm_sq=0.031,
-            cap_area_ff_um2=0.005798,
-            cap_perim_ff_um=0.030386,
-        ),
-    ),
-    # `defaultoverlap` vertical plate-coupling coefficients (issue #760,
-    # Extract Stage 2a): entry `i` is the coefficient between `metals[i]`
-    # (lower plate) and `metals[i+1]` (upper plate), so a fully-populated
-    # table has `len(metals) - 1` = 4 entries for this 5-level stack.
-    #
-    # Transcribed from the resolved, pre-built `gf180mcuD.tech` for the
-    # pinned PDK commit f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7 (values
-    # re-checked unchanged from c6d73a3, issue #3540), nominal
-    # `variants ()` corner block -- the same source and corner Metal5's
-    # sheet resistance above is cited from (issue #572), chosen over the
-    # generic `gf180mcu.tech` because only the resolved file has the
-    # `#ifdef METALS5` Metal4/Metal5 rows already selected for this deck's
-    # actual 5-level stack. Only `allmN metalN allmM metalM` rows are used
-    # (metal-over-metal); the same blocks' `... nwell well` / `...
-    # allpolynonres active` rows describe metal-over-substrate/poly overlap,
-    # which the existing `cap_area_ff_um2` ground term already covers.
-    #
-    # Magic states these in aF/um^2; divided by 1000 to fF/um^2, matching
-    # `cap_area_ff_um2`'s convention above.
-    metal_overlaps=(
-        # Metal1 (idx0) <-> Metal2 (idx1): `defaultoverlap allm2 metal2
-        # allm1 metal1 59.027`.
-        0.059027,
-        # Metal2 (idx1) <-> Metal3 (idx2): `defaultoverlap allm3 metal3
-        # allm2 metal2 59.027`.
-        0.059027,
-        # Metal3 (idx2) <-> Metal4 (idx3): `defaultoverlap allm4 metal4
-        # allm3 metal3 59.027`.
-        0.059027,
-        # Metal4 (idx3) <-> Metal5 (idx4): `defaultoverlap allm5 metal5
-        # allm4 metal4 39.351`.
-        0.039351,
-    ),
-    # Per-cut via resistance and the interconnect-resistance corners (issue
-    # #3053), from the same resolved `gf180mcuD.tech` / pinned PDK commit
-    # f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7 as Metal5 above. Magic states
-    # `contact` rows in milliohm per cut; divided by 1000. Nominal: `variants
-    # ()` block (L3355-3358); high-R: `variants (hrhc),(hrlc)` (L3404-3407,
-    # 15000 = 15 ohm, 3.3x nominal); low-R: `variants (lrhc),(lrlc)`
-    # (L3453-3456, 0 -- an ideal short, stored as published, not clamped; see
-    # `CutRC`). The high/low *metal* sheet resistances are on `metals` above
-    # (L3390-3396 / L3439-3445). `lower_metal_index` is the Metal level the
-    # cut lands on: m2c = Metal1->Metal2, m3c = Metal2->Metal3, via3 =
-    # Metal3->Metal4, via4 = Metal4->Metal5. `mimcc` (MiM cap contact, also
-    # 4.5 ohm) and the diffusion/poly contacts (`ndc` ... `pc`) are not
-    # curated: they are not between two metals of this stack.
-    cuts=(
-        CutRC("m2c", 0, nominal_ohm=4.5, high_ohm=15.0, low_ohm=0.0),
-        CutRC("m3c", 1, nominal_ohm=4.5, high_ohm=15.0, low_ohm=0.0),
-        CutRC("via3", 2, nominal_ohm=4.5, high_ohm=15.0, low_ohm=0.0),
-        CutRC("via4", 3, nominal_ohm=4.5, high_ohm=15.0, low_ohm=0.0),
     ),
 )

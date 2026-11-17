@@ -59,7 +59,36 @@
     "findings": [],
     "finding_count": 0
   },
-  "device_parameter_coverage": [],
+  "device_parameter_coverage": [
+    {
+      "class": "NFET",
+      "device_kind": "mos",
+      "layout_devices": 2,
+      "reference_devices": 2,
+      "compared": [
+        "L",
+        "W"
+      ],
+      "not_compared": [
+        {
+          "parameter": "AS",
+          "reason": "secondary"
+        },
+        {
+          "parameter": "AD",
+          "reason": "secondary"
+        },
+        {
+          "parameter": "PS",
+          "reason": "secondary"
+        },
+        {
+          "parameter": "PD",
+          "reason": "secondary"
+        }
+      ]
+    }
+  ],
   "mismatch_count": 0,
   "error_count": 0,
   "category_counts": {},
@@ -107,17 +136,23 @@
   "net_correspondence": [
     {
       "layout": "VIN",
+      "layout_id": 0,
       "reference": "VIN",
+      "reference_id": 0,
       "pin": true
     },
     {
       "layout": "VOUT",
+      "layout_id": 1,
       "reference": "VOUT",
+      "reference_id": 1,
       "pin": true
     },
     {
       "layout": "VSS",
+      "layout_id": 2,
       "reference": "VSS",
+      "reference_id": 2,
       "pin": true
     }
   ]

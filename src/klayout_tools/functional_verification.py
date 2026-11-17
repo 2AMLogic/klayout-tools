@@ -215,12 +215,17 @@ from ._paths import load_request_arg as _shared_load_request_arg
 from ._paths import validate_request_shape as _shared_validate_request_shape
 from ._provenance import sha256_file
 from .env_provenance import find_repo_root, repo_relative_path
+from .functional_verification_from_synthesize import (  # noqa: F401
+    _resolve_sources,
+    has_from_synthesize,
+)
 from .functional_verification_initial_state import (
     INITIAL_STATE_MODULE,
     SEED_PLUSARG,
     build_initial_state_verilog,
     count_d_nets,
 )
+from .functional_verification_run_inputs import resolve_run_inputs, with_run_inputs
 from .functional_verification_sdf import (
     _check_sdf_engine_capability,
     _collect_sdf_alias_port_bits,
@@ -253,7 +258,9 @@ from .functional_verification_sdf_steps import (
     SDF_COND_EXPRESSION_REASONS,
     _apply_sdf_cond_expression_drop,
     _apply_sdf_header_normalization,
+    _sdf_refusal_error,
 )
+from .request_paths import RequestPaths
 from .reset_coverage import ResetCoverageError, sequential_elements
 
 #: Bumped only on a non-additive (breaking) change to this command's own
@@ -642,6 +649,7 @@ class FunctionalVerificationError(Exception):
     """
 
     code: str | None = None
+    details: dict[str, Any] | None = None
 
     def __init__(self, message: str = "", *, code: str | None = None) -> None:
         super().__init__(message)
@@ -649,24 +657,35 @@ class FunctionalVerificationError(Exception):
             self.code = code
 
 
+_rpath = RequestPaths(FunctionalVerificationError)
+
+
 # ---------------------------------------------------------------------------
 # request loading (same file / "-" / inline-JSON convention as `klt lvs`)
 # ---------------------------------------------------------------------------
 
 
-_REQUIRED_REQUEST_FIELDS = ("sources", "hdl_toplevel", "testbench")
+# "sources" is checked in _resolve_sources: options.from_synthesize may omit it.
+_REQUIRED_REQUEST_FIELDS = ("hdl_toplevel", "testbench")
 
 
 def _validate_request_shape(data: Any, source: str) -> dict[str, Any]:
     """Shared shape check for a JSON-decoded request, however it was sourced
     (file, inline JSON, stdin). ``source`` is folded into the "must be a JSON
     object" error for context."""
-    return _shared_validate_request_shape(
+    doc = _shared_validate_request_shape(
         data,
         source,
         error_cls=FunctionalVerificationError,
         required_fields=_REQUIRED_REQUEST_FIELDS,
     )
+    return _require_sources(doc)
+
+
+def _require_sources(doc: dict[str, Any]) -> dict[str, Any]:
+    if "sources" not in doc and not has_from_synthesize(doc.get("options")):
+        raise FunctionalVerificationError("request is missing required field: sources")
+    return doc
 
 
 def load_request(request_path: str) -> dict[str, Any]:
@@ -690,46 +709,18 @@ def load_request_arg(value: str) -> tuple[dict[str, Any], str]:
     JSON file, ``"-"`` for stdin, or an inline JSON object string), so this
     verb composes into ``klt eval``'s descriptor unchanged.
     """
-    return _shared_load_request_arg(
+    doc, request_dir = _shared_load_request_arg(
         value,
         error_cls=FunctionalVerificationError,
         required_fields=_REQUIRED_REQUEST_FIELDS,
         load_request_fn=load_request,
     )
+    return _require_sources(doc), request_dir
 
 
 # ---------------------------------------------------------------------------
 # request field validation
 # ---------------------------------------------------------------------------
-
-
-def _resolve_sources(sources: Any, request_dir: str) -> list[str]:
-    """Validate ``request.sources`` and resolve each entry to an absolute,
-    readable path (relative to ``request_dir`` -- the same convention every
-    other request-taking verb uses)."""
-    if not isinstance(sources, list) or not sources:
-        raise FunctionalVerificationError(
-            "request.sources must be a non-empty array of paths"
-        )
-    if not all(isinstance(entry, str) and entry for entry in sources):
-        raise FunctionalVerificationError(
-            "request.sources entries must be non-empty strings"
-        )
-
-    resolved: list[str] = []
-    for entry in sources:
-        path = entry if os.path.isabs(entry) else os.path.join(request_dir, entry)
-        if not os.path.isfile(path):
-            raise FunctionalVerificationError(f"RTL source not found: {entry}")
-        try:
-            with open(path, "rb"):
-                pass
-        except OSError as exc:
-            raise FunctionalVerificationError(
-                f"could not read RTL source '{entry}': {exc}"
-            ) from exc
-        resolved.append(os.path.abspath(path))
-    return resolved
 
 
 def _resolve_testbench(
@@ -773,11 +764,7 @@ def _resolve_testbench(
             raise FunctionalVerificationError(
                 "request.testbench.search_path must be a non-empty string when given"
             )
-        search_dir = (
-            search_path
-            if os.path.isabs(search_path)
-            else os.path.join(request_dir, search_path)
-        )
+        search_dir = _rpath(search_path, request_dir, "request.testbench.search_path")
     else:
         search_dir = request_dir
 
@@ -990,9 +977,7 @@ def _resolve_initial_state(
             f"options.initial_state requires engine 'icarus' -- engine "
             f"'{engine}' cannot force cell-model pins hierarchically"
         )
-    netlist_path = (
-        netlist if os.path.isabs(netlist) else os.path.join(request_dir, netlist)
-    )
+    netlist_path = _rpath(netlist, request_dir, "request.options.initial_state.netlist")
     if not os.path.isfile(netlist_path):
         raise FunctionalVerificationError(
             f"request.options.initial_state.netlist '{netlist_path}' not found"
@@ -1286,7 +1271,7 @@ def _resolve_source_defines(
                 "request.options.source_defines keys must be non-empty strings"
             )
         path = os.path.abspath(
-            key if os.path.isabs(key) else os.path.join(request_dir, key)
+            _rpath(key, request_dir, "request.options.source_defines key")
         )
         if path not in sources:
             raise FunctionalVerificationError(
@@ -1407,7 +1392,7 @@ def _resolve_includes(includes: Any, request_dir: str) -> list[str]:
 
     resolved: list[str] = []
     for entry in includes:
-        path = entry if os.path.isabs(entry) else os.path.join(request_dir, entry)
+        path = _rpath(entry, request_dir, "request.options.includes entry")
         if not os.path.isdir(path):
             raise FunctionalVerificationError(f"include directory not found: {entry}")
         resolved.append(os.path.abspath(path))
@@ -1646,7 +1631,7 @@ def _tool_version_output(path: str, env: dict[str, str]) -> str | None:
 
 class _MissingToolError(FunctionalVerificationError):
     """``missing_tool``: one or more ``request.requires_tools`` unmet. The CLI
-    surfaces ``details`` as ``error.details``."""
+    surfaces ``details`` flat on ``error`` (``error.unmet_tools``)."""
 
     def __init__(self, unmet: list[dict[str, Any]]) -> None:
         listing = "; ".join(f"{u['name']} ({u['reason']})" for u in unmet)
@@ -2584,13 +2569,15 @@ def run_functional_verification(
 
     engine = _resolve_engine(request_doc)
 
-    sources = _resolve_sources(request_doc["sources"], request_dir)
-
     hdl_toplevel = request_doc["hdl_toplevel"]
     if not isinstance(hdl_toplevel, str) or not hdl_toplevel:
         raise FunctionalVerificationError(
             "request.hdl_toplevel must be a non-empty string"
         )
+    # Issue #5684: verify the synthesized netlist before anything is built.
+    sources, run_inputs = resolve_run_inputs(
+        request_doc, request_dir, hdl_toplevel, _path_envelope
+    )
 
     verilog_tb = _resolve_verilog_top(
         request_doc["testbench"], sources, engine, request_doc.get("options")
@@ -2913,23 +2900,26 @@ def run_functional_verification(
     includes = [*includes, *scoped_include_dirs]
 
     if verilog_tb is not None:
-        return _run_verilog_top(
-            verilog_tb,
-            engine=engine,
-            hdl_toplevel=hdl_toplevel,
-            sources=sources,
-            build_args=build_args,
-            defines=defines,
-            includes=includes,
-            build_dir=build_dir,
-            build_log=build_log,
-            test_log=test_log,
-            sdf=sdf,
-            sdf_pre_dropped_counts=sdf_pre_dropped_counts,
-            sdf_pre_dropped_arcs=sdf_pre_dropped_arcs,
-            sdf_renamed=sdf_renamed,
-            source_defines=source_defines,
-            tools=tools,
+        return with_run_inputs(
+            _run_verilog_top(
+                verilog_tb,
+                engine=engine,
+                hdl_toplevel=hdl_toplevel,
+                sources=sources,
+                build_args=build_args,
+                defines=defines,
+                includes=includes,
+                build_dir=build_dir,
+                build_log=build_log,
+                test_log=test_log,
+                sdf=sdf,
+                sdf_pre_dropped_counts=sdf_pre_dropped_counts,
+                sdf_pre_dropped_arcs=sdf_pre_dropped_arcs,
+                sdf_renamed=sdf_renamed,
+                source_defines=source_defines,
+                tools=tools,
+            ),
+            run_inputs,
         )
 
     runner_module = _import_runner()
@@ -2991,14 +2981,11 @@ def run_functional_verification(
         # run (issue #2285), for which Icarus emits nothing at all.
         sdf_dropped_counts = {**sdf_pre_dropped_counts, **scanned_dropped_counts}
         if diagnostics:
-            shown = " | ".join(diagnostics[:5])
-            more = f" (+{len(diagnostics) - 5} more)" if len(diagnostics) > 5 else ""
-            raise FunctionalVerificationError(
-                f"SDF back-annotation of '{sdf['file']}' did not fully apply: "
-                f"{len(diagnostics)} diagnostic(s) in the {engine} transcript "
-                f"-- {shown}{more}. The simulator exits 0 after skipping an "
-                "annotation it cannot apply, so this run's verdict would have "
-                "been a zero-delay one reported as if it were annotated."
+            raise _sdf_refusal_error(
+                sdf["file"],
+                engine,
+                diagnostics,
+                _sdf_dropped_report(sdf_dropped_counts, sdf_pre_dropped_arcs),
             )
 
     tests, (passed_count, failed_count, skipped_count), run_reports = (
@@ -3047,18 +3034,18 @@ def run_functional_verification(
                 "tools": tools,
                 "cocotb_version": _cocotb_version(),
                 "results_xml": _hashed_path_envelope(results_xml),
-                # Additive (issue #3013): the simulator/cocotb console transcript
-                # and the build transcript the run wrote, named by path (never
-                # inlined) like `results_xml`.
+                # Additive (issue #3013): the simulator/cocotb console and build
+                # transcripts, named by path (never inlined) like `results_xml`.
                 "test_log": _hashed_path_envelope(test_log),
                 "build_log": _hashed_path_envelope(build_log),
                 "random_seed": _extract_random_seed_property(results_xml),
                 # Additive (issue #3290): `options.source_defines` keyed by the
-                # request.sources entry as resolved to an absolute path; `{}`
-                # when absent.
+                # request.sources entry as resolved; `{}` when absent.
                 "source_defines": source_defines,
                 # Additive (issue #4338): `request.env` as given; `{}` when absent.
                 "env": env,
+                # Additive (issue #5697): `request.parameters` echo; `{}` when absent.
+                "parameters": parameters,
                 # Additive (issue #2998): `null` unless the request set
                 # `options.initial_state`. `seeds` echoes the effective seeds
                 # (empty for mode "x"); `runs` has one entry per seed.
@@ -3112,6 +3099,7 @@ def run_functional_verification(
             },
         }
     )
+    with_run_inputs(report, run_inputs)  # #5684/#5771, additive
     report.local_paths = {
         "results_xml": results_xml,
         "test_log": test_log,

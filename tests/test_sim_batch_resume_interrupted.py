@@ -5,7 +5,6 @@ single-job path (issue #5459); split from test_sim_batch.py to keep it small."""
 from __future__ import annotations
 
 import json
-import time
 
 from helpers.subprocess_fakes import fake_completed
 from klayout_tools import sim
@@ -169,12 +168,24 @@ def test_resume_resubmits_a_single_unit_job_that_stays_interrupted(
     launches_before = len(_launches(runner))
     _stick_job_status(monkeypatch, {stuck: "interrupted"})
 
-    started = time.monotonic()
-    corners, _, environment = run(resume=True)
-    elapsed = time.monotonic() - started
+    # Record the grace each poll loop is given rather than timing the call:
+    # wall clock also counts fixture I/O and a loaded runner (issue #6321).
+    graces: list[tuple[str, float]] = []
+    real_poll = sb._poll_status_interruptibly
 
-    # Reported after ~one poll, not after another full `interrupted_grace_s`.
-    assert elapsed < grace_s / 2
+    def spy(config, job_id, **kwargs):
+        graces.append((job_id, config.interrupted_grace_s))
+        return real_poll(config, job_id, **kwargs)
+
+    monkeypatch.setattr(sb, "_poll_status_interruptibly", spy)
+
+    corners, _, environment = run(resume=True)
+
+    # The re-attach to the stuck job waits the shortened resume grace -- about
+    # one poll -- not another full `interrupted_grace_s`; only the fresh
+    # resubmit gets the request's own grace.
+    assert graces[0] == (stuck, 0.01)
+    assert [g for job, g in graces if job != stuck] == [grace_s]
     assert len(_launches(runner)) == launches_before + 1
     assert not _codes(corners)
     assert environment["job_id"] != stuck

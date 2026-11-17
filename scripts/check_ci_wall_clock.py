@@ -73,6 +73,14 @@ before. `scripts/fetch_ci_wall_clock_history.py` applies the same subtraction
 (this module's `measure_cache_miss`) to every history run, so the rolling
 baseline and the judged run are the same kind of number.
 
+**Checkout is fixed setup, not compute** (issue #5964). A job's wall time also
+includes its `actions/checkout` step(s), and on 2026-11-16 one stalled at 313 s
+on a single runner while the five sibling jobs of the same run took 4-6 s -- a
+job with ~29 s of normal cargo work, reported as a "compute breach". That time
+(`measure_checkout`, shared with the history fetcher) is excluded from every
+job's compute figure *always*, with anything above 60 s named as a stall; as
+with the cache miss, nothing else is excluded.
+
 Exit codes (mirroring `scripts/check-release-lag.sh`'s tiering):
 
   0  within budget, a queue-only breach, an UNCONFIRMED compute breach, or a
@@ -122,6 +130,11 @@ from ci_wall_clock_attempt import (
 )
 from ci_wall_clock_attempt import as_json as attempt_as_json
 from ci_wall_clock_guidance import breach_guidance
+from ci_wall_clock_steps import (
+    UNMEASURABLE_CONCLUSIONS,
+    measure_cache_miss,
+    measure_checkout,
+)
 
 # The budget file's own schema (`.github/ci-wall-clock-budget.json`). Still 1:
 # #2615 only *added* an optional `rolling_window` block, so a budget file
@@ -141,8 +154,9 @@ EXIT_OK = 0
 EXIT_BREACH = 1
 EXIT_CANNOT_RUN = 2
 
-# Conclusions that carry no meaningful duration.
-_UNMEASURABLE_CONCLUSIONS = frozenset({"skipped", "cancelled", "neutral"})
+# A checkout figure at or above this is named as a stall in the report
+# (#5964); normal checkouts are 3-10 s.
+CHECKOUT_STALL_SECONDS = 60
 
 # Defaults for the rolling-window model (issue #2615). Every one of these is
 # overridable from the budget file's `rolling_window` block; the values here
@@ -181,19 +195,6 @@ DEFAULT_ROLLING = {
     "peer_quantile": 0.9,
 }
 
-# `ci.yml`'s naming convention for the two halves of a pinned-tool install
-# (issue #2617). Both are load-bearing here, so a rename in the workflow must
-# be mirrored in this file -- see docs/guides/ci-wall-clock-budget.md.
-#
-#   "Cache pinned Yosys build"                        <- actions/cache restore
-#   "Build + install pinned Yosys (cache miss only)"  <- `if: cache-hit != 'true'`
-#
-# On a cache hit the rebuild step is reported as `skipped`, so a rebuild step
-# with any *other* conclusion is a positive, unambiguous cache-miss signal --
-# no workflow change and no extra API call needed to detect one.
-CACHE_MISS_STEP_SUFFIX = " (cache miss only)"
-CACHE_STEP_PREFIXES = ("Cache ", "Post Cache ")
-
 
 class CannotRun(Exception):
     """The check could not be performed (exit 2, never a silent pass)."""
@@ -224,11 +225,12 @@ class HistoryRun:
 
 @dataclass(frozen=True)
 class JobTiming:
-    """One job's timing, with cache-miss recovery time held separately.
+    """One job's timing, with non-compute time held separately.
 
     `seconds` is the **compute** figure -- the number compared against the
-    budget -- and deliberately excludes `cache_miss_seconds`. `total_seconds`
-    is what the GitHub UI shows for the job.
+    budget -- and deliberately excludes `cache_miss_seconds` (#2617) and
+    `checkout_seconds` (#5964). `total_seconds` is what the GitHub UI shows
+    for the job.
     """
 
     name: str
@@ -239,6 +241,7 @@ class JobTiming:
     baseline: Baseline | None = None
     cache_miss_seconds: int = 0
     cache_miss_steps: tuple[str, ...] = ()
+    checkout_seconds: int = 0
 
     @property
     def over_budget(self) -> bool:
@@ -246,12 +249,19 @@ class JobTiming:
 
     @property
     def total_seconds(self) -> int:
-        return self.seconds + self.cache_miss_seconds
+        return self.seconds + self.cache_miss_seconds + self.checkout_seconds
 
     @property
     def cache_missed(self) -> bool:
         # Duration is not the signal -- a rebuild step that *ran at all* is.
         return bool(self.cache_miss_steps)
+
+    @property
+    def checkout_stalled(self) -> bool:
+        # Same shape as `cache_missed`, but duration *is* the signal here:
+        # checkout always runs and is always excluded, so only a large one
+        # is worth naming (a normal checkout is 3-10 s).
+        return self.checkout_seconds >= CHECKOUT_STALL_SECONDS
 
 
 @dataclass(frozen=True)
@@ -691,69 +701,6 @@ def measure_current_attempt(
     return timings, first, last, sel
 
 
-def _step_seconds(step: dict) -> int:
-    """A step's duration, or 0 when it is missing/unparseable.
-
-    Step timings are *secondary* data: they only ever subtract from the
-    compute figure, so a malformed one must degrade to "subtract nothing"
-    rather than take the whole check down (which a `CannotRun` would).
-    """
-    started, completed = step.get("started_at"), step.get("completed_at")
-    if not isinstance(started, str) or not isinstance(completed, str):
-        return 0
-    if not started or not completed:
-        return 0
-    try:
-        elapsed = _parse_iso(completed) - _parse_iso(started)
-    except ValueError:
-        return 0
-    return max(0, int(elapsed.total_seconds()))
-
-
-def measure_cache_miss(job: dict) -> tuple[int, tuple[str, ...]]:
-    """Seconds this job spent recovering from an `actions/cache` miss.
-
-    Returns `(seconds, rebuilt_step_names)`; `(0, ())` for a job that hit its
-    caches, carries no `steps[]`, or does not use the convention at all.
-
-    Only a job with at least one rebuild step that actually ran gets *any*
-    time excluded, and only these two kinds of step are ever counted:
-
-      * the `" (cache miss only)"` source builds themselves;
-      * that job's own `actions/cache` restore/save steps -- ~1 s each on a
-        healthy run, but the retry path of a degraded cache service (the
-        `(500) Internal Server Error` loop behind #2617) is precisely where
-        they stop being ~1 s.
-
-    Every other step -- pytest above all -- stays in the compute figure, so
-    this can never launder a real slowdown.
-    """
-    steps = job.get("steps")
-    if not isinstance(steps, list):
-        return 0, ()
-
-    rebuilds: list[tuple[str, int]] = []
-    cache_io_seconds = 0
-    for step in steps:
-        if not isinstance(step, dict):
-            continue
-        name = step.get("name")
-        if not isinstance(name, str):
-            continue
-        if name.endswith(CACHE_MISS_STEP_SUFFIX):
-            # `skipped` == the cache hit and the rebuild never ran.
-            if step.get("conclusion") in _UNMEASURABLE_CONCLUSIONS:
-                continue
-            rebuilds.append((name, _step_seconds(step)))
-        elif name.startswith(CACHE_STEP_PREFIXES):
-            cache_io_seconds += _step_seconds(step)
-
-    if not rebuilds:
-        return 0, ()
-    seconds = sum(step_seconds for _, step_seconds in rebuilds) + cache_io_seconds
-    return seconds, tuple(name for name, _ in rebuilds)
-
-
 def measure_jobs(
     payload: object, budget: dict, *, exclude: frozenset[str]
 ) -> tuple[list[JobTiming], datetime, datetime]:
@@ -764,8 +711,10 @@ def measure_jobs(
     conclusion carries no duration are dropped.
 
     Each job's `steps[]`, when the payload carries them, are used to split its
-    duration into compute and `actions/cache`-miss recovery time (#2617); only
-    the compute half is compared against the budget.
+    duration into compute and the non-compute slices (#2617 cache-miss
+    recovery, #5964 `actions/checkout`); only the compute half is compared
+    against the budget. The exclusions are clamped to the job's own seconds,
+    so the compute figure can never go negative.
     """
     per_job_budgets = budget.get("jobs", {})
     default_budget = budget["default_job_budget_seconds"]
@@ -783,7 +732,7 @@ def measure_jobs(
             continue
         if not started or not completed:
             continue
-        if job.get("conclusion") in _UNMEASURABLE_CONCLUSIONS:
+        if job.get("conclusion") in UNMEASURABLE_CONCLUSIONS:
             continue
         try:
             start, end = _parse_iso(started), _parse_iso(completed)
@@ -796,16 +745,19 @@ def measure_jobs(
         if not isinstance(job_budget, int) or job_budget <= 0:
             raise CannotRun(f"budget for job {name!r} is not a positive integer")
         cache_seconds, cache_steps = measure_cache_miss(job)
+        checkout_seconds, _ = measure_checkout(job)
         # Steps can overlap the job's own bounds by a second of rounding;
         # never let the excluded slice exceed the job itself.
         cache_seconds = min(cache_seconds, seconds)
+        checkout_seconds = min(checkout_seconds, max(0, seconds - cache_seconds))
         timings.append(
             JobTiming(
                 name,
-                seconds - cache_seconds,
+                seconds - cache_seconds - checkout_seconds,
                 job_budget,
                 cache_miss_seconds=cache_seconds,
                 cache_miss_steps=cache_steps,
+                checkout_seconds=checkout_seconds,
             )
         )
         starts.append(start)
@@ -987,6 +939,67 @@ def _render_cache_misses(cache_missed: list[JobTiming]) -> list[str]:
     ]
 
 
+def checkout_stalled_jobs(timings: list[JobTiming]) -> list[JobTiming]:
+    """Jobs whose `actions/checkout` figure is stall-sized (#5964), costliest
+    first."""
+    return sorted(
+        (t for t in timings if t.checkout_stalled), key=lambda t: -t.checkout_seconds
+    )
+
+
+def _render_checkout_stalls(stalled: list[JobTiming]) -> list[str]:
+    """The `CHECKOUT STALL:` block -- empty when every checkout was quick."""
+    if not stalled:
+        return []
+    excluded = sum(t.checkout_seconds for t in stalled)
+    return [
+        f"CHECKOUT STALL: {len(stalled)} job(s) spent {excluded}s in "
+        "actions/checkout, which is fixed",
+        "git/setup time, not compute, so it is EXCLUDED from the figures "
+        "above (issue #5964):",
+        *(f"  - {t.name}: {t.checkout_seconds}s" for t in stalled),
+        "",
+    ]
+
+
+def print_annotations(
+    breaches: list[Breach], timings: list[JobTiming], *, report_only: bool
+) -> None:
+    """`::warning`/`::error` per breach, `::notice` per excluded slice.
+
+    Mirror the exit-code rule per breach, not per run (see `main`'s
+    `EXIT_BREACH` gate): only a confirmed compute breach on a non-report-only
+    run reddens the build, so only that case gets `::error::`.
+    """
+    for b in breaches:
+        gating = b.kind == "compute" and b.confirmed and not report_only
+        level = "error" if gating else "warning"
+        print(
+            f"::{level} file=.github/ci-wall-clock-budget.json,"
+            f"title=CI wall-clock budget ({b.kind})::{b.message}"
+        )
+    # Cache health is a `::notice::`, never an error: a missed cache is
+    # nothing the PR author did and nothing they can fix, but it is the
+    # first thing a reader of a slow run needs to know (#2617).
+    for t in cache_missed_jobs(timings):
+        print(
+            "::notice file=.github/workflows/ci.yml,"
+            f"title=CI cache miss::{t.name}: actions/cache missed, so "
+            f"{', '.join(t.cache_miss_steps)} rebuilt from source. That "
+            f"{t.cache_miss_seconds}s is excluded from the "
+            f"{t.seconds}s compute figure."
+        )
+    # Same for a checkout stall (#5964): infra the author did not cause and
+    # cannot fix, reported so it is not misread as slow compute.
+    for t in checkout_stalled_jobs(timings):
+        print(
+            "::notice file=.github/workflows/ci.yml,"
+            f"title=CI checkout stall::{t.name}: actions/checkout took "
+            f"{t.checkout_seconds}s (siblings typically take <10s). That "
+            f"time is excluded from the {t.seconds}s compute figure."
+        )
+
+
 def render_text(
     timings: list[JobTiming],
     breaches: list[Breach],
@@ -1023,6 +1036,8 @@ def render_text(
             )
         if t.cache_missed:
             flag += f"  (+{t.cache_miss_seconds}s cache miss, excluded)"
+        if t.checkout_stalled:
+            flag += f"  (+{t.checkout_seconds}s checkout, excluded)"
         lines.append(
             f"  {t.name.ljust(width)}  {t.seconds:>8}  "
             f"{t.budget_seconds:>8}  {basis}{flag}"
@@ -1041,6 +1056,8 @@ def render_text(
 
     cache_missed = cache_missed_jobs(timings)
     lines += _render_cache_misses(cache_missed)
+    stalled = checkout_stalled_jobs(timings)
+    lines += _render_checkout_stalls(stalled)
 
     if not breaches:
         lines.append("OK: every job, total compute, and run wall clock within budget.")
@@ -1052,7 +1069,11 @@ def render_text(
     )
     for b in breaches:
         lines.append(f"  - {b.message}")
-    lines += breach_guidance(breaches, cache_missed=bool(cache_missed))
+    lines += breach_guidance(
+        breaches,
+        cache_missed=bool(cache_missed),
+        checkout_stalled=bool(stalled),
+    )
     return "\n".join(lines)
 
 
@@ -1149,6 +1170,7 @@ def main(argv: list[str] | None = None) -> int:
     # really elapsed, and its breach is report-only anyway.
     total_seconds = sum(t.seconds for t in timings)
     total_cache_miss_seconds = sum(t.cache_miss_seconds for t in timings)
+    total_checkout_seconds = sum(t.checkout_seconds for t in timings)
 
     total_budget, total_basis = total_budget_seconds(budget, model)
     breaches = evaluate(
@@ -1178,6 +1200,7 @@ def main(argv: list[str] | None = None) -> int:
             "total_job_budget_seconds": total_budget,
             "total_job_budget_basis": total_basis,
             "total_cache_miss_seconds": total_cache_miss_seconds,
+            "total_checkout_seconds": total_checkout_seconds,
             "run_wall_clock_seconds": wall_clock_seconds,
             "run_wall_clock_budget_seconds": budget["run_wall_clock_budget_seconds"],
             "run_wall_clock_includes_queue": includes_queue,
@@ -1199,6 +1222,7 @@ def main(argv: list[str] | None = None) -> int:
                     "total_seconds": t.total_seconds,
                     "cache_miss_seconds": t.cache_miss_seconds,
                     "cache_miss_steps": list(t.cache_miss_steps),
+                    "checkout_seconds": t.checkout_seconds,
                 }
                 for t in sorted(timings, key=lambda t: -t.seconds)
             ],
@@ -1233,31 +1257,7 @@ def main(argv: list[str] | None = None) -> int:
         print(report)
 
     if args.annotate:
-        # Mirror the exit-code rule per breach, not per run: a queue breach
-        # never fails the build (see the `EXIT_BREACH` gate below), so it must
-        # never read `::error::` either -- a red annotation on a green job
-        # just trains people to stop reading annotations. Same for an
-        # UNCONFIRMED compute breach (#2615), which also exits 0. Only a
-        # confirmed compute breach on a non-report-only run reddens the build,
-        # and only that case gets `::error::`.
-        for b in breaches:
-            gating = b.kind == "compute" and b.confirmed and not args.report_only
-            level = "error" if gating else "warning"
-            print(
-                f"::{level} file=.github/ci-wall-clock-budget.json,"
-                f"title=CI wall-clock budget ({b.kind})::{b.message}"
-            )
-        # Cache health is a `::notice::`, never an error: a missed cache is
-        # nothing the PR author did and nothing they can fix, but it is the
-        # first thing a reader of a slow run needs to know (#2617).
-        for t in cache_missed_jobs(timings):
-            print(
-                "::notice file=.github/workflows/ci.yml,"
-                f"title=CI cache miss::{t.name}: actions/cache missed, so "
-                f"{', '.join(t.cache_miss_steps)} rebuilt from source. That "
-                f"{t.cache_miss_seconds}s is excluded from the "
-                f"{t.seconds}s compute figure."
-            )
+        print_annotations(breaches, timings, report_only=args.report_only)
 
     summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary_path:

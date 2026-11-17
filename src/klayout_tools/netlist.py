@@ -63,7 +63,6 @@ scope-narrowing comment, 2026-10-01) are both now addressed, via #2680:
 
 from __future__ import annotations
 
-import difflib
 import os
 import re
 import shutil
@@ -77,18 +76,20 @@ from typing import Any
 from . import pdk as pdk_module
 from ._provenance import content_hash_bytes
 from .netlist_diagnostics import diagnostics_block
+from .netlist_diff import MAX_DIFF_LINES, unified_diff  # noqa: F401
 from .netlist_inputs import (
     generation_inputs,
     inputs_drift,
     inputs_record_line,
     split_inputs_record,
 )
-from .netlist_paths import _PATH_COMMENT_RE, postprocess_netlist
+from .netlist_paths import _PATH_COMMENT_RE, fold_continuations, postprocess_netlist
 from .netlist_pdk import (
     _pdk_env_note,
     _pdk_root_consistent,
+    _pdk_xschem_env,
     _rcfile_pdk_root,
-    _with_symbol_path_env,
+    unestablished_variant_warning,
 )
 from .netlist_port_order import port_order_drift_reason
 from .netlist_port_order import sibling_symbol as _sibling_symbol
@@ -132,12 +133,6 @@ SIGTERM_GRACE_S = 2.0
 #: written 10ms after launch can stat as having been written up to a second
 #: *before* it. One second is the coarsest granularity we need to tolerate.
 FRESHNESS_TOLERANCE_S = 1.0
-
-#: Cap on the number of unified-diff lines carried in a ``--check`` payload.
-#: A drifted netlist can differ by thousands of lines; the payload's job is
-#: to say *that* it drifted and show the head of the difference, not to be a
-#: transport for the whole file (both copies are on disk already).
-MAX_DIFF_LINES = 200
 
 #: ``status`` values. ``"generated"`` is the normal export; ``"match"`` /
 #: ``"drifted"`` are ``--check``'s verdicts, reusing the same vocabulary (and
@@ -439,26 +434,6 @@ def _netlist_block(path: str | None, data: bytes) -> dict[str, Any]:
     }
 
 
-def _unified_diff(
-    committed: bytes, fresh: bytes, output: str
-) -> tuple[list[str], bool]:
-    """Unified diff of the committed netlist against the regenerated one,
-    capped at :data:`MAX_DIFF_LINES` lines (second element says whether it
-    was truncated)."""
-    lines = list(
-        difflib.unified_diff(
-            committed.decode("utf-8", errors="replace").splitlines(),
-            fresh.decode("utf-8", errors="replace").splitlines(),
-            fromfile=f"{output} (committed)",
-            tofile=f"{output} (regenerated)",
-            lineterm="",
-        )
-    )
-    if len(lines) > MAX_DIFF_LINES:
-        return lines[:MAX_DIFF_LINES], True
-    return lines, False
-
-
 def _normalize_path_comments(data: bytes) -> bytes:
     """``data`` with every xschem ``** sch_path:`` / ``** sym_path:`` comment
     reduced to the file's basename (issue #3010).
@@ -492,40 +467,29 @@ def _sort_subckt_comment_ports(line: bytes) -> bytes:
 
 
 def _normalize_layout(data: bytes, ignore_comments: bool = False) -> bytes:
-    """``data`` with ``+`` continuation lines joined onto their predecessor and
-    whitespace runs collapsed, so a netlist re-wrapped by a post-processor
-    compares equal to the original (issue #3324).
-
-    Comment lines (``*``) are kept as their own lines with only trailing
-    whitespace (and any CR) dropped; a ``+`` line is never joined onto a
-    comment. Only line layout changes, never a token of a non-comment line,
-    so an electrical change (device card, parameter, node or pin order) still
-    compares unequal. The one comment-token normalization is the port order of
-    xschem's ``**.subckt <name> <ports...>`` comment, which varies across
-    xschem versions (:func:`_sort_subckt_comment_ports`).
-
-    ``ignore_comments=True`` (issue #4525) drops every comment line and every
-    blank line instead, so a project-added header or a rewritten
-    ``** sch_path:`` comment cannot cause drift; non-comment lines are still
-    compared token for token.
+    """``data`` laid out the way ``--check`` compares it (issue #3324): ``+``
+    continuations joined, whitespace runs collapsed -- via
+    :func:`klayout_tools.netlist_paths.fold_continuations`, the helper the
+    writer applies under ``--canonical-wrap`` (issue #5715), so canonical
+    output is a fixed point of this comparison. The compare-only comment
+    behaviours stay here: a ``+`` never joins onto a comment, comments keep
+    their sorted ``**.subckt`` port order (:func:`_sort_subckt_comment_ports`)
+    and lose trailing whitespace (and any CR), and ``ignore_comments=True``
+    (issue #4525) drops comment and blank lines entirely, so a ``+`` folds
+    across a dropped comment onto the card before it.
     """
-    lines: list[bytes] = []
-    prev_joinable = False
-    for raw in data.split(b"\n"):
-        if ignore_comments and (not raw.strip() or raw.lstrip().startswith(b"*")):
-            continue
-        if raw.lstrip().startswith(b"*"):
-            lines.append(_sort_subckt_comment_ports(raw.rstrip()))
-            prev_joinable = False
-            continue
-        tokens = raw.split()
-        if tokens and tokens[0].startswith(b"+") and prev_joinable:
-            rest = [tokens[0][1:]] + tokens[1:]
-            lines[-1] = b" ".join([lines[-1]] + [t for t in rest if t])
-            continue
-        lines.append(b" ".join(tokens))
-        prev_joinable = bool(tokens)
-    return b"\n".join(lines)
+    if ignore_comments:
+        data = b"\n".join(
+            line
+            for line in data.split(b"\n")
+            if line.strip() and not line.lstrip().startswith(b"*")
+        )
+    return b"\n".join(
+        _sort_subckt_comment_ports(line.rstrip())
+        if line.lstrip().startswith(b"*")
+        else line
+        for line in fold_continuations(data).split(b"\n")
+    )
 
 
 def _subckt_card(line: bytes) -> tuple[bytes, list[bytes], list[bytes]] | None:
@@ -628,6 +592,12 @@ def _check_result(
     ``--block`` top sheet's port order, both quoted in that reason
     (:func:`port_order_drift_reason`, issue #5473).
 
+    ``compared_content_hash`` (issue #5743) is the hash of the normalized body
+    both sides reduced to -- ``None`` unless the verdict is ``"match"``; under
+    ``ignore_comments`` it is the comment-stripped body. Unlike
+    ``run_netlist``'s ``netlist.content_hash`` (the raw generator output) it is
+    the same on every checkout that agrees.
+
     ``inputs`` (issue #4945) are the fresh generation inputs; the committed
     side's record is the ``** klt-netlist-inputs:`` line :func:`run_netlist`
     wrote, which is excluded from the comparison. ``drift.inputs`` compares
@@ -638,6 +608,7 @@ def _check_result(
             "committed_present": False,
             "committed_bytes": None,
             "committed_content_hash": None,
+            "compared_content_hash": None,
             "path_comments_differ": False,
             "layout_differs": False,
             "comments_differ": False,
@@ -659,6 +630,9 @@ def _check_result(
             "committed_present": True,
             "committed_bytes": len(committed_raw),
             "committed_content_hash": content_hash_bytes(committed_raw),
+            "compared_content_hash": content_hash_bytes(
+                _normalize_layout(committed_paths)
+            ),
             "path_comments_differ": _normalize_layout(committed)
             != _normalize_layout(fresh_data),
             "layout_differs": committed_paths != fresh_paths,
@@ -677,6 +651,9 @@ def _check_result(
             "committed_present": True,
             "committed_bytes": len(committed_raw),
             "committed_content_hash": content_hash_bytes(committed_raw),
+            "compared_content_hash": content_hash_bytes(
+                _normalize_layout(committed, True)
+            ),
             "path_comments_differ": False,
             "layout_differs": False,
             "comments_differ": True,
@@ -687,7 +664,7 @@ def _check_result(
             "inputs": inputs_block,
         }
 
-    diff, truncated = _unified_diff(committed, fresh_data, output)
+    diff, truncated = unified_diff(committed, fresh_data, output)
     port_order = _subckt_port_order_drift(committed, fresh_data, ignore_comments)
     if port_order:
         reason = port_order_drift_reason(port_order, xschem_version, sibling_symbol)
@@ -702,6 +679,7 @@ def _check_result(
         "committed_present": True,
         "committed_bytes": len(committed_raw),
         "committed_content_hash": content_hash_bytes(committed_raw),
+        "compared_content_hash": None,
         "path_comments_differ": False,
         "layout_differs": False,
         "comments_differ": False,
@@ -860,6 +838,11 @@ def _pdk_consistency(
     install root itself, or the resolved variant directory under it, e.g.
     ``$PDK_ROOT`` holding ``sky130A/``), and ``None`` when there is nothing
     to compare.
+
+    ``variant_established`` is ``False`` when the variant was defaulted, not
+    selected -- no ``--pdk``/``$PDK`` and the root holds more than one (issue
+    #5639); ``unestablished_warning`` then carries the ``payload.warnings``
+    entry, and the generation-inputs record says ``pdk_variant: null``.
     """
     explicit = pdk is not None or pdk_root is not None
     if not explicit and not (
@@ -885,6 +868,7 @@ def _pdk_consistency(
                 f"(via {found['resolved_via']}); the schematic and "
                 "simulation sides may be using different PDKs"
             )
+    unestablished = unestablished_variant_warning(found)
     return {
         "variant": found["variant"],
         "version": found.get("version"),
@@ -894,6 +878,8 @@ def _pdk_consistency(
         "consistent": consistent,
         "warning": warning,
         "ambiguity_warning": pdk_module.ambiguity_warning(found),
+        "variant_established": unestablished is None,
+        "unestablished_warning": unestablished,
     }
 
 
@@ -923,6 +909,7 @@ def run_netlist(
     erc: bool = False,
     symbol_path: Sequence[str] = (),
     relative_paths: bool = False,
+    canonical_wrap: bool = False,
     provenance_header: bool = True,
 ) -> dict[str, Any]:
     """Export ``schematic`` to a SPICE netlist at ``output`` via xschem.
@@ -952,6 +939,10 @@ def run_netlist(
     ``relative_paths=True`` (issue #5046) writes ``** sch_path:`` / ``** sym_path:``
     comments relative to the schematic's git toplevel (checkout-independent).
 
+    ``canonical_wrap=True`` (issue #5715) writes the layout ``--check``
+    compares, so two hosts whose ``--check`` says ``match`` write identical
+    files (combine with ``--relative-paths`` and ``--no-provenance-header``).
+
     Returns the documented payload (see ``docs/cli/netlist.md``). Raises
     :class:`NetlistError` for every failure mode: unreadable schematic,
     missing/unlaunchable xschem, the timeout (after SIGTERM->SIGKILL
@@ -980,19 +971,8 @@ def run_netlist(
         # satisfied by a file that already existed (see
         # `_resolve_produced_netlist`).
         started_at = time.time()
-        # Export the resolved PDK so an xschemrc reading $env(PDK_ROOT)/
-        # $env(PDK) agrees with --pdk/--pdk-root (issue #4186).
-        xschem_env: dict[str, str] | None = None
-        if pdk_block is not None:
-            xschem_env = {
-                **os.environ,
-                "PDK_ROOT": pdk_block["root"],
-                "PDK": pdk_block["variant"],
-            }
-        # Only a resolved PDK means klt exported PDK_ROOT/PDK; --symbol-path
-        # alone builds an env that merely inherits them (issue #5441).
-        exported_pdk_env = xschem_env
-        xschem_env = _with_symbol_path_env(xschem_env, resolved_symbol_path)
+        # Netlist_pdk (size split); snapshot pre-dates the symbol-path merge.
+        xschem_env, exported_pdk_env = _pdk_xschem_env(pdk_block, resolved_symbol_path)
         exit_status, stdout, stderr, duration_s = _launch_xschem(
             argv, timeout_s, xschem_env
         )
@@ -1008,13 +988,19 @@ def run_netlist(
             fresh_data = handle.read()
 
         fresh_data, block_info = postprocess_netlist(
-            fresh_data, block=block, relative_paths=relative_paths, schematic=schematic
+            fresh_data,
+            block=block,
+            relative_paths=relative_paths,
+            schematic=schematic,
+            canonical_wrap=canonical_wrap,
         )
 
         version = _probe_xschem_version(xschem_binary)
         warnings = _unevaluated_expr_warnings(
             fresh_data, version, allow_unevaluated_expr
         )
+        if pdk_block is not None and pdk_block["unestablished_warning"] is not None:
+            warnings.append(pdk_block["unestablished_warning"])
         _check_no_unresolved_symbol(fresh_data, rcfile, exported_pdk_env)
 
         payload: dict[str, Any] = {
@@ -1061,6 +1047,7 @@ def run_netlist(
 
         _write_output(output, written_data)
         payload.update(status=STATUS_GENERATED, provenance_header=provenance_header)
+        payload["canonical_wrap"] = canonical_wrap
         payload["netlist"] = _netlist_block(output, written_data)
         return payload
     finally:
