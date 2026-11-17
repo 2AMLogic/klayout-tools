@@ -300,3 +300,80 @@ def test_header_with_only_delay_model_beyond_ignored_set(tmp_path):
     b = _write(tmp_path, "groupB.lib", b_text)
     text = _read(liberty_merge.merge_liberty([a, b]))
     assert "cell (X_A)" in text and "cell (X_B)" in text
+
+
+def test_complex_attribute_without_body_merges(tmp_path):
+    extra = "  capacitive_load_unit (1, pf);\n  voltage_map (VDD, 1.8);\n"
+    a = _write(tmp_path, "groupA.lib", _lib("A", header_extra=extra))
+    b = _write(tmp_path, "groupB.lib", _lib("B", header_extra=extra))
+    text = _read(liberty_merge.merge_liberty([a, b]))
+    assert "capacitive_load_unit (1, pf)" in text
+    assert "voltage_map (VDD, 1.8)" in text
+
+
+def test_complex_attribute_conflict_names_key_and_values(tmp_path):
+    a = _write(
+        tmp_path, "groupA.lib", _lib("A", header_extra="  voltage_map (VDD, 1.8);\n")
+    )
+    b = _write(
+        tmp_path, "groupB.lib", _lib("B", header_extra="  voltage_map (VDD, 1.7);\n")
+    )
+    with pytest.raises(liberty_merge.LibertyMergeError) as exc:
+        liberty_merge.merge_liberty([a, b])
+    msg = str(exc.value)
+    # The args are part of the field key, so differing args surface as
+    # present-vs-missing: the message names the first file's key (args
+    # embedded) and both paths, never the opaque wording.
+    assert "voltage_map(VDD, 1.8)" in msg
+    assert "groupA.lib" in msg and "groupB.lib" in msg
+    assert "missing" in msg and "Liberty headers differ" not in msg
+
+
+def test_comments_between_header_tokens_merge(tmp_path):
+    extra = (
+        "  nominal_voltage /* VDD rail */ : 0.7;\n"
+        "  voltage_map // VDD at nominal\n"
+        "    (VDD, 0.7);\n"
+    )
+    a = _write(tmp_path, "groupA.lib", _lib("A", header_extra=extra))
+    b = _write(tmp_path, "groupB.lib", _lib("B", header_extra=extra))
+    text = _read(liberty_merge.merge_liberty([a, b]))
+    assert "nominal_voltage /* VDD rail */ : 0.7;" in text
+    assert "cell (X_A)" in text and "cell (X_B)" in text
+
+
+def test_comments_and_nested_group_inside_header_group_merge(tmp_path):
+    extra = (
+        "  pin_constraints (PC) {\n"
+        '    /* nested */ pin_group (PG) { pins : "A, B"; }\n'
+        "    // line note\n"
+        '    default_pin : "A";\n'
+        "  }\n"
+    )
+    a = _write(tmp_path, "groupA.lib", _lib("A", header_extra=extra))
+    b = _write(tmp_path, "groupB.lib", _lib("B", header_extra=extra))
+    text = _read(liberty_merge.merge_liberty([a, b]))
+    assert "pin_group (PG)" in text
+    assert "cell (X_A)" in text and "cell (X_B)" in text
+
+
+def test_next_significant_skips_comments_to_end_of_text():
+    open_block = "a /* never closed"
+    assert liberty_merge._next_significant(open_block, 1) == (len(open_block), "")
+    open_line = "a // never closed"
+    assert liberty_merge._next_significant(open_line, 1) == (len(open_line), "")
+    idx, ch = liberty_merge._next_significant("/* c */ b", 0)
+    assert (ch, "/* c */ b"[idx:]) == ("b", "b")
+    idx, ch = liberty_merge._next_significant("// c\nb", 0)
+    assert (ch, "// c\nb"[idx:]) == ("b", "b")
+    assert liberty_merge._next_significant("   ", 0) == (3, "")
+
+
+def test_find_matching_skips_comments_and_nested_braces():
+    text = "{ a /* } */ : 1; { b } // tail\n }"
+    assert liberty_merge._find_matching(text, 0, "{", "}") == text.rindex("}")
+    open_block = "{ /* never closed"
+    assert liberty_merge._find_matching(open_block, 0, "{", "}") == len(open_block)
+    open_line = "{ // never closed"
+    assert liberty_merge._find_matching(open_line, 0, "{", "}") == len(open_line)
+    assert liberty_merge._find_matching("{ a", 0, "{", "}") == len("{ a")
