@@ -154,8 +154,7 @@ def _run_yosys_subprocess(
     """
     started = time.monotonic()
     timed_out = False
-    stdout = ""
-    stderr = ""
+    stdout = stderr = ""
     returncode: int | None = None
     try:
         completed = run_in_group(

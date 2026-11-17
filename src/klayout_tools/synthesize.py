@@ -3159,11 +3159,9 @@ def _write_yosys_log(
     """Keep both streams next to every executed script, including failed trials."""
 
     def text(stream: str | bytes | None) -> str:
-        return (
-            stream.decode("utf-8", errors="replace")
-            if isinstance(stream, bytes)
-            else stream or ""
-        )
+        if isinstance(stream, bytes):
+            return stream.decode("utf-8", errors="replace")
+        return stream or ""
 
     _write_text_file(
         os.path.splitext(script_path)[0] + ".log",
