@@ -152,7 +152,7 @@ reset_state() {
     rm -f "$STUB_DIR"/comments.json "$STUB_DIR"/comments-fail \
         "$STUB_DIR"/check-branch-rc "$STUB_DIR"/check-branch-stdout \
         "$STUB_DIR"/check-branch-args.log "$STUB_DIR"/check-branch-legacy-rc
-    unset LOOM_LEASE_FENCE_NOW LOOM_HOST_ID LOOM_LEASE_TTL_MINUTES HOSTNAME \
+    unset LOOM_LEASE_FENCE_NOW LOOM_LEASE_HOST_ID LOOM_HOST_ID LOOM_LEASE_TTL_MINUTES HOSTNAME \
         LOOM_LEASE_PUBLISH_HOSTNAME LOOM_REPO 2> /dev/null || true
 }
 
@@ -301,6 +301,43 @@ cat > "$STUB_DIR/comments.json" <<'JSON'
 JSON
 LOOM_HOST_ID="opaque-test-host" LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309
 assert_eq "4" "$RC" "(n) a raw-hostname lease comment does not match the opaque default -> ABORT SUPERSEDED"
+
+# --- (n2) LOOM_LEASE_HOST_ID outranks LOOM_HOST_ID for the default --host
+# (#6108), matching sweep-lease-publish.sh's resolve_host. The lease is
+# published under the opaque id of LOOM_LEASE_HOST_ID (`host-60a4fb97` =
+# opaque("opaque-test-host")), while LOOM_HOST_ID names a different host --
+# a session container whose own host id differs from its dispatcher's.
+reset_state
+cat > "$STUB_DIR/comments.json" <<'JSON'
+[{"id": 1, "updated_at": "2026-08-15T15:51:00Z", "body": "<!-- loom:lease host=host-60a4fb97 sweep=sweep-a -->\nprose"}]
+JSON
+LOOM_LEASE_HOST_ID="opaque-test-host" LOOM_HOST_ID="container-host" LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309
+assert_eq "0" "$RC" "(n2) LOOM_LEASE_HOST_ID wins over a differing LOOM_HOST_ID for the default host -> exit 0"
+
+# --- (n3) the same crossed variables, but the lease was published under
+# LOOM_HOST_ID's identity: the fence must NOT use LOOM_HOST_ID -> SUPERSEDED.
+reset_state
+cat > "$STUB_DIR/comments.json" <<'JSON'
+[{"id": 1, "updated_at": "2026-08-15T15:51:00Z", "body": "<!-- loom:lease host=container-host sweep=sweep-a -->\nprose"}]
+JSON
+LOOM_LEASE_HOST_ID="opaque-test-host" LOOM_HOST_ID="container-host" LOOM_LEASE_PUBLISH_HOSTNAME="1" LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309
+assert_eq "4" "$RC" "(n3) a lease under LOOM_HOST_ID's identity is not 'own' when LOOM_LEASE_HOST_ID is set -> ABORT SUPERSEDED"
+
+# --- (n4) only LOOM_LEASE_HOST_ID set (raw opt-in): resolved verbatim.
+reset_state
+cat > "$STUB_DIR/comments.json" <<'JSON'
+[{"id": 1, "updated_at": "2026-08-15T15:51:00Z", "body": "<!-- loom:lease host=lease-only-host sweep=sweep-a -->\nprose"}]
+JSON
+LOOM_LEASE_HOST_ID="lease-only-host" LOOM_LEASE_PUBLISH_HOSTNAME="1" LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309
+assert_eq "0" "$RC" "(n4) only LOOM_LEASE_HOST_ID set, raw opt-in -> resolves verbatim and matches -> exit 0"
+
+# --- (n5) neither id set: falls back to $HOSTNAME.
+reset_state
+cat > "$STUB_DIR/comments.json" <<'JSON'
+[{"id": 1, "updated_at": "2026-08-15T15:51:00Z", "body": "<!-- loom:lease host=fallback-hostname sweep=sweep-a -->\nprose"}]
+JSON
+HOSTNAME="fallback-hostname" LOOM_LEASE_PUBLISH_HOSTNAME="1" LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309
+assert_eq "0" "$RC" "(n5) neither LOOM_LEASE_HOST_ID nor LOOM_HOST_ID set -> falls back to \$HOSTNAME -> exit 0"
 
 # --- (o) a lease excluded by a same (host, sweep) loom:lease-yield record
 # (#6485) falls back to the next-freshest, non-yielded candidate -- here
