@@ -14,6 +14,45 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt yield`: a damaged gzip input is an error envelope, not a traceback**
+  (#5543, 2026-11-13): a gzip samples or `--limits` file whose deflate stream
+  is *corrupt* — as opposed to truncated, or carrying a bad CRC trailer, both
+  of which already reported correctly — made `klt yield` print a raw
+  `zlib.error` traceback and exit 1 with no JSON on either stream, breaking
+  the error contract in [`docs/json-contract.md`](docs/json-contract.md) for a
+  caller that parses the envelope. `yield_analysis._load_json` converted
+  `(OSError, EOFError, UnicodeDecodeError, json.JSONDecodeError)` into
+  `YieldError`, and `zlib.error` subclasses none of them, so it escaped
+  `yield_cmd.run`'s handler. It is now in that tuple: the input reports
+  `could not read samples '<path>': …` like every other unreadable input, and
+  `run_yield` raises `YieldError` rather than leaking `zlib.error` at the
+  library surface. No output-shape change; no `schema_version` bump.
+
+- **`klt pex` and `klt sim --monte-carlo` now read a SPICE card the same way
+  the flattener does: `w = 1` and `w=(2 * 1u)` are parameters, not device
+  names** (#5461, 2026-11-13): three hand-rolled card tokenizers lived in
+  `spice_flatten`, `pex` and `sim_mismatch_gate`. The two lesser copies
+  understood neither a space around `=` (ngspice accepts `w=1`, `w =1`,
+  `w= 1` and `w = 1` for one assignment) nor a parenthesised value
+  expression, while both fed "the model is the last token without `=`"
+  logic. `klt extract`'s own output is always unspaced, so a klt-generated
+  netlist never tripped this — but a **hand-written or xschem-netlisted**
+  file could, on two user-supplied inputs:
+  - `klt pex --reference`: a reference card `XM1 d g s b nfet w = 1 l = 0.15`
+    tallied its model as `0.15`, producing a phantom `model_mismatch`
+    (`kind: "model_set"`) against an extracted side naming the same device;
+    the same rule also decides `_reference_is_hierarchical`, so the
+    diagnostic's hierarchy-artifact caveat could be suppressed.
+  - `klt sim` `monte_carlo.instances`: an instance card `Xa n1 n2 sub w = 1`
+    read `w` as the subcircuit name and counted `sub` as an extra node, so
+    the generated mismatch-off wrapper got one pin too many.
+
+  All three now share `split_spice_tokens` (the flattener's implementation,
+  which was already the strict superset). **Behaviour change**: a gated
+  instance's parameters are re-emitted in the canonical unspaced spelling —
+  `w = 1` comes back as `w=1`, equivalent to ngspice. No JSON field is added,
+  renamed or removed; no `schema_version` bump.
+
 - **`klt mcp serve` serves the `docs/schemas/` JSON contract as MCP
   resources** (#5420, 2026-11-13): the server now advertises the resources
   capability and lists one resource per `docs/schemas/*.schema.json` at
