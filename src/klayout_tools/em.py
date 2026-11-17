@@ -22,7 +22,7 @@ import os
 import shutil
 import subprocess
 import tempfile
-from typing import Any
+from typing import Any, TypeGuard
 
 from ._artifact_envelope import hashed_path_envelope
 from ._digest import sha256_file
@@ -52,7 +52,7 @@ _UNIT_SCALE = {"F": 1.0, "pF": 1e-12, "fF": 1e-15}
 __all__ = ["EmError", "run_em"]
 
 
-def _is_finite_number(value: Any) -> bool:
+def _is_finite_number(value: object) -> TypeGuard[int | float]:
     return (
         not isinstance(value, bool)
         and isinstance(value, (int, float))
