@@ -171,9 +171,24 @@ A `.devN+g<sha>` version is not published to any index, so
 `reinstall_spec`) next to the result, then re-run under the same build with
 
 ```
-uvx --from "<reinstall_spec>" klt ...
-# e.g. uvx --from "klayout-tools @ git+https://github.com/2AMLogic/klayout-tools@<git_commit>" klt ...
+uvx --from "<reinstall_spec>" --with "klayout==<klayout_version>" klt ...
+# e.g. uvx --from "klayout-tools @ git+https://github.com/2AMLogic/klayout-tools@<git_commit>" \
+#      --with "klayout==0.30.12" klt ...
 ```
+
+**`reinstall_spec` pins the klt axis only** (issue #5884). The `klayout`
+engine axis is pinned by the `--with` flag, and its value is the
+**recorded** `klayout_version` — `provenance.klayout_version` from the
+report being reproduced, or `klayout_version` from `klt version --format
+json` on the build that wrote it — *not* `klayout_version_expected`, which
+is the version the commit was tested against, not the one that wrote the
+bytes. Omit `--with` and the `klayout>=0.30` floor resolves whatever engine
+PyPI serves on the day: a reconstruction that verifies today can silently
+stop verifying at the next klayout point release, with no change to the
+recording or the code. If the recording carries `klayout_version: null`
+(engine unresolvable when it was written), the engine axis cannot be
+reconstructed from that recording at all — omit `--with` and accept the
+floor.
 
 Caveat: the re-installed build is the same commit, so `git_commit` and the
 `+g<sha>` segment match, but `N` is computed from the tags visible to the
@@ -278,20 +293,36 @@ versions, and DRC/LVS report internals (deck content hash, `rules_skipped`,
 `category_counts`) can shift alongside it even though the verdict itself
 does not (issue #1490).
 
-`klayout_version_expected` above is the reproduction target; the fix is
-`uv`'s own dependency override, no `klt`-specific flag needed. Use the form
+There are two pinning cases with two different targets:
+
+- **Expected** — pin *forward*: install a commit under the engine it was
+  *tested against*. The target is `klayout_version_expected` above.
+- **Recorded** — reproduce a *specific recording*: re-run under the engine
+  that actually wrote its bytes. The target is the recording's own
+  `provenance.klayout_version` (or `klayout_version` from `klt version`),
+  never `klayout_version_expected`.
+
+In both cases the fix is `uv`'s own dependency override, no
+`klt`-specific flag needed. For the expected case, use the install form
 matching how the build you are replacing was installed (`reinstall_spec`
 above already names it):
 
 ```bash
-# released install:
+# expected, released install: install under the tested-against engine
 uv tool install "klayout-tools==<klt version>" \
   --with klayout==<klayout_version_expected>
 
-# dev/git checkout:
+# expected, dev/git checkout: install under the tested-against engine
 uv tool install "klayout-tools @ git+https://github.com/2AMLogic/klayout-tools@<sha>" \
   --with klayout==<klayout_version_expected>
+
+# recorded: re-run under the engine that wrote the recording
+uvx --from "<reinstall_spec>" --with "klayout==<klayout_version>" klt ...
 ```
+
+The recorded form is the canonical reconstruction recipe — see
+"Reproducing a recorded pin" above for its edge cases (`klayout_version:
+null`, `reinstall_spec: null`).
 
 `klt drc`/`klt lvs` reports compare the two fields automatically —
 `provenance.klayout_version_mismatch` — with a stderr warning on drift whose

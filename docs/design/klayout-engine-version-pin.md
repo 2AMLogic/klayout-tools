@@ -205,6 +205,17 @@ See `docs/json-contract.md`'s "Shared `provenance` block" section for the
 field reference and this same recipe alongside the existing
 `provenance.klayout_version` guidance.
 
+## GDS byte-reproducibility depends on the klayout module version
+
+The `klayout>=0.30` floor guarantees API compatibility, not byte-identical
+GDS output. Different klayout module versions can serialise the same layout
+differently (a consumer observed 0.30.x re-encoding some TEXT MAG records
+relative to 0.28.x; not verified here). Consumers who commit GDS artifacts
+and need them byte-stable should pin the module exactly (see "Reproducing
+the exact engine" above). `klt place-and-route`'s GDS merge uses only
+`Layout.read`/`Layout.write`, so it does not itself require the 0.30-only
+`read_bytes`/`write_bytes` API (#5768).
+
 ## Engine version compatibility
 
 *(Added 2026-11-17, against commit `59096013d`. Line numbers cited below

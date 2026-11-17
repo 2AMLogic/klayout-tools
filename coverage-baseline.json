@@ -120,10 +120,6 @@
       "line": 92.4,
       "branch": 83.6
     },
-    "src/klayout_tools/artifact_store.py": {
-      "line": 87.2,
-      "branch": 73.6
-    },
     "src/klayout_tools/asap7_bsimcmg.py": {
       "line": 98.4,
       "branch": 96.1

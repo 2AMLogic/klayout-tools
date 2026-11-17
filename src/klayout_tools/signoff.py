@@ -93,6 +93,11 @@ from .signoff_derived_rows import (
 # `X as X` form marks the ones with no call site left in this module as
 # deliberate re-exports rather than dead imports.
 from .signoff_details import _DETAIL_BUILDERS
+
+# The `drc --engine both` (cross-check) envelope projection (issue #5815):
+# rewriting the cross-check shape into the single-engine `drc` envelope the
+# existing grading rules read, at the ingestion boundary.
+from .signoff_drc_crosscheck import crosscheck_disclosure, crosscheck_project
 from .signoff_envelopes import (
     _ENVELOPE_SHAPES,
     _SCALAR_CHECKS,
@@ -211,6 +216,19 @@ from .signoff_sta_constraints import (
     constraint_completeness_status,
     sta_annotation_refusal,
     sta_constraint_refusal,
+)
+
+# The `klt yield` campaign-disclosure rollups (issue #2467), split out of
+# this file for its size-ratchet ceiling (issue #5815); re-imported by name
+# so `signoff.<name>` keeps resolving (the #2313 `signoff_envelopes.py`
+# precedent). The `X as X` form marks the two rollups with no call site left
+# in this module as deliberate re-exports rather than dead imports.
+from .signoff_yield_disclosure import _yield_campaign_disclosure
+from .signoff_yield_disclosure import (
+    _yield_negative_control_rollup as _yield_negative_control_rollup,
+)
+from .signoff_yield_disclosure import (
+    _yield_sample_size_rollup as _yield_sample_size_rollup,
 )
 
 __all__ = [
@@ -1761,6 +1779,10 @@ def build_signoff(sources: list[str]) -> dict[str, Any]:
         # the envelope against that kind's declared shape, so the cast below
         # is backed by a runtime check -- not an assertion about unvalidated
         # JSON.
+        # Issue #5815: an `--engine both` (cross-check) envelope is projected
+        # to its single-engine-equivalent `drc` envelope before
+        # classification, so aggregation reads the shape `--check` reads.
+        envelope = crosscheck_project(envelope) or envelope
         kind = _classify(envelope, source)
         checks.append(_build_check(kind, cast(_EvidenceEnvelope, envelope), source))
 
@@ -3301,158 +3323,6 @@ def _pex_body_bias_disclosure(
         "unbiased_device_count": body_bias.get("unbiased_device_count"),
         "unbiased_nets": list(nets) if isinstance(nets, list) else [],
     }
-
-
-def _yield_campaign_disclosure(
-    kind: str, envelope: dict[str, Any]
-) -> dict[str, Any] | None:
-    """The cited `klt yield` campaign's own two statements about whether its
-    numbers can support a claim at all (issue #2467) -- its per-measurement
-    ``sample_size.verdict`` and its ``negative_control`` state, rolled up
-    across ``measurements[]`` -- or ``None`` when there is nothing to quote.
-
-    Quoted verbatim off the envelope, never re-derived: `klt yield` computes
-    both (``docs/cli/yield.md``'s "Sample-size verdict" and "Negative
-    control"), and re-deriving either here would let this module and the
-    producer disagree about the same campaign.
-
-    ``None`` in exactly two cases, and they mean the same thing to a reader
-    ("this artifact makes no campaign-discipline statement"), never "the
-    campaign was disciplined":
-
-    - ``kind != "yield"``. No other envelope kind carries ``measurements[]``
-      of this shape, and item 6 is the only item that accepts this kind.
-    - The envelope reports no measurements at all (an empty or non-list
-      ``measurements``). There is then nothing whose sizing or self-check
-      could be stated.
-
-    The rolled-up fields, and the aggregation rule each uses -- stated here
-    because a campaign is a *set* of measurements and "the campaign's
-    verdict" is not a field any of them carries:
-
-    - ``sample_size`` -- ``"insufficient"`` when **any** measurement says so,
-      ``"sufficient"`` when at least one says so and none says otherwise,
-      and ``None`` when no measurement states a verdict at all (a report
-      written before the block existed). "Any" rather than "all": the item is
-      graded against the whole cited campaign, so one unsized measurement
-      leaves part of the claim unsized, and a missing statement is never read
-      as an insufficient one (the same back-compat rule
-      :func:`_drc_coverage_disclosure` applies to a missing ``coverage``
-      block).
-    - ``undersized_measurements`` -- the names behind that verdict, in the
-      report's own measurement order.
-    - ``negative_control`` -- ``"not_detected"`` when **any** declared
-      control failed to show the seeded degradation, ``"detected"`` when at
-      least one was declared and every declared one detected, and
-      ``"not_declared"`` when no measurement declared one. "Any failed" and
-      "at least one declared" are deliberately asymmetric, and match the two
-      run-level warnings `klt yield` itself emits (``native/yield/src/
-      estimate.rs``): one working self-check demonstrates the campaign's
-      statistics *can* discriminate, while one failed self-check
-      demonstrates they cannot.
-    - ``measurements_without_negative_control`` / ``undetected_negative_controls``
-      -- the names behind that verdict, likewise in report order, so a reader
-      who sees ``"detected"`` beside a non-empty first list can tell a
-      fully-controlled campaign from a partly-controlled one.
-    """
-    if kind != "yield":
-        return None
-    raw = envelope.get("measurements")
-    measurements = (
-        [m for m in raw if isinstance(m, dict)] if isinstance(raw, list) else []
-    )
-    if not measurements:
-        return None
-
-    sample_size_verdict, undersized = _yield_sample_size_rollup(measurements)
-    (
-        control_verdict,
-        without_control,
-        undetected,
-        not_applicable,
-    ) = _yield_negative_control_rollup(measurements)
-    return {
-        "sample_size": sample_size_verdict,
-        "undersized_measurements": undersized,
-        "negative_control": control_verdict,
-        "measurements_without_negative_control": without_control,
-        "undetected_negative_controls": undetected,
-        "not_applicable_negative_controls": not_applicable,
-    }
-
-
-def _yield_sample_size_rollup(
-    measurements: list[dict[str, Any]],
-) -> tuple[str | None, list[Any]]:
-    """:func:`_yield_campaign_disclosure`'s ``sample_size`` /
-    ``undersized_measurements`` pair (issue #2467) -- see that function's
-    docstring for the aggregation rule this applies.
-
-    Split out rather than inlined because the two axes a campaign is rolled
-    up along (sizing, self-check) have *different* aggregation rules, and
-    reading them in one loop obscured which "any"/"at least one" belonged to
-    which axis.
-    """
-    undersized: list[Any] = []
-    sized = False
-    for measurement in measurements:
-        sample_size = measurement.get("sample_size")
-        if not isinstance(sample_size, dict):
-            continue
-        verdict = sample_size.get("verdict")
-        if verdict == "insufficient":
-            undersized.append(measurement.get("name"))
-        elif verdict == "sufficient":
-            sized = True
-    if undersized:
-        return "insufficient", undersized
-    return ("sufficient" if sized else None), undersized
-
-
-def _yield_negative_control_rollup(
-    measurements: list[dict[str, Any]],
-) -> tuple[str, list[Any], list[Any], list[dict[str, Any]]]:
-    """:func:`_yield_campaign_disclosure`'s ``negative_control`` /
-    ``measurements_without_negative_control`` /
-    ``undetected_negative_controls`` triple (issue #2467) -- see that
-    function's docstring for the aggregation rule this applies.
-
-    A measurement whose ``negative_control`` is ``null``/absent declared
-    none; a declared one whose ``verdict`` is anything other than
-    ``"detected"`` (``"not_detected"`` today) did not show the seeded
-    degradation. A declared-but-unrecognised verdict is counted with the
-    latter deliberately: an unknown self-check result is not a passing one.
-
-    A ``"not_applicable"`` verdict with a non-empty ``reason`` (issue #4523)
-    is a declared disposition: it is listed in the fourth element, excluded
-    from the other lists, and can never itself make the rollup ``detected``.
-    Without a reason it fails closed, like an unrecognised verdict.
-    """
-    without_control: list[Any] = []
-    undetected: list[Any] = []
-    not_applicable: list[dict[str, Any]] = []
-    detected = False
-    for measurement in measurements:
-        control = measurement.get("negative_control")
-        if not isinstance(control, dict):
-            without_control.append(measurement.get("name"))
-        elif control.get("verdict") == "detected":
-            detected = True
-        elif (
-            control.get("verdict") == "not_applicable"
-            and isinstance(control.get("reason"), str)
-            and control["reason"].strip()
-        ):
-            not_applicable.append(
-                {"name": measurement.get("name"), "reason": control["reason"]}
-            )
-        else:
-            undetected.append(measurement.get("name"))
-    if undetected:
-        return "not_detected", without_control, undetected, not_applicable
-    if detected:
-        return "detected", without_control, undetected, not_applicable
-    return "not_declared", without_control, undetected, not_applicable
 
 
 def _yield_campaign_refusal(kind: str, envelope: dict[str, Any]) -> str | None:
@@ -6522,6 +6392,11 @@ def _resolve_evidence(
     if envelope is None:
         return None, envelope_reason
 
+    # Issue #5815: *after* pointer resolution, so a `pointer` selecting one
+    # side of a cross-check envelope keeps grading as that standalone report
+    # while a whole-envelope citation gets the both-engines verdict.
+    envelope = crosscheck_project(envelope) or envelope
+
     try:
         check_kind = _classify(envelope, source_label)
     except SignoffError as exc:
@@ -6586,6 +6461,15 @@ def _resolve_evidence(
     )
 
 
+def _citation_pointer(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """The RFC 6901 ``pointer`` the evidence entry carried, as a citation
+    fragment (issue #5815) -- ``{}`` (a no-op update) when it named none, so
+    a citation of *part* of a composite document is distinguishable in the
+    JSON from a whole-envelope citation of the same file."""
+    pointer = spec.get("pointer")
+    return {"pointer": pointer} if pointer is not None else {}
+
+
 def _citation(resolution: dict[str, Any]) -> dict[str, Any]:
     """Build a ``"met"`` item's ``citation`` block from a
     :func:`_resolve_evidence` resolution -- see :func:`build_tier_report`'s
@@ -6605,6 +6489,9 @@ def _citation(resolution: dict[str, Any]) -> dict[str, Any]:
         "input_verified": resolution.get("input_verified"),
         "exit_status": resolution["exit_status"],
     }
+    # Issue #5815: the RFC 6901 `pointer` the evidence entry carried, when
+    # it carried one -- additive, never a grading input.
+    citation.update(_citation_pointer(resolution["spec"]))
     if resolution.get("content_hash_basis") is not None:
         # Issue #4893: `content_hash` is a re-hash of the cited evidence file
         # itself, not a design input.
@@ -6631,6 +6518,12 @@ def _citation(resolution: dict[str, Any]) -> dict[str, Any]:
     coverage = _drc_coverage_disclosure(resolution["kind"], resolution["envelope"])
     if coverage is not None:
         citation["coverage"] = coverage
+    # Issue #5815: a cross-check (`--engine both`) citation discloses what
+    # was actually graded -- each engine's own status, the comparison
+    # state, each side's coverage fields. Disclosure only, like every other
+    # key added here; `None` (a no-op update) for every non-cross-check
+    # envelope.
+    citation.update(crosscheck_disclosure(resolution["envelope"]) or {})
     # Issue #1983: a `pex` citation also carries the cited envelope's own
     # body-bias statement -- item 7's verdict and the one property that can
     # silently invalidate the numbers backing it end up in the same
