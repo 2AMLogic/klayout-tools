@@ -229,7 +229,13 @@ written to every block.
    nothing compares them against what the claim actually disclosed, so a
    `met` verdict from `klt signoff` is still not evidence that the gaps were
    disclosed. A reviewer must read the reported `coverage` against the claim
-   themselves.
+   themselves. **Opt-in exception (#5789)**: a manifest that sets
+   `require_coverage_disclosure: true` and enumerates its gaps on item 3's
+   evidence entry (`coverage_disclosed`) has the comparison graded — a
+   declaration that is not set-equal to the reported coverage renders the
+   item `unmet` / `coverage_undisclosed`. The default remains
+   claimant-enforced; the tool-enforced form is something a project opts
+   into per manifest.
    **Disclosed exception for unmodified foundry cells** (operator ruling
    2026-10-28): DRC violations inside an unmodified foundry-library cell
    (a stock I/O pad, a foundry SRAM macro) do not block `met`, provided all
@@ -424,6 +430,19 @@ written to every block.
      mismatch is acceptable, labelled as such in the evidence.
    - **Declare item 6 a gap** for the analog partition.
    The digital partition of the same block may still use `not_applicable`.
+   **Declared gaps keep blocking T1** (issue #5858, operator ruling
+   2026-11-17): a settled, hash-justified gap does *not* satisfy the roll-up,
+   on any item or partition. `_T1_SATISFIED_STATUSES` is not widened and
+   ruling #4183 above is untouched, so `tier: "T1"` still means every
+   *applicable* row is evidenced. A gap is not a permanent state: a row that
+   cannot be evidenced today is a statement about today's tools and inputs,
+   and a request to build what is missing, either a klayout-tools feature or a
+   new EDA project. A declared gap therefore names the open issue that would
+   close it, and a gap with no such link is a signoff finding. A row that is
+   unevidenceable for a reason no tool could ever fix is a different case,
+   closer to `not_applicable`, and goes back to the operator rather than being
+   declared a gap. The hash-justified declaration and the separate count and
+   listing of declared gaps belong to #5599.
    **Several statistical rows, only some evidenced** (issue #2908): item 6
    is a claim about *every* statistical row, so a manifest may declare the
    row set under `spec_rows."6"` and cite one `klt yield` report per row set
