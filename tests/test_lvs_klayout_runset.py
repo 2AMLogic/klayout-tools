@@ -1,10 +1,8 @@
-"""Tests for ``klt lvs`` ``"engine": "klayout-runset"`` (issue #2849).
-
-The standalone ``klayout`` application is mocked at the ``subprocess.run``
-boundary: the fake "runset" writes a *real* ``.lvsdb`` (built with the pip
-``klayout.db`` API) so the verdict-from-database path is exercised end to end.
-A real-binary smoke test is skipped when ``klayout`` is not on PATH.
-"""
+"""Tests for ``klt lvs`` ``"engine": "klayout-runset"`` (issue #2849): the
+standalone ``klayout`` application is mocked at the ``subprocess.run``
+boundary -- the fake "runset" writes a *real* ``.lvsdb`` (built with the pip
+``klayout.db`` API) so the verdict-from-database path is exercised end to end;
+a real-binary smoke test is skipped when ``klayout`` is not on PATH."""
 
 from __future__ import annotations
 
@@ -17,11 +15,13 @@ import tempfile
 import klayout.db as kdb
 import pytest
 
+import lvs_tmp_repo
 from klayout_tools import lvs_runset
 from klayout_tools.coverage import coverage_validation_error
 from klayout_tools.env_provenance import find_absolute_path_fields
 from klayout_tools.lvs import LvsError, check_lvs_report, run_lvs
 
+tmp_path = lvs_tmp_repo.tmp_path  # pytest collects the fixture by module-level name
 SPICE_ONE = ".subckt TOP\nM1 c b a d NMOS L=0.2u W=0.4u\n.ends\n"
 
 

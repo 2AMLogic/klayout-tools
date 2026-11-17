@@ -119,13 +119,12 @@ def _without_geometry_disclosure(report: dict) -> list[dict]:
     ``device.geometry_not_compared`` entries.
 
     That disclosure is emitted once per participating resistor/capacitor
-    device class on *every* run (KLayout declares those classes' `L`/`W`/
-    `A`/`P` secondary, so no default compare covers them), independently of
-    what the compare found. Tests whose subject is the compare itself -- "this
-    pairing produces no finding", "this hint removes the only warning" --
-    filter it out here rather than restating it, which keeps their intent
-    readable; the disclosure's own behaviour is pinned by the dedicated
-    `device.geometry_not_compared` tests further down.
+    device class on *every* run (KLayout declares those classes'
+    `L`/`W`/`A`/`P` secondary, so no default compare covers them).
+    Tests whose subject is the compare itself -- "this pairing produces
+    no finding", "this hint removes the only warning" -- filter it out
+    here rather than restating it; the disclosure's own behaviour is
+    pinned by the dedicated `device.geometry_not_compared` tests below.
     """
     return [
         entry
@@ -8339,6 +8338,7 @@ def test_lvs_cli_exits_4_on_inconclusive(tmp_path, monkeypatch, capsys):
         format="json",
         check=None,
         rerun=False,
+        deck=None,
         deck_file=None,
         deck_var=None,
         layout=None,
@@ -12814,21 +12814,8 @@ def test_build_device_binding_map_derived_fallback_shape():
         "rppd",
         "rhigh",
     }
-    # sg13g2's capacitor family is fully curated too (issue #1470): neither
-    # capacitor key comes from the derived fallback. The dict is keyed by
-    # *subcircuit* name, not device-class name: `rfcmim`'s real subcircuit is
-    # `cap_rfcmim`, so that is the key here, though the class name is unchanged.
-    assert set(build_device_binding_map("sg13g2")) == {
-        "sg13_lv_nmos",
-        "sg13_lv_pmos",
-        "sg13_hv_nmos",
-        "sg13_hv_pmos",
-        "rsil",
-        "rppd",
-        "rhigh",
-        "cap_cmim",
-        "cap_rfcmim",
-    }
+    # sg13g2's own arm lives in tests/test_extract_sg13g2_antenna_diodes.py
+    # (issue #5491), with the two antenna-diode keys that binding added.
     # Both fully-curated decks are unchanged: no derived entry is added.
     assert set(build_device_binding_map("gf180mcu")) == {
         "nfet_03v3",
@@ -12894,7 +12881,7 @@ def test_build_device_binding_map_derived_fallback_shape():
         "sky130_fd_pr__cap_mim_m3_2",
         "sky130_fd_pr__pnp_05v5_W0p68L0p68",
         "sky130_fd_pr__pnp_05v5_W3p40L3p40",
-        # Junction diodes (issue #4319) -- curated in `_DIODE_MODEL_TABLE`.
+        # Junction diodes (issue #4319) -- curated in `pdk_diode_models.py`.
         "sky130_fd_pr__diode_pw2nd_05v5",
         "sky130_fd_pr__diode_pw2nd_05v5_lvt",
         "sky130_fd_pr__diode_pw2nd_05v5_nvt",
@@ -13871,28 +13858,6 @@ def test_device_parameter_coverage_is_the_gradeable_form_of_the_disclosure(tmp_p
             ],
         }
     ]
-
-
-def test_device_parameter_coverage_is_empty_without_a_resistor_or_capacitor(tmp_path):
-    """Scoped to the two classes whose *whole* geometry is secondary. A MOS
-    class's own `L`/`W` are primary and compared, so an all-MOS compare
-    reports neither the warning nor a coverage entry -- the disclosure would
-    be noise, not information."""
-    layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
-    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
-    report = run_lvs(
-        _write_request(
-            tmp_path / "request.json",
-            {
-                "layout": {"netlist": layout_path, "top": "inv"},
-                "reference": {"netlist": reference_path, "top": "inv"},
-            },
-        )
-    )
-
-    assert report["status"] == "match"
-    assert report["device_parameter_coverage"] == []
-    assert _geometry_entries(report) == []
 
 
 def test_subckt_call_placeholder_class_discloses_that_nothing_was_compared(tmp_path):

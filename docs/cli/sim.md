@@ -42,7 +42,9 @@ this document (and the code) win.
   `ceil(len(decks)/N)` balanced contiguous slices, one batch job each, merged
   into one report in request order, with a shard map (`batch-shards.json`,
   plus `deck_slices[]`) written to the artifacts dir and
-  `environment.remote.{split,shard_count,shard_map,shards[]}` in the report.
+  `environment.remote.{split,shard_count,shard_map,shards[]}` in the report
+  (`shard_map` repo-relative when the map lies inside a git repo, absolute
+  otherwise, like every `shard_map` emission).
   A list that already fits submits one job and writes no shard map.
   `--submit-only` on a deck list that would split is refused with
   `error.code: "batch_decks_split_unsupported"`; run it blocking, then
@@ -163,9 +165,15 @@ not hardcoded — first runnable candidate wins:
 
 An explicitly-named binary (option or env var) that is not runnable is a
 clear, actionable error naming which source named it — never a silent
-fallback to the next source. The resolved path is recorded in the response
-as `environment.ngspice_binary` (alongside `engine_version`), `null` for
-`engine: "xyce"` (below), which this issue adds no override for. Mirrors
+fallback to the next source. That strictness applies on the submitting host
+too, before any dispatch — an override naming a path only the runner has is
+refused at submit, so name a path (or bare `PATH` name) valid on both
+hosts. The runner re-resolves the override fresh from its own filesystem
+and `$PATH`, so what actually executes is the runner's copy — reported back
+as `environment.ngspice_binary` (alongside `engine_version`), with the
+submitter's own resolution kept as `environment.client_ngspice_binary`;
+`null` for `engine: "xyce"` (below), which this issue adds no override for.
+Mirrors
 `klt lvs`'s `options.netgen_binary`/`$KLT_NETGEN_BINARY`/
 `environment.netgen_binary` (issue #2373). `klt sim` has no `--check`/
 `--rerun` mode, so there is no drift-diff exclusion to add for this field.
@@ -177,9 +185,27 @@ with the engine it resolved and, on a mismatch, exits 1 *before simulating*
 with `error.code: "engine_version_unmet"` naming required vs found. A version
 that cannot be determined or parsed also fails (closed). On `local` and
 `local-parallel` the engine is probed (`ngspice --version` / `Xyce -v`) up
-front. `remote` and `batch` have no pre-submit probe, so the pin is checked
-against the version in the runner's report once the run returns; the job has
-already run by then. Unset, behaviour is unchanged. The pin applies to
+front. `remote` and `batch` have no *submit-side* probe, but the pin is not
+post-run-only either: the job command is a plain
+`klt sim --backend local-parallel` on the runner, with the request
+forwarded verbatim, so a runner whose `klt` knows the field (0.8.0 and
+newer) enforces the pin there *before any corner simulates* and fails the
+job with `engine_version_unmet`. The refusal surfaces through the normal
+failed-job path — every unit of the job reports `batch_job_failed`, quoting
+the runner's error, with `runner_code: "engine_version_unmet"` — and,
+because the runner wrote no report, the submit-side check below then also
+fails closed with a top-level `engine_version_unmet`. That submit-side
+comparison against the report's `environment.engine_version` stays as the
+backstop for a runner too old to know the field: a pre-0.8.0 runner ignores
+the pin silently but reports no version either, so it still fails closed
+after the run (never a wrong-solver report), and the default
+`batch.runner_version_check: enforce` gate refuses such a version-skewed
+runner at submit. Which of the two applies is decided by the backend that
+*executes*, not the one first resolved: when a host-default off-host backend
+steps back to `local` late — a single-unit run, or `options.resume` — the pin
+is probed here up front, exactly as `--backend local` does (issue #5500);
+before that fix neither half ran and the pin passed silently.
+Unset, behaviour is unchanged. The pin applies to
 deck-list requests (see "Pre-composed decks") the same way — decks always run
 on `ngspice`, and an off-host runner that reports no `engine_version` fails
 closed — but `unsupported_analysis` does not, as decks have no `analysis`
@@ -205,6 +231,13 @@ and compares the installed identity *before simulating*; a `mismatch`, an
 `models.pdk` nor `models.pdk_root` set exits 1 with
 `error.code: "pdk_version_unmet"`. `remote` and `batch` reject the field with a
 request error (no silent pass): the worker-side check is tracked in #3462.
+That rejection is keyed on the backend that *executes*: when the off-host
+backend is only a host default (`$KLT_SIM_BACKEND`) that a late yield steps
+back to `local` — a single-unit run, or `options.resume` — the pin is compared
+locally instead of refused (issue #5500), so a host default cannot turn a
+valid request into a refusal. An explicitly named `--backend` /
+`request.backend` is still refused immediately, and a host-default run that
+really does leave this host is refused before anything is submitted.
 Unset, behaviour is unchanged.
 
 **Supported analyses (issue #3041).** `analysis.kind` (and each
@@ -274,6 +307,35 @@ from before this issue, modulo the `cwd=` fix itself (which only matters if
 the invoking directory or `$HOME` happened to carry a `.spiceinit` of its
 own). ngspice-only: the `xyce` engine has no equivalent init-file lookup, so
 `options.ngspice_init` is accepted but has no effect when `engine: "xyce"`.
+
+The option applies to **deck-list requests** too (see "Pre-composed decks"):
+each unit's own directory gets the same `.spiceinit` before `ngspice -b`
+runs there, on every backend — an off-host job forwards the option in its
+worker request. A unit that itself stages a deck, input, or include named
+`.spiceinit` while the option is set is rejected by name rather than
+silently dropping one side. Note the file ngspice reads from its working
+directory *replaces* `$HOME/.spiceinit` — ngspice does not merge the two —
+so the requested lines must be complete, not mode-only additions to
+whatever the host's own init file sets.
+
+**What was in effect is recorded (issue
+[#5648](https://github.com/2AMLogic/klayout-tools/issues/5648)).** A run-directory
+`.spiceinit` *replaces* `$HOME/.spiceinit` rather than merging with it, and
+klt also writes one on requests that declared nothing whenever it pins the
+thread count (`options.threads_per_worker`, or `local-parallel` with more than
+one worker and unit) — so the same request can read the host's ambient init on
+`--backend local` and ignore it on `--backend local-parallel`. The report's
+`environment.ngspice_init` is `{source, lines, sha256}` (`null` for xyce);
+`source` is `"request"`, `"thread_pin"`, `"home"`, `"none"`, or `"runner"` for
+`remote`/`batch` (resolved by the worker). It reflects what ngspice actually
+reads, never what the request merely declared, and carries no absolute path.
+Two runs whose `sha256` differ read different init files. See
+`docs/json-contract.md`.
+
+Two stderr warnings (stdout JSON unaffected, silent when no
+`$HOME/.spiceinit` exists): the run **inherits** an ambient `$HOME/.spiceinit`
+(declare `options.ngspice_init` to make the request self-contained), or klt's
+own `.spiceinit` **replaced** it rather than merging.
 
 ### Transient noise coverage (ngspice, [#2985](https://github.com/2AMLogic/klayout-tools/issues/2985))
 
@@ -844,7 +906,14 @@ or more shards submitted but never launched (typically a capacity or
 concurrency-cap refusal with `batch.capacity_wait_s` at its default `0`),
 `environment.remote` carries three additive fields, absent when every shard
 launched: `unlaunched_shards` (count), `resumable: true`, and `shard_map` (the
-`batch-shards.json` path). The affected corners still report `lost_shard` and
+`batch-shards.json` path, repo-relative when it lies inside a git repo and
+absolute otherwise -- the stderr hints keep the absolute path either way).
+Each unlaunched shard is also a `null` entry in `environment.remote.fleet[]`,
+at its own index (the shard map's shard order): a client collecting per-job
+metadata across `fleet[]` must skip the `null` slots, and read job identity
+and runner skew from the null-safe `job_ids` / `runner_compatibility`
+roll-ups, which omit the lost shards. The affected corners still report
+`lost_shard` and
 the exit code stays 4; the fields only let an unattended caller tell
 "incomplete, rerun with `--resume` and the same outdir" from a real failure
 ([#4856](https://github.com/2AMLogic/klayout-tools/issues/4856)). Unattended
@@ -856,8 +925,11 @@ any corner that never ran (`lost_shard`, `batch_job_failed`,
 `batch_job_timeout`, `batch_poll_timeout`, `batch_job_interrupted`) and klt kept
 state to resume from (the shard map, else the `--resume` checkpoint),
 `environment.remote` additionally carries `unrun_units` (count) and
-`resumable: true`, with `shard_map` naming the retained file, and stderr names
-the `--resume` rerun once. Absent when every unit ran. `unrun_units` counts
+`resumable: true`, with `shard_map` naming the retained file (repo-relative
+when it lies inside a git repo, absolute otherwise), and stderr names
+the `--resume` rerun once. Each affected shard is a `null` entry in
+`environment.remote.fleet[]` at its own index, as for unlaunched shards above.
+Absent when every unit ran. `unrun_units` counts
 every corner that never ran; `unlaunched_shards` (above) counts only shards that
 were never launched, so with both present `unrun_units` is the larger. A lost shard is
 identified by `corners[].diagnostics[].code`, not by `status` (it stays
@@ -1014,7 +1086,13 @@ shards and merges them exactly as the blocking sharded run does. The request
 must be the one submitted (a `request_sha256` or fingerprint mismatch is
 `error.code: "resume_fingerprint_mismatch"`). `--attach` only re-attaches: a
 shard whose job is gone is reported as lost, other shards are still reported,
-and nothing is resubmitted.
+and nothing is resubmitted. A map written by a `--hosts N` / `remote.hosts: N`
+run attaches the same way ([#5777](https://github.com/2AMLogic/klayout-tools/issues/5777)):
+pass the request (and `--hosts`, if it was given at submit) the shards were
+submitted from; the shard count is read from the map itself, so `--hosts` is not
+compared on attach, while a changed `remote.hosts` in the request file is a
+`request_sha256` mismatch naming `remote`. `--collect-partial` takes such a
+map too.
 
 **Worked example: a 135-unit grid** ([#4878](https://github.com/2AMLogic/klayout-tools/issues/4878)).
 A job is capped by the whole-job ceiling (`max_job_seconds`, default `3600`
@@ -1054,7 +1132,10 @@ a plain attach. Any other shard (`running`, `interrupted`, unreadable status,
 or one the map records as submitted but never launched, reported `unlaunched`)
 is not waited on and never launched: each of its units is `lost_shard`, and
 `environment.remote` carries `unfinished_shards[]` (`index`, `job_id`, last
-observed `state`), `resumable: true` and `shard_map`. The exit code is `4`
+observed `state`), `resumable: true` and `shard_map` (repo-relative when it
+lies inside a git repo, absolute otherwise). Each unfinished shard is a
+`null` entry in `fleet[]` at its own index, as for unlaunched and lost
+shards above. The exit code is `4`
 (incomplete). With every shard `done` the report equals a plain `--attach`;
 with none done every unit is lost. The map is changed only by collected state,
 so a later plain `--attach` (or `--resume`) still finishes the remaining
@@ -1317,6 +1398,17 @@ command instead of N invocations that each back off alone:
 klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
 ```
 
+- **Member directories.** Each member writes into its own directory under
+  `-o`, named after its request file's stem: a trailing `.request.json` is
+  stripped (the usual request naming convention, so `foo.request.json` ->
+  `out/foo/`), otherwise only the last filename suffix is stripped
+  (`foo.sim.json` -> `out/foo.sim/`). Without `-o` the directories live under the
+  single-request default (`.klt/sim/<stem>/` next to each request file). A
+  repeated stem gets the member's index appended (`foo-1`) so two members
+  never share a directory or an output lock. `requests[].report` in the
+  aggregate envelope (and each request's `dir` in `set-manifest.json`) is
+  the authoritative path to a member's `report.json` -- read it from the
+  envelope rather than re-deriving the stem.
 - **Bounded in flight.** At most `--max-in-flight` requests (default **4**)
   run at once -- submit, launch, and poll; the rest queue and start as slots
   free. The bound is a client-side politeness knob, not the fleet's cap.
@@ -1391,8 +1483,8 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   combined with it.
 - **Partial collection (`--collect-partial`,
   [#5014](https://github.com/2AMLogic/klayout-tools/issues/5014)).** Allowed
-  with `--batch-set`. Each member whose directory (`<outdir>/<request-stem>/`)
-  holds a `batch-shards.json` is collected through the single-request
+  with `--batch-set`. Each member whose directory (`<outdir>/<stem>/`, see
+  "Member directories" above) holds a `batch-shards.json` is collected through the single-request
   `--attach <map> --collect-partial` path: every shard is read once, nothing is
   relaunched, finished shards are merged and the rest come back `lost_shard`
   (listed in that member's `environment.remote.unfinished_shards[]`; no value is
@@ -1406,7 +1498,8 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   are never inferred). Empty when this client observed no job. The text output
   prints one `shard ...` line per row.
 - **Resuming a set (`--resume`).** `--resume` is forwarded to every request and
-  each one resumes from its own directory, `<outdir>/<request-stem>/`. Re-run
+  each one resumes from its own directory, `<outdir>/<stem>/` (see "Member
+  directories" above). Re-run
   the same set with the same `-o`: a sharded request re-attaches to the shard
   jobs recorded in its `batch-shards.json` (`fleet[].resumed: true`) and
   resubmits only the shards it cannot collect; a request with no prior
@@ -1437,8 +1530,9 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   true), distinguishing it from a shard that really failed; its unfinished
   shards are `lost_shard` units.
 - **Per-request reports.** Each request writes its full single-request report
-  to `report.json` in its own directory, `<outdir>/<request-stem>/` (without
-  `-o`: `.klt/sim/<request-stem>/` next to the request file).
+  to `report.json` in its own member directory, `<outdir>/<stem>/` (see
+  "Member directories" above; without
+  `-o`: `.klt/sim/<stem>/` next to the request file).
 - **Invalid request.** A request that fails validation (before any S3 write) or
   is refused becomes an `error` entry; the others proceed.
 
@@ -1756,7 +1850,11 @@ a consumer-repo wrapper does"), and `klt` implements exactly its four steps:
    `inputs/<name>` per staged `.include`/`.inc` target — see "Off-host
    backends stage the netlist's `.include` closure" below), then
    `job.json` — uploaded last, so a launch can never observe a job spec
-   whose inputs are still uploading.
+   whose inputs are still uploading. The whole `inputs/` tree goes up in a
+   **single** `aws s3 cp --recursive` ([#5539](https://github.com/2AMLogic/klayout-tools/issues/5539)),
+   however many inputs there are; the S3 keys are unchanged (each input
+   still lands at `inputs/<name>`, subdirectories included), and `job.json`
+   is still a separate call, still last.
 2. **launch** `batch-fleet-provision.sh launch --job <job-id> --apply
    --profile <profile>`, exactly once per job. `klt` shells out rather than
    issuing its own `CreateFleet`: `launch` enforces the diversification
@@ -1852,7 +1950,9 @@ which of those changed is not recoverable). A shard lost at the collect stage
 ends its `lost_shard` message with `[remote job <id>: finished|failed|timeout|
 running|unknown]`, the job's `status.json` state at that moment: `finished`
 means re-attaching can collect it, `unknown` means no status was readable.
-`--attach` still takes a single job id; recover a split request with
+A bare `--attach <job_id>` still takes a single job (`hosts = 1`) and is
+refused for `hosts != 1`; re-attach a sharded run (`--hosts N` or a
+`--max-units-per-job` split) with its `batch-shards.json`, or recover it with
 `--resume`.
 
 The dispatch-time fail-fast probe is skipped for `batch` —
@@ -1931,10 +2031,15 @@ runner silently drops them ([#4212](https://github.com/2AMLogic/klayout-tools/is
 | `corners.params` | 0.8.0 |
 | `corners.units` | 0.8.0 |
 | `corners.temperature_param` | 0.8.0 |
+| `corners.options` | 0.8.0 |
 | `options.ngspice_init` | 0.7.0 |
 | `options.ngspice_options` | 0.8.0 |
+| `options.nodeset` | 0.8.0 |
+| `options.initial_conditions` | 0.8.0 |
 | `options.osdi_preload` | 0.7.0 |
 | `options.stage_model_inputs` | 0.7.0 |
+| `analysis_overrides` | 0.9.1 |
+| `analysis.op_check` | 0.9.2 |
 | `analysis_steps[].measurements[]` (noise analysis `.meas` cards) | unreleased |
 | `measurements[].search` | unreleased |
 
@@ -1997,13 +2102,15 @@ report a pass. Policy: **reject before simulating**.
   carries exactly one `batch_runner_version_mismatch` entry (severity
   `error`) with `runner_klt_version`, `client_klt_version`,
   `accepted_client_release` (the runner's major.minor) and a `message` stating
-  the remedy: submit from a client of that major.minor, or update the runner
-  image to the client's. It is additive (the per-unit diagnostics and
-  `environment.remote` fields above are unchanged), appears once even for
-  `hosts > 1`, and is not emitted for `match` / `unknown`, nor under
-  `runner_version_check: "warn"` when the run proceeded (that skew stays in
-  `environment.remote` only). It covers the case the pre-launch manifest check
-  cannot see (no manifest, or an entry without `klt_version`).
+  the remedy: submit from a client of that major.minor, update the runner
+  image to the client's, or set `batch.runner_version_check: "warn"` to run
+  anyway (under `warn` the runner-side gate is not applied, so the job is
+  submitted and runs despite the skew). It is additive (the per-unit
+  diagnostics and `environment.remote` fields above are unchanged), appears
+  once even for `hosts > 1`, and is not emitted for `match` / `unknown`, nor
+  under `runner_version_check: "warn"` when the run proceeded (that skew stays
+  in `environment.remote` only). It covers the case the pre-launch manifest
+  check cannot see (no manifest, or an entry without `klt_version`).
 - A single-job `environment.remote`, and each `environment.remote.fleet[]`
   entry of a sharded run (so mixed-version shards stay distinguishable), always
   carries `runner_klt_version` (the runner's own version, or `null` when it
@@ -2069,12 +2176,17 @@ release segment:
 | `measurements[].expr` | any `measurements[]` entry has `expr` | `0.7.0` |
 | `corners.process[].sections[]` | a `corners.process[]` bundle has an object-form `sections[]` entry | `0.7.0` |
 | `corners.params` ([#4097](https://github.com/2AMLogic/klayout-tools/issues/4097)) | `corners.params` is present and non-empty; checked before launch against the AMI manifest (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `params_unsupported_worker` check stays) | `0.8.0` (**mandatory**, see below) |
+| `corners.options` ([#3125](https://github.com/2AMLogic/klayout-tools/issues/3125)) | `corners.options` is present and non-empty; checked before launch against the AMI manifest (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `options_unsupported_worker` check stays) | `0.8.0` (**mandatory**, see below) |
+| `options.nodeset` ([#3036](https://github.com/2AMLogic/klayout-tools/issues/3036)) | `options.nodeset` is set and non-empty; checked before launch against the AMI manifest (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `nodeset_unsupported_worker` check stays) | `0.8.0` (**mandatory**, see below) |
+| `options.initial_conditions` ([#3881](https://github.com/2AMLogic/klayout-tools/issues/3881)) | `options.initial_conditions` is set and non-empty; checked before launch against the AMI manifest (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `initial_conditions_unsupported_worker` check stays) | `0.8.0` (**mandatory**, see below) |
+| `analysis_overrides` ([#4970](https://github.com/2AMLogic/klayout-tools/issues/4970)) | `analysis_overrides` is present and non-empty; checked before launch against the AMI manifest (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `analysis_overrides_unsupported_worker` check stays) | `0.9.1` (**mandatory**, see below) |
+| `analysis.op_check` ([#5077](https://github.com/2AMLogic/klayout-tools/issues/5077)) | `analysis.op_check` is declared; checked before launch against the AMI manifest (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `op_check_unsupported_worker` check stays) | `0.9.2` (**mandatory**, see below) |
 | `options.ngspice_init` | `options.ngspice_init` is set and non-empty | `0.7.0` |
 | `options.ngspice_options` ([#4212](https://github.com/2AMLogic/klayout-tools/issues/4212)) | `options.ngspice_options` is set and non-empty | `0.8.0` |
 | `options.osdi_preload` | `options.osdi_preload` is set and non-empty | `0.7.0` |
 | `options.stage_model_inputs` | `options.stage_model_inputs` is set | `0.7.0` |
 
-The last six rows are the released entries of
+The rows from `measurements[].expr` down are the released entries of
 `REQUEST_FEATURE_MIN_RUNNER_VERSION` ([#2877](https://github.com/2AMLogic/klayout-tools/issues/2877)),
 the same table the checks below read ([#2901](https://github.com/2AMLogic/klayout-tools/issues/2901)).
 An entry whose minimum is `unreleased` has no detector and never counts as
@@ -2150,7 +2262,9 @@ reject (version/feature gate) instead of leaving the bare `job command exited
 87`. If the post-run runner identity shows a major.minor mismatch with the
 client (`environment.remote.runner_compatibility: "mismatch"`), the diagnostic
 also carries `runner_code: "batch_runner_version_mismatch"` and both klt
-versions. `--job-status` is a `status.json` passthrough only and never
+versions, and its message names the remedy: update the runner image, use a
+compatible client, or set `batch.runner_version_check: "warn"` to submit
+anyway. `--job-status` is a `status.json` passthrough only and never
 fetches outputs, so it can show just `job command exited 87`; read the full
 report for the cause.
 
@@ -2334,7 +2448,7 @@ contents), size-capped, serialised with a JSON encoder, errors recorded as
 | --- | --- |
 | `capture` | `ok`, `absent` (older worker, no artifact, poll timeout) or `malformed`. When not `ok`, all observations are `null` -- never the client's values. |
 | `simulator` | `requested_binary`, `binary_source` (`request` / `KLT_NGSPICE_BINARY` / `PATH`), `selected_path` (binary actually selected on the worker), `version_banner` (full `--version` text, bounded to 2000 chars), `version_probe` (`ok` / `timeout` / `exit_N` / `error` / `unavailable`). |
-| `model_inputs` | Under `options.stage_model_inputs`: `[{name, sha256}]` digests of the staged model files in `$EDA_INPUT_DIR` (bounded to 64); `null` otherwise or when an older worker does not report it. Lifted to `environment.remote.runner_model_inputs`. |
+| `model_inputs` | Under `options.stage_model_inputs`: `[{name, sha256}]` digests of the staged model files in `$EDA_INPUT_DIR` (bounded to 64); `null` otherwise or when an older worker does not report it. Lifted to `environment.remote.runner_model_inputs`. **Staged files only**: a runner-resolved, image-baked `.osdi` (issue #3819) is never staged, so it can never appear here -- its digest is `environment.remote.runner_osdi_preload` instead. |
 | `pdk` | `variant`, worker `root`, `stamp_scheme` (`sources-sha256`), `stamp_sha256`, `stamp_text` (bounded `SOURCES` text) for the resolved variant, `models_staged` (true under `options.stage_model_inputs`: the executed models then came from the request, not the image tree), `stamp_scope` (`image` when `models_staged` is true: `stamp_*` then describes the worker image's tree, not the models that ran; `executed` otherwise). Stamp fields are `null` when neither `SOURCES` nor a bundle `.pdk-store.json` is readable; with only the latter, `stamp_scheme` is `store-version-sha256` (sha256 of its `version` string; `stamp_text` is `store:<version>`). |
 | `cpu_model` | First `model name` from the worker's `/proc/cpuinfo`, else `null`. CPU count stays `physical_cores` / `concurrency` from `status.json`. |
 | `omp_num_threads` | The worker's effective `OMP_NUM_THREADS`, `null` when unset. |
@@ -2356,6 +2470,21 @@ runner whose image has no readable `SOURCES` stamp:
   `environment.models_lib_sha256`. Missing data is never a proven mismatch,
   and klt does not fail the run on `mismatch`. `pdk_stamp_comparison` is
   unchanged. Text output prints a `models_lib:` line next to `pdk_stamp:`.
+
+A third sibling covers the OSDI objects the runner loaded (issue #5562):
+
+- `runner_osdi_preload`: the runner's own `environment.osdi_preload` lifted to
+  `[{name, sha256}]` in declared order -- the digests of the `.osdi` files the
+  worker actually opened, which for a runner-resolved, image-baked object the
+  submitting host never sees. `null` when the runner does not report it
+  (older runner, error envelope, malformed report), so "unknown" is
+  distinguishable from "this request declared no OSDI objects". A malformed
+  entry keeps its slot with `null` fields rather than being dropped: the
+  array is index-aligned with the declared `options.osdi_preload`, and that
+  alignment is what joins each digest onto
+  `environment.osdi_preload_runner_resolved[].sha256` (see "OSDI (Verilog-A)
+  model preload" below). Present on `environment.remote` for a single job and
+  on each `fleet[]` member under sharding.
 
 `pdk_stamp_comparison` compares the worker's stamp with the `SOURCES` stamp
 the submitter resolves locally and reports a `mismatch` only when both sides
@@ -2385,6 +2514,7 @@ comparison's status, so a divergence can be attributed from the report alone:
 | Runner | `environment.remote.worker_environment.pdk.stamp_text` (plus `stamp_scheme` / `stamp_sha256`, and under sharding the same block on each `fleet[]` member). |
 | Submitter's model library | `environment.models_lib_sha256` -- a content hash of the top model library file actually loaded. |
 | Runner's model library | `environment.remote.runner_models_lib_sha256`, compared in `models_lib_comparison`. |
+| Runner's OSDI objects | `environment.remote.runner_osdi_preload` (`[{name, sha256}]`), joined onto `environment.osdi_preload_runner_resolved[].sha256`. |
 
 When `pdk.models_staged` is true the image stamp says nothing about the
 executed models, so `pdk_stamp_comparison` instead compares the client's
@@ -2692,6 +2822,7 @@ in the deck path), exactly as corner jobs do.
 | `options.timeout_s` | number | Default per-unit timeout (see `decks[].timeout_s`). |
 | `options.max_workers` | integer | Worker-pool size for `local-parallel`; overridable with `--max-workers`, capped by `$KLT_SIM_MAX_WORKERS`, same as corners. |
 | `options.ngspice_binary` | string | Same resolution rules as corners (issue #2423). Interpreted on the *executing* host. |
+| `options.ngspice_init` | array\<string\> | Same meaning as corners (issue #2520): each string becomes one line of the `.spiceinit` written into every unit's own directory before `ngspice -b` runs there (issue #5738), on every backend. Replaces the executing host's `$HOME/.spiceinit` — lines must be complete. A unit staging its own `.spiceinit` while this is set is rejected by name. |
 | `remote.*` / `batch.*` | object | The same backend blocks corner requests carry; only read for the matching backend. `remote.hosts` sharding is refused for deck requests — one off-host job runs the whole list across its own worker pool. |
 
 A deck-list request must not also declare `netlist`, `corners`, `analysis`,
@@ -2744,6 +2875,19 @@ job id; see "Asynchronous submit and status"); they cannot be combined with
   `.lib <section>` … `.endl` *definition* names no
   file and is left alone; any other `.lib` shape (no arguments, more than
   two, unbalanced quotes) is rejected by name.
+- **Identical staged files are uploaded once per job.** A grid sweeps
+  corners against one model set, so every unit stages the same closure.
+  On `remote` and `batch`, files whose bytes are identical (sha256) are
+  shipped **once** and referenced by every unit that needs them, so a job
+  of N units sharing M identical includes transfers `N + M` files rather
+  than `N × (1 + M)`
+  ([#5539](https://github.com/2AMLogic/klayout-tools/issues/5539)). This is
+  invisible to the deck: each unit's declared in-unit destination is
+  unchanged (the worker *copies* each staged file into every unit
+  directory), two files that share a basename but differ in bytes are still
+  shipped separately, and `deck_sha256` and the `--resume` key are
+  byte-identical either way. A sharded deck-list run dedups within each
+  shard job, which is the granularity that gets uploaded.
 - **Units are isolated.** Each unit runs in its own directory
   (`<outdir>/<id>/`), recreated fresh every run (except a unit `--resume`
   skips, which is left untouched). Its deck, declared
@@ -3079,7 +3223,15 @@ not just equivalent.
   backend actually populates `environment.remote` (see "Remote backend"
   above) reports one `fleet[]` entry per host instead of a single block —
   each entry has the exact same fields as today's single-host block, or
-  `null` for a lost shard:
+  `null` for a lost shard — a shard that never returned a remote block,
+  whether it failed mid-run or was submitted but never launched (an
+  unlaunched shard additionally sets `unlaunched_shards` / `resumable`,
+  see "Unlaunched shards are a resumable signal" above). The array is
+  positional: index *i* is shard *i*, in the shard map's order, so a client
+  collecting per-job metadata across `fleet[]` must skip the `null` slots
+  rather than dereference them, and read job identity and runner skew from
+  the null-safe `job_ids` / `runner_compatibility` roll-ups (which omit the
+  `null` shards):
 
   ```json
   {
@@ -3746,7 +3898,12 @@ the `options.resume` fingerprint (changing it invalidates a stored result) and
 is forwarded to `remote`/`batch` workers; omitting it leaves decks, corner IDs
 and fingerprints byte-identical. A worker built before the field would drop it,
 so the client requires `op_check` on every corner that ran and otherwise fails
-with `error.code: "op_check_unsupported_worker"`.
+with `error.code: "op_check_unsupported_worker"`. It is also a **mandatory**
+runner feature (`analysis.op_check`, minimum `0.9.2`), so a submit against an
+AMI manifest whose every image predates it is refused with
+`batch_runner_feature_unsupported` before anything is uploaded or launched --
+and `--dry-run` reports the refusal -- rather than the grid running first and
+the echo check refusing the result afterward.
 
 **Pinning a node (the deterministic workaround).** `op_check` only detects.
 To make the solution deterministic, hold the latch node with an ideal source at
@@ -3893,15 +4050,24 @@ conditions, so a large transient keeps only the signals you named resident
 (and in the rawfile/waveform artifact) without editing the netlist.
 
 klt always adds every `v(x)`/`i(x)` (and derivative forms such as `vdb(x)`,
-`vm(a,b)`) referenced by a declared `measurements[].spice`, `measurements[].expr`
-or `crossings.signal`, so measurements stay correct. A measurement that names
-a vector *bare* (`out` rather than `v(out)`) is not detected — list it in
-`save_vectors` yourself. `save_vectors` and `save_mode: "netlist"` are mutually
-exclusive (an application error: the latter already suppresses the card the
-former rewrites), and `engine: "xyce"` refuses it like `save_mode`. Omitting it
-leaves the deck byte-identical. A changed `save_vectors` invalidates a
-`--resume` checkpoint. It rides the forwarded request document to
-`remote`/`batch` workers, so the worker image must include this implementation.
+`vm(a,b)`) referenced by a declared measurement, so measurements stay
+correct. Covered (issue #5559): the `measurements[].spice` and
+`measurements[].expr` text, `crossings.signal`, `step_resolution.signal`,
+the `settled` clock and `settled.mean.signal`/`settled.peak.signal`,
+`cycle_mean.signal` and `cycle_mean.align`, `energy.voltage` plus the
+implied `i(<energy.source>)`, `stress.a`/`stress.b` (bare node names, saved
+as `v(<node>)`), `snm.x`/`snm.y1`/`snm.y2`, `eye.signal`,
+`transfer.num`/`transfer.den`, and `tian` — its `tv`/`ti` selectors, or
+`v(<series_injection.load_node>)` and `i(<series_injection.source>)` for a
+series injection; the `analysis.passes` decks read the same `save` card. A
+measurement that names a vector *bare* (`out` rather than `v(out)`) is not
+detected — list it in `save_vectors` yourself. `save_vectors` and
+`save_mode: "netlist"` are mutually exclusive (an application error: the
+latter already suppresses the card the former rewrites), and
+`engine: "xyce"` refuses it like `save_mode`. Omitting it leaves the deck
+byte-identical. A changed `save_vectors` invalidates a `--resume`
+checkpoint. It rides the forwarded request document to `remote`/`batch`
+workers, so the worker image must include this implementation.
 
 ### Complex AC vectors: `options.complex_vectors` (issue #3337)
 
@@ -6561,9 +6727,25 @@ fails with `Unable to find definition of model …` and every corner errors.
   mismatch there still surfaces as the per-corner `osdi_abi_mismatch`
   diagnostic (no client-side check is possible for an image-baked file).
   `environment.osdi_preload_runner_resolved`
-  lists them as `{entry, reason}` (no sha256; additive, present only when
-  such entries ran off-host). A mixed list keeps today's behavior for its
-  host-local entries (refused, or staged under `stage_model_inputs`).
+  lists them as `{entry, index, reason, sha256}` (additive, present only when
+  such entries ran off-host). `index` is the entry's position in the declared
+  `options.osdi_preload`, so an entry can be related back to the request even
+  when a list names the same entry twice. `sha256` is the digest the *runner*
+  computed over the bytes it opened, lifted from its own report (issue #5562
+  -- see `environment.remote.runner_osdi_preload` below), and `null` whenever
+  that cannot be established: an older runner that does not report it, a
+  report whose entry is missing or malformed, a sharded run whose shards
+  disagree, or the `remote` (SSH) backend, which is not covered. It is never
+  the submitting host's hash of its own copy -- that file is not the one the
+  runner read, so it would pin the wrong bytes; a `null` says "unknown", and
+  a digest that cannot be established never fails the run or raises a
+  diagnostic. The resolved *path* on the runner is deliberately not reported:
+  an image-baked `.osdi` lies outside the runner's repo, which
+  `environment.osdi_preload` normalises to `{"path": null, "scope":
+  "external"}` like every other external input (`models_lib` included), so
+  the digest pins the bytes and nothing claims to pin the location. A mixed
+  list keeps today's behavior for its host-local entries (refused, or staged
+  under `stage_model_inputs`).
   `local`/`local-parallel` are unchanged: every entry is expanded and
   existence-checked on this host. No new runner-version row is needed: a
   runner that predates this loads the same image-baked file through
@@ -6633,7 +6815,12 @@ x86-64 (elsewhere set `OPENVAF_R_BIN`). The `.osdi` lands in the ignored
   multiply `NFIN`). KLayout's `\$11` / `VDD$1` names become `11` / `VDD_1`.
   The extractor's `M` card (`finfet_card`) is unchanged: it stays the
   CDL-shaped card LVS compares. Measured: `NFIN=6` draws exactly twice the
-  drain current of `NFIN=3`.
+  drain current of `NFIN=3`. `*` comment lines pass through verbatim, so a
+  `* Generated by …` provenance header from the source lands unchanged in
+  the adapted copy: the adapted bytes are the adapter's output, not its
+  authorship claim. The adapted copy is a private work-dir artefact derived
+  from the request's `netlist` (`netlist_sha256_in`); `environment.adapt`'s
+  `netlist_sha256_out` pins the adapted bytes, inherited header included.
 - The extracted cell's separate `VDD`/`VDD$1` (tap vs. source) and
   `vsubs`/`VSS` pins are distinct nets; the testbench ties them.
 
@@ -6785,7 +6972,9 @@ a corner grid. A stock ngspice without the module still produces the
     Poly resistors (`sky130_fd_pr__res_*`) are covered too: their subcircuits
     draw per-instance `AGAUSS` terms (`res_match`, `rend`) scaled by
     `MC_MM_SWITCH`, so two identical instances differ under `tt_mm` (measured
-    on the volare sky130A build `c6d73a35…`; note the term is upper-case, so a
+    on the volare sky130A build `c6d73a35…`, re-checked 2026-10-29 on `f6eeac7…`:
+    `res_high_po.model.spice` still carries 3 upper-case `AGAUSS` terms and no
+    lower-case `agauss` (#3420); note the term is upper-case, so a
     case-sensitive `grep agauss` misses it). The corner-level `var_mult` is a
     separate term shared by all instances.
   - **ihp-sg13g2**: Section-based like sky130. `cornerMOSlv.lib` /
@@ -6796,6 +6985,15 @@ a corner grid. A stock ngspice without the module still produces the
     mismatch. `family_mismatch` reports `mosfet` `active: true` only when every
     selected `corners.process` section ends in `_mismatch`, `false` when none
     does, and `null` when the section is unknown or mixed.
+    Within a selected `_mismatch` section, each device subcircuit gates its own
+    draws on an instance parameter, `mm_ok` (`agauss(nom, sigma, (mm_ok != 1 ?
+    0 : 1))`, defaulted to `1` inside the subcircuit), so a *single* instance's
+    mismatch is switched off by putting `mm_ok=0` on its instance line — what
+    `monte_carlo.instances` does (see "Per-instance mismatch selection").
+    Note `sg13g2_hbt_mod_mismatch.lib` is ISO-8859 encoded, so a plain
+    `grep agauss`/`grep mm_ok` reports it as a binary file and prints nothing:
+    the HBT subcircuits **do** carry `mm_ok`-gated `agauss()` terms
+    (`grep -a`, 2026-11-13, #5487).
   - **gf180mcu**: Mismatch works differently — there is **no** corner-suffixed
     `_mm` section to select. `sm141064.ngspice` (`libs.tech/ngspice/`) exposes
     only plain corner sections (`typical`, `ss`, `ff`, `sf`, `fs`, plus
@@ -7469,14 +7667,103 @@ hand-written netlist wrapper:
 `include` and `exclude` are case-insensitive globs over **top-level `X`
 (subcircuit) instance names** of the request netlist. An instance is
 randomised when it matches `include` (or `include` is empty) and does not match
-`exclude`. At least one list must be non-empty. klt wraps every other `X`
-instance in a generated one-instance subcircuit that sets the PDK's mismatch
-switch to `0` locally (`mc_mm_switch` for sky130, `sw_stat_mismatch` for
-gf180mcu); the instance line, including `m` and every other parameter, moves
-*inside* the wrapper verbatim, so nothing is forwarded across the extra
-hierarchy level. The netlist you wrote is not modified; a gated copy runs.
-Hierarchical probes of a wrapped instance gain one level
-(`xm1.xm1_klt`).
+`exclude`. At least one list must be non-empty. The netlist you wrote is not
+modified; a gated copy runs.
+
+How every other `X` instance has its mismatch switched off depends on the PDK,
+because the PDKs differ structurally:
+
+- **sky130, gf180mcu — wrapper mode.** Both decks gate mismatch with a
+  model-level `.param` (`mc_mm_switch`, `sw_stat_mismatch`), so klt wraps the
+  instance in a generated one-instance subcircuit that sets that parameter to
+  `0` locally. The instance line, including `m` and every other parameter,
+  moves *inside* the wrapper verbatim, so nothing is forwarded across the extra
+  hierarchy level. Hierarchical probes of a wrapped instance gain one level
+  (`xm1.xm1_klt`).
+- **ihp-sg13g2 — instance-parameter mode**
+  ([#5487](https://github.com/2AMLogic/klayout-tools/issues/5487)). sg13g2 has
+  no global switch to shadow: its `*_mismatch.lib` device subcircuits write
+  every term as `agauss(nom, sigma, (mm_ok != 1 ? 0 : 1))` and default
+  `mm_ok=1` *inside each subcircuit*, which shadows any enclosing `.param`.
+  klt therefore rewrites the unselected instance's own line to carry
+  `mm_ok=0` (replacing an `mm_ok=` already on the line rather than duplicating
+  it, and folding any `+` continuation into the rewritten line). **No wrapper
+  subcircuit is generated, so hierarchical probe names are unchanged.**
+
+  An end-of-line comment (`$ ...`, `; ...` or `// ...`, on the instance line
+  or on any of its `+` continuations) is separated from the element before the
+  rewrite and re-attached after it, so `mm_ok=0` is always written into the
+  element and never inside the comment — ngspice discards everything after the
+  comment marker, so a parameter written there would leave the instance
+  randomised while the report said `randomised: false`. For the same reason an
+  `mm_ok=` that appears only inside a comment is not treated as an existing
+  assignment. `//` opens a comment anywhere on the line; `$` only at the start
+  of a line or after whitespace (`w=1u$2` is a value, not a comment).
+
+  **Which lines break an element, measured (ngspice-47, 2026-11-13, #5498).**
+  ngspice drops some lines *before* it folds `+` continuations, so a
+  continuation after one of them still belongs to the element above. klt folds
+  the same way; reading it the other way round either attaches the
+  continuation's parameters to a comment (leaving the element's own `mm_ok`
+  untouched) or claims parameters ngspice never applied. Probe: `.subckt rr a
+  b foo=1 mm_ok=1` holding `R1 a b {1k + mm_ok*1k}` across 1 V, deck
+  `X1 n1 0 rr` / *the line below* / `+ mm_ok=0`, where `-1.0e-03` means
+  `mm_ok=0` was honoured and `-5.0e-04` means it was not:
+
+  | Line between the element and its `+` continuation | ngspice | Folds? |
+  | --- | --- | --- |
+  | blank or whitespace-only | `-1.0e-03` | yes |
+  | `*` comment line (any indent) | `-1.0e-03` | yes |
+  | `$ ...` only (any indent, `$note` too) | `-1.0e-03` | yes |
+  | `// ...` only (any indent) | `-1.0e-03` | yes |
+  | `; ...` only (any indent) | `-5.0e-04` | **no** |
+
+  A `;`-only line is the exception: it **breaks** the element, and the `+`
+  after it attaches to the comment and is discarded with no warning. klt ends
+  the element there too, gates the first line alone, and leaves the orphaned
+  continuation exactly as written. For the lines that do fold, the comment or
+  blank line itself is re-emitted after the rewritten element rather than
+  deleted with the continuation it sat inside.
+
+  Because `mm_ok` is only honoured by a subcircuit that declares it, klt
+  writes it **only** onto an instance whose subcircuit definition it has read
+  and found to declare it — on the `.subckt` line (`sg13_lv_nmos`) or in a body
+  `.param` (`cap_cmim`). Definitions are read from the request netlist's
+  `.include` closure and from the `.lib <file> <section>` closure of the
+  sections this run's corners select; klt keeps **no** list of device names, so
+  a PDK pin bump that renames or adds a device needs no change here. An
+  unselected instance whose subcircuit does not declare `mm_ok` — a user
+  subcircuit, or a PDK device with no such gate — is refused with a `SimError`
+  naming the instance and the subcircuit, before any corner is dispatched.
+
+  That refusal is the point, not a limitation: ngspice **aborts** on
+  `mm_ok=0` applied to a subcircuit declaring no parameters at all
+  (`Mismatch: 0 formal but 1 actual params.`), but **silently accepts** it on
+  one declaring any *other* parameter and leaves the devices inside still
+  randomised — so guessing would make klt report `randomised: false` for an
+  instance that was still randomised.
+
+  **What "declares it" does and does not establish.** klt checks that the
+  subcircuit *declares* `mm_ok`, which is what makes the instance-line
+  override legal; it does not trace whether the subcircuit then passes the
+  parameter down to the devices inside it. A subcircuit that declares `mm_ok`
+  and ignores it would be reported as gated while its devices still varied.
+  Every `mm_ok`-bearing sg13g2 device subcircuit does use it (that is what the
+  `(mm_ok != 1 ? 0 : 1)` term is), so this is a caveat for a hand-written
+  wrapper that declares the parameter for pass-through and forgets to forward
+  it — not for PDK devices.
+
+**Verified on ngspice-47 with a real IHP-Open-PDK install (2026-11-13,
+#5487).** Two identical diode-connected `sg13_lv_nmos` (`w=1u l=0.13u`), each
+fed 10 µA, under `corners.process: ["mos_tt_mismatch"]`, `n=12`,
+`seed=20261113`. With `exclude: ["xm2"]`, the randomised device's `v(d1)` had
+`stddev` `8.136e-3` V while the gated `v(d2)` had `stddev` **exactly** `0.0`
+(every sample `0.5495592` V). With `exclude: ["x*"]` (`negative_control:
+true`) both measurements read `0.5495592` V, **identical** to the same deck run
+under the plain `mos_tt` section. A gated instance's operating point can still
+move at the ~4e-9 relative level with what else is in the deck, so treat
+"within 1e-6 relative of the mismatch-off run", not exact equality, as the
+negative-control criterion.
 
 **Verified on ngspice 46 with sky130A (2026-10-16, #3442).** Wrapping every
 `X` instance under `tt_mm` removed all spread (8/8 samples exactly `0.0`, the
@@ -7487,9 +7774,11 @@ ngspice 42 has not been compared (unverified).
 
 Refused up front with a `SimError`: a glob that matches no `X` instance (or
 only non-subcircuit elements), a hierarchical glob (`.`/`/`), `vary:
-"process"`, a `models.pdk` without a known switch, and the `remote`/`batch`
-backends. Instances inside user `.subckt` bodies and in `.include`d files are
-not gated individually.
+"process"`, a `models.pdk` whose family has neither a known mismatch switch nor
+a known instance parameter (supported today: `gf180mcu`, `sg13g2`, `sky130`),
+an unselected sg13g2 instance whose subcircuit does not declare `mm_ok` (above),
+and the `remote`/`batch` backends. Instances inside user `.subckt` bodies and
+in `.include`d files are not gated individually.
 
 The response adds `environment.monte_carlo.instance_mismatch`:
 
@@ -7505,7 +7794,9 @@ The response adds `environment.monte_carlo.instance_mismatch`:
 }
 ```
 
-`negative_control: true` means every `X` instance was excluded: that run should
+`switch` names whichever gate the run used: the shadowed model-level `.param`
+in wrapper mode, or the instance parameter (`"mm_ok"`) in instance-parameter
+mode. `negative_control: true` means every `X` instance was excluded: that run should
 reproduce the mismatch-off run under the same seed, so diff it against one to
 catch a wrapper that drops a parameter. The report states which instances were
 gated, not that the PDK model responded to the switch. Whether the remaining
@@ -8322,6 +8613,16 @@ preflight warning, attached at report assembly (after the corners finish), so
 it is present even when every corner passed. The entry has `severity: "warning"`,
 `code: "model_bin_range_preflight"`, and `instance`, `model`, `w_um`, `nf`
 fields. It never rejects the run; a `w` given as an expression is skipped.
+
+A `w` literal's unit follows the card it sits on (issue #5802). A literal that
+carries a **unit suffix** (`50u`, `100n`, `128u`) is read as written — an
+absolute SPICE quantity in metres, converted to µm for `w_um` — on every card
+kind. A **bare** literal — no suffix, including plain exponential notation
+(`13`, `150`, `1e-4`) — is read as micrometres on an `X` subckt call, the
+convention PDK device wrappers with micrometre parameters use (sky130: `W=13`
+is 13 µm, and the genuinely oversized `W=150` still warns at `w_um: 150`), and
+as metres on an `M` card (`w=1e-4` is 100 µm), matching SPICE's bare-number
+convention for primitive MOS cards.
 
 When ngspice's log matches this failure, `klt sim` re-scans the corner's own
 netlist for MOS-shaped instances (`M`/`X` cards) and picks out the one with

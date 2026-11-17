@@ -59,7 +59,36 @@
     "findings": [],
     "finding_count": 0
   },
-  "device_parameter_coverage": [],
+  "device_parameter_coverage": [
+    {
+      "class": "NFET",
+      "device_kind": "mos",
+      "layout_devices": 2,
+      "reference_devices": 2,
+      "compared": [
+        "L",
+        "W"
+      ],
+      "not_compared": [
+        {
+          "parameter": "AS",
+          "reason": "secondary"
+        },
+        {
+          "parameter": "AD",
+          "reason": "secondary"
+        },
+        {
+          "parameter": "PS",
+          "reason": "secondary"
+        },
+        {
+          "parameter": "PD",
+          "reason": "secondary"
+        }
+      ]
+    }
+  ],
   "mismatches_omitted": false,
   "mismatch_count": 0,
   "error_count": 0,

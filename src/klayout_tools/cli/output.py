@@ -129,6 +129,33 @@ def render_table(
         print(fmt(row))
 
 
+def _drift_check_label(entry: dict) -> str:
+    """``"  [role identity...]"`` naming the attestation check a ``drift[]``
+    entry is about, or ``""`` when the entry carries no ``check`` (issue
+    #5460).
+
+    ``klt signoff --attest ... --check`` annotates every ``drift[]`` entry
+    that points at one ``attestation.checks[<i>]`` entry with an additive
+    ``check`` object holding that check's identity -- its ``role`` plus
+    whichever of ``path``/``target``/``name``/``testbench``/``row``/
+    ``corner``/``metric`` the check kind carries (see
+    ``signoff_attest_drift.check_identity``, which owns both the key set and
+    the order). Rendering it is a plain join of those values in that order, so
+    this module -- a leaf that every ``klt`` verb and two library modules
+    import -- stays free of a dependency on the signoff stack, and the
+    producer stays the single place that decides what identifies a check.
+
+    Every other ``drift[]`` entry has no ``check`` key -- a whole-list
+    ``attestation.checks`` entry, a ``status`` entry, and all of
+    ``drc``/``extract``/``lvs``/``signoff --check``'s drift -- and renders
+    byte-identically to what it did before this existed.
+    """
+    check = entry.get("check")
+    if not isinstance(check, dict) or not check:
+        return ""
+    return "  [" + " ".join(str(value) for value in check.values()) + "]"
+
+
 def render_rerun_drift(result: dict) -> None:
     """Print the ``--format text`` rendering of a ``--rerun`` drift report.
 
@@ -142,11 +169,20 @@ def render_rerun_drift(result: dict) -> None:
     ``klt signoff --check`` additionally carries ``doc_drift``/
     ``doc_drift_fields`` (issue #2526) -- fields that moved but do not bear
     on the verdict, so ``status`` can stay ``"match"`` while the caller is
-    still told the checklist's wording moved. Rendered only when present, so
+    still told the checklist's wording moved. It also carries ``build_skew``
+    (issue #5868): one line when the excluded ``build`` block
+    differs. Rendered only when present, so
     every other verb's output is byte-identical to what it was, and rendered
     as field *names* only: the values are whole paragraphs of checklist
     prose, which is precisely what a consumer asked not to have dumped into
     its gate output.
+
+    ``klt signoff --attest ... --check`` additionally annotates a ``drift[]``
+    entry that points at one ``attestation.checks[<i>]`` entry with an
+    additive ``check`` identity object (issue #5460), rendered as a bracketed
+    label after the pointer so the drifted file is named without a second
+    lookup -- the same "print it only when present" pattern as ``doc_drift``
+    above. See :func:`_drift_check_label`.
     """
     print(f"report: {result['report']}")
     print(f"status: {result['status']}")
@@ -157,9 +193,17 @@ def render_rerun_drift(result: dict) -> None:
         print()
         print("drift:")
         for entry in drift:
-            print(f"  {entry['field']}:")
+            print(f"  {entry['field']}{_drift_check_label(entry)}:")
             print(f"      committed: {entry['committed']!r}")
             print(f"      fresh:     {entry['fresh']!r}")
+    skew = result.get("build_skew")
+    if isinstance(skew, dict) and skew.get("state") in ("build_only", "ruleset"):
+        names = ", ".join(entry["field"] for entry in skew.get("fields") or [])
+        if skew["state"] == "ruleset":
+            what = "graded under a different ruleset (build.grading_ruleset_id moved)"
+        else:
+            what = "rendered by a different klt build (grading ruleset unchanged)"
+        print(f"build_skew: {what} -- excluded from the verdict: {names}")
     doc_drift_fields = result.get("doc_drift_fields") or []
     if doc_drift_fields:
         print()
@@ -189,7 +233,19 @@ def render_check_text(result: dict) -> None:
             # relative paths were written against the report's own directory
             # -- where the input really is.
             missing = check.get("input_not_found")
-            if missing is None:
+            deck_missing = check.get("deck_not_found")
+            if deck_missing is not None:
+                # A --deck-file miss has no packaged name to name; the
+                # entry's hint says the override was the thing looked for.
+                detail = f"deck not found: {deck_missing['resolved']}"
+                if deck_missing["name"] is not None:
+                    detail += (
+                        f"; packaged name {deck_missing['name']!r} not in "
+                        f"{deck_missing['packaged_dir']}"
+                    )
+                print(f"      actual:   None ({detail})")
+                print(f"      note:     {deck_missing['hint']}")
+            elif missing is None:
                 print(f"      actual:   {check['actual']}")
             else:
                 print(f"      actual:   None (input not found: {missing['resolved']})")

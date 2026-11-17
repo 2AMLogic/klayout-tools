@@ -25,7 +25,14 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, cast
 
-from . import sim_batch, sim_batch_plan, sim_batch_shards, sim_decks, sim_remote
+from . import (
+    _batch_common,
+    sim_batch,
+    sim_batch_plan,
+    sim_batch_shards,
+    sim_decks,
+    sim_remote,
+)
 from .sim_errors import SimError
 
 #: Per-unit diagnostic code of a shard still running under ``--collect-partial``.
@@ -229,7 +236,7 @@ def run_split(
         [report for report, _s in results],
         [summary for _r, summary in results],
         outdir=outdir,
-        shard_map=str(manifest.path),
+        shard_map=_batch_common.repo_relative_str(manifest.path),
     )
 
 
@@ -342,7 +349,7 @@ def _attach_shard(
                 status = sim_batch._read_status(
                     config, job_id, sim_batch._run_subprocess
                 )
-            except Exception:  # noqa: BLE001 - an unreadable status is "unknown"
+            except Exception:  # - an unreadable status is "unknown"
                 status = None
             raw = status.get("state") if status else None
             state = str(raw) if raw else "unknown"

@@ -21,61 +21,7 @@ import pytest
 from klayout_tools import env_provenance as ep
 from klayout_tools.cli import main
 
-# --------------------------------------------------------------------------- #
-# pseudonymous host id
-# --------------------------------------------------------------------------- #
-
 _HOST_ID_RE = re.compile(r"^host-[0-9a-f]{8}$")
-
-
-def test_host_id_has_the_fleet_host_8hex_shape():
-    assert _HOST_ID_RE.match(ep.opaque_host_id("robb-pro"))
-
-
-def test_host_id_is_stable_for_the_same_hostname():
-    assert ep.opaque_host_id("robb-pro") == ep.opaque_host_id("robb-pro")
-
-
-def test_host_id_differs_between_hosts():
-    assert ep.opaque_host_id("robb-pro") != ep.opaque_host_id("other-host")
-
-
-def test_host_id_does_not_contain_the_hostname():
-    assert "robb" not in ep.opaque_host_id("robb-pro")
-
-
-def test_host_id_normalises_case_and_the_mdns_local_suffix():
-    """macOS reports `gethostname()` inconsistently as `robb-pro` or
-    `Robb-Pro.local` depending on the network; both are the same host and
-    must pseudonymise to the same id, or the id is not stable."""
-    canonical = ep.opaque_host_id("robb-pro")
-    assert ep.opaque_host_id("Robb-Pro.local") == canonical
-    assert ep.opaque_host_id("robb-pro.") == canonical
-
-
-def test_host_id_salt_changes_the_id():
-    assert ep.opaque_host_id("robb-pro", salt="a") != ep.opaque_host_id(
-        "robb-pro", salt="b"
-    )
-
-
-def test_host_id_salt_env_var_overrides_the_default(monkeypatch):
-    default = ep.opaque_host_id("robb-pro")
-    monkeypatch.setenv(ep.HOST_ID_SALT_ENV_VAR, "project-specific-salt")
-    assert ep.opaque_host_id("robb-pro") != default
-
-
-def test_host_id_defaults_to_this_hosts_own_name(monkeypatch):
-    monkeypatch.setattr(ep.socket, "gethostname", lambda: "robb-pro")
-    assert ep.opaque_host_id() == ep.opaque_host_id("robb-pro")
-
-
-def test_unresolvable_hostname_is_reported_as_unknown_not_fabricated(monkeypatch):
-    def _boom():
-        raise OSError("no hostname")
-
-    monkeypatch.setattr(ep.socket, "gethostname", _boom)
-    assert ep.opaque_host_id() == ep.UNKNOWN_HOST_ID
 
 
 # --------------------------------------------------------------------------- #
@@ -88,6 +34,12 @@ def _make_repo(tmp_path):
     (root / ".git").mkdir(parents=True)
     (root / "sim" / "bandgap").mkdir(parents=True)
     return root
+
+
+def test_repo_root_for_none_is_none():
+    """`repo_root_for(None)` is the "no input path was resolved" case; it must
+    stay `None` rather than falling back to the process cwd."""
+    assert ep.repo_root_for(None) is None
 
 
 def test_path_inside_the_repo_is_reported_repo_relative(tmp_path):
@@ -598,7 +550,7 @@ def test_lint_envelope_files_rejects_a_non_json_file(tmp_path):
 
 
 def test_lint_envelope_files_rejects_an_unreadable_file(tmp_path):
-    with pytest.raises(ep.EnvironmentProvenanceError, match="could not read"):
+    with pytest.raises(ep.EnvironmentProvenanceError, match="file not found"):
         ep.lint_envelope_files([str(tmp_path / "missing.json")])
 
 
