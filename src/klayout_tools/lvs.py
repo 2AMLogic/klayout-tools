@@ -173,6 +173,10 @@ from .lvs_combine import (
     _unmatched_combine_devices_per_circuit_warnings,  # noqa: F401
     _validate_combine_device_classes,
 )
+from .lvs_coverage import (
+    _coverage_kind,
+    _geometry_disclosure_kind,
+)
 from .lvs_finfet import (
     apply_finfet_bulk_hierarchy,
     bulk_disclosures,
@@ -915,6 +919,21 @@ def _merge_deck_flags(
         request["deck_vars"] = dict(deck_vars)
 
 
+def _merge_layout_deck(request: dict[str, Any], deck: str | None) -> None:
+    """Fold ``--deck`` (issue #5733) into ``request["layout"]["deck"]`` in place."""
+    if deck is None:
+        return
+    layout = request.get("layout")
+    if not isinstance(layout, dict):
+        raise LvsError("request.layout must be a JSON object")
+    if layout.get("deck") is not None:
+        raise LvsError(
+            "--deck conflicts with request.layout.deck: set one, not "
+            "both (a flag never silently overrides the request document)"
+        )
+    layout["deck"] = deck
+
+
 def _aggregate_lvs_findings(
     *,
     status: Any,
@@ -1212,6 +1231,7 @@ def _aggregate_lvs_findings(
 def run_lvs(
     request: str,
     *,
+    deck: str | None = None,
     deck_file: str | None = None,
     deck_vars: dict[str, str] | None = None,
     progress: bool | str = False,
@@ -1228,22 +1248,22 @@ def run_lvs(
     they fill the request's ``deck_file``/``deck_vars`` fields, and setting
     both a flag and its request field is a clean :class:`LvsError`.
 
+    ``deck`` (issue #5733): the ``klt lvs --deck`` spelling of ``layout.deck``.
+
     ``request`` accepts the same three forms every ``klt lvs`` request
     argument does (see :func:`load_request_arg` / docs/cli/lvs.md): a path
     to a request JSON file, ``"-"`` to read the request from stdin, or an
     inline JSON object string. Relative paths *inside* the request document
     (``layout.file``, ``reference.netlist``, etc.) resolve against the
-    request file's own directory for the file form, or against the current
-    working directory for the stdin/inline forms -- there is no request
-    file to anchor them to in that case.
+    request file's own directory for the file form, or the current working
+    directory for the stdin/inline forms.
 
     Returns a dict matching the documented JSON schema (see
     ``docs/cli/lvs.md`` / ``docs/design/lvs-extraction-spike.md`` section
     2b). Raises :class:`LvsError` for anything that prevents a trustworthy
     verdict from being produced at all (bad request, unresolvable layout/
-    reference input, unknown deck, unsupported engine, engine error) --
-    a documented ``status: "mismatch"`` is a successful run, not an error
-    (see this module's docstring).
+    reference input, unknown deck, unsupported engine, engine error); a
+    documented ``status: "mismatch"`` is a successful run, not an error.
 
     ``layout`` is the committable ``{path, scope}`` object
     :func:`~klayout_tools.env_provenance.repo_relative_path` defines (issue
@@ -1251,29 +1271,27 @@ def run_lvs(
     this run actually hashed into ``provenance.input.content_hash`` --
     ``scope: "repo"`` with a path relative to the repo the **layout** sits
     in (:func:`~klayout_tools.env_provenance.repo_root_for`),
-    ``{"path": null, "scope": "external"}`` when it sits in none. It is
-    therefore no longer the request's own verbatim
-    ``layout.file``/``layout.netlist`` echo, which was anchored to whatever
-    directory the producing run used and so could be re-verified only
-    there: a committed `klt lvs` envelope is cited verbatim in `klt signoff`
-    evidence. ``reference`` *is* still the verbatim echo -- it is pinned by
-    its own ``environment.reference_sha256``, not by ``provenance.input``.
+    ``{"path": null, "scope": "external"}`` when it sits in none -- no
+    longer the request's own verbatim ``layout.file``/``layout.netlist``
+    echo, which was anchored to whatever directory the producing run used
+    and so could be re-verified only there: a committed `klt lvs` envelope
+    is cited verbatim in `klt signoff` evidence. ``reference`` *is* still
+    the verbatim echo -- pinned by its own ``environment.reference_sha256``,
+    not by ``provenance.input``.
 
     ``device_classes`` (issue #221) echoes the layout-side
     :attr:`~klayout_tools.decks.ExtractionDeck.device_classes` -- what that
     deck can structurally recognise, not what this particular compare found
     -- whenever a ``layout.deck`` is given: always for ``layout.file``
     (inline extraction, where the deck is required), and also for the
-    pre-extracted ``layout.netlist`` shape when a ``layout.deck`` is supplied
-    alongside it (issue #585). ``null`` only when no ``layout.deck`` was given
-    (the bare ``layout.netlist`` form).
+    pre-extracted ``layout.netlist`` shape when a ``layout.deck`` is
+    supplied alongside it (issue #585). ``null`` only when no ``layout.deck`` was given.
 
     The response echoes back enough of the request to reconstruct the
     compare it describes (issue #1205): ``top`` and ``reference_top`` are
-    each side's own resolved top circuit (they differ by construction for an
-    LVS negative control -- a ``<cell>_shorted`` layout compared against the
-    intact ``<cell>``'s reference netlist), and the ``options`` block echoes
-    every compare-shaping option as resolved (``combine_devices``,
+    each side's own resolved top circuit (differing by construction for an
+    LVS negative control), and the ``options`` block echoes every
+    compare-shaping option as resolved (``combine_devices``,
     ``flatten_layout``, ``flatten_reference``, ``netgen_setup``,
     ``parameter_tolerance``). That is what lets ``klt lvs --check <report>
     --rerun`` re-run *this* compare rather than a differently-shaped one
@@ -1289,28 +1307,24 @@ def run_lvs(
     ``layout.deck_options`` (issue #600) is the JSON-request-document
     counterpart of ``klt extract --deck-option``: a ``{key: value}`` object
     of string pairs selecting a caller-visible flavour of a shared-geometry
-    resistor family (e.g. gf180mcu's ``poly_res``), honored for both layout
-    shapes wherever ``layout.deck`` is meaningful -- see
-    :func:`~klayout_tools.decks.get_extraction_deck`'s own ``deck_options``
-    docstring for the resolution mechanism. Omitting it resolves every deck
-    exactly as before this field existed. An unrecognised key/value is a
-    clean :class:`LvsError`, not a traceback; giving it without
-    ``layout.deck`` is likewise a clean :class:`LvsError` (there is no deck
-    to apply it to). The resolved mapping is echoed under
-    ``provenance.deck.options`` when non-empty, matching ``klt extract``'s
-    own shape.
+    resistor family (e.g. gf180mcu's ``poly_res``), honored wherever
+    ``layout.deck`` is meaningful -- see
+    :func:`~klayout_tools.decks.get_extraction_deck`'s ``deck_options``
+    docstring. Omitting it resolves every deck exactly as before; an
+    unrecognised key/value, or giving it without ``layout.deck``, is a
+    clean :class:`LvsError`. Resolved pairs are echoed under
+    ``provenance.deck.options`` when non-empty.
 
     ``layout.label_layers`` (issue #2686) is the request-document counterpart
-    of ``klt extract --label-layer`` (that verb's own ``label_layers`` request
-    field, issue #2656): ``{"<role>": [layer, datatype] | null}`` redirecting
-    which GDS purpose inline extraction reads net/pin name text from, for a
-    layout whose names sit on a text purpose the curated deck does not read.
-    Extraction-only: a non-empty override needs ``layout.file`` +
-    ``layout.deck`` and is a clean :class:`LvsError` on the pre-extracted
-    ``layout.netlist`` shape (see :func:`_parse_layout_label_layers`).
-    Omitting it (or giving ``null``/``{}``) extracts exactly as before. An
-    applied override is echoed as the response's top-level ``label_layers``
-    field (absent otherwise) and replayed by ``--check --rerun``.
+    of ``klt extract --label-layer`` (issue #2656): ``{"<role>":
+    [layer, datatype] | null}`` redirecting which GDS purpose inline
+    extraction reads net/pin name text from. Extraction-only: a non-empty
+    override needs ``layout.file`` + ``layout.deck`` and is a clean
+    :class:`LvsError` on the pre-extracted ``layout.netlist`` shape (see
+    :func:`_parse_layout_label_layers`); omitting it (or ``null``/``{}``)
+    extracts exactly as before; an applied override is echoed as the
+    response's top-level ``label_layers`` field (absent otherwise) and
+    replayed by ``--check --rerun``.
 
     Same inline-extraction condition also gates ``device.body_unverified``
     (issue #281, see :func:`_body_net_warnings`): non-blocking
@@ -1324,13 +1338,10 @@ def run_lvs(
     ``status`` is ``"verified"``/``"unverified"``/``"unchecked"``
     (:data:`BODY_STATUS_VERIFIED` and friends) -- see
     :func:`_body_verification_report`. Both renderings come from one
-    determination, so they cannot disagree. ``status`` is unchanged by it:
-    a layout with unverified bodies still matches when the compare matches.
-    The block exists because a ``mismatches[]`` warning is not gradeable --
-    a downstream consumer (``klt signoff``, a committed evidence record)
-    had to string-match a category inside an array of ordinary compare
-    findings to ask the question, so in practice nothing asked, and a
-    record carrying the warning was indistinguishable from a clean one.
+    determination, so they cannot disagree, and ``status`` is unchanged:
+    unverified bodies still match when the compare matches. The block
+    exists because a ``mismatches[]`` warning is not gradeable, so nothing
+    asked the question and a warned record was indistinguishable from a clean one.
 
     ``request.reference.device_bulk`` (issue #506) is the reconciliation
     counterpart of that disclosure: it normalises a named reference device
@@ -1354,11 +1365,9 @@ def run_lvs(
 
     ``options.parameter_tolerance`` (issue #589, ``"engine": "klayout"``
     only) is the same discipline applied to device *parameters*: an opt-in
-    relative tolerance that lets a compare reach ``status: "match"`` when the
-    only remaining difference is a numeric device parameter within it (see
-    this module's docstring for the two-pass snap-and-recompare mechanism it
-    is implemented with, and why widening this module's own float-noise
-    epsilon could not have worked). Omitting it leaves every verdict and
+    relative tolerance that lets a compare reach ``status: "match"`` when
+    the only remaining difference is a numeric device parameter within it
+    (see this module's docstring). Omitting it leaves every verdict and
     every ``mismatches[]`` entry exactly as before. The effective value is
     echoed as the response's ``parameter_tolerance`` field (``null`` when
     omitted), and every parameter it absorbs yields its own
@@ -1367,31 +1376,30 @@ def run_lvs(
     ``options.flatten_reference`` / ``options.flatten_layout`` (issue #1085)
     are the fix for the flat-vs-hierarchical seam ``klt extract``'s
     always-flat extraction creates: a hierarchical reference netlist (one
-    leaf ``.subckt`` plus N instance calls of it -- the shape a macro built
-    by tiling one verified leaf cell naturally takes) can never structurally
-    match a flat layout-side netlist, because ``NetlistComparer`` compares
-    circuit-by-circuit, and the flat side simply has no subcircuit-call
-    circuit to pair against the reference's. Both options call KLayout's own
-    ``Netlist.flatten()`` in-process -- ``options.flatten_reference`` on the
-    reference netlist (right after it is read, before circuit selection),
-    ``options.flatten_layout`` on the layout netlist (right after it is
-    resolved -- meaningful for the pre-extracted ``layout.netlist`` shape,
-    which can itself be hierarchical; a no-op for inline ``layout.file``
-    extraction, which is already flat). Both default ``false``, so omitting
-    them leaves every verdict and every ``mismatches[]`` entry exactly as
-    before. Each side that is actually flattened (its circuit count changes)
-    yields its own ``severity: "warning"`` ``topology.flattened`` entry, so a
-    ``"match"`` reached after flattening is never silently indistinguishable
-    from one reached against the netlist's original hierarchy. See
-    :func:`_flatten_netlist_safely`.
+    leaf ``.subckt`` plus N instance calls of it -- the shape a tiled-leaf
+    macro takes) can never structurally match a flat layout-side netlist,
+    because ``NetlistComparer`` compares circuit-by-circuit and the flat
+    side has no subcircuit-call circuit to pair against the reference's.
+    Both options call KLayout's own
+    ``Netlist.flatten()`` in-process -- on the reference netlist (right
+    after it is read, before circuit selection) / on the layout netlist
+    (right after it is resolved -- meaningful for the pre-extracted
+    ``layout.netlist`` shape, which can itself be hierarchical; a no-op for
+    inline ``layout.file`` extraction, which is already flat). Both default
+    ``false``, so omitting them leaves every verdict and every
+    ``mismatches[]`` entry exactly as before. Each side actually flattened
+    (its circuit count changes) yields its own ``severity: "warning"``
+    ``topology.flattened`` entry, so a ``"match"`` reached after flattening
+    is never silently indistinguishable from one reached against the netlist's
+    original hierarchy. See :func:`_flatten_netlist_safely`.
 
     ``options.combine_devices`` (issue #261) accepts a bool **or**, since
     issue #1370, a list of device-class names restricting combining to those
     classes -- the escape hatch for a netlist where KLayout's own
     ``combine_devices()`` trips its internal-consistency invariant
     deterministically on one class's partial-match group (see
-    :func:`_parse_combine_devices`). Naming a class present on neither side is
-    a clean :class:`LvsError`, never a silent no-op.
+    :func:`_parse_combine_devices`). A class present on neither side is a
+    clean :class:`LvsError`, never a silent no-op.
 
     That option is also the sole source of this command's third ``status``
     value, ``"inconclusive"`` (:data:`STATUS_INCONCLUSIVE`, issue #1370).
@@ -1399,13 +1407,11 @@ def run_lvs(
     side, both netlists are rolled back to ``Netlist.dup()`` snapshots taken
     before combining (a **symmetric degrade** -- never a partially-folded
     layout compared against a fully-folded reference), and a resulting
-    ``"mismatch"`` is reported as ``"inconclusive"`` instead: the compare the
-    caller asked for did not run, so its outcome is not a statement about the
-    design. A ``"match"`` reached that way is left alone -- the engine's
-    verdict is always authoritative here, and an uncombined compare that
-    still matched is strictly stronger evidence than a combined one. The
-    ``device.combine_incomplete`` warning is present in ``mismatches[]``
-    either way, now carrying the failing attempt's own
+    ``"mismatch"`` is reported as ``"inconclusive"`` instead: the compare
+    the caller asked for did not run. A ``"match"`` reached that way is
+    left alone -- an uncombined compare that still matched is strictly
+    stronger evidence. The ``device.combine_incomplete`` warning is present
+    in ``mismatches[]`` either way, carrying the failing attempt's own
     ``circuit``/``device``/``net`` identifiers.
 
     ``options.combine_devices_max_attempts`` (issue #1412) is the
@@ -1413,25 +1419,22 @@ def run_lvs(
     independent ``Netlist.dup()`` attempts :func:`_combine_devices_safely`
     makes per side before falling back to ``device.combine_incomplete`` /
     ``"inconclusive"``. Defaults to :data:`_COMBINE_DEVICES_MAX_ATTEMPTS`
-    (``5``, unchanged from before this option existed) when omitted. A caller
-    working against a large/complex netlist that observes retry exhaustion
-    more often than that default's own derivation predicts can raise this to
-    trade runtime for a lower observed exhaustion rate; a caller iterating on
-    a small netlist can lower it for faster feedback. Ignored when
-    ``options.combine_devices`` is falsy. See ``docs/cli/lvs.md``'s
-    ``options.combine_devices`` section for the documented exhaustion-rate
-    caveat this knob exists to let a caller work around.
+    (``5``, unchanged from before this option existed) when omitted. A
+    caller observing retry exhaustion more often than that default predicts
+    can raise it to trade runtime for a lower observed exhaustion rate; a
+    caller iterating on a small netlist can lower it for faster feedback.
+    Ignored when ``options.combine_devices`` is falsy. See
+    ``docs/cli/lvs.md``'s ``options.combine_devices`` section.
 
     ``options.combine_devices_per_circuit`` (issue #1552) is a per-macro
     alternative to the single, whole-request ``options.combine_devices``
     above: a ``{<circuit-name-glob>: <bool>}`` mapping applied via
     ``Circuit.combine_devices()`` to each side's own matching circuits,
     *before* either side's optional ``flatten_layout``/``flatten_reference``
-    structural flatten runs -- so a composed design's own macros, each
-    already independently verified under its own (possibly opposite)
-    ``combine_devices`` setting, can keep that setting once composed into one
-    top-level design, instead of the two macros' needs colliding into a
-    single request-wide flag that cannot satisfy both. Mutually exclusive
+    structural flatten runs -- so macros already verified under their own
+    (possibly opposite) ``combine_devices`` settings keep them once
+    composed, instead of their needs colliding into one request-wide flag
+    that cannot satisfy both. Mutually exclusive
     with a truthy ``options.combine_devices`` (a clean :class:`LvsError`).
     See :func:`_parse_combine_devices_per_circuit` and
     :func:`_combine_circuit_devices_safely`.
@@ -1493,6 +1496,7 @@ def run_lvs(
             f"unsupported engine '{engine}' (supported: {', '.join(SUPPORTED_ENGINES)})"
         )
     _merge_deck_flags(loaded, engine, deck_file, deck_vars)
+    _merge_layout_deck(loaded, deck)
     portable_paths = _validate_portable_paths(loaded.get("portable_paths"))
 
     layout_spec = request["layout"]
@@ -6229,25 +6233,6 @@ def _apply_compare_parameters(
 # say which of a resistor/capacitor class's parameters the compare covered
 # --------------------------------------------------------------------------- #
 
-#: Issue #2461: the device-class families whose *geometry* sits entirely
-#: outside a default compare, keyed by the `klayout.db` class name (resolved
-#: lazily, the way :data:`_COMBINE_PARAMETER_CONSERVATION_RULES` is) to the
-#: `device_kind` label reported for them. Both are matched with `isinstance`,
-#: so each one's `*WithBulk` flavour -- a subclass declaring the identical
-#: parameter set -- is covered without being listed.
-#:
-#: Deliberately *only* these two. A MOS class's own geometry (`L`/`W`) is
-#: primary and therefore compared; its secondary `AS`/`AD`/`PS`/`PD` diffusion
-#: parameters are a genuinely narrower gap and reporting them here would add a
-#: warning to essentially every `klt lvs` run for no new information about
-#: whether the device was *sized* correctly. For a resistor/capacitor there is
-#: no such consolation: `R`/`C` is the only primary parameter, so no dimension
-#: of the drawn device is compared at all.
-_GEOMETRY_DISCLOSURE_CLASS_KINDS: tuple[tuple[str, str], ...] = (
-    ("DeviceClassResistor", "resistor"),
-    ("DeviceClassCapacitor", "capacitor"),
-)
-
 #: Issue #2461: the stable ``device_parameter_coverage[].not_compared[].reason``
 #: values -- why one declared parameter of a participating class took no part
 #: in the compare.
@@ -6276,16 +6261,6 @@ _GEOMETRY_DISCLOSURE_CLASS_KINDS: tuple[tuple[str, str], ...] = (
 PARAMETER_NOT_COMPARED_SECONDARY = "secondary"
 PARAMETER_NOT_COMPARED_PLACEHOLDER_VALUE = "placeholder_value"
 PARAMETER_NOT_COMPARED_COMPARE_PARAMETERS = "compare_parameters"
-
-
-def _geometry_disclosure_kind(device_class: Any, kdb_module: Any) -> str | None:
-    """The :data:`_GEOMETRY_DISCLOSURE_CLASS_KINDS` label for ``device_class``
-    (``"resistor"``/``"capacitor"``), or ``None`` for every other class."""
-    for class_name, kind in _GEOMETRY_DISCLOSURE_CLASS_KINDS:
-        klayout_class = getattr(kdb_module, class_name, None)
-        if klayout_class is not None and isinstance(device_class, klayout_class):
-            return kind
-    return None
 
 
 def _participating_device_classes(netlist: Any) -> dict[str, tuple[Any, int]]:
@@ -6317,7 +6292,8 @@ def _device_parameter_coverage(
     compare_scoped_narrowed: AbstractSet[tuple[str, str]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Which parameters of each participating resistor/capacitor class this
-    compare actually covered (issue #2461).
+    compare actually covered (issue #2461). Issue #5653: the coverage block
+    also reports MOS classes, but the warning stays resistor/capacitor-only.
 
     Returns ``(mismatch entries, coverage block)``:
 
@@ -6327,7 +6303,8 @@ def _device_parameter_coverage(
       already discloses as excluded -- so the human-readable half of the
       report stops implying the geometry was checked;
     * the machine-checkable ``device_parameter_coverage`` block, built from
-      the same determination so the two renderings cannot disagree (the same
+      the same per-parameter determination so the two renderings cannot
+      disagree on a class both cover (the same
       one-source-of-truth discipline ``body_verification``/
       ``device.body_unverified`` follow, issue #1983).
 
@@ -6379,9 +6356,11 @@ def _device_parameter_coverage(
         layout_entry = layout_classes.get(key)
         reference_entry = reference_classes.get(key)
         device_class = (layout_entry or reference_entry)[0]  # type: ignore[index]
-        kind = _geometry_disclosure_kind(device_class, kdb)
+        kind = _coverage_kind(device_class, kdb)
         if kind is None:
             continue
+        # Issue #5653: coverage-only kinds (MOS) never raise the warning.
+        warns = _geometry_disclosure_kind(device_class, kdb) is not None
 
         class_name = device_class.name
         compared: list[str] = []
@@ -6412,7 +6391,7 @@ def _device_parameter_coverage(
             }
         )
 
-        if not secondary:
+        if not secondary or not warns:
             # Every uncompared parameter of this class is already disclosed
             # by its own, more specific warning -- nothing left to say.
             continue

@@ -14,6 +14,87 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt sim --fail-fast-probe` reads the same `.spiceinit` as the corners it
+  screens** (#6047, 2026-11-17): `_run_corner` pins the thread count by writing
+  a run-directory `.spiceinit`, which *replaces* `$HOME/.spiceinit`, but the
+  probe was handed the unpinned init and so fell through to `$HOME` -- an init
+  setting that changes device interpretation (e.g. `set wnflag=1`) could apply
+  to the probe and not the corners, or the reverse. The probe now receives the
+  same thread-pinned init lines (pin first, then any `options.ngspice_init`).
+  When no pin applies (a single local corner with no explicit
+  `options.threads_per_worker`) nothing is written, as before. No new request
+  option or response field.
+- **`klt sim` refuses `measurements[].transfer` declared beside `noise`**
+  (#5695, 2026-11-14): the mutually exclusive measurement forms each carried a
+  hand-maintained list of "every *other* exclusive form", and `transfer`'s
+  predated `noise` and never gained it. Because the form validators return on
+  the first match, an entry declaring both was accepted as a plain `transfer`
+  entry and the `noise` request was silently dropped -- one measurement came
+  back where two were asked for. All seven lists are now derived from one
+  ordered registry (`sim_forms.FORMS`), so every pair of forms is refused in
+  both declaration orders. A request declaring `transfer` together with
+  `noise` now fails validation with the usual "alternative forms of a
+  measurement" error instead of running; every other refusal and message is
+  byte-identical. `klt sim`'s `schema_version` is unaffected.
+- **`klt yield`: a damaged gzip input is an error envelope, not a traceback**
+  (#5543, 2026-11-13): a gzip samples or `--limits` file whose deflate stream
+  is *corrupt* — as opposed to truncated, or carrying a bad CRC trailer, both
+  of which already reported correctly — made `klt yield` print a raw
+  `zlib.error` traceback and exit 1 with no JSON on either stream, breaking
+  the error contract in [`docs/json-contract.md`](docs/json-contract.md) for a
+  caller that parses the envelope. `yield_analysis._load_json` converted
+  `(OSError, EOFError, UnicodeDecodeError, json.JSONDecodeError)` into
+  `YieldError`, and `zlib.error` subclasses none of them, so it escaped
+  `yield_cmd.run`'s handler. It is now in that tuple: the input reports
+  `could not read samples '<path>': …` like every other unreadable input, and
+  `run_yield` raises `YieldError` rather than leaking `zlib.error` at the
+  library surface. No output-shape change; no `schema_version` bump.
+- **`klt pex` and `klt sim --monte-carlo` now read a SPICE card the same way
+  the flattener does: `w = 1` and `w=(2 * 1u)` are parameters, not device
+  names** (#5461, 2026-11-13): three hand-rolled card tokenizers lived in
+  `spice_flatten`, `pex` and `sim_mismatch_gate`. The two lesser copies
+  understood neither a space around `=` (ngspice accepts `w=1`, `w =1`,
+  `w= 1` and `w = 1` for one assignment) nor a parenthesised value
+  expression, while both fed "the model is the last token without `=`"
+  logic. `klt extract`'s own output is always unspaced, so a klt-generated
+  netlist never tripped this — but a **hand-written or xschem-netlisted**
+  file could, on two user-supplied inputs:
+  - `klt pex --reference`: a reference card `XM1 d g s b nfet w = 1 l = 0.15`
+    tallied its model as `0.15`, producing a phantom `model_mismatch`
+    (`kind: "model_set"`) against an extracted side naming the same device;
+    the same rule also decides `_reference_is_hierarchical`, so the
+    diagnostic's hierarchy-artifact caveat could be suppressed.
+  - `klt sim` `monte_carlo.instances`: an instance card `Xa n1 n2 sub w = 1`
+    read `w` as the subcircuit name and counted `sub` as an extra node, so
+    the generated mismatch-off wrapper got one pin too many.
+
+  All three now share `split_spice_tokens` (the flattener's implementation,
+  which was already the strict superset). **Behaviour change**: a gated
+  instance's parameters are re-emitted in the canonical unspaced spelling —
+  `w = 1` comes back as `w=1`, equivalent to ngspice. No JSON field is added,
+  renamed or removed; no `schema_version` bump.
+- **`klt extract --pins` orders the top `.SUBCKT` header by component label,
+  not whole name** (#5534, 2026-11-13): `--pins`' documented ordering rule
+  (#5255 — declared pins first, in the given order) compared each header token
+  as a whole string, while the same flag's *matching* rule is per component
+  label (#1687 — a net matches when any of its comma-joined labels is
+  declared). On a layout where KLayout joins labels, a pin promoted through a
+  component label (`Y|ybar` matching declared `ybar`) was therefore never
+  hoisted, so the header was neither the declared order nor the pre-#5255
+  order. Ordering now uses the same any-component-label match as promotion: a
+  joined-label port is hoisted into the slot of the earliest declared name it
+  carries, and a port carrying two declared names is emitted once, at the
+  earlier. The token's text is unchanged (`Y|ybar` moves but is still written
+  `Y|ybar`), ports matching no declared name keep their relative order, and
+  without `--pins` the written netlist is byte-identical to before.
+  **Re-baseline note**: this moves the header once more for joined-label
+  layouts, so a committed extracted netlist produced with `--pins` on such a
+  layout needs regenerating once; after that the header depends only on
+  `--pins`. `docs/cli/extract.md` also now records that *without* `--pins` the
+  top-level port order is the extractor's own and is not a cross-build
+  contract, alongside the existing `$N` caveat (#1063). Additive; no
+  `schema_version` bump.
+
 - **`klt mcp serve` serves the `docs/schemas/` JSON contract as MCP
   resources** (#5420, 2026-11-13): the server now advertises the resources
   capability and lists one resource per `docs/schemas/*.schema.json` at
@@ -31,6 +112,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   `--require-build-match` fails the check (exit 3, `status: "drifted"`) when
   ENV's `provenance.klt_version` is from a different build. Report-only
   without the flag.
+- **Added** (#5684): `klt functional-verification` accepts
+  `request.options.from_synthesize` (`{"report", "netlist"}`) to re-simulate
+  the netlist a `klt synthesize` run produced. The netlist is re-hashed against
+  the report's `netlist_sha256` before any build and the run is refused (exit
+  1) on a mismatch, a missing hash, an unresolvable netlist, or an
+  `hdl_toplevel` mismatch. `sources` may be empty/omitted only with this key.
+  Additive `from_synthesize` response block; no `schema_version` bump.
+
 - **Changed** (#5583, additive-compatible — `klt stats` `schema_version`
   unchanged): `geometry_digest` is now opt-in via `klt stats
   --geometry-digest` and is `null` by default (text output `geometry_digest:
@@ -513,6 +602,15 @@ not `klt --version`, if you need to detect this kind of drift. See
   island counts only when an `NWell` (31/0) ring closes it; taps are derived
   from `Activ` (`tap=None`) and the tie logic handles that. A layout drawing
   no `nBuLay` extracts exactly as before.
+- **`klt lvs` `options.ignore_mos_bulk`'s `device.bulk_ignored` warning
+  category is recorded here** (issue #5927, backfill — the option shipped
+  in 0.9.2 without a CHANGELOG entry): `options.ignore_mos_bulk: true`
+  disconnects the bulk terminal of every MOS device on both netlists
+  before comparing, so a tap-less planar layout (whose inline extraction
+  leaves bulks on deck-synthesized or anonymous nets) can still have its
+  gate/drain/source topology graded, disclosed as one
+  `device.bulk_ignored` `severity: "warning"` entry per device class and
+  side (never changes `status`). `"engine": "klayout"` only.
 - **`klt signoff` item 11 reads the substrate-path ERC result** (#5346,
   2026-11-12): a substrate-path `erc.supply_short` (`via: "substrate"`) is a
   `supply_not_continuous` blocker exactly like a metal one, so a real short is
@@ -1973,6 +2071,17 @@ not `klt --version`, if you need to detect this kind of drift. See
   the reported orientation changes, and only on hosts that were iterating in
   the other order.
 - `klt lvs`: new `"engine": "klayout-runset"` runs a PDK's own KLayout LVS runset (`deck_file`, `deck_vars`) and takes the verdict from its `.lvsdb` cross-reference, with `device_census`, a `coverage` block and `provenance.runset` (issue #2849). Additive; no `schema_version` bump.
+- **`klt lvs` klayout-runset engine's `mismatches[].category` values are
+  recorded here** (issue #5927, backfill for the
+  categories-are-recorded-here rule; both shipped with the engine itself in
+  0.8.0, issue #2849). `coverage.no_devices_recognized`
+  (`severity: "error"`) fires when the runset recognized no devices on
+  either side — an empty compare is not a verdict, and the run reports
+  `inconclusive`. `runset.incomplete` (`severity: "error"`) fires per
+  circuit the runset did not compare (cross-reference status
+  `Skipped`/`None`); those entries are excluded from the error-based
+  mismatch verdict, so a run that is otherwise clean reports
+  `inconclusive` rather than `mismatch`.
 
 - **Dev builds no longer satisfy `klayout-tools==X.Y.Z` pins** (issue #2823,
   absorbing #2888): the distribution version is now computed at build time

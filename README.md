@@ -68,6 +68,9 @@ pip install klayout-tools
 `klt` is now on `PATH`. Either install provides the `klayout` **Python
 module** only — `klt drc --engine klayout` additionally needs a system KLayout
 application with `klayout` on `PATH` (<https://www.klayout.de/build.html>).
+Engine-version compatibility (supported/tested `klayout` versions, and what
+happens below the `klayout>=0.30` floor):
+[Engine version compatibility](docs/design/klayout-engine-version-pin.md#engine-version-compatibility).
 For the latest development version, install from
 source instead:
 
