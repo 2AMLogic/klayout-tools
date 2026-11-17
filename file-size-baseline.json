@@ -1045,7 +1045,7 @@
     },
     {
       "path": "tests/test_signoff.py",
-      "lines": 18303
+      "lines": 18287
     },
     {
       "path": "tests/test_signoff_generator_batch.py",
