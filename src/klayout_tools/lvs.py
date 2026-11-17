@@ -256,6 +256,7 @@ from .lvs_power import (
 from .lvs_reference_stage import _read_reference_stage
 from .lvs_report import assemble_lvs_report
 from .lvs_runset import RUNSET_ENGINE, run_lvs_klayout_runset
+from .lvs_runset_reference import passthrough_rerun_excludes
 from .lvs_short_nets import _short_nets_disclosure as _short_nets_disclosure
 from .lvs_supply import parse_supply_nets, supply_fragmentation_findings  # noqa: F401
 from .lvs_timeout import (
@@ -2763,10 +2764,9 @@ def rerun_lvs_report(
     )
     # Issue #1952 (extended by #2692's `anchor_top_level_pins`): the same "a
     # field the committed report never carried cannot itself have drifted"
-    # rule, one level down -- a report committed after issue #1205 added the
-    # `options` echo but before one of these options existed has an `options`
-    # block without that key, and the current build's richer echo is not
-    # drift.
+    # rule, one level down -- an `options` block committed before one of these
+    # options existed lacks that key, and the richer echo is not drift (the
+    # runset `reference_conversion` keys follow the same rule, issue #5796).
     committed_options = committed.get("options")
     for option in (
         "power_connectivity",
@@ -2783,7 +2783,7 @@ def rerun_lvs_report(
         report_path=report_path,
         committed=committed,
         fresh=fresh,
-        exclude=frozenset(exclude),
+        exclude=frozenset(exclude | passthrough_rerun_excludes(committed)),
     )
 
 

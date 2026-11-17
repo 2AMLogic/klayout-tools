@@ -38,7 +38,9 @@
           "properties": {
             "form": {"const": "subckt-call"},
             "deck": {"type": ["string", "null"]},
-            "device_map": {"type": ["object", "null"]}
+            "device_map": {"type": ["object", "null"]},
+            "passthrough_callees": {"type": "array", "items": {"type": "string"}, "description": "klayout-runset engine only (issue #5796): sorted subcircuit names of the X cards the conversion left untouched for the runset's own reader (deck DEVICE_LIST passthrough, issue #5402); [] when none. Optional: absent on other engines and on reports committed before it existed."},
+            "passthrough_cards": {"type": "integer", "minimum": 0, "description": "klayout-runset engine only (issue #5796): number of X cards left untouched; 0 when none."}
           }
         },
         {

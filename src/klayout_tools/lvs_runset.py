@@ -846,13 +846,14 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
     timeout_s = float(options.get("runset_timeout_s", RUNSET_DEFAULT_TIMEOUT_S))
     binary = _resolve_klayout_binary(options, request_dir)
 
-    from .lvs import _reference_conversion_echo
-    from .lvs_runset_reference import convert_reference
+    from . import lvs_runset_reference as rr
 
     work_dir = tempfile.mkdtemp(prefix="klt-lvs-runset-")
     try:
         # Issue #4805: a ``subckt-call`` reference is converted into work_dir.
-        runset_reference = convert_reference(reference, request, work_dir, deck_file)
+        runset_reference, passthrough = rr.convert_reference(
+            reference, request, work_dir, deck_file
+        )
         lvsdb_path, completed = _run_runset(
             binary=binary,
             deck_file=deck_file,
@@ -878,7 +879,7 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
             request["reference"].get("top") and (top or request["reference"]["top"]),
             {str(n).upper() for side in declared.values() for n in side or []}
             | _deck_device_list(deck_file),
-        )
+        ) + rr.passthrough_finding(passthrough, verdict)
     finally:
         import shutil
 
@@ -917,9 +918,7 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
     return {
         "schema_version": SCHEMA_VERSION,
         "engine": RUNSET_ENGINE,
-        **_reference_conversion_echo(
-            request["reference"].get("form", "plain-element"), request["reference"]
-        ),
+        **rr.reference_conversion_echo(request["reference"], passthrough),
         "layout": request["layout"]["file"],
         "reference": request["reference"]["netlist"],
         "top": top or verdict["top"],
