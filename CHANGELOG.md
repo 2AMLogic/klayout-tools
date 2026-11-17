@@ -79,6 +79,12 @@ not `klt --version`, if you need to detect this kind of drift. See
   and the Verilog-top path. `path`/`scope` is the repo-relative shape, so a
   source outside the repo reads `{"path": null, "scope": "external"}` and never
   leaks a host path. No `schema_version` bump.
+- **`klt synthesize` accepts an abstract-less macro** (#5612, 2026-11-16):
+  a `request.macros[]` entry may omit `lef` when it gives `verilog_blackbox`;
+  identity comes from `cell` or the blackbox's single module, the instance
+  count is keyed on it, and the response echoes `lef` as
+  `{"path": null, "scope": "absent"}`. Additive; `schema_version` unchanged.
+  `klt sta` and `klt place-and-route` still require `lef`.
 - **Added** (#5644, 2026-11-16): `klt sim --op-lint` now reports an additive
   top-level `unexpanded_instance_count` — the number of `X` instances whose
   `.subckt` was found in neither the netlist body nor its `.include` closure

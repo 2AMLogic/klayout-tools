@@ -314,6 +314,9 @@ bump. Reports without the field still verify, and `--check` treats
 
 ## Hard macros (`request.macros`)
 
+`lef` stays required here: the LEF-less (blackbox-only) macro declaration is
+`klt synthesize`-only (issue #5612), and a LEF-less entry is a request error.
+
 Issue #2635 adds an optional `macros` array — the same shared shape `klt
 synthesize` and `klt place-and-route` accept, documented once in
 `klayout_tools.macros`. Each entry's `lef` is `read_lef`'d alongside the

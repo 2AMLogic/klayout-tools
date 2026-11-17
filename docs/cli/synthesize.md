@@ -1655,7 +1655,7 @@ core shipped as LEF + liberty + GDS.
 
 | `macros[]` field | Type | Description |
 | --- | --- | --- |
-| `lef` | string | Path to the macro's LEF abstract. Required; must declare exactly one `MACRO`. Resolved relative to the request file's own directory. |
+| `lef` | string \| omitted | Path to the macro's LEF abstract; must declare exactly one `MACRO`. Resolved relative to the request file's own directory. Required by `klt sta` and `klt place-and-route`, but **`klt synthesize` alone accepts an entry that omits it** (issue #5612) when `verilog_blackbox` is given — the macro's identity then comes from `cell`, or from the blackbox's single declared module (several modules and no `cell` is a request error listing them; a `cell` not among them is rejected). The response echoes `lef` as `{"path": null, "scope": "absent"}`, `area_um2` still excludes the macro and `cells_without_area` still names it. A `lef` that is present but unusable (empty, missing file, multi-`MACRO`) is still an error, never treated as omitted. |
 | `cell` | string \| omitted | The macro's cell/master name. Derived from the LEF's own `MACRO` name when omitted; when given, must match it exactly — a `cell` that disagrees with its own `lef` is always a mistake and is rejected rather than silently reconciled. |
 | `lib` (alias `liberty`) | object\<string, string\> \| omitted | A **per-corner** liberty map, `{"<corner>": "<path>"}`, keyed the same way `pdk.corner` names a corner. The reserved key `"default"` applies to any corner with no exact entry. Give at most one of `lib`/`liberty` — they are two spellings of the same field, never two independent values. Omitted means a LEF-only macro: legal, and handled as an untimed blackbox. |
 | `gds` | string \| omitted | The macro's GDS view. Unused by `klt synthesize` itself (no layout step here); accepted so one declaration serves all three verbs without per-verb pruning. |
@@ -1675,7 +1675,9 @@ command emits one line per declared macro, in precedence order:
    LEF `PIN DIRECTION`s and written into the run directory as
    `<cell>_blackbox.v`, then loaded the same way. A caller with only a LEF
    never has to hand-write (or hand-maintain, against a vendor's own port
-   list) a stub.
+   list) a stub. Disposition 3 is unreachable for a LEF-less entry (issue
+   #5612) — with no LEF there is nothing to generate the stub from, so such
+   an entry always takes disposition 1 or 2.
 
 Every disposition has the same effect: the macro survives
 `hierarchy`/`synth`/`abc`/`clean` as one opaque instance in
@@ -1704,8 +1706,9 @@ instantiated type (macro or otherwise) `area_um2` does not account for, and
 a non-empty result also surfaces as a `macro_area_excluded` /
 `cells_without_liberty_area` entry in `warnings` — see "`warnings`" below.
 The `macro_area_excluded` text sends the caller to `response.macros[].lib`
-only for macros that have one; a LEF-only (or `verilog_blackbox`-only) macro
-has `lib: null`, so the warning says no area is available for it here.
+only for macros that have one; a LEF-only, `verilog_blackbox`-only or
+abstract-less macro has `lib: null`, so the warning says no area is
+available for it here.
 
 See `docs/cli/sta.md`'s and `docs/cli/place-and-route.md`'s own "Hard
 macros"/"Hard-macro placement" sections for how the other two verbs consume
