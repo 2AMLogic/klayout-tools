@@ -92,6 +92,59 @@ def check_offhost_engine_version_pin(
     )
 
 
+def _enforce_published_engine_version_pin(
+    request: dict[str, Any], assessment: dict[str, Any]
+) -> None:
+    """Pre-submit half of the off-host ``engine_version`` pin (issue #5851):
+    refuse with ``engine_version_unmet`` before any S3 write or launch when
+    *every* image the AMI manifest publishes carries an ``ngspice_version``
+    the request's ``engine_version`` pin excludes, so a drifted runner image
+    no longer costs a provisioned, executed job per submission. Fails open
+    exactly like the runner-identity checks: an image without a readable
+    version (legacy entry, unparseable value), or any one image that
+    satisfies the pin, defers to :func:`check_offhost_engine_version_pin`
+    above -- a manifest records what was *published*, not what the launched
+    instance runs. Shares :func:`klayout_tools.sim._version_components` with
+    that check so the two can never disagree about a match, and
+    ``runner_version_check`` does not relax it: the pin is a request-level
+    requirement, not version-skew policy. A non-``ngspice`` ``engine``
+    defers too -- the manifest publishes no identity for any other engine.
+
+    ``models.pdk_version`` has no pre-submit gate here: an off-host backend
+    still rejects the field outright (worker-side comparison tracked in
+    #3462).
+    """
+    from . import sim
+
+    images = assessment["images"]
+    pin = sim._validate_engine_version_pin(request) if images else None
+    if pin is None or str(request.get("engine") or "ngspice") != "ngspice":
+        return
+    unmet: list[dict[str, Any]] = []
+    for image in images:
+        found = image.get("ngspice_version")
+        parsed = sim._version_components(found) if found else None
+        if parsed is None or parsed[: len(pin)] == pin:
+            return  # unknown version, or one image satisfies the pin
+        unmet.append(image)
+    required = ".".join(str(part) for part in pin)
+    published = "; ".join(
+        f"{image['ami_id']} (pdk {image['pdk']}, region {image['region']}) "
+        f"runs ngspice {image['ngspice_version']}"
+        for image in unmet
+    )
+    raise SimError(
+        f"backend 'batch' refused before submission: pinned simulator "
+        f"unavailable: request requires ngspice {required}; the AMI "
+        f"manifest publishes {published} -- the request was not submitted "
+        "and no instance was launched (rebuild the runner image with the "
+        "pinned ngspice or drop the pin; the manifest is publication "
+        "metadata, so the post-run report comparison stays as the backstop; "
+        "see docs/cli/sim.md)",
+        code=sim.ENGINE_VERSION_UNMET_CODE,
+    )
+
+
 def validate_pdk_version_pin(models: Any) -> str | None:
     """The request's ``models.pdk_version`` pin (issue #4046), ``None`` when
     unset. Same value forms as ``klt pdk check --expect-version``."""

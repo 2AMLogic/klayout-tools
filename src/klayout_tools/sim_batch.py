@@ -134,6 +134,7 @@ from .sim_batch_reattach import (
 )
 from .sim_batch_warn import warn_over_serial_bound_once
 from .sim_exit_reason import status_exit_code as _status_exit_code
+from .sim_pin_settle import _enforce_published_engine_version_pin
 from .sim_remote import (
     _build_remote_request,
     _points_to_push,
@@ -621,31 +622,26 @@ def _resolve_batch_config(
     check_runner: bool = True,
 ) -> BatchConfig:
     """Resolve every ``batch.*`` knob, raising
-    :class:`~klayout_tools.sim.SimError` before any S3 write.
-
-    Resolution order per field: ``request.batch.<field>``, then a
-    ``KLT_BATCH_*`` environment variable, then 2am's own
-    ``batch-fleet.env`` beside the provision script, then (for the profile
-    and jobs prefix only) a documented literal default. The **bucket has no
-    literal default** -- an unresolvable bucket is an error naming all three
-    sources, never a guess (see this module's docstring).
+    :class:`~klayout_tools.sim.SimError` before any S3 write. Per-field
+    resolution order: ``request.batch.<field>``, then a ``KLT_BATCH_*``
+    environment variable, then 2am's own ``batch-fleet.env`` beside the
+    provision script, then (profile and jobs prefix only) a documented
+    literal default. The **bucket has no literal default** -- an
+    unresolvable bucket errors naming all three sources, never a guess.
 
     ``models.pdk`` is validated here too (:func:`_validate_batch_pdk`),
     first: a PDK the fleet publishes no image for has no compliant execution
-    path on this backend at all, so it is a property of the *request* rather
-    than of this host's fleet configuration and should be reported even when
-    the provision script or bucket is also unresolvable.
+    path on this backend at all -- a property of the *request*, reported
+    even when the provision script or bucket is also unresolvable.
 
     Last, the runner ``klt`` the AMI manifest publishes is compared with
     this client (:func:`_assess_published_runner`, issue #2851): under
     ``runner_version_check: "enforce"`` a known mismatch raises
     ``batch_runner_version_mismatch`` here, so neither ``klt sim`` (one job
-    or every shard) nor ``klt netlist`` uploads or launches anything.
-    Beside it, a request ``engine_version`` pin every published image's
-    ``ngspice_version`` fails is refused with ``engine_version_unmet``
-    (:func:`_enforce_published_engine_version_pin`, issue #5851).
-    ``check_runner=False`` skips those comparisons for a read-only caller
-    (``klt sim --job-status``, issue #3073) that submits nothing.
+    or every shard) nor ``klt netlist`` uploads or launches anything, as
+    does a request ``engine_version`` pin every published image's
+    ``ngspice_version`` fails (issue #5851). ``check_runner=False`` skips
+    both for a read-only caller (``klt sim --job-status``, #3073).
     """
     from .sim import SimError
 
@@ -722,8 +718,6 @@ def _resolve_batch_config(
         diagnostic = _enforce_published_runner_features(request, assessment)
         if diagnostic is not None:
             config = replace(config, feature_diagnostic=diagnostic)
-        # Issue #5851: refuse an `engine_version` pin every published image's
-        # `ngspice_version` fails, before any S3 write or launch.
         _enforce_published_engine_version_pin(request, assessment)
         # Issue #3251: refuse a PDK variant the published image does not ship.
         _validate_batch_pdk_variant(request, config.region)
@@ -745,17 +739,15 @@ def dry_run_runner_check(
     Returns the feature diagnostic a ``warn`` run reports, else ``None``. A
     host with no resolvable batch configuration (no bucket, no provision
     script) cannot run the check and is left to dry-run clean, as before;
-    only the runner version/feature refusals and the pre-submit
-    ``engine_version`` pin refusal (issue #5851) propagate.
+    only the runner version/feature/pin refusals (issue #5851) propagate.
 
     When ``runner_out`` is given it is filled with the published runner
     identity (``status``, ``client_klt_version``, ``images``) for ``match``,
     ``unknown`` and, under ``runner_version_check: "warn"``, ``mismatch``, so
     the report can answer "which ``klt`` does the fleet accept" without a
-    submit (issue #4675). A ``mismatch`` under the default ``"enforce"`` is
+    submit (issue #4675); a ``mismatch`` under the default ``"enforce"`` is
     refused with ``BATCH_RUNNER_MISMATCH_CODE`` before ``runner_out`` is
-    filled; the client and published runner versions are in that error's
-    message (issue #4680).
+    filled, with both versions in the message (issue #4680).
     """
     from .sim import ENGINE_VERSION_UNMET_CODE, SimError
 
@@ -943,68 +935,6 @@ def _enforce_published_runner_features(
         "image from a release that has the feature, or set "
         'request.batch.runner_version_check to "warn"; see docs/cli/sim.md)',
         code=BATCH_RUNNER_FEATURE_CODE,
-    )
-
-
-def _enforce_published_engine_version_pin(
-    request: dict[str, Any], assessment: dict[str, Any]
-) -> None:
-    """Refuse before any S3 write or launch when *every* image the AMI
-    manifest publishes carries an ``ngspice_version`` the request's
-    ``engine_version`` pin excludes (issue #5851), so a drifted runner image
-    no longer costs a provisioned, executed job per submission.
-
-    The manifest is the only pre-submit engine identity the fleet publishes,
-    so the check is manifest-only and fails open exactly like
-    :func:`_enforce_published_runner_features`: an image without a readable
-    ``ngspice_version`` (legacy entry, unparseable value) or any one image
-    that satisfies the pin defers to the post-run report comparison
-    (:func:`klayout_tools.sim_pin_settle.check_offhost_engine_version_pin`),
-    which stays as the backstop -- a manifest records what was *published*,
-    not what the launched instance runs. The comparison uses the same
-    :func:`klayout_tools.sim._version_components` parser as that check, so
-    the two can never disagree about what counts as a match, and
-    ``runner_version_check`` does not relax it: the pin is a request-level
-    requirement, not version-skew policy. A non-``ngspice`` ``engine``
-    defers too -- the manifest publishes no identity for any other engine.
-
-    ``models.pdk_version`` has no pre-submit gate here: an off-host backend
-    still rejects the field outright (worker-side comparison tracked in
-    #3462).
-    """
-    from . import sim
-    from .sim import ENGINE_VERSION_UNMET_CODE, SimError
-
-    images = assessment["images"]
-    if not images:
-        return
-    pin = sim._validate_engine_version_pin(request)
-    if pin is None:
-        return
-    if str(request.get("engine") or "ngspice") != "ngspice":
-        return
-    unmet: list[dict[str, Any]] = []
-    for image in images:
-        found = image.get("ngspice_version")
-        parsed = sim._version_components(found) if found else None
-        if parsed is None or parsed[: len(pin)] == pin:
-            return  # unknown version, or one image satisfies the pin
-        unmet.append(image)
-    required = ".".join(str(part) for part in pin)
-    published = "; ".join(
-        f"{image['ami_id']} (pdk {image['pdk']}, region {image['region']}) "
-        f"runs ngspice {image['ngspice_version']}"
-        for image in unmet
-    )
-    raise SimError(
-        f"backend 'batch' refused before submission: pinned simulator "
-        f"unavailable: request requires ngspice {required}; the AMI "
-        f"manifest publishes {published} -- the request was not submitted "
-        "and no instance was launched (rebuild the runner image with the "
-        "pinned ngspice or drop the pin; the manifest is publication "
-        "metadata, so the post-run report comparison stays as the backstop; "
-        "see docs/cli/sim.md)",
-        code=ENGINE_VERSION_UNMET_CODE,
     )
 
 

@@ -9,8 +9,10 @@ from pathlib import Path
 
 import pytest
 
+from klayout_tools import remote_launcher as rl
 from klayout_tools import sim
 from klayout_tools import sim_batch as sb
+from test_remote_launcher import _entry, _write_manifest
 from test_sim_batch import (
     FAKE_BUCKET,
     _batch_request,
@@ -155,3 +157,21 @@ def test_run_sim_refuses_before_any_submit_or_launch(tmp_path, monkeypatch):
         sim.run_sim(str(path))
     assert raised.value.code == sim.ENGINE_VERSION_UNMET_CODE
     assert runner.argvs_matching("launch", "--apply") == []
+
+
+def test_published_runner_identities_carry_engine_identity(tmp_path):
+    """Issue #5851: identities carry ``ngspice_version``/``pdk_snapshot``
+    for the pre-submit pin check; ``None`` for a legacy entry."""
+    manifest = _write_manifest(
+        tmp_path,
+        [
+            _entry(ngspice_version="46.2", pdk_snapshot="sky130A-2026.11.01"),
+            _entry(region="us-west-2", ngspice_version=None, pdk_snapshot=None),
+        ],
+    )
+    ids = rl.published_runner_identities("sky130A", None, manifest)
+    by_region = {i["region"]: i for i in ids}
+    east, west = by_region["us-east-1"], by_region["us-west-2"]
+    assert east["ngspice_version"] == "46.2"
+    assert east["pdk_snapshot"] == "sky130A-2026.11.01"
+    assert west["ngspice_version"] is None and west["pdk_snapshot"] is None
