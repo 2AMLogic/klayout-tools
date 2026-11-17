@@ -1557,6 +1557,7 @@ def run_extract(
     mom_net: str | None = None,
     mom_background_permittivity: float = MOM_CROSSCHECK_BACKGROUND_PERMITTIVITY,
     spef_output: str | None = None,
+    report_parasitics: str = "full",
     def_net_names: bool = False,
     critical_nets: Sequence[str] | None = None,
     parasitics_nets: Sequence[str] | None = None,
@@ -2919,6 +2920,7 @@ def run_extract(
     ) = validate_run_extract_args(
         mom_net=mom_net,
         spef_output=spef_output,
+        report_parasitics=report_parasitics,
         substrate_spreading_net=substrate_spreading_net,
         substrate_tie_ohms=substrate_tie_ohms,
         critical_nets=critical_nets,
@@ -3277,6 +3279,7 @@ def run_extract(
         parasitics_report=parasitics_report,
         path=path,
         pdk_info=pdk_info,
+        report_parasitics_shape=report_parasitics,
         pin_renames=pin_renames,
         pin_ties=pin_ties,
         probe_results=probe_results,

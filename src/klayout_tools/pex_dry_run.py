@@ -153,6 +153,7 @@ def _extraction_preflight(
             validate_run_extract_args(
                 mom_net=None,
                 spef_output=None,
+                report_parasitics="full",
                 substrate_spreading_net=None,
                 substrate_tie_ohms=substrate_tie_ohms,
                 critical_nets=critical_nets,

@@ -14,6 +14,27 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt extract --report-parasitics slim` slims the JSON `parasitics`
+  report beside a `--spef` file** (#5816, 2026-11-17): `--spef` and the
+  JSON report describe the same measurement twice — the SPEF's
+  `*CAP`/`*RES` rows are a verbatim translation of `parasitics.nets[]`, and
+  each coupling capacitor appears in the JSON once from *each side of the
+  pair* — so a caller who wants the complete measurement and a committable
+  report had to commit the same numbers in two formats (~94% of a ~4 MB
+  report was `parasitics.nets[]`, almost all of it SPEF-carried data or one
+  constant repeated per net). The new `--report-parasitics {full,slim}` flag
+  (default `full`, byte-identical to the pre-#5816 output; request-form
+  field `report_parasitics`) drops from each `nets[]` entry the data the
+  SPEF beside it already carries (`coupled[]`, `hub_net`, and the
+  empty/constant lumped-model `terminals`/`segments`/`pin_order` and
+  `integrity` sub-keys — populated distributed-ladder fields and real
+  integrity findings are kept), and adds `parasitics.report_shape: "slim"`
+  plus a `parasitics.coupling_by_layer_pair` histogram (layer pair → count
+  and summed fF, each capacitor counted once) so the `coupled[].levels`
+  distribution survives. `slim` requires `--spef` (a clean `ExtractError`
+  otherwise); a slim run's SPEF and written SPICE are byte-identical to a
+  full run's. No `schema_version` bump: the default shape is unchanged and
+  every new field is additive.
 - **`klt sim --fail-fast-probe` reads the same `.spiceinit` as the corners it
   screens** (#6047, 2026-11-17): `_run_corner` pins the thread count by writing
   a run-directory `.spiceinit`, which *replaces* `$HOME/.spiceinit`, but the

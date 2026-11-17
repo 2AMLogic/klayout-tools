@@ -374,6 +374,7 @@ _REQUEST_FIELD_DESTS = {
         "mom_net",
         "substrate_spreading",
         "spef",
+        "report_parasitics",
         "critical_nets",
         "parasitics_nets",
         "critical_net_patterns",
@@ -491,6 +492,13 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
             "mom_net": _str("mom_net"),
             "substrate_spreading": _str("substrate_spreading"),
             "spef": _path("spef"),
+            # Enum-valued field with a non-None default (issue #5816): a
+            # document omitting it keeps the flag's own "full" default --
+            # the same "absent means the default" tri-state `progress`
+            # below uses, because `_str` maps an absent field to `None`.
+            "report_parasitics": (
+                _str("report_parasitics") if "report_parasitics" in request else "full"
+            ),
             "critical_nets": _str_list("critical_nets"),
             "parasitics_nets": _str_list("parasitics_nets"),
             "critical_net_patterns": _str_list("critical_net_patterns"),
@@ -677,6 +685,12 @@ def run(args: argparse.Namespace) -> int:
             # as a SPEF file at this path. `None` when the flag was never
             # given, unchanged from every call site that predates it.
             spef_output=args.spef,
+            # `--report-parasitics` (issue #5816): the JSON `parasitics`
+            # block's shape. The default `"full"` is byte-identical to every
+            # call site that predates it; `"slim"` (validated up front to
+            # require `--spef`) swaps in the slim shape after the SPEF and
+            # metrics have consumed the full block.
+            report_parasitics=args.report_parasitics,
             # `--substrate-spreading` (issue #2561): two-terminal closed-form estimate
             # of the bulk resistance between this net's substrate taps. `None` when the
             # flag was never given, unchanged from every call site that predates it.

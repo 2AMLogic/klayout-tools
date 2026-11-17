@@ -250,6 +250,7 @@
         "klayout_tools.extract_hierarchy",
         "klayout_tools.extract_parasitics",
         "klayout_tools.extract_parasitics_block",
+        "klayout_tools.extract_parasitics_slim",
         "klayout_tools.extract_netlist_write",
         "klayout_tools.extract_detect_block",
         "klayout_tools.extract_pdk_resolve",

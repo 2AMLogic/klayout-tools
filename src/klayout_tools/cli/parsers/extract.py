@@ -211,6 +211,28 @@ def add_extract_parser(
         ),
     )
     extract_parser.add_argument(
+        "--report-parasitics",
+        dest="report_parasitics",
+        choices=("full", "slim"),
+        default="full",
+        help=(
+            "the shape of the JSON `parasitics` block (issue #5816): "
+            "'full' (the default, byte-identical to today) reports every "
+            "per-net field; 'slim' -- meaningful only with --spef -- drops "
+            "from each `parasitics.nets[]` entry the data the SPEF beside "
+            "it already carries (the per-net RC network, `coupled[]`'s "
+            "two-sided copy of every coupling capacitor), the constant "
+            "lumped-model `integrity` sub-keys, and the empty "
+            "`terminals`/`segments`/`pin_order`/`hub_net` fields, and adds "
+            "one global `parasitics.coupling_by_layer_pair` histogram plus "
+            'a `report_shape: "slim"` marker so a reader can tell the '
+            "shapes apart. Requires --spef. A slim run's SPEF and written "
+            "SPICE are byte-identical to a full run's -- only the JSON "
+            "changes. See docs/cli/extract.md's 'Slimming the parasitics "
+            "report' section."
+        ),
+    )
+    extract_parser.add_argument(
         "--critical-net",
         dest="critical_nets",
         action="append",
