@@ -203,22 +203,25 @@ def _verilog_top_sdf_gate(
     build_log: str,
     test_log: str,
     sdf_pre_dropped_counts: dict[str, int],
+    sdf_pre_dropped_arcs: dict[str, list[dict[str, str]]],
 ) -> dict[str, int]:
-    """Raise on SDF back-annotation diagnostics; return the dropped counts."""
+    """Raise on SDF back-annotation diagnostics; return the dropped counts.
+
+    Issue #5854: the raised error carries the same ``sdf.dropped`` accounting
+    the success-path report emits -- both refusal sites build it through the
+    shared helper in ``functional_verification_sdf_steps``."""
     if sdf is None:
         return {}
     diagnostics, scanned = _fv._scan_sdf_diagnostics(build_log, test_log)
+    merged = {**sdf_pre_dropped_counts, **scanned}
     if diagnostics:
-        shown = " | ".join(diagnostics[:5])
-        more = f" (+{len(diagnostics) - 5} more)" if len(diagnostics) > 5 else ""
-        raise _fv.FunctionalVerificationError(
-            f"SDF back-annotation of '{sdf['file']}' did not fully apply: "
-            f"{len(diagnostics)} diagnostic(s) in the {engine} transcript "
-            f"-- {shown}{more}. The simulator exits 0 after skipping an "
-            "annotation it cannot apply, so this run's verdict would have "
-            "been a zero-delay one reported as if it were annotated."
+        raise _fv._sdf_refusal_error(
+            sdf["file"],
+            engine,
+            diagnostics,
+            _fv._sdf_dropped_report(merged, sdf_pre_dropped_arcs),
         )
-    return {**sdf_pre_dropped_counts, **scanned}
+    return merged
 
 
 def _verilog_top_error(
@@ -310,7 +313,7 @@ def _run_verilog_top(
         transcript = handle.read()
 
     sdf_dropped_counts = _verilog_top_sdf_gate(
-        sdf, engine, build_log, test_log, sdf_pre_dropped_counts
+        sdf, engine, build_log, test_log, sdf_pre_dropped_counts, sdf_pre_dropped_arcs
     )
     error_message = _verilog_top_error(
         ran.returncode, transcript, pass_marker, fail_marker
