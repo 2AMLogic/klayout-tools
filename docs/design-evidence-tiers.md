@@ -229,7 +229,13 @@ written to every block.
    nothing compares them against what the claim actually disclosed, so a
    `met` verdict from `klt signoff` is still not evidence that the gaps were
    disclosed. A reviewer must read the reported `coverage` against the claim
-   themselves.
+   themselves. **Opt-in exception (#5789)**: a manifest that sets
+   `require_coverage_disclosure: true` and enumerates its gaps on item 3's
+   evidence entry (`coverage_disclosed`) has the comparison graded — a
+   declaration that is not set-equal to the reported coverage renders the
+   item `unmet` / `coverage_undisclosed`. The default remains
+   claimant-enforced; the tool-enforced form is something a project opts
+   into per manifest.
    **Disclosed exception for unmodified foundry cells** (operator ruling
    2026-10-28): DRC violations inside an unmodified foundry-library cell
    (a stock I/O pad, a foundry SRAM macro) do not block `met`, provided all
