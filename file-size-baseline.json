@@ -165,7 +165,7 @@
     },
     {
       "path": "src/klayout_tools/_provenance.py",
-      "lines": 1005
+      "lines": 991
     },
     {
       "path": "src/klayout_tools/arith_gen.py",

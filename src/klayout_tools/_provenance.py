@@ -44,7 +44,6 @@ import hashlib
 import os
 import re
 import subprocess
-import sys
 import tempfile
 from collections.abc import Callable, Mapping
 from typing import Any
@@ -65,6 +64,7 @@ from ._digest import (
 from ._digest import (
     sha256_file_required as sha256_file_required,
 )
+from ._engine_remedy import _warn_klayout_version_mismatch
 from ._report_verify import get_path
 from .decks.history import is_deck_hash_released
 
@@ -512,51 +512,6 @@ def _klayout_version_mismatch(actual: str | None, expected: str | None) -> bool:
     if actual is None or expected is None:
         return False
     return actual != expected
-
-
-def _warn_klayout_version_mismatch(
-    actual: str | None,
-    expected: str | None,
-    reinstall_spec: str | None,
-) -> None:
-    """The stderr warning printed once per report when
-    :func:`_klayout_version_mismatch` is ``True`` (issue #1490) -- a caller
-    piping ``--format json`` to a file still sees this on the terminal,
-    since JSON output goes to stdout only (``docs/json-contract.md``).
-
-    ``reinstall_spec`` is the running build's
-    :func:`klayout_tools.build_identity.reinstall_spec` value -- the same
-    string already computed for ``provenance.klt_reinstall_spec``, passed
-    in by :func:`build_provenance` rather than re-derived here so the
-    warning adds no probe of its own. A released install renders the
-    version-pin install form; a clean dev build renders a real
-    ``git+https://...@<commit>`` (issue #5601: the placeholder this
-    warning previously printed was copy-pasteable by no one -- it showed
-    a literal ``...`` where the sha should be). ``None`` (dirty tree, or
-    no recorded commit) never renders as a fabricated command: the line
-    says the build is not reinstallable and points at
-    ``klt version --format json``, which carries the same
-    ``reinstall_spec`` field."""
-    if reinstall_spec is None:
-        remedy = (
-            "this klayout-tools build is not reinstallable from a single "
-            "spec (dirty working tree, or no recorded commit) -- see "
-            "`klt version --format json`'s `reinstall_spec` field; the "
-            f"engine constraint itself is `--with klayout=={expected}`"
-        )
-    else:
-        remedy = f'`uv tool install "{reinstall_spec}" --with klayout=={expected}`'
-    message = (
-        f"klt: warning: resolved klayout engine version {actual!r} differs "
-        f"from klayout=={expected}, the version this klayout-tools build/"
-        "commit was tested against -- DRC/LVS report counts (deck content "
-        "hash, rules_skipped, category_counts, ...) may differ from a "
-        f"report generated with klayout=={expected}, even though the "
-        "verdict itself is unaffected. To reproduce the exact engine: "
-        f"{remedy} -- see docs/json-contract.md's "
-        '"Shared `provenance` block".'
-    )
-    print(message, file=sys.stderr)
 
 
 def _pdk_block(
