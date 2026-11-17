@@ -24,10 +24,12 @@ not `klt --version`, if you need to detect this kind of drift. See
   on it, instead of re-deriving the node from device cards after every run
   (a renumbered `$N` probe still *resolves* — to a plausible but wrong
   node). `null` for a named net and for an anonymous net with zero device
-  terminals. `--check --rerun` strips the field alongside `net_id` (derived
-  bookkeeping), so `netlist_normalized_sha256` is byte-identical across the
-  field's introduction and reports committed before it still verify `match`.
-  `parasitics.nets[]` is untouched. Additive; no `schema_version` bump.
+  terminals. `--check --rerun` strips the field alongside `net_id` (it is
+  content class, but a pre-field committed report lacks the key — stripping
+  is backward compatibility), so `netlist_normalized_sha256` is
+  byte-identical across the field's introduction and reports committed
+  before it still verify `match`. `parasitics.nets[]` is untouched.
+  Additive; no `schema_version` bump.
 - **`klt sim --attach <batch-shards.json>` accepts a map written by a
   `--hosts N` / `remote.hosts: N` run** (#5777, 2026-11-17): `--attach` and
   `--collect-partial` refused every `hosts != 1` request with "requires backend

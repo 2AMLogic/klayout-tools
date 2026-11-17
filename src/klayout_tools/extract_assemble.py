@@ -92,15 +92,22 @@ def assemble_extract_report(
     # `devices` and `nets` are already in scope (the identity needs the
     # assembled `devices[]` array, which `_build_nets` does not see).
     # Present on every entry; `null` exactly when the net has no structural
-    # identity -- a named net (its `name` is already a stable handle) or an
-    # anonymous net no `devices[]` terminal touches. `_strip_net_id_and_rewrite_names`
-    # drops the key again, so the digest and `--check --rerun` are unaffected.
-    # Only the top-level `nets[]` entries are annotated; `parasitics.nets[]`
-    # is a different array built by a different stage and is untouched.
+    # identity -- a named net (its `name` is the label a consumer already
+    # joins on, and the sub-cell collision caveat in docs/cli/extract.md is
+    # why no unique per-net handle is minted for it) or an anonymous net no
+    # `devices[]` terminal touches. `_strip_net_id_and_rewrite_names` drops
+    # the key again -- rerun backward-compatibility, not a stability caveat
+    # (the field is content-class in docs/cli/extract.md's field-class
+    # table) -- so the digest and `--check --rerun` are unaffected. Only the
+    # top-level `nets[]` entries are annotated; `parasitics.nets[]` is a
+    # different array built by a different stage and is untouched.
     nets_name_map = _anonymous_net_name_map({"devices": devices, "nets": nets})
     for net_entry in nets:
         if isinstance(net_entry, dict):
-            net_entry["structural_id"] = nets_name_map.get(net_entry.get("name"))
+            name = net_entry.get("name")
+            net_entry["structural_id"] = (
+                nets_name_map.get(name) if isinstance(name, str) else None
+            )
 
     result: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
