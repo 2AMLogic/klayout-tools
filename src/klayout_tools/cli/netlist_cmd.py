@@ -67,6 +67,7 @@ def run(args: argparse.Namespace) -> int:
         backend = resolve_backend(getattr(args, "backend", None))
         allow_expr = bool(getattr(args, "allow_unevaluated_expr", False))
         ignore_comments = bool(getattr(args, "ignore_comments", False))
+        canonical_wrap = bool(getattr(args, "canonical_wrap", False))
         erc = bool(getattr(args, "erc", False))
         no_header = bool(getattr(args, "no_provenance_header", False))
         if backend == "batch":
@@ -101,6 +102,7 @@ def run(args: argparse.Namespace) -> int:
                 ignore_comments=ignore_comments,
                 symbol_path=getattr(args, "symbol_path", None) or (),
                 relative_paths=args.relative_paths,
+                canonical_wrap=canonical_wrap,
                 warn=_warn,
             )
         else:
@@ -119,6 +121,7 @@ def run(args: argparse.Namespace) -> int:
                 symbol_path=getattr(args, "symbol_path", None) or (),
                 erc=erc,
                 relative_paths=args.relative_paths,
+                canonical_wrap=canonical_wrap,
                 provenance_header=not no_header,
             )
     except NetlistError as exc:

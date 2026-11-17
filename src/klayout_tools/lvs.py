@@ -299,10 +299,10 @@ if TYPE_CHECKING:
 #: use (often that host's absolute path), so `klt signoff`'s
 #: `input_verified` freshness gate (issue #2196) could re-verify such a
 #: citation only there and reported drift from every other checkout.
-#: Bumped 2 -> 3 (issue #4984): top-level `reference` became the same
-#: `{path, scope}` shape, built from the resolved path `environment.
-#: reference_sha256` hashes, so `--check` is cwd-independent. Readers still
-#: accept the bare string of an older report; `klayout-runset` keeps strings.
+#: Bumped 2 -> 3 (issue #4984): top-level `reference` became `{path, scope}`
+#: built from the resolved path `environment.reference_sha256` hashes
+#: (`--check` cwd-independent; readers accept the older bare string);
+#: `klayout-runset` keeps its `reference` bare, `layout` normalised (#5666).
 SCHEMA_VERSION = 3
 
 #: ``klayout`` (in-process ``NetlistComparer``) is the primary engine;

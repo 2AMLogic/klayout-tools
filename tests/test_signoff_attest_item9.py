@@ -93,6 +93,9 @@ def test_old_form_envelope_has_no_new_fields(tmp_path):
     roles = [c["role"] for c in envelope["attestation"]["checks"]]
     assert roles == ["testbench", "testbench", "cold_start", "pdk", "tools"]
     assert all("testbench" not in c for c in _commands(envelope))
+    # No sources declared: no source-role check and no attribution anywhere
+    # (issue #5701 back-compat).
+    assert all("testbenches" not in c for c in envelope["attestation"]["checks"])
 
 
 @pytest.mark.parametrize(

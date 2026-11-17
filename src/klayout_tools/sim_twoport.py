@@ -59,7 +59,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from . import sim_raw, touchstone
-from ._jsonnum import is_finite_number, is_int, is_number
+from ._jsonnum import is_int, require_finite_number
 from .sim_errors import SimError
 
 KIND = "twoport"
@@ -113,14 +113,6 @@ def is_twoport(analysis: dict[str, Any]) -> bool:
 # --------------------------------------------------------------------------- #
 
 
-def _number(value: Any, where: str) -> float:
-    if not is_number(value):
-        raise SimError(f"{where} must be a number (got {value!r})")
-    if not is_finite_number(value):
-        raise SimError(f"{where} must be finite (got {value!r})")
-    return float(value)
-
-
 def _resolve_port(entry: Any, index: int) -> dict[str, Any]:
     where = f"analysis.ports[{index}]"
     if not isinstance(entry, dict):
@@ -142,7 +134,7 @@ def _resolve_port(entry: Any, index: int) -> dict[str, Any]:
         nodes[key] = node
     if "z0" not in entry:
         raise SimError(f"{where}.z0 is required (the port's reference impedance, ohm)")
-    z0 = _number(entry["z0"], f"{where}.z0")
+    z0 = require_finite_number(entry["z0"], SimError, f"{where}.z0")
     if z0 <= 0:
         raise SimError(f"{where}.z0 must be positive (got {entry['z0']!r})")
     if nodes["p"].lower() == nodes["n"].lower() or (
@@ -174,8 +166,8 @@ def _resolve_freq(freq: Any) -> dict[str, Any]:
         raise SimError(
             f"analysis.freq.points must be a positive integer (got {points!r})"
         )
-    start = _number(freq.get("start"), "analysis.freq.start")
-    stop = _number(freq.get("stop"), "analysis.freq.stop")
+    start = require_finite_number(freq.get("start"), SimError, "analysis.freq.start")
+    stop = require_finite_number(freq.get("stop"), SimError, "analysis.freq.stop")
     if start <= 0:
         raise SimError(f"analysis.freq.start must be positive (got {freq['start']!r})")
     if sweep == "lin" and points == 1:
@@ -207,7 +199,9 @@ def _resolve_noise(noise: Any) -> dict[str, Any]:
             "analysis.noise.source_port is required and must be 1 or 2 (the "
             f"port that drives the noise source; got {port!r})"
         )
-    t0 = _number(noise.get("t0_k", DEFAULT_T0_K), "analysis.noise.t0_k")
+    t0 = require_finite_number(
+        noise.get("t0_k", DEFAULT_T0_K), SimError, "analysis.noise.t0_k"
+    )
     if t0 <= 0:
         raise SimError(f"analysis.noise.t0_k must be positive (got {t0!r})")
     return {"source_port": int(port), "t0_k": t0}
