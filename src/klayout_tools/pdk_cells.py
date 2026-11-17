@@ -14,10 +14,7 @@ own docstrings/callers for how this is used.
 
 PDK root/variant discovery (:func:`klayout_tools.pdk.find_pdk`) and the
 :class:`klayout_tools.pdk.PdkNotFoundError` exception it raises stay in
-:mod:`klayout_tools.pdk`, imported here; likewise :func:`klayout_tools.pdk._read_text`,
-which :mod:`klayout_tools.pdk`'s own :func:`klayout_tools.pdk.lef_files` also
-depends on and so cannot move here without leaving a back-reference the other
-way.
+:mod:`klayout_tools.pdk`, imported here.
 """
 
 from __future__ import annotations
@@ -27,10 +24,10 @@ import os
 import re
 from typing import Any
 
+from ._text import read_text as _read_text
 from .liberty_merge import LibertyMergeError, merge_liberty
 from .pdk import (
     PdkNotFoundError,
-    _read_text,
     find_pdk,
     list_pdks,
     variant_dir_of,

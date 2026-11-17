@@ -14,6 +14,56 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt pex` and `klt sim --monte-carlo` now read a SPICE card the same way
+  the flattener does: `w = 1` and `w=(2 * 1u)` are parameters, not device
+  names** (#5461, 2026-11-13): three hand-rolled card tokenizers lived in
+  `spice_flatten`, `pex` and `sim_mismatch_gate`. The two lesser copies
+  understood neither a space around `=` (ngspice accepts `w=1`, `w =1`,
+  `w= 1` and `w = 1` for one assignment) nor a parenthesised value
+  expression, while both fed "the model is the last token without `=`"
+  logic. `klt extract`'s own output is always unspaced, so a klt-generated
+  netlist never tripped this — but a **hand-written or xschem-netlisted**
+  file could, on two user-supplied inputs:
+  - `klt pex --reference`: a reference card `XM1 d g s b nfet w = 1 l = 0.15`
+    tallied its model as `0.15`, producing a phantom `model_mismatch`
+    (`kind: "model_set"`) against an extracted side naming the same device;
+    the same rule also decides `_reference_is_hierarchical`, so the
+    diagnostic's hierarchy-artifact caveat could be suppressed.
+  - `klt sim` `monte_carlo.instances`: an instance card `Xa n1 n2 sub w = 1`
+    read `w` as the subcircuit name and counted `sub` as an extra node, so
+    the generated mismatch-off wrapper got one pin too many.
+
+  All three now share `split_spice_tokens` (the flattener's implementation,
+  which was already the strict superset). **Behaviour change**: a gated
+  instance's parameters are re-emitted in the canonical unspaced spelling —
+  `w = 1` comes back as `w=1`, equivalent to ngspice. No JSON field is added,
+  renamed or removed; no `schema_version` bump.
+
+- **`klt mcp serve` serves the `docs/schemas/` JSON contract as MCP
+  resources** (#5420, 2026-11-13): the server now advertises the resources
+  capability and lists one resource per `docs/schemas/*.schema.json` at
+  `klt://schemas/<file name>` (MIME type `application/json`), so a client can
+  fetch the schema for a verb's request document without a checkout of this
+  repository. `resources/read` returns the schema verbatim; a URI that is not
+  in the listing — including a traversal attempt — is refused with
+  `InvalidParams`. The schemas are force-included into the wheel
+  (`klayout_tools/data/schemas`), so a wheel-only install serves the same
+  listing as a source checkout. Tools, their names and their schemas are
+  unchanged. See `docs/guides/mcp-server.md`.
+- **Added** (#5875): `klt signoff --attest N --inventory F --check ENV` now
+  reports an additive `build_drift` object (same shape as envelope
+  aggregation, #4223) and a `build_drift: <state>` text line; the opt-in
+  `--require-build-match` fails the check (exit 3, `status: "drifted"`) when
+  ENV's `provenance.klt_version` is from a different build. Report-only
+  without the flag.
+- **Changed** (#5583, additive-compatible — `klt stats` `schema_version`
+  unchanged): `geometry_digest` is now opt-in via `klt stats
+  --geometry-digest` and is `null` by default (text output `geometry_digest:
+  -`). Computing it re-reads and walks the whole layout (~2.5x the rest of
+  the report on large flat layouts). The field and its `["string","null"]`
+  schema type are unchanged; consumers that relied on the default value (e.g.
+  the `klt signoff --attest 2 --hash-kind geometry` recipe) must now pass the
+  flag.
 - **Changed** (#5788, breaking — `klt array-check` `schema_version` 1 ->
   **2**): the record's `file` field is now the committable
   `{path, scope}` object `env_provenance.repo_relative_path()` builds
@@ -27,6 +77,55 @@ not `klt --version`, if you need to detect this kind of drift. See
   `docs/json-contract.md` and carries no bump of its own. `--format text`
   still prints a path (`<outside repo>` for an external input), never the
   envelope object.
+
+- **`klt synthesize`'s `netlist_sha256` no longer depends on the build root
+  or on `run_id`** (#5594, 2026-11-15): Yosys names function-derived nets
+  (`$func$…`) after the source path spelling its script used, and since the
+  #1844 path rewriting that spelling is repo-relative for in-repo sources —
+  a form the #4872 normalizer never stripped, so in-repo netlists embedded
+  the repo-relative directory (sv2v intermediates: the run directory itself,
+  which defaults to a random `run-<uuid>`, making the digest differ on every
+  run). The normalizer now strips each source's repo-relative directory as
+  well as its absolute one, so a `$func$` net name always collapses to the
+  bare basename: the same request synthesizes byte-identical netlists and an
+  equal `netlist_sha256` from any build root, in or out of a git repository,
+  at any depth inside one, and with a defaulted `run_id`. **In-repo
+  digests change once**: a `netlist_sha256` recorded by an in-repo run of a
+  previous version will not match a run of this version (out-of-repo
+  digests are unchanged); callers holding a recorded digest for the
+  `signoff --check` freshness pattern should re-record it from a run of
+  this version. No JSON field changes.
+- **`klt lvs` retroactive records: the `device.property` count-granularity
+  change of issue #4729, and six `mismatches[].category` values that shipped
+  unlisted** (#4729, 2026-11-16): this file's header designates it the source
+  of truth for which `mismatches[].category` values exist as of a given date,
+  and a consumer who followed that policy while comparing two `klt lvs`
+  reports across versions found it silent on exactly the delta they were
+  looking up. Two retroactive records, both shipped before this entry;
+  neither changes any current output. (1) **`device.property` count
+  granularity** (landed in `v0.9.0`, 2026-11-05): the geometry-derived
+  `as`/`ad`/`ps`/`pd` parameter differences on a matched device pair whose
+  `w_um` also differs are no longer reported as their own `device.property`
+  entries — they are folded into that pair's `w_um` entry, preserved in its
+  `details.derived`. A pair whose `w_um` agrees keeps its derived entries as
+  they were. A width-only
+  difference on a matched MOS pair therefore emitted **five** `device.property`
+  entries before `v0.9.0` and emits **one** after (observed on the two builds
+  that surfaced this: `category_counts["device.property"]` `5` -> `1`, with
+  `status` and the per-class `counts` identical in both). Because every
+  `device.property` entry is `severity: "error"`, `mismatch_count` and
+  `error_count` move the same way for such an event (`5` -> `1` each) — only
+  the redundancy was removed; `status` is unchanged. (2) **Six
+  `mismatches[].category` values shipped without an entry here**:
+  `device.unmerged_fingers`, `device.flavour_mismatch`,
+  `topology.hierarchy_mismatch` and `topology.dangling_output_ambiguous`
+  (all first released in `v0.9.0`, 2026-11-05),
+  `hints.constant_nets_declared` (first released in `v0.8.0`, 2026-10-24),
+  and `pin.unmatched` (first released in `v0.2.0`, 2026-08-04 — the one
+  predating this file's category-record policy, listed for completeness).
+  Each is documented in [`docs/cli/lvs.md`](docs/cli/lvs.md) (four have their
+  own per-category sections; `pin.unmatched` and `hints.constant_nets_declared`
+  are covered in its field tables). No `schema_version` changes.
 
 - **`klt sim --batch-set` names member directories after the request stem**
   (#5633, 2026-11-15): a member request named `<stem>.request.json` -- the
@@ -151,6 +250,29 @@ not `klt --version`, if you need to detect this kind of drift. See
   `dead_metal_omitted`, so it shows no drift. Detection itself is unchanged, as
   is every run without the flag. Mirrors `klt erc --omit-antenna-tables`;
   additive and opt-in, no `schema_version` bump.
+
+- **`klt layout-plan execute` ties a MOS group's body to the net the netlist
+  already puts it on** (#5546, 2026-11-13): a `mos_array` / `diff_pair` /
+  `esd_device` group's `B`/bulk terminal was deliberately left out of the
+  per-device terminal map, so the group's own contacted tap pads (`TAP_PAD<k>`,
+  #4143) and guard-ring taps stayed floating. The plan reported itself fully
+  routed and `klt drc` reported 0 violations on a layout that could not pass
+  LVS: every PMOS body extracted onto an anonymous `$<n>` well net, every NMOS
+  body onto the deck-synthesized substrate net, and `klt lvs` came back
+  `unmatched` on every MOS. The body net is now derived from the digest and
+  bound group-level — one pin per group, on the first `TAP_PAD<k>` pad, or on
+  the first `TAP_<side>` port when the group draws its own ring instead. A
+  group whose declared devices disagree on their body net is an application
+  error (exit 1) naming the group and the nets, rather than a silent short; a
+  group with a body net and no tie port at all (a ring-less sky130 array)
+  binds nothing and earns a `warnings[]` entry, suppressed when a `guard_ring`
+  group's `net` (#5095) already names that net. No request or response field
+  is added, removed or renamed; no `schema_version` bump. **Behaviour change:**
+  a gf180mcu plan gains a pin per MOS group on its bulk net, so a plan that
+  exited `0` can now exit `3` with that net in `unrouted_nets[]` and a reason
+  in `unrouted_reasons[]` — an honest report of a tie that was previously
+  missing. A group enclosed by its own ring typically needs
+  `routing.cross_block_layer_role` for the tie to route out.
 
 ## 0.9.2 (2026-11-14)
 
@@ -540,6 +662,19 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## 0.9.0 (2026-11-05)
 
+- **`klt gen` names its PCell child cell `<cell-name>__core`** (issue #4251,
+  documented in [`docs/cli/gen.md`](docs/cli/gen.md)): on generators that
+  emit a PCell child (all except `asap7_finfet`/`asap7_tap`, which flatten
+  their output, and `bjt_array` on sg13g2, which instantiates the PDK's own
+  HBT cell), the child that the generated top cell instantiates was
+  previously left with KLayout's generator-named default (the library cell
+  name, e.g. `mos_array`) and is now `<cell-name>__core`, so streams from
+  differently named `--cell-name` runs can be read into one `Layout` without
+  their children merging. This changes the structure names written to the
+  stream, and therefore its bytes, while the drawn geometry is unchanged. A
+  consumer that pins a released stream's structure names or byte hash will
+  see the difference across this boundary. (Recorded retroactively; the
+  rename shipped in 0.9.0 without an entry.)
 - **`klt signoff --attest 9` accepts an explicit no-PDK pin** (issue #4904,
   documented in [`docs/cli/signoff.md`](docs/cli/signoff.md)): `pins.pdk` may
   be `{"none": true, "reason": "<non-empty>"}` for a partition whose cold

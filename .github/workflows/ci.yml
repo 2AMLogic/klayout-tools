@@ -74,7 +74,7 @@ jobs:
           fetch-depth: 0
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
           # Restore anywhere, save only on main -- see the uv-cache note above
@@ -349,7 +349,7 @@ jobs:
         run: cargo test ${{ matrix.cargo_test_args }}
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
           # Restore anywhere, save only on main -- see the uv-cache note above
@@ -656,7 +656,7 @@ jobs:
         run: cargo test
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
           # Restore anywhere, save only on main -- see the uv-cache note above
@@ -885,7 +885,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
           # Restore anywhere, save only on main -- see the uv-cache note above
@@ -1002,7 +1002,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
           # Restore anywhere, save only on main -- see the uv-cache note above
@@ -1167,6 +1167,37 @@ jobs:
 
       - name: Verify Yosys runs headlessly
         run: yosys -V
+
+      - name: Cache pinned sv2v install
+        # Issue #5956: the sv2v front end `klt synthesize`'s
+        # `sv_frontend: "sv2v"` route shells out to. Prebuilt upstream
+        # release asset, so -- unlike the Yosys block above -- a cache
+        # miss is a ~2 MB download + unzip, no apt packages and no build.
+        id: sv2v-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.cache/sv2v-0.0.13
+          key: sv2v-0.0.13-${{ runner.os }}-${{ hashFiles('scripts/install-sv2v.sh', 'scripts/_install_common.sh') }}
+
+      - name: Install pinned sv2v (cache miss only)
+        # scripts/install-sv2v.sh (issue #5956) installs the pinned,
+        # checksum-verified sv2v release binary so
+        # tests/test_synthesize_netlist_normalize.py's two real-sv2v
+        # reproducibility tests (issue #5594's AC2/AC4) run here instead
+        # of skipping -- before this, no CI leg installed sv2v, so both
+        # tests skipped on every leg and AC2/AC4 were verified locally
+        # only, on hosts that happen to have sv2v on PATH.
+        if: steps.sv2v-cache.outputs.cache-hit != 'true'
+        run: scripts/install-sv2v.sh
+
+      - name: Add pinned sv2v to PATH
+        run: echo "$HOME/.cache/sv2v-0.0.13/bin" >>"$GITHUB_PATH"
+
+      - name: Verify sv2v runs headlessly
+        # Also the per-leg presence guard (issue #5956 AC3): if the
+        # cache restore or install ever breaks, this fails the leg here
+        # instead of letting the sv2v tests silently skip.
+        run: sv2v --version
 
       - name: Install SymbiYosys (sby) + Bitwuzla runtime dependencies
         # scripts/install-symbiyosys.sh (issue #1312, Phase 2 of Epic #707)
@@ -1379,6 +1410,34 @@ jobs:
           PDK: sky130A
           COV_ARGS: ${{ matrix.python-version == '3.12' && '--cov --cov-report=json:coverage.json --cov-report=term' || '' }}
 
+      - name: Assert the sv2v reproducibility tests ran (no silent skip)
+        # Issue #5956: before the pinned sv2v steps above,
+        # tests/test_synthesize_netlist_normalize.py's two `_needs_sv2v`
+        # tests skipped on every CI leg, so issue #5594's AC2/AC4 were
+        # host-only. Same no-silent-skip posture as the `test-numerical`
+        # job's cross-check assert (issue #2276): this job provisions
+        # sv2v, Yosys and the sky130 liberty, so a skip in that file is a
+        # red, never a green lie. Runs the file explicitly with -rs on
+        # one leg (3.12, the leg that already carries the coverage extra)
+        # so any skip is named in this step's own log block -- that log
+        # line is also the AC1 "tests ran, 0 skipped" evidence.
+        if: matrix.python-version == '3.12'
+        run: |
+          set -o pipefail
+          sv2v --version
+          uv run --frozen --extra dev --extra functional-verification pytest \
+            tests/test_synthesize_netlist_normalize.py -rs \
+            | tee /tmp/sv2v-normalize-pytest.log
+          summary="$(tail -n 1 /tmp/sv2v-normalize-pytest.log)"
+          echo "pytest summary: $summary"
+          if echo "$summary" | grep -q 'skipped'; then
+            echo "::error::test_synthesize_netlist_normalize.py reported skips -- sv2v/Yosys/sky130 liberty are all provisioned in this job, so a skip here is a bug (issue #5956: this file's real-sv2v tests must RUN, never skip)"
+            exit 1
+          fi
+        env:
+          PDK_ROOT: ${{ github.workspace }}/pdks/sky130-liberty
+          PDK: sky130A
+
       - name: Coverage job summary (report-only)
         # `!cancelled()` so a red pytest still publishes what was measured;
         # hashFiles guards the legs that did not collect coverage.
@@ -1462,7 +1521,7 @@ jobs:
           path: second-checkout/nested/deeper-than-the-primary
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
           # Restore anywhere, save only on main -- see the uv-cache note above
@@ -1703,7 +1762,7 @@ jobs:
           path: second-checkout/nested/deeper-than-the-primary
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
           # Restore anywhere, save only on main -- see the uv-cache note above
@@ -1784,7 +1843,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
           # Restore anywhere, save only on main -- see the uv-cache note above
@@ -1864,7 +1923,10 @@ jobs:
       - name: ASAP7 deck fixtures
         run: |
           klayout -v
-          uv run --frozen --extra dev pytest tests/test_drc_asap7_deck.py -q -rs
+          # The via-tip oracle's one @_needs_klayout test
+          # (test_counts_match_the_real_deck) skips without the binary, so it
+          # only executes here (#5762, ~+10 s measured).
+          uv run --frozen --extra dev pytest tests/test_drc_asap7_deck.py tests/test_place_and_route_via_tip.py -q -rs
 
   wall-clock-budget:
     name: CI wall-clock budget

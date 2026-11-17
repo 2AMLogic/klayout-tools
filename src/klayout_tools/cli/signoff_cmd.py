@@ -130,6 +130,7 @@ from ..signoff import (
     describe_grader,
 )
 from ..signoff_attest import STREAM_ATTESTABLE_ITEM, write_attestation
+from ..signoff_attest_build import attach_build_drift, build_drift_line
 from ..signoff_attest_carry import compute_attestation as _compute_attestation
 from ..signoff_attest_carry import flag_problem as _skip_local_only_problem
 from ..signoff_attest_carry import skip_lines
@@ -142,6 +143,7 @@ from ..signoff_generator_batch import (
     GeneratorExecution,
     resolve_execution,
 )
+from ..signoff_output import non_attest_problem, write_output_or_message
 from .color import Palette, resolve_palette
 from .output import emit_error, emit_success, render_rerun_drift
 
@@ -221,30 +223,15 @@ def _maybe_run_attest(
     """``--attest`` dispatch (issue #2844) -- run it, or refuse its flags.
 
     Returns the exit code when the invocation is an ``--attest`` one (run it)
-    or an ``--inventory``/``--output`` misuse (refuse them), and ``None``
+    or a flag misuse (refuse it: the non-``--attest`` pairings that make no
+    sense, per :func:`~.signoff_output.non_attest_problem`), and ``None``
     otherwise so ``run`` can fall through to the other modes.
     """
     if getattr(args, "attest", None) is not None:
         return _run_attest(args, manifest_source, fleet_source)
-    stray = [
-        flag
-        for flag, attr in (
-            ("--inventory", "inventory"),
-            ("--output", "output"),
-            ("--input", "attest_input"),
-            ("--generator", "generator"),
-            ("--regenerated-hash", "regenerated_hash"),
-            ("--skip-local-only", "skip_local_only"),
-        )
-        if getattr(args, attr, None)
-    ]
-    if stray or getattr(args, "hash_kind", None) is not None:
-        return emit_error(
-            "signoff",
-            "--inventory/--output/--input/--generator/--regenerated-hash/"
-            "--hash-kind/--skip-local-only only apply to --attest",
-            args.format,
-        )
+    problem = non_attest_problem(args, manifest_source, fleet_source)
+    if problem:
+        return emit_error("signoff", problem, args.format)
     return None
 
 
@@ -354,13 +341,6 @@ def _run_attest(
     problem = _skip_local_only_problem(args)
     if problem is not None:
         return emit_error("signoff", problem, args.format)
-    if committed is not None and output:
-        return emit_error(
-            "signoff",
-            "--check and --output are mutually exclusive with --attest: "
-            "--check verifies a committed envelope and never writes",
-            args.format,
-        )
     try:
         result = _compute_attestation(args, inventory, stream, committed)
     except SignoffError as exc:
@@ -368,6 +348,7 @@ def _run_attest(
 
     if committed is not None:
         attach_live_fields(result.get("fresh") or {}, hints=False)
+        attach_build_drift(result, committed, args.require_build_match)
         emit_success(result, args.format, _print_attestation_check_text)
         ok = result["status"] == "match" and result["fresh_status"] == "pass"
         return EXIT_PASS if ok else EXIT_FAIL
@@ -400,6 +381,7 @@ def _print_attestation_text(result: dict) -> None:
 def _print_attestation_check_text(result: dict) -> None:
     render_rerun_drift(result)
     print(f"fresh_status: {result['fresh_status']}")
+    print(build_drift_line(result))
     failed = [c for c in result["fresh"]["attestation"]["checks"] if not c["passed"]]
     for check in failed:
         print(_attestation_check_line(check))
@@ -490,12 +472,7 @@ def _run_tier_report(
         emit_success(result, args.format, render_rerun_drift)
         return _CHECK_EXIT_CODES[result["status"]]
 
-    palette = resolve_palette(args)
-    emit_success(
-        result, args.format, lambda payload: _print_tier_report_text(payload, palette)
-    )
-
-    return EXIT_PASS if result["tier"] == "T1" else EXIT_FAIL
+    return _finish_render(result, args, _print_tier_report_text, result["tier"] == "T1")
 
 
 def _run_fleet_report(
@@ -541,17 +518,28 @@ def _run_fleet_report(
         emit_success(result, args.format, render_rerun_drift)
         return _CHECK_EXIT_CODES[result["status"]]
 
-    palette = resolve_palette(args)
-    emit_success(
-        result, args.format, lambda payload: _print_fleet_report_text(payload, palette)
+    return _finish_render(
+        result, args, _print_fleet_report_text, result["not_t1_count"] == 0
     )
-
-    return EXIT_PASS if result["not_t1_count"] == 0 else EXIT_FAIL
 
 
 def _read_manifest(source: str, *, description: str = "manifest") -> Any:
     """Use the same strict JSON reader for manifest, fleet, and evidence."""
     return _read_json_source(source, description)
+
+
+def _finish_render(
+    result: dict, args: argparse.Namespace, print_text: Any, passed: bool
+) -> int:
+    """Emit a fresh render's verdict (issue #5867 wiring): write the
+    ``--output`` envelope (if any) *before* stdout so a write failure
+    never follows a printed success, then render the text report."""
+    problem = write_output_or_message(result, getattr(args, "output", None))
+    if problem:
+        return emit_error("signoff", problem, args.format)
+    palette = resolve_palette(args)
+    emit_success(result, args.format, lambda payload: print_text(payload, palette))
+    return EXIT_PASS if passed else EXIT_FAIL
 
 
 def _print_describe_grader_text(result: dict) -> None:
