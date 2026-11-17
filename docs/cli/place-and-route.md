@@ -3497,13 +3497,23 @@ being reported, a changed `provenance.input.content_hash`.
 
 Excluded from the diff: `provenance.klt_version`/`klt_git_commit`/`klt_reinstall_spec`/`klayout_version`/
 `pdk.version` and `engine_version` (an OpenROAD upgrade that leaves the result
-untouched is tool churn, not evidence drift), plus the whole `engine_logs[]`
-block — every entry is keyed by a fresh `uuid4` `invocation_id` with its
-retained log directory named after it, so leaving it in would make `--rerun`
-report `"drifted"` unconditionally. The output artifact paths
-(`def_path`/`gds_path`/`verilog_path`) are **not** excluded: this verb writes
-to a fixed `.klt/place-and-route/` directory, so they are stable across
-re-runs from the same request and a change in one is real drift.
+untouched is tool churn, not evidence drift), `provenance.pdk.source` (*how*
+the PDK was resolved — search roots vs `$PDK_ROOT` vs `--pdk-root`; the
+identical install resolved through a different mechanism on another host is
+not drift, issue #5863), plus the whole `engine_logs[]` block — every entry
+is keyed by a fresh `uuid4` `invocation_id` with its retained log directory
+named after it, so leaving it in would make `--rerun` report `"drifted"`
+unconditionally. The output artifact paths (`def_path`/`gds_path`/
+`verilog_path` and the other path-bearing fields) are **not** excluded — but
+they are compared by **file name only**, on both sides (issue #5863): a
+committed report is lint-clean, so a consumer has scrubbed its paths
+repo-relative or to `~/`-form (`env-provenance lint-envelope` requires
+exactly that), while the fresh side echoes absolute host paths; the directory
+is host- and scrub-shape-specific and never verdict-bearing. The file name
+keeps the identity check — this verb writes to a fixed `.klt/place-and-route/`
+directory under names derived from the top module, so a renamed artifact, or
+one going `null` ↔ path (missing or newly appearing), still reports
+`"drifted"`.
 
 **`--rerun` overwrites this request's own artifacts.** Unlike `klt
 synthesize`'s retained per-`run_id` directories, the output directory is
