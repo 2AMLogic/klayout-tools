@@ -821,6 +821,7 @@
         "klayout_tools.sim_plan",
         "klayout_tools.sim_plot",
         "klayout_tools.sim_portable",
+        "klayout_tools.sim_post_commands",
         "klayout_tools.sim_process_legs",
         "klayout_tools.sim_provenance",
         "klayout_tools.sim_raw",
