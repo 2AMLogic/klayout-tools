@@ -738,6 +738,7 @@
       "modules": [
         "klayout_tools.asap7_bsimcmg",
         "klayout_tools.cli.parser_sim",
+        "klayout_tools.cli.sim_check_cmd",
         "klayout_tools.cli.sim_cmd",
         "klayout_tools.cli.sim_job_text",
         "klayout_tools.cli.sim_measurement_text",
@@ -814,6 +815,7 @@
         "klayout_tools.sim_plan",
         "klayout_tools.sim_plot",
         "klayout_tools.sim_portable",
+        "klayout_tools.sim_report_check",
         "klayout_tools.sim_process_legs",
         "klayout_tools.sim_provenance",
         "klayout_tools.sim_raw",

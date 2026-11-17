@@ -152,9 +152,14 @@ this document (and the code) win.
   | raw `sha256` | `netlist_identity` | `diagnosis` |
   |---|---|---|
   | all match | match | `intact` |
-  | some mismatch | match | `cosmetic` (comment/whitespace/case edit only) |
+  | some mismatch | match | `cosmetic` (raw bytes moved, normalized text did not) |
   | some mismatch | mismatch | `electrical` (recorded measurements are stale) |
   | all match | mismatch | `normalization_changed` (the tool's normalization moved, not the netlist; see #5438) |
+
+  `cosmetic` is not always benign: usually it is a comment/whitespace/case
+  edit, but a **repointed `.include`** also lands in this row, because
+  normalization strips the include target — the identity cannot see it. The
+  mismatching `netlist_closure` entry names the file that moved; check it.
 
   `skipped[]` lists entries that cannot be re-hashed — a host-resolved
   `{target, sha256: null}` include, a `scope: "external"`/`"absent"` entry

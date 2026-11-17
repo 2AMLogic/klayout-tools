@@ -10,7 +10,11 @@ import pytest
 
 from klayout_tools.sim_errors import SimError
 from klayout_tools.sim_report_check import check_sim_report
-from klayout_tools.sim_staging import _normalized_netlist_text
+from klayout_tools.sim_staging import (
+    _normalized_netlist_text,
+    netlist_closure,
+    netlist_identity,
+)
 
 
 def _raw(path) -> str:
@@ -180,3 +184,27 @@ def test_root_reanchors(tree, tmp_path_factory):
 def test_unreadable_report_raises(tmp_path):
     with pytest.raises(SimError):
         check_sim_report(str(tmp_path / "nope.json"))
+
+
+def test_writer_identity_and_closure_round_trip(tree):
+    """The fixture evidence is recorded by ``sim_staging`` itself, not the
+    ``_raw``/``_identity`` helpers: if the writer's digest loop ever changes
+    (separator, ordering, which files it walks), this fails instead of the
+    checker silently reporting false drift on every intact report."""
+    tmp, top, _ = tree
+    identity, error = netlist_identity({}, str(top))
+    assert error is None
+    report = tmp / "report.json"
+    report.write_text(
+        json.dumps(
+            {
+                "environment": {
+                    "netlist_closure": netlist_closure({}, str(top)),
+                    "netlist_identity": identity,
+                }
+            }
+        )
+    )
+    result = check_sim_report(str(report))
+    assert result["status"] == "match"
+    assert result["diagnosis"] == "intact"
