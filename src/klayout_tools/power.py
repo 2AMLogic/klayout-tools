@@ -218,11 +218,13 @@ _STACKUP_KEYS = (
     "layer",
     "label_layer",
     "sheet_resistance_ohm_per_sq",
+    "sheet_resistance_source",
     "current_limit_a_per_um",
     "current_limit_source",
 )
 _VIA_EXTRA_KEYS = (
     "resistance_ohm",
+    "resistance_ohm_source",
     "current_limit_a",
     "current_limit_source",
     "cut_size_um",
@@ -389,12 +391,22 @@ def _validate_stackup(spec: dict[str, Any], spec_path: str) -> list[dict[str, An
         if current_limit_source is not None:
             current_limit_source = str(current_limit_source)
 
+        # `sheet_resistance_source` (issue #5791, optional): the same
+        # citation convention for `sheet_resistance_ohm_per_sq` --
+        # which techfile line, foundry doc or corner variant the number
+        # came from -- echoed on every metal edge this role contributes
+        # as `resistance_ohm_source`.
+        sheet_resistance_source = entry.get("sheet_resistance_source")
+        if sheet_resistance_source is not None:
+            sheet_resistance_source = str(sheet_resistance_source)
+
         entries.append(
             {
                 "name": name,
                 "layer": layer,
                 "label_layer": label_layer,
                 "sheet_resistance_ohm_per_sq": sheet_r,
+                "sheet_resistance_source": sheet_resistance_source,
                 "current_limit_a_per_um": current_limit_a_per_um,
                 "current_limit_source": current_limit_source,
             }
@@ -503,6 +515,28 @@ def _validate_vias(
         if current_limit_source is not None:
             current_limit_source = str(current_limit_source)
 
+        # `resistance_ohm_source` (issue #5791, optional): the citation
+        # convention for `resistance_ohm` -- but only alongside an explicit
+        # number. With `--deck` an omitted `resistance_ohm` is filled from
+        # the deck (`_apply_deck_via_resistance`), and the report's own
+        # `vias[].resistance_source` then says `deck:<name>:<corner>`, so
+        # echoing a spec citation on top would assert false provenance in a
+        # report `klt signoff` can cite. An explicit `resistance_ohm`
+        # always wins over the deck, so the citation is truthful in every
+        # accepted case.
+        resistance_ohm_source = entry.get("resistance_ohm_source")
+        if resistance_ohm_source is not None:
+            resistance_ohm_source = str(resistance_ohm_source)
+            if resistance_ohm is None:
+                raise PowerError(
+                    f"spec '{spec_path}': vias[{i}] gives "
+                    "'resistance_ohm_source' without 'resistance_ohm' -- "
+                    "with --deck the number would come from the deck and "
+                    "the citation would claim spec provenance it does not "
+                    "have; set 'resistance_ohm' explicitly or drop the "
+                    "citation"
+                )
+
         cut_geometry = _validate_via_cut_geometry(entry, spec_path, i)
 
         entries.append(
@@ -512,6 +546,7 @@ def _validate_vias(
                 "between": between,
                 "resistance_ohm": resistance_ohm,
                 "resistance_source": "spec",
+                "resistance_ohm_source": resistance_ohm_source,
                 "current_limit_a": current_limit_a,
                 "current_limit_source": current_limit_source,
                 **cut_geometry,
@@ -1086,6 +1121,7 @@ def _model_box_polygon(
         entry["current_limit_source"],
         length_um=length_um,
         cross_um=cross_um,
+        resistance_ohm_source=entry["sheet_resistance_source"],
     )
     return [(n_a, a_x, a_y), (n_b, b_x, b_y)]
 
@@ -1178,6 +1214,7 @@ def _model_mesh_polygon(
                 entry["current_limit_source"],
                 length_um=half_um,
                 cross_um=cross_um,
+                resistance_ohm_source=entry["sheet_resistance_source"],
             )
     return endpoints
 
@@ -1239,6 +1276,7 @@ def _build_island_network(
         area_um2: float | None = None,
         n_cuts: int | None = None,
         n_cuts_source: str | None = None,
+        resistance_ohm_source: str | None = None,
     ) -> None:
         edge_id = f"e{counters['edge']}"
         counters["edge"] += 1
@@ -1273,6 +1311,12 @@ def _build_island_network(
                     round(current_limit_a, 12) if current_limit_a is not None else None
                 ),
                 "current_limit_source": current_limit_source,
+                # Issue #5791: where this edge's `resistance_ohm` came
+                # from -- the contributing role's spec citation
+                # (`stackup[].sheet_resistance_source` on a metal edge,
+                # `vias[].resistance_ohm_source` on a via edge), `null`
+                # when that role declared none.
+                "resistance_ohm_source": resistance_ohm_source,
                 # Issue #3401: cuts this via edge's `resistance_ohm` was
                 # divided across (`null` on a metal edge); `n_cuts_source`
                 # is "spec" when `cut_size_um`/`cut_space_um` derived it,
@@ -1366,6 +1410,7 @@ def _build_island_network(
                 area_um2=polygon.area() * dbu * dbu,
                 n_cuts=n_cuts,
                 n_cuts_source=n_cuts_source,
+                resistance_ohm_source=via["resistance_ohm_source"],
             )
 
     # The connectivity model already declared these nodes one island, so the
