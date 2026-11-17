@@ -8,6 +8,7 @@ import json
 
 import pytest
 
+import lvs_tmp_repo
 import test_lvs_klayout_runset as base
 from klayout_tools import lvs_runset
 from klayout_tools.lvs import LvsError, rerun_lvs_report, run_lvs
@@ -15,6 +16,7 @@ from klayout_tools.lvs import LvsError, rerun_lvs_report, run_lvs
 fake_klayout = base.fake_klayout  # pytest collects the fixture by module-level name
 _request = base._request
 _unresolved = base._unresolved
+tmp_path = lvs_tmp_repo.tmp_path  # pytest collects the fixture by module-level name
 
 
 MIM_SPICE = (
