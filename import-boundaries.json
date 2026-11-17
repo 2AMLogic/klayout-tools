@@ -698,7 +698,8 @@
         "klayout_tools.touchstone",
         "klayout_tools.verilog_module_names",
         "klayout_tools.verilog_netlist",
-        "klayout_tools.verilog_pin_bind"
+        "klayout_tools.verilog_pin_bind",
+        "klayout_tools.ziputils"
       ]
     },
     "signoff": {
