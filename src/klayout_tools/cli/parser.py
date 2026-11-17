@@ -423,8 +423,7 @@ def _add_sta_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     sta_parser.add_argument("request", help="path to a klt sta request JSON file")
     _add_pdk_args(sta_parser)
-    _add_format_arg(sta_parser)
-    sta_parser.set_defaults(func=sta_cmd.run)
+    sta_cmd.configure(sta_parser, _add_format_arg, _add_flow_verify_args)
 
 
 def _add_eval_parser(subparsers: argparse._SubParsersAction) -> None:

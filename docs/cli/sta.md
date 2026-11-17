@@ -1823,15 +1823,58 @@ not evidence of a completed analysis. No timeout is added, and logs are
 written after capture: timeout/interrupt data is retained when available,
 but an abrupt termination cannot guarantee a complete transcript.
 
+## `--check` / `--rerun` (issue #5841)
+
+A committed `klt sta --format json` report can be re-verified against the
+request that produced it, the same affordance `klt place-and-route` and
+`klt synthesize` have (issue #2224). The request stays **positional** — a `sta`
+report does not echo it.
+
+```bash
+klt sta flows/gcd/sta.json --check flows/gcd/sta.report.json           # cheap
+klt sta flows/gcd/sta.json --check flows/gcd/sta.report.json --rerun   # full
+```
+
+- **`--check REPORT` (cheap mode).** Re-resolves the request's geometry source
+  (`def` or `verilog`) and standard-cell liberty and re-hashes them, comparing
+  against the digests the report recorded: `provenance.input.content_hash` and
+  `provenance.deck.content_hash`. No OpenROAD run. A `pdk.corners` (or
+  map-form `spef`) report hoists `provenance.input` and carries one
+  `corners[].deck.content_hash` per corner, so each corner is checked on its
+  own and the moved one is named, e.g. `corners[ss_100C_1v60].deck.content_hash`.
+  A recorded hash that is `null`, or a corner missing from the report, never
+  counts as a match.
+- **`--rerun` (full mode, requires `--check`).** Re-runs the analysis and diffs
+  the fresh report against the committed one, reporting every changed field
+  under `drift`. Excluded from the diff: `provenance.klt_version` /
+  `klt_git_commit` / `klt_reinstall_spec` / `klayout_version` /
+  `pdk.version` / `pdk.commit` and `engine_version` (tool churn, not evidence
+  drift), the run-scoped `engine_log` object (a fresh `invocation_id` and the
+  log paths named after it, at the top level and in every `corners[]` entry),
+  and `sdf.content_hash` (OpenSTA stamps a `(DATE ...)` header, so the digest
+  is not reproducible). Everything else, including every `{path, scope}`
+  envelope, is compared as-is: both sides are produced by the same code, so a
+  committed report needs no extra normalization. The fresh report is embedded
+  as `fresh`.
+- `--rerun` without `--check` is an error (exit 1).
+- **`--rerun` rewrites `.klt/sta/`** next to the request, exactly as a normal
+  `klt sta` run does. `--check` alone touches nothing.
+
+Both modes emit the shared `--check` / `--rerun` payloads
+(`schema_version`, `mode`, `report`, `status: "match" | "drifted"`, plus
+`checks[]` or `drift[]`). Additive only: the `sta` report itself, its
+`schema_version` and its verdict fields are unchanged.
+
 ## Exit codes
 
 | Code | Meaning |
 | --- | --- |
-| `0` | The analysis completed. |
-| `1` | Failed to run — bad request, unresolvable `def`/`verilog`/PDK/LEF/`spef`, a missing clock constraint, or an OpenROAD engine error. |
+| `0` | The analysis completed (or, with `--check`, the committed report still reproduces). |
+| `1` | Failed to run — bad request, unresolvable `def`/`verilog`/PDK/LEF/`spef`, a missing clock constraint, an OpenROAD engine error, or (with `--check`) a missing/unparseable committed report; `--rerun` without `--check`. |
 | `2` | Usage error (missing argument, bad `--format` value) — from argparse. |
+| `3` | `--check` only: the committed report no longer reproduces (`status: "drifted"`). |
 
-**No exit code `3`.** Like `klt place-and-route`, timing slack and violation
+**A fresh run never exits `3`.** Like `klt place-and-route`, timing slack and violation
 counts are data, not a built-in pass/fail gate — a negative `worst_slack_ns`
 is an expected, correctly-reported number, not a contract-level failure. A
 caller wanting "did timing close" as a pass/fail gate composes this contract

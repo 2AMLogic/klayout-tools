@@ -9,20 +9,57 @@ Exit codes (see ``docs/cli/sta.md`` for the full table):
     1 - failed to run (bad request, unresolvable def/PDK/LEF/spef, a missing
         clock constraint, or an OpenROAD engine error) -- returned by
         ``emit_error`` as ``output.ERROR_EXIT_CODE``
+    3 - ``--check`` only: the committed report no longer reproduces
+        (``status: "drifted"``)
 (2 is reserved for argparse usage errors, as with every other ``klt``
-subcommand. There is no exit code 3 -- like ``klt place-and-route``, this
+subcommand. A *fresh* run never exits 3 -- like ``klt place-and-route``, this
 command has no pass/fail concept of its own; timing slack/violation counts
 are data, not a built-in gate.)
+
+``--check <report>`` (issue #5841) verifies a previously committed report
+still reproduces from the request given positionally -- see
+``docs/cli/sta.md``, "--check / --rerun". Cheap mode (default): re-hash the
+request's geometry source and liberty(ies) and compare against the report's
+recorded ``provenance`` digests, no OpenROAD run. Full mode (``--check
+<report> --rerun``): re-run the analysis and diff verdict-bearing fields.
 """
 
 import argparse
 
 from ..env_provenance import render_path_field
 from ..post_route_sta import PostRouteStaError, run_sta
-from .output import emit_error, emit_success
+from ..post_route_sta_verify import check_sta_report, rerun_sta_report
+from .output import emit_error, emit_success, render_check_text, render_rerun_drift
+
+#: The --check/--rerun outcome (issue #5841) -- the same 0/3 split `klt
+#: place-and-route --check` uses. A fresh run never exits 3, so 3 means, and
+#: only means, "the committed report no longer reproduces".
+EXIT_MATCH = 0
+EXIT_DRIFTED = 3
+
+
+def configure(
+    sta_parser: argparse.ArgumentParser, add_format_arg, add_verify_args
+) -> None:
+    """Attach ``--format`` and the shared ``--check``/``--rerun`` flags (issue
+    #5841), and bind :func:`run`. Called from ``parser._add_sta_parser``."""
+    add_format_arg(sta_parser)
+    add_verify_args(
+        sta_parser,
+        verb="sta",
+        inputs="geometry source (def/verilog) and liberty",
+        engine="OpenSTA",
+        docs="docs/cli/sta.md",
+    )
+    sta_parser.set_defaults(func=run)
 
 
 def run(args: argparse.Namespace) -> int:
+    if args.check is not None:
+        return _run_check(args)
+    if args.rerun:
+        return emit_error("sta", "--rerun requires --check <report>", args.format)
+
     try:
         report = run_sta(args.request, pdk_variant=args.pdk, pdk_root=args.pdk_root)
     except PostRouteStaError as exc:
@@ -31,6 +68,29 @@ def run(args: argparse.Namespace) -> int:
     emit_success(report, args.format, _print_text)
 
     return 0
+
+
+def _run_check(args: argparse.Namespace) -> int:
+    """`--check <report>` (and `--rerun`): verify committed evidence against
+    the request still on disk (issue #5841). The positional `request` stays
+    required: a `klt sta` report does not echo the request that produced it
+    (see `_report_verify.py`'s module docstring)."""
+    try:
+        if args.rerun:
+            result = rerun_sta_report(
+                args.check, args.request, pdk_variant=args.pdk, pdk_root=args.pdk_root
+            )
+        else:
+            result = check_sta_report(
+                args.check, args.request, pdk_variant=args.pdk, pdk_root=args.pdk_root
+            )
+    except PostRouteStaError as exc:
+        return emit_error("sta", str(exc), args.format)
+
+    emit_success(
+        result, args.format, render_rerun_drift if args.rerun else render_check_text
+    )
+    return EXIT_MATCH if result["status"] == "match" else EXIT_DRIFTED
 
 
 def _print_text(report: dict) -> None:
