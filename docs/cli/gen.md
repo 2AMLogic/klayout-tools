@@ -1093,9 +1093,19 @@ the cell as `sky130_fd_pr__res_high_po_<w>` / `res_xhigh_po_<w>`. Magic's own
 poly resistor by < 2.16um" and `rpm.1`'s minimum RPM/URPM width: the
 generator's heads are not drawn to the foundry cell's head geometry, and
 `klt drc --deck sky130` does not check those rules (see `docs/cli/drc.md`,
-"Precision-poly-resistor head rules are not checked"). So the `high`/`xhigh`
-output is recognised by Magic but is **not** Magic-DRC-clean; use `klt drc
---engine klayout` for the independent check. A reporter also saw Magic
+"Precision-poly-resistor head rules are not checked"). That head-geometry
+attribution is measured, not assumed (2026-11-15: Magic 8.3.683, open_pdks
+sky130A `c6d73a35f524`, klt `0.9.3.dev3+gd5d57daf9a14`): forcing the marker
+to a uniform 0.2 µm on all four sides (`spacing_um` <= 0.4) leaves the
+`rpm.1` verdict unchanged, while sweeping only the head length clears it —
+`rpm.1` gone from a 1.50 µm head, fully `drc(full)`-clean from 2.08 µm — so
+the marker overhang is ruled out and the head-length fix is tracked in
+#5704. (The duplicated `poly.2` reports — "Distance between precision
+resistors < 0.21um" and "poly spacing < 0.21um" — seen on a standalone unit
+at klt 0.8.0 do not reproduce at klt `0.9.3.dev3`, so they are not
+tracked.) So the `high`/`xhigh` output is recognised by Magic but is
+**not** Magic-DRC-clean; use `klt drc --engine klayout` for the independent
+check. A reporter also saw Magic
 (10 nm input scale) extract a body whose length is an odd multiple of 5 nm
 (e.g. `length_um: 9.765`) as a generic `res_high_po` with both terminals
 on one net when its left edge sat on the 10 nm grid, and correctly when
@@ -2413,6 +2423,7 @@ family/variant split the resolver doesn't have. The response's
   "pdk": { "name": "sky130A", "variant": "sky130A", "version": "open_pdks 0fe599b" },
   "dbu_um": 0.001,
   "bbox_um": { "x0": 0.0, "y0": 0.0, "x1": 9.68, "y1": 0.42 },
+  "subcell_naming_scheme": "core-suffix-v1",
   "device_count": 4,
   "ports": [
     {
@@ -2495,6 +2506,13 @@ family/variant split the resolver doesn't have. The response's
 | `well_box_um` | object \| null | `well_island` only: `{x0, y0, x1, y1}` of the well rectangle actually drawn, at the resolved (possibly trimmed) enclosure. `null` on a PDK family with no well layer. |
 | `well_separation_um` | number \| null | `well_island` only: the well-to-well clearance actually enforced against `params.isolate_from` — the resolved family's own different-potential rule unless `params.separation_um` raised it. |
 | `well_keepout_box_um` | object \| null | `well_island` only: `well_box_um` grown by `well_separation_um` on every side — the region no *other* well may enter. |
+
+`subcell_naming_scheme` (issue #5808) is a stable id of how the written
+stream names its sub-cells: `"core-suffix-v1"` (`<cell_name>__core`),
+`"pdk-cell-v1"` (sg13g2 `bjt_array`: the PDK cell's own name) or `null`
+(flattened output, no sub-cell). It changes whenever the naming changes, so a
+caller committing GDS can compare it across klt versions instead of diffing
+bytes.
 
 ### Semantics and guarantees
 
