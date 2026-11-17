@@ -4,8 +4,9 @@ without growing :mod:`parser` past its ceiling -- the same move
 :mod:`parser_pex` made for ``klt pex``. Parser-wide helpers are callables the
 caller passes in, so this module never imports :mod:`parser` back.
 
-The verb's logic lives in :mod:`klayout_tools.artifact_store`,
-:mod:`klayout_tools.artifact_verify_local` and :mod:`.artifact_cmd`; see
+The verb's logic lives in :mod:`klayout_tools.artifact_objects`,
+:mod:`klayout_tools.artifact_verify`, :mod:`klayout_tools.artifact_verify_local`
+and :mod:`.artifact_cmd`; see
 docs/cli/artifact.md.
 """
 
@@ -15,7 +16,7 @@ import argparse
 from collections.abc import Callable
 from typing import Any
 
-from .. import artifact_store
+from .. import artifact_objects
 from . import artifact_cmd
 
 
@@ -35,7 +36,7 @@ def add_artifact_parser(
         description=(
             "Evidence bytes go to the artifact store through its broker; git "
             "keeps a manifest naming each object by sha256. The broker URL "
-            f"comes from --broker or ${artifact_store.ENV_BROKER}; there is "
+            f"comes from --broker or ${artifact_objects.ENV_BROKER}; there is "
             "no default. No credential is held: the broker identifies the "
             "caller by its network identity. Presigned URLs stay in-process "
             "and are never printed."
@@ -63,7 +64,7 @@ def add_artifact_parser(
         help="merge the entries into this manifest JSON (created if absent)",
     )
     put_parser.add_argument(
-        "--kind", choices=list(artifact_store.CLIENT_KINDS), default="evidence"
+        "--kind", choices=list(artifact_objects.CLIENT_KINDS), default="evidence"
     )
     put_parser.add_argument(
         "--name",
@@ -193,7 +194,7 @@ def _add_artifact_common_args(
         "--broker",
         metavar="URL",
         default=None,
-        help=f"artifact broker base URL (default: ${artifact_store.ENV_BROKER})",
+        help=f"artifact broker base URL (default: ${artifact_objects.ENV_BROKER})",
     )
     if repo:
         parser.add_argument(
@@ -201,6 +202,6 @@ def _add_artifact_common_args(
             metavar="OWNER/NAME",
             default=None,
             help=f"repo the objects are stored under (default: "
-            f"${artifact_store.ENV_REPO}, else the git origin remote)",
+            f"${artifact_objects.ENV_REPO}, else the git origin remote)",
         )
     _add_format_arg(parser)

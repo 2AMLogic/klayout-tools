@@ -24,36 +24,20 @@ Two tiers, mirroring `test_sim.py`/`test_size.py`:
 from __future__ import annotations
 
 import json
-import os
 import re
-import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
 from helpers.subprocess_fakes import fake_completed
+from helpers.tool_probes import HAVE_NGSPICE
 from klayout_tools import eval as eval_mod
 from klayout_tools import op_sanity
 from klayout_tools.cli import main
 from klayout_tools.pdk import PdkNotFoundError, find_pdk
 
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
-
-#: The integration tests at the bottom of this file invoke a real `ngspice`
-#: against a real vendor model library -- slow and host-load-sensitive, the
-#: tier issue #1651 carved out. `KLT_SKIP_NGSPICE_TESTS=1` (set by `npm run
-#: check:ci`'s local-only test script, never by CI) lets a host that *has*
-#: ngspice still opt out, exactly as `tests/test_extract.py`,
-#: `tests/test_sim.py` and `tests/test_eval.py` already do. Issue #2677:
-#: this file was never wired into that knob, so a saturated 8-vCPU dispatch
-#: worker ran these under the build gate and lost the operating point to a
-#: wall-clock timeout -- a red gate for a host-contention reason. CI, which
-#: never sets the variable, still runs them and still catches regressions.
-HAVE_NGSPICE = (
-    shutil.which("ngspice") is not None
-    and os.environ.get("KLT_SKIP_NGSPICE_TESTS") != "1"
-)
 
 EXAMPLES = Path(__file__).parent.parent / "examples"
 

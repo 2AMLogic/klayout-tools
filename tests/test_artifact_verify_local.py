@@ -21,7 +21,8 @@ from typing import Any
 
 import pytest
 
-from klayout_tools import artifact_store as store
+from klayout_tools import artifact_objects as store
+from klayout_tools import artifact_verify as av
 from klayout_tools.cli import main
 
 REPO = "acme/widgets"
@@ -43,7 +44,7 @@ def no_broker(monkeypatch: pytest.MonkeyPatch) -> None:
             raise AssertionError("the check constructed a BrokerClient")
 
     monkeypatch.delenv(store.ENV_BROKER, raising=False)
-    monkeypatch.setattr(store, "BrokerClient", ForbiddenBroker)
+    monkeypatch.setattr(av, "BrokerClient", ForbiddenBroker)
 
 
 @pytest.fixture

@@ -34,11 +34,10 @@ and a request without it is byte-identical to before.
 
 from __future__ import annotations
 
-import math
 import re
 from typing import Any
 
-from ._jsonnum import is_number
+from ._jsonnum import require_finite_number
 from .sim_errors import SimError
 from .sim_remote import _UNRUN_MESSAGES
 
@@ -64,14 +63,6 @@ OP_CHECK_UNSUPPORTED_WORKER_CODE = "op_check_unsupported_worker"
 
 def is_declared(analysis: dict[str, Any]) -> bool:
     return isinstance(analysis, dict) and analysis.get("op_check") is not None
-
-
-def _number(value: Any, where: str) -> float:
-    if not is_number(value):
-        raise SimError(f"{where} must be a number (got {value!r})")
-    if not math.isfinite(value):
-        raise SimError(f"{where} must be finite (got {value!r})")
-    return float(value)
 
 
 def validate(analysis: dict[str, Any]) -> None:
@@ -117,7 +108,7 @@ def _validate_nodes(nodes: Any) -> None:
 
 def _validate_levels(spec: dict[str, Any]) -> None:
     if "band" in spec:
-        band = _number(spec["band"], "analysis.op_check.band")
+        band = require_finite_number(spec["band"], SimError, "analysis.op_check.band")
         if not 0 < band <= 0.5:
             raise SimError(
                 "analysis.op_check.band must be in (0, 0.5] (a fraction of "
@@ -127,8 +118,12 @@ def _validate_levels(spec: dict[str, Any]) -> None:
         raise SimError("analysis.op_check.rail and .supply are mutually exclusive")
     if "rail" in spec and (not isinstance(spec["rail"], str) or not spec["rail"]):
         raise SimError("analysis.op_check.rail must be a non-empty string")
-    if "supply" in spec and _number(spec["supply"], "analysis.op_check.supply") <= 0:
-        raise SimError("analysis.op_check.supply must be positive")
+    if "supply" in spec:
+        supply = require_finite_number(
+            spec["supply"], SimError, "analysis.op_check.supply"
+        )
+        if supply <= 0:
+            raise SimError("analysis.op_check.supply must be positive")
 
 
 def _nodes(analysis: dict[str, Any]) -> list[str]:

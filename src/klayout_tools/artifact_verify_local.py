@@ -1,9 +1,9 @@
 """Broker-free local half of ``klt artifact verify --local`` (issue #5591),
-split out of :mod:`artifact_store` (per-file size ratchet, issue #5464) so
-the ``--local`` mode could land without growing :mod:`artifact_store` past
-its ratchet ceiling. The broker-backed ``verify_manifest`` and the manifest
-plumbing (:func:`load_manifest`, :func:`select_entry`, :func:`hash_file`)
-stay in :mod:`artifact_store`.
+a sibling of :mod:`artifact_verify` kept separate so neither module grows
+past its per-file size ratchet ceiling (issue #5464). The broker-backed
+``verify_manifest`` and :func:`load_manifest` stay in :mod:`artifact_verify`;
+the manifest-entry plumbing (:func:`select_entry`, :func:`hash_file`,
+:func:`_git`) lives in :mod:`artifact_objects`.
 
 Re-hashes manifest entries against files under a root -- no broker call, no
 network, no credential; the semantics and exit codes are documented in
@@ -15,13 +15,8 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from .artifact_store import (
-    ArtifactError,
-    _git,
-    hash_file,
-    load_manifest,
-    select_entry,
-)
+from .artifact_objects import _git, hash_file, select_entry
+from .artifact_verify import ArtifactError, load_manifest
 
 
 def _local_root_for(path: str) -> str:

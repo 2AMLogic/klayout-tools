@@ -13,7 +13,8 @@ from typing import Any
 
 import pytest
 
-from klayout_tools import artifact_store as store
+from klayout_tools import artifact_objects as store
+from klayout_tools import artifact_verify as av
 
 from test_artifact_store import (
     REPO,
@@ -43,7 +44,7 @@ def test_verify_local_ok_whole_and_selector(
 ):
     manifest, sha = _stored(broker, report, tmp_path, capsys)
     monkeypatch.delenv(store.ENV_BROKER, raising=False)
-    monkeypatch.setattr(store, "BrokerClient", _ForbiddenBroker)
+    monkeypatch.setattr(av, "BrokerClient", _ForbiddenBroker)
 
     argv = [
         "artifact",
