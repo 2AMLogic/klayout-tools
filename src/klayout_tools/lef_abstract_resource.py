@@ -122,12 +122,11 @@ def _free_track_count(
     *,
     region: Any | None,
     horizontal: bool,
-    offset_um: float,
-    pitch_um: float,
-    strip_um: float,
+    centre_dbu: int,
+    pitch_dbu: int,
+    half_dbu: int,
     width_dbu: int,
     height_dbu: int,
-    dbu_um: float,
 ) -> int:
     """Count the preferred-direction tracks whose **full-length** strip
     across the macro stays entirely unobstructed.
@@ -138,14 +137,17 @@ def _free_track_count(
     the layer's own ``WIDTH``, centred on the track. A track only counts
     when its strip sits fully inside the macro outline (a strip hanging
     over the edge is not a usable crossing) and ``strip & region`` is empty.
+
+    All grid arguments arrive already converted to dbu and validated
+    positive by :func:`resource_entry` -- a pitch or strip width that does
+    not survive the µm→dbu conversion is degraded to ``free_tracks: null``
+    there, so this walk always terminates and never tests degenerate
+    zero-extent strips.
     """
     import klayout.db as kdb
 
     cross_dbu = height_dbu if horizontal else width_dbu
     span_dbu = width_dbu if horizontal else height_dbu
-    half_dbu = round(strip_um / dbu_um / 2)
-    pitch_dbu = round(pitch_um / dbu_um)
-    centre_dbu = round(offset_um / dbu_um)
 
     free = 0
     while centre_dbu - half_dbu < cross_dbu:
@@ -178,8 +180,12 @@ def resource_entry(
 
     A layer whose ``DIRECTION``/``PITCH`` (or ``WIDTH``, which sizes the
     strip) is missing reports ``free_tracks: null`` plus a ``warnings[]``
-    entry -- never a guessed track count. ``obstructed_fraction`` needs
-    none of those: it is plain obstructed area over the macro outline.
+    entry -- never a guessed track count. So does a pitch/width that does
+    not survive the conversion to the layout's dbu (rounds to ``0`` or
+    negative dbu): that grid cannot place tracks, and counting it anyway
+    would either walk forever or test zero-extent strips.
+    ``obstructed_fraction`` needs none of those: it is plain obstructed
+    area over the macro outline.
     """
     name = layer["name"]
     direction = layer.get("direction")
@@ -202,23 +208,39 @@ def resource_entry(
         offset_um = layer.get("offset_y_um" if horizontal else "offset_x_um") or 0.0
         strip_um = layer.get("width_um")
         if not pitch_um or not strip_um:
-            missing = "PITCH" if not pitch_um else "WIDTH"
-            warnings.append(
-                f"routing_resource: layer '{name}' declares no {missing} -- "
-                "free_tracks unknown"
-            )
-            pitch_um = None
+            # A WIDTH-less layer still declares its PITCH: keep reporting
+            # it -- only the track count is unknown.
+            if pitch_um:
+                warnings.append(
+                    f"routing_resource: layer '{name}' declares no WIDTH -- "
+                    "free_tracks unknown"
+                )
+            else:
+                warnings.append(
+                    f"routing_resource: layer '{name}' declares no PITCH -- "
+                    "free_tracks unknown"
+                )
+                pitch_um = None
         else:
-            free_tracks = _free_track_count(
-                region=region,
-                horizontal=horizontal,
-                offset_um=offset_um,
-                pitch_um=pitch_um,
-                strip_um=strip_um,
-                width_dbu=width_dbu,
-                height_dbu=height_dbu,
-                dbu_um=dbu_um,
-            )
+            pitch_dbu = round(pitch_um / dbu_um)
+            half_dbu = round(strip_um / dbu_um / 2)
+            centre_dbu = round(offset_um / dbu_um)
+            if pitch_dbu <= 0 or half_dbu <= 0:
+                warnings.append(
+                    f"routing_resource: layer '{name}' pitch/width not usable "
+                    f"at the layout's dbu {dbu_um} (pitch_dbu={pitch_dbu}, "
+                    f"width_dbu={half_dbu}) -- free_tracks unknown"
+                )
+            else:
+                free_tracks = _free_track_count(
+                    region=region,
+                    horizontal=horizontal,
+                    centre_dbu=centre_dbu,
+                    pitch_dbu=pitch_dbu,
+                    half_dbu=half_dbu,
+                    width_dbu=width_dbu,
+                    height_dbu=height_dbu,
+                )
 
     outline_area_dbu = width_dbu * height_dbu
     obstructed_area_dbu = region.area() if region is not None else 0

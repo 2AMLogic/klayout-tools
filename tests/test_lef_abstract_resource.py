@@ -104,9 +104,10 @@ _MET3_MAP_LINE = "met3    NET,SPNET,PIN           69  20\n"
 
 def _tech_lef_with_met3(*, omit: str) -> str:
     """The fixture tech LEF plus a ``met3`` routing layer whose ``omit``
-    ("PITCH" or "DIRECTION") statement is left out."""
+    ("PITCH", "WIDTH" or "DIRECTION") statement is left out."""
     line = {
         "PITCH": "  PITCH 0.6 ;\n",
+        "WIDTH": "  WIDTH 0.2 ;\n",
         "DIRECTION": "  DIRECTION HORIZONTAL ;\n",
     }[omit]
     return _TECH_LEF_TEXT + _MET3_LAYER_TEXT.replace(line, "")
@@ -252,8 +253,9 @@ def test_coarse_reports_the_bbox_figures_not_detailed_ones(tmp_path, monkeypatch
     coarse = _run(tmp_path, monkeypatch, obs_mode="coarse")
 
     # Same layout, same geometry source: coarse's bounding rectangle
-    # (0,1)-(4,3) minus the VDD port blocks 6 more rows than the detailed
-    # region did, and covers 7.8 of 25 um^2 instead of 1.5.
+    # (0,1)-(4,3) minus the VDD port blocks 6 track rows in total -- 4
+    # more than the detailed region's 2 -- and covers 7.8 of 25 um^2
+    # instead of 1.5.
     assert _entry(detailed, "met1")["free_tracks"] == 13
     assert _entry(coarse, "met1")["free_tracks"] == 9
     assert _entry(coarse, "met1")["obstructed_fraction"] == 0.312
@@ -351,6 +353,43 @@ def test_layer_missing_direction_reports_null_and_warns(tmp_path, monkeypatch):
     assert any("DIRECTION" in w and "met3" in w for w in report["warnings"])
 
 
+def test_layer_missing_width_reports_null_but_keeps_pitch(tmp_path, monkeypatch):
+    report = _run(
+        tmp_path,
+        monkeypatch,
+        layout=_met3_layout(),
+        tech_lef_text=_tech_lef_with_met3(omit="WIDTH"),
+        map_text=_map_text_with_met3(),
+    )
+    met3 = _entry(report, "met3")
+    assert met3["free_tracks"] is None
+    # Only the track count is unknown: the declared PITCH still reports.
+    assert met3["pitch_um"] == 0.6
+    assert met3["direction"] == "HORIZONTAL"
+    assert met3["obstructed_fraction"] == 0.096
+    assert any("no WIDTH" in w and "met3" in w for w in report["warnings"])
+
+
+def test_dbu_coarser_than_pitch_degrades_instead_of_hanging(tmp_path, monkeypatch):
+    # Regression: with the layout at 1 dbu/um, pitch_dbu = round(0.34 / 1.0)
+    # == 0 and the track walk used to loop forever -- no output, no error,
+    # until something killed the run. The grid is now rejected as unusable
+    # at that dbu, exactly like a missing PITCH.
+    layout = kdb.Layout()
+    layout.dbu = 1.0
+    top = layout.create_cell("ANALOG_BLOCK")
+    met1 = layout.layer(*MET1_NET)
+    top.shapes(met1).insert(kdb.Box(0, 2, 1, 3))  # VDD port (dbu == um here)
+    top.shapes(met1).insert(kdb.Box(1, 1, 4, 2))  # general obstruction
+    report = _run(tmp_path, monkeypatch, layout=layout)
+    met1_entry = _entry(report, "met1")
+    assert met1_entry["free_tracks"] is None
+    assert met1_entry["pitch_um"] == 0.34
+    assert any(
+        "met1" in w and "not usable" in w and "dbu 1.0" in w for w in report["warnings"]
+    )
+
+
 # --------------------------------------------------------------------------- #
 # unit: the pure helpers, no PDK install
 # --------------------------------------------------------------------------- #
@@ -397,6 +436,46 @@ def test_resource_entry_empty_region_is_the_fully_free_case():
         "free_tracks": 11,
     }
     assert warnings == []
+
+
+def test_resource_entry_pitch_not_positive_in_dbu_degrades_to_null():
+    # pitch_dbu == 0 (a pitch below one dbu) used to walk the track loop
+    # forever; a negative PITCH (the tech-LEF grammar accepts a sign) used
+    # to walk it down forever. Either way: no output, no error, until
+    # something killed the run.
+    for pitch, marker in ((0.0004, "pitch_dbu=0"), (-0.34, "pitch_dbu=-340")):
+        warnings: list[str] = []
+        entry = resource_entry(
+            region=None,
+            layer=_layer("met2", "VERTICAL", pitch=pitch, width=0.14),
+            width_dbu=5000,
+            height_dbu=5000,
+            dbu_um=DBU_UM,
+            warnings=warnings,
+        )
+        assert entry["free_tracks"] is None
+        assert len(warnings) == 1
+        assert "met2" in warnings[0] and marker in warnings[0]
+
+
+def test_resource_entry_width_below_one_dbu_degrades_to_null():
+    # The self-consistency invariant: a fully obstructed macro must never
+    # report free tracks. A sub-dbu WIDTH used to make every strip
+    # degenerate (zero-extent, intersecting nothing) and count every
+    # in-bounds track as free on exactly such a macro.
+    warnings: list[str] = []
+    entry = resource_entry(
+        region=kdb.Region(kdb.Box(0, 0, 5000, 5000)),
+        layer=_layer("met1", "HORIZONTAL", pitch=0.34, width=0.0004),
+        width_dbu=5000,
+        height_dbu=5000,
+        dbu_um=DBU_UM,
+        warnings=warnings,
+    )
+    assert entry["obstructed_fraction"] == 1.0
+    assert entry["free_tracks"] is None
+    assert len(warnings) == 1
+    assert "met1" in warnings[0] and "width_dbu=0" in warnings[0]
 
 
 def _layer(

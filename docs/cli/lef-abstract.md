@@ -199,11 +199,12 @@ One entry exists per routing layer of the tech LEF — including layers with
 no OBS geometry at all, so a fully free layer is never silently absent. In
 `coarse` mode a layer whose bounding rectangle spans the outline honestly
 reports `free_tracks: 0`; in `detailed` mode the real remainder shows.
-A layer missing a usable `DIRECTION`, `PITCH`, or `WIDTH` cannot enumerate
-a track grid: it reports `free_tracks: null` (and `pitch_um: null` when
-`DIRECTION`/`PITCH` is the missing one) plus a `warnings[]` entry — never a
-guessed grid. `obstructed_fraction` needs none of those and is always
-reported.
+A layer missing a usable `DIRECTION`, `PITCH`, or `WIDTH` — or whose pitch
+or width does not survive the conversion to the layout's database units
+(rounds to ≤ 0 dbu) — cannot enumerate a track grid: it reports
+`free_tracks: null` (and `pitch_um: null` when `DIRECTION`/`PITCH` is the
+missing one) plus a `warnings[]` entry — never a guessed grid.
+`obstructed_fraction` needs none of those and is always reported.
 
 ## Response
 
