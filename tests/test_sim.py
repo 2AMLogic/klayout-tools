@@ -41,17 +41,10 @@ from helpers.subprocess_fakes import (
     fake_completed,
 )
 from klayout_tools import _paths as paths_module
-from klayout_tools import (
-    pdk,
-    remote_transport,
-    sim,
-    sim_batch,
-    sim_noise_mechanism,
-    sim_remote,
-    sim_steps,
-)
+from klayout_tools import pdk, remote_transport, sim, sim_batch, sim_remote, sim_steps
 from klayout_tools import remote_launcher as rl
 from klayout_tools import sim_measurement_results as smr
+from klayout_tools import sim_noise_mechanism as snm
 from klayout_tools.cli import main
 
 pytestmark = pytest.mark.usefixtures(
@@ -10838,17 +10831,8 @@ def test_examples_sim_remote_reference_reports_agree_across_backends():
 # --------------------------------------------------------------------------- #
 # options.fail_on_diagnostic -> status: "inconclusive" (issue #2492)
 # --------------------------------------------------------------------------- #
-
-
 #: The modules that can put a `diagnostics[].code` into a `klt sim` report.
-_DIAGNOSTIC_SOURCE_MODULES = (
-    sim,
-    sim_remote,
-    sim_batch,
-    sim_steps,
-    smr,
-    sim_noise_mechanism,
-)
+_DIAGNOSTIC_SOURCE_MODULES = (sim, sim_remote, sim_batch, sim_steps, smr, snm)
 
 #: Emission sites where the code is supplied by the site's *caller* or by a
 #: table it iterates, so the literal cannot be read off the site itself --

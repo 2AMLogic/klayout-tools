@@ -718,7 +718,7 @@ def _replace_spectrum(
 ) -> str:
     """One ``<step>.spectrum.<vector>`` reference -> the vector in that
     ``noise`` step's spectrum plot (captured in :func:`control_lines`)."""
-    from .sim import NOISE_SPECTRUM_VECTORS
+    from .sim_noise import NOISE_SPECTRUM_VECTORS
 
     step_ref, qualifier, vec = match.group("step", "meas", "vec")
     text = f"{step_ref}.{qualifier}.{vec}"
