@@ -39,7 +39,7 @@ _install_lock = threading.Lock()
 _install_refs = 0
 
 
-class _RecordingPopen(_REAL_POPEN):  # type: ignore[valid-type, misc]
+class _RecordingPopen(_REAL_POPEN):
     """Popen that records its pid on the calling thread's active recorder."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
