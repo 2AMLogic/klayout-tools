@@ -111,7 +111,7 @@ def _load_json(path: str, what: str) -> Any:
     try:
         with open_text(path) as f:
             return json.load(f)
-    except (*READ_ERRORS, json.JSONDecodeError) as exc:
+    except READ_ERRORS + (json.JSONDecodeError,) as exc:
         raise YieldError(f"could not read {what} '{path}': {exc}") from exc
 
 
