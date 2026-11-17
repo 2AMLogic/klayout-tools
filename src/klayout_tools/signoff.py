@@ -92,6 +92,8 @@ from .signoff_coverage_disclosure import (
 # size-ratchet ceiling, same as `signoff_multi_member` and `signoff_na`.
 from .signoff_derived_rows import (
     DERIVED_ROWS_ITEM_ID,
+    _record_envelope,
+    _remember_envelope,
     asserted_rows,
     credited_rows,
     multi_row_info,
@@ -5421,6 +5423,9 @@ def _grade_evidence(
         allowed_kinds=allowed_kinds,
     )
     if unmet is not None:
+        if unmet[1] == _REASON_CHECK_FAILED and check_kind == "sim":
+            # Issue #6027: the failed envelope still carries per-row truth.
+            _record_envelope(envelope_sink, envelope)
         return unmet
 
     sta_refusal = sta_annotation_refusal(
@@ -6678,8 +6683,8 @@ def _build_tier_item(
     reason: str | None = _REASON_NO_EVIDENCE
 
     not_applicable: dict[str, Any] | None = None
-    # Issue #3778: the envelope of every ``met`` citation graded below, keyed
-    # by the spec's identity, for `_grade_multi_citation`'s `spec_row` check.
+    # Issue #3778: the envelope of every ``met`` citation graded below -- and
+    # every ``check_failed`` ``sim`` one (#6027) -- for the row credit.
     met_envelopes: dict[int, dict[str, Any]] = {}
 
     def grade_spec(
@@ -6999,6 +7004,12 @@ def _grade_multi_citation(
     so is ``require_coverage_invalid`` (issue #5789, via
     :func:`_checked_multi_members`).
 
+    Issue #6027: a ``check_failed`` ``sim`` member's envelope is captured too,
+    so its tagged, limited, passing rows join ``covered``/``row_sources`` as
+    ``derived`` and leave ``failed_rows``; the citation still grades
+    ``unmet`` with its own reason, and a named row whose tagged measurement
+    fails stays in ``failed_rows``.
+
     Returns ``(status, reason, citation, failure_detail, extra_item_keys)``.
     """
 
@@ -7285,24 +7296,6 @@ def _members_rows_declared(
         for _, rows in members
         for row_id in rows or []
     )
-
-
-def _record_envelope(
-    sink: list[dict[str, Any]] | None, envelope: dict[str, Any]
-) -> None:
-    """Append ``envelope`` to ``sink`` when one was given (issue #3778)."""
-    if sink is not None:
-        sink.append(envelope)
-
-
-def _remember_envelope(
-    met_envelopes: dict[int, dict[str, Any]],
-    spec: dict[str, Any],
-    sink: list[dict[str, Any]],
-) -> None:
-    """Key the envelope a ``met`` grading captured by ``spec``'s identity."""
-    if sink:
-        met_envelopes[id(spec)] = sink[0]
 
 
 # --------------------------------------------------------------------------- #

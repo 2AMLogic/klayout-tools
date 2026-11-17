@@ -22,6 +22,19 @@ its size ratchet:
     counting as coverage, and the item grades ``unmet`` /
     ``partial_coverage`` with the rows listed under ``detail.asserted_rows``.
     Off by default, so existing manifests grade unchanged.
+
+Row-scoped credit from a failing envelope (issue #6027)
+    A ``check_failed`` ``sim`` citation grades ``unmet`` as a unit, but its
+    envelope's per-row truth survives the failure: rows its tagged,
+    ``limits``-bearing, passing measurements grade now count as ``derived``
+    coverage (and leave ``failed_rows``) instead of being mis-reported as
+    failed. Only derived rows are credited -- a failed citation never covers
+    a row on the manifest's word alone, and an envelope captured on a
+    stale-pin, binding, kind or provenance refusal is not recorded at all.
+
+The envelope-capture plumbing (:func:`_record_envelope` /
+:func:`_remember_envelope`) lives here too, moved out of :mod:`.signoff` for
+the same ceiling: it exists to feed the derived-row check.
 """
 
 from __future__ import annotations
@@ -79,15 +92,45 @@ def envelope_tagged_rows(envelope: dict[str, Any]) -> tuple[bool, set[str]]:
 def credited_rows(
     rows: list[str] | None, envelope: dict[str, Any] | None
 ) -> tuple[list[str] | None, bool]:
-    """The rows a ``met`` member is credited with and whether they were
-    ``derived`` from its envelope's ``spec_row`` tags (issue #3778). Untagged
-    (or unavailable) envelopes keep the manifest-asserted ``rows``."""
+    """The rows a member is credited with and whether they were ``derived``
+    from its envelope's ``spec_row`` tags (issue #3778). Untagged (or
+    unavailable) envelopes keep the manifest-asserted ``rows``. Since issue
+    #6027 the envelope may also come from a ``check_failed`` ``sim`` grading;
+    :func:`multi_row_info` credits the result only when it is derived.
+    """
     if not rows or envelope is None:
         return rows, False
     has_tags, covering = envelope_tagged_rows(envelope)
     if not has_tags:
         return rows, False
     return [r for r in rows if r in covering], True
+
+
+def _record_envelope(
+    sink: list[dict[str, Any]] | None, envelope: dict[str, Any]
+) -> None:
+    """Append ``envelope`` to ``sink`` when one was given (issue #3778).
+
+    Called on the ``met`` return and -- issue #6027 -- on the
+    ``check_failed`` return for a ``sim`` envelope, the only non-passing
+    verdict whose envelope still carries trustworthy per-row truth. The
+    stale-pin, binding, kind and provenance refusals record nothing: those
+    envelopes are not evidence for any row.
+    """
+    if sink is not None:
+        sink.append(envelope)
+
+
+def _remember_envelope(
+    met_envelopes: dict[int, dict[str, Any]],
+    spec: dict[str, Any],
+    sink: list[dict[str, Any]],
+) -> None:
+    """Key the envelope a grading captured -- ``met``, or a ``check_failed``
+    ``sim`` one (issue #6027) -- by ``spec``'s identity, for the
+    derived-row credit :func:`multi_row_info` computes."""
+    if sink:
+        met_envelopes[id(spec)] = sink[0]
 
 
 def multi_row_info(
@@ -99,16 +142,26 @@ def multi_row_info(
     """``failed_rows`` / ``uncovered_rows`` / ``declared_gaps`` /
     ``unratified_rows`` for the declared ``spec_rows`` (empty when none were
     declared). ``unratified_rows`` lists every non-gap row declared
-    ``ratified: false``, covered or not."""
+    ``ratified: false``, covered or not.
+
+    A member grades ``met`` or -- issue #6027 -- ``check_failed`` with a
+    captured, tagged ``sim`` envelope: its derived rows join ``covered`` and
+    ``row_sources``. A failed member never contributes asserted rows, and a
+    derived-only credit from it never masks the citation's own failure (the
+    item still grades ``unmet`` on the failed member).
+    """
     if spec_rows is None:
         return {}
     credited = credited or {}
     covered: set[str] = set()
     row_sources: dict[str, str] = {}
     for spec, rows, g in graded:
-        if g[0] != "met":
-            continue
         member_rows, derived = credited.get(id(spec), (rows, False))
+        # Issue #6027: a failed citation credits only derived rows -- those
+        # its tagged, limited, passing measurements grade; never asserted
+        # ones, and never from a refused (uncaptured) envelope.
+        if g[0] != "met" and not derived:
+            continue
         for r in member_rows or []:
             covered.add(r)
             # A row covered by any derived citation is machine-checked.
