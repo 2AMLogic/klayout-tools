@@ -803,6 +803,7 @@
         "klayout_tools.sim_expr_hint",
         "klayout_tools.sim_eye",
         "klayout_tools.sim_forms",
+        "klayout_tools.sim_form_signals",
         "klayout_tools.sim_injected",
         "klayout_tools.sim_merge",
         "klayout_tools.sim_mismatch_declarations",
