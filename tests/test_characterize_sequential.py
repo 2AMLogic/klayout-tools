@@ -2,16 +2,12 @@
 level-sensitive latch declaration layered on them (issue #5521)."""
 
 import json
-import shutil
 from pathlib import Path
 
 import pytest
 
+from helpers.tool_probes import SKIP_NO_NGSPICE as _SKIP_NO_NGSPICE
 from klayout_tools import characterize
-
-_SKIP_NO_NGSPICE = pytest.mark.skipif(
-    shutil.which("ngspice") is None, reason="ngspice is not installed"
-)
 
 
 def _expect_error(tmp_path: Path, request: dict, match: str) -> None:

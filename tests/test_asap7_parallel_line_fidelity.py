@@ -5,10 +5,11 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
-import shutil
 import sys
 
 import pytest
+
+from helpers.tool_probes import HAVE_NGSPICE
 
 _PATH = os.path.join(
     os.path.dirname(__file__),
@@ -85,7 +86,7 @@ def _phase1_point(gm, point_id):
 def circuit_one_point(gm, cs, tmp_path_factory):
     """The min-pitch (coupling-dominated) M2 point through the circuit stage,
     on the local backend (a debug probe of 4 single-corner decks)."""
-    if shutil.which("ngspice") is None:
+    if not HAVE_NGSPICE:
         pytest.skip("ngspice is not installed")
     point = _phase1_point(gm, "M2-p1x-sparse-L0.36")
     work = str(tmp_path_factory.mktemp("circuit"))
