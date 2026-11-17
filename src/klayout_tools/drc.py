@@ -44,6 +44,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from . import env_provenance
+from ._drc_edge_pair_hull import _edge_pair_hull_points
 from ._layout import load_layout
 from ._layout import select_top_cells as _select_top_cells
 from ._paths import _load_request_json
@@ -3232,29 +3233,6 @@ def _run_width_max_check(region: Any, rule: DrcRule, dbu_scale: float) -> Any | 
         return None
     max_d = round(rule.threshold_max_dbu * dbu_scale)
     return region.merged().with_bbox_max(0, max_d + 1, True)
-
-
-def _edge_pair_hull_points(edge_pair: Any) -> list[list[int]] | None:
-    """``violations[].polygon`` for one ``EdgePair`` violation marker: the
-    hull points of the quadrilateral spanning its two edges, or ``None`` when
-    the marker has no renderable outline.
-
-    Two ways a marker has none, both reported as ``null`` per the contract in
-    ``docs/cli/drc.md``:
-
-    - ``EdgePair.polygon(0)`` raises (a degenerate pair KLayout declines to
-      turn into a polygon at all) -- the long-standing case;
-    - it returns a polygon whose hull is *empty*, which is what a fully
-      degenerate single-point marker yields -- ``"ongrid"``'s per-vertex
-      markers are exactly that (issue #2642). Normalized to ``None`` here
-      rather than emitted as an empty array, which would be a third,
-      undocumented shape for this field.
-    """
-    try:
-        points = [[pt.x, pt.y] for pt in edge_pair.polygon(0).each_point_hull()]
-    except Exception:
-        return None
-    return points or None
 
 
 def _run_vertex_check(region: Any, rule: DrcRule, dbu: float) -> Any:

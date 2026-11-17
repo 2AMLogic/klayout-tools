@@ -28,6 +28,7 @@ from pathlib import Path
 import pytest
 
 from helpers.subprocess_fakes import fake_completed
+from helpers.tool_probes import SKIP_NO_NGSPICE as requires_ngspice
 from klayout_tools import signoff as signoff_module
 from klayout_tools import signoff_attest as attest_module
 from klayout_tools._provenance import layout_geometry_digest
@@ -65,13 +66,6 @@ pytestmark = pytest.mark.usefixtures("real_build_identity_git")
 #: tests below (issue #825) to locate `examples/design-pipeline/`'s
 #: already-passing artifacts without depending on pytest's cwd.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-
-# Match the real-engine tier in test_sim.py and test_pex.py. CI installs
-# ngspice; the local check:ci command deliberately opts out of this tier.
-requires_ngspice = pytest.mark.skipif(
-    shutil.which("ngspice") is None or os.environ.get("KLT_SKIP_NGSPICE_TESTS") == "1",
-    reason="ngspice is unavailable or disabled by KLT_SKIP_NGSPICE_TESTS=1",
-)
 
 DRC_CLEAN_ENVELOPE = {
     "schema_version": 1,
@@ -7511,7 +7505,7 @@ def test_command_evidence_launch_failure_renders_command_failed(monkeypatch):
     assert item_3["citation"] is None
 
 
-def test_command_evidence_timeout_renders_command_failed(monkeypatch):
+def test_command_evidence_timeout_renders_command_timeout(monkeypatch):
     def fake_run(command, **kwargs):
         raise subprocess.TimeoutExpired(cmd=command, timeout=kwargs.get("timeout"))
 
@@ -7521,7 +7515,7 @@ def test_command_evidence_timeout_renders_command_failed(monkeypatch):
 
     item_3 = next(item for item in result["items"] if item["id"] == 3)
     assert item_3["status"] == "unmet"
-    assert item_3["reason"] == "command_failed"
+    assert item_3["reason"] == "command_timeout"
     assert item_3["citation"] is None
 
 
@@ -13999,7 +13993,7 @@ def test_check_refuses_a_missing_or_unparseable_committed_report(tmp_path):
     """Both refusals come from the shared loader -- a clean message, never a
     traceback."""
     manifest = _manifest()
-    with pytest.raises(SignoffError, match="committed report not found"):
+    with pytest.raises(SignoffError, match="file not found"):
         check_tier_report(str(tmp_path / "nope.json"), manifest)
 
     bad = tmp_path / "bad.json"
@@ -14116,7 +14110,7 @@ def test_check_excludes_build_identity_and_the_checklist_prose_and_nothing_else(
     widening either set by accident."""
     assert signoff_module.VOLATILE_REPORT_PATHS == frozenset({("build",)})
     # The only *top-level* doc-prose path; the rest are per-item/per-block.
-    excluded_top_level = {"build", "source_doc_content_hash"}
+    excluded_top_level = {"build", "source_doc_content_hash", "unmet_reason_counts"}
     assert {
         path[0] for path in signoff_module.DOC_PROSE_REPORT_PATHS if len(path) == 1
     } == {"source_doc_content_hash"}
@@ -14484,12 +14478,12 @@ def test_pointer_resolved_envelope_grades_identically_to_the_same_file_unnested(
     plain_item = next(item for item in plain["items"] if item["id"] == 3)
     pointed_item = next(item for item in pointed["items"] if item["id"] == 3)
 
-    # Same fields, same values -- except `citation.file`, which necessarily
-    # names the document each manifest actually cited.
-    assert set(plain_item["citation"]) == set(pointed_item["citation"])
-    assert {k: v for k, v in plain_item["citation"].items() if k != "file"} == {
-        k: v for k, v in pointed_item["citation"].items() if k != "file"
-    }
+    # Same fields, same values -- except `citation.file` (naming the
+    # document each manifest cited) and `citation.pointer` (#5815: only a
+    # pointed citation records its selector).
+    normalized = dict(pointed_item["citation"], file=plain_item["citation"]["file"])
+    normalized.pop("pointer")
+    assert plain_item["citation"] == normalized
     assert plain_item["status"] == pointed_item["status"] == "met"
 
 
@@ -18130,43 +18124,9 @@ def test_unreadable_file_evidence_absolute_path_is_unchanged(tmp_path, monkeypat
     assert item_3["detail"]["path"] == gone
 
 
-def _capture_attest_env(monkeypatch):
-    from klayout_tools import signoff_attest
-
-    seen = {}
-
-    def fake_run(argv, **kwargs):
-        seen["env"] = kwargs["env"]
-        return subprocess.CompletedProcess(argv, 0, stdout=b"")
-
-    monkeypatch.setattr(signoff_attest.subprocess, "run", fake_run)
-    signoff_attest._run_command(".", {"argv": ["python3"], "cwd": "."})
-    return seen["env"]
-
-
-def test_attest_command_env_drops_venv_bin_from_path(monkeypatch):
-    venv_bin = os.path.dirname(sys.executable)
-    monkeypatch.setattr(sys, "prefix", "/venv")
-    monkeypatch.setattr(sys, "base_prefix", "/base")
-    monkeypatch.setenv("PATH", os.pathsep.join([venv_bin, "/usr/bin"]))
-    assert _capture_attest_env(monkeypatch)["PATH"] == "/usr/bin"
-
-
-def test_attest_command_env_unchanged_outside_venv(monkeypatch):
-    monkeypatch.setattr(sys, "prefix", "/base")
-    monkeypatch.setattr(sys, "base_prefix", "/base")
-    path = os.pathsep.join([os.path.dirname(sys.executable), "/usr/bin"])
-    monkeypatch.setenv("PATH", path)
-    assert _capture_attest_env(monkeypatch)["PATH"] == path
-
-
-def test_attest_command_env_tolerates_unset_path_and_absent_venv_bin(monkeypatch):
-    monkeypatch.setattr(sys, "prefix", "/venv")
-    monkeypatch.setattr(sys, "base_prefix", "/base")
-    monkeypatch.setenv("PATH", "/usr/bin")
-    assert _capture_attest_env(monkeypatch)["PATH"] == "/usr/bin"
-    monkeypatch.delenv("PATH")
-    assert "PATH" not in _capture_attest_env(monkeypatch)
+# The declared-command environment tests (venv-bin stripping, #4192, plus the
+# run-scoped klt-only shim, #5565) live in tests/test_signoff_attest_env.py,
+# split out of this file for the per-file size ratchet.
 
 
 # --------------------------------------------------------------------------- #

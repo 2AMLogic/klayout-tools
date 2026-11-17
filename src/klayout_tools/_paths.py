@@ -7,8 +7,10 @@ request or spec file), ``validate_request_shape`` / ``load_request_arg``
 (request dispatch and shape checks), ``_parse_layer_datatype`` and
 ``_validate_via_entries`` (spec parsing), ``_tcl_net_list`` and
 ``_count_spef_nets_annotated`` (OpenSTA Tcl helpers), ``resolve_tool_binary``
-(``options.<tool>_binary`` -> ``$KLT_<TOOL>_BINARY`` -> ``PATH``), and
-``fold_spice_continuations`` (SPICE ``+`` continuation fold).
+(``options.<tool>_binary`` -> ``$KLT_<TOOL>_BINARY`` -> ``PATH``).
+
+SPICE line pre-processing (``+`` continuation folding and ``;``/``$`` inline
+comments) used to live here too; it now has its own module, ``_spice_text``.
 """
 
 from __future__ import annotations
@@ -120,9 +122,8 @@ def _load_request_json(request_path: str, error_cls: type[Exception]) -> Any:
 
     Returns whatever :func:`json.load` produced, unvalidated -- callers
     still own the "is this a JSON object" and "are the required fields
-    present" checks, since those (and their exact wording) are genuinely
-    module-specific and some callers reuse them across non-file request
-    sources (stdin, inline JSON) that never reach this function.
+    present" checks (their exact wording is module-specific, and some
+    callers reuse them across stdin/inline sources that never reach here).
     """
     if not os.path.exists(request_path):
         raise error_cls(f"file not found: {request_path}")
@@ -141,23 +142,24 @@ def _load_request_json(request_path: str, error_cls: type[Exception]) -> Any:
 def _load_spec_json(spec_path: str, error_cls: type[Exception]) -> dict[str, Any]:
     """Read ``spec_path`` and decode it as a JSON object, raising
     ``error_cls`` for every failure mode ``erc.py``/``power.py``/``mom.py``'s
-    ``run_*`` entry points need to report: missing file, a directory instead
-    of a file, an unreadable/undecodable file, or a JSON value that isn't an
-    object.
+    ``run_*`` entry points report: missing file, a directory instead of a
+    file, an unreadable/undecodable file, invalid JSON, or a non-object.
 
     Unlike :func:`_load_request_json`, this also enforces "is this a JSON
-    object" itself -- all three ``_load_spec`` callers needed that exact
-    check, so it is folded in here rather than left to each caller.
+    object" itself -- all three callers need that exact check, folded in
+    here rather than left to each caller.
     """
     if not os.path.exists(spec_path):
         raise error_cls(f"spec file not found: {spec_path}")
     if os.path.isdir(spec_path):
         raise error_cls(f"not a file: {spec_path}")
     try:
-        with open(spec_path) as f:
+        with open(spec_path, encoding="utf-8") as f:
             spec = json.load(f)
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         raise error_cls(f"could not read spec '{spec_path}': {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise error_cls(f"spec '{spec_path}' is not valid JSON: {exc}") from exc
     if not isinstance(spec, dict):
         raise error_cls(f"spec '{spec_path}' must be a JSON object")
     return spec
@@ -350,36 +352,6 @@ def _count_spef_nets_annotated(
         int(match.group(3)),
         int(match.group(4)),
     )
-
-
-def fold_spice_continuations(lines: list[str]) -> list[str]:
-    """Fold SPICE ``+`` continuation lines onto the entry they continue.
-
-    ``lines`` is whatever a caller's own pre-pass has already produced (raw
-    lines, comment-stripped lines, or comment-stripped-and-filtered lines --
-    this function does not care). For each entry, if it starts with ``+``
-    (after left-stripping) *and* there is already a previous entry to fold
-    onto, that previous entry is replaced with itself plus a single space
-    plus the continuation's own content (the ``+`` and any leading/trailing
-    whitespace around it dropped); otherwise the entry is appended as-is.
-
-    A ``+``-prefixed entry with nothing preceding it to fold onto (the first
-    entry in ``lines`` starts with ``+``, or every entry before it was
-    itself folded away) is appended verbatim, ``+`` prefix intact, rather
-    than raising or being silently dropped -- callers that want an orphan
-    continuation line dropped (as ``op_sanity.py`` does) filter such
-    unfolded ``+``-prefixed entries out of this function's return value
-    themselves; callers that want it kept as a literal line (``pex.py``,
-    ``netlist_normalize.py``) use the return value as-is.
-    """
-    folded: list[str] = []
-    for line in lines:
-        stripped = line.lstrip()
-        if stripped.startswith("+") and folded:
-            folded[-1] = f"{folded[-1]} {stripped[1:].strip()}"
-        else:
-            folded.append(line)
-    return folded
 
 
 def validate_request_shape(
