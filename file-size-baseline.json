@@ -1001,7 +1001,7 @@
     },
     {
       "path": "tests/test_post_route_sta.py",
-      "lines": 7821
+      "lines": 7802
     },
     {
       "path": "tests/test_power.py",
