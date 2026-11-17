@@ -3,6 +3,8 @@
 Split out of ``pex.py`` (file-size ratchet, #2766): the ``testbenches[].sides``
 execution evidence (issues #2872 / #2876) and the ``unfinished[]`` shard-loss
 entries (issue #5282). Both transport ``klt sim``'s own response unchanged.
+Also home to the ``delta[]`` row-label fields (:func:`delta_labels`, issue
+#5681), kept here so ``pex.py`` does not grow.
 """
 
 from __future__ import annotations
@@ -122,3 +124,22 @@ def unfinished_legs(
     legs = (("schematic", schematic_report), ("extracted", extracted_report))
     entries = (unfinished_leg(testbench, side, report) for side, report in legs)
     return [entry for entry in entries if entry is not None]
+
+
+def delta_labels(
+    testbench: str | None, spec_row_prefix: str | None, name: str
+) -> dict[str, Any]:
+    """Issue #5681: the identity fields every ``delta[]`` row leads with.
+
+    ``spec_row`` is the display label -- ``<stem>.<name>`` only when the run
+    had several testbenches (``spec_row_prefix`` set), else the bare name -- so
+    it depends on invocation shape. ``testbench`` (the request's filename
+    stem; ``None`` in ``--measure-command`` mode, which has no testbench file)
+    and ``measurement`` (the bare ``measurements[].name``) do not, so
+    ``(testbench, measurement)`` is a stable key for a row.
+    """
+    return {
+        "spec_row": name if spec_row_prefix is None else f"{spec_row_prefix}.{name}",
+        "testbench": testbench,
+        "measurement": name,
+    }

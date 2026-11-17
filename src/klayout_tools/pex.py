@@ -1426,6 +1426,7 @@ def _device_only_fields(
 
 def _build_delta_rows(
     *,
+    testbench: str | None = None,
     spec_row_prefix: str | None,
     schematic_report: dict[str, Any],
     extracted_report: dict[str, Any],
@@ -1444,7 +1445,6 @@ def _build_delta_rows(
         schematic_measurements = schematic_index.get(corner_id, {})
         for extracted_measurement in corner["measurements"]:
             name = extracted_measurement["name"]
-            spec_row = name if spec_row_prefix is None else f"{spec_row_prefix}.{name}"
             schematic_measurement = schematic_measurements.get(name)
             schematic_value = (
                 schematic_measurement["value"]
@@ -1452,7 +1452,7 @@ def _build_delta_rows(
                 else None
             )
             row = {
-                "spec_row": spec_row,
+                **pex_sim_evidence.delta_labels(testbench, spec_row_prefix, name),
                 "corner_id": corner_id,
                 "schematic_value": schematic_value,
                 "extracted_value": extracted_measurement["value"],
@@ -1514,6 +1514,7 @@ def _static_extracted_failure(
 
 def _unextracted_delta_rows(
     *,
+    testbench: str | None = None,
     spec_row_prefix: str | None,
     schematic_report: dict[str, Any],
     failure_message: str | None = None,
@@ -1536,9 +1537,7 @@ def _unextracted_delta_rows(
         for measurement in corner["measurements"]:
             name = measurement["name"]
             row = {
-                "spec_row": name
-                if spec_row_prefix is None
-                else f"{spec_row_prefix}.{name}",
+                **pex_sim_evidence.delta_labels(testbench, spec_row_prefix, name),
                 "corner_id": corner["corner_id"],
                 "schematic_value": measurement["value"],
                 "extracted_value": None,
@@ -2060,7 +2059,7 @@ def _measure_both_sides(
     sim` calls, nothing else. ``spec_row_prefix`` is ``None`` because there
     is exactly one measurement pair in this mode (and no testbench file to
     name), so a row's ``spec_row`` is the measurement name the caller's own
-    document declared, bare -- the same as a single-testbench run's.
+    document declared, bare, and ``testbench`` is ``null`` (issue #5681).
     """
     side_reports: dict[str, dict[str, Any]] = {}
     sides: dict[str, Any] = {}
@@ -2090,6 +2089,7 @@ def _measure_both_sides(
         }
 
     rows = _build_delta_rows(
+        testbench=None,
         spec_row_prefix=None,
         schematic_report=side_reports["schematic"],
         extracted_report=side_reports["extracted"],
@@ -3439,11 +3439,8 @@ def run_pex(
             label, schematic_report, extracted_report
         )
 
-        spec_row_prefix = (
-            None
-            if single_testbench
-            else os.path.splitext(os.path.basename(testbench_path))[0]
-        )
+        stem = os.path.splitext(os.path.basename(testbench_path))[0]
+        spec_row_prefix = None if single_testbench else stem
         if extracted_report is None:
             if extracted_failure is None:
                 extracted_failure = _static_extracted_failure(
@@ -3451,6 +3448,7 @@ def run_pex(
                 )
             delta.extend(
                 _unextracted_delta_rows(
+                    testbench=stem,
                     spec_row_prefix=spec_row_prefix,
                     schematic_report=schematic_report,
                     failure_message=extracted_failure[0] if extracted_failure else None,
@@ -3502,6 +3500,7 @@ def run_pex(
         )
 
         rows = _build_delta_rows(
+            testbench=stem,
             spec_row_prefix=spec_row_prefix,
             schematic_report=schematic_report,
             extracted_report=extracted_report,

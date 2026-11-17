@@ -1738,6 +1738,8 @@ full `repo`/`external`/`absent` scope meanings.
   "delta": [
     {
       "spec_row": "gain_db",
+      "testbench": "gain",
+      "measurement": "gain_db",
       "corner_id": "tt/1.800V/27C",
       "schematic_value": 42.1,
       "extracted_value": 41.6,
@@ -1811,7 +1813,9 @@ full `repo`/`external`/`absent` scope meanings.
 
 | Field             | Type            | Description                                                                          |
 | ----------------- | --------------- | --------------------------------------------------------------------------------------- |
-| `spec_row`        | string          | The measurement name, from the testbench's own `measurements[].name` (see [`sim.md`](sim.md)) — or, for a `--measure-command` run, from the measurement document's own `measurements[].name`. When more than one `<testbench>` is given, prefixed `<testbench file stem>.<name>` to disambiguate reused measurement names across testbenches; bare `<name>` for a single testbench, and for a `--measure-command` run (there is exactly one measurement pair). |
+| `spec_row`        | string          | The measurement name, from the testbench's own `measurements[].name` (see [`sim.md`](sim.md)) — or, for a `--measure-command` run, from the measurement document's own `measurements[].name`. When more than one `<testbench>` is given, prefixed `<testbench file stem>.<name>` to disambiguate reused measurement names across testbenches; bare `<name>` for a single testbench, and for a `--measure-command` run (there is exactly one measurement pair). Its form depends on how many testbenches the run was given, so key on `testbench` + `measurement` instead. |
+| `testbench`       | string \| null  | The owning testbench request's **filename stem** (the same string the multi-testbench `spec_row` prefix uses), on every row regardless of how many testbenches the run was given, so a one-testbench report is self-describing. It is the stem, not the request path: `testbenches[].request.path` is `null` for an external-scope request, the stem never is. `null` for a `--measure-command` run, which has no testbench file (the key is present, not omitted). Two requests sharing a stem in different directories share a value. |
+| `measurement`     | string          | The bare measurement name (`measurements[].name`), never prefixed. For a testbench run, `spec_row == measurement` with one testbench and `spec_row == "<testbench>.<measurement>"` with several; `(testbench, measurement, corner_id)` is the invocation-independent key for a row. |
 | `corner_id`       | string          | `klt sim`'s own corner id (`<process>/<supply>V/<temp>C`, see [`sim.md`](sim.md#corners-entries)) — identical on both sides, since the extracted-side request differs from the schematic-side one *only* in its `.include`d DUT file. |
 | `schematic_value` | number \| null  | The measurement's value on the schematic-side run, or `null` if that corner/measurement was missing or itself errored. |
 | `extracted_value` | number \| null  | The measurement's value on the extracted-side run, or `null` if it was unextractable (a `klt sim` `"error"`-status measurement). |
