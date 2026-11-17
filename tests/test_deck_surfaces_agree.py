@@ -137,6 +137,14 @@ _EXPECTED_DECK_SCOPES: dict[str, frozenset[str]] = {
             "V2",
             "V3",
             "V4",
+            # d38f2866 (issue #5916) added the five curated upper-landing
+            # rules; the frozen guard here was not updated in that commit,
+            # leaving main red until this entry caught up.
+            "Cont upper-landing containment (curated)",
+            "Via1 upper-landing containment (curated)",
+            "Via2 upper-landing containment (curated)",
+            "Via3 upper-landing containment (curated)",
+            "Via4 upper-landing containment (curated)",
             "pSD",
         }
     ),
