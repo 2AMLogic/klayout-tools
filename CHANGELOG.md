@@ -26,8 +26,13 @@ not `klt --version`, if you need to detect this kind of drift. See
   envelope says whether binding happened instead of implying completeness.
   A dependency may be shared across entries (and may itself be an
   inventoried member); a repeat within one entry is refused (exit 1).
-  Additive; `schema_version` unchanged. First ships in the first release
-  after `v0.9.2` (which refuses `depends_on` as an unknown field).
+  An envelope committed before this change no longer reproduces under
+  `--check` (every member now emits the `dependency_binding` disclosure
+  row that older envelopes lack), so it is drift until re-attested once:
+  run `klt signoff --attest 9 --inventory <inv> -o <envelope>` and commit
+  the new envelope. Additive; `schema_version` unchanged. First ships in
+  the first release after `v0.9.2` (which refuses `depends_on` as an
+  unknown field).
 - **`klt drc` gf180mcu deck: `DF.1c` (MOSCAP COMP min width) is now checked,
   and `comp.width.mv.1` exempts `MVSD`/`MVPSD`-marked LDMOS drains** (#5719,
   2026-11-17). New rule `comp.width.moscap.1` (`DF.1c`, 1.0 um,

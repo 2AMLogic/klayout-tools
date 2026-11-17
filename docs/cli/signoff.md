@@ -2295,7 +2295,14 @@ refused: there is no path to pin).
   unless the entry declares them in `depends_on`, in which case each declared
   path gets its own `present` check (role `testbench_dependency`) whose
   `content_hash` `--check` diffs like any other. The producer records
-  declared edges; it does not discover them.
+  declared edges; it does not discover them. Every member also emits a
+  passing `dependency_binding` disclosure row; because that row is emitted
+  unconditionally, an envelope committed by a build older than `depends_on`
+  no longer reproduces under `--check` even with no file changed and no
+  `depends_on` declared anywhere — the missing row is drift until
+  re-attested once. **Migration for existing item 9 inventories:**
+  re-attest once and commit the new envelope
+  (`klt signoff --attest 9 --inventory <inv> -o <envelope>`).
 
 #### Item 8: characterization report
 

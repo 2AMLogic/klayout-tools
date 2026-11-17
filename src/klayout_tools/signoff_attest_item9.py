@@ -386,21 +386,22 @@ def with_progress(
 
 
 def dependency_present_checks(
-    root: str, normalized: Mapping[str, Any]
+    root: str,
+    normalized: Mapping[str, Any],
+    file_check: Callable[..., dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """One ``present`` check per declared dependency edge (issue #5850),
     benches sorted by path (each entry's dependencies were sorted at
     validation), so a missing or edited dependency names both itself and the
-    bench that declared it. ``_file_check`` is reused unchanged (imported
-    lazily -- :mod:`signoff_attest` imports this module); the owning
-    ``testbench`` is recorded after ``role``, where the per-bench cold-start
-    checks carry theirs."""
-    from klayout_tools.signoff_attest import _file_check
-
+    bench that declared it. ``file_check`` is the caller-injected
+    :func:`signoff_attest._file_check` reused unchanged (injected, per this
+    module's import boundary, rather than imported); the owning ``testbench``
+    is recorded after ``role``, where the per-bench cold-start checks carry
+    theirs."""
     checks = []
     for bench in sorted(normalized["bench_depends_on"]):
         for dep in normalized["bench_depends_on"][bench]:
-            base = _file_check(root, dep, "testbench_dependency")
+            base = file_check(root, dep, "testbench_dependency")
             checks.append(
                 {
                     "check": base["check"],
@@ -452,7 +453,7 @@ def item9_checks(
     run = with_progress(
         command, lambda role, ident: f"{role} {ident.get('testbench', '')}".strip()
     )
-    checks = dependency_present_checks(root, normalized) + [
+    checks = dependency_present_checks(root, normalized, file_check) + [
         {**file_check(root, path, "source"), "testbenches": benches}
         for path, benches in sorted(normalized["source_benches"].items())
     ]

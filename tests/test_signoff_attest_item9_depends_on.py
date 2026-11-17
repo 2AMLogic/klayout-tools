@@ -102,6 +102,17 @@ def test_editing_a_declared_dependency_drifts_the_check(tmp_path):
     committed.write_text(
         render_envelope(build_attestation(9, make_inventory(repo, testbenches=[entry])))
     )
+    pre_edit = main(
+        [
+            "signoff",
+            "--attest",
+            "9",
+            "--inventory",
+            make_inventory(repo, testbenches=[entry]),
+        ]
+        + ["--check", str(committed), "--format", "json"]
+    )
+    assert pre_edit == 0
     helper.write_text("v2 -- a behaviour-changing edit\n")
 
     code = main(
