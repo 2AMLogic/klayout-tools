@@ -297,11 +297,7 @@ class _MemberScheduler:
         for index in sorted(self.abandoned):
             abandoned_at = self.abandoned_at.get(index)
             job_id = self.trackers[index].pending_job()
-            if (
-                abandoned_at is None
-                or job_id is None
-                or now - abandoned_at <= budget
-            ):
+            if abandoned_at is None or job_id is None or now - abandoned_at <= budget:
                 continue  # inside the grace window, or not scan-abandoned
             message = (
                 f"batch job {job_id} of abandoned member {index} is still "
