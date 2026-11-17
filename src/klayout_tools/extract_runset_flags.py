@@ -13,6 +13,7 @@ device-only netlist as a parasitic-annotated one.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
@@ -55,6 +56,69 @@ def parse_deck_vars(raw_vars: Any) -> dict[str, str]:
             raise ExtractError(f"deck_vars['{name}'] must be a string, number or bool")
         deck_vars[name] = str(value).lower() if isinstance(value, bool) else str(value)
     return deck_vars
+
+
+#: A SPICE parameter name as ``--device-param`` accepts it on the right of ``=``.
+_PARAM_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+#: A SPICE scale-factor suffix (``u``, ``p``, ``meg``, ...): letters only, so a
+#: declaration can never put whitespace or an operator into a written card.
+_PARAM_SUFFIX = re.compile(r"[A-Za-z]*")
+
+
+def parse_device_params(
+    raw: Sequence[str] | None,
+) -> dict[str, dict[str, tuple[str, str]]] | None:
+    """Parse repeatable ``--device-param CLASS:PARAM=NAME[:SUFFIX]`` entries
+    (issue #5513) into ``{class: {KLayout PARAM: (SPICE NAME, SUFFIX)}}``, or
+    ``None`` when none were given -- so "no declaration" stays distinguishable
+    from every declaration shape, and a default run is untouched.
+
+    ``PARAM`` is the extractor's own parameter name (``W``, ``L``, ``AS``, ...
+    -- the names ``warnings[]`` already lists); ``NAME`` is what the PDK
+    subcircuit calls it; ``SUFFIX`` is appended verbatim to the measured value
+    (empty when omitted). Nothing here knows a PDK's units: the caller states
+    the mapping, ``klt`` does not guess one.
+
+    A later entry for the same ``CLASS:PARAM`` wins (as ``--device-model``'s
+    does), but two *different* parameters of one class may not target the same
+    ``NAME`` -- that would write one ``name=`` twice onto the card. Whether
+    ``CLASS``/``PARAM`` exist is checked against the runset's own netlist, where
+    the real class and parameter names can be quoted.
+    """
+    if not raw:
+        return None
+    declared: dict[str, dict[str, tuple[str, str]]] = {}
+    for entry in raw:
+        target, sep, source = entry.partition("=")
+        device_class, colon, param = target.rpartition(":")
+        name, _, suffix = source.partition(":")
+        device_class, param = device_class.strip(), param.strip()
+        if (
+            not sep
+            or not colon
+            or not device_class
+            or not param
+            or _PARAM_NAME.fullmatch(name) is None
+            or _PARAM_SUFFIX.fullmatch(suffix) is None
+        ):
+            raise ExtractError(
+                f"--device-param entry {entry!r} is not CLASS:PARAM=NAME[:SUFFIX] "
+                "(NAME a SPICE identifier, SUFFIX letters only) -- e.g. "
+                "--device-param sg13_hv_nmos:W=w:u"
+            )
+        declared.setdefault(device_class, {})[param] = (name, suffix)
+    for device_class, params in declared.items():
+        seen: dict[str, str] = {}
+        for param, (name, _) in sorted(params.items()):
+            other = seen.setdefault(name.lower(), param)
+            if other != param:
+                raise ExtractError(
+                    f"--device-param maps both '{other}' and '{param}' of class "
+                    f"'{device_class}' onto '{name}': one card cannot carry "
+                    "the same parameter name twice"
+                )
+    return declared
 
 
 #: ``run_extract`` keyword -> the CLI flag a caller would have typed, for every

@@ -227,9 +227,7 @@ from .extract_detect_block import build_detection_findings
 # `_diode_required_terms` and `_is_synthesized_substrate_net_name` are
 # re-exported for `tests/test_extract.py`, `extract_parasitics.py` and (with
 # `_extraction_deck_name`) `extract_finfet.py`.
-from .extract_detect_diode_near_miss import (
-    _collect_diode_near_miss_warnings,
-)
+from .extract_detect_diode_near_miss import _collect_diode_near_miss_warnings
 from .extract_detect_diode_near_miss import (
     _diode_required_terms as _diode_required_terms,
 )
@@ -1635,6 +1633,7 @@ def run_extract(
     engine: str = "klayout",
     deck_file: str | None = None,
     deck_vars: Mapping[str, str] | None = None,
+    device_params: Mapping[str, Mapping[str, tuple[str, str]]] | None = None,
     runset_timeout: float | None = None,
     klayout_binary: str | None = None,
 ) -> dict[str, Any]:
@@ -1644,9 +1643,9 @@ def run_extract(
     runs. ``"klayout"`` (the default) is the curated-deck engine every
     paragraph below describes, byte-identical to this function before the
     parameter existed. ``"klayout-runset"`` runs a PDK's **own** KLayout LVS
-    runset (``deck_file``, ``deck_vars``) instead -- devices and connectivity
-    only, with every curated-engine-specific parameter refused by name. See
-    :mod:`klayout_tools.extract_runset` and ``docs/cli/extract.md``, "Engine".
+    runset (``deck_file``, ``deck_vars``, ``device_params``) instead -- devices
+    and connectivity only, with every curated-engine-specific parameter refused
+    by name. See :mod:`klayout_tools.extract_runset` and docs/cli/extract.md, "Engine".
 
     The report carries an additive ``timing`` object (issue #3181):
     ``stages`` (wall seconds per named stage), ``total_seconds`` and
@@ -2953,13 +2952,14 @@ def run_extract(
             top=top,
             deck_vars=deck_vars,
             device_models=device_models,
+            device_params=device_params,
             no_netlist=no_netlist,
             runset_timeout_s=runset_timeout,
             klayout_binary=klayout_binary,
         )
-    if runset_timeout is not None or klayout_binary is not None:
+    if runset_timeout is not None or klayout_binary is not None or device_params:
         raise ExtractError(
-            "runset_timeout/klayout_binary are only used by engine "
+            "runset_timeout/klayout_binary/device_params are only used by engine "
             f"'{extract_runset.RUNSET_ENGINE}' (this run uses '{engine}')"
         )
 
