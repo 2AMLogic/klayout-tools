@@ -12,12 +12,14 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from . import signoff_records
 from .signoff_attest import (
     STREAM_ATTESTABLE_ITEM,
     AttestationError,
     _load_committed_attestation,
     build_attestation,
     check_attestation,
+    write_attestation,
 )
 from .signoff_attest_build import add_require_build_match_argument
 from .signoff_attest_build import flag_problem as _build_match_problem
@@ -42,12 +44,31 @@ def add_skip_local_only_argument(parser: Any) -> None:
             "Refused with --check or without --output."
         ),
     )
+    parser.add_argument(
+        "--records",
+        metavar="FILE",
+        help=(
+            "with --attest 1/8/9/10 (issue #5945): record format 2 -- write one "
+            "line per covered file (path, role, sha256) to FILE and, with "
+            "--output, a judgment-only envelope that pins the inventory and "
+            "names FILE, so PRs touching different files merge cleanly. "
+            "--check detects the format from the committed envelope."
+        ),
+    )
 
 
 def flag_problem(args: Any) -> str | None:
     """The refusal message for an invalid ``--attest`` flag combination
     (``--attest`` presence is checked by the caller), else ``None``."""
     problem = _skip_local_only_problem(args) or _build_match_problem(args)
+    if problem is None and getattr(args, "records", None):
+        if args.check is not None:
+            problem = (
+                "--records applies when writing; --check reads the records "
+                "file named by the committed envelope"
+            )
+        elif args.attest == STREAM_ATTESTABLE_ITEM:
+            problem = "--records applies to --attest 1, 8, 9 and 10 (not item 2)"
     if problem is None and args.check is not None and args.output:
         return (
             "--check and --output are mutually exclusive with --attest: "
@@ -149,4 +170,20 @@ def _compute(
     assert inventory is not None
     if committed is not None:
         return check_attestation(args.attest, inventory, committed)
-    return build_attestation(args.attest, inventory, committed_checks)
+    records = getattr(args, "records", None)
+    return build_attestation(args.attest, inventory, committed_checks, records)
+
+
+def write_result(
+    result: Mapping[str, Any], output: str | None, records_file: str | None
+) -> None:
+    """Write a passing ``--attest`` result: the envelope to ``output`` (only
+    if its bytes changed) and, in record format 2, the per-file lines to
+    ``records_file`` first -- so a crash never leaves an envelope naming
+    records that were not written."""
+    envelope = {k: v for k, v in result.items() if k != "skipped_checks"}
+    if records_file:
+        signoff_records.write_records(envelope["records"]["lines"], records_file)
+        envelope = signoff_records.committed_view(envelope)
+    if output:
+        write_attestation(envelope, output)
