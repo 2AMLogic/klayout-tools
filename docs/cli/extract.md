@@ -6281,11 +6281,20 @@ klt extract routed.gds --deck sky130 --parasitics --spef routed.spef --format js
 **A format translation of already-computed data, not a new extraction
 pass** (`docs/design/post-route-sta-survey.md` §3.1/§4.1): every SPEF `*CAP`/
 `*RES` value is copied verbatim from `parasitics.nets[]` — the same
-star-topology model documented above, re-expressed as SPEF's `*D_NET`/
+star or distributed-ladder model documented above, re-expressed as SPEF's `*D_NET`/
 `*CONN`/`*CAP`/`*RES` block syntax instead of KLayout SPICE `R`/`C` device
 cards. Units are declared (`*C_UNIT 1 FF`, `*R_UNIT 1 OHM`) to match
 `parasitics`'s own units exactly, so no femtofarad/ohm conversion — and no
 conversion error — is introduced.
+
+With `--distributed-rc --critical-net <net>`, SPEF preserves the selected
+net's ladder: one `*RES` row per `segments[]` entry and one ground `*CAP`
+row per terminal node, using `terminals[].capacitance_ff`. The middle node
+(`pin_order`) reuses the net's primary SPEF node; other nodes use fresh
+`<net>:<N>` identifiers. Ground capacitance is distributed across the nodes
+instead of concentrated at the hub; the `*D_NET` total stays the same.
+Coupling capacitance still attaches at the middle node. Lumped nets keep
+their existing star/Gamma-shunt output. This changes no JSON report fields.
 
 **Net-name correlation by default; optional device-terminal correlation via
 `--def-net-connections` (issue #948, extended by #961).** Each `*D_NET`
