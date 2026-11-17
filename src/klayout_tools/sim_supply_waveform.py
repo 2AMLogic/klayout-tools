@@ -36,7 +36,8 @@ _ANY_WAVE_RE = re.compile(
 def _cards(text: str) -> list[tuple[int, int, str]]:
     """Top-level (outside ``.subckt``) logical cards of ``text`` as
     ``(first_line, last_line, joined_text)`` -- ``+`` continuations joined,
-    ``;`` tail comments dropped. Line indices are 0-based and inclusive."""
+    ``;`` tail comments dropped, cards left empty by that dropped.
+    Line indices are 0-based and inclusive."""
     lines = text.split("\n")
     cards: list[tuple[int, int, str]] = []
     depth = 0
@@ -52,6 +53,8 @@ def _cards(text: str) -> list[tuple[int, int, str]]:
             joined += " " + lines[index].strip()[1:].strip()
             index += 1
         joined = re.split(r";|\s\$", joined, maxsplit=1)[0].strip()
+        if not joined:
+            continue
         lowered = joined.lower()
         if lowered.startswith("."):
             word = lowered.split(None, 1)[0]
