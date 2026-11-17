@@ -109,6 +109,7 @@
       "description": "`klt deck` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.deck_cmd",
+        "klayout_tools.deck_diff",
         "klayout_tools.decks.history"
       ]
     },

@@ -301,12 +301,25 @@ def _print_diff_text(report: dict) -> None:
         print(f"added ({len(report['added'])}): {', '.join(report['added'])}")
     if report["removed"]:
         print(f"removed ({len(report['removed'])}): {', '.join(report['removed'])}")
-    for entry in report["changed"]:
+    _print_changed_rules(report["changed"])
+    _print_enforcement_and_deck_level(report)
+    _print_not_comparable(report)
+
+
+def _print_changed_rules(changed: list) -> None:
+    """The ``changed`` section: one line per rule, then one indented line
+    per moved field."""
+    for entry in changed:
         print(f"changed: {entry['id']}")
         for field, move in entry["fields"].items():
             print(
                 f"  {field}: {_diff_value(move['from'])} -> {_diff_value(move['to'])}"
             )
+
+
+def _print_enforcement_and_deck_level(report: dict) -> None:
+    """The enforcement-move section (rules that moved between ``rules`` and
+    ``unmodeled_rules``) and the deck-level field moves."""
     for entry in report["enforcement_changed"]:
         print(f"enforcement changed: {entry['id']} {entry['from']} -> {entry['to']}")
     for field, move in report["deck_level_changed"].items():
@@ -314,6 +327,11 @@ def _print_diff_text(report: dict) -> None:
             f"deck-level: {field}: {_diff_value(move['from'])}"
             f" -> {_diff_value(move['to'])}"
         )
+
+
+def _print_not_comparable(report: dict) -> None:
+    """The not-comparable section: envelope fields the other side's schema
+    predates, then per-rule fields."""
     not_comparable = report["not_comparable"]
     if not_comparable["envelope_fields"]:
         print(
