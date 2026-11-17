@@ -34,6 +34,36 @@ not `klt --version`, if you need to detect this kind of drift. See
   for `splits` in {2, 3, 8}, nfet and pfet, with and without the
   automatically-sized guard ring.
 
+- **`klt sim --attach <batch-shards.json>` accepts a map written by a
+  `--hosts N` / `remote.hosts: N` run** (#5777, 2026-11-17): `--attach` and
+  `--collect-partial` refused every `hosts != 1` request with "requires backend
+  'batch' with a single job", contradicting `--help`, and even once past that
+  gate a `hosts > 1` dispatch would have submitted a fresh fleet instead of
+  attaching. A shard map now attaches under any `hosts` (the shard count is read
+  from the map); a bare job id still requires `hosts = 1`. Additive: a call that
+  used to fail now succeeds.
+- **`klt sim --fail-fast-probe` reads the same `.spiceinit` as the corners it
+  screens** (#6047, 2026-11-17): `_run_corner` pins the thread count by writing
+  a run-directory `.spiceinit`, which *replaces* `$HOME/.spiceinit`, but the
+  probe was handed the unpinned init and so fell through to `$HOME` -- an init
+  setting that changes device interpretation (e.g. `set wnflag=1`) could apply
+  to the probe and not the corners, or the reverse. The probe now receives the
+  same thread-pinned init lines (pin first, then any `options.ngspice_init`).
+  When no pin applies (a single local corner with no explicit
+  `options.threads_per_worker`) nothing is written, as before. No new request
+  option or response field.
+- **`klt sim` refuses `measurements[].transfer` declared beside `noise`**
+  (#5695, 2026-11-14): the mutually exclusive measurement forms each carried a
+  hand-maintained list of "every *other* exclusive form", and `transfer`'s
+  predated `noise` and never gained it. Because the form validators return on
+  the first match, an entry declaring both was accepted as a plain `transfer`
+  entry and the `noise` request was silently dropped -- one measurement came
+  back where two were asked for. All seven lists are now derived from one
+  ordered registry (`sim_forms.FORMS`), so every pair of forms is refused in
+  both declaration orders. A request declaring `transfer` together with
+  `noise` now fails validation with the usual "alternative forms of a
+  measurement" error instead of running; every other refusal and message is
+  byte-identical. `klt sim`'s `schema_version` is unaffected.
 - **`klt yield`: a damaged gzip input is an error envelope, not a traceback**
   (#5543, 2026-11-13): a gzip samples or `--limits` file whose deflate stream
   is *corrupt* — as opposed to truncated, or carrying a bad CRC trailer, both
@@ -47,7 +77,6 @@ not `klt --version`, if you need to detect this kind of drift. See
   `could not read samples '<path>': …` like every other unreadable input, and
   `run_yield` raises `YieldError` rather than leaking `zlib.error` at the
   library surface. No output-shape change; no `schema_version` bump.
-
 - **`klt pex` and `klt sim --monte-carlo` now read a SPICE card the same way
   the flattener does: `w = 1` and `w=(2 * 1u)` are parameters, not device
   names** (#5461, 2026-11-13): three hand-rolled card tokenizers lived in
@@ -72,7 +101,49 @@ not `klt --version`, if you need to detect this kind of drift. See
   instance's parameters are re-emitted in the canonical unspaced spelling —
   `w = 1` comes back as `w=1`, equivalent to ngspice. No JSON field is added,
   renamed or removed; no `schema_version` bump.
+- **`klt extract --pins` orders the top `.SUBCKT` header by component label,
+  not whole name** (#5534, 2026-11-13): `--pins`' documented ordering rule
+  (#5255 — declared pins first, in the given order) compared each header token
+  as a whole string, while the same flag's *matching* rule is per component
+  label (#1687 — a net matches when any of its comma-joined labels is
+  declared). On a layout where KLayout joins labels, a pin promoted through a
+  component label (`Y|ybar` matching declared `ybar`) was therefore never
+  hoisted, so the header was neither the declared order nor the pre-#5255
+  order. Ordering now uses the same any-component-label match as promotion: a
+  joined-label port is hoisted into the slot of the earliest declared name it
+  carries, and a port carrying two declared names is emitted once, at the
+  earlier. The token's text is unchanged (`Y|ybar` moves but is still written
+  `Y|ybar`), ports matching no declared name keep their relative order, and
+  without `--pins` the written netlist is byte-identical to before.
+  **Re-baseline note**: this moves the header once more for joined-label
+  layouts, so a committed extracted netlist produced with `--pins` on such a
+  layout needs regenerating once; after that the header depends only on
+  `--pins`. `docs/cli/extract.md` also now records that *without* `--pins` the
+  top-level port order is the extractor's own and is not a cross-build
+  contract, alongside the existing `$N` caveat (#1063). Additive; no
+  `schema_version` bump.
 
+- **`klt sim` refuses capability-gated request fields before the grid runs,
+  not after** (#5645, 2026-11-16): five request fields whose only worker
+  guard was a post-run `*_unsupported_worker` echo check are now registered
+  in `REQUEST_FEATURE_MIN_RUNNER_VERSION` (all **mandatory**, mirroring their
+  echo checks' severity), so a submit against a fleet whose AMI-manifest
+  images predate the field is refused with `batch_runner_feature_unsupported`
+  before any S3 write or instance launch, `--dry-run` reports the refusal,
+  and the `remote` backend refuses pre-launch the same way:
+  `analysis.op_check` (minimum `0.9.2`), `analysis_overrides` (`0.9.1`),
+  `options.nodeset`, `options.initial_conditions`, `corners.options`
+  (`0.8.0`). Previously an old runner image ran the whole grid and the
+  result was then refused wholesale, with nothing reported -- and
+  `--dry-run` reported `status: valid`, because the registry had no row to
+  compare. The post-run echo checks stay unchanged as the backstop for an
+  unreadable manifest or disagreeing images. A new ratchet test
+  (`tests/test_sim_runner_feature_registry_coverage.py`) fails when a new
+  `*_UNSUPPORTED_WORKER_CODE` echo check lands without a registry row or a
+  reasoned waiver, so the next capability-gated field cannot repeat the gap.
+  No `schema_version` bump: the fields appear only as new values inside the
+  existing `runner_request_features.required` / `missing` arrays and as the
+  existing `batch_runner_feature_unsupported` error code.
 - **`klt mcp serve` serves the `docs/schemas/` JSON contract as MCP
   resources** (#5420, 2026-11-13): the server now advertises the resources
   capability and lists one resource per `docs/schemas/*.schema.json` at
@@ -119,6 +190,21 @@ not `klt --version`, if you need to detect this kind of drift. See
   `docs/json-contract.md` and carries no bump of its own. `--format text`
   still prints a path (`<outside repo>` for an external input), never the
   envelope object.
+- **Changed** (#5666, emission-affecting, **no** `schema_version` bump): a
+  `klt lvs` report from `engine: "klayout-runset"` now emits `layout` as the
+  committable `{path, scope}` envelope `env_provenance.repo_relative_path()`
+  builds from the **resolved** layout path — the same file
+  `environment.layout_sha256` hashes (`{"path": "<repo-relative POSIX path>",
+  "scope": "repo"}` inside the invoking repo, `{"path": null, "scope":
+  "external"}` outside) — not the request's bare-string echo. No bump:
+  `docs/cli/lvs.md` already documents `layout` as an unconditional object at
+  `schema_version: 3`, so the string was the non-compliance and this is a
+  compliance fix. `reference` is unchanged and still the documented
+  bare-string echo. A newly produced report for an out-of-repo layout reads
+  `{"path": null, "scope": "external"}` and needs an explicit `--layout` to
+  `--rerun` (already-committed old reports still resolve: the committed-path
+  reader accepts the bare string). `--format text` (the default) no longer
+  crashes with an `AttributeError` on a runset report.
 
 - **`klt synthesize`'s `netlist_sha256` no longer depends on the build root
   or on `run_id`** (#5594, 2026-11-15): Yosys names function-derived nets
@@ -580,6 +666,15 @@ not `klt --version`, if you need to detect this kind of drift. See
   island counts only when an `NWell` (31/0) ring closes it; taps are derived
   from `Activ` (`tap=None`) and the tie logic handles that. A layout drawing
   no `nBuLay` extracts exactly as before.
+- **`klt lvs` `options.ignore_mos_bulk`'s `device.bulk_ignored` warning
+  category is recorded here** (issue #5927, backfill — the option shipped
+  in 0.9.2 without a CHANGELOG entry): `options.ignore_mos_bulk: true`
+  disconnects the bulk terminal of every MOS device on both netlists
+  before comparing, so a tap-less planar layout (whose inline extraction
+  leaves bulks on deck-synthesized or anonymous nets) can still have its
+  gate/drain/source topology graded, disclosed as one
+  `device.bulk_ignored` `severity: "warning"` entry per device class and
+  side (never changes `status`). `"engine": "klayout"` only.
 - **`klt signoff` item 11 reads the substrate-path ERC result** (#5346,
   2026-11-12): a substrate-path `erc.supply_short` (`via: "substrate"`) is a
   `supply_not_continuous` blocker exactly like a metal one, so a real short is
@@ -2040,6 +2135,17 @@ not `klt --version`, if you need to detect this kind of drift. See
   the reported orientation changes, and only on hosts that were iterating in
   the other order.
 - `klt lvs`: new `"engine": "klayout-runset"` runs a PDK's own KLayout LVS runset (`deck_file`, `deck_vars`) and takes the verdict from its `.lvsdb` cross-reference, with `device_census`, a `coverage` block and `provenance.runset` (issue #2849). Additive; no `schema_version` bump.
+- **`klt lvs` klayout-runset engine's `mismatches[].category` values are
+  recorded here** (issue #5927, backfill for the
+  categories-are-recorded-here rule; both shipped with the engine itself in
+  0.8.0, issue #2849). `coverage.no_devices_recognized`
+  (`severity: "error"`) fires when the runset recognized no devices on
+  either side — an empty compare is not a verdict, and the run reports
+  `inconclusive`. `runset.incomplete` (`severity: "error"`) fires per
+  circuit the runset did not compare (cross-reference status
+  `Skipped`/`None`); those entries are excluded from the error-based
+  mismatch verdict, so a run that is otherwise clean reports
+  `inconclusive` rather than `mismatch`.
 
 - **Dev builds no longer satisfy `klayout-tools==X.Y.Z` pins** (issue #2823,
   absorbing #2888): the distribution version is now computed at build time

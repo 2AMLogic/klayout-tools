@@ -11,20 +11,14 @@ step (``0.25``) resolves both end points. Runs one real single-corner
 from __future__ import annotations
 
 import json
-import os
-import shutil
 from pathlib import Path
 
 import pytest
 
+from helpers.tool_probes import SKIP_NO_NGSPICE as _SKIP_NO_NGSPICE
 from klayout_tools import sim
 
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
-
-_SKIP_NO_NGSPICE = pytest.mark.skipif(
-    shutil.which("ngspice") is None or os.environ.get("KLT_SKIP_NGSPICE_TESTS") == "1",
-    reason="ngspice is not installed on this machine",
-)
 
 
 def _run(tmp_path: Path, step: str) -> dict:
