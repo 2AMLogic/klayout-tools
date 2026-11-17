@@ -6,7 +6,7 @@ import argparse
 from collections.abc import Callable
 from typing import Any
 
-from . import sim_cmd
+from . import sim_check_cmd
 
 
 def add_wait_for_capacity_arg(parser: argparse.ArgumentParser, tail: str) -> None:
@@ -133,6 +133,9 @@ def add_sim_parser(
             "override where per-corner logs/rawfiles are written when the "
             "request sets options.keep_artifacts "
             "(default: a `.klt/sim/` directory next to the request file). "
+            "Without --report-out, a completed run also writes its report "
+            "envelope to <dir>/report.json (issue #5776); --report-out "
+            "chooses another path instead and wins when given. "
             "With --batch-set, -o is instead the parent of one directory "
             "per member, each named after its request's stem (a trailing "
             "`.request.json` is stripped); `requests[].report` in the "
@@ -163,7 +166,7 @@ def add_sim_parser(
             "of submitting a new one: "
             "waits for it (bounded by the request's `batch.poll_timeout_s`) "
             "and reports it, never re-launching. Pass the same request the "
-            "job was submitted from, with --backend batch. See "
+            "job was submitted from (and --hosts), with --backend batch. See "
             "docs/cli/sim.md."
         ),
     )
@@ -415,4 +418,22 @@ def add_sim_parser(
         ),
     )
     _add_format_arg(sim_parser)
-    sim_parser.set_defaults(func=sim_cmd.run)
+    sim_parser.add_argument(
+        "--check",
+        dest="check",
+        metavar="REPORT",
+        default=None,
+        help=(
+            "instead of simulating, re-verify a finished klt sim report's "
+            "environment.netlist_closure/netlist_identity against the working "
+            "tree (no engine, network or PDK). Exit 0 match, 3 drifted, 1 "
+            "unreadable report. See docs/cli/sim.md."
+        ),
+    )
+    sim_parser.add_argument(
+        "--root",
+        dest="root",
+        default=None,
+        help="with --check: directory to anchor scope=repo closure entries to",
+    )
+    sim_parser.set_defaults(func=sim_check_cmd.run)

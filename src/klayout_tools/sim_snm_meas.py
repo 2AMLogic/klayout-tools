@@ -28,13 +28,13 @@ with a ``[<reason>]`` token from :data:`ERROR_CODES`.
 from __future__ import annotations
 
 import os
-import re
 from dataclasses import dataclass
 from typing import Any
 
-from . import sim_raw, sim_snm
+from . import sim_measurement_kind, sim_raw, sim_snm
 from .sim_errors import SimError
-from .sim_forms import validate_exclusive_form
+from .sim_forms import normalize_selector as normalize_selector
+from .sim_forms import other_forms, validate_exclusive_form
 
 #: Reason tokens a failed ``snm`` entry's diagnostic message leads with.
 ERROR_CODES = (
@@ -48,39 +48,15 @@ ERROR_CODES = (
 _KEYS = ("x", "y1", "y2")
 _ALLOWED_KEYS = frozenset(_KEYS)
 
-#: Single-ended ``v(node)``: one non-empty token without whitespace, control
-#: characters, commas or parentheses.
-_SELECTOR_RE = re.compile(r"^[vV]\(([^\s\x00-\x1f\x7f,()]+)\)$")
-
 _VECTOR_PREFIX = "__klt_snm_"
-
-_FORMS = (
-    "spice",
-    "expr",
-    "crossings",
-    "cycle_mean",
-    "energy",
-    "stress",
-    "noise",
-    "transfer",
-    "tian",
-)
 
 
 def is_snm(spec: dict[str, Any]) -> bool:
-    return spec.get("snm") is not None
+    return sim_measurement_kind.declares(spec, "snm")
 
 
 def snm_measurements(measurements_spec: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [spec for spec in measurements_spec if is_snm(spec)]
-
-
-def normalize_selector(selector: Any) -> str | None:
-    """``"v(node)"`` lower-cased, or ``None`` when not an accepted selector."""
-    if not isinstance(selector, str):
-        return None
-    match = _SELECTOR_RE.match(selector)
-    return None if match is None else f"v({match.group(1).lower()})"
 
 
 def _triple(spec: dict[str, Any]) -> tuple[str, str, str]:
@@ -113,7 +89,7 @@ def validate_form_exclusive(spec: dict[str, Any]) -> bool:
     return validate_exclusive_form(
         spec,
         "snm",
-        _FORMS,
+        other_forms("snm"),
         lambda name, spec: validate_snm_spec(name, spec["snm"]),
     )
 
@@ -147,22 +123,16 @@ def validate_snm_context(
     declared = snm_measurements(measurements_spec)
     if not declared:
         return
-    kind = str(analysis.get("kind", "")).lower()
-    if kind != "dc":
-        raise SimError(
-            f"measurement '{declared[0]['name']}' declares 'snm', which needs "
-            f'a DC sweep and so requires analysis.kind "dc" (got '
-            f"{analysis.get('kind')!r})"
-        )
-    seen: set[str] = set()
-    for spec in measurements_spec:
-        key = str(spec.get("name")).lower()
-        if key in seen:
-            raise SimError(
-                f"duplicate measurement name '{spec.get('name')}': names must "
-                "be unique when measurements[] declares an snm entry"
-            )
-        seen.add(key)
+    sim_measurement_kind.require_analysis_kind(
+        declared,
+        analysis,
+        form="snm",
+        required="dc",
+        explanation="needs a DC sweep",
+    )
+    sim_measurement_kind.require_unique_measurement_names(
+        measurements_spec, form="an snm entry"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -170,8 +140,12 @@ def validate_snm_context(
 # --------------------------------------------------------------------------- #
 
 
+#: Prefix of the rawfile each snm measurement writes per corner.
+_RAWFILE_PREFIX = "snm"
+
+
 def rawfile_path(corner_dir: str, index: int) -> str:
-    return os.path.join(corner_dir, f"snm_{index}.raw")
+    return sim_measurement_kind.rawfile_path(corner_dir, _RAWFILE_PREFIX, index)
 
 
 def control_lines(

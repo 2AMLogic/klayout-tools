@@ -84,26 +84,16 @@ jobs:
       - name: Verify ngspice runs headlessly
         run: ngspice -v
 
-      - name: Install ciel
-        run: |
-          PIP_BREAK_SYSTEM_PACKAGES=1 python3 -m pip install --user ciel==2.6.1
-          echo "$HOME/.local/bin" >>"$GITHUB_PATH"
-
-      - name: Cache full sky130A PDK (ciel, pinned)
+      - name: Install ciel + restore/fetch the pinned sky130A PDK (device-model libs)
+        # Shared composite action (issue #5658): defaults to the
+        # device-models-only library list, which is folded into the cache
+        # key -- so this nightly entry can never serve a std-cell consumer.
         id: pdk-cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: ~/.ciel
-          # Same pinned open_pdks build equiv-canary.yml/place-and-route-
-          # smoke.yml pin, reused here for reproducibility rather than
-          # "whatever ciel's latest is at run time".
-          key: sky130A-ciel-f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7
-
-      - name: Fetch full sky130A PDK (ciel, cache miss only)
-        if: steps.pdk-cache.outputs.cache-hit != 'true'
+        # timeout-minutes caps the whole composite (composite-action
+        # steps cannot carry timeout-minutes themselves); strictly tighter
+        # than the inline triple's fetch-only 20-minute cap.
         timeout-minutes: 20
-        run: |
-          ciel enable --pdk-family sky130 -l sky130_fd_pr f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7
+        uses: ./.github/actions/setup-sky130a-pdk
 
       - name: Regression-test the reference-passes/degraded-variant-fails contract
         # tests/test_design_agent_benchmark.py's `deliberately_broken`/
@@ -261,23 +251,16 @@ jobs:
       - name: Verify ngspice runs headlessly
         run: ngspice -v
 
-      - name: Install ciel
-        run: |
-          PIP_BREAK_SYSTEM_PACKAGES=1 python3 -m pip install --user ciel==2.6.1
-          echo "$HOME/.local/bin" >>"$GITHUB_PATH"
-
-      - name: Cache full sky130A PDK (ciel, pinned)
+      - name: Install ciel + restore/fetch the pinned sky130A PDK (device-model libs)
+        # Shared composite action (issue #5658): defaults to the
+        # device-models-only library list, which is folded into the cache
+        # key -- so this entry can never serve a std-cell consumer.
         id: pdk-cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: ~/.ciel
-          key: sky130A-ciel-f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7
-
-      - name: Fetch full sky130A PDK (ciel, cache miss only)
-        if: steps.pdk-cache.outputs.cache-hit != 'true'
+        # timeout-minutes caps the whole composite (composite-action
+        # steps cannot carry timeout-minutes themselves); strictly tighter
+        # than the inline triple's fetch-only 20-minute cap.
         timeout-minutes: 20
-        run: |
-          ciel enable --pdk-family sky130 -l sky130_fd_pr f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7
+        uses: ./.github/actions/setup-sky130a-pdk
 
       - name: Install the claude CLI
         if: ${{ env.CLAUDE_CODE_OAUTH_TOKEN != '' }}
@@ -366,23 +349,16 @@ jobs:
       - name: Verify ngspice runs headlessly
         run: ngspice -v
 
-      - name: Install ciel
-        run: |
-          PIP_BREAK_SYSTEM_PACKAGES=1 python3 -m pip install --user ciel==2.6.1
-          echo "$HOME/.local/bin" >>"$GITHUB_PATH"
-
-      - name: Cache full sky130A PDK (ciel, pinned)
+      - name: Install ciel + restore/fetch the pinned sky130A PDK (device-model libs)
+        # Shared composite action (issue #5658): defaults to the
+        # device-models-only library list, which is folded into the cache
+        # key -- so this entry can never serve a std-cell consumer.
         id: pdk-cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: ~/.ciel
-          key: sky130A-ciel-f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7
-
-      - name: Fetch full sky130A PDK (ciel, cache miss only)
-        if: steps.pdk-cache.outputs.cache-hit != 'true'
+        # timeout-minutes caps the whole composite (composite-action
+        # steps cannot carry timeout-minutes themselves); strictly tighter
+        # than the inline triple's fetch-only 20-minute cap.
         timeout-minutes: 20
-        run: |
-          ciel enable --pdk-family sky130 -l sky130_fd_pr f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7
+        uses: ./.github/actions/setup-sky130a-pdk
 
       - name: Install the claude CLI
         if: ${{ env.CLAUDE_CODE_OAUTH_TOKEN != '' }}
