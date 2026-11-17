@@ -105,10 +105,36 @@ def _two_node_difference(text: str) -> str:
     return f"{func}({first})-{func}({second})"
 
 
+def _balanced_close(spice: str, open_at: int) -> int | None:
+    """Index of the ``)`` matching the ``(`` at *open_at*, or ``None`` when
+    the group never closes."""
+    depth = 0
+    for index in range(open_at, len(spice)):
+        if spice[index] == "(":
+            depth += 1
+        elif spice[index] == ")":
+            depth -= 1
+            if depth == 0:
+                return index
+    return None
+
+
+def _callee_start(spice: str, open_at: int) -> int | None:
+    """Start of the callee identifier immediately before the ``(`` at
+    *open_at* (spaces allowed) -- ``None`` when the group has no callee and
+    is a bare parenthesised group."""
+    cursor = open_at
+    while cursor > 0 and spice[cursor - 1].isspace():
+        cursor -= 1
+    match = re.search(r"[A-Za-z0-9_.]+$", spice[:cursor])
+    return None if match is None else match.start()
+
+
 def _token_end(spice: str, start: int) -> int | None:
     """End index of the operand token beginning at *start* -- a quoted span,
-    a parenthesised group, or a bare number/identifier run -- or ``None``
-    when no operand starts there."""
+    a parenthesised group, a call (``abs(v(b))``: an identifier run followed
+    by its balanced group, spaces allowed before it), or a bare
+    number/identifier run -- or ``None`` when no operand starts there."""
     if start >= len(spice):
         return None
     ch = spice[start]
@@ -116,22 +142,27 @@ def _token_end(spice: str, start: int) -> int | None:
         close = spice.find("'", start + 1)
         return None if close == -1 else close + 1
     if ch == "(":
-        depth = 0
-        for index in range(start, len(spice)):
-            if spice[index] == "(":
-                depth += 1
-            elif spice[index] == ")":
-                depth -= 1
-                if depth == 0:
-                    return index + 1
-        return None
+        close = _balanced_close(spice, start)
+        return None if close is None else close + 1
     match = re.match(r"[A-Za-z0-9_.]+", spice[start:])
-    return None if match is None else start + match.end()
+    if match is None:
+        return None
+    end = start + match.end()
+    cursor = end
+    while cursor < len(spice) and spice[cursor].isspace():
+        cursor += 1
+    if cursor < len(spice) and spice[cursor] == "(":
+        close = _balanced_close(spice, cursor)
+        if close is not None:
+            return close + 1
+    return end
 
 
 def _token_start(spice: str, end: int) -> int | None:
     """Start index of the operand token whose last character is at *end*,
-    or ``None`` when no operand ends there."""
+    or ``None`` when no operand ends there. A group that closes at *end*
+    and carries a callee (``abs(v(b))``) absorbs it, so the token spans the
+    whole call."""
     if end < 0:
         return None
     ch = spice[end]
@@ -146,7 +177,8 @@ def _token_start(spice: str, end: int) -> int | None:
             elif spice[index] == "(":
                 depth -= 1
                 if depth == 0:
-                    return index
+                    callee = _callee_start(spice, index)
+                    return index if callee is None else callee
         return None
     match = re.search(r"[A-Za-z0-9_.]+$", spice[: end + 1])
     return None if match is None else match.start()
@@ -186,6 +218,37 @@ def _extend_over_operands(spice: str, start: int, end: int) -> tuple[int, int]:
     return start, end
 
 
+def _widen_over_enclosing_call(spice: str, start: int, end: int) -> tuple[int, int]:
+    """Widen a flagged expression span over the balanced calls enclosing it
+    (``abs(v(a)-v(b))``, nested calls too), so the refusal's rewrite wraps
+    the whole local expression -- ``par('abs(v(a)-v(b))')``, the form
+    ngspice accepts -- rather than ``abs(par('v(a)-v(b)'))``, which fatals
+    on every corner. A bare parenthesised group with no callee is not a
+    call and is left alone."""
+    while True:
+        depth = 0
+        widened = False
+        for index in range(start - 1, -1, -1):
+            ch = spice[index]
+            if ch == ")":
+                depth += 1
+            elif ch == "(":
+                if depth > 0:
+                    depth -= 1
+                    continue
+                close = _balanced_close(spice, index)
+                if close is None or close < end:
+                    continue
+                callee = _callee_start(spice, index)
+                if callee is None:
+                    continue
+                start, end = callee, close + 1
+                widened = True
+                break
+        if not widened:
+            return start, end
+
+
 def _find_meas_signal_expression(spice: str) -> tuple[int, int, str] | None:
     """Locate an arithmetic expression in a `.meas` card's signal position.
 
@@ -196,7 +259,9 @@ def _find_meas_signal_expression(spice: str) -> tuple[int, int, str] | None:
     an outer operator (``2*v(a)``).
 
     Returns ``(start, end, text)`` -- the expression's span in *spice* and
-    its verbatim text -- or ``None`` when every reference stands alone:
+    its verbatim text, widened over any enclosing balanced call so the
+    quoted rewrite holds the whole local expression -- or ``None`` when
+    every reference stands alone:
     ``when v(a)=0.5``, ``when a=0.5`` (a bare identifier left-hand side is
     legal), ``i(V1)=-0.0005`` (the ``-`` binds a number), and the #2826
     right-hand-side cases ``when v(a)=0.5*1.62`` / ``find v(a) at='1u+2n'``
@@ -224,11 +289,13 @@ def _find_meas_signal_expression(spice: str) -> tuple[int, int, str] | None:
         groups.append(_MeasGroup(start, end, comma=comma))
     for group in groups:
         if group.count >= 2 or group.comma:
-            return (group.start, group.end, spice[group.start : group.end])
+            lo, hi = _widen_over_enclosing_call(spice, group.start, group.end)
+            return (lo, hi, spice[lo:hi])
         before = blanked[: group.start].rstrip()
         after = blanked[group.end :].lstrip()
         if before.endswith(_MEAS_ARITH_OPS) or after.startswith(_MEAS_ARITH_OPS):
             lo, hi = _extend_over_operands(spice, group.start, group.end)
+            lo, hi = _widen_over_enclosing_call(spice, lo, hi)
             return (lo, hi, spice[lo:hi])
     return None
 

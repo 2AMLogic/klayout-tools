@@ -34,6 +34,12 @@ from test_sim import _write_body, _write_request
         # a lone reference bound to a non-reference operand
         ".meas tran t when 2*v(a)=0.5",
         ".meas tran t when v(a)*2=0.5",
+        # a call around the expression: the rewrite must wrap the whole
+        # call, not splice par('...') inside it (measured on ngspice-47:
+        # abs(par('v(a)-v(b)')) fatals; par('abs(v(a)-v(b))') works)
+        ".meas tran t when abs(v(a)-v(b))=0.1",
+        ".meas tran t when v(a)*abs(v(b))=0.1",
+        ".meas tran t when v(a)*2*par('v(b)')=0",
     ],
 )
 def test_validate_meas_card_rejects_signal_position_expression(card):
@@ -81,6 +87,49 @@ def test_validate_meas_card_rewrites_expression_in_message():
     # author picks the right form
     assert "measurements[].crossings" in str(excinfo.value)
     assert "count" in str(excinfo.value)
+
+
+def test_validate_meas_card_rewrites_call_expression_as_whole_par_span():
+    # A flagged expression inside or beside a call must be quoted whole:
+    # the rewrite splices par('...') around the call (or the whole operand
+    # run), never inside it -- the spliced-in forms are cards ngspice
+    # fatals or crashes on (measured on ngspice-47, issue #5651 verdict).
+    cases = [
+        (
+            ".meas tran t_x when abs(v(a)-v(b))=0.1",
+            ".meas tran t_x when par('abs(v(a)-v(b))')=0.1",
+        ),
+        (
+            ".meas tran t_x when v(a)*abs(v(b))=0.1",
+            ".meas tran t_x when par('v(a)*abs(v(b))')=0.1",
+        ),
+        (
+            ".meas tran t_x when v(a)*2*par('v(b)')=0",
+            ".meas tran t_x when par('v(a)*2*v(b)')=0",
+        ),
+    ]
+    for card, rewrite in cases:
+        with pytest.raises(sim.SimError) as excinfo:
+            sim._validate_meas_card("t_x", card)
+        message = str(excinfo.value)
+        assert rewrite in message
+        # the spliced-into-the-call forms must never be suggested
+        assert "abs(par(" not in message
+        assert "par('v(a)*abs')" not in message
+        assert "par('v(a)*2*par')" not in message
+
+
+def test_validate_meas_card_control_scope_call_expression_names_vdiff():
+    # The control-scope remedy replaces the same widened span: the let
+    # helper holds the whole call expression and the card references it by
+    # name, so the quoted expr is the author's whole local expression.
+    with pytest.raises(sim.SimError) as excinfo:
+        sim._validate_meas_card(
+            "c_x", ".meas tran c_x when abs(v(a)-v(b))=0.1", control_scope=True
+        )
+    message = str(excinfo.value)
+    assert '"expr": "abs(v(a)-v(b))"' in message
+    assert "when vdiff=0.1" in message
 
 
 def test_validate_meas_card_rewrites_two_node_voltage_as_difference():
