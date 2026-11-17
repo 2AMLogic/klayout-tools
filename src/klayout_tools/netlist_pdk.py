@@ -127,9 +127,13 @@ def unestablished_variant_warning(report: dict[str, Any]) -> dict[str, Any] | No
     alternatives = report.get("alternative_variants") or []
     if not alternatives:
         return None
-    message = pdk_module.alternative_variants_warning(report) or ""
-    if message.startswith(_ALT_WARNING_PREFIX):
-        message = message[len(_ALT_WARNING_PREFIX) :]
+    # ``removeprefix``, not an ``if``: with ``alternatives`` non-empty the
+    # formatter always returns its prefixed text, so a conditional strip
+    # leaves an unreachable branch (the coverage floor on this module is
+    # 100%). Same result either way if that text ever loses the prefix.
+    message = (pdk_module.alternative_variants_warning(report) or "").removeprefix(
+        _ALT_WARNING_PREFIX
+    )
     return {
         "code": PDK_VARIANT_UNESTABLISHED_CODE,
         "variant": report["variant"],
