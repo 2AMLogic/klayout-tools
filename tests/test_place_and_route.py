@@ -6521,7 +6521,7 @@ def test_engine_error_message_names_mount_rule_for_path_outside_cwd(
     message = place_and_route._engine_error_message("floorplan", completed)
 
     assert f"'{outside}' is outside the invocation directory" in message
-    assert "$PWD, $PDK_ROOT and $TMPDIR" in message
+    assert "$PWD, $PDK_ROOT and $TMPDIR (plus /tmp when $TMPDIR differs)" in message
     assert "common ancestor" in message
 
     inside = cwd / "macro.lef"

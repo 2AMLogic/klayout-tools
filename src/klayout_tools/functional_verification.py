@@ -118,25 +118,23 @@ implemented deliberately rather than rediscovered:
 
 9. **A bit-selected top-level-port ``INTERCONNECT`` entry can poison a
    sibling entry on the same net** (issue #1619, live on Icarus 13.0) --
-   distinct from finding 7's *scalar* bare-port fix, and only reachable once
-   that fix let a *vector* port bit (``y[0]``, ``a[0]``) resolve at all. Two
-   separate mechanisms, depending on which side of the entry carries the
-   bit-selected port -- see the module comment above
-   :func:`_split_sdf_bus_port_interconnects` for the full write-up and
-   `docs/design/sdf-annotate-feasibility-spike.md` §3.7 for the live
-   evidence: (a) as a *destination*, order-dependent -- fixed by deferring
-   every such entry to its own, later ``$sdf_annotate`` call
-   (:func:`_split_sdf_bus_port_interconnects`); (b) as a *source* feeding a
-   ``specify``-bearing destination -- fails even in total isolation,
-   unfixable by reordering, and confirmed sensitive to the testbench itself
-   (a no-op test resolves cleanly; any test that actually drives the DUT and
-   awaits a trigger does not) -- left unfixed and pinned down by
-   ``test_integration_real_icarus_sdf_bus_port_input_fanout_stays_
-   unresolvable`` rather than silently reported as "annotated" or masked.
-   The issue's own "wrapper double-binds the net identity" hypothesis is
-   refuted by shape (a) alone: reordering the entries (bit-selected-port
-   entry last instead of first) resolves everything, which a genuine
-   identity double-bind would not fix.
+   distinct from finding 7's *scalar* bare-port fix, and only reachable
+   once that fix let a *vector* port bit (``y[0]``, ``a[0]``) resolve.
+   Two separate mechanisms, depending on which side of the entry carries
+   the bit-selected port -- full write-up in the module comment above
+   :func:`_split_sdf_bus_port_interconnects` and
+   `docs/design/sdf-annotate-feasibility-spike.md` §3.7:
+   (a) as a *destination*, order-dependent -- fixed by deferring every
+   such entry to its own, later ``$sdf_annotate`` call; (b) as a *source*
+   -- the one-modpath-per-port-net cap (issue #5705, raw
+   ``iverilog``/``vvp`` 13.0): on a fanout-above-1 net ``$sdf_annotate``
+   annotates only the last-declared instance's destination and rejects
+   the rest, deterministically -- unfixable by reordering, left unfixed,
+   pinned down by ``test_integration_real_icarus_sdf_bus_port_input_
+   fanout_stays_unresolvable`` rather than silently reported as
+   "annotated" or masked. The "wrapper double-binds the net identity"
+   hypothesis is refuted by shape (a): reordering (bit-selected entry
+   last) resolves everything, which a genuine double-bind would not.
 
 10. **A run that fails on every test case under ``options.sdf`` -- often
     with the design's outputs reading a constant zero -- while the
@@ -2824,17 +2822,17 @@ def run_functional_verification(
         # Issue #2363: an `INTERCONNECT` entry from a bit-selected top-level
         # input port onto a pin of a *physical-only* instance -- a
         # router-inserted antenna diode, or any filler/tapcell whose model
-        # is timing-empty -- is shape (b) of the #1619/#1857 spike and
-        # cannot be annotated by Icarus at all. Unlike the general shape (b)
-        # case (which stays failing, pinned by
+        # is timing-empty -- is shape (b) of the #1619/#1857 spike: on a
+        # fanout-above-1 net, #5705's cap leaves every non-last-declared
+        # load's entry unannotated. Unlike the general shape (b) case
+        # (which stays failing, pinned by
         # `test_integration_real_icarus_sdf_bus_port_input_fanout_stays_
-        # unresolvable`), this destination's elaborated model carries no
-        # `specify` block and no output pin, so there is no modpath the
-        # entry could ever annotate. When such an entry is zero-delay at
-        # every corner, dropping it cannot change any simulated timing, so
+        # unresolvable`), this destination has no timing content and no
+        # logic observes the pin -- its entry can still be the cap's
+        # survivor, so the drop rests on timing emptiness, not "no modpath
+        # exists". A zero-delay-at-every-corner entry is timing-neutral, so
         # it is removed here and counted in `environment.sdf.dropped`
-        # instead of failing the run. A non-zero-delay entry is left in
-        # place and still fails the diagnostic gate loudly.
+        # instead of failing the run; a non-zero-delay entry still fails.
         annotate_source_path = _apply_sdf_physical_only_drop(
             annotate_source_path,
             output_dir,
