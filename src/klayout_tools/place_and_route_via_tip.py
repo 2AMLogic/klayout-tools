@@ -47,11 +47,19 @@ has finished editing geometry, and its report rides out as that pass's own
 ``place-and-route`` response): the repair says what it changed, the flag says
 what the deck still makes of the result.
 
-Each rule's hits are reported twice: ``violations`` (every hit on the layer,
-the deck-equivalent count) and ``via_pads`` (the subset whose edge pair
-touches the M* landing pad of a ``VIA_*`` cell -- the router-inserted
-geometry this issue is about). The two together say whether a non-zero deck
-result is the router's landing geometry or the design's own routing.
+Each rule's hits are reported twice over: ``violations`` (every hit on the
+layer, the deck-equivalent count) and two attribution subsets -- ``via_pads``
+(the edge pairs touching the M* landing pad of a ``VIA_*`` cell) and
+``router_fill`` (issue #5740: those touching a reconstructed ``SHAPE
+DRCFILL`` patch region, the patch metal OpenROAD's PDN builder inserts on
+via-stack intermediate layers and KLayout's reader cannot tell apart from
+routed wire -- see
+:mod:`~klayout_tools.place_and_route_def_drcfill`). A pair can belong to
+both subsets when it touches both kinds of router geometry. The three
+together say whether a non-zero deck result is the router's landing
+geometry, the router's patch metal, or the design's own routing, with the
+totals ``via_pad_violations`` and ``router_fill_violations`` alongside
+``violations``.
 
 This is a targeted measurement, not a deck run: it loads no ``.drc`` script
 and needs no ``klayout`` *binary*, only the ``klayout.db`` module the merge
@@ -63,9 +71,13 @@ asap7``, which stays the signoff verdict:
   40 nm spacing and ``M8``/``M9`` their own 80 nm-conditioned family.
 * only the tip rules are checked -- not ``S.1`` (side to side), ``S.6``
   (corner to corner), widths, areas or enclosures.
-* attribution is geometric: an edge pair is counted against via pads when it
-  touches pad geometry, which cannot distinguish a pad's own tip edge from a
-  routed wire edge abutting that pad.
+* attribution is geometric: an edge pair is counted against a source when
+  it touches that source's geometry, which cannot distinguish a source's
+  own tip edge from a routed wire edge abutting it.
+* the ``router_fill`` source is only as complete as the DEF text it is
+  reconstructed from: ``trim_via_pads`` scans the routed DEF when the
+  caller hands it one (``def_path``), and a caller that does not simply
+  reports ``router_fill`` 0 everywhere rather than guessing.
 
 Thresholds are declared here rather than resolved from a curated rule table
 because ASAP7 has none (``get_deck("asap7")`` raises ``UnknownDeckError`` --
@@ -123,6 +135,7 @@ def _report(status: str, reason: str | None = None) -> dict[str, Any]:
         "reason": reason,
         "violations": 0,
         "via_pad_violations": 0,
+        "router_fill_violations": 0,
         "rules": [],
     }
 
@@ -181,6 +194,7 @@ def _check_layer(
     *,
     merged: Any,
     pads: Any,
+    fills: Any,
     lef_layer: str,
     gds: tuple[int, int],
     dbu_um: float,
@@ -199,14 +213,16 @@ def _check_layer(
         total = pairs.count()
         if not total:
             continue
-        attributed = pairs.interacting(pads).count() if pads is not None else 0
         entries.append(
             {
                 "rule": f"{lef_layer}.{suffix}",
                 "layer": [gds[0], gds[1]],
                 "threshold_nm": threshold_nm,
                 "violations": total,
-                "via_pads": attributed,
+                "via_pads": pairs.interacting(pads).count() if pads is not None else 0,
+                "router_fill": (
+                    pairs.interacting(fills).count() if fills is not None else 0
+                ),
             }
         )
     return entries
@@ -219,20 +235,27 @@ def check_via_pad_tips(
     top_cell: Any,
     variant: str,
     lef_to_gds: dict[str, tuple[int, int]],
+    drcfill_regions: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Count the deck's ``M1``-``M3`` tip-spacing violations in the merged
-    layout, and how many of them touch a ``VIA_*`` landing pad.
+    layout, and how many of them touch a ``VIA_*`` landing pad or a
+    reconstructed ``SHAPE DRCFILL`` patch (issue #5740).
+
+    ``drcfill_regions`` maps a LEF routing layer name to the patch region
+    :func:`~klayout_tools.place_and_route_def_drcfill.scan_def_drcfill`
+    reconstructed from the routed DEF; ``None`` (no DEF handed in) reports
+    ``router_fill`` 0 everywhere rather than guessing.
 
     Report-only: ``layout`` is never modified, so the merged GDS is
     byte-identical whether this pass runs or not.
 
     Returns ``status`` (``"violations"``: at least one hit; ``"clean"``: ran,
     none; ``"skipped"``: could not run, ``reason`` says why -- every
-    non-ASAP7 PDK reports ``"skipped"``), ``reason``, ``violations`` and
-    ``via_pad_violations`` (totals over every rule), and ``rules``: one entry
-    per deck rule id with a non-zero count, carrying its ``layer``,
-    ``threshold_nm``, ``violations`` and the ``via_pads`` subset.
-    Never raises for absent input.
+    non-ASAP7 PDK reports ``"skipped"``), ``reason``, ``violations``,
+    ``via_pad_violations`` and ``router_fill_violations`` (totals over every
+    rule), and ``rules``: one entry per deck rule id with a non-zero count,
+    carrying its ``layer``, ``threshold_nm``, ``violations`` and the
+    ``via_pads``/``router_fill`` subsets. Never raises for absent input.
     """
     if pdk_variant_family(variant) != _ASAP7_FAMILY:
         return _report("skipped", f"PDK family of '{variant}' is not ASAP7; no-op")
@@ -251,11 +274,13 @@ def check_via_pad_tips(
         if merged.is_empty():
             continue
         pads = _placed_pads(kdb, layout, top_cell, layer_index)
+        fills = None if drcfill_regions is None else drcfill_regions.get(lef_layer)
         report["rules"].extend(
             _check_layer(
                 kdb,
                 merged=merged,
                 pads=pads,
+                fills=fills,
                 lef_layer=lef_layer,
                 gds=gds,
                 dbu_um=layout.dbu,
@@ -268,6 +293,9 @@ def check_via_pad_tips(
         )
     report["violations"] = sum(entry["violations"] for entry in report["rules"])
     report["via_pad_violations"] = sum(entry["via_pads"] for entry in report["rules"])
+    report["router_fill_violations"] = sum(
+        entry["router_fill"] for entry in report["rules"]
+    )
     if report["violations"]:
         report["status"] = "violations"
     return report
