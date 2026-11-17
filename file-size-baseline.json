@@ -189,11 +189,11 @@
     },
     {
       "path": "src/klayout_tools/cli/parser.py",
-      "lines": 5247
+      "lines": 5234
     },
     {
       "path": "src/klayout_tools/cli/pdk_cmd.py",
-      "lines": 613
+      "lines": 604
     },
     {
       "path": "src/klayout_tools/cli/signoff_cmd.py",
