@@ -32,7 +32,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import env_provenance
+from . import env_provenance, sim_provenance
 from . import sim_staging as sim_staging
 from ._batch_common import apply_unrun_signal
 
@@ -93,6 +93,7 @@ def remote_entry_environment(
     corners_lost: int,
     artifacts_dir: str,
     checkpoint_path: str | None,
+    request: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """``environment.remote`` -- additive/optional (``remote``/``batch`` only).
 
@@ -107,6 +108,11 @@ def remote_entry_environment(
     fields. Either way a later reader of ``environment["remote"]`` -- notably
     :func:`~klayout_tools.sim_batch_features.pop_remote_diagnostics` -- sees
     exactly what it saw when this was inline.
+
+    ``request`` (issue #5593) additionally yields
+    ``pdk_revision_comparison`` beside ``remote``: a declared
+    ``options.pdk_revision`` compared with each worker-observed stamp on
+    ``remote_environment`` (advisory; :mod:`sim_provenance` owns the shape).
     """
     if remote_environment is None:
         return {}
@@ -116,7 +122,10 @@ def remote_entry_environment(
             corners_lost,
             artifacts_dir,
             checkpoint_path,
-        )
+        ),
+        **sim_provenance.pdk_revision_comparison_environment(
+            remote_environment, request
+        ),
     }
 
 

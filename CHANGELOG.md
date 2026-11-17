@@ -14,6 +14,23 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Changed** (#5593, additive — `klt sim` `schema_version` unchanged): a
+  batch run's surfaced `could not find a valid modelname` diagnostic
+  (`model_bin_range`/`ngspice_fatal`, from the retrieved engine log) is now
+  self-attributing: with a usable `worker_environment` capture it names the
+  fleet's observed PDK `variant` and `stamp_sha256` (plus the `SOURCES`
+  revision token when parseable), the `pdk_stamp_comparison` status (and
+  `reason`), and names `options.stage_model_inputs: true` as the remedy --
+  instead of advising a comparison against the submitter's own bin cards,
+  which a local-pass/fleet-fail abort has typically already ruled out. A run
+  that already staged its models is not told to stage again; without a
+  usable capture the message is byte-for-byte unchanged. A declared
+  `options.pdk_revision` on a `batch` run with a readable worker stamp
+  additionally records the advisory `environment.pdk_revision_comparison`
+  (`match` by `stamp_sha256` or revision token, `mismatch`, or
+  `not_comparable`; per-`fleet[]` under sharding) beside
+  `pdk_revision_asserted` -- it never changes the run's outcome. See
+  `docs/cli/sim.md`.
 - **`klt mcp serve` serves the `docs/schemas/` JSON contract as MCP
   resources** (#5420, 2026-11-13): the server now advertises the resources
   capability and lists one resource per `docs/schemas/*.schema.json` at

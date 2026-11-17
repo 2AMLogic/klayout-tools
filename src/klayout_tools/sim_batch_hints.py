@@ -6,8 +6,11 @@ per-file size ratchet.
 
 from __future__ import annotations
 
+import os
 import re
 from typing import Any
+
+from .pdk_store import sources_revision_token
 
 #: ngspice log signatures of a model-library ``expr()`` parameter the engine
 #: cannot evaluate; off-host only, where the engine is the runner image's, not
@@ -88,15 +91,93 @@ _CARD_ERR_RE = re.compile(
 )
 _MODELNAME_RE = re.compile(r"could not find a valid modelname", re.IGNORECASE)
 _ATTRIBUTED_MARK = "ngspice card at expanded-deck line"
+_LEGACY_BIN_CARD_ADVICE = "compare this model's w/l against the library's bin cards"
 
 
-def attribute_modelname(diagnostic: dict[str, Any], log_text: str) -> dict[str, Any]:
+def _worker_stamp_sentence(pdk: dict[str, Any], staged: bool) -> str:
+    """The fleet's observed PDK, as one sentence: variant plus stamp (and
+    the ``SOURCES`` revision token when parseable), or the absence of a
+    readable stamp."""
+    sha = pdk.get("stamp_sha256")
+    if not (isinstance(sha, str) and sha):
+        return f"the fleet resolved PDK {pdk['variant']} but reported no readable stamp"
+    token = sources_revision_token(pdk.get("stamp_text"))
+    stamp = f"{pdk.get('stamp_scheme') or 'stamp'} {sha}"
+    if token:
+        stamp += f" (revision {token})"
+    if staged:
+        stamp += " -- an image stamp; the submitter's staged inputs executed"
+    return f"the fleet resolved PDK {pdk['variant']}, {stamp}"
+
+
+def _worker_comparison_sentence(worker_environment: dict[str, Any]) -> str:
+    """``pdk_stamp_comparison`` as text: status, reason when present, and the
+    staged-model-inputs basis when the comparison carries one."""
+    comparison = worker_environment.get("pdk_stamp_comparison")
+    if not (isinstance(comparison, dict) and comparison.get("status")):
+        return ""
+    text = f"pdk_stamp_comparison: {comparison['status']}"
+    if comparison.get("reason"):
+        text += f" ({comparison['reason']})"
+    if comparison.get("basis"):
+        text += f" [basis: {comparison['basis']}]"
+    return text
+
+
+_STAGED_REMEDY = (
+    "this job already executed the submitter's staged model inputs, so the "
+    "bin cards that failed to select a model are your own -- compare this "
+    "model's w/l against your staged library and the digests in "
+    "environment.remote.worker_environment.model_inputs"
+)
+_IMAGE_REMEDY = (
+    "the library that failed to select a model is the runner image's, not "
+    "yours -- run with options.stage_model_inputs: true to execute your own "
+    "model closure on the fleet (docs/cli/sim.md)"
+)
+
+
+def _worker_pdk_clause(worker_environment: Any) -> str | None:
+    """The fleet-side attribution tail for a ``modelname`` abort (issue
+    #5593): the worker-observed PDK stamp, the stamp comparison, and the
+    remedy that removes the divergence -- ``options.stage_model_inputs``
+    shipping the submitter's own model closure. ``None`` when the capture is
+    not a usable ``ok`` block, so the caller keeps the legacy bin-card
+    advice: without a worker stamp there is nothing to attribute, and the
+    submitter's own cards are then the only reachable ones."""
+    if not isinstance(worker_environment, dict):
+        return None
+    if worker_environment.get("capture") != "ok":
+        return None
+    pdk = worker_environment.get("pdk")
+    if not isinstance(pdk, dict) or not pdk.get("variant"):
+        return None
+    staged = pdk.get("models_staged") is True
+    parts = [
+        _worker_stamp_sentence(pdk, staged),
+        _worker_comparison_sentence(worker_environment),
+        _STAGED_REMEDY if staged else _IMAGE_REMEDY,
+    ]
+    return "; ".join(part for part in parts if part)
+
+
+def attribute_modelname(
+    diagnostic: dict[str, Any],
+    log_text: str,
+    worker_environment: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Name the instance/model behind a ``could not find a valid modelname``
     abort (issue #5138). The fleet outputs carry no expanded deck, but the
     engine log quotes the offending card, so the instance, model and sizing
     are read from it; ngspice's line number indexes the *expanded* deck, not
     the caller's netlist, and is labelled so. Additive and idempotent; never
-    raises. Without a quoted card the diagnostic is returned unchanged."""
+    raises. Without a quoted card the diagnostic is returned unchanged.
+
+    With a usable ``worker_environment`` block (issue #5593) the trailing
+    bin-card advice is replaced by the fleet-side attribution clause
+    (:func:`_worker_pdk_clause`): on a batch run the only bin cards the
+    submitter can reach are their own, which a local-pass/fleet-fail abort
+    has already ruled out."""
     message = diagnostic.get("message")
     if (
         not isinstance(message, str)
@@ -119,9 +200,43 @@ def attribute_modelname(diagnostic: dict[str, Any], log_text: str) -> dict[str, 
         detail = f"'{card[0]}'"
     if params:
         detail += f" ({params})"
+    tail = _worker_pdk_clause(worker_environment)
+    if tail is None:
+        tail = _LEGACY_BIN_CARD_ADVICE
     diagnostic["message"] = (
         f"{message}; {_ATTRIBUTED_MARK} {line_no}: {detail} -- the line "
-        "number indexes ngspice's expanded deck, not your netlist; compare "
-        "this model's w/l against the library's bin cards"
+        "number indexes ngspice's expanded deck, not your netlist; " + tail
     )
     return diagnostic
+
+
+#: Engine logs a collected ``outputs/`` tree may hold (``keep_artifacts`` runs
+#: copy each corner's log under ``artifacts/``). Only read to surface the
+#: engine's fatal error; never copied wholesale into the JSON.
+_BATCH_ENGINE_LOG_NAMES = ("ngspice.log", "xyce.log")
+
+#: Bytes read from the head of an engine log (a fatal include/parse error is
+#: printed before the simulation starts).
+_BATCH_ENGINE_LOG_HEAD_BYTES = 256 * 1024
+
+
+def _find_engine_logs(collected: str) -> list[str]:
+    """Paths of every engine log under a collected ``outputs/`` tree, sorted."""
+    found: list[str] = []
+    for root, _dirs, files in os.walk(collected):
+        found.extend(
+            os.path.join(root, name)
+            for name in files
+            if name in _BATCH_ENGINE_LOG_NAMES
+        )
+    return sorted(found)
+
+
+def _read_log_head(path: str) -> str:
+    try:
+        with open(path, "rb") as handle:
+            return handle.read(_BATCH_ENGINE_LOG_HEAD_BYTES).decode(
+                "utf-8", errors="replace"
+            )
+    except OSError:
+        return ""

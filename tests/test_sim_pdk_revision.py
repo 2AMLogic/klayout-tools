@@ -148,3 +148,165 @@ def test_worker_capture_omits_unknown_pdk_diagnostic_when_models_staged(
     assert (
         "pdk root or variant unknown on worker" in doc["diagnostics"]
     ) is expect_diagnostic
+
+
+# --------------------------------------------------------------------------- #
+# `options.pdk_revision` as an assertion, not an echo (issue #5593)
+# --------------------------------------------------------------------------- #
+
+_TOKEN = "c6d73a35f524070e85faff4a6a9eef49553ebc2b"
+
+
+def _worker_block(
+    *,
+    capture="ok",
+    stamp_sha256="a" * 64,
+    stamp_text=f"open_pdks {_TOKEN}\n",
+    models_staged=True,
+):
+    return {
+        "capture": capture,
+        "pdk": {
+            "variant": "sky130A",
+            "stamp_scheme": "sources-sha256",
+            "stamp_sha256": stamp_sha256,
+            "stamp_text": stamp_text,
+            "models_staged": models_staged,
+            "stamp_scope": "image" if models_staged else "executed",
+        },
+        "pdk_stamp_comparison": {"status": "not_comparable", "reason": "no"},
+    }
+
+
+def _comparison(value, remote):
+    from klayout_tools import sim_provenance as sp
+
+    return sp.pdk_revision_comparison_environment(
+        remote, {"options": {"pdk_revision": value}}
+    ).get("pdk_revision_comparison")
+
+
+@pytest.mark.parametrize("value", ["a" * 64, "A" * 64, _TOKEN])
+def test_pdk_revision_matching_stamp_or_token_is_a_match(value):
+    comparison = _comparison(value, {"worker_environment": _worker_block()})
+    assert comparison["status"] == "match"
+    assert comparison["worker_stamp"]["revision_token"] == _TOKEN
+    assert comparison["worker_stamp"]["stamp_scope"] == "image"
+
+
+def test_pdk_revision_differing_from_stamp_is_an_advisory_mismatch():
+    comparison = _comparison(
+        "f6eeac7bf3e04b1c", {"worker_environment": _worker_block()}
+    )
+    assert comparison["status"] == "mismatch"
+    assert comparison["worker_stamp"]["stamp_sha256"] == "a" * 64
+    assert "does not fail the run" in comparison["warning"]
+    assert "runner image's tree" in comparison["warning"]  # stamp_scope: image
+
+
+def test_pdk_revision_without_readable_worker_stamp_is_not_comparable():
+    comparison = _comparison(
+        "abc123", {"worker_environment": _worker_block(stamp_sha256=None)}
+    )
+    assert comparison["status"] == "not_comparable"
+    assert comparison["reason"] == "worker_stamp_unavailable"
+
+
+@pytest.mark.parametrize(
+    "remote",
+    [
+        {"worker_environment": {"capture": "absent", "pdk": None}},
+        {"worker_environment": {"capture": "malformed", "pdk": None}},
+    ],
+    ids=["absent", "malformed"],
+)
+def test_pdk_revision_with_unusable_capture_is_not_comparable(remote):
+    assert _comparison("abc123", remote) == {
+        "status": "not_comparable",
+        "reason": "worker_stamp_unavailable",
+    }
+
+
+@pytest.mark.parametrize(
+    "remote",
+    [
+        {},
+        {"worker_environment": None},
+        {"fleet": [{"job_id": "j1"}, {"job_id": "j2"}]},
+    ],
+    ids=["empty-remote", "no-block", "fleet-without-blocks"],
+)
+def test_pdk_revision_without_any_worker_block_adds_no_field(remote):
+    assert _comparison("abc123", remote) is None
+
+
+def test_pdk_revision_without_asserted_option_adds_no_field():
+    from klayout_tools import sim_provenance as sp
+
+    assert (
+        sp.pdk_revision_comparison_environment(
+            {"worker_environment": _worker_block()}, {"options": {}}
+        )
+        == {}
+    )
+
+
+def test_pdk_revision_fleet_members_stay_individually_visible():
+    remote = {
+        "fleet": [
+            {"job_id": "j1", "worker_environment": _worker_block()},
+            {
+                "job_id": "j2",
+                "worker_environment": _worker_block(stamp_sha256="b" * 64),
+            },
+        ]
+    }
+    comparison = _comparison("a" * 64, remote)
+    assert comparison["status"] == "mismatch"
+    assert [m["status"] for m in comparison["fleet"]] == ["match", "mismatch"]
+    assert comparison["fleet"][0]["job_id"] == "j1"
+
+
+def test_pdk_revision_on_staged_batch_run_records_comparison_and_keeps_outcome(
+    tmp_path, monkeypatch
+):
+    """Issue #5593 AC: a declared `options.pdk_revision` on a staged batch
+    run whose (fake) worker stamp is readable records the comparison beside
+    `environment.pdk_revision_asserted`, and the run's outcome is unchanged
+    by it -- the same request without the option grades identically."""
+    src = tmp_path / "src"
+    src.mkdir()
+    request = _staged_model_fixture(src)
+    request.pop("remote")
+    request["backend"] = "batch"
+    # `models.pdk_root` is a submitting-host path refused for batch; the
+    # install is reachable through $PDK_ROOT instead.
+    request["models"] = {"pdk": "sky130A", "lib": "libs.tech/ngspice/sky130.lib.spice"}
+    monkeypatch.setenv("PDK_ROOT", str(src / "pdk"))
+
+    def fake_backend(**kwargs):
+        return (
+            [],
+            "46",
+            {
+                "provider": "aws-batch-fleet",
+                "job_id": "klt-sim-fake",
+                "worker_environment": _worker_block(),
+            },
+        )
+
+    monkeypatch.setitem(sim._BACKENDS, "batch", fake_backend)
+    control = sim.run_sim(str(_write_request(src, request)), backend="batch")
+    request["options"]["pdk_revision"] = _TOKEN
+    reported = sim.run_sim(str(_write_request(src, request)), backend="batch")
+
+    assert reported["status"] == control["status"]
+    assert reported["corners"] == control["corners"]
+    assert reported["environment"]["pdk_revision_asserted"] == {
+        "value": _TOKEN,
+        "scope": "caller-asserted",
+    }
+    comparison = reported["environment"]["pdk_revision_comparison"]
+    assert comparison["status"] == "match"
+    assert comparison["worker_stamp"]["revision_token"] == _TOKEN
+    assert "pdk_revision_comparison" not in control["environment"]

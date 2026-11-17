@@ -4458,6 +4458,7 @@ def _run_sim_corners(
     environment.update(
         sim_env_report.remote_entry_environment(
             remote_environment,
+            request=request,
             corners_lost=corners_lost,
             artifacts_dir=artifacts_dir,
             checkpoint_path=checkpoint_path if checkpoint_retained else None,
@@ -4501,9 +4502,7 @@ def _run_sim_corners(
             repo_root=repo_root,
         )
     )
-
     _attach_timeout_budget_hint(environment, corners, timeout_s)
-
     # Issues #2901, #5061: lifted out of `environment.remote` to the top level.
     remote_diagnostics = pop_remote_diagnostics(environment.get("remote"))
 
