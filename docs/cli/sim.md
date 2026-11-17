@@ -3685,7 +3685,10 @@ before any corner runs) carries a `severity: "warning"`, `code:
 the request widened it — and both remedies (`options.save_mode: "netlist"`,
 `options.save_vectors`):
 
-- the netlist body declares a top-level `.save` card;
+- the netlist body declares a top-level `.save` card that restricts: a card
+  whose only argument is `all`, or a bare `.save` with no arguments, restricted
+  nothing for the generated `save all` to supersede, so neither triggers the
+  warning;
 - `options.save_mode` resolves to `"all"` (declared or defaulted);
 - `options.save_vectors` is empty (a non-empty list already states the retained
   set and emits `save <named vectors>`, not `save all`);
@@ -3695,12 +3698,15 @@ the request widened it — and both remedies (`options.save_mode: "netlist"`,
 
 Only a `.save` card counts. A `save` command inside a `.control` … `.endc`
 block, a `.save` inside a `.subckt`, and a `.probe` card do not (ngspice-47 does
-not treat `.probe` as a retention directive). Several `.save` cards produce one
-warning. Only the netlist body itself is scanned, not its `.include`/`.lib`
-closure, so a `.save` reachable only through an include is a documented miss.
-The warning is request-level, so `options.fail_on_diagnostic` (which grades
-per-corner diagnostics) does not turn a passing run into a failing one. It
-changes nothing ngspice receives.
+not treat `.probe` as a retention directive). Several restricting `.save` cards
+produce one warning. Only the netlist body itself is scanned, not its
+`.include`/`.lib` closure, so a `.save` reachable only through an include is a
+documented miss. The warning is request-level, so
+`options.fail_on_diagnostic` (which grades per-corner diagnostics) does not
+turn a passing run into a failing one. It changes nothing ngspice receives.
+Beside `severity`/`code`/`message`, the entry carries `save_cards` (integer,
+how many restricting `.save` cards the body declared) and `source`
+(`"netlist_save_cards"`).
 
 Each corner that keeps a rawfile also reports its size as
 `corners[].artifacts.raw_bytes`, so a surprise artifact size is visible without
@@ -8344,7 +8350,7 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `no_such_vector`   | ngspice's own `Error: no such vector as ...` — emitted *alongside* `measurement` when the missing signal's name never resolved to a vector at all (issue #2521). See "Saved signal set (`save all`)" below for what this can and cannot tell you. |
 | `step_failed`      | An `analysis_steps[]` step's analysis produced no plot of its own (it failed, or the run ended before it) — read from `klt`'s own step markers in the log, never inferred from measurements. The step's own measurements are reported `value: null`/`status: "error"` under this one diagnostic (issue #2482). See "Several solves per corner" above. |
 | `derived_input_unavailable` | A measurement computed from other results (a derived measurement, or a step `expr` reading an earlier step) was **not graded** because at least one of its inputs produced no value in this corner (issue #2482). Distinguishes "an input was missing" from a derived expression that itself failed, which is an ordinary `measurement` diagnostic. |
-| `save_all_supersedes` | Issue #5622. The generated `save all` supersedes a `.save` card in the netlist body while `options.waveforms` is on, so `waveform.raw` holds every node rather than the body's restricted set. Request-level (not per-corner), always `severity: "warning"`; emitted in `--dry-run` too. See "Warning when `save all` supersedes a body `.save`" above. |
+| `save_all_supersedes` | Issue #5622. The generated `save all` supersedes a restricting `.save` card in the netlist body while `options.waveforms` is on, so `waveform.raw` holds every node rather than the body's restricted set; a card whose only argument is `all`, or a bare `.save`, restricted nothing and does not warn. Request-level (not per-corner), always `severity: "warning"`; emitted in `--dry-run` too. See "Warning when `save all` supersedes a body `.save`" above. |
 | `waveform_too_large` | `waveform.raw` exceeded `options.waveform_max_bytes`, so the `waveform.raw.json` conversion was skipped (issue #3211). Always `severity: "warning"`; measurements and `status` are unaffected. See "Waveform size guard" above. |
 | `pass_failed` | An `analysis.passes` pass left no AC-analysis rawfile (the solve failed or never ran); the corner grades `error` (issue #3159). See "Multi-pass AC acquisition" above. A `tian` measurement naming that pass reports `[tian_pass_missing]` (issue #3160). |
 | `op_metastable` | `analysis.op_check` (issue #5077): a declared node of an `op` solution sits within `band * supply` of mid-rail, so the engine may have converged onto the unstable solution of a bistable circuit. `severity: "warning"` — grade unchanged unless listed in `options.fail_on_diagnostic`. See "Detecting a metastable operating point" above. |

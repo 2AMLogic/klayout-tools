@@ -1936,7 +1936,7 @@ def _install_batch_artifacts(
     remote_root: str | None = None
     for corner in corners:
         for value in (corner.get("artifacts") or {}).values():
-            if value and marker in value:
+            if isinstance(value, str) and marker in value:
                 remote_root = value[: value.rindex(marker) + len(marker) - 1]
                 break
         if remote_root is not None:

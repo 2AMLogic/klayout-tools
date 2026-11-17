@@ -148,6 +148,7 @@ from . import sim_environment_report as sim_env_report
 from . import sim_op_check as sim_op_check
 from . import sim_peak_rss as sim_peak_rss
 from . import sim_provenance as sim_provenance
+from . import sim_save_diagnostic as sim_save_diagnostic
 from . import sim_staging as sim_staging
 from ._jsonnum import is_int, is_number
 from ._paths import (
@@ -4047,12 +4048,8 @@ def _run_sim_corners(
     )
     _check_capacity_wait_applies(capacity_wait_s, backend, attach_job_id)
 
-    # Issue #2668: stage the complete job closure once, here, before any
-    # backend runs -- so a missing model input, unresolvable dependency or
-    # exceeded cap is a named SimError before any S3 write, SSH push or
-    # instance launch on every off-host path (single job, remote fleet,
-    # batch shards alike). The result's asset list is also this report's
-    # provenance for what the worker actually received.
+    # Issue #2668: stage the complete job closure once, before any backend
+    # runs; see `_preflight_staged_model_inputs` for the rationale.
     staged_model_environment = _preflight_staged_model_inputs(
         request,
         netlist_path,
@@ -4065,12 +4062,8 @@ def _run_sim_corners(
     bin_diagnostic = sim_bin_range.preflight_with_bins(
         netlist_path, models_lib, _find_width_ceiling_culprit, _MODEL_WIDTH_CEILING_UM
     )
-    save_diagnostic = _save_supersede_diagnostic(
-        netlist_path,
-        engine=engine,
-        save_mode=save_mode,
-        save_vectors=save_vectors,
-        want_waveforms=want_waveforms,
+    save_diagnostic = sim_save_diagnostic.preflight(
+        netlist_path, engine, save_mode, save_vectors, want_waveforms
     )
     if dry_run:
         published_runner: dict[str, Any] = {}
@@ -4571,15 +4564,8 @@ def _run_sim_corners(
         "corners": corners,
     }
     # Additive/optional (#2901 runner feature, #4976 bin-range preflight).
-    if top_diags := [
-        d
-        for d in (
-            *remote_diagnostics,
-            bin_diagnostic,
-            save_diagnostic,
-        )
-        if d
-    ]:
+    diag_candidates = (*remote_diagnostics, bin_diagnostic, save_diagnostic)
+    if top_diags := [d for d in diag_candidates if d]:
         report["diagnostics"] = top_diags
     _attach_expr_runner_hint(report, measurements_spec, corners, backend=backend)
     attach_process_leg_check(report, corners)
@@ -7337,9 +7323,6 @@ class _NetlistDeclarations(NamedTuple):
     voltage_specs: dict[str, str]
     #: Raw file references of ``.include``/``.inc``/``.lib <file> <sect>``.
     includes: list[str]
-    #: Top-level ``.save`` cards (issue #5622). ``.probe`` is deliberately not
-    #: recorded: ngspice-47 does not treat it as a retention directive.
-    save_cards: list[str]
 
 
 def _netlist_declarations(netlist_text: str) -> _NetlistDeclarations:
@@ -7347,7 +7330,7 @@ def _netlist_declarations(netlist_text: str) -> _NetlistDeclarations:
     include references. ``.subckt`` bodies and ``.control`` blocks are
     skipped; ``.lib`` *section* bodies (``.lib tt`` ... ``.endl``) count as
     top level, since a loaded section is."""
-    decl = _NetlistDeclarations(set(), set(), {}, [], [])
+    decl = _NetlistDeclarations(set(), set(), {}, [])
     depth = 0
     for line in _top_level_cards(_logical_netlist_lines(netlist_text)):
         word = line.split(None, 1)[0].lower()
@@ -7358,59 +7341,6 @@ def _netlist_declarations(netlist_text: str) -> _NetlistDeclarations:
         elif not depth:
             _record_declaration(decl, line)
     return decl
-
-
-def _save_supersede_diagnostic(
-    netlist_path: str,
-    *,
-    engine: str,
-    save_mode: str,
-    save_vectors: tuple[str, ...],
-    want_waveforms: bool,
-) -> dict[str, Any] | None:
-    """Request-level warning when the generated ``save all`` supersedes a
-    ``.save`` card of the netlist body while waveform capture is on (issue
-    #5622). Never raises; reports presence only, so a ``.save`` reachable only
-    through ``.include``/``.lib`` is a documented miss.
-
-    Gated on every condition that makes the widening real *and* costly: a
-    top-level body ``.save``; ``save_mode`` ``"all"`` (``"netlist"`` emits no
-    card); no ``save_vectors`` (those emit ``save <named vectors>``, not
-    ``save all``); and ``waveforms`` on -- a measurements-only request that
-    supersedes a ``.save`` is #2521's intended rescue, and its cost is not in
-    the rawfile.
-    """
-    if (
-        engine == "xyce"
-        or save_mode != DEFAULT_SAVE_MODE
-        or save_vectors
-        or not want_waveforms
-    ):
-        return None
-    try:
-        with open(netlist_path, encoding="utf-8", errors="replace") as handle:
-            cards = _netlist_declarations(handle.read()).save_cards
-    except Exception:  # advisory only
-        return None
-    if not cards:
-        return None
-    return {
-        "severity": "warning",
-        "code": "save_all_supersedes",
-        "message": (
-            f"the netlist body restricts the saved signal set ({cards[0]}) but "
-            "the request widens it: the generated 'save all' supersedes the "
-            'body\'s .save card(s) (options.save_mode defaults to "all"), so '
-            "with options.waveforms on the waveform.raw artifact holds every "
-            "node of the flattened design and can be orders of magnitude "
-            "larger than the body's own .save implies. Set options.save_mode "
-            'to "netlist" to honor the body\'s .save, or options.save_vectors '
-            "to name the signals to keep; leave both unset to keep 'save all' "
-            "deliberately"
-        ),
-        "save_cards": len(cards),
-        "source": "netlist_save_cards",
-    }
 
 
 def _top_level_cards(lines: list[str]) -> list[str]:
@@ -7437,8 +7367,6 @@ def _record_declaration(decl: _NetlistDeclarations, line: str) -> None:
         decl.includes.append(line.split(None, 1)[1].strip())
     elif word == ".lib" and len(parts) >= 3:
         decl.includes.append(" ".join(parts[1:-1]))
-    elif word == ".save":
-        decl.save_cards.append(line)
     elif word == ".param" and len(parts) > 1:
         body = _PARAM_DECL_EXPR_RE.sub(" 0 ", lowered.split(None, 1)[1])
         decl.params.update(_PARAM_DECL_NAME_RE.findall(body))
