@@ -168,7 +168,7 @@ from .coverage import (
     work_id,
 )
 from .metrics import is_registered
-from .pdk import PdkNotFoundError, find_pdk, list_corners
+from .pdk import PdkNotFoundError, find_pdk, list_corners, variant_dir_of
 from .pdk_families import pdk_variant_family
 from .remote_launcher import RemoteLauncher as RemoteLauncher
 from .remote_launcher import RemoteLaunchError as RemoteLaunchError
@@ -4992,7 +4992,11 @@ def _resolve_lib_ref(lib: str, models: dict[str, Any], request_dir: str) -> str:
             resolution = find_pdk(variant=pdk_variant, root=pdk_root)
         except PdkNotFoundError as exc:
             raise SimError(str(exc)) from exc
-        variant_dir = os.path.join(resolution["root"], resolution["variant"])
+        # A flat single-PDK install (issue #522) resolves ``variant`` to the
+        # root itself, so the variant directory is layout-aware
+        # (:func:`klayout_tools.pdk.variant_dir_of`), not ``root/<variant>``
+        # -- that join is a phantom path there (issue #6256).
+        variant_dir = variant_dir_of(resolution) or resolution["root"]
         return lib if os.path.isabs(lib) else os.path.join(variant_dir, lib)
     return _resolve_relative(lib, request_dir)
 
