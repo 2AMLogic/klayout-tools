@@ -2073,7 +2073,10 @@ from the committed stream as `stale_artifact`. `--check COMMITTED` re-attests
 and diffs as for items 1/9/10. `--input` is refused with items 1/9/10.
 A cited item-2 envelope carries the same `artifact_binding.attestation`
 disclosure (`inventory_schema_version` is `null` unless a declared-checks
-inventory was given).
+inventory was given; when one was, it reports the inventory's schema version
+whichever shape the envelope recorded it in -- the flat
+`attestation.inventory_schema_version` key or the nested
+`attestation.inventory.schema_version` block, issue #5571).
 
 `provenance.regeneration` is part of what `--check` compares, so how a
 regeneration claim is re-checked depends on whether you pass the flags again
