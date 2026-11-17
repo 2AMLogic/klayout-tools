@@ -242,3 +242,58 @@ def test_spawn_degrades_to_subprocess_run_without_process_groups(tmp_path, monke
     assert seen["cmd"] == ["yosys", "-s", str(script)]
     assert seen["timeout"] == 5.0
     assert "start_new_session" not in seen
+
+
+# --------------------------------------------------------------------------- #
+# Issue #5780 (merged via #5975): `_run_yosys` pins the child's COLUMNS to
+# 4096 -- an inherited COLUMNS=80 wedges the abc handshake -- and the pin
+# must ride through the #5798 spawn seam on BOTH spawn branches, so the seam
+# cannot silently uncouple from the pin again.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.skipif(
+    not synthesize_spawn._CAN_KILL_PROCESS_GROUP,
+    reason="POSIX process groups required",
+)
+def test_run_yosys_pins_child_columns_4096_on_process_group_branch(
+    tmp_path, monkeypatch
+):
+    """The Popen branch (``start_new_session``) spawns the child with
+    COLUMNS=4096 even when the parent inherited COLUMNS=80 (#5780's exact
+    failing case)."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    yosys = fake_bin / "yosys"
+    yosys.write_text('#!/bin/sh\necho "cols=$COLUMNS"\n')
+    yosys.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ['PATH']}")
+    monkeypatch.setenv("COLUMNS", "80")
+    script = tmp_path / "s.ys"
+    script.write_text("")
+
+    stdout = synthesize._run_yosys(str(script), timeout_s=30.0)
+
+    assert "cols=4096" in stdout
+
+
+def test_run_yosys_pins_child_columns_4096_on_the_degraded_branch(
+    tmp_path, monkeypatch
+):
+    """The no-process-group branch (``_CAN_KILL_PROCESS_GROUP`` False)
+    degrades to ``subprocess.run`` and must carry the same COLUMNS=4096
+    pin."""
+    seen: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        seen.update(kwargs)
+        return fake_completed(returncode=0, stdout="ok\n")
+
+    monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
+    monkeypatch.setattr(synthesize_spawn, "_CAN_KILL_PROCESS_GROUP", False)
+    script = tmp_path / "s.ys"
+    script.write_text("")
+
+    synthesize._run_yosys(str(script))
+
+    assert seen["env"]["COLUMNS"] == "4096"
