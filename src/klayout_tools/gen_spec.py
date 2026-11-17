@@ -23,11 +23,12 @@ class _GeneratorSpec:
     name: str
     summary: str
     #: Fallback output database unit (um) -- used only when the resolved
-    #: PDK's own tech LEF declares no ``DATABASE MICRONS`` value (or ships
-    #: no readable tech LEF at all), since :func:`_produce` prefers
-    #: :func:`~klayout_tools.pdk.resolve_pdk_dbu`'s PDK-derived answer
-    #: (issue #1496). Every registered generator declares ``0.001``, the dbu
-    #: `klt gen` unconditionally wrote at before that change.
+    #: PDK resolves no output dbu at all (:func:
+    #: `~klayout_tools.pdk.resolve_output_dbu` returns ``None``: no family
+    #: stream requirement -- issue #5721 -- and no tech LEF ``DATABASE
+    #: MICRONS`` -- issue #1496). Every registered generator declares
+    #: ``0.001``, the dbu `klt gen` unconditionally wrote at before those
+    #: changes.
     dbu: float
     validate: Callable[[dict[str, Any]], None]
     describe: Callable[[dict[str, Any], float, dict[str, Any]], dict[str, Any]]

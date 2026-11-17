@@ -2318,42 +2318,61 @@ klt gen asap7_tap --pdk-root <lambdapdk>/asap7 \
 
 ## Output database unit (dbu)
 
-**Every generator writes its GDS at the resolved PDK's own database unit,
-read from that PDK's tech LEF `DATABASE MICRONS` declaration** — `0.001µm`
-for a PDK declaring `DATABASE MICRONS 1000` (sky130), `0.0005µm` for one
-declaring `DATABASE MICRONS 2000` (gf180mcu). The resolved value is reported
-as the response's `dbu_um`.
+**Every generator writes its GDS at the resolved PDK's required *stream*
+database unit** — the dbu a GDS/OASIS stream *for that PDK* must be written
+at, reported as the response's `dbu_um`. For most PDKs that is the dbu its
+tech LEF `DATABASE MICRONS` declaration resolves to (`0.001µm` for a PDK
+declaring `DATABASE MICRONS 1000` (sky130), `0.0005µm` for one declaring
+`DATABASE MICRONS 2000` (gf180mcu)). For a family whose own runset enforces
+a specific dbu, that requirement wins: **gf180mcu's native DRC runset
+contains an exact-equality rule — `extent.output('DBU', ...) if dbu !=
+0.001` in its `rule_decks/geom.rb` — so every gf180mcu stream is written at
+`0.001µm`, even though its tech LEF declares `DATABASE MICRONS 2000`
+(0.0005)**. A stream at 0.0005 carries a whole-cell `DBU` marker under the
+family's own deck; the LEF's 2000 is headroom nothing in the install uses —
+every GDS the gf180mcu install itself ships is at 0.001, and every
+generator's default `params` geometry sits on the 0.001µm grid, so the
+coarser write is exact by construction.
 
-This is the same tech-LEF-derived resolution
-[`klt place-and-route`](place-and-route.md)'s DEF→GDS merge already performs,
-so a `klt gen` block and a `klt place-and-route` macro **resolved against the
-same PDK agree on their dbu by construction** — which is what lets
-[`klt gen-compose`](gen-compose.md) place them in one composed cell (it
-requires a single shared dbu across every block and rejects a mismatch as an
-application error). Before this, `klt gen` wrote at a fixed `0.001µm`
-regardless of the PDK, so mixing the two verb families in one `gen-compose`
-request was impossible for any PDK whose tech LEF declares something other
-than `DATABASE MICRONS 1000` (issue #1496).
+The stream dbu and the tech-LEF dbu answer **different questions**, and the
+toolkit keeps both:
+
+- **Stream dbu** (this section — `pdk.resolve_output_dbu`): what `klt gen`
+  and [`klt gen-compose`](gen-compose.md) *write* at.
+- **Tech-LEF dbu** (`pdk.resolve_pdk_dbu`): the `DATABASE MICRONS` truth a
+  DEF *reader* must use — [`klt place-and-route`](place-and-route.md)'s
+  DEF→GDS merge reads DEF coordinates at it and keeps doing so. A DEF's
+  coordinates for gf180mcu are in 1/2000µm units; re-interpreting them at
+  0.001 would move geometry.
+
+Before #1496 `klt gen` wrote at a fixed `0.001µm` regardless of the PDK;
+#1496 made it follow the tech LEF; #5721 made the family's own stream
+requirement win where the two disagree (gf180mcu).
 
 Notes and guarantees:
 
-- **Fallback.** A resolved PDK that ships no readable tech LEF, or whose tech
-  LEF declares no `DATABASE MICRONS`, falls back to `0.001µm` — the value
-  `klt gen` always used. Resolution never fails a request that previously
-  succeeded.
-- **Multiple tech LEFs.** The lookup is family-wide (every
+- **Fallback.** A resolved PDK that declares no family requirement falls
+  through to its tech-LEF dbu; one that additionally ships no readable tech
+  LEF, or whose tech LEF declares no `DATABASE MICRONS`, falls back to
+  `0.001µm` — the value `klt gen` has always used. Resolution never fails a
+  request that previously succeeded.
+- **Multiple tech LEFs.** The tech-LEF lookup is family-wide (every
   `libs.ref/<library>/techlef/*.tlef` under the resolved install). Real open
   PDKs declare one value across the whole family; if they ever disagreed, the
   **finest** declared dbu wins, so the answer does not depend on library
   naming.
-- **Geometry is unchanged.** A finer dbu changes only the integer grid the
-  shapes are stored on, not the shapes: `bbox_um`, `ports[].x_um`/`y_um`, and
-  every drawn polygon are identical in micrometres, and every generator's
-  documented default `params` stay `klt drc --deck gf180mcu` clean at
-  `0.0005µm`. sky130 output is byte-identical to before.
-- **`dbu` is not a request parameter.** It is a property of the resolved PDK,
-  not a caller knob — there is no `options.dbu`. To compose blocks at a given
-  dbu, resolve them all against the same PDK.
+- **Geometry is unchanged.** The output dbu changes only the integer grid
+  the shapes are stored on, not the shapes: `bbox_um`,
+  `ports[].x_um`/`y_um`, and every drawn polygon are identical in
+  micrometres across every dbu a generator can resolve to, and every
+  generator's documented default `params` stay `klt drc --deck gf180mcu`
+  clean at each of them. sky130 output is unaffected either way (its LEF
+  already declares `DATABASE MICRONS 1000`).
+- **`dbu` is not a request parameter.** It is a property of the resolved
+  PDK, not a caller knob — there is no `options.dbu`. To compose blocks at a
+  given dbu, resolve them all against the same PDK; see
+  [`klt gen-compose`](gen-compose.md)'s "Reconciling mismatched `dbu`s" for
+  how blocks still sitting at another (evenly-related) dbu are reconciled.
 
 ## JSON schema (the contract)
 
@@ -2457,7 +2476,7 @@ family/variant split the resolver doesn't have. The response's
 | `cell_name` | string | Name of the top cell written into `gds_path`. |
 | `gds_path` | string | Resolved output path (echoes `options.output`, or the computed default). |
 | `pdk` | object | The resolved PDK reference, echoing `klt pdk find`'s own `variant`/`version` fields — see the request section's deviation note. |
-| `dbu_um` | number | Database unit (µm) the output stream was written at, resolved from the PDK's own tech LEF — see "Output database unit (dbu)" above. Every block handed to [`klt gen-compose`](gen-compose.md) must agree on this value. |
+| `dbu_um` | number | Database unit (µm) the output stream was written at — the PDK's **required stream dbu** when its family declares one (issue #5721: gf180mcu's `0.001`, its native runset's exact-equality `DBU` rule), else resolved from the PDK's tech LEF (`DATABASE MICRONS`) — see "Output database unit (dbu)" above. Every block handed to [`klt gen-compose`](gen-compose.md) must agree on this value (or sit at an exactly-related dbu `gen-compose` can reconcile). |
 | `bbox_um` | object | Bounding box of the generated cell in micrometres — `_um` suffix per this repo's units-in-field-name convention (`dbu_um` in `klt layers`). |
 | `device_count` | integer | Number of unit instances placed (`resistor_strip`'s `num`). |
 | `ports` | array\<object\> | Named terminals for downstream connection — see below. |
@@ -2512,10 +2531,13 @@ uncontrolled drift. Two concrete precedents from `CHANGELOG.md`'s `## 0.5.0
 `esd_device`'s `gf180mcu` geometry gained new implant coverage to close real
 signoff-DRC gaps (issues #1577, #1580 — and, once `NP.5b`/`PP.5b` were
 actually transcribed, grew that ring implant past the diffusion it dopes
-rather than leaving it coincident with it, issue #2369), and every
+rather than leaving it coincident with it, issue #2369), every
 generator's output database
 unit moved from a fixed `0.001um` to one resolved per-PDK from the tech LEF's
-`DATABASE MICRONS` declaration (issue #1496) — both changed the exact bytes
+`DATABASE MICRONS` declaration (issue #1496), and the gf180mcu family's
+output moved back to `0.001um` when its native runset's exact-equality
+`DBU` rule showed the LEF-derived value was a stream a foundry deck rejects
+(issue #5721) — each changed the exact bytes
 of a generated GDS for affected PDK families without any generator `params`
 or request shape changing.
 

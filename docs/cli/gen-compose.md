@@ -1953,35 +1953,52 @@ specific to composition," section 2). Blocks referenced by
 below — but every dbu disagreement must be an exact integer ratio, or
 composing raises `GenComposeError` (exit 1).
 
-Every block resolved against the **same PDK** agrees by construction: both
-[`klt gen`](gen.md) and [`klt place-and-route`](place-and-route.md) derive
-their output dbu from that PDK's own tech LEF `DATABASE MICRONS` declaration
-(`0.001` for sky130, `0.0005` for gf180mcu — see
-[`docs/cli/gen.md`](gen.md)'s "Output database unit (dbu)"). So a `klt gen`
-guard ring and a `klt place-and-route` macro built for the same PDK compose
-cleanly, including on a PDK whose tech LEF declares something other than
-`DATABASE MICRONS 1000` (issue #1496 — before that fix `klt gen` always wrote
-`0.001`, and such a mix was refused outright).
+Every block resolved against the **same PDK** agrees by construction:
+[`klt gen`](gen.md) writes at that PDK's required **stream** dbu (`0.001`
+for gf180mcu — its native runset rejects any other dbu — and, for families
+with no declared requirement, whatever its tech LEF `DATABASE MICRONS`
+declares, e.g. `0.001` for sky130 — see
+[`docs/cli/gen.md`](gen.md)'s "Output database unit (dbu)"), and
+[`klt place-and-route`](place-and-route.md) derives its dbu from the same
+PDK's tech LEF. A block still sitting at a finer, evenly-related grid than
+the composed target (e.g. a `place_and_route` macro at gf180mcu's
+LEF-derived `0.0005`) composes too — see "Reconciling mismatched `dbu`s"
+below; issue #1496 is what first let such a mix compose at all, and #5721
+changed *where* a gf180mcu composition lands (the family's required 0.001,
+not the finest block's 0.0005).
 
 ### Reconciling mismatched `dbu`s (issue #1514)
 
 `klt draw` has no PDK awareness by design (issue #230) and always writes
 `0.001`, regardless of `--pdk`; a GDS produced by a `klt gen` build predating
-#1512 does too. Composing either of those against a freshly generated
-gf180mcu-family `klt gen` block (`0.0005`) is not a composition mistake — it
-is the exact same design, just described at two different, evenly-related
-grid resolutions.
+#1512 does too. Composing either of those against any other block is not a
+composition mistake — it is the exact same design, just described at two
+different, evenly-related grid resolutions.
 
-The composed cell is written at the **finest** (smallest-valued) `dbu` among
-all blocks, echoed as the response's own `dbu_um`. Every coarser block's
-geometry — including any internal cell hierarchy and array pitch — is
-losslessly rescaled onto that finer grid (an exact integer magnification:
-`0.001` onto `0.0005` is `2x`, `0.001` onto `0.0002` would be `5x`, and so
-on), the same rescale mechanics
+The composed cell's own dbu is the **PDK's required stream dbu** when its
+family declares one (issue #5721: gf180mcu — `0.001`, its native runset's
+exact-equality `DBU` rule), else the **finest** (smallest-valued) `dbu` among
+all blocks (issue #1514), echoed as the response's `dbu_um`. Every block at a
+*different*, evenly-related dbu is rescaled onto that target — including any
+internal cell hierarchy and array pitch, the same rescale mechanics
 [`klt place-and-route`](place-and-route.md)'s DEF/LEF-GDS merge already uses
-for the analogous problem. Each rescaled block adds one entry to the
-response's `warnings[]` naming the block, its own original `dbu`, and the
-`dbu` it was rescaled onto.
+for the analogous problem — and each rescaled block adds one entry to the
+response's `warnings[]` naming the block, its own original `dbu`, the
+`dbu` it was rescaled onto, and the integer ratio:
+
+- **Coarser onto finer** (the #1514 direction): multiplying integer
+  coordinates by an exact integer factor is always exact (`0.001` onto
+  `0.0005` is `2x`, `0.001` onto `0.0002` would be `5x`).
+- **Finer onto coarser** (the #5721 direction, opened for exactly the
+  required-stream-dbu case): dividing coordinates is exact only when every
+  coordinate is already a multiple of the ratio, so the block is **measured
+  first** — every polygon vertex (via the same `grid_check` primitive the
+  DRC engine's `ongrid` checks use), every text position, and every instance
+  displacement/array step vector across the block's whole cell tree. A block
+  that passes is rescaled exactly; one that fails raises `GenComposeError`
+  naming the block, the offending layer (or text/instance vector) and one
+  offending coordinate, and **no output stream is written** — geometry is
+  never silently rounded.
 
 A `dbu` mismatch that is **not** an exact integer ratio still raises
 `GenComposeError` — that is a genuine composition mistake (e.g. two blocks
@@ -2201,7 +2218,7 @@ exit codes).
 | `cell_name` | string | Name of the top cell written into `gds_path`, containing every placed block's cell as a translated sub-cell instance plus all routed metal. |
 | `gds_path` | string | Resolved output path (echoes `options.output`, or the computed default). |
 | `pdk` | object | The resolved PDK reference, echoing `klt pdk find`'s own `variant`/`version` fields. |
-| `dbu_um` | number | Database unit (µm) the composed cell was written at — the **finest** dbu among all blocks' own streams (any coarser block is losslessly rescaled onto it, see "Reconciling mismatched `dbu`s" above; a non-integer-ratio mismatch is still an error), matching [`klt gen`](gen.md)'s field of the same name. Reported so this response can be nested as a `blocks[].generator_report` one level up without re-reading the stream. |
+| `dbu_um` | number | Database unit (µm) the composed cell was written at — the resolved PDK's **required stream dbu** when its family declares one (issue #5721: gf180mcu's `0.001`, its native runset's exact-equality `DBU` rule — see [`klt gen`](gen.md)'s "Output database unit (dbu)"), else the **finest** dbu among all blocks' own streams (#1514). Any block at a different, evenly-related dbu is rescaled onto it exactly (a block finer than the target is measured first and refused by name if any coordinate is off the target grid — never silently rounded; a non-integer-ratio mismatch is still an error), matching [`klt gen`](gen.md)'s field of the same name. Reported so this response can be nested as a `blocks[].generator_report` one level up without re-reading the stream. |
 | `bbox_um` | object | Bounding box of the *composed* cell — the union of every placed block's own `bbox_um`, translated by its `offset_um` (computed arithmetically from each block's reported `bbox_um`, never re-derived from drawn geometry). |
 | `ports[]` | array\<object\> | The composed cell's **own** named terminals (#1189), in the composed (post-placement) coordinate frame — one per request `pins[]` entry, in request order. Same entry shape as [`klt gen`](gen.md)'s `ports[]` (`name`, `net`, `layer`, `x_um`, `y_um`, `width_um`, `direction_deg`) plus `block`/`port` recording which sub-block port it was promoted from. `name` **and** `net` are the `pins[]` entry's own `net` string — the same name written as the port's `kdb.Text` label — so the composed cell's port name, its drawn label, and the name `klt extract` recovers all agree, and the level above addresses it as `connectivity[].pins[].port`. Always present; **empty when the request supplied no `pins[]`** (backward compatible). Only `pins[]` is promoted: auto-exposing every sub-block port would both flood the parent with internal terminals and collide names across blocks (two `mos_array` blocks both report `U0_D`). A `pins[]` port with no reported `{x_um, y_um, layer}` geometry has no composed-frame position and is skipped (the same `drc_hints.notes[]` entry the label path emits explains why); two `pins[]` entries sharing one `net` name both appear, with a note that only the first is addressable by name one level up. |
 | `blocks[]` | array\<object\> | Per-block placement result — see below. |

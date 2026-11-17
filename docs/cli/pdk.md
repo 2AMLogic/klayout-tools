@@ -1920,6 +1920,51 @@ resolves at all — a variant shipping no `libs_ref` asset, or one whose
 libraries ship no `techlef/` directory at all, returns an empty
 `sources`/`layers`/`disagreements` result rather than raising.
 
+### Stream vs. tech-LEF dbu resolution (`resolve_output_dbu` vs. `resolve_pdk_dbu`, issue #5721)
+
+Two further library functions answer the database-unit question, and they are
+deliberately **two** functions, because a PDK can legitimately carry two
+different dbu answers:
+
+```python
+from klayout_tools.pdk import resolve_output_dbu, resolve_pdk_dbu
+
+info = find_pdk(variant="gf180mcuA")
+
+resolve_pdk_dbu(info)     # 0.0005 -- the tech LEF's DATABASE MICRONS 2000 truth
+resolve_output_dbu(info)  # 0.001  -- the dbu a *stream for* this PDK must be at
+```
+
+- **`resolve_pdk_dbu(pdk_info)`** is the tech LEF's `DATABASE MICRONS` truth
+  — the finest value declared across the family-wide `libs.ref/*/techlef/`
+  set, or `None` (never an exception) when nothing readable declares one. It
+  is what a DEF *reader* must be configured with: a DEF's coordinates for
+  gf180mcu are in 1/2000 µm units, and re-interpreting them at another dbu
+  moves geometry. `klt place-and-route`'s DEF→GDS merge uses it, unchanged
+  by #5721.
+- **`resolve_output_dbu(pdk_info)`** is "what dbu a GDS/OASIS stream *for*
+  this PDK must be written at": the family's entry in
+  `_REQUIRED_STREAM_DBU_UM` when it declares one — **gf180mcu, the only
+  entry today: `0.001`**, because the family's native DRC runset enforces an
+  exact-equality `DBU` rule (`rule_decks/geom.rb`:
+  `extent.output('DBU', ...) if dbu != 0.001`) that rejects a 0.0005 stream
+  whole-cell — falling through to `resolve_pdk_dbu` for every family with no
+  declared requirement, and returning `None` exactly where `resolve_pdk_dbu`
+  would. `klt gen` and `klt gen-compose` write at it (see
+  [`gen.md`](gen.md)'s "Output database unit (dbu)" and
+  [`gen-compose.md`](gen-compose.md)'s "Reconciling mismatched `dbu`s").
+
+Why the two disagree on gf180mcu and both are still kept: the tech LEF's
+`DATABASE MICRONS 2000` is LEF headroom nothing in the install uses (every
+GDS the gf180mcu install itself ships is at 0.001, and so is the runset's own
+rule), while its DEFs really are authored in 1/2000 µm units. Collapsing the
+answers into one function — e.g. reusing the curated deck's
+`get_nominal_dbu` — would make the next PDK's requirement unexpressible
+(that helper means "the dbu klt's deck transcribed thresholds against", and
+it raises for families whose packaged deck legitimately wants a finer dbu,
+e.g. asap7). Keep writing streams at `resolve_output_dbu` and reading DEFs
+at `resolve_pdk_dbu`.
+
 ## Exit codes and errors
 
 | Exit code | Meaning |

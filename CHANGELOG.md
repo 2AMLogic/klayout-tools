@@ -14,6 +14,31 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **gf180mcu-family streams are written at the family's required stream dbu
+  `0.001`, not the tech LEF's `DATABASE MICRONS 2000` (0.0005)** (#5721,
+  2026-11-17): gf180mcu's native DRC runset enforces an exact-equality `DBU`
+  rule (`rule_decks/geom.rb`: `extent.output('DBU', ...) if dbu != 0.001`),
+  so every `klt gen`/`klt gen-compose` stream this flow produced for the
+  family carried a whole-cell `DBU` marker under the PDK's own deck and could
+  not be handed to it without a rewrite. `klt gen` and `klt gen-compose` now
+  write at `pdk.resolve_output_dbu`'s answer — the family's required stream
+  dbu (`0.001` for gf180mcu, the only declared entry today), falling through
+  to the tech LEF `DATABASE MICRONS` for families with no requirement
+  (sky130/asap7/sg13g2 unchanged), and to the historical `0.001` default when
+  neither resolves. `pdk.resolve_pdk_dbu` is **unchanged** and remains the
+  tech-LEF truth a DEF reader must use (`klt place-and-route` keeps reading
+  DEFs at it). `gen-compose` targeting gf180mcu coarsens a finer
+  (0.0005 `place-and-route`-style) block onto `0.001` — but only after
+  measuring every polygon vertex, text position and instance/array vector in
+  the block against the target grid (`kdb.Region.grid_check`, the `ongrid`
+  primitive): an off-grid coordinate raises `GenComposeError` naming the
+  block, the layer and one offending coordinate, writing no output — never a
+  silent round. Non-integer-ratio dbu mismatches still refuse outright.
+  Drawn geometry in micrometres is unchanged for every generator at default
+  params (all sit on the 0.001 µm grid); the stream's integer grid and the
+  reported `dbu_um` change for gf180mcu only. No JSON field is added,
+  renamed or removed; no `schema_version` bump.
+
 - **`klt pex` and `klt sim --monte-carlo` now read a SPICE card the same way
   the flattener does: `w = 1` and `w=(2 * 1u)` are parameters, not device
   names** (#5461, 2026-11-13): three hand-rolled card tokenizers lived in
