@@ -161,3 +161,37 @@ def test_device_parameter_coverage_mixed_mos_and_resistor(tmp_path):
         "PD",
     }
     assert by_kind["resistor"]["compared"] == ["R"]
+
+
+_DIODE_ONLY_SPICE = """
+.subckt dio A K
+D1 A K dmod
+.ends
+"""
+
+
+def test_device_parameter_coverage_is_empty_without_a_participating_class(tmp_path):
+    """The documented meaning of `[]` (issue #6105): a run with no
+    participating MOS, resistor or capacitor class reports an empty list --
+    not `null` (that is `"engine": "netgen"` only) and not an absent key. A
+    diode is neither a geometry-disclosure kind nor a coverage-only kind."""
+    report = run_lvs(
+        _write_request(
+            tmp_path / "request.json",
+            {
+                "layout": {
+                    "netlist": _write(tmp_path / "layout.spice", _DIODE_ONLY_SPICE),
+                    "top": "dio",
+                },
+                "reference": {
+                    "netlist": _write(tmp_path / "ref.spice", _DIODE_ONLY_SPICE),
+                    "top": "dio",
+                },
+            },
+        )
+    )
+
+    assert report["status"] == "match"
+    assert report["error_count"] == 0
+    assert report["device_parameter_coverage"] == []
+    assert _geometry_entries(report) == []
