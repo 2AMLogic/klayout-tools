@@ -3,25 +3,30 @@ list index (issue #5460).
 
 The tests reuse the item-9 fixtures (its inventory is the richest check
 surface to drift against); the helpers live in
-``test_signoff_attest_item9``."""
+``tests/helpers/signoff_item9``."""
 
 from __future__ import annotations
 
 import sys
 from pathlib import Path
 
-import test_signoff_attest_item9 as base
+from helpers.signoff_item9 import (
+    OK_ARGV as _OK,
+)
+from helpers.signoff_item9 import (
+    PINS as _PINS,
+)
+from helpers.signoff_item9 import (
+    make_inventory as _inv,
+)
+from helpers.signoff_item9 import (
+    make_repo as _repo,
+)
 from klayout_tools.signoff_attest import (
     build_attestation,
     check_attestation,
     render_envelope,
 )
-
-_OK = base._OK
-_PINS = base._PINS
-_repo = base._repo
-_inv = base._inv
-
 
 # --------------------------------------------------------------------------- #
 # `--attest --check` drift names the check, not only its list index
