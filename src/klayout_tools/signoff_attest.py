@@ -60,7 +60,6 @@ import math
 import os
 import re
 import subprocess
-import sys
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
@@ -82,6 +81,7 @@ from .signoff import (
     _reject_json_constant,
 )
 from .signoff_attest_drift import drift_result
+from .signoff_attest_env import command_env, klt_shim_scope
 from .signoff_attest_input import input_binding
 
 #: The attestation-inventory schema versions this build reads. An inventory
@@ -770,23 +770,6 @@ def attach_output_tails(envelope: Mapping[str, Any]) -> None:
                 check["output_tail"] = tail
 
 
-def _command_env() -> dict[str, str]:
-    """Environment for a declared command: the caller's, minus the tool
-    venv's ``bin`` directory on ``PATH`` when running inside a venv (as under
-    ``uvx``/pipx), so a bare ``python3`` resolves to the repo's interpreter
-    rather than the tool's. Outside a venv the environment is unchanged."""
-    env = dict(os.environ)
-    if sys.prefix == sys.base_prefix or "PATH" not in env:
-        return env
-    venv_bin = os.path.normcase(os.path.dirname(sys.executable))
-    env["PATH"] = os.pathsep.join(
-        entry
-        for entry in env["PATH"].split(os.pathsep)
-        if os.path.normcase(entry) != venv_bin
-    )
-    return env
-
-
 def _run_command(root: str, spec: Mapping[str, Any]) -> tuple[int | None, str | None]:
     """Run one declared command; return ``(exit_status, error)``. ``error``
     is ``"launch_failed"``/``"timeout"`` (stable tokens, not host-specific
@@ -804,7 +787,7 @@ def _run_command(root: str, spec: Mapping[str, Any]) -> tuple[int | None, str | 
             stderr=subprocess.STDOUT,
             timeout=spec.get("timeout_s", _COMMAND_EVIDENCE_TIMEOUT_S),
             check=False,
-            env=_command_env(),
+            env=command_env(),
         )
     except subprocess.TimeoutExpired:
         return None, "timeout"
@@ -1051,7 +1034,8 @@ def build_attestation(
         )
     inventory_rel = os.path.relpath(absolute, root).replace(os.sep, "/")
     normalized = _validated_inventory(inventory, item, root, inventory_path)
-    checks = _run_checks(item, root, normalized, committed_checks)
+    with klt_shim_scope():
+        checks = _run_checks(item, root, normalized, committed_checks)
     passed_count = sum(1 for check in checks if check["passed"])
     status = "pass" if passed_count == len(checks) else "fail"
     prov, digest = input_binding(item, root, normalized, inventory_rel, inventory_hash)

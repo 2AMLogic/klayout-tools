@@ -18073,43 +18073,9 @@ def test_unreadable_file_evidence_absolute_path_is_unchanged(tmp_path, monkeypat
     assert item_3["detail"]["path"] == gone
 
 
-def _capture_attest_env(monkeypatch):
-    from klayout_tools import signoff_attest
-
-    seen = {}
-
-    def fake_run(argv, **kwargs):
-        seen["env"] = kwargs["env"]
-        return subprocess.CompletedProcess(argv, 0, stdout=b"")
-
-    monkeypatch.setattr(signoff_attest.subprocess, "run", fake_run)
-    signoff_attest._run_command(".", {"argv": ["python3"], "cwd": "."})
-    return seen["env"]
-
-
-def test_attest_command_env_drops_venv_bin_from_path(monkeypatch):
-    venv_bin = os.path.dirname(sys.executable)
-    monkeypatch.setattr(sys, "prefix", "/venv")
-    monkeypatch.setattr(sys, "base_prefix", "/base")
-    monkeypatch.setenv("PATH", os.pathsep.join([venv_bin, "/usr/bin"]))
-    assert _capture_attest_env(monkeypatch)["PATH"] == "/usr/bin"
-
-
-def test_attest_command_env_unchanged_outside_venv(monkeypatch):
-    monkeypatch.setattr(sys, "prefix", "/base")
-    monkeypatch.setattr(sys, "base_prefix", "/base")
-    path = os.pathsep.join([os.path.dirname(sys.executable), "/usr/bin"])
-    monkeypatch.setenv("PATH", path)
-    assert _capture_attest_env(monkeypatch)["PATH"] == path
-
-
-def test_attest_command_env_tolerates_unset_path_and_absent_venv_bin(monkeypatch):
-    monkeypatch.setattr(sys, "prefix", "/venv")
-    monkeypatch.setattr(sys, "base_prefix", "/base")
-    monkeypatch.setenv("PATH", "/usr/bin")
-    assert _capture_attest_env(monkeypatch)["PATH"] == "/usr/bin"
-    monkeypatch.delenv("PATH")
-    assert "PATH" not in _capture_attest_env(monkeypatch)
+# The declared-command environment tests (venv-bin stripping, #4192, plus the
+# run-scoped klt-only shim, #5565) live in tests/test_signoff_attest_env.py,
+# split out of this file for the per-file size ratchet.
 
 
 # --------------------------------------------------------------------------- #

@@ -2078,11 +2078,20 @@ Field-level schema, path rules, examples and exit codes:
 
 Two behaviours worth knowing when running `--attest` or grading a manifest:
 
-- **Declared commands see the caller's `PATH`.** Inventory commands run with
-  the invoking environment, except that when `klt` itself runs inside a venv
+- **Declared commands see the caller's `PATH` — except that `klt` stays the
+  attesting `klt`.** Inventory commands run with the invoking environment,
+  except that when `klt` itself runs inside a venv
   (`sys.prefix != sys.base_prefix`, as under `uvx`/pipx) that venv's `bin`
   directory is removed from `PATH`, so a bare `python3` resolves to the
-  repo's interpreter, not the tool's. Outside a venv the environment is
+  repo's interpreter, not the tool's. The one name the stripping must not
+  remove is restored: a run-scoped shim directory holding a single `klt`
+  symlink to the venv's entry point is **prepended** to the declared
+  command's `PATH`, so `klt` on it is always the `klt` running the
+  attestation — the venv's when attesting from a venv, the host's when not.
+  The shim is prepended and so takes precedence over a `klt` the caller
+  placed earlier on `PATH` (issue #5565). No other executable from the
+  venv's `bin` (`python`, `python3`, `pip`) is re-exposed; the per-run shim
+  path never enters the envelope. Outside a venv the environment is
   unchanged.
 - **Manifest evidence paths are cwd-relative.** A relative `file` evidence
   path resolves against the process cwd, not the manifest's directory. When a

@@ -1970,8 +1970,16 @@ is the authority.
 
 Declared `argv` commands run with the tool virtualenv's `bin` directory
 removed from `PATH` when klt itself runs inside a venv (`uvx`, pipx), so a bare
-`python3` in an `argv` is the repository's interpreter, not klt's. Outside a
-venv the environment is unchanged. The same applies to item 10 commands.
+`python3` in an `argv` is the repository's interpreter, not klt's. The one
+name that removal must not take is restored: a run-scoped shim directory
+holding a single `klt` symlink to the venv's entry point is prepended to the
+command's `PATH`, so a bare `klt` resolves to the very `klt` running the
+attestation — the venv's when attesting from a venv, the host's when not
+(issue #5565). The shim is prepended and so takes precedence over a `klt`
+the caller placed earlier on `PATH`; no other venv-`bin` name (`python`,
+`python3`, `pip`) is re-exposed, and the per-run shim path never enters the
+envelope. Outside a venv the environment is unchanged. The same applies to
+item 10 commands.
 
 
 #### How manifest `file` paths resolve
