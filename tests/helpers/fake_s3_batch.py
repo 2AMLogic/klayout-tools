@@ -71,11 +71,9 @@ class FakeS3BatchRunner:
     def __call__(self, argv: list[str], timeout_s: float) -> object:
         self.calls.append(list(argv))
         joined = " ".join(argv)
-        for key, value in self.failures.items():
-            if key in joined:
-                if isinstance(value, Exception):
-                    raise value
-                return value
+        injected = self._injected_failure(joined)
+        if injected is not None:
+            return injected
         if "cp" in argv:
             source, destination = argv[argv.index("cp") + 1 : argv.index("cp") + 3]
             if destination.startswith("s3://"):
@@ -84,25 +82,40 @@ class FakeS3BatchRunner:
                 )
                 return fake_completed()
             if source.endswith("/status.json"):
-                if self.job_id is None:
-                    if not self.statuses:
-                        return fake_completed(returncode=1, stderr="NoSuchKey")
-                    state = (
-                        self.statuses.pop(0)
-                        if len(self.statuses) > 1
-                        else self.statuses[0]
-                    )
-                    return fake_completed(stdout=state)
-                return fake_completed(stdout=self._fixed_status_document())
+                return self._status_response()
             if source.endswith("/outputs/"):
-                for name, content in self.outputs.items():
-                    path = Path(destination) / name
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    if isinstance(content, bytes):
-                        path.write_bytes(content)
-                    else:
-                        path.write_text(content, encoding="utf-8")
-                return fake_completed()
+                return self._materialize_outputs(destination)
+        return fake_completed()
+
+    def _injected_failure(self, joined: str) -> object | None:
+        """Answer a mapped ``failures`` entry: a return value, or raise it."""
+        for key, value in self.failures.items():
+            if key in joined:
+                if isinstance(value, Exception):
+                    raise value
+                return value
+        return None
+
+    def _status_response(self) -> object:
+        """Answer a ``.../status.json`` read: the FIFO queue's head, or the
+        fixed document when constructed with a ``job_id``."""
+        if self.job_id is None:
+            if not self.statuses:
+                return fake_completed(returncode=1, stderr="NoSuchKey")
+            state = self.statuses.pop(0) if len(self.statuses) > 1 else self.statuses[0]
+            return fake_completed(stdout=state)
+        return fake_completed(stdout=self._fixed_status_document())
+
+    def _materialize_outputs(self, destination: str) -> object:
+        """Write the prepared ``outputs`` (text or bytes) into the collect
+        destination."""
+        for name, content in self.outputs.items():
+            path = Path(destination) / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if isinstance(content, bytes):
+                path.write_bytes(content)
+            else:
+                path.write_text(content, encoding="utf-8")
         return fake_completed()
 
     def _fixed_status_document(self) -> str:
