@@ -465,7 +465,10 @@ application error naming the instance and cell, never a silent skip.
   module-level net of that name; any other unconnected pin gets its own
   unconnected net.
 - `options.flatten_reference` defaults to **true** on this route (the
-  FinFET layout is extracted flat); it is echoed and can be set `false`.
+  FinFET layout is extracted flat); it is echoed and can be set `false`. A
+  request that supplies its own hierarchical `layout.netlist` under this
+  default gets a `topology.hierarchy_mismatch` advisory naming
+  `options.flatten_layout: true` (see below).
 - **`power_connectivity` is `unchecked`** with a reason saying so: the
   stub-form pin-to-net audit does not apply because the expanded cells carry
   their own power pins, so supply connectivity takes part in the ordinary
@@ -4055,23 +4058,39 @@ original hierarchy — the same transparency precedent
 `device.parameter_tolerated`/`device.bulk_reconciled` establish for their own
 opt-in normalisations.
 
-#### `topology.hierarchy_mismatch`: flat layout against a hierarchical reference, `options.flatten_reference` unset (issue #4548)
+#### `topology.hierarchy_mismatch`: the two sides sit at different hierarchy levels (issues #4548, #5756)
 
-Emitted when all of these hold: `options.flatten_reference` is not `true`, the
-layout netlist has exactly one circuit (what `klt extract` always produces),
-and the reference netlist still has more than one circuit after unrelated top
-circuits are pruned (so a library file with extra unrelated `.subckt`s does
-not trigger it). Not emitted when `flatten_reference` is `true`, when both
-sides are flat, or when both sides are hierarchical.
+Emitted in exactly one of two directions, never both:
 
-Without it, this shape reports only per-circuit `topology` "circuit could not
-be matched to a counterpart" errors (with `counts.devices.reference: 0`),
-which read like a connectivity problem. The entry says the cause may be
-structural and names `options.flatten_reference: true`, which compares the
-flattened reference against the flat layout.
+- **Flat layout against a hierarchical reference, `options.flatten_reference`
+  unset** (issue #4548, `side: "reference"`): the layout netlist has exactly
+  one circuit (what `klt extract` always produces) and the reference netlist
+  still has more than one circuit after unrelated top circuits are pruned
+  (so a library file with extra unrelated `.subckt`s does not trigger it).
+  Without it, this shape reports only per-circuit `topology` "circuit could
+  not be matched to a counterpart" errors (with `counts.devices.reference:
+  0`), which read like a connectivity problem. The entry says the cause may
+  be structural and names `options.flatten_reference: true`, which compares
+  the flattened reference against the flat layout.
+- **Hierarchical layout against a reference flattened to a single circuit,
+  `options.flatten_reference` set** (issue #5756, `side: "layout"`): the
+  layout netlist still has more than one circuit (the normal shape for a
+  routed block's extracted subcircuits — `options.flatten_layout` defaults
+  to false) while the reference side has exactly one. This is the direction
+  the default itself produces: `options.flatten_reference` defaults to
+  `true` for a `reference.form: "gate-level-verilog"` reference on a FinFET
+  deck. Without it, this shape reports one generic null-detail `topology`
+  error per layout circuit plus one for the top pair, with nothing naming
+  the asymmetry. The entry states the layout kept N circuits while the
+  reference is one and names `options.flatten_layout: true`, which compares
+  both sides at the same hierarchy level.
 
-`severity` is always `"warning"` — advisory, never changes `status`. `side` is
-`"reference"`.
+Not emitted when both sides are flat, when both sides are hierarchical, when
+`options.flatten_layout` is `true` (the layout side is then a single
+circuit), or when a keep-list `flatten_reference` spared stub circuits (the
+reference stays hierarchical).
+
+`severity` is always `"warning"` — advisory, never changes `status`.
 
 #### `topology.dangling_output_ambiguous`: interchangeable instances on unconnected outputs (issue #4296)
 
