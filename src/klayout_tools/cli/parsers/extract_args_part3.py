@@ -177,6 +177,28 @@ def add_extract_args_part3(extract_parser: argparse.ArgumentParser) -> None:
         ),
     )
     extract_parser.add_argument(
+        "--omit-dead-metal",
+        dest="omit_dead_metal",
+        action="store_true",
+        help=(
+            "emit the JSON response's `dead_metal` as an empty list and set "
+            "`dead_metal_omitted: true` (issue #5545), keeping only the "
+            "always-present per-layer `dead_metal_summary` "
+            "{clusters, shapes, area_um2, by_layer[]}. Use this when the "
+            "report is committed as a provenance record: under "
+            "--abstract-cells every abstracted cell's internal wiring joins "
+            "no extracted net, so `dead_metal[]` scales with the instance "
+            "count and can dominate the response. Detection is unchanged -- "
+            "the summary and the aggregate dead-metal warning carry the same "
+            "counts either way, and only the per-cluster rows are dropped. "
+            "Off by default: `dead_metal[]` and `warnings[]` are "
+            "byte-identical to before this flag existed. `--check <report> "
+            "--rerun` replays the flag from the committed "
+            "`dead_metal_omitted`, so a report committed with it shows no "
+            "drift. See docs/cli/extract.md's 'Dead metal' section."
+        ),
+    )
+    extract_parser.add_argument(
         "--abstract-cells",
         dest="abstract_cells",
         action="append",

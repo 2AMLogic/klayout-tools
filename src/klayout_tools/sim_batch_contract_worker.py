@@ -104,7 +104,8 @@ def pdk():
     p = {"variant": clip(variant) or None, "root": clip(root), "stamp_scheme": None,
          "stamp_sha256": None, "stamp_text": None, "models_staged": staged == "1"}
     if not (root and variant):
-        diag.append("pdk root or variant unknown on worker")
+        if staged != "1":
+            diag.append("pdk root or variant unknown on worker")
         return p
     stamp = os.path.join(root, variant, "SOURCES")
     try:

@@ -145,12 +145,12 @@ import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
+from . import extract_dead_metal as _dead_metal
 from ._annotation import is_reserved_annotation_layer
 from ._jsonnum import is_int
 from ._layout import complement_well_tie as _complement_well_tie
 from ._layout import region as _region
 from ._layout import region_expr as _region_expr
-from ._layout import resolve_top_cell
 from ._layout import texts as _texts
 from ._paths import _load_request_json
 from ._paths import load_request_arg as _shared_load_request_arg
@@ -172,8 +172,6 @@ from .decks import (
     BipolarDevice,
     DiodeDevice,
     ExtractionDeck,
-    InvalidDeckOptionError,
-    InvalidLabelLayerError,
     MosCapacitorDevice,
     MOSFlavour,
     ParasiticsDeck,
@@ -216,6 +214,10 @@ from .extract_abstract import _sanitize_instance_name as _sanitize_instance_name
 
 # Final report assembly moved out of `run_extract` (issue #5196).
 from .extract_assemble import assemble_extract_report
+
+# The pre-report detection/warning run also moved out of `run_extract`
+# (issue #5196, stage 7) -- see `extract_detect_block.py`'s module docstring.
+from .extract_detect_block import build_detection_findings
 from .extract_flavour import (
     _extract_flavour_devices,
     _flavour_split_island,
@@ -266,8 +268,28 @@ from .extract_passive_regions import (
     mom_capacitor_device_class as mom_capacitor_device_class,
 )
 from .extract_pdk_resolve import resolve_pdk_and_model_bindings
+from .extract_preflight import preflight_layout, require_declared_set_for_rename
 from .extract_progress import StageTimer, active_timer, stage
-from .extract_report import (
+
+# The netlist-report-description subsystem lives in its own module (issue
+# #2070, the fourth split of this one after `extract_abstract.py`,
+# `extract_parasitics.py` and `extract_spef.py`). It shapes an already-resolved
+# `kdb.Circuit`/`kdb.LayoutToNetlist` into the response's `devices[]`/`nets[]`
+# arrays and layer/net warning lists -- the report layer, not the recognition
+# engine. `run_extract` still calls `_describe_devices`,
+# `_describe_matched_device_groups` and `_describe_nets` itself, and
+# `_extract_netlist` calls `_net_label_positions` while the layout is still
+# open. The rest have no call site here any more -- the net/layer detections
+# and warning builders moved to `extract_detect_block.py` (issue #5196,
+# stage 7) and the parasitics gap describers to `extract_parasitics_block.py`
+# -- but the test suite and several docstring cross-references address them as
+# `klayout_tools.extract.<name>`, so they are kept as deliberate re-exports
+# rather than dropped. Because ruff's isort merges same-module plain-name
+# groups into one statement, the F401 suppression that marks them re-exports
+# sits on the whole group rather than on each line. `extract_report.py`'s own
+# three internal helpers (`_describe_layers_in_set`, `_pin_index_by_net_id`,
+# `_each_pin_net`) have no caller here and are deliberately not imported.
+from .extract_report import (  # noqa: F401 -- re-exports, see comment above
     _case_collision_warnings,
     _describe_device_recognition_only_layers,
     _describe_devices,
@@ -281,19 +303,6 @@ from .extract_report import (
     _net_label_positions,
     _split_net_label_warnings,
 )
-
-# The netlist-report-description subsystem lives in its own module (issue
-# #2070, the fourth split of this one after `extract_abstract.py`,
-# `extract_parasitics.py` and `extract_spef.py`). It shapes an already-resolved
-# `kdb.Circuit`/`kdb.LayoutToNetlist` into the response's `devices[]`/`nets[]`
-# arrays and layer/net warning lists -- the report layer, not the recognition
-# engine. Every name below has a call site in this module (`run_extract` for
-# all but `_net_label_positions`, which `_extract_netlist` calls while the
-# layout is still open), so none needs an `X as X` re-export alias; the test
-# suite's `from klayout_tools.extract import _describe_devices`-style imports
-# keep resolving through them unchanged. `extract_report.py`'s own three
-# internal helpers (`_describe_layers_in_set`, `_pin_index_by_net_id`,
-# `_each_pin_net`) have no caller here and are deliberately not imported.
 from .extract_report import (
     _describe_parasitics_metal_gaps as _describe_parasitics_metal_gaps,
 )
@@ -318,7 +327,11 @@ from .extract_validate import validate_run_extract_args
 # `cli/extract_cmd.py`, `place_and_route.py`, and the test suite). The
 # redundant `X as X` aliases mark them explicit re-exports, so neither reads as
 # an unused import in a module that never calls them itself.
-from .extract_warnings import (
+# The `extract_warnings` group below is a re-export for the same reason: every
+# warning builder it exports is now called from `extract_detect_block.py`
+# (issue #5196, stage 7) rather than from `run_extract` here, and the test
+# suite still reaches them through `klayout_tools.extract`.
+from .extract_warnings import (  # noqa: F401 -- re-exported, see comment above
     ignored_layer_warnings,
     merged_net_label_warnings,
     pdk_dropped_param_warnings,
@@ -1578,6 +1591,7 @@ def run_extract(
     no_netlist: bool = False,
     substrate_tie_ohms: float | None = None,
     probes: Sequence[Mapping[str, Any]] = (),
+    omit_dead_metal: bool = False,
 ) -> dict[str, Any]:
     """Extract a schematic-equivalent netlist from the layout at ``path``.
 
@@ -2030,10 +2044,10 @@ def run_extract(
     ``False`` keeps the legacy-scalar netlist.
 
     ``resistance_graph_r_cut_ohm`` (``--resistance-graph-r-cut``, issue #2983)
-    supplies the per-cut via/contact resistance the shipped decks do not
-    curate (``0`` = ideal via). ``None`` (the default) keeps a net with a
-    cross-level landing ``unsupported`` and on the legacy scalar. Requires
-    ``resistance_graph=True``.
+    sets the per-cut via/contact resistance (``0`` = ideal via) the decks
+    curate (``ParasiticsDeck.cuts``) but ``klt extract`` does not consume yet
+    (#3053). ``None`` (the default) keeps a cross-level landing
+    ``unsupported`` and on the legacy scalar; needs ``resistance_graph=True``.
 
     ``distributed_rc`` (``klt extract --distributed-rc``, issue #977, Epic
     #709 Phase 2b) replaces the single-lumped-element star/Gamma-shunt R/C
@@ -2775,6 +2789,10 @@ def run_extract(
     ``docs/cli/extract.md``'s "Dead metal" section. Always a list, empty when
     every metal/via shape joins a net.
 
+    ``omit_dead_metal`` (``--omit-dead-metal``, issue #5545) emits that list
+    as ``[]`` with ``dead_metal_omitted: True``, keeping the always-present
+    ``dead_metal_summary``. See :mod:`klayout_tools.extract_dead_metal`.
+
     ``matched_device_groups`` (issue #1018) is one entry per ``--matched-
     group`` declaration, in the order given -- see ``matched_device_groups``
     above ``run_extract``'s own parameter docstring for the full contract.
@@ -3012,6 +3030,9 @@ def run_extract(
         dotted_renames_out=dotted_renames,
     )
 
+    dead_metal_summary = _dead_metal.summarize_dead_metal(dead_metal)
+    dead_metal = _dead_metal.drop_dead_metal_rows(dead_metal, warnings, omit_dead_metal)
+
     # `--critical-net-pattern`/`--parasitics-net-pattern` (issue #2974): the
     # selectors were resolved against the extracted nets inside the call above.
     critical_nets_set, parasitics_nets_set = _adopt_resolved_net_selectors(
@@ -3094,139 +3115,29 @@ def run_extract(
     )
     warnings.extend(matched_group_warnings)
 
-    # Nets whose KLayout-assigned name is a multi-label merge (issue #470):
-    # `Net.expanded_name()` joins every distinct label found on one
-    # electrical net with `,` (see `tests/test_extract.py`'s
-    # `_make_inverter_layout(extra_y_label=...)` fixture, built for issue
-    # #312's SPICE-name-sanitization fix), but this response's `nets[]`
-    # (built by `_describe_nets`, above) has already rewritten that to the
-    # `|`-joined spelling KLayout's own `NetlistSpiceWriter` uses for the
-    # net's node references in the written SPICE (`spice_safe_net_name`,
-    # issue #696) -- so `merged_net_labels[].net` below is byte-identical to
-    # the netlist's own spelling, not a separately (comma-) spelled alias of
-    # it. That is a silent signal that two differently-named nets were
-    # shorted together on the layout side -- e.g. a `gen-compose` `pins[]`
-    # entry naming a port that other connectivity already reaches. Surfaced
-    # two ways: a structured `merged_net_labels[]` entry (so a caller does
-    # not have to re-derive the label list from the joined string) and a
-    # matching prose `warnings[]` entry (so a caller checking only
-    # `warnings[]`, per the documented contract, still sees it). See
-    # docs/cli/extract.md's "Merged net labels" section for the
-    # false-positive limitation: a label that legitimately contains a
-    # literal `|` is indistinguishable from a real collision by this
-    # heuristic.
-    merged_net_labels = _detect_merged_net_labels(nets)
-    warnings.extend(merged_net_label_warnings(merged_net_labels))
-
-    # The inverse (issue #3920): one drawn label on 2+ distinct nets, e.g.
-    # two unstrapped `VDD` rails. Same two-way surfacing as above; see
-    # docs/cli/extract.md's "Split net labels" section.
-    split_net_labels = _detect_split_net_labels(nets)
-    warnings.extend(_split_net_label_warnings(split_net_labels))
-
-    # Issue #4200: nets differing only by case merge on `klt lvs` read-back.
-    warnings.extend(_case_collision_warnings(nets))
-
-    # PMOS body terminals tied to an anonymous, unbiased net (issue #555):
-    # a PMOS body extracts onto a KLayout-synthesized `$<n>` net with no DC
-    # bias path whenever no well tie -- drawn on a distinct `tap` layer, or
-    # derived from `tap_nplus`/`tap_pplus` implants (issue #1084) -- reaches
-    # this specific device's `nwell` island; a deck with neither mechanism
-    # at all (e.g. gf180mcu before #1084) hits this for *every* PMOS,
-    # unconditionally. The net name was already readable via
-    # `devices[].nets["b"]`, but nothing flagged it as *this specific* gap.
-    # Surfaced two ways: a structured `unbiased_pmos_body_nets[]` entry (so
-    # a caller does not have to re-derive the anonymous-net convention
-    # itself) and a matching prose `warnings[]` entry. The `warnings[]`
-    # entry is a single aggregate line with the count baked in, mirroring
-    # `_detect_unmodelled_poly_bodies`'s aggregate pattern (issue #599) --
-    # one line per device would blow up `warnings[]` at scale (e.g. 148
-    # entries for 148 floating PMOS bodies) and defeat literal-list pinning
-    # by a caller.
-    unbiased_pmos_body_nets = _detect_unbiased_pmos_body_nets(devices, deck)
-    warnings.extend(unbiased_pmos_body_warnings(unbiased_pmos_body_nets))
-
-    # Drawn MiM capacitors written as a fixed-value `C` card (issue #3090): the
-    # value is the deck's nominal area+perimeter law, so PDK process-corner
-    # sections cannot move it (a `--pdk`-bound `X` subckt call can). One
-    # aggregate line, plus the same fact in the `--parasitics` header below.
-    fixed_value_capacitor_note = _fixed_value_capacitor_note(
-        _fixed_value_capacitor_classes(deck, device_counts, model_bindings)
-    )
-    warnings.extend(fixed_value_capacitor_note)
-
-    # `--pdk`-bound device classes whose target subcircuit has no parameter
-    # for something the extractor measured (issue #695): today, only a
-    # sky130 `pnp` bipolar binding, whose fixed-geometry `pnp_05v5_*` cells
-    # take no per-instance base/collector-area/perimeter or emitter-count
-    # override at all (see `pdk_models.DeviceBinding.dropped_params` and
-    # `_BIPOLAR_DROPPED_PARAMS`'s docstring for the full provenance). MOS
-    # bindings carry every measured parameter onto the `X` card as of #695
-    # (see `devices[].params`' `as_um2`/`ad_um2`/`ps_um`/`pd_um` above) and so
-    # never reach this branch. One aggregate line per affected class (not per
-    # device), mirroring `unbiased_pmos_body_nets`'s pattern just above --
-    # `device_counts` is keyed by `devices[].class`, independent of `--pdk`,
-    # so it is safe to consult here even though it was computed before the
-    # `--pdk`-bound netlist is written below.
-    warnings.extend(pdk_dropped_param_warnings(model_bindings, device_counts))
-
-    # Nets touching exactly one device terminal and no declared pin (issue
-    # #596): there is no DC path through such a node from anywhere else in
-    # the netlist, so a downstream simulator hits a singular matrix on it --
-    # several stages past where this is structurally detectable from the
-    # extracted netlist alone. Surfaced two ways: a structured
-    # `single_terminal_nets[]` entry (so a caller does not have to
-    # cross-reference `nets[]`/`devices[]` itself) and a matching prose
-    # `warnings[]` entry, phrased more strongly for a gate terminal (almost
-    # never intentional) than for source/drain/body/resistor-equivalent
-    # terminals (can be a legitimate unterminated dummy tie). Each bucket
-    # gets its own single aggregate `warnings[]` line with the count baked
-    # in (issue #599), mirroring `_detect_unmodelled_poly_bodies`'s
-    # two-message-class aggregate pattern -- one line per net would blow up
-    # `warnings[]` at scale.
-    single_terminal_nets = _detect_single_terminal_nets(devices, nets)
-    warnings.extend(single_terminal_net_warnings(single_terminal_nets))
-
-    # Layers carrying shapes the deck's connectivity graph never reads (issue
-    # #220): geometry there is invisible to extraction, so surface it rather
-    # than let it become a silent LVS mismatch downstream.
-    ignored_layers = _describe_ignored_layers(path, deck)
-
-    # A material `ignored_layers` result gets a matching `warnings[]` entry
-    # (issue #666): `_describe_layers_in_set` already drops every
-    # `shapes == 0` entry before it reaches `ignored_layers`, so a non-empty
-    # list here is by construction "material" -- geometry that is genuinely
-    # invisible to this extraction's connectivity graph, not a stray empty
-    # layer declaration. Before this, `ignored_layers` was a diagnostic-only
-    # field: a routed net split across an undeclared metal level extracted
-    # "successfully" with no signal in `warnings[]`, the one field
-    # `docs/cli/extract.md` documents as the minimal self-check every `klt`
-    # command output should get. One aggregate line with the shape total
-    # baked in (issue #599's pattern), not one line per layer -- mirroring
-    # `metals_without_coefficient`'s `warnings[]` entry a bit further down
-    # this function.
-    warnings.extend(ignored_layer_warnings(ignored_layers, deck_name))
-
-    # Layers carrying shapes the deck reads for bipolar/capacitor/resistor/
-    # diode device recognition but never treats as a `metals`/`vias`
-    # connectivity level (issue #619): such a layer does not appear in
-    # `ignored_layers` above (it *is* read), but two nets joined only through
-    # it will not merge -- exactly the gap that hid sky130's own met3/met4
-    # routing-connectivity ceiling behind a clean-looking `ignored_layers`
-    # report before this deck's `metals` stack grew to cover them too. Unlike
-    # `ignored_layers`, this is *not* mirrored into `warnings[]`: an
-    # `ExtractionDeck.device_recognition_only_layers` entry is the deck's own
-    # marker/mask geometry (a resistor's `poly.res` marker, a bipolar's ID
-    # mark, a MiM cap's top-plate mark) -- layers that are *never* candidate
-    # connectivity levels by PDK design, so their presence is routine, not a
-    # gap. Reporting them here is diagnostic context for the rare case where
-    # a caller genuinely needs to distinguish "read but not merged" from
-    # "never read," not a signal that something is wrong with this
-    # extraction. See `ExtractionDeck.device_recognition_only_layers`'s
-    # docstring and docs/cli/extract.md's "Device-recognition-only layers"
-    # section.
-    device_recognition_only_layers = _describe_device_recognition_only_layers(
-        path, deck
+    # The pre-report detection/warning run (issue #5196, stage 7): merged and
+    # split net labels, case-fold collisions, unbiased PMOS bodies,
+    # fixed-value MiM capacitors, `--pdk` dropped parameters, single-terminal
+    # nets, ignored layers and device-recognition-only layers. Moved verbatim
+    # into `extract_detect_block.py`; it appends to `warnings` in place, in the
+    # same order, and the locals below are unpacked under their former names.
+    (
+        merged_net_labels,
+        split_net_labels,
+        unbiased_pmos_body_nets,
+        fixed_value_capacitor_note,
+        single_terminal_nets,
+        ignored_layers,
+        device_recognition_only_layers,
+    ) = build_detection_findings(
+        path=path,
+        deck=deck,
+        deck_name=deck_name,
+        devices=devices,
+        nets=nets,
+        device_counts=device_counts,
+        model_bindings=model_bindings,
+        warnings=warnings,
     )
 
     parasitics_report = build_parasitics_report(
@@ -3342,6 +3253,8 @@ def run_extract(
         black_box_regions=black_box_regions,
         dbu_um=dbu_um,
         dead_metal=dead_metal,
+        dead_metal_omitted=omit_dead_metal,
+        dead_metal_summary=dead_metal_summary,
         deck=deck,
         deck_name=deck_name,
         deck_options=deck_options,
@@ -4119,8 +4032,9 @@ def rerun_extract_report(
     report -- while a block without the separate echoes, i.e. one produced
     by an earlier build of this unreleased feature or hand-edited, replays
     its ``declared`` union as ``--pins`` alone) -- when the committed report
-    carries a ``pin_renames`` block,
-    writing the fresh netlist to a private temp directory deleted afterward
+    carries a ``pin_renames`` block, plus ``--omit-dead-metal`` (issue #5545,
+    from its own ``dead_metal_omitted`` echo) -- writing the fresh netlist
+    to a private temp directory deleted afterward
     (issue #3061: the committed ``netlist_path`` file is never modified;
     ``netlist_sha256`` is still computed, and ``fresh.netlist_path`` reports
     the committed path so that field is not an incidental path difference).
@@ -4267,6 +4181,9 @@ def rerun_extract_report(
             tie_declared_pins=isinstance(
                 (committed.get("pin_renames") or {}).get("ties"), list
             ),
+            # Issue #5545: a flagged report must rerun flagged, else it
+            # drifts on its own omission. Absent/non-`true` runs unflagged.
+            omit_dead_metal=bool(committed.get("dead_metal_omitted")),
         )
     finally:
         if scratch_dir is not None:
@@ -4606,43 +4523,18 @@ def extract_netlist_from_layout(
     ``deck_options``/``label_layers`` entry, or missing/ambiguous top cell --
     identical error semantics to ``run_extract``.
     """
-    if not os.path.exists(path):
-        raise ExtractError(f"file not found: {path}")
-    if os.path.isdir(path):
-        raise ExtractError(f"not a file: {path}")
-
-    try:
-        deck = get_extraction_deck(deck_name, deck_options, label_layers)
-    except (
-        UnknownExtractionDeckError,
-        InvalidDeckOptionError,
-        InvalidLabelLayerError,
-    ) as exc:
-        raise ExtractError(str(exc)) from exc
-
-    # Imported lazily (after the cheap checks above) so `klt --version` and
-    # argument parsing never pay the cost of loading the KLayout database
-    # module -- same discipline as `_layout.load_layout`.
-    import klayout.db as kdb
-
-    layout = kdb.Layout()
-    try:
-        with stage("read_layout"):
-            layout.read(path)
-    except Exception as exc:  # klayout raises RuntimeError for bad/unknown streams
-        raise ExtractError(f"could not read layout '{path}': {exc}") from exc
-
-    top_cell = resolve_top_cell(layout, top, ExtractError, path=path)
-
-    # Issue #2761: a FinFET deck runs its own recogniser (see
-    # `extract_finfet`), which implements none of the planar-only options
-    # below -- refuse them by name instead of half-applying them.
-    from .extract_finfet import refuse_layout_options
-
-    refuse_layout_options(
-        deck,
+    # Issue #5464: the engine-free prefix (file checks, deck resolution, the
+    # layout read, top-cell resolution and the FinFET option refusal) lives
+    # in `extract_preflight` so `klt pex --dry-run` runs exactly these checks
+    # without starting the extraction engine -- one helper, two callers, so
+    # the two can never drift.
+    deck, layout, top_cell = preflight_layout(
+        path,
         deck_name,
-        **{
+        top=top,
+        deck_options=deck_options,
+        label_layers=label_layers,
+        refuse_options={
             "--top-cell-pins": top_cell_pins_only,
             "--abstract-cells": bool(abstract_cell_patterns),
             "--abstract-cell-lef": bool(abstract_cell_lef_paths),
@@ -4674,8 +4566,8 @@ def extract_netlist_from_layout(
     # to -- validated before any extraction work, the same window every
     # other request-shape check above uses (see the helper for why this is
     # an error rather than a silent no-op).
-    _require_declared_set_for_rename(rename_declared_pins, declared_pins, def_pins)
-    _require_declared_set_for_rename(
+    require_declared_set_for_rename(rename_declared_pins, declared_pins, def_pins)
+    require_declared_set_for_rename(
         tie_declared_pins, declared_pins, def_pins, flag="--tie-declared-pins"
     )
 
@@ -4920,25 +4812,6 @@ def extract_netlist_from_layout(
         substrate_spreading,
         pin_renames,
     )
-
-
-def _require_declared_set_for_rename(
-    rename_declared_pins: bool,
-    declared_pins: frozenset[str] | None,
-    def_pins: frozenset[str] | None,
-    flag: str = "--rename-declared-pins",
-) -> None:
-    """Issue #2854: ``--rename-declared-pins`` with neither ``--pins`` nor
-    ``--def-pins`` is a clean :class:`ExtractError`, not a silent no-op --
-    there is no declared set to rename *to*, and silently extracting an
-    unrenameable netlist would defeat the flag's whole purpose (canonical
-    pin names for ``klt lvs``'s ``options.anchor_top_level_pins``)."""
-    if rename_declared_pins and declared_pins is None and def_pins is None:
-        raise ExtractError(
-            f"{flag} requires a declared pin set to rename "
-            "to -- pass --pins <A,B,...> (or --def-pins <def>), the same "
-            "set whose reconciliation survives the pins it names"
-        )
 
 
 def _default_output_path(path: str) -> str:
@@ -10312,22 +10185,7 @@ def _extract_netlist(
         ],
     )
     if dead_metal:
-        cluster_word = "cluster" if len(dead_metal) == 1 else "clusters"
-        total_shapes = sum(entry["shapes"] for entry in dead_metal)
-        shape_word = "shape" if total_shapes == 1 else "shapes"
-        layers_str = ", ".join(
-            sorted({f"{entry['layer']}/{entry['datatype']}" for entry in dead_metal})
-        )
-        warnings.append(
-            f"{len(dead_metal)} routing-stack {cluster_word} ({total_shapes} "
-            f"{shape_word} on {layers_str}) join no extracted net -- no via "
-            "lands on this geometry and no same-layer wiring touches it, so "
-            "it is invisible to the extracted netlist and to every downstream "
-            "`klt lvs`/`klt sim` view; deliberate dead metal (artwork, fill) "
-            "is expected here, unexplained dead metal usually means the "
-            "connection you intended is missing -- see dead_metal[] for the "
-            "per-cluster layer/bbox/shape count."
-        )
+        warnings.append(_dead_metal.dead_metal_warning(dead_metal, omitted=False))
 
     # Parasitics geometry must be read *before* `l2n` (which owns the shape
     # database `polygons_of_net` reads) is garbage-collected below, so compute

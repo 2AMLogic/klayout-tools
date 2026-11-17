@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from klayout_tools.netlist import run_netlist
-from test_netlist import (  # noqa: F401
+from test_netlist import (
     _NETLIST_BODY,
     _STUB_NONZERO_EXIT,
     _TESTBENCH_SHAPED_BODY,
@@ -50,6 +50,9 @@ def test_block_mode_uncomments_subckt_and_drops_trailing_end(
         "ends_uncommented": True,
         "trailing_end_removed": True,
         "warning": None,
+        # Additive since issue #5473; null when the emitted port order is the
+        # one the schematic declares, as it is for a stub with no pins.
+        "port_order": None,
     }
 
 

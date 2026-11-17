@@ -114,9 +114,9 @@ def load_request(request_path: str) -> dict[str, Any]:
         with open(request_path, encoding="utf-8") as handle:
             request = json.load(handle)
     except (OSError, UnicodeDecodeError) as exc:
-        raise FormalError(f"could not read request file: {exc}") from exc
+        raise FormalError(f"could not read request '{request_path}': {exc}") from exc
     except json.JSONDecodeError as exc:
-        raise FormalError(f"request file is not valid JSON: {exc}") from exc
+        raise FormalError(f"request '{request_path}' is not valid JSON: {exc}") from exc
     return validate_request_shape(
         request,
         "request file",

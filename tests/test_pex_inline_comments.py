@@ -4,8 +4,10 @@ rule (issue #5417).
 ``pex._logical_lines`` used to hand-roll the comment strip as ``\\s\\$|;``,
 which truncated ``.include $PDK_ROOT/...`` to a bare ``.include`` -- a ``$``
 glued to the next token is a shell-style variable reference, not a comment.
-It now shares ``_paths.strip_spice_inline_comment`` with every other netlist
-reader in the package, which makes the two consumers built on it --
+It now shares ``_spice_text.strip_spice_inline_comment`` with every other
+netlist reader in the package (the helper moved from ``pex.py`` into
+``pex_netlist_text.py`` when main refactored it, issue #5477), which
+makes the two consumers built on it --
 ``_has_include_card`` and ``_expand_reference_includes`` -- see such a card
 at all. These tests pin that, and pin that a *genuine* ``$``/``;`` comment is
 still stripped.
@@ -13,7 +15,8 @@ still stripped.
 
 from __future__ import annotations
 
-from klayout_tools.pex import _has_include_card, _logical_lines, _model_mismatch
+from klayout_tools.pex import _has_include_card, _model_mismatch
+from klayout_tools.pex_netlist_text import _logical_lines
 
 
 def test_logical_lines_keeps_a_dollar_variable_include_target():

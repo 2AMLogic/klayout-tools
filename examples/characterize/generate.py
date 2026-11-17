@@ -2,8 +2,10 @@
 """Generate the `klt characterize` worked example fixtures: a tiny synthetic
 CMOS inverter/NAND2 cell netlist wrapping bare SPICE ``level=1`` MOSFET
 models, a two-corner model library, the request JSON that characterizes
-the NAND2 into an NLDM Liberty model, and a batch request that characterizes
-both cells into one combined library (see `docs/cli/characterize.md`).
+the NAND2 into an NLDM Liberty model, a batch request that characterizes
+both cells into one combined library, and a synthetic level-sensitive latch
+plus the request that characterizes its three arc kinds and its setup/hold
+against the enable's closing edge (see `docs/cli/characterize.md`).
 
 These fixtures are deliberately **not** a real PDK deck -- CLAUDE.md's "open
 PDKs only" rule is about design-rule/model data this repo *vendors*; a worked
@@ -30,6 +32,10 @@ response instead, and `tests/test_characterize.py` runs this example live
 Run from the repo root:
 
     uv run python3 examples/characterize/generate.py
+
+The edge-triggered flip-flop fixtures (`dff.spice`, `request-dff.json`,
+`request-dff-constraints.json`) predate this script and are committed
+directly; only the files listed in :func:`main` are (re)written here.
 """
 
 import json
@@ -200,12 +206,111 @@ def write_batch_request() -> None:
         handle.write("\n")
 
 
+def write_latch_spice() -> None:
+    """A synthetic active-high D latch: ``Q`` tracks ``D`` while ``E`` is high
+    and holds the last value once ``E`` goes low.
+
+    Same transmission-gate style as ``dff.spice``, minus the second (slave)
+    stage -- which is exactly the structural difference between a latch and a
+    flop, and the reason the two need different arcs. The storage loop is two
+    inverters (``n`` -> ``nb`` -> ``Q``) with ``Q`` fed back to ``n`` through
+    a transmission gate that closes while ``E`` is *low*, so the feedback is
+    non-inverting and the node holds rather than oscillating.
+    """
+    path = os.path.join(_DIR, "dlat.spice")
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(
+            "* klt characterize worked example -- synthetic active-high D latch\n"
+            "* (transparent while E is high; not a real PDK -- see generate.py).\n"
+            "* Q = D while E is high, and holds the captured D once E falls.\n"
+            "\n"
+            ".subckt dlat_demo Q E D VDD VSS\n"
+            "* enable phases: eb = !E, ep = E (buffered)\n"
+            "MNe1 eb E VSS VSS nfet_demo w=1u l=0.15u\n"
+            "MPe1 eb E VDD VDD pfet_demo w=2u l=0.15u\n"
+            "MNe2 ep eb VSS VSS nfet_demo w=1u l=0.15u\n"
+            "MPe2 ep eb VDD VDD pfet_demo w=2u l=0.15u\n"
+            "* input transmission gate: D -> n, transparent while E is high\n"
+            "MNi D ep n VSS nfet_demo w=1u l=0.15u\n"
+            "MPi D eb n VDD pfet_demo w=2u l=0.15u\n"
+            "* storage pair: nb = !n, Q = !nb = n\n"
+            "MN1 nb n VSS VSS nfet_demo w=1u l=0.15u\n"
+            "MP1 nb n VDD VDD pfet_demo w=2u l=0.15u\n"
+            "MN2 Q nb VSS VSS nfet_demo w=2u l=0.15u\n"
+            "MP2 Q nb VDD VDD pfet_demo w=4u l=0.15u\n"
+            "* feedback transmission gate: Q -> n, closed while E is low\n"
+            "MNf Q eb n VSS nfet_demo w=0.5u l=0.3u\n"
+            "MPf Q ep n VDD pfet_demo w=1u l=0.3u\n"
+            ".ends dlat_demo\n"
+        )
+
+
+def write_latch_request() -> None:
+    """The latch request (issue #5521): ``enable_pin``/``enable_level`` in
+    place of ``clock_pin``, plus ``constrained_pins`` so one run covers all
+    three latch shapes.
+
+    What the emitted ``.lib`` carries, and why each piece is here:
+
+    - a **transparent** ``D -> Q`` ``timing()`` group
+      (``timing_type : combinational``), measured with ``E`` held high;
+    - an **enable** ``E -> Q`` group with ``timing_type : rising_edge``,
+      because an active-high enable *opens* on its rising edge;
+    - ``setup_falling`` / ``hold_falling`` on ``D``, because the same enable
+      *closes* on its falling edge -- the one a latch's data is constrained
+      against.
+
+    The 2x2 grid matches ``request-dff-constraints.json``: the constraint
+    bisection is `2 + ceil(log2(window/tolerance))` ngspice runs on top of
+    the single arc deck, so a vendor-sized grid would dominate the example's
+    runtime without changing any shape.
+    """
+    request = {
+        "cell": {
+            "name": "dlat_demo",
+            "netlist": "dlat.spice",
+            "enable_pin": "E",
+            "enable_level": "high",
+            "constrained_pins": ["D"],
+            "pins": [
+                {"name": "E", "direction": "input"},
+                {"name": "D", "direction": "input"},
+                {"name": "Q", "direction": "output", "function": "D"},
+            ],
+            "power_pins": {"vdd": "VDD", "gnd": "VSS"},
+            "area": 16.0,
+        },
+        "corner": {
+            "name": "tt_1p80V_25C",
+            "process": "tt",
+            "supply_v": 1.8,
+            "temperature_c": 25,
+        },
+        "grid": {
+            "input_transition_ns": [0.02, 0.24],
+            "output_load_pf": [0.005, 0.03],
+        },
+        "models": {"lib": "models.lib"},
+        "library": {"name": "characterize_dlat_demo_tt_1p80V_25C"},
+        "options": {"timeout_s": 600},
+    }
+    path = os.path.join(_DIR, "request-dlat.json")
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(request, handle, indent=2)
+        handle.write("\n")
+
+
 def main() -> None:
     write_models_lib()
     write_cells_spice()
     write_request()
     write_batch_request()
-    print(f"wrote models.lib, cells.spice, request.json, request-batch.json to {_DIR}")
+    write_latch_spice()
+    write_latch_request()
+    print(
+        "wrote models.lib, cells.spice, request.json, request-batch.json, "
+        f"dlat.spice, request-dlat.json to {_DIR}"
+    )
 
 
 if __name__ == "__main__":

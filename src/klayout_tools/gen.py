@@ -56,7 +56,7 @@ import os
 from typing import TYPE_CHECKING, Any
 
 from ._jsonnum import is_int, is_number
-from ._layout import write_layout
+from ._layout import new_canonical_layout, write_layout
 from ._provenance import build_provenance
 from .gen_asap7_tap import ASAP7_SPECS
 from .gen_cap_vpp import (
@@ -550,7 +550,7 @@ CONTACT_SIZE_UM = 0.22
 #: deliberately not re-derived per-request from the resolved dbu -- doing so
 #: would move geometry (a finer snap grid moves a contact's centre) on the
 #: very PDKs this constant was validated against.
-from .gen_snap import (  # noqa: E402,F401 -- re-exported
+from .gen_snap import (  # noqa: E402 -- re-exported
     _GRID_DBU_UM,
     _snap_offset_um,
     _snap_rect_box_um,
@@ -4077,8 +4077,7 @@ def _produce(
     pcell_values = dict(resolved_params)
     pcell_values.update(spec.layer_params(pdk_info, resolved_params))
 
-    layout = kdb.Layout()
-    layout.dbu = resolve_pdk_dbu(pdk_info) or spec.dbu
+    layout = new_canonical_layout(resolve_pdk_dbu(pdk_info) or spec.dbu, pcell_values)
     pcell_var = layout.add_pcell_variant(lib, decl.id(), pcell_values)
     top = layout.create_cell(cell_name)
     top.insert(kdb.CellInstArray(pcell_var, kdb.Trans()))

@@ -58,6 +58,17 @@ def test_changed_inputs_never_reuse_a_stale_report(tmp_path, monkeypatch):
     assert len(calls) == 2
 
 
+def test_non_utf8_cached_input_degrades_to_a_cache_miss(tmp_path, monkeypatch):
+    """A cached file with invalid UTF-8 bytes must not raise out of the
+    cache check (issue #5755): it degrades to a cache miss, like any other
+    unreadable input, and the leg re-simulates."""
+    calls: list = []
+    _leg(tmp_path, calls, monkeypatch, resume=False)
+    (tmp_path / "leg" / "testbench.spice").write_bytes(b"\xff\xfe not utf-8\n")
+    _leg(tmp_path, calls, monkeypatch)
+    assert len(calls) == 2
+
+
 def test_unrun_corner_report_is_not_reused(tmp_path, monkeypatch):
     calls: list = []
     _leg(tmp_path, calls, monkeypatch, resume=False)
@@ -140,6 +151,18 @@ def test_cli_accepts_resume():
     assert create_parser().parse_args(["characterize", "req.json"]).resume is None
 
 
+def _config():
+    return sim_batch.BatchConfig(
+        provision_script="batch-fleet-provision.sh",
+        bucket="fake-batch-jobs-000000000000",
+        jobs_prefix="jobs",
+        profile="fake",
+        region=None,
+        poll_interval_s=0.0,
+        poll_timeout_s=1.0,
+    )
+
+
 def _run_batch_with(tmp_path, monkeypatch, checkpoint):
     seen: dict = {}
 
@@ -149,7 +172,9 @@ def _run_batch_with(tmp_path, monkeypatch, checkpoint):
 
     monkeypatch.setattr(sim_batch, "_run_batch_job", fake_job)
     monkeypatch.setattr(sim_batch, "new_job_id", lambda: "fresh-job")
-    monkeypatch.setattr(sim_batch, "_resolve_batch_config", lambda *a, **k: object())
+    # A real `BatchConfig`, not a bare sentinel: the resumed re-attach copies
+    # it with a shortened `interrupted_grace_s` (issues #5371, #5459).
+    monkeypatch.setattr(sim_batch, "_resolve_batch_config", lambda *a, **k: _config())
     from klayout_tools import sim_batch_plan
 
     monkeypatch.setattr(sim_batch_plan, "plan_batch_job", lambda *a, **k: ({}, 1))

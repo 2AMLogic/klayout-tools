@@ -22,11 +22,13 @@ def add_extract_args_part2(
         metavar="OHM",
         help=(
             "per-cut via/contact resistance for --resistance-graph (issue "
-            "#2983); 0 is an ideal via. The shipped decks curate none, so "
-            "without this a net with a cross-level landing is `unsupported` "
-            "and `resistance_graph.selected_resistance_ohm` falls back to the "
-            "legacy scalar. Must be >= 0. Requires --resistance-graph. See "
-            "docs/cli/extract.md's '--resistance-graph' section."
+            "#2983); 0 is an ideal via. The shipped decks do curate a per-cut "
+            "table (issue #3053) but klt extract does not consume it yet, so "
+            "without this flag a net with a cross-level landing is "
+            "`unsupported` and `resistance_graph.selected_resistance_ohm` "
+            "falls back to the legacy scalar. Must be >= 0. Requires "
+            "--resistance-graph. See docs/cli/extract.md's "
+            "'--resistance-graph' section."
         ),
     )
     extract_parser.add_argument(

@@ -6597,6 +6597,7 @@ def test_run_pex_extract_only_reports_extraction_without_measuring(
     assert report["reference_netlist_sha256"] is None
     assert report["pin_count_mismatch"] is None
     assert report["flat_dut_mismatch"] is None
+    assert report["pin_order_mismatch"] is None
     assert report["model_mismatch"] is None
 
 
@@ -6604,7 +6605,6 @@ def test_run_pex_extract_only_reports_extraction_without_measuring(
     ("kwargs", "needle"),
     [
         ({"measure_command": ["true"]}, "--measure-command"),
-        ({"reference_netlist": "x.spice"}, "--reference-netlist"),
         ({"measure_timeout_s": 5.0}, "--measure-timeout-s"),
         ({"device_only_leg": True}, "--device-only-leg"),
         ({"flatten_schematic": True}, "--flatten-schematic"),

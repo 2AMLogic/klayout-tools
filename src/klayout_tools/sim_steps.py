@@ -90,6 +90,7 @@ from typing import Any
 
 from .sim_errors import SimError
 from .sim_op_args import default_op_args
+from .sim_step_shadow import validate_step_measurement_name
 
 #: The internal ``analysis["kind"]`` a resolved step sequence carries. Never
 #: a request value: the request declares ``analysis_steps[]`` instead, and
@@ -498,24 +499,17 @@ def _resolve_step_measurements(
             f"step {step['name']!r}: measurements must be an array of objects"
         )
     resolved: list[dict[str, Any]] = []
-    local_names: set[str] = set()
+    # Lower-cased local name -> the name as written, for the siblings already
+    # resolved; `validate_step_measurement_name` refuses every collision a
+    # new name can cause against them (illegal, duplicate, shadowing #5446).
+    local_names: dict[str, str] = {}
     for spec in specs:
         _validate_measurement_form(spec)
         _refuse_unsupported(spec)
         _check_intermediate(spec, f"step {step['name']!r}")
         local = spec["name"]
-        if not isinstance(local, str) or not _NAME_RE.match(local):
-            raise SimError(
-                f"step {step['name']!r}: measurement name {local!r} must match "
-                "[A-Za-z_][A-Za-z0-9_]* (it is referenced as "
-                f"'{step['name']}.<name>' and becomes an ngspice vector name)"
-            )
-        if local.lower() in local_names:
-            raise SimError(
-                f"step {step['name']!r}: measurement name {local!r} is declared "
-                "more than once (compared case-insensitively)"
-            )
-        local_names.add(local.lower())
+        validate_step_measurement_name(spec, local, local_names, step)
+        local_names[local.lower()] = local
         resolved.append(_flatten_step_measurement(spec, step, index, known))
     return resolved
 

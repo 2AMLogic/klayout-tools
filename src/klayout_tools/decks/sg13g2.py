@@ -618,9 +618,9 @@ DECK: list[DrcRule] = [
     #   * ThickGateOx/DigiBnd scoping selects whole Activ polygons; upstream
     #     clips with a boolean NOT. Only a polygon straddling a marker edge
     #     can differ.
-    #   * SVaricap, schottky_nbl1/nw1, scr1 (text-marker derived) exclusions
-    #     and `NWell_Nsram` (SRAM-marked NWell) are not modelled: those
-    #     structures are held to the ordinary threshold (stricter).
+    #   * schottky_nbl1/nw1, scr1 and `NWell_Nsram` (SRAM-marked NWell) are not
+    #     modelled: held to the ordinary (stricter) threshold. NW.c's SVaricap
+    #     carve-out *is* modelled -- see `sg13g2_svaricap.py`.
     #   * NW.e "tie surrounded entirely by NWell" is the enclosed check on
     #     N+ Activ: N+ Activ wholly outside NWell (NMOS S/D) is not flagged,
     #     one straddling a well edge is. Activ inside the well is the
@@ -1751,8 +1751,8 @@ DECK: list[DrcRule] = [
         provenance=_sg13g2_drc_provenance(f"{_BEOL}/6_11_mim.drc", "MIM.d"),
     ),
 ]
-__import__(f"{__package__}.sg13g2_cont_grid", fromlist=["x"]).apply(DECK)
-__import__(f"{__package__}.sg13g2_runset_notes", fromlist=["x"]).apply(DECK)
+for _hook in ("sg13g2_cont_grid", "sg13g2_svaricap", "sg13g2_runset_notes"):
+    __import__(f"{__package__}.{_hook}", fromlist=["x"]).apply(DECK)
 # Foundry rules this curated deck knows about but cannot evaluate (issue
 # #3571, mirroring #3012): `{rule id: (layer, description)}`. `drc.py`
 # reports each one under `coverage.unchecked_rules` whenever its layer is

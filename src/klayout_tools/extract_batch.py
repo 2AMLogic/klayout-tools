@@ -46,7 +46,7 @@ import time
 from collections.abc import Callable, Sequence
 from typing import Any
 
-from . import _batch_common, _provenance, remote_transport, sim_batch
+from . import _batch_common, remote_transport, sim_batch
 from . import netlist_batch as _nb
 from .extract_spef import ExtractError
 from .netlist import NetlistError
@@ -274,62 +274,36 @@ def build_job_spec(
     ``klt extract request.json`` there under ``timeout`` (report to
     ``report.json``, stderr teed to ``stderr.log``), then copy the netlist to
     ``$EDA_OUTPUT_DIR``."""
-    version = (
-        client_version if client_version is not None else _provenance._klt_version()
+    command = _batch_common.build_job_command(
+        tree_member=BATCH_TREE_FILENAME,
+        run=(
+            f"{BACKEND_ENV}=local timeout --kill-after=30 "
+            f"{int(math.ceil(timeout_s))} "
+            f"klt extract {BATCH_REQUEST_FILENAME} --format json"
+        ),
+        err_cls=ExtractError,
+        stdout_target=sim_batch.BATCH_REPORT_FILENAME,
+        client_version=client_version,
+        version_check=version_check,
+        tree_root_subdir="",
+        extra_tail=(
+            ""
+            if no_netlist
+            else (
+                f"if [ -f {BATCH_NETLIST_FILENAME} ]; then "
+                f"cp {BATCH_NETLIST_FILENAME} "
+                f'"$EDA_OUTPUT_DIR/{BATCH_NETLIST_FILENAME}"; fi'
+            )
+        ),
     )
-    try:
-        preflight = sim_batch._runner_preflight_script(
-            version, enforce=version_check == "enforce"
-        )
-    except Exception as exc:  # SimError: a client version unsafe to embed
-        raise ExtractError(str(exc)) from exc
-    out = '"$EDA_OUTPUT_DIR/{}"'
-    setup = " && ".join(
-        [
-            'EDA_INPUT_DIR=$(cd "$EDA_INPUT_DIR" && pwd -P)',
-            'EDA_OUTPUT_DIR=$(cd "$EDA_OUTPUT_DIR" && pwd -P)',
-            "w=$(mktemp -d)",
-            f'tar -xzf "$EDA_INPUT_DIR/{BATCH_TREE_FILENAME}" -C "$w"',
-            'cd "$w"',
-            'printf \'%s\\n%s\\n\' "$w" "$(pwd -P)" >'
-            + out.format(_batch_common.BATCH_TREE_ROOT_FILENAME),
-        ]
-    )
-    run = (
-        f"{BACKEND_ENV}=local timeout --kill-after=30 {int(math.ceil(timeout_s))} "
-        f"klt extract {BATCH_REQUEST_FILENAME} --format json"
-        f' > "$EDA_OUTPUT_DIR/{sim_batch.BATCH_REPORT_FILENAME}"'
-        f' 2> >(tee "$EDA_OUTPUT_DIR/{sim_batch.BATCH_STDERR_FILENAME}" >&2)'
-    )
-    copy = (
-        ""
-        if no_netlist
-        else (
-            f"; if [ -f {BATCH_NETLIST_FILENAME} ]; then cp {BATCH_NETLIST_FILENAME} "
-            f"{out.format(BATCH_NETLIST_FILENAME)}; fi"
-        )
-    )
-    command = (
-        preflight
-        + setup
-        + " && "
-        + run
-        + "; rc=$?; wait $! 2>/dev/null"
-        + copy
-        + "; exit $rc"
-    )
-    return sim_batch.BatchJobSpec(
+    return _batch_common.build_job_spec(
         cmd=command,
         tool=BATCH_JOB_TOOL,
         pdk_variant=pdk,
-        timeout_seconds=_batch_common.job_timeout_seconds(timeout_s),
-        inputs=(
-            sim_batch.BatchJobInput(
-                name=BATCH_TREE_FILENAME,
-                label="layout tree",
-                local_path=tarball_path,
-            ),
-        ),
+        tree_member=BATCH_TREE_FILENAME,
+        tree_label="layout tree",
+        tarball_path=tarball_path,
+        timeout_s=timeout_s,
     )
 
 

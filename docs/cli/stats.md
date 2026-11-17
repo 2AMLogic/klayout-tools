@@ -4,13 +4,17 @@ Report bounding box, drawn area, density, and polygon/vertex counts of a
 GDSII or OASIS layout stream, in total and optionally per layer.
 
 ```
-klt stats <file> [--per-layer] [--top <cell>] [--density-window <um>]
+klt stats <file> [--per-layer] [--geometry-digest] [--top <cell>] [--density-window <um>]
           [--window-layer L/D ...] [--format text|json]
 ```
 
 - `<file>` — path to a GDSII (`.gds`) or OASIS (`.oas`) file. KLayout
   auto-detects the stream format on read; the extension is not authoritative.
 - `--per-layer` — also report the same statistics broken down per layer.
+- `--geometry-digest` — also compute `geometry_digest` (a sha256 of the
+  stream's decoded geometry). Off by default: it re-reads and walks the whole
+  layout (~2.5x the runtime of the rest of the report on large flat layouts),
+  so the field is `null` unless this flag is given.
   Without this flag, only the `total` figures are computed (`layers` is
   `null`).
 - `--top` — top cell to report on when the stream has more than one
@@ -59,6 +63,7 @@ all `klt` commands (`schema_version`, error shape, exit codes).
   "file": "design.gds",
   "dbu_um": 0.001,
   "top_cell": "TOP",
+  "geometry_digest": "sha256:d3d5d5e8d70eec7829f978842083218f06e2e00aa0f2dc93045cab78a56a55f7",
   "bbox_um": {
     "left": 0.0,
     "bottom": 0.0,
@@ -125,6 +130,7 @@ With `--per-layer`, `layers` is a list instead of `null`:
 | `file`           | string                  | The input path exactly as provided on the command line.                     |
 | `dbu_um`         | number (float)          | Database unit in micrometres (e.g. `0.001` = 1 nm).                         |
 | `top_cell`       | string \| null          | Name of the layout's single top cell, or `null` if the layout has no cells. |
+| `geometry_digest`| string \| null          | `"sha256:<64 hex>"` digest of the stream's **decoded geometry** when `--geometry-digest` is given; `null` otherwise, or if it cannot be computed. See "Geometry digest" below. |
 | `bbox_um`        | object                  | The top cell's bounding box (hierarchy-inclusive), in micrometres. See below. |
 | `total`          | object                  | Aggregate area/density/polygon/vertex figures across all layers. See below. |
 | `layers`         | array\<object\> \| null | Per-layer breakdown; `null` unless `--per-layer` was given.                 |
@@ -228,6 +234,58 @@ All zero if the layout has no cells.
   applies to `klt drc`, `klt extract`, `klt layers`, and this command),
   matching `klt layers`.
 
+## Geometry digest
+
+`geometry_digest` is a `"sha256:<64 lowercase hex>"` digest of the stream's
+**decoded geometry**: the database unit, every cell sorted by name, and within
+each cell every shape (keyed by layer/datatype) and every child-cell instance,
+each rendered canonically and then sorted. Container metadata that says nothing
+about the geometry is **never** read — the GDS/OASIS write timestamp, record
+order within a cell, cell-table indices, and the stream format itself.
+
+Two consequences follow, and they are the reason the field exists:
+
+- Re-writing geometrically identical output produces different **bytes** every
+  time (the header carries the write time), but the same `geometry_digest`.
+- A real geometry change always changes it.
+
+So `geometry_digest` answers "is this the same layout?", where a raw-byte
+SHA-256 (`provenance.input.content_hash` on every `klt` envelope, and what
+`klt drc`/`lvs`/`extract`/`sim` record) answers the narrower "is this the same
+file?". For the regenerate-and-compare gate this field is built for — and why
+that raw byte compare is within-version only, not a contract across a `klt`
+upgrade — see
+[`docs/json-contract.md`](../json-contract.md#stream-stability-contract-layout-stream-bytes-are-not-stable-across-klt-versions)
+→ "Stream-stability contract".
+
+The digest covers the **whole stream** and is never scoped by `--top`, unlike
+the area/density/count figures. Two runs over the same file with different
+`--top` values report the same `geometry_digest`. It is `null` unless
+`--geometry-digest` is given (or the digest cannot be computed).
+
+### Producing a signoff regeneration hash (issue #5551)
+
+This is the value
+[`klt signoff --attest 2 --hash-kind geometry`](signoff.md) is graded against,
+and `klt stats` is its supported producer. Run it on the **regenerated**
+stream:
+
+```bash
+# CI regenerates the layout into a scratch dir, then attests the committed one.
+python gen.py -o /tmp/scratch/top.gds
+klt signoff --attest 2 --input layout/top.gds -o evidence/item2.json \
+    --generator "python gen.py -o layout/top.gds" \
+    --hash-kind geometry \
+    --regenerated-hash "$(klt stats --geometry-digest --format json /tmp/scratch/top.gds \
+                          | jq -r .geometry_digest)"
+```
+
+> **`klt diff`'s `canonical_hash` is a different digest.** It is also
+> geometry-level and also normalizes away timestamps, but it is a separate
+> implementation with a separate value (and no `sha256:` prefix). Substituting
+> it into `--regenerated-hash --hash-kind geometry` grades `stale_artifact` —
+> see [`docs/cli/diff.md`](diff.md).
+
 ## Windowed density
 
 With `--density-window <um>`, `density_windows` is:
@@ -271,10 +329,11 @@ table when `--per-layer` is given. It is intended for human eyes and its
 exact layout is **not** part of the contract — parse the JSON instead.
 
 ```
-$ klt stats design.gds --per-layer
+$ klt stats design.gds --per-layer --geometry-digest
 file: design.gds
 dbu_um: 0.001
 top_cell: TOP
+geometry_digest: sha256:d3d5d5e8d70eec7829f978842083218f06e2e00aa0f2dc93045cab78a56a55f7
 bbox_um: (0.0, 0.0) - (3.0, 3.0)  3.0 x 3.0
 area_um2: 2.125
 density: 0.2361111111111111

@@ -598,6 +598,14 @@ one-line warning (naming the absolute root read, every root skipped, and the
 remedy) or `None` when unambiguous. `klt sim` prints it to stderr; see
 [`sim.md`](sim.md)'s "Model library resolution".
 
+The trailing remedy sentence defaults to `pdk.AMBIGUITY_REMEDY` ("pin the root
+explicitly (--pdk-root, or a request's models.pdk_root)…"). A caller whose
+backend refuses those pins passes its own with the keyword-only
+`remedy=` argument
+([#5449](https://github.com/2AMLogic/klayout-tools/issues/5449)); the
+chosen/skipped-root half of the line is identical either way. `klt sim
+--backend batch` is the only caller that does so today.
+
 ### Silent default among several variants (`alternative_variants`, issue #3814)
 
 With no `--pdk` and no `$PDK`, `find` takes the first variant in sorted order.

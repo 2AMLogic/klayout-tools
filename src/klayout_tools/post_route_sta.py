@@ -322,6 +322,17 @@ from .post_route_sta_electrical import (  # noqa: F401 -- re-exported names
     _parse_electrical_check,
     _parse_electrical_slack_check,
 )
+from .post_route_sta_path_groups import (  # noqa: F401 -- re-exported names
+    _CHECK_ROLE_TYPES,
+    _SLACK_CONSISTENCY_TOL_NS,
+    _WORST_PATHS_BEGIN,
+    _WORST_PATHS_END,
+    _empty_path_record,
+    _parse_worst_path_rows,
+    _worst_path_record,
+    _worst_paths,
+    _worst_paths_by_group,
+)
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- versioned independently of every other verb's own
@@ -457,14 +468,6 @@ _PORT_CHECK_END = "===KLT_STA_PORT_CHECK_END==="
 #: reported -- so a typo can never silently constrain no ports.
 _PORT_CHECK_EXIT_CODE = 3
 
-#: Issue #2740: brackets the per-path-group worst setup/hold path records
-#: (:func:`_worst_path_lines`), one
-#: ``PATH\t<max|min>\t<check_role>\t<slack_s>\t<startpoint>\t<endpoint>`` row
-#: per path group per side, or a single ``ERROR\t<message>`` row when the
-#: engine's path introspection itself failed.
-_WORST_PATHS_BEGIN = "===KLT_STA_WORST_PATHS_BEGIN==="
-_WORST_PATHS_END = "===KLT_STA_WORST_PATHS_END==="
-
 #: Issue #3042: brackets the per-port worst-path records
 #: (:func:`_port_path_lines`) a ``constraints.report_ports`` request emits.
 #: Per requested port: one ``DIR\t<port>\t<direction>`` row, then
@@ -519,33 +522,6 @@ _COMPLETENESS_CHECKS = (
     ("unconstrained_endpoints", "0 0 0 0 1 0 0"),
     ("unclocked_registers", "0 0 0 1 0 0 0"),
 )
-
-#: OpenSTA ``PathEnd::checkRole()`` names -> this command's ``check_type``
-#: values. Verified live (OpenROAD ``openroad/orfs:latest`` image, 2026-10-10)
-#: for ``setup``, ``hold``, ``recovery``, ``removal``, ``clock gating
-#: setup``, ``clock gating hold`` and ``output setup``; ``output hold``,
-#: ``latch setup`` and ``latch hold`` are the remaining OpenSTA
-#: ``TimingRole`` names a path end can carry. Any role not listed here is
-#: reported as ``check_type: "unknown"`` (with the engine's own spelling kept
-#: in ``engine_check_role``) -- never guessed into a setup/hold bucket.
-_CHECK_ROLE_TYPES = {
-    "setup": "setup",
-    "hold": "hold",
-    "recovery": "recovery",
-    "removal": "removal",
-    "clock gating setup": "clock_gating_setup",
-    "clock gating hold": "clock_gating_hold",
-    "output setup": "output_setup",
-    "output hold": "output_hold",
-    "latch setup": "latch_setup",
-    "latch hold": "latch_hold",
-}
-
-#: Largest |path slack - aggregate WNS| (ns) still treated as "the same
-#: number": the aggregate comes from ``report_worst_slack_metric`` (printed
-#: to 6 decimals in the engine's time unit) while the path slack is the
-#: engine's own full-precision value in seconds.
-_SLACK_CONSISTENCY_TOL_NS = 1e-4
 
 #: The direction strings OpenSTA's ``get_property <port> direction`` may
 #: return that a per-port input/output delay may be applied to.
@@ -1167,6 +1143,10 @@ def _dispatch_sta(
         "hold_violation_count": corner_fields["hold_violation_count"],
         "worst_setup_path": corner_fields["worst_setup_path"],
         "worst_hold_path": corner_fields["worst_hold_path"],
+        # Additive field (issue #5424): the unreduced per-path-group rows
+        # behind the two records above -- how a caller reads a data-setup
+        # WNS when an async recovery check binds `worst_slack_ns`/`fmax_mhz`.
+        "worst_paths_by_group": corner_fields["worst_paths_by_group"],
         "clock_skew_ns": corner_fields["clock_skew_ns"],
         "estimated_power_mw": corner_fields["estimated_power_mw"],
         "power_basis": corner_fields["power_basis"],
@@ -1419,6 +1399,10 @@ def _run_corner_session(
         # hold-side path end this session found -- see `_worst_path_record`.
         "worst_setup_path": worst_setup_path,
         "worst_hold_path": worst_hold_path,
+        # Additive field (issue #5424): every per-path-group row behind
+        # those two records, unreduced -- the per-check-family slack the
+        # single records cannot carry. See `_worst_paths_by_group`.
+        "worst_paths_by_group": _worst_paths_by_group(completed.stdout or ""),
         "clock_skew_ns": round(clock_skew, 5) if clock_skew is not None else None,
         "estimated_power_mw": (
             round(power_w * 1000, 4) if power_w is not None else None
@@ -4452,130 +4436,6 @@ def _port_check_error_message(rows: list[tuple[str, str, str]]) -> str:
         only_side, "per-port I/O delay constraint(s) rejected"
     )
     return f"{prefix}: " + "; ".join(details)
-
-
-def _empty_path_record(status: str, reason: str | None) -> dict[str, Any]:
-    return {
-        "status": status,
-        "check_type": None,
-        "engine_check_role": None,
-        "startpoint": None,
-        "endpoint": None,
-        "slack_ns": None,
-        "consistent_with_aggregate": None,
-        "reason": reason,
-    }
-
-
-def _parse_worst_path_rows(
-    stdout: str,
-) -> tuple[dict[str, list[dict[str, Any]]] | None, str | None]:
-    """``({"max": [...], "min": [...]}, None)`` from
-    :func:`_worst_path_lines`' block, or ``(None, reason)`` when the block is
-    absent, reports an engine error, or carries a malformed ``PATH`` row.
-    Lines that are neither ``PATH`` nor ``ERROR`` rows (stray engine
-    warnings) are ignored -- they can never be mistaken for a path."""
-    block = _extract_block(stdout, _WORST_PATHS_BEGIN, _WORST_PATHS_END)
-    if block is None:
-        return None, "worst-path records absent from engine output"
-    rows: dict[str, list[dict[str, Any]]] = {"max": [], "min": []}
-    for line in block.splitlines():
-        if line.startswith("ERROR\t"):
-            return None, (
-                "engine path introspection failed: " + line[len("ERROR\t") :].strip()
-            )
-        if not line.startswith("PATH\t"):
-            continue
-        parts = line.split("\t")
-        if len(parts) != 6 or parts[1] not in rows or not all(parts[2:]):
-            return None, f"malformed worst-path record: {line!r}"
-        try:
-            slack_s = float(parts[3])
-        except ValueError:
-            return None, f"malformed worst-path slack: {line!r}"
-        if slack_s != slack_s or abs(slack_s) == float("inf"):
-            return None, f"non-finite worst-path slack: {line!r}"
-        rows[parts[1]].append(
-            {
-                "engine_check_role": parts[2],
-                "slack_ns": slack_s * 1e9,
-                "startpoint": parts[4],
-                "endpoint": parts[5],
-            }
-        )
-    return rows, None
-
-
-def _worst_path_record(
-    rows: list[dict[str, Any]], aggregate_ns: float | None
-) -> dict[str, Any]:
-    """The worst (minimum-slack) record among one side's per-group rows,
-    cross-checked against that side's aggregate WNS from the same session.
-
-    ``status``:
-
-    - ``"ok"`` -- a path was found and its slack equals the aggregate WNS
-      (within :data:`_SLACK_CONSISTENCY_TOL_NS`), or the aggregate was not
-      reported at all (``consistent_with_aggregate: null``).
-    - ``"no_paths"`` -- the engine found no constrained path on this side,
-      and the aggregate agrees (sentinel or absent). Identity fields null.
-    - ``"inconsistent"`` -- the path population and the aggregate WNS
-      disagree (no path but a real WNS, or a different slack). The record
-      is still the engine's real worst *found* path, but it must not be
-      read as the path that binds the aggregate.
-    """
-    aggregate_real = aggregate_ns is not None and abs(aggregate_ns) < 1e29
-    if not rows:
-        if aggregate_real:
-            record = _empty_path_record(
-                "inconsistent",
-                "engine reported no constrained path but an aggregate WNS of "
-                f"{aggregate_ns}",
-            )
-            record["consistent_with_aggregate"] = False
-            return record
-        return _empty_path_record("no_paths", None)
-    worst = min(rows, key=lambda row: row["slack_ns"])
-    role = worst["engine_check_role"]
-    record = {
-        "status": "ok",
-        "check_type": _CHECK_ROLE_TYPES.get(role, "unknown"),
-        "engine_check_role": role,
-        "startpoint": worst["startpoint"],
-        "endpoint": worst["endpoint"],
-        "slack_ns": round(worst["slack_ns"], 5),
-        "consistent_with_aggregate": None,
-        "reason": None,
-    }
-    if aggregate_ns is None:
-        return record
-    consistent = aggregate_real and (
-        abs(worst["slack_ns"] - aggregate_ns) <= _SLACK_CONSISTENCY_TOL_NS
-    )
-    record["consistent_with_aggregate"] = consistent
-    if not consistent:
-        record["status"] = "inconsistent"
-        record["reason"] = (
-            f"worst path slack {record['slack_ns']} ns differs from the "
-            f"aggregate WNS {aggregate_ns}"
-        )
-    return record
-
-
-def _worst_paths(
-    stdout: str, setup_ws: float | None, hold_ws: float | None
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    """``(worst_setup_path, worst_hold_path)`` for one session."""
-    rows, reason = _parse_worst_path_rows(stdout)
-    if rows is None:
-        return (
-            _empty_path_record("unavailable", reason),
-            _empty_path_record("unavailable", reason),
-        )
-    return (
-        _worst_path_record(rows["max"], setup_ws),
-        _worst_path_record(rows["min"], hold_ws),
-    )
 
 
 def _apply_port_record(

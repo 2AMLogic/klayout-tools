@@ -14,6 +14,11 @@ directory has its own README, start there.
 - [`critical-net-mom-fidelity/`](critical-net-mom-fidelity/) — measurement
   fixture grading `klt extract --critical-net`'s lateral-coupling capacitance
   against `klt mom`'s field solver (issue #978). See its README.
+- [`asap7-parallel-line-fidelity/`](asap7-parallel-line-fidelity/) —
+  measurement fixture grading `klt extract --deck asap7 --parasitics` against
+  `klt mom` on N parallel ASAP7 M2/M4 lines: capacitance and resistance, plus
+  a delay/energy circuit stage, with the cited-vs-assumed stack written out
+  (issue #5201). See its README.
 - [`design-centering/`](design-centering/) — a `klt design-centering` worked
   example: request, parameter map, and sized device (issue #924). See its
   README.
@@ -40,12 +45,25 @@ directory has its own README, start there.
   power-up-state example (`options.initial_state`).
 - [`kb/`](kb/) — knowledge-base worked examples (bandgap, LDO, oscillator,
   spiral inductor). See its README.
+- [`power-intent/`](power-intent/) — `klt power-intent` input: a flat
+  gate-level sky130 netlist with a power-gated domain whose only defect is one
+  unclamped domain output (`netlist.v`), the intent document declaring its
+  gated instances, clamp values, retained flop and wake sequence
+  (`intent.json`), and the tiny behavioural cell models those instances
+  resolve against (`cell_models.v`). `tests/test_power_intent.py` runs against
+  these three files; no README of its own.
 - [`signoff/`](signoff/) — a minimal, runnable block manifest for `klt
   signoff --manifest` (plus a one-block `--fleet` manifest), citing T1 items
   3 and 4 against real committed `klt drc`/`klt lvs` envelopes and leaving
   the rest visibly unmet; `generate.py` regenerates. See its README.
 - [`sim/`](sim/) — `klt sim` corner-matrix and Monte Carlo requests with
   their SPICE testbenches and corner lib; `generate.py` regenerates.
+- [`sim-batch/`](sim-batch/) — the same 5-process-corner ring-oscillator
+  matrix and testbench as [`sim-remote/`](sim-remote/), submitted to the EDA
+  batch fleet instead (`backend: "batch"` plus a placeholder `batch` submit
+  block), with the report slot deliberately left empty until a live fleet run
+  exists; `adaptive-search.py` is the sequential bounded-bisection campaign
+  recipe for the same backend. See its README.
 - [`sim-remote/`](sim-remote/) — the same sim matrix run on the local and
   remote backends, side by side. See its README.
 - [`size/`](size/) — a `klt size` gm/Id sizing request plus the tiny
@@ -54,6 +72,12 @@ directory has its own README, start there.
   `generate.py` regenerates both.
 - [`spec-review/`](spec-review/) — the spec-review skill applied to a draft
   block spec: input spec and resulting review. See its README.
+- [`wave/`](wave/) — `klt wave query` fixtures for
+  [the waveform-first debugging guide](../docs/guides/waveform-first-debugging.md):
+  a fixture-only, deliberately mutated copy of
+  [`functional-verification/modexp.v`](functional-verification/modexp.v) and
+  the two real cocotb/Icarus FST traces it and the unmutated RTL produce
+  (stuck-multiply and known-good). See its README.
 - [`yield/`](yield/) — a seeded 300-sample Monte Carlo campaign for `klt
   yield`, in both accepted input shapes (sample-set document and `klt sim`
   MC report) plus its spec limits; `generate.py` regenerates. See its README.

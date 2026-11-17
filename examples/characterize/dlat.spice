@@ -1,0 +1,22 @@
+* klt characterize worked example -- synthetic active-high D latch
+* (transparent while E is high; not a real PDK -- see generate.py).
+* Q = D while E is high, and holds the captured D once E falls.
+
+.subckt dlat_demo Q E D VDD VSS
+* enable phases: eb = !E, ep = E (buffered)
+MNe1 eb E VSS VSS nfet_demo w=1u l=0.15u
+MPe1 eb E VDD VDD pfet_demo w=2u l=0.15u
+MNe2 ep eb VSS VSS nfet_demo w=1u l=0.15u
+MPe2 ep eb VDD VDD pfet_demo w=2u l=0.15u
+* input transmission gate: D -> n, transparent while E is high
+MNi D ep n VSS nfet_demo w=1u l=0.15u
+MPi D eb n VDD pfet_demo w=2u l=0.15u
+* storage pair: nb = !n, Q = !nb = n
+MN1 nb n VSS VSS nfet_demo w=1u l=0.15u
+MP1 nb n VDD VDD pfet_demo w=2u l=0.15u
+MN2 Q nb VSS VSS nfet_demo w=2u l=0.15u
+MP2 Q nb VDD VDD pfet_demo w=4u l=0.15u
+* feedback transmission gate: Q -> n, closed while E is low
+MNf Q eb n VSS nfet_demo w=0.5u l=0.3u
+MPf Q ep n VDD pfet_demo w=1u l=0.3u
+.ends dlat_demo

@@ -66,9 +66,12 @@ def add_sim_parser(
             "submit several independent request files to the batch fleet in "
             "one invocation (issue #2869) instead of the single positional "
             "request: at most --max-in-flight run at once, the rest queue, "
-            "and one aggregate JSON envelope reports every request. Always "
-            "backend `batch`; never falls back to local ngspice. See "
-            "docs/cli/sim.md 'Submitting a set of requests'."
+            "and one aggregate JSON envelope reports every request. Each "
+            "member gets its own directory under -o named after the request "
+            "stem (a trailing `.request.json` is stripped); read "
+            "`requests[].report` from the envelope to locate a member's "
+            "report. Always backend `batch`; never falls back to local "
+            "ngspice. See docs/cli/sim.md 'Submitting a set of requests'."
         ),
     )
     sim_parser.add_argument(
@@ -129,7 +132,12 @@ def add_sim_parser(
         help=(
             "override where per-corner logs/rawfiles are written when the "
             "request sets options.keep_artifacts "
-            "(default: a `.klt/sim/` directory next to the request file)"
+            "(default: a `.klt/sim/` directory next to the request file). "
+            "With --batch-set, -o is instead the parent of one directory "
+            "per member, each named after its request's stem (a trailing "
+            "`.request.json` is stripped); `requests[].report` in the "
+            "aggregate envelope is the authoritative path to each member's "
+            "report. See docs/cli/sim.md 'Submitting a set of requests'."
         ),
     )
     sim_parser.add_argument(
@@ -210,8 +218,9 @@ def add_sim_parser(
             "shard the expanded corner/Monte-Carlo unit list across this "
             "many hosts and merge the per-shard reports (default: 1, or "
             "the request's `remote.hosts` field); overrides the request "
-            "field when given. Currently implemented for `local`/"
-            "`local-parallel` only -- see docs/cli/sim.md."
+            "field when given. `local`/`local-parallel` shard in-process, "
+            "`remote` provisions this many instances, `batch` submits one "
+            "fleet job per shard -- see docs/cli/sim.md 'Fleet sharding'."
         ),
     )
     sim_parser.add_argument(
@@ -349,8 +358,8 @@ def add_sim_parser(
             "also write the report envelope to PATH, byte-identical to "
             "`--format json` stdout; gzip-compressed (deterministic) when "
             "PATH ends `.gz`, plain indented JSON otherwise. Stdout is "
-            "unchanged (issue #2975). `klt yield` reads `.json.gz` "
-            "directly. See docs/cli/sim.md."
+            "unchanged (issue #2975). `klt yield` and `klt signoff` read "
+            "`.json.gz` directly. See docs/cli/sim.md."
         ),
     )
     sim_parser.add_argument(

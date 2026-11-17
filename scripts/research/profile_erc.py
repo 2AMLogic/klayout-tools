@@ -76,7 +76,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
-from klayout_tools import erc  # noqa: E402
+from klayout_tools import erc
 
 # Top-level helpers run_erc calls directly, outside the candidate walk.
 _REMAINDER_FUNCS = (

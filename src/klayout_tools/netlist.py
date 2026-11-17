@@ -48,10 +48,10 @@ scope-narrowing comment, 2026-10-01) are both now addressed, via #2680:
    (``**.subckt ...`` / ``**.ends``) and always appends a trailing ``.end`` --
    correct when the top sheet is a testbench, wrong when it is a reusable
    block meant to be ``.include``d elsewhere. ``block=True`` post-processes
-   the export: the first commented ``.subckt``/``.ends`` pair is uncommented
-   and the trailing ``.end`` is dropped, so the result is directly
-   ``.include``able without a duplicate ``.end`` terminating the including
-   deck early (:func:`apply_block_mode`).
+   the export: the commented ``.subckt``/``.ends`` pair is uncommented, the
+   cell's subcircuit parameters restored onto it (#5439), and the trailing
+   ``.end`` dropped, so the result is ``.include``able without a duplicate
+   ``.end`` terminating the including deck early (:func:`apply_block_mode`).
 5. **PDK-root disagreement between the schematic and simulation sides is
    silent** (edge #3). Addressed as a *consistency check*, not
    auto-generation: ``--pdk``/``--pdk-root`` resolve through
@@ -84,7 +84,14 @@ from .netlist_inputs import (
     split_inputs_record,
 )
 from .netlist_paths import _PATH_COMMENT_RE, postprocess_netlist
-from .netlist_pdk import _pdk_root_consistent, _rcfile_pdk_root, _with_symbol_path_env
+from .netlist_pdk import (
+    _pdk_env_note,
+    _pdk_root_consistent,
+    _rcfile_pdk_root,
+    _with_symbol_path_env,
+)
+from .netlist_port_order import port_order_drift_reason
+from .netlist_port_order import sibling_symbol as _sibling_symbol
 
 #: Payload schema version (``docs/json-contract.md``; versioned per command).
 SCHEMA_VERSION = 1
@@ -588,6 +595,7 @@ def _check_result(
     ignore_comments: bool = False,
     xschem_version: str | None = None,
     inputs: dict[str, str | None] | None = None,
+    sibling_symbol: str | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """``check=True``'s verdict: does the committed netlist at ``output``
     still match what the schematics produce?
@@ -616,7 +624,9 @@ def _check_result(
     When the only difference is the port order of one or more electrical
     ``.subckt`` cards, ``subckt_port_order`` names them and ``reason`` says so
     (issue #4524); the status stays ``"drifted"``. ``xschem_version`` is the
-    local xschem's version, quoted in that reason.
+    local xschem's version and ``sibling_symbol`` the symbol governing a
+    ``--block`` top sheet's port order, both quoted in that reason
+    (:func:`port_order_drift_reason`, issue #5473).
 
     ``inputs`` (issue #4945) are the fresh generation inputs; the committed
     side's record is the ``** klt-netlist-inputs:`` line :func:`run_netlist`
@@ -680,14 +690,7 @@ def _check_result(
     diff, truncated = _unified_diff(committed, fresh_data, output)
     port_order = _subckt_port_order_drift(committed, fresh_data, ignore_comments)
     if port_order:
-        names = ", ".join(entry["subckt"] for entry in port_order)
-        reason = (
-            f"the .subckt port order of {names} differs from the committed "
-            f"netlist (local xschem {xschem_version or 'version unknown'}); "
-            "different xschem builds order ports differently -- recheck "
-            "positional subckt-call callers and LVS references before "
-            "re-running without --check to refresh it"
-        )
+        reason = port_order_drift_reason(port_order, xschem_version, sibling_symbol)
         reason += f"; {inputs_reason}"
     else:
         reason = (
@@ -805,22 +808,10 @@ def _unevaluated_expr_warnings(
     ]
 
 
-def _pdk_env_note(rcfile: str | None, env: dict[str, str] | None) -> str:
-    """Name what klt can observe about xschem's PDK setup, for error text."""
-    if env is not None:
-        seen = f"PDK_ROOT={env['PDK_ROOT']} PDK={env['PDK']} (exported by klt)"
-    else:
-        root = os.environ.get("PDK_ROOT")
-        variant = os.environ.get("PDK")
-        seen = (
-            f"PDK_ROOT={root or 'not set'} PDK={variant or 'not set'} "
-            "(inherited, not set by klt)"
-        )
-    return f"xschem ran with --rcfile {rcfile or 'none'} and {seen}. "
-
-
 def _check_no_unresolved_symbol(
-    data: bytes, rcfile: str | None = None, env: dict[str, str] | None = None
+    data: bytes,
+    rcfile: str | None = None,
+    exported_pdk_env: dict[str, str] | None = None,
 ) -> None:
     """Fail when xschem could not resolve a symbol (issue #3964).
 
@@ -837,7 +828,7 @@ def _check_no_unresolved_symbol(
             f"the netlist has an unresolved symbol at line {number}: "
             f"{snippet!r}. xschem could not find a symbol an instance refers "
             "to, so the device is missing from the netlist and none was "
-            f"written. {_pdk_env_note(rcfile, env)}"
+            f"written. {_pdk_env_note(rcfile, exported_pdk_env)}"
             "Fix the symbol path or library.",
             code=UNRESOLVED_SYMBOL_CODE,
         )
@@ -941,10 +932,10 @@ def run_netlist(
     (with a capped unified diff under ``drift``). This is the staleness gate
     a repo runs in CI over a committed netlist.
 
-    ``block=True`` post-processes the export into an includable block (issue
-    #2680, edge 1): see :func:`apply_block_mode`. The transform runs before
-    ``check``'s comparison/diff and before the normal write, so both modes
-    operate on the block-shaped netlist, not xschem's raw testbench export.
+    ``block=True`` post-processes the export into an includable block (issues
+    #2680 edge 1, #5439): see :func:`apply_block_mode`. The transform runs
+    before ``check``'s comparison/diff and before the normal write, so both
+    modes operate on the block-shaped netlist, not xschem's raw export.
 
     ``allow_unevaluated_expr=True`` downgrades the unevaluated-``expr()`` gate
     (issue #4305) to a ``warnings`` entry in the payload, for callers that
@@ -998,6 +989,9 @@ def run_netlist(
                 "PDK_ROOT": pdk_block["root"],
                 "PDK": pdk_block["variant"],
             }
+        # Only a resolved PDK means klt exported PDK_ROOT/PDK; --symbol-path
+        # alone builds an env that merely inherits them (issue #5441).
+        exported_pdk_env = xschem_env
         xschem_env = _with_symbol_path_env(xschem_env, resolved_symbol_path)
         exit_status, stdout, stderr, duration_s = _launch_xschem(
             argv, timeout_s, xschem_env
@@ -1021,7 +1015,7 @@ def run_netlist(
         warnings = _unevaluated_expr_warnings(
             fresh_data, version, allow_unevaluated_expr
         )
-        _check_no_unresolved_symbol(fresh_data, rcfile, xschem_env)
+        _check_no_unresolved_symbol(fresh_data, rcfile, exported_pdk_env)
 
         payload: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
@@ -1059,6 +1053,7 @@ def run_netlist(
                 ignore_comments,
                 xschem_version=version,
                 inputs=inputs,
+                sibling_symbol=_sibling_symbol(schematic) if block else None,
             )
             nb = _netlist_block(None, written_data)
             payload.update(status=status, netlist=nb, drift=drift)

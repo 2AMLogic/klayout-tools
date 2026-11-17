@@ -17,6 +17,12 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import klayout.db as kdb
 
+from ._common_params import (
+    declare_cut_and_metal_params,
+    declare_metal_label_present,
+    declare_tap_and_well_layers,
+)
+
 
 def _build_well_island_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
     """Build the ``well_island`` reference generator's PCell -- an isolated well
@@ -177,24 +183,8 @@ def _build_well_island_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "net is equipotential and is not isolated from",
                 default=[],
             )
-            self.param(
-                "tap_layer",
-                self.TypeLayer,
-                "Substrate/well tap drawing layer",
-                default=kdb.LayerInfo(0, 0),
-            )
-            self.param(
-                "contact_layer",
-                self.TypeLayer,
-                "Contact drawing layer",
-                default=kdb.LayerInfo(0, 0),
-            )
-            self.param(
-                "metal_layer",
-                self.TypeLayer,
-                "Local routing metal drawing layer",
-                default=kdb.LayerInfo(0, 0),
-            )
+            declare_tap_and_well_layers(self, kdb)
+            declare_cut_and_metal_params(self, kdb)
             self.param(
                 "metal_label_layer",
                 self.TypeLayer,
@@ -202,18 +192,7 @@ def _build_well_island_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "metal_label_present)",
                 default=kdb.LayerInfo(0, 0),
             )
-            self.param(
-                "metal_label_present",
-                self.TypeBoolean,
-                "Whether metal_label_layer is a real label layer for the resolved PDK",
-                default=False,
-            )
-            self.param(
-                "well_layer",
-                self.TypeLayer,
-                "Well drawing layer (only used when well_present)",
-                default=kdb.LayerInfo(0, 0),
-            )
+            declare_metal_label_present(self)
             self.param(
                 "well_present",
                 self.TypeBoolean,
@@ -249,26 +228,6 @@ def _build_well_island_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Harness-resolved well enclosure actually drawn (see "
                 "_well_island_isolation)",
                 default=WELL_ENCLOSURE_MARGIN_UM,
-            )
-            # Fixed drawn side of every cut on contact_layer (issue #2585) --
-            # harness-computed by `_cut_fixed_size_um` from the resolved PDK
-            # family and layer. `0.0` (no upper size bound) leaves the cuts
-            # exactly as laid out; see `gen._clamp_cut_boxes`.
-            self.param(
-                "contact_fixed_size_um",
-                self.TypeDouble,
-                "Fixed drawn side (um) every cut on contact_layer is clamped "
-                "down to on the resolved PDK family -- 0.0 leaves the "
-                "generator's own cut size unchanged",
-                default=0.0,
-            )
-            self.param(
-                "mfg_grid_um",
-                self.TypeDouble,
-                "Manufacturing grid (um) every cut on contact_layer is "
-                "snapped onto (issue #2648) -- 0.0 leaves cut positions "
-                "unchanged",
-                default=0.0,
             )
 
         def display_text_impl(self) -> str:

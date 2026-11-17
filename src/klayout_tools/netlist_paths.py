@@ -7,6 +7,7 @@ import subprocess
 from typing import Any
 
 from .netlist_block import apply_block_mode, space_separate_subckt_ports
+from .netlist_port_order import with_port_order
 
 #: xschem writes the absolute path of every schematic and symbol it expands
 #: into a SPICE export as a comment line (``** sch_path: /abs/x.sch``,
@@ -93,10 +94,18 @@ def postprocess_netlist(
     data: bytes, *, block: bool, relative_paths: bool, schematic: str
 ) -> tuple[bytes, dict[str, Any] | None]:
     """Apply the post-xschem netlist rewrites (block mode, port spacing,
-    ``--relative-paths``); returns ``(data, block_info)``."""
+    ``--relative-paths``); returns ``(data, block_info)``.
+
+    ``schematic`` reaches block mode as well as ``--relative-paths``: the
+    cell's subcircuit parameters live in its symbol attributes, not in the
+    netlist text (issue #5439), and so does the port order of the restored
+    ``.subckt`` header (:func:`with_port_order`, issue #5473)."""
     block_info: dict[str, Any] | None = None
     if block:
-        data, block_info = apply_block_mode(data)
+        data, block_info = apply_block_mode(data, schematic=schematic)
+        block_info = with_port_order(
+            block_info, data.decode("utf-8", errors="replace"), schematic
+        )
     data = space_separate_subckt_ports(data)
     if relative_paths:
         data = relativize_schematic_paths(data, schematic)

@@ -1,13 +1,13 @@
-"""Define ``klt characterize``: SPICE-driven NLDM timing characterization of
-one standard cell at one PVT corner (issue #2502, split from #2498).
+"""Define ``klt characterize``: SPICE-driven NLDM timing characterization of one
+standard cell (or a batch) at one PVT corner (issue #2502, split from #2498).
 
 ``klt`` could already *consume* a Liberty model from three verbs
 (``synthesize``, ``place-and-route``, ``post_route_sta``, all through
 ``pdk_cells.resolve_liberty_for_cell_library``) and ``native/statime`` could
-*parse* one, but nothing in the tree produced one -- characterization was
-the last stage of the cell flow with no open answer. This module is that
-answer's first increment: one cell, one corner, delay and transition time
-only.
+*parse* one, but nothing in the tree produced one -- characterization was the
+last stage of the cell flow with no open answer. This module is that answer:
+one corner, delay, transition time, internal energy and -- for a sequential
+cell -- clock/enable-to-output and setup/hold constraint arcs.
 
 Pure library: :func:`run_characterize` returns plain Python data (a
 JSON-serialisable ``dict``) and never prints -- serialisation and
@@ -26,18 +26,18 @@ hand-rolled-simulation-grid pattern ``klt sim``'s corner matrix exists to
 replace; as written, a 7x7 grid of a two-input cell is a single-corner,
 single-unit ``local``-backend run.
 
-Scope of this increment -- what the emitted ``.lib`` deliberately does
-**not** contain (issue #2503 owns the first two):
+Scope -- what the emitted ``.lib`` deliberately does **not** contain:
 
-- no power/energy tables (``rise_power``/``fall_power``/``leakage_power``);
-- one cell per invocation (no multi-cell batch mode), and one corner per
-  invocation (no multi-corner ``.lib``);
-- no sequential-cell constraint arcs (``setup``/``hold``/``recovery``): a
-  cell whose output ``function`` references anything that is not a declared
-  input pin is refused with a named error, never characterized as if it were
-  combinational (see :mod:`klayout_tools.characterize_arcs`);
-- no ``when``-qualified arc/power splitting, no ``bus``/``bundle`` pins, no
-  input-pin (hidden) internal power.
+- one corner per invocation (no multi-corner ``.lib``);
+- no ``recovery``/``removal`` or async set/reset arcs, no ``ff``/``latch``
+  **state** groups, no latch time borrowing or min-pulse-width;
+- no ``when``-qualified splitting, ``bus``/``bundle`` pins or hidden input-pin power.
+
+Power/energy tables (issue #2503) and batch mode have since shipped. A sequential cell
+is characterized when it declares ``cell.clock_pin`` (edge-triggered: clock-to-output,
+issue #4755, and setup/hold for ``cell.constrained_pins``, issue #4756) or
+``cell.enable_pin`` (latch: transparent, enable-to-output and setup/hold arcs, issue
+#5521); with neither it is refused by name (see :mod:`klayout_tools.characterize_arcs`).
 
 Input **pin capacitance is measured** (issue #2512) -- one extra probe
 instance per input pin on the same deck, emitted as the pin's
@@ -84,9 +84,9 @@ from .characterize_instances import (
     _capacitance_instance_lines,
     _capacitance_side_state,
     _full_side_state,
+    _instance_lines,
     _leakage_instance_lines,
     _leakage_states,
-    _metered_rail_nodes,
     _rail_nodes,
 )
 from .characterize_leg import best_effort_pdk, resolve_resume, run_sim_leg
@@ -95,8 +95,7 @@ from .characterize_pool import run_cells_partitioned
 from .characterize_probe import probe_netlist_cells as _probe_netlist_cells
 from .characterize_sequential import (
     SequentialSpecError,
-    clock_pwl_line,
-    data_pwl_line,
+    derive_latch_arcs,
     derive_sequential_arcs,
     resolve_sequential,
     stimulus_schedule,
@@ -577,7 +576,9 @@ def _resolve_cell_spec(
     pins = _resolve_pins(spec, subckt, where)
     power = _resolve_power_pins(spec, terminals, pins, where)
     try:
-        clock_pin, clock_edge, static_inputs = resolve_sequential(spec, pins, where)
+        clock_pin, clock_edge, static_inputs, latch = resolve_sequential(
+            spec, pins, where
+        )
     except SequentialSpecError as exc:
         raise CharacterizeError(str(exc)) from exc
 
@@ -618,6 +619,10 @@ def _resolve_cell_spec(
         "where": where,
         "clock_pin": clock_pin,
         "clock_edge": clock_edge,
+        # True when `clock_pin` came from `enable_pin`: the cell is a
+        # level-sensitive latch, `clock_edge` is the enable's opening edge,
+        # and setup/hold reference its closing edge (issue #5521).
+        "latch": latch,
         "static_inputs": static_inputs,
         "constrained_pins": constrained_pins,
     }
@@ -943,8 +948,9 @@ def _resolve_arcs_for(
     if override is not None:
         return _arcs_from_request(override, cell, where)
     if cell["clock_pin"] is not None:
+        derive = derive_latch_arcs if cell["latch"] else derive_sequential_arcs
         try:
-            return derive_sequential_arcs(cell)
+            return derive(cell)
         except SequentialSpecError as exc:
             raise CharacterizeError(str(exc)) from exc
 
@@ -1329,84 +1335,6 @@ def _build_stimulus_plan(
             "step_ns": options["tran_step_ns"],
         },
     }
-
-
-def _instance_lines(
-    *,
-    tag: str,
-    cell: dict[str, Any],
-    arc: DerivedArc,
-    side_state: tuple[tuple[str, bool], ...],
-    rail_nodes: dict[str, str],
-    vdd: float,
-    ramp_ns: float,
-    load_pf: float,
-    rise_start: float,
-    fall_start: float,
-    clock_times: dict[str, float] | None = None,
-    clock_edge: str = "rising",
-) -> list[str]:
-    side_map = dict(side_state)
-    low_map = dict(arc.fall_side_inputs)
-    node_of: dict[str, str] = {}
-    data_sources: list[str] = []
-    for pin in cell["pins"]:
-        name = pin["name"]
-        if pin["direction"] == "output":
-            node_of[name] = f"o_{tag}_{slug(name)}"
-        elif name == arc.related_pin:
-            node_of[name] = f"i_{tag}"
-        elif clock_times is not None and low_map.get(name, False) != side_map[name]:
-            node_of[name] = f"d_{tag}_{slug(name)}"
-            data_sources.append(
-                data_pwl_line(
-                    f"V{tag}d_{slug(name)}",
-                    node_of[name],
-                    low=low_map[name],
-                    high=side_map[name],
-                    vdd=vdd,
-                    ramp_ns=ramp_ns,
-                    times=clock_times,
-                )
-            )
-        else:
-            node_of[name] = "vdd" if side_map[name] else "0"
-
-    metered = _metered_rail_nodes(tag, cell, rail_nodes)
-    nodes = [
-        node_of.get(terminal) or metered[terminal] for terminal in cell["terminals"]
-    ]
-    if clock_times is None:
-        source = (
-            f"V{tag} i_{tag} 0 PWL(0 0 "
-            f"{spice_number(rise_start)}n 0 "
-            f"{spice_number(rise_start + ramp_ns)}n {spice_number(vdd)} "
-            f"{spice_number(fall_start)}n {spice_number(vdd)} "
-            f"{spice_number(fall_start + ramp_ns)}n 0)"
-        )
-    else:
-        source = clock_pwl_line(
-            f"V{tag}",
-            f"i_{tag}",
-            vdd=vdd,
-            ramp_ns=ramp_ns,
-            times=clock_times,
-            edge=clock_edge,
-        )
-    lines = [
-        source,
-        *data_sources,
-        # 0 V ammeters: i(Vpd) is the current the supply delivers INTO the
-        # cell's vdd pin, i(Vpg) the current flowing OUT of its gnd pin.
-        f"Vpd{tag} vdd pd_{tag} DC 0",
-        f"Vpg{tag} pg_{tag} 0 DC 0",
-        f"X{tag} {' '.join(nodes)} {cell['subckt']}",
-    ]
-    for output in cell["output_pins"]:
-        lines.append(
-            f"C{tag}_{slug(output)} {node_of[output]} 0 {spice_number(load_pf)}p"
-        )
-    return lines
 
 
 # --------------------------------------------------------------------------- #

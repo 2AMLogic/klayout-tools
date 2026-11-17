@@ -111,7 +111,7 @@ from . import (
     sim_staging,
 )
 from .pdk_families import family_subset, pdk_variant_family
-from .pdk_store import store_pdk_stamp
+from .pdk_store import client_pdk_stamp
 from .remote_launcher import (
     RemoteLaunchError,
     _signal_handlers_install,
@@ -126,8 +126,10 @@ from .sim_batch_features import (
     refusal_diagnostic,
 )
 from .sim_batch_hints import attribute_modelname, hint_existing_fatal, with_runner_hints
-from .sim_batch_reattach import (  # noqa: F401
+from .sim_batch_reattach import (
     _RESUME_INTERRUPTED_GRACE_S,
+    _resume_attach_config,
+    _resume_or_submit_one_job,
     _try_reattach_shard,
 )
 from .sim_batch_warn import warn_over_serial_bound_once
@@ -146,9 +148,10 @@ if TYPE_CHECKING:
 
 # Contract block moved to sim_batch_contract (issue #4065); re-exported so every
 # existing ``sim_batch`` import path keeps working.
-from .sim_batch_contract import (  # noqa: E402, F401
+from .sim_batch_contract import (  # noqa: F401
     _ATTACH_UNSTARTED_GRACE_S,
     _BATCH_AWS_TIMEOUT_S,
+    _BATCH_INPUTS_TIMEOUT_S,
     _BATCH_JOB_FAILURE_TAIL_BYTES,
     _BATCH_JOB_OVERHEAD_S,
     _BATCH_LAUNCH_TIMEOUT_S,
@@ -209,12 +212,12 @@ from .sim_batch_contract import (  # noqa: E402, F401
     BatchPollTimeout,
     _batch_job_tool_label,
 )
-from .sim_batch_contract_jobspec import (  # noqa: E402, F401
+from .sim_batch_contract_jobspec import (
     _build_batch_job_spec,
     _default_batch_job_timeout_s,
     _default_batch_poll_timeout_s,
 )
-from .sim_batch_contract_preflight import (  # noqa: E402, F401
+from .sim_batch_contract_preflight import (  # noqa: F401
     _feature_gate_shell,
     _job_stderr_capture_prefix,
     _mandatory_feature_gate_shell,
@@ -223,7 +226,7 @@ from .sim_batch_contract_preflight import (  # noqa: E402, F401
     assess_remote_runner_features,
     remote_feature_preflight,
 )
-from .sim_batch_contract_spec import (  # noqa: E402, F401
+from .sim_batch_contract_spec import (  # noqa: F401
     _MANDATORY_RUNNER_FEATURES,
     _RELEASED_FEATURE_DETECTORS,
     _RUNNER_REQUEST_FEATURES,
@@ -242,7 +245,7 @@ from .sim_batch_contract_spec import (  # noqa: E402, F401
     _uses_option,
     _uses_process_section_objects,
 )
-from .sim_batch_contract_worker import (  # noqa: E402, F401
+from .sim_batch_contract_worker import (  # noqa: F401
     _WORKER_CAPTURE_PROGRAM,
     BATCH_WORKER_ENVIRONMENT_FILENAME,
     WORKER_CAPTURE_BANNER_MAX,
@@ -1399,6 +1402,13 @@ def submit_job(
     the submission atomic from the fleet's point of view -- a launch can
     never observe a job spec whose inputs are still uploading.
 
+    **One transfer for the inputs (issue #5539).** They are materialised
+    into a local ``inputs/`` tree (:meth:`BatchJobInput.materialize`) and
+    sent by one recursive copy, not one process per object: that
+    per-object latency and process spawn is what made a deck-list grid
+    spend over three hours on 17,000 serial objects. The keys are
+    unchanged (``<prefix>/inputs/<name>``, subdirectories included).
+
     ``progress`` (issue #2992) prints the job id on stderr before uploading;
     a verb whose stderr carries its error envelope (``klt netlist``) passes
     ``False``.
@@ -1410,39 +1420,31 @@ def submit_job(
             f"klt: batch job {job_id} submitting to {report_job_uri(config, job_id)}"
         )
     with tempfile.TemporaryDirectory(prefix="klt-batch-") as staging:
+        inputs_root = os.path.join(staging, "inputs")
         for item in spec.inputs:
-            local_path = item.local_path
-            if local_path is None:
-                local_path = os.path.join(staging, item.name)
-                with open(local_path, "w", encoding="utf-8") as handle:
-                    handle.write(item.content or "")
+            try:
+                item.materialize(inputs_root)
+            except OSError as exc:
+                # One error type for every input-upload failure.
+                raise BatchError(
+                    f"could not stage the {item.label} input for upload: {exc}"
+                ) from exc
+        if spec.inputs:
+            copy = ("s3", "cp", inputs_root, f"{prefix}/inputs", "--recursive")
             _run_checked(
                 run,
-                _aws_argv(
-                    config,
-                    "s3",
-                    "cp",
-                    local_path,
-                    f"{prefix}/inputs/{item.name}",
-                    "--only-show-errors",
-                ),
-                _BATCH_AWS_TIMEOUT_S,
-                f"aws s3 cp ({item.label} input)",
+                _aws_argv(config, *copy, "--only-show-errors"),
+                _BATCH_INPUTS_TIMEOUT_S,
+                f"aws s3 cp ({len(spec.inputs)} input(s))",
                 redact=config.bucket,
             )
         job_json_path = os.path.join(staging, "job.json")
         with open(job_json_path, "w", encoding="utf-8") as handle:
             json.dump(spec.to_job_json(), handle)
+        spec_copy = ("s3", "cp", job_json_path, f"{prefix}/job.json")
         _run_checked(
             run,
-            _aws_argv(
-                config,
-                "s3",
-                "cp",
-                job_json_path,
-                f"{prefix}/job.json",
-                "--only-show-errors",
-            ),
+            _aws_argv(config, *spec_copy, "--only-show-errors"),
             _BATCH_AWS_TIMEOUT_S,
             "aws s3 cp (job.json)",
             redact=config.bucket,
@@ -1576,7 +1578,7 @@ def _remote_state_note(config: BatchConfig, job_id: str) -> str:
     collect it) or is still ``running`` / ``unknown`` (status unreadable)."""
     try:
         status = _read_status(config, job_id, _run_subprocess)
-    except Exception:  # noqa: BLE001 - a diagnostic probe must never raise
+    except Exception:  # - a diagnostic probe must never raise
         status = None
     state = status.get("state") if status else None
     label = {"done": "finished"}.get(str(state), str(state)) if state else "unknown"
@@ -1987,25 +1989,14 @@ def _bounded_str(value: Any, limit: int = WORKER_CAPTURE_STR_MAX) -> str | None:
 
 def _client_pdk_stamp(request: dict[str, Any] | None) -> dict[str, Any] | None:
     """The submitter's local view of the requested PDK variant's stamp (``SOURCES``,
-    else bundle ``.pdk-store.json``); ``None`` when nothing comparable is readable."""
+    else bundle ``.pdk-store.json``, #5318); ``None`` when nothing comparable is
+    readable. The root is ``models.pdk_root``, else ``$PDK_ROOT``, else the install
+    the PDK search order resolves -- the one ``provenance.pdk`` names (#5474), so a
+    host that pins neither still gets a comparison rather than
+    ``client_stamp_unavailable`` (``models.pdk_root`` is refused for batch)."""
     models = (request or {}).get("models") or {}
-    variant = models.get("pdk")
     root = models.get("pdk_root") or os.environ.get("PDK_ROOT")
-    if not (isinstance(variant, str) and variant and isinstance(root, str) and root):
-        return None
-    try:
-        with open(os.path.join(root, variant, "SOURCES"), "rb") as handle:
-            text = handle.read(16385)[:16384].decode("utf-8", "replace")
-    except OSError:
-        return store_pdk_stamp(variant, os.path.join(root, variant))  # #5318
-    normalized = "\n".join(
-        line.rstrip() for line in text.replace("\r\n", "\n").strip().split("\n")
-    )
-    return {
-        "variant": variant,
-        "stamp_scheme": "sources-sha256",
-        "stamp_sha256": hashlib.sha256(normalized.encode("utf-8")).hexdigest(),
-    }
+    return client_pdk_stamp(models.get("pdk"), root)
 
 
 def _compare_pdk_stamps(
@@ -3639,14 +3630,13 @@ def _run_batch(
                 **_feature_diagnostic_field(config),
             }
         return corners, engine_version, environment
-    resume_job_id = sim_batch_receipt.resumable_job_id(
-        artifacts_dir, request, len(corner_points), checkpoint is not None
-    )
     try:
-        corners, engine_version, environment = _run_batch_job(
+        corners, engine_version, environment = _resume_or_submit_one_job(
             config=config,
-            job_id=resume_job_id or new_job_id(),
-            attach=resume_job_id is not None,
+            resume_grace_s=_RESUME_INTERRUPTED_GRACE_S,
+            resume_job_id=sim_batch_receipt.resumable_job_id(
+                artifacts_dir, request, len(corner_points), checkpoint is not None
+            ),
             corner_points=corner_points,
             netlist_path=netlist_path,
             timeout_s=timeout_s,
@@ -4019,13 +4009,12 @@ class _BatchFleetRun:
             else self.artifacts_dir
         )
         shard_config = self.shard_config()
-        if resumed and shard_config.interrupted_grace_s > 0:
+        if resumed:
             # A recorded job still ``interrupted`` on resume already waited out
             # the full grace in the prior run: surface it after ~one poll so
             # ``_try_reattach_shard`` can submit that shard afresh (issue #5371).
-            # ``0`` (grace disabled by the request) is left unbounded.
-            shard_config = replace(
-                shard_config, interrupted_grace_s=_RESUME_INTERRUPTED_GRACE_S
+            shard_config = _resume_attach_config(
+                shard_config, _RESUME_INTERRUPTED_GRACE_S
             )
         try:
             return _run_batch_job(

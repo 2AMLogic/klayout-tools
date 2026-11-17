@@ -50,7 +50,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import sim_supply_relative
+from . import sim_supply_relative, sim_window
 from ._jsonnum import is_number
 from .sim_crossings_reduce import reduce_crossings, validate_reduce
 from .sim_errors import SimError
@@ -114,8 +114,8 @@ def validate_crossings_spec(name: Any, body: Any) -> None:
         )
     _validate_max(name, body.get("max"))
     validate_reduce(name, body.get("reduce"))
-    start = _window_bound(name, body, "from")
-    stop = _window_bound(name, body, "to")
+    start = sim_window.window_bound(name, body, "from", form="crossings")
+    stop = sim_window.window_bound(name, body, "to", form="crossings")
     if start is not None and stop is not None and stop < start:
         raise SimError(
             f"measurement '{name}': crossings.to ({stop!r} s) is before "
@@ -164,7 +164,9 @@ def _validate_sampled_offset(name: Any, level: dict[str, Any]) -> None:
             '"sample_at" and "offset", e.g. {"sample_at": "50n", '
             f'"offset": -0.9}} (got keys {sorted(level)})'
         )
-    _window_bound(name, level, "sample_at", label="crossings.level.sample_at")
+    sim_window.window_bound(
+        name, level, "sample_at", form="crossings", field="level.sample_at"
+    )
     offset = level["offset"]
     if not is_number(offset) or not math.isfinite(offset):
         raise SimError(
@@ -221,30 +223,6 @@ def _validate_max(name: Any, value: Any) -> None:
             f"[1, {MAX_CROSSINGS_CAP}] (got {value!r}); omit it for the "
             f"default of {DEFAULT_MAX_CROSSINGS}"
         )
-
-
-def _window_bound(
-    name: Any, body: dict[str, Any], key: str, *, label: str | None = None
-) -> float | None:
-    """``crossings.from``/``.to`` in seconds: a number, or a SPICE time
-    literal such as ``"10n"``. ``None`` when absent."""
-    from .sim import _parse_spice_seconds
-
-    raw = body.get(key)
-    if raw is None:
-        return None
-    seconds: float | None = None
-    if is_number(raw):
-        seconds = float(raw)
-    elif isinstance(raw, str):
-        seconds = _parse_spice_seconds(raw)
-    if seconds is None or not math.isfinite(seconds):
-        raise SimError(
-            f"measurement '{name}': {label or 'crossings.' + key} must be a "
-            "time in seconds "
-            f'-- a number or a SPICE time literal such as "10n" (got {raw!r})'
-        )
-    return seconds
 
 
 def validate_crossings_context(
@@ -382,7 +360,9 @@ def _resolve_sampled_offset(
     """``signal(sample_at) + offset``, the sample linearly interpolated between
     its two bracketing points. Raises ``ValueError`` (message = the
     measurement diagnostic) when ``sample_at`` is outside the simulated range."""
-    at = _window_bound(name, level, "sample_at")
+    at = sim_window.window_bound(
+        name, level, "sample_at", form="crossings", field="level.sample_at"
+    )
     assert at is not None  # validated as required before any run
     count = min(len(scale), len(values))
     if count == 0 or not scale[0] <= at <= scale[count - 1]:
@@ -479,8 +459,8 @@ def _extract_one(
         [point[1] for point in points],
         resolved_level if resolved_level is not None else float(raw_level),
         edge=body.get("edge", "rise"),
-        start=_window_bound(name, body, "from"),
-        stop=_window_bound(name, body, "to"),
+        start=sim_window.window_bound(name, body, "from", form="crossings"),
+        stop=sim_window.window_bound(name, body, "to", form="crossings"),
         max_count=body.get("max") or DEFAULT_MAX_CROSSINGS,
     )
     outcome.resolved_level = resolved_level
