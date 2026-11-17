@@ -3501,7 +3501,10 @@ is host- and scrub-shape-specific and never verdict-bearing. The file name
 keeps the identity check — this verb writes to a fixed `.klt/place-and-route/`
 directory under names derived from the top module, so a renamed artifact, or
 one going `null` ↔ path (missing or newly appearing), still reports
-`"drifted"`.
+`"drifted"`. Message prose is not reduced, so it carries no host path: the
+`power.placed.unavailable_reason` strings that name a DEF (and the
+`warnings[]` that quote them) use its file name only (issue #6146), so a
+lint-clean report is not made to drift by prose.
 
 **`--rerun` overwrites this request's own artifacts.** Unlike `klt
 synthesize`'s retained per-`run_id` directories, the output directory is

@@ -5041,6 +5041,40 @@ def test_power_audit_specialnets_count_must_match_its_header():
     assert power_audit.parse_def_special_nets(miscounted) is None
 
 
+def test_power_audit_unavailable_prose_embeds_file_name_not_host_path(tmp_path):
+    """Issue #6146: ``unavailable_reason`` and the ``warnings[]`` that quote
+    it must name the DEF by file name, never its absolute path, so a lint-clean
+    (path-scrubbed) committed report still matches under ``--check --rerun``.
+    The ``def_path`` *field* keeps the full path (the path-field scrub handles
+    it)."""
+    unreadable = str(tmp_path / "gone.def")  # never written
+    truncated = _write(tmp_path / "truncated.def", _TRUNCATED_SPECIALNETS_DEF)
+    no_components = _write(tmp_path / "empty.def", "VERSION 5.8 ;\nEND DESIGN\n")
+
+    for def_path in (unreadable, truncated, no_components):
+        placed = power_audit.audit_power_delivery(
+            def_path=def_path,
+            unavailable_reason=None,
+            tapcell_master=None,
+            endcap_master=None,
+            filler_masters=(),
+            power_net="VPWR",
+            ground_net="VGND",
+            expect_fillers=False,
+        )
+        assert placed["evidence"] == "unavailable"
+        assert placed["def_path"] == def_path
+        name = os.path.basename(def_path)
+        prose = [placed["unavailable_reason"]]
+        for requested in (True, False):
+            prose += power_audit.power_delivery_warnings(
+                placed, power_requested=requested
+            )
+        for text in prose:
+            assert str(tmp_path) not in text, text
+        assert f"'{name}'" in placed["unavailable_reason"]
+
+
 def test_power_audit_truncated_specialnets_grades_unavailable_not_complete(tmp_path):
     """End to end: the truncated DEF above must not satisfy the
     complete-grid gate. Every count is `null`, `status` is `"unknown"`,

@@ -2696,7 +2696,7 @@ def _add_flow_verify_args(
             "provenance.klt_version/klayout_version/pdk.version, "
             "engine_version, and run-scoped bookkeeping (see "
             f"{docs}). Requires --check; a clean error (exit 1) otherwise"
-            + (f" {rerun_extra}" if rerun_extra else "")
+            + (f". {rerun_extra}" if rerun_extra else "")
         ),
     )
 
