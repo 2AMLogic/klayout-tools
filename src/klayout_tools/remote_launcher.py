@@ -690,11 +690,11 @@ BUILD_KLT_VERSION_MARKER = "klt-remote-sim-ami-klt-version="
 
 def _manifest_runner_field(image: dict[str, Any], key: str) -> str | None:
     """A manifest entry's optional runner-identity field (``klt_version`` /
-    ``klt_ref``, issue #2851), or ``None`` -- explicitly *unknown* -- when the
-    entry predates the field or carries something unusable. A malformed
-    ``klt_version`` is unknown rather than an error: it only ever feeds the
-    batch backend's advisory pre-launch check, which must fall back to the
-    runner-side preflight instead of refusing on a value it cannot read."""
+    ``klt_ref``, issue #2851; ``ngspice_version`` / ``pdk_snapshot``, issue
+    #5851), or ``None`` -- explicitly *unknown* -- for a legacy or unusable
+    entry. A malformed ``klt_version`` is unknown rather than an error: it
+    only ever feeds the batch backend's advisory pre-launch check, which
+    must fall back to the runner-side preflight instead of refusing on it."""
     value = image.get(key)
     if not isinstance(value, str) or not value.strip():
         return None
@@ -730,18 +730,18 @@ def published_runner_identities(
     region: str | None,
     manifest_path: str | Path | None = None,
 ) -> list[dict[str, Any]]:
-    """The runner identity of every image the manifest currently publishes
-    for ``pdk``/``region`` -- the most recently built entry per
-    ``(pdk key, region)`` pair, exactly the entry :func:`resolve_ami` would
-    pick for that pair (issue #2851).
+    """The runner identity of every image the manifest publishes for
+    ``pdk``/``region`` -- the newest entry per ``(pdk key, region)`` pair,
+    exactly what :func:`resolve_ami` picks (issue #2851).
 
     ``None`` for ``pdk`` or ``region`` widens the selection to every PDK key
     or every region: the batch fleet chooses its own Spot pool, so a client
     that does not pin a region cannot know which region's image it gets.
     Each item is ``{"pdk", "region", "ami_id", "klt_version", "klt_ref",
-    "pdk_variants"}``; the last three are ``None`` for a legacy entry
-    (``pdk_variants`` is the list of PDK variant directories the image
-    ships, issue #3251). Raises
+    "pdk_variants", "ngspice_version", "pdk_snapshot"}``; all but the first
+    three are ``None`` for a legacy entry (``pdk_variants`` lists the PDK
+    variant directories the image ships, issue #3251; the two engine fields
+    feed the pre-submit ``engine_version`` pin check, issue #5851). Raises
     :class:`RemoteLaunchError` when the manifest cannot be loaded or ``pdk``
     has no AMI family, like :func:`resolve_ami`.
     """
@@ -755,9 +755,8 @@ def published_runner_identities(
             continue
         if region is not None and image.get("region") != region:
             continue
-        groups.setdefault((str(image.get("pdk")), str(image.get("region"))), []).append(
-            image
-        )
+        pair = (str(image.get("pdk")), str(image.get("region")))
+        groups.setdefault(pair, []).append(image)
     identities = []
     for (image_pdk, image_region), candidates in sorted(groups.items()):
         latest = _latest_image(candidates)
@@ -769,6 +768,8 @@ def published_runner_identities(
                 "klt_version": _manifest_runner_field(latest, "klt_version"),
                 "klt_ref": _manifest_runner_field(latest, "klt_ref"),
                 "pdk_variants": _manifest_pdk_variants(latest),
+                "ngspice_version": _manifest_runner_field(latest, "ngspice_version"),
+                "pdk_snapshot": _manifest_runner_field(latest, "pdk_snapshot"),
             }
         )
     return identities
@@ -780,10 +781,9 @@ def parse_build_klt_version(console: str) -> str | None:
     present (issue #2851).
 
     The build's user-data prints ``<BUILD_KLT_VERSION_MARKER>[<version>]``
-    right after installing ``klayout-tools`` from the pinned ``--klt-ref``.
-    Under ``set -x`` the same text also appears in the trace of that
-    ``echo``; both carry the same expanded value, and the last occurrence
-    wins.
+    right after installing ``klayout-tools`` from the pinned ``--klt-ref``;
+    under ``set -x`` the trace of that ``echo`` carries the same expanded
+    value, so the last occurrence wins.
     """
     pattern = re.escape(BUILD_KLT_VERSION_MARKER) + r"\[([^\]\s]*)\]"
     matches = re.findall(pattern, console)
