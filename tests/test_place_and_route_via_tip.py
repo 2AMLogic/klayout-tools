@@ -89,13 +89,14 @@ class _Builder:
             kdb.CellInstArray(via.cell_index(), kdb.Trans(_nm(cx), _nm(cy)))
         )
 
-    def run(self, variant: str = "asap7") -> dict:
+    def run(self, variant: str = "asap7", drcfill_regions=None) -> dict:
         return check_via_pad_tips(
             kdb,
             layout=self.layout,
             top_cell=self.top,
             variant=variant,
             lef_to_gds=LEF_TO_GDS,
+            drcfill_regions=drcfill_regions,
         )
 
     def merged(self, layer) -> kdb.Region:
@@ -164,6 +165,79 @@ def test_wire_only_violation_is_counted_but_not_attributed_to_via_pads():
     assert _by_rule(result) == {"M1.S.2": 1}
     assert _attributed(result) == {"M1.S.2": 0}
     assert result["violations"] == 1 and result["via_pad_violations"] == 0
+
+
+# --------------------------------------------------------------------------
+# Router DRCFILL attribution (issue #5740)
+# --------------------------------------------------------------------------
+
+
+def _patch_tip_near_wire_side() -> _Builder:
+    """A ``SHAPE DRCFILL``-shaped patch rectangle whose 28 nm-wide end edge
+    faces the long side of a routed wire 20 nm away -- the via-stack patch
+    case issue #5740's follow-up report describes. No ``VIA_*`` cell exists,
+    so the hit is patch metal and nothing else."""
+    b = _Builder()
+    b.wire(M1, -14, -200, 14, 0)  # the patch: 28 nm wide, butt end at y=0
+    b.wire(M1, -200, 20, 200, 38)
+    return b
+
+
+def test_drcfill_patch_tip_is_attributed_to_router_fill_not_via_pads():
+    b = _patch_tip_near_wire_side()
+    result = b.run(drcfill_regions={"M1": b.merged(M1)})
+    assert _by_rule(result) == {"M1.S.2": 1}
+    assert _attributed(result) == {"M1.S.2": 0}
+    assert {entry["rule"]: entry["router_fill"] for entry in result["rules"]} == {
+        "M1.S.2": 1
+    }
+    assert (
+        result["violations"] == 1
+        and result["via_pad_violations"] == 0
+        and result["router_fill_violations"] == 1
+    )
+
+
+def test_totals_are_unchanged_by_the_drcfill_regions():
+    """The attribution is a second lens on the same hits, never extra ones:
+    ``violations``/``via_pad_violations`` must be identical with and without
+    a patch region."""
+    without = _patch_tip_near_wire_side().run()
+    with_regions = _patch_tip_near_wire_side().run(
+        drcfill_regions={"M1": _patch_tip_near_wire_side().merged(M1)}
+    )
+    assert without["violations"] == with_regions["violations"]
+    assert without["via_pad_violations"] == with_regions["via_pad_violations"]
+    assert without["router_fill_violations"] == 0
+    assert with_regions["router_fill_violations"] == 1
+
+
+def test_pair_touching_pad_and_patch_counts_in_both_subsets():
+    """Attribution is per-source and independent: an edge pair that touches
+    a ``VIA_*`` landing pad *and* a patch rectangle is a ``via_pads`` hit
+    and a ``router_fill`` hit at once, while ``violations`` stays 1."""
+    b = _Builder()
+    b.pad(M1, -9, -20, 9, 20)  # 18 nm pad tip at y=20, fed from below
+    b.wire(M1, -9, -200, 9, -20)
+    b.wire(M1, -200, 40, 200, 58)
+    result = b.run(drcfill_regions={"M1": b.merged(M1)})
+    entry = next(e for e in result["rules"] if e["rule"] == "M1.S.2")
+    assert entry["violations"] == 1
+    assert entry["via_pads"] == 1 and entry["router_fill"] == 1
+    assert result["via_pad_violations"] == 1 and result["router_fill_violations"] == 1
+
+
+def test_missing_region_for_a_layer_reports_zero_not_a_guess():
+    """``drcfill_regions`` naming only the layers the DEF actually patched:
+    a tip rule layer with no region entry reports ``router_fill`` 0 and
+    stays in the report exactly as before."""
+    b = _Builder()
+    b.wire(M1, -9, -200, 9, 0)
+    b.wire(M1, -200, 20, 200, 38)
+    result = b.run(drcfill_regions={})
+    assert _by_rule(result) == {"M1.S.2": 1}
+    assert _attributed(result) == {"M1.S.2": 0}
+    assert result["router_fill_violations"] == 0
 
 
 def test_pass_writes_no_geometry():
