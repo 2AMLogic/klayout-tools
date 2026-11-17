@@ -259,7 +259,6 @@ def test_generate_reports_snapped_to_grid(tmp_path, pdk_root):
 
 
 def test_cli_json_contract_keys(tmp_path, pdk_root, capsys):
-    output = tmp_path / "res.gds"
     exit_code = main(
         [
             "gen",
@@ -271,7 +270,7 @@ def test_cli_json_contract_keys(tmp_path, pdk_root, capsys):
             "--pdk-root",
             str(pdk_root),
             "-o",
-            str(output),
+            str(tmp_path / "res.gds"),
             "--format",
             "json",
         ]
@@ -286,6 +285,7 @@ def test_cli_json_contract_keys(tmp_path, pdk_root, capsys):
         "pdk",
         "dbu_um",
         "bbox_um",
+        "subcell_naming_scheme",
         "device_count",
         "ports",
         "navigable_regions",
