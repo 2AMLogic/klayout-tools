@@ -1737,6 +1737,7 @@ a test keeps this table equal to it). Dotted paths:
 | `provenance.pdk.commit` | PDK upstream commit (issue #3786) |
 | `provenance.pdk.linked_trees` | host PDK install layout |
 | `provenance.pdk.ambiguous_sources` | other PDK roots on this machine (issue #2564) |
+| `provenance.pdk.source` | how the PDK was resolved — search roots vs `$PDK_ROOT` vs `--pdk-root` (issue #5863) |
 <!-- run-specific-fields:end -->
 
 No field is added or removed by this list; `schema_version` is unchanged.
@@ -1835,6 +1836,31 @@ All eight share one contract:
   (`engine`) is not excluded: swapping engines is a different run. For
   `signoff` the same rule lands on the field *its* reports carry tool
   identity in — the whole `build` block (issue #2249).
+- **`provenance.pdk.source` is excluded as resolution provenance (issue
+  #5863).** It records *how* the PDK install was found (search roots vs
+  `$PDK_ROOT` vs `--pdk-root`), in the shared
+  `VOLATILE_PROVENANCE_PATHS` set: the identical install (same
+  `provenance.pdk.version` hash) resolved through a different mechanism on
+  another host must not read as drift — the same rationale one field over
+  for `provenance.pdk.ambiguous_sources` (issue #5182).
+- **Flow-verb output paths compare by file name (issue #5863).** A consumer
+  commits lint-clean evidence with output paths rewritten repo-relative or
+  to `~/`/`$PDK_ROOT/...`-form (what `env-provenance lint-envelope`
+  requires), while the fresh side of a `--rerun` diff echoes absolute host
+  paths — the directory is host- and scrub-shape-specific and never
+  verdict-bearing. `klt place-and-route --check --rerun` therefore reduces
+  every output-path field (`netlist`/`provenance.deck.path`/`layer_map.path`
+  `{path, scope}` envelopes, `def_path`/`unrouted_def_path`/`gds_path`/
+  `verilog_path` at the top level, under `power.placed` and inside every
+  `corner_runs[]` entry, `corner_runs[].output_dir`, `macros[].lef`/`.lib`,
+  `spef_sta.spef_path`/`sdf_path`) to its file name on **both** sides
+  before diffing. The identity check stays: a different file *name* drifts,
+  and so does an artifact going `null` ↔ path (missing or newly appearing).
+  Message prose that embeds a path (`warnings[]`,
+  `power.placed.unavailable_reason`) is not reduced — scrub-shape drift
+  there remains visible, by design. The other flow verbs (`synthesize`) and
+  the analysis verbs (`drc`/`lvs`/`extract`/`equiv`/`erc`) have not needed
+  this and are unchanged; a follow-up issue covers them if reproduced.
 - **`klt signoff` excludes one more surface, and reports it separately**
   (issue #2526): the report's verbatim quotation of the checklist doc — each
   `items[]` entry's `title`/`text`/`notes`, and `source_doc_content_hash`.
