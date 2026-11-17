@@ -700,6 +700,7 @@
         "klayout_tools.macros",
         "klayout_tools.metrics",
         "klayout_tools.op_sanity",
+        "klayout_tools.op_sanity_pdk",
         "klayout_tools.output_lock",
         "klayout_tools.resistor_mesh",
         "klayout_tools.touchstone",
@@ -752,6 +753,7 @@
         "klayout_tools.cli.sim_job_text",
         "klayout_tools.cli.sim_measurement_text",
         "klayout_tools.cli.sim_merge_cmd",
+        "klayout_tools.cli.sim_op_lint_text",
         "klayout_tools.cli.sim_pdk_text",
         "klayout_tools.cli.sim_plan_cmd",
         "klayout_tools.digital_fleet",
@@ -2729,6 +2731,12 @@
         "exporter": "klayout_tools.sim",
         "symbol": "_supply_alter_lines",
         "reason": "op-lint emits `alter` lines for supply rails with the same helper the sweep uses (issue #3624); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.op_sanity",
+        "exporter": "klayout_tools.sim_request_overrides",
+        "symbol": "_with_pdk_root_override",
+        "reason": "Reviewed (issue #5751): op-lint folds a `--pdk-root` pin through the same helper the graded sim path uses so both paths resolve the pin by one rule and cannot drift; promote to a public name when sim_request_overrides is next reworked."
       },
       {
         "consumer": "klayout_tools.pdk_pcell",
