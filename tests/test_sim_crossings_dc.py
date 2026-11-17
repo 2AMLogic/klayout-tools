@@ -62,6 +62,25 @@ def test_offset_level_works_on_the_sweep_axis(tmp_path):
     assert outcome.graded_value() == pytest.approx(1.0)
 
 
+def test_sample_at_at_the_declared_stop_survives_final_point_round_off(tmp_path):
+    # ngspice's accumulated final sweep point for "V1 0 3.3 0.01" can land a
+    # few ULP short of the declared stop (3.299999999999974); the pre-run
+    # check accepts sample_at == 3.3 against the declared bounds, so the
+    # post-run resolver must too -- EDGE_TOLERANCE slack, end-sample clamp.
+    dc = {"kind": "dc", "args": "V1 0 3.3 0.01"}
+    spec = _spec({"sample_at": 3.3, "fraction": 0.5})
+    sim_crossings.validate_crossings_context(spec, dc)
+    outcome = _run(
+        tmp_path,
+        spec,
+        scale=[0.0, 1.65, 3.299999999999974],
+        values=[0.0, 0.5, 1.6],
+    )
+    assert outcome.error is None
+    assert outcome.report()["level"] == pytest.approx(0.8)
+    assert outcome.graded_value() == pytest.approx(2.1)
+
+
 def test_value_is_first_abscissa_and_count_stays_in_member(tmp_path):
     outcome = _run(
         tmp_path,

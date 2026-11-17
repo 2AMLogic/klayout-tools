@@ -4922,7 +4922,8 @@ literal sweep range, and `{"sample_at", "fraction"}` on `tran`. One sweep only
 `analysis.kind: "tran"` or `"dc"` (see above); an unknown key, a missing `signal`/`level`, an
 unknown `edge`, a malformed window or `max` are all refused up front
 (`SimError`, exit 1) with a corrective message. Optional `unit`, `limits`,
-`plausible_range` and `k_sigma` apply to the entry's `value` (the count).
+`plausible_range` and `k_sigma` apply to the entry's `value` (the count; on
+`dc`, the sweep abscissa described above).
 
 ### Response
 

@@ -137,7 +137,8 @@ def resolve_sampled_level(
     count = min(len(scale), len(values))
     low = min(scale[:count], default=math.nan)
     high = max(scale[:count], default=math.nan)
-    if count == 0 or not low <= at <= high:
+    slack = sim_window.EDGE_TOLERANCE * max(abs(high - low), abs(at), 1e-30)
+    if count == 0 or not low - slack <= at <= high + slack:
         span = f"[{low!r}, {high!r}]" if count else "empty"
         unit, axis = ("", "swept") if sweep else (" s", "simulated time")
         raise ValueError(

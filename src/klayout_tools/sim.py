@@ -8992,9 +8992,10 @@ def _crossings_measurement_result(
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """One ``crossings`` measurement's response entry (issue #2868).
 
-    ``value`` is the number of crossings found inside the window -- a plain
-    number, graded through :func:`_grade_measurement_value` exactly like any
-    scalar -- and the series itself rides the additive ``crossings`` sibling.
+    ``value`` is the number of crossings found inside the window (on ``dc``,
+    the sweep abscissa of the first crossing) -- a plain number, graded
+    through :func:`_grade_measurement_value` exactly like any scalar -- and
+    the series itself rides the additive ``crossings`` sibling.
     No series (signal did not resolve, rawfile unreadable) is an ordinary
     ``status: "error"`` entry with a ``code: "measurement"`` diagnostic and
     no ``crossings`` member, like any other measurement with no value."""
