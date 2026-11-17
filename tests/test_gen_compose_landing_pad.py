@@ -158,6 +158,7 @@ def test_pad_conflict_is_named_and_backbone_only_keeps_the_generic_message():
     assert reason is not None
     assert "landing pad" in reason
     assert "pitch" in reason
+    assert "pitch 0um" in reason
     assert "routing.landing_pad_size_um" in reason
     # The drawn-side footprint is reported, deck floors included.
     assert f"{_VIA_LANDING_SIZE_UM:.4g}um square" in reason
@@ -175,6 +176,7 @@ def test_pad_conflict_is_named_and_backbone_only_keeps_the_generic_message():
     )
     assert spacing_reason is not None
     assert "met1.space.1" in spacing_reason
+    assert "pitch 0um" in spacing_reason  # literal overlap: pitch stays 0
     # No pad on this layer: backbone-only, generic message stays accurate.
     assert (
         pads._landing_pad_conflict_reason(
@@ -189,6 +191,47 @@ def test_pad_conflict_is_named_and_backbone_only_keeps_the_generic_message():
         )
         is None
     )
+
+
+def test_pad_conflict_reports_the_true_pitch_on_a_non_overlapping_neighbour():
+    """The spacing branch reports the real pitch, not a clamped 0.
+
+    ``Edge.distance(point)`` is the *signed* distance to the edge's
+    infinite line, so on a non-overlapping neighbour the pre-fix
+    ``min`` over ``max(0, ...)`` was always 0 -- a message claiming an
+    outright overlap on the one branch that proves there is none.
+    """
+    dbu = 0.001
+    drop = {
+        "x_um": 1.0,
+        "y_um": 1.0,
+        "via_layer": _VIA1,
+        "landing_layers": (_MET1,),
+        "block_id": "a",
+    }
+    # The 0.42um pad spans 790..1210 dbu on both axes; the neighbour
+    # starts at x=1390 -- a 0.18um edge gap, no overlap -- while the
+    # 0.3um rule still fires (gap < rule).
+    other = kdb.Region()
+    other.insert(kdb.Box(1390, 790, 1810, 1210))
+    reason = pads._landing_pad_conflict_reason(
+        "sky130A",
+        [drop],
+        _MET1,
+        "other",
+        other,
+        dbu,
+        pads._make_landing_pad_side_um("sky130A"),
+        lambda _layer: (0.3, "met1.space.1"),
+        spacing_um=0.3,
+    )
+    assert reason is not None
+    assert "pitch 0um" not in reason
+    # Centre-to-centre frame, comparable with the requirement: the
+    # 0.18um gap plus the 0.42um pad side is a 0.60um terminal pitch,
+    # against 0.42 + 0.3 = 0.72um needed.
+    assert "0.6um (terminal pitch, centre-to-centre)" in reason
+    assert "needs >= 0.72um of terminal pitch" in reason
 
 
 def test_verdict_helper_falls_back_to_the_generic_messages():

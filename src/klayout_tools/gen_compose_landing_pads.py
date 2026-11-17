@@ -302,9 +302,11 @@ def _landing_pad_conflict_reason(
 
     The message names the three things the caller needs to reconcile the
     conflict: the pad footprint (the effective drawn side for this
-    ``(landing, via)`` pair), the terminal pitch (centre-to-nearest-edge
-    of the other net's already-accepted metal on that plane, 0 for an
-    outright overlap), and the resolved deck's own spacing rule when the
+    ``(landing, via)`` pair), the terminal pitch (centre-to-centre: the
+    pad centre's distance to the nearest point of the other net's
+    already-accepted metal on that plane, plus half the pad side -- exact
+    for a like-sized square neighbour -- 0 for an outright overlap), and
+    the resolved deck's own spacing rule when the
     layer carries one -- plus the ``routing.landing_pad_size_um`` override
     as the escape hatch where the deck's floors allow a smaller pad.
     """
@@ -364,12 +366,25 @@ def _landing_pad_conflict_reason(
     side_um = drawn_side_um(drop)
     px, py = float(drop["x_um"]), float(drop["y_um"])
     centre = kdb.Point(int(round(px / dbu)), int(round(py / dbu)))
-    pitch_dbu = int(
-        min(
-            (max(0, edge.distance(centre)) for edge in other_region.edges()),
-            default=0,
-        )
-    )
+    if (pad_region & other_region).is_empty():
+        # ``Edge.distance(point)`` is the *signed* distance to the edge's
+        # infinite line, so some edge of any region the point sits
+        # outside always scores <= 0 and a ``min`` over ``max(0, ...)``
+        # reports pitch 0 on this no-overlap branch -- use the true
+        # point-to-segment distance instead, and report terminal pitch
+        # centre-to-centre (pad centre to the nearest point of the other
+        # net's metal, plus half the pad side) so it pairs with the
+        # ``side + spacing`` requirement below; exact for a like-sized
+        # square neighbour.
+        half_dbu = int(round(side_um / 2.0 / dbu))
+        pitch_dbu = int(
+            min(
+                (edge.euclidian_distance(centre) for edge in other_region.edges()),
+                default=0,
+            )
+        ) + half_dbu
+    else:
+        pitch_dbu = 0
     pitch_um = pitch_dbu * dbu
     spacing = spacing_lookup(pad_layer)
     spacing_note = ""
@@ -387,8 +402,8 @@ def _landing_pad_conflict_reason(
         )
     else:
         conflict = (
-            f"comes within {pitch_um:.4g}um of already-routed net "
-            f"'{other_net}' on that plane"
+            f"sits {pitch_um:.4g}um (terminal pitch, centre-to-centre) "
+            f"from already-routed net '{other_net}' on that plane"
         )
     return (
         f"via-drop landing pad ({side_um:.4g}um square at ({px:.4g}, {py:.4g}) "
