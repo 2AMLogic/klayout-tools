@@ -86,7 +86,12 @@ def validate_dc_context(
         if bounds is None or not isinstance(level, dict) or "sample_at" not in level:
             continue
         at = sim_window.window_bound(
-            name, level, "sample_at", form="crossings", field="level.sample_at"
+            name,
+            level,
+            "sample_at",
+            form="crossings",
+            field="level.sample_at",
+            axis="sweep",
         )
         low, high = min(bounds), max(bounds)
         if at is not None and not low <= at <= high:
@@ -121,7 +126,12 @@ def resolve_sampled_level(
     with ``sweep=False``, simulated time. Raises ``ValueError`` (the
     measurement diagnostic) when ``sample_at`` is outside the axis range."""
     at = sim_window.window_bound(
-        name, level, "sample_at", form="crossings", field="level.sample_at"
+        name,
+        level,
+        "sample_at",
+        form="crossings",
+        field="level.sample_at",
+        axis="sweep" if sweep else "time",
     )
     assert at is not None  # validated as required before any run
     count = min(len(scale), len(values))

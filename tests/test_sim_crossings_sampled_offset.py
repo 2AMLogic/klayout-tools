@@ -45,6 +45,8 @@ def test_sampled_offset_is_a_valid_declaration():
     [
         {"sample_at": 1.0},
         {"offset": -0.5},
+        {"sample_at": None, "offset": 0.1},
+        {"sample_at": None, "fraction": 0.9},
         {"sample_at": 1.0, "offset": -0.5, "extra": 1},
         {"sample_at": 1.0, "offset": float("nan")},
         {"sample_at": 1.0, "offset": True},
@@ -57,6 +59,23 @@ def test_malformed_sampled_offset_is_refused(level):
         sim._validate_measurement_forms(
             [{"name": "t", "crossings": {"signal": "v(a)", "level": level}}]
         )
+
+
+def test_null_sample_at_is_refused_before_a_run_not_crashed_at_extraction():
+    """An explicit ``{"sample_at": null}`` used to pass shape validation (only
+    a missing key was thought impossible) and then crash the extraction with a
+    bare ``assert`` (or, under ``-O``, a ``TypeError``) instead of refusing the
+    request with a named corrective ``SimError``."""
+    for level in (
+        {"sample_at": None, "offset": 0.1},
+        {"sample_at": None, "fraction": 0.9},
+    ):
+        with pytest.raises(
+            sim.SimError, match=r"crossings\.level\.sample_at is required"
+        ):
+            sim._validate_measurement_forms(
+                [{"name": "t", "crossings": {"signal": "v(a)", "level": level}}]
+            )
 
 
 @pytest.mark.parametrize(

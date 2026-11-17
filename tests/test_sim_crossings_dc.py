@@ -141,6 +141,26 @@ def test_misspecified_dc_requests_are_refused_before_a_run(level, extra, match):
         sim_crossings.validate_crossings_context(_spec(level, **extra), _DC)
 
 
+def test_bad_sample_at_string_on_dc_is_not_worded_as_a_time():
+    """The dc docs put ``from``/``to``/``level.sample_at`` in the sweep's own
+    unit, so the refusal must not claim the value is a time in seconds."""
+    with pytest.raises(sim.SimError) as excinfo:
+        sim._validate_measurement_forms(_spec({"sample_at": "abc", "offset": -0.9}))
+    message = str(excinfo.value)
+    assert "must be a time in seconds" not in message
+    assert "the swept source's unit on dc" in message
+
+
+def test_from_after_to_refusal_does_not_claim_seconds():
+    """``from``/``to`` are sweep values on dc, so the ordering refusal prints
+    them bare rather than with a ``s`` suffix."""
+    with pytest.raises(sim.SimError) as excinfo:
+        sim._validate_measurement_forms(_spec(0.9, **{"from": 2.0, "to": 1.0}))
+    message = str(excinfo.value)
+    assert "is before crossings.from" in message
+    assert " s)" not in message
+
+
 def test_fraction_level_is_refused_on_tran():
     with pytest.raises(sim.SimError, match='only defined for analysis.kind "dc"'):
         sim_crossings.validate_crossings_context(

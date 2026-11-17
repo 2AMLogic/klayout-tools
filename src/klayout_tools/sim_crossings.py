@@ -114,12 +114,12 @@ def validate_crossings_spec(name: Any, body: Any) -> None:
         )
     _validate_max(name, body.get("max"))
     validate_reduce(name, body.get("reduce"))
-    start = sim_window.window_bound(name, body, "from", form="crossings")
-    stop = sim_window.window_bound(name, body, "to", form="crossings")
+    start = sim_window.window_bound(name, body, "from", form="crossings", axis="axis")
+    stop = sim_window.window_bound(name, body, "to", form="crossings", axis="axis")
     if start is not None and stop is not None and stop < start:
         raise SimError(
-            f"measurement '{name}': crossings.to ({stop!r} s) is before "
-            f"crossings.from ({start!r} s)"
+            f"measurement '{name}': crossings.to ({stop!r}) is before "
+            f"crossings.from ({start!r})"
         )
 
 
@@ -160,9 +160,21 @@ def _validate_sampled_offset(name: Any, level: dict[str, Any]) -> None:
             '"offset": -0.9} (or, on a dc sweep, "sample_at" and '
             f'"fraction") (got keys {sorted(level)})'
         )
-    sim_window.window_bound(
-        name, level, "sample_at", form="crossings", field="level.sample_at"
+    at = sim_window.window_bound(
+        name,
+        level,
+        "sample_at",
+        form="crossings",
+        field="level.sample_at",
+        axis="axis",
     )
+    if at is None:
+        raise SimError(
+            f"{where}.sample_at is required -- the abscissa the signal is "
+            "sampled at, e.g. "
+            '{"sample_at": "50n", "offset": -0.9} ({"sample_at": 1.0, '
+            '"fraction": 0.99} on a dc sweep)'
+        )
     if "fraction" in level:
         sim_crossings_dc.validate_fraction(name, level)
         return

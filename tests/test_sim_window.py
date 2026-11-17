@@ -70,7 +70,13 @@ def test_bad_from_names_its_own_form(form):
     with pytest.raises(SimError) as excinfo:
         validate("m1", {**body, "from": "soon"})
     message = str(excinfo.value)
-    assert f"{form}.from must be a time in seconds" in message
+    if form == "crossings":
+        # crossings runs on tran (seconds) and dc (sweep units) and is
+        # shape-checked before the kind is known, so its unit wording is
+        # axis-neutral rather than "a time in seconds".
+        assert f"{form}.from must be a number or a SPICE literal" in message
+    else:
+        assert f"{form}.from must be a time in seconds" in message
     for other in _FORMS:
         if other != form:
             assert f"{other}." not in message
@@ -94,6 +100,26 @@ def test_window_bound_absent_is_none_and_literals_parse():
 def test_window_bound_refuses_non_finite():
     with pytest.raises(SimError, match="must be a time in seconds"):
         sim_window.window_bound("m", {"to": float("inf")}, "to", form="stress")
+
+
+def test_window_bound_axis_words_the_unit():
+    """``axis=`` picks the unit the diagnostic demands: seconds (tran), the
+    swept source's own unit (dc), or the neutral wording for a form whose
+    kind is not known yet."""
+    body = {"sample_at": "soon"}
+    with pytest.raises(SimError) as excinfo:
+        sim_window.window_bound("m", body, "sample_at", form="crossings", axis="sweep")
+    assert "in the sweep's own unit" in str(excinfo.value)
+    with pytest.raises(SimError) as excinfo:
+        sim_window.window_bound("m", body, "sample_at", form="crossings", axis="axis")
+    assert "simulated seconds on tran, the swept source's unit on dc" in str(
+        excinfo.value
+    )
+    # The default stays the tran-time wording; parsing is axis-independent.
+    assert (
+        sim_window.window_bound("m", {"sample_at": "1m"}, "sample_at", form="crossings")
+        == 0.001
+    )
 
 
 def test_field_overrides_the_reported_path():
