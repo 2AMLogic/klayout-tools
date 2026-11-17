@@ -144,8 +144,11 @@ from ..signoff_generator_batch import (
     GeneratorExecution,
     resolve_execution,
 )
-from ..signoff_output import non_attest_problem, write_output_or_message
-from ..signoff_output import repo_root_problem
+from ..signoff_output import (
+    non_attest_problem,
+    repo_root_problem,
+    write_output_or_message,
+)
 from ..signoff_require_build import require_grading_ruleset_problem
 from .color import Palette, resolve_palette
 from .output import emit_error, emit_success, render_rerun_drift
