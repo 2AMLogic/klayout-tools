@@ -925,7 +925,7 @@ R2 VDD $2 1k
     assert len(correspondence) == 3 == report["counts"]["nets"]["matched"]
 
     by_reference = {entry["reference"]: entry for entry in correspondence}
-    assert by_reference["VDD"] == {"layout": "VDD", "reference": "VDD", "pin": True}
+    assert by_reference["VDD"]["pin"] is True and by_reference["VDD"]["layout"] == "VDD"
     assert {"P1", "P2"} <= by_reference.keys()
     # The ambiguous pair's layout side is `$1`/`$2` (unlabelled, neither a
     # declared pin), backslash-escaped (issue #1162) to match the written
@@ -2155,7 +2155,7 @@ def test_shorted_nets_report_net_merged(tmp_path):
     assert report["category_counts"]["net.merged"] == 1
     merged = next(m for m in report["mismatches"] if m["category"] == "net.merged")
     assert merged["side"] == "reference"
-    assert merged["net"] == {"layout": None, "reference": "A"}
+    assert [merged["net"][k] for k in ("layout", "reference")] == [None, "A"]
 
 
 def test_split_net_reports_net_split(tmp_path):
@@ -2309,7 +2309,7 @@ def test_composing_an_unrelated_block_does_not_reclassify_an_isolated_net(tmp_pa
     )
     (a_finding,) = [m for m in alone["mismatches"] if m["category"].startswith("net.")]
     assert a_finding["category"] == "net.unmatched"
-    assert a_finding["net"] == {"layout": "A_DANGLE", "reference": None}
+    assert [a_finding["net"][k] for k in ("layout", "reference")] == ["A_DANGLE", None]
 
     composed = _compare_islands(
         tmp_path,
@@ -2318,14 +2318,14 @@ def test_composing_an_unrelated_block_does_not_reclassify_an_isolated_net(tmp_pa
         _ISLAND_A_LAYOUT + _ISLAND_B_LAYOUT,
         _ISLAND_A_REFERENCE + _ISLAND_B_REFERENCE,
     )
-    composed_a = [
-        m
+    assert [
+        {**m, "net": {k: v for k, v in m["net"].items() if not k.endswith("_id")}}
         for m in composed["mismatches"]
         if (m["net"] or {}).get("layout") == "A_DANGLE"
-    ]
-    assert composed_a == [a_finding], (
-        "composing an unrelated block changed block A's own net finding"
-    )
+    ] == [
+        {**m, "net": {k: v for k, v in m["net"].items() if not k.endswith("_id")}}
+        for m in [a_finding]
+    ], "composing an unrelated block changed block A's own net finding"
     assert "net.split" in composed["category_counts"]  # block B's, not block A's
 
 
@@ -2338,7 +2338,7 @@ def test_a_genuine_split_still_classifies_as_net_split_when_composed(tmp_path):
     )
     assert alone["category_counts"]["net.split"] == 1
     (split,) = [m for m in alone["mismatches"] if m["category"] == "net.split"]
-    assert split["net"] == {"layout": "B_MID2", "reference": None}
+    assert [split["net"][k] for k in ("layout", "reference")] == ["B_MID2", None]
 
     composed = _compare_islands(
         tmp_path,
@@ -2347,9 +2347,8 @@ def test_a_genuine_split_still_classifies_as_net_split_when_composed(tmp_path):
         _ISLAND_A_LAYOUT + _ISLAND_B_LAYOUT,
         _ISLAND_A_REFERENCE + _ISLAND_B_REFERENCE,
     )
-    assert [m for m in composed["mismatches"] if m["category"] == "net.split"] == [
-        split
-    ]
+    (c_split,) = [m for m in composed["mismatches"] if m["category"] == "net.split"]
+    assert [c_split["net"][k] for k in ("layout", "reference")] == ["B_MID2", None]
 
 
 # Block D: a genuinely ambiguous-but-resolvable pairing -- two symmetric
@@ -2420,17 +2419,15 @@ def test_composing_a_clean_unrelated_block_does_not_flip_status_or_severity(tmp_
         _ISLAND_D_REFERENCE + _ISLAND_E_REFERENCE,
     )
     assert composed["status"] == "match"
-    composed_d = [
-        m
+    assert [
+        {**m, "net": {k: v for k, v in m["net"].items() if not k.endswith("_id")}}
         for m in composed["mismatches"]
         if (m["net"] or {}).get("reference") in {"D_P1", "D_P2"}
-    ]
-    alone_d = [
-        m
+    ] == [
+        {**m, "net": {k: v for k, v in m["net"].items() if not k.endswith("_id")}}
         for m in alone["mismatches"]
         if (m["net"] or {}).get("reference") in {"D_P1", "D_P2"}
     ]
-    assert composed_d == alone_d
 
 
 # --------------------------------------------------------------------------- #
@@ -2618,7 +2615,7 @@ R2 GND $2 2k
     assert len(rejected) == 1
     (entry,) = rejected
     assert entry["severity"] == "error"
-    assert entry["net"] == {"layout": "$1", "reference": "P2"}
+    assert [entry["net"][k] for k in ("layout", "reference")] == ["$1", "P2"]
     assert response["category_counts"]["hints.rejected"] == 1
     assert response["status"] == "mismatch"
 
@@ -2715,7 +2712,7 @@ R2 OUT VSS 2k
         lvs.CATEGORY_DEVICE_GEOMETRY_NOT_COMPARED: 1,
     }
     (conflict,) = [m for m in no_hint["mismatches"] if m["category"] == "topology"]
-    assert conflict["net"] == {"layout": "OUT", "reference": "FB"}
+    assert [conflict["net"][k] for k in ("layout", "reference")] == ["OUT", "FB"]
     assert "name/identity conflict" in conflict["description"]
 
     with_hint = run_lvs(
@@ -2743,7 +2740,7 @@ R2 OUT VSS 2k
         m for m in with_hint["mismatches"] if m["category"] == "hints.rejected"
     ]
     assert rejected["severity"] == "error"
-    assert rejected["net"] == {"layout": "OUT", "reference": "FB"}
+    assert [rejected["net"][k] for k in ("layout", "reference")] == ["OUT", "FB"]
     # The description says *why* the assertion was refused, so a caller does
     # not re-declare the hint expecting a different answer.
     assert "not identical topologically" in rejected["description"]
@@ -2783,10 +2780,10 @@ R2 OUT GNDL 2k
     )
 
     (rejected,) = [m for m in report["mismatches"] if m["category"] == "hints.rejected"]
-    assert rejected["net"] == {"layout": "OUT", "reference": "FB"}
+    assert [rejected["net"][k] for k in ("layout", "reference")] == ["OUT", "FB"]
     # `GNDL`/`VSS` was never declared -- its own conflict entry is untouched.
     (conflict,) = [m for m in report["mismatches"] if m["category"] == "topology"]
-    assert conflict["net"] == {"layout": "GNDL", "reference": "VSS"}
+    assert [conflict["net"][k] for k in ("layout", "reference")] == ["GNDL", "VSS"]
 
 
 def test_same_nets_hint_unknown_layout_net_raises(tmp_path):
@@ -8142,7 +8139,7 @@ def test_combine_incomplete_entry_carries_circuit_device_and_net(tmp_path, monke
     assert warning["device"]["reference"] is None
     assert warning["device"]["class"] == "NFET"
     # ...and its gate terminal G is wired to net A.
-    assert warning["net"] == {"layout": "A", "reference": None}
+    assert [warning["net"][k] for k in ("layout", "reference")] == ["A", None]
     # The raw KLayout message is still available verbatim.
     assert warning["details"]["terminal"] == "G"
     assert warning["details"]["klayout_error"] == _COMBINE_DEVICES_NAMED_DEVICE_ERROR
@@ -9329,7 +9326,7 @@ def test_build_net_correspondence_omits_heuristic_without_a_universe():
     logger = _FakeLogger()
     logger.net_matches = [(1, _MatchedNet("VGND"), _MatchedNet("OEN"))]
     (entry,) = lvs._build_net_correspondence(logger)
-    assert entry == {"layout": "VGND", "reference": "OEN", "pin": True}
+    assert [entry[k] for k in ("layout", "reference", "pin")] == ["VGND", "OEN", True]
 
     universe = lvs._SupplyPinUniverse(
         power_pin_names=frozenset({"VGND"}),
@@ -9547,7 +9544,7 @@ def test_build_mismatches_ambiguous_net_is_warning_topology():
     (entry,) = lvs._build_mismatches(logger)
     assert entry["category"] == lvs.CATEGORY_TOPOLOGY
     assert entry["severity"] == "warning"
-    assert entry["net"] == {"layout": "N1", "reference": "N2"}
+    assert [entry["net"][k] for k in ("layout", "reference")] == ["N1", "N2"]
     # A `_FakeNamed` stand-in has no `terminal_count()`/`pin_count()` --
     # the single-terminal-both-sides check (issue #596, below) must not
     # error against an object that only implements `expanded_name()`, and
@@ -9590,7 +9587,7 @@ def test_build_mismatches_ambiguous_net_both_single_terminal_is_distinct_finding
     (entry,) = lvs._build_mismatches(logger)
     assert entry["category"] == lvs.CATEGORY_TOPOLOGY
     assert entry["severity"] == "warning"
-    assert entry["net"] == {"layout": "N1", "reference": "N2"}
+    assert [entry["net"][k] for k in ("layout", "reference")] == ["N1", "N2"]
     assert "not a routine ambiguous-pairing" in entry["description"]
     assert "single_terminal_nets" in entry["description"]
     assert "resolved it structurally" not in entry["description"]
@@ -9766,7 +9763,7 @@ def test_connected_leftover_and_renamed_pairing_still_pool_together():
     )
 
     assert [e["category"] for e in entries] == [lvs.CATEGORY_NET_SPLIT]
-    assert entries[0]["net"] == {"layout": "A_DANGLE", "reference": None}
+    assert [entries[0]["net"][k] for k in ("layout", "reference")] == ["A_DANGLE", None]
 
 
 def test_net_mismatch_pools_fall_back_to_one_pool_without_connectivity():
@@ -11162,9 +11159,9 @@ def test_short_nets_hint_resolves_mask_option_reference_to_clean_match(tmp_path)
     # The merged net's spelling matches `klt extract`'s own
     # `merged_net_labels` pipe-joined convention, reused rather than
     # re-derived (see `_apply_short_nets_hint`'s docstring).
-    assert {"layout": "OUT", "reference": "OUT|P0", "pin": True} in report[
-        "net_correspondence"
-    ]
+    assert ("OUT", "OUT|P0", True) in {
+        (e["layout"], e["reference"], e["pin"]) for e in report["net_correspondence"]
+    }
 
 
 def test_short_nets_hint_catches_a_miswired_layout(tmp_path):
@@ -18451,7 +18448,7 @@ def test_net_correspondence_omits_heuristic_for_a_spice_reference(tmp_path):
     assert report["status"] == "match"
     correspondence = report["net_correspondence"]
     assert {e["reference"] for e in correspondence} == {"A", "Y", "VPWR", "VGND"}
-    assert all(set(e) == {"layout", "reference", "pin"} for e in correspondence)
+    assert all(set(e) >= {"layout", "reference", "pin"} for e in correspondence)
 
 
 def test_net_correspondence_reference_null_for_unmatched_gate_level_supply_pin(

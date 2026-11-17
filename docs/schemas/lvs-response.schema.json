@@ -436,7 +436,18 @@
         "severity": {"enum": ["error", "warning"]},
         "description": {"type": "string"},
         "side": {"enum": ["layout", "reference", "both"]},
-        "net": {"$ref": "#/$defs/name_pair"},
+        "net": {
+          "type": ["object", "null"],
+          "description": "{layout, reference} names plus (klayout engine, issue #5833) each side's per-report stable net id — null on a side with no net, or naming a supply group for net.supply_fragmented. Ids are unique within one report and side only; the klayout-runset engine's objects carry the two name keys only.",
+          "required": ["layout", "reference"],
+          "properties": {
+            "layout": {"type": ["string", "null"]},
+            "layout_id": {"type": ["integer", "null"], "minimum": 0},
+            "reference": {"type": ["string", "null"]},
+            "reference_id": {"type": ["integer", "null"], "minimum": 0}
+          },
+          "additionalProperties": true
+        },
         "device": {
           "type": ["object", "null"],
           "required": ["layout", "reference", "class"],
@@ -474,7 +485,9 @@
       "required": ["layout", "reference", "pin"],
       "properties": {
         "layout": {"type": ["string", "null"], "description": "Layout net name; aliases are |-joined and anonymous nets backslash-escaped."},
+        "layout_id": {"type": ["integer", "null"], "minimum": 0, "description": "Layout net's per-report stable id (issue #5833, klayout engine; null when the event carried no layout net)."},
         "reference": {"type": ["string", "null"], "description": "Paired reference net; null for e.g. layout-only supply pins of a gate-level-verilog run."},
+        "reference_id": {"type": ["integer", "null"], "minimum": 0, "description": "Reference net's per-report stable id (issue #5833, klayout engine; null when the event carried no reference net)."},
         "pin": {"type": "boolean"},
         "heuristic": {"type": "boolean", "description": "Present only for gate-level-verilog runs with a derivable supply universe."}
       },

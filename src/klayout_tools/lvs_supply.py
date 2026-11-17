@@ -85,7 +85,17 @@ def supply_fragmentation_findings(
                     "configure options.supply_nets for this design's domains. "
                     "A signal-topology match does not verify power delivery.",
                     "layout",
-                    net={"layout": supply, "reference": None},
+                    # Issue #5833: a fragmented supply names a *group* of
+                    # nets (details.fragment_count of them), not one net,
+                    # so there is no single per-report id to report --
+                    # null on both sides, the same null-not-omitted
+                    # convention every other ``net`` object follows.
+                    net={
+                        "layout": supply,
+                        "layout_id": None,
+                        "reference": None,
+                        "reference_id": None,
+                    },
                     circuit={"layout": circuit.name, "reference": None},
                     details={"supply": supply, "fragment_count": count},
                 )
