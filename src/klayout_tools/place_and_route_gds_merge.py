@@ -747,15 +747,15 @@ def _merge_def_to_gds(
 
     # Issue #4495: ASAP7-only trim of redundant VIA_* M1 landing pads (a
     # documented no-op, GDS untouched, for every other PDK family). Runs
-    # after the min-area pass so that pass keeps judging the router's own
-    # geometry; the pads dropped are fully covered by wire, so no polygon
-    # area the repair measured changes.
+    # after the min-area pass; the dropped pads are wire-covered, so the
+    # repair's areas are unchanged. #5740: the routed DEF rides along too.
     via_pad_info = trim_via_pads(
         kdb,
         layout=top_only,
         top_cell=top,
         variant=pdk_info["variant"],
         lef_to_gds=_lef_net_layer_gds_map(layer_map_path),
+        def_path=def_path,
     )
 
     # write_layout() (see _layout.py, #320) always disables KLayout's default
