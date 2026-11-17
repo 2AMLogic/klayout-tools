@@ -186,6 +186,7 @@
       "modules": [
         "klayout_tools.cli.env_provenance_cmd",
         "klayout_tools.env_provenance",
+        "klayout_tools.env_provenance_json_stream",
         "klayout_tools.env_provenance_scrub",
         "klayout_tools.env_provenance_walk"
       ]
