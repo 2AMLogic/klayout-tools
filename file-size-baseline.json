@@ -413,7 +413,7 @@
     },
     {
       "path": "src/klayout_tools/lvs_combine.py",
-      "lines": 1609
+      "lines": 1569
     },
     {
       "path": "src/klayout_tools/lvs_finfet.py",
