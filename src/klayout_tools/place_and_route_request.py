@@ -7,8 +7,7 @@ precedent of ``place_and_route_sta.py`` (issue #1808). Nothing here invokes
 OpenROAD or emits a stage script -- that stays in ``place_and_route.py``. Every
 public-by-convention name here is re-exported from
 :mod:`klayout_tools.place_and_route`, so ``place_and_route.<name>`` (the CLI,
-:mod:`klayout_tools.eval`, the batch backend and the test suite) keeps
-resolving unchanged.
+:mod:`klayout_tools.eval`, the batch backend, tests) keeps resolving unchanged.
 
 :class:`PlaceAndRouteError` and the validation-only tables
 (``_MACRO_ORIENTATIONS``, ``_FLOORPLAN_METHOD_FIELDS``,
@@ -34,6 +33,7 @@ from .pdk import descriptor_views, lef_files
 from .pdk_cells import resolve_liberty_for_cell_library
 from .place_and_route_clock import validate_clock_constraints
 from .place_and_route_groups import reject_unknown_group_keys, validate_group_geometry
+from .place_and_route_hints import NETLIST_HINT
 from .place_and_route_layers import (
     _ROUTING_LAYER_STACK as _ROUTING_LAYER_STACK,
 )
@@ -447,11 +447,7 @@ def _resolve_netlist(netlist: Any, request_dir: str) -> str:
         raise PlaceAndRouteError("request.netlist must be a non-empty string")
     path = netlist if os.path.isabs(netlist) else os.path.join(request_dir, netlist)
     if not os.path.isfile(path):
-        raise PlaceAndRouteError(
-            f"netlist not found: {netlist} (klt synthesize writes its netlist "
-            "under a per-run directory .klt/synthesize/<run_id>/ unless its "
-            "request sets outputs.dir, which gives the netlist a stable path)"
-        )
+        raise PlaceAndRouteError(f"netlist not found: {netlist} ({NETLIST_HINT})")
     try:
         with open(path, "rb"):
             pass
