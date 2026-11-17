@@ -48,6 +48,17 @@ klt gen --pdk-pcell <library>/<cell> [--params <path-or-inline>] [--pdk <variant
   that one resolver, never a private lookup. Omitting both falls back to
   `$PDK`/`$PDK_ROOT`, same as `klt pdk find` with no flags.
 - `--cell-name` — name for the generated top cell (default: `<generator>_0`).
+  For generators that emit a PCell child — every generator except
+  `asap7_finfet` and `asap7_tap` (which flatten their output into the top
+  cell and carry no child) and `bjt_array` on sg13g2 (which instantiates the
+  PDK's own HBT cell under its PDK name, independent of `--cell-name`) —
+  that child is named `<cell-name>__core` (since v0.9.0, issue #4251;
+  earlier releases left it as the library cell name, e.g. `mos_array`). The
+  suffix keeps the children of streams generated under different
+  `--cell-name`s from merging when they are read into one `Layout`. This
+  naming is part of `klt gen`'s documented output: a change to it is a
+  CHANGELOG-recorded event, since structure names are written into the
+  stream.
 - `-o`/`--output` — output GDS/OASIS path (default: `<cell_name>.gds`, written
   to the current directory). Format (`.gds`/`.oas`) is inferred from the
   extension, matching `klt render`'s auto-detection posture. The containing
@@ -1563,7 +1574,7 @@ and 4).
 | `inner_height_um`        | double | `3.0`   | Height of the protected inner area (µm). Must be `> 0`. |
 | `ring_width_um`          | double | `0.42`  | Tap ring thickness (µm). Must be `>= 0.42`. |
 | `contacts_per_side`      | int    | `4`     | Tap contacts evenly spaced along each ring side, applied uniformly to all four sides unless overridden per-axis below. Must be `>= 1`. |
-| `contacts_per_side_ns`   | int    | `0`     | Tap contacts on the N/S (top/bottom) sides, spaced along `inner_width_um`. `0` (the default) inherits `contacts_per_side`, so existing single-scalar callers are unaffected. Must be `>= 0`. |
+| `contacts_per_side_ns`   | int    | `0`     | Tap contacts on the N/S (top/bottom) sides, spaced along `inner_width_um`. `0` (the default) inherits `contacts_per_side`. Must be `>= 0`. |
 | `contacts_per_side_ew`   | int    | `0`     | Tap contacts on the E/W (left/right) sides, spaced along `inner_height_um`. `0` (the default) inherits `contacts_per_side`. Must be `>= 0`. |
 | `ring_gap_side`          | string | `""`    | Cut one routing opening through the ring on this side: `""` (a closed ring), `"N"`, `"S"`, `"E"` or `"W"`. See "Ring routing openings" below. |
 | `ring_gap_um`            | double | `0.0`   | Length of the opening along its side (µm). Required (and must be `>= 0.4`, the minimum same-layer spacing) when `ring_gap_side` is set; must be `0` otherwise. |

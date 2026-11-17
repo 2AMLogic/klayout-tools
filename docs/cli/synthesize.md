@@ -73,6 +73,24 @@ binding for Yosys the way `klayout.db` already is for `klt lvs`/`klt
 extract`. Requires a `yosys` binary on `$PATH`; a missing binary is a clear,
 actionable error (exit 1), never a traceback.
 
+**Pinned child environment: `COLUMNS`.** klt spawns Yosys with an explicit
+environment that is a copy of its own with `COLUMNS` pinned to `4096`
+(issue #5780). Yosys drives `yosys-abc` as an interactive REPL over pipes
+and synchronizes on abc echoing the `source <tmpdir>/…/abc.script` command
+line; because that echo goes through readline with stdout a pipe (no
+window size to query), it falls back to 80 columns. When the echoed line's
+width — `len($TMPDIR) + 43` — reaches column 79 (i.e. `$TMPDIR` is 36+
+characters), readline wraps the echo: it arrives as a prompt, a carriage
+return, and only the tail of the path, with no `source ` token. Yosys's
+handshake then never arms and both processes block until the run's
+`yosys_timeout_s` watchdog kills it with a bare "did not complete within
+Ns" — the run log's last line is
+``2.22.1. Extracting gate netlist of module `…' to `<abc-temp-dir>/input.blif'.``.
+The pin removes the length sensitivity entirely (mapping results are
+unchanged); an inherited `COLUMNS=80` from an interactive shell is
+overridden for the child, everything else (`PATH`, `TMPDIR`, PDK vars) is
+inherited unchanged.
+
 **Which `yosys` matters.** If the `yosys` resolved from `$PATH` is a YoWASP
 (WASI-sandboxed) build — e.g. `yowasp-yosys`, commonly pulled in by `pip
 install --user` and installed to `~/.local/bin/yosys`, shadowing a native
@@ -560,17 +578,30 @@ downstream reader — is never touched. The netlist file is only rewritten
 when something actually changed, so the common case (no `signed` at all)
 leaves it untouched, mtime included.
 
-### Source-path normalization (issue #4872)
+### Source-path normalization (issue #4872, #5594)
 
 The written netlist depends only on the inputs, not on the directory the
 request ran in. Yosys names some internal nets after the path it read the
-source from (`\f$func$/abs/dir/f.v:3$2.x`, typical of sv2v output with
-functions and casts); after `write_verilog`, `run_synthesize` drops each
-source's directory prefix, leaving `\f$func$f.v:3$2.x`. This runs before
-`netlist_sha256` is computed, so two runs of the same request from different
-directories produce byte-identical `*_synth.v` and equal `netlist_sha256`, and
-no host path leaks into a committed netlist. A netlist containing no such
-path is never rewritten. No JSON field changes.
+source from (`\f$func$<dir>/f.v:3$2.x`, typical of sv2v output with
+functions and casts), and it records whichever spelling the generated
+script used: the absolute path for sources outside the run's repo root,
+the repo-relative path (issue #1844) for sources inside it. After
+`write_verilog`, `run_synthesize` drops each source's directory prefix in
+both spellings, leaving `\f$func$f.v:3$2.x`. This runs before
+`netlist_sha256` is computed, so two runs of the same request from
+different directories — in or out of any git repository, at any depth
+inside one, and with a defaulted (random) `run_id` — produce
+byte-identical `*_synth.v` and equal `netlist_sha256`; `netlist_sha256`
+is a function of the inputs and is reproducible across build roots. No
+host path, absolute or repo-relative, leaks into a committed netlist. A
+netlist containing no such path is never rewritten. No JSON field
+changes.
+
+One-time note for callers upgrading: `netlist_sha256` values recorded by
+in-repo runs before the #5594 fix embedded the repo-relative path and
+change once with this release; digests recorded by out-of-repo runs are
+unchanged. A freshness check (`signoff --check`, issue #4313) should
+re-record its digest from a run of this version.
 
 ## PDK / liberty resolution
 

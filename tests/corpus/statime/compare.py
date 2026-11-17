@@ -51,7 +51,7 @@ def _ensure_binary() -> str:
 
 def _resolve_liberty() -> str:
     sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
-    from klayout_tools.pdk import find_pdk  # noqa: E402
+    from klayout_tools.pdk import find_pdk
 
     pdk = find_pdk(variant="sky130A")
     libs_ref = pdk["assets"]["libs_ref"]
