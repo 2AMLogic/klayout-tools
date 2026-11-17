@@ -264,6 +264,7 @@ from ._openroad_engine import (
     _timing_status,
     _timing_violation_report_lines,
     container_runtime_hint,
+    mount_namespace_hint,
     write_sdf_line,
 )
 from ._paths import (
@@ -1353,7 +1354,7 @@ def _run_corner_session(
         if port_errors:
             raise PostRouteStaError(_port_check_error_message(port_errors))
         if completed.returncode != 0:
-            raise PostRouteStaError(_engine_error_message(completed))
+            raise PostRouteStaError(_engine_error_message(completed, pdk_info))
 
         metrics = _read_metrics(metrics_path)
     setup_violation_count = _count_violations(
@@ -3971,7 +3972,9 @@ def _spef_name_map(text: str) -> dict[str, str]:
 # --------------------------------------------------------------------------- #
 
 
-def _engine_error_message(completed: _OpenRoadResult) -> str:
+def _engine_error_message(
+    completed: _OpenRoadResult, pdk_info: dict[str, Any] | None = None
+) -> str:
     """Build an actionable error message from a failed OpenROAD run.
 
     Prefers a bracketed ``[ERROR ...]`` diagnostic OpenROAD itself printed
@@ -3983,10 +3986,14 @@ def _engine_error_message(completed: _OpenRoadResult) -> str:
     :func:`~klayout_tools._openroad_engine.container_runtime_hint` is
     appended as a further ``--`` clause when the captured output shows the
     engine never really ran at all because its container runtime was
-    unreachable (issue #2632) -- the same append-a-recognized-hint structure
-    ``place_and_route.py`` already uses for ``_mount_namespace_hint`` (issue
-    #1868). A failure carrying neither signature keeps exactly its previous
-    message."""
+    unreachable (issue #2632). :func:`~klayout_tools._openroad_engine.
+    mount_namespace_hint` is appended likewise when the captured output
+    names a file this process can still read that ``openroad`` reported it
+    could not open -- the container-wrapper mount gap (issue #1868; shared
+    helper, issue #5753), with ``pdk_info`` feeding the PDK-specific aside
+    when the caller has one. Both use the same append-a-recognized-hint
+    structure ``place_and_route.py`` already uses. A failure carrying
+    neither signature keeps exactly its previous message."""
     bracket_lines: list[str] = []
     bare_error_lines: list[str] = []
     for stream in (completed.stdout or "", completed.stderr or ""):
@@ -4009,6 +4016,13 @@ def _engine_error_message(completed: _OpenRoadResult) -> str:
     hint = container_runtime_hint(completed)
     if hint is not None:
         message = f"{message} -- {hint}"
+    # Issue #1868/#5753: an "cannot open/read '<abs path>'" failure for a
+    # path this process can itself read is a container-wrapper mount gap,
+    # not a missing file. Appended as a further `--` clause, the same
+    # recognized-hint structure `container_runtime_hint` above uses.
+    mount_hint = mount_namespace_hint(completed, pdk_info)
+    if mount_hint is not None:
+        message = f"{message} -- {mount_hint}"
     # Issue #2635: `ORD-2013` names the instance and the LEF master but
     # nothing about which request field would have supplied it -- the one
     # failure mode a caller with a hard macro and no `request.macros` entry
