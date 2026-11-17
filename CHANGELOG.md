@@ -14,6 +14,17 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt sim --fail-fast-probe` reads the same `.spiceinit` as the corners it
+  screens** (#6047, 2026-11-17): `_run_corner` pins the thread count by writing
+  a run-directory `.spiceinit`, which *replaces* `$HOME/.spiceinit`, but the
+  probe was handed the unpinned init and so fell through to `$HOME` -- an init
+  setting that changes device interpretation (e.g. `set wnflag=1`) could apply
+  to the probe and not the corners, or the reverse. The probe now receives the
+  same thread-pinned init lines (pin first, then any `options.ngspice_init`).
+  When no pin applies (a single local corner with no explicit
+  `options.threads_per_worker`) nothing is written, as before. No new request
+  option or response field.
+
 - **`klt sim` gains `analysis.post_commands`** (#6080, 2026-11-17): an additive,
   opt-in list of control commands (first token `linearize` or `fft` only) that a
   scalar `tran` analysis emits after the analysis, `write` and `linearize`
@@ -22,7 +33,6 @@ not `klt --version`, if you need to detect this kind of drift. See
   for non-`tran`, `analysis_steps[]`, `engine: "xyce"`, non-`expr`/`spice`
   measurements, and malformed entries. A request using it needs a batch runner
   at klt 0.9.3 or later. Requests without the field render a byte-identical deck.
-
 - **`klt sim` refuses `measurements[].transfer` declared beside `noise`**
   (#5695, 2026-11-14): the mutually exclusive measurement forms each carried a
   hand-maintained list of "every *other* exclusive form", and `transfer`'s
@@ -72,6 +82,27 @@ not `klt --version`, if you need to detect this kind of drift. See
   instance's parameters are re-emitted in the canonical unspaced spelling —
   `w = 1` comes back as `w=1`, equivalent to ngspice. No JSON field is added,
   renamed or removed; no `schema_version` bump.
+- **`klt extract --pins` orders the top `.SUBCKT` header by component label,
+  not whole name** (#5534, 2026-11-13): `--pins`' documented ordering rule
+  (#5255 — declared pins first, in the given order) compared each header token
+  as a whole string, while the same flag's *matching* rule is per component
+  label (#1687 — a net matches when any of its comma-joined labels is
+  declared). On a layout where KLayout joins labels, a pin promoted through a
+  component label (`Y|ybar` matching declared `ybar`) was therefore never
+  hoisted, so the header was neither the declared order nor the pre-#5255
+  order. Ordering now uses the same any-component-label match as promotion: a
+  joined-label port is hoisted into the slot of the earliest declared name it
+  carries, and a port carrying two declared names is emitted once, at the
+  earlier. The token's text is unchanged (`Y|ybar` moves but is still written
+  `Y|ybar`), ports matching no declared name keep their relative order, and
+  without `--pins` the written netlist is byte-identical to before.
+  **Re-baseline note**: this moves the header once more for joined-label
+  layouts, so a committed extracted netlist produced with `--pins` on such a
+  layout needs regenerating once; after that the header depends only on
+  `--pins`. `docs/cli/extract.md` also now records that *without* `--pins` the
+  top-level port order is the extractor's own and is not a cross-build
+  contract, alongside the existing `$N` caveat (#1063). Additive; no
+  `schema_version` bump.
 
 - **`klt mcp serve` serves the `docs/schemas/` JSON contract as MCP
   resources** (#5420, 2026-11-13): the server now advertises the resources
