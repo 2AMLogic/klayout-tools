@@ -237,7 +237,7 @@ def _print_canonicalize_text(payload: dict) -> None:
     )
 
 
-def add_canonicalize_parser(subparsers, add_format_arg) -> None:  # type: ignore[no-untyped-def]
+def add_canonicalize_parser(subparsers, add_format_arg) -> None:
     """Register ``klt evidence canonicalize`` (kept out of ``cli/parser.py``,
     which is size-ratcheted).
 
