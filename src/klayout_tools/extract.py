@@ -2275,11 +2275,10 @@ def run_extract(
                     "name": str, "pin": bool, "device_count": int,
                     # Issue #1540: unique across every net *object* in this
                     # circuit, unlike "name" (several distinct nets can
-                    # collide on one name -- see the "nets[]" schema note
-                    # below).
+                    # collide on one name -- see the "nets[]" schema note below).
                     "net_id": int,
-                    # 0-based `.SUBCKT` port position (`None` if not a
-                    # promoted pin) -- issue #1540.
+                    "structural_id": str | None,  # issue #5735 (see below/docs)
+                    # 0-based `.SUBCKT` port position (`None` if not a promoted pin)
                     "pin_index": int | None,
                     # Drawn-label geometry naming this net -- issue #1540.
                     "label_positions_um": [
@@ -2466,8 +2465,8 @@ def run_extract(
     collisions from internally-repeated sub-cells" section for a worked
     example (a small ring fixture) and :func:`_net_label_positions`'s own
     docstring for the full rationale. Purely additive -- every existing
-    ``nets[]`` consumer that reads only ``name``/``pin``/``device_count`` is
-    unaffected.
+    ``nets[]`` consumer reading only ``name``/``pin``/``device_count`` is unaffected.
+    (``nets[].structural_id`` #5735: docs/cli/extract.md carries the contract.)
 
     ``device_classes`` is what the *deck* is structurally capable of
     recognising (:attr:`klayout_tools.decks.ExtractionDeck.device_classes`)
@@ -3905,11 +3904,12 @@ def _canonicalize_extract_report_for_rerun_diff(
     differences as ``status: "drifted"``:
 
     - every ``net_id`` (``Net.cluster_id``, KLayout's own internal counter)
-      is stripped wherever it appears, at any nesting depth -- it is never
-      itself part of the extracted *content*, only a same-run handle onto a
-      net object (see this module's own many "resolved by net_id, not by
-      name" docstrings, e.g. :func:`_net_identity_name`,
-      :func:`_mom_ground_entry_for_crosscheck`);
+      and ``structural_id`` key (issue #5735's per-net handle -- stripped
+      so pre-field committed reports stay comparable) is stripped wherever
+      it appears, at any nesting depth -- it is never itself part of the
+      extracted *content*, only a same-run handle onto a net object (see
+      this module's many "resolved by net_id, not by name" docstrings, e.g.
+      :func:`_net_identity_name`, :func:`_mom_ground_entry_for_crosscheck`);
     - every anonymous ``\\$<n>`` net-name spelling is rewritten to the
       structural identity :func:`_anonymous_net_name_map` derives for it
       (that net's own sorted ``<device>.<terminal>`` attachment list), so
@@ -3983,8 +3983,8 @@ def _canonicalize_extract_report_for_rerun_diff(
 def _normalized_netlist_sha256(devices: list[Any], nets: list[Any]) -> str:
     """Issue #3407: SHA-256 hex digest of this run's flat ``devices[]`` /
     ``nets[]`` connectivity with KLayout's anonymous-net numbering
-    normalized away -- the same ``net_id`` strip, ``\\$<n>`` structural
-    rewrite and ``(name, attachment key)`` re-sort
+    normalized away -- the same ``net_id``/``structural_id`` strip,
+    ``\\$<n>`` structural rewrite and ``(name, attachment key)`` re-sort
     :func:`_canonicalize_extract_report_for_rerun_diff` applies, serialized
     as sorted-key compact JSON. Unlike ``netlist_sha256`` (the written
     ``.spice`` bytes, which embed the ``$N`` counter) it is stable across
@@ -4021,17 +4021,17 @@ def _parasitics_net_attachment_key(entry: Mapping[str, Any]) -> str:
 
 def _strip_net_id_and_rewrite_names(value: Any, name_map: Mapping[str, str]) -> Any:
     """Recursively rebuild ``value`` (a JSON-decoded report, or any nested
-    piece of one), dropping every ``net_id`` key and passing every string
-    leaf through :func:`_rewrite_net_name` -- the two bookkeeping
-    normalizations :func:`_canonicalize_extract_report_for_rerun_diff`
-    applies report-wide rather than at a fixed set of paths, so a new report
-    field carrying a net name or a ``net_id`` needs no separate registration
-    here to be covered."""
+    piece of one), dropping every ``net_id`` and ``structural_id`` key
+    (leaving the #5735 per-net handle in would shift the digest and flag
+    every pre-field committed report as drifted) and passing every string
+    leaf through :func:`_rewrite_net_name` -- the bookkeeping normalizations
+    :func:`_canonicalize_extract_report_for_rerun_diff` applies report-wide,
+    so a new net-name-carrying field needs no separate registration here."""
     if isinstance(value, dict):
         return {
             key: _strip_net_id_and_rewrite_names(val, name_map)
             for key, val in value.items()
-            if key != "net_id"
+            if key not in ("net_id", "structural_id")
         }
     if isinstance(value, list):
         return [_strip_net_id_and_rewrite_names(item, name_map) for item in value]
