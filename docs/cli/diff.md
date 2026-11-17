@@ -3,7 +3,11 @@
 Compare two GDSII or OASIS layout streams and report whether they hold the
 same geometry, labels and hierarchy. Built for regenerate-and-compare
 (`--check`) gates: DRC/LVS status cannot tell "same layout" from "different
-layout that also passes", and a raw byte hash trips on stream timestamps.
+layout that also passes", and a raw byte hash trips on stream timestamps —
+and, across a `klt` upgrade, on record order within a cell. See
+[`docs/json-contract.md`](../json-contract.md#stream-stability-contract-layout-stream-bytes-are-not-stable-across-klt-versions)
+→ "Stream-stability contract" for why a byte-compare gate is within-version
+only, and why this verb is the supported cross-upgrade gate.
 
 ```
 klt diff <file_a> <file_b> [--top <cell>] [--max-items N] [--format text|json]
@@ -84,6 +88,14 @@ the same way.
   a SHA-256 over the normalized content. **Equal `canonical_hash` with
   different `stream_sha256` means a timestamp/order-only difference** (the run
   exits `0`, `stream_identical` is `false`).
+- **`canonical_hash` is not the signoff geometry digest (issue #5551).** It is
+  this command's own normalization, meaningful only when compared with another
+  `canonical_hash` from `klt diff`. It is a *different* value from the digest
+  `klt signoff --attest 2 --regenerated-hash ... --hash-kind geometry` is
+  graded against (and carries no `sha256:` prefix), so feeding it to that flag
+  grades `stale_artifact`. Use `klt stats --geometry-digest --format json | jq -r
+  .geometry_digest` for that — see [`docs/cli/stats.md`](stats.md) → "Geometry
+  digest".
 - Shape items are `box` (`bbox`), `polygon` (`hull`, `holes`), `path`
   (`width`, `bgn_ext`, `end_ext`, `round`, `points`) or `text` (`string`, `x`,
   `y`, `rotation`, `mirror`), all in database units. Instance items carry

@@ -325,7 +325,16 @@ Fixture acceptance criteria (each is the observable the PR must show):
    result side by side; any disagreement carries a stated reason. **This
    live step is not performable in this repo's CI** and must be reported as
    such, with the run tracked in the implementation issue, not asserted from
-   the synthetic fixtures.
+   the synthetic fixtures. **Done (#5346):** the live run is recorded in
+   [`erc-substrate-continuity-live-run.md`](erc-substrate-continuity-live-run.md)
+   — ERC and `klt lvs`/`klt extract` agree on the committed LDO core, with no
+   disagreement to explain. Two corrections that record establishes: the
+   `hints.short_nets` half of this fixture is not an engine observable (it is
+   a request-side input, `null` on the live run), so the agreement test reads
+   `klt extract` net identity and LVS `net_correspondence` instead; and since
+   piece D (#5345) declared `substrate_isolation` for `sg13g2`/`sg13cmos5l`, a
+   **drawn** `nbulay` under `--deck` is *evaluated*, not disclosed — the
+   disclosure path on that layout is the run that names no deck.
 6. **Undecidable PDK keeps disclosure.** For asap7 (no drawn taps) and any
    family where rule 2/3 of §4 do not hold, the report keeps
    `inapplicable` with the refined reason and a non-empty `missing` list.

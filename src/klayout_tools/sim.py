@@ -105,6 +105,7 @@ from . import (
     sim_energy,
     sim_eye,
     sim_injected,
+    sim_mismatch_declarations,
     sim_mismatch_gate,
     sim_noise,
     sim_op_args,
@@ -142,11 +143,11 @@ from . import sim_adapt as sim_adapt
 from . import sim_analysis_overrides as _sao
 from . import sim_bin_range as sim_bin_range
 from . import sim_cause as sim_cause
+from . import sim_environment_report as sim_env_report
 from . import sim_op_check as sim_op_check
 from . import sim_peak_rss as sim_peak_rss
 from . import sim_provenance as sim_provenance
 from . import sim_staging as sim_staging
-from ._batch_common import apply_unrun_signal
 from ._jsonnum import is_int, is_number
 from ._paths import (
     _load_request_json,
@@ -193,7 +194,7 @@ from .sim_batch_async import (
     shard_scoped_points,
 )
 from .sim_batch_async import submit_only as _submit_batch_only
-from .sim_batch_features import attach_models_lib_comparison, pop_remote_diagnostics
+from .sim_batch_features import finalize_batch_remote, pop_remote_diagnostics
 from .sim_convergence_retry import is_retryable_convergence_failure, note_not_retried
 
 #: Moved to the ``sim_corner_*`` modules (issue #5428) so this module stays
@@ -225,7 +226,18 @@ from .sim_echo_messages import echo_unsupported_message
 from .sim_expr_hint import attach_expr_runner_hint as _attach_expr_runner_hint
 from .sim_osdi_pin import osdi_pdk_root_pin
 from .sim_osdi_pin import resolve_osdi_preload as _resolve_osdi_preload
+from .sim_osdi_settle import (
+    finalize_osdi_preload,
+    osdi_runner_environment_fields,
+    resettle_osdi_preload_for_local,
+)
 from .sim_pdk_ambiguity import warn_pdk_ambiguity as _warn_pdk_ambiguity
+from .sim_pin_settle import (
+    check_local_engine_version_pin,
+    check_offhost_engine_version_pin,
+    check_pdk_version_pin_early,
+    settle_version_pins,
+)
 from .sim_process_legs import attach_process_leg_check
 
 from .sim_analysis_overrides import (  # isort: skip
@@ -1377,101 +1389,6 @@ def _check_engine_version_pin(
     )
 
 
-def _check_local_engine_version_pin(
-    pin: tuple[int, ...] | None, backend: str, engine: str, binary: str
-) -> None:
-    """Enforce the pin before any corner runs, where this process can see the
-    engine (local backends); a no-op when unset or for off-host backends."""
-    if pin is None or backend in _OFFHOST_BACKENDS:
-        return
-    _check_engine_version_pin(
-        pin,
-        _probe_engine_version(engine, binary),
-        engine,
-        where="the local engine probe",
-    )
-
-
-def _check_offhost_engine_version_pin(
-    pin: tuple[int, ...] | None,
-    backend: str,
-    engine: str,
-    engine_version: str | None,
-) -> None:
-    """Enforce the pin for off-host backends. No pre-submit probe exists for a
-    remote/batch runner, so it is checked against the version its reports
-    carried (after the run)."""
-    if pin is None or backend not in _OFFHOST_BACKENDS:
-        return
-    _check_engine_version_pin(
-        pin, engine_version, engine, where=f"the {backend} runner's report"
-    )
-
-
-def _validate_pdk_version_pin(models: Any) -> str | None:
-    """The request's ``models.pdk_version`` pin (issue #4046), ``None`` when
-    unset. Same value forms as ``klt pdk check --expect-version``."""
-    if not isinstance(models, dict):
-        return None
-    pin = models.get("pdk_version")
-    if pin is None:
-        return None
-    if not isinstance(pin, str) or not pin.strip():
-        raise SimError(
-            f"request.models.pdk_version must be a non-empty string (got {pin!r})"
-        )
-    return pin.strip()
-
-
-def _check_pdk_version_pin(pin: str | None, models: Any, backend: str) -> None:
-    """Enforce ``models.pdk_version`` before any corner runs (issue #4046).
-
-    Local backends resolve the PDK the way ``provenance.pdk`` does and fail
-    closed (``pdk_version_unmet``) on ``mismatch``/``unknown`` or when no PDK
-    resolves. Off-host backends reject the field: the worker-side comparison
-    is tracked in #3462, and silently passing would hide drift."""
-    if pin is None:
-        return
-    if backend in _OFFHOST_BACKENDS:
-        raise SimError(
-            f"models.pdk_version is not supported for backend {backend!r}: "
-            "the PDK is resolved on the runner, and the worker-side pin check "
-            "is not implemented yet (see issue #3462) -- use backend 'local' "
-            "or 'local-parallel', or drop the pin"
-        )
-    variant = models.get("pdk")
-    root = models.get("pdk_root")
-    if not (variant or root):
-        raise SimError(
-            f"models.pdk_version pins {pin!r} but no PDK is named: set "
-            "models.pdk and/or models.pdk_root so the installed revision can "
-            "be checked",
-            code=PDK_VERSION_UNMET_CODE,
-        )
-    try:
-        found = find_pdk(variant=variant, root=root, expect_version=pin)
-    except PdkNotFoundError as exc:
-        raise SimError(
-            f"models.pdk_version pins {pin!r} but the PDK could not be resolved: {exc}",
-            code=PDK_VERSION_UNMET_CODE,
-        ) from exc
-    expectation = found.get("version_expectation") or {}
-    status = expectation.get("status")
-    if status == "match":
-        return
-    installed = expectation.get("installed")
-    if status == "mismatch":
-        detail = f"installed PDK is {installed!r}"
-    elif installed:
-        detail = f"installed PDK {installed!r} could not be compared"
-    else:
-        detail = "installed PDK identity could not be determined"
-    raise SimError(
-        f"pinned PDK unavailable: request requires {pin!r}; {detail}",
-        code=PDK_VERSION_UNMET_CODE,
-    )
-
-
 def _probe_engine_version(engine: str, binary: str) -> str | None:
     """Ask the local engine binary for its version without simulating."""
     argv = [binary, "--version"] if engine == "ngspice" else [binary, "-v"]
@@ -1572,14 +1489,14 @@ def apply_engine_host(
     """Stamp ``environment.engine_host``, keep ``ngspice_binary`` honest (#3110):
     local changes nothing else; off-host ``"worker"`` makes it the worker's
     path and moves the submitter's to ``client_ngspice_binary``. Batch adds
-    ``models_lib_comparison`` (#5321)."""
+    ``models_lib_comparison`` (#5321) and the sharded roll-ups (#5522)."""
     if backend not in _OFFHOST_BACKENDS:
         environment["engine_host"] = "local"
         return
     environment["engine_host"] = "worker"
     environment["client_ngspice_binary"] = client_ngspice_binary
     environment["ngspice_binary"] = _worker_ngspice_binary(environment.get("remote"))
-    attach_models_lib_comparison(environment, backend)
+    finalize_batch_remote(environment, backend)
 
 
 #: Environment-variable override for the ngspice binary (issue #2423), the
@@ -2876,7 +2793,7 @@ def _dispatch_deck_request(
     # before anything runs; off-host ones are checked against the report below.
     engine_version_pin = _validate_engine_version_pin(request)
     if engine_version_pin is not None and resolved_backend not in _OFFHOST_BACKENDS:
-        _check_local_engine_version_pin(
+        check_local_engine_version_pin(
             engine_version_pin,
             resolved_backend,
             "ngspice",
@@ -2905,7 +2822,7 @@ def _dispatch_deck_request(
         dry_run=dry_run,
         collect_partial=collect_partial,
     )
-    _check_offhost_engine_version_pin(
+    check_offhost_engine_version_pin(
         engine_version_pin,
         resolved_backend,
         "ngspice",
@@ -3311,10 +3228,10 @@ def _prepare_sim_request(
             "image-baked `.osdi` as `$PDK_ROOT/<rel>` (or under "
             "models.pdk_root) so the runner resolves it"
         )
-    osdi_preload, osdi_runner_environment = _finalize_osdi_preload(
+    osdi_preload, osdi_runner_environment = finalize_osdi_preload(
         options,
         request_dir,
-        backend,
+        backend in _OFFHOST_BACKENDS,
         osdi_preload,
         osdi_runner_resolved,
         pdk_root=osdi_pdk_root,
@@ -3323,7 +3240,7 @@ def _prepare_sim_request(
     # where this process can see the engine (local backends); off-host
     # backends are checked against the report's `engine_version` afterwards.
     engine_version_pin = _validate_engine_version_pin(request)
-    _check_local_engine_version_pin(
+    check_local_engine_version_pin(
         engine_version_pin, backend, engine, ngspice_binary or XYCE_BINARY
     )
     # Issue #4438: an OSDI ABI the local ngspice cannot load is refused up
@@ -3331,7 +3248,11 @@ def _prepare_sim_request(
     _check_local_osdi_abi(osdi_preload, backend, engine, ngspice_binary or XYCE_BINARY)
     # Issue #4046: a `models.pdk_version` pin is checked the same way, before
     # any corner runs; off-host backends reject it rather than pass silently.
-    _check_pdk_version_pin(_validate_pdk_version_pin(models), models, backend)
+    # Issue #5500: unless the off-host backend is a host default a late yield
+    # may still step back to `local` -- then only the pin's *value* is
+    # validated here and the comparison waits for `settle_version_pins` at
+    # the last yield, so a host default cannot refuse a valid local run.
+    check_pdk_version_pin_early(models, backend, backend_from_host_default)
     timeout_s = options.get("timeout_s", DEFAULT_TIMEOUT_S)
     # Issue #3337: the complex-vector sidecar is the result, so declared
     # vectors force artifacts on (validated in full below).
@@ -3597,6 +3518,9 @@ def _prepare_sim_request(
         models.get("pdk"),
         backend=backend,
         explicit_points=explicit_points_wire is not None,
+        gate_context=sim_mismatch_declarations.gate_context(
+            models, request_dir, corner_points, _resolve_lib_ref
+        ),
     )
 
     # Issue #3919: `.subckt` override of the include closure. Applied on top of
@@ -3685,8 +3609,31 @@ def _prepare_sim_request(
     # this process does not reconcile against a local `CornerPoint.corner_id`,
     # so it stays rejected, mirroring the existing `hosts > 1` + `remote`
     # restriction above rather than inventing a new error shape.
+    offhost_before_yield = backend in _OFFHOST_BACKENDS
     backend = _yield_host_default_backend(
         backend, backend_from_host_default, reason_ok=not resume
+    )
+    # Issue #5492: that yield can land a run whose OSDI list was settled
+    # off-host back on this host -- re-settle it against what executes.
+    yielded_on_host = offhost_before_yield and backend not in _OFFHOST_BACKENDS
+    # A conditional expression, not an `if`: a new branch here would push this
+    # function past its `complexity-baseline.json` value without sign-off.
+    osdi_preload, osdi_runner_environment = (
+        resettle_osdi_preload_for_local(
+            request, request_dir, backend, engine, ngspice_binary or XYCE_BINARY
+        )
+        if yielded_on_host and osdi_runner_environment
+        else (osdi_preload, osdi_runner_environment)
+    )
+    # Issue #5500: the same yield decides which engine and PDK the
+    # `engine_version` / `models.pdk_version` pins must be checked against.
+    settle_version_pins(
+        request,
+        backend,
+        engine,
+        ngspice_binary or XYCE_BINARY,
+        engine_version_pin,
+        settle=yielded_on_host,
     )
     if resume and backend == "remote":
         raise SimError(
@@ -3911,8 +3858,34 @@ def _run_sim_corners(
     # A single-unit run under a host default stays here: one corner does not
     # repay a Spot instance's minutes of boot, and it is exactly the "probe
     # one corner locally" case 2am#1004's ruling keeps local.
+    offhost_before_yield = backend in _OFFHOST_BACKENDS
     backend = _yield_host_default_backend(
         backend, backend_from_host_default, reason_ok=len(dispatch_points) > 1
+    )
+    # Issue #5492: the unit count is only known here, so this is the one yield
+    # that can move the run on-host after the OSDI list was already settled
+    # for an off-host backend -- re-settle it against the backend that runs.
+    yielded_on_host = offhost_before_yield and backend not in _OFFHOST_BACKENDS
+    osdi_preload, osdi_runner_environment = (  # expression, see the resume site
+        resettle_osdi_preload_for_local(
+            request, request_dir, backend, engine, ngspice_binary or XYCE_BINARY
+        )
+        if yielded_on_host and osdi_runner_environment
+        else (osdi_preload, osdi_runner_environment)
+    )
+    # Issue #5500: this is the *last* yield, so `backend` is final here. Both
+    # version pins are settled against it when the yield just moved the run
+    # on-host, and the `models.pdk_version` comparison deferred by
+    # `check_pdk_version_pin_early` is due now for a run that really is
+    # leaving this host -- either way before anything is dispatched.
+    settle_version_pins(
+        request,
+        backend,
+        engine,
+        ngspice_binary or XYCE_BINARY,
+        engine_version_pin,
+        settle=yielded_on_host
+        or (backend_from_host_default and backend in _OFFHOST_BACKENDS),
     )
     # Issue #2977: which backend actually ran, and where the request for it
     # came from -- so a host-policy audit can spot a `local` run although
@@ -4272,7 +4245,7 @@ def _run_sim_corners(
         if backend_engine_version is not None
         else loaded_engine_version
     )
-    _check_offhost_engine_version_pin(
+    check_offhost_engine_version_pin(
         engine_version_pin, backend, engine, engine_version
     )
 
@@ -4432,25 +4405,16 @@ def _run_sim_corners(
     )
     environment.update(_threads_environment(effective_threads))
     environment.update(_corner_coverage_environment(request, corner_points))
-    # Issue #2799: `netlist_sha256` covers only the top-level file, so also
-    # pin the resolved `.include`/`.inc` closure (same resolver the
-    # off-host backends stage with). Additive; an unresolvable closure is
-    # disclosed rather than failing the report.
-    try:
-        environment["netlist_closure"] = sim_staging.netlist_closure(
+    environment.update(
+        sim_env_report.netlist_closure_environment(
             request, netlist_path, repo_root=repo_root
         )
-    except sim_staging.IncludeStagingError as exc:
-        environment["netlist_closure_error"] = str(exc)
+    )
     # Additive/optional (issue #3111): the declared solver options, verbatim,
     # so the setting is part of the report's evidence.
     environment.update({"ngspice_options": ngspice_options} if ngspice_options else {})
     _stamp_netlist_identity(environment, netlist_identity, netlist_identity_error)
-    if netlist_source is not None:
-        # Additive/optional: only present when the request declares it, so
-        # existing consumers of a request that omits netlist_source see an
-        # unchanged environment block (see docs/cli/sim.md).
-        environment["netlist_source"] = netlist_source
+    environment.update(sim_env_report.netlist_source_environment(netlist_source))
     # Additive/optional, one key each and only when the request declared that
     # kind of input: `osdi_preload` (issue #2513) and `corner_section_libs`
     # (issue #2522 -- `models_lib_sha256` alone no longer pins "which models
@@ -4467,7 +4431,7 @@ def _run_sim_corners(
     # Additive/optional (issue #3819): `.osdi` entries the executing host
     # resolved itself -- named, never hashed; the worker's own report is
     # the source of what actually loaded.
-    environment.update(_osdi_runner_environment_fields(osdi_runner_environment))
+    environment.update(osdi_runner_environment_fields(osdi_runner_environment))
     # Additive/optional (issue #2668): `staged_model_inputs`, only present
     # when `options.stage_model_inputs` staged model inputs for an off-host
     # backend -- see `_preflight_staged_model_inputs`.
@@ -4491,18 +4455,18 @@ def _run_sim_corners(
             repo_root=repo_root,
         )
     )
-    if remote_environment is not None:
-        # Additive/optional (`remote`/`batch` only): docs/cli/sim.md.
-        environment["remote"] = apply_unrun_signal(
+    environment.update(
+        sim_env_report.remote_entry_environment(
             remote_environment,
-            corners_lost,
-            artifacts_dir,
-            checkpoint_path if checkpoint_retained else None,
+            corners_lost=corners_lost,
+            artifacts_dir=artifacts_dir,
+            checkpoint_path=checkpoint_path if checkpoint_retained else None,
         )
+    )
     apply_engine_host(
         environment, backend=backend, client_ngspice_binary=ngspice_binary
     )
-    environment["backend"] = backend_provenance
+    environment.update(sim_env_report.backend_environment(backend_provenance))
     # Issue #2977: additive, only when declared; the schedule as applied (skew
     # and transition times resolved, PWL points included) -- see docs/cli/sim.md.
     environment.update(
@@ -4512,62 +4476,31 @@ def _run_sim_corners(
     # `netlist_overrides` -- see docs/cli/sim.md.
     environment.update(_netlist_overrides_environment(netlist_overrides_report))
     environment.update(resolved.adapt_environment)
-    if monte_carlo_info is not None:
-        # Additive/optional: only present when the request declares
-        # `monte_carlo` -- the seed contract's request-level echo, per
-        # docs/cli/sim.md's "Monte Carlo" section. Per-sample seed values
-        # live on each corner (`corners[].monte_carlo`), not here.
-        environment["monte_carlo"] = monte_carlo_info
+    environment.update(sim_env_report.monte_carlo_environment(monte_carlo_info))
     # Additive/optional (issue #2973): the resolved retry policy, only when
     # `options.retry_on_convergence_error` opted in.
     environment.update(_convergence_retry_environment(convergence_retry))
-    if budget_s is not None:
-        # Additive/optional: only present when the request declares
-        # `options.wall_clock_budget_s` (or `--budget-s` overrides it) --
-        # see `run_sim`'s docstring and docs/cli/sim.md's "Wall-clock
-        # budget" section. `exceeded`/`corners_skipped` are always reported
-        # here, never left for a caller to infer from scanning
-        # `corners[].diagnostics` itself.
-        environment["budget"] = {
-            "wall_clock_budget_s": budget_s,
-            "elapsed_s": round(time.monotonic() - sweep_started, 3),
-            "exceeded": budget_exceeded,
-            "corners_skipped": corners_skipped,
-        }
-    if orphaned:
-        # Additive/optional: only present when the always-on orphan check
-        # (see `initial_ppid` above) actually fired -- reported for the
-        # benefit of a later `--resume` invocation inspecting this report;
-        # the process that would have read it live is, by definition, the
-        # one that died.
-        environment["orphaned"] = True
-    if preflight_warning is not None:
-        # Additive/optional: only present when the coarse, pre-grid budget
-        # preflight had something to say (issue #1686, third acceptance
-        # criterion) -- absent for the common case (an `options.timeout_s`
-        # that looks plausible for the declared `tran` window), exactly
-        # like `orphaned` above. Advisory only -- never blocks the sweep.
-        environment["timeout_preflight_warning"] = preflight_warning
-    if probe_result is not None:
-        # Additive/optional: only present when `fail_fast_probe`/
-        # `options.fail_fast_probe` opted in *and* the probe actually ran
-        # and came back conclusive (issue #1694) -- reports the measured
-        # rate/estimate regardless of whether it triggered an abort, so a
-        # caller can see how close a passing sweep came to the margin, not
-        # just learn about it after the fact. See
-        # docs/design/sim-corner-reached-s.md and docs/cli/sim.md's
-        # "Timeout-budget preflight" section.
-        environment["fail_fast_probe"] = probe_result
-    if resume:
-        # Additive/optional: only present when `options.resume`/`--resume`
-        # was requested -- see `run_sim`'s docstring.
-        environment["resume"] = {
-            "resumed_corners": len(pre_completed),
-            "checkpoint_path": env_provenance.repo_relative_path(
-                checkpoint_path, repo_root=repo_root
-            ),
-            "checkpoint_retained": checkpoint_retained,
-        }
+    environment.update(
+        sim_env_report.budget_environment(
+            budget_s,
+            elapsed_s=round(time.monotonic() - sweep_started, 3),
+            exceeded=budget_exceeded,
+            corners_skipped=corners_skipped,
+        )
+    )
+    # `orphaned` reflects the always-on orphan check (see `initial_ppid` above).
+    environment.update(sim_env_report.orphaned_environment(orphaned))
+    environment.update(sim_env_report.timeout_preflight_environment(preflight_warning))
+    environment.update(sim_env_report.fail_fast_probe_environment(probe_result))
+    environment.update(
+        sim_env_report.resume_environment(
+            resume,
+            resumed_corners=len(pre_completed),
+            checkpoint_path=checkpoint_path,
+            checkpoint_retained=checkpoint_retained,
+            repo_root=repo_root,
+        )
+    )
 
     _attach_timeout_budget_hint(environment, corners, timeout_s)
 
@@ -5139,38 +5072,6 @@ def _needs_models_lib(point: CornerPoint) -> bool:
     return any(lib is None for lib in declared)
 
 
-def _finalize_osdi_preload(
-    options: dict[str, Any],
-    request_dir: str,
-    backend: str,
-    osdi_preload: tuple[str, ...],
-    osdi_runner_resolved: dict[int, str],
-    pdk_root: str | None = None,
-) -> tuple[tuple[str, ...], list[dict[str, str]]]:
-    """Settle ``osdi_preload`` once the backend is known (issue #3819).
-
-    Off-host, the runner-resolved entries are reported by name in
-    ``environment.osdi_preload_runner_resolved`` and the already-resolved
-    host-local ones stand. A run that stays on this host reads every entry
-    here, so the full existence check and expansion apply, exactly as before.
-    """
-    if backend not in _OFFHOST_BACKENDS:
-        return _resolve_osdi_preload(options, request_dir, pdk_root=pdk_root), []
-    return osdi_preload, [
-        {"entry": options["osdi_preload"][index], "reason": reason}
-        for index, reason in sorted(osdi_runner_resolved.items())
-    ]
-
-
-def _osdi_runner_environment_fields(
-    osdi_runner_environment: list[dict[str, str]],
-) -> dict[str, Any]:
-    """The ``environment`` fragment for runner-resolved ``.osdi`` entries."""
-    if not osdi_runner_environment:
-        return {}
-    return {"osdi_preload_runner_resolved": osdi_runner_environment}
-
-
 def _model_inputs_environment(
     *,
     osdi_preload: tuple[str, ...],
@@ -5524,41 +5425,21 @@ def _maybe_gate_instances(
     *,
     backend: str,
     explicit_points: bool,
+    gate_context: tuple[Any, ...] = (),
 ) -> tuple[str, dict[str, Any] | None]:
     """Apply ``request.monte_carlo.instances`` when present (issue #2995):
-    returns ``(netlist_to_dispatch, monte_carlo_info)``, with the gating
-    report attached as ``instance_mismatch``; unchanged when absent."""
-    if mc_spec is None or "instances" not in mc_spec:
-        return netlist_path, monte_carlo_info
-    gated_path, gating = _apply_mismatch_instance_gating(
-        netlist_path,
-        mc_spec,
-        monte_carlo_info,
-        pdk,
-        backend=backend,
-        explicit_points=explicit_points,
-    )
-    if monte_carlo_info is not None:
-        monte_carlo_info = {**monte_carlo_info, "instance_mismatch": gating}
-    return gated_path, monte_carlo_info
-
-
-def _apply_mismatch_instance_gating(
-    netlist_path: str,
-    mc_spec: dict[str, Any],
-    monte_carlo_info: dict[str, Any] | None,
-    pdk: str | None,
-    *,
-    backend: str,
-    explicit_points: bool,
-) -> tuple[str, dict[str, Any]]:
-    """Resolve ``request.monte_carlo.instances`` (issue #2995): validate it,
-    and write a gated copy of the netlist in which every instance not
-    selected has the PDK's mismatch switch shadowed to ``0``. Returns
-    ``(gated_netlist_path, report)``; raises :class:`SimError` for anything
-    unsupported, before any corner is dispatched."""
+    dispatch a gated copy of the netlist in which every instance not selected
+    has its local mismatch switched off, by whichever mechanism the PDK family
+    uses -- a shadowed model-level ``.param`` inside a generated wrapper
+    subcircuit, or ``<param>=0`` on the instance line itself (#5487; see
+    :mod:`klayout_tools.sim_mismatch_gate`). Returns ``(netlist_to_dispatch,
+    monte_carlo_info)`` with the gating report attached as
+    ``instance_mismatch``, unchanged when absent; raises :class:`SimError` for
+    anything unsupported, before any corner is dispatched."""
     import atexit
 
+    if mc_spec is None or "instances" not in mc_spec:
+        return netlist_path, monte_carlo_info
     if backend in _OFFHOST_BACKENDS or explicit_points:
         raise SimError(
             "request.monte_carlo.instances is only supported on local "
@@ -5573,8 +5454,9 @@ def _apply_mismatch_instance_gating(
         )
     family = pdk_variant_family(pdk) if pdk else None
     switch = sim_mismatch_gate.MISMATCH_SWITCH.get(family or "")
-    if switch is None:
-        known_pdks = sorted(sim_mismatch_gate.MISMATCH_SWITCH)
+    instance_param = sim_mismatch_gate.MISMATCH_INSTANCE_PARAM.get(family or "")
+    if switch is None and instance_param is None:
+        known_pdks = sim_mismatch_gate.MISMATCH_GATED_FAMILIES
         raise SimError(
             "request.monte_carlo.instances needs models.pdk naming a PDK with "
             f"a known mismatch switch ({', '.join(known_pdks)}); got {pdk!r}"
@@ -5585,7 +5467,12 @@ def _apply_mismatch_instance_gating(
         )
         with open(netlist_path, encoding="utf-8", errors="surrogateescape") as fh:
             text = fh.read()
-        gated, rows = sim_mismatch_gate.gate_netlist(text, include, exclude, switch)
+        declared = sim_mismatch_declarations.collect(
+            netlist_path, instance_param, *gate_context
+        )
+        gated, rows = sim_mismatch_gate.gate_netlist(
+            text, include, exclude, switch, instance_param, declared
+        )
     except (sim_mismatch_gate.GateError, OSError) as exc:
         raise SimError(str(exc)) from exc
     base = os.path.dirname(os.path.abspath(netlist_path))
@@ -5598,14 +5485,17 @@ def _apply_mismatch_instance_gating(
     with open(gated_path, "w", encoding="utf-8", errors="surrogateescape") as fh:
         fh.write(gated)
     report = {
-        "switch": switch,
+        # Whichever gate this run used: the `.param`, or the instance parameter.
+        "switch": switch or instance_param,
         "include": include,
         "exclude": exclude,
         "instances": rows,
         # All excluded: the run must equal the mismatch-off run (negative control).
         "negative_control": not any(r["randomised"] for r in rows),
     }
-    return gated_path, report
+    if monte_carlo_info is not None:
+        monte_carlo_info = {**monte_carlo_info, "instance_mismatch": report}
+    return gated_path, monte_carlo_info
 
 
 def _netlist_overrides_environment(report: Any) -> dict[str, Any]:
@@ -7219,7 +7109,6 @@ _ENGINE_VERSION_RE = re.compile(r"ngspice-([\w.]+)")
 _WAVEFORM_KEYWORDS = frozenset(
     {"pwl", "pulse", "sin", "exp", "sffm", "am", "trnoise", "trrandom", "external"}
 )
-_WAVEFORM_RE = re.compile(r"^([a-z]+)\s*(?:\(|$)")
 
 
 def _logical_netlist_lines(netlist_text: str) -> list[str]:
@@ -12285,7 +12174,7 @@ def _open_ascii_rawfile(
     format notes (``Flags: complex`` magnitude reduction in particular).
     """
     try:
-        handle = open(raw_path, encoding="utf-8", errors="replace")  # noqa: SIM115
+        handle = open(raw_path, encoding="utf-8", errors="replace")
     except OSError as exc:
         raise SimError(f"could not read rawfile: {exc}") from exc
     with handle:

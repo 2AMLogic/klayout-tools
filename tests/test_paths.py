@@ -9,7 +9,16 @@ exercised indirectly through a public verb's own test suite.
 
 from __future__ import annotations
 
-from klayout_tools._paths import fold_spice_continuations, looks_like_request_document
+import json
+import re
+
+import pytest
+
+from klayout_tools._paths import (
+    _load_request_json,
+    fold_spice_continuations,
+    looks_like_request_document,
+)
 
 
 def test_fold_spice_continuations_empty_input():
@@ -117,3 +126,46 @@ def test_looks_like_request_document_unreadable_file_falls_through(
     directory.mkdir()
     monkeypatch.chdir(tmp_path)
     assert looks_like_request_document("{weird-dir}") is True
+
+
+# --------------------------------------------------------------------------- #
+# _load_request_json error messages (issue #5530)
+# --------------------------------------------------------------------------- #
+
+
+class _LoaderError(Exception):
+    """Stand-in for a caller's own error class (``EvalError`` et al.)."""
+
+
+def test_load_request_json_undecodable_file_names_the_path(tmp_path):
+    # `UnicodeDecodeError` carries no filename of its own, so the message has
+    # to supply it -- `klt eval` sends two files through this loader.
+    path = tmp_path / "latin1.json"
+    path.write_bytes(b"\xff\xfe{}")
+    with pytest.raises(_LoaderError, match=re.escape(str(path))) as excinfo:
+        _load_request_json(str(path), _LoaderError)
+    assert "could not read request" in str(excinfo.value)
+
+
+def test_load_request_json_malformed_json_names_the_path(tmp_path):
+    path = tmp_path / "bad.json"
+    path.write_text("{not json")
+    with pytest.raises(_LoaderError, match=re.escape(str(path))) as excinfo:
+        _load_request_json(str(path), _LoaderError)
+    assert "is not valid JSON" in str(excinfo.value)
+
+
+def test_load_request_json_path_with_spaces_and_quote_is_readable(tmp_path):
+    # A path that is itself awkward to quote must not break message
+    # formatting (the message single-quotes the path).
+    path = tmp_path / "a dir with spaces" / "it's bad.json"
+    path.parent.mkdir()
+    path.write_text("{not json")
+    with pytest.raises(_LoaderError, match=re.escape(str(path))):
+        _load_request_json(str(path), _LoaderError)
+
+
+def test_load_request_json_valid_document_round_trips(tmp_path):
+    path = tmp_path / "ok.json"
+    path.write_text(json.dumps({"hello": "world"}))
+    assert _load_request_json(str(path), _LoaderError) == {"hello": "world"}

@@ -1,4 +1,5 @@
-"""Setup/hold constraint arcs for sequential cells (issue #4756)."""
+"""Setup/hold constraint arcs for sequential cells (issue #4756), and their
+latch form -- referenced to the enable's closing edge (issue #5521)."""
 
 import json
 import shutil
@@ -9,7 +10,8 @@ import pytest
 from klayout_tools import characterize, liberty_writer
 from klayout_tools import characterize_bisect as bisect
 from klayout_tools import characterize_constraints as cc
-from klayout_tools.characterize_arcs import derive_sequential_arc
+from klayout_tools.characterize_arcs import derive_arcs, derive_sequential_arc
+from klayout_tools.characterize_sequential import closing_edge
 
 _SKIP_NO_NGSPICE = pytest.mark.skipif(
     shutil.which("ngspice") is None, reason="ngspice is not installed"
@@ -264,3 +266,226 @@ def test_dff_constraints_end_to_end(tmp_path):
         pass
     else:
         assert roundtrip["status"] == "pass", roundtrip["message"]
+
+
+# --------------------------------------------------------------------------- #
+# Latches: setup/hold against the enable's closing edge (issue #5521)
+# --------------------------------------------------------------------------- #
+
+
+def _latch_cell(level="high", constrained=("D",)):
+    """A latch cell dict as `_resolve_cell_spec` produces one: the enable sits
+    in the `clock_pin` slot and `clock_edge` is its *opening* edge."""
+    return {
+        "name": "dlat",
+        "clock_pin": "E",
+        "clock_edge": "rising" if level == "high" else "falling",
+        "latch": True,
+        "input_pins": ("E", "D"),
+        "constrained_pins": tuple(constrained),
+    }
+
+
+def _latch_arcs(level="high"):
+    """The two arcs a latch carries: enable->Q, then the transparent D->Q."""
+    opening = "rising" if level == "high" else "falling"
+    (transparent,) = derive_arcs(output_pin="Q", function="D", input_pins=("D",))
+    return (
+        derive_sequential_arc(
+            output_pin="Q",
+            next_state="D",
+            data_pins=("D",),
+            clock_pin="E",
+            clock_edge=opening,
+        ),
+        transparent,
+    )
+
+
+@pytest.mark.parametrize("level,closes", [("high", "falling"), ("low", "rising")])
+def test_closing_edge_is_the_edge_away_from_the_active_level(level, closes):
+    assert closing_edge("rising" if level == "high" else "falling") == closes
+
+
+def test_derive_cases_ignores_a_latch_transparent_arc():
+    """The transparent D->Q arc records no captured state (its
+    `fall_side_inputs` is empty), so it must never be read as the witness for
+    a constrained pin -- the enable arc is."""
+    cases = cc.derive_cases(_latch_cell(), _latch_arcs())
+    assert {(c.edge, c.kind) for c in cases} == {
+        ("rise", "setup"),
+        ("rise", "hold"),
+        ("fall", "setup"),
+        ("fall", "hold"),
+    }
+    assert {c.output_pin for c in cases} == {"Q"}
+
+
+@pytest.mark.parametrize("level,suffix", [("high", "falling"), ("low", "rising")])
+def test_latch_constraint_groups_are_named_after_the_closing_edge(level, suffix):
+    """An active-high enable opens rising and closes falling, so its data
+    constraints are `setup_falling`/`hold_falling` -- the opposite suffix from
+    a rising-edge flop's."""
+    table = liberty_writer.Table2D((0.02,), (0.02,), ((0.1,),))
+    cases = cc.derive_cases(_latch_cell(level), _latch_arcs(level))
+    entries = [{"case": case, "table": table} for case in cases]
+    edge = closing_edge(_latch_cell(level)["clock_edge"])
+    (arcs,) = cc.liberty_constraints(entries, "E", edge).values()
+    assert {arc.timing_type for arc in arcs} == {f"setup_{suffix}", f"hold_{suffix}"}
+    assert {arc.related_pin for arc in arcs} == {"E"}
+    types = {
+        e["timing_type"]
+        for e in cc.response_entries(
+            entries,
+            {
+                "iterations": 1,
+                "reference_ns": dict.fromkeys(
+                    [(c, 0, 0) for c in range(len(cases))], 0.1
+                ),
+            },
+            "E",
+            edge,
+            _OPTIONS,
+        )
+    }
+    assert types == {f"setup_{suffix}", f"hold_{suffix}"}
+
+
+def test_held_captured_is_vacuous_for_a_flop_and_strict_for_a_latch():
+    """The held-level leg of the criterion: a flop's capture is already proven
+    by its clock-to-output delay, so the leg is vacuous there. For a latch a
+    *missing* held level is a failed probe, never an assumed pass -- the same
+    "never fabricate a value" rule the bracket errors enforce."""
+    case = next(
+        c
+        for c in cc.derive_cases(_latch_cell(), _latch_arcs())
+        if (c.edge, c.kind) == ("rise", "setup")
+    )
+    assert case.out_rising is True  # Q = D, so capturing a high D raises Q
+    assert bisect._held_captured(case, None, 1.8, latch=False) is True
+    assert bisect._held_captured(case, None, 1.8, latch=True) is False
+    assert bisect._held_captured(case, 1.75, 1.8, latch=True) is True
+    assert bisect._held_captured(case, 0.05, 1.8, latch=True) is False
+
+
+def test_latch_deck_opens_the_enable_once_and_measures_the_held_level():
+    """The latch probe's enable goes active early and closes at the reference
+    edge; each probe carries the transparent-delay card AND the held-level
+    card, and neither keys off the (absent) clock-to-output delay."""
+    cell = {
+        **_latch_cell(),
+        "netlist_path": "dlat.spice",
+        "subckt": "dlat",
+        "terminals": ("Q", "E", "D", "VDD", "VSS"),
+        "output_pins": ("Q",),
+    }
+    cases = cc.derive_cases(cell, _latch_arcs())
+    setup = next(
+        i for i, c in enumerate(cases) if (c.edge, c.kind) == ("rise", "setup")
+    )
+    text, meas, stop = bisect.build_deck(
+        cell=cell,
+        cases=cases,
+        probes=[(setup, 0, 0, 0.5)],
+        rail_nodes={"VDD": "vdd", "VSS": "0"},
+        vdd=1.8,
+        thresholds=liberty_writer.Thresholds(),
+        ramps_ns=(0.1,),
+        settle_ns=2.0,
+        window_ns=(-1.0, 2.0),
+        load_pf=0.005,
+        edge="rising",
+        latch=True,
+    )
+    enable = next(ln for ln in text.splitlines() if ln.startswith("Vkc0 "))
+    # one opening ramp and one closing ramp, not the flop's three pulses
+    assert enable.count("1.8") == 2
+    names = [m["name"] for m in meas]
+    assert names == ["c0_d", "c0_h"]
+    # the transparent delay is triggered by the DATA pin, not the enable
+    assert "TRIG v(dd_c0)" in meas[0]["spice"]
+    assert "TD=" not in meas[0]["spice"]
+    assert meas[1]["spice"].startswith(".meas tran c0_h FIND v(o_c0_Q) AT=")
+    assert meas[1]["unit"] == "V"
+    assert stop > 0
+
+
+def _fake_latch_bisect(monkeypatch, boundary, *, degrade_below=False):
+    """Drive run_bisection on a latch: every probe reports the same
+    transparent delay, and the output holds the captured level only for
+    offsets at or above `boundary`.
+
+    With `degrade_below`, the held level is always right and it is the
+    *delay* that blows past the degradation bound below the boundary -- so
+    each half of the latch pass criterion can be exercised on its own.
+    """
+
+    def fake_build_deck(**kwargs):
+        assert kwargs["latch"] is True
+        return "", [("probe", p) for p in kwargs["probes"]], 1.0
+
+    monkeypatch.setattr(bisect, "build_deck", fake_build_deck)
+    cell = _latch_cell()
+    cases = cc.derive_cases(cell, _latch_arcs())[:1]
+    captured_high = cases[0].out_rising
+
+    def run_deck(text, measurements, label, stop):
+        out = {}
+        for k, (_, probe) in enumerate(measurements):
+            ok = probe[3] >= boundary
+            if degrade_below:
+                out[f"c{k}_d"] = 1e-10 if ok else 1e-9
+                out[f"c{k}_h"] = 1.8 if captured_high else 0.0
+            else:
+                out[f"c{k}_d"] = 1e-10
+                out[f"c{k}_h"] = (
+                    (1.8 if captured_high else 0.0)
+                    if ok
+                    else (0.0 if captured_high else 1.8)
+                )
+        return out
+
+    return dict(
+        cell=cell,
+        cases=cases,
+        grid_ns=(0.02, 0.24),
+        rail_nodes={},
+        vdd=1.8,
+        thresholds=liberty_writer.Thresholds(),
+        ramps_ns=(0.03, 0.4),
+        settle_ns=2.0,
+        load_pf=0.005,
+        options=_OPTIONS,
+        run_deck=run_deck,
+    )
+
+
+@pytest.mark.parametrize("degrade_below", [False, True])
+def test_latch_bisection_converges_on_the_held_captured_value(
+    monkeypatch, degrade_below
+):
+    kwargs = _fake_latch_bisect(monkeypatch, 0.137, degrade_below=degrade_below)
+    outcome = bisect.run_bisection(**kwargs)
+    assert len(outcome["values"]) == 4
+    for value in outcome["values"].values():
+        assert 0.137 <= value <= 0.137 + _OPTIONS["tolerance_ns"]
+
+
+def test_latch_losing_the_captured_value_at_the_wide_end_is_a_named_error(
+    monkeypatch,
+):
+    """AC: a bracket with no boundary raises, never a fabricated value -- and
+    for a latch 'no boundary' includes a probe whose delay was fine but whose
+    output did not hold."""
+    kwargs = _fake_latch_bisect(monkeypatch, boundary=5.0)
+    with pytest.raises(bisect.ConstraintError) as exc:
+        bisect.run_bisection(**kwargs)
+    assert "cannot be bracketed" in str(exc.value)
+    assert "enable's closing edge" in str(exc.value)
+    assert "hold the captured value" in str(exc.value)
+
+
+def test_latch_boundary_below_the_window_is_a_named_error(monkeypatch):
+    kwargs = _fake_latch_bisect(monkeypatch, boundary=-9.0)
+    with pytest.raises(bisect.ConstraintError, match="below the"):
+        bisect.run_bisection(**kwargs)

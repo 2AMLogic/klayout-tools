@@ -35,7 +35,11 @@ from pathlib import Path
 
 import pytest
 
-from helpers.subprocess_fakes import fake_completed
+from helpers.subprocess_fakes import (
+    _STUB_VERSION_BANNER,
+    _stub_subprocess_run,
+    fake_completed,
+)
 from klayout_tools import _paths as paths_module
 from klayout_tools import pdk, remote_transport, sim, sim_batch, sim_remote, sim_steps
 from klayout_tools import remote_launcher as rl
@@ -3514,30 +3518,6 @@ def test_parse_ascii_rawfile_missing_file_raises(tmp_path):
 # --------------------------------------------------------------------------- #
 # run_sim with a stubbed ngspice subprocess (no binary required)
 # --------------------------------------------------------------------------- #
-
-
-_STUB_VERSION_BANNER = "ngspice-99 : stub banner\n"
-
-
-def _stub_subprocess_run(
-    monkeypatch,
-    *,
-    log_text: str = "",
-    stdout: str = "** ngspice-99\n",
-    side_effect=None,
-    returncode: int = 0,
-):
-    def fake_run(cmd, capture_output, text, timeout, cwd=None, env=None, **_kw):
-        if "--version" in cmd:  # the once-per-sweep engine_build probe (#3095)
-            return fake_completed(_STUB_VERSION_BANNER)
-        log_path = cmd[cmd.index("-o") + 1]
-        if side_effect is not None:
-            raise side_effect
-        with open(log_path, "w", encoding="utf-8") as handle:
-            handle.write(log_text)
-        return fake_completed(stdout, returncode=returncode)
-
-    monkeypatch.setattr(sim.subprocess, "run", fake_run)
 
 
 def test_run_sim_stubbed_missing_binary_is_corner_error(tmp_path, monkeypatch):
@@ -12044,9 +12024,8 @@ def test_run_sim_runner_resolved_osdi_preload_goes_offhost_unchecked(
     assert seen["request_dir"] == str(tmp_path)
     environment = report["environment"]
     assert "osdi_preload" not in environment  # nothing hashed on this host
-    assert environment["osdi_preload_runner_resolved"] == [
-        {"entry": entry, "reason": "env_var"}
-    ]
+    expected = {"entry": entry, "index": 0, "reason": "env_var", "sha256": None}
+    assert environment["osdi_preload_runner_resolved"] == [expected]
 
 
 def test_run_sim_osdi_preload_under_models_pdk_root_goes_offhost(tmp_path, monkeypatch):
@@ -12067,9 +12046,8 @@ def test_run_sim_osdi_preload_under_models_pdk_root_goes_offhost(tmp_path, monke
 
     report = sim.run_sim(str(request), backend="batch")
 
-    assert report["environment"]["osdi_preload_runner_resolved"] == [
-        {"entry": entry, "reason": "pdk_root"}
-    ]
+    expected = {"entry": entry, "index": 0, "reason": "pdk_root", "sha256": None}
+    assert report["environment"]["osdi_preload_runner_resolved"] == [expected]
 
 
 def test_run_sim_runner_resolved_osdi_keeps_a_host_default_batch_backend(

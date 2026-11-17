@@ -133,9 +133,9 @@ def _load_request_json(request_path: str, error_cls: type[Exception]) -> Any:
         with open(request_path, encoding="utf-8") as handle:
             return json.load(handle)
     except (OSError, UnicodeDecodeError) as exc:
-        raise error_cls(f"could not read request file: {exc}") from exc
+        raise error_cls(f"could not read request '{request_path}': {exc}") from exc
     except json.JSONDecodeError as exc:
-        raise error_cls(f"request file is not valid JSON: {exc}") from exc
+        raise error_cls(f"request '{request_path}' is not valid JSON: {exc}") from exc
 
 
 def _load_spec_json(spec_path: str, error_cls: type[Exception]) -> dict[str, Any]:

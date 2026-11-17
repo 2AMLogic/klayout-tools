@@ -62,7 +62,7 @@ Runner = Callable[[list[str], float], tuple[int, str, str]]
 
 
 def subprocess_runner(argv: list[str], timeout_s: float) -> tuple[int, str, str]:
-    proc = subprocess.run(  # noqa: S603
+    proc = subprocess.run(
         argv, capture_output=True, text=True, timeout=timeout_s, errors="replace"
     )
     return proc.returncode, proc.stdout, proc.stderr
@@ -141,7 +141,7 @@ def run_stage(
             exit_code=None,
             stderr_tail=tail(err or f"timed out after {timeout_s}s"),
         )
-    except Exception as exc:  # noqa: BLE001 -- one design must never stop the run
+    except Exception as exc:  # -- one design must never stop the run
         result.update(
             outcome="crash",
             exit_code=None,

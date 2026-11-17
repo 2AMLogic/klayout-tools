@@ -1,7 +1,9 @@
 """Per-instance testbench netlist helpers for ``klt characterize``: the
-pin-capacitance and leakage instances and the rail-net maps they share.
+per-grid-point switching instances, the pin-capacitance and leakage
+instances, and the rail-net maps they share.
 
-Split out of :mod:`klayout_tools.characterize` (size ratchet, issue #4756).
+Split out of :mod:`klayout_tools.characterize` (size ratchet, issues #4756
+and #5521).
 """
 
 from __future__ import annotations
@@ -10,6 +12,7 @@ from typing import Any
 
 from .characterize_arcs import DerivedArc
 from .characterize_cards import slug, spice_number
+from .characterize_sequential import clock_pwl_line, data_pwl_line
 
 
 def _metered_rail_nodes(
@@ -183,3 +186,98 @@ def _full_side_state(
         for pin in cell["input_pins"]
         if pin != arc.related_pin
     )
+
+
+def _instance_lines(
+    *,
+    tag: str,
+    cell: dict[str, Any],
+    arc: DerivedArc,
+    side_state: tuple[tuple[str, bool], ...],
+    rail_nodes: dict[str, str],
+    vdd: float,
+    ramp_ns: float,
+    load_pf: float,
+    rise_start: float,
+    fall_start: float,
+    clock_times: dict[str, float] | None = None,
+    clock_edge: str = "rising",
+) -> list[str]:
+    """One switching instance of a grid point, driven according to **this
+    arc's** own kind rather than the cell's.
+
+    A sequential (clock/enable-edge) arc gets the three-pulse clock waveform
+    on its related pin and a data PWL on every data pin whose level differs
+    between the output-high and output-low states. A ``combinational`` arc
+    gets the plain low->high->low ramp on its related pin at
+    ``rise_start``/``fall_start`` with every other input tied to a rail --
+    which is what makes a latch's transparent data->output arc (issue #5521)
+    share one deck with its enable->output arc: the sequential schedule's two
+    measured-edge slots are each ``max_ramp + settle`` wide, exactly the
+    combinational schedule's own windows, so the same ramp measures the same
+    quantity in either deck.
+    """
+    side_map = dict(side_state)
+    low_map = dict(arc.fall_side_inputs)
+    node_of: dict[str, str] = {}
+    data_sources: list[str] = []
+    # Narrowed to the schedule this arc is actually driven on: `None` for a
+    # combinational arc even in a sequential cell's deck.
+    times = clock_times if arc.is_sequential else None
+    for pin in cell["pins"]:
+        name = pin["name"]
+        if pin["direction"] == "output":
+            node_of[name] = f"o_{tag}_{slug(name)}"
+        elif name == arc.related_pin:
+            node_of[name] = f"i_{tag}"
+        elif times is not None and low_map.get(name, False) != side_map[name]:
+            node_of[name] = f"d_{tag}_{slug(name)}"
+            data_sources.append(
+                data_pwl_line(
+                    f"V{tag}d_{slug(name)}",
+                    node_of[name],
+                    low=low_map[name],
+                    high=side_map[name],
+                    vdd=vdd,
+                    ramp_ns=ramp_ns,
+                    times=times,
+                )
+            )
+        else:
+            node_of[name] = "vdd" if side_map[name] else "0"
+
+    metered = _metered_rail_nodes(tag, cell, rail_nodes)
+    nodes = [
+        node_of.get(terminal) or metered[terminal] for terminal in cell["terminals"]
+    ]
+    if times is not None:
+        source = clock_pwl_line(
+            f"V{tag}",
+            f"i_{tag}",
+            vdd=vdd,
+            ramp_ns=ramp_ns,
+            times=times,
+            edge=clock_edge,
+        )
+    else:
+        source = (
+            f"V{tag} i_{tag} 0 PWL(0 0 "
+            f"{spice_number(rise_start)}n 0 "
+            f"{spice_number(rise_start + ramp_ns)}n {spice_number(vdd)} "
+            f"{spice_number(fall_start)}n {spice_number(vdd)} "
+            f"{spice_number(fall_start + ramp_ns)}n 0)"
+        )
+    lines = [
+        source,
+        *data_sources,
+        # 0 V ammeters: i(Vpd) is the current the supply delivers INTO the
+        # cell's vdd pin, i(Vpg) the current flowing OUT of its gnd pin.
+        f"Vpd{tag} vdd pd_{tag} DC 0",
+        f"Vpg{tag} pg_{tag} 0 DC 0",
+        f"X{tag} {' '.join(nodes)} {cell['subckt']}",
+    ]
+    for output in cell["output_pins"]:
+        lines.append(
+            f"C{tag}_{slug(output)} {node_of[output]} 0 {spice_number(load_pf)}p"
+        )
+    return lines

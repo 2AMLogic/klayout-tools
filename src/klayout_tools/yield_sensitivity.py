@@ -43,6 +43,7 @@ from typing import Any
 
 from ._jsonnum import is_number
 from ._native import _load_native_extension
+from ._paths import _load_request_json
 
 #: Mirrors ``native/yield/src/contract.rs``'s ``SENSITIVITY_SCHEMA_VERSION``
 #: -- kept in sync manually, the same convention ``yield_analysis.py`` uses
@@ -72,15 +73,21 @@ def _load_native() -> Any:
 
 
 def _load_json(path: str) -> Any:
+    """Read the sensitivity sample document at ``path``, raising
+    ``SensitivityError`` for every read failure.
+
+    Calls the shared ``_paths._load_request_json`` (issue #5485) rather than
+    opening the file here: the hand-rolled copy this replaced did not catch
+    ``UnicodeDecodeError`` and opened without an explicit encoding, so a
+    non-UTF-8 samples file escaped as a traceback instead of the error
+    envelope ``docs/json-contract.md`` requires. The ``samples file not
+    found`` check stays here -- the shared loader's own message does not
+    name the document, and this verb's only file argument is the samples
+    one.
+    """
     if not os.path.exists(path):
         raise SensitivityError(f"samples file not found: {path}")
-    if os.path.isdir(path):
-        raise SensitivityError(f"not a file: {path}")
-    try:
-        with open(path) as f:
-            return json.load(f)
-    except (OSError, json.JSONDecodeError) as exc:
-        raise SensitivityError(f"could not read samples '{path}': {exc}") from exc
+    return _load_request_json(path, SensitivityError)
 
 
 def _parameters_from(raw: Any, name: str, index: int) -> dict[str, float]:
