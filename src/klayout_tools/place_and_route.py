@@ -1264,6 +1264,29 @@ def _antenna_repair_warnings(
     ]
 
 
+def _unconstrained_warnings(
+    target_stage: str, clock_port: str | None, clock_period_ns: float | None
+) -> list[str]:
+    """Warn when a ``place``-or-later run has no clock (issue #5672): every
+    timing-driven pass was skipped, so a caller who merely forgot
+    ``constraints.clock_period_ns`` is told rather than silently handed an
+    unoptimised result."""
+    if clock_port is not None or clock_period_ns is not None:
+        return []
+    if STAGE_ORDER.index(target_stage) < STAGE_ORDER.index("place"):
+        return []
+    skipped = ["repair_design", "repair_timing"]
+    if STAGE_ORDER.index(target_stage) >= STAGE_ORDER.index("cts"):
+        skipped += ["clock_tree_synthesis", "repair_timing -hold"]
+    return [
+        "unconstrained run: request.constraints.clock_period_ns was not "
+        "given, so no clock was created and these passes did not run: "
+        + ", ".join(skipped)
+        + "; the clock net (if any) is routed as an ordinary signal net and "
+        "timing_status is 'unconstrained'"
+    ]
+
+
 def _layer_map_warnings(layer_map_info: dict[str, Any] | None) -> list[str]:
     """Warn when the DEF->GDS merge resolved no KLayout LEF/DEF layer map."""
     if layer_map_info is None or layer_map_info.get("resolution") != "none":
@@ -1604,15 +1627,10 @@ def _validate_stage_prerequisites(
     ``request.power``) needs inputs or per-library tables this request lacks
     (extracted from :func:`_run_single_corner`, issue #3507, to keep its
     cyclomatic complexity from growing)."""
-    # Stages beyond "floorplan" need a clock (else STA reports the
-    # unconstrained sentinel); `clock_period_ns` alone is a virtual clock.
-    no_clock = not (clock_port or clock_period_ns)
-    if stage_index >= STAGE_ORDER.index("place") and no_clock:
-        raise PlaceAndRouteError(
-            "request.constraints.clock_period_ns (optionally with clock_port) "
-            f"is required to reach target_stage '{target_stage}'; period "
-            "alone is accepted as a virtual clock"
-        )
+    # No clock is not an error (issue #5672): a missing `clock_period_ns` (and
+    # `clock_port`) is an unconstrained run -- the timing-driven passes are
+    # skipped and `timing_status` reads "unconstrained" -- so a timing-free
+    # (structural) Liberty can still reach place/route.
     if stage_index >= STAGE_ORDER.index("place") and io_spec is None:
         raise PlaceAndRouteError(
             f"request.io.layer_h/layer_v are required to reach target_stage "
@@ -2374,6 +2392,7 @@ def _run_single_corner(
         row_rail_layer=row_rail_info["layer"],
     )
     warnings.extend(_antenna_repair_warnings(target_stage, library))
+    warnings.extend(_unconstrained_warnings(target_stage, clock_port, clock_period_ns))
     warnings.extend(_layer_map_warnings(layer_map_info))
 
     last_stage = stages[-1]

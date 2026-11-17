@@ -122,11 +122,3 @@ def test_run_constraints_virtual_period_must_be_positive(tmp_path, period):
     )
     with pytest.raises(PlaceAndRouteError, match="clock_period_ns must be"):
         run_place_and_route(request_path)
-
-
-def test_run_target_stage_place_error_mentions_virtual_clock(tmp_path, monkeypatch):
-    request_path = _setup_success_env(
-        tmp_path, monkeypatch, target_stage="place", constraints=None
-    )
-    with pytest.raises(PlaceAndRouteError, match="accepted as a virtual clock"):
-        run_place_and_route(request_path)

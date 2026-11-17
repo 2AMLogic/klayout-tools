@@ -1077,6 +1077,7 @@ def _stage_script_lines(
         max_transition_ns, max_capacitance_pf, max_fanout
     )
     lines += _io_delay_lines(clock_port, input_delay_ns, output_delay_ns)
+    unconstrained = clock_port is None and clock_period_ns is None
 
     if stage == "place":
         assert io_spec is not None
@@ -1087,10 +1088,30 @@ def _stage_script_lines(
             *_wire_rc_lines(io_spec, library),
             global_placement_call,
             "estimate_parasitics -placement",
-            "repair_design",
-            "repair_timing",
+        ]
+        # Issue #5672: with neither `clock_port` nor `clock_period_ns` the
+        # run is unconstrained -- no `create_clock` was emitted above, so the
+        # timing-driven resizer passes have nothing to work from. Skip them.
+        if not unconstrained:
+            lines += ["repair_design", "repair_timing"]
+        lines += ["detailed_placement"]
+    elif stage == "cts" and unconstrained:
+        assert io_spec is not None
+        # Issue #5672: no clock, so there is no clock tree to build (and a
+        # timing-free Liberty cannot characterise a CTS buffer anyway,
+        # TritonCTS CTS-0111). The clock routes as an ordinary signal net.
+        # The stage still writes its `<top>.cts.def`, which
+        # `run_place_and_route` threads into `unrouted_def_path` for
+        # `target_stage == "cts"`.
+        lines += [
+            *_wire_rc_lines(io_spec, library),
+            "estimate_parasitics -placement",
+            'puts "klt place-and-route: no clock constraint (request.'
+            "constraints.clock_period_ns omitted) -- skipping "
+            'clock_tree_synthesis and repair_timing -hold"',
             "detailed_placement",
         ]
+        lines += [f"write_def {os.path.join(output_dir, f'{hdl_toplevel}.cts.def')}"]
     elif stage == "cts":
         assert io_spec is not None
         # Request validation guarantees clock_port or clock_period_ns here.
