@@ -76,8 +76,10 @@ The artifact per item:
 - item 2: the committed layout stream;
 - item 9: the testbench inventory;
 - item 10: the repo-hygiene inventory (repo-owned files only, not
-  Loom/Repo-Skills resync-managed paths; re-attesting is an owner action —
-  see `docs/cli/signoff.md` "Item 10: what belongs in a hygiene inventory").
+  Loom/Repo-Skills resync-managed paths; listed files must be stable by
+  construction — living status belongs in an uninventoried file, not a
+  hygiene path; re-attesting is an owner action — see `docs/cli/signoff.md`
+  "Item 10: what belongs in a hygiene inventory").
 
 For items 1, 9 and 10 that envelope is **tool-produced**, not hand-rolled:
 `klt signoff --attest {1,9,10} --inventory <file>` (issue #2844) reads a
