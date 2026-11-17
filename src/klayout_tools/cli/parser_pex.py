@@ -312,7 +312,10 @@ def add_pex_parser(
             "each request's `remote.hosts`)."
         ),
     )
-    add_wait_for_capacity_arg(pex_parser, "Applied to every `klt sim` call of the run.")
+    add_wait_for_capacity_arg(
+        pex_parser,
+        "Applied to every `klt sim` call of the run. Ignored under --attach.",
+    )
     pex_parser.add_argument(
         "--resume",
         dest="resume",

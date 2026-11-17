@@ -1,5 +1,6 @@
-"""Small place-and-route response helpers split out of ``place_and_route.py``
-to keep that file's size ceiling from growing (issue #4914)."""
+"""Small place-and-route hint strings split out of ``place_and_route.py`` and
+``place_and_route_request.py`` to keep those files' size ceilings from growing
+(issue #4914, issue #5577)."""
 
 from __future__ import annotations
 
@@ -11,16 +12,18 @@ from .place_and_route_reports import parse_global_route_congestion
 
 def outside_cwd_note(path: str) -> str:
     """Issue #4191: the docker wrapper mounts only `$PWD`, `$PDK_ROOT` and
-    `$TMPDIR`, so a readable path outside the invocation directory is the
-    commonest trigger -- say the rule and the fix, not just the symptom."""
+    `$TMPDIR` (plus `/tmp` when `$TMPDIR` differs, issue #5878), so a
+    readable path outside the invocation directory is the commonest trigger
+    -- say the rule and the fix, not just the symptom."""
     cwd = os.path.realpath(os.getcwd())
     real = os.path.realpath(path)
     if real == cwd or real.startswith(cwd.rstrip(os.sep) + os.sep):
         return ""
     return (
         f"; '{path}' is outside the invocation directory '{cwd}', and the "
-        "container wrapper mounts only $PWD, $PDK_ROOT and $TMPDIR -- run "
-        "from a common ancestor of the request and its inputs"
+        "container wrapper mounts only $PWD, $PDK_ROOT and $TMPDIR (plus /tmp "
+        "when $TMPDIR differs) -- run from a common ancestor of the request and "
+        "its inputs"
     )
 
 
@@ -66,3 +69,12 @@ def grt_hint(stage: str, streams: str, stdout: str) -> str | None:
         f"max V {congestion['max_vertical_overflow']}); worst layer {worst} "
         f"with overflow {layers[worst]['total_overflow']}"
     )
+
+
+#: Appended to ``place_and_route_request.py``'s netlist-not-found error: how
+#: ``klt synthesize`` lays out its netlist and the stable-path alternative.
+NETLIST_HINT = (
+    "klt synthesize writes its netlist under a per-run directory "
+    ".klt/synthesize/<run_id>/ unless its request sets outputs.dir, "
+    "which gives the netlist a stable path"
+)
