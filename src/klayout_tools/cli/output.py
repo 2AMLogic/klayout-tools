@@ -129,6 +129,33 @@ def render_table(
         print(fmt(row))
 
 
+def _drift_check_label(entry: dict) -> str:
+    """``"  [role identity...]"`` naming the attestation check a ``drift[]``
+    entry is about, or ``""`` when the entry carries no ``check`` (issue
+    #5460).
+
+    ``klt signoff --attest ... --check`` annotates every ``drift[]`` entry
+    that points at one ``attestation.checks[<i>]`` entry with an additive
+    ``check`` object holding that check's identity -- its ``role`` plus
+    whichever of ``path``/``target``/``name``/``testbench``/``row``/
+    ``corner``/``metric`` the check kind carries (see
+    ``signoff_attest_drift.check_identity``, which owns both the key set and
+    the order). Rendering it is a plain join of those values in that order, so
+    this module -- a leaf that every ``klt`` verb and two library modules
+    import -- stays free of a dependency on the signoff stack, and the
+    producer stays the single place that decides what identifies a check.
+
+    Every other ``drift[]`` entry has no ``check`` key -- a whole-list
+    ``attestation.checks`` entry, a ``status`` entry, and all of
+    ``drc``/``extract``/``lvs``/``signoff --check``'s drift -- and renders
+    byte-identically to what it did before this existed.
+    """
+    check = entry.get("check")
+    if not isinstance(check, dict) or not check:
+        return ""
+    return "  [" + " ".join(str(value) for value in check.values()) + "]"
+
+
 def render_rerun_drift(result: dict) -> None:
     """Print the ``--format text`` rendering of a ``--rerun`` drift report.
 
@@ -147,6 +174,13 @@ def render_rerun_drift(result: dict) -> None:
     as field *names* only: the values are whole paragraphs of checklist
     prose, which is precisely what a consumer asked not to have dumped into
     its gate output.
+
+    ``klt signoff --attest ... --check`` additionally annotates a ``drift[]``
+    entry that points at one ``attestation.checks[<i>]`` entry with an
+    additive ``check`` identity object (issue #5460), rendered as a bracketed
+    label after the pointer so the drifted file is named without a second
+    lookup -- the same "print it only when present" pattern as ``doc_drift``
+    above. See :func:`_drift_check_label`.
     """
     print(f"report: {result['report']}")
     print(f"status: {result['status']}")
@@ -157,7 +191,7 @@ def render_rerun_drift(result: dict) -> None:
         print()
         print("drift:")
         for entry in drift:
-            print(f"  {entry['field']}:")
+            print(f"  {entry['field']}{_drift_check_label(entry)}:")
             print(f"      committed: {entry['committed']!r}")
             print(f"      fresh:     {entry['fresh']!r}")
     doc_drift_fields = result.get("doc_drift_fields") or []
