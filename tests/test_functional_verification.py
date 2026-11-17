@@ -2741,8 +2741,7 @@ def test_scan_sdf_diagnostics_drops_a_stdio_spliced_line(tmp_path):
     actionable, dropped = fv._scan_sdf_diagnostics(log)
 
     assert actionable == []
-    # The intact first line still counts; the spliced second one counts
-    # nowhere at all.
+    # The intact first line still counts; the spliced second one counts nowhere at all.
     assert dropped == {"timingcheck": 1}
 
 
