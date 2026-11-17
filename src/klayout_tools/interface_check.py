@@ -240,8 +240,24 @@ def run_interface_check(
     side_a = _collect_side(layout_a, cell_a, patterns_a, pin_layer_a, (0.0, 0.0))
     side_b = _collect_side(layout_b, cell_b, patterns_b, pin_layer_b, place)
 
-    if not side_a and not side_b:
+    if (
+        not side_a
+        and not side_b
+        and _pins_alone_matches_nothing(
+            layout_a,
+            cell_a,
+            layout_b,
+            cell_b,
+            pattern,
+            (pattern_a, pattern_b),
+            pin_layer_a,
+            pin_layer_b,
+            place,
+        )
+    ):
         raise InterfaceCheckError(f"--pins {pins!r} matches no label in either stream")
+    # Per-side guards come before any both-sides-empty blame: when --pins matched
+    # but the per-side filters emptied their sides, the filter is what is wrong.
     if pattern_a is not None and not side_a:
         raise InterfaceCheckError(f"--pins-a {pins_a!r} matches no label in stream A")
     if pattern_b is not None and not side_b:
@@ -284,6 +300,30 @@ def _natural_key(name: str) -> list[Any]:
 
 def _round(value: float) -> float:
     return round(value, _UM_DIGITS) + 0.0  # + 0.0 turns -0.0 into 0.0
+
+
+def _pins_alone_matches_nothing(
+    layout_a: Any,
+    cell_a: Any,
+    layout_b: Any,
+    cell_b: Any,
+    pattern: re.Pattern[str],
+    per_side: tuple[re.Pattern[str] | None, re.Pattern[str] | None],
+    pin_layer_a: tuple[int, int] | None,
+    pin_layer_b: tuple[int, int] | None,
+    place: tuple[float, float],
+) -> bool:
+    """True when ``--pins`` is what emptied both sides (blame it, not a filter).
+
+    Without per-side filters the sides were collected with ``--pins`` alone, so
+    both being empty already answers it; with one, re-collect without the
+    narrowing to see whether ``--pins`` on its own matched anything.
+    """
+    if per_side[0] is None and per_side[1] is None:
+        return True
+    return not _collect_side(
+        layout_a, cell_a, (pattern,), pin_layer_a, (0.0, 0.0)
+    ) and not _collect_side(layout_b, cell_b, (pattern,), pin_layer_b, place)
 
 
 def _collect_side(

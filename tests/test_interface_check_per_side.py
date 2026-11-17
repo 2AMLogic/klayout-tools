@@ -214,6 +214,28 @@ def test_per_side_regex_matching_nothing_is_error(tmp_path):
         run_interface_check(a, b, _PLACE, _PINS, pins_b="ZZZ.*")
 
 
+def test_both_per_side_regexes_emptying_their_sides_blame_per_side_flag(tmp_path):
+    # --pins itself matches 8 labels here; only the per-side filters are wrong,
+    # so the error must name --pins-a, never the regex that was right (#6119).
+    a = _write(tmp_path / "a.gds", _strip())
+    b = _write(tmp_path / "b.gds", _array())
+    with pytest.raises(InterfaceCheckError, match="--pins-a .* matches no label") as e:
+        run_interface_check(a, b, _PLACE, _PINS, pins_a="ZZZ.*", pins_b="ZZZ.*")
+    assert "--pins " not in str(e.value)
+
+
+def test_pins_matching_nothing_still_blames_pins_with_per_side_flags(tmp_path):
+    # Wording unchanged when --pins is the narrowest thing that matched nothing,
+    # whether or not per-side filters are also supplied.
+    a = _write(tmp_path / "a.gds", _strip())
+    b = _write(tmp_path / "b.gds", _array())
+    for kwargs in ({}, {"pins_a": ".*"}, {"pins_a": ".*", "pins_b": ".*"}):
+        with pytest.raises(
+            InterfaceCheckError, match="--pins 'ZZZ.*' matches no label"
+        ):
+            run_interface_check(a, b, _PLACE, "ZZZ.*", **kwargs)
+
+
 def test_cli_one_seam_invocation(tmp_path, capsys):
     good = _write(tmp_path / "c.gds", _seam_block())
     base = [
