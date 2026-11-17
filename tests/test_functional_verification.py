@@ -5310,16 +5310,16 @@ def test_integration_real_icarus_sdf_bus_port_input_fanout_stays_unresolvable(tm
     around: on this fixture's fanout-2 `a[0]` net, `$sdf_annotate`
     annotates only the last-declared instance's destination (`u_d`, the
     diode); the `a[0] u1.in` entry is rejected deterministically, in
-    both SDF entry orders, with both a no-op and a fully driven bench.
+    both SDF entry orders. (#5705 measured the same verdicts under both
+    an idle and a fully driving plain-Verilog bench; the cocotb
+    no-op-vs-driven flip recorded in #1619's era may still be real on
+    top of the cap, but no race is needed to explain the rejection.)
     The survivor is fixed by netlist declaration order, which the split
-    never touches, so reordering or deferring cannot help. (An earlier
-    revision blamed a `$sdf_annotate`/VPI-callback race read off a
-    cocotb no-op-vs-driven flip; superseded -- no race is needed to
-    explain the rejection.) This test pins the *realistic*
-    (driven-testbench) outcome down: it must keep raising, not silently
-    start passing (which would mean either Icarus's own behaviour changed,
-    or a future change here papered over the failure without actually
-    resolving it)."""
+    never touches, so reordering or deferring cannot help. This test
+    pins this fixture's outcome down: it must keep raising, not
+    silently start passing (which would mean either Icarus's own
+    behaviour changed, or a future change here papered over the failure
+    without actually resolving it)."""
     tmp_path.joinpath("bus_fanout_in.v").write_text(
         _BUS_PORT_FANOUT_INPUT_DUT_V, encoding="utf-8"
     )

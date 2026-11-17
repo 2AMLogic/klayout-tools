@@ -572,14 +572,14 @@ def _write_sdf_dut_wrapper(
 # intermodpath!`). The precondition is **physical fanout above 1**, not
 # the entry count; the destination's own `specify`/`IOPATH` block is
 # neither trigger nor protection; verdicts are deterministic across
-# benches and entry orders, and reordering the *netlist* declarations
+# plain-Verilog benches and entry orders, and reordering the *netlist* declarations
 # moves the survivor -- which a race would not do (an earlier revision
 # blamed a `$sdf_annotate`/VPI-callback race; superseded -- full
 # narrative, control table and the buffered-output-pin workaround in the
 # spike doc's #5705 section). Reordering or deferring entries therefore
 # cannot help; left unfixed and documented
 # (`test_integration_real_icarus_sdf_bus_port_input_fanout_stays_
-# unresolvable` pins the driven-testbench outcome so it is never silently
+# unresolvable` pins this fixture's outcome so it is never silently
 # "fixed" without the mechanism being understood).
 # --------------------------------------------------------------------------- #
 
