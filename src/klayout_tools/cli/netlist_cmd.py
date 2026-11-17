@@ -180,10 +180,22 @@ def _print_text(report: dict) -> None:
     _print_remote(report)
 
     netlist = report["netlist"]
+    # Under --check the netlist block describes the raw bytes just generated,
+    # which are never written and are not what the verdict compared (issue
+    # #5743): label it, and print the hashes that can be reconciled instead.
+    label = (
+        "netlist (generated, not compared)" if report["mode"] == "check" else "netlist"
+    )
     print(
-        f"netlist: {netlist['lines']} lines, {netlist['bytes']} bytes, "
+        f"{label}: {netlist['lines']} lines, {netlist['bytes']} bytes, "
         f"{netlist['content_hash']}"
     )
+    drift_block = report.get("drift")
+    if drift_block is not None:
+        print(
+            f"committed: {drift_block['committed_content_hash'] or '-'} (the -o file)"
+        )
+        print(f"compared: {drift_block['compared_content_hash'] or '-'} (normalized)")
 
     pdk_block = report.get("pdk")
     if pdk_block is not None:

@@ -63,7 +63,6 @@ scope-narrowing comment, 2026-10-01) are both now addressed, via #2680:
 
 from __future__ import annotations
 
-import difflib
 import os
 import re
 import shutil
@@ -77,6 +76,7 @@ from typing import Any
 from . import pdk as pdk_module
 from ._provenance import content_hash_bytes
 from .netlist_diagnostics import diagnostics_block
+from .netlist_diff import MAX_DIFF_LINES, unified_diff  # noqa: F401
 from .netlist_inputs import (
     generation_inputs,
     inputs_drift,
@@ -132,12 +132,6 @@ SIGTERM_GRACE_S = 2.0
 #: written 10ms after launch can stat as having been written up to a second
 #: *before* it. One second is the coarsest granularity we need to tolerate.
 FRESHNESS_TOLERANCE_S = 1.0
-
-#: Cap on the number of unified-diff lines carried in a ``--check`` payload.
-#: A drifted netlist can differ by thousands of lines; the payload's job is
-#: to say *that* it drifted and show the head of the difference, not to be a
-#: transport for the whole file (both copies are on disk already).
-MAX_DIFF_LINES = 200
 
 #: ``status`` values. ``"generated"`` is the normal export; ``"match"`` /
 #: ``"drifted"`` are ``--check``'s verdicts, reusing the same vocabulary (and
@@ -439,26 +433,6 @@ def _netlist_block(path: str | None, data: bytes) -> dict[str, Any]:
     }
 
 
-def _unified_diff(
-    committed: bytes, fresh: bytes, output: str
-) -> tuple[list[str], bool]:
-    """Unified diff of the committed netlist against the regenerated one,
-    capped at :data:`MAX_DIFF_LINES` lines (second element says whether it
-    was truncated)."""
-    lines = list(
-        difflib.unified_diff(
-            committed.decode("utf-8", errors="replace").splitlines(),
-            fresh.decode("utf-8", errors="replace").splitlines(),
-            fromfile=f"{output} (committed)",
-            tofile=f"{output} (regenerated)",
-            lineterm="",
-        )
-    )
-    if len(lines) > MAX_DIFF_LINES:
-        return lines[:MAX_DIFF_LINES], True
-    return lines, False
-
-
 def _normalize_path_comments(data: bytes) -> bytes:
     """``data`` with every xschem ``** sch_path:`` / ``** sym_path:`` comment
     reduced to the file's basename (issue #3010).
@@ -617,6 +591,12 @@ def _check_result(
     ``--block`` top sheet's port order, both quoted in that reason
     (:func:`port_order_drift_reason`, issue #5473).
 
+    ``compared_content_hash`` (issue #5743) is the hash of the normalized body
+    both sides reduced to -- ``None`` unless the verdict is ``"match"``; under
+    ``ignore_comments`` it is the comment-stripped body. Unlike
+    ``run_netlist``'s ``netlist.content_hash`` (the raw generator output) it is
+    the same on every checkout that agrees.
+
     ``inputs`` (issue #4945) are the fresh generation inputs; the committed
     side's record is the ``** klt-netlist-inputs:`` line :func:`run_netlist`
     wrote, which is excluded from the comparison. ``drift.inputs`` compares
@@ -627,6 +607,7 @@ def _check_result(
             "committed_present": False,
             "committed_bytes": None,
             "committed_content_hash": None,
+            "compared_content_hash": None,
             "path_comments_differ": False,
             "layout_differs": False,
             "comments_differ": False,
@@ -648,6 +629,9 @@ def _check_result(
             "committed_present": True,
             "committed_bytes": len(committed_raw),
             "committed_content_hash": content_hash_bytes(committed_raw),
+            "compared_content_hash": content_hash_bytes(
+                _normalize_layout(committed_paths)
+            ),
             "path_comments_differ": _normalize_layout(committed)
             != _normalize_layout(fresh_data),
             "layout_differs": committed_paths != fresh_paths,
@@ -666,6 +650,9 @@ def _check_result(
             "committed_present": True,
             "committed_bytes": len(committed_raw),
             "committed_content_hash": content_hash_bytes(committed_raw),
+            "compared_content_hash": content_hash_bytes(
+                _normalize_layout(committed, True)
+            ),
             "path_comments_differ": False,
             "layout_differs": False,
             "comments_differ": True,
@@ -676,7 +663,7 @@ def _check_result(
             "inputs": inputs_block,
         }
 
-    diff, truncated = _unified_diff(committed, fresh_data, output)
+    diff, truncated = unified_diff(committed, fresh_data, output)
     port_order = _subckt_port_order_drift(committed, fresh_data, ignore_comments)
     if port_order:
         reason = port_order_drift_reason(port_order, xschem_version, sibling_symbol)
@@ -691,6 +678,7 @@ def _check_result(
         "committed_present": True,
         "committed_bytes": len(committed_raw),
         "committed_content_hash": content_hash_bytes(committed_raw),
+        "compared_content_hash": None,
         "path_comments_differ": False,
         "layout_differs": False,
         "comments_differ": False,
