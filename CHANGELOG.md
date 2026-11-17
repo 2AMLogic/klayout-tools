@@ -32,6 +32,31 @@ not `klt --version`, if you need to detect this kind of drift. See
   that minted it. `--resume` alone is now enough for the
   `environment.remote.resumable: true` recovery the report advertises;
   `--attach <map> --collect-partial` remains the non-blocking form.
+- **`klt drc` gf180mcu deck: `DF.1c` (MOSCAP COMP min width) is now checked,
+  and `comp.width.mv.1` exempts `MVSD`/`MVPSD`-marked LDMOS drains** (#5719,
+  2026-11-17). New rule `comp.width.moscap.1` (`DF.1c`, 1.0 um,
+  `Comp AND MOS_CAP_MK` via `DerivedLayer`'s `"sized_intersection"` AND,
+  `voltage_independent`): before it, a MOSCAP-marked `Comp` island below
+  1 um — e.g. `klt gen mos_array`'s own 0.42 um `w_um` floor — reported
+  `status: clean` with `166/5` listed under
+  `coverage.layers_in_stream_without_rules`, i.e. an undisclosed miss; the
+  marker now reads as a checked deck layer and the rule as covered.
+  `comp.width.mv.1` (`DF.1a_MV`) now excludes whole `Comp` polygons touching
+  the `mvsd` (210/0) / `mvpsd` (11/39) drain markers, matching the PDK
+  deck's `comp_56v.not(mvsd.or(mvpsd))` wherever the PDK's own LDMOS PCells
+  draw (the `nfet_10v0_asym` 0.22 um drain stripe was a confirmed false
+  positive); a marker-straddling polygon is dropped whole where the official
+  boolean clip would check its clipped remainder — a disclosed approximation,
+  the only shape this engine can give that rule. Verified against the native
+  runset (`--engine both`): curated/native now agree on the PCell
+  (`comp.enclosing.contact.1` x16 ↔ `CO.4` x16, a real finding — see
+  `docs/cli/drc.md`'s corrected waiver guidance; `DF.6_MV`/`PL.4_MV` remain
+  disclosed unmodeled), and `DF.1c` flags the same narrow MOSCAP fixture both
+  engines report. A consequence for `klt gen mos_array`: its MOSCAP-marked
+  devices now report the genuine `comp.width.moscap.1` finding (the native
+  deck flags the same shapes) — the generator cannot yet draw a MOSCAP that
+  passes it (#6170). No JSON field added or removed; `schema_version` unchanged.
+
 - **Fixed** (#5664, `klt lvs` `--engine klayout-runset`; no JSON field
   changes, `schema_version` stays 3): a `pin.unmatched` finding whose pin
   pair KLayout's own comparer graded `Match`/`MatchWithWarning` — a
@@ -71,6 +96,16 @@ not `klt --version`, if you need to detect this kind of drift. See
   and the Verilog-top path. `path`/`scope` is the repo-relative shape, so a
   source outside the repo reads `{"path": null, "scope": "external"}` and never
   leaks a host path. No `schema_version` bump.
+- **Added** (#5644, 2026-11-16): `klt sim --op-lint` now reports an additive
+  top-level `unexpanded_instance_count` — the number of `X` instances whose
+  `.subckt` was found in neither the netlist body nor its `.include` closure
+  and which are not recognised MOS models (typically PDK passive primitives
+  defined only in `models.lib`, which the hierarchy walk does not read), so
+  lint coverage is measurable without parsing `diagnostics[]`. When a
+  `models.lib` was resolved, each such instance's `unsupported_hierarchy`
+  warning now says its definition may live in the model library instead of
+  implying the netlist alone was searched; without a model library the
+  wording is unchanged.
 - **`klt sim` refuses `measurements[].transfer` declared beside `noise`**
   (#5695, 2026-11-14): the mutually exclusive measurement forms each carried a
   hand-maintained list of "every *other* exclusive form", and `transfer`'s
@@ -83,6 +118,30 @@ not `klt --version`, if you need to detect this kind of drift. See
   `noise` now fails validation with the usual "alternative forms of a
   measurement" error instead of running; every other refusal and message is
   byte-identical. `klt sim`'s `schema_version` is unaffected.
+- **`klt sim`: an off-host report's `environment.engine_build` now describes
+  the worker, not the submitting client** (#5566, 2026-11-13): on an
+  `engine_host: "worker"` report (`--backend batch`/`remote`),
+  `environment.engine_version` has always been the worker's, while
+  `engine_build` was the submitter's own `ngspice --version` probe — so one
+  report could pair a worker-sourced version with a client-sourced banner
+  naming a different ngspice, and a consumer recording both emitted
+  self-contradicting simulator provenance. `engine_build` is now taken from
+  `environment.remote.worker_environment.simulator.version_banner` under the
+  same rule `ngspice_binary` uses (capture `"ok"`; a sharded run only when
+  every member agrees), with `binary_sha256: null` because the worker capture
+  carries no digest, and `probe`/`reason` explaining any missing banner rather
+  than falling back to the client's. The client's probe is kept verbatim under
+  the new `environment.client_engine_build`, present only on off-host reports.
+  This is the same correction #3110 made for `ngspice_binary` and is treated
+  as a bug fix against the already-documented `engine_host` contract, not a
+  new one — but it **changes what `environment.engine_build` means on an
+  off-host report**: a consumer that read it as the client's build must read
+  `client_engine_build` instead. Keys are otherwise unchanged;
+  `worker_environment.engine_build_comparison` still compares the worker's
+  banner with the client's probe, `engine_host: "local"` reports are
+  identical, `engine: "xyce"` keeps `engine_build: null`, and deck-list
+  reports gain no field. No `schema_version` bump (additive key; the
+  re-pointed field is a correction).
 - **`klt yield`: a damaged gzip input is an error envelope, not a traceback**
   (#5543, 2026-11-13): a gzip samples or `--limits` file whose deflate stream
   is *corrupt* — as opposed to truncated, or carrying a bad CRC trailer, both
@@ -818,6 +877,13 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## 0.9.0 (2026-11-05)
 
+- **`klt lvs` emits `topology.known_limitation`** (issue #6162, recorded
+  retroactively; introduced in #4819 and shipped in 0.9.0 without an entry):
+  a `warning`-severity `mismatches[].category` added when a mismatching
+  FinFET compare's top cell is one of the pinned unsupported ASAP7 RVT library
+  cells (drawn folded-stack or series-order topology differs from the library
+  CDL). It names the cell and never changes `status`, so the compare stays
+  `mismatch`.
 - **`klt gen` names its PCell child cell `<cell-name>__core`** (issue #4251,
   documented in [`docs/cli/gen.md`](docs/cli/gen.md)): on generators that
   emit a PCell child (all except `asap7_finfet`/`asap7_tap`, which flatten
@@ -5373,6 +5439,13 @@ conventional-commit breaking marker (`!:` / `BREAKING CHANGE`) and no
 1→2 bumps plus a new constant at 1; `FLEET_REPORT_SCHEMA_VERSION` rose 1→3);
 compatibility notes, where they matter, are in the entries below.
 
+- **`klt lvs` emits `net.supply_fragmented`** (issue #6162, recorded
+  retroactively; introduced in #2078 and shipped in 0.6.0 without an entry):
+  a `warning`-severity `mismatches[].category` added when a supply name from
+  `options.supply_nets` (default `GND`/`VCC`/`VDD`/`VGND`/`VPWR`/`VSS`) spans
+  more than one disconnected layout net in a circuit. One entry per circuit
+  and supply, with `details.supply` and `details.fragment_count`; it does not
+  change `status`.
 - **Fixed** (#2312, `klt gen bjt_array` geometry + `klt gen-compose`
   via-drop, **no** `schema_version` bump — but the `COLL_*` ports' reported
   `layer` and the drawn collector-ring layer both change on sky130, see
