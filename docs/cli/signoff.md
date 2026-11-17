@@ -3616,7 +3616,12 @@ new. Outcomes:
 - all pass but a declared row is uncovered or a `gap` -> `unmet` /
   `partial_coverage`, with `detail.uncovered_rows`, `detail.failed_rows` and
   `detail.declared_gaps` (`[{id, gap}]`) reported separately -- a gap is never
-  covered;
+  covered, and it keeps blocking `tier: "T1"` (issue #5858, operator ruling
+  2026-11-17). A gap is not a permanent state: it records work not yet done, so
+  it should name the open issue for the klayout-tools feature or EDA project
+  that would close it, and a gap with no such link is a signoff finding. A row
+  no tool could ever evidence is a different case (closer to `not_applicable`)
+  and goes back to the operator;
 - `spec_rows` declared but **no evidence entry** for the item (issue #4190)
   -> graded as a zero-citation set: `unmet` / `partial_coverage` with the same
   `detail` keys (every non-gap row in `uncovered_rows`, gaps in
@@ -3804,7 +3809,8 @@ Item 6 reuses the item-5 list form and `spec_rows` schema above, with
 
 - every declared row covered by a passing citation and all rows ratified ->
   `met` (`row_coverage` present);
-- otherwise, with no failing citation -> `unmet` / `partial_coverage`; the
+- otherwise, with no failing citation -> `unmet` / `partial_coverage` (a
+  declared gap blocks `tier: "T1"` here as for item 5, issue #5858); the
   `detail` lists `uncovered_rows`, `declared_gaps` (`[{id, gap}]`) and
   `unratified_rows` (every `ratified: false` row, covered or not -- evidence
   against a proposed limit is provisional) separately;
