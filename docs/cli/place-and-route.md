@@ -562,10 +562,15 @@ before OpenROAD launches and, for such a layer, fails with a
 ]
 ```
 
-Each entry needs `layer` (non-empty string, unique across entries) and the four
-finite numbers `x_offset_um`, `x_pitch_um`, `y_offset_um`, `y_pitch_um`
-(pitches `> 0`, offsets `>= 0`). Layers not listed get no tracks, so list every
-layer routing needs. Omitted, the script is byte-identical to before.
+Each entry needs `layer` (non-empty string) and the four finite numbers
+`x_offset_um`, `x_pitch_um`, `y_offset_um`, `y_pitch_um` (pitches `> 0`,
+offsets `>= 0`). A layer may be named by several entries (issue #5671):
+repeated `make_tracks` calls on one layer accumulate track patterns in list
+order, which is how non-uniform grids (e.g. a 7.5-track row) are expressed.
+Only a byte-identical repeated entry — same `layer` and all four numbers — is
+a request error, since it is a transcription mistake and a no-op in OpenROAD.
+Layers not listed get no tracks, so list every layer routing needs. Omitted,
+the script is byte-identical to before.
 
 #### ASAP7 RVT example (M4-M7 on the DRC deck's grid)
 
@@ -594,6 +599,38 @@ no offsets are applied unless you set `floorplan.tracks`. The offsets come from
 the reporter of issue #4493; the `M4.AUX.1`/`M4.AUX.2` improvement versus
 offset 0 (~9.6k violations each on ~1,000 um^2) has not been re-measured in
 this repo, so check it with `klt drc --engine klayout` on your own block.
+
+#### ASAP7 7.5-track row (repeated layer, issue #5671)
+
+A row whose M2 tracks are not on one uniform pitch needs several `make_tracks`
+calls on the same layer. The shipped `asap7sc7p5t` APR script (lambdapdk
+v0.2.17, `libs/asap7sc7p5t_rvt/apr/openroad/tracks.tcl`) lays M2 out as six
+0.036 um steps plus a 0.045 um step at the row boundary — seven calls on one
+layer. `floorplan.tracks` accepts this directly: repeated layers accumulate in
+list order, one `make_tracks` per entry:
+
+```json
+"tracks": [
+  {"layer": "M2", "x_offset_um": 0.009, "x_pitch_um": 0.036,
+   "y_offset_um": 0.045, "y_pitch_um": 0.270},
+  {"layer": "M2", "x_offset_um": 0.009, "x_pitch_um": 0.036,
+   "y_offset_um": 0.081, "y_pitch_um": 0.270},
+  {"layer": "M2", "x_offset_um": 0.009, "x_pitch_um": 0.036,
+   "y_offset_um": 0.117, "y_pitch_um": 0.270},
+  {"layer": "M2", "x_offset_um": 0.009, "x_pitch_um": 0.036,
+   "y_offset_um": 0.153, "y_pitch_um": 0.270},
+  {"layer": "M2", "x_offset_um": 0.009, "x_pitch_um": 0.036,
+   "y_offset_um": 0.189, "y_pitch_um": 0.270},
+  {"layer": "M2", "x_offset_um": 0.009, "x_pitch_um": 0.036,
+   "y_offset_um": 0.225, "y_pitch_um": 0.270},
+  {"layer": "M2", "x_offset_um": 0.009, "x_pitch_um": 0.036,
+   "y_offset_um": 0.270, "y_pitch_um": 0.270}
+]
+```
+
+Only M2 is shown; a working request lists the remaining layers too (M1 and
+M3-M7 as in the M4-M7 example above, all read from the same shipped
+`tracks.tcl`).
 
 #### ASAP7 track-alignment residual (router M4 stub ends)
 
@@ -2146,7 +2183,7 @@ live re-measurement above.
 | --- | --- | --- |
 | `schema` | string | Request contract identifier + major version. Not validated — user-authored input, never emitted by this tool. |
 | `engine` | string | `"openroad"` (default; only value implemented). |
-| `netlist` | string | The gate-level netlist path — typically `klt synthesize`'s own `netlist_path` output. Required. Resolved relative to the request file's own directory. **Scripted flow:** set `run_id` (e.g. `"gcd-v1"`) in the `klt synthesize` request, then point `netlist` at `.klt/synthesize/<run_id>/<top>_synth.v` (e.g. `.klt/synthesize/gcd-v1/gcd_synth.v`) without waiting for the synthesize response — see [`synthesize.md`](synthesize.md#artifacts-written-to-kltsynthesizerun_id). There is no "latest" alias, and a `run_id` whose directory already exists is an error, so a re-run needs a fresh ID. |
+| `netlist` | string | The gate-level netlist path — typically `klt synthesize`'s own `netlist_path` output. Required. Resolved relative to the request file's own directory. **Committed pair flow (recommended):** give the `klt synthesize` request `"outputs": {"dir": "build/syn"}` so the netlist lands at a stable, committable path — `build/syn/<top>_synth.v` (e.g. `build/syn/gcd_synth.v`) — and name that path here, in a request committed alongside the synthesize request, without waiting for the synthesize response; see [`synthesize.md`](synthesize.md#artifacts-written-to-kltsynthesizerun_id) for `outputs.dir`. A re-run of the same pair must be given an empty or absent `outputs.dir`: a populated one is refused to retain prior evidence, so clear the directory between runs. **Single-use alternative:** set `run_id` (e.g. `"gcd-v1"`) in the `klt synthesize` request, then point `netlist` at `.klt/synthesize/<run_id>/<top>_synth.v` — there is no "latest" alias, and a `run_id` whose directory already exists is an error, so a re-run needs a fresh ID. |
 | `hdl_toplevel` | string | The design's top module name. Required. |
 | `pdk.cell_library` | string | Standard-cell library name. Required. |
 | `pdk.corner` | string \| omitted | Liberty (device) corner selector; defaults to the nominal corner when omitted. This single deck is the **only** liberty the `place`/`cts`/`route` stages' `repair_design`/`repair_timing`/`repair_timing -hold`/`repair_antennas` passes see; the other corners in the post-route sweep (`pdk.sweep_corners`) are analysed afterwards and never feed back into repair. To aim repair at a low-voltage deck, name it here. A tight `constraints.max_transition_ns`/`.max_capacitance_pf` is one absolute value for every corner and, at a slow corner, can grow the design sharply without meeting it (see `docs/design/place-and-route-improvements-survey.md` section 3.7); check `corners[]` and the `..._vs_library` counts afterwards. |
@@ -2154,7 +2191,7 @@ live re-measurement above.
 | `pdk.rebuild_corners` | array\<string\> \| omitted | Additive field (issue #3507). Re-runs the **whole** flow (`floorplan` through `target_stage`) once per named corner, serially, into one aggregated report — see "Physical rebuild per corner" below. Non-empty, no duplicates, mutually exclusive with `pdk.corner`; every name must be one of `cell_library`'s shipped liberty corners (an unknown name is a `PlaceAndRouteError` raised before any unit starts). Not the same as `pdk.sweep_corners`, which only re-times an already-routed design. |
 | `pdk.sweep_corners` | array\<string\> \| omitted | Additive field (issue #1092). Scopes the "Multi-corner setup/hold sweep" below to the named subset of `cell_library`'s shipped `.lib` corners. Omitted (the default) sweeps every shipped corner, reproducing today's behaviour exactly. An explicit `[]` sweeps zero corners (`worst_setup_slack_ns`/`worst_hold_slack_ns`/`corners` all degrade to `null`/`[]`). Every named corner must actually be one of `cell_library`'s own shipped corners (`corners[].name` in the unfiltered sweep) — an unresolvable name raises a `PlaceAndRouteError` naming the corner(s) it could not find and every corner that *is* valid. |
 | `floorplan.method` | string | `"utilization"` \| `"explicit"` \| `"def"` — see "Floorplan methods" above. Required. |
-| `floorplan.tracks` | array\<object\> \| omitted | Additive field (issue #4088). Explicit per-layer `make_tracks` definitions (`layer`, `x_offset_um`, `x_pitch_um`, `y_offset_um`, `y_pitch_um`) replacing the bare `make_tracks`; needed for a tech LEF with a negative routing-layer `OFFSET`, which is otherwise rejected at request time. See "Explicit tracks" above. |
+| `floorplan.tracks` | array\<object\> \| omitted | Additive field (issue #4088). Explicit `make_tracks` definitions (`layer`, `x_offset_um`, `x_pitch_um`, `y_offset_um`, `y_pitch_um`) replacing the bare `make_tracks`; needed for a tech LEF with a negative routing-layer `OFFSET`, which is otherwise rejected at request time. Repeated layers are allowed (issue #5671) and accumulate in list order — one `make_tracks` call per entry, exactly as listed; only a byte-identical repeated entry (same `layer` and all four numbers) is a request error. See "Explicit tracks" above. |
 | `io.layer_h` / `.layer_v` | string | Horizontal/vertical I/O routing layers for `place_pins`. Required once `target_stage` reaches `"place"` or later. |
 | `io.pin_constraints` | array\<object\> \| omitted | Additive field (issue #3885). Pins top-level ports to a die edge so a block can abut or tile with a neighbour. Each entry: `pins` (non-empty array of port names or globs; bus bits are `a[3]`, `a[*]` matches a bus), `edge` (`"north"` \| `"east"` \| `"south"` \| `"west"`), `range_um` (optional `[lo, hi]` offset along that edge, `0 <= lo < hi`), `ordered` (optional boolean, default `false`; keeps the matched pins in listed order via `-group -order`). Each entry emits one `set_io_pin_constraint` before `place_pins`. A pattern matching no top-level port of `netlist`, or a port matched by two entries, is a request error. A `range_um` with fewer pin slots than the entry has pins fails `place`; the error names the `pin_constraints[i]` entry (or quotes OpenROAD's `PPL-0110` line) with its pin and slot counts. See "Pin placement" for slot pitch and range semantics. Omitted or `[]`, the Tcl is byte-identical to before. |
 | `pins` (response) | array\<object\> \| null | Additive field (issue #3885). Final placement of every top-level pin, read from the DEF this run wrote: `name`, `edge` (nearest die edge), `x_um`, `y_um`, `layer`. Present for every run that reaches `place` (constrained or not); `null` at `target_stage: "floorplan"`. Lets a caller verify abutment from the envelope without parsing the DEF. |
@@ -2173,7 +2210,7 @@ live re-measurement above.
 | `power.connects[].max_columns` | integer \| omitted | → `add_pdn_connect -max_columns`. Positive integer when given. |
 | `power.connects[].ongrid` | array\<string\> \| omitted | → `add_pdn_connect -ongrid`. Non-empty list of layer names when given. |
 | `power.connects[].split_cuts` | object \| omitted | → `add_pdn_connect -split_cuts`. `{ layer: string, width_um: positive number }`, both required together when given. |
-| `constraints.clock_port` / `.clock_period_ns` | string / number | Clock port name + target period (ns). Required once `target_stage` reaches `"place"` or later — stages beyond floorplan have no meaning without a clock. **Virtual clock** (issue #4913, additive): `clock_period_ns` *without* `clock_port` defines a port-less clock (`create_clock -name klt_virtual_clk -period P`) for purely combinational blocks; `input_delay_ns`/`output_delay_ns` then apply to every input/output, so slack is the real input-to-output budget (`period - in - out`) and `timing_status` is `constrained`. CTS is skipped (no registers). `clock_port` without `clock_period_ns`, or a non-positive period, is still an error. |
+| `constraints.clock_port` / `.clock_period_ns` | string / number | Clock port name + target period (ns). Optional at every stage. **Unconstrained run** (issue #5672, additive): with neither field, `place`/`cts`/`route` still run — no `create_clock` is emitted, the timing-driven passes `repair_design` and `repair_timing` (`place`) and `clock_tree_synthesis` and `repair_timing -hold` (`cts`) are skipped, any clock net is routed as an ordinary signal net, `timing_status` is `"unconstrained"`, and `warnings` names every skipped pass. This lets a timing-free (structural) standard-cell Liberty reach routing; a caller who merely *forgot* the period gets the same unoptimised result, hence the warning. **Virtual clock** (issue #4913, additive): `clock_period_ns` *without* `clock_port` defines a port-less clock (`create_clock -name klt_virtual_clk -period P`) for purely combinational blocks; `input_delay_ns`/`output_delay_ns` then apply to every input/output, so slack is the real input-to-output budget (`period - in - out`) and `timing_status` is `constrained`. CTS is skipped (no registers). `clock_port` without `clock_period_ns`, or a non-positive period, is still an error. |
 | `constraints.max_transition_ns` | number \| omitted | Additive field (issue #1709) → `set_max_transition <ns> [current_design]`. Positive number when given. Emitted right after the clock constraint (`create_clock`), before `repair_design`/`repair_timing`, aiming that already-generated optimiser at a caller-given max-slew target instead of only whatever limit the resolved liberty deck declares. Omitted (the default) emits no `set_max_transition` line, byte-identical to this command's behavior before this field existed. |
 | `constraints.max_capacitance_pf` | number \| omitted | Additive field (issue #1709) → `set_max_capacitance <pf> [current_design]`. Positive number when given; same emission point and omitted-default behavior as `max_transition_ns` above. |
 | `constraints.max_fanout` | number \| omitted | Additive field (issue #1709) → `set_max_fanout <n> [current_design]`. Positive number when given; same emission point and omitted-default behavior as `max_transition_ns` above. Useful for standard-cell libraries that declare no fanout limit of their own (`default_max_fanout`/per-pin `max_fanout` absent from the liberty), where `repair_design` would otherwise have nothing to aim at for fanout. Note the response reports **no** fanout violation count to go with it — see "Design-rule-check verdict" for the `sta::max_fanout_violation_count` SIGSEGV that rules one out. |
@@ -3043,6 +3080,18 @@ edge grids. Measured result: zero `V4.M5.AUX.2`, `M4.AUX.1`, `M4.AUX.2`,
 `M4.W.3`, `M5.AUX.1`, `M6.AUX.1`. **Not deck-clean:** the tech LEF's wide
 `V4` bar has zero `M4` enclosure, so `V4.M4.EN.1` (~370) and `V4.M5.EN.2`
 (~13) remain, plus 1-2 `M5.W.3`; no existing request field changes that.
+At block scale `M3.S.2` is a further known residual (issue #6030): ~15
+markers per ~10^3 `M2`->`M5` crossings, measured at klayout-tools 0.9.2 (a
+count that scales with block size, not a fixed number). They sit on
+`pdngen`'s own `M2`->`M5` stub patches, not on router metal, where two stack
+stubs can land closer than the deck's 25 nm tip-to-side `M3` spacing
+(`M3.S.2`, Table 3.12.1); they are report-only.
+No `power.connects[]` field moves them: `max_columns` is already minimal and
+is across-track, `ongrid {M3 M4}` is the recipe's purpose (dropping it
+re-introduces the families above), `split_cuts` is measured DRC-dirty on
+gf180mcu (issue #4301), and the stub patch shape comes from the tech LEF.
+This is an upstream
+OpenROAD `pdngen` limitation; the preset is unchanged here.
 `pdngen` offsets are core-origin relative: the edge-grid result was measured
 with core origin 0.96 um, and other origins can leave `M5.AUX.1`/`M6.AUX.1`
 hits (adjust `power.straps` explicitly in that case).
@@ -3485,13 +3534,23 @@ being reported, a changed `provenance.input.content_hash`.
 
 Excluded from the diff: `provenance.klt_version`/`klt_git_commit`/`klt_reinstall_spec`/`klayout_version`/
 `pdk.version` and `engine_version` (an OpenROAD upgrade that leaves the result
-untouched is tool churn, not evidence drift), plus the whole `engine_logs[]`
-block — every entry is keyed by a fresh `uuid4` `invocation_id` with its
-retained log directory named after it, so leaving it in would make `--rerun`
-report `"drifted"` unconditionally. The output artifact paths
-(`def_path`/`gds_path`/`verilog_path`) are **not** excluded: this verb writes
-to a fixed `.klt/place-and-route/` directory, so they are stable across
-re-runs from the same request and a change in one is real drift.
+untouched is tool churn, not evidence drift), `provenance.pdk.source` (*how*
+the PDK was resolved — search roots vs `$PDK_ROOT` vs `--pdk-root`; the
+identical install resolved through a different mechanism on another host is
+not drift, issue #5863), plus the whole `engine_logs[]` block — every entry
+is keyed by a fresh `uuid4` `invocation_id` with its retained log directory
+named after it, so leaving it in would make `--rerun` report `"drifted"`
+unconditionally. The output artifact paths (`def_path`/`gds_path`/
+`verilog_path` and the other path-bearing fields) are **not** excluded — but
+they are compared by **file name only**, on both sides (issue #5863): a
+committed report is lint-clean, so a consumer has scrubbed its paths
+repo-relative or to `~/`-form (`env-provenance lint-envelope` requires
+exactly that), while the fresh side echoes absolute host paths; the directory
+is host- and scrub-shape-specific and never verdict-bearing. The file name
+keeps the identity check — this verb writes to a fixed `.klt/place-and-route/`
+directory under names derived from the top module, so a renamed artifact, or
+one going `null` ↔ path (missing or newly appearing), still reports
+`"drifted"`.
 
 **`--rerun` overwrites this request's own artifacts.** Unlike `klt
 synthesize`'s retained per-`run_id` directories, the output directory is
