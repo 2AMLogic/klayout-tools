@@ -602,6 +602,15 @@ not `klt --version`, if you need to detect this kind of drift. See
   island counts only when an `NWell` (31/0) ring closes it; taps are derived
   from `Activ` (`tap=None`) and the tie logic handles that. A layout drawing
   no `nBuLay` extracts exactly as before.
+- **`klt lvs` `options.ignore_mos_bulk`'s `device.bulk_ignored` warning
+  category is recorded here** (issue #5927, backfill — the option shipped
+  in 0.9.2 without a CHANGELOG entry): `options.ignore_mos_bulk: true`
+  disconnects the bulk terminal of every MOS device on both netlists
+  before comparing, so a tap-less planar layout (whose inline extraction
+  leaves bulks on deck-synthesized or anonymous nets) can still have its
+  gate/drain/source topology graded, disclosed as one
+  `device.bulk_ignored` `severity: "warning"` entry per device class and
+  side (never changes `status`). `"engine": "klayout"` only.
 - **`klt signoff` item 11 reads the substrate-path ERC result** (#5346,
   2026-11-12): a substrate-path `erc.supply_short` (`via: "substrate"`) is a
   `supply_not_continuous` blocker exactly like a metal one, so a real short is
@@ -2062,6 +2071,17 @@ not `klt --version`, if you need to detect this kind of drift. See
   the reported orientation changes, and only on hosts that were iterating in
   the other order.
 - `klt lvs`: new `"engine": "klayout-runset"` runs a PDK's own KLayout LVS runset (`deck_file`, `deck_vars`) and takes the verdict from its `.lvsdb` cross-reference, with `device_census`, a `coverage` block and `provenance.runset` (issue #2849). Additive; no `schema_version` bump.
+- **`klt lvs` klayout-runset engine's `mismatches[].category` values are
+  recorded here** (issue #5927, backfill for the
+  categories-are-recorded-here rule; both shipped with the engine itself in
+  0.8.0, issue #2849). `coverage.no_devices_recognized`
+  (`severity: "error"`) fires when the runset recognized no devices on
+  either side — an empty compare is not a verdict, and the run reports
+  `inconclusive`. `runset.incomplete` (`severity: "error"`) fires per
+  circuit the runset did not compare (cross-reference status
+  `Skipped`/`None`); those entries are excluded from the error-based
+  mismatch verdict, so a run that is otherwise clean reports
+  `inconclusive` rather than `mismatch`.
 
 - **Dev builds no longer satisfy `klayout-tools==X.Y.Z` pins** (issue #2823,
   absorbing #2888): the distribution version is now computed at build time
