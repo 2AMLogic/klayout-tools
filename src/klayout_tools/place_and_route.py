@@ -345,6 +345,7 @@ from .place_and_route_sta import _post_route_spef_metrics as _post_route_spef_me
 from .place_and_route_sta import _run_corner_sweep as _run_corner_sweep
 from .place_and_route_sta import _spef_sta_script_lines as _spef_sta_script_lines
 from .place_and_route_sta import def_pin_names as def_pin_names
+from .place_and_route_unconstrained import unconstrained_warnings
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
@@ -1605,15 +1606,10 @@ def _validate_stage_prerequisites(
     ``request.power``) needs inputs or per-library tables this request lacks
     (extracted from :func:`_run_single_corner`, issue #3507, to keep its
     cyclomatic complexity from growing)."""
-    # Stages beyond "floorplan" need a clock (else STA reports the
-    # unconstrained sentinel); `clock_period_ns` alone is a virtual clock.
-    no_clock = not (clock_port or clock_period_ns)
-    if stage_index >= STAGE_ORDER.index("place") and no_clock:
-        raise PlaceAndRouteError(
-            "request.constraints.clock_period_ns (optionally with clock_port) "
-            f"is required to reach target_stage '{target_stage}'; period "
-            "alone is accepted as a virtual clock"
-        )
+    # No clock is not an error (issue #5672): a missing `clock_period_ns` (and
+    # `clock_port`) is an unconstrained run -- the timing-driven passes are
+    # skipped and `timing_status` reads "unconstrained" -- so a timing-free
+    # (structural) Liberty can still reach place/route.
     if stage_index >= STAGE_ORDER.index("place") and io_spec is None:
         raise PlaceAndRouteError(
             f"request.io.layer_h/layer_v are required to reach target_stage "
@@ -2375,6 +2371,7 @@ def _run_single_corner(
         row_rail_layer=row_rail_info["layer"],
     )
     warnings.extend(_antenna_repair_warnings(target_stage, library))
+    warnings.extend(unconstrained_warnings(target_stage, clock_port, clock_period_ns))
     warnings.extend(_layer_map_warnings(layer_map_info))
 
     last_stage = stages[-1]

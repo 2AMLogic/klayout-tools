@@ -459,6 +459,7 @@
         "klayout_tools.lvs_flatten",
         "klayout_tools.lvs_gate_level",
         "klayout_tools.lvs_gate_level_convert",
+        "klayout_tools.lvs_hierarchy",
         "klayout_tools.lvs_known_limits",
         "klayout_tools.lvs_layout_stage",
         "klayout_tools.lvs_mismatch",
@@ -605,6 +606,7 @@
         "klayout_tools.place_and_route_route_overflow",
         "klayout_tools.place_and_route_script",
         "klayout_tools.place_and_route_sta",
+        "klayout_tools.place_and_route_unconstrained",
         "klayout_tools.place_and_route_via_pad",
         "klayout_tools.place_and_route_via_tip"
       ]
@@ -737,6 +739,7 @@
         "klayout_tools.signoff_attest_presence",
         "klayout_tools.signoff_attest_stream",
         "klayout_tools.signoff_attest_text",
+        "klayout_tools.signoff_coverage_disclosure",
         "klayout_tools.signoff_derived_rows",
         "klayout_tools.signoff_details",
         "klayout_tools.signoff_drc_crosscheck",
