@@ -59,6 +59,10 @@ klt gen --pdk-pcell <library>/<cell> [--params <path-or-inline>] [--pdk <variant
   naming is part of `klt gen`'s documented output: a change to it is a
   CHANGELOG-recorded event, since structure names are written into the
   stream.
+  Under `--pdk-pcell` the child is **not** renamed: it keeps the vendor
+  PCell's own name (e.g. `cap_mim`), independent of `--cell-name`, so streams
+  generated under different `--cell-name`s share that child name (issue
+  #5933; pinned by `tests/test_gen_pdk_pcell.py`).
 - `-o`/`--output` — output GDS/OASIS path (default: `<cell_name>.gds`, written
   to the current directory). Format (`.gds`/`.oas`) is inferred from the
   extension, matching `klt render`'s auto-detection posture. The containing
