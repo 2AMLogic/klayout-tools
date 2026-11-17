@@ -853,7 +853,7 @@
     },
     {
       "path": "tests/test_functional_verification.py",
-      "lines": 6589
+      "lines": 6588
     },
     {
       "path": "tests/test_functional_verification_identity_contract.py",
