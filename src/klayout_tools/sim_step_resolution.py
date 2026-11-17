@@ -56,7 +56,7 @@ from typing import Any
 
 from . import sim_crossings, sim_window
 from .sim_errors import SimError
-from .sim_forms import validate_exclusive_form
+from .sim_forms import other_forms, validate_exclusive_form
 
 #: Reason tokens a failed ``step_resolution`` entry's diagnostic leads with.
 ERROR_CODES = (
@@ -67,22 +67,6 @@ ERROR_CODES = (
 _ALLOWED_KEYS = frozenset({"signal", "level", "edge", "window", "from", "to", "max"})
 
 _VECTOR_PREFIX = "__klt_stepres_"
-
-#: Every other measurement form an entry must not also declare.
-_FORMS = (
-    "spice",
-    "expr",
-    "crossings",
-    "cycle_mean",
-    "energy",
-    "stress",
-    "noise",
-    "transfer",
-    "tian",
-    "snm",
-    "search",
-    "eye",
-)
 
 
 def is_step_resolution(spec: dict[str, Any]) -> bool:
@@ -117,7 +101,10 @@ def validate_form_exclusive(spec: dict[str, Any]) -> bool:
     """For an entry declaring ``step_resolution``: refuse any other form beside
     it and validate the body. Returns ``True`` for such an entry."""
     return validate_exclusive_form(
-        spec, "step_resolution", _FORMS, _validate_exclusive_body
+        spec,
+        "step_resolution",
+        other_forms("step_resolution"),
+        _validate_exclusive_body,
     )
 
 

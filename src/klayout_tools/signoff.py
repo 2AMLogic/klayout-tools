@@ -53,6 +53,7 @@ from typing import (
 from . import _report_verify_hints as hints
 from . import signoff_foundry_cell as foundry_cell
 from . import signoff_nothing_checked as vacuous
+from ._git_tracked import is_untracked_working_tree_file, repo_scoped_candidates
 from ._jsongz import READ_ERRORS, open_text
 from ._jsonnum import is_number
 from ._provenance import INPUT_ROLE_LAYOUT, layout_geometry_digest, sha256_file
@@ -73,6 +74,19 @@ from .design_evidence_tiers import (
 from .env_provenance import find_repo_root
 from .metrics import get_metric, is_registered
 
+# Item 3's DRC coverage disclosure and its #5789 ratchet, split out for
+# the size-ratchet ceiling like `signoff_derived_rows` below.
+from .signoff_coverage_disclosure import (
+    drc_coverage_disclosure as _drc_coverage_disclosure,
+)
+from .signoff_coverage_disclosure import (
+    item3_coverage_verdict as _item3_coverage_verdict,
+)
+from .signoff_coverage_disclosure import (
+    item3_key_invalid,
+    read_require_coverage_disclosure,
+)
+
 # Item 5's spec-row coverage sources (issue #3778) and the manifest ratchet
 # that requires them machine-derived (issue #5462); out of this file for its
 # size-ratchet ceiling, same as `signoff_multi_member` and `signoff_na`.
@@ -92,6 +106,11 @@ from .signoff_derived_rows import (
 # `X as X` form marks the ones with no call site left in this module as
 # deliberate re-exports rather than dead imports.
 from .signoff_details import _DETAIL_BUILDERS
+
+# The `drc --engine both` (cross-check) envelope projection (issue #5815):
+# rewriting the cross-check shape into the single-engine `drc` envelope the
+# existing grading rules read, at the ingestion boundary.
+from .signoff_drc_crosscheck import crosscheck_disclosure, crosscheck_project
 from .signoff_envelopes import (
     _ENVELOPE_SHAPES,
     _SCALAR_CHECKS,
@@ -134,9 +153,9 @@ from .signoff_evidence_pin import (
     PIN_UNVERIFIABLE,
     content_hash_pin_state,
     generic_binding_check,
+    pin_disclosure,
     rehash_evidence_file,
     unanchored_detail,
-    unverifiable_pin_note,
 )
 
 # The fleet roll-up subsystem (issue #827, Phase 1c of epic #706) lives in
@@ -210,6 +229,18 @@ from .signoff_sta_constraints import (
     constraint_completeness_status,
     sta_annotation_refusal,
     sta_constraint_refusal,
+)
+from .signoff_unmet_reasons import unmet_reason_counts
+
+# The `klt yield` campaign-disclosure rollups (issue #2467), split out of
+# this file for its size-ratchet ceiling (issue #5815) and re-imported by
+# name so `signoff.<name>` keeps resolving; `X as X` marks deliberate re-exports.
+from .signoff_yield_disclosure import _yield_campaign_disclosure, graded_entry_campaign
+from .signoff_yield_disclosure import (
+    _yield_negative_control_rollup as _yield_negative_control_rollup,
+)
+from .signoff_yield_disclosure import (
+    _yield_sample_size_rollup as _yield_sample_size_rollup,
 )
 
 __all__ = [
@@ -1107,18 +1138,18 @@ _HASH_KIND_GEOMETRY = "geometry"
 _REASON_INVALID_POINTER = "invalid_pointer"
 
 _REASON_TIER_NOT_SUPPORTED = "tier_not_supported"
-#: Issue #825 (Phase 1 of epic #706): a command-backed evidence entry's
-#: subprocess itself did not complete usably -- it could not be launched, it
-#: timed out, or it exited nonzero *without* leaving a parseable envelope on
-#: stdout (per docs/json-contract.md, exit code 1/2 leaves stdout empty).
-#: A nonzero exit that *does* carry a parseable envelope on stdout -- e.g.
-#: `klt drc`'s `EXIT_VIOLATIONS = 3`, a successful run that found violations
-#: -- is not this case; it flows into :func:`_classify`/:func:`_check_passed`
-#: exactly like the file-backed path, landing on :data:`_REASON_CHECK_ERRORED`
-#: or :data:`_REASON_CHECK_FAILED`. Distinct from
-#: :data:`_REASON_UNREADABLE_EVIDENCE` (the command exited *zero* but its
-#: stdout wasn't valid JSON) -- different ways "no runnable check proves this
-#: item" can happen, kept distinguishable per issue #826's invariant.
+#: Issue #5763: the entry's subprocess ran but was killed by
+#: :data:`_COMMAND_EVIDENCE_TIMEOUT_S` -- the bound, not the check,
+#: produced the unmet grade, so a hung gate reads differently from a
+#: failing one (split from :data:`_REASON_COMMAND_FAILED`).
+_REASON_COMMAND_TIMEOUT = "command_timeout"
+#: Issue #825 (Phase 1 of epic #706): could not be launched or exited
+#: nonzero without a parseable stdout envelope (exit 1/2 leaves stdout
+#: empty per docs/json-contract.md) -- a timeout is
+#: :data:`_REASON_COMMAND_TIMEOUT`; a nonzero exit *with* a parseable
+#: envelope flows into :func:`_classify`/:func:`_check_passed` like the
+#: file-backed path; distinct from :data:`_REASON_UNREADABLE_EVIDENCE`
+#: (zero exit, stdout not valid JSON) -- kept distinguishable per #826.
 _REASON_COMMAND_FAILED = "command_failed"
 
 #: Issue #871 (Phase 2b of epic #706): the evidence resolved to a readable,
@@ -1606,10 +1637,10 @@ _PARTIAL_STATUS_BY_KIND: dict[str, str] = {
 }
 
 #: Wall-clock cap on a command-backed evidence entry's subprocess (issue
-#: #825) -- a hung `klt drc`/`klt lvs`/`klt sim` gate must not hang `klt
-#: signoff` itself. Generous (corner-matrix sims are slow) but finite; a
-#: timeout renders that item "unmet" (see :func:`_grade_evidence`), never an
-#: exception that aborts the whole report.
+#: #825) -- a hung gate must not hang `klt signoff`. Generous (corner-matrix
+#: sims are slow) but finite; a timeout renders the item
+#: "unmet"/:data:`_REASON_COMMAND_TIMEOUT` (#5763), never an aborting
+#: exception.
 _COMMAND_EVIDENCE_TIMEOUT_S = 1800
 
 
@@ -1760,6 +1791,10 @@ def build_signoff(sources: list[str]) -> dict[str, Any]:
         # the envelope against that kind's declared shape, so the cast below
         # is backed by a runtime check -- not an assertion about unvalidated
         # JSON.
+        # Issue #5815: an `--engine both` (cross-check) envelope is projected
+        # to its single-engine-equivalent `drc` envelope before
+        # classification, so aggregation reads the shape `--check` reads.
+        envelope = crosscheck_project(envelope) or envelope
         kind = _classify(envelope, source)
         checks.append(_build_check(kind, cast(_EvidenceEnvelope, envelope), source))
 
@@ -3017,49 +3052,6 @@ def _generic_overstates_coverage(kind: str, envelope: _EvidenceEnvelope) -> bool
     )
 
 
-def _drc_coverage_disclosure(
-    kind: str, envelope: dict[str, Any]
-) -> dict[str, Any] | None:
-    """The three ``coverage`` fields ``docs/design-evidence-tiers.md`` item 3
-    requires a DRC claim to disclose, quoted verbatim off the cited envelope
-    (issue #2002) -- or ``None`` when there is nothing to quote.
-
-    ``None`` in exactly two cases, and they mean the same thing to a reader
-    ("this artifact makes no coverage statement"), never "the deck has no
-    gaps":
-
-    - ``kind != "drc"``. No other envelope kind carries a ``coverage`` block
-      of this shape, and item 3 is the only item whose doc text names these
-      fields. (`klt lvs`'s own coverage-shaped disclosures are deliberately
-      out of scope -- see this module's "DRC coverage surfacing" docstring
-      section.)
-    - The envelope has no ``coverage`` key at all, or a non-object one:
-      evidence committed before ``klt drc`` reported coverage. Back-compat is
-      the whole reason this is ``None`` rather than a dict of empty lists --
-      an old envelope must not read as a deck that checked everything.
-
-    Individual fields are normalised to a list (``[]`` for a missing or
-    non-list value) so a consumer never has to re-do that check; this is a
-    *shape* normalisation of a present ``coverage`` block, not a fabricated
-    coverage claim for an absent one.
-    """
-    if kind != "drc":
-        return None
-    coverage = envelope.get("coverage")
-    if not isinstance(coverage, dict):
-        return None
-
-    def _field(name: str) -> list[Any]:
-        value = coverage.get(name)
-        return list(value) if isinstance(value, list) else []
-
-    return {
-        "layers_in_stream_without_rules": _field("layers_in_stream_without_rules"),
-        "rules_skipped": _field("rules_skipped"),
-        "deck_scope": _field("deck_scope"),
-    }
-
-
 def _partial_coverage_disclosure(envelope: Mapping[str, Any]) -> dict[str, Any] | None:
     """The cited envelope's own statement that it skipped requested work
     (issue #2109) -- or ``None`` when it makes no such statement.
@@ -3300,158 +3292,6 @@ def _pex_body_bias_disclosure(
         "unbiased_device_count": body_bias.get("unbiased_device_count"),
         "unbiased_nets": list(nets) if isinstance(nets, list) else [],
     }
-
-
-def _yield_campaign_disclosure(
-    kind: str, envelope: dict[str, Any]
-) -> dict[str, Any] | None:
-    """The cited `klt yield` campaign's own two statements about whether its
-    numbers can support a claim at all (issue #2467) -- its per-measurement
-    ``sample_size.verdict`` and its ``negative_control`` state, rolled up
-    across ``measurements[]`` -- or ``None`` when there is nothing to quote.
-
-    Quoted verbatim off the envelope, never re-derived: `klt yield` computes
-    both (``docs/cli/yield.md``'s "Sample-size verdict" and "Negative
-    control"), and re-deriving either here would let this module and the
-    producer disagree about the same campaign.
-
-    ``None`` in exactly two cases, and they mean the same thing to a reader
-    ("this artifact makes no campaign-discipline statement"), never "the
-    campaign was disciplined":
-
-    - ``kind != "yield"``. No other envelope kind carries ``measurements[]``
-      of this shape, and item 6 is the only item that accepts this kind.
-    - The envelope reports no measurements at all (an empty or non-list
-      ``measurements``). There is then nothing whose sizing or self-check
-      could be stated.
-
-    The rolled-up fields, and the aggregation rule each uses -- stated here
-    because a campaign is a *set* of measurements and "the campaign's
-    verdict" is not a field any of them carries:
-
-    - ``sample_size`` -- ``"insufficient"`` when **any** measurement says so,
-      ``"sufficient"`` when at least one says so and none says otherwise,
-      and ``None`` when no measurement states a verdict at all (a report
-      written before the block existed). "Any" rather than "all": the item is
-      graded against the whole cited campaign, so one unsized measurement
-      leaves part of the claim unsized, and a missing statement is never read
-      as an insufficient one (the same back-compat rule
-      :func:`_drc_coverage_disclosure` applies to a missing ``coverage``
-      block).
-    - ``undersized_measurements`` -- the names behind that verdict, in the
-      report's own measurement order.
-    - ``negative_control`` -- ``"not_detected"`` when **any** declared
-      control failed to show the seeded degradation, ``"detected"`` when at
-      least one was declared and every declared one detected, and
-      ``"not_declared"`` when no measurement declared one. "Any failed" and
-      "at least one declared" are deliberately asymmetric, and match the two
-      run-level warnings `klt yield` itself emits (``native/yield/src/
-      estimate.rs``): one working self-check demonstrates the campaign's
-      statistics *can* discriminate, while one failed self-check
-      demonstrates they cannot.
-    - ``measurements_without_negative_control`` / ``undetected_negative_controls``
-      -- the names behind that verdict, likewise in report order, so a reader
-      who sees ``"detected"`` beside a non-empty first list can tell a
-      fully-controlled campaign from a partly-controlled one.
-    """
-    if kind != "yield":
-        return None
-    raw = envelope.get("measurements")
-    measurements = (
-        [m for m in raw if isinstance(m, dict)] if isinstance(raw, list) else []
-    )
-    if not measurements:
-        return None
-
-    sample_size_verdict, undersized = _yield_sample_size_rollup(measurements)
-    (
-        control_verdict,
-        without_control,
-        undetected,
-        not_applicable,
-    ) = _yield_negative_control_rollup(measurements)
-    return {
-        "sample_size": sample_size_verdict,
-        "undersized_measurements": undersized,
-        "negative_control": control_verdict,
-        "measurements_without_negative_control": without_control,
-        "undetected_negative_controls": undetected,
-        "not_applicable_negative_controls": not_applicable,
-    }
-
-
-def _yield_sample_size_rollup(
-    measurements: list[dict[str, Any]],
-) -> tuple[str | None, list[Any]]:
-    """:func:`_yield_campaign_disclosure`'s ``sample_size`` /
-    ``undersized_measurements`` pair (issue #2467) -- see that function's
-    docstring for the aggregation rule this applies.
-
-    Split out rather than inlined because the two axes a campaign is rolled
-    up along (sizing, self-check) have *different* aggregation rules, and
-    reading them in one loop obscured which "any"/"at least one" belonged to
-    which axis.
-    """
-    undersized: list[Any] = []
-    sized = False
-    for measurement in measurements:
-        sample_size = measurement.get("sample_size")
-        if not isinstance(sample_size, dict):
-            continue
-        verdict = sample_size.get("verdict")
-        if verdict == "insufficient":
-            undersized.append(measurement.get("name"))
-        elif verdict == "sufficient":
-            sized = True
-    if undersized:
-        return "insufficient", undersized
-    return ("sufficient" if sized else None), undersized
-
-
-def _yield_negative_control_rollup(
-    measurements: list[dict[str, Any]],
-) -> tuple[str, list[Any], list[Any], list[dict[str, Any]]]:
-    """:func:`_yield_campaign_disclosure`'s ``negative_control`` /
-    ``measurements_without_negative_control`` /
-    ``undetected_negative_controls`` triple (issue #2467) -- see that
-    function's docstring for the aggregation rule this applies.
-
-    A measurement whose ``negative_control`` is ``null``/absent declared
-    none; a declared one whose ``verdict`` is anything other than
-    ``"detected"`` (``"not_detected"`` today) did not show the seeded
-    degradation. A declared-but-unrecognised verdict is counted with the
-    latter deliberately: an unknown self-check result is not a passing one.
-
-    A ``"not_applicable"`` verdict with a non-empty ``reason`` (issue #4523)
-    is a declared disposition: it is listed in the fourth element, excluded
-    from the other lists, and can never itself make the rollup ``detected``.
-    Without a reason it fails closed, like an unrecognised verdict.
-    """
-    without_control: list[Any] = []
-    undetected: list[Any] = []
-    not_applicable: list[dict[str, Any]] = []
-    detected = False
-    for measurement in measurements:
-        control = measurement.get("negative_control")
-        if not isinstance(control, dict):
-            without_control.append(measurement.get("name"))
-        elif control.get("verdict") == "detected":
-            detected = True
-        elif (
-            control.get("verdict") == "not_applicable"
-            and isinstance(control.get("reason"), str)
-            and control["reason"].strip()
-        ):
-            not_applicable.append(
-                {"name": measurement.get("name"), "reason": control["reason"]}
-            )
-        else:
-            undetected.append(measurement.get("name"))
-    if undetected:
-        return "not_detected", without_control, undetected, not_applicable
-    if detected:
-        return "detected", without_control, undetected, not_applicable
-    return "not_declared", without_control, undetected, not_applicable
 
 
 def _yield_campaign_refusal(kind: str, envelope: dict[str, Any]) -> str | None:
@@ -4240,13 +4080,13 @@ def build_tier_report(
       which says the resolved bytes are not a shape this build recognises:
       here nothing was ever classified, and the remedy is to fix the
       pointer, not the citation.
-    - ``"command_failed"`` -- a command-backed entry's subprocess could not
-      be launched, timed out, or exited nonzero *without* leaving a
-      parseable envelope on stdout. A nonzero exit whose stdout *does* parse
-      (e.g. a ``klt drc``/``klt lvs``/``klt sim`` extension exit code for a
-      successful run that found a violation/mismatch/failure) is not this
-      case -- it is graded by its envelope content instead, landing on
-      ``"check_errored"`` or ``"check_failed"`` below.
+    - ``"command_timeout"`` (issue #5763) -- the subprocess was killed by the
+      :data:`_COMMAND_EVIDENCE_TIMEOUT_S` cap (the bound, not the check,
+      produced the grade).
+    - ``"command_failed"`` -- launch failure or nonzero exit *without* a
+      parseable stdout envelope (timeouts are ``"command_timeout"``); a
+      nonzero exit whose stdout *does* parse (a ``klt drc`` extension exit
+      for a found violation) is graded by envelope content instead.
     - ``"check_errored"`` -- the evidence resolved to a ``klt`` ``error``
       envelope: the underlying command itself failed to run to completion.
     - ``"check_failed"`` -- the evidence resolved to a recognised, non-error
@@ -4463,6 +4303,10 @@ def build_tier_report(
     # Issue #5462: the opt-in ratchet that fails item 5 on manifest-asserted
     # (rather than envelope-derived) row coverage.
     require_derived, require_derived_invalid = read_require_derived_rows(manifest)
+    # Issue #5789: the opt-in ratchet failing item 3 on a mis-declared gap.
+    require_coverage, require_coverage_invalid = read_require_coverage_disclosure(
+        manifest
+    )
     # Issue #2839: T1 item 11's port-accessibility policy (provisional).
     power_port_policy = _read_power_port_policy(manifest.get("power_ports"))
 
@@ -4521,6 +4365,8 @@ def build_tier_report(
                     **_resolve_spec_rows(spec_rows_by_item, t1_item["id"], partition),
                     require_derived_rows=require_derived,
                     require_derived_rows_invalid=require_derived_invalid,
+                    require_coverage_disclosure=require_coverage,
+                    require_coverage_disclosure_invalid=require_coverage_invalid,
                     generator_exec=generator_exec,
                 )
             total += 1
@@ -4566,15 +4412,14 @@ def build_tier_report(
         # t1_item_count`. `None` when the shipped doc is unreadable.
         "build_t1_item_count": _build_t1_row_count(build_item_ids, len(partitions)),
         "t1_met_count": met_count,
-        # Issue #2865: items satisfied by a recorded "not applicable", never
-        # folded into `t1_met_count`. Omitted when zero so a report with none
-        # is byte-identical to what this build rendered before the field
-        # existed (absent means 0).
+        # Issue #2865: recorded "not applicable" items, never in `t1_met_count`;
+        # omitted when zero (absent means 0).
         **(
             {"t1_not_applicable_count": not_applicable_count}
             if not_applicable_count
             else {}
         ),
+        **unmet_reason_counts(items),  # issue #5903; absent when nothing is unmet
         "source_doc": doc_source_label(tiers_doc),
         "source_doc_content_hash": doc["content_hash"],
         "build": _build_identity(),
@@ -4786,6 +4631,9 @@ def _normalize_evidence_options(raw: dict[str, Any]) -> dict[str, Any] | None:
     ``require_annotation_complete`` is issue #3258;
     ``require_complete_constraints`` is issue #5234; ``foundry_cell_exceptions``
     (disclosed foundry-cell DRC exceptions for item 3) is issue #4530.
+    ``coverage_disclosed`` (issue #5789) is validated lazily by
+    :mod:`.signoff_coverage_disclosure`, so it is read only when the
+    ratchet is on.
     """
     require_annotation = raw.get("require_annotation_complete", False)
     if not isinstance(require_annotation, bool):
@@ -4802,6 +4650,7 @@ def _normalize_evidence_options(raw: dict[str, Any]) -> dict[str, Any] | None:
         "require_annotation_complete": require_annotation,
         "require_complete_constraints": require_constraints,
         "foundry_cell_exceptions": cell_exceptions,
+        "coverage_disclosed": raw.get("coverage_disclosed"),
     }
 
 
@@ -5242,6 +5091,11 @@ def _resolve_input_artifact_value(
     A plain absolute string (schema-1 `klt sta` evidence, issue #2879) is
     tried only as written: it is never re-rooted by stripping a guessed host
     prefix, so it verifies only where that exact path still exists.
+
+    **The grading basis is the git index, not the working tree** (issue
+    #5857): a candidate inside a functioning checkout whose index does
+    not track it is dropped here -- :mod:`klayout_tools._git_tracked`
+    holds the contract and the fallbacks.
     """
     candidates: list[str] = []
     if isinstance(value, str) and value:
@@ -5249,16 +5103,10 @@ def _resolve_input_artifact_value(
         if evidence_dir is not None and not os.path.isabs(value):
             candidates.append(os.path.join(evidence_dir, value))
     elif isinstance(value, Mapping) and value.get("scope") == "repo":
-        repo_relative = value.get("path")
-        if isinstance(repo_relative, str) and repo_relative:
-            root = (
-                repo_root
-                if repo_root is not None
-                else find_repo_root(evidence_dir or spec.get("cwd") or os.getcwd())
-            )
-            if root is not None:
-                candidates.append(os.path.join(root, repo_relative))
-    return list(dict.fromkeys(candidates))
+        candidates.extend(repo_scoped_candidates(value, spec, evidence_dir, repo_root))
+    return [
+        c for c in dict.fromkeys(candidates) if not is_untracked_working_tree_file(c)
+    ]
 
 
 def _input_artifact_candidates(
@@ -5485,24 +5333,23 @@ def _grade_evidence(
 
     **Command-backed** (``spec["kind"] == "command"``, issue #825): actually
     runs the given argv as a subprocess (``cwd=spec["cwd"]`` when given),
-    bounded by :data:`_COMMAND_EVIDENCE_TIMEOUT_S`. A launch failure or
-    timeout renders :data:`_REASON_COMMAND_FAILED`. Stdout is parsed as JSON
-    *before* the exit status is ever inspected -- exactly like the
-    file-backed path, which does not gate on an inferred exit code at all --
-    because a ``klt`` verb's own nonzero exit can mean "ran successfully and
-    found a problem" (e.g. ``klt drc``'s ``EXIT_VIOLATIONS = 3``) just as
-    easily as it can mean a genuine failure; per docs/json-contract.md, both
-    shapes leave a documented envelope on stdout. If stdout parses, the
-    envelope flows into :func:`_classify`/:func:`_check_passed` regardless of
-    ``exit_status``, so :data:`_REASON_CHECK_ERRORED`/:data:`_REASON_CHECK_FAILED`
-    work correctly whether the verb exited 0 or with an extension code. Only
-    when stdout does *not* parse as JSON does ``exit_status`` matter: a zero
-    exit with unparsable stdout renders :data:`_REASON_UNREADABLE_EVIDENCE`
-    (the command-backed analogue of an unreadable evidence file); a nonzero
-    exit with unparsable stdout renders :data:`_REASON_COMMAND_FAILED` (per
-    the contract, an application-level error leaves stdout empty, so there is
-    genuinely no evidence to grade). ``exit_status`` is the subprocess's
-    *actually observed* return code, never inferred.
+    bounded by :data:`_COMMAND_EVIDENCE_TIMEOUT_S`; a timeout renders
+    :data:`_REASON_COMMAND_TIMEOUT` (issue #5763) and a launch failure
+    :data:`_REASON_COMMAND_FAILED`. Stdout is parsed as JSON *before* the
+    exit status is ever inspected -- exactly like the file-backed path,
+    which does not gate on an inferred exit code -- because a ``klt`` verb's
+    own nonzero exit can mean "ran successfully and found a problem" (e.g.
+    ``klt drc``'s ``EXIT_VIOLATIONS = 3``) just as easily as it can mean a
+    genuine failure; per docs/json-contract.md, both shapes leave a
+    documented envelope on stdout. If stdout parses, the envelope flows into
+    :func:`_classify`/:func:`_check_passed` regardless of ``exit_status``,
+    so :data:`_REASON_CHECK_ERRORED`/:data:`_REASON_CHECK_FAILED` work
+    correctly whether the verb exited 0 or with an extension code. Only when
+    stdout does *not* parse as JSON does ``exit_status`` matter: a zero exit
+    with unparsable stdout renders :data:`_REASON_UNREADABLE_EVIDENCE`; a
+    nonzero exit with unparsable stdout renders :data:`_REASON_COMMAND_FAILED`
+    (an application-level error leaves stdout empty -- genuinely no evidence
+    to grade). ``exit_status`` is the observed return code, never inferred.
 
     **Content hash** (either binding): normally read from the resolved
     envelope's own ``provenance.input.content_hash``. A ``klt yield`` kind
@@ -5613,15 +5460,8 @@ def _grade_evidence(
     )
     if pin_state == PIN_UNVERIFIABLE:
         # Issue #3747: say why -- the pin itself is ungradable for this kind.
-        return (
-            "unmet",
-            _REASON_UNVERIFIABLE_PROVENANCE,
-            None,
-            {
-                "content_hash_pin": PIN_UNVERIFIABLE,
-                "content_hash_pin_note": unverifiable_pin_note(check_kind, resolution),
-            },
-        )
+        pin = pin_disclosure(spec, resolution, check_kind=check_kind)
+        return "unmet", _REASON_UNVERIFIABLE_PROVENANCE, None, pin
     if pin_state == PIN_STALE:
         return "unmet", _REASON_STALE_EVIDENCE, None, hints.stale_pin(spec, resolution)
 
@@ -5667,7 +5507,14 @@ def _grade_check_outcome(
     :func:`_build_tier_item`'s own kind gate, as :func:`_kind_gated_refusal`
     does; that verdict carries
     :func:`~.signoff_nothing_checked.nothing_checked_item_detail` (issue
-    #5479), naming the artifact read though ``citation`` stays ``None``."""
+    #5479), naming the artifact read though ``citation`` stays ``None``.
+
+    Issue #5598: this return precedes :func:`_grade_evidence`'s staleness
+    gate, so it would otherwise hide the manifest ``content_hash`` pin --
+    a comparable, genuinely stale one included -- behind the envelope's own
+    failure, for every kind. :func:`~.signoff_evidence_pin.pin_disclosure`
+    carries it beside the verdict, never changing it; a stale pin also names
+    the failed comparison, as the staleness verdict's own detail does."""
     if _check_passed(kind, checked):
         return {}, None
     failure_detail = _critical_metric_detail(envelope)
@@ -5686,7 +5533,11 @@ def _grade_check_outcome(
             **failure_detail,
             **vacuous.nothing_checked_item_detail(envelope, _citation(resolution)),
         }
-    return {}, ("unmet", reason, None, failure_detail)
+    pin = pin_disclosure(spec, resolution, check_kind=kind)
+    if pin.get("content_hash_pin") == PIN_STALE:
+        # Name the failed comparison, exactly as the staleness verdict does.
+        pin = hints.stale_pin(spec, resolution)
+    return {}, ("unmet", reason, None, {**failure_detail, **pin})
 
 
 def _foundry_cell_exception_eligible(kind: str, envelope: dict[str, Any]) -> bool:
@@ -5721,7 +5572,8 @@ def _kind_gated_failure_detail(
 
     Issue #3063: the early return would otherwise hide a stale
     ``content_hash`` pin behind the campaign refusal until the sample is
-    raised. Disclosed beside the verdict, never changing it.
+    raised. Disclosed beside the verdict, never changing it -- via the
+    shared :func:`~.signoff_evidence_pin.pin_disclosure` since issue #5598.
 
     Issue #5479: a :data:`_REASON_NOTHING_CHECKED` refusal carries
     :func:`~.signoff_nothing_checked.nothing_checked_item_detail`, so this
@@ -5737,13 +5589,7 @@ def _kind_gated_failure_detail(
         _REASON_NEGATIVE_CONTROL_NOT_DETECTED,
     ):
         return {}
-    detail: dict[str, Any] = {"yield_campaign": campaign}
-    pin_state = content_hash_pin_state(
-        spec.get("content_hash"), resolution["content_hash"]
-    )
-    if pin_state is not None:
-        detail["content_hash_pin"] = pin_state
-    return detail
+    return {"yield_campaign": campaign, **pin_disclosure(spec, resolution)}
 
 
 def _bind_anchored_citation(
@@ -6475,17 +6321,18 @@ def _resolve_evidence(
     """
     pointer = spec.get("pointer")
     if spec["kind"] == "command":
-        command = spec["command"]
-        command_label = shlex.join(command)
+        command_label = shlex.join(spec["command"])
         try:
             completed = subprocess.run(
-                command,
+                spec["command"],
                 cwd=spec.get("cwd"),
                 capture_output=True,
                 text=True,
                 timeout=_COMMAND_EVIDENCE_TIMEOUT_S,
             )
-        except (OSError, subprocess.TimeoutExpired):
+        except subprocess.TimeoutExpired:
+            return None, _REASON_COMMAND_TIMEOUT
+        except OSError:
             return None, _REASON_COMMAND_FAILED
 
         exit_status = completed.returncode
@@ -6522,6 +6369,11 @@ def _resolve_evidence(
     envelope, envelope_reason = _cited_envelope(envelope, pointer)
     if envelope is None:
         return None, envelope_reason
+
+    # Issue #5815: *after* pointer resolution, so a `pointer` selecting one
+    # side of a cross-check envelope keeps grading as that standalone report
+    # while a whole-envelope citation gets the both-engines verdict.
+    envelope = crosscheck_project(envelope) or envelope
 
     try:
         check_kind = _classify(envelope, source_label)
@@ -6587,6 +6439,15 @@ def _resolve_evidence(
     )
 
 
+def _citation_pointer(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """The RFC 6901 ``pointer`` the evidence entry carried, as a citation
+    fragment (issue #5815) -- ``{}`` (a no-op update) when it named none, so
+    a citation of *part* of a composite document is distinguishable in the
+    JSON from a whole-envelope citation of the same file."""
+    pointer = spec.get("pointer")
+    return {"pointer": pointer} if pointer is not None else {}
+
+
 def _citation(resolution: dict[str, Any]) -> dict[str, Any]:
     """Build a ``"met"`` item's ``citation`` block from a
     :func:`_resolve_evidence` resolution -- see :func:`build_tier_report`'s
@@ -6606,6 +6467,9 @@ def _citation(resolution: dict[str, Any]) -> dict[str, Any]:
         "input_verified": resolution.get("input_verified"),
         "exit_status": resolution["exit_status"],
     }
+    # Issue #5815: the RFC 6901 `pointer` the evidence entry carried, when
+    # it carried one -- additive, never a grading input.
+    citation.update(_citation_pointer(resolution["spec"]))
     if resolution.get("content_hash_basis") is not None:
         # Issue #4893: `content_hash` is a re-hash of the cited evidence file
         # itself, not a design input.
@@ -6632,6 +6496,12 @@ def _citation(resolution: dict[str, Any]) -> dict[str, Any]:
     coverage = _drc_coverage_disclosure(resolution["kind"], resolution["envelope"])
     if coverage is not None:
         citation["coverage"] = coverage
+    # Issue #5815: a cross-check (`--engine both`) citation discloses what
+    # was actually graded -- each engine's own status, the comparison
+    # state, each side's coverage fields. Disclosure only, like every other
+    # key added here; `None` (a no-op update) for every non-cross-check
+    # envelope.
+    citation.update(crosscheck_disclosure(resolution["envelope"]) or {})
     # Issue #1983: a `pex` citation also carries the cited envelope's own
     # body-bias statement -- item 7's verdict and the one property that can
     # silently invalidate the numbers backing it end up in the same
@@ -6720,6 +6590,8 @@ def _build_tier_item(
     spec_rows_invalid: bool = False,
     require_derived_rows: bool = False,
     require_derived_rows_invalid: bool = False,
+    require_coverage_disclosure: bool = False,
+    require_coverage_disclosure_invalid: bool = False,
     generator_exec: GeneratorExecution | None = None,
 ) -> dict[str, Any]:
     """Grade one T1 checklist item against ``evidence`` -- see
@@ -6837,7 +6709,13 @@ def _build_tier_item(
             and spec_citation["kind"] not in allowed_kinds
         ):
             return "unmet", _REASON_WRONG_KIND, None, spec_detail
-        return spec_status, spec_reason, spec_citation, spec_detail
+        # Issue #5789: refuse an item 3 whose declared coverage disagrees.
+        return _item3_coverage_verdict(
+            item_id,
+            require_coverage_disclosure,
+            spec,
+            (spec_status, spec_reason, spec_citation, spec_detail),
+        )
 
     raw_entry = _lookup_evidence(evidence, item_id, partition_kind)
     # Issue #3741: item 5 digital's RTL-flow route needs STA *and* a
@@ -6871,24 +6749,25 @@ def _build_tier_item(
             )
     elif (
         report_list
+        # Issue #5789: item 3's malformed key, likewise item 5's own.
+        or item3_key_invalid(item_id, require_coverage_disclosure_invalid)
         or item_id in _ITEMS_ACCEPTING_MULTI_CITATION
         and (
-            # Issue #5462: a mistyped ``require_derived_rows`` is item 5's own
-            # ``invalid_evidence``, so it must reach the aggregator for every
-            # evidence shape -- single-dict and absent entries took neither
-            # branch below and graded as if the key were not set at all.
+            # Issue #5462: a mistyped ``require_derived_rows`` is item 5's
+            # own ``invalid_evidence``, so it must reach the aggregator for
+            # every evidence shape, not only list-shaped entries.
             item5_require_derived_invalid
-            or raw_entry is not None
-            and (
-                isinstance(raw_entry, list)
-                or spec_rows is not None
-                or spec_rows_invalid
-                or required_kind_pair is not None
-            )
+            or spec_rows is not None
+            or spec_rows_invalid
             # Issue #4190: declared ``spec_rows`` with no evidence entry at
             # all grade as a zero-citation set (every row uncovered or a
-            # declared gap), not as ``no_evidence``.
-            or (raw_entry is None and (spec_rows is not None or spec_rows_invalid))
+            # declared gap), not as ``no_evidence`` -- so ``spec_rows``
+            # routes the branch with or without an entry, while a bare list
+            # or an RTL-flow kind pair still needs one (issues #2959/#3741).
+            or (
+                raw_entry is not None
+                and (isinstance(raw_entry, list) or required_kind_pair is not None)
+            )
         )
     ):
         # Issue #2959: item 5 may cite several envelopes (and declare the
@@ -6908,6 +6787,9 @@ def _build_tier_item(
             required_kind_pair=required_kind_pair,
             require_derived=item5_require_derived,
             require_derived_invalid=item5_require_derived_invalid,
+            require_coverage_invalid=item3_key_invalid(
+                item_id, require_coverage_disclosure_invalid
+            ),
         )
         # Issue #5031: per-cell DRC/LVS lists state how many members counted.
         extra = with_member_coverage(item_id, report_list, raw_entry, extra)
@@ -7082,6 +6964,7 @@ def _grade_multi_citation(
     required_kind_pair: tuple[str, ...] | None = None,
     require_derived: bool = False,
     require_derived_invalid: bool = False,
+    require_coverage_invalid: bool = False,
 ) -> tuple[str, str | None, dict[str, Any] | None, dict[str, Any], dict[str, Any]]:
     """Grade a list-form (or ``spec_rows``-bearing) evidence entry (issue
     #2959). Each member goes through the ordinary per-envelope path
@@ -7112,7 +6995,9 @@ def _grade_multi_citation(
     #5462, the manifest's ``require_derived_rows``, item 5 only) an asserted
     row is not coverage: an otherwise passing set carrying one is
     ``unmet``/``partial_coverage`` with ``detail.asserted_rows``.
-    ``require_derived_invalid`` (a non-boolean key) is ``invalid_evidence``.
+    ``require_derived_invalid`` (a non-boolean key) is ``invalid_evidence``;
+    so is ``require_coverage_invalid`` (issue #5789, via
+    :func:`_checked_multi_members`).
 
     Returns ``(status, reason, citation, failure_detail, extra_item_keys)``.
     """
@@ -7125,7 +7010,9 @@ def _grade_multi_citation(
     if require_derived_invalid:
         return invalid("'require_derived_rows' must be a boolean")
 
-    members, problem = _checked_multi_members(raw_entry, spec_rows, spec_rows_invalid)
+    members, problem = _checked_multi_members(
+        raw_entry, spec_rows, spec_rows_invalid, require_coverage_invalid
+    )
     if members is None:
         return invalid(problem or "malformed evidence entry")
 
@@ -7144,6 +7031,8 @@ def _grade_multi_citation(
                 **({"rows": rows} if rows else {}),
                 "status": g[0],
                 "reason": g[1],
+                # Issue #5786: carries the member citation's own `yield_campaign`.
+                **graded_entry_campaign(g[2]),
             }
             for spec, rows, g in graded
         ]
@@ -7190,10 +7079,13 @@ def _checked_multi_members(
     raw_entry: Any,
     spec_rows: list[dict[str, Any]] | None,
     spec_rows_invalid: bool,
+    require_coverage_invalid: bool = False,
 ) -> tuple[list[tuple[dict[str, Any], list[str] | None]] | None, str | None]:
     """The parsed ``(spec, rows)`` members of a multi-citation entry, or
     ``(None, <problem>)`` when ``spec_rows``, a member, or a member's row
     naming is invalid."""
+    if require_coverage_invalid:  # issue #5789: item 3's malformed key
+        return None, "'require_coverage_disclosure' must be a boolean"
     if spec_rows_invalid:
         return None, "'spec_rows' for this item is malformed"
     # Issue #4190: no evidence entry -> zero members; only ``spec_rows`` grade.

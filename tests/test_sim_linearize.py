@@ -7,20 +7,15 @@ Unit tests need no simulator; the integration test runs the real
 from __future__ import annotations
 
 import json
-import os
-import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from helpers.tool_probes import SKIP_NO_NGSPICE as _SKIP_NO_NGSPICE
 from klayout_tools import sim
 
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
-
-HAVE_NGSPICE = shutil.which("ngspice") is not None and (
-    os.environ.get("KLT_SKIP_NGSPICE_TESTS") != "1"
-)
 
 _RC = "V1 in 0 SIN(0 1 1k)\nR1 in out 1k\nC1 out 0 159.155n\n"
 _EXPR = "mean(v(out)*cos(2*pi*1k*time))*2"
@@ -100,7 +95,7 @@ def test_linearize_refused_for_xyce(tmp_path):
         sim.run_sim(str(request))
 
 
-@pytest.mark.skipif(not HAVE_NGSPICE, reason="ngspice is not installed")
+@_SKIP_NO_NGSPICE
 def test_real_ngspice_fourier_sum_after_linearize(tmp_path):
     values = {}
     for flag in (False, True):

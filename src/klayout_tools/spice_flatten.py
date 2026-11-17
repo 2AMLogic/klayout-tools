@@ -74,6 +74,7 @@ from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
 
 from ._paths import fold_spice_continuations
+from ._spice_tokens import split_spice_tokens
 
 __all__ = ["FlattenResult", "SpiceFlattenError", "flatten_spice"]
 
@@ -158,56 +159,6 @@ def _logical_lines(text: str) -> list[str]:
             continue
         lines.append(_INLINE_COMMENT.split(raw, maxsplit=1)[0].rstrip())
     return fold_spice_continuations([line for line in lines if line.strip()])
-
-
-def _lex(line: str) -> list[str]:
-    """Whitespace split keeping quoted/braced/parenthesised expressions whole."""
-    tokens: list[str] = []
-    current: list[str] = []
-    quote = ""
-    depth = 0
-    for ch in line:
-        if quote:
-            quote = "" if ch == quote else quote
-        elif ch in "'\"":
-            quote = ch
-        elif ch in "{(":
-            depth += 1
-        elif ch in "})":
-            depth = max(depth - 1, 0)
-        elif ch.isspace() and depth == 0:
-            if current:
-                tokens.append("".join(current))
-                current = []
-            continue
-        current.append(ch)
-    if current:
-        tokens.append("".join(current))
-    return tokens
-
-
-def _split_tokens(line: str) -> list[str]:
-    """:func:`_lex`, then re-join ``name = value`` / ``name= value`` /
-    ``name =value`` spellings into one ``name=value`` token."""
-    tokens = _lex(line)
-    merged: list[str] = []
-    index = 0
-    while index < len(tokens):
-        token = tokens[index]
-        has_next = index + 1 < len(tokens)
-        if token == "=" and merged and has_next:
-            merged[-1] = f"{merged[-1]}={tokens[index + 1]}"
-            index += 2
-        elif token.endswith("=") and token != "=" and has_next:
-            merged.append(token + tokens[index + 1])
-            index += 2
-        elif token.startswith("=") and token != "=" and merged:
-            merged[-1] = merged[-1] + token
-            index += 1
-        else:
-            merged.append(token)
-            index += 1
-    return merged
 
 
 def _is_assignment(token: str) -> bool:
@@ -324,7 +275,7 @@ class _Parsed:
 
 
 def _parse_header(line: str) -> _Subckt:
-    tokens = _split_tokens(line.strip())[1:]
+    tokens = split_spice_tokens(line.strip())[1:]
     if not tokens:
         raise SpiceFlattenError(
             f"`.subckt` header with no name: `{line.strip()}`", code="malformed"
@@ -503,7 +454,7 @@ class _Flattener:
         """One non-`X`-local device card, renamed/re-noded/substituted."""
         if not scope.path:
             return card
-        tokens = _split_tokens(card)
+        tokens = split_spice_tokens(card)
         letter = tokens[0][0].upper()
         if letter in _FIXED_NODE_COUNT:
             rest = self._rewrite_fixed(
@@ -616,7 +567,7 @@ class _Flattener:
                     f"`{directive}` cards are not supported inside an "
                     "inlined subcircuit",
                 )
-            tokens = _split_tokens(card)
+            tokens = split_spice_tokens(card)
             if tokens[0][0].upper() == "X":
                 nodes, target, params = _x_call(tokens)
                 key = target.lower()
@@ -692,7 +643,7 @@ class _Flattener:
             env[name.lower()] = resolved
         for card in subckt.body:
             if _directive(card) == ".param":
-                for token in _split_tokens(card)[1:]:
+                for token in split_spice_tokens(card)[1:]:
                     if _is_assignment(token):
                         name, value = _split_assignment(token)
                         env[name.lower()] = _substitute(_unwrap(value), env)
@@ -729,7 +680,7 @@ def _instantiated(parsed: _Parsed) -> set[str]:
     bodies.append([text for kind, text in parsed.items if kind == "line"])
     for body in bodies:
         for card in body:
-            tokens = _split_tokens(card)
+            tokens = split_spice_tokens(card)
             if tokens and tokens[0][0].upper() == "X":
                 _nodes, target, _params = _x_call(tokens)
                 if target.lower() in parsed.subckts:
@@ -758,7 +709,7 @@ def _wrap_fragment(top: str, pins: Sequence[str], inside: list[str]) -> list[str
         token.lower()
         for card in inside
         if not card.startswith(".")
-        for token in _split_tokens(card)[1:]
+        for token in split_spice_tokens(card)[1:]
     }
     missing = [pin for pin in pins if pin.lower() not in used]
     if missing:
