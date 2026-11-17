@@ -78,6 +78,7 @@ from .pdk import (
     find_pdk,
     resolve_pdk_dbu,
 )
+from .pdk_pcell_checks import check_pcell_variant
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import klayout.db as kdb
@@ -915,14 +916,12 @@ def _produce_pdk_pcell(
     raw_params: dict[str, Any],
     pdk_info: dict[str, Any],
 ) -> tuple[kdb.Layout, kdb.Cell]:
-    """Instantiate ``entry``'s ``pcell_name`` into a fresh layout.
-
-    Identical in shape to :func:`klayout_tools.gen._produce` -- resolve the
-    declaration, ``add_pcell_variant``, insert into a fresh top cell -- except
-    the declaration comes from the *vendor's* library rather than klt's own.
-    The output dbu is resolved from the PDK's tech LEF the same way, so a
-    ``--pdk-pcell`` block and a built-in-generator block resolved against one
-    PDK agree by construction (a `klt gen-compose` precondition).
+    """Instantiate ``entry``'s ``pcell_name`` into a fresh layout, then
+    validate the variant -- KLayout swallows a vendor ``produce`` failure
+    and leaves an unnamed cell (issue #5936). Otherwise identical in shape
+    to klt's own ``_produce``: resolve the declaration, ``add_pcell_variant``,
+    insert into a fresh top cell; the dbu comes from the PDK's tech LEF (a
+    `klt gen-compose` precondition). See :mod:`klayout_tools.pdk_pcell_checks`.
     """
     import klayout.db as kdb
 
@@ -952,6 +951,7 @@ def _produce_pdk_pcell(
     _apply_tkinter_workaround(entry["package"])
     try:
         variant = layout.add_pcell_variant(handle, declaration.id(), values)
+        check_pcell_variant(layout, variant, entry["library"], pcell_name)
         top = layout.create_cell(cell_name)
         top.insert(kdb.CellInstArray(variant, kdb.Trans()))
     except PdkPCellError:
