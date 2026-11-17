@@ -1,5 +1,7 @@
 """Per-kind ``detail`` excerpt builders for :mod:`.signoff`'s checks
-(issues #2839, #4859; split out for the #2766 per-file size ratchet)."""
+(issues #2839, #4859; split out for the #2766 per-file size ratchet), plus
+:func:`_yield_sample_size_rollup`, moved from :mod:`.signoff` for the same
+ratchet (issue #5573)."""
 
 from __future__ import annotations
 
@@ -143,3 +145,33 @@ _DETAIL_BUILDERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "model-run": _model_run_detail,
     "synthesize": _synthesize_detail,
 }
+
+
+def _yield_sample_size_rollup(
+    measurements: list[dict[str, Any]],
+) -> tuple[str | None, list[Any]]:
+    """:func:`~.signoff._yield_campaign_disclosure`'s ``sample_size`` /
+    ``undersized_measurements`` pair (issue #2467) -- see that function's
+    docstring for the aggregation rule this applies.
+
+    Split out rather than inlined because the two axes a campaign is rolled
+    up along (sizing, self-check) have *different* aggregation rules, and
+    reading them in one loop obscured which "any"/"at least one" belonged to
+    which axis. Moved to this module for :mod:`.signoff`'s file-size ratchet
+    (issue #5573); ``signoff.py`` re-imports it so
+    ``signoff._yield_sample_size_rollup`` keeps resolving.
+    """
+    undersized: list[Any] = []
+    sized = False
+    for measurement in measurements:
+        sample_size = measurement.get("sample_size")
+        if not isinstance(sample_size, dict):
+            continue
+        verdict = sample_size.get("verdict")
+        if verdict == "insufficient":
+            undersized.append(measurement.get("name"))
+        elif verdict == "sufficient":
+            sized = True
+    if undersized:
+        return "insufficient", undersized
+    return ("sufficient" if sized else None), undersized

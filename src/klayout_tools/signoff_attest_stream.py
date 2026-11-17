@@ -37,6 +37,7 @@ from .signoff_attest import (
     _validated_command_checks,
 )
 from .signoff_attest_drift import drift_result
+from .signoff_attest_input import attestation_block, normalized_description
 
 #: ``--hash-kind`` values a stream attestation's regeneration claim accepts.
 REGENERATION_HASH_KINDS: tuple[str, ...] = (_HASH_KIND_BYTES, _HASH_KIND_GEOMETRY)
@@ -207,9 +208,10 @@ def _inventory_checks(
     inventory_path: str,
     absolute: str,
     committed_checks: Sequence[Mapping[str, Any]] | None,
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], dict[str, Any], str | None]:
     """Run the item-2 inventory's declared checks; return them with the
-    ``attestation.inventory`` block."""
+    ``attestation.inventory`` block and the inventory's normalized
+    ``description`` (issue #5573)."""
     inventory, inventory_hash = _read_inventory(inventory_path)
     inv_absolute = os.path.realpath(os.path.abspath(inventory_path))
     root = find_repo_root(os.path.dirname(absolute))
@@ -235,7 +237,11 @@ def _inventory_checks(
         "content_hash": inventory_hash,
         "schema_version": inventory["schema_version"],
     }
-    return _audit_command_checks(specs, command), block
+    return (
+        _audit_command_checks(specs, command),
+        block,
+        normalized_description(inventory),
+    )
 
 
 def build_stream_attestation(
@@ -264,9 +270,11 @@ def build_stream_attestation(
     ``checks`` -- the user's own geometric / net-width checkers, run as item-10
     style commands (``role: "audit"``) after the three built-in checks. The
     stream is not an inventory field: a command names it in its own ``argv``.
-    ``committed_checks`` is passed only by :func:`check_stream_attestation`
-    (``local_only`` commands skip). Without an inventory the envelope is
-    unchanged."""
+    The inventory's ``description``, when declared non-empty, is carried as
+    ``attestation.description`` (issue #5573) -- an item-2 scope disclosure
+    therefore requires ``--inventory``. ``committed_checks`` is passed only
+    by :func:`check_stream_attestation` (``local_only`` commands skip).
+    Without an inventory the envelope is unchanged."""
     if hash_kind is None:
         hash_kind = _HASH_KIND_BYTES
     _validate_regeneration_claim(generator, regenerated_hash, hash_kind)
@@ -286,9 +294,10 @@ def build_stream_attestation(
         stream_hash = input_set_digest((rel, h) for _g, _a, rel, h in streams)
         absolute, stream_rel = streams[0][1], streams[0][2]
     checks = _member_checks(streams, multi)
+    description: str | None = None
     inventory_block: dict[str, Any] | None = None
     if inventory_path is not None:
-        extra, inventory_block = _inventory_checks(
+        extra, inventory_block, description = _inventory_checks(
             inventory_path, absolute, committed_checks
         )
         checks.extend(extra)
@@ -319,13 +328,13 @@ def build_stream_attestation(
             f"attestation checks passed ({PRODUCER})"
         ),
         "source": stream_rel,
-        "attestation": {
-            "producer": PRODUCER,
-            "hash_algorithm": HASH_ALGORITHM,
-            "check_count": len(checks),
-            "passed_count": passed_count,
-            "checks": checks,
-        },
+        "attestation": attestation_block(
+            PRODUCER,
+            HASH_ALGORITHM,
+            checks,
+            passed_count,
+            description=description,
+        ),
         "provenance": provenance,
     }
     if inventory_block is not None:

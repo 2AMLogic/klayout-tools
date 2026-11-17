@@ -82,7 +82,7 @@ from .signoff import (
     _reject_json_constant,
 )
 from .signoff_attest_drift import drift_result
-from .signoff_attest_input import input_binding
+from .signoff_attest_input import attestation_block, input_binding
 
 #: The attestation-inventory schema versions this build reads. An inventory
 #: declaring any other version is refused (exit ``1``) rather than read with
@@ -1065,14 +1065,13 @@ def build_attestation(
             f"attestation checks passed ({PRODUCER})"
         ),
         "source": inventory_rel,
-        "attestation": {
-            "producer": PRODUCER,
-            "inventory_schema_version": inventory["schema_version"],
-            "hash_algorithm": HASH_ALGORITHM,
-            "check_count": len(checks),
-            "passed_count": passed_count,
-            "checks": checks,
-        },
+        "attestation": attestation_block(
+            PRODUCER,
+            HASH_ALGORITHM,
+            checks,
+            passed_count,
+            inventory=inventory,
+        ),
         "provenance": {
             "klt_version": build_version(),
             "klayout_version": None,

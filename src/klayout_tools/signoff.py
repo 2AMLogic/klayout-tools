@@ -91,7 +91,7 @@ from .signoff_derived_rows import (
 # `signoff.<name>` keeps resolving exactly as it did before the split; the
 # `X as X` form marks the ones with no call site left in this module as
 # deliberate re-exports rather than dead imports.
-from .signoff_details import _DETAIL_BUILDERS
+from .signoff_details import _DETAIL_BUILDERS, _yield_sample_size_rollup
 from .signoff_envelopes import (
     _ENVELOPE_SHAPES,
     _SCALAR_CHECKS,
@@ -3380,34 +3380,6 @@ def _yield_campaign_disclosure(
     }
 
 
-def _yield_sample_size_rollup(
-    measurements: list[dict[str, Any]],
-) -> tuple[str | None, list[Any]]:
-    """:func:`_yield_campaign_disclosure`'s ``sample_size`` /
-    ``undersized_measurements`` pair (issue #2467) -- see that function's
-    docstring for the aggregation rule this applies.
-
-    Split out rather than inlined because the two axes a campaign is rolled
-    up along (sizing, self-check) have *different* aggregation rules, and
-    reading them in one loop obscured which "any"/"at least one" belonged to
-    which axis.
-    """
-    undersized: list[Any] = []
-    sized = False
-    for measurement in measurements:
-        sample_size = measurement.get("sample_size")
-        if not isinstance(sample_size, dict):
-            continue
-        verdict = sample_size.get("verdict")
-        if verdict == "insufficient":
-            undersized.append(measurement.get("name"))
-        elif verdict == "sufficient":
-            sized = True
-    if undersized:
-        return "insufficient", undersized
-    return ("sufficient" if sized else None), undersized
-
-
 def _yield_negative_control_rollup(
     measurements: list[dict[str, Any]],
 ) -> tuple[str, list[Any], list[Any], list[dict[str, Any]]]:
@@ -6359,6 +6331,13 @@ def _generic_artifact_binding(
             "check_count": attestation.get("check_count"),
             "passed_count": attestation.get("passed_count"),
         }
+        # Issue #5573: the claimant's scope disclosure, carried from the
+        # inventory's `description`. Echoed verbatim like `summary`/`source`
+        # above -- never graded -- and absent when the envelope carries no
+        # non-empty one (the same absence rule the producers apply).
+        description = attestation.get("description")
+        if isinstance(description, str) and description.strip():
+            binding["attestation"]["description"] = description
     return binding
 
 
