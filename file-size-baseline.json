@@ -357,7 +357,7 @@
     },
     {
       "path": "src/klayout_tools/gen_compose.py",
-      "lines": 5108
+      "lines": 5100
     },
     {
       "path": "src/klayout_tools/gen_compose_port_access.py",
@@ -865,11 +865,11 @@
     },
     {
       "path": "tests/test_gen.py",
-      "lines": 12392
+      "lines": 12232
     },
     {
       "path": "tests/test_gen_compose.py",
-      "lines": 17537
+      "lines": 17212
     },
     {
       "path": "tests/test_gen_pdk_pcell.py",
