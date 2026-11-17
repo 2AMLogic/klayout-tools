@@ -778,6 +778,37 @@ def test_stubbed_run_without_env_echoes_an_empty_mapping(tmp_path, monkeypatch):
     assert response["environment"]["env"] == {}
 
 
+def test_stubbed_run_forwards_parameters_and_echoes_them(tmp_path, monkeypatch):
+    """`request.parameters` -> `Runner.build(parameters=...)` /
+    `Runner.test(parameters=...)`, echoed verbatim as
+    `environment.parameters` (issue #5697) -- every scalar kind
+    (integer, float, string, boolean) round-trips unchanged, so a stored
+    envelope states which parameterization it is evidence for."""
+    _setup_inputs(tmp_path)
+    parameters = {"WIDTH": 8, "GAIN": 1.5, "NAME": "dut", "SYNC": True}
+    request_path = _write_request(
+        tmp_path / "request.json", _base_request(parameters=parameters)
+    )
+    runner = _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+
+    response = run_functional_verification(request_path)
+
+    assert runner.build_kwargs["parameters"] == parameters
+    assert runner.test_kwargs["parameters"] == parameters
+    assert response["environment"]["parameters"] == parameters
+
+
+def test_stubbed_run_without_parameters_echoes_an_empty_mapping(tmp_path, monkeypatch):
+    _setup_inputs(tmp_path)
+    request_path = _write_request(tmp_path / "request.json", _base_request())
+    runner = _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+
+    response = run_functional_verification(request_path)
+
+    assert runner.build_kwargs["parameters"] == {}
+    assert response["environment"]["parameters"] == {}
+
+
 def test_mutation_variant_forwards_env_to_its_test_step(tmp_path, monkeypatch):
     """The per-mutant build+test sees the same `env` as the baseline run."""
     captured: dict = {}
@@ -1273,6 +1304,8 @@ def test_stubbed_run_reports_the_full_contract_shape(tmp_path, monkeypatch):
         # Additive (issue #3290): `{}` without `options.source_defines`.
         "source_defines": {},
         "env": {},
+        # Additive (issue #5697): `{}` without `request.parameters`.
+        "parameters": {},
         # Additive (issue #1002): `null` on any run without `options.sdf`,
         # so an unannotated verdict is never mistakable for an annotated one.
         "sdf": None,
@@ -6061,6 +6094,37 @@ def test_mutations_killed_and_survived_end_to_end(tmp_path, monkeypatch):
     # "no cross-contamination between sequential per-proposal builds" edge
     # case from the issue's own Test Plan).
     assert (tmp_path / "dut.v").read_text(encoding="utf-8") == _MUTATION_DUT_RTL
+
+
+def test_mutations_report_echoes_request_parameters(tmp_path, monkeypatch):
+    """The `--mutations` response is the baseline report with the additive
+    `mutation_testing` block, so its `environment.parameters` echo states
+    the parameterization every mutant was compared under (issue #5697)."""
+    (tmp_path / ".git").mkdir()
+    monkeypatch.chdir(tmp_path)
+    _write(tmp_path / "dut.v", _MUTATION_DUT_RTL)
+    _write(tmp_path / "test_dut.py", _TESTBENCH)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(
+            sources=["dut.v"],
+            hdl_toplevel="dut",
+            testbench={"module": "test_dut", "testcase": None},
+            parameters={"WIDTH": 8},
+        ),
+    )
+    proposals_path = _write_mutation_proposals(tmp_path)
+    _stub_mutation_runner(
+        monkeypatch,
+        _ContentAwareFakeRunner(
+            _MUTATION_BASELINE_XML, _MUTATION_KILLED_XML, "wire a = 9;"
+        ),
+    )
+
+    report = run_functional_verification_with_mutations(request_path, proposals_path)
+
+    assert report["status"] == "pass"
+    assert report["environment"]["parameters"] == {"WIDTH": 8}
 
 
 class _WrapperFollowingRunner(_ContentAwareFakeRunner):

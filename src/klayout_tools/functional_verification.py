@@ -2930,6 +2930,7 @@ def run_functional_verification(
             sdf_renamed=sdf_renamed,
             source_defines=source_defines,
             tools=tools,
+            parameters=parameters,
         )
 
     runner_module = _import_runner()
@@ -3059,6 +3060,11 @@ def run_functional_verification(
                 "source_defines": source_defines,
                 # Additive (issue #4338): `request.env` as given; `{}` when absent.
                 "env": env,
+                # Additive (issue #5697): `request.parameters` as resolved by
+                # `_resolve_parameters` and forwarded to the build/test --
+                # `{}` when absent -- so a stored envelope states which
+                # parameterization it is evidence for.
+                "parameters": parameters,
                 # Additive (issue #2998): `null` unless the request set
                 # `options.initial_state`. `seeds` echoes the effective seeds
                 # (empty for mode "x"); `runs` has one entry per seed.
