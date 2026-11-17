@@ -1048,10 +1048,6 @@
       "lines": 18337
     },
     {
-      "path": "tests/test_signoff_attest_canonical_yaml.py",
-      "lines": 600
-    },
-    {
       "path": "tests/test_signoff_generator_batch.py",
       "lines": 726
     },
