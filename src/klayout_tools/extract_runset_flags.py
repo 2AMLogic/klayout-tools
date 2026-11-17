@@ -170,7 +170,7 @@ def refuse_unsupported(given: Mapping[str, Any]) -> None:
 
 def provenance_hash_check(
     committed: Mapping[str, Any],
-    deck_source_path: Callable[[str | None], str | None],
+    deck_source_path: Callable[[str], str | None],
 ) -> dict[str, Any]:
     """The engine-aware provenance entry ``check_extract_report`` appends
     for a committed report.
