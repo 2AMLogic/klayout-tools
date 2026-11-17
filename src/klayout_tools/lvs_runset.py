@@ -31,8 +31,8 @@ each side. A runset that recognizes no device on either side yields
 ``status: "inconclusive"`` (exit 4) with ``coverage.nothing_checked`` set --
 a clean-looking empty compare is not evidence.
 
-This module has no load-time dependency on ``lvs.py`` (it imports from it
-inside functions), mirroring ``lvs_netgen.py``.
+This module has no load-time ``lvs.py`` dependency (function-local imports);
+it mirrors ``lvs_netgen.py``.
 """
 
 from __future__ import annotations
@@ -62,9 +62,8 @@ _KLAYOUT_BINARY_ENV_VAR = "KLT_KLAYOUT_BINARY"
 #: ``-rd`` names this engine sets itself; ``deck_vars`` may not override them.
 RESERVED_RUNSET_VARS = ("input", "schematic", "report", "top", "topcell")
 
-#: Request ``options`` keys this engine understands. Anything else is refused
-#: rather than silently ignored (an option the caller believes is in force
-#: but is not would be worse than not supporting it).
+#: Request ``options`` keys this engine understands; anything else is refused,
+#: not silently ignored -- an option believed in force but absent is worse.
 _ALLOWED_OPTIONS = ("runset_timeout_s", "klayout_binary")
 
 _ERROR_LINE_RE = re.compile(r"^\s*ERROR\b", re.IGNORECASE)
@@ -449,8 +448,7 @@ def _circuit_findings(xref: Any, cp: Any) -> tuple[list[dict[str, Any]], bool]:
         + _pin_findings(xref, cp, cname)
     )
     if not found and status not in _ok_statuses():
-        # The circuit's own status says no-match but no finer-grained pair
-        # explains it: still a mismatch, and say so.
+        # No finer-grained pair explains the circuit's no-match status: say so.
         found.append(
             _mismatch(
                 "topology",
@@ -505,7 +503,6 @@ def _pair_counts(xref: Any) -> dict[str, dict[str, int]]:
 def _net_correspondence(xref: Any) -> list[dict[str, Any]]:
     """Every net the runset's compare paired successfully, in ``klt lvs``'s
     documented ``net_correspondence[]`` shape (issue #2870).
-
     Item 11's LVS half proves a supply "took part in the compare" by finding
     it paired here (``signoff_power_delivery._lvs_reference_carries_supplies``),
     so this lists only *matched* nets -- same rule as the curated engine's
@@ -536,9 +533,8 @@ def _net_correspondence(xref: Any) -> list[dict[str, Any]]:
     )
 
 
-#: ``power_pins_derivation.rule`` for this engine: the runset has no library
-#: pin-order data, so the power/ground universe is the pins the extracted
-#: subcircuits declare whose *names* classify as supplies.
+#: ``power_pins_derivation.rule`` for this engine: no library pin-order data,
+#: so the power/ground universe is the extracted subcircuits' supply-named pins.
 POWER_PINS_RULE_NAMED_SUBCIRCUIT_PINS = "named-power-ground-pin-of-extracted-subcircuit"
 
 
@@ -547,7 +543,6 @@ def runset_power_connectivity(netlist: Any) -> dict[str, Any]:
     netlist (``LayoutVsSchematic.netlist()``, issue #3206), via the same
     :mod:`.lvs_power` walk the ``klayout`` engine uses: every extracted
     subcircuit instance's power/ground pins must reach one consistent net.
-
     ``unchecked`` (with a reason) when there is no extracted netlist, or it
     holds no subcircuit instance with a supply-named pin -- a flat
     transistor-level extraction has no instance pins to walk, and "no
@@ -612,7 +607,6 @@ def runset_power_connectivity(netlist: Any) -> dict[str, Any]:
 def _empty_extraction_verdict(l2n: Any, reference_path: str | None) -> dict[str, Any]:
     """Verdict for a db with no cross-reference whose extracted netlist holds
     no devices: the runset recognized nothing, so its compare step never ran.
-
     The layout side is empty and every reference device is an unmatched
     ``device.unmatched`` finding (issue #4081). The reference netlist is the
     one stored in the db when present, else ``reference_path`` parsed as SPICE.
@@ -701,7 +695,6 @@ def read_lvsdb_verdict(
     """Read ``lvsdb_path`` and derive the verdict, mismatches, census and
     coverage from its cross-reference. Raises ``LvsError`` when the database
     is unreadable or carries no cross-reference.
-
     A db with no cross-reference *and no extracted layout devices* (the runset
     recognized nothing, so it never compared) is graded instead: see
     :func:`_empty_extraction_verdict`. ``reference_path`` is the reference
@@ -839,14 +832,9 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
     ``docs/cli/lvs.md`` ("klayout-runset")."""
     from .lvs import _DECK_FILE_GIVEN_KEY, SCHEMA_VERSION, LvsError
 
-    # Issue #5795: echo the caller's own --deck-file form when the flag was
-    # relative (_merge_deck_flags shadows the absolutized value it resolved
-    # with); pop the private key here so it never reaches validation or any
-    # other echo.
-    deck_file_given = request.pop(_DECK_FILE_GIVEN_KEY, None)
-    deck_file_echo = (
-        deck_file_given if deck_file_given is not None else request.get("deck_file")
-    )
+    # Issue #5795: echo the caller's own relative --deck-file form (_merge_
+    # deck_flags shadows the absolutized value); popped so no echo sees it.
+    deck_file_echo = request.pop(_DECK_FILE_GIVEN_KEY, None) or request.get("deck_file")
     layout, reference, deck_file, deck_vars, options = _validate_request(
         request, request_dir
     )
@@ -951,10 +939,8 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
         "environment": {
             "engine": RUNSET_ENGINE,
             "engine_version": runset_block["klayout_application_version"],
-            # Issue #5795: the directory carries nothing engine_version and
-            # provenance.runset.klayout_application_version don't already --
-            # record the binary's identity, the form portable mode chose in
-            # #3991, in both modes. An override stays visible in `options`.
+            # Issue #5795: basename in both modes (#3991 chose it for
+            # portable only); the version stays in engine_version above.
             "klayout_binary": os.path.basename(binary),
             "netgen_binary": None,
             "layout_sha256": sha256_file(layout),

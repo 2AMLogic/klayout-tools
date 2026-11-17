@@ -877,12 +877,9 @@ def load_request_arg(value: str) -> tuple[dict[str, Any], str]:
     )
 
 
-#: Issue #5795: the caller-given ``--deck-file`` string, kept alongside the
-#: absolutized ``request["deck_file"]`` (which resolution depends on) so the
-#: runset report can echo the caller's own form -- the same verbatim echo
-#: ``layout``/``reference`` already get. Set only for a *relative* flag (an
-#: absolute one echoes byte-identically either way); popped by
-#: ``run_lvs_klayout_runset`` before the request is echoed anywhere.
+#: Issue #5795: the caller-given relative ``--deck-file`` string, so the
+#: runset report echoes the caller's own form like ``layout``/``reference``
+#: already do; popped by ``run_lvs_klayout_runset`` before any echo.
 _DECK_FILE_GIVEN_KEY = "_deck_file_given"
 
 
@@ -1515,8 +1512,14 @@ def run_lvs(
 
     if engine == RUNSET_ENGINE:
         # Issue #2849: the PDK's own runset does extraction and compare; the
-        # verdict is read back from its .lvsdb (see lvs_runset.py).
-        return _run_runset_response(request, request_dir, portable_paths)
+        # verdict is read back from its .lvsdb (see lvs_runset.py). Its
+        # report records klayout_binary as a basename in both modes (#5795,
+        # finishing what #3988 started for portable_paths).
+        return _finish_response(
+            run_lvs_klayout_runset(request, request_dir),
+            portable=portable_paths,
+            request_dir=request_dir,
+        )
 
     # `layout.deck_options` (issue #600) mirrors `klt extract --deck-option`'s
     # resolved `{key: value}` mapping, one layer down: this is a JSON object
@@ -2058,21 +2061,6 @@ def _validate_portable_paths(value: Any) -> bool:
     if not isinstance(value, bool):
         raise LvsError("request.portable_paths must be a boolean")
     return value
-
-
-def _run_runset_response(
-    request: dict[str, Any], request_dir: str, portable_paths: bool
-) -> dict[str, Any]:
-    """Run the ``klayout-runset`` engine and finish its response.
-
-    Issue #3988 kept ``environment.klayout_binary`` as the basename under
-    ``portable_paths`` via a special case here; issue #5795 moved that
-    decision into the writer itself (``lvs_runset`` now records the basename
-    in default mode too), so the special case is gone and both modes agree."""
-    runset_report = run_lvs_klayout_runset(request, request_dir)
-    return _finish_response(
-        runset_report, portable=portable_paths, request_dir=request_dir
-    )
 
 
 def _finish_response(

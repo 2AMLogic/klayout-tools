@@ -1,12 +1,11 @@
 """`klt env-provenance`: the committable environment-provenance emitter and
 the leak scan that keeps it honest (issue #1254).
 
-The rule under test is the one `docs/design-evidence-tiers.md` states: an
-evidence record carries repo-relative paths only, a stable pseudonymous host
-id, and no login/author field. These tests assert the emitter *cannot* emit
-the three identifier classes the disclosure audit found in ~3,937 committed
-canary records -- the author's home-directory path, the dispatch host's name,
-and the author's login.
+The rule under test is `docs/design-evidence-tiers.md`'s: an evidence record
+carries repo-relative paths only, a stable pseudonymous host id, and no
+login/author field. These tests assert the emitter *cannot* emit the three
+identifier classes the disclosure audit found in ~3,937 canary records: the
+author's home-directory path, the dispatch host's name, and the author's login.
 """
 
 from __future__ import annotations
@@ -70,9 +69,8 @@ def test_the_repo_root_itself_is_dot(tmp_path):
 
 
 def test_path_outside_the_repo_never_emits_the_absolute_path(tmp_path):
-    """The exact leak the audit found: a PDK resolved under the author's home
-    directory. Outside-the-repo paths are identified by their `scope`, never
-    by their location."""
+    """The audit's exact leak: a PDK under the author's home directory.
+    Outside-the-repo paths are identified by their `scope`, never location."""
     root = _make_repo(tmp_path)
     outside = tmp_path / "home" / "someone" / ".volare" / "gf180mcuD"
     outside.mkdir(parents=True)
@@ -540,13 +538,8 @@ def test_lint_envelope_files_reports_status_and_recommendation(tmp_path):
     assert report["status"] == "violations"
     assert report["finding_count"] == 1
     assert report["files"][0]["file"] == dirty
-
-
-def test_lint_envelope_recommendation_names_portable_paths_first():
-    # Issue #5795: a klt-produced envelope's first-choice remedy is the
-    # writer-side portable_paths rewrite, with --allow-prefix the fallback.
+    # Issue #5795: portable_paths is the first-choice remedy, not --allow-prefix.
     text = ep.ENVELOPE_LINT_RECOMMENDATION
-    assert "portable_paths" in text
     assert text.index("portable_paths") < text.index("--allow-prefix")
 
 
@@ -670,9 +663,8 @@ def test_ci_gates_the_committed_example_envelopes():
     with open(workflow, encoding="utf-8") as handle:
         text = handle.read()
     lint_job = text.split("\n  native:", 1)[0]
-    # Comments stripped before the assertions below: the step's own comment
-    # names `--allow-prefix` (to tell a future reader not to reach for it),
-    # which must not be mistaken for the step actually passing one.
+    # Comments stripped: the step's own comment names `--allow-prefix` (telling
+    # readers not to reach for it) and must not read as the step passing one.
     commands = "\n".join(
         line for line in lint_job.splitlines() if not line.lstrip().startswith("#")
     )

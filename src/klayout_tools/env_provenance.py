@@ -378,13 +378,10 @@ def scan_files(paths: Iterable[str]) -> dict[str, Any]:
 #: only the JSON still gets the remedy, not just the complaint.
 ENVELOPE_LINT_RECOMMENDATION = (
     "for a klt-produced envelope, re-run with request.portable_paths: true so "
-    "the writer itself rewrites every absolute host path to a committable "
-    "form; otherwise replace each absolute host path with a repo-relative "
-    "reference (the {path, scope} shape env_provenance.repo_relative_path() "
-    "builds) or with a content hash (provenance.input.content_hash) -- an "
-    "absolute path is not reproducible on another checkout. Declare a "
-    "genuinely machine-wide PDK/tool install prefix with --allow-prefix if it "
-    "must appear."
+    "the writer rewrites absolute host paths to a committable form; otherwise "
+    "replace each with a repo-relative reference or a content hash -- an absolute "
+    "path is not reproducible on another checkout. Declare a genuinely machine-wide "
+    "PDK/tool install prefix with --allow-prefix if it must appear."
 )
 
 #: Any absolute POSIX path with at least two components -- ``/Users/rob/x``,
