@@ -1944,7 +1944,9 @@ member is named in `detail.artifact_binding.members`) without running
 
 Every `hygiene` path is hashed as raw bytes (`sha256-raw-bytes`) and bound
 into the envelope, so any byte change to a listed file turns the committed
-envelope stale (`stale_evidence`, or a `--check` diff).
+envelope stale (`stale_evidence`, or a `--check` diff) — unless the entry
+declares `attest: "yaml"` (two paragraphs down), which binds the file's
+canonical parse instead.
 
 **List only repo-owned evidence:** the README, the spec table, the LICENSE,
 and a CI workflow whose content the repo owner wrote. **Do not list paths
@@ -1956,8 +1958,10 @@ change. The rule is about resync-managed *content*: a repo-owned workflow
 that a resync does not touch may still be listed even if Loom also installs
 other workflows. `--attest` does not hash "the file minus managed blocks".
 If the file's *presence* is what you want to attest and its content churns
-independently, list it presence-only instead (next paragraph); otherwise list
-fewer files.
+independently, list it presence-only instead (next paragraph); if it is a
+YAML workflow whose *behaviour* you want to pin while comments and
+reformatting churn, list it `attest: "yaml"` (the paragraph after next);
+otherwise list fewer files.
 
 **Presence-only entries (issue #5615).** A `hygiene` entry may be the object
 form `{"path": "<repo-relative>", "attest": "presence"}` alongside a bare
@@ -1972,6 +1976,39 @@ drift until re-attested once. The option is accepted only on item 10
 `hygiene`: item 1 `sources` are re-hashed into the input binding regardless,
 and an item 9 bench *is* the attested file, so `attest` there is refused
 (exit `1`), as is an unknown key, an unknown value, or an entry without `path`.
+
+**Canonical-YAML entries (issue #5862).** A `hygiene` entry may declare
+`{"path": "<repo-relative>", "attest": "yaml", "select"?: "<dotted path>"}`.
+The entry's `present` check binds the file by its **canonical parse** under
+the named algorithm `sha256-canonical-yaml-v1` (parsed with `yaml.safe_load`,
+mapping keys type-tagged so a workflow's YAML-1.1 boolean `on:` key sorts
+beside string keys, then serialised with sorted keys and compact separators):
+a comment-only, whitespace-only, key-reorder or anchor/alias refactor of the
+file is not drift, while every change to a key or value still is. That is
+the right pin for `.github/workflows/ci.yml` — the file that *runs* the
+attestation, where `presence` could not catch a `continue-on-error: true`
+added to the signoff job, a removed step or a changed command. `select`
+(optional) hashes only the named subtree (`jobs.signoff`, say), so edits to
+unrelated jobs are not drift either; a segment that is absent, or an
+intermediate that is not a mapping, is an error at attest time (exit `1`),
+never a silently empty hash. A `yaml` check records `attest`, `select`
+(when given) and its own `hash_algorithm` beside `content_hash`, plus the
+raw bytes as an informational `raw_content_hash`: when the raw bytes differ
+but the canonical hash matches, `--attest --check` still reports `match`
+(exit `0`) and adds a live `notes` entry (text: a `[NOTE]` line) — the note
+is not drift, and `raw_content_hash` is excluded from the diff. The
+`--manifest` re-hash (issue #4197) re-hashes the canonical form too, so the
+row stays `met` for a comment edit and `stale_evidence` for a semantic one.
+An unparseable or multi-document file is an attest-time error (exit `1`)
+naming the path — never a fallback to byte-hashing — and a build that does
+not read `attest: "yaml"` refuses it explicitly (exit `1`, naming the
+accepted values) rather than byte-hashing it. As with `presence`, the option
+is accepted only on item 10 `hygiene` (items 1/9 refuse it, exit `1`),
+`select` is accepted only with `attest: "yaml"`, and flipping an entry's
+mode or `select` is drift until re-attested once. A dotted `select` cannot
+name a key containing a `.` or the boolean `on:` key, and PyYAML keeps the
+last duplicate key, so an edit to a shadowed duplicate can be invisible to
+the canonical hash — accepted limitations of a parse-based pin.
 
 **Listed files must be stable by construction (issue #5603).** A `hygiene`
 path is bound by its full bytes, so a listed file must change only when the
@@ -2227,7 +2264,7 @@ an inventory the author did not write.
 | | `cold_start`: command | yes, unless **every** testbench entry carries its own `cold_start` | exits `0` (`command`, role `cold_start`). A per-bench `cold_start` is a command too and yields a `command` check with `testbench: "<path>"`, so a failure names its bench. When both forms are present, the top-level command runs as well. A cold start (either form) may add `documented_argv` — the full reproducing invocation, recorded and never run; see "A cold start that only validates its bench" below. *First ships in the first release after `v0.9.2`.* |
 | | `unbenched_rows`: list of `{"row": "<id>", "issue": <positive int>}` | no | one `unbenched_row` check per entry (role `row`), **passing**: the gap and its owner issue are visible to the grader, not refused. Empty/duplicate `row` or a non-positive `issue` is refused (exit `1`). Whether bench-less rows should fail T1 item 9 is a grading-policy decision this producer does not make. *First ships in 0.9.0; 0.8.0 refuses `unbenched_rows` as an unknown field.* |
 | | `pins`: `{"pdk": {"name", "revision"} \| {"none": true, "reason"}, "tools": {<tool>: <version>}}` | checked, not structurally required | `pdk.name` and `pdk.revision` non-empty, or, for a partition whose cold start consumes no PDK, the explicit no-PDK form `{"none": true, "reason": "<non-empty>"}` (`pin`, role `pdk`; `none` mixed with `name`/`revision`, or with an empty `reason`, fails; an absent `pdk` still fails -- silence never means "no PDK"); `tools` a non-empty map of non-empty versions (`pin`, role `tools`). A missing pin is a **failed check**, not a malformed inventory. |
-| **10** Repo hygiene | `hygiene`: list of paths, or `{"path", "attest": "presence"\|"content"}` objects (mixing is fine) | yes, non-empty | each file exists (`present`, role `hygiene`); a `"presence"` entry omits `content_hash`, so content edits are not drift |
+| **10** Repo hygiene | `hygiene`: list of paths, or `{"path", "attest": "presence"\|"content"\|"yaml", "select"?}` objects (mixing is fine) | yes, non-empty | each file exists (`present`, role `hygiene`); a `"presence"` entry omits `content_hash`, so content edits are not drift; a `"yaml"` entry (optional `select`, item 10 only) binds the canonical parse (`sha256-canonical-yaml-v1`), so comments and reformatting are not drift while key/value edits still are |
 | | `checks`: list of `{name, argv, cwd?, local_only?, timeout_s?}` | yes, non-empty | each exits `0` (`command`, role `audit`); `name` must be unique |
 
 A **command** is `{"argv": ["prog", "arg", ...], "cwd": "<repo-relative dir>", "local_only": false}`.
@@ -2536,7 +2573,11 @@ when the run did not succeed, for example a `gh run view` query:
   "schema_version": 1,
   "kind": "t1-attestation-inventory",
   "t1_item": 10,
-  "hygiene": ["README.md", "LICENSE", ".github/workflows/ci.yml"],
+  "hygiene": [
+    "README.md",
+    "LICENSE",
+    {"path": ".github/workflows/ci.yml", "attest": "yaml", "select": "jobs.signoff"}
+  ],
   "checks": [
     {"name": "lint", "argv": ["uv", "run", "ruff", "check", "."]},
     {"name": "ci-run", "argv": ["sh", "scripts/ci-run-succeeded.sh"]}

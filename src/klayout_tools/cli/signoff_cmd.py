@@ -137,7 +137,7 @@ from ..signoff_attest_carry import skip_lines
 from ..signoff_attest_input import input_line, with_entry
 from ..signoff_attest_live import attach_live_fields
 from ..signoff_attest_text import attestation_check_line as _attestation_check_line
-from ..signoff_attest_text import check_label
+from ..signoff_attest_text import check_label, note_lines
 from ..signoff_coverage_disclosure import format_coverage as _format_coverage
 from ..signoff_coverage_disclosure import format_undisclosed
 from ..signoff_generator_batch import (
@@ -289,10 +289,8 @@ def _attest_flag_problem(
                 "layout stream; see docs/cli/signoff.md)"
             )
         return None
-    if stream or any(
-        getattr(args, attr, None) is not None
-        for attr in ("generator", "regenerated_hash", "hash_kind")
-    ):
+    attrs = ("generator", "regenerated_hash", "hash_kind")
+    if stream or any(getattr(args, attr, None) is not None for attr in attrs):
         return (
             "--input/--generator/--regenerated-hash/--hash-kind only apply "
             f"to --attest {STREAM_ATTESTABLE_ITEM} (items 1, 8, 9 and 10 take "
@@ -384,6 +382,8 @@ def _print_attestation_check_text(result: dict) -> None:
     render_rerun_drift(result)
     print(f"fresh_status: {result['fresh_status']}")
     print(build_drift_line(result))
+    for line in note_lines(result):
+        print(line)
     failed = [c for c in result["fresh"]["attestation"]["checks"] if not c["passed"]]
     for check in failed:
         print(_attestation_check_line(check))

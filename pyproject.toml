@@ -24,6 +24,13 @@ dependencies = [
     # Backs `klt kb validate` (src/klayout_tools/kb.py), so it's a runtime
     # dependency, not dev-only -- it was dev-only before that command existed.
     "jsonschema>=4.0",
+    # Backs `attest: "yaml"` hygiene entries
+    # (src/klayout_tools/signoff_attest_canonical_yaml.py, issue #5862):
+    # parsing a workflow to hash its canonical form, so a comment-only edit
+    # is not drift. Runtime for the same reason jsonschema is -- the
+    # `uvx --from klayout-tools klt signoff --check` the fleet's CI runs
+    # must reach the parser without extras.
+    "pyyaml>=6",
 ]
 
 [project.urls]
@@ -45,6 +52,10 @@ dev = [
     # Pinned to a major so diagnostics (and thus type-baseline.json) stay
     # stable between releases.
     "mypy>=2.4,<3",
+    # Stubs for the `pyyaml` runtime dependency (issue #5862): without them
+    # mypy reports `import-untyped` on `import yaml` and the type ratchet
+    # (scripts/check_type_baseline.py) refuses to run.
+    "types-pyyaml>=6",
     # Lets tests/test_mcp_server.py and tests/test_mcp_resources.py run their
     # stdio round-trips (and the in-process resource-handler tests) in CI.
     # Dev-only: they importorskip() `mcp`, so the suite also passes without it.

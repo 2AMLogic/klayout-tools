@@ -99,6 +99,15 @@ _WHAT_RENDERERS = {
 }
 
 
+def note_lines(result: Mapping[str, Any]) -> list[str]:
+    """``[NOTE]`` text lines for a ``--check`` result's informational
+    notes (issue #5862: a yaml entry's raw bytes drifted while its
+    canonical hash held). Empty for a result carrying none."""
+    return [
+        f"[NOTE] {note['path']}: {note['note']}" for note in result.get("notes", [])
+    ]
+
+
 def attestation_check_line(check: dict) -> str:
     marker = "SKIP" if check.get("skipped") else ("PASS" if check["passed"] else "FAIL")
     renderer = _WHAT_RENDERERS.get(check["check"])
