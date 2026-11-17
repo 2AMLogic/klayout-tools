@@ -105,7 +105,7 @@ def estimate_congestion(
         response_json = native.estimate_congestion_json(json.dumps(request))
     except ValueError as exc:
         raise CongestionError(str(exc)) from exc
-    return json.loads(response_json)  # type: ignore[no-any-return]
+    return json.loads(response_json)
 
 
 # --------------------------------------------------------------------------- #
