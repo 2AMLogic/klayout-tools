@@ -22,7 +22,11 @@ def check_label(check: Mapping[str, Any]) -> str:
 def _what_present(c: dict) -> str:
     if c.get("role") == "testbench_dependency":
         return f"dependency {c['path']} of {c['testbench']} present"
-    return f"{c['role']} {c['path']} present"
+    what = f"{c['role']} {c['path']} present"
+    benches = c.get("testbenches")
+    if benches:
+        what += f" (bench: {', '.join(benches)})"
+    return what
 
 
 def _what_stream_readable(c: dict) -> str:
