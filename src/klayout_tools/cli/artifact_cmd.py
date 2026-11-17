@@ -1,5 +1,6 @@
 """``klt artifact put|get|verify|delete``: the fleet artifact-store client (issue
-#4063). The logic lives in :mod:`klayout_tools.artifact_store`; this module
+#4063). The logic lives in :mod:`klayout_tools.artifact_objects` (put/get/delete)
+and :mod:`klayout_tools.artifact_verify` (the verify closure); this module
 only maps arguments and emits through the shared envelope in :mod:`.output`
 (``docs/json-contract.md``, ``docs/cli/artifact.md``).
 
@@ -30,7 +31,7 @@ import os
 import sys
 from typing import Any
 
-from .. import artifact_store as store
+from .. import artifact_objects as store
 from .output import emit_error, emit_success
 
 #: verify ran and found a missing or mismatched entry.

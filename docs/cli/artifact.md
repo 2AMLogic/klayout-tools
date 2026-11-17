@@ -155,6 +155,71 @@ success and no other status is retried. When they run out the error has
 `--format json`: `{schema_version: 1, manifest, status: "ok"|"failed",
 entry_count, failed_count, entries: [{sha256, name, size, status, ...}]}`.
 
+## Standalone verifier (no `klt` install)
+
+A chip repo's CI can byte-verify a manifest without installing `klt` at all
+(issue #5958). `klayout_tools/artifact_verify.py` — in the repo and in the
+wheel — is a **single-file, stdlib-only** copy of the whole verify path
+above, with a CLI of its own:
+
+```
+python artifact_verify.py MANIFEST --broker URL [--format text|json]
+```
+
+(`--broker` may be omitted when `KLT_ARTIFACT_BROKER` is set.) Vendor it by
+copying that one file out of a `klayout-tools` release tag, or out of the
+installed wheel's `klayout_tools/` directory. It runs under `python -I` with
+no `klt`, no `klayout` and no third-party packages, emits the same
+`--format json` report and uses the same exit codes (`0`/`1`/`2`/`3`, same
+meanings as above) as `klt artifact verify`. There is no second
+implementation to drift: `klt artifact verify` imports this same module, and
+`tests/test_artifact_verify.py` runs a vendored copy under `python -I` and
+diffs its report against the verb's.
+
+### Offline CI: an injected fake broker client
+
+`verify_manifest(client, path)` accepts any object with the broker client's
+`presign` and `fetch_into` methods in place of a `BrokerClient`, so a repo's
+CI can exercise the exact verification code with no broker reachable and no
+socket opened. A minimal fake:
+
+```python
+from artifact_verify import Presigned, verify_manifest
+
+
+class FakeClient:
+    def __init__(self, objects):  # sha256 hex -> bytes
+        self.objects = objects
+
+    def presign(self, op, kind, repo, sha256, size=None):
+        data = self.objects.get(sha256)
+        return Presigned(
+            key=f"evidence/{repo}/{sha256[:2]}/{sha256}",
+            exists=data is not None,
+            size=len(data) if data is not None else None,
+        )
+
+    def fetch_into(self, target, sink):
+        import hashlib
+
+        data = self.objects[target.sha256]
+        if sink is not None:
+            sink(data)
+        return {
+            "key": target.key,
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "size": len(data),
+        }
+
+
+report = verify_manifest(FakeClient({...}), "artifacts.manifest.json")
+```
+
+Stat the entry with `presign`, hash the fetched bytes with `fetch_into`: the
+fake controls both, so every verdict (`ok`, `missing`, `size_mismatch`,
+`hash_mismatch`, `key_mismatch`) can be rehearsed offline. Never log or
+print anything `fetch_into` is handed if your fake mints URLs.
+
 ## `delete`
 
 `klt artifact delete REF... [--keep MANIFEST]... [--yes] [--force-referenced]`.
@@ -219,4 +284,6 @@ Campaign outputs are cited the same way.
 | `2` | Usage error |
 | `3` | `verify` only: at least one entry is missing or mismatched |
 
-The library behind the verb is `klayout_tools.artifact_store`.
+The library behind the verb is `klayout_tools.artifact_verify` (the verify
+path, vendorable standalone as above) plus `klayout_tools.artifact_objects`
+(put/get/delete), re-exported through the latter.
