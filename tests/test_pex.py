@@ -6761,6 +6761,7 @@ def test_run_pex_resistance_graph_writes_selected_resistance(tmp_path):
     assert echo["r_cut_ohm"] == 0.0
     (net,) = echo["nets"]
     assert net["resistance_source"] == "graph"
+    assert net["fallback_reason"] is None
     assert net["selected_resistance_ohm"] < net["legacy_resistance_ohm"]
     assert sum(_netlist_resistors(base_out)) == pytest.approx(
         net["legacy_resistance_ohm"], rel=1e-3
@@ -6779,8 +6780,67 @@ def test_run_pex_resistance_graph_legacy_net_keeps_legacy_value(tmp_path):
 
     (net,) = graph["extraction"]["resistance_graph"]["nets"]
     assert net["resistance_source"] == "legacy"
+    assert net["fallback_reason"] == "via_resistance_unknown"
     assert net["selected_resistance_ohm"] == net["legacy_resistance_ohm"]
     assert graph["extraction"]["netlist_sha256"] == base["extraction"]["netlist_sha256"]
+
+
+@pytest.mark.parametrize(
+    ("graph", "expected"),
+    [
+        ({"resistance_source": "graph", "resistance_source_reason": "x"}, None),
+        (
+            {
+                "resistance_source": "legacy",
+                "status": "unsupported",
+                "diagnostics": [
+                    {"code": "graph_too_large"},
+                    {"code": "unsupported_geometry"},
+                ],
+                "resistance_source_reason": "graph_status_unsupported",
+            },
+            "graph_too_large",
+        ),
+        (
+            {
+                "resistance_source": "legacy",
+                "status": "unsupported",
+                "diagnostics": [],
+                "resistance_source_reason": "graph_status_unsupported",
+            },
+            "graph_status_unsupported",
+        ),
+        (
+            {
+                "resistance_source": "legacy",
+                "status": "ok",
+                "diagnostics": [{"code": "ignored"}],
+                "resistance_source_reason": "terminal_count_not_two",
+            },
+            "terminal_count_not_two",
+        ),
+        (
+            {
+                "resistance_source": "legacy",
+                "status": "skipped",
+                "resistance_source_reason": "graph_status_skipped",
+            },
+            "graph_status_skipped",
+        ),
+        (
+            {
+                "resistance_source": "legacy",
+                "status": "ok",
+                "resistance_source_reason": "pair_resistance_unavailable",
+            },
+            "pair_resistance_unavailable",
+        ),
+    ],
+)
+def test_resistance_graph_fallback_reason_branches(graph, expected):
+    from klayout_tools.pex import _resistance_graph_fallback_reason
+
+    assert _resistance_graph_fallback_reason(graph) == expected
 
 
 def test_run_pex_resistance_graph_r_cut_zero_is_forwarded(tmp_path, monkeypatch):
