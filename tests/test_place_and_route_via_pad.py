@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import klayout.db as kdb
 import pytest
 
@@ -52,13 +54,14 @@ def _merged_m1(layout, top, m1):
     return kdb.Region(top.begin_shapes_rec(m1)).merged()
 
 
-def _run(layout, top, variant="asap7", lef_to_gds=None):
+def _run(layout, top, variant="asap7", lef_to_gds=None, def_path=None):
     return trim_via_pads(
         kdb,
         layout=layout,
         top_cell=top,
         variant=variant,
         lef_to_gds=LEF_TO_GDS if lef_to_gds is None else lef_to_gds,
+        def_path=def_path,
     )
 
 
@@ -233,3 +236,58 @@ def test_no_tip_rule_layer_in_the_map_is_a_named_skip():
     report = _run(layout, top, lef_to_gds={"V1": V1})
     assert report["status"] == "skipped"
     assert "no M1/M2/M3 routed-net layer" in report["reason"]
+
+
+# --------------------------------------------------------------------------
+# Routed-DEF DRCFILL attribution through the production call (issue #5740)
+# --------------------------------------------------------------------------
+
+#: The captured real routed ASAP7 DEF (see that fixture directory's README).
+_ROUTED_DEF = Path(__file__).parent / "fixtures/place_and_route_drcfill/routed.def"
+
+#: Its first DRCFILL patch, ``NEW M3 28 + SHAPE DRCFILL ( 1872 5116 ) ( 1872
+#: 5165 )`` at the fixture's own 1 nm dbu -- the rectangle the DEF scan
+#: reconstructs, and the geometry the two tests below face a wire against.
+_PATCH = (1858, 5116, 1886, 5165)
+
+
+def _wire_facing_the_real_patch() -> tuple[kdb.Layout, kdb.Cell]:
+    """The merged metal a KLayout DEF read would hold for the fixture's
+    first patch (drawn, because the reader draws the wiring it cannot
+    annotate) plus an 18 nm-wide M3 wire whose top end edge sits 11 nm
+    below the patch's 28 nm end edge -- the ``S.5`` tip-to-narrow case (the
+    follow-up report's "patch end edge beside a minimum-width wire") with
+    no ``VIA_*`` cell anywhere, so the only possible attribution source is
+    the scan."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("top")
+    m3 = layout.layer(*M3)
+    top.shapes(m3).insert(kdb.Box(*_PATCH))
+    top.shapes(m3).insert(kdb.Box(1860, 4900, 1878, 5105))
+    return layout, top
+
+
+def test_routed_def_scan_attributes_a_patch_tip_hit():
+    layout, top = _wire_facing_the_real_patch()
+    report = _run(layout, top, lef_to_gds=FULL_LEF_TO_GDS, def_path=str(_ROUTED_DEF))
+    assert report["status"] == "clean"  # no VIA_* cells: nothing to trim
+    tip_check = report["tip_check"]
+    assert tip_check["status"] == "violations"
+    assert tip_check["router_fill_violations"] == 1
+    assert tip_check["via_pad_violations"] == 0
+    entry = next(e for e in tip_check["rules"] if e["rule"] == "M3.S.5")
+    assert entry["violations"] == 1
+    assert entry["router_fill"] == 1 and entry["via_pads"] == 0
+
+
+def test_without_a_def_path_the_same_hit_is_unattributed():
+    """No DEF handed in means no patch region and no guesswork: the same
+    violation counts in the total but in neither attribution subset."""
+    layout, top = _wire_facing_the_real_patch()
+    report = _run(layout, top, lef_to_gds=FULL_LEF_TO_GDS)
+    tip_check = report["tip_check"]
+    entry = next(e for e in tip_check["rules"] if e["rule"] == "M3.S.5")
+    assert entry["violations"] == 1
+    assert entry["router_fill"] == 0 and entry["via_pads"] == 0
+    assert tip_check["router_fill_violations"] == 0

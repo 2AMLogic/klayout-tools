@@ -67,6 +67,7 @@ from typing import Any
 
 from . import sim_crossings, sim_cycle_mean, sim_window
 from .sim_errors import SimError
+from .sim_forms import other_forms, validate_exclusive_form
 
 #: Reason tokens a failed ``settled`` entry's diagnostic message leads with.
 ERROR_CODES = (
@@ -86,23 +87,6 @@ _ALLOWED_KEYS = frozenset({"clock", "level", "edge", "cycles", "mean", "peak", "
 _SIGNAL_KEYS = frozenset({"signal", "tol_pct"})
 
 _VECTOR_PREFIX = "__klt_settled_"
-
-#: Every other measurement form an entry must not also declare.
-_FORMS = (
-    "spice",
-    "expr",
-    "crossings",
-    "cycle_mean",
-    "energy",
-    "stress",
-    "noise",
-    "transfer",
-    "tian",
-    "snm",
-    "search",
-    "eye",
-    "step_resolution",
-)
 
 
 def is_settled(spec: dict[str, Any]) -> bool:
@@ -202,29 +186,21 @@ def validate_settled_spec(name: Any, body: Any) -> None:
     sim_window.window_bound(name, body, "from", form="settled")
 
 
-def validate_form_exclusive(spec: dict[str, Any]) -> bool:
-    """For an entry declaring ``settled``: refuse any other form beside it and
-    validate the body. Returns ``True`` for such an entry."""
-    if not is_settled(spec):
-        return False
-    name = spec.get("name")
-    if name is None:
-        raise SimError("each request.measurements[] entry requires 'name'")
-    others = [form for form in _FORMS if spec.get(form) is not None]
-    if others:
-        raise SimError(
-            f"measurement '{name}' declares 'settled' together with "
-            f"'{others[0]}': they are alternative forms of a measurement -- "
-            "declare exactly one (use a separate measurements[] entry for "
-            "the other)"
-        )
+def _validate_exclusive_body(name: Any, spec: dict[str, Any]) -> None:
     if spec.get("optional") is True:
         raise SimError(
             f"measurement '{name}': 'optional' is not supported on "
             "'settled' (a missing series is a read failure, not absent data)"
         )
     validate_settled_spec(name, spec["settled"])
-    return True
+
+
+def validate_form_exclusive(spec: dict[str, Any]) -> bool:
+    """For an entry declaring ``settled``: refuse any other form beside it and
+    validate the body. Returns ``True`` for such an entry."""
+    return validate_exclusive_form(
+        spec, "settled", other_forms("settled"), _validate_exclusive_body
+    )
 
 
 def validate_settled_context(
