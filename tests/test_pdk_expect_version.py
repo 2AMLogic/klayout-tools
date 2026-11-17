@@ -308,3 +308,41 @@ def test_broken_symlink_wins_over_bundle_mismatch(capsys, tmp_path):
     assert code == 4
     assert report["bundle_expectation"]["status"] == "mismatch"
     assert BUNDLE_OTHER in err
+
+
+def test_bundle_flat_install_stamp_at_parent_matches(capsys, tmp_path):
+    # Flat single-PDK install (#522): `--pdk-root` names the PDK's own
+    # directory, so the variant dir is the root itself -- not the phantom
+    # `root/<variant>` join. Stamp at #5318's placement (one level above):
+    # only the real variant dir reaches it, so both legs must match.
+    root = tmp_path / "sg13g2"
+    (root / "libs.tech" / "ngspice").mkdir(parents=True)
+    (tmp_path / ".pdk-store.json").write_text(
+        json.dumps({"version": OTHER, "sha256": BUNDLE}), encoding="utf-8"
+    )
+    code = main(
+        [
+            "pdk",
+            "check",
+            "--pdk",
+            "sg13g2",
+            "--pdk-root",
+            str(root),
+            "--format",
+            "json",
+            "--expect-version",
+            OTHER,
+            "--expect-bundle-sha256",
+            BUNDLE,
+        ]
+    )
+    out, err = capsys.readouterr()
+    report = json.loads(out)
+    assert code == 0 and err == ""
+    assert report["variant"] == "sg13g2"
+    assert report["version_expectation"]["status"] == "match"
+    assert report["bundle_expectation"] == {
+        "status": "match",
+        "expected": BUNDLE,
+        "installed": BUNDLE,
+    }

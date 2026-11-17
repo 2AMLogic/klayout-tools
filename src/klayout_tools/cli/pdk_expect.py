@@ -52,12 +52,17 @@ def bundle_expectation(report: dict, expected: str | None) -> None:
     was given ``--expect-bundle-sha256`` (``check`` only; ``find`` never
     registers the flag). ``expected`` is compared with the ``sha256`` the
     install's nearest ``.pdk-store.json`` records (issue #5624). The variant
-    directory is reconstructed from the report's ``root``/``variant`` keys --
-    exactly the path :func:`klayout_tools.pdk.find_pdk` resolved under.
+    directory is resolved the way :func:`klayout_tools.pdk.find_pdk`'s probe
+    chose it: ``root``/``variant`` when that directory exists, else ``root``
+    itself -- a flat single-PDK install's variant directory is the root, not
+    the join (issue #522; see ``pdk._probe_root``'s flat fallback), so both
+    expectation legs read the same directory and stamp placements.
     """
     if expected is None:
         return
     variant_dir = os.path.join(report["root"], report["variant"])
+    if not os.path.isdir(variant_dir):
+        variant_dir = report["root"]
     report["bundle_expectation"] = check_expected_bundle(variant_dir, expected)
 
 
