@@ -27,11 +27,11 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 from pathlib import Path
 
 import pytest
 
+from helpers.tool_probes import HAVE_NGSPICE
 from klayout_tools import characterize, liberty_compare
 from klayout_tools.cli import main
 
@@ -420,9 +420,6 @@ def _find_ihp_sg13g2() -> Path | None:
 
 
 IHP_SG13G2 = _find_ihp_sg13g2()
-HAVE_NGSPICE = shutil.which("ngspice") is not None and (
-    os.environ.get("KLT_SKIP_NGSPICE_TESTS") != "1"
-)
 _SKIP_NO_VENDOR = pytest.mark.skipif(
     IHP_SG13G2 is None or not HAVE_NGSPICE,
     reason=(

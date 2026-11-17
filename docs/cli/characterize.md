@@ -920,6 +920,12 @@ state it measured so the limitation is visible rather than implied.
     "runtime_s": 2.374,
     "engine": "ngspice",
     "engine_version": "46",
+    "engine_build": {
+      "version_banner": "ngspice-46 : Circuit level simulation program",
+      "binary_sha256": "<hex>",
+      "probe": "ok",
+      "reason": null
+    },
     "window": { "settle_ns": 3.6, "tran_step_ns": 0.001 }
   },
   "comparison": null,
@@ -952,7 +958,7 @@ each a full `len(index_1) x len(index_2)` `values` matrix — and so is
 | `leakage` | object \| null | Single-cell form: `cells[0].leakage`; `null` in batch mode. `cell_leakage_power_pw` (the mean over states) and `states[]` of `{when, inputs, value_pw}`, one per input state. |
 | `liberty` | object | `path` (the emitted file — a **plain absolute string**, see below), `library_name`, `cell_count`, `time_unit`, `capacitive_load_unit`, and `roundtrip`. |
 | `liberty.roundtrip` | object | `{engine, status, message, probe_netlist}`. See "Round-trip verification". |
-| `simulation` | object \| null | Single-cell form: `cells[0].simulation`; `null` in batch mode. The generated artifacts (plain absolute strings) plus the `klt sim` corner's own `corner_id`/`status`/`runtime_s`, the engine and its version, and the resolved transient `window`. |
+| `simulation` | object \| null | Single-cell form: `cells[0].simulation`; `null` in batch mode. The generated artifacts (plain absolute strings) plus the `klt sim` corner's own `corner_id`/`status`/`runtime_s`, the engine, its major version, `engine_build` (the full build identity -- version banner and binary sha256 -- copied verbatim from the sim report's `environment.engine_build`, shaped as in [`sim.md`](sim.md); `null` when the report has none, e.g. xyce), and the resolved transient `window`. |
 | `comparison` | object \| null | The `--compare-to` report (see "Accuracy against a vendor library"); `null` when not asked for. |
 | `provenance` | object | The shared reproducibility block from [`../json-contract.md`](../json-contract.md). `pdk` is best-effort from `models.pdk`/`pdk_root` (else `null`); `input` pins the (first) cell's netlist (`role: "netlist"`). |
 

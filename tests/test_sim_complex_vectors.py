@@ -10,13 +10,11 @@ from pathlib import Path
 
 import pytest
 
+from helpers.tool_probes import SKIP_NO_NGSPICE as real_ngspice
 from klayout_tools import sim, sim_batch, sim_complex_vectors
 
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
 
-real_ngspice = pytest.mark.skipif(
-    shutil.which("ngspice") is None, reason="ngspice not installed"
-)
 
 # Single-pole RC low-pass, fc = 1 kHz, driven by 1 V AC: v(out) = 1/(1+jf/fc).
 _FC = 1e3

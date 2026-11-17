@@ -129,7 +129,17 @@ two disagree, this document (and the code) win.
   given is also the order of the top `.SUBCKT` header (issue #5255): declared
   pins come first, in the given order, and any remaining ports follow in the
   existing deterministic order — so `klt pex --pins` can match a schematic
-  header without a wrapper subcircuit.
+  header without a wrapper subcircuit. That ordering uses the *same*
+  any-component-label match as promotion above (issue #5534), not a
+  whole-string one: a joined-label port is hoisted into the slot of the
+  earliest declared name it carries, keeping its joined spelling intact
+  (`Y|ybar` moves, but is still written `Y|ybar`), and a port carrying two
+  declared names appears once, at the earlier of them. Because a net none of
+  whose labels is declared is demoted, a header written *with* `--pins` is
+  fully determined by `--pins`. Without `--pins` the top-level port order is
+  the extractor's own and is **not** a cross-build contract — see
+  "[Top-level `.SUBCKT` port order without `--pins`](#top-level-subckt-port-order-without---pins-is-not-a-cross-build-contract-issue-5534)"
+  below.
 - `--rename-declared-pins` — optional, off by default, requires `--pins` or
   `--def-pins`. Renames each surviving promoted pin net whose comma-joined
   component labels contain *exactly one* declared name to that name (issue
@@ -774,6 +784,33 @@ bookkeeping, tool metadata" and "`--check` / `--rerun`" below, which also
 name `net_id` and `parasitics.nets[]` ordering as the same class of
 extractor-internal bookkeeping.
 
+### Top-level `.SUBCKT` port order without `--pins` is NOT a cross-build contract (issue #5534)
+
+> **Evidence pins:** same as the `$N` caveat above — `netlist_sha256` embeds
+> this order; `netlist_normalized_sha256` (issue #3407) does not.
+
+Anonymous-net numbering is not the only part of a written netlist that can
+move between two builds with no behavioural change behind it. **Without
+`--pins`, the top-level `.SUBCKT` header's port order is whatever order the
+native `l2n.extract_netlist()` call promoted the pins in** — the same opaque
+KLayout routine that owns `cluster_id` — and this repo does not sort it.
+It is deterministic within one run and one environment, but it is not
+guaranteed across `klayout` point releases, host platforms, or `klt` versions
+that change pin promotion.
+
+This matters to exactly one kind of caller: a gate that byte-compares a
+*committed* extracted netlist against a fresh one. Such a gate can go red on a
+`klt`/`klayout` upgrade with the device and net bodies byte-identical and only
+the header reordered — and, unlike a `$N` swap, nothing in the output itself
+says so.
+
+**The fix is to pass `--pins`.** With a declared pin set the header order is
+fully determined by `--pins` (every non-matching net is demoted, and every
+surviving port is hoisted by the any-component-label rule above), so the
+header becomes a stable, caller-owned artifact rather than an extractor-owned
+one. As with `$N`, `klt lvs` is unaffected either way: `NetlistComparer` pairs
+by connectivity, never by pin position.
+
 ### Progress and timing (issue #3181)
 
 A large routed block can spend tens of minutes inside one extraction call, so
@@ -787,14 +824,31 @@ two things let a caller tell a slow run from a hang and budget the step:
 - **`timing` in the response** — an additive object (no existing field
   changed): `stages` (wall seconds per named stage), `total_seconds`, and
   `unattributed_seconds` (the remainder no stage covers, so
-  `sum(stages) + unattributed_seconds ≈ total_seconds`). Stages, in order:
-  `read_layout`, `device_extraction` (the `LayoutToNetlist` run plus dead-metal,
-  passive-region and `--parasitics` computation), `diagnostics` (voltage-domain
-  and flavour-marker checks), `netlist_write`, `netlist_hash` (the raw-file
-  SHA-256), and `netlist_normalized_hash` (the numbering-independent
+  `sum(stages) + unattributed_seconds ≈ total_seconds`). Stage seconds are
+  **exclusive**: a stage opened inside another is credited to the inner stage
+  only, so the parent's value excludes it (issue #5716). Stages, in order:
+  `read_layout`, `device_extraction` (the `LayoutToNetlist` run plus dead-metal
+  and passive-region work; **excludes** the `--parasitics` compute),
+  `parasitics_compute` (the per-net R/C accumulation and coupling-pair search,
+  run while the `LayoutToNetlist` is still live; issue #5716; present only with
+  `--parasitics`), `diagnostics` (voltage-domain and flavour-marker checks),
+  `parasitics_inject` (building the parasitics report and injecting the R/C
+  elements into the netlist, issue #5716; present only with `--parasitics`),
+  `netlist_write`, `netlist_hash` (the raw-file SHA-256), and
+  `netlist_normalized_hash` (the numbering-independent
   `netlist_normalized_sha256` canonicalization, issue #3408; present only when a
-  netlist is written, absent under `--no-netlist`).
+  netlist is written, absent under `--no-netlist`). `--progress` heartbeats name
+  whichever of these is open, so the parasitics phases are no longer silent.
   `--check --rerun` ignores `timing` (a measurement, not evidence).
+
+Before issue #5716 the `--parasitics` compute was folded into
+`device_extraction` and the injection was in no stage at all, so a long
+`--parasitics` run could show most of its time as `unattributed_seconds` with a
+silent heartbeat. On `gcd` (`--deck sky130 --parasitics --no-netlist`, measured
+2026-11-17 at the #5716 branch) the former 11.0 s `device_extraction` now reads
+2.5 s plus 8.5 s `parasitics_compute`, and `parasitics_inject` is 0.4 s. The
+scaling table below was measured **without** `--parasitics`, so its numbers
+are unaffected.
 
 **Measured scaling** (sky130, one shared 16-core host, `klt extract --deck
 sky130`, the routed digital blocks in `tests/corpus/place_and_route/`; measured

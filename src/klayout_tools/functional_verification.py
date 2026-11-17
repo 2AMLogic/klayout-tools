@@ -218,8 +218,6 @@ from .env_provenance import find_repo_root, repo_relative_path
 from .functional_verification_from_synthesize import (  # noqa: F401
     _resolve_sources,
     has_from_synthesize,
-    resolve_sources_with_synthesize,
-    with_from_synthesize,
 )
 from .functional_verification_initial_state import (
     INITIAL_STATE_MODULE,
@@ -227,6 +225,7 @@ from .functional_verification_initial_state import (
     build_initial_state_verilog,
     count_d_nets,
 )
+from .functional_verification_run_inputs import resolve_run_inputs, with_run_inputs
 from .functional_verification_sdf import (
     _check_sdf_engine_capability,
     _collect_sdf_alias_port_bits,
@@ -259,6 +258,7 @@ from .functional_verification_sdf_steps import (
     SDF_COND_EXPRESSION_REASONS,
     _apply_sdf_cond_expression_drop,
     _apply_sdf_header_normalization,
+    _sdf_refusal_error,
 )
 from .reset_coverage import ResetCoverageError, sequential_elements
 
@@ -648,6 +648,7 @@ class FunctionalVerificationError(Exception):
     """
 
     code: str | None = None
+    details: dict[str, Any] | None = None
 
     def __init__(self, message: str = "", *, code: str | None = None) -> None:
         super().__init__(message)
@@ -1632,7 +1633,7 @@ def _tool_version_output(path: str, env: dict[str, str]) -> str | None:
 
 class _MissingToolError(FunctionalVerificationError):
     """``missing_tool``: one or more ``request.requires_tools`` unmet. The CLI
-    surfaces ``details`` as ``error.details``."""
+    surfaces ``details`` flat on ``error`` (``error.unmet_tools``)."""
 
     def __init__(self, unmet: list[dict[str, Any]]) -> None:
         listing = "; ".join(f"{u['name']} ({u['reason']})" for u in unmet)
@@ -2576,7 +2577,7 @@ def run_functional_verification(
             "request.hdl_toplevel must be a non-empty string"
         )
     # Issue #5684: verify the synthesized netlist before anything is built.
-    sources, synth_block = resolve_sources_with_synthesize(
+    sources, run_inputs = resolve_run_inputs(
         request_doc, request_dir, hdl_toplevel, _path_envelope
     )
 
@@ -2901,7 +2902,7 @@ def run_functional_verification(
     includes = [*includes, *scoped_include_dirs]
 
     if verilog_tb is not None:
-        return with_from_synthesize(
+        return with_run_inputs(
             _run_verilog_top(
                 verilog_tb,
                 engine=engine,
@@ -2920,7 +2921,7 @@ def run_functional_verification(
                 source_defines=source_defines,
                 tools=tools,
             ),
-            synth_block,
+            run_inputs,
         )
 
     runner_module = _import_runner()
@@ -2982,14 +2983,11 @@ def run_functional_verification(
         # run (issue #2285), for which Icarus emits nothing at all.
         sdf_dropped_counts = {**sdf_pre_dropped_counts, **scanned_dropped_counts}
         if diagnostics:
-            shown = " | ".join(diagnostics[:5])
-            more = f" (+{len(diagnostics) - 5} more)" if len(diagnostics) > 5 else ""
-            raise FunctionalVerificationError(
-                f"SDF back-annotation of '{sdf['file']}' did not fully apply: "
-                f"{len(diagnostics)} diagnostic(s) in the {engine} transcript "
-                f"-- {shown}{more}. The simulator exits 0 after skipping an "
-                "annotation it cannot apply, so this run's verdict would have "
-                "been a zero-delay one reported as if it were annotated."
+            raise _sdf_refusal_error(
+                sdf["file"],
+                engine,
+                diagnostics,
+                _sdf_dropped_report(sdf_dropped_counts, sdf_pre_dropped_arcs),
             )
 
     tests, (passed_count, failed_count, skipped_count), run_reports = (
@@ -3038,18 +3036,18 @@ def run_functional_verification(
                 "tools": tools,
                 "cocotb_version": _cocotb_version(),
                 "results_xml": _hashed_path_envelope(results_xml),
-                # Additive (issue #3013): the simulator/cocotb console transcript
-                # and the build transcript the run wrote, named by path (never
-                # inlined) like `results_xml`.
+                # Additive (issue #3013): the simulator/cocotb console and build
+                # transcripts, named by path (never inlined) like `results_xml`.
                 "test_log": _hashed_path_envelope(test_log),
                 "build_log": _hashed_path_envelope(build_log),
                 "random_seed": _extract_random_seed_property(results_xml),
                 # Additive (issue #3290): `options.source_defines` keyed by the
-                # request.sources entry as resolved to an absolute path; `{}`
-                # when absent.
+                # request.sources entry as resolved; `{}` when absent.
                 "source_defines": source_defines,
                 # Additive (issue #4338): `request.env` as given; `{}` when absent.
                 "env": env,
+                # Additive (issue #5697): `request.parameters` echo; `{}` when absent.
+                "parameters": parameters,
                 # Additive (issue #2998): `null` unless the request set
                 # `options.initial_state`. `seeds` echoes the effective seeds
                 # (empty for mode "x"); `runs` has one entry per seed.
@@ -3103,7 +3101,7 @@ def run_functional_verification(
             },
         }
     )
-    with_from_synthesize(report, synth_block)  # issue #5684, additive
+    with_run_inputs(report, run_inputs)  # #5684/#5771, additive
     report.local_paths = {
         "results_xml": results_xml,
         "test_log": test_log,

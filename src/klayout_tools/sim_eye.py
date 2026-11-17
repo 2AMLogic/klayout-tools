@@ -50,7 +50,7 @@ from typing import Any
 
 from . import sim_crossings, sim_window
 from .sim_errors import SimError
-from .sim_forms import validate_exclusive_form
+from .sim_forms import other_forms, validate_exclusive_form
 
 #: Reason tokens a failed ``eye`` entry's diagnostic message leads with.
 ERROR_CODES = (
@@ -67,20 +67,6 @@ MAX_UIS = 1_000_000
 _ALLOWED_KEYS = frozenset({"signal", "ui", "uis", "from", "level", "metric"})
 
 _VECTOR_PREFIX = "__klt_eye_"
-
-_FORMS = (
-    "spice",
-    "expr",
-    "crossings",
-    "cycle_mean",
-    "energy",
-    "stress",
-    "noise",
-    "transfer",
-    "tian",
-    "snm",
-    "search",
-)
 
 
 def is_eye(spec: dict[str, Any]) -> bool:
@@ -105,7 +91,7 @@ def validate_form_exclusive(spec: dict[str, Any]) -> bool:
     return validate_exclusive_form(
         spec,
         "eye",
-        _FORMS,
+        other_forms("eye"),
         lambda name, spec: validate_eye_spec(name, spec["eye"]),
     )
 
