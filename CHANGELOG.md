@@ -14,6 +14,24 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt extract --deck gf180mcu` no longer scales quadratically with device
+  count on flat arrays** (#5807, 2026-11-17): the gf180mcu MOS-capacitor
+  recogniser (#2919, dfc9ae034) walked every `active` island and ran one
+  full-layout `interacting()` per island per marker/implant layer, and
+  `klt extract`'s unsupported-device diagnostic re-ran that walk plus a
+  second per-island flavour sweep (#4587) — so an ~8k-cell flat SRAM array
+  went from 202 s on v0.5.0 to unfinished after 1831 s on v0.8.0, with the
+  cost attributed to `device_extraction`. Both paths now resolve their claim
+  sets with bulk island-set region algebra (one `interacting()` per layer
+  over the merged region, first-claim-wins preserved by an ordered entry
+  sweep), and the per-gate flavour split only visits islands touching the
+  flavour marker. Extraction output is byte-identical: the netlist (and its
+  normalized hash) is unchanged on plain and marker-rich fixtures. The
+  previously unattributed unsupported-device block is now timed as its own
+  `timing.stages.unsupported_devices` key (additive; no `schema_version`
+  bump). A 4x-larger flat array now costs ~4x the recognition block instead
+  of ~16x (`tests/test_extract_scaling.py`).
+
 - **`klt pex` and `klt sim --monte-carlo` now read a SPICE card the same way
   the flattener does: `w = 1` and `w=(2 * 1u)` are parameters, not device
   names** (#5461, 2026-11-13): three hand-rolled card tokenizers lived in
