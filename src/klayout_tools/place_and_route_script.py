@@ -21,6 +21,11 @@ from .place_and_route_macro_halo import merge_macro_margins
 from .place_and_route_pins import pin_constraint_lines
 from .place_and_route_reports import detailed_route_lines, routing_completeness_lines
 from .place_and_route_request import PlaceAndRouteError
+from .place_and_route_unconstrained import (
+    cts_stage_lines,
+    resizer_pass_lines,
+    run_is_unconstrained,
+)
 
 # The stage-script emitters below read the per-library tables and the
 # violation-marker sentinels that stay defined in `place_and_route.py` (the
@@ -1077,7 +1082,7 @@ def _stage_script_lines(
         max_transition_ns, max_capacitance_pf, max_fanout
     )
     lines += _io_delay_lines(clock_port, input_delay_ns, output_delay_ns)
-    unconstrained = clock_port is None and clock_period_ns is None
+    unconstrained = run_is_unconstrained(clock_port, clock_period_ns)
 
     if stage == "place":
         assert io_spec is not None
@@ -1089,120 +1094,24 @@ def _stage_script_lines(
             global_placement_call,
             "estimate_parasitics -placement",
         ]
-        # Issue #5672: with neither `clock_port` nor `clock_period_ns` the
-        # run is unconstrained -- no `create_clock` was emitted above, so the
-        # timing-driven resizer passes have nothing to work from. Skip them.
-        if not unconstrained:
-            lines += ["repair_design", "repair_timing"]
+        lines += resizer_pass_lines(unconstrained)
         lines += ["detailed_placement"]
-    elif stage == "cts" and unconstrained:
-        assert io_spec is not None
-        # Issue #5672: no clock, so there is no clock tree to build (and a
-        # timing-free Liberty cannot characterise a CTS buffer anyway,
-        # TritonCTS CTS-0111). The clock routes as an ordinary signal net.
-        # The stage still writes its `<top>.cts.def`, which
-        # `run_place_and_route` threads into `unrouted_def_path` for
-        # `target_stage == "cts"`.
-        lines += [
-            *_wire_rc_lines(io_spec, library),
-            "estimate_parasitics -placement",
-            'puts "klt place-and-route: no clock constraint (request.'
-            "constraints.clock_period_ns omitted) -- skipping "
-            'clock_tree_synthesis and repair_timing -hold"',
-            "detailed_placement",
-        ]
-        lines += [f"write_def {os.path.join(output_dir, f'{hdl_toplevel}.cts.def')}"]
     elif stage == "cts":
         assert io_spec is not None
-        # Request validation guarantees clock_port or clock_period_ns here.
+        wire_rc = _wire_rc_lines(io_spec, library)
+        # Request validation guarantees clock_port or clock_period_ns here
+        # whenever `unconstrained` is false; the `route` branch below already
+        # resolves per-PDK tables on clockless runs, so `buf_cell`/`cts_clock`
+        # are safe to resolve eagerly (both unused when unconstrained).
         buf_cell = (
             library["cts_buffer"]
             if library is not None and "cts_buffer" in library
             else _CTS_BUFFER_CELLS[cell_library]
         )
         cts_clock = clock_port if clock_port is not None else _vclk.VIRTUAL_CLOCK_NAME
-        lines += [
-            *_wire_rc_lines(io_spec, library),
-            "estimate_parasitics -placement",
-            # Issue #1506: `clock_tree_synthesis` (TritonCTS) segfaults --
-            # confirmed live (a real `openroad/orfs:latest` container,
-            # `26Q3-1510-g6cb3f2b704`, against a real sky130A liberty/LEF
-            # pair) reproducing the reported `exit 139` byte-for-byte, stack
-            # trace bottoming out in `TritonCTS::separateMacroRegSinks` --
-            # when `constraints.clock_port` names a real net with **zero**
-            # fanout to any sequential (clocked) cell. This is a legitimate,
-            # schema-forced input this command must survive: every stage
-            # past `"floorplan"` requires `clock_port`/`clock_period_ns`
-            # unconditionally, so a genuinely clockless, all-combinational
-            # block still has to declare *some* clock net to reach `"cts"`/
-            # `"route"` at all. `all_registers -clock [get_clocks ...]` (a
-            # standard OpenSTA query -- already loaded by this stage's own
-            # `read_liberty`/`read_db`) answers "does this clock drive any
-            # sequential element" directly, without this module needing its
-            # own liberty/netlist parser to classify cells as sequential --
-            # OpenSTA already knows, from the same liberty this stage
-            # already reads (live-verified: 0 registers for the zero-
-            # fanout repro above, 2 for an otherwise-identical design with
-            # two real `dfxtp` sinks on the same clock). Zero registered
-            # sinks -> skip `clock_tree_synthesis` entirely as a clean
-            # no-op and continue -- matching this module's own existing
-            # precedent of leaning on OpenROAD/OpenSTA as the authority
-            # rather than re-deriving what it already knows (see this
-            # module's own docstring, "Macro-pin routability cross-check").
-            f"set _klt_cts_seq_sinks [llength [all_registers -clock "
-            f"[get_clocks {{{cts_clock}}}]]]",
-            "if {$_klt_cts_seq_sinks > 0} {",
-            # `-sink_clustering_enable -obstruction_aware` (P&R survey
-            # section 3.4, issue #783): TritonCTS clusters nearby sinks
-            # under a shared buffer instead of one buffer per sink, and
-            # routes the clock tree around placed macro/blockage
-            # obstructions instead of ignoring them -- both are real
-            # TritonCTS flags on this OpenROAD version, confirmed live via
-            # `info body clock_tree_synthesis` against a real
-            # `openroad/orfs:latest` container (`26Q3-1080-gab6fd26351`).
-            # `-balance_levels` was evaluated and deliberately **not**
-            # added: the same introspection shows OpenROAD now treats it as
-            # obsolete (`utl::warn CTS 132 "-balance_levels is obsolete."`)
-            # -- passing it would only emit a warning, a no-op flag this
-            # command's Tcl generator has no reason to carry.
-            f"clock_tree_synthesis -root_buf {buf_cell} -buf_list {buf_cell} "
-            "-sink_clustering_enable -obstruction_aware",
-            # Post-CTS parasitics must be re-estimated (the clock tree just
-            # added real buffers/wire) *before* hold repair runs -- hold
-            # slack is only meaningful once a real clock tree (with real
-            # skew) exists, the general reason production flows run
-            # hold-fixing immediately after CTS, not before (survey
-            # section 2.7/3.2, `docs/design/place-and-route-improvements-
-            # survey.md`). `repair_timing -hold` inserts hold buffers,
-            # which `detailed_placement` below then legalizes alongside
-            # CTS's own buffers -- one legalization pass covers both.
-            "estimate_parasitics -placement",
-            "repair_timing -hold",
-            "} else {",
-            f'puts "klt place-and-route: clock {cts_clock} has no '
-            "sequential (registered) fanout -- skipping "
-            'clock_tree_synthesis (see issue #1506)"',
-            "}",
-            # `report_clock_skew_metric -setup` below (unconditional,
-            # `_metrics_report_lines(include_clock_skew=True)`) is safe to
-            # run either way -- live-verified: it does not error when no
-            # clock tree was built in the `else` branch above, it simply
-            # reports on the (unbuffered) ideal clock same as it would if
-            # this stage never ran at all.
-            "detailed_placement",
-        ]
-        # A post-CTS, still-unrouted DEF (issue #1826, reversing #785's own
-        # "internal artifact only" decision for the `"place"`-stage DEF
-        # below -- this one is surfaced in the response from the start,
-        # never internal-only). Written unconditionally, exactly like the
-        # `"place"`-stage `place_def_path` write below -- `run_place_and_
-        # route` only threads it into `unrouted_def_path` when
-        # `target_stage` is `"cts"` itself (mirroring `def_path`'s own
-        # "only when this is the actual target" convention), but the file
-        # always exists on disk once this stage runs, the same "no dead
-        # branch" reasoning `place_def_path` already established.
-        cts_def_path = os.path.join(output_dir, f"{hdl_toplevel}.cts.def")
-        lines += [f"write_def {cts_def_path}"]
+        lines += cts_stage_lines(
+            unconstrained, buf_cell, cts_clock, wire_rc, output_dir, hdl_toplevel
+        )
     else:  # stage == "route"
         routing_range = (
             library["route_layers"]

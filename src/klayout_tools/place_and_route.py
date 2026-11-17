@@ -344,6 +344,7 @@ from .place_and_route_sta import _post_route_spef_metrics as _post_route_spef_me
 from .place_and_route_sta import _run_corner_sweep as _run_corner_sweep
 from .place_and_route_sta import _spef_sta_script_lines as _spef_sta_script_lines
 from .place_and_route_sta import def_pin_names as def_pin_names
+from .place_and_route_unconstrained import unconstrained_warnings
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
@@ -1261,29 +1262,6 @@ def _antenna_repair_warnings(
         "antenna repair did not run: request.library.antenna_diode is "
         "null (the library has no antenna diode), so repair_antennas "
         "was not called; the antenna check still ran"
-    ]
-
-
-def _unconstrained_warnings(
-    target_stage: str, clock_port: str | None, clock_period_ns: float | None
-) -> list[str]:
-    """Warn when a ``place``-or-later run has no clock (issue #5672): every
-    timing-driven pass was skipped, so a caller who merely forgot
-    ``constraints.clock_period_ns`` is told rather than silently handed an
-    unoptimised result."""
-    if clock_port is not None or clock_period_ns is not None:
-        return []
-    if STAGE_ORDER.index(target_stage) < STAGE_ORDER.index("place"):
-        return []
-    skipped = ["repair_design", "repair_timing"]
-    if STAGE_ORDER.index(target_stage) >= STAGE_ORDER.index("cts"):
-        skipped += ["clock_tree_synthesis", "repair_timing -hold"]
-    return [
-        "unconstrained run: request.constraints.clock_period_ns was not "
-        "given, so no clock was created and these passes did not run: "
-        + ", ".join(skipped)
-        + "; the clock net (if any) is routed as an ordinary signal net and "
-        "timing_status is 'unconstrained'"
     ]
 
 
@@ -2392,7 +2370,7 @@ def _run_single_corner(
         row_rail_layer=row_rail_info["layer"],
     )
     warnings.extend(_antenna_repair_warnings(target_stage, library))
-    warnings.extend(_unconstrained_warnings(target_stage, clock_port, clock_period_ns))
+    warnings.extend(unconstrained_warnings(target_stage, clock_port, clock_period_ns))
     warnings.extend(_layer_map_warnings(layer_map_info))
 
     last_stage = stages[-1]

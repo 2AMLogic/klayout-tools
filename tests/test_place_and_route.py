@@ -703,21 +703,6 @@ def test_run_constraints_design_rule_field_valid_without_clock(tmp_path, monkeyp
     assert report["status"] == "ok"
 
 
-def test_run_target_stage_place_without_clock_is_unconstrained(tmp_path, monkeypatch):
-    # Issue #5672: a missing clock period is no longer an error; see
-    # tests/test_place_and_route_unconstrained.py for the full coverage.
-    request_path = _setup_success_env(
-        tmp_path,
-        monkeypatch,
-        target_stage="place",
-        constraints=None,
-    )
-    _stub_openroad_success(monkeypatch, stages=("floorplan", "place"))
-    report = run_place_and_route(request_path)
-    assert report["status"] == "ok"
-    assert any("unconstrained run" in w for w in report["warnings"])
-
-
 def test_run_target_stage_place_requires_io(tmp_path, monkeypatch):
     request_path = _setup_success_env(
         tmp_path,

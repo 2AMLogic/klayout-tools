@@ -11,6 +11,7 @@ from klayout_tools import place_and_route
 from klayout_tools.place_and_route import PlaceAndRouteError, run_place_and_route
 from klayout_tools.place_and_route_request import _validate_constraints
 from klayout_tools.place_and_route_script import _clock_lines
+from klayout_tools.place_and_route_unconstrained import unconstrained_warnings
 from test_place_and_route import (
     _REAL_SKY130_PNR_VARIANT,
     HAVE_OPENROAD,
@@ -140,7 +141,7 @@ def test_clock_constraint_errors_stay_errors(constraints, match):
 
 
 def test_unconstrained_warning_names_every_skipped_pass():
-    warn = place_and_route._unconstrained_warnings
+    warn = unconstrained_warnings
     route = " ".join(warn("route", None, None))
     for token in (
         "repair_design",
