@@ -7448,7 +7448,7 @@ def test_command_evidence_launch_failure_renders_command_failed(monkeypatch):
     assert item_3["citation"] is None
 
 
-def test_command_evidence_timeout_renders_command_failed(monkeypatch):
+def test_command_evidence_timeout_renders_command_timeout(monkeypatch):
     def fake_run(command, **kwargs):
         raise subprocess.TimeoutExpired(cmd=command, timeout=kwargs.get("timeout"))
 
@@ -7458,7 +7458,7 @@ def test_command_evidence_timeout_renders_command_failed(monkeypatch):
 
     item_3 = next(item for item in result["items"] if item["id"] == 3)
     assert item_3["status"] == "unmet"
-    assert item_3["reason"] == "command_failed"
+    assert item_3["reason"] == "command_timeout"
     assert item_3["citation"] is None
 
 
@@ -13936,7 +13936,7 @@ def test_check_refuses_a_missing_or_unparseable_committed_report(tmp_path):
     """Both refusals come from the shared loader -- a clean message, never a
     traceback."""
     manifest = _manifest()
-    with pytest.raises(SignoffError, match="committed report not found"):
+    with pytest.raises(SignoffError, match="file not found"):
         check_tier_report(str(tmp_path / "nope.json"), manifest)
 
     bad = tmp_path / "bad.json"
@@ -14421,12 +14421,12 @@ def test_pointer_resolved_envelope_grades_identically_to_the_same_file_unnested(
     plain_item = next(item for item in plain["items"] if item["id"] == 3)
     pointed_item = next(item for item in pointed["items"] if item["id"] == 3)
 
-    # Same fields, same values -- except `citation.file`, which necessarily
-    # names the document each manifest actually cited.
-    assert set(plain_item["citation"]) == set(pointed_item["citation"])
-    assert {k: v for k, v in plain_item["citation"].items() if k != "file"} == {
-        k: v for k, v in pointed_item["citation"].items() if k != "file"
-    }
+    # Same fields, same values -- except `citation.file` (naming the
+    # document each manifest cited) and `citation.pointer` (#5815: only a
+    # pointed citation records its selector).
+    normalized = dict(pointed_item["citation"], file=plain_item["citation"]["file"])
+    normalized.pop("pointer")
+    assert plain_item["citation"] == normalized
     assert plain_item["status"] == pointed_item["status"] == "met"
 
 
