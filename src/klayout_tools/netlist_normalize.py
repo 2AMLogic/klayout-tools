@@ -2239,7 +2239,6 @@ def normalize_reference_netlist(
 
 
 from .netlist_normalize_scan import (  # noqa: E402,F401  (re-exported)
-    _INCLUDE_LINE_RE,
     defined_subckt_names,
     detect_subckt_call_devices,
     quote_spice_includes,

@@ -3115,38 +3115,24 @@ def run_functional_verification(
 # every name they need already defined; ``klayout_tools.functional_verification.<name>``
 # stays a working import path for every moved name.
 from .functional_verification_mutation import (  # noqa: E402, F401
-    _write_mutant_combined_log,
     run_functional_verification_with_mutations,
 )
 from .functional_verification_mutation_proposals import (  # noqa: E402, F401
-    _MUTATION_PROPOSAL_REQUIRED_FIELDS,
-    _MUTATION_PROPOSALS_REQUIRED_FIELDS,
-    _load_mutation_proposals_json,
     _ProposalRecord,
-    _resolve_mutation_proposals,
     _validate_mutation_scope,
     _validate_proposal_indices,
     load_mutation_proposals,
 )
 from .functional_verification_mutation_variant import (  # noqa: E402, F401
     _build_and_test_variant,
-    _first_new_failure,
-    _kill_process_tree,
-    _mutation_subprocess_entry,
     _run_isolated_variant,
 )
 from .functional_verification_verilog_top import (  # noqa: E402, F401
-    _VERILOG_TOP_REJECTED_OPTIONS,
-    VERILOG_TOP_FIELDS,
     _check_verilog_top_sdf,
     _reject_verilog_top_mutations,
-    _reject_verilog_top_options,
     _resolve_testbench_target,
     _resolve_verilog_top,
     _run_verilog_top,
     _sdf_annotate_scope,
     _sdf_extend_sources,
-    _verilog_top_error,
-    _verilog_top_fields,
-    _verilog_top_sdf_gate,
 )

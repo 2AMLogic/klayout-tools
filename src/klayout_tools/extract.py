@@ -318,18 +318,11 @@ from .extract_progress import StageTimer, active_timer, stage
 # three internal helpers (`_describe_layers_in_set`, `_pin_index_by_net_id`,
 # `_each_pin_net`) have no caller here and are deliberately not imported.
 from .extract_report import (  # noqa: F401 -- re-exports, see comment above
-    _case_collision_warnings,
-    _describe_device_recognition_only_layers,
     _describe_devices,
-    _describe_ignored_layers,
     _describe_matched_device_groups,
     _describe_nets,
-    _detect_merged_net_labels,
     _detect_single_terminal_nets,
-    _detect_split_net_labels,
-    _detect_unbiased_pmos_body_nets,
     _net_label_positions,
-    _split_net_label_warnings,
 )
 from .extract_report import (
     _describe_parasitics_metal_gaps as _describe_parasitics_metal_gaps,
@@ -355,17 +348,6 @@ from .extract_validate import validate_run_extract_args
 # `cli/extract_cmd.py`, `place_and_route.py`, and the test suite). The
 # redundant `X as X` aliases mark them explicit re-exports, so neither reads as
 # an unused import in a module that never calls them itself.
-# The `extract_warnings` group below is a re-export for the same reason: every
-# warning builder it exports is now called from `extract_detect_block.py`
-# (issue #5196, stage 7) rather than from `run_extract` here, and the test
-# suite still reaches them through `klayout_tools.extract`.
-from .extract_warnings import (  # noqa: F401 -- re-exported, see comment above
-    ignored_layer_warnings,
-    merged_net_label_warnings,
-    pdk_dropped_param_warnings,
-    single_terminal_net_warnings,
-    unbiased_pmos_body_warnings,
-)
 from .metrics import is_registered
 from .pdk_models import (
     MOS_FLAVOUR_PROPERTY,
