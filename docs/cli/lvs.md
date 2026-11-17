@@ -1388,7 +1388,16 @@ deck — either `klt extract` the same GDS and read each device's `r_ohm`/
 the schematic's `L`/`W` — and update the reference cards. Narrowing the
 `options.compare_parameters` scope to drop `R` also restores a verdict, at
 the cost of no longer verifying resistance at all; prefer re-deriving the
-values. `tests/test_lvs_sg13g2_resistor_reference.py::test_sg13g2_resistor_value_drift_reports_the_class_cascade`
+values. Raising `options.parameter_tolerance` does not restore a verdict
+here, however wide: it absorbs a parameter delta on a device pair the
+comparer has already paired, and in this cascade the stale scoped `R` is
+what stops the resistors pairing, so there is no paired device for the
+tolerance to act on and no `device.parameter_tolerated` entry is emitted
+(a `0.15` tolerance against an ~11% resistance delta returns the same
+`status`, device counts and finding categories as no tolerance at all). That
+limit is specific to this class-wide cascade; the single-pair recovery
+described under "`device.parameter_tolerated`" is unchanged.
+`tests/test_lvs_sg13g2_resistor_reference.py::test_sg13g2_resistor_value_drift_reports_the_class_cascade`
 pins this signature, and the
 `test_inline_extracted_sg13g2_resistor_pairs_plain_element_reference` /
 `test_mixed_sg13g2_mos_and_resistor_inline_pairs_plain_element_reference`
