@@ -168,10 +168,6 @@
       "lines": 1005
     },
     {
-      "path": "src/klayout_tools/_report_verify.py",
-      "lines": 501
-    },
-    {
       "path": "src/klayout_tools/arith_gen.py",
       "lines": 1010
     },
@@ -193,7 +189,7 @@
     },
     {
       "path": "src/klayout_tools/cli/parser.py",
-      "lines": 5480
+      "lines": 5385
     },
     {
       "path": "src/klayout_tools/cli/pdk_cmd.py",
@@ -201,7 +197,7 @@
     },
     {
       "path": "src/klayout_tools/cli/signoff_cmd.py",
-      "lines": 1171
+      "lines": 1166
     },
     {
       "path": "src/klayout_tools/cli/sim_cmd.py",
@@ -209,7 +205,7 @@
     },
     {
       "path": "src/klayout_tools/components.py",
-      "lines": 606
+      "lines": 532
     },
     {
       "path": "src/klayout_tools/coverage.py",
@@ -273,7 +269,7 @@
     },
     {
       "path": "src/klayout_tools/env_provenance.py",
-      "lines": 728
+      "lines": 714
     },
     {
       "path": "src/klayout_tools/equiv.py",
@@ -384,16 +380,8 @@
       "lines": 1019
     },
     {
-      "path": "src/klayout_tools/gen_pcells/diff_pair.py",
-      "lines": 579
-    },
-    {
-      "path": "src/klayout_tools/gen_pcells/esd_device.py",
-      "lines": 507
-    },
-    {
       "path": "src/klayout_tools/gen_pcells/mos_array.py",
-      "lines": 843
+      "lines": 658
     },
     {
       "path": "src/klayout_tools/kb.py",
@@ -493,11 +481,11 @@
     },
     {
       "path": "src/klayout_tools/pdk.py",
-      "lines": 2561
+      "lines": 2545
     },
     {
       "path": "src/klayout_tools/pdk_cells.py",
-      "lines": 807
+      "lines": 804
     },
     {
       "path": "src/klayout_tools/pdk_models.py",
@@ -581,15 +569,15 @@
     },
     {
       "path": "src/klayout_tools/ring_check.py",
-      "lines": 585
+      "lines": 552
     },
     {
       "path": "src/klayout_tools/signoff.py",
-      "lines": 7422
+      "lines": 7421
     },
     {
       "path": "src/klayout_tools/signoff_attest.py",
-      "lines": 1216
+      "lines": 1172
     },
     {
       "path": "src/klayout_tools/signoff_generator_batch.py",
@@ -601,7 +589,7 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 12487
+      "lines": 12426
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
@@ -661,7 +649,7 @@
     },
     {
       "path": "src/klayout_tools/spice_flatten.py",
-      "lines": 847
+      "lines": 798
     },
     {
       "path": "src/klayout_tools/substrate_resistance.py",
@@ -837,7 +825,7 @@
     },
     {
       "path": "tests/test_env_provenance.py",
-      "lines": 726
+      "lines": 678
     },
     {
       "path": "tests/test_equiv.py",
@@ -985,11 +973,11 @@
     },
     {
       "path": "tests/test_pdk.py",
-      "lines": 3303
+      "lines": 3160
     },
     {
       "path": "tests/test_pdk_cells.py",
-      "lines": 1183
+      "lines": 1041
     },
     {
       "path": "tests/test_pdk_pcell_diagnostics.py",
@@ -1061,7 +1049,7 @@
     },
     {
       "path": "tests/test_signoff.py",
-      "lines": 18366
+      "lines": 18343
     },
     {
       "path": "tests/test_signoff_generator_batch.py",
@@ -1069,7 +1057,7 @@
     },
     {
       "path": "tests/test_sim.py",
-      "lines": 15845
+      "lines": 15843
     },
     {
       "path": "tests/test_sim_batch.py",
