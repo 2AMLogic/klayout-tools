@@ -3726,7 +3726,12 @@ Every list-form item also carries `citations_graded` (per-citation status).
 Without `spec_rows`, several passing citations grade `met` as the union of
 their verdicts. A single string/dict entry with no `spec_rows` renders
 exactly as before. The `spec_rows` list form applies to items 5 and 6 (item 6:
-#2908, below).
+#2908, below). Since issue #5786, an entry whose member graded `met` off a
+`klt yield` citation also carries that citation's own `yield_campaign`
+block, copied verbatim (never re-derived), so a multi-citation item 6
+discloses each cited campaign exactly as the single-citation form does; the
+key is absent for every other kind, for a report with no measurements, and
+for an unmet member — see "Campaign discipline on item 6" below.
 
 Item 4 (LVS clean) also accepts a list (issue #4354): one `klt lvs` report per
 cell of an analog partition. It grades `met` only if every member is `match`
@@ -5368,6 +5373,20 @@ Three states, three treatments, decided by what the *report* itself claims:
 | Any measurement's `sample_size.verdict` is `"insufficient"` | `"unmet"`, `reason: "undersized_sample"`, no citation |
 | Any declared `negative_control` has `verdict: "not_detected"` | `"unmet"`, `reason: "negative_control_not_detected"`, no citation |
 | **No** measurement declared a `negative_control` | `"met"`, with `citation.yield_campaign.negative_control: "not_declared"` |
+
+**A multi-citation item 6 discloses each campaign beside its grade (issue
+#5786).** The `citations_graded` entry of a member that graded `met` off a
+`klt yield` citation carries that citation's own `yield_campaign` block —
+the same `{"sample_size", "negative_control", …}` shape the table row above
+names — copied verbatim off the member citation, never re-derived from the
+envelope. A reader of a multi-citation report can therefore tell which cited
+populations declared a negative control without leaving the graded artifact,
+exactly as the single-citation form allows. The key is absent on an entry
+whose member cited another kind, whose report carried no measurements, or
+which graded `unmet` (no citation is retained for it; the two
+campaign-discipline refusals above already carry the member's state as the
+item's `detail.yield_campaign`).
+Disclosure only: no grading rule reads it.
 
 **A stale pin is disclosed beside either refusal (issue #3063).** When the
 entry pins `content_hash`, the two refusals above also carry
