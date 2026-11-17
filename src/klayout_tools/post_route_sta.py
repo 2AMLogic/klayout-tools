@@ -266,6 +266,7 @@ from ._openroad_engine import (
     container_runtime_hint,
     write_sdf_line,
 )
+from ._openroad_mount_hint import mount_namespace_hint
 from ._paths import (
     _count_spef_nets_annotated,
     _load_request_json,
@@ -1353,7 +1354,7 @@ def _run_corner_session(
         if port_errors:
             raise PostRouteStaError(_port_check_error_message(port_errors))
         if completed.returncode != 0:
-            raise PostRouteStaError(_engine_error_message(completed))
+            raise PostRouteStaError(_engine_error_message(completed, pdk_info))
 
         metrics = _read_metrics(metrics_path)
     setup_violation_count = _count_violations(
@@ -3971,22 +3972,18 @@ def _spef_name_map(text: str) -> dict[str, str]:
 # --------------------------------------------------------------------------- #
 
 
-def _engine_error_message(completed: _OpenRoadResult) -> str:
+def _engine_error_message(
+    completed: _OpenRoadResult, pdk_info: dict[str, Any] | None = None
+) -> str:
     """Build an actionable error message from a failed OpenROAD run.
 
-    Prefers a bracketed ``[ERROR ...]`` diagnostic OpenROAD itself printed
-    over a bare ``Error:`` trailer line, mirroring
-    ``place_and_route.py``'s own ``_engine_error_message`` (minus that
-    function's route-stage-only ``DRT-0305`` diagnosis, which cannot occur
-    here -- this verb never runs TritonRoute).
-
-    :func:`~klayout_tools._openroad_engine.container_runtime_hint` is
-    appended as a further ``--`` clause when the captured output shows the
-    engine never really ran at all because its container runtime was
-    unreachable (issue #2632) -- the same append-a-recognized-hint structure
-    ``place_and_route.py`` already uses for ``_mount_namespace_hint`` (issue
-    #1868). A failure carrying neither signature keeps exactly its previous
-    message."""
+    Prefers a bracketed ``[ERROR ...]`` diagnostic over a bare ``Error:``
+    trailer, mirroring ``place_and_route.py``'s own function minus its
+    TritonRoute-only ``DRT-0305`` diagnosis. :func:`container_runtime_hint`
+    is appended when the engine never ran (issue #2632);
+    :func:`mount_namespace_hint` likewise when the output names a readable
+    file -- the container-wrapper mount gap (issues #1868/#5753),
+    ``pdk_info`` feeding its PDK aside; neither keeps the previous message."""
     bracket_lines: list[str] = []
     bare_error_lines: list[str] = []
     for stream in (completed.stdout or "", completed.stderr or ""):
@@ -4009,6 +4006,9 @@ def _engine_error_message(completed: _OpenRoadResult) -> str:
     hint = container_runtime_hint(completed)
     if hint is not None:
         message = f"{message} -- {hint}"
+    mount_hint = mount_namespace_hint(completed, pdk_info)
+    if mount_hint is not None:
+        message = f"{message} -- {mount_hint}"
     # Issue #2635: `ORD-2013` names the instance and the LEF master but
     # nothing about which request field would have supplied it -- the one
     # failure mode a caller with a hard macro and no `request.macros` entry

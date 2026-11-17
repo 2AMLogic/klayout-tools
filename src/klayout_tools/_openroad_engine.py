@@ -165,8 +165,8 @@ def container_runtime_hint(completed: _OpenRoadResult) -> str | None:
       invoking user lacks access to the daemon socket. Checked first, as the
       narrower of the two signatures.
 
-    Like ``place_and_route.py``'s :func:`~klayout_tools.place_and_route.
-    _mount_namespace_hint` (issue #1868), this is safe to *append* to an
+    Like :func:`~klayout_tools._openroad_mount_hint.mount_namespace_hint`
+    (issue #1868), this is safe to *append* to an
     existing engine-error message rather than replace it: the engine's own
     captured diagnosis is still the primary evidence, the hint only says what
     that diagnosis means and what to do next. A caller that does not recognize
