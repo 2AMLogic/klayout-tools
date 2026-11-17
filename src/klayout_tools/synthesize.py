@@ -3111,8 +3111,7 @@ def _run_yosys(
     :func:`_measure_candidate` (issue #1775) disqualify one hung arithmetic-
     architecture trial synthesis without killing the rest of the ``"auto"``
     sweep. The kill takes the child's whole process group (issue #5798), so a
-    ``yosys-abc`` grandchild mid-``abc`` pass cannot outlive the watchdog that
-    ended its parent.
+    ``yosys-abc`` grandchild cannot outlive the watchdog that ended its parent.
 
     ``cwd`` (issue #1844) is passed straight through to the spawn's own ``cwd``;
     ``script_path`` is always given as an absolute path, so ``cwd`` only matters

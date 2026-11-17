@@ -800,20 +800,20 @@ def _stub_yosys_success(
 
 
 def _record_yosys_scripts(monkeypatch) -> list[str]:
-    """Wrap whatever `synthesize._spawn_yosys` stub is already installed so
+    """Wrap whatever `synthesize.run_in_group` stub is already installed so
     every `yosys -s <script>` script path is appended to the returned list
     (issue #1870: which of the two generated scripts Yosys is handed is the
     behaviour under test, not an implementation detail). Call *after*
     `_stub_yosys_success`; install-time capture chains through the stub."""
     scripts: list[str] = []
-    inner = synthesize._spawn_yosys
+    inner = synthesize.run_in_group
 
     def recording_spawn(cmd, **kwargs):
         if cmd[:2] == ["yosys", "-s"]:
             scripts.append(cmd[2])
         return inner(cmd, **kwargs)
 
-    monkeypatch.setattr(synthesize, "_spawn_yosys", recording_spawn)
+    monkeypatch.setattr(synthesize, "run_in_group", recording_spawn)
     return scripts
 
 
