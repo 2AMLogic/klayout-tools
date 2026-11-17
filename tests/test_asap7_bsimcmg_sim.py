@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 
+from helpers.tool_probes import NGSPICE_TESTS_SKIPPED
 from klayout_tools import sim
 from klayout_tools.extract import run_extract
 
@@ -34,6 +35,10 @@ _OSDI = Path(
 
 
 def _skip_reason() -> str | None:
+    if NGSPICE_TESTS_SKIPPED:
+        # Real-ngspice tier: the shared opt-out (issue #6144) skips the
+        # module before the ngspice probe below can spawn a `ngspice -b`.
+        return "KLT_SKIP_NGSPICE_TESTS=1"
     if not _GDS.is_file() or not (_PM / "7nm_TT_160803.pm").is_file():
         return "missing capability: ASAP7 corpus (run scripts/fetch-pdks.sh)"
     if shutil.which(os.environ.get("KLT_NGSPICE_BINARY", "ngspice")) is None:
