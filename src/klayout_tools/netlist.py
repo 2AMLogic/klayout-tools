@@ -83,6 +83,7 @@ from .netlist_inputs import (
     inputs_record_line,
     split_inputs_record,
 )
+from .netlist_instances import instances_payload
 from .netlist_paths import _PATH_COMMENT_RE, postprocess_netlist
 from .netlist_pdk import (
     _pdk_env_note,
@@ -293,9 +294,8 @@ def _launch_xschem(
             stderr=subprocess.PIPE,
             text=True,
             env=env,
-            # The child gets its own session (and therefore its own process
-            # group) so `_signal_group` has a group handle to kill -- see its
-            # docstring.
+            # The child gets its own session (and therefore its own process group) so
+            # `_signal_group` has a group handle to kill -- see its docstring.
             start_new_session=True,
         )
     except FileNotFoundError as exc:
@@ -977,8 +977,7 @@ def run_netlist(
             rcfile=rcfile,
         )
         # Captured *before* the launch, so the freshness test can never be
-        # satisfied by a file that already existed (see
-        # `_resolve_produced_netlist`).
+        # satisfied by a file that already existed (see `_resolve_produced_netlist`).
         started_at = time.time()
         # Export the resolved PDK so an xschemrc reading $env(PDK_ROOT)/
         # $env(PDK) agrees with --pdk/--pdk-root (issue #4186).
@@ -989,8 +988,8 @@ def run_netlist(
                 "PDK_ROOT": pdk_block["root"],
                 "PDK": pdk_block["variant"],
             }
-        # Only a resolved PDK means klt exported PDK_ROOT/PDK; --symbol-path
-        # alone builds an env that merely inherits them (issue #5441).
+        # Only a resolved PDK means klt exported PDK_ROOT/PDK; --symbol-path alone
+        # builds an env that merely inherits them (issue #5441).
         exported_pdk_env = xschem_env
         xschem_env = _with_symbol_path_env(xschem_env, resolved_symbol_path)
         exit_status, stdout, stderr, duration_s = _launch_xschem(
@@ -1035,6 +1034,7 @@ def run_netlist(
                 "symbol_path": resolved_symbol_path,
             },
             "diagnostics": diagnostics_block(stdout, stderr, erc=erc),
+            **instances_payload(fresh_data),
         }
 
         if pdk_block is not None:

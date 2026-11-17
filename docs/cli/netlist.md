@@ -738,6 +738,8 @@ resolves its own `$PDK_ROOT`.
 | `status` | `"generated"` \| `"match"` \| `"drifted"` | `"generated"` in `generate` mode; `"match"`/`"drifted"` in `check` mode. |
 | `xschem` | object | How xschem was invoked and what it returned — see below. |
 | `netlist` | object | Identity of the netlist this run produced — see below. |
+| `instances` | array\<object\> | One entry per device instance in the netlist this run produced, in file order — see below and [The device multiplier](#the-device-multiplier-two-forms-both-load-bearing). Additive (issue #5687). |
+| `instances_truncated` | boolean | Whether `instances` was cut off at its cap. |
 | `pdk` | object | **Only when a PDK resolved** (see [PDK-root consistency](#pdk-root-consistency)); absent otherwise. Additive. |
 | `block` | object | **Only when `--block` was passed** (see [Block mode](#block-mode-an-includable-subckt)); absent otherwise. Additive. |
 | `drift` | object | **`check` mode only** (absent in `generate` mode) — see below. |
@@ -765,6 +767,31 @@ resolves its own `$PDK_ROOT`.
 | `bytes` | integer | Size of the produced netlist. |
 | `lines` | integer | Newline count. |
 | `content_hash` | string | `sha256:<hex>` of the produced netlist's bytes. |
+
+### `instances`
+
+One entry per device instance in the netlist this run produced, in file order
+— in **both** modes: `generate`, and `--check` (where it is derived from the
+**regenerated** side, the one `--check` actually compared, never from the
+committed file). `+` continuation lines are folded onto their card first (the
+same shared primitive `--check`'s layout normalization uses), so a parameter
+xschem wrapped onto a continuation line is present here — the whole point of
+the block, since `grep '^XM2'` on the written netlist shows neither form of
+the multiplier (see [The device multiplier](#the-device-multiplier-two-forms-both-load-bearing)).
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `name` | string | The instance's first token (`XM2`). |
+| `card` | string | The instance's logical card with `+` continuations folded onto one line. |
+| `model` | string \| null | The token immediately before the first `key=value` parameter (SPICE's positional prefix — nodes — ends where named parameters begin, which is how xschem's `format=` output shapes every device card); `null` for a card with no named parameters (a bare `R1 a b 1k`). |
+| `params` | object | Every `key=value` on the folded card, values verbatim as written; the last one wins on a duplicate key. |
+| `multiplier` | object | The two device-multiplier forms resolved, tri-state: `{"m": <value or null>, "mult": <value or null>, "agree": <bool or null>}`. `agree` is `true` when both forms are present and numerically equal, `false` when both are present and differ, `null` when fewer than two are present **or** a value is not numeric (an `expr(...)`, say) — so a consumer can tell "disagree" from "not applicable" without re-parsing, and a non-numeric value can never crash the block. |
+
+The array is capped at `INSTANCES_CAP` (1000) entries; a deck above the cap
+truncates the array and sets the sibling `instances_truncated` flag (the
+`diagnostics.*_truncated` convention), so a large deck cannot balloon the
+payload unboundedly. A deck with no device instances carries `instances: []`,
+never an absent key.
 
 ### `pdk`
 
@@ -807,6 +834,57 @@ The fields `klt sim` reports for a batch job (`provider`, `job_id`,
 | `batch_root` | string | The root whose git-tracked files were uploaded. |
 | `input_files` | integer | How many files the uploaded tree held. |
 | `input_bytes` | integer | Their uncompressed total. |
+
+## The device multiplier: two forms, both load-bearing
+
+A wide sky130 device instance is emitted with its parameters wrapped onto `+`
+continuation lines and its multiplier emitted **twice**:
+
+```
+XM2 n1 n2 n3 n4 sky130_fd_pr__nfet_01v8 L=1 W=2 ... sd=0
++ mult=6 m=6
+```
+
+Both the wrapping and the `mult=`/`m=` pairing are the **PDK symbol's own
+`format=` attribute** (`sky130A/libs.tech/xschem/sky130_fd_pr/nfet_01v8.sym`
+embeds the literal `+` breaks and the pair) — not a choice `klt netlist`
+makes. `klt` does not reflow xschem's bytes: `--check`'s byte comparison and
+`--no-provenance-header`'s byte-identity both depend on the export being
+exactly what xschem wrote.
+
+The two forms are not redundant, and neither is safe to drop:
+
+- **`m=` is the one that drives.** It is SPICE's own subcircuit-instance
+  multiplier. sky130's device subcircuits declare `mult` and **do not forward
+  it** to the inner primitive (`m = {mult}` appears on no primitive line in
+  `models_fet.spice`), so a netlist carrying only `mult=N` would simulate a
+  **1×** device with no diagnostic from anyone.
+- **`mult=` is the one that de-rates mismatch.** It is consumed inside the
+  subcircuit, in the mismatch sigma denominator
+  (`AGAUSS(0,1.0,1)/sqrt(l*w*mult)`, feeding `delvto`), gated on
+  `MC_MM_SWITCH` (default `0`): inert in a nominal run, **live in a mismatch
+  Monte Carlo run**. Dropping it overstates mismatch by `sqrt(N)`.
+
+`mult=N m=N` — what the symbols emit when a multiplier is set — is a correct,
+non-redundant pair: `m` supplies the drive, `mult` supplies the mismatch
+de-rating, and the two should agree. (Checking that the pair agrees is issue
+#5779's lint; it must never suggest a form is removable.)
+
+**Reviewing a multiplier?** Don't grep the netlist — `grep '^XM2'` shows
+neither form (they sit one line down), `git diff | grep '^[+-]XM2'` shows no
+change when only the multiplier changed, and `grep -lE '<model>.* m='` over a
+tree matches nothing, because `m=` is never on the same line as the model
+name. Read the structured view instead:
+
+```console
+$ klt netlist <sch> -o <spice> --block --format json \
+    | jq '.instances[] | select(.name=="XM2") | .multiplier'
+{
+  "m": "6",
+  "mult": "6",
+  "agree": true
+}
+```
 
 ## Exit codes
 
