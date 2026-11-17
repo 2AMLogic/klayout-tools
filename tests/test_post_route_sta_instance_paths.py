@@ -46,19 +46,30 @@ def _ipath_block(*rows: str) -> str:
     return "\n".join([_INSTANCE_PATHS_BEGIN, *rows, _INSTANCE_PATHS_END, ""])
 
 
-def _direct_instance_rows(instance: str, port: str) -> list[str]:
+def _direct_instance_rows(instance: str, input_ports: list[str]) -> list[str]:
     """``IPATH`` rows for ``instance``'s *into* side, synthesized from the
-    fixture's direct ``port`` queries (the worst path arriving at the
-    instance's input pins is the same path the direct ``-from <port>``
-    query measured)."""
-    direct = _WORST_PATH_CAPTURES["direct_queries"]["tt_025C_1v80"]["from"][port]
+    fixture's measured direct port queries. A real ``-to`` query spans
+    *every* input pin of the instance and keeps the single worst path per
+    check side, so these rows take the worst direct query per side across
+    ``input_ports``. For ``ff_a`` (a ``dfrtp``: ``D`` *and* ``RESET_B``)
+    that is the ``rst_n`` removal path on ``min`` -- not the ``a_in`` data
+    hold path the ``-from a_in`` query measured."""
+    direct = _WORST_PATH_CAPTURES["direct_queries"]["tt_025C_1v80"]["from"]
+    worst: dict[str, tuple[str, float, str, str]] = {}
+    for port in input_ports:
+        for side, capture in direct[port].items():
+            if capture is not None and (
+                side not in worst or capture[1] < worst[side][1]
+            ):
+                role, slack_s, endpoint = capture
+                worst[side] = (role, slack_s, endpoint, port)
     rows = []
     for side in ("max", "min"):
-        if direct[side] is not None:
-            role, slack_s, endpoint = direct[side]
+        if side in worst:
+            role, slack_s, endpoint, startpoint = worst[side]
             rows.append(
                 f"IPATH\t{instance}\tinto\t{side}\t{role}\t{slack_s!r}"
-                f"\t{port}\t{endpoint}"
+                f"\t{startpoint}\t{endpoint}"
             )
     return rows
 
@@ -188,23 +199,49 @@ def test_report_instances_alone_still_emits_the_name_check_block():
 
 
 def test_parse_instance_paths_matches_direct_engine_values():
-    stdout = _ipath_block(*_direct_instance_rows("ff_a", "a_in"))
-    result = _instance_paths(stdout, ["ff_a"])
-    into = result["ff_a"]["into"]
-    direct = _WORST_PATH_CAPTURES["direct_queries"]["tt_025C_1v80"]["from"]["a_in"]
+    """``ff_b`` is a plain ``dfxtp`` with one constrained input data pin
+    (``D``), so the worst path into it *is* the ``b_in`` direct query's
+    path, both sides."""
+    stdout = _ipath_block(*_direct_instance_rows("ff_b", ["b_in"]))
+    result = _instance_paths(stdout, ["ff_b"])
+    into = result["ff_b"]["into"]
+    direct = _WORST_PATH_CAPTURES["direct_queries"]["tt_025C_1v80"]["from"]["b_in"]
     for side, key in (("setup", "max"), ("hold", "min")):
         role, slack_s, endpoint = direct[key]
         record = into[side]
         assert record["status"] == "ok"
         assert record["engine_check_role"] == role
-        assert record["startpoint"] == "a_in"
-        assert record["endpoint"] == "ff_a/D"
+        assert record["startpoint"] == "b_in"
+        assert record["endpoint"] == "ff_b/D"
         assert record["slack_ns"] == round(slack_s * 1e9, 5)
         assert record["consistent_with_aggregate"] is None
 
 
+def test_parse_instance_paths_into_spans_every_input_pin():
+    """``into`` covers every input pin, so for ``ff_a`` (``dfrtp``: ``D``
+    and ``RESET_B``) the min side is the ``rst_n`` removal check -- worse
+    than the ``a_in`` data hold path -- and the max side stays the ``a_in``
+    setup path (worse than ``rst_n`` recovery). The ``check_type`` keeps
+    ``removal``; it is never relabeled as data hold."""
+    stdout = _ipath_block(*_direct_instance_rows("ff_a", ["a_in", "rst_n"]))
+    direct = _WORST_PATH_CAPTURES["direct_queries"]["tt_025C_1v80"]["from"]
+    into = _instance_paths(stdout, ["ff_a"])["ff_a"]["into"]
+    assert into["setup"]["engine_check_role"] == "setup"
+    assert (into["setup"]["startpoint"], into["setup"]["endpoint"]) == (
+        "a_in",
+        "ff_a/D",
+    )
+    assert into["hold"]["engine_check_role"] == "removal"
+    assert (into["hold"]["startpoint"], into["hold"]["endpoint"]) == (
+        "rst_n",
+        "ff_a/RESET_B",
+    )
+    assert into["hold"]["check_type"] == "removal"
+    assert into["hold"]["slack_ns"] == round(direct["rst_n"]["min"][1] * 1e9, 5)
+
+
 def test_parse_instance_paths_side_without_constrained_path_is_no_paths():
-    stdout = _ipath_block(*_direct_instance_rows("ff_a", "a_in"))
+    stdout = _ipath_block(*_direct_instance_rows("ff_a", ["a_in", "rst_n"]))
     out_of = _instance_paths(stdout, ["ff_a"])["ff_a"]["out_of"]
     for side in ("setup", "hold"):
         assert out_of[side] == post_route_sta._empty_path_record("no_paths", None)
@@ -214,7 +251,7 @@ def test_parse_instance_paths_side_without_constrained_path_is_no_paths():
 def test_parse_instance_paths_engine_error_is_unavailable_for_that_instance_only():
     stdout = _ipath_block(
         "warning: something unrelated",
-        *_direct_instance_rows("ff_a", "a_in"),
+        *_direct_instance_rows("ff_a", ["a_in", "rst_n"]),
         "ERROR\tff_b\tboom",
     )
 
@@ -283,7 +320,10 @@ def test_run_sta_report_instances_single_corner(tmp_path, monkeypatch):
     scripts = _stub_openroad_capture(monkeypatch, {None: "boundary_tt_025C_1v80"})
     _append_instance_block(
         monkeypatch,
-        _ipath_block(*_direct_instance_rows("ff_a", "a_in")),
+        _ipath_block(
+            *_direct_instance_rows("ff_a", ["a_in", "rst_n"]),
+            *_direct_instance_rows("ff_b", ["b_in"]),
+        ),
     )
 
     report = run_sta(request_path)
@@ -291,9 +331,19 @@ def test_run_sta_report_instances_single_corner(tmp_path, monkeypatch):
     assert "set klt_instances_by_name [dict create]" in scripts[0]
     assert _INSTANCE_PATHS_BEGIN in scripts[0]
     assert list(report["instance_paths"]) == ["ff_a", "ff_b"]
+    # `into` spans every input pin: ff_a (a dfrtp) takes the async removal
+    # check on its reset pin as its worst hold, not the a_in data path.
     hold = report["instance_paths"]["ff_a"]["into"]["hold"]
-    assert hold["endpoint"] == "ff_a/D"
-    assert hold["slack_ns"] == pytest.approx(0.33, abs=0.01)
+    assert (hold["check_type"], hold["startpoint"], hold["endpoint"]) == (
+        "removal",
+        "rst_n",
+        "ff_a/RESET_B",
+    )
+    assert hold["slack_ns"] == pytest.approx(-0.29559, abs=0.01)
+    # ff_b is a plain dfxtp: its into hold is the b_in data path.
+    b_hold = report["instance_paths"]["ff_b"]["into"]["hold"]
+    assert (b_hold["check_type"], b_hold["endpoint"]) == ("hold", "ff_b/D")
+    assert b_hold["slack_ns"] == pytest.approx(0.07772, abs=0.01)
     assert report["instance_paths"]["ff_b"]["out_of"]["setup"]["status"] == ("no_paths")
 
 
@@ -306,7 +356,7 @@ def test_run_sta_report_instances_check_runs_before_timing(tmp_path, monkeypatch
     scripts = _stub_openroad_capture(monkeypatch, {None: "boundary_tt_025C_1v80"})
     _append_instance_block(
         monkeypatch,
-        _ipath_block(*_direct_instance_rows("ff_a", "a_in")),
+        _ipath_block(*_direct_instance_rows("ff_a", ["a_in", "rst_n"])),
     )
 
     report = run_sta(request_path)
@@ -332,7 +382,7 @@ def test_run_sta_report_instances_multi_corner_each_entry(tmp_path, monkeypatch)
     )
     _append_instance_block(
         monkeypatch,
-        _ipath_block(*_direct_instance_rows("ff_a", "a_in")),
+        _ipath_block(*_direct_instance_rows("ff_a", ["a_in", "rst_n"])),
     )
 
     report = run_sta(request_path)
@@ -366,7 +416,7 @@ def test_run_sta_report_instances_with_report_ports_both_present(tmp_path, monke
     _stub_openroad_capture(monkeypatch, {None: "boundary_tt_025C_1v80"})
     _append_instance_block(
         monkeypatch,
-        _ipath_block(*_direct_instance_rows("ff_a", "a_in")),
+        _ipath_block(*_direct_instance_rows("ff_a", ["a_in", "rst_n"])),
     )
 
     report = run_sta(request_path)
@@ -459,37 +509,61 @@ def test_print_text_renders_instance_paths(capsys):
 )
 def test_live_engine_report_instances(tmp_path):
     """Engine integration (issue #5754): the boundary request with
-    ``report_instances=["ff_a"]`` against a real session must report the
-    flip-flop's own into/out_of arcs -- the D-pin capture path and the
-    Q-pin launch path -- consistent with the boundary ports' own
-    ``port_paths`` records from the same session."""
+    ``report_instances=["ff_a", "ff_b"]`` against a real session must
+    report each flip-flop's own into/out_of arcs, consistent with the
+    boundary ports' own ``port_paths`` records from the same session.
+    ``into`` spans every input pin: ``ff_a`` is a ``dfrtp`` whose reset pin
+    adds the async checks, so its worst hold is the ``rst_n`` removal path
+    (not the ``a_in`` data path), while plain ``dfxtp`` ``ff_b`` has no
+    such pin and its into hold *is* the ``b_in`` data path."""
     _write(tmp_path / "boundary.v", _WORST_PATH_CAPTURES["netlist"])
     request = {
         "verilog": "boundary.v",
         "hdl_toplevel": "top",
         "pdk": {"cell_library": "sky130_fd_sc_hd", "corner": "tt_025C_1v80"},
         "constraints": _boundary_constraints(
-            report_ports=["a_in", "q_a"], report_instances=["ff_a"]
+            report_ports=["a_in", "b_in", "rst_n"],
+            report_instances=["ff_a", "ff_b"],
         ),
     }
     request_path = _write_request(tmp_path / "request.json", request)
 
     report = run_sta(request_path, pdk_variant="sky130A")
 
-    paths = report["instance_paths"]["ff_a"]
-    assert paths["into"]["hold"]["endpoint"] == "ff_a/D"
-    assert paths["into"]["setup"]["endpoint"] == "ff_a/D"
-    assert paths["out_of"]["setup"]["startpoint"] == "ff_a/Q"
-    # Cross-checks against the same session's port_paths records: ff_a has
-    # exactly one input pin (D) and one output pin (Q), so the worst path
-    # into ff_a *is* the a_in path and the worst path out of ff_a *is* the
-    # q_a path.
-    assert paths["into"]["hold"]["slack_ns"] == pytest.approx(
-        report["port_paths"]["a_in"]["hold"]["slack_ns"], abs=1e-6
+    paths = report["instance_paths"]
+    assert list(paths) == ["ff_a", "ff_b"]
+    # ff_a: D + RESET_B inputs -- the async removal check on the reset pin
+    # is the worst path into the instance on the min side.
+    into_a = paths["ff_a"]["into"]
+    assert into_a["hold"]["check_type"] == "removal"
+    assert (into_a["hold"]["startpoint"], into_a["hold"]["endpoint"]) == (
+        "rst_n",
+        "ff_a/RESET_B",
     )
-    assert paths["into"]["setup"]["slack_ns"] == pytest.approx(
+    assert into_a["hold"]["slack_ns"] == pytest.approx(
+        report["port_paths"]["rst_n"]["hold"]["slack_ns"], abs=1e-6
+    )
+    # The max side stays the a_in setup path (worse than rst_n recovery).
+    assert into_a["setup"]["endpoint"] == "ff_a/D"
+    assert into_a["setup"]["slack_ns"] == pytest.approx(
         report["port_paths"]["a_in"]["setup"]["slack_ns"], abs=1e-6
     )
-    assert paths["out_of"]["setup"]["endpoint"] == "q_a"
+    # ff_b: a plain dfxtp -- its only constrained input data pin is D, so
+    # the worst path into it is the b_in data path.
+    into_b = paths["ff_b"]["into"]
+    assert into_b["hold"]["check_type"] == "hold"
+    assert (into_b["hold"]["startpoint"], into_b["hold"]["endpoint"]) == (
+        "b_in",
+        "ff_b/D",
+    )
+    assert into_b["hold"]["slack_ns"] == pytest.approx(
+        report["port_paths"]["b_in"]["hold"]["slack_ns"], abs=1e-6
+    )
+    # The Q-pin launch path out of ff_a.
+    out_a = paths["ff_a"]["out_of"]
+    assert out_a["setup"]["startpoint"] == "ff_a/Q"
+    assert out_a["setup"]["endpoint"] == "q_a"
+    assert out_a["setup"]["check_type"] == "output_setup"
+    assert out_a["hold"]["status"] == "no_paths"
     # The global worst hold stays the unrelated async-reset check.
     assert report["worst_hold_path"]["startpoint"] == "rst_n"

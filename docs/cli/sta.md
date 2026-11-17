@@ -1440,22 +1440,30 @@ Each corner then carries `instance_paths`, in request order. For each
 instance there are exactly four records — `into` (worst path **arriving at**
 the instance's input pins, `find_timing_paths -to` over those pins) and
 `out_of` (worst path **launching from** its output pins, `-from`), each with
-`setup` and `hold`:
+`setup` and `hold`. For the boundary example at `tt_025C_1v80` (`ff_a`
+values as measured by the direct engine query; `engine_check_role` omitted
+here as above):
 
 ```json
 "instance_paths": {
   "ff_a": {
     "into": {
       "setup": { "status": "ok", "check_type": "setup", "startpoint": "a_in", "endpoint": "ff_a/D", "slack_ns": 1.29511, "consistent_with_aggregate": null, "reason": null },
-      "hold":  { "status": "ok", "check_type": "hold",  "startpoint": "a_in", "endpoint": "ff_a/D", "slack_ns": 0.33143, "consistent_with_aggregate": null, "reason": null }
+      "hold":  { "status": "ok", "check_type": "removal", "startpoint": "rst_n", "endpoint": "ff_a/RESET_B", "slack_ns": -0.29559, "consistent_with_aggregate": null, "reason": null }
     },
     "out_of": {
-      "setup": { "status": "ok", "check_type": "setup", "startpoint": "ff_a/Q", "endpoint": "q_a", "slack_ns": 1.1, "consistent_with_aggregate": null, "reason": null },
+      "setup": { "status": "ok", "check_type": "output_setup", "startpoint": "ff_a/Q", "endpoint": "q_a", "slack_ns": 1.18789, "consistent_with_aggregate": null, "reason": null },
       "hold":  { "status": "no_paths", "check_type": null, "startpoint": null, "endpoint": null, "slack_ns": null, "consistent_with_aggregate": null, "reason": null }
     }
   }
 }
 ```
+
+The `into` query spans **every** input pin of the instance: `ff_a` is a
+`dfrtp`, so on the hold side its reset pin's async **removal** check — the
+same check that is the global `worst_hold_path` — is worse than the `a_in`
+data hold path and is what `into.hold` reports, under its own
+`check_type` as always, never relabeled as data hold.
 
 - **What is queried.** Per instance, one `-to` query over its input pins and
   one `-from` query over its output pins, each
