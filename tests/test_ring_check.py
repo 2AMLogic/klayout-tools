@@ -74,8 +74,8 @@ def test_closed_ring_is_continuous(tmp_path):
 
     report = run_ring_check(str(path), [_COMP, _METAL1])
 
-    assert report["schema_version"] == 1
-    assert report["file"] == str(path)
+    assert report["schema_version"] == 2
+    assert report["file"] == {"path": None, "scope": "external"}
     assert report["layers"] == [[22, 0], [34, 0]]
     assert report["region_um"] is None
     assert report["dbu_um"] == _DBU
@@ -125,7 +125,7 @@ def test_check_is_purely_geometric_no_extraction(tmp_path):
     report = run_ring_check(str(path), [_COMP, _METAL1])
 
     assert report["status"] == "broken"
-    assert "provenance" not in report  # no deck/PDK provenance: nothing was resolved
+    assert {report["provenance"]["pdk"], report["provenance"]["deck"]} == {None}
 
 
 def test_single_layer_closed_ring(tmp_path):
@@ -406,7 +406,7 @@ def test_cli_broken_exit_three_json(tmp_path, capsys):
 
     assert exit_code == 3
     payload = json.loads(capsys.readouterr().out)
-    assert payload["schema_version"] == 1
+    assert payload["schema_version"] == 2
     assert payload["status"] == "broken"
     assert payload["violations"][0]["kind"] == "gap"
 
