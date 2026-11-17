@@ -10,7 +10,10 @@ top-level ``cold_start``:
 * a start/finish progress line per command run, written to stderr only.
 
 Plus (issue #5463) the ``documented_argv`` disclosure on a cold start and the
-item's reproducibility-pin checks, which live here for the same reason.
+item's reproducibility-pin checks, which live here for the same reason. Plus
+(issue #5641) a ``cold_start`` accepting a list: several named cold starts
+over one inventoried file, so a shared implementation module can carry every
+graded cold start without minting hollow wrapper files.
 
 The validators take the command/path helpers as arguments so this module need
 not import :mod:`signoff_attest` (which imports it).
@@ -133,23 +136,74 @@ def pin_checks(pins: Any) -> list[dict[str, Any]]:
     ]
 
 
+def _cold_start_specs(
+    raw: Any,
+    field: str,
+    root: str,
+    command_spec: Callable[..., dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """One entry's ``cold_start`` as a list of specs.
+
+    Either today's single command object -- one unnamed spec, so the emitted
+    envelope is unchanged -- or (issue #5641) a non-empty list of named
+    command objects: each ``{name, argv, ...}`` with a non-empty ``name``
+    unique within its entry, one graded cold start per member over the same
+    file. ``name`` is validated and stripped here because ``command_spec``
+    silently ignores unknown keys."""
+    if not isinstance(raw, list):
+        return [command_spec(raw, field, root, documented_argv=True)]
+    if not raw:
+        raise _error(
+            f"'{field}' is an empty list -- declare at least one named cold "
+            "start (a list of {name, argv, ...} objects)"
+        )
+    specs: list[dict[str, Any]] = []
+    names: set[str] = set()
+    for index, member in enumerate(raw):
+        member_field = f"{field}[{index}]"
+        if not isinstance(member, Mapping):
+            raise _error(
+                f"'{member_field}' must be an object with a 'name' and an 'argv' list"
+            )
+        name = member.get("name")
+        if not isinstance(name, str) or not name:
+            raise _error(f"'{member_field}.name' must be a non-empty string")
+        if name in names:
+            raise _error(
+                f"cold start name '{name}' is declared more than once in '{field}'"
+            )
+        names.add(name)
+        spec = command_spec(
+            {key: value for key, value in member.items() if key != "name"},
+            member_field,
+            root,
+            documented_argv=True,
+        )
+        specs.append({"name": name, **spec})
+    return specs
+
+
 def split_testbenches(
     inventory: Mapping[str, Any],
     root: str,
     normalize_path: Callable[[Any, str, str], str],
     command_spec: Callable[..., dict[str, Any]],
-) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+) -> tuple[dict[str, Any], dict[str, list[dict[str, Any]]]]:
     """Reduce object-form ``testbenches`` entries to plain paths.
 
-    Returns ``(inventory_with_plain_paths, {normalized_path: cold_start_spec})``.
+    Returns ``(inventory_with_plain_paths, {normalized_path: [cold_start_spec, ...]})``.
     String entries pass through untouched, so an old-form inventory is
     returned as an equal mapping and validates exactly as before. A malformed
-    container is left for the generic path-list validator to refuse."""
+    container is left for the generic path-list validator to refuse. An entry
+    may declare its ``cold_start`` as a list (issue #5641): N named commands
+    over one shared file, each graded independently -- the file is still
+    inventoried exactly once."""
     entries = inventory.get("testbenches")
     if not isinstance(entries, list):
         return dict(inventory), {}
     paths: list[Any] = []
-    specs: dict[str, dict[str, Any]] = {}
+    specs: dict[str, list[dict[str, Any]]] = {}
+    bench_paths: set[str] = set()
     for index, entry in enumerate(entries):
         if not isinstance(entry, Mapping):
             paths.append(entry)
@@ -164,17 +218,18 @@ def split_testbenches(
         if "path" not in entry:
             raise _error(f"'{field}' must declare 'path'")
         path = normalize_path(entry["path"], "testbenches", root)
+        if path in bench_paths:
+            raise _error(
+                f"path '{path}' is listed more than once in 'testbenches' -- "
+                "each inventoried file must appear exactly once; to run several "
+                "cold starts over one file, declare them as a list of named "
+                f"commands on that entry's 'cold_start' (see '{field}.cold_start')"
+            )
+        bench_paths.add(path)
         paths.append(entry["path"])
         if "cold_start" in entry:
-            # A duplicate path is refused by the generic list validator.
-            specs.setdefault(
-                path,
-                command_spec(
-                    entry["cold_start"],
-                    f"{field}.cold_start",
-                    root,
-                    documented_argv=True,
-                ),
+            specs[path] = _cold_start_specs(
+                entry["cold_start"], f"{field}.cold_start", root, command_spec
             )
     return {**inventory, "testbenches": paths}, specs
 
@@ -272,20 +327,40 @@ def with_progress(
     return wrapped
 
 
+def _progress_label(role: str, identity: Mapping[str, Any]) -> str:
+    """The stderr progress label for one command run: the role, then whatever
+    identity the check carries (``name`` for one of a bench's several cold
+    starts, ``testbench`` for a per-bench one)."""
+    return " ".join(
+        part
+        for part in (
+            role,
+            identity.get("name", ""),
+            identity.get("testbench", ""),
+        )
+        if part
+    )
+
+
 def item9_checks(
     normalized: Mapping[str, Any], command: Callable[..., dict[str, Any]]
 ) -> list[dict[str, Any]]:
     """Item 9's command, unbenched-row and (via the caller) pin checks, in a
     deterministic order: top-level cold start, per-bench cold starts sorted by
-    path, then unbenched rows sorted by row id."""
-    run = with_progress(
-        command, lambda role, ident: f"{role} {ident.get('testbench', '')}".strip()
-    )
+    path -- a bench declaring several, in ``name`` order (issue #5641) -- then
+    unbenched rows sorted by row id."""
+    run = with_progress(command, _progress_label)
     checks = []
     if "cold_start" in normalized:
         checks.append(run(normalized["cold_start"], "cold_start"))
-    for path, spec in sorted(normalized["bench_cold_starts"].items()):
-        checks.append(run(spec, "cold_start", testbench=path))
+    for path, specs in sorted(normalized["bench_cold_starts"].items()):
+        for spec in sorted(specs, key=lambda s: s.get("name", "")):
+            if "name" in spec:
+                checks.append(
+                    run(spec, "cold_start", testbench=path, name=spec["name"])
+                )
+            else:
+                checks.append(run(spec, "cold_start", testbench=path))
     return checks + unbenched_row_checks(normalized["unbenched_rows"])
 
 

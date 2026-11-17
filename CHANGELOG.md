@@ -14,6 +14,27 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt signoff --attest 9`: a `cold_start` may be a list — several named
+  cold starts over one inventoried file** (#5641, 2026-11-17): an item-9
+  `testbenches[]` entry's `cold_start` now also accepts a non-empty list of
+  `{name, argv, ...}` command objects (`name` a non-empty string, unique
+  within its entry; an empty list, a non-object member, a missing/empty
+  `name` or a duplicate `name` is refused, exit `1`). Each member yields its
+  own `command` check (`role: "cold_start"`) carrying `testbench` **and**
+  `name` with its own `exit_status`/`passed`, while the entry's file is still
+  inventoried exactly once — so N benches sharing one implementation module
+  can each have a graded cold start over the same file, instead of minting
+  one hollow wrapper file per bench (which carried the attested hashes while
+  the module implementing every graded behaviour carried none). Members are
+  emitted in `name` order after benches sorted by path; `name` joins the
+  carried-check identity, so `--attest --check` and `--skip-local-only`
+  deliver a `local_only` member's committed outcome to the right member even
+  when two members declare identical `argv`. Text output labels a listed cold
+  start by its `name` and the stderr progress lines carry it. Additive: the
+  single-object form emits the envelope it always did (no `name` key), so a
+  committed envelope re-checks `match`; no `schema_version` bump. Repeating
+  one path across item-9 object entries is still refused, and the refusal now
+  points at the list form. See `docs/cli/signoff.md`.
 - **`klt yield`: a damaged gzip input is an error envelope, not a traceback**
   (#5543, 2026-11-13): a gzip samples or `--limits` file whose deflate stream
   is *corrupt* — as opposed to truncated, or carrying a bad CRC trailer, both

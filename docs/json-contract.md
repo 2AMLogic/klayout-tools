@@ -812,6 +812,22 @@ committed envelope. The key is refused (exit `1`) on any non-item-9 command.
 See [`docs/cli/signoff.md`](cli/signoff.md)'s "A cold start that only
 validates its bench".
 
+Issue #5641 lets an item-9 `testbenches[]` entry declare its `cold_start` as a
+**list** of named commands as well as the single object it always took
+(additive; no `schema_version` bump): each member `{name, argv, ...}` — `name`
+a non-empty string, unique within its entry; anything else refused, exit `1` —
+yields its own `command` check (`role: "cold_start"`) carrying `testbench` and
+`name` alongside the usual `argv`/`cwd`/`exit_status`/`passed`, and the entry's
+file is still inventoried exactly once (one `present` check). An entry with a
+single-object `cold_start` — or none, under a top-level one — emits the checks
+it always did, with no `name` key, so a committed envelope re-checks `match`
+unchanged. Because `name` joins the carried-check identity, `--attest --check`
+and `--skip-local-only` deliver a `local_only` member's committed outcome to
+the right member even when two members under one path declare identical
+`argv`. Members are emitted in `name` order after benches sorted by path, so
+check order does not depend on inventory listing order. See
+[`docs/cli/signoff.md`](cli/signoff.md)'s "Several cold starts over one file".
+
 `klt erc` since issue #2183 also carries a second verb-local key,
 `provenance.devices`: one entry per `devices[]` spec declaration (`{name,
 body_layer, on, body_area_um2}`), `[]` when none were declared. A

@@ -2009,7 +2009,7 @@ an inventory the author did not write.
 | | `envelope_checks`: `{envelope path: command}` | yes, one per cited envelope | each command exits `0` (`command`, role `freshness`) — e.g. the cited verb's own `--check` |
 | | `corners`: list of names, with `metrics`: `{corner: {fmax\|area\|power: {"envelope": path, "field": "dotted.path"}}}` | digital partitions only (both or neither) | for every corner and each of `area`, `fmax`, `power`, the named field of the named cited envelope is a finite number (`metric`, role `digital`; the value is recorded). A missing binding or non-numeric field is a **failed check**. Digit segments index lists, e.g. `result.0.fmax_mhz`. |
 | **9** Testbenches shipped | `testbenches`: list of paths, or `{"path", "cold_start"}` objects (mixing is fine; the object form first ships in 0.9.0) | yes, non-empty | each file exists (`present`, role `testbench`) |
-| | `cold_start`: command | yes, unless **every** testbench entry carries its own `cold_start` | exits `0` (`command`, role `cold_start`). A per-bench `cold_start` is a command too and yields a `command` check with `testbench: "<path>"`, so a failure names its bench. When both forms are present, the top-level command runs as well. A cold start (either form) may add `documented_argv` — the full reproducing invocation, recorded and never run; see "A cold start that only validates its bench" below. *First ships in the first release after `v0.9.2`.* |
+| | `cold_start`: command, or a non-empty list of `{name, ...}` commands (each `name` a non-empty string, unique within its entry; the list form is refused otherwise, exit `1`) | yes, unless **every** testbench entry carries its own `cold_start` | exits `0` (`command`, role `cold_start`). A per-bench `cold_start` is a command too and yields a `command` check with `testbench: "<path>"`, so a failure names its bench. The list form declares several cold starts over the same file: each member yields its own `command` check carrying `testbench` **and** `name`, graded independently, while the file is still inventoried (and hashed) exactly once — the honest way to attest N benches that share one implementation module, where minting one wrapper file per bench would hash hollow files and leave the real module attested by nothing. Members are emitted in `name` order after benches sorted by path. When both forms are present, the top-level command runs as well. A cold start (either form) may add `documented_argv` — the full reproducing invocation, recorded and never run; see "A cold start that only validates its bench" below. *Per-bench `cold_start` first ships in the first release after `v0.9.2`; the list form adds no envelope field for today's single-command inventories (no `schema_version` bump).* |
 | | `unbenched_rows`: list of `{"row": "<id>", "issue": <positive int>}` | no | one `unbenched_row` check per entry (role `row`), **passing**: the gap and its owner issue are visible to the grader, not refused. Empty/duplicate `row` or a non-positive `issue` is refused (exit `1`). Whether bench-less rows should fail T1 item 9 is a grading-policy decision this producer does not make. *First ships in 0.9.0; 0.8.0 refuses `unbenched_rows` as an unknown field.* |
 | | `pins`: `{"pdk": {"name", "revision"} \| {"none": true, "reason"}, "tools": {<tool>: <version>}}` | checked, not structurally required | `pdk.name` and `pdk.revision` non-empty, or, for a partition whose cold start consumes no PDK, the explicit no-PDK form `{"none": true, "reason": "<non-empty>"}` (`pin`, role `pdk`; `none` mixed with `name`/`revision`, or with an empty `reason`, fails; an absent `pdk` still fails -- silence never means "no PDK"); `tools` a non-empty map of non-empty versions (`pin`, role `tools`). A missing pin is a **failed check**, not a malformed inventory. |
 | **10** Repo hygiene | `hygiene`: list of paths | yes, non-empty | each file exists (`present`, role `hygiene`) |
@@ -2225,10 +2225,43 @@ top-level `cold_start` stays valid and produces the same envelope as before):
 }
 ```
 
-Each command run under `--attest 9` prints `attest item 9: running <role> [<bench>] ...`
+Each command run under `--attest 9` prints `attest item 9: running <role> [<name>] [<bench>] ...`
 and a `... ok|FAILED|skipped in N.Ns` line to **stderr**, regardless of
-`--format`; stdout (and so the JSON envelope) is unchanged and carries no
-timing, keeping `--check` drift comparison reproducible.
+`--format`; the `<name>` segment appears only for a member of a `cold_start`
+list. stdout (and so the JSON envelope) is unchanged and carries no timing,
+keeping `--check` drift comparison reproducible.
+
+**Several cold starts over one file: `cold_start` as a list (issue #5641).**
+When several testbenches are implemented by one shared module — invoked with
+different arguments, graded separately — the inventory needs a way to run a
+cold start per bench without repeating the file. An entry's `cold_start`
+therefore also accepts a non-empty list of named commands:
+
+```json
+{
+  "testbenches": [
+    {"path": "tb/shared.py", "cold_start": [
+      {"name": "ac", "argv": ["make", "ac"]},
+      {"name": "tran", "argv": ["make", "tran"], "local_only": true, "timeout_s": 7200}
+    ]}
+  ]
+}
+```
+
+Each member yields its own `command` check (`role: "cold_start"`) carrying
+`testbench: "tb/shared.py"` **and** its `name`, with its own `argv`, `cwd`,
+`exit_status` and `passed` — N independently graded cold starts — while the
+file itself is still inventoried exactly once: one `present` check, one
+attested `content_hash` on the module that implements every graded behaviour.
+This is what replaced the wrapper-file workaround, which attested N hollow
+one-line files and left the shared module (every behaviour, none of the
+hashes) outside the envelope. Every bench still needs a cold start: the list
+satisfies the requirement on its own, and an empty list is refused, exit `1`
+— as is a non-object member, a member without a `name`, an empty or non-string
+`name`, or a duplicate `name` within one entry. Repeating one `path` across
+`testbenches` object entries is still refused, and the refusal now points at
+this list form as the alternative. Text output labels a listed cold start by
+its `name` (`[PASS] cold_start ac: make ac (exit 0)`).
 
 **A cold start that only validates its bench: `documented_argv` (issue
 #5463).** When a bench's claimed numbers come from a large corner grid or a
