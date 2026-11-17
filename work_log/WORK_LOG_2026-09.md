@@ -2,6 +2,56 @@
 
 Sections moved byte-for-byte from [WORK_LOG.md](../WORK_LOG.md) by `loom-daemon work-docs archive`.
 
+### 2026-09-17
+
+- **PR #2031**: feat(lvs): disclose applied hints.equivalent_pins groupings in the envelope
+- **PR #2024**: fix(extract): stop abstract-pin candidate discovery at a second declared pin
+- **PR #2018**: fix(examples): make both worked-example regenerators reproducible
+- **PR #2017**: feat(signoff): report the cited DRC envelope's coverage block (#2002)
+- **PR #2013**: fix(signoff): restrict T1 items 3 and 4 to drc and lvs citations
+- **PR #2010**: extract: warn when a declared pin name matches 2+ disconnected nets
+- **PR #2009**: fix(lvs): act on power_connectivity first-tester feedback
+- **PR #2006**: fix(synth,pnr): strip signed declarations, resolve x constants, pre-flight netlists
+- **PR #2005**: fix(lvs): populate provenance.input.content_hash, strip ANSI from netgen text
+- **PR #2003**: docs(tiers): state the power_connectivity condition item 4 is graded on
+- **PR #2001**: fix(erc): compute gate area from poly ∩ diff via optional active_layer
+- **PR #1992**: docs(drc): record the decision to leave metal density uncovered (#1975)
+- **PR #1990**: docs(cocotb): require ReadOnly() before sampling a DUT output
+- **PR #1989**: fix(decks): transcribe sky130's met1-met5 minimum-area rules (#1955)
+- **PR #1984**: feat(erc): add status and provenance to klt erc's envelope
+- **PR #1981**: ci: move native-techmap off the contended self-hosted pool
+- **PR #1974**: fix(signoff): hard-fail klt signoff's lvs check on a power_connectivity mismatch
+- **PR #1970**: fix(gen-compose): make the closed-ring rejection plane-aware
+- **PR #1967**: feat(signoff): grade digital RTL-flow blocks (sta/functional-verification, per-kind item 7)
+- **PR #1964**: feat(lvs): add per-instance power/ground connectivity check to gate-level LVS
+- **PR #1963**: docs: add the digital path's staged pipeline contract (D1-D11)
+- **PR #1961**: docs(signoff): add a runnable block-manifest worked example
+- **PR #1958**: docs(cli): add yield-campaign reference page, link release-lag policy
+- **Issue #2004** (closed): dogbone-terminal example drifted from mos_array: decide whether committed GDS or current generator output is correct
+- **Issue #2002** (closed): klt signoff never reads the DRC envelope's coverage block, so item 3's disclosure clause is documented but unenforced
+- **Issue #2000** (closed): extract: a merged net's pin flag isn't gated by an explicit declared-pin-set input (--def-pins/--pins)
+- **Issue #1998** (closed): klt lvs: disclose applied hints.equivalent_pins groupings in the envelope instead of silently reshaping the verdict
+- **Issue #1994** (closed): klt extract's 'named net beats unnamed' tie-break binds unused tie-cell outputs to VPWR, so fixing a missing PDN turns LVS match into 77 false errors
+- **Issue #1982** (closed): design-evidence-tiers.md is now weaker than its own grader: item 4 omits the power_connectivity condition klt lvs enforces, and 'orthogonal' conflated connectivity with analysis
+- **Issue #1980** (closed): docs(functional-verification): note the benign OSS CAD Suite PYTHONHOME / 'Unexpected sys.executable' cocotb error
+- **Issue #1979** (closed): klt erc counts tie-cell poly resistors as gates, producing false antenna-ratio violations (OpenROAD reports 0 on the same design)
+- **Issue #1978** (closed): First-tester feedback on the new power_connectivity check: it caught a real no-PDN defect, but its remedy advice, VNB handling, VPB duplication and signoff text output need work
+- **Issue #1977** (closed): Two worked-example regenerators are not reproducible: examples/drc/generate.py documents a command whose output fails the drift test, and dogbone-terminal/generate.py no longer reproduces its committed GDS
+- **Issue #1975** (closed): sky130 deck: decide whether a windowed metal-density rule is transcribable at all, given the engine tiles the drawn extent not a floorplan boundary
+- **Issue #1973** (closed): yosys netlists fail klt place-and-route three deterministic ways (signed keyword, X-constant GROUND net, integer loop vars) with no pre-flight check
+- **Issue #1972** (closed): cocotb style guide has no sampling rule: reading a DUT output in the active region passes on Verilator and fails on Icarus
+- **Issue #1969** (closed): klt lvs: no input content_hash (item-4 citations pin as stale), and --format text emits ANSI to non-TTY stdout
+- **Issue #1968** (closed): klt erc emits no status and no provenance block, so its output cannot be graded
+- **Issue #1965** (closed): klt signoff still counts a gate-level LVS envelope as passing when power_connectivity is a mismatch
+- **Issue #1960** (closed): Friction: gen-compose's closed-ring rejection is plane-agnostic, forcing a floorplan change where a higher-plane escape would do
+- **Issue #1959** (closed): klt signoff cannot grade a digital RTL-flow block: sta/functional-verification/equiv/erc are not recognised envelope kinds, and item 7 is pex-only
+- **Issue #1957** (closed): feat(lvs): add an opt-in power_check mode for per-instance PG pin-to-rail verification
+- **Issue #1956** (closed): No staged pipeline contract for the digital path — design-pipeline.md's S1-S11 has no digital counterpart
+- **Issue #1955** (closed): sky130 DRC deck has no area or density rules although the engine supports those check kinds (m2.6 min-area not transcribed)
+- **Issue #1954** (closed): No block repo ships a signoff manifest — klt signoff --manifest/--fleet has never been exercised against real block evidence
+- **Issue #1953** (closed): docs/cli on main documents three verbs absent from the v0.5.0 release (wave, layout-plan, layout-plan-execute)
+- **Issue #1952** (closed): Gate-level LVS is signal-connectivity only — no power/ground or well-tie connectivity check to pair with it
+
 ### 2026-09-16
 
 - **PR #1951**: fix(drc): fail --engine klayout runs on a partially-executed deck
