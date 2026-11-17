@@ -4857,8 +4857,8 @@ def _build_dry_run_report(
         # directory on *this* host (issue #4097's refusal). The real submit
         # raises it from `_resolve_batch_config`, which a dry run reaches
         # only through `dry_run_runner_check` -- and that swallows every
-        # code but the two runner ones, and is skipped outright on a host
-        # with no resolvable batch config. Re-applying it here, beside the
+        # code but the runner and engine-pin ones, and is skipped outright on
+        # a host with no resolvable batch config. Re-applying it here, beside the
         # #3917 check, makes the dry run refuse what the submit refuses
         # whether or not this host can resolve a bucket or provision script.
         _validate_batch_pdk_root(request)

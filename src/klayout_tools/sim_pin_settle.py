@@ -67,9 +67,12 @@ def check_offhost_engine_version_pin(
     engine: str,
     engine_version: str | None,
 ) -> None:
-    """Enforce the pin for off-host backends. No pre-submit probe exists for a
-    remote/batch runner, so it is checked against the version its reports
-    carried (after the run)."""
+    """Enforce the pin for off-host backends. There is still no pre-submit
+    probe of the *launched* instance: ``batch`` refuses a pin every AMI
+    manifest image's published ``ngspice_version`` fails before submitting
+    (issue #5851), but a ``remote`` runner -- and any manifest-less or
+    unknown-version image -- is checked here, against the version the
+    runner's reports carried (after the run)."""
     from . import sim
 
     if pin is None or backend not in sim._OFFHOST_BACKENDS:

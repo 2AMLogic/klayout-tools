@@ -177,9 +177,19 @@ with the engine it resolved and, on a mismatch, exits 1 *before simulating*
 with `error.code: "engine_version_unmet"` naming required vs found. A version
 that cannot be determined or parsed also fails (closed). On `local` and
 `local-parallel` the engine is probed (`ngspice --version` / `Xyce -v`) up
-front. `remote` and `batch` have no pre-submit probe, so the pin is checked
-against the version in the runner's report once the run returns; the job has
-already run by then. Which of the two applies is decided by the backend that
+front. `batch` also checks the pin *before submitting*: the AMI manifest
+publishes each image's `ngspice_version`, and when **every** candidate image
+for the request's `models.pdk`/`batch.region` carries one the pin excludes,
+`klt sim` refuses with `engine_version_unmet` before any S3 write or launch
+(no job provisioned, no instance started; issue #5851). The manifest is
+publication metadata rather than a probe of the launched instance, so an
+image without a readable `ngspice_version`, an unparseable one, or any one
+image that satisfies the pin defers instead — and `remote`, which publishes
+no such identity, is unchanged. On every off-host backend the pin is still
+checked against the version in the runner's report once the run returns;
+the job has already run by then, and that post-run comparison remains the
+backstop for everything the pre-submit check let through. Which of the two
+applies is decided by the backend that
 *executes*, not the one first resolved: when a host-default off-host backend
 steps back to `local` late — a single-unit run, or `options.resume` — the pin
 is probed here up front, exactly as `--backend local` does (issue #5500);
@@ -2270,14 +2280,19 @@ the packaged `data/` copy. See
   only `batch.region` (every region when none is configured, because the
   fleet chooses its own Spot pool).
 - **`--dry-run`.** `klt sim --backend batch --dry-run` runs this same
-  pre-launch check (version mismatch and request-feature gaps), so a
-  request the published images cannot run is refused (or, under `warn`,
-  reported in `diagnostics[]`) without a submit. The report also carries
+  pre-launch check (version mismatch, request-feature gaps, and the
+  `engine_version` pin against the published images), so a request the
+  published images cannot run is refused (or, under `warn` for the
+  version/feature checks, reported in `diagnostics[]`) without a submit.
+  The report also carries
   `published_runner` (`status`: `match`/`mismatch`/`unknown`,
   `client_klt_version`, and the candidate `images` with their `klt_version`)
   for `match`, `unknown` and, under `runner_version_check: "warn"`,
   `mismatch`, so the runner `klt` the fleet accepts is readable
   without a submit ([#4675](https://github.com/2AMLogic/klayout-tools/issues/4675)).
+  Each `images[]` entry also carries the image's engine identity as
+  published (`ngspice_version`, `pdk_snapshot`), `null` for a legacy
+  manifest entry (issue #5851, additive).
   A `mismatch` under the default `enforce` is refused as
   `batch_runner_version_mismatch` instead, with no `published_runner`; the
   client and published runner versions are in the error message
@@ -2292,6 +2307,22 @@ the packaged `data/` copy. See
   as the runner-side gate (#3184, table above), so the two can never
   disagree. It reports a mismatch only when **every** candidate image
   publishes a `klt_version` and none of them matches the client.
+- **`engine_version` pin (#5851).** Beside the version/feature checks, a
+  request `engine_version` pin is compared with the `ngspice_version` each
+  candidate image publishes, using the same dotted-version rule as the
+  post-run report comparison, so the two can never disagree about what
+  counts as a match (`"44"` pins the major, `"44.2"` major.minor). When
+  **every** candidate publishes a readable `ngspice_version` and all of
+  them fail the pin, the request is refused before any S3 write or launch
+  with `error.code: "engine_version_unmet"`, naming every image and its
+  ngspice build; a sharded request is checked once, not once per shard.
+  `runner_version_check` does not relax this: the pin is a request-level
+  requirement, not version-skew policy. Anything less certain — a legacy
+  entry without `ngspice_version`, an unparseable one, one image that
+  satisfies the pin, an `engine` other than `ngspice` (the manifest
+  publishes no identity for it) — defers to the post-run comparison, which
+  stays as the backstop because the manifest records what was *published*,
+  not what the launched instance runs.
 - **`enforce` (default).** A known mismatch fails the whole request once,
   before any S3 write or launch call. It exits `1` with a top-level
   `error.code` of `batch_runner_version_mismatch` (the existing code). The
@@ -2336,7 +2367,8 @@ the packaged `data/` copy. See
   (`2AMLogic/2am:infra/aws/batch-fleet-provision.sh` provisions the batch
   fleet).
 - **Discovering the runner version before submit.** Read the manifest:
-  `jq '.images[] | {pdk, region, ami_id, built_at, klt_version, klt_ref}'
+  `jq '.images[] | {pdk, region, ami_id, built_at, klt_version, klt_ref,
+  ngspice_version, pdk_snapshot}'
   "${KLT_AMI_MANIFEST:-$HOME/.config/klt/remote-sim-ami-manifest.json}"`.
   For a given pair, the entry with the latest `built_at` is the one in use.
 - **Limit.** A manifest `klt_version` is publication metadata, not proof of

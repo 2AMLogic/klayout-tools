@@ -1819,6 +1819,8 @@ def test_published_runner_identities_latest_per_pdk_and_region(tmp_path):
             "klt_version": "0.7.0",
             "klt_ref": "v0.7.0",
             "pdk_variants": None,
+            "ngspice_version": "46",
+            "pdk_snapshot": "sky130A-2026.10.01",
         }
     ]
     any_region = rl.published_runner_identities("sky130A", None, manifest)
@@ -1951,3 +1953,25 @@ def test_published_runner_identities_carry_pdk_variants(tmp_path):
     by_pdk = {i["pdk"]: i for i in rl.published_runner_identities(None, None, manifest)}
     assert by_pdk["gf180mcu"]["pdk_variants"] == ["gf180mcuD"]
     assert by_pdk["sky130A"]["pdk_variants"] is None
+
+
+def test_published_runner_identities_carry_engine_identity(tmp_path):
+    """Issue #5851: the batch pre-submit ``engine_version`` pin check reads
+    ``ngspice_version``/``pdk_snapshot`` off the same identities; a legacy
+    entry without them is ``None`` -- explicitly unknown -- like the other
+    optional runner fields."""
+    manifest = _write_manifest(
+        tmp_path,
+        [
+            _entry(ngspice_version="46.2", pdk_snapshot="sky130A-2026.11.01"),
+            _entry(region="us-west-2", ngspice_version=None, pdk_snapshot=None),
+        ],
+    )
+    by_region = {
+        i["region"]: i
+        for i in rl.published_runner_identities("sky130A", None, manifest)
+    }
+    assert by_region["us-east-1"]["ngspice_version"] == "46.2"
+    assert by_region["us-east-1"]["pdk_snapshot"] == "sky130A-2026.11.01"
+    assert by_region["us-west-2"]["ngspice_version"] is None
+    assert by_region["us-west-2"]["pdk_snapshot"] is None

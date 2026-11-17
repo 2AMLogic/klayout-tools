@@ -690,7 +690,8 @@ BUILD_KLT_VERSION_MARKER = "klt-remote-sim-ami-klt-version="
 
 def _manifest_runner_field(image: dict[str, Any], key: str) -> str | None:
     """A manifest entry's optional runner-identity field (``klt_version`` /
-    ``klt_ref``, issue #2851), or ``None`` -- explicitly *unknown* -- when the
+    ``klt_ref`` (issue #2851) and, since issue #5851, ``ngspice_version`` /
+    ``pdk_snapshot``), or ``None`` -- explicitly *unknown* -- when the
     entry predates the field or carries something unusable. A malformed
     ``klt_version`` is unknown rather than an error: it only ever feeds the
     batch backend's advisory pre-launch check, which must fall back to the
@@ -739,9 +740,12 @@ def published_runner_identities(
     or every region: the batch fleet chooses its own Spot pool, so a client
     that does not pin a region cannot know which region's image it gets.
     Each item is ``{"pdk", "region", "ami_id", "klt_version", "klt_ref",
-    "pdk_variants"}``; the last three are ``None`` for a legacy entry
-    (``pdk_variants`` is the list of PDK variant directories the image
-    ships, issue #3251). Raises
+    "pdk_variants", "ngspice_version", "pdk_snapshot"}``; all but the first
+    three are ``None`` for a legacy entry (``pdk_variants`` is the list of
+    PDK variant directories the image ships, issue #3251;
+    ``ngspice_version``/``pdk_snapshot`` are the engine identity the batch
+    backend's pre-submit ``engine_version`` pin check gates on, issue
+    #5851). Raises
     :class:`RemoteLaunchError` when the manifest cannot be loaded or ``pdk``
     has no AMI family, like :func:`resolve_ami`.
     """
@@ -769,6 +773,8 @@ def published_runner_identities(
                 "klt_version": _manifest_runner_field(latest, "klt_version"),
                 "klt_ref": _manifest_runner_field(latest, "klt_ref"),
                 "pdk_variants": _manifest_pdk_variants(latest),
+                "ngspice_version": _manifest_runner_field(latest, "ngspice_version"),
+                "pdk_snapshot": _manifest_runner_field(latest, "pdk_snapshot"),
             }
         )
     return identities

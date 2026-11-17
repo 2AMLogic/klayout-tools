@@ -636,6 +636,13 @@ observe). `lines` is the written file's lines for `request`/`thread_pin`, else
 (`status` `match` / `mismatch` / `not_comparable`); no `schema_version` bump
 (issue #5321).
 
+`klt sim --backend batch --dry-run`'s `published_runner.images[]` entries
+(issue #5851) gain the additive `ngspice_version` and `pdk_snapshot` fields
+each AMI-manifest image publishes, `null` for a legacy entry — the same
+identities the new pre-submit `engine_version` pin refusal reads. No
+`schema_version` bump. See [`docs/cli/sim.md`](cli/sim.md)'s "`engine_version`
+pin (#5851)".
+
 **No bucket in batch reports (issue #3777).** `environment.remote` (and each
 `fleet[]` member) no longer carries `bucket` on any batch verb. The bucket name
 embeds the fleet's AWS account number and reports are committed as evidence.
