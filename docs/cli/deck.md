@@ -551,7 +551,7 @@ field by field, which two separate passes on a real design had to do
         "source_repo": "google/globalfoundries-pdk-libs-gf180mcu_fd_pv",
         "source_path": "libs.tech/klayout/lvs/rule_decks/diode_extraction.lvs",
         "rule_id": "gf180mcu_fd_pr__diode_pd2nw_06v0",
-        "commit": "c6d73a35f524070e85faff4a6a9eef49553ebc2b"
+        "commit": "f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7"
       }
     }
   ]

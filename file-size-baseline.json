@@ -189,7 +189,7 @@
     },
     {
       "path": "src/klayout_tools/cli/parser.py",
-      "lines": 5385
+      "lines": 5277
     },
     {
       "path": "src/klayout_tools/cli/pdk_cmd.py",
@@ -197,7 +197,7 @@
     },
     {
       "path": "src/klayout_tools/cli/signoff_cmd.py",
-      "lines": 1166
+      "lines": 1156
     },
     {
       "path": "src/klayout_tools/cli/sim_cmd.py",
@@ -345,7 +345,7 @@
     },
     {
       "path": "src/klayout_tools/functional_verification.py",
-      "lines": 3162
+      "lines": 3154
     },
     {
       "path": "src/klayout_tools/functional_verification_sdf.py",
@@ -397,7 +397,7 @@
     },
     {
       "path": "src/klayout_tools/lef_abstract.py",
-      "lines": 1475
+      "lines": 1468
     },
     {
       "path": "src/klayout_tools/liberty_compare.py",
@@ -573,7 +573,7 @@
     },
     {
       "path": "src/klayout_tools/signoff.py",
-      "lines": 7422
+      "lines": 7421
     },
     {
       "path": "src/klayout_tools/signoff_attest.py",
@@ -589,7 +589,7 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 12426
+      "lines": 12417
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
@@ -649,7 +649,7 @@
     },
     {
       "path": "src/klayout_tools/spice_flatten.py",
-      "lines": 847
+      "lines": 798
     },
     {
       "path": "src/klayout_tools/substrate_resistance.py",
@@ -1049,7 +1049,7 @@
     },
     {
       "path": "tests/test_signoff.py",
-      "lines": 18366
+      "lines": 18343
     },
     {
       "path": "tests/test_signoff_generator_batch.py",
