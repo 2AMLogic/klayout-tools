@@ -220,7 +220,7 @@ from typing import Any
 
 from . import env_provenance, output_lock, pex_async, pex_sim_evidence
 from ._jsonnum import is_number
-from ._paths import _resolve_relative, fold_spice_continuations
+from ._paths import _resolve_relative
 from ._provenance import content_hash, sha256_file
 from ._text import read_text as _read_text
 from .coverage import (
@@ -241,6 +241,7 @@ from .pex_netlist_text import (
     _dut_declares_a_circuit,
     _expand_reference_includes,
     _has_include_card,
+    _logical_cards,
     _reference_is_hierarchical,
     _subckt_interfaces,
 )
@@ -2394,18 +2395,6 @@ def _flatten_schematic_dut(
 
 
 _STAR_NODE_SUFFIX = re.compile(r"__t\d+(?=\s|$)")
-
-
-def _logical_cards(text: str) -> list[str]:
-    """``text``'s SPICE cards with ``+`` continuation lines joined and
-    comments dropped."""
-    return fold_spice_continuations(
-        [
-            line.strip()
-            for line in text.splitlines()
-            if line.strip() and not line.startswith("*")
-        ]
-    )
 
 
 def _device_only_parity(

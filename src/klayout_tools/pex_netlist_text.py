@@ -15,7 +15,7 @@ from __future__ import annotations
 import os
 import re
 
-from ._paths import fold_spice_continuations
+from ._spice_text import fold_spice_continuations, strip_spice_inline_comment
 from ._spice_tokens import split_spice_tokens
 from .op_sanity import INCLUDE_CARD_RE, IncludeState, expand_includes
 from .pex_asap7 import DEVICE_MODEL_CARD_PREFIXES
@@ -27,14 +27,26 @@ _SUBCKT_RE = re.compile(r"^\s*\.subckt\s+(?P<body>\S.*?)\s*$", re.IGNORECASE)
 
 
 def _logical_lines(netlist_text: str) -> list[str]:
-    """``netlist_text``'s lines with SPICE ``+`` continuation lines folded
-    into the line they continue, and inline ``$``/``;`` comments stripped --
-    so :func:`_subckt_interfaces` sees each `.subckt` header whole."""
-    lines = [
-        re.split(r"\s\$|;", raw, maxsplit=1)[0].rstrip()
-        for raw in netlist_text.splitlines()
-    ]
+    """``netlist_text``'s lines with ``+`` continuations folded onto the line
+    they continue and inline ``$``/``;`` comments stripped by the shared
+    rule in ``_spice_text`` -- so :func:`_subckt_interfaces` sees each
+    `.subckt` header whole, and a ``$PDK_ROOT``-style ``.include`` reaches
+    :func:`_has_include_card`/:func:`_expand_reference_includes` unmangled."""
+    lines = [strip_spice_inline_comment(raw) for raw in netlist_text.splitlines()]
     return fold_spice_continuations(lines)
+
+
+def _logical_cards(text: str) -> list[str]:
+    """``text``'s SPICE cards with ``+`` continuation lines joined and
+    full-line ``*`` comments dropped (inline comments are *not* stripped
+    here -- unlike :func:`_logical_lines`)."""
+    return fold_spice_continuations(
+        [
+            line.strip()
+            for line in text.splitlines()
+            if line.strip() and not line.startswith("*")
+        ]
+    )
 
 
 def _subckt_interfaces(netlist_text: str) -> dict[str, tuple[str, list[str]]]:

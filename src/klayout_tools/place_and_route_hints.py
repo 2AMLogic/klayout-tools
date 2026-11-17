@@ -12,16 +12,18 @@ from .place_and_route_reports import parse_global_route_congestion
 
 def outside_cwd_note(path: str) -> str:
     """Issue #4191: the docker wrapper mounts only `$PWD`, `$PDK_ROOT` and
-    `$TMPDIR`, so a readable path outside the invocation directory is the
-    commonest trigger -- say the rule and the fix, not just the symptom."""
+    `$TMPDIR` (plus `/tmp` when `$TMPDIR` differs, issue #5878), so a
+    readable path outside the invocation directory is the commonest trigger
+    -- say the rule and the fix, not just the symptom."""
     cwd = os.path.realpath(os.getcwd())
     real = os.path.realpath(path)
     if real == cwd or real.startswith(cwd.rstrip(os.sep) + os.sep):
         return ""
     return (
         f"; '{path}' is outside the invocation directory '{cwd}', and the "
-        "container wrapper mounts only $PWD, $PDK_ROOT and $TMPDIR -- run "
-        "from a common ancestor of the request and its inputs"
+        "container wrapper mounts only $PWD, $PDK_ROOT and $TMPDIR (plus /tmp "
+        "when $TMPDIR differs) -- run from a common ancestor of the request and "
+        "its inputs"
     )
 
 
