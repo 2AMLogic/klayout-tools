@@ -27,6 +27,20 @@ not `klt --version`, if you need to detect this kind of drift. See
   fields keep their exact values, so no JSON field changes meaning or moves
   — additive only, no `schema_version` bump.
 
+- **`klt yield`: a damaged gzip input is an error envelope, not a traceback**
+  (#5543, 2026-11-13): a gzip samples or `--limits` file whose deflate stream
+  is *corrupt* — as opposed to truncated, or carrying a bad CRC trailer, both
+  of which already reported correctly — made `klt yield` print a raw
+  `zlib.error` traceback and exit 1 with no JSON on either stream, breaking
+  the error contract in [`docs/json-contract.md`](docs/json-contract.md) for a
+  caller that parses the envelope. `yield_analysis._load_json` converted
+  `(OSError, EOFError, UnicodeDecodeError, json.JSONDecodeError)` into
+  `YieldError`, and `zlib.error` subclasses none of them, so it escaped
+  `yield_cmd.run`'s handler. It is now in that tuple: the input reports
+  `could not read samples '<path>': …` like every other unreadable input, and
+  `run_yield` raises `YieldError` rather than leaking `zlib.error` at the
+  library surface. No output-shape change; no `schema_version` bump.
+
 - **`klt pex` and `klt sim --monte-carlo` now read a SPICE card the same way
   the flattener does: `w = 1` and `w=(2 * 1u)` are parameters, not device
   names** (#5461, 2026-11-13): three hand-rolled card tokenizers lived in
@@ -69,6 +83,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   `--require-build-match` fails the check (exit 3, `status: "drifted"`) when
   ENV's `provenance.klt_version` is from a different build. Report-only
   without the flag.
+- **Added** (#5684): `klt functional-verification` accepts
+  `request.options.from_synthesize` (`{"report", "netlist"}`) to re-simulate
+  the netlist a `klt synthesize` run produced. The netlist is re-hashed against
+  the report's `netlist_sha256` before any build and the run is refused (exit
+  1) on a mismatch, a missing hash, an unresolvable netlist, or an
+  `hdl_toplevel` mismatch. `sources` may be empty/omitted only with this key.
+  Additive `from_synthesize` response block; no `schema_version` bump.
+
 - **Changed** (#5583, additive-compatible — `klt stats` `schema_version`
   unchanged): `geometry_digest` is now opt-in via `klt stats
   --geometry-digest` and is `null` by default (text output `geometry_digest:
