@@ -162,6 +162,21 @@ not `klt --version`, if you need to detect this kind of drift. See
   `docs/json-contract.md` and carries no bump of its own. `--format text`
   still prints a path (`<outside repo>` for an external input), never the
   envelope object.
+- **Changed** (#5666, emission-affecting, **no** `schema_version` bump): a
+  `klt lvs` report from `engine: "klayout-runset"` now emits `layout` as the
+  committable `{path, scope}` envelope `env_provenance.repo_relative_path()`
+  builds from the **resolved** layout path — the same file
+  `environment.layout_sha256` hashes (`{"path": "<repo-relative POSIX path>",
+  "scope": "repo"}` inside the invoking repo, `{"path": null, "scope":
+  "external"}` outside) — not the request's bare-string echo. No bump:
+  `docs/cli/lvs.md` already documents `layout` as an unconditional object at
+  `schema_version: 3`, so the string was the non-compliance and this is a
+  compliance fix. `reference` is unchanged and still the documented
+  bare-string echo. A newly produced report for an out-of-repo layout reads
+  `{"path": null, "scope": "external"}` and needs an explicit `--layout` to
+  `--rerun` (already-committed old reports still resolve: the committed-path
+  reader accepts the bare string). `--format text` (the default) no longer
+  crashes with an `AttributeError` on a runset report.
 
 - **`klt synthesize`'s `netlist_sha256` no longer depends on the build root
   or on `run_id`** (#5594, 2026-11-15): Yosys names function-derived nets
