@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -324,6 +324,19 @@ def _section_sigma_params(field: str, path: str, section: str) -> dict[str, floa
     return found
 
 
+def _top_level(lines: Iterable[str]) -> Iterator[str]:
+    """Only the lines outside every ``.subckt`` body: a parameter declared
+    there is subcircuit-local, not the deck-level sigma."""
+    depth = 0
+    for line in lines:
+        if _SUBCKT_RE.match(line):
+            depth += 1
+        elif _SUBCKT_END_RE.match(line):
+            depth = max(0, depth - 1)
+        elif not depth:
+            yield line
+
+
 def _walk_section(
     field: str, path: str, section: str, found: dict[str, float], seen: set[Any]
 ) -> None:
@@ -331,33 +344,19 @@ def _walk_section(
     if key in seen:
         return
     seen.add(key)
-    lines = _logical_lines(_read(field, path))
+    lines = _top_level(_logical_lines(_read(field, path)))
     inside = False
-    depth = 0
     for line in lines:
         start = _LIB_START_RE.match(line)
         if start is not None and start.group(2) is None:
             # `.lib <section>` opens a named block of this same file.
             inside = start.group(1).lower() == section.lower()
-            depth = 0
             continue
         if _LIB_END_RE.match(line):
             inside = False
-            depth = 0
             continue
-        if not inside:
-            continue
-        # `.subckt` bodies are skipped for the same reason as in `_walk_file`:
-        # a parameter declared there is subcircuit-local, not the deck sigma.
-        if _SUBCKT_RE.match(line):
-            depth += 1
-            continue
-        if _SUBCKT_END_RE.match(line):
-            depth = max(0, depth - 1)
-            continue
-        if depth:
-            continue
-        _walk_line(field, path, line, found, seen)
+        if inside:
+            _walk_line(field, path, line, found, seen)
 
 
 def _walk_line(
@@ -389,16 +388,7 @@ def _walk_file(field: str, path: str, found: dict[str, float], seen: set[Any]) -
             f"{field} cannot read model library {path} (included by the "
             "selected mismatch section) on this host"
         )
-    depth = 0
-    for line in _logical_lines(_read(field, path)):
-        if _SUBCKT_RE.match(line):
-            depth += 1
-            continue
-        if _SUBCKT_END_RE.match(line):
-            depth = max(0, depth - 1)
-            continue
-        if depth:
-            continue
+    for line in _top_level(_logical_lines(_read(field, path))):
         include = _INCLUDE_RE.match(line)
         if include is not None:
             _walk_file(field, _join(path, include.group(1)), found, seen)
