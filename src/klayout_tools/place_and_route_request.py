@@ -447,7 +447,11 @@ def _resolve_netlist(netlist: Any, request_dir: str) -> str:
         raise PlaceAndRouteError("request.netlist must be a non-empty string")
     path = netlist if os.path.isabs(netlist) else os.path.join(request_dir, netlist)
     if not os.path.isfile(path):
-        raise PlaceAndRouteError(f"netlist not found: {netlist}")
+        raise PlaceAndRouteError(
+            f"netlist not found: {netlist} (klt synthesize writes its netlist "
+            "under a per-run directory .klt/synthesize/<run_id>/ unless its "
+            "request sets outputs.dir, which gives the netlist a stable path)"
+        )
     try:
         with open(path, "rb"):
             pass
