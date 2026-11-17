@@ -145,6 +145,7 @@
         "klayout_tools.cli._drc_parser_args",
         "klayout_tools.cli.drc_cmd",
         "klayout_tools.cli.drc_text",
+        "klayout_tools._drc_edge_pair_hull",
         "klayout_tools.drc",
         "klayout_tools.drc_check_kinds",
         "klayout_tools.drc_crosscheck",
