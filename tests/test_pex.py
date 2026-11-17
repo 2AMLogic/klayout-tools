@@ -6739,6 +6739,7 @@ def test_run_pex_resistance_graph_writes_selected_resistance(tmp_path):
     assert echo["r_cut_ohm"] == 0.0
     (net,) = echo["nets"]
     assert net["resistance_source"] == "graph"
+    assert net["fallback_reason"] is None
     assert net["selected_resistance_ohm"] < net["legacy_resistance_ohm"]
     assert sum(_netlist_resistors(base_out)) == pytest.approx(
         net["legacy_resistance_ohm"], rel=1e-3
@@ -6757,22 +6758,9 @@ def test_run_pex_resistance_graph_legacy_net_keeps_legacy_value(tmp_path):
 
     (net,) = graph["extraction"]["resistance_graph"]["nets"]
     assert net["resistance_source"] == "legacy"
+    assert net["fallback_reason"] == "via_resistance_unknown"
     assert net["selected_resistance_ohm"] == net["legacy_resistance_ohm"]
     assert graph["extraction"]["netlist_sha256"] == base["extraction"]["netlist_sha256"]
-
-
-def test_run_pex_resistance_graph_r_cut_zero_is_forwarded(tmp_path, monkeypatch):
-    calls = _capture_run_extract_kwargs(monkeypatch)
-    _pex_strapped(
-        tmp_path,
-        "single_level",
-        "g",
-        resistance_graph=True,
-        resistance_graph_r_cut_ohm=0,
-    )
-    assert calls[0]["resistance_graph"] is True
-    assert calls[0]["resistance_graph_r_cut_ohm"] == 0
-    assert calls[0]["emit_selected_resistance"] is True
 
 
 def test_run_pex_resistance_graph_default_passes_no_graph_request(
