@@ -32,8 +32,8 @@ from helpers.netlist_batch_fakes import (
     _make_fake,
     _make_repo,
 )
-from helpers.subprocess_fakes import fake_completed, keep_uploaded
-from klayout_tools import _batch_collect, _provenance, sim_batch
+from helpers.subprocess_fakes import fake_completed
+from klayout_tools import _batch_collect, sim_batch
 from klayout_tools import netlist as netlist_module
 from klayout_tools import netlist_batch as nb
 from klayout_tools.cli import main, netlist_cmd
