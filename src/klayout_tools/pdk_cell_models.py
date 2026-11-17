@@ -76,8 +76,8 @@ def resolve_cell_models_for_cell_library(
     always wins: ``find_pdk`` disables the search for it, so the ambiguity
     refusal never fires when one was pinned.
 
-    Raises ``error_cls`` (never :class:`PdkNotFoundError`) for every failure
-    mode, each with a stable ``code``:
+    If no PDK install resolves, raises ``error_cls`` with the lookup error's
+    message. Model resolution failures carry a stable ``code``:
 
     - ``pdk_ambiguous_install`` -- the resolved install is ambiguous
       (``ambiguous_roots`` non-empty) and no explicit ``root`` pinned it;

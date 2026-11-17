@@ -43,7 +43,7 @@ class RunInputs(NamedTuple):
     sources: list[dict[str, Any]]
     #: Defines the ``pdk`` input derives (``FUNCTIONAL``, no SDF); the run
     #: merges them *under* the caller's own ``options.defines`` (issue #5782).
-    pdk_defines: dict[str, str | None] = {}
+    pdk_defines: dict[str, str | None]
 
 
 def sources_echo(

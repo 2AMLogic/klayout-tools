@@ -434,13 +434,10 @@ PDK's own model branches are derived for you, and only when you did not set
 them yourself:
 
 - `FUNCTIONAL` is defined (with no value) **only when `options.sdf` is
-  absent** -- the zero-delay behavioural branch is the right choice for a
-  pre-CTS `klt synthesize` netlist with no SDF to annotate. With
-  `options.sdf` present nothing is derived: the request must elaborate the
-  *timing* branch, and a derived `FUNCTIONAL` there would be exactly the
-  `options.sdf` + `FUNCTIONAL` contradiction this verb rejects (see "SDF
-  back-annotation") -- so a `pdk` block with an SDF can never trip that
-  rejection by itself.
+  omitted or `null`**. This selects the zero-delay behavioural branch for
+  a pre-CTS `klt synthesize` netlist without SDF. A request with SDF
+  elaborates the *timing* branch. See "SDF back-annotation" for the
+  rules on combining SDF with caller defines.
 - `USE_POWER_PINS` is **never** derived: a `klt synthesize` netlist carries
   no power pins, so defining it is an elaboration error. It stays purely a
   caller choice (a layout-extracted netlist with supply pins is exactly the
@@ -1617,15 +1614,15 @@ block alone, so the flags without a block are a request error rather than a
 silently-ignored flag. A relative `pdk.root` resolves against the request
 file's own directory, the same base every other path field uses.
 
-**Three named refusals (exit 1, each with its own `error.code`)** — this
-verb refuses rather than guesses:
+The verb reports four named refusals, each with exit 1 and its own
+`error.code`.
 
 - `pdk_no_verilog_view` — the resolved install's library ships no
   `verilog/` view at all (real case: gf180mcuD's `gf180mcu_osu_sc_gp12t3v3`,
   which has `lef`/`lib` and no simulation models), the library is absent
-  from the install, or the install ships no `libs_ref` asset. The closely
-  related `pdk_no_cell_models` names a `verilog/` view that exists but ships
-  no `<cell_library>.v`.
+  from the install, or the install ships no `libs_ref` asset.
+- `pdk_no_cell_models` — the `verilog/` view exists but ships no
+  `<cell_library>.v`.
 - `pdk_ambiguous_install` — the install search found the variant under more
   than one root (the `~/.ciel` vs `~/.volare` case) and no explicit
   `root`/`--pdk-root` pinned one. Resolving cell models from a *different*

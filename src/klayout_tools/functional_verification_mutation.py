@@ -86,7 +86,11 @@ def _reject_pdk_with_mutations(
     alone -- every mutant would elaborate without the std-cell models the
     baseline tested, the same divergence the from_synthesize refusal above
     names."""
-    if "pdk" in request_doc or pdk_variant is not None or pdk_root is not None:
+    if (
+        request_doc.get("pdk") is not None
+        or pdk_variant is not None
+        or pdk_root is not None
+    ):
         raise _fv.FunctionalVerificationError(
             "a pdk input (request.pdk / --pdk / --pdk-root) cannot currently "
             "be combined with --mutations -- not yet designed (the baseline "

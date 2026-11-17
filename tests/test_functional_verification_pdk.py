@@ -449,6 +449,7 @@ def test_derive_pdk_defines_unit_cases():
     assert derive_pdk_defines(pdk_input, None) == {"FUNCTIONAL": None}
     assert derive_pdk_defines(pdk_input, {}) == {"FUNCTIONAL": None}
     assert derive_pdk_defines(pdk_input, {"random_seed": 1}) == {"FUNCTIONAL": None}
+    assert derive_pdk_defines(pdk_input, {"sdf": None}) == {"FUNCTIONAL": None}
     assert derive_pdk_defines(pdk_input, {"sdf": {"file": "x.sdf"}}) == {}
 
 
@@ -494,3 +495,4 @@ def test_pdk_input_with_mutations_is_refused(work):
     with pytest.raises(fv.FunctionalVerificationError, match="cannot currently"):
         _reject_pdk_with_mutations({}, "sky130A", None)
     _reject_pdk_with_mutations({}, None, None)  # no pdk input: unchanged
+    _reject_pdk_with_mutations({"pdk": None}, None, None)

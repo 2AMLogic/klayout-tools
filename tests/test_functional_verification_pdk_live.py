@@ -5,8 +5,8 @@ verdict as the hand-written-paths form.
 
 Split from ``tests/test_functional_verification_pdk.py`` for the 500-line
 per-file size ratchet (that file carries the offline request-surface
-coverage; this one needs a real install + ``iverilog`` + cocotb and skips
-everywhere they are absent -- CI's simulator leg runs it).
+coverage). This test requires a real install, ``iverilog``, and cocotb.
+It skips in CI, where the sky130 fixture supplies only Liberty data.
 """
 
 from __future__ import annotations

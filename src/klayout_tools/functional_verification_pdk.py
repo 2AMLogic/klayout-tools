@@ -14,13 +14,11 @@ moving ``_resolve_sources`` out whole):
    issue #5673 constraint). No pdk input at all returns ``None``, and every
    consumer keyed off ``None`` is byte-identical to before this issue.
 2. **Derive the compile-time defines** the resolved models need:
-   ``FUNCTIONAL`` (the zero-delay branch) only when no ``options.sdf`` is
-   present, ``USE_POWER_PINS`` never (a ``klt synthesize`` netlist has no
+   ``FUNCTIONAL`` (the zero-delay branch) when ``options.sdf`` is omitted
+   or null, ``USE_POWER_PINS`` never (a ``klt synthesize`` netlist has no
    power pins). Caller ``options.defines`` win at the merge point, and the
-   derived ``FUNCTIONAL`` exists only when ``options.sdf`` is absent, so it
-   can never trip
-   :func:`functional_verification_sdf._reject_sdf_with_functional_models`
-   -- this feature cannot manufacture the contradiction that check rejects.
+   derived ``FUNCTIONAL`` can never trip
+   :func:`functional_verification_sdf._reject_sdf_with_functional_models`.
 3. **Cross-check the requested ``cell_library``** against the synthesize
    report's ``provenance.deck.name`` prefix (``<cell_library>__<corner>``)
    when ``options.from_synthesize`` is also present -- resolving models for a
@@ -134,9 +132,9 @@ def derive_pdk_defines(
 
     ``FUNCTIONAL`` selects a PDK's zero-delay behavioural branch -- the right
     choice for a pre-CTS ``klt synthesize`` netlist with no SDF -- so it is
-    derived only when ``options.sdf`` is absent: with an SDF the request must
-    elaborate the *timing* branch instead, and a derived ``FUNCTIONAL`` there
-    would be exactly the ``options.sdf`` + ``FUNCTIONAL`` contradiction
+    derived only when ``options.sdf`` is omitted or null. An SDF request
+    elaborates the *timing* branch. Deriving ``FUNCTIONAL`` there would
+    create the ``options.sdf`` + ``FUNCTIONAL`` contradiction
     :func:`functional_verification_sdf._reject_sdf_with_functional_models`
     exists to reject. ``USE_POWER_PINS`` is never derived (a ``klt
     synthesize`` netlist has no power pins; defining it is an elaboration
@@ -146,7 +144,7 @@ def derive_pdk_defines(
     """
     if pdk_input is None:
         return {}
-    if isinstance(options, dict) and "sdf" in options:
+    if isinstance(options, dict) and options.get("sdf") is not None:
         return {}
     return {"FUNCTIONAL": None}
 
