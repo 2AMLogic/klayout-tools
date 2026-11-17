@@ -15,7 +15,7 @@ from collections.abc import Callable
 from klayout_tools._paths import _resolve_relative
 
 #: Mirrors ``posixpath.expandvars``'s variable syntax (``$NAME`` / ``${NAME}``).
-_ENV_VAR_REF_RE = re.compile(r"\$(\w+|\{[^}]*\})")
+_ENV_VAR_REF_RE = re.compile(r"\$(\w+|\{[^}]*\})", re.ASCII)
 
 
 def _unset_env_vars(path: str) -> list[str]:

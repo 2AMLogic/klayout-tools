@@ -123,6 +123,21 @@ def test_dollar_not_a_variable_reference_is_literal(tmp_path):
     ) == str(tmp_path / "a$" / "b")
 
 
+def test_non_ascii_suffix_is_not_part_of_the_var_name(tmp_path, monkeypatch):
+    # ``posixpath.expandvars`` compiles its pattern with ``re.ASCII``: in
+    # ``$café`` the reference is ``caf`` and ``é`` is literal text. The
+    # mirror must agree, or it false-rejects paths expandvars would resolve.
+    monkeypatch.setenv("caf", "/tmp/caf")
+    monkeypatch.delenv("café", raising=False)
+    assert _unset_env_vars("$café/x.v") == []
+    assert (
+        resolve_request_path(
+            "$café/x.v", str(tmp_path), error_cls=ValueError, field="f"
+        )
+        == "/tmp/café/x.v"
+    )
+
+
 def test_multiple_unset_vars_are_all_named(tmp_path, monkeypatch):
     monkeypatch.delenv("KLT_A", raising=False)
     monkeypatch.delenv("KLT_B", raising=False)
