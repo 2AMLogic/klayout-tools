@@ -74,6 +74,7 @@ def _staged_ids(spec):
 
 
 def test_split_submits_balanced_jobs_and_merges_in_order(tmp_path, monkeypatch):
+    (tmp_path / ".git").mkdir()
     fleet = _install_and_fleet(monkeypatch)
     report = _run(tmp_path, _request(tmp_path), max_units_per_job=2)
     sizes = sorted(len(_staged_ids(s)) for s in fleet.specs.values())
@@ -82,6 +83,9 @@ def test_split_submits_balanced_jobs_and_merges_in_order(tmp_path, monkeypatch):
     assert report["unit_count"] == 5 and report["status"] == "pass"
     remote = report["environment"]["remote"]
     assert remote["split"] and remote["shard_count"] == 3
+    # Issue #5542: inside a git repo the deck split's shard_map is emitted
+    # repo-relative, like every other shard_map emission.
+    assert remote["shard_map"] == "out/batch-shards.json"
     doc = json.load(open(os.path.join(tmp_path / "out", sb.BATCH_SHARDS_FILENAME)))
     assert len(doc["shards"]) == 3 and doc["deck_slices"][0] == ["d0", "d1"]
 

@@ -32,6 +32,9 @@
 
 set -euo pipefail
 
+# shellcheck source=scripts/_install_common.sh
+source "$(dirname "${BASH_SOURCE[0]}")/_install_common.sh"
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEST_ROOT="$REPO_ROOT/pdks/cell-netlists"
 MARKER="$DEST_ROOT/.fetched-manifest-version"
@@ -47,17 +50,6 @@ if [[ -f "$MARKER" && $FORCE -eq 0 ]]; then
         exit 0
     fi
 fi
-
-sha256_of() {
-    if command -v shasum &>/dev/null; then
-        shasum -a 256 "$1" | awk '{print $1}'
-    elif command -v sha256sum &>/dev/null; then
-        sha256sum "$1" | awk '{print $1}'
-    else
-        echo "error: no sha256 command found (need shasum or sha256sum)" >&2
-        return 1
-    fi
-}
 
 # Pinned commit SHAs -- bump alongside the manifest below (URL + sha256) in
 # the same change when refreshing; the fetch fails closed on any mismatch.
