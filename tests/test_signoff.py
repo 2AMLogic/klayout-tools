@@ -28,6 +28,7 @@ from pathlib import Path
 import pytest
 
 from helpers.subprocess_fakes import fake_completed
+from helpers.tool_probes import SKIP_NO_NGSPICE as requires_ngspice
 from klayout_tools import signoff as signoff_module
 from klayout_tools import signoff_attest as attest_module
 from klayout_tools._provenance import layout_geometry_digest
@@ -65,13 +66,6 @@ pytestmark = pytest.mark.usefixtures("real_build_identity_git")
 #: tests below (issue #825) to locate `examples/design-pipeline/`'s
 #: already-passing artifacts without depending on pytest's cwd.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-
-# Match the real-engine tier in test_sim.py and test_pex.py. CI installs
-# ngspice; the local check:ci command deliberately opts out of this tier.
-requires_ngspice = pytest.mark.skipif(
-    shutil.which("ngspice") is None or os.environ.get("KLT_SKIP_NGSPICE_TESTS") == "1",
-    reason="ngspice is unavailable or disabled by KLT_SKIP_NGSPICE_TESTS=1",
-)
 
 DRC_CLEAN_ENVELOPE = {
     "schema_version": 1,

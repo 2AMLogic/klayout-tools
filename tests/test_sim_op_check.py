@@ -7,23 +7,17 @@ and skip without it (like `tests/test_sim_nodeset.py`).
 from __future__ import annotations
 
 import json
-import os
-import shutil
 from pathlib import Path
 
 import pytest
 
+from helpers.tool_probes import SKIP_NO_NGSPICE as _SKIP_NO_NGSPICE
 from klayout_tools import sim, sim_op_check
 from klayout_tools.sim_errors import SimError
 
 OFFHOST = ("remote", "batch")
 
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
-
-HAVE_NGSPICE = shutil.which("ngspice") is not None and (
-    os.environ.get("KLT_SKIP_NGSPICE_TESTS") != "1"
-)
-_SKIP_NO_NGSPICE = pytest.mark.skipif(not HAVE_NGSPICE, reason="no ngspice")
 
 #: A 0..1 V bistable latch: stable at (a, b) = (0, 1) or (1, 0); unstable
 #: mid-rail solution at 0.5 V.
