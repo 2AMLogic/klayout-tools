@@ -2150,6 +2150,29 @@ removed from `PATH` when klt itself runs inside a venv (`uvx`, pipx), so a bare
 `python3` in an `argv` is the repository's interpreter, not klt's. Outside a
 venv the environment is unchanged. The same applies to item 10 commands.
 
+The consequence: **a module installed into the tool virtualenv is not
+importable by a bare `python3` in a declared command.** The documented
+`uvx --with <module> --from "klayout-tools==X.Y.Z" klt signoff --attest …` form
+installs `<module>` into the uvx venv, and that venv's `bin` is exactly the
+directory removed, so `["python3", "-c", "import <module>"]` runs the host
+interpreter and fails:
+
+```text
+[FAIL] audit <name>: python3 -c import <module> (exit 1)
+    | ModuleNotFoundError: No module named '<module>'
+```
+
+This is deliberate (#4192, #5860, #5565), not a bug, and no inventory field
+or flag overrides it. Only `klt` itself is ever re-exposed from that directory
+(#5565); `python3`, `pip` and every other name stay stripped. Name the
+interpreter that has the module instead — declare an **absolute interpreter
+path** in `argv` (e.g. `["/abs/path/to/venv/bin/python", "tools/check.py",
+"layout/top.gds"]`), or provision the module in an environment the declared
+command's interpreter already sees. Verified 2026-11-17 on klt 0.9.x
+(Linux): with `uvx --with tomli_w --from klayout-tools klt signoff --attest 2 …`,
+`["python3", "-c", "import tomli_w"]` fails as above, and the same check with
+the absolute path of a separate venv that has `tomli_w` passes.
+
 ##### Minting above the grading pin
 
 The item-2 mint path first ships in `klt` 0.9.0 (PyPI), so a consumer that
