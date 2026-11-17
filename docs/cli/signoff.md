@@ -126,8 +126,11 @@ klt signoff --attest {1,8,9,10} --inventory <file> --check <committed-envelope> 
   or `3`) and only if its bytes changed, so re-rendering an unchanged tree
   leaves the committed record untouched and a failed render can never
   truncate a previous good one. The write is atomic (temp file +
-  rename). Refused without `--attest`/`--manifest`/`--fleet`, and together
-  with `--check`.
+  rename). The bytes are always plain JSON, whatever the file's suffix:
+  unlike `drc`/`lvs`/`sim`/`pex` `-o` (issue #6041), a `.gz` name is not
+  compressed, and `--check` reads these envelopes as plain JSON only —
+  do not compress one by hand. Refused without
+  `--attest`/`--manifest`/`--fleet`, and together with `--check`.
 - `--skip-local-only` — with `--attest` and `-o`: do not run `local_only`
   commands; carry their committed outcome from the existing `-o` envelope
   and recompute everything else (issue #5209). See "Refreshing on a host
@@ -1071,7 +1074,10 @@ the report's JSON envelope to a committed file — no stdout redirect, whose
 truncate-then-write would zero a previous good record on any failed run.
 The file is written only after a successful render (exit `0` for T1, `3`
 below T1 — both are verdicts of record), only if its bytes changed, and
-atomically; it always receives JSON, whatever `--format` says. The same
+atomically; it always receives JSON, whatever `--format` says. Those bytes
+are plain JSON whatever the file's suffix — a `.gz` name is not compressed,
+unlike `drc`/`lvs`/`sim`/`pex` `-o` (issue #6041), and `--check` reads the
+committed report as plain JSON only. The same
 `-o` works with `--fleet` roll-ups. Re-rendering an unchanged tree leaves
 the committed file untouched, so a make-style pipeline can re-run freely:
 
@@ -2094,7 +2100,8 @@ an inventory the author did not write.
 | | `citations`: `{row: [envelope path, ...]}` | yes | keys must be declared rows; a declared row with no entry fails its `citation` check |
 | | `envelope_checks`: `{envelope path: command}` | yes, one per cited envelope | each command exits `0` (`command`, role `freshness`) — e.g. the cited verb's own `--check` |
 | | `corners`: list of names, with `metrics`: `{corner: {fmax\|area\|power: {"envelope": path, "field": "dotted.path"}}}` | digital partitions only (both or neither) | for every corner and each of `area`, `fmax`, `power`, the named field of the named cited envelope is a finite number (`metric`, role `digital`; the value is recorded). A missing binding or non-numeric field is a **failed check**. Digit segments index lists, e.g. `result.0.fmax_mhz`. |
-| **9** Testbenches shipped | `testbenches`: list of paths, or `{"path", "cold_start"}` objects (mixing is fine; the object form first ships in 0.9.0) | yes, non-empty | each file exists (`present`, role `testbench`) |
+| **9** Testbenches shipped | `testbenches`: list of paths, or `{"path", "cold_start", "sources"}` objects (mixing is fine; the object form first ships in 0.9.0, `sources` in 0.9.3) | yes, non-empty | each file exists (`present`, role `testbench`) |
+| | `sources` (on a `{"path", ...}` entry): non-empty list of paths | no | each file exists (`present`, role `source`, plus `testbenches: [<bench path>, ...]` — the sorted benches that declared it). The same source named by several benches is hashed once and lists all of them; a path declared both as a bench and as a source is refused (exit `1` — its bytes are already pinned as the bench). *First ships in 0.9.3.* |
 | | `cold_start`: command | yes, unless **every** testbench entry carries its own `cold_start` | exits `0` (`command`, role `cold_start`). A per-bench `cold_start` is a command too and yields a `command` check with `testbench: "<path>"`, so a failure names its bench. When both forms are present, the top-level command runs as well. A cold start (either form) may add `documented_argv` — the full reproducing invocation, recorded and never run; see "A cold start that only validates its bench" below. *First ships in the first release after `v0.9.2`.* |
 | | `unbenched_rows`: list of `{"row": "<id>", "issue": <positive int>}` | no | one `unbenched_row` check per entry (role `row`), **passing**: the gap and its owner issue are visible to the grader, not refused. Empty/duplicate `row` or a non-positive `issue` is refused (exit `1`). Whether bench-less rows should fail T1 item 9 is a grading-policy decision this producer does not make. *First ships in 0.9.0; 0.8.0 refuses `unbenched_rows` as an unknown field.* |
 | | `pins`: `{"pdk": {"name", "revision"} \| {"none": true, "reason"}, "tools": {<tool>: <version>}}` | checked, not structurally required | `pdk.name` and `pdk.revision` non-empty, or, for a partition whose cold start consumes no PDK, the explicit no-PDK form `{"none": true, "reason": "<non-empty>"}` (`pin`, role `pdk`; `none` mixed with `name`/`revision`, or with an empty `reason`, fails; an absent `pdk` still fails -- silence never means "no PDK"); `tools` a non-empty map of non-empty versions (`pin`, role `tools`). A missing pin is a **failed check**, not a malformed inventory. |
@@ -2315,6 +2322,37 @@ Each command run under `--attest 9` prints `attest item 9: running <role> [<benc
 and a `... ok|FAILED|skipped in N.Ns` line to **stderr**, regardless of
 `--format`; stdout (and so the JSON envelope) is unchanged and carries no
 timing, keeping `--check` drift comparison reproducible.
+
+**A bench's implementation modules: `sources` (first ships in 0.9.3).** A
+bench whose behaviour lives across an entry point plus the modules it imports
+declares those modules as `sources`, so they are hashed without being
+declared as benches in their own right:
+
+```json
+{
+  "testbenches": [
+    {"path": "tb/ota_ac.spice", "cold_start": {"argv": ["make", "ac"]},
+     "sources": ["tb/lib/analysers.py", "tb/lib/helpers.py"]}
+  ]
+}
+```
+
+Each unique source yields one `present` check with `role: "source"`, carrying
+`testbenches: [<bench path>, ...]` — the sorted benches that declared it — so
+the bench count stays the number of declared benches and an entry point stays
+distinguishable from a library it pulls in. The same source named by several
+benches is hashed once and lists all of them; a path declared both as a bench
+and as a source is refused (exit `1`): its bytes are already pinned as the
+bench, so listing it twice would say nothing new. Sources are declared by the
+author, never inferred by walking imports. Text output names the bench on a
+source line, e.g. `[PASS] source tb/lib/helpers.py present (bench:
+tb/ota_ac.spice)`.
+
+**Migration:** a repo that today lists its helper modules as extra
+`testbenches` entries and moves them under `sources` changes its inventory, so
+the envelope must be re-attested and re-committed — and any manifest citing
+that envelope re-pinned. That is the inventory actually changing, not a
+regression.
 
 **A cold start that only validates its bench: `documented_argv` (issue
 #5463).** When a bench's claimed numbers come from a large corner grid or a
@@ -3601,7 +3639,12 @@ new. Outcomes:
 - all pass but a declared row is uncovered or a `gap` -> `unmet` /
   `partial_coverage`, with `detail.uncovered_rows`, `detail.failed_rows` and
   `detail.declared_gaps` (`[{id, gap}]`) reported separately -- a gap is never
-  covered;
+  covered, and it keeps blocking `tier: "T1"` (issue #5858, operator ruling
+  2026-11-17). A gap is not a permanent state: it records work not yet done, so
+  it should name the open issue for the klayout-tools feature or EDA project
+  that would close it, and a gap with no such link is a signoff finding. A row
+  no tool could ever evidence is a different case (closer to `not_applicable`)
+  and goes back to the operator;
 - `spec_rows` declared but **no evidence entry** for the item (issue #4190)
   -> graded as a zero-citation set: `unmet` / `partial_coverage` with the same
   `detail` keys (every non-gap row in `uncovered_rows`, gaps in
@@ -3789,7 +3832,8 @@ Item 6 reuses the item-5 list form and `spec_rows` schema above, with
 
 - every declared row covered by a passing citation and all rows ratified ->
   `met` (`row_coverage` present);
-- otherwise, with no failing citation -> `unmet` / `partial_coverage`; the
+- otherwise, with no failing citation -> `unmet` / `partial_coverage` (a
+  declared gap blocks `tier: "T1"` here as for item 5, issue #5858); the
   `detail` lists `uncovered_rows`, `declared_gaps` (`[{id, gap}]`) and
   `unratified_rows` (every `ratified: false` row, covered or not -- evidence
   against a proposed limit is provisional) separately;
@@ -4632,7 +4676,8 @@ actually ran and failed):
 | `"invalid_pointer"`       | yes | **(issue #2342)** The evidence entry carried a `"pointer"` (an RFC 6901 JSON Pointer naming where inside the cited document the envelope lives) that did not resolve to a JSON object: malformed syntax (no leading `/`, a `~` followed by neither `0` nor `1`), a path the document does not contain, or a value that is not an object (a string, number, array, or `null` — none of which can ever be a `klt` envelope). Deliberately distinct from `"unrecognized_envelope"`: nothing was ever classified, so this says nothing about the cited bytes, and the remedy is to fix the pointer rather than the citation. See "Citing an envelope nested inside a composite report" above. |
 | `"tier_not_supported"`    | yes | A T2-T4 ladder row — this repository has no mechanism to run a T2+ check at all. |
 | `"ungradeable_by_build"`  | yes | **(issue #2176)** The manifest cited evidence for an item this build has no grading rules for at all (`graded_by_build: false` — an item only the `--tiers-doc`/`$KLT_TIERS_DOC` copy of the doc lists). Not a statement about the cited artifact, which is never even resolved: the *build* is the gap, so the fix is a newer `klt` (or grading against the doc this one ships), not a different citation. Without it, such a citation fell through to the unrestricted grading path and could render `met` from rules that do not exist in the running build. See "An overridden doc can outrun the build" above. |
-| `"command_failed"`        | yes | A command-backed entry's subprocess could not be launched, timed out, or exited nonzero — distinct from `"check_errored"` below, which requires the command to have actually produced a readable `klt` `error` envelope. |
+| `"command_timeout"`       | yes | **(issue #5763)** A command-backed entry's subprocess ran but was killed by the fixed evidence-timeout cap (`_COMMAND_EVIDENCE_TIMEOUT_S`, 1800 s) — the bound, not the check, produced the `unmet` grade, so a hung gate is distinguishable in the record from a failing one. |
+| `"command_failed"`        | yes | A command-backed entry's subprocess could not be launched, or exited nonzero — a timeout is `"command_timeout"` above. Distinct from `"check_errored"` below, which requires the command to have actually produced a readable `klt` `error` envelope. |
 | `"check_errored"`         | no  | The evidence resolved to a `klt` `error` envelope — the underlying command itself failed to run to completion. |
 | `"check_failed"`          | no  | The evidence resolved to a recognised, non-error envelope, but that check's own verdict did not pass (e.g. DRC violations, an LVS mismatch, a failed sim corner). For item 11's compound citation this covers a failing `lvs` part beside an ERC half that proves nothing about power delivery either; a failing `lvs` part beside a *complete, continuous* supply spec renders `"lvs_did_not_pass"` below instead (issue #2495). |
 | `"stale_evidence"`        | no  | The check passed, but its `provenance.input.content_hash` did not match the manifest's pinned `content_hash` — it ran against a different layout revision than the one being claimed. **Item 11 only** (issue #2496): also rendered when the cited `erc` part's own **spec** document — read separately, since the envelope echoes the spec's path but not its declarations — no longer matches that run's own `provenance.spec.content_hash` (issue #2049): the spec was edited after `klt erc` ran, so the declarations item 11 is grading are not the ones the cited run actually checked. **Items 1, 2, 9 and 10, artifact-anchored `generic` citations** (issue #2718): also rendered when the pin matches the envelope but the audited artifact itself no longer re-hashes to that value (`input_verified: false`), meaning the artifact was edited after it was attested. |
@@ -5258,10 +5303,12 @@ $ klt signoff --manifest manifest.json --format json | jq '.items[] | select(.id
 The citation's `file` is `null` (no static file backs a command-backed
 entry) and its `command` names exactly what ran; `exit_status: 0` here is
 the subprocess's actually-observed return code, not inferred from a
-readable file the way a file-backed citation's `exit_status: 0` is. A
-broken or hanging gate command renders `"unmet"` with `reason:
-"command_failed"` (a launch failure, a timeout, or a nonzero exit) instead
-of silently reading like a skipped check or a fabricated pass.
+readable file the way a file-backed citation's `exit_status: 0` is. A broken
+or hanging gate command renders `"unmet"` — `reason: "command_timeout"`
+when the subprocess was killed by the fixed evidence-timeout cap, `reason:
+"command_failed"` when it could not be launched or exited nonzero (issue
+#5763) — instead of silently reading like a skipped check or a fabricated
+pass.
 
 ## Worked example: binding the statistical-evidence item to `klt yield`
 

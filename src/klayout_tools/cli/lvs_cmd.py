@@ -203,16 +203,14 @@ def _print_excluded_pins(power: dict) -> None:
 
 def _print_text(report: dict) -> None:
     # `layout` is the `{path, scope}` object
-    # `env_provenance.repo_relative_path` defines (issue #2659) -- rendered
-    # through the same courtesy helper `klt sim`/`klt pex` use, so the
-    # absolute path is never printed even in text mode. `reference` is still
-    # the request's own verbatim echo (a plain string) and prints as-is.
+    # `env_provenance.repo_relative_path` defines (issue #2659, extended to
+    # the klayout-runset engine by issue #5666) -- rendered through the same
+    # courtesy helper `klt sim`/`klt pex` use, so the absolute path is never
+    # printed even in text mode. `reference` is still the runset request's
+    # own verbatim echo (a plain string); `render_path_field` passes such a
+    # string through verbatim (issue #5666), so no per-field guard remains.
     print(f"layout: {render_path_field(report['layout'])}")
-    # Issue #4984: an object since schema_version 3; a pre-v3 or runset
-    # report still carries the bare request string.
-    reference = report["reference"]
-    shown = reference if isinstance(reference, str) else render_path_field(reference)
-    print(f"reference: {shown}")
+    print(f"reference: {render_path_field(report['reference'])}")
     print(f"top: {report['top']}")
     # Issue #1205: only printed when the two sides resolved to different top
     # circuits -- the ordinary compare's output is unchanged, but a negative

@@ -117,6 +117,24 @@ def test_cli_manifest_output_is_not_rewritten_when_unchanged(tmp_path, capsys):
     capsys.readouterr()
 
 
+def test_cli_manifest_output_with_gz_suffix_writes_plain_json(tmp_path, capsys):
+    """AC (issue #6041): `-o out.json.gz` writes plain JSON bytes, not a
+    gzip stream -- the suffix is ignored, unlike `drc`/`lvs`/`sim`/`pex`
+    `-o`; the exit code stays the verdict's own and the file parses as the
+    envelope (which is also the only form `--check` reads)."""
+    manifest_path = _write(tmp_path, "manifest.json", _manifest())
+    output = tmp_path / "tier-report.json.gz"
+
+    exit_code = main(["signoff", "--manifest", manifest_path, "-o", str(output)])
+
+    assert exit_code == 3
+    capsys.readouterr()
+    raw = output.read_bytes()
+    assert raw.startswith(b"{")  # plain JSON, not the gzip magic b"\x1f\x8b"
+    assert not raw.startswith(b"\x1f\x8b")
+    assert json.loads(raw)["schema_version"] == 1
+
+
 @pytest.mark.parametrize(
     "argv",
     [
