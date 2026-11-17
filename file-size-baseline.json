@@ -172,8 +172,8 @@
       "lines": 1010
     },
     {
-      "path": "src/klayout_tools/artifact_store.py",
-      "lines": 1025
+      "path": "src/klayout_tools/artifact_verify.py",
+      "lines": 745
     },
     {
       "path": "src/klayout_tools/characterize.py",
