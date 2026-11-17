@@ -65,6 +65,54 @@ def test_missing_unreleased_heading_is_an_error() -> None:
         rp.add_changelog_heading("# Changelog\n", "0.9.0", "2026-11-09")
 
 
+EMPTY_CHANGELOG = "# Changelog\n\n## Unreleased\n\n## 0.8.0 (2026-10-24)\n\n- old\n"
+
+
+def test_prepare_refuses_empty_unreleased_section(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    (repo / "CHANGELOG.md").write_text(EMPTY_CHANGELOG)
+    with pytest.raises(rp.PrepError, match="nothing to release"):
+        rp.prepare(repo, None, "2026-11-09")
+    # The refusal happens before any write: the tree is untouched.
+    assert (repo / "pyproject.toml").read_text() == PYPROJECT
+    assert (repo / "CHANGELOG.md").read_text() == EMPTY_CHANGELOG
+
+
+def test_prepare_refuses_whitespace_only_unreleased_section(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    (repo / "CHANGELOG.md").write_text(
+        "# Changelog\n\n## Unreleased\n\n   \n\n## 0.8.0 (2026-10-24)\n"
+    )
+    with pytest.raises(rp.PrepError, match="nothing to release"):
+        rp.prepare(repo, None, "2026-11-09")
+    assert (repo / "pyproject.toml").read_text() == PYPROJECT
+
+
+def test_add_changelog_heading_refuses_empty_section_at_eof() -> None:
+    text = "# Changelog\n\n## Unreleased\n"
+    with pytest.raises(rp.PrepError, match="nothing to release"):
+        rp.add_changelog_heading(text, "0.9.0", "2026-11-09")
+
+
+def test_rerun_after_release_cut_skips_empty_section_gate(tmp_path: Path) -> None:
+    # Post-release state: the cut left '## Unreleased' empty with the
+    # '## X.Y.Z (' heading present; an idempotent re-run must not trip the gate.
+    repo = _repo(tmp_path)
+    rp.prepare(repo, None, "2026-11-09")
+    log = (repo / "CHANGELOG.md").read_text()
+    assert log.startswith("# Changelog\n\n## Unreleased\n\n## 0.9.0 (2026-11-09)")
+    rp.prepare(repo, "0.9.0", "2026-11-10")  # no raise
+    snapshot = {p.name: p.read_text() for p in repo.rglob("*") if p.is_file()}
+    assert snapshot == {p.name: p.read_text() for p in repo.rglob("*") if p.is_file()}
+
+
+def test_cli_prepare_empty_section_exits_2(tmp_path: Path, capsys) -> None:
+    repo = _repo(tmp_path)
+    (repo / "CHANGELOG.md").write_text(EMPTY_CHANGELOG)
+    assert rp.main(["--repo", str(repo), "prepare", "--date", "2026-11-09"]) == 2
+    assert "nothing to release" in capsys.readouterr().err
+
+
 def test_prepare_refuses_stale_anchor(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     (repo / "docs/cli/signoff.md").write_text(
