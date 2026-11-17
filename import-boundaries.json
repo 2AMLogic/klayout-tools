@@ -723,6 +723,7 @@
         "klayout_tools.signoff_attest_carry",
         "klayout_tools.signoff_attest_drift",
         "klayout_tools.signoff_attest_input",
+        "klayout_tools.signoff_attest_item2_inputs",
         "klayout_tools.signoff_attest_item9",
         "klayout_tools.signoff_attest_live",
         "klayout_tools.signoff_attest_stream",

@@ -36,7 +36,7 @@ from .signoff_attest import (
     _validate_header,
 )
 from .signoff_attest_drift import drift_result
-from .signoff_attest_inputs import (
+from .signoff_attest_item2_inputs import (
     bound_input,
     input_checks,
     validated_checks,
