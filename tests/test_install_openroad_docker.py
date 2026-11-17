@@ -104,3 +104,10 @@ def test_wrapper_trailing_slash_tmpdir_no_duplicate(tmp_path: Path) -> None:
     mounts = _mounts(argv)
     assert "/tmp/:/tmp/" in mounts
     assert "/tmp:/tmp" not in mounts
+
+
+def test_wrapper_multi_trailing_slash_tmpdir_no_duplicate(tmp_path: Path) -> None:
+    argv = _install(tmp_path, {"TMPDIR": "/tmp//"})
+    mounts = _mounts(argv)
+    assert "/tmp//:/tmp//" in mounts
+    assert "/tmp:/tmp" not in mounts

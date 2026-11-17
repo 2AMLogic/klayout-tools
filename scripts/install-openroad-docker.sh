@@ -62,9 +62,9 @@
 # `[ERROR STA-0340] cannot open '<path>'` for a file the caller can still
 # `cat` on the host (measured, issue #5878). So when `$TMPDIR` differs from
 # `/tmp` the wrapper keeps `/tmp` mounted as well (skipped when they are
-# equal -- docker rejects a duplicate mount point; a single trailing slash
-# on `$TMPDIR` is stripped before the comparison so `/tmp/` does not
-# duplicate it either).
+# equal -- docker rejects a duplicate mount point; all trailing slashes
+# on `$TMPDIR` are stripped before the comparison so `/tmp/` or `/tmp//`
+# does not duplicate it either).
 #
 # The wrapper forwards a narrow allowlist of the caller's environment into the
 # container (issue #3821): `PLATFORM_DIR` (the ORFS idiom, read by Tcl as
@@ -159,9 +159,14 @@ MOUNTS+=(-v "\$TMPDIR_MOUNT:\$TMPDIR_MOUNT")
 # with any other TMPDIR exported, an input under /tmp failed with an opaque
 # "[ERROR STA-0340] cannot open" for a file the caller could read on the
 # host). Keep /tmp mounted too unless TMPDIR already resolves to it --
-# docker rejects a duplicate mount point, and the trailing-slash strip keeps
-# TMPDIR=/tmp/ from producing one.
-if [[ "\${TMPDIR_MOUNT%/}" != "/tmp" ]]; then
+# docker rejects a duplicate mount point, and all trailing slashes are
+# stripped from the comparison so TMPDIR=/tmp/ or /tmp// does not
+# produce one.
+TMPDIR_CMP="\$TMPDIR_MOUNT"
+while [[ "\$TMPDIR_CMP" == */ && "\$TMPDIR_CMP" != / ]]; do
+    TMPDIR_CMP="\${TMPDIR_CMP%/}"
+done
+if [[ "\$TMPDIR_CMP" != "/tmp" ]]; then
     MOUNTS+=(-v "/tmp:/tmp")
 fi
 # Forward PLATFORM_DIR and OPENROAD_* by name (issue #3821).
