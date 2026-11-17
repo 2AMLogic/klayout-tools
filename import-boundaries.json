@@ -528,6 +528,7 @@
         "klayout_tools.netlist_normalize_scan",
         "klayout_tools.netlist_paths",
         "klayout_tools.netlist_pdk",
+        "klayout_tools.netlist_diff",
         "klayout_tools.netlist_port_order"
       ]
     },
@@ -599,6 +600,7 @@
         "klayout_tools.place_and_route",
         "klayout_tools.place_and_route_clock",
         "klayout_tools.place_and_route_batch",
+        "klayout_tools.place_and_route_batch_single",
         "klayout_tools.place_and_route_def_drcfill",
         "klayout_tools.place_and_route_gds_merge",
         "klayout_tools.place_and_route_groups",
@@ -708,6 +710,7 @@
         "klayout_tools._report_verify_exclude",
         "klayout_tools._report_verify_hints",
         "klayout_tools._spice_number",
+        "klayout_tools._spice_text",
         "klayout_tools._spice_tokens",
         "klayout_tools._text",
         "klayout_tools._unionfind",
@@ -943,6 +946,7 @@
         "klayout_tools._sta_sdc_check",
         "klayout_tools.post_route_sta",
         "klayout_tools.post_route_sta_electrical",
+        "klayout_tools.post_route_sta_instance_paths",
         "klayout_tools.post_route_sta_path_groups"
       ]
     },
