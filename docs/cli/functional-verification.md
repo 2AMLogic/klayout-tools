@@ -881,10 +881,18 @@ That entry is shape (b) of the bit-selected-port `INTERCONNECT` failure
 neither the `klt_sdf_safe.sdf`/`klt_sdf_deferred_bus_ports.sdf` split nor the
 alias-map normalization above resolves it, and it costs one `SDF ERROR:
 <file>:<line>: Could not find intermodpath!`. Verified live against Icarus
-13.0: the failure needs the port bit's net to carry **more than one**
-`INTERCONNECT` entry — a bus-port net whose only entry is the diode's own
-annotates cleanly, but a real router inserts one diode per violating pin, so
-a multi-load input bit collects several and one of them fails. `klt`
+13.0, re-measured with one-variable-per-case controls in issue #5705: the
+deciding variable is the port bit's net's **physical fanout**, not the
+`INTERCONNECT` entry count — `$sdf_annotate` creates at most **one**
+interconnect modpath per bit-selected top-level port net, for the
+destination of the **last-declared instance on that net**, and rejects
+every other load's entry. A bus-port net whose only load is the diode's
+annotates cleanly (fanout 1), but a real router inserts one diode per
+violating pin, so a multi-load input bit collects several and the
+non-survivors fail. (An earlier revision of this paragraph read the
+precondition as needing **more than one** entry; that holds for this
+fixture by declaration order — a lone entry on a fanout-above-1 net fails
+too when it targets a non-last-declared instance.) `klt`
 **removes** those entries from the SDF text it hands `$sdf_annotate` and
 reports the count as its own `dropped` class, distinct from the alias-port
 one:
@@ -895,9 +903,11 @@ one:
 }
 ```
 
-The justification is that the destination is structurally incapable of
-carrying a modpath — no `specify` block, no output pin, so nothing the entry
-could annotate and no logic that observes the pin — and the exemption carries
+The justification is that the destination is a physical-only cell — no
+`specify` block, no output pin, so no timing content and no logic that
+observes the pin (the entry can still be the #5705 cap's annotated survivor
+when its instance is the net's last-declared load; the drop does not rest on
+"no modpath exists") — and the exemption carries
 the same **delay-value** bound as the alias-port class above:
 
 - An entry is dropped only when *every* `min:typ:max` member of *every*
@@ -906,8 +916,10 @@ the same **delay-value** bound as the alias-port class above:
   `max`) is left in place, fails to annotate, and still fails the run with
   exit 1.
 - The destination must be a *physical-only* instance. An entry onto an
-  ordinary `specify`-bearing standard cell — the general shape (b) case — is
-  **not** covered by this exemption and still fails the run loudly; that
+  ordinary `specify`-bearing standard cell — the general shape (b) case,
+  which on a fanout-above-1 port-bit net fails whenever it is not the
+  last-declared instance's entry (issue #5705) — is **not** covered by
+  this exemption and still fails the run loudly; that
   remains an open Icarus limitation, not something this drop papers over.
 - Only `INTERCONNECT` entries are eligible, and only entries whose *source*
   is a bit-selected top-level input port (the one shape this failure was
@@ -1556,10 +1568,10 @@ re-simulating the old netlist. For a report written outside a git repo
 | --- | --- | --- |
 | `schema` | string | Request contract identifier + major version. Not validated — user-authored input, never emitted by this tool. |
 | `engine` | string | `"icarus"` (default) or `"verilator"`. An unsupported value is an application error (exit 1). Icarus 13.0 does **not** implement the full SystemVerilog-2012 subset (e.g. packed-struct named-field assignment patterns), so modern SV IP — lowRISC/OpenTitan primitives, Ibex, OpenHW cores — commonly requires `"verilator"`; today that is discovered only as a raw `iverilog` syntax error in the build log, never as a structured field. This is a per-request, not a per-project, choice — see "Which engine for which sources". |
-| `sources` | array\<string\> | RTL source file paths, resolved relative to the request. Required, non-empty. May point at original RTL. Pointing it at `klt synthesize`'s `netlist_path` **by hand** is the *unverified* route — nothing ties the file to the run that produced it, so a stale netlist left in the build tree re-simulates cleanly; use `options.from_synthesize` instead. May be empty or omitted **only** when `options.from_synthesize` is present; otherwise required and non-empty. |
+| `sources` | array\<string\> | RTL source file paths, resolved relative to the request. `~` and `$VAR` are expanded. An unset `$VAR` is exit 1 naming the variable, so a committed request naming `$PDK_ROOT/...` runs as-is. Required, non-empty. May point at original RTL. Pointing it at `klt synthesize`'s `netlist_path` **by hand** is the *unverified* route — nothing ties the file to the run that produced it, so a stale netlist left in the build tree re-simulates cleanly; use `options.from_synthesize` instead. May be empty or omitted **only** when `options.from_synthesize` is present; otherwise required and non-empty. |
 | `hdl_toplevel` | string | The DUT module name. Required. |
 | `testbench.module` | string | The Python test module **name** (`"test_gcd"`, not `"test_gcd.py"`), resolved as `<search dir>/<module>.py` where `<search dir>` is `testbench.search_path` if given, else the request's own directory. Required — this verb does not synthesize testbenches; the module is human- or generator-authored. |
-| `testbench.search_path` | string | Optional. Directory to resolve `testbench.module` against, instead of the request's own directory — absolute, or relative to the request (the same convention `sources` entries already use). Lets one unmodified testbench module be shared by several requests (e.g. RTL, gate-level netlist, and layout-extracted views of the same design) that live in different directories. Omitted: unchanged default behavior — the module is resolved next to the request. |
+| `testbench.search_path` | string | Optional. Directory to resolve `testbench.module` against, instead of the request's own directory — absolute, or relative to the request (the same convention `sources` entries already use; `~` and `$VAR` are expanded). Lets one unmodified testbench module be shared by several requests (e.g. RTL, gate-level netlist, and layout-extracted views of the same design) that live in different directories. Omitted: unchanged default behavior — the module is resolved next to the request. |
 | `testbench.testcase` | string \| array\<string\> \| null | Optional testcase-name filter; `null`/omitted runs every `@cocotb.test()` in the module. Under cocotb ≥ 2.1 (the pinned line, issue #2583) filtered-out tests are **deselected, not skipped** — the runner compiles the names into a `COCOTB_TEST_FILTER` regex, and a deselected test does not appear in the report at all (`test_count` counts only selected tests). Cocotb 2.0.x instead recorded each filtered-out test as a `skipped` entry; `skipped_count` remains live for tests that *ran* and skipped themselves. |
 | `options.coverage` | boolean | Defaults to `false`. `true` requires `engine: "verilator"` (see "Coverage"). |
 | `options.timescale` | `[string, string]` | `[unit, precision]`, defaulting to `["1ns", "1ps"]`. Passed to **both** the build and test steps — Icarus elaboration otherwise fails the moment a testbench's `Clock(..., unit="ns")` meets an unset (default 1 s) simulator precision. |
@@ -1569,8 +1581,8 @@ re-simulating the old netlist. For a report written outside a git repo
 | `requires_tools` | array | Optional (issue #4473), default `[]`. Build-time tools the suite needs beyond cocotb and the simulator, each `{"name": str, "version": str\|null, "sha256": str\|null}`. Before any build, each `name` is resolved with `shutil.which` on `request.env["PATH"]` when set (else the ambient `PATH`). `version` (optional) is a substring match on the tool's `--version` output; `sha256` (optional) is compared with the resolved binary's digest. A bad shape (non-array, entry without `name`, non-string fields, unknown fields) is exit 1 naming `request.requires_tools`; any unmet tool is exit 1 with `error.code: "missing_tool"` (see "Exit codes"). Applied to `--mutations` runs too. See "External toolchains". |
 | `options.source_defines` | object | Optional (issue #3290). Key = an entry of `request.sources` (matched after the same path resolution; an unknown key is exit 1), value = a defines object with the same `string -> string \| null` rules as `options.defines`. For each named source a wrapper is generated under the output directory (`` `define K [V] `` / `` `include "<abs path>" `` / `` `undef K ``) and substituted for that source in the same list position, so the defines reach that one file and cannot leak into later sources; the source's own directory is added to the include path for nested relative `` `include ``s. If a name is also in `options.defines`, the scoped value wins inside that source. Echoed as `environment.source_defines` (keyed by absolute source path; `{}` when absent). Works with `--mutations`. Defaults to `{}`. |
 | `options.build_args` | array\<string\> | Optional. Extra Icarus/Verilator build args, appended **after** the fixed `--coverage --trace` args a coverage run already adds and after any SDF back-annotation args (composed, not replaced — see "Coverage" and "SDF back-annotation"). Defaults to `[]`. |
-| `options.includes` | array\<string\> | Optional. `-I` include directories, resolved relative to the request (same convention as `sources`). Forwarded to `Runner.build(includes=...)`. Defaults to `[]`. |
-| `options.sdf.file` | string | Optional. Path to an IEEE-1497 SDF file, resolved relative to the request like every other path field, and back-annotated onto the design through Icarus's `$sdf_annotate` (see "SDF back-annotation"). Requires `engine: "icarus"` at version 13.0 or newer — `options.sdf` with `engine: "verilator"`, against a pre-13.0 `iverilog` (no `-ginterconnect`), or alongside a `FUNCTIONAL` entry in `options.defines`, is exit 1, never a silent no-op. A missing/unreadable file is exit 1 (issue #1002). |
+| `options.includes` | array\<string\> | Optional. `-I` include directories, resolved relative to the request (same convention as `sources`, `~` and `$VAR` are expanded). Forwarded to `Runner.build(includes=...)`. Defaults to `[]`. |
+| `options.sdf.file` | string | Optional. Path to an IEEE-1497 SDF file, resolved relative to the request like every other path field (`~` and `$VAR` expanded), and back-annotated onto the design through Icarus's `$sdf_annotate` (see "SDF back-annotation"). Requires `engine: "icarus"` at version 13.0 or newer — `options.sdf` with `engine: "verilator"`, against a pre-13.0 `iverilog` (no `-ginterconnect`), or alongside a `FUNCTIONAL` entry in `options.defines`, is exit 1, never a silent no-op. A missing/unreadable file is exit 1 (issue #1002). |
 | `options.sdf.corner` | string | Optional, one of `"min"`/`"typ"`/`"max"`, default `"typ"`. Selects one member of each SDF `min:typ:max` triplet, via the compile-time `iverilog -T` flag. Only valid inside an `options.sdf` block; an unknown key inside that block is exit 1 rather than silently ignored. |
 | `options.sdf.entries` | string | Optional, one of `"all"`/`"interconnect"`, default `"all"` (issue #2364). `"all"` annotates every delay entry the SDF carries. `"interconnect"` drops every non-`INTERCONNECT` delay entry (on a real `write_sdf` output, the `IOPATH` population) before annotation and reports the count as the `iopath_interconnect_only` `environment.sdf.dropped` class — the supported net-delay back-annotation configuration for a design whose post-route STA closes (see "SDF back-annotation"). Echoed as `environment.sdf.entries`. An unknown value is exit 1 rather than silently ignored. |
 | `options.from_synthesize` | object | Optional (issue #5684). `{"report": <path>, "netlist": <path>\|null}` — re-simulate the netlist a `klt synthesize` run produced. `report` (required, relative to the request) is that run's `--format json` report; the netlist is its `netlist_path`, resolved from the report's own location (`scope: "repo"`) and prepended to `sources`. `netlist`, when given, wins over the recorded path (relative to the request) and is **required** when the report records `scope: "external"` (a synthesize run outside any git repo). **The hash gate is a requirement, not a courtesy:** before any build the netlist is re-hashed and must equal the report's `netlist_sha256`, and the report's `hdl_toplevel` must equal the request's. A mismatch, a report with no `netlist_sha256`, an unresolvable netlist, or a bare-string/unknown-key value is exit 1 (never exit 3 — a netlist that failed the gate never ran) and names the expected and actual digests. The response gains a top-level `from_synthesize` block `{report, netlist, netlist_sha256, hash_check}` (paths as `{path, scope}` envelopes; additive, absent when unused). Cell-model auto-prepending is out of scope (#5782): supply the PDK's behavioural models and `FUNCTIONAL` define via `sources`/`options.defines`. |

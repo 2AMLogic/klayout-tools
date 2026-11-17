@@ -14,6 +14,64 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt signoff --attest 2` inventories can pin the generator's input files**
+  (#5724, 2026-11-17): an item-2 inventory may declare `inputs`, a non-empty
+  list of repo-relative paths. Each becomes a hash-pinned `{"check": "present",
+  "role": "input"}` entry (path order, after the built-in checks, before the
+  `role: "audit"` commands; a missing input fails the envelope, exit `3`) and a
+  role-tagged member (`"role": "stream"` / `"input"`) of
+  `provenance.input.paths`, bound by the set digest in
+  `provenance.input.content_hash`. Editing an input with the stream untouched
+  grades the manifest row `unmet` / `stale_evidence` and makes `--check` report
+  drift even when every command is `local_only`. `checks` is now optional when
+  `inputs` is declared (an inventory declaring neither is refused). Additive;
+  an envelope without `inputs` is byte-identical. **Pin change:** an envelope
+  that declares `inputs` reports `provenance.input.paths` instead of
+  `provenance.input.path`, so a manifest citing it must re-pin. No grader
+  change. Docs: `docs/cli/signoff.md`, "Pinning the generator's inputs".
+- **`klt env-provenance lint-envelope --json-stream` lints concatenated JSON
+  document streams** (#5887, 2026-11-17): each FILE argument is parsed as a
+  single JSON document, so a file holding several whitespace-separated
+  documents (e.g. one `json.dumps(...)` printed per record) failed with
+  `Extra data` / `... is not valid JSON` -- indistinguishable at the CLI
+  surface from a corrupt file, leaving such repositories no `lint-envelope`
+  validity gate. The new opt-in `--json-stream` flag reads each FILE as one
+  or more whitespace-separated JSON documents (`raw_decode` walk; no
+  separator required between documents, bare strings/numbers allowed -- a
+  document stream, not JSON Lines) and runs the lint over every document;
+  per-document findings gain an additive 0-based `document` key, `field`
+  stays relative to its own document, and the text report names the index
+  (`FILE[i]: field: match`). Default mode is unchanged: single-document
+  parse, no `document` key, exit `1` on a concatenated stream. A truncated
+  or corrupt document anywhere in the stream, or an empty/whitespace-only
+  FILE, is still exit `1` under `--json-stream` -- never a silent clean
+  verdict. No `schema_version` changes.
+- **`klt-pdk.json` liberty lists merge on field-equal headers, and header
+  conflicts are named** (#5625, 2026-11-17): a `liberty` corner's list of
+  cell-group `.lib` files was compared as one whole header string, so a real
+  vendor split (e.g. ASAP7 `asap7sc7p5t_28`) whose per-file headers differ
+  only in the `date` timestamp was refused with an opaque "Liberty headers
+  differ". The comparison is now field by field: the `library (<name>)` name,
+  lexical comments, and the free-text `date`, `revision` and `comment`
+  attributes are ignored; any other differing field (units,
+  `operating_conditions`, `default_max_transition`, ...) raises an error
+  naming the field and both files' values, and a field present in only one
+  file is reported as missing. Additive: merges that used to fail now
+  succeed; the merged output, template union, duplicate-cell check and cache
+  paths are unchanged.
+- **`openroad` Docker wrapper keeps `/tmp` mounted when `$TMPDIR` differs**
+  (issue #5878, 2026-11-17): the wrapper `scripts/install-openroad-docker.sh`
+  writes, mounted only `${TMPDIR:-/tmp}`, so while `$TMPDIR` was unset (or
+  `/tmp`) that mount incidentally made `/tmp` visible as a whole — but the
+  moment a caller exported any other `TMPDIR` (this fleet's daemon exports
+  one for every child process), `/tmp` stopped being mounted and an input
+  under `/tmp` failed inside the container with an opaque
+  `[ERROR STA-0340] cannot open '<path>'` for a file the caller could read
+  on the host. The wrapper now also mounts `/tmp:/tmp` whenever `$TMPDIR`
+  resolves to anything else (skipped when it equals `/tmp`, including
+  trailing-slash forms like `/tmp/` or `/tmp//`, since docker rejects a
+  duplicate mount point). Hosts with an older wrapper should re-run
+  `scripts/install-openroad-docker.sh` to upgrade it in place.
 - **`klt drc` gf180mcu deck: `DF.1c` (MOSCAP COMP min width) is now checked,
   and `comp.width.mv.1` exempts `MVSD`/`MVPSD`-marked LDMOS drains** (#5719,
   2026-11-17). New rule `comp.width.moscap.1` (`DF.1c`, 1.0 um,
@@ -39,6 +97,15 @@ not `klt --version`, if you need to detect this kind of drift. See
   deck flags the same shapes) — the generator cannot yet draw a MOSCAP that
   passes it (#6170). No JSON field added or removed; `schema_version` unchanged.
 
+- **HDL verbs expand `$VAR` / `~` in request path fields** (#5678, 2026-11-17):
+  `klt functional-verification`, `synthesize`, `formal` and `equiv` resolved
+  `sources` (and `liberty`, `netlist_path`, `testbench.search_path`,
+  `options.includes`, `options.sdf.file`, `baseline.*` paths) with a hand-rolled
+  `isabs`/`join`, so a committed request naming `$PDK_ROOT/...` could not run
+  as-is. They now use the same `_resolve_relative` convention `klt lvs` / `drc` /
+  `extract` / `sim` document, and an unset `$VAR` is a request error naming the
+  variable instead of a bare "not found". Additive: a literal path keeps its
+  meaning, no `schema_version` bump.
 
 - **Fixed** (#5664, `klt lvs` `--engine klayout-runset`; no JSON field
   changes, `schema_version` stays 3): a `pin.unmatched` finding whose pin
@@ -52,6 +119,41 @@ not `klt --version`, if you need to detect this kind of drift. See
   `error_count`/`category_error_counts` and the `status` now agree with the
   engine's own grade; `counts.pins` still reports structural pin presence,
   and a pin pair the comparer itself graded otherwise remains an error.
+- **`klt sim` accepts `request.netlist_source: "gate-level"`** (#5638,
+  2026-11-17): a third caller-declared provenance for `request.netlist`
+  beside `"schematic"` (pre-layout) and `"extracted"` (post-layout) — a
+  netlist assembled from a structural post-synthesis/post-route netlist plus
+  a timing library, i.e. event-driven primitives (XSPICE `d_*` models behind
+  `adc_bridge`/`dac_bridge`) whose delays were reduced from a Liberty deck,
+  the shape a digital block co-simulated beside an analog macro needs —
+  without claiming either that a schematic produced the netlist or that
+  layout extraction did. `klt sim` builds no such netlist itself; the value
+  only declares provenance, is echoed back verbatim in
+  `environment.netlist_source`, and every other field is unaffected (an
+  unrecognized value remains an application error, exit 1). Additive enum
+  value; no `schema_version` bump. See
+  [`docs/cli/sim.md`](docs/cli/sim.md)'s "Post-layout verification
+  (`netlist_source`)" section.
+- **`klt lvs --deck` is the command-line spelling of the request's
+  `layout.deck` field** (#5899, 2026-11-17): the curated extraction deck for
+  inline layout extraction, the same knob `klt extract --deck` sets (issue
+  #5733). A request document that already sets `layout.deck` is refused with
+  a clean error (exit 1) — a flag never silently overrides a request
+  document — and the flag is refused with `--check`. It never sets
+  `reference.deck` (the reference-netlist rewriting deck — a different knob,
+  reached through the runset's `--deck-file`/`--deck-var`). Additive request
+  surface; no `schema_version` bump.
+- **Inventory-driven `klt signoff --attest` envelopes record the klayout
+  engine version** (#6043, 2026-11-17): `build_attestation` (items 1, 8, 9
+  and 10, issue #5690) hardcoded `provenance.klayout_version: null` where its
+  stream twin (`--attest 2 --hash-kind …`) already recorded the engine. It
+  now populates the field the same way: the `klayout` build resolved into the
+  attesting process — the engine a declared `checks[].argv` command that
+  imports `klayout.db` actually ran against — and `null` when `klayout` is
+  not importable. Emission-affecting and additive; no `schema_version` bump.
+  Like `klt_version`, the field sits in the `--check`/`--rerun` exclusion
+  set, so committed evidence re-checked across a klayout upgrade still
+  reports `match`.
 - **`klt sim --attach <batch-shards.json>` accepts a map written by a
   `--hosts N` / `remote.hosts: N` run** (#5777, 2026-11-17): `--attach` and
   `--collect-partial` refused every `hosts != 1` request with "requires backend
@@ -79,6 +181,27 @@ not `klt --version`, if you need to detect this kind of drift. See
   and the Verilog-top path. `path`/`scope` is the repo-relative shape, so a
   source outside the repo reads `{"path": null, "scope": "external"}` and never
   leaks a host path. No `schema_version` bump.
+- **`klt signoff --attest 9`: a `cold_start` may be a list — several named
+  cold starts over one inventoried file** (#5641, 2026-11-17): an item-9
+  `testbenches[]` entry's `cold_start` now also accepts a non-empty list of
+  `{name, argv, ...}` command objects (`name` a non-empty string, unique
+  within its entry; an empty list, a non-object member, a missing/empty
+  `name` or a duplicate `name` is refused, exit `1`). Each member yields its
+  own `command` check (`role: "cold_start"`) carrying `testbench` **and**
+  `name` with its own `exit_status`/`passed`, while the entry's file is still
+  inventoried exactly once — so N benches sharing one implementation module
+  can each have a graded cold start over the same file, instead of minting
+  one hollow wrapper file per bench (which carried the attested hashes while
+  the module implementing every graded behaviour carried none). Members are
+  emitted in `name` order after benches sorted by path; `name` joins the
+  carried-check identity, so `--attest --check` and `--skip-local-only`
+  deliver a `local_only` member's committed outcome to the right member even
+  when two members declare identical `argv`. Text output labels a listed cold
+  start by its `name` and the stderr progress lines carry it. Additive: the
+  single-object form emits the envelope it always did (no `name` key), so a
+  committed envelope re-checks `match`; no `schema_version` bump. Repeating
+  one path across item-9 object entries is still refused, and the refusal now
+  points at the list form. See `docs/cli/signoff.md`.
 - **Added** (#5644, 2026-11-16): `klt sim --op-lint` now reports an additive
   top-level `unexpanded_instance_count` — the number of `X` instances whose
   `.subckt` was found in neither the netlist body nor its `.include` closure
@@ -225,6 +348,30 @@ not `klt --version`, if you need to detect this kind of drift. See
   (`klayout_tools/data/schemas`), so a wheel-only install serves the same
   listing as a source checkout. Tools, their names and their schemas are
   unchanged. See `docs/guides/mcp-server.md`.
+- **`klt extract --engine klayout-runset`: a device family only the PDK
+  runset recognises can now reach an extracted netlist** (#5481, 2026-11-13):
+  `klt extract` had one engine, the curated `--deck`, so a device class that
+  deck does not declare was simply not extracted — IHP's `pnpMPA` on
+  `sg13cmos5l` came back `device_count: 0`, and no `klt` verb could produce a
+  simulatable netlist containing it. `klt lvs` could already run the PDK's own
+  runset for such a family (#2849), but a verdict is not a netlist. The new
+  engine runs that same runset through the same launcher (`--deck-file`,
+  `--deck-var`, `--runset-timeout`) and reads the extracted netlist back out
+  of the `.lvsdb`. Measured on the PDK's own `pnpMPA` testcase:
+  `device_count: 2`, `device_counts: {"pnpMPA": 1, "ptap1": 1}`, and the
+  written netlist completes an ngspice `.op` against the PDK model library.
+  Every device is written as an `X` subcircuit call onto its class name
+  (KLayout's default `Q`/`R` cards name a `.model` no PDK library declares and
+  do not bind); measured parameters are **not** carried onto the call and each
+  dropped parameter is named in `warnings[]`. **Additive**: `--engine` defaults
+  to `klayout`, a curated-deck report is byte-identical and does not even carry
+  the new top-level `engine` field, so no `schema_version` bump (`klt extract`
+  stays at 4). The runset report adds `engine`, `deck_file`, `deck_vars` and
+  `provenance.runset` (the block `klt lvs` already emits). No parasitics, so
+  `klt pex` cannot use this engine and it does not by itself make
+  `docs/design-evidence-tiers.md` T1 item 7 citable; every curated-engine-only
+  flag, and `--backend batch`, is refused by name with exit 1 rather than
+  silently ignored. See `docs/cli/extract.md` → "Engine".
 - **Added** (#5875): `klt signoff --attest N --inventory F --check ENV` now
   reports an additive `build_drift` object (same shape as envelope
   aggregation, #4223) and a `build_drift: <state>` text line; the opt-in
