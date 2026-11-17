@@ -231,18 +231,26 @@ def diff_report(
     *,
     top: str | None = None,
     max_items: int = DEFAULT_MAX_ITEMS,
+    flattened: bool = False,
 ) -> dict[str, Any]:
     """Compare two layout streams and return a deterministic report dict.
 
     ``top`` scopes both streams to that cell's hierarchy (it must exist in
     both). ``max_items`` caps every listed difference list; the ``*_count``
-    fields always carry the true totals.
+    fields always carry the true totals. ``flattened`` switches to the
+    hierarchy-insensitive comparison in :mod:`klayout_tools.layout_diff_flat`
+    (issue #5729): cell names and partitioning are ignored and the report has
+    ``"mode": "flattened"``; the default report is unchanged.
 
     Raises :class:`LayoutDiffError` for an unreadable file, an unknown
     ``top`` cell, or a non-positive ``max_items``.
     """
     if max_items < 1:
         raise LayoutDiffError(f"max-items must be >= 1, got {max_items}")
+    if flattened:
+        from .layout_diff_flat import flattened_report
+
+        return flattened_report(file_a, file_b, top=top, max_items=max_items)
     a = _load(file_a, top)
     b = _load(file_b, top)
 
