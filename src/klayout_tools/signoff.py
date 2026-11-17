@@ -6474,7 +6474,7 @@ def _citation_pointer(spec: Mapping[str, Any]) -> dict[str, Any]:
     return {"pointer": pointer} if pointer is not None else {}
 
 
-def _citation(resolution: dict[str, Any]) -> dict[str, Any]:
+def _citation(resolution: Mapping[str, Any]) -> dict[str, Any]:
     """Build a ``"met"`` item's ``citation`` block from a
     :func:`_resolve_evidence` resolution -- see :func:`build_tier_report`'s
     docstring for what each field means."""

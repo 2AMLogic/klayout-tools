@@ -1805,7 +1805,7 @@ def _grade_power_delivery(
 
     erc = by_kind.get("erc")
     lvs = by_kind.get("lvs")
-    if None in (erc, lvs):
+    if erc is None or lvs is None:
         return _missing_parts_verdict(by_kind)
 
     # Issue #2495: the ERC half is resolved *before* the LVS pass gate, not
@@ -1905,10 +1905,11 @@ def _grade_power_delivery(
     disclosed_undeclared_tie_classes = _erc_disclosed_undeclared_tie_classes(
         erc["envelope"]
     )
-    if disclosed_undeclared_tie_classes:
-        citation["power_delivery"]["disclosed_undeclared_tie_classes"] = (
-            disclosed_undeclared_tie_classes
-        )
+    citation["power_delivery"].update(
+        {"disclosed_undeclared_tie_classes": disclosed_undeclared_tie_classes}
+        if disclosed_undeclared_tie_classes
+        else {}
+    )
     # Issue #4199: present only when the cited P&R response states the
     # library is tapless, so a `null` tapcell_master reads as by-design.
     citation["power_delivery"].update(_par_tapless_field(par))

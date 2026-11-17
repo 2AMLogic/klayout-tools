@@ -60,7 +60,7 @@ from .coverage import (
 #: derive-don't-duplicate rule ``signoff_nothing_checked``'s
 #: ``ZERO_COVERAGE_STATUS`` follows -- so this gate and the coverage
 #: contract cannot drift apart about the token.
-MALFORMED_COVERAGE_REASON: str = ROLLUP_TABLE[RESULT_MALFORMED].reason
+MALFORMED_COVERAGE_REASON: str = cast(str, ROLLUP_TABLE[RESULT_MALFORMED].reason)
 
 
 def malformed_coverage_refusal(envelope: Mapping[str, Any]) -> str | None:
