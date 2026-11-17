@@ -13197,6 +13197,32 @@ def test_cli_item_11_text_output_states_group_coverage(tmp_path, capsys):
     assert "groups:" not in out
 
 
+def test_cli_multi_member_item_3_and_4_text_rendering_has_no_groups_line(
+    tmp_path, capsys
+):
+    """Issue #5597 regression pin: the `groups:` coverage line is item 11's
+    alone. Items 3 and 4 have carried JSON member counts since issue #5031,
+    and their text rendering must not change -- their members are per-cell
+    reports, not citation groups, so a "cited groups graded met" line would
+    misdescribe what was cited."""
+    drc_paths = [_write(tmp_path, f"{n}.json", DRC_CLEAN_ENVELOPE) for n in "abc"]
+    lvs_paths = [
+        _write(tmp_path, f"{n}-lvs.json", LVS_MATCH_POWER_MATCH_ENVELOPE) for n in "de"
+    ]
+
+    for item_id, paths in ((3, drc_paths), (4, lvs_paths)):
+        manifest_path = _write(
+            tmp_path,
+            f"manifest-{item_id}.json",
+            _manifest(kind="analog", evidence={str(item_id): paths}),
+        )
+        main(["signoff", "--manifest", manifest_path])
+
+        out = capsys.readouterr().out
+        assert f"T1 #{item_id}" in out
+        assert "groups:" not in out
+
+
 # --------------------------------------------------------------------------- #
 # Input-artifact verification (issue #2196): `--manifest`'s freshness gate
 # compares the manifest's pinned `content_hash` against the cited envelope's

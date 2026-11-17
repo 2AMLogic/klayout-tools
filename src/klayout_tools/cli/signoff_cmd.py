@@ -1021,7 +1021,12 @@ def _print_tier_report_text(result: dict, palette: Palette) -> None:
         _print_not_applicable(item)
         # Issue #5597: a multi-group item-11 citation states its group
         # coverage in the text rendering too (the count is not JSON-only).
-        _print_group_coverage(item)
+        # Item 11 only: items 2/3/4 also carry member counts (issue #5031),
+        # but their members are per-cell reports, not citation groups --
+        # a "groups:" line would misdescribe them and change rendering
+        # that issue leaves untouched.
+        if item.get("id") == 11:
+            _print_group_coverage(item)
         citation = item["citation"]
         if citation:
             _print_cite_line(citation)
