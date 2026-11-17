@@ -24,7 +24,6 @@ from test_signoff import (
     _write,
 )
 
-
 # --------------------------------------------------------------------------- #
 # `--check` vs. the `build` block itself (issue #5852): excluded from the
 # verdict (issue #2249) but never invisible -- the response reports,
