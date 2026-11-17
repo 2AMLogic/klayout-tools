@@ -107,17 +107,23 @@
   "net_correspondence": [
     {
       "layout": "VIN",
+      "layout_id": 0,
       "reference": "VIN",
+      "reference_id": 0,
       "pin": true
     },
     {
       "layout": "VOUT",
+      "layout_id": 1,
       "reference": "VOUT",
+      "reference_id": 1,
       "pin": true
     },
     {
       "layout": "VSS",
+      "layout_id": 2,
       "reference": "VSS",
+      "reference_id": 2,
       "pin": true
     }
   ]

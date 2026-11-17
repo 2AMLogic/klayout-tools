@@ -1487,15 +1487,15 @@ def _same_nets_rejections(
     for layout_name, reference_name, provenance in _same_nets_assertions(
         same_nets_hints, anchored_pins, constant_bindings
     ):
-        pair = ((top_scope, layout_name), (top_scope, reference_name))
-        if pair in hint_outcomes.confirmed:
+        declared_pair = ((top_scope, layout_name), (top_scope, reference_name))
+        if declared_pair in hint_outcomes.confirmed:
             continue
         entries.append(
             _mismatch(
                 CATEGORY_HINTS_REJECTED,
                 "error",
                 _same_nets_rejection_description(
-                    provenance, pair in hint_outcomes.refused_after_pairing
+                    provenance, declared_pair in hint_outcomes.refused_after_pairing
                 ),
                 "both",
                 net={

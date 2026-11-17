@@ -456,6 +456,7 @@
         "klayout_tools.lvs_mismatch",
         "klayout_tools.lvs_mismatch_tolerance",
         "klayout_tools.lvs_mos_options",
+        "klayout_tools.lvs_net_identity",
         "klayout_tools.lvs_netgen",
         "klayout_tools.lvs_netgen_branch",
         "klayout_tools.lvs_pin_anchors",
@@ -468,6 +469,7 @@
         "klayout_tools.lvs_runset_census",
         "klayout_tools.lvs_short_nets",
         "klayout_tools.lvs_supply",
+        "klayout_tools.lvs_supply_universe",
         "klayout_tools.lvs_timeout",
         "klayout_tools.lvs_unmerged_fingers"
       ]

@@ -8138,7 +8138,9 @@ def test_combine_incomplete_entry_carries_circuit_device_and_net(tmp_path, monke
     assert warning["device"]["layout"] == "1"
     assert warning["device"]["reference"] is None
     assert warning["device"]["class"] == "NFET"
-    # ...and its gate terminal G is wired to net A.
+    # ...and its gate terminal G is wired to net A. Issue #5833: id keys
+    # present with null ids (built pre-compare; never omitted).
+    assert set(warning["net"]) == {"layout", "layout_id", "reference", "reference_id"}
     assert [warning["net"][k] for k in ("layout", "reference")] == ["A", None]
     # The raw KLayout message is still available verbatim.
     assert warning["details"]["terminal"] == "G"
