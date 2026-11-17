@@ -38,7 +38,7 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
-from . import sim_raw, sim_transfer
+from . import sim_measurement_kind, sim_raw, sim_transfer
 from .sim_errors import SimError
 from .sim_forms import normalize_selector as normalize_selector
 from .sim_forms import other_forms, validate_exclusive_form
@@ -84,7 +84,7 @@ _VECTOR_PREFIX = "__klt_xfer_"
 
 
 def is_transfer(spec: dict[str, Any]) -> bool:
-    return spec.get("transfer") is not None
+    return sim_measurement_kind.declares(spec, "transfer")
 
 
 def transfer_measurements(
@@ -160,22 +160,16 @@ def validate_transfer_context(
     declared = transfer_measurements(measurements_spec)
     if not declared:
         return
-    kind = str(analysis.get("kind", "")).lower()
-    if kind != "ac":
-        raise SimError(
-            f"measurement '{declared[0]['name']}' declares 'transfer', which "
-            f'needs an AC sweep and so requires analysis.kind "ac" (got '
-            f"{analysis.get('kind')!r})"
-        )
-    seen: set[str] = set()
-    for spec in measurements_spec:
-        key = str(spec.get("name")).lower()
-        if key in seen:
-            raise SimError(
-                f"duplicate measurement name '{spec.get('name')}': names must "
-                "be unique when measurements[] declares a transfer entry"
-            )
-        seen.add(key)
+    sim_measurement_kind.require_analysis_kind(
+        declared,
+        analysis,
+        form="transfer",
+        required="ac",
+        explanation="needs an AC sweep",
+    )
+    sim_measurement_kind.require_unique_measurement_names(
+        measurements_spec, form="a transfer entry"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -183,8 +177,12 @@ def validate_transfer_context(
 # --------------------------------------------------------------------------- #
 
 
+#: Prefix of the rawfile each transfer measurement writes per corner.
+_RAWFILE_PREFIX = "transfer"
+
+
 def rawfile_path(corner_dir: str, index: int) -> str:
-    return os.path.join(corner_dir, f"transfer_{index}.raw")
+    return sim_measurement_kind.rawfile_path(corner_dir, _RAWFILE_PREFIX, index)
 
 
 def control_lines(

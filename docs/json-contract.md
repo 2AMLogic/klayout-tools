@@ -305,6 +305,12 @@ field (`resistance_ohm`, `terminals[]`, `by_layer`, the ladder) keeps its
 meaning and value. A consumer must treat the key as optional. No field is
 removed, renamed or retyped, so **no `schema_version` bump**. See
 `docs/cli/extract.md`'s "Terminal-aware resistance graph" section.
+Issue #5747 likewise adds `fallback_reason` (`string | null`) to each
+`extraction.resistance_graph.nets[]` entry of `klt pex --resistance-graph`:
+`null` when `resistance_source` is `graph`, otherwise the reason the legacy
+scalar was kept (the first diagnostic `code` of an `unsupported` graph, else
+`resistance_source_reason`). Output without the flag is unchanged; no
+`schema_version` bump.
 
 **A new *qualifier* field next to an existing numeric field is additive — and
 is strictly preferable to retyping that field to `number | null`.** When an
@@ -635,6 +641,16 @@ not carry the resolving machine's `$HOME`): `"request"` (klt wrote a
 observe). `lines` is the written file's lines for `request`/`thread_pin`, else
 `null`; `sha256` is `sha256:<hex>` of the effective file's bytes, `null` for
 `none`/`runner`. Additive; no `schema_version` bump.
+
+For corner-mode `batch` runs, the worker's own on-host report supplies
+`environment.remote.worker_environment.ngspice_init` (and the same field on
+each `fleet[]` member, issue #6045). It has the same `{source, lines, sha256}`
+shape and path-free labels; `home` always has `lines: null`. The client's
+`environment.ngspice_init` remains `source: "runner"`. Missing, legacy,
+Xyce or malformed worker observations are `null`; no client value is used
+as a fallback. This field comes from the collected simulation report,
+independently of the preflight capture's `capture` status. Additive; no
+`schema_version` bump.
 
 `environment.remote` (and each `fleet[]` member) also gains the additive
 `runner_models_lib_sha256` (string or `null`) and `models_lib_comparison`
