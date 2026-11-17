@@ -25,6 +25,8 @@ import re
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
+from .extract_spef_rc import _spef_rc_lines
+
 
 class ExtractError(Exception):
     """Raised when a layout cannot be extracted: bad file, unknown deck,
@@ -626,7 +628,7 @@ def _write_spef(
     **A format translation of already-computed data, not a new extraction
     pass** (the survey's own §4.1 scoping): every R/C value written here
     comes straight from ``parasitics_report["nets"]`` -- the exact
-    star-topology model ``docs/cli/extract.md``'s "Parasitic (RC)
+    star or distributed-ladder model ``docs/cli/extract.md``'s "Parasitic (RC)
     extraction" section documents for the written SPICE ``R``/``C`` device
     cards -- re-expressed as SPEF's ``*D_NET``/``*CAP``/``*RES`` block
     syntax instead. Nothing here re-derives or re-measures a single R or C
@@ -708,7 +710,7 @@ def _write_spef(
     model's own internal net names.** :func:`_spef_net_topology_nodes` plans
     each block's ``net_node`` (where device-terminal legs, DEF-instance-pin
     legs, and the Gamma-shunt resistor all originate) and ``hub_node`` (where
-    self- and coupling-capacitance attach); every device terminal's own
+    self- and coupling-capacitance attach); each lumped net's device terminal's
     ``leg_net`` (a KLayout-internal net name, e.g. ``_031___t0``, that no
     ``*CONN`` entry anywhere ever declares) becomes one further ``<net>:<N>``
     node of its own, bridged to ``net_node`` by one ``*RES`` card -- the
@@ -716,7 +718,10 @@ def _write_spef(
     topology" section documents, expressed as SPEF resistor cards instead of
     SPICE ``R`` device cards, but with SPEF-legal node identifiers instead of
     the model's own (SPICE-legal, SPEF-illegal-as-a-two-node-endpoint)
-    internal net names.
+    internal net names. Distributed nets instead reuse ``net_node`` for the
+    middle terminal, number the other ladder nodes, and emit the reported
+    ``segments[]`` and per-terminal ground capacitances. Coupling still
+    attaches to the middle node.
 
     **Coupling ``*CAP`` entries reference the coupled net's own ``hub_node``
     (issue #961 defect 2), which is the coupled port's own bare name when it
@@ -917,7 +922,6 @@ def _write_spef(
     for entry in parasitics_report["nets"]:
         net = entry["net"]
         hub = entry["hub_net"]
-        terminals = entry.get("terminals", [])
         own_coupling = coupling_by_net.get(net, [])
         total_cap_ff = entry["capacitance_ff"] + sum(
             coupled["capacitance_ff"] for coupled in own_coupling
@@ -972,8 +976,10 @@ def _write_spef(
             lines.append("*CONN")
             lines += conn_lines
 
-        cap_lines: list[str] = [f"1 {hub_node} {entry['capacitance_ff']:.6f}"]
-        for i, coupled in enumerate(own_coupling, start=2):
+        cap_lines, res_lines = _spef_rc_lines(
+            entry, spef_net, net_node, hub_node, next_node_idx
+        )
+        for i, coupled in enumerate(own_coupling, start=len(cap_lines) + 1):
             # Issue #961 defect 2: reference the coupled net's own hub
             # *node* (a SPEF-legal identifier), not its bare name -- see
             # this function's docstring, "Coupling `*CAP` entries"
@@ -985,32 +991,7 @@ def _write_spef(
                 f"{i} {hub_node} {coupled_hub_node} {coupled['capacitance_ff']:.6f}"
             )
 
-        res_lines: list[str] = []
-        next_res_idx = 1
-        node_idx = next_node_idx
-        if terminals:
-            for terminal in terminals:
-                # Each device terminal's own `leg_net` (a KLayout-internal
-                # name, e.g. `_031___t0`, that no `*CONN` entry ever
-                # declares) becomes a fresh `<net>:<N>` internal node rather
-                # than being referenced by its own bare name -- issue #961's
-                # root-cause fix, see this function's docstring.
-                leg_node = f"{spef_net}:{node_idx}"
-                node_idx += 1
-                res_lines.append(
-                    f"{next_res_idx} {net_node} {leg_node} "
-                    f"{terminal['resistance_ohm']:.6f}"
-                )
-                next_res_idx += 1
-        elif hub_differs:
-            # No-device-terminal Gamma-shunt fallback (docs/cli/extract.md's
-            # "The model: a star topology" section): a single resistor from
-            # the net's own node to its (now internal-node-numbered) hub --
-            # the only case where `hub_node` differs from `net_node`.
-            res_lines.append(
-                f"{next_res_idx} {net_node} {hub_node} {entry['resistance_ohm']:.6f}"
-            )
-            next_res_idx += 1
+        next_res_idx = len(res_lines) + 1
         for inst, pin in instance_pins:
             # Zero-ohm connectivity leg from the net's own primary node to
             # this real design pin -- see this function's docstring,

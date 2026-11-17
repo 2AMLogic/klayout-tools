@@ -270,6 +270,7 @@
         "klayout_tools.extract_resistance_graph",
         "klayout_tools.extract_spef",
         "klayout_tools.extract_spef_block",
+        "klayout_tools.extract_spef_rc",
         "klayout_tools.extract_subcircuit",
         "klayout_tools.extract_warnings",
         "klayout_tools.parasitic_integrity",
