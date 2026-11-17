@@ -217,8 +217,9 @@ def _extraction_block(
     :func:`run_pex`), so the extract-time hash no longer identifies the file
     the report points at.
     """
-    from .pex import _parasitic_integrity_report, _resistance_graph_echo
+    from .pex import _parasitic_integrity_report
     from .pex_asap7 import netlist_adaptation_for_deck
+    from .pex_resistance_graph import _resistance_graph_echo
 
     parasitics = extract_report.get("parasitics") or {}
     return {
