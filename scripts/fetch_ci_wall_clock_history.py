@@ -510,8 +510,8 @@ def main(argv: list[str] | None = None) -> int:
         type=float,
         default=2.0,
         help="seconds before the first transient-failure retry, growing "
-        "geometrically (2 s then 5 s by default; 0 waits between retries "
-        "but still makes them)",
+        "geometrically (2 s then 5 s by default; 0 waits no time between "
+        "retries but still makes them)",
     )
     args = parser.parse_args(argv)
 
