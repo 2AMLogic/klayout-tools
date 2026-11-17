@@ -27,8 +27,8 @@ def _edge_pair_hull_points(edge_pair: Any) -> list[list[int]] | None:
       markers are exactly that (issue #2642). Normalized to ``None`` here
       rather than emitted as an empty array, which would be a third,
       undocumented shape for this field;
-    - it returns a *zero-area* hull -- every vertex collinear on the
-      failing edge, with duplicated and interior points -- which is what a
+    - it returns a *collinear* hull -- every vertex on one line (the
+      failing edge), with duplicated and interior points -- which is what a
       total-deficit edge pair produces: an ``enclosing`` violation whose
       zero-extension edge is exactly coincident with its peer (issue
       #5869's repro collapses to ``[(0,50),(0,1900),(0,100),(0,1950)]``).
@@ -48,18 +48,29 @@ def _edge_pair_hull_points(edge_pair: Any) -> list[list[int]] | None:
 
 
 def _hull_is_collinear(points: list[list[int]]) -> bool:
-    """True when the hull point ring has zero area -- every vertex on one
-    line. Exact integer shoelace; dbu coordinates are ints, so there is no
-    epsilon to worry about."""
-    area2 = 0
-    for i, (x1, y1) in enumerate(points):
-        x2, y2 = points[(i + 1) % len(points)]
-        area2 += x1 * y2 - x2 * y1
-    return area2 == 0
+    """True when every distinct vertex lies on one line. Exact integer
+    cross products against a reference direction; dbu coordinates are
+    ints, so there is no epsilon to worry about.
+
+    This is deliberately *not* a zero-shoelace-area test: edge-pair hulls
+    are crossed (bowtie) quads whose two lobes cancel exactly whenever
+    the pair's two edges have equal length -- zero signed area without
+    collinearity, which would collapse ordinary positive-separation 2D
+    markers (issue #5901 review).
+    """
+    distinct: list[list[int]] = []
+    for point in points:
+        if point not in distinct:
+            distinct.append(point)
+    if len(distinct) < 3:
+        return True
+    (x0, y0), (x1, y1) = distinct[0], distinct[1]
+    dx, dy = x1 - x0, y1 - y0
+    return all((x - x0) * dy - (y - y0) * dx == 0 for x, y in distinct[2:])
 
 
 def _collapsed_segment(points: list[list[int]]) -> list[list[int]] | None:
-    """Deduplicate a zero-area hull to its two extreme points, keeping the
+    """Deduplicate a collinear hull to its two extreme points, keeping the
     full extent along the edge (issue #5869). Returns ``None`` for the
     zero-extent corner case (every point identical) -- a marker with no
     extent in either direction has no renderable outline, the same

@@ -121,6 +121,60 @@ def test_positive_extension_violation_polygon_unchanged(tmp_path, monkeypatch):
     ]
 
 
+def test_equal_length_edges_violation_polygon_unchanged(tmp_path, monkeypatch):
+    """Equal-length, positively-separated edges keep their bowtie quad.
+
+    A pair whose two edges have the *same* length but real separation --
+    B inset 20 dbu in x, flush in y -- is a genuine 2D marker region
+    (``x ∈ [0,20]``, ``y ∈ [0,2000]``). Its hull is a *crossed* (bowtie)
+    quad whose two lobes cancel exactly under a shoelace sum: zero signed
+    area without collinearity. Collapsing it fabricates geometry (the
+    diagonal of the marker region) or drops the enclosing edge outright;
+    it must pass through byte-identical to the pre-#5869 output.
+    """
+    rule = DrcRule(
+        id="test.enclosing",
+        description="synthetic 50 dbu enclosing",
+        check="enclosing",
+        layer=(1, 0),
+        other_layer=(2, 0),
+        threshold_dbu=50,
+    )
+    report = _run_with_deck(
+        monkeypatch,
+        rule,
+        _write_two_layer_layout(tmp_path, REPRO_A, (20, 0, 980, 2000)),
+    )
+
+    assert report["rule_counts"] == {"test.enclosing": 4}
+    by_bbox = {
+        (
+            v["bbox"]["left"],
+            v["bbox"]["bottom"],
+            v["bbox"]["right"],
+            v["bbox"]["top"],
+        ): v
+        for v in report["violations"]
+    }
+    # Left/right pairs: 20 dbu apart -- real quadrilaterals, verbatim.
+    assert by_bbox[(0, 0, 20, 2000)]["polygon"] == [
+        [0, 0],
+        [20, 2000],
+        [20, 0],
+        [0, 2000],
+    ]
+    assert by_bbox[(980, 0, 1000, 2000)]["polygon"] == [
+        [980, 0],
+        [980, 2000],
+        [1000, 0],
+        [1000, 2000],
+    ]
+    # Top/bottom pairs: flush (zero extension) -- genuinely collinear,
+    # still collapse to the failing edge's extremes.
+    assert by_bbox[(0, 0, 1000, 0)]["polygon"] == [[0, 0], [1000, 0]]
+    assert by_bbox[(0, 2000, 1000, 2000)]["polygon"] == [[0, 2000], [1000, 2000]]
+
+
 def test_space_check_violation_polygon_unchanged(tmp_path, monkeypatch):
     """``space`` markers -- the already-good shape -- are untouched.
 
@@ -183,4 +237,22 @@ def test_hull_points_positive_area_quad_untouched():
         [0, 1946],
         [20, 100],
         [20, 1900],
+    ]
+
+
+def test_hull_points_equal_length_edges_bowtie_hull_untouched():
+    """Equal-length, positively-separated edges make a *crossed* (bowtie)
+    hull: its two lobes cancel exactly under a shoelace sum -- zero signed
+    area without collinearity -- so it must not be collapsed. Regression
+    control for the pre-fix zero-area predicate, which turned this pair
+    into the bogus diagonal ``[[0,0],[20,2000]]``."""
+    edge_pair = kdb.EdgePair(
+        kdb.Edge(kdb.Point(0, 0), kdb.Point(0, 2000)),
+        kdb.Edge(kdb.Point(20, 0), kdb.Point(20, 2000)),
+    )
+    assert _edge_pair_hull_points(edge_pair) == [
+        [0, 0],
+        [20, 2000],
+        [20, 0],
+        [0, 2000],
     ]
