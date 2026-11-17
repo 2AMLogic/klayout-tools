@@ -1,13 +1,25 @@
-"""Post-run scan of a written synthesize netlist for surviving bare
-``x``-valued constants (issue #5074)."""
+"""Post-run scan of a written synthesize netlist for constructs
+`klt place-and-route`'s own pre-flight will refuse -- surviving bare
+``x``-valued constants (issue #5074) and the behavioural ``reg``/``always``
+rendering of a latch the synthesis library had no cell for (issue #5792) --
+so the caller hears it from the stage that wrote the netlist, not as a raw
+syntax error from a later stage."""
 
 from __future__ import annotations
 
-from .place_and_route_request import _NETLIST_X_CONSTANT_RE, _blank_verilog_comments
+from .place_and_route_request import (
+    _NETLIST_BEHAVIOURAL_LATCH_RE,
+    _NETLIST_X_CONSTANT_RE,
+    _blank_verilog_comments,
+)
 
 #: Bound on how many offending netlist line numbers
 #: :func:`netlist_x_constant_warning` names (issue #5074).
 X_CONSTANT_WARNING_MAX_LINES = 5
+
+#: Bound on how many offending netlist line numbers
+#: :func:`netlist_behavioural_latch_warning` names (issue #5792).
+BEHAVIOURAL_LATCH_WARNING_MAX_LINES = 5
 
 
 def netlist_x_constant_warning(
@@ -63,5 +75,47 @@ def netlist_x_constant_warning(
             f"netlist still has {len(hits)} bare x-valued constant assign(s) at "
             f"line(s) {shown}{suffix}, e.g. '{hits[0][1]}'; `klt place-and-route` "
             f"will refuse this netlist. {advice}"
+        )
+    }
+
+
+def netlist_behavioural_latch_warning(netlist_text: str) -> dict[str, str]:
+    """A ``warnings`` entry (issue #5792) when the written netlist carries a
+    behavioural Verilog statement -- a ``reg`` declaration or ``always``
+    block -- instead of gate-level cell instances.
+
+    ``write_verilog`` renders a gate-level latch that survived synthesis
+    unmapped this way when the resolved library has no latch cell to map it
+    onto: ``dfflibmap`` maps flip-flops only, and ``latch_map`` (issue
+    #4458) has no target to give it. OpenSTA's structural reader rejects the
+    shape outright, so ``klt place-and-route`` refuses this netlist in its
+    pre-flight (same regex, shared from :mod:`place_and_route_request`) --
+    the caller is told here, before P&R. Names the first few 1-based line
+    numbers and the first offending line. Empty when the netlist is clean
+    (which is also the ``latch_map``-mapped shape: the mapped latch is a
+    cell instance).
+    """
+    hits = [
+        (lineno, line.strip())
+        for lineno, line in enumerate(_blank_verilog_comments(netlist_text), start=1)
+        if _NETLIST_BEHAVIOURAL_LATCH_RE.search(line)
+    ]
+    if not hits:
+        return {}
+    shown = ", ".join(str(n) for n, _ in hits[:BEHAVIOURAL_LATCH_WARNING_MAX_LINES])
+    more = len(hits) - BEHAVIOURAL_LATCH_WARNING_MAX_LINES
+    suffix = f" (+{more} more)" if more > 0 else ""
+    return {
+        "netlist_behavioural_latch": (
+            f"netlist still has {len(hits)} behavioural Verilog statement(s) "
+            f"(a `reg` declaration or `always` block) at line(s) {shown}{suffix}, "
+            f"e.g. '{hits[0][1]}': an inferred latch survived synthesis "
+            "unmapped -- the cell_library has no latch cell to map it onto "
+            "(or the `latch_map` entry did not cover it), so `write_verilog` "
+            "rendered it behaviourally instead of as a cell instance; see "
+            "`structural.unexpected_latches` and `instance_counts_by_type` "
+            "`$_DLATCH_*_`. `klt place-and-route` will refuse this netlist. "
+            "Use a cell_library that has a latch cell, give `latch_map` a "
+            "target, or remove the latch from the RTL."
         )
     }

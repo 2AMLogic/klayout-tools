@@ -302,7 +302,10 @@ from .synthesize_library_hint import (
 # `synthesize_memory.py` imports this module's helpers at call time only.
 from .synthesize_memory import collect_memory_evidence
 from .synthesize_netlist_normalize import rewrite_netlist
-from .synthesize_x_scan import netlist_x_constant_warning
+from .synthesize_x_scan import (
+    netlist_behavioural_latch_warning,
+    netlist_x_constant_warning,
+)
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
@@ -1446,6 +1449,7 @@ def run_synthesize(
                 cell_library=cell_library,
                 has_tie_cells=cell_library in _TIE_CELLS,
             ),
+            **netlist_behavioural_latch_warning(_read_produced_netlist(netlist_path)),
             **_dont_use_unsupported_warning(cell_exclusions),
             **_macro_area_warning(
                 cells_without_area,

@@ -1453,18 +1453,30 @@ _NETLIST_X_CONSTANT_RE = re.compile(
     r"\d+'[sS]?[bBoOdDhH][0-9a-fA-F_]*[xX][0-9a-fA-FxX_]*"
 )
 
+#: A behavioural Verilog statement at a line's start -- a ``reg`` declaration
+#: or an ``always`` block (issue #5792). Anchored to the line start on
+#: purpose: Yosys names flop instances ``_reg_0_`` and nets ``regbank_out``
+#: routinely, so a bare ``\breg\b`` would flag structural netlists that route
+#: fine today, while ``write_verilog``'s behavioural rendering of a surviving
+#: unmapped latch always puts the keyword at the start of its own indented
+#: line (verified live, Yosys 0.67: ``  reg q;`` / ``  always @*``). A
+#: structural netlist -- module/port/wire declarations and cell
+#: instantiations only -- never has a line beginning with either keyword.
+_NETLIST_BEHAVIOURAL_LATCH_RE = re.compile(r"^\s*(reg|always)\b")
+
 
 def _reject_unsupported_netlist_constructs(netlist_path: str) -> None:
     """Raise :class:`PlaceAndRouteError` naming the construct, the 1-based
     line number, and the offending line when ``netlist_path`` carries a
-    ``signed`` port/wire qualifier or a bare ``x``-valued constant -- the
-    two constructs that deterministically fail a real OpenROAD run several
-    stages in, with a diagnostic pointing at a generated file the caller
-    never wrote (issue #1973; see this module's docstring "Netlist
-    pre-flight" section for the full rationale).
+    ``signed`` port/wire qualifier, a bare ``x``-valued constant, or a
+    behavioural ``reg``/``always`` statement -- the three constructs that
+    deterministically fail a real OpenROAD run several stages in, with a
+    diagnostic pointing at a generated file the caller never wrote (issues
+    #1973 and #5792; see this module's docstring "Netlist pre-flight"
+    section for the full rationale).
 
     Reports the **first** offending line in file order, whichever construct
-    it is: both are already fatal, so there is nothing to gain from
+    it is: all are already fatal, so there is nothing to gain from
     enumerating every occurrence, and the first one is the one a reader will
     go fix. A netlist this cannot read is not an error here --
     :func:`_resolve_netlist` has already established the file exists and is
@@ -1502,6 +1514,24 @@ def _reject_unsupported_netlist_constructs(netlist_path: str) -> None:
                 "cells; if it already produced this netlist, its report "
                 "`warnings.netlist_x_constants` names these lines -- drive or "
                 "remove the undriven source signal in the RTL."
+            )
+
+        behavioural_match = _NETLIST_BEHAVIOURAL_LATCH_RE.search(line)
+        if behavioural_match is not None:
+            raise PlaceAndRouteError(
+                f"netlist '{netlist_path}' line {lineno} is behavioural "
+                f"Verilog (a '{behavioural_match.group(1)}' statement): "
+                f"{line.strip()} -- OpenSTA's Verilog reader (used by the "
+                "'floorplan' stage) rejects behavioural statements with a "
+                "syntax error. This shape is how `write_verilog` renders a "
+                "gate-level latch that survived synthesis unmapped -- the "
+                "synthesis library had no latch cell to map it onto (see the "
+                "`klt synthesize` response's `structural.unexpected_latches` "
+                "and `instance_counts_by_type` `$_DLATCH_*_` counts; its "
+                "`warnings.netlist_behavioural_latch` names these lines). "
+                "Use a `cell_library` that has a latch cell, give `klt "
+                "synthesize`'s `latch_map` a target, or remove the inferred "
+                "latch from the RTL."
             )
 
 

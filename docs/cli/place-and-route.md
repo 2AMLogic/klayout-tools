@@ -3560,7 +3560,7 @@ ties" section. The diagnosis remains for netlists produced by anything else.
 
 ## Netlist pre-flight (issue #1973)
 
-Before any OpenROAD subprocess runs, `request.netlist` is scanned for two
+Before any OpenROAD subprocess runs, `request.netlist` is scanned for three
 constructs that fail deterministically several stages in, each with a
 diagnostic that points at a generated file the caller never wrote:
 
@@ -3568,20 +3568,25 @@ diagnostic that points at a generated file the caller never wrote:
 |---|---|---|
 | A `signed` port/wire qualifier (`output signed [15:0] sample;`) | `[ERROR STA-0171] <netlist> line N, syntax error` — OpenSTA's Verilog reader rejects the keyword outright, at the **floorplan** stage | The qualifier, the 1-based netlist line, the offending line, and the `$signed(...)`-cast fix |
 | A bare `x`-valued constant (`assign \foo$func$..o = 5'hxx;`) | `[ERROR DRT-0305] Net zero_ of signal type GROUND is not routable by TritonRoute` — after floorplan, placement **and** CTS have all already succeeded, so it costs a full route attempt to discover | The literal, the 1-based netlist line, the offending line, and the re-synthesize fix |
+| A behavioural `reg` declaration or `always` block — how `write_verilog` renders a latch that survived synthesis unmapped because the library has no latch cell (issue #5792) | `[ERROR STA-0171] <netlist> line N, syntax error` — OpenSTA's structural reader cannot read behavioural statements, pointing at the `reg` line, at the **floorplan** stage | The construct, the 1-based netlist line, the offending line, the latch-has-no-library-cell cause (cross-referencing the synthesize response's `structural.unexpected_latches` / `instance_counts_by_type` `$_DLATCH_*_` counts), and the fix |
 
 The scan is comment-aware (a construct quoted inside Yosys's own `/* ... */`
 header banner or a `//` comment is prose, not a construct), and the `signed`
 pattern is anchored to a preceding declaration keyword so an
 expression-level `$signed(...)` cast — valid everywhere downstream — is
-never flagged. The first offending line in file order is reported; both
+never flagged; the `reg`/`always` pattern is anchored to the line start so
+Yosys's own `_reg_0_` instance names and `regbank_out`-style nets are never
+flagged either. The first offending line in file order is reported; all
 constructs are already fatal, so there is nothing to gain from enumerating
 every occurrence.
 
 This is a **safety net for netlists that did not come from `klt
 synthesize`** (hand-written, third-party, or post-edited). `klt synthesize`
-prevents both at the source — see its own "Constant ties" and "`signed`
-stripping" sections. RTL-side, the constructs that produce them are covered
-by
+prevents the first two at the source — see its own "Constant ties" and
+"`signed` stripping" sections — and for the third it warns up front via its
+`netlist_behavioural_latch` warning (the library having no latch cell is not
+something synthesize can fix on its own) before P&R refuses the netlist.
+RTL-side, the constructs that produce them are covered by
 [`docs/guides/digital-review/rtl-style-guide.md`](../guides/digital-review/rtl-style-guide.md)'s
 "Flow compatibility" rules.
 
