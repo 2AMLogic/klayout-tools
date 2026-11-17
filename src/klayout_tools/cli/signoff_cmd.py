@@ -144,6 +144,8 @@ from ..signoff_generator_batch import (
     GeneratorExecution,
     resolve_execution,
 )
+from ..signoff_grouped_citations import print_group_coverage as _print_group_coverage
+from ..signoff_grouped_citations import print_power_delivery as _print_power_delivery
 from ..signoff_output import non_attest_problem, write_output_or_message
 from .color import Palette, resolve_palette
 from .output import emit_error, emit_success, render_rerun_drift
@@ -710,64 +712,6 @@ def _print_regeneration(regeneration: Any) -> None:
     )
 
 
-def _print_power_delivery(citation: dict) -> None:
-    """Print T1 item 11's compound-citation summary (issue #2025), or
-    nothing at all for every other item's single-artifact citation.
-
-    Its own function for the same reason :func:`_print_input_verified` is
-    (and since issue #2234's extra line, the same C901 budget reason):
-    the caller, :func:`_print_tier_report_text`, is already at the
-    complexity ratchet's limit.
-
-    The second line (issue #2234) names the ties whose tap geometry rested
-    on a caller **assertion** (``ties[].tap_boxes``) rather than on a drawn
-    PDK marker. It is disclosure only -- such a tie is graded ``met``
-    exactly as a marker-derived one, and `klt erc` has already rejected a
-    degenerate or unmatched assertion before the citation could reach here
-    -- but leaving that provenance reachable only through the JSON would
-    make the two indistinguishable in the rendering a reviewer actually
-    reads. Printed only when non-empty, so a purely marker-derived report
-    (and every report produced before the field existed) renders exactly as
-    it did before.
-
-    The third line (issue #2255) does the same for the *well* side: the ties
-    whose substrate region was itself asserted (``ties[].well_layer: null``
-    + ``ties[].well_boxes``), for a block that draws no well/tub layer at
-    all. Same disclosure-only status, same print-when-non-empty rule, and
-    deliberately its own line rather than being folded into the tap one --
-    "which drawn geometry is the tap" and "where the substrate is" are
-    different claims, and the second is the weaker of the two.
-    """
-    power_delivery = citation.get("power_delivery")
-    if not power_delivery:
-        return
-    print(
-        "        power delivery: supplies="
-        f"{', '.join(power_delivery['supply_nets']) or 'none'}, "
-        f"pdn={'yes' if power_delivery['pdn'] else 'no (no P&R cited)'}, "
-        f"power_connectivity={power_delivery['power_connectivity_status']}"
-    )
-    asserted = power_delivery.get("ties_checked_by_assertion") or []
-    if asserted:
-        print(
-            f"        taps asserted by the caller: {len(asserted)} "
-            f"({', '.join(asserted)})"
-        )
-    well_asserted = power_delivery.get("ties_checked_by_well_assertion") or []
-    if well_asserted:
-        # Issue #2540 widened this list from "the substrate region was
-        # asserted" (no drawn well at all) to "the well side rested on
-        # caller-named coordinates", which now also covers a *drawn* well
-        # whose bias class was selected by boxes. The line names both rather
-        # than only the older form, so the count can never read as a claim
-        # the spec did not make.
-        print(
-            "        well side rested on the caller's word (asserted region, "
-            f"or a box-selected class): {len(well_asserted)} "
-            f"({', '.join(well_asserted)})"
-        )
-
-
 def _format_body_bias(body_bias: dict) -> str:
     """One line summarising a `pex` citation's `body_bias` statement (issue
     #1983): the verdict, and -- when it is `"unbiased"` -- how many devices
@@ -974,6 +918,7 @@ def _print_tier_report_text(result: dict, palette: Palette) -> None:
                 f"; it is in {result['source_doc']}, not this build's own doc)"
             )
         _print_not_applicable(item)
+        _print_group_coverage(item)
         citation = item["citation"]
         if citation:
             _print_cite_line(citation)

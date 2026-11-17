@@ -62,21 +62,25 @@ SKIP_INVALID_EVIDENCE = "invalid_evidence"
 
 def _evidence_specs(
     evidence: Mapping[str, Any],
-) -> Iterator[tuple[str, int | None, Any]]:
-    """Yield ``(key, index, raw_entry)`` for every citation in ``evidence``.
+) -> Iterator[tuple[str, int | None, int | None, Any]]:
+    """Yield ``(key, group_index, index, raw_entry)`` for each citation.
 
-    ``index`` is the position within a multi-citation list entry (issue
-    #2959's item-5 shape, and the per-cell ``drc``/``lvs``/``pex`` lists),
-    or ``None`` for a single citation -- so a record can name exactly which
-    citation moved.
+    ``index`` locates a list member, or is ``None`` for a single citation.
+    Grouped item-11 citations (issue #5597) also have a ``group_index``,
+    and ``index`` locates the member within that group.
     """
-    for key in evidence:
-        raw = evidence[key]
-        if isinstance(raw, list):
-            for index, member in enumerate(raw):
-                yield key, index, member
+    for key, raw in evidence.items():
+        if not isinstance(raw, list):
+            yield key, None, None, raw
+        elif key.partition(".")[0] == "11" and all(
+            isinstance(group, list) and group for group in raw
+        ):
+            for group_index, group in enumerate(raw):
+                for index, member in enumerate(group):
+                    yield key, group_index, index, member
         else:
-            yield key, None, raw
+            for index, member in enumerate(raw):
+                yield key, None, index, member
 
 
 def _pinned_hash(raw: Any) -> str | None:
@@ -133,8 +137,9 @@ def plan_repin(
 
     ``changed`` records carry ``item``/``index``/``file``/``old_content_hash``/
     ``new_content_hash``; ``skipped`` records carry ``item``/``index``/
-    ``file``/``reason``. An entry whose pin is already fresh, and an entry
-    that pins nothing, appear in neither.
+    ``file``/``reason``. Both include ``group_index`` for grouped citations.
+    An entry whose pin is already fresh, and an entry that pins nothing,
+    appear in neither.
     """
     evidence = manifest.get("evidence")
     if evidence is None:
@@ -146,27 +151,21 @@ def plan_repin(
 
     changed: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
-    for key, index, raw in _evidence_specs(evidence):
+    for key, group_index, index, raw in _evidence_specs(evidence):
         new_hash, skip_reason, file_label = _classify_entry(raw, repo_root)
+        location = {"item": key, "index": index, "file": file_label}
+        if group_index is not None:
+            location["group_index"] = group_index
         if new_hash is not None:
             changed.append(
                 {
-                    "item": key,
-                    "index": index,
-                    "file": file_label,
+                    **location,
                     "old_content_hash": _pinned_hash(raw),
                     "new_content_hash": new_hash,
                 }
             )
         elif skip_reason is not None:
-            skipped.append(
-                {
-                    "item": key,
-                    "index": index,
-                    "file": file_label,
-                    "reason": skip_reason,
-                }
-            )
+            skipped.append({**location, "reason": skip_reason})
     return changed, skipped
 
 
@@ -175,6 +174,8 @@ def _apply(manifest: dict[str, Any], changed: list[dict[str, Any]]) -> None:
     evidence = manifest["evidence"]
     for record in changed:
         entry = evidence[record["item"]]
+        if (group_index := record.get("group_index")) is not None:
+            entry = entry[group_index]
         if record["index"] is not None:
             entry = entry[record["index"]]
         entry["content_hash"] = record["new_content_hash"]

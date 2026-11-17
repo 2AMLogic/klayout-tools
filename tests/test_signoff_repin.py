@@ -20,6 +20,11 @@ from klayout_tools.signoff_repin import (
     SKIP_INVALID_EVIDENCE,
     SKIP_UNRESOLVED_EVIDENCE,
 )
+from test_signoff import (
+    LVS_MATCH_SUPPLY_CORRESPONDENCE_ENVELOPE,
+    _hash_of,
+    _power_delivery_evidence,
+)
 
 
 def _write_inventory(repo, rows):
@@ -245,6 +250,47 @@ def test_unresolvable_and_malformed_pinned_entries_are_reported(attested, capsys
         "4": SKIP_INVALID_EVIDENCE,
     }
     assert manifest.read_bytes() == before
+
+
+def test_grouped_item_11_repin_restores_the_verified_part(tmp_path, capsys):
+    layout = tmp_path / "layout.gds"
+    layout.write_bytes(b"the layout bytes cited by LVS")
+    live_hash = _hash_of(layout)
+    old_hash = "sha256:" + "a" * 64
+    clean = _power_delivery_evidence(tmp_path, prefix="clean")
+    stale = _power_delivery_evidence(
+        tmp_path,
+        prefix="stale",
+        lvs_envelope={
+            **LVS_MATCH_SUPPLY_CORRESPONDENCE_ENVELOPE,
+            "layout": str(layout),
+            "provenance": {"input": {"content_hash": live_hash}},
+        },
+    )
+    manifest = tmp_path / "manifest.json"
+    pinned = {"file": stale[1], "content_hash": old_hash}
+    _write_manifest(manifest, {"11": [clean, [stale[0], pinned]]})
+    assert _item(manifest, 11)["reason"] == "stale_evidence"
+
+    code, payload = _repin(manifest, capsys)
+
+    assert code == 0
+    assert payload["skipped"] == []
+    assert payload["changed"] == [
+        {
+            "item": "11",
+            "group_index": 1,
+            "index": 1,
+            "file": stale[1],
+            "old_content_hash": old_hash,
+            "new_content_hash": live_hash,
+        }
+    ]
+    assert json.loads(manifest.read_text())["evidence"]["11"] == [
+        clean,
+        [stale[0], {**pinned, "content_hash": live_hash}],
+    ]
+    assert _item(manifest, 11)["status"] == "met"
 
 
 def test_a_clean_manifest_is_not_rewritten_at_all(attested, capsys):

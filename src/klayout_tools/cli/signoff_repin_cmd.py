@@ -107,8 +107,10 @@ def _print_text(result: dict) -> None:
 
 
 def _repin_entry_label(record: dict) -> str:
-    """``"9"`` or ``"9[2]"`` plus the evidence file, for a text-mode line."""
+    """The evidence key and any list positions, plus the evidence file."""
     label = record["item"]
+    if (group_index := record.get("group_index")) is not None:
+        label = f"{label}[{group_index}]"
     if record["index"] is not None:
         label = f"{label}[{record['index']}]"
     file = record.get("file")
