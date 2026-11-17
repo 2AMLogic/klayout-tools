@@ -27,7 +27,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from . import sim_window
+from . import sim_supply_relative, sim_window
 from ._jsonnum import is_number
 from .sim_errors import SimError
 
@@ -43,6 +43,12 @@ FRACTION_KEYS = frozenset({"sample_at", "fraction"})
 def is_dc(kind: Any) -> bool:
     """Whether ``analysis.kind`` names a dc sweep."""
     return str(kind or "").lower() == DC_KIND
+
+
+def is_sampled_offset(level: Any) -> bool:
+    """Whether ``level`` is the sampled-offset form ``{sample_at, offset}``
+    (issue #4813): the signal's own value at a time, plus an offset."""
+    return isinstance(level, dict) and ("sample_at" in level or "offset" in level)
 
 
 def is_fraction_level(level: Any) -> bool:
@@ -139,6 +145,46 @@ def resolve_sampled_level(
     if "fraction" in level:
         return sampled * float(level["fraction"])
     return sampled + float(level["offset"])
+
+
+def resolve_level(
+    name: Any,
+    body: dict[str, Any],
+    points: list[list[float]],
+    supply_v: dict[str, Any] | None,
+    sweep: bool,
+) -> tuple[float | None, str | None]:
+    """The per-corner threshold for one measurement: ``body.level`` itself,
+    or the sampled-offset / supply-relative form resolved against this
+    corner's waveform and supply map. Returns ``(resolved level, error
+    message)`` -- the level is None when it stays literal, the message set
+    when resolution failed."""
+    raw_level = body["level"]
+    if is_sampled_offset(raw_level):
+        try:
+            return (
+                resolve_sampled_level(
+                    name,
+                    raw_level,
+                    [point[0] for point in points],
+                    [point[1] for point in points],
+                    sweep=sweep,
+                ),
+                None,
+            )
+        except ValueError as exc:
+            return None, str(exc)
+    if sim_supply_relative.is_supply_relative(raw_level):
+        try:
+            return (
+                sim_supply_relative.resolve(
+                    raw_level, f"measurement '{name}': crossings.level", supply_v
+                ),
+                None,
+            )
+        except sim_supply_relative.SupplyRelativeError as exc:
+            return None, str(exc)
+    return None, None
 
 
 def no_crossing_message(name: Any, level: float, edge: str) -> str:

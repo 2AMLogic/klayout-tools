@@ -150,12 +150,6 @@ def _validate_level(name: Any, level: Any) -> None:
         )
 
 
-def is_sampled_offset(level: Any) -> bool:
-    """Whether ``level`` is the sampled-offset form ``{sample_at, offset}``
-    (issue #4813): the signal's own value at a time, plus an offset."""
-    return isinstance(level, dict) and ("sample_at" in level or "offset" in level)
-
-
 def _validate_sampled_offset(name: Any, level: dict[str, Any]) -> None:
     where = f"measurement '{name}': crossings.level"
     keys = set(level)
@@ -185,7 +179,7 @@ def _validate_crossings_level(name: Any, level: Any) -> None:
     sampled-offset level (issue #4813), or (issue #3918) a
     ``{frac_of, fraction}`` fraction of a ``corners.supply_v`` key resolved per
     corner. Whether the key exists is checked once the corners are known."""
-    if is_sampled_offset(level):
+    if sim_crossings_dc.is_sampled_offset(level):
         _validate_sampled_offset(name, level)
         return
     if not sim_supply_relative.is_supply_relative(level):
@@ -204,9 +198,9 @@ def validate_supply_relative_levels(
     ``frac_of`` key one of the corners' ``supply_v`` maps does not carry."""
     for spec in crossings_measurements(measurements_spec):
         level = spec["crossings"].get("level")
-        if is_sampled_offset(level) or not sim_supply_relative.is_supply_relative(
+        if sim_crossings_dc.is_sampled_offset(
             level
-        ):
+        ) or not sim_supply_relative.is_supply_relative(level):
             continue
         for supply_v in supply_maps:
             try:
@@ -405,45 +399,6 @@ def extract_corner_crossings(
     return outcomes
 
 
-def _resolve_level(
-    name: Any,
-    body: dict[str, Any],
-    points: list[list[float]],
-    supply_v: dict[str, Any] | None,
-    sweep: bool,
-) -> tuple[float | None, str | None]:
-    """The per-corner threshold: ``body.level`` itself, or the sampled-offset
-    / supply-relative form resolved against this corner's waveform and supply
-    map. Returns ``(resolved level, error message)`` -- the level is None
-    when it stays literal, the message set when resolution failed."""
-    raw_level = body["level"]
-    if is_sampled_offset(raw_level):
-        try:
-            return (
-                sim_crossings_dc.resolve_sampled_level(
-                    name,
-                    raw_level,
-                    [point[0] for point in points],
-                    [point[1] for point in points],
-                    sweep=sweep,
-                ),
-                None,
-            )
-        except ValueError as exc:
-            return None, str(exc)
-    if sim_supply_relative.is_supply_relative(raw_level):
-        try:
-            return (
-                sim_supply_relative.resolve(
-                    raw_level, f"measurement '{name}': crossings.level", supply_v
-                ),
-                None,
-            )
-        except sim_supply_relative.SupplyRelativeError as exc:
-            return None, str(exc)
-    return None, None
-
-
 def _extract_one(
     spec: dict[str, Any],
     raw_path: str,
@@ -480,7 +435,9 @@ def _extract_one(
         )
     name = spec["name"]
     sweep = sim_crossings_dc.is_dc(kind)
-    resolved_level, error = _resolve_level(name, body, points, supply_v, sweep)
+    resolved_level, error = sim_crossings_dc.resolve_level(
+        name, body, points, supply_v, sweep
+    )
     if error is not None:
         return CrossingsOutcome(error=error)
     outcome = find_crossings(
