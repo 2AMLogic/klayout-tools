@@ -305,6 +305,12 @@ field (`resistance_ohm`, `terminals[]`, `by_layer`, the ladder) keeps its
 meaning and value. A consumer must treat the key as optional. No field is
 removed, renamed or retyped, so **no `schema_version` bump**. See
 `docs/cli/extract.md`'s "Terminal-aware resistance graph" section.
+Issue #5747 likewise adds `fallback_reason` (`string | null`) to each
+`extraction.resistance_graph.nets[]` entry of `klt pex --resistance-graph`:
+`null` when `resistance_source` is `graph`, otherwise the reason the legacy
+scalar was kept (the first diagnostic `code` of an `unsupported` graph, else
+`resistance_source_reason`). Output without the flag is unchanged; no
+`schema_version` bump.
 
 **A new *qualifier* field next to an existing numeric field is additive — and
 is strictly preferable to retyping that field to `number | null`.** When an
@@ -1821,9 +1827,9 @@ All eight share one contract:
   same clean "no `file`/`layout` field to rerun" error, never a traceback.
   A report predating #2659, whose field is a bare string, keeps the old
   anchoring described in the next bullet exactly as before.
-- **An explicit input restores the non-repo workflow (issue #2699).** For the
-  three verbs whose report echoes its own input, the caller may supply it
-  alongside `--check`/`--rerun` — `klt drc <file> --check REPORT`, `klt
+- **An explicit input restores the non-repo workflow (issue #2699).** For
+  `drc`/`extract`/`lvs`, the caller may supply the echoed input alongside
+  `--check`/`--rerun` — `klt drc <file> --check REPORT`, `klt
   extract <file> --check REPORT`, `klt lvs --check REPORT --layout PATH` —
   for use when the report cannot locate the input (`scope: "external"`) or
   the grading clone is laid out differently. **Precedence is one rule for all
@@ -2132,7 +2138,12 @@ depends on its meaning staying fixed:
 - The emitted envelope is an ordinary `generic` evidence envelope plus an
   additive `attestation` block (`producer`, `inventory_schema_version`,
   `hash_algorithm`, `check_count`, `passed_count`, `checks[]`). Its fields
-  follow this document's usual additive rules.
+  follow this document's usual additive rules. The tier record's flat
+  `artifact_binding.attestation.inventory_schema_version` is resolved from
+  that key when present, else from `attestation.inventory.schema_version`
+  (the item-2 `--input`+`--inventory` shape, issue #5571), so a committed
+  envelope in either shape discloses its inventory contract without a
+  re-attest.
 - Hashes are `sha256:<hex>` of raw bytes (`hash_algorithm:
   "sha256-raw-bytes"`). Introducing any normalisation would be a new named
   algorithm recorded in the envelope, never a silent change to this one.
