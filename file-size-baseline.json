@@ -193,7 +193,7 @@
     },
     {
       "path": "src/klayout_tools/cli/pdk_cmd.py",
-      "lines": 615
+      "lines": 613
     },
     {
       "path": "src/klayout_tools/cli/signoff_cmd.py",
@@ -257,7 +257,7 @@
     },
     {
       "path": "src/klayout_tools/drc.py",
-      "lines": 3759
+      "lines": 3737
     },
     {
       "path": "src/klayout_tools/drc_klayout_engine.py",
@@ -409,7 +409,7 @@
     },
     {
       "path": "src/klayout_tools/lvs.py",
-      "lines": 6469
+      "lines": 6448
     },
     {
       "path": "src/klayout_tools/lvs_combine.py",
@@ -609,7 +609,7 @@
     },
     {
       "path": "src/klayout_tools/sim_search.py",
-      "lines": 543
+      "lines": 529
     },
     {
       "path": "src/klayout_tools/sim_staging.py",
@@ -621,7 +621,7 @@
     },
     {
       "path": "src/klayout_tools/sim_tian.py",
-      "lines": 559
+      "lines": 547
     },
     {
       "path": "src/klayout_tools/sim_transfer.py",
@@ -913,7 +913,7 @@
     },
     {
       "path": "tests/test_lvs.py",
-      "lines": 26221
+      "lines": 26199
     },
     {
       "path": "tests/test_lvs_device_provenance.py",
