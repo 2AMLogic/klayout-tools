@@ -14,6 +14,18 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed** (#5664, `klt lvs` `--engine klayout-runset`; no JSON field
+  changes, `schema_version` stays 3): a `pin.unmatched` finding whose pin
+  pair KLayout's own comparer graded `Match`/`MatchWithWarning` — a
+  reference pin with no layout counterpart, i.e. an *unlabelled* layout pin,
+  the shape a runset global like IHP sg13g2's `ignore_top_ports_mismatch`
+  exists to accept — is now disclosed with `severity: "warning"` instead of
+  `error`, so it no longer flips the wrapper's verdict to `mismatch`
+  (exit 3) on a compare the wrapped runset itself reports as PASS. The
+  finding stays listed in `mismatches[]` and `category_counts`, but
+  `error_count`/`category_error_counts` and the `status` now agree with the
+  engine's own grade; `counts.pins` still reports structural pin presence,
+  and a pin pair the comparer itself graded otherwise remains an error.
 - **`klt lvs --deck` is the command-line spelling of the request's
   `layout.deck` field** (#5899, 2026-11-17): the curated extraction deck for
   inline layout extraction, the same knob `klt extract --deck` sets (issue

@@ -334,7 +334,14 @@ a non-zero exit whose database is unreadable or has no cross-reference.
 `status` is `match` only when every circuit pair is `Match`/`MatchWithWarning`;
 unmatched devices, nets, pins and circuits become `mismatches[]` entries using
 the shared categories (`device.unmatched`, `device.property`, `net.unmatched`,
-`pin.unmatched`, `topology`).
+`pin.unmatched`, `topology`). A `pin.unmatched` entry whose pin pair the
+runset's own compare graded `Match`/`MatchWithWarning` — a reference pin with
+no layout counterpart, i.e. an *unlabelled* layout pin, the shape a runset
+global like IHP sg13g2's `ignore_top_ports_mismatch` exists to accept — is
+disclosed with `severity: "warning"` and does not gate the verdict: the
+wrapper's `status` stays in step with the engine it wrapped (issue #5664).
+`counts.pins` still reports the structural pin presence, and a pin pair the
+comparer itself graded otherwise remains `severity: "error"`.
 
 **An empty extraction is graded, not an error (issue #4081).** When the runset
 extracts zero devices from the layout its compare step never runs, so the
