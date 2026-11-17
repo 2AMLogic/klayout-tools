@@ -900,6 +900,7 @@ state it measured so the limitation is visible rather than implied.
   ],
   "liberty": {
     "path": "/abs/path/.klt/characterize/characterize_demo_tt_1p80V_25C.lib",
+    "sha256": "9f2b…64 hex chars…e1",
     "library_name": "characterize_demo_tt_1p80V_25C",
     "cell_count": 1,
     "time_unit": "1ns",
@@ -956,7 +957,7 @@ each a full `len(index_1) x len(index_2)` `values` matrix — and so is
 | `cell` | object \| null | Single-cell form: `cells[0].cell`. `null` in batch mode (there is no one cell to describe). |
 | `arcs` | array \| null | Single-cell form: `cells[0].arcs`; `null` in batch mode. One entry per characterized arc: `output_pin`, `related_pin`, `timing_sense`, `measured_sense`, `side_inputs` (the full held state, including inputs the function does not reference), and the six tables `cell_rise`/`cell_fall`/`rise_transition`/`fall_transition`/`rise_power`/`fall_power` as `{index_1, index_2, values}` in the library's own units. Same numbers as the `.lib`, so a consumer need not re-parse Liberty to read them. |
 | `leakage` | object \| null | Single-cell form: `cells[0].leakage`; `null` in batch mode. `cell_leakage_power_pw` (the mean over states) and `states[]` of `{when, inputs, value_pw}`, one per input state. |
-| `liberty` | object | `path` (the emitted file — a **plain absolute string**, see below), `library_name`, `cell_count`, `time_unit`, `capacitive_load_unit`, and `roundtrip`. |
+| `liberty` | object | `path` (the emitted file — a **plain absolute string**, see below), `sha256` (bare-hex SHA-256 of that file's bytes, via the shared `sha256_file`; re-hash the file to detect an in-place edit after the run — additive, no `schema_version` bump), `library_name`, `cell_count`, `time_unit`, `capacitive_load_unit`, and `roundtrip`. |
 | `liberty.roundtrip` | object | `{engine, status, message, probe_netlist}`. See "Round-trip verification". |
 | `simulation` | object \| null | Single-cell form: `cells[0].simulation`; `null` in batch mode. The generated artifacts (plain absolute strings) plus the `klt sim` corner's own `corner_id`/`status`/`runtime_s`, the engine, its major version, `engine_build` (the full build identity -- version banner and binary sha256 -- copied verbatim from the sim report's `environment.engine_build`, shaped as in [`sim.md`](sim.md); `null` when the report has none, e.g. xyce), and the resolved transient `window`. |
 | `comparison` | object \| null | The `--compare-to` report (see "Accuracy against a vendor library"); `null` when not asked for. |
