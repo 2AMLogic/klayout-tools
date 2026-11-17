@@ -197,7 +197,7 @@
     },
     {
       "path": "src/klayout_tools/cli/signoff_cmd.py",
-      "lines": 1156
+      "lines": 1154
     },
     {
       "path": "src/klayout_tools/cli/sim_cmd.py",
@@ -413,7 +413,7 @@
     },
     {
       "path": "src/klayout_tools/lvs_combine.py",
-      "lines": 1609
+      "lines": 1569
     },
     {
       "path": "src/klayout_tools/lvs_finfet.py",
@@ -437,7 +437,7 @@
     },
     {
       "path": "src/klayout_tools/lvs_runset.py",
-      "lines": 977
+      "lines": 774
     },
     {
       "path": "src/klayout_tools/macros.py",
@@ -505,7 +505,7 @@
     },
     {
       "path": "src/klayout_tools/place_and_route.py",
-      "lines": 3355
+      "lines": 3352
     },
     {
       "path": "src/klayout_tools/place_and_route_batch.py",
@@ -525,7 +525,7 @@
     },
     {
       "path": "src/klayout_tools/place_and_route_script.py",
-      "lines": 1429
+      "lines": 1359
     },
     {
       "path": "src/klayout_tools/place_and_route_sta.py",
@@ -577,7 +577,7 @@
     },
     {
       "path": "src/klayout_tools/signoff_attest.py",
-      "lines": 1172
+      "lines": 1168
     },
     {
       "path": "src/klayout_tools/signoff_generator_batch.py",
@@ -589,11 +589,11 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 12415
+      "lines": 12396
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
-      "lines": 4454
+      "lines": 4441
     },
     {
       "path": "src/klayout_tools/sim_commands.py",
@@ -609,7 +609,7 @@
     },
     {
       "path": "src/klayout_tools/sim_search.py",
-      "lines": 529
+      "lines": 523
     },
     {
       "path": "src/klayout_tools/sim_staging.py",
@@ -621,7 +621,7 @@
     },
     {
       "path": "src/klayout_tools/sim_tian.py",
-      "lines": 547
+      "lines": 541
     },
     {
       "path": "src/klayout_tools/sim_transfer.py",
@@ -765,7 +765,7 @@
     },
     {
       "path": "tests/test_ci_wall_clock.py",
-      "lines": 2054
+      "lines": 2035
     },
     {
       "path": "tests/test_components.py",
@@ -920,10 +920,6 @@
       "lines": 1398
     },
     {
-      "path": "tests/test_lvs_klayout_runset.py",
-      "lines": 576
-    },
-    {
       "path": "tests/test_lvs_magic_oracle.py",
       "lines": 839
     },
@@ -993,7 +989,7 @@
     },
     {
       "path": "tests/test_place_and_route.py",
-      "lines": 12411
+      "lines": 12398
     },
     {
       "path": "tests/test_place_and_route_batch.py",

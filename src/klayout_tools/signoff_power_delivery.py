@@ -36,7 +36,7 @@ from typing import Any, cast
 
 from ._jsonnum import is_int, is_number
 from ._provenance import content_hash
-from .signoff_coverage_disclosure import power_delivery_part_refusal
+from .signoff_malformed_coverage import power_delivery_part_refusal
 from .signoff_power_delivery_substrate import (
     REASON_SUBSTRATE_ISOLATION_UNDECIDABLE,
     add_substrate_continuity,

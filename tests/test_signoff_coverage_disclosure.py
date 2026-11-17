@@ -1,286 +1,345 @@
-"""`klt signoff --manifest`'s `malformed_coverage` gate and disclosure (#5643).
+"""Issue #5789: the manifest's opt-in ``require_coverage_disclosure``
+ratchet.
 
-A cited envelope whose versioned `coverage` block does not validate must be
-refused, and the refusal must name what was read and why it was refused --
-on the single-envelope route (item 3) *and* on item 11's compound citation,
-where `_grade_power_delivery` resolves several parts and previously applied
-no coverage gate to any of them. Split out of ``test_signoff.py`` to respect
-the per-file size ratchet.
+T1 item 3's citation reports the cited `klt drc` envelope's three
+``coverage`` fields (issue #2002), but by default a claim that hides every
+disclosed gap grades exactly like a fully-disclosing one -- a manifest had
+no field to state its disclosure in. These cover the top-level boolean and
+the per-entry ``coverage_disclosed`` declaration that close that loop: the
+declaration is compared against the coverage the citation reports as
+per-field set equality. The reporting itself is covered beside the other
+item-3 cases in ``test_signoff.py``.
 """
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
-from klayout_tools.coverage import build_check_coverage
-from klayout_tools.signoff import build_signoff, build_tier_report
+from klayout_tools.cli import main
+from klayout_tools.signoff import build_tier_report, check_tier_report
 from test_signoff import (
     DRC_CLEAN_ENVELOPE,
-    ERC_CLEAN_ENVELOPE,
-    LVS_MATCH_SUPPLY_CORRESPONDENCE_ENVELOPE,
-    LVS_MISMATCH_ENVELOPE,
-    _erc_coverage_block,
-    _item_11,
-    _manifest,
-    _port_evidence,
-    _power_delivery_evidence,
-    _socket_check_envelope,
-    _write,
+    DRC_CLEAN_NO_COVERAGE_ENVELOPE,
+    DRC_CLEAN_WITH_COVERAGE_GAPS_ENVELOPE,
+    DRC_VIOLATIONS_ENVELOPE,
 )
 
-_ANTENNA_CHECKED = 'antenna:["gate0","poly"]'
+_GAPS = {
+    "layers_in_stream_without_rules": ["70/20", "71/20"],
+    "rules_skipped": ["met5.4", "met5.5"],
+    "deck_scope": ["5.x", "6.x"],
+}
 
 
-def _malformed_coverage() -> dict:
-    """A v1 block whose `checked` list has been replaced by an object --
-    the report's own reproduction recipe, and the one message
-    ("checked: work must be an array") every route must quote verbatim."""
-    block = build_check_coverage(checked=[_ANTENNA_CHECKED])
-    block["checked"] = {"a": 1}
-    return block
+def _write(tmp_path, name, payload) -> str:
+    path = tmp_path / name
+    path.write_text(json.dumps(payload))
+    return str(path)
 
 
-def _grade_item_11(
-    tmp_path, *, erc: dict | None = None, lvs: dict | None = None
-) -> dict:
-    """Grade an analog item 11 citing `erc`/`lvs` envelope overrides."""
-    return _item_11(
-        build_tier_report(
-            _manifest(
-                kind="analog",
-                evidence={
-                    "11": _power_delivery_evidence(
-                        tmp_path,
-                        kind="analog",
-                        erc_envelope=erc or ERC_CLEAN_ENVELOPE,
-                        lvs_envelope=lvs,
-                    )
-                },
-            )
+def _manifest(**overrides) -> dict:
+    return {"block": "demo-block", "kind": "analog", "evidence": {}, **overrides}
+
+
+def _item3(evidence, **overrides) -> dict:
+    manifest = _manifest(evidence={"3": evidence}, **overrides)
+    return next(i for i in build_tier_report(manifest)["items"] if i["id"] == 3)
+
+
+def _declared(**fields) -> dict:
+    return {name: list(entries) for name, entries in fields.items()}
+
+
+def test_ratchet_off_grades_byte_identically(tmp_path):
+    """AC: absent, `null` and `false` all render the report a manifest
+    without the key always rendered -- the hard requirement."""
+    drc = _write(tmp_path, "drc.json", DRC_CLEAN_WITH_COVERAGE_GAPS_ENVELOPE)
+    evidence = {"3": {"file": drc, "coverage_disclosed": _declared(**_GAPS)}}
+
+    absent = build_tier_report(_manifest(evidence=evidence))
+    for value in (False, None):
+        explicit = build_tier_report(
+            _manifest(evidence=evidence, require_coverage_disclosure=value)
         )
+        assert explicit == absent
+    assert next(i for i in absent["items"] if i["id"] == 3)["status"] == "met"
+
+
+def test_matching_declaration_grades_met_with_no_new_detail_key(tmp_path):
+    drc = _write(tmp_path, "drc.json", DRC_CLEAN_WITH_COVERAGE_GAPS_ENVELOPE)
+    # Shuffled order: the comparison is per-field set equality.
+    declared = _declared(
+        rules_skipped=["met5.5", "met5.4"],
+        deck_scope=["6.x", "5.x"],
+        layers_in_stream_without_rules=["71/20", "70/20"],
     )
 
+    item = _item3(
+        {"file": drc, "coverage_disclosed": declared},
+        require_coverage_disclosure=True,
+    )
 
-def _item_3(result: dict) -> dict:
-    return next(item for item in result["items"] if item["id"] == 3)
+    assert item["status"] == "met"
+    assert item["reason"] is None
+    assert "detail" not in item
+    assert item["citation"]["coverage"] == _GAPS
 
 
-# --------------------------------------------------------------------------- #
-# AC1: item 11 refuses a malformed coverage block, on either part, with or
-# without a valid `erc_coverage` scope beside it.
-# --------------------------------------------------------------------------- #
+def test_disagreeing_field_grades_unmet_naming_missing_and_extra(tmp_path):
+    drc = _write(tmp_path, "drc.json", DRC_CLEAN_WITH_COVERAGE_GAPS_ENVELOPE)
+    declared = _declared(
+        layers_in_stream_without_rules=["70/20"],
+        rules_skipped=["met5.4", "met5.5", "met9.1"],
+        deck_scope=["5.x", "6.x"],
+    )
 
-
-@pytest.mark.parametrize("erc_coverage", [False, True], ids=["no-scope", "with-scope"])
-@pytest.mark.parametrize("part", ["erc", "lvs"])
-def test_item_11_refuses_a_malformed_coverage_block(tmp_path, part, erc_coverage):
-    erc: dict = {**ERC_CLEAN_ENVELOPE, "coverage": _malformed_coverage()}
-    if erc_coverage:
-        # A valid connectivity scope must not suppress the refusal the way
-        # `_coverage_refusal`'s erc widening suppresses a vacuous one -- the
-        # widening exists for #2179's table-less PDK, not for a block that
-        # claims coverage it cannot validate.
-        erc["erc_coverage"] = _erc_coverage_block(
-            checked=['erc.net_connectivity:["VPWR"]']
-        )
-    lvs: dict = {
-        **LVS_MATCH_SUPPLY_CORRESPONDENCE_ENVELOPE,
-        "coverage": _malformed_coverage(),
-    }
-
-    item = _grade_item_11(
-        tmp_path,
-        erc=erc if part == "erc" else None,
-        lvs=lvs if part == "lvs" else None,
+    item = _item3(
+        {"file": drc, "coverage_disclosed": declared},
+        require_coverage_disclosure=True,
     )
 
     assert item["status"] == "unmet"
-    assert item["reason"] == "malformed_coverage"
+    assert item["reason"] == "coverage_undisclosed"
     assert item["citation"] is None
-    # AC3: the row names the artifact that was read and what was invalid in
-    # it -- not just that something was.
-    assert item["detail"]["cited_evidence"]["kind"] == part
-    assert item["detail"]["cited_evidence"]["file"].endswith(f"pd-{part}.json")
-    assert item["detail"]["cited_evidence"]["check_status"] in ("clean", "match")
-    assert item["detail"]["cited_evidence"]["content_hash"] is not None
-    assert item["detail"]["coverage_error"] == "checked: work must be an array"
+    assert item["detail"]["coverage_undisclosed"] == {
+        "layers_in_stream_without_rules": {
+            "missing": ["71/20"],
+            "extra": [],
+        },
+        "rules_skipped": {"extra": ["met9.1"], "missing": []},
+    }
+    # The unmet item still names what was read (#5479's additive pattern:
+    # `citation` is documented as present only on a `met` item).
+    assert item["detail"]["cited_evidence"]["file"] == drc
+    assert item["detail"]["cited_evidence"]["coverage"] == _GAPS
 
 
-# --------------------------------------------------------------------------- #
-# AC3, single-envelope route: the refusal names the artifact and the message.
-# --------------------------------------------------------------------------- #
+def test_absent_declaration_with_disclosed_gaps_is_unmet(tmp_path):
+    """The issue's observed failure mode: a pointer claim, not an
+    enumeration, never grades `met` under the ratchet."""
+    drc = _write(tmp_path, "drc.json", DRC_CLEAN_WITH_COVERAGE_GAPS_ENVELOPE)
 
-
-def test_single_envelope_malformed_coverage_row_names_artifact_and_message(tmp_path):
-    path = _write(
-        tmp_path, "drc.json", {**DRC_CLEAN_ENVELOPE, "coverage": _malformed_coverage()}
-    )
-
-    item = _item_3(build_tier_report(_manifest(evidence={"3": path})))
+    item = _item3(drc, require_coverage_disclosure=True)
 
     assert item["status"] == "unmet"
-    assert item["reason"] == "malformed_coverage"
-    assert item["citation"] is None
-    evidence = item["detail"]["cited_evidence"]
-    assert evidence["kind"] == "drc"
-    assert evidence["file"].endswith("drc.json")
-    assert evidence["check_status"] == "clean"
-    assert evidence["content_hash"] is not None
-    assert item["detail"]["coverage_error"] == "checked: work must be an array"
-
-
-# --------------------------------------------------------------------------- #
-# AC5: envelope aggregation and --manifest agree that the block is malformed.
-# --------------------------------------------------------------------------- #
-
-
-def test_both_modes_report_the_same_malformed_coverage_block(tmp_path):
-    drc_path = _write(
-        tmp_path, "drc.json", {**DRC_CLEAN_ENVELOPE, "coverage": _malformed_coverage()}
-    )
-    aggregated = next(
-        c for c in build_signoff([drc_path])["checks"] if c["kind"] == "drc"
-    )
-    assert aggregated["detail"]["coverage_state"] == "malformed"
-    assert aggregated["detail"]["coverage_error"] == "checked: work must be an array"
-    item = _item_3(build_tier_report(_manifest(evidence={"3": drc_path})))
-    assert (item["reason"], item["detail"]["coverage_error"]) == (
-        "malformed_coverage",
-        aggregated["detail"]["coverage_error"],
-    )
-
-    erc = {**ERC_CLEAN_ENVELOPE, "coverage": _malformed_coverage()}
-    erc_aggregated = next(
-        c
-        for c in build_signoff([_write(tmp_path, "erc.json", erc)])["checks"]
-        if c["kind"] == "erc"
-    )
-    assert erc_aggregated["detail"]["coverage_state"] == "malformed"
-    item_11 = _grade_item_11(tmp_path, erc=erc)
-    assert (item_11["reason"], item_11["detail"]["coverage_error"]) == (
-        "malformed_coverage",
-        erc_aggregated["detail"]["coverage_error"],
-    )
-
-
-# --------------------------------------------------------------------------- #
-# No-regression controls: valid, partial and absent coverage grade as before.
-# --------------------------------------------------------------------------- #
-
-
-def test_item_11_still_met_with_valid_versioned_coverage(tmp_path):
-    erc = {
-        **ERC_CLEAN_ENVELOPE,
-        "coverage": build_check_coverage(checked=[_ANTENNA_CHECKED]),
+    assert item["reason"] == "coverage_undisclosed"
+    assert item["detail"]["coverage_undisclosed"] == {
+        field: {"missing": sorted(entries), "extra": []}
+        for field, entries in _GAPS.items()
     }
 
-    item = _grade_item_11(tmp_path, erc=erc)
+
+def test_no_coverage_block_is_refused_with_that_reason(tmp_path):
+    drc = _write(tmp_path, "drc.json", DRC_CLEAN_NO_COVERAGE_ENVELOPE)
+
+    item = _item3(drc, require_coverage_disclosure=True)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "coverage_undisclosed"
+    assert item["detail"]["coverage_undisclosed"] == {"reason": "no_coverage_block"}
+    assert "coverage" not in item["detail"]["cited_evidence"]
+
+
+def test_all_empty_fields_with_no_declaration_stay_met(tmp_path):
+    """Nothing was disclosed because there is nothing to disclose."""
+    drc = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+
+    item = _item3(drc, require_coverage_disclosure=True)
 
     assert item["status"] == "met"
-    assert item["reason"] is None
-    assert item["citation"]["kind"] == "erc"
-    assert [part["kind"] for part in item["citation"]["parts"]] == ["erc", "lvs"]
+    assert "detail" not in item
 
 
-def test_item_11_coverage_less_fixture_still_met(tmp_path):
-    """The stock `_power_delivery_evidence` erc envelope carries no
-    `coverage` block at all -- absence is not evidence (docs/cli/signoff.md),
-    so it must keep grading exactly as it always has."""
+@pytest.mark.parametrize("value", ["true", 1, 0, {}, []])
+def test_non_boolean_ratchet_degrades_only_item_3(tmp_path, value):
+    drc = _write(tmp_path, "drc.json", DRC_CLEAN_WITH_COVERAGE_GAPS_ENVELOPE)
 
-    item = _grade_item_11(tmp_path)
+    def report(**overrides):
+        return build_tier_report(_manifest(evidence={"3": drc}, **overrides))
 
-    assert item["status"] == "met"
-    assert item["reason"] is None
+    bad = report(require_coverage_disclosure=value)
 
-
-def test_partial_coverage_still_qualifies_and_still_meets(tmp_path):
-    erc = {
-        **ERC_CLEAN_ENVELOPE,
-        "coverage": build_check_coverage(
-            checked=[_ANTENNA_CHECKED],
-            skipped=[
-                {
-                    "id": 'antenna:["gate0","li1"]',
-                    "reason": "missing_antenna_pdk",
-                }
-            ],
-        ),
-    }
-
-    item = _grade_item_11(tmp_path, erc=erc)
-
-    assert item["status"] == "met"
-    assert item["reason"] is None
-    qualification = item["citation"]["coverage_qualification"]
-    assert qualification["reason"] == "partial_coverage"
-    assert qualification["skipped"][0]["reason"] == "missing_antenna_pdk"
+    item = next(i for i in bad["items"] if i["id"] == 3)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "invalid_evidence"
+    assert "require_coverage_disclosure" in item["detail"]["problem"]
+    # Item 3 alone: every other item grades exactly as with the key absent.
+    baseline = report()
+    assert [i for i in bad["items"] if i["id"] != 3] == [
+        i for i in baseline["items"] if i["id"] != 3
+    ]
 
 
-# --------------------------------------------------------------------------- #
-# Edge cases from the issue's test plan.
-# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("value", ["true", 1, 0, {}, []])
+def test_non_boolean_ratchet_degrades_with_no_item_3_evidence(tmp_path, value):
+    """A mistyped key is item 3's `invalid_evidence` even when item 3 cites
+    nothing at all -- reporting `no_evidence` would never surface it."""
+    item = _item3(None, require_coverage_disclosure=value)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "invalid_evidence"
+    assert "require_coverage_disclosure" in item["detail"]["problem"]
 
 
 @pytest.mark.parametrize(
-    "coverage",
-    [3, "schema"],
-    ids=["int", "string"],
+    "declared",
+    [
+        ["70/20"],
+        {"layers_in_stream_without_rules": "70/20"},
+        {"layers_in_stream_without_rules": [70]},
+        {"deck_scope": ["5.x"], "unknown_field": ["x"]},
+    ],
 )
-def test_item_11_malformed_non_object_block(tmp_path, coverage):
-    item = _grade_item_11(tmp_path, erc={**ERC_CLEAN_ENVELOPE, "coverage": coverage})
+def test_malformed_declaration_is_invalid_evidence(tmp_path, declared):
+    drc = _write(tmp_path, "drc.json", DRC_CLEAN_WITH_COVERAGE_GAPS_ENVELOPE)
 
-    assert (item["status"], item["reason"]) == ("unmet", "malformed_coverage")
-    assert item["detail"]["coverage_error"] == "coverage must be an object"
-
-
-def test_item_11_malformed_missing_schema_version(tmp_path):
-    block = build_check_coverage(checked=[_ANTENNA_CHECKED])
-    del block["schema_version"]
-    item = _grade_item_11(tmp_path, erc={**ERC_CLEAN_ENVELOPE, "coverage": block})
-
-    assert (item["status"], item["reason"]) == ("unmet", "malformed_coverage")
-    assert (
-        item["detail"]["coverage_error"]
-        == "unsupported or missing coverage.schema_version"
-    )
-
-
-def test_item_11_malformed_known_unknown_contradiction(tmp_path):
-    block = build_check_coverage(
-        checked=[_ANTENNA_CHECKED],
-        unknown=[{"id": 'antenna:["gate0","mcon"]', "reason": "no_model"}],
-    )
-    block["known"] = True
-    item = _grade_item_11(tmp_path, erc={**ERC_CLEAN_ENVELOPE, "coverage": block})
-
-    assert (item["status"], item["reason"]) == ("unmet", "malformed_coverage")
-    assert item["detail"]["coverage_error"] == "known contradicts unknown work"
-
-
-def test_item_11_refuses_a_malformed_part_it_did_not_need(tmp_path):
-    """AC2: the gate runs over *every* resolved part, in part order -- a
-    socket-check citation this analog block never needed is still refused
-    when its coverage block does not validate, and named in the detail."""
-    parts = _port_evidence(
-        tmp_path,
-        socket={**_socket_check_envelope(), "coverage": _malformed_coverage()},
-    )
-
-    item = _item_11(build_tier_report(_manifest(kind="analog", evidence={"11": parts})))
-
-    assert (item["status"], item["reason"]) == ("unmet", "malformed_coverage")
-    assert item["detail"]["cited_evidence"]["kind"] == "socket-check"
-
-
-def test_a_failing_part_outranks_its_malformed_coverage(tmp_path):
-    """Guidance step 1: a part that *failed* is reported as the failure it
-    is, before any coverage complaint about it -- the LVS mismatch verdict
-    must win over the erc part's malformed block."""
-    item = _grade_item_11(
-        tmp_path,
-        erc={**ERC_CLEAN_ENVELOPE, "coverage": _malformed_coverage()},
-        lvs=LVS_MISMATCH_ENVELOPE,
+    item = _item3(
+        {"file": drc, "coverage_disclosed": declared},
+        require_coverage_disclosure=True,
     )
 
     assert item["status"] == "unmet"
-    assert item["reason"] == "lvs_did_not_pass"
+    assert item["reason"] == "invalid_evidence"
+    assert "coverage_disclosed" in item["detail"]["problem"]
+
+
+def test_malformed_declaration_with_ratchet_off_is_ignored(tmp_path):
+    """Edge-table row 1 is absolute: with the ratchet off no verdict
+    changes, so the lazy validation never fires."""
+    drc = _write(tmp_path, "drc.json", DRC_CLEAN_WITH_COVERAGE_GAPS_ENVELOPE)
+    evidence = {"3": {"file": drc, "coverage_disclosed": ["not-an-object"]}}
+
+    assert build_tier_report(_manifest(evidence=evidence)) == build_tier_report(
+        _manifest(evidence={"3": drc})
+    )
+
+
+def test_deck_scope_entry_compared_verbatim(tmp_path):
+    """A non-layer `deck_scope` token (the curated sg13g2 `"x"`, #5723)
+    compares exactly like a chapter name -- the ratchet is correct
+    whichever way that deck issue lands."""
+    envelope = {
+        **DRC_CLEAN_WITH_COVERAGE_GAPS_ENVELOPE,
+        "coverage": {
+            **DRC_CLEAN_WITH_COVERAGE_GAPS_ENVELOPE["coverage"],
+            "deck_scope": ["x"],
+        },
+    }
+    drc = _write(tmp_path, "drc.json", envelope)
+    declared = _declared(**{**_GAPS, "deck_scope": ["x"]})
+
+    assert (
+        _item3(
+            {"file": drc, "coverage_disclosed": declared},
+            require_coverage_disclosure=True,
+        )["status"]
+        == "met"
+    )
+    assert _item3(
+        {"file": drc, "coverage_disclosed": _declared(**_GAPS)},
+        require_coverage_disclosure=True,
+    )["detail"]["coverage_undisclosed"]["deck_scope"] == {
+        "extra": ["5.x", "6.x"],
+        "missing": ["x"],
+    }
+
+
+def test_ratchet_leaves_a_failing_envelope_reason_untouched(tmp_path):
+    """The ratchet only narrows what already passes: a `violations`
+    envelope still reports its own reason first."""
+    drc = _write(tmp_path, "drc.json", DRC_VIOLATIONS_ENVELOPE)
+
+    item = _item3(drc, require_coverage_disclosure=True)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "check_failed"
+
+
+def test_report_list_member_refusal_names_the_citation(tmp_path):
+    """Item 3 may cite one `klt drc` report per cell (#5031): the gate
+    applies per member, and the aggregate names the failing one."""
+    disclosed = _write(tmp_path, "a.json", DRC_CLEAN_ENVELOPE)
+    hidden = _write(tmp_path, "b.json", DRC_CLEAN_WITH_COVERAGE_GAPS_ENVELOPE)
+
+    item = _item3(
+        [
+            {
+                "file": disclosed,
+                "coverage_disclosed": _declared(
+                    layers_in_stream_without_rules=[],
+                    rules_skipped=[],
+                    deck_scope=[],
+                ),
+            },
+            {"file": hidden},
+        ],
+        require_coverage_disclosure=True,
+    )
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "coverage_undisclosed"
+    assert item["detail"]["failed_citations"] == [hidden]
+    assert item["detail"]["coverage_undisclosed"]["rules_skipped"]["missing"] == [
+        "met5.4",
+        "met5.5",
+    ]
+
+
+def test_check_reproduces_a_report_from_the_same_ratcheted_manifest(tmp_path, capsys):
+    """AC: the verdict depends on no CLI state -- `--check` re-grades the
+    manifest and matches a report committed from it."""
+    drc = _write(tmp_path, "drc.json", DRC_CLEAN_WITH_COVERAGE_GAPS_ENVELOPE)
+    manifest = _manifest(
+        evidence={"3": {"file": drc, "coverage_disclosed": _declared(**_GAPS)}},
+        require_coverage_disclosure=True,
+    )
+    manifest_path = _write(tmp_path, "manifest.json", manifest)
+    committed = _write(tmp_path, "committed.json", build_tier_report(manifest))
+
+    result = check_tier_report(committed, manifest)
+    assert result["status"] == "match"
+
+    exit_code = main(["signoff", "--manifest", manifest_path, "--check", committed])
+    assert exit_code == 0
+    assert "status: match" in capsys.readouterr().out
+
+
+def test_text_prints_the_undisclosed_entries_under_the_cite_line(tmp_path, capsys):
+    drc = _write(tmp_path, "drc.json", DRC_CLEAN_WITH_COVERAGE_GAPS_ENVELOPE)
+    manifest_path = _write(
+        tmp_path,
+        "manifest.json",
+        _manifest(evidence={"3": {"file": drc}}, require_coverage_disclosure=True),
+    )
+
+    main(["signoff", "--manifest", manifest_path, "--format", "text"])
+
+    lines = [line.strip() for line in capsys.readouterr().out.splitlines()]
+    cite = next(i for i, line in enumerate(lines) if line.startswith("cite:"))
+    coverage = next(i for i, line in enumerate(lines) if line.startswith("coverage:"))
+    undisclosed = next(
+        i for i, line in enumerate(lines) if line.startswith("coverage undisclosed:")
+    )
+    assert cite < coverage < undisclosed
+    assert "layers_in_stream_without_rules=2 (70/20, 71/20)" in lines[coverage]
+    assert "missing 70/20, 71/20" in lines[undisclosed]
+    assert "rules_skipped: missing met5.4, met5.5" in lines[undisclosed]
+
+
+def test_text_names_a_missing_coverage_block(tmp_path, capsys):
+    drc = _write(tmp_path, "drc.json", DRC_CLEAN_NO_COVERAGE_ENVELOPE)
+    manifest_path = _write(
+        tmp_path,
+        "manifest.json",
+        _manifest(evidence={"3": drc}, require_coverage_disclosure=True),
+    )
+
+    main(["signoff", "--manifest", manifest_path, "--format", "text"])
+
+    lines = [line.strip() for line in capsys.readouterr().out.splitlines()]
+    assert any(
+        line.startswith("coverage undisclosed: cited evidence reports no coverage")
+        for line in lines
+    )
