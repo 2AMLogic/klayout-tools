@@ -185,7 +185,12 @@ and `schema_version` are unchanged. See [`docs/cli/sim.md`](cli/sim.md)'s
 roll-ups to `environment.remote` beside the existing `fleet[]` array:
 `job_ids` (every non-`null` shard's `job_id`, in shard order) and a worst-of
 `runner_compatibility` (`mismatch` > `unknown` > `match`, so a lost or
-unknown shard never reads as clean). Additive, and narrower than the
+unknown shard never reads as clean). Each `fleet[]` member is typed
+`object | null`: `null` is the slot of a shard that returned no remote block
+(lost mid-run, or submitted but never launched), at its own index -- the
+array is positional (index *i* is shard *i*, in the shard map's order), so a
+client iterating it must skip the `null` slots and take identity and skew
+from the roll-ups above. Additive, and narrower than the
 opt-in-flag rule above: they appear only where `fleet[]` already does, so an
 unsplit single-job report is byte-identical, the `fleet[]` entries are
 unchanged, and the SSH `remote` backend gets neither. No `schema_version`
@@ -631,6 +636,16 @@ observe). `lines` is the written file's lines for `request`/`thread_pin`, else
 `null`; `sha256` is `sha256:<hex>` of the effective file's bytes, `null` for
 `none`/`runner`. Additive; no `schema_version` bump.
 
+For corner-mode `batch` runs, the worker's own on-host report supplies
+`environment.remote.worker_environment.ngspice_init` (and the same field on
+each `fleet[]` member, issue #6045). It has the same `{source, lines, sha256}`
+shape and path-free labels; `home` always has `lines: null`. The client's
+`environment.ngspice_init` remains `source: "runner"`. Missing, legacy,
+Xyce or malformed worker observations are `null`; no client value is used
+as a fallback. This field comes from the collected simulation report,
+independently of the preflight capture's `capture` status. Additive; no
+`schema_version` bump.
+
 `environment.remote` (and each `fleet[]` member) also gains the additive
 `runner_models_lib_sha256` (string or `null`) and `models_lib_comparison`
 (`status` `match` / `mismatch` / `not_comparable`); no `schema_version` bump
@@ -652,6 +667,15 @@ every other verb below populates this field — there is no `--pdk-root` for
 is always `null` (no `SOURCES` stamp to read); `provenance.pdk` itself is
 still `null` when `--pdk` was omitted, matching every other verb's
 conditional population.
+
+`klt ring-check --pdk` (issue #5650) is the same kind of exception: its
+`--pdk` selects a seal-ring rule table baked into `seal_ring_rules.py`
+(see [`docs/cli/ring-check.md`](cli/ring-check.md)), not an installed PDK
+directory resolved via `find_pdk`, and there is no `--pdk-root` for it to
+resolve against either. In `--pdk` mode `provenance.pdk` is therefore always
+`{"name": "<pdk>", "source": "built-in", "version": null}`; in `--layers`
+mode (no `--pdk`) it is `null`, matching the conditional-population
+convention above.
 
 `klt erc`'s `provenance.deck` (issue #2204) is, by contrast, populated
 exactly the way every other `--deck`-taking verb below populates it (the
@@ -2182,7 +2206,7 @@ the exit code alone is authoritative.
 
   | Command | `error.code` | Meaning |
   |---------|--------------|---------|
-  | `sim` | `engine_version_unmet` | The request's `engine_version` pin (`"MAJOR"` or `"MAJOR.MINOR"`) is not satisfied by the engine that would run it, or the version could not be determined (fail closed). Raised before any corner simulates on the `local`/`local-parallel` backends; on `remote`/`batch` the pin is checked against the runner report's `engine_version` after the run. The *tool* is unavailable. See [docs/cli/sim.md](cli/sim.md) "Pinning the simulator version". |
+  | `sim` | `engine_version_unmet` | The request's `engine_version` pin (`"MAJOR"` or `"MAJOR.MINOR"`) is not satisfied by the engine that would run it, or the version could not be determined (fail closed). Raised before any corner simulates on the `local`/`local-parallel` backends. On `remote`/`batch` the pin travels with the job: the runner's own `local-parallel` `klt sim` raises it there before any corner simulates (0.8.0+ runners), surfacing per unit as `batch_job_failed` with `runner_code: "engine_version_unmet"` and then as this top-level code when the submitter's post-run check finds no report version; the submitter's post-run check against the report's `environment.engine_version` remains the fail-closed backstop for a runner too old to enforce the field. The *tool* is unavailable. See [docs/cli/sim.md](cli/sim.md) "Pinning the simulator version". |
   | `sim` | `pdk_version_unmet` | The request's `models.pdk_version` pin is not satisfied by the installed PDK (`mismatch` or `unknown` identity), the PDK could not be resolved, or the pin was given with neither `models.pdk` nor `models.pdk_root`. Raised before any corner simulates on `local`/`local-parallel`; `remote`/`batch` reject the field with an uncoded request error (worker-side check tracked in #3462). See [docs/cli/sim.md](cli/sim.md) "Pinning the PDK revision". |
   | `sim` | `unsupported_analysis` | The request names a periodic analysis (`pss`, `pnoise`, `pac`) that `klt sim` does not implement. The *capability* is absent regardless of simulator build. Raised before any corner runs. See [docs/cli/sim.md](cli/sim.md) "Supported analyses". |
   | `sim` | `batch_no_capacity` | `--backend batch`: 2am's fleet launcher refused the job for lack of Spot capacity in every pool, or because the shared vCPU/Spot-quota budget (`BATCH_MAX_VCPU`) is exhausted (after any `batch.capacity_wait_s` budget was spent). A fleet-wide, usually transient condition — retrying later is reasonable. See [docs/cli/sim.md](cli/sim.md) "Batch backend". |

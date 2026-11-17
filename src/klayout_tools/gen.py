@@ -3785,7 +3785,7 @@ def load_params_arg(value: str | None) -> dict[str, Any]:
         try:
             with open(value, encoding="utf-8") as handle:
                 data = json.load(handle)
-        except OSError as exc:
+        except (OSError, UnicodeDecodeError) as exc:
             raise GenError(f"could not read params file '{value}': {exc}") from exc
         except json.JSONDecodeError as exc:
             raise GenError(f"params file '{value}' is not valid JSON: {exc}") from exc

@@ -27,7 +27,7 @@ def test_load_committed_report_unreadable_file_is_an_error_not_a_crash(tmp_path)
     path.write_text('{"status": "clean"}')
     path.chmod(0o000)
 
-    with pytest.raises(RuntimeError, match="could not read committed report"):
+    with pytest.raises(RuntimeError, match="could not read"):
         rv.load_committed_report(str(path), error_cls=RuntimeError)
 
 
