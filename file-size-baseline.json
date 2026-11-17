@@ -457,7 +457,7 @@
     },
     {
       "path": "src/klayout_tools/netlist.py",
-      "lines": 1067
+      "lines": 1066
     },
     {
       "path": "src/klayout_tools/netlist_batch.py",
