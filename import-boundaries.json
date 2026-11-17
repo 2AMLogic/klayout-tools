@@ -255,6 +255,9 @@
         "klayout_tools.extract_parasitics_block",
         "klayout_tools.extract_netlist_write",
         "klayout_tools.extract_detect_block",
+        "klayout_tools.extract_detect_diode_near_miss",
+        "klayout_tools.extract_detect_markers",
+        "klayout_tools.extract_detect_substrate_label",
         "klayout_tools.extract_pdk_resolve",
         "klayout_tools.extract_pin_order",
         "klayout_tools.extract_netselect",
@@ -467,6 +470,7 @@
         "klayout_tools.lvs_mismatch",
         "klayout_tools.lvs_mismatch_tolerance",
         "klayout_tools.lvs_mos_options",
+        "klayout_tools.lvs_net_identity",
         "klayout_tools.lvs_netgen",
         "klayout_tools.lvs_netgen_branch",
         "klayout_tools.lvs_pin_anchors",
@@ -480,6 +484,7 @@
         "klayout_tools.lvs_runset_findings",
         "klayout_tools.lvs_short_nets",
         "klayout_tools.lvs_supply",
+        "klayout_tools.lvs_supply_universe",
         "klayout_tools.lvs_timeout",
         "klayout_tools.lvs_unmerged_fingers"
       ]
@@ -522,6 +527,7 @@
         "klayout_tools.netlist_normalize_scan",
         "klayout_tools.netlist_paths",
         "klayout_tools.netlist_pdk",
+        "klayout_tools.netlist_diff",
         "klayout_tools.netlist_port_order"
       ]
     },
@@ -537,6 +543,7 @@
         "klayout_tools.decks.finfet",
         "klayout_tools.decks.gf180mcu",
         "klayout_tools.decks.gf180mcu_bond_pad",
+        "klayout_tools.decks.gf180mcu_parasitics",
         "klayout_tools.decks.gf180mcu_untranscribed",
         "klayout_tools.decks.parasitics",
         "klayout_tools.decks.rules",
@@ -592,6 +599,7 @@
         "klayout_tools.place_and_route",
         "klayout_tools.place_and_route_clock",
         "klayout_tools.place_and_route_batch",
+        "klayout_tools.place_and_route_batch_single",
         "klayout_tools.place_and_route_def_drcfill",
         "klayout_tools.place_and_route_gds_merge",
         "klayout_tools.place_and_route_groups",
@@ -686,6 +694,7 @@
         "klayout_tools._devices",
         "klayout_tools._digest",
         "klayout_tools._engine_proc",
+        "klayout_tools._engine_remedy",
         "klayout_tools._git_tracked",
         "klayout_tools._jsongz",
         "klayout_tools._jsonnum",
@@ -738,6 +747,7 @@
         "klayout_tools.signoff_attest_build",
         "klayout_tools.signoff_attest_carry",
         "klayout_tools.signoff_attest_drift",
+        "klayout_tools.signoff_attest_env",
         "klayout_tools.signoff_attest_input",
         "klayout_tools.signoff_attest_item9",
         "klayout_tools.signoff_attest_live",
@@ -773,6 +783,7 @@
       "modules": [
         "klayout_tools.asap7_bsimcmg",
         "klayout_tools.cli.parser_sim",
+        "klayout_tools.cli.sim_check_cmd",
         "klayout_tools.cli.sim_cmd",
         "klayout_tools.cli.sim_job_text",
         "klayout_tools.cli.sim_measurement_text",
@@ -840,6 +851,7 @@
         "klayout_tools.sim_mismatch_gate",
         "klayout_tools.sim_measurement_kind",
         "klayout_tools.sim_measurement_results",
+        "klayout_tools.sim_measurement_template",
         "klayout_tools.sim_noise",
         "klayout_tools.sim_op_args",
         "klayout_tools.sim_param_file",
@@ -853,6 +865,7 @@
         "klayout_tools.sim_plan",
         "klayout_tools.sim_plot",
         "klayout_tools.sim_portable",
+        "klayout_tools.sim_report_check",
         "klayout_tools.sim_process_legs",
         "klayout_tools.sim_provenance",
         "klayout_tools.sim_raw",
@@ -931,6 +944,7 @@
         "klayout_tools._sta_sdc_check",
         "klayout_tools.post_route_sta",
         "klayout_tools.post_route_sta_electrical",
+        "klayout_tools.post_route_sta_instance_paths",
         "klayout_tools.post_route_sta_path_groups"
       ]
     },
