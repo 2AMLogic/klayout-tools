@@ -6318,11 +6318,14 @@ existing `limits`/`plausible_range`/Monte Carlo paths unchanged.
   `case11_`).
 - **Templated entries.** A `measurements[]` entry is templated when `{case}`
   appears anywhere in it; only `name`, `spice` and `expr` support
-  substitution. A placeholder in any other field (`unit`, `limits`,
-  `plausible_range`, a `crossings`/`snm`/`search` sub-object, ...) is a
-  request error naming the field — a reduction declared per case must have
-  its per-case scope inside the card text or the name. Untemplated entries
-  are declared once and graded per corner exactly as before.
+  substitution. With more than one case, the placeholder must reach both the
+  name and the card text (each case needs its own measurement name and its
+  own card) — see the refusal list below. A placeholder in any other field
+  (`unit`, `limits`, `plausible_range`, a `crossings`/`snm`/`search`
+  sub-object, ...) is a request error naming the field — a reduction
+  declared per case must have its per-case scope inside the card text or the
+  name. Untemplated entries are declared once and graded per corner exactly
+  as before.
 - **Expanded names are ordinary names.** After expansion every entry goes
   through the existing validation: the case-insensitive collision rule
   (two cases whose expanded names differ only by letter case — scopes
@@ -6337,10 +6340,15 @@ existing `limits`/`plausible_range`/Monte Carlo paths unchanged.
   (`measurement_cases_without_template`); an empty, non-array, non-string,
   bad-character or duplicate case list (`measurement_cases_invalid`); a
   placeholder in a field where substitution is not supported
-  (`measurement_template_field_unsupported`); and templated entries combined
+  (`measurement_template_field_unsupported`); templated entries combined
   with `analysis_steps[]` (`measurement_template_with_analysis_steps`) —
   steps are an ordered sequence of solves within one corner's deck for
-  figures of merit defined across solves, not independent cases.
+  figures of merit defined across solves, not independent cases; and, with
+  more than one case declared, a templated entry whose `{case}` never
+  reaches a field where it must vary per case — a placeholder outside
+  `name` expands every copy to the same measurement name, and a placeholder
+  outside the `spice` card text emits the identical `.meas` card N times
+  (`measurement_template_missing_substitution`).
 - **Backends and the forwarded document.** The expansion is resolved
   client-side, before any corner is dispatched and before the request
   document is forwarded to a `remote`/`batch` runner: the forwarded document

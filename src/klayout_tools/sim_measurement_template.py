@@ -68,6 +68,7 @@ TEMPLATE_WITHOUT_CASES_CODE = "measurement_template_without_cases"
 CASES_WITHOUT_TEMPLATE_CODE = "measurement_cases_without_template"
 FIELD_UNSUPPORTED_CODE = "measurement_template_field_unsupported"
 STEPS_COMBINATION_CODE = "measurement_template_with_analysis_steps"
+MISSING_SUBSTITUTION_CODE = "measurement_template_missing_substitution"
 
 #: A case scope must be valid simultaneously as (part of) an ngspice vector
 #: name -- expanded ``expr`` names are read back out of the log -- and as
@@ -178,11 +179,51 @@ def _expand_one(spec: Any, cases: list[str]) -> list[Any]:
             "per-case scope into the card text or the name",
             code=FIELD_UNSUPPORTED_CODE,
         )
+    if len(cases) > 1:
+        name = spec.get("name")
+        if not isinstance(name, str) or PLACEHOLDER not in name:
+            raise _missing_name_substitution(spec, fields[0], len(cases))
+        spice = spec.get("spice")
+        if isinstance(spice, str) and PLACEHOLDER not in spice:
+            raise _missing_card_substitution(spec, len(cases))
     return [
         {**spec, "case": case}
         | {field: spec[field].replace(PLACEHOLDER, case) for field in fields}
         for case in cases
     ]
+
+
+def _missing_name_substitution(
+    spec: dict[str, Any], field: str, n_cases: int
+) -> SimError:
+    """N > 1 copies of one entry whose ``{case}`` never reaches ``name`` all
+    expand to the same name -- N identical results (and downstream, an
+    unhandled duplicate-identity ``ValueError`` instead of a refusal) -- so
+    the name must carry the placeholder too."""
+    return SimError(
+        f"measurement '{spec.get('name')}' has the {PLACEHOLDER} placeholder "
+        f"only in measurements[].{field}: with {n_cases} cases every expanded "
+        f"copy would share the one name '{spec.get('name')}' -- put "
+        f"{PLACEHOLDER} in measurements[].name as well, e.g. "
+        '"name": "tpd_{case}", so each case gets its own measurement',
+        code=MISSING_SUBSTITUTION_CODE,
+    )
+
+
+def _missing_card_substitution(spec: dict[str, Any], n_cases: int) -> SimError:
+    """N > 1 copies of one entry whose ``spice`` card never carries the
+    ``{case}`` token emit the identical ``.meas`` card N times (an ``expr``
+    card embeds its entry's own expanded name, so it cannot go static this
+    way): every expanded copy measures the same vector under a name the card
+    never emits, so each result reports no value."""
+    return SimError(
+        f"measurement '{spec.get('name')}' has the {PLACEHOLDER} placeholder "
+        f"only in measurements[].name: with {n_cases} cases every expanded "
+        "copy would emit the identical spice card, measuring one vector N "
+        f"times -- put {PLACEHOLDER} in the 'spice' card text where the "
+        "copy's own node/source names go",
+        code=MISSING_SUBSTITUTION_CODE,
+    )
 
 
 def _validate_cases(cases_raw: Any) -> list[str]:
