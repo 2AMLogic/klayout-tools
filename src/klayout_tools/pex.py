@@ -222,6 +222,7 @@ from . import env_provenance, output_lock, pex_async, pex_sim_evidence
 from ._jsonnum import is_number
 from ._paths import _resolve_relative, fold_spice_continuations
 from ._provenance import content_hash, sha256_file
+from ._text import read_text as _read_text
 from .coverage import (
     REASON_NO_DELTA_ROWS,
     build_check_coverage,
@@ -240,10 +241,10 @@ from .pex_netlist_text import (
     _dut_declares_a_circuit,
     _expand_reference_includes,
     _has_include_card,
-    _read_text,
     _reference_is_hierarchical,
     _subckt_interfaces,
 )
+from .pex_resistance_graph import _resistance_graph_echo
 from .sim import SimError, load_request, run_sim
 from .spice_flatten import SpiceFlattenError, flatten_spice
 
@@ -335,10 +336,6 @@ MEASUREMENT_MODE_EXTRACT_ONLY = "extract-only"
 #: Override per run with ``measure_timeout_s`` (``klt pex
 #: --measure-timeout-s``).
 MEASURE_COMMAND_TIMEOUT_S = 1800.0
-
-#: The two sides a ``--measure-command`` is invoked for, in invocation order
-#: -- also the two keys of the report's ``measurement.sides`` object.
-_MEASURE_SIDES = ("schematic", "extracted")
 
 #: A measurement document row's permitted ``status`` values -- the same three
 #: a ``delta[]`` row itself uses, and the same three `klt sim` reports per
@@ -555,30 +552,6 @@ def _parasitic_integrity_report(
         if isinstance(entry, dict) and entry.get("integrity") is not None
     ]
     return {**summary, "nets": nets}
-
-
-def _resistance_graph_echo(
-    parasitics: Mapping[str, Any], r_cut_ohm: float | None
-) -> dict[str, Any]:
-    """The ``extraction.resistance_graph`` block (issue #4037): the request
-    (``r_cut_ohm``) and, per net with a graph result, which scalar the
-    extracted netlist's lumped R used (``resistance_source``) next to both
-    candidate values. ``klt extract`` is the source of every value."""
-    nets = []
-    for entry in parasitics.get("nets") or []:
-        graph = entry.get("resistance_graph") if isinstance(entry, dict) else None
-        if not isinstance(graph, dict):
-            continue
-        nets.append(
-            {
-                "net": entry.get("net"),
-                "net_id": entry.get("net_id"),
-                "resistance_source": graph.get("resistance_source"),
-                "selected_resistance_ohm": graph.get("selected_resistance_ohm"),
-                "legacy_resistance_ohm": graph.get("legacy_resistance_ohm"),
-            }
-        )
-    return {"r_cut_ohm": r_cut_ohm, "nets": nets}
 
 
 def _strip_quotes(token: str) -> str:

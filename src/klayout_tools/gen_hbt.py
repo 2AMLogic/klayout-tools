@@ -94,7 +94,7 @@ def load_hbt(
     src = kdb.Layout()
     try:
         src.read(path)
-    except Exception as exc:  # noqa: BLE001 - KLayout raises bare RuntimeError
+    except Exception as exc:  # - KLayout raises bare RuntimeError
         raise GenError(
             f"generator 'bjt_array': cannot read PDK HBT library {path}: {exc}"
         ) from exc

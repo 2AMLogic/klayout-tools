@@ -260,7 +260,7 @@ def _read_owner(fd: int) -> tuple[int | None, str | None]:
         if not isinstance(acquired, str):
             acquired = None
         return pid, acquired
-    except Exception:  # noqa: BLE001 - diagnostics must never mask contention
+    except Exception:  # - diagnostics must never mask contention
         return None, None
 
 

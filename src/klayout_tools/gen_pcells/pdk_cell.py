@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     import klayout.db as kdb
 
+from ._common_params import declare_vpp_gds_path
+
 
 def _build_pdk_cell_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
     """Build the ``pdk_cell`` PCell -- a row of one PDK fixed cell."""
@@ -40,12 +42,7 @@ def _build_pdk_cell_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Instance pitch (um); 0 abuts at the cell's bbox width",
                 default=0.0,
             )
-            self.param(
-                "vpp_gds_path",
-                self.TypeString,
-                "Resolved PDK GDS holding the cell (harness-computed)",
-                default="",
-            )
+            declare_vpp_gds_path(self)
 
         def display_text_impl(self) -> str:
             return f"pdk_cell({self.pdk_cell},n={self.num})"
