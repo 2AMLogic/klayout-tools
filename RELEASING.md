@@ -192,6 +192,14 @@ depending on someone remembering. Design decisions:
   PR is opened and again before tagging; if a `klt-*-native` pin is unpublished
   the job files (or refreshes in place) a single "Automated release blocked"
   issue and opens no PR or tag. `publish.yml` keeps its own copy of the gate.
+- **The GitHub Release is part of the pipeline.** After the PyPI upload
+  succeeds, `publish.yml`'s `github-release` job creates the GitHub Release
+  for the tag from the matching `## X.Y.Z (date)` section of `CHANGELOG.md`
+  (`scripts/release_notes.py`) and marks it latest. A section over GitHub's
+  125,000-character release-body cap is cut at a line boundary under 120k
+  characters and ends with links to the CHANGELOG at the tag and the PyPI
+  version. The job is idempotent: a re-run of `publish.yml` on an
+  already-released tag edits the existing release instead of failing.
 - **Re-run after a failed publish:** run `publish.yml` via "Run workflow" on the
   existing `vX.Y.Z` tag; do not re-tag.
 - `release-lag.yml` was retired; its check is the first step of `release.yml`.

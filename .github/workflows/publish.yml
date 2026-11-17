@@ -89,3 +89,40 @@ jobs:
 
       - name: Publish to PyPI
         run: uv publish
+
+  # Issue #5861: the pipeline stopped at PyPI, so the Releases page lagged
+  # behind. This job runs only after the upload succeeds and creates the
+  # GitHub Release from this tag's CHANGELOG.md section; `contents: write`
+  # is scoped to this job only (workflow default stays read-only).
+  github-release:
+    name: Create GitHub Release
+    needs: publish
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Build release notes from CHANGELOG.md
+        run: |
+          python3 -I scripts/release_notes.py "${GITHUB_REF_NAME#v}" \
+            >"$RUNNER_TEMP/release-notes.md"
+          cat "$RUNNER_TEMP/release-notes.md"
+
+      # Idempotent: a re-run of publish.yml on the same tag edits the
+      # existing release instead of failing on it.
+      - name: Create or update the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" \
+              --notes-file "$RUNNER_TEMP/release-notes.md" --latest
+          else
+            gh release create "$GITHUB_REF_NAME" --verify-tag \
+              --title "$GITHUB_REF_NAME" \
+              --notes-file "$RUNNER_TEMP/release-notes.md" --latest
+          fi
