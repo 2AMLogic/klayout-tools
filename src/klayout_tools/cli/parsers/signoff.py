@@ -226,9 +226,9 @@ def add_signoff_parser(
         "--generator",
         metavar="CMD",
         help=(
-            "with --attest 2: the command that regenerates the stream, "
-            "recorded as provenance.regeneration.generator. Echoed, never "
-            "run; requires --regenerated-hash."
+            "with --attest 2: the command that regenerates the stream, recorded as "
+            "provenance.regeneration.generator. Echoed, never run; requires "
+            "--regenerated-hash. A flag-less --check re-checks the committed claim."
         ),
     )
     signoff_parser.add_argument(
