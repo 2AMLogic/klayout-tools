@@ -533,14 +533,14 @@ _INCONCLUSIVE_STATUS = "inconclusive"
 SUPPORTED_ENGINES = ("ngspice", "xyce")
 
 #: Recognised values for the optional ``request.netlist_source`` field --
-#: caller-declared provenance of ``request.netlist``, distinguishing a
-#: pre-layout schematic-level netlist (S6 in the stage graph) from a
-#: post-layout netlist extracted from the laid-out design (S9). Mirrors the
-#: caller-declares-intent pattern already used for ``engine``/``backend``
-#: rather than trying to auto-detect provenance from the netlist file itself
-#: (fragile -- a schematic and an extracted netlist can look syntactically
-#: identical). See docs/cli/sim.md and docs/design/design-pipeline.md.
-SUPPORTED_NETLIST_SOURCES = ("schematic", "extracted")
+#: caller-declared provenance of ``request.netlist``: a pre-layout schematic
+#: netlist (S6 in the stage graph), a post-layout extracted netlist (S9),
+#: or a gate-level netlist (structural netlist plus timing library,
+#: issue #5638). Mirrors the caller-declares-intent pattern already used
+#: for ``engine``/``backend`` -- rather than auto-detecting provenance from
+#: the netlist file itself (a schematic and an extracted netlist can look
+#: syntactically identical). See docs/cli/sim.md and docs/design/design-pipeline.md.
+SUPPORTED_NETLIST_SOURCES = ("schematic", "extracted", "gate-level")
 
 #: Execution backends behind ``run_sim``. ``local`` runs the corner matrix
 #: sequentially in-process (the original behaviour). ``local-parallel`` fans
