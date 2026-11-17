@@ -42,6 +42,7 @@ from typing import Any
 
 from . import macros as macro_spec
 from . import output_lock
+from . import place_and_route_rerun as _place_and_route_rerun
 from . import place_and_route_resume as _resume
 from ._openroad_engine import (
     _count_violations,
@@ -74,7 +75,6 @@ from ._report_verify import (
     get_path,
     hash_check,
     load_committed_report,
-    strip_keys,
 )
 from .env_provenance import find_repo_root, repo_relative_path
 from .lef_header import read_lef_header as read_lef_header
@@ -344,6 +344,7 @@ from .place_and_route_sta import _post_route_spef_metrics as _post_route_spef_me
 from .place_and_route_sta import _run_corner_sweep as _run_corner_sweep
 from .place_and_route_sta import _spef_sta_script_lines as _spef_sta_script_lines
 from .place_and_route_sta import def_pin_names as def_pin_names
+from .place_and_route_unconstrained import unconstrained_warnings
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
@@ -1604,15 +1605,10 @@ def _validate_stage_prerequisites(
     ``request.power``) needs inputs or per-library tables this request lacks
     (extracted from :func:`_run_single_corner`, issue #3507, to keep its
     cyclomatic complexity from growing)."""
-    # Stages beyond "floorplan" need a clock (else STA reports the
-    # unconstrained sentinel); `clock_period_ns` alone is a virtual clock.
-    no_clock = not (clock_port or clock_period_ns)
-    if stage_index >= STAGE_ORDER.index("place") and no_clock:
-        raise PlaceAndRouteError(
-            "request.constraints.clock_period_ns (optionally with clock_port) "
-            f"is required to reach target_stage '{target_stage}'; period "
-            "alone is accepted as a virtual clock"
-        )
+    # No clock is not an error (issue #5672): a missing `clock_period_ns` (and
+    # `clock_port`) is an unconstrained run -- the timing-driven passes are
+    # skipped and `timing_status` reads "unconstrained" -- so a timing-free
+    # (structural) Liberty can still reach place/route.
     if stage_index >= STAGE_ORDER.index("place") and io_spec is None:
         raise PlaceAndRouteError(
             f"request.io.layer_h/layer_v are required to reach target_stage "
@@ -2374,6 +2370,7 @@ def _run_single_corner(
         row_rail_layer=row_rail_info["layer"],
     )
     warnings.extend(_antenna_repair_warnings(target_stage, library))
+    warnings.extend(unconstrained_warnings(target_stage, clock_port, clock_period_ns))
     warnings.extend(_layer_map_warnings(layer_map_info))
 
     last_stage = stages[-1]
@@ -3174,29 +3171,13 @@ __all__ = [
 # --check / --rerun: verify a previously committed report (issue #2224)
 # --------------------------------------------------------------------------- #
 
-#: Run-scoped bookkeeping keys dropped from *both* sides of a ``--rerun``
-#: diff (issue #2224), via :func:`klayout_tools._report_verify.strip_keys`.
-#:
-#: ``engine_logs`` is the whole reason this exists: every entry is keyed by a
-#: fresh ``uuid4`` ``invocation_id`` (``_openroad_engine._run_openroad``) and
-#: its retained log ``directory``/``stdout_path``/``stderr_path``/
-#: ``metadata_path`` are named after that id, so two identical runs never
-#: agree on the block. The stage scripts' own ``script_sha256`` goes with it
-#: -- the script embeds those same per-invocation paths. Unlike ``klt
-#: synthesize``, the output artifacts (``def_path``/``gds_path``/
-#: ``verilog_path``) are *not* dropped: this verb writes them to a fixed
-#: ``.klt/place-and-route/`` directory, so they are stable across re-runs
-#: from the same request and a change in one is real drift.
-RERUN_BOOKKEEPING_KEYS: frozenset[str] = frozenset({"engine_logs"})
+#: The comparison view :func:`rerun_place_and_route_report` diffs -- bookkeeping
+#: keys stripped and path fields reduced to file names (issue #5863) -- lives
+#: in :mod:`klayout_tools.place_and_route_rerun` beside its key sets.
 
-
-def _canonicalize_place_and_route_report_for_rerun_diff(
-    report: dict[str, Any],
-) -> dict[str, Any]:
-    """``report`` with :data:`RERUN_BOOKKEEPING_KEYS` removed at every depth
-    -- the comparison view :func:`rerun_place_and_route_report` diffs, never
-    what it embeds as ``fresh``."""
-    return strip_keys(report, RERUN_BOOKKEEPING_KEYS)
+_canonicalize_place_and_route_report_for_rerun_diff = (
+    _place_and_route_rerun.canonicalize_place_and_route_report_for_rerun_diff
+)
 
 
 def _place_and_route_provenance_hashes(
@@ -3326,11 +3307,18 @@ def rerun_place_and_route_report(
     Diffs via :func:`klayout_tools._report_verify.diff_verdict_fields`,
     excluding :data:`klayout_tools._report_verify.VOLATILE_FLOW_PATHS`
     (``provenance.klt_version``/``klayout_version``/``pdk.version`` plus
-    ``engine_version``) and canonicalizing :data:`RERUN_BOOKKEEPING_KEYS`
-    out of both sides first. ``status: "drifted"`` names every other field
-    that changed -- a moved ``worst_slack_ns``/``wirelength_um``/
-    ``setup_violation_count``, a ``power.placed`` count that stopped being
-    reported, a changed ``provenance.input.content_hash``.
+    ``engine_version``; ``pdk.source``, *how* the PDK was resolved, rides in
+    the shared set since issue #5863) and canonicalizing both sides first:
+    :data:`RERUN_BOOKKEEPING_KEYS` are stripped and every
+    :data:`RERUN_PATH_FIELD_KEYS` value is reduced to its file name, so a
+    committed report whose output paths were scrubbed repo-relative or to
+    `~/`-form (what ``env-provenance lint-envelope`` requires) still diffs
+    against the raw fresh envelope -- the file name is the identity; a
+    renamed, missing, or newly-appearing artifact still drifts.
+    ``status: "drifted"`` names every other field that changed -- a moved
+    ``worst_slack_ns``/``wirelength_um``/``setup_violation_count``, a
+    ``power.placed`` count that stopped being reported, a changed
+    ``provenance.input.content_hash``.
 
     **Re-running overwrites this request's own artifacts.** Unlike ``klt
     synthesize``'s retained per-``run_id`` directories, this verb writes to a

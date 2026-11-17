@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import shutil
 import subprocess
 
 import pytest
 
+from helpers.tool_probes import SKIP_NO_NGSPICE
 from klayout_tools.spice_flatten import SpiceFlattenError, flatten_spice
 
 _INV_BUF = (
@@ -370,7 +370,7 @@ def test_unbalanced_or_duplicate_definitions_are_errors(text):
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.skipif(shutil.which("ngspice") is None, reason="ngspice not installed")
+@SKIP_NO_NGSPICE
 def test_flattened_deck_simulates_to_the_same_operating_point(tmp_path):
     hierarchical = (
         ".subckt half a b R=1\nR1 a mid {R/2}\nR2 mid b {R/2}\n.ends half\n"
@@ -400,7 +400,7 @@ def test_flattened_deck_simulates_to_the_same_operating_point(tmp_path):
     assert value == pytest.approx(1.8 * 1000 / 1289.2, rel=1e-4)
 
 
-@pytest.mark.skipif(shutil.which("ngspice") is None, reason="ngspice not installed")
+@SKIP_NO_NGSPICE
 def test_flattened_deck_keeps_parameters_inherited_from_enclosing_instance(tmp_path):
     """A file-level `.param rval=10k` must not leak in: the flattened `leaf`
     resolves `rval` from the enclosing `mid` instance (2k), like ngspice."""

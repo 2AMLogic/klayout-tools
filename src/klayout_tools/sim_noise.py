@@ -48,6 +48,7 @@ import math
 from typing import Any
 
 from . import _spice_number as spice_number
+from . import sim_measurement_kind
 from . import sim_noise_mechanism
 from .sim_errors import SimError
 
@@ -176,12 +177,13 @@ def validate_noise_context(
     declared = [s for s in measurements_spec if is_noise(s)]
     if not declared:
         return
-    if str(analysis.get("kind", "")).lower() != "noise":
-        raise SimError(
-            f"measurement '{declared[0]['name']}' declares 'noise', which "
-            'reads the noise spectrum and so requires analysis.kind "noise" '
-            f"(got {analysis.get('kind')!r})"
-        )
+    sim_measurement_kind.require_analysis_kind(
+        declared,
+        analysis,
+        form="noise",
+        required="noise",
+        explanation="reads the noise spectrum",
+    )
     _refuse_missing_pts_per_summary(declared, analysis)
     swept = swept_range(analysis)
     if swept is None:

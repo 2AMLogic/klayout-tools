@@ -22,7 +22,10 @@ nothing is shrunk.
 The returned report carries a ``tip_check`` sub-object
 (:mod:`~klayout_tools.place_and_route_via_tip`): what the packaged deck's own
 ``M1``-``M3`` tip rules make of the merged geometry this pass leaves behind,
-including how much of it is attributable to router-inserted landing pads.
+including how much of it is attributable to router-inserted landing pads
+and, when the caller hands the routed DEF over as ``def_path``, to the
+router's own ``SHAPE DRCFILL`` patch metal
+(:mod:`~klayout_tools.place_and_route_def_drcfill`, issue #5740).
 That is the half ``route_drc_violation_count`` cannot report, and it is why
 "trimmed" never has to be read as "deck-clean".
 
@@ -52,6 +55,7 @@ from __future__ import annotations
 from typing import Any
 
 from .pdk_families import pdk_variant_family
+from .place_and_route_def_drcfill import scan_def_drcfill
 from .place_and_route_via_tip import check_via_pad_tips
 
 _ASAP7_FAMILY = "asap7"
@@ -295,6 +299,21 @@ def _trim(
     return report
 
 
+def _drcfill_regions(
+    kdb: Any, *, variant: str, def_path: str | None, dbu_um: float
+) -> dict[str, Any] | None:
+    """The routed DEF's reconstructed ``SHAPE DRCFILL`` patch regions, or
+    ``None`` when this pass must not attribute any: no DEF was handed in,
+    the PDK family is not ASAP7 (the scan would be dead work on a pass
+    whose GDS outcome is a documented no-op), or the scan itself skipped
+    (unreadable file, no ``UNITS`` statement) -- all reported as absence,
+    never guessed."""
+    if def_path is None or pdk_variant_family(variant) != _ASAP7_FAMILY:
+        return None
+    scanned = scan_def_drcfill(kdb, def_path=def_path, dbu_um=dbu_um)
+    return scanned["regions"] or None
+
+
 def trim_via_pads(
     kdb: Any,
     *,
@@ -302,11 +321,13 @@ def trim_via_pads(
     top_cell: Any,
     variant: str,
     lef_to_gds: dict[str, tuple[int, int]],
+    def_path: str | None = None,
 ) -> dict[str, Any]:
     """:func:`_trim`'s report plus the ``tip_check`` sub-report: what the
     deck's own tip rules say about the merged geometry this pass leaves
     behind (:func:`~klayout_tools.place_and_route_via_tip.check_via_pad_tips`,
-    issue #4495).
+    issue #4495), with the routed DEF's ``SHAPE DRCFILL`` patch metal
+    attributed separately when ``def_path`` names it (issue #5740).
 
     The two belong together because neither answers the caller's actual
     question alone. ``"trimmed"`` says pads were edited, not that the deck
@@ -328,5 +349,8 @@ def trim_via_pads(
         top_cell=top_cell,
         variant=variant,
         lef_to_gds=lef_to_gds,
+        drcfill_regions=_drcfill_regions(
+            kdb, variant=variant, def_path=def_path, dbu_um=layout.dbu
+        ),
     )
     return report
