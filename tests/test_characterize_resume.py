@@ -58,6 +58,17 @@ def test_changed_inputs_never_reuse_a_stale_report(tmp_path, monkeypatch):
     assert len(calls) == 2
 
 
+def test_non_utf8_cached_input_degrades_to_a_cache_miss(tmp_path, monkeypatch):
+    """A cached file with invalid UTF-8 bytes must not raise out of the
+    cache check (issue #5755): it degrades to a cache miss, like any other
+    unreadable input, and the leg re-simulates."""
+    calls: list = []
+    _leg(tmp_path, calls, monkeypatch, resume=False)
+    (tmp_path / "leg" / "testbench.spice").write_bytes(b"\xff\xfe not utf-8\n")
+    _leg(tmp_path, calls, monkeypatch)
+    assert len(calls) == 2
+
+
 def test_unrun_corner_report_is_not_reused(tmp_path, monkeypatch):
     calls: list = []
     _leg(tmp_path, calls, monkeypatch, resume=False)
