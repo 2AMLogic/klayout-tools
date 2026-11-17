@@ -1055,7 +1055,13 @@ shards and merges them exactly as the blocking sharded run does. The request
 must be the one submitted (a `request_sha256` or fingerprint mismatch is
 `error.code: "resume_fingerprint_mismatch"`). `--attach` only re-attaches: a
 shard whose job is gone is reported as lost, other shards are still reported,
-and nothing is resubmitted.
+and nothing is resubmitted. A map written by a `--hosts N` / `remote.hosts: N`
+run attaches the same way ([#5777](https://github.com/2AMLogic/klayout-tools/issues/5777)):
+pass the request (and `--hosts`, if it was given at submit) the shards were
+submitted from; the shard count is read from the map itself, so `--hosts` is not
+compared on attach, while a changed `remote.hosts` in the request file is a
+`request_sha256` mismatch naming `remote`. `--collect-partial` takes such a
+map too.
 
 **Worked example: a 135-unit grid** ([#4878](https://github.com/2AMLogic/klayout-tools/issues/4878)).
 A job is capped by the whole-job ceiling (`max_job_seconds`, default `3600`
@@ -1910,7 +1916,9 @@ which of those changed is not recoverable). A shard lost at the collect stage
 ends its `lost_shard` message with `[remote job <id>: finished|failed|timeout|
 running|unknown]`, the job's `status.json` state at that moment: `finished`
 means re-attaching can collect it, `unknown` means no status was readable.
-`--attach` still takes a single job id; recover a split request with
+A bare `--attach <job_id>` still takes a single job (`hosts = 1`) and is
+refused for `hosts != 1`; re-attach a sharded run (`--hosts N` or a
+`--max-units-per-job` split) with its `batch-shards.json`, or recover it with
 `--resume`.
 
 The dispatch-time fail-fast probe is skipped for `batch` —
@@ -2060,13 +2068,15 @@ report a pass. Policy: **reject before simulating**.
   carries exactly one `batch_runner_version_mismatch` entry (severity
   `error`) with `runner_klt_version`, `client_klt_version`,
   `accepted_client_release` (the runner's major.minor) and a `message` stating
-  the remedy: submit from a client of that major.minor, or update the runner
-  image to the client's. It is additive (the per-unit diagnostics and
-  `environment.remote` fields above are unchanged), appears once even for
-  `hosts > 1`, and is not emitted for `match` / `unknown`, nor under
-  `runner_version_check: "warn"` when the run proceeded (that skew stays in
-  `environment.remote` only). It covers the case the pre-launch manifest check
-  cannot see (no manifest, or an entry without `klt_version`).
+  the remedy: submit from a client of that major.minor, update the runner
+  image to the client's, or set `batch.runner_version_check: "warn"` to run
+  anyway (under `warn` the runner-side gate is not applied, so the job is
+  submitted and runs despite the skew). It is additive (the per-unit
+  diagnostics and `environment.remote` fields above are unchanged), appears
+  once even for `hosts > 1`, and is not emitted for `match` / `unknown`, nor
+  under `runner_version_check: "warn"` when the run proceeded (that skew stays
+  in `environment.remote` only). It covers the case the pre-launch manifest
+  check cannot see (no manifest, or an entry without `klt_version`).
 - A single-job `environment.remote`, and each `environment.remote.fleet[]`
   entry of a sharded run (so mixed-version shards stay distinguishable), always
   carries `runner_klt_version` (the runner's own version, or `null` when it
@@ -2218,7 +2228,9 @@ reject (version/feature gate) instead of leaving the bare `job command exited
 87`. If the post-run runner identity shows a major.minor mismatch with the
 client (`environment.remote.runner_compatibility: "mismatch"`), the diagnostic
 also carries `runner_code: "batch_runner_version_mismatch"` and both klt
-versions. `--job-status` is a `status.json` passthrough only and never
+versions, and its message names the remedy: update the runner image, use a
+compatible client, or set `batch.runner_version_check: "warn"` to submit
+anyway. `--job-status` is a `status.json` passthrough only and never
 fetches outputs, so it can show just `job command exited 87`; read the full
 report for the cause.
 
@@ -3996,15 +4008,24 @@ conditions, so a large transient keeps only the signals you named resident
 (and in the rawfile/waveform artifact) without editing the netlist.
 
 klt always adds every `v(x)`/`i(x)` (and derivative forms such as `vdb(x)`,
-`vm(a,b)`) referenced by a declared `measurements[].spice`, `measurements[].expr`
-or `crossings.signal`, so measurements stay correct. A measurement that names
-a vector *bare* (`out` rather than `v(out)`) is not detected — list it in
-`save_vectors` yourself. `save_vectors` and `save_mode: "netlist"` are mutually
-exclusive (an application error: the latter already suppresses the card the
-former rewrites), and `engine: "xyce"` refuses it like `save_mode`. Omitting it
-leaves the deck byte-identical. A changed `save_vectors` invalidates a
-`--resume` checkpoint. It rides the forwarded request document to
-`remote`/`batch` workers, so the worker image must include this implementation.
+`vm(a,b)`) referenced by a declared measurement, so measurements stay
+correct. Covered (issue #5559): the `measurements[].spice` and
+`measurements[].expr` text, `crossings.signal`, `step_resolution.signal`,
+the `settled` clock and `settled.mean.signal`/`settled.peak.signal`,
+`cycle_mean.signal` and `cycle_mean.align`, `energy.voltage` plus the
+implied `i(<energy.source>)`, `stress.a`/`stress.b` (bare node names, saved
+as `v(<node>)`), `snm.x`/`snm.y1`/`snm.y2`, `eye.signal`,
+`transfer.num`/`transfer.den`, and `tian` — its `tv`/`ti` selectors, or
+`v(<series_injection.load_node>)` and `i(<series_injection.source>)` for a
+series injection; the `analysis.passes` decks read the same `save` card. A
+measurement that names a vector *bare* (`out` rather than `v(out)`) is not
+detected — list it in `save_vectors` yourself. `save_vectors` and
+`save_mode: "netlist"` are mutually exclusive (an application error: the
+latter already suppresses the card the former rewrites), and
+`engine: "xyce"` refuses it like `save_mode`. Omitting it leaves the deck
+byte-identical. A changed `save_vectors` invalidates a `--resume`
+checkpoint. It rides the forwarded request document to `remote`/`batch`
+workers, so the worker image must include this implementation.
 
 ### Complex AC vectors: `options.complex_vectors` (issue #3337)
 
@@ -8545,6 +8566,16 @@ preflight warning, attached at report assembly (after the corners finish), so
 it is present even when every corner passed. The entry has `severity: "warning"`,
 `code: "model_bin_range_preflight"`, and `instance`, `model`, `w_um`, `nf`
 fields. It never rejects the run; a `w` given as an expression is skipped.
+
+A `w` literal's unit follows the card it sits on (issue #5802). A literal that
+carries a **unit suffix** (`50u`, `100n`, `128u`) is read as written — an
+absolute SPICE quantity in metres, converted to µm for `w_um` — on every card
+kind. A **bare** literal — no suffix, including plain exponential notation
+(`13`, `150`, `1e-4`) — is read as micrometres on an `X` subckt call, the
+convention PDK device wrappers with micrometre parameters use (sky130: `W=13`
+is 13 µm, and the genuinely oversized `W=150` still warns at `w_um: 150`), and
+as metres on an `M` card (`w=1e-4` is 100 µm), matching SPICE's bare-number
+convention for primitive MOS cards.
 
 When ngspice's log matches this failure, `klt sim` re-scans the corner's own
 netlist for MOS-shaped instances (`M`/`X` cards) and picks out the one with
