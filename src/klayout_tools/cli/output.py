@@ -175,6 +175,13 @@ def render_rerun_drift(result: dict) -> None:
     prose, which is precisely what a consumer asked not to have dumped into
     its gate output.
 
+    It also carries ``build_provenance`` (issue #5852) -- the same
+    "reported, not graded" treatment for the ``build`` block the verdict
+    excludes: one ``build_provenance: <state>`` line, plus a
+    ``build differs:`` list of the differing identity field *names* (the
+    same names-only convention as ``doc_drift_fields``) only when the state
+    is ``different``. Also rendered only when present.
+
     ``klt signoff --attest ... --check`` additionally annotates a ``drift[]``
     entry that points at one ``attestation.checks[<i>]`` entry with an
     additive ``check`` identity object (issue #5460), rendered as a bracketed
@@ -186,6 +193,9 @@ def render_rerun_drift(result: dict) -> None:
     print(f"status: {result['status']}")
     if "doc_drift" in result:
         print(f"doc_drift: {str(result['doc_drift']).lower()}")
+    build_provenance = result.get("build_provenance")
+    if isinstance(build_provenance, dict):
+        print(f"build_provenance: {build_provenance['state']}")
     drift = result["drift"]
     if drift:
         print()
@@ -200,6 +210,14 @@ def render_rerun_drift(result: dict) -> None:
         print("doc drift (checklist wording -- excluded from the verdict):")
         for entry in doc_drift_fields:
             print(f"  {entry['field']}")
+    # Issue #5852: build identity moved but is excluded from the verdict --
+    # names only, never the values (the JSON payload carries both sides).
+    build_differs = (build_provenance or {}).get("differing_fields") or []
+    if build_differs:
+        print()
+        print("build differs:")
+        for field in build_differs:
+            print(f"  {field}")
 
 
 def render_check_text(result: dict) -> None:

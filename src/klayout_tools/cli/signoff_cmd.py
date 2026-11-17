@@ -37,7 +37,10 @@ rendering the report, diffs the result against a previously committed one --
 excluding two surfaces that move without any verdict moving with them:
 
 - the ``build`` block, which states how the running install was provisioned
-  rather than which commit it came from (:data:`..signoff.VOLATILE_REPORT_PATHS`);
+  rather than which commit it came from (:data:`..signoff.VOLATILE_REPORT_PATHS`)
+  -- reported, not silently dropped: the additive ``build_provenance`` field
+  (issue #5852) compares it with the running build and answers
+  ``same``/``different``/``unverifiable`` without touching the verdict;
 - the report's verbatim quotation of the checklist doc -- each item's
   ``title``/``text``/``notes`` and the whole-doc ``source_doc_content_hash``
   (:data:`..signoff.DOC_PROSE_REPORT_PATHS`, issue #2526).

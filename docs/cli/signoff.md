@@ -2753,6 +2753,12 @@ klt signoff --manifest manifest.json --check reports/block.signoff.json \
     { "field": "items.7.text", "committed": "…", "fresh": "… (reworded)" },
     { "field": "source_doc_content_hash", "committed": "sha256:…", "fresh": "sha256:…" }
   ],
+  "build_provenance": {
+    "state": "different",
+    "differing_fields": ["version", "grading_ruleset_id"],
+    "committed": { "version": "0.9.0.dev4+g1a2b3c4", "is_release": false, "grading_ruleset_id": "sha256:…" },
+    "running": { "version": "0.9.1", "is_release": true, "grading_ruleset_id": "sha256:…" }
+  },
   "fresh": { "…": "the full freshly-graded report" }
 }
 ```
@@ -2767,9 +2773,26 @@ klt signoff --manifest manifest.json --check reports/block.signoff.json \
 - **The tier verdict does not decide this mode's exit code.** A faithful
   report of a block that is *not* yet at T1 is `"match"`/exit `0` — the
   question is drift, not tier. Gate on `status`.
-- **Build identity is excluded** — the whole `build` block. This mirrors
+- **Build identity is excluded from the verdict — and reported as
+  `build_provenance`** — the whole `build` block, mirroring
   "tool identity is excluded from the diff, and only tool identity" for the
-  other five verbs.
+  other five verbs. The exclusion is total for `status` because two
+  byte-legitimate installs of one pinned commit report different blocks
+  (see "`build` describes the *install*, not only the commit"), but it is
+  not silent: the additive `build_provenance` field (issue #5852) compares
+  the committed report's `build` block with the running build's over the
+  build-identity fields (`version`, `package_version`, `git_commit`,
+  `git_tag`, `dirty`, `is_release`, `grading_ruleset_id`) and answers
+  `"same"`, `"different"` (with `differing_fields` naming what moved), or
+  `"unverifiable"` — a report with no `build` block at all, or a side whose
+  identity resolved to `+unknown`/null (a tarball install), where absence
+  of evidence is never read as difference. `build_provenance` never
+  affects `status` or the exit code: a report committed by an unreleased
+  dev build and re-checked by the pinned release still verifies (exit `0`)
+  — the response now *says* that is what happened, so a consumer can warn
+  on it by reading `.build_provenance.state`. `--format text` prints one
+  `build_provenance: <state>` line, plus a `build differs:` list of the
+  differing field names when the state is `different`.
 - **The checklist's own wording is excluded from the *verdict* and reported
   separately** (issue #2526) — see "A reworded checklist is not evidence
   drift" below.
@@ -2829,7 +2852,9 @@ What the exclusion is **not**:
   unchanged — see "Identifying the grading build" below. It lives in the
   `build` block, so like the rest of that block it does not by itself flip
   `--check`'s verdict, but it is still visible verbatim in the response's
-  embedded `fresh` report and from `--describe-grader`.
+  embedded `fresh` report, summarized (with the rest of the build identity)
+  in the response's `build_provenance` field, and reported by
+  `--describe-grader`.
 
 ```bash
 # Fail on evidence drift; warn on a reworded checklist.
