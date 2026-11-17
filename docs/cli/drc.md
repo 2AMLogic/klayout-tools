@@ -4293,9 +4293,12 @@ field is `"klayout"`) and diffs the fresh report against the committed one,
 field by field. `provenance.klt_version`/`provenance.klayout_version`/
 `provenance.pdk.version` are excluded from the diff — these legitimately
 vary between two runs of identical inputs on different tool
-installs/PDK snapshots; every other field (including `status`,
-`violation_count`, `violations`, and the hashes cheap mode also checks) is
-load-bearing. `provenance.klayout_version_mismatch` (issue #1490) is
+installs/PDK snapshots; so (issue #5660) are an `--engine klayout` report's
+`environment.klayout_binary` (a host-local path) and
+`provenance.klayout_module_version` (the pip wheel), which a report committed
+before that change never carried -- it still re-runs as `match`. Every other
+field (including `status`, `violation_count`, `violations`, and the hashes
+cheap mode also checks) is load-bearing. `provenance.klayout_version_mismatch` (issue #1490) is
 deliberately **not** excluded: unlike the raw version strings, whether the
 mismatch itself changed between the committed run and a fresh rerun is
 informative on its own (a `false` → `true` transition means the fresh

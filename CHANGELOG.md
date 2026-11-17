@@ -36,7 +36,11 @@ not `klt --version`, if you need to detect this kind of drift. See
   `--list-rule-categories --engine klayout` records the same fields.
   `--engine curated`, `klt lvs` and every other provenance caller are
   byte-identical (the wheel genuinely is the engine there), and `klt drc
-  --check` is unaffected (it compares content hashes only). No
+  --check` in cheap mode is unaffected (it compares content hashes only).
+  `klt drc --check --rerun` excludes both new fields
+  (`environment.klayout_binary`, a host-local path, and
+  `provenance.klayout_module_version`) from its drift diff, so a report
+  committed before this change still re-runs as `match`. No
   `schema_version` bump: both fields are additive and
   `provenance`'s `$defs` block is `additionalProperties: true`.
 

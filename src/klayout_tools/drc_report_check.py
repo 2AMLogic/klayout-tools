@@ -1,4 +1,5 @@
-"""Hash checks behind ``klt drc --check`` (issues #1106, #4986).
+"""Hash checks behind ``klt drc --check`` (issues #1106, #4986), and the
+``--check --rerun`` diff exclusions (issue #5660).
 
 Split out of :mod:`klayout_tools.drc` to keep that module under its per-file
 size ceiling; :func:`klayout_tools.drc.check_drc_report` is the public entry.
@@ -10,7 +11,14 @@ import os
 from typing import Any
 
 from ._provenance import content_hash
-from ._report_verify import get_path, hash_check, resolve_committed_path
+from ._report_verify import (
+    VOLATILE_PROVENANCE_PATHS,
+    build_rerun_result,
+    get_path,
+    hash_check,
+    resolve_committed_path,
+    strip_path_patterns,
+)
 from ._report_verify_hints import deck_not_found_entry
 from .decks import deck_source_path
 
@@ -171,3 +179,51 @@ def report_checks(
                 )
             )
     return checks
+
+
+#: ``klt drc --check --rerun`` exclusions (issue #5660): the volatile
+#: provenance fields plus the two surfaces an ``--engine klayout`` run now
+#: always populates. The same rule as ``lvs._LVS_RERUN_EXCLUDE_PATHS`` -- "a
+#: field a report never carried cannot itself have drifted".
+#:
+#: * ``environment.klayout_binary`` -- a host-local path (#2849 precedent): the
+#:   same KLayout installed under another prefix is not a change in evidence.
+#: * ``provenance.klayout_module_version`` -- the pip-wheel axis, volatile like
+#:   its sibling ``provenance.klayout_version``.
+DRC_RERUN_EXCLUDE_PATHS: frozenset[tuple[str, ...]] = VOLATILE_PROVENANCE_PATHS | {
+    ("environment", "klayout_binary"),
+    ("provenance", "klayout_module_version"),
+}
+
+
+def _rerun_diff_view(report: dict[str, Any]) -> dict[str, Any]:
+    """``report`` minus :data:`DRC_RERUN_EXCLUDE_PATHS`, and minus an
+    ``environment`` block those exclusions left empty.
+
+    The second step is what makes a report committed before #5660 (no
+    ``environment`` key at all) re-run as ``match``: path exclusion alone
+    leaves ``{}`` on the fresh side against a *missing* key on the committed
+    side, which the key-union diff reports as drift on ``environment`` itself.
+    A block that still holds any other key is kept, so a future
+    ``environment`` field stays evidence until someone excludes it.
+    """
+    view = strip_path_patterns(report, DRC_RERUN_EXCLUDE_PATHS)
+    if view.get("environment") == {}:
+        del view["environment"]
+    return view
+
+
+def drc_rerun_result(
+    *, report_path: str, committed: dict[str, Any], fresh: dict[str, Any]
+) -> dict[str, Any]:
+    """:func:`~klayout_tools._report_verify.build_rerun_result` with the
+    DRC-specific exclusions of :data:`DRC_RERUN_EXCLUDE_PATHS`. ``fresh`` is
+    still embedded verbatim."""
+    return build_rerun_result(
+        report_path=report_path,
+        committed=committed,
+        fresh=fresh,
+        exclude=DRC_RERUN_EXCLUDE_PATHS,
+        committed_for_diff=_rerun_diff_view(committed),
+        fresh_for_diff=_rerun_diff_view(fresh),
+    )
