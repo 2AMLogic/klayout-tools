@@ -350,6 +350,13 @@ same `if FEOL ... end` block that suppresses
 `diff.width.1`/`poly.width.1`/`nwell.width.1`. It therefore now carries a
 non-null `expected_disagreement` and appears as a class-A row above.
 
+> **Superseded revision (historical, `c6d73a3`).** Re-qualified 2026-10-29
+> under open_pdks `f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7` (ciel 2.6.1),
+> issue #3420: the `tap.width.1` FEOL-gated disagreement above is unchanged
+> under `f6eeac7` — covered by the tier-3 re-qualification note above,
+> whose re-run found every manifest `expected_disagreement` value
+> unchanged.
+
 If you add a rule to `sky130/manifest.json`, add it to the class-A/class-B
 table above (or state the new class in prose) in the same change -- the
 tier-1 coverage test enforces that the manifest matches the deck, but
