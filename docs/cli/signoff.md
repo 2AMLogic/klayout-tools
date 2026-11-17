@@ -1376,6 +1376,21 @@ the entry shape to cite, using the hash of the resolved artifact. Additive:
 `wrong_item` and every other reason keep their detail shape, and a `met` item
 gains no `detail`.
 
+**What a stale pin's `detail` names (issues #4795, #4837, #5837).** A
+citation graded `stale_evidence` over a pin mismatch carries
+`detail.hash_check` — `{field, expected, actual, match}`, `expected` being
+the manifest's pinned `content_hash` and `actual` the hash the cited
+envelope recorded — plus a `hint` stating which hash `content_hash` must
+be. When the envelope records what was hashed (`provenance.input.path` /
+`paths`, or a yield report's samples document), `compared_against` names
+it. An envelope whose `provenance.input` carries only `content_hash`/`role`
+(the shape `klt drc` and the other provenance-backed kinds emit) has
+nothing to name there, so `compared_against` is absent and the hint states
+the pin must be the envelope's recorded input hash; when the pin instead
+equals the cited envelope file's own sha256 — hashing the record, not what
+the record is about — `detail.pin_is_envelope_file_hash` is `true` and the
+hint leads with that.
+
 `klt signoff --attest` (both `--inventory` and `--input`) adds a top-level
 `manifest_entry` (`{"file": <--output or null>, "content_hash": "sha256:<hex>"}`)
 to its JSON result and prints it in text mode; it is not written into the

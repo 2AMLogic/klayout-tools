@@ -94,6 +94,12 @@ def stale_pin(spec: Mapping[str, Any], resolution: Mapping[str, Any]) -> dict[st
     computed over) and ``hint`` (which hash ``content_hash`` must be), plus
     ``pin_is_envelope_file_hash`` when the pin is the cited envelope file's own
     sha256 -- the usual mistake.
+
+    Issue #5837 extends both to a ``provenance.input`` that carries only
+    ``content_hash``/``role`` -- the shape ``build_provenance`` emits, with no
+    ``path``/``paths`` to name in ``compared_against``: the hint states the pin
+    must be the envelope's recorded input hash, and the envelope-own-hash check
+    still flags a pin of the evidence file's own sha256.
     """
     expected = spec.get("content_hash")
     samples_path = resolution.get("yield_samples_path")
@@ -112,6 +118,7 @@ def stale_pin(spec: Mapping[str, Any], resolution: Mapping[str, Any]) -> dict[st
     block = provenance.get("input") if isinstance(provenance, Mapping) else None
     block = block if isinstance(block, Mapping) else {}
     members = block.get("paths")
+    what = None
     if isinstance(members, list) and members:
         names = []
         for member in members:
@@ -129,13 +136,22 @@ def stale_pin(spec: Mapping[str, Any], resolution: Mapping[str, Any]) -> dict[st
         # over the samples document the report names.
         detail["compared_against"] = samples_path
         what = f"the sha256 of the samples document {samples_path}"
+    if what is None:
+        # Issue #5837: no path to name in compared_against -- either
+        # provenance.input carries only content_hash/role (the
+        # `build_provenance` shape) or there is no input block at all. The
+        # hint and the own-hash check below still apply.
+        hint = (
+            "content_hash must be the envelope's provenance.input.content_hash "
+            "(the recorded input hash), not the hash of the evidence envelope "
+            "file"
+        )
     else:
-        return detail
-    field = "samples document" if samples_path else "provenance.input.content_hash"
-    hint = (
-        f"content_hash must be {what} ({field}), "
-        "not the hash of the evidence envelope file"
-    )
+        field = "samples document" if samples_path else "provenance.input.content_hash"
+        hint = (
+            f"content_hash must be {what} ({field}), "
+            "not the hash of the evidence envelope file"
+        )
     evidence_file = resolution.get("file")
     own = sha256_file(evidence_file) if isinstance(evidence_file, str) else None
     if own is not None and expected == f"sha256:{own}":
