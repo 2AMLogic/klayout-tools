@@ -269,7 +269,7 @@ from .sim_measurement_results import (
 from .sim_measurement_results import (
     NOT_REACHED_DIAGNOSTIC_CODE as NOT_REACHED_DIAGNOSTIC_CODE,
 )
-from .sim_measurement_results import _corner_measurement_results
+from .sim_measurement_results import _corner_measurement_results, expand_request
 from .sim_param_file import _corner_lib_lines as _corner_lib_lines
 from .sim_param_file import param_file_environment, resolve_param_file
 from .sim_plot import render_waveform_svg
@@ -533,14 +533,14 @@ _INCONCLUSIVE_STATUS = "inconclusive"
 SUPPORTED_ENGINES = ("ngspice", "xyce")
 
 #: Recognised values for the optional ``request.netlist_source`` field --
-#: caller-declared provenance of ``request.netlist``, distinguishing a
-#: pre-layout schematic-level netlist (S6 in the stage graph) from a
-#: post-layout netlist extracted from the laid-out design (S9). Mirrors the
-#: caller-declares-intent pattern already used for ``engine``/``backend``
-#: rather than trying to auto-detect provenance from the netlist file itself
-#: (fragile -- a schematic and an extracted netlist can look syntactically
-#: identical). See docs/cli/sim.md and docs/design/design-pipeline.md.
-SUPPORTED_NETLIST_SOURCES = ("schematic", "extracted")
+#: caller-declared provenance of ``request.netlist``: a pre-layout schematic
+#: netlist (S6 in the stage graph), a post-layout extracted netlist (S9),
+#: or a gate-level netlist (structural netlist plus timing library,
+#: issue #5638). Mirrors the caller-declares-intent pattern already used
+#: for ``engine``/``backend`` -- rather than auto-detecting provenance from
+#: the netlist file itself (a schematic and an extracted netlist can look
+#: syntactically identical). See docs/cli/sim.md and docs/design/design-pipeline.md.
+SUPPORTED_NETLIST_SOURCES = ("schematic", "extracted", "gate-level")
 
 #: Execution backends behind ``run_sim``. ``local`` runs the corner matrix
 #: sequentially in-process (the original behaviour). ``local-parallel`` fans
@@ -1550,7 +1550,7 @@ def load_request(request_path: str) -> dict[str, Any]:
             "request is missing required field: analysis (or analysis_steps "
             "for an ordered multi-step sequence)"
         )
-    return request
+    return expand_request(request)  # issue #5731; see sim_measurement_template
 
 
 def _reject_linearize_in_steps(request: dict[str, Any]) -> None:
