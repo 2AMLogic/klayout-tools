@@ -169,7 +169,9 @@ def render_rerun_drift(result: dict) -> None:
     ``klt signoff --check`` additionally carries ``doc_drift``/
     ``doc_drift_fields`` (issue #2526) -- fields that moved but do not bear
     on the verdict, so ``status`` can stay ``"match"`` while the caller is
-    still told the checklist's wording moved. Rendered only when present, so
+    still told the checklist's wording moved. It also carries ``build_skew``
+    (issue #5868): one line when the excluded ``build`` block
+    differs. Rendered only when present, so
     every other verb's output is byte-identical to what it was, and rendered
     as field *names* only: the values are whole paragraphs of checklist
     prose, which is precisely what a consumer asked not to have dumped into
@@ -208,6 +210,14 @@ def render_rerun_drift(result: dict) -> None:
         print("not compared (provenance fields absent from the fresh report):")
         for entry in not_compared:
             print(f"  {entry['field']}")
+    skew = result.get("build_skew")
+    if isinstance(skew, dict) and skew.get("state") in ("build_only", "ruleset"):
+        names = ", ".join(entry["field"] for entry in skew.get("fields") or [])
+        if skew["state"] == "ruleset":
+            what = "graded under a different ruleset (build.grading_ruleset_id moved)"
+        else:
+            what = "rendered by a different klt build (grading ruleset unchanged)"
+        print(f"build_skew: {what} -- excluded from the verdict: {names}")
     doc_drift_fields = result.get("doc_drift_fields") or []
     if doc_drift_fields:
         print()
