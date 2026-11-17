@@ -189,7 +189,7 @@
     },
     {
       "path": "src/klayout_tools/cli/parser.py",
-      "lines": 5247
+      "lines": 5120
     },
     {
       "path": "src/klayout_tools/cli/pdk_cmd.py",
@@ -409,7 +409,7 @@
     },
     {
       "path": "src/klayout_tools/lvs.py",
-      "lines": 6448
+      "lines": 6419
     },
     {
       "path": "src/klayout_tools/lvs_combine.py",
@@ -913,7 +913,7 @@
     },
     {
       "path": "tests/test_lvs.py",
-      "lines": 26199
+      "lines": 26152
     },
     {
       "path": "tests/test_lvs_device_provenance.py",

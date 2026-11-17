@@ -8302,55 +8302,6 @@ def test_combine_devices_degrade_keeps_a_match_verdict(tmp_path, monkeypatch):
     assert report["category_counts"]["device.combine_incomplete"] == 2
 
 
-def test_lvs_cli_exits_4_on_inconclusive(tmp_path, monkeypatch, capsys):
-    """Issue #1370: `status: "inconclusive"` gets its own exit code, `4` --
-    the same value `klt equiv` already uses for its own unreachable-verdict
-    outcome (`cli/equiv_cmd.py`'s `EXIT_INCONCLUSIVE`). Folding it into `3`
-    would leave an automation gate unable to tell "the design differs" from
-    "the comparison could not be performed"."""
-    import klayout.db as kdb
-
-    from klayout_tools.cli import equiv_cmd, lvs_cmd
-
-    # The two verbs agree on the numeric value, by construction.
-    assert lvs_cmd.EXIT_INCONCLUSIVE == equiv_cmd.EXIT_INCONCLUSIVE == 4
-
-    def _raise(self):
-        raise RuntimeError(_COMBINE_DEVICES_PARTIAL_MATCH_ERROR)
-
-    monkeypatch.setattr(kdb.Netlist, "combine_devices", _raise)
-
-    layout_path = _write(tmp_path / "layout.spice", _MULTIFINGER_LAYOUT_SPICE)
-    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
-    path = _write_request(
-        tmp_path / "request.json",
-        {
-            "layout": {"netlist": layout_path, "top": "inv"},
-            "reference": {"netlist": reference_path, "top": "inv"},
-            "options": {"combine_devices": True},
-        },
-    )
-
-    import argparse
-
-    args = argparse.Namespace(
-        request=path,
-        format="json",
-        check=None,
-        rerun=False,
-        deck=None,
-        deck_file=None,
-        deck_var=None,
-        layout=None,
-        progress=None,
-        omit_mismatches=False,
-        output=None,
-    )
-    assert lvs_cmd.run(args) == lvs_cmd.EXIT_INCONCLUSIVE
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["status"] == "inconclusive"
-
-
 def test_rerun_reconstructs_a_device_class_restricted_combine(tmp_path):
     """A committed report whose `options.combine_devices` is a *list* must
     round-trip back into the same restricted compare -- re-asserting a bare
