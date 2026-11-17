@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import types
 
 import pytest
 
@@ -13,7 +14,15 @@ from klayout_tools import sim
 from klayout_tools import sim_batch as sb
 from klayout_tools import sim_batch_async as sba
 from klayout_tools import sim_batch_shards as sbs
-from test_sim_batch import _corner_points, _split_runner, _status, _write_body
+from test_sim_batch import (
+    _batch_request,
+    _ceiling_request,
+    _corner_points,
+    _split_runner,
+    _status,
+    _write_body,
+    _write_request,
+)
 from test_sim_batch_async import _attach_shards, _submit_shards
 
 
@@ -179,6 +188,21 @@ def test_collect_partial_merges_done_shards_and_lists_the_rest(tmp_path, monkeyp
     assert "unfinished_shards" not in environment
 
 
+def test_with_unfinished_shard_map_is_repo_relative_inside_a_repo(tmp_path):
+    """Issue #5542: the `unfinished_shards` emission normalizes the map path
+    the same way as the unlaunched and unrun signals."""
+    (tmp_path / ".git").mkdir()
+    manifest = types.SimpleNamespace(path=str(tmp_path / "out" / "batch-shards.json"))
+    environment = sbs.with_unfinished(
+        None, {1: {"index": 1, "job_id": "j", "state": "running"}}, manifest
+    )
+    assert environment["shard_map"] == "out/batch-shards.json"
+    assert environment["resumable"] is True
+    assert environment["unfinished_shards"] == [
+        {"index": 1, "job_id": "j", "state": "running"}
+    ]
+
+
 def test_collect_partial_with_all_shards_done_equals_plain_attach(
     tmp_path, monkeypatch
 ):
@@ -255,3 +279,127 @@ def test_collect_partial_is_refused_without_a_shard_map():
     assert err.value.code == "collect_partial_requires_attach"
     with pytest.raises(sim.SimError):
         sim._apply_attach({}, "klt-sim-job", "batch", 1, collect_partial=True)
+
+
+# --- `--attach <shard map>` of a `hosts > 1` run (issue #5777) ---------------
+
+
+def _submit_hosts2(tmp_path, units=4):
+    """A `--submit-only --hosts 2` run: the map records `hosts: 2`."""
+    request = _ceiling_request(tmp_path)
+    payload = sba.submit_only(
+        request=request,
+        corner_points=_corner_points(units),
+        netlist_path=str(_write_body(tmp_path)),
+        timeout_s=120.0,
+        keep_artifacts=False,
+        want_waveforms=False,
+        artifacts_dir=str(tmp_path / "artifacts"),
+        shard_fingerprint="fp-async",
+        hosts=2,
+    )
+    return request, payload
+
+
+def test_attach_shard_map_of_a_hosts_2_run_merges_every_shard(tmp_path, monkeypatch):
+    _split_runner(monkeypatch)
+    monkeypatch.delenv(sb.MAX_JOB_SECONDS_ENV, raising=False)
+    request, payload = _submit_hosts2(tmp_path)
+    assert json.loads(open(payload["manifest_path"]).read())["hosts"] == 2
+
+    corners, _, environment = _attach_shards(
+        tmp_path, request, payload["manifest_path"], units=4
+    )
+
+    assert len(corners) == 4
+    assert _lost(corners) == []
+    assert len(environment["fleet"]) == 2
+
+
+def test_collect_partial_works_on_a_hosts_2_shard_map(tmp_path, monkeypatch):
+    _split_runner(monkeypatch)
+    monkeypatch.delenv(sb.MAX_JOB_SECONDS_ENV, raising=False)
+    request, payload = _submit_hosts2(tmp_path)
+    jobs = [s["job_id"] for s in payload["shards"]]
+    _states(monkeypatch, {jobs[1]: "running"})
+
+    corners, _, environment = _attach_shards(
+        tmp_path, request, payload["manifest_path"], units=4, collect_partial=True
+    )
+
+    assert len(corners) == 4
+    assert len(_lost(corners)) == 2
+    assert [u["job_id"] for u in environment["unfinished_shards"]] == [jobs[1]]
+
+
+def test_attach_hosts_2_shard_map_refused_for_a_different_request(
+    tmp_path, monkeypatch
+):
+    _split_runner(monkeypatch)
+    monkeypatch.delenv(sb.MAX_JOB_SECONDS_ENV, raising=False)
+    request, payload = _submit_hosts2(tmp_path)
+    other = {**request, "remote": {"hosts": 3}}
+
+    with pytest.raises(sim.SimError) as err:
+        _attach_shards(tmp_path, other, payload["manifest_path"], units=4)
+
+    assert "differing request field(s): remote" in str(err.value)
+
+
+def test_apply_attach_gates_hosts_only_for_a_bare_job_id():
+    kwargs: dict = {}
+    sim._apply_attach(kwargs, "out/batch-shards.json", "batch", 2, collect_partial=True)
+    assert kwargs == {
+        "attach_job_id": "out/batch-shards.json",
+        "collect_partial": True,
+    }
+    with pytest.raises(sim.SimError, match="single job .*hosts = 1.*shard map"):
+        sim._apply_attach({}, "klt-sim-job", "batch", 2)
+    with pytest.raises(sim.SimError, match="requires backend 'batch'"):
+        sim._apply_attach({}, "out/batch-shards.json", "local", 2)
+
+
+def test_run_sim_hosts_2_attach_goes_to_the_map_not_a_fresh_fleet(
+    tmp_path, monkeypatch
+):
+    """The attach must reach the backend (which reads the map), never
+    `_run_batch_fleet`, which would submit every shard afresh."""
+    seen: dict = {}
+
+    def _backend(*, corner_points, **kwargs):
+        seen["attach_job_id"] = kwargs.get("attach_job_id")
+        seen["collect_partial"] = kwargs.get("collect_partial")
+        corners = [
+            {
+                "corner_id": p.corner_id,
+                "status": "pass",
+                "measurements": [],
+                "diagnostics": [],
+            }
+            for p in corner_points
+        ]
+        return corners, "46", {"provider": "aws-batch-fleet"}
+
+    def _no_fleet(**kwargs):
+        raise AssertionError("--attach must not submit a fresh fleet")
+
+    monkeypatch.setitem(sim._BACKENDS, "batch", _backend)
+    monkeypatch.setattr(sim, "_run_batch_fleet", _no_fleet)
+    _write_body(tmp_path)
+    request = _batch_request(
+        tmp_path,
+        corners={"supply_v": {"vdd": [1.6, 1.8, 2.0]}, "temperature_c": [27]},
+    )
+    path = _write_request(tmp_path, request)
+    shard_map = str(tmp_path / "artifacts" / sb.BATCH_SHARDS_FILENAME)
+
+    report = sim.run_sim(
+        str(path),
+        artifacts_dir=str(tmp_path / "artifacts"),
+        hosts=2,
+        attach_job_id=shard_map,
+        collect_partial=True,
+    )
+
+    assert seen == {"attach_job_id": shard_map, "collect_partial": True}
+    assert len(report["corners"]) == 3

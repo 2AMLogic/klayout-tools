@@ -104,6 +104,7 @@ from . import (
     sim_decks,
     sim_energy,
     sim_eye,
+    sim_form_signals,
     sim_injected,
     sim_mismatch_declarations,
     sim_mismatch_gate,
@@ -2112,18 +2113,14 @@ def _validate_save_vectors(
     return tuple(vectors), True
 
 
-#: A ``v(...)``/``i(...)`` token (optionally with ngspice's derivative prefix,
-#: e.g. ``vdb(out)``, ``vm(a,b)``) in a measurement's ``spice``/``expr``/
-#: ``crossings.signal`` text -- the vectors ``options.save_vectors`` must keep
-#: resident for that measurement to resolve.
-_SAVE_TOKEN_RE = re.compile(r"\b([vi][a-z]{0,2})\(([^()]*)\)", re.IGNORECASE)
-
-
 def _required_save_vectors(
     save_vectors: tuple[str, ...], measurements_spec: list[dict[str, Any]]
 ) -> list[str]:
     """``options.save_vectors`` plus every ``v(x)``/``i(x)`` vector the
     declared measurements reference, de-duplicated, in first-seen order.
+
+    Every form that names a signal contributes its texts -- free-text fields
+    verbatim, structured-form fields via :mod:`sim_form_signals`.
 
     Only the parenthesized forms are detected; a measurement that names a
     vector bare (``out`` rather than ``v(out)``) must list it in
@@ -2139,10 +2136,11 @@ def _required_save_vectors(
         if isinstance(step_res, dict):
             texts.append(step_res.get("signal"))
         texts.extend(sim_settled.signal_texts(spec))
+        texts.extend(sim_form_signals.signal_texts(spec))
         for text in texts:
             if not isinstance(text, str):
                 continue
-            for prefix, args in _SAVE_TOKEN_RE.findall(text):
+            for prefix, args in sim_form_signals.SAVE_TOKEN_RE.findall(text):
                 kind = prefix[0].lower()
                 for arg in args.split(","):
                     arg = arg.strip().lower()
@@ -4102,7 +4100,7 @@ def _run_sim_corners(
             shard_fingerprint=_checkpoint_fingerprint(**fingerprint_inputs),
         )
 
-    if hosts == 1:
+    if hosts == 1 or attach_job_id is not None:  # #5777: attach never fans out
         # The exact pre-#376 call for the default case (no budget, no
         # resume, hosts=1, no fail-fast probe) -- `dispatch_points`/the four
         # new-since kwargs are identity no-ops then (`dispatch_points is
@@ -10991,15 +10989,15 @@ def _parse_plain_number(raw: str) -> float | None:
     return float(match.group(1))
 
 
-def _parse_width_um(raw: str) -> float | None:
+def _parse_width_um(raw: str, bare_is_um: bool = False) -> float | None:
     """Parse a SPICE ``W``/``L``-style geometry literal (``50u``, ``5e-5``,
-    ``100n``) to micrometres. Returns ``None`` for anything that is not a
-    plain numeric literal.
-    """
+    ``100n``) to micrometres (``None`` for non-numerics); ``bare_is_um``
+    reads a bare literal as micrometres (#5802 X-card PDK wrappers)."""
     match = spice_number.NUMBER_RE.match(raw.strip().strip("'\""))
     if match is None:
         return None
-    return float(match.group(1)) * spice_number.suffix_scale(match.group(2)) * 1e6
+    value = float(match.group(1)) * spice_number.suffix_scale(match.group(2))
+    return value * (1 if match.group(2) == "" and bare_is_um else 1e6)
 
 
 def _find_width_ceiling_culprit(
@@ -11029,7 +11027,7 @@ def _find_width_ceiling_culprit(
         w_raw = params.get("w") or params.get("W")
         if w_raw is None:
             continue
-        w_um = _parse_width_um(w_raw)
+        w_um = _parse_width_um(w_raw, bare_is_um=inst_name[:1].upper() == "X")
         if w_um is None:
             continue
         m_raw = params.get("m") or params.get("M")

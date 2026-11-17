@@ -48,11 +48,12 @@ from ..sim import SimError, load_request, run_sim
 from ..sim_batch_async import read_job_status
 from ..sim_batch_plan import print_dry_run_plan_line
 from ..sim_set import DEFAULT_MAX_IN_FLIGHT, print_set_text, run_sim_set
-from .output import EXIT_USAGE_ERROR, emit_error, emit_success, write_json_file
+from .output import EXIT_USAGE_ERROR, emit_error, emit_success
 from .sim_job_text import _print_job_status_text as _print_job_status_text
 from .sim_measurement_text import print_measurement_head
 from .sim_pdk_text import _print_pdk as _print_pdk
 from .sim_pdk_text import _print_worker_pdk as _print_worker_pdk
+from .sim_report_out import _write_report_out as _write_report_out
 
 EXIT_PASS = 0
 EXIT_MEASUREMENT_FAILED = 3
@@ -152,7 +153,9 @@ def _run_sweep(args: argparse.Namespace) -> int:
     except (SimError, OutputLockError) as exc:
         return emit_error("sim", str(exc), args.format, code=exc.code)
 
-    if (write_failure := _write_report_out(report, args)) is not None:
+    if (
+        write_failure := _write_report_out(report, args, implicit_outdir=True)
+    ) is not None:
         return write_failure
     if report.get("status") == "submitted" and getattr(args, "submit_only", False):
         # Issue #3073: submitted, not run -- there is no verdict to grade.
@@ -192,27 +195,6 @@ def _exit_code_for(report: dict, deck_mode: bool) -> int:
     if report["status"] == "fail":
         return EXIT_MEASUREMENT_FAILED
     return EXIT_PASS
-
-
-def _write_report_out(report: dict, args: argparse.Namespace) -> int | None:
-    """Write the ``--report-out`` file copy; return an exit code only on failure.
-
-    Issue #2975: an additive file copy of the envelope; stdout is unchanged.
-    Written before emitting so an unwritable path fails cleanly with the error
-    envelope rather than after a full report.
-    """
-    report_out = getattr(args, "report_out", None)
-    if not report_out:
-        return None
-    try:
-        write_json_file(report, report_out)
-    except OSError as exc:
-        return emit_error(
-            "sim",
-            f"could not write report to '{report_out}': {exc}",
-            args.format,
-        )
-    return None
 
 
 def _run_job_status(args: argparse.Namespace) -> int:
