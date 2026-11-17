@@ -76,8 +76,10 @@ The artifact per item:
 - item 2: the committed layout stream;
 - item 9: the testbench inventory;
 - item 10: the repo-hygiene inventory (repo-owned files only, not
-  Loom/Repo-Skills resync-managed paths; re-attesting is an owner action —
-  see `docs/cli/signoff.md` "Item 10: what belongs in a hygiene inventory").
+  Loom/Repo-Skills resync-managed paths; listed files must be stable by
+  construction — living status belongs in an uninventoried file, not a
+  hygiene path; re-attesting is an owner action — see `docs/cli/signoff.md`
+  "Item 10: what belongs in a hygiene inventory").
 
 For items 1, 9 and 10 that envelope is **tool-produced**, not hand-rolled:
 `klt signoff --attest {1,9,10} --inventory <file>` (issue #2844) reads a
@@ -267,7 +269,23 @@ written to every block.
    question was never asked; this item and `klt signoff` both read it as
    "does not apply here", never as "verified", so a fleet policy of "re-run
    LVS, look for `match`" is not by itself power-connectivity evidence
-   (#1985). And even where it does run it is *not* a geometric rail/grid
+   (#1985). A fourth `unchecked` case existed on the route that document
+   itself steers routed digital blocks through — `gate-level-verilog` **on a
+   FinFET deck** (issue #4462), where the stub-form pin-to-net check does not
+   apply. Since issue #5757 that route no longer stops at `unchecked`: after
+   the compare, the verdict is *derived* from the expanded-cell compare —
+   `"match"` when the compare matched and a requested supply net
+   (`options.supply_nets`, the same allowlist that scopes
+   supply-fragmentation findings) is proven on a matched
+   `net_correspondence` row, with the `reason` naming the derivation and
+   exactly the supplies the compare proved — and stays `"unchecked"` when
+   the compare mismatched, the check was opted out, the allowlist is empty
+   (`options.supply_nets: []` proves nothing), or no requested supply net
+   pairs (a reference whose expanded rails float on internal nets under
+   other names proves nothing about the top-level grid). A derived
+   `"match"` is this item's
+   `"match"` for every purpose below, including item 11's requirement. And
+   even where it does run it is *not* a geometric rail/grid
    continuity check: whether a rail is an unbroken annulus, and whether the
    grid carries the current, stay `klt ring-check`, `klt power`, and the DRC
    deck's business — see "Power/IR-drop + EM evidence" below for what is and
@@ -553,7 +571,13 @@ written to every block.
       `klt erc` spec's own stackup, and that same LVS report's
       `power_connectivity.status` is `"match"` — `"unchecked"` does **not**
       satisfy this item, unlike item 4 itself, where it means "the question
-      does not apply here". For a hand-captured full-custom digital
+      does not apply here". On the FinFET `gate-level-verilog` route the
+      `"match"` is the verdict derived from the expanded-cell compare
+      (issue #5757; the compare matched and a requested supply net —
+      `options.supply_nets` — paired in `net_correspondence`) — it
+      satisfies this item exactly as a
+      stub-form `"match"` does, and the report's own `reason` says which
+      form it took. For a hand-captured full-custom digital
       partition (no RTL, no synthesis, no P&R — see "Full-custom digital
       sub-case" above), this item is satisfied instead by the Analog
       column's artifacts, exactly as items 1, 2, and 5 are: there is no
