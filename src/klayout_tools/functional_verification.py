@@ -721,9 +721,9 @@ def load_request_arg(value: str) -> tuple[dict[str, Any], str]:
 
 def _resolve_testbench(
     testbench: Any, request_dir: str
-) -> tuple[str, str, str | list[str] | None]:
+) -> tuple[str, list[str], str | list[str] | None]:
     """Validate ``request.testbench`` and return
-    ``(module, module_dir, testcase)``.
+    ``(module, module_dirs, testcase)``.
 
     ``module`` is a Python *module name* (``"test_gcd"``), not a path -- it is
     what cocotb's ``Runner.test(test_module=...)`` imports. By default the
@@ -734,11 +734,19 @@ def _resolve_testbench(
     ``0`` and simply writes no ``results.xml``).
 
     An optional ``testbench.search_path`` overrides *where* ``module`` is
-    looked up -- resolved absolute-or-relative-to-``request_dir`` the same way
-    ``_resolve_sources()`` resolves each ``request.sources`` entry -- so one
-    unmodified testbench module can be shared by several requests that live in
-    different directories. When omitted, behavior is unchanged: the module is
-    resolved next to the request.
+    looked up -- a string, or a non-empty array of strings, each entry resolved
+    absolute-or-relative-to-``request_dir`` the same way ``_resolve_sources()``
+    resolves each ``request.sources`` entry -- so one unmodified testbench
+    module can be shared by several requests that live in different
+    directories, and a bench split across several directories can be described
+    by the request alone. ``module`` is taken from the first entry (in list
+    order) that contains ``<module>.py``. When omitted, behavior is unchanged:
+    the module is resolved next to the request.
+
+    ``module_dirs`` is every resolved directory, absolute, in list order with
+    duplicates collapsed to their first occurrence; all of them belong on the
+    bench's import path (see :func:`_run_test`). Without ``search_path`` it is
+    just ``[request_dir]``'s absolute form.
     """
     if not isinstance(testbench, dict):
         raise FunctionalVerificationError("request.testbench must be a JSON object")
@@ -754,31 +762,9 @@ def _resolve_testbench(
             f"path: {module!r}"
         )
 
-    search_path = testbench.get("search_path")
-    if search_path is not None:
-        if not isinstance(search_path, str) or not search_path:
-            raise FunctionalVerificationError(
-                "request.testbench.search_path must be a non-empty string when given"
-            )
-        search_dir = (
-            search_path
-            if os.path.isabs(search_path)
-            else os.path.join(request_dir, search_path)
-        )
-    else:
-        search_dir = request_dir
-
-    module_path = os.path.join(search_dir, f"{module}.py")
-    if not os.path.isfile(module_path):
-        location = (
-            "request.testbench.search_path"
-            if search_path is not None
-            else "next to the request"
-        )
-        raise FunctionalVerificationError(
-            f"testbench module not found: expected '{module_path}' "
-            f"(request.testbench.module names a Python module resolved via {location})"
-        )
+    module_dirs = resolve_testbench_search_dirs(
+        testbench.get("search_path"), request_dir, module
+    )
 
     testcase = testbench.get("testcase")
     if testcase is not None:
@@ -800,7 +786,7 @@ def _resolve_testbench(
                 "strings, or null"
             )
 
-    return module, os.path.dirname(os.path.abspath(module_path)), testcase
+    return module, module_dirs, testcase
 
 
 def _resolve_options(
@@ -1482,6 +1468,8 @@ def _resolve_env(env: Any, *, verilog_top: bool = False) -> dict[str, str]:
                 f"request.env[{key!r}] must be a string -- got a {type(value).__name__}"
             )
 
+    _reject_env_pythonpath(env)
+
     if verilog_top and env:
         raise FunctionalVerificationError(
             "request.env cannot be combined with testbench.verilog_top -- "
@@ -2042,7 +2030,7 @@ def _run_test(
     *,
     engine: str,
     module: str,
-    module_dir: str,
+    module_dirs: list[str],
     hdl_toplevel: str,
     testcase: str | list[str] | None,
     random_seed: int | None,
@@ -2062,7 +2050,9 @@ def _run_test(
     from "one test failed" to "nothing ran". The verdict comes from
     :func:`parse_results_xml` instead, which the caller runs next.
 
-    ``module_dir`` is prepended to ``sys.path`` for the duration of the call
+    ``module_dirs`` are prepended to ``sys.path`` (list order preserved, so
+    entry 0 shadows entry 1) for the duration of the call; entries already on
+    ``sys.path`` are neither re-inserted nor later removed. This is done
     because ``Runner._set_env`` propagates the *calling* process's ``sys.path``
     to the simulator as ``PYTHONPATH`` (verified live) -- there is no
     ``test_module`` search-path parameter to use instead.
@@ -2092,9 +2082,10 @@ def _run_test(
     simulator to dump a waveform this run -- see :func:`_find_trace_artifact`
     for where each engine writes it.
     """
-    inserted = module_dir not in sys.path
-    if inserted:
-        sys.path.insert(0, module_dir)
+    inserted = [d for d in module_dirs if d not in sys.path]
+    # Reverse so the first entry ends up first on sys.path.
+    for d in reversed(inserted):
+        sys.path.insert(0, d)
     try:
         engine_runner.test(
             test_module=module,
@@ -2124,9 +2115,9 @@ def _run_test(
             f"{engine} simulation failed: {exc} ({_log_tail(log_path)})"
         ) from exc
     finally:
-        if inserted:
+        for d in inserted:
             try:
-                sys.path.remove(module_dir)
+                sys.path.remove(d)
             except ValueError:  # pragma: no cover - defensive
                 pass
 
@@ -2584,7 +2575,7 @@ def run_functional_verification(
     verilog_tb = _resolve_verilog_top(
         request_doc["testbench"], sources, engine, request_doc.get("options")
     )
-    module, module_dir, testcase = _resolve_testbench_target(
+    module, module_dirs, testcase = _resolve_testbench_target(
         verilog_tb, request_doc["testbench"], request_dir
     )
     (
@@ -2953,7 +2944,7 @@ def run_functional_verification(
             spec,
             engine=engine,
             module=module,
-            module_dir=module_dir,
+            module_dirs=module_dirs,
             hdl_toplevel=build_hdl_toplevel,
             testcase=testcase,
             random_seed=random_seed,
@@ -3134,6 +3125,10 @@ from .functional_verification_mutation_variant import (  # noqa: E402, F401
     _kill_process_tree,
     _mutation_subprocess_entry,
     _run_isolated_variant,
+)
+from .functional_verification_search_path import (  # noqa: E402
+    _reject_env_pythonpath,
+    resolve_testbench_search_dirs,
 )
 from .functional_verification_verilog_top import (  # noqa: E402, F401
     _VERILOG_TOP_REJECTED_OPTIONS,
