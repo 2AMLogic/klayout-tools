@@ -8,13 +8,15 @@ format 2** (opt in with ``--attest ... --records FILE``) splits the committed
 evidence in two:
 
 * a **records file** -- NDJSON, one line per covered file, sorted by UTF-8
-  path bytes: ``{"path": ..., "role": ..., "sha256": "<hex>"}`` (a derived
-  artifact's line also carries ``"sources": {path: hex}``). A PR that changes a
-  covered file changes exactly that file's line, so PRs on disjoint
+  path bytes: ``{"path": ..., "role": ..., "sha256": "<hex>"}``. A PR that
+  changes a covered file changes exactly that file's line, so PRs on disjoint
   (non-adjacent) files merge with plain ``git merge``;
 * the **judgment envelope** -- the ordinary generic envelope with the
-  aggregates and per-file ``present`` checks removed: nothing a content edit
-  rewrites. ``provenance.input.content_hash`` (what the manifest pins) is the
+  aggregates removed and the per-file ``present`` checks that carry a
+  ``content_hash`` dropped (their pin is the records line): nothing a content
+  edit rewrites. A presence-only check (issue #5615) pins nothing, so it
+  stays -- it is the only committed trace that the file was present when
+  attested. ``provenance.input.content_hash`` (what the manifest pins) is the
   hash of the *inventory*, the append-only judgment record (what was audited,
   by which commands, against which pins); ``provenance.input.records`` names
   the records file.
@@ -66,36 +68,25 @@ def input_binding(
 
 
 def files_from_checks(
-    checks: Sequence[Mapping[str, Any]], derived: Sequence[Mapping[str, Any]]
+    checks: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
     """The record lines for the passing ``present`` checks in ``checks``,
-    sorted by path bytes. A derived artifact built from declared sources also
-    records those sources' hashes (so renewing a source renews its line)."""
-    hashes = {
-        check["path"]: check["content_hash"].removeprefix("sha256:")
-        for check in checks
-        if check.get("check") == "present" and check.get("content_hash")
-    }
-    declared = {
-        entry["path"]: entry["recorded"]["sources"]
-        for entry in derived
-        if "recorded" in entry
-    }
+    sorted by path bytes. A presence-only check (issue #5615) carries no
+    ``content_hash`` and so yields no line -- its committed trace is the
+    check itself, kept in the envelope by :func:`committed_view`."""
     lines: dict[str, dict[str, Any]] = {}
     for check in checks:
         path = check.get("path")
+        digest = check.get("content_hash")
         if check.get("check") != "present" or not isinstance(path, str):
             continue
-        if path not in hashes or path in lines:
+        if not isinstance(digest, str) or path in lines:
             continue
-        line: dict[str, Any] = {
+        lines[path] = {
             "path": path,
             "role": check["role"],
-            "sha256": hashes[path],
+            "sha256": digest.removeprefix("sha256:"),
         }
-        if path in declared:
-            line["sources"] = {s: hashes[s] for s in declared[path] if s in hashes}
-        lines[path] = line
     return [lines[p] for p in sorted(lines, key=lambda value: value.encode("utf-8"))]
 
 
@@ -161,8 +152,10 @@ def write_records(lines: Sequence[Mapping[str, Any]], output: str) -> bool:
 def committed_view(result: Mapping[str, Any]) -> dict[str, Any]:
     """What is committed of a live record-format result: the envelope without
     the live-only keys, the counts (``summary``, ``check_count``,
-    ``passed_count``) and the per-file ``present`` checks (their hashes live in
-    the records file)."""
+    ``passed_count``) and the per-file ``present`` checks whose hash moved to
+    the records file. A presence-only check (issue #5615) carries no
+    ``content_hash`` -- nothing moved, and the check itself is the only
+    committed trace that the file was present when attested, so it stays."""
     view = {k: v for k, v in result.items() if k not in ("skipped_checks", "records")}
     attestation = {
         k: v
@@ -170,7 +163,9 @@ def committed_view(result: Mapping[str, Any]) -> dict[str, Any]:
         if k not in ("check_count", "passed_count")
     }
     attestation["checks"] = [
-        check for check in attestation["checks"] if check.get("check") != "present"
+        check
+        for check in attestation["checks"]
+        if check.get("check") != "present" or "content_hash" not in check
     ]
     view["attestation"] = attestation
     view["summary"] = _COUNTS.sub(": attestation checks", result["summary"])

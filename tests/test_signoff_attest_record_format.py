@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -301,29 +302,68 @@ def test_items_9_and_10_round_trip_and_grade(tmp_path, capsys, item):
     assert _graded(repo, envelope, item)["reason"] == "stale_evidence"
 
 
-def test_derived_line_records_its_sources(tmp_path, capsys):
+@pytest.mark.parametrize(
+    "recorded",
+    [
+        {"sources": ["design/ota.sch"]},
+        {"derived_sha256": "0" * 64, "sources": {"design/ota.sch": "1" * 64}},
+    ],
+    ids=["source-list", "hash-map"],
+)
+def test_recorded_is_refused_with_records(tmp_path, recorded):
+    """The source-list form has no freshness gate (re-attesting would renew a
+    stale artifact's line after a source edit); the hash map would be a
+    second, conflict-prone copy of the digests. Both are refused (#5945)."""
+    repo = _attest_repo(tmp_path)
+    inventory = _write_inventory(repo, 1, _item1_inventory(recorded=recorded))
+
+    with pytest.raises(AttestationError, match="not accepted with --records"):
+        build_attestation(1, inventory, None, str(repo / RECORDS.format(item=1)))
+
+
+def test_derived_freshness_gate_runs_under_records(tmp_path, capsys):
+    """With `recorded` refused, an item-1 derived artifact's freshness rests
+    on its `check` command, which runs on every attestation: a command that
+    fails (the artifact is stale) fails the attestation and writes nothing."""
+    repo = _attest_repo(tmp_path)
+    stale = {"argv": [sys.executable, "-c", "import sys; sys.exit(1)"]}
+    inventory = _write_inventory(repo, 1, _item1_inventory(check=stale))
+
+    code, envelope = _attest(repo, 1, inventory, capsys)
+
+    assert code == 3
+    assert not envelope.exists()
+    assert not (repo / RECORDS.format(item=1)).exists()
+
+
+def test_presence_only_entry_keeps_its_committed_trace(tmp_path, capsys):
+    """A presence-only entry (#5615) pins nothing, so it yields no records
+    line; its check stays in the committed envelope -- the only trace the
+    file was present when attested. Deleting the file fails `--check`."""
     repo = _attest_repo(tmp_path)
     inventory = _write_inventory(
-        repo, 1, _item1_inventory(recorded={"sources": ["design/ota.sch"]})
+        repo,
+        10,
+        hygiene=["README.md", {"path": "LICENSE", "attest": "presence"}],
     )
-    code, envelope = _attest(repo, 1, inventory, capsys)
+    code, envelope = _attest(repo, 10, inventory, capsys)
     assert code == 0
 
-    derived = next(line for line in _lines(repo, 1) if line["role"] == "derived")
-    ota = next(line for line in _lines(repo, 1) if line["path"] == "design/ota.sch")
-    assert derived["sources"] == {"design/ota.sch": ota["sha256"]}
-    # Renewing the source renews the derived artifact's line, or --check fails.
-    (repo / "design" / "ota.sch").write_text("edited\n")
-    assert _check(1, inventory, envelope, capsys)[0] == 3
+    paths = [line["path"] for line in _lines(repo, 10)]
+    assert "README.md" in paths
+    assert "LICENSE" not in paths
+    committed = json.loads(envelope.read_text())
+    present = [
+        check
+        for check in committed["attestation"]["checks"]
+        if check.get("check") == "present"
+    ]
+    assert [(check["path"], check.get("attest")) for check in present] == [
+        ("LICENSE", "presence")
+    ]
 
-
-def test_a_hash_map_in_the_inventory_is_refused_with_records(tmp_path):
-    repo = _attest_repo(tmp_path)
-    hashed = {"derived_sha256": "0" * 64, "sources": {"design/ota.sch": "1" * 64}}
-    inventory = _write_inventory(repo, 1, _item1_inventory(recorded=hashed))
-
-    with pytest.raises(AttestationError, match="live in the records file"):
-        build_attestation(1, inventory, None, str(repo / RECORDS.format(item=1)))
+    (repo / "LICENSE").unlink()
+    assert _check(10, inventory, envelope, capsys)[0] == 3
 
 
 def test_records_flag_is_attest_only_and_not_with_check(tmp_path, capsys):

@@ -10,6 +10,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from .signoff_attest_binding import attestation_record
+
 #: T1 item 8 (Characterization report): the one item that accepts a bare
 #: generic envelope, so a met citation always discloses whether
 #: ``klt signoff --attest 8`` produced it (issue #4311).
@@ -85,12 +87,7 @@ def _generic_artifact_binding(
     if isinstance(attestation, Mapping) and isinstance(
         attestation.get("producer"), str
     ):
-        binding["attestation"] = {
-            "producer": attestation["producer"],
-            "inventory_schema_version": attestation.get("inventory_schema_version"),
-            "check_count": attestation.get("check_count"),
-            "passed_count": attestation.get("passed_count"),
-        }
+        binding["attestation"] = attestation_record(attestation)
         if "record_format" in attestation:
             # Issue #5945: counts are not committed in record format 2 (null).
             binding["attestation"]["record_format"] = attestation["record_format"]

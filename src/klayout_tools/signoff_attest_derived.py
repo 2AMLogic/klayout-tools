@@ -7,10 +7,13 @@ import :mod:`signoff_attest` (which imports it) at module level, so the path
 normaliser is passed in and ``AttestationError`` is imported lazily.
 
 In **record format 2** (:mod:`klayout_tools.signoff_records`) the file hashes
-live in the records file, not the inventory: a ``recorded`` entry then names
-only the ``sources`` the artifact was built from (``{"sources": [path, ...]}``)
-and the hashes are written to -- and compared against -- the artifact's record
-line.
+live in the records file, not the inventory, so a ``recorded`` entry has no
+digests to compare against and its check would degenerate to presence-only:
+re-running ``--attest --records`` after a source edit would silently renew a
+stale artifact's record line. ``recorded`` is therefore **refused** with
+``--records``; a derived artifact must declare the ``check`` command form,
+which re-verifies freshness on every attestation exactly as in the classic
+format (migrating a classic ``recorded`` inventory is issue #5947).
 """
 
 from __future__ import annotations
@@ -71,37 +74,6 @@ def _validated_recorded(
     return {"derived_sha256": derived_sha256, "sources": normalized}
 
 
-def _validated_recorded_sources(
-    raw: Any, field: str, root: str, sources: set[str], normalize: _NormalizePath
-) -> dict[str, Any]:
-    """Record format 2: ``recorded`` is ``{"sources": [path, ...]}`` -- which
-    inventory sources the artifact was built from. The hashes are written to
-    the records file, so a hash map here is refused (it would be a second,
-    conflict-prone copy)."""
-    if (
-        not isinstance(raw, Mapping)
-        or set(raw) != {"sources"}
-        or not isinstance(raw["sources"], list)
-        or not raw["sources"]
-    ):
-        raise _error(
-            f"'{field}' must be {{\"sources\": [path, ...]}} with --records: "
-            "the file hashes live in the records file, not the inventory"
-        )
-    listed: list[str] = []
-    for raw_path in raw["sources"]:
-        path = normalize(raw_path, f"{field}.sources", root)
-        if path not in sources:
-            raise _error(
-                f"'{field}.sources' lists '{path}', which is not in the "
-                "inventory's top-level 'sources'"
-            )
-        if path in listed:
-            raise _error(f"'{field}.sources' lists '{path}' more than once")
-        listed.append(path)
-    return {"sources": sorted(listed)}
-
-
 def validated_derived(
     inventory: Mapping[str, Any],
     root: str,
@@ -149,9 +121,17 @@ def validated_derived(
         entry: dict[str, Any] = {"path": path, "generator": generator}
         if "check" in raw:
             entry["check"] = command_spec(raw["check"], f"{field}.check", root)
+        elif records:
+            raise _error(
+                f"'{field}.recorded' is not accepted with --records: without "
+                "the declared source hashes there is no freshness gate, and "
+                "re-running --attest would silently renew a stale artifact's "
+                "record line. Declare 'check' instead -- a command that fails "
+                "when the artifact is stale (e.g. klt netlist ... --check); "
+                "migrating a classic 'recorded' inventory is issue #5947"
+            )
         else:
-            validate = _validated_recorded_sources if records else _validated_recorded
-            entry["recorded"] = validate(
+            entry["recorded"] = _validated_recorded(
                 raw["recorded"], f"{field}.recorded", root, sources, normalize
             )
         entries.append(entry)
@@ -163,27 +143,17 @@ def recorded_hash_check(root: str, entry: Mapping[str, Any]) -> dict[str, Any]:
     the inventory recorded; no command is run. ``mismatches`` names every
     differing path with its expected and actual digest (``None`` = missing).
 
-    A record-format-2 entry (no digests: they live in the records file) only
-    requires the artifact and its sources to be readable (``missing``); a
-    changed hash is the records file's drift, reported by ``--check``."""
+    Classic format only: under ``--records`` a ``recorded`` entry is refused
+    at validation (:func:`validated_derived`), so the freshness gate is the
+    entry's ``check`` command, as in the classic ``check`` form."""
     recorded = entry["recorded"]
+    expected = {entry["path"]: recorded["derived_sha256"], **recorded["sources"]}
     check: dict[str, Any] = {
         "check": "recorded_hash",
         "role": "freshness",
         "target": entry["path"],
         "generator": entry["generator"],
     }
-    if "derived_sha256" not in recorded:
-        missing = [
-            path
-            for path in sorted([entry["path"], *recorded["sources"]])
-            if sha256_file(os.path.join(root, path)) is None
-        ]
-        check["passed"] = not missing
-        if missing:
-            check["missing"] = missing
-        return check
-    expected = {entry["path"]: recorded["derived_sha256"], **recorded["sources"]}
     mismatches = []
     for path in sorted(expected):
         actual = sha256_file(os.path.join(root, path))
