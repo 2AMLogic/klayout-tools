@@ -1257,6 +1257,59 @@ wrapped, and so the one hardest to cite.
 - **`--check` needs no pointer awareness.** It re-grades the manifest through
   the same resolution path, so a committed report that cites by pointer
   reproduces, and drifts when the *nested* envelope changes.
+- **The citation records the pointer (issue #5815).** A `met` citation for an
+  entry that carried a `pointer` now includes `citation.pointer`, the RFC 6901
+  selector verbatim — so a citation of *part* of a composite document (one
+  side of a cross-check report, say) is distinguishable in the JSON from a
+  whole-envelope citation of the same file. Additive; whole-envelope citations
+  are unchanged.
+
+### Citing a `--engine both` (cross-check) DRC report (issue #5815)
+
+`klt drc --engine both` writes a cross-check envelope (`mode: "crosscheck"`):
+the two engines' own complete reports nested under `reports.curated` /
+`reports.native`, the two-engine verdict at the top level, and the comparison
+block beside them ([`drc.md`](drc.md)'s "Cross-check"). It is the strongest
+DRC evidence the tool can produce, and `klt signoff` reads it directly:
+
+- **Cited whole** (no `pointer`), for item 3 or in envelope-aggregation mode,
+  the envelope is graded on its **own top-level `status`** — which the
+  producer derived conservatively from both sides (`violations` if either
+  engine found any, `clean_partial` if either side is partial, `not_checked`
+  when a side reached no verdict, `clean` only when both are clean). `clean`
+  renders `met`; every other verdict renders the ordinary `unmet` reasons
+  (`check_failed`, `partial_coverage`, `nothing_checked`), never
+  `unrecognized_envelope`.
+- **A cross-check run never gets credit a single-engine run would be
+  refused.** A `--rules` subset declared by *either* embedded side withholds
+  full-deck credit (`partial_coverage`), and `coverage.nothing_checked: true`
+  on either side refuses the citation (`nothing_checked`) — the projection
+  the grader applies reads those per-engine inputs per engine, not from the
+  top level where a cross-check envelope does not carry them.
+- **A `met` citation discloses what was actually graded**, in
+  `citation.drc_crosscheck`: each engine's own `status`, the
+  `comparison.state`, and each side's three item-3 `coverage` fields
+  (`layers_in_stream_without_rules`, `rules_skipped`, `deck_scope` — the same
+  fields the single-engine `citation.coverage` quotes, per engine). The
+  ordinary `citation.coverage` quotes the curated side's, as before.
+  Disclosure only, never graded on.
+- **A native side that is absent** (`reports.native: null` — the engine was
+  unavailable or failed) grades `unmet` on the envelope's own
+  `status: "not_checked"` and discloses `engines.native: null`, so the
+  citation never implies a two-engine claim.
+- **`pointer` still selects one side.** `{"file": …, "pointer":
+  "/reports/curated"}` grades the curated side as a standalone `drc`
+  envelope — the long-standing pointer contract — with `citation.pointer`
+  recording that only one side was graded. Citing the whole file is the
+  both-engines verdict; before #5815 the side pointer was the *only* way to
+  cite a cross-check at all, and it reported a curated-side `clean` against
+  a file whose own top-level `status` was `violations`.
+
+Provenance (and the `content_hash` staleness gate) read the curated side's
+`provenance`, which the producer's identity gate guarantees matches the
+native side's for any committed envelope — a cross-check whose two sides
+hashed different layouts or resolved different PDKs is refused at production
+time and never written.
 
 ### Citing an object in the artifact store (issue #4063)
 
@@ -4499,7 +4552,7 @@ distinguishable from "no samples document was ever named" (see
 | `status`    | string               | `"met"`, `"unmet"`, or (item 6 only, issue #2865) `"not_applicable"` — see above and "Item 6 `not_applicable`" below. |
 | `reason`    | string \| null       | `null` when `status` is `"met"` or `"not_applicable"`; otherwise **why**, so a missing check never reads the same as a failed one (issue #826) — see "`reason` values" below. |
 | `graded_by_build` | boolean        | **T1 items only** (issue #2176; a T2-T4 ladder row carries no such key — its `reason: "tier_not_supported"` already says this repository cannot check it at all). `true` when this build has grading rules for the item's id — always so for the shipped doc; `false` for an item only a `--tiers-doc`/`$KLT_TIERS_DOC` copy knows about, whose accepted kinds, evidence shape and pass conditions are all absent here. A `false` item that is nonetheless cited renders `unmet`/`ungradeable_by_build`. See "An overridden doc can outrun the build" above. |
-| `citation`  | object \| null       | Present only when `status: "met"`: `{"file", "command", "kind", "check_status", "content_hash", "input_verified", "exit_status"}`, plus `coverage` for a `drc` citation whose envelope reports one, `body_bias` for a `pex` citation whose envelope reports one (issue #1983), `content_hash_unresolved` for a `yield` citation whose named samples document could not be found (issue #2197), `yield_campaign` for a `yield` citation whose report carries measurements (issue #2467 — the campaign's rolled-up `sample_size`/`negative_control` state; see "Campaign discipline on item 6" below), `artifact_binding` for an artifact-anchored `generic` citation of item 1, 2, 9 or 10 (issue #2718), plus `parts` and `power_delivery` for item 11's compound citation (issue #2025). |
+| `citation`  | object \| null       | Present only when `status: "met"`: `{"file", "command", "kind", "check_status", "content_hash", "input_verified", "exit_status"}`, plus `coverage` for a `drc` citation whose envelope reports one, `body_bias` for a `pex` citation whose envelope reports one (issue #1983), `content_hash_unresolved` for a `yield` citation whose named samples document could not be found (issue #2197), `yield_campaign` for a `yield` citation whose report carries measurements (issue #2467 — the campaign's rolled-up `sample_size`/`negative_control` state; see "Campaign discipline on item 6" below), `artifact_binding` for an artifact-anchored `generic` citation of item 1, 2, 9 or 10 (issue #2718), `pointer` when the evidence entry carried one (issue #5815), `drc_crosscheck` for a cross-check (`--engine both`) `drc` citation (issue #5815), plus `parts` and `power_delivery` for item 11's compound citation (issue #2025). |
 
 #### `citation` fields
 
@@ -4520,6 +4573,8 @@ distinguishable from "no samples document was ever named" (see
 | `yield_campaign` | object | **`yield` citations only**, and only when the cited report carries at least one measurement (issue #2467): `{"sample_size", "undersized_measurements", "negative_control", "measurements_without_negative_control", "undetected_negative_controls", "not_applicable_negative_controls"}` — the campaign's own sample-size and negative-control state, rolled up across `measurements[]`. `sample_size` is `"insufficient"` when any measurement says so, `"sufficient"` when at least one says so and none says otherwise, and `null` when none states a verdict; `negative_control` is `"not_detected"` when any declared control failed, `"detected"` when at least one was declared and every declared one detected, and `"not_declared"` when none was declared. The first two name-lists are in the report's own measurement order. `not_applicable_negative_controls` (issue #4523) lists `{"name", "reason"}` for each measurement whose control verdict is `"not_applicable"` with a non-empty reason: such a measurement is excluded from the other two lists and never makes `negative_control` `"detected"` (a campaign where every control is N/A rolls up to `"not_declared"`); one without a reason fails closed and counts as undetected. Signoff discloses the reason; it does not judge it. On a `"met"` citation the refusing values (`"insufficient"`, `"not_detected"`) can never appear — those render `unmet`/`undersized_sample` or `unmet`/`negative_control_not_detected` instead, carrying this same block as the item's `detail.yield_campaign`. **Absent** for any other kind, and for a report with no measurements — an absent key means "this artifact made no campaign statement", never "the campaign was disciplined". See "Campaign discipline on item 6" below. |
 | `artifact_binding` | object | **Items 1, 2, 9 and 10, `generic` citations only** (issue #2718): `{"t1_item", "path", "content_hash", "input_verified", "members"?, "summary"?, "source"?}`. `members` (issue #3044) is present only for a set binding (`provenance.input.paths`) — `[{"path", "content_hash", "status"}]` with `status` of `verified`/`stale`/`unverifiable`, `content_hash` then being the set's combined digest and `path` `null`; an unmet set citation carries the same list as the item's `detail.artifact_binding.members`. These are the item the attestation declared, the audited artifact exactly as its `provenance.input.path` names it (a string or a `{path, scope}` object), the hash that artifact re-hashed to, and `input_verified` (always `true` on a met row). `summary`/`source` are echoed when the envelope carries them as strings, and are never graded. `attestation` (issue #2844) — `{"producer", "inventory_schema_version", "check_count", "passed_count"}` — is echoed when the envelope carries an `attestation` block naming a `producer` (every `klt signoff --attest` envelope does), and is never graded. **Items 1 and 2 only** (issue #2887): a `regeneration` object `{"generator", "regenerated_hash", "executed_by_klt"}` is added when the attestation carries a matching `provenance.regeneration` claim; `executed_by_klt` is `false` unless the opt-in generator execution above ran an approved generator successfully (then `true`, with an `execution` block). It is absent when no claim was made. **Absent** on every other citation, including a native-kind citation of item 2 (items 1, 9 and 10 no longer accept native citations). On item 2 an absent key means "a passing envelope was cited, but nothing ties it to the item's subject matter". See "Items 1, 2, 9, and 10: bind them to an audited artifact" above. |
 | `coverage_qualification` | object | **Any kind**, and only when the cited envelope's versioned `coverage` block classifies as `partial` (issue #2109): `{"reason": "partial_coverage", "skipped": [{"id", "reason"}, …]}` — the requested work the cited run did not check. Bounded (issue #4286): at most 20 `skipped` records are quoted; a longer list is truncated to its first 20 (the producer's sorted order) and gains the additive keys `skipped_total` (int, full count), `skipped_by_reason` (`{reason: count}`) and `truncated: true`, while the complete list stays in the cited envelope (identified by `file` + `content_hash`). At or below 20 records the shape is exactly as above. **Absent** for complete, zero, unknown, malformed and pre-contract coverage alike; an absent key means "this artifact made no partial-coverage claim", never "nothing was skipped". Legacy verb-specific gap fields (`coverage.rules_skipped`) are **not** re-read into it. Quoted, never graded on — see "Partial coverage is qualified, not inferred" above. |
+| `pointer`     | string          | **Present only when the evidence entry carried a `pointer`** (issue #5815): the RFC 6901 selector, verbatim, naming where inside the cited document the graded envelope lives — so a citation of *part* of a composite document (one side of a cross-check report, say) is distinguishable in the JSON from a whole-envelope citation of the same file. **Absent** when the entry named none (including the empty pointer `""`, which denotes the whole document). Never consulted by any grading rule — see "Citing an envelope nested inside a composite report" above. |
+| `drc_crosscheck` | object      | **Cross-check (`--engine both`) `drc` citations only** (issue #5815): `{"mode": "crosscheck", "engines": {"curated": …, "native": …}, "comparison_state"}` — what the citation actually graded. Each engine's entry is `{"status", "coverage"}` (its own status token and its three item-3 `coverage` fields, present only when that side carries a coverage block), or `null` for a native side that is absent (`reports.native: null` — the engine was unavailable or failed; the envelope then grades `unmet` on its own `not_checked`, so this appears on a `met` citation only for a hand-shaped artifact). `comparison_state` is the comparison block's own state token. **Absent** for every single-engine citation, and for a side-selected cross-check citation (a `pointer` citation grades the selected side as a standalone envelope). Disclosure only, never graded on — see "Citing a `--engine both` (cross-check) DRC report" above. |
 
 #### `reason` values
 

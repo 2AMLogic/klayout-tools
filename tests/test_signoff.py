@@ -14427,12 +14427,12 @@ def test_pointer_resolved_envelope_grades_identically_to_the_same_file_unnested(
     plain_item = next(item for item in plain["items"] if item["id"] == 3)
     pointed_item = next(item for item in pointed["items"] if item["id"] == 3)
 
-    # Same fields, same values -- except `citation.file`, which necessarily
-    # names the document each manifest actually cited.
-    assert set(plain_item["citation"]) == set(pointed_item["citation"])
-    assert {k: v for k, v in plain_item["citation"].items() if k != "file"} == {
-        k: v for k, v in pointed_item["citation"].items() if k != "file"
-    }
+    # Same fields, same values -- except `citation.file` (naming the
+    # document each manifest cited) and `citation.pointer` (#5815: only a
+    # pointed citation records its selector).
+    normalized = dict(pointed_item["citation"], file=plain_item["citation"]["file"])
+    normalized.pop("pointer")
+    assert plain_item["citation"] == normalized
     assert plain_item["status"] == pointed_item["status"] == "met"
 
 
