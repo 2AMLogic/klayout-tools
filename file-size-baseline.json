@@ -765,7 +765,7 @@
     },
     {
       "path": "tests/test_ci_wall_clock.py",
-      "lines": 2054
+      "lines": 2035
     },
     {
       "path": "tests/test_components.py",
