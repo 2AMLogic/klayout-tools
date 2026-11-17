@@ -19,7 +19,7 @@ import os
 from collections.abc import Callable
 
 from ..route_labelled import RouteError, route
-from ._parsing import RequestFileError, load_request_file
+from ._request_file import RequestFileError, load_request_file
 from .output import emit_error, emit_success
 
 EXIT_FINDINGS = 3

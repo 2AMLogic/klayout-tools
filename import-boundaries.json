@@ -62,6 +62,7 @@
         "klayout_tools.cli._argv_flags",
         "klayout_tools.cli._parsing",
         "klayout_tools.cli._request_document",
+        "klayout_tools.cli._request_file",
         "klayout_tools.cli.color",
         "klayout_tools.cli.output",
         "klayout_tools.cli.parser",
@@ -1897,7 +1898,7 @@
       "reason": "Issue #5485: reads the samples document with the shared error handling; its hand-rolled copy omitted UnicodeDecodeError and tracebacked past the error envelope. Promote to a public name when _paths is next reworked."
     },
     {
-      "consumer": "klayout_tools.cli._parsing",
+      "consumer": "klayout_tools.cli._request_file",
       "exporter": "klayout_tools._paths",
       "symbol": "_load_request_json",
       "reason": "Issue #5540: load_request_file delegates to the shared loader so the route/gen-compose/layout-plan request reads cannot drift from it again; all four hand-rolled copies omitted UnicodeDecodeError. Promote to a public name when _paths is next reworked."

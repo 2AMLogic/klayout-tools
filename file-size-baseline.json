@@ -169,7 +169,7 @@
     },
     {
       "path": "src/klayout_tools/arith_gen.py",
-      "lines": 1010
+      "lines": 1003
     },
     {
       "path": "src/klayout_tools/artifact_store.py",
@@ -269,7 +269,7 @@
     },
     {
       "path": "src/klayout_tools/env_provenance.py",
-      "lines": 714
+      "lines": 708
     },
     {
       "path": "src/klayout_tools/equiv.py",
@@ -357,7 +357,7 @@
     },
     {
       "path": "src/klayout_tools/gen_compose.py",
-      "lines": 5119
+      "lines": 5108
     },
     {
       "path": "src/klayout_tools/gen_compose_port_access.py",
@@ -645,7 +645,7 @@
     },
     {
       "path": "src/klayout_tools/socket_check.py",
-      "lines": 1133
+      "lines": 1117
     },
     {
       "path": "src/klayout_tools/spice_flatten.py",
@@ -665,7 +665,7 @@
     },
     {
       "path": "src/klayout_tools/tap_distance.py",
-      "lines": 599
+      "lines": 593
     },
     {
       "path": "src/klayout_tools/trajectory.py",

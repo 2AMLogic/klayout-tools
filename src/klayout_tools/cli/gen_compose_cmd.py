@@ -22,7 +22,7 @@ import argparse
 import os
 
 from ..gen_compose import GenComposeError, compose
-from ._parsing import RequestFileError, load_request_file
+from ._request_file import RequestFileError, load_request_file
 from .output import emit_error, emit_success
 
 #: Exit code for a partial-success run (blocks placed, some nets unrouted).

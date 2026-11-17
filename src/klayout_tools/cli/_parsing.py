@@ -34,36 +34,8 @@ from collections.abc import Callable
 from typing import Any
 
 from .._jsonnum import is_number
-from .._paths import _load_request_json
 
 ErrorFactory = Callable[[str], Exception]
-
-
-class RequestFileError(Exception):
-    """A ``klt`` request JSON file could not be read or parsed (issue #5540).
-
-    :func:`load_request_file` raises this for a missing file, a directory,
-    an unreadable or non-UTF-8 file, or invalid JSON; the command modules
-    catch it and translate the message into :func:`.output.emit_error` so
-    it reaches the caller through the shared error envelope.
-    """
-
-
-def load_request_file(path: str) -> Any:
-    """Read and decode a ``klt`` request JSON file.
-
-    Delegates to :func:`klayout_tools._paths._load_request_json` so the CLI
-    request reads cannot drift from the library's loader -- the four
-    near-identical hand-rolled reads this replaces (``klt route``,
-    ``klt gen-compose``, ``klt layout-plan execute``/``check``) had all
-    dropped ``UnicodeDecodeError``, so a non-UTF-8 request escaped as a raw
-    traceback instead of the error envelope ``docs/json-contract.md``
-    requires (issue #5540).
-
-    Raises :class:`RequestFileError` for every failure mode the read can
-    hit; returns whatever :func:`json.load` produced, unvalidated.
-    """
-    return _load_request_json(path, RequestFileError)
 
 
 def load_json_path_or_inline(

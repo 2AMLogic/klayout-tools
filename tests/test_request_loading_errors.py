@@ -37,12 +37,12 @@ from klayout_tools import (
 )
 from klayout_tools._paths import _load_spec_json
 from klayout_tools.cli import main
-from klayout_tools.cli._parsing import (
-    RequestFileError,
-    load_json_path_or_inline,
-    load_request_file,
-)
+from klayout_tools.cli._parsing import load_json_path_or_inline
+from klayout_tools.cli._request_file import RequestFileError, load_request_file
+from klayout_tools.erc_spec import ErcError
 from klayout_tools.eval import EvalError, run_eval
+from klayout_tools.mom import MomError
+from klayout_tools.power import PowerError
 from klayout_tools.yield_sensitivity import SensitivityError, run_sensitivity
 
 #: `\xff\xfe` is a UTF-16 BOM: valid JSON once decoded as UTF-16, and not
@@ -187,6 +187,35 @@ def test_load_spec_json_non_utf8_raises_the_callers_error(tmp_path):
     path.write_bytes(_NON_UTF8)
     with pytest.raises(ValueError, match="could not read spec"):
         _load_spec_json(str(path), ValueError)
+
+
+def test_load_spec_json_malformed_json_raises_the_callers_error(tmp_path):
+    """The malformed-JSON direction of the same reader: the except tuple
+    must keep the `json.JSONDecodeError` arm alongside the
+    `UnicodeDecodeError` one. Dropping it (replacing instead of widening)
+    moved the raw traceback from non-UTF-8 input to invalid-JSON input --
+    the far more common case, and what CI caught first."""
+    path = tmp_path / "bad.json"
+    path.write_text("{not json")
+    for error_cls in (ErcError, MomError, PowerError):
+        with pytest.raises(error_cls, match="is not valid JSON"):
+            _load_spec_json(str(path), error_cls)
+
+
+@pytest.mark.parametrize("verb", ["mom", "power"], ids=["mom", "power"])
+def test_cli_mom_power_malformed_spec_emits_an_error_envelope(verb, tmp_path, capsys):
+    """`klt mom`/`klt power` read their positional spec through the same
+    helper before touching the layout file, so a malformed spec is an error
+    envelope -- no real layout needed to pin it."""
+    path = tmp_path / "bad.json"
+    path.write_text("{not json")
+
+    exit_code = main([verb, "whatever.gds", str(path), "--format", "json"])
+
+    assert exit_code == 1
+    error = _error_envelope(capsys)["error"]
+    assert error["command"] == verb
+    assert "not valid JSON" in error["message"]
 
 
 def test_load_json_path_or_inline_non_utf8_raises_the_callers_error(tmp_path):

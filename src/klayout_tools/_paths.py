@@ -120,9 +120,8 @@ def _load_request_json(request_path: str, error_cls: type[Exception]) -> Any:
 
     Returns whatever :func:`json.load` produced, unvalidated -- callers
     still own the "is this a JSON object" and "are the required fields
-    present" checks, since those (and their exact wording) are genuinely
-    module-specific and some callers reuse them across non-file request
-    sources (stdin, inline JSON) that never reach this function.
+    present" checks (their exact wording is module-specific, and some
+    callers reuse them across stdin/inline sources that never reach here).
     """
     if not os.path.exists(request_path):
         raise error_cls(f"file not found: {request_path}")
@@ -141,13 +140,12 @@ def _load_request_json(request_path: str, error_cls: type[Exception]) -> Any:
 def _load_spec_json(spec_path: str, error_cls: type[Exception]) -> dict[str, Any]:
     """Read ``spec_path`` and decode it as a JSON object, raising
     ``error_cls`` for every failure mode ``erc.py``/``power.py``/``mom.py``'s
-    ``run_*`` entry points need to report: missing file, a directory instead
-    of a file, an unreadable/undecodable file, or a JSON value that isn't an
-    object.
+    ``run_*`` entry points report: missing file, a directory instead of a
+    file, an unreadable/undecodable file, invalid JSON, or a non-object.
 
     Unlike :func:`_load_request_json`, this also enforces "is this a JSON
-    object" itself -- all three ``_load_spec`` callers needed that exact
-    check, so it is folded in here rather than left to each caller.
+    object" itself -- all three callers need that exact check, folded in
+    here rather than left to each caller.
     """
     if not os.path.exists(spec_path):
         raise error_cls(f"spec file not found: {spec_path}")
@@ -158,6 +156,8 @@ def _load_spec_json(spec_path: str, error_cls: type[Exception]) -> dict[str, Any
             spec = json.load(f)
     except (OSError, UnicodeDecodeError) as exc:
         raise error_cls(f"could not read spec '{spec_path}': {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise error_cls(f"spec '{spec_path}' is not valid JSON: {exc}") from exc
     if not isinstance(spec, dict):
         raise error_cls(f"spec '{spec_path}' must be a JSON object")
     return spec
