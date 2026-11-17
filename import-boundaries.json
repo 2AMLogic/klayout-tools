@@ -658,6 +658,7 @@
         "klayout_tools._jsongz",
         "klayout_tools._jsonnum",
         "klayout_tools._layout",
+        "klayout_tools._macros_blackbox",
         "klayout_tools._native",
         "klayout_tools._openroad_engine",
         "klayout_tools._paths",

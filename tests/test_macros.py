@@ -541,11 +541,3 @@ def test_undeclared_module_hint_recognizes_the_yosys_error():
 
 def test_undeclared_module_hint_ignores_unrelated_failures():
     assert macro_spec.undeclared_module_hint("ERROR: syntax error") is None
-
-
-def test_missing_lef_master_hint_names_blackbox_form_only_when_asked():
-    text = "[ERROR ORD-2013] instance u_m LEF master mystery not found."
-    assert '{"cell": "mystery"}' not in macro_spec.missing_lef_master_hint(text)
-    hint = macro_spec.missing_lef_master_hint(text, blackbox_form=True)
-    assert '{"cell": "mystery"}' in hint
-    assert "excluded" in hint

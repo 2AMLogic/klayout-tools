@@ -240,7 +240,7 @@ macro's real arcs participate in this verb's slack/``fmax``/power numbers
 rather than being blackboxed; a ``lib`` map with no entry for the corner
 being run is a named error, never a silent fallback to another corner's
 timing, which matters most in a ``request.pdk.corners`` sweep. See
-:func:`_macro_liberty_paths`.
+:func:`~klayout_tools._macros_blackbox.macro_liberty_paths`.
 """
 
 from __future__ import annotations
@@ -253,6 +253,7 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from typing import Any
 
+from . import _macros_blackbox as macro_blackbox
 from . import env_provenance
 from . import macros as macro_spec
 from ._jsonnum import is_finite_number
@@ -1109,11 +1110,9 @@ def _dispatch_sta(
         # declaration round-trips through both verbs' reports unchanged.
         # `[]` when the request declared none.
         "macros": macro_spec.macros_response(macros),
-        # Additive field (issue #5707): every cell linked as an untimed
-        # black box (a `macros[]` entry with `cell` and no `lef`/`lib`), in
-        # request order. Always present; `[]` when none. The numbers above
-        # exclude these cells' delay and power.
-        "blackboxed_cells": macro_spec.blackboxed_cells_response(macros),
+        # Additive field (issue #5707): cells linked as untimed black boxes
+        # (always present; their delay/power is excluded from the numbers).
+        "blackboxed_cells": macro_blackbox.blackboxed_cells_response(macros),
         # Additive field (issue #2739): which clock mode every analyzed
         # corner was timed with -- "ideal" (the default, this command's
         # pre-#2739 behaviour) or "propagated". Present on both response
@@ -1251,7 +1250,7 @@ def _run_corner_session(
     -- which is what makes a macro-bearing ``def``/``verilog`` load at all
     instead of failing ``[ERROR ORD-2013] instance <inst> LEF master <cell>
     not found`` -- plus one ``read_liberty`` per macro that declared a
-    liberty for *this* corner (:func:`_macro_liberty_paths`). ``[]`` (the
+    liberty for *this* corner (:func:`macro_blackbox.macro_liberty_paths`). ``[]`` (the
     default for every pre-#2635 request) emits neither and leaves the
     generated script byte-identical.
     ``sdf_stem`` (issue #2886) -- when given (only ever for a ``def``-mode
@@ -1274,14 +1273,10 @@ def _run_corner_session(
     )
     tech_lef, cell_lef = _resolve_lef(cell_library, pdk_info)
     macro_lefs = [macro["lef"] for macro in macros if macro["lef"] is not None]
-    # Issue #5707: each black-boxed cell gets a generated pin-less stub LEF so
-    # `link_design` resolves it (without one it fails with ORD-2013).
-    for index, macro in enumerate(m for m in macros if m["lef"] is None):
-        stub_path = os.path.join(output_dir, f"blackbox_{script_tag}_{index}.lef")
-        with open(stub_path, "w", encoding="utf-8") as handle:
-            handle.write(macro_spec.blackbox_stub_lef_text(macro["cell"]))
-        macro_lefs.append(stub_path)
-    macro_liberty_paths = _macro_liberty_paths(macros, corner)
+    macro_lefs.extend(macro_blackbox.write_stub_lefs(macros, output_dir, script_tag))
+    macro_liberty_paths = macro_blackbox.macro_liberty_paths(
+        macros, corner, error_cls=PostRouteStaError
+    )
 
     script_path = os.path.join(output_dir, f"sta_{script_tag}.tcl")
     metrics_path = os.path.join(output_dir, f"{script_tag}_metrics.json")
@@ -1659,11 +1654,9 @@ def _run_multi_corner(
         # liberties was loaded varies, and that is already determined by
         # each corner's own name plus this one `macros` block.
         "macros": macro_spec.macros_response(macros),
-        # Additive field (issue #5707): every cell linked as an untimed
-        # black box (a `macros[]` entry with `cell` and no `lef`/`lib`), in
-        # request order. Always present; `[]` when none. The numbers above
-        # exclude these cells' delay and power.
-        "blackboxed_cells": macro_spec.blackboxed_cells_response(macros),
+        # Additive field (issue #5707): cells linked as untimed black boxes
+        # (always present; their delay/power is excluded from the numbers).
+        "blackboxed_cells": macro_blackbox.blackboxed_cells_response(macros),
         # Additive field (issue #2739): one clock mode for the whole
         # characterization -- every per-corner session runs the same
         # request-level `constraints.propagated_clock`, so this is hoisted
@@ -2781,59 +2774,18 @@ def _validate_macros(
 ) -> list[dict[str, Any]]:
     """Validate the optional ``request.macros`` array (issue #2635) -- the
     same shared hard-macro declaration ``klt synthesize`` accepts, field for
-    field, documented once in :mod:`klayout_tools.macros`.
-
-    Returns ``[]`` when the field is omitted, so every request written
-    before this field existed analyses exactly as it did. A thin wrapper
-    rather than a second validator: only the exception class differs per
-    verb.
-
-    Issue #5707: in ``verilog`` mode an entry with ``cell`` and neither
-    ``lef`` nor ``lib`` is accepted as an explicit untimed black box. In
-    ``def`` mode every entry still needs its ``lef`` -- a DEF carries
-    placed geometry -- and a LEF-less one is rejected naming the field.
+    field, documented once in :mod:`klayout_tools.macros`. Returns ``[]``
+    when the field is omitted, so every request written before this field
+    existed analyses exactly as it did. A thin wrapper rather than a second
+    validator: only the exception class differs per verb. Issue #5707: a
+    LEF-less entry is a verilog-mode-only untimed black box (see
+    :mod:`klayout_tools._macros_blackbox`); ``def`` mode rejects it.
     """
-    if has_def and isinstance(macros, list):
-        for index, entry in enumerate(macros):
-            if isinstance(entry, dict) and entry.get("lef") is None:
-                raise PostRouteStaError(
-                    f"request.macros[{index}].lef is required in def mode: a "
-                    "DEF carries placed geometry, so a macro cannot be "
-                    "declared as an untimed black box without a LEF (that "
-                    "form is verilog mode only)"
-                )
+    if has_def:
+        macro_blackbox.reject_lefless_in_def(macros, error_cls=PostRouteStaError)
     return macro_spec.validate_macros(
-        macros,
-        request_dir,
-        error_cls=PostRouteStaError,
-        allow_blackbox=not has_def,
+        macros, request_dir, error_cls=PostRouteStaError, allow_blackbox=not has_def
     )
-
-
-def _macro_liberty_paths(macros: list[dict[str, Any]], corner: str) -> list[str]:
-    """The macro liberties to ``read_liberty`` alongside the standard-cell
-    library for the corner actually being analysed (issue #2635).
-
-    A macro that declared no ``lib`` at all contributes nothing: its LEF is
-    what fixes ``ORD-2013``, and OpenSTA then times the instance as an
-    untimed blackbox (``[WARNING STA-0198] module <cell> not found.
-    Creating black box for <inst>``) -- a legitimate, explicit choice for a
-    caller doing a geometry-only run. A macro that *did* declare a ``lib``
-    map with no entry for this corner is a hard error naming the corner and
-    the keys that are available
-    (:func:`~klayout_tools.macros.macro_lib_for_corner`), never a silent
-    fallback to some other corner's timing -- which matters most in a
-    ``request.pdk.corners`` multi-corner run, where the right answer for
-    one corner is the wrong answer for the next.
-    """
-    paths: list[str] = []
-    for macro in macros:
-        lib_path = macro_spec.macro_lib_for_corner(
-            macro, corner, error_cls=PostRouteStaError
-        )
-        if lib_path is not None:
-            paths.append(lib_path)
-    return paths
 
 
 def _resolve_liberty(
