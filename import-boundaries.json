@@ -784,6 +784,7 @@
         "klayout_tools.sim_cycle_mean",
         "klayout_tools.sim_deck_expand",
         "klayout_tools.sim_decks",
+        "klayout_tools.sim_decks_resume",
         "klayout_tools.sim_decks_split",
         "klayout_tools.sim_decks_staging",
         "klayout_tools.sim_echo_messages",

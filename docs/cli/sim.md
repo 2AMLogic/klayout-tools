@@ -287,6 +287,16 @@ the invoking directory or `$HOME` happened to carry a `.spiceinit` of its
 own). ngspice-only: the `xyce` engine has no equivalent init-file lookup, so
 `options.ngspice_init` is accepted but has no effect when `engine: "xyce"`.
 
+The option applies to **deck-list requests** too (see "Pre-composed decks"):
+each unit's own directory gets the same `.spiceinit` before `ngspice -b`
+runs there, on every backend — an off-host job forwards the option in its
+worker request. A unit that itself stages a deck, input, or include named
+`.spiceinit` while the option is set is rejected by name rather than
+silently dropping one side. Note the file ngspice reads from its working
+directory *replaces* `$HOME/.spiceinit` — ngspice does not merge the two —
+so the requested lines must be complete, not mode-only additions to
+whatever the host's own init file sets.
+
 ### Transient noise coverage (ngspice, [#2985](https://github.com/2AMLogic/klayout-tools/issues/2985))
 
 On the **ngspice** engine a transient (`analysis.kind: "tran"`, or a `tran`
@@ -2737,6 +2747,7 @@ in the deck path), exactly as corner jobs do.
 | `options.timeout_s` | number | Default per-unit timeout (see `decks[].timeout_s`). |
 | `options.max_workers` | integer | Worker-pool size for `local-parallel`; overridable with `--max-workers`, capped by `$KLT_SIM_MAX_WORKERS`, same as corners. |
 | `options.ngspice_binary` | string | Same resolution rules as corners (issue #2423). Interpreted on the *executing* host. |
+| `options.ngspice_init` | array\<string\> | Same meaning as corners (issue #2520): each string becomes one line of the `.spiceinit` written into every unit's own directory before `ngspice -b` runs there (issue #5738), on every backend. Replaces the executing host's `$HOME/.spiceinit` — lines must be complete. A unit staging its own `.spiceinit` while this is set is rejected by name. |
 | `remote.*` / `batch.*` | object | The same backend blocks corner requests carry; only read for the matching backend. `remote.hosts` sharding is refused for deck requests — one off-host job runs the whole list across its own worker pool. |
 
 A deck-list request must not also declare `netlist`, `corners`, `analysis`,
