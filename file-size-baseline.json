@@ -557,7 +557,7 @@
     },
     {
       "path": "src/klayout_tools/remote_launcher.py",
-      "lines": 1789
+      "lines": 1787
     },
     {
       "path": "src/klayout_tools/remote_transport.py",
@@ -577,7 +577,7 @@
     },
     {
       "path": "src/klayout_tools/signoff_attest.py",
-      "lines": 1168
+      "lines": 1152
     },
     {
       "path": "src/klayout_tools/signoff_generator_batch.py",
@@ -1045,7 +1045,7 @@
     },
     {
       "path": "tests/test_signoff.py",
-      "lines": 18321
+      "lines": 18303
     },
     {
       "path": "tests/test_signoff_generator_batch.py",
