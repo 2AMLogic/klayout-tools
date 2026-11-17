@@ -80,6 +80,9 @@ VOLATILE_PROVENANCE_PATHS: frozenset[tuple[str, ...]] = frozenset(
         ("provenance", "pdk", "linked_trees"),
         # Issue #5182: other PDK roots on the resolving host (#2564) -- machine-local.
         ("provenance", "pdk", "ambiguous_sources"),
+        # Issue #5863: how the PDK was resolved (search roots vs $PDK_ROOT
+        # vs --pdk-root) -- resolution provenance, not evidence.
+        ("provenance", "pdk", "source"),
     }
 )
 

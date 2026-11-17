@@ -11,12 +11,12 @@ klt stats <file> [--per-layer] [--geometry-digest] [--top <cell>] [--density-win
 - `<file>` — path to a GDSII (`.gds`) or OASIS (`.oas`) file. KLayout
   auto-detects the stream format on read; the extension is not authoritative.
 - `--per-layer` — also report the same statistics broken down per layer.
+  Without this flag, only the `total` figures are computed (`layers` is
+  `null`).
 - `--geometry-digest` — also compute `geometry_digest` (a sha256 of the
   stream's decoded geometry). Off by default: it re-reads and walks the whole
   layout (~2.5x the runtime of the rest of the report on large flat layouts),
   so the field is `null` unless this flag is given.
-  Without this flag, only the `total` figures are computed (`layers` is
-  `null`).
 - `--top` — top cell to report on when the stream has more than one
   (required in that case; optional otherwise), matching `klt extract --top`.
   When given, **both** `bbox_um` and every area/polygon/vertex count

@@ -247,7 +247,19 @@ def render_check_text(result: dict) -> None:
             # relative paths were written against the report's own directory
             # -- where the input really is.
             missing = check.get("input_not_found")
-            if missing is None:
+            deck_missing = check.get("deck_not_found")
+            if deck_missing is not None:
+                # A --deck-file miss has no packaged name to name; the
+                # entry's hint says the override was the thing looked for.
+                detail = f"deck not found: {deck_missing['resolved']}"
+                if deck_missing["name"] is not None:
+                    detail += (
+                        f"; packaged name {deck_missing['name']!r} not in "
+                        f"{deck_missing['packaged_dir']}"
+                    )
+                print(f"      actual:   None ({detail})")
+                print(f"      note:     {deck_missing['hint']}")
+            elif missing is None:
                 print(f"      actual:   {check['actual']}")
             else:
                 print(f"      actual:   None (input not found: {missing['resolved']})")
