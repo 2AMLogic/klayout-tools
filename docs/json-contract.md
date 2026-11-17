@@ -167,6 +167,8 @@ the same one-status-many-reasons shape as `implausible_solution`, so the
 `--batch-set` aggregate, which only references per-request reports by path) is
 unchanged. See [`docs/cli/sim.md`](cli/sim.md)'s "AC return-ratio metrics".
 
+`klt sim --check <report>` (issue #5821) is the reader half of the two netlist fields below: it emits the shared `--check` payload plus additive `diagnosis`/`note` members.
+
 `klt sim` also gains an additive `environment.netlist_identity` (normalised,
 comment/whitespace/path-insensitive netlist-closure hash; `null` plus
 `netlist_identity_error` when not computable) and an optional request field
@@ -272,6 +274,19 @@ object of numbers, so it sits beside `params` rather than inside it; it is
 absent (not `null`) when unmeasured and always absent on `cap_cmomf`. No
 existing member changed, so **no `schema_version` bump**. See
 `docs/cli/extract.md`'s "MoM capacitor devices" section.
+
+**A whole new *engine*, whose report adds fields and removes none, is
+additive.** Issue #5481 added `klt extract --engine klayout-runset`, which
+runs a PDK's own KLayout LVS runset instead of a curated `--deck`. Its report
+carries a top-level `engine`, `deck_file` and `deck_vars`, plus
+`provenance.runset` (the same block `klt lvs` already emits); `deck`,
+`parasitics` and `pdk` are `null` because no curated deck, parasitics pass or
+PDK resolution ran. Every field the default engine documents keeps its
+meaning, and a **default-engine report is byte-identical** to one produced
+before the flag existed — it does not even carry `engine`. So **no
+`schema_version` bump** (`klt extract` stays at 4). A consumer that wants to
+tell the two apart reads `engine`, whose absence means the curated engine.
+See `docs/cli/extract.md`'s "Engine" section.
 
 **A new terminal key on one device class's `nets` map is additive by the
 same per-class reasoning.** Issue #2862 added an `"s"` (substrate) key to
@@ -950,6 +965,9 @@ there is no rule/model deck and no single input layout stream to pin — so
 Unlike `klt wave`, both do resolve a PDK, and unconditionally (a generator
 cannot draw geometry without one), so `provenance.pdk` is always populated
 and mirrors the identity the report's own top-level `pdk` field carries.
+`klt gen` also reports an additive top-level `subcell_naming_scheme` (issue
+#5808): a string id of its sub-cell naming (`null` when none remains) — see
+`docs/cli/gen.md`.
 `klt_version` and `klayout_version` are what these two verbs gained the
 block for: a consumer that commits generated geometry plus its report as
 evidence and re-runs the generator later can otherwise not tell a real
@@ -1384,10 +1402,18 @@ including why a hard pin was rejected).
 A caller committing `klt drc`/`klt lvs` output as evidence does not need to
 call `klt version` separately to detect drift: `provenance.klayout_version_mismatch`
 (previous section) carries the same comparison inline on every report, with
-a stderr warning when it is `true`. To reproduce the exact engine a
-committed report was generated against:
+a stderr warning when it is `true`. The warning prints the install command
+for *your* build — for a released install the version-pin form, for a clean
+dev checkout the git-commit form — derived from
+`klt version --format json`'s `reinstall_spec` field (issue #5601). To
+reproduce the exact engine a committed report was generated against:
 
 ```bash
+# released install (the warning prints this when klt itself came from a pin):
+uv tool install "klayout-tools==<klt version>" \
+  --with klayout==<klayout_version_expected>
+
+# dev/git checkout:
 uv tool install "klayout-tools @ git+https://github.com/2AMLogic/klayout-tools@<sha>" \
   --with klayout==<klayout_version_expected>
 ```
@@ -1854,6 +1880,34 @@ All eight share one contract:
   (`engine`) is not excluded: swapping engines is a different run. For
   `signoff` the same rule lands on the field *its* reports carry tool
   identity in — the whole `build` block (issue #2249).
+- **A provenance field the fresh run does not emit is `not_compared`, not
+  drift (issue #5866).** A committed report may carry `provenance` keys the
+  re-running `klt` never writes — spliced in by a downstream wrapper
+  (`provenance.gds_sha256`), or emitted by a newer/older version of the
+  tool. Such a key is collected into an additive, optional `not_compared`
+  list of `{field, committed}` entries (dotted field names exactly like
+  `drift[]`'s; emitted only when non-empty, so every existing payload
+  stays byte-identical) and influences neither `status` nor the exit code:
+  only a field both reports actually carry can drift. The rule is
+  deliberately provenance-only and one-directional — a verdict-bearing key
+  missing from the fresh report (`violation_count`, `violations`,
+  `coverage`, …) still drifts, because dropping a verdict-bearing field is
+  exactly the regression the diff exists to catch; a key the *fresh*
+  report grew (schema evolution in the other direction) still drifts; a
+  fresh report missing its entire `provenance` block still drifts; and
+  the carve-out covers scalar keys only — a committed `provenance`
+  *sub-block* (a dict or list, e.g. a `regeneration` claim the fresh run
+  declined to adopt) absent from fresh is one absent verdict-bearing
+  structure and still drifts. The `provenance.regeneration` subtree
+  (`klt signoff --attest`'s caller-supplied claim) is excluded from the
+  carve-out entirely — its `hash_kind` leaf is written only when it
+  differs from the default (`bytes`), so absence there encodes a default
+  *value*, not an unproducible field, and any leaf disagreement inside a
+  declined claim still drifts (the explicit `--hash-kind` cross-check of
+  issue #5572). The
+  `--format text` renderer lists the skipped field names in a
+  `not compared:` block, so a non-zero exit always means "something that
+  could be compared did not match".
 - **`provenance.pdk.source` is excluded as resolution provenance (issue
   #5863).** It records *how* the PDK install was found (search roots vs
   `$PDK_ROOT` vs `--pdk-root`), in the shared
@@ -2146,11 +2200,20 @@ Field-level schema, path rules, examples and exit codes:
 
 Two behaviours worth knowing when running `--attest` or grading a manifest:
 
-- **Declared commands see the caller's `PATH`.** Inventory commands run with
-  the invoking environment, except that when `klt` itself runs inside a venv
+- **Declared commands see the caller's `PATH` — except that `klt` stays the
+  attesting `klt`.** Inventory commands run with the invoking environment,
+  except that when `klt` itself runs inside a venv
   (`sys.prefix != sys.base_prefix`, as under `uvx`/pipx) that venv's `bin`
   directory is removed from `PATH`, so a bare `python3` resolves to the
-  repo's interpreter, not the tool's. Outside a venv the environment is
+  repo's interpreter, not the tool's. The one name the stripping must not
+  remove is restored: a run-scoped shim directory holding a single `klt`
+  symlink to the venv's entry point is **prepended** to the declared
+  command's `PATH`, so `klt` on it is always the `klt` running the
+  attestation — the venv's when attesting from a venv, the host's when not.
+  The shim is prepended and so takes precedence over a `klt` the caller
+  placed earlier on `PATH` (issue #5565). No other executable from the
+  venv's `bin` (`python`, `python3`, `pip`) is re-exposed; the per-run shim
+  path never enters the envelope. Outside a venv the environment is
   unchanged.
 - **Manifest evidence paths are cwd-relative.** A relative `file` evidence
   path resolves against the process cwd, not the manifest's directory. When a
