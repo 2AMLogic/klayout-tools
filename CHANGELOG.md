@@ -779,6 +779,13 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## 0.9.0 (2026-11-05)
 
+- **`klt lvs` emits `topology.known_limitation`** (issue #6162, recorded
+  retroactively; introduced in #4819 and shipped in 0.9.0 without an entry):
+  a `warning`-severity `mismatches[].category` added when a mismatching
+  FinFET compare's top cell is one of the pinned unsupported ASAP7 RVT library
+  cells (drawn folded-stack or series-order topology differs from the library
+  CDL). It names the cell and never changes `status`, so the compare stays
+  `mismatch`.
 - **`klt gen` names its PCell child cell `<cell-name>__core`** (issue #4251,
   documented in [`docs/cli/gen.md`](docs/cli/gen.md)): on generators that
   emit a PCell child (all except `asap7_finfet`/`asap7_tap`, which flatten
@@ -5334,6 +5341,13 @@ conventional-commit breaking marker (`!:` / `BREAKING CHANGE`) and no
 1→2 bumps plus a new constant at 1; `FLEET_REPORT_SCHEMA_VERSION` rose 1→3);
 compatibility notes, where they matter, are in the entries below.
 
+- **`klt lvs` emits `net.supply_fragmented`** (issue #6162, recorded
+  retroactively; introduced in #2078 and shipped in 0.6.0 without an entry):
+  a `warning`-severity `mismatches[].category` added when a supply name from
+  `options.supply_nets` (default `GND`/`VCC`/`VDD`/`VGND`/`VPWR`/`VSS`) spans
+  more than one disconnected layout net in a circuit. One entry per circuit
+  and supply, with `details.supply` and `details.fragment_count`; it does not
+  change `status`.
 - **Fixed** (#2312, `klt gen bjt_array` geometry + `klt gen-compose`
   via-drop, **no** `schema_version` bump — but the `COLL_*` ports' reported
   `layer` and the drawn collector-ring layer both change on sky130, see

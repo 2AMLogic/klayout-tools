@@ -17,6 +17,13 @@ guard. Engine-specific categories are **not** exempt --
 ``runset.incomplete`` and ``coverage.no_devices_recognized`` are published
 ``mismatches[].category`` values of ``klt lvs`` like any other.
 
+Coverage is limited to module-level ``CATEGORY_*`` constants (one
+``CATEGORY_X = "value"`` assignment per line, at column 0). A category literal
+passed straight to ``_mismatch(...)`` is not seen by this guard, so a new
+category must be declared as a ``CATEGORY_*`` constant to be checked (issue
+#6162 promoted ``net.supply_fragmented`` and ``topology.known_limitation`` for
+this reason).
+
 Matching is plain substring containment, so a category string that appears in
 ``CHANGELOG.md`` only inside a fenced code block (e.g. an example report)
 would also satisfy this check. That residual false-positive risk is accepted
