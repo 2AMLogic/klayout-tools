@@ -290,6 +290,7 @@
         "klayout_tools.functional_verification_sdf_instance",
         "klayout_tools.functional_verification_sdf_rename",
         "klayout_tools.functional_verification_sdf_steps",
+        "klayout_tools.functional_verification_search_path",
         "klayout_tools.functional_verification_verilog_top"
       ]
     },
