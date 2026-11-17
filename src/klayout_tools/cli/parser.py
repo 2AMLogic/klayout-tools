@@ -3598,8 +3598,8 @@ def _add_env_provenance_parser(subparsers: argparse._SubParsersAction) -> None:
     lint_parser.add_argument(
         "--json-stream",
         action="store_true",
-        help="treat each FILE as whitespace-separated JSON documents; "
-        "findings gain a 0-based `document` index",
+        help="treat each FILE as whitespace-separated JSON documents (default: each"
+        " FILE is a single JSON document); findings gain a 0-based `document` index",
     )
     _add_format_arg(lint_parser)
     lint_parser.set_defaults(func=env_provenance_cmd.run_lint_envelope)
