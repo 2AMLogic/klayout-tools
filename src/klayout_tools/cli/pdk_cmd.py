@@ -63,6 +63,7 @@ from ..pdk_descriptor import ASSET_KEYS
 from ..pdk_pcell import PdkPCellError, list_pdk_pcells
 from ..pdk_stackup import PdkStackupError, stackup
 from .output import emit_error, emit_success, render_table
+from .pdk_expect import bundle_expectation, expectations_exit
 
 #: `klt pdk cells --supply` exit code when no library is compatible (ran
 #: fine, just no match) -- distinct from 1 (PdkNotFoundError) and 2 (argparse
@@ -96,34 +97,6 @@ EXIT_PCELL_UNAVAILABLE = 5
 #: docs/cli/pdk.md.
 EXIT_VERSION_MISMATCH = 6
 
-#: The expectation objects `find`/`check` may carry, in report order: report
-#: key and the noun naming the expectation in its one-line stderr failure
-#: (issue #5624 adds the bundle leg, `check` only).
-_EXPECTATIONS: tuple[tuple[str, str], ...] = (
-    ("version_expectation", "version"),
-    ("bundle_expectation", "bundle"),
-)
-
-
-def _expectations_exit(report: dict) -> int:
-    """Exit code (0 or EXIT_VERSION_MISMATCH) for the expectation flags; on
-    each failure writes one stderr line naming both values. All failing
-    expectations report (one line each) even though the code is shared."""
-    code = 0
-    for key, noun in _EXPECTATIONS:
-        result = report.get(key)
-        if not result or result["status"] == "match":
-            continue
-        installed = result["installed"]
-        print(
-            f"klt: PDK {noun} expectation {result['status']}: expected "
-            f"{result['expected']!r}, installed "
-            f"{installed if installed is not None else 'unknown'!r}",
-            file=sys.stderr,
-        )
-        code = EXIT_VERSION_MISMATCH
-    return code
-
 
 def run_find(args: argparse.Namespace) -> int:
     try:
@@ -135,7 +108,7 @@ def run_find(args: argparse.Namespace) -> int:
 
     emit_success(report, args.format, _print_find_text)
 
-    return _expectations_exit(report)
+    return expectations_exit(report, EXIT_VERSION_MISMATCH)
 
 
 def run_list(args: argparse.Namespace) -> int:
@@ -157,17 +130,15 @@ def run_env(args: argparse.Namespace) -> int:
 def run_check(args: argparse.Namespace) -> int:
     try:
         report = find_pdk(
-            variant=args.pdk,
-            root=args.pdk_root,
-            expect_version=args.expect_version,
-            expect_bundle_sha256=args.expect_bundle_sha256,
+            variant=args.pdk, root=args.pdk_root, expect_version=args.expect_version
         )
     except PdkNotFoundError as exc:
         return emit_error("pdk check", str(exc), args.format)
 
+    bundle_expectation(report, args.expect_bundle_sha256)
     emit_success(report, args.format, _print_check_text)
 
-    expectation_exit = _expectations_exit(report)
+    expectation_exit = expectations_exit(report, EXIT_VERSION_MISMATCH)
     if report["broken_symlinks"]:
         return EXIT_BROKEN_SYMLINKS
     return expectation_exit

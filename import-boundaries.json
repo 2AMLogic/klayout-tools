@@ -518,6 +518,7 @@
       "description": "PDK resolution and rule decks -- the documented exception to verb self-containment (docs/ARCHITECTURE.md).",
       "modules": [
         "klayout_tools.cli.pdk_cmd",
+        "klayout_tools.cli.pdk_expect",
         "klayout_tools.decks",
         "klayout_tools.decks.asap7",
         "klayout_tools.decks.asap7_rules",
