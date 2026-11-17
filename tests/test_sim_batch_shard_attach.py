@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import types
 
 import pytest
 
@@ -185,6 +186,21 @@ def test_collect_partial_merges_done_shards_and_lists_the_rest(tmp_path, monkeyp
     )
     assert _lost(corners) == []
     assert "unfinished_shards" not in environment
+
+
+def test_with_unfinished_shard_map_is_repo_relative_inside_a_repo(tmp_path):
+    """Issue #5542: the `unfinished_shards` emission normalizes the map path
+    the same way as the unlaunched and unrun signals."""
+    (tmp_path / ".git").mkdir()
+    manifest = types.SimpleNamespace(path=str(tmp_path / "out" / "batch-shards.json"))
+    environment = sbs.with_unfinished(
+        None, {1: {"index": 1, "job_id": "j", "state": "running"}}, manifest
+    )
+    assert environment["shard_map"] == "out/batch-shards.json"
+    assert environment["resumable"] is True
+    assert environment["unfinished_shards"] == [
+        {"index": 1, "job_id": "j", "state": "running"}
+    ]
 
 
 def test_collect_partial_with_all_shards_done_equals_plain_attach(
