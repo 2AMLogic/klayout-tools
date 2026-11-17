@@ -64,6 +64,19 @@ acceptance data keyed on `category_counts`), key that pin off the shared
 fields below — not `klt --version` — until `klt` reaches `1.0` and this
 caveat is retired.
 
+Growing value sets are not the only pre-1.0 drift this caveat covers: the
+**count under an already-shipped key can change what it counts**. A
+category's own rules can consolidate or split the entries one event emits —
+e.g. issue #4729 (`v0.9.0`) folded the geometry-derived `as`/`ad`/`ps`/`pd`
+parameter differences into the same `device.property` entry as the primary
+`w_um` difference they duplicated, so a width-only difference that
+reported `category_counts["device.property"] == 5` before that release
+reports `1` after, with `status` unchanged. Under this repo's policy such a
+change is additive: it earns no `schema_version` bump, and it is recorded in
+`CHANGELOG.md`. A caller comparing `category_counts` (or `error_count`)
+values across versions therefore needs the same `provenance.deck` /
+`provenance.klayout_version` pin described above.
+
 The same rule applies on the **request** side for the commands that take a
 JSON request document (`klt lvs`, `klt place-and-route`, `klt synthesize`,
 …): a new accepted value for an already-shipped request enum — e.g. `klt
@@ -569,12 +582,12 @@ and [#2124](https://github.com/2AMLogic/klayout-tools/issues/2124).
 
 Verbs whose verdict depends on the exact tool build, PDK release, and rule
 deck — currently `drc`, `lvs`, `extract`, `sim`, `size`, `precheck`, `erc`,
-`power`, `gen`, `gen-compose`, and `array-check` — emit a shared top-level
-`provenance` block so a "clean"/"pass"/"match" result is auditable and
-reproducible later. Two runs made against different deck revisions or PDK
-releases are otherwise indistinguishable in the output, so a signoff claim
-can't be checked or reproduced. This block is **additive** (see above):
-adopting it required no `schema_version` bump on any verb.
+`power`, `economy`, `ring-check`, `gen`, `gen-compose`, and `array-check` — emit a
+shared top-level `provenance` block so a "clean"/"pass"/"match" result is
+auditable and reproducible later. Two runs made against different deck
+revisions or PDK releases are otherwise indistinguishable in the output, so a
+signoff claim can't be checked or reproduced. This block is **additive** (see
+above): adopting it required no `schema_version` bump on any verb.
 
 **Build drift in `klt signoff` (issue #4223).** `klt signoff` compares each
 cited check's `provenance.klt_version` with the running build and reports an
@@ -604,6 +617,19 @@ and gets it back as `environment.pdk_revision_asserted` (`{value, scope:
 worker-observed `worker_environment.pdk` so the two are never confused;
 `cli/sim.md`'s option and `environment` tables are the field-level record.
 Additive fields only; no `schema_version` bump (issue #4020).
+
+`klt sim`'s `environment.ngspice_init` (issue #5648) records the ngspice init
+file that was **in effect** -- always present on corner-mode runs, `null` for
+`engine: "xyce"` -- as `{source, lines, sha256}`. `source` is a path-free label
+(the same rule as `provenance.pdk.ambiguous_sources`: committed evidence must
+not carry the resolving machine's `$HOME`): `"request"` (klt wrote a
+`.spiceinit` including declared `options.ngspice_init` lines), `"thread_pin"`
+(klt wrote only the `set num_threads=N` pin), `"home"` (klt wrote none and
+`$HOME/.spiceinit` exists), `"none"`, or `"runner"` (off-host backends
+`remote`/`batch`: the worker resolves the file, which the client cannot
+observe). `lines` is the written file's lines for `request`/`thread_pin`, else
+`null`; `sha256` is `sha256:<hex>` of the effective file's bytes, `null` for
+`none`/`runner`. Additive; no `schema_version` bump.
 
 `environment.remote` (and each `fleet[]` member) also gains the additive
 `runner_models_lib_sha256` (string or `null`) and `models_lib_comparison`
@@ -1637,7 +1663,12 @@ hard-code names from observation. The lists are also importable constants in
 `EXTRACT_PATH_ONLY_PATHS`, `PATH_ONLY_KEYS_BY_VERB`) with a helper
 `strip_path_only_keys(report, verb)`; a test fails if a path-bearing key is
 added without being registered. Paths use dotted notation, `*` standing for
-any list index.
+any list index. The wildcard is meaningful only on this canonicalization
+side: drift exclusion in `--rerun`/`--check` verdicts
+(`diff_verdict_fields(exclude=...)`) matches by exact path, so a `*` entry
+in an `exclude` set is rejected with a `ValueError` rather than silently
+ignored (issue #5586) — a per-list-entry exclusion belongs in a
+`strip_path_patterns` set passed via `committed_for_diff`/`fresh_for_diff`.
 
 | Verb | Key | Meaning |
 |---|---|---|
@@ -1792,6 +1823,12 @@ All eight share one contract:
   item still fails, via the counts and per-item `id`s that stay compared.
   See [`cli/signoff.md`](cli/signoff.md)'s "A reworded checklist is not
   evidence drift".
+- **`klt signoff --check` also carries a report-only `build_skew`** (issue
+  #5868; additive, no `schema_version` bump): `{state, fields}` where `state`
+  is `"same"`, `"build_only"`, `"ruleset"` (`build.grading_ruleset_id`
+  differs) or `"unknown"` (the committed report has no `build` block), and
+  `fields` lists each differing `build.*` field in the `{field, committed,
+  fresh}` shape of `drift`. It never affects `status` or the exit code.
 
 **Build identity is route-dependent, so committed reports must not be
 byte-compared (issue #2249).** A `klt signoff` tier/fleet report's `build`
