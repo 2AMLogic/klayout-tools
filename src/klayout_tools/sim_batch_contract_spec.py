@@ -273,6 +273,12 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
 #: ``*_unsupported_worker`` echo check already hard-fails the whole request
 #: -- mandatory membership mirrors that severity, moving the identical
 #: refusal from after the grid ran to before anything is launched.
+#: ``lossless supply_v corner_id spelling`` is mandatory because its
+#: post-run ``supply_precision_unsupported_worker`` echo check
+#: hard-fails the request (#5870); its registry version is still ``None``
+#: (unreleased), so it has no detector row yet and the pre-launch gates
+#: engage only once a release pins the version -- until then the echo
+#: check is the gate.
 _MANDATORY_RUNNER_FEATURES = frozenset(
     {
         "transfer",
@@ -294,6 +300,7 @@ _MANDATORY_RUNNER_FEATURES = frozenset(
         "options.initial_conditions",
         "analysis_overrides",
         "analysis.op_check",
+        "lossless supply_v corner_id spelling",
     }
 )
 
