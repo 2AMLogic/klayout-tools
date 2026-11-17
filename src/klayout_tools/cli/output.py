@@ -256,6 +256,11 @@ def render_check_text(result: dict) -> None:
                         "--check resolves relative paths against the current "
                         "working directory -- re-run from there"
                     )
+                # Issue #5845: a repo-scoped echo names the repo root --check
+                # anchored its recorded path on (absent for a cwd-anchored or
+                # absolute echo, so every other output is unchanged).
+                if missing.get("resolved_repo_root") is not None:
+                    print(f"      repo root: {missing['resolved_repo_root']}")
     for skipped in result.get("skipped", ()):
         print(f"  [SKIPPED] {skipped['field']}: {skipped['reason']}")
     # Issue #1373: engine-version drift is a non-fatal advisory, never folded

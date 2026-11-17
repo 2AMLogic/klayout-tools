@@ -2107,19 +2107,16 @@ def _input_hash_check(
     :func:`~klayout_tools._provenance.sha256_file` returns ``None`` both for
     "the file is not there" and (vacuously) for "no path was recorded", so a
     plain ``hash_check`` renders an unresolvable input as ``actual: null`` --
-    indistinguishable, to a reader, from a recorded hash that no longer
-    matches. That is exactly the confusing shape issue #2595 reported when a
-    committed request/report pair with *request-file-relative*
-    ``layout``/``reference`` paths is ``--check``ed from a different
-    directory.
+    indistinguishable from a recorded hash that no longer matches. That is
+    the confusing shape issue #2595 reported for a committed request/report
+    pair with *request-file-relative* paths ``--check``ed from elsewhere.
 
     This does **not** change where the path is resolved: ``--check`` still
-    anchors a relative echoed path to the current working directory, the
-    same convention ``klt drc --check``'s ``file`` field uses (re-anchoring
-    one verb and not the other would make the two silently disagree). It
-    only makes the failure legible, as an *additional*, optional key on the
-    entry -- ``expected``/``actual``/``match`` and the resulting ``status``
-    are byte-identical to before:
+    anchors a relative echoed path to the cwd, the same convention ``klt
+    drc --check``'s ``file`` field uses (re-anchoring one verb and not the
+    other would make the two silently disagree). It only makes the failure
+    legible, as an *additional* optional key -- ``expected``/``actual``/
+    ``match`` and ``status`` are byte-identical to before:
 
     - ``path`` -- the echoed path verbatim, as the report recorded it.
     - ``resolved`` -- the absolute path that was actually looked for.
@@ -2127,24 +2124,25 @@ def _input_hash_check(
       occupy relative to the committed report's own directory, when it is
       there; ``null`` otherwise (including for an echoed absolute path,
       which has no report-relative candidate to try).
+    - ``resolved_repo_root`` -- for a repo-scoped ``{path, scope}`` echo
+      (issue #5845), the repo root the recorded path was anchored on;
+      ``null`` otherwise (a bare string resolves against the cwd).
 
     Kept local to this module rather than folded into the shared
-    ``hash_check`` on purpose: ``klt drc --check`` resolves its own
-    ``provenance.input`` path the identical way and would need the identical
-    diagnostic to stay consistent, which is a deliberate follow-up, not a
-    side effect of this one. Promote this helper to ``_report_verify`` if
-    and when that happens.
+    ``hash_check``: ``klt drc --check`` resolves its own ``provenance.input``
+    path the identical way and would need the identical diagnostic to stay
+    consistent -- a deliberate follow-up, not a side effect. Promote this
+    helper to ``_report_verify`` if and when that happens.
 
     Issue #2659: ``echoed`` is resolved through
     :func:`klayout_tools._report_verify.resolve_committed_path`, so the
-    ``{path, scope}`` object ``layout`` carries today is joined to the repo
-    root of the committed report's own directory -- which is precisely the
-    case the "known limitation" above describes, now *resolved* for the
-    layout side rather than merely diagnosed; ``reference`` too since #4984
-    (only a bare-string one keeps the cwd anchoring). An
-    entry naming no path at all (``scope: "external"``/``"absent"``, or a
-    report with no such field) resolves to ``None`` and renders exactly as
-    an absent one always has.
+    ``{path, scope}`` object ``layout`` carries is joined to the repo root
+    of the committed report's own directory -- precisely the case the
+    "known limitation" above describes, now *resolved* for the layout side
+    rather than merely diagnosed; ``reference`` too since #4984 (only a
+    bare-string one keeps the cwd anchoring). An entry naming no path at
+    all (``scope: "external"``/``"absent"``, or no such field) resolves to
+    ``None`` and renders exactly as an absent one always has.
     """
     path = resolve_committed_path(echoed, report_path=report_path, override=override)
     check = hash_check(field, expected, sha256_file(path))
@@ -2156,51 +2154,51 @@ def _input_hash_check(
         if os.path.isfile(candidate):
             found_relative_to_report = os.path.abspath(candidate)
     check["input_not_found"] = input_not_found_entry(
-        path, report_path, found_relative_to_report
+        path, report_path, found_relative_to_report, echoed=echoed
     )
     return check
 
 
 def check_lvs_report(
-    report_path: str, *, layout_path: str | None = None
+    report_path: str,
+    *,
+    layout_path: str | None = None,
+    reference_path: str | None = None,
 ) -> dict[str, Any]:
     """``klt lvs --check`` (cheap mode, issue #1106): verify a previously
     committed ``klt lvs --format json`` report at ``report_path`` still
     reproduces, without re-running the compare engine at all.
 
-    Reconciles all three hashes LVS's own envelope carries (unlike ``klt
-    drc``'s single input hash -- see this module's ``environment``/
-    ``provenance.deck`` docstrings): re-hashes ``committed["layout"]`` and
-    ``committed["reference"]`` (the paths exactly as echoed back by the
-    original run) via :func:`klayout_tools._provenance.sha256_file` and
-    compares each against ``environment.layout_sha256``/
-    ``environment.reference_sha256``; when the committed report used an
-    extraction deck (``provenance.deck`` is non-``null``), also re-hashes
-    that deck's source (:func:`~klayout_tools.decks.deck_source_path`) and
+    Reconciles all three hashes LVS's envelope carries (unlike ``klt drc``'s
+    single input hash -- see this module's ``environment``/``provenance.deck``
+    docstrings): re-hashes the echoed ``layout``/``reference`` paths via
+    :func:`klayout_tools._provenance.sha256_file` and compares each against
+    ``environment.layout_sha256``/``environment.reference_sha256``; when an
+    extraction deck was used (``provenance.deck`` non-``null``), also
+    re-hashes its source (:func:`~klayout_tools.decks.deck_source_path`) and
     compares against ``provenance.deck.content_hash``. Each mismatch names
     which of the (up to three) inputs moved -- never a single pass/fail bit.
 
     Since #2659 / #4984 ``layout`` and ``reference`` are ``{path, scope}``
-    objects resolved against the report's own repo root (cwd-independent).
-    Only a pre-#4984 or ``klayout-runset`` report's bare ``reference`` string
-    stays cwd-anchored (issue #2595's ``input_not_found`` diagnostic).
-
-    ``layout_path`` (issue #2699, ``klt lvs --layout``) is an explicit layout
-    that overrides the report's recorded ``layout`` unconditionally (see
-    :func:`~klayout_tools._report_verify.resolve_committed_path`) -- the way
-    to verify a report whose layout is ``scope: "external"``.
+    objects resolved against the report's own repo root (cwd-independent);
+    only a pre-#4984 or ``klayout-runset`` report's bare ``reference``
+    string stays cwd-anchored (issue #2595's ``input_not_found`` diagnostic).
+    ``layout_path`` (issue #2699, ``--layout``) / ``reference_path``
+    (issue #5845, ``--reference``) override the recorded value
+    unconditionally (see
+    :func:`~klayout_tools._report_verify.resolve_committed_path`) -- how to
+    verify a report whose recorded input is external or mis-anchored.
 
     Raises :class:`LvsError` for a missing/unparseable committed report --
     never a traceback.
 
     The result additionally carries an ``advisories`` list (issue #1373):
-    entries naming a ``provenance.klt_version``/``provenance.klayout_version``
-    that differs between the committed report and the engine currently
-    running ``--check`` -- see :func:`version_drift_advisories`. This is
-    purely informational: it never affects ``status`` (still driven only by
-    the hash ``checks`` above) or the caller's exit code, and is never folded
-    into ``checks``' ``[OK]``/``[DRIFTED]`` list, so a scripted gate grepping
-    that list for a failure marker does not start matching on it.
+    entries naming a ``provenance.klt_version``/``klayout_version`` that
+    differs between the committed report and the engine running ``--check``
+    -- see :func:`version_drift_advisories`. Purely informational: it never
+    affects ``status`` (driven only by the hash ``checks`` above) or the
+    caller's exit code, and never joins ``checks``' ``[OK]``/``[DRIFTED]``
+    list, so a scripted gate grepping that list never matches on it.
     """
     committed = _load_committed_report(report_path, LvsError)
     checks = [
@@ -2216,6 +2214,7 @@ def check_lvs_report(
             get_path(committed, ("environment", "reference_sha256")),
             committed.get("reference"),
             report_path,
+            override=reference_path,
         ),
     ]
     deck = get_path(committed, ("provenance", "deck"))
@@ -2259,16 +2258,21 @@ def _strict_top_level_pin_count_replay_options(
 
 
 def _reconstruct_runset_request(
-    committed: dict[str, Any], layout: str | None = None
+    committed: dict[str, Any],
+    layout: str | None = None,
+    reference: str | None = None,
 ) -> dict[str, Any]:
     """Issue #2849: replay a ``klayout-runset`` report from its own echo
     (``layout``/``reference``/``top``/``deck_file``/``deck_vars``/``options``).
     Re-running needs the same standalone ``klayout`` application; there is no
-    fallback to another engine."""
+    fallback to another engine. ``reference`` (issue #5845) overrides the
+    echoed reference path -- the ``--reference`` counterpart of ``layout``."""
     layout_spec: dict[str, Any] = {"file": layout or committed.get("layout")}
     if committed.get("top"):
         layout_spec["top"] = committed["top"]
-    reference_spec: dict[str, Any] = {"netlist": committed.get("reference")}
+    reference_spec: dict[str, Any] = {
+        "netlist": reference or committed.get("reference")
+    }
     if committed.get("reference_top"):
         reference_spec["top"] = committed["reference_top"]
     reference_spec.update(_reference_conversion_replay(committed))  # issue #4805
@@ -2289,6 +2293,7 @@ def _reconstruct_lvs_request(
     *,
     report_path: str | None = None,
     layout_path: str | None = None,
+    reference_path: str | None = None,
 ) -> dict[str, Any]:
     """Best-effort reconstruction of a ``klt lvs`` request document from a
     previously committed report, for :func:`rerun_lvs_report`.
@@ -2302,6 +2307,8 @@ def _reconstruct_lvs_request(
     report) falls back to the current working directory's repo root; a
     committed report whose ``layout`` is a bare string -- every report
     predating #2659 -- reconstructs byte-identically either way.
+    ``layout_path``/``reference_path`` (issues #2699/#5845) override the
+    recorded layout/reference the same way.
 
     Reconstructs the fields the response actually echoes: ``engine``,
     ``layout`` (``file``+``deck``[+``deck_options``][+``label_layers``,
@@ -2317,44 +2324,36 @@ def _reconstruct_lvs_request(
     ``parameter_tolerance``/``compare_parameters``, from
     ``report["options"]``).
 
-    Issue #1205: the last two used to be lossy. The response recorded a
-    single ``top`` applied to *both* sides here, so a report whose request
-    set a ``reference.top`` different from the layout top -- an LVS negative
-    control (``<cell>_shorted`` layout vs. the intact ``<cell>``'s reference
-    netlist) has two different tops by construction -- could not be
-    reconstructed at all and errored out with "top cell/subcircuit not found
-    in reference netlist". And ``options`` was rebuilt from
-    ``parameter_tolerance`` alone, so a report from a
-    ``combine_devices: true`` request silently re-ran the compare *without*
-    folding, then reported the resulting fresh mismatch list as drift. Both
-    fields are now echoed by :func:`run_lvs` and consumed here.
+    Issue #1205: those last two used to be lossy -- a single ``top`` was
+    recorded for *both* sides, so a negative control (a ``<cell>_shorted``
+    layout vs. the intact ``<cell>``'s reference netlist) could not be
+    reconstructed at all ("top cell/subcircuit not found in reference
+    netlist"), and ``options`` was rebuilt from ``parameter_tolerance``
+    alone, so a ``combine_devices: true`` request silently re-ran unfolded
+    and reported the fresh mismatch list as drift. Both are now echoed by
+    :func:`run_lvs` and consumed here.
 
-    Reports predating those two fields (written before issue #1205) still
-    reconstruct exactly as they used to: ``reference_top`` falls back to the
-    committed ``top``, and ``options`` falls back to the top-level
-    ``parameter_tolerance`` echo. :func:`rerun_lvs_report` additionally
-    excludes both fields from the drift diff for such a report, since a
-    field the committed report never carried cannot itself have drifted.
+    Reports predating those fields still reconstruct as they used to:
+    ``reference_top`` falls back to the committed ``top``, ``options`` to
+    the top-level ``parameter_tolerance`` echo; :func:`rerun_lvs_report`
+    excludes both from the drift diff for such a report (a field a report
+    never carried cannot itself have drifted).
 
     **Known limitations** (still not reconstructible from the response
     alone, so silently omitted -- ``--rerun`` is best-effort, not a
     byte-exact replay): the ``layout.netlist``+``layout.deck`` combo (issue
     #585) is indistinguishable from plain ``layout.file`` inline extraction
-    here -- both populate ``provenance.deck`` -- so this always reconstructs
-    ``layout.file``; that combo will fail loudly (a clean
+    (both populate ``provenance.deck``), so this always reconstructs
+    ``layout.file`` -- that combo then fails loudly (a clean
     :class:`LvsError` from the layout loader, not a silent wrong answer)
-    since ``committed["layout"]`` is actually a SPICE netlist, not a
-    layout stream, in that case. A ``"subckt-call"`` reference is replayed
-    from the report's ``reference_conversion`` echo (issue #2673; a report
-    committed before it existed stays best-effort), as is a
-    ``"gate-level-verilog"`` reference (issue #4353), but
-    ``reference.device_bulk``
-    and ``layout.top_cell_pins``/``declared_pins``/``pin_source_cells``/
-    ``rename_declared_pins`` are
-    never echoed anywhere in the response and are always omitted
-    (reconstructed as each option's own default). Use ``--check`` (cheap
-    mode) instead when any of these apply. When the omitted form makes the
-    plain-element re-read of the reference fail to parse,
+    since the recorded "layout" is actually a SPICE netlist. A
+    ``"subckt-call"`` reference is replayed from the ``reference_conversion``
+    echo (issue #2673; older reports stay best-effort), as is a
+    ``"gate-level-verilog"`` one (issue #4353); ``reference.device_bulk`` and
+    ``layout.top_cell_pins``/``declared_pins``/``pin_source_cells``/
+    ``rename_declared_pins`` are never echoed and always omitted (each
+    reconstructs at its own default). Use cheap ``--check`` when any
+    of these apply; when an omitted form breaks the plain-element re-read,
     :func:`_run_reconstructed_lvs` says so in the error (issue #2250).
     """
     deck = get_path(committed, ("provenance", "deck"))
@@ -2366,10 +2365,9 @@ def _reconstruct_lvs_request(
     # falling back to it reconstructs such a report the same way as before.
     reference_top = committed.get("reference_top") or top
 
-    # Issue #2659: the `{path, scope}` object resolved back to a path on this
-    # checkout (a bare string passes through unchanged) -- see this
-    # function's `report_path` docstring note.
-    # Issue #2699: an explicit `--layout` wins over the recorded value.
+    # Issues #2659/#2699/#5845: the `{path, scope}` object resolved back to
+    # a path on this checkout (a bare string passes through unchanged); an
+    # explicit --layout/--reference wins over the recorded value.
     layout = resolve_committed_path(
         committed.get("layout"), report_path=report_path, override=layout_path
     )
@@ -2397,7 +2395,9 @@ def _reconstruct_lvs_request(
 
     reference_spec: dict[str, Any] = {
         "netlist": resolve_committed_path(
-            committed.get("reference"), report_path=report_path
+            committed.get("reference"),
+            report_path=report_path,
+            override=reference_path,
         )
     }
     if reference_top:
@@ -2676,7 +2676,10 @@ def _run_reconstructed_lvs(request: dict[str, Any]) -> dict[str, Any]:
 
 
 def rerun_lvs_report(
-    report_path: str, *, layout_path: str | None = None
+    report_path: str,
+    *,
+    layout_path: str | None = None,
+    reference_path: str | None = None,
 ) -> dict[str, Any]:
     """``klt lvs --check <report> --rerun`` (full mode, issue #1106):
     verify a previously committed ``klt lvs --format json`` report at
@@ -2689,20 +2692,16 @@ def rerun_lvs_report(
     excluding :data:`_LVS_RERUN_EXCLUDE_PATHS` --
     :data:`klayout_tools._report_verify.VOLATILE_PROVENANCE_PATHS`
     (``provenance.klt_version``/``klayout_version``/``pdk.version`` --
-    ``pdk`` is always ``null`` for LVS, so only the first two ever apply in
-    practice) plus ``environment.extracted_netlist`` (issue #1223): that
-    field is populated only when the *original* request set
-    ``options.keep_extracted: true``, its value is an absolute path anchored
-    to the original request document's own directory, and
-    ``_reconstruct_lvs_request`` never re-asserts ``keep_extracted`` -- so a
-    fresh rerun always reports it as ``null`` even when nothing else about
-    the compare changed, which is a false drift, not a real one, on a
-    report committed from a ``keep_extracted: true`` request; plus
-    ``environment.netgen_binary`` (issue #2373), a host-local absolute path
-    whose value legitimately differs between the committing and the
-    verifying host without anything about the compare changing -- the
-    comparator's semantic identity stays diffed via the *not*-excluded
-    ``environment.engine_version``. ``status:
+    ``pdk`` is always ``null`` for LVS, so only the first two ever apply)
+    plus ``environment.extracted_netlist`` (issue #1223: populated only
+    under ``options.keep_extracted: true``, anchored to the original
+    request document's own directory, and never re-asserted by
+    reconstruction -- so a fresh rerun always reports it ``null``, a false
+    drift, not a real one) plus ``environment.netgen_binary`` (issue
+    #2373: a host-local absolute path that legitimately differs between
+    the committing and the verifying host; the comparator's semantic
+    identity stays diffed via the not-excluded
+    ``environment.engine_version``). ``status:
     "drifted"`` names every other changed field, including a changed
     ``status``/``mismatch_count``/``mismatches`` (the LVS-outcome-changed
     case) as well as changed ``environment.layout_sha256``/
@@ -2710,19 +2709,17 @@ def rerun_lvs_report(
     redundantly but harmlessly here since this mode always re-hashes as a
     side effect of re-running).
 
-    Additionally excludes any of the request-echo fields issue #1205 added
+    Additionally excludes request-echo fields issue #1205 added
     (``reference_top``, ``options``) that the *committed* report predates:
-    a field a report never carried cannot itself have drifted, so a report
-    written before those fields existed keeps re-running exactly as it did
-    before rather than reporting the current build's richer echo as drift.
-    (Such a report is still only best-effort reconstructible -- it records
-    no reference-side top and no ``options``, which is the very gap #1205
-    closed going forward. Use cheap ``--check`` on reports that predate it
-    when the original request used either.)
+    a field a report never carried cannot itself have drifted, so such a
+    report keeps re-running exactly as before rather than reporting the
+    current build's richer echo as drift. (It is still only best-effort
+    reconstructible -- it records no reference-side top and no ``options``,
+    the very gap #1205 closed. Use cheap ``--check`` on such reports.)
 
-    ``layout_path`` (issue #2699, ``klt lvs --layout``) is an explicit layout
-    that overrides the report's recorded ``layout`` unconditionally -- the way
-    to rerun a report whose layout is ``scope: "external"``.
+    ``layout_path`` (issue #2699, ``--layout``) / ``reference_path``
+    (issue #5845, ``--reference``) override the recorded layout/reference
+    unconditionally -- how to rerun an external-scope or mis-anchored input.
 
     Raises :class:`LvsError` for a missing/unparseable committed report, a
     report missing ``layout``/``reference`` to rerun, or any error the
@@ -2738,10 +2735,13 @@ def rerun_lvs_report(
             f"{report_path}"
         )
     request = (
-        _reconstruct_runset_request(committed, layout)
+        _reconstruct_runset_request(committed, layout, reference_path)
         if committed.get("engine") == RUNSET_ENGINE
         else _reconstruct_lvs_request(
-            committed, report_path=report_path, layout_path=layout_path
+            committed,
+            report_path=report_path,
+            layout_path=layout_path,
+            reference_path=reference_path,
         )
     )
     fresh = _run_reconstructed_lvs(request)

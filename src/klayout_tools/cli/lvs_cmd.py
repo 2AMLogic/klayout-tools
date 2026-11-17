@@ -107,6 +107,9 @@ def run(args: argparse.Namespace) -> int:
     if args.layout is not None:
         return emit_error("lvs", "--layout requires --check <report>", args.format)
 
+    if args.reference is not None:
+        return emit_error("lvs", "--reference requires --check <report>", args.format)
+
     try:
         report = run_lvs(
             args.request,
@@ -180,9 +183,17 @@ def _run_check(args: argparse.Namespace) -> int:
         )
     try:
         if args.rerun:
-            result = rerun_lvs_report(args.check, layout_path=args.layout)
+            result = rerun_lvs_report(
+                args.check,
+                layout_path=args.layout,
+                reference_path=args.reference,
+            )
         else:
-            result = check_lvs_report(args.check, layout_path=args.layout)
+            result = check_lvs_report(
+                args.check,
+                layout_path=args.layout,
+                reference_path=args.reference,
+            )
     except LvsError as exc:
         return emit_error("lvs", str(exc), args.format)
 

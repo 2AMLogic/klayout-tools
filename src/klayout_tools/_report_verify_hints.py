@@ -12,6 +12,7 @@ import os
 from collections.abc import Mapping
 from typing import Any
 
+from . import env_provenance
 from ._provenance import sha256_file
 from ._report_verify import hash_check
 
@@ -21,7 +22,11 @@ _YIELD_HASH_FIELD = "samples (sha256 of the named samples document)"
 
 
 def input_not_found_entry(
-    path: str, report_path: str, found_relative_to_report: str | None
+    path: str,
+    report_path: str,
+    found_relative_to_report: str | None,
+    *,
+    echoed: Any = None,
 ) -> dict[str, Any]:
     """The ``input_not_found`` diagnostic for an echoed input path that does
     not name an existing file (issues #2595, #4795).
@@ -32,6 +37,12 @@ def input_not_found_entry(
       the committed report's directory, or ``None``.
     - ``resolved_against`` -- the directory a relative ``path`` was anchored
       to (the cwd); ``None`` for an absolute path, which has no anchor.
+    - ``resolved_repo_root`` -- for a repo-scoped ``{path, scope}`` echo
+      (issue #5845), the repo root the recorded path was anchored on --
+      discovered from the report's own directory, the identical anchor
+      :func:`klayout_tools._report_verify.resolve_committed_path` uses;
+      ``None`` for every other echo shape (a bare string resolves against
+      the cwd, not a repo root).
     - ``hint`` -- when the input sits next to the report, how to reach it;
       ``None`` otherwise.
     """
@@ -43,11 +54,15 @@ def input_not_found_entry(
         "an absolute path; request-file-relative paths resolve against "
         f"{report_dir}"
     )
+    repo_root = None
+    if isinstance(echoed, Mapping) and echoed.get("scope") == "repo":
+        repo_root = env_provenance.find_repo_root(report_dir)
     return {
         "path": path,
         "resolved": os.path.abspath(path),
         "found_relative_to_report": found_relative_to_report,
         "resolved_against": None if os.path.isabs(path) else os.getcwd(),
+        "resolved_repo_root": repo_root,
         "hint": hint,
     }
 

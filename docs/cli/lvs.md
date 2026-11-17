@@ -7,7 +7,7 @@ Epic #153, following the layout-vs-schematic pattern
 
 ```
 klt lvs <request> [-o <report.json[.gz]>] [--format text|json]
-klt lvs --check <report.json> [--layout <path>] [--rerun] [--format text|json]
+klt lvs --check <report.json> [--layout <path>] [--reference <path>] [--rerun] [--format text|json]
 ```
 
 This is phase 3 of Epic #153 (`klt lvs`/`klt extract`), the build carried by
@@ -4920,20 +4920,22 @@ klt lvs --check design.lvs.json --rerun           # full mode
 the layout/reference paths, engine, and (when used) extraction deck are all
 read from `<report.json>` itself, not given again on the command line.
 
-**Explicit input (issue #2699).** When the report cannot locate its own
-input — a `scope: "external"` run, or a grading clone laid out differently
+**Explicit inputs (issues #2699, #5845).** When the report cannot locate its own
+input — a `scope: "external"` run, a committed nested-repo report whose
+recorded relative path is ambiguous, or a grading clone laid out differently
 from the producing one — supply the input yourself alongside `--check`:
-`klt lvs --check design.lvs.json --layout design.spice [--rerun]`. The explicit input **always overrides** the report's recorded
+`klt lvs --check design.lvs.json --layout design.spice --reference ref.spice [--rerun]`. The explicit input **always overrides** the report's recorded
 one (not only when that one is unresolvable), the same rule on `klt drc`,
 `klt extract` and `klt lvs`; its hash is compared against the report's
-recorded `provenance.input.content_hash`, and the reference/deck hashes are unaffected, so a file that disagrees reports
+recorded `environment.layout_sha256`/`environment.reference_sha256`, and the
+deck hashes are unaffected, so a file that disagrees reports
 `status: "drifted"` rather than being silently accepted. A relative path
-resolves against the current directory. Without it nothing changes: the
-`file`/`layout` field is resolved exactly as described above, and an
-external-scope report still reports `actual: null` / the clean "no field to
+resolves against the current directory. Without an override nothing changes:
+the recorded field is resolved exactly as described above, and an
+external-scope side still reports `actual: null` / the clean "no field to
 rerun" error.
-`--layout` without `--check` is a clean error (exit 1). Only the layout can
-be supplied this way — `reference` is still the request's own verbatim echo.
+`--layout`/`--reference` without `--check` are clean errors (exit 1). Note
+`--deck-file` applies to a fresh `klayout-runset` run, never to `--check`.
 
 ### Cheap mode (default)
 
@@ -5070,6 +5072,17 @@ input resolved, its bytes moved):
   report-relative candidate to try). A non-`null` value is the tell for the
   directory-portability trap above: the committed request/report pair is
   intact, `--check` was just invoked from somewhere else.
+- `resolved_against` — the directory a relative recorded path was anchored
+  to (the current working directory); `null` for an absolute path, which
+  has no anchor.
+- `resolved_repo_root` (issue #5845) — for a repo-scoped `{path, scope}`
+  echo, the repo root the recorded path was anchored on, discovered from
+  the committed report's own directory (the identical anchor the path
+  resolution itself uses); `null` for every other echo shape, whose
+  anchoring is the current working directory, not a repo root. When the
+  diagnostic fires on a nested-repo report, this names the tree `--check`
+  actually looked in — the clue that the recorded relative path was
+  anchored in the wrong repo.
 
 Text output (`--format text`, the default) renders the same information in
 place of the bare `actual: None`:
@@ -5081,6 +5094,16 @@ place of the bare `actual: None`:
       note:     it exists relative to the report's own directory
                 (/work/pair/design.gds); --check resolves relative paths
                 against the current working directory -- re-run from there
+```
+
+A repo-scoped echo additionally renders its anchor (issue #5845), only
+when present:
+
+```
+  [DRIFTED] environment.reference_sha256
+      expected: 9c2d…
+      actual:   None (input not found: /work/outer/repo/ref.spice)
+      repo root: /work/outer/repo
 ```
 
 `klt drc --check` does not (yet) carry this block — its `provenance.input`
