@@ -26,28 +26,55 @@ from __future__ import annotations
 
 import re
 
-#: ngspice's inline-comment rule, as one pattern shared by every netlist
-#: reader in the package (issue #5417). Two markers:
+#: The package's shared inline-comment rule, as one pattern for every
+#: netlist reader (issue #5417). Two markers:
 #:
 #: * ``;`` anywhere on the line;
 #: * ``$`` that *begins a token* (start of line, or preceded by whitespace)
 #:   **and** ends one (followed by whitespace or end of line).
 #:
-#: Both halves of the ``$`` condition are load-bearing against real netlists:
+#: This is deliberately **not** ngspice's whole element-card story, which
+#: is ``ngbehavior``-dependent: in the default mode a ``$`` that begins a
+#: token starts a comment *whatever follows it*, so ngspice reads
+#: ``R1 a $1 1k`` as ``r1 a`` -- the ``$1`` tail is already comment. The
+#: PSpice compatibility families (``ngbehavior=ps``/``psa``) instead keep
+#: ``$1`` as a node name. Verified against ngspice-47 directly -- default
+#: plus every other documented family (``hs``, ``ltc``, ``ltcy``,
+#: ``lta``, ``ltx``, ``compat``, ``all``) drops it; ``ps``/``psa`` keep
+#: it -- and pinned live by
+#: ``tests/test_spice_text_ngspice.py``. On the disputed shape this rule
+#: therefore *matches* ngspice's PSpice-compat reading and is stricter
+#: than its default one. Two further ngspice behaviours agree with the
+#: pattern in every mode: a ``$`` inside a token is part of its name
+#: (``R$3 a 0 2k`` parses), and ``.include``/``.lib`` keep a ``$VAR``
+#: filename and expand the environment variable themselves.
 #:
-#: * a ``$`` glued to the next token is a shell-style variable reference, not
-#:   a comment -- ``.include $PDK_ROOT/...`` and ``.lib $SKY130/... tt`` must
-#:   survive intact, and so must KLayout's anonymous-net names (``.subckt
-#:   cell $1 $2``, see ``extract.py``'s ``"$5"``-style placeholder note);
+#: The stricter token-delimited ``$`` is load-bearing against what klt's
+#: readers actually consume:
+#:
+#: * a ``$`` glued to the next token is a shell-style variable reference,
+#:   not a comment -- ``.include $PDK_ROOT/...`` and ``.lib $SKY130/... tt``
+#:   must survive intact, which is also what ngspice's own include
+#:   handling does;
 #: * a ``$`` glued to the *previous* token is part of that token's name --
-#:   KLayout writes cards as ``X$1``/``M$1``/``C$1`` (issue #2972).
+#:   KLayout writes cards as ``X$1``/``M$1``/``C$1`` (issue #2972) and
+#:   anonymous-net names as ``.subckt cell $1 $2`` (``extract.py``'s
+#:   ``"$5"``-style placeholder note). ngspice would comment these away,
+#:   but they are klt's interchange with KLayout, not ngspice decks.
+#:
+#: The accepted consequence: on a card such as ``R1 a $1 1k`` this rule
+#: keeps text that a default-mode ngspice discards (a PSpice-mode ngspice
+#: keeps it too) -- the one known divergence, pinned test-first so it
+#: cannot silently widen.
 _SPICE_INLINE_COMMENT = re.compile(r"(?:^|\s)\$(?=\s|$)|;")
 
 
 def strip_spice_inline_comment(line: str) -> str:
     """``line`` with a trailing SPICE inline comment removed, right-stripped.
 
-    Implements ngspice's rule (:data:`_SPICE_INLINE_COMMENT`): everything
+    Implements the package's shared rule (:data:`_SPICE_INLINE_COMMENT` --
+    see there for the evidence that it is deliberately stricter than
+    ngspice's default element-card reading): everything
     from the first ``;``, or from the first token-delimited ``$``, is
     dropped. A line that is nothing but a comment returns ``""``; a line
     with no comment marker comes back only right-stripped.

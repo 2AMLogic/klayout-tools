@@ -736,8 +736,8 @@ def _read_text(path: str) -> str | None:
 def _logical_lines(netlist_text: str) -> list[str]:
     """``netlist_text``'s lines with ``+`` continuations folded onto the line
     they continue and inline ``$``/``;`` comments stripped by the shared
-    ngspice rule -- so :func:`_subckt_interfaces` sees each `.subckt` header
-    whole, and a ``$PDK_ROOT``-style ``.include`` reaches
+    rule in ``_spice_text`` -- so :func:`_subckt_interfaces` sees each
+    `.subckt` header whole, and a ``$PDK_ROOT``-style ``.include`` reaches
     :func:`_has_include_card`/:func:`_expand_reference_includes` unmangled."""
     lines = [strip_spice_inline_comment(raw) for raw in netlist_text.splitlines()]
     return fold_spice_continuations(lines)

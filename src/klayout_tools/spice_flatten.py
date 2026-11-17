@@ -141,10 +141,12 @@ _HIERARCHY_SEP = "."
 def _logical_lines(text: str) -> list[str]:
     """Comment-stripped lines with ``+`` continuations folded.
 
-    Inline comments follow ngspice via the shared
-    :func:`strip_spice_inline_comment`: ``;`` anywhere, or a token-delimited
-    ``$``.  A ``$`` glued to the next token -- ``.include $PDK_ROOT/...`` --
-    is *not* a comment and survives intact.
+    Inline comments go through the shared
+    :func:`strip_spice_inline_comment` (``;`` anywhere, or a
+    token-delimited ``$`` -- deliberately stricter than ngspice's
+    element-card rule, see ``_SPICE_INLINE_COMMENT``).  A ``$`` glued to
+    the next token -- ``.include $PDK_ROOT/...`` -- is *not* a comment
+    and survives intact.
     """
     lines: list[str] = []
     for raw in text.splitlines():

@@ -18,9 +18,11 @@ from klayout_tools._spice_text import (
     strip_spice_inline_comment,
 )
 
-#: ``(line, expected)`` for every shape of ngspice inline comment the
-#: package's netlist readers meet -- the one rule that replaced six drifted
-#: hand-rolled copies (issue #5417).
+#: ``(line, expected)`` for every shape of inline comment the package's
+#: netlist readers meet -- the one rule that replaced six drifted
+#: hand-rolled copies (issue #5417). The rule is deliberately stricter
+#: than ngspice's element-card behaviour; the live pins for what ngspice
+#: itself does live in ``tests/test_spice_text_ngspice.py``.
 _INLINE_COMMENT_CASES = [
     # --- no comment marker at all: only right-stripped ---
     ("R1 a b 1k", "R1 a b 1k"),
