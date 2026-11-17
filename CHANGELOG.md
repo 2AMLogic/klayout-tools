@@ -26,6 +26,19 @@ not `klt --version`, if you need to detect this kind of drift. See
   gains an additive `pad_sides_um` map (`"layer/datatype"` -> pad side
   certified) so a caller drawing the ladder itself draws exactly the checked
   footprint. `schema_version` is unchanged.
+- **`openroad` Docker wrapper keeps `/tmp` mounted when `$TMPDIR` differs**
+  (issue #5878, 2026-11-17): the wrapper `scripts/install-openroad-docker.sh`
+  writes, mounted only `${TMPDIR:-/tmp}`, so while `$TMPDIR` was unset (or
+  `/tmp`) that mount incidentally made `/tmp` visible as a whole — but the
+  moment a caller exported any other `TMPDIR` (this fleet's daemon exports
+  one for every child process), `/tmp` stopped being mounted and an input
+  under `/tmp` failed inside the container with an opaque
+  `[ERROR STA-0340] cannot open '<path>'` for a file the caller could read
+  on the host. The wrapper now also mounts `/tmp:/tmp` whenever `$TMPDIR`
+  resolves to anything else (skipped when it equals `/tmp`, including
+  trailing-slash forms like `/tmp/` or `/tmp//`, since docker rejects a
+  duplicate mount point). Hosts with an older wrapper should re-run
+  `scripts/install-openroad-docker.sh` to upgrade it in place.
 - **`klt drc` gf180mcu deck: `DF.1c` (MOSCAP COMP min width) is now checked,
   and `comp.width.mv.1` exempts `MVSD`/`MVPSD`-marked LDMOS drains** (#5719,
   2026-11-17). New rule `comp.width.moscap.1` (`DF.1c`, 1.0 um,
