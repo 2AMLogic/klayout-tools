@@ -66,6 +66,19 @@ not `klt --version`, if you need to detect this kind of drift. See
   or corrupt document anywhere in the stream, or an empty/whitespace-only
   FILE, is still exit `1` under `--json-stream` -- never a silent clean
   verdict. No `schema_version` changes.
+- **`klt-pdk.json` liberty lists merge on field-equal headers, and header
+  conflicts are named** (#5625, 2026-11-17): a `liberty` corner's list of
+  cell-group `.lib` files was compared as one whole header string, so a real
+  vendor split (e.g. ASAP7 `asap7sc7p5t_28`) whose per-file headers differ
+  only in the `date` timestamp was refused with an opaque "Liberty headers
+  differ". The comparison is now field by field: the `library (<name>)` name,
+  lexical comments, and the free-text `date`, `revision` and `comment`
+  attributes are ignored; any other differing field (units,
+  `operating_conditions`, `default_max_transition`, ...) raises an error
+  naming the field and both files' values, and a field present in only one
+  file is reported as missing. Additive: merges that used to fail now
+  succeed; the merged output, template union, duplicate-cell check and cache
+  paths are unchanged.
 - **`openroad` Docker wrapper keeps `/tmp` mounted when `$TMPDIR` differs**
   (issue #5878, 2026-11-17): the wrapper `scripts/install-openroad-docker.sh`
   writes, mounted only `${TMPDIR:-/tmp}`, so while `$TMPDIR` was unset (or
