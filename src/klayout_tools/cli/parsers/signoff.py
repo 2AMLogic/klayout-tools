@@ -255,9 +255,9 @@ def add_signoff_parser(
         "--output",
         metavar="FILE",
         help=(
-            "with --attest: also write the envelope to FILE when it passes, "
-            "only if its bytes changed (an unchanged attestation leaves the "
-            "committed file untouched)."
+            "with --attest: also write the envelope to FILE when it passes; "
+            "--manifest/--fleet: also write the report's JSON envelope to "
+            "FILE (exit 0 or 3, always JSON), if bytes changed; refused with --check."
         ),
     )
     signoff_parser.add_argument(
