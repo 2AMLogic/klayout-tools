@@ -163,9 +163,15 @@ not hardcoded — first runnable candidate wins:
 
 An explicitly-named binary (option or env var) that is not runnable is a
 clear, actionable error naming which source named it — never a silent
-fallback to the next source. The resolved path is recorded in the response
-as `environment.ngspice_binary` (alongside `engine_version`), `null` for
-`engine: "xyce"` (below), which this issue adds no override for. Mirrors
+fallback to the next source. That strictness applies on the submitting host
+too, before any dispatch — an override naming a path only the runner has is
+refused at submit, so name a path (or bare `PATH` name) valid on both
+hosts. The runner re-resolves the override fresh from its own filesystem
+and `$PATH`, so what actually executes is the runner's copy — reported back
+as `environment.ngspice_binary` (alongside `engine_version`), with the
+submitter's own resolution kept as `environment.client_ngspice_binary`;
+`null` for `engine: "xyce"` (below), which this issue adds no override for.
+Mirrors
 `klt lvs`'s `options.netgen_binary`/`$KLT_NETGEN_BINARY`/
 `environment.netgen_binary` (issue #2373). `klt sim` has no `--check`/
 `--rerun` mode, so there is no drift-diff exclusion to add for this field.
@@ -177,9 +183,22 @@ with the engine it resolved and, on a mismatch, exits 1 *before simulating*
 with `error.code: "engine_version_unmet"` naming required vs found. A version
 that cannot be determined or parsed also fails (closed). On `local` and
 `local-parallel` the engine is probed (`ngspice --version` / `Xyce -v`) up
-front. `remote` and `batch` have no pre-submit probe, so the pin is checked
-against the version in the runner's report once the run returns; the job has
-already run by then. Which of the two applies is decided by the backend that
+front. `remote` and `batch` have no *submit-side* probe, but the pin is not
+post-run-only either: the job command is a plain
+`klt sim --backend local-parallel` on the runner, with the request
+forwarded verbatim, so a runner whose `klt` knows the field (0.8.0 and
+newer) enforces the pin there *before any corner simulates* and fails the
+job with `engine_version_unmet`. The refusal surfaces through the normal
+failed-job path — every unit of the job reports `batch_job_failed`, quoting
+the runner's error, with `runner_code: "engine_version_unmet"` — and,
+because the runner wrote no report, the submit-side check below then also
+fails closed with a top-level `engine_version_unmet`. That submit-side
+comparison against the report's `environment.engine_version` stays as the
+backstop for a runner too old to know the field: a pre-0.8.0 runner ignores
+the pin silently but reports no version either, so it still fails closed
+after the run (never a wrong-solver report), and the default
+`batch.runner_version_check: enforce` gate refuses such a version-skewed
+runner at submit. Which of the two applies is decided by the backend that
 *executes*, not the one first resolved: when a host-default off-host backend
 steps back to `local` late — a single-unit run, or `options.resume` — the pin
 is probed here up front, exactly as `--backend local` does (issue #5500);
