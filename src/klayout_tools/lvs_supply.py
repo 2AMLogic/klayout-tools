@@ -7,6 +7,10 @@ from typing import Any
 
 DEFAULT_SUPPLY_NETS = ("GND", "VCC", "VDD", "VGND", "VPWR", "VSS")
 
+#: Issue #2078: a supply name spans more than one disconnected layout net in a
+#: circuit (always a warning; one entry per circuit and supply).
+CATEGORY_NET_SUPPLY_FRAGMENTED = "net.supply_fragmented"
+
 
 def parse_supply_nets(options: Mapping[str, Any]) -> list[str]:
     """Resolve an exact, case-insensitive allowlist; an empty list disables it."""
@@ -78,7 +82,7 @@ def supply_fragmentation_findings(
                 continue
             findings.append(
                 _mismatch(
-                    "net.supply_fragmented",
+                    CATEGORY_NET_SUPPLY_FRAGMENTED,
                     "warning",
                     f"supply '{supply}' spans {count} disconnected layout nets "
                     f"in circuit '{circuit.name}'; connect the supply grid or "

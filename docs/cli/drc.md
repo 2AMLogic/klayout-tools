@@ -1127,8 +1127,16 @@ side is the existing `topmetal1.enclosing.topvia1.1`).
 
 Remaining limitations: `Cont` against `Activ | GatPoly` (Contact layer `6/0` is
 still unread by the sg13cmos5l deck) needs compound-region/population
-semantics and is **not** covered; other PDKs' via stacks (including sg13g2) have
-not been reviewed for this opt-in and keep the legacy behaviour.
+semantics and is **not** covered; other PDKs' via stacks have
+not been reviewed for this opt-in and keep the legacy behaviour. The sg13g2
+deck opts in for every cut side it models (issue #5916): Cont's Metal1 upper
+landing (new curated `metal1.enclosing.cont.1`), Via1-Via4's modelled lower
+landings plus new curated upper landings (`metal2.enclosing.via1.1`,
+`metal3.enclosing.via2.1`, `metal4.enclosing.via3.1`, `metal5.enclosing.via4.1`),
+TopVia1 both sides, and TopVia2 both sides; its `mim.enclosing.topvia1.1`
+keeps the legacy behaviour (TopVia1 is shared between the MIM-cap population
+and ordinary Metal5->TopMetal1 routing) and its Cont lower side stays
+uncovered exactly as sg13cmos5l's does above.
 
 ### Sized/derived-layer rules (`DerivedLayer`)
 
@@ -4022,6 +4030,18 @@ here deduplicated and sorted. A caller building a signoff gate on top of
 contents to see which chapters this curated deck does not attempt at all —
 something no per-layer field can express, since one layer (e.g. gf180mcu's
 `Metal4`) can be referenced by rules spanning several different DRM sections.
+
+**A `scope` token is not a layer name.** It names an upstream DRM section or
+rule-id family — the layer a rule applies to is carried separately by
+`DrcRule.layer` / `coverage.deck_layers`. The offgrid rules across the three
+curated decks are the worked example: sky130's two offgrid rules declare
+`scope="x"` (its `sky130.lydrc` OFFGRID block emits `x.1b`/`x.2c` rule ids),
+gf180mcu's declare `"OFFGRID"` (its `<layer>_OFFGRID` ids), and sg13g2's
+`cont.ongrid.1` declares `"Offgrid"` (upstream `cont_drw_Offgrid`, from
+`rule_decks/geometry/3_1_offgrid.drc`) — none names the layer being gridded
+(sg13g2's rule runs on `Cont.drawing`), and `"Cnt"` there would wrongly claim
+the `Cnt.a`-`Cnt.d` section from `feol/5_14_cont.drc`, which the deck does
+not implement (issue #5723).
 
 `deck_scope` is purely additive (see
 [`docs/json-contract.md`](../json-contract.md)): the existing
