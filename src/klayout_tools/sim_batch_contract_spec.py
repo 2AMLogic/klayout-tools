@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 from . import (
     remote_transport,
     sim_eye,
+    sim_post_commands,
     sim_search,
     sim_settled,
     sim_snm_meas,
@@ -226,6 +227,10 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
             and spec["search"].get("param") is not None
             for spec in request.get("measurements") or []
         ),
+    ),
+    "post_commands": (
+        (0, 9, 3),
+        lambda request: sim_post_commands.is_declared(request.get("analysis")),
     ),
     "stimulus": (
         (0, 7, 1),

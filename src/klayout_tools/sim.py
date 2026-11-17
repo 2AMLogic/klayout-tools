@@ -147,6 +147,7 @@ from . import sim_cause as sim_cause
 from . import sim_environment_report as sim_env_report
 from . import sim_op_check as sim_op_check
 from . import sim_peak_rss as sim_peak_rss
+from . import sim_post_commands as sim_post_commands
 from . import sim_provenance as sim_provenance
 from . import sim_staging as sim_staging
 from ._jsonnum import is_int, is_number
@@ -1571,41 +1572,6 @@ def load_request(request_path: str) -> dict[str, Any]:
     return request
 
 
-def _reject_linearize_in_steps(request: dict[str, Any]) -> None:
-    """Issue #4014: ``linearize`` is a scalar-``tran``-only field."""
-    holders = [("analysis", request.get("analysis"))]
-    holders.extend(
-        (f"analysis_steps[{i}]", step)
-        for i, step in enumerate(request.get("analysis_steps") or [])
-    )
-    for where, holder in holders:
-        if isinstance(holder, dict) and "linearize" in holder:
-            raise SimError(
-                f"{where}.linearize is not supported with analysis_steps[]: "
-                "`linearize` is only available on a scalar `tran` analysis "
-                '(analysis: {"kind": "tran", ..., "linearize": true})'
-            )
-
-
-def _validate_linearize(analysis: dict[str, Any]) -> None:
-    """Issue #4014: ``analysis.linearize`` must be a boolean on a ``tran``."""
-    if "linearize" not in analysis:
-        return
-    value = analysis["linearize"]
-    if not isinstance(value, bool):
-        raise SimError(
-            f"analysis.linearize must be a boolean (got {value!r}); "
-            "set true to resample the transient waveforms onto a uniform "
-            "time grid before the expr measurements are evaluated"
-        )
-    if value and str(analysis.get("kind", "")).lower() != "tran":
-        raise SimError(
-            'analysis.linearize requires analysis.kind "tran" '
-            f"(got {analysis.get('kind')!r}): `linearize` resamples a "
-            "transient waveform and has no meaning for other analyses"
-        )
-
-
 def _validate_search_targets(
     measurements_spec: list[dict[str, Any]],
     netlist_path: str,
@@ -1639,7 +1605,7 @@ def _resolve_analysis_and_measurements(
     :func:`klayout_tools.sim_steps.resolve_analysis_steps`.
     """
     if request.get("analysis_steps") is not None:
-        _reject_linearize_in_steps(request)
+        sim_post_commands.reject_in_steps(request)  # issues #4014/#6080
         sim_op_check.reject_in_steps(request)  # issue #5077
         return sim_steps.resolve_analysis_steps(request)
     analysis = request.get("analysis") or {}
@@ -1651,7 +1617,7 @@ def _resolve_analysis_and_measurements(
     # Issue #3159: `analysis.passes` (AC only) is validated and normalised
     # here, before any engine launch; absent `passes` returns `analysis` as is.
     analysis = sim_passes.resolve_analysis(analysis)
-    _validate_linearize(analysis)
+    sim_post_commands.validate_linearize(analysis)
     sim_op_check.validate(analysis)  # issue #5077
     measurements_spec = request.get("measurements", [])
     # Issue #2533: `spice` (a verbatim top-level `.meas` card) and `expr` (an
@@ -1659,6 +1625,7 @@ def _resolve_analysis_and_measurements(
     # `.control` block) are the two declarable forms, exactly one per entry
     # -- see `_validate_measurement_forms` for the full rule set.
     _validate_measurement_forms(measurements_spec)
+    sim_post_commands.validate(analysis, measurements_spec)  # issue #6080
     # Issue #3109: an `op` analysis has no dc/ac/tran/sp sweep for a `.meas`
     # card to search, so every `spice` card would end as "produced no value".
     if str(analysis["kind"]).lower() == "op":
@@ -3408,6 +3375,7 @@ def _prepare_sim_request(
     corner_points = _expand_corners(corners_spec, request.get("exclude") or [])
 
     monte_carlo_spec = request.get("monte_carlo")
+    sim_post_commands.refuse_xyce(engine, analysis)  # issue #6080
     _enforce_xyce_support_boundary(
         engine=engine,
         backend=backend,
@@ -10026,6 +9994,7 @@ def _corner_deck_control_lines(
         # `expr` lets, so time-weighted sums are not biased by the
         # adaptive timestep distribution.
         lines.append("linearize")
+    lines.extend(sim_post_commands.control_lines(analysis))  # issue #6080
     expr_specs = _expr_measurements(measurements_spec)
     if expr_specs and analysis["kind"] == "noise":
         # Issue #2893: after `noise`, ngspice's current plot is the integrated

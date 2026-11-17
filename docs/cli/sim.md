@@ -4374,7 +4374,38 @@ deck is byte-identical to before. `linearize` is refused (exit 1, naming the
 field) on a non-`tran` analysis, inside `analysis_steps[]`, for a non-boolean
 value, and with `engine: "xyce"`. The `batch` backend replays the same deck, so
 it needs no extra support. There is no generic `let`/control-line passthrough:
-express derived quantities as `expr` measurements.
+express derived quantities as `expr` measurements. The one narrow exception is
+`analysis.post_commands`, below.
+
+### Transforms between the analysis and `expr`: `analysis.post_commands`
+
+A waveform transform such as `fft` has to run *between* the transient and the
+`expr` lets, because afterwards the current plot is the spectrum.
+`analysis.post_commands` (a non-empty list of single-line strings) on a scalar
+`tran` analysis emits those lines in order after the analysis line, after the
+rawfile `write` and `linearize`, and before the `expr` lets. A two-tone bench:
+
+```json
+"analysis": {
+  "kind": "tran", "args": "1u 2m",
+  "post_commands": ["linearize v(a) v(b)", "fft v(a) v(b)"]
+},
+"measurements": [
+  { "name": "fund_a", "expr": "mag(a[10])", "unit": "V" }
+]
+```
+
+After `fft` the current plot is the spectrum, so `expr` measurements read
+spectrum bins (`a`, `b` here), not time-domain vectors. Each entry's first
+token must be `linearize` or `fft` -- an allowlist, not a control-line
+passthrough. Refused with exit 1 (naming `analysis.post_commands[i]` where an
+entry is at fault): a non-list or empty value, a non-string entry, an entry
+containing a newline or `;`, a first token outside the allowlist, a non-`tran`
+analysis, use inside `analysis_steps[]`, `engine: "xyce"`, and any measurement
+other than `expr`/`spice` (crossings, energy, eye, ... read the transient plot,
+which `fft` replaces). Without the field the deck is byte-identical to before.
+A request using it needs a batch runner at klt 0.9.3 or later; an older runner
+is refused at submit rather than ignoring the field.
 
 ### `expr` after a `noise` analysis
 

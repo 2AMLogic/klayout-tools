@@ -14,6 +14,15 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt sim` gains `analysis.post_commands`** (#6080, 2026-11-17): an additive,
+  opt-in list of control commands (first token `linearize` or `fft` only) that a
+  scalar `tran` analysis emits after the analysis, `write` and `linearize`
+  lines and before the `expr` lets, so FFT-class benches read spectrum bins
+  without packing a multi-line string into `analysis.kind`. Refused (exit 1)
+  for non-`tran`, `analysis_steps[]`, `engine: "xyce"`, non-`expr`/`spice`
+  measurements, and malformed entries. A request using it needs a batch runner
+  at klt 0.9.3 or later. Requests without the field render a byte-identical deck.
+
 - **`klt sim` refuses `measurements[].transfer` declared beside `noise`**
   (#5695, 2026-11-14): the mutually exclusive measurement forms each carried a
   hand-maintained list of "every *other* exclusive form", and `transfer`'s
