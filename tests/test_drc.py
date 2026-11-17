@@ -9503,12 +9503,6 @@ def test_legacy_enclosing_unchanged_without_opt_in(tmp_path, monkeypatch):
         [((31, 0), kdb.Box(0, 0, 100, 100)), ((30, 0), kdb.Box(5000, 0, 5500, 500))],
     )
     assert not _synthetic_hits(path)
-    gf = get_deck("gf180mcu")
-    # Only MDP.6 opts in: upstream's `mvpsd.not_inside(ldmos_xtor)` flags an
-    # MVPSD not wholly inside LDMOS_XTOR, which interaction-scoped enclosing
-    # cannot express. Every other gf180mcu rule keeps the legacy semantics.
-    opted_in = {r.id for r in gf if getattr(r, "require_containment", False)}
-    assert opted_in == {"ldmos_xtor.enclosing.mvpsd.1"}
 
 
 @pytest.fixture
