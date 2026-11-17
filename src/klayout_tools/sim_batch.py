@@ -2720,13 +2720,12 @@ def _annotate_unrecovered_preflight_reject(
     status: dict[str, Any],
     identity: dict[str, Any],
 ) -> None:
-    """Issue #4161: a job that exited :data:`_BATCH_PREFLIGHT_REJECT_EXIT`
-    but whose klt error envelope could not be recovered (no ``report.json``,
-    no ``stderr.log``) would otherwise read as the bare ``job command exited
-    87``. Say what the exit means and, when the post-run runner identity
-    shows a major.minor mismatch, classify the failure as a version mismatch
-    (``runner_code`` :data:`BATCH_RUNNER_MISMATCH_CODE` plus both klt
-    identities). Any other non-zero exit code gets the generic
+    """Issue #4161: a job that exited :data:`_BATCH_PREFLIGHT_REJECT_EXIT` but whose
+    klt error envelope could not be recovered (no ``report.json``, no ``stderr.log``)
+    would otherwise read as the bare ``job command exited 87``. Say what the exit means
+    and, when the post-run runner identity shows a major.minor mismatch, classify the
+    failure as a version mismatch (``runner_code`` :data:`BATCH_RUNNER_MISMATCH_CODE`
+    plus both klt identities). Any other non-zero exit code gets the generic
     :func:`.sim_batch_features.annotate_unrecovered_failure` wording (issue #4217)."""
     exit_code = _status_exit_code(status)
     if exit_code is None or exit_code == 0:
@@ -2744,7 +2743,8 @@ def _annotate_unrecovered_preflight_reject(
         note += (
             f"; the runner ran klt {identity.get('runner_klt_version')} but the "
             f"client is {identity.get('client_klt_version')} -- update the "
-            "runner image or use a compatible client"
+            "runner image, use a compatible client, or set "
+            'request.batch.runner_version_check to "warn" to submit anyway'
         )
     note += gap_note(identity)
     for corner in corners:
