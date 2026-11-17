@@ -248,8 +248,8 @@ directory itself, or a named subdirectory of it). When present it wins over
   `default_max_transition`, ...) is an error naming the conflicting field
   and both files' values. Matching files are merged into one
   content-addressed `.lib` under `$KLT_CACHE_DIR` (default
-  `~/.cache/klt/liberty-merged`, never inside the PDK tree) and hands that
-  single path to Yosys/OpenROAD/OpenSTA. Top-level `lu_table_template` and
+  `~/.cache/klt/liberty-merged`, never inside the PDK tree), and klt hands
+  that single path to Yosys/OpenROAD/OpenSTA. Top-level `lu_table_template` and
   `power_lut_template` groups are unioned by name (same name with different
   content is an error). A duplicate cell name is an error; the merged header
   is the first file's plus any templates it lacks; a one-element list equals
