@@ -119,10 +119,13 @@ def add_sim_parser(
         default=None,
         help=(
             "read one batch job's state by id (one status.json read; "
-            "state `pending` before the instance writes one) and exit. The "
-            "positional request supplies the bucket/region/profile. Submits "
-            "and launches nothing. Unit counts are not published by the "
-            "fleet and are not reported. See docs/cli/sim.md."
+            "state `pending` before the instance writes one) and exit. "
+            "The positional request, when given, supplies the "
+            "bucket/region/profile; without one they resolve from the "
+            "KLT_BATCH_* environment and the fleet batch-fleet.env "
+            "(issue #5810). Submits and launches nothing. Unit counts "
+            "are not published by the fleet and are not reported. See "
+            "docs/cli/sim.md."
         ),
     )
     sim_parser.add_argument(

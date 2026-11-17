@@ -82,9 +82,15 @@ def _print_dry_run_text(report: dict[str, Any]) -> None:
 def _reject_single_request_misuse(args: argparse.Namespace) -> int | None:
     """Usage failures of the single-request form of ``klt sim`` (``None`` =
     the arguments are fine)."""
-    if args.request is None:
+    if args.request is None and (
+        getattr(args, "op_lint", False) or getattr(args, "job_status", None) is None
+    ):
         # Keep the pre---batch-set contract: a bare ``klt sim`` is an
         # argparse-style usage failure (stderr message, SystemExit(2)).
+        # ``--job-status`` alone is exempt (issue #5810): it needs no
+        # request file, resolving bucket/region/profile from the
+        # ``KLT_BATCH_*`` environment and the fleet config instead.
+        # ``--op-lint`` is not exempt -- it runs on the request document.
         sys.stderr.write(
             "klt sim: error: the following arguments are required: "
             "request (or --batch-set REQUEST...)\n"
@@ -198,7 +204,11 @@ def _exit_code_for(report: dict, deck_mode: bool) -> int:
 
 
 def _run_job_status(args: argparse.Namespace) -> int:
-    """``klt sim REQUEST --job-status JOB_ID``: one state read (issue #3073).
+    """``klt sim [REQUEST] --job-status JOB_ID``: one state read (issue #3073).
+
+    The request file is optional here (issue #5810): without one, the
+    bucket/region/profile resolve from the ``KLT_BATCH_*`` environment and
+    the fleet config, exactly as ``read_job_status`` resolves them.
 
     Exit ``0`` whenever the read succeeded -- whatever state the *job* is in
     (``failed`` included): the exit code reports this read, the ``state``
@@ -227,7 +237,8 @@ def _run_job_status(args: argparse.Namespace) -> int:
             exit_code=EXIT_USAGE_ERROR,
         )
     try:
-        status = read_job_status(load_request(args.request), args.job_status)
+        request = load_request(args.request) if args.request is not None else {}
+        status = read_job_status(request, args.job_status)
     except SimError as exc:
         return emit_error("sim", str(exc), args.format, code=exc.code)
     emit_success(status, args.format, _print_job_status_text)
