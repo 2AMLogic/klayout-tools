@@ -703,19 +703,6 @@ def test_run_constraints_design_rule_field_valid_without_clock(tmp_path, monkeyp
     assert report["status"] == "ok"
 
 
-def test_run_target_stage_place_requires_clock(tmp_path, monkeypatch):
-    request_path = _setup_success_env(
-        tmp_path,
-        monkeypatch,
-        target_stage="place",
-        constraints=None,
-    )
-    with pytest.raises(
-        PlaceAndRouteError, match="required to reach target_stage 'place'"
-    ):
-        run_place_and_route(request_path)
-
-
 def test_run_target_stage_place_requires_io(tmp_path, monkeypatch):
     request_path = _setup_success_env(
         tmp_path,

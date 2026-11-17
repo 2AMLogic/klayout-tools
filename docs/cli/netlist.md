@@ -280,6 +280,41 @@ When the files match only because of this, `drift.layout_differs` is `true`. Thi
 real `.subckt`, pass `--block`, which `--check` applies before comparing
 ([Block mode](#block-mode-an-includable-subckt)).
 
+**`--canonical-wrap` (issue #5715)** makes the *written* netlist
+layout-independent too: every `+` continuation line is folded onto the card it
+continues and whitespace runs inside non-comment lines are collapsed to single
+spaces — exactly the layout `--check` compares — so two hosts whose xschem
+builds wrap long cards differently write byte-identical files from the same
+schematic. Comment lines are left byte-intact: the informational
+`**.subckt <name> <ports...>` port order is not rewritten, a `+` line is never
+joined onto a comment, and a quoted expression with embedded spaces
+(`ad='int((nf+1)/2) * w/nf * 0.29'`) survives verbatim. The fold is idempotent,
+so canonical output is a fixed point of the comparison: a netlist written with
+the flag still checks `match` (with or without the flag on the checking run).
+It is honoured under `--backend batch` too, applied client-side after the
+runner's paths are mapped back. Default off, like the other write-side flags:
+without it no written byte changes. In generate mode the payload reports
+`canonical_wrap` (`false` by default), and `netlist.content_hash` /
+`netlist.bytes` describe the folded bytes.
+
+Three parts of a written netlist are a property of the **host or the
+checkout** rather than of the circuit, and `--check` forgives all three. Each
+has its own opt-in write-side flag:
+
+| Host/checkout-dependent surface | Written without a flag | Write-side flag |
+| --- | --- | --- |
+| `+` continuation wrapping | the host xschem's wrap column | `--canonical-wrap` (issue #5715) |
+| `** sch_path:` / `** sym_path:` absolute paths | this checkout's absolute paths | `--relative-paths` (issue #5046) |
+| `** klt-netlist-inputs:` line (embeds `xschem_version`) | this xschem build's version | `--no-provenance-header` (issue #5085) |
+
+So `klt netlist <sch> -o out.spice --canonical-wrap --relative-paths
+--no-provenance-header` is the form whose regenerations are byte-identical
+across hosts and checkouts. The combination is required: the provenance
+header embeds `xschem_version`, so with the header enabled two hosts running
+different xschem builds differ on that line whatever the wrapping. Without
+the flags the written netlist keeps the generating host's form, and
+`--check` still forgives all three surfaces when comparing.
+
 **Generation inputs are recorded** (issue #4945). The line is a stable, strippable contract; pass `--no-provenance-header` (issue #5085) to omit it, so the written netlist is byte-identical to xschem's own export (for projects that hash-pin committed netlists). The payload reports `provenance_header` (`true` by default), and `netlist.content_hash` and `netlist.bytes` describe the bytes actually written. `--check` is unaffected, and a headerless committed netlist still checks cleanly. Not supported with `--backend batch`. A written netlist starts with
 one comment line, `** klt-netlist-inputs: {"pdk_variant": ..., "rcfile": ...,
 "xschem_version": ...}`: the xschem version, the `--rcfile` *basename* (its
@@ -736,6 +771,7 @@ resolves its own `$PDK_ROOT`.
 | `output` | string | The `--output` path exactly as provided. Written in `generate` mode; read and compared in `check` mode. |
 | `mode` | `"generate"` \| `"check"` | Which mode ran (`"check"` iff `--check` was passed). |
 | `status` | `"generated"` \| `"match"` \| `"drifted"` | `"generated"` in `generate` mode; `"match"`/`"drifted"` in `check` mode. |
+| `canonical_wrap` | boolean | **`generate` mode only**: whether `--canonical-wrap` folded the written netlist onto the layout `--check` compares (issue #5715). Absent in `check` mode. |
 | `xschem` | object | How xschem was invoked and what it returned — see below. |
 | `netlist` | object | Identity of the netlist this run produced — see below. |
 | `pdk` | object | **Only when a PDK resolved** (see [PDK-root consistency](#pdk-root-consistency)); absent otherwise. Additive. |
