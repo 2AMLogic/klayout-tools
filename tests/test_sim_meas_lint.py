@@ -40,6 +40,12 @@ from test_sim import _write_body, _write_request
         ".meas tran t when abs(v(a)-v(b))=0.1",
         ".meas tran t when v(a)*abs(v(b))=0.1",
         ".meas tran t when v(a)*2*par('v(b)')=0",
+        # a parenthesised difference straight after the signal-position
+        # keyword: the group is not a call, and the rewrite must keep the
+        # keyword outside the par('...') span (see the rewrite-text test
+        # below -- `par('when (v(a)-v(b))')` fatals ngspice-47)
+        ".meas tran t when (v(a)-v(b))=0.1",
+        ".meas tran t avg (v(a)-v(b))",
     ],
 )
 def test_validate_meas_card_rejects_signal_position_expression(card):
@@ -117,6 +123,84 @@ def test_validate_meas_card_rewrites_call_expression_as_whole_par_span():
         assert "abs(par(" not in message
         assert "par('v(a)*abs')" not in message
         assert "par('v(a)*2*par')" not in message
+
+
+#: Every `.meas` signal-position keyword that can sit right before a
+#: parenthesised flagged expression (issue #5651 verdict on b8297e5cf: the
+#: lint read each as the callee of a call and widened the span over it).
+_SIGNAL_POSITION_KEYWORDS = [
+    "when", "find", "avg", "max", "min", "rms",
+    "integ", "pp", "deriv", "trig", "targ", "param",
+]  # fmt: skip
+
+
+@pytest.mark.parametrize("keyword", _SIGNAL_POSITION_KEYWORDS)
+def test_validate_meas_card_rewrite_keeps_keyword_outside_par_span(keyword):
+    # A parenthesised difference right after a signal-position keyword is a
+    # bare group, not a call: the working rewrite wraps the group *with* its
+    # parens -- `when par('(v(a)-v(b))')=0.1` -- and leaves the keyword
+    # outside. `par('when (v(a)-v(b))')` is a card ngspice-47 fatals on
+    # ("no such function 'when'"), and the quoted expression must be the
+    # author's own `(v(a)-v(b))`, not one that swallows the keyword.
+    card = f".meas tran t_x {keyword} (v(a)-v(b))=0.1"
+    with pytest.raises(sim.SimError) as excinfo:
+        sim._validate_meas_card("t_x", card)
+    message = str(excinfo.value)
+    assert f".meas tran t_x {keyword} par('(v(a)-v(b))')=0.1" in message
+    assert "expression '(v(a)-v(b))'" in message
+    assert f"par('{keyword} " not in message
+    assert f"({keyword} (" not in message
+
+
+def test_validate_meas_card_rewrite_keyword_is_case_insensitive():
+    # ngspice card syntax is case-insensitive; so is the keyword guard.
+    with pytest.raises(sim.SimError) as excinfo:
+        sim._validate_meas_card("t_x", ".MEAS TRAN t_x WHEN (V(A)-V(B))=0.1")
+    message = str(excinfo.value)
+    assert ".MEAS TRAN t_x WHEN par('(V(A)-V(B))')=0.1" in message
+    assert "par('WHEN" not in message
+
+
+def test_validate_meas_card_rewrite_separates_keyword_from_par_span():
+    # `when(v(a)-v(b))` has no space to keep the keyword apart; the rewrite
+    # must not glue them into the unknown token `whenpar(`.
+    with pytest.raises(sim.SimError) as excinfo:
+        sim._validate_meas_card("t_x", ".meas tran t_x when(v(a)-v(b))=0.1")
+    message = str(excinfo.value)
+    assert ".meas tran t_x when par('(v(a)-v(b))')=0.1" in message
+    assert "whenpar(" not in message
+
+
+def test_validate_meas_card_rewrite_widens_operand_across_keyword_group():
+    # The lone-reference widening reaches the same keyword-adjacent group
+    # through _token_start: `when (v(a))-v(b)` is one expression and the
+    # keyword stays outside the quote.
+    with pytest.raises(sim.SimError) as excinfo:
+        sim._validate_meas_card("t_x", ".meas tran t_x when (v(a))-v(b)=0.1")
+    message = str(excinfo.value)
+    assert ".meas tran t_x when par('(v(a))-v(b)')=0.1" in message
+    assert "expression '(v(a))-v(b)'" in message
+
+
+def test_validate_meas_card_rewrite_wraps_group_nested_in_call():
+    # A bare group inside a call widens outward through both: the call and
+    # the group's own parens end up inside one par('...') span.
+    with pytest.raises(sim.SimError) as excinfo:
+        sim._validate_meas_card("t_x", ".meas tran t_x when abs((v(a)-v(b)))=0.1")
+    assert ".meas tran t_x when par('abs((v(a)-v(b)))')=0.1" in str(excinfo.value)
+
+
+def test_validate_meas_card_control_scope_keeps_keyword_for_group():
+    # Control scope shares the span: the reference handed back must keep the
+    # `when` keyword (it used to read `.meas tran c_x vdiff=0.1`), and the
+    # let helper holds the author's whole parenthesised expression.
+    with pytest.raises(sim.SimError) as excinfo:
+        sim._validate_meas_card(
+            "c_x", ".meas tran c_x when (v(a)-v(b))=0.1", control_scope=True
+        )
+    message = str(excinfo.value)
+    assert "`.meas tran c_x when vdiff=0.1`" in message
+    assert '"expr": "(v(a)-v(b))"' in message
 
 
 def test_validate_meas_card_control_scope_call_expression_names_vdiff():

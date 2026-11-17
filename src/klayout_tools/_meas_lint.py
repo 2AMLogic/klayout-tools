@@ -55,6 +55,21 @@ _MEAS_TWO_NODE_REF_RE = re.compile(r"([vViI])\s*\(\s*([^,()\s]+)\s*,\s*([^()]+?)
 #: built from.
 _MEAS_ARITH_OPS = ("+", "-", "*", "/")
 
+#: Words of a `.meas` card that are keywords, never functions: a signal
+#: position's keyword (``when``, ``find``, ``avg``, ...) and the card's
+#: modifiers. One of these right before a ``(`` must not be read as the
+#: callee of a call, or a span widened over the "call" swallows the keyword
+#: and the suggested ``par('when (v(a)-v(b))')`` fatals ngspice-47 with
+#: ``no such function 'when'`` (issue #5651).
+_MEAS_CARD_KEYWORDS = frozenset(
+    {
+        "when", "find", "avg", "max", "min", "rms", "integ", "pp", "deriv",
+        "min_at", "max_at", "trig", "targ", "param", "at", "val", "from",
+        "to", "td", "cross", "rise", "fall", "meas", "measure", "tran",
+        "dc", "ac", "sp", "noise",
+    }
+)  # fmt: skip
+
 
 #: One operator-merged run of adjacent references in a `.meas` card: its
 #: ``(start, end)`` span in the original card, how many references merged
@@ -122,12 +137,17 @@ def _balanced_close(spice: str, open_at: int) -> int | None:
 def _callee_start(spice: str, open_at: int) -> int | None:
     """Start of the callee identifier immediately before the ``(`` at
     *open_at* (spaces allowed) -- ``None`` when the group has no callee and
-    is a bare parenthesised group."""
+    is a bare parenthesised group. A `.meas` card keyword (``when``,
+    ``avg``, ...) sitting right before the ``(`` is not a callee: the group
+    after it is a bare group, so the keyword stays outside any ``par('...')``
+    span built from it."""
     cursor = open_at
     while cursor > 0 and spice[cursor - 1].isspace():
         cursor -= 1
     match = re.search(r"[A-Za-z0-9_.]+$", spice[:cursor])
-    return None if match is None else match.start()
+    if match is None or match.group(0).lower() in _MEAS_CARD_KEYWORDS:
+        return None
+    return match.start()
 
 
 def _token_end(spice: str, start: int) -> int | None:
@@ -219,12 +239,14 @@ def _extend_over_operands(spice: str, start: int, end: int) -> tuple[int, int]:
 
 
 def _widen_over_enclosing_call(spice: str, start: int, end: int) -> tuple[int, int]:
-    """Widen a flagged expression span over the balanced calls enclosing it
+    """Widen a flagged expression span over the balanced groups enclosing it
     (``abs(v(a)-v(b))``, nested calls too), so the refusal's rewrite wraps
     the whole local expression -- ``par('abs(v(a)-v(b))')``, the form
     ngspice accepts -- rather than ``abs(par('v(a)-v(b)'))``, which fatals
-    on every corner. A bare parenthesised group with no callee is not a
-    call and is left alone."""
+    on every corner. A bare parenthesised group (no callee, or a `.meas`
+    keyword such as ``when`` before it) is widened over too, parentheses
+    included and the keyword left outside: ``when par('(v(a)-v(b))')=0.1``
+    works, while ``when (par('v(a)-v(b)'))=0.1`` errors on ngspice-47."""
     while True:
         depth = 0
         widened = False
@@ -240,9 +262,7 @@ def _widen_over_enclosing_call(spice: str, start: int, end: int) -> tuple[int, i
                 if close is None or close < end:
                     continue
                 callee = _callee_start(spice, index)
-                if callee is None:
-                    continue
-                start, end = callee, close + 1
+                start, end = (index if callee is None else callee), close + 1
                 widened = True
                 break
         if not widened:
@@ -300,6 +320,16 @@ def _find_meas_signal_expression(spice: str) -> tuple[int, int, str] | None:
     return None
 
 
+def _splice_replacement(spice: str, start: int, end: int, replacement: str) -> str:
+    """*spice* with ``spice[start:end]`` replaced by *replacement* (a
+    ``par('...')`` call or a ``vdiff`` name, both identifier-initial). A
+    space goes in when the character before the span is an identifier
+    character, so ``when(v(a)-v(b))`` rewrites to ``when par('...')`` and
+    never to the unknown token ``whenpar(``."""
+    gap = " " if start > 0 and re.match(r"[A-Za-z0-9_.]", spice[start - 1]) else ""
+    return f"{spice[:start]}{gap}{replacement}{spice[end:]}"
+
+
 def check_meas_signal_position(
     name: str, spice: str, control_scope: bool = False
 ) -> None:
@@ -324,9 +354,9 @@ def check_meas_signal_position(
         return
     start, end, expression = found
     inner = _two_node_difference(_unwrap_par_spans(expression))
-    rewrite = f"{spice[:start]}par('{inner}'){spice[end:]}"
+    rewrite = _splice_replacement(spice, start, end, f"par('{inner}')")
     if control_scope:
-        reference = f"{spice[:start]}vdiff{spice[end:]}"
+        reference = _splice_replacement(spice, start, end, "vdiff")
         raise SimError(
             f"measurement '{name}': a control-scope meas command's signal "
             "position takes a single vector reference, not the arithmetic "
