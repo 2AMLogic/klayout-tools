@@ -182,6 +182,56 @@ def test_no_note_when_paths_set_declared(tmp_path):
     assert cit["input_verified"] is True
 
 
+def test_note_for_empty_paths_set(tmp_path):
+    """An empty set has no member to verify, so nothing is re-hashed -- the
+    declared hash binds nothing, exactly the reported gap: the note fires."""
+    env = _generic_env(content_hash="sha256:" + "6" * 64, paths=[])
+    cit = _generic_cite(tmp_path, env)
+    assert cit["input_verified_note"] == "declared_hash_unbound"
+    assert cit["input_verified"] is None
+
+
+def test_note_for_malformed_paths_set(tmp_path):
+    """A malformed set (not a list) never answers through its members and
+    never falls back to ``input.path``: nothing is re-hashed, so the note
+    fires rather than leaving the declared hash reading as a binding."""
+    env = _generic_env(content_hash="sha256:" + "7" * 64, paths="not-a-list")
+    cit = _generic_cite(tmp_path, env)
+    assert cit["input_verified_note"] == "declared_hash_unbound"
+    assert cit["input_verified"] is None
+
+
+def test_note_for_model_run_paths_set(tmp_path):
+    """A ``model-run`` envelope's set is never member-verified
+    (``_fold_kind_inputs`` folds a set for ``generic`` only), so a declared
+    hash beside a well-formed one is still never re-hashed: the note fires
+    there too -- the blanket set exclusion reintroduced the reported gap."""
+    member = tmp_path / "member.txt"
+    member.write_text("member bytes")
+    env = _model_run_env(
+        content_hash=input_set_digest([("member.txt", _hash_of(member))]),
+        paths=[{"path": "member.txt", "content_hash": _hash_of(member)}],
+    )
+    cit = _model_run_cite(tmp_path, env)
+    assert cit["input_verified_note"] == "declared_hash_unbound"
+    assert cit["input_verified"] is None
+
+
+def test_no_note_when_paths_set_members_unresolvable(tmp_path):
+    """A well-formed set whose members cannot be read here still answered
+    through its members (``input_members`` rendered, each saying
+    ``unverifiable``) -- grader-tried, like an unresolvable single ``path``,
+    so no note even though ``input_verified`` stays ``null``."""
+    recorded = "sha256:" + "9" * 64
+    env = _generic_env(
+        content_hash=input_set_digest([("gone.txt", recorded)]),
+        paths=[{"path": "gone.txt", "content_hash": recorded}],
+    )
+    cit = _generic_cite(tmp_path, env)
+    assert "input_verified_note" not in cit
+    assert cit["input_verified"] is None
+
+
 def test_no_note_for_native_kind(tmp_path):
     """A native kind's declared hash is checked against the field that kind
     names (``drc``'s ``file``) -- nothing is unbound, so no note."""

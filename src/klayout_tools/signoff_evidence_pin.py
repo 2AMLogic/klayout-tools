@@ -86,9 +86,11 @@ def pin_disclosure(
     return detail
 
 
-#: ``citation.input_verified_note`` for a ``generic``/``model-run`` envelope
-#: that declares ``provenance.input.content_hash`` with no usable
-#: ``provenance.input.path`` (issue #6403): the declared hash is silently
+#: ``citation.input_verified_note`` for a ``generic``/``model-run``
+#: envelope that declares ``provenance.input.content_hash`` naming
+#: nothing verification answers -- no usable ``provenance.input.path``,
+#: and no ``paths`` set that answered through its members (issue #6403):
+#: the declared hash is silently
 #: never re-hashed, and ``input_verified: null`` also means "nothing to
 #: hash", so it cannot say "declared, never checked" on its own.
 DECLARED_HASH_UNBOUND = "declared_hash_unbound"
@@ -110,12 +112,15 @@ def declared_hash_unbound_disclosure(
     resolution: Mapping[str, Any],
 ) -> dict[str, str]:
     """Issue #6403: a ``generic``/``model-run`` envelope that declares
-    ``provenance.input.content_hash`` (non-empty string) with no usable
-    ``provenance.input.path`` and no ``provenance.input.paths`` set has
-    that hash silently never re-hashed -- the citation renders
-    ``input_verified: null`` exactly like one declaring no hash at all.
-    Returns ``{"input_verified_note": DECLARED_HASH_UNBOUND}`` so the
-    declared-but-never-checked case is visible beside the unchanged
+    ``provenance.input.content_hash`` (non-empty string) naming nothing
+    verification answers has that hash silently never re-hashed -- the
+    citation renders ``input_verified: null`` exactly like one declaring
+    no hash at all. That is: no usable ``provenance.input.path``, or a
+    ``provenance.input.paths`` set that never answered (malformed, empty,
+    or on a ``model-run`` envelope, whose set is never member-verified) --
+    a well-formed ``generic`` set answers through its members and is not
+    unbound. Returns ``{"input_verified_note": DECLARED_HASH_UNBOUND}`` so
+    the declared-but-never-checked case is visible beside the unchanged
     ``null``; ``{}`` (no key) for every envelope the note does not
     describe. Disclosure only, like every citation field -- never
     consulted by any grading rule."""
@@ -123,12 +128,25 @@ def declared_hash_unbound_disclosure(
         return {}
     provenance = resolution["envelope"].get("provenance")
     input_block = provenance.get("input") if isinstance(provenance, Mapping) else None
-    if not isinstance(input_block, Mapping) or "paths" in input_block:
+    if not isinstance(input_block, Mapping):
+        return {}
+    if "paths" in input_block:
+        # A `paths` set binds through its members, not `input.path`: the
+        # note stays off it exactly while the set answered (members were
+        # verified -- `input_verified` settled or members rendered). A
+        # malformed or empty set re-hashes nothing
+        # (`_fold_generic_input_set` forces `input_verified: null`), and a
+        # `model-run` envelope's set is never folded at all, so in both
+        # the declared hash binds nothing with no disclosure -- the exact
+        # gap this note exists to close -- and it fires.
+        if resolution.get("input_verified") is not None or resolution.get(
+            "input_members"
+        ):
+            return {}
+    elif _usable_input_path(input_block.get("path")):
         return {}
     declared = input_block.get("content_hash")
     if not isinstance(declared, str) or not declared:
-        return {}
-    if _usable_input_path(input_block.get("path")):
         return {}
     return {"input_verified_note": DECLARED_HASH_UNBOUND}
 

@@ -693,7 +693,7 @@ the answer to "was that hash checked against the artifact itself?"
 | ----- | ------- |
 | `true` | The input artifact the envelope names was found, re-hashed (`sha256`, the same digest the producing run recorded), and **matches**. The freshness claim is anchored to a file. |
 | `false` | The artifact was found and re-hashed, and it **disagrees** with the hash the envelope recorded — the report describes a revision that is no longer on disk. |
-| `null`  | Nothing was re-hashed, so the pinned hash was only ever compared to another claim. Either the envelope records no input hash, its kind names no input path this command can resolve, or the path it names does not resolve to a readable file from the grading context — including one git does not track (see the index basis below). A `generic`/`model-run` envelope that *declares* a `content_hash` but no usable path additionally carries `input_verified_note: "declared_hash_unbound"` — see below. |
+| `null`  | Nothing was re-hashed, so the pinned hash was only ever compared to another claim. Either the envelope records no input hash, its kind names no input path this command can resolve, or the path it names does not resolve to a readable file from the grading context — including one git does not track (see the index basis below). A `generic`/`model-run` envelope that *declares* a `content_hash` but names nothing verification can answer (no usable `path`, and no `paths` set that answered through its members) additionally carries `input_verified_note: "declared_hash_unbound"` — see below. |
 
 ```
 $ klt signoff --manifest manifest.json --format json | jq '.items[] | select(.id == 3) | .citation | {content_hash, input_verified}'
@@ -710,17 +710,20 @@ $ klt signoff --manifest manifest.json --format text
 
 **A declared hash nobody checked (issue #6403).** `input_verified: null`
 also covers the case where a `generic`/`model-run` envelope *declares*
-`provenance.input.content_hash` but no usable `provenance.input.path` (a
-`paths` set, `null`, or `scope: "external"` path included): that declaration
-is silently never re-hashed — the opt-in is `path`-keyed by design — yet it
-read as a binding, indistinguishable in the citation from an envelope
-declaring no hash at all. Those citations carry the additive
-`input_verified_note: "declared_hash_unbound"` beside the unchanged
-`input_verified: null` (a single string token, never consulted by any
-grading rule, no `schema_version` bump), and the text report prints an
-`input note:` line under the `input:` one. A declared `path` that merely
-fails to resolve here is *not* unbound — the grader tried it — and keeps
-the plain `null`.
+`provenance.input.content_hash` but names nothing verification can answer:
+no usable `provenance.input.path` (`null` or `scope: "external"`), or a
+`provenance.input.paths` set that never answered — malformed, empty, or on
+a `model-run` envelope, whose set is not verified through its members.
+That declaration is silently never re-hashed — the opt-in is `path`-keyed
+by design — yet it reads as a binding, indistinguishable in the citation
+from an envelope declaring no hash at all. Those citations carry the
+additive `input_verified_note: "declared_hash_unbound"` beside the
+unchanged `input_verified: null` (a single string token, never consulted
+by any grading rule, no `schema_version` bump), and the text report prints
+an `input note:` line under the `input:` one. A well-formed `paths` set
+answers through its members, and a declared `path` that merely fails to
+resolve here was grader-tried — neither is unbound, and both keep the
+plain `null`.
 
 **Which artifact is re-hashed** is the one the producing run pinned into
 `provenance.input`, named by the field that run echoes it back under — never
@@ -4195,9 +4198,11 @@ sim`'s `netlist`) — never a raw absolute host path, for the same reason
 `repo_relative_path` never emits one for `scope: "external"`. Omitting
 `provenance.input.path` is unaffected either way: `input_verified` stays
 `null`, exactly as it always has for `generic` — and since issue #6403 a
-citation whose envelope declared a `content_hash` without a usable `path`
-(`paths` set, `null`, and `scope: "external"` count as no usable path; an
-empty string declares nothing) also carries the additive
+citation whose envelope declared a `content_hash` but names nothing
+verification can answer (`null` and `scope: "external"` count as no usable
+`path`; an empty string declares nothing; a `paths` set counts as answered
+only when its members were verified — a malformed, empty, or `model-run`
+set never is) also carries the additive
 `input_verified_note: "declared_hash_unbound"`, so a declared-but-never-
 checked hash is visible in the rendered report instead of reading as
 absent. This is purely additive —
