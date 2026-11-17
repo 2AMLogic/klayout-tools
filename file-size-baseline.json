@@ -160,10 +160,6 @@
       "lines": 627
     },
     {
-      "path": "src/klayout_tools/_paths.py",
-      "lines": 526
-    },
-    {
       "path": "src/klayout_tools/_provenance.py",
       "lines": 991
     },
@@ -473,7 +469,7 @@
     },
     {
       "path": "src/klayout_tools/op_sanity.py",
-      "lines": 1844
+      "lines": 1836
     },
     {
       "path": "src/klayout_tools/parasitic_integrity.py",
@@ -501,7 +497,7 @@
     },
     {
       "path": "src/klayout_tools/pex.py",
-      "lines": 3716
+      "lines": 3705
     },
     {
       "path": "src/klayout_tools/place_and_route.py",
@@ -649,7 +645,7 @@
     },
     {
       "path": "src/klayout_tools/spice_flatten.py",
-      "lines": 798
+      "lines": 796
     },
     {
       "path": "src/klayout_tools/substrate_resistance.py",
