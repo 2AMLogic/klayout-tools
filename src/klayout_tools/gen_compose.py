@@ -4832,12 +4832,10 @@ def _write_composed_gds(
     routed metal. Returns ``(dbu, rescale_warnings)`` -- ``dbu`` is the
     composed layout's own dbu (:func:`compose` echoes it as the response's
     ``dbu_um``, issue #1496), resolved as the PDK's required stream dbu when
-    ``required_output_dbu_um`` is given (issue #5721: the family's
-    *declared* requirement only,
-    :func:`~klayout_tools.pdk_output_dbu.required_stream_dbu` -- 0.001 for gf180mcu
-    even though every gf180mcu block's own stream is finer; ``None`` for
-    every family with no declared entry, e.g. sky130), else the
-    *finest* dbu among all blocks (issue #1514); ``rescale_warnings``
+    ``required_output_dbu_um`` is given (issue #5721: the family's *declared*
+    requirement only, :func:`~klayout_tools.pdk_output_dbu.required_stream_dbu`
+    -- 0.001 for gf180mcu, ``None`` for every family with no declared entry),
+    else the *finest* dbu among all blocks (issue #1514); ``rescale_warnings``
     is one string per block whose own dbu differed and was rescaled onto it,
     which :func:`compose` folds into the response's top-level ``warnings``.
 
