@@ -437,7 +437,7 @@
     },
     {
       "path": "src/klayout_tools/lvs_runset.py",
-      "lines": 977
+      "lines": 774
     },
     {
       "path": "src/klayout_tools/macros.py",
@@ -577,7 +577,7 @@
     },
     {
       "path": "src/klayout_tools/signoff_attest.py",
-      "lines": 1172
+      "lines": 1168
     },
     {
       "path": "src/klayout_tools/signoff_generator_batch.py",
@@ -918,10 +918,6 @@
     {
       "path": "tests/test_lvs_device_provenance.py",
       "lines": 1398
-    },
-    {
-      "path": "tests/test_lvs_klayout_runset.py",
-      "lines": 576
     },
     {
       "path": "tests/test_lvs_magic_oracle.py",
