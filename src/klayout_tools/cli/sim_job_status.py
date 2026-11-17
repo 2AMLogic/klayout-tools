@@ -16,6 +16,8 @@ from ..sim_batch_async import read_job_status
 from .output import EXIT_USAGE_ERROR, emit_error, emit_success
 from .sim_job_text import _print_job_status_text
 
+EXIT_PASS = 0
+
 
 def _run_job_status(args: argparse.Namespace) -> int:
     """``klt sim [REQUEST] --job-status JOB_ID``: one state read (issue #3073).
@@ -52,4 +54,4 @@ def _run_job_status(args: argparse.Namespace) -> int:
     except SimError as exc:
         return emit_error("sim", str(exc), args.format, code=exc.code)
     emit_success(status, args.format, _print_job_status_text)
-    return 0
+    return EXIT_PASS
