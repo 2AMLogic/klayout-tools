@@ -2173,7 +2173,7 @@ live re-measurement above.
 | `power.connects[].max_columns` | integer \| omitted | → `add_pdn_connect -max_columns`. Positive integer when given. |
 | `power.connects[].ongrid` | array\<string\> \| omitted | → `add_pdn_connect -ongrid`. Non-empty list of layer names when given. |
 | `power.connects[].split_cuts` | object \| omitted | → `add_pdn_connect -split_cuts`. `{ layer: string, width_um: positive number }`, both required together when given. |
-| `constraints.clock_port` / `.clock_period_ns` | string / number | Clock port name + target period (ns). Required once `target_stage` reaches `"place"` or later — stages beyond floorplan have no meaning without a clock. **Virtual clock** (issue #4913, additive): `clock_period_ns` *without* `clock_port` defines a port-less clock (`create_clock -name klt_virtual_clk -period P`) for purely combinational blocks; `input_delay_ns`/`output_delay_ns` then apply to every input/output, so slack is the real input-to-output budget (`period - in - out`) and `timing_status` is `constrained`. CTS is skipped (no registers). `clock_port` without `clock_period_ns`, or a non-positive period, is still an error. |
+| `constraints.clock_port` / `.clock_period_ns` | string / number | Clock port name + target period (ns). Optional at every stage. **Unconstrained run** (issue #5672, additive): with neither field, `place`/`cts`/`route` still run — no `create_clock` is emitted, the timing-driven passes `repair_design` and `repair_timing` (`place`) and `clock_tree_synthesis` and `repair_timing -hold` (`cts`) are skipped, any clock net is routed as an ordinary signal net, `timing_status` is `"unconstrained"`, and `warnings` names every skipped pass. This lets a timing-free (structural) standard-cell Liberty reach routing; a caller who merely *forgot* the period gets the same unoptimised result, hence the warning. **Virtual clock** (issue #4913, additive): `clock_period_ns` *without* `clock_port` defines a port-less clock (`create_clock -name klt_virtual_clk -period P`) for purely combinational blocks; `input_delay_ns`/`output_delay_ns` then apply to every input/output, so slack is the real input-to-output budget (`period - in - out`) and `timing_status` is `constrained`. CTS is skipped (no registers). `clock_port` without `clock_period_ns`, or a non-positive period, is still an error. |
 | `constraints.max_transition_ns` | number \| omitted | Additive field (issue #1709) → `set_max_transition <ns> [current_design]`. Positive number when given. Emitted right after the clock constraint (`create_clock`), before `repair_design`/`repair_timing`, aiming that already-generated optimiser at a caller-given max-slew target instead of only whatever limit the resolved liberty deck declares. Omitted (the default) emits no `set_max_transition` line, byte-identical to this command's behavior before this field existed. |
 | `constraints.max_capacitance_pf` | number \| omitted | Additive field (issue #1709) → `set_max_capacitance <pf> [current_design]`. Positive number when given; same emission point and omitted-default behavior as `max_transition_ns` above. |
 | `constraints.max_fanout` | number \| omitted | Additive field (issue #1709) → `set_max_fanout <n> [current_design]`. Positive number when given; same emission point and omitted-default behavior as `max_transition_ns` above. Useful for standard-cell libraries that declare no fanout limit of their own (`default_max_fanout`/per-pin `max_fanout` absent from the liberty), where `repair_design` would otherwise have nothing to aim at for fanout. Note the response reports **no** fanout violation count to go with it — see "Design-rule-check verdict" for the `sta::max_fanout_violation_count` SIGSEGV that rules one out. |
@@ -3043,6 +3043,18 @@ edge grids. Measured result: zero `V4.M5.AUX.2`, `M4.AUX.1`, `M4.AUX.2`,
 `M4.W.3`, `M5.AUX.1`, `M6.AUX.1`. **Not deck-clean:** the tech LEF's wide
 `V4` bar has zero `M4` enclosure, so `V4.M4.EN.1` (~370) and `V4.M5.EN.2`
 (~13) remain, plus 1-2 `M5.W.3`; no existing request field changes that.
+At block scale `M3.S.2` is a further known residual (issue #6030): ~15
+markers per ~10^3 `M2`->`M5` crossings, measured at klayout-tools 0.9.2 (a
+count that scales with block size, not a fixed number). They sit on
+`pdngen`'s own `M2`->`M5` stub patches, not on router metal, where two stack
+stubs can land closer than the deck's 25 nm tip-to-side `M3` spacing
+(`M3.S.2`, Table 3.12.1); they are report-only.
+No `power.connects[]` field moves them: `max_columns` is already minimal and
+is across-track, `ongrid {M3 M4}` is the recipe's purpose (dropping it
+re-introduces the families above), `split_cuts` is measured DRC-dirty on
+gf180mcu (issue #4301), and the stub patch shape comes from the tech LEF.
+This is an upstream
+OpenROAD `pdngen` limitation; the preset is unchanged here.
 `pdngen` offsets are core-origin relative: the edge-grid result was measured
 with core origin 0.96 um, and other origins can leave `M5.AUX.1`/`M6.AUX.1`
 hits (adjust `power.straps` explicitly in that case).
