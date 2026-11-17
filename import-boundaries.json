@@ -673,6 +673,7 @@
         "klayout_tools._check_result",
         "klayout_tools._devices",
         "klayout_tools._digest",
+        "klayout_tools._engine_proc",
         "klayout_tools._git_tracked",
         "klayout_tools._jsongz",
         "klayout_tools._jsonnum",
