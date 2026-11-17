@@ -728,6 +728,8 @@
         "klayout_tools.signoff_attest",
         "klayout_tools.signoff_attest_build",
         "klayout_tools.signoff_attest_carry",
+        "klayout_tools.signoff_attest_derived",
+        "klayout_tools.signoff_attest_disclosure",
         "klayout_tools.signoff_attest_drift",
         "klayout_tools.signoff_attest_input",
         "klayout_tools.signoff_attest_item9",
@@ -750,6 +752,7 @@
         "klayout_tools.signoff_output",
         "klayout_tools.signoff_power_delivery",
         "klayout_tools.signoff_power_delivery_substrate",
+        "klayout_tools.signoff_records",
         "klayout_tools.signoff_runset",
         "klayout_tools.signoff_sta_constraints",
         "klayout_tools.signoff_yield_disclosure"

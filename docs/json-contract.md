@@ -810,6 +810,26 @@ a CI log names the file that moved without a second lookup — the index alone
 is not even stable, since file-presence checks are sorted by path. See
 [`docs/cli/signoff.md`](cli/signoff.md)'s "CI usage: `--check`".
 
+Issue #5945 adds **record format 2** for the inventory-driven `--attest` items
+(1, 8, 9, 10), opt in with `--records FILE` (additive; classic input and output
+are byte-for-byte unchanged). Committed evidence splits in two: an NDJSON records
+file — one line per covered file, sorted by UTF-8 path bytes,
+`{"path": str, "role": str, "sha256": <64 hex>}` plus, for an item-1 derived
+artifact, `"sources": {path: <64 hex>}` — and the generic envelope with
+`attestation.record_format: 2`, `provenance.input.records: {"path": {"path",
+"scope": "repo"}}`, and `provenance.input.content_hash` equal to the inventory's
+hash (the manifest pin). In that committed envelope `summary` carries no counts,
+`attestation.check_count`/`passed_count` are absent and `attestation.checks[]`
+holds no `check: "present"` entries; the live `--attest`/`--check` output still
+carries all of them, plus `records: {path, lines[]}`. `--check` adds
+`drift[]` entries `records.<path>.{sha256,role,sources}` (with `check: {role,
+path}`) for changed, missing and extra lines, and `records.<records path>` for an
+unreadable or non-canonical file. The manifest grader re-hashes every recorded
+file (`artifact_binding.members[]`, `status` `verified`/`stale`/`unverifiable`)
+and echoes `artifact_binding.attestation.record_format`; `check_count` and
+`passed_count` there are `null`. See [`docs/cli/signoff.md`](cli/signoff.md)'s
+"Record format 2".
+
 Issue #5463 adds two more additive, optional fields on the same principle (no
 `schema_version` bump; absent they change nothing): `documented_argv` on an
 item-9 `cold_start` in an attestation inventory — the full invocation that

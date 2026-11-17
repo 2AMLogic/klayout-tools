@@ -573,11 +573,11 @@
     },
     {
       "path": "src/klayout_tools/signoff.py",
-      "lines": 7314
+      "lines": 7240
     },
     {
       "path": "src/klayout_tools/signoff_attest.py",
-      "lines": 1172
+      "lines": 1094
     },
     {
       "path": "src/klayout_tools/signoff_generator_batch.py",
@@ -853,7 +853,7 @@
     },
     {
       "path": "tests/test_functional_verification.py",
-      "lines": 6588
+      "lines": 6589
     },
     {
       "path": "tests/test_functional_verification_identity_contract.py",

@@ -66,6 +66,7 @@ def non_attest_problem(
             ("--generator", "generator"),
             ("--regenerated-hash", "regenerated_hash"),
             ("--skip-local-only", "skip_local_only"),
+            ("--records", "records"),
             ("--require-build-match", "require_build_match"),
         )
         if getattr(args, attr, None)
@@ -73,7 +74,8 @@ def non_attest_problem(
     if stray or getattr(args, "hash_kind", None) is not None:
         return (
             "--inventory/--input/--generator/--regenerated-hash/"
-            "--hash-kind/--skip-local-only/--require-build-match only apply "
+            "--hash-kind/--skip-local-only/--require-build-match/--records "
+            "only apply "
             "to --attest"
         )
     output = getattr(args, "output", None)

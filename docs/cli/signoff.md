@@ -1864,6 +1864,52 @@ member is named in `detail.artifact_binding.members`) without running
 > evidence `content_hash` to the new `provenance.input.content_hash`; the old
 > inventory-only hash now grades `stale_evidence`.
 
+#### Record format 2: evidence git can merge (`--records`, issue #5945)
+
+The classic envelope rewrites aggregates (`summary`, `check_count`,
+`passed_count`, the positional `checks[]` array, item 1's combined
+`provenance.input.content_hash`) whenever *any* covered file changes, so two PRs
+that touch different files still conflict. Opt in per item with
+`--records FILE` (items 1, 8, 9, 10):
+
+```bash
+klt signoff --attest 1 --inventory attest/item1.json \
+    --records attest/item1.files.ndjson -o evidence/item1.json
+klt signoff --attest 1 --inventory attest/item1.json --check evidence/item1.json
+```
+
+- **`FILE` (the records file)** is NDJSON: one line per covered file, sorted by
+  UTF-8 path bytes, `{"path", "role", "sha256"}` (a derived artifact's line also
+  carries `"sources": {path: sha256}`). A PR that changes a covered file changes
+  that file's line only, so PRs on disjoint files merge with plain `git merge`
+  (two changed lines need at least one unchanged line between them; changing the
+  *same* file in two PRs still conflicts, on purpose).
+- **The envelope** keeps the judgment part and drops everything a content edit
+  rewrites: no `summary` counts, no `check_count`/`passed_count`, no per-file
+  `present` checks, and `provenance.input.content_hash` is the hash of the
+  **inventory** (the manifest pin), with `provenance.input.records` naming the
+  records file and `attestation.record_format` set to `2`. The inventory is the
+  append-only judgment record: what was audited, by which commands, against
+  which pins. The counts and summary are recomputed and shown in every
+  `--attest`/`--check` live output, never committed.
+- **A derived artifact** declares `"recorded": {"sources": ["design/ota.sch"]}`
+  (which sources it was built from) instead of a hash map; the hashes are
+  written to its record line, so renewing a source renews the line.
+  A hash map in the inventory is refused with `--records`.
+- **The gate is unchanged.** `--check` detects the format from the committed
+  envelope and exits `3` on a changed, missing, extra or non-canonical record
+  line (`drift[].field` is `records.<path>.sha256`, with `check: {role, path}`),
+  on any other envelope drift, or on a failing check. Renew a line by re-running
+  `--attest`. In `klt signoff --manifest`, every recorded file is re-hashed:
+  a changed one grades `stale_evidence`, a missing one (or an unreadable,
+  malformed or empty records file) `unverifiable_provenance`. The grader does not
+  know which files an inventory *should* cover, so completeness (a dropped line)
+  is `--check`'s job -- keep `--check` in CI. Changing the inventory still turns
+  the pin stale.
+
+Classic-format envelopes keep working unchanged until they are converted
+(`--check` reads either format).
+
 #### Item 10: what belongs in a hygiene inventory, and who re-attests (issue #4839)
 
 Every `hygiene` path is hashed as raw bytes (`sha256-raw-bytes`) and bound

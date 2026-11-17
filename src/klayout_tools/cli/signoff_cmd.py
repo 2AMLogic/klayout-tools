@@ -129,11 +129,11 @@ from ..signoff import (
     check_tier_report,
     describe_grader,
 )
-from ..signoff_attest import STREAM_ATTESTABLE_ITEM, write_attestation
+from ..signoff_attest import STREAM_ATTESTABLE_ITEM
 from ..signoff_attest_build import attach_build_drift, build_drift_line
 from ..signoff_attest_carry import compute_attestation as _compute_attestation
 from ..signoff_attest_carry import flag_problem as _skip_local_only_problem
-from ..signoff_attest_carry import skip_lines
+from ..signoff_attest_carry import skip_lines, write_result
 from ..signoff_attest_input import input_line, with_entry
 from ..signoff_attest_live import attach_live_fields
 from ..signoff_attest_text import attestation_check_line as _attestation_check_line
@@ -353,10 +353,10 @@ def _run_attest(
         ok = result["status"] == "match" and result["fresh_status"] == "pass"
         return EXIT_PASS if ok else EXIT_FAIL
 
-    if result["status"] == "pass" and output:
+    records = getattr(args, "records", None)
+    if result["status"] == "pass" and (output or records):
         try:
-            envelope = {k: v for k, v in result.items() if k != "skipped_checks"}
-            write_attestation(envelope, output)
+            write_result(result, output, records)
         except OSError as exc:
             return emit_error(
                 "signoff", f"could not write --output '{output}': {exc}", args.format

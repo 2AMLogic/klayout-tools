@@ -26,7 +26,7 @@ envelopes and check dicts it is handed -- so both that module and
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from . import signoff_attest_item9 as item9
@@ -121,12 +121,16 @@ def annotate_check_drift(
 
 
 def drift_result(
-    committed_path: str, committed: dict[str, Any], fresh: dict[str, Any]
+    committed_path: str,
+    committed: dict[str, Any],
+    fresh: dict[str, Any],
+    view: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """The ``--attest --check`` response: ``fresh`` diffed against the
     committed envelope, with ``skipped_checks`` and ``fresh_status`` beside
     it and every check-scoped ``drift`` entry annotated by
-    :func:`annotate_check_drift`."""
+    :func:`annotate_check_drift`. ``view`` (record format 2) maps ``fresh`` to
+    the part of it that is committed, which is what gets diffed."""
     # ``skipped`` marks a local_only check this run did not execute; its
     # (carried-through) outcome is the committed one, so it is reported beside
     # the diff rather than as a difference from the committed envelope.
@@ -136,14 +140,16 @@ def drift_result(
             skipped.append(
                 {key: check[key] for key in SKIPPED_CHECK_KEYS if key in check}
             )
+    diffed = fresh if view is None else view(fresh)
     result = build_rerun_result(
         report_path=committed_path,
         committed=committed,
         fresh=fresh,
         exclude=VOLATILE_ATTESTATION_PATHS,
+        fresh_for_diff=diffed,
         mode="check",
     )
-    annotate_check_drift(result["drift"], fresh["attestation"]["checks"])
+    annotate_check_drift(result["drift"], diffed["attestation"]["checks"])
     fresh_payload = result.pop("fresh")
     result["fresh_status"] = fresh_payload["status"]
     result["skipped_checks"] = skipped

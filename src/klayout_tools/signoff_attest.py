@@ -58,13 +58,13 @@ import hashlib
 import json
 import math
 import os
-import re
 import subprocess
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from . import signoff_attest_item9 as item9
+from . import signoff_records as records_format
 from ._jsonnum import is_int, is_number
 from ._provenance import sha256_file
 from ._report_verify import load_committed_report
@@ -81,6 +81,7 @@ from .signoff import (
     _generic_item_binding_refusal,
     _reject_json_constant,
 )
+from .signoff_attest_derived import derived_freshness_check, validated_derived
 from .signoff_attest_drift import drift_result
 from .signoff_attest_input import input_binding
 
@@ -395,7 +396,11 @@ def _validated_command_checks(
 
 
 def _validated_inventory(
-    inventory: Mapping[str, Any], item: int, root: str, source: str
+    inventory: Mapping[str, Any],
+    item: int,
+    root: str,
+    source: str,
+    records: bool = False,
 ) -> dict[str, Any]:
     """Structurally validate ``inventory`` for ``item`` and return the
     normalised form the checks run against. Raises :class:`AttestationError`
@@ -411,8 +416,14 @@ def _validated_inventory(
     for field, _role in _PATH_LISTS[item]:
         normalized[field] = _path_list(inventory, field, root, seen)
     if item == 1:
-        normalized["derived"] = _validated_derived(
-            inventory, root, seen, set(normalized["sources"])
+        normalized["derived"] = validated_derived(
+            inventory,
+            root,
+            seen,
+            set(normalized["sources"]),
+            _normalize_repo_path,
+            _command_spec,
+            records,
         )
     elif item == CHARACTERIZATION_ITEM:
         normalized.update(_validated_characterization(inventory, root))
@@ -593,103 +604,6 @@ def _validated_corner_metrics(
     return result
 
 
-_HEX_DIGEST = re.compile(r"[0-9a-f]{64}")
-
-
-def _hex_digest(value: Any, field: str) -> str:
-    if not isinstance(value, str) or not _HEX_DIGEST.fullmatch(value):
-        raise AttestationError(
-            f"'{field}' must be a 64-character lowercase hex sha256 digest"
-        )
-    return value
-
-
-def _validated_recorded(
-    raw: Any, field: str, root: str, sources: set[str]
-) -> dict[str, Any]:
-    """Validate a ``derived[]`` entry's ``recorded`` freshness record: the
-    derived file's digest plus the digest of every source it was built from."""
-    if not isinstance(raw, Mapping):
-        raise AttestationError(f"'{field}' must be an object")
-    unknown = sorted(set(raw) - {"derived_sha256", "sources"})
-    if unknown:
-        raise AttestationError(f"'{field}' has unknown field(s): {', '.join(unknown)}")
-    derived_sha256 = _hex_digest(raw.get("derived_sha256"), f"{field}.derived_sha256")
-    recorded_sources = raw.get("sources")
-    if not isinstance(recorded_sources, Mapping) or not recorded_sources:
-        raise AttestationError(
-            f"'{field}.sources' must be a non-empty object mapping each source "
-            "path to its sha256 -- a hash of the artifact alone proves nothing "
-            "about the sources it was built from"
-        )
-    normalized: dict[str, str] = {}
-    for raw_path, digest in recorded_sources.items():
-        path = _normalize_repo_path(raw_path, f"{field}.sources", root)
-        if path not in sources:
-            raise AttestationError(
-                f"'{field}.sources' lists '{path}', which is not in the "
-                "inventory's top-level 'sources'"
-            )
-        if path in normalized:
-            raise AttestationError(f"'{field}.sources' lists '{path}' more than once")
-        normalized[path] = _hex_digest(digest, f"{field}.sources[{path}]")
-    return {"derived_sha256": derived_sha256, "sources": normalized}
-
-
-def _validated_derived(
-    inventory: Mapping[str, Any],
-    root: str,
-    seen: dict[str, str],
-    sources: set[str],
-) -> list[dict[str, Any]]:
-    derived = inventory.get("derived")
-    if not isinstance(derived, list) or not derived:
-        raise AttestationError(
-            "item 1 inventory must declare a non-empty 'derived' list -- the "
-            "netlist(s) generated from the sources, each with a freshness check"
-        )
-    entries = []
-    for index, raw in enumerate(derived):
-        field = f"derived[{index}]"
-        if not isinstance(raw, Mapping):
-            raise AttestationError(f"'{field}' must be an object")
-        unknown = sorted(set(raw) - {"path", "generator", "check", "recorded"})
-        if unknown:
-            raise AttestationError(
-                f"'{field}' has unknown field(s): {', '.join(unknown)}"
-            )
-        path = _normalize_repo_path(raw.get("path"), f"{field}.path", root)
-        if path in seen:
-            raise AttestationError(
-                f"path '{path}' is listed more than once (in '{seen[path]}' and "
-                f"'{field}') -- each inventoried file must appear exactly once"
-            )
-        seen[path] = field
-        generator = raw.get("generator")
-        if not isinstance(generator, str) or not generator:
-            raise AttestationError(
-                f"'{field}.generator' must name what produced the artifact "
-                '(e.g. "klt netlist")'
-            )
-        if ("check" in raw) == ("recorded" in raw):
-            raise AttestationError(
-                f"'{field}' must declare exactly one of 'check' (a command that "
-                "fails when the artifact is stale, e.g. klt netlist ... --check) "
-                "or 'recorded' (the derived file's and its sources' sha256 "
-                "digests) -- presence alone does not prove a derived artifact "
-                "is current"
-            )
-        entry: dict[str, Any] = {"path": path, "generator": generator}
-        if "check" in raw:
-            entry["check"] = _command_spec(raw["check"], f"{field}.check", root)
-        else:
-            entry["recorded"] = _validated_recorded(
-                raw["recorded"], f"{field}.recorded", root, sources
-            )
-        entries.append(entry)
-    return sorted(entries, key=lambda entry: entry["path"])
-
-
 # --------------------------------------------------------------------------- #
 # Checks
 # --------------------------------------------------------------------------- #
@@ -704,31 +618,6 @@ def _file_check(root: str, path: str, role: str) -> dict[str, Any]:
         "passed": digest is not None,
         "content_hash": f"sha256:{digest}" if digest is not None else None,
     }
-
-
-def _recorded_hash_check(root: str, entry: Mapping[str, Any]) -> dict[str, Any]:
-    """Compare the derived file and each recorded source against the digests
-    the inventory recorded; no command is run. ``mismatches`` names every
-    differing path with its expected and actual digest (``None`` = missing)."""
-    recorded = entry["recorded"]
-    expected = {entry["path"]: recorded["derived_sha256"], **recorded["sources"]}
-    mismatches = []
-    for path in sorted(expected):
-        actual = sha256_file(os.path.join(root, path))
-        if actual != expected[path]:
-            mismatches.append(
-                {"path": path, "expected": expected[path], "actual": actual}
-            )
-    check: dict[str, Any] = {
-        "check": "recorded_hash",
-        "role": "freshness",
-        "target": entry["path"],
-        "generator": entry["generator"],
-        "passed": not mismatches,
-    }
-    if mismatches:
-        check["mismatches"] = mismatches
-    return check
 
 
 # Bounded tail of a failing command's captured output (issue #4698). Held out
@@ -943,23 +832,6 @@ def _characterization_checks(
     return checks
 
 
-def _derived_freshness_check(
-    root: str,
-    entry: Mapping[str, Any],
-    command: Callable[..., dict[str, Any]],
-) -> dict[str, Any]:
-    """The freshness check for one item-1 ``derived`` entry: the recorded
-    hash comparison, or the entry's ``check`` command."""
-    if "recorded" in entry:
-        return _recorded_hash_check(root, entry)
-    return command(
-        entry["check"],
-        "freshness",
-        target=entry["path"],
-        generator=entry["generator"],
-    )
-
-
 def _audit_command_checks(
     specs: Sequence[Mapping[str, Any]],
     command: Callable[..., dict[str, Any]],
@@ -1000,7 +872,7 @@ def _run_checks(
         for entry in normalized["derived"]:
             checks.append(_file_check(root, entry["path"], "derived"))
         checks.extend(
-            _derived_freshness_check(root, entry, command)
+            derived_freshness_check(root, entry, command)
             for entry in normalized["derived"]
         )
     elif item == CHARACTERIZATION_ITEM:
@@ -1022,6 +894,7 @@ def build_attestation(
     item: int,
     inventory_path: str,
     committed_checks: Sequence[Mapping[str, Any]] | None = None,
+    records: str | None = None,
 ) -> dict[str, Any]:
     """``klt signoff --attest ITEM --inventory PATH``: run every check
     ``PATH`` declares for T1 item ``item`` and return the artifact-anchored
@@ -1035,7 +908,12 @@ def build_attestation(
 
     ``committed_checks`` is passed only by :func:`check_attestation`: it makes
     ``local_only`` commands skip (carrying the committed outcome, marked
-    ``skipped``) instead of run."""
+    ``skipped``) instead of run.
+
+    ``records`` (a filesystem path inside the repository) selects record
+    format 2 (:mod:`.signoff_records`): the result is the full envelope
+    (counts, every check) plus ``records.lines``, the per-file lines to write
+    there; the committed envelope is ``records_format.committed_view(result)``."""
     if item not in ATTESTABLE_ITEMS:
         raise AttestationError(
             f"--attest supports T1 items {', '.join(map(str, ATTESTABLE_ITEMS))}; "
@@ -1050,11 +928,17 @@ def build_attestation(
             "inventory paths are repository-relative"
         )
     inventory_rel = os.path.relpath(absolute, root).replace(os.sep, "/")
-    normalized = _validated_inventory(inventory, item, root, inventory_path)
+    records_rel = _records_rel(records, root, inventory_path)
+    normalized = _validated_inventory(
+        inventory, item, root, inventory_path, records_rel is not None
+    )
     checks = _run_checks(item, root, normalized, committed_checks)
     passed_count = sum(1 for check in checks if check["passed"])
     status = "pass" if passed_count == len(checks) else "fail"
     prov, digest = input_binding(item, root, normalized, inventory_rel, inventory_hash)
+    if records_rel is not None:
+        prov = records_format.input_binding(inventory_rel, inventory_hash, records_rel)
+        digest = inventory_hash
     envelope: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "kind": "generic",
@@ -1082,7 +966,24 @@ def build_attestation(
         },
     }
     _self_check(envelope, item, digest)
+    if records_rel is not None:
+        envelope["attestation"]["record_format"] = records_format.RECORD_FORMAT
+        envelope["records"] = {
+            "path": records_rel,
+            "lines": records_format.files_from_checks(
+                checks, normalized.get("derived", [])
+            ),
+        }
     return envelope
+
+
+def _records_rel(records: str | None, root: str, inventory_path: str) -> str | None:
+    if records is None:
+        return None
+    try:
+        return records_format.relative_path(records, root)
+    except ValueError as exc:
+        raise AttestationError(f"{exc} (inventory '{inventory_path}')") from exc
 
 
 def _self_check(envelope: Mapping[str, Any], item: int, content_hash: str) -> None:
@@ -1153,12 +1054,33 @@ def check_attestation(
     into ``fresh_status``, so a committed failure still fails the gate."""
     committed = _load_committed_attestation(committed_path)
     committed_checks = (committed.get("attestation") or {}).get("checks")
+    try:
+        records_rel = records_format.committed_records_ref(committed)
+    except ValueError as exc:
+        raise AttestationError(f"committed envelope '{committed_path}': {exc}") from exc
+    root = find_repo_root(os.path.dirname(os.path.realpath(inventory_path)))
+    records = os.path.join(root, records_rel) if root and records_rel else None
     fresh = build_attestation(
         item,
         inventory_path,
         committed_checks if isinstance(committed_checks, list) else [],
+        records,
     )
-    return drift_result(committed_path, committed, fresh)
+    if records is None or records_rel is None:
+        return drift_result(committed_path, committed, fresh)
+    result = drift_result(
+        committed_path, committed, fresh, records_format.committed_view
+    )
+    try:
+        with open(records, encoding="utf-8") as handle:
+            text: str | None = handle.read()
+    except (OSError, UnicodeDecodeError):
+        text = None
+    drift = records_format.diff_records(text, fresh["records"]["lines"], records_rel)
+    result["drift"].extend(drift)
+    if drift:
+        result["status"] = "drifted"
+    return result
 
 
 def _load_committed_attestation(committed_path: str) -> dict[str, Any]:
