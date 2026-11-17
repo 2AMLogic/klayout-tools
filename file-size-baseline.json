@@ -141,7 +141,7 @@
     },
     {
       "path": "scripts/fetch_ci_wall_clock_history.py",
-      "lines": 589
+      "lines": 563
     },
     {
       "path": "scripts/gallery_signals.py",
@@ -853,7 +853,7 @@
     },
     {
       "path": "tests/test_functional_verification.py",
-      "lines": 6588
+      "lines": 6589
     },
     {
       "path": "tests/test_functional_verification_identity_contract.py",
