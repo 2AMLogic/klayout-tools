@@ -234,7 +234,12 @@ from . import env_provenance
 from . import macros as macro_spec
 from . import synthesize_timeout as ytimeout
 from ._jsonnum import is_int, is_number
-from ._paths import _load_request_json, _reject_unknown_keys, validate_request_shape
+from ._paths import (
+    _load_request_json,
+    _reject_unknown_keys,
+    _resolve_request_path,
+    validate_request_shape,
+)
 from ._provenance import (
     INPUT_ROLE_SOURCE,
     _combined_content_hash,
@@ -2046,7 +2051,12 @@ def _resolve_sources(sources: Any, request_dir: str) -> list[str]:
 
     resolved: list[str] = []
     for entry in sources:
-        path = entry if os.path.isabs(entry) else os.path.join(request_dir, entry)
+        path = _resolve_request_path(
+            entry,
+            request_dir,
+            error_cls=SynthesizeError,
+            field="request.sources entry",
+        )
         if not os.path.isfile(path):
             raise SynthesizeError(f"RTL source not found: {entry}")
         try:
@@ -4273,18 +4283,20 @@ def _compute_baseline(
         )
 
     if response_path is not None:
-        resolved = (
-            response_path
-            if os.path.isabs(response_path)
-            else os.path.join(request_dir, response_path)
+        resolved = _resolve_request_path(
+            response_path,
+            request_dir,
+            error_cls=SynthesizeError,
+            field="request.baseline.response_path",
         )
         baseline_metrics = _baseline_metrics_from_response_file(resolved)
         ref = ref or _baseline_ref_fallback(resolved, repo_root=repo_root)
     else:
-        resolved = (
-            netlist_path
-            if os.path.isabs(netlist_path)
-            else os.path.join(request_dir, netlist_path)
+        resolved = _resolve_request_path(
+            netlist_path,
+            request_dir,
+            error_cls=SynthesizeError,
+            field="request.baseline.netlist_path",
         )
         baseline_metrics = _baseline_metrics_from_netlist(
             resolved, liberty_path, hdl_toplevel, output_dir

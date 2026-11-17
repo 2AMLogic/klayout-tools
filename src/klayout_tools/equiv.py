@@ -55,7 +55,12 @@ import subprocess
 import time
 from typing import Any
 
-from ._paths import _load_request_json, resolve_tool_binary, validate_request_shape
+from ._paths import (
+    _load_request_json,
+    _resolve_request_path,
+    resolve_tool_binary,
+    validate_request_shape,
+)
 from ._paths import load_request_arg as _shared_load_request_arg
 from ._provenance import (
     INPUT_ROLE_SOURCE,
@@ -569,7 +574,12 @@ def _resolve_side(spec: Any, request_dir: str, label: str) -> dict[str, Any]:
 
     resolved: list[str] = []
     for entry in sources:
-        path = entry if os.path.isabs(entry) else os.path.join(request_dir, entry)
+        path = _resolve_request_path(
+            entry,
+            request_dir,
+            error_cls=EquivError,
+            field=f"request.{label}.sources entry",
+        )
         if not os.path.isfile(path):
             raise EquivError(f"{label} source not found: {entry}")
         try:
@@ -581,8 +591,11 @@ def _resolve_side(spec: Any, request_dir: str, label: str) -> dict[str, Any]:
 
     resolved_liberty = None
     if liberty is not None:
-        liberty_path = (
-            liberty if os.path.isabs(liberty) else os.path.join(request_dir, liberty)
+        liberty_path = _resolve_request_path(
+            liberty,
+            request_dir,
+            error_cls=EquivError,
+            field=f"request.{label}.liberty",
         )
         if not os.path.isfile(liberty_path):
             raise EquivError(f"{label} liberty file not found: {liberty}")

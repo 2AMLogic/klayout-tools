@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from ._paths import _resolve_request_path
 from ._provenance import sha256_file
 from ._report_verify import hash_check, load_committed_report, resolve_committed_path
 
@@ -30,10 +31,14 @@ def _err(message: str) -> Exception:
     return FunctionalVerificationError(message)
 
 
-def _request_relative(entry: str, request_dir: str) -> str:
-    """The one place a request-relative path is anchored (#5673 constraint)."""
+def _request_relative(entry: str, request_dir: str, field: str = "request path") -> str:
+    """The one place a request-relative path is anchored (#5673 constraint).
+
+    ``$VAR`` / ``~`` are expanded first (issue #5678), the same convention
+    ``klt lvs`` / ``drc`` / ``extract`` / ``sim`` document.
+    """
     return os.path.abspath(
-        entry if os.path.isabs(entry) else os.path.join(request_dir, entry)
+        _resolve_request_path(entry, request_dir, error_cls=_err, field=field)
     )
 
 
@@ -55,7 +60,7 @@ def _resolve_sources(
 
     resolved: list[str] = []
     for entry in sources:
-        path = _request_relative(entry, request_dir)
+        path = _request_relative(entry, request_dir, "request.sources entry")
         if not os.path.isfile(path):
             raise _err(f"RTL source not found: {entry}")
         try:
@@ -105,7 +110,9 @@ def resolve_from_synthesize(
     if not has_from_synthesize(options):
         return None
     report_rel, netlist_rel = _validate_option(options["from_synthesize"])
-    report_path = _request_relative(report_rel, request_dir)
+    report_path = _request_relative(
+        report_rel, request_dir, "options.from_synthesize.report"
+    )
     report = load_committed_report(report_path, _err_cls())
     if "netlist_path" not in report:
         raise _err(
@@ -118,7 +125,11 @@ def resolve_from_synthesize(
             f"options.from_synthesize.report synthesized hdl_toplevel "
             f"{report_top!r}, but the request's hdl_toplevel is {hdl_toplevel!r}"
         )
-    override = _request_relative(netlist_rel, request_dir) if netlist_rel else None
+    override = (
+        _request_relative(netlist_rel, request_dir, "options.from_synthesize.netlist")
+        if netlist_rel
+        else None
+    )
     netlist = resolve_committed_path(
         report["netlist_path"], report_path=report_path, override=override
     )

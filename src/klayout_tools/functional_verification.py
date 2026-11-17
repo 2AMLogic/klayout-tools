@@ -210,7 +210,7 @@ from typing import Any
 
 from ._artifact_envelope import hashed_path_envelope as _hashed_path_envelope
 from ._jsonnum import is_int
-from ._paths import _load_request_json
+from ._paths import _load_request_json, _resolve_request_path
 from ._paths import load_request_arg as _shared_load_request_arg
 from ._paths import validate_request_shape as _shared_validate_request_shape
 from ._provenance import sha256_file
@@ -759,10 +759,11 @@ def _resolve_testbench(
             raise FunctionalVerificationError(
                 "request.testbench.search_path must be a non-empty string when given"
             )
-        search_dir = (
-            search_path
-            if os.path.isabs(search_path)
-            else os.path.join(request_dir, search_path)
+        search_dir = _resolve_request_path(
+            search_path,
+            request_dir,
+            error_cls=FunctionalVerificationError,
+            field="request.testbench.search_path",
         )
     else:
         search_dir = request_dir
@@ -976,8 +977,11 @@ def _resolve_initial_state(
             f"options.initial_state requires engine 'icarus' -- engine "
             f"'{engine}' cannot force cell-model pins hierarchically"
         )
-    netlist_path = (
-        netlist if os.path.isabs(netlist) else os.path.join(request_dir, netlist)
+    netlist_path = _resolve_request_path(
+        netlist,
+        request_dir,
+        error_cls=FunctionalVerificationError,
+        field="request.options.initial_state.netlist",
     )
     if not os.path.isfile(netlist_path):
         raise FunctionalVerificationError(
@@ -1272,7 +1276,12 @@ def _resolve_source_defines(
                 "request.options.source_defines keys must be non-empty strings"
             )
         path = os.path.abspath(
-            key if os.path.isabs(key) else os.path.join(request_dir, key)
+            _resolve_request_path(
+                key,
+                request_dir,
+                error_cls=FunctionalVerificationError,
+                field="request.options.source_defines key",
+            )
         )
         if path not in sources:
             raise FunctionalVerificationError(
@@ -1393,7 +1402,12 @@ def _resolve_includes(includes: Any, request_dir: str) -> list[str]:
 
     resolved: list[str] = []
     for entry in includes:
-        path = entry if os.path.isabs(entry) else os.path.join(request_dir, entry)
+        path = _resolve_request_path(
+            entry,
+            request_dir,
+            error_cls=FunctionalVerificationError,
+            field="request.options.includes entry",
+        )
         if not os.path.isdir(path):
             raise FunctionalVerificationError(f"include directory not found: {entry}")
         resolved.append(os.path.abspath(path))

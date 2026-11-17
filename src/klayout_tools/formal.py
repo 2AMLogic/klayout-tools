@@ -39,8 +39,8 @@ import subprocess
 import time
 from typing import Any
 
+from ._paths import _resolve_request_path, resolve_tool_binary, validate_request_shape
 from ._paths import load_request_arg as _shared_load_request_arg
-from ._paths import resolve_tool_binary, validate_request_shape
 from ._provenance import (
     INPUT_ROLE_SOURCE,
     build_provenance,
@@ -343,7 +343,9 @@ def _resolve_optional_file(value: Any, request_dir: str, label: str) -> str | No
         return None
     if not isinstance(value, str) or not value:
         raise FormalError(f"request.{label} must be a non-empty string when given")
-    path = value if os.path.isabs(value) else os.path.join(request_dir, value)
+    path = _resolve_request_path(
+        value, request_dir, error_cls=FormalError, field=f"request.{label}"
+    )
     if not os.path.isfile(path):
         raise FormalError(f"{label} file not found: {value}")
     return os.path.abspath(path)
@@ -358,7 +360,12 @@ def _resolve_sources(value: Any, request_dir: str) -> list[str]:
         raise FormalError("request.sources must be an array of non-empty strings")
     resolved = []
     for entry in value:
-        path = entry if os.path.isabs(entry) else os.path.join(request_dir, entry)
+        path = _resolve_request_path(
+            entry,
+            request_dir,
+            error_cls=FormalError,
+            field="request.sources entry",
+        )
         if not os.path.isfile(path):
             raise FormalError(f"source not found: {entry}")
         resolved.append(os.path.abspath(path))

@@ -30,6 +30,48 @@ def _resolve_relative(path: str, base_dir: str) -> str:
     return os.path.join(base_dir, expanded)
 
 
+#: Mirrors ``posixpath.expandvars``'s variable syntax (``$NAME`` / ``${NAME}``).
+_ENV_VAR_REF_RE = re.compile(r"\$(\w+|\{[^}]*\})")
+
+
+def _unset_env_vars(path: str) -> list[str]:
+    """Names of the ``$VAR`` / ``${VAR}`` references in ``path`` that are unset.
+
+    ``os.path.expandvars`` leaves an unset reference as the literal text, so
+    without this a path like ``$PDK_ROOT/x.v`` with ``PDK_ROOT`` unset would
+    surface as a bare "file not found" that reads like a missing file rather
+    than an unexported variable (issue #5678).
+    """
+    unset: list[str] = []
+    for match in _ENV_VAR_REF_RE.finditer(path):
+        name = match.group(1)
+        if name.startswith("{"):
+            name = name[1:-1]
+        if name and name not in os.environ and name not in unset:
+            unset.append(name)
+    return unset
+
+
+def _resolve_request_path(
+    path: str,
+    base_dir: str,
+    *,
+    error_cls: Callable[[str], Exception],
+    field: str,
+) -> str:
+    """:func:`_resolve_relative`, but an unset ``$VAR`` in ``path`` raises
+    ``error_cls(message)`` naming the variable (and ``field``) instead of passing the
+    literal ``$VAR/...`` through to a misleading "not found" error."""
+    unset = _unset_env_vars(path)
+    if unset:
+        names = ", ".join(f"${name}" for name in unset)
+        raise error_cls(
+            f"{field} '{path}' references unset environment variable "
+            f"{names}; export it before running or use a literal path"
+        )
+    return _resolve_relative(path, base_dir)
+
+
 def resolve_tool_binary(
     tool_label: str,
     values: Mapping[str, Any],
