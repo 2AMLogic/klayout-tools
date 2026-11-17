@@ -60,6 +60,7 @@ options:
   --pdk PDK variant to resolve (e.g. sky130A); overrides $PDK
   --pdk-root PDK_ROOT explicit install root; overrides $PDK_ROOT and the search order
   --expect-version STAMP_OR_SHA assert the installed PDK identity: an open_pdks commit SHA (>= 7 hex) or SOURCES stamp, or a fetched-version string. Exit 6 (payload still emitted) on mismatch or unknown identity
+  --expect-bundle-sha256 SHA256 assert the install was provisioned from the bundle whose recorded sha256 this is (full 64-hex digest, compared exactly with the nearest .pdk-store.json; the stamp is trusted, the tree is not rehashed). Exit 6 (payload still emitted) on mismatch or unknown (no recorded sha256)
   --format {text,json} output format (default: text)
 
 --- klt pdk cells ---

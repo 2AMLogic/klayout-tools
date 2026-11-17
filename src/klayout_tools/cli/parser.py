@@ -92,6 +92,7 @@ from .parser_pex import add_pex_parser
 from .parser_sim import add_sim_parser
 from .parsers.components import add_components_parser
 from .parsers.extract import add_extract_parser
+from .pdk_expect import add_expect_bundle_arg, add_expect_version_arg
 
 
 def _add_format_arg(
@@ -194,21 +195,6 @@ def _add_pdk_args(
     if include_pdk:
         parser.add_argument("--pdk", default=None, help=pdk_help)
     parser.add_argument("--pdk-root", dest="pdk_root", default=None, help=pdk_root_help)
-
-
-def _add_expect_version_arg(parser: argparse.ArgumentParser) -> None:
-    """Register ``--expect-version`` on ``klt pdk find``/``check`` (issue #3810)."""
-    parser.add_argument(
-        "--expect-version",
-        dest="expect_version",
-        default=None,
-        metavar="STAMP_OR_SHA",
-        help=(
-            "assert the installed PDK identity: an open_pdks commit SHA "
-            "(>= 7 hex) or SOURCES stamp, or a fetched-version string. Exit 6 "
-            "(payload still emitted) on mismatch or unknown identity"
-        ),
-    )
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -2874,7 +2860,7 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
         pdk_help="variant to resolve (e.g. sky130A); overrides $PDK",
         pdk_root_help="explicit install root; overrides $PDK_ROOT and the search order",
     )
-    _add_expect_version_arg(find_parser)
+    add_expect_version_arg(find_parser)
     _add_format_arg(find_parser)
     find_parser.set_defaults(func=pdk_cmd.run_find)
 
@@ -2934,7 +2920,8 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
         pdk_help="variant to resolve (e.g. sky130A); overrides $PDK",
         pdk_root_help="explicit install root; overrides $PDK_ROOT and the search order",
     )
-    _add_expect_version_arg(check_parser)
+    add_expect_version_arg(check_parser)
+    add_expect_bundle_arg(check_parser)
     _add_format_arg(check_parser)
     check_parser.set_defaults(func=pdk_cmd.run_check)
 

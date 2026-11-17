@@ -63,6 +63,7 @@ from ..pdk_descriptor import ASSET_KEYS
 from ..pdk_pcell import PdkPCellError, list_pdk_pcells
 from ..pdk_stackup import PdkStackupError, stackup
 from .output import emit_error, emit_success, render_table
+from .pdk_expect import bundle_expectation, expectations_exit
 
 #: `klt pdk cells --supply` exit code when no library is compatible (ran
 #: fine, just no match) -- distinct from 1 (PdkNotFoundError) and 2 (argparse
@@ -91,25 +92,10 @@ EXIT_PCELL_UNAVAILABLE = 5
 #: `klt pdk find`/`check --expect-version` exit code when the installed
 #: identity is a `mismatch` or `unknown` (fail closed) against the caller's
 #: pin (issue #3810). The normal payload is still emitted. Lower codes win:
-#: `check`'s EXIT_BROKEN_SYMLINKS (4) is returned in preference. See
+#: `check`'s EXIT_BROKEN_SYMLINKS (4) is returned in preference. The same
+#: code serves `check --expect-bundle-sha256` (issue #5624). See
 #: docs/cli/pdk.md.
 EXIT_VERSION_MISMATCH = 6
-
-
-def _version_expectation_exit(report: dict) -> int:
-    """Exit code (0 or EXIT_VERSION_MISMATCH) for ``--expect-version``; on a
-    failure writes one stderr line naming both revisions."""
-    result = report.get("version_expectation")
-    if not result or result["status"] == "match":
-        return 0
-    installed = result["installed"]
-    print(
-        f"klt: PDK version expectation {result['status']}: expected "
-        f"{result['expected']!r}, installed "
-        f"{installed if installed is not None else 'unknown'!r}",
-        file=sys.stderr,
-    )
-    return EXIT_VERSION_MISMATCH
 
 
 def run_find(args: argparse.Namespace) -> int:
@@ -121,7 +107,8 @@ def run_find(args: argparse.Namespace) -> int:
         return emit_error("pdk find", str(exc), args.format)
 
     emit_success(report, args.format, _print_find_text)
-    return _version_expectation_exit(report)
+
+    return expectations_exit(report, EXIT_VERSION_MISMATCH)
 
 
 def run_list(args: argparse.Namespace) -> int:
@@ -148,9 +135,10 @@ def run_check(args: argparse.Namespace) -> int:
     except PdkNotFoundError as exc:
         return emit_error("pdk check", str(exc), args.format)
 
+    bundle_expectation(report, args.expect_bundle_sha256)
     emit_success(report, args.format, _print_check_text)
 
-    expectation_exit = _version_expectation_exit(report)
+    expectation_exit = expectations_exit(report, EXIT_VERSION_MISMATCH)
     if report["broken_symlinks"]:
         return EXIT_BROKEN_SYMLINKS
     return expectation_exit
@@ -288,6 +276,9 @@ def _print_compatibility_text(report: dict) -> None:
     expectation = report.get("version_expectation")
     if expectation:
         print(f"version_expectation: {expectation['status']}")
+    bundle = report.get("bundle_expectation")
+    if bundle:
+        print(f"bundle_expectation: {bundle['status']}")
     compat = report.get("compatibility")
     if not compat:
         return

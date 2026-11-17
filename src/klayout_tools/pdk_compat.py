@@ -24,6 +24,8 @@ import os
 import re
 from typing import Any
 
+from .pdk_store import PDK_STORE_MARKER, read_store_sha256, read_store_version
+
 #: Identity namespace: a lambdapdk *wrapper release* (the tag
 #: ``scripts/fetch-pdks.sh`` fetches). This is **not** an upstream ASAP7
 #: revision and must never be presented as one.
@@ -31,6 +33,12 @@ NS_LAMBDAPDK_RELEASE = "lambdapdk-release"
 
 #: Identity namespace: open_pdks ``SOURCES`` stamp (the ``version`` field).
 NS_OPEN_PDKS_SOURCES = "open_pdks-sources"
+
+#: Identity namespace: the bundle ``.pdk-store.json`` ``version`` (the
+#: upstream commit SHA an object-store provisioner installed from, issue
+#: #5624). A bare commit SHA compared against a store install resolves into
+#: this namespace; it is never conflated with an open_pdks ``SOURCES`` stamp.
+NS_PDK_STORE = "pdk-store-version"
 
 #: The open_pdks commit the fleet pins for sky130 and gf180mcu (issue #3427,
 #: epic #3420). The authoritative copy is ``pdks.families.*.open_pdks_commit``
@@ -105,6 +113,20 @@ def _open_pdks_equal(expected: str, installed: str) -> bool:
     return len(short) >= _MIN_SHORT_HASH and long_.startswith(short)
 
 
+_BARE_HEX = re.compile(r"[0-9a-fA-F]+")
+
+
+def _sha_equal(expected: str, installed: str) -> bool:
+    """Same commit SHA (both values fully hex, e.g. a store install's
+    ``.pdk-store.json`` ``version`` against a bare-hex pin); a short hash
+    (>= 7 hex, git's abbreviation floor) matches by prefix. Non-hex values
+    are compared exactly."""
+    if not (_BARE_HEX.fullmatch(expected) and _BARE_HEX.fullmatch(installed)):
+        return expected == installed
+    short, long_ = sorted((expected.lower(), installed.lower()), key=len)
+    return len(short) >= _MIN_SHORT_HASH and long_.startswith(short)
+
+
 def read_fetched_marker(variant_dir: str) -> str | None:
     """Return the stripped contents of the nearest :data:`LAMBDAPDK_MARKER`
     at ``variant_dir`` or up to :data:`_MARKER_SEARCH_DEPTH` parents, or
@@ -172,6 +194,14 @@ def read_installed_identity(
             {"namespace": namespace, "value": sources_version},
             "SOURCES",
         )
+    if namespace == NS_PDK_STORE:
+        value = read_store_version(variant_dir)
+        if value is None:
+            return None, None
+        return (
+            {"namespace": namespace, "value": value},
+            PDK_STORE_MARKER,
+        )
     return None, None
 
 
@@ -190,6 +220,8 @@ def compare_identities(
         return "unknown"
     if expected["namespace"] == NS_OPEN_PDKS_SOURCES:
         same = _open_pdks_equal(expected["value"], installed["value"])
+    elif expected["namespace"] == NS_PDK_STORE:
+        same = _sha_equal(expected["value"], installed["value"])
     else:
         same = expected["value"] == installed["value"]
     return "match" if same else "mismatch"
@@ -272,19 +304,30 @@ def check_expected_version(
     Shape: ``{"status": "match"|"mismatch"|"unknown", "expected": str,
     "installed": str | None}``. The installed identity is the open_pdks
     ``SOURCES`` stamp if present, else the lambdapdk ``.fetched-version``
-    marker. A bare hex SHA (>= 7 chars) or an ``open_pdks <sha>`` stamp is an
-    open_pdks identity; any other string is compared exactly in the installed
-    tree's own namespace. Differing namespaces and an unreadable installed
-    identity are ``unknown`` -- callers gating on this must fail closed.
+    marker, else the bundle ``.pdk-store.json`` ``version`` (issue #5624,
+    compared last so an install carrying a real ``SOURCES`` stamp is
+    unchanged). A bare hex SHA (>= 7 chars) is a commit pin: against a store
+    install it resolves into the store namespace (both values are commit
+    SHAs, matched by prefix), otherwise into the ``open_pdks <sha>`` stamp
+    namespace; an ``open_pdks <sha>`` stamp is always an open_pdks identity;
+    any other string is compared exactly in the installed tree's own
+    namespace. Differing namespaces and an unreadable installed identity
+    are ``unknown`` -- callers gating on this must fail closed.
     """
     installed: dict[str, str] | None = None
-    for namespace in (NS_OPEN_PDKS_SOURCES, NS_LAMBDAPDK_RELEASE):
+    for namespace in (NS_OPEN_PDKS_SOURCES, NS_LAMBDAPDK_RELEASE, NS_PDK_STORE):
         installed, _ = read_installed_identity(variant_dir, namespace, sources_version)
         if installed:
             break
     wanted = expected.strip()
     if re.fullmatch(rf"[0-9a-fA-F]{{{_MIN_SHORT_HASH},}}", wanted):
-        identity = {"namespace": NS_OPEN_PDKS_SOURCES, "value": f"open_pdks {wanted}"}
+        if installed and installed["namespace"] == NS_PDK_STORE:
+            identity = {"namespace": NS_PDK_STORE, "value": wanted}
+        else:
+            identity = {
+                "namespace": NS_OPEN_PDKS_SOURCES,
+                "value": f"open_pdks {wanted}",
+            }
     elif _OPEN_PDKS_STAMP.search(wanted):
         identity = {"namespace": NS_OPEN_PDKS_SOURCES, "value": wanted}
     else:
@@ -297,3 +340,30 @@ def check_expected_version(
         "expected": expected,
         "installed": installed["value"] if installed else None,
     }
+
+
+def check_expected_bundle(variant_dir: str, expected: str) -> dict[str, Any]:
+    """Compare a caller-supplied bundle sha256 pin (``klt pdk check
+    --expect-bundle-sha256``, issue #5624) against the ``sha256`` the nearest
+    ``.pdk-store.json`` records.
+
+    Shape: ``{"status": "match"|"mismatch"|"unknown", "expected": str,
+    "installed": str | None}`` -- the same shape as
+    :func:`check_expected_version`. The full 64-hex digest is compared
+    exactly. A stamp that is absent, unreadable, or records no string
+    ``sha256`` is ``unknown`` -- callers gating on this must fail closed.
+
+    This compares the install's *recorded* bundle hash: it trusts the stamp
+    and never rehashes the unpacked tree (an unpacked tree cannot be hashed
+    back to its tar bytes reproducibly). It therefore detects an install
+    provisioned from a bundle other than the one the pin names -- not
+    in-place corruption of already-unpacked files.
+    """
+    installed = read_store_sha256(variant_dir)
+    if installed is None:
+        status = "unknown"
+    elif installed == expected.strip():
+        status = "match"
+    else:
+        status = "mismatch"
+    return {"status": status, "expected": expected, "installed": installed}
