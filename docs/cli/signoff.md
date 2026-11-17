@@ -1637,7 +1637,9 @@ binding an author-written inventory leaves member edits undetected. Issue
 #3044 adds an optional `provenance.input.paths` for these: a non-empty list
 of members, each `{"path": <string | {"path", "scope": "repo"}>,
 "content_hash": "sha256:..."}`, with `path` resolved exactly as
-`provenance.input.path` is (including `--repo-root`).
+`provenance.input.path` is (including `--repo-root`). Members may also include
+an optional `role` key (`"stream"` or `"input"`) identifying an item-2 stream
+or declared generator input.
 
 ```json
 "input": {
@@ -2196,11 +2198,11 @@ attestation. `inputs` is a hash pin, not a rebuild: klt neither runs the
 generator nor verifies that the stream regenerates from the inputs (declare a
 `checks` command for that).
 
-`inputs` composes with repeated `--input`. It also composes with `--generator` /
-`--regenerated-hash` on a single stream, with one caveat: the grader compares
-`regenerated_hash` to the *bound* hash, which for an envelope that declares
-`inputs` is the set digest (`provenance.input.content_hash`), not the bare
-stream hash, and a `geometry` hash kind is unavailable for a set binding.
+`inputs` composes with repeated `--input`. For a single stream with
+`--generator` and `--regenerated-hash`, use `--hash-kind bytes` (the default)
+with the set digest (`provenance.input.content_hash`). A bare stream hash
+grades `unmet` / `stale_artifact`. `klt signoff --attest 2` refuses
+`--hash-kind geometry` with an inventory declaring `inputs` (exit `1`).
 
 > **Pin change.** An item-2 envelope that declares `inputs` reports
 > `provenance.input.paths` plus a set digest instead of a single
