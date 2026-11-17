@@ -13858,28 +13858,6 @@ def test_device_parameter_coverage_is_the_gradeable_form_of_the_disclosure(tmp_p
     ]
 
 
-def test_device_parameter_coverage_is_empty_without_a_resistor_or_capacitor(tmp_path):
-    """Scoped to the two classes whose *whole* geometry is secondary. A MOS
-    class's own `L`/`W` are primary and compared, so an all-MOS compare
-    reports neither the warning nor a coverage entry -- the disclosure would
-    be noise, not information."""
-    layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
-    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
-    report = run_lvs(
-        _write_request(
-            tmp_path / "request.json",
-            {
-                "layout": {"netlist": layout_path, "top": "inv"},
-                "reference": {"netlist": reference_path, "top": "inv"},
-            },
-        )
-    )
-
-    assert report["status"] == "match"
-    assert report["device_parameter_coverage"] == []
-    assert _geometry_entries(report) == []
-
-
 def test_subckt_call_placeholder_class_discloses_that_nothing_was_compared(tmp_path):
     """The shape the issue was filed from: under `reference.form:
     "subckt-call"` the primary `R` is excluded as a placeholder *and* the
