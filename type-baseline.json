@@ -2151,12 +2151,6 @@
       "count": 1
     },
     {
-      "file": "src/klayout_tools/lef_abstract.py",
-      "code": "misc",
-      "message": "List comprehension has incompatible type List[Box]; expected List[PolygonWithProperties]",
-      "count": 1
-    },
-    {
       "file": "src/klayout_tools/lvs.py",
       "code": "assignment",
       "message": "Incompatible types in assignment (expression has type \"dict[str, Any]\", variable has type \"str\")",
