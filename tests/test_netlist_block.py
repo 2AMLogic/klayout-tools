@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from klayout_tools.netlist import run_netlist
-from test_netlist import (  # noqa: F401
+from test_netlist import (
     _NETLIST_BODY,
     _STUB_NONZERO_EXIT,
     _TESTBENCH_SHAPED_BODY,

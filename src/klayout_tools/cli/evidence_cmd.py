@@ -171,7 +171,7 @@ def add_claims_parser(
     claims_parser.set_defaults(func=run_claims)
 
 
-def add_render_parser(subparsers, add_format_arg) -> None:  # type: ignore[no-untyped-def]
+def add_render_parser(subparsers, add_format_arg) -> None:
     """Register ``klt evidence render`` (kept out of ``cli/parser.py``, which
     is size-ratcheted)."""
     render_parser = subparsers.add_parser(
