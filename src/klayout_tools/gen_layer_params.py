@@ -1755,7 +1755,7 @@ _MOS_ARRAY_WELL_TAP_NET_LABEL = "WELL_TAP"
 #: ``diff_pair`` a second, opt-in way to draw the same GDS layer without
 #: renaming or otherwise disturbing ``esd_device``'s existing role.
 #:
-#: sky130's single supported flavour, ``"hvi"`` (issue #1912, unblocked by
+#: sky130's first supported flavour, ``"hvi"`` (issue #1912, unblocked by
 #: #1369's own citation), reuses ``klayout_tools.decks.sky130``'s curated
 #: *extraction* deck's ``EXTRACTION_DECK.mos_flavours``
 #: ``MOSFlavour(marker=(75, 20), flavour="hvi", ...)`` entry -- the same
@@ -1787,6 +1787,13 @@ _MOS_ARRAY_WELL_TAP_NET_LABEL = "WELL_TAP"
 #: :data:`WELL_ENCLOSURE_MARGIN_UM` box never needs the gf180mcu-only
 #: enlargement.
 #:
+#: ``"lvt"`` (issue #5607) draws ``lvtn.drawing`` (125/44) alone, the marker
+#: ``decks.sky130_lvt.lvt_mos_flavour`` keys the low-Vt device class on; it is
+#: valid for both ``flavor="nfet"`` and ``"pfet"`` (``pfet_01v8_lvt`` exists),
+#: so it is not in :data:`_NFET_ONLY_VOLTAGE_FLAVORS`. The ``"native"``/
+#: ``"nvt"`` names (issue #3600) draw hvi plus lvtn (see
+#: :data:`_PDK_VOLTAGE_FLAVOR_EXTRA_LAYERS`).
+#:
 #: ``sg13g2``/``sg13cmos5l`` (issue #1472) both share the single flavour name
 #: ``"hv"``, transcribed directly from the curated decks' own
 #: ``EXTRACTION_DECK.mos_flavours`` entry rather than a second, private layer
@@ -1812,6 +1819,12 @@ _PDK_VOLTAGE_FLAVOR_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         # :data:`_PDK_VOLTAGE_FLAVOR_EXTRA_LAYERS`.
         "native": (75, 20),
         "nvt": (75, 20),
+        # Low-Vt (issue #5607): lvtn alone -- ``decks.sky130_lvt.lvt_mos_flavour``
+        # keys ``lvt`` on lvtn.drawing with hvi/hvtp/areaid_ed/areaid_ce as
+        # exclusions. Unlike native/nvt there is no hvi half, no EXTRA_LAYERS
+        # entry, and (``sky130_fd_pr__pfet_01v8_lvt`` exists) no NMOS-only
+        # restriction.
+        "lvt": (125, 44),  # lvtn.drawing
     },
     "sg13g2": {
         "hv": (44, 0),  # ThickGateOx.drawing -- same citation as

@@ -14,6 +14,13 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added** (#5607, `klt gen` `mos_array`/`diff_pair`; no JSON field changes):
+  `params.voltage_flavor="lvt"` on `sky130` draws `lvtn.drawing` (125/44) alone
+  over the device footprint, for both `flavor="nfet"` and `"pfet"`, so
+  `klt extract --deck sky130` classifies the result as
+  `sky130_fd_pr__nfet_01v8_lvt` / `sky130_fd_pr__pfet_01v8_lvt`. Previously the
+  value resolved to no layer and only a `drc_hints.notes` entry flagged it.
+
 - **Fixed** (#5664, `klt lvs` `--engine klayout-runset`; no JSON field
   changes, `schema_version` stays 3): a `pin.unmatched` finding whose pin
   pair KLayout's own comparer graded `Match`/`MatchWithWarning` — a

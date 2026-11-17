@@ -180,7 +180,8 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Optional medium-voltage/thick-oxide device-class marker: "
                 "'' (default, no marker drawn) or a name the resolved PDK "
                 "family's role-layer table recognises (e.g. 'medium_voltage' "
-                "on gf180mcu, drawing its Dualgate marker). A name the family "
+                "on gf180mcu, drawing its Dualgate marker; 'lvt' on sky130, "
+                "drawing lvtn.drawing for the low-Vt device). A name the family "
                 "doesn't recognise draws nothing and is reported via "
                 "drc_hints.notes, never silently dropped",
                 default="",
