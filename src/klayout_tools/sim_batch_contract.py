@@ -135,6 +135,32 @@ REQUEST_FEATURE_MIN_RUNNER_VERSION: dict[str, str | None] = {
     # 0380f2a05 corners.temperature_param, after v0.7.0; first in v0.8.0
     # (`git tag --contains 0380f2a05`).
     "corners.temperature_param": "0.8.0",
+    # 8d03a5bcb corners.options solver-tolerance axis (#3125); first in
+    # v0.8.0 (`git tag --contains 8d03a5bcb`). An older runner ignores the
+    # axis and runs every rung at the default tolerance; the post-run
+    # options_unsupported_worker echo check stays (#5645).
+    "corners.options": "0.8.0",
+    # 5c3247e18 options.nodeset per-point initial-guess hints (#3036); first
+    # in v0.8.0 (`git tag --contains 5c3247e18`). An older runner ignores
+    # the hints and solves without them; the post-run
+    # nodeset_unsupported_worker echo check stays (#5645).
+    "options.nodeset": "0.8.0",
+    # f281896c1 options.initial_conditions .ic/uic start states (#3881);
+    # first in v0.8.0 (`git tag --contains f281896c1`). An older runner
+    # ignores the start state; the post-run
+    # initial_conditions_unsupported_worker echo check stays (#5645).
+    "options.initial_conditions": "0.8.0",
+    # cb9ee89dd analysis_overrides per-corner analysis windows (#4970);
+    # first in v0.9.1 (`git tag --contains cb9ee89dd`). An older runner
+    # ignores the rules and runs the request's own analysis.args everywhere;
+    # the post-run analysis_overrides_unsupported_worker echo check stays
+    # (#5645).
+    "analysis_overrides": "0.9.1",
+    # c00898fc5 analysis.op_check metastable-op detection (#5077); first in
+    # v0.9.2 (`git tag --contains c00898fc5` -> v0.9.2 only). An older
+    # runner grades the corner without the metastability check; the post-run
+    # op_check_unsupported_worker echo check stays (#5645).
+    "analysis.op_check": "0.9.2",
     # 8296828c options.osdi_preload (#2534); first in v0.7.0.
     "options.osdi_preload": "0.7.0",
     # 07440b8f options.stage_model_inputs (#2668); first in v0.7.0.
