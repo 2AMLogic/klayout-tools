@@ -1055,7 +1055,13 @@ shards and merges them exactly as the blocking sharded run does. The request
 must be the one submitted (a `request_sha256` or fingerprint mismatch is
 `error.code: "resume_fingerprint_mismatch"`). `--attach` only re-attaches: a
 shard whose job is gone is reported as lost, other shards are still reported,
-and nothing is resubmitted.
+and nothing is resubmitted. A map written by a `--hosts N` / `remote.hosts: N`
+run attaches the same way ([#5777](https://github.com/2AMLogic/klayout-tools/issues/5777)):
+pass the request (and `--hosts`, if it was given at submit) the shards were
+submitted from; the shard count is read from the map itself, so `--hosts` is not
+compared on attach, while a changed `remote.hosts` in the request file is a
+`request_sha256` mismatch naming `remote`. `--collect-partial` takes such a
+map too.
 
 **Worked example: a 135-unit grid** ([#4878](https://github.com/2AMLogic/klayout-tools/issues/4878)).
 A job is capped by the whole-job ceiling (`max_job_seconds`, default `3600`
@@ -1910,7 +1916,9 @@ which of those changed is not recoverable). A shard lost at the collect stage
 ends its `lost_shard` message with `[remote job <id>: finished|failed|timeout|
 running|unknown]`, the job's `status.json` state at that moment: `finished`
 means re-attaching can collect it, `unknown` means no status was readable.
-`--attach` still takes a single job id; recover a split request with
+A bare `--attach <job_id>` still takes a single job (`hosts = 1`) and is
+refused for `hosts != 1`; re-attach a sharded run (`--hosts N` or a
+`--max-units-per-job` split) with its `batch-shards.json`, or recover it with
 `--resume`.
 
 The dispatch-time fail-fast probe is skipped for `batch` —
@@ -8545,6 +8553,16 @@ preflight warning, attached at report assembly (after the corners finish), so
 it is present even when every corner passed. The entry has `severity: "warning"`,
 `code: "model_bin_range_preflight"`, and `instance`, `model`, `w_um`, `nf`
 fields. It never rejects the run; a `w` given as an expression is skipped.
+
+A `w` literal's unit follows the card it sits on (issue #5802). A literal that
+carries a **unit suffix** (`50u`, `100n`, `128u`) is read as written — an
+absolute SPICE quantity in metres, converted to µm for `w_um` — on every card
+kind. A **bare** literal — no suffix, including plain exponential notation
+(`13`, `150`, `1e-4`) — is read as micrometres on an `X` subckt call, the
+convention PDK device wrappers with micrometre parameters use (sky130: `W=13`
+is 13 µm, and the genuinely oversized `W=150` still warns at `w_um: 150`), and
+as metres on an `M` card (`w=1e-4` is 100 µm), matching SPICE's bare-number
+convention for primitive MOS cards.
 
 When ngspice's log matches this failure, `klt sim` re-scans the corner's own
 netlist for MOS-shaped instances (`M`/`X` cards) and picks out the one with

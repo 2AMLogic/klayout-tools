@@ -4107,7 +4107,7 @@ def _run_sim_corners(
             shard_fingerprint=_checkpoint_fingerprint(**fingerprint_inputs),
         )
 
-    if hosts == 1:
+    if hosts == 1 or attach_job_id is not None:  # #5777: attach never fans out
         # The exact pre-#376 call for the default case (no budget, no
         # resume, hosts=1, no fail-fast probe) -- `dispatch_points`/the four
         # new-since kwargs are identity no-ops then (`dispatch_points is
@@ -10991,15 +10991,15 @@ def _parse_plain_number(raw: str) -> float | None:
     return float(match.group(1))
 
 
-def _parse_width_um(raw: str) -> float | None:
+def _parse_width_um(raw: str, bare_is_um: bool = False) -> float | None:
     """Parse a SPICE ``W``/``L``-style geometry literal (``50u``, ``5e-5``,
-    ``100n``) to micrometres. Returns ``None`` for anything that is not a
-    plain numeric literal.
-    """
+    ``100n``) to micrometres (``None`` for non-numerics); ``bare_is_um``
+    reads a bare literal as micrometres (#5802 X-card PDK wrappers)."""
     match = spice_number.NUMBER_RE.match(raw.strip().strip("'\""))
     if match is None:
         return None
-    return float(match.group(1)) * spice_number.suffix_scale(match.group(2)) * 1e6
+    value = float(match.group(1)) * spice_number.suffix_scale(match.group(2))
+    return value * (1 if match.group(2) == "" and bare_is_um else 1e6)
 
 
 def _find_width_ceiling_culprit(
@@ -11029,7 +11029,7 @@ def _find_width_ceiling_culprit(
         w_raw = params.get("w") or params.get("W")
         if w_raw is None:
             continue
-        w_um = _parse_width_um(w_raw)
+        w_um = _parse_width_um(w_raw, bare_is_um=inst_name[:1].upper() == "X")
         if w_um is None:
             continue
         m_raw = params.get("m") or params.get("M")

@@ -31,6 +31,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   status (139) -- read "stderr traceback + 139" as a tool crash to report,
   never as a layout verdict. See `docs/cli/lvs.md`'s #5630 note for the
   size/shape record and the v0.9.0 -> v0.9.1 suspect analysis.
+- **`klt sim --attach <batch-shards.json>` accepts a map written by a
+  `--hosts N` / `remote.hosts: N` run** (#5777, 2026-11-17): `--attach` and
+  `--collect-partial` refused every `hosts != 1` request with "requires backend
+  'batch' with a single job", contradicting `--help`, and even once past that
+  gate a `hosts > 1` dispatch would have submitted a fresh fleet instead of
+  attaching. A shard map now attaches under any `hosts` (the shard count is read
+  from the map); a bare job id still requires `hosts = 1`. Additive: a call that
+  used to fail now succeeds.
 - **`klt sim --fail-fast-probe` reads the same `.spiceinit` as the corners it
   screens** (#6047, 2026-11-17): `_run_corner` pins the thread count by writing
   a run-directory `.spiceinit`, which *replaces* `$HOME/.spiceinit`, but the
@@ -179,6 +187,21 @@ not `klt --version`, if you need to detect this kind of drift. See
   `docs/json-contract.md` and carries no bump of its own. `--format text`
   still prints a path (`<outside repo>` for an external input), never the
   envelope object.
+- **Changed** (#5666, emission-affecting, **no** `schema_version` bump): a
+  `klt lvs` report from `engine: "klayout-runset"` now emits `layout` as the
+  committable `{path, scope}` envelope `env_provenance.repo_relative_path()`
+  builds from the **resolved** layout path — the same file
+  `environment.layout_sha256` hashes (`{"path": "<repo-relative POSIX path>",
+  "scope": "repo"}` inside the invoking repo, `{"path": null, "scope":
+  "external"}` outside) — not the request's bare-string echo. No bump:
+  `docs/cli/lvs.md` already documents `layout` as an unconditional object at
+  `schema_version: 3`, so the string was the non-compliance and this is a
+  compliance fix. `reference` is unchanged and still the documented
+  bare-string echo. A newly produced report for an out-of-repo layout reads
+  `{"path": null, "scope": "external"}` and needs an explicit `--layout` to
+  `--rerun` (already-committed old reports still resolve: the committed-path
+  reader accepts the bare string). `--format text` (the default) no longer
+  crashes with an `AttributeError` on a runset report.
 
 - **`klt synthesize`'s `netlist_sha256` no longer depends on the build root
   or on `run_id`** (#5594, 2026-11-15): Yosys names function-derived nets
