@@ -3081,7 +3081,9 @@ def run_functional_verification(
             # committed report is hash-pinnable and binds to the design inputs
             # rather than its own bytes. `pdk`/`deck` are always `null`: this
             # verb resolves neither.
-            "provenance": _input_provenance(provenance_sources, synth_block),
+            "provenance": _input_provenance(
+                provenance_sources, run_inputs.from_synthesize
+            ),
             "environment": {
                 "engine": engine,
                 "engine_version": _engine_version(engine),
