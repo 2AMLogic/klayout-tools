@@ -44,7 +44,10 @@ Four modes, one verb:
 5. **Attest T1 items 1, 8, 9 and 10** (`--attest {1,8,9,10} --inventory FILE`,
    issues #2844, #4311) — run the item-specific mechanical checks a versioned
    inventory declares and emit the artifact-anchored `generic` envelope
-   `--manifest` binds for that item. Its `status` is derived from the
+   `--manifest` binds for that item. Item 2 is attested from the committed
+   stream instead (`--attest 2 --input FILE`, issue #4188 — first ships in
+   `klt` 0.9.0 (PyPI); see "Minting above the grading pin" below). Its
+   `status` is derived from the
    checks, not asserted. Since this producer exists, items 1, 9 and 10
    **no longer accept native envelopes** (item 2 still does; item 8 still
    accepts a bare generic envelope — `--attest 8` is the tool-produced
@@ -69,6 +72,9 @@ klt signoff --fleet <fleet-manifest-file> --check <committed-report> [--tiers-do
 klt signoff --describe-grader [--format text|json]
 klt signoff --attest {1,8,9,10} --inventory <file> [-o <envelope> [--skip-local-only]] [--format text|json]
 klt signoff --attest {1,8,9,10} --inventory <file> --check <committed-envelope> [--format text|json]
+# The --attest 2 (stream) forms first ship in klt 0.9.0 (PyPI); 0.8.0 and earlier refuse --attest 2.
+klt signoff --attest 2 --input <stream> [--inventory <file>] [--generator CMD --regenerated-hash sha256:<hash>] [-o <envelope> [--skip-local-only]] [--format text|json]
+klt signoff --attest 2 --input <stream> --check <committed-envelope> [--format text|json]
 ```
 
 - `<file>...` — one or more paths to `klt drc`/`klt lvs`/`klt extract`/`klt
@@ -111,7 +117,10 @@ klt signoff --attest {1,8,9,10} --inventory <file> --check <committed-envelope> 
   `<file>...`/`--manifest`/`--fleet`/`--tiers-doc`/`--check`. See
   "Identifying the grading build" below.
 - `--attest` — **first ships in `klt` 0.8.0 (PyPI); not in 0.7.0 and earlier.** `1`, `8`, `9` or `10`: produce the attestation envelope for
-  that T1 item from `--inventory` (issues #2844, #4311). Any other value is a usage error
+  that T1 item from `--inventory` (issues #2844, #4311). `2`: attest a committed layout
+  stream from `--input` instead of an inventory (issue #4188) — **the item-2 form first
+  ships in `klt` 0.9.0 (PyPI)**; 0.8.0 and earlier refuse `--attest 2` as an invalid
+  choice (exit `2`). Any other value is a usage error
   (exit `2`). Mutually exclusive with
   `<file>...`/`--manifest`/`--fleet`/`--describe-grader`/`--tiers-doc`.
   With `--check <committed-envelope>`, re-attests and diffs instead of
@@ -1918,6 +1927,12 @@ files changed, and an agent must not merge it itself.
 
 #### Item 2: attest a committed layout stream (`--input`, issue #4188)
 
+**`--attest 2`, `--input`, `--generator`, `--regenerated-hash` and
+`--hash-kind` first ship in `klt` 0.9.0 (PyPI)**; 0.8.0 and earlier refuse
+`--attest 2` as an invalid choice (exit `2`), so a release pinned that far
+back cannot mint or re-check an item-2 envelope — see
+[Minting above the grading pin](#minting-above-the-grading-pin) below.
+
 Item 2 (Layout) needs no inventory — the committed stream is the artifact
 (an optional inventory of declared checks is described
 [below](#item-2-declared-checks-optional---inventory-issue-4767)):
@@ -2041,6 +2056,46 @@ Declared `argv` commands run with the tool virtualenv's `bin` directory
 removed from `PATH` when klt itself runs inside a venv (`uvx`, pipx), so a bare
 `python3` in an `argv` is the repository's interpreter, not klt's. Outside a
 venv the environment is unchanged. The same applies to item 10 commands.
+
+##### Minting above the grading pin
+
+The item-2 mint path first ships in `klt` 0.9.0 (PyPI), so a consumer that
+pins an older release for grading — to keep a committed `--manifest` report's
+diff stable — must mint item-2 envelopes with a newer release than it grades
+with. What that cross-version pair does, measured 2026-11-17 by minting a
+single-stream item-2 envelope (a committed GDS, no `--generator` claim) with
+`klt` 0.9.1, citing it in a block manifest, and grading the manifest with
+`klt signoff --manifest` at 0.8.0:
+
+- **It grades.** 0.8.0 accepts the envelope as `kind: "generic"` evidence for
+  item 2, renders `met` with `input_verified: true`, and every item verdict
+  and the `t1_met_count` match what the minting release itself renders for
+  the same manifest. The envelope's `attestation` block is extra surface the
+  older grader does not read.
+- **The rendered report's bytes are not stable across grader versions, and
+  no release promises that.** The `build` block — which names the grading
+  install, including its `grading_ruleset_id` hash — and the embedded
+  checklist wording (`items[].text`, parsed from the tier doc this install
+  ships) both moved between 0.8.0 and 0.9.1, and the two builds'
+  `grading_ruleset_id` hashes differ. The verdict agreement above is one
+  measured pair, not a guarantee: a newer grader may grade differently.
+  Compare reports with `--check` — which excludes exactly these moving
+  surfaces — never bytewise, when the two renders came from different
+  grader builds.
+- **The pin cannot re-check the envelope.** 0.8.0 and earlier refuse
+  `--attest 2` as an invalid choice (exit `2`), so the drift gate for an
+  item-2 envelope (`--attest 2 --input ... --check`) has to run on a release
+  that can mint it. The inventory-minted items' equivalent guard is
+  `--require-build-match` (issue #5875), which needs `--attest` and
+  `--check` too — so it does not reach item 2 at such a pin either.
+- **The envelope records who minted it.** `provenance.klt_version` (with
+  `provenance.klayout_version`) is the version surface a consumer can read
+  from the envelope itself and compare against its grading pin before
+  trusting the citation — there is no per-envelope schema-version table to
+  consult. For envelope-aggregation and `--attest ... --check` grading the
+  same pairing surfaces as the report-only `build_drift` marker (see
+  "Build drift" above); it never changes a verdict, so gate on it by
+  reading the JSON, not the exit code.
 
 
 #### How manifest `file` paths resolve
