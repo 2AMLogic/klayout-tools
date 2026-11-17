@@ -1,4 +1,5 @@
-"""Every ``CATEGORY_*`` value in ``src/klayout_tools/lvs*.py`` is recorded in ``CHANGELOG.md``.
+"""Every ``CATEGORY_*`` value in ``src/klayout_tools/lvs*.py`` is recorded
+in ``CHANGELOG.md``.
 
 ``CHANGELOG.md``'s own header and ``docs/json-contract.md``'s pre-1.0 caveat
 designate it the source of truth for which categories exist as of a given
