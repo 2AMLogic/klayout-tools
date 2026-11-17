@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
+
+import pytest
 
 from klayout_tools import sim
 from test_sim import (
@@ -120,3 +124,63 @@ def test_ngspice_init_env_null_for_xyce_and_runner_offhost():
     assert sim_spiceinit.effective_init(
         ("a",), ("a",), engine="ngspice", offhost=True
     ) == {"source": "runner", "lines": None, "sha256": None}
+
+
+# Issue #6047: the fail-fast probe reads the same init file as the corners.
+
+
+@pytest.mark.parametrize(
+    ("backend", "corners", "options", "expected"),
+    [
+        # Explicit pin, `ngspice_init` undeclared (issue #6047's repro).
+        ("local", {}, {"threads_per_worker": 1}, "set num_threads=1\n"),
+        # Implicit pin: local-parallel, >1 worker and >1 unit.
+        (
+            "local-parallel",
+            {"temperature_c": [10, 20]},
+            {"max_workers": 2},
+            "set num_threads=1\n",
+        ),
+        # Pin resolves to None: no probe-dir file, behaviour unchanged.
+        ("local", {}, {}, None),
+        # A declared init still follows the pin line, as for the corners.
+        (
+            "local",
+            {},
+            {"threads_per_worker": 1, "ngspice_init": ["set wnflag=1"]},
+            "set num_threads=1\nset wnflag=1\n",
+        ),
+    ],
+)
+def test_fail_fast_probe_spiceinit_matches_corner_pin(
+    tmp_path, monkeypatch, backend, corners, options, expected
+):
+    """The probe and the corners it screens read one effective `.spiceinit`
+    (issue #6047): a run-dir file replaces `$HOME`'s, so an unpinned probe
+    would otherwise read the ambient home file the pinned corners do not."""
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "backend": backend,
+            "corners": corners,
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "options": {"keep_artifacts": True, "fail_fast_probe": True, **options},
+        },
+    )
+    _stub_subprocess_run(monkeypatch)
+
+    report = sim.run_sim(str(request), artifacts_dir=str(tmp_path / "artifacts"))
+
+    probe_dirs = sorted(Path(tmp_path, "artifacts").glob("*__probe"))
+    assert len(probe_dirs) == 1
+    probe_init = probe_dirs[0] / ".spiceinit"
+    corner_dir = Path(os.path.dirname(report["corners"][0]["artifacts"]["log"]))
+    corner_init = corner_dir / ".spiceinit"
+    if expected is None:
+        assert not probe_init.exists()
+        assert not corner_init.exists()
+    else:
+        assert probe_init.read_text() == expected
+        assert probe_init.read_text() == corner_init.read_text()
