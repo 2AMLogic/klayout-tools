@@ -2111,10 +2111,66 @@ def _validate_save_vectors(
 
 
 #: A ``v(...)``/``i(...)`` token (optionally with ngspice's derivative prefix,
-#: e.g. ``vdb(out)``, ``vm(a,b)``) in a measurement's ``spice``/``expr``/
-#: ``crossings.signal`` text -- the vectors ``options.save_vectors`` must keep
-#: resident for that measurement to resolve.
+#: e.g. ``vdb(out)``, ``vm(a,b)``) in a measurement's ``spice``/``expr`` text
+#: or a structured signal field (``crossings.signal``, ``cycle_mean.signal``/
+#: ``align``, the ``v(node)`` selectors of ``snm``/``transfer``/``tian``) --
+#: the vectors ``options.save_vectors`` must keep resident for that
+#: measurement to resolve.
 _SAVE_TOKEN_RE = re.compile(r"\b([vi][a-z]{0,2})\(([^()]*)\)", re.IGNORECASE)
+
+
+def _form_signal_texts(spec: dict[str, Any]) -> list[str]:
+    """The signal texts of every measurement form that names a vector outside
+    ``spice``/``expr``/``crossings``/``step_resolution``/``settled`` (issue
+    #5559). Fields that hold expressions or selectors pass through verbatim;
+    fields that hold a bare name (``energy.source``, ``stress.a``/``b``,
+    ``tian.series_injection``) are wrapped in the ``i(...)``/``v(...)`` form
+    their own deck lines read. Unknown values are skipped: validation of each
+    form rejects them before a deck is written, and this function must not
+    raise while assembling one.
+    """
+    texts: list[str] = []
+
+    def _add(value: Any) -> None:
+        if isinstance(value, str):
+            texts.append(value)
+
+    cycle_mean = spec.get("cycle_mean")
+    if isinstance(cycle_mean, dict):
+        _add(cycle_mean.get("signal"))
+        _add(cycle_mean.get("align"))
+    energy = spec.get("energy")
+    if isinstance(energy, dict):
+        _add(energy.get("voltage"))
+        if isinstance(energy.get("source"), str):
+            texts.append(f"i({energy['source']})")
+    stress = spec.get("stress")
+    if isinstance(stress, dict):
+        for key in ("a", "b"):
+            if isinstance(stress.get(key), str):
+                texts.append(f"v({stress[key]})")
+    snm = spec.get("snm")
+    if isinstance(snm, dict):
+        for key in ("x", "y1", "y2"):
+            _add(snm.get(key))
+    eye = spec.get("eye")
+    if isinstance(eye, dict):
+        _add(eye.get("signal"))
+    transfer = spec.get("transfer")
+    if isinstance(transfer, dict):
+        _add(transfer.get("num"))
+        _add(transfer.get("den"))
+    tian = spec.get("tian")
+    if isinstance(tian, dict):
+        _add(tian.get("tv"))
+        _add(tian.get("ti"))
+        series = tian.get("series_injection")
+        if isinstance(series, dict):
+            if isinstance(series.get("load_node"), str):
+                texts.append(f"v({series['load_node']})")
+            if isinstance(series.get("source"), str):
+                texts.append(f"i({series['source']})")
+    return texts
 
 
 def _required_save_vectors(
@@ -2122,6 +2178,15 @@ def _required_save_vectors(
 ) -> list[str]:
     """``options.save_vectors`` plus every ``v(x)``/``i(x)`` vector the
     declared measurements reference, de-duplicated, in first-seen order.
+
+    Every form that names a signal contributes: ``spice``/``expr`` text,
+    ``crossings.signal``, ``step_resolution.signal``, the ``settled`` signal
+    texts, ``cycle_mean.signal``/``align``, ``energy.voltage`` plus the
+    implied ``i(<energy.source>)``, ``stress.a``/``b``, ``snm.x``/``y1``/
+    ``y2``, ``eye.signal``, ``transfer.num``/``den`` and ``tian`` (its
+    ``tv``/``ti`` selectors, or ``v(<load_node>)``/``i(<source>)`` for a
+    ``series_injection`` -- the ``analysis.passes`` decks read the same
+    ``save`` card this list feeds).
 
     Only the parenthesized forms are detected; a measurement that names a
     vector bare (``out`` rather than ``v(out)``) must list it in
@@ -2137,6 +2202,7 @@ def _required_save_vectors(
         if isinstance(step_res, dict):
             texts.append(step_res.get("signal"))
         texts.extend(sim_settled.signal_texts(spec))
+        texts.extend(_form_signal_texts(spec))
         for text in texts:
             if not isinstance(text, str):
                 continue
