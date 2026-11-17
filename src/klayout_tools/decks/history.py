@@ -347,6 +347,12 @@ def deck_info(name: str | None = None) -> dict[str, Any]:
       any of ``curated_drc`` (``klt drc --deck`` / ``klt deck rules``),
       ``klayout_drc`` (a shipped KLayout DRC script run via ``--engine
       klayout --deck-file``) and ``extraction``.
+    - ``enforced_rule_count`` -- how many rules the deck's curated DRC rule
+      table enforces (issue #5843): the same count as the ``rules:`` header
+      of ``klt deck rules`` (``len(get_deck(name))``). ``None`` (JSON
+      ``null``) for a deck with no curated rule table (``asap7``) -- present
+      but ``null``, never ``0`` or omitted, so "a rule table enforcing
+      nothing" stays distinct from "no rule table at all".
     - ``released`` -- the same tri-state signal as
       ``provenance.deck.released`` (:func:`is_deck_hash_released`): ``True``
       when this exact content hash shipped in a tagged release, ``False``
@@ -374,9 +380,11 @@ def deck_info(name: str | None = None) -> dict[str, Any]:
     # first time anything imports `_provenance` first).
     from .._provenance import sha256_file
     from . import (
+        UnknownDeckError,
         UnknownExtractionDeckError,
         deck_provides,
         deck_source_path,
+        get_deck,
         get_extraction_deck,
         get_unmodeled_rules,
         known_extraction_deck_names,
@@ -395,11 +403,20 @@ def deck_info(name: str | None = None) -> dict[str, Any]:
         content_hash = f"sha256:{digest}" if digest is not None else None
         released, release = _release_status(deck_name, content_hash)
 
+        try:
+            enforced_rule_count: int | None = len(get_deck(deck_name))
+        except UnknownDeckError:
+            # No curated rule table (e.g. asap7): `null`, not `0` (#5843) --
+            # 0 would claim a rule table that enforces nothing rather than
+            # one that does not exist; `provides` carries that distinction.
+            enforced_rule_count = None
+
         entry: dict[str, Any] = {
             "deck": deck_name,
             "content_hash": content_hash,
             "device_classes": list(deck.device_classes),
             "provides": deck_provides(deck_name),
+            "enforced_rule_count": enforced_rule_count,
             "released": released,
             "release": release,
             "unmodeled_rules": get_unmodeled_rules(deck_name),

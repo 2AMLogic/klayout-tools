@@ -305,9 +305,22 @@ def _provenance_text(provenance: dict | None) -> str:
 def _print_info_text(report: dict) -> None:
     for entry in report["decks"]:
         print(f"deck: {entry['deck']}")
-        print(f"  extraction deck content_hash: {entry['content_hash']}")
+        if "curated_drc" in entry["provides"] and entry.get("drc_deck") is None:
+            # One module artifact covers both roles (#5843): the deck module
+            # *is* the curated DRC rule table, so its single hash is what
+            # `klt deck hash` / `klt deck rules` report too. Labelling it
+            # "extraction deck" sends a provenance author hunting for a DRC
+            # hash that is this identical value.
+            print(
+                "  deck content_hash (extraction + curated DRC rule table): "
+                f"{entry['content_hash']}"
+            )
+        else:
+            print(f"  extraction deck content_hash: {entry['content_hash']}")
         print(f"  device_classes: {', '.join(entry['device_classes'])}")
         _print_info_artifact(entry, indent="  ")
+        if entry["enforced_rule_count"] is not None:
+            print(f"  enforced_rules: {entry['enforced_rule_count']}")
         unmodeled = entry.get("unmodeled_rules") or []
         if unmodeled:
             print(

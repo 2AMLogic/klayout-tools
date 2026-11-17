@@ -71,7 +71,14 @@ wired up at all), and release status -- with no input layout needed.
 Complements `klt deck resolve`: `resolve` turns a hash you already have into a
 release; `info` tells you your own currently-running hash and coverage without
 first running an extraction (issue #1209 -- two installs can report the
-identical `klt --version` string while shipping different deck content).
+identical `klt --version` string while shipping different deck content). For a
+deck whose `provides` includes `curated_drc` (sky130, gf180mcu, sg13g2,
+sg13cmos5l) the deck module *is* its DRC rule table, so the reported
+`content_hash` is also the DRC rule-table hash -- the identical value `klt
+deck hash` and `klt deck rules` report -- and `enforced_rule_count` says how
+many rules that table enforces (`null` for a deck without a curated table,
+e.g. asap7). `deck info` alone is therefore sufficient for a provenance
+citation (issue #5843); no second command is needed.
 
 options:
   -h, --help show this help message and exit

@@ -14,6 +14,24 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt deck info` reports `enforced_rule_count`, and labels a curated
+  deck's hash truthfully** (#5843, 2026-11-17): each entry gains an additive
+  `enforced_rule_count` field — how many rules the deck's curated DRC rule
+  table enforces, the same count as the `rules:` header of `klt deck rules`
+  — so a provenance row built from `deck info` alone can state deck
+  coverage, not just its `NOT ENFORCED` remainder. It is `null` (present,
+  never omitted, never `0`) for a deck with no curated rule table
+  (`asap7`), keeping "enforces nothing" distinct from "has no rule table".
+  Text output prints `enforced_rules: N` directly above the existing
+  `NOT ENFORCED` line, and for a deck whose `provides` includes
+  `curated_drc` (sky130, gf180mcu, sg13g2, sg13cmos5l) relabels the module
+  hash `deck content_hash (extraction + curated DRC rule table)` — that one
+  module *is* both artifacts, so the hash is the identical value `klt deck
+  hash` and `klt deck rules` report and `deck info` alone is sufficient for
+  a provenance citation. `asap7`'s two-artifact rendering is unchanged. The
+  JSON field name `content_hash` does not change; `schema_version` stays
+  `1`.
+
 - **`klt sim --batch-set` names member directories after the request stem**
   (#5633, 2026-11-15): a member request named `<stem>.request.json` -- the
   repo's own documented request naming convention -- used to land in

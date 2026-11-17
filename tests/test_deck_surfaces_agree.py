@@ -14,7 +14,7 @@ from klayout_tools.decks import (
     drc_deck_names,
     get_deck,
 )
-from klayout_tools.decks.history import deck_info
+from klayout_tools.decks.history import deck_info, deck_rules
 
 
 def _help(capsys: pytest.CaptureFixture[str], *argv: str) -> str:
@@ -49,6 +49,20 @@ def test_deck_info_provides() -> None:
         assert entry["provides"] == deck_provides(name)
         if "curated_drc" in entry["provides"]:
             assert get_deck(name)
+
+
+def test_deck_info_enforced_rule_count_agrees_with_deck_rules() -> None:
+    """`deck info`'s ``enforced_rule_count`` is the same count ``klt deck
+    rules`` reports, for every curated deck (#5843) -- and present-but-null
+    (never 0, never omitted) for a deck without a curated table. Loops every
+    registered deck so the two surfaces cannot drift apart on a PDK bump."""
+    by_name = {d["deck"]: d for d in deck_info()["decks"]}
+    for name, entry in by_name.items():
+        if "curated_drc" in entry["provides"]:
+            assert entry["enforced_rule_count"] == len(deck_rules(name)["rules"])
+        else:
+            assert "enforced_rule_count" in entry
+            assert entry["enforced_rule_count"] is None
 
 
 def test_asap7_rejected_with_route_hint() -> None:

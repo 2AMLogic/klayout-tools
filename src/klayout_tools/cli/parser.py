@@ -3472,7 +3472,16 @@ def _add_deck_parser(subparsers: argparse._SubParsersAction) -> None:
             "release; `info` tells you your own currently-running hash and "
             "coverage without first running an extraction (issue #1209 -- "
             "two installs can report the identical `klt --version` string "
-            "while shipping different deck content)."
+            "while shipping different deck content). For a deck whose "
+            "`provides` includes `curated_drc` (sky130, gf180mcu, sg13g2, "
+            "sg13cmos5l) the deck module *is* its DRC rule table, so the "
+            "reported `content_hash` is also the DRC rule-table hash -- the "
+            "identical value `klt deck hash` and `klt deck rules` report -- "
+            "and `enforced_rule_count` says how many rules that table "
+            "enforces (`null` for a deck without a curated table, e.g. "
+            "asap7). `deck info` alone is therefore sufficient for a "
+            "provenance citation (issue #5843); no second command is "
+            "needed."
         ),
     )
     info_parser.add_argument(
