@@ -439,7 +439,8 @@
       "modules": [
         "klayout_tools.cli.lef_abstract_cmd",
         "klayout_tools.lef_abstract",
-        "klayout_tools.lef_abstract_no_layout"
+        "klayout_tools.lef_abstract_no_layout",
+        "klayout_tools.lef_abstract_resource"
       ]
     },
     "lvs": {
