@@ -65,7 +65,7 @@ from typing import Any
 
 from . import liberty_writer
 from ._paths import _load_request_json, _resolve_relative, fold_spice_continuations
-from ._provenance import INPUT_ROLE_NETLIST, build_provenance
+from ._provenance import INPUT_ROLE_NETLIST, build_provenance, sha256_file
 from .characterize_arcs import DerivedArc, FunctionError, derive_arcs
 from .characterize_capacity import capacity_shard, with_batch_passthrough
 from .characterize_cards import (
@@ -2207,15 +2207,15 @@ def _build_response(
         "leakage": single["leakage"] if single else None,
         "cells": entries,
         "liberty": {
-            # Plain absolute string, not the `{path, scope}` envelope: this is
-            # a *generated artifact a caller chains onward* (into `klt sta`'s
-            # `pdk.liberty`, say), the same role `klt extract`'s
-            # `netlist_path` and `klt sim`'s `corners[].artifacts.*` fill --
-            # see docs/json-contract.md's "Path fields: envelope vs.
-            # plain string" table, which lists both shapes and which fields
-            # use each. `cell.netlist` above is an *input* and does use the
-            # envelope, matching `klt sim`'s own `netlist`.
+            # Plain absolute string, not the `{path, scope}` envelope: this
+            # is a *generated artifact a caller chains onward*, the same
+            # role `klt extract`'s `netlist_path` and `klt sim`'s
+            # `corners[].artifacts.*` fill -- see docs/json-contract.md's
+            # "Path fields: envelope vs. plain string" table. `cell.netlist`
+            # above is an *input* and does use the envelope, matching
+            # `klt sim`'s own `netlist`.
             "path": emitted_path,
+            "sha256": sha256_file(emitted_path),
             "library_name": library.name,
             "cell_count": len(library.cells),
             "time_unit": library.time_unit,

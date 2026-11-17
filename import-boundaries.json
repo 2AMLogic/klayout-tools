@@ -17,7 +17,9 @@
       "modules": [
         "klayout_tools.artifact_objects",
         "klayout_tools.artifact_verify",
-        "klayout_tools.cli.artifact_cmd"
+        "klayout_tools.artifact_verify_local",
+        "klayout_tools.cli.artifact_cmd",
+        "klayout_tools.cli.parser_artifact"
       ]
     },
     "cells": {
@@ -66,6 +68,7 @@
         "klayout_tools.cli._argv_flags",
         "klayout_tools.cli._parsing",
         "klayout_tools.cli._request_document",
+        "klayout_tools.cli._request_file",
         "klayout_tools.cli.color",
         "klayout_tools.cli.output",
         "klayout_tools.cli.parser",
@@ -461,6 +464,7 @@
         "klayout_tools.lvs_flatten",
         "klayout_tools.lvs_gate_level",
         "klayout_tools.lvs_gate_level_convert",
+        "klayout_tools.lvs_hierarchy",
         "klayout_tools.lvs_known_limits",
         "klayout_tools.lvs_layout_stage",
         "klayout_tools.lvs_mismatch",
@@ -476,6 +480,7 @@
         "klayout_tools.lvs_runset",
         "klayout_tools.lvs_runset_reference",
         "klayout_tools.lvs_runset_census",
+        "klayout_tools.lvs_runset_findings",
         "klayout_tools.lvs_short_nets",
         "klayout_tools.lvs_supply",
         "klayout_tools.lvs_timeout",
@@ -571,6 +576,7 @@
         "klayout_tools.pex",
         "klayout_tools.pex_async",
         "klayout_tools.pex_netlist_text",
+        "klayout_tools.pex_resistance_graph",
         "klayout_tools.pex_asap7",
         "klayout_tools.pex_sim_evidence",
         "klayout_tools.spice_flatten",
@@ -606,6 +612,7 @@
         "klayout_tools.place_and_route_route_overflow",
         "klayout_tools.place_and_route_script",
         "klayout_tools.place_and_route_sta",
+        "klayout_tools.place_and_route_unconstrained",
         "klayout_tools.place_and_route_via_pad",
         "klayout_tools.place_and_route_via_tip"
       ]
@@ -713,6 +720,7 @@
         "klayout_tools.macros",
         "klayout_tools.metrics",
         "klayout_tools.op_sanity",
+        "klayout_tools.op_sanity_diagnostics",
         "klayout_tools.output_lock",
         "klayout_tools.resistor_mesh",
         "klayout_tools.touchstone",
@@ -734,8 +742,10 @@
         "klayout_tools.signoff_attest_input",
         "klayout_tools.signoff_attest_item9",
         "klayout_tools.signoff_attest_live",
+        "klayout_tools.signoff_attest_presence",
         "klayout_tools.signoff_attest_stream",
         "klayout_tools.signoff_attest_text",
+        "klayout_tools.signoff_coverage_disclosure",
         "klayout_tools.signoff_derived_rows",
         "klayout_tools.signoff_details",
         "klayout_tools.signoff_drc_crosscheck",
@@ -754,6 +764,7 @@
         "klayout_tools.signoff_power_delivery_substrate",
         "klayout_tools.signoff_runset",
         "klayout_tools.signoff_sta_constraints",
+        "klayout_tools.signoff_unmet_reasons",
         "klayout_tools.signoff_yield_disclosure"
       ]
     },
@@ -768,6 +779,7 @@
         "klayout_tools.cli.sim_measurement_text",
         "klayout_tools.cli.sim_merge_cmd",
         "klayout_tools.cli.sim_pdk_text",
+        "klayout_tools.cli.sim_report_out",
         "klayout_tools.cli.sim_plan_cmd",
         "klayout_tools.digital_fleet",
         "klayout_tools.remote_fleet",
@@ -827,6 +839,7 @@
         "klayout_tools.sim_merge",
         "klayout_tools.sim_mismatch_declarations",
         "klayout_tools.sim_mismatch_gate",
+        "klayout_tools.sim_measurement_kind",
         "klayout_tools.sim_measurement_results",
         "klayout_tools.sim_noise",
         "klayout_tools.sim_op_args",
@@ -1909,6 +1922,42 @@
       "exporter": "klayout_tools._paths",
       "symbol": "_load_request_json",
       "reason": "Issue #5485: reads the samples document with the shared error handling; its hand-rolled copy omitted UnicodeDecodeError and tracebacked past the error envelope. Promote to a public name when _paths is next reworked."
+    },
+    {
+      "consumer": "klayout_tools.cli._request_file",
+      "exporter": "klayout_tools._paths",
+      "symbol": "_load_request_json",
+      "reason": "Issue #5540: load_request_file delegates to the shared loader so the route/gen-compose/layout-plan request reads cannot drift from it again; all four hand-rolled copies omitted UnicodeDecodeError. Promote to a public name when _paths is next reworked."
+    },
+    {
+      "consumer": "klayout_tools.socket_check",
+      "exporter": "klayout_tools._paths",
+      "symbol": "_load_request_json",
+      "reason": "Issue #5540: _load_descriptor's hand-rolled read omitted UnicodeDecodeError and tracebacked past the error envelope. Promote to a public name when _paths is next reworked."
+    },
+    {
+      "consumer": "klayout_tools.tap_distance",
+      "exporter": "klayout_tools._paths",
+      "symbol": "_load_request_json",
+      "reason": "Issue #5540: _load_net_spec's hand-rolled read omitted UnicodeDecodeError and tracebacked past the error envelope. Promote to a public name when _paths is next reworked."
+    },
+    {
+      "consumer": "klayout_tools.arith_gen",
+      "exporter": "klayout_tools._paths",
+      "symbol": "_load_request_json",
+      "reason": "Issue #5540: _load_cell_map's hand-rolled read omitted UnicodeDecodeError and tracebacked past the error envelope. Promote to a public name when _paths is next reworked."
+    },
+    {
+      "consumer": "klayout_tools.env_provenance",
+      "exporter": "klayout_tools._paths",
+      "symbol": "_load_request_json",
+      "reason": "Issue #5540: _load_json_envelope's hand-rolled read omitted UnicodeDecodeError and tracebacked past the error envelope. Promote to a public name when _paths is next reworked."
+    },
+    {
+      "consumer": "klayout_tools.gen_compose",
+      "exporter": "klayout_tools._paths",
+      "symbol": "_load_request_json",
+      "reason": "Issue #5540: load_generator_report_arg's hand-rolled read omitted UnicodeDecodeError and tracebacked past the error envelope. Promote to a public name when _paths is next reworked."
     },
     {
       "consumer": "klayout_tools.corner_matrix",

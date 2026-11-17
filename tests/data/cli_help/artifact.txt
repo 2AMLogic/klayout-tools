@@ -5,7 +5,7 @@ identifies the caller by its network identity. Presigned URLs stay in-process
 and are never printed.
 
 positional arguments:
-  <subcommand> put store files and emit (or merge) manifest entries get fetch one object, writing it only if its sha256 verifies verify check every manifest entry's size and sha256 against the store delete delete stored objects through the broker (dry run unless --yes)
+  <subcommand> put store files and emit (or merge) manifest entries get fetch one object, writing it only if its sha256 verifies verify check every manifest entry's size and sha256 against the store, or re-hash local files in place with --local delete delete stored objects through the broker (dry run unless --yes)
 
 options:
   -h, --help show this help message and exit
@@ -52,14 +52,21 @@ options:
 
 --- klt artifact verify ---
 
-stat each entry, then fetch and re-hash it. Exits 3 if any entry is missing or
-mismatched, 1 on a broker refusal or bad manifest.
+Against the broker: stat each entry, then fetch and re-hash it. With --local
+no broker is contacted at all: each entry whose name resolves to a file under
+--root is re-hashed in place and its sha256 and size compared to the manifest,
+so a committed summary can be checked in a clean checkout with no credential.
+Exits 3 if any checked entry is missing or mismatched, 1 on a broker refusal,
+a bad manifest, a local run in which no entry resolved, or a local entry name
+that escapes the verify root.
 
 positional arguments:
-  MANIFEST
+  MANIFEST manifest to check; with --local, MANIFEST[#SELECTOR] checks one entry (SELECTOR is an entry's sha256 or name)
 
 options:
   -h, --help show this help message and exit
+  --local verify against files under --root instead of the store: no broker, no network, no credential
+  --root DIR directory entry names resolve against (with --local; default: the manifest's git checkout root, else the current directory)
   --broker URL artifact broker base URL (default: $KLT_ARTIFACT_BROKER)
   --format {text,json} output format (default: text)
 
