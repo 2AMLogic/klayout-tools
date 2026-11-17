@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Any
+from typing import Any, NamedTuple
 
 #: ``reference.form`` values the runset engine accepts.
 _RUNSET_REFERENCE_FORMS = ("plain-element", "subckt-call")
@@ -110,12 +110,22 @@ def rename_top_subckt(text: str, old: str, new: str) -> str:
     return "\n".join(out)
 
 
+class Passthrough(NamedTuple):
+    """The ``X`` cards the conversion left for the runset's own reader
+    (issue #5796): the callee names as written (sorted, unique) and the
+    number of cards hidden."""
+
+    callees: list[str]
+    cards: int
+
+
 def _protect_passthrough_calls(
     text: str, passthrough: set[str], deck: str | None, device_map: Any
-) -> tuple[str, dict[str, str]]:
+) -> tuple[str, dict[str, str], Passthrough]:
     """Issue #5402: hide ``X`` cards that call a ``passthrough`` subcircuit
     no curated/``device_map`` binding claims (curated wins) behind comment
-    markers, so the conversion leaves them for the runset's own reader."""
+    markers, so the conversion leaves them for the runset's own reader.
+    Also returns what was hidden (issue #5796)."""
     from .netlist_normalize import (
         _binding_known,
         _build_subckt_map,
@@ -125,6 +135,7 @@ def _protect_passthrough_calls(
 
     binding = _build_subckt_map(deck, device_map)[0]
     saved: dict[str, str] = {}
+    callees: set[str] = set()
     lines = text.split("\n")
     for i, line in enumerate(lines):
         if line.strip()[:1] not in ("X", "x"):
@@ -134,15 +145,17 @@ def _protect_passthrough_calls(
         if name.upper() in passthrough and not _binding_known(name, binding):
             marker = f"* __klt_passthrough_{i}__"
             saved[marker] = line
+            callees.add(name)
             lines[i] = marker
-    return "\n".join(lines), saved
+    return "\n".join(lines), saved, Passthrough(sorted(callees), len(saved))
 
 
 def convert_reference(
     reference: str, request: dict[str, Any], work_dir: str, deck_file: str
-) -> str:
+) -> tuple[str, Passthrough]:
     """Write the ``subckt-call`` conversion of ``reference`` into ``work_dir``
-    and return its path (``reference`` itself for any other form).
+    and return its path (``reference`` itself for any other form) with the
+    :class:`Passthrough` the conversion left for the runset (issue #5796).
 
     Reuses the ``"klayout"`` engine's conversion, so the schematic MIM call
     ``X.. <pdk>__cap_mim_m3_1 W= L=`` becomes the plain card the runset's own
@@ -160,8 +173,9 @@ def convert_reference(
     ref_top = ref_spec.get("top")
     rename = bool(layout_top and ref_top and layout_top != ref_top)
     subckt_call = ref_spec.get("form", "plain-element") == "subckt-call"
+    passthrough = Passthrough([], 0)
     if not subckt_call and not rename:
-        return reference
+        return reference, passthrough
     try:
         with open(reference, encoding="utf-8", errors="replace") as handle:
             text = handle.read()
@@ -174,7 +188,7 @@ def convert_reference(
     converted = text
     if subckt_call:
         deck, device_map = ref_spec.get("deck"), ref_spec.get("device_map")
-        text, saved = _protect_passthrough_calls(
+        text, saved, passthrough = _protect_passthrough_calls(
             text, _deck_device_list(deck_file), deck, device_map
         )
         try:
@@ -195,4 +209,75 @@ def convert_reference(
     out = os.path.join(work_dir, "reference_converted.sp")
     with open(out, "w", encoding="utf-8") as handle:
         handle.write(converted)
-    return out
+    return out, passthrough
+
+
+def reference_conversion_echo(
+    ref_spec: dict[str, Any], passthrough: Passthrough
+) -> dict[str, Any]:
+    """The report's ``reference_conversion`` echo. For ``subckt-call`` it adds
+    ``passthrough_callees`` / ``passthrough_cards`` (issue #5796; empty/zero
+    when nothing passed through), because the request echo alone cannot say
+    whether the deck's ``DEVICE_LIST`` hid any card from the conversion."""
+    from .lvs import _reference_conversion_echo
+
+    form = ref_spec.get("form", "plain-element")
+    echo = _reference_conversion_echo(form, ref_spec)
+    if form == "subckt-call":
+        echo["reference_conversion"].update(
+            passthrough_callees=passthrough.callees,
+            passthrough_cards=passthrough.cards,
+        )
+    return echo
+
+
+def passthrough_rerun_excludes(committed: dict[str, Any]) -> set[tuple[str, str]]:
+    """``--rerun`` drift paths to ignore: a ``subckt-call`` report committed
+    before issue #5796 has no ``passthrough_*`` keys, and the richer echo of
+    the current build is not drift."""
+    echoed = committed.get("reference_conversion")
+    echoed = echoed if isinstance(echoed, dict) else {}
+    return {
+        ("reference_conversion", key)
+        for key in ("passthrough_callees", "passthrough_cards")
+        if key not in echoed
+    }
+
+
+def passthrough_finding(
+    passthrough: Passthrough, verdict: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Issue #5796: one ``reference.unresolved_subckt_call`` finding when
+    passthrough hid ``X`` cards and the runset's compare recognized **no**
+    reference device -- the cards vanished from the reference without a trace
+    (``_unresolved_reference_calls`` excludes ``DEVICE_LIST`` callees).
+
+    Aggregate on purpose: the runset's reader renames devices (sky130
+    ``special_nfet_01v8`` -> ``nfet_01v8``), so a callee cannot be matched to
+    a produced class. A reference with any recognized device (curated cards
+    converted, or the runset paired the passed-through ones, issue #5402)
+    stays quiet."""
+    from .lvs import CATEGORY_REFERENCE_UNRESOLVED_SUBCKT_CALL, _mismatch
+
+    recognized = verdict["coverage"]["recognized_device_classes"]["reference"]
+    if not passthrough.cards or recognized:
+        return []
+    names = ", ".join(repr(c) for c in passthrough.callees)
+    return [
+        _mismatch(
+            CATEGORY_REFERENCE_UNRESOLVED_SUBCKT_CALL,
+            "error",
+            f"{passthrough.cards} reference card(s) calling {names} were passed "
+            "through to the runset's own reader (the deck's DEVICE_LIST names "
+            "them and no reference.deck/reference.device_map binding claims "
+            "them), but the runset recognized no reference device -- the "
+            "cards were never compared. Pass reference.deck or "
+            "reference.device_map to convert them, or write them as "
+            'plain-element cards (see docs/cli/lvs.md, "klayout-runset")',
+            "reference",
+            details={
+                "callees": passthrough.callees,
+                "passthrough_cards": passthrough.cards,
+            },
+        )
+    ]

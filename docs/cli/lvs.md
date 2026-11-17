@@ -321,6 +321,27 @@ equal or absent tops the reference passes through byte-for-byte as before.
 Not live-verified against the IHP `sg13g2.lvs` (not available on this host);
 covered by stub-deck unit tests in `tests/test_lvs_runset_reference.py`.
 
+**The passthrough is observable (issue #5796).** `reference_conversion`
+(`form`, `deck`, `device_map`) is a pure echo of the *request*, so
+`device_map: null` means "you passed no `device_map`", not "conversion failed".
+For `form: "subckt-call"` the block therefore also records what the passthrough
+above left for the runset's reader: `passthrough_callees` (sorted, unique
+subcircuit names as written; `[]` when none) and `passthrough_cards` (how many
+`X` cards were left untouched; `0` when none). These keys are additive
+(`schema_version` stays `3`); a report committed before they existed replays
+under `--check --rerun` without drift. When at least one card passed through and
+the runset recognized **no** reference device
+(`coverage.recognized_device_classes.reference` is empty), the report also
+carries one `reference.unresolved_subckt_call` error finding (so `status` is
+`"mismatch"`) whose `details` give `callees` and `passthrough_cards`: the cards
+vanished from the reference without being compared, and the fix is
+`reference.deck` or `reference.device_map` (or plain-element cards). The test
+is deliberately aggregate: the runset's reader renames some devices (sky130
+`special_nfet_01v8` -> `nfet_01v8`), so a callee cannot be matched to a produced
+class. A reference with any recognized device -- curated cards converted, or the
+runset pairing the passed-through ones as in the IHP case above -- emits no
+finding.
+
 **The verdict is taken from the `.lvsdb`, not the process.** The database is
 read back with `klayout.db.LayoutVsSchematic.read()` + `xref()`. A PDK driver
 may exit `0` on a non-matching pair, and another (sky130's `sky130.lvs`) exits
