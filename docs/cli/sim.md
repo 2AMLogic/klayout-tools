@@ -289,6 +289,16 @@ the invoking directory or `$HOME` happened to carry a `.spiceinit` of its
 own). ngspice-only: the `xyce` engine has no equivalent init-file lookup, so
 `options.ngspice_init` is accepted but has no effect when `engine: "xyce"`.
 
+The option applies to **deck-list requests** too (see "Pre-composed decks"):
+each unit's own directory gets the same `.spiceinit` before `ngspice -b`
+runs there, on every backend — an off-host job forwards the option in its
+worker request. A unit that itself stages a deck, input, or include named
+`.spiceinit` while the option is set is rejected by name rather than
+silently dropping one side. Note the file ngspice reads from its working
+directory *replaces* `$HOME/.spiceinit` — ngspice does not merge the two —
+so the requested lines must be complete, not mode-only additions to
+whatever the host's own init file sets.
+
 **What was in effect is recorded (issue
 [#5648](https://github.com/2AMLogic/klayout-tools/issues/5648)).** A run-directory
 `.spiceinit` *replaces* `$HOME/.spiceinit` rather than merging with it, and
@@ -1994,10 +2004,15 @@ runner silently drops them ([#4212](https://github.com/2AMLogic/klayout-tools/is
 | `corners.params` | 0.8.0 |
 | `corners.units` | 0.8.0 |
 | `corners.temperature_param` | 0.8.0 |
+| `corners.options` | 0.8.0 |
 | `options.ngspice_init` | 0.7.0 |
 | `options.ngspice_options` | 0.8.0 |
+| `options.nodeset` | 0.8.0 |
+| `options.initial_conditions` | 0.8.0 |
 | `options.osdi_preload` | 0.7.0 |
 | `options.stage_model_inputs` | 0.7.0 |
+| `analysis_overrides` | 0.9.1 |
+| `analysis.op_check` | 0.9.2 |
 | `analysis_steps[].measurements[]` (noise analysis `.meas` cards) | unreleased |
 | `measurements[].search` | unreleased |
 
@@ -2132,12 +2147,17 @@ release segment:
 | `measurements[].expr` | any `measurements[]` entry has `expr` | `0.7.0` |
 | `corners.process[].sections[]` | a `corners.process[]` bundle has an object-form `sections[]` entry | `0.7.0` |
 | `corners.params` ([#4097](https://github.com/2AMLogic/klayout-tools/issues/4097)) | `corners.params` is present and non-empty; checked before launch against the AMI manifest (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `params_unsupported_worker` check stays) | `0.8.0` (**mandatory**, see below) |
+| `corners.options` ([#3125](https://github.com/2AMLogic/klayout-tools/issues/3125)) | `corners.options` is present and non-empty; checked before launch against the AMI manifest (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `options_unsupported_worker` check stays) | `0.8.0` (**mandatory**, see below) |
+| `options.nodeset` ([#3036](https://github.com/2AMLogic/klayout-tools/issues/3036)) | `options.nodeset` is set and non-empty; checked before launch against the AMI manifest (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `nodeset_unsupported_worker` check stays) | `0.8.0` (**mandatory**, see below) |
+| `options.initial_conditions` ([#3881](https://github.com/2AMLogic/klayout-tools/issues/3881)) | `options.initial_conditions` is set and non-empty; checked before launch against the AMI manifest (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `initial_conditions_unsupported_worker` check stays) | `0.8.0` (**mandatory**, see below) |
+| `analysis_overrides` ([#4970](https://github.com/2AMLogic/klayout-tools/issues/4970)) | `analysis_overrides` is present and non-empty; checked before launch against the AMI manifest (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `analysis_overrides_unsupported_worker` check stays) | `0.9.1` (**mandatory**, see below) |
+| `analysis.op_check` ([#5077](https://github.com/2AMLogic/klayout-tools/issues/5077)) | `analysis.op_check` is declared; checked before launch against the AMI manifest (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `op_check_unsupported_worker` check stays) | `0.9.2` (**mandatory**, see below) |
 | `options.ngspice_init` | `options.ngspice_init` is set and non-empty | `0.7.0` |
 | `options.ngspice_options` ([#4212](https://github.com/2AMLogic/klayout-tools/issues/4212)) | `options.ngspice_options` is set and non-empty | `0.8.0` |
 | `options.osdi_preload` | `options.osdi_preload` is set and non-empty | `0.7.0` |
 | `options.stage_model_inputs` | `options.stage_model_inputs` is set | `0.7.0` |
 
-The last six rows are the released entries of
+The rows from `measurements[].expr` down are the released entries of
 `REQUEST_FEATURE_MIN_RUNNER_VERSION` ([#2877](https://github.com/2AMLogic/klayout-tools/issues/2877)),
 the same table the checks below read ([#2901](https://github.com/2AMLogic/klayout-tools/issues/2901)).
 An entry whose minimum is `unreleased` has no detector and never counts as
@@ -2771,6 +2791,7 @@ in the deck path), exactly as corner jobs do.
 | `options.timeout_s` | number | Default per-unit timeout (see `decks[].timeout_s`). |
 | `options.max_workers` | integer | Worker-pool size for `local-parallel`; overridable with `--max-workers`, capped by `$KLT_SIM_MAX_WORKERS`, same as corners. |
 | `options.ngspice_binary` | string | Same resolution rules as corners (issue #2423). Interpreted on the *executing* host. |
+| `options.ngspice_init` | array\<string\> | Same meaning as corners (issue #2520): each string becomes one line of the `.spiceinit` written into every unit's own directory before `ngspice -b` runs there (issue #5738), on every backend. Replaces the executing host's `$HOME/.spiceinit` — lines must be complete. A unit staging its own `.spiceinit` while this is set is rejected by name. |
 | `remote.*` / `batch.*` | object | The same backend blocks corner requests carry; only read for the matching backend. `remote.hosts` sharding is refused for deck requests — one off-host job runs the whole list across its own worker pool. |
 
 A deck-list request must not also declare `netlist`, `corners`, `analysis`,
@@ -3846,7 +3867,12 @@ the `options.resume` fingerprint (changing it invalidates a stored result) and
 is forwarded to `remote`/`batch` workers; omitting it leaves decks, corner IDs
 and fingerprints byte-identical. A worker built before the field would drop it,
 so the client requires `op_check` on every corner that ran and otherwise fails
-with `error.code: "op_check_unsupported_worker"`.
+with `error.code: "op_check_unsupported_worker"`. It is also a **mandatory**
+runner feature (`analysis.op_check`, minimum `0.9.2`), so a submit against an
+AMI manifest whose every image predates it is refused with
+`batch_runner_feature_unsupported` before anything is uploaded or launched --
+and `--dry-run` reports the refusal -- rather than the grid running first and
+the echo check refusing the result afterward.
 
 **Pinning a node (the deterministic workaround).** `op_check` only detects.
 To make the solution deterministic, hold the latch node with an ideal source at
