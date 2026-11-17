@@ -177,7 +177,7 @@
     },
     {
       "path": "src/klayout_tools/characterize.py",
-      "lines": 2243
+      "lines": 2238
     },
     {
       "path": "src/klayout_tools/cli/drc_cmd.py",
@@ -297,7 +297,7 @@
     },
     {
       "path": "src/klayout_tools/extract.py",
-      "lines": 10779
+      "lines": 10778
     },
     {
       "path": "src/klayout_tools/extract_abstract.py",
@@ -469,11 +469,11 @@
     },
     {
       "path": "src/klayout_tools/netlist_normalize.py",
-      "lines": 2246
+      "lines": 2241
     },
     {
       "path": "src/klayout_tools/op_sanity.py",
-      "lines": 1848
+      "lines": 1845
     },
     {
       "path": "src/klayout_tools/parasitic_integrity.py",
@@ -561,7 +561,7 @@
     },
     {
       "path": "src/klayout_tools/remote_transport.py",
-      "lines": 622
+      "lines": 614
     },
     {
       "path": "src/klayout_tools/reset_coverage.py",
@@ -589,15 +589,15 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 12426
+      "lines": 12424
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
-      "lines": 4454
+      "lines": 4453
     },
     {
       "path": "src/klayout_tools/sim_commands.py",
-      "lines": 915
+      "lines": 912
     },
     {
       "path": "src/klayout_tools/sim_decks.py",
@@ -617,7 +617,7 @@
     },
     {
       "path": "src/klayout_tools/sim_steps.py",
-      "lines": 1314
+      "lines": 1312
     },
     {
       "path": "src/klayout_tools/sim_tian.py",
@@ -745,7 +745,7 @@
     },
     {
       "path": "tests/test_characterize.py",
-      "lines": 2283
+      "lines": 2279
     },
     {
       "path": "tests/test_characterize_vendor_comparison.py",
@@ -1057,11 +1057,11 @@
     },
     {
       "path": "tests/test_sim.py",
-      "lines": 15843
+      "lines": 15842
     },
     {
       "path": "tests/test_sim_batch.py",
-      "lines": 8242
+      "lines": 8204
     },
     {
       "path": "tests/test_sim_batch_async.py",
