@@ -219,11 +219,9 @@ from .signoff_sta_constraints import (
 )
 
 # The `klt yield` campaign-disclosure rollups (issue #2467), split out of
-# this file for its size-ratchet ceiling (issue #5815); re-imported by name
-# so `signoff.<name>` keeps resolving (the #2313 `signoff_envelopes.py`
-# precedent). The `X as X` form marks the two rollups with no call site left
-# in this module as deliberate re-exports rather than dead imports.
-from .signoff_yield_disclosure import _yield_campaign_disclosure
+# this file for its size-ratchet ceiling (issue #5815) and re-imported by
+# name so `signoff.<name>` keeps resolving; `X as X` marks deliberate re-exports.
+from .signoff_yield_disclosure import _yield_campaign_disclosure, graded_entry_campaign
 from .signoff_yield_disclosure import (
     _yield_negative_control_rollup as _yield_negative_control_rollup,
 )
@@ -7036,6 +7034,8 @@ def _grade_multi_citation(
                 **({"rows": rows} if rows else {}),
                 "status": g[0],
                 "reason": g[1],
+                # Issue #5786: carries the member citation's own `yield_campaign`.
+                **graded_entry_campaign(g[2]),
             }
             for spec, rows, g in graded
         ]
