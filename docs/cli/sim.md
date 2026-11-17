@@ -2068,13 +2068,15 @@ report a pass. Policy: **reject before simulating**.
   carries exactly one `batch_runner_version_mismatch` entry (severity
   `error`) with `runner_klt_version`, `client_klt_version`,
   `accepted_client_release` (the runner's major.minor) and a `message` stating
-  the remedy: submit from a client of that major.minor, or update the runner
-  image to the client's. It is additive (the per-unit diagnostics and
-  `environment.remote` fields above are unchanged), appears once even for
-  `hosts > 1`, and is not emitted for `match` / `unknown`, nor under
-  `runner_version_check: "warn"` when the run proceeded (that skew stays in
-  `environment.remote` only). It covers the case the pre-launch manifest check
-  cannot see (no manifest, or an entry without `klt_version`).
+  the remedy: submit from a client of that major.minor, update the runner
+  image to the client's, or set `batch.runner_version_check: "warn"` to run
+  anyway (under `warn` the runner-side gate is not applied, so the job is
+  submitted and runs despite the skew). It is additive (the per-unit
+  diagnostics and `environment.remote` fields above are unchanged), appears
+  once even for `hosts > 1`, and is not emitted for `match` / `unknown`, nor
+  under `runner_version_check: "warn"` when the run proceeded (that skew stays
+  in `environment.remote` only). It covers the case the pre-launch manifest
+  check cannot see (no manifest, or an entry without `klt_version`).
 - A single-job `environment.remote`, and each `environment.remote.fleet[]`
   entry of a sharded run (so mixed-version shards stay distinguishable), always
   carries `runner_klt_version` (the runner's own version, or `null` when it
@@ -2226,7 +2228,9 @@ reject (version/feature gate) instead of leaving the bare `job command exited
 87`. If the post-run runner identity shows a major.minor mismatch with the
 client (`environment.remote.runner_compatibility: "mismatch"`), the diagnostic
 also carries `runner_code: "batch_runner_version_mismatch"` and both klt
-versions. `--job-status` is a `status.json` passthrough only and never
+versions, and its message names the remedy: update the runner image, use a
+compatible client, or set `batch.runner_version_check: "warn"` to submit
+anyway. `--job-status` is a `status.json` passthrough only and never
 fetches outputs, so it can show just `job command exited 87`; read the full
 report for the cause.
 
