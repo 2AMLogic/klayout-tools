@@ -692,6 +692,7 @@
         "klayout_tools.macros",
         "klayout_tools.metrics",
         "klayout_tools.op_sanity",
+        "klayout_tools.op_sanity_diagnostics",
         "klayout_tools.output_lock",
         "klayout_tools.resistor_mesh",
         "klayout_tools.touchstone",
