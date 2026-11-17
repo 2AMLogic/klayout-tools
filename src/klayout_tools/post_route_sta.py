@@ -1386,10 +1386,12 @@ def _run_corner_session(
     worst_setup_path, worst_hold_path = _worst_paths(
         completed.stdout or "", worst_slack, worst_hold_slack
     )
-    if report_path_stages:  # issue #5783
-        worst_setup_path, worst_hold_path = _attach_worst_path_stages(
-            completed.stdout or "", worst_setup_path, worst_hold_path
-        )
+    worst_setup_path, worst_hold_path = _attach_worst_path_stages(  # issue #5783
+        completed.stdout or "",
+        worst_setup_path,
+        worst_hold_path,
+        enabled=report_path_stages,
+    )
 
     corner_fields: dict[str, Any] = {
         "engine_log": completed.engine_log,

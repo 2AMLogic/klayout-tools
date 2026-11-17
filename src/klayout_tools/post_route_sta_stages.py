@@ -293,9 +293,11 @@ def _parse_path_stage_region(
         if record["reason"]:
             reason += f": {record['reason']}"
         return _unavailable_stage_block(reason)
-    rows, reason = _stage_rows(region, record["startpoint"], record["endpoint"])
+    rows, stage_reason = _stage_rows(
+        region, record["startpoint"], record["endpoint"]
+    )
     if rows is None:
-        return _unavailable_stage_block(reason or "stage report unparseable")
+        return _unavailable_stage_block(stage_reason or "stage report unparseable")
     arrival = _first_number(region, _ARRIVAL_RE)
     required = _first_number(region, _REQUIRED_RE)
     if arrival is None or required is None:
@@ -337,16 +339,26 @@ def _first_number(region: list[str], pattern: re.Pattern[str]) -> float | None:
 
 
 def _attach_worst_path_stages(
-    stdout: str, setup_record: dict[str, Any], hold_record: dict[str, Any]
+    stdout: str,
+    setup_record: dict[str, Any],
+    hold_record: dict[str, Any],
+    enabled: bool = True,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Attach each record's ``stages`` block in place (issue #5783) and
-    return ``(setup_record, hold_record)``. Called only when the request set
-    ``constraints.report_path_stages`` -- the records are returned with the
-    field added, never without it."""
+    return ``(setup_record, hold_record)``. ``enabled`` is the request's
+    ``constraints.report_path_stages`` -- when false the records are
+    returned untouched, so the caller can stay unconditional; when true
+    the records gain the field, never lose it."""
+    if not enabled:
+        return setup_record, hold_record
     regions, reason = _parse_path_stage_block(stdout)
     if regions is None:
-        setup_record["stages"] = _unavailable_stage_block(reason)
-        hold_record["stages"] = _unavailable_stage_block(reason)
+        setup_record["stages"] = _unavailable_stage_block(
+            reason or "path-stage reports unparseable"
+        )
+        hold_record["stages"] = _unavailable_stage_block(
+            reason or "path-stage reports unparseable"
+        )
         return setup_record, hold_record
     for record, side in ((setup_record, "max"), (hold_record, "min")):
         if side not in regions:
