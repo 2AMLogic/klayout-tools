@@ -1825,10 +1825,16 @@ jobs:
     # installs has no DSL runner, so there tests/test_drc_asap7_deck.py's
     # per-rule fixture tier skips. This job installs the binary (Ubuntu
     # 24.04's apt package, KLayout 0.28.16, the version the deck was
-    # validated against) and runs only that module, so every rule's failing
-    # and boundary-passing fixture is checked in CI. The shipped-cell clean
-    # run in the same module still skips here: it needs scripts/fetch-pdks.sh's
-    # lambdapdk payload, which CI does not fetch.
+    # validated against) and runs that module, so every rule's failing and
+    # boundary-passing fixture is checked in CI. It also runs
+    # tests/test_place_and_route_via_tip.py (issue #5886): its differential
+    # oracle runs the real deck over generated geometry, and at 0.28.16 it
+    # was measured to agree rule-for-rule with the in-process tip pass --
+    # per-rule counts M1.S.2/M1.S.3/M1.S.4/M1.S.5 = 1/1/1/1 on both sides,
+    # identical to 0.30.12 -- so the DSL semantics this job pins are the ones
+    # the wheel-side edge-check API agrees with. The shipped-cell clean run
+    # in test_drc_asap7_deck.py still skips here: it needs
+    # scripts/fetch-pdks.sh's lambdapdk payload, which CI does not fetch.
     #
     # Its own job rather than an apt step in `test`: installing the binary
     # there would also switch on every other real-binary tier of the suite

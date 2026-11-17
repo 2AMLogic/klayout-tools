@@ -265,6 +265,7 @@ from ._yosys_error_messages import _synthesis_error_message
 from .equiv import EquivError, run_equiv
 from .liberty_compare import LibertyCompareError, parse_liberty_text
 from .pdk_cells import resolve_liberty_for_cell_library
+from .request_paths import RequestPaths
 from .restructure import RestructureError, restructure_for_timing
 from .sta import StaError, compute_critical_path
 
@@ -788,6 +789,9 @@ class SynthesizeError(Exception):
     with ``structural.has_critical: true`` and exit code ``3`` -- never this
     exception. See ``docs/cli/synthesize.md``'s "Exit codes" section.
     """
+
+
+_rpath = RequestPaths(SynthesizeError)
 
 
 def _script_path_text(path: str, *, repo_root: str | None) -> str:
@@ -2047,7 +2051,7 @@ def _resolve_sources(sources: Any, request_dir: str) -> list[str]:
 
     resolved: list[str] = []
     for entry in sources:
-        path = entry if os.path.isabs(entry) else os.path.join(request_dir, entry)
+        path = _rpath(entry, request_dir, "request.sources entry")
         if not os.path.isfile(path):
             raise SynthesizeError(f"RTL source not found: {entry}")
         try:
@@ -4208,19 +4212,12 @@ def _compute_baseline(
         )
 
     if response_path is not None:
-        resolved = (
-            response_path
-            if os.path.isabs(response_path)
-            else os.path.join(request_dir, response_path)
-        )
+        resolved = _rpath(response_path, request_dir, "request.baseline.response_path")
         baseline_metrics = _baseline_metrics_from_response_file(resolved)
         ref = ref or _baseline_ref_fallback(resolved, repo_root=repo_root)
     else:
-        resolved = (
-            netlist_path
-            if os.path.isabs(netlist_path)
-            else os.path.join(request_dir, netlist_path)
-        )
+        assert netlist_path is not None
+        resolved = _rpath(netlist_path, request_dir, "request.baseline.netlist_path")
         baseline_metrics = _baseline_metrics_from_netlist(
             resolved, liberty_path, hdl_toplevel, output_dir
         )
