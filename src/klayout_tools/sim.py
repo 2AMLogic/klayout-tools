@@ -196,7 +196,12 @@ from .sim_batch_async import (
     shard_scoped_points,
 )
 from .sim_batch_async import submit_only as _submit_batch_only
-from .sim_batch_features import finalize_batch_remote, pop_remote_diagnostics
+from .sim_batch_features import (
+    apply_worker_engine_build,
+    finalize_batch_remote,
+    pop_remote_diagnostics,
+    worker_ngspice_binary,
+)
 from .sim_convergence_retry import is_retryable_convergence_failure, note_not_retried
 
 #: Moved to the ``sim_corner_*`` modules (issue #5428) so this module stays
@@ -264,7 +269,7 @@ from .sim_measurement_results import (
 from .sim_measurement_results import (
     NOT_REACHED_DIAGNOSTIC_CODE as NOT_REACHED_DIAGNOSTIC_CODE,
 )
-from .sim_measurement_results import _corner_measurement_results
+from .sim_measurement_results import _corner_measurement_results, expand_request
 from .sim_param_file import _corner_lib_lines as _corner_lib_lines
 from .sim_param_file import param_file_environment, resolve_param_file
 from .sim_plot import render_waveform_svg
@@ -528,14 +533,14 @@ _INCONCLUSIVE_STATUS = "inconclusive"
 SUPPORTED_ENGINES = ("ngspice", "xyce")
 
 #: Recognised values for the optional ``request.netlist_source`` field --
-#: caller-declared provenance of ``request.netlist``, distinguishing a
-#: pre-layout schematic-level netlist (S6 in the stage graph) from a
-#: post-layout netlist extracted from the laid-out design (S9). Mirrors the
-#: caller-declares-intent pattern already used for ``engine``/``backend``
-#: rather than trying to auto-detect provenance from the netlist file itself
-#: (fragile -- a schematic and an extracted netlist can look syntactically
-#: identical). See docs/cli/sim.md and docs/design/design-pipeline.md.
-SUPPORTED_NETLIST_SOURCES = ("schematic", "extracted")
+#: caller-declared provenance of ``request.netlist``: a pre-layout schematic
+#: netlist (S6 in the stage graph), a post-layout extracted netlist (S9),
+#: or a gate-level netlist (structural netlist plus timing library,
+#: issue #5638). Mirrors the caller-declares-intent pattern already used
+#: for ``engine``/``backend`` -- rather than auto-detecting provenance from
+#: the netlist file itself (a schematic and an extracted netlist can look
+#: syntactically identical). See docs/cli/sim.md and docs/design/design-pipeline.md.
+SUPPORTED_NETLIST_SOURCES = ("schematic", "extracted", "gate-level")
 
 #: Execution backends behind ``run_sim``. ``local`` runs the corner matrix
 #: sequentially in-process (the original behaviour). ``local-parallel`` fans
@@ -1461,44 +1466,20 @@ def _check_local_osdi_abi(
         )
 
 
-def _worker_ngspice_binary(remote: Any) -> str | None:
-    """The worker-observed ngspice path out of ``environment.remote`` (issue
-    #3110): ``worker_environment.simulator.selected_path`` when its capture is
-    ``"ok"``. A sharded run (``remote.fleet[]``) reports a value only when
-    every member captured the same path -- never silently picks one. ``None``
-    for a pre-#2834 runner, the SSH ``remote`` backend, or disagreement."""
-    if not isinstance(remote, dict):
-        return None
-    members = remote.get("fleet")
-    blocks = members if isinstance(members, list) and members else [remote]
-    paths: set[str | None] = set()
-    for block in blocks:
-        worker = block.get("worker_environment") if isinstance(block, dict) else None
-        simulator = worker.get("simulator") if isinstance(worker, dict) else None
-        ok = isinstance(worker, dict) and worker.get("capture") == "ok"
-        path = (
-            simulator.get("selected_path")
-            if ok and isinstance(simulator, dict)
-            else None
-        )
-        paths.add(path if isinstance(path, str) and path else None)
-    only = next(iter(paths)) if len(paths) == 1 else None
-    return only
-
-
 def apply_engine_host(
     environment: dict[str, Any], *, backend: str, client_ngspice_binary: str | None
 ) -> None:
-    """Stamp ``environment.engine_host``, keep ``ngspice_binary`` honest (#3110):
-    local changes nothing else; off-host ``"worker"`` makes it the worker's
-    path and moves the submitter's to ``client_ngspice_binary``. Batch adds
-    ``models_lib_comparison`` (#5321) and the sharded roll-ups (#5522)."""
+    """Stamp ``environment.engine_host``; keep ``ngspice_binary`` (#3110) and
+    ``engine_build`` (#5566) honest -- off-host ``"worker"`` makes both the
+    worker's, moving the submitter's to the matching ``client_*`` key. Batch
+    adds ``models_lib_comparison`` (#5321) and the sharded roll-ups (#5522)."""
     if backend not in _OFFHOST_BACKENDS:
         environment["engine_host"] = "local"
         return
     environment["engine_host"] = "worker"
     environment["client_ngspice_binary"] = client_ngspice_binary
-    environment["ngspice_binary"] = _worker_ngspice_binary(environment.get("remote"))
+    environment["ngspice_binary"] = worker_ngspice_binary(environment.get("remote"))
+    apply_worker_engine_build(environment)
     finalize_batch_remote(environment, backend)
 
 
@@ -1569,7 +1550,7 @@ def load_request(request_path: str) -> dict[str, Any]:
             "request is missing required field: analysis (or analysis_steps "
             "for an ordered multi-step sequence)"
         )
-    return request
+    return expand_request(request)  # issue #5731; see sim_measurement_template
 
 
 def _reject_linearize_in_steps(request: dict[str, Any]) -> None:

@@ -68,7 +68,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from . import sim_transfer
+from . import sim_measurement_kind, sim_transfer
 from ._jsonnum import is_finite_number
 from .sim_errors import SimError
 from .sim_forms import normalize_selector as _normalize_voltage
@@ -304,15 +304,9 @@ def validate_tian_context(
                     f"is not an analysis.passes name (declared: "
                     f"{sorted(p['name'] for p in passes)})"
                 )
-    seen: set[str] = set()
-    for spec in measurements_spec:
-        key = str(spec.get("name")).lower()
-        if key in seen:
-            raise SimError(
-                f"duplicate measurement name '{spec.get('name')}': names must "
-                "be unique when measurements[] declares a tian entry"
-            )
-        seen.add(key)
+    sim_measurement_kind.require_unique_measurement_names(
+        measurements_spec, form="a tian entry"
+    )
 
 
 # --------------------------------------------------------------------------- #
