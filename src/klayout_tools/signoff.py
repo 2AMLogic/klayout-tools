@@ -6201,13 +6201,6 @@ def _generic_artifact_binding(
         attestation.get("producer"), str
     ):
         binding["attestation"] = attestation_record(attestation)
-        # Issue #5573: the claimant's scope disclosure, carried from the
-        # inventory's `description`. Echoed verbatim like `summary`/`source`
-        # above -- never graded -- and absent when the envelope carries no
-        # non-empty one (the same absence rule the producers apply).
-        description = attestation.get("description")
-        if isinstance(description, str) and description.strip():
-            binding["attestation"]["description"] = description
     return binding
 
 
