@@ -6,8 +6,9 @@ See :mod:`klayout_tools.route_labelled` for the verb's design and
 
 from __future__ import annotations
 
-from typing import Any, TypeGuard
+from typing import Any
 
+from ._jsonnum import is_number
 from ._paths import _resolve_relative
 from ._request_fields import check_known_fields
 
@@ -34,10 +35,6 @@ class RouteError(Exception):
         super().__init__(message)
         self.code = code
         self.details = details
-
-
-def _is_number(value: Any) -> TypeGuard[int | float]:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
 def _require_object(raw: Any, where: str) -> dict[str, Any]:
@@ -85,7 +82,7 @@ def _parse_pin(raw: Any, where: str) -> dict[str, Any]:
     assert spec is not None
     direction = pin.get("direction_deg")
     if direction is not None and (
-        not _is_number(direction) or float(direction) not in (0.0, 90.0, 180.0, 270.0)
+        not is_number(direction) or float(direction) not in (0.0, 90.0, 180.0, 270.0)
     ):
         raise RouteError(f"{where}.direction_deg must be one of 0, 90, 180, 270")
     return {
@@ -116,7 +113,7 @@ def parse_request(request: Any, request_dir: str) -> dict[str, Any]:
     _check_keys(routing, ("layer_role", "width_um"), "request.routing")
     layer_role = _require_str(routing, "layer_role", "request.routing")
     width_um = routing.get("width_um")
-    if not _is_number(width_um) or float(width_um) <= 0:
+    if not is_number(width_um) or float(width_um) <= 0:
         raise RouteError("request.routing.width_um is required (a number > 0)")
 
     raw_nets = request.get("nets")

@@ -7,25 +7,18 @@ this module does not import it (which would be circular).
 
 from __future__ import annotations
 
-import math
 from typing import Any
 
+from ._jsonnum import is_finite_number
+
 _GROUP_KEYS = frozenset({"name", "instances", "max_extent_um", "region_um", "order"})
-
-
-def _is_finite_number(value: Any) -> bool:
-    return (
-        not isinstance(value, bool)
-        and isinstance(value, (int, float))
-        and math.isfinite(value)
-    )
 
 
 def _check_region_um(region: Any, where: str, error: type[Exception]) -> None:
     if not (
         isinstance(region, list)
         and len(region) == 4
-        and all(_is_finite_number(v) for v in region)
+        and all(is_finite_number(v) for v in region)
         and region[0] < region[2]
         and region[1] < region[3]
     ):
@@ -49,7 +42,7 @@ def _check_group_order(
     result: dict[str, Any] = {"axis": axis}
     pitch = order.get("pitch_um")
     if pitch is not None:
-        if not _is_finite_number(pitch) or pitch <= 0:
+        if not is_finite_number(pitch) or pitch <= 0:
             raise error(f"{where}.order.pitch_um must be a number > 0")
         result["pitch_um"] = pitch
     if any(ch in name for name in instances for ch in "*?"):
