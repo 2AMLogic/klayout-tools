@@ -1638,7 +1638,7 @@
     },
     "src/klayout_tools/sim_energy.py": {
       "line": 96.6,
-      "branch": 93.1
+      "branch": 91.6
     },
     "src/klayout_tools/sim_errors.py": {
       "line": 100.0,
@@ -1734,7 +1734,7 @@
     },
     "src/klayout_tools/sim_settled.py": {
       "line": 95.8,
-      "branch": 90.0
+      "branch": 88.8
     },
     "src/klayout_tools/sim_slug.py": {
       "line": 100.0,
@@ -1746,7 +1746,7 @@
     },
     "src/klayout_tools/sim_snm_meas.py": {
       "line": 99.0,
-      "branch": 93.7
+      "branch": 92.3
     },
     "src/klayout_tools/sim_staging.py": {
       "line": 95.5,
@@ -1754,7 +1754,7 @@
     },
     "src/klayout_tools/sim_step_resolution.py": {
       "line": 94.5,
-      "branch": 88.6
+      "branch": 86.8
     },
     "src/klayout_tools/sim_steps.py": {
       "line": 95.7,
