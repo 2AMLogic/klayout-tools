@@ -596,6 +596,7 @@
       "kind": "verb",
       "description": "`klt power` implementation: core modules plus CLI adapter.",
       "modules": [
+        "klayout_tools._power_mesh",
         "klayout_tools.cli.power_cmd",
         "klayout_tools.ir_solver",
         "klayout_tools.power"

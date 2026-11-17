@@ -249,15 +249,11 @@ def test_power_valid_spec_still_runs(tmp_path):
     assert "networks" in run_power(str(gds), str(spec))
 
 
-def test_power_resistance_citation_keys_accepted_only_in_their_own_section(
-    tmp_path,
-):
-    """Issue #5791: `sheet_resistance_source` belongs to `stackup[]` and
-    `resistance_ohm_source` to `vias[]`; each is accepted in its own section
-    and still rejected in the other."""
+def test_power_resistance_citation_keys_accepted_only_in_their_own_section(tmp_path):
+    """Issue #5791: `sheet_resistance_source` belongs to `stackup[]`,
+    `resistance_ohm_source` to `vias[]`; each accepted only in its own section."""
     gds = tmp_path / "power.gds"
     _power_fixture(gds)
-
     spec = tmp_path / "spec.json"
     _power_basic_spec(spec)
     payload = json.loads(spec.read_text())
@@ -268,21 +264,17 @@ def test_power_resistance_citation_keys_accepted_only_in_their_own_section(
     edges = [e for n in report["networks"] for i in n["islands"] for e in i["edges"]]
     assert edges and all("resistance_ohm_source" in edge for edge in edges)
 
-    swapped = tmp_path / "swapped.json"
-    _power_basic_spec(swapped)
-    payload = json.loads(swapped.read_text())
-    payload["stackup"][0]["resistance_ohm_source"] = "unit-test met1 citation"
-    swapped.write_text(json.dumps(payload))
-    with pytest.raises(PowerError, match=r"stackup\[0\].resistance_ohm_source"):
-        run_power(str(gds), str(swapped))
-
-    swapped = tmp_path / "swapped2.json"
-    _power_basic_spec(swapped)
-    payload = json.loads(swapped.read_text())
-    payload["vias"][0]["sheet_resistance_source"] = "unit-test via1 citation"
-    swapped.write_text(json.dumps(payload))
-    with pytest.raises(PowerError, match=r"vias\[0\].sheet_resistance_source"):
-        run_power(str(gds), str(swapped))
+    for section, key in (
+        ("stackup", "resistance_ohm_source"),
+        ("vias", "sheet_resistance_source"),
+    ):
+        swapped = tmp_path / f"swapped-{section}.json"
+        _power_basic_spec(swapped)
+        payload = json.loads(swapped.read_text())
+        payload[section][0][key] = "unit-test citation"
+        swapped.write_text(json.dumps(payload))
+        with pytest.raises(PowerError, match=rf"{section}\[0\].{key}"):
+            run_power(str(gds), str(swapped))
 
 
 @pytest.mark.parametrize("verb", ["erc", "power", "mom"])

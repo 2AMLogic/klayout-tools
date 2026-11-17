@@ -158,6 +158,7 @@ from ._paths import (
     _reject_unknown_keys,
     _validate_via_entries,
 )
+from ._power_mesh import _cell_sides
 from ._provenance import INPUT_ROLE_LAYOUT, build_provenance, content_hash
 from ._unionfind import UnionFind
 from .coverage import build_check_coverage, coverage_rollup, rollup_status, work_id
@@ -391,14 +392,10 @@ def _validate_stackup(spec: dict[str, Any], spec_path: str) -> list[dict[str, An
         if current_limit_source is not None:
             current_limit_source = str(current_limit_source)
 
-        # `sheet_resistance_source` (issue #5791, optional): the same
-        # citation convention for `sheet_resistance_ohm_per_sq` --
-        # which techfile line, foundry doc or corner variant the number
-        # came from -- echoed on every metal edge this role contributes
-        # as `resistance_ohm_source`.
-        sheet_resistance_source = entry.get("sheet_resistance_source")
-        if sheet_resistance_source is not None:
-            sheet_resistance_source = str(sheet_resistance_source)
+        # Issue #5791: the `sheet_resistance_ohm_per_sq` citation.
+        sheet_resistance_source = _read_source_citation(
+            entry, "sheet_resistance_source"
+        )
 
         entries.append(
             {
@@ -448,6 +445,41 @@ def _validate_via_cut_geometry(
             )
         cut_geometry[key] = value
     return cut_geometry
+
+
+def _read_source_citation(entry: dict[str, Any], key: str) -> str | None:
+    """An optional provenance-citation spec field (issue #5791),
+    ``str()``-coerced exactly like ``current_limit_source``: free text, in
+    any JSON type, never type-checked."""
+    value = entry.get(key)
+    return None if value is None else str(value)
+
+
+def _via_resistance_citation(
+    entry: dict[str, Any],
+    spec_path: str,
+    index: int,
+    resistance_ohm: float | None,
+) -> str | None:
+    """The via's optional ``resistance_ohm_source`` citation (issue #5791),
+    refused without an explicit ``resistance_ohm``: under ``--deck`` an
+    omitted number is filled from the deck
+    (:func:`_apply_deck_via_resistance`) and the report's own
+    ``vias[].resistance_source`` would then say ``deck:<name>:<corner>``, so
+    echoing a spec citation on top would assert false provenance in a report
+    ``klt signoff`` can cite. An explicit ``resistance_ohm`` always wins
+    over the deck, so every accepted citation is truthful."""
+    source = _read_source_citation(entry, "resistance_ohm_source")
+    if source is not None and resistance_ohm is None:
+        raise PowerError(
+            f"spec '{spec_path}': vias[{index}] gives "
+            "'resistance_ohm_source' without 'resistance_ohm' -- "
+            "with --deck the number would come from the deck and "
+            "the citation would claim spec provenance it does not "
+            "have; set 'resistance_ohm' explicitly or drop the "
+            "citation"
+        )
+    return source
 
 
 def _validate_vias(
@@ -515,27 +547,10 @@ def _validate_vias(
         if current_limit_source is not None:
             current_limit_source = str(current_limit_source)
 
-        # `resistance_ohm_source` (issue #5791, optional): the citation
-        # convention for `resistance_ohm` -- but only alongside an explicit
-        # number. With `--deck` an omitted `resistance_ohm` is filled from
-        # the deck (`_apply_deck_via_resistance`), and the report's own
-        # `vias[].resistance_source` then says `deck:<name>:<corner>`, so
-        # echoing a spec citation on top would assert false provenance in a
-        # report `klt signoff` can cite. An explicit `resistance_ohm`
-        # always wins over the deck, so the citation is truthful in every
-        # accepted case.
-        resistance_ohm_source = entry.get("resistance_ohm_source")
-        if resistance_ohm_source is not None:
-            resistance_ohm_source = str(resistance_ohm_source)
-            if resistance_ohm is None:
-                raise PowerError(
-                    f"spec '{spec_path}': vias[{i}] gives "
-                    "'resistance_ohm_source' without 'resistance_ohm' -- "
-                    "with --deck the number would come from the deck and "
-                    "the citation would claim spec provenance it does not "
-                    "have; set 'resistance_ohm' explicitly or drop the "
-                    "citation"
-                )
+        # Issue #5791; deck guard in `_via_resistance_citation`.
+        resistance_ohm_source = _via_resistance_citation(
+            entry, spec_path, i, resistance_ohm
+        )
 
         cut_geometry = _validate_via_cut_geometry(entry, spec_path, i)
 
@@ -1011,68 +1026,6 @@ def _warn_if_network_fragmented(
         "'vias', or one whose 'between' roles do not match the layers it "
         "joins). Nodes on components with no pad cannot be solved, so the "
         "reported droop understates the real one"
-    )
-
-
-def _cell_sides(
-    column: int,
-    row: int,
-    x0: float,
-    y0: float,
-    x1: float,
-    y1: float,
-    horizontal_major: bool,
-) -> tuple[
-    tuple[tuple[int, int], tuple[str, int, int], float, float, float, float, bool], ...
-]:
-    """The four sides of one mesh cell as ``(neighbour_key, port_key, port_x,
-    port_y, half_length_um, cross_um, is_major_axis_end)`` tuples.
-
-    ``port_key`` is deliberately shared by the two cells on either side of a
-    boundary, so they meet at **one** node; ``half_length_um`` is the
-    centre-to-side travel along the flow direction and ``cross_um`` the
-    conducting width across it.
-    """
-    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
-    half_w, half_h = (x1 - x0) / 2, (y1 - y0) / 2
-    width_um, height_um = x1 - x0, y1 - y0
-    return (
-        (
-            (column - 1, row),
-            ("v", column, row),
-            x0,
-            cy,
-            half_w,
-            height_um,
-            horizontal_major,
-        ),
-        (
-            (column + 1, row),
-            ("v", column + 1, row),
-            x1,
-            cy,
-            half_w,
-            height_um,
-            horizontal_major,
-        ),
-        (
-            (column, row - 1),
-            ("h", column, row),
-            cx,
-            y0,
-            half_h,
-            width_um,
-            not horizontal_major,
-        ),
-        (
-            (column, row + 1),
-            ("h", column, row + 1),
-            cx,
-            y1,
-            half_h,
-            width_um,
-            not horizontal_major,
-        ),
     )
 
 
