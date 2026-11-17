@@ -41,6 +41,20 @@ not `klt --version`, if you need to detect this kind of drift. See
   and the Verilog-top path. `path`/`scope` is the repo-relative shape, so a
   source outside the repo reads `{"path": null, "scope": "external"}` and never
   leaks a host path. No `schema_version` bump.
+- **`klt signoff --attest 1 --check` names a pre-v0.9.0 envelope
+  `schema_mismatch`** (#5730, #5767, 2026-11-16): when the committed item-1
+  envelope still carries the singular `provenance.input.path` (before #4764)
+  and that binding is the only drift, `status` is the new value
+  `"schema_mismatch"` instead of `"drifted"`, with additive `legacy_binding`
+  and `legacy_binding_detail` keys and the remedy printed before the `drift:`
+  block in text. Still exit `3`. Additive pre-1.0 enum value, so no
+  `schema_version` bump (see `docs/json-contract.md`). The value follows the
+  repo's underscore convention for multi-word `status` tokens (cf.
+  `stale_evidence`, `key_mismatch`) rather than the hyphenated spelling first
+  proposed in #5730. Migrating 0.8.x -> 0.9.x:
+  regenerate committed item-1 envelopes and re-pin manifest `content_hash` to
+  the input-set digest.
+
 - **`klt sim` refuses `measurements[].transfer` declared beside `noise`**
   (#5695, 2026-11-14): the mutually exclusive measurement forms each carried a
   hand-maintained list of "every *other* exclusive form", and `transfer`'s

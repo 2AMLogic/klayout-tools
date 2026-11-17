@@ -824,6 +824,18 @@ committed envelope. The key is refused (exit `1`) on any non-item-9 command.
 See [`docs/cli/signoff.md`](cli/signoff.md)'s "A cold start that only
 validates its bench".
 
+Issue #5730 adds one new `status` value and two additive, optional keys to
+the `klt signoff --attest --check` response (no `schema_version` bump; a
+same-version check still grades `match`, and every other drift still grades
+`drifted`): `status: "schema_mismatch"` names a committed item-1 envelope
+that still carries the pre-#4764 singular `provenance.input.path` when that
+binding is the only drift, with `legacy_binding: true` and
+`legacy_binding_detail` (`boundary`, `attested_klt_version`,
+`checking_klt_version`, `remedy`) beside it. It is still exit `3` — nothing
+in the legacy envelope's input set was verified — and a co-occurring real
+drift keeps the response exactly as it was before. See
+[`docs/cli/signoff.md`](cli/signoff.md)'s "CI usage: `--check`".
+
 `klt erc` since issue #2183 also carries a second verb-local key,
 `provenance.devices`: one entry per `devices[]` spec declaration (`{name,
 body_layer, on, body_area_um2}`), `[]` when none were declared. A

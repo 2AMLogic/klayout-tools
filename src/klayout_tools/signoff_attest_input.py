@@ -88,3 +88,53 @@ def with_entry(result: dict[str, Any], output: str | None) -> dict[str, Any]:
         "content_hash": binding["content_hash"],
     }
     return result
+
+
+#: The first release whose item-1 envelopes bind ``provenance.input.paths``.
+LEGACY_BINDING_BOUNDARY = "v0.9.0 (#4764)"
+
+#: ``--check`` drift fields that are the item-1 binding itself.
+_BINDING_DRIFT_FIELDS = frozenset(
+    {
+        "provenance.input.path",
+        "provenance.input.paths",
+        "provenance.input.content_hash",
+    }
+)
+
+
+def legacy_binding_detail(
+    committed: Mapping[str, Any],
+    fresh: Mapping[str, Any],
+    drift: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """``legacy_binding_detail`` when ``drift`` is *only* the item-1 binding
+    moving from the pre-v0.9.0 singular ``provenance.input.path`` to ``paths``
+    (#5730); ``None`` otherwise.
+
+    Restricted to ``t1_item == 1``: for item 2 ``path`` vs ``paths`` is a
+    content distinction (one stream vs several). Any other drift entry keeps
+    the caller's ``drifted`` verdict, so real drift is never masked."""
+    binding = (committed.get("provenance") or {}).get("input")
+    if (
+        committed.get("t1_item") != 1
+        or not isinstance(binding, Mapping)
+        or "path" not in binding
+        or "paths" in binding
+        or not drift
+        or any(entry["field"] not in _BINDING_DRIFT_FIELDS for entry in drift)
+    ):
+        return None
+    attested = (committed.get("provenance") or {}).get("klt_version")
+    checked = (fresh.get("provenance") or {}).get("klt_version")
+    return {
+        "boundary": LEGACY_BINDING_BOUNDARY,
+        "attested_klt_version": attested,
+        "checking_klt_version": checked,
+        "remedy": (
+            "the committed envelope predates the item-1 input-set binding "
+            f"(first released in {LEGACY_BINDING_BOUNDARY}) and cannot be "
+            "compared field by field; regenerate it with this klt, or pin klt "
+            f"to the attesting version ({attested or 'unknown'})"
+        ),
+    }
