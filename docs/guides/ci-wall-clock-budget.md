@@ -340,10 +340,12 @@ on `created_at`, not `run_started_at`: a re-run executes its original commit's
 `cutoff` it applied and how many listed runs it dropped (`dropped_stale_runs`).
 
 **History durations are compute, too.** The fetcher subtracts the same
-cache-miss rebuild time the check subtracts from the run being judged (see
-[Cache-miss rebuilds are not compute](#cache-miss-rebuilds-are-not-compute)),
-by calling the check's own `measure_cache_miss`, so a cache outage inside the
-window can neither inflate a baseline nor fake a busy pool.
+non-compute time the check subtracts from the run being judged (see
+[Cache-miss rebuilds are not compute](#cache-miss-rebuilds-are-not-compute)
+and [Checkout is fixed setup, not compute](#checkout-is-fixed-setup-not-compute-issue-5964)),
+via the shared `scripts/ci_wall_clock_steps.py` module, so neither a cache
+outage nor a checkout stall inside the window can inflate a baseline or fake
+a busy pool.
 
 The trade-off accepted is a dependency on the Actions API, which is why
 [`scripts/fetch_ci_wall_clock_history.py`](../../scripts/fetch_ci_wall_clock_history.py)
@@ -466,13 +468,53 @@ guidance says so rather than pointing only at runner contention.
 
 **This is a step-name convention, and it is load-bearing.** Renaming those
 steps in `ci.yml` without updating `CACHE_MISS_STEP_SUFFIX` /
-`CACHE_STEP_PREFIXES` in `scripts/check_ci_wall_clock.py` would silently fold
+`CACHE_STEP_PREFIXES` in `scripts/ci_wall_clock_steps.py` would silently fold
 rebuild time back into compute and re-create the false-red.
-`test_cache_miss_step_naming_convention_still_holds_in_ci_yml` guards the link.
+`test_cache_miss_step_naming_convention_still_holds_in_ci_yml` (in
+`tests/test_ci_wall_clock_checkout.py`, where the #5964 tests live) guards the
+link.
 
 **Raising the budgets is not the alternative.** #2582's 420 → 480 s bump did
 not turn its run green, and a budget loose enough to absorb a 1,780 s rebuild
 would no longer catch anything real.
+
+## Checkout is fixed setup, not compute (issue #5964)
+
+A job's wall time also includes its `actions/checkout` step(s), and on
+2026-11-16 (PR #5942, attempt 1) one stalled at 313 s on a single runner
+while the five sibling jobs of the same run checked out in 4-6 s -- so a job
+with ~29 s of entirely normal cargo work was classified as a `compute`
+breach, and the guidance pointed at shrinking a job that was already fast.
+
+Like the cache miss, that time is measured (`measure_checkout` in
+`scripts/ci_wall_clock_steps.py`) and excluded from every job's compute
+figure **always** -- not only when it stalls -- because checkout is fixed
+git/setup time by construction: the same commit, action pin and repo size on
+every job of a run. The history fetcher applies the same subtraction, so the
+rolling baseline stays the same kind of number; and as with the cache miss,
+nothing else is excluded -- a slower pytest/cargo step still breaches.
+
+**What you see.** A checkout figure of 60 s or more (`CHECKOUT_STALL_SECONDS`)
+gets a per-row `(+Ns checkout, excluded)` flag, a `CHECKOUT STALL:` block
+naming the affected jobs, and one `::notice::` per affected job under
+`--annotate` -- a notice, not an error, because a stalled checkout is neither
+the author's doing nor the author's to fix. `--format json` keeps it
+auditable: per job `checkout_seconds` alongside the budget-compared
+`seconds`, plus a run-level `total_checkout_seconds`; `total_seconds` still
+reconciles with what the GitHub UI shows. Run wall clock is *not* adjusted --
+it measures the run as it really elapsed, and its breach is report-only
+anyway.
+
+**This is a step-name convention, and it is load-bearing.** The module
+matches GitHub's auto-generated names for a bare
+`- uses: actions/checkout@<sha>` step (`Run actions/checkout@<sha>` plus its
+`Post Run actions/checkout@<sha>` cleanup), confirmed against a recorded
+`/jobs` payload (run 43967976263, 2026-11-17). A checkout step given an
+explicit `name:` is reported under that name and is *not* matched (as of
+this writing `ci.yml` names only the budget job's own two checkouts, which
+are not compute jobs).
+`test_checkout_step_naming_convention_still_holds_in_ci_yml` guards the
+link.
 
 ## Fork PRs are report-only
 

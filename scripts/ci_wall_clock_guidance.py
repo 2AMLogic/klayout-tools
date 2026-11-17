@@ -7,7 +7,9 @@ checker's `Breach` rows; only `.kind` and `.confirmed` are read.
 from __future__ import annotations
 
 
-def breach_guidance(breaches: list, *, cache_missed: bool) -> list[str]:
+def breach_guidance(
+    breaches: list, *, cache_missed: bool, checkout_stalled: bool = False
+) -> list[str]:
     """What the reader should do about `breaches` (a non-empty list)."""
     kinds = {b.kind for b in breaches}
     failing = [b for b in breaches if b.kind == "compute" and b.confirmed]
@@ -59,5 +61,10 @@ def breach_guidance(breaches: list, *, cache_missed: bool) -> list[str]:
             guidance.append(
                 "Cache-miss rebuild time is ALREADY excluded above, so this "
                 "breach is not the cache service."
+            )
+        if checkout_stalled:
+            guidance.append(
+                "Checkout time is ALREADY excluded above (#5964), so this "
+                "breach is not the checkout step either."
             )
     return guidance

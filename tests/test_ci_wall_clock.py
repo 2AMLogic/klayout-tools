@@ -2019,25 +2019,6 @@ def test_repo_budget_files_rolling_window_block_is_accepted(tmp_path: Path) -> N
     assert result.returncode == EXIT_OK, result.stdout + result.stderr
 
 
-def test_cache_miss_step_naming_convention_still_holds_in_ci_yml() -> None:
-    """The cache-miss exclusion (#2617) matches on a *step-name convention*,
-    so the convention is load-bearing: renaming those steps in `ci.yml`
-    without updating the script would silently put rebuild time back into the
-    compute figure and re-create the false-red this check was fixed for."""
-    workflow = WORKFLOW.read_text()
-    script = SCRIPT.read_text()
-    # Mirrored from scripts/check_ci_wall_clock.py's CACHE_MISS_STEP_SUFFIX /
-    # CACHE_STEP_PREFIXES.
-    assert '" (cache miss only)"' in script
-    assert '"Cache ", "Post Cache "' in script
-    # Yosys, SymbiYosys/Bitwuzla, Icarus Verilog, Verilator.
-    assert workflow.count("(cache miss only)") >= 4
-    # Each rebuild is gated on its `actions/cache` step's `cache-hit` output,
-    # and that step's name is what the restore/save exclusion matches on.
-    assert "uses: actions/cache@" in workflow
-    assert workflow.count("name: Cache pinned ") >= 4
-
-
 def test_repo_budgets_leave_headroom_over_the_measured_baseline() -> None:
     """The budgets are documented as derived from a measured baseline; assert
     the recorded baseline is actually below them, so a typo cannot ship a
