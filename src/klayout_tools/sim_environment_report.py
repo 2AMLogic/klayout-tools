@@ -5,12 +5,15 @@
 ``environment`` block from a long ordered sequence of contributions. Most of
 them already came from small, individually testable ``*_environment(...)``
 helpers -- :func:`~klayout_tools.sim._portable_environment`,
-:func:`~klayout_tools.sim._corner_coverage_environment`,
 :func:`~klayout_tools.sim_param_file.param_file_environment` and friends --
 but eleven were still written inline in the sweep function's epilogue, as a
 flat append-point that every feature needing to disclose something extended
 in place. This module holds those eleven, in the same shape the pattern
-already used:
+already used (and, since issue #5663, also
+:func:`corner_coverage_environment` with its ``_corner_process_sections``
+helper -- moved here from ``sim.py``, whose ``file-size-baseline.json`` debt
+ceiling cannot grow; ``sim.py`` self-aliases the import so its historical
+attribute and existing tests keep working):
 
 * each takes only the two-to-five values it actually needs, never the
   sweep function's ambient locals;
@@ -35,10 +38,12 @@ from typing import Any
 from . import env_provenance
 from . import sim_staging as sim_staging
 from ._batch_common import apply_unrun_signal
+from .pdk import PdkNotFoundError, list_corners
 
 __all__ = [
     "backend_environment",
     "budget_environment",
+    "corner_coverage_environment",
     "fail_fast_probe_environment",
     "monte_carlo_environment",
     "netlist_closure_environment",
@@ -73,6 +78,80 @@ def netlist_closure_environment(
         }
     except sim_staging.IncludeStagingError as exc:
         return {"netlist_closure_error": str(exc)}
+
+
+def _corner_process_sections(corner_points: list[Any]) -> list[str]:
+    """Every process section the run's corner points exercise, in order.
+
+    Moved verbatim from ``sim.py`` together with
+    :func:`corner_coverage_environment` (issue #5663 -- ``sim.py`` cannot
+    grow past its ``file-size-baseline.json`` ceiling); ``sim.py`` imports
+    it back for its other consumer, the Monte Carlo mismatch family report."""
+    return [
+        name
+        for point in corner_points
+        for name in (
+            point.process_sections
+            if point.process_sections is not None
+            else ([point.process] if point.process else [])
+        )
+    ]
+
+
+def corner_coverage_environment(
+    request: dict[str, Any], corner_points: list[Any]
+) -> dict[str, Any]:
+    """``environment.corner_coverage`` (issues #3794 and #5663): per requested
+    non-typical process section, the device flavours the PDK deck leaves at
+    their typical model -- and, since #5663, the ones whose state the deck
+    evidence cannot decide -- so a multi-corner sweep never reads as skewing
+    devices it does not. Empty (key absent) when there is no resolvable PDK,
+    no per-flavour corner data, or nothing to report.
+
+    Two **disjoint** lists per section, never folded together:
+    ``unmoved_devices`` are flavours reported ``skew: "typical"`` --
+    provably at their typical model; ``unknown_devices`` are flavours
+    reported ``skew: "unknown"`` (unresolvable sub-library with differing
+    ``.param`` values attributable to it by neither consumption nor name
+    prefix) -- which are *not* claimed as unmoved. Either key is omitted
+    when empty. Consumes :func:`klayout_tools.pdk.list_corners`'s output
+    directly (one classifier, no second code path).
+    """
+    models = request.get("models") or {}
+    if not (models.get("pdk") or models.get("pdk_root")):
+        return {}
+    process_sections = list(dict.fromkeys(_corner_process_sections(corner_points)))
+    if not process_sections:
+        return {}
+    try:
+        report = list_corners(variant=models.get("pdk"), root=models.get("pdk_root"))
+    except PdkNotFoundError:
+        return {}
+    by_corner = {entry["corner"]: entry for entry in report["corners"]}
+    entries: list[dict[str, Any]] = []
+    for name in process_sections:
+        corner = by_corner.get(name)
+        if corner is None:
+            continue
+        devices = [
+            device
+            for section in corner["sections"]
+            for device in section.get("devices", [])
+        ]
+        if not devices:
+            continue
+        unmoved = [d["flavour"] for d in devices if d["skew"] == "typical"]
+        unknown = [d["flavour"] for d in devices if d["skew"] == "unknown"]
+        if name != "typical" and (unmoved or unknown):
+            entry: dict[str, Any] = {"process": name}
+            if unmoved:
+                entry["unmoved_devices"] = unmoved
+            if unknown:
+                entry["unknown_devices"] = unknown
+            entries.append(entry)
+    if not entries:
+        return {}
+    return {"corner_coverage": {"pdk": report["pdk"], "sections": entries}}
 
 
 def netlist_source_environment(netlist_source: Any) -> dict[str, Any]:

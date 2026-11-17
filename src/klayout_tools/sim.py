@@ -166,7 +166,7 @@ from .coverage import (
     work_id,
 )
 from .metrics import is_registered
-from .pdk import PdkNotFoundError, find_pdk, list_corners
+from .pdk import PdkNotFoundError, find_pdk
 from .pdk_families import pdk_variant_family
 from .remote_launcher import RemoteLauncher as RemoteLauncher
 from .remote_launcher import RemoteLaunchError as RemoteLaunchError
@@ -223,6 +223,15 @@ from .sim_corners import (
 from .sim_corners import _corner_points_to_wire as _corner_points_to_wire
 from .sim_decks import run_deck_request
 from .sim_echo_messages import echo_unsupported_message
+
+#: Moved to ``sim_environment_report`` (issue #5663) so this module stays
+#: under its per-file size ratchet; the coverage helper is self-aliased so
+#: ``klayout_tools.sim``'s historical attribute (and existing tests) keeps
+#: working unchanged.
+from .sim_environment_report import _corner_process_sections
+from .sim_environment_report import (
+    corner_coverage_environment as _corner_coverage_environment,
+)
 from .sim_expr_hint import attach_expr_runner_hint as _attach_expr_runner_hint
 from .sim_osdi_pin import osdi_pdk_root_pin
 from .sim_osdi_pin import resolve_osdi_preload as _resolve_osdi_preload
@@ -5876,59 +5885,6 @@ def _derive_mc_seed(base_seed: int, *parts: object) -> int:
     payload = ":".join(str(part) for part in (base_seed, *parts)).encode("utf-8")
     digest = hashlib.sha256(payload).digest()
     return int.from_bytes(digest[:4], "big") % _MC_SEED_MODULUS
-
-
-def _corner_process_sections(corner_points: list[Any]) -> list[str]:
-    """Every process section the run's corner points exercise, in order."""
-    return [
-        name
-        for point in corner_points
-        for name in (
-            point.process_sections
-            if point.process_sections is not None
-            else ([point.process] if point.process else [])
-        )
-    ]
-
-
-def _corner_coverage_environment(
-    request: dict[str, Any], corner_points: list[Any]
-) -> dict[str, Any]:
-    """Additive ``environment.corner_coverage`` (issue #3794): per requested
-    non-typical process section, the device flavours the PDK deck leaves at
-    their typical model (e.g. gf180mcu's 5/6V devices), so a multi-corner
-    sweep never reads as skewing devices it does not. Empty (key absent) when
-    there is no resolvable PDK, no per-flavour corner data, or nothing
-    unmoved."""
-    models = request.get("models") or {}
-    if not (models.get("pdk") or models.get("pdk_root")):
-        return {}
-    process_sections = list(dict.fromkeys(_corner_process_sections(corner_points)))
-    if not process_sections:
-        return {}
-    try:
-        report = list_corners(variant=models.get("pdk"), root=models.get("pdk_root"))
-    except PdkNotFoundError:
-        return {}
-    by_corner = {entry["corner"]: entry for entry in report["corners"]}
-    entries: list[dict[str, Any]] = []
-    for name in process_sections:
-        corner = by_corner.get(name)
-        if corner is None:
-            continue
-        devices = [
-            device
-            for section in corner["sections"]
-            for device in section.get("devices", [])
-        ]
-        if not devices:
-            continue
-        unmoved = [d["flavour"] for d in devices if d["skew"] == "typical"]
-        if name != "typical" and unmoved:
-            entries.append({"process": name, "unmoved_devices": unmoved})
-    if not entries:
-        return {}
-    return {"corner_coverage": {"pdk": report["pdk"], "sections": entries}}
 
 
 def _with_family_mismatch(

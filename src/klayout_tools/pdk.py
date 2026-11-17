@@ -107,6 +107,11 @@ from .pdk_compat import (
     read_fetched_commit,
     read_fetched_marker,
 )
+from .pdk_corner_skew import (
+    _flavour_devices,
+    _gf180mcu_flavour_tokens,
+    _param_lines,
+)
 from .pdk_descriptor import DescriptorError, has_descriptor, load_descriptor
 from .pdk_families import (
     KNOWN_PDK_FAMILIES,
@@ -2116,40 +2121,6 @@ _LIB_INCLUDE_TOKEN_RE = re.compile(
 _INCLUDE_PATH_RE = re.compile(
     r'^\s*\.include\s+"([^"]+)"', re.IGNORECASE | re.MULTILINE
 )
-#: Matches both a `.param` statement line and its `+`-prefixed ngspice
-#: line-continuations -- gf180mcu's `bjt_*`/`diode_*`/`res_*`/`moscap_*`
-#: sections write their assignments as a bare `.param` line followed by
-#: several `+name=value ...` continuation lines (see :func:`_param_lines`),
-#: not `.param name=value` on one line the way `mimcap_*` does.
-_PARAM_LINE_RE = re.compile(r"^\s*(?:\.param\b|\+)", re.IGNORECASE)
-
-
-def _param_lines(body: str) -> frozenset[str]:
-    """The normalised set of `.param` statement lines (plus their `+`
-    line-continuations, concatenated as separate set members) in ``body``,
-    for comparing whether a section's parameter overrides genuinely differ
-    from its family's typical section.
-
-    A **set** comparison of the *whole* parameter area (not "does this
-    section contain any `.param`/`+` line at all") -- both PDKs' decks carry
-    `.param` lines that are unconditional boilerplate, unrelated to
-    process-corner skew, in *every* section (gf180mcu's per-corner
-    `rsh_*_u_m` sheet-resistance restatements that happen to equal the
-    typical value at some corners; sky130's `mc_mm_switch`/`mc_pr_switch`
-    Monte-Carlo toggle, which is `0` in every non-mismatch,
-    non-statistical corner including `tt` itself). Presence alone would
-    misclassify those as ``"param"``-skewed even when every value is
-    unchanged from typical; comparing the actual line set against the
-    family's typical section correctly resolves them to ``"typical"``.
-    Internal whitespace is collapsed (``" ".join(line.split())``) so
-    incidental spacing differences between corners don't register as a
-    content difference.
-    """
-    return frozenset(
-        " ".join(line.split())
-        for line in body.splitlines()
-        if _PARAM_LINE_RE.match(line)
-    )
 
 
 def list_corners(variant: str | None = None, root: str | None = None) -> dict[str, Any]:
@@ -2210,17 +2181,27 @@ def list_corners(variant: str | None = None, root: str | None = None) -> dict[st
     for sky130), not per individual device flavor within a family. A family
     reported ``"skewed"`` means *some* of its devices moved off the typical
     section for that corner -- it does not guarantee *every* device in the
-    family did. For example, gf180mcu's own model deck leaves its 06v0
-    MOSFET flavor at the typical-named section inside every corner while
-    its 03v3 flavor does skew, both inside the single curated "mos" family
-    (the issue's own worked example) -- this command correctly reports
-    "mos" as ``"skewed"`` for that corner (some devices moved), but does
-    not itself flag the 06v0 sub-flavor as unmoved in the family-level
-    ``skew``. The finer question is answered by the additive ``devices``
-    list (issue #3794) on gf180mcu's ``mos`` section entries: one
-    ``{flavour, section, skew}`` per device flavour (``03v3``, ``06v0``,
-    ``06v0_nvt``, ...), each classified against its own typical-corner
-    include set. Family-level ``skew`` and ``complete`` are unchanged.
+    family did. For example, gf180mcu's own model deck includes the same
+    ``_t``-suffixed (typical-named) sub-library for its 06v0 MOSFET flavor
+    inside every corner's section while its 03v3 flavor switches to
+    ``_s``/``_f``-suffixed sub-libraries, both inside the single curated
+    "mos" family -- but identical include tokens alone do not decide what a
+    flavor's model receives: the corner sections also override ``.param``
+    values those ``_t`` sub-libraries consume, so the flavor is skewed, by
+    parameters rather than by a model swap (issue #5663). Which of the two
+    happened per flavor is answered by the additive ``devices`` list (issue
+    #3794) on gf180mcu's ``mos`` section entries: one ``{flavour, section,
+    skew}`` per device flavor (``03v3``, ``06v0``, ``06v0_nvt``, ...), each
+    classified against its own typical-corner include tokens *and* the
+    ``.param`` values its sub-libraries consume -- ``"skewed"`` (tokens
+    moved), ``"param"`` (tokens identical, a consumed ``.param`` value
+    differs), ``"typical"`` (provably unmoved), ``"unknown"`` (undecidable:
+    unresolvable sub-library with differing ``.param`` values attributable
+    to it by neither consumption nor name prefix), or ``None`` for a flavor
+    the typical corner has but this section does not. Tokens without a
+    separable flavor (gf180mcuD's ``fets_mm`` mismatch lib, its
+    ``noise_corner`` noise lib) are not device flavors and are not listed
+    (issue #5663). Family-level ``skew`` and ``complete`` are unchanged.
 
     Returns a dict matching the documented JSON schema (see
     ``docs/cli/pdk.md``)::
@@ -2238,9 +2219,10 @@ def list_corners(variant: str | None = None, root: str | None = None) -> dict[st
                     "sections": [
                         {"family": str, "section": str | None,
                          "skew": "typical" | "skewed" | "param" | None,
-                         # gf180mcu "mos" only (issue #3794):
+                         # gf180mcu "mos" only (issues #3794, #5663):
                          "devices": [{"flavour": str, "section": str | None,
-                                      "skew": "typical" | "skewed" | None}]},
+                                      "skew": "typical" | "skewed" | "param"
+                                              | "unknown" | None}]},
                         ...
                     ],
                     "family_count": int,
@@ -2406,54 +2388,17 @@ def _scan_gf180mcu_corners(model_path: str) -> list[dict[str, Any]]:
                 if corner == "typical":
                     typical_flavours = flavours
                 entry["devices"] = _flavour_devices(
-                    section_name, flavours, typical_flavours, corner == "typical"
+                    section_name,
+                    flavours,
+                    typical_flavours,
+                    corner == "typical",
+                    blocks=blocks,
+                    params=params,
+                    typical_params=typical_params.get(family, frozenset()),
                 )
             sections.append(entry)
         corners.append(_finish_corner(corner, sections, corner == "typical"))
     return corners
-
-
-def _gf180mcu_flavour_tokens(
-    tokens: set[tuple[str, str]],
-) -> dict[str, set[tuple[str, str]]]:
-    """Group a gf180mcu section's ``.lib '<file>' <token>`` includes by device
-    flavour: ``nfet_06v0_nvt_t`` -> ``06v0_nvt`` (drop the leading device
-    token and the trailing per-corner suffix). A token with fewer than three
-    ``_`` parts has no separable flavour and is keyed by its whole name."""
-    grouped: dict[str, set[tuple[str, str]]] = {}
-    for path, name in tokens:
-        parts = name.split("_")
-        flavour = "_".join(parts[1:-1]) if len(parts) >= 3 else name
-        grouped.setdefault(flavour, set()).add((path, name))
-    return grouped
-
-
-def _flavour_devices(
-    section: str,
-    flavours: dict[str, set[tuple[str, str]]],
-    typical: dict[str, set[tuple[str, str]]],
-    is_typical_corner: bool,
-) -> list[dict[str, Any]]:
-    """Per-flavour ``{flavour, section, skew}`` list, each flavour classified
-    against its own typical-corner include set (``skewed`` when it differs,
-    else ``typical``; ``None`` for a flavour the typical corner has but this
-    section does not)."""
-    devices: list[dict[str, Any]] = []
-    for flavour in sorted(set(flavours) | set(typical)):
-        if flavour not in flavours:
-            skew = None
-        elif is_typical_corner or flavours[flavour] == typical.get(flavour):
-            skew = "typical"
-        else:
-            skew = "skewed"
-        devices.append(
-            {
-                "flavour": flavour,
-                "section": section if skew is not None else None,
-                "skew": skew,
-            }
-        )
-    return devices
 
 
 def _scan_sky130_corners(model_path: str) -> list[dict[str, Any]]:

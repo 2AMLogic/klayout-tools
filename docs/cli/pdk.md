@@ -1206,8 +1206,8 @@ sf        no        mos=skewed bjt=- diode=- resistor=- mim_cap=- mos_cap=-
         { "family": "mos", "section": "ss", "skew": "skewed",
           "devices": [
             { "flavour": "03v3", "section": "ss", "skew": "skewed" },
-            { "flavour": "06v0", "section": "ss", "skew": "typical" },
-            { "flavour": "06v0_nvt", "section": "ss", "skew": "typical" }
+            { "flavour": "06v0", "section": "ss", "skew": "param" },
+            { "flavour": "06v0_nvt", "section": "ss", "skew": "param" }
           ] },
         { "family": "bjt", "section": "bjt_ss", "skew": "param" },
         { "family": "diode", "section": "diode_ss", "skew": "param" },
@@ -1301,22 +1301,59 @@ itself against a release (the spike's own open question) is not built here.
 
 Family-level skew is classified **per curated family**: a family reported
 `"skewed"` means *some* of its devices moved off the typical section for that
-corner — not that *every* device did. gf180mcu's own deck, for example, leaves
-its `nfet_06v0`/`pfet_06v0` MOSFET flavors bound to the same `_t`-suffixed
-(typical) model inside every corner while its `nfet_03v3`/`pfet_03v3` flavors
-do skew, both inside the single curated `mos` family.
+corner — not that *every* device did. gf180mcu's own deck, for example, keeps
+its `nfet_06v0`/`pfet_06v0` flavors' *include tokens* pointing at the same
+`_t`-suffixed (typical-named) sub-library inside every corner's section while
+its `nfet_03v3`/`pfet_03v3` flavors switch to `_s`/`_f`-suffixed sub-libraries,
+both inside the single curated `mos` family. The tokens alone, however, do not
+decide what a flavour's model actually receives: each corner section also
+overrides `.param` values those `_t` sub-libraries **consume**, so a flavour
+whose tokens are unchanged can still be process-skewed (measured on the real
+gf180mcuD deck, 2026-11-15: 20 of each section's 22 `.param` values differ
+from `typical`'s, and the `06v0`/`06v0_nvt` sub-libraries consume them —
+issue #5663).
 
 To resolve that finer question, gf180mcu's `mos` section entries carry an
 additive `devices` list (issue #3794) — one `{flavour, section, skew}` per
 device flavour (`03v3`, `06v0`, `06v0_nvt`, …, derived from the section's
-`.lib '<file>' <model>_<flavour>_<suffix>` include tokens), each classified
-against that flavour's own typical-corner include set (`"skewed"`/`"typical"`;
-`section`/`skew` are `null` for a flavour the typical corner has but the
-section does not). For gf180mcuD, `ff`/`ss`/`fs`/`sf` report `03v3` as
-`"skewed"` and `06v0`/`06v0_nvt` as `"typical"`. Family-level `skew` and
-`complete` keep their meaning; other families and sky130 carry no `devices`.
-`klt sim` surfaces the unmoved flavours as
-[`environment.corner_coverage`](sim.md#environmentcorner_coverage-issue-3794).
+`.lib '<file>' <model>_<flavour>_<suffix>` include tokens; tokens without a
+separable flavour — gf180mcuD's `fets_mm` mismatch lib, its `noise_corner`
+noise lib — are *not* device flavours and are not listed, issue #5663), each
+classified against that flavour's own typical-corner evidence:
+
+- `"skewed"` — the flavour's include tokens differ from its typical corner's
+  (token evidence always wins);
+- `"param"` — tokens identical, but at least one `.param` value that differs
+  from the typical section's is **consumed** by the flavour's own
+  sub-library. Attribution is by consumption: the differing `.param` names
+  are matched against the sub-library bodies the flavour's tokens point at.
+  Only when a flavour's sub-library body is not resolvable in the deck does
+  a name-prefix fallback (`nfet_06v0_vth0` → `06v0`) attribute instead;
+- `"typical"` — provably unmoved: identical tokens, and either no `.param`
+  differs from typical at all or the flavour's resolvable sub-libraries
+  consume none of the differing values;
+- `"unknown"` — undecidable (issue #5663): identical tokens, `.param` values
+  do differ, but the flavour's sub-library is unresolvable in the deck and
+  no differing `.param`'s name-prefix maps to it. `klt sim` reports these
+  under `environment.corner_coverage`'s `unknown_devices` key, never folded
+  into `unmoved_devices`;
+- `null` — the typical corner ships the flavour but the section does not.
+
+For gf180mcuD, `ff`/`ss`/`fs`/`sf` report `03v3` as `"skewed"` and
+`06v0`/`06v0_nvt` as `"param"`. Family-level `skew` and `complete` keep their
+meaning; other families and sky130 carry no `devices`. `klt sim` surfaces the
+unmoved flavours as
+[`environment.corner_coverage`](sim.md#environmentcorner_coverage-issue-3794-unknown_devices-issue-5663).
+
+**Schema note (issue #5663):** `devices[].skew` grows from
+`"typical" | "skewed" | null` to also report `"param"` and `"unknown"`, and
+`"typical"` narrows: the same deck now yields `"param"` where it wrongly
+yielded `"typical"` (the old answer was factually wrong about the deck — the
+sub-libraries provably consume the differing `.param` values). Per
+`docs/json-contract.md`'s pre-1.0 caveat this is a bug fix plus an additive
+value with **no `schema_version` bump** — the field's documented purpose
+("which device flavours each corner actually skews") is unchanged — but a
+consumer pinning on `"typical"` will see different output for the same PDK.
 
 ## `klt pdk em-limits`
 
