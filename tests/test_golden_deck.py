@@ -24,10 +24,16 @@ mocked-unit/real-binary split:
    against the real `sky130A.lydrc`, asserting the same violate/clean
    *status* agrees between engines, unless the manifest entry carries an
    `expected_disagreement` explaining a known, documented approximation.
-   gf180mcu's cross-check remains explicitly deferred (its native DRC deck
-   still has no single runnable file -- see `docs/cli/drc.md`'s "Engine" ->
-   "klayout" limitation, re-verified unchanged as of issue #904) -- noted
-   explicitly here, not silently skipped.
+   gf180mcu's cross-check remains explicitly deferred -- noted
+   explicitly here, not silently skipped. (Premise corrected 2026-11-16,
+   issue #5720: the old "its native DRC deck still has no single runnable
+   file" reason no longer holds -- since issue #4002 the PDK ships one
+   family main script, `tech/drc/gf180mcu.drc`, which `klt drc --engine
+   klayout|both --pdk <variant>` resolves as `native_deck.kind:
+   pdk_main_script`, and a live `--engine both` run on `gf180mcuA` has
+   completed both engines on one layout. The deferral now reflects only
+   that the manifest fixtures have not been wired through the native
+   engine for gf180mcu -- see `docs/cli/drc.md`'s golden-pair section.)
 """
 
 from __future__ import annotations

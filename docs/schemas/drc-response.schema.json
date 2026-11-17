@@ -127,6 +127,11 @@
           "required": ["state", "groups", "unmapped"],
           "properties": {
             "state": {"type": "string", "enum": ["agree_clean", "agree_violations", "disagreement", "not_comparable", "native_unavailable", "engine_failed"]},
+            "reason": {
+              "type": "string",
+              "enum": ["mapping_empty", "group_not_covered", "unmapped_rules_ran"],
+              "description": "Which `not_comparable` cause applies (issue #5720): `mapping_empty` (no group defined for this deck), `group_not_covered` (a mapped group's rules did not all run on both sides), `unmapped_rules_ran` (groups covered, but rules outside the mapping ran on either side). Present on `state: \"not_comparable\"` only; precedence most-fundamental first. See docs/cli/drc.md."
+            },
             "granularity": {"type": "string"},
             "error": {"type": "object", "required": ["message"], "properties": {"message": {"type": "string"}}},
             "groups": {

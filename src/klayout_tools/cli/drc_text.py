@@ -165,6 +165,9 @@ def _print_crosscheck_text(report: dict) -> None:
     print(f"file: {report['file']}")
     print(f"status: {report['status']}")
     print(f"comparison: {comparison['state']}")
+    # Issue #5720: which not_comparable cause applies; absent on other states.
+    if comparison.get("reason"):
+        print(f"  reason: {comparison['reason']}")
     error = comparison.get("error")
     if error:
         print(f"  native run did not complete: {error['message']}")

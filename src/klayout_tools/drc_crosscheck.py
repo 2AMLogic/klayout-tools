@@ -42,16 +42,51 @@ GROUP_AGREE_VIOLATIONS = "agree_violations"
 GROUP_DISAGREEMENT = "disagreement"
 GROUP_NOT_COVERED = "not_covered"
 
+#: Why a run is ``not_comparable`` (issue #5720). Emitted as
+#: ``comparison.reason``, on ``state == "not_comparable"`` only -- the other
+#: five states already say (or visibly lack) their cause on their own, and a
+#: second error-style channel would duplicate ``comparison.error``.
+#: Precedence is most-fundamental first: no group defined at all beats a
+#: defined-but-uncovered group, which beats covered groups shadowed by rules
+#: outside the mapping.
+REASON_MAPPING_EMPTY = "mapping_empty"
+REASON_GROUP_NOT_COVERED = "group_not_covered"
+REASON_UNMAPPED_RULES_RAN = "unmapped_rules_ran"
+
 #: The deliberately-minimal rule mapping, keyed by curated deck name. Each
 #: group pairs curated rule ids with the native RDB categories that check the
 #: same thing in the same region; ``{"id", "curated_rules", "native_categories"}``.
-#: It is empty on purpose: a wrong pairing manufactures false agreement or
-#: false disagreement, so a group is added only with a documented, verified
-#: equivalence (docs/cli/drc.md, "Cross-check"). With no group, every rule is
-#: ``unmapped`` and the state is ``not_comparable`` -- the contract's honest
-#: answer. ``run_drc_crosscheck(rule_mapping=...)`` accepts a caller mapping
-#: for tests and for a verified project-local table.
-RULE_MAPPING: dict[str, list[dict[str, Any]]] = {}
+#: A wrong pairing manufactures false agreement or false disagreement, so a
+#: group is added only with a documented, verified equivalence
+#: (docs/cli/drc.md, "Cross-check"). Any rule outside these groups is
+#: ``unmapped`` and can never produce an ``agree_*`` state.
+#: ``run_drc_crosscheck(rule_mapping=...)`` accepts a caller mapping for tests
+#: and for a verified project-local table.
+#:
+#: The one shipped group (issue #5720) is the first verified equivalence:
+#: curated ``comp.enclosing.contact.1`` ↔ native ``CO.4``. Verified on a live
+#: ``gf180mcuA`` run (2026-11-16): both engines flagged exactly the same 16
+#: contact-enclosure markers in the same cell, overlapping exactly; the
+#: pairing is corroborated in-repo by docs/cli/drc.md ("``comp.enclosing.contact.1``
+#: (``CO.4``)") and docs/cli/gen.md (``CO.1``-``CO.4`` as the rule's DRM source).
+#:
+#: Deliberately *not* mapped: curated ``comp.width.mv.1`` ↔ native
+#: ``DF.1a_MV``. That pair is a known, documented modelling divergence, not a
+#: verified equivalence -- the PDK deck's ``DF.1a_MV`` additionally excludes
+#: the LDMOS drain markers ``mvsd``/``mvpsd`` which the curated rule still
+#: checks (see the ``comp.width.mv.1`` entry in ``decks/gf180mcu.py``'s
+#: approximations list). Mapping it would make every gf180mcu layout with an
+#: LDMOS drift region report ``disagreement`` -- a false disagreement, the
+#: exact hazard the mapping's minimality exists to prevent.
+RULE_MAPPING: dict[str, list[dict[str, Any]]] = {
+    "gf180mcu": [
+        {
+            "id": "contact.enclosure",
+            "curated_rules": ["comp.enclosing.contact.1"],
+            "native_categories": ["CO.4"],
+        }
+    ],
+}
 
 
 def _ids(report: dict[str, Any], key: str) -> set[str]:
@@ -156,6 +191,19 @@ def _overall_state(groups: list[dict[str, Any]], unmapped: dict[str, list[str]])
     return STATE_AGREE_CLEAN
 
 
+def _not_comparable_reason(
+    groups: list[dict[str, Any]], unmapped: dict[str, list[str]]
+) -> str:
+    """Which of the three ``not_comparable`` causes applies (issue #5720).
+    Called only for a ``not_comparable`` state; precedence
+    ``mapping_empty`` -> ``group_not_covered`` -> ``unmapped_rules_ran``."""
+    if not groups:
+        return REASON_MAPPING_EMPTY
+    if any(g["state"] == GROUP_NOT_COVERED for g in groups):
+        return REASON_GROUP_NOT_COVERED
+    return REASON_UNMAPPED_RULES_RAN
+
+
 def compare_reports(
     curated: dict[str, Any],
     native: dict[str, Any],
@@ -172,8 +220,9 @@ def compare_reports(
             - mapped_native
         ),
     }
-    return {
-        "state": _overall_state(groups, unmapped),
+    state = _overall_state(groups, unmapped)
+    comparison: dict[str, Any] = {
+        "state": state,
         "granularity": (
             "region: zero vs non-zero plus bbox overlap, "
             "never rule-id equality or counts"
@@ -181,6 +230,12 @@ def compare_reports(
         "groups": groups,
         "unmapped": unmapped,
     }
+    if state == STATE_NOT_COMPARABLE:
+        # Issue #5720: say *which* not_comparable cause applies. Absent on
+        # every other state -- those states already carry their own cause
+        # (agreement/disagreement) or error message (native-side failures).
+        comparison["reason"] = _not_comparable_reason(groups, unmapped)
+    return comparison
 
 
 def _native_failure_state(exc: DrcError) -> str:

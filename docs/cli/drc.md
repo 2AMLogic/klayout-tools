@@ -1705,10 +1705,30 @@ Comparison is by **region, not by rule id or count**: zero vs non-zero plus
 bbox overlap (the precedent is `docs/design/magic-oracle.md`), so 1 vs 2
 markers over the same spot agree. Only rules an explicit mapping group pairs
 up (`drc_crosscheck.RULE_MAPPING`, curated rule ids ↔ native RDB categories)
-are compared. **The shipped mapping is empty**: a wrong pairing manufactures
+are compared. **The shipped mapping is minimal**: a wrong pairing manufactures
 false agreement or disagreement, so groups are added one at a time with a
-verified equivalence. Until then every real run is `not_comparable`, and the
-per-engine reports are the useful output.
+verified equivalence. It currently carries exactly one group, for `gf180mcu`:
+curated `comp.enclosing.contact.1` ↔ native `CO.4` (verified 2026-11-16, issue
+#5720: both engines flagged the same 16 contact-enclosure markers in the same
+cell, overlapping exactly). Deliberately *absent*: `comp.width.mv.1` ↔
+`DF.1a_MV` — the native rule additionally excludes the LDMOS drain markers
+`mvsd`/`mvpsd` that the curated rule still checks (a documented modelling
+divergence, see `decks/gf180mcu.py`), so pairing them would report a false
+`disagreement` on every layout with an LDMOS drift region. Every rule outside
+a group is `unmapped`, and an unmapped rule can never produce `agree_*` — so a
+real gf180mcu run still reports `not_comparable` (with the contact-enclosure
+group's own verdict under `groups`), and the per-engine reports remain the
+complete picture.
+
+When `comparison.state` is `not_comparable`, `comparison.reason` (issue #5720,
+optional, absent on every other state) names which of three causes applied,
+most-fundamental first:
+
+| `comparison.reason` | Meaning |
+|---|---|
+| `mapping_empty` | no group is defined for this deck at all — no comparison was attempted |
+| `group_not_covered` | a defined group's rules did not all run on both sides (a `groups[].state` of `not_covered`) |
+| `unmapped_rules_ran` | every defined group was covered, but rules outside the mapping ran on either side (`unmapped.curated` / `unmapped.native` non-empty) |
 
 | `comparison.state` | Meaning |
 |---|---|
@@ -4115,11 +4135,19 @@ Regenerated deterministically from each rule's own `layer`/`other_layer`/
 `threshold_dbu` via `tests/golden_deck/generate_golden_deck.py` — see
 `tests/golden_deck/README.md` for the manifest schema, the regeneration
 workflow, and the sky130 native-deck (`--engine klayout`) cross-check
-results this issue ran against a real `sky130A.lydrc`. gf180mcu's own
-`--engine klayout` cross-check remains deferred as of issue #904 (its
-native *DRC* deck still has no single runnable file — matching this
-section's existing "no single runnable native deck" limitation above), even
-though its golden-pair manifest now covers all 44 of its `DrcRule` entries
+results this issue ran against a real `sky130A.lydrc`. gf180mcu's
+golden-pair-vs-native-deck cross-check tier itself remains sky130-only
+(deferred as of issue #904), but its original premise is stale
+(corrected 2026-11-16, issue #5720): the claim that gf180mcu's native *DRC*
+deck "has no single runnable file" no longer holds — since issue #4002 the
+PDK ships one family main script, `tech/drc/gf180mcu.drc`, which
+`klt drc --engine klayout|both --pdk <variant>` resolves
+(`native_deck.kind: pdk_main_script`), and a live `--engine both` run on
+`gf180mcuA` has since driven both engines to completion on the same layout
+(issue #5720; its curated-vs-native comparison is `drc_crosscheck`'s, not
+this manifest tier's). The tier deferral now reflects only that nobody has
+wired the manifest fixtures through the native engine for gf180mcu —
+even though its golden-pair manifest covers all 44 of its `DrcRule` entries
 (issue #904, extended by #1110) — the manifest and coverage/curated-engine tiers are complete
 for gf180mcu, only the native-DRC-deck cross-check tier is sky130-only.
 gf180mcu's *LVS* device-extraction rules are cross-checked against a real,

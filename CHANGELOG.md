@@ -14,6 +14,29 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt drc --engine both` now carries the first verified rule group and a
+  structured `comparison.reason`** (#5720, 2026-11-17): the shipped
+  `drc_crosscheck.RULE_MAPPING` was empty, so every real cross-check reported
+  `state: "not_comparable"` with `groups: []` and every rule `unmapped` —
+  telling the caller nothing about whether the two decks agree. It now ships
+  exactly one verified group for `gf180mcu`, curated
+  `comp.enclosing.contact.1` ↔ native `CO.4` (verified on a live `gf180mcuA`
+  run: the same 16 contact-enclosure markers on both sides, overlapping
+  exactly), so `groups` is non-empty and that pair's own verdict is reported.
+  Curated `comp.width.mv.1` ↔ native `DF.1a_MV` stays deliberately unmapped:
+  the native rule additionally excludes the LDMOS drain markers `mvsd`/
+  `mvpsd` the curated rule still checks, so pairing them would manufacture a
+  false `disagreement`. The overall state is unchanged — an unmapped rule can
+  never produce `agree_*`, so a real gf180mcu run is still
+  `not_comparable` — but a new optional `comparison.reason`
+  (`mapping_empty` | `group_not_covered` | `unmapped_rules_ran`,
+  most-fundamental-first precedence) now says which of the three causes
+  applied, on `not_comparable` only, in both the JSON schema
+  (`docs/schemas/drc-response.schema.json`) and the `--format text` render.
+  Additive; no `schema_version` bump; the six `comparison.state` tokens and
+  their precedence are untouched. See `docs/cli/drc.md`'s `--engine both`
+  section.
+
 - **`klt yield`: a damaged gzip input is an error envelope, not a traceback**
   (#5543, 2026-11-13): a gzip samples or `--limits` file whose deflate stream
   is *corrupt* — as opposed to truncated, or carrying a bad CRC trailer, both

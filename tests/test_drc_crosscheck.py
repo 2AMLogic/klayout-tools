@@ -70,7 +70,7 @@ def _report(
     }
 
 
-def _run(monkeypatch, curated, native, mapping=MAPPING):
+def _run(monkeypatch, curated, native, mapping=MAPPING, deck="sky130"):
     monkeypatch.setattr(cc, "run_drc", lambda *a, **k: curated)
     if isinstance(native, Exception):
 
@@ -80,7 +80,7 @@ def _run(monkeypatch, curated, native, mapping=MAPPING):
         monkeypatch.setattr(cc, "run_drc_klayout_engine", boom)
     else:
         monkeypatch.setattr(cc, "run_drc_klayout_engine", lambda *a, **k: native)
-    return cc.run_drc_crosscheck("x.gds", "sky130", "native.drc", rule_mapping=mapping)
+    return cc.run_drc_crosscheck("x.gds", deck, "native.drc", rule_mapping=mapping)
 
 
 def _covered(**kw):
@@ -177,6 +177,125 @@ def test_empty_mapping_is_not_comparable_never_agree(monkeypatch):
         mapping=[],
     )
     assert out["comparison"]["state"] == "not_comparable"
+
+
+# --------------------------------------------------------------------------- #
+# comparison.reason (issue #5720): which not_comparable cause applies
+# --------------------------------------------------------------------------- #
+
+
+def test_shipped_gf180mcu_mapping_is_the_one_verified_group():
+    """AC1 (issue #5720): exactly one shipped group, the verified
+    ``comp.enclosing.contact.1`` ↔ ``CO.4`` equivalence; ``comp.width.mv.1``
+    ↔ ``DF.1a_MV`` stays unmapped (the ``mvsd``/``mvpsd`` exclusion)."""
+    assert set(cc.RULE_MAPPING) == {"gf180mcu"}
+    (group,) = cc.RULE_MAPPING["gf180mcu"]
+    assert group["curated_rules"] == ["comp.enclosing.contact.1"]
+    assert group["native_categories"] == ["CO.4"]
+    assert all(
+        "comp.width.mv.1" not in g["curated_rules"]
+        for g in cc.RULE_MAPPING.get("gf180mcu", [])
+    )
+
+
+def test_reason_mapping_empty(monkeypatch):
+    c_kw, n_kw = _covered()
+    out = _run(
+        monkeypatch,
+        _report(engine="curated", **c_kw),
+        _report(engine="native", **n_kw),
+        mapping=[],
+    )
+    assert out["comparison"]["state"] == "not_comparable"
+    assert out["comparison"]["reason"] == cc.REASON_MAPPING_EMPTY
+
+
+def test_reason_group_not_covered(monkeypatch):
+    # The native deck never declared the mapped category: no comparison.
+    curated = _report(engine="curated", checked=["met1.1"])
+    native = _report(engine="native", categories=[], checked=[])
+    out = _run(monkeypatch, curated, native)
+    assert out["comparison"]["state"] == "not_comparable"
+    assert out["comparison"]["reason"] == cc.REASON_GROUP_NOT_COVERED
+
+
+def test_reason_group_not_covered_precedes_unmapped_rules_ran(monkeypatch):
+    # Both causes present: the group-level one is more fundamental.
+    curated = _report(engine="curated", checked=["met1.1", "met2.1"])
+    native = _report(engine="native", categories=[], checked=[])
+    out = _run(monkeypatch, curated, native)
+    assert out["comparison"]["reason"] == cc.REASON_GROUP_NOT_COVERED
+
+
+def test_gf180mcu_group_is_reported_but_state_stays_not_comparable(monkeypatch):
+    """AC4 (issue #5720): the shipped gf180mcu group makes ``groups``
+    non-empty and its own verdict agree_violations, while unmapped rules on
+    both sides keep the overall state ``not_comparable`` (never
+    ``agree_violations``), reasoned ``unmapped_rules_ran`` — the live run's
+    shape."""
+    curated = _report(
+        engine="curated",
+        violations=[_violation("comp.enclosing.contact.1")],
+        checked=["comp.enclosing.contact.1", "comp.width.1"],
+    )
+    native = _report(
+        engine="native",
+        violations=[_violation("CO.4", _box(0, 0, 6, 10))],
+        categories=["CO.4", "DF.1a_MV"],
+        checked=["CO.4"],
+    )
+    # mapping=None: the shipped RULE_MAPPING for gf180mcu is used.
+    out = _run(monkeypatch, curated, native, mapping=None, deck="gf180mcu")
+    comparison = out["comparison"]
+    assert comparison["state"] == "not_comparable"
+    assert comparison["reason"] == cc.REASON_UNMAPPED_RULES_RAN
+    assert [g["id"] for g in comparison["groups"]] == ["contact.enclosure"]
+    assert comparison["groups"][0]["state"] == "agree_violations"
+    assert comparison["unmapped"]["curated"] == ["comp.width.1"]
+    assert comparison["unmapped"]["native"] == ["DF.1a_MV"]
+
+
+def test_reason_absent_when_agree_clean(monkeypatch):
+    c_kw, n_kw = _covered()
+    out = _run(
+        monkeypatch, _report(engine="curated", **c_kw), _report(engine="native", **n_kw)
+    )
+    assert out["comparison"]["state"] == "agree_clean"
+    assert "reason" not in out["comparison"]
+
+
+def test_reason_absent_when_disagreement(monkeypatch):
+    c_kw, n_kw = _covered()
+    out = _run(
+        monkeypatch,
+        _report(engine="curated", violations=[_violation("met1.1")], **c_kw),
+        _report(engine="native", **n_kw),
+    )
+    assert out["comparison"]["state"] == "disagreement"
+    assert "reason" not in out["comparison"]
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        DrcError("no klayout", code=CODE_KLAYOUT_UNAVAILABLE),
+        DrcError("deck exploded"),
+    ],
+)
+def test_reason_absent_on_native_side_failures(monkeypatch, exc):
+    curated = _report(engine="curated", checked=["met1.1"])
+    out = _run(monkeypatch, curated, exc)
+    assert out["comparison"]["state"] in ("native_unavailable", "engine_failed")
+    assert "reason" not in out["comparison"]
+
+
+def test_reason_absent_when_missing_native_deck(monkeypatch):
+    monkeypatch.setattr(
+        cc, "run_drc", lambda *a, **k: _report(engine="curated", checked=["a"])
+    )
+    out = cc.run_drc_crosscheck("x.gds", "sky130", None)
+    assert out["comparison"]["state"] == "native_unavailable"
+    assert "reason" not in out["comparison"]
 
 
 @pytest.mark.parametrize(
@@ -299,6 +418,27 @@ def test_cli_engine_both_emits_envelope_and_exit_code(monkeypatch, tmp_path, cap
     assert payload["comparison"]["state"] == "agree_clean"
 
 
+def test_cli_engine_both_text_prints_reason(monkeypatch, capsys):
+    """AC8 (issue #5720): `--format text` prints the reason next to the
+    comparison state."""
+    curated = _report(
+        engine="curated", checked=["comp.enclosing.contact.1", "comp.width.1"]
+    )
+    native = _report(engine="native", categories=["CO.4"], checked=["CO.4"])
+    out = _run(monkeypatch, curated, native, mapping=None, deck="gf180mcu")
+    monkeypatch.setattr(
+        "klayout_tools.cli.drc_cmd.run_drc_crosscheck", lambda *a, **k: out
+    )
+    monkeypatch.setattr(
+        "klayout_tools.cli.drc_cmd.pdk_module.drc_deck_file", lambda **k: "native.drc"
+    )
+    rc = main(["drc", "x.gds", "--engine", "both", "--deck", "gf180mcu"])
+    text = capsys.readouterr().out
+    assert rc == 0
+    assert "comparison: not_comparable" in text
+    assert "reason: unmapped_rules_ran" in text
+
+
 # --------------------------------------------------------------------------- #
 # Schema conformance against real engine reports
 # --------------------------------------------------------------------------- #
@@ -375,8 +515,11 @@ def test_crosscheck_envelope_validates_with_real_reports(tmp_path, monkeypatch):
         native_kwargs={"allow_missing_host_tools": True},
     )
     assert out["reports"]["native"]["engine"] == "klayout"
-    # Real decks and no mapping group: never an agreement.
+    # Real decks and no sky130 mapping group: never an agreement, and the
+    # reason names the empty mapping (schema-validated below with `reason`
+    # present, issue #5720).
     assert out["comparison"]["state"] == "not_comparable"
+    assert out["comparison"]["reason"] == cc.REASON_MAPPING_EMPTY
     _schema_validator().validate(out)
 
 
