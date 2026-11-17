@@ -53,14 +53,10 @@ from typing import (
 from . import _report_verify_hints as hints
 from . import signoff_foundry_cell as foundry_cell
 from . import signoff_nothing_checked as vacuous
+from ._git_tracked import is_untracked_working_tree_file, repo_scoped_candidates
 from ._jsongz import READ_ERRORS, open_text
 from ._jsonnum import is_number
-from ._provenance import (
-    INPUT_ROLE_LAYOUT,
-    is_untracked_working_tree_file,
-    layout_geometry_digest,
-    sha256_file,
-)
+from ._provenance import INPUT_ROLE_LAYOUT, layout_geometry_digest, sha256_file
 from .build_identity import build_version, version_report
 from .coverage import (
     RESULT_PARTIAL,
@@ -5249,16 +5245,9 @@ def _resolve_input_artifact_value(
     prefix, so it verifies only where that exact path still exists.
 
     **The grading basis is the git index, not the working tree** (issue
-    #5857): a candidate that sits inside a functioning git checkout whose
-    index does not track it is dropped here, before anything reads it.
-    Reading such a candidate made the render a function of the producing
-    host's working tree -- a gitignored scratch artifact verified ``True``
-    where it happened to lie and ``None`` in a fresh clone, moving
-    ``input_verified`` and, through it, the artifact-anchored T1 verdicts
-    between hosts. A candidate outside any functioning checkout keeps the
-    filesystem-presence behaviour: ``--repo-root`` (issue #2878) exists
-    precisely so a ``.git``-less copy still verifies, and trackedness
-    cannot be asked of a tree that has no index.
+    #5857): a candidate inside a functioning checkout whose index does
+    not track it is dropped here -- :mod:`klayout_tools._git_tracked`
+    holds the contract and the fallbacks.
     """
     candidates: list[str] = []
     if isinstance(value, str) and value:
@@ -5266,19 +5255,9 @@ def _resolve_input_artifact_value(
         if evidence_dir is not None and not os.path.isabs(value):
             candidates.append(os.path.join(evidence_dir, value))
     elif isinstance(value, Mapping) and value.get("scope") == "repo":
-        repo_relative = value.get("path")
-        if isinstance(repo_relative, str) and repo_relative:
-            root = (
-                repo_root
-                if repo_root is not None
-                else find_repo_root(evidence_dir or spec.get("cwd") or os.getcwd())
-            )
-            if root is not None:
-                candidates.append(os.path.join(root, repo_relative))
+        candidates.extend(repo_scoped_candidates(value, spec, evidence_dir, repo_root))
     return [
-        candidate
-        for candidate in dict.fromkeys(candidates)
-        if not is_untracked_working_tree_file(candidate)
+        c for c in dict.fromkeys(candidates) if not is_untracked_working_tree_file(c)
     ]
 
 
@@ -5357,13 +5336,6 @@ def _verify_input_artifact(
     digest computed differently from the one the producing run recorded
     would report drift that is an artifact of this module, not of the
     evidence.
-
-    The candidates come from :func:`_resolve_input_artifact_value`, whose
-    grading basis is the git index (issue #5857): a path inside a
-    functioning checkout that the index does not track is never read, so a
-    gitignored artifact beside the evidence reports ``None`` on every host
-    -- deterministically, not only in a fresh clone -- and the
-    artifact-anchored T1 items render their refusal identically everywhere.
     """
     if not isinstance(recorded_hash, str) or not recorded_hash:
         return None
