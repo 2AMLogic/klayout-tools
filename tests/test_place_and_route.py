@@ -5041,48 +5041,14 @@ def test_power_audit_specialnets_count_must_match_its_header():
     assert power_audit.parse_def_special_nets(miscounted) is None
 
 
-def test_power_audit_unavailable_prose_embeds_file_name_not_host_path(tmp_path):
-    """Issue #6146: ``unavailable_reason`` and the ``warnings[]`` that quote
-    it must name the DEF by file name, never its absolute path, so a lint-clean
-    (path-scrubbed) committed report still matches under ``--check --rerun``.
-    The ``def_path`` *field* keeps the full path (the path-field scrub handles
-    it)."""
+def test_power_audit_truncated_specialnets_grades_unavailable_not_complete(tmp_path):
+    """End to end: the truncated DEF must not satisfy the complete-grid gate
+    (counts `null`, `status` `"unknown"`, the run warned), and that gate's
+    prose names the DEF by file name, never its host path (issue #6146)."""
     unreadable = str(tmp_path / "gone.def")  # never written
     truncated = _write(tmp_path / "truncated.def", _TRUNCATED_SPECIALNETS_DEF)
     no_components = _write(tmp_path / "empty.def", "VERSION 5.8 ;\nEND DESIGN\n")
-
-    for def_path in (unreadable, truncated, no_components):
-        placed = power_audit.audit_power_delivery(
-            def_path=def_path,
-            unavailable_reason=None,
-            tapcell_master=None,
-            endcap_master=None,
-            filler_masters=(),
-            power_net="VPWR",
-            ground_net="VGND",
-            expect_fillers=False,
-        )
-        assert placed["evidence"] == "unavailable"
-        assert placed["def_path"] == def_path
-        name = os.path.basename(def_path)
-        prose = [placed["unavailable_reason"]]
-        for requested in (True, False):
-            prose += power_audit.power_delivery_warnings(
-                placed, power_requested=requested
-            )
-        for text in prose:
-            assert str(tmp_path) not in text, text
-        assert f"'{name}'" in placed["unavailable_reason"]
-
-
-def test_power_audit_truncated_specialnets_grades_unavailable_not_complete(tmp_path):
-    """End to end: the truncated DEF above must not satisfy the
-    complete-grid gate. Every count is `null`, `status` is `"unknown"`,
-    and the run is warned about rather than silently passing."""
-    def_path = _write(tmp_path / "truncated.def", _TRUNCATED_SPECIALNETS_DEF)
-
-    placed = power_audit.audit_power_delivery(
-        def_path=def_path,
+    kwargs = dict(
         unavailable_reason=None,
         tapcell_master="sky130_fd_sc_hd__tapvpwrvgnd_1",
         endcap_master=None,
@@ -5091,25 +5057,25 @@ def test_power_audit_truncated_specialnets_grades_unavailable_not_complete(tmp_p
         ground_net="VGND",
         expect_fillers=True,
     )
-
-    assert placed["evidence"] == "unavailable"
-    assert placed["status"] == "unknown"
-    assert placed["special_nets"] is None
-    assert placed["tapcells"] is None
-    assert "SPECIALNETS" in placed["unavailable_reason"]
-    assert power_audit.power_delivery_warnings(placed, power_requested=True)
-
-    # The same DEF with its final record terminated *is* a measurement --
-    # the gate rejects truncation, not this grid.
+    for def_path in (unreadable, truncated, no_components):
+        placed = power_audit.audit_power_delivery(def_path=def_path, **kwargs)
+        assert placed["evidence"] == "unavailable"
+        assert placed["status"] == "unknown"
+        assert placed["special_nets"] is None
+        assert placed["tapcells"] is None
+        assert placed["def_path"] == def_path  # field keeps the full path (#6146)
+        prose = [placed["unavailable_reason"]]
+        prose += power_audit.power_delivery_warnings(placed, power_requested=True)
+        prose += power_audit.power_delivery_warnings(placed, power_requested=False)
+        for text in prose:
+            assert str(tmp_path) not in text, text
+        assert f"'{os.path.basename(def_path)}'" in placed["unavailable_reason"]
+        if def_path == truncated:  # the truncated case alone names this gate
+            assert "SPECIALNETS" in placed["unavailable_reason"]
+            assert power_audit.power_delivery_warnings(placed, power_requested=True)
+    # The same DEF with its final record terminated *is* a measurement.
     complete = power_audit.audit_power_delivery(
-        def_path=_write(tmp_path / "complete.def", _COMPLETE_SPECIALNETS_DEF),
-        unavailable_reason=None,
-        tapcell_master="sky130_fd_sc_hd__tapvpwrvgnd_1",
-        endcap_master=None,
-        filler_masters=("sky130_fd_sc_hd__fill_1",),
-        power_net="VPWR",
-        ground_net="VGND",
-        expect_fillers=True,
+        def_path=_write(tmp_path / "complete.def", _COMPLETE_SPECIALNETS_DEF), **kwargs
     )
     assert complete["evidence"] == "def"
     assert complete["status"] == "complete"

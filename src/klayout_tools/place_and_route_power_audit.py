@@ -448,14 +448,13 @@ def audit_power_delivery(
     special_nets = parse_def_special_nets(text)
     if special_nets is None:
         # A `SPECIALNETS` section that is present but structurally broken
-        # (record count disagrees with its header, or the file stops
-        # mid-record). Its grid cannot be measured, and a short read of it
-        # would grade as a *smaller but complete-looking* grid -- so the
-        # whole block is unavailable evidence, not a measurement.
+        # (count vs header mismatch, or a file stopped mid-record) is
+        # unavailable evidence, not a measurement -- a short read grades as
+        # a smaller-but-complete-looking grid; ``or ''`` narrows the type.
         return _unavailable_block(
             def_path,
-            f"DEF {_def_label(def_path)} has a truncated or miscounted "
-            "SPECIALNETS section (its power grid cannot be measured)",
+            f"DEF '{os.path.basename(def_path or '')}' has a truncated or "
+            "miscounted SPECIALNETS section (its power grid cannot be measured)",
         )
     tapcells = masters.get(tapcell_master, 0) if tapcell_master else 0
     endcaps = masters.get(endcap_master, 0) if endcap_master else 0
@@ -489,18 +488,6 @@ def audit_power_delivery(
     }
 
 
-def _def_label(def_path: str) -> str:
-    """``def_path``'s file name, quoted, for message prose.
-
-    The ``def_path`` *field* already carries the absolute path; prose that
-    repeated it would embed a host path in ``warnings[]`` and
-    ``unavailable_reason``, which ``klt env-provenance lint-envelope``
-    rejects and ``--check --rerun`` cannot scrub-match (issue #6146). The
-    file name is enough to tell which DEF is meant.
-    """
-    return f"'{os.path.basename(def_path)}'"
-
-
 def _read_placed_masters(
     def_path: str | None, unavailable_reason: str | None
 ) -> tuple[str | None, dict[str, int] | None, str | None]:
@@ -515,13 +502,13 @@ def _read_placed_masters(
         return None, None, unavailable_reason or "no DEF was written by this run"
     text = read_def_text(def_path)
     if text is None:
-        return None, None, f"DEF {_def_label(def_path)} could not be read"
+        return None, None, f"DEF '{os.path.basename(def_path)}' could not be read"
     masters = parse_def_component_masters(text)
     if masters is None:
         return (
             None,
             None,
-            f"DEF {_def_label(def_path)} declares no COMPONENTS section "
+            f"DEF '{os.path.basename(def_path)}' declares no COMPONENTS section "
             "(truncated or not a DEF)",
         )
     return text, masters, None
