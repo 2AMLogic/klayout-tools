@@ -43,7 +43,7 @@ Translation from socket descriptor to LEF ``MACRO``
   ``(34, 10)``), which on some PDKs is a different datatype than the one
   the actual metal is drawn on (e.g. gf180mcu's ``(34, 0)``) -- both
   resolve to the same LEF layer (e.g. ``Metal1``), so searching every
-  sibling datatype (mirroring :func:`_resolve_obs`'s existing per-LEF-layer
+  sibling datatype (mirroring the OBS pipeline's existing per-LEF-layer
   union across datatypes) finds the real geometry a single-datatype search
   would silently miss (issue #1614). Falls back to a **synthesized** box
   (``width_um``/``height_um`` if declared, else the resolved tech LEF
@@ -85,15 +85,12 @@ from typing import Any
 
 from . import env_provenance
 from ._layout import load_layout, resolve_top_cell
-from ._provenance import build_provenance
-from .lef_header import read_lef_header
-from .pdk import (
-    PdkNotFoundError,
-    find_pdk,
-    lef_files,
-    load_gds_to_lef_layer_map,
-    resolve_klayout_layer_map,
+from ._provenance import INPUT_ROLE_LAYOUT, INPUT_ROLE_SOURCE, build_provenance
+from .lef_abstract_no_layout import (
+    resolve_dbu_um,
+    resolve_tech_context,
 )
+from .lef_abstract_resource import resolve_obs_regions, routing_resource
 from .socket_check import (
     GROUND_NAME_TOKENS,
     POWER_NAME_TOKENS,
@@ -143,7 +140,7 @@ class LefAbstractError(Exception):
 
 
 def run_lef_abstract(
-    layout_path: str,
+    layout_path: str | None,
     socket_path: str,
     *,
     macro_name: str,
@@ -186,6 +183,11 @@ def run_lef_abstract(
             "obs_mode": "detailed" | "coarse",
             "obs": [{"layer": str, "shape_count": int}, ...],
             "obs_shape_count": <int>,
+            "routing_resource": [  # issue #5677, additive
+                {"layer": <lef layer name>, "direction": str | None,
+                 "pitch_um": float | None, "obstructed_fraction": float,
+                 "free_tracks": int | None}, ...
+            ],
             "warnings": [...],
             "self_check": {
                 "status": "pass" | "fail",
@@ -232,13 +234,33 @@ def run_lef_abstract(
     rectangle minus the declared pin ports, so the OBS size is O(pins)
     rather than O(shapes). Echoed as the additive ``obs_mode`` report field.
 
+    ``routing_resource`` (issue #5677, additive -- no schema bump) reads the
+    same final OBS regions the abstract writes and reports, per routing
+    layer of the tech LEF, the fraction of the macro outline the OBS blocks
+    (after pin-port subtraction) and the count of preferred-direction
+    tracks whose full-length strip across the macro stays unobstructed --
+    the static figure a hierarchical floorplan needs to decide whether
+    over-macro feedthrough fits, in either ``obs_mode``. ``coarse``'s
+    whole-macro bounding rectangle normally leaves no free track on an
+    obstructed layer; ``detailed`` reports the real remainder. A layer
+    missing ``DIRECTION``/``PITCH``/``WIDTH`` reports ``free_tracks: null``
+    plus a ``warnings[]`` entry -- never a guessed track grid.
+
     Raises :class:`LefAbstractError` for a missing/unreadable layout or
     socket descriptor, an invalid ``obs_mode``, an ambiguous/missing top cell,
     an unresolvable PDK or tech LEF for ``cell_library``, a write failure, or
     a failure to read the written file back for its self-check.
     """
-    layout = load_layout(layout_path, LefAbstractError)
-    top_cell = resolve_top_cell(layout, top, LefAbstractError, path=layout_path)
+    # Issue #5714: ``layout_path=None`` is the layout-free (``--no-layout``)
+    # mode -- a black-box abstract emitted from the socket descriptor alone.
+    layout: Any = None
+    top_cell: Any = None
+    if layout_path is None:
+        if top is not None:
+            raise LefAbstractError("top has no meaning without a layout")
+    else:
+        layout = load_layout(layout_path, LefAbstractError)
+        top_cell = resolve_top_cell(layout, top, LefAbstractError, path=layout_path)
 
     try:
         descriptor = _load_descriptor(socket_path)
@@ -254,36 +276,10 @@ def run_lef_abstract(
     if symmetry is not None and not all(isinstance(s, str) and s for s in symmetry):
         raise LefAbstractError("symmetry must be a list of non-empty strings")
 
-    try:
-        pdk_info = find_pdk(variant=pdk_variant, root=pdk_root)
-    except PdkNotFoundError as exc:
-        raise LefAbstractError(str(exc)) from exc
-
-    lefs = lef_files(cell_library, variant=pdk_info["variant"], root=pdk_info["root"])
-    tech_lef = lefs["tech_lef"]
-    if tech_lef is None:
-        raise LefAbstractError(
-            f"tech LEF not found for standard-cell library '{cell_library}' "
-            f"under resolved PDK install '{pdk_info['variant']}' at "
-            f"'{pdk_info['root']}'"
-        )
-    tech_header = read_lef_header(tech_lef)
-    routing_layers = {
-        layer["name"]: layer
-        for layer in tech_header["layers"]
-        if layer["type"] == "ROUTING"
-    }
-
-    layer_map_path, _layer_map_resolution = resolve_klayout_layer_map(pdk_info)
-    if layer_map_path is None:
-        raise LefAbstractError(
-            f"no KLayout GDS<->LEF layer map found for resolved PDK install "
-            f"'{pdk_info['variant']}' -- cannot translate socket descriptor "
-            "layers into LEF layer names"
-        )
-    gds_to_lef = load_gds_to_lef_layer_map(layer_map_path)
-
-    dbu_um = layout.dbu
+    pdk_info, tech_lef, tech_header, routing_layers, gds_to_lef = resolve_tech_context(
+        cell_library, pdk_variant, pdk_root, LefAbstractError
+    )
+    dbu_um = resolve_dbu_um(layout, tech_header, tech_lef, LefAbstractError)
     outline = descriptor["outline"]
     origin_x_dbu = round(outline["x0"] / dbu_um)
     origin_y_dbu = round(outline["y0"] / dbu_um)
@@ -303,7 +299,7 @@ def run_lef_abstract(
         warnings=warnings,
     )
 
-    obs_report = _resolve_obs(
+    obs_regions = resolve_obs_regions(
         layout=layout,
         top_cell=top_cell,
         gds_to_lef=gds_to_lef,
@@ -316,6 +312,10 @@ def run_lef_abstract(
         dbu_um=dbu_um,
         obs_mode=obs_mode,
     )
+    obs_report = [
+        (name, [_polygon_to_um_shape(poly, dbu_um) for poly in region.each_merged()])
+        for name, region in sorted(obs_regions.items())
+    ]
 
     _write_lef(
         output_path=output_path,
@@ -343,13 +343,15 @@ def run_lef_abstract(
         deck_name=cell_library,
         deck_path=tech_lef,
         pdk=pdk_info,
-        input_path=layout_path,
+        input_path=layout_path if layout_path is not None else socket_path,
+        # Layout-free mode pins the descriptor (role "source") instead.
+        input_role=INPUT_ROLE_SOURCE if layout_path is None else INPUT_ROLE_LAYOUT,
     )
 
     return {
         "schema_version": SCHEMA_VERSION,
         # `{path, scope}` (issue #2703): the layout `provenance.input` hashes.
-        "file": env_provenance.repo_relative_path(layout_path),
+        "file": env_provenance.repo_relative_path(layout_path),  # None -> absent
         "socket": socket_path,
         "output": output_path,
         "macro_name": macro_name,
@@ -382,6 +384,16 @@ def run_lef_abstract(
             for layer_name, shapes in obs_report
         ],
         "obs_shape_count": sum(len(shapes) for _layer_name, shapes in obs_report),
+        # Issue #5677: per-routing-layer feedthrough figure computed from
+        # the same final OBS regions written above -- additive, no bump.
+        "routing_resource": routing_resource(
+            regions_by_layer=obs_regions,
+            routing_layers=routing_layers,
+            width_dbu=round(width_um / dbu_um),
+            height_dbu=round(height_um / dbu_um),
+            dbu_um=dbu_um,
+            warnings=warnings,
+        ),
         "warnings": warnings,
         "self_check": self_check,
         "power_pins": power_pins,
@@ -415,8 +427,8 @@ def _invert_gds_to_lef(
     Used by :func:`_resolve_pins` to search every GDS datatype that shares a
     pin's resolved LEF layer *name* for drawn geometry -- not just the
     single ``(layer, datatype)`` the socket descriptor's ``pins[].layer``
-    happens to declare -- mirroring :func:`_resolve_obs`'s existing
-    per-LEF-layer union across every GDS datatype. Necessary because a PDK
+    happens to declare -- mirroring the OBS pipeline's own per-LEF-layer
+    union across every GDS datatype. Necessary because a PDK
     can (and open_pdks' own gf180mcu convention does) put a routing layer's
     drawn metal and its pin/net text label on two different datatypes of
     the same LEF layer; see issue #1614.
@@ -479,8 +491,8 @@ def _resolve_pins(
     """Resolve each descriptor pin's LEF layer, direction/use, and port
     geometry. Returns ``(pins_report, pin_boxes_by_lef_layer_dbu)`` -- the
     second value (macro-local dbu boxes, keyed by LEF layer name) is reused
-    by :func:`_resolve_obs` to subtract declared pin geometry back out of
-    the obstruction region.
+    by :func:`~klayout_tools.lef_abstract_resource.resolve_obs_regions` to
+    subtract declared pin geometry back out of the obstruction region.
     """
     import klayout.db as kdb
 
@@ -530,7 +542,11 @@ def _resolve_pins(
         y_dbu = round(pin["y"] / dbu_um)
         point = kdb.Point(x_dbu, y_dbu)
 
-        drawn_boxes = _match_drawn_boxes(layout, top_cell, search_layers, point)
+        drawn_boxes = (
+            _match_drawn_boxes(layout, top_cell, search_layers, point)
+            if layout is not None
+            else []
+        )
 
         if drawn_boxes:
             geometry_source = "drawn"
@@ -543,7 +559,9 @@ def _resolve_pins(
                     pin, lef_layer, routing_layers, x_dbu, y_dbu, dbu_um
                 )
             ]
-            if len(search_layers) > 1:
+            if layout is None:
+                searched_desc = "no layout (declaration-only abstract)"
+            elif len(search_layers) > 1:
                 sibling_desc = ", ".join(
                     f"{layer}/{datatype}" for layer, datatype in search_layers[1:]
                 )
@@ -694,78 +712,6 @@ def _synthesized_pin_box(
 # --------------------------------------------------------------------------- #
 # OBS
 # --------------------------------------------------------------------------- #
-
-
-def _resolve_obs(
-    *,
-    layout: Any,
-    top_cell: Any,
-    gds_to_lef: dict[tuple[int, int], str],
-    routing_layers: dict[str, dict[str, Any]],
-    pin_boxes_by_layer: dict[str, list[tuple[int, int, int, int]]],
-    origin_x_dbu: int,
-    origin_y_dbu: int,
-    width_dbu: int,
-    height_dbu: int,
-    dbu_um: float,
-    obs_mode: str = "detailed",
-) -> list[tuple[str, list[dict[str, Any]]]]:
-    """Build the obstruction geometry: every shape drawn on a GDS layer that
-    maps to a routing-type LEF layer, unioned per LEF layer, shifted into
-    macro-local coordinates, clipped to the outline, and with the declared
-    pin ports subtracted back out.
-
-    Returns ``[(lef_layer_name, [shape, ...]), ...]``, sorted by layer name,
-    skipping layers with no resulting geometry. Each ``shape`` is already
-    converted to **micrometres** (macro-local) so :func:`_write_lef` never
-    touches ``kdb`` objects: ``{"kind": "rect", "rect_um": [x0, y0, x1, y1]}``
-    for an axis-aligned box (the common case), or ``{"kind": "polygon",
-    "points_um": [[x, y], ...]}`` for anything else (e.g. an L-shaped region
-    left after subtracting a pin's port) -- LEF's ``OBS``/``PORT`` sections
-    accept both a ``RECT`` and a ``POLYGON`` statement.
-    """
-    import klayout.db as kdb
-
-    regions_by_layer: dict[str, Any] = {}
-    for layer_index in layout.layer_indexes():
-        info = layout.get_info(layer_index)
-        lef_layer = gds_to_lef.get((info.layer, info.datatype))
-        if lef_layer is None or lef_layer not in routing_layers:
-            continue
-        region = kdb.Region(top_cell.begin_shapes_rec(layer_index))
-        if region.is_empty():
-            continue
-        regions_by_layer.setdefault(lef_layer, kdb.Region()).__iadd__(region)
-
-    outline_box_dbu = kdb.Box(
-        origin_x_dbu, origin_y_dbu, origin_x_dbu + width_dbu, origin_y_dbu + height_dbu
-    )
-    local_outline_box = kdb.Box(0, 0, width_dbu, height_dbu)
-    translation = kdb.Trans(kdb.Vector(-origin_x_dbu, -origin_y_dbu))
-
-    result: list[tuple[str, list[dict[str, Any]]]] = []
-    for lef_layer in sorted(regions_by_layer):
-        region = regions_by_layer[lef_layer]
-        region.merge()
-        region = region & kdb.Region(outline_box_dbu)
-        region = region.transformed(translation)
-        if obs_mode == "coarse" and not region.is_empty():
-            # Issue #4283: one bounding rectangle per layer; the pin
-            # subtraction below keeps declared ports unblocked.
-            region = kdb.Region(region.bbox())
-
-        pin_boxes = pin_boxes_by_layer.get(lef_layer)
-        if pin_boxes:
-            pin_region = kdb.Region([kdb.Box(*box) for box in pin_boxes])
-            region = region - pin_region
-        region.merge()
-        region &= kdb.Region(local_outline_box)
-
-        shapes = [_polygon_to_um_shape(poly, dbu_um) for poly in region.each_merged()]
-        if shapes:
-            result.append((lef_layer, shapes))
-
-    return result
 
 
 def _polygon_to_um_shape(polygon: Any, dbu_um: float) -> dict[str, Any]:
