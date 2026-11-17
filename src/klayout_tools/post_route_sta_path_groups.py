@@ -1,7 +1,9 @@
 """Worst-path-record parsing for ``klt sta``: the per-path-group
 ``find_timing_paths`` block, the single ``worst_setup_path`` /
-``worst_hold_path`` records reduced from it (issue #2740), and the unreduced
-``worst_paths_by_group`` list (issue #5424).
+``worst_hold_path`` records reduced from it (issue #2740), the unreduced
+``worst_paths_by_group`` list (issue #5424), and the per-port ``port_paths``
+block and records a ``constraints.report_ports`` request emits (issue
+#3042).
 
 Split out of :mod:`klayout_tools.post_route_sta` to keep that module under its
 file-size ceiling, the same way :mod:`klayout_tools.post_route_sta_electrical`
@@ -9,9 +11,10 @@ was (issues #3005, #5241). ``post_route_sta`` re-imports every name here, so
 existing ``post_route_sta._parse_worst_path_rows`` etc. references keep
 working.
 
-The Tcl that produces the block (``_worst_path_lines``) stays in
-``post_route_sta`` with the rest of the generated script; only the markers it
-prints and the parsers that read them live here.
+The Tcl that produces these blocks (``_worst_path_lines`` and
+``_port_path_lines``) stays in ``post_route_sta`` with the rest of the
+generated script; only the markers they print and the parsers that read them
+live here.
 """
 
 from __future__ import annotations
@@ -238,3 +241,114 @@ def _worst_paths_by_group(stdout: str) -> dict[str, Any]:
             for row in sorted(rows["min"], key=lambda row: row["slack_ns"])
         ],
     }
+
+
+#: Issue #3042: brackets the per-port worst-path records
+#: (:func:`post_route_sta._port_path_lines`) a ``constraints.report_ports``
+#: request emits. Per requested port: one ``DIR\t<port>\t<direction>`` row,
+#: then ``PATH\t<port>\t<max|min>\t<check_role>\t<slack_s>\t<startpoint>\t
+#: <endpoint>`` rows (an ``inout`` port contributes its ``-from`` and its
+#: ``-to`` paths), or a single ``ERROR\t<port>\t<message>`` row when that
+#: port's query failed. Moved here verbatim (issue #5754) so the per-instance
+#: parser in ``post_route_sta_instance_paths`` can sit beside its own
+#: markers without growing ``post_route_sta`` past its file-size ceiling;
+#: ``post_route_sta`` re-imports every name below.
+_PORT_PATHS_BEGIN = "===KLT_STA_PORT_PATHS_BEGIN==="
+_PORT_PATHS_END = "===KLT_STA_PORT_PATHS_END==="
+
+
+def _apply_port_record(
+    parts: list[str],
+    line: str,
+    directions: dict[str, str],
+    port_rows: dict[str, list[dict[str, Any]]],
+) -> str | None:
+    """Fold one ``DIR``/``PATH``/``ERROR`` record into ``directions`` /
+    ``port_rows``; return a failure reason when the record is bad, else
+    ``None``."""
+    kind, port = parts[0], parts[1]
+    if kind == "ERROR":
+        return "engine path introspection failed: " + "\t".join(parts[2:]).strip()
+    if kind == "DIR":
+        if len(parts) != 3 or not parts[2]:
+            return f"malformed port record: {line!r}"
+        directions[port] = "inout" if parts[2] == "bidirect" else parts[2]
+        return None
+    if len(parts) != 7 or parts[2] not in ("max", "min") or not all(parts[3:]):
+        return f"malformed port path record: {line!r}"
+    try:
+        slack_s = float(parts[4])
+    except ValueError:
+        return f"malformed port path slack: {line!r}"
+    if slack_s != slack_s or abs(slack_s) == float("inf"):
+        return f"non-finite port path slack: {line!r}"
+    port_rows[parts[2]].append(
+        {
+            "engine_check_role": parts[3],
+            "slack_ns": slack_s * 1e9,
+            "startpoint": parts[5],
+            "endpoint": parts[6],
+        }
+    )
+    return None
+
+
+def _parse_port_path_rows(
+    stdout: str, ports: list[str]
+) -> dict[str, tuple[str | None, dict[str, list[dict[str, Any]]] | None, str | None]]:
+    """``{port: (direction, rows, reason)}`` from ``post_route_sta``'s
+    ``_port_path_lines`` block, in request order. ``rows`` is
+    ``{"max": [...], "min": [...]}`` (``None`` with a ``reason`` when the
+    port's query failed, its record was malformed, or the block/port is
+    absent). Lines that are neither ``DIR``, ``PATH`` nor ``ERROR`` rows
+    (stray engine warnings) are ignored."""
+    block = _extract_block(stdout, _PORT_PATHS_BEGIN, _PORT_PATHS_END)
+    if block is None:
+        reason = "per-port path records absent from engine output"
+        return {port: (None, None, reason) for port in ports}
+    directions: dict[str, str] = {}
+    rows: dict[str, dict[str, list[dict[str, Any]]]] = {
+        port: {"max": [], "min": []} for port in ports
+    }
+    failures: dict[str, str] = {}
+    for line in block.splitlines():
+        parts = line.split("\t")
+        if parts[0] not in ("DIR", "PATH", "ERROR") or len(parts) < 2:
+            continue
+        port = parts[1]
+        if port not in rows or port in failures:
+            continue
+        failure = _apply_port_record(parts, line, directions, rows[port])
+        if failure is not None:
+            failures[port] = failure
+    parsed: dict[
+        str, tuple[str | None, dict[str, list[dict[str, Any]]] | None, str | None]
+    ] = {}
+    for port in ports:
+        if port in failures:
+            parsed[port] = (directions.get(port), None, failures[port])
+        elif port not in directions:
+            parsed[port] = (None, None, "no record emitted for this port")
+        else:
+            parsed[port] = (directions[port], rows[port], None)
+    return parsed
+
+
+def _port_paths(stdout: str, report_ports: list[str]) -> dict[str, dict[str, Any]]:
+    """``port_paths`` for one session (issue #3042): per requested port, in
+    request order, its ``direction`` and the worst ``setup``/``hold``
+    records. There is no per-port aggregate to cross-check against, so
+    ``consistent_with_aggregate`` stays ``null`` and ``inconsistent`` is
+    never produced; a side with no constrained path is ``no_paths``."""
+    result: dict[str, dict[str, Any]] = {}
+    for port, (direction, rows, reason) in _parse_port_path_rows(
+        stdout, report_ports
+    ).items():
+        if rows is None:
+            setup = _empty_path_record("unavailable", reason)
+            hold = _empty_path_record("unavailable", reason)
+        else:
+            setup = _worst_path_record(rows["max"], None)
+            hold = _worst_path_record(rows["min"], None)
+        result[port] = {"direction": direction, "setup": setup, "hold": hold}
+    return result
