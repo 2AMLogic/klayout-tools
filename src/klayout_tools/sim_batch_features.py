@@ -8,6 +8,7 @@ non-empty ``missing`` list.
 
 from __future__ import annotations
 
+import os
 import re
 from typing import Any
 
@@ -116,25 +117,77 @@ def annotate_unrecovered_failure(corners: list[dict[str, Any]], exit_code: int) 
 # --- runner models_lib hash comparison (issue #5321) ---
 
 
+def _sha256_or_none(value: Any) -> str | None:
+    """``value`` lower-cased when it is a 64-hex digest, else ``None`` -- one
+    rule for every digest lifted out of a runner's report, so a malformed
+    value can never reach a report as if it were a hash."""
+    if isinstance(value, str) and re.fullmatch(r"[0-9a-fA-F]{64}", value):
+        return value.lower()
+    return None
+
+
 def runner_models_lib_sha256(report: dict[str, Any] | None) -> str | None:
     """The model-library hash the runner's own ``klt sim`` reported (issue
     #5321): ``environment.models_lib_sha256`` of the collected inner report,
     i.e. the card the worker actually resolved. ``None`` when absent or not a
     64-hex string (older runner, error envelope, malformed report)."""
     env = report.get("environment") if isinstance(report, dict) else None
-    value = env.get("models_lib_sha256") if isinstance(env, dict) else None
-    if isinstance(value, str) and re.fullmatch(r"[0-9a-fA-F]{64}", value):
-        return value.lower()
-    return None
+    return _sha256_or_none(
+        env.get("models_lib_sha256") if isinstance(env, dict) else None
+    )
+
+
+def _lifted_osdi_entry(entry: Any) -> dict[str, Any]:
+    """One ``{name, sha256}`` from a runner ``environment.osdi_preload``
+    entry, each field ``None`` when it is absent or malformed."""
+    name = entry.get("name") if isinstance(entry, dict) else None
+    sha256 = entry.get("sha256") if isinstance(entry, dict) else None
+    return {
+        "name": name if isinstance(name, str) and name else None,
+        "sha256": _sha256_or_none(sha256),
+    }
+
+
+def runner_osdi_preload(report: dict[str, Any] | None) -> list[dict[str, Any]] | None:
+    """The OSDI objects the runner's own ``klt sim`` loaded (issue #5562):
+    ``environment.osdi_preload`` of the collected inner report, lifted to
+    ``[{name, sha256}]`` in declared order.
+
+    The runner is not a reduced klt -- it runs a full
+    ``--backend local-parallel`` sweep, whose on-host settling expands and
+    existence-checks every entry and hashes the bytes it opened
+    (``sim._model_file_entries``). So the digest a runner-resolved,
+    image-baked ``.osdi`` otherwise has nowhere to come from already exists
+    one level down; this only lifts it.
+
+    ``None`` -- not ``[]`` -- when the key is absent or not a list, so
+    "older runner / unreported" stays distinguishable from "this request
+    declared no OSDI objects".
+
+    A malformed entry keeps its **slot**, with ``None`` fields, rather than
+    being dropped: the array is index-aligned with the client's declared
+    ``options.osdi_preload`` (``sim_staging._osdi_forward_order`` forwards it
+    index-for-index), and that alignment is the join key
+    (:func:`attach_runner_osdi_digests`). Dropping an entry would shift every
+    later index and attribute one object's bytes to another -- strictly worse
+    than reporting one digest as unknown.
+    """
+    env = report.get("environment") if isinstance(report, dict) else None
+    entries = env.get("osdi_preload") if isinstance(env, dict) else None
+    if not isinstance(entries, list):
+        return None
+    return [_lifted_osdi_entry(entry) for entry in entries]
 
 
 def collected_report_env(status: Any, report: dict[str, Any]) -> dict[str, Any]:
     """Environment keys derived from the collected inner report: the exit
-    reason plus ``runner_models_lib_sha256`` (``None`` when unreported, so
-    "unknown" is visible)."""
+    reason plus ``runner_models_lib_sha256`` (#5321) and
+    ``runner_osdi_preload`` (#5562) -- each ``None`` when unreported, so
+    "unknown" is visible."""
     return {
         **exit_reason_env(status, report),
         "runner_models_lib_sha256": runner_models_lib_sha256(report),
+        "runner_osdi_preload": runner_osdi_preload(report),
     }
 
 
@@ -183,6 +236,93 @@ def attach_models_lib_comparison(environment: dict[str, Any], backend: str) -> N
         entry["models_lib_comparison"] = _compare_models_lib(
             entry.get("runner_models_lib_sha256"), client_sha, staged=staged
         )
+
+
+# --- runner OSDI digests joined onto the declared entries (issue #5562) ---
+
+
+def _collected_runner_osdi_preload(remote: dict[str, Any]) -> list[Any] | None:
+    """The one :func:`runner_osdi_preload` array a whole batch run agrees on,
+    or ``None``.
+
+    A single job answers for itself. A sharded run (``fleet[]``) ran the *same*
+    request on every shard, so every shard must report the same objects: a
+    disagreement means two hosts loaded different bytes and a lost or
+    field-less shard means the fleet has no answer. Both are ``None`` --
+    "unknown" -- rather than one shard's array standing for all of them, the
+    same fail-safe posture :func:`fleet_runner_compatibility` takes.
+    """
+    fleet = remote.get("fleet")
+    if not isinstance(fleet, list):
+        lifted = remote.get("runner_osdi_preload")
+        return lifted if isinstance(lifted, list) else None
+    shards = [
+        member.get("runner_osdi_preload") if isinstance(member, dict) else None
+        for member in fleet
+    ]
+    if not shards or any(not isinstance(shard, list) for shard in shards):
+        return None
+    return shards[0] if all(shard == shards[0] for shard in shards) else None
+
+
+def _joined_osdi_sha256(entry: dict[str, Any], lifted: list[Any] | None) -> str | None:
+    """The runner digest for one ``osdi_preload_runner_resolved`` entry, by
+    its declared ``index`` -- ``None`` whenever that cannot be established.
+
+    The index is the join key, never the ``entry`` string: a declared list may
+    name the same entry twice, and a string match would then be ambiguous.
+    The runner's reported file ``name`` corroborates it -- for a runner-resolved
+    entry the basename survives expansion (``$PDK_ROOT/<rel>`` and a path under
+    ``models.pdk_root`` both keep it), so a name that disagrees means the two
+    arrays do not line up and the digest describes some *other* object. Report
+    nothing rather than the wrong bytes.
+    """
+    index = entry.get("index")
+    if lifted is None or not isinstance(index, int) or isinstance(index, bool):
+        return None
+    if not 0 <= index < len(lifted):
+        return None
+    reported = lifted[index]
+    if not isinstance(reported, dict):
+        return None
+    name = reported.get("name")
+    declared = entry.get("entry")
+    if (
+        isinstance(name, str)
+        and isinstance(declared, str)
+        and os.path.basename(declared) != name
+    ):
+        return None
+    return _sha256_or_none(reported.get("sha256"))
+
+
+def attach_runner_osdi_digests(environment: dict[str, Any], backend: str) -> None:
+    """Give each ``environment.osdi_preload_runner_resolved`` entry the digest
+    the runner computed for it (issue #5562), in place; batch backend only.
+
+    The entry named an image-baked ``.osdi`` and why the runner owned it and
+    stopped there, so a consumer recording the report as provenance could not
+    say which OSDI bytes produced the result -- and the only substitute within
+    reach was the submitting host's own hash of a file the runner never read.
+    This fills the gap with the runner's own digest, or leaves the explicit
+    ``null`` :func:`sim_osdi_settle.osdi_runner_environment_fields` wrote.
+    Never a client-side hash: a wrong digest is worse than an absent one.
+
+    Purely additive and never fatal -- an absent, unestablished or
+    disagreeing digest is ``null``, with no diagnostic and no effect on the
+    run's status. The SSH ``remote`` backend is skipped (#5321's batch-only
+    precedent for this field family); its entries keep their ``null``.
+    """
+    entries = environment.get("osdi_preload_runner_resolved")
+    remote = environment.get("remote")
+    if backend != "batch" or not isinstance(entries, list):
+        return
+    if not isinstance(remote, dict):
+        return
+    lifted = _collected_runner_osdi_preload(remote)
+    for entry in entries:
+        if isinstance(entry, dict):
+            entry["sha256"] = _joined_osdi_sha256(entry, lifted)
 
 
 # --- sharded-report top-level roll-ups (issue #5522) ---
@@ -258,8 +398,10 @@ def attach_fleet_rollups(environment: dict[str, Any], backend: str) -> None:
 def finalize_batch_remote(environment: dict[str, Any], backend: str) -> None:
     """Every post-processing step the finished ``environment.remote`` block
     gets, in one call for :func:`klayout_tools.sim.apply_engine_host`:
-    :func:`attach_models_lib_comparison` (#5321) and
-    :func:`attach_fleet_rollups` (#5522). Each is independently a no-op off
-    the batch backend, so this is safe to call for any off-host backend."""
+    :func:`attach_models_lib_comparison` (#5321),
+    :func:`attach_fleet_rollups` (#5522) and
+    :func:`attach_runner_osdi_digests` (#5562). Each is independently a no-op
+    off the batch backend, so this is safe to call for any off-host backend."""
     attach_models_lib_comparison(environment, backend)
     attach_fleet_rollups(environment, backend)
+    attach_runner_osdi_digests(environment, backend)

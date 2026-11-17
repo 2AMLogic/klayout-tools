@@ -92,6 +92,7 @@ import re
 import subprocess
 from typing import Any
 
+from ._text import read_text as _read_text
 from .lef_header import parse_lef_header
 
 #: Re-exported (self-aliased so linters recognise the re-export as
@@ -1871,23 +1872,6 @@ def _not_found_message(candidates: list[tuple[str, str]], variant: str | None) -
         "`ciel enable --pdk-family sky130 <version>` "
         "(or build open_pdks with `make install`)."
     )
-
-
-def _read_text(path: str) -> str | None:
-    """Read ``path`` as UTF-8 text, or ``None`` if missing/unreadable.
-
-    Stays defined here (rather than moving into :mod:`klayout_tools.pdk_cells`
-    with the rest of the `klt pdk cells` region, issue #1884) because
-    :func:`lef_files` below also calls it -- :mod:`klayout_tools.pdk_cells`
-    imports it back from here instead.
-    """
-    if not os.path.isfile(path):
-        return None
-    try:
-        with open(path, encoding="utf-8", errors="replace") as handle:
-            return handle.read()
-    except OSError:
-        return None
 
 
 # --------------------------------------------------------------------------- #
