@@ -3074,6 +3074,7 @@ def test_res_array_series_ports_note_and_drc_clean(tmp_path, pdk_root, extra):
     assert report["drc_hints"]["matched_group_id"] == f"res_array:{num}"
     notes = " ".join(report["drc_hints"]["notes"])
     assert f"{num - 1} joint jumper" in notes
+    assert "combine_devices" in notes
     drc_report = run_drc(str(output), "sky130")
     assert drc_report["status"] == "clean", drc_report["violations"]
 
