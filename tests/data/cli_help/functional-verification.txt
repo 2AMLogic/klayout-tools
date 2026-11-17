@@ -15,6 +15,18 @@ positional arguments:
 
 options:
   -h, --help show this help message and exit
-  --mutations PROPOSALS_PATH run mutation testing (issue #1592): a path to a <proposals> JSON document (schema klt.functional_verification.mutation_proposals/1) naming byte-exact source mutations to apply, one at a time, to an isolated build+test of the same <request>. Aborts with exit 1 if the request's own baseline run fails first -- see docs/cli/functional- verification.md, '--mutations'
+  --mutations PROPOSALS_PATH run mutation testing (issue #1592): a path to a <proposals> JSON document (schema klt.functional_verification.mutation_proposals/1) naming byte-exact source mutations to apply, one at a time, to an isolated build+test of the same <request>. Aborts with exit 1 if the request's own baseline run fails first -- see docs/cli/functional- verification.md, '--mutations' (example below)
   -o, --outdir OUTDIR write run artifacts (results XML, logs, simulator build directory, coverage, trace, mutants/) here instead of `.klt/functional-verification/` next to the request file; created if missing, relative paths resolve against the cwd. Request-relative source paths still resolve against the request's own directory
   --format {text,json} output format (default: text)
+
+--mutations <proposals> example (every required field filled):
+{
+  "schema": "klt.functional_verification.mutation_proposals/1",
+  "scope": [ "<a path from request.sources, byte-for-byte>"
+  ],
+  "proposals": [ { "index": 1, "category": "operator", "file": "<same string as in scope>", "line": 10, "original_code": "<the byte-exact source line>", "mutated_code": "<the replacement line>" }
+  ]
+}
+`index` is 1-based and unique; `scope` entries and `file` must repeat a `request.sources` string exactly.
+All validation errors are reported in one run.
+Full field table: docs/cli/functional-verification.md

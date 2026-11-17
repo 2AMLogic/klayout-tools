@@ -3127,6 +3127,7 @@ from .functional_verification_mutation_proposals import (  # noqa: E402, F401
     _validate_mutation_scope,
     _validate_proposal_indices,
     load_mutation_proposals,
+    parse_mutation_proposals,
 )
 from .functional_verification_mutation_variant import (  # noqa: E402, F401
     _build_and_test_variant,
