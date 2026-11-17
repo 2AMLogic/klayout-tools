@@ -50,7 +50,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import sim_crossings_dc, sim_supply_relative, sim_window
+from . import sim_crossings_dc, sim_measurement_kind, sim_supply_relative, sim_window
 from ._jsonnum import is_number
 from .sim_crossings_reduce import reduce_crossings, validate_reduce
 from .sim_errors import SimError
@@ -74,7 +74,7 @@ _VECTOR_PREFIX = "__klt_xing_"
 
 def is_crossings(spec: dict[str, Any]) -> bool:
     """Whether a ``measurements[]`` entry is declared with ``crossings``."""
-    return spec.get("crossings") is not None
+    return sim_measurement_kind.declares(spec, "crossings")
 
 
 def crossings_measurements(
@@ -266,9 +266,13 @@ def validate_crossings_context(
 # --------------------------------------------------------------------------- #
 
 
+#: Prefix of the rawfile each crossings measurement writes per corner.
+_RAWFILE_PREFIX = "crossings"
+
+
 def rawfile_path(corner_dir: str, index: int) -> str:
     """Where crossings measurement number ``index`` writes its rawfile."""
-    return os.path.join(corner_dir, f"crossings_{index}.raw")
+    return sim_measurement_kind.rawfile_path(corner_dir, _RAWFILE_PREFIX, index)
 
 
 def control_lines(
@@ -399,16 +403,17 @@ def extract_corner_crossings(
     supply-relative ``level`` is resolved against), read from the rawfiles
     :func:`control_lines` asked ngspice to write. Never raises: an unreadable
     or missing rawfile becomes that measurement's own ``error``."""
-    outcomes: dict[int, CrossingsOutcome] = {}
-    index = 0
-    for position, spec in enumerate(measurements_spec):
-        if not is_crossings(spec):
-            continue
-        outcomes[position] = _extract_one(
-            spec, rawfile_path(corner_dir, index), supply_v, kind
-        )
-        index += 1
-    return outcomes
+
+    def extract(spec: dict[str, Any], raw_path: str) -> CrossingsOutcome:
+        return _extract_one(spec, raw_path, supply_v, kind)
+
+    return sim_measurement_kind.extract_indexed(
+        measurements_spec,
+        corner_dir,
+        prefix=_RAWFILE_PREFIX,
+        predicate=is_crossings,
+        extractor=extract,
+    )
 
 
 def _extract_one(
