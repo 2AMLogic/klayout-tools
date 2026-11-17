@@ -8709,6 +8709,12 @@ def test_merge_def_to_gds_success(tmp_path):
             "unrepaired": [],
         },
         "via_pad_trim": _skipped_via_pad_trim("sky130A"),
+        # Issue #5700: no layer map resolved, so nothing to stage.
+        "pin_conductor": {
+            "status": "skipped",
+            "reason": "no layer map resolved",
+            "layers": [],
+        },
     }
 
 
@@ -8838,6 +8844,8 @@ def test_merge_def_to_gds_applies_family_fallback_layer_map_for_gf180mcu(tmp_pat
             "unrepaired": [],
         },
         "via_pad_trim": _skipped_via_pad_trim("gf180mcuC"),
+        # Issue #5700: no dual-purpose (split NET / PIN) layer in this map.
+        "pin_conductor": {"status": "unchanged", "layers": []},
     }
 
 

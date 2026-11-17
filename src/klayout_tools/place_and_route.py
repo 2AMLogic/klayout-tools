@@ -2109,6 +2109,7 @@ def _run_single_corner(
     def_net_names_info: dict[str, Any] | None = None
     min_area_repair_info: dict[str, Any] | None = None
     via_pad_trim_info: dict[str, Any] | None = None
+    pin_conductor_info: dict[str, Any] | None = None
     gds_dbu_um: float | None = None
     if target_stage == "route":
         def_path = os.path.join(output_dir, f"{hdl_toplevel}.def")
@@ -2137,6 +2138,7 @@ def _run_single_corner(
         def_net_names_info = merge_info["def_net_names"]
         min_area_repair_info = merge_info["min_area_repair"]
         via_pad_trim_info = merge_info.get("via_pad_trim")
+        pin_conductor_info = merge_info.get("pin_conductor")
         # `request.post_route_spef` (issue #948, Epic #700 Phase 3): real
         # routed-geometry parasitics, via `klt extract --parasitics` against
         # the GDS just merged above, fed back into a fresh OpenSTA session
@@ -2530,6 +2532,14 @@ def _run_single_corner(
         # `"skipped"` and its GDS is untouched). `null` unless
         # `stage_reached` is `"route"`.
         "via_pad_trim": via_pad_trim_info,
+        # Additive field (issue #5700): whether the DEF->GDS merge also drew
+        # each top-level DEF pin on its routing layer's *conductor* pair.
+        # `status` is `"staged"` (a derived layer map was applied; `layers[]`
+        # names each layer), `"unchanged"` (no layer declares NET and PIN
+        # purposes on separate lines) or `"skipped"` (`reason` says why).
+        # `layer_map` still names the PDK's own map. `null` unless
+        # `stage_reached` is `"route"`.
+        "pin_conductor": pin_conductor_info,
         # Additive field (issue #4482): the dbu (um) of the merged `gds_path`
         # -- the tech LEF's native dbu unless `request.output_dbu_um` refined
         # it. `null` unless `stage_reached` is `"route"`, mirroring `gds_path`.
