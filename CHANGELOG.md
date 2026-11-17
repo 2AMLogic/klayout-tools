@@ -14,6 +14,26 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt lvs --deck` is the command-line spelling of the request's
+  `layout.deck` field** (#5899, 2026-11-17): the curated extraction deck for
+  inline layout extraction, the same knob `klt extract --deck` sets (issue
+  #5733). A request document that already sets `layout.deck` is refused with
+  a clean error (exit 1) — a flag never silently overrides a request
+  document — and the flag is refused with `--check`. It never sets
+  `reference.deck` (the reference-netlist rewriting deck — a different knob,
+  reached through the runset's `--deck-file`/`--deck-var`). Additive request
+  surface; no `schema_version` bump.
+- **Inventory-driven `klt signoff --attest` envelopes record the klayout
+  engine version** (#6043, 2026-11-17): `build_attestation` (items 1, 8, 9
+  and 10, issue #5690) hardcoded `provenance.klayout_version: null` where its
+  stream twin (`--attest 2 --hash-kind …`) already recorded the engine. It
+  now populates the field the same way: the `klayout` build resolved into the
+  attesting process — the engine a declared `checks[].argv` command that
+  imports `klayout.db` actually ran against — and `null` when `klayout` is
+  not importable. Emission-affecting and additive; no `schema_version` bump.
+  Like `klt_version`, the field sits in the `--check`/`--rerun` exclusion
+  set, so committed evidence re-checked across a klayout upgrade still
+  reports `match`.
 - **`klt sim --attach <batch-shards.json>` accepts a map written by a
   `--hosts N` / `remote.hosts: N` run** (#5777, 2026-11-17): `--attach` and
   `--collect-partial` refused every `hosts != 1` request with "requires backend
