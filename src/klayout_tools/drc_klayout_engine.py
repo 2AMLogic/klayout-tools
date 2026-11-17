@@ -36,11 +36,11 @@ from .drc import (
     CODE_NEGATIVE_CONTROL_FAILED,
     SCHEMA_VERSION,
     DrcError,
-    _attribute_to_instance,
 )
 from .drc_deck_includes import _deck_script_files
 from .drc_klayout_abort import deck_abort_info, deck_aborted_error
 from .drc_klayout_app import _preflight_klayout_version, _resolve_klayout_executable
+from .drc_klayout_attribution import _attribute_violations_to_instances
 from .drc_klayout_launch import launch_klayout_deck
 from .pdk import PdkNotFoundError, find_pdk_for_deck
 
@@ -132,13 +132,7 @@ def _parse_klayout_rdb_report(
     from RDB XML alone), and ``violations[].layer`` echoes the same rule id
     (an external deck's own category naming is the only per-violation layer
     identity available). ``source_cell``/``source_path`` are left ``None``
-    here -- per-instance attribution needs this module's own instance-tree
-    walk against the *input* layout, which an RDB report does not carry, and
-    this parser stays deliberately layout-free. The caller
-    (:func:`run_drc_klayout_engine`, which holds the loaded layout and its
-    selected top cell) fills them afterwards via
-    :func:`_attribute_violations_to_instances`, with the same semantics as
-    the curated engine (:func:`_attribute_to_instance`).
+    here; the caller fills them (``drc_klayout_attribution``).
 
     ``bbox``/``polygon`` are derived from every coordinate pair embedded in
     an item's ``<values><value>`` text (see :data:`_RDB_COORD_RE`), converted
@@ -260,41 +254,6 @@ def _parse_klayout_rdb_report(
         rule_counts,
         sorted(set(rule_categories) | set(rule_counts)),
     )
-
-
-def _attribute_violations_to_instances(
-    violations: list[dict[str, Any]], top_cell: Any
-) -> None:
-    """Fill each parsed violation's ``source_cell``/``source_path`` in place
-    by walking the input layout's instance tree -- the ``klayout``-engine
-    counterpart of the curated engine's own per-marker attribution (see
-    :func:`klayout_tools.drc._attribute_to_instance`, which does the actual
-    lookup: innermost placed instance whose world bbox fully contains the
-    marker, deterministic tie-break, ``None``/``None`` for top-level or
-    boundary-straddling markers).
-
-    The RDB report names each item's ``<cell>`` -- the frame its coordinates
-    are expressed in. Only markers reported under ``top_cell`` itself can be
-    mapped back through that cell's instance tree, so an item whose
-    ``<cell>`` is anything else (a deck reporting under a child cell) is
-    left ``None``/``None`` rather than misattributed: its ``bbox`` would be
-    in another frame than the one this walk resolves against. The parser
-    stays pure (see its docstring); this is the only step that needs the
-    layout, and it mutates ``violations`` in place so the caller can keep
-    its existing parse -> attribute -> sort flow.
-    """
-    import klayout.db as kdb  # lazily, matching load_layout()'s own import
-
-    for violation in violations:
-        if violation["cell"] != top_cell.name:
-            continue
-        bbox = violation["bbox"]
-        source_cell, source_path = _attribute_to_instance(
-            top_cell,
-            kdb.Box(bbox["left"], bbox["bottom"], bbox["right"], bbox["top"]),
-        )
-        violation["source_cell"] = source_cell
-        violation["source_path"] = source_path
 
 
 #: KLayout's own error prefix for a deck-script failure, as emitted by
@@ -1578,12 +1537,7 @@ def run_drc_klayout_engine(
         violations, rule_counts, rule_categories = _parse_klayout_rdb_report(
             report_path, dbu
         )
-        # Issue #5661: per-instance attribution, same semantics as the
-        # curated engine. The deck ran on `top_cells[0]`'s subtree (with
-        # `--top` naming a child, that cell *is* the rewritten stream's
-        # top), so its frame is the one the RDB coordinates are expressed
-        # in; markers reported under any other RDB `<cell>` stay null.
-        _attribute_violations_to_instances(violations, top_cells[0])
+        _attribute_violations_to_instances(violations, top_cells[0])  # issue #5661
         coverage_assertion = _evaluate_category_assertion(
             expected_rule_categories, rule_categories, deck_errored, expected_names
         )
