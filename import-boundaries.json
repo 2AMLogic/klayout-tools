@@ -553,6 +553,7 @@
         "klayout_tools.pdk_models",
         "klayout_tools.pdk_native_drc",
         "klayout_tools.pdk_pcell",
+        "klayout_tools.pdk_pcell_checks",
         "klayout_tools.pdk_stackup",
         "klayout_tools.pdk_store"
       ]
