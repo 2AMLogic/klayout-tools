@@ -83,6 +83,7 @@ def test_order_detects_misordering(tmp_path):
         ({"region_um": [1, 0, 1, 2]}, "instance_groups[0].region_um"),
         ({"region_um": [0, 0, True, 2]}, "instance_groups[0].region_um"),
         ({"region_um": [0, 0, float("inf"), 2]}, "instance_groups[0].region_um"),
+        ({"region_um": [0, 0, 10**400, 2]}, "instance_groups[0].region_um"),
         ({"order": "x"}, "instance_groups[0].order"),
         ({"order": {"axis": "z"}}, "instance_groups[0].order.axis"),
         ({"order": {"axis": "x", "pitch_um": 0}}, "order.pitch_um"),
