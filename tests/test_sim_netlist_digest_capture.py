@@ -22,14 +22,18 @@ import pytest
 
 from helpers.subprocess_fakes import _STUB_VERSION_BANNER, fake_completed
 from klayout_tools import sim
+from klayout_tools import sim_batch as sb
 from test_sim_batch import (
     _batch_request,
     _FakeRunner,
     _install_fake_batch_transport,
+    _launches,
+    _run,
     _sim_report,
     _status,
     _write_body,
     _write_request,
+    uploaded_request_of,
 )
 
 pytestmark = pytest.mark.usefixtures(
@@ -169,3 +173,62 @@ def test_run_sim_attach_reports_client_at_collection_scope(tmp_path, monkeypatch
     report = sim.run_sim(str(path), attach_job_id="klt-sim-abc123")
 
     assert report["environment"]["netlist_sha256_scope"] == "client-at-collection"
+
+
+@pytest.mark.parametrize("hosts", [1, 2])
+@pytest.mark.parametrize("replace_job", [False, True])
+def test_run_sim_resume_reports_scope_from_batch_dispatch(
+    tmp_path, monkeypatch, hosts, replace_job
+):
+    """Resume can collect every prior job or submit a replacement."""
+    runner = _install_fake_batch_transport(monkeypatch, runner=_FakeRunner())
+    runner.default = fake_completed(_status("done"))
+    runner.outputs = {"report.json": _sim_report(("tt/1.800V/27C",))}
+
+    def register_shard_report(argv, timeout_s):
+        uploaded = uploaded_request_of(argv)
+        if uploaded is not None:
+            request, job_id = uploaded
+            corner_ids = [
+                sim.CornerPoint("tt", {"vdd": 1.8}, point["temperature_c"]).corner_id
+                for point in request.get("_explicit_points", [])
+            ]
+            if corner_ids:
+                runner.outputs_by_job[job_id] = {"report.json": _sim_report(corner_ids)}
+        return runner(argv, timeout_s)
+
+    monkeypatch.setattr(sb, "_run_subprocess", register_shard_report)
+    _write_body(tmp_path)
+    (tmp_path / "models.lib").write_text(".lib tt\n.endl tt\n")
+    path = _write_request(
+        tmp_path,
+        _batch_request(
+            tmp_path,
+            models={"lib": "models.lib"},
+            corners={
+                "process": ["tt"],
+                "supply_v": {"vdd": [1.8]},
+                "temperature_c": [27, 85][:hosts],
+            },
+        ),
+    )
+
+    def stop_polling(*args, **kwargs):
+        raise sb.BatchPollTimeout("client stopped polling", last_state="running")
+
+    # Leave the prior jobs running, with a receipt or shard map to resume from.
+    with monkeypatch.context() as interrupted:
+        interrupted.setattr(sb, "_poll_status_interruptibly", stop_polling)
+        first = _run(path, tmp_path, hosts=hosts)
+    assert first["environment"]["netlist_sha256_scope"] == "staged"
+    launches = _launches(runner)
+    assert len(launches) == hosts
+    if replace_job:
+        runner.queue(f"{launches[0][3]}/job.json", fake_completed(returncode=1))
+
+    resumed = _run(path, tmp_path, hosts=hosts, resume=True)
+
+    assert len(_launches(runner)) == hosts + replace_job
+    assert [corner["status"] for corner in resumed["corners"]] == ["pass"] * hosts
+    expected_scope = "staged" if replace_job else "client-at-collection"
+    assert resumed["environment"]["netlist_sha256_scope"] == expected_scope

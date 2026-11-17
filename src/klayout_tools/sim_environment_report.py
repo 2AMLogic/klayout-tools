@@ -109,19 +109,32 @@ class NetlistDigests:
             ),
         )
 
-    def environment(self, *, attach: bool) -> dict[str, Any]:
+    def environment(
+        self,
+        attach_job_id: str | None,
+        resume: bool,
+        remote_environment: dict[str, Any] | None,
+    ) -> dict[str, Any]:
         """``environment.netlist_sha256`` and ``netlist_sha256_scope``.
 
-        The scope says which moment the digest describes: ``"staged"`` --
-        captured before this process dispatched any work (every local/remote
-        run and every batch submit-and-collect run); ``"client-at-collection"``
-        -- this process only collected an earlier submission (``--attach``),
-        whose staging happened elsewhere, so the digest describes the file as
-        this process found it and is not binding on what ran.
+        ``client-at-collection`` describes the request resolved by an attach
+        or a batch resume that only collected previously dispatched jobs.
         """
+        collection_only = attach_job_id is not None
+        if not collection_only and resume and remote_environment is not None:
+            jobs = remote_environment.get("fleet", [remote_environment])
+            # A missing shard report or timestamp leaves dispatch unknown.
+            collection_only = bool(jobs) and all(
+                job is not None
+                and job.get("client_submitted_at", False) is None
+                and job.get("client_launched_at", False) is None
+                for job in jobs
+            )
         return {
             "netlist_sha256": self.sha256,
-            "netlist_sha256_scope": "client-at-collection" if attach else "staged",
+            "netlist_sha256_scope": (
+                "client-at-collection" if collection_only else "staged"
+            ),
         }
 
     def pin_provenance_input(self, provenance: dict[str, Any]) -> None:
