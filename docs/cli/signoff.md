@@ -3052,16 +3052,10 @@ klt signoff --manifest manifest.json --check reports/block.signoff.json \
     { "field": "items.7.text", "committed": "…", "fresh": "… (reworded)" },
     { "field": "source_doc_content_hash", "committed": "sha256:…", "fresh": "sha256:…" }
   ],
-  "build_provenance": {
-    "state": "different",
-    "differing_fields": ["version", "grading_ruleset_id"],
-    "committed": { "version": "0.9.0.dev4+g1a2b3c4", "is_release": false, "grading_ruleset_id": "sha256:…" },
-    "running": { "version": "0.9.1", "is_release": true, "grading_ruleset_id": "sha256:…" }
-  },
   "build_skew": {
-    "state": "build_only",
+    "state": "ruleset",
     "fields": [
-      { "field": "build.git_commit", "committed": "d5d57daf…", "fresh": "5dbbad05…" }
+      { "field": "build.grading_ruleset_id", "committed": "sha256:…", "fresh": "sha256:…" }
     ]
   },
   "fresh": { "…": "the full freshly-graded report" }
@@ -3075,39 +3069,32 @@ klt signoff --manifest manifest.json --check reports/block.signoff.json \
   `place-and-route` — see
   [`../json-contract.md`](../json-contract.md)'s "Verifying committed
   evidence"), and it renders through the same `--format text` drift report.
-- **`build_skew` names version skew without grading it** (issue #5868).
-  `--check` is the version-tolerant freshness gate; a raw diff of two
-  `--format json` renders is not, because the `build` block differs whenever
-  the rendering klt differs. `build_skew.state` is `"same"`, `"build_only"`
-  (some `build.*` field moved, the grading ruleset did not), `"ruleset"`
-  (`build.grading_ruleset_id` moved: graded under different rules, not just
-  rendered by a different build) or `"unknown"` (the committed report has no
-  `build` block). `fields` lists each differing field. It never changes
-  `status` or the exit code, and `--format text` prints one `build_skew:` line
-  when the state is `build_only` or `ruleset`.
+- **`build_skew` names build-block skew without grading it** (issues
+  #5868, #5852). `--check` is the version-tolerant freshness gate; a raw
+  diff of two `--format json` renders is not, because the `build` block
+  differs whenever the rendering klt differs. `build_skew.state` is
+  `"same"`, `"build_only"` (some `build.*` field moved, the grading
+  ruleset did not), `"ruleset"` (`build.grading_ruleset_id` moved: graded
+  under different rules, not just rendered by a different build),
+  `"unverifiable"` (at least one side's identity cannot be resolved
+  honestly — no `version`, or a `+unknown` one from a source-tarball
+  install — so neither `"same"` nor a difference state is an assertion the
+  evidence supports; two `+unknown` builds that agree on every recorded
+  field would otherwise read as `"same"`) or `"unknown"` (the committed
+  report has no `build` block). `fields` lists each differing field, kept
+  even under `"unverifiable"` — there it is what the recorded values say,
+  not a claim. It never changes `status` or the exit code, and `--format
+  text` prints one `build_skew:` line when the state is `build_only`,
+  `ruleset` or `unverifiable`. This one field is the whole report-only
+  story of the excluded `build` block: gate on `.build_skew.state` — a
+  consumer that wants to warn (or fail) on "committed by a different
+  build" reads it; nothing else carries that fact.
 - **The tier verdict does not decide this mode's exit code.** A faithful
   report of a block that is *not* yet at T1 is `"match"`/exit `0` — the
   question is drift, not tier. Gate on `status`.
-- **Build identity is excluded from the verdict — and reported as
-  `build_provenance`** — the whole `build` block, mirroring
+- **Build identity is excluded** — the whole `build` block. This mirrors
   "tool identity is excluded from the diff, and only tool identity" for the
-  other five verbs. The exclusion is total for `status` because two
-  byte-legitimate installs of one pinned commit report different blocks
-  (see "`build` describes the *install*, not only the commit"), but it is
-  not silent: the additive `build_provenance` field (issue #5852) compares
-  the committed report's `build` block with the running build's over the
-  build-identity fields (`version`, `package_version`, `git_commit`,
-  `git_tag`, `dirty`, `is_release`, `grading_ruleset_id`) and answers
-  `"same"`, `"different"` (with `differing_fields` naming what moved), or
-  `"unverifiable"` — a report with no `build` block at all, or a side whose
-  identity resolved to `+unknown`/null (a tarball install), where absence
-  of evidence is never read as difference. `build_provenance` never
-  affects `status` or the exit code: a report committed by an unreleased
-  dev build and re-checked by the pinned release still verifies (exit `0`)
-  — the response now *says* that is what happened, so a consumer can warn
-  on it by reading `.build_provenance.state`. `--format text` prints one
-  `build_provenance: <state>` line, plus a `build differs:` list of the
-  differing field names when the state is `different`.
+  other five verbs.
 - **The checklist's own wording is excluded from the *verdict* and reported
   separately** (issue #2526) — see "A reworded checklist is not evidence
   drift" below.
@@ -3168,8 +3155,8 @@ What the exclusion is **not**:
   unchanged — see "Identifying the grading build" below. It lives in the
   `build` block, so like the rest of that block it does not by itself flip
   `--check`'s verdict, but it is still visible verbatim in the response's
-  embedded `fresh` report, summarized (with the rest of the build identity)
-  in the response's `build_provenance` field, and reported by
+  embedded `fresh` report, named (with the rest of the build identity) in
+  the response's `build_skew.fields` when it moved, and reported by
   `--describe-grader`.
 
 ```bash

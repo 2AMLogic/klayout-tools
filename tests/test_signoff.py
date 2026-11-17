@@ -13818,8 +13818,9 @@ def test_check_matches_a_report_committed_by_another_provisioning_route(tmp_path
 
     result = check_tier_report(committed_path, manifest)
 
-    # Issue #5852: `+unknown` committed identity is `unverifiable`, never
-    # `different` (echo pinned in test_signoff_build_provenance.py).
+    # Issue #5852: the `+unknown` committed identity makes the report-only
+    # `build_skew` `unverifiable`, never an asserted difference (the state
+    # vocabulary is pinned in test_signoff_check_build_skew.py).
     assert result == {
         "schema_version": 1,
         "mode": "check",
@@ -13828,11 +13829,10 @@ def test_check_matches_a_report_committed_by_another_provisioning_route(tmp_path
         "drift": [],
         "doc_drift": False,
         "doc_drift_fields": [],
-        "build_provenance": result["build_provenance"],
         "build_skew": result["build_skew"],
         "fresh": fresh,
     }
-    assert result["build_provenance"]["state"] == "unverifiable"
+    assert result["build_skew"]["state"] == "unverifiable"
 
 
 def test_check_reports_drift_in_a_graded_field(tmp_path):

@@ -38,7 +38,7 @@ excluding two surfaces that move without any verdict moving with them:
 
 - the ``build`` block, which states how the running install was provisioned
   rather than which commit it came from (:data:`..signoff.VOLATILE_REPORT_PATHS`)
-  -- reported, not dropped, as ``build_provenance`` (issue #5852);
+  -- reported, not dropped, as ``build_skew`` (issues #5852, #5868);
 - the report's verbatim quotation of the checklist doc -- each item's
   ``title``/``text``/``notes`` and the whole-doc ``source_doc_content_hash``
   (:data:`..signoff.DOC_PROSE_REPORT_PATHS`, issue #2526).

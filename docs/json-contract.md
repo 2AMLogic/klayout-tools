@@ -1868,9 +1868,9 @@ All eight share one contract:
   `signoff` the same rule lands on the field *its* reports carry tool
   identity in — the whole `build` block (issue #2249), which `--check`
   additionally reports (report-only, never touching `status`) as the
-  additive `build_provenance` field: `same`/`different`/`unverifiable`
-  over the block's identity fields, with `different` naming them (issue
-  #5852).
+  additive `build_skew` field: `same`/`build_only`/`ruleset`/
+  `unverifiable`/`unknown` over the block's fields, with the difference
+  states naming what moved (issues #5868, #5852).
 - **`provenance.pdk.source` is excluded as resolution provenance (issue
   #5863).** It records *how* the PDK install was found (search roots vs
   `$PDK_ROOT` vs `--pdk-root`), in the shared

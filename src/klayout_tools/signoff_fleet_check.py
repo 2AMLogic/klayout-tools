@@ -79,11 +79,11 @@ from .signoff_unmet_reasons import DERIVED_REPORT_PATHS
 #: not either side has it, so such a report still verifies on its graded
 #: content rather than reporting one spurious whole-block drift entry.
 #:
-#: The exclusion is from the **verdict**, not from the report (issue #5852):
-#: :func:`_build_provenance` compares the block's identity fields
-#: report-only and answers same/different/unverifiable as the response's
-#: ``build_provenance`` field, so "graded by a dev build, re-checked by the
-#: pinned release" is visible without ever failing on it.
+#: The exclusion is from the **verdict**, not from the report (issues
+#: #5852, #5868): :func:`_build_skew` compares the block report-only and
+#: names what moved as the response's ``build_skew`` field, so "graded by
+#: a dev build, re-checked by the pinned release" is visible without ever
+#: failing on it.
 VOLATILE_REPORT_PATHS: frozenset[tuple[str, ...]] = frozenset({("build",)})
 
 #: The tier/fleet-report paths ``--check`` excludes from its **pass/fail**
@@ -185,120 +185,55 @@ RUN_IDENTITY_REPORT_PATHS: frozenset[tuple[str, ...]] = frozenset(
     }
 )
 
-#: ``build_provenance.state`` values (issue #5852).
-_BUILD_PROVENANCE_SAME = "same"
-_BUILD_PROVENANCE_DIFFERENT = "different"
-_BUILD_PROVENANCE_UNVERIFIABLE = "unverifiable"
 
-#: The ``build``-block identity fields the ``build_provenance`` payload
-#: echoes for each side (issue #5852): the two a consumer gates on when it
-#: pinned a *release* (``version``, ``is_release``) plus the one that
-#: identifies the grading code itself (``grading_ruleset_id``, issue #2216).
-#: The full identity comparison stays over
-#: :data:`~.signoff._BUILD_IDENTITY_FIELDS` -- these are only what the
-#: response shows, kept small so the field reads at a glance next to the
-#: verdict rather than duplicating both ``build`` blocks the response
-#: already carries (verbatim, in ``fresh``, and in the committed file).
-_BUILD_PROVENANCE_ECHO_FIELDS = ("version", "is_release", "grading_ruleset_id")
+def _build_identity_unresolved(block: Any) -> bool:
+    """Whether a ``build`` block's identity is honest to compare at all.
 
-
-def _build_provenance(committed: Any, running: Any) -> dict[str, Any]:
-    """Whether the committed report's ``build`` block and the fresh render's
-    state the same build identity (issue #5852), as the report-only
-    ``build_provenance`` field of a ``--check`` response.
-
-    :data:`VOLATILE_REPORT_PATHS` excludes the whole ``build`` block from
-    the drift verdict because two byte-legitimate installs of one pinned
-    commit report different ones -- but that exclusion was total, so a
-    report committed by an unreleased dev build passed ``--check`` under a
-    pinned release with the response never saying the builds differed. This
-    closes that gap the same way :data:`DOC_PROSE_REPORT_PATHS` closes its
-    own (issue #2526): report what was excluded, let the consumer decide.
-
-    Report-only by construction -- :func:`_check_signoff_report` sets the
-    key after ``status`` is already decided -- so a ``"different"`` state
-    never changes the verdict or the exit code.
-
-    The state vocabulary mirrors :func:`~.signoff._build_drift`'s
-    "absence of evidence is never drift" rule (issue #4223):
-
-    - ``"same"`` -- every :data:`~.signoff._BUILD_IDENTITY_FIELDS` field
-      is equal on both sides.
-    - ``"different"`` -- at least one differs; ``differing_fields`` names
-      exactly which, in that tuple's order.
-    - ``"unverifiable"`` -- the comparison cannot be made honestly: the
-      committed report predates the ``build`` block (issue #2176), or
-      either side recorded no git facts at all (a source-tarball install's
-      ``+unknown`` version, :func:`~.build_identity.build_version`), so
-      "different" would assert something the facts were never present to
-      establish. ``differing_fields`` stays empty.
-
-    Either side being absent or not a mapping (a report shape this code
-    has never produced) reads as that side's fields being ``None``; the
-    committed side absent entirely is the pre-#2176 case above.
+    :func:`~.signoff._build_drift`'s test (issue #4223), applied to the
+    field the block carries the identity-bearing version in: no version at
+    all, or one that says the build recorded no git facts (``+unknown``, a
+    source-tarball install -- :func:`~.build_identity.build_version`).
+    Either side unresolved makes the comparison ``"unverifiable"`` rather
+    than an assertion the facts were never present to support.
     """
-    from .signoff import _BUILD_IDENTITY_FIELDS
-
-    committed_block = committed if isinstance(committed, dict) else None
-    running_block = running if isinstance(running, dict) else None
-
-    def echo(block: dict[str, Any] | None) -> dict[str, Any]:
-        if block is None:
-            return {field: None for field in _BUILD_PROVENANCE_ECHO_FIELDS}
-        return {field: block.get(field) for field in _BUILD_PROVENANCE_ECHO_FIELDS}
-
-    def identity_unresolved(block: dict[str, Any] | None) -> bool:
-        # `_build_drift`'s test, applied to the field the report carries the
-        # identity-bearing version in: no version at all, or one that says
-        # the build recorded no git facts (`+unknown`).
-        version = block.get("version") if block is not None else None
-        return not isinstance(version, str) or not version or "+unknown" in version
-
-    if (
-        committed_block is None
-        or running_block is None
-        or identity_unresolved(committed_block)
-        or identity_unresolved(running_block)
-    ):
-        state = _BUILD_PROVENANCE_UNVERIFIABLE
-        differing_fields: list[str] = []
-    else:
-        differing_fields = [
-            field
-            for field in _BUILD_IDENTITY_FIELDS
-            if committed_block.get(field) != running_block.get(field)
-        ]
-        state = (
-            _BUILD_PROVENANCE_DIFFERENT if differing_fields else _BUILD_PROVENANCE_SAME
-        )
-    return {
-        "state": state,
-        "differing_fields": differing_fields,
-        "committed": echo(committed_block),
-        "running": echo(running_block),
-    }
+    version = block.get("version") if isinstance(block, dict) else None
+    return not isinstance(version, str) or not version or "+unknown" in version
 
 
 def _build_skew(committed: dict[str, Any], fresh: dict[str, Any]) -> dict[str, Any]:
-    """The report-only ``build_skew`` signal ``--check`` carries (issue #5868).
+    """The report-only ``build_skew`` signal ``--check`` carries (issues
+    #5868, #5852).
 
     ``--check`` excludes the whole ``build`` block from its verdict
     (:data:`VOLATILE_REPORT_PATHS`), which leaves it silent on whether the
     committed report was rendered by a different klt build -- or graded under a
     different ruleset. This names that, never grades it: ``state`` is
     ``"same"`` (no ``build.*`` field differs), ``"build_only"`` (some do, but
-    not ``grading_ruleset_id``), ``"ruleset"`` (``grading_ruleset_id`` differs)
-    or ``"unknown"`` (the committed report carries no ``build`` block, so
-    there is nothing to compare). ``fields`` lists each differing field in the
-    ``{field, committed, fresh}`` shape of ``drift``.
+    not ``grading_ruleset_id``), ``"ruleset"`` (``grading_ruleset_id`` differs),
+    ``"unverifiable"`` (at least one side's identity cannot be resolved
+    honestly -- no ``version``, or a ``+unknown`` one -- so neither ``"same"``
+    nor a difference state is an assertion the evidence supports; two
+    ``+unknown`` builds that agree on every recorded field would otherwise
+    read as ``"same"``, issue #5852) or ``"unknown"`` (the committed report
+    carries no ``build`` block, so there is nothing to compare). ``fields``
+    lists each differing field in the ``{field, committed, fresh}`` shape of
+    ``drift`` -- kept even under ``"unverifiable"``, where it is what the
+    recorded values say, not a claim; the state is what says it cannot be
+    graded.
+
+    The ``"unverifiable"`` rule mirrors :func:`~.signoff._build_drift`'s
+    "absence of evidence is never drift" (issue #4223).
     """
     committed_build = committed.get("build")
     if not isinstance(committed_build, dict):
         return {"state": "unknown", "fields": []}
-    fields = diff_verdict_fields(
-        {"build": committed_build}, {"build": fresh.get("build")}
-    )
-    if not fields:
+    fresh_build = fresh.get("build")
+    fields = diff_verdict_fields({"build": committed_build}, {"build": fresh_build})
+    if _build_identity_unresolved(committed_build) or _build_identity_unresolved(
+        fresh_build
+    ):
+        state = "unverifiable"
+    elif not fields:
         state = "same"
     elif any(entry["field"] == "build.grading_ruleset_id" for entry in fields):
         state = "ruleset"
@@ -311,8 +246,8 @@ def _check_signoff_report(
     report_path: str, committed: dict[str, Any], fresh: dict[str, Any]
 ) -> dict[str, Any]:
     """The diff half both ``--check`` modes share (issues #2249, #2526,
-    #5852): ``{schema_version, mode, report, status, drift, doc_drift,
-    doc_drift_fields, build_provenance, build_skew, fresh}``.
+    #5868): ``{schema_version, mode, report, status, drift, doc_drift,
+    doc_drift_fields, build_skew, fresh}``.
 
     Two diffs of the same pair, both through
     :func:`~._report_verify.diff_verdict_fields`, both excluding
@@ -334,10 +269,9 @@ def _check_signoff_report(
     ``fresh`` is embedded un-stripped, exactly as before -- the exclusion
     applies to the comparison, never to what the response shows.
 
-    ``build_provenance`` (issue #5852) and ``build_skew`` (issue #5868) are
-    two further, report-only signals on the same excluded ``build`` block --
-    identity-level (see :func:`_build_provenance`) and field-level (see
-    :func:`_build_skew`) respectively.
+    ``build_skew`` (issues #5868, #5852) is a further report-only signal on
+    the same excluded ``build`` block: whether it differs at all, and how
+    honestly that can be asserted (see :func:`_build_skew`).
     """
     # Run identity is dropped from both diffs (and so is never doc drift).
     # Also dropped: fields derived from `items[]` (issue #5903), which stay
@@ -369,13 +303,10 @@ def _check_signoff_report(
     fresh_payload = result.pop("fresh")
     result["doc_drift"] = bool(doc_drift_fields)
     result["doc_drift_fields"] = doc_drift_fields
-    # Issue #5852: the `build` exclusion is from the verdict, not from the
+    # Report-only (issues #5868, #5852): never feeds `status`, so never the
+    # exit code. The `build` exclusion is from the verdict, not from the
     # report -- answer, report-only, whether the committed report's build
-    # identity differs from the running one.
-    result["build_provenance"] = _build_provenance(
-        committed.get("build"), fresh_payload.get("build")
-    )
-    # Report-only (issue #5868): never feeds `status`, so never the exit code.
+    # block differs from the running one, and whether that can be asserted.
     result["build_skew"] = _build_skew(committed, fresh)
     result["fresh"] = fresh_payload
     return result
