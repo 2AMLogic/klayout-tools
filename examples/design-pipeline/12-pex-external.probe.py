@@ -59,7 +59,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
-from klayout_tools.sim import run_sim  # noqa: E402
+from klayout_tools.sim import run_sim
 
 #: Tail-bias sweep grid, volts -- least-negative first, so "first bracketing
 #: pair in sweep order" is a well-defined rule and not an artifact of dict
