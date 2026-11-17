@@ -5,6 +5,7 @@ report per-corner measurement pass/fail as structured data.
 
 ```
 klt sim <request.json> [-o|--outdir <dir>] [--report-out <path>] [--backend <name>] [--max-workers <n>] [--hosts <n>] [--max-units-per-job <n>] [--max-concurrent-jobs <n>] [--budget-s <seconds>] [--timeout-s <seconds>] [--resume] [--fail-fast-probe] [--fail-on-diagnostic <code>] [--dry-run] [--plot <dir>] [--op-lint [--op-lint-corner <corner_id>|all]] [--format text|json]
+klt sim --check <report.json> [--root <dir>] [--format text|json]
 ```
 
 This is the build carried by the accepted spike,
@@ -151,6 +152,33 @@ this document (and the code) win.
   off/triode region, wiring smells, and netlist hygiene. Run it first when a
   measurement misses. `--op-lint-corner` picks which corner to bias at (`all` tabulates the worst margin per corner). See
   "Operating-point lint" below.
+- `--check <report.json>` (issue #5821) — **re-verify a finished report's
+  netlist evidence without simulating** (no engine, network or PDK). Compares
+  each `environment.netlist_closure` entry's recorded raw `sha256` against the
+  file now on disk, and the recorded `environment.netlist_identity` against one
+  recomputed with the writer's own normalization. Emits the shared `--check`
+  payload (`schema_version`, `mode: "check"`, `report`, `status`, `checks[]`,
+  `skipped[]`) plus `diagnosis`:
+
+  | raw `sha256` | `netlist_identity` | `diagnosis` |
+  |---|---|---|
+  | all match | match | `intact` |
+  | some mismatch | match | `cosmetic` (raw bytes moved, normalized text did not) |
+  | some mismatch | mismatch | `electrical` (recorded measurements are stale) |
+  | all match | mismatch | `normalization_changed` (the tool's normalization moved, not the netlist; see #5438) |
+
+  `cosmetic` is not always benign: usually it is a comment/whitespace/case
+  edit, but a **repointed `.include`** also lands in this row, because
+  normalization strips the include target — the identity cannot see it. The
+  mismatching `netlist_closure` entry names the file that moved; check it.
+
+  `skipped[]` lists entries that cannot be re-hashed — a host-resolved
+  `{target, sha256: null}` include, a `scope: "external"`/`"absent"` entry
+  (`path: null`) — and any skipped entry prevents `status: "match"`. A report
+  with `netlist_identity_error`/`netlist_closure_error`, no closure, or a
+  closure file missing from the tree is `drifted`, never `match`. `--root`
+  re-anchors `scope: "repo"` entries; otherwise they resolve from the report's
+  own location. Exit `0` match, `3` drifted, `1` missing/unparseable report.
 - `--format` — `text` (default, a human-readable summary) or `json`.
 
 ## Engine
@@ -1487,7 +1515,16 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   whose job was accepted but stays `pending` longer than that budget becomes an
   entry with `status: "error"`, `exit_code: 4` and `error.code: "not_launched"`;
   its job id stays in `job_ids` and the manifest so it can be cancelled or
-  attached. Finished members keep their results. An interrupt
+  attached. Finished members keep their results.
+  Admission rule ([#5849](https://github.com/2AMLogic/klayout-tools/issues/5849)):
+  a replacement member is admitted only while no abandoned member still holds a
+  `pending` job, so the set never holds more fleet capacity than
+  `--max-in-flight × --max-concurrent-jobs` plus the abandoned members'
+  already-submitted jobs. If a held job never launches, the remaining unstarted
+  members become `not_launched` entries naming that job id (with no job ids of
+  their own) one more `--wait-for-capacity` window after the abandonment,
+  instead of being submitted; the set then terminates.
+  An interrupt
   (`KeyboardInterrupt`/`SystemExit`) turns every unfinished member into a
   `set_interrupted` entry; the envelope and manifest are still written. Without
   a wait budget the pending wait is unbounded, as before.
