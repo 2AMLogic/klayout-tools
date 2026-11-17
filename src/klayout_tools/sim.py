@@ -11002,25 +11002,13 @@ def _parse_plain_number(raw: str) -> float | None:
 
 def _parse_width_um(raw: str, bare_is_um: bool = False) -> float | None:
     """Parse a SPICE ``W``/``L``-style geometry literal (``50u``, ``5e-5``,
-    ``100n``) to micrometres. Returns ``None`` for anything that is not a
-    plain numeric literal.
-
-    A literal with a unit suffix is an absolute SPICE quantity (metres
-    based) on every card kind. A *bare* literal is ambiguous: on an ``M``
-    card it is metres by SPICE convention, but a PDK subckt call (``X``
-    card) whose wrapper parameters are in micrometres -- sky130's
-    primitive-device convention, see issue #5802 -- writes the bare number
-    *as* micrometres. ``bare_is_um`` selects that reading: when true, a
-    bare literal is returned unchanged (already micrometres) instead of
-    being scaled from metres.
-    """
+    ``100n``) to micrometres (``None`` for non-numerics); ``bare_is_um``
+    reads a bare literal as micrometres (#5802 X-card PDK wrappers)."""
     match = spice_number.NUMBER_RE.match(raw.strip().strip("'\""))
     if match is None:
         return None
     value = float(match.group(1)) * spice_number.suffix_scale(match.group(2))
-    if match.group(2) == "" and bare_is_um:
-        return value
-    return value * 1e6
+    return value * (1 if match.group(2) == "" and bare_is_um else 1e6)
 
 
 def _find_width_ceiling_culprit(
@@ -11050,9 +11038,6 @@ def _find_width_ceiling_culprit(
         w_raw = params.get("w") or params.get("W")
         if w_raw is None:
             continue
-        # Bare-um convention (issue #5802): an X subckt call whose PDK
-        # wrapper parameters are micrometres (sky130) writes a bare literal
-        # as um, while an M card keeps the SPICE metres reading.
         w_um = _parse_width_um(w_raw, bare_is_um=inst_name[:1].upper() == "X")
         if w_um is None:
             continue
