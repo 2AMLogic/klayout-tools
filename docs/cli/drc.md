@@ -1138,6 +1138,38 @@ keeps the legacy behaviour (TopVia1 is shared between the MIM-cap population
 and ordinary Metal5->TopMetal1 routing) and its Cont lower side stays
 uncovered exactly as sg13cmos5l's does above.
 
+#### Verifying "zero new findings" for a `require_containment` opt-in (issue #6174)
+
+Every `require_containment` opt-in (#5883 family: #5737 sky130, #5915 gf180mcu,
+#5916 sg13g2, asap7) is gated on "zero new findings on the existing corpus".
+That corpus is **two** trees, and `tests/corpus/<pdk>/` alone is the smaller
+one for most PDKs (`tests/corpus/` has no sg13g2 tree at all, yet the repo
+tracks ten real sg13g2 layouts). Enumerate both:
+
+```bash
+ls tests/corpus/<pdk>/                                  # fixture corpus
+git ls-files 'blocks/<prefix>*/output/*.gds*'           # mirrored block layouts
+```
+
+`<prefix>` is the PDK's block-directory prefix, which is not always the PDK
+name: `sg13g2-` (and `sg13cmos5l-` for the sg13cmos5l deck), `gf180-` plus the
+`gf180mcu_fd_sc_mcu*` cells, `sky130-` plus the `sky130_fd_sc_hd__*` cells,
+`asap7-`. Run `git ls-files 'blocks/*/output/*.gds*'` unfiltered and read the
+directory names if in doubt. Then run `run_drc(path, "<pdk>")` on every layout
+at the merge base and at the PR head, and report **any layout whose
+`rule_counts` changed**, naming the rule and the before/after count.
+
+Pre-existing violations are baseline, not new findings: the `blocks/` layouts
+are snapshots mirrored from the downstream canary repos by
+`.github/workflows/refresh-canaries.yml` and several are known-violating, so
+nothing gates on their DRC status. Only the delta attributable to the new rule
+counts, and a delta there is evidence to triage (a true positive belongs
+upstream in the canary repo, not in a waiver here), not an automatic blocker.
+Worked example: opting sg13g2 in (PR #6065) added `metal2.enclosing.via1.1: 0
+-> 12` on `blocks/sg13g2-bandgap/output/bandgap_amp.gds` only; all 12 are true
+positives (250 x 250 dbu Via1 centred on a Metal2 boundary, half outside) and
+the other nine sg13g2 layouts were unchanged.
+
 ### Sized/derived-layer rules (`DerivedLayer`)
 
 Some DRM rules are defined against a derived geometry rather than a single
