@@ -14,6 +14,34 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt gen-compose` gains `routing.landing_pad_size_um` — a request-level
+  landing-pad size override — and names pad-vs-pitch conflicts as such**
+  (#5803, 2026-11-17): every via-drop's landing pad was a fixed 0.42 µm
+  square (contact-enclosure convention, grown per `(landing, via)` pair by
+  the #2072/#2074 area/enclosure floors), independent of the route's own
+  width — so a generator family whose terminals are pitched *finer* than
+  that footprint (e.g. `mos_array`'s 0.335 µm terminal columns) deposited
+  overlapping pads on every plane the ladders share, with no parameter on
+  either side to reconcile them, and the resulting rejections surfaced as
+  generic "crosses already-routed net" / "comes within N um" messages that
+  read as backbone problems:
+  - **`routing.landing_pad_size_um`** sets the pad side from the caller's
+    side. Validated against each drawn `(landing, via)` pair's own deck
+    floor — an override below the floor is an application error (exit 1)
+    naming the binding rule id and threshold (a smaller pad would be a
+    guaranteed `klt drc` violation, so it is never silently grown back);
+    where the floors allow it, pads draw at exactly the override, and the
+    route-vs-route collision checks measure the same footprint. Omitted ⇒
+    default pads, byte-for-byte unchanged.
+  - **Pad-vs-pitch conflicts are named.** A route-vs-route conflict whose
+    geometry is a landing pad now reports the pad footprint, the terminal
+    pitch, and the deck's spacing rule, with the override named as the
+    escape hatch — instead of a generic crossing/spacing rejection on a
+    plane the caller never assigned anything to. Backbone-only conflicts
+    keep the generic (accurate) messages.
+  Request/response shape change is additive only (a new optional
+  `routing.*` request field; no response field changed).
+
 - **`klt pex` and `klt sim --monte-carlo` now read a SPICE card the same way
   the flattener does: `w = 1` and `w=(2 * 1u)` are parameters, not device
   names** (#5461, 2026-11-13): three hand-rolled card tokenizers lived in

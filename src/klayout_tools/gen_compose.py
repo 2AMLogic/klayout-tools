@@ -209,6 +209,12 @@ from .gen import (
     _fixed_cut_side_um as _fixed_cut_side_um,
 )
 from .gen_compose_boundary import draw_pins_and_boundary, parse_boundary
+from .gen_compose_landing_pads import (
+    _landing_and_widen_pad_boxes,
+    _leg_conflict_message,
+    _make_landing_pad_side_um,
+    _parse_landing_pad_override,
+)
 from .gen_compose_port_access import derive_label_ports, parse_ports_from_labels
 
 # The rest of this module never calls these directly -- they are re-exported
@@ -3275,6 +3281,9 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     # width up to satisfy the cross layer's own (typically stricter) deck
     # minimum. None unless a cross layer is configured; resolved below.
     cross_block_width_um: float | None = None
+    # routing.landing_pad_size_um (issue #5803): None keeps the pre-#5803 pads.
+    landing_pad_override_um = None
+    side_for_pair = _make_landing_pad_side_um(pdk_info["variant"])
     if connectivity and not declare_only:
         layer_role = routing.get("layer_role")
         if not isinstance(layer_role, str) or not layer_role:
@@ -3324,6 +3333,14 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         # via-drop check (5) consults this same ExtractionDeck.metals/.vias
         # stack per net, never a second, private via table.
         extraction_deck = get_extraction_deck(_pdk_family(pdk_info["variant"]))
+
+        landing_pad_override_um = _parse_landing_pad_override(
+            routing.get("landing_pad_size_um"), "request.routing.landing_pad_size_um"
+        )
+        if landing_pad_override_um is not None:  # baseline resolver when absent
+            side_for_pair = _make_landing_pad_side_um(
+                pdk_info["variant"], landing_pad_override_um
+            )
 
         cross_layer_role = routing.get("cross_block_layer_role")
         if cross_layer_role is not None:
@@ -3949,6 +3966,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                 stub_widen,
                 _route_dbu(),
                 layer,
+                side_for_pair,
             )
             # layer_checks (#1913): the primary (layer, region) entry (with
             # its own spacing check, exactly as before), plus one further
@@ -3966,7 +3984,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                 layer_checks.extend(
                     (pad_layer, pad_region, False)
                     for pad_layer, pad_region in _drawn_leg_intermediate_pad_regions(
-                        via_drops, _route_dbu(), layer
+                        via_drops, _route_dbu(), layer, side_for_pair
                     ).items()
                 )
             for (
@@ -3984,27 +4002,23 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                         and cand_layer != other_layer
                     ):
                         continue  # different physical layers can't touch or short
-                    if not (cand_region & other_region).is_empty():
-                        return f"crosses already-routed net '{other_net}'"
-                    if not check_spacing:
-                        continue
-                    cand_spacing = _min_spacing_um_for_layer(cand_layer)
-                    if cand_spacing is None:
-                        continue
-                    cand_spacing_um, cand_rule_id = cand_spacing
-                    cand_spacing_dbu = int(round(cand_spacing_um / _route_dbu()))
-                    if cand_spacing_dbu <= 0:
-                        continue
-                    cand_inflated = cand_region.sized(cand_spacing_dbu)
-                    if not (cand_inflated & other_region).is_empty():
-                        return (
-                            f"comes within {cand_spacing_um:.4g}um of "
-                            f"already-routed net '{other_net}' -- closer "
-                            "than the resolved deck's own "
-                            f"'{cand_rule_id}' minimum same-layer spacing "
-                            "rule (no literal overlap, but still a real "
-                            "`klt drc` violation on the composed layout)"
-                        )
+
+                    # Issue #5803: the #1057/#1386 verdict, upgraded to
+                    # name a pad-vs-pitch conflict when it is a landing pad.
+                    message = _leg_conflict_message(
+                        pdk_info["variant"],
+                        via_drops,
+                        cand_layer,
+                        other_net,
+                        cand_region,
+                        other_region,
+                        _route_dbu(),
+                        side_for_pair,
+                        _min_spacing_um_for_layer,
+                        check_spacing=check_spacing,
+                    )
+                    if message is not None:
+                        return message
 
             # Own-block pad self-notch check (#1520): everything above
             # compares this leg's drawn footprint against a *different*
@@ -4029,48 +4043,14 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             # which the overlap/inflate comparisons above cannot see -- the
             # pad and the wire it lands on merge into one polygon, so there
             # is no *other* shape here to intersect against.
-            pad_boxes: list[
-                tuple[tuple[int, int], str, tuple[float, float, float, float]]
-            ] = []
-            for drop in via_drops:
-                block_id = drop.get("block_id")
-                if block_id is None:
-                    continue  # pre-#1520 caller-built via_drops -- skip, not an error
-                landing_half_um = (
-                    _VIA_LANDING_SIZE_UM + _drop_array_extra_um(drop)
-                ) / 2.0
-                cx, cy = drop["x_um"], drop["y_um"]
-                box = (
-                    cx - landing_half_um,
-                    cy - landing_half_um,
-                    cx + landing_half_um,
-                    cy + landing_half_um,
-                )
-                # Each hop's landing pad is drawn on *both* of its own
-                # ``landing_layers`` (see _write_composed_gds) -- issue
-                # #1567 generalized this from a single hop's fixed
-                # (port_layer, this leg's own route layer) pair to whatever
-                # pair *that hop* actually lands on, so a multi-level
-                # ladder's intermediate pads are checked here too, not just
-                # the one nearest the backbone or the one nearest the pin.
-                # dict.fromkeys dedupes the common case where both layers of
-                # a hop happen to be identical.
-                for pad_layer in dict.fromkeys(drop.get("landing_layers", ())):
-                    pad_boxes.append((pad_layer, block_id, box))
-            for widen in stub_widen:
-                block_id = widen.get("block_id")
-                if block_id is None or layer is None:
-                    continue  # pre-#1520 caller-built stub_widen -- skip
-                cx, cy = widen["x_um"], widen["y_um"]
-                half_um = widen["width_um"] / 2.0
-                length_um = widen["length_um"]
-                if widen["direction_deg"] == 90:
-                    box = (cx - half_um, cy, cx + half_um, cy + length_um)
-                else:  # 270
-                    box = (cx - half_um, cy - length_um, cx + half_um, cy)
-                pad_boxes.append((layer, block_id, box))
+            #
+            # The box collection lives in :func:`_landing_and_widen_pad_boxes`
+            # (issue #5803: shared with the pad-vs-pitch message path).
+            pad_boxes = _landing_and_widen_pad_boxes(
+                via_drops, stub_widen, layer, side_for_pair
+            )
 
-            for pad_layer, block_id, box in pad_boxes:
+            for pad_layer, block_id, box, _drop in pad_boxes:
                 pad_spacing = _min_spacing_um_for_layer(pad_layer)
                 if pad_spacing is None:
                     continue
@@ -4315,6 +4295,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                         leg["stub_widen"],
                         _route_dbu(),
                         leg_route_layer,
+                        side_for_pair,
                     ),
                 )
             )
@@ -4331,7 +4312,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             # `_leg_conflict`'s own docstring).
             if leg_route_layer is not None:
                 for pad_layer, pad_region in _drawn_leg_intermediate_pad_regions(
-                    leg["via_drops"], _route_dbu(), leg_route_layer
+                    leg["via_drops"], _route_dbu(), leg_route_layer, side_for_pair
                 ).items():
                     accepted_route_regions.append(
                         (net_label, net_pin_set, pad_layer, pad_region)
@@ -4455,7 +4436,10 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     # ratchet baseline -- does not grow by drawing DRC-clean landing pads
     # (PR #2075 review).
     landing_pad_size_um = _resolve_landing_pad_sizes(
-        routed_geometry, pdk_info["variant"], via_drop_size_um
+        routed_geometry,
+        pdk_info["variant"],
+        via_drop_size_um,
+        override_um=landing_pad_override_um,
     )
     composed_dbu_um, dbu_rescale_warnings = _write_composed_gds(
         blocks,

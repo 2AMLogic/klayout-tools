@@ -79,6 +79,15 @@ from .gen import RING_SIDE_DIRECTIONS, _pdk_family
 # re-export form for the names only used through this module -- so every
 # pre-existing ``from klayout_tools.gen_compose_routing import <name>``
 # path, and ``gen_compose.py``'s re-export of it, resolves unchanged.
+# Relocated verbatim to gen_compose_landing_pads.py (issue #5803 -- this
+# file sat exactly at its per-file size ratchet ceiling; see that module's
+# docstring for the same move gen_compose_layer_rules.py made in #5426).
+# Re-imported at module scope so every pre-existing
+# ``from .gen_compose_routing import _drawn_leg_intermediate_pad_regions``
+# path keeps resolving unchanged.
+from .gen_compose_landing_pads import (
+    _drawn_leg_intermediate_pad_regions as _drawn_leg_intermediate_pad_regions,
+)
 from .gen_compose_layer_rules import (
     _landing_pad_side_um_for_layer as _landing_pad_side_um_for_layer,
 )
@@ -1750,6 +1759,7 @@ def _drawn_leg_footprint_region(
     stub_widen: list[dict[str, Any]],
     dbu: float,
     route_layer: tuple[int, int] | None = None,
+    side_for_pair: Any = None,
 ):
     """The full metal one routed leg draws on its own route layer, as a
     ``kdb.Region`` -- the bare backbone (:func:`_drawn_route_region`) plus
@@ -1810,8 +1820,12 @@ def _drawn_leg_footprint_region(
     region = _drawn_route_region(points_um, width_um, dbu)
 
     for drop in via_drops:
+        if side_for_pair is not None and route_layer is not None:
+            side_um = side_for_pair(route_layer, drop["via_layer"])
+        else:
+            side_um = _VIA_LANDING_SIZE_UM
         landing_half_dbu = int(
-            round((_VIA_LANDING_SIZE_UM + _drop_array_extra_um(drop)) / 2.0 / dbu)
+            round((side_um + _drop_array_extra_um(drop)) / 2.0 / dbu)
         )
         landing_layers = drop.get("landing_layers")
         if (
@@ -1842,74 +1856,6 @@ def _drawn_leg_footprint_region(
             region.insert(kdb.Box(cx - half_dbu, cy - length_dbu, cx + half_dbu, cy))
 
     return region
-
-
-def _drawn_leg_intermediate_pad_regions(
-    via_drops: list[dict[str, Any]],
-    dbu: float,
-    route_layer: tuple[int, int] | None,
-) -> dict[tuple[int, int], Any]:
-    """Every via-drop landing-pad box this leg draws on a physical layer
-    *other than* its own primary ``route_layer``, grouped by that pad's own
-    layer (issue #1913).
-
-    :func:`_drawn_leg_footprint_region` deliberately excludes a multi-hop
-    via-drop ladder's intermediate/far landing pads -- they are not part of
-    the leg's footprint *on route_layer* -- and the module docstring for
-    that function pointed at `klt drc` as the backstop for a cross-net short
-    that lives entirely on one of those excluded planes. That pointer is
-    wrong: two shapes that overlap on one layer *merge* into a single
-    polygon in the composed GDS, which is a short, not a spacing violation,
-    so no rule deck has anything to flag.
-
-    This is the complement of :func:`_drawn_leg_footprint_region`: the
-    landing-pad geometry it leaves out, keyed by the pad's own layer so the
-    route-vs-route collision check in :func:`compose` can compare it against
-    another already-accepted net's footprint on that *same* plane -- even
-    though neither net's own primary routing layer names it.
-
-    Returns ``{}`` when ``route_layer`` is ``None`` -- a caller that
-    genuinely does not know its own leg's layer already gets every via-drop
-    pad folded into the single conservative region
-    :func:`_drawn_leg_footprint_region` returns for that case, so there is
-    nothing left here to separate out.
-    """
-    import klayout.db as kdb
-
-    from .gen_compose import _VIA_LANDING_SIZE_UM
-
-    regions: dict[tuple[int, int], Any] = {}
-    if route_layer is None:
-        return regions
-
-    for drop in via_drops:
-        landing_layers = drop.get("landing_layers")
-        if not landing_layers:
-            continue
-        landing_half_dbu = int(
-            round((_VIA_LANDING_SIZE_UM + _drop_array_extra_um(drop)) / 2.0 / dbu)
-        )
-        cx = int(round(drop["x_um"] / dbu))
-        cy = int(round(drop["y_um"] / dbu))
-        box = kdb.Box(
-            cx - landing_half_dbu,
-            cy - landing_half_dbu,
-            cx + landing_half_dbu,
-            cy + landing_half_dbu,
-        )
-        # dict.fromkeys dedupes the common case where both layers of a hop
-        # happen to be identical (mirrors the same idiom in
-        # `_leg_conflict`'s own-block pad self-notch loop).
-        for pad_layer in dict.fromkeys(landing_layers):
-            if pad_layer == route_layer:
-                continue  # already part of _drawn_leg_footprint_region
-            region = regions.get(pad_layer)
-            if region is None:
-                region = kdb.Region()
-                regions[pad_layer] = region
-            region.insert(box)
-
-    return regions
 
 
 def _pad_self_notch_violation_um(

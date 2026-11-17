@@ -112,6 +112,24 @@ cleanly.
     the identical error shape (naming `routing.cross_block_width_um`, the
     violated rule id, and its threshold). Meaningless, and ignored, without
     `routing.cross_block_layer_role` also configured.
+  - **`routing.landing_pad_size_um` is the request-level landing-pad size
+    override (issue #5803).** Every via-drop draws a square landing pad on
+    each of its `landing_layers` — on the sky130 curated deck a fixed 0.42 µm
+    square (sized from the contact-enclosure convention), grown per
+    `(landing, via)` pair by the area/enclosure floors #2072/#2074 added, and
+    independent of `routing.width_um`. A generator whose terminals are pitched
+    tighter than that footprint cannot be landed on independently — exactly
+    the compatibility wall #5803 records. This field sets the pad side from
+    the caller's side: each drawn pair's own deck floor is checked against
+    the override once routing has resolved the request's pairs (an override
+    below a floor is an application error, exit 1, naming the binding rule id
+    and threshold — never a silently grown-back pad), honoured exactly where
+    the floors allow, and measured by the route-vs-route collision checks at
+    the same size drawing inserts. Omitting it keeps the default pads
+    byte-for-byte unchanged. A pad-vs-pitch conflict routing still hits is
+    rejected naming the pad footprint, the terminal pitch, and the deck's
+    spacing rule — not a generic crossing — with this field named as the
+    escape hatch.
 - **Declare-only connectivity (no `routing`, #1188)** — `routing` is
   optional: omitting it (or passing `{}`) with a non-empty `connectivity[]`
   still validates every net's `{block, port}` pins against the referenced
@@ -2102,6 +2120,7 @@ exit codes).
 | `routing.width_um` | number | Route wire width. **Required and must be `> 0`** once any `routing` key is supplied with `connectivity[]` non-empty; omit `routing` entirely for a declare-only request instead (see above). |
 | `routing.cross_block_layer_role` | string | Optional (issue #1168). A *second* layer role, resolved the same way as `routing.layer_role`, that a same-block self-net leg falls back to when it would otherwise short across another of that block's own pads on `routing.layer_role` (the exact rejection "Bussing this net across the block would draw a silent short" names as the fix) — see "Cross-block bus routing (`routing.cross_block_layer_role`, #1168)" below. Must resolve to a distinct layer connectable to `routing.layer_role` by some via-drop ladder in the resolved PDK family's own metals/vias stack (an application error, exit 1, otherwise; issue #1567 lifted the earlier single-via-hop-only restriction here). Every other net in the same request is unaffected — this is a per-leg fallback, not a whole-composition layer switch like selecting `routing.layer_role: "metal2"` directly. Configuring it also arms the same-block multi-self-net detour retry (#1393, "More than one same-block self-net per block" below), which is what lets a *second* self-net on the same block route when its own fixed-shape backbone would collide with the first's, and (issue #1680) the general route-vs-route collision retry — any leg, same-block or inter-block, rejected for crossing a *different* net's already-accepted route is retried once with `routing.layer_role`/`routing.cross_block_layer_role` swapped before the net is failed outright. Either retry can land a leg back on the primary `routing.layer_role`, so read the drawn geometry rather than assuming a leg's layer. |
 | `routing.cross_block_width_um` | number | Optional (issue #1620). The width a leg draws at once it actually falls back to `routing.cross_block_layer_role` — independent of `routing.width_um`, so naming a cross-block layer with a stricter deck minimum never forces the *primary* plane's own routing wider than requested. Defaults to `routing.cross_block_layer_role`'s own deck minimum-width rule when omitted; when given, must be `> 0` and floored the same way `routing.width_um` is against `routing.layer_role` (an application error, exit 1, naming this field, the offending value, and the resolved deck's own rule id and threshold). Ignored (and meaningless) without `routing.cross_block_layer_role` also configured. |
+| `routing.landing_pad_size_um` | number | Optional (issue #5803). The side (µm) of the square landing pad every via-drop draws on each of its `landing_layers`, replacing the fixed 0.42 µm baseline (sized from the contact-enclosure convention) — the knob that reconciles a generator's terminal pitch with the composer's pad footprint. Must be `> 0`. Each drawn `(landing layer, via layer)` pair's own deck floor — the pad layer's minimum-area side and the via side plus twice its enclosing-margin rule, the same floors #2072/#2074 grow the default pads with — is checked against the override once routing has resolved which pairs this request actually draws: an override below a pair's floor is an application error (exit 1) naming the binding rule id and threshold (a smaller pad would be a guaranteed `klt drc` violation, so it is never silently grown back). Where the floors allow it, pads draw at exactly the override, and the route-vs-route collision checks measure the same footprint the drawing inserts. Omitting it changes nothing (default pads, byte-for-byte). |
 | `options.cell_name`/`options.output` | string | Same semantics as `klt gen`'s own `options` fields — see [`docs/cli/gen.md`](gen.md). `cell_name` defaults to `"gen_compose_0"`; `output` defaults to `"<cell_name>.gds"`. |
 | `options.boundary` | object | Optional (#3998). `{"bbox_um": {"x0", "y0", "x1", "y1"}}` draws exactly one rectangle on layer 235/4 (`prBoundary.boundary`, shared by sky130 and gf180mcu) in the top cell. The extent is exactly the caller-given `bbox_um`, never derived from the placed content (containment is advisory, not enforced). Density decks (e.g. `gf180mcu_density.lydrc`) need this layer to evaluate their whole-design ratios; without it they silently check nothing. Invalid (`boundary` not an object, missing/non-numeric corner, `x1 <= x0` or `y1 <= y0`) is an application error (exit 1). Omitted or `null`: output is unchanged. Example: `"options": {"cell_name": "chip_top", "output": "chip_top.gds", "boundary": {"bbox_um": {"x0": 0, "y0": 0, "x1": 2000, "y1": 2000}}}`. |
 
