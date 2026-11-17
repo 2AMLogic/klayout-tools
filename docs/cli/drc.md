@@ -4319,6 +4319,30 @@ committed `--engine klayout` report carrying `engine_deck_errors` (issue
 #1941) is re-run with the same `--allow-deck-errors` tolerance the original
 invocation used, so verifying such a report diffs it — including any change
 in the tolerated `exit_status`/`error_lines` — rather than failing outright.
+**A provenance field the fresh run does not emit is not drift (issue
+#5866).** A committed report may carry `provenance` keys `klt drc` never
+writes — spliced in by a downstream wrapper (e.g. a `gds_sha256` digest
+added after `klt` wrote the report), or emitted by a different version of
+the tool. Such a key is reported in an additive, optional `not_compared`
+list (emitted only when non-empty, so every existing payload is unchanged)
+and affects neither `status` nor the exit code: only a field both reports
+actually carry can drift. The rule is provenance-only and
+one-directional — a verdict-bearing key missing from the fresh report
+(`violation_count`, `violations`, `coverage`, …) still drifts, a key the
+*fresh* report grew still drifts, and a fresh report missing its entire
+`provenance` block still drifts. The carve-out covers scalar keys only: a
+committed `provenance` *sub-block* (a dict or list — e.g. a
+`regeneration` claim the fresh run declined to adopt) absent from the
+fresh report is one absent verdict-bearing structure and still drifts.
+The `provenance.regeneration` subtree (`klt signoff --attest`'s
+caller-supplied claim) is excluded from the carve-out entirely: its
+`hash_kind` leaf is written only when it differs from the default
+(`bytes`), so absence there encodes a default *value*, not an
+unproducible field — any leaf disagreement inside a declined claim still
+drifts (the explicit `--hash-kind` cross-check of issue #5572).
+`--format text` lists the skipped fields
+in a `not compared:` block, so a non-zero exit always means "something
+that could be compared did not match".
 Response shape:
 
 ```json
@@ -4330,6 +4354,9 @@ Response shape:
   "drift": [
     { "field": "status", "committed": "clean", "fresh": "violations" },
     { "field": "violation_count", "committed": 0, "fresh": 1 }
+  ],
+  "not_compared": [
+    { "field": "provenance.gds_sha256", "committed": "sha256:<hex>" }
   ],
   "fresh": { "...": "the freshly produced klt drc report, full shape" }
 }
