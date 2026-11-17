@@ -245,6 +245,7 @@ def test_run_sim_dry_run_batch_refuses_host_models_pdk_root(tmp_path, monkeypatc
 
     assert excinfo.value.code == sim_batch.BATCH_MODELS_PDK_ROOT_HOST_PATH_CODE
     assert str(local_root) in str(excinfo.value)
+    assert "$PDK_ROOT" in str(excinfo.value)  # issue #5751: names the working pin
 
 
 def test_run_sim_dry_run_batch_pdk_root_refusal_matches_the_real_submit(

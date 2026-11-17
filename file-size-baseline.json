@@ -201,7 +201,7 @@
     },
     {
       "path": "src/klayout_tools/cli/sim_cmd.py",
-      "lines": 566
+      "lines": 508
     },
     {
       "path": "src/klayout_tools/components.py",
@@ -473,7 +473,7 @@
     },
     {
       "path": "src/klayout_tools/op_sanity.py",
-      "lines": 1848
+      "lines": 1847
     },
     {
       "path": "src/klayout_tools/parasitic_integrity.py",

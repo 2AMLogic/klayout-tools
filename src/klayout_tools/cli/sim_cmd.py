@@ -52,6 +52,7 @@ from ..sim_set import DEFAULT_MAX_IN_FLIGHT, print_set_text, run_sim_set
 from .output import EXIT_USAGE_ERROR, emit_error, emit_success, write_json_file
 from .sim_job_text import _print_job_status_text as _print_job_status_text
 from .sim_measurement_text import print_measurement_head
+from .sim_op_lint_text import _print_op_lint_text as _print_op_lint_text
 from .sim_pdk_text import _print_pdk as _print_pdk
 from .sim_pdk_text import _print_worker_pdk as _print_worker_pdk
 
@@ -101,15 +102,13 @@ def _reject_single_request_misuse(args: argparse.Namespace) -> int | None:
             args.format,
             exit_code=EXIT_USAGE_ERROR,
         )
-    if getattr(args, "pdk_root", None) is not None:
-        for flag, name in (("op_lint", "--op-lint"), ("job_status", "--job-status")):
-            if getattr(args, flag, None) not in (None, False):
-                return emit_error(
-                    "sim",
-                    f"--pdk-root has no effect with {name}",
-                    args.format,
-                    exit_code=EXIT_USAGE_ERROR,
-                )
+    if all(getattr(args, a, None) is not None for a in ("pdk_root", "job_status")):
+        return emit_error(
+            "sim",
+            "--pdk-root has no effect with --job-status",
+            args.format,
+            exit_code=EXIT_USAGE_ERROR,
+        )
     return None
 
 
@@ -330,7 +329,9 @@ def _run_op_lint(args: argparse.Namespace) -> int:
     see this module's docstring.
     """
     try:
-        report = run_op_sanity(args.request, corner=args.op_lint_corner)
+        report = run_op_sanity(
+            args.request, corner=args.op_lint_corner, pdk_root=args.pdk_root
+        )
     except OpSanityError as exc:
         return emit_error("sim", str(exc), args.format)
 
@@ -341,65 +342,6 @@ def _run_op_lint(args: argparse.Namespace) -> int:
     if report["error_count"] > 0:
         return EXIT_MEASUREMENT_FAILED
     return EXIT_PASS
-
-
-def _print_op_lint_text(report: dict) -> None:
-    print(f"netlist: {render_path_field(report['netlist'])}")
-    print(f"status: {report['status']}")
-    print(f"corner: {report['corner']['corner_id']}")
-    print(
-        f"devices: {report['device_count']}  "
-        f"findings: {report['finding_count']} "
-        f"(errors: {report['error_count']}, warnings: {report['warning_count']})"
-    )
-
-    devices = report["devices"]
-    if devices:
-        print()
-        print("devices:")
-        for device in devices:
-            values = device["values"]
-            detail = "  ".join(
-                f"{key}={values[key]!r}"
-                for key in sorted(values)
-                if values[key] is not None
-            )
-            print(
-                f"  {device['name']} [{device['kind']}] {device['region']}"
-                f"{'  ' + detail if detail else ''}"
-            )
-
-    corner_margins = report.get("corner_margins")
-    if corner_margins:
-        print()
-        print("corner margins (|Vds| - |Vdsat|, worst first):")
-        for entry in corner_margins:
-            margin = entry["worst_margin_v"]
-            shown = "n/a" if margin is None else f"{margin * 1000:.1f} mV"
-            print(
-                f"  {entry['corner_id']}  {shown}  "
-                f"device={entry['worst_device'] or '-'}  "
-                f"triode={entry['triode_count']}"
-            )
-            for diagnostic in entry["diagnostics"]:
-                print(f"      {diagnostic['code']}: {diagnostic['message']}")
-
-    findings = report["findings"]
-    if findings:
-        print()
-        print("findings:")
-        for finding in findings:
-            print(f"  [{finding['severity']}] {finding['check']}: {finding['message']}")
-            print(f"      -> {finding['suggestion']}")
-
-    diagnostics = report["diagnostics"]
-    if diagnostics:
-        print()
-        for diagnostic in diagnostics:
-            print(
-                f"diagnostic: {diagnostic['severity']} {diagnostic['code']} - "
-                f"{diagnostic['message']}"
-            )
 
 
 def _print_commands_text(report: dict) -> None:

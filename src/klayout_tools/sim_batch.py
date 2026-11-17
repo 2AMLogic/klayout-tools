@@ -566,9 +566,9 @@ def _validate_batch_pdk_root(request: dict[str, Any]) -> None:
     raise SimError(
         f"backend 'batch': models.pdk_root {root!r} is a directory on the "
         "submitting host, but it is forwarded to the runner verbatim, where "
-        "that path does not exist. Drop models.pdk_root and name the variant "
-        "with models.pdk (the runner uses its own PDK install); nothing was "
-        "submitted",
+        "that path does not exist. Drop models.pdk_root, name the variant with "
+        "models.pdk (the runner uses its own install) and pin this client's "
+        "install with $PDK_ROOT if needed; nothing was submitted",
         code=BATCH_MODELS_PDK_ROOT_HOST_PATH_CODE,
     )
 

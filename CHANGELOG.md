@@ -14,6 +14,16 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt sim --op-lint` honors `--pdk-root` and reports its resolved PDK**
+  (#5751, 2026-11-17): `--pdk-root` was refused with `--op-lint` ("has no
+  effect") although the lint's resolution already reads `models.pdk_root`; it is
+  now folded in exactly as on the graded path (`--job-status` still refuses it).
+  An unpinned lint on a multi-install host now prints the same stderr ambiguity
+  warning as the graded path, and `--format text` prints the `pdk:` /
+  `pdk: WARNING` lines; `--format json` is unchanged. The `batch`
+  `models_pdk_root_host_path` refusal now names `$PDK_ROOT`, the client-side pin
+  that does work there (code and refuse-before-submit behavior unchanged).
+
 - **`klt sim` refuses `measurements[].transfer` declared beside `noise`**
   (#5695, 2026-11-14): the mutually exclusive measurement forms each carried a
   hand-maintained list of "every *other* exclusive form", and `transfer`'s
