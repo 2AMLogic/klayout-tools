@@ -1,0 +1,28 @@
+{
+  "version": 3,
+  "id": "ttgf0p2",
+  "repo": "https://github.com/TinyTapeout/tinytapeout-gf-0p2",
+  "commit": "622aa779a5e7cf4c1007c6f6ad939678d21897b0",
+  "source_index": "https://index.tinytapeout.com/ttgf0p2.json",
+  "captured_at": "2026-11-17",
+  "note": "Pinned slice of the live TT index. The two operator-named designs are retained; PAL is 1x2 in the index, despite the issue describing it as 1x1.",
+  "gds_url_template": "https://raw.githubusercontent.com/{shuttle_repo}/{shuttle_commit}/projects/{macro}/{macro}.oas",
+  "projects": [
+    {
+      "macro": "tt_um_SophusAndreassen_dogbattle",
+      "title": "Dog Battle Game",
+      "author": "Sophus Andreassen",
+      "tiles": "1x1",
+      "repo": "https://github.com/jorgenkraghjakobsen/tt_gf_dog_fight",
+      "commit": "64f1c9bf31c5f4b0e05ec6aa92b5b41d77db72e3"
+    },
+    {
+      "macro": "tt_um_MATTHIAS_M_PAL_TOP_WRAPPER",
+      "title": "easy PAL",
+      "author": "Ken Pettit",
+      "tiles": "1x2",
+      "repo": "https://github.com/kdp1965/ttgf-um-easy-PAL",
+      "commit": "9934a6b5d12dcbfee9a0d58db6992c04f427dd8d"
+    }
+  ]
+}
