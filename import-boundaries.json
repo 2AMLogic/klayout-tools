@@ -750,6 +750,7 @@
         "klayout_tools.cli.sim_measurement_text",
         "klayout_tools.cli.sim_merge_cmd",
         "klayout_tools.cli.sim_pdk_text",
+        "klayout_tools.cli.sim_report_out",
         "klayout_tools.cli.sim_plan_cmd",
         "klayout_tools.digital_fleet",
         "klayout_tools.remote_fleet",
