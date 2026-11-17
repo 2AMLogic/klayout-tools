@@ -56,10 +56,10 @@ test suite that used them before this split.
 
 from __future__ import annotations
 
+import os
 import re
 import tempfile
 from collections.abc import Iterable
-from pathlib import Path
 from typing import Any
 
 from ._layout import write_layout
@@ -141,44 +141,36 @@ def _parse_def_die_area_um(def_path: str) -> tuple[float, float, float, float] |
 def _merge_gds_view(kdb: Any, main_layout: Any, gds_path: str) -> None:
     """Merge a GDS view (the standard-cell library GDS, or a macro's own
     declared ``gds``) into ``main_layout``, preserving ``main_layout``'s own
-    DBU regardless of ``gds_path``'s own declared DBU (issue #1090, a
-    follow-on to #1032's fix for the *first* DEF/LEF read's own DBU).
+    DBU regardless of ``gds_path``'s own declared DBU (issue #1090).
 
     A plain ``main_layout.read(gds_path)`` on an existing, non-empty
     ``Layout`` silently *adopts* the incoming GDS stream's own DBU whenever
-    it differs from ``main_layout.dbu`` -- confirmed directly against the
-    installed ``klayout`` build -- without rescaling any geometry already
-    present. Every DEF-derived shape (instance placements, routed wires,
-    vias -- correct at the DEF's own DBU, itself resolved from the tech LEF
-    per #1032) then gets silently *reinterpreted* at the GDS's own DBU on
-    this second read, doubling (or halving) every DEF-derived coordinate in
-    real microns while the standard-cell/macro geometry that arrives with
-    this same read stays correct -- a geometrically-plausible-looking but
-    wrong merged GDS that passes the "empty (unmatched) cells"/"orphan
-    cells" checks below.
+    it differs from ``main_layout.dbu``, without rescaling geometry already
+    present: every DEF-derived shape (correct at the DEF's own DBU, itself
+    resolved from the tech LEF per #1032) then gets silently *reinterpreted*
+    at the GDS's own DBU, doubling (or halving) every DEF-derived coordinate
+    in real microns while the standard-cell/macro geometry from this same
+    read stays correct -- a plausible-looking but wrong merged GDS that
+    passes the "empty (unmatched) cells"/"orphan cells" checks below.
 
-    Reading the incoming view into its own scratch ``Layout`` first,
-    rescaling it (only when its DBU actually differs) to
-    ``main_layout.dbu``, and re-serializing it (via a temp file) before the real
-    merge keeps both sides in one coordinate system by construction: the
-    DBU-adoption behavior above can then only ever apply to the scratch
-    layout's own (already-rescaled) content, never to ``main_layout``'s
-    existing geometry, regardless of which DBU either side started at.
+    Reading the incoming view into its own scratch ``Layout``, rescaling it
+    (only when its DBU differs) to ``main_layout.dbu``, and re-serializing
+    it via a temp file keeps both sides in one coordinate system: the
+    DBU-adoption above then only ever applies to the scratch layout's own
+    (already-rescaled) content, never to ``main_layout``'s existing geometry.
     """
     scratch = kdb.Layout()
     scratch.read(gds_path)
     if scratch.dbu != main_layout.dbu:
-        scale = scratch.dbu / main_layout.dbu
-        scratch.transform(kdb.ICplxTrans(scale))
+        scratch.transform(kdb.ICplxTrans(scratch.dbu / main_layout.dbu))
         scratch.dbu = main_layout.dbu
-    save_opts = kdb.SaveLayoutOptions()
-    save_opts.format = "GDS2"
-    # A temp-file round trip rather than ``Layout.write_bytes``/``read_bytes``:
-    # ``read``/``write`` exist on every supported klayout, whereas the
-    # in-memory byte API is 0.30-only (issue #5768).
+    from .place_and_route import PlaceAndRouteError
+
+    # Temp-file round trip rather than ``Layout.write_bytes``/``read_bytes``:
+    # the in-memory byte API is 0.30-only (issue #5768).
     with tempfile.TemporaryDirectory() as tmp:
-        scratch_path = str(Path(tmp) / "scratch.gds")
-        scratch.write(scratch_path, save_opts)
+        scratch_path = os.path.join(tmp, "scratch.gds")
+        write_layout(scratch, scratch_path, PlaceAndRouteError)
         main_layout.read(scratch_path, kdb.LoadLayoutOptions())
 
 
