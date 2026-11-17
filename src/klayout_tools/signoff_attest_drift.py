@@ -51,14 +51,16 @@ SKIPPED_CHECK_KEYS = (
     *item9.DOCUMENTED_KEYS,
 )
 
-#: Keys beyond ``role`` that identify one ``attestation.checks[]`` entry, in
-#: the order a ``drift[].check`` object lists them: ``path`` for a ``present``
-#: file check, ``target``/``name``/``testbench`` for a ``command`` or
-#: ``recorded_hash`` check, ``row`` for an item-8 citation check, and
-#: ``corner`` + ``metric`` for an item-8 metric check (there is one check per
-#: corner x metric, so the corner alone would not name it). A check kind
-#: carrying none of them -- item 9's ``pdk``/``tools`` pins, a top-level
-#: ``cold_start`` covering every bench -- is identified by its ``role`` alone.
+#: Keys beyond ``role`` (and the check's own ``check`` kind, which
+#: :func:`check_identity` emits first) that identify one
+#: ``attestation.checks[]`` entry, in the order a ``drift[].check`` object
+#: lists them: ``path`` for a ``present`` file check, ``target``/``name``/
+#: ``testbench`` for a ``command`` or ``recorded_hash`` check, ``row`` for an
+#: item-8 citation check, and ``corner`` + ``metric`` for an item-8 metric
+#: check (there is one check per corner x metric, so the corner alone would
+#: not name it). A check kind carrying none of them -- item 9's
+#: ``pdk``/``tools`` pins, a top-level ``cold_start`` covering every bench --
+#: is identified by its ``role`` plus its ``check`` kind alone.
 CHECK_IDENTITY_KEYS = (
     "path",
     "target",
@@ -80,10 +82,18 @@ _CHECK_DRIFT_FIELD = re.compile(r"attestation\.checks\.(\d+)(?:\.|\Z)")
 
 
 def check_identity(check: Mapping[str, Any]) -> dict[str, Any]:
-    """The identity of one ``attestation.checks[]`` entry: its ``role``
+    """The identity of one ``attestation.checks[]`` entry: its ``role``,
+    then the check's own kind -- its ``check`` value (``present``,
+    ``command``, ``stream_readable``, ...), when the check carries one --
     followed by whichever of :data:`CHECK_IDENTITY_KEYS` the check carries,
-    in that order."""
+    in that order. The kind comes before the per-instance keys so checks of
+    one ``role`` that carry no other identity key (the three ``layout``
+    stream checks, item 8's ``report`` present check) still get pairwise
+    distinct identities, and so the ``--format text`` label reads
+    ``[role kind identity...]``."""
     identity: dict[str, Any] = {"role": check["role"]}
+    if "check" in check:
+        identity["check"] = check["check"]
     identity.update((key, check[key]) for key in CHECK_IDENTITY_KEYS if key in check)
     return identity
 

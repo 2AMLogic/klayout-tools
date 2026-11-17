@@ -136,12 +136,14 @@ def _drift_check_label(entry: dict) -> str:
 
     ``klt signoff --attest ... --check`` annotates every ``drift[]`` entry
     that points at one ``attestation.checks[<i>]`` entry with an additive
-    ``check`` object holding that check's identity -- its ``role`` plus
-    whichever of ``path``/``target``/``name``/``testbench``/``row``/
+    ``check`` object holding that check's identity -- its ``role``, then the
+    check's own kind (its ``check`` value, e.g. ``present``/``command``),
+    then whichever of ``path``/``target``/``name``/``testbench``/``row``/
     ``corner``/``metric`` the check kind carries (see
     ``signoff_attest_drift.check_identity``, which owns both the key set and
-    the order). Rendering it is a plain join of those values in that order, so
-    this module -- a leaf that every ``klt`` verb and two library modules
+    the order). Rendering it is a plain join of those values in that order,
+    so the label reads ``[evidence present evidence/sim_tt.json]``; this
+    module -- a leaf that every ``klt`` verb and two library modules
     import -- stays free of a dependency on the signoff stack, and the
     producer stays the single place that decides what identifies a check.
 

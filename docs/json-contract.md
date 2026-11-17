@@ -790,12 +790,17 @@ the artifact was regenerated".
 
 Issue #5460 adds an optional `check` object to a `drift[]` entry of the
 `klt signoff --attest --check` response, naming the `attestation.checks[]`
-entry the entry is about: its `role`, plus whichever identity keys that check
-kind carries — `path` (a `present` file check), `target` / `name` /
-`testbench` (a `command` or `recorded_hash` check), `row` (an item-8 citation
-check), `corner` + `metric` (an item-8 metric check, one per corner ×
-metric). A check with no identity beyond its role — item 9's `pdk` / `tools`
-pins, a top-level `cold_start` — gets `{"role": …}`. **Additive; no
+entry the entry is about: its `role`, then the check's own kind (its `check`
+value — `present`, `command`, `stream_readable`, …) when it carries one,
+then whichever identity keys that check kind carries — `path` (a `present`
+file check), `target` / `name` / `testbench` (a `command` or `recorded_hash`
+check), `row` (an item-8 citation check), `corner` + `metric` (an item-8
+metric check, one per corner × metric). The kind comes first so checks of
+one role that carry no other identity key stay pairwise distinct — the three
+`layout` stream checks of item 2, for example, are named by their kind alone.
+A check with no identity key beyond its kind — item 9's `pdk` / `tools` pins
+(`{"role": …, "check": "pin"}`), a top-level `cold_start`
+(`{"role": "cold_start", "check": "command"}`) — stops there. **Additive; no
 `schema_version` bump**: `field` stays the dotted positional pointer
 (`attestation.checks.17.content_hash`) it has always been, and `committed` /
 `fresh` are untouched, so a consumer that never reads `check` sees the bytes
@@ -805,7 +810,8 @@ when both lists have the same length, so an inventory that *gained or lost* a
 file still yields one whole-list entry), a `status` entry, anything outside
 `attestation.checks`, and every `drift[]` entry the other `--check` verbs
 produce. `--format text` renders it as a bracketed label after the pointer
-(`attestation.checks.17.content_hash  [testbench sim/bin/sim_common.py]:`) so
+(`attestation.checks.17.content_hash  [testbench present
+sim/bin/sim_common.py]:`) so
 a CI log names the file that moved without a second lookup — the index alone
 is not even stable, since file-presence checks are sorted by path. See
 [`docs/cli/signoff.md`](cli/signoff.md)'s "CI usage: `--check`".

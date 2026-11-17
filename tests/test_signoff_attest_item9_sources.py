@@ -277,7 +277,11 @@ def test_sources_envelope_checks_clean_then_names_the_source_on_drift(tmp_path):
         if e["field"].startswith("attestation.checks.")
         and e["field"].endswith(".content_hash")
     ]
-    assert hashed["check"] == {"role": "source", "path": "tb/lib/helpers.py"}
+    assert hashed["check"] == {
+        "role": "source",
+        "check": "present",
+        "path": "tb/lib/helpers.py",
+    }
 
 
 def test_text_output_names_a_source_bench(tmp_path, capsys):

@@ -389,7 +389,12 @@ def test_check_drift_names_a_metric_check_by_corner_and_metric(tmp_path):
     result = check_attestation(8, str(repo / "inventory.json"), committed)
 
     (value,) = [e for e in result["drift"] if e["field"].endswith(".value")]
-    assert value["check"] == {"role": "digital", "corner": "tt", "metric": "fmax"}
+    assert value["check"] == {
+        "role": "digital",
+        "check": "metric",
+        "corner": "tt",
+        "metric": "fmax",
+    }
     assert (value["committed"], value["fresh"]) == (100, 120)
     # The evidence file's own presence check names the path that moved.
     (hashed,) = [
@@ -398,7 +403,11 @@ def test_check_drift_names_a_metric_check_by_corner_and_metric(tmp_path):
         if e["field"].startswith("attestation.checks.")
         and e["field"].endswith(".content_hash")
     ]
-    assert hashed["check"] == {"role": "evidence", "path": "evidence/sim_tt.json"}
+    assert hashed["check"] == {
+        "role": "evidence",
+        "check": "present",
+        "path": "evidence/sim_tt.json",
+    }
 
 
 def test_check_drift_names_a_citation_check_by_spec_row(tmp_path):

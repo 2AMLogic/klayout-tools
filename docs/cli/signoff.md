@@ -2459,20 +2459,25 @@ additive `check` object identifying it:
   "field": "attestation.checks.17.content_hash",
   "committed": "sha256:3bca9b8e95ec…",
   "fresh": "sha256:aaa8abc15692…",
-  "check": {"role": "testbench", "path": "sim/bin/sim_common.py"}
+  "check": {"role": "testbench", "check": "present", "path": "sim/bin/sim_common.py"}
 }
 ```
 
-`check` is the check's `role` plus whichever identity keys its kind carries —
-`path` for a file-presence check, `target` / `name` / `testbench` for a
-command or `recorded_hash` check, `row` for a citation check, `corner` +
-`metric` for an item-8 metric check. A check with no identity beyond its role
-(the `pdk` / `tools` pins, a top-level `cold_start`) gets `{"role": …}`.
-`--format text` prints it as a bracketed label after the pointer:
+`check` is the check's `role`, then the check's own kind (its `check` value
+— `present`, `command`, `stream_readable`, …) when it carries one, then
+whichever identity keys its kind carries — `path` for a file-presence check,
+`target` / `name` / `testbench` for a command or `recorded_hash` check,
+`row` for a citation check, `corner` + `metric` for an item-8 metric check.
+The kind comes before those keys so checks of one role with no other
+identity key stay pairwise distinct (the three `layout` stream checks of
+item 2). A check with no identity key beyond its kind (the `pdk` / `tools`
+pins, a top-level `cold_start`) stops there — `{"role": …, "check": "pin"}`,
+`{"role": "cold_start", "check": "command"}`. `--format text` prints it as a
+bracketed label after the pointer:
 
 ```
 drift:
-  attestation.checks.17.content_hash  [testbench sim/bin/sim_common.py]:
+  attestation.checks.17.content_hash  [testbench present sim/bin/sim_common.py]:
       committed: 'sha256:3bca9b8e95ec…'
       fresh:     'sha256:aaa8abc15692…'
 ```
