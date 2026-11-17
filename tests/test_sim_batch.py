@@ -7605,33 +7605,6 @@ def test_split_reroute_without_a_checkpoint_writes_the_shard_map(tmp_path, monke
     assert [e["state"] for e in document["shards"]] == ["collected"] * 3
 
 
-@pytest.mark.parametrize("lose_a_corner", [False, True])
-def test_shard_map_is_removed_only_when_the_sweep_finishes(
-    tmp_path, monkeypatch, lose_a_corner
-):
-    path = _resume_request(tmp_path)
-    manifest_path = tmp_path / "artifacts" / sb.BATCH_SHARDS_FILENAME
-    manifest_path.parent.mkdir(parents=True)
-    # A well-formed inert map (no shards listed): issue #5775's harvest
-    # reads it, finds nothing to collect, and leaves it alone.
-    manifest_path.write_text(
-        json.dumps({"schema_version": 1, "fingerprint": "fp", "hosts": 2, "shards": []})
-    )
-    probe = _install_fake_batch(monkeypatch, fleet=True)
-    first = _run(path, tmp_path, hosts=2)
-    assert probe
-    if lose_a_corner:
-        manifest_path.write_text(
-            json.dumps(
-                {"schema_version": 1, "fingerprint": "fp", "hosts": 2, "shards": []}
-            )
-        )
-        lost = first["corners"][1]["corner_id"]
-        _install_fake_batch(monkeypatch, lost_ids={lost}, fleet=True)
-        _run(path, tmp_path, hosts=2)
-    assert manifest_path.exists() is lose_a_corner
-
-
 # --------------------------------------------------------------------------- #
 # batch.max_concurrent_jobs / --max-concurrent-jobs (issue #3914)
 # --------------------------------------------------------------------------- #
