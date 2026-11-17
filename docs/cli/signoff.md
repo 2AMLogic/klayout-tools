@@ -574,16 +574,74 @@ $ klt signoff --manifest manifest.json --format text
 entries by name — under the `cite:` line they qualify, and (in `--fleet`)
 beside a block whose deck actually left a gap.
 
-**No verdict changes.** A `drc` check still passes on `status: "clean"`
-alone: a deck with twenty rule-free drawn layers and sixteen skipped rules
-grades exactly like a fully-covering one, and no claim that was `met` before
-this change becomes `unmet` because of it. This is deliberate — surfacing
-the gaps is not enforcing their disclosure. `klt signoff` still cannot tell
-a *disclosed* gap from an *undisclosed* one, because a claim states its
-disclosure in a block README/manifest this command has no field to compare
-against, so **item 3's disclosure requirement remains claimant-enforced**: a
-`met` verdict is not evidence that the gaps were disclosed, only that they
-are now printed next to the claim that has to disclose them.
+**No verdict changes by default.** A `drc` check still passes on `status:
+"clean"` alone: a deck with twenty rule-free drawn layers and sixteen skipped
+rules grades exactly like a fully-covering one, and no claim that was `met`
+before this change becomes `unmet` because of it. This is deliberate —
+surfacing the gaps is not enforcing their disclosure. Without the opt-in
+below, `klt signoff` still cannot tell a *disclosed* gap from an
+*undisclosed* one, because a claim states its disclosure in a block
+README/manifest this command has no field to compare against, so **item 3's
+disclosure requirement is claimant-enforced by default**: a `met` verdict is
+not evidence that the gaps were disclosed, only that they are now printed
+next to the claim that has to disclose them.
+
+**Opt-in: `require_coverage_disclosure` (issue #5789).** A project that
+wants the comparison grades it, not just prints it, with the optional
+top-level manifest boolean `require_coverage_disclosure` (default `false`)
+and a `coverage_disclosed` declaration on item 3's evidence entry — the
+machine-readable place a claim's enumeration lives, which #2002 left open:
+
+```json
+{
+  "require_coverage_disclosure": true,
+  "evidence": {
+    "3": {
+      "file": "drc.json",
+      "coverage_disclosed": {
+        "layers_in_stream_without_rules": ["70/20", "71/20"],
+        "rules_skipped": ["met5.4", "met5.5"],
+        "deck_scope": ["5.x", "6.x"]
+      }
+    }
+  }
+}
+```
+
+With it `true`, a would-be-`met` item 3 whose declaration is not
+**set-equal** (order-insensitive, per field) to the coverage its citation
+reports grades `unmet` / `coverage_undisclosed`, with
+`detail.coverage_undisclosed` naming per field the `missing` entries
+(reported by the envelope, absent from the claim) and the `extra` entries
+(claimed, no longer reported — deck drift is a false claim too). Set
+equality, not subset, for exactly that reason: a stale claim listing gaps
+the deck no longer has is as much a false claim as one hiding the gaps it
+has. Entries are compared verbatim as strings, so a `deck_scope` token that
+is not a chapter name (the curated sg13g2 deck's `"x"` placeholder, #5723)
+compares exactly like one. The refused item also carries
+`detail.cited_evidence` — the citation verbatim, in the same shape a `met`
+item's would have carried (`citation` itself stays `null`, as on every
+unmet item) — and `--format text` prints the `cite:`/`coverage:` lines it
+would have printed, then the undisclosed entries under them. A per-cell
+report list is gated per member, the failing member named under
+`detail.failed_citations` as usual.
+
+| Case | Grade |
+| ---- | ----- |
+| Ratchet absent, `null` or `false` | Byte-identical to before the key existed — no new report key, no verdict change. A malformed `coverage_disclosed` is not even read. |
+| Ratchet on, declaration set-equal to the three reported fields | `met`, no new `detail` key. |
+| Ratchet on, any field disagreeing | `unmet` / `coverage_undisclosed`, `detail.coverage_undisclosed` naming per-field `missing` and `extra`. |
+| Ratchet on, `coverage_disclosed` absent while the envelope discloses a non-empty `layers_in_stream_without_rules` or `rules_skipped` | `unmet` / `coverage_undisclosed` — every reported entry is `missing`. |
+| Ratchet on, cited envelope carries no `coverage` block (pre-#2002 evidence) | `unmet` / `coverage_undisclosed`, `detail.coverage_undisclosed.reason: "no_coverage_block"` — evidence that states no gaps cannot satisfy a project asserting every claim states its gaps. |
+| All three fields empty, `coverage_disclosed` absent | `met` — nothing was disclosed because there is nothing to disclose. |
+| `require_coverage_disclosure` non-boolean, or `coverage_disclosed` not an object of string lists (with the ratchet on) | `unmet` / `invalid_evidence` for **item 3 alone**, `detail.problem` naming the key — never raises. |
+
+The ratchet grades **item 3 only**, whatever item carries a
+`coverage_disclosed` entry, and needs no CLI state: a report committed from
+a ratcheted manifest reproduces under `--check` (`status: "match"`), because
+the verdict is a function of the manifest alone. Additive — two optional
+manifest keys, one new `reason` value, one new conditional `detail` key — so
+there is no `schema_version` bump.
 
 Absent entirely — no `coverage` key in the detail/citation, no
 `drc_coverage` row — for DRC evidence committed before `klt drc` reported
@@ -592,8 +650,9 @@ coverage, and for every non-`drc` kind. An absent coverage statement means
 `--fleet` run mixing pre- and post-`coverage` evidence renders both without
 error. `klt lvs`'s own coverage-shaped disclosures (warnings-only
 mismatches, `power_connectivity: "unchecked"`) get no equivalent treatment
-for item 4 — that, and whether a non-empty gap should ever change item 3's
-verdict, are open questions #2002 deliberately left unanswered.
+for item 4 — #2002's still-open question. Whether a non-empty gap should
+change item 3's verdict is the question `require_coverage_disclosure`
+above answers: opt-in, never by default.
 
 ### A pinned hash is checked against the artifact, not only against the envelope
 
@@ -1082,6 +1141,10 @@ See "Citing an envelope nested inside a composite report (`pointer`)" below.
 - `partition_boundary` — optional, `"mixed-signal"` only (issue #2278):
   what this block's two partitions *denote*. See "The declared partition
   boundary" below.
+- `require_coverage_disclosure` — optional boolean (default `false`, issue
+  #5789): the item-3 ratchet comparing each cited `klt drc` report's
+  `coverage` block against the `coverage_disclosed` declaration on its
+  evidence entry. See "DRC coverage is reported, not graded" above.
 - `evidence` — optional (default `{}`), a map from item id to an evidence
   entry, either **file-backed** or **command-backed**:
   - **File-backed** (issue #722) — a bare file path (a `klt
@@ -1096,7 +1159,11 @@ See "Citing an envelope nested inside a composite report (`pointer`)" below.
     second copy; see "Gzip-compressed evidence files" above. A `klt power`
     envelope classifies fine here too, but is never graded `"met"` for any
     item — see "No T1 item accepts `power` evidence" below; cite it in
-    envelope-aggregation mode instead.
+    envelope-aggregation mode instead. Item 3's entry may also carry
+    `coverage_disclosed` (issue #5789) — the claim's own enumeration of the
+    cited report's three coverage fields, graded under
+    `require_coverage_disclosure`; see "DRC coverage is reported, not
+    graded" above.
   - **Command-backed** (issue #825, Phase 1 of epic #706) —
     `{"command": [<argv>, ...], "cwd": ..., "content_hash": ...,
     "pointer": ...}`: `klt
@@ -4547,6 +4614,7 @@ actually ran and failed):
 | `"unverifiable_provenance"` | no  | The check passed, and the manifest pins a `content_hash`, but the resolved envelope carries no input hash at all (`null`) — a command-backed `functional-verification` citation (no `provenance` block by design, and a command's stdout is not a stable file to re-hash; a *file-backed* one is re-hashed by the grader, issue #4893) or an unprovenanced `generic` envelope. Distinct from `"stale_evidence"`: no revision was ever recorded to compare against, so the remedy is to re-produce the evidence with a producer that records provenance, not to re-run the same one again. The item carries `detail.content_hash_pin: "unverifiable"` and a `detail.content_hash_pin_note` naming the envelope kind (issue #3747). **Item 11 only** (issue #2496): also rendered when the cited `erc` part's spec document could not be verified at all — the envelope carries no `provenance.spec.content_hash` (it predates issue #2049), or the document could no longer be hashed on this second read. **Items 1, 2, 9 and 10, artifact-anchored `generic` citations** (issue #2718): also rendered when the artifact `provenance.input.path` names cannot be found or read from the grading context (`input_verified: null`), so the binding is only the envelope's own claim. |
 | `"wrong_kind"`            | yes | The evidence resolved to a recognised, *passing* envelope, but its classified kind is not one this item accepts — item 3 requires `"drc"` and item 4 requires `"lvs"` (issue #1987: a `klt extract` report, which cannot fail, no longer satisfies either), item 5 requires `"sim"` for an analog partition and `"sta"`/`"functional-verification"`/`"sim"` for a digital one, item 6 requires `"yield"`, and item 8 requires `"generic"` (issue #2044 — see "Items 5, 6 and 8 are kind-restricted too" above), item 7 requires `"pex"` for an analog partition and `"pex"` or `"functional-verification"` for a digital one (see "Item 7 is kind-restricted, per block kind" above), items 3-7 and 11 reject a `"generic"` citation (see "Generic evidence (opt-in, non-`klt`-native)" above; items 1, 2, 9 and 10 refuse a bare one as `"unanchored_evidence"` instead), every item other than item 11 rejects an `"erc"`, `"place-and-route"`, `"socket-check"` or `"lef-abstract"` citation (see "Item 11 is compound" above), and **every** item rejects a `"power"` citation. (A cited item-11 *set* that is merely missing the `erc` or `lvs` part renders `"power_delivery_parts_missing"` instead, issue #4193.) The cited check did not fail on its own terms; it simply does not prove what this item requires. |
 | `"unanchored_evidence"`   | yes | **(issue #2718)** **Items 1, 2, 9 and 10 only.** The evidence resolved to a *passing* `generic` envelope, but it is not bound to an audited artifact. Either the envelope declares no `t1_item` (or a non-integer one), or it names no usable `provenance.input.path`, or the manifest entry pins no `content_hash`. The envelope's `status` is then only its author's word. Add the binding; there is nothing to re-run. A non-integer `t1_item` renders this for item 8 too. See "Items 1, 2, 9, and 10: bind them to an audited artifact" above. |
+| `"coverage_undisclosed"`  | no  | **(issue #5789)** **Item 3 only, and only under `require_coverage_disclosure`.** The cited `klt drc` report graded `met` on `status: "clean"`, but the claim's `coverage_disclosed` declaration is not set-equal to the coverage the report itself states: `detail.coverage_undisclosed` names per field the `missing` entries (reported, not claimed) and `extra` entries (claimed, no longer reported — deck drift), or carries `reason: "no_coverage_block"` for pre-#2002 evidence that states no coverage at all. The item also carries `detail.cited_evidence` (the citation a `met` item would have had). Fix the declaration, or regenerate against the deck the claim describes. See "DRC coverage is reported, not graded" above. |
 | `"stale_artifact"`        | no  | **(issue #2887)** **Items 1 and 2 only.** An artifact-anchored `generic` attestation carries a `provenance.regeneration` claim whose `regenerated_hash` (the hash the attester's own CI got by re-running the generator) differs from the hash the bound artifact re-hashes to. The attested bytes are intact, but they are not what the generator produces: the committed netlist or stream is out of date with its sources, or the generator is nondeterministic. Distinct from `"stale_evidence"`, which means the artifact changed *after* it was attested. `klt signoff` never runs the generator. Regenerate and commit the artifact, then re-attest. See "Items 1 and 2: attesting that the artifact was regenerated" above. |
 | `"wrong_item"`            | yes | **(issue #2718)** The evidence resolved to a *passing* `generic` envelope whose declared `t1_item` names a different item than the one it is cited for: an attestation replayed across items. Rendered for every item that accepts `generic` (1, 2, 8, 9, 10). An item-8 envelope with no `t1_item` is unaffected. Cite the attestation made for this item. |
 | `"not_applicable_wrong_partition"` | yes | **(issue #2865)** **Item 6 only.** The `not_applicable` form was used on an analog partition (or a pure `analog` block); only a digital partition may. |

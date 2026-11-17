@@ -73,6 +73,19 @@ from .design_evidence_tiers import (
 from .env_provenance import find_repo_root
 from .metrics import get_metric, is_registered
 
+# Item 3's DRC coverage disclosure and its #5789 ratchet, split out for
+# the size-ratchet ceiling like `signoff_derived_rows` below.
+from .signoff_coverage_disclosure import (
+    drc_coverage_disclosure as _drc_coverage_disclosure,
+)
+from .signoff_coverage_disclosure import (
+    item3_coverage_verdict as _item3_coverage_verdict,
+)
+from .signoff_coverage_disclosure import (
+    item3_key_invalid,
+    read_require_coverage_disclosure,
+)
+
 # Item 5's spec-row coverage sources (issue #3778) and the manifest ratchet
 # that requires them machine-derived (issue #5462); out of this file for its
 # size-ratchet ceiling, same as `signoff_multi_member` and `signoff_na`.
@@ -3017,49 +3030,6 @@ def _generic_overstates_coverage(kind: str, envelope: _EvidenceEnvelope) -> bool
     )
 
 
-def _drc_coverage_disclosure(
-    kind: str, envelope: dict[str, Any]
-) -> dict[str, Any] | None:
-    """The three ``coverage`` fields ``docs/design-evidence-tiers.md`` item 3
-    requires a DRC claim to disclose, quoted verbatim off the cited envelope
-    (issue #2002) -- or ``None`` when there is nothing to quote.
-
-    ``None`` in exactly two cases, and they mean the same thing to a reader
-    ("this artifact makes no coverage statement"), never "the deck has no
-    gaps":
-
-    - ``kind != "drc"``. No other envelope kind carries a ``coverage`` block
-      of this shape, and item 3 is the only item whose doc text names these
-      fields. (`klt lvs`'s own coverage-shaped disclosures are deliberately
-      out of scope -- see this module's "DRC coverage surfacing" docstring
-      section.)
-    - The envelope has no ``coverage`` key at all, or a non-object one:
-      evidence committed before ``klt drc`` reported coverage. Back-compat is
-      the whole reason this is ``None`` rather than a dict of empty lists --
-      an old envelope must not read as a deck that checked everything.
-
-    Individual fields are normalised to a list (``[]`` for a missing or
-    non-list value) so a consumer never has to re-do that check; this is a
-    *shape* normalisation of a present ``coverage`` block, not a fabricated
-    coverage claim for an absent one.
-    """
-    if kind != "drc":
-        return None
-    coverage = envelope.get("coverage")
-    if not isinstance(coverage, dict):
-        return None
-
-    def _field(name: str) -> list[Any]:
-        value = coverage.get(name)
-        return list(value) if isinstance(value, list) else []
-
-    return {
-        "layers_in_stream_without_rules": _field("layers_in_stream_without_rules"),
-        "rules_skipped": _field("rules_skipped"),
-        "deck_scope": _field("deck_scope"),
-    }
-
-
 def _partial_coverage_disclosure(envelope: Mapping[str, Any]) -> dict[str, Any] | None:
     """The cited envelope's own statement that it skipped requested work
     (issue #2109) -- or ``None`` when it makes no such statement.
@@ -4463,6 +4433,10 @@ def build_tier_report(
     # Issue #5462: the opt-in ratchet that fails item 5 on manifest-asserted
     # (rather than envelope-derived) row coverage.
     require_derived, require_derived_invalid = read_require_derived_rows(manifest)
+    # Issue #5789: the opt-in ratchet failing item 3 on a mis-declared gap.
+    require_coverage, require_coverage_invalid = read_require_coverage_disclosure(
+        manifest
+    )
     # Issue #2839: T1 item 11's port-accessibility policy (provisional).
     power_port_policy = _read_power_port_policy(manifest.get("power_ports"))
 
@@ -4521,6 +4495,8 @@ def build_tier_report(
                     **_resolve_spec_rows(spec_rows_by_item, t1_item["id"], partition),
                     require_derived_rows=require_derived,
                     require_derived_rows_invalid=require_derived_invalid,
+                    require_coverage_disclosure=require_coverage,
+                    require_coverage_disclosure_invalid=require_coverage_invalid,
                     generator_exec=generator_exec,
                 )
             total += 1
@@ -4786,6 +4762,9 @@ def _normalize_evidence_options(raw: dict[str, Any]) -> dict[str, Any] | None:
     ``require_annotation_complete`` is issue #3258;
     ``require_complete_constraints`` is issue #5234; ``foundry_cell_exceptions``
     (disclosed foundry-cell DRC exceptions for item 3) is issue #4530.
+    ``coverage_disclosed`` (issue #5789) is validated lazily by
+    :mod:`.signoff_coverage_disclosure`, so it is read only when the
+    ratchet is on.
     """
     require_annotation = raw.get("require_annotation_complete", False)
     if not isinstance(require_annotation, bool):
@@ -4802,6 +4781,7 @@ def _normalize_evidence_options(raw: dict[str, Any]) -> dict[str, Any] | None:
         "require_annotation_complete": require_annotation,
         "require_complete_constraints": require_constraints,
         "foundry_cell_exceptions": cell_exceptions,
+        "coverage_disclosed": raw.get("coverage_disclosed"),
     }
 
 
@@ -6719,6 +6699,8 @@ def _build_tier_item(
     spec_rows_invalid: bool = False,
     require_derived_rows: bool = False,
     require_derived_rows_invalid: bool = False,
+    require_coverage_disclosure: bool = False,
+    require_coverage_disclosure_invalid: bool = False,
     generator_exec: GeneratorExecution | None = None,
 ) -> dict[str, Any]:
     """Grade one T1 checklist item against ``evidence`` -- see
@@ -6836,7 +6818,13 @@ def _build_tier_item(
             and spec_citation["kind"] not in allowed_kinds
         ):
             return "unmet", _REASON_WRONG_KIND, None, spec_detail
-        return spec_status, spec_reason, spec_citation, spec_detail
+        # Issue #5789: refuse an item 3 whose declared coverage disagrees.
+        return _item3_coverage_verdict(
+            item_id,
+            require_coverage_disclosure,
+            spec,
+            (spec_status, spec_reason, spec_citation, spec_detail),
+        )
 
     raw_entry = _lookup_evidence(evidence, item_id, partition_kind)
     # Issue #3741: item 5 digital's RTL-flow route needs STA *and* a
@@ -6870,24 +6858,25 @@ def _build_tier_item(
             )
     elif (
         report_list
+        # Issue #5789: item 3's malformed key, likewise item 5's own.
+        or item3_key_invalid(item_id, require_coverage_disclosure_invalid)
         or item_id in _ITEMS_ACCEPTING_MULTI_CITATION
         and (
-            # Issue #5462: a mistyped ``require_derived_rows`` is item 5's own
-            # ``invalid_evidence``, so it must reach the aggregator for every
-            # evidence shape -- single-dict and absent entries took neither
-            # branch below and graded as if the key were not set at all.
+            # Issue #5462: a mistyped ``require_derived_rows`` is item 5's
+            # own ``invalid_evidence``, so it must reach the aggregator for
+            # every evidence shape, not only list-shaped entries.
             item5_require_derived_invalid
-            or raw_entry is not None
-            and (
-                isinstance(raw_entry, list)
-                or spec_rows is not None
-                or spec_rows_invalid
-                or required_kind_pair is not None
-            )
+            or spec_rows is not None
+            or spec_rows_invalid
             # Issue #4190: declared ``spec_rows`` with no evidence entry at
             # all grade as a zero-citation set (every row uncovered or a
-            # declared gap), not as ``no_evidence``.
-            or (raw_entry is None and (spec_rows is not None or spec_rows_invalid))
+            # declared gap), not as ``no_evidence`` -- so ``spec_rows``
+            # routes the branch with or without an entry, while a bare list
+            # or an RTL-flow kind pair still needs one (issues #2959/#3741).
+            or (
+                raw_entry is not None
+                and (isinstance(raw_entry, list) or required_kind_pair is not None)
+            )
         )
     ):
         # Issue #2959: item 5 may cite several envelopes (and declare the
@@ -6907,6 +6896,9 @@ def _build_tier_item(
             required_kind_pair=required_kind_pair,
             require_derived=item5_require_derived,
             require_derived_invalid=item5_require_derived_invalid,
+            require_coverage_invalid=item3_key_invalid(
+                item_id, require_coverage_disclosure_invalid
+            ),
         )
         # Issue #5031: per-cell DRC/LVS lists state how many members counted.
         extra = with_member_coverage(item_id, report_list, raw_entry, extra)
@@ -7081,6 +7073,7 @@ def _grade_multi_citation(
     required_kind_pair: tuple[str, ...] | None = None,
     require_derived: bool = False,
     require_derived_invalid: bool = False,
+    require_coverage_invalid: bool = False,
 ) -> tuple[str, str | None, dict[str, Any] | None, dict[str, Any], dict[str, Any]]:
     """Grade a list-form (or ``spec_rows``-bearing) evidence entry (issue
     #2959). Each member goes through the ordinary per-envelope path
@@ -7111,7 +7104,9 @@ def _grade_multi_citation(
     #5462, the manifest's ``require_derived_rows``, item 5 only) an asserted
     row is not coverage: an otherwise passing set carrying one is
     ``unmet``/``partial_coverage`` with ``detail.asserted_rows``.
-    ``require_derived_invalid`` (a non-boolean key) is ``invalid_evidence``.
+    ``require_derived_invalid`` (a non-boolean key) is ``invalid_evidence``;
+    so is ``require_coverage_invalid`` (issue #5789, via
+    :func:`_checked_multi_members`).
 
     Returns ``(status, reason, citation, failure_detail, extra_item_keys)``.
     """
@@ -7124,7 +7119,9 @@ def _grade_multi_citation(
     if require_derived_invalid:
         return invalid("'require_derived_rows' must be a boolean")
 
-    members, problem = _checked_multi_members(raw_entry, spec_rows, spec_rows_invalid)
+    members, problem = _checked_multi_members(
+        raw_entry, spec_rows, spec_rows_invalid, require_coverage_invalid
+    )
     if members is None:
         return invalid(problem or "malformed evidence entry")
 
@@ -7189,10 +7186,13 @@ def _checked_multi_members(
     raw_entry: Any,
     spec_rows: list[dict[str, Any]] | None,
     spec_rows_invalid: bool,
+    require_coverage_invalid: bool = False,
 ) -> tuple[list[tuple[dict[str, Any], list[str] | None]] | None, str | None]:
     """The parsed ``(spec, rows)`` members of a multi-citation entry, or
     ``(None, <problem>)`` when ``spec_rows``, a member, or a member's row
     naming is invalid."""
+    if require_coverage_invalid:  # issue #5789: item 3's malformed key
+        return None, "'require_coverage_disclosure' must be a boolean"
     if spec_rows_invalid:
         return None, "'spec_rows' for this item is malformed"
     # Issue #4190: no evidence entry -> zero members; only ``spec_rows`` grade.
