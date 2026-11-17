@@ -334,7 +334,14 @@ a non-zero exit whose database is unreadable or has no cross-reference.
 `status` is `match` only when every circuit pair is `Match`/`MatchWithWarning`;
 unmatched devices, nets, pins and circuits become `mismatches[]` entries using
 the shared categories (`device.unmatched`, `device.property`, `net.unmatched`,
-`pin.unmatched`, `topology`).
+`pin.unmatched`, `topology`). A `pin.unmatched` entry whose pin pair the
+runset's own compare graded `Match`/`MatchWithWarning` — a reference pin with
+no layout counterpart, i.e. an *unlabelled* layout pin, the shape a runset
+global like IHP sg13g2's `ignore_top_ports_mismatch` exists to accept — is
+disclosed with `severity: "warning"` and does not gate the verdict: the
+wrapper's `status` stays in step with the engine it wrapped (issue #5664).
+`counts.pins` still reports the structural pin presence, and a pin pair the
+comparer itself graded otherwise remains `severity: "error"`.
 
 **An empty extraction is graded, not an error (issue #4081).** When the runset
 extracts zero devices from the layout its compare step never runs, so the
@@ -3551,7 +3558,8 @@ Notes on the semantics:
   `klt lvs` run without telling a reader anything new about whether the
   device was *sized* correctly. A custom device class whose geometry
   parameters are primary (e.g. the MoM capacitor's `W`/`L`, see
-  `extract.mom_capacitor_device_class`) is likewise not reported — its
+  `extract.mom_capacitor_device_class`) is likewise not reported *as a
+  warning* — its
   geometry really is compared.
 - **To actually compare the geometry**, name the parameters in
   `options.compare_parameters` for that class — e.g.
@@ -3571,7 +3579,9 @@ string-match a category inside an array of ordinary compare findings to ask
 "was this class's sizing verified?", so in practice nothing asked. The
 top-level **`device_parameter_coverage`** block (always present; `null` only
 for `"engine": "netgen"`) answers it directly, built from the same
-determination as the warning so the two cannot disagree — the same
+per-parameter determination as the warning, so the two cannot disagree about
+a class they both cover — a MOS class appears in the block only, never as a
+warning (see "Only resistors and capacitors" above) — the same
 one-source-of-truth discipline `body_verification` (issue #1983) and
 `power_connectivity` (issue #1952) already apply:
 

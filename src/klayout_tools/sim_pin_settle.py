@@ -67,9 +67,18 @@ def check_offhost_engine_version_pin(
     engine: str,
     engine_version: str | None,
 ) -> None:
-    """Enforce the pin for off-host backends. No pre-submit probe exists for a
-    remote/batch runner, so it is checked against the version its reports
-    carried (after the run)."""
+    """Enforce the pin for off-host backends.
+
+    This process cannot probe a remote/batch runner's engine, but the pin is
+    not post-run-only: the forwarded request runs on the runner as
+    ``klt sim --backend local-parallel``, whose own
+    :func:`check_local_engine_version_pin` refuses the job before any corner
+    simulates there (issue #5853). This check is the backstop: it compares
+    the version the runner's reports carried after the run, which is also
+    what fails closed for a runner too old to know the field (its reports
+    carry no version) and what raises the submitter's own
+    ``engine_version_unmet`` when a runner-side refusal left no report at
+    all."""
     from . import sim
 
     if pin is None or backend not in sim._OFFHOST_BACKENDS:
