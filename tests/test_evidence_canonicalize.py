@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 
 from klayout_tools import evidence_canonicalize as ec
+from klayout_tools import place_and_route_rerun as _pnr_rerun
 from klayout_tools._report_verify import diff_verdict_fields
 from klayout_tools.cli import main
 
@@ -322,7 +323,10 @@ def test_nested_bookkeeping_keys_are_removed() -> None:
 def test_flow_verb_run_scoped_keys_are_removed() -> None:
     pnr = ec.canonicalize(_base_report("place-and-route"), "place-and-route")
     assert "engine_logs" not in pnr and pnr["stages"]["detailed_route"] == {}
-    assert pnr["def_path"] == ".klt/place-and-route/block.def"
+    # Issue #5863 (merged in from main): --rerun compares path fields by
+    # file name -- the directory is host/scrub-specific -- so the view
+    # reduces ``def_path`` to ``block.def`` the same way.
+    assert pnr["def_path"] == "block.def"
     assert pnr["wns_ns"] == -0.1
 
     equiv = ec.canonicalize(_base_report("equiv"), "equiv")
@@ -349,14 +353,19 @@ def test_extract_anonymous_net_spellings_canonicalize_equal() -> None:
 
 @pytest.mark.parametrize("kind", KINDS)
 def test_verdict_fields_survive_with_their_values(kind: str) -> None:
-    """Every key the kind neither excludes nor drops keeps its value: the
-    view narrows the comparison, it never rewrites a verdict."""
+    """Every key the kind neither excludes, drops, nor rewrites keeps its
+    value: the view narrows the comparison, it never rewrites a verdict
+    -- except place-and-route's path fields, reduced to their file names
+    since issue #5863 (the file name is the comparison identity)."""
     spec = ec.kind_spec(kind)
     report = _base_report(kind)
     removed = {path[0] for path in spec.exclude if len(path) == 1}
     canonical = ec.canonicalize(report, kind)
+    rewritten = (
+        _pnr_rerun.RERUN_PATH_FIELD_KEYS if kind == "place-and-route" else frozenset()
+    )
     for key, value in report.items():
-        if key in removed or key not in canonical:
+        if key in removed or key in rewritten or key not in canonical:
             continue
         if isinstance(value, (dict, list)):
             continue
