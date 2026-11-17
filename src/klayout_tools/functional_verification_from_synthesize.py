@@ -25,10 +25,14 @@ from .request_paths import resolve_request_path
 FROM_SYNTHESIZE_KEYS = ("report", "netlist")
 
 
-def _err(message: str) -> Exception:
+def _err_cls() -> type[Exception]:
     from .functional_verification import FunctionalVerificationError
 
-    return FunctionalVerificationError(message)
+    return FunctionalVerificationError
+
+
+def _err(message: str) -> Exception:
+    return _err_cls()(message)
 
 
 def _request_relative(entry: str, request_dir: str, field: str = "request path") -> str:
@@ -158,12 +162,6 @@ def resolve_from_synthesize(
         "netlist_sha256": check["actual"],
         "hash_check": check,
     }
-
-
-def _err_cls() -> type[Exception]:
-    from .functional_verification import FunctionalVerificationError
-
-    return FunctionalVerificationError
 
 
 def resolve_sources_with_synthesize(

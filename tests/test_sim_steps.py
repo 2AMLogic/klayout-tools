@@ -13,24 +13,16 @@ from __future__ import annotations
 
 import copy
 import json
-import os
-import shutil
 from pathlib import Path
 
 import pytest
 
 from helpers.subprocess_fakes import fake_completed
+from helpers.tool_probes import SKIP_NO_NGSPICE as _SKIP_NO_NGSPICE
 from klayout_tools import sim, sim_measurement_results, sim_remote, sim_steps
 
 pytestmark = pytest.mark.usefixtures(
     "real_build_identity_git", "bare_name_ngspice_resolution"
-)
-
-HAVE_NGSPICE = shutil.which("ngspice") is not None and (
-    os.environ.get("KLT_SKIP_NGSPICE_TESTS") != "1"
-)
-_SKIP_NO_NGSPICE = pytest.mark.skipif(
-    not HAVE_NGSPICE, reason="ngspice is not installed on this machine"
 )
 
 #: A resistive divider: v(out) = vin * 2/3 with no load, so every number
