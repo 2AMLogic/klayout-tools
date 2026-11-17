@@ -87,8 +87,9 @@ from .netlist_paths import _PATH_COMMENT_RE, postprocess_netlist
 from .netlist_pdk import (
     _pdk_env_note,
     _pdk_root_consistent,
+    _pdk_xschem_env,
     _rcfile_pdk_root,
-    _with_symbol_path_env,
+    unestablished_variant_warning,
 )
 from .netlist_port_order import port_order_drift_reason
 from .netlist_port_order import sibling_symbol as _sibling_symbol
@@ -860,6 +861,11 @@ def _pdk_consistency(
     install root itself, or the resolved variant directory under it, e.g.
     ``$PDK_ROOT`` holding ``sky130A/``), and ``None`` when there is nothing
     to compare.
+
+    ``variant_established`` is ``False`` when the variant was defaulted, not
+    selected -- no ``--pdk``/``$PDK`` and the root holds more than one (issue
+    #5639); ``unestablished_warning`` then carries the ``payload.warnings``
+    entry, and the generation-inputs record says ``pdk_variant: null``.
     """
     explicit = pdk is not None or pdk_root is not None
     if not explicit and not (
@@ -885,6 +891,7 @@ def _pdk_consistency(
                 f"(via {found['resolved_via']}); the schematic and "
                 "simulation sides may be using different PDKs"
             )
+    unestablished = unestablished_variant_warning(found)
     return {
         "variant": found["variant"],
         "version": found.get("version"),
@@ -894,6 +901,8 @@ def _pdk_consistency(
         "consistent": consistent,
         "warning": warning,
         "ambiguity_warning": pdk_module.ambiguity_warning(found),
+        "variant_established": unestablished is None,
+        "unestablished_warning": unestablished,
     }
 
 
@@ -980,19 +989,8 @@ def run_netlist(
         # satisfied by a file that already existed (see
         # `_resolve_produced_netlist`).
         started_at = time.time()
-        # Export the resolved PDK so an xschemrc reading $env(PDK_ROOT)/
-        # $env(PDK) agrees with --pdk/--pdk-root (issue #4186).
-        xschem_env: dict[str, str] | None = None
-        if pdk_block is not None:
-            xschem_env = {
-                **os.environ,
-                "PDK_ROOT": pdk_block["root"],
-                "PDK": pdk_block["variant"],
-            }
-        # Only a resolved PDK means klt exported PDK_ROOT/PDK; --symbol-path
-        # alone builds an env that merely inherits them (issue #5441).
-        exported_pdk_env = xschem_env
-        xschem_env = _with_symbol_path_env(xschem_env, resolved_symbol_path)
+        # Netlist_pdk (size split); snapshot pre-dates the symbol-path merge.
+        xschem_env, exported_pdk_env = _pdk_xschem_env(pdk_block, resolved_symbol_path)
         exit_status, stdout, stderr, duration_s = _launch_xschem(
             argv, timeout_s, xschem_env
         )
@@ -1015,6 +1013,8 @@ def run_netlist(
         warnings = _unevaluated_expr_warnings(
             fresh_data, version, allow_unevaluated_expr
         )
+        if pdk_block is not None and pdk_block["unestablished_warning"] is not None:
+            warnings.append(pdk_block["unestablished_warning"])
         _check_no_unresolved_symbol(fresh_data, rcfile, exported_pdk_env)
 
         payload: dict[str, Any] = {

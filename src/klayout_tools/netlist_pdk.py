@@ -5,6 +5,9 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Sequence
+from typing import Any
+
+from . import pdk as pdk_module
 
 _RC_PDK_ROOT_RE = re.compile(
     r"^\s*set\s+(?:::)?(?:env\(PDK_ROOT\)|PDK_ROOT)\s+(\"[^\"]*\"|\{[^}]*\}|\S+)",
@@ -95,3 +98,68 @@ def _pdk_env_note(rcfile: str | None, exported_env: dict[str, str] | None) -> st
             "(inherited, not set by klt)"
         )
     return f"xschem ran with --rcfile {rcfile or 'none'} and {seen}. "
+
+
+#: ``payload.warnings`` code for a run whose PDK variant was defaulted, not
+#: selected (issue #5639): the generation-inputs record carries
+#: ``pdk_variant: null`` rather than asserting the first-match guess as fact.
+PDK_VARIANT_UNESTABLISHED_CODE = "pdk_variant_unestablished"
+
+#: The prefix :func:`klayout_tools.pdk.alternative_variants_warning` puts on
+#: its text. Stripped for the entry's ``message`` so the CLI's ``_warn``
+#: channel -- which adds its own ``klt netlist: warning:`` -- does not double
+#: it.
+_ALT_WARNING_PREFIX = "klt: warning: "
+
+
+def unestablished_variant_warning(report: dict[str, Any]) -> dict[str, Any] | None:
+    """The ``pdk_variant_unestablished`` warnings entry for a
+    :func:`klayout_tools.pdk.find_pdk` report whose variant was defaulted,
+    or ``None`` when it was established.
+
+    Reuses #3814's ``alternative_variants`` signal, which is non-empty
+    exactly when no variant was explicitly selected (no ``--pdk``, no
+    ``$PDK``) *and* the chosen root holds more than one -- the "cannot
+    establish which variant was used" predicate of issue #5639, so its
+    emptiness is the verdict. Pure, like the formatter it wraps; the caller
+    prints the entry.
+    """
+    alternatives = report.get("alternative_variants") or []
+    if not alternatives:
+        return None
+    message = pdk_module.alternative_variants_warning(report) or ""
+    if message.startswith(_ALT_WARNING_PREFIX):
+        message = message[len(_ALT_WARNING_PREFIX) :]
+    return {
+        "code": PDK_VARIANT_UNESTABLISHED_CODE,
+        "variant": report["variant"],
+        "alternative_variants": list(alternatives),
+        "root": report["root"],
+        "message": message,
+    }
+
+
+def _pdk_xschem_env(
+    pdk_block: dict[str, Any] | None, resolved_symbol_path: Sequence[str]
+) -> tuple[dict[str, str] | None, dict[str, str] | None]:
+    """The env xschem runs under, plus the snapshot taken at the PDK export.
+
+    First element: ``os.environ`` with the resolved PDK exported, so an
+    xschemrc reading ``$env(PDK_ROOT)``/``$env(PDK)`` agrees with
+    ``--pdk``/``--pdk-root`` (issue #4186), with ``--symbol-path`` dirs
+    prepended to ``XSCHEM_USER_LIBRARY_PATH`` (issue #4952). Second: the
+    snapshot *before* that merge -- only a resolved PDK means klt exported
+    ``PDK_ROOT``/``PDK``; ``--symbol-path`` alone builds an env that merely
+    inherits them (issue #5441), and error text must not claim klt set what
+    it inherited.
+    """
+    xschem_env: dict[str, str] | None = None
+    if pdk_block is not None:
+        xschem_env = {
+            **os.environ,
+            "PDK_ROOT": pdk_block["root"],
+            "PDK": pdk_block["variant"],
+        }
+    exported_pdk_env = xschem_env
+    xschem_env = _with_symbol_path_env(xschem_env, resolved_symbol_path)
+    return xschem_env, exported_pdk_env

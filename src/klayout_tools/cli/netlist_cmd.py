@@ -31,6 +31,7 @@ import sys
 
 from ..netlist import NetlistError, run_netlist
 from ..netlist_batch import resolve_backend, run_netlist_batch
+from ..netlist_pdk import PDK_VARIANT_UNESTABLISHED_CODE
 from .output import emit_error, emit_success
 
 EXIT_OK = 0
@@ -127,6 +128,9 @@ def run(args: argparse.Namespace) -> int:
         )
 
     for entry in report.get("warnings") or ():
+        if entry["code"] == PDK_VARIANT_UNESTABLISHED_CODE:
+            _warn(entry["message"])
+            continue
         _warn(
             f"unevaluated expr(...) at line {entry['line']}: {entry['snippet']!r} "
             f"(xschem version: {entry['xschem_version'] or 'unknown'}); "
