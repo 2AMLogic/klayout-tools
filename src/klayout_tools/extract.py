@@ -4778,11 +4778,8 @@ def extract_netlist_from_layout(
 
     # Unsupported devices (issue #2919): additive diagnostic through the
     # optional `unsupported_devices` out-parameter, same idiom as above.
-    # Timed as its own stage (issue #5807): this block re-runs the MOS-cap
-    # recogniser and the flavour-recognised-islands sweep on the drawn
-    # layers, so on flat arrays its cost is on the order of the extraction
-    # itself -- leaving it outside `timing.stages` hid a superlinear share
-    # of the run in `unattributed_seconds`.
+    # Timed as its own stage (#5807): it re-runs the recogniser walks, a
+    # superlinear share previously hidden in `unattributed_seconds`.
     warnings = warnings + _staged(
         "unsupported_devices",
         _detect_unsupported_devices,
@@ -7118,22 +7115,9 @@ def _resolve_mos_capacitors(
     ``dropped`` counts gate components fully covered by ``dummy``. Everything
     is empty/``0`` for a deck declaring no ``mos_capacitors``.
 
-    The claim sets are resolved with **bulk region algebra**, not a
-    per-island loop (issue #5807): every test the per-island form ran --
-    gate presence, in-well, and each marker/implant/``requires``/
-    ``excludes`` touch -- selects whole islands when applied to the merged
-    ``active`` region, so each entry's claim set is one ``interacting()``
-    pass per layer instead of one call per island per layer (quadratic in
-    device count on flat arrays: the loop walked every island and each call
-    rescanned the full-layout layer). Merged islands are mutually disjoint,
-    so ``&``/``-`` between such island unions stay island-granular, and the
-    ordered entry sweep with a cumulative ``taken`` union reproduces the
-    per-island first-claim-wins outcome exactly. The gate predicate keeps
-    its original area-overlap semantics (``island & poly`` non-empty) by
-    testing islands against ``poly & islands`` -- the overlap fragments --
-    rather than ``poly`` itself, whose mere edge-touch would widen it to a
-    touch test; an island holds an overlap fragment iff ``island & poly``
-    is non-empty, since disjoint islands share no fragments.
+    Claim sets are resolved with bulk region algebra, not a per-island loop
+    (issue #5807): one ``interacting()`` per layer over the merged island
+    set, first-claim-wins via the ordered sweep (derivation: CHANGELOG #5807).
     """
     import klayout.db as kdb
 
@@ -7151,9 +7135,7 @@ def _resolve_mos_capacitors(
     in_well = islands.interacting(nwell)
 
     def touching(layer: tuple[int, int]) -> kdb.Region:
-        # A layer with no shapes claims nothing, and `islands.interacting()`
-        # on a huge island set is not free -- short-circuit the common
-        # no-MOS-cap-drawn case (issue #5807).
+        # Empty layer claims nothing; skip the interacting() call (#5807).
         region = region_of(layer)
         return kdb.Region() if region.is_empty() else islands.interacting(region)
 
@@ -7213,12 +7195,7 @@ def _flavour_recognised_islands(
         marker_region = _region(layout, top_cell, flavour.marker)
         and_regions = [_region(layout, top_cell, m) for m in flavour.and_markers]
         not_regions = [_region(layout, top_cell, m) for m in flavour.not_markers]
-        # Only islands touching the flavour marker can claim anything (both
-        # the per-gate test and the gate-less island fallback require marker
-        # interaction), so the per-gate split below (#5301) runs only over
-        # those -- on a layout drawing no marker this is empty, skipping the
-        # walk over every active island instead of paying a per-island
-        # ``interacting()`` against each full-layout layer (issue #5807).
+        # Only marker-touching islands can claim (#5807); empty when no marker drawn.
         for component in islands.interacting(marker_region).each():
             island = kdb.Region(component)
             if (island & poly).is_empty():
@@ -8544,13 +8521,7 @@ def _extract_netlist(
         not_regions = [_region(layout, top_cell, m) for m in flavour.not_markers]
         claimed = kdb.Region()
         if not marker_region.is_empty() and not active.is_empty():
-            # An island not touching the flavour marker claims nothing on
-            # either the per-gate test or the gate-less island fallback, so
-            # only marker-touching islands take the per-gate split (#5301)
-            # and the rest pass through whole (issue #5807) -- without this
-            # filter every island paid a per-gate/per-layer ``interacting()``
-            # against each full-layout region, quadratic in device count on
-            # flat arrays.
+            # Non-marker-touching islands claim nothing and pass through whole (#5807).
             candidates = active.merged().interacting(marker_region)
             remaining = active - candidates
             for component in candidates.each():

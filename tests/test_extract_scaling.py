@@ -15,7 +15,7 @@ synthetic flat array below at two sizes -- because an end-to-end wall-time
 ratio also sees KLayout's own C++ net clustering (superlinear at high
 device counts in every version, v0.5.0 included) and shared-CI contention.
 On the pre-fix tree the 800/200 ratio of this block measured ~16x
-(quadratic); the bulk-island-set rewrite holds it near 1. The bound 3
+(quadratic); the bulk-island-set rewrite holds it near 1. The bound 6
 leaves jitter headroom while still tripping any return to per-island,
 per-layer full-layout scans. Full-run wall times per size are recorded in
 the PR, not asserted here.

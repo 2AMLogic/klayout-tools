@@ -25,7 +25,16 @@ not `klt --version`, if you need to detect this kind of drift. See
   sets with bulk island-set region algebra (one `interacting()` per layer
   over the merged region, first-claim-wins preserved by an ordered entry
   sweep), and the per-gate flavour split only visits islands touching the
-  flavour marker. Extraction output is byte-identical: the netlist (and its
+  flavour marker. Equivalence with the per-island form: merged islands are
+  mutually disjoint, so `&`/`-` between island unions stay island-granular,
+  and the ordered entry sweep with a cumulative `taken` union reproduces
+  first-claim-wins exactly; the gate predicate keeps its area-overlap
+  semantics (`island & poly` non-empty) by testing islands against
+  `poly & islands` — the overlap fragments, disjoint islands sharing none —
+  rather than `poly` itself, whose mere edge-touch would widen it to a touch
+  test; empty `requires` layers claim nothing and empty `excludes` layers
+  are a no-op, matching the old `touches()` predicate. Extraction output is
+  byte-identical: the netlist (and its
   normalized hash) is unchanged on plain and marker-rich fixtures. The
   previously unattributed unsupported-device block is now timed as its own
   `timing.stages.unsupported_devices` key (additive; no `schema_version`
