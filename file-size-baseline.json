@@ -185,7 +185,7 @@
     },
     {
       "path": "src/klayout_tools/cli/parser.py",
-      "lines": 5095
+      "lines": 4846
     },
     {
       "path": "src/klayout_tools/cli/pdk_cmd.py",
@@ -193,7 +193,7 @@
     },
     {
       "path": "src/klayout_tools/cli/signoff_cmd.py",
-      "lines": 1099
+      "lines": 1071
     },
     {
       "path": "src/klayout_tools/cli/sim_cmd.py",
@@ -341,7 +341,7 @@
     },
     {
       "path": "src/klayout_tools/functional_verification.py",
-      "lines": 3150
+      "lines": 3148
     },
     {
       "path": "src/klayout_tools/functional_verification_sdf.py",
@@ -997,7 +997,7 @@
     },
     {
       "path": "tests/test_post_route_sta.py",
-      "lines": 7821
+      "lines": 7802
     },
     {
       "path": "tests/test_power.py",
