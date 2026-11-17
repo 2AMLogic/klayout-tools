@@ -86,6 +86,7 @@ import re
 from collections.abc import Callable
 from typing import Any
 
+from klayout_tools._paths import _resolve_relative
 from klayout_tools.lef_header import read_lef_header
 
 #: The reserved ``macros[].lib`` key meaning "use this liberty for any
@@ -149,9 +150,7 @@ def resolve_macro_path(value: str, request_dir: str) -> str:
     """``value`` as an absolute path, resolved against ``request_dir`` when
     relative -- the same "relative to the request file's own directory"
     convention every other path field in every ``klt`` request uses."""
-    return os.path.abspath(
-        value if os.path.isabs(value) else os.path.join(request_dir, value)
-    )
+    return os.path.abspath(_resolve_relative(value, request_dir))
 
 
 def _require_non_empty_string(
