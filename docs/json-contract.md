@@ -2460,6 +2460,25 @@ additive); it exists so a dry run states what it did not verify rather than
 letting a `"valid"` status imply more than it earned. See
 [`cli/pex.md`](cli/pex.md)'s "Validating an invocation without running it".
 
+### `klt pex --resistance-graph` echo fields (issue #5894)
+
+`extraction.resistance_graph.nets[]` entries — present only with
+`--resistance-graph` — additively gain `terminals` and `pair_resistance_ohm`,
+copied verbatim from `klt extract`'s own per-net `resistance_graph` (the
+sorted geometry-derived terminal names and the full symmetric
+effective-resistance matrix, `null` for a disconnected pair, `[]` on an
+`unsupported`/`skipped` net). This closes an honesty gap in the
+extraction-to-simulation loop: the lumped `resistance_ohm` a `legacy` net
+keeps is a series sum of *all* the net's fragments, so a tree-routed net's
+total overstates the terminal-to-terminal path (stub arms to terminals
+carrying no DC current are summed in), and nets with three or more terminals
+always keep `legacy` — the pair matrix is what a caller reads for the path
+resistance between two named terminals there. No existing field changes
+name, type or meaning, output without the flag stays byte-identical, so
+**no `schema_version` bump**. See [`cli/pex.md`](cli/pex.md) and
+[`cli/extract.md`](cli/extract.md)'s "Terminal-aware resistance graph"
+section.
+
 ### `klt corner-matrix check` coverage verdict (issue #5865)
 
 `klt corner-matrix check` adds the always-present boolean

@@ -556,10 +556,8 @@ def _parasitic_integrity_report(
 def _resistance_graph_echo(
     parasitics: Mapping[str, Any], r_cut_ohm: float | None
 ) -> dict[str, Any]:
-    """The ``extraction.resistance_graph`` block (issue #4037): the request
-    (``r_cut_ohm``) and, per net with a graph result, which scalar the
-    extracted netlist's lumped R used (``resistance_source``) next to both
-    candidate values. ``klt extract`` is the source of every value."""
+    """The ``extraction.resistance_graph`` echo (#4037, #5894), verbatim
+    from ``klt extract``: the request plus per-net source and graph fields."""
     nets = []
     for entry in parasitics.get("nets") or []:
         graph = entry.get("resistance_graph") if isinstance(entry, dict) else None
@@ -572,6 +570,8 @@ def _resistance_graph_echo(
                 "resistance_source": graph.get("resistance_source"),
                 "selected_resistance_ohm": graph.get("selected_resistance_ohm"),
                 "legacy_resistance_ohm": graph.get("legacy_resistance_ohm"),
+                "terminals": graph.get("terminals"),
+                "pair_resistance_ohm": graph.get("pair_resistance_ohm"),
             }
         )
     return {"r_cut_ohm": r_cut_ohm, "nets": nets}
@@ -2708,10 +2708,10 @@ def run_pex(
     ``selected_resistance_ohm`` as its lumped R (``legacy`` nets keep the
     legacy scalar). ``extraction.resistance_graph`` echoes the request and one
     ``{net, net_id, resistance_source, selected_resistance_ohm,
-    legacy_resistance_ohm}`` entry per net, only when the flag was given --
-    otherwise the report and netlist are byte-identical. Combining it with
-    ``distributed_rc`` raises :class:`PexError` (the ladder stays on the
-    legacy scalar, so a critical net would mix resistance sources).
+    legacy_resistance_ohm, terminals, pair_resistance_ohm}`` entry per net,
+    only when the flag was given -- otherwise the report and netlist are
+    byte-identical. Combining it with ``distributed_rc`` raises :class:`PexError`
+    (the ladder stays on the legacy scalar, so a critical net would mix sources).
 
     ``critical_net_all``/``critical_net_excludes`` (``klt pex
     --critical-net-pattern``/``--critical-net-all``/``--critical-net-exclude``,
