@@ -181,7 +181,7 @@
     },
     {
       "path": "src/klayout_tools/cli/drc_cmd.py",
-      "lines": 565
+      "lines": 563
     },
     {
       "path": "src/klayout_tools/cli/extract_cmd.py",
@@ -189,7 +189,7 @@
     },
     {
       "path": "src/klayout_tools/cli/parser.py",
-      "lines": 5385
+      "lines": 5277
     },
     {
       "path": "src/klayout_tools/cli/pdk_cmd.py",
@@ -197,7 +197,7 @@
     },
     {
       "path": "src/klayout_tools/cli/signoff_cmd.py",
-      "lines": 1166
+      "lines": 1156
     },
     {
       "path": "src/klayout_tools/cli/sim_cmd.py",
@@ -257,7 +257,7 @@
     },
     {
       "path": "src/klayout_tools/drc.py",
-      "lines": 3764
+      "lines": 3759
     },
     {
       "path": "src/klayout_tools/drc_klayout_engine.py",
@@ -345,7 +345,7 @@
     },
     {
       "path": "src/klayout_tools/functional_verification.py",
-      "lines": 3157
+      "lines": 3149
     },
     {
       "path": "src/klayout_tools/functional_verification_sdf.py",
@@ -397,7 +397,7 @@
     },
     {
       "path": "src/klayout_tools/lef_abstract.py",
-      "lines": 1475
+      "lines": 1468
     },
     {
       "path": "src/klayout_tools/liberty_compare.py",
@@ -573,7 +573,7 @@
     },
     {
       "path": "src/klayout_tools/signoff.py",
-      "lines": 7422
+      "lines": 7421
     },
     {
       "path": "src/klayout_tools/signoff_attest.py",
@@ -589,7 +589,7 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 12426
+      "lines": 12417
     },
     {
       "path": "src/klayout_tools/sim_batch.py",

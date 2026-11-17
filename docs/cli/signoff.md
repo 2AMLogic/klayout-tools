@@ -119,8 +119,15 @@ klt signoff --attest {1,8,9,10} --inventory <file> --check <committed-envelope> 
 - `--inventory` — **first ships in `klt` 0.8.0 (PyPI); not in 0.7.0 and earlier.** With `--attest`: path to the attestation inventory (a
   file inside a git repository, not `-`). Refused without `--attest`.
 - `-o`/`--output` — with `--attest`: also write the envelope to this path,
-  only when it passes and only if its bytes changed. Refused without
-  `--attest`, and together with `--check`.
+  only when it passes and only if its bytes changed. With `--manifest`/
+  `--fleet` (issue #5867): also write the rendered report's JSON envelope
+  to this path — the file always receives JSON, whatever `--format` says,
+  since it is a machine record — after a successful render only (exit `0`
+  or `3`) and only if its bytes changed, so re-rendering an unchanged tree
+  leaves the committed record untouched and a failed render can never
+  truncate a previous good one. The write is atomic (temp file +
+  rename). Refused without `--attest`/`--manifest`/`--fleet`, and together
+  with `--check`.
 - `--skip-local-only` — with `--attest` and `-o`: do not run `local_only`
   commands; carry their committed outcome from the existing `-o` envelope
   and recompute everything else (issue #5209). See "Refreshing on a host
@@ -1026,6 +1033,20 @@ against a caller-supplied **block manifest**:
 }
 ```
 
+**Committing the verdict of record** (issue #5867): add `-o FILE` to write
+the report's JSON envelope to a committed file — no stdout redirect, whose
+truncate-then-write would zero a previous good record on any failed run.
+The file is written only after a successful render (exit `0` for T1, `3`
+below T1 — both are verdicts of record), only if its bytes changed, and
+atomically; it always receives JSON, whatever `--format` says. The same
+`-o` works with `--fleet` roll-ups. Re-rendering an unchanged tree leaves
+the committed file untouched, so a make-style pipeline can re-run freely:
+
+```console
+$ klt signoff --manifest signoff/manifest.json \
+    --tiers-doc signoff/design-evidence-tiers.md -o signoff/tier-report.json
+```
+
 An entry of either shape may also carry a **`pointer`** — an [RFC
 6901](https://www.rfc-editor.org/rfc/rfc6901) JSON Pointer naming *where
 inside* the resolved document the envelope lives (issue #2342), so an
@@ -1785,6 +1806,26 @@ that a resync does not touch may still be listed even if Loom also installs
 other workflows. `--attest` does not hash "the file minus managed blocks";
 the fix is to list fewer files.
 
+**Listed files must be stable by construction (issue #5603).** A `hygiene`
+path is bound by its full bytes, so a listed file must change only when the
+owner means to change the evidence. A file that is also a living status
+surface — a README carrying a status paragraph, current counts, or "what's
+new" notes — churns on routine documentation passes, and each such edit
+re-renders the envelope stale with no agent able to discharge it (the
+re-attest rule below). Keep that content in an uninventoried file (for
+example `STATUS.md`) and link to it; the inventoried README carries only the
+durable evidence — what the block is, the spec table, how to reproduce
+results — which is exactly what item 10 grades
+(`docs/design-evidence-tiers.md`).
+
+**No durable-portion binding (issue #5603).** `--attest` cannot pin part of
+a file. Marker-region hashing and a companion-checklist inventory were both
+considered and rejected: a region hash reintroduces exactly the partial
+drift `--check` exists to catch, and a companion checklist would displace
+the README as the pinned artifact item 10 names. The answer to a churning
+file is the same as for resync-managed paths above — list fewer files: move
+the churn out and list a stable file instead.
+
 **Migration for existing item 10 inventories:** remove resync-managed paths
 from `hygiene`, then re-attest once and commit the new envelope
 (`klt signoff --attest 10 --inventory <inv> -o <envelope>`). That re-attest
@@ -1799,7 +1840,12 @@ attested and when is the git/PR record of the commit that changed
 for the repo owner. An agent must not regenerate an envelope to clear a red
 `signoff` or CI check, and an envelope diff inside an unrelated PR is a
 review red flag. If a stale envelope is blocking CI, escalate it to the
-owner instead.
+owner instead. The rule bars exactly those two things (issue #5603):
+regenerating an envelope to clear a red check, and an envelope diff inside
+an *unrelated* PR. A PR whose declared subject **is** the hygiene-evidence
+edit may carry the re-attested envelope: an agent may open such a PR, but
+the owner must review and approve it, the PR body must name the hygiene
+files changed, and an agent must not merge it itself.
 
 #### Item 2: attest a committed layout stream (`--input`, issue #4188)
 
@@ -3823,6 +3869,20 @@ misclassify it as a native kind instead:
   `klt yield` report. A manifest entry with no pinned `content_hash` at all
   is unaffected either way — no staleness claim was made to check.
 
+**What a generic citation's `content_hash` hashes.** A manifest entry's
+pinned `content_hash` is compared against the envelope's own
+`provenance.input.content_hash`, which covers the **input artifact**
+`provenance.input.path` names (the committed record the envelope attests) —
+**not** the bytes of the evidence envelope file itself. That is the same
+convention every native kind uses, and the grader says so verbatim in the
+`stale_evidence` hint ("`content_hash` must be the sha256 of the input
+artifact … not the hash of the evidence envelope file"); pinning the envelope
+file's own sha256 is common enough that `klt` names it, setting
+`pin_is_envelope_file_hash: true` in the stale-pin detail. Only
+`functional-verification` pins the evidence file's bytes (issue #4893);
+`generic` deliberately gets no such fallback, so with no `provenance.input`
+there is no live hash and the pin can only render `"unverifiable"`.
+
 **`provenance.input.path` (issue #2403) — optional, opt-in — the artifact
 `input_verified` re-hashes.** Even when `provenance` is given, a generic
 envelope's `content_hash` was, until this field existed, structurally
@@ -5195,8 +5255,9 @@ document the report names equals the pin), `"stale"` (it differs), or
 live hash to compare). It is disclosure only: `status` and `reason` stay
 `unmet` / `undersized_sample` (or `negative_control_not_detected`), so a bad
 pin is visible now rather than only after the sample size is raised. The key
-is absent when the entry pins no `content_hash`, on every other refusal, and
-on `met` items.
+is absent when the entry pins no `content_hash` and on `met` items; since
+issue #5598 a non-passing envelope's own refusal carries it too (see "A
+non-passing envelope discloses its pin too" below).
 
 **An unverifiable pin explains itself (issue #3747).** When the entry pins
 `content_hash` and the resolved envelope carries no input hash at all (a
@@ -5207,6 +5268,26 @@ on `met` items.
 pin itself is visible as the cause. Disclosure only: `status` and `reason` are
 unchanged, and the keys are absent when the entry pins nothing or the pin is
 `stale`.
+
+**A non-passing envelope discloses its pin too (issue #5598).** An envelope
+whose own `status` is not passing is refused *before* the staleness gate is
+reached, so that refusal used to publish nothing at all about the manifest's
+pin: a `content_hash` that matched, one that was comparable and genuinely
+**stale**, and one that could never be compared all rendered the same `unmet`
+/ `check_failed` with no `detail`. For every citation kind, that refusal now
+carries `detail.content_hash_pin` (`"verified"` / `"stale"` /
+`"unverifiable"`), with `detail.content_hash_pin_note` on an unverifiable pin
+and, on a stale one, the same `hash_check` / `compared_against` / `hint`
+payload the `stale_evidence` verdict carries. Disclosure only: `status` and
+`reason` are unchanged for every manifest, so a drifted pin is visible on the
+first commit rather than only on the day the item first passes — which is what
+a repo byte-comparing this command's `--format json` output against a
+committed record needs. The keys are absent when the entry pins no
+`content_hash`, and when disclosed foundry-cell exceptions cover every
+violation (the item proceeds, so there is no refusal to sit beside). An
+unprovenanced `generic` envelope has no live hash, so its pin renders
+`"unverifiable"` whatever value it holds — uncomparable, not mismatched;
+anchor the citation with `provenance.input.path` to make it enforceable.
 
 **A `functional-verification` pin binds the evidence file (issue #4893).**
 `klt functional-verification` records no input hash, so for a **file-backed**
