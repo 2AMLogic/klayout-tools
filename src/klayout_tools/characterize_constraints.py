@@ -1,7 +1,10 @@
-"""Setup/hold constraint arcs for sequential cells in ``klt characterize``
-(issue #4756): request validation, case derivation, table assembly and the
-JSON/Liberty shapes. The probe decks and bisection live in
-:mod:`klayout_tools.characterize_bisect`.
+"""Constraint arcs for sequential cells in ``klt characterize``: setup/hold
+on data pins (issue #4756) and recovery/removal on asynchronous set/reset
+pins (issue #5520) -- request validation, case derivation, table assembly
+and the JSON/Liberty shapes. The probe decks and bisection live in
+:mod:`klayout_tools.characterize_bisect`; the async *propagation* arcs those
+recovery/removal cases are derived from live in
+:mod:`klayout_tools.characterize_async`.
 
 For a **latch** (issue #5521) every one of those shapes is reused unchanged
 except the edge the groups are named after: a latch's data is constrained
@@ -17,7 +20,9 @@ from typing import Any
 
 from . import liberty_writer
 from ._jsonnum import is_number
+from .characterize_async import run_async
 from .characterize_bisect import (
+    ASYNC_KINDS,
     ConstraintCase,
     ConstraintError,
     DeckRunner,
@@ -155,6 +160,52 @@ def derive_cases(
     return tuple(cases)
 
 
+def derive_async_cases(
+    cell: dict[str, Any], async_entries: list[dict[str, Any]]
+) -> tuple[ConstraintCase, ...]:
+    """The recovery and removal cases of each declared async pin
+    (issue #5520).
+
+    ``async_entries`` are the *measured* propagation arcs
+    (:mod:`klayout_tools.characterize_async`), so the forced level each pin
+    drives an output to is known rather than assumed. One output per pin is
+    enough to observe the capture, and the first measured one is used: the
+    probe holds the data pins at the state whose capture drives that output
+    the **other** way, asserts the async pin from t=0 and releases it at the
+    bisected offset from the clock edge.
+    """
+    chosen: dict[str, dict[str, Any]] = {}
+    for entry in async_entries:
+        chosen.setdefault(entry["case"].pin, entry)
+    cases: list[ConstraintCase] = []
+    for spec in cell["async_pins"]:
+        measured = chosen.get(spec.pin)
+        if measured is None:
+            raise ConstraintError(
+                f"cell '{cell['name']}': async pin '{spec.pin}' forces no "
+                "output, so its recovery/removal cannot be observed"
+            )
+        forced_rising = measured["out_rising"]
+        case = measured["case"]
+        for kind in ASYNC_KINDS:
+            cases.append(
+                ConstraintCase(
+                    pin=spec.pin,
+                    # The pin is released, so its edge goes to the inactive
+                    # level: a rise for an active-low pin.
+                    edge="rise" if spec.inactive_level else "fall",
+                    kind=kind,
+                    output_pin=case.output_pin,
+                    others=case.state(forced_rising),
+                    start_level=spec.active_level,
+                    captured_level=spec.inactive_level,
+                    # The clock captures the opposite of the forced level.
+                    out_rising=not forced_rising,
+                )
+            )
+    return tuple(cases)
+
+
 def build_tables(
     cases: tuple[ConstraintCase, ...],
     grid_ns: tuple[float, ...],
@@ -183,7 +234,13 @@ def build_tables(
 def liberty_constraints(
     entries: list[dict[str, Any]], clock_pin: str, reference_edge: str
 ) -> dict[str, tuple[liberty_writer.ConstraintArc, ...]]:
-    """Group the tables into ``{pin: (setup arc, hold arc)}``.
+    """Group the tables into ``{pin: (ConstraintArc, ...)}``.
+
+    A data pin carries its setup and hold arcs (both edges in one group); an
+    async pin carries recovery and removal, and because only its *release*
+    edge is constrained each of those groups holds a single table
+    (``rise_constraint`` for an active-low pin, ``fall_constraint`` for an
+    active-high one).
 
     ``reference_edge`` is the edge of ``clock_pin`` the constraint is measured
     against -- a flop's active clock edge, a latch's enable-closing edge --
@@ -205,7 +262,7 @@ def liberty_constraints(
                 rise_constraint=kinds[kind].get("rise"),
                 fall_constraint=kinds[kind].get("fall"),
             )
-            for kind in ("setup", "hold")
+            for kind in ("setup", "hold", *ASYNC_KINDS)
             if kind in kinds
         )
     return result
@@ -237,11 +294,20 @@ def response_entries(
                     "index_2": list(table.index_2),
                     "values": [list(row) for row in table.values],
                 },
-                "reference_delay_ns": [
-                    [outcome["reference_ns"][(c, ci, di)] for ci in range(n)]
-                    for di in range(n)
-                ],
-                "degradation": options["degradation"],
+                # Removal passes on the *absence* of an output transition,
+                # so it has no reference delay to degrade: both fields are
+                # null rather than a number that means nothing.
+                "reference_delay_ns": (
+                    None
+                    if case.kind == "removal"
+                    else [
+                        [outcome["reference_ns"][(c, ci, di)] for ci in range(n)]
+                        for di in range(n)
+                    ]
+                ),
+                "degradation": (
+                    None if case.kind == "removal" else options["degradation"]
+                ),
                 "tolerance_ns": options["tolerance_ns"],
                 "iterations": outcome["iterations"],
             }
@@ -262,13 +328,21 @@ def run_constraints(
     load_pf: float,
     options: dict[str, Any],
     run_deck: DeckRunner,
+    async_entries: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Characterize every constrained pin of ``cell``.
+    """Characterize every constrained pin of ``cell``, and the recovery and
+    removal of every declared async pin.
 
     Returns ``{"liberty": {pin: (ConstraintArc, ...)}, "entries": [...]}``:
-    the Liberty groups and the JSON ``constraints[]`` list.
+    the Liberty groups and the JSON ``constraints[]`` list. Both pin kinds
+    share one lockstep bisection, so an async pin costs no extra simulation
+    rounds beyond the ones setup/hold already pays for.
     """
     cases = derive_cases(cell, arcs)
+    if async_entries:
+        cases = cases + derive_async_cases(cell, async_entries)
+    if not cases:
+        return {"liberty": {}, "entries": []}
     # A flop's data is constrained against its active clock edge; a latch's
     # against the enable's closing edge, which is the opposite of the opening
     # edge `clock_edge` holds (issue #5521).
@@ -295,3 +369,57 @@ def run_constraints(
             tables, outcome, cell["clock_pin"], reference_edge, options
         ),
     }
+
+
+def run_sequential_constraints(
+    *,
+    cell: dict[str, Any],
+    arcs: tuple[Any, ...],
+    grid: dict[str, tuple[float, ...]],
+    rail_nodes: dict[str, str],
+    vdd: float,
+    thresholds: liberty_writer.Thresholds,
+    ramps_ns: tuple[float, ...],
+    settle_ns: float,
+    options: dict[str, Any],
+    run_deck: DeckRunner,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Both opt-in sequential measurements of one cell, in the order they
+    depend on each other: ``(async_arcs, constraints)``.
+
+    The async propagation arcs come first because they measure which way
+    each declared pin forces each output, which is what the recovery/removal
+    cases hold the data pins against. Either half is ``None`` when the
+    request did not ask for it.
+    """
+    async_arcs = None
+    if cell["async_pins"]:
+        async_arcs = run_async(
+            cell=cell,
+            arcs=arcs,
+            grid_ns=grid["input_transition_ns"],
+            loads_pf=grid["output_load_pf"],
+            rail_nodes=rail_nodes,
+            vdd=vdd,
+            thresholds=thresholds,
+            ramps_ns=ramps_ns,
+            settle_ns=settle_ns,
+            run_deck=run_deck,
+        )
+    constraints = None
+    if cell["constrained_pins"] or cell["async_pins"]:
+        constraints = run_constraints(
+            cell=cell,
+            arcs=arcs,
+            grid_ns=grid["input_transition_ns"],
+            rail_nodes=rail_nodes,
+            vdd=vdd,
+            thresholds=thresholds,
+            ramps_ns=ramps_ns,
+            settle_ns=settle_ns,
+            load_pf=min(grid["output_load_pf"]),
+            options=options,
+            run_deck=run_deck,
+            async_entries=(async_arcs or {}).get("measured"),
+        )
+    return async_arcs, constraints
