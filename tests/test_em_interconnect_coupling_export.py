@@ -222,7 +222,7 @@ def test_regenerating_with_a_different_block_changes_provenance():
             / "interconnect_coupling"
         ),
     )
-    import generate as gen  # noqa: E402
+    import generate as gen
 
     repo_root = Path(__file__).resolve().parent.parent
     nand2_path = (

@@ -1393,7 +1393,7 @@ def _find_gate_level_instances(
             return []
         for module in modules:
             if module["name"] == hdl_toplevel:
-                return list(module["instances"])  # type: ignore[arg-type]
+                return list(module["instances"])
         return []
     return []
 
@@ -1787,7 +1787,7 @@ def _verilog_cell_discarded_arcs(
                         return set()
                     if path is None:
                         continue
-                    ifnone, edge, sources, destinations = path  # type: ignore[misc, str-unpack]
+                    ifnone, edge, sources, destinations = path  # type: ignore[str-unpack]
                     target = discarded if ifnone and edge else kept
                     target.update((s, d) for s in sources for d in destinations)
     return discarded - kept
@@ -1960,7 +1960,7 @@ def _verilog_cell_whole_vector_arcs(
                         return set()
                     if path is None:
                         continue
-                    _, _, sources, destinations = path  # type: ignore[misc, str-unpack]
+                    _, _, sources, destinations = path  # type: ignore[str-unpack]
                     raw = _strip_specify_condition(statement.strip())
                     if raw is not None and re.search(r"(?:=>|\*>)[^;]*\[", raw[1]):
                         indexed.update(destinations)

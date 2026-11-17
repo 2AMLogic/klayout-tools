@@ -19,6 +19,7 @@ import argparse
 import json
 
 from ..array_check import ArrayCheckError, run_array_check
+from ..env_provenance import render_path_field
 from ._parsing import load_json_path_or_inline, parse_layer_pairs
 from .output import emit_error, emit_success, render_table
 
@@ -94,7 +95,7 @@ def _load_translate(value: str | None) -> tuple[float, float] | None:
 
 
 def _print_text(report: dict) -> None:
-    print(f"file: {report['file']}")
+    print(f"file: {render_path_field(report['file'])}")
     if report["layers"] is not None:
         print(f"layers: {', '.join(f'{layer}/{dt}' for layer, dt in report['layers'])}")
     for key in ("cell", "mirror_axis", "at_um", "translate_um", "pitch_um", "count"):

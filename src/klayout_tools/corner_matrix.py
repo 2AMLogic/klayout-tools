@@ -148,11 +148,17 @@ def check_corner_matrix(
     extra = sorted(observed_set - expected_set)
     duplicate = _duplicates(observed)
     complete = not (missing or extra or duplicate or any(extra_checks.values()))
+    # Coverage (did the run exercise the declared matrix, once each?) is a
+    # separate question from outcome quality (were those corners usable and
+    # in-limit?); report both verdicts so a caller can gate coverage without
+    # recomputing it, and a legitimately failing corner stays recordable.
+    coverage_complete = not (missing or extra or duplicate)
     result.update(
         {
             "mode": mode,
             "source": source,
             "complete": complete,
+            "coverage_complete": coverage_complete,
             "matrix_size": len(expected),
             "observed_count": len(observed),
             "missing": missing,

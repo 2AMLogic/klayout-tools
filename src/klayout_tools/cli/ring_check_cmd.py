@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 
+from ..env_provenance import render_path_field
 from ..ring_check import RingCheckError, run_ring_check
 from ..seal_ring_check import run_seal_ring_check
 from ._parsing import load_json_path_or_inline, load_region, parse_layer_pairs
@@ -72,7 +73,7 @@ def _run_pdk(args: argparse.Namespace) -> int:
 
 
 def _print_pdk_text(report: dict) -> None:
-    print(f"file: {report['file']}")
+    print(f"file: {render_path_field(report['file'])}")
     print(f"pdk: {report['pdk']}")
     print(f"status: {report['status']}")
     if report["reason"]:
@@ -118,7 +119,7 @@ def _load_region(value: str | None) -> tuple[float, float, float, float] | None:
 
 
 def _print_text(report: dict) -> None:
-    print(f"file: {report['file']}")
+    print(f"file: {render_path_field(report['file'])}")
     print(f"layers: {'+'.join(f'{layer}/{dt}' for layer, dt in report['layers'])}")
     if report["region_um"] is not None:
         left, bottom, right, top = report["region_um"]
