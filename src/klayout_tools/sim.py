@@ -104,6 +104,7 @@ from . import (
     sim_decks,
     sim_energy,
     sim_eye,
+    sim_form_signals,
     sim_injected,
     sim_mismatch_declarations,
     sim_mismatch_gate,
@@ -2111,18 +2112,14 @@ def _validate_save_vectors(
     return tuple(vectors), True
 
 
-#: A ``v(...)``/``i(...)`` token (optionally with ngspice's derivative prefix,
-#: e.g. ``vdb(out)``, ``vm(a,b)``) in a measurement's ``spice``/``expr``/
-#: ``crossings.signal`` text -- the vectors ``options.save_vectors`` must keep
-#: resident for that measurement to resolve.
-_SAVE_TOKEN_RE = re.compile(r"\b([vi][a-z]{0,2})\(([^()]*)\)", re.IGNORECASE)
-
-
 def _required_save_vectors(
     save_vectors: tuple[str, ...], measurements_spec: list[dict[str, Any]]
 ) -> list[str]:
     """``options.save_vectors`` plus every ``v(x)``/``i(x)`` vector the
     declared measurements reference, de-duplicated, in first-seen order.
+
+    Every form that names a signal contributes its texts -- free-text fields
+    verbatim, structured-form fields via :mod:`sim_form_signals`.
 
     Only the parenthesized forms are detected; a measurement that names a
     vector bare (``out`` rather than ``v(out)``) must list it in
@@ -2138,10 +2135,11 @@ def _required_save_vectors(
         if isinstance(step_res, dict):
             texts.append(step_res.get("signal"))
         texts.extend(sim_settled.signal_texts(spec))
+        texts.extend(sim_form_signals.signal_texts(spec))
         for text in texts:
             if not isinstance(text, str):
                 continue
-            for prefix, args in _SAVE_TOKEN_RE.findall(text):
+            for prefix, args in sim_form_signals.SAVE_TOKEN_RE.findall(text):
                 kind = prefix[0].lower()
                 for arg in args.split(","):
                     arg = arg.strip().lower()

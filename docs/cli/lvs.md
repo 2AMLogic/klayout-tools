@@ -3551,7 +3551,8 @@ Notes on the semantics:
   `klt lvs` run without telling a reader anything new about whether the
   device was *sized* correctly. A custom device class whose geometry
   parameters are primary (e.g. the MoM capacitor's `W`/`L`, see
-  `extract.mom_capacitor_device_class`) is likewise not reported — its
+  `extract.mom_capacitor_device_class`) is likewise not reported *as a
+  warning* — its
   geometry really is compared.
 - **To actually compare the geometry**, name the parameters in
   `options.compare_parameters` for that class — e.g.
@@ -3571,7 +3572,9 @@ string-match a category inside an array of ordinary compare findings to ask
 "was this class's sizing verified?", so in practice nothing asked. The
 top-level **`device_parameter_coverage`** block (always present; `null` only
 for `"engine": "netgen"`) answers it directly, built from the same
-determination as the warning so the two cannot disagree — the same
+per-parameter determination as the warning, so the two cannot disagree about
+a class they both cover — a MOS class appears in the block only, never as a
+warning (see "Only resistors and capacitors" above) — the same
 one-source-of-truth discipline `body_verification` (issue #1983) and
 `power_connectivity` (issue #1952) already apply:
 
