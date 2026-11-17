@@ -206,14 +206,7 @@ def render_rerun_drift(result: dict) -> None:
             print(f"  {entry['field']}{_drift_check_label(entry)}:")
             print(f"      committed: {entry['committed']!r}")
             print(f"      fresh:     {entry['fresh']!r}")
-    skew = result.get("build_skew")
-    if isinstance(skew, dict) and skew.get("state") in ("build_only", "ruleset"):
-        names = ", ".join(entry["field"] for entry in skew.get("fields") or [])
-        if skew["state"] == "ruleset":
-            what = "graded under a different ruleset (build.grading_ruleset_id moved)"
-        else:
-            what = "rendered by a different klt build (grading ruleset unchanged)"
-        print(f"build_skew: {what} -- excluded from the verdict: {names}")
+    _print_build_skew(result.get("build_skew"))
     doc_drift_fields = result.get("doc_drift_fields") or []
     if doc_drift_fields:
         print()
@@ -228,6 +221,22 @@ def render_rerun_drift(result: dict) -> None:
         print("build differs:")
         for field in build_differs:
             print(f"  {field}")
+
+
+def _print_build_skew(skew: dict | None) -> None:
+    """The one ``build_skew:`` line of a signoff ``--check`` text render
+    (issue #5868), only when the excluded ``build`` block actually differs."""
+    if not isinstance(skew, dict) or skew.get("state") not in (
+        "build_only",
+        "ruleset",
+    ):
+        return
+    names = ", ".join(entry["field"] for entry in skew.get("fields") or [])
+    if skew["state"] == "ruleset":
+        what = "graded under a different ruleset (build.grading_ruleset_id moved)"
+    else:
+        what = "rendered by a different klt build (grading ruleset unchanged)"
+    print(f"build_skew: {what} -- excluded from the verdict: {names}")
 
 
 def render_check_text(result: dict) -> None:
