@@ -37,6 +37,7 @@ def _report(
     categories=(),
     layout_hash=HASH,
     pdk="sky130A",
+    klayout_version="0.30",
     known=True,
 ):
     """A report with the fields the cross-check reads. ``known=False`` models
@@ -62,7 +63,7 @@ def _report(
         "coverage": coverage,
         "provenance": {
             "klt_version": "1",
-            "klayout_version": "0.30",
+            "klayout_version": klayout_version,
             "pdk": {"name": pdk, "source": "s", "version": "v"},
             "deck": {"name": engine, "content_hash": HASH},
             "input": {"content_hash": layout_hash, "role": "layout"},
@@ -246,16 +247,36 @@ def test_native_without_verdict_makes_clean_curated_run_no_verdict(monkeypatch):
     assert cc.crosscheck_exit_code(out) == 4
 
 
-def test_identity_block_records_shared_inputs(monkeypatch):
+@pytest.mark.parametrize(
+    "curated_version, native_version",
+    [("0.30", "0.30"), ("0.30.10", "0.30.12"), ("0.30.10", None)],
+)
+def test_identity_block_records_shared_inputs(
+    monkeypatch, curated_version, native_version
+):
     c_kw, n_kw = _covered()
     out = _run(
-        monkeypatch, _report(engine="curated", **c_kw), _report(engine="native", **n_kw)
+        monkeypatch,
+        _report(engine="curated", klayout_version=curated_version, **c_kw),
+        _report(engine="native", klayout_version=native_version, **n_kw),
     )
     ident = out["identity"]
+    assert ident["klayout_version"] == curated_version
+    assert ident["native_klayout_version"] == native_version
     assert ident["layout_content_hash"] == HASH
     assert ident["pdk"]["name"] == "sky130A"
     assert ident["curated_deck"]["content_hash"] == HASH
     assert ident["native_deck"]["content_hash"] == HASH
+    assert out["comparison"]["state"] == "agree_clean"
+
+
+def test_identity_without_native_klayout_version(monkeypatch):
+    c_kw, n_kw = _covered()
+    curated = _report(engine="curated", **c_kw)
+    native = _report(engine="native", **n_kw)
+    del native["provenance"]["klayout_version"]
+    out = _run(monkeypatch, curated, native)
+    assert out["identity"]["native_klayout_version"] is None
 
 
 def test_cli_engine_both_rejects_rules(tmp_path, capsys):

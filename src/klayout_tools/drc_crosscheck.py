@@ -101,6 +101,7 @@ def _check_identity(curated: dict[str, Any], native: dict[str, Any]) -> dict[str
         "pdk": c_prov.get("pdk"),
         "klt_version": c_prov.get("klt_version"),
         "klayout_version": c_prov.get("klayout_version"),
+        "native_klayout_version": n_prov.get("klayout_version"),
         "curated_deck": c_prov.get("deck"),
         "native_deck": n_prov.get("deck"),
     }

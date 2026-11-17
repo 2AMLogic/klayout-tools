@@ -1709,6 +1709,11 @@ cross-check compares whole-deck reports); the native-engine flags
 (`--deck-var`, `--timeout-s`, `--allow-deck-errors`, ...) pass through. The
 request document accepts `"engine": "both"`.
 
+In the `identity` block, `klayout_version` is the curated engine's KLayout
+wheel version, and `native_klayout_version` is the native binary's version
+from `reports.native.provenance.klayout_version` (`null` when absent).
+The versions may differ without a warning or refusal.
+
 Comparison is by **region, not by rule id or count**: zero vs non-zero plus
 bbox overlap (the precedent is `docs/design/magic-oracle.md`), so 1 vs 2
 markers over the same spot agree. Only rules an explicit mapping group pairs

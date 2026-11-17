@@ -116,7 +116,8 @@
             "layout_content_hash": {"type": ["string", "null"]},
             "pdk": {"type": ["object", "null"]},
             "klt_version": {"type": ["string", "null"]},
-            "klayout_version": {"type": ["string", "null"]},
+            "klayout_version": {"description": "The curated engine's KLayout wheel version.", "type": ["string", "null"]},
+            "native_klayout_version": {"description": "The native binary's KLayout version; null when absent from its provenance.", "type": ["string", "null"]},
             "curated_deck": {"type": ["object", "null"]},
             "native_deck": {"type": ["object", "null"]}
           },
