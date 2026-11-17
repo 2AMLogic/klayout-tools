@@ -25,6 +25,44 @@ from typing import Any
 from .signoff import _finite_json_float, _reject_json_constant
 
 
+def _resolve_section(
+    section: Any,
+    wanted: tuple[str, ...] | None,
+    field_prefix: str,
+    root: str,
+    normalize_path: Callable[[Any, str, str], str],
+    *,
+    sorted_keys: bool = False,
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """One ``pins`` section (``pdk`` or ``tools``) copied with every listed
+    leaf resolved through :func:`_pin_leaf`, plus the provenance of the leaves
+    that were references (empty when none was, key-sorted when
+    ``sorted_keys``). ``wanted`` names the leaves to resolve, skipping absent
+    ones; ``None`` resolves every entry the section has. ``None`` itself when
+    ``section`` is not a mapping, so the caller leaves it untouched."""
+    if not isinstance(section, Mapping):
+        return None
+    entries = (
+        [(name, section[name]) for name in wanted if name in section]
+        if wanted is not None
+        else list(section.items())
+    )
+    resolved_section = dict(section)
+    section_sources: dict[str, Any] = {}
+    for name, leaf in entries:
+        value, reference = _pin_leaf(
+            leaf, f"{field_prefix}.{name}", root, normalize_path
+        )
+        resolved_section[name] = value
+        if reference is not None:
+            section_sources[name] = reference
+    if sorted_keys:
+        section_sources = dict(
+            sorted(section_sources.items(), key=lambda item: str(item[0]))
+        )
+    return resolved_section, section_sources
+
+
 def json_node(root: str, path: str, field: str) -> Any:
     """The raw node at dotted ``field`` (digit segments index lists) of the
     JSON file at repo-relative ``path``, or ``None`` when the file cannot be
@@ -93,36 +131,23 @@ def resolve_pin_refs(
         return pins, {}
     resolved = dict(pins)
     sources: dict[str, Any] = {}
-    pdk = resolved.get("pdk")
-    if isinstance(pdk, Mapping):
-        new_pdk = dict(pdk)
-        pdk_sources: dict[str, Any] = {}
-        for leaf in ("name", "revision"):
-            if leaf not in new_pdk:
-                continue
-            value, reference = _pin_leaf(
-                new_pdk[leaf], f"pins.pdk.{leaf}", root, normalize_path
-            )
-            new_pdk[leaf] = value
-            if reference is not None:
-                pdk_sources[leaf] = reference
-        resolved["pdk"] = new_pdk
+    pdk = _resolve_section(
+        resolved.get("pdk"), ("name", "revision"), "pins.pdk", root, normalize_path
+    )
+    if pdk is not None:
+        resolved["pdk"], pdk_sources = pdk
         if pdk_sources:
             sources["pdk"] = pdk_sources
-    tools = resolved.get("tools")
-    if isinstance(tools, Mapping):
-        new_tools = dict(tools)
-        tool_sources: dict[str, Any] = {}
-        for tool, leaf in tools.items():
-            value, reference = _pin_leaf(
-                leaf, f"pins.tools.{tool}", root, normalize_path
-            )
-            new_tools[tool] = value
-            if reference is not None:
-                tool_sources[tool] = reference
-        resolved["tools"] = new_tools
+    tools = _resolve_section(
+        resolved.get("tools"),
+        None,
+        "pins.tools",
+        root,
+        normalize_path,
+        sorted_keys=True,
+    )
+    if tools is not None:
+        resolved["tools"], tool_sources = tools
         if tool_sources:
-            sources["tools"] = dict(
-                sorted(tool_sources.items(), key=lambda item: str(item[0]))
-            )
+            sources["tools"] = tool_sources
     return resolved, sources
