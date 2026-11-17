@@ -403,10 +403,9 @@ def validate_request_shape(
     return data
 
 
-#: How many leading bytes :func:`looks_like_request_document` reads off a
-#: candidate file to decide whether it is a JSON document. A request document
-#: may legitimately start with whitespace/newlines before its opening ``{``,
-#: so this is generous relative to the single byte actually needed.
+#: Leading bytes :func:`looks_like_request_document` reads off a candidate
+#: file to decide whether it is a JSON document -- generous (vs the single
+#: byte actually needed) because a request may open with whitespace.
 _REQUEST_SNIFF_BYTES = 512
 
 
@@ -415,44 +414,35 @@ def looks_like_request_document(value: str) -> bool:
     input *file* path?
 
     ``klt drc``/``klt extract`` (issue #1867) accept either shape in the same
-    positional slot -- unlike ``klt lvs``, whose positional has only ever been
-    a request document, they predate the convention and already take a layout
-    path there. argparse cannot disambiguate two optional positionals (the
-    first one always wins), so the two forms share one slot and are told apart
-    by *value shape*, never by argument position:
+    positional slot -- they predate the convention and already take a layout
+    path there. argparse cannot disambiguate two optional positionals, so the
+    two forms share one slot and are told apart by *value shape*, never by
+    argument position:
 
     - ``"-"`` -- always a request document read from stdin. A layout stream is
       never read from stdin (KLayout's reader needs a seekable file).
-    - an *existing* file whose first non-whitespace byte is ``{`` -- a request
-      document file. A GDSII stream starts with the binary record header
-      ``00 06 00 02`` and an OASIS stream with ``%SEMI-OASIS``, so no layout
-      this tool can read can be mistaken for one. This check is gated on
-      ``os.path.isfile`` running *first*, so a real layout whose bare
-      filename happens to start with ``{`` (e.g. ``{weird}.gds``, issue
-      #1922) is still routed here for content-sniffing rather than being
-      misread as inline JSON from its name alone.
-    - otherwise, a value whose first non-whitespace character is ``{`` -- an
-      inline JSON object string (or a mistyped/nonexistent path that merely
-      looks like one).
+    - an *existing* file whose first non-whitespace byte is ``{`` -- a
+      request document file (no readable layout starts with ``{``: GDSII
+      starts ``00 06 00 02``, OASIS ``%SEMI-OASIS``). Gated on
+      ``os.path.isfile`` running *first*, so a layout named ``{weird}.gds``
+      (issue #1922) is still content-sniffed, not misread as inline JSON.
+    - otherwise, a value whose first non-whitespace character is ``{`` --
+      inline JSON (or a mistyped/nonexistent path that merely looks like one).
 
-    Everything else (including a path that does not exist and does not start
-    with ``{``) is a layout path, so an unreadable/mistyped layout path still
-    produces the same "file not found" error it always has, rather than a
-    JSON parse error.
+    Everything else (a path that does not exist and does not start with
+    ``{``) is a layout path, so a mistyped one still gets the usual "file
+    not found" error rather than a JSON parse error.
     """
     if value == "-":
         return True
     if os.path.isfile(value):
         # An existing file always wins over the bare-string shape check --
-        # e.g. a layout named "{weird}.gds" must be content-sniffed, not
-        # misclassified as inline JSON just because its name starts with
-        # "{".
+        # e.g. "{weird}.gds" must be content-sniffed, not misread as JSON.
         try:
             with open(value, "rb") as handle:
                 head = handle.read(_REQUEST_SNIFF_BYTES)
         except OSError:
-            # Unreadable: fall through to the layout-path reader, which
-            # reports the read failure in its own vocabulary.
+            # Unreadable: fall through to the layout-path reader's error.
             return False
         return head.decode("utf-8", errors="replace").lstrip()[:1] == "{"
     return value.lstrip()[:1] == "{"
@@ -470,29 +460,19 @@ def load_request_arg(
     directory relative paths inside it should resolve against.
 
     ``value`` is one of three forms (the convention shared by ``klt lvs``
-    and ``klt functional-verification``):
-
-    - ``"-"`` -- read the request JSON document from stdin. Relative paths
-      inside it resolve against the current working directory, since there
-      is no request *file* to anchor them to.
-    - a path to an existing, readable file -- read and parse that file via
-      the caller's own ``load_request_fn`` (unchanged). Relative paths
-      resolve against the file's own directory, exactly as before.
-    - anything else -- parsed as an inline JSON object string. This mirrors
-      ``klt gen --params``'s ``load_params_arg`` (``gen.py``): an existing
-      file always wins first, so this only applies once ``os.path.isfile``
-      has already said no. Relative paths resolve against the current
-      working directory, same as the stdin form.
+    and ``klt functional-verification``): ``"-"`` reads the request JSON
+    document from stdin; a path to an existing, readable file is read via
+    the caller's ``load_request_fn``; anything else is parsed as an inline
+    JSON object string, mirroring ``gen.py``'s ``load_params_arg`` (an
+    existing file always wins first, so this only applies once
+    ``os.path.isfile`` has said no). Relative paths resolve against the
+    file's own directory for the file form, the cwd otherwise.
 
     ``base_dir``, when given, overrides that form-derived anchor for every
-    form (a file request re-run from an archive keeps resolving against the
-    directory the paths were written against; stdin/inline get an explicit
-    anchor instead of the cwd). It must exist and be a directory --
-    ``error_cls`` is raised otherwise, never a silent fallback. The default
-    ``None`` keeps today's behaviour byte-identical for every existing
-    caller. The request document itself is still read from ``value``; the
-    override changes where relative paths resolve, not where the request
-    is loaded from.
+    form; it must exist and be a directory, else ``error_cls`` is raised --
+    never a silent fallback. The request document itself is still read from
+    ``value``; the override changes where relative paths resolve, not where
+    the request is loaded from.
 
     Raises ``error_cls`` for any read/parse/shape failure -- the same
     exception type ``load_request_fn`` raises, so callers do not need to
@@ -503,9 +483,7 @@ def load_request_arg(
         if base_dir is None:
             return default
         if not os.path.isdir(base_dir):
-            raise error_cls(
-                f"base directory '{base_dir}' does not exist or is not a directory"
-            )
+            raise error_cls(f"base directory '{base_dir}' is not a directory")
         return os.path.abspath(base_dir)
 
     if value == "-":
