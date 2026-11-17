@@ -746,7 +746,14 @@ unchanged in grading; issue #4188 adds a producer for it,
 [--hash-kind {bytes,geometry}]]`, emitting the same `generic` envelope with
 `attestation.checks[]` entries `stream_readable`, `top_cell_non_empty` and
 `dbu_on_grid`, `provenance.klayout_version` populated, and an optional
-`provenance.regeneration` (additive; no `schema_version` bump). The inventory `--attest` reads is its own versioned contract —
+`provenance.regeneration` (additive; no `schema_version` bump). The
+inventory-driven producers — `klt signoff --attest ITEM` for items 1, 8, 9
+and 10 (issue #5690) — populate `provenance.klayout_version` the same way:
+the `klayout` build resolved into the attesting process, which is the engine
+a declared `checks[].argv` command that imports `klayout.db` actually ran
+against (`null` when `klayout` is not importable). Like `klt_version`, it is
+a version string in the `--check`/`--rerun` exclusion set, so committed
+evidence re-checked across a klayout upgrade still reports `match`. The inventory `--attest` reads is its own versioned contract —
 see "A versioned *input* contract" below.
 
 Issue #3044 adds an optional `provenance.input.paths` set form to that
@@ -961,10 +968,17 @@ stability statement, concrete precedents, and drift-detection guidance, and
   populated on a dirty tree; `klt_reinstall_spec` is `null` when the tree is
   dirty or the commit is unrecoverable. Never fabricated. A `.devN+g<sha>`
   `klt_version` is not published to an index, so `uvx --from
-  "klayout-tools==<version>"` fails by design; use `klt_reinstall_spec`. Both are
+  "klayout-tools==<version>"` fails by design; use `klt_reinstall_spec`. The
+  spec re-obtains the **klt axis only**; the canonical both-axes
+  reconstruction of a recording adds `--with "klayout==<klayout_version>"`
+  (issue #5884) — see [`docs/cli/version.md`](cli/version.md)'s
+  "Reproducing a recorded pin". Both are
   excluded from `--rerun`/`--check` drift like `klt_version`.
 - `klayout_version` — the KLayout Python engine build (`klayout.__version__`),
-  or `null` if unresolvable.
+  or `null` if unresolvable. To reproduce a recording byte-for-byte, pass
+  this recorded value to `uv`'s `--with "klayout==<klayout_version>"` next to
+  `klt_reinstall_spec` (issue #5884) — see
+  [`docs/cli/version.md`](cli/version.md)'s "Reproducing a recorded pin".
 - `klayout_version_mismatch` (issue #1490, `klt drc`/`klt lvs` only — see
   below) — `true` when this run's `klayout_version` differs from
   `klayout_version_expected` (`klt version --format json`, next section):
@@ -1547,7 +1561,7 @@ which reads the input field only (`signoff.py`'s `_INPUT_ARTIFACT_FIELDS`).
 | `extract` | `file` (the hashed input layout; both response builders) | 4 | #2659 |
 | `lvs` | `layout` (the hashed layout side, `schema_version` 2, #2659); `reference` (the resolved reference netlist, `schema_version` 3, #4984; the `klayout-runset` engine keeps both as plain strings) | 3 | #2659, #4984 |
 | `erc` | `file` (the hashed input layout; `spec` stays a plain string) | 2 | #2703 |
-| `lef-abstract` | `file` (the hashed input layout; `socket` and `output` stay plain strings) | 2 | #2703 |
+| `lef-abstract` | `file` (the hashed input layout; `socket` and `output` stay plain strings; `{path: null, scope: "absent"}` under `--no-layout`, #5714) | 2 | #2703 |
 | `place-and-route` | `netlist` — the input netlist `provenance.input.content_hash` pins (additive, no bump) | 1 | #3751 |
 | `sta` | `def_path`, `verilog_path`, `spef_path` (`null` when the request does not use that input) | 2 | #2879 (moved from the plain-string table; schema-1 evidence carries absolute strings) |
 | `sta` | `sdf` / `corners[].sdf` — a written output: the envelope plus `content_hash` (`null` unless `request.sdf: true`; additive, no bump) | 2 | #2886 |
