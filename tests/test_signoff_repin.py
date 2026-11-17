@@ -188,7 +188,7 @@ def test_unpinned_entry_is_never_given_a_pin(attested, capsys):
     assert manifest.read_bytes() == before
 
 
-def test_a_kind_the_grader_does_not_rehash_is_skipped(attested, capsys):
+def test_a_stale_pin_whose_artifact_does_not_resolve_is_skipped(attested, capsys):
     """A pinned ``drc`` report whose artifact does not resolve here.
 
     ``input_verified`` is not ``True``, so the pin -- the manifest author's
