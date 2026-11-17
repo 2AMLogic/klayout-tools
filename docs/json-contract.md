@@ -1842,7 +1842,13 @@ All eight share one contract:
   the carve-out covers scalar keys only — a committed `provenance`
   *sub-block* (a dict or list, e.g. a `regeneration` claim the fresh run
   declined to adopt) absent from fresh is one absent verdict-bearing
-  structure and still drifts. The
+  structure and still drifts. The `provenance.regeneration` subtree
+  (`klt signoff --attest`'s caller-supplied claim) is excluded from the
+  carve-out entirely — its `hash_kind` leaf is written only when it
+  differs from the default (`bytes`), so absence there encodes a default
+  *value*, not an unproducible field, and any leaf disagreement inside a
+  declined claim still drifts (the explicit `--hash-kind` cross-check of
+  issue #5572). The
   `--format text` renderer lists the skipped field names in a
   `not compared:` block, so a non-zero exit always means "something that
   could be compared did not match".

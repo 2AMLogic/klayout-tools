@@ -169,6 +169,67 @@ def test_absent_provenance_sublist_still_drifts():
     assert "not_compared" not in result
 
 
+def test_absent_regeneration_leaf_still_drifts():
+    """`provenance.regeneration.hash_kind` is written only when it differs
+    from the default (`bytes`), so an absent leaf there encodes a default
+    *value*, not an unproducible field -- the carve-out never reaches
+    inside the `regeneration` subtree (issue #5572's explicit
+    `--hash-kind` cross-check must keep failing on a declined claim)."""
+    from klayout_tools import _report_verify as rv
+
+    committed = _report()
+    committed["provenance"]["regeneration"] = {
+        "generator": "python gen.py -o layout/top.gds",
+        "regenerated_hash": "sha256:" + "ae8c" * 16,
+        "hash_kind": "geometry",
+    }
+    fresh = _report()
+    fresh["provenance"]["regeneration"] = {
+        "generator": "python gen.py -o layout/top.gds",
+        "regenerated_hash": "sha256:" + "ae8c" * 16,
+    }
+
+    result = rv.build_rerun_result(
+        report_path="drc.json", committed=committed, fresh=fresh
+    )
+
+    assert result["status"] == "drifted"
+    assert result["drift"] == [
+        {
+            "field": "provenance.regeneration.hash_kind",
+            "committed": "geometry",
+            "fresh": None,
+        }
+    ]
+    assert "not_compared" not in result
+
+
+def test_identical_regeneration_claims_still_verify_match():
+    """Positive control: excluding the subtree costs the flag-less
+    `--check` adopt path nothing -- identical committed/fresh claims
+    (explicit `hash_kind` included) verify `match` with no drift and no
+    `not_compared` entry."""
+    from klayout_tools import _report_verify as rv
+
+    claim = {
+        "generator": "python gen.py -o layout/top.gds",
+        "regenerated_hash": "sha256:" + "ae8c" * 16,
+        "hash_kind": "geometry",
+    }
+    committed = _report()
+    committed["provenance"]["regeneration"] = dict(claim)
+    fresh = _report()
+    fresh["provenance"]["regeneration"] = dict(claim)
+
+    result = rv.build_rerun_result(
+        report_path="drc.json", committed=committed, fresh=fresh
+    )
+
+    assert result["status"] == "match"
+    assert result["drift"] == []
+    assert "not_compared" not in result
+
+
 def test_fresh_only_provenance_key_still_drifts():
     """Asymmetric by design: a key the *fresh* report grew (`schema grew`)
     still drifts -- only a committed key the fresh run cannot produce is

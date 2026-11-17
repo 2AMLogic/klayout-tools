@@ -61,6 +61,12 @@ def diff_verdict_fields(
       declined to adopt) arrives at this rule whole (``_diff_json``
       recurses only when both sides carry the value) and is one absent
       verdict-bearing structure, which still drifts;
+    - never inside ``provenance.regeneration`` -- the caller-supplied
+      regeneration claim (issue #5572) is excluded from the carve-out
+      entirely: its ``hash_kind`` leaf is written only when it differs
+      from the default (``bytes``), so absence there encodes a default
+      *value*, not an unproducible field, and any leaf disagreement
+      inside a declined claim still drifts;
     - only committed-present/fresh-absent -- a key the fresh report *grew*
       (schema evolution in the other direction) still drifts;
     - a value that merely changed (including to a genuine JSON ``null``)
@@ -104,6 +110,15 @@ def _provenance_absent_in_fresh(
     declined to adopt (issue #5572's explicit-``--hash-kind`` cross-check)
     -- is verdict-bearing, and its absence *is* the drift; treating it as
     not-comparable would silently pass a cross-check that must fail.
+
+    ``provenance.regeneration`` is excluded outright: it is a
+    caller-supplied claim, not tool-emitted provenance chatter, and its
+    ``hash_kind`` leaf is written only when it differs from the default
+    (``bytes``) -- an absent ``hash_kind`` encodes a default *value*, not
+    an unproducible field, so a leaf disagreement inside a declined claim
+    is a real value difference and must drift. Under the flag-less
+    ``--check`` adopt path both sides carry the claim identically, so the
+    exclusion costs nothing there.
     """
     return (
         committed is not _MISSING
@@ -111,6 +126,7 @@ def _provenance_absent_in_fresh(
         and not isinstance(committed, (dict, list))
         and len(path) > 1
         and path[0] == "provenance"
+        and path[:2] != ("provenance", "regeneration")
     )
 
 

@@ -4266,6 +4266,12 @@ one-directional — a verdict-bearing key missing from the fresh report
 committed `provenance` *sub-block* (a dict or list — e.g. a
 `regeneration` claim the fresh run declined to adopt) absent from the
 fresh report is one absent verdict-bearing structure and still drifts.
+The `provenance.regeneration` subtree (`klt signoff --attest`'s
+caller-supplied claim) is excluded from the carve-out entirely: its
+`hash_kind` leaf is written only when it differs from the default
+(`bytes`), so absence there encodes a default *value*, not an
+unproducible field — any leaf disagreement inside a declined claim still
+drifts (the explicit `--hash-kind` cross-check of issue #5572).
 `--format text` lists the skipped fields
 in a `not compared:` block, so a non-zero exit always means "something
 that could be compared did not match".
