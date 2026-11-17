@@ -43,6 +43,15 @@
 # verify-proposal-refs and pr-worktree stay pinned below but were RE-PORTED
 # onto current upstream in the same change (only their local delta remains).
 # curator/judge/doctor (#668) were unpinned by #1966 PR 2; dep-recheck-fingerprint stays.
+#
+# #6236 audit (2026-11-17): every 2026-10-14 re-port above except
+# hermit-patterns and the fence files was re-audited against tag v0.19.1306
+# and re-ported again (pr-worktree, claim-staleness + test, builder-pr both
+# copies); see the per-entry notes below and docs/loom-pin-drift.md. The fence
+# files were left alone here — their v0.19.1306 re-port (LOOM_LEASE_HOST_ID)
+# is #6108 / PR #6222. Each retained delta needs an upstream issue so its pin
+# has a retirement path; none exists yet and none can be filed from this repo,
+# so the filings are tracked in #6306.
 
 # #668 (RETIRED by #1966 PR 2): commands/loom/{curator,judge,doctor}.md used to
 # be pinned whole-file to protect an inline "Frozen-Timeline Fallback" (the
@@ -166,6 +175,17 @@ scripts/tests/test-dep-recheck-fingerprint.sh
 # operator gated on THIS pin landing and being verified (done). If the upstream Loom
 # project ever adopts an equivalent frozen-timeline guard, these pins can be
 # dropped and the files resynced normally.
+#
+# #6236 audit (2026-11-17, vs v0.19.1306): re-ported again. Ported upstream:
+# the #11947 PR-lease check (a live held-self/held-peer lease outranks the
+# idle/streak clocks and downgrades stale -> fresh; runs before the local
+# frozen-timeline block, which then correctly skips) and the #13134 marker
+# fallback (never print nothing for a live agent with LOOM_SWEEP_ID set); the
+# test's T16 was aligned to the #13134 contract (the "prints nothing" case now
+# scrubs LOOM_SWEEP_ID because this repo's suites run inside dispatched
+# sweeps). Delta remaining: the #1966 frozen-timeline protection only
+# (test-claim-staleness.sh 104/104). Upstream issue for the delta: pending,
+# tracked in #6306.
 scripts/claim-staleness.sh
 scripts/tests/test-claim-staleness.sh
 
@@ -182,6 +202,15 @@ scripts/tests/test-claim-staleness.sh
 # reversion pattern as #606/#662/#1292/#1316/#1356/#1546. If the upstream
 # Loom project ever adopts an equivalent section, this pin can be dropped and
 # the file resynced normally.
+#
+# #6236 audit (2026-11-17, vs v0.19.1306): re-ported again. Ported upstream:
+# the #13089 DCO rewrite (no role attests a sign-off — the pinned copy still
+# taught `git commit --signoff`), the #12759 conflict-stacking step, the
+# remainder-hold wording and the Loom-Issue trailer note. Delta remaining:
+# the #1674 quoted-keyword section plus the #2237 --sweep-id call site (both
+# hunks verified as the only local-vs-v0.19.1306 differences; the sweep-id
+# contract is asserted by test-sweep-lease-publish.sh 81/81). Upstream issues
+# for the deltas: pending, tracked in #6306.
 commands/loom/builder-pr.md
 
 # #2128 (commit d0b770ad): verify-proposal-refs.sh and
@@ -223,6 +252,15 @@ scripts/tests/test-verify-proposal-refs.sh
 # upstreamed). If the upstream
 # Loom project ever adopts an equivalent post-worktree-hook call from
 # pr-worktree.sh, this pin can be dropped and the file resynced normally.
+#
+# #6236 audit (2026-11-17, vs v0.19.1306): re-ported again. Ported upstream:
+# the #11194 header/help rework (pr-worktree.sh is the Judge's supported
+# review checkout for any PR shape; exits 1 naming a holder worktree) and the
+# removal of the #10120 live-output-attend emitter (deleted upstream by
+# cfcb24902; nothing else here referenced it). Delta remaining: the #2020
+# hook call only (verified: local vs v0.19.1306 differs by nothing else;
+# test-pr-worktree-post-hook.sh 14/14, test-pr-worktree-isolation.sh 38/38).
+# Upstream issue for the delta: pending, tracked in #6306.
 scripts/pr-worktree.sh
 
 # #2237 (2026-09-21): sweep-lease-fence.sh's `check` subcommand (and its test
@@ -262,6 +300,17 @@ scripts/pr-worktree.sh
 # or this fix's call-site half goes back to upstream's sweep-id-less form.
 # If the upstream Loom project ever adopts an equivalent `--sweep-id`
 # parameter, these pins can be dropped and the files resynced normally.
+#
+# #6236 audit (2026-11-17, vs v0.19.1306): roles/builder-pr.md was re-ported
+# again together with its commands/loom twin (identical content; upstream's
+# defaults/roles/builder-pr.md is a symlink to the commands file). Ported the
+# same upstream fixes listed in the #1674 entry above; delta remaining is the
+# #2237 --sweep-id call site plus the #1674 section (via the twin). The fence
+# files themselves were deliberately NOT re-ported here: their v0.19.1306
+# drift includes the LOOM_LEASE_HOST_ID fix that #6108 / PR #6222 owns; after
+# that PR merges, test-sweep-lease-fence.sh must be re-run against the merged
+# fence (the #6236 drift check). Upstream issue for the sweep-id delta:
+# pending, tracked in #6306.
 scripts/sweep-lease-fence.sh
 scripts/tests/test-sweep-lease-fence.sh
 roles/builder-pr.md
