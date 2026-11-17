@@ -95,6 +95,14 @@ def pin_disclosure(
 #: hash", so it cannot say "declared, never checked" on its own.
 DECLARED_HASH_UNBOUND = "declared_hash_unbound"
 
+#: The ``--`` gloss each ``input_verified_note`` token renders with in
+#: ``klt signoff --format text`` (issue #6403), keyed by token so a second
+#: token can never inherit this one's explanation; unmapped tokens render
+#: bare.
+INPUT_VERIFIED_NOTE_GLOSSES = {
+    DECLARED_HASH_UNBOUND: "declared hash binds nothing -- never re-hashed",
+}
+
 
 def _usable_input_path(path: Any) -> bool:
     """Whether a ``provenance.input.path`` value is a shape the opt-in

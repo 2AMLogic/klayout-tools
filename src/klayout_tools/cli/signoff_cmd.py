@@ -140,7 +140,7 @@ from ..signoff_attest_text import attestation_check_line as _attestation_check_l
 from ..signoff_attest_text import check_label
 from ..signoff_coverage_disclosure import format_coverage as _format_coverage
 from ..signoff_coverage_disclosure import format_undisclosed
-from ..signoff_evidence_pin import DECLARED_HASH_UNBOUND
+from ..signoff_evidence_pin import INPUT_VERIFIED_NOTE_GLOSSES
 from ..signoff_generator_batch import (
     GeneratorApprovalError,
     GeneratorExecution,
@@ -628,13 +628,6 @@ def _print_text(result: dict) -> None:
 #: dozens of rule-free layers.
 _COVERAGE_PREVIEW = 4
 
-#: The ``--`` gloss each ``input_verified_note`` token carries in the text
-#: report (issue #6403), keyed by token so a second token can never inherit
-#: this one's explanation; an unmapped token renders bare.
-_INPUT_VERIFIED_NOTE_GLOSSES = {
-    DECLARED_HASH_UNBOUND: "declared hash binds nothing -- never re-hashed",
-}
-
 
 def _print_input_verified(citation: dict) -> None:
     """Print one line stating whether a citation's ``content_hash`` was
@@ -666,11 +659,8 @@ def _print_input_verified(citation: dict) -> None:
     print(f"        input: {statement}")
     note = citation.get("input_verified_note")
     if note is not None:
-        gloss = _INPUT_VERIFIED_NOTE_GLOSSES.get(note)
-        print(
-            f"        input note: {note}"
-            + (f" -- {gloss}" if gloss is not None else "")
-        )
+        gloss = INPUT_VERIFIED_NOTE_GLOSSES.get(note)
+        print(f"        input note: {note}" + (f" -- {gloss}" if gloss else ""))
     for pex_input in citation.get("pex_inputs") or []:
         # Issue #2875: per-role schematic-side verification of a `pex` run.
         print(f"        pex input {pex_input['role']}: {pex_input['status']}")
