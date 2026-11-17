@@ -505,11 +505,11 @@
     },
     {
       "path": "src/klayout_tools/place_and_route.py",
-      "lines": 3355
+      "lines": 3352
     },
     {
       "path": "src/klayout_tools/place_and_route_batch.py",
-      "lines": 682
+      "lines": 677
     },
     {
       "path": "src/klayout_tools/place_and_route_gds_merge.py",
@@ -993,7 +993,7 @@
     },
     {
       "path": "tests/test_place_and_route_batch.py",
-      "lines": 613
+      "lines": 605
     },
     {
       "path": "tests/test_place_and_route_min_area.py",

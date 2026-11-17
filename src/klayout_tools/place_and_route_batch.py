@@ -15,7 +15,7 @@ called as they are. What is place-and-route-specific is small:
    ``$KLT_SIM_BACKEND`` > ``local``). An env-sourced ``batch`` steps back to
    ``local`` for a single unit (a request without ``pdk.rebuild_corners``, or
    a one-element list) -- the same rule ``klt sim`` applies. An *explicit*
-   ``batch`` on a single unit is refused rather than silently run locally.
+   ``batch`` on a single unit submits the whole flow as one job (#5799).
 2. **What is uploaded.** The job instance holds no forge credential, so the
    submitter ships one ``tree.tar.gz`` of the request's directory (minus
    ``.klt/`` and ``.git/``), refused above :data:`MAX_BATCH_TREE_BYTES`
@@ -125,7 +125,8 @@ def resolve_backend(flag: str | None, request: dict[str, Any], *, units: int) ->
     independent units.
 
     A host-default ``batch`` steps back to ``local`` when ``units`` is 1; an
-    explicit ``batch`` with one unit is a :class:`PlaceAndRouteError`.
+    explicit ``batch`` with one unit is kept (the whole flow is one job,
+    :mod:`klayout_tools.place_and_route_batch_single`, issue #5799).
     """
     backend, from_host_default = sim.resolve_backend(flag, request)
     if backend not in SUPPORTED_BACKENDS:
@@ -137,12 +138,6 @@ def resolve_backend(flag: str | None, request: dict[str, Any], *, units: int) ->
     backend = sim._yield_host_default_backend(
         backend, from_host_default, reason_ok=units > 1
     )
-    if backend == "batch" and units <= 1:
-        raise PlaceAndRouteError(
-            "backend 'batch' dispatches one job per pdk.rebuild_corners unit "
-            "and needs at least two corners; a single-unit request runs on "
-            "this host (backend 'local')"
-        )
     return backend
 
 
@@ -429,7 +424,7 @@ def _runner_deck_hash(report: dict[str, Any]) -> str | None:
 
 
 def _local_deck_hash(
-    cell_library: str, corner: str, pdk_variant: str | None
+    cell_library: str, corner: str | None, pdk_variant: str | None
 ) -> str | None:
     """This host's hash of the corner's liberty deck, or ``None`` when this
     host cannot resolve it (the runner's PDK is then the only evidence)."""

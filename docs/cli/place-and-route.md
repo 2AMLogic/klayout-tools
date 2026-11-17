@@ -3308,8 +3308,9 @@ The units of a `pdk.rebuild_corners` request run where the backend says:
 This is `klt sim`'s precedence (`sim.resolve_backend`). A host default of
 `batch` is a *preference*: a single-unit request (no `rebuild_corners`, or a
 one-element list) stays local. An **explicit** `--backend batch` (flag or
-request field) on a single-unit request is an error, not a silent local run.
-Any other value is an error.
+request field) on a single-unit request submits the **whole flow** — honoring
+`target_stage` — as **one** fleet job (issue #5799; see "Single-unit batch run"
+below). Any other value is an error.
 
 With `batch`, each corner is submitted as one job on the same S3 job contract
 as `klt sim --backend batch` (bucket, profile, provision script and runner
@@ -3341,6 +3342,25 @@ The aggregated report keeps the shape above and adds:
 used; if this host can resolve the same corner's deck and the hashes differ,
 the unit fails with `batch_deck_mismatch` (the fleet image's PDK does not match
 this host's).
+
+#### Single-unit batch run (issue #5799)
+
+A request with no `pdk.rebuild_corners` (or a one-element list) and an explicit
+batch backend runs as one job — the way to move a long single-threaded route off
+the host. It uses the same upload, job contract, preflight and error codes as
+above, with these differences:
+
+- The request is shipped as written (`backend` dropped; a one-element
+  `rebuild_corners` list becomes `pdk.corner`), so `target_stage` is honored.
+- The runner's `.klt/place-and-route/` is collected into this host's
+  `.klt/place-and-route/` (no `<corner>/` subdirectory).
+- The report is the runner's single-run report plus `environment.backend:
+  "batch"` and `environment.remote` (one remote block, `job_id` included) — not
+  the `corner_runs` aggregate.
+- A failed upload, launch, poll or job is an error (exit `1`) carrying the
+  `batch_*` code in its error envelope; OpenROAD is never run on this host.
+- `--resume` and `request.outputs.dir` are refused with the batch backend: the
+  fleet runs the whole flow and copies its artifacts back.
 
 #### Runner support for `--backend` (`batch_runner_lacks_place_and_route_backend`, issue #4124)
 

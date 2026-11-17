@@ -1398,7 +1398,8 @@ def run_place_and_route(
     ``pdk.rebuild_corners`` units run; ``batch`` submits one job per corner
     to the Spot batch fleet (:mod:`klayout_tools.place_and_route_batch`) and
     never falls back to running a unit on this host. A single-unit request
-    stays local under a host-default ``batch``.
+    stays local under a host-default ``batch``; an explicit ``batch`` runs
+    the whole flow as one job (issue #5799).
 
     **Resume (issue #4411).** ``resume`` (``--resume``) skips each leading
     stage whose commit record (:mod:`klayout_tools.place_and_route_resume`)
@@ -1421,22 +1422,18 @@ def run_place_and_route(
             "re-runs in full)"
         )
 
-    from . import place_and_route_batch
+    from . import place_and_route_batch, place_and_route_batch_single
 
     selected = place_and_route_batch.resolve_backend(
         backend, request, units=len(rebuild_corners) if rebuild_corners else 1
     )
     if selected == "batch":
-        if "dir" in request.get("outputs", {}):
-            raise PlaceAndRouteError(
-                "request.outputs.dir is not supported with the batch backend "
-                "(the fleet copies artifacts back into .klt/place-and-route/)"
-            )
-        assert rebuild_corners is not None and _ownership is not None
-        return place_and_route_batch.run_rebuild_corners_batch(
+        assert _ownership is not None
+        return place_and_route_batch_single.run_batch(
             request_path,
             request,
             rebuild_corners,
+            resume=resume,
             pdk_variant=pdk_variant,
             ownership=_ownership,
         )
