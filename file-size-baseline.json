@@ -161,7 +161,7 @@
     },
     {
       "path": "src/klayout_tools/_provenance.py",
-      "lines": 1005
+      "lines": 991
     },
     {
       "path": "src/klayout_tools/arith_gen.py",
@@ -349,7 +349,7 @@
     },
     {
       "path": "src/klayout_tools/gen.py",
-      "lines": 4355
+      "lines": 4334
     },
     {
       "path": "src/klayout_tools/gen_compose.py",
@@ -613,7 +613,7 @@
     },
     {
       "path": "src/klayout_tools/sim_steps.py",
-      "lines": 1314
+      "lines": 1313
     },
     {
       "path": "src/klayout_tools/sim_tian.py",
