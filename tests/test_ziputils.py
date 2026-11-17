@@ -8,8 +8,11 @@ from pathlib import Path
 
 import pytest
 
-from klayout_tools import ZipSmugglingError, safe_extract
-from klayout_tools.ziputils import _validated_member_name
+from klayout_tools.ziputils import (
+    ZipSmugglingError,
+    _validated_member_name,
+    safe_extract,
+)
 
 
 def _write_archive(path: Path, members: dict[str, str]) -> Path:
