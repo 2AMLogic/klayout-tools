@@ -724,6 +724,7 @@
         "klayout_tools.signoff_attest_build",
         "klayout_tools.signoff_attest_carry",
         "klayout_tools.signoff_attest_drift",
+        "klayout_tools.signoff_attest_glob",
         "klayout_tools.signoff_attest_input",
         "klayout_tools.signoff_attest_item9",
         "klayout_tools.signoff_attest_live",

@@ -82,15 +82,16 @@ from .signoff import (
     _reject_json_constant,
 )
 from .signoff_attest_drift import drift_result
+from .signoff_attest_glob import expand_entry
 from .signoff_attest_input import input_binding
 
-#: The attestation-inventory schema versions this build reads. An inventory
-#: declaring any other version is refused (exit ``1``) rather than read with
-#: guessed semantics -- the inventory is a public, versioned contract
-#: (``docs/json-contract.md``).
-INVENTORY_SCHEMA_VERSION = 1
+#: The attestation-inventory schema version this build mints against. The
+#: inventory is a public, versioned contract (``docs/json-contract.md``);
+#: older versions stay readable so an inventory never breaks the ``klt``
+#: that wrote it.
+INVENTORY_SCHEMA_VERSION = 2
 SUPPORTED_INVENTORY_SCHEMA_VERSIONS: frozenset[int] = frozenset(
-    {INVENTORY_SCHEMA_VERSION}
+    {1, INVENTORY_SCHEMA_VERSION}
 )
 
 #: The literal ``kind`` every inventory must declare, so an unrelated JSON
@@ -293,6 +294,9 @@ def _normalize_repo_path(raw: Any, field: str, root: str) -> str:
 def _path_list(
     inventory: Mapping[str, Any], field: str, root: str, seen: dict[str, str]
 ) -> list[str]:
+    """The normalised members of one path-list field, each claimed in
+    ``seen``. A member is accepted -- and a ``{"glob": ...}`` entry expanded
+    -- by :func:`~klayout_tools.signoff_attest_glob.expand_entry`."""
     value = inventory.get(field)
     if not isinstance(value, list):
         raise AttestationError(f"inventory field '{field}' must be a list of paths")
@@ -302,14 +306,9 @@ def _path_list(
         )
     paths = []
     for raw in value:
-        path = _normalize_repo_path(raw, field, root)
-        if path in seen:
-            raise AttestationError(
-                f"path '{path}' is listed more than once (in '{seen[path]}' and "
-                f"'{field}') -- each inventoried file must appear exactly once"
-            )
-        seen[path] = field
-        paths.append(path)
+        paths.extend(
+            expand_entry(raw, field, root, seen, inventory.get("schema_version"))
+        )
     return paths
 
 

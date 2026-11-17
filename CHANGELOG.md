@@ -14,6 +14,19 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt signoff --attest` inventory path lists accept `{"glob":
+  "<pattern>"}` members** (#5614, 2026-11-17): a `sources` (item 1) or
+  `hygiene` (item 10) entry may be a glob object instead of a literal path,
+  expanded at attest time to the **git-tracked** files matching it (never a
+  filesystem walk, so the envelope stays byte-deterministic across hosts).
+  Each expanded member gets its own `present` check and hash, so the
+  previously-undetectable case — a file added to a covered directory after
+  the envelope was committed — is now drift: `--attest --check` re-expands
+  and exits non-zero. A zero-match glob, a glob colliding with a literal
+  entry, an absolute/`..` pattern, a symlinked member, and a glob in a
+  `schema_version: 1` inventory are all refused; inventory schema version 2
+  carries the new form and this build reads `{1, 2}` (a v1 inventory attests
+  byte-identically to before).
 - **`klt sim --attach <batch-shards.json>` accepts a map written by a
   `--hosts N` / `remote.hosts: N` run** (#5777, 2026-11-17): `--attach` and
   `--collect-partial` refused every `hosts != 1` request with "requires backend

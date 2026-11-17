@@ -1852,7 +1852,12 @@ is the combined set digest (see "Set binding" above), and
 therefore renders the manifest row `unmet` / `stale_evidence` (the changed
 member is named in `detail.artifact_binding.members`) without running
 `--attest --check`. A member that cannot be read is left out of the set; its
-`present` check already fails the attestation.
+`present` check already fails the attestation. A `{"glob": ...}` source
+entry contributes its **expanded** members to `provenance.input.paths` and
+the combined set digest: adding a matching file changes
+`provenance.input.content_hash`, so a manifest citing the envelope must be
+re-pinned after every such addition (the behaviour the "Pin change" note
+below describes).
 
 > **Pin change.** Existing manifests citing an item-1 envelope must re-pin the
 > evidence `content_hash` to the new `provenance.input.content_hash`; the old
@@ -1894,6 +1899,18 @@ drift `--check` exists to catch, and a companion checklist would displace
 the README as the pinned artifact item 10 names. The answer to a churning
 file is the same as for resync-managed paths above — list fewer files: move
 the churn out and list a stable file instead.
+
+**Globs make the resync rule easier to violate by accident (issue #5614).**
+A `{"glob": ...}` hygiene entry expands to every tracked file matching it at
+attest time — including files added later — so a pattern wide enough to
+reach resync-managed content (`.loom/`, `.claude/`, `.gitignore`,
+`CLAUDE.md`) will start binding tooling files the moment a resync adds one,
+and the envelope goes red on every resync. Keep hygiene patterns scoped to
+repo-owned directories (`records/*.md`, not `**/*.md`), and re-check a
+glob's expansion (`git ls-files` with the same pattern) when the covered
+directory gains kinds of files, not just more of them. The expansion itself
+is deterministic — tracked files only — so the drift an added file causes is
+the intended signal: re-attest (owner action, below) or narrow the pattern.
 
 **Migration for existing item 10 inventories:** remove resync-managed paths
 from `hygiene`, then re-attest once and commit the new envelope
@@ -2053,13 +2070,13 @@ or the entry grades `unmet`/`unreadable_evidence`. (The `{path, scope:
 "repo"}` input an envelope names is separate: it resolves against the repo
 root of the evidence file.)
 
-#### Inventory schema (`schema_version: 1`)
+#### Inventory schema (`schema_version: 1` and `2`)
 
 Every inventory is a JSON object with these common fields:
 
 | Field | Required | Meaning |
 | ----- | -------- | ------- |
-| `schema_version` | yes | Integer. This build reads `1`; any other value is refused (exit `1`). |
+| `schema_version` | yes | Integer. This build reads `1` and `2` (version 2 adds the `{"glob": ...}` path-list members described below); any other value is refused (exit `1`). |
 | `kind` | yes | The literal `"t1-attestation-inventory"`. |
 | `t1_item` | yes | Integer; must equal the `--attest` value. One inventory attests one item. |
 | `description` | no | Free text, never graded. |
@@ -2070,7 +2087,7 @@ an inventory the author did not write.
 
 | Item | Field | Required | Checks run |
 | ---- | ----- | -------- | ---------- |
-| **1** Design sources | `sources`: list of paths | yes, non-empty | each file exists (`present`, role `source`) |
+| **1** Design sources | `sources`: list of paths — each entry a literal path, or (schema 2) a `{"glob": "<pattern>"}` object | yes, non-empty | each file exists (`present`, role `source`) |
 | | `derived`: list of `{path, generator, check}` or `{path, generator, recorded}` | yes, non-empty | each file exists (`present`, role `derived`), **and** exactly one of: its `check` command exits `0` (`command`, role `freshness`), or its `recorded` digests match (`recorded_hash`, role `freshness`; see below). `generator` names what produced it (e.g. `"klt netlist"`). Both or neither of `check`/`recorded` is refused (exit `1`). |
 | **8** Characterization report | `report`: path | yes | the report file exists (`present`, role `report`) |
 | | `spec_rows`: list of row ids | yes, non-empty | each row has at least one citation (`citation`, role `spec_row`) and every envelope it cites exists (`present`, role `evidence`) |
@@ -2082,7 +2099,7 @@ an inventory the author did not write.
 | | `cold_start`: command | yes, unless **every** testbench entry carries its own `cold_start` | exits `0` (`command`, role `cold_start`). A per-bench `cold_start` is a command too and yields a `command` check with `testbench: "<path>"`, so a failure names its bench. When both forms are present, the top-level command runs as well. A cold start (either form) may add `documented_argv` — the full reproducing invocation, recorded and never run; see "A cold start that only validates its bench" below. *First ships in the first release after `v0.9.2`.* |
 | | `unbenched_rows`: list of `{"row": "<id>", "issue": <positive int>}` | no | one `unbenched_row` check per entry (role `row`), **passing**: the gap and its owner issue are visible to the grader, not refused. Empty/duplicate `row` or a non-positive `issue` is refused (exit `1`). Whether bench-less rows should fail T1 item 9 is a grading-policy decision this producer does not make. *First ships in 0.9.0; 0.8.0 refuses `unbenched_rows` as an unknown field.* |
 | | `pins`: `{"pdk": {"name", "revision"} \| {"none": true, "reason"}, "tools": {<tool>: <version>}}` | checked, not structurally required | `pdk.name` and `pdk.revision` non-empty, or, for a partition whose cold start consumes no PDK, the explicit no-PDK form `{"none": true, "reason": "<non-empty>"}` (`pin`, role `pdk`; `none` mixed with `name`/`revision`, or with an empty `reason`, fails; an absent `pdk` still fails -- silence never means "no PDK"); `tools` a non-empty map of non-empty versions (`pin`, role `tools`). A missing pin is a **failed check**, not a malformed inventory. |
-| **10** Repo hygiene | `hygiene`: list of paths | yes, non-empty | each file exists (`present`, role `hygiene`) |
+| **10** Repo hygiene | `hygiene`: list of paths — each entry a literal path, or (schema 2) a `{"glob": "<pattern>"}` object | yes, non-empty | each file exists (`present`, role `hygiene`) |
 | | `checks`: list of `{name, argv, cwd?, local_only?, timeout_s?}` | yes, non-empty | each exits `0` (`command`, role `audit`); `name` must be unique |
 
 A **command** is `{"argv": ["prog", "arg", ...], "cwd": "<repo-relative dir>", "local_only": false}`.
@@ -2125,6 +2142,32 @@ absolute, escape the repository (`..`), traverse a symlink anywhere along
 their length, or appear more than once across the inventory's path lists.
 The inventory file itself must not be a symlink, and must be a file (`-` is
 refused: there is no path to pin).
+
+**Glob members (schema 2, issue #5614).** A `sources` (item 1) or `hygiene`
+(item 10) entry may instead be `{"glob": "<pattern>"}`, expanded at attest
+time to the **git-tracked** files matching the pattern — each expanded member
+then appears in the envelope as its own `present` check with its own
+`content_hash`, exactly as if it had been listed literally, so the envelope
+stays a literal, checkable record of what was bound. Patterns are
+repository-relative and follow `fnmatch` rules: `*` matches any characters
+*including* path separators (so `records/*.md` covers subdirectories too —
+which is the point: an inventory whose intent is "every record under
+`records/`" keeps covering the directory as it grows), `?` matches one
+character, `[...]` a character class; empty and `.` path segments are
+dropped. A pattern is refused when it is not a non-empty string, is
+absolute, or escapes the repository with `..` — the same contract a literal
+path has. Expansion reads `git ls-files`, **never the filesystem**: an
+untracked local file is never a member, so a local `--attest` and CI's
+`--attest --check` expand to the same member set and the envelope stays
+byte-deterministic; git being unusable is an error naming the glob entry,
+with no filesystem fallback. A glob matching **zero** tracked files is
+refused (a glob that attests nothing is the original coverage gap in a new
+shape), and a glob naming a file that is also listed literally — in any
+path list — is the ordinary duplicate refusal. Because the envelope pins the
+expanded set, **a file added to a covered directory after the envelope was
+committed is drift**: `--attest --check` re-expands the glob, sees the extra
+`present` check and changed `check_count`, and exits non-zero. Re-attesting
+is the repo owner's action (the item-10 rule below).
 
 #### Hashing rules
 
