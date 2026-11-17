@@ -18,8 +18,8 @@ through ``extract.py`` -- so the import graph stays one-directional.
 ``extract.py`` re-exports every moved name, so existing ``from
 klayout_tools.extract import ...`` call sites keep working unchanged. The
 diode near-miss diagnostics (``_collect_diode_near_miss_warnings`` and its
-helpers) deliberately stay in ``extract.py``: they assemble warnings for the
-main extraction/reporting flow rather than resolving device regions.
+helpers) are not here either: they moved to ``extract_detect_diode_near_miss.py``
+(issue #5736), as warnings rather than device-region resolution.
 """
 
 from __future__ import annotations

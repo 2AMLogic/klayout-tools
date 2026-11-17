@@ -200,11 +200,6 @@
     },
     {
       "file": "src/klayout_tools/extract.py",
-      "function": "_detect_diode_substrate_label_divergence",
-      "complexity": 19
-    },
-    {
-      "file": "src/klayout_tools/extract.py",
       "function": "_extract_netlist",
       "complexity": 120
     },
@@ -227,6 +222,11 @@
       "file": "src/klayout_tools/extract_abstract.py",
       "function": "_wire_abstract_cells",
       "complexity": 11
+    },
+    {
+      "file": "src/klayout_tools/extract_detect_substrate_label.py",
+      "function": "_detect_diode_substrate_label_divergence",
+      "complexity": 19
     },
     {
       "file": "src/klayout_tools/extract_parasitics.py",
