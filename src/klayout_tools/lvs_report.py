@@ -54,6 +54,7 @@ def assemble_lvs_report(
         _layout_abstraction_echo,
         _reference_conversion_echo,
     )
+    from .lvs_finfet_power import derive_finfet_gate_level_power
     from .verilog_module_names import reference_module_names
 
     category_counts: dict[str, int] = {}
@@ -295,7 +296,22 @@ def assemble_lvs_report(
         # `status == "match" and power_connectivity["status"] == "match"`.
         # See `_power_connectivity_report` and
         # `docs/design/pg-connectivity-check-decision.md`.
-        "power_connectivity": power_connectivity,
+        #
+        # Issue #5757: on the FinFET gate-level route the stub block this
+        # stage starts from is graded here, after the compare -- the one
+        # place the final `status` and the `net_correspondence` are both in
+        # scope -- so a matched compare whose requested supplies paired
+        # reports the evidence the compare itself produced. Every
+        # non-deriving path returns the block unchanged (byte-identical).
+        "power_connectivity": derive_finfet_gate_level_power(
+            power_connectivity,
+            status,
+            net_correspondence,
+            finfet_layout=opts.finfet_layout,
+            reference_form=reference_form,
+            power_connectivity_enabled=opts.power_connectivity_enabled,
+            supply_nets=opts.supply_nets,
+        ),
         # Issue #1983: whether this layout's MOS body terminals were resolved
         # from real drawn/labelled geometry or from a deck-synthesized net --
         # the gradeable form of the `device.body_unverified` warning, which
