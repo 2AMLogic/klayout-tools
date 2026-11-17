@@ -8,14 +8,12 @@ the rejected shapes and keeps everything else.
 
 from __future__ import annotations
 
-import shutil
 import subprocess
 
 import pytest
 
+from helpers.tool_probes import SKIP_NO_ICARUS
 from klayout_tools import functional_verification_sdf_steps as fvs
-
-HAVE_ICARUS = shutil.which("iverilog") is not None and shutil.which("vvp") is not None
 
 _VERILOG = """\
 module cellx(input CLK, input D, input SETN, output reg Q);
@@ -84,7 +82,7 @@ def test_only_entry_dropped_leaves_valid_cell(tmp_path):
     assert '(CELLTYPE "cellx")' in text
 
 
-@pytest.mark.skipif(not HAVE_ICARUS, reason="Icarus Verilog not installed")
+@SKIP_NO_ICARUS
 def test_icarus_annotates_after_drop(tmp_path):
     (tmp_path / "t.v").write_text(_VERILOG)
     sdf = _sdf(

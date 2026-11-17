@@ -47,6 +47,7 @@ import pytest
 from helpers.artifact_envelope import env as _envelope
 from helpers.cocotb_fakes import FakeCocotbRunner as _FakeRunner
 from helpers.subprocess_fakes import fake_completed
+from helpers.tool_probes import HAVE_ICARUS, SKIP_NO_COCOTB
 from klayout_tools import functional_verification as fv
 from klayout_tools.cli import main
 from klayout_tools.functional_verification import (
@@ -3080,17 +3081,8 @@ def test_stubbed_sdf_with_parameters_is_a_request_error(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 
-def _have_cocotb() -> bool:
-    try:
-        import cocotb_tools.runner  # noqa: F401
-    except Exception:
-        return False
-    return True
-
-
-HAVE_COCOTB = _have_cocotb()
 HAVE_SIMULATOR = {
-    "icarus": shutil.which("iverilog") is not None,
+    "icarus": HAVE_ICARUS,
     "verilator": shutil.which("verilator") is not None
     and shutil.which("verilator_coverage") is not None,
 }
@@ -3104,10 +3096,8 @@ def _stage_example(tmp_path: Path, request_name: str) -> str:
     return str(tmp_path / request_name)
 
 
-@pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
-@pytest.mark.skipif(
-    not HAVE_SIMULATOR["icarus"], reason="iverilog is not installed on this machine"
-)
+@SKIP_NO_COCOTB
+@pytest.mark.skipif(not HAVE_SIMULATOR["icarus"], reason="iverilog/vvp not installed")
 def test_integration_real_icarus_gcd_worked_example(tmp_path):
     """The GCD worked example (spike section 6) end to end against real
     cocotb + Icarus: `TESTS=3 PASS=2 FAIL=1 SKIP=0`, exit 3."""
@@ -3146,7 +3136,7 @@ def test_integration_real_icarus_gcd_worked_example(tmp_path):
     assert os.path.isfile(report.local_paths["results_xml"])
 
 
-@pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
+@SKIP_NO_COCOTB
 @pytest.mark.skipif(
     not HAVE_SIMULATOR["verilator"],
     reason="verilator/verilator_coverage is not installed on this machine",
@@ -3181,10 +3171,8 @@ def test_integration_real_verilator_gcd_worked_example_with_coverage(tmp_path):
         assert handle.readline().startswith("TN:")
 
 
-@pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
-@pytest.mark.skipif(
-    not HAVE_SIMULATOR["icarus"], reason="iverilog is not installed on this machine"
-)
+@SKIP_NO_COCOTB
+@pytest.mark.skipif(not HAVE_SIMULATOR["icarus"], reason="iverilog/vvp not installed")
 def test_integration_real_icarus_testcase_filter_passes(tmp_path):
     """Filtering out the deliberately-failing test flips the same example to
     `status: "pass"` / exit 0 -- the `valid: true` half of the gate."""
@@ -3213,10 +3201,8 @@ def test_integration_real_icarus_testcase_filter_passes(tmp_path):
     assert report["test_count"] == 2
 
 
-@pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
-@pytest.mark.skipif(
-    not HAVE_SIMULATOR["icarus"], reason="iverilog is not installed on this machine"
-)
+@SKIP_NO_COCOTB
+@pytest.mark.skipif(not HAVE_SIMULATOR["icarus"], reason="iverilog/vvp not installed")
 def test_integration_real_icarus_parameters_override_reaches_elaboration(tmp_path):
     """`request.parameters` end to end against real cocotb + Icarus: the
     `modexp` core elaborates at `WIDTH=8` (its RTL default is `WIDTH=16`),
@@ -3239,10 +3225,8 @@ def test_integration_real_icarus_parameters_override_reaches_elaboration(tmp_pat
     assert report["test_count"] == 1
 
 
-@pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
-@pytest.mark.skipif(
-    not HAVE_SIMULATOR["icarus"], reason="iverilog is not installed on this machine"
-)
+@SKIP_NO_COCOTB
+@pytest.mark.skipif(not HAVE_SIMULATOR["icarus"], reason="iverilog/vvp not installed")
 def test_integration_real_icarus_random_seed_is_pinned_and_echoed(tmp_path):
     """`options.random_seed` pinned end to end against a real cocotb +
     Icarus run: the pinned value reaches `COCOTB_RANDOM_SEED` (via
@@ -3270,10 +3254,8 @@ def test_integration_real_icarus_random_seed_is_pinned_and_echoed(tmp_path):
     ) == (3, 2, 1, 0)
 
 
-@pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
-@pytest.mark.skipif(
-    not HAVE_SIMULATOR["icarus"], reason="iverilog is not installed on this machine"
-)
+@SKIP_NO_COCOTB
+@pytest.mark.skipif(not HAVE_SIMULATOR["icarus"], reason="iverilog/vvp not installed")
 def test_integration_real_icarus_same_seed_reproduces_identical_results(tmp_path):
     """Two runs of the same seeded request produce identical `tests[]`
     content -- issue #423's own edge-case test plan ("confirm two CI runs of
@@ -3382,10 +3364,8 @@ def _sdf_integration_request(tmp_path: Path, name: str, sdf: dict | None) -> str
     return _write_request(tmp_path / name, request)
 
 
-@pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
-@pytest.mark.skipif(
-    not HAVE_SIMULATOR["icarus"], reason="iverilog is not installed on this machine"
-)
+@SKIP_NO_COCOTB
+@pytest.mark.skipif(not HAVE_SIMULATOR["icarus"], reason="iverilog/vvp not installed")
 def test_integration_real_icarus_sdf_annotation_changes_the_verdict(tmp_path):
     """Survey section 4.3's own coverage metric, demonstrated end to end: the
     *same* testbench passes at zero delay and fails once the SDF's real path
@@ -3414,10 +3394,8 @@ def test_integration_real_icarus_sdf_annotation_changes_the_verdict(tmp_path):
     }
 
 
-@pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
-@pytest.mark.skipif(
-    not HAVE_SIMULATOR["icarus"], reason="iverilog is not installed on this machine"
-)
+@SKIP_NO_COCOTB
+@pytest.mark.skipif(not HAVE_SIMULATOR["icarus"], reason="iverilog/vvp not installed")
 def test_integration_real_icarus_sdf_interconnect_mode_returns_the_zero_delay_verdict(
     tmp_path,
 ):
@@ -3447,10 +3425,8 @@ def test_integration_real_icarus_sdf_interconnect_mode_returns_the_zero_delay_ve
     assert sdf["dropped"]["iopath_interconnect_only"]["count"] == 1
 
 
-@pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
-@pytest.mark.skipif(
-    not HAVE_SIMULATOR["icarus"], reason="iverilog is not installed on this machine"
-)
+@SKIP_NO_COCOTB
+@pytest.mark.skipif(not HAVE_SIMULATOR["icarus"], reason="iverilog/vvp not installed")
 @pytest.mark.parametrize(
     ("corner", "expected_status"),
     [("min", "pass"), ("max", "fail")],
@@ -3495,10 +3471,8 @@ def _opensta_header_sdf_text() -> str:
     return _sdf_text().replace("  (DIVIDER .)\n", _OPENSTA_SDF_HEADER)
 
 
-@pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
-@pytest.mark.skipif(
-    not HAVE_SIMULATOR["icarus"], reason="iverilog is not installed on this machine"
-)
+@SKIP_NO_COCOTB
+@pytest.mark.skipif(not HAVE_SIMULATOR["icarus"], reason="iverilog/vvp not installed")
 @pytest.mark.parametrize(
     ("corner", "expected_status"),
     [("min", "pass"), ("typ", "fail"), ("max", "fail")],
@@ -3614,10 +3588,8 @@ def test_normalize_sdf_header_triples_tolerates_an_unreadable_file(tmp_path):
     assert fv._normalize_sdf_header_triples(str(tmp_path / "missing.sdf")) is None
 
 
-@pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
-@pytest.mark.skipif(
-    not HAVE_SIMULATOR["icarus"], reason="iverilog is not installed on this machine"
-)
+@SKIP_NO_COCOTB
+@pytest.mark.skipif(not HAVE_SIMULATOR["icarus"], reason="iverilog/vvp not installed")
 def test_integration_real_icarus_broken_sdf_fails_loud_not_silently(tmp_path):
     """The trap, reproduced against the real toolchain: an SDF naming an arc
     the cell does not declare makes Icarus drop that annotation, print `SDF
@@ -3697,10 +3669,8 @@ def _generate_flattened_sdf_text() -> str:
 """
 
 
-@pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
-@pytest.mark.skipif(
-    not HAVE_SIMULATOR["icarus"], reason="iverilog is not installed on this machine"
-)
+@SKIP_NO_COCOTB
+@pytest.mark.skipif(not HAVE_SIMULATOR["icarus"], reason="iverilog/vvp not installed")
 def test_integration_real_icarus_escaped_divider_interconnect_annotates_not_a_crash(
     tmp_path,
 ):
@@ -3838,10 +3808,8 @@ def _toplevel_port_sdf_integration_request(
     return _write_request(tmp_path / name, request)
 
 
-@pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
-@pytest.mark.skipif(
-    not HAVE_SIMULATOR["icarus"], reason="iverilog is not installed on this machine"
-)
+@SKIP_NO_COCOTB
+@pytest.mark.skipif(not HAVE_SIMULATOR["icarus"], reason="iverilog/vvp not installed")
 def test_integration_real_icarus_sdf_resolves_a_toplevel_port_interconnect(tmp_path):
     """The load-bearing regression for issue #1056: a real post-route SDF's
     top design `CELL` mixes purely internal `INTERCONNECT inst.pin inst.pin`
@@ -4419,10 +4387,8 @@ def _tie_alias_port_request(tmp_path: Path, name: str, sdf: dict | None) -> str:
     return _write_request(tmp_path / name, request)
 
 
-@pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
-@pytest.mark.skipif(
-    not HAVE_SIMULATOR["icarus"], reason="iverilog is not installed on this machine"
-)
+@SKIP_NO_COCOTB
+@pytest.mark.skipif(not HAVE_SIMULATOR["icarus"], reason="iverilog/vvp not installed")
 def test_integration_real_icarus_sdf_drops_a_zero_delay_alias_port_interconnect(
     tmp_path,
 ):
@@ -4465,10 +4431,8 @@ def test_integration_real_icarus_sdf_drops_a_zero_delay_alias_port_interconnect(
     }
 
 
-@pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
-@pytest.mark.skipif(
-    not HAVE_SIMULATOR["icarus"], reason="iverilog is not installed on this machine"
-)
+@SKIP_NO_COCOTB
+@pytest.mark.skipif(not HAVE_SIMULATOR["icarus"], reason="iverilog/vvp not installed")
 def test_integration_real_icarus_sdf_nonzero_alias_port_interconnect_fails_loud(
     tmp_path,
 ):
@@ -5006,10 +4970,8 @@ def _physical_only_diode_request(tmp_path: Path, name: str, sdf: dict | None) ->
     return _write_request(tmp_path / name, request)
 
 
-@pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
-@pytest.mark.skipif(
-    not HAVE_SIMULATOR["icarus"], reason="iverilog is not installed on this machine"
-)
+@SKIP_NO_COCOTB
+@pytest.mark.skipif(not HAVE_SIMULATOR["icarus"], reason="iverilog/vvp not installed")
 def test_integration_real_icarus_sdf_drops_a_zero_delay_physical_only_interconnect(
     tmp_path,
 ):
@@ -5052,10 +5014,8 @@ def test_integration_real_icarus_sdf_drops_a_zero_delay_physical_only_interconne
     }
 
 
-@pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
-@pytest.mark.skipif(
-    not HAVE_SIMULATOR["icarus"], reason="iverilog is not installed on this machine"
-)
+@SKIP_NO_COCOTB
+@pytest.mark.skipif(not HAVE_SIMULATOR["icarus"], reason="iverilog/vvp not installed")
 def test_integration_real_icarus_sdf_nonzero_physical_only_interconnect_fails_loud(
     tmp_path,
 ):
@@ -5175,10 +5135,8 @@ def _bus_port_fanout_output_sdf_text() -> str:
 """
 
 
-@pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
-@pytest.mark.skipif(
-    not HAVE_SIMULATOR["icarus"], reason="iverilog is not installed on this machine"
-)
+@SKIP_NO_COCOTB
+@pytest.mark.skipif(not HAVE_SIMULATOR["icarus"], reason="iverilog/vvp not installed")
 def test_integration_real_icarus_sdf_resolves_bus_port_output_fanout_sibling(tmp_path):
     """Issue #1619 shape (a): a driver net fans out to both a bit-selected
     top-level output port and an internal instance-pin load. Before the fix,
@@ -5294,10 +5252,8 @@ async def test_output_settles_within_two_ns(dut):
 '''
 
 
-@pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
-@pytest.mark.skipif(
-    not HAVE_SIMULATOR["icarus"], reason="iverilog is not installed on this machine"
-)
+@SKIP_NO_COCOTB
+@pytest.mark.skipif(not HAVE_SIMULATOR["icarus"], reason="iverilog/vvp not installed")
 def test_integration_real_icarus_sdf_bus_port_input_fanout_stays_unresolvable(tmp_path):
     """Issue #1619 shape (b), root-caused rather than fixed -- see the
     module-level comment above :func:`_split_sdf_bus_port_interconnects` for
@@ -5434,10 +5390,8 @@ def test_physical_only_pass_runs_first_so_classes_do_not_double_count(tmp_path):
     )
 
 
-@pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
-@pytest.mark.skipif(
-    not HAVE_SIMULATOR["icarus"], reason="iverilog is not installed on this machine"
-)
+@SKIP_NO_COCOTB
+@pytest.mark.skipif(not HAVE_SIMULATOR["icarus"], reason="iverilog/vvp not installed")
 def test_integration_real_icarus_sdf_zero_delay_bus_port_input_fanout_is_dropped(
     tmp_path,
 ):
@@ -5627,10 +5581,8 @@ def _constant_zero_request(tmp_path: Path, name: str, *, sdf: bool) -> str:
     return _write_request(tmp_path / name, request)
 
 
-@pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
-@pytest.mark.skipif(
-    not HAVE_SIMULATOR["icarus"], reason="iverilog is not installed on this machine"
-)
+@SKIP_NO_COCOTB
+@pytest.mark.skipif(not HAVE_SIMULATOR["icarus"], reason="iverilog/vvp not installed")
 def test_integration_real_icarus_sdf_constant_zero_is_a_timing_outcome(tmp_path):
     """Issue #1854: the reported "constant-zero result on every test case once
     `options.sdf` is set" shape, reproduced and attributed -- **on the

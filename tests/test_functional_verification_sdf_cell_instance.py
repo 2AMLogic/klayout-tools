@@ -10,16 +10,14 @@ with the root cell spelled `(INSTANCE)` annotate and pass.
 
 from __future__ import annotations
 
-import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
+from helpers.tool_probes import SKIP_NO_ICARUS
 from klayout_tools import functional_verification_sdf_instance as fvi
 from klayout_tools.functional_verification import FunctionalVerificationError
-
-HAVE_ICARUS = shutil.which("iverilog") is not None and shutil.which("vvp") is not None
 
 _CELLS_V = """\
 module klt_buf (A, Z);
@@ -126,7 +124,7 @@ def test_combined_guard_names_the_cell_instance(tmp_path):
         fvi._reject_sdf_unresolvable_scopes(sdf_path, sources, "top")
 
 
-@pytest.mark.skipif(not HAVE_ICARUS, reason="Icarus Verilog not installed")
+@SKIP_NO_ICARUS
 def test_real_icarus_aborts_on_the_guarded_shape(tmp_path):
     """Pins the upstream behaviour: with the SDF's CELL scoped at a missing
     instance raw `vvp` dies with the `vpi_scan` assertion; the guard names

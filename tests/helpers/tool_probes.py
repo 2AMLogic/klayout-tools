@@ -40,3 +40,28 @@ HAVE_NGSPICE = NGSPICE_ON_PATH and not NGSPICE_TESTS_SKIPPED
 SKIP_NO_NGSPICE = pytest.mark.skipif(
     not HAVE_NGSPICE, reason="ngspice is not installed on this machine"
 )
+
+
+# Icarus simulation needs both the compiler and its runtime. The SDF bus,
+# escaped-divider and ifnone-edge integration tests all fail launching vvp
+# when only iverilog is installed (issue #5699); a compiler-only gate is not
+# sufficient for these real-simulation tiers.
+HAVE_ICARUS = shutil.which("iverilog") is not None and shutil.which("vvp") is not None
+
+
+def _have_cocotb() -> bool:
+    try:
+        import cocotb_tools.runner  # noqa: F401
+    except Exception:
+        return False
+    return True
+
+
+HAVE_COCOTB = _have_cocotb()
+
+SKIP_NO_ICARUS = pytest.mark.skipif(
+    not HAVE_ICARUS, reason="iverilog/vvp not installed"
+)
+SKIP_NO_COCOTB = pytest.mark.skipif(
+    not HAVE_COCOTB, reason="cocotb is not installed on this machine"
+)

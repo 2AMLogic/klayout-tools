@@ -12,28 +12,16 @@ counts them as `iopath_bus_bit_modpath`, naming every affected arc.
 from __future__ import annotations
 
 import json
-import shutil
 import types
 from pathlib import Path
 
 import pytest
 
 from helpers.cocotb_fakes import FakeCocotbRunner as _FakeRunner
+from helpers.tool_probes import SKIP_NO_COCOTB, SKIP_NO_ICARUS
 from klayout_tools import functional_verification as fv
 from klayout_tools import functional_verification_sdf as fvs
 from klayout_tools.functional_verification import run_functional_verification
-
-
-def _have_cocotb() -> bool:
-    try:
-        import cocotb_tools.runner  # noqa: F401
-    except Exception:
-        return False
-    return True
-
-
-HAVE_COCOTB = _have_cocotb()
-HAVE_ICARUS = shutil.which("iverilog") is not None
 
 _RESULTS_XML = """\
 <testsuites name="results">
@@ -381,8 +369,8 @@ def test_stubbed_sdf_interconnect_mode_never_reaches_the_bus_pass(
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
-@pytest.mark.skipif(not HAVE_ICARUS, reason="iverilog is not installed on this machine")
+@SKIP_NO_COCOTB
+@SKIP_NO_ICARUS
 @pytest.mark.parametrize("escaped", [False, True])
 def test_integration_real_icarus_sdf_drops_bus_bit_iopaths(tmp_path, escaped):
     """Before the fix both spellings raised `FunctionalVerificationError`.
