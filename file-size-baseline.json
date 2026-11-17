@@ -225,7 +225,7 @@
     },
     {
       "path": "src/klayout_tools/decks/gf180mcu.py",
-      "lines": 4096
+      "lines": 4030
     },
     {
       "path": "src/klayout_tools/decks/history.py",
@@ -697,7 +697,7 @@
     },
     {
       "path": "tests/golden_deck/generate_golden_deck.py",
-      "lines": 1084
+      "lines": 1081
     },
     {
       "path": "tests/helpers/asap7_drc_fixtures.py",
