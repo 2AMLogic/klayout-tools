@@ -93,7 +93,9 @@ def resolve_obs_regions(
 
         pin_boxes = pin_boxes_by_layer.get(lef_layer)
         if pin_boxes:
-            pin_region = kdb.Region([kdb.Box(*box) for box in pin_boxes])
+            pin_region = kdb.Region()
+            for box in pin_boxes:
+                pin_region.insert(kdb.Box(*box))
             region = region - pin_region
         region.merge()
         region &= kdb.Region(local_outline_box)

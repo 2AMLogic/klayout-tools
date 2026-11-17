@@ -432,7 +432,8 @@
       "description": "`klt lef_abstract` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.lef_abstract_cmd",
-        "klayout_tools.lef_abstract"
+        "klayout_tools.lef_abstract",
+        "klayout_tools.lef_abstract_resource"
       ]
     },
     "lvs": {
