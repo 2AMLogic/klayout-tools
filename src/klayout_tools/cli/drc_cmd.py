@@ -54,8 +54,8 @@ normal run (see ``klayout_tools._report_verify``).
 import argparse
 
 from .. import pdk as pdk_module
-from .._jsonnum import is_int
 from .._paths import looks_like_request_document
+from ..deck_hash_assertion import assert_deck_hash
 from ..drc import (
     REQUEST_SCHEMA,
     DrcError,
@@ -73,6 +73,11 @@ from ..drc_crosscheck import crosscheck_exit_code, run_drc_crosscheck
 from . import _drc_list_categories
 from . import _drc_native as native_deck
 from . import _request_document as reqdoc
+from ._drc_request_fields import (
+    _expect_deck_hash,
+    _expect_rule_categories,
+    _request_rules,
+)
 from .drc_text import _print_crosscheck_text, _print_rule_list, _print_text
 from .output import (
     emit_error,
@@ -124,6 +129,9 @@ def run(args: argparse.Namespace) -> int:
         if args.file is not None and looks_like_request_document(args.file):
             args = _apply_request(args)
         report = _run(args)
+        # Issue #5806: the caller's deck-pin assertion, before anything is
+        # written or emitted -- a mismatch produces only the error envelope.
+        assert_deck_hash(report, args.expect_deck_hash, DrcError)
     except DrcError as exc:
         reqdoc.annotate_missing_file(exc, str(request_arg), str(args.file))
         return emit_error("drc", str(exc), args.format, **vars(exc))
@@ -239,6 +247,15 @@ def _run_check(args: argparse.Namespace) -> int:
             "the committed report's own recorded tile",
             args.format,
         )
+    if args.expect_deck_hash is not None:
+        # Issue #5806: a fresh-run assertion; --check re-verifies the
+        # committed report's own recorded deck hash instead.
+        return emit_error(
+            "drc",
+            "--expect-deck-hash cannot be combined with --check: --check "
+            "verifies the committed report's own recorded deck hash",
+            args.format,
+        )
     if args.rules is not None:
         # Issue #2768: `--check` verifies a committed report as it was run;
         # `--rerun` replays that report's own recorded `rule_selection`, so a
@@ -282,6 +299,7 @@ _REQUEST_FIELD_DESTS = {
     "allow_missing_host_tools": "allow_missing_host_tools",
     "expect_rule_categories": "expect_rule_categories",
     "expect_rule_categories_file": "expect_rule_categories_file",
+    "expect_deck_hash": "expect_deck_hash",
     "min_klayout_version": "min_klayout_version",
     "klayout_binary": "klayout_binary",
     "negative_control": "negative_control",
@@ -355,6 +373,7 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
             # Issue #2806: resolved against the request document's own
             # directory, like every other path field.
             "expect_rule_categories_file": _path("expect_rule_categories_file"),
+            "expect_deck_hash": _expect_deck_hash(request),
             "min_klayout_version": _str("min_klayout_version"),
             "klayout_binary": _path("klayout_binary"),
             # Issue #3076: resolved against the request document's own
@@ -376,38 +395,6 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
     )
 
 
-def _request_rules(request: dict) -> str | list[str] | None:
-    """``request["rules"]`` (issue #2768): the ``--rules`` selection, as one
-    comma-separated string (the argv spelling) or a list of strings. Any
-    other type -- a number, an object, a list holding a non-string -- is a
-    clean error; token-level checks (empty/unmatched) are shared with the
-    argv form downstream in :func:`~klayout_tools.drc.parse_rule_selectors`
-    and :func:`~klayout_tools.drc.resolve_rule_selection`."""
-    value = request.get("rules")
-    if value is None or isinstance(value, str):
-        return value
-    if isinstance(value, list) and all(isinstance(item, str) for item in value):
-        return value
-    raise DrcError(
-        "`klt drc` request field 'rules' must be a string of comma-separated "
-        f"rule ids/globs or a list of strings (got {value!r})"
-    )
-
-
-def _expect_rule_categories(request: dict) -> int | None:
-    """``request["expect_rule_categories"]`` as a positive int, or ``None``
-    (issue #2697). Booleans, floats and strings are rejected."""
-    value = request.get("expect_rule_categories")
-    if value is None:
-        return None
-    if not is_int(value) or value < 1:
-        raise DrcError(
-            "`klt drc` request field 'expect_rule_categories' must be a "
-            f"positive integer (got {value!r})"
-        )
-    return value
-
-
 def _run_crosscheck(args: argparse.Namespace) -> dict:
     """``--engine both`` (issue #3973): both engines, one comparison report."""
     for flag, value in (
@@ -415,6 +402,7 @@ def _run_crosscheck(args: argparse.Namespace) -> dict:
         ("--waivers", args.waivers),
         ("--tile", args.tile),
         ("--max-violations", args.max_violations),
+        ("--expect-deck-hash", args.expect_deck_hash),
     ):
         if value is not None:
             raise DrcError(

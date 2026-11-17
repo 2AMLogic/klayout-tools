@@ -39,6 +39,7 @@ normal run (see ``klayout_tools._report_verify``).
 import argparse
 import sys
 
+from ..deck_hash_assertion import assert_deck_hash
 from ..env_provenance import render_path_field
 from ..lvs import LvsError, check_lvs_report, rerun_lvs_report, run_lvs
 from .output import (
@@ -99,6 +100,15 @@ def run(args: argparse.Namespace) -> int:
                 "reads the deck from the committed report",
                 args.format,
             )
+        if args.expect_deck_hash is not None:
+            # Issue #5806: a fresh-run assertion; --check re-verifies the
+            # committed report's own recorded deck hash instead.
+            return emit_error(
+                "lvs",
+                "--expect-deck-hash cannot be combined with --check: --check "
+                "verifies the committed report's own recorded deck hash",
+                args.format,
+            )
         return _run_check(args)
 
     if args.rerun:
@@ -121,6 +131,9 @@ def run(args: argparse.Namespace) -> int:
                 else ("heartbeat" if not sys.stderr.isatty() else False)
             ),
         )
+        # Issue #5806: the caller's deck-pin assertion, before anything is
+        # written or emitted -- a mismatch produces only the error envelope.
+        assert_deck_hash(report, args.expect_deck_hash, LvsError)
     except LvsError as exc:
         return emit_error("lvs", str(exc), args.format)
 

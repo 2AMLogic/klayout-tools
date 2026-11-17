@@ -33,6 +33,7 @@ Three tiers:
 
 from __future__ import annotations
 
+import argparse
 import io
 import json
 import os
@@ -8331,8 +8332,6 @@ def test_lvs_cli_exits_4_on_inconclusive(tmp_path, monkeypatch, capsys):
         },
     )
 
-    import argparse
-
     args = argparse.Namespace(
         request=path,
         format="json",
@@ -8341,6 +8340,7 @@ def test_lvs_cli_exits_4_on_inconclusive(tmp_path, monkeypatch, capsys):
         deck=None,
         deck_file=None,
         deck_var=None,
+        expect_deck_hash=None,
         layout=None,
         progress=None,
         output=None,

@@ -181,7 +181,7 @@
     },
     {
       "path": "src/klayout_tools/cli/drc_cmd.py",
-      "lines": 563
+      "lines": 551
     },
     {
       "path": "src/klayout_tools/cli/extract_cmd.py",
@@ -189,7 +189,7 @@
     },
     {
       "path": "src/klayout_tools/cli/parser.py",
-      "lines": 5097
+      "lines": 5093
     },
     {
       "path": "src/klayout_tools/cli/pdk_cmd.py",
@@ -853,7 +853,7 @@
     },
     {
       "path": "tests/test_functional_verification.py",
-      "lines": 6588
+      "lines": 6589
     },
     {
       "path": "tests/test_functional_verification_identity_contract.py",
