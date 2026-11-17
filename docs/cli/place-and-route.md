@@ -562,10 +562,15 @@ before OpenROAD launches and, for such a layer, fails with a
 ]
 ```
 
-Each entry needs `layer` (non-empty string, unique across entries) and the four
-finite numbers `x_offset_um`, `x_pitch_um`, `y_offset_um`, `y_pitch_um`
-(pitches `> 0`, offsets `>= 0`). Layers not listed get no tracks, so list every
-layer routing needs. Omitted, the script is byte-identical to before.
+Each entry needs `layer` (non-empty string) and the four finite numbers
+`x_offset_um`, `x_pitch_um`, `y_offset_um`, `y_pitch_um` (pitches `> 0`,
+offsets `>= 0`). A layer may be named by several entries (issue #5671):
+repeated `make_tracks` calls on one layer accumulate track patterns in list
+order, which is how non-uniform grids (e.g. a 7.5-track row) are expressed.
+Only a byte-identical repeated entry — same `layer` and all four numbers — is
+a request error, since it is a transcription mistake and a no-op in OpenROAD.
+Layers not listed get no tracks, so list every layer routing needs. Omitted,
+the script is byte-identical to before.
 
 #### ASAP7 RVT example (M4-M7 on the DRC deck's grid)
 
@@ -594,6 +599,38 @@ no offsets are applied unless you set `floorplan.tracks`. The offsets come from
 the reporter of issue #4493; the `M4.AUX.1`/`M4.AUX.2` improvement versus
 offset 0 (~9.6k violations each on ~1,000 um^2) has not been re-measured in
 this repo, so check it with `klt drc --engine klayout` on your own block.
+
+#### ASAP7 7.5-track row (repeated layer, issue #5671)
+
+A row whose M2 tracks are not on one uniform pitch needs several `make_tracks`
+calls on the same layer. The shipped `asap7sc7p5t` APR script (lambdapdk
+v0.2.17, `libs/asap7sc7p5t_rvt/apr/openroad/tracks.tcl`) lays M2 out as six
+0.036 um steps plus a 0.045 um step at the row boundary — seven calls on one
+layer. `floorplan.tracks` accepts this directly: repeated layers accumulate in
+list order, one `make_tracks` per entry:
+
+```json
+"tracks": [
+  {"layer": "M2", "x_offset_um": 0.009, "x_pitch_um": 0.036,
+   "y_offset_um": 0.045, "y_pitch_um": 0.270},
+  {"layer": "M2", "x_offset_um": 0.009, "x_pitch_um": 0.036,
+   "y_offset_um": 0.081, "y_pitch_um": 0.270},
+  {"layer": "M2", "x_offset_um": 0.009, "x_pitch_um": 0.036,
+   "y_offset_um": 0.117, "y_pitch_um": 0.270},
+  {"layer": "M2", "x_offset_um": 0.009, "x_pitch_um": 0.036,
+   "y_offset_um": 0.153, "y_pitch_um": 0.270},
+  {"layer": "M2", "x_offset_um": 0.009, "x_pitch_um": 0.036,
+   "y_offset_um": 0.189, "y_pitch_um": 0.270},
+  {"layer": "M2", "x_offset_um": 0.009, "x_pitch_um": 0.036,
+   "y_offset_um": 0.225, "y_pitch_um": 0.270},
+  {"layer": "M2", "x_offset_um": 0.009, "x_pitch_um": 0.036,
+   "y_offset_um": 0.270, "y_pitch_um": 0.270}
+]
+```
+
+Only M2 is shown; a working request lists the remaining layers too (M1 and
+M3-M7 as in the M4-M7 example above, all read from the same shipped
+`tracks.tcl`).
 
 #### ASAP7 track-alignment residual (router M4 stub ends)
 
@@ -2154,7 +2191,7 @@ live re-measurement above.
 | `pdk.rebuild_corners` | array\<string\> \| omitted | Additive field (issue #3507). Re-runs the **whole** flow (`floorplan` through `target_stage`) once per named corner, serially, into one aggregated report — see "Physical rebuild per corner" below. Non-empty, no duplicates, mutually exclusive with `pdk.corner`; every name must be one of `cell_library`'s shipped liberty corners (an unknown name is a `PlaceAndRouteError` raised before any unit starts). Not the same as `pdk.sweep_corners`, which only re-times an already-routed design. |
 | `pdk.sweep_corners` | array\<string\> \| omitted | Additive field (issue #1092). Scopes the "Multi-corner setup/hold sweep" below to the named subset of `cell_library`'s shipped `.lib` corners. Omitted (the default) sweeps every shipped corner, reproducing today's behaviour exactly. An explicit `[]` sweeps zero corners (`worst_setup_slack_ns`/`worst_hold_slack_ns`/`corners` all degrade to `null`/`[]`). Every named corner must actually be one of `cell_library`'s own shipped corners (`corners[].name` in the unfiltered sweep) — an unresolvable name raises a `PlaceAndRouteError` naming the corner(s) it could not find and every corner that *is* valid. |
 | `floorplan.method` | string | `"utilization"` \| `"explicit"` \| `"def"` — see "Floorplan methods" above. Required. |
-| `floorplan.tracks` | array\<object\> \| omitted | Additive field (issue #4088). Explicit per-layer `make_tracks` definitions (`layer`, `x_offset_um`, `x_pitch_um`, `y_offset_um`, `y_pitch_um`) replacing the bare `make_tracks`; needed for a tech LEF with a negative routing-layer `OFFSET`, which is otherwise rejected at request time. See "Explicit tracks" above. |
+| `floorplan.tracks` | array\<object\> \| omitted | Additive field (issue #4088). Explicit `make_tracks` definitions (`layer`, `x_offset_um`, `x_pitch_um`, `y_offset_um`, `y_pitch_um`) replacing the bare `make_tracks`; needed for a tech LEF with a negative routing-layer `OFFSET`, which is otherwise rejected at request time. Repeated layers are allowed (issue #5671) and accumulate in list order — one `make_tracks` call per entry, exactly as listed; only a byte-identical repeated entry (same `layer` and all four numbers) is a request error. See "Explicit tracks" above. |
 | `io.layer_h` / `.layer_v` | string | Horizontal/vertical I/O routing layers for `place_pins`. Required once `target_stage` reaches `"place"` or later. |
 | `io.pin_constraints` | array\<object\> \| omitted | Additive field (issue #3885). Pins top-level ports to a die edge so a block can abut or tile with a neighbour. Each entry: `pins` (non-empty array of port names or globs; bus bits are `a[3]`, `a[*]` matches a bus), `edge` (`"north"` \| `"east"` \| `"south"` \| `"west"`), `range_um` (optional `[lo, hi]` offset along that edge, `0 <= lo < hi`), `ordered` (optional boolean, default `false`; keeps the matched pins in listed order via `-group -order`). Each entry emits one `set_io_pin_constraint` before `place_pins`. A pattern matching no top-level port of `netlist`, or a port matched by two entries, is a request error. A `range_um` with fewer pin slots than the entry has pins fails `place`; the error names the `pin_constraints[i]` entry (or quotes OpenROAD's `PPL-0110` line) with its pin and slot counts. See "Pin placement" for slot pitch and range semantics. Omitted or `[]`, the Tcl is byte-identical to before. |
 | `pins` (response) | array\<object\> \| null | Additive field (issue #3885). Final placement of every top-level pin, read from the DEF this run wrote: `name`, `edge` (nearest die edge), `x_um`, `y_um`, `layer`. Present for every run that reaches `place` (constrained or not); `null` at `target_stage: "floorplan"`. Lets a caller verify abutment from the envelope without parsing the DEF. |
