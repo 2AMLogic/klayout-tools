@@ -133,6 +133,9 @@ def add_sim_parser(
             "override where per-corner logs/rawfiles are written when the "
             "request sets options.keep_artifacts "
             "(default: a `.klt/sim/` directory next to the request file). "
+            "Without --report-out, a completed run also writes its report "
+            "envelope to <dir>/report.json (issue #5776); --report-out "
+            "chooses another path instead and wins when given. "
             "With --batch-set, -o is instead the parent of one directory "
             "per member, each named after its request's stem (a trailing "
             "`.request.json` is stripped); `requests[].report` in the "
@@ -163,7 +166,7 @@ def add_sim_parser(
             "of submitting a new one: "
             "waits for it (bounded by the request's `batch.poll_timeout_s`) "
             "and reports it, never re-launching. Pass the same request the "
-            "job was submitted from, with --backend batch. See "
+            "job was submitted from (and --hosts), with --backend batch. See "
             "docs/cli/sim.md."
         ),
     )
@@ -218,8 +221,9 @@ def add_sim_parser(
             "shard the expanded corner/Monte-Carlo unit list across this "
             "many hosts and merge the per-shard reports (default: 1, or "
             "the request's `remote.hosts` field); overrides the request "
-            "field when given. Currently implemented for `local`/"
-            "`local-parallel` only -- see docs/cli/sim.md."
+            "field when given. `local`/`local-parallel` shard in-process, "
+            "`remote` provisions this many instances, `batch` submits one "
+            "fleet job per shard -- see docs/cli/sim.md 'Fleet sharding'."
         ),
     )
     sim_parser.add_argument(

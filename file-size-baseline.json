@@ -168,16 +168,12 @@
       "lines": 1005
     },
     {
-      "path": "src/klayout_tools/_report_verify.py",
-      "lines": 501
-    },
-    {
       "path": "src/klayout_tools/arith_gen.py",
-      "lines": 1010
+      "lines": 1003
     },
     {
-      "path": "src/klayout_tools/artifact_store.py",
-      "lines": 1025
+      "path": "src/klayout_tools/artifact_verify.py",
+      "lines": 745
     },
     {
       "path": "src/klayout_tools/characterize.py",
@@ -185,7 +181,7 @@
     },
     {
       "path": "src/klayout_tools/cli/drc_cmd.py",
-      "lines": 565
+      "lines": 563
     },
     {
       "path": "src/klayout_tools/cli/extract_cmd.py",
@@ -193,23 +189,23 @@
     },
     {
       "path": "src/klayout_tools/cli/parser.py",
-      "lines": 5480
+      "lines": 5247
     },
     {
       "path": "src/klayout_tools/cli/pdk_cmd.py",
-      "lines": 615
+      "lines": 613
     },
     {
       "path": "src/klayout_tools/cli/signoff_cmd.py",
-      "lines": 1171
+      "lines": 1156
     },
     {
       "path": "src/klayout_tools/cli/sim_cmd.py",
-      "lines": 566
+      "lines": 548
     },
     {
       "path": "src/klayout_tools/components.py",
-      "lines": 606
+      "lines": 532
     },
     {
       "path": "src/klayout_tools/coverage.py",
@@ -245,7 +241,7 @@
     },
     {
       "path": "src/klayout_tools/decks/sg13g2.py",
-      "lines": 2948
+      "lines": 2941
     },
     {
       "path": "src/klayout_tools/decks/sky130.py",
@@ -261,7 +257,7 @@
     },
     {
       "path": "src/klayout_tools/drc.py",
-      "lines": 3764
+      "lines": 3737
     },
     {
       "path": "src/klayout_tools/drc_klayout_engine.py",
@@ -273,7 +269,7 @@
     },
     {
       "path": "src/klayout_tools/env_provenance.py",
-      "lines": 728
+      "lines": 708
     },
     {
       "path": "src/klayout_tools/equiv.py",
@@ -349,7 +345,7 @@
     },
     {
       "path": "src/klayout_tools/functional_verification.py",
-      "lines": 3162
+      "lines": 3152
     },
     {
       "path": "src/klayout_tools/functional_verification_sdf.py",
@@ -361,7 +357,7 @@
     },
     {
       "path": "src/klayout_tools/gen_compose.py",
-      "lines": 5119
+      "lines": 5108
     },
     {
       "path": "src/klayout_tools/gen_compose_port_access.py",
@@ -384,16 +380,8 @@
       "lines": 1019
     },
     {
-      "path": "src/klayout_tools/gen_pcells/diff_pair.py",
-      "lines": 579
-    },
-    {
-      "path": "src/klayout_tools/gen_pcells/esd_device.py",
-      "lines": 507
-    },
-    {
       "path": "src/klayout_tools/gen_pcells/mos_array.py",
-      "lines": 843
+      "lines": 658
     },
     {
       "path": "src/klayout_tools/kb.py",
@@ -409,7 +397,7 @@
     },
     {
       "path": "src/klayout_tools/lef_abstract.py",
-      "lines": 1475
+      "lines": 1421
     },
     {
       "path": "src/klayout_tools/liberty_compare.py",
@@ -421,7 +409,7 @@
     },
     {
       "path": "src/klayout_tools/lvs.py",
-      "lines": 6469
+      "lines": 6448
     },
     {
       "path": "src/klayout_tools/lvs_combine.py",
@@ -449,7 +437,7 @@
     },
     {
       "path": "src/klayout_tools/lvs_runset.py",
-      "lines": 977
+      "lines": 774
     },
     {
       "path": "src/klayout_tools/macros.py",
@@ -469,7 +457,7 @@
     },
     {
       "path": "src/klayout_tools/netlist.py",
-      "lines": 1067
+      "lines": 1066
     },
     {
       "path": "src/klayout_tools/netlist_batch.py",
@@ -493,11 +481,11 @@
     },
     {
       "path": "src/klayout_tools/pdk.py",
-      "lines": 2561
+      "lines": 2545
     },
     {
       "path": "src/klayout_tools/pdk_cells.py",
-      "lines": 807
+      "lines": 804
     },
     {
       "path": "src/klayout_tools/pdk_models.py",
@@ -517,7 +505,7 @@
     },
     {
       "path": "src/klayout_tools/place_and_route.py",
-      "lines": 3364
+      "lines": 3355
     },
     {
       "path": "src/klayout_tools/place_and_route_batch.py",
@@ -561,7 +549,7 @@
     },
     {
       "path": "src/klayout_tools/probit.py",
-      "lines": 838
+      "lines": 837
     },
     {
       "path": "src/klayout_tools/remote_fleet.py",
@@ -581,15 +569,15 @@
     },
     {
       "path": "src/klayout_tools/ring_check.py",
-      "lines": 585
+      "lines": 552
     },
     {
       "path": "src/klayout_tools/signoff.py",
-      "lines": 8206
+      "lines": 7314
     },
     {
       "path": "src/klayout_tools/signoff_attest.py",
-      "lines": 1216
+      "lines": 1168
     },
     {
       "path": "src/klayout_tools/signoff_generator_batch.py",
@@ -601,7 +589,7 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 12487
+      "lines": 12415
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
@@ -613,7 +601,7 @@
     },
     {
       "path": "src/klayout_tools/sim_decks.py",
-      "lines": 2297
+      "lines": 2264
     },
     {
       "path": "src/klayout_tools/sim_remote.py",
@@ -621,7 +609,7 @@
     },
     {
       "path": "src/klayout_tools/sim_search.py",
-      "lines": 543
+      "lines": 529
     },
     {
       "path": "src/klayout_tools/sim_staging.py",
@@ -633,7 +621,7 @@
     },
     {
       "path": "src/klayout_tools/sim_tian.py",
-      "lines": 559
+      "lines": 547
     },
     {
       "path": "src/klayout_tools/sim_transfer.py",
@@ -641,7 +629,7 @@
     },
     {
       "path": "src/klayout_tools/sim_twoport.py",
-      "lines": 657
+      "lines": 651
     },
     {
       "path": "src/klayout_tools/sim_validate.py",
@@ -657,11 +645,11 @@
     },
     {
       "path": "src/klayout_tools/socket_check.py",
-      "lines": 1133
+      "lines": 1117
     },
     {
       "path": "src/klayout_tools/spice_flatten.py",
-      "lines": 847
+      "lines": 798
     },
     {
       "path": "src/klayout_tools/substrate_resistance.py",
@@ -669,7 +657,7 @@
     },
     {
       "path": "src/klayout_tools/synthesize.py",
-      "lines": 4651
+      "lines": 4650
     },
     {
       "path": "src/klayout_tools/synthesize_arithmetic.py",
@@ -677,7 +665,7 @@
     },
     {
       "path": "src/klayout_tools/tap_distance.py",
-      "lines": 599
+      "lines": 593
     },
     {
       "path": "src/klayout_tools/trajectory.py",
@@ -757,11 +745,11 @@
     },
     {
       "path": "tests/test_characterize.py",
-      "lines": 2283
+      "lines": 2274
     },
     {
       "path": "tests/test_characterize_vendor_comparison.py",
-      "lines": 653
+      "lines": 650
     },
     {
       "path": "tests/test_check_file_size_baseline.py",
@@ -789,7 +777,7 @@
     },
     {
       "path": "tests/test_design_agent_benchmark.py",
-      "lines": 3291
+      "lines": 3286
     },
     {
       "path": "tests/test_design_agent_benchmark_layout.py",
@@ -837,7 +825,7 @@
     },
     {
       "path": "tests/test_env_provenance.py",
-      "lines": 726
+      "lines": 678
     },
     {
       "path": "tests/test_equiv.py",
@@ -853,11 +841,11 @@
     },
     {
       "path": "tests/test_eval.py",
-      "lines": 1591
+      "lines": 1580
     },
     {
       "path": "tests/test_extract.py",
-      "lines": 26748
+      "lines": 26734
     },
     {
       "path": "tests/test_extract_resistance_graph.py",
@@ -925,15 +913,11 @@
     },
     {
       "path": "tests/test_lvs.py",
-      "lines": 26221
+      "lines": 26199
     },
     {
       "path": "tests/test_lvs_device_provenance.py",
       "lines": 1398
-    },
-    {
-      "path": "tests/test_lvs_klayout_runset.py",
-      "lines": 576
     },
     {
       "path": "tests/test_lvs_magic_oracle.py",
@@ -973,7 +957,7 @@
     },
     {
       "path": "tests/test_op_sanity.py",
-      "lines": 1820
+      "lines": 1804
     },
     {
       "path": "tests/test_output_lock.py",
@@ -985,11 +969,11 @@
     },
     {
       "path": "tests/test_pdk.py",
-      "lines": 3303
+      "lines": 3160
     },
     {
       "path": "tests/test_pdk_cells.py",
-      "lines": 1183
+      "lines": 1041
     },
     {
       "path": "tests/test_pdk_pcell_diagnostics.py",
@@ -1001,7 +985,7 @@
     },
     {
       "path": "tests/test_pex.py",
-      "lines": 7558
+      "lines": 7547
     },
     {
       "path": "tests/test_place_and_route.py",
@@ -1061,7 +1045,7 @@
     },
     {
       "path": "tests/test_signoff.py",
-      "lines": 18366
+      "lines": 18337
     },
     {
       "path": "tests/test_signoff_generator_batch.py",
@@ -1069,7 +1053,7 @@
     },
     {
       "path": "tests/test_sim.py",
-      "lines": 15845
+      "lines": 15834
     },
     {
       "path": "tests/test_sim_batch.py",
@@ -1085,7 +1069,7 @@
     },
     {
       "path": "tests/test_sim_crossings.py",
-      "lines": 557
+      "lines": 551
     },
     {
       "path": "tests/test_sim_decks.py",
@@ -1093,15 +1077,15 @@
     },
     {
       "path": "tests/test_sim_nodeset.py",
-      "lines": 877
+      "lines": 869
     },
     {
       "path": "tests/test_sim_params.py",
-      "lines": 897
+      "lines": 890
     },
     {
       "path": "tests/test_sim_save_mode.py",
-      "lines": 627
+      "lines": 619
     },
     {
       "path": "tests/test_sim_staging.py",
@@ -1109,11 +1093,11 @@
     },
     {
       "path": "tests/test_sim_steps.py",
-      "lines": 1718
+      "lines": 1710
     },
     {
       "path": "tests/test_sim_tian.py",
-      "lines": 873
+      "lines": 870
     },
     {
       "path": "tests/test_sim_transfer.py",
@@ -1121,15 +1105,15 @@
     },
     {
       "path": "tests/test_sim_transfer_meas.py",
-      "lines": 764
+      "lines": 761
     },
     {
       "path": "tests/test_sim_twoport.py",
-      "lines": 735
+      "lines": 733
     },
     {
       "path": "tests/test_size.py",
-      "lines": 3437
+      "lines": 3427
     },
     {
       "path": "tests/test_socket_check.py",

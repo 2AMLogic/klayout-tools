@@ -67,12 +67,8 @@ from typing import Any
 from . import signoff_attest_item9 as item9
 from ._jsonnum import is_int, is_number
 from ._provenance import sha256_file
-from ._report_verify import (
-    VOLATILE_PROVENANCE_PATHS,
-    build_rerun_result,
-    load_committed_report,
-)
-from .build_identity import build_version
+from ._report_verify import load_committed_report
+from .build_identity import build_version, klayout_version
 from .env_provenance import find_repo_root
 from .signoff import (
     _COMMAND_EVIDENCE_TIMEOUT_S,
@@ -85,7 +81,10 @@ from .signoff import (
     _generic_item_binding_refusal,
     _reject_json_constant,
 )
+from .signoff_attest_drift import drift_result
 from .signoff_attest_input import input_binding
+from .signoff_attest_presence import file_check as _file_check
+from .signoff_attest_presence import split_entries
 
 #: The attestation-inventory schema versions this build reads. An inventory
 #: declaring any other version is refused (exit ``1``) rather than read with
@@ -166,22 +165,6 @@ _PATH_LISTS: dict[int, tuple[tuple[str, str], ...]] = {
     9: (("testbenches", "testbench"),),
     10: (("hygiene", "hygiene"),),
 }
-
-#: Volatile envelope paths ``--check`` excludes from drift: the producing
-#: build's version strings. A `klt` upgrade that attests byte-identical
-#: inputs with identical outcomes is not evidence drift.
-VOLATILE_ATTESTATION_PATHS = VOLATILE_PROVENANCE_PATHS
-
-#: The keys a ``skipped_checks[]`` entry reports for a carried command check.
-SKIPPED_CHECK_KEYS = (
-    "role",
-    "name",
-    "target",
-    "argv",
-    "cwd",
-    "passed",
-    *item9.DOCUMENTED_KEYS,
-)
 
 
 class AttestationError(SignoffError):
@@ -425,8 +408,11 @@ def _validated_inventory(
         inventory, bench_specs = item9.split_testbenches(
             inventory, root, _normalize_repo_path, _command_spec
         )
+    inventory, presence = split_entries(
+        inventory, item, _PATH_LISTS[item], root, _normalize_repo_path
+    )
     seen: dict[str, str] = {}
-    normalized: dict[str, Any] = {}
+    normalized: dict[str, Any] = {"presence": sorted(presence)} if presence else {}
     for field, _role in _PATH_LISTS[item]:
         normalized[field] = _path_list(inventory, field, root, seen)
     if item == 1:
@@ -712,17 +698,6 @@ def _validated_derived(
 # --------------------------------------------------------------------------- #
 # Checks
 # --------------------------------------------------------------------------- #
-
-
-def _file_check(root: str, path: str, role: str) -> dict[str, Any]:
-    digest = sha256_file(os.path.join(root, path))
-    return {
-        "check": "present",
-        "role": role,
-        "path": path,
-        "passed": digest is not None,
-        "content_hash": f"sha256:{digest}" if digest is not None else None,
-    }
 
 
 def _recorded_hash_check(root: str, entry: Mapping[str, Any]) -> dict[str, Any]:
@@ -1012,8 +987,10 @@ def _run_checks(
         return _command_check(root, spec, role, **identity)
 
     for field, role in _PATH_LISTS[item]:
+        presence = normalized.get("presence", ())
         checks.extend(
-            _file_check(root, path, role) for path in sorted(normalized[field])
+            _file_check(root, path, role, presence=path in presence)
+            for path in sorted(normalized[field])
         )
     if item == 1:
         for entry in normalized["derived"]:
@@ -1025,7 +1002,7 @@ def _run_checks(
     elif item == CHARACTERIZATION_ITEM:
         checks.extend(_characterization_checks(root, normalized, command))
     elif item == 9:
-        checks.extend(item9.item9_checks(normalized, command))
+        checks.extend(item9.item9_checks(normalized, command, root, _file_check))
         checks.extend(item9.pin_checks(normalized["pins"]))
     else:
         checks.extend(_audit_command_checks(normalized["checks"], command))
@@ -1094,7 +1071,7 @@ def build_attestation(
         },
         "provenance": {
             "klt_version": build_version(),
-            "klayout_version": None,
+            "klayout_version": klayout_version(),
             "pdk": None,
             "deck": None,
             "input": prov,
@@ -1162,8 +1139,9 @@ def check_attestation(
     CLI exits ``0`` only for ``status: "match"`` *and* ``fresh_status:
     "pass"``: a faithfully reproduced failing attestation is still not a
     passing gate. Only the producing build's version strings are excluded
-    from the diff (:data:`VOLATILE_ATTESTATION_PATHS`); a change to the
-    inventory, to any inventoried file, to a check's outcome, or to the
+    from the diff
+    (:data:`~.signoff_attest_drift.VOLATILE_ATTESTATION_PATHS`); a change to
+    the inventory, to any inventoried file, to a check's outcome, or to the
     committed envelope itself is drift.
 
     A ``local_only`` command is not run: it is listed in ``skipped_checks``
@@ -1176,7 +1154,7 @@ def check_attestation(
         inventory_path,
         committed_checks if isinstance(committed_checks, list) else [],
     )
-    return _drift_result(committed_path, committed, fresh)
+    return drift_result(committed_path, committed, fresh)
 
 
 def _load_committed_attestation(committed_path: str) -> dict[str, Any]:
@@ -1188,29 +1166,3 @@ def _load_committed_attestation(committed_path: str) -> dict[str, Any]:
             "check the path"
         )
     return committed
-
-
-def _drift_result(
-    committed_path: str, committed: dict[str, Any], fresh: dict[str, Any]
-) -> dict[str, Any]:
-    # ``skipped`` marks a local_only check this run did not execute; its
-    # (carried-through) outcome is the committed one, so it is reported beside
-    # the diff rather than as a difference from the committed envelope.
-    skipped = []
-    for check in fresh["attestation"]["checks"]:
-        if check.pop("skipped", False):
-            skipped.append(
-                {key: check[key] for key in SKIPPED_CHECK_KEYS if key in check}
-            )
-    result = build_rerun_result(
-        report_path=committed_path,
-        committed=committed,
-        fresh=fresh,
-        exclude=VOLATILE_ATTESTATION_PATHS,
-        mode="check",
-    )
-    fresh_payload = result.pop("fresh")
-    result["fresh_status"] = fresh_payload["status"]
-    result["skipped_checks"] = skipped
-    result["fresh"] = fresh_payload
-    return result

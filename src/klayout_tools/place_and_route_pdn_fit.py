@@ -297,7 +297,7 @@ def standard_cell_area_um2(
     if top is None:
         return None
     total = 0.0
-    for instance in top["instances"]:  # type: ignore[index]
+    for instance in top["instances"]:
         size = macro_sizes.get(str(instance["cell"]))
         if size is None:
             return None

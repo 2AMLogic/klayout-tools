@@ -104,6 +104,7 @@ from . import (
     sim_decks,
     sim_energy,
     sim_eye,
+    sim_form_signals,
     sim_injected,
     sim_mismatch_declarations,
     sim_mismatch_gate,
@@ -114,6 +115,7 @@ from . import (
     sim_search,
     sim_settled,
     sim_snm_meas,
+    sim_spiceinit,
     sim_step_resolution,
     sim_steps,
     sim_stimulus,
@@ -232,7 +234,14 @@ from .sim_osdi_settle import (
     resettle_osdi_preload_for_local,
 )
 from .sim_pdk_ambiguity import warn_pdk_ambiguity as _warn_pdk_ambiguity
+from .sim_pin_settle import (
+    check_local_engine_version_pin,
+    check_offhost_engine_version_pin,
+    check_pdk_version_pin_early,
+    settle_version_pins,
+)
 from .sim_process_legs import attach_process_leg_check
+from .sim_spiceinit import with_thread_pin as _with_thread_pin
 
 from .sim_analysis_overrides import (  # isort: skip
     AO_LABEL as _AO_LABEL,  # noqa: F401
@@ -1383,101 +1392,6 @@ def _check_engine_version_pin(
     )
 
 
-def _check_local_engine_version_pin(
-    pin: tuple[int, ...] | None, backend: str, engine: str, binary: str
-) -> None:
-    """Enforce the pin before any corner runs, where this process can see the
-    engine (local backends); a no-op when unset or for off-host backends."""
-    if pin is None or backend in _OFFHOST_BACKENDS:
-        return
-    _check_engine_version_pin(
-        pin,
-        _probe_engine_version(engine, binary),
-        engine,
-        where="the local engine probe",
-    )
-
-
-def _check_offhost_engine_version_pin(
-    pin: tuple[int, ...] | None,
-    backend: str,
-    engine: str,
-    engine_version: str | None,
-) -> None:
-    """Enforce the pin for off-host backends. No pre-submit probe exists for a
-    remote/batch runner, so it is checked against the version its reports
-    carried (after the run)."""
-    if pin is None or backend not in _OFFHOST_BACKENDS:
-        return
-    _check_engine_version_pin(
-        pin, engine_version, engine, where=f"the {backend} runner's report"
-    )
-
-
-def _validate_pdk_version_pin(models: Any) -> str | None:
-    """The request's ``models.pdk_version`` pin (issue #4046), ``None`` when
-    unset. Same value forms as ``klt pdk check --expect-version``."""
-    if not isinstance(models, dict):
-        return None
-    pin = models.get("pdk_version")
-    if pin is None:
-        return None
-    if not isinstance(pin, str) or not pin.strip():
-        raise SimError(
-            f"request.models.pdk_version must be a non-empty string (got {pin!r})"
-        )
-    return pin.strip()
-
-
-def _check_pdk_version_pin(pin: str | None, models: Any, backend: str) -> None:
-    """Enforce ``models.pdk_version`` before any corner runs (issue #4046).
-
-    Local backends resolve the PDK the way ``provenance.pdk`` does and fail
-    closed (``pdk_version_unmet``) on ``mismatch``/``unknown`` or when no PDK
-    resolves. Off-host backends reject the field: the worker-side comparison
-    is tracked in #3462, and silently passing would hide drift."""
-    if pin is None:
-        return
-    if backend in _OFFHOST_BACKENDS:
-        raise SimError(
-            f"models.pdk_version is not supported for backend {backend!r}: "
-            "the PDK is resolved on the runner, and the worker-side pin check "
-            "is not implemented yet (see issue #3462) -- use backend 'local' "
-            "or 'local-parallel', or drop the pin"
-        )
-    variant = models.get("pdk")
-    root = models.get("pdk_root")
-    if not (variant or root):
-        raise SimError(
-            f"models.pdk_version pins {pin!r} but no PDK is named: set "
-            "models.pdk and/or models.pdk_root so the installed revision can "
-            "be checked",
-            code=PDK_VERSION_UNMET_CODE,
-        )
-    try:
-        found = find_pdk(variant=variant, root=root, expect_version=pin)
-    except PdkNotFoundError as exc:
-        raise SimError(
-            f"models.pdk_version pins {pin!r} but the PDK could not be resolved: {exc}",
-            code=PDK_VERSION_UNMET_CODE,
-        ) from exc
-    expectation = found.get("version_expectation") or {}
-    status = expectation.get("status")
-    if status == "match":
-        return
-    installed = expectation.get("installed")
-    if status == "mismatch":
-        detail = f"installed PDK is {installed!r}"
-    elif installed:
-        detail = f"installed PDK {installed!r} could not be compared"
-    else:
-        detail = "installed PDK identity could not be determined"
-    raise SimError(
-        f"pinned PDK unavailable: request requires {pin!r}; {detail}",
-        code=PDK_VERSION_UNMET_CODE,
-    )
-
-
 def _probe_engine_version(engine: str, binary: str) -> str | None:
     """Ask the local engine binary for its version without simulating."""
     argv = [binary, "--version"] if engine == "ngspice" else [binary, "-v"]
@@ -2199,18 +2113,14 @@ def _validate_save_vectors(
     return tuple(vectors), True
 
 
-#: A ``v(...)``/``i(...)`` token (optionally with ngspice's derivative prefix,
-#: e.g. ``vdb(out)``, ``vm(a,b)``) in a measurement's ``spice``/``expr``/
-#: ``crossings.signal`` text -- the vectors ``options.save_vectors`` must keep
-#: resident for that measurement to resolve.
-_SAVE_TOKEN_RE = re.compile(r"\b([vi][a-z]{0,2})\(([^()]*)\)", re.IGNORECASE)
-
-
 def _required_save_vectors(
     save_vectors: tuple[str, ...], measurements_spec: list[dict[str, Any]]
 ) -> list[str]:
     """``options.save_vectors`` plus every ``v(x)``/``i(x)`` vector the
     declared measurements reference, de-duplicated, in first-seen order.
+
+    Every form that names a signal contributes its texts -- free-text fields
+    verbatim, structured-form fields via :mod:`sim_form_signals`.
 
     Only the parenthesized forms are detected; a measurement that names a
     vector bare (``out`` rather than ``v(out)``) must list it in
@@ -2226,10 +2136,11 @@ def _required_save_vectors(
         if isinstance(step_res, dict):
             texts.append(step_res.get("signal"))
         texts.extend(sim_settled.signal_texts(spec))
+        texts.extend(sim_form_signals.signal_texts(spec))
         for text in texts:
             if not isinstance(text, str):
                 continue
-            for prefix, args in _SAVE_TOKEN_RE.findall(text):
+            for prefix, args in sim_form_signals.SAVE_TOKEN_RE.findall(text):
                 kind = prefix[0].lower()
                 for arg in args.split(","):
                     arg = arg.strip().lower()
@@ -2882,7 +2793,7 @@ def _dispatch_deck_request(
     # before anything runs; off-host ones are checked against the report below.
     engine_version_pin = _validate_engine_version_pin(request)
     if engine_version_pin is not None and resolved_backend not in _OFFHOST_BACKENDS:
-        _check_local_engine_version_pin(
+        check_local_engine_version_pin(
             engine_version_pin,
             resolved_backend,
             "ngspice",
@@ -2911,7 +2822,7 @@ def _dispatch_deck_request(
         dry_run=dry_run,
         collect_partial=collect_partial,
     )
-    _check_offhost_engine_version_pin(
+    check_offhost_engine_version_pin(
         engine_version_pin,
         resolved_backend,
         "ngspice",
@@ -3329,7 +3240,7 @@ def _prepare_sim_request(
     # where this process can see the engine (local backends); off-host
     # backends are checked against the report's `engine_version` afterwards.
     engine_version_pin = _validate_engine_version_pin(request)
-    _check_local_engine_version_pin(
+    check_local_engine_version_pin(
         engine_version_pin, backend, engine, ngspice_binary or XYCE_BINARY
     )
     # Issue #4438: an OSDI ABI the local ngspice cannot load is refused up
@@ -3337,7 +3248,11 @@ def _prepare_sim_request(
     _check_local_osdi_abi(osdi_preload, backend, engine, ngspice_binary or XYCE_BINARY)
     # Issue #4046: a `models.pdk_version` pin is checked the same way, before
     # any corner runs; off-host backends reject it rather than pass silently.
-    _check_pdk_version_pin(_validate_pdk_version_pin(models), models, backend)
+    # Issue #5500: unless the off-host backend is a host default a late yield
+    # may still step back to `local` -- then only the pin's *value* is
+    # validated here and the comparison waits for `settle_version_pins` at
+    # the last yield, so a host default cannot refuse a valid local run.
+    check_pdk_version_pin_early(models, backend, backend_from_host_default)
     timeout_s = options.get("timeout_s", DEFAULT_TIMEOUT_S)
     # Issue #3337: the complex-vector sidecar is the result, so declared
     # vectors force artifacts on (validated in full below).
@@ -3710,6 +3625,16 @@ def _prepare_sim_request(
         if yielded_on_host and osdi_runner_environment
         else (osdi_preload, osdi_runner_environment)
     )
+    # Issue #5500: the same yield decides which engine and PDK the
+    # `engine_version` / `models.pdk_version` pins must be checked against.
+    settle_version_pins(
+        request,
+        backend,
+        engine,
+        ngspice_binary or XYCE_BINARY,
+        engine_version_pin,
+        settle=yielded_on_host,
+    )
     if resume and backend == "remote":
         raise SimError(
             f"options.resume is not yet supported for backend {backend!r} -- "
@@ -3948,6 +3873,20 @@ def _run_sim_corners(
         if yielded_on_host and osdi_runner_environment
         else (osdi_preload, osdi_runner_environment)
     )
+    # Issue #5500: this is the *last* yield, so `backend` is final here. Both
+    # version pins are settled against it when the yield just moved the run
+    # on-host, and the `models.pdk_version` comparison deferred by
+    # `check_pdk_version_pin_early` is due now for a run that really is
+    # leaving this host -- either way before anything is dispatched.
+    settle_version_pins(
+        request,
+        backend,
+        engine,
+        ngspice_binary or XYCE_BINARY,
+        engine_version_pin,
+        settle=yielded_on_host
+        or (backend_from_host_default and backend in _OFFHOST_BACKENDS),
+    )
     # Issue #2977: which backend actually ran, and where the request for it
     # came from -- so a host-policy audit can spot a `local` run although
     # `$KLT_SIM_BACKEND=batch` asked otherwise.
@@ -3969,6 +3908,10 @@ def _run_sim_corners(
     # Issues #3159/#3161: `analysis.passes` / `measurements[].tian` are gated
     # the same way (the `dual_injection` mandatory runner feature).
 
+    # Hoisted above the probe (issue #6047): it takes the corners' pinned init.
+    effective_threads = _effective_threads_per_worker(
+        threads_per_worker, backend, max_workers, len(dispatch_points)
+    )
     # Two-pass fail-fast probe (issue #1694, opt-in via `fail_fast_probe`/
     # `options.fail_fast_probe`): run once per grid, before any real corner
     # is dispatched -- not per backend/shard/host, and not for `remote`/
@@ -3993,7 +3936,9 @@ def _run_sim_corners(
             artifacts_dir=artifacts_dir,
             keep_artifacts=keep_artifacts,
             ngspice_binary=ngspice_binary,
-            ngspice_init=ngspice_init_lines,
+            ngspice_init=_with_thread_pin(
+                ngspice_init_lines, effective_threads, engine
+            ),
             osdi_preload=osdi_preload,
             save_mode=save_mode,
             ngspice_options=ngspice_options,
@@ -4065,8 +4010,8 @@ def _run_sim_corners(
         corner_points=corner_points,
         osdi_preload=osdi_preload,
     )
-    effective_threads = _effective_threads_per_worker(
-        threads_per_worker, backend, max_workers, len(dispatch_points)
+    ngspice_init_env = sim_spiceinit.record(  # Issue #5648
+        ngspice_init_lines, effective_threads, engine, backend in _OFFHOST_BACKENDS
     )
     local_engine_kwargs = (
         {
@@ -4160,7 +4105,7 @@ def _run_sim_corners(
             shard_fingerprint=_checkpoint_fingerprint(**fingerprint_inputs),
         )
 
-    if hosts == 1:
+    if hosts == 1 or attach_job_id is not None:  # #5777: attach never fans out
         # The exact pre-#376 call for the default case (no budget, no
         # resume, hosts=1, no fail-fast probe) -- `dispatch_points`/the four
         # new-since kwargs are identity no-ops then (`dispatch_points is
@@ -4306,7 +4251,7 @@ def _run_sim_corners(
         if backend_engine_version is not None
         else loaded_engine_version
     )
-    _check_offhost_engine_version_pin(
+    check_offhost_engine_version_pin(
         engine_version_pin, backend, engine, engine_version
     )
 
@@ -4439,6 +4384,7 @@ def _run_sim_corners(
         "ngspice_binary": ngspice_binary,
         # Issue #3095: build identity of that binary (``null`` for xyce).
         "engine_build": engine_build,
+        "ngspice_init": ngspice_init_env,
         # Issue #1274: normalised like every other path field this response
         # echoes -- the resolved library usually lives outside the repo (a
         # PDK under the user's home directory), which reports
@@ -8268,21 +8214,6 @@ def _worker_env_kwargs(threads_per_worker: int | None) -> dict[str, Any]:
     return {"env": {**os.environ, "OMP_NUM_THREADS": str(threads_per_worker)}}
 
 
-def _with_thread_pin(
-    ngspice_init: tuple[str, ...], threads_per_worker: int | None, engine: str
-) -> tuple[str, ...]:
-    """Also pin the thread count through ``.spiceinit`` (issue #3619).
-
-    ``OMP_NUM_THREADS`` alone did not stop ngspice-46 from oversubscribing
-    on the batch fleet, while ``set num_threads=1`` did. The pin line goes
-    first so a user ``options.ngspice_init`` line still wins; a netlist
-    ``.control`` ``set num_threads`` runs later still.
-    """
-    if threads_per_worker is None or engine == "xyce":
-        return ngspice_init
-    return (f"set num_threads={threads_per_worker}", *ngspice_init)
-
-
 def _threads_environment(effective: int | None) -> dict[str, int]:
     """Additive/optional ``environment.threads_per_worker`` (issue #2970): the
     OpenMP thread count each ngspice worker actually ran with. Absent when the
@@ -10690,16 +10621,13 @@ def _run_calibration_probe(
     misconfiguration surfaces at the (cheap) probe stage rather than only
     after every real corner is dispatched.
 
-    ``ngspice_init`` (issue #2520, the already-validated
-    ``options.ngspice_init`` lines -- see :func:`_validate_ngspice_init`) is
-    materialized as ``probe_dir/.spiceinit`` the same way :func:`_run_corner`
-    does for a real corner, and the probe's own ``subprocess.run`` call
-    passes ``cwd=probe_dir`` so it is actually read. The probe otherwise
-    runs the same compatibility mode a real corner would, and this issue's
-    other half (the missing ``cwd=``) applied here too -- without it, the
-    probe's own convergence behaviour (and thus its rate estimate) would
-    silently diverge from the real corners it is meant to be representative
-    of whenever a caller sets ``options.ngspice_init``.
+    ``ngspice_init`` (issues #2520, #6047) is the init-file lines the real
+    corners get, thread pin included (:func:`_with_thread_pin`; a run-dir
+    ``.spiceinit`` replaces ``$HOME``'s). It is materialized as
+    ``probe_dir/.spiceinit`` and the probe's ``subprocess.run`` passes
+    ``cwd=probe_dir`` so it is read -- otherwise the probe's convergence
+    behaviour (and rate estimate) would diverge from the corners it is meant
+    to be representative of.
     """
     probe_dir = (
         os.path.join(artifacts_dir, f"{point.slug}__probe")
@@ -11061,15 +10989,15 @@ def _parse_plain_number(raw: str) -> float | None:
     return float(match.group(1))
 
 
-def _parse_width_um(raw: str) -> float | None:
+def _parse_width_um(raw: str, bare_is_um: bool = False) -> float | None:
     """Parse a SPICE ``W``/``L``-style geometry literal (``50u``, ``5e-5``,
-    ``100n``) to micrometres. Returns ``None`` for anything that is not a
-    plain numeric literal.
-    """
+    ``100n``) to micrometres (``None`` for non-numerics); ``bare_is_um``
+    reads a bare literal as micrometres (#5802 X-card PDK wrappers)."""
     match = spice_number.NUMBER_RE.match(raw.strip().strip("'\""))
     if match is None:
         return None
-    return float(match.group(1)) * spice_number.suffix_scale(match.group(2)) * 1e6
+    value = float(match.group(1)) * spice_number.suffix_scale(match.group(2))
+    return value * (1 if match.group(2) == "" and bare_is_um else 1e6)
 
 
 def _find_width_ceiling_culprit(
@@ -11099,7 +11027,7 @@ def _find_width_ceiling_culprit(
         w_raw = params.get("w") or params.get("W")
         if w_raw is None:
             continue
-        w_um = _parse_width_um(w_raw)
+        w_um = _parse_width_um(w_raw, bare_is_um=inst_name[:1].upper() == "X")
         if w_um is None:
             continue
         m_raw = params.get("m") or params.get("M")
@@ -12235,7 +12163,7 @@ def _open_ascii_rawfile(
     format notes (``Flags: complex`` magnitude reduction in particular).
     """
     try:
-        handle = open(raw_path, encoding="utf-8", errors="replace")  # noqa: SIM115
+        handle = open(raw_path, encoding="utf-8", errors="replace")
     except OSError as exc:
         raise SimError(f"could not read rawfile: {exc}") from exc
     with handle:

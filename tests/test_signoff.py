@@ -28,12 +28,12 @@ from pathlib import Path
 import pytest
 
 from helpers.subprocess_fakes import fake_completed
+from helpers.tool_probes import SKIP_NO_NGSPICE as requires_ngspice
 from klayout_tools import signoff as signoff_module
 from klayout_tools import signoff_attest as attest_module
 from klayout_tools._provenance import layout_geometry_digest
 from klayout_tools._report_verify import strip_path_patterns
 from klayout_tools.cli import main
-from klayout_tools.cli.output import render_rerun_drift
 from klayout_tools.coverage import build_check_coverage
 from klayout_tools.design_evidence_tiers import (
     DesignEvidenceTiersError,
@@ -66,13 +66,6 @@ pytestmark = pytest.mark.usefixtures("real_build_identity_git")
 #: tests below (issue #825) to locate `examples/design-pipeline/`'s
 #: already-passing artifacts without depending on pytest's cwd.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-
-# Match the real-engine tier in test_sim.py and test_pex.py. CI installs
-# ngspice; the local check:ci command deliberately opts out of this tier.
-requires_ngspice = pytest.mark.skipif(
-    shutil.which("ngspice") is None or os.environ.get("KLT_SKIP_NGSPICE_TESTS") == "1",
-    reason="ngspice is unavailable or disabled by KLT_SKIP_NGSPICE_TESTS=1",
-)
 
 DRC_CLEAN_ENVELOPE = {
     "schema_version": 1,
@@ -7455,7 +7448,7 @@ def test_command_evidence_launch_failure_renders_command_failed(monkeypatch):
     assert item_3["citation"] is None
 
 
-def test_command_evidence_timeout_renders_command_failed(monkeypatch):
+def test_command_evidence_timeout_renders_command_timeout(monkeypatch):
     def fake_run(command, **kwargs):
         raise subprocess.TimeoutExpired(cmd=command, timeout=kwargs.get("timeout"))
 
@@ -7465,7 +7458,7 @@ def test_command_evidence_timeout_renders_command_failed(monkeypatch):
 
     item_3 = next(item for item in result["items"] if item["id"] == 3)
     assert item_3["status"] == "unmet"
-    assert item_3["reason"] == "command_failed"
+    assert item_3["reason"] == "command_timeout"
     assert item_3["citation"] is None
 
 
@@ -13833,6 +13826,7 @@ def test_check_matches_a_report_committed_by_another_provisioning_route(tmp_path
         "drift": [],
         "doc_drift": False,
         "doc_drift_fields": [],
+        "build_skew": result["build_skew"],
         "fresh": fresh,
     }
 
@@ -13942,7 +13936,7 @@ def test_check_refuses_a_missing_or_unparseable_committed_report(tmp_path):
     """Both refusals come from the shared loader -- a clean message, never a
     traceback."""
     manifest = _manifest()
-    with pytest.raises(SignoffError, match="committed report not found"):
+    with pytest.raises(SignoffError, match="file not found"):
         check_tier_report(str(tmp_path / "nope.json"), manifest)
 
     bad = tmp_path / "bad.json"
@@ -14369,29 +14363,6 @@ def test_doc_prose_exclusion_is_path_keyed_not_name_keyed():
     }
 
 
-def test_cli_check_text_output_omits_doc_drift_for_the_other_verbs(capsys):
-    """`render_rerun_drift` is shared with five other verbs' `--rerun`, whose
-    payloads carry no `doc_drift` key -- their output must stay byte-identical
-    to what it was before issue #2526."""
-    render_rerun_drift(
-        {
-            "report": "committed.json",
-            "status": "drifted",
-            "drift": [{"field": "violation_count", "committed": 0, "fresh": 2}],
-        }
-    )
-
-    assert capsys.readouterr().out == (
-        "report: committed.json\n"
-        "status: drifted\n"
-        "\n"
-        "drift:\n"
-        "  violation_count:\n"
-        "      committed: 0\n"
-        "      fresh:     2\n"
-    )
-
-
 # --------------------------------------------------------------------------- #
 # Citing an envelope nested inside a composite report: `"pointer"`
 # (issue #2342)
@@ -14450,12 +14421,12 @@ def test_pointer_resolved_envelope_grades_identically_to_the_same_file_unnested(
     plain_item = next(item for item in plain["items"] if item["id"] == 3)
     pointed_item = next(item for item in pointed["items"] if item["id"] == 3)
 
-    # Same fields, same values -- except `citation.file`, which necessarily
-    # names the document each manifest actually cited.
-    assert set(plain_item["citation"]) == set(pointed_item["citation"])
-    assert {k: v for k, v in plain_item["citation"].items() if k != "file"} == {
-        k: v for k, v in pointed_item["citation"].items() if k != "file"
-    }
+    # Same fields, same values -- except `citation.file` (naming the
+    # document each manifest cited) and `citation.pointer` (#5815: only a
+    # pointed citation records its selector).
+    normalized = dict(pointed_item["citation"], file=plain_item["citation"]["file"])
+    normalized.pop("pointer")
+    assert plain_item["citation"] == normalized
     assert plain_item["status"] == pointed_item["status"] == "met"
 
 

@@ -19,28 +19,19 @@ Two tiers, mirroring `tests/test_sim.py`:
 from __future__ import annotations
 
 import json
-import os
-import shutil
 import sys
 import tempfile
 from pathlib import Path
 
 import pytest
 
+from helpers.tool_probes import SKIP_NO_NGSPICE as _SKIP_NO_NGSPICE
+
 SCRIPTS_DIR = Path(__file__).parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 import gallery_signals as gs  # noqa: E402
 
-#: `KLT_SKIP_NGSPICE_TESTS=1` (local-only, set by `npm run check:ci` -- never
-#: by CI) opts a host with ngspice installed out of this slow tier too; see
-#: `tests/test_extract.py`'s `HAVE_NGSPICE` for the full rationale (issue #1651).
-HAVE_NGSPICE = shutil.which("ngspice") is not None and (
-    os.environ.get("KLT_SKIP_NGSPICE_TESTS") != "1"
-)
-_SKIP_NO_NGSPICE = pytest.mark.skipif(
-    not HAVE_NGSPICE, reason="ngspice is not installed on this machine"
-)
 _SKIP_NO_NETLISTS = pytest.mark.skipif(
     not gs.netlists_available(),
     reason=(
@@ -103,7 +94,7 @@ def test_gf180_cells_get_documented_device_substitution():
         cfg = gs.CELL_CONFIGS[slug]
         if cfg.pdk != "gf180mcu":
             continue
-        body = gs._cell_body_text(cfg)  # noqa: SLF001 -- unit-testing the helper directly
+        body = gs._cell_body_text(cfg)  # -- unit-testing the helper directly
         assert "nfet_05v0" not in body
         assert "pfet_05v0" not in body
         assert "nmos_6p0" in body or "pmos_6p0" in body
@@ -175,7 +166,7 @@ def test_trim_waveform_projects_onto_testbench_pins(tmp_path):
             }
         )
     )
-    trimmed = gs._trim_waveform(str(source), cfg)  # noqa: SLF001 -- unit-testing the helper
+    trimmed = gs._trim_waveform(str(source), cfg)  # -- unit-testing the helper
 
     assert [v["name"] for v in trimmed["variables"]] == ["time", "v(a)", "v(y)"]
     # Re-indexed 0..n-1 so the artifact stays self-consistent.
@@ -186,7 +177,7 @@ def test_trim_waveform_projects_onto_testbench_pins(tmp_path):
 def test_trim_waveform_returns_none_for_unusable_artifact(tmp_path):
     cfg = gs.CELL_CONFIGS["sky130_fd_sc_hd__inv_1"]
     missing = tmp_path / "nope.json"
-    assert gs._trim_waveform(str(missing), cfg) is None  # noqa: SLF001
+    assert gs._trim_waveform(str(missing), cfg) is None
 
     unrelated = tmp_path / "unrelated.json"
     unrelated.write_text(
@@ -198,7 +189,7 @@ def test_trim_waveform_returns_none_for_unusable_artifact(tmp_path):
             }
         )
     )
-    assert gs._trim_waveform(str(unrelated), cfg) is None  # noqa: SLF001
+    assert gs._trim_waveform(str(unrelated), cfg) is None
 
 
 def test_stage_waveforms_writes_nominal_corners_and_drops_artifacts(tmp_path):
@@ -227,7 +218,7 @@ def test_stage_waveforms_writes_nominal_corners_and_drops_artifacts(tmp_path):
         {"corner_id": "tt/1.620V/-40C", "artifacts": {"waveform": str(raw)}},
     ]
     block_dir = tmp_path / "block"
-    gs._stage_waveforms(cfg, corners, str(block_dir))  # noqa: SLF001
+    gs._stage_waveforms(cfg, corners, str(block_dir))
 
     assert corners[0]["waveform"] == f"signals/{nominal_id.replace('/', '_')}.json"
     assert "waveform" not in corners[1]  # a non-nominal corner is not staged
