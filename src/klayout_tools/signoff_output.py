@@ -92,6 +92,27 @@ def non_attest_problem(
     return None
 
 
+def repo_root_problem(
+    repo_root: str | None, manifest_source: str | None, fleet_source: str | None
+) -> str | None:
+    """The refusal message for an invalid ``--repo-root``, else ``None``:
+    envelope aggregation re-hashes no input artifacts, so the flag only
+    applies to ``--manifest``/``--fleet``; and an explicit root that is
+    not an existing directory is refused, never silently ignored --
+    issue #2878: grading that *looks* right while resolving against
+    nothing would be worse than the error."""
+    if repo_root is None:
+        return None
+    if not (manifest_source or fleet_source):
+        return (
+            "--repo-root only applies to --manifest/--fleet (envelope "
+            "aggregation re-hashes no input artifacts)"
+        )
+    if not os.path.isdir(repo_root):
+        return f"--repo-root '{repo_root}' is not an existing directory"
+    return None
+
+
 def write_output_or_message(payload: dict, output: str | None) -> str | None:
     """Write ``payload``'s envelope to ``output`` (issue #5867) and return
     ``None``, or return the error message on ``OSError``; a falsy

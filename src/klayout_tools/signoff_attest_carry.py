@@ -9,7 +9,7 @@ ratchet.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from typing import Any
 
 from .signoff_attest import (
@@ -23,7 +23,6 @@ from .signoff_attest_build import add_require_build_match_argument
 from .signoff_attest_build import flag_problem as _build_match_problem
 from .signoff_attest_drift import SKIPPED_CHECK_KEYS
 from .signoff_attest_stream import build_stream_attestation, check_stream_attestation
-from .signoff_attest_text import documented_suffix
 
 
 def add_skip_local_only_argument(parser: Any) -> None:
@@ -90,19 +89,6 @@ def attest_carrying(
             skipped.append({k: check[k] for k in SKIPPED_CHECK_KEYS if k in check})
     result["skipped_checks"] = skipped
     return result
-
-
-def skip_lines(result: Mapping[str, Any], label: Callable[[Any], str]) -> list[str]:
-    """``[SKIP]`` text lines for a result's ``skipped_checks``."""
-    lines = []
-    for check in result.get("skipped_checks", []):
-        outcome = "pass" if check["passed"] else "fail"
-        lines.append(
-            f"[SKIP] {check['role']} {label(check)}: {' '.join(check['argv'])} "
-            f"(local_only, not run; committed outcome: {outcome})"
-            f"{documented_suffix(check)}"
-        )
-    return lines
 
 
 def compute_attestation(
