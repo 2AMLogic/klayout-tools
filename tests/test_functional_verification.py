@@ -773,7 +773,6 @@ def test_stubbed_run_without_env_echoes_an_empty_mapping(tmp_path, monkeypatch):
     runner = _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
 
     response = run_functional_verification(request_path)
-
     assert runner.test_kwargs["extra_env"] == {}
     assert response["environment"]["env"] == {}
 
