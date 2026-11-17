@@ -1796,6 +1796,24 @@ All eight share one contract:
   (`engine`) is not excluded: swapping engines is a different run. For
   `signoff` the same rule lands on the field *its* reports carry tool
   identity in — the whole `build` block (issue #2249).
+- **A provenance field the fresh run does not emit is `not_compared`, not
+  drift (issue #5866).** A committed report may carry `provenance` keys the
+  re-running `klt` never writes — spliced in by a downstream wrapper
+  (`provenance.gds_sha256`), or emitted by a newer/older version of the
+  tool. Such a key is collected into an additive, optional `not_compared`
+  list of `{field, committed}` entries (dotted field names exactly like
+  `drift[]`'s; emitted only when non-empty, so every existing payload
+  stays byte-identical) and influences neither `status` nor the exit code:
+  only a field both reports actually carry can drift. The rule is
+  deliberately provenance-only and one-directional — a verdict-bearing key
+  missing from the fresh report (`violation_count`, `violations`,
+  `coverage`, …) still drifts, because dropping a verdict-bearing field is
+  exactly the regression the diff exists to catch; a key the *fresh*
+  report grew (schema evolution in the other direction) still drifts; and
+  a fresh report missing its entire `provenance` block still drifts. The
+  `--format text` renderer lists the skipped field names in a
+  `not compared:` block, so a non-zero exit always means "something that
+  could be compared did not match".
 - **`klt signoff` excludes one more surface, and reports it separately**
   (issue #2526): the report's verbatim quotation of the checklist doc — each
   `items[]` entry's `title`/`text`/`notes`, and `source_doc_content_hash`.

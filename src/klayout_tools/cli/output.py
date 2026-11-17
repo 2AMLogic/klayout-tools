@@ -181,6 +181,14 @@ def render_rerun_drift(result: dict) -> None:
     label after the pointer so the drifted file is named without a second
     lookup -- the same "print it only when present" pattern as ``doc_drift``
     above. See :func:`_drift_check_label`.
+
+    Every verb's payload may additionally carry a ``not_compared`` list
+    (issue #5866): provenance fields present in the committed report and
+    absent from the fresh one -- not comparable, so excluded from the
+    verdict. Rendered as field *names* only (the committed value is
+    provenance chatter a gate does not need), so a non-zero exit always
+    means "something that could be compared did not match". Absent key ->
+    byte-identical output, as with ``doc_drift``.
     """
     print(f"report: {result['report']}")
     print(f"status: {result['status']}")
@@ -194,6 +202,12 @@ def render_rerun_drift(result: dict) -> None:
             print(f"  {entry['field']}{_drift_check_label(entry)}:")
             print(f"      committed: {entry['committed']!r}")
             print(f"      fresh:     {entry['fresh']!r}")
+    not_compared = result.get("not_compared") or []
+    if not_compared:
+        print()
+        print("not compared (provenance fields absent from the fresh report):")
+        for entry in not_compared:
+            print(f"  {entry['field']}")
     doc_drift_fields = result.get("doc_drift_fields") or []
     if doc_drift_fields:
         print()
