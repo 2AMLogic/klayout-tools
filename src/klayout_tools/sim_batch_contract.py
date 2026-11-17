@@ -260,6 +260,12 @@ BATCH_MAX_CONCURRENT_CODE = "batch_max_concurrent_jobs_invalid"
 #: request-derived fully-serial upper bound, never a measured runtime.
 JOB_CEILING_BASIS = "conservative_serial_bound"
 
+#: ``environment.remote.job_ceiling``'s ``basis`` when the caller states the
+#: whole-job wall bound via ``request.batch.job_timeout_s`` (issue #5544):
+#: every field of the assessment is then defined by that stated bound, not
+#: by the serial formula (see ``sim_batch_job_timeout.assess_caller_job_timeout``).
+JOB_CEILING_BASIS_CALLER = "caller_job_timeout"
+
 #: Per-invocation timeout for one `aws` CLI call (upload/poll/collect).
 _BATCH_AWS_TIMEOUT_S = 900.0
 

@@ -37,6 +37,7 @@ from .sim_batch_contract_spec import (
 from .sim_batch_contract_worker import (
     _worker_capture_command,
 )
+from .sim_batch_job_timeout import caller_poll_timeout_s
 
 if TYPE_CHECKING:
     pass
@@ -49,6 +50,7 @@ def _build_batch_job_spec(
     corner_count: int,
     timeout_s: float,
     keep_artifacts: bool,
+    job_timeout_s: float | None = None,
     request_dir: str | None = None,
     client_version: str | None = None,
     version_check: str = "enforce",
@@ -91,6 +93,12 @@ def _build_batch_job_spec(
     rewritten worker request uploaded as ``request.json``. ``pdk_variant``
     still comes from ``models.pdk`` -- image selection is unchanged and
     independent of where the model files come from.
+
+    ``job_timeout_s`` (issue #5544) is the caller's stated whole-job wall
+    bound (``request.batch.job_timeout_s``): it **is** ``timeout_seconds``,
+    instead of the fully-serial worst case -- and it applies to every shard
+    of a split run, which all carry the same stated bound. ``timeout_s``
+    keeps its single meaning, the per-unit engine timeout.
     """
     models = remote_request.get("models") or {}
     staged = sim_staging.stage_sim_job(
@@ -144,7 +152,11 @@ def _build_batch_job_spec(
         pdk_root=models.get("pdk_root"),
         cores_per_job=ASSUMED_THREADS_PER_CORNER,
         timeout_seconds=int(
-            math.ceil(_default_batch_job_timeout_s(corner_count, timeout_s))
+            math.ceil(
+                job_timeout_s
+                if job_timeout_s is not None
+                else _default_batch_job_timeout_s(corner_count, timeout_s)
+            )
         ),
         inputs=(
             *(
@@ -184,14 +196,19 @@ def _default_batch_job_timeout_s(
 
 
 def _default_batch_poll_timeout_s(
-    corner_count: int, per_corner_timeout_s: float
+    corner_count: int,
+    per_corner_timeout_s: float,
+    job_timeout_s: float | None = None,
 ) -> float:
     """Default wall-clock budget :func:`poll_status` waits for a terminal
     ``status.json``: the job's own timeout plus
     :data:`_BATCH_PROVISION_SLACK_S` for Spot capacity acquisition, boot,
     and cloud-init (none of which have started when the client begins
-    polling). Overridable via ``request.batch.poll_timeout_s``.
-    """
+    polling). Overridable via ``request.batch.poll_timeout_s``. When the
+    caller states the job's own wall bound (``job_timeout_s``, issue
+    #5544), that bound is the job's timeout and the slack is added to it."""
+    if job_timeout_s is not None:
+        return caller_poll_timeout_s(job_timeout_s)
     return (
         _default_batch_job_timeout_s(corner_count, per_corner_timeout_s)
         + _BATCH_PROVISION_SLACK_S

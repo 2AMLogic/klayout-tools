@@ -986,7 +986,7 @@ field and is tracked with the `analysis_steps[]` equivalent in
 | `batch.region` | string | AWS region passed to both the `aws` CLI and `launch`. Defaults to `$KLT_BATCH_REGION`, else the fleet config's `BATCH_REGION`, else the `aws` CLI's own resolution. |
 | `batch.profile` | string | `aws` CLI **profile name** the submit path runs under — a name, never a credential; the key it resolves to lives in the operator's own AWS config. Defaults to `$KLT_BATCH_PROFILE`, else the fleet config's `BATCH_SUBMIT_PROFILE`, else `"batch-runner-submit"`. |
 | `batch.poll_interval_s` | number | How often `status.json` is re-read. Defaults to `30`. |
-| `batch.poll_timeout_s` | number | Wall-clock budget waiting for a terminal `status.json`. Defaults to the fully-serial worst case (`options.timeout_s × corner count + 120`) plus 1800s of Spot-acquisition/boot slack. On overrun every unit is reported with a `batch_poll_timeout` diagnostic (the job may still be running on the fleet — see "Failure classification" below). |
+| `batch.poll_timeout_s` | number | Wall-clock budget waiting for a terminal `status.json`. Defaults to the fully-serial worst case (`options.timeout_s × corner count + 120`) plus 1800s of Spot-acquisition/boot slack -- or, when `batch.job_timeout_s` states the whole-job wall bound ([#5544](https://github.com/2AMLogic/klayout-tools/issues/5544)), to that stated bound plus the same 1800s. On overrun every unit is reported with a `batch_poll_timeout` diagnostic (the job may still be running on the fleet — see "Failure classification" below). |
 | `batch.interrupted_grace_s` | number ≥ 0 | How long a job may stay **continuously** `interrupted` (Spot-reclaimed, waiting for 2am's scheduled `reconcile` to re-launch it) before polling stops early ([#2992](https://github.com/2AMLogic/klayout-tools/issues/2992)). Defaults to `1800`; `0` disables the fail-fast, so an interrupted job is waited on until `poll_timeout_s`. Seeing `running` again resets the clock; an unreadable `status.json` neither starts nor resets it. On expiry every unit is reported with a `batch_job_interrupted` diagnostic (not `batch_poll_timeout`), and `environment.remote` carries `job_id`, `state: "interrupted"` and `interrupted_s`. The job may still be recoverable on the fleet — the client does not re-launch it (that would double-spend the shared fleet budget). The diagnostic `message` names the recovery command (re-run with the same `-o` and `--resume`; for a shard map, `--attach <batch-shards.json> --collect-partial`, then `--resume`); the run exits 4 when every unit ended this way. A grace longer than `poll_timeout_s` never fires. A negative, non-finite, or non-numeric value is rejected before any S3 write. |
 | `batch.runner_version_check` | `"enforce"` \| `"warn"` | Runner/client `klt` version-skew policy (default `"enforce"`), applied both to the pre-launch check against the AMI manifest's published runner version and to the runner-side preflight; see "Runner/client `klt` version skew" below. Any other value is rejected before any S3 write. |
 | `batch.capacity_wait_s` | number ≥ 0 | Wall-clock budget, per `launch` call, for waiting out a Spot **capacity refusal** or a fleet **concurrency-cap refusal** ([#2721](https://github.com/2AMLogic/klayout-tools/issues/2721)). Per `launch` call for a single job; one run-wide deadline for a sharded run ([#4018](https://github.com/2AMLogic/klayout-tools/issues/4018)). Defaults to `0`: one launch attempt, exactly as before. See "Capacity refusal and `batch_no_capacity`" below. A negative, non-finite, or non-numeric value is rejected before any S3 write. |
@@ -994,6 +994,7 @@ field and is tracked with the `analysis_steps[]` equivalent in
 | `batch.job_ceiling_check` | `"warn"` \| `"enforce"` \| `"split"` | What the one-job pre-submit check does when the job's conservative bound exceeds `max_job_seconds`: `"warn"` (default) submits and warns, `"enforce"` refuses before any S3 write with `error.code: "batch_job_ceiling_exceeded"`, `"split"` ([#3446](https://github.com/2AMLogic/klayout-tools/issues/3446)) submits the request as the fewest balanced jobs that each fit (each holds at most `max_units_per_job = floor((max_job_seconds - 120) / options.timeout_s)` units). A split reports `environment.remote` as a `fleet[]` array (one block per job, even with `remote.hosts: 1`) plus the top-level `job_ids` / `runner_compatibility` roll-ups, so per-job fields must be read from `fleet[]` -- see "Fleet sharding" below. Any other value is rejected before any S3 write. |
 | `batch.max_units_per_job` | integer ≥ 1 | Opt-in cap on the units of one job ([#3446](https://github.com/2AMLogic/klayout-tools/issues/3446)); `--max-units-per-job` overrides it. With `remote.hosts: 1` the request is split into `ceil(units / N)` balanced jobs, even when it would have fit one -- and that split reports `environment.remote.fleet[]` (one block per job) with only the `job_ids` / `runner_compatibility` roll-ups at the top level, so per-job fields must be read from `fleet[]` (see "Fleet sharding" below). The ceiling bound is a fully-serial upper bound, not a runtime estimate, so an explicit cap is honored even when `timeout_s x shard units + 120` exceeds `max_job_seconds` ([#4982](https://github.com/2AMLogic/klayout-tools/issues/4982)); a stderr warning states the bound is a serial upper bound, and the harness still kills a job that actually runs past the ceiling. A request that should be sized automatically should omit the cap and use `job_ceiling_check: "split"` (largest shard `floor((max_job_seconds - 120) / options.timeout_s)`). Rejected before any S3 write with `error.code: "batch_max_units_per_job_invalid"` when not a positive integer, or when combined with `job_ceiling_check: "enforce"`. |
 | `batch.max_concurrent_jobs` | integer ≥ 1 | Opt-in bound on the shard jobs in flight at once for a sharded run (`remote.hosts > 1`, or a split) ([#3914](https://github.com/2AMLogic/klayout-tools/issues/3914)); `--max-concurrent-jobs` overrides it. Unset submits every shard at once, as before. With a cap of K, at most K jobs sit between submit and collected; the remaining shards start as earlier ones finish, and the merge order, `fleet[]`, `batch-shards.json` and `--resume` are unchanged. The effective value is echoed as `environment.remote.max_concurrent_jobs` only when set. Use it to stay under the fleet's instance cap (`BATCH_MAX_CONCURRENT_INSTANCES`) instead of letting refused shards come back as `lost_shard`; it composes with `capacity_wait_s` (a retry of a refused launch, drawing on the run-wide budget) and with `--resume`, which re-submits only the `lost_shard` / failed units. Rejected before any S3 write with `error.code: "batch_max_concurrent_jobs_invalid"` when not a positive integer. |
+| `batch.job_timeout_s` | number > 0 | The caller's stated **whole-job wall bound** for one batch job ([#5544](https://github.com/2AMLogic/klayout-tools/issues/5544)). A job's units run **concurrently** on the job instance, so covering per-unit contention means raising `options.timeout_s` -- and the serial bound formula (`options.timeout_s x units + 120`) then multiplies that inflated number by the unit count again. This key breaks that coupling: it replaces the serial bound everywhere it is used -- `job.json`'s `timeout_seconds` (the harness still clamps *down* to the fleet's ceiling, never up), the pre-submit ceiling assessment (`environment.remote.job_ceiling` then reports `basis: "caller_job_timeout"`; every field is defined by the stated bound -- see the field table in "Three budgets, and the fleet's whole-job ceiling"), and the default `batch.poll_timeout_s`. `options.timeout_s` keeps its single meaning, the per-unit engine timeout, and every shard of a split run carries the same stated bound. A stated bound that exceeds `max_job_seconds` behaves like any over-ceiling request (warn, or refuse under `"enforce"` / `"split"` -- splitting cannot help, because every shard would carry the same over-ceiling bound), and the warning names `batch.job_timeout_s` as the value to lower. **The trade-off is the bound's honesty**: a stated bound that turns out too low kills the whole job at that age, and units that had finished inside it are lost with it, exactly like a fleet-ceiling kill -- state the wall you actually want the job killed at. Rejected before any S3 write when not a positive, finite number (a `bool` is refused). Unset, everything is sized from the serial bound exactly as before. |
 
 ### Asynchronous submit and status (`--submit-only`, `--job-status`, [#3073](https://github.com/2AMLogic/klayout-tools/issues/3073))
 
@@ -1711,6 +1712,53 @@ the value 2am's harness falls back to when the instance's `MaxJobSeconds`
 tag is absent). `warning` is present only when `exceeds_ceiling` is `true`.
 `recommended_hosts` is `null` when no `hosts` value fits.
 
+**Stating the bound: `batch.job_timeout_s`**
+([#5544](https://github.com/2AMLogic/klayout-tools/issues/5544)). The serial
+bound is derived from the request, but a job's units run concurrently on the
+job instance, so a caller covering per-unit contention has to raise
+`options.timeout_s` -- and the serial formula multiplies that inflated
+number by the unit count again. Set `batch.job_timeout_s` to state one job's
+wall bound directly; `options.timeout_s` keeps its single meaning, the
+per-unit engine timeout. The stated bound replaces the serial one everywhere
+it is used: `job.json`'s `timeout_seconds` (its ceiling; the harness still
+clamps down, never up), the pre-submit check, and the default
+`batch.poll_timeout_s` (the stated bound plus the same 1800 s slack). Every
+shard of a split run carries the same stated bound.
+
+The assessment is then reported with `basis: "caller_job_timeout"` and
+every field defined by the stated bound, which is unit-count-independent:
+
+| Field | Value when `batch.job_timeout_s` is set |
+| --- | --- |
+| `basis` | `"caller_job_timeout"` |
+| `job_bound_s` | the stated `batch.job_timeout_s` |
+| `per_unit_timeout_s` | unchanged: `options.timeout_s`, the per-unit engine timeout |
+| `overhead_s` | `0` (the stated bound includes whatever slack the caller chose) |
+| `unit_count`, `max_job_seconds`, `max_job_seconds_source`, `check`, `exceeds_ceiling` | unchanged in meaning; `exceeds_ceiling` is `job_bound_s > max_job_seconds` (equal passes) |
+| `max_units_per_job` | `unit_count` when the bound fits, `0` when it exceeds -- every shard carries the same stated bound, so the largest fitting shard is the whole run |
+| `recommended_hosts` | `1` when the bound fits, `null` when it exceeds (no `hosts` value changes a per-job bound) |
+| `warning` | present only when `exceeds_ceiling`; names `batch.job_timeout_s` as the value to lower -- never more hosts, never a lower `options.timeout_s` |
+| `split`, `effective_hosts` | unchanged: added whenever a split mode is active |
+
+Behavior under the check modes follows the same rules as the serial bound,
+with two consequences worth spelling out. When the stated bound fits, the
+request is one job with no warning under `"warn"`, `"enforce"` and `"split"`
+alike, and an explicit `batch.max_units_per_job` still balances it into
+`ceil(units / N)` shards -- each carrying the stated timeout, and no
+over-serial-bound warning (that warning's "lower `options.timeout_s`" advice
+is wrong once the caller stated a bound). When the stated bound exceeds the
+ceiling, `"warn"` submits with a warning, while `"enforce"` and `"split"`
+both refuse with `batch_job_ceiling_exceeded` before any S3 write:
+splitting cannot help, because every shard would carry the same
+over-ceiling bound. A cap combined with `"enforce"` is still rejected with
+`batch_max_units_per_job_invalid`, as always.
+
+**The trade-off is the bound's honesty.** A stated bound that turns out too
+low kills the whole job at that age, and units that had already finished are
+lost with it, exactly like a fleet-ceiling kill (the harness never writes an
+incremental report). State the wall you actually want the job killed at --
+the point of the key is an honest kill age, not a bigger one.
+
 **The mitigation is the existing shard path.** Worked example: the report
 in #2833 had 63 corners at the default `options.timeout_s: 120`, so the bound
 is `120 × 63 + 120 = 7680 s`, above `3600 s`. At most
@@ -1746,10 +1794,16 @@ with the same report shape as `remote.hosts: <that many>`, and prints
 3 jobs of 21 units. A request that already fits stays one job unless a smaller
 cap is given. Splitting is never silent: each extra job is one more launch
 against the fleet's shared concurrency cap, which is why it is opt-in and
-the default stays `"warn"`. A cap that would leave a job over the ceiling is
-rejected up front (`batch_max_units_per_job_invalid`), and when even one unit
-exceeds the ceiling the "lower `options.timeout_s`" refusal applies
-(`batch_job_ceiling_exceeded`), because splitting cannot help. When a split
+the default stays `"warn"`. An explicit cap is honored even when it leaves
+jobs over the serial bound, with the stderr warning above
+([#4982](https://github.com/2AMLogic/klayout-tools/issues/4982));
+`batch_max_units_per_job_invalid` is raised only by the cap validator
+itself -- when the cap is not a positive integer, or when it is combined
+with `job_ceiling_check: "enforce"`. When even one unit's serial bound
+exceeds the ceiling -- or a stated `batch.job_timeout_s`
+([#5544](https://github.com/2AMLogic/klayout-tools/issues/5544)) does -- the
+"lower it" refusal applies (`batch_job_ceiling_exceeded`), because splitting
+cannot help. When a split
 mode is active, `environment.remote.job_ceiling` gains `split` (boolean) and
 `effective_hosts`; the report otherwise carries the `fleet[]` array -- and
 the top-level `job_ids` / `runner_compatibility` roll-ups -- of a

@@ -264,6 +264,12 @@ from .sim_batch_contract_worker import (  # noqa: F401
     assess_par_backend_support,
     par_backend_preflight_lines,
 )
+from .sim_batch_job_timeout import (
+    _resolve_job_ceiling_check,
+    _resolve_max_units_per_job,
+    assess_caller_job_timeout,
+    resolve_job_timeout_s,
+)
 
 # --------------------------------------------------------------------------- #
 # Configuration resolution (nothing secret, nothing hardcoded)
@@ -303,6 +309,10 @@ class BatchConfig:
     #: ``request.batch.max_concurrent_jobs`` (issue #3914): opt-in bound on
     #: the shard jobs in flight at once; ``None`` submits every shard at once.
     max_concurrent_jobs: int | None = None
+    #: ``request.batch.job_timeout_s`` (issue #5544): the caller's stated
+    #: wall bound for one job; ``None`` -- the default -- keeps the
+    #: fully-serial upper bound.
+    job_timeout_s: float | None = None
     #: ``request.batch.interrupted_grace_s`` (issue #2992); ``0`` disables.
     interrupted_grace_s: float = DEFAULT_INTERRUPTED_GRACE_S
     #: Pre-launch ``warn`` diagnostic for request features the manifest's
@@ -669,6 +679,7 @@ def _resolve_batch_config(
     job_ceiling_check = _resolve_job_ceiling_check(batch_spec)
     max_units_per_job = _resolve_max_units_per_job(batch_spec, job_ceiling_check)
     max_concurrent_jobs = _resolve_max_concurrent_jobs(batch_spec)
+    job_timeout_s = resolve_job_timeout_s(batch_spec)
     config = BatchConfig(
         provision_script=provision_script,
         bucket=bucket,
@@ -695,7 +706,9 @@ def _resolve_batch_config(
         poll_timeout_s=float(
             batch_spec.get(
                 "poll_timeout_s",
-                _default_batch_poll_timeout_s(corner_count, timeout_s),
+                _default_batch_poll_timeout_s(
+                    corner_count, timeout_s, job_timeout_s=job_timeout_s
+                ),
             )
         ),
         capacity_wait_s=capacity_wait_s,
@@ -705,6 +718,7 @@ def _resolve_batch_config(
         job_ceiling_check=job_ceiling_check,
         max_units_per_job=max_units_per_job,
         max_concurrent_jobs=max_concurrent_jobs,
+        job_timeout_s=job_timeout_s,
         interrupted_grace_s=_resolve_interrupted_grace_s(batch_spec),
     )
     # Issue #2851: compare the runner klt the AMI manifest publishes with
@@ -983,22 +997,6 @@ def _resolve_max_job_seconds(
     return DEFAULT_BATCH_MAX_JOB_SECONDS, "default"
 
 
-def _resolve_job_ceiling_check(batch_spec: dict[str, Any]) -> str:
-    """``request.batch.job_ceiling_check``: ``"warn"`` (default),
-    ``"enforce"`` or ``"split"`` (issue #3446), else
-    :class:`~klayout_tools.sim.SimError` before any S3 write (issue #2833)."""
-    from .sim import SimError
-
-    value = batch_spec.get("job_ceiling_check", "warn")
-    if value not in JOB_CEILING_CHECK_MODES:
-        raise SimError(
-            "request.batch.job_ceiling_check must be one of "
-            f"{', '.join(repr(m) for m in JOB_CEILING_CHECK_MODES)} "
-            f"(got {value!r})"
-        )
-    return value
-
-
 def _resolve_max_concurrent_jobs(batch_spec: dict[str, Any]) -> int | None:
     """``request.batch.max_concurrent_jobs`` (issue #3914): a positive integer
     bound on the shard jobs in flight at once, else
@@ -1013,35 +1011,6 @@ def _resolve_max_concurrent_jobs(batch_spec: dict[str, Any]) -> int | None:
             "request.batch.max_concurrent_jobs must be a positive integer "
             f"(got {value!r})",
             code=BATCH_MAX_CONCURRENT_CODE,
-        )
-    return value
-
-
-def _resolve_max_units_per_job(
-    batch_spec: dict[str, Any], job_ceiling_check: str
-) -> int | None:
-    """``request.batch.max_units_per_job`` (issue #3446): a positive integer
-    cap on the units of one job, which opts the request into splitting; else
-    :class:`~klayout_tools.sim.SimError` before any S3 write. Combining it
-    with ``job_ceiling_check: "enforce"`` is contradictory (one refuses an
-    over-ceiling request, the other splits it) and is refused."""
-    from .sim import SimError
-
-    value = batch_spec.get("max_units_per_job")
-    if value is None:
-        return None
-    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
-        raise SimError(
-            "request.batch.max_units_per_job must be a positive integer "
-            f"(got {value!r})",
-            code=BATCH_MAX_UNITS_CODE,
-        )
-    if job_ceiling_check == "enforce":
-        raise SimError(
-            "request.batch.max_units_per_job splits an over-ceiling request "
-            'and cannot be combined with job_ceiling_check "enforce", which '
-            'refuses it; use "warn" or "split"',
-            code=BATCH_MAX_UNITS_CODE,
         )
     return value
 
@@ -1102,7 +1071,17 @@ def _assess_job_ceiling(
     ``ceil(units / hosts)`` -- fits it, or ``None`` when no ``hosts`` value
     can (lower ``options.timeout_s`` instead). When the bound exceeds the
     ceiling the result carries a human-readable ``warning``.
+
+    ``config.job_timeout_s`` (issue #5544) replaces the whole assessment:
+    :func:`sim_batch_job_timeout.assess_caller_job_timeout` defines every
+    field from the caller's stated bound instead of this serial formula.
     """
+    if getattr(config, "job_timeout_s", None) is not None:
+        return assess_caller_job_timeout(
+            unit_count=unit_count,
+            per_unit_timeout_s=per_unit_timeout_s,
+            config=config,
+        )
     units = max(1, unit_count)
     ceiling = config.max_job_seconds
     bound = _default_batch_job_timeout_s(units, per_unit_timeout_s)
@@ -2835,6 +2814,7 @@ def _prepare_batch_job_spec(
         netlist_path,
         corner_count=corner_count,
         timeout_s=timeout_s,
+        job_timeout_s=config.job_timeout_s,
         keep_artifacts=keep_artifacts,
         request_dir=request_dir,
         version_check=config.runner_version_check,

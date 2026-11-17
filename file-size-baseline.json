@@ -593,7 +593,7 @@
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
-      "lines": 4454
+      "lines": 4434
     },
     {
       "path": "src/klayout_tools/sim_commands.py",
