@@ -32,6 +32,7 @@ from klayout_tools import signoff as signoff_module
 from klayout_tools import signoff_attest as attest_module
 from klayout_tools._provenance import layout_geometry_digest
 from klayout_tools._report_verify import strip_path_patterns
+from klayout_tools.build_identity import grading_ruleset_id
 from klayout_tools.cli import main
 from klayout_tools.coverage import build_check_coverage
 from klayout_tools.design_evidence_tiers import (
@@ -13786,7 +13787,10 @@ def test_cli_manifest_text_names_an_unverified_input_artifact(tmp_path, capsys):
 #: `is_release: null` identity. Nothing about `dirty` can collapse this case
 #: -- the facts were never present to record -- which is why the report-side
 #: exclusion, not a `dirty` fix alone, is what makes a committed report
-#: comparable across provisioning routes.
+#: comparable across provisioning routes. The grading id is sourced from the
+#: running build: the same commit ships the same grading code (issue #2216),
+#: so a hard-coded placeholder here would read as a *different* ruleset to
+#: `build_skew` (issue #6016).
 _TARBALL_ROUTE_BUILD_BLOCK = {
     "version": "0.5.0+unknown",
     "package_version": "0.5.0",
@@ -13794,7 +13798,7 @@ _TARBALL_ROUTE_BUILD_BLOCK = {
     "git_tag": None,
     "dirty": None,
     "is_release": None,
-    "grading_ruleset_id": "sha256:whatever-this-install-reads",
+    "grading_ruleset_id": grading_ruleset_id(),
 }
 
 
@@ -13819,8 +13823,14 @@ def test_check_matches_a_report_committed_by_another_provisioning_route(tmp_path
 
     # The premise: these two files are NOT byte-identical, so the documented
     # "re-render and byte-compare" gate would fail between them.
+    committed_build = json.loads(Path(committed_path).read_text())["build"]
     assert json.loads(Path(committed_path).read_text()) != fresh
-    assert json.loads(Path(committed_path).read_text())["build"] != fresh["build"]
+    assert committed_build != fresh["build"]
+    # ...but the grading id is the one build field that must agree: an
+    # install of the same commit ships the same grading code (issue #2216),
+    # whatever route provisioned it. Its disagreement would make `build_skew`
+    # report "ruleset" below, not the "build_only" this fixture represents.
+    assert committed_build["grading_ruleset_id"] == fresh["build"]["grading_ruleset_id"]
 
     result = check_tier_report(committed_path, manifest)
 
@@ -13832,7 +13842,18 @@ def test_check_matches_a_report_committed_by_another_provisioning_route(tmp_path
         "drift": [],
         "doc_drift": False,
         "doc_drift_fields": [],
-        "build_skew": result["build_skew"],
+        "build_skew": {
+            "state": "build_only",
+            "fields": [
+                {
+                    "field": f"build.{name}",
+                    "committed": _TARBALL_ROUTE_BUILD_BLOCK[name],
+                    "fresh": fresh["build"][name],
+                }
+                for name in sorted(_TARBALL_ROUTE_BUILD_BLOCK)
+                if _TARBALL_ROUTE_BUILD_BLOCK[name] != fresh["build"][name]
+            ],
+        },
         "fresh": fresh,
     }
 
