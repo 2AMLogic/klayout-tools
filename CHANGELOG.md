@@ -14,6 +14,17 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt gen mos_array --mos_cap` on gf180mcu now draws DRC-clean MOS
+  capacitors (`DF.1c`)** (#6170, 2026-11-17). The `MOS_CAP_MK` marker covered
+  the array's whole `voltage_flavor` margin box, which reached the 0.42 um
+  guard-ring `COMP` and made every array report four ring-wide
+  `comp.width.moscap.1` violations; it now covers only the unit devices (the
+  device `COMP` itself was already >= 1 um at `w_um` >= 1.0). Because the
+  channel is `w_um` wide, no S/D geometry can pass a 1 um width rule below
+  that, so `mos_cap` now rejects `w_um` < 1.0 with a `GenError` naming
+  `comp.width.moscap.1` (previously 0.22 um LV / 0.30 um MV were accepted and
+  emitted a violating device). Non-`mos_cap` output is unchanged. No JSON field
+  added or removed; `schema_version` unchanged.
 - **`klt drc` gf180mcu deck: `DF.1c` (MOSCAP COMP min width) is now checked,
   and `comp.width.mv.1` exempts `MVSD`/`MVPSD`-marked LDMOS drains** (#5719,
   2026-11-17). New rule `comp.width.moscap.1` (`DF.1c`, 1.0 um,
@@ -35,9 +46,9 @@ not `klt --version`, if you need to detect this kind of drift. See
   `docs/cli/drc.md`'s corrected waiver guidance; `DF.6_MV`/`PL.4_MV` remain
   disclosed unmodeled), and `DF.1c` flags the same narrow MOSCAP fixture both
   engines report. A consequence for `klt gen mos_array`: its MOSCAP-marked
-  devices now report the genuine `comp.width.moscap.1` finding (the native
-  deck flags the same shapes) — the generator cannot yet draw a MOSCAP that
-  passes it (#6170). No JSON field added or removed; `schema_version` unchanged.
+  devices reported the genuine `comp.width.moscap.1` finding (the native
+  deck flags the same shapes) until the generator fix below (#6170). No JSON
+  field added or removed; `schema_version` unchanged.
 
 
 - **Fixed** (#5664, `klt lvs` `--engine klayout-runset`; no JSON field

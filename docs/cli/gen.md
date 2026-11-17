@@ -798,11 +798,16 @@ tie is the guard ring's `TAP_*` ports, so `mos_cap` **requires
 `add_guard_ring: true`** and does not support `gate_contact`.
 `finger_topology` is ignored. The width floor is **not** the flat `0.42`
 µm of a plain transistor: it is the deck's own COMP min-width rule for the
-selected oxide (`comp.width.1` = 0.22 µm thin oxide, `comp.width.mv.1` = 0.30
-µm with `voltage_flavor: "medium_voltage"` on `gf180mcu`), and a `w_um` below
-it is rejected with an error naming the rule. Below the contact-plus-
-enclosure width each S/D segment grows a diffusion landing bump above the
-channel (channel width stays `w_um`) and the gate landing pad is lifted
+selected oxide *or* under the capacitor marker, whichever is larger. On
+`gf180mcu` that is `comp.width.moscap.1` (`DF.1c`) = 1.0 µm (above
+`comp.width.1` = 0.22 µm thin oxide and `comp.width.mv.1` = 0.30 µm with
+`voltage_flavor: "medium_voltage"`), and a `w_um` below it is rejected with an
+error naming the rule (issue #6170: the channel is `w_um` wide, so no S/D
+geometry can pass a 1 µm width rule below that). The marker covers the unit
+devices only, not the 0.42 µm guard ring. A `w_um` below the
+contact-plus-enclosure width (reachable only on a family whose floor is lower
+than that) grows a diffusion landing bump above the channel on each S/D
+segment (channel width stays `w_um`) and lifts the gate landing pad
 clear of it. A PDK family with no MOS-capacitor marker (everything but
 `gf180mcu` today) is rejected with a `GenError`. Plain `mos_array`
 (`mos_cap: false`, the default) is unchanged. `klt extract` does not yet
