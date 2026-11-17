@@ -17,7 +17,9 @@
       "modules": [
         "klayout_tools.artifact_objects",
         "klayout_tools.artifact_verify",
-        "klayout_tools.cli.artifact_cmd"
+        "klayout_tools.artifact_verify_local",
+        "klayout_tools.cli.artifact_cmd",
+        "klayout_tools.cli.parser_artifact"
       ]
     },
     "cells": {
