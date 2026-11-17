@@ -59,12 +59,10 @@ from ..pdk import (
 )
 from ..pdk_cells import list_cell_libraries
 from ..pdk_compat import compatibility_warning
+from ..pdk_descriptor import ASSET_KEYS
 from ..pdk_pcell import PdkPCellError, list_pdk_pcells
 from ..pdk_stackup import PdkStackupError, stackup
 from .output import emit_error, emit_success, render_table
-
-#: Stable order for rendering the ``assets`` object in text output.
-_ASSET_KEYS = ("ngspice", "xschem", "klayout", "magic", "netgen", "libs_ref")
 
 #: `klt pdk cells --supply` exit code when no library is compatible (ran
 #: fine, just no match) -- distinct from 1 (PdkNotFoundError) and 2 (argparse
@@ -254,7 +252,7 @@ def _print_find_text(report: dict) -> None:
         )
     print("assets:")
     assets = report["assets"]
-    for key in _ASSET_KEYS:
+    for key in ASSET_KEYS:
         value = assets.get(key)
         print(f"  {key}: {value if value is not None else '-'}")
     broken = report.get("broken_symlinks", [])
