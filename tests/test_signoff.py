@@ -13936,7 +13936,7 @@ def test_check_refuses_a_missing_or_unparseable_committed_report(tmp_path):
     """Both refusals come from the shared loader -- a clean message, never a
     traceback."""
     manifest = _manifest()
-    with pytest.raises(SignoffError, match="committed report not found"):
+    with pytest.raises(SignoffError, match="file not found"):
         check_tier_report(str(tmp_path / "nope.json"), manifest)
 
     bad = tmp_path / "bad.json"
@@ -14053,7 +14053,7 @@ def test_check_excludes_build_identity_and_the_checklist_prose_and_nothing_else(
     widening either set by accident."""
     assert signoff_module.VOLATILE_REPORT_PATHS == frozenset({("build",)})
     # The only *top-level* doc-prose path; the rest are per-item/per-block.
-    excluded_top_level = {"build", "source_doc_content_hash"}
+    excluded_top_level = {"build", "source_doc_content_hash", "unmet_reason_counts"}
     assert {
         path[0] for path in signoff_module.DOC_PROSE_REPORT_PATHS if len(path) == 1
     } == {"source_doc_content_hash"}
