@@ -6288,13 +6288,13 @@ def _stripped_report(report: dict) -> dict:
     compared for byte-identical equality (see docs/cli/sim.md's
     byte-exact-fixture caveat)."""
     clone = json.loads(json.dumps(report))
-    clone["environment"].pop("engine_version", None)
     # `environment.backend.source` (issue #2977) records how the backend was
     # chosen (flag/request/default), which differs by design between runs
     # that otherwise execute identically.
     clone["environment"].pop("backend", None)
-    # Issue #2970: legitimately differs between `local` and `local-parallel`.
-    clone["environment"].pop("threads_per_worker", None)
+    # Issues #2970/#5648: thread pin + its `.spiceinit` differ by backend.
+    for key in ("engine_version", "threads_per_worker", "ngspice_init"):
+        clone["environment"].pop(key, None)
     for corner in clone["corners"]:
         corner.pop("runtime_s", None)
     return clone
@@ -12024,9 +12024,8 @@ def test_run_sim_runner_resolved_osdi_preload_goes_offhost_unchecked(
     assert seen["request_dir"] == str(tmp_path)
     environment = report["environment"]
     assert "osdi_preload" not in environment  # nothing hashed on this host
-    assert environment["osdi_preload_runner_resolved"] == [
-        {"entry": entry, "reason": "env_var"}
-    ]
+    expected = {"entry": entry, "index": 0, "reason": "env_var", "sha256": None}
+    assert environment["osdi_preload_runner_resolved"] == [expected]
 
 
 def test_run_sim_osdi_preload_under_models_pdk_root_goes_offhost(tmp_path, monkeypatch):
@@ -12047,9 +12046,8 @@ def test_run_sim_osdi_preload_under_models_pdk_root_goes_offhost(tmp_path, monke
 
     report = sim.run_sim(str(request), backend="batch")
 
-    assert report["environment"]["osdi_preload_runner_resolved"] == [
-        {"entry": entry, "reason": "pdk_root"}
-    ]
+    expected = {"entry": entry, "index": 0, "reason": "pdk_root", "sha256": None}
+    assert report["environment"]["osdi_preload_runner_resolved"] == [expected]
 
 
 def test_run_sim_runner_resolved_osdi_keeps_a_host_default_batch_backend(
