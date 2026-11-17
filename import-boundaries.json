@@ -578,6 +578,7 @@
         "klayout_tools.place_and_route",
         "klayout_tools.place_and_route_clock",
         "klayout_tools.place_and_route_batch",
+        "klayout_tools.place_and_route_def_drcfill",
         "klayout_tools.place_and_route_gds_merge",
         "klayout_tools.place_and_route_groups",
         "klayout_tools.place_and_route_hints",
@@ -725,6 +726,7 @@
         "klayout_tools.signoff_attest_text",
         "klayout_tools.signoff_derived_rows",
         "klayout_tools.signoff_details",
+        "klayout_tools.signoff_drc_crosscheck",
         "klayout_tools.signoff_envelopes",
         "klayout_tools.signoff_evidence_pin",
         "klayout_tools.signoff_fleet",
@@ -740,7 +742,7 @@
         "klayout_tools.signoff_power_delivery_substrate",
         "klayout_tools.signoff_runset",
         "klayout_tools.signoff_sta_constraints",
-        "klayout_tools.signoff_yield"
+        "klayout_tools.signoff_yield_disclosure"
       ]
     },
     "sim": {

@@ -1,18 +1,8 @@
-"""The `klt yield` campaign-discipline disclosure block (issue #2467).
-
-The three envelope-reading helpers here quote a cited yield report's own
-statements about whether its numbers can support a claim -- per-measurement
-``sample_size`` verdicts and ``negative_control`` state, rolled up across
-``measurements[]`` -- verbatim, never re-derived: `klt yield` computes both
-(``docs/cli/yield.md``'s "Sample-size verdict" and "Negative control"), and
-re-deriving either here would let this module and the producer disagree
-about the same campaign. They lived in ``signoff.py`` until issue #5786
-moved them out for that file's size-ratchet ceiling, unchanged.
-
-``graded_entry_campaign`` (issue #5786) copies the block onto a
-multi-citation item's ``citations_graded`` entry, so a multi-citation item
-6 discloses each cited campaign the same way the single-citation form does.
-"""
+"""The `klt yield` campaign-disclosure rollups (issue #2467), split out of
+`signoff.py` for its size-ratchet ceiling (issue #5815) -- the #2313
+`signoff_envelopes.py` precedent: pure functions over a report dict,
+importing nothing from the module they were split out of, re-imported there
+by name so `signoff.<name>` keeps resolving."""
 
 from __future__ import annotations
 
@@ -169,20 +159,3 @@ def _yield_negative_control_rollup(
     if detected:
         return "detected", without_control, undetected, not_applicable
     return "not_declared", without_control, undetected, not_applicable
-
-
-def graded_entry_campaign(citation: dict[str, Any] | None) -> dict[str, Any]:
-    """The ``yield_campaign`` block a multi-citation item's
-    ``citations_graded`` entry carries (issue #5786) -- the member citation's
-    own block, or ``{}`` when there is none to carry.
-
-    Copied off the citation :func:`signoff._citation` already built, never
-    re-derived: re-reading the envelope here would let an entry and the
-    citation it sits beside describe different states of the same report.
-    ``{}`` -- key absent -- for a non-``yield`` member, a report with no
-    measurements, and an unmet member (whose citation is not retained), so
-    every pre-#5786 output is unchanged.
-    """
-    if citation and "yield_campaign" in citation:
-        return {"yield_campaign": citation["yield_campaign"]}
-    return {}

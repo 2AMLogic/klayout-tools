@@ -93,6 +93,11 @@ from .signoff_derived_rows import (
 # `X as X` form marks the ones with no call site left in this module as
 # deliberate re-exports rather than dead imports.
 from .signoff_details import _DETAIL_BUILDERS
+
+# The `drc --engine both` (cross-check) envelope projection (issue #5815):
+# rewriting the cross-check shape into the single-engine `drc` envelope the
+# existing grading rules read, at the ingestion boundary.
+from .signoff_drc_crosscheck import crosscheck_disclosure, crosscheck_project
 from .signoff_envelopes import (
     _ENVELOPE_SHAPES,
     _SCALAR_CHECKS,
@@ -213,12 +218,16 @@ from .signoff_sta_constraints import (
     sta_constraint_refusal,
 )
 
-# The `klt yield` campaign-discipline disclosure block (issue #2467): pure
-# envelope-reading helpers quoting a cited report's own sample-size and
-# negative-control state, plus the copy of that block a multi-citation
-# item's `citations_graded` entry carries (issue #5786). Kept out of this
-# file for its size-ratchet ceiling, same split precedent as `signoff_na`.
-from .signoff_yield import _yield_campaign_disclosure, graded_entry_campaign
+# The `klt yield` campaign-disclosure rollups (issue #2467), split out of
+# this file for its size-ratchet ceiling (issue #5815) and re-imported by
+# name so `signoff.<name>` keeps resolving; `X as X` marks deliberate re-exports.
+from .signoff_yield_disclosure import _yield_campaign_disclosure, graded_entry_campaign
+from .signoff_yield_disclosure import (
+    _yield_negative_control_rollup as _yield_negative_control_rollup,
+)
+from .signoff_yield_disclosure import (
+    _yield_sample_size_rollup as _yield_sample_size_rollup,
+)
 
 __all__ = [
     "SignoffError",
@@ -1768,6 +1777,10 @@ def build_signoff(sources: list[str]) -> dict[str, Any]:
         # the envelope against that kind's declared shape, so the cast below
         # is backed by a runtime check -- not an assertion about unvalidated
         # JSON.
+        # Issue #5815: an `--engine both` (cross-check) envelope is projected
+        # to its single-engine-equivalent `drc` envelope before
+        # classification, so aggregation reads the shape `--check` reads.
+        envelope = crosscheck_project(envelope) or envelope
         kind = _classify(envelope, source)
         checks.append(_build_check(kind, cast(_EvidenceEnvelope, envelope), source))
 
@@ -6377,6 +6390,11 @@ def _resolve_evidence(
     if envelope is None:
         return None, envelope_reason
 
+    # Issue #5815: *after* pointer resolution, so a `pointer` selecting one
+    # side of a cross-check envelope keeps grading as that standalone report
+    # while a whole-envelope citation gets the both-engines verdict.
+    envelope = crosscheck_project(envelope) or envelope
+
     try:
         check_kind = _classify(envelope, source_label)
     except SignoffError as exc:
@@ -6441,6 +6459,15 @@ def _resolve_evidence(
     )
 
 
+def _citation_pointer(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """The RFC 6901 ``pointer`` the evidence entry carried, as a citation
+    fragment (issue #5815) -- ``{}`` (a no-op update) when it named none, so
+    a citation of *part* of a composite document is distinguishable in the
+    JSON from a whole-envelope citation of the same file."""
+    pointer = spec.get("pointer")
+    return {"pointer": pointer} if pointer is not None else {}
+
+
 def _citation(resolution: dict[str, Any]) -> dict[str, Any]:
     """Build a ``"met"`` item's ``citation`` block from a
     :func:`_resolve_evidence` resolution -- see :func:`build_tier_report`'s
@@ -6460,6 +6487,9 @@ def _citation(resolution: dict[str, Any]) -> dict[str, Any]:
         "input_verified": resolution.get("input_verified"),
         "exit_status": resolution["exit_status"],
     }
+    # Issue #5815: the RFC 6901 `pointer` the evidence entry carried, when
+    # it carried one -- additive, never a grading input.
+    citation.update(_citation_pointer(resolution["spec"]))
     if resolution.get("content_hash_basis") is not None:
         # Issue #4893: `content_hash` is a re-hash of the cited evidence file
         # itself, not a design input.
@@ -6486,6 +6516,12 @@ def _citation(resolution: dict[str, Any]) -> dict[str, Any]:
     coverage = _drc_coverage_disclosure(resolution["kind"], resolution["envelope"])
     if coverage is not None:
         citation["coverage"] = coverage
+    # Issue #5815: a cross-check (`--engine both`) citation discloses what
+    # was actually graded -- each engine's own status, the comparison
+    # state, each side's coverage fields. Disclosure only, like every other
+    # key added here; `None` (a no-op update) for every non-cross-check
+    # envelope.
+    citation.update(crosscheck_disclosure(resolution["envelope"]) or {})
     # Issue #1983: a `pex` citation also carries the cited envelope's own
     # body-bias statement -- item 7's verdict and the one property that can
     # silently invalidate the numbers backing it end up in the same
@@ -6998,13 +7034,7 @@ def _grade_multi_citation(
                 **({"rows": rows} if rows else {}),
                 "status": g[0],
                 "reason": g[1],
-                # Issue #5786: a member that resolved to a `yield` citation
-                # carries that citation's own `yield_campaign` block --
-                # copied, never re-derived -- beside its grade, so a
-                # multi-citation item 6 is as self-describing as the
-                # single-citation form. Absent for every other kind, a
-                # report with no measurements, and an unmet member (no
-                # retained citation).
+                # Issue #5786: carries the member citation's own `yield_campaign`.
                 **graded_entry_campaign(g[2]),
             }
             for spec, rows, g in graded
