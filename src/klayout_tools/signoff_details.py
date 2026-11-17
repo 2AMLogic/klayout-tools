@@ -158,33 +158,6 @@ _DETAIL_BUILDERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
 _COVERAGE_PREVIEW = 4
 
 
-def _format_coverage(coverage: dict) -> str:
-    """One line summarising a `drc` citation's three disclosed `coverage`
-    fields (issue #2002): each field's entry count, plus the first few
-    entries by name.
-
-    Counts first so a non-zero gap is visible without reading the names, and
-    every field is always shown -- including a `0` -- because "this deck
-    skipped no rules" is exactly the statement item 3 asks a claim to make,
-    and it must not be indistinguishable from a field that went unreported
-    (an envelope with no `coverage` block at all prints no coverage line at
-    all; see the call site).
-    """
-    parts = []
-    for field in (
-        "layers_in_stream_without_rules",
-        "rules_skipped",
-        "deck_scope",
-    ):
-        entries = coverage.get(field) or []
-        shown = ", ".join(str(entry) for entry in entries[:_COVERAGE_PREVIEW])
-        if len(entries) > _COVERAGE_PREVIEW:
-            shown += f", +{len(entries) - _COVERAGE_PREVIEW} more"
-        suffix = f" ({shown})" if entries else ""
-        parts.append(f"{field}={len(entries)}{suffix}")
-    return ", ".join(parts)
-
-
 def _format_body_bias(body_bias: dict) -> str:
     """One line summarising a `pex` citation's `body_bias` statement (issue
     #1983): the verdict, and -- when it is `"unbiased"` -- how many devices

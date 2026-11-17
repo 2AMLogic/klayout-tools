@@ -138,10 +138,9 @@ from ..signoff_attest_input import input_line, with_entry
 from ..signoff_attest_live import attach_live_fields
 from ..signoff_attest_text import attestation_check_line as _attestation_check_line
 from ..signoff_attest_text import check_label
-from ..signoff_details import (
-    _format_body_bias,
-    _format_coverage,
-)
+from ..signoff_coverage_disclosure import format_coverage as _format_coverage
+from ..signoff_coverage_disclosure import format_undisclosed
+from ..signoff_details import _format_body_bias
 from ..signoff_generator_batch import (
     GeneratorApprovalError,
     GeneratorExecution,
@@ -893,6 +892,40 @@ def _print_foundry_cell_exceptions(citation: dict) -> None:
         )
 
 
+def _print_cite_line(citation: dict) -> None:
+    """The ``cite:`` line naming what an item's evidence was: command-backed
+    evidence (issue #825) has no static file, so the executed command is
+    shown instead; file-backed evidence (issue #722) has no command, so the
+    evidence file is shown, as before."""
+    source = citation["file"] if citation["file"] is not None else citation["command"]
+    print(
+        f"        cite: {source} "
+        f"(kind={citation['kind']}, status={citation['check_status']}, "
+        f"content_hash={citation['content_hash']}, "
+        f"exit_status={citation['exit_status']})"
+    )
+
+
+def _print_coverage_undisclosed(item: dict) -> None:
+    """Issue #5789: an item 3 refused under ``require_coverage_disclosure``
+    prints what a ``met`` one would have -- the ``cite:`` line and its
+    ``coverage:`` statement, read from ``detail.cited_evidence`` (``citation``
+    itself is documented as present only on a ``met`` item) -- then the
+    entries the claim left undisclosed, beside the ``coverage:`` line they
+    qualify."""
+    detail = item.get("detail") or {}
+    refusal = detail.get("coverage_undisclosed")
+    if not refusal:
+        return
+    cited = detail.get("cited_evidence") or {}
+    if cited:
+        _print_cite_line(cited)
+        coverage = cited.get("coverage")
+        if coverage:
+            print(f"        coverage: {_format_coverage(coverage)}")
+    print(f"        coverage undisclosed: {format_undisclosed(refusal)}")
+
+
 def _print_tier_report_text(result: dict, palette: Palette) -> None:
     block = result["block"] or "(unnamed block)"
     print(f"block: {block}  kind: {result['kind']}")
@@ -938,21 +971,7 @@ def _print_tier_report_text(result: dict, palette: Palette) -> None:
         _print_not_applicable(item)
         citation = item["citation"]
         if citation:
-            # Command-backed evidence (issue #825) has no static file --
-            # show the executed command instead; file-backed evidence
-            # (issue #722) has no command -- show the evidence file, as
-            # before.
-            source = (
-                citation["file"]
-                if citation["file"] is not None
-                else citation["command"]
-            )
-            print(
-                f"        cite: {source} "
-                f"(kind={citation['kind']}, status={citation['check_status']}, "
-                f"content_hash={citation['content_hash']}, "
-                f"exit_status={citation['exit_status']})"
-            )
+            _print_cite_line(citation)
             # Issue #2196: whether that `content_hash` was checked against
             # the input artifact itself or only against the envelope's own
             # claim about it. Shown beside the hash it qualifies, because a
@@ -1005,6 +1024,9 @@ def _print_tier_report_text(result: dict, palette: Palette) -> None:
             # from "a check ran and did not pass" (e.g. check_failed) even
             # in the terminal-first text rendering, not just the JSON.
             print(f"        {palette.red}reason: {item['reason']}{palette.reset}")
+            # Issue #5789: an item 3 refused under the coverage ratchet
+            # names exactly which entries it left undisclosed.
+            _print_coverage_undisclosed(item)
             # Issue #2865: a refused `not_applicable` names the offending row.
             row = (item.get("detail") or {}).get("row")
             if row:
