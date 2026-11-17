@@ -74,6 +74,7 @@ import socket
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from .env_provenance_scrub import scrub_payload
 from .env_provenance_walk import walk_lintable_string_fields, walk_string_fields
 
 __all__ = [
@@ -95,6 +96,7 @@ __all__ = [
     "render_text_lines",
     "repo_relative_path",
     "scan_files",
+    "scrub_payload",
 ]
 
 #: ``klt env-provenance``'s own payload version (``docs/json-contract.md``).
@@ -649,10 +651,8 @@ def _klayout_version() -> str | None:
 
 def _assert_no_leaks(report: Mapping[str, Any]) -> None:
     identifiers = _local_identifiers()
-    # ``walk_string_fields`` ignores non-``str`` mapping keys where the old
-    # ``_string_values`` walk recursed into them; that narrowing is safe here
-    # because this payload is JSON-serialisable by contract
-    # (docs/json-contract.md), and JSON cannot carry a container as a key.
+    # Unlike the old ``_string_values`` walk, ``walk_string_fields`` skips
+    # non-``str`` keys; safe here (JSON keys are strings, docs/json-contract.md).
     for value in (text for _field, text in walk_string_fields(report, "")):
         leaks = find_leaks(value, extra_identifiers=identifiers)
         if leaks:
