@@ -1084,15 +1084,29 @@ NPC`, so without it Magic sees no resistor at all (an independent Magic
 cover the whole unit, end heads included, at `0.2`/`0.11`/`0.095` µm
 enclosure (`rpm.3`, `rpm.4`, and the 0.095 µm with which `sky130A.tech`'s
 own `cifoutput` grows NPC around the resistor), so adjacent units' masks
-abut and merge. With that, Magic's `extract all` + `ext2spice` recognises
-the cell as `sky130_fd_pr__res_high_po_<w>` / `res_xhigh_po_<w>`. Magic's own
-`drc(full)` still reports, on these cells, `licon.1c`'s "poly contact extends
-poly resistor by < 2.16um" and `rpm.1`'s minimum RPM/URPM width: the
-generator's heads are not drawn to the foundry cell's head geometry, and
-`klt drc --deck sky130` does not check those rules (see `docs/cli/drc.md`,
-"Precision-poly-resistor head rules are not checked"). So the `high`/`xhigh`
-output is recognised by Magic but is **not** Magic-DRC-clean; use `klt drc
---engine klayout` for the independent check. A reporter also saw Magic
+abut and merge. The contacted end heads themselves are drawn **2.16 µm**
+long along the current-flow axis (issue #5704): `sky130A.tech`'s DRC
+demands `extend xpc/a xhrpoly,uhrpoly 2160` — "poly contact extends poly
+resistor by < 2.16um" (`licon.1c + li.5`, one violation per short head,
+under Magic's default `drc(fast)` style as well as `drc(full)`) — and
+2.16 µm is exactly what the foundry's own cells draw
+(`res_to_endcont 1.985` + `end_contact_size/2` 0.095 + `poly_surround`
+0.08). The generator resolves this from a per-(PDK, flavor) table with no
+new request parameter, so a unit's total length grows by
+2 × (2.16 − 0.39) = 3.54 µm versus releases before this change; the
+recognised body span (and so the extracted `L`/`R`), the 0.19 × 2.0 µm
+licon slots and the pad height are unchanged. With that, Magic's `extract
+all` + `ext2spice` recognises
+the cell as `sky130_fd_pr__res_high_po_<w>` / `res_xhigh_po_<w>`. Magic's
+own DRC no longer reports the head-extension rule on these cells —
+verified live (2026-11-17, Magic 8.3.683, open_pdks `c6d73a35f524`): the
+reproducer cell below reported `licon.1c + li.5` twice per unit before the
+change and `No errors found.` after, under both `drc(fast)` and
+`drc(full)`, for both flavours; `rpm.1`'s minimum-width report cleared in
+the same run (that marker rule is tracked separately by issue #5659).
+`klt drc --deck sky130` does not check the head rules (see
+`docs/cli/drc.md`, "Precision-poly-resistor head rules are not checked"),
+so use `klt drc --engine klayout` for the independent check. A reporter also saw Magic
 (10 nm input scale) extract a body whose length is an odd multiple of 5 nm
 (e.g. `length_um: 9.765`) as a generic `res_high_po` with both terminals
 on one net when its left edge sat on the 10 nm grid, and correctly when

@@ -82,6 +82,7 @@ from .gen_layer_params import (
     _res_end_contact_um,
     _res_flavor_layers,
     _res_flavor_min_width_um_floor,
+    _res_head_len_um,
     _res_sab_geometry_um,
     _ring_implant_margin_um,
     _role_layer_info,
@@ -1152,6 +1153,11 @@ def _res_array_describe(
     end_contact = _res_end_contact_um(
         family, params.get("flavor", _DEFAULT_RES_FLAVOR), metal_level
     )
+    # Issue #5704: sky130 high/xhigh extend the head to the PDK's
+    # precision-resistor contact-extension rule (licon.1c + li.5).
+    head_len_um = _res_head_len_um(
+        family, params.get("flavor", _DEFAULT_RES_FLAVOR), metal_level
+    )
     info = _res_array_layout(
         params["length_um"],
         params["width_um"],
@@ -1166,6 +1172,7 @@ def _res_array_describe(
         _res_sab_geometry_um(
             family, params.get("flavor", _DEFAULT_RES_FLAVOR), metal_level
         )[0],
+        head_len_um,
     )
     unit = info["unit"]
     # A metal-level resistor's own body layer (metN) is already a routing
@@ -1227,6 +1234,13 @@ def _res_array_describe(
             f"rectangular {end_contact[0]}um x {end_contact[1]}um end "
             "contacts (licon.1b/c precision-resistor exception) on "
             f"{unit['pad_height_um']}um-tall poly/local-metal end pads"
+            + (
+                f", extended to {head_len_um}um along the body axis (the "
+                "PDK's licon.1c + li.5 precision-resistor contact-extension "
+                "rule; the unit pitch grows accordingly)"
+                if head_len_um > 0.0
+                else ""
+            )
         )
 
     snapped = _grid_snapped(

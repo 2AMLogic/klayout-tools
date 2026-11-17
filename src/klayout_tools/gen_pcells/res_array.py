@@ -295,6 +295,15 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Minimum space (um) from the body-segment marker / salicide "
                 "block to the end contact -- 0.0 keeps the generic margin",
             )
+            # Issue #5704: sky130 high/xhigh end-head extension to the PDK's
+            # 2.16um precision-resistor contact-extension rule (licon.1c +
+            # li.5); 0.0 = the generic enclosure-derived head.
+            _declare_double_param(
+                self,
+                "res_head_len_um",
+                "Minimum end-head length (um) along the current-flow axis -- "
+                "0.0 keeps the generic enclosure-derived head",
+            )
             self.param(
                 "res_poly_heads_only",
                 self.TypeBoolean,  # type: ignore[attr-defined]
@@ -329,6 +338,7 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.end_contact_w_um,
                 self.end_contact_h_um,
                 getattr(self, "res_contact_space_um"),  # noqa: B009
+                getattr(self, "res_head_len_um"),  # noqa: B009
                 self.res_poly_heads_only,  # type: ignore[attr-defined]
             )
             unit_boxes = info["unit"]["boxes_um"]

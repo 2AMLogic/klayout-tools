@@ -480,6 +480,9 @@ _HIDDEN_PARAMS = {
     # gf180mcu salicide-block clearance from the end contacts (issue #3000),
     # resolved per family by `_res_sab_geometry_um`; never request-facing.
     "res_contact_space_um",
+    # sky130 precision-poly end-head length (issue #5704), resolved per
+    # (family, flavor) by `_res_head_len_um`; never request-facing.
+    "res_head_len_um",
     # sg13g2 PDK-PCell poly-resistor convention (issue #2679): poly drawn as
     # the two abutting heads only; resolved per family, never request-facing.
     "res_poly_heads_only",
@@ -1816,6 +1819,7 @@ def _res_unit_layout(
     end_contact_w_um: float = 0.0,
     end_contact_h_um: float = 0.0,
     marker_contact_space_um: float = 0.0,
+    head_len_um: float = 0.0,
     poly_heads_only: bool = False,
 ) -> dict[str, Any]:
     """One unit resistor (or unit MoM/MiM cap cell footprint): a poly body
@@ -1863,6 +1867,15 @@ def _res_unit_layout(
     the marker. gf180mcu's ``SB.4`` needs 0.15um where the generic enclosure
     margin leaves 0.10um.
 
+    ``head_len_um`` (issue #5704, ``0.0`` by default) is a PDK-resolved
+    minimum end-head length along the current-flow axis -- sky130's
+    ``licon.1c + li.5`` precision-resistor contact extension (see
+    :data:`~klayout_tools.gen_layer_params._PDK_RES_FLAVOR_HEAD_LEN_UM`):
+    ``contact_region_um`` becomes ``max(enclosure-derived, head_len_um)``,
+    lengthening the poly/local-metal end pads and the unit pitch without
+    touching the body segment, the pad height or the centred contact.
+    ``0.0`` keeps every existing caller unchanged.
+
     ``poly_heads_only`` (issue #2679, ``False`` by default) draws the
     ``"poly"`` role as just the two end heads, leaving the body span between
     them undrawn on the poly layer -- the IHP sg13g2 PCell convention where
@@ -1875,7 +1888,9 @@ def _res_unit_layout(
     enclosure_um = max(ENCLOSURE_MARGIN_UM, via_enclosure_min_um)
     contact_w_um = end_contact_w_um if rect_contact else contact_side_um
     contact_h_um = end_contact_h_um if rect_contact else contact_side_um
-    contact_region_um = contact_w_um + 2 * max(enclosure_um, marker_contact_space_um)
+    contact_region_um = max(
+        contact_w_um + 2 * max(enclosure_um, marker_contact_space_um), head_len_um
+    )
     # Pad extent across the body axis: the body width, grown to enclose a
     # taller-than-body rectangular contact (dogbone head).
     pad_h_um = (
@@ -1947,6 +1962,7 @@ def _res_array_layout(
     end_contact_w_um: float = 0.0,
     end_contact_h_um: float = 0.0,
     marker_contact_space_um: float = 0.0,
+    head_len_um: float = 0.0,
     poly_heads_only: bool = False,
 ) -> dict[str, Any]:
     """``num`` matched unit resistors (see :func:`_res_unit_layout`), folded
@@ -1995,6 +2011,8 @@ def _res_array_layout(
     :func:`_res_unit_layout`'s rectangular precision-poly end contact; a
     dogbone head taller than the body also widens the row-to-row pitch.
     ``marker_contact_space_um`` (issue #3000) forwards likewise.
+    ``head_len_um`` (issue #5704) forwards to :func:`_res_unit_layout`'s
+    PDK-resolved minimum end-head length; only the unit pitch moves.
     """
     unit = _res_unit_layout(
         length_um,
@@ -2004,6 +2022,7 @@ def _res_array_layout(
         end_contact_w_um,
         end_contact_h_um,
         marker_contact_space_um,
+        head_len_um,
         poly_heads_only,
     )
     effective_spacing_um = max(spacing_um, min_spacing_um)
