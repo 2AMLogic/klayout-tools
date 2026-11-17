@@ -44,7 +44,9 @@ import functools
 import sys
 import threading
 from collections.abc import Callable
-from typing import Any
+from typing import Any, TypeVar, cast
+
+_F = TypeVar("_F", bound=Callable[..., Any])
 
 _stage_state = threading.local()
 
@@ -88,7 +90,7 @@ def _wrapper_name(name: str) -> str:
     return f"klt_lvs_stage_{safe or 'unnamed'}"
 
 
-def stage(name: str) -> Callable[[Callable], Callable]:
+def stage(name: str) -> Callable[[_F], _F]:
     """Decorator naming a pipeline stage in every crash traceback.
 
     The returned wrapper's *compiled* function name is
@@ -99,7 +101,7 @@ def stage(name: str) -> Callable[[Callable], Callable]:
     recorded thread-locally for :func:`current_stage`.
     """
 
-    def decorate(fn: Callable) -> Callable:
+    def decorate(fn: _F) -> _F:
         scope: dict[str, Any] = {"_fn": fn, "_enter": _enter, "_restore": _restore}
         source = (
             f"def {_wrapper_name(name)}(*args, **kwargs):\n"
@@ -113,6 +115,9 @@ def stage(name: str) -> Callable[[Callable], Callable]:
         wrapper = scope[_wrapper_name(name)]
         functools.update_wrapper(wrapper, fn)
         wrapper.__lvs_stage__ = name
-        return wrapper
+        # `cast`: the wrapper forwards *args/**kwargs verbatim, so it has `fn`'s
+        # signature; without this every decorated stage would erase to
+        # `(*Any, **Any) -> Any` for callers (issue #5630 review).
+        return cast("_F", wrapper)
 
     return decorate
