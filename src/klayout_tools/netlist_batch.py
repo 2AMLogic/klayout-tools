@@ -73,10 +73,8 @@ from .netlist import (
     _write_output,
 )
 from .netlist_batch_select import _relative_symbol_dirs, _select_files
-from .netlist_paths import (
-    _rewrite_runner_paths,
-    relativize_schematic_paths,
-)
+from .netlist_instances import instances_payload
+from .netlist_paths import _rewrite_runner_paths, relativize_schematic_paths
 
 # --------------------------------------------------------------------------- #
 # Constants
@@ -693,6 +691,8 @@ def _payload(
         # ``symbol_path`` is the root-relative list the client forwarded
         # (the runner's own absolute paths are meaningless here).
         "xschem": {**report["xschem"], "symbol_path": list(symbol_path)},
+        # As on the local backend: derived from the regenerated netlist.
+        **instances_payload(data),
     }
     for key in ("pdk", "block"):
         if isinstance(report.get(key), dict):

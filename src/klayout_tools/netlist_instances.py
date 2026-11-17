@@ -133,9 +133,9 @@ def _agree(m: str | None, mult: str | None) -> bool | None:
 
     ``True`` when both are present and numerically equal, ``False`` when both
     are present and differ, ``None`` when fewer than two are present **or**
-    either value is not numeric (e.g. an ``expr(...)``) -- a consumer must be
-    able to tell "disagree" from "not applicable", and a non-numeric value is
-    the latter, never a crash.
+    either value is not numeric (an ``expr(...)``, a bare word, a
+    SPICE-suffixed ``6u``) -- a consumer must be able to tell "disagree" from
+    "not applicable", and a non-numeric value is the latter, never a crash.
     """
     if m is None or mult is None:
         return None
@@ -146,22 +146,21 @@ def _agree(m: str | None, mult: str | None) -> bool | None:
 
 
 def _numeric(value: str) -> float | None:
-    """Parse a SPICE cardinality value; ``None`` when it is not numeric.
+    """Parse a plain numeric value; ``None`` when it is not one.
 
-    ``float`` first (``6``, ``6.0``, ``1e3`` all parse); failing that, a
-    trailing SPICE suffix letter is stripped and retried (``6u`` -> 6.0) --
-    suffixes do not occur on real multipliers, but a parsed ``agree`` must
-    not hinge on one. Anything else (``expr(...)``, a bare node name) is
-    ``None``.
+    ``float`` decides: ``6``, ``6.0``, ``1e3`` parse; anything else is
+    ``None``. A SPICE suffix is a scale factor, not notation -- ``6u`` is
+    ``6e-6`` -- so stripping the suffix to compare mantissas would call
+    ``mult=6 m=6m`` agreed while the drive is wrong by 1000x, the same
+    unit-suffixed-literal failure ``pdk_models.py`` documents from the
+    ``.option scale=1.0u`` incident (#1396). A suffixed literal therefore
+    takes the same ``None`` path as an ``expr(...)``: ``agree`` reports
+    "not applicable" rather than guessing a scale it cannot verify (proper
+    suffix arithmetic is more machinery than this purely-local card view
+    needs). Anything else non-numeric (``expr(...)``, a bare node name) is
+    ``None`` too.
     """
     try:
         return float(value)
     except ValueError:
-        pass
-    stripped = value.rstrip("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
-    if stripped and stripped != value:
-        try:
-            return float(stripped)
-        except ValueError:
-            return None
-    return None
+        return None

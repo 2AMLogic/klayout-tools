@@ -10,13 +10,17 @@ regenerated side), with each card's ``multiplier`` resolved tri-state.
 Split from ``test_netlist.py``, which is at its file-size ceiling -- the same
 reason ``test_netlist_erc.py`` and ``test_netlist_digest.py`` exist -- and
 reusing the same stub-``xschem`` harness (a real subprocess, never a patched
-``subprocess.run``).
+``subprocess.run``). The batch-backend tests reuse ``test_netlist_batch``'s
+hermetic fake-runner fixtures: the payload contract holds in both backends.
 """
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
+from klayout_tools.cli import main
 from klayout_tools.netlist import run_netlist
 from klayout_tools.netlist_instances import (
     INSTANCES_CAP,
@@ -29,6 +33,14 @@ from test_netlist import (  # noqa: F401  (argv_log is a fixture)
     _write_schematic,
     _write_stub,
     argv_log,
+)
+from test_netlist_batch import (  # noqa: F401  (some are used by name only)
+    RUNNER_TREE,
+    _argv,
+    _make_fake,
+    _make_repo,
+    _runner_outputs,
+    _status,
 )
 
 pytestmark = pytest.mark.usefixtures("argv_log")
@@ -90,11 +102,24 @@ def test_multiplier_agree_is_null_never_a_crash_on_non_numeric_values():
 
 
 def test_multiplier_agree_is_numeric_not_string_equality():
-    # "6" vs "6.0" and a SPICE-suffixed "6u" are numerically equal.
+    # "6" vs "6.0" compares numerically. A SPICE suffix is not notation --
+    # it is a scale factor -- so it never compares equal to an unsuffixed
+    # value (see the suffix test below).
     (float_form,) = parse_instance_cards("X1 a b c d mod mult=6.0 m=6\n")
-    (suffix_form,) = parse_instance_cards("X1 a b c d mod mult=6u m=6\n")
     assert float_form["multiplier"]["agree"] is True
-    assert suffix_form["multiplier"]["agree"] is True
+
+
+def test_multiplier_suffixed_values_are_not_applicable_never_equal():
+    """A SPICE suffix is a scale factor (``6u`` is 6e-6, ``6m`` is 6e-3), so
+    stripping it to compare mantissas would report agreement across orders
+    of magnitude -- the unit-suffixed-literal failure ``pdk_models.py``
+    documents from the ``.option scale=1.0u`` incident (#1396). A suffixed
+    value therefore takes the same "not numeric" path as an ``expr(...)``:
+    ``agree`` is ``null``, never a scale-blind ``true``."""
+    (mismatch,) = parse_instance_cards("X1 a b c d mod mult=6 m=6m\n")
+    assert mismatch["multiplier"] == {"m": "6m", "mult": "6", "agree": None}
+    (same_suffix,) = parse_instance_cards("X1 a b c d mod mult=6u m=6u\n")
+    assert same_suffix["multiplier"] == {"m": "6u", "mult": "6u", "agree": None}
 
 
 def test_comments_and_control_cards_are_not_instances():
@@ -221,3 +246,89 @@ def test_written_netlist_bytes_are_unchanged_by_the_instances_view(
         provenance_header=False,
     )
     assert output.read_bytes() == (_WIDE_BODY + "\n").encode()
+
+
+# --------------------------------------------------------------------------- #
+# batch backend: the payload contract holds in both backends (PR #6096)
+# --------------------------------------------------------------------------- #
+
+#: The batch runner's collected netlist: the same wide device as
+#: ``_WIDE_BODY``, shaped like ``test_netlist_batch``'s ``_BODY`` (the
+#: ``sch_path`` comment is what the client rewrites from the runner's scratch
+#: tree to this checkout).
+_BATCH_WIDE = (
+    "** sch_path: {sch}\n"
+    "**.subckt block a b\n"
+    "XM1 a b a a sky130_fd_pr__nfet_01v8 L=0.15 W=1 nf=1\n"
+    "+ mult=6 m=6\n"
+    "**.ends\n"
+    ".end\n"
+)
+
+
+def test_batch_payload_carries_instances(tmp_path, monkeypatch, capsys):
+    """``instances`` is documented as present in every ``--format json``
+    payload; the batch backend derives it from the collected (regenerated)
+    netlist bytes exactly as the local backend does."""
+    repo = _make_repo(tmp_path)
+    fake = _make_fake(tmp_path, monkeypatch)
+    fake.statuses = [_status("done")]
+    fake.outputs = _runner_outputs(
+        _BATCH_WIDE.format(sch=f"{RUNNER_TREE}/design/block.sch")
+    )
+    output = tmp_path / "out" / "block.spice"
+
+    assert main(_argv(repo, output, "--backend", "batch")) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    (xm1,) = payload["instances"]
+    assert xm1["name"] == "XM1"
+    assert xm1["params"]["mult"] == "6"  # folded off the continuation line
+    assert xm1["multiplier"] == {"m": "6", "mult": "6", "agree": True}
+    assert payload["instances_truncated"] is False
+
+
+def test_batch_check_payload_instances_come_from_the_regenerated_side(
+    tmp_path, monkeypatch, capsys
+):
+    """Under ``--backend batch --check``, ``instances`` describes the side the
+    runner produced, not the committed file -- the local backend's rule."""
+    repo = _make_repo(tmp_path)
+    fake = _make_fake(tmp_path, monkeypatch)
+    fake.statuses = [_status("done")]
+    fake.outputs = _runner_outputs(
+        _BATCH_WIDE.format(sch=f"{RUNNER_TREE}/design/block.sch")
+    )
+    committed = tmp_path / "block.spice"
+    committed.write_text(
+        _BATCH_WIDE.format(sch="/home/elsewhere/design/block.sch").replace(
+            "mult=6 m=6", "mult=1 m=1"
+        ),
+        encoding="utf-8",
+    )
+
+    assert main(_argv(repo, committed, "--backend", "batch", "--check")) == 3
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["status"] == "drifted"
+    (xm1,) = payload["instances"]
+    assert xm1["params"]["mult"] == "6"  # the regenerated side, not the "1"
+    assert xm1["multiplier"]["agree"] is True
+
+
+def test_batch_payload_instances_is_empty_not_absent_without_devices(
+    tmp_path, monkeypatch, capsys
+):
+    """The "``[]``, never an absent key" guarantee holds on the batch backend
+    too: a consumer may index ``payload["instances"]`` unconditionally."""
+    repo = _make_repo(tmp_path)
+    fake = _make_fake(tmp_path, monkeypatch)
+    fake.statuses = [_status("done")]
+    fake.outputs = _runner_outputs("* only comments\n.end\n")
+    output = tmp_path / "out" / "block.spice"
+
+    assert main(_argv(repo, output, "--backend", "batch")) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["instances"] == []
+    assert payload["instances_truncated"] is False

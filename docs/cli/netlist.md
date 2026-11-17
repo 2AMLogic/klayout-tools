@@ -773,7 +773,9 @@ resolves its own `$PDK_ROOT`.
 One entry per device instance in the netlist this run produced, in file order
 — in **both** modes: `generate`, and `--check` (where it is derived from the
 **regenerated** side, the one `--check` actually compared, never from the
-committed file). `+` continuation lines are folded onto their card first (the
+committed file) — and under **both** backends: local, and `--backend batch`
+(where the collected netlist the runner produced is the regenerated side).
+`+` continuation lines are folded onto their card first (the
 same shared primitive `--check`'s layout normalization uses), so a parameter
 xschem wrapped onto a continuation line is present here — the whole point of
 the block, since `grep '^XM2'` on the written netlist shows neither form of
@@ -785,13 +787,13 @@ the multiplier (see [The device multiplier](#the-device-multiplier-two-forms-bot
 | `card` | string | The instance's logical card with `+` continuations folded onto one line. |
 | `model` | string \| null | The token immediately before the first `key=value` parameter (SPICE's positional prefix — nodes — ends where named parameters begin, which is how xschem's `format=` output shapes every device card); `null` for a card with no named parameters (a bare `R1 a b 1k`). |
 | `params` | object | Every `key=value` on the folded card, values verbatim as written; the last one wins on a duplicate key. |
-| `multiplier` | object | The two device-multiplier forms resolved, tri-state: `{"m": <value or null>, "mult": <value or null>, "agree": <bool or null>}`. `agree` is `true` when both forms are present and numerically equal, `false` when both are present and differ, `null` when fewer than two are present **or** a value is not numeric (an `expr(...)`, say) — so a consumer can tell "disagree" from "not applicable" without re-parsing, and a non-numeric value can never crash the block. |
+| `multiplier` | object | The two device-multiplier forms resolved, tri-state: `{"m": <value or null>, "mult": <value or null>, "agree": <bool or null>}`. `agree` is `true` when both forms are present and numerically equal, `false` when both are present and differ, `null` when fewer than two are present **or** a value is not numeric (an `expr(...)` or a SPICE-suffixed literal like `6u`, say — a suffix is a scale factor, `6u` is `6e-6`, so a suffixed form is never called equal to an unsuffixed one) — so a consumer can tell "disagree" from "not applicable" without re-parsing, and a non-numeric value can never crash the block. |
 
 The array is capped at `INSTANCES_CAP` (1000) entries; a deck above the cap
 truncates the array and sets the sibling `instances_truncated` flag (the
 `diagnostics.*_truncated` convention), so a large deck cannot balloon the
 payload unboundedly. A deck with no device instances carries `instances: []`,
-never an absent key.
+never an absent key, in either backend.
 
 ### `pdk`
 

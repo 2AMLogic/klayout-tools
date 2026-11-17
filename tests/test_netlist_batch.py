@@ -169,8 +169,7 @@ def _git(repo: Path, *args: str) -> None:
     subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
 
 
-@pytest.fixture
-def repo(tmp_path) -> Path:
+def _make_repo(tmp_path) -> Path:
     """A git repo holding a tracked schematic, symbol and xschemrc, plus one
     untracked file."""
     root = tmp_path / "repo"
@@ -194,7 +193,13 @@ def repo(tmp_path) -> Path:
 
 
 @pytest.fixture
-def fake(tmp_path, monkeypatch) -> _FakeRunner:
+def repo(tmp_path) -> Path:
+    """See ``_make_repo`` (plain helper: also drives the batch-backend tests
+    in ``test_netlist_instances.py``, which cannot import a fixture)."""
+    return _make_repo(tmp_path)
+
+
+def _make_fake(tmp_path, monkeypatch) -> _FakeRunner:
     """Batch config resolvable from the environment, a fake runner in place
     of every transport subprocess, and a pinned client version."""
     script = tmp_path / "batch-fleet-provision.sh"
@@ -212,6 +217,13 @@ def fake(tmp_path, monkeypatch) -> _FakeRunner:
     runner = _FakeRunner(keep)
     monkeypatch.setattr(sim_batch, "_run_subprocess", runner)
     return runner
+
+
+@pytest.fixture
+def fake(tmp_path, monkeypatch) -> _FakeRunner:
+    """See ``_make_fake`` (plain helper: also drives the batch-backend tests
+    in ``test_netlist_instances.py``, which cannot import a fixture)."""
+    return _make_fake(tmp_path, monkeypatch)
 
 
 @pytest.fixture
