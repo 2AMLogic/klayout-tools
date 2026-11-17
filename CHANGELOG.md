@@ -14,6 +14,24 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt power` judges EM on a split arm's cross-section, not row by row**
+  (#6449, 2026-11-17, additive — no `schema_version` bump): where two arms of
+  one merged polygon join, the mesh's vertex grid cuts the wider arm
+  lengthwise into parallel rows, and a pad/load snapping to one node can put
+  the whole port current through a single row against a *row-width* limit —
+  an over-limit `em_verdict` finding on metal whose true cross-section
+  density is within limit. For each cut perpendicular to the flow, the
+  signed sum of the crossing branches is now compared against
+  `current_limit_a_per_um *` the contiguous conducting width, when the cut's
+  branches tile all the polygon's metal there and every member has a solved
+  current and a limit (never across a gap, layer or polygon; a true narrow
+  neck keeps its own width). `em_verdict` entries judged this way gain
+  `basis: "cross_section"`, `width_um` and `section_edge_ids`; every other
+  entry (vias, rectangular rails, edges on no eligible cut) is byte-identical
+  to before, and `coverage`/edge counts are unchanged. A cross-section can
+  relax a per-row finding, never tighten one, so a layout that failed only
+  because of the row split now passes while a real over-limit still fails.
+  Distributed pad/load injection and the IR solver are unchanged.
 - **`klt env-provenance lint-envelope --json-stream` lints concatenated JSON
   document streams** (#5887, 2026-11-17): each FILE argument is parsed as a
   single JSON document, so a file holding several whitespace-separated
