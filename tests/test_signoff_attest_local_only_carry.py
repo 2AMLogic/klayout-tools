@@ -285,3 +285,80 @@ def test_skip_text_output_marks_a_validation_only_carried_check(tmp_path, capsys
     assert (
         f"(validates only; documented: {' '.join(_OLD_DOC)})" in capsys.readouterr().out
     )
+
+
+# --------------------------------------------------------------------------- #
+# Two named cold starts under one path carry independently (issue #5641)
+# --------------------------------------------------------------------------- #
+
+
+def _two_member_inv(repo: Path, argv_ac, argv_tran) -> str:
+    """One file, two ``local_only`` cold starts with *different names*."""
+    inventory = {
+        "schema_version": 1,
+        "kind": "t1-attestation-inventory",
+        "t1_item": 9,
+        "pins": _PINS,
+        "testbenches": [
+            {
+                "path": "tb/a.spice",
+                "cold_start": [
+                    {"name": "ac", "argv": argv_ac, "local_only": True},
+                    {"name": "tran", "argv": argv_tran, "local_only": True},
+                ],
+            }
+        ],
+    }
+    path = repo / "attest" / "item9.json"
+    path.write_text(json.dumps(inventory))
+    return str(path)
+
+
+def _named_cold_start(envelope: dict, name: str) -> dict:
+    return next(
+        c
+        for c in envelope["attestation"]["checks"]
+        if c["check"] == "command" and c.get("name") == name
+    )
+
+
+def test_check_carries_each_named_member_its_own_outcome(tmp_path, capsys):
+    """Committed: ac passed, tran failed. Fresh: both declare the same argv.
+
+    Matching on role + testbench + argv alone would hand tran ac's committed
+    pass; the ``name`` in the identity keeps each member's own outcome."""
+    repo = _repo(tmp_path)
+    out = repo / "evidence" / "item9.json"
+    out.write_text(
+        render_envelope(build_attestation(9, _two_member_inv(repo, _OK, _BAD)))
+    )
+    inventory = _two_member_inv(repo, _OK, _OK)  # argv now identical across members
+    capsys.readouterr()
+
+    assert _attest(inventory, None, "--check", str(out)) == 3  # tran's argv drifts
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "drifted"
+    carried_ac = _named_cold_start(result["fresh"], "ac")
+    carried_tran = _named_cold_start(result["fresh"], "tran")
+    assert carried_ac["passed"] is True  # its own committed outcome
+    assert carried_tran["passed"] is False  # not ac's pass
+    assert {c["name"] for c in result["skipped_checks"]} == {"ac", "tran"}
+
+
+def test_skip_refuses_when_a_named_member_has_no_committed_counterpart(tmp_path):
+    """Committed: ac failed, tran passed. Fresh: both declare tran's argv.
+
+    Without ``name`` in the identity, ac would match committed tran (same
+    path, same argv) and wrongly carry its pass, so ``--skip-local-only``
+    would succeed. The name keeps ac counterpartless: the refresh refuses."""
+    repo = _repo(tmp_path)
+    out = repo / "evidence" / "item9.json"
+    out.write_text(
+        render_envelope(build_attestation(9, _two_member_inv(repo, _BAD, _OK)))
+    )
+    inventory = _two_member_inv(repo, _OK, _OK)
+    before = out.read_text()
+
+    assert _attest(inventory, out, "--skip-local-only") == 3
+    assert out.read_text() == before

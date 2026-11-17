@@ -27,7 +27,12 @@ and, when the caller hands the routed DEF over as ``def_path``, to the
 router's own ``SHAPE DRCFILL`` patch metal
 (:mod:`~klayout_tools.place_and_route_def_drcfill`, issue #5740).
 That is the half ``route_drc_violation_count`` cannot report, and it is why
-"trimmed" never has to be read as "deck-clean".
+"trimmed" never has to be read as "deck-clean". The DEF scan's own
+``status``/``reason``/``unresolved`` ride along as
+``tip_check.router_fill_scan`` (issue #6100), so a zero
+``router_fill_violations`` is interpretable: "the router wrote no DRCFILL"
+does not have to share a reading with "never measured" or "could not
+resolve every item".
 
 Layer scope (issue #4495's follow-up report: the same router-vs-deck
 disagreement is not specific to the V1/M1 landing pad)
@@ -301,17 +306,21 @@ def _trim(
 
 def _drcfill_regions(
     kdb: Any, *, variant: str, def_path: str | None, dbu_um: float
-) -> dict[str, Any] | None:
-    """The routed DEF's reconstructed ``SHAPE DRCFILL`` patch regions, or
-    ``None`` when this pass must not attribute any: no DEF was handed in,
-    the PDK family is not ASAP7 (the scan would be dead work on a pass
-    whose GDS outcome is a documented no-op), or the scan itself skipped
-    (unreadable file, no ``UNITS`` statement) -- all reported as absence,
-    never guessed."""
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """The routed DEF's reconstructed ``SHAPE DRCFILL`` patch regions plus the
+    scan's own self-report, or ``(None, None)`` when this pass must not
+    attribute any and has no scan to report: no DEF was handed in, or the PDK
+    family is not ASAP7 (the scan would be dead work on a pass whose GDS
+    outcome is a documented no-op). When the scan ran, the second element is
+    its full return -- ``status`` (``"scanned"``, or ``"skipped"`` with
+    ``reason`` saying why), ``unresolved``, ``segments`` and the rest -- so
+    "measured, zero patches" stays distinguishable from "never measured"
+    instead of both reading ``router_fill`` 0 (issue #6100).
+    """
     if def_path is None or pdk_variant_family(variant) != _ASAP7_FAMILY:
-        return None
+        return None, None
     scanned = scan_def_drcfill(kdb, def_path=def_path, dbu_um=dbu_um)
-    return scanned["regions"] or None
+    return scanned["regions"] or None, scanned
 
 
 def trim_via_pads(
@@ -335,6 +344,15 @@ def trim_via_pads(
     cannot report. So the repair runs first, and the flag then measures the
     geometry that is actually written -- which is also why it must run after,
     never before, the trim.
+
+    ``tip_check`` also carries ``router_fill_scan`` (issue #6100): the DEF
+    scan's own ``status``/``reason``/``unresolved`` whenever it was attempted,
+    ``None`` when it was not -- no ``def_path`` was handed in, or the PDK
+    family is not ASAP7, where ``tip_check`` itself reports ``"skipped"``.
+    Without it, ``router_fill_violations: 0`` reads identically for "the
+    router wrote no DRCFILL" and "the scan never ran / could not resolve
+    every item"; with it, the zero is interpretable, the way
+    ``min_area_repair`` keeps a ``"skipped"`` pass distinct from a clean one.
     """
     report = _trim(
         kdb,
@@ -343,14 +361,24 @@ def trim_via_pads(
         variant=variant,
         lef_to_gds=lef_to_gds,
     )
+    drcfill_regions, drcfill_scan = _drcfill_regions(
+        kdb, variant=variant, def_path=def_path, dbu_um=layout.dbu
+    )
     report["tip_check"] = check_via_pad_tips(
         kdb,
         layout=layout,
         top_cell=top_cell,
         variant=variant,
         lef_to_gds=lef_to_gds,
-        drcfill_regions=_drcfill_regions(
-            kdb, variant=variant, def_path=def_path, dbu_um=layout.dbu
-        ),
+        drcfill_regions=drcfill_regions,
+    )
+    report["tip_check"]["router_fill_scan"] = (
+        None
+        if drcfill_scan is None
+        else {
+            "status": drcfill_scan["status"],
+            "reason": drcfill_scan["reason"],
+            "unresolved": drcfill_scan["unresolved"],
+        }
     )
     return report
