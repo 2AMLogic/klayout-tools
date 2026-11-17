@@ -13,9 +13,10 @@
     },
     "artifact": {
       "kind": "verb",
-      "description": "`klt artifact` implementation: fleet artifact-store client (issue #4063) plus CLI adapter.",
+      "description": "`klt artifact` implementation: fleet artifact-store client (issues #4063, #5958) plus CLI adapter. `artifact_verify` is the stdlib-only, standalone-vendorable verify closure; `artifact_objects` is the put/get/delete side importing it.",
       "modules": [
-        "klayout_tools.artifact_store",
+        "klayout_tools.artifact_objects",
+        "klayout_tools.artifact_verify",
         "klayout_tools.cli.artifact_cmd"
       ]
     },
@@ -154,7 +155,7 @@
         "klayout_tools.drc_deck_includes",
         "klayout_tools.drc_klayout_abort",
         "klayout_tools.drc_klayout_app",
-      "klayout_tools.drc_layer_selection",
+        "klayout_tools.drc_layer_selection",
         "klayout_tools.drc_klayout_engine",
         "klayout_tools.drc_klayout_launch",
         "klayout_tools.drc_klayout_list",
@@ -590,6 +591,7 @@
         "klayout_tools.place_and_route_pdn_fit",
         "klayout_tools.place_and_route_pins",
         "klayout_tools.place_and_route_portable",
+        "klayout_tools.place_and_route_rerun",
         "klayout_tools.place_and_route_power_audit",
         "klayout_tools.place_and_route_reports",
         "klayout_tools.place_and_route_request",
@@ -671,6 +673,7 @@
         "klayout_tools._check_result",
         "klayout_tools._devices",
         "klayout_tools._digest",
+        "klayout_tools._engine_proc",
         "klayout_tools._git_tracked",
         "klayout_tools._jsongz",
         "klayout_tools._jsonnum",
@@ -801,6 +804,7 @@
         "klayout_tools.sim_cycle_mean",
         "klayout_tools.sim_deck_expand",
         "klayout_tools.sim_decks",
+        "klayout_tools.sim_decks_resume",
         "klayout_tools.sim_decks_split",
         "klayout_tools.sim_decks_staging",
         "klayout_tools.sim_echo_messages",

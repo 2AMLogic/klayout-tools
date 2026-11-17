@@ -163,7 +163,7 @@ def add_sim_parser(
             "of submitting a new one: "
             "waits for it (bounded by the request's `batch.poll_timeout_s`) "
             "and reports it, never re-launching. Pass the same request the "
-            "job was submitted from, with --backend batch. See "
+            "job was submitted from (and --hosts), with --backend batch. See "
             "docs/cli/sim.md."
         ),
     )

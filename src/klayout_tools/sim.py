@@ -3910,6 +3910,10 @@ def _run_sim_corners(
     # Issues #3159/#3161: `analysis.passes` / `measurements[].tian` are gated
     # the same way (the `dual_injection` mandatory runner feature).
 
+    # Hoisted above the probe (issue #6047): it takes the corners' pinned init.
+    effective_threads = _effective_threads_per_worker(
+        threads_per_worker, backend, max_workers, len(dispatch_points)
+    )
     # Two-pass fail-fast probe (issue #1694, opt-in via `fail_fast_probe`/
     # `options.fail_fast_probe`): run once per grid, before any real corner
     # is dispatched -- not per backend/shard/host, and not for `remote`/
@@ -3934,7 +3938,9 @@ def _run_sim_corners(
             artifacts_dir=artifacts_dir,
             keep_artifacts=keep_artifacts,
             ngspice_binary=ngspice_binary,
-            ngspice_init=ngspice_init_lines,
+            ngspice_init=_with_thread_pin(
+                ngspice_init_lines, effective_threads, engine
+            ),
             osdi_preload=osdi_preload,
             save_mode=save_mode,
             ngspice_options=ngspice_options,
@@ -4005,9 +4011,6 @@ def _run_sim_corners(
         models_lib=models_lib,
         corner_points=corner_points,
         osdi_preload=osdi_preload,
-    )
-    effective_threads = _effective_threads_per_worker(
-        threads_per_worker, backend, max_workers, len(dispatch_points)
     )
     ngspice_init_env = sim_spiceinit.record(  # Issue #5648
         ngspice_init_lines, effective_threads, engine, backend in _OFFHOST_BACKENDS
@@ -4104,7 +4107,7 @@ def _run_sim_corners(
             shard_fingerprint=_checkpoint_fingerprint(**fingerprint_inputs),
         )
 
-    if hosts == 1:
+    if hosts == 1 or attach_job_id is not None:  # #5777: attach never fans out
         # The exact pre-#376 call for the default case (no budget, no
         # resume, hosts=1, no fail-fast probe) -- `dispatch_points`/the four
         # new-since kwargs are identity no-ops then (`dispatch_points is
@@ -10620,16 +10623,13 @@ def _run_calibration_probe(
     misconfiguration surfaces at the (cheap) probe stage rather than only
     after every real corner is dispatched.
 
-    ``ngspice_init`` (issue #2520, the already-validated
-    ``options.ngspice_init`` lines -- see :func:`_validate_ngspice_init`) is
-    materialized as ``probe_dir/.spiceinit`` the same way :func:`_run_corner`
-    does for a real corner, and the probe's own ``subprocess.run`` call
-    passes ``cwd=probe_dir`` so it is actually read. The probe otherwise
-    runs the same compatibility mode a real corner would, and this issue's
-    other half (the missing ``cwd=``) applied here too -- without it, the
-    probe's own convergence behaviour (and thus its rate estimate) would
-    silently diverge from the real corners it is meant to be representative
-    of whenever a caller sets ``options.ngspice_init``.
+    ``ngspice_init`` (issues #2520, #6047) is the init-file lines the real
+    corners get, thread pin included (:func:`_with_thread_pin`; a run-dir
+    ``.spiceinit`` replaces ``$HOME``'s). It is materialized as
+    ``probe_dir/.spiceinit`` and the probe's ``subprocess.run`` passes
+    ``cwd=probe_dir`` so it is read -- otherwise the probe's convergence
+    behaviour (and rate estimate) would diverge from the corners it is meant
+    to be representative of.
     """
     probe_dir = (
         os.path.join(artifacts_dir, f"{point.slug}__probe")
@@ -10991,15 +10991,15 @@ def _parse_plain_number(raw: str) -> float | None:
     return float(match.group(1))
 
 
-def _parse_width_um(raw: str) -> float | None:
+def _parse_width_um(raw: str, bare_is_um: bool = False) -> float | None:
     """Parse a SPICE ``W``/``L``-style geometry literal (``50u``, ``5e-5``,
-    ``100n``) to micrometres. Returns ``None`` for anything that is not a
-    plain numeric literal.
-    """
+    ``100n``) to micrometres (``None`` for non-numerics); ``bare_is_um``
+    reads a bare literal as micrometres (#5802 X-card PDK wrappers)."""
     match = spice_number.NUMBER_RE.match(raw.strip().strip("'\""))
     if match is None:
         return None
-    return float(match.group(1)) * spice_number.suffix_scale(match.group(2)) * 1e6
+    value = float(match.group(1)) * spice_number.suffix_scale(match.group(2))
+    return value * (1 if match.group(2) == "" and bare_is_um else 1e6)
 
 
 def _find_width_ceiling_culprit(
@@ -11029,7 +11029,7 @@ def _find_width_ceiling_culprit(
         w_raw = params.get("w") or params.get("W")
         if w_raw is None:
             continue
-        w_um = _parse_width_um(w_raw)
+        w_um = _parse_width_um(w_raw, bare_is_um=inst_name[:1].upper() == "X")
         if w_um is None:
             continue
         m_raw = params.get("m") or params.get("M")
