@@ -14,6 +14,19 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt-pdk.json` liberty lists merge on field-equal headers, and header
+  conflicts are named** (#5625, 2026-11-17): a `liberty` corner's list of
+  cell-group `.lib` files was compared as one whole header string, so a real
+  vendor split (e.g. ASAP7 `asap7sc7p5t_28`) whose per-file headers differ
+  only in the `date` timestamp was refused with an opaque "Liberty headers
+  differ". The comparison is now field by field: the `library (<name>)` name,
+  lexical comments, and the free-text `date`, `revision` and `comment`
+  attributes are ignored; any other differing field (units,
+  `operating_conditions`, `default_max_transition`, ...) raises an error
+  naming the field and both files' values, and a field present in only one
+  file is reported as missing. Additive: merges that used to fail now
+  succeed; the merged output, template union, duplicate-cell check and cache
+  paths are unchanged.
 - **`klt sim --attach <batch-shards.json>` accepts a map written by a
   `--hosts N` / `remote.hosts: N` run** (#5777, 2026-11-17): `--attach` and
   `--collect-partial` refused every `hosts != 1` request with "requires backend

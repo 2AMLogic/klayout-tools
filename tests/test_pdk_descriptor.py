@@ -341,7 +341,9 @@ def test_liberty_conflicting_template_refused(tmp_path, monkeypatch):
 
 
 def test_liberty_non_template_difference_with_templates_refused(tmp_path, monkeypatch):
-    with pytest.raises(ValueError, match="headers differ"):
+    with pytest.raises(
+        ValueError, match='cannot merge: \'time_unit\' differs: "1ps".*"1ns"'
+    ):
         _merge_g2(
             tmp_path,
             monkeypatch,
@@ -356,7 +358,9 @@ def test_liberty_header_mismatch_and_duplicate(tmp_path, monkeypatch):
     (root / "d" / "g2.lib").write_text(
         _lib("C", header='library (x) {\n  time_unit : "1ns";\n'), encoding="utf-8"
     )
-    with pytest.raises(ValueError, match="headers differ"):
+    with pytest.raises(
+        ValueError, match='cannot merge: \'time_unit\' differs: "1ps".*"1ns"'
+    ):
         pdk_cells._descriptor_liberty(info, "lib", None, ValueError)
     (root / "d" / "g2.lib").write_text(_lib("B"), encoding="utf-8")
     with pytest.raises(ValueError, match="duplicate cell 'B'"):

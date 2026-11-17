@@ -7,9 +7,11 @@ lets a ``liberty`` corner list those files; :func:`merge_liberty` produces the
 single file every ``liberty_path`` consumer (Yosys, OpenROAD, OpenSTA) expects.
 
 Merge rule: the header (text before the first ``cell (``) comes from the first
-file and must match the rest after normalisation -- whitespace, comments and
-the ``library (<name>)`` name are ignored, every other difference (units,
-operating conditions, ...) is an error. Top-level ``lu_table_template`` and
+file and must agree with the rest field by field -- whitespace, lexical
+comments, the ``library (<name>)`` name and the free-text ``date``,
+``revision`` and ``comment`` attributes are ignored; any other difference
+(units, operating conditions, ``default_*``, ...) is an error naming the
+conflicting field and both values. Top-level ``lu_table_template`` and
 ``power_lut_template`` groups are the exception: they are unioned by name
 (same name with different content is an error) and the ones the first file
 lacks are appended after its header. Each file's cell groups are appended in
@@ -34,6 +36,15 @@ _LIBRARY_NAME_RE = re.compile(r"\blibrary\s*\([^)]*\)")
 _CELL_NAME_RE = re.compile(r"\(\s*\"?([^\")\s]+)\"?\s*\)")
 _TEMPLATE_KINDS = ("lu_table_template", "power_lut_template")
 
+#: Header attributes ignored when comparing files for a merge: free text with
+#: no electrical content (a per-file timestamp, a version string, a vendor
+#: note). This is a closed set -- every other header field must agree.
+_IGNORED_HEADER_ATTRS = frozenset({"date", "revision", "comment"})
+
+#: Key carrying header text that is neither an attribute nor a group, so
+#: unrecognised residue still participates in the comparison (fail closed).
+_RESIDUE_KEY = "<other header text>"
+
 
 class LibertyMergeError(Exception):
     """Liberty files cannot be merged (header mismatch, duplicate cell, ...)."""
@@ -54,8 +65,9 @@ def merge_liberty(paths: list[str]) -> str:
     """Merge ``paths`` into one cached ``.lib`` and return its path.
 
     A single path is returned unchanged (the list form of one element equals
-    the string form). Raises :class:`LibertyMergeError` on a header mismatch,
-    a duplicate cell name, or a file that is not a ``library`` group.
+    the string form). Raises :class:`LibertyMergeError` on a header field
+    conflict, a duplicate cell name, or a file that is not a ``library``
+    group.
     """
     if not paths:
         raise LibertyMergeError("no Liberty files to merge")
@@ -84,7 +96,7 @@ def _collect(paths: list[str], texts: list[str]) -> tuple[str, list[str], list[s
     """Validate headers/cell names across files; ``(header, extra templates,
     bodies)``. Extra templates are those the first header does not define."""
     header = ""
-    header_norm = ""
+    header_fields: dict[str, str] = {}
     first_path = paths[0]
     seen: dict[str, str] = {}
     templates: dict[str, tuple[str, str, str]] = {}  # name -> (norm, raw, path)
@@ -93,14 +105,11 @@ def _collect(paths: list[str], texts: list[str]) -> tuple[str, list[str], list[s
     for path, text in zip(paths, texts, strict=True):
         file_header, body, cells = _split(path, text)
         stripped, file_templates = _extract_templates(file_header)
-        norm = _normalize_header(stripped)
+        fields = _header_fields(stripped)
         if path is first_path:
-            header, header_norm = file_header, norm
-        elif norm != header_norm:
-            raise LibertyMergeError(
-                f"Liberty headers differ: '{path}' does not match the header "
-                f"of '{first_path}' (cannot merge cell groups)"
-            )
+            header, header_fields = file_header, fields
+        else:
+            _compare_headers(first_path, header_fields, path, fields)
         for name, raw in file_templates:
             tnorm = _normalize_header(raw)
             known = templates.get(name)
@@ -122,6 +131,107 @@ def _collect(paths: list[str], texts: list[str]) -> tuple[str, list[str], list[s
             seen[cell] = path
         bodies.append(body)
     return header, extra, bodies
+
+
+def _header_fields(header: str) -> dict[str, str]:
+    """Depth-1 fields of a template-stripped header, keyed by name.
+
+    ``attr : value ;`` statements map to their normalised value (quoted
+    strings kept verbatim), ``name (args) { ... }`` groups to their
+    normalised body under a ``name(args)`` key, ``name (args) ;`` complex
+    attributes to their normalised args. Attributes in
+    :data:`_IGNORED_HEADER_ATTRS` are dropped; anything unrecognised is
+    carried under :data:`_RESIDUE_KEY` so it still takes part in the
+    comparison.
+    """
+    fields: dict[str, str] = {}
+    cursor = depth = 0
+    for kind, pos, end in _tokens(header):
+        if pos < cursor:
+            continue  # inside a statement already consumed below
+        if kind == "{":
+            depth += 1
+            if depth == 1:
+                cursor = end  # the 'library (<name>) {' opener
+            continue
+        if kind == "}":
+            depth -= 1
+            continue
+        if depth != 1:
+            continue
+        if cursor < pos:
+            _add_residue(header[cursor:pos], fields)
+        cursor = _take_field(header, pos, end, cursor, fields)
+    _add_residue(header[cursor:], fields)
+    return fields
+
+
+def _take_field(
+    header: str, pos: int, end: int, cursor: int, fields: dict[str, str]
+) -> int:
+    """Consume the depth-1 statement starting at the identifier ``pos`` and
+    return the new cursor (the old one when unrecognised, so the text rides
+    in the next residue flush instead of being silently skipped)."""
+    name = header[pos:end]
+    nxt, ch = _next_significant(header, end)
+    n = len(header)
+    if ch == ":":
+        semi = _find_matching(header, nxt, ":", ";")
+        if name not in _IGNORED_HEADER_ATTRS:
+            fields[name] = _normalize_header(header[nxt + 1 : min(semi, n)])
+        return min(semi + 1, n)
+    if ch == "(":
+        close = _find_matching(header, nxt, "(", ")")
+        args = _normalize_header(header[nxt + 1 : close])
+        p2, ch2 = _next_significant(header, close + 1)
+        if ch2 == "{":
+            bend = _find_matching(header, p2, "{", "}")
+            fields[f"{name}({args})"] = _normalize_header(header[p2 + 1 : min(bend, n)])
+            return min(bend + 1, n)
+        fields[f"{name}({args})"] = args  # complex attribute 'name (v1, v2) ;'
+        return min(p2 + 1, n)
+    if ch == "{":
+        bend = _find_matching(header, nxt, "{", "}")
+        fields[name] = _normalize_header(header[nxt + 1 : min(bend, n)])
+        return min(bend + 1, n)
+    return cursor
+
+
+def _add_residue(text: str, fields: dict[str, str]) -> None:
+    """Carry unrecognised header text into the field map (fail closed)."""
+    norm = _normalize_header(text)
+    if not norm:
+        return
+    prior = fields.get(_RESIDUE_KEY)
+    fields[_RESIDUE_KEY] = f"{prior} {norm}" if prior else norm
+
+
+def _compare_headers(
+    first_path: str, first: dict[str, str], path: str, other: dict[str, str]
+) -> None:
+    """Raise :class:`LibertyMergeError` on the first header field that
+    differs; a field present in one header and absent from the other is
+    reported as missing rather than as a value difference."""
+    for key, value in first.items():
+        if key not in other:
+            raise LibertyMergeError(
+                f"cannot merge: '{key}' present in '{first_path}', missing in '{path}'"
+            )
+        if other[key] != value:
+            raise LibertyMergeError(
+                f"cannot merge: '{key}' differs: {_clip(value)} in "
+                f"'{first_path}', {_clip(other[key])} in '{path}'"
+            )
+    for key in other:
+        if key not in first:
+            raise LibertyMergeError(
+                f"cannot merge: '{key}' missing in '{first_path}', present in '{path}'"
+            )
+
+
+def _clip(value: str, limit: int = 80) -> str:
+    """Value truncated so an error message stays readable."""
+    return value if len(value) <= limit else value[: limit - 3] + "..."
 
 
 def _extract_templates(header: str) -> tuple[str, list[tuple[str, str]]]:
@@ -238,6 +348,56 @@ def _skip_ws(text: str, index: int) -> int:
     while index < len(text) and text[index].isspace():
         index += 1
     return index
+
+
+def _next_significant(text: str, start: int) -> tuple[int, str]:
+    """``(index, char)`` of the next char that is neither whitespace nor a
+    comment; ``(len(text), "")`` at end of text."""
+    i, n = start, len(text)
+    while i < n:
+        ch = text[i]
+        if ch.isspace():
+            i += 1
+        elif text.startswith("/*", i):
+            stop = text.find("*/", i + 2)
+            i = n if stop < 0 else stop + 2
+        elif text.startswith("//", i):
+            stop = text.find("\n", i)
+            i = n if stop < 0 else stop
+        else:
+            return i, ch
+    return n, ""
+
+
+def _find_matching(text: str, start: int, open_ch: str, close_ch: str) -> int:
+    """Index of the ``close_ch`` matching the ``open_ch`` at ``start`` (strings
+    and comments skipped), or ``len(text)`` when it never closes."""
+    depth = 0
+    i, n = start, len(text)
+    while i < n:
+        ch = text[i]
+        if ch == '"':
+            i += 1
+            while i < n and text[i] != '"':
+                i += 2 if text[i] == "\\" else 1
+            i += 1
+        elif text.startswith("/*", i):
+            stop = text.find("*/", i + 2)
+            i = n if stop < 0 else stop + 2
+        elif text.startswith("//", i):
+            stop = text.find("\n", i)
+            i = n if stop < 0 else stop
+        elif ch == open_ch:
+            depth += 1
+            i += 1
+        elif ch == close_ch:
+            depth -= 1
+            if depth == 0:
+                return i
+            i += 1
+        else:
+            i += 1
+    return n
 
 
 def _tokens(text: str):
