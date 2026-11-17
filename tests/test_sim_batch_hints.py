@@ -423,3 +423,65 @@ def test_errored_batch_text_output_prints_pdk_stamp_line(tmp_path, monkeypatch, 
     out = capsys.readouterr().out
     assert "pdk_stamp: not_comparable (client_stamp_unavailable)" in out
     assert "models_staged: false" in out
+
+
+# --------------------------------------------------------------------------- #
+# Defensive branches the CI coverage floor caught uncovered (#3312 ratchet).
+# --------------------------------------------------------------------------- #
+
+
+def test_comparison_sentence_is_empty_without_a_usable_comparison():
+    from klayout_tools.sim_batch_hints import _worker_comparison_sentence
+
+    assert _worker_comparison_sentence({}) == ""
+    assert _worker_comparison_sentence({"pdk_stamp_comparison": {}}) == ""
+    assert _worker_comparison_sentence({"pdk_stamp_comparison": "mismatch"}) == ""
+
+
+def test_worker_block_without_comparison_omits_the_line():
+    msg = _attributed_message(_worker_block(comparison={}))
+    assert "pdk_stamp_comparison" not in msg
+    assert "the fleet resolved PDK gf180mcuD" in msg
+
+
+def test_modelname_non_instance_card_names_the_card(tmp_path):
+    from klayout_tools.sim_batch_hints import attribute_modelname
+
+    log = (
+        "Circuit: * deck\n"
+        "Error on line 12 : c.x1 a b 1.0e-12 w=1.0e-5\n"
+        "Error: could not find a valid modelname\n"
+    )
+    diag = {"code": "model_bin_range", "message": "could not find a valid modelname"}
+    attribute_modelname(diag, log)
+    assert "'c.x1' (w=1.0e-5)" in diag["message"]
+
+
+def test_modelname_instance_card_without_params_omits_the_parenthetical():
+    from klayout_tools.sim_batch_hints import attribute_modelname
+
+    log = (
+        "Circuit: * deck\n"
+        "Error on line 570 : m.x1.m0 d g s b nfet_03v3\n"
+        "Error: could not find a valid modelname\n"
+    )
+    diag = {"code": "model_bin_range", "message": "could not find a valid modelname"}
+    attribute_modelname(diag, log)
+    assert "instance 'm.x1.m0' model 'nfet_03v3'" in diag["message"]
+    assert "(" not in diag["message"].split("ngspice card at expanded-deck line")[1]
+
+
+def test_modelname_message_with_card_only_log_keeps_the_card():
+    from klayout_tools.sim_batch_hints import attribute_modelname
+
+    log = "Error on line 570 : m.x1.m0 d g s b nfet_03v3 w=1.28e-4\n"
+    diag = {"code": "model_bin_range", "message": "could not find a valid modelname"}
+    attribute_modelname(diag, log)
+    assert "instance 'm.x1.m0' model 'nfet_03v3'" in diag["message"]
+
+
+def test_read_log_head_unreadable_path_is_empty(tmp_path):
+    from klayout_tools.sim_batch_hints import _read_log_head
+
+    assert _read_log_head(str(tmp_path / "absent" / "ngspice.log")) == ""
+    assert _read_log_head(str(tmp_path)) == ""  # a directory: IsADirectoryError
