@@ -48,9 +48,9 @@ Notable findings:
 Verification: `test-claim-staleness.sh` 104/104 (was 102/103 before the T16
 alignment), `test-pr-worktree-post-hook.sh` 14/14,
 `test-pr-worktree-isolation.sh` 38/38, `test-sweep-lease-publish.sh` 81/81.
-`test-sweep-lease-fence.sh` is deliberately unchanged: it pins with the fence
-and re-runs after PR #6222 merges (the fence drift check this audit leaves to
-#6108).
+After #6222 merged, `test-sweep-lease-fence.sh` passed 110/110 on the updated
+audit branch. This completes the #6236 fence drift check with the
+`LOOM_LEASE_HOST_ID` fix from #6108.
 
 Per-pin retirement conditions are unchanged and now also require the matching
 upstream issue from #6306 to exist and be resolved.

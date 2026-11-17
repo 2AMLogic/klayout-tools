@@ -306,11 +306,10 @@ scripts/pr-worktree.sh
 # defaults/roles/builder-pr.md is a symlink to the commands file). Ported the
 # same upstream fixes listed in the #1674 entry above; delta remaining is the
 # #2237 --sweep-id call site plus the #1674 section (via the twin). The fence
-# files themselves were deliberately NOT re-ported here: their v0.19.1306
-# drift includes the LOOM_LEASE_HOST_ID fix that #6108 / PR #6222 owns; after
-# that PR merges, test-sweep-lease-fence.sh must be re-run against the merged
-# fence (the #6236 drift check). Upstream issue for the sweep-id delta:
-# pending, tracked in #6306.
+# files received the LOOM_LEASE_HOST_ID fix in #6108 / PR #6222.
+# After #6222 merged, test-sweep-lease-fence.sh passed 110/110 on the updated
+# audit branch, completing the #6236 fence drift check.
+# Upstream issue for the sweep-id delta: pending, tracked in #6306.
 scripts/sweep-lease-fence.sh
 scripts/tests/test-sweep-lease-fence.sh
 roles/builder-pr.md
