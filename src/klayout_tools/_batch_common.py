@@ -16,6 +16,8 @@ import uuid
 from collections.abc import Sequence
 from typing import Any, TypeVar
 
+from . import env_provenance
+
 # ``ExtractError``/``NetlistError`` share a ``code``/``job_id``/``details``
 # keyword shape that ``type[Exception]`` cannot express, so construction goes
 # through ``Any`` while the return type stays the caller's own class.
@@ -148,7 +150,9 @@ def resumable(
 ) -> dict[str, Any] | None:
     """``environment`` plus the additive "incomplete, resumable" signal
     (issue #4856) when ``manifest`` (a shard manifest) still has shards that
-    were submitted but never launched; ``environment`` unchanged otherwise."""
+    were submitted but never launched; ``environment`` unchanged otherwise.
+    ``shard_map`` is repo-relative when the map lies inside a git repo
+    (issue #5542) -- the stderr hint keeps the absolute path."""
     count = manifest.unlaunched() if manifest is not None else 0
     if not count:
         return environment
@@ -156,7 +160,7 @@ def resumable(
         **(environment or {}),
         "unlaunched_shards": count,
         "resumable": True,
-        "shard_map": str(manifest.path),
+        "shard_map": env_provenance.repo_relative_str(manifest.path),
     }
 
 
@@ -167,13 +171,14 @@ def with_unrun_signal(
     corners that never ran (``lost_shard``, ``batch_job_interrupted``, ...;
     issue #5364): ``unrun_units`` (count), ``resumable: true`` and -- unless
     :func:`resumable` already set it -- ``shard_map`` (``state_path``, the
-    retained shard map or checkpoint). Returns ``(environment, hint_needed)``;
+    retained shard map or checkpoint, repo-relative when it lies inside a
+    git repo; issue #5542). Returns ``(environment, hint_needed)``;
     ``hint_needed`` is False when the unlaunched-shard hint already covers
     the rerun. Unchanged for ``unrun == 0`` or no retained state."""
     if not unrun or not state_path or environment is None:
         return environment, False
     out = {**environment, "unrun_units": unrun, "resumable": True}
-    out.setdefault("shard_map", state_path)
+    out.setdefault("shard_map", env_provenance.repo_relative_str(state_path))
     return out, "unlaunched_shards" not in environment
 
 

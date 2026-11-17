@@ -25,7 +25,14 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, cast
 
-from . import sim_batch, sim_batch_plan, sim_batch_shards, sim_decks, sim_remote
+from . import (
+    env_provenance,
+    sim_batch,
+    sim_batch_plan,
+    sim_batch_shards,
+    sim_decks,
+    sim_remote,
+)
 from .sim_errors import SimError
 
 #: Per-unit diagnostic code of a shard still running under ``--collect-partial``.
@@ -229,7 +236,7 @@ def run_split(
         [report for report, _s in results],
         [summary for _r, summary in results],
         outdir=outdir,
-        shard_map=str(manifest.path),
+        shard_map=env_provenance.repo_relative_str(manifest.path),
     )
 
 

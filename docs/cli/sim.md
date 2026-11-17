@@ -42,7 +42,9 @@ this document (and the code) win.
   `ceil(len(decks)/N)` balanced contiguous slices, one batch job each, merged
   into one report in request order, with a shard map (`batch-shards.json`,
   plus `deck_slices[]`) written to the artifacts dir and
-  `environment.remote.{split,shard_count,shard_map,shards[]}` in the report.
+  `environment.remote.{split,shard_count,shard_map,shards[]}` in the report
+  (`shard_map` repo-relative when the map lies inside a git repo, absolute
+  otherwise, like every `shard_map` emission).
   A list that already fits submits one job and writes no shard map.
   `--submit-only` on a deck list that would split is refused with
   `error.code: "batch_decks_split_unsupported"`; run it blocking, then
@@ -875,7 +877,14 @@ or more shards submitted but never launched (typically a capacity or
 concurrency-cap refusal with `batch.capacity_wait_s` at its default `0`),
 `environment.remote` carries three additive fields, absent when every shard
 launched: `unlaunched_shards` (count), `resumable: true`, and `shard_map` (the
-`batch-shards.json` path). The affected corners still report `lost_shard` and
+`batch-shards.json` path, repo-relative when it lies inside a git repo and
+absolute otherwise -- the stderr hints keep the absolute path either way).
+Each unlaunched shard is also a `null` entry in `environment.remote.fleet[]`,
+at its own index (the shard map's shard order): a client collecting per-job
+metadata across `fleet[]` must skip the `null` slots, and read job identity
+and runner skew from the null-safe `job_ids` / `runner_compatibility`
+roll-ups, which omit the lost shards. The affected corners still report
+`lost_shard` and
 the exit code stays 4; the fields only let an unattended caller tell
 "incomplete, rerun with `--resume` and the same outdir" from a real failure
 ([#4856](https://github.com/2AMLogic/klayout-tools/issues/4856)). Unattended
@@ -887,8 +896,11 @@ any corner that never ran (`lost_shard`, `batch_job_failed`,
 `batch_job_timeout`, `batch_poll_timeout`, `batch_job_interrupted`) and klt kept
 state to resume from (the shard map, else the `--resume` checkpoint),
 `environment.remote` additionally carries `unrun_units` (count) and
-`resumable: true`, with `shard_map` naming the retained file, and stderr names
-the `--resume` rerun once. Absent when every unit ran. `unrun_units` counts
+`resumable: true`, with `shard_map` naming the retained file (repo-relative
+when it lies inside a git repo, absolute otherwise), and stderr names
+the `--resume` rerun once. Each affected shard is a `null` entry in
+`environment.remote.fleet[]` at its own index, as for unlaunched shards above.
+Absent when every unit ran. `unrun_units` counts
 every corner that never ran; `unlaunched_shards` (above) counts only shards that
 were never launched, so with both present `unrun_units` is the larger. A lost shard is
 identified by `corners[].diagnostics[].code`, not by `status` (it stays
@@ -1085,7 +1097,10 @@ a plain attach. Any other shard (`running`, `interrupted`, unreadable status,
 or one the map records as submitted but never launched, reported `unlaunched`)
 is not waited on and never launched: each of its units is `lost_shard`, and
 `environment.remote` carries `unfinished_shards[]` (`index`, `job_id`, last
-observed `state`), `resumable: true` and `shard_map`. The exit code is `4`
+observed `state`), `resumable: true` and `shard_map` (repo-relative when it
+lies inside a git repo, absolute otherwise). Each unfinished shard is a
+`null` entry in `fleet[]` at its own index, as for unlaunched and lost
+shards above. The exit code is `4`
 (incomplete). With every shard `done` the report equals a plain `--attach`;
 with none done every unit is lost. The map is changed only by collected state,
 so a later plain `--attach` (or `--resume`) still finishes the remaining
@@ -3156,7 +3171,15 @@ not just equivalent.
   backend actually populates `environment.remote` (see "Remote backend"
   above) reports one `fleet[]` entry per host instead of a single block —
   each entry has the exact same fields as today's single-host block, or
-  `null` for a lost shard:
+  `null` for a lost shard — a shard that never returned a remote block,
+  whether it failed mid-run or was submitted but never launched (an
+  unlaunched shard additionally sets `unlaunched_shards` / `resumable`,
+  see "Unlaunched shards are a resumable signal" above). The array is
+  positional: index *i* is shard *i*, in the shard map's order, so a client
+  collecting per-job metadata across `fleet[]` must skip the `null` slots
+  rather than dereference them, and read job identity and runner skew from
+  the null-safe `job_ids` / `runner_compatibility` roll-ups (which omit the
+  `null` shards):
 
   ```json
   {
