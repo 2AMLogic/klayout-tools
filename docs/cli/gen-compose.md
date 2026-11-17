@@ -2898,6 +2898,15 @@ via_count, via_array, candidates_evaluated, truncated}}` (`via_count` is the
 total number of cuts: hops x rows x cols; `via_array` is `[rows, cols]`).
 `schema_version` is unchanged.
 
+**Frames (#5609).** `label_um` and `landing.x_um`/`y_um` are in the **source
+cell's own** frame — un-oriented, un-translated, matching the
+`generator_report` the block was built from. Every entry additionally
+carries composed-frame mirrors — `label_composed_um: {x, y}`, and when
+`landing` is non-null `landing.x_composed_um`/`y_composed_um` — oriented by
+the block's `orientation` and translated by its `offset_um`, the same
+transform as `bbox_um` and the composed `ports[]`. Drive downstream
+geometry (routers, via-drops) from the composed fields.
+
 ## Worked example
 
 **Verified end to end (#196, phase 3 canary bring-up; re-verified after

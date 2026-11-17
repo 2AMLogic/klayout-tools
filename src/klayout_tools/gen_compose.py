@@ -209,6 +209,7 @@ from .gen import (
     _fixed_cut_side_um as _fixed_cut_side_um,
 )
 from .gen_compose_boundary import draw_pins_and_boundary, parse_boundary
+from .gen_compose_derived_frame import add_composed_frames as _framed
 from .gen_compose_port_access import derive_label_ports, parse_ports_from_labels
 
 # The rest of this module never calls these directly -- they are re-exported
@@ -216,8 +217,7 @@ from .gen_compose_port_access import derive_label_ports, parse_ports_from_labels
 # imports/monkeypatches several of them by that path from before this split,
 # issue #1708). The redundant `X as X` aliases mark them as intentional
 # re-exports (mirrors `extract.py`'s `_sanitize_instance_name`/`ExtractError`/
-# `def_net_instance_pins` re-exports from `extract_abstract.py`/
-# `extract_spef.py`).
+# `def_net_instance_pins` re-exports from `extract_abstract.py`/`extract_spef.py`).
 from .gen_compose_routing import (
     _MAX_SAME_BLOCK_CROSS_LAYER_LANES as _MAX_SAME_BLOCK_CROSS_LAYER_LANES,
 )
@@ -4521,7 +4521,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             # #2927: additive -- only present for blocks that used
             # `cell.ports_from_labels`.
             **(
-                {"derived_ports": blocks[block_id]["derived_ports"]}
+                {"derived_ports": _framed(blocks[block_id], offsets_um[block_id])}
                 if blocks[block_id]["derived_ports"]
                 else {}
             ),
