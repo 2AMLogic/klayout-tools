@@ -42,6 +42,8 @@ def _stub_klayout_passing_git_through(monkeypatch):
             return real_run(
                 cmd, capture_output=capture_output, text=text, timeout=timeout
             )
+        if cmd[1:] == ["-v"]:
+            return fake_completed(stdout="KLayout 0.30.12\n")
         report_path = next(a for a in cmd if a.startswith("report=")).split("=", 1)[1]
         Path(report_path).write_text(_CLEAN_WITH_CATEGORIES_RDB, encoding="utf-8")
         return fake_completed()

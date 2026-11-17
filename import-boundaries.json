@@ -2348,6 +2348,12 @@
       "exporter": "klayout_tools._paths",
       "symbol": "_resolve_relative",
       "reason": "Issue #5464: `klt pex --dry-run` resolves a testbench's `netlist` field against its request directory with the same helper `pex.py`'s own first pass uses, so the dry run cannot resolve it differently; promote to public with the other _paths importers."
+    },
+    {
+      "consumer": "klayout_tools.drc_klayout_app",
+      "exporter": "klayout_tools.build_identity",
+      "symbol": "_recorded_klayout_version_expected",
+      "reason": "Issue #5660: the binary-worded --engine klayout mismatch warning must quote the exact build-time expected KLayout version that _provenance (same shared-core group) used to compute klayout_version_mismatch, so the warning cannot name an expected version the envelope did not; both call sites read it via the build_identity attribute, exactly as _provenance does."
     }
   ],
   "legacy_exceptions": {
