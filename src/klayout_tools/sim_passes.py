@@ -49,7 +49,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from . import sim_raw, sim_steps
+from . import sim_measurement_kind, sim_raw, sim_steps
 from .sim_errors import SimError
 
 #: What an ``alter`` entry changes.
@@ -287,8 +287,12 @@ def refuse_xyce(analysis: dict[str, Any], engine: str) -> None:
 # --------------------------------------------------------------------------- #
 
 
+#: Prefix of the rawfile each AC pass writes per corner.
+_RAWFILE_PREFIX = "ac_pass"
+
+
 def rawfile_path(corner_dir: str, index: int) -> str:
-    return os.path.join(corner_dir, f"ac_pass_{index}.raw")
+    return sim_measurement_kind.rawfile_path(corner_dir, _RAWFILE_PREFIX, index)
 
 
 def _format_value(value: float) -> str:
