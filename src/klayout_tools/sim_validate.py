@@ -16,6 +16,7 @@ from . import (
     sim_cycle_mean,
     sim_energy,
     sim_eye,
+    sim_forms,
     sim_noise,
     sim_search,
     sim_settled,
@@ -283,21 +284,16 @@ def _validate_rawfile_form(
 
 
 def _require_measurement_form(name: Any, has_form: bool) -> None:
-    """A ``measurements[]`` entry needs a ``name`` and one declared form."""
+    """A ``measurements[]`` entry needs a ``name`` and one declared form.
+
+    The option list is rendered from :data:`sim_forms.FORMS`, the single form
+    registry, so a newly registered form cannot ship missing from it (#6328 --
+    ``eye``/``step_resolution``/``settled`` once were)."""
     if name is None or not has_form:
+        forms = ", ".join(f"'{form}'" for form in sim_forms.FORMS)
         raise SimError(
             "each request.measurements[] entry requires 'name' and "
-            "exactly one of 'spice' (a verbatim .meas card), 'expr' "
-            "(an ngspice expression evaluated after the analysis), "
-            "'crossings' (a threshold-crossing time series), "
-            "'cycle_mean' (a mean over whole reference cycles), "
-            "'energy' (a source's energy over a transient window), "
-            "'stress' (a node pair's worst |V| over a transient window), "
-            "'noise' (a spot/band-integrated noise-spectrum value) or "
-            "'transfer' (an AC return-ratio metric), "
-            "'tian' (a dual-injection AC stability metric) or "
-            "'snm' (a butterfly static noise margin of a DC sweep) or "
-            "'search' (a bisection boundary over a source value)"
+            f"exactly one of {forms}"
         )
 
 
