@@ -25,7 +25,7 @@ from . import (
     sim_tian,
     sim_transfer_meas,
 )
-from .sim_case_names import validate_case_variant_names
+from .sim_case_names import validate_case_variant_names, validate_measurement_shapes
 from .sim_errors import SimError
 
 #: A `.meas` card's declared analysis type (the token right after
@@ -216,16 +216,7 @@ def _validate_measurement_forms(measurements_spec: list[dict[str, Any]]) -> None
     Split into helpers so no one function carries the whole rule set's
     branch count (see ``scripts/check_complexity_baseline.py``).
     """
-    if not isinstance(measurements_spec, list):
-        raise SimError(
-            "request.measurements must be an array of objects "
-            f"(got {type(measurements_spec).__name__})"
-        )
-    for index, spec in enumerate(measurements_spec):
-        if not isinstance(spec, dict):
-            raise SimError(
-                f"measurements[{index}] must be an object (got {type(spec).__name__})"
-            )
+    for spec in validate_measurement_shapes(measurements_spec):
         _validate_measurement_form(spec)
     _validate_expr_names_unique(measurements_spec)
     validate_case_variant_names(measurements_spec)
