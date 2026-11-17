@@ -231,6 +231,20 @@ packages = ["src/klayout_tools"]
 # JSON-contract schemas: `klt mcp serve` serves them as MCP resources, so a
 # wheel-only install must carry them (issue #5420).
 "docs/schemas" = "klayout_tools/data/schemas"
+# Shared contract docs the per-verb pages cite as authority: 63 of the 68
+# shipped `cli/*.md` pages link `../json-contract.md` and 6 link
+# `../coverage-contract.md`, so ship them as siblings of `data/cli/` to keep
+# those relative links resolving for a wheel-only install (issue #5819).
+# Also cited by the shipped set and safe to ship: `releasing-native.md` (1 ref
+# from the CLI pages) links no other markdown file, and `type-checking.md`
+# (cited by `json-contract.md` itself) links only `json-contract.md`, which
+# ships above. `docs/ARCHITECTURE.md` (2 refs from the CLI pages) is
+# deliberately left out: it links `../scripts/README.md` and
+# `library/README.md`, which would dangle in the wheel (issue #5819).
+"docs/json-contract.md" = "klayout_tools/data/json-contract.md"
+"docs/coverage-contract.md" = "klayout_tools/data/coverage-contract.md"
+"docs/releasing-native.md" = "klayout_tools/data/releasing-native.md"
+"docs/type-checking.md" = "klayout_tools/data/type-checking.md"
 
 # Distribution version (issue #2823). `base-version` is the release this
 # checkout is at or working towards -- bump it here (then `uv lock`) when
