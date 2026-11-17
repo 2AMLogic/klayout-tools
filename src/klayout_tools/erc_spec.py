@@ -16,7 +16,7 @@ from typing import Any
 
 from ._jsonnum import is_int
 from ._paths import _reject_unknown_keys, _validate_via_entries, parse_layer_datatype
-from .erc_spec_boxes import (  # noqa: F401 -- _parse_um_boxes is re-exported
+from .erc_spec_boxes import (  # -- _parse_um_boxes is re-exported
     _parse_isolation_boxes,
     _parse_tap_boxes,
     _parse_um_boxes,
