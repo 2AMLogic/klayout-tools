@@ -2,7 +2,31 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
+
+from .place_and_route_portable import PDK_ROOT_TOKEN, _under
+
+
+def _tokenise_pdk_pin_order_sources(sources: Any, pdk_root: str | None) -> Any:
+    """Issue #5812: ``pin_order_sources[].path`` for a file under the resolved
+    PDK root is recorded as ``"$PDK_ROOT/<relative>"`` (the token
+    ``portable_paths`` already produces) rather than an absolute host path, so
+    a committed report does not leak the PDK's install location. Paths outside
+    the PDK root (caller-supplied ``reference.pin_order_files``) are left
+    absolute -- ``portable_paths: true`` still handles those. Same type, no new
+    fields; the compare itself already ran on the real paths."""
+    if not pdk_root or not isinstance(sources, list):
+        return sources
+    out: list[Any] = []
+    for entry in sources:
+        path = entry.get("path") if isinstance(entry, dict) else None
+        if isinstance(path, str) and os.path.isabs(path):
+            relative = _under(path, pdk_root)
+            if relative is not None and relative != ".":
+                entry = {**entry, "path": f"{PDK_ROOT_TOKEN}/{relative}"}
+        out.append(entry)
+    return out
 
 
 def assemble_lvs_report(
@@ -135,7 +159,9 @@ def assemble_lvs_report(
         # "where did this cell's pin order come from". Omitted entirely for
         # every other `reference.form`, which reads no pin-order source at
         # all -- never a spuriously present empty list.
-        provenance["pin_order_sources"] = reference_pin_order_sources
+        provenance["pin_order_sources"] = _tokenise_pdk_pin_order_sources(
+            reference_pin_order_sources, (reference_pdk_info or {}).get("root")
+        )
 
     repo_root = common_repo_root(
         [layout_hash_source, reference_netlist_path],

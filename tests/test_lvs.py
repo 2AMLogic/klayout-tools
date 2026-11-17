@@ -21334,13 +21334,57 @@ def _portable_macro_request(tmp_path: Path, **extra) -> tuple[str, str]:
     return json.dumps(request), root
 
 
-def test_run_lvs_portable_paths_default_keeps_absolute_paths(tmp_path):
-    """Omitting `portable_paths` leaves the report as it was (issue #3798)."""
+def test_run_lvs_portable_paths_default_tokenises_pdk_rooted_pin_order_sources(
+    tmp_path,
+):
+    """Issue #5812 (narrow exception to #3798's byte-identical default):
+    without `portable_paths`, a pin-order file under the PDK root is recorded
+    as `$PDK_ROOT/<rel>` -- no absolute home path leaks -- and an explicit
+    `portable_paths: false` is identical."""
+    from klayout_tools.env_provenance import find_absolute_path_fields
+
     request, _ = _portable_macro_request(tmp_path)
     explicit_false, _ = _portable_macro_request(tmp_path, portable_paths=False)
-    sources = run_lvs(request)["provenance"]["pin_order_sources"]
-    assert all(os.path.isabs(entry["path"]) for entry in sources)
+    report = run_lvs(request)
+    sources = report["provenance"]["pin_order_sources"]
+    assert [entry["path"] for entry in sources] == [
+        "$PDK_ROOT/sky130A/libs.ref/sky130_fd_sc_hd/spice/sky130_fd_sc_hd.spice",
+        "$PDK_ROOT/sky130A/libs.ref/sky130_sram_macros/spice/"
+        "sky130_sram_1kbyte_1rw1r_32x256_8.spice",
+        "$PDK_ROOT/sky130A/libs.ref/sky130_sram_macros/spice/"
+        "sky130_sram_2kbyte_1rw1r_32x512_8.spice",
+    ]
+    assert not [
+        hit
+        for hit in find_absolute_path_fields(report)
+        if "pin_order_sources" in str(hit)
+    ]
     assert run_lvs(explicit_false)["provenance"]["pin_order_sources"] == sources
+
+
+def test_run_lvs_default_keeps_non_pdk_pin_order_files_absolute(tmp_path):
+    """Issue #5812: only PDK-rooted sources are tokenised. A caller-supplied
+    `reference.pin_order_files` entry outside the PDK root stays absolute by
+    default, including a sibling dir whose name merely prefix-matches the PDK
+    root."""
+    root = _make_fake_macro_pdk(tmp_path)
+    lookalike = tmp_path / "pdk_install_extra"
+    lookalike.mkdir()
+    macro_path = _write(lookalike / "macro.spice", _SRAM_MACRO_SPICE)
+    request = _macro_request(
+        tmp_path,
+        {
+            "library": "sky130_fd_sc_hd",
+            "pdk": "sky130A",
+            "pdk_root": root,
+            "pin_order_files": [macro_path],
+        },
+    )
+    sources = run_lvs(request)["provenance"]["pin_order_sources"]
+    assert sources[0]["path"].startswith("$PDK_ROOT/")
+    assert sources[-1]["library"] is None
+    assert os.path.isabs(sources[-1]["path"])
+    assert os.path.basename(sources[-1]["path"]) == "macro.spice"
 
 
 def test_run_lvs_portable_paths_true_leaves_no_absolute_host_path(tmp_path):
