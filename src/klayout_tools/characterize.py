@@ -2209,20 +2209,14 @@ def _build_response(
         "leakage": single["leakage"] if single else None,
         "cells": entries,
         "liberty": {
-            # Plain absolute string, not the `{path, scope}` envelope: this is
-            # a *generated artifact a caller chains onward* (into `klt sta`'s
-            # `pdk.liberty`, say), the same role `klt extract`'s
-            # `netlist_path` and `klt sim`'s `corners[].artifacts.*` fill --
-            # see docs/json-contract.md's "Path fields: envelope vs.
-            # plain string" table, which lists both shapes and which fields
-            # use each. `cell.netlist` above is an *input* and does use the
-            # envelope, matching `klt sim`'s own `netlist`.
+            # Plain absolute string, not the `{path, scope}` envelope: this
+            # is a *generated artifact a caller chains onward*, the same
+            # role `klt extract`'s `netlist_path` and `klt sim`'s
+            # `corners[].artifacts.*` fill -- see docs/json-contract.md's
+            # "Path fields: envelope vs. plain string" table. `cell.netlist`
+            # above is an *input* and does use the envelope, matching
+            # `klt sim`'s own `netlist`.
             "path": emitted_path,
-            # Bare-hex SHA-256 of the emitted `.lib` bytes (additive field, no
-            # `schema_version` bump -- same convention as `klt synthesize`'s
-            # `netlist_sha256`, #2452). The `.lib` is written once and only
-            # read afterwards (round-trip, `--compare-to`), so this describes
-            # the final on-disk bytes; a later in-place edit breaks the pin.
             "sha256": sha256_file(emitted_path),
             "library_name": library.name,
             "cell_count": len(library.cells),
