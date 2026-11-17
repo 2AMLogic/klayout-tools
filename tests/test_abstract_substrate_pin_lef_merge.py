@@ -9,8 +9,10 @@ conductor joins the deck's substrate global net.
 """
 
 from pathlib import Path
+from types import SimpleNamespace
 
 from klayout_tools.extract import run_extract
+from klayout_tools.extract_warnings import isolated_substrate_global_warning
 from test_extract import _make_abstract_cells_layout, _write_gds
 
 _LEF_WITH_VNB = """\
@@ -216,3 +218,26 @@ def test_isolated_substrate_global_warning_not_fired_without_lef(tmp_path):
         for w in report["warnings"]
         if "substrate-role pin" in w and "isolated node" in w
     ]
+
+
+def test_isolated_substrate_global_warning_tolerates_a_missing_substrate_net():
+    """Unit-tested directly for the ``net is None`` guard: substrate-role
+    pins recorded, but the deck's synthesized substrate global absent from
+    the emitted netlist's top circuit -- the warning stays silent rather
+    than raising. Unreachable through ``_wire_abstract_cells`` today (the
+    binding always creates the net it binds to), so no drawn layout can
+    drive it: defence in depth against a future caller, pinning the moved
+    helper's own guard (issue #5632 put it under ``extract_warnings``' 100%
+    floor)."""
+
+    class _NoSubstrateNetCircuit:
+        def net_by_name(self, _name):
+            return None
+
+    entries = isolated_substrate_global_warning(
+        _NoSubstrateNetCircuit(),
+        SimpleNamespace(substrate_net="vsubs"),
+        {"SC_BUF": {"VNB"}},
+        [{"cell": "SC_BUF", "instance_count": 2}],
+    )
+    assert entries == []

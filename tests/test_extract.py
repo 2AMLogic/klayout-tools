@@ -11947,6 +11947,21 @@ def test_collapsed_abstract_pin_warning_aggregates_beyond_five_instances():
     assert "... and 3 more instance(s)" in entry
 
 
+def test_tied_abstract_pin_warning_aggregates_beyond_five_instances():
+    """The plain issue #1366 tie entry, unit-tested directly for its own
+    example-list truncation: at most
+    ``_ABSTRACT_TIED_PIN_WARNING_EXAMPLES`` instances spelled out, then the
+    remainder counted -- the same readable-``warnings[]`` discipline the
+    escalated entry above pins down, on the helper its move to
+    ``extract_warnings`` (issue #5632) put under that module's 100% floor."""
+    tied = [(f"MACRO_{index}", "MACRO", "TIED", ["A", "B"], 2) for index in range(8)]
+    (entry,) = extract_abstract._tied_abstract_pin_warning(tied)
+    assert "8 --abstract-cells instance(s)" in entry
+    assert "MACRO_4 (cell 'MACRO')" in entry
+    assert "MACRO_5 (cell 'MACRO')" not in entry
+    assert "... and 3 more instance(s)" in entry
+
+
 def _make_multi_layer_pin_macro_layout(extra_pin: bool = False) -> kdb.Layout:
     """Issue #2142's reproduction layout: one macro whose declared pins are
     each labelled on **two** conductors, over a parent-level power strap.
