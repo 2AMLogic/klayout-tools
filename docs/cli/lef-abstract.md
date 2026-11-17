@@ -167,6 +167,41 @@ KLayout's own hole-resolution via `to_simple_polygon()` keeps this a single,
 self-touching point list, an acceptable simplification for an abstract
 view rather than a hole-aware multi-`RECT` decomposition).
 
+### Routing-resource figure
+
+Issue #5677 (additive). A hierarchical floorplan has to answer, before it
+commits, *"how much routing resource does this abstract leave over the
+macro, per layer?"* — the question that decides whether a top-level route
+can cross a hard macro at all when macros abut with no channel. The
+`routing_resource` array answers it from the same final OBS regions the
+command has already built (pin ports subtracted, clipped to the outline),
+in either `--obs-mode`, so it is a static property of the emitted abstract
+rather than a guess from the tech LEF's pitches:
+
+- `obstructed_fraction` — the OBS area actually written, divided by the
+  macro outline area. `0.0` on a fully free layer; in `coarse` mode the
+  whole-macro bounding rectangle normally drives it near `1.0`.
+- `free_tracks` — the count of the layer's preferred-direction tracks whose
+  **full-length** strip across the macro (at the layer's own `WIDTH`,
+  centred on each track, entirely inside the outline) is unobstructed. This
+  is the "will N nets fit across this macro?" number. Track positions use
+  the tech LEF `OFFSET`/`PITCH` for the layer; a missing `OFFSET` defaults
+  the track origin to `0` (the LEF/DEF convention for an unstated grid
+  origin).
+- `direction` and `pitch_um` — the tech LEF's own `DIRECTION` and the
+  track pitch (the `PITCH` component along the non-preferred axis), so the
+  figure is auditable against the deck it came from.
+
+One entry exists per routing layer of the tech LEF — including layers with
+no OBS geometry at all, so a fully free layer is never silently absent. In
+`coarse` mode a layer whose bounding rectangle spans the outline honestly
+reports `free_tracks: 0`; in `detailed` mode the real remainder shows.
+A layer missing a usable `DIRECTION`, `PITCH`, or `WIDTH` cannot enumerate
+a track grid: it reports `free_tracks: null` (and `pitch_um: null` when
+`DIRECTION`/`PITCH` is the missing one) plus a `warnings[]` entry — never a
+guessed grid. `obstructed_fraction` needs none of those and is always
+reported.
+
 ## Response
 
 ```json
@@ -190,6 +225,10 @@ view rather than a hole-aware multi-`RECT` decomposition).
   "unroutable_pins": [],
   "obs": [{ "layer": "met1", "shape_count": 1 }],
   "obs_shape_count": 1,
+  "routing_resource": [
+    { "layer": "li1", "direction": "VERTICAL", "pitch_um": 0.46, "obstructed_fraction": 0.0, "free_tracks": 11 },
+    { "layer": "met1", "direction": "HORIZONTAL", "pitch_um": 0.34, "obstructed_fraction": 0.06, "free_tracks": 13 }
+  ],
   "warnings": [],
   "self_check": { "status": "pass", "findings": [], "missing_macros": [], "unexpected_macros": [] },
   "power_pins": {
@@ -226,7 +265,8 @@ view rather than a hole-aware multi-`RECT` decomposition).
 | `obs_mode` | string | `"detailed"` or `"coarse"` — echo of `--obs-mode` (issue #4283, additive). |
 | `obs` | array\<object\> | `{layer, shape_count}` per LEF layer with obstruction geometry, layer-name sorted. |
 | `obs_shape_count` | integer | Sum of every `obs[].shape_count`. |
-| `warnings` | array\<string\> | Non-fatal notes: a pin fell back to synthesized geometry, or a pin's layer did not resolve to a known routing LEF layer. `[]` on a run with no such notes. |
+| `routing_resource` | array\<object\> | Issue #5677 (additive): one entry per routing layer of the tech LEF — layers with OBS geometry and fully free layers alike — layer-name sorted: `{layer, direction, pitch_um, obstructed_fraction, free_tracks}`. See "Routing-resource figure" below. |
+| `warnings` | array\<string\> | Non-fatal notes: a pin fell back to synthesized geometry, a pin's layer did not resolve to a known routing LEF layer, or a routing layer's `routing_resource` entry could not enumerate a track grid (no usable `DIRECTION`/`PITCH`/`WIDTH` — that layer reports `free_tracks: null` instead of a guess). `[]` on a run with no such notes. |
 | `self_check` | object | Structural self-check of the LEF file **read back from disk** after writing (issue #2769) — see "Structural self-check" below. `{status, findings, missing_macros, unexpected_macros}`; `status` is `"pass"` or `"fail"` and is the verdict of record for whether `output` may be consumed. |
 | `power_pins` | object | Issue #2839 (additive): the supply-pin verdict over the same read-back bytes — see "Supply-pin verdict" below. Affects the exit code only with `--require-power-pins`. |
 | `provenance` | object | The shared envelope block (`docs/json-contract.md`). `deck` names `--cell-library` and hashes the resolved tech LEF; `pdk` is `find_pdk()`'s resolved triple; `input` is the content hash of `<file>`. |
