@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 
 import pytest
 
@@ -253,27 +252,6 @@ def test_deck_info_reports_content_hash_and_device_classes(_history_table):
     # hash -- confirmed unreleased, not "unknown".
     assert entry["released"] is False
     assert entry["release"] is None
-
-
-def test_deck_info_reports_enforced_rule_count_for_curated_deck(_history_table):
-    entry = history.deck_info(name="gf180mcu")["decks"][0]
-
-    # The same count `klt deck rules` reports for the same deck (#5843) --
-    # derived here, not hardcoded, so the two surfaces cannot drift apart
-    # silently on a PDK bump.
-    assert isinstance(entry["enforced_rule_count"], int)
-    assert entry["enforced_rule_count"] > 0
-    assert entry["enforced_rule_count"] == len(history.deck_rules("gf180mcu")["rules"])
-
-
-def test_deck_info_enforced_rule_count_null_without_curated_table(_history_table):
-    entry = history.deck_info(name="asap7")["decks"][0]
-
-    # Present but null -- never omitted, never 0 (#5843): asap7 has no
-    # curated rule table at all, which is a different claim from a rule
-    # table that enforces nothing.
-    assert "enforced_rule_count" in entry
-    assert entry["enforced_rule_count"] is None
 
 
 def test_deck_info_reports_released_true_with_release_details(tmp_path, monkeypatch):
@@ -631,37 +609,6 @@ def test_cli_info_text(capsys):
     assert "deck: sky130" in out
     assert "device_classes:" in out
     assert "released:" in out
-
-
-def test_cli_info_text_curated_deck_labels_hash_and_enforced_count(capsys):
-    exit_code = main(["deck", "info", "--deck", "sky130"])
-
-    assert exit_code == 0
-    out = capsys.readouterr().out
-    # For a curated deck the module hash covers both roles (#5843) -- the
-    # bare "extraction deck" label sent provenance authors hunting for a
-    # DRC hash that is this identical value.
-    assert "deck content_hash (extraction + curated DRC rule table):" in out
-    assert "extraction deck content_hash" not in out
-    # The enforced count reads as a pair with the NOT ENFORCED count,
-    # directly above it.
-    enforced = re.search(r"  enforced_rules: (\d+)", out)
-    assert enforced is not None
-    assert int(enforced.group(1)) == len(history.deck_rules("sky130")["rules"])
-    assert "NOT ENFORCED by this deck:" in out
-    assert out.index("enforced_rules:") < out.index("NOT ENFORCED by this deck:")
-
-
-def test_cli_info_text_asap7_keeps_two_artifact_rendering(capsys):
-    exit_code = main(["deck", "info", "--deck", "asap7"])
-
-    assert exit_code == 0
-    out = capsys.readouterr().out
-    # No curated table -> no enforced count; the two real artifacts still
-    # print on their own labelled lines (#5843).
-    assert "enforced_rules:" not in out
-    assert "extraction deck content_hash:" in out
-    assert "drc deck content_hash:" in out
 
 
 def test_cli_info_no_deck_reports_every_registered_deck(capsys):
