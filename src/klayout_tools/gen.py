@@ -331,6 +331,7 @@ from .gen_pcells import (
     _build_well_island_pcell,
 )
 from .gen_pdk_cell import _PDK_CELL_SPEC
+from .gen_pitch import _clamp_pitch_override
 from .gen_spec import _GeneratorSpec
 from .pdk import PdkNotFoundError, find_pdk, resolve_pdk_dbu
 
@@ -1448,17 +1449,6 @@ def _mos_array_well_tap_layout(
         "width_um": contact_region_um,
         "xy": (cx, cy),
     }
-
-
-def _clamp_pitch_override(override_um: float, minimum_um: float) -> tuple[float, bool]:
-    """Resolve a pitch override against its legal minimum (issue #3299).
-
-    Returns ``(effective_pitch_um, clamped)``: ``0.0`` means "no override"
-    (the minimum, not clamped); a positive value below ``minimum_um`` is
-    clamped up to it and reported as clamped."""
-    if override_um <= 0.0:
-        return minimum_um, False
-    return max(override_um, minimum_um), override_um < minimum_um
 
 
 def _shared_sd_col_pitch(
@@ -2742,6 +2732,7 @@ def _diff_pair_layout(
     contact_gate_offset_um: float = 0.0,
     bottom_endcap_um: float = 0.0,
     sd_implant_margin_um: float = 0.0,
+    pitch_x_um: float = 0.0,
     top_endcap_um: float = 0.0,
     tap_reach_um: float = 0.0,
 ) -> dict[str, Any]:
@@ -2770,8 +2761,10 @@ def _diff_pair_layout(
     present-day values by default so omitting them reproduces prior geometry
     byte-for-byte; a caller that needs more room to route both matched
     devices' gate nets out of the block can grow either and pay the area.
-    ``col_pitch`` (the within-row gap between interleaved splits) stays
-    fixed to ``MIN_SAME_LAYER_SPACING_UM`` -- out of scope for #484.
+    ``pitch_x_um`` (issue #5764) overrides the within-row column pitch
+    (the room a ``gen-compose`` route needs between adjacent units); like
+    ``mos_array``'s #3299 knob it is clamped up to the legal minimum and
+    ``0.0`` (default) is a strict no-op, uniform so common-centroid holds.
 
     ``gate_contact`` (issue #492) is forwarded to :func:`_mos_unit_layout`;
     it grows each unit's ``bbox_height_um``, so both the row pitch and the
@@ -2795,8 +2788,9 @@ def _diff_pair_layout(
         sd_implant_margin_um=sd_implant_margin_um,
         top_endcap_um=top_endcap_um,
     )
-    col_pitch = unit["total_len_um"] + MIN_SAME_LAYER_SPACING_UM
+    min_col_pitch = unit["total_len_um"] + MIN_SAME_LAYER_SPACING_UM
     row_pitch = unit["bbox_height_um"] + row_spacing_um
+    col_pitch, pitch_x_clamped = _clamp_pitch_override(pitch_x_um, min_col_pitch)
 
     counts = {"A": 0, "B": 0}
     cells = []
@@ -2815,7 +2809,9 @@ def _diff_pair_layout(
                 }
             )
 
-    core_w = splits * col_pitch - MIN_SAME_LAYER_SPACING_UM
+    # True units' footprint at any pitch (#5764): the old shortcut only
+    # equals this at the default pitch (`col_pitch == min_col_pitch`).
+    core_w = (splits - 1) * col_pitch + unit["total_len_um"]
     core_h = 2 * row_pitch - row_spacing_um
 
     ring = None
@@ -2842,6 +2838,8 @@ def _diff_pair_layout(
         "unit": unit,
         "cells": cells,
         "col_pitch_um": col_pitch,
+        "min_col_pitch_um": min_col_pitch,
+        "pitch_x_clamped": pitch_x_clamped,
         "row_pitch_um": row_pitch,
         "core_w_um": core_w,
         "core_h_um": core_h,
