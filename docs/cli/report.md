@@ -54,6 +54,17 @@ detected from its own JSON structure:
 | `layout-metrics` | top-level `slug` + `name` + `status` together (`klt layout-metrics`'s `layout.json` shape) | a Metric/Value key-metrics table, plus DRC/Renders/Signals summary lines when present |
 | `error`          | a top-level `error` object with a `message` (any verb's own `--format json` error output, per `docs/json-contract.md`) | the failed command name and message               |
 
+A `klt drc --engine both` cross-check envelope (`mode: "crosscheck"`, whose
+per-engine `violations[]` live under `reports.curated` / `reports.native`
+rather than at the top level) is accepted too: it is projected to a `drc`
+section with the same projection `klt signoff` uses
+(`signoff_drc_crosscheck.crosscheck_project`). The section's `status` is the
+cross-check's own top-level verdict (`clean` / `violations` / `not_checked`)
+and the table shows the curated side's violation rows — the same side
+`klt drc` prints; native-side rows are not merged in, since they describe the
+same geometry and would double-count. The per-engine comparison and
+disclosure are not rendered.
+
 A file matching none of these — including one with no `schema_version` at
 all — is a **hard error** (see "Errors" below), not an empty or silently
 skipped section: a typo'd path or a non-`klt` JSON file should fail loudly,

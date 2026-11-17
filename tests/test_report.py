@@ -282,6 +282,104 @@ def test_missing_schema_version_raises(tmp_path):
         build_report([path])
 
 
+def _crosscheck_envelope(curated: dict, native: dict | None, status: str) -> dict:
+    """A ``klt drc --engine both`` envelope (``drc_crosscheck.py`` shape):
+    the per-engine ``violations[]`` live under ``reports.*``, never at the
+    top level (issue #6125)."""
+    return {
+        "schema_version": 2,
+        "mode": "crosscheck",
+        "file": "design.gds",
+        "status": status,
+        "identity": None if native is None else {"input_hash_match": True},
+        "comparison": None,
+        "reports": {"curated": curated, "native": native},
+    }
+
+
+@pytest.mark.parametrize(
+    ("curated", "native", "status", "expected_rows"),
+    [
+        pytest.param(
+            DRC_CLEAN_ENVELOPE, DRC_CLEAN_ENVELOPE, "clean", 0, id="both-clean"
+        ),
+        pytest.param(
+            DRC_VIOLATIONS_ENVELOPE,
+            DRC_CLEAN_ENVELOPE,
+            "violations",
+            1,
+            id="curated-violating",
+        ),
+        pytest.param(
+            DRC_VIOLATIONS_ENVELOPE,
+            DRC_VIOLATIONS_ENVELOPE,
+            "violations",
+            1,
+            id="both-violating-not-double-counted",
+        ),
+        pytest.param(DRC_CLEAN_ENVELOPE, None, "not_checked", 0, id="native-null"),
+    ],
+)
+def test_crosscheck_envelope_renders_as_drc_section(
+    tmp_path, capsys, curated, native, status, expected_rows
+):
+    """A `--engine both` envelope renders as one `drc` section carrying the
+    cross-check's own top-level verdict, not the curated side's status."""
+    path = _write(tmp_path, "cross.json", _crosscheck_envelope(curated, native, status))
+
+    result = build_report([path])
+
+    (section,) = result["sections"]
+    assert section["kind"] == "drc"
+    assert section["status"] == status
+    assert section["item_count"] == expected_rows
+    assert "_drc_crosscheck_source" not in json.dumps(result)
+
+    assert main(["report", path, "--format", "json"]) == 0
+    assert json.loads(capsys.readouterr().out)["sections"][0]["status"] == status
+
+
+def test_crosscheck_envelope_renders_curated_violation_rows(tmp_path):
+    path = _write(
+        tmp_path,
+        "cross.json",
+        _crosscheck_envelope(DRC_VIOLATIONS_ENVELOPE, DRC_CLEAN_ENVELOPE, "violations"),
+    )
+
+    result = build_report([path])
+
+    assert "poly.width.1" in result["markdown"]
+    assert "poly.width.1" in result["text"]
+    assert "_drc_crosscheck_source" not in result["markdown"]
+    assert "_drc_crosscheck_source" not in result["text"]
+
+
+def test_crosscheck_section_matches_single_engine_render_of_same_layout(tmp_path):
+    single = _write(tmp_path, "single.json", DRC_VIOLATIONS_ENVELOPE)
+    cross = _write(
+        tmp_path,
+        "cross.json",
+        _crosscheck_envelope(
+            DRC_VIOLATIONS_ENVELOPE, DRC_VIOLATIONS_ENVELOPE, "violations"
+        ),
+    )
+
+    single_section = build_report([single])["sections"][0]
+    cross_section = build_report([cross])["sections"][0]
+
+    assert {**cross_section, "source": None} == {**single_section, "source": None}
+
+
+def test_malformed_crosscheck_still_raises_unrecognized_shape(tmp_path):
+    """`reports.curated` not DRC-shaped is not projected, so it keeps
+    falling through to the existing loud error rather than crashing."""
+    malformed = _crosscheck_envelope({"status": "clean"}, None, "clean")
+    path = _write(tmp_path, "bad-cross.json", malformed)
+
+    with pytest.raises(ReportError, match="unrecognized shape"):
+        build_report([path])
+
+
 def test_unrecognized_shape_raises(tmp_path):
     path = _write(tmp_path, "unknown.json", {"schema_version": 1, "foo": "bar"})
 
