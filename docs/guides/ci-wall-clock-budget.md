@@ -351,7 +351,10 @@ The trade-off accepted is a dependency on the Actions API, which is why
 [`scripts/fetch_ci_wall_clock_history.py`](../../scripts/fetch_ci_wall_clock_history.py)
 **never fails**: any error writes a valid, empty history and exits 0, and the
 check falls back to the committed ceilings — its pre-#2615 behaviour, not a
-broken build.
+broken build. Transient API failures — an HTTP 5xx, a timeout, a dropped
+connection — are retried a bounded three times with short backoff first
+(#6214, in [`scripts/ci_wall_clock_gh.py`](../../scripts/ci_wall_clock_gh.py));
+only a failure that survives them falls back.
 
 ### What this model does *not* catch
 

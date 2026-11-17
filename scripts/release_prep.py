@@ -18,7 +18,9 @@ version changes nothing):
 - ``pyproject.toml``: ``[tool.hatch.version] base-version``;
 - ``CHANGELOG.md``: inserts ``## X.Y.Z (date)`` directly below
   ``## Unreleased`` (the unreleased entries become the release's entries and
-  ``## Unreleased`` stays, empty, for the next cycle);
+  ``## Unreleased`` stays, empty, for the next cycle). A section with no
+  entries has nothing to release; the run refuses (``PrepError``, before any
+  file is written) rather than cut an empty release section (issue #6086);
 - ``docs/cli/signoff.md``: "first release after `vPREV`" availability notes
   become "`klt X.Y.Z`" (PREV is the version being superseded). A placeholder
   anchored on a release older than PREV can never be resolved again; the prep
@@ -35,7 +37,8 @@ with the ``(#NNN)`` suffix a squash merge appends, or the merge-commit subject
 produces) -- the tag job's gate for
 "tag this commit". It prints nothing and exits 0 otherwise.
 
-Exit codes: 0 ok; 2 bad input (bad version, no ``## Unreleased`` heading, ...).
+Exit codes: 0 ok; 2 bad input (bad version, no ``## Unreleased`` heading, an
+empty ``## Unreleased`` section, ...).
 """
 
 from __future__ import annotations
@@ -91,13 +94,39 @@ def bump_pyproject(text: str, new: str) -> str:
     return _BASE_VERSION_RE.sub(rf"\g<1>{new}\g<3>", text, count=1)
 
 
-def add_changelog_heading(text: str, new: str, date: str) -> str:
-    """Insert ``## new (date)`` below ``## Unreleased``; no-op if present."""
-    if re.search(rf"^## {re.escape(new)} \(", text, re.MULTILINE):
-        return text
+def _unreleased_entries(text: str) -> str | None:
+    """Body of the ``## Unreleased`` section (to the next ``## `` or EOF).
+
+    None when there is no ``## Unreleased`` heading at all.
+    """
     match = _UNRELEASED_RE.search(text)
     if match is None:
+        return None
+    next_heading = re.search(r"^## ", text[match.end() :], re.MULTILINE)
+    end = match.end() + next_heading.start() if next_heading else len(text)
+    return text[match.end() : end]
+
+
+def add_changelog_heading(text: str, new: str, date: str) -> str:
+    """Insert ``## new (date)`` below ``## Unreleased``; no-op if present.
+
+    The already-present early return runs first so an idempotent re-run never
+    trips the empty-section gate (issue #6086). Inserting is only allowed when
+    the ``## Unreleased`` section actually has entries: an empty section means
+    there is nothing to release, and cutting anyway would ship an empty
+    ``## X.Y.Z`` section and fail the release after the PyPI upload.
+    """
+    if re.search(rf"^## {re.escape(new)} \(", text, re.MULTILINE):
+        return text
+    entries = _unreleased_entries(text)
+    if entries is None:
         raise PrepError("CHANGELOG.md has no '## Unreleased' heading")
+    if not entries.strip():
+        raise PrepError(
+            "CHANGELOG.md '## Unreleased' section has no entries --"
+            " nothing to release; refusing to insert an empty release section"
+        )
+    match = _UNRELEASED_RE.search(text)
     return f"{text[: match.end()]}\n\n## {new} ({date}){text[match.end() :]}"
 
 
@@ -148,11 +177,14 @@ def prepare(repo: Path, version: str | None, date: str) -> dict[str, str]:
             f"version {new} is older than the current base-version {current}"
         )
 
-    pyproject.write_text(bump_pyproject(py_text, new), encoding="utf-8")
-    changelog.write_text(
-        add_changelog_heading(changelog.read_text(encoding="utf-8"), new, date),
-        encoding="utf-8",
-    )
+    # Compute every write up front so a refusal (e.g. an empty '## Unreleased'
+    # section, issue #6086) leaves the tree untouched, pyproject.toml unbumped.
+    new_py_text = bump_pyproject(py_text, new)
+    changelog_text = changelog.read_text(encoding="utf-8")
+    new_log_text = add_changelog_heading(changelog_text, new, date)
+
+    pyproject.write_text(new_py_text, encoding="utf-8")
+    changelog.write_text(new_log_text, encoding="utf-8")
     # On an idempotent re-run `current == new`; the notes were already resolved.
     if signoff.exists() and current != new:
         signoff_text = update_signoff_notes(
