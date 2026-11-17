@@ -78,6 +78,17 @@ def _claim(path: str, field: str, seen: dict[str, str]) -> str:
     return path
 
 
+def is_glob_entry(entry: Any) -> bool:
+    """Whether a raw path-list member is a ``{"glob": ...}`` object.
+
+    The entry-form classification this module's :func:`expand_entry` and
+    :func:`signoff_attest_presence.split_entries` both dispatch on -- one
+    predicate, so the two dispatch sites cannot drift (a glob member is never
+    a presence candidate; a mapping without ``glob`` is a malformed path-form
+    entry each site refuses in its own validator)."""
+    return isinstance(entry, Mapping) and "glob" in entry
+
+
 def expand_entry(
     raw: Any,
     field: str,

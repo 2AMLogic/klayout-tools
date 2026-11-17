@@ -28,6 +28,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from ._provenance import sha256_file
+from .signoff_attest_glob import is_glob_entry
 
 #: The mapping-entry keys a path-list entry accepts.
 ENTRY_KEYS = frozenset({"path", "attest"})
@@ -44,6 +45,47 @@ def _error(message: str) -> Exception:
     from klayout_tools.signoff_attest import AttestationError
 
     return AttestationError(message)
+
+
+def _reduce_entry(
+    entry: Mapping[str, Any],
+    where: str,
+    field: str,
+    item: int,
+    root: str,
+    presence: set[str],
+    normalize_path: Callable[[Any, str, str], str],
+) -> Any:
+    """Reduce one path-form mapping entry to its plain path.
+
+    Validates the ``{"path": ..., "attest": ...}`` form (issue #5615):
+    unknown fields, a missing ``path`` and an ``attest`` value the item does
+    not accept are refused; a ``presence`` entry additionally registers its
+    normalized path in ``presence`` -- the side set ``split_entries``
+    returns."""
+    unknown = sorted(set(entry) - ENTRY_KEYS)
+    if unknown:
+        raise _error(
+            f"'{where}' has unknown field(s): {', '.join(unknown)} "
+            f"(accepted: {', '.join(sorted(ENTRY_KEYS))})"
+        )
+    if "path" not in entry:
+        raise _error(f"'{where}' must declare 'path'")
+    mode = entry.get("attest", "content")
+    if mode not in ATTEST_VALUES:
+        raise _error(
+            f"'{where}.attest' must be one of "
+            f"{', '.join(repr(v) for v in ATTEST_VALUES)}, got {mode!r}"
+        )
+    if mode == "presence":
+        if field not in PRESENCE_FIELDS.get(item, frozenset()):
+            raise _error(
+                f"'{where}.attest' = 'presence' is only accepted on an "
+                "item 10 'hygiene' entry -- elsewhere the file's bytes "
+                "are the attested property"
+            )
+        presence.add(normalize_path(entry["path"], field, root))
+    return entry["path"]
 
 
 def split_entries(
@@ -69,40 +111,25 @@ def split_entries(
             continue
         paths: list[Any] = []
         for index, entry in enumerate(entries):
-            if not isinstance(entry, Mapping):
+            if not isinstance(entry, Mapping) or is_glob_entry(entry):
+                # Not a presence candidate: a non-mapping entry is left for
+                # the generic path-list validator, and a ``{"glob": ...}``
+                # member passes through untouched so the glob-aware
+                # validator validates, expands and claims it alongside the
+                # literals.
                 paths.append(entry)
                 continue
-            where = f"{field}[{index}]"
-            if "glob" in entry:
-                # A {"glob": ...} member (inventory schema 2, issue #5614)
-                # is not a presence candidate: pass it through untouched so
-                # the glob-aware path-list validator validates, expands and
-                # claims it alongside the literals.
-                paths.append(entry)
-                continue
-            unknown = sorted(set(entry) - ENTRY_KEYS)
-            if unknown:
-                raise _error(
-                    f"'{where}' has unknown field(s): {', '.join(unknown)} "
-                    f"(accepted: {', '.join(sorted(ENTRY_KEYS))})"
+            paths.append(
+                _reduce_entry(
+                    entry,
+                    f"{field}[{index}]",
+                    field,
+                    item,
+                    root,
+                    presence,
+                    normalize_path,
                 )
-            if "path" not in entry:
-                raise _error(f"'{where}' must declare 'path'")
-            mode = entry.get("attest", "content")
-            if mode not in ATTEST_VALUES:
-                raise _error(
-                    f"'{where}.attest' must be one of "
-                    f"{', '.join(repr(v) for v in ATTEST_VALUES)}, got {mode!r}"
-                )
-            if mode == "presence":
-                if field not in PRESENCE_FIELDS.get(item, frozenset()):
-                    raise _error(
-                        f"'{where}.attest' = 'presence' is only accepted on an "
-                        "item 10 'hygiene' entry -- elsewhere the file's bytes "
-                        "are the attested property"
-                    )
-                presence.add(normalize_path(entry["path"], field, root))
-            paths.append(entry["path"])
+            )
         out[field] = paths
     return out, frozenset(presence)
 
