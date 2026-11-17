@@ -393,7 +393,11 @@ are always the real, unmodified DRM values:
   covered by neither; **D7** only upstream's ``flat`` mode was compared, not
   its ``deep``/tiled modes. ``DF.13`` measures with octagon steps and
   ``DF.14`` with a Euclidean separation, so the two rules do not share one
-  boundary metric.
+  boundary metric. D1 and D3 are additionally disclosed per rule via
+  ``DrcRule.approximations`` -> ``coverage.approximated_rules`` (issue #5805):
+  a zero violation count is not evidence of the DRM rules' universal
+  every-point-within-distance form, so every run that checks one of these
+  rules says so in its report.
 - ``bjt.separation.comp.1``: the official ``BJT.3`` scopes to COMP
   "unrelated" to the BJT device (i.e. excludes COMP that is itself part of
   the same bipolar device, a connectivity/netlist notion); our engine has no
@@ -654,6 +658,34 @@ def _gf180mcu_klayout_deck_provenance(source_file: str, rule_id: str) -> RulePro
 # results against a layout written at a different dbu (see DrcRule's
 # docstring).
 NOMINAL_DBU_UM = 0.001
+
+# Issue #5805: the D1/D3 approximation disclosures shared by all four
+# `comp.tap_distance.*` rules, mirrored from the module docstring's "Known
+# approximations" notes and surfaced per checked rule via
+# `coverage.approximated_rules`. D2/D7 stay prose-only: they concern *which
+# wells the reach covers* and *which upstream modes were compared*, not what
+# a zero violation count can be read as.
+_TAP_DISTANCE_APPROXIMATIONS = (
+    {
+        "class": "whole_polygon_selection",
+        "description": (
+            "D1: selection is of whole active polygons that do not interact "
+            "with the tap reach region, so a long active with one end near a "
+            "tap is legal; the check under-reports monotonically and a "
+            "violation count of 0 does not establish the DRM DF.13/DF.14 "
+            "every-point-within-distance form"
+        ),
+    },
+    {
+        "class": "non_complement_voltage_selection",
+        "description": (
+            "D3: the lv (touching neither v5_xtor nor dualgate) and mv "
+            "(overlapping dualgate) selections are not complements; active "
+            "touching v5_xtor without dualgate is evaluated by neither "
+            "voltage column"
+        ),
+    },
+)
 
 DECK: list[DrcRule] = [
     DrcRule(
@@ -1383,6 +1415,7 @@ DECK: list[DrcRule] = [
         # approximations" note on `comp.tap_distance.nwell.lv.1`.
         scope="7.5 Comp",  # DRM section this rule is transcribed from (#566)
         provenance=_gf180mcu_klayout_deck_provenance("comp", "DF.13_LV"),
+        approximations=list(_TAP_DISTANCE_APPROXIMATIONS),  # D1/D3 (#5805)
     ),
     DrcRule(
         id="comp.tap_distance.psub.lv.1",
@@ -1413,6 +1446,7 @@ DECK: list[DrcRule] = [
         # docstring's "Known approximations" note on `comp.tap_distance.psub.lv.1`.
         scope="7.5 Comp",  # DRM section this rule is transcribed from (#566)
         provenance=_gf180mcu_klayout_deck_provenance("comp", "DF.14_LV"),
+        approximations=list(_TAP_DISTANCE_APPROXIMATIONS),  # D1/D3 (#5805)
     ),
     DrcRule(
         id="comp.tap_distance.nwell.mv.1",
@@ -1443,6 +1477,7 @@ DECK: list[DrcRule] = [
         # "Known approximations" note on `comp.tap_distance.nwell.mv.1`.
         scope="7.5 Comp",  # DRM section this rule is transcribed from (#566)
         provenance=_gf180mcu_klayout_deck_provenance("comp", "DF.13_MV"),
+        approximations=list(_TAP_DISTANCE_APPROXIMATIONS),  # D1/D3 (#5805)
     ),
     DrcRule(
         id="comp.tap_distance.psub.mv.1",
@@ -1474,6 +1509,7 @@ DECK: list[DrcRule] = [
         # `comp.tap_distance.psub.mv.1`.
         scope="7.5 Comp",  # DRM section this rule is transcribed from (#566)
         provenance=_gf180mcu_klayout_deck_provenance("comp", "DF.14_MV"),
+        approximations=list(_TAP_DISTANCE_APPROXIMATIONS),  # D1/D3 (#5805)
     ),
     DrcRule(
         id="nplus.width.1",

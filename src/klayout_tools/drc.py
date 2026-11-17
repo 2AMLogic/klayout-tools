@@ -2019,6 +2019,21 @@ def _build_coverage(setup: _DrcSetup, state: _DrcState) -> dict[str, Any]:
         if layer in stream_layer_tuples
     ]
 
+    # Issue #5805: approximation disclosure for *checked* rules -- the runs
+    # (including, and especially, zero-violation ones) where a count of 0
+    # could be misread as the DRM rule's universal form holding. One entry
+    # per declared approximation, the rule id prepended; a rule that was
+    # skipped or inapplicable applied no approximation and contributes
+    # nothing. Attached only when non-empty (see below), so a deck whose
+    # rules declare no approximations emits an unchanged `coverage` block.
+    checked_ids = set(rules_checked)
+    approximated_rules = [
+        {"rule": rule.id, **note}
+        for rule in sorted(deck, key=lambda r: r.id)
+        for note in (rule.approximations or [])
+        if rule.id in checked_ids
+    ]
+
     # Issue #3815: area-marker layers the deck accepts but does not model, so
     # a result identical with and without the marker is not read as
     # marker-aware. Informational only, like `unchecked_rules`.
@@ -2043,7 +2058,7 @@ def _build_coverage(setup: _DrcSetup, state: _DrcState) -> dict[str, Any]:
         {"id": rule_id, "reason": SKIP_REASON_NOT_SELECTED}
         for rule_id in sorted(omitted_ids)
     ]
-    return {
+    coverage = {
         "deck_layers": [_layer_str(t) for t in sorted(deck_layer_tuples)],
         "layers_checked": [_layer_str(t) for t in sorted(layers_checked)],
         "layers_in_stream_without_rules": [
@@ -2070,6 +2085,11 @@ def _build_coverage(setup: _DrcSetup, state: _DrcState) -> dict[str, Any]:
             ),
         ),
     }
+    # Additive and only-when-non-empty (#5805): no empty-key churn for the
+    # decks (sky130/sg13g2/asap7/...) whose rules declare no approximations.
+    if approximated_rules:
+        coverage["approximated_rules"] = approximated_rules
+    return coverage
 
 
 def _assemble_report(
@@ -2219,6 +2239,9 @@ def run_drc(
                 "marker_blind_layers_in_stream": ["<layer>/<datatype>", ...],
                 "deck_scope": [<scope identifier>, ...],
                 "unmodeled_rules": [<official rule id>, ...],
+                "approximated_rules": [  # only when non-empty (issue #5805)
+                    {"rule": str, "class": str, "description": str}, ...
+                ],
                 "nothing_checked": bool,
                 "nothing_checked_reasons": [<reason code>, ...],
             },
@@ -2372,6 +2395,24 @@ def run_drc(
     about was never curated at all; diffing ``deck_scope`` against the DRM's
     own table of contents surfaces that gap. A deck rule with no ``scope``
     set (the default, ``""``) contributes nothing to this list.
+
+    ``coverage.approximated_rules`` (issue #5805) is the disclosure channel
+    for the fourth trust gap -- *checked-but-approximated* work. A rule can
+    run, find nothing, and still not establish the universal form of the
+    official rule it transcribes: gf180mcu's ``tap_distance`` rules select
+    whole polygons, so a long active with one end near a tap is legal and a
+    violation count of 0 is not evidence that every point of the diffusion
+    lies within the rule's distance of a tap. Whenever a rule that declares
+    :attr:`~klayout_tools.decks.DrcRule.approximations` was **checked** on
+    this run -- fired or not -- each declared approximation becomes one
+    ``{"rule", "class", "description"}`` entry, sorted by rule id (declaration
+    order within a rule). Skipped/inapplicable rules applied no
+    approximation and contribute nothing; the key itself is absent when no
+    checked rule declares any, so a deck without approximations emits a
+    ``coverage`` block byte-identical to pre-#5805. Purely informational: it
+    changes no ``status``, violation or exit code, and is deliberately not
+    ``waiver_fields.runset_correspondence`` (issue #4520), which fires only
+    for rules that produced a finding.
 
     Every ``DrcRule.threshold_dbu`` in ``deck_name`` is authored against that
     deck's nominal dbu (see :func:`klayout_tools.decks.get_nominal_dbu`), not

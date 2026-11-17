@@ -4,11 +4,19 @@ Assert that **every point of a subject region lies within a Euclidean
 distance of a qualifying tap** -- the latch-up / well-tie-spacing rule shape
 ("something must be at least this close") -- and report where it is not.
 
-`klt drc` has only width/spacing/enclosure style checks and `klt erc`
-`ties[]` answers only "does this well island have a tap wired to net X", with
-no distance bound. This verb is the single-purpose geometric assertion for
-the distance question. Purely geometric apart from the optional net filter,
-which reuses `klt erc`'s connectivity-extraction helpers.
+[`klt drc`](drc.md)'s `tap_distance` rules (gf180mcu's `comp.tap_distance.*`,
+DRM `DF.13`/`DF.14`) are the pinned-upstream, **per-polygon** transcription:
+they report a whole active polygon only when it does not interact with the
+tap reach at all, so a long active with one end near a tap is legal and a
+violation count of 0 is **not** evidence of the DRM's universal form (see
+`klt drc`'s [`"tap_distance"` check
+kind](drc.md#tap_distance-check-kind-issue-3607) and
+`coverage.approximated_rules`, which discloses this on every checked run).
+This verb is the per-point universal assertion: assert on
+`measurement.measured_max_distance_um`. `klt erc` `ties[]` answers only
+"does this well island have a tap wired to net X", with no distance bound.
+Purely geometric apart from the optional net filter, which reuses `klt erc`'s
+connectivity-extraction helpers.
 
 ```
 klt tap-distance <file> --subject <expr> --taps <expr> --max-distance-um <um>

@@ -821,6 +821,25 @@ class DrcRule:
     the enclosing one in other directions (gf180mcu's ``SB.10``: poly must
     extend 0.22um past the SAB edge, while the SAB routinely overhangs the
     poly sideways). Meaningless, and ignored, for every other check kind.
+
+    ``approximations`` (issue #5805) declares, per rule, the known fidelity
+    gaps between what this rule *checks* and the universal form of the
+    official DRM rule it transcribes -- the machine-readable analogue of a
+    deck module's prose "Known approximations" note. Each entry is
+    ``{"class": <short machine-readable kind>, "description": <prose>}``;
+    ``run_drc()`` aggregates the entries of every rule that was **checked**
+    on a run into ``coverage.approximated_rules`` (one
+    ``{"rule", "class", "description"}`` object per entry, the rule id
+    prepended), *whatever the outcome* -- the caveat is about the rule, not
+    the result, so it is populated on exactly the zero-violation runs where
+    a count of 0 could otherwise be misread as the DRM rule's universal
+    form holding. Skipped/inapplicable rules contribute nothing, and a deck
+    whose rules declare none (every pre-existing rule) emits no
+    ``approximated_rules`` key at all, so its ``coverage`` block is
+    unchanged. This is deliberately a *different* channel from
+    ``runset_note`` (issue #4520), which is the waiver
+    runset-correspondence record and fires only for rules that produced a
+    finding. ``None`` (the default) declares nothing.
     """
 
     id: str
@@ -853,6 +872,11 @@ class DrcRule:
     # `runset_correspondence` in a report only when the rule fires. Keys:
     # `implemented_by_pdk_runset` (bool), `runset_file`, `pdk_revision`, `note`.
     runset_note: dict[str, Any] | None = None
+    # Issue #5805: per-rule approximation disclosure, aggregated into
+    # `coverage.approximated_rules` for every *checked* rule whatever the
+    # outcome. Entries: `{"class": str, "description": str}` -- see the class
+    # docstring for why this is not `runset_note`.
+    approximations: list[dict[str, str]] | None = None
     text_exempt: Any = None  # `drc_text_exempt.TextMarkerDeviceSpec` (#5442)
 
 
