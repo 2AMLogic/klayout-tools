@@ -55,8 +55,9 @@ def refusal_diagnostic(
     #5061), or ``None`` unless ``identity`` is a ``mismatch``. The caller only
     asks when the runner preflight actually rejected the job, so a
     ``runner_version_check: "warn"`` run that proceeded never gets one. The
-    remedy names the runner's accepted client major.minor; ``gate_release``
-    is :func:`klayout_tools.sim_batch._runner_gate_release`."""
+    remedy names the runner's accepted client major.minor, the updated image,
+    and the ``runner_version_check: "warn"`` opt-out (#5750);
+    ``gate_release`` is :func:`klayout_tools.sim_batch._runner_gate_release`."""
     if identity.get("runner_compatibility") != "mismatch":
         return None
     runner = identity.get("runner_klt_version")
@@ -71,7 +72,8 @@ def refusal_diagnostic(
         "message": (
             f"the fleet runner (klt {runner}) refused the job: the submitting "
             f"client is klt {client}; submit from a client of klt {accepted}.x, "
-            f"or update the runner image to klt {client_release}"
+            f"update the runner image to klt {client_release}, or set "
+            'request.batch.runner_version_check to "warn" to run anyway'
         ),
         "runner_klt_version": runner,
         "client_klt_version": client,
@@ -429,11 +431,10 @@ def _worker_simulators(remote: Any) -> list[dict[str, Any] | None]:
 
 
 def worker_ngspice_binary(remote: Any) -> str | None:
-    """The worker-observed ngspice path out of ``environment.remote`` (issue
-    #3110): ``worker_environment.simulator.selected_path`` when its capture is
-    ``"ok"``. A sharded run reports a value only when every member captured
-    the same path; ``None`` for a pre-#2834 runner, SSH ``remote``, or
-    disagreement."""
+    """The worker-observed ngspice path out of ``environment.remote`` (issue #3110):
+    ``worker_environment.simulator.selected_path`` when its capture is ``"ok"``.
+    A sharded run reports a value only when every member captured the same
+    path; ``None`` for a pre-#2834 runner, SSH ``remote``, or disagreement."""
     paths: set[str | None] = set()
     for simulator in _worker_simulators(remote):
         path = simulator.get("selected_path") if simulator else None
