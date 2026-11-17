@@ -10,19 +10,16 @@ from __future__ import annotations
 
 import copy
 import json
-import shutil
 from pathlib import Path
 
 import pytest
 
+from helpers.tool_probes import SKIP_NO_NGSPICE as _SKIP_NO_NGSPICE
 from klayout_tools import sim, sim_batch, sim_search
 from klayout_tools.sim_errors import SimError
 
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
 
-_SKIP_NO_NGSPICE = pytest.mark.skipif(
-    shutil.which("ngspice") is None, reason="ngspice not installed"
-)
 
 _SEARCH = {
     "source": "Ib",
