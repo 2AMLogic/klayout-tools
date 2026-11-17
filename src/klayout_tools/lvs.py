@@ -121,7 +121,7 @@ import contextlib
 import fnmatch
 import json
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -2098,11 +2098,12 @@ def _input_hash_check(
     echoed: Any,
     report_path: str,
     override: str | None = None,
+    hasher: Callable[[str | None], str | None] = sha256_file,
 ) -> dict[str, Any]:
     """One :func:`~klayout_tools._report_verify.hash_check` entry for an
-    input path the committed report echoes back (``layout``/``reference``),
-    with issue #2595's ``input_not_found`` diagnostic attached when that
-    path does not name an existing file.
+    input path the committed report echoes back (``layout``/``reference``/
+    the runset ``deck_file``), with issue #2595's ``input_not_found``
+    diagnostic attached when that path does not name an existing file.
 
     :func:`~klayout_tools._provenance.sha256_file` returns ``None`` both for
     "the file is not there" and (vacuously) for "no path was recorded", so a
@@ -2124,15 +2125,12 @@ def _input_hash_check(
       occupy relative to the committed report's own directory, when it is
       there; ``null`` otherwise (including for an echoed absolute path,
       which has no report-relative candidate to try).
-    - ``resolved_repo_root`` -- for a repo-scoped ``{path, scope}`` echo
-      (issue #5845), the repo root the recorded path was anchored on;
-      ``null`` otherwise (a bare string resolves against the cwd).
+    - ``resolved_repo_root`` -- the repo root a repo-scoped ``{path, scope}``
+      echo (issue #5845) was anchored on; ``null`` for a bare string (cwd).
 
-    Kept local to this module rather than folded into the shared
-    ``hash_check``: ``klt drc --check`` resolves its own ``provenance.input``
-    path the identical way and would need the identical diagnostic to stay
-    consistent -- a deliberate follow-up, not a side effect. Promote this
-    helper to ``_report_verify`` if and when that happens.
+    ``hasher`` is the recorded digest form: ``sha256_file`` (bare hex, default)
+    or ``content_hash`` (``sha256:``-prefixed; runset deck, issue #6223). Kept
+    local, not in ``hash_check``: ``klt drc --check`` needs it too (follow-up).
 
     Issue #2659: ``echoed`` is resolved through
     :func:`klayout_tools._report_verify.resolve_committed_path`, so the
@@ -2145,7 +2143,7 @@ def _input_hash_check(
     ``None`` and renders exactly as an absent one always has.
     """
     path = resolve_committed_path(echoed, report_path=report_path, override=override)
-    check = hash_check(field, expected, sha256_file(path))
+    check = hash_check(field, expected, hasher(path))
     if path is None or os.path.isfile(path):
         return check
     found_relative_to_report: str | None = None
@@ -2235,10 +2233,12 @@ def check_lvs_report(
         # Issue #2849: the PDK runset is an input too -- a changed runset
         # can change the verdict without moving the layout or reference.
         checks.append(
-            hash_check(
+            _input_hash_check(
                 "provenance.runset.content_hash",
                 runset_hash,
-                content_hash(committed.get("deck_file")),
+                committed.get("deck_file"),
+                report_path,
+                hasher=content_hash,
             )
         )
     result = build_check_result(report_path=report_path, checks=checks)
