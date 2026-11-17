@@ -133,7 +133,9 @@
       "description": "`klt diff` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.diff_cmd",
-        "klayout_tools.layout_diff"
+        "klayout_tools.cli.parser_diff",
+        "klayout_tools.layout_diff",
+        "klayout_tools.layout_diff_flat"
       ]
     },
     "drc": {
