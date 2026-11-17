@@ -248,6 +248,12 @@ print("approx: ", ", ".join(approx))
 PY
 ```
 
+> **Superseded revision (historical, `c6d73a3`).** Re-qualified 2026-10-29 under open_pdks `f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7` (ciel 2.6.1), issue #3420:
+> `tests/test_golden_deck.py` plus both native-extraction cross-check
+> modules re-run against the `~/.ciel` f6eeac7 install with KLayout 0.28.16 from the
+> system package: all passed, so the manifest's `expected_disagreement`
+> values are unchanged. The text below records the original runs.
+
 Tier 3 has been run against a real `volare`-fetched sky130A install
 (`open_pdks c6d73a35f524070e85faff4a6a9eef49553ebc2b`, the same commit
 `sky130.py`'s own provenance notes cite) and a real KLayout 0.30.10 binary,

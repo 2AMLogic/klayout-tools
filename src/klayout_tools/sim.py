@@ -114,6 +114,7 @@ from . import (
     sim_search,
     sim_settled,
     sim_snm_meas,
+    sim_spiceinit,
     sim_step_resolution,
     sim_steps,
     sim_stimulus,
@@ -239,6 +240,7 @@ from .sim_pin_settle import (
     settle_version_pins,
 )
 from .sim_process_legs import attach_process_leg_check
+from .sim_spiceinit import with_thread_pin as _with_thread_pin
 
 from .sim_analysis_overrides import (  # isort: skip
     AO_LABEL as _AO_LABEL,  # noqa: F401
@@ -3998,6 +4000,9 @@ def _run_sim_corners(
     effective_threads = _effective_threads_per_worker(
         threads_per_worker, backend, max_workers, len(dispatch_points)
     )
+    ngspice_init_env = sim_spiceinit.record(  # Issue #5648
+        ngspice_init_lines, effective_threads, engine, backend in _OFFHOST_BACKENDS
+    )
     local_engine_kwargs = (
         {
             "portable_roots": portable_roots,
@@ -4369,6 +4374,7 @@ def _run_sim_corners(
         "ngspice_binary": ngspice_binary,
         # Issue #3095: build identity of that binary (``null`` for xyce).
         "engine_build": engine_build,
+        "ngspice_init": ngspice_init_env,
         # Issue #1274: normalised like every other path field this response
         # echoes -- the resolved library usually lives outside the repo (a
         # PDK under the user's home directory), which reports
@@ -8196,21 +8202,6 @@ def _worker_env_kwargs(threads_per_worker: int | None) -> dict[str, Any]:
     if threads_per_worker is None:
         return {}
     return {"env": {**os.environ, "OMP_NUM_THREADS": str(threads_per_worker)}}
-
-
-def _with_thread_pin(
-    ngspice_init: tuple[str, ...], threads_per_worker: int | None, engine: str
-) -> tuple[str, ...]:
-    """Also pin the thread count through ``.spiceinit`` (issue #3619).
-
-    ``OMP_NUM_THREADS`` alone did not stop ngspice-46 from oversubscribing
-    on the batch fleet, while ``set num_threads=1`` did. The pin line goes
-    first so a user ``options.ngspice_init`` line still wins; a netlist
-    ``.control`` ``set num_threads`` runs later still.
-    """
-    if threads_per_worker is None or engine == "xyce":
-        return ngspice_init
-    return (f"set num_threads={threads_per_worker}", *ngspice_init)
 
 
 def _threads_environment(effective: int | None) -> dict[str, int]:
