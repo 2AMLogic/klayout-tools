@@ -4020,7 +4020,7 @@ def _add_stats_parser(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         help="also compute geometry_digest, a sha256 of the stream's decoded "
         "geometry (null otherwise; it re-reads the whole layout and "
-        "roughly 2.5x's the runtime on large flat layouts)",
+        "roughly 2.5x the runtime on large flat layouts)",
     )
     stats_parser.add_argument(
         "--top",
