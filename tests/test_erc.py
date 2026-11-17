@@ -8948,7 +8948,7 @@ def test_check_erc_report_version_drift_is_an_advisory_only(tmp_path):
 
 
 def test_check_erc_report_missing_or_invalid_report_is_a_clean_error(tmp_path):
-    with pytest.raises(ErcError, match="committed report not found"):
+    with pytest.raises(ErcError, match="file not found"):
         erc.check_erc_report(str(tmp_path / "nope.json"))
     bad = tmp_path / "bad.json"
     bad.write_text("{not json")
@@ -9089,7 +9089,7 @@ def test_cli_rerun_without_check_and_missing_inputs_are_clean_errors(tmp_path, c
 
 def test_cli_check_missing_report_is_a_clean_error(tmp_path, capsys):
     assert main(["erc", "--check", str(tmp_path / "nope.json")]) == 1
-    assert "committed report not found" in capsys.readouterr().err
+    assert "file not found" in capsys.readouterr().err
 
 
 # --- ties[].well_complement_of (issue #3750) --------------------------------

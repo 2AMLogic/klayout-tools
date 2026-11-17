@@ -126,8 +126,11 @@ klt signoff --attest {1,8,9,10} --inventory <file> --check <committed-envelope> 
   or `3`) and only if its bytes changed, so re-rendering an unchanged tree
   leaves the committed record untouched and a failed render can never
   truncate a previous good one. The write is atomic (temp file +
-  rename). Refused without `--attest`/`--manifest`/`--fleet`, and together
-  with `--check`.
+  rename). The bytes are always plain JSON, whatever the file's suffix:
+  unlike `drc`/`lvs`/`sim`/`pex` `-o` (issue #6041), a `.gz` name is not
+  compressed, and `--check` reads these envelopes as plain JSON only —
+  do not compress one by hand. Refused without
+  `--attest`/`--manifest`/`--fleet`, and together with `--check`.
 - `--skip-local-only` — with `--attest` and `-o`: do not run `local_only`
   commands; carry their committed outcome from the existing `-o` envelope
   and recompute everything else (issue #5209). See "Refreshing on a host
@@ -1054,7 +1057,10 @@ the report's JSON envelope to a committed file — no stdout redirect, whose
 truncate-then-write would zero a previous good record on any failed run.
 The file is written only after a successful render (exit `0` for T1, `3`
 below T1 — both are verdicts of record), only if its bytes changed, and
-atomically; it always receives JSON, whatever `--format` says. The same
+atomically; it always receives JSON, whatever `--format` says. Those bytes
+are plain JSON whatever the file's suffix — a `.gz` name is not compressed,
+unlike `drc`/`lvs`/`sim`/`pex` `-o` (issue #6041), and `--check` reads the
+committed report as plain JSON only. The same
 `-o` works with `--fleet` roll-ups. Re-rendering an unchanged tree leaves
 the committed file untouched, so a make-style pipeline can re-run freely:
 
