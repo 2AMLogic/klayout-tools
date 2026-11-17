@@ -167,6 +167,8 @@ the same one-status-many-reasons shape as `implausible_solution`, so the
 `--batch-set` aggregate, which only references per-request reports by path) is
 unchanged. See [`docs/cli/sim.md`](cli/sim.md)'s "AC return-ratio metrics".
 
+`klt sim --check <report>` (issue #5821) is the reader half of the two netlist fields below: it emits the shared `--check` payload plus additive `diagnosis`/`note` members.
+
 `klt sim` also gains an additive `environment.netlist_identity` (normalised,
 comment/whitespace/path-insensitive netlist-closure hash; `null` plus
 `netlist_identity_error` when not computable) and an optional request field
@@ -1820,9 +1822,9 @@ All eight share one contract:
   same clean "no `file`/`layout` field to rerun" error, never a traceback.
   A report predating #2659, whose field is a bare string, keeps the old
   anchoring described in the next bullet exactly as before.
-- **An explicit input restores the non-repo workflow (issue #2699).** For the
-  three verbs whose report echoes its own input, the caller may supply it
-  alongside `--check`/`--rerun` — `klt drc <file> --check REPORT`, `klt
+- **An explicit input restores the non-repo workflow (issue #2699).** For
+  `drc`/`extract`/`lvs`, the caller may supply the echoed input alongside
+  `--check`/`--rerun` — `klt drc <file> --check REPORT`, `klt
   extract <file> --check REPORT`, `klt lvs --check REPORT --layout PATH` —
   for use when the report cannot locate the input (`scope: "external"`) or
   the grading clone is laid out differently. **Precedence is one rule for all
