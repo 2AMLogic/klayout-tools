@@ -104,7 +104,15 @@ def assess_caller_job_timeout(
     """
     units = max(1, unit_count)
     ceiling = config.max_job_seconds
-    bound = float(config.job_timeout_s)
+    bound_value = config.job_timeout_s
+    if bound_value is None:
+        from .sim import SimError
+
+        raise SimError(
+            "request.batch.job_timeout_s must be set to assess the "
+            f"caller-stated job ceiling (got {bound_value!r})"
+        )
+    bound = float(bound_value)
     exceeds = bound > ceiling
     assessment: dict[str, Any] = {
         "basis": JOB_CEILING_BASIS_CALLER,
