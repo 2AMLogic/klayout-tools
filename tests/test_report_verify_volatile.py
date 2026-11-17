@@ -42,6 +42,56 @@ def test_rerun_still_detects_content_drift_with_ambiguous_sources():
     assert result["status"] == "drifted"
 
 
+# --------------------------------------------------------------------------- #
+# Issue #5863: `provenance.pdk.source` records HOW the PDK was resolved
+# (search roots vs `$PDK_ROOT` vs `--pdk-root`), not anything about the
+# evidence. The same install (same `version` hash) resolved via a different
+# mechanism on another host never causes drift -- the #5182 rationale for
+# `ambiguous_sources`, one field over.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("committed_source", "fresh_source"),
+    [
+        ("--pdk-root flag", "PDK_ROOT environment variable"),
+        ("PDK_ROOT environment variable", "search root: ~/.ciel"),
+        ("search root: ~/.ciel", "search root: ~/.volare"),
+        ("search root: ~/.ciel", None),
+        (None, "search root: ~/.ciel"),
+    ],
+)
+def test_rerun_ignores_pdk_source_resolution_change(committed_source, fresh_source):
+    committed = _ambiguous_sources_report(4, None)
+    fresh = _ambiguous_sources_report(4, None)
+    if committed_source is None:
+        del committed["provenance"]["pdk"]["source"]
+    else:
+        committed["provenance"]["pdk"]["source"] = committed_source
+    if fresh_source is None:
+        del fresh["provenance"]["pdk"]["source"]
+    else:
+        fresh["provenance"]["pdk"]["source"] = fresh_source
+
+    from klayout_tools import _report_verify as rv
+
+    result = rv.build_rerun_result(
+        report_path="r.json", committed=committed, fresh=fresh
+    )
+    assert result["status"] == "match"
+    assert result["drift"] == []
+
+
+def test_rerun_pdk_source_is_in_volatile_provenance_paths():
+    """Issue #5863: the exclusion lives in the shared set, matching the #5182
+    precedent -- drc/lvs/extract/equiv/erc echo the same `_pdk_block` and
+    have the identical cross-host resolution problem."""
+    from klayout_tools import _report_verify as rv
+
+    assert ("provenance", "pdk", "source") in rv.VOLATILE_PROVENANCE_PATHS
+    assert ("provenance", "pdk", "source") in rv.VOLATILE_FLOW_PATHS
+
+
 def test_documented_run_specific_fields_equal_volatile_provenance_paths():
     """Issue #5182: docs/json-contract.md's table and the code constant agree."""
     import re

@@ -104,6 +104,7 @@ from . import (
     sim_decks,
     sim_energy,
     sim_eye,
+    sim_form_signals,
     sim_injected,
     sim_mismatch_declarations,
     sim_mismatch_gate,
@@ -195,7 +196,12 @@ from .sim_batch_async import (
     shard_scoped_points,
 )
 from .sim_batch_async import submit_only as _submit_batch_only
-from .sim_batch_features import finalize_batch_remote, pop_remote_diagnostics
+from .sim_batch_features import (
+    apply_worker_engine_build,
+    finalize_batch_remote,
+    pop_remote_diagnostics,
+    worker_ngspice_binary,
+)
 from .sim_convergence_retry import is_retryable_convergence_failure, note_not_retried
 
 #: Moved to the ``sim_corner_*`` modules (issue #5428) so this module stays
@@ -263,7 +269,7 @@ from .sim_measurement_results import (
 from .sim_measurement_results import (
     NOT_REACHED_DIAGNOSTIC_CODE as NOT_REACHED_DIAGNOSTIC_CODE,
 )
-from .sim_measurement_results import _corner_measurement_results
+from .sim_measurement_results import _corner_measurement_results, expand_request
 from .sim_param_file import _corner_lib_lines as _corner_lib_lines
 from .sim_param_file import param_file_environment, resolve_param_file
 from .sim_plot import render_waveform_svg
@@ -527,14 +533,14 @@ _INCONCLUSIVE_STATUS = "inconclusive"
 SUPPORTED_ENGINES = ("ngspice", "xyce")
 
 #: Recognised values for the optional ``request.netlist_source`` field --
-#: caller-declared provenance of ``request.netlist``, distinguishing a
-#: pre-layout schematic-level netlist (S6 in the stage graph) from a
-#: post-layout netlist extracted from the laid-out design (S9). Mirrors the
-#: caller-declares-intent pattern already used for ``engine``/``backend``
-#: rather than trying to auto-detect provenance from the netlist file itself
-#: (fragile -- a schematic and an extracted netlist can look syntactically
-#: identical). See docs/cli/sim.md and docs/design/design-pipeline.md.
-SUPPORTED_NETLIST_SOURCES = ("schematic", "extracted")
+#: caller-declared provenance of ``request.netlist``: a pre-layout schematic
+#: netlist (S6 in the stage graph), a post-layout extracted netlist (S9),
+#: or a gate-level netlist (structural netlist plus timing library,
+#: issue #5638). Mirrors the caller-declares-intent pattern already used
+#: for ``engine``/``backend`` -- rather than auto-detecting provenance from
+#: the netlist file itself (a schematic and an extracted netlist can look
+#: syntactically identical). See docs/cli/sim.md and docs/design/design-pipeline.md.
+SUPPORTED_NETLIST_SOURCES = ("schematic", "extracted", "gate-level")
 
 #: Execution backends behind ``run_sim``. ``local`` runs the corner matrix
 #: sequentially in-process (the original behaviour). ``local-parallel`` fans
@@ -1460,44 +1466,20 @@ def _check_local_osdi_abi(
         )
 
 
-def _worker_ngspice_binary(remote: Any) -> str | None:
-    """The worker-observed ngspice path out of ``environment.remote`` (issue
-    #3110): ``worker_environment.simulator.selected_path`` when its capture is
-    ``"ok"``. A sharded run (``remote.fleet[]``) reports a value only when
-    every member captured the same path -- never silently picks one. ``None``
-    for a pre-#2834 runner, the SSH ``remote`` backend, or disagreement."""
-    if not isinstance(remote, dict):
-        return None
-    members = remote.get("fleet")
-    blocks = members if isinstance(members, list) and members else [remote]
-    paths: set[str | None] = set()
-    for block in blocks:
-        worker = block.get("worker_environment") if isinstance(block, dict) else None
-        simulator = worker.get("simulator") if isinstance(worker, dict) else None
-        ok = isinstance(worker, dict) and worker.get("capture") == "ok"
-        path = (
-            simulator.get("selected_path")
-            if ok and isinstance(simulator, dict)
-            else None
-        )
-        paths.add(path if isinstance(path, str) and path else None)
-    only = next(iter(paths)) if len(paths) == 1 else None
-    return only
-
-
 def apply_engine_host(
     environment: dict[str, Any], *, backend: str, client_ngspice_binary: str | None
 ) -> None:
-    """Stamp ``environment.engine_host``, keep ``ngspice_binary`` honest (#3110):
-    local changes nothing else; off-host ``"worker"`` makes it the worker's
-    path and moves the submitter's to ``client_ngspice_binary``. Batch adds
-    ``models_lib_comparison`` (#5321) and the sharded roll-ups (#5522)."""
+    """Stamp ``environment.engine_host``; keep ``ngspice_binary`` (#3110) and
+    ``engine_build`` (#5566) honest -- off-host ``"worker"`` makes both the
+    worker's, moving the submitter's to the matching ``client_*`` key. Batch
+    adds ``models_lib_comparison`` (#5321) and the sharded roll-ups (#5522)."""
     if backend not in _OFFHOST_BACKENDS:
         environment["engine_host"] = "local"
         return
     environment["engine_host"] = "worker"
     environment["client_ngspice_binary"] = client_ngspice_binary
-    environment["ngspice_binary"] = _worker_ngspice_binary(environment.get("remote"))
+    environment["ngspice_binary"] = worker_ngspice_binary(environment.get("remote"))
+    apply_worker_engine_build(environment)
     finalize_batch_remote(environment, backend)
 
 
@@ -1568,7 +1550,7 @@ def load_request(request_path: str) -> dict[str, Any]:
             "request is missing required field: analysis (or analysis_steps "
             "for an ordered multi-step sequence)"
         )
-    return request
+    return expand_request(request)  # issue #5731; see sim_measurement_template
 
 
 def _reject_linearize_in_steps(request: dict[str, Any]) -> None:
@@ -2112,18 +2094,14 @@ def _validate_save_vectors(
     return tuple(vectors), True
 
 
-#: A ``v(...)``/``i(...)`` token (optionally with ngspice's derivative prefix,
-#: e.g. ``vdb(out)``, ``vm(a,b)``) in a measurement's ``spice``/``expr``/
-#: ``crossings.signal`` text -- the vectors ``options.save_vectors`` must keep
-#: resident for that measurement to resolve.
-_SAVE_TOKEN_RE = re.compile(r"\b([vi][a-z]{0,2})\(([^()]*)\)", re.IGNORECASE)
-
-
 def _required_save_vectors(
     save_vectors: tuple[str, ...], measurements_spec: list[dict[str, Any]]
 ) -> list[str]:
     """``options.save_vectors`` plus every ``v(x)``/``i(x)`` vector the
     declared measurements reference, de-duplicated, in first-seen order.
+
+    Every form that names a signal contributes its texts -- free-text fields
+    verbatim, structured-form fields via :mod:`sim_form_signals`.
 
     Only the parenthesized forms are detected; a measurement that names a
     vector bare (``out`` rather than ``v(out)``) must list it in
@@ -2139,10 +2117,11 @@ def _required_save_vectors(
         if isinstance(step_res, dict):
             texts.append(step_res.get("signal"))
         texts.extend(sim_settled.signal_texts(spec))
+        texts.extend(sim_form_signals.signal_texts(spec))
         for text in texts:
             if not isinstance(text, str):
                 continue
-            for prefix, args in _SAVE_TOKEN_RE.findall(text):
+            for prefix, args in sim_form_signals.SAVE_TOKEN_RE.findall(text):
                 kind = prefix[0].lower()
                 for arg in args.split(","):
                     arg = arg.strip().lower()
@@ -3910,6 +3889,10 @@ def _run_sim_corners(
     # Issues #3159/#3161: `analysis.passes` / `measurements[].tian` are gated
     # the same way (the `dual_injection` mandatory runner feature).
 
+    # Hoisted above the probe (issue #6047): it takes the corners' pinned init.
+    effective_threads = _effective_threads_per_worker(
+        threads_per_worker, backend, max_workers, len(dispatch_points)
+    )
     # Two-pass fail-fast probe (issue #1694, opt-in via `fail_fast_probe`/
     # `options.fail_fast_probe`): run once per grid, before any real corner
     # is dispatched -- not per backend/shard/host, and not for `remote`/
@@ -3934,7 +3917,9 @@ def _run_sim_corners(
             artifacts_dir=artifacts_dir,
             keep_artifacts=keep_artifacts,
             ngspice_binary=ngspice_binary,
-            ngspice_init=ngspice_init_lines,
+            ngspice_init=_with_thread_pin(
+                ngspice_init_lines, effective_threads, engine
+            ),
             osdi_preload=osdi_preload,
             save_mode=save_mode,
             ngspice_options=ngspice_options,
@@ -4005,9 +3990,6 @@ def _run_sim_corners(
         models_lib=models_lib,
         corner_points=corner_points,
         osdi_preload=osdi_preload,
-    )
-    effective_threads = _effective_threads_per_worker(
-        threads_per_worker, backend, max_workers, len(dispatch_points)
     )
     ngspice_init_env = sim_spiceinit.record(  # Issue #5648
         ngspice_init_lines, effective_threads, engine, backend in _OFFHOST_BACKENDS
@@ -4104,7 +4086,7 @@ def _run_sim_corners(
             shard_fingerprint=_checkpoint_fingerprint(**fingerprint_inputs),
         )
 
-    if hosts == 1:
+    if hosts == 1 or attach_job_id is not None:  # #5777: attach never fans out
         # The exact pre-#376 call for the default case (no budget, no
         # resume, hosts=1, no fail-fast probe) -- `dispatch_points`/the four
         # new-since kwargs are identity no-ops then (`dispatch_points is
@@ -10620,16 +10602,13 @@ def _run_calibration_probe(
     misconfiguration surfaces at the (cheap) probe stage rather than only
     after every real corner is dispatched.
 
-    ``ngspice_init`` (issue #2520, the already-validated
-    ``options.ngspice_init`` lines -- see :func:`_validate_ngspice_init`) is
-    materialized as ``probe_dir/.spiceinit`` the same way :func:`_run_corner`
-    does for a real corner, and the probe's own ``subprocess.run`` call
-    passes ``cwd=probe_dir`` so it is actually read. The probe otherwise
-    runs the same compatibility mode a real corner would, and this issue's
-    other half (the missing ``cwd=``) applied here too -- without it, the
-    probe's own convergence behaviour (and thus its rate estimate) would
-    silently diverge from the real corners it is meant to be representative
-    of whenever a caller sets ``options.ngspice_init``.
+    ``ngspice_init`` (issues #2520, #6047) is the init-file lines the real
+    corners get, thread pin included (:func:`_with_thread_pin`; a run-dir
+    ``.spiceinit`` replaces ``$HOME``'s). It is materialized as
+    ``probe_dir/.spiceinit`` and the probe's ``subprocess.run`` passes
+    ``cwd=probe_dir`` so it is read -- otherwise the probe's convergence
+    behaviour (and rate estimate) would diverge from the corners it is meant
+    to be representative of.
     """
     probe_dir = (
         os.path.join(artifacts_dir, f"{point.slug}__probe")
@@ -10991,15 +10970,15 @@ def _parse_plain_number(raw: str) -> float | None:
     return float(match.group(1))
 
 
-def _parse_width_um(raw: str) -> float | None:
+def _parse_width_um(raw: str, bare_is_um: bool = False) -> float | None:
     """Parse a SPICE ``W``/``L``-style geometry literal (``50u``, ``5e-5``,
-    ``100n``) to micrometres. Returns ``None`` for anything that is not a
-    plain numeric literal.
-    """
+    ``100n``) to micrometres (``None`` for non-numerics); ``bare_is_um``
+    reads a bare literal as micrometres (#5802 X-card PDK wrappers)."""
     match = spice_number.NUMBER_RE.match(raw.strip().strip("'\""))
     if match is None:
         return None
-    return float(match.group(1)) * spice_number.suffix_scale(match.group(2)) * 1e6
+    value = float(match.group(1)) * spice_number.suffix_scale(match.group(2))
+    return value * (1 if match.group(2) == "" and bare_is_um else 1e6)
 
 
 def _find_width_ceiling_culprit(
@@ -11029,7 +11008,7 @@ def _find_width_ceiling_culprit(
         w_raw = params.get("w") or params.get("W")
         if w_raw is None:
             continue
-        w_um = _parse_width_um(w_raw)
+        w_um = _parse_width_um(w_raw, bare_is_um=inst_name[:1].upper() == "X")
         if w_um is None:
             continue
         m_raw = params.get("m") or params.get("M")

@@ -10,7 +10,6 @@ import sys
 
 from .. import (
     arith_gen,
-    artifact_store,
     pdk_stackup,
 )
 from ..equiv import SUPPORTED_ENGINES as SUPPORTED_EQUIV_ENGINES
@@ -21,13 +20,11 @@ from ..signoff_attest_carry import add_skip_local_only_argument
 from . import (
     arith_gen_cmd,
     array_check_cmd,
-    artifact_cmd,
     cells_cmd,
     clip_cmd,
     corner_matrix_cmd,
     deck_cmd,
     design_centering_cmd,
-    diff_cmd,
     draw_cmd,
     drc_cmd,
     env_provenance_cmd,
@@ -86,7 +83,9 @@ from ._argv_flags import _record_request_argv_flags as _record_request_argv_flag
 from ._argv_flags import _require_one_input as _require_one_input
 from ._drc_parser_args import add_klayout_app_args, add_rule_listing_args
 from .color import add_color_args
+from .parser_artifact import add_artifact_parser
 from .parser_characterize import add_characterize_parser
+from .parser_diff import add_diff_parser
 from .parser_economy import add_economy_parser
 from .parser_netlist import add_netlist_parser
 from .parser_pex import add_pex_parser
@@ -235,7 +234,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_layers_parser(subparsers)
 
     _add_stats_parser(subparsers)
-    _add_diff_parser(subparsers)
+    add_diff_parser(subparsers, _add_format_arg)
 
     add_economy_parser(subparsers, _add_format_arg)
 
@@ -269,7 +268,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_deck_parser(subparsers)
     _add_env_provenance_parser(subparsers)
     _add_evidence_parser(subparsers)
-    _add_artifact_parser(subparsers)
+    add_artifact_parser(subparsers, _no_subcommand_handler, _add_format_arg)
     _add_version_parser(subparsers)
 
     add_extract_parser(
@@ -2649,6 +2648,7 @@ def _add_place_and_route_parser(subparsers: argparse._SubParsersAction) -> None:
         inputs="gate-level netlist and standard-cell liberty",
         engine="OpenROAD",
         docs="docs/cli/place-and-route.md",
+        rerun_extra=place_and_route_cmd.RERUN_HELP_EXTRA,
     )
     _add_format_arg(place_and_route_parser)
     place_and_route_parser.set_defaults(func=place_and_route_cmd.run)
@@ -2661,16 +2661,14 @@ def _add_flow_verify_args(
     inputs: str,
     engine: str,
     docs: str,
+    rerun_extra: str = "",
 ) -> None:
     """Register the shared ``--check``/``--rerun`` committed-evidence
     verification flags on a *flow* verb (issue #2224).
 
-    Deliberately **not** the mutually-exclusive-with-the-input group ``klt
-    drc``/``klt lvs``/``klt extract`` use: those reports echo their own
-    inputs, so ``--check REPORT`` is self-sufficient there. A flow verb's
-    report echoes outputs and provenance hashes only, so the positional
-    ``request`` stays required and supplies the inputs to re-hash/re-run
-    against. See ``_report_verify.py``'s module docstring.
+    Deliberately **not** the input-exclusive group ``klt drc``/``klt lvs``/
+    ``klt extract`` use: their reports echo their own inputs; a flow verb's
+    report does not, so ``request`` stays required for the re-run inputs.
     """
     parser.add_argument(
         "--check",
@@ -2697,6 +2695,7 @@ def _add_flow_verify_args(
             "provenance.klt_version/klayout_version/pdk.version, "
             "engine_version, and run-scoped bookkeeping (see "
             f"{docs}). Requires --check; a clean error (exit 1) otherwise"
+            + (f" {rerun_extra}" if rerun_extra else "")
         ),
     )
 
@@ -3483,155 +3482,6 @@ def _add_evidence_parser(subparsers: argparse._SubParsersAction) -> None:
     evidence_cmd.add_render_parser(evidence_sub, _add_format_arg)
 
 
-def _add_artifact_parser(subparsers: argparse._SubParsersAction) -> None:
-    """Register the ``artifact`` verb with nested ``put``/``get``/``verify``/``delete``
-    subcommands (issues #4063, #4101): the client for the fleet artifact store's
-    broker. See docs/cli/artifact.md.
-    """
-    artifact_parser = subparsers.add_parser(
-        "artifact",
-        help="put/get/verify/delete evidence bytes in the fleet artifact store by "
-        "sha256, with a committed manifest",
-        description=(
-            "Evidence bytes go to the artifact store through its broker; git "
-            "keeps a manifest naming each object by sha256. The broker URL "
-            f"comes from --broker or ${artifact_store.ENV_BROKER}; there is "
-            "no default. No credential is held: the broker identifies the "
-            "caller by its network identity. Presigned URLs stay in-process "
-            "and are never printed."
-        ),
-    )
-    artifact_sub = artifact_parser.add_subparsers(
-        dest="artifact_command", metavar="<subcommand>"
-    )
-    artifact_parser.set_defaults(func=_no_subcommand_handler(artifact_parser))
-
-    put_parser = artifact_sub.add_parser(
-        "put",
-        help="store files and emit (or merge) manifest entries",
-        description=(
-            "Hash each file, ask the broker for a presigned PUT, upload with "
-            "exactly the headers it returned, and emit one manifest entry per "
-            "file. An object already stored is not re-sent and still succeeds."
-        ),
-    )
-    put_parser.add_argument("files", nargs="+", metavar="FILE", help="file(s) to store")
-    put_parser.add_argument(
-        "--manifest",
-        metavar="PATH",
-        default=None,
-        help="merge the entries into this manifest JSON (created if absent)",
-    )
-    put_parser.add_argument(
-        "--kind", choices=list(artifact_store.CLIENT_KINDS), default="evidence"
-    )
-    put_parser.add_argument(
-        "--name",
-        default=None,
-        help="entry name (single file only; default: the path relative to "
-        "its git checkout)",
-    )
-    put_parser.add_argument("--media-type", default=None, help="entry media_type")
-    put_parser.add_argument(
-        "--producer-tool", default=None, help="producer.tool (default: klt)"
-    )
-    put_parser.add_argument(
-        "--producer-version",
-        default=None,
-        help="producer.version (default: this klt's version)",
-    )
-    put_parser.add_argument(
-        "--commit",
-        default=None,
-        help="producer.commit (default: git HEAD of the current directory)",
-    )
-    _add_artifact_common_args(put_parser, repo=True)
-    put_parser.set_defaults(func=artifact_cmd.run_put)
-
-    get_parser = artifact_sub.add_parser(
-        "get",
-        help="fetch one object, writing it only if its sha256 verifies",
-        description=(
-            "REF is a sha256 (stored under --repo) or MANIFEST[#SHA256|NAME]. "
-            "The bytes are written only when their recomputed sha256 matches "
-            "both the manifest's digest and the key's. `-o -` writes the "
-            "verified bytes to stdout instead of a JSON envelope."
-        ),
-    )
-    get_parser.add_argument("ref", metavar="REF", help="sha256 or MANIFEST[#SELECTOR]")
-    get_parser.add_argument(
-        "-o", "--output", required=True, help="destination file, or - for stdout"
-    )
-    get_parser.add_argument(
-        "--force", action="store_true", help="replace an existing output file"
-    )
-    _add_artifact_common_args(get_parser, repo=True)
-    get_parser.set_defaults(func=artifact_cmd.run_get)
-
-    verify_parser = artifact_sub.add_parser(
-        "verify",
-        help="check every manifest entry's size and sha256 against the store",
-        description=(
-            "stat each entry, then fetch and re-hash it. Exits 3 if any entry "
-            "is missing or mismatched, 1 on a broker refusal or bad manifest."
-        ),
-    )
-    verify_parser.add_argument("manifest", metavar="MANIFEST")
-    _add_artifact_common_args(verify_parser, repo=False)
-    verify_parser.set_defaults(func=artifact_cmd.run_verify)
-
-    delete_parser = artifact_sub.add_parser(
-        "delete",
-        help="delete stored objects through the broker (dry run unless --yes)",
-        description=(
-            "REF is a sha256 (under --repo) or MANIFEST[#SELECTOR], as for "
-            "`get`. Without --yes only `stat` is called and nothing is "
-            "deleted. Each --keep MANIFEST protects the objects it names: a "
-            "referenced target refuses the whole batch unless "
-            "--force-referenced. An absent object is success. The broker "
-            "decides whether the caller may delete."
-        ),
-    )
-    delete_parser.add_argument(
-        "refs", nargs="+", metavar="REF", help="sha256 or MANIFEST[#SELECTOR]"
-    )
-    delete_parser.add_argument(
-        "--keep",
-        metavar="MANIFEST",
-        action="append",
-        default=[],
-        help="manifest whose objects must not be deleted (repeatable)",
-    )
-    delete_parser.add_argument(
-        "--yes", action="store_true", help="actually delete (default: dry run)"
-    )
-    delete_parser.add_argument(
-        "--force-referenced",
-        action="store_true",
-        help="delete even objects a --keep manifest names",
-    )
-    _add_artifact_common_args(delete_parser, repo=True)
-    delete_parser.set_defaults(func=artifact_cmd.run_delete)
-
-
-def _add_artifact_common_args(parser: argparse.ArgumentParser, *, repo: bool) -> None:
-    parser.add_argument(
-        "--broker",
-        metavar="URL",
-        default=None,
-        help=f"artifact broker base URL (default: ${artifact_store.ENV_BROKER})",
-    )
-    if repo:
-        parser.add_argument(
-            "--repo",
-            metavar="OWNER/NAME",
-            default=None,
-            help=f"repo the objects are stored under (default: "
-            f"${artifact_store.ENV_REPO}, else the git origin remote)",
-        )
-    _add_format_arg(parser)
-
-
 def _add_env_provenance_parser(subparsers: argparse._SubParsersAction) -> None:
     """Register the ``env-provenance`` verb with nested ``emit``/``scan``/
     ``lint-envelope`` subcommands (issues #1254, #2224), mirroring
@@ -4033,7 +3883,7 @@ def _add_stats_parser(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         help="also compute geometry_digest, a sha256 of the stream's decoded "
         "geometry (null otherwise; it re-reads the whole layout and "
-        "roughly 2.5x's the runtime on large flat layouts)",
+        "roughly 2.5x the runtime on large flat layouts)",
     )
     stats_parser.add_argument(
         "--top",
@@ -4060,36 +3910,6 @@ def _add_stats_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(stats_parser)
     stats_parser.set_defaults(func=stats_cmd.run)
-
-
-def _add_diff_parser(subparsers: argparse._SubParsersAction) -> None:
-    """Register the ``diff`` verb: compare two layout streams for equal geometry."""
-    diff_parser = subparsers.add_parser(
-        "diff",
-        help="compare two GDSII/OASIS streams for equal geometry, labels and hierarchy",
-        description=(
-            "Compare two layout streams shape-for-shape. Ignores stream "
-            "timestamps, element order and library name; never ignores "
-            "coordinates, path widths, text, instance transforms, the "
-            "database unit or cell names. Exit 0 = equivalent, 3 = layouts "
-            "differ, 1 = unreadable file or unknown --top."
-        ),
-    )
-    diff_parser.add_argument("file_a", help="first GDSII or OASIS layout file")
-    diff_parser.add_argument("file_b", help="second GDSII or OASIS layout file")
-    diff_parser.add_argument(
-        "--top",
-        default=None,
-        help="compare only this cell's hierarchy (must exist in both streams)",
-    )
-    diff_parser.add_argument(
-        "--max-items",
-        type=int,
-        default=50,
-        help="cap on listed differences per list (counts stay exact; default 50)",
-    )
-    _add_format_arg(diff_parser)
-    diff_parser.set_defaults(func=diff_cmd.run)
 
 
 def _add_cells_parser(subparsers: argparse._SubParsersAction) -> None:
