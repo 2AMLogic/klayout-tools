@@ -935,16 +935,16 @@ def test_validate_measurement_forms_rejects_expr_colliding_with_a_later_card():
         )
 
 
-def test_validate_measurement_forms_ignores_duplicate_spice_only_names():
-    """Two `.meas` cards sharing a name is ngspice's own business, exactly as
-    before this issue -- the new uniqueness rule is scoped to `expr` so no
-    previously-accepted request starts failing."""
-    sim._validate_measurement_forms(
-        [
-            {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=1u"},
-            {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=2u"},
-        ]
-    )  # must not raise
+def test_validate_measurement_forms_rejects_duplicate_spice_only_names():
+    """Issue #6289: two `.meas` cards sharing a byte-identical name are refused
+    up front -- before that issue they crashed coverage as a bare `ValueError`."""
+    with pytest.raises(sim.SimError, match="'vout' is declared more than once"):
+        sim._validate_measurement_forms(
+            [
+                {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=1u"},
+                {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=2u"},
+            ]
+        )
 
 
 def test_validate_measurement_forms_rejects_case_insensitive_duplicate_expr_name():

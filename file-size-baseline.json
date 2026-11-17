@@ -160,10 +160,6 @@
       "lines": 627
     },
     {
-      "path": "src/klayout_tools/_paths.py",
-      "lines": 526
-    },
-    {
       "path": "src/klayout_tools/_provenance.py",
       "lines": 991
     },
@@ -189,7 +185,7 @@
     },
     {
       "path": "src/klayout_tools/cli/parser.py",
-      "lines": 5097
+      "lines": 5095
     },
     {
       "path": "src/klayout_tools/cli/pdk_cmd.py",
@@ -345,11 +341,11 @@
     },
     {
       "path": "src/klayout_tools/functional_verification.py",
-      "lines": 3152
+      "lines": 3150
     },
     {
       "path": "src/klayout_tools/functional_verification_sdf.py",
-      "lines": 2531
+      "lines": 2530
     },
     {
       "path": "src/klayout_tools/gen.py",
@@ -441,7 +437,7 @@
     },
     {
       "path": "src/klayout_tools/macros.py",
-      "lines": 668
+      "lines": 667
     },
     {
       "path": "src/klayout_tools/mcp_tools.py",
@@ -473,7 +469,7 @@
     },
     {
       "path": "src/klayout_tools/op_sanity.py",
-      "lines": 1844
+      "lines": 1836
     },
     {
       "path": "src/klayout_tools/parasitic_integrity.py",
@@ -501,7 +497,7 @@
     },
     {
       "path": "src/klayout_tools/pex.py",
-      "lines": 3716
+      "lines": 3705
     },
     {
       "path": "src/klayout_tools/place_and_route.py",
@@ -589,11 +585,11 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 12395
+      "lines": 12352
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
-      "lines": 4441
+      "lines": 4421
     },
     {
       "path": "src/klayout_tools/sim_commands.py",
@@ -649,7 +645,7 @@
     },
     {
       "path": "src/klayout_tools/spice_flatten.py",
-      "lines": 798
+      "lines": 796
     },
     {
       "path": "src/klayout_tools/substrate_resistance.py",
@@ -657,7 +653,7 @@
     },
     {
       "path": "src/klayout_tools/synthesize.py",
-      "lines": 4650
+      "lines": 4647
     },
     {
       "path": "src/klayout_tools/synthesize_arithmetic.py",
