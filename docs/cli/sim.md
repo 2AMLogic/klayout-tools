@@ -21,7 +21,14 @@ this document (and the code) win.
   next to the request file (the same "next to the input" convention as `klt
   render`'s default output directory). `-o` names a **directory**, never the
   report file, on every backend (including `--backend batch`): the report goes
-  to stdout, and `--report-out <path>` writes a copy to a file.
+  to stdout. Without `--report-out`, a completed single-request run
+  ([#5776](https://github.com/2AMLogic/klayout-tools/issues/5776)) also
+  writes the report envelope to `<outdir>/report.json` — the directory is
+  created if missing, `--dry-run`/`--submit-only` write nothing, and a write
+  failure exits 1 with the error envelope — so a finished run's evidence is
+  on disk even when the caller forgot `--report-out`. `--report-out <path>`
+  remains the way to choose another path (`.gz` included) and wins outright
+  when both are given.
 - `--backend` — execution backend for the corner matrix, overriding the
   request's own `backend` field when given. See "Execution backends" below.
 - `--max-workers` — worker-pool size for the `local-parallel` backend,
@@ -132,7 +139,9 @@ this document (and the code) win.
   yield` and `klt signoff` accept the `.json.gz` file directly
   ([#5452](https://github.com/2AMLogic/klayout-tools/issues/5452)), so the
   compressed report is citable as manifest evidence with no decompressed
-  second copy.
+  second copy. Given together with `-o`, `--report-out` wins outright and
+  no implicit `<outdir>/report.json` copy is written (see `--outdir`
+  above).
 - `--plot` — write one self-contained, dependency-free waveform SVG per
   non-sweep signal per corner to this directory, forcing
   `options.waveforms`/`keep_artifacts` on for this run. See "Waveform
@@ -2446,8 +2455,9 @@ contents), size-capped, serialised with a JSON encoder, errors recorded as
 
 | Field | Meaning |
 | --- | --- |
-| `capture` | `ok`, `absent` (older worker, no artifact, poll timeout) or `malformed`. When not `ok`, all observations are `null` -- never the client's values. |
+| `capture` | `ok`, `absent` (older worker, no artifact, poll timeout) or `malformed`. When not `ok`, preflight observations are `null` -- never the client's values. `ngspice_init` is collected independently from the simulation report. |
 | `simulator` | `requested_binary`, `binary_source` (`request` / `KLT_NGSPICE_BINARY` / `PATH`), `selected_path` (binary actually selected on the worker), `version_banner` (full `--version` text, bounded to 2000 chars), `version_probe` (`ok` / `timeout` / `exit_N` / `error` / `unavailable`). |
+| `ngspice_init` | Issue #6045. Corner-mode worker report's `{source, lines, sha256}`: path-free `source` is `request`, `thread_pin`, `home` or `none`; `lines` is retained only for klt-written `request`/`thread_pin` files, never home contents. Digest is `sha256:<hex>` (`null` for `none`). Missing/legacy, Xyce or malformed observations are `null`. Collected from the worker's simulation report after execution, independently of preflight `capture`, including recovered failed jobs and each fleet shard. Init lines are bounded to 256 entries, 2000 characters per entry and 32768 characters total including newlines; oversized content is rejected as `null`, never truncated beside its full-file digest. The client's `environment.ngspice_init.source` remains `runner`; SSH and deck-mode provenance are outside this field's scope. |
 | `model_inputs` | Under `options.stage_model_inputs`: `[{name, sha256}]` digests of the staged model files in `$EDA_INPUT_DIR` (bounded to 64); `null` otherwise or when an older worker does not report it. Lifted to `environment.remote.runner_model_inputs`. **Staged files only**: a runner-resolved, image-baked `.osdi` (issue #3819) is never staged, so it can never appear here -- its digest is `environment.remote.runner_osdi_preload` instead. |
 | `pdk` | `variant`, worker `root`, `stamp_scheme` (`sources-sha256`), `stamp_sha256`, `stamp_text` (bounded `SOURCES` text) for the resolved variant, `models_staged` (true under `options.stage_model_inputs`: the executed models then came from the request, not the image tree), `stamp_scope` (`image` when `models_staged` is true: `stamp_*` then describes the worker image's tree, not the models that ran; `executed` otherwise). Stamp fields are `null` when neither `SOURCES` nor a bundle `.pdk-store.json` is readable; with only the latter, `stamp_scheme` is `store-version-sha256` (sha256 of its `version` string; `stamp_text` is `store:<version>`). |
 | `cpu_model` | First `model name` from the worker's `/proc/cpuinfo`, else `null`. CPU count stays `physical_cores` / `concurrency` from `status.json`. |
