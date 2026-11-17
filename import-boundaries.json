@@ -772,6 +772,7 @@
         "klayout_tools.sim_corner_variants",
         "klayout_tools.sim_corners",
         "klayout_tools.sim_crossings",
+        "klayout_tools.sim_crossings_dc",
         "klayout_tools.sim_crossings_reduce",
         "klayout_tools.sim_cycle_mean",
         "klayout_tools.sim_deck_expand",

@@ -405,6 +405,45 @@ def extract_corner_crossings(
     return outcomes
 
 
+def _resolve_level(
+    name: Any,
+    body: dict[str, Any],
+    points: list[list[float]],
+    supply_v: dict[str, Any] | None,
+    sweep: bool,
+) -> tuple[float | None, str | None]:
+    """The per-corner threshold: ``body.level`` itself, or the sampled-offset
+    / supply-relative form resolved against this corner's waveform and supply
+    map. Returns ``(resolved level, error message)`` -- the level is None
+    when it stays literal, the message set when resolution failed."""
+    raw_level = body["level"]
+    if is_sampled_offset(raw_level):
+        try:
+            return (
+                sim_crossings_dc.resolve_sampled_level(
+                    name,
+                    raw_level,
+                    [point[0] for point in points],
+                    [point[1] for point in points],
+                    sweep=sweep,
+                ),
+                None,
+            )
+        except ValueError as exc:
+            return None, str(exc)
+    if sim_supply_relative.is_supply_relative(raw_level):
+        try:
+            return (
+                sim_supply_relative.resolve(
+                    raw_level, f"measurement '{name}': crossings.level", supply_v
+                ),
+                None,
+            )
+        except sim_supply_relative.SupplyRelativeError as exc:
+            return None, str(exc)
+    return None, None
+
+
 def _extract_one(
     spec: dict[str, Any],
     raw_path: str,
@@ -440,31 +479,14 @@ def _extract_one(
             )
         )
     name = spec["name"]
-    raw_level = body["level"]
-    resolved_level: float | None = None
     sweep = sim_crossings_dc.is_dc(kind)
-    if is_sampled_offset(raw_level):
-        try:
-            resolved_level = sim_crossings_dc.resolve_sampled_level(
-                name,
-                raw_level,
-                [point[0] for point in points],
-                [point[1] for point in points],
-                sweep=sweep,
-            )
-        except ValueError as exc:
-            return CrossingsOutcome(error=str(exc))
-    elif sim_supply_relative.is_supply_relative(raw_level):
-        try:
-            resolved_level = sim_supply_relative.resolve(
-                raw_level, f"measurement '{name}': crossings.level", supply_v
-            )
-        except sim_supply_relative.SupplyRelativeError as exc:
-            return CrossingsOutcome(error=str(exc))
+    resolved_level, error = _resolve_level(name, body, points, supply_v, sweep)
+    if error is not None:
+        return CrossingsOutcome(error=error)
     outcome = find_crossings(
         [point[0] for point in points],
         [point[1] for point in points],
-        resolved_level if resolved_level is not None else float(raw_level),
+        resolved_level if resolved_level is not None else float(body["level"]),
         edge=body.get("edge", "rise"),
         start=sim_window.window_bound(name, body, "from", form="crossings"),
         stop=sim_window.window_bound(name, body, "to", form="crossings"),
@@ -477,7 +499,7 @@ def _extract_one(
             return CrossingsOutcome(
                 error=sim_crossings_dc.no_crossing_message(
                     name,
-                    resolved_level if resolved_level is not None else raw_level,
+                    resolved_level if resolved_level is not None else body["level"],
                     body.get("edge", "rise"),
                 )
             )
