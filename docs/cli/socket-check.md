@@ -386,5 +386,5 @@ is written to stdout. No Python traceback is printed.
   [`docs/json-contract.md`](../json-contract.md)):
 
   ```json
-  { "schema_version": 1, "error": { "command": "socket-check", "message": "socket descriptor not found: socket.json" } }
+  { "schema_version": 1, "error": { "command": "socket-check", "message": "file not found: socket.json" } }
   ```
