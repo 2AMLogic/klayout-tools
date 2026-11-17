@@ -292,6 +292,7 @@
         "klayout_tools.functional_verification_mutation",
         "klayout_tools.functional_verification_mutation_proposals",
         "klayout_tools.functional_verification_mutation_variant",
+        "klayout_tools.functional_verification_run_inputs",
         "klayout_tools.functional_verification_sdf",
         "klayout_tools.functional_verification_sdf_instance",
         "klayout_tools.functional_verification_sdf_rename",
@@ -439,7 +440,8 @@
       "modules": [
         "klayout_tools.cli.lef_abstract_cmd",
         "klayout_tools.lef_abstract",
-        "klayout_tools.lef_abstract_no_layout"
+        "klayout_tools.lef_abstract_no_layout",
+        "klayout_tools.lef_abstract_resource"
       ]
     },
     "lvs": {
@@ -537,6 +539,7 @@
         "klayout_tools.decks.sg13g2_cont_grid",
         "klayout_tools.decks.sg13g2_runset_notes",
         "klayout_tools.decks.sg13g2_svaricap",
+        "klayout_tools.decks.sg13g2_unmodeled",
         "klayout_tools.decks.sky130",
         "klayout_tools.decks.sky130_lvt",
         "klayout_tools.decks.sky130_unmodeled",
@@ -552,6 +555,7 @@
         "klayout_tools.pdk_models",
         "klayout_tools.pdk_native_drc",
         "klayout_tools.pdk_pcell",
+        "klayout_tools.pdk_pcell_checks",
         "klayout_tools.pdk_stackup",
         "klayout_tools.pdk_store"
       ]
@@ -674,6 +678,7 @@
         "klayout_tools._check_result",
         "klayout_tools._devices",
         "klayout_tools._digest",
+        "klayout_tools._engine_proc",
         "klayout_tools._git_tracked",
         "klayout_tools._jsongz",
         "klayout_tools._jsonnum",
@@ -815,6 +820,7 @@
         "klayout_tools.sim_expr_hint",
         "klayout_tools.sim_eye",
         "klayout_tools.sim_forms",
+        "klayout_tools.sim_form_signals",
         "klayout_tools.sim_injected",
         "klayout_tools.sim_merge",
         "klayout_tools.sim_mismatch_declarations",
