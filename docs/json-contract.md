@@ -1867,6 +1867,34 @@ All eight share one contract:
   (`engine`) is not excluded: swapping engines is a different run. For
   `signoff` the same rule lands on the field *its* reports carry tool
   identity in — the whole `build` block (issue #2249).
+- **A provenance field the fresh run does not emit is `not_compared`, not
+  drift (issue #5866).** A committed report may carry `provenance` keys the
+  re-running `klt` never writes — spliced in by a downstream wrapper
+  (`provenance.gds_sha256`), or emitted by a newer/older version of the
+  tool. Such a key is collected into an additive, optional `not_compared`
+  list of `{field, committed}` entries (dotted field names exactly like
+  `drift[]`'s; emitted only when non-empty, so every existing payload
+  stays byte-identical) and influences neither `status` nor the exit code:
+  only a field both reports actually carry can drift. The rule is
+  deliberately provenance-only and one-directional — a verdict-bearing key
+  missing from the fresh report (`violation_count`, `violations`,
+  `coverage`, …) still drifts, because dropping a verdict-bearing field is
+  exactly the regression the diff exists to catch; a key the *fresh*
+  report grew (schema evolution in the other direction) still drifts; a
+  fresh report missing its entire `provenance` block still drifts; and
+  the carve-out covers scalar keys only — a committed `provenance`
+  *sub-block* (a dict or list, e.g. a `regeneration` claim the fresh run
+  declined to adopt) absent from fresh is one absent verdict-bearing
+  structure and still drifts. The `provenance.regeneration` subtree
+  (`klt signoff --attest`'s caller-supplied claim) is excluded from the
+  carve-out entirely — its `hash_kind` leaf is written only when it
+  differs from the default (`bytes`), so absence there encodes a default
+  *value*, not an unproducible field, and any leaf disagreement inside a
+  declined claim still drifts (the explicit `--hash-kind` cross-check of
+  issue #5572). The
+  `--format text` renderer lists the skipped field names in a
+  `not compared:` block, so a non-zero exit always means "something that
+  could be compared did not match".
 - **`provenance.pdk.source` is excluded as resolution provenance (issue
   #5863).** It records *how* the PDK install was found (search roots vs
   `$PDK_ROOT` vs `--pdk-root`), in the shared
@@ -2159,11 +2187,20 @@ Field-level schema, path rules, examples and exit codes:
 
 Two behaviours worth knowing when running `--attest` or grading a manifest:
 
-- **Declared commands see the caller's `PATH`.** Inventory commands run with
-  the invoking environment, except that when `klt` itself runs inside a venv
+- **Declared commands see the caller's `PATH` — except that `klt` stays the
+  attesting `klt`.** Inventory commands run with the invoking environment,
+  except that when `klt` itself runs inside a venv
   (`sys.prefix != sys.base_prefix`, as under `uvx`/pipx) that venv's `bin`
   directory is removed from `PATH`, so a bare `python3` resolves to the
-  repo's interpreter, not the tool's. Outside a venv the environment is
+  repo's interpreter, not the tool's. The one name the stripping must not
+  remove is restored: a run-scoped shim directory holding a single `klt`
+  symlink to the venv's entry point is **prepended** to the declared
+  command's `PATH`, so `klt` on it is always the `klt` running the
+  attestation — the venv's when attesting from a venv, the host's when not.
+  The shim is prepended and so takes precedence over a `klt` the caller
+  placed earlier on `PATH` (issue #5565). No other executable from the
+  venv's `bin` (`python`, `python3`, `pip`) is re-exposed; the per-run shim
+  path never enters the envelope. Outside a venv the environment is
   unchanged.
 - **Manifest evidence paths are cwd-relative.** A relative `file` evidence
   path resolves against the process cwd, not the manifest's directory. When a
