@@ -37,6 +37,7 @@ from .signoff_attest import (
     _validated_command_checks,
 )
 from .signoff_attest_drift import drift_result
+from .signoff_attest_env import klt_shim_scope
 from .signoff_attest_input import attestation_block, normalized_description
 
 #: ``--hash-kind`` values a stream attestation's regeneration claim accepts.
@@ -297,9 +298,10 @@ def build_stream_attestation(
     description: str | None = None
     inventory_block: dict[str, Any] | None = None
     if inventory_path is not None:
-        extra, inventory_block, description = _inventory_checks(
-            inventory_path, absolute, committed_checks
-        )
+        with klt_shim_scope():
+            extra, inventory_block, description = _inventory_checks(
+                inventory_path, absolute, committed_checks
+            )
         checks.extend(extra)
     passed_count = sum(1 for check in checks if check["passed"])
     status = "pass" if passed_count == len(checks) else "fail"
