@@ -1,110 +1,69 @@
-"""Client for the fleet artifact store (issue #4063).
+"""Standalone, dependency-free verifier for artifact manifests (issue #5958).
 
-Large evidence (sim outputs, signoff campaign bytes) does not belong in git:
-a repo commits a small **manifest** that names each object by its sha256, and
-the bytes live in an object store reached only through an *artifact broker*.
-This module is the ``klt`` side of that arrangement: hash a file, ask the
-broker for a short-lived presigned URL, move the bytes over it, and write or
-check manifest entries. ``klt artifact put|get|verify|delete``
-(:mod:`.cli.artifact_cmd`) is a thin adapter over it.
+This one file is the whole ``verify`` path of ``klt artifact verify``: the
+artifact-broker client (``POST /v1/<op>``, presigned-URL handling, 429
+retry), manifest loading and validation, and the stat-then-hashed-``get``
+verification that verdicts each entry. ``klayout_tools.artifact_objects``
+(put/get/delete) and the CLI adapter import it, so there is exactly one
+implementation and nothing can drift from it.
 
-Broker wire contract (the broker is not part of this repo):
+The module is deliberately **stdlib-only with no package-relative imports**,
+so a chip repo can vendor it: copy the file out of a ``klayout-tools``
+release tag (or the installed wheel's ``klayout_tools/`` directory) and run
+it with no ``klt`` and no ``klayout`` installed::
 
-- ``POST <broker>/v1/{put,get,stat,delete}`` with a JSON body ``{"kind", "repo",
-  "sha256", "size"}`` (``size`` for put only). The broker identifies the
-  caller by its network identity, so the client sends **no credential** and
-  holds none.
-- A success answer is ``{"key", "exists", "url"?, "method"?, "headers"?,
-  "expires_at"?, "size"?}``. ``put`` of an object that already exists answers
-  ``exists: true`` with no URL -- objects are immutable and named by their
-  digest, so that is success. ``get`` answers a presigned GET URL (or a 404).
-  ``stat`` answers ``{exists, size}``. ``delete`` takes the ``stat`` body and
-  answers any 200 JSON object; the broker owns authorization and retention.
-- A refusal is ``{"error", "message"}`` with a 4xx/5xx status, surfaced
-  verbatim as :class:`ArtifactError` code ``broker_refused``. HTTP 429 is
-  retried with bounded backoff (honoring ``Retry-After``); when the retries run
-  out it is code ``broker_rate_limited`` instead. There is no
-  local fallback and no direct object-store path (no cloud SDK, no cloud
-  credential).
+    python artifact_verify.py MANIFEST --broker URL [--format text|json]
 
-Two invariants hold everywhere in this module:
+It emits the same ``--format json`` report, through the same envelope, with
+the same exit codes as ``klt artifact verify`` (``docs/cli/artifact.md``);
+``tests/test_artifact_verify.py`` runs a vendored copy under ``python -I``
+and diffs the two reports, so the twinning cannot drift.
 
-1. **A presigned URL is a bearer credential for five minutes.** It is held in
-   memory, handed to :mod:`http.client` in-process, and never logged,
-   printed, put in an exception message, written to a manifest or passed in
-   argv. :class:`Presigned` keeps it out of its ``repr``.
-2. **Bytes are trusted only after re-hashing.** A fetch is streamed to a
-   temporary file beside the destination and moved into place only when the
-   recomputed sha256 matches both the digest that was asked for (the
-   manifest's) and the digest the broker's object key names.
+Offline CI seam: :func:`verify_manifest` accepts any object with
+:class:`BrokerClient`'s ``presign`` and ``fetch_into`` methods, so a repo's
+CI can verify a manifest through an in-process fake broker and open no
+socket at all (a minimal fake is documented in ``docs/cli/artifact.md``).
 
-Manifest format (``schema_version`` 1)::
+Two invariants hold everywhere in this module, as in ``artifact_objects``:
 
-    {
-      "schema_version": 1,
-      "entries": [
-        {
-          "sha256": "<64 lowercase hex>",
-          "size": 1234,
-          "kind": "evidence",
-          "producer": {"tool": "klt", "version": "0.4.2",
-                       "loom.repo": "owner/name", "commit": "<git sha>"},
-          "uri": "artifact:<key>",
-          "name": "sim/run1/report.json",      # optional
-          "media_type": "application/json"     # optional
-        }
-      ]
-    }
-
-An entry carries exactly those fields. ``uri`` is a **logical** URI,
-``artifact:<key>``, that only the artifact broker resolves (operator ruling
-H1, 2AMLogic/2am#5553): ``<key>`` is the broker's own answer, verbatim, never
-assembled here, and nothing about the storage location (no bucket, no
-endpoint) is written, so a manifest stays safe to commit to a public repo.
-``get`` and ``verify`` accept that scheme only; any other ``uri`` is an
-``invalid_manifest``.
+1. **A presigned URL is a bearer credential for five minutes.** It is held
+   in memory, handed to :mod:`http.client` in-process, and never logged,
+   printed, put in an exception message or passed in argv.
+   :class:`Presigned` keeps it out of its ``repr``.
+2. **Bytes are trusted only after re-hashing.** An entry is ``ok`` only when
+   the fetched bytes re-hash to the manifest's digest, to the digest the
+   broker's object key names, and to the entry's recorded size.
 """
 
 from __future__ import annotations
 
-import base64
+import argparse
 import hashlib
 import http.client
 import json
-import mimetypes
 import os
 import random
 import re
-import subprocess
-import tempfile
+import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import IO, Any
 from urllib.parse import SplitResult, urlsplit
 
-from . import build_identity
-from ._jsonnum import is_int
-
 #: Environment variable naming the broker's base URL (``http(s)://host:port``).
 ENV_BROKER = "KLT_ARTIFACT_BROKER"
-#: Environment variable naming the ``owner/name`` repo objects are stored under.
-ENV_REPO = "KLT_ARTIFACT_REPO"
 
 MANIFEST_SCHEMA_VERSION = 1
 
 #: Every kind the store knows. A manifest entry may name any of them.
 KINDS = ("evidence", "transcript", "log", "pdk")
-#: The kinds this client puts and fetches: repo-scoped evidence only.
+#: The kinds this client fetches and verifies: repo-scoped evidence only.
 CLIENT_KINDS = ("evidence",)
 
 ENTRY_REQUIRED_FIELDS = ("sha256", "size", "kind", "producer", "uri")
 ENTRY_OPTIONAL_FIELDS = ("name", "media_type")
 PRODUCER_FIELDS = ("tool", "version", "loom.repo", "commit")
-
-#: The store's single-PUT ceiling (5 GiB); larger objects need multipart,
-#: which the broker does not mint.
-MAX_PUT_SIZE = 5 << 30
 
 BROKER_TIMEOUT_S = 60
 TRANSFER_TIMEOUT_S = 600
@@ -131,7 +90,6 @@ _REPO_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
 URI_SCHEME = "artifact"
 _URI_RE = re.compile(r"^artifact:([^/\s]\S*)$")
 _S3_CODE_RE = re.compile(r"<Code>([A-Za-z0-9_.-]{1,64})</Code>")
-_REMOTE_RE = re.compile(r"[:/]([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+?)(?:\.git)?/?$")
 
 
 class ArtifactError(Exception):
@@ -211,8 +169,9 @@ class BrokerClient:
 
         HTTP 429 is retried (``Retry-After`` seconds when the broker sends
         them, else exponential backoff with full jitter) within
-        :data:`RATE_LIMIT_ATTEMPTS` and :data:`RATE_LIMIT_TOTAL_WAIT_S`; exhausted
-        retries raise ``broker_rate_limited``. No other status is retried."""
+        :data:`RATE_LIMIT_ATTEMPTS` and :data:`RATE_LIMIT_TOTAL_WAIT_S`;
+        exhausted retries raise ``broker_rate_limited``. No other status is
+        retried."""
         waited = 0.0
         attempt = 0
         while True:
@@ -281,6 +240,37 @@ class BrokerClient:
             body["size"] = size
         return _parse_presigned(self.call(op, body), op)
 
+    def fetch_into(
+        self, target: FetchTarget, sink: Callable[[bytes], object] | None
+    ) -> dict[str, Any]:
+        """Fetch ``target`` streaming into ``sink`` while hashing; return
+        ``{"key", "sha256", "size"}`` of what was observed. Raises on a
+        broker refusal (including 404).
+
+        A method, not a module function, so :func:`verify_manifest` can take
+        any object with ``presign`` and ``fetch_into`` -- an in-process fake
+        for offline CI -- in place of a :class:`BrokerClient`."""
+        answer = self.presign("get", target.kind, target.repo, target.sha256)
+        _check_key(answer.key, target.sha256)
+        if target.key is not None and answer.key != target.key:
+            raise ArtifactError(
+                "the artifact broker's key differs from the manifest uri's",
+                "key_mismatch",
+                {"key": answer.key, "manifest_key": target.key},
+            )
+        hasher = hashlib.sha256()
+        count = 0
+
+        def _consume(chunk: bytes) -> None:
+            nonlocal count
+            hasher.update(chunk)
+            count += len(chunk)
+            if sink is not None:
+                sink(chunk)
+
+        _transfer(answer, "GET", None, None, _consume)
+        return {"key": answer.key, "sha256": hasher.hexdigest(), "size": count}
+
 
 def _parse_retry_after(value: str | None) -> float | None:
     """``Retry-After`` in delta-seconds form; the HTTP-date form is ignored."""
@@ -345,6 +335,12 @@ def _parse_headers(raw: Any, op: str) -> dict[str, str]:
     return dict(raw)
 
 
+def _is_int(value: Any) -> bool:
+    """A JSON integer, excluding ``bool`` (a Python int). Inlined from
+    ``klayout_tools._jsonnum.is_int`` so this file runs standalone."""
+    return not isinstance(value, bool) and isinstance(value, int)
+
+
 def _parse_presigned(payload: dict[str, Any], op: str) -> Presigned:
     key = payload.get("key")
     if not isinstance(key, str) or not key:
@@ -355,7 +351,7 @@ def _parse_presigned(payload: dict[str, Any], op: str) -> Presigned:
     return Presigned(
         key=key,
         exists=payload.get("exists") is True,
-        size=size if is_int(size) else None,
+        size=size if _is_int(size) else None,
         method=_optional_str(payload, "method"),
         url=_optional_str(payload, "url"),
         headers=_parse_headers(payload.get("headers"), op),
@@ -419,24 +415,8 @@ def _transfer_failure(method: str, status: int, raw: bytes) -> ArtifactError:
 
 
 # --------------------------------------------------------------------------
-# Hashing, keys, URIs
+# Keys, URIs, repo names, configuration
 # --------------------------------------------------------------------------
-
-
-def hash_file(path: str) -> tuple[str, int]:
-    """``(sha256 lowercase hex, size)`` of ``path``, streamed."""
-    hasher = hashlib.sha256()
-    size = 0
-    try:
-        with open(path, "rb") as handle:
-            while chunk := handle.read(_CHUNK):
-                hasher.update(chunk)
-                size += len(chunk)
-    except OSError as exc:
-        raise ArtifactError(
-            f"cannot read {path}: {exc.strerror}", "unreadable_input"
-        ) from None
-    return hasher.hexdigest(), size
 
 
 def key_digest(key: str) -> str:
@@ -472,22 +452,6 @@ def _check_key(key: str, sha256: str) -> None:
         )
 
 
-def _checksum_header(sha256: str) -> str:
-    return base64.b64encode(bytes.fromhex(sha256)).decode("ascii")
-
-
-def _check_checksum_header(headers: dict[str, str], sha256: str) -> None:
-    """If the broker bound the upload to a checksum, it must be ours."""
-    for name, value in headers.items():
-        if name.lower() == "x-amz-checksum-sha256" and value != _checksum_header(
-            sha256
-        ):
-            raise ArtifactError(
-                "the artifact broker bound the upload to a different checksum",
-                "key_mismatch",
-            )
-
-
 def uri_for_key(key: str) -> str:
     """The manifest ``uri`` for a broker key: ``artifact:<key>``, the key
     verbatim. A key that would not read back as itself is refused."""
@@ -501,9 +465,13 @@ def uri_for_key(key: str) -> str:
     return uri
 
 
-# --------------------------------------------------------------------------
-# Configuration: broker, repo, producer
-# --------------------------------------------------------------------------
+def check_repo(repo: str) -> str:
+    """Validate ``owner/name`` the way the broker spells it into a key."""
+    if not _REPO_RE.match(repo) or any(
+        part in (".", "..") or "__" in part for part in repo.split("/")
+    ):
+        raise ArtifactError(f"repo {repo!r} is not a storable owner/name", "bad_repo")
+    return repo
 
 
 def resolve_broker(explicit: str | None) -> BrokerClient:
@@ -514,72 +482,6 @@ def resolve_broker(explicit: str | None) -> BrokerClient:
             "broker_unconfigured",
         )
     return BrokerClient(url)
-
-
-def _git(cwd: str | None, *args: str) -> str | None:
-    try:
-        completed = subprocess.run(
-            ["git", *args], cwd=cwd, capture_output=True, text=True, timeout=30
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    out = completed.stdout.strip()
-    return out if completed.returncode == 0 and out else None
-
-
-def check_repo(repo: str) -> str:
-    """Validate ``owner/name`` the way the broker spells it into a key."""
-    if not _REPO_RE.match(repo) or any(
-        part in (".", "..") or "__" in part for part in repo.split("/")
-    ):
-        raise ArtifactError(f"repo {repo!r} is not a storable owner/name", "bad_repo")
-    return repo
-
-
-def resolve_repo(explicit: str | None, cwd: str | None = None) -> str:
-    """``--repo``, else ``$KLT_ARTIFACT_REPO``, else the git ``origin`` remote."""
-    repo = explicit or os.environ.get(ENV_REPO)
-    if not repo:
-        remote = _git(cwd, "remote", "get-url", "origin")
-        match = _REMOTE_RE.search(remote or "")
-        if match is None:
-            raise ArtifactError(
-                "cannot tell which repo to store under: pass --repo or set "
-                f"${ENV_REPO}",
-                "repo_unconfigured",
-            )
-        repo = f"{match.group(1)}/{match.group(2)}"
-    return check_repo(repo)
-
-
-def producer_block(
-    repo: str,
-    *,
-    tool: str | None = None,
-    version: str | None = None,
-    commit: str | None = None,
-    cwd: str | None = None,
-) -> dict[str, Any]:
-    """The entry's ``producer``: tool and version (default this ``klt``),
-    ``loom.repo`` and the git commit of ``cwd``'s checkout."""
-    return {
-        "tool": tool or "klt",
-        "version": version or build_identity.build_version(),
-        "loom.repo": repo,
-        "commit": commit or _git(cwd, "rev-parse", "HEAD"),
-    }
-
-
-def default_name(path: str) -> str:
-    """The entry's ``name``: the path relative to its git checkout, else the
-    bare file name -- never an absolute (host-identifying) path."""
-    absolute = os.path.realpath(path)
-    top = _git(os.path.dirname(absolute), "rev-parse", "--show-toplevel")
-    if top is not None:
-        rel = os.path.relpath(absolute, os.path.realpath(top))
-        if not rel.startswith(".."):
-            return rel.replace(os.sep, "/")
-    return os.path.basename(absolute)
 
 
 # --------------------------------------------------------------------------
@@ -642,30 +544,6 @@ def entry_problems(entry: Any) -> list[str]:
     return problems
 
 
-def build_entry(
-    *,
-    sha256: str,
-    size: int,
-    kind: str,
-    producer: dict[str, Any],
-    uri: str,
-    name: str | None = None,
-    media_type: str | None = None,
-) -> dict[str, Any]:
-    entry: dict[str, Any] = {
-        "sha256": sha256,
-        "size": size,
-        "kind": kind,
-        "producer": producer,
-        "uri": uri,
-    }
-    if name:
-        entry["name"] = name
-    if media_type:
-        entry["media_type"] = media_type
-    return entry
-
-
 def load_manifest(path: str) -> dict[str, Any]:
     """Read and validate a manifest; any malformed entry fails the whole file."""
     try:
@@ -700,101 +578,9 @@ def load_manifest(path: str) -> dict[str, Any]:
     return manifest
 
 
-def add_entries(path: str, entries: list[dict[str, Any]]) -> None:
-    """Merge ``entries`` into the manifest at ``path`` (created if absent).
-    An entry with the same ``sha256`` and ``name`` as an existing one replaces
-    it in place; the file is rewritten atomically."""
-    if os.path.exists(path):
-        manifest = load_manifest(path)
-    else:
-        manifest = {"schema_version": MANIFEST_SCHEMA_VERSION, "entries": []}
-    current: list[dict[str, Any]] = manifest["entries"]
-    for entry in entries:
-        identity = (entry["sha256"], entry.get("name"))
-        for index, existing in enumerate(current):
-            if (existing["sha256"], existing.get("name")) == identity:
-                current[index] = entry
-                break
-        else:
-            current.append(entry)
-    directory = os.path.dirname(os.path.abspath(path))
-    fd, tmp = tempfile.mkstemp(prefix=".manifest-", suffix=".tmp", dir=directory)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
-            json.dump(manifest, handle, indent=2)
-            handle.write("\n")
-        os.replace(tmp, path)
-    except BaseException:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
-        raise
-
-
-def select_entry(
-    manifest: dict[str, Any], selector: str | None, path: str
-) -> dict[str, Any]:
-    """The one entry ``selector`` names (a sha256 or a ``name``); with no
-    selector the manifest must hold exactly one entry."""
-    entries: list[dict[str, Any]] = manifest["entries"]
-    if selector is None:
-        matches = entries
-    else:
-        matches = [e for e in entries if selector in (e["sha256"], e.get("name"))]
-        matches = list({e["sha256"]: e for e in matches}.values())
-    if len(matches) != 1:
-        what = "no entry" if not matches else f"{len(matches)} entries"
-        target = f"matching {selector!r}" if selector else "(pass PATH#<sha256|name>)"
-        raise ArtifactError(f"manifest {path} has {what} {target}", "entry_not_found")
-    return matches[0]
-
-
 # --------------------------------------------------------------------------
-# Operations
+# Verification
 # --------------------------------------------------------------------------
-
-
-def put_file(
-    client: BrokerClient,
-    path: str,
-    *,
-    repo: str,
-    producer: dict[str, Any],
-    kind: str = "evidence",
-    name: str | None = None,
-    media_type: str | None = None,
-) -> dict[str, Any]:
-    """Store ``path`` and return ``{"entry", "key", "uploaded"}``.
-
-    An object the store already holds is not re-sent (``uploaded: false``)
-    and is still a success: the digest names the bytes."""
-    if kind not in CLIENT_KINDS:
-        raise ArtifactError(
-            f"klt artifact stores kind evidence only, not {kind!r}", "bad_kind"
-        )
-    sha256, size = hash_file(path)
-    if size < 1 or size > MAX_PUT_SIZE:
-        raise ArtifactError(
-            f"{path} is {size} bytes; the store takes 1 to {MAX_PUT_SIZE}", "bad_size"
-        )
-    answer = client.presign("put", kind, repo, sha256, size)
-    _check_key(answer.key, sha256)
-    uri = uri_for_key(answer.key)
-    if not answer.exists:
-        _check_checksum_header(answer.headers, sha256)
-        with open(path, "rb") as handle:
-            _transfer(answer, "PUT", handle, size, None)
-    if media_type is None:
-        media_type = mimetypes.guess_type(path)[0]
-    entry = build_entry(
-        sha256=sha256,
-        size=size,
-        kind=kind,
-        producer=producer,
-        uri=uri,
-        name=name if name is not None else default_name(path),
-        media_type=media_type,
-    )
-    return {"entry": entry, "key": answer.key, "uploaded": not answer.exists}
 
 
 @dataclass(frozen=True)
@@ -826,33 +612,6 @@ def target_for_entry(entry: dict[str, Any]) -> FetchTarget:
     )
 
 
-def _fetch_into(
-    client: BrokerClient, target: FetchTarget, sink: Callable[[bytes], object] | None
-) -> dict[str, Any]:
-    """Fetch ``target`` streaming into ``sink``; return what was observed.
-    Raises on a broker refusal (including 404)."""
-    answer = client.presign("get", target.kind, target.repo, target.sha256)
-    _check_key(answer.key, target.sha256)
-    if target.key is not None and answer.key != target.key:
-        raise ArtifactError(
-            "the artifact broker's key differs from the manifest uri's",
-            "key_mismatch",
-            {"key": answer.key, "manifest_key": target.key},
-        )
-    hasher = hashlib.sha256()
-    count = 0
-
-    def _consume(chunk: bytes) -> None:
-        nonlocal count
-        hasher.update(chunk)
-        count += len(chunk)
-        if sink is not None:
-            sink(chunk)
-
-    _transfer(answer, "GET", None, None, _consume)
-    return {"key": answer.key, "sha256": hasher.hexdigest(), "size": count}
-
-
 def _integrity_problem(target: FetchTarget, observed: dict[str, Any]) -> str | None:
     if observed["sha256"] != target.sha256:
         return "hash_mismatch"
@@ -863,46 +622,7 @@ def _integrity_problem(target: FetchTarget, observed: dict[str, Any]) -> str | N
     return None
 
 
-def fetch_to(
-    client: BrokerClient, target: FetchTarget, output: IO[bytes] | str
-) -> dict[str, Any]:
-    """Fetch ``target`` and deliver it to ``output`` (a path or a binary
-    stream) **only** once its recomputed sha256 matches the requested digest
-    and the key's. The bytes land in a temporary file first; a mismatch
-    deletes it and raises, so nothing unverified is ever written out."""
-    directory = (
-        os.path.dirname(os.path.abspath(output)) if isinstance(output, str) else None
-    )
-    fd, tmp = tempfile.mkstemp(prefix=".klt-artifact-", suffix=".part", dir=directory)
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            observed = _fetch_into(client, target, handle.write)
-        problem = _integrity_problem(target, observed)
-        if problem is not None:
-            raise ArtifactError(
-                f"refusing to write {target.sha256}: fetched bytes fail "
-                f"{problem.replace('_', ' ')} "
-                f"(got sha256 {observed['sha256']}, {observed['size']} bytes)",
-                problem,
-                {
-                    "expected_sha256": target.sha256,
-                    "observed_sha256": observed["sha256"],
-                },
-            )
-        if isinstance(output, str):
-            os.replace(tmp, output)
-        else:
-            with open(tmp, "rb") as handle:
-                while chunk := handle.read(_CHUNK):
-                    output.write(chunk)
-            output.flush()
-        return observed
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
-
-
-def _verify_entry(client: BrokerClient, entry: dict[str, Any]) -> dict[str, Any]:
+def _verify_entry(client: Any, entry: dict[str, Any]) -> dict[str, Any]:
     target = target_for_entry(entry)
     result: dict[str, Any] = {
         "sha256": entry["sha256"],
@@ -915,7 +635,7 @@ def _verify_entry(client: BrokerClient, entry: dict[str, Any]) -> dict[str, Any]
     if stat.size is not None and stat.size != entry["size"]:
         return {**result, "status": "size_mismatch", "stored_size": stat.size}
     try:
-        observed = _fetch_into(client, target, None)
+        observed = client.fetch_into(target, None)
     except ArtifactError as exc:
         if exc.code == "key_mismatch":
             return {**result, "status": "key_mismatch"}
@@ -933,9 +653,14 @@ def _verify_entry(client: BrokerClient, entry: dict[str, Any]) -> dict[str, Any]
     return {**result, "status": "ok"}
 
 
-def verify_manifest(client: BrokerClient, path: str) -> dict[str, Any]:
+def verify_manifest(client: Any, path: str) -> dict[str, Any]:
     """Check every entry of the manifest at ``path`` with ``stat`` then a
-    hashed ``get``. A broker refusal other than a missing object aborts."""
+    hashed ``get``. A broker refusal other than a missing object aborts.
+
+    ``client`` is a :class:`BrokerClient`, or any object with its ``presign``
+    and ``fetch_into`` methods -- an in-process fake, so offline CI can
+    exercise this exact code with no broker reachable and no socket opened
+    (see ``docs/cli/artifact.md``)."""
     manifest = load_manifest(path)
     results = [_verify_entry(client, entry) for entry in manifest["entries"]]
     failed = [r for r in results if r["status"] != "ok"]
@@ -947,79 +672,74 @@ def verify_manifest(client: BrokerClient, path: str) -> dict[str, Any]:
     }
 
 
-def referenced_digests(keep_manifests: list[str]) -> dict[str, str]:
-    """sha256 -> the first ``--keep`` manifest path that names it."""
-    referenced: dict[str, str] = {}
-    for path in keep_manifests:
-        for entry in load_manifest(path)["entries"]:
-            referenced.setdefault(entry["sha256"], path)
-    return referenced
+# --------------------------------------------------------------------------
+# Standalone entry point (same report and exit codes as `klt artifact verify`)
+# --------------------------------------------------------------------------
+
+#: verify ran and found a missing or mismatched entry.
+EXIT_VERIFY_FAILED = 3
 
 
-def delete_objects(
-    client: BrokerClient,
-    targets: list[FetchTarget],
-    *,
-    keep_manifests: list[str],
-    yes: bool,
-    force_referenced: bool = False,
-) -> dict[str, Any]:
-    """Delete the named objects through the broker's ``delete`` op.
+def _print_verify_text(payload: dict[str, Any]) -> None:
+    for result in payload["entries"]:
+        print(f"{result['status']:<14} {result['sha256']}  {result.get('name') or ''}")
+    print(
+        f"{payload['manifest']}: {payload['status']} "
+        f"({payload['failed_count']} of {payload['entry_count']} failed)"
+    )
 
-    Without ``yes`` only ``stat`` is called (a dry run). Every target is
-    checked against the ``keep_manifests`` before the first delete call; one
-    referenced target refuses the whole batch with ``still_referenced``
-    unless ``force_referenced``. An absent object is success. The client
-    cannot enumerate the store, so only objects the caller names are touched.
-    """
-    unique: dict[tuple[str, str, str], FetchTarget] = {}
-    for target in targets:
-        unique.setdefault((target.kind, target.repo, target.sha256), target)
-    referenced = referenced_digests(keep_manifests)
-    if not force_referenced:
-        hits = {
-            t.sha256: referenced[t.sha256]
-            for t in unique.values()
-            if t.sha256 in referenced
-        }
-        if hits:
-            first = next(iter(hits))
-            raise ArtifactError(
-                f"refusing to delete {len(hits)} object(s) still referenced by a "
-                f"--keep manifest (e.g. {first} in {hits[first]}); pass "
-                "--force-referenced to override",
-                "still_referenced",
-                {"referenced": [{"sha256": s, "manifest": m} for s, m in hits.items()]},
-            )
-    stats = [
-        (t, client.presign("stat", t.kind, t.repo, t.sha256)) for t in unique.values()
-    ]
-    objects: list[dict[str, Any]] = []
-    for target, stat in stats:
-        item: dict[str, Any] = {"sha256": target.sha256, "key": stat.key}
-        if not yes:
-            objects.append(
-                {
-                    **item,
-                    "status": "would_delete" if stat.exists else "absent",
-                    "exists": stat.exists,
-                    "size": stat.size,
-                    "would_delete": stat.exists,
-                }
-            )
-            continue
-        if stat.exists:
-            client.call(
-                "delete",
-                {"kind": target.kind, "repo": target.repo, "sha256": target.sha256},
-            )
-        objects.append({**item, "status": "deleted" if stat.exists else "absent"})
-    return {
-        "status": "deleted" if yes else "dry_run",
-        "objects": objects,
-        "guard": {
-            "keep_manifests": len(keep_manifests),
-            "checked": bool(keep_manifests),
-            "forced": force_referenced,
-        },
-    }
+
+def _emit_error(
+    message: str,
+    fmt: str,
+    code: str | None = None,
+    details: dict[str, Any] | None = None,
+) -> int:
+    """The ``docs/json-contract.md`` error envelope, inlined stdlib-only so
+    this file runs alone; the same-report test pins it to the CLI's."""
+    if fmt == "json":
+        error: dict[str, Any] = {"command": "artifact verify", "message": message}
+        if code is not None:
+            error["code"] = code
+        for key, value in (details or {}).items():
+            error.setdefault(key, value)
+        json.dump({"schema_version": 1, "error": error}, sys.stderr, indent=2)
+        print(file=sys.stderr)
+    else:
+        print(f"artifact verify: {message}", file=sys.stderr)
+    return 1
+
+
+def main(argv: list[str] | None = None) -> int:
+    """``python artifact_verify.py MANIFEST --broker URL [--format ...]``:
+    the standalone verify run (see the module docstring)."""
+    parser = argparse.ArgumentParser(
+        prog="artifact_verify.py",
+        description="Verify an artifact manifest against the store through "
+        "its broker (the standalone twin of `klt artifact verify`; see "
+        "docs/cli/artifact.md)",
+    )
+    parser.add_argument("manifest", metavar="MANIFEST")
+    parser.add_argument(
+        "--broker", metavar="URL", default=None, help=f"else ${ENV_BROKER}"
+    )
+    parser.add_argument("--format", choices=("text", "json"), default="text")
+    args = parser.parse_args(argv)
+    try:
+        client = resolve_broker(args.broker)
+        report = verify_manifest(client, args.manifest)
+    except ArtifactError as exc:
+        return _emit_error(
+            str(exc), args.format, code=exc.code, details=exc.details or None
+        )
+    payload = {"schema_version": 1, "manifest": args.manifest, **report}
+    if args.format == "json":
+        json.dump(payload, sys.stdout, indent=2)
+        print()
+    else:
+        _print_verify_text(payload)
+    return 0 if report["status"] == "ok" else EXIT_VERIFY_FAILED
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())
