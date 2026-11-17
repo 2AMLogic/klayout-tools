@@ -837,8 +837,16 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
     """Run ``request`` through the PDK runset and return the ``klt lvs``
     envelope. See this module's docstring; request fields are documented in
     ``docs/cli/lvs.md`` ("klayout-runset")."""
-    from .lvs import SCHEMA_VERSION, LvsError
+    from .lvs import _DECK_FILE_GIVEN_KEY, SCHEMA_VERSION, LvsError
 
+    # Issue #5795: echo the caller's own --deck-file form when the flag was
+    # relative (_merge_deck_flags shadows the absolutized value it resolved
+    # with); pop the private key here so it never reaches validation or any
+    # other echo.
+    deck_file_given = request.pop(_DECK_FILE_GIVEN_KEY, None)
+    deck_file_echo = (
+        deck_file_given if deck_file_given is not None else request.get("deck_file")
+    )
     layout, reference, deck_file, deck_vars, options = _validate_request(
         request, request_dir
     )
@@ -903,7 +911,7 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
         "released": None,
     }
     runset_block = {
-        "deck_file": request["deck_file"],
+        "deck_file": deck_file_echo,
         "deck_vars": deck_vars,
         "content_hash": _sha_prefixed(deck_file),
         "klayout_application_version": _application_version(binary),
@@ -924,7 +932,7 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
         "reference": request["reference"]["netlist"],
         "top": top or verdict["top"],
         "reference_top": request["reference"].get("top") or verdict["reference_top"],
-        "deck_file": request["deck_file"],
+        "deck_file": deck_file_echo,
         "deck_vars": deck_vars,
         "options": {k: options[k] for k in _ALLOWED_OPTIONS if k in options},
         "hints_applied": None,
@@ -943,7 +951,11 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
         "environment": {
             "engine": RUNSET_ENGINE,
             "engine_version": runset_block["klayout_application_version"],
-            "klayout_binary": binary,
+            # Issue #5795: the directory carries nothing engine_version and
+            # provenance.runset.klayout_application_version don't already --
+            # record the binary's identity, the form portable mode chose in
+            # #3991, in both modes. An override stays visible in `options`.
+            "klayout_binary": os.path.basename(binary),
             "netgen_binary": None,
             "layout_sha256": sha256_file(layout),
             "reference_sha256": sha256_file(reference),

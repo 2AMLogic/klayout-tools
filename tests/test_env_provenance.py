@@ -542,6 +542,14 @@ def test_lint_envelope_files_reports_status_and_recommendation(tmp_path):
     assert report["files"][0]["file"] == dirty
 
 
+def test_lint_envelope_recommendation_names_portable_paths_first():
+    # Issue #5795: a klt-produced envelope's first-choice remedy is the
+    # writer-side portable_paths rewrite, with --allow-prefix the fallback.
+    text = ep.ENVELOPE_LINT_RECOMMENDATION
+    assert "portable_paths" in text
+    assert text.index("portable_paths") < text.index("--allow-prefix")
+
+
 def test_lint_envelope_files_rejects_a_non_json_file(tmp_path):
     path = tmp_path / "bad.json"
     path.write_text("not json", encoding="utf-8")

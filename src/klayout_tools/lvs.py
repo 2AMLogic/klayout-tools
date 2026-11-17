@@ -877,6 +877,15 @@ def load_request_arg(value: str) -> tuple[dict[str, Any], str]:
     )
 
 
+#: Issue #5795: the caller-given ``--deck-file`` string, kept alongside the
+#: absolutized ``request["deck_file"]`` (which resolution depends on) so the
+#: runset report can echo the caller's own form -- the same verbatim echo
+#: ``layout``/``reference`` already get. Set only for a *relative* flag (an
+#: absolute one echoes byte-identically either way); popped by
+#: ``run_lvs_klayout_runset`` before the request is echoed anywhere.
+_DECK_FILE_GIVEN_KEY = "_deck_file_given"
+
+
 def _merge_deck_flags(
     request: dict[str, Any],
     engine: str,
@@ -906,6 +915,8 @@ def _merge_deck_flags(
                 "both (a flag never silently overrides the request document)"
             )
         request["deck_file"] = os.path.abspath(deck_file)
+        if not os.path.isabs(deck_file):
+            request[_DECK_FILE_GIVEN_KEY] = deck_file
     if deck_vars:
         if request.get("deck_vars") is not None:
             raise LvsError(
@@ -2054,18 +2065,14 @@ def _run_runset_response(
 ) -> dict[str, Any]:
     """Run the ``klayout-runset`` engine and finish its response.
 
-    Issue #3988: under ``portable_paths`` the tool's identity (its basename)
-    is kept for ``environment.klayout_binary`` instead of the generic
-    external-path object; the version is recorded separately in
-    ``engine_version``."""
+    Issue #3988 kept ``environment.klayout_binary`` as the basename under
+    ``portable_paths`` via a special case here; issue #5795 moved that
+    decision into the writer itself (``lvs_runset`` now records the basename
+    in default mode too), so the special case is gone and both modes agree."""
     runset_report = run_lvs_klayout_runset(request, request_dir)
-    binary = runset_report.get("environment", {}).get("klayout_binary")
-    response = _finish_response(
+    return _finish_response(
         runset_report, portable=portable_paths, request_dir=request_dir
     )
-    if portable_paths and isinstance(binary, str):
-        response["environment"]["klayout_binary"] = os.path.basename(binary)
-    return response
 
 
 def _finish_response(

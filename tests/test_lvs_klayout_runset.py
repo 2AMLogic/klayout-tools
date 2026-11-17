@@ -19,8 +19,8 @@ import pytest
 
 from klayout_tools import lvs_runset
 from klayout_tools.coverage import coverage_validation_error
-from klayout_tools.env_provenance import find_absolute_path_fields
-from klayout_tools.lvs import LvsError, check_lvs_report, run_lvs
+from klayout_tools.env_provenance import find_absolute_path_fields, lint_envelope_files
+from klayout_tools.lvs import LvsError, check_lvs_report, rerun_lvs_report, run_lvs
 
 SPICE_ONE = ".subckt TOP\nM1 c b a d NMOS L=0.2u W=0.4u\n.ends\n"
 
@@ -562,8 +562,8 @@ def test_cli_deck_var_parsing():
 
 def test_portable_paths_runset_has_no_absolute_paths(tmp_path, fake_klayout):
     default = run_lvs(_request(tmp_path, 1))
-    assert find_absolute_path_fields(default)
-    assert os.path.isabs(default["environment"]["klayout_binary"])
+    assert find_absolute_path_fields(default)  # absolute inputs still echo
+    assert default["environment"]["klayout_binary"] == "klayout"
 
     portable = run_lvs(_request(tmp_path, 1, portable_paths=True))
     assert find_absolute_path_fields(portable) == []
@@ -574,3 +574,117 @@ def test_portable_paths_runset_has_no_absolute_paths(tmp_path, fake_klayout):
 def test_portable_paths_runset_rejects_non_boolean(tmp_path, fake_klayout):
     with pytest.raises(LvsError):
         run_lvs(_request(tmp_path, 1, portable_paths="yes"))
+
+
+def _cwd_relative_request(tmp_path, n_dev, *, layout, reference):
+    """A request whose layout/reference echo relative names (issue #5795);
+    the inline-JSON form resolves them against the current directory."""
+    request = json.loads(_request(tmp_path, n_dev))
+    request["layout"]["file"] = layout
+    request["reference"]["netlist"] = reference
+    request.pop("deck_file")
+    return request
+
+
+def test_relative_deck_file_flag_echoes_caller_form(
+    tmp_path, fake_klayout, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    request = _cwd_relative_request(tmp_path, 1, layout="l.gds", reference="ref.sp")
+    report = run_lvs(json.dumps(request), deck_file="pdk.lvs")
+    assert report["status"] == "match"
+    assert report["deck_file"] == "pdk.lvs"
+    assert report["provenance"]["runset"]["deck_file"] == "pdk.lvs"
+    # the runset still resolved and hashed the flag against the CWD
+    assert report["provenance"]["runset"]["content_hash"] == lvs_runset._sha_prefixed(
+        str(tmp_path / "pdk.lvs")
+    )
+    assert (
+        report["provenance"]["deck"]["content_hash"]
+        == report["provenance"]["runset"]["content_hash"]
+    )
+
+
+def test_deck_file_flag_edge_forms_echo_verbatim(tmp_path, fake_klayout, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    request = _cwd_relative_request(tmp_path, 1, layout="./l.gds", reference="./ref.sp")
+    dotted = run_lvs(
+        json.dumps(request), deck_file="./pdk.lvs", deck_vars={"feol": "true"}
+    )
+    assert dotted["deck_file"] == "./pdk.lvs"
+    assert dotted["provenance"]["runset"]["deck_file"] == "./pdk.lvs"
+    assert dotted["layout"] == "./l.gds"
+    assert dotted["reference"] == "./ref.sp"
+    assert dotted["deck_vars"] == {"feol": "true"}
+    assert "feol=true" in fake_klayout["cmd"]
+
+    (tmp_path / "sub").mkdir()
+    monkeypatch.chdir(tmp_path / "sub")
+    parent = _cwd_relative_request(
+        tmp_path, 1, layout="../l.gds", reference="../ref.sp"
+    )
+    parent_relative = run_lvs(json.dumps(parent), deck_file="../pdk.lvs")
+    assert parent_relative["deck_file"] == "../pdk.lvs"
+    assert parent_relative["provenance"]["runset"]["deck_file"] == "../pdk.lvs"
+
+
+def test_deck_file_through_symlink_echoes_given_form(
+    tmp_path, fake_klayout, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    request = _cwd_relative_request(tmp_path, 1, layout="l.gds", reference="ref.sp")
+    os.symlink(str(tmp_path / "pdk.lvs"), str(tmp_path / "link.lvs"))
+    report = run_lvs(json.dumps(request), deck_file="link.lvs")
+    assert report["deck_file"] == "link.lvs"
+    assert report["provenance"]["runset"]["content_hash"] == lvs_runset._sha_prefixed(
+        str(tmp_path / "pdk.lvs")
+    )
+
+
+def test_absolute_and_document_deck_file_echo_unchanged(tmp_path, fake_klayout):
+    document = run_lvs(_request(tmp_path, 1))
+    assert document["deck_file"] == str(tmp_path / "pdk.lvs")
+    assert document["provenance"]["runset"]["deck_file"] == str(tmp_path / "pdk.lvs")
+
+    request = json.loads(_request(tmp_path, 1))
+    deck = request.pop("deck_file")
+    flag = run_lvs(json.dumps(request), deck_file=deck)
+    assert flag["deck_file"] == deck
+    assert flag["provenance"]["runset"]["deck_file"] == deck
+
+
+def test_klayout_binary_is_basename_with_version_elsewhere(tmp_path, fake_klayout):
+    report = run_lvs(_request(tmp_path, 1))
+    binary = report["environment"]["klayout_binary"]
+    assert binary == os.path.basename(binary)
+    assert binary == "klayout"
+    assert report["environment"]["engine_version"] == "0.30.12"
+    assert report["provenance"]["runset"]["klayout_application_version"] == "0.30.12"
+
+
+def test_relative_inputs_lint_clean_no_declarations(
+    tmp_path, fake_klayout, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    request = _cwd_relative_request(tmp_path, 1, layout="l.gds", reference="ref.sp")
+    report = run_lvs(json.dumps(request), deck_file="pdk.lvs")
+    out = tmp_path / "out.json"
+    out.write_text(json.dumps(report))
+    result = lint_envelope_files([str(out)])
+    assert result["status"] == "clean", result["files"]
+    assert result["finding_count"] == 0
+
+
+def test_check_and_rerun_of_relative_deck_report_same_cwd(
+    tmp_path, fake_klayout, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    request = _cwd_relative_request(tmp_path, 1, layout="l.gds", reference="ref.sp")
+    report = run_lvs(json.dumps(request), deck_file="pdk.lvs")
+    path = tmp_path / "report.json"
+    path.write_text(json.dumps(report))
+    checked = check_lvs_report(str(path))
+    assert checked["status"] == "match", [
+        c for c in checked["checks"] if not c["match"]
+    ]
+    assert rerun_lvs_report(str(path))["status"] == "match"
