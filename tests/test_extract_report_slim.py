@@ -7,8 +7,8 @@ repeats one constant per net (the lumped model's vacuous `integrity`
 sub-keys, empty `terminals`/`segments`/`pin_order`). `slim` drops exactly
 that, keeps everything the SPEF lacks (`by_layer`, `integrity.capacitance`,
 the scalars) and adds one global `coupling_by_layer_pair` histogram so the
-`coupled[].levels` distribution survives. `full` (the default) is
-byte-identical to the pre-#5816 output.
+`coupled[].levels` and `coupled[].lateral_levels` distributions survive.
+`full` (the default) is byte-identical to the pre-#5816 output.
 """
 
 from __future__ import annotations
@@ -60,6 +60,17 @@ def _run_pair(tmp_path: Path, **extra):
         **extra,
     )
     return full, slim
+
+
+def test_runset_engine_refuses_slim_report():
+    with pytest.raises(ExtractError, match=r"cannot honour --report-parasitics"):
+        run_extract(
+            "layout.gds",
+            None,
+            engine="klayout-runset",
+            deck_file="example.lvs",
+            report_parasitics="slim",
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -240,20 +251,68 @@ def test_full_report_carries_the_fields_slim_drops(tmp_path):
     assert "report_shape" not in full["parasitics"]
 
 
-def test_coupling_histogram_equals_the_full_aggregate(tmp_path):
-    """Each capacitor counted once (not once per side), keyed by layer pair,
-    summing the pair's capacitance -- exactly the aggregate over `full`'s
-    `coupled[].levels`."""
-    full, slim = _run_pair(tmp_path)
-    expected = _histogram_from_full(full["parasitics"])
-    histogram = slim["parasitics"]["coupling_by_layer_pair"]
-    assert histogram == expected
-    assert histogram, "fixture must produce at least one layer pair"
-    # And it agrees with the report's own scalar totals.
-    assert sum(b["count"] for b in histogram.values()) == full["parasitics"]["cc_count"]
-    assert sum(b["capacitance_ff"] for b in histogram.values()) == pytest.approx(
-        full["parasitics"]["total_coupling_capacitance_ff"]
+def test_slim_report_includes_vertical_coupling_histogram(tmp_path):
+    _, slim = _run_pair(tmp_path)
+    assert slim["parasitics"]["coupling_by_layer_pair"] == {
+        "0/1": {"count": 1, "capacitance_ff": 0.1142},
+    }
+
+
+def test_coupling_histogram_counts_each_capacitor_in_every_layer_pair():
+    from klayout_tools.extract_parasitics_slim import slim_parasitics_report
+
+    mixed = {
+        "capacitance_ff": 10.0,
+        "levels": [[0, 1], [1, 2]],
+        "lateral_levels": [1],
+    }
+    lateral = {"capacitance_ff": 4.0, "levels": [], "lateral_levels": [1]}
+    full = {
+        "cc_count": 2,
+        "total_coupling_capacitance_ff": 14.0,
+        "nets": [
+            {"net": "A", "coupled": [{"net": "B", **mixed}]},
+            {
+                "net": "B",
+                "coupled": [{"net": "A", **mixed}, {"net": "C", **lateral}],
+            },
+            {"net": "C", "coupled": [{"net": "B", **lateral}]},
+        ],
+    }
+
+    slim = slim_parasitics_report(full)
+
+    assert slim["coupling_by_layer_pair"] == {
+        "0/1": {"count": 1, "capacitance_ff": 10.0},
+        "1/2": {"count": 1, "capacitance_ff": 10.0},
+        "1/1": {"count": 2, "capacitance_ff": 14.0},
+    }
+    assert slim["cc_count"] == 2
+    assert slim["total_coupling_capacitance_ff"] == 14.0
+
+
+@pytest.mark.parametrize(
+    ("measured_nets", "expected"),
+    [
+        (["VIC"], {}),
+        (["AGR", "VIC"], {"1/1": {"count": 1, "capacitance_ff": 0.044}}),
+    ],
+)
+def test_slim_lateral_histogram_respects_parasitics_net_scope(
+    tmp_path, measured_nets, expected
+):
+    gds = te._write_gds(te._make_lateral_coupling_layout(), tmp_path / "lateral.gds")
+    report = run_extract(
+        gds,
+        "sky130",
+        output=str(tmp_path / "lateral.spice"),
+        parasitics=True,
+        critical_nets=["VIC"],
+        parasitics_nets=measured_nets,
+        spef_output=str(tmp_path / "lateral.spef"),
+        report_parasitics="slim",
     )
+    assert report["parasitics"]["coupling_by_layer_pair"] == expected
 
 
 def test_net_without_coupling_is_unchanged_except_the_drops(tmp_path):
@@ -324,51 +383,16 @@ def test_drop_c_coupling_variant_keeps_the_measured_histogram(tmp_path):
     JSON still *measures* every pair -- `coupled[]` stays populated (the
     documented #3056 behavior), so slim's histogram, which aggregates the
     measurement, stays populated too."""
-    expected_hist: dict | None = None
-    for shape in ("full", "slim"):
-        gds = _coupling_fixture(tmp_path, f"overlap_{shape}.gds")
-        report = run_extract(
-            gds,
-            "sky130",
-            output=str(tmp_path / f"{shape}.spice"),
-            parasitics=True,
-            spef_output=str(tmp_path / f"{shape}.spef"),
-            parasitic_variants=["drop-c-coupling"],
-            report_parasitics=shape,
-        )
+    full, slim = _run_pair(tmp_path, parasitic_variants=["drop-c-coupling"])
+    for report in (full, slim):
         para = report["parasitics"]
         assert para["cc_count"] == 0
         assert para["total_coupling_capacitance_ff"] == 0.0
-        if shape == "full":
-            coupled = [n for n in para["nets"] if n["coupled"]]
-            assert coupled, "the measurement survives the variant on full"
-            expected_hist = _histogram_from_full(para)
-        else:
-            assert all("coupled" not in n for n in para["nets"])
-            assert para["coupling_by_layer_pair"] == expected_hist
-
-
-def _histogram_from_full(para: dict) -> dict:
-    """The expected slim histogram, re-derived from a full report (the same
-    aggregation `test_coupling_histogram_equals_the_full_aggregate`
-    asserts)."""
-    expected: dict[str, dict] = {}
-    seen: set[tuple] = set()
-    for entry in para["nets"]:
-        for c in entry["coupled"]:
-            pair = (tuple(sorted((entry["net"], c["net"]))), c["capacitance_ff"])
-            if pair in seen:
-                continue
-            seen.add(pair)
-            for lo, hi in c["levels"]:
-                bucket = expected.setdefault(
-                    f"{lo}/{hi}", {"count": 0, "capacitance_ff": 0.0}
-                )
-                bucket["count"] += 1
-                bucket["capacitance_ff"] += c["capacitance_ff"]
-    for bucket in expected.values():
-        bucket["capacitance_ff"] = round(bucket["capacitance_ff"], 6)
-    return expected
+    assert any(n["coupled"] for n in full["parasitics"]["nets"])
+    assert all("coupled" not in n for n in slim["parasitics"]["nets"])
+    assert slim["parasitics"]["coupling_by_layer_pair"] == {
+        "0/1": {"count": 1, "capacitance_ff": 0.1142},
+    }
 
 
 # --------------------------------------------------------------------------- #

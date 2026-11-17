@@ -342,19 +342,10 @@ def _parse_def_pins(raw: str | None) -> frozenset[str] | None:
     return names
 
 
-#: Every top-level field a ``klt extract`` request document may carry (issue
-#: #1867), mapped to the argparse ``dest`` it stands in for -- one entry per
-#: flag this command accepts, plus the positional ``file``. Every field name
-#: is its ``dest`` verbatim (the repeatable flags already carry plural
-#: ``dest``s: ``--critical-net`` -> ``critical_nets``, ``--matched-group`` ->
-#: ``matched_groups``). ``tests/test_extract.py`` asserts this covers the
-#: subparser's whole flag surface, so a flag added later cannot silently
-#: become unreachable from the request form.
+#: Request document fields mapped to argparse destinations (issue #1867).
+#: ``tests/test_extract.py`` checks coverage against the subparser.
 _REQUEST_FIELD_DESTS = {
-    # `deck_vars` is the one request key whose argv dest differs from its own
-    # spelling (`--deck-var` accumulates into `deck_var`), so it is folded in
-    # explicitly below rather than through the identity comprehension.
-    **{"deck_vars": "deck_var"},
+    "deck_vars": "deck_var",
     **{
         name: name
         for name in (
@@ -505,10 +496,6 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
             "mom_net": _str("mom_net"),
             "substrate_spreading": _str("substrate_spreading"),
             "spef": _path("spef"),
-            # Enum-valued field with a non-None default (issue #5816): a
-            # document omitting it keeps the flag's own "full" default --
-            # the same "absent means the default" tri-state `progress`
-            # below uses, because `_str` maps an absent field to `None`.
             "report_parasitics": (
                 _str("report_parasitics") if "report_parasitics" in request else "full"
             ),
@@ -723,11 +710,6 @@ def run(args: argparse.Namespace) -> int:
             # as a SPEF file at this path. `None` when the flag was never
             # given, unchanged from every call site that predates it.
             spef_output=args.spef,
-            # `--report-parasitics` (issue #5816): the JSON `parasitics`
-            # block's shape. The default `"full"` is byte-identical to every
-            # call site that predates it; `"slim"` (validated up front to
-            # require `--spef`) swaps in the slim shape after the SPEF and
-            # metrics have consumed the full block.
             report_parasitics=args.report_parasitics,
             # `--substrate-spreading` (issue #2561): two-terminal closed-form estimate
             # of the bulk resistance between this net's substrate taps. `None` when the

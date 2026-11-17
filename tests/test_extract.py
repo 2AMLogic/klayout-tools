@@ -22116,7 +22116,6 @@ def test_extract_request_document_maps_every_field_onto_its_flag(tmp_path):
                 "parasitics": True,
                 "mom_net": "VGND",
                 "spef": "design.spef",
-                "report_parasitics": "slim",
                 "critical_nets": ["clk", "rst"],
                 "parasitics_nets": "clk",
                 "parasitics_top_cell_only": True,
@@ -22157,7 +22156,6 @@ def test_extract_request_document_maps_every_field_onto_its_flag(tmp_path):
     assert resolved.parasitics is True
     assert resolved.mom_net == "VGND"
     assert resolved.spef == str(tmp_path / "design.spef")
-    assert resolved.report_parasitics == "slim"
     assert resolved.critical_nets == ["clk", "rst"]
     assert resolved.parasitics_nets == ["clk"]
     assert resolved.parasitics_top_cell_only is True

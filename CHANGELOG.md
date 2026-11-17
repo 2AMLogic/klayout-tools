@@ -29,9 +29,9 @@ not `klt --version`, if you need to detect this kind of drift. See
   empty/constant lumped-model `terminals`/`segments`/`pin_order` and
   `integrity` sub-keys — populated distributed-ladder fields and real
   integrity findings are kept), and adds `parasitics.report_shape: "slim"`
-  plus a `parasitics.coupling_by_layer_pair` histogram (layer pair → count
-  and summed fF, each capacitor counted once) so the `coupled[].levels`
-  distribution survives. `slim` requires `--spef` (a clean `ExtractError`
+  plus a `parasitics.coupling_by_layer_pair` histogram that counts each
+  capacitor once per layer pair it spans, including same-layer coupling.
+  `slim` requires `--spef` (a clean `ExtractError`
   otherwise); a slim run's SPEF and written SPICE are byte-identical to a
   full run's. No `schema_version` bump: the default shape is unchanged and
   every new field is additive.

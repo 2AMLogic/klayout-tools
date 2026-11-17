@@ -1,24 +1,12 @@
 """Slim the finished ``parasitics`` report block (issue #5816).
 
-``klt extract --report-parasitics slim --spef ...``: when the SPEF written
-beside the JSON already carries the per-net RC network and every coupling
-capacitor value, most of ``parasitics.nets[]`` is either a less-compact
-re-statement of the SPEF (the per-net star/ladder topology, ``coupled[]``'s
-per-side copy of each coupling capacitor) or one constant repeated per net
-(the lumped model's vacuous ``integrity`` sub-keys, the empty
-``terminals``/``segments``/``pin_order``, ``hub_net``'s node spelling the
-SPEF's own ``*D_NET`` blocks already encode). The slim shape drops exactly
-that, keeps everything the SPEF lacks (``by_layer``, per-net
-``integrity.capacitance``, the scalars, any populated distributed-ladder
-field) and adds one global ``coupling_by_layer_pair`` histogram so the
-``coupled[].levels`` layer-pair distribution -- the one ``coupled`` datum
-the SPEF does not carry -- survives in a few hundred bytes.
+The slim report drops empty or constant fields and information already
+carried by the SPEF file, such as coupling values and hub node names. It
+summarizes the vertical and lateral layers from ``coupled[]`` in the global
+``coupling_by_layer_pair`` histogram.
 
-Pure function over the already-built report: the SPEF writer and
-``_build_metrics`` both consume the **full** block before this runs
-(``extract_assemble.py`` applies it last), so slimming corrupts neither.
-The default (``full``) never calls into this module and stays byte-identical
-to the pre-#5816 output.
+The SPEF writer and metrics builder consume the full block before
+``extract_assemble.py`` applies this transformation.
 """
 
 from __future__ import annotations
@@ -42,9 +30,8 @@ _CONSTANT_INTEGRITY_SUBKEYS = (
 )
 
 #: ``parasitics.nets[]`` fields the SPEF beside the report carries verbatim
-#: (its ``*D_NET``/``*CONN``/``*CAP``/``*RES`` rows are a format translation
-#: of the same per-net model), or the SPEF's own node naming covers
-#: (``hub_net``). Dropped on every net entry in slim mode.
+#: (``coupled[]`` values) or through node naming (``hub_net``). The histogram
+#: preserves the layer distribution before ``coupled[]`` is dropped.
 _SPEF_CARRIED_NET_FIELDS = (
     "coupled",
     "hub_net",
@@ -79,36 +66,36 @@ def _slim_integrity(integrity: dict[str, Any]) -> dict[str, Any]:
 
 
 def coupling_by_layer_pair_histogram(nets: list[dict[str, Any]]) -> dict[str, Any]:
-    """The global ``coupling_by_layer_pair`` histogram over ``nets[]``'
-    ``coupled[].levels`` -- layer pair -> ``{count, capacitance_ff}``.
+    """Map each layer pair to its capacitor count and summed capacitance.
 
-    Each ``parasitics.nets[]`` entry's ``coupled[]`` lists every coupling
-    capacitor **from that net's side**, so a pair appears twice across
-    ``nets[]`` with identical values. Deduplicating on the unordered net
-    pair (plus value) counts each capacitor exactly once -- the histogram's
-    counts sum back to ``cc_count`` and its sums to
-    ``total_coupling_capacitance_ff``. A capacitor spanning several layer
-    pairs contributes to each pair it spans (a capacitor's ``levels`` is the
-    set of ``[lower_metal_index, upper_metal_index]`` deck-``metals`` pairs
-    whose overlap built it), so per-pair counts count capacitors, not fF.
+    Deduplicate the two copies of a capacitor using its unordered net pair
+    and value. Attribute the capacitor's full value to each vertical pair
+    in ``levels`` and to ``i/i`` for each index in ``lateral_levels``. A
+    multi-layer capacitor contributes to several buckets, so use the report
+    scalars ``cc_count`` and ``total_coupling_capacitance_ff`` for totals.
     """
     histogram: dict[str, dict[str, Any]] = {}
     seen_pairs: set[tuple[Any, ...]] = set()
     for entry in nets:
         for coupled in entry.get("coupled") or ():
+            capacitance_ff = coupled["capacitance_ff"]
             pair_key = (
                 tuple(sorted((entry["net"], coupled["net"]))),
-                coupled["capacitance_ff"],
+                capacitance_ff,
             )
             if pair_key in seen_pairs:
                 continue
             seen_pairs.add(pair_key)
-            for lo, hi in coupled.get("levels") or ():
+            layer_pairs = list(coupled.get("levels") or ())
+            layer_pairs.extend(
+                (level, level) for level in coupled.get("lateral_levels") or ()
+            )
+            for lo, hi in layer_pairs:
                 bucket = histogram.setdefault(
                     f"{lo}/{hi}", {"count": 0, "capacitance_ff": 0.0}
                 )
                 bucket["count"] += 1
-                bucket["capacitance_ff"] += coupled["capacitance_ff"]
+                bucket["capacitance_ff"] += capacitance_ff
     for bucket in histogram.values():
         bucket["capacitance_ff"] = round(bucket["capacitance_ff"], 6)
     return histogram

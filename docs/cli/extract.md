@@ -601,7 +601,7 @@ name with exit 1, never silently ignored — a caller who believes
 parasitic-annotated one. That covers `--deck`, `--pdk`/`--pdk-root`,
 `--parasitics` and everything built on it (`--critical-net*`,
 `--parasitics-net*`, `--distributed-rc`, `--resistance-graph*`,
-`--resistance-path*`, `--spef`, `--mom-net`, `--mom-rlc-*`,
+`--resistance-path*`, `--spef`, `--report-parasitics slim`, `--mom-net`, `--mom-rlc-*`,
 `--parasitic-variant`, `--substrate-spreading`, `--substrate-tie-ohms`),
 `--deck-option`, `--label-layer`, `--subcircuit`/`--subcircuit-output`,
 `--hierarchical-cells`, `--abstract-cells`/`--abstract-cell-lef`, `--probe`,
@@ -6762,10 +6762,9 @@ shapes the JSON `parasitics` block down to what the SPEF does **not**
 carry. Per `parasitics.nets[]` entry it drops:
 
 - `coupled[]` — the per-side copy of every coupling capacitor (the SPEF's
-  two-terminal `*CAP` rows carry the same values, bit-for-bit). The one
-  `coupled` datum the SPEF lacks — the `levels` metal-layer pairs each
-  capacitor spans — survives in the global
-  `parasitics.coupling_by_layer_pair` histogram below.
+  two-terminal `*CAP` rows carry the same values, bit-for-bit). The global
+  `parasitics.coupling_by_layer_pair` histogram summarizes the vertical
+  `levels` and same-layer `lateral_levels` from those entries.
 - `hub_net` — the net's hub node spelling, which the SPEF's own
   `*D_NET`/`*CONN` node naming already encodes.
 - `terminals[]`/`segments[]`/`pin_order` — **only when empty/constant**
@@ -6790,7 +6789,13 @@ shape it is looking at:
 | Field | Meaning |
 |---|---|
 | `parasitics.report_shape` | Always `"slim"` on a slimmed report; a `full` report carries no `report_shape` key at all (its shape is the documented default). |
-| `parasitics.coupling_by_layer_pair` | `"<lower_metal_index>/<upper_metal_index>"` → `{"count", "capacitance_ff"}`: how many coupling capacitors span that layer-pair and their summed fF. Each capacitor is counted **once** (not once per `coupled[]` side), so the counts sum back to `cc_count` and the sums to `total_coupling_capacitance_ff` on a run without `--parasitic-variant drop-c-coupling`. A capacitor spanning several layer pairs contributes to each pair it spans, so per-pair counts count capacitors, not femtofarads. `{}` when no pair was measured. |
+| `parasitics.coupling_by_layer_pair` | Maps `"<lower_metal_index>/<upper_metal_index>"` to `{"count", "capacitance_ff"}`. For same-layer coupling, both indices equal the level from `lateral_levels` (for example, `"1/1"`). The histogram is `{}` when no coupling was measured. |
+
+Each capacitor contributes one count and its full measured capacitance to
+every layer pair it spans, after deduplicating the two `coupled[]` entries
+for the same capacitor. A lateral-only capacitor contributes to its same-layer
+buckets. Summing across buckets can count a capacitor more than once. Read
+`cc_count` and `total_coupling_capacitance_ff` for the report's totals.
 
 ```
 klt extract routed.gds --deck sky130 --parasitics --spef routed.spef \

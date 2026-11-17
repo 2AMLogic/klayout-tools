@@ -1951,18 +1951,12 @@ def run_extract(
     omitted (the default) skips this entirely -- byte-identical to before
     this feature existed.
 
-    ``spef_output`` (``klt extract --spef <path>``, issue #948, Epic #700
-    Phase 3) additionally writes ``parasitics``'s per-net R/C model as a
-    Standard Parasitic Exchange Format file at the given path -- see
-    :func:`_write_spef` for the exact translation and its documented
-    net-name-only correlation scope, and ``docs/cli/extract.md``'s "SPEF
-    export" section for the CLI contract. Requires ``parasitics=True``
-    (there is nothing to translate otherwise); given without it, this is an
-    :class:`ExtractError`, the same "a flag naming something invalid is an
-    error, not a silent no-op" convention ``mom_net`` above already follows.
-    ``None`` (the default) skips this entirely -- byte-identical to before
-    this feature existed. The resolved path is echoed back as the response's
-    ``spef_path`` field (``null`` when omitted).
+    ``spef_output`` (issue #948) writes the per-net R/C model as SPEF and
+    requires ``parasitics=True``. See :func:`_write_spef` and "SPEF export"
+    in ``docs/cli/extract.md`` for details. The report's ``spef_path`` holds
+    the resolved path or ``null`` when omitted.
+    ``report_parasitics="slim"`` (issue #5816) requires ``spef_output`` and
+    reduces the JSON report after SPEF export and metrics calculation.
 
     ``substrate_spreading_net`` (``klt extract --substrate-spreading <net>``,
     issue #2561, Phase 2 of issue #2515, requires ``parasitics=True``)
