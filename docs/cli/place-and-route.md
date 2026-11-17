@@ -131,11 +131,12 @@ nothing about the real cause (issue #1868). `klt place-and-route` itself
 now recognizes this exact failure shape — a path `openroad` reports it
 cannot read that this process can itself still read — and appends a hint
 about mount coverage rather than passing the raw Tcl error through
-unexplained. **Rule (issue #4191):** the container wrapper mounts only `$PWD`,
-`$PDK_ROOT` and `$TMPDIR`, so every input the request references (netlist,
-macro LEF, `--abstract-cell-lef`) must live under one of those. When the
-unreadable path is outside the invocation directory, the hint names that
-path and says to run `klt place-and-route` from a common ancestor of the
+unexplained. **Rule (issue #4191):** the container wrapper mounts `$PWD`,
+`$PDK_ROOT` and `$TMPDIR` (plus `/tmp` itself whenever `$TMPDIR` is set to
+something else — issue #5878), so every input the request references
+(netlist, macro LEF, `--abstract-cell-lef`) must live under one of those.
+When the unreadable path is outside the invocation directory, the hint names
+that path and says to run `klt place-and-route` from a common ancestor of the
 request and its inputs. [`scripts/install-openroad-docker.sh`](../../scripts/install-openroad-docker.sh)'s
 wrapper (below) already automates this fallback; only the bare snippet
 above needs it spelled out manually.
@@ -1454,9 +1455,13 @@ commits to disk.
 
 `post_route_spef` / `post_route_sdf` also accept `asap7sc7p5t_rvt` (issue
 #4559): the pass extracts with `klt extract --deck asap7`, whose FinFET path
-honours the `--def-net-names` and `--pins` options the pass passes. A library
-with no extract-deck entry still fails at request validation, before any
-engine runs.
+honours the `--def-net-names` and `--pins` options the pass passes. Both
+gf180mcu standard-cell families are supported —
+`gf180mcu_fd_sc_mcu9t5v0` and `gf180mcu_fd_sc_mcu7t5v0` (issue #5825)
+resolve to the same `klt extract --deck gf180mcu` parasitics deck, which is
+metal-stack-level first-order RC data shared by the two families (both route
+over `Metal2-Metal5`). A library with no extract-deck entry still fails at
+request validation, before any engine runs.
 
 The optional boolean `post_route_spef` request field (default `false`) opts
 in to a real-parasitics **A/B** pass on top of that existing behaviour, never
@@ -3345,8 +3350,9 @@ The units of a `pdk.rebuild_corners` request run where the backend says:
 This is `klt sim`'s precedence (`sim.resolve_backend`). A host default of
 `batch` is a *preference*: a single-unit request (no `rebuild_corners`, or a
 one-element list) stays local. An **explicit** `--backend batch` (flag or
-request field) on a single-unit request is an error, not a silent local run.
-Any other value is an error.
+request field) on a single-unit request submits the **whole flow** — honoring
+`target_stage` — as **one** fleet job (issue #5799; see "Single-unit batch run"
+below). Any other value is an error.
 
 With `batch`, each corner is submitted as one job on the same S3 job contract
 as `klt sim --backend batch` (bucket, profile, provision script and runner
@@ -3378,6 +3384,25 @@ The aggregated report keeps the shape above and adds:
 used; if this host can resolve the same corner's deck and the hashes differ,
 the unit fails with `batch_deck_mismatch` (the fleet image's PDK does not match
 this host's).
+
+#### Single-unit batch run (issue #5799)
+
+A request with no `pdk.rebuild_corners` (or a one-element list) and an explicit
+batch backend runs as one job — the way to move a long single-threaded route off
+the host. It uses the same upload, job contract, preflight and error codes as
+above, with these differences:
+
+- The request is shipped as written (`backend` dropped; a one-element
+  `rebuild_corners` list becomes `pdk.corner`), so `target_stage` is honored.
+- The runner's `.klt/place-and-route/` is collected into this host's
+  `.klt/place-and-route/` (no `<corner>/` subdirectory).
+- The report is the runner's single-run report plus `environment.backend:
+  "batch"` and `environment.remote` (one remote block, `job_id` included) — not
+  the `corner_runs` aggregate.
+- A failed upload, launch, poll or job is an error (exit `1`) carrying the
+  `batch_*` code in its error envelope; OpenROAD is never run on this host.
+- `--resume` and `request.outputs.dir` are refused with the batch backend: the
+  fleet runs the whole flow and copies its artifacts back.
 
 #### Runner support for `--backend` (`batch_runner_lacks_place_and_route_backend`, issue #4124)
 
