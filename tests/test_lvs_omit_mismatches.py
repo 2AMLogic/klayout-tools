@@ -1,7 +1,7 @@
 """Issue #5610: ``klt lvs --omit-mismatches`` on the ``klayout-runset``
 engine, split out of ``test_lvs_klayout_runset.py`` per the per-file size
-ratchet. The fixtures are that module's own; import them (the
-``test_extract``/``test_characterize`` pattern).
+ratchet. The fixture builders live in ``helpers/lvs_runset_fixtures.py``
+(issue #5664's shared preamble).
 """
 
 from __future__ import annotations
@@ -10,9 +10,9 @@ import json
 
 import pytest
 
+from helpers.lvs_runset_fixtures import install_fake_klayout
+from helpers.lvs_runset_fixtures import request as _request
 from klayout_tools.lvs import LvsError, run_lvs
-from test_lvs_klayout_runset import _request
-from test_lvs_klayout_runset import fake_klayout as fake_klayout  # noqa: F401 (pytest fixture)
 
 
 @pytest.fixture
@@ -22,6 +22,12 @@ def tmp_path(tmp_path):
     repo-relative path ``--check --rerun`` can resolve."""
     (tmp_path / ".git").mkdir()
     return tmp_path
+
+
+@pytest.fixture
+def fake_klayout(monkeypatch, tmp_path):
+    return install_fake_klayout(monkeypatch, tmp_path)
+
 
 # --------------------------------------------------------------------------- #
 # `--omit-mismatches` / `request.omit_mismatches` (issue #5610)
