@@ -4279,7 +4279,8 @@ def _compute_baseline(
         resolved = _rpath(response_path, request_dir, "request.baseline.response_path")
         baseline_metrics = _baseline_metrics_from_response_file(resolved)
         ref = ref or _baseline_ref_fallback(resolved, repo_root=repo_root)
-    elif netlist_path is not None:
+    else:
+        assert netlist_path is not None
         resolved = _rpath(netlist_path, request_dir, "request.baseline.netlist_path")
         baseline_metrics = _baseline_metrics_from_netlist(
             resolved, liberty_path, hdl_toplevel, output_dir
