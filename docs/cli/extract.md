@@ -824,14 +824,31 @@ two things let a caller tell a slow run from a hang and budget the step:
 - **`timing` in the response** — an additive object (no existing field
   changed): `stages` (wall seconds per named stage), `total_seconds`, and
   `unattributed_seconds` (the remainder no stage covers, so
-  `sum(stages) + unattributed_seconds ≈ total_seconds`). Stages, in order:
-  `read_layout`, `device_extraction` (the `LayoutToNetlist` run plus dead-metal,
-  passive-region and `--parasitics` computation), `diagnostics` (voltage-domain
-  and flavour-marker checks), `netlist_write`, `netlist_hash` (the raw-file
-  SHA-256), and `netlist_normalized_hash` (the numbering-independent
+  `sum(stages) + unattributed_seconds ≈ total_seconds`). Stage seconds are
+  **exclusive**: a stage opened inside another is credited to the inner stage
+  only, so the parent's value excludes it (issue #5716). Stages, in order:
+  `read_layout`, `device_extraction` (the `LayoutToNetlist` run plus dead-metal
+  and passive-region work; **excludes** the `--parasitics` compute),
+  `parasitics_compute` (the per-net R/C accumulation and coupling-pair search,
+  run while the `LayoutToNetlist` is still live; issue #5716; present only with
+  `--parasitics`), `diagnostics` (voltage-domain and flavour-marker checks),
+  `parasitics_inject` (building the parasitics report and injecting the R/C
+  elements into the netlist, issue #5716; present only with `--parasitics`),
+  `netlist_write`, `netlist_hash` (the raw-file SHA-256), and
+  `netlist_normalized_hash` (the numbering-independent
   `netlist_normalized_sha256` canonicalization, issue #3408; present only when a
-  netlist is written, absent under `--no-netlist`).
+  netlist is written, absent under `--no-netlist`). `--progress` heartbeats name
+  whichever of these is open, so the parasitics phases are no longer silent.
   `--check --rerun` ignores `timing` (a measurement, not evidence).
+
+Before issue #5716 the `--parasitics` compute was folded into
+`device_extraction` and the injection was in no stage at all, so a long
+`--parasitics` run could show most of its time as `unattributed_seconds` with a
+silent heartbeat. On `gcd` (`--deck sky130 --parasitics --no-netlist`, measured
+2026-11-17 at the #5716 branch) the former 11.0 s `device_extraction` now reads
+2.5 s plus 8.5 s `parasitics_compute`, and `parasitics_inject` is 0.4 s. The
+scaling table below was measured **without** `--parasitics`, so its numbers
+are unaffected.
 
 **Measured scaling** (sky130, one shared 16-core host, `klt extract --deck
 sky130`, the routed digital blocks in `tests/corpus/place_and_route/`; measured

@@ -159,3 +159,20 @@ def _yield_negative_control_rollup(
     if detected:
         return "detected", without_control, undetected, not_applicable
     return "not_declared", without_control, undetected, not_applicable
+
+
+def graded_entry_campaign(citation: dict[str, Any] | None) -> dict[str, Any]:
+    """The ``yield_campaign`` block a multi-citation item's
+    ``citations_graded`` entry carries (issue #5786) -- the member citation's
+    own block, or ``{}`` when there is none to carry.
+
+    Copied off the citation :func:`signoff._citation` already built, never
+    re-derived: re-reading the envelope here would let an entry and the
+    citation it sits beside describe different states of the same report.
+    ``{}`` -- key absent -- for a non-``yield`` member, a report with no
+    measurements, and an unmet member (whose citation is not retained), so
+    every pre-#5786 output is unchanged.
+    """
+    if citation and "yield_campaign" in citation:
+        return {"yield_campaign": citation["yield_campaign"]}
+    return {}
