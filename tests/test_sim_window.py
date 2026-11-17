@@ -96,6 +96,14 @@ def test_window_bound_refuses_non_finite():
         sim_window.window_bound("m", {"to": float("inf")}, "to", form="stress")
 
 
+@pytest.mark.parametrize("bound", [10**400, -(10**400)])
+def test_window_bound_refuses_a_huge_int(bound):
+    """A 400-digit int is a JSON number too large for a float (issue #6114):
+    refused with the documented wording, never an uncaught OverflowError."""
+    with pytest.raises(SimError, match="must be a time in seconds"):
+        sim_window.window_bound("m", {"to": bound}, "to", form="stress")
+
+
 def test_field_overrides_the_reported_path():
     """``crossings.level.sample_at`` is nested, so ``key`` alone misnames it."""
     with pytest.raises(SimError) as excinfo:
