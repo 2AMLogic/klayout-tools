@@ -43,6 +43,7 @@ from ..env_provenance import (
     render_text_lines,
     scan_files,
 )
+from ..env_provenance_json_stream import lint_envelope_files_json_stream
 from .output import emit_error, emit_success
 
 
@@ -94,11 +95,14 @@ def _print_scan_text(report: dict) -> None:
 
 def run_lint_envelope(args: argparse.Namespace) -> int:
     try:
-        report = lint_envelope_files(
-            args.files,
-            allow_prefixes=args.allow_prefixes or [],
-            json_stream=args.json_stream,
-        )
+        if args.json_stream:
+            report = lint_envelope_files_json_stream(
+                args.files, allow_prefixes=args.allow_prefixes or []
+            )
+        else:
+            report = lint_envelope_files(
+                args.files, allow_prefixes=args.allow_prefixes or []
+            )
     except EnvironmentProvenanceError as exc:
         return emit_error("env-provenance lint-envelope", str(exc), args.format)
 
