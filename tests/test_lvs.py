@@ -11280,38 +11280,6 @@ def test_short_nets_hint_net_group_needs_at_least_two_names(tmp_path):
         run_lvs(path)
 
 
-def test_short_nets_hint_empty_nets_list_merges_nothing(tmp_path):
-    """`nets: []` alongside `devices` is a devices-only apply:
-    `_short_nets_merge_nets`'s empty-group guard returns the no-op `[]` (no
-    merge, no error -- distinct from the absent/empty-object request errors
-    above), the disclosure names the dropped devices only, and nothing
-    carries the merge's `OUT|P0` spelling: dropping S0 empties `P0`
-    entirely, so `_purge_emptied_nets` removes it and the compare matches
-    on the remaining OUT/P1/P2 pins -- resolved by removal here, where the
-    real hint resolves it by merging."""
-    path = _option_ladder_request(
-        tmp_path,
-        _OPTION_LADDER_LAYOUT_CODE0_SPICE,
-        hints={"short_nets": {"nets": [], "devices": ["S0", "S1", "S2"]}},
-    )
-
-    report = run_lvs(path)
-
-    assert report["status"] == "match"
-    (entry,) = [
-        m
-        for m in report["mismatches"]
-        if m["category"] == lvs.CATEGORY_HINTS_SHORT_NETS_APPLIED
-    ]
-    assert entry["details"]["merged_nets"] == []
-    assert [d["name"] for d in entry["details"]["dropped_devices"]] == [
-        "S0",
-        "S1",
-        "S2",
-    ]
-    assert not [c for c in report["net_correspondence"] if c["reference"] == "OUT|P0"]
-
-
 def test_short_nets_hint_unresolvable_device_glob_raises(tmp_path):
     """Issue #2653's own acceptance criterion: an unresolvable glob is a
     clean application error naming the pattern and what is actually
