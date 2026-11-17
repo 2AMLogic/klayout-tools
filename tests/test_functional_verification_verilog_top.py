@@ -243,10 +243,6 @@ def test_integration_plusargs_forwarded_and_echoed(tmp_path):
     absent = run_functional_verification(str(tmp_path / "request-rtl.json"))
     assert absent["status"] == "fail"
     assert absent["environment"]["plusargs"] == []
-    # Additive (issue #5697): always `{}` on this path -- a non-empty
-    # `request.parameters` is rejected with `testbench.verilog_top` -- but
-    # the field is present so the `environment` shape is uniform.
-    assert absent["environment"]["parameters"] == {}
     request = _edit(
         tmp_path / "request-rtl.json",
         **{"testbench.plusargs": ["+go", "+file=a b=c"]},

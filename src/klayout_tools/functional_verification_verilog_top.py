@@ -172,8 +172,7 @@ def _check_verilog_top_sdf(
 ) -> None:
     """``testbench.dut_instance`` is the SDF scope, so it is required with
     ``options.sdf`` and meaningless without it. ``request.parameters`` is
-    rejected: it would have to target the bench, not the DUT. A no-op on the
-    cocotb path (``verilog_tb is None``)."""
+    rejected (it would target the bench, not the DUT). A no-op on cocotb."""
     if verilog_tb is None:
         return
     if parameters:
@@ -255,7 +254,6 @@ def _run_verilog_top(
     sdf_renamed: list[dict[str, str]],
     source_defines: dict[str, Any],
     tools: list[dict[str, Any]],
-    parameters: dict[str, Any],
 ) -> dict[str, Any]:
     """Build the bench with ``iverilog``, run it with ``vvp`` and assemble the
     ordinary report (issue #4083). No cocotb is involved.
@@ -351,11 +349,7 @@ def _run_verilog_top(
                 "build_log": _hashed_path_envelope(build_log),
                 "random_seed": None,
                 "source_defines": source_defines,
-                # Additive (issue #5697): always `{}` here -- a non-empty
-                # `request.parameters` is rejected with `verilog_top`
-                # upstream -- so the `environment` shape stays uniform
-                # across both testbench kinds.
-                "parameters": parameters,
+                "parameters": {},  # issue #5697; always `{}` -- rejected upstream
                 "plusargs": plusargs,  # issue #5006; `[]` when absent
                 "initial_state": None,
                 "sdf": (

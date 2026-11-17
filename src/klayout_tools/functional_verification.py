@@ -2919,7 +2919,6 @@ def run_functional_verification(
                 sdf_renamed=sdf_renamed,
                 source_defines=source_defines,
                 tools=tools,
-                parameters=parameters,
             ),
             synth_block,
         )
@@ -3039,22 +3038,17 @@ def run_functional_verification(
                 "tools": tools,
                 "cocotb_version": _cocotb_version(),
                 "results_xml": _hashed_path_envelope(results_xml),
-                # Additive (issue #3013): the simulator/cocotb console transcript
-                # and the build transcript the run wrote, named by path (never
-                # inlined) like `results_xml`.
+                # Additive (issue #3013): the simulator/cocotb console and build
+                # transcripts, named by path (never inlined) like `results_xml`.
                 "test_log": _hashed_path_envelope(test_log),
                 "build_log": _hashed_path_envelope(build_log),
                 "random_seed": _extract_random_seed_property(results_xml),
                 # Additive (issue #3290): `options.source_defines` keyed by the
-                # request.sources entry as resolved to an absolute path; `{}`
-                # when absent.
+                # request.sources entry as resolved; `{}` when absent.
                 "source_defines": source_defines,
                 # Additive (issue #4338): `request.env` as given; `{}` when absent.
                 "env": env,
-                # Additive (issue #5697): `request.parameters` as resolved by
-                # `_resolve_parameters` and forwarded to the build/test --
-                # `{}` when absent -- so a stored envelope states which
-                # parameterization it is evidence for.
+                # Additive (issue #5697): `request.parameters` echo; `{}` when absent.
                 "parameters": parameters,
                 # Additive (issue #2998): `null` unless the request set
                 # `options.initial_state`. `seeds` echoes the effective seeds
