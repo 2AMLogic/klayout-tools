@@ -158,6 +158,21 @@ def add_netlist_parser(
         ),
     )
     netlist_parser.add_argument(
+        "--canonical-wrap",
+        dest="canonical_wrap",
+        action="store_true",
+        default=False,
+        help=(
+            "generate mode: fold every '+' continuation line onto the card "
+            "it continues and collapse whitespace runs inside non-comment "
+            "lines, writing the line layout --check already compares, so "
+            "regenerating on a host whose xschem wraps long cards "
+            "differently is byte-identical. Comment lines are left "
+            "byte-intact (xschem's '**.subckt' port order is not "
+            "rewritten). Off by default (issue #5715)"
+        ),
+    )
+    netlist_parser.add_argument(
         "--allow-unevaluated-expr",
         action="store_true",
         default=False,

@@ -10,7 +10,7 @@ Two tiers, mirroring `tests/test_sim.py`'s split (issue #2502):
   request validation, the generated testbench and `.meas` card set, the
   seconds -> nanoseconds table reshape, and the settle-window check. These
   always run, everywhere.
-- **Integration tests** (`@pytest.mark.skipif(not HAVE_NGSPICE, ...)`) run
+- **Integration tests** (`@_SKIP_NO_NGSPICE`) run
   the worked example end to end through the real `ngspice -b`: grid sweep,
   `.meas` extraction, `.lib` emission, and the **round-trip acceptance bar**
   the issue names explicitly -- the emitted file parsing back through
@@ -32,21 +32,12 @@ from pathlib import Path
 
 import pytest
 
+from helpers.tool_probes import SKIP_NO_NGSPICE as _SKIP_NO_NGSPICE
 from klayout_tools import characterize, liberty_writer
 from klayout_tools.characterize_arcs import FunctionError, derive_arcs, parse_function
 from klayout_tools.cli import main
 
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
-
-#: `KLT_SKIP_NGSPICE_TESTS=1` (local-only, set by `npm run check:ci` -- never
-#: by CI) opts a host with ngspice installed out of this slow tier too; see
-#: `tests/test_sim.py`'s `HAVE_NGSPICE` for the full rationale (issue #1651).
-HAVE_NGSPICE = shutil.which("ngspice") is not None and (
-    os.environ.get("KLT_SKIP_NGSPICE_TESTS") != "1"
-)
-_SKIP_NO_NGSPICE = pytest.mark.skipif(
-    not HAVE_NGSPICE, reason="ngspice is not installed on this machine"
-)
 
 EXAMPLES_DIR = Path(__file__).parent.parent / "examples" / "characterize"
 

@@ -34,14 +34,13 @@ Tests skip (never fail) when ngspice is not installed, matching
 from __future__ import annotations
 
 import json
-import os
 import re
-import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
+from helpers.tool_probes import SKIP_NO_NGSPICE as _SKIP_NO_NGSPICE
 from klayout_tools.ir_solver import solve_ir_drop
 from klayout_tools.power import run_power
 
@@ -55,16 +54,6 @@ CORPUS_DIR = Path(__file__).parent / "corpus"
 # arithmetic is no longer hand-checkable. `tests/test_power.py` pins the
 # gridded fixture's own island topology instead.
 PLACE_AND_ROUTE_GDS = CORPUS_DIR / "place_and_route" / "gcd.gds.gz"
-
-#: `KLT_SKIP_NGSPICE_TESTS=1` (local-only, set by `npm run check:ci` -- never
-#: by CI) opts a host with ngspice installed out of this slow tier too; see
-#: `tests/test_extract.py`'s `HAVE_NGSPICE` for the full rationale (issue #1651).
-HAVE_NGSPICE = shutil.which("ngspice") is not None and (
-    os.environ.get("KLT_SKIP_NGSPICE_TESTS") != "1"
-)
-_SKIP_NO_NGSPICE = pytest.mark.skipif(
-    not HAVE_NGSPICE, reason="ngspice is not installed on this machine"
-)
 
 #: Absolute agreement required between the two solvers, in volts. ngspice is
 #: asked for 12 significant digits (`set numdgt=12`); at a ~1 V rail that is a
