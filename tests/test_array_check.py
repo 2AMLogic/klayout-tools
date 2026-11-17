@@ -69,6 +69,9 @@ def test_abutment_overlap_and_count(tmp_path):
     r = run_array_check(str(path), cell="BIT", pitch_um=_PITCH, count=5)
     kinds = {v["kind"] for v in r["violations"]}
     assert {"overlap", "count", "length"} <= kinds
+    overlap = next(v for v in r["violations"] if v["kind"] == "overlap")
+    # pitch == width: expected gap 0, measured is the signed (negative) gap
+    assert overlap["measured_um"] == -1.0 and overlap["expected_um"] == 0.0
 
 
 def test_abutment_tolerance_and_single_placement(tmp_path):
@@ -155,22 +158,33 @@ def test_abutment_grid_is_clean_per_lane(tmp_path):
 
 
 @pytest.mark.parametrize("pitch,expected_gap", [(1.8, -0.2), (2.0, 0.0), (2.5, 0.5)])
-def test_abutment_derived_expected_gap(tmp_path, pitch, expected_gap):
+@pytest.mark.parametrize("shift_last", [1.0, -1.0])
+def test_abutment_derived_expected_gap(tmp_path, pitch, expected_gap, shift_last):
     """#5698 AC3: single rows at a declared pitch below or above the cell
     width are clean; a deviating pair reports ``expected_um`` = pitch - width
-    (signed), classified by the deviation direction."""
+    and ``measured_um`` in the same signed-gap convention, so their difference
+    is the real deviation whichever way the seam is off, and ``kind`` /
+    description name that direction (wider / narrower)."""
     path = tmp_path / "row.gds"
     _write_row(path, pitch=pitch)
     r = run_array_check(str(path), cell="UNIT", pitch_um=pitch, count=4)
     assert r["status"] == "clean" and r["violation_count"] == 0
     bad = tmp_path / "bad.gds"
-    _write_row(bad, pitch=pitch, shift_last=1.0)
+    _write_row(bad, pitch=pitch, shift_last=shift_last)
     rb = run_array_check(str(bad), cell="UNIT", pitch_um=pitch, count=4)
     seams = [v for v in rb["violations"] if v["kind"] in ("gap", "overlap")]
     assert len(seams) == 1
-    assert seams[0]["expected_um"] == pytest.approx(expected_gap)
-    assert seams[0]["measured_um"] == pytest.approx(expected_gap + 1.0)
-    assert seams[0]["lane"] == 0
+    (seam,) = seams
+    assert seam["expected_um"] == pytest.approx(expected_gap)
+    assert seam["measured_um"] == pytest.approx(expected_gap + shift_last)
+    assert seam["measured_um"] - seam["expected_um"] == pytest.approx(shift_last)
+    assert seam["kind"] == ("gap" if shift_last > 0 else "overlap")
+    assert seam["lane"] == 0
+    # readable prose: a signed deviation is never printed as a "-1.0 um gap"
+    side = "wider" if shift_last > 0 else "narrower"
+    assert f"is {abs(shift_last)} um {side} than the" in seam["description"]
+    assert "-1.0 um gap" not in seam["description"]
+    assert "overlap" not in seam["description"]
 
 
 @pytest.mark.parametrize("pitch,expected_length", [(1.8, 7.4), (2.0, 8.0), (2.5, 9.5)])
@@ -242,8 +256,13 @@ def test_abutment_pitch_kind_only_for_differing_extents():
     # equal extents: the expected gap is pitch - width, the deviation classifies
     assert _classify_pair(0, 10, 10, 10, 10, 0) is None  # abuts at the pitch
     assert _classify_pair(1, 11, 10, 10, 10, 0) == ("gap", 1, 0)
-    assert _classify_pair(-1, 9, 10, 10, 10, 0) == ("overlap", 1, 0)
+    assert _classify_pair(-1, 9, 10, 10, 10, 0) == ("overlap", -1, 0)  # signed gap
     assert _classify_pair(1, 11, 9, 9, 10, 0) is None  # matches expected gap 1
+    # non-zero expected gap: measured and expected stay in one signed
+    # convention, so measured - expected is the deviation in every case
+    assert _classify_pair(1, 11, 10, 10, 12, 0) == ("overlap", 1, 2)  # spaced, short
+    assert _classify_pair(-1, 9, 10, 10, 8, 0) == ("gap", -1, -2)  # mirror seam, wide
+    assert _classify_pair(-3, 7, 10, 10, 8, 0) == ("overlap", -3, -2)  # mirror, tight
     # differing extents (a rotated placement): the advance is checked instead
     assert _classify_pair(0, 5, 10, 5, 10, 0) == ("pitch", 5, 10)
     assert _classify_pair(0, 10, 10, 5, 10, 0) is None  # advance == pitch

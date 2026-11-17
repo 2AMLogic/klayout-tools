@@ -4812,11 +4812,9 @@ def _add_array_check_parser(subparsers: argparse._SubParsersAction) -> None:
             "Assert structural regularity of a cell array: layer-by-layer "
             "mirror or translation symmetry (XOR residual per layer) and/or "
             "abutment of the unit-cell placements at a declared pitch and "
-            "count, checked per lane (placements are grouped by their "
-            "perpendicular extent, and the expected seam gap is derived from "
-            "the declared pitch, so mirror seams and spaced arrays are "
-            "expressible). Purely geometric; fully headless via KLayout's "
-            "batch database API. See docs/cli/array-check.md."
+            "count, checked per lane against a seam gap derived from the pitch. "
+            "Purely geometric; fully headless via KLayout's batch database API. "
+            "See docs/cli/array-check.md."
         ),
     )
     p.add_argument("file", help="path to a GDSII or OASIS layout file")
@@ -4854,9 +4852,7 @@ def _add_array_check_parser(subparsers: argparse._SubParsersAction) -> None:
         help="ignore deviations below this many um (default 0)",
     )
     p.add_argument("--pitch", default=None, help="abutment pitch in um (> 0)")
-    p.add_argument(
-        "--count", default=None, help="expected number of placements in each lane"
-    )
+    p.add_argument("--count", default=None, help="expected placements per lane")
     p.add_argument(
         "--direction",
         choices=("x", "y"),

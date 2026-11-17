@@ -35,7 +35,12 @@ not `klt --version`, if you need to detect this kind of drift. See
   `schema_version` bump. Arrays that previously reported `violated` on a
   geometrically perfect layout now report `clean`, and `kind` for `gap` /
   `overlap` names the deviation direction from the expected seam gap rather
-  than a physical intersection.
+  than a physical intersection. For `gap`/`overlap`, `measured_um` and
+  `expected_um` are now both the **signed** seam gap, so their difference is
+  the deviation; this changes `measured_um` of an `overlap` violation from the
+  positive overlap magnitude to the negative signed gap (`expected_um` stays
+  `0` when `--pitch` equals the cell's extent), and the `description` is
+  phrased off the deviation ("wider"/"narrower than the expected gap").
 - **`klt env-provenance lint-envelope --json-stream` lints concatenated JSON
   document streams** (#5887, 2026-11-17): each FILE argument is parsed as a
   single JSON document, so a file holding several whitespace-separated

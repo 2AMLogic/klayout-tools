@@ -34,9 +34,12 @@ features narrower than `2T`. A layer absent from the stream contributes nothing.
 Placements are first grouped into **lanes** by their extent on the axis
 perpendicular to `--direction` (`(bottom, top)` for `x`, `(left, right)` for
 `y`), so a 2-D grid is read as parallel 1-D arrays and placements from
-different lanes are never compared. Each lane is then sorted along the
-direction and checked independently; the record reports how many lanes were
-found (`lanes`), and `--count` is the expected population **of each lane**:
+different lanes are never compared. Lane keys are compared exactly (no
+tolerance): placements offset across the axis by even one database unit fall
+in different lanes, and each short lane then reports a `count` violation.
+Each lane is then sorted along the direction and checked independently; the
+record reports how many lanes were found (`lanes`), and `--count` is the
+expected population **of each lane**:
 
 - **count** -- the lane must hold exactly `--count` placements.
 - **seam gap** -- every consecutive pair's measured gap must match the
@@ -112,17 +115,28 @@ Emitted through the shared envelope (`docs/json-contract.md`).
 | `mirror_axis` / `at_um` / `translate_um` | string \| number \| array \| null | The symmetry request echoed back; the two `null` when only abutment ran. |
 | `tolerance_um`    | number (float)          | As given (default `0.0`). |
 | `pitch_um` / `count` / `direction` | number \| integer \| string \| null | The abutment request echoed back; `direction` is `null` when `--pitch` was not given. |
-| `lanes`           | integer \| null         | Number of lanes the placements were grouped into (ordered by the lane's perpendicular low coordinate); `null` when `--pitch` was not given. A 4x3 grid checked along `x` reads as 3 lanes of 4. |
+| `lanes`           | integer \| null         | Number of lanes the placements were grouped into (ordered by the lane's perpendicular low coordinate); `null` when `--pitch` was not given. A 4x3 grid checked along `x` reads as 3 lanes of 4. With several top cells it is the **sum** over the tops checked, while each violation's `lane` restarts at 0 in every top (tell them apart by the violation's `cell`). |
 | `dbu_um`          | number (float)          | Database unit in micrometres. |
 | `status`          | string                  | `clean` \| `violated` — the verdict. Gate on this, not the exit code. |
 | `violation_count` | integer                 | Number of violations. |
 | `violations`      | array\<object\>         | Sorted deterministically; see the bullets below. |
 | `provenance`      | object                  | The shared provenance block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) — see [`docs/json-contract.md`](../json-contract.md). `pdk`/`deck` are always `null` (this command resolves neither); `input.content_hash` is the input file's own SHA-256. |
 
-- `layer` is `null` for abutment violations, which also carry `measured_um`,
-  `expected_um` and `lane` — the 0-based index of the lane the violating
-  pair/lane belongs to (`expected_um` is the derived expected gap
-  `pitch - width` for `gap`/`overlap`, the declared pitch for `pitch`).
+- `layer` is `null` for abutment violations, which also carry `lane` — the
+  0-based index of the lane the violating pair/lane belongs to — and
+  `measured_um` / `expected_um`. For every `kind` the two are in one
+  comparable convention, so `measured_um - expected_um` is the deviation:
+
+  | `kind` | `measured_um` | `expected_um` |
+  | ------ | ------------- | ------------- |
+  | `gap`, `overlap` | the **signed seam gap** `next.low - prev.high` (negative: the placements overlap or share a seam) | the signed expected gap `pitch - width` |
+  | `pitch` | the placements' advance `next.low - prev.low` | the declared pitch |
+  | `length` | the lane's extent | `(count - 1) x pitch + width` |
+  | `count` | the lane's placement count | `--count` |
+
+  The `description` is phrased off that deviation (`seam gap 1.0 um is 1.0 um
+  narrower than the 2.0 um expected from --pitch`), never as a negative gap or
+  overlap.
 - `bbox` is in **micrometres**. Violations are sorted deterministically.
 
 Gate on `status`, not the exit code.
