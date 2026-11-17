@@ -5,6 +5,7 @@ report per-corner measurement pass/fail as structured data.
 
 ```
 klt sim <request.json> [-o|--outdir <dir>] [--report-out <path>] [--backend <name>] [--max-workers <n>] [--hosts <n>] [--max-units-per-job <n>] [--max-concurrent-jobs <n>] [--budget-s <seconds>] [--timeout-s <seconds>] [--resume] [--fail-fast-probe] [--fail-on-diagnostic <code>] [--dry-run] [--plot <dir>] [--op-lint [--op-lint-corner <corner_id>|all]] [--format text|json]
+klt sim --check <report.json> [--root <dir>] [--format text|json]
 ```
 
 This is the build carried by the accepted spike,
@@ -151,6 +152,33 @@ this document (and the code) win.
   off/triode region, wiring smells, and netlist hygiene. Run it first when a
   measurement misses. `--op-lint-corner` picks which corner to bias at (`all` tabulates the worst margin per corner). See
   "Operating-point lint" below.
+- `--check <report.json>` (issue #5821) — **re-verify a finished report's
+  netlist evidence without simulating** (no engine, network or PDK). Compares
+  each `environment.netlist_closure` entry's recorded raw `sha256` against the
+  file now on disk, and the recorded `environment.netlist_identity` against one
+  recomputed with the writer's own normalization. Emits the shared `--check`
+  payload (`schema_version`, `mode: "check"`, `report`, `status`, `checks[]`,
+  `skipped[]`) plus `diagnosis`:
+
+  | raw `sha256` | `netlist_identity` | `diagnosis` |
+  |---|---|---|
+  | all match | match | `intact` |
+  | some mismatch | match | `cosmetic` (raw bytes moved, normalized text did not) |
+  | some mismatch | mismatch | `electrical` (recorded measurements are stale) |
+  | all match | mismatch | `normalization_changed` (the tool's normalization moved, not the netlist; see #5438) |
+
+  `cosmetic` is not always benign: usually it is a comment/whitespace/case
+  edit, but a **repointed `.include`** also lands in this row, because
+  normalization strips the include target — the identity cannot see it. The
+  mismatching `netlist_closure` entry names the file that moved; check it.
+
+  `skipped[]` lists entries that cannot be re-hashed — a host-resolved
+  `{target, sha256: null}` include, a `scope: "external"`/`"absent"` entry
+  (`path: null`) — and any skipped entry prevents `status: "match"`. A report
+  with `netlist_identity_error`/`netlist_closure_error`, no closure, or a
+  closure file missing from the tree is `drifted`, never `match`. `--root`
+  re-anchors `scope: "repo"` entries; otherwise they resolve from the report's
+  own location. Exit `0` match, `3` drifted, `1` missing/unparseable report.
 - `--format` — `text` (default, a human-readable summary) or `json`.
 
 ## Engine
@@ -1483,7 +1511,16 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   whose job was accepted but stays `pending` longer than that budget becomes an
   entry with `status: "error"`, `exit_code: 4` and `error.code: "not_launched"`;
   its job id stays in `job_ids` and the manifest so it can be cancelled or
-  attached. Finished members keep their results. An interrupt
+  attached. Finished members keep their results.
+  Admission rule ([#5849](https://github.com/2AMLogic/klayout-tools/issues/5849)):
+  a replacement member is admitted only while no abandoned member still holds a
+  `pending` job, so the set never holds more fleet capacity than
+  `--max-in-flight × --max-concurrent-jobs` plus the abandoned members'
+  already-submitted jobs. If a held job never launches, the remaining unstarted
+  members become `not_launched` entries naming that job id (with no job ids of
+  their own) one more `--wait-for-capacity` window after the abandonment,
+  instead of being submitted; the set then terminates.
+  An interrupt
   (`KeyboardInterrupt`/`SystemExit`) turns every unfinished member into a
   `set_interrupted` entry; the envelope and manifest are still written. Without
   a wait budget the pending wait is unbounded, as before.
@@ -8832,7 +8869,8 @@ of the follow-up wiring (tracked on #3088).
 
 ## Post-layout verification (`netlist_source`)
 
-`request.netlist_source` (optional, `"schematic"` | `"extracted"`) lets a
+`request.netlist_source` (optional, `"schematic"` | `"extracted"` |
+`"gate-level"`) lets a
 caller declare which side of the design loop a given `netlist` represents. It
 is a plain data field — `klt sim` never tries to infer provenance from the
 netlist file itself (a schematic-level netlist and one extracted from a
@@ -8842,6 +8880,17 @@ provided, it is echoed back verbatim in the response's
 `environment.netlist_source`; when omitted, `environment` has no such key and
 every other field is unaffected — this is an additive, backward-compatible
 change.
+
+`"schematic"` is the pre-layout declaration and `"extracted"` the post-layout
+one (below). `"gate-level"` (issue #5638) declares the third kind of
+provenance a mixed-level campaign needs: a netlist assembled from a
+structural (post-synthesis or post-route) netlist plus a timing library —
+event-driven primitives (e.g. XSPICE `d_*` models with `adc_bridge`/
+`dac_bridge`) whose delays were reduced from a Liberty deck — so a digital
+block can be co-simulated beside an analog macro without claiming either
+that a schematic produced it or that layout extraction did. `klt sim` builds
+no such netlist itself; the value only states, truthfully, where the one in
+`request.netlist` came from.
 
 The intended use is the post-layout re-verification pass: after Loop B
 converges (DRC/LVS clean), run `klt extract` on the layout and re-run the
@@ -8936,9 +8985,16 @@ klt sim <request.json> --op-lint [--op-lint-corner <corner_id>|all] [--format te
 line instantiates it: its MOS devices are reported with hierarchical names
 (`Xdut.M1`), probed at ngspice's `@m.xdut.m1[...]` path, and checked like
 top-level devices. A definition nothing instantiates contributes nothing; `.lib`
-sections and `params:` value propagation are not followed. An `X` instance that
-is neither a recognised MOS model nor a resolvable subcircuit gets a
-`unsupported_hierarchy` warning in `diagnostics[]` naming it, and a netlist
+sections and `params:` value propagation are not followed — and neither is the
+model library: the hierarchy walk does not read `models.lib`'s own include
+closure, which is where an open PDK ships its non-MOS device primitives (a
+resistor as a `.subckt` wrapper, say), so an instance of one cannot be
+expanded. An `X` instance that is neither a recognised MOS model nor a
+resolvable subcircuit gets a `unsupported_hierarchy` warning in
+`diagnostics[]` naming it — when a `models.lib` was resolved, saying the
+definition may live in the model library rather than implying the netlist
+alone was searched — and is counted in `unexpanded_instance_count`, so a
+resistively biased design cannot read as silently "clean". A netlist
 with no enumerated device and such an instance reports `status: "findings"`,
 never `clean`. Expansion is bounded: nesting depth 16, 64 `.include`d files,
 and 20 000 expanded subcircuit instances in total. A hierarchy that would
@@ -9001,6 +9057,7 @@ cannot classify as n- or p-channel.
   "netlist": { "path": "examples/design-pipeline/ota_5t.spice", "scope": "repo" },
   "corner": { "corner_id": "ss/1.620V/125C", "process": "ss", "supply_v": { "vdd": 1.62 }, "temperature_c": 125 },
   "device_count": 6,
+  "unexpanded_instance_count": 0,
   "finding_count": 1,
   "error_count": 0,
   "warning_count": 1,
@@ -9041,6 +9098,7 @@ cannot classify as n- or p-channel.
 | --- | --- |
 | `status` | `"clean"` (no findings), `"findings"` (at least one, of any severity), or `"error"` (the operating point itself produced no trustworthy result). |
 | `finding_count` / `error_count` / `warning_count` | Totals. `error_count` is what the exit code and the `klt eval` gate key off; `finding_count` is the headline number. |
+| `unexpanded_instance_count` | `X` instances the hierarchy walk could not expand — their `.subckt` was in neither the netlist body nor its `.include` closure, and they are not recognised MOS models. Typically PDK passive primitives defined only in `models.lib`, which the walk does not read (see "Hierarchy" above); `0` on a fully expanded netlist. Describes the netlist, not a corner. |
 | `devices[]` | Every MOS instance found at the netlist body's top level, in netlist order, with its four terminal nodes, model-reported values (`null` for any the model does not expose), the resolved `op_point_element`, and its `region` (`off`/`subthreshold`/`triode`/`saturation`/`unknown`). |
 | `findings[]` | One entry per finding, in device-then-node order. `device`/`kind`/`nodes`/`values` are `null` on a node-level finding and `node` is `null` on a device-level one — every key is always present. |
 | `node_voltages` | Every probed node's DC voltage, for the agent's own reasoning. |
@@ -9154,7 +9212,7 @@ the *response* echoes back.
 | `options.ngspice_init`   | array\<string\>   | Issue #2520. Lines materialized as a `.spiceinit` file inside each corner's own artifact directory (`cwd=` for that corner's `ngspice` invocation), most commonly `["set ngbehavior=hsa"]` to select a compatibility mode for vendor decks written in HSPICE style. Defaults to unset — no `.spiceinit` is written (no behavior change). `engine: "ngspice"` only; accepted-and-ignored for `"xyce"`. See "ngspice's working directory, and `.spiceinit` compatibility mode" above. |
 | *(CLI-only)* `--plot <dir>` | string         | No request-document equivalent (like `trajectory --plot`) — writes one waveform SVG per non-sweep signal per corner to `<dir>`, forcing `options.waveforms`/`keep_artifacts` on for this run. See "Waveform plots" above. |
 | `expect_netlist_identity` | string           | Optional (issue #3074). The `environment.netlist_identity` stamp of the record this run is compared against. When present and different from the identity computed for this request, `klt sim` refuses before simulating (application error, exit 1) with a message naming both stamps. Absent or matching changes nothing. Also refused if the identity cannot be computed (see `netlist_identity_error`). |
-| `netlist_source`         | string            | Optional caller-declared provenance of `netlist`: `"schematic"` (pre-layout, e.g. an S6 sizing netlist) or `"extracted"` (post-layout, from `klt extract`). Omit for unchanged behavior — the field is purely additive. An unrecognized value is an application error (exit 1). See "Post-layout verification" below. |
+| `netlist_source`         | string            | Optional caller-declared provenance of `netlist`: `"schematic"` (pre-layout, e.g. an S6 sizing netlist), `"extracted"` (post-layout, from `klt extract`), or `"gate-level"` (a netlist assembled from a structural post-synthesis/post-route netlist plus a timing library — event-driven primitives with Liberty-derived delays; issue #5638). Omit for unchanged behavior — the field is purely additive. An unrecognized value is an application error (exit 1). See "Post-layout verification" below. |
 | `decks[]`                | array\<object\>   | Issue #2804. **Deck-list request**: declares pre-composed caller-owned ngspice decks to transport, instead of the corner matrix above. When present, `netlist`/`corners`/`analysis`/`measurements` and friends must be absent, and the report takes the deck shape (`mode: "decks"`). Per-unit fields (`id`, `deck`, `inputs`, `outputs`, `timeout_s`) and the preservation/isolation contract are documented in "Pre-composed decks" above. |
 
 ### Response
