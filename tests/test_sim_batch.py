@@ -375,18 +375,17 @@ def test_job_cmd_is_valid_bash_syntax(tmp_path):
     bash = shutil.which("bash")
     if bash is None:
         pytest.skip("bash not available")
-    for keep in (False, True):
-        spec = sb._build_batch_job_spec(
-            {"models": {}},
-            str(_write_body(tmp_path)),
-            corner_count=1,
-            timeout_s=30.0,
-            client_version="0.7.0",
-        )
-        proc = subprocess.run(
-            [bash, "-n", "-c", spec.cmd], capture_output=True, text=True
-        )
-        assert proc.returncode == 0, proc.stderr
+    spec = sb._build_batch_job_spec(
+        {"models": {}},
+        str(_write_body(tmp_path)),
+        corner_count=1,
+        timeout_s=30.0,
+        client_version="0.7.0",
+    )
+    proc = subprocess.run(
+        [bash, "-n", "-c", spec.cmd], capture_output=True, text=True
+    )
+    assert proc.returncode == 0, proc.stderr
 
 
 def _bash_n(script):
@@ -418,21 +417,20 @@ def test_runner_preflight_with_required_features_is_valid_bash(features, enforce
 
 def test_job_cmd_with_gated_request_features_is_valid_bash(tmp_path):
     """Issue #3993: ngspice_init + measurement expr is the reporter's shape."""
-    for keep in (False, True):
-        spec = sb._build_batch_job_spec(
-            {
-                "models": {},
-                "options": {"ngspice_init": "x"},
-                "measurements": [{"name": "a", "expr": "1"}],
-                "analysis": {"kind": "op"},
-            },
-            str(_write_body(tmp_path)),
-            corner_count=1,
-            timeout_s=30.0,
-            client_version="0.7.1.dev2264+gcba5e957d9ed",
-        )
-        proc = _bash_n(spec.cmd)
-        assert proc.returncode == 0, proc.stderr
+    spec = sb._build_batch_job_spec(
+        {
+            "models": {},
+            "options": {"ngspice_init": "x"},
+            "measurements": [{"name": "a", "expr": "1"}],
+            "analysis": {"kind": "op"},
+        },
+        str(_write_body(tmp_path)),
+        corner_count=1,
+        timeout_s=30.0,
+        client_version="0.7.1.dev2264+gcba5e957d9ed",
+    )
+    proc = _bash_n(spec.cmd)
+    assert proc.returncode == 0, proc.stderr
 
 
 def test_job_cmd_with_gated_features_refuses_an_older_runner(tmp_path):
@@ -573,7 +571,10 @@ def test_job_cmd_respects_an_explicit_request_max_workers(tmp_path):
     assert "--max-workers" not in spec.cmd
 
 
-def test_job_cmd_points_outdir_into_output_dir_when_keeping_artifacts(tmp_path):
+def test_job_cmd_always_collects_artifacts_into_output_dir(tmp_path):
+    """Issue #4369: artifacts and engine logs must always be collected —
+    `--outdir` points inside $EDA_OUTPUT_DIR so a deck abort is diagnosable,
+    and it precedes the report redirect."""
     spec = sb._build_batch_job_spec(
         {"models": {}},
         str(_write_body(tmp_path)),
@@ -584,17 +585,6 @@ def test_job_cmd_points_outdir_into_output_dir_when_keeping_artifacts(tmp_path):
     assert spec.cmd.index("--outdir") < spec.cmd.index(
         '> "$EDA_OUTPUT_DIR/report.json"'
     )
-
-
-def test_job_cmd_collects_engine_logs_without_keep_artifacts(tmp_path):
-    """Issue #4369: the log must be collected so a deck abort is diagnosable."""
-    spec = sb._build_batch_job_spec(
-        {"models": {}},
-        str(_write_body(tmp_path)),
-        corner_count=1,
-        timeout_s=30.0,
-    )
-    assert '--outdir "$EDA_OUTPUT_DIR/artifacts"' in spec.cmd
 
 
 def test_job_json_omits_unset_optional_fields(tmp_path):
