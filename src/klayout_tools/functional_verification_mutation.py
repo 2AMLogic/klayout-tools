@@ -57,6 +57,25 @@ def _write_mutant_combined_log(
         pass
 
 
+def _reject_from_synthesize_with_mutations(options: Any) -> None:
+    """The fifth sibling of the trace/coverage/initial_state/sdf refusals
+    (issue #5684): the baseline below goes through
+    ``_fv.run_functional_verification`` and so resolves netlist +
+    ``request.sources`` via ``options.from_synthesize``, while this
+    module's own per-mutant builds resolve ``request.sources`` alone --
+    every mutant would elaborate without the DUT the baseline tested, a
+    build that diverges from the baseline's own in a way nothing here
+    would catch. Refusing up front also keeps the base contract's "sources
+    may be empty only with from_synthesize" rule from contradicting this
+    path's own non-empty-sources requirement."""
+    if _fv.has_from_synthesize(options):
+        raise _fv.FunctionalVerificationError(
+            "options.from_synthesize cannot currently be combined with "
+            "--mutations -- not yet designed (the baseline elaborates the "
+            "synthesize netlist while per-mutant builds do not)"
+        )
+
+
 def run_functional_verification_with_mutations(
     request: str, proposals_path: str, output_dir: str | None = None
 ) -> dict[str, Any]:
@@ -158,6 +177,7 @@ def run_functional_verification_with_mutations(
             "not yet designed (docs/design/mutation-testing-spike.md, "
             "'Open questions')"
         )
+    _reject_from_synthesize_with_mutations(request_doc.get("options"))
 
     sources = _fv._resolve_sources(request_doc.get("sources"), request_dir)
     hdl_toplevel = request_doc["hdl_toplevel"]

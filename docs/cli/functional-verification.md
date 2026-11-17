@@ -1456,7 +1456,26 @@ exactly.
 | `2` | Usage error — from argparse. |
 | `3` | Ran successfully; the baseline passed but at least one valid proposal `"survived"` (`survived_count > 0`) — the same "ran fine, found violations" convention [`klt drc`](drc.md) already uses. |
 
-#### `options.from_synthesize`: re-simulate what `klt synthesize` just produced
+### Out of scope
+
+- **Automatic mutation generation.** Proposal authorship stays outside
+  `klt`, by hand or by agent — a naive syntactic generator would produce
+  false-positive-looking noise (e.g. flipping `1'b1` to `2'b1`, both the
+  integer `1`) without taking on real HDL semantics.
+- **A named evidence-tier threshold.** `mutation_testing` ships as an
+  optional response field only; no change is made to
+  [docs/design-evidence-tiers.md](../design-evidence-tiers.md) T1 item 9's
+  wording. See
+  [docs/design/mutation-testing-spike.md](../design/mutation-testing-spike.md)
+  section 4 for the reasoning.
+- **Parallelizing the isolated per-mutant builds.** Each is already
+  independent — a real, low-risk future speedup, not attempted here.
+- **`options.coverage` + `--mutations` together.** See above.
+- **`options.from_synthesize` + `--mutations` together.** See above — the
+  baseline would elaborate the synthesize netlist while every per-mutant build
+  would not, so it is a request error.
+
+## `options.from_synthesize`: re-simulate what `klt synthesize` just produced
 
 `klt synthesize` claims a fresh `run-<uuid>` directory every run, so its netlist
 path cannot be a committed constant in `sources`. Save the report and point the
@@ -1483,22 +1502,6 @@ and refuses (exit 1) on any mismatch — so re-running `klt synthesize` into a n
 run directory makes the *old* report's request fail instead of silently
 re-simulating the old netlist. For a report written outside a git repo
 (`netlist_path.scope: "external"`), add `"netlist": "<path>"`.
-
-## Out of scope
-
-- **Automatic mutation generation.** Proposal authorship stays outside
-  `klt`, by hand or by agent — a naive syntactic generator would produce
-  false-positive-looking noise (e.g. flipping `1'b1` to `2'b1`, both the
-  integer `1`) without taking on real HDL semantics.
-- **A named evidence-tier threshold.** `mutation_testing` ships as an
-  optional response field only; no change is made to
-  [docs/design-evidence-tiers.md](../design-evidence-tiers.md) T1 item 9's
-  wording. See
-  [docs/design/mutation-testing-spike.md](../design/mutation-testing-spike.md)
-  section 4 for the reasoning.
-- **Parallelizing the isolated per-mutant builds.** Each is already
-  independent — a real, low-risk future speedup, not attempted here.
-- **`options.coverage` + `--mutations` together.** See above.
 
 ## Request
 

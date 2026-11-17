@@ -177,3 +177,52 @@ def test_report_not_json_or_not_synthesize(work):
     _refused(work, {"report": "report.json"}, "not valid JSON", sources=[])
     (work / "report.json").write_text("{}")
     _refused(work, {"report": "report.json"}, "not a klt synthesize report", sources=[])
+
+
+def test_from_synthesize_with_mutations_is_refused(work):
+    """`options.from_synthesize` + `--mutations` is a request error (issue
+    #5684): the mutation path's baseline run resolves netlist + sources via
+    the synthesize report while each isolated per-mutant build resolves
+    request.sources alone, so a mutant build would diverge from the
+    baseline's own in a way nothing there would catch -- the same
+    trace/coverage/initial_state/sdf refusal family, fifth member."""
+    from klayout_tools.functional_verification_mutation import (
+        run_functional_verification_with_mutations,
+    )
+
+    _report(work)
+    (work / "dut.v").write_text("module dut(); wire a = 1; endmodule\n")
+    (work / "proposals.json").write_text(
+        json.dumps(
+            {
+                "schema": "klt.functional_verification.mutation_proposals/1",
+                "scope": ["dut.v"],
+                "proposals": [
+                    {
+                        "index": 1,
+                        "category": "constant",
+                        "file": "dut.v",
+                        "line": 1,
+                        "original_code": "wire a = 1;",
+                        "mutated_code": "wire a = 9;",
+                    }
+                ],
+            }
+        )
+    )
+    request_path = work / "mutation-request.json"
+    request_path.write_text(
+        json.dumps(
+            {
+                "hdl_toplevel": "dut",
+                "testbench": {"module": "test_gcd"},
+                "options": {"from_synthesize": {"report": "report.json"}},
+                "sources": ["dut.v"],
+            }
+        )
+    )
+
+    with pytest.raises(fv.FunctionalVerificationError, match="options.from_synthesize"):
+        run_functional_verification_with_mutations(
+            str(request_path), str(work / "proposals.json")
+        )
