@@ -113,6 +113,7 @@ def _print_slack_fields(fields: dict, *, indent: str) -> None:
     for port, entry in (fields.get("port_paths") or {}).items():
         for side in ("setup", "hold"):
             _print_path_record(f"{indent}port_paths[{port}].{side}", entry[side])
+    _print_instance_paths(fields, indent=indent)
     print(f"{indent}clock_skew_ns: {fields['clock_skew_ns']}")
     propagation = fields.get("clock_propagation")
     if propagation is not None:
@@ -138,6 +139,18 @@ def _print_slack_fields(fields: dict, *, indent: str) -> None:
     sdf = fields.get("sdf")
     if sdf is not None:
         print(f"{indent}sdf: {_render_input_path(sdf)} ({sdf['content_hash']})")
+
+
+def _print_instance_paths(fields: dict, *, indent: str) -> None:
+    """Issue #5754: four records per requested instance (into/out_of x
+    setup/hold), rendered like the port records above."""
+    for instance, sides in (fields.get("instance_paths") or {}).items():
+        for group in ("into", "out_of"):
+            for side in ("setup", "hold"):
+                _print_path_record(
+                    f"{indent}instance_paths[{instance}].{group}.{side}",
+                    sides[group][side],
+                )
 
 
 def _print_constraint_completeness(block: dict | None, *, indent: str) -> None:

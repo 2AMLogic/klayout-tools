@@ -7,8 +7,10 @@ request or spec file), ``validate_request_shape`` / ``load_request_arg``
 (request dispatch and shape checks), ``_parse_layer_datatype`` and
 ``_validate_via_entries`` (spec parsing), ``_tcl_net_list`` and
 ``_count_spef_nets_annotated`` (OpenSTA Tcl helpers), ``resolve_tool_binary``
-(``options.<tool>_binary`` -> ``$KLT_<TOOL>_BINARY`` -> ``PATH``), and
-``fold_spice_continuations`` (SPICE ``+`` continuation fold).
+(``options.<tool>_binary`` -> ``$KLT_<TOOL>_BINARY`` -> ``PATH``).
+
+SPICE line pre-processing (``+`` continuation folding and ``;``/``$`` inline
+comments) used to live here too; it now has its own module, ``_spice_text``.
 """
 
 from __future__ import annotations
@@ -350,36 +352,6 @@ def _count_spef_nets_annotated(
         int(match.group(3)),
         int(match.group(4)),
     )
-
-
-def fold_spice_continuations(lines: list[str]) -> list[str]:
-    """Fold SPICE ``+`` continuation lines onto the entry they continue.
-
-    ``lines`` is whatever a caller's own pre-pass has already produced (raw
-    lines, comment-stripped lines, or comment-stripped-and-filtered lines --
-    this function does not care). For each entry, if it starts with ``+``
-    (after left-stripping) *and* there is already a previous entry to fold
-    onto, that previous entry is replaced with itself plus a single space
-    plus the continuation's own content (the ``+`` and any leading/trailing
-    whitespace around it dropped); otherwise the entry is appended as-is.
-
-    A ``+``-prefixed entry with nothing preceding it to fold onto (the first
-    entry in ``lines`` starts with ``+``, or every entry before it was
-    itself folded away) is appended verbatim, ``+`` prefix intact, rather
-    than raising or being silently dropped -- callers that want an orphan
-    continuation line dropped (as ``op_sanity.py`` does) filter such
-    unfolded ``+``-prefixed entries out of this function's return value
-    themselves; callers that want it kept as a literal line (``pex.py``,
-    ``netlist_normalize.py``) use the return value as-is.
-    """
-    folded: list[str] = []
-    for line in lines:
-        stripped = line.lstrip()
-        if stripped.startswith("+") and folded:
-            folded[-1] = f"{folded[-1]} {stripped[1:].strip()}"
-        else:
-            folded.append(line)
-    return folded
 
 
 def validate_request_shape(

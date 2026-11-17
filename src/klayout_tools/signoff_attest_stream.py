@@ -36,6 +36,7 @@ from .signoff_attest import (
     _validate_header,
 )
 from .signoff_attest_drift import drift_result
+from .signoff_attest_env import klt_shim_scope
 from .signoff_attest_item2_inputs import (
     bound_input,
     input_checks,
@@ -301,9 +302,10 @@ def build_stream_attestation(
     inventory_block: dict[str, Any] | None = None
     declared_inputs: list[dict[str, Any]] = []
     if inventory_path is not None:
-        declared_inputs, audit, inventory_block = _inventory_checks(
-            inventory_path, absolute, [s[2] for s in streams], committed_checks
-        )
+        with klt_shim_scope():
+            declared_inputs, audit, inventory_block = _inventory_checks(
+                inventory_path, absolute, [s[2] for s in streams], committed_checks
+            )
         checks.extend(declared_inputs)
         checks.extend(audit)
     passed_count = sum(1 for check in checks if check["passed"])
