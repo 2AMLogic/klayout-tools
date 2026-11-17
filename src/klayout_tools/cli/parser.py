@@ -1741,16 +1741,13 @@ def _add_lvs_parser(subparsers: argparse._SubParsersAction) -> None:
         metavar="REPORT",
         help=(
             "verify a previously committed 'klt lvs --format json' report "
-            "(REPORT) instead of running a fresh compare: mutually "
-            "exclusive with the positional 'request' argument, since "
-            "inputs are read from REPORT itself (issue #1106). Cheap mode "
-            "(default): re-hash REPORT's layout/reference netlists (and "
-            "extraction deck, when one was used) and compare against the "
-            "recorded environment.layout_sha256/reference_sha256/"
-            "provenance.deck.content_hash values, no compare engine "
-            "re-run. Combine with --rerun for full mode (re-run the "
-            "compare and diff verdict-bearing fields). Exits 0 if still "
-            "consistent, 3 if drifted -- see docs/cli/lvs.md, '--check'"
+            "(REPORT) instead of running a fresh compare: mutually exclusive "
+            "with the positional 'request', since inputs are read from "
+            "REPORT itself (issue #1106). Cheap mode (default) re-hashes "
+            "REPORT's recorded inputs; combine with --rerun for full mode "
+            "(re-run the compare and diff verdict-bearing fields). Exits 0 "
+            "if still consistent, 3 if drifted -- see docs/cli/lvs.md, "
+            "'--check'"
         ),
     )
     lvs_parser.add_argument(
@@ -1760,13 +1757,10 @@ def _add_lvs_parser(subparsers: argparse._SubParsersAction) -> None:
         help=(
             "explicit layout/netlist input for --check/--rerun (issue "
             "#2699): overrides the layout path REPORT recorded, "
-            "unconditionally (same rule as the positional 'file' of 'klt "
-            "drc --check'/'klt extract --check'). Use it when REPORT's "
-            "layout is outside any repository (recorded as scope "
-            "'external', so it cannot be located) or the verifying clone "
-            "is laid out differently. A layout that no longer hashes to "
-            "the recorded value reports 'drifted'. Requires --check; a "
-            "clean error (exit 1) otherwise"
+            "unconditionally -- use it when REPORT's layout is outside any "
+            "repository or the verifying clone is laid out differently; a "
+            "layout that no longer hashes to the recorded value reports "
+            "'drifted'. Requires --check; a clean error (exit 1) otherwise"
         ),
     )
     lvs_parser.add_argument(
@@ -1776,25 +1770,19 @@ def _add_lvs_parser(subparsers: argparse._SubParsersAction) -> None:
             "full mode for --check (issue #1106): best-effort re-run of "
             "the compare REPORT names (reconstructed from REPORT's own "
             "echoed layout/reference/engine/deck/parameter_tolerance "
-            "fields -- see docs/cli/lvs.md, '--check', for reconstruction "
-            "limits) and diff verdict-bearing fields against the "
-            "committed report, excluding provenance.klt_version/"
-            "klayout_version/pdk.version. Requires --check; a clean error "
-            "(exit 1) otherwise"
+            "fields -- see docs/cli/lvs.md for reconstruction limits) and "
+            "diff verdict-bearing fields against the committed report, "
+            "excluding the provenance version echoes. Requires --check; a "
+            "clean error (exit 1) otherwise"
         ),
     )
     lvs_parser.add_argument(
         "--deck",
-        dest="deck",
         default=None,
         metavar="NAME",
-        help=(
-            f"extraction deck to run (currently: {_deck_names_str()}); the "
-            "command-line spelling of the request's layout.deck field "
-            "(issue #5733). A clean error (exit 1) if the request already "
-            "sets layout.deck. Does not set reference.deck -- the "
-            "reference-netlist rewriting deck is a different knob"
-        ),
+        help=f"extraction deck to run (currently: {_deck_names_str()}); fills "
+        "the request's layout.deck only, never reference.deck (issue "
+        "#5733); a clean error (exit 1) if the request sets layout.deck too",
     )
     lvs_parser.add_argument(
         "--deck-file",
@@ -1818,8 +1806,8 @@ def _add_lvs_parser(subparsers: argparse._SubParsersAction) -> None:
         help=(
             "extra '-rd NAME=VALUE' global passed to the runset (engine "
             "'klayout-runset' only; issue #3206). Repeatable; fills "
-            "request.deck_vars, and is a clean error (exit 1) if the "
-            "request already sets it or uses another engine"
+            "request.deck_vars; a clean error (exit 1) if the request "
+            "already sets it or uses another engine"
         ),
     )
     lvs_parser.add_argument(
@@ -1830,8 +1818,7 @@ def _add_lvs_parser(subparsers: argparse._SubParsersAction) -> None:
             "write stage start/finish lines and a periodic heartbeat for "
             "inline layout extraction to stderr (stdout stays the pure "
             "response). Default: heartbeat lines only (every 30s of a long "
-            "stage) when stderr is not a TTY, nothing on a TTY; "
-            "--no-progress forces off"
+            "stage) when stderr is not a TTY; --no-progress forces off"
         ),
     )
     _add_format_arg(lvs_parser)
