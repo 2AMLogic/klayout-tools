@@ -1,6 +1,6 @@
 """Per-PDK layer-rule resolution for ``klt gen-compose`` routing (#5426).
 
-Relocated verbatim out of ``gen_compose_routing.py``, which sat exactly at
+Relocated out of ``gen_compose_routing.py``, which sat exactly at
 its per-file size ratchet ceiling with no headroom for routing work. This
 cluster is a pure leaf: it resolves ``routing.layer_role`` to a
 ``(layer, datatype)`` pair and looks up the width / area / enclosure floors
@@ -13,8 +13,8 @@ Same conventions as the module it came from (and as
 ``gen_compose.py``'s own module-scope names (``GenComposeError``,
 ``_VIA_LANDING_SIZE_UM``, ``_VIA_DROP_SIZE_UM``) are imported *inside* the
 functions that use them, so this module never has a load-time dependency
-back on ``gen_compose.py``. ``gen_compose_routing`` re-imports every name
-below at module scope, so each pre-existing
+back on ``gen_compose.py``. ``gen_compose_routing`` re-imports the original
+names at module scope, so each pre-existing
 ``from klayout_tools.gen_compose_routing import <name>`` path -- and
 ``gen_compose``'s own re-export of it -- keeps resolving unchanged.
 """
@@ -183,8 +183,8 @@ def _min_enclosing_margin_um_for_layer(
 def _landing_pad_side_um_for_layer(variant: str, layer: tuple[int, int]) -> float:
     """A landing pad's baseline/area side length (um) on ``layer`` (#2072).
 
-    :func:`_resolve_landing_pad_sizes` additionally applies each hop's
-    via-enclosure floor before passing the final size into drawing (#2074).
+    :func:`_landing_pad_side_um_for_pair` additionally applies each hop's
+    via-enclosure floor (#2074).
 
     A via-drop's landing pad (``_VIA_LANDING_SIZE_UM``, sized from the PDK's
     contact-enclosure convention) is drawn on *every* hop of a multi-level
@@ -209,18 +209,10 @@ def _landing_pad_side_um_for_layer(variant: str, layer: tuple[int, int]) -> floa
     resolved) -- an unresolvable family degrades to the pre-#2072 fixed
     size, never blocks routing.
 
-    Same known, already-accepted scoping trade-off as ``via_drop_size_um``
-    (issue #1501): this resolved size is threaded into *drawing*
-    (:func:`~klayout_tools.gen_compose._write_composed_gds`) only, not into
-    the router's own pre-route spacing/collision pre-checks (still sized
-    off the fixed ``_VIA_LANDING_SIZE_UM`` baseline) -- so an oversized pad
-    on a rule-heavy layer (met5's 2.0um side, up from 0.42um) is, in the
-    rare case a route was accepted right at that pre-check's own margin,
-    theoretically capable of surfacing a *new*, previously-unseen spacing
-    violation against a neighbour `klt drc` would still catch. This is
-    strictly better than the pre-#2072 guaranteed area violation it
-    replaces, and mirrors the exact precedent #1501 already shipped and
-    left unchanged for `via_drop_size_um`'s own via-square growth.
+    Drawing and the own-block self-notch check use the resolved side
+    (#6469). The router's spacing/collision pre-checks still use the fixed
+    baseline, following #1501, so an enlarged pad can still create a
+    spacing violation against a neighbouring shape that ``klt drc`` catches.
     """
     from .gen_compose import _VIA_LANDING_SIZE_UM
 
@@ -229,6 +221,20 @@ def _landing_pad_side_um_for_layer(variant: str, layer: tuple[int, int]) -> floa
         return _VIA_LANDING_SIZE_UM
     needed_side_um = math.sqrt(area_floor[0])
     return max(_VIA_LANDING_SIZE_UM, needed_side_um)
+
+
+def _landing_pad_side_um_for_pair(
+    variant: str,
+    pad_layer: tuple[int, int],
+    via_layer: tuple[int, int],
+    via_side_um: float,
+) -> float:
+    """Landing-pad side before array growth, including area and enclosure floors."""
+    side = _landing_pad_side_um_for_layer(variant, pad_layer)
+    enclosure = _min_enclosing_margin_um_for_layer(variant, pad_layer, via_layer)
+    if enclosure is not None:
+        side = max(side, via_side_um + 2 * enclosure[0])
+    return side
 
 
 def _resolve_landing_pad_sizes(
@@ -257,14 +263,12 @@ def _resolve_landing_pad_sizes(
             for pad_layer in drop.get("landing_layers", ()):
                 pair = (pad_layer, via_layer)
                 if pair not in landing_pad_size_um:
-                    side = _landing_pad_side_um_for_layer(variant, pad_layer)
-                    enclosure = _min_enclosing_margin_um_for_layer(
-                        variant, pad_layer, via_layer
+                    landing_pad_size_um[pair] = _landing_pad_side_um_for_pair(
+                        variant,
+                        pad_layer,
+                        via_layer,
+                        via_drop_size_um.get(via_layer, _VIA_DROP_SIZE_UM),
                     )
-                    if enclosure is not None:
-                        via_side = via_drop_size_um.get(via_layer, _VIA_DROP_SIZE_UM)
-                        side = max(side, via_side + 2 * enclosure[0])
-                    landing_pad_size_um[pair] = side
     return landing_pad_size_um
 
 

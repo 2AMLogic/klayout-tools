@@ -183,6 +183,7 @@ from __future__ import annotations
 import math
 import os
 from collections.abc import Callable
+from functools import cache, partial
 from typing import Any
 
 from . import gen_compose_port_request as _pr
@@ -208,6 +209,7 @@ from .gen import (
     _fixed_cut_side_um as _fixed_cut_side_um,
 )
 from .gen_compose_boundary import draw_pins_and_boundary, parse_boundary
+from .gen_compose_layer_rules import _landing_pad_side_um_for_pair
 from .gen_compose_port_access import derive_label_ports, parse_ports_from_labels
 
 # The rest of this module never calls these directly -- they are re-exported
@@ -3599,6 +3601,16 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             _route_dbu_cache.append(probe_layout.dbu)
         return _route_dbu_cache[0]
 
+    via_cut_side_um = cache(partial(via_drop_cut_side_um, pdk_info["variant"]))
+
+    @cache
+    def _landing_pad_side_um(
+        pad_layer: tuple[int, int], via_layer: tuple[int, int]
+    ) -> float:
+        return _landing_pad_side_um_for_pair(
+            pdk_info["variant"], pad_layer, via_layer, via_cut_side_um(via_layer)
+        )
+
     nets: list[dict[str, Any]] = []
     unrouted_nets: list[str] = []
     routed_geometry: list[dict[str, Any]] = []
@@ -3998,10 +4010,8 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             # Own-block pad self-notch check (#1520): everything above
             # compares this leg's drawn footprint against a *different*
             # net's already-accepted geometry. Nothing yet checks a
-            # via-drop's landing pad or a stub-widen box -- both drawn
-            # independent of routing.width_um, at a fixed size sized from
-            # the PDK's own contact-enclosure convention -- against the
-            # *same* block's own other drawn shapes on the pad's own layer.
+            # via-drop's landing pad or a stub-widen box against the *same*
+            # block's own other drawn shapes on the pad's own layer.
             # A pad legitimately lands on (merges with) the wire at its own
             # declared port; that touch is never a violation. But when that
             # port was hand-declared on a pre-existing `blocks[].cell`
@@ -4025,26 +4035,16 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                 block_id = drop.get("block_id")
                 if block_id is None:
                     continue  # pre-#1520 caller-built via_drops -- skip, not an error
-                landing_half_um = (
-                    _VIA_LANDING_SIZE_UM + _drop_array_extra_um(drop)
-                ) / 2.0
+                via_layer = drop["via_layer"]
+                array_extra_um = _drop_array_extra_um(drop)
                 cx, cy = drop["x_um"], drop["y_um"]
-                box = (
-                    cx - landing_half_um,
-                    cy - landing_half_um,
-                    cx + landing_half_um,
-                    cy + landing_half_um,
-                )
-                # Each hop's landing pad is drawn on *both* of its own
-                # ``landing_layers`` (see _write_composed_gds) -- issue
-                # #1567 generalized this from a single hop's fixed
-                # (port_layer, this leg's own route layer) pair to whatever
-                # pair *that hop* actually lands on, so a multi-level
-                # ladder's intermediate pads are checked here too, not just
-                # the one nearest the backbone or the one nearest the pin.
-                # dict.fromkeys dedupes the common case where both layers of
-                # a hop happen to be identical.
+                # Check every hop's landing layers, including the ladder's
+                # intermediate metals (#1567), at their drawn size (#6469).
                 for pad_layer in dict.fromkeys(drop.get("landing_layers", ())):
+                    half_um = (
+                        _landing_pad_side_um(pad_layer, via_layer) + array_extra_um
+                    ) / 2
+                    box = (cx - half_um, cy - half_um, cx + half_um, cy + half_um)
                     pad_boxes.append((pad_layer, block_id, box))
             for widen in stub_widen:
                 block_id = widen.get("block_id")
@@ -4410,39 +4410,14 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         if strategy == "array"
         else None
     )
-    # #1501: `_VIA_DROP_SIZE_UM` (`gen.CONTACT_SIZE_UM`, a PDK-independent
-    # constant) is a guaranteed `viaN.width.1` violation on any family whose
-    # via-width minimum exceeds it (e.g. gf180mcu's `via1.width.1` = 0.26um
-    # vs. the 0.22um constant). Derive a per-via_layer floor from the same
-    # resolved deck `klt drc` judges the drawn via square with -- one lookup
-    # per *distinct* via_layer actually used across every drawn via-drop,
-    # never a private threshold. A layer with no matching "width" rule (or an
-    # unresolvable PDK family) keeps exactly `_VIA_DROP_SIZE_UM`, unchanged.
+    # Resolve deck-sized cuts (#1501) for the vias that survived routing.
     via_drop_size_um: dict[tuple[int, int], float] = {}
     for route in routed_geometry:
         for drop in route.get("via_drops", []):
             via_pair = drop["via_layer"]
             if via_pair not in via_drop_size_um:
-                via_drop_size_um[via_pair] = via_drop_cut_side_um(
-                    pdk_info["variant"], via_pair
-                )
-    # Issue #2072: `_VIA_LANDING_SIZE_UM` is a guaranteed `met3.area.1`/
-    # `met4.area.1`/`met5.area.1`-class violation whenever a via-drop
-    # ladder's landing pad lands *isolated* on a metal level whose own
-    # minimum-area rule exceeds the fixed 0.42um square's 0.1764um^2 (e.g.
-    # an intermediate hop several levels below a `bond_pad`'s `top_metal`
-    # pin, which never merges with anything else the composition draws on
-    # that level). Derive a per-landing-layer floor from the same resolved
-    # deck `klt drc` judges the drawn pad with -- one lookup per *distinct*
-    # landing/via pair actually used across every drawn via-drop. Issue
-    # #2074 adds each pair's enclosure floor using the resolved via size
-    # above, independently on both sides of each hop. Missing area or
-    # enclosure rules leave the other floors intact. The loop itself lives in
-    # `_resolve_landing_pad_sizes` (beside `_landing_pad_side_um_for_layer`,
-    # which was likewise extracted rather than inlined) instead of inline
-    # here, so this function -- already the worst entry in the repo's `C901`
-    # ratchet baseline -- does not grow by drawing DRC-clean landing pads
-    # (PR #2075 review).
+                via_drop_size_um[via_pair] = via_cut_side_um(via_pair)
+    # Resolve each drawn pad's area (#2072) and via-enclosure (#2074) floors.
     landing_pad_size_um = _resolve_landing_pad_sizes(
         routed_geometry, pdk_info["variant"], via_drop_size_um
     )
