@@ -119,13 +119,24 @@ klt signoff --attest {1,8,9,10} --inventory <file> --check <committed-envelope> 
 - `--inventory` — **first ships in `klt` 0.8.0 (PyPI); not in 0.7.0 and earlier.** With `--attest`: path to the attestation inventory (a
   file inside a git repository, not `-`). Refused without `--attest`.
 - `-o`/`--output` — with `--attest`: also write the envelope to this path,
-  only when it passes and only if its bytes changed. Refused without
-  `--attest`, and together with `--check`.
+  only when it passes and only if its bytes changed. With `--manifest`/
+  `--fleet` (issue #5867): also write the rendered report's JSON envelope
+  to this path — the file always receives JSON, whatever `--format` says,
+  since it is a machine record — after a successful render only (exit `0`
+  or `3`) and only if its bytes changed, so re-rendering an unchanged tree
+  leaves the committed record untouched and a failed render can never
+  truncate a previous good one. The write is atomic (temp file +
+  rename). Refused without `--attest`/`--manifest`/`--fleet`, and together
+  with `--check`.
 - `--skip-local-only` — with `--attest` and `-o`: do not run `local_only`
   commands; carry their committed outcome from the existing `-o` envelope
   and recompute everything else (issue #5209). See "Refreshing on a host
   lacking the toolchain" below. Refused without `--attest`/`-o`, and with
   `--check`.
+- `--require-build-match` — with `--attest` and `--check` (issue #5875): exit
+  `3` with `status: "drifted"` (a `provenance.klt_version` entry in `drift[]`)
+  when the committed envelope was produced by a different `klt` build. See
+  "Build drift". Refused without `--attest` and `--check`.
 - `--format` — `text` (default, a human-readable pass/fail summary) or
   `json` (this command's own JSON envelope, see below).
 - `--color` — when to colour `--format text` output: `auto` (default),
@@ -418,6 +429,14 @@ The marker is **report-only**: it never changes a check's `passed`, the
 overall `status`, or the exit code, so existing green pipelines do not flip.
 Gate on it by reading `checks[].build_drift.state` from the JSON. It is an
 additive field; no existing field changes.
+
+`klt signoff --attest N --inventory F --check ENV` carries the same object as
+a top-level `build_drift` (computed from ENV's `provenance.klt_version`) and
+prints a `build_drift: <state>` line in text mode. It is report-only unless
+`--require-build-match` is passed, which turns `stale` (only `stale`;
+`current` and `unverifiable` never fail) into `status: "drifted"` and exit
+`3`, naming `provenance.klt_version` in `drift[]`. Content drift is still
+reported alongside.
 
 ### What this does not do yet
 
@@ -1014,6 +1033,20 @@ against a caller-supplied **block manifest**:
 }
 ```
 
+**Committing the verdict of record** (issue #5867): add `-o FILE` to write
+the report's JSON envelope to a committed file — no stdout redirect, whose
+truncate-then-write would zero a previous good record on any failed run.
+The file is written only after a successful render (exit `0` for T1, `3`
+below T1 — both are verdicts of record), only if its bytes changed, and
+atomically; it always receives JSON, whatever `--format` says. The same
+`-o` works with `--fleet` roll-ups. Re-rendering an unchanged tree leaves
+the committed file untouched, so a make-style pipeline can re-run freely:
+
+```console
+$ klt signoff --manifest signoff/manifest.json \
+    --tiers-doc signoff/design-evidence-tiers.md -o signoff/tier-report.json
+```
+
 An entry of either shape may also carry a **`pointer`** — an [RFC
 6901](https://www.rfc-editor.org/rfc/rfc6901) JSON Pointer naming *where
 inside* the resolved document the envelope lives (issue #2342), so an
@@ -1425,7 +1458,7 @@ resolved against the entry's `cwd`.
 #### Binding a set of artifacts: `provenance.input.paths`
 
 > **Availability.** `provenance.input.paths` is **not** in `klt 0.7.0`; it
-> first ships in the first release after `v0.7.0`. A build without it ignores
+> first ships in `klt 0.8.0`. A build without it ignores
 > `paths`, falls through to the single-`provenance.input.path` rule, and
 > grades a `paths`-only envelope `unanchored_evidence`. That is that build's
 > expected behavior, not a malformed envelope — pin `klt` to a release (or dev
@@ -1535,12 +1568,12 @@ absent for byte claims). A geometry claim is never run by the opt-in
 generator execution, which compares bytes; it stays `executed_by_klt: false`.
 
 **Producing the value (issue #5551).** `klt stats --format json` reports the
-same digest as `geometry_digest`, so the supported way to fill
+same digest as `klt stats --geometry-digest`'s `geometry_digest`, so the supported way to fill
 `--regenerated-hash` for a geometry claim is to run it on the **regenerated**
 stream:
 
 ```bash
-klt stats --format json /tmp/scratch/top.gds | jq -r .geometry_digest
+klt stats --geometry-digest --format json /tmp/scratch/top.gds | jq -r .geometry_digest
 ```
 
 See [`docs/cli/stats.md`](stats.md) → "Geometry digest". Two values that look
@@ -1773,6 +1806,26 @@ that a resync does not touch may still be listed even if Loom also installs
 other workflows. `--attest` does not hash "the file minus managed blocks";
 the fix is to list fewer files.
 
+**Listed files must be stable by construction (issue #5603).** A `hygiene`
+path is bound by its full bytes, so a listed file must change only when the
+owner means to change the evidence. A file that is also a living status
+surface — a README carrying a status paragraph, current counts, or "what's
+new" notes — churns on routine documentation passes, and each such edit
+re-renders the envelope stale with no agent able to discharge it (the
+re-attest rule below). Keep that content in an uninventoried file (for
+example `STATUS.md`) and link to it; the inventoried README carries only the
+durable evidence — what the block is, the spec table, how to reproduce
+results — which is exactly what item 10 grades
+(`docs/design-evidence-tiers.md`).
+
+**No durable-portion binding (issue #5603).** `--attest` cannot pin part of
+a file. Marker-region hashing and a companion-checklist inventory were both
+considered and rejected: a region hash reintroduces exactly the partial
+drift `--check` exists to catch, and a companion checklist would displace
+the README as the pinned artifact item 10 names. The answer to a churning
+file is the same as for resync-managed paths above — list fewer files: move
+the churn out and list a stable file instead.
+
 **Migration for existing item 10 inventories:** remove resync-managed paths
 from `hygiene`, then re-attest once and commit the new envelope
 (`klt signoff --attest 10 --inventory <inv> -o <envelope>`). That re-attest
@@ -1787,7 +1840,12 @@ attested and when is the git/PR record of the commit that changed
 for the repo owner. An agent must not regenerate an envelope to clear a red
 `signoff` or CI check, and an envelope diff inside an unrelated PR is a
 review red flag. If a stale envelope is blocking CI, escalate it to the
-owner instead.
+owner instead. The rule bars exactly those two things (issue #5603):
+regenerating an envelope to clear a red check, and an envelope diff inside
+an *unrelated* PR. A PR whose declared subject **is** the hygiene-evidence
+edit may carry the re-attested envelope: an agent may open such a PR, but
+the owner must review and approve it, the PR body must name the hygiene
+files changed, and an agent must not merge it itself.
 
 #### Item 2: attest a committed layout stream (`--input`, issue #4188)
 
@@ -1816,7 +1874,7 @@ plus the raw-byte SHA-256) and records the producing KLayout version in
 writes no `--output`. `--generator` and `--regenerated-hash` must be given
 together and populate `provenance.regeneration` (`--hash-kind geometry`
 compares the timestamp-independent geometry digest instead of raw bytes;
-produce that value with `klt stats --format json <regenerated stream> | jq -r
+produce that value with `klt stats --geometry-digest --format json <regenerated stream> | jq -r
 .geometry_digest` — **not** `klt diff`'s `canonical_hash`, a different digest,
 see [`docs/cli/stats.md`](stats.md) → "Geometry digest").
 The generator is echoed, never run; the grader reports a hash that differs
@@ -1825,6 +1883,33 @@ and diffs as for items 1/9/10. `--input` is refused with items 1/9/10.
 A cited item-2 envelope carries the same `artifact_binding.attestation`
 disclosure (`inventory_schema_version` is `null` unless a declared-checks
 inventory was given).
+
+`provenance.regeneration` is part of what `--check` compares, so how a
+regeneration claim is re-checked depends on whether you pass the flags again
+(issue #5572):
+
+| `--check` invocation | What the claim is compared against |
+| -------------------- | ---------------------------------- |
+| None of `--generator` / `--regenerated-hash` / `--hash-kind` | The committed claim is **re-checked as recorded** — read back out of the envelope, so it never contributes drift on its own. A committed item-2 envelope is therefore verifiable from the repo alone. |
+| Any of the three given | An **explicit cross-check**: the fresh envelope is built from the flags alone, so a value that differs from the committed claim (or flags passed against an envelope that carries no claim) is reported as drift on `provenance.regeneration`. |
+
+So the CI step that runs the check does not have to carry a second copy of the
+hash literal:
+
+```bash
+# Re-checks the committed claim as attested; no flags to keep in sync.
+klt signoff --attest 2 --input layout/top.gds --check evidence/item2.json
+```
+
+Adopting the claim is **not** a verification of it. Whether
+`regenerated_hash` actually matches the stream is decided by the grader, which
+reports a mismatch as `stale_artifact` (see
+[Items 1 and 2: attesting that the artifact was regenerated](#items-1-and-2-attesting-that-the-artifact-was-regenerated)
+above) — `--check` never runs the generator, so its own comparison of this
+block could only ever echo what the caller typed. A committed claim too
+malformed to re-attest from (not an object, or a non-string `generator`,
+`regenerated_hash` or `hash_kind`) is a usage error on a flag-less `--check`,
+never a `match`.
 
 ##### Item 2 over several streams (repeat `--input`, issue #4935)
 
@@ -1924,7 +2009,7 @@ an inventory the author did not write.
 | | `envelope_checks`: `{envelope path: command}` | yes, one per cited envelope | each command exits `0` (`command`, role `freshness`) — e.g. the cited verb's own `--check` |
 | | `corners`: list of names, with `metrics`: `{corner: {fmax\|area\|power: {"envelope": path, "field": "dotted.path"}}}` | digital partitions only (both or neither) | for every corner and each of `area`, `fmax`, `power`, the named field of the named cited envelope is a finite number (`metric`, role `digital`; the value is recorded). A missing binding or non-numeric field is a **failed check**. Digit segments index lists, e.g. `result.0.fmax_mhz`. |
 | **9** Testbenches shipped | `testbenches`: list of paths, or `{"path", "cold_start"}` objects (mixing is fine; the object form first ships in 0.9.0) | yes, non-empty | each file exists (`present`, role `testbench`) |
-| | `cold_start`: command | yes, unless **every** testbench entry carries its own `cold_start` | exits `0` (`command`, role `cold_start`). A per-bench `cold_start` is a command too and yields a `command` check with `testbench: "<path>"`, so a failure names its bench. When both forms are present, the top-level command runs as well. |
+| | `cold_start`: command | yes, unless **every** testbench entry carries its own `cold_start` | exits `0` (`command`, role `cold_start`). A per-bench `cold_start` is a command too and yields a `command` check with `testbench: "<path>"`, so a failure names its bench. When both forms are present, the top-level command runs as well. A cold start (either form) may add `documented_argv` — the full reproducing invocation, recorded and never run; see "A cold start that only validates its bench" below. *First ships in the first release after `v0.9.2`.* |
 | | `unbenched_rows`: list of `{"row": "<id>", "issue": <positive int>}` | no | one `unbenched_row` check per entry (role `row`), **passing**: the gap and its owner issue are visible to the grader, not refused. Empty/duplicate `row` or a non-positive `issue` is refused (exit `1`). Whether bench-less rows should fail T1 item 9 is a grading-policy decision this producer does not make. *First ships in 0.9.0; 0.8.0 refuses `unbenched_rows` as an unknown field.* |
 | | `pins`: `{"pdk": {"name", "revision"} \| {"none": true, "reason"}, "tools": {<tool>: <version>}}` | checked, not structurally required | `pdk.name` and `pdk.revision` non-empty, or, for a partition whose cold start consumes no PDK, the explicit no-PDK form `{"none": true, "reason": "<non-empty>"}` (`pin`, role `pdk`; `none` mixed with `name`/`revision`, or with an empty `reason`, fails; an absent `pdk` still fails -- silence never means "no PDK"); `tools` a non-empty map of non-empty versions (`pin`, role `tools`). A missing pin is a **failed check**, not a malformed inventory. |
 | **10** Repo hygiene | `hygiene`: list of paths | yes, non-empty | each file exists (`present`, role `hygiene`) |
@@ -1934,6 +2019,11 @@ A **command** is `{"argv": ["prog", "arg", ...], "cwd": "<repo-relative dir>", "
 `local_only` is optional (boolean, default `false`; anything else is refused,
 exit `1`). It marks a command that needs a toolchain the `--check` runner may
 not have (xschem, a PDK): see "CI usage" below.
+`documented_argv` is optional and accepted **only** on an item-9 `cold_start`
+(a non-empty list of non-empty strings; anything else, including the key on an
+item-1 `derived[].check`, an item-8 `envelope_checks` entry or an item-2/10
+`checks[]` entry, is refused, exit `1`). It is recorded, never executed: see
+"A cold start that only validates its bench".
 `timeout_s` is optional (positive finite number of seconds, at most `21600`;
 a string, boolean, non-positive, non-finite or larger value is refused, exit
 `1`). It raises or lowers that one command's time limit; omitted, the command
@@ -1943,7 +2033,17 @@ command's merged stdout+stderr is kept as a bounded tail (last 20 lines, at most
 2048 bytes) and emitted as the failing check's additive `output_tail` string in
 the live `--format json` result (issue #4698) -- never in an `--output` file,
 nor in the `--check` diff, so the envelope and its content hash stay
-reproducible across hosts; passing, skipped and unlaunchable checks omit it. `cwd` defaults to the repository root. A command that cannot
+reproducible across hosts; passing, skipped and unlaunchable checks omit it.
+A failing command that re-verifies a tier-verdict record -- its `argv`
+contains `signoff`, `--manifest` (or `--manifest=...`) and `--check` (or
+`--check=...`), whatever wrapper prefixes it carries -- additionally gets an
+advisory `hint` string (issue #5538), with exactly the same lifecycle as
+`output_tail` and under the same `[FAIL]` line in text output. It is attached
+in generate mode only: `--attest --check` mints nothing, a `local_only`
+command carried under `--skip-local-only` was not run, and a passing or
+differently-shaped check is not advised, so none of them carry it. Neither
+field is a `schema_version` change: both are additive, live-only, and absent
+unless the check failed in this run. `cwd` defaults to the repository root. A command that cannot
 be launched or times out fails its check with `exit_status: null` and
 `error: "launch_failed"`/`"timeout"`.
 
@@ -2130,6 +2230,57 @@ and a `... ok|FAILED|skipped in N.Ns` line to **stderr**, regardless of
 `--format`; stdout (and so the JSON envelope) is unchanged and carries no
 timing, keeping `--check` drift comparison reproducible.
 
+**A cold start that only validates its bench: `documented_argv` (issue
+#5463).** When a bench's claimed numbers come from a large corner grid or a
+Monte Carlo run on a batch fleet, the invocation that truly reproduces them
+costs hours of fleet budget, and `--attest` runs every declared command on
+every regeneration. Producers therefore declare a cheap proxy (typically
+`klt sim <request> --dry-run`) — and the envelope then records a command that
+only *validates* the bench, with nothing to say so. `documented_argv` carries
+that disclosure in the envelope instead of in prose:
+
+```json
+{
+  "path": "tb/ota_mc.spice",
+  "cold_start": {
+    "argv": ["klt", "sim", "sim/mc.json", "--dry-run", "--format", "json"],
+    "documented_argv": ["klt", "sim", "sim/mc.json", "-o", "evidence/mc.json"]
+  }
+}
+```
+
+`argv` is unchanged: it still runs, still gates the envelope, and a non-zero
+exit still makes the attestation `fail`. `documented_argv` is **never
+executed** — `klt` does not check that it is runnable, or that it is related to
+`argv`; it is the producer's claim about what reproduces the measurement. The
+emitted `attestation.checks[]` entry gains two fields:
+
+```json
+{"check": "command", "role": "cold_start", "testbench": "tb/ota_mc.spice",
+ "argv": ["klt", "sim", "sim/mc.json", "--dry-run", "--format", "json"],
+ "cwd": ".", "exit_status": 0, "passed": true,
+ "reproduces": "validates",
+ "documented_argv": ["klt", "sim", "sim/mc.json", "-o", "evidence/mc.json"]}
+```
+
+so a reader (or a grader) can tell a reproducing cold start from a validating
+one. Text output marks the check
+`(validates only; documented: klt sim sim/mc.json -o evidence/mc.json)`. A
+cold start without `documented_argv` emits exactly the entry it always did —
+no `reproduces` key — so committed envelopes show no `--check` drift.
+
+Item 9's `status` and the T1 grade are **unchanged** by the presence of
+`documented_argv`: today's proxy commands already grade `pass`, and this field
+only makes them visible. Whether a validation-only cold start should grade
+lower is a tier-policy question this producer does not decide.
+
+With `local_only: true`, a carried check (`--attest --check`,
+`--skip-local-only`) takes `reproduces`/`documented_argv` from the **current**
+inventory, not from the committed envelope — what a command reproduces is a
+property of what is declared now, so changing `documented_argv` is drift under
+`--check` and is refreshed into the envelope by `--skip-local-only`. The
+committed check is still matched on role, `argv` and testbench identity.
+
 Item 10: hygiene artifacts and the CI/audit commands that back them
 (`attest/item10.json`). A CI-run check is any command that exits non-zero
 when the run did not succeed, for example a `gh run view` query:
@@ -2192,13 +2343,55 @@ is the shared `--check` drift shape (`schema_version`, `mode: "check"`,
 `report`, `status: "match"|"drifted"`, `drift[]`, `fresh`) plus
 `fresh_status`, the re-attested envelope's own `status`.
 
+**A drift entry names the check, not only its index (issue #5460).** A
+`drift[]` entry that points at one `attestation.checks[]` entry carries an
+additive `check` object identifying it:
+
+```json
+{
+  "field": "attestation.checks.17.content_hash",
+  "committed": "sha256:3bca9b8e95ec…",
+  "fresh": "sha256:aaa8abc15692…",
+  "check": {"role": "testbench", "path": "sim/bin/sim_common.py"}
+}
+```
+
+`check` is the check's `role` plus whichever identity keys its kind carries —
+`path` for a file-presence check, `target` / `name` / `testbench` for a
+command or `recorded_hash` check, `row` for a citation check, `corner` +
+`metric` for an item-8 metric check. A check with no identity beyond its role
+(the `pdk` / `tools` pins, a top-level `cold_start`) gets `{"role": …}`.
+`--format text` prints it as a bracketed label after the pointer:
+
+```
+drift:
+  attestation.checks.17.content_hash  [testbench sim/bin/sim_common.py]:
+      committed: 'sha256:3bca9b8e95ec…'
+      fresh:     'sha256:aaa8abc15692…'
+```
+
+This matters most where the report is the only artifact a reader has — a CI
+job log, or a reviewer on a PR they did not write. The index alone is not
+even a stable identifier: file-presence checks are sorted by path, so
+inventorying one new file renumbers every entry after it.
+
+`field`, `committed` and `fresh` are unchanged (`field` is the dotted
+positional pointer, shared contract surface with `klt drc`/`extract`/`lvs`),
+so the key is additive with no `schema_version` bump. It is **absent** on an
+entry that names no single check: a `status` entry, and the single whole-list
+`attestation.checks` entry an inventory that *gained or lost* a file produces
+— equal-length lists are diffed index by index, a length mismatch is one
+whole-list diff. Matching committed to fresh checks by identity rather than
+position, so that case too became per-check, is not done here.
+
 **Toolchain-free runners: `local_only` commands (issue #3743).** A command
 declared `"local_only": true` (an item-1 `derived[].check`, an item-9
 `cold_start`, or an item-10 `checks[]` entry) runs under `--attest` as usual,
 and its outcome is committed in the envelope (the check carries
 `"local_only": true`). Under `--attest --check` it is **not run**: the check
 is carried through with its committed outcome and listed in the response's
-`skipped_checks` (`[{"role", "name"?, "target"?, "argv", "cwd", "passed"}]`,
+`skipped_checks` (`[{"role", "name"?, "target"?, "argv", "cwd", "passed",
+"reproduces"?, "documented_argv"?}]`,
 `passed` being the *committed* outcome, never a result of this run). Text
 output prints each as `[SKIP]`. Every file-presence and content-hash check
 still runs, so drift in an inventoried file is still drift, and a committed
@@ -2250,13 +2443,51 @@ This makes one case circular. A check that also verifies committed evidence
 *downstream* of the item-10 envelope (a lint for record freshness, or for
 envelope-to-manifest pins) fails whenever a record citing that envelope is
 stale, and such a record cannot be re-minted until the envelope exists. There
-are two ways out:
+are three ways out:
 
 1. Keep the downstream-verifying lint out of the item-10 `checks[]` inventory
    and run it in CI instead.
 2. Keep it in the inventory and follow the required order: mint item 10 first,
    on a tree whose baseline still holds, then re-mint the downstream records
    that cite the new envelope.
+3. When no such tree is left, run the record → envelope → record sequence
+   below.
+
+**Editing an inventoried file leaves no tree for way out no. 2 (issue
+#5538).** Way out no. 2 needs a moment at which the committed record still
+holds. An edit to an inventoried file (or to the inventory itself, which is
+what adding one means) removes it: the envelope must be re-minted and the
+record that cites it goes stale in the same moment. `--attest` then refuses
+to write, because the record it checks is stale, and the record cannot be
+regraded to a correct value, because it grades an envelope that has not been
+rewritten yet. Break the cycle by running the two producers in this order,
+from the deadlocked tree:
+
+1. **Regenerate the record.** It grades the item `unmet` with
+   `reason: "stale_evidence"` — the honest verdict for an envelope that has
+   not been rewritten yet.
+2. **Re-run `klt signoff --attest ITEM --inventory INV -o OUT`.** The record
+   check passes against that record, so the envelope is written (exit `0`).
+3. **Regenerate the record again.** It grades the item `met` against the
+   envelope step 2 wrote.
+
+**It has converged when `klt signoff --attest ITEM --inventory INV --check
+OUT` and the record's own `klt signoff --manifest M --check R` both exit
+`0`.** Run both. **A pair committed after step 1 or step 2 is
+half-converged** — the record still says `stale_evidence` while the envelope
+is fresh — and neither producer stops you committing it; both `--check` runs
+reject such a pair with exit `3`, so CI running them is the backstop. (The
+step-3 record is not in general byte-identical to the pre-edit one, so a
+byte-comparison against the old record is not the convergence signal; the two
+`--check` runs are.)
+
+Exit `3` on this shape otherwise reads like any other failing check, so a
+**failing `command` check whose `argv` runs a `signoff … --manifest …
+--check …`** carries a live-only `hint` naming the cycle and this sequence
+(see "A **command** is …" above for the field's lifecycle). The hint is
+worded conditionally — *if* that record cites this envelope — because the
+manifest named in `argv` is deliberately not parsed; an unrelated failing
+record check therefore gets advice that is still accurate.
 
 #### Exit codes
 
@@ -2568,6 +2799,12 @@ klt signoff --manifest manifest.json --check reports/block.signoff.json \
     { "field": "items.7.text", "committed": "…", "fresh": "… (reworded)" },
     { "field": "source_doc_content_hash", "committed": "sha256:…", "fresh": "sha256:…" }
   ],
+  "build_skew": {
+    "state": "build_only",
+    "fields": [
+      { "field": "build.git_commit", "committed": "d5d57daf…", "fresh": "5dbbad05…" }
+    ]
+  },
   "fresh": { "…": "the full freshly-graded report" }
 }
 ```
@@ -2579,6 +2816,16 @@ klt signoff --manifest manifest.json --check reports/block.signoff.json \
   `place-and-route` — see
   [`../json-contract.md`](../json-contract.md)'s "Verifying committed
   evidence"), and it renders through the same `--format text` drift report.
+- **`build_skew` names version skew without grading it** (issue #5868).
+  `--check` is the version-tolerant freshness gate; a raw diff of two
+  `--format json` renders is not, because the `build` block differs whenever
+  the rendering klt differs. `build_skew.state` is `"same"`, `"build_only"`
+  (some `build.*` field moved, the grading ruleset did not), `"ruleset"`
+  (`build.grading_ruleset_id` moved: graded under different rules, not just
+  rendered by a different build) or `"unknown"` (the committed report has no
+  `build` block). `fields` lists each differing field. It never changes
+  `status` or the exit code, and `--format text` prints one `build_skew:` line
+  when the state is `build_only` or `ruleset`.
 - **The tier verdict does not decide this mode's exit code.** A faithful
   report of a block that is *not* yet at T1 is `"match"`/exit `0` — the
   question is drift, not tier. Gate on `status`.
@@ -3655,6 +3902,20 @@ misclassify it as a native kind instead:
   same way it already excludes an `error`-kind check or an unprovenanced
   `klt yield` report. A manifest entry with no pinned `content_hash` at all
   is unaffected either way — no staleness claim was made to check.
+
+**What a generic citation's `content_hash` hashes.** A manifest entry's
+pinned `content_hash` is compared against the envelope's own
+`provenance.input.content_hash`, which covers the **input artifact**
+`provenance.input.path` names (the committed record the envelope attests) —
+**not** the bytes of the evidence envelope file itself. That is the same
+convention every native kind uses, and the grader says so verbatim in the
+`stale_evidence` hint ("`content_hash` must be the sha256 of the input
+artifact … not the hash of the evidence envelope file"); pinning the envelope
+file's own sha256 is common enough that `klt` names it, setting
+`pin_is_envelope_file_hash: true` in the stale-pin detail. Only
+`functional-verification` pins the evidence file's bytes (issue #4893);
+`generic` deliberately gets no such fallback, so with no `provenance.input`
+there is no live hash and the pin can only render `"unverifiable"`.
 
 **`provenance.input.path` (issue #2403) — optional, opt-in — the artifact
 `input_verified` re-hashes.** Even when `provenance` is given, a generic
@@ -5028,8 +5289,9 @@ document the report names equals the pin), `"stale"` (it differs), or
 live hash to compare). It is disclosure only: `status` and `reason` stay
 `unmet` / `undersized_sample` (or `negative_control_not_detected`), so a bad
 pin is visible now rather than only after the sample size is raised. The key
-is absent when the entry pins no `content_hash`, on every other refusal, and
-on `met` items.
+is absent when the entry pins no `content_hash` and on `met` items; since
+issue #5598 a non-passing envelope's own refusal carries it too (see "A
+non-passing envelope discloses its pin too" below).
 
 **An unverifiable pin explains itself (issue #3747).** When the entry pins
 `content_hash` and the resolved envelope carries no input hash at all (a
@@ -5040,6 +5302,26 @@ on `met` items.
 pin itself is visible as the cause. Disclosure only: `status` and `reason` are
 unchanged, and the keys are absent when the entry pins nothing or the pin is
 `stale`.
+
+**A non-passing envelope discloses its pin too (issue #5598).** An envelope
+whose own `status` is not passing is refused *before* the staleness gate is
+reached, so that refusal used to publish nothing at all about the manifest's
+pin: a `content_hash` that matched, one that was comparable and genuinely
+**stale**, and one that could never be compared all rendered the same `unmet`
+/ `check_failed` with no `detail`. For every citation kind, that refusal now
+carries `detail.content_hash_pin` (`"verified"` / `"stale"` /
+`"unverifiable"`), with `detail.content_hash_pin_note` on an unverifiable pin
+and, on a stale one, the same `hash_check` / `compared_against` / `hint`
+payload the `stale_evidence` verdict carries. Disclosure only: `status` and
+`reason` are unchanged for every manifest, so a drifted pin is visible on the
+first commit rather than only on the day the item first passes — which is what
+a repo byte-comparing this command's `--format json` output against a
+committed record needs. The keys are absent when the entry pins no
+`content_hash`, and when disclosed foundry-cell exceptions cover every
+violation (the item proceeds, so there is no refusal to sit beside). An
+unprovenanced `generic` envelope has no live hash, so its pin renders
+`"unverifiable"` whatever value it holds — uncomparable, not mismatched;
+anchor the citation with `provenance.input.path` to make it enforceable.
 
 **A `functional-verification` pin binds the evidence file (issue #4893).**
 `klt functional-verification` records no input hash, so for a **file-backed**

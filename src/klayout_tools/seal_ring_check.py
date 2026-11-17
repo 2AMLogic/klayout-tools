@@ -9,6 +9,8 @@ from __future__ import annotations
 from typing import Any
 
 from ._layout import load_layout
+from ._provenance import build_provenance
+from .env_provenance import repo_relative_path
 from .ring_check import RingCheckError, _assert_annulus, _select_top_cells
 
 # ---------------------------------------------------------------------------
@@ -96,9 +98,12 @@ def run_seal_ring_check(
         status = "not_checked"
 
     return {
-        "schema_version": 1,
+        # schema_version 2 (issue #5650): `file` re-shaped from the raw input
+        # string to the anchored `{path, scope}` object -- a breaking change.
+        # The additive `provenance` block alone would not have bumped it.
+        "schema_version": 2,
         "mode": "pdk",
-        "file": layout_path,
+        "file": repo_relative_path(layout_path),
         "pdk": pdk,
         "dbu_um": dbu,
         "status": status,
@@ -109,6 +114,12 @@ def run_seal_ring_check(
         "not_checked_rules": [
             r["id"] for r in rule_info if r["status"] == "not_checked"
         ],
+        # The seal-ring rule table is built in (no installed PDK directory is
+        # resolved), so name that honestly -- same shape as `klt erc`.
+        "provenance": build_provenance(
+            pdk={"variant": pdk, "resolved_via": "built-in", "version": None},
+            input_path=layout_path,
+        ),
     }
 
 
