@@ -83,6 +83,7 @@ from .signoff import (
 )
 from .signoff_attest_drift import drift_result
 from .signoff_attest_input import input_binding
+from .signoff_attest_pins import json_node, resolve_pin_refs
 
 #: The attestation-inventory schema versions this build reads. An inventory
 #: declaring any other version is refused (exit ``1``) rather than read with
@@ -873,23 +874,10 @@ def _skipped_check(
 
 def _metric_value(root: str, path: str, field: str) -> float | int | None:
     """The finite number at dotted ``field`` of the JSON envelope at ``path``
-    (digit segments index lists), or ``None`` if unreadable/absent/non-numeric."""
-    try:
-        with open(os.path.join(root, path), "rb") as handle:
-            node: Any = json.loads(
-                handle.read().decode("utf-8"),
-                parse_constant=_reject_json_constant,
-                parse_float=_finite_json_float,
-            )
-    except (OSError, UnicodeDecodeError, ValueError):
-        return None
-    for segment in field.split("."):
-        if isinstance(node, Mapping) and segment in node:
-            node = node[segment]
-        elif isinstance(node, list) and segment.isdigit() and int(segment) < len(node):
-            node = node[int(segment)]
-        else:
-            return None
+    (digit segments index lists), or ``None`` if unreadable/absent/non-numeric.
+    The walk itself is shared with item 9's reference-form pins
+    (:func:`~.signoff_attest_pins.json_node`, issue #5563)."""
+    node = json_node(root, path, field)
     return node if is_number(node) else None
 
 
@@ -1007,7 +995,10 @@ def _run_checks(
         checks.extend(_characterization_checks(root, normalized, command))
     elif item == 9:
         checks.extend(item9.item9_checks(normalized, command))
-        checks.extend(item9.pin_checks(normalized["pins"]))
+        resolved_pins, pin_sources = resolve_pin_refs(
+            normalized["pins"], root, _normalize_repo_path
+        )
+        checks.extend(item9.pin_checks(resolved_pins, pin_sources))
     else:
         checks.extend(_audit_command_checks(normalized["checks"], command))
     return checks

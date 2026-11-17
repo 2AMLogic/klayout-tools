@@ -98,12 +98,20 @@ def carried_check(
     return {**kept, "local_only": True, "skipped": True, **documented_fields(spec)}
 
 
-def pin_checks(pins: Any) -> list[dict[str, Any]]:
+def pin_checks(
+    pins: Any, sources: Mapping[str, Any] | None = None
+) -> list[dict[str, Any]]:
     """Item 9's reproducibility pins: the PDK name + revision (or the explicit
     ``{"none": true, "reason": "..."}`` no-PDK form -- an absent ``pdk`` never
     means "no PDK"), and at least one tool version. A missing or empty pin is
     a failed check, not a malformed inventory -- the inventory is well-formed,
-    it just does not yet say how to reproduce the run."""
+    it just does not yet say how to reproduce the run.
+
+    ``pins`` arrives with every reference-form leaf already resolved (issue
+    #5563); ``sources`` carries each resolved leaf's ``{"from", "key"}``
+    declaration and is recorded as the check's ``resolved_from`` -- only for
+    a check that used a reference, so a literal-only inventory emits the
+    check it always did."""
     pins = pins if isinstance(pins, Mapping) else {}
     pdk_value = pdk_pin(pins.get("pdk"))
     tools = pins.get("tools")
@@ -117,20 +125,23 @@ def pin_checks(pins: Any) -> list[dict[str, Any]]:
         )
     ):
         tools_value = {key: tools[key] for key in sorted(tools)}
-    return [
-        {
-            "check": "pin",
-            "role": "pdk",
-            "passed": pdk_value is not None,
-            "value": pdk_value,
-        },
-        {
-            "check": "pin",
-            "role": "tools",
-            "passed": tools_value is not None,
-            "value": tools_value,
-        },
-    ]
+    pdk_check = {
+        "check": "pin",
+        "role": "pdk",
+        "passed": pdk_value is not None,
+        "value": pdk_value,
+    }
+    tools_check = {
+        "check": "pin",
+        "role": "tools",
+        "passed": tools_value is not None,
+        "value": tools_value,
+    }
+    if sources and sources.get("pdk"):
+        pdk_check["resolved_from"] = sources["pdk"]
+    if sources and sources.get("tools"):
+        tools_check["resolved_from"] = sources["tools"]
+    return [pdk_check, tools_check]
 
 
 def split_testbenches(
