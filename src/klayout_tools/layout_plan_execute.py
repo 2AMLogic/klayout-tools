@@ -185,8 +185,10 @@ from .gen import GenError, _pdk_family, _resolve_expected_device_class, generate
 from .gen_compose import GenComposeError, _translate_bbox, compose
 from .layout_plan_fields import ingest_netlist
 from .layout_plan_ports import (
+    _netlist_derived_size_params,
     apply_gate_contact,
     device_owned_port_names,
+    diff_pair_leg_error,
     extract_raw_params_by_id,
     port_pins,
     unrouted_reasons,
@@ -234,16 +236,6 @@ _TERMINAL_SUFFIXES: dict[str, dict[str, str]] = {
     "cap_array": {"A": "BOT", "B": "TOP"},
 }
 
-#: Which resolved digest params (MOS/resistor ``L``/``W``) map onto which
-#: ``klt gen`` params field, per generator -- see the module docstring's
-#: scope decision 1.
-_SIZE_PARAM_TARGETS: dict[str, dict[str, str]] = {
-    "mos_array": {"L": "l_um", "W": "w_um"},
-    "diff_pair": {"L": "l_um", "W": "w_um"},
-    "esd_device": {"L": "l_um", "W": "finger_width_um"},
-    "res_array": {"L": "length_um", "W": "width_um"},
-}
-
 #: Opposite edge, used when resolving an ``abutment[]`` pair from the side
 #: that is already placed (see :func:`_abutment_target_offset`).
 _INVERT_EDGE = {"top": "bottom", "bottom": "top", "left": "right", "right": "left"}
@@ -268,8 +260,10 @@ class LayoutPlanExecuteError(Exception):
     """Raised when a validated plan cannot be executed: an unresolvable PDK,
     a generation failure (invalid resolved ``params``), a ``device_groups[]``
     entry with no reachable placement (no ``rows[]`` entry and no resolvable
-    ``abutment[]`` chain), or a ``gen_compose.compose()`` failure. Exit code
-    1 -- see the module docstring's "Exit-code trichotomy" note.
+    ``abutment[]`` chain), a ``diff_pair`` group whose declared devices are
+    not electrically distinct legs (#5765), or a ``gen_compose.compose()``
+    failure. Exit code 1 -- see the module docstring's "Exit-code
+    trichotomy" note.
     """
 
 
@@ -349,34 +343,6 @@ def _resolve_routing_spec(raw: Any) -> dict[str, Any]:
     if "nets" in raw:
         resolved["nets"] = nr.resolve_net_routing(raw["nets"], LayoutPlanExecuteError)
 
-    return resolved
-
-
-def _netlist_derived_size_params(
-    generator: str, device_params: dict[str, Any]
-) -> dict[str, float]:
-    """Pick the ``L``/``W``-style digest params a given generator's own
-    ``klt gen`` params can absorb, per :data:`_SIZE_PARAM_TARGETS`.
-
-    Only a **positive** digest value counts as "the netlist specified this
-    device's geometry" -- ``NetlistSpiceReader`` reports ``L``/``W`` as
-    ``0.0`` (KLayout's own structural default for an unset device-class
-    param) for a resistor written in the bare, purely-electrical
-    ``R<name> n1 n2 <ohms>`` SPICE form (no ``L=``/``W=`` at all), which is
-    "the netlist did not specify a geometric size for this device," not "the
-    netlist specifies a zero-sized device" -- treating it as the latter
-    would hand a real generator a rejected (``> 0`` required) param instead
-    of falling back to its own documented default.
-    """
-    targets = _SIZE_PARAM_TARGETS.get(generator)
-    if not targets:
-        return {}
-    resolved: dict[str, float] = {}
-    for digest_key, gen_param in targets.items():
-        value = device_params.get(digest_key)
-        value_is_number = is_number(value)
-        if value_is_number and value > 0:
-            resolved[gen_param] = float(value)
     return resolved
 
 
@@ -1059,6 +1025,14 @@ def execute_layout_plan(
         generated: dict[str, dict[str, Any]] = {}
         resolved_params_by_id: dict[str, dict[str, Any]] = {}
         for group in device_groups:
+            # diff_pair legs must be electrically distinct (#5765): two
+            # digest devices sharing a gate or drain net are parallel
+            # fingers (typically of one folded nf>1 MOS) or a duplicate
+            # declaration, and binding both as legs shorts the pair. An
+            # application error, before any generation work.
+            leg_error = diff_pair_leg_error(group, digest_devices_by_key)
+            if leg_error:
+                raise LayoutPlanExecuteError(leg_error)
             params, param_warnings = _resolve_group_params(
                 group,
                 digest_devices_by_key,

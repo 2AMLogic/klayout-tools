@@ -1610,8 +1610,8 @@ def _resolve_expected_device_class(
     metal-resistor ``device_class`` but routed through ``res_array`` with no
     explicit ``metal_level`` override silently draws the poly-body default
     instead. Dispatched on ``generator`` by name (mirroring
-    :data:`_SIZE_PARAM_TARGETS`'s own per-generator dispatch shape in
-    ``layout_plan_execute.py``) so a future generator with its own
+    :data:`_SIZE_PARAM_TARGETS`'s per-generator dispatch shape -- now in
+    ``layout_plan_ports.py`` since #5765) so a future generator with its own
     device-class-selecting param can add an entry here without restructuring
     this function -- no other generator's request params currently select
     between distinct recognised device classes the way ``res_array``'s do
