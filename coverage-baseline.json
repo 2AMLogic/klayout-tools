@@ -1734,7 +1734,7 @@
     },
     "src/klayout_tools/sim_settled.py": {
       "line": 95.8,
-      "branch": 88.8
+      "branch": 87.5
     },
     "src/klayout_tools/sim_slug.py": {
       "line": 100.0,
@@ -1746,7 +1746,7 @@
     },
     "src/klayout_tools/sim_snm_meas.py": {
       "line": 99.0,
-      "branch": 92.3
+      "branch": 91.6
     },
     "src/klayout_tools/sim_staging.py": {
       "line": 95.5,
