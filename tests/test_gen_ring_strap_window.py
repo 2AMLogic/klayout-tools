@@ -117,9 +117,11 @@ def test_strap_window_insets_along_each_ring_side(tmp_path, pdk_root, side, wind
 
     gap = _gap_port(report)
     assert gap["name"] == f"GAP_{side}"
-    assert gap["strap_window_um"] == {
-        key: pytest.approx(value) for key, value in window.items()
-    }
+    # Exact equality, not approx: the inset is pure-float arithmetic, so the
+    # reported coordinates are rounded to 6 decimals -- a 17-digit tail
+    # (1.5899999999999999) here is precisely the representation-noise
+    # regression this asserts stays fixed.
+    assert gap["strap_window_um"] == window
 
 
 def test_strap_window_inset_follows_the_resolved_deck(tmp_path, both_pdk_root):
@@ -196,6 +198,43 @@ def test_mos_array_strap_window_tracks_the_gap_as_the_sweep_moves_it(
     # -0.07..+0.93 shift both window ends by the same amount).
     assert (window["x0"] + window["x1"]) / 2 == pytest.approx(gap["x_um"])
     assert (window["y0"] + window["y1"]) / 2 == pytest.approx(gap["y_um"])
+
+
+@pytest.mark.parametrize(
+    ("ring_gap_um", "window"),
+    [
+        # gf180mcu's metal1.space.1 is 0.23um, so every accepted opening in
+        # [0.40, 0.46) -- 0.40 being the documented minimum -- insets to a
+        # negative along-side extent, and one exactly two spacings wide
+        # (0.46) insets to zero: none admits a same-layer-legal strap, and
+        # all three report null, never an inverted or zero-width box (which
+        # a consumer's geometry library would silently normalise into a
+        # phantom window exactly where a strap may not go).
+        (0.40, None),
+        (0.44, None),
+        (0.46, None),
+        (0.50, {"x0": 1.90, "y0": 0.0, "x1": 1.94, "y1": 0.42}),
+    ],
+)
+def test_opening_too_narrow_for_a_strap_reports_null_not_an_inverted_box(
+    tmp_path, both_pdk_root, ring_gap_um, window
+):
+    report = generate(
+        {
+            "generator": "guard_ring",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {
+                "contacts_per_side": 2,
+                "ring_gap_side": "S",
+                "ring_gap_um": ring_gap_um,
+            },
+            "options": {"output": str(tmp_path / f"narrow_{ring_gap_um}.gds")},
+        }
+    )
+
+    gap = _gap_port(report)
+    assert gap["name"] == "GAP_S"
+    assert gap["strap_window_um"] == window
 
 
 def test_strap_inside_the_window_is_drc_clean_outside_it_is_not(tmp_path, pdk_root):

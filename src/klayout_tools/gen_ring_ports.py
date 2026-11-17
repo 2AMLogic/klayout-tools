@@ -97,15 +97,22 @@ def _ring_ports(
     resolved deck's minimum same-layer spacing for ``gap_layer``
     (:func:`_min_spacing_um_for_layer`, the same lookup and threshold a
     ``klt drc`` run judges a strap with), in the composed frame like every
-    other port field. A strap whose footprint stays inside the window is
-    spacing-clean against the ring metal on both sides of the opening; the
-    window's extent across the side is the ring band's full thickness, since
-    a strap crossing the ring is constrained only along it. A window whose
-    along-side extent is <= 0 (an opening narrower than two spacings) means
-    no same-layer-legal strap fits. An unresolvable PDK family -- or a deck
-    with no ``"space"`` rule for ``gap_layer`` -- insets by ``0.0``,
-    reporting the opening's own box, the same degrade-to-no-op the #1386
-    spacing lookup established.
+    other port field, each coordinate rounded to the 6-decimal micron
+    precision deck thresholds themselves report at -- the pure-float inset
+    arithmetic would otherwise leak representation noise (17-digit tails)
+    no other reported coordinate in the response has. A strap whose extent
+    along the ring side stays within the window is spacing-clean against
+    the ring metal on both sides of the opening; the window's extent across
+    the side is the ring band's full thickness, since a strap crossing the
+    ring is constrained only along it. ``None`` -- never a zero-width or
+    inverted box, which a consumer's geometry library would silently
+    normalise into a phantom window exactly where a strap may not go --
+    when the along-side extent would be <= 0 (an opening narrower than two
+    spacings: no same-layer-legal strap fits), the same absent-box encoding
+    ``well_box_um``/``well_keepout_box_um`` already use. An unresolvable
+    PDK family -- or a deck with no ``"space"`` rule for ``gap_layer`` --
+    insets by ``0.0``, reporting the opening's own box, the same
+    degrade-to-no-op the #1386 spacing lookup established.
 
     ``tap_net`` (issue #1421) names the net every tap port carries, reported
     as each entry's ``net``. ``None`` (the default, and every caller that
@@ -143,9 +150,20 @@ def _ring_ports(
         inset = spacing[0] if spacing is not None else 0.0
         x0, y0, x1, y1 = gap["box_um"]
         if gap["side"] in ("N", "S"):
-            window = (x0 + inset, y0, x1 - inset, y1)
+            window = (x0 + inset + ox, y0 + oy, x1 - inset + ox, y1 + oy)
         else:
-            window = (x0, y0 + inset, x1, y1 - inset)
+            window = (x0 + ox, y0 + inset + oy, x1 + ox, y1 - inset + oy)
+        # Round to the micron precision deck thresholds report at, *before*
+        # the degenerate check, so an opening exactly two spacings wide (a
+        # mathematically zero extent like 1e-16) reports None rather than a
+        # phantom window -- and the inset's float arithmetic leaves no
+        # representation noise in the emitted coordinates.
+        window = tuple(round(v, 6) for v in window)
+        along = (
+            window[2] - window[0]
+            if gap["side"] in ("N", "S")
+            else window[3] - window[1]
+        )
         ports.append(
             {
                 "name": f"GAP_{gap['side']}",
@@ -155,14 +173,7 @@ def _ring_ports(
                 "y_um": gap["y_um"] + oy,
                 "width_um": gap["opening_um"],
                 "direction_deg": RING_SIDE_DIRECTIONS[gap["side"]],
-                "strap_window_um": _box_um_field(
-                    (
-                        window[0] + ox,
-                        window[1] + oy,
-                        window[2] + ox,
-                        window[3] + oy,
-                    )
-                ),
+                "strap_window_um": _box_um_field(window) if along > 0.0 else None,
             }
         )
     return ports
