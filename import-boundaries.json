@@ -15,6 +15,7 @@
       "kind": "verb",
       "description": "`klt artifact` implementation: fleet artifact-store client (issue #4063) plus CLI adapter.",
       "modules": [
+        "klayout_tools.artifact_errors",
         "klayout_tools.artifact_store",
         "klayout_tools.cli.artifact_cmd"
       ]
