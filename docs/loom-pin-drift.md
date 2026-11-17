@@ -151,6 +151,67 @@ Upstream resolves bare `name.ext:L` citations, with unique-basename
 resolution and MISSING/AMBIGUOUS reporting, and the local fixtures pass
 against the upstream script.
 
+## `scripts/pr-worktree.sh`
+
+Checked **2026-11-17** against `rjwalters/loom` @
+`92556a147b18e43d0763c94f396e1aa68f81a5e2`. Re-ported in #6009: the installed
+file now differs from that upstream script only by the local hook helper and
+its two call sites. The whole-file pin remains in `.loom/resync-ignore`.
+
+### Protected local behavior
+
+#2020: `run_post_worktree_hook` invokes the repo-owned
+`.loom/hooks/post-worktree.sh` after both fresh creation and reuse of a PR
+review worktree. The hook runs `uv sync --extra dev` to give the worktree its
+own virtual environment and editable install. Without it, tests in a review
+worktree can silently import the main checkout's `src/`, hiding regressions
+or missing fixes. Hook failure warns without aborting worktree creation.
+
+### Upstream differences observed (2026-11-17)
+
+The previous re-port (`d532f8e94`, upstream v0.19.1160) retained stale header
+and help text that redirected issue PRs to `worktree.sh`, contradicting the
+Judge's supported fallback. Upstream #11194 (`e9d652800`, tightened by
+`3883cf25e`) documents `pr-worktree.sh` as the review checkout for any PR
+shape, and says to reuse the named holder or stop after a branch collision.
+#6009 takes that text unchanged.
+
+The old pin also retained the #10120 `live-output-attend --pr` block. Upstream
+deliberately removed it in
+[`cfcb24902`](https://github.com/rjwalters/loom/commit/cfcb24902f2956edf52db51c27f7c06b5ec2349f)
+(#12536, 2026-10-16), retiring attended-session telemetry emitters and their
+callers. It was removed here too; it was not moved elsewhere.
+
+### Reproduction
+
+```bash
+SHA=92556a147b18e43d0763c94f396e1aa68f81a5e2
+mkdir -p /tmp/pr-worktree-pin-drift
+gh api "repos/rjwalters/loom/contents/defaults/scripts/pr-worktree.sh?ref=$SHA" \
+  -H 'Accept: application/vnd.github.raw' > /tmp/pr-worktree-pin-drift/upstream.sh
+# Only run_post_worktree_hook and its reuse/fresh-creation calls should differ.
+diff -u /tmp/pr-worktree-pin-drift/upstream.sh .loom/scripts/pr-worktree.sh
+
+bash .loom/scripts/pr-worktree.sh --help
+bash -n .loom/scripts/pr-worktree.sh
+bash .loom/scripts/tests/test-pr-worktree-isolation.sh
+bash .loom/scripts/tests/test-pr-worktree-post-hook.sh
+```
+
+The isolation suite reported 36/38 before this re-port (the two help checks
+failed) and 38/38 afterward. The post-hook suite still passes. These are
+targeted local checks; this repo's CI does not run `.loom/scripts/tests`.
+The fixture suites require an executable temporary directory and no inherited
+`LOOM_WORKTREE_ROOT` override; the post-hook suite's missing-uv case also
+requires a test PATH without a real `uv` binary.
+
+### Conditions to retire the pin
+
+Drop the pin when upstream `pr-worktree.sh` invokes an equivalent
+post-worktree hook on both the fresh and reuse paths, and the local post-hook
+suite passes against the upstream file. Upstreaming that generic hook call
+would permit retirement; it is separate work in `rjwalters/loom`.
+
 ## Upstream proposal: section-scoped resync (PROPOSED, not shipped)
 
 > **Status: proposed, not filed, not implemented.** No upstream issue exists
