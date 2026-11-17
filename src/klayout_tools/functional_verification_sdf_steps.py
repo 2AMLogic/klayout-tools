@@ -1,5 +1,6 @@
 """SDF-normalization pipeline steps for :func:`run_functional_verification`
-that need nothing from ``functional_verification`` itself.
+that reach into ``functional_verification`` only lazily, never at runtime
+module scope.
 
 Split out of ``functional_verification.py`` / ``functional_verification_sdf.py``
 because the per-file size ratchet (``scripts/check_file_size_baseline.py``)
@@ -10,6 +11,7 @@ from __future__ import annotations
 
 import os
 import re
+from typing import TYPE_CHECKING, Any
 
 from .functional_verification_sdf import (
     _cut_sdf_spans,
@@ -19,6 +21,9 @@ from .functional_verification_sdf import (
     _sdf_cell_entry_removals,
     _sdf_iopath_arc,
 )
+
+if TYPE_CHECKING:
+    from .functional_verification import FunctionalVerificationError
 
 #: The ``environment.sdf.dropped`` class counting ``COND``-wrapped ``IOPATH``
 #: entries removed before annotation because their condition is an operator
@@ -164,3 +169,36 @@ def _apply_sdf_cond_expression_drop(
     sdf_pre_dropped_counts[SDF_COND_EXPRESSION_DROPPED_CLASS] = cond_count
     sdf_pre_dropped_arcs[SDF_COND_EXPRESSION_DROPPED_CLASS] = cond_arcs
     return new_path
+
+
+def _sdf_refusal_error(
+    sdf_file: str,
+    engine: str,
+    diagnostics: list[str],
+    dropped_report: dict[str, dict[str, Any]],
+) -> FunctionalVerificationError:
+    """The exception both SDF-diagnostic refusal sites raise (issue #5854).
+
+    The message is the one both sites used to build inline, unchanged. The
+    caller passes the already-built ``environment.sdf.dropped``-shaped report
+    -- built by ``functional_verification._sdf_dropped_report``, which this
+    module cannot import at module level (that module imports this one) --
+    and it is attached as the exception's ``details`` attribute only when at
+    least one class was dropped: a refusal with an empty accounting keeps the
+    exact attribute set every other refusal path's error has. The CLI merges
+    ``details`` flat into ``error``: the path is ``error.sdf.dropped``.
+    """
+    from .functional_verification import FunctionalVerificationError
+
+    shown = " | ".join(diagnostics[:5])
+    more = f" (+{len(diagnostics) - 5} more)" if len(diagnostics) > 5 else ""
+    error = FunctionalVerificationError(
+        f"SDF back-annotation of '{sdf_file}' did not fully apply: "
+        f"{len(diagnostics)} diagnostic(s) in the {engine} transcript "
+        f"-- {shown}{more}. The simulator exits 0 after skipping an "
+        "annotation it cannot apply, so this run's verdict would have "
+        "been a zero-delay one reported as if it were annotated."
+    )
+    if dropped_report:
+        error.details = {"sdf": {"dropped": dropped_report}}
+    return error

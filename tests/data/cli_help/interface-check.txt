@@ -16,7 +16,9 @@ options:
   --pin-layer-a L/D layer of A's pads (default: each label's own layer)
   --pin-layer-b L/D layer of B's pads (default: each label's own layer)
   --tol-um UM largest pad-to-pad gap still counted as mated (default 0: overlap/touch)
-  --pair A_REGEX=B_TEMPLATE pair complementary names: an A label fully matching A_REGEX mates with the B label named by the re.Match.expand template, e.g. 'n_out\[(\d+)\]=s_in[\1]'; repeatable, first match wins; both names must match --pins
+  --pins-a REGEX narrow A's checked labels: a label is checked only when it fully matches --pins AND --pins-a (default: --pins alone)
+  --pins-b REGEX narrow B's checked labels: a label is checked only when it fully matches --pins AND --pins-b (default: --pins alone)
+  --pair A_REGEX=B_TEMPLATE pair complementary names: an A label fully matching A_REGEX mates with the B label named by the re.Match.expand template, e.g. 'n_out\[(\d+)\]=s_in[\1]'; repeatable, first match wins; both names must match --pins, each within its side's --pins-a/--pins-b scope
   --top-a TOP_A top cell of A (required if several)
   --top-b TOP_B top cell of B (required if several)
   --format {text,json} output format (default: text)

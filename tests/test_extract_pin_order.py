@@ -72,3 +72,72 @@ def test_cli_pins_flag_order_defines_subckt_pin_order(tmp_path, capsys):
     )  # fmt: skip
     pins = header.split()[2:]
     assert pins[:4] == ["Y", "VPWR", "VGND", "VPB"]
+
+
+def test_joined_label_pin_hoists_on_component_match(tmp_path):
+    """Issue #5534: a declared name hoists a pin whose *component* labels
+    contain it, not only a whole-token match (`--pins`' own #1687 rule)."""
+    path = _write(tmp_path, ".SUBCKT top a|a0 b c|x d")
+    _apply_pin_order_to_spice(path, "top", ("d", "x", "a"))
+    assert ".SUBCKT top d c|x a|a0 b\n" in open(path).read()
+
+
+def test_pin_matching_two_declared_names_is_emitted_once_at_earliest(tmp_path):
+    """Issue #5534: a joined-label pin matching several declared names appears
+    exactly once, at the position of the earliest name it matches."""
+    path = _write(tmp_path, ".SUBCKT top z a|b y")
+    _apply_pin_order_to_spice(path, "top", ("a", "b"))
+    assert ".SUBCKT top a|b z y\n" in open(path).read()
+
+
+def test_component_label_match_is_case_insensitive(tmp_path):
+    """Issue #5534: component matching keeps #5255's case-insensitivity."""
+    path = _write(tmp_path, ".SUBCKT top q VGND|vss")
+    _apply_pin_order_to_spice(path, "top", ("VSS",))
+    assert ".SUBCKT top VGND|vss q\n" in open(path).read()
+
+
+def test_cli_pins_order_holds_for_joined_label_nets(tmp_path, capsys):
+    """Issue #5534: end-to-end, a layout carrying both a single-label net and
+    a joined-label net emits the top `.SUBCKT` header in declared order."""
+    layout = _make_inverter_layout(extra_y_label="ybar")
+    path = str(_write_gds(layout, tmp_path / "inv.gds"))
+    out_path = tmp_path / "inv.spice"
+    exit_code = main(
+        [
+            "extract", path, "--deck", "sky130", "-o", str(out_path),
+            "--pins", "VPWR,ybar,VGND", "--format", "json",
+        ]
+    )  # fmt: skip
+    assert exit_code == 0
+    capsys.readouterr()
+    header = next(
+        line for line in out_path.read_text().splitlines()
+        if line.lower().startswith(".subckt")
+    )  # fmt: skip
+    # `Y|ybar` matches declared `ybar` through its component label, so it is
+    # hoisted into the declared slot rather than trailing the whole-name hits.
+    assert header.split()[2:] == ["VPWR", "Y|ybar", "VGND"]
+
+
+def test_cli_rename_declared_pins_keeps_declared_order(tmp_path, capsys):
+    """Issue #5534: `--rename-declared-pins` renames a joined-label net to its
+    single declared name (a whole-name match), and the header still follows
+    `--pins` — the component-label hoist must not regress that path."""
+    layout = _make_inverter_layout(extra_y_label="ybar")
+    path = str(_write_gds(layout, tmp_path / "inv.gds"))
+    out_path = tmp_path / "inv.spice"
+    exit_code = main(
+        [
+            "extract", path, "--deck", "sky130", "-o", str(out_path),
+            "--pins", "VPWR,ybar,VGND", "--rename-declared-pins",
+            "--format", "json",
+        ]
+    )  # fmt: skip
+    assert exit_code == 0
+    capsys.readouterr()
+    header = next(
+        line for line in out_path.read_text().splitlines()
+        if line.lower().startswith(".subckt")
+    )  # fmt: skip
+    assert header.split()[2:] == ["VPWR", "ybar", "VGND"]
