@@ -186,6 +186,7 @@
       "modules": [
         "klayout_tools.cli.env_provenance_cmd",
         "klayout_tools.env_provenance",
+        "klayout_tools.env_provenance_json_stream",
         "klayout_tools.env_provenance_scrub",
         "klayout_tools.env_provenance_walk"
       ]
@@ -527,6 +528,7 @@
         "klayout_tools.netlist_normalize_scan",
         "klayout_tools.netlist_paths",
         "klayout_tools.netlist_pdk",
+        "klayout_tools.netlist_diff",
         "klayout_tools.netlist_port_order"
       ]
     },
@@ -542,6 +544,7 @@
         "klayout_tools.decks.finfet",
         "klayout_tools.decks.gf180mcu",
         "klayout_tools.decks.gf180mcu_bond_pad",
+        "klayout_tools.decks.gf180mcu_parasitics",
         "klayout_tools.decks.gf180mcu_untranscribed",
         "klayout_tools.decks.parasitics",
         "klayout_tools.decks.rules",
@@ -597,6 +600,7 @@
         "klayout_tools.place_and_route",
         "klayout_tools.place_and_route_clock",
         "klayout_tools.place_and_route_batch",
+        "klayout_tools.place_and_route_batch_single",
         "klayout_tools.place_and_route_def_drcfill",
         "klayout_tools.place_and_route_gds_merge",
         "klayout_tools.place_and_route_groups",
@@ -691,6 +695,7 @@
         "klayout_tools._devices",
         "klayout_tools._digest",
         "klayout_tools._engine_proc",
+        "klayout_tools._engine_remedy",
         "klayout_tools._git_tracked",
         "klayout_tools._jsongz",
         "klayout_tools._jsonnum",
@@ -705,6 +710,7 @@
         "klayout_tools._report_verify_exclude",
         "klayout_tools._report_verify_hints",
         "klayout_tools._spice_number",
+        "klayout_tools._spice_text",
         "klayout_tools._spice_tokens",
         "klayout_tools._text",
         "klayout_tools._unionfind",
@@ -743,6 +749,7 @@
         "klayout_tools.signoff_attest_build",
         "klayout_tools.signoff_attest_carry",
         "klayout_tools.signoff_attest_drift",
+        "klayout_tools.signoff_attest_env",
         "klayout_tools.signoff_attest_input",
         "klayout_tools.signoff_attest_item9",
         "klayout_tools.signoff_attest_live",
@@ -846,6 +853,7 @@
         "klayout_tools.sim_mismatch_gate",
         "klayout_tools.sim_measurement_kind",
         "klayout_tools.sim_measurement_results",
+        "klayout_tools.sim_measurement_template",
         "klayout_tools.sim_noise",
         "klayout_tools.sim_op_args",
         "klayout_tools.sim_param_file",
@@ -938,6 +946,7 @@
         "klayout_tools._sta_sdc_check",
         "klayout_tools.post_route_sta",
         "klayout_tools.post_route_sta_electrical",
+        "klayout_tools.post_route_sta_instance_paths",
         "klayout_tools.post_route_sta_path_groups"
       ]
     },
