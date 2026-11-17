@@ -76,8 +76,32 @@ def _reject_from_synthesize_with_mutations(options: Any) -> None:
         )
 
 
+def _reject_pdk_with_mutations(
+    request_doc: dict[str, Any], pdk_variant: str | None, pdk_root: str | None
+) -> None:
+    """Sixth sibling of the trace/coverage/initial_state/sdf/
+    from_synthesize refusals (issue #5782): the baseline below resolves
+    ``request.pdk``'s cell models and derives their ``FUNCTIONAL`` define,
+    while this module's own per-mutant builds resolve ``request.sources``
+    alone -- every mutant would elaborate without the std-cell models the
+    baseline tested, the same divergence the from_synthesize refusal above
+    names."""
+    if "pdk" in request_doc or pdk_variant is not None or pdk_root is not None:
+        raise _fv.FunctionalVerificationError(
+            "a pdk input (request.pdk / --pdk / --pdk-root) cannot currently "
+            "be combined with --mutations -- not yet designed (the baseline "
+            "elaborates the resolved cell models while per-mutant builds do "
+            "not)"
+        )
+
+
 def run_functional_verification_with_mutations(
-    request: str, proposals_path: str, output_dir: str | None = None
+    request: str,
+    proposals_path: str,
+    output_dir: str | None = None,
+    *,
+    pdk_variant: str | None = None,
+    pdk_root: str | None = None,
 ) -> dict[str, Any]:
     """Run ``klt functional-verification --mutations`` end to end (issue
     #1592, spike section 3): the unmodified baseline run from
@@ -178,6 +202,7 @@ def run_functional_verification_with_mutations(
             "'Open questions')"
         )
     _reject_from_synthesize_with_mutations(request_doc.get("options"))
+    _reject_pdk_with_mutations(request_doc, pdk_variant, pdk_root)
 
     sources = _fv._resolve_sources(request_doc.get("sources"), request_dir)
     hdl_toplevel = request_doc["hdl_toplevel"]
@@ -208,7 +233,9 @@ def run_functional_verification_with_mutations(
     # The baseline-must-pass gate (spike §3d): the exact same request the
     # caller already used for an ordinary (non-mutation) run, reused
     # unchanged -- see `docs/design/mutation-testing-spike.md` §3a.
-    baseline = _fv.run_functional_verification(request, output_dir)
+    baseline = _fv.run_functional_verification(
+        request, output_dir, pdk_variant=pdk_variant, pdk_root=pdk_root
+    )
     if baseline["status"] != "pass":
         failing_names = ", ".join(
             test["name"] for test in baseline["tests"] if test["status"] == "failed"

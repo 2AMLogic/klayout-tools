@@ -17,4 +17,6 @@ options:
   -h, --help show this help message and exit
   --mutations PROPOSALS_PATH run mutation testing (issue #1592): a path to a <proposals> JSON document (schema klt.functional_verification.mutation_proposals/1) naming byte-exact source mutations to apply, one at a time, to an isolated build+test of the same <request>. Aborts with exit 1 if the request's own baseline run fails first -- see docs/cli/functional- verification.md, '--mutations'
   -o, --outdir OUTDIR write run artifacts (results XML, logs, simulator build directory, coverage, trace, mutants/) here instead of `.klt/functional-verification/` next to the request file; created if missing, relative paths resolve against the cwd. Request-relative source paths still resolve against the request's own directory
+  --pdk PDK PDK variant to resolve a request.pdk block's cell models from (e.g. sky130A); overrides request.pdk.variant (issue #5782)
+  --pdk-root PDK_ROOT explicit PDK install root; overrides $PDK_ROOT and the search order
   --format {text,json} output format (default: text)

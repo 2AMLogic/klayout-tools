@@ -225,6 +225,9 @@ from .functional_verification_initial_state import (
     build_initial_state_verilog,
     count_d_nets,
 )
+from .functional_verification_pdk import (
+    _resolve_defines,
+)
 from .functional_verification_run_inputs import resolve_run_inputs, with_run_inputs
 from .functional_verification_sdf import (
     _check_sdf_engine_capability,
@@ -1213,34 +1216,6 @@ def _write_initial_state_shim(
         "clock": clock,
     }
     return path, info
-
-
-def _resolve_defines(defines: Any) -> dict[str, str | None]:
-    """Validate the optional ``request.options.defines`` object and return it
-    unchanged (or ``{}`` when omitted).
-
-    Forwarded to ``Runner.build(defines=...)`` -- cocotb's own ``Runner``
-    accepts string values; a ``None`` value defines the macro with no value
-    (e.g. ``` `define USE_POWER_PINS ```). cocotb 2.x cannot serialise
-    ``None`` itself, so :func:`_run_build` emits those as ``-DNAME`` build args.
-    """
-    if defines is None:
-        return {}
-    if not isinstance(defines, dict):
-        raise FunctionalVerificationError(
-            "request.options.defines must be a JSON object of string -> string|null"
-        )
-    for key, value in defines.items():
-        if not isinstance(key, str) or not key:
-            raise FunctionalVerificationError(
-                "request.options.defines keys must be non-empty strings"
-            )
-        if value is not None and not isinstance(value, str):
-            raise FunctionalVerificationError(
-                f"request.options.defines[{key!r}] must be a string or null "
-                f"-- got a {type(value).__name__}"
-            )
-    return defines
 
 
 def _resolve_source_defines(
@@ -2544,7 +2519,11 @@ def _resolve_engine(request_doc: dict[str, Any]) -> str:
 
 
 def run_functional_verification(
-    request: str, output_dir: str | None = None
+    request: str,
+    output_dir: str | None = None,
+    *,
+    pdk_variant: str | None = None,
+    pdk_root: str | None = None,
 ) -> dict[str, Any]:
     """Run the cocotb regression declared by ``request``.
 
@@ -2577,8 +2556,14 @@ def run_functional_verification(
             "request.hdl_toplevel must be a non-empty string"
         )
     # Issue #5684: verify the synthesized netlist before anything is built.
+    # Issue #5782: the CLI's --pdk/--pdk-root merge over request.pdk here.
     sources, run_inputs = resolve_run_inputs(
-        request_doc, request_dir, hdl_toplevel, _path_envelope
+        request_doc,
+        request_dir,
+        hdl_toplevel,
+        _path_envelope,
+        pdk_variant=pdk_variant,
+        pdk_root=pdk_root,
     )
 
     verilog_tb = _resolve_verilog_top(
@@ -2597,6 +2582,12 @@ def run_functional_verification(
         sdf,
         trace_requested,
     ) = _resolve_options(request_doc.get("options"), engine, request_dir)
+    # Issue #5782: defines the pdk input derives (FUNCTIONAL, only when no
+    # options.sdf) land *under* the caller's own -- caller values win, and
+    # the rejection inside _resolve_options ran on caller defines only, so
+    # a derived FUNCTIONAL (which exists only when sdf is None) can never
+    # trip it. Unconditional merge: {} under {} is the same dict.
+    defines = {**run_inputs.pdk_defines, **defines}
     _check_verilog_top_sdf(verilog_tb, sdf, request_doc.get("parameters"))
     initial_state = _resolve_initial_state(
         request_doc.get("options"), engine, request_dir
