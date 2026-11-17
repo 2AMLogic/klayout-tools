@@ -55,7 +55,16 @@
 # temp dir, not under `$PWD`; without this mount `openroad` fails with
 # `cannot open '<tmp_path>/.../pnr_*.tcl'` the moment a caller's request
 # lives outside `$PWD` (verified live against this exact failure while
-# building #1353).
+# building #1353). While `$TMPDIR` is unset (or `/tmp`) that mount is what
+# incidentally makes `/tmp` visible as a whole -- but the moment a caller
+# exports any other `$TMPDIR`, `/tmp` stops being mounted and an input under
+# `/tmp`-but-not-`$TMPDIR` fails inside the container with an opaque
+# `[ERROR STA-0340] cannot open '<path>'` for a file the caller can still
+# `cat` on the host (measured, issue #5878). So when `$TMPDIR` differs from
+# `/tmp` the wrapper keeps `/tmp` mounted as well (skipped when they are
+# equal -- docker rejects a duplicate mount point; all trailing slashes
+# on `$TMPDIR` are stripped before the comparison so `/tmp/` or `/tmp//`
+# does not duplicate it either).
 #
 # And it mounts the klt cache root (issue #5626): the merged `.lib` that a
 # descriptor's LIST-form `liberty` entry produces is written under
@@ -82,8 +91,9 @@
 # so Docker copies the host value verbatim and an unset variable stays unset.
 # The whole environment is deliberately NOT forwarded (it would leak unrelated
 # host state and break reproducibility). Because values are verbatim, a
-# host-path `PLATFORM_DIR` only resolves in the container if it lies under
-# a mounted path ($PWD, $PDK_ROOT, $TMPDIR, or the klt cache root).
+# host-path `PLATFORM_DIR` only resolves in the container if it lies under a
+# mounted path ($PWD, $PDK_ROOT, $TMPDIR, plus /tmp itself when $TMPDIR
+# differs from it -- issue #5878 -- or the klt cache root).
 
 set -euo pipefail
 
@@ -133,7 +143,8 @@ cat >"$WRAPPER" <<WRAPPER_EOF
 # "Docker: extract the binary onto \$PATH" recipe, plus a \$PDK_ROOT mount
 # (falling back to \`klt pdk find\` when \$PDK_ROOT is unset -- issue #1868,
 # see this generator's own header comment for why), a \$TMPDIR mount, and
-# the klt cache root that holds the merged Liberty file a list-form
+# /tmp itself kept mounted whenever \$TMPDIR differs from it (issue #5878),
+# and the klt cache root that holds the merged Liberty file a list-form
 # descriptor's \`liberty\` entry produces (issue #5626).
 #
 # Runs the image by PINNED DIGEST, never by the moving \`:latest\` tag, so this
@@ -164,8 +175,27 @@ elif command -v klt >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
         MOUNTED_PATHS+=("\$RESOLVED_PDK_ROOT")
     fi
 fi
-MOUNTS+=(-v "\${TMPDIR:-/tmp}:\${TMPDIR:-/tmp}")
-MOUNTED_PATHS+=("\${TMPDIR:-/tmp}")
+TMPDIR_MOUNT="\${TMPDIR:-/tmp}"
+MOUNTS+=(-v "\$TMPDIR_MOUNT:\$TMPDIR_MOUNT")
+MOUNTED_PATHS+=("\$TMPDIR_MOUNT")
+# A \$TMPDIR other than /tmp stops /tmp itself being visible inside the
+# container, but callers legitimately pass /tmp-resident paths (issue #5878:
+# with any other TMPDIR exported, an input under /tmp failed with an opaque
+# "[ERROR STA-0340] cannot open" for a file the caller could read on the
+# host). Keep /tmp mounted too unless TMPDIR already resolves to it --
+# docker rejects a duplicate mount point, and all trailing slashes are
+# stripped from the comparison so TMPDIR=/tmp/ or /tmp// does not
+# produce one. /tmp is recorded in MOUNTED_PATHS so the klt cache-root
+# dedupe below also sees it (KLT_CACHE_DIR=/tmp must not become a second
+# -v for it).
+TMPDIR_CMP="\$TMPDIR_MOUNT"
+while [[ "\$TMPDIR_CMP" == */ && "\$TMPDIR_CMP" != / ]]; do
+    TMPDIR_CMP="\${TMPDIR_CMP%/}"
+done
+if [[ "\$TMPDIR_CMP" != "/tmp" ]]; then
+    MOUNTS+=(-v "/tmp:/tmp")
+    MOUNTED_PATHS+=("/tmp")
+fi
 # klt cache root (issue #5626): the merged .lib a list-form \`liberty\`
 # descriptor produces is written under it and embedded as an absolute path
 # in the generated Tcl, so the container must see it. Resolved exactly as

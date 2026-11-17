@@ -148,3 +148,48 @@ def test_wrapper_degrades_when_home_unwritable(tmp_path: Path) -> None:
     argv = _install(tmp_path, {"HOME": "/proc/nonexistent"})
     assert argv
     assert not any(m.startswith("/proc/nonexistent") for m in _mounts(argv))
+
+
+def test_wrapper_mounts_tmp_alongside_other_tmpdir(tmp_path: Path) -> None:
+    argv = _install(tmp_path, {"TMPDIR": str(tmp_path)})
+    mounts = _mounts(argv)
+    assert f"{tmp_path}:{tmp_path}" in mounts
+    assert "/tmp:/tmp" in mounts
+    assert f"HOME={tmp_path}" in argv
+
+
+def test_wrapper_mounts_single_tmp_when_tmpdir_unset(tmp_path: Path) -> None:
+    argv = _install(tmp_path, {})
+    assert _mounts(argv).count("/tmp:/tmp") == 1
+    assert "HOME=/tmp" in argv
+
+
+def test_wrapper_mounts_single_tmp_when_tmpdir_is_tmp(tmp_path: Path) -> None:
+    argv = _install(tmp_path, {"TMPDIR": "/tmp"})
+    assert _mounts(argv).count("/tmp:/tmp") == 1
+
+
+def test_wrapper_trailing_slash_tmpdir_no_duplicate(tmp_path: Path) -> None:
+    argv = _install(tmp_path, {"TMPDIR": "/tmp/"})
+    mounts = _mounts(argv)
+    assert "/tmp/:/tmp/" in mounts
+    assert "/tmp:/tmp" not in mounts
+
+
+def test_wrapper_multi_trailing_slash_tmpdir_no_duplicate(tmp_path: Path) -> None:
+    argv = _install(tmp_path, {"TMPDIR": "/tmp//"})
+    mounts = _mounts(argv)
+    assert "/tmp//:/tmp//" in mounts
+    assert "/tmp:/tmp" not in mounts
+
+
+def test_wrapper_skips_cache_mount_duplicate_of_extra_tmp_mount(
+    tmp_path: Path,
+) -> None:
+    """Issues #5626 + #5878: when $TMPDIR differs from /tmp the wrapper mounts
+    /tmp too, so KLT_CACHE_DIR=/tmp must not become a second, read-only -v for
+    it -- docker run rejects a duplicate mount point and every `openroad`
+    invocation would fail."""
+    argv = _install(tmp_path, {"TMPDIR": str(tmp_path), "KLT_CACHE_DIR": "/tmp"})
+    specs = [m for m in _mounts(argv) if m.startswith("/tmp:")]
+    assert specs == ["/tmp:/tmp"]

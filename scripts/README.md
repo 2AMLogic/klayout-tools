@@ -383,8 +383,8 @@ writes into the mounted `$PWD`/`$TMPDIR` are not root-owned on Linux (issue
 the caller into the container by name (`-e NAME`, issue #3821) so ORFS-style Tcl
 reading `$::env(PLATFORM_DIR)` works; the rest of the environment is not
 forwarded. Values pass verbatim, so a host-path `PLATFORM_DIR` only resolves if
-it lies under a mounted path (`$PWD`, `$PDK_ROOT`, `$TMPDIR`, or the klt
-cache root).
+it lies under a mounted path (`$PWD`, `$PDK_ROOT`, `$TMPDIR`, plus `/tmp` when
+`$TMPDIR` differs from it, or the klt cache root).
 
 The image is **pinned by digest** (`ORFS_IMAGE_DIGEST` near the top of the
 script), not by the moving `:latest` tag: both the `docker pull` and the

@@ -17,13 +17,13 @@ def _under(real: str, root: str) -> bool:
 
 def outside_cwd_note(path: str) -> str:
     """Issue #4191, extended by #5626: the docker wrapper mounts `$PWD`,
-    `$PDK_ROOT`, `$TMPDIR` and the klt cache root, so a readable path
-    outside all of those is the commonest trigger -- say the rule and the
-    fix, not just the symptom. A path under the klt cache root (the merged
-    `.lib` a list-form liberty descriptor produces) gets its own
-    remediation: "run from a common ancestor" is unachievable for a cache
-    path, so point at regenerating the wrapper or relocating `KLT_CACHE_DIR`
-    instead."""
+    `$PDK_ROOT`, `$TMPDIR` (plus `/tmp` when `$TMPDIR` differs, issue #5878)
+    and the klt cache root, so a readable path outside all of those is the
+    commonest trigger -- say the rule and the fix, not just the symptom. A
+    path under the klt cache root (the merged `.lib` a list-form liberty
+    descriptor produces) gets its own remediation: "run from a common
+    ancestor" is unachievable for a cache path, so point at regenerating the
+    wrapper or relocating `KLT_CACHE_DIR` instead."""
     cwd = os.path.realpath(os.getcwd())
     real = os.path.realpath(path)
     if _under(real, cwd):
@@ -40,9 +40,9 @@ def outside_cwd_note(path: str) -> str:
         )
     return (
         f"; '{path}' is outside the invocation directory '{cwd}', and the "
-        "container wrapper mounts only $PWD, $PDK_ROOT, $TMPDIR and the klt "
-        "cache root -- run from a common ancestor of the request and its "
-        "inputs"
+        "container wrapper mounts only $PWD, $PDK_ROOT, $TMPDIR (plus /tmp "
+        "when $TMPDIR differs) and the klt cache root -- run from a common "
+        "ancestor of the request and its inputs"
     )
 
 

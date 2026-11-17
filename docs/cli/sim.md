@@ -1083,7 +1083,7 @@ field and is tracked with the `analysis_steps[]` equivalent in
 | `batch.region` | string | AWS region passed to both the `aws` CLI and `launch`. Defaults to `$KLT_BATCH_REGION`, else the fleet config's `BATCH_REGION`, else the `aws` CLI's own resolution. |
 | `batch.profile` | string | `aws` CLI **profile name** the submit path runs under — a name, never a credential; the key it resolves to lives in the operator's own AWS config. Defaults to `$KLT_BATCH_PROFILE`, else the fleet config's `BATCH_SUBMIT_PROFILE`, else `"batch-runner-submit"`. |
 | `batch.poll_interval_s` | number | How often `status.json` is re-read. Defaults to `30`. |
-| `batch.poll_timeout_s` | number | Wall-clock budget waiting for a terminal `status.json`. Defaults to the fully-serial worst case (`options.timeout_s × corner count + 120`) plus 1800s of Spot-acquisition/boot slack. On overrun every unit is reported with a `batch_poll_timeout` diagnostic (the job may still be running on the fleet — see "Failure classification" below). |
+| `batch.poll_timeout_s` | number | Wall-clock budget waiting for a terminal `status.json`. Defaults to the fully-serial worst case (`options.timeout_s × corner count + 120`) plus 1800s of Spot-acquisition/boot slack -- or, when `batch.job_timeout_s` states the whole-job wall bound ([#5544](https://github.com/2AMLogic/klayout-tools/issues/5544)), to that stated bound plus the same 1800s. On overrun every unit is reported with a `batch_poll_timeout` diagnostic (the job may still be running on the fleet — see "Failure classification" below). |
 | `batch.interrupted_grace_s` | number ≥ 0 | How long a job may stay **continuously** `interrupted` (Spot-reclaimed, waiting for 2am's scheduled `reconcile` to re-launch it) before polling stops early ([#2992](https://github.com/2AMLogic/klayout-tools/issues/2992)). Defaults to `1800`; `0` disables the fail-fast, so an interrupted job is waited on until `poll_timeout_s`. Seeing `running` again resets the clock; an unreadable `status.json` neither starts nor resets it. On expiry every unit is reported with a `batch_job_interrupted` diagnostic (not `batch_poll_timeout`), and `environment.remote` carries `job_id`, `state: "interrupted"` and `interrupted_s`. The job may still be recoverable on the fleet — the client does not re-launch it (that would double-spend the shared fleet budget). The diagnostic `message` names the recovery command (re-run with the same `-o` and `--resume`; for a shard map, `--attach <batch-shards.json> --collect-partial`, then `--resume`); the run exits 4 when every unit ended this way. A grace longer than `poll_timeout_s` never fires. A negative, non-finite, or non-numeric value is rejected before any S3 write. |
 | `batch.runner_version_check` | `"enforce"` \| `"warn"` | Runner/client `klt` version-skew policy (default `"enforce"`), applied both to the pre-launch check against the AMI manifest's published runner version and to the runner-side preflight; see "Runner/client `klt` version skew" below. Any other value is rejected before any S3 write. |
 | `batch.capacity_wait_s` | number ≥ 0 | Wall-clock budget, per `launch` call, for waiting out a Spot **capacity refusal** or a fleet **concurrency-cap refusal** ([#2721](https://github.com/2AMLogic/klayout-tools/issues/2721)). Per `launch` call for a single job; one run-wide deadline for a sharded run ([#4018](https://github.com/2AMLogic/klayout-tools/issues/4018)). Defaults to `0`: one launch attempt, exactly as before. See "Capacity refusal and `batch_no_capacity`" below. A negative, non-finite, or non-numeric value is rejected before any S3 write. |
@@ -1091,6 +1091,7 @@ field and is tracked with the `analysis_steps[]` equivalent in
 | `batch.job_ceiling_check` | `"warn"` \| `"enforce"` \| `"split"` | What the one-job pre-submit check does when the job's conservative bound exceeds `max_job_seconds`: `"warn"` (default) submits and warns, `"enforce"` refuses before any S3 write with `error.code: "batch_job_ceiling_exceeded"`, `"split"` ([#3446](https://github.com/2AMLogic/klayout-tools/issues/3446)) submits the request as the fewest balanced jobs that each fit (each holds at most `max_units_per_job = floor((max_job_seconds - 120) / options.timeout_s)` units). A split reports `environment.remote` as a `fleet[]` array (one block per job, even with `remote.hosts: 1`) plus the top-level `job_ids` / `runner_compatibility` roll-ups, so per-job fields must be read from `fleet[]` -- see "Fleet sharding" below. Any other value is rejected before any S3 write. |
 | `batch.max_units_per_job` | integer ≥ 1 | Opt-in cap on the units of one job ([#3446](https://github.com/2AMLogic/klayout-tools/issues/3446)); `--max-units-per-job` overrides it. With `remote.hosts: 1` the request is split into `ceil(units / N)` balanced jobs, even when it would have fit one -- and that split reports `environment.remote.fleet[]` (one block per job) with only the `job_ids` / `runner_compatibility` roll-ups at the top level, so per-job fields must be read from `fleet[]` (see "Fleet sharding" below). The ceiling bound is a fully-serial upper bound, not a runtime estimate, so an explicit cap is honored even when `timeout_s x shard units + 120` exceeds `max_job_seconds` ([#4982](https://github.com/2AMLogic/klayout-tools/issues/4982)); a stderr warning states the bound is a serial upper bound, and the harness still kills a job that actually runs past the ceiling. A request that should be sized automatically should omit the cap and use `job_ceiling_check: "split"` (largest shard `floor((max_job_seconds - 120) / options.timeout_s)`). Rejected before any S3 write with `error.code: "batch_max_units_per_job_invalid"` when not a positive integer, or when combined with `job_ceiling_check: "enforce"`. |
 | `batch.max_concurrent_jobs` | integer ≥ 1 | Opt-in bound on the shard jobs in flight at once for a sharded run (`remote.hosts > 1`, or a split) ([#3914](https://github.com/2AMLogic/klayout-tools/issues/3914)); `--max-concurrent-jobs` overrides it. Unset submits every shard at once, as before. With a cap of K, at most K jobs sit between submit and collected; the remaining shards start as earlier ones finish, and the merge order, `fleet[]`, `batch-shards.json` and `--resume` are unchanged. The effective value is echoed as `environment.remote.max_concurrent_jobs` only when set. Use it to stay under the fleet's instance cap (`BATCH_MAX_CONCURRENT_INSTANCES`) instead of letting refused shards come back as `lost_shard`; it composes with `capacity_wait_s` (a retry of a refused launch, drawing on the run-wide budget) and with `--resume`, which re-submits only the `lost_shard` / failed units. Rejected before any S3 write with `error.code: "batch_max_concurrent_jobs_invalid"` when not a positive integer. |
+| `batch.job_timeout_s` | number > 0 | The caller's stated **whole-job wall bound** for one batch job ([#5544](https://github.com/2AMLogic/klayout-tools/issues/5544)). A job's units run **concurrently** on the job instance, so covering per-unit contention means raising `options.timeout_s` -- and the serial bound formula (`options.timeout_s x units + 120`) then multiplies that inflated number by the unit count again. This key breaks that coupling: it replaces the serial bound everywhere it is used -- `job.json`'s `timeout_seconds` (the harness still clamps *down* to the fleet's ceiling, never up), the pre-submit ceiling assessment (`environment.remote.job_ceiling` then reports `basis: "caller_job_timeout"`; every field is defined by the stated bound -- see the field table in "Three budgets, and the fleet's whole-job ceiling"), and the default `batch.poll_timeout_s`. `options.timeout_s` keeps its single meaning, the per-unit engine timeout, and every shard of a split run carries the same stated bound. A stated bound that exceeds `max_job_seconds` behaves like any over-ceiling request (warn, or refuse under `"enforce"` / `"split"` -- splitting cannot help, because every shard would carry the same over-ceiling bound), and the warning names `batch.job_timeout_s` as the value to lower. **The trade-off is the bound's honesty**: a stated bound that turns out too low kills the whole job at that age, and units that had finished inside it are lost with it, exactly like a fleet-ceiling kill -- state the wall you actually want the job killed at. Rejected before any S3 write when not a positive, finite number (a `bool` is refused). Unset, everything is sized from the serial bound exactly as before. |
 
 ### Asynchronous submit and status (`--submit-only`, `--job-status`, [#3073](https://github.com/2AMLogic/klayout-tools/issues/3073))
 
@@ -1826,6 +1827,53 @@ the value 2am's harness falls back to when the instance's `MaxJobSeconds`
 tag is absent). `warning` is present only when `exceeds_ceiling` is `true`.
 `recommended_hosts` is `null` when no `hosts` value fits.
 
+**Stating the bound: `batch.job_timeout_s`**
+([#5544](https://github.com/2AMLogic/klayout-tools/issues/5544)). The serial
+bound is derived from the request, but a job's units run concurrently on the
+job instance, so a caller covering per-unit contention has to raise
+`options.timeout_s` -- and the serial formula multiplies that inflated
+number by the unit count again. Set `batch.job_timeout_s` to state one job's
+wall bound directly; `options.timeout_s` keeps its single meaning, the
+per-unit engine timeout. The stated bound replaces the serial one everywhere
+it is used: `job.json`'s `timeout_seconds` (its ceiling; the harness still
+clamps down, never up), the pre-submit check, and the default
+`batch.poll_timeout_s` (the stated bound plus the same 1800 s slack). Every
+shard of a split run carries the same stated bound.
+
+The assessment is then reported with `basis: "caller_job_timeout"` and
+every field defined by the stated bound, which is unit-count-independent:
+
+| Field | Value when `batch.job_timeout_s` is set |
+| --- | --- |
+| `basis` | `"caller_job_timeout"` |
+| `job_bound_s` | the stated `batch.job_timeout_s` |
+| `per_unit_timeout_s` | unchanged: `options.timeout_s`, the per-unit engine timeout |
+| `overhead_s` | `0` (the stated bound includes whatever slack the caller chose) |
+| `unit_count`, `max_job_seconds`, `max_job_seconds_source`, `check`, `exceeds_ceiling` | unchanged in meaning; `exceeds_ceiling` is `job_bound_s > max_job_seconds` (equal passes) |
+| `max_units_per_job` | `unit_count` when the bound fits, `0` when it exceeds -- every shard carries the same stated bound, so the largest fitting shard is the whole run |
+| `recommended_hosts` | `1` when the bound fits, `null` when it exceeds (no `hosts` value changes a per-job bound) |
+| `warning` | present only when `exceeds_ceiling`; names `batch.job_timeout_s` as the value to lower -- never more hosts, never a lower `options.timeout_s` |
+| `split`, `effective_hosts` | unchanged: added whenever a split mode is active |
+
+Behavior under the check modes follows the same rules as the serial bound,
+with two consequences worth spelling out. When the stated bound fits, the
+request is one job with no warning under `"warn"`, `"enforce"` and `"split"`
+alike, and an explicit `batch.max_units_per_job` still balances it into
+`ceil(units / N)` shards -- each carrying the stated timeout, and no
+over-serial-bound warning (that warning's "lower `options.timeout_s`" advice
+is wrong once the caller stated a bound). When the stated bound exceeds the
+ceiling, `"warn"` submits with a warning, while `"enforce"` and `"split"`
+both refuse with `batch_job_ceiling_exceeded` before any S3 write:
+splitting cannot help, because every shard would carry the same
+over-ceiling bound. A cap combined with `"enforce"` is still rejected with
+`batch_max_units_per_job_invalid`, as always.
+
+**The trade-off is the bound's honesty.** A stated bound that turns out too
+low kills the whole job at that age, and units that had already finished are
+lost with it, exactly like a fleet-ceiling kill (the harness never writes an
+incremental report). State the wall you actually want the job killed at --
+the point of the key is an honest kill age, not a bigger one.
+
 **The mitigation is the existing shard path.** Worked example: the report
 in #2833 had 63 corners at the default `options.timeout_s: 120`, so the bound
 is `120 × 63 + 120 = 7680 s`, above `3600 s`. At most
@@ -1861,10 +1909,16 @@ with the same report shape as `remote.hosts: <that many>`, and prints
 3 jobs of 21 units. A request that already fits stays one job unless a smaller
 cap is given. Splitting is never silent: each extra job is one more launch
 against the fleet's shared concurrency cap, which is why it is opt-in and
-the default stays `"warn"`. A cap that would leave a job over the ceiling is
-rejected up front (`batch_max_units_per_job_invalid`), and when even one unit
-exceeds the ceiling the "lower `options.timeout_s`" refusal applies
-(`batch_job_ceiling_exceeded`), because splitting cannot help. When a split
+the default stays `"warn"`. An explicit cap is honored even when it leaves
+jobs over the serial bound, with the stderr warning above
+([#4982](https://github.com/2AMLogic/klayout-tools/issues/4982));
+`batch_max_units_per_job_invalid` is raised only by the cap validator
+itself -- when the cap is not a positive integer, or when it is combined
+with `job_ceiling_check: "enforce"`. When even one unit's serial bound
+exceeds the ceiling -- or a stated `batch.job_timeout_s`
+([#5544](https://github.com/2AMLogic/klayout-tools/issues/5544)) does -- the
+"lower it" refusal applies (`batch_job_ceiling_exceeded`), because splitting
+cannot help. When a split
 mode is active, `environment.remote.job_ceiling` gains `split` (boolean) and
 `effective_hosts`; the report otherwise carries the `fleet[]` array -- and
 the top-level `job_ids` / `runner_compatibility` roll-ups -- of a
@@ -2298,7 +2352,7 @@ established. `runner_compatibility` itself stays a major.minor gate.
 - Limit: a `0.7.1.devN` runner built before a feature landed looks the same as
   one built after, so it counts as supporting it.
 
-**Mandatory features (`transfer`, [#2924](https://github.com/2AMLogic/klayout-tools/issues/2924); `stimulus`, [#2977](https://github.com/2AMLogic/klayout-tools/issues/2977); `dual_injection`, [#3161](https://github.com/2AMLogic/klayout-tools/issues/3161); `complex_vectors`, [#3337](https://github.com/2AMLogic/klayout-tools/issues/3337); `twoport`, [#3338](https://github.com/2AMLogic/klayout-tools/issues/3338); `snm`, [#3895](https://github.com/2AMLogic/klayout-tools/issues/3895); `search`, [#4121](https://github.com/2AMLogic/klayout-tools/issues/4121); `eye`, [#4292](https://github.com/2AMLogic/klayout-tools/issues/4292); `step_resolution`, [#4773](https://github.com/2AMLogic/klayout-tools/issues/4773); `settled`, [#4780](https://github.com/2AMLogic/klayout-tools/issues/4780); `stress`, [#4592](https://github.com/2AMLogic/klayout-tools/issues/4592)/[#4858](https://github.com/2AMLogic/klayout-tools/issues/4858)).**
+**Mandatory features (`transfer`, [#2924](https://github.com/2AMLogic/klayout-tools/issues/2924); `stimulus`, [#2977](https://github.com/2AMLogic/klayout-tools/issues/2977); `dual_injection`, [#3161](https://github.com/2AMLogic/klayout-tools/issues/3161); `complex_vectors`, [#3337](https://github.com/2AMLogic/klayout-tools/issues/3337); `twoport`, [#3338](https://github.com/2AMLogic/klayout-tools/issues/3338); `snm`, [#3895](https://github.com/2AMLogic/klayout-tools/issues/3895); `search`, [#4121](https://github.com/2AMLogic/klayout-tools/issues/4121); `eye`, [#4292](https://github.com/2AMLogic/klayout-tools/issues/4292); `step_resolution`, [#4773](https://github.com/2AMLogic/klayout-tools/issues/4773); `settled`, [#4780](https://github.com/2AMLogic/klayout-tools/issues/4780); `stress`, [#4592](https://github.com/2AMLogic/klayout-tools/issues/4592)/[#4858](https://github.com/2AMLogic/klayout-tools/issues/4858); `slope_band`, [#5518](https://github.com/2AMLogic/klayout-tools/issues/5518)).**
 A runner that predates `measurements[].transfer` would drop the metric (and one
 that predates `stimulus` would simulate with the digital control lines
 undriven), so
@@ -4836,8 +4890,11 @@ Worked `op` example — the case that had no expression at all before:
 - **An `expr` name must be unique** across the whole `measurements[]` list
   (compared case-insensitively, per the previous bullet): a second `let
   <name>` overwrites the first, so both response entries would report the same
-  value. Duplicate names among `spice`-only entries are left to ngspice
-  exactly as before.
+  value. Byte-identical duplicate names are refused for every measurement
+  form ([#6289](https://github.com/2AMLogic/klayout-tools/issues/6289)):
+  before that issue a request with two same-named `spice` cards failed
+  outside the JSON error envelope with an unhandled `ValueError` (exit 1,
+  traceback) instead of an application error.
 - **Single line only.** The expression is spliced verbatim into one `let`
   line; an embedded newline would become a separate control command.
 - **No bare `<` / `>`.** In ngspice's control language these are I/O
@@ -5440,6 +5497,105 @@ measurement, with no out-of-tool waveform post-processing:
   wrappers or cell templates. A bounded bisection over a source value is the
   separate [`measurements[].search`](#bisection--threshold-search-measurementssearch)
   form.
+
+## Local-slope-band run (`measurements[].slope_band`)
+
+Issue [#5518](https://github.com/2AMLogic/klayout-tools/issues/5518). A spec
+row graded as "the contiguous range around an operating point over which the
+local slope `dy/dx` of a DC transfer curve stays inside `[lo, hi]`" — usable
+range, compliance range, linear region — is one graded scalar, so `limits`,
+`plausible_range`, `spec_row`, `worst_case`, `monte_carlo` statistics and `klt
+yield` consume it like any other measurement, with no out-of-tool waveform
+post-processing:
+
+```json
+{"analysis": {"kind": "dc", "args": "Vin 0 1 0.0025"},
+ "measurements": [
+   {"name": "usable_range",
+    "slope_band": {"y": "v(out)", "x": "v(in)", "anchor": 0.5,
+                   "min_slope": 1.0, "max_slope": 2.5, "report": "y_span"},
+    "unit": "V", "limits": {"min": 0.5}}]}
+```
+
+- **Form.** `slope_band` is an object with **all six** of:
+
+  | Key | Meaning |
+  |---|---|
+  | `y` | Single-ended `v(node)` selector for the swept quantity. |
+  | `x` | Single-ended `v(node)` selector for the sweep variable. |
+  | `anchor` | A finite **`x` value**. The run must contain the sweep point nearest it. |
+  | `min_slope` / `max_slope` | The closed band `dy/dx` must stay inside. `min_slope > max_slope` is refused. |
+  | `report` | Which scalar becomes `value`: `y_span`, `y_lo`, `y_hi`, `x_span`, `x_lo`, `x_hi`. |
+
+  None has a default — each changes which run is found or which scalar is
+  graded. Unknown keys, missing keys, non-finite numbers, a bad `report` and
+  non-selector `x`/`y` are refused up front (exit 1), as is declaring
+  `slope_band` beside any other value form on the same entry. Measurement names
+  must be unique. `engine: "xyce"` is refused, and so is `analysis_steps[]`.
+- **Analysis.** Requires `analysis.kind: "dc"`; the sweep axis is `x`. Any other
+  kind is refused up front.
+- **Method.**
+  - The slope at each sweep point is the **central difference over the solver's
+    own points** — `(y[i+1] - y[i-1]) / (x[i+1] - x[i-1])` — one-sided at the
+    first and last point. No smoothing, no other estimator.
+  - `x` must be strictly monotonic. A descending sweep is reduced to the
+    identical result as the equivalent ascending one (reversing flips the sign
+    of both differences, so every slope is unchanged).
+  - The **anchor point** is the sweep point whose `x` is nearest `anchor`.
+  - The **run** is the largest contiguous set of sweep points containing the
+    anchor point whose slope is inside the closed band `[min_slope,
+    max_slope]`. A second in-band region that does not contain the anchor is
+    ignored.
+  - **Edges are the outermost in-band sample points — there is no
+    interpolation**, so the reported span never exceeds the true one by
+    construction. A finer sweep, not a second convention, buys resolution.
+  - `*_lo` / `*_hi` are the smaller / larger of the two edge values, and
+    `*_span = *_hi - *_lo`.
+- **Value.** `value` is the single scalar `report` names, graded against
+  `limits` like any other scalar (`status`, `margin`). An additive `slope_band`
+  sibling echoes the six request keys and adds all six scalars plus:
+
+  | Field | Meaning |
+  |---|---|
+  | `edge_lo_at` / `edge_hi_at` | `"band"` (the slope left the band there) or `"sweep_end"` (the run reached the end of the sweep, so the true range may extend past it). They describe the run's **low-`x`** and **high-`x`** end — the sweep axis, which is ordered unambiguously whatever `y` does. |
+  | `points_in_run` | How many sweep points the run spans (`1` is a legitimate zero-span run). |
+
+  The vectors are dumped to a small corner-local rawfile (`slope_band_<k>.raw`)
+  after the analysis, independent of `options.waveforms`: one rawfile per unique
+  `x`/`y` pair, and one run search per unique `(x, y, anchor, min_slope,
+  max_slope)` on it — so three entries differing only by `report` cost one
+  computation.
+- **Errors.** A failure is `status: "error"`, `value: null`, and a
+  `code: "measurement"` diagnostic whose message starts with a reason token —
+  never a silent substitute or a pass:
+
+  | Token | Meaning |
+  |---|---|
+  | `[slope_band_vector_missing]` | an `x`/`y` vector did not resolve (no rawfile written; check node names and `options.save_mode`) |
+  | `[slope_band_raw_invalid]` | the rawfile could not be read or has the wrong shape |
+  | `[slope_band_invalid_data]` | mismatched lengths, fewer than three points, or a non-finite sample |
+  | `[slope_band_non_monotonic]` | `x` is not strictly monotonic (a repeated or non-ordered sweep value) |
+  | `[slope_band_anchor_outside_sweep]` | `anchor` lies outside the swept `x` range |
+  | `[slope_band_anchor_out_of_band]` | the anchor point's **own** slope is outside the band |
+
+  The last one is deliberately an error rather than a run of span `0`: a zero
+  span would grade against `limits` as a real (and usually failing) number,
+  hiding the fact that the curve never satisfied the rule at the point the row
+  is defined at. Under `monte_carlo`, such a sample is counted in the
+  statistics block's `errored` — `n + errored + inconclusive` always equals the
+  number of samples drawn — so an error never silently shrinks the denominator
+  a yield is computed over.
+- **Backends.** `local`, `local-parallel`, `remote` and `batch` all run
+  `slope_band`; the worker computes it. It is a mandatory runner feature
+  (`slope_band`, first `klt` release segment `0.9.3`): see "Mandatory features"
+  under "Runner/client `klt` version skew". An older or unreadable runner
+  refuses the request instead of omitting the measurement.
+- **Out of scope.** `tran` (or any non-`dc`) analysis — every named row shape is
+  a DC transfer curve, and a time axis needs a different anchor and
+  monotonicity story. Also: an anchor given as a `y` value (ambiguous when `y`
+  is not monotonic), edge interpolation or smoothing, any other slope
+  estimator, differential or expression selectors for `x`/`y`,
+  `analysis_steps[]` integration, and Xyce support.
 
 ## Eye / phase-fold measurement (`measurements[].eye`)
 
@@ -6847,6 +7003,33 @@ them with the job
   `osdi_preload[].sha256` and `corner_section_libs[].sha256` hash those same
   staged files. The array is present only when the option staged inputs for
   an off-host backend.
+
+### Pinning a PDK build on batch
+
+To make a `batch` run execute a specific PDK build rather than whatever the
+runner image baked, set `options.stage_model_inputs: true` together with
+`options.pdk_revision` (your own revision/stamp string, echoed as
+`environment.pdk_revision_asserted`). The runner then executes the files your
+client uploaded, and the report lets you verify that:
+
+- Compare `environment.staged_model_inputs[].sha256` (what was uploaded) with
+  `environment.remote.runner_model_inputs[].sha256` (what the runner reports
+  having received); `source_sha256` is the digest of your original,
+  pre-rewrite bytes.
+- Do **not** use `environment.remote.runner_models_lib_sha256` against a
+  pinned install digest as the key. Under staging `models_lib_comparison` is
+  deliberately `not_comparable` with reason `models_staged`, because the
+  runner's model card is then your staged copy, not the image's.
+
+To judge *before* a run whether an image carries the PDK build you need
+without staging, read the AMI manifest entry (`data/remote-sim-ami-manifest.json`):
+for sky130A/gf180mcu images built after
+[#6156](https://github.com/2AMLogic/klayout-tools/issues/6156), the optional
+`open_pdks_commit` is the 40-hex open_pdks commit the build pinned
+(`build-remote-sim-ami.sh`'s `PDK_VERSION`), alongside the date-label
+`pdk_snapshot`. It is absent on historical entries (unknown, never guessed)
+and on sg13g2 images, which have no single commit. It is publication
+metadata, not proof of the bytes a job executes; the digests above are.
 
 ## OSDI (Verilog-A) model preload
 
@@ -9337,7 +9520,7 @@ the *response* echoes back.
 | `monte_carlo.window_scope` | string          | `"pooled"` (default) or `"per_corner"`: which `mean ± k*stddev` window gates status. `"per_corner"` fails a measurement if any `by_corner[]` window fails and adds `failing_corners` to its `monte_carlo` block; see "Pooled vs. per corner". |
 | `analysis`               | object            | `kind` (e.g. `"op"`, `"dc"`, `"ac"`, `"tran"`) and `args`, the engine-syntax analysis-card arguments. One analysis per corner. `"op"` is a valid `kind`, but see `measurements[]` below — it cannot be paired with a `.meas op` card; measure an operating-point quantity with `measurements[].expr` instead. Required unless the request declares `analysis_steps` instead; declaring both is an application error (exit 1). |
 | `analysis_steps[]`       | array\<object\>   | Issue #2482. Additive alternative to `analysis`: an ordered, non-empty sequence of named solves run inside each corner's one deck — each step `{name, analysis: {kind, args}, alter?, reset?, measurements?}` (`alter` values are a finite number, or `{"pwl": [t0, v0, ...]}` for a `pwl`-declared source). With it, the top-level `measurements[]` are **derived** `expr`s over `<step>.<measurement>` results. ngspice only (refused for `engine: "xyce"`); refuses `options.waveforms`/`--plot`. See "Several solves per corner (`analysis_steps[]`)" above for the full rules. |
-| `measurements[]`         | array\<object\>   | `name` (stable response key) plus **exactly one** of `spice` (a verbatim `.meas` card), `expr` (issue #2533 — a single-line ngspice expression evaluated after the analysis inside `klt sim`'s own `.control` block; see "Measurements that are not `.meas` cards" above), `crossings` (issue #2868 — `{signal, level, edge?, from?, to?, max?}`, a threshold-crossing time series, `tran` only; see "Threshold-crossing time series" above), `cycle_mean` (issue #2947 — `{signal, align, level, cycles, edge?, from?}`, a time-weighted mean over whole reference cycles, `tran` only; see "Cycle-aligned mean" above), `energy` (issue #3033 — `{source, voltage, from?, to?}`, a source's net/gross/recovered energy and charge over a transient window, `tran` only; see "Source energy over a transient window" above), `stress` (issue #4592 — `{a, b?, from?, to?}`, the worst `|v(a)-v(b)|` over a transient window, `tran` only; see "Worst voltage stress over a settled window" above), or `transfer` (issue #2923 — `{num, den, metric}`, an AC return-ratio metric, `ac` and local backends only; see "AC return-ratio metrics" above), or `snm` (issue #3895 — `{x, y1, y2}`, a butterfly static noise margin of two voltage-transfer curves, `dc` only; see "Butterfly static noise margin" above), plus optional `unit`, `optional` (issue #2925 — boolean, default `false`; `true` grades a value-less result `status: "absent"` instead of `error`, `spice`/`expr` on the scalar `analysis` only — see "Optional measurements" above), `limits` (`min`/`max`, either optional), `k_sigma` (per-measurement override of `monte_carlo.k_sigma`), and `plausible_range` (issue #2493 — `min`/`max`, either optional but at least one required; per-measurement plausibility bound, unscoped by `unit`; overrides `options.node_voltage_bounds` when both apply), and `spec_row` (issue #3778 — non-empty string, the spec row this measurement grades, echoed on the rollup entry only when declared; `klt signoff` item 5 derives a citation's row coverage from it, see `docs/cli/signoff.md` "Derived coverage". Same meaning as `spec_row` in `klt pex` delta rows). Optional `on_unreached` (issue #3108 — `"error"` (default) or `"null"`, `spice` only; see "Unreached `.meas` targets" below). No `limits` -> reported, never fails; no `plausible_range` (and no applicable `options.node_voltage_bounds`) -> plausibility check never runs, exactly as before this issue. Declaring both `spice` and `expr`, or neither, is an application error (exit 1). `spice`'s declared analysis type must be one ngspice's own `.MEASURE` implements (`dc`/`ac`/`tran`/`sp`) — there is no `.MEASURE OP`; a `.meas op` card is rejected up front (`SimError`), regardless of the request's own `analysis.kind`. `expr` must reduce to a single real scalar, must be one line, must have a name matching `[A-Za-z_][A-Za-z0-9_]*` unique across `measurements[]`, and is refused for `engine: "xyce"`. An entry may also be a **template**: write `{case}` where a copy's own names go and declare the scopes under `options.measurement_cases`, and `klt sim` expands the entry into one ordinary measurement per case before any of the rules above run — see "Measurement templates over a case list" above. |
+| `measurements[]`         | array\<object\>   | `name` (stable response key) plus **exactly one** of `spice` (a verbatim `.meas` card), `expr` (issue #2533 — a single-line ngspice expression evaluated after the analysis inside `klt sim`'s own `.control` block; see "Measurements that are not `.meas` cards" above), `crossings` (issue #2868 — `{signal, level, edge?, from?, to?, max?}`, a threshold-crossing time series, `tran` only; see "Threshold-crossing time series" above), `cycle_mean` (issue #2947 — `{signal, align, level, cycles, edge?, from?}`, a time-weighted mean over whole reference cycles, `tran` only; see "Cycle-aligned mean" above), `energy` (issue #3033 — `{source, voltage, from?, to?}`, a source's net/gross/recovered energy and charge over a transient window, `tran` only; see "Source energy over a transient window" above), `stress` (issue #4592 — `{a, b?, from?, to?}`, the worst `|v(a)-v(b)|` over a transient window, `tran` only; see "Worst voltage stress over a settled window" above), or `transfer` (issue #2923 — `{num, den, metric}`, an AC return-ratio metric, `ac` and local backends only; see "AC return-ratio metrics" above), or `snm` (issue #3895 — `{x, y1, y2}`, a butterfly static noise margin of two voltage-transfer curves, `dc` only; see "Butterfly static noise margin" above), or `slope_band` (issue #5518 — `{y, x, anchor, min_slope, max_slope, report}`, one scalar of the largest contiguous run around `anchor` over which `dy/dx` stays in `[min_slope, max_slope]`, `dc` only; see "Local-slope-band run" above), plus optional `unit`, `optional` (issue #2925 — boolean, default `false`; `true` grades a value-less result `status: "absent"` instead of `error`, `spice`/`expr` on the scalar `analysis` only — see "Optional measurements" above), `limits` (`min`/`max`, either optional), `k_sigma` (per-measurement override of `monte_carlo.k_sigma`), and `plausible_range` (issue #2493 — `min`/`max`, either optional but at least one required; per-measurement plausibility bound, unscoped by `unit`; overrides `options.node_voltage_bounds` when both apply), and `spec_row` (issue #3778 — non-empty string, the spec row this measurement grades, echoed on the rollup entry only when declared; `klt signoff` item 5 derives a citation's row coverage from it, see `docs/cli/signoff.md` "Derived coverage". Same meaning as `spec_row` in `klt pex` delta rows). Optional `on_unreached` (issue #3108 — `"error"` (default) or `"null"`, `spice` only; see "Unreached `.meas` targets" below). No `limits` -> reported, never fails; no `plausible_range` (and no applicable `options.node_voltage_bounds`) -> plausibility check never runs, exactly as before this issue. Declaring both `spice` and `expr`, or neither, is an application error (exit 1). `spice`'s declared analysis type must be one ngspice's own `.MEASURE` implements (`dc`/`ac`/`tran`/`sp`) — there is no `.MEASURE OP`; a `.meas op` card is rejected up front (`SimError`), regardless of the request's own `analysis.kind`. `expr` must reduce to a single real scalar, must be one line, must have a name matching `[A-Za-z_][A-Za-z0-9_]*` unique across `measurements[]`, and is refused for `engine: "xyce"`. An entry may also be a **template**: write `{case}` where a copy's own names go and declare the scopes under `options.measurement_cases`, and `klt sim` expands the entry into one ordinary measurement per case before any of the rules above run — see "Measurement templates over a case list" above. |
 | `options.node_voltage_bounds` | object       | Issue #2493. Run-wide plausibility default (`min`/`max`, either optional but at least one required) — see "Plausibility bounds" above. **Voltage-scoped**: only auto-applies to a measurement declaring `unit: "V"` that has no own `plausible_range`. Omit for no default (today's behaviour, unchanged). |
 | `options.timeout_s`      | number            | Per-corner wall-clock budget. Defaults to `120`. Exceeding it kills the process and yields an `error`-status corner.                                                    |
 | `options.keep_artifacts` | boolean           | Retain per-corner logs/rawfiles on disk under `--outdir` (or its default) and reference them from the response. Defaults to `false`.                                   |
