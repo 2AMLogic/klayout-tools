@@ -979,13 +979,20 @@ jobs:
     runs-on: ubuntu-24.04
     # Explicit bound (issue #1009) so a stuck runner or hung step fails
     # outright instead of silently riding the platform default of 360
-    # minutes. A real cold-cache run (Yosys/Icarus Verilog/Verilator all
-    # built from source on a cache miss, not the ~2-3 minute cache-hit path
-    # this job normally takes) measured 23m26s-24m28s across the matrix on
-    # run 31452136100 (2026-08-11, triggered by a cache-key change in #689):
-    # Yosys ~14.5min, Verilator ~6min, Icarus ~1m45s. 45 minutes leaves
-    # ~1.9x margin over that measurement for runner variance.
-    timeout-minutes: 45
+    # minutes. Sized 2026-11-17 (issue #6061) from fresh measurements:
+    # warm-cache pytest alone ran 18.7-35.2 min across the 25 legs of 5
+    # recent main runs (median ~25 min), and a cold-cache run (Yosys/Icarus
+    # Verilog/Verilator all built from source on a cache miss, not the
+    # ~2-3 minute cache-hit path this job normally takes) spent ~26 min of
+    # setup before pytest even started (run 44079621959, PR #6103,
+    # 2026-11-16 — a cold cache hits ordinary PRs too, not only ones that
+    # bust installer cache keys; run 43983075799 / PR #6000 showed the same
+    # 19-26 min cold setup). Worst observed cold case ~26 min setup + ~35
+    # min pytest overflowed the old 45-minute cap, cancelling the slowest
+    # legs with zero test failures. 90 minutes leaves ~1.4x margin over
+    # that worst case for runner variance while still bounding a hang at
+    # well under the 360-minute platform default.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -1033,7 +1040,7 @@ jobs:
         # failed -- confirmed on main and PR #1194 (multiple ~45min hangs on
         # this exact step, 2026-08-19). 5 minutes is generous for a normal
         # `apt-get update && apt-get install` of one package, while still
-        # failing fast relative to the 45-minute job budget.
+        # failing fast well inside the job budget.
         #
         # The timeout alone only converts the stall into a *red check*
         # though (issue #1219): on 2026-08-19 the runner-local
@@ -1938,9 +1945,9 @@ jobs:
     # parallelised. That makes klayout-tools the one repo where the work
     # itself has to shrink, and so the one repo where a compute regression is
     # worth gating on. Before this job nothing did: the per-job
-    # `timeout-minutes` above are hard ceilings (the `test` matrix allows 45
-    # minutes for a 3-minute job), so a leg could quietly triple and still be
-    # green. See docs/guides/ci-wall-clock-budget.md.
+    # `timeout-minutes` above are hard ceilings (the `test` matrix allows 90
+    # minutes for a job whose median is ~25), so a leg could quietly triple
+    # and still be green. See docs/guides/ci-wall-clock-budget.md.
     #
     # `needs:` every measured job so this runs last and sees their completed
     # timings; `if: always()` so a red run still gets its breakdown (a
