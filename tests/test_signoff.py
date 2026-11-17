@@ -7448,7 +7448,7 @@ def test_command_evidence_launch_failure_renders_command_failed(monkeypatch):
     assert item_3["citation"] is None
 
 
-def test_command_evidence_timeout_renders_command_failed(monkeypatch):
+def test_command_evidence_timeout_renders_command_timeout(monkeypatch):
     def fake_run(command, **kwargs):
         raise subprocess.TimeoutExpired(cmd=command, timeout=kwargs.get("timeout"))
 
@@ -7458,7 +7458,7 @@ def test_command_evidence_timeout_renders_command_failed(monkeypatch):
 
     item_3 = next(item for item in result["items"] if item["id"] == 3)
     assert item_3["status"] == "unmet"
-    assert item_3["reason"] == "command_failed"
+    assert item_3["reason"] == "command_timeout"
     assert item_3["citation"] is None
 
 
@@ -13936,7 +13936,7 @@ def test_check_refuses_a_missing_or_unparseable_committed_report(tmp_path):
     """Both refusals come from the shared loader -- a clean message, never a
     traceback."""
     manifest = _manifest()
-    with pytest.raises(SignoffError, match="committed report not found"):
+    with pytest.raises(SignoffError, match="file not found"):
         check_tier_report(str(tmp_path / "nope.json"), manifest)
 
     bad = tmp_path / "bad.json"
