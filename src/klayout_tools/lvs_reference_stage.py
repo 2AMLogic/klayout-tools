@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Any, NamedTuple
 
 from . import lvs as _lvs
+from .lvs_crash_diagnostics import stage
 
 
 class _ReferenceStage(NamedTuple):
@@ -31,6 +32,7 @@ class _ReferenceStage(NamedTuple):
     reference_netlist: Any
 
 
+@stage("reference_read")
 def _read_reference_stage(
     reference_spec: dict[str, Any],
     layout_spec: dict[str, Any],

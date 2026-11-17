@@ -465,6 +465,7 @@
         "klayout_tools.lvs",
         "klayout_tools.lvs_combine",
         "klayout_tools.lvs_coverage",
+        "klayout_tools.lvs_crash_diagnostics",
         "klayout_tools.lvs_finfet",
         "klayout_tools.lvs_finfet_flatten",
         "klayout_tools.lvs_finfet_power",
