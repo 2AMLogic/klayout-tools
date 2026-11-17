@@ -45,11 +45,11 @@ import fnmatch
 import re
 from typing import Any
 
+from ._spice_tokens import split_spice_tokens
 from .sim_mismatch_declarations import (
     logical_lines,
     logical_lines_with_comments,
     merge_equals,
-    split_tokens,
 )
 
 #: ``pdk_variant_family`` -> the model-level ``.param`` that turns per-instance
@@ -155,7 +155,7 @@ def _scan_top_level(
             in_subckt = max(0, in_subckt - 1)
         if in_control or in_subckt or not stripped or stripped[0] in "*;.":
             continue
-        tokens = split_tokens(stripped)
+        tokens = split_spice_tokens(stripped)
         if stripped[0] in "xX":
             x_instances.append((first, last, tokens[0], tokens, comment, folded))
         else:
