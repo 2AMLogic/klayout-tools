@@ -45,10 +45,10 @@ A handful of functions below (:func:`_detect_dead_metal`,
 a few names that remain defined in ``extract.py`` itself
 (:func:`~klayout_tools.extract._bbox_um_rounded`, the
 ``_PARAM_PRECISION_UM``/``_MIN_PARASITIC_R_OHM``/``_SPICE_GLOBAL_GROUND_NODE``/
-``SUBSTRATE_DC_TIE_RESISTANCE_OHM`` tunables, and
-:func:`~klayout_tools.extract._is_synthesized_substrate_net_name`) -- each has
-other callers or definitions living in ``extract.py``, so it stays there
-rather than moving along with this subsystem. Those imports are deferred
+``SUBSTRATE_DC_TIE_RESISTANCE_OHM`` tunables, and the re-exported
+:func:`~klayout_tools.extract._is_synthesized_substrate_net_name`, defined in
+``extract_detect_substrate_label.py`` since #5736) -- each is reached through
+``extract.py``, not moved along with this subsystem. Those imports are deferred
 (``from .extract import ...`` *inside* the function body, not at this
 module's top level) because ``extract.py`` imports *this* module at its own
 top level (the same "``from .extract_parasitics import ...``" pattern
@@ -3221,9 +3221,9 @@ def _tie_substrate_nets_to_ground(
     """
     # Deferred (call-time) import -- see `_detect_dead_metal`'s identical
     # comment above for why this can't be a module-level import.
-    # `_is_synthesized_substrate_net_name`/`_SPICE_GLOBAL_GROUND_NODE`/
-    # `SUBSTRATE_DC_TIE_RESISTANCE_OHM` stay in `extract.py` (each has other
-    # callers/definitions there).
+    # `_SPICE_GLOBAL_GROUND_NODE`/`SUBSTRATE_DC_TIE_RESISTANCE_OHM` stay in
+    # `extract.py`; `_is_synthesized_substrate_net_name` moved to
+    # `extract_detect_substrate_label.py` (#5736) and is re-exported there.
     from .extract import (
         _SPICE_GLOBAL_GROUND_NODE,
         SUBSTRATE_DC_TIE_RESISTANCE_OHM,
