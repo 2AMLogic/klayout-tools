@@ -113,6 +113,7 @@ for the version pins and the full contract.
 klt layers design.gds                    # enumerate layers, JSON out
 klt cells design.gds --top               # cell hierarchy
 klt drc design.gds --deck sky130        # run a DRC deck, structured results
+klt diff a.gds b.gds                     # same layout? order-insensitive compare for regenerate-and-compare gates (byte hashes drift across klt upgrades)
 klt precheck design.gds --grid-um 0.005  # off-grid/zero-area/naming hygiene checks
 klt ring-check design.gds --layers '[[22,0],[34,0]]'  # guard/tap ring is a closed annulus
 klt seam-check row.gds --tiling TILE --layer 68/20 --band 0,0,30,2  # abutting cells tile and the rail is continuous across seams

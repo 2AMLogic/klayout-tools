@@ -102,11 +102,6 @@ BATCH_TREE_FILENAME = "tree.tar.gz"
 #: Where the job command writes the netlist, under ``$EDA_OUTPUT_DIR``.
 BATCH_NETLIST_FILENAME = "netlist.spice"
 
-#: Where the job command records the absolute path(s) of the extracted tree
-#: on the runner, under ``$EDA_OUTPUT_DIR`` -- what the client rewrites
-#: xschem's path comments from.
-BATCH_TREE_ROOT_FILENAME = "tree_root.txt"
-
 #: ``job.json``'s ``tool`` label (``klt sim`` uses ``"ngspice"``).
 BATCH_JOB_TOOL = "xschem"
 
@@ -398,33 +393,11 @@ def build_job_spec(
     (where klt writes an error envelope), the same channels ``klt sim``'s
     batch job uses. ``pdk_root`` is never set: the runner resolves its own.
     """
-    version = (
-        client_version if client_version is not None else _provenance._klt_version()
-    )
-    try:
-        preflight = sim_batch._runner_preflight_script(
-            version, enforce=version_check == "enforce"
-        )
-    except Exception as exc:  # SimError: a client version unsafe to embed
-        raise NetlistError(str(exc)) from exc
-
-    out = '"$EDA_OUTPUT_DIR/{}"'
-    setup = " && ".join(
-        [
-            'EDA_INPUT_DIR=$(cd "$EDA_INPUT_DIR" && pwd -P)',
-            'EDA_OUTPUT_DIR=$(cd "$EDA_OUTPUT_DIR" && pwd -P)',
-            'w=$(mktemp -d) && export HOME="${HOME:-$(mktemp -d)}"',
-            f'tar -xzf "$EDA_INPUT_DIR/{BATCH_TREE_FILENAME}" -C "$w"',
-            'cd "$w"',
-            'printf \'%s\\n%s\\n\' "$w" "$(pwd -P)" >'
-            + out.format(BATCH_TREE_ROOT_FILENAME),
-        ]
-    )
     argv = [
         "klt netlist",
         shlex.quote(tree.schematic),
         "-o",
-        out.format(BATCH_NETLIST_FILENAME),
+        f'"$EDA_OUTPUT_DIR/{BATCH_NETLIST_FILENAME}"',
     ]
     if block:
         argv.append("--block")
@@ -434,27 +407,23 @@ def build_job_spec(
         argv += ["--symbol-path", shlex.quote(rel_dir)]
     argv += ["--pdk", shlex.quote(pdk), "--timeout-s", repr(float(timeout_s))]
     argv += ["--backend local --format json"]
-    command = (
-        preflight
-        + setup
-        + " && "
-        + " ".join(argv)
-        + f' > "$EDA_OUTPUT_DIR/{sim_batch.BATCH_REPORT_FILENAME}"'
-        + f' 2> >(tee "$EDA_OUTPUT_DIR/{sim_batch.BATCH_STDERR_FILENAME}" >&2)'
-        + "; rc=$?; wait $! 2>/dev/null; exit $rc"
+    command = _batch_common.build_job_command(
+        tree_member=BATCH_TREE_FILENAME,
+        run=" ".join(argv),
+        err_cls=NetlistError,
+        stdout_target=sim_batch.BATCH_REPORT_FILENAME,
+        client_version=client_version,
+        version_check=version_check,
+        tree_root_subdir="",
     )
-    return sim_batch.BatchJobSpec(
+    return _batch_common.build_job_spec(
         cmd=command,
         tool=BATCH_JOB_TOOL,
         pdk_variant=pdk,
-        timeout_seconds=_batch_common.job_timeout_seconds(timeout_s),
-        inputs=(
-            sim_batch.BatchJobInput(
-                name=BATCH_TREE_FILENAME,
-                label="schematic tree",
-                local_path=tarball_path,
-            ),
-        ),
+        tree_member=BATCH_TREE_FILENAME,
+        tree_label="schematic tree",
+        tarball_path=tarball_path,
+        timeout_s=timeout_s,
     )
 
 

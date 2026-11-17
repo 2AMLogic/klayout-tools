@@ -518,7 +518,7 @@ def _load_libraries(
         modules_before = set(sys.modules)
         try:
             module = importlib.import_module(package)
-        except Exception as exc:  # noqa: BLE001 - reported, never re-raised
+        except Exception as exc:  # - reported, never re-raised
             unavailable.append(_unavailable_entry(package, exc, package_dir, memo_key))
             continue
 
@@ -629,7 +629,7 @@ def _instantiate_library_classes(
             continue
         try:
             value()
-        except Exception as exc:  # noqa: BLE001 - reported, never re-raised
+        except Exception as exc:  # - reported, never re-raised
             failure = failure or exc
     return failure
 
@@ -819,7 +819,7 @@ def _describe_loaded(
     for entry in loaded:
         try:
             libraries.append(_describe_library(entry))
-        except Exception as exc:  # noqa: BLE001 - vendor code, never a traceback
+        except Exception as exc:  # - vendor code, never a traceback
             unavailable.append(
                 {
                     "package": entry["package"],
@@ -930,7 +930,7 @@ def _produce_pdk_pcell(
     try:
         declaration = handle.layout().pcell_declaration(pcell_name)
         available = sorted(handle.layout().pcell_names())
-    except Exception as exc:  # noqa: BLE001 - vendor code, never a traceback
+    except Exception as exc:  # - vendor code, never a traceback
         raise PdkPCellError(
             f"PDK PCell library '{entry['library']}' is unusable: "
             f"{type(exc).__name__}: {exc}"
@@ -956,7 +956,7 @@ def _produce_pdk_pcell(
         top.insert(kdb.CellInstArray(variant, kdb.Trans()))
     except PdkPCellError:
         raise
-    except Exception as exc:  # noqa: BLE001 - vendor code, never a traceback
+    except Exception as exc:  # - vendor code, never a traceback
         raise PdkPCellError(
             f"PDK PCell '{entry['library']}/{pcell_name}' failed while "
             f"producing geometry: {type(exc).__name__}: {exc}"
@@ -1018,7 +1018,7 @@ def _coerce_layer_param(ref: str, name: str, value: Any) -> Any:
     if isinstance(value, str):
         try:
             return kdb.LayerInfo.from_string(value)
-        except Exception as exc:  # noqa: BLE001 - reported as a param error
+        except Exception as exc:  # - reported as a param error
             raise PdkPCellError(
                 f"PDK PCell '{ref}': params.{name} is not a valid layer "
                 f"specification: {value!r}"
