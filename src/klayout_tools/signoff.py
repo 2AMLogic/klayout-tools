@@ -90,6 +90,7 @@ from .signoff_coverage_disclosure import (
 # Item 5's spec-row coverage sources (issue #3778) and the manifest ratchet
 # that requires them machine-derived (issue #5462); out of this file for its
 # size-ratchet ceiling, same as `signoff_multi_member` and `signoff_na`.
+from .signoff_attest_binding import attestation_record
 from .signoff_derived_rows import (
     DERIVED_ROWS_ITEM_ID,
     asserted_rows,
@@ -6199,12 +6200,7 @@ def _generic_artifact_binding(
     if isinstance(attestation, Mapping) and isinstance(
         attestation.get("producer"), str
     ):
-        binding["attestation"] = {
-            "producer": attestation["producer"],
-            "inventory_schema_version": attestation.get("inventory_schema_version"),
-            "check_count": attestation.get("check_count"),
-            "passed_count": attestation.get("passed_count"),
-        }
+        binding["attestation"] = attestation_record(attestation)
     return binding
 
 
