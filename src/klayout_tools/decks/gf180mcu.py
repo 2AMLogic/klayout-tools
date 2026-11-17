@@ -4074,6 +4074,58 @@ PARASITICS = ParasiticsDeck(
         # allm4 metal4 39.351`.
         0.039351,
     ),
+    # `defaultsidewall` lateral (same-layer) coupling coefficients (issue
+    # #5742, closing this deck's Stage-2b gap) -- entry `i` describes
+    # `metals[i]`'s own same-layer coupling (like sky130's table; unlike
+    # `metal_overlaps`' adjacent-*pair* indexing above, so this table has
+    # `len(metals)` = 5 entries for this Metal1..Metal5 stack). First
+    # parameter only (aF/um, divided by 1000 to fF/um to match
+    # `cap_perim_ff_um`'s convention) -- the second parameter's exact
+    # magic distance/scaling semantics are an open question
+    # (docs/design/extract-fidelity-roadmap.md's open question #1),
+    # deliberately not transcribed here (see `metal_sidewall_lookback_um`
+    # below for what this deck uses instead). Transcribed from the
+    # resolved, pre-built `gf180mcuD.tech` for the pinned PDK commit
+    # f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7 -- the same source and
+    # nominal `variants ()` corner block `metal_overlaps` above is cited
+    # from -- with every row re-checked character-for-character against
+    # the generic `gf180mcu.tech` source at that same commit and against
+    # the c6d73a35f524070e85faff4a6a9eef49553ebc2b resolved install: the
+    # `defaultsidewall allm*` rows are unconditional across the
+    # #3540 re-pin. Metal5's entry is the `#ifdef METALS5` row
+    # (114.86), not the `#ifdef METALS6` alternative (31.121) -- this
+    # deck's stack is the 5-level one (see `EXTRACTION_DECK.metals`).
+    metal_sidewalls=(
+        # Metal1 (idx0): `defaultsidewall allm1 metal1 40.512 -0.053`.
+        0.040512,
+        # Metal2 (idx1): `defaultsidewall allm2 metal2 46.736 0.289`.
+        0.046736,
+        # Metal3 (idx2): `defaultsidewall allm3 metal3 70.675 0.534`.
+        0.070675,
+        # Metal4 (idx3): `defaultsidewall allm4 metal4 77.388 0.611`.
+        0.077388,
+        # Metal5 (idx4): `defaultsidewall allm5 metal5 114.86 0.025` (the
+        # `#ifdef METALS5` row).
+        0.11486,
+    ),
+    # Lateral-coupling lookback distance per metal level (issue #5742),
+    # the same convention sky130's table uses: **2x** this deck's own
+    # same-layer minimum-spacing DRC rule for that level (see `DECK`'s
+    # `metal[1-5].space.1` rules above -- 0.23 um for Metal1, 0.28 um for
+    # Metal2-5), not magic's own `defaultsidewall` second parameter (see
+    # `metal_sidewalls`' comment above for why). 2x the bare minimum, not
+    # the minimum itself: a `separation_check(d)` only reports edges
+    # *closer than* `d`, so a lookback of exactly the legal minimum could
+    # only ever fire on a DRC-illegal layout -- the measured `gcd`
+    # corpus evidence behind the 2x choice is recorded on sky130's own
+    # table (`decks/sky130.py`).
+    metal_sidewall_lookback_um=(
+        0.46,  # Metal1 (idx0): 2x `metal1.space.1` (0.23).
+        0.56,  # Metal2 (idx1): 2x `metal2.space.1` (0.28).
+        0.56,  # Metal3 (idx2): 2x `metal3.space.1` (0.28).
+        0.56,  # Metal4 (idx3): 2x `metal4.space.1` (0.28).
+        0.56,  # Metal5 (idx4): 2x `metal5.space.1` (0.28).
+    ),
     # Per-cut via resistance and the interconnect-resistance corners (issue
     # #3053), from the same resolved `gf180mcuD.tech` / pinned PDK commit
     # f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7 as Metal5 above. Magic states

@@ -299,6 +299,24 @@ def build_parasitics_report(
             if _selects_critical(net_selectors)
             else (list(critical_nets) if critical_nets else [])
         )
+        # Additive field (issue #5742): machine-readable capability signal
+        # for the `--critical-net` lateral (same-layer) coupling pass --
+        # "computed" when the deck curates at least one `metal_sidewalls`
+        # coefficient, "unmodelled" when it cannot model lateral coupling at
+        # all, `null` when no critical-net selection was requested (no
+        # lateral pass ran, so neither state applies). Without it a consumer
+        # reading `cc_count: 0` has to substring-match English prose in
+        # `warnings` to tell "no coupling at this separation" from "this
+        # deck cannot model coupling". Requested-ness, not matched-ness: a
+        # selection that matched nothing still declares the deck-level
+        # capability. Reuses the same `any(parasitics_deck.metal_sidewalls)`
+        # predicate the `metal_sidewalls` warning below uses, so the field
+        # and the warning can never disagree.
+        parasitics_report["lateral_coupling"] = (
+            ("computed" if any(parasitics_deck.metal_sidewalls) else "unmodelled")
+            if (_selects_critical(net_selectors) or bool(critical_nets))
+            else None
+        )
         # Additive field (issue #1700): echoes the `--parasitics-net` request
         # back verbatim (as given, not sorted/deduplicated) -- `[]` when the
         # flag was never given. Without it a scoped run's deliberately-short

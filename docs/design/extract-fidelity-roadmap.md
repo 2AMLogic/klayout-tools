@@ -174,7 +174,7 @@ of this table; `docs/cli/extract.md` → "Parasitic model scope"):
 |---|---|---|
 | Net-to-substrate **area** capacitance | ✅ modelled, per conductor layer | `model.capacitance` |
 | Net-to-substrate **perimeter/fringe** capacitance | ✅ modelled, isolated-edge coefficient applied to the net's whole perimeter | `model.capacitance` |
-| **Lateral** net-to-net coupling (same layer, sidewall) | ⚠️ **partial** (#976) — computed only for a same-layer pair naming a declared `--critical-net` net, and only on a deck curating `metal_sidewalls` (sky130 today); exactly zero for every other pair | `model.coupling` |
+| **Lateral** net-to-net coupling (same layer, sidewall) | ⚠️ **partial** (#976) — computed only for a same-layer pair naming a declared `--critical-net` net, and only on a deck curating `metal_sidewalls` (sky130 and gf180mcu today, #5742); exactly zero for every other pair | `model.coupling` |
 | **Vertical** net-to-net coupling (crossover / plate overlap on adjacent layers) | ✅ **modelled** (#760) — overlap area charged between the two distinct nets and deducted from both nets' own ground area term, unconditionally under `--parasitics` wherever the deck curates `metal_overlaps` | `model.coupling` |
 | **Fringe shielding** (an edge facing a neighbour does not also see full substrate fringe) | ❌ not modelled — full substrate fringe charged regardless of neighbours | implied by `model.capacitance` |
 | Distributed RC (per-segment ladder) | ⚠️ **partial** (#977) — `--distributed-rc` (requires `--critical-net`) emits a multi-segment ladder for a declared critical net, ordered by terminal position rather than by decomposed routed geometry; every other net keeps one lumped R, star-apportioned | `model.resistance` |
@@ -215,7 +215,7 @@ of the five (#760, #976), with the scoping each carries given in the table:
 |---|---|---|---|
 | `defaultareacap` | area cap to the substrate plane | `allm1 metal1 25.78` aF/µm² | ✅ `cap_area_ff_um2` |
 | `defaultperimeter` | fringe cap from an edge to the substrate plane | `allm1 metal1 40.57` aF/µm | ✅ `cap_perim_ff_um` |
-| `defaultsidewall` | **lateral** coupling between same-plane conductors | `allm1 metal1 44 0.25` | ⚠️ **first parameter only**, as `metal_sidewalls` (#976) — sky130 deck only, and only for `--critical-net` pairs; the second parameter is still unread (see the caution below) |
+| `defaultsidewall` | **lateral** coupling between same-plane conductors | `allm1 metal1 44 0.25` | ⚠️ **first parameter only**, as `metal_sidewalls` (#976) — sky130 and gf180mcu decks (#5742), and only for `--critical-net` pairs; the second parameter is still unread (see the caution below) |
 | `defaultoverlap` | **vertical** plate coupling to a specific lower plane | `allm1 metal1 allli locali 114.20` aF/µm² | ✅ `metal_overlaps` (#760) — read unconditionally under `--parasitics` |
 | `defaultsideoverlap` | fringe from an edge down onto a specific lower plane | `allm1 metal1 allli locali 59.50` aF/µm | ❌ — Stage 2c, not started |
 
