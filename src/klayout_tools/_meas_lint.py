@@ -218,7 +218,16 @@ def _extend_over_operands(spice: str, start: int, end: int) -> tuple[int, int]:
             while cursor > 0 and spice[cursor - 1].isspace():
                 cursor -= 1
             found = _token_start(spice, cursor - 1)
-            if found is None:
+            if found is None or (
+                spice[found:cursor].strip().lower() in _MEAS_CARD_KEYWORDS
+            ):
+                # No operand sits before the operator -- nothing, or only a
+                # card keyword (``when -v(a)``): the operator is a leading
+                # unary sign. It belongs inside the span, and the keyword
+                # stays outside it (``par('when -v(a)')`` is a keyword-less
+                # card ngspice-47 fatals on, and this lint accepts it).
+                if spice[left - 1] in "+-":
+                    start = left - 1
                 break
             start = found
             continue

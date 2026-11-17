@@ -46,6 +46,19 @@ from test_sim import _write_body, _write_request
         # below -- `par('when (v(a)-v(b))')` fatals ngspice-47)
         ".meas tran t when (v(a)-v(b))=0.1",
         ".meas tran t avg (v(a)-v(b))",
+        # a leading unary sign right after the keyword: the operand walk
+        # must not reach back over the keyword (see the rewrite-text tests
+        # below)
+        ".meas tran t when -v(a)=0.1",
+        ".meas tran t find -v(a) at=2u",
+        ".meas tran t avg -v(out) from=0 to=20u",
+        # a par('...') span still bound to an operator outside it -- the
+        # split-sign rewrites ngspice-47 fatals on (the review of 1d199cea2
+        # measured `-par('v(a)+v(b)')` and `2*par('abs(v(a)-v(b))')` at
+        # rc=1): the lint must keep refusing them, or the unary-sign span
+        # could turn one into an accepted card
+        ".meas tran t when -par('v(a)')=0.1",
+        ".meas tran t when 2*par('-v(a)')=0.1",
     ],
 )
 def test_validate_meas_card_rejects_signal_position_expression(card):
@@ -68,6 +81,12 @@ def test_validate_meas_card_rejects_signal_position_expression(card):
         ".meas tran t when par('v(a)-v(b)')=0.3 rise=1",
         ".meas tran t when par('v(a)-v(b)')=0.3 fall=1",
         ".meas tran t when par('v(a)-v(b)')=0.3 cross=2",
+        # the unary-sign rewrites the refusal suggests (measured on
+        # ngspice-47, rc=0, issue #5651): the sign sits inside the span
+        ".meas tran t when par('-v(a)')=0.1",
+        ".meas tran t find par('-v(a)') at=2u",
+        ".meas tran t avg par('-v(out)') from=0 to=20u",
+        ".meas tran t when v(c)=par('-v(a)')",
         ".meas tran t trig v(a) val=0.3 rise=1 targ v(b) val=0.9 rise=1",
         ".meas tran t when v(a)=0.5*1.62",  # #2826 RHS: runtime diagnostic
         ".meas tran t find v(a) at='1u+2n'",  # #2826: pinned accepted
@@ -180,6 +199,107 @@ def test_validate_meas_card_rewrite_widens_operand_across_keyword_group():
     message = str(excinfo.value)
     assert ".meas tran t_x when par('(v(a))-v(b)')=0.1" in message
     assert "expression '(v(a))-v(b)'" in message
+
+
+def _assert_no_keyword_in_par_span(message):
+    # No suggested span may open with a `.meas` signal-position keyword --
+    # `par('when -v(a)')` is a keyword-less card ngspice-47 fatals on
+    # ("Cannot compute substitute", rc=1) that this lint then accepts.
+    lowered = message.lower()
+    for keyword in _SIGNAL_POSITION_KEYWORDS:
+        assert f"par('{keyword} " not in lowered
+
+
+@pytest.mark.parametrize("keyword", _SIGNAL_POSITION_KEYWORDS)
+def test_validate_meas_card_rewrite_keeps_keyword_outside_span_for_leading_sign(
+    keyword,
+):
+    # The operand walk reaches the keyword through its bare-identifier
+    # branch when a lone reference carries a leading unary sign
+    # (`when -v(a)=0.1`). The sign belongs inside the span and the keyword
+    # outside it: `when par('-v(a)')=0.1` -- measured working on
+    # ngspice-47 -- never `par('when -v(a)')=0.1`, which the lint accepts
+    # and every corner fatals on.
+    with pytest.raises(sim.SimError) as excinfo:
+        sim._validate_meas_card("t_x", f".meas tran t_x {keyword} -v(a)=0.1")
+    message = str(excinfo.value)
+    assert f".meas tran t_x {keyword} par('-v(a)')=0.1" in message
+    assert "expression '-v(a)'" in message
+    _assert_no_keyword_in_par_span(message)
+
+
+@pytest.mark.parametrize(
+    ("card", "expression", "rewrite"),
+    [
+        # the sign may be `+`, and may be spaced from its operand
+        (
+            ".meas tran t_x when +v(a)=0.25",
+            "+v(a)",
+            ".meas tran t_x when par('+v(a)')=0.25",
+        ),
+        (
+            ".meas tran t_x when - v(a)=-0.25",
+            "- v(a)",
+            ".meas tran t_x when par('- v(a)')=-0.25",
+        ),
+        # the walk crosses a binary operator first, then meets the sign
+        (
+            ".meas tran t_x when -2*v(a)=-1",
+            "-2*v(a)",
+            ".meas tran t_x when par('-2*v(a)')=-1",
+        ),
+        # keyword case does not matter
+        (
+            ".MEAS TRAN t_x WHEN -V(A)=0.1",
+            "-V(A)",
+            ".MEAS TRAN t_x WHEN par('-V(A)')=0.1",
+        ),
+        # a keyword in the middle of the card, not only the first one
+        (
+            ".meas tran t_x find v(a) when -v(b)=0.5",
+            "-v(b)",
+            ".meas tran t_x find v(a) when par('-v(b)')=0.5",
+        ),
+        (
+            ".meas tran t_x trig -v(a) val=0.5 rise=1 targ v(b) val=0.5 rise=1",
+            "-v(a)",
+            ".meas tran t_x trig par('-v(a)') val=0.5 rise=1 targ v(b) val=0.5 rise=1",
+        ),
+        # no keyword before the sign at all (right-hand side): the same
+        # branch takes the sign into the span. Measured on ngspice-47,
+        # `when v(c)=par('-v(a)')` returns 3.33333e-07 (v(c)=-1+2t meets
+        # -v(a)=-t at t=1/3 us).
+        (
+            ".meas tran t_x when v(c)=-v(a)",
+            "-v(a)",
+            ".meas tran t_x when v(c)=par('-v(a)')",
+        ),
+    ],
+)
+def test_validate_meas_card_rewrite_takes_leading_sign_into_span(
+    card, expression, rewrite
+):
+    with pytest.raises(sim.SimError) as excinfo:
+        sim._validate_meas_card("t_x", card)
+    message = str(excinfo.value)
+    assert rewrite in message
+    assert f"expression '{expression}'" in message
+    _assert_no_keyword_in_par_span(message)
+
+
+@pytest.mark.parametrize("keyword", ["when", "avg"])
+def test_validate_meas_card_control_scope_keeps_keyword_for_leading_sign(keyword):
+    # Control scope shares the span: the reference handed back keeps the
+    # keyword (it used to read `.meas tran t_x vdiff=0.1`, no `when` at all)
+    # and the let helper holds just the author's signed reference.
+    with pytest.raises(sim.SimError) as excinfo:
+        sim._validate_meas_card(
+            "t_x", f".meas tran t_x {keyword} -v(a)=0.1", control_scope=True
+        )
+    message = str(excinfo.value)
+    assert f"`.meas tran t_x {keyword} vdiff=0.1`" in message
+    assert '"expr": "-v(a)"' in message
+    assert f'"expr": "{keyword} ' not in message
 
 
 def test_validate_meas_card_rewrite_wraps_group_nested_in_call():
