@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from helpers.tool_probes import SKIP_NO_ICARUS as needs_icarus
 from klayout_tools.functional_verification import (
     FunctionalVerificationError,
     run_functional_verification,
@@ -22,8 +23,6 @@ EXAMPLE_DIR = (
     / "functional-verification"
     / "verilog-tb"
 )
-HAVE_ICARUS = shutil.which("iverilog") is not None and shutil.which("vvp") is not None
-needs_icarus = pytest.mark.skipif(not HAVE_ICARUS, reason="iverilog/vvp not installed")
 
 
 def _stage(tmp_path: Path, request_name: str = "request-rtl.json") -> Path:

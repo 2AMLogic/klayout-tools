@@ -3,6 +3,12 @@
   "generated_by": "scripts/check_type_baseline.py --update-baseline (mypy 2.4.0 (compiled: yes))",
   "diagnostics": [
     {
+      "file": "src/klayout_tools/_engine_proc.py",
+      "code": "unused-ignore",
+      "message": "Unused \"type: ignore[valid-type, misc]\" comment",
+      "count": 1
+    },
+    {
       "file": "src/klayout_tools/arith_gen.py",
       "code": "index",
       "message": "Value of type \"tuple[tuple[int, int], tuple[int, int]] | None\" is not indexable",
