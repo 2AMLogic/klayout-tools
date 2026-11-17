@@ -5211,7 +5211,7 @@ def test_integration_real_icarus_sdf_resolves_bus_port_output_fanout_sibling(tmp
     # sibling entry) instead of returning a report at all.
     assert annotated_report["status"] == "fail"
     assert annotated_report["environment"]["sdf"] == {
-        "file": str(tmp_path / "route_bus_out.sdf"),
+        "file": _envelope(None, "external"),
         "corner": "typ",
         "entries": "all",
         "annotated": True,
