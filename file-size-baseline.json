@@ -341,11 +341,11 @@
     },
     {
       "path": "src/klayout_tools/functional_verification.py",
-      "lines": 3152
+      "lines": 3150
     },
     {
       "path": "src/klayout_tools/functional_verification_sdf.py",
-      "lines": 2531
+      "lines": 2530
     },
     {
       "path": "src/klayout_tools/gen.py",
@@ -365,7 +365,7 @@
     },
     {
       "path": "src/klayout_tools/gen_describe.py",
-      "lines": 3206
+      "lines": 3151
     },
     {
       "path": "src/klayout_tools/gen_layer_params.py",
@@ -437,7 +437,7 @@
     },
     {
       "path": "src/klayout_tools/macros.py",
-      "lines": 668
+      "lines": 667
     },
     {
       "path": "src/klayout_tools/mcp_tools.py",
@@ -585,11 +585,11 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 12396
+      "lines": 12353
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
-      "lines": 4441
+      "lines": 4421
     },
     {
       "path": "src/klayout_tools/sim_commands.py",
@@ -653,7 +653,7 @@
     },
     {
       "path": "src/klayout_tools/synthesize.py",
-      "lines": 4650
+      "lines": 4647
     },
     {
       "path": "src/klayout_tools/synthesize_arithmetic.py",
@@ -861,7 +861,7 @@
     },
     {
       "path": "tests/test_gen.py",
-      "lines": 12392
+      "lines": 12375
     },
     {
       "path": "tests/test_gen_compose.py",
