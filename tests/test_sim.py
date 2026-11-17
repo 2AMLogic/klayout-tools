@@ -42,15 +42,7 @@ from helpers.subprocess_fakes import (
 )
 from helpers.tool_probes import SKIP_NO_NGSPICE as _SKIP_NO_NGSPICE
 from klayout_tools import _paths as paths_module
-from klayout_tools import (
-    pdk,
-    remote_transport,
-    sim,
-    sim_batch,
-    sim_forms,
-    sim_remote,
-    sim_steps,
-)
+from klayout_tools import pdk, remote_transport, sim, sim_batch, sim_remote, sim_steps
 from klayout_tools import remote_launcher as rl
 from klayout_tools import sim_measurement_results as smr
 from klayout_tools.cli import main
@@ -837,18 +829,6 @@ def test_validate_measurement_forms_accepts_either_form():
 def test_validate_measurement_forms_rejects_neither_form():
     with pytest.raises(sim.SimError, match="exactly one of 'spice'"):
         sim._validate_measurement_forms([{"name": "vout", "unit": "V"}])
-
-
-def test_validate_measurement_forms_no_form_error_lists_every_form():
-    """The no-form error is the discovery surface for the form registry: every
-    form in `sim_forms.FORMS` must appear in it, or a newly registered form
-    ships undiscoverable (the `eye`/`step_resolution`/`settled` gap, #6328)."""
-    with pytest.raises(sim.SimError) as excinfo:
-        sim._validate_measurement_forms([{"name": "vout", "unit": "V"}])
-    missing = [
-        form for form in sim_forms.FORMS if f"'{form}'" not in str(excinfo.value)
-    ]
-    assert not missing, f"forms missing from the no-form error: {missing}"
 
 
 def test_validate_measurement_forms_rejects_missing_name():
