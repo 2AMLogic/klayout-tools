@@ -252,8 +252,8 @@ both.
 
 ```json
 {
-  "schema_version": 1,
-  "file": "guard_ring.gds",
+  "schema_version": 2,
+  "file": { "path": "guard_ring.gds", "scope": "repo" },
   "layers": [[22, 0], [34, 0]],
   "region_um": null,
   "cells": null,
@@ -273,7 +273,14 @@ both.
       "bbox": { "left": 16000, "bottom": 8000, "right": 20000, "top": 12000 },
       "polygon": [[16000, 8000], [16000, 12000], [20000, 12000], [20000, 8000]]
     }
-  ]
+  ],
+  "provenance": {
+    "klt_version": "0.8.0",
+    "klayout_version": "0.30.13",
+    "pdk": null,
+    "deck": null,
+    "input": { "content_hash": "sha256:…", "role": "layout" }
+  }
 }
 ```
 
@@ -281,8 +288,9 @@ both.
 
 | Field             | Type                          | Description                                                                 |
 | ----------------- | ----------------------------- | --------------------------------------------------------------------------- |
-| `schema_version`  | integer                       | Version of this command's JSON shape (starts at `1`).                       |
-| `file`            | string                        | The input layout path exactly as provided on the command line.              |
+| `schema_version`  | integer                       | Version of this command's JSON shape (`2` since issue #5650, when `file` became an anchored object; `1` emitted a raw string). |
+| `file`            | object                        | The input layout as `{path, scope}`: `{"path": "<repo-relative POSIX path>", "scope": "repo"}` in-repo, `{"path": null, "scope": "external"}` outside (no absolute path is emitted). Same shape as `klt drc`'s `file`. |
+| `provenance`      | object                        | Additive. The shared `provenance` block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input.content_hash`/`input.role`). In `--pdk` mode `provenance.pdk` is `{"name": "<name>", "source": "built-in", "version": null}`; in `--layers` mode it is `null`. |
 | `layers`          | array\<[int, int]\>           | The `--layers` set, as `[layer, datatype]` pairs, in the order given.       |
 | `region_um`       | array\<number\> \| null       | The `--region` clip window `[left, bottom, right, top]` in micrometres, or `null` when omitted. |
 | `cells`           | array\<string\> \| null    | Additive. The effective `--cells` scope (de-duplicated, in the order given), or `null` when no scope was requested. |
