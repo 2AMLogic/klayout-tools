@@ -14,9 +14,34 @@ body: ``extract.py`` imports this module at its top level, so a module-level
 
 from __future__ import annotations
 
+import functools
+from collections.abc import Callable
 from typing import Any
 
+from .extract_progress import stage
 
+
+def _in_parasitics_inject_stage(
+    func: Callable[..., dict[str, Any] | None],
+) -> Callable[..., dict[str, Any] | None]:
+    """Run ``func`` under its own ``parasitics_inject`` timing stage (#5716).
+
+    The stage is opened only when parasitics were extracted (``parasitic_nets``
+    is not ``None``), so a run without ``--parasitics`` carries no such key in
+    ``timing.stages``. The empty-report branch still runs inside it.
+    """
+
+    @functools.wraps(func)
+    def wrapper(**kwargs: Any) -> dict[str, Any] | None:
+        if kwargs["parasitic_nets"] is None:
+            return func(**kwargs)
+        with stage("parasitics_inject"):
+            return func(**kwargs)
+
+    return wrapper
+
+
+@_in_parasitics_inject_stage
 def build_parasitics_report(
     *,
     circuit: Any,

@@ -1071,7 +1071,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: pdks/cell-netlists
-          key: cell-netlists-${{ runner.os }}-${{ hashFiles('scripts/fetch-cell-netlists.sh') }}
+          key: cell-netlists-${{ runner.os }}-${{ hashFiles('scripts/fetch-cell-netlists.sh', 'scripts/_install_common.sh') }}
 
       - name: Fetch real gallery-cell SPICE netlists
         # Pinned, checksum-verified per-file fetch (see the script's header
@@ -1259,7 +1259,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: pdks/sky130-liberty
-          key: sky130-liberty-${{ hashFiles('scripts/fetch-sky130-liberty.sh') }}
+          key: sky130-liberty-${{ hashFiles('scripts/fetch-sky130-liberty.sh', 'scripts/_install_common.sh') }}
 
       - name: Fetch sky130_fd_sc_hd liberty (tt_025C_1v80 corner)
         # A real, Yosys-parseable Liberty timing view for `klt synthesize`'s

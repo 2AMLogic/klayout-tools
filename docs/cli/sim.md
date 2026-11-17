@@ -21,7 +21,14 @@ this document (and the code) win.
   next to the request file (the same "next to the input" convention as `klt
   render`'s default output directory). `-o` names a **directory**, never the
   report file, on every backend (including `--backend batch`): the report goes
-  to stdout, and `--report-out <path>` writes a copy to a file.
+  to stdout. Without `--report-out`, a completed single-request run
+  ([#5776](https://github.com/2AMLogic/klayout-tools/issues/5776)) also
+  writes the report envelope to `<outdir>/report.json` — the directory is
+  created if missing, `--dry-run`/`--submit-only` write nothing, and a write
+  failure exits 1 with the error envelope — so a finished run's evidence is
+  on disk even when the caller forgot `--report-out`. `--report-out <path>`
+  remains the way to choose another path (`.gz` included) and wins outright
+  when both are given.
 - `--backend` — execution backend for the corner matrix, overriding the
   request's own `backend` field when given. See "Execution backends" below.
 - `--max-workers` — worker-pool size for the `local-parallel` backend,
@@ -42,7 +49,9 @@ this document (and the code) win.
   `ceil(len(decks)/N)` balanced contiguous slices, one batch job each, merged
   into one report in request order, with a shard map (`batch-shards.json`,
   plus `deck_slices[]`) written to the artifacts dir and
-  `environment.remote.{split,shard_count,shard_map,shards[]}` in the report.
+  `environment.remote.{split,shard_count,shard_map,shards[]}` in the report
+  (`shard_map` repo-relative when the map lies inside a git repo, absolute
+  otherwise, like every `shard_map` emission).
   A list that already fits submits one job and writes no shard map.
   `--submit-only` on a deck list that would split is refused with
   `error.code: "batch_decks_split_unsupported"`; run it blocking, then
@@ -130,7 +139,9 @@ this document (and the code) win.
   yield` and `klt signoff` accept the `.json.gz` file directly
   ([#5452](https://github.com/2AMLogic/klayout-tools/issues/5452)), so the
   compressed report is citable as manifest evidence with no decompressed
-  second copy.
+  second copy. Given together with `-o`, `--report-out` wins outright and
+  no implicit `<outdir>/report.json` copy is written (see `--outdir`
+  above).
 - `--plot` — write one self-contained, dependency-free waveform SVG per
   non-sweep signal per corner to this directory, forcing
   `options.waveforms`/`keep_artifacts` on for this run. See "Waveform
@@ -163,9 +174,15 @@ not hardcoded — first runnable candidate wins:
 
 An explicitly-named binary (option or env var) that is not runnable is a
 clear, actionable error naming which source named it — never a silent
-fallback to the next source. The resolved path is recorded in the response
-as `environment.ngspice_binary` (alongside `engine_version`), `null` for
-`engine: "xyce"` (below), which this issue adds no override for. Mirrors
+fallback to the next source. That strictness applies on the submitting host
+too, before any dispatch — an override naming a path only the runner has is
+refused at submit, so name a path (or bare `PATH` name) valid on both
+hosts. The runner re-resolves the override fresh from its own filesystem
+and `$PATH`, so what actually executes is the runner's copy — reported back
+as `environment.ngspice_binary` (alongside `engine_version`), with the
+submitter's own resolution kept as `environment.client_ngspice_binary`;
+`null` for `engine: "xyce"` (below), which this issue adds no override for.
+Mirrors
 `klt lvs`'s `options.netgen_binary`/`$KLT_NETGEN_BINARY`/
 `environment.netgen_binary` (issue #2373). `klt sim` has no `--check`/
 `--rerun` mode, so there is no drift-diff exclusion to add for this field.
@@ -177,9 +194,22 @@ with the engine it resolved and, on a mismatch, exits 1 *before simulating*
 with `error.code: "engine_version_unmet"` naming required vs found. A version
 that cannot be determined or parsed also fails (closed). On `local` and
 `local-parallel` the engine is probed (`ngspice --version` / `Xyce -v`) up
-front. `remote` and `batch` have no pre-submit probe, so the pin is checked
-against the version in the runner's report once the run returns; the job has
-already run by then. Which of the two applies is decided by the backend that
+front. `remote` and `batch` have no *submit-side* probe, but the pin is not
+post-run-only either: the job command is a plain
+`klt sim --backend local-parallel` on the runner, with the request
+forwarded verbatim, so a runner whose `klt` knows the field (0.8.0 and
+newer) enforces the pin there *before any corner simulates* and fails the
+job with `engine_version_unmet`. The refusal surfaces through the normal
+failed-job path — every unit of the job reports `batch_job_failed`, quoting
+the runner's error, with `runner_code: "engine_version_unmet"` — and,
+because the runner wrote no report, the submit-side check below then also
+fails closed with a top-level `engine_version_unmet`. That submit-side
+comparison against the report's `environment.engine_version` stays as the
+backstop for a runner too old to know the field: a pre-0.8.0 runner ignores
+the pin silently but reports no version either, so it still fails closed
+after the run (never a wrong-solver report), and the default
+`batch.runner_version_check: enforce` gate refuses such a version-skewed
+runner at submit. Which of the two applies is decided by the backend that
 *executes*, not the one first resolved: when a host-default off-host backend
 steps back to `local` late — a single-unit run, or `options.resume` — the pin
 is probed here up front, exactly as `--backend local` does (issue #5500);
@@ -938,7 +968,14 @@ or more shards submitted but never launched (typically a capacity or
 concurrency-cap refusal with `batch.capacity_wait_s` at its default `0`),
 `environment.remote` carries three additive fields, absent when every shard
 launched: `unlaunched_shards` (count), `resumable: true`, and `shard_map` (the
-`batch-shards.json` path). The affected corners still report `lost_shard` and
+`batch-shards.json` path, repo-relative when it lies inside a git repo and
+absolute otherwise -- the stderr hints keep the absolute path either way).
+Each unlaunched shard is also a `null` entry in `environment.remote.fleet[]`,
+at its own index (the shard map's shard order): a client collecting per-job
+metadata across `fleet[]` must skip the `null` slots, and read job identity
+and runner skew from the null-safe `job_ids` / `runner_compatibility`
+roll-ups, which omit the lost shards. The affected corners still report
+`lost_shard` and
 the exit code stays 4; the fields only let an unattended caller tell
 "incomplete, rerun with `--resume` and the same outdir" from a real failure
 ([#4856](https://github.com/2AMLogic/klayout-tools/issues/4856)). Unattended
@@ -950,8 +987,11 @@ any corner that never ran (`lost_shard`, `batch_job_failed`,
 `batch_job_timeout`, `batch_poll_timeout`, `batch_job_interrupted`) and klt kept
 state to resume from (the shard map, else the `--resume` checkpoint),
 `environment.remote` additionally carries `unrun_units` (count) and
-`resumable: true`, with `shard_map` naming the retained file, and stderr names
-the `--resume` rerun once. Absent when every unit ran. `unrun_units` counts
+`resumable: true`, with `shard_map` naming the retained file (repo-relative
+when it lies inside a git repo, absolute otherwise), and stderr names
+the `--resume` rerun once. Each affected shard is a `null` entry in
+`environment.remote.fleet[]` at its own index, as for unlaunched shards above.
+Absent when every unit ran. `unrun_units` counts
 every corner that never ran; `unlaunched_shards` (above) counts only shards that
 were never launched, so with both present `unrun_units` is the larger. A lost shard is
 identified by `corners[].diagnostics[].code`, not by `status` (it stays
@@ -1154,7 +1194,10 @@ a plain attach. Any other shard (`running`, `interrupted`, unreadable status,
 or one the map records as submitted but never launched, reported `unlaunched`)
 is not waited on and never launched: each of its units is `lost_shard`, and
 `environment.remote` carries `unfinished_shards[]` (`index`, `job_id`, last
-observed `state`), `resumable: true` and `shard_map`. The exit code is `4`
+observed `state`), `resumable: true` and `shard_map` (repo-relative when it
+lies inside a git repo, absolute otherwise). Each unfinished shard is a
+`null` entry in `fleet[]` at its own index, as for unlaunched and lost
+shards above. The exit code is `4`
 (incomplete). With every shard `done` the report equals a plain `--attach`;
 with none done every unit is lost. The map is changed only by collected state,
 so a later plain `--attach` (or `--resume`) still finishes the remaining
@@ -2122,13 +2165,15 @@ report a pass. Policy: **reject before simulating**.
   carries exactly one `batch_runner_version_mismatch` entry (severity
   `error`) with `runner_klt_version`, `client_klt_version`,
   `accepted_client_release` (the runner's major.minor) and a `message` stating
-  the remedy: submit from a client of that major.minor, or update the runner
-  image to the client's. It is additive (the per-unit diagnostics and
-  `environment.remote` fields above are unchanged), appears once even for
-  `hosts > 1`, and is not emitted for `match` / `unknown`, nor under
-  `runner_version_check: "warn"` when the run proceeded (that skew stays in
-  `environment.remote` only). It covers the case the pre-launch manifest check
-  cannot see (no manifest, or an entry without `klt_version`).
+  the remedy: submit from a client of that major.minor, update the runner
+  image to the client's, or set `batch.runner_version_check: "warn"` to run
+  anyway (under `warn` the runner-side gate is not applied, so the job is
+  submitted and runs despite the skew). It is additive (the per-unit
+  diagnostics and `environment.remote` fields above are unchanged), appears
+  once even for `hosts > 1`, and is not emitted for `match` / `unknown`, nor
+  under `runner_version_check: "warn"` when the run proceeded (that skew stays
+  in `environment.remote` only). It covers the case the pre-launch manifest
+  check cannot see (no manifest, or an entry without `klt_version`).
 - A single-job `environment.remote`, and each `environment.remote.fleet[]`
   entry of a sharded run (so mixed-version shards stay distinguishable), always
   carries `runner_klt_version` (the runner's own version, or `null` when it
@@ -2280,7 +2325,9 @@ reject (version/feature gate) instead of leaving the bare `job command exited
 87`. If the post-run runner identity shows a major.minor mismatch with the
 client (`environment.remote.runner_compatibility: "mismatch"`), the diagnostic
 also carries `runner_code: "batch_runner_version_mismatch"` and both klt
-versions. `--job-status` is a `status.json` passthrough only and never
+versions, and its message names the remedy: update the runner image, use a
+compatible client, or set `batch.runner_version_check: "warn"` to submit
+anyway. `--job-status` is a `status.json` passthrough only and never
 fetches outputs, so it can show just `job command exited 87`; read the full
 report for the cause.
 
@@ -3239,7 +3286,15 @@ not just equivalent.
   backend actually populates `environment.remote` (see "Remote backend"
   above) reports one `fleet[]` entry per host instead of a single block —
   each entry has the exact same fields as today's single-host block, or
-  `null` for a lost shard:
+  `null` for a lost shard — a shard that never returned a remote block,
+  whether it failed mid-run or was submitted but never launched (an
+  unlaunched shard additionally sets `unlaunched_shards` / `resumable`,
+  see "Unlaunched shards are a resumable signal" above). The array is
+  positional: index *i* is shard *i*, in the shard map's order, so a client
+  collecting per-job metadata across `fleet[]` must skip the `null` slots
+  rather than dereference them, and read job identity and runner skew from
+  the null-safe `job_ids` / `runner_compatibility` roll-ups (which omit the
+  `null` shards):
 
   ```json
   {
@@ -6823,7 +6878,12 @@ x86-64 (elsewhere set `OPENVAF_R_BIN`). The `.osdi` lands in the ignored
   multiply `NFIN`). KLayout's `\$11` / `VDD$1` names become `11` / `VDD_1`.
   The extractor's `M` card (`finfet_card`) is unchanged: it stays the
   CDL-shaped card LVS compares. Measured: `NFIN=6` draws exactly twice the
-  drain current of `NFIN=3`.
+  drain current of `NFIN=3`. `*` comment lines pass through verbatim, so a
+  `* Generated by …` provenance header from the source lands unchanged in
+  the adapted copy: the adapted bytes are the adapter's output, not its
+  authorship claim. The adapted copy is a private work-dir artefact derived
+  from the request's `netlist` (`netlist_sha256_in`); `environment.adapt`'s
+  `netlist_sha256_out` pins the adapted bytes, inherited header included.
 - The extracted cell's separate `VDD`/`VDD$1` (tap vs. source) and
   `vsubs`/`VSS` pins are distinct nets; the testbench ties them.
 
