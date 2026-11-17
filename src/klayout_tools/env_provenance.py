@@ -636,13 +636,11 @@ def environment_provenance(
 
 def _klt_version() -> str | None:
     from ._provenance import _klt_version as resolve
-
     return resolve()
 
 
 def _klayout_version() -> str | None:
     from ._provenance import _klayout_version as resolve
-
     return resolve()
 
 

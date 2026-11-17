@@ -10,7 +10,7 @@ per-file size ceiling.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
 __all__ = ["scrub_payload"]
@@ -34,10 +34,19 @@ def _compile(subs: Iterable[tuple[str, str]]) -> list[tuple[re.Pattern[str], str
     return compiled
 
 
+def _literal_replacement(tag: str) -> Callable[[re.Match[str]], str]:
+    """A ``re.sub`` replacement function emitting ``tag`` verbatim: a string
+    replacement would treat backslashes in ``tag`` as escapes."""
+
+    def replace(_match: re.Match[str]) -> str:
+        return tag
+
+    return replace
+
+
 def _scrub_text(text: str, compiled: list[tuple[re.Pattern[str], str]]) -> str:
     for pattern, tag in compiled:
-        # A function replacement keeps backslashes in ``tag`` literal.
-        text = pattern.sub(lambda _m: tag, text)
+        text = pattern.sub(_literal_replacement(tag), text)
     return text
 
 
