@@ -155,3 +155,34 @@ def test_explicit_strap_splits_true_passes_through(tmp_path, pdk_root):
         "strap_splits" in warning and "diverges" in warning
         for warning in response["warnings"]
     )
+
+
+def test_explicit_unit_w_um_override_fits_strap_check(tmp_path, pdk_root):
+    """An explicit `params.w_um` override is the *per-unit* PCell param
+    (`apply_diff_pair_unit_w_um` deliberately leaves it alone), so the strap
+    width check uses it as-is instead of dividing it by `splits` again -- a
+    per-unit width that fits (3.0 um >= 2.35 um at splits=2) derives the
+    strap. Dividing the override too (3.0/2 < 2.35) silently skipped it,
+    leaving every sub-instance but one per device floating."""
+    request = _two_fet_request(tmp_path, pdk_root, {"w_um": 3.0}, "dp_explicit_w_um")
+    response = execute_layout_plan_document(request, request_dir=str(tmp_path))
+
+    group = response["device_groups"][0]
+    assert group["resolved_params"]["w_um"] == 3.0
+    assert group["resolved_params"]["strap_splits"] is True
+    ports = _plan_device_ports(response)
+    assert set(ports) == {"Q1_S", "Q1_D", "Q1_G", "Q2_S", "Q2_D", "Q2_G"}
+
+
+def test_explicit_unit_w_um_override_below_floor_does_not_derive(tmp_path, pdk_root):
+    """Symmetric negative: an explicit per-unit `w_um` below the strap
+    floor derives nothing -- the override is *not* divided by `splits`, so
+    the floor comparison is apples-to-apples on both sides."""
+    request = _two_fet_request(
+        tmp_path, pdk_root, {"w_um": 2.0}, "dp_explicit_w_um_narrow"
+    )
+    response = execute_layout_plan_document(request, request_dir=str(tmp_path))
+
+    group = response["device_groups"][0]
+    assert group["resolved_params"].get("strap_splits") is None
+    assert not any("strap_splits" in warning for warning in response["warnings"])

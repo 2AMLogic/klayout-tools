@@ -154,12 +154,28 @@ def apply_strap_splits(
         return []
     from .gen_diff_pair_strap import STRAP_MIN_W_UM
 
-    w_raw = overrides.get("w_um", derived.get("w_um"))
+    # The two `w_um` sources are in different units: an explicit
+    # `params.w_um` override is already the per-unit PCell param
+    # (`apply_diff_pair_unit_w_um` deliberately leaves it alone), while the
+    # netlist-derived value is the whole matched device's width and still
+    # needs the same `splits` division the resolved param gets. Dividing the
+    # override too understated the unit width by a factor of `splits`, so a
+    # plan whose per-unit width fit the strap silently derived nothing --
+    # #5557's floating-sub-instances failure mode.
+    if "w_um" in overrides:
+        unit_w = overrides["w_um"]
+    else:
+        whole_w = derived.get("w_um")
+        unit_w = (
+            whole_w / splits
+            if isinstance(whole_w, (int, float)) and not isinstance(whole_w, bool)
+            else None
+        )
     if not (
-        isinstance(w_raw, (int, float)) and not isinstance(w_raw, bool) and w_raw > 0
+        isinstance(unit_w, (int, float)) and not isinstance(unit_w, bool) and unit_w > 0
     ):
         return []
-    if w_raw / splits < STRAP_MIN_W_UM:
+    if unit_w < STRAP_MIN_W_UM:
         return []
     derived["strap_splits"] = True
     resolved["strap_splits"] = True

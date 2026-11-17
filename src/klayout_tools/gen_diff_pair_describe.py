@@ -149,16 +149,14 @@ def _diff_pair_describe(
     unit = info["unit"]
     metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
     poly_pair = _PDK_ROLE_LAYERS[family]["poly"]
+    # `metal`/`poly` are the roles every supported family draws the device
+    # on -- the table's `| None` values cover genuinely optional roles
+    # (`well`, `metal2`, ...), not these two.
+    assert metal_pair is not None and poly_pair is not None
     metal_layer = {"layer": metal_pair[0], "datatype": metal_pair[1], "name": None}
     poly_layer = {"layer": poly_pair[0], "datatype": poly_pair[1], "name": None}
     # #492 -- see the equivalent comment in `_mos_array_describe`.
     gate_layer = metal_layer if params["gate_contact"] else poly_layer
-    strap_metal_pair = _PDK_ROLE_LAYERS[family]["metal2"]
-    strap_metal_layer = {
-        "layer": strap_metal_pair[0],
-        "datatype": strap_metal_pair[1],
-        "name": None,
-    }
     prefix = "M" if params["mirror"] else "Q"
 
     ports = []
@@ -168,7 +166,17 @@ def _diff_pair_describe(
         # port sitting on its terminal's met1 strap rail at the trunk lane
         # (the rail's outermost point, where a composer route can land
         # without crossing another strap). Port layer is the strap's own
-        # metal (metal2/met1), not the unit pads' local metal.
+        # metal (metal2/met1), not the unit pads' local metal. The optional
+        # `metal2` role is only read here, under the strap guard -- an
+        # unstrapped request never touches it -- and the strap cannot be
+        # present unless the family's deck defines the layer it was drawn on.
+        strap_metal_pair = _PDK_ROLE_LAYERS[family]["metal2"]
+        assert strap_metal_pair is not None
+        strap_metal_layer = {
+            "layer": strap_metal_pair[0],
+            "datatype": strap_metal_pair[1],
+            "name": None,
+        }
         direction_by_terminal = {"S": 180, "D": 0, "G": 90}
         for entry in strap["ports"]:
             ports.append(
