@@ -265,6 +265,7 @@ from .functional_verification_sdf_steps import (
     _apply_sdf_header_normalization,
     _sdf_refusal_error,
 )
+from .request_paths import RequestPaths
 from .reset_coverage import ResetCoverageError, sequential_elements
 
 #: Bumped only on a non-additive (breaking) change to this command's own
@@ -661,6 +662,9 @@ class FunctionalVerificationError(Exception):
             self.code = code
 
 
+_rpath = RequestPaths(FunctionalVerificationError)
+
+
 # ---------------------------------------------------------------------------
 # request loading (same file / "-" / inline-JSON convention as `klt lvs`)
 # ---------------------------------------------------------------------------
@@ -765,11 +769,7 @@ def _resolve_testbench(
             raise FunctionalVerificationError(
                 "request.testbench.search_path must be a non-empty string when given"
             )
-        search_dir = (
-            search_path
-            if os.path.isabs(search_path)
-            else os.path.join(request_dir, search_path)
-        )
+        search_dir = _rpath(search_path, request_dir, "request.testbench.search_path")
     else:
         search_dir = request_dir
 
@@ -982,9 +982,7 @@ def _resolve_initial_state(
             f"options.initial_state requires engine 'icarus' -- engine "
             f"'{engine}' cannot force cell-model pins hierarchically"
         )
-    netlist_path = (
-        netlist if os.path.isabs(netlist) else os.path.join(request_dir, netlist)
-    )
+    netlist_path = _rpath(netlist, request_dir, "request.options.initial_state.netlist")
     if not os.path.isfile(netlist_path):
         raise FunctionalVerificationError(
             f"request.options.initial_state.netlist '{netlist_path}' not found"
@@ -1278,7 +1276,7 @@ def _resolve_source_defines(
                 "request.options.source_defines keys must be non-empty strings"
             )
         path = os.path.abspath(
-            key if os.path.isabs(key) else os.path.join(request_dir, key)
+            _rpath(key, request_dir, "request.options.source_defines key")
         )
         if path not in sources:
             raise FunctionalVerificationError(
@@ -1399,7 +1397,7 @@ def _resolve_includes(includes: Any, request_dir: str) -> list[str]:
 
     resolved: list[str] = []
     for entry in includes:
-        path = entry if os.path.isabs(entry) else os.path.join(request_dir, entry)
+        path = _rpath(entry, request_dir, "request.options.includes entry")
         if not os.path.isdir(path):
             raise FunctionalVerificationError(f"include directory not found: {entry}")
         resolved.append(os.path.abspath(path))
