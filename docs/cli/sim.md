@@ -300,7 +300,7 @@ capture records no digest. With no usable worker banner, `version_banner` is
 #2834 or the SSH `remote` backend, the worker's own `version_probe` code for
 a probe that failed there, `"disagreement"` for sharded members that do not
 agree, and `"error"` with every member's code named in `reason` when sharded
-members each failed the probe for *different* reasons — issue
+members each failed the probe for *different* reasons, issue
 [#6260](https://github.com/2AMLogic/klayout-tools/issues/6260)) — never the
 submitter's banner. `"absent"` therefore always means no worker probe code was
 reported at all. The submitting host's probe is kept
