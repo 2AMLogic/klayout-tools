@@ -523,6 +523,76 @@ def test_yosys_error_message_missing_script_no_hint(tmp_path):
     assert "WASI" not in message
 
 
+# Issue #5804: a WASI/wasm yosys build that exhausts the wasm32 guest's
+# ~4 GiB linear-memory ceiling dies with a bare wasmtime trap -- no yosys
+# ``ERROR:`` line at all -- so the no-``ERROR:`` tail branch must recognise
+# the trap signature (on either stream) and append the native-build hint.
+_WASM_TRAP_TRACEBACK = (
+    "Traceback (most recent call last):\n"
+    '  File "/usr/local/bin/yowasp-yosys", line 8, in <module>\n'
+    "    sys.exit(main())\n"
+    "wasmtime._trap.Trap: unreachable\n"
+    "\n"
+    "Caused by:\n"
+    "    thrown Wasm exception\n"
+)
+
+
+def test_yosys_error_message_wasm_trap_hint():
+    """A trap traceback with no yosys ``ERROR:`` line gets the wasm memory
+    ceiling hint naming the native-build remedy -- issue #5804."""
+    message = equiv._yosys_error_message("", _WASM_TRAP_TRACEBACK, 1)
+
+    assert message.startswith("yosys exited with code 1:")
+    assert "wasm" in message.lower()
+    assert "4 GiB" in message
+    assert "request.yosys_binary" in message
+    assert "KLT_YOSYS_BINARY" in message
+
+
+def test_yosys_error_message_wasm_trap_on_stdout_hint():
+    """The trap signature on stdout (not stderr) is still recognised."""
+    message = equiv._yosys_error_message(_WASM_TRAP_TRACEBACK, "", 1)
+
+    assert message.startswith("yosys exited with code 1:")
+    assert "4 GiB" in message
+    assert "KLT_YOSYS_BINARY" in message
+
+
+def test_yosys_error_message_error_line_still_wins_over_trap():
+    """A run carrying both a trap traceback and a yosys ``ERROR:`` line
+    keeps today's ``ERROR:``-line message -- no trap hint appended."""
+    stderr = _WASM_TRAP_TRACEBACK + "ERROR: Prove terminated abnormally.\n"
+
+    message = equiv._yosys_error_message("", stderr, 1)
+
+    assert message == (
+        "yosys equivalence check failed: ERROR: Prove terminated abnormally."
+    )
+    assert "4 GiB" not in message
+
+
+def test_yosys_error_message_unrelated_tail_unchanged():
+    """Output with neither a trap signature nor an ``ERROR:`` line keeps
+    today's tail-of-output message verbatim."""
+    stderr = "warning: Dumping selected design.\nsecond line\nthird line\n"
+
+    message = equiv._yosys_error_message("", stderr, 2)
+
+    assert message == (
+        "yosys exited with code 2: warning: Dumping selected design."
+        " second line third line"
+    )
+
+
+def test_yosys_error_message_empty_output_unchanged():
+    """Empty captured output keeps the ``no output captured`` path, and no
+    hint is appended (the trap signature cannot be present)."""
+    message = equiv._yosys_error_message("", "", 1)
+
+    assert message == "yosys exited with code 1: no output captured"
+
+
 # Issue #2453: the WASI hint branches on whether the unreadable script lies
 # inside the host temp dir (likely shadowed by the sandbox's private /tmp
 # mount -> "relocate the request" advice) or outside it (generic advice).

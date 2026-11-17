@@ -110,7 +110,13 @@ into your checkout or under `$HOME`), which keeps a deliberately pinned
 engine; ensuring a native `yosys` build precedes the WASI-sandboxed one on
 `$PATH` (e.g. `PATH=/usr/bin:$PATH klt synthesize ...`) is only the fallback,
 since it swaps out the engine build. For a script outside the host temp dir
-the hint keeps the generic native-`yosys` advice.
+the hint keeps the generic native-`yosys` advice. The same WASI builds have
+a separate, second failure mode: a query that exhausts the wasm32 guest's
+~4 GiB linear-memory ceiling dies with an unlabelled
+`thrown Wasm exception` trap and no `ERROR:` line — `klt synthesize` and
+`klt equiv` append a hint for that shape too, and
+[`docs/cli/equiv.md`](equiv.md) ("Which binaries are run") documents it
+(issue #5804).
 
 One post-processing stage is **not** Yosys: after `write_verilog` produces
 the mapped netlist, `klt-statime-native` (a compiled Rust extension, called

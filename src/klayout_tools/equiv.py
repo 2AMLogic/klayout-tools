@@ -64,6 +64,7 @@ from ._provenance import (
     build_provenance,
     content_hash,
     wasi_sandbox_hint_if_applicable,
+    wasm_trap_hint_if_applicable,
 )
 from ._report_verify import (
     VOLATILE_FLOW_PATHS,
@@ -771,6 +772,15 @@ def _yosys_error_message(stdout: str, stderr: str, returncode: int | None) -> st
     mount and leads with relocating the request (issue #2453). A script
     path that genuinely does not exist is a different failure and is left
     unchanged.
+
+    In the no-``ERROR:`` tail branch, a run whose captured output carries
+    the wasmtime trap signature (``wasmtime._trap.Trap`` /
+    ``thrown Wasm exception`` -- a WASI yosys build, e.g. yowasp-yosys,
+    exhausting the wasm32 guest's ~4 GiB memory ceiling) appends the
+    shared ``wasm_trap_hint_if_applicable`` hint naming the ceiling and
+    the ``request.yosys_binary``/``$KLT_YOSYS_BINARY`` native-build remedy
+    (issue #5804). Output carrying neither an ``ERROR:`` line nor a trap
+    signature keeps today's tail-of-output message verbatim.
     """
     for stream in (stderr, stdout):
         error_lines = [line.strip() for line in stream.splitlines() if "ERROR:" in line]
@@ -781,7 +791,8 @@ def _yosys_error_message(stdout: str, stderr: str, returncode: int | None) -> st
 
     tail_source = (stderr or stdout).strip().splitlines()
     snippet = " ".join(tail_source[-3:]) if tail_source else "no output captured"
-    return f"yosys exited with code {returncode}: {snippet}"
+    message = f"yosys exited with code {returncode}: {snippet}"
+    return message + wasm_trap_hint_if_applicable(f"{stderr}\n{stdout}")
 
 
 def _classify_sat_result(stdout: str) -> tuple[str, list[dict[str, str]]]:

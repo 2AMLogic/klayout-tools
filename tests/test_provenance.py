@@ -857,3 +857,61 @@ def test_build_handle_fields_are_volatile_for_rerun_diff():
 
     for field in ("klt_git_commit", "klt_reinstall_spec"):
         assert ("provenance", field) in _report_verify.VOLATILE_PROVENANCE_PATHS
+
+
+# --------------------------------------------------------------------------- #
+# wasm_trap_hint_if_applicable (issue #5804)
+# --------------------------------------------------------------------------- #
+#
+# A WASI/wasm yosys build (e.g. yowasp-yosys) runs inside a wasm32 guest
+# whose linear memory is capped at ~4 GiB; a heavy `sat -seq <depth>` query
+# over a large flattened netlist can exceed that ceiling and die as a bare
+# wasmtime trap -- no yosys `ERROR:` line anywhere. The helper is a pure
+# string test over the captured output, like the WASI-sandbox hint above.
+# Precedence between the trap hint and a yosys `ERROR:` line lives at the
+# call sites (equiv.py / synthesize.py consult this helper only in their
+# no-`ERROR:` tail branch), so the helper itself is signature-only by
+# design: a trap co-occurring with an `ERROR:` line still matches here.
+
+_WASM_TRAP_TRACEBACK = (
+    "Traceback (most recent call last):\n"
+    '  File "/usr/local/bin/yowasp-yosys", line 8, in <module>\n'
+    "    sys.exit(main())\n"
+    "wasmtime._trap.Trap: unreachable\n"
+    "\n"
+    "Caused by:\n"
+    "    thrown Wasm exception\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("output", "expect_hint"),
+    [
+        (_WASM_TRAP_TRACEBACK, True),
+        (_WASM_TRAP_TRACEBACK + "ERROR: Prove terminated abnormally.\n", True),
+        ("wasmtime._trap.Trap: unreachable\n", True),
+        ("Caused by:\n    thrown Wasm exception\n", True),
+        ("ERROR: Prove terminated abnormally.\n", False),
+        ("warning: Dumping selected design.\n", False),
+        ("", False),
+    ],
+    ids=[
+        "trap_traceback",
+        "trap_plus_error_line_is_signature_only",
+        "trap_class_alone",
+        "caused_by_line_alone",
+        "error_line_only",
+        "unrelated_stderr",
+        "empty",
+    ],
+)
+def test_wasm_trap_hint_if_applicable(output, expect_hint):
+    hint = _provenance.wasm_trap_hint_if_applicable(output)
+    if expect_hint:
+        assert hint
+        assert "wasm" in hint.lower()
+        assert "4 GiB" in hint
+        assert "request.yosys_binary" in hint
+        assert "KLT_YOSYS_BINARY" in hint
+    else:
+        assert hint == ""
