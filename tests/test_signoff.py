@@ -1080,6 +1080,23 @@ FUNCTIONAL_VERIFICATION_SDF_ENVELOPE = {
     },
 }
 
+#: The same SDF envelope from a `klt` that records the shared `provenance`
+#: block (issue #5550): `provenance.input.content_hash` digests the RTL the
+#: run built (role `source`), not the report's own bytes -- the value a
+#: manifest `content_hash` pin binds for this kind.
+FUNCTIONAL_VERIFICATION_SDF_PROVENANCE_ENVELOPE = {
+    **FUNCTIONAL_VERIFICATION_SDF_ENVELOPE,
+    "provenance": {
+        "klt_version": "0.9.2",
+        "klt_git_commit": None,
+        "klt_reinstall_spec": None,
+        "klayout_version": "0.30.12",
+        "pdk": None,
+        "deck": None,
+        "input": {"content_hash": "sha256:rtl-a", "role": "source"},
+    },
+}
+
 #: A `klt place-and-route` response (docs/cli/place-and-route.md), trimmed to
 #: the fields this module reasons about plus the ones that overlap `klt
 #: sta`'s own shape. Two things are being asserted by this fixture at once:
@@ -3231,6 +3248,46 @@ def test_power_evidence_excluded_from_provenance_consistency(tmp_path):
 
     assert result["provenance_consistency"]["ok"] is True
     assert result["status"] == "pass"
+
+
+def test_functional_verification_source_digest_agrees_with_synthesize(tmp_path):
+    """Issue #5550: an FV envelope's `source`-role digest joins
+    `_provenance_consistency`'s per-role comparison, so an FV citation and a
+    `klt synthesize` citation over the same RTL set agree instead of the FV
+    report being invisible to the gate."""
+    fv_path = _write(
+        tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_SDF_PROVENANCE_ENVELOPE
+    )
+    synth = _synthesize_envelope()
+    synth["provenance"] = {"input": {"content_hash": "sha256:rtl-a", "role": "source"}}
+    synth_path = _write(tmp_path, "synth.json", synth)
+
+    result = build_signoff([fv_path, synth_path])
+
+    assert result["provenance_consistency"]["ok"] is True
+    assert result["status"] == "pass"
+
+
+def test_functional_verification_source_digest_disagreement_refuses(tmp_path):
+    """The same bundle with the RTL edited under one report only -- the
+    per-role comparison now catches what a provenance-less FV envelope could
+    never participate in (issue #5550, the #2027 per-role comparison)."""
+    fv_path = _write(
+        tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_SDF_PROVENANCE_ENVELOPE
+    )
+    synth = _synthesize_envelope()
+    synth["provenance"] = {"input": {"content_hash": "sha256:rtl-b", "role": "source"}}
+    synth_path = _write(tmp_path, "synth.json", synth)
+
+    result = build_signoff([fv_path, synth_path])
+
+    assert result["provenance_consistency"]["ok"] is False
+    mismatches = result["provenance_consistency"]["mismatches"]
+    assert {
+        "field": "input.content_hash",
+        "role": "source",
+    }.items() <= mismatches[0].items()
+    assert result["status"] == "refused"
 
 
 # --------------------------------------------------------------------------- #

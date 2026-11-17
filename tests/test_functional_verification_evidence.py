@@ -8,10 +8,13 @@ status alone cannot accidentally qualify an unchecked design.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
+from pathlib import Path
 
 import pytest
 
+from klayout_tools._provenance import _combined_content_hash
 from klayout_tools.cli import main
 from klayout_tools.functional_verification import (
     FunctionalVerificationError,
@@ -211,3 +214,176 @@ def test_external_contradictory_counts_or_records_cannot_qualify(tmp_path, updat
     envelope.update(updates)
     # Exercise a JSON round-trip, like external and legacy saved artifacts.
     _assert_signoff_verdict(tmp_path, json.loads(json.dumps(envelope)), passed=False)
+
+
+# --------------------------------------------------------------------------- #
+# Response `provenance` block (issue #5550)
+# --------------------------------------------------------------------------- #
+
+
+def _run_stubbed(tmp_path, monkeypatch, request, *, output_dir=None):
+    runner = _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+    report = run_functional_verification(
+        _write_request(tmp_path / "request.json", request), output_dir
+    )
+    return report, runner
+
+
+def _file_digest(path) -> str:
+    return "sha256:" + hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def test_provenance_digests_single_source_with_source_role(tmp_path, monkeypatch):
+    _setup_inputs(tmp_path)
+    report, _ = _run_stubbed(tmp_path, monkeypatch, _base_request())
+
+    provenance = report["provenance"]
+    assert provenance["input"] == {
+        "content_hash": _file_digest(tmp_path / "gcd.v"),
+        "role": "source",
+    }
+    # The shared block's fields, with the two this verb never resolves null.
+    assert provenance["pdk"] is None
+    assert provenance["deck"] is None
+    for field in (
+        "klt_version",
+        "klt_git_commit",
+        "klt_reinstall_spec",
+        "klayout_version",
+    ):
+        assert field in provenance
+    assert report["schema_version"] == 2  # additive block: no bump (issue #5550)
+
+
+def test_provenance_multi_source_digest_is_combined_and_order_independent(
+    tmp_path, monkeypatch
+):
+    _setup_inputs(tmp_path)
+    (tmp_path / "util.v").write_text("module util; endmodule\n")
+    expected = _combined_content_hash(
+        [str(tmp_path / "gcd.v"), str(tmp_path / "util.v")]
+    )
+
+    report, _ = _run_stubbed(
+        tmp_path, monkeypatch, _base_request(sources=["gcd.v", "util.v"])
+    )
+    assert report["provenance"]["input"] == {
+        "content_hash": expected,
+        "role": "source",
+    }
+
+    # Same contents in the other order: the scheme sorts before hashing.
+    report, _ = _run_stubbed(
+        tmp_path, monkeypatch, _base_request(sources=["util.v", "gcd.v"])
+    )
+    assert report["provenance"]["input"]["content_hash"] == expected
+
+
+def test_provenance_digest_is_checkout_and_output_path_independent(
+    tmp_path, monkeypatch
+):
+    digests = []
+    for name, out in (("a", None), ("b", "custom-out")):
+        work = tmp_path / name
+        work.mkdir()
+        _setup_inputs(work)
+        output_dir = str(work / out) if out is not None else None
+        report, _ = _run_stubbed(
+            work, monkeypatch, _base_request(), output_dir=output_dir
+        )
+        digests.append(report["provenance"]["input"]["content_hash"])
+    assert digests[0] == digests[1]
+
+
+def test_provenance_digest_changes_when_rtl_edited(tmp_path, monkeypatch):
+    _setup_inputs(tmp_path)
+    report, _ = _run_stubbed(tmp_path, monkeypatch, _base_request())
+    first = report["provenance"]["input"]["content_hash"]
+
+    edited = "module gcd(input wire clk, input wire rst); endmodule\n"
+    (tmp_path / "gcd.v").write_text(edited)
+    report, _ = _run_stubbed(tmp_path, monkeypatch, _base_request())
+    second = report["provenance"]["input"]["content_hash"]
+
+    assert first != second
+    assert second == "sha256:" + hashlib.sha256(edited.encode()).hexdigest()
+
+
+def test_provenance_digest_covers_user_sources_not_generated_wrappers(
+    tmp_path, monkeypatch
+):
+    """`options.source_defines` substitutes generated wrapper files for the
+    user's sources in the build list; the digest must still cover the
+    originals (issue #5550's trap: hashing the post-rewrite list would digest
+    run-specific files from `output_dir`)."""
+    _setup_inputs(tmp_path)
+    (tmp_path / "macro.v").write_text("module macro; endmodule\n")
+    request = _base_request(
+        options={"source_defines": {"macro.v": {"FUNCTIONAL": "1"}}}
+    )
+    request["sources"] = ["gcd.v", "macro.v"]
+
+    report, runner = _run_stubbed(tmp_path, monkeypatch, request)
+
+    assert report["provenance"]["input"]["content_hash"] == _combined_content_hash(
+        [str(tmp_path / "gcd.v"), str(tmp_path / "macro.v")]
+    )
+    # The build list really was rewritten -- the digest is not merely
+    # re-reading it. The wrapper is a generated `define/`include shim that
+    # embeds the original's absolute path, i.e. exactly the run-specific
+    # file the digest must not cover.
+    built = runner.build_kwargs["sources"]
+    assert built[1] != str((tmp_path / "macro.v").resolve())
+    wrapper = Path(built[1]).read_text()
+    assert "`include" in wrapper and "macro.v" in wrapper
+    assert "scoped_defines" in Path(built[1]).name
+
+
+def test_provenance_digest_excludes_cocotb_testbench(tmp_path, monkeypatch):
+    """The testbench is a resolved input of the run but never a
+    `request.sources` entry; the digest must not fold it in (the same digest
+    a `klt synthesize` run over the same RTL records -- `_provenance_
+    consistency` compares them)."""
+    _setup_inputs(tmp_path)
+    (tmp_path / "util.v").write_text("module util; endmodule\n")
+    expected = _combined_content_hash(
+        [str(tmp_path / "gcd.v"), str(tmp_path / "util.v")]
+    )
+    report, _ = _run_stubbed(
+        tmp_path, monkeypatch, _base_request(sources=["gcd.v", "util.v"])
+    )
+    assert report["provenance"]["input"]["content_hash"] == expected
+    assert expected != _combined_content_hash(
+        [
+            str(tmp_path / "gcd.v"),
+            str(tmp_path / "util.v"),
+            str(tmp_path / "test_gcd.py"),
+        ]
+    )
+
+
+def test_from_synthesize_run_leaves_provenance_input_null(tmp_path, monkeypatch):
+    """A `from_synthesize` run's design input is the synthesized netlist,
+    already pinned by the additive `from_synthesize.netlist_sha256` block; a
+    `source`-role digest here could only disagree with the synthesize
+    report's own RTL digest and refuse a coherent bundle."""
+    _setup_inputs(tmp_path)
+    netlist = tmp_path / "gcd_synth.v"
+    netlist.write_text("module gcd(input a, output y); assign y = a; endmodule\n")
+    digest = hashlib.sha256(netlist.read_bytes()).hexdigest()
+    (tmp_path / "report.json").write_text(
+        json.dumps(
+            {
+                "hdl_toplevel": "gcd",
+                "netlist_path": str(netlist),
+                "netlist_sha256": digest,
+            }
+        )
+    )
+    request = _base_request(options={"from_synthesize": {"report": "report.json"}})
+    request["sources"] = []
+
+    report, _ = _run_stubbed(tmp_path, monkeypatch, request)
+
+    assert report["provenance"]["input"] is None
+    assert report["from_synthesize"]["netlist_sha256"] == digest

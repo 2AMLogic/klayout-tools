@@ -14,6 +14,30 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt functional-verification`: the response records a shared `provenance`
+  block, and a signoff `content_hash` pin binds the RTL, not the report's
+  bytes** (#5550, 2026-11-17): the response carried no `provenance` key, so a
+  `klt signoff` manifest citing the report as item 5/7 evidence could only
+  hash-pin it through the #4893 evidence-file re-hash — binding the report's
+  own bytes, blind to any RTL edit underneath it, with command-backed pinned
+  citations grading `unverifiable_provenance`. The response now carries the
+  shared block: `provenance.input.content_hash` (role `source`) digests
+  `request.sources` as resolved *before* the SDF/initial-state shims,
+  escaped-divider renames, and scoped-define wrappers are substituted, using
+  the same content-only combined scheme `klt
+  synthesize`/`klt equiv` record — so the digest is byte-identical for the
+  same RTL under a different checkout path or `-o` directory, excludes the
+  cocotb testbench, the SDF, and every generated wrapper, and the report
+  joins `_provenance_consistency`'s per-role cross-check against
+  `synthesize`/`equiv` citations over the same sources. `options.from_synthesize`
+  runs record `input: null` (their netlist is already pinned by
+  `from_synthesize.netlist_sha256`). Grading change, disclosed: a pinned
+  citation now compares against the RTL digest; the `evidence_file` basis
+  applies only to a legacy envelope with no `provenance` key, so a manifest
+  pinned under #4893 (the report's byte hash) grades `stale_evidence`
+  against a new report — re-pin against `provenance.input.content_hash`. No
+  `schema_version` bump: the block is additive by contract.
+
 - **`klt yield`: a damaged gzip input is an error envelope, not a traceback**
   (#5543, 2026-11-13): a gzip samples or `--limits` file whose deflate stream
   is *corrupt* — as opposed to truncated, or carrying a bad CRC trailer, both

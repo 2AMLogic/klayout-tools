@@ -6559,7 +6559,15 @@ def _resolve_evidence(
         )
 
     actual_hash, content_hash_basis, input_verified = rehash_evidence_file(
-        check_kind, spec, file_label, actual_hash, input_verified
+        check_kind,
+        spec,
+        file_label,
+        actual_hash,
+        input_verified,
+        # Issue #5550: a provenance-bearing functional-verification envelope
+        # is pinned by its RTL digest, not by the #4893 evidence-file re-hash
+        # -- that fallback is a legacy-envelope stand-in only.
+        envelope_has_provenance=bool(envelope.get("provenance")),
     )
 
     pex_inputs, input_members, input_verified = _fold_kind_inputs(

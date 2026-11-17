@@ -1794,8 +1794,14 @@ Coverage Summary:
 
 
 def _stub_verilator_coverage(monkeypatch, *, summary=_COVERAGE_SUMMARY, returncode=0):
+    real_run = fv.subprocess.run
+
     def fake_run(cmd, **kwargs):
-        assert cmd[0] == "verilator_coverage"
+        # Anything that is not this stub's subject (issue #5550: the
+        # `provenance` block's build-identity `git` probe on a dev checkout)
+        # goes to the real subprocess untouched.
+        if cmd[0] != "verilator_coverage":
+            return real_run(cmd, **kwargs)
         if cmd[1] == "--write-info":
             with open(cmd[2], "w", encoding="utf-8") as handle:
                 handle.write("TN:verilator_coverage\nSF:gcd.v\nDA:15,538\n")

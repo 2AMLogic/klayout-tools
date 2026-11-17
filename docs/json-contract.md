@@ -582,12 +582,18 @@ and [#2124](https://github.com/2AMLogic/klayout-tools/issues/2124).
 
 Verbs whose verdict depends on the exact tool build, PDK release, and rule
 deck — currently `drc`, `lvs`, `extract`, `sim`, `size`, `precheck`, `erc`,
-`power`, `economy`, `ring-check`, `gen`, `gen-compose`, and `array-check` — emit a
+`power`, `economy`, `ring-check`, `gen`, `gen-compose`, and `array-check`
+— emit a
 shared top-level `provenance` block so a "clean"/"pass"/"match" result is
 auditable and reproducible later. Two runs made against different deck
 revisions or PDK releases are otherwise indistinguishable in the output, so a
 signoff claim can't be checked or reproduced. This block is **additive** (see
-above): adopting it required no `schema_version` bump on any verb.
+above): adopting it required no `schema_version` bump on any verb. The
+HDL-flow verbs `synthesize`, `equiv`, and `functional-verification` (issue
+#5550), and `klt sta`, emit the same block with `pdk`/`deck` as their run
+resolved them — for those, `input.content_hash` (role `source`) pins the
+design *sources* the run checked, binding a committed report to the RTL it
+was built from rather than to its own bytes.
 
 **Build drift in `klt signoff` (issue #4223).** `klt signoff` compares each
 cited check's `provenance.klt_version` with the running build and reports an
