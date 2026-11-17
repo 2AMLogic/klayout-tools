@@ -8,6 +8,7 @@ import os
 
 import pytest
 
+from klayout_tools.cli import main
 from klayout_tools.sim_errors import SimError
 from klayout_tools.sim_report_check import check_sim_report
 from klayout_tools.sim_staging import (
@@ -208,3 +209,66 @@ def test_writer_identity_and_closure_round_trip(tree):
     result = check_sim_report(str(report))
     assert result["status"] == "match"
     assert result["diagnosis"] == "intact"
+
+
+def test_cli_check_exit_codes_and_text_rendering(tree, capsys):
+    tmp, top, inc = tree
+    report = _write(tmp, top, inc)
+    assert main(["sim", "--check", report, "--format", "json"]) == 0
+    envelope = json.loads(capsys.readouterr().out)
+    assert envelope["status"] == "match"
+    assert envelope["diagnosis"] == "intact"
+
+    top.write_text(".include models_a.spice\nr1 n1 0 2k\n")
+    assert main(["sim", "--check", report, "--format", "text"]) == 3
+    assert "diagnosis: electrical" in capsys.readouterr().out
+
+
+def test_cli_check_text_renders_check_error(tree, capsys):
+    tmp, top, inc = tree
+    report = _write(tmp, top, inc)
+    os.remove(inc)
+    assert main(["sim", "--check", report, "--format", "text"]) == 3
+    out = capsys.readouterr().out
+    assert "error: closure file not found" in out
+    assert "diagnosis: indeterminate" in out
+
+
+def test_cli_check_text_renders_skipped(tree, capsys):
+    tmp, top, inc = tree
+    report = _write(tmp, top, inc)
+    _edit_report(
+        report,
+        lambda env: env["netlist_closure"].append(
+            {"target": "$PDK/x.lib", "sha256": None, "unhashed_reason": "env_var"}
+        ),
+    )
+    assert main(["sim", "--check", report, "--format", "text"]) == 3
+    out = capsys.readouterr().out
+    assert "[SKIPPED]" in out
+    assert "env_var" in out
+
+
+def test_cli_check_text_renders_note(tree, capsys):
+    tmp, top, inc = tree
+    report = _write(tmp, top, inc, netlist_identity="sha256:" + "0" * 64)
+    assert main(["sim", "--check", report, "--format", "text"]) == 3
+    out = capsys.readouterr().out
+    assert "diagnosis: normalization_changed" in out
+    assert "note:" in out
+
+
+def test_cli_unreadable_report_exits_1(tree):
+    tmp, _, _ = tree
+    assert main(["sim", "--check", str(tmp / "nope.json")]) == 1
+
+
+def test_cli_root_without_check_is_usage_error(tree):
+    tmp, _, _ = tree
+    assert main(["sim", "--root", str(tmp)]) == 2
+
+
+def test_cli_check_with_request_is_usage_error(tree):
+    tmp, _, _ = tree
+    report = _write(tmp, tmp / "top.cir", tmp / "models_a.spice")
+    assert main(["sim", "--check", report, "req.request.json"]) == 2
