@@ -51,6 +51,7 @@ from typing import (
 )
 
 from . import _report_verify_hints as hints
+from . import signoff_coverage_disclosure as disclosure
 from . import signoff_foundry_cell as foundry_cell
 from . import signoff_nothing_checked as vacuous
 from ._git_tracked import is_untracked_working_tree_file, repo_scoped_candidates
@@ -3259,11 +3260,9 @@ def _kind_gated_refusal(
     ``nothing_checked`` is checked first: an empty report is not post-layout
     evidence either, and "this measured nothing" names the more fundamental
     of the problems. The `klt yield` campaign-discipline gate is checked
-    last, since it is the narrowest -- it applies to one kind, and only once
-    the report has been established to have measured something and to be the
-    right kind of run. All are ordered *after* :func:`_check_passed` in the
-    caller, so a run that both failed and measured nothing is reported as the
-    failure it is.
+    last, since it is the narrowest. All are ordered *after*
+    :func:`_check_passed` in the caller, so a run that both failed and
+    measured nothing is reported as the failure it is.
     """
     if not _kind_is_accepted(check_kind, allowed_kinds):
         return None
@@ -5452,7 +5451,7 @@ def _grade_evidence(
     if sta_refusal is not None:
         return sta_refusal
 
-    # The two refusals that apply only to a kind this item actually accepts --
+    # The two refusals applying only to a kind this item accepts --
     # `nothing_checked` (issue #1996) and `not_post_layout` -- resolved
     # together, in that order. See `_kind_gated_refusal`.
     kind_gated = _kind_gated_refusal(
@@ -5536,8 +5535,7 @@ def _grade_check_outcome(
     gate, so it would otherwise hide the manifest ``content_hash`` pin --
     a comparable, genuinely stale one included -- behind the envelope's own
     failure, for every kind. :func:`~.signoff_evidence_pin.pin_disclosure`
-    carries it beside the verdict, never changing it; a stale pin also names
-    the failed comparison, as the staleness verdict's own detail does."""
+    carries it beside the verdict, never changing it."""
     if _check_passed(kind, checked):
         return {}, None
     failure_detail = _critical_metric_detail(envelope)
@@ -5558,8 +5556,7 @@ def _grade_check_outcome(
         }
     pin = pin_disclosure(spec, resolution, check_kind=kind)
     if pin.get("content_hash_pin") == PIN_STALE:
-        # Name the failed comparison, exactly as the staleness verdict does.
-        pin = hints.stale_pin(spec, resolution)
+        pin = hints.stale_pin(spec, resolution)  # name the failed compare
     return {}, ("unmet", reason, None, {**failure_detail, **pin})
 
 
@@ -5595,15 +5592,22 @@ def _kind_gated_failure_detail(
 
     Issue #3063: the early return would otherwise hide a stale
     ``content_hash`` pin behind the campaign refusal until the sample is
-    raised. Disclosed beside the verdict, never changing it -- via the
-    shared :func:`~.signoff_evidence_pin.pin_disclosure` since issue #5598.
+    raised; disclosed beside the verdict, never changing it, via
+    :func:`~.signoff_evidence_pin.pin_disclosure` (issue #5598).
 
     Issue #5479: a :data:`_REASON_NOTHING_CHECKED` refusal carries
     :func:`~.signoff_nothing_checked.nothing_checked_item_detail`, so this
     route names the artifact it read as :func:`_grade_check_outcome`'s does.
+    Issue #5643: a `malformed_coverage` refusal carries
+    :func:`~.signoff_coverage_disclosure.malformed_coverage_item_detail`
+    for the same reason, plus the validator's own message.
     """
     if kind_gated == _REASON_NOTHING_CHECKED:
         return vacuous.nothing_checked_item_detail(
+            envelope, _citation(dict(resolution))
+        )
+    if kind_gated == disclosure.MALFORMED_COVERAGE_REASON:
+        return disclosure.malformed_coverage_item_detail(
             envelope, _citation(dict(resolution))
         )
     campaign = _yield_campaign_disclosure(check_kind, envelope)
@@ -6537,8 +6541,8 @@ def _citation(resolution: dict[str, Any]) -> dict[str, Any]:
     # skipped *requested* work carries that statement, so an item graded
     # `"met"` off a pre-adapter producer -- one still reporting its
     # unconditional success token on a partial run -- discloses the gap
-    # instead of hiding it. Present only for a v1 `coverage` block that says
-    # `partial`, and never consulted by any grading rule.
+    # instead of hiding it. Present only for a v1 block saying `partial`;
+    # never consulted by any grading rule.
     partial = _partial_coverage_disclosure(resolution["envelope"])
     if partial is not None:
         citation["coverage_qualification"] = partial
@@ -6547,11 +6551,8 @@ def _citation(resolution: dict[str, Any]) -> dict[str, Any]:
     # then cwd-relative) carries that fact explicitly, so `content_hash:
     # null` here reads as "this input could not be verified" rather than
     # being indistinguishable from any other benign reason a hash might be
-    # absent. Present only in that one case -- never when the report simply
-    # named no samples document at all, and never consulted by any grading
-    # rule (an unpinned manifest entry still renders `"met"`; a pinned one
-    # already renders `"unmet"`/`unverifiable_provenance` via the
-    # `content_hash` mismatch check above `_citation` is only reached past).
+    # absent. Present only in that one case; never consulted by any grading
+    # rule.
     content_hash_unresolved = resolution.get("content_hash_unresolved")
     if content_hash_unresolved is not None:
         citation["content_hash_unresolved"] = content_hash_unresolved
@@ -6562,8 +6563,7 @@ def _citation(resolution: dict[str, Any]) -> dict[str, Any]:
     # that state (`"insufficient"`, `"not_detected"`) never reach here --
     # `_yield_campaign_refusal` has already rendered them `"unmet"` -- so
     # what this key carries on a `"met"` item is the state the claim rests
-    # on, including the `"not_declared"` case the grader deliberately does
-    # not refuse. Never consulted by any grading rule.
+    # on, including `"not_declared"`. Never consulted by any grading rule.
     campaign = _yield_campaign_disclosure(resolution["kind"], resolution["envelope"])
     if campaign is not None:
         citation["yield_campaign"] = campaign
