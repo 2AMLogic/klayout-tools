@@ -89,8 +89,7 @@ def _build_guard_ring_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "contacts_per_side_ns",
                 self.TypeInt,
                 "Tap contacts on the N/S (top/bottom) sides, spaced along "
-                "inner_width_um -- 0 (default) inherits contacts_per_side, "
-                "so existing single-scalar callers are unaffected",
+                "inner_width_um -- 0 (default) inherits contacts_per_side",
                 default=0,
             )
             self.param(

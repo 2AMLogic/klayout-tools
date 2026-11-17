@@ -97,7 +97,8 @@ def _mutation_subprocess_entry(kwargs: dict[str, Any], result_queue: Any) -> Non
         pass
     try:
         _build_and_test_variant(**kwargs)
-    except BaseException as exc:  # noqa: BLE001 - reported back, never raised across the process boundary
+    # - reported back, never raised across the process boundary
+    except BaseException as exc:
         try:
             result_queue.put(("error", f"{exc}"))
         except Exception:  # pragma: no cover - defensive: an unpicklable exc
