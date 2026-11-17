@@ -4107,7 +4107,7 @@ def _run_sim_corners(
             shard_fingerprint=_checkpoint_fingerprint(**fingerprint_inputs),
         )
 
-    if hosts == 1:
+    if hosts == 1 or attach_job_id is not None:  # #5777: attach never fans out
         # The exact pre-#376 call for the default case (no budget, no
         # resume, hosts=1, no fail-fast probe) -- `dispatch_points`/the four
         # new-since kwargs are identity no-ops then (`dispatch_points is
