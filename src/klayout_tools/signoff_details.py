@@ -143,3 +143,71 @@ _DETAIL_BUILDERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "model-run": _model_run_detail,
     "synthesize": _synthesize_detail,
 }
+
+
+# --------------------------------------------------------------------------- #
+# Citation-summary lines for the ``--format text`` rendering (moved here from
+# ``cli/signoff_cmd.py``, which sits at its file-size ratchet ceiling; the CLI
+# imports them back by name, so every call site reads exactly as before).
+# --------------------------------------------------------------------------- #
+
+#: How many entries of each `coverage` list the text rendering names before
+#: summarising the rest as `+N more`. The JSON output always carries every
+#: entry -- this cap only keeps a terminal line readable for a deck with
+#: dozens of rule-free layers.
+_COVERAGE_PREVIEW = 4
+
+
+def _format_coverage(coverage: dict) -> str:
+    """One line summarising a `drc` citation's three disclosed `coverage`
+    fields (issue #2002): each field's entry count, plus the first few
+    entries by name.
+
+    Counts first so a non-zero gap is visible without reading the names, and
+    every field is always shown -- including a `0` -- because "this deck
+    skipped no rules" is exactly the statement item 3 asks a claim to make,
+    and it must not be indistinguishable from a field that went unreported
+    (an envelope with no `coverage` block at all prints no coverage line at
+    all; see the call site).
+    """
+    parts = []
+    for field in (
+        "layers_in_stream_without_rules",
+        "rules_skipped",
+        "deck_scope",
+    ):
+        entries = coverage.get(field) or []
+        shown = ", ".join(str(entry) for entry in entries[:_COVERAGE_PREVIEW])
+        if len(entries) > _COVERAGE_PREVIEW:
+            shown += f", +{len(entries) - _COVERAGE_PREVIEW} more"
+        suffix = f" ({shown})" if entries else ""
+        parts.append(f"{field}={len(entries)}{suffix}")
+    return ", ".join(parts)
+
+
+def _format_body_bias(body_bias: dict) -> str:
+    """One line summarising a `pex` citation's `body_bias` statement (issue
+    #1983): the verdict, and -- when it is `"unbiased"` -- how many devices
+    and which synthesized nets are involved.
+
+    The verdict is always shown, including `"biased"`, for the same reason
+    `_format_coverage` always shows a `0`: "every device body had a DC bias
+    path" is the statement item 7's evidence is being asked to make, and it
+    must not be indistinguishable from an artifact that never made it (an
+    envelope with no `body_bias` block prints no line at all; see the call
+    site).
+    """
+    status = body_bias.get("status") or "unknown"
+    if status == "biased":
+        return f"{status} (every device body has a DC bias path)"
+    count = body_bias.get("unbiased_device_count") or 0
+    nets = body_bias.get("unbiased_nets") or []
+    shown = ", ".join(str(net) for net in nets[:_COVERAGE_PREVIEW])
+    if len(nets) > _COVERAGE_PREVIEW:
+        shown += f", +{len(nets) - _COVERAGE_PREVIEW} more"
+    suffix = f" on {shown}" if nets else ""
+    return (
+        f"{status} ({count} device(s) with no DC bias path{suffix}) -- "
+        "these post-layout numbers are not comparable to the schematic leg; "
+        "see docs/cli/extract.md"
+    )
