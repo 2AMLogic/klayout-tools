@@ -1,5 +1,6 @@
 """SDF-normalization pipeline steps for :func:`run_functional_verification`
-that need nothing from ``functional_verification`` itself.
+that reach into ``functional_verification`` only lazily, never at runtime
+module scope.
 
 Split out of ``functional_verification.py`` / ``functional_verification_sdf.py``
 because the per-file size ratchet (``scripts/check_file_size_baseline.py``)
@@ -182,10 +183,10 @@ def _sdf_refusal_error(
     caller passes the already-built ``environment.sdf.dropped``-shaped report
     -- built by ``functional_verification._sdf_dropped_report``, which this
     module cannot import at module level (that module imports this one) --
-    and it is attached as ``error.details`` only when at least one class was
-    dropped: a refusal with an empty accounting keeps the exact attribute set
-    every other refusal path's error has. The CLI surfaces ``details`` as
-    ``error.details`` (the ``_MissingToolError`` precedent).
+    and it is attached as the exception's ``details`` attribute only when at
+    least one class was dropped: a refusal with an empty accounting keeps the
+    exact attribute set every other refusal path's error has. The CLI merges
+    ``details`` flat into ``error``: the path is ``error.sdf.dropped``.
     """
     from .functional_verification import FunctionalVerificationError
 

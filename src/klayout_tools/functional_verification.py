@@ -1648,7 +1648,7 @@ def _tool_version_output(path: str, env: dict[str, str]) -> str | None:
 
 class _MissingToolError(FunctionalVerificationError):
     """``missing_tool``: one or more ``request.requires_tools`` unmet. The CLI
-    surfaces ``details`` as ``error.details``."""
+    surfaces ``details`` flat on ``error`` (``error.unmet_tools``)."""
 
     def __init__(self, unmet: list[dict[str, Any]]) -> None:
         listing = "; ".join(f"{u['name']} ({u['reason']})" for u in unmet)
