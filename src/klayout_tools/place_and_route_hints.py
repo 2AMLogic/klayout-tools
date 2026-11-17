@@ -1,5 +1,6 @@
-"""Small place-and-route response helpers split out of ``place_and_route.py``
-to keep that file's size ceiling from growing (issue #4914)."""
+"""Small place-and-route hint strings split out of ``place_and_route.py`` and
+``place_and_route_request.py`` to keep those files' size ceilings from growing
+(issue #4914, issue #5577)."""
 
 from __future__ import annotations
 
@@ -66,3 +67,12 @@ def grt_hint(stage: str, streams: str, stdout: str) -> str | None:
         f"max V {congestion['max_vertical_overflow']}); worst layer {worst} "
         f"with overflow {layers[worst]['total_overflow']}"
     )
+
+
+#: Appended to ``place_and_route_request.py``'s netlist-not-found error: how
+#: ``klt synthesize`` lays out its netlist and the stable-path alternative.
+NETLIST_HINT = (
+    "klt synthesize writes its netlist under a per-run directory "
+    ".klt/synthesize/<run_id>/ unless its request sets outputs.dir, "
+    "which gives the netlist a stable path"
+)
