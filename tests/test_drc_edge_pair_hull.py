@@ -20,6 +20,7 @@ from __future__ import annotations
 import klayout.db as kdb
 
 import klayout_tools.drc as drc
+from klayout_tools._drc_edge_pair_hull import _edge_pair_hull_points
 from klayout_tools.decks import DrcRule
 
 #: The repro geometry: layer A encloses layer B, flush (zero extension)
@@ -157,7 +158,7 @@ def test_hull_points_single_point_marker_is_null():
         kdb.Edge(kdb.Point(1503, 0), kdb.Point(1503, 0)),
         kdb.Edge(kdb.Point(1503, 300), kdb.Point(1503, 300)),
     )
-    assert drc._edge_pair_hull_points(edge_pair) is None
+    assert _edge_pair_hull_points(edge_pair) is None
 
 
 def test_hull_points_coincident_edges_collapse_to_segment():
@@ -168,7 +169,7 @@ def test_hull_points_coincident_edges_collapse_to_segment():
         kdb.Edge(kdb.Point(0, 0), kdb.Point(0, 100)),
         kdb.Edge(kdb.Point(0, 0), kdb.Point(0, 100)),
     )
-    assert drc._edge_pair_hull_points(edge_pair) == [[0, 0], [0, 100]]
+    assert _edge_pair_hull_points(edge_pair) == [[0, 0], [0, 100]]
 
 
 def test_hull_points_positive_area_quad_untouched():
@@ -177,7 +178,7 @@ def test_hull_points_positive_area_quad_untouched():
         kdb.Edge(kdb.Point(0, 54), kdb.Point(0, 1946)),
         kdb.Edge(kdb.Point(20, 100), kdb.Point(20, 1900)),
     )
-    assert drc._edge_pair_hull_points(edge_pair) == [
+    assert _edge_pair_hull_points(edge_pair) == [
         [0, 54],
         [0, 1946],
         [20, 100],
