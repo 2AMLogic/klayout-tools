@@ -1,7 +1,8 @@
 """``klt artifact put|get|verify|delete``: the fleet artifact-store client (issue
-#4063). The logic lives in :mod:`klayout_tools.artifact_store`; this module
-only maps arguments and emits through the shared envelope in :mod:`.output`
-(``docs/json-contract.md``, ``docs/cli/artifact.md``).
+#4063). The logic lives in :mod:`klayout_tools.artifact_store` (broker-backed
+modes) and :mod:`klayout_tools.artifact_verify_local` (``verify --local``);
+this module only maps arguments and emits through the shared envelope in
+:mod:`.output` (``docs/json-contract.md``, ``docs/cli/artifact.md``).
 
 No presigned URL ever reaches this module's output: the library keeps URLs
 in-process, and the payloads below carry digests, sizes, keys and manifest
@@ -32,6 +33,7 @@ import sys
 from typing import Any
 
 from .. import artifact_store as store
+from .. import artifact_verify_local as verify_local
 from .output import emit_error, emit_success
 
 #: verify ran and found a missing or mismatched entry.
@@ -171,7 +173,7 @@ def run_verify(args: argparse.Namespace) -> int:
 def _run_verify_local(args: argparse.Namespace) -> int:
     path, _, selector = args.manifest.partition("#")
     try:
-        report = store.verify_manifest_local(path, selector or None, args.root)
+        report = verify_local.verify_manifest_local(path, selector or None, args.root)
     except store.ArtifactError as exc:
         return _error("verify", exc, args.format)
     payload = {"schema_version": 1, "manifest": path, **report}
