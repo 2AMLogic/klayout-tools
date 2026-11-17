@@ -32,6 +32,8 @@ import json
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from klayout_tools import functional_verification as fv
 from klayout_tools import functional_verification_sdf_internal_bus as fvib
 
@@ -156,6 +158,8 @@ def _sdf_text(
     port_source_entry: str = "",
     deep_entry: str = "",
     bare_dest_entry: str = "",
+    *,
+    divider: str = ".",
 ) -> str:
     """An SDF whose top design `CELL` mixes internal-bit-select entries
     (`u_src.Y u_l*.A`) with a scalar-internal-net entry whose text is
@@ -166,8 +170,11 @@ def _sdf_text(
         return f"      (INTERCONNECT {src} {dst} ({delay}) ({delay}))"
 
     entries = [
-        _entry("u_src.Y", f"u_l{i}.A", internal_bus_delay) for i in range(1, 5)
-    ] + [_entry("u_w.Y", f"u_w{i}.A", scalar_delay) for i in range(1, 5)]
+        _entry(f"u_src{divider}Y", f"u_l{i}{divider}A", internal_bus_delay)
+        for i in range(1, 5)
+    ] + [
+        _entry(f"u_w{divider}Y", f"u_w{i}{divider}A", scalar_delay) for i in range(1, 5)
+    ]
     if port_source_entry:
         entries.append(f"      {port_source_entry}")
     if deep_entry:
@@ -179,7 +186,7 @@ def _sdf_text(
 (DELAYFILE
   (SDFVERSION "3.0")
   (DESIGN "dut")
-  (DIVIDER .)
+  (DIVIDER {divider})
   (TIMESCALE 1ns)
   (CELL
     (CELLTYPE "dut")
@@ -241,25 +248,31 @@ def test_collect_pins_empty_when_the_module_is_outside_the_grammar(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
-def test_drop_sdf_zero_delay_internal_bus_net_interconnects_drops_only_those(tmp_path):
+@pytest.mark.parametrize("divider", [".", "/"], ids=["dot", "slash"])
+def test_drop_sdf_zero_delay_internal_bus_net_interconnects_drops_only_those(
+    tmp_path, divider
+):
     """The load-bearing discrimination: the scalar-net entry's text is
     byte-identical to the dropped entries' shape and survives only because
     the netlist says its net is a scalar. A bit-selected bus-*port* source
     (`in[3] u_l1.A` -- #2984's source shape), a deeper-hierarchical
     destination, and a bare port destination are all left alone."""
     sdf_path = _write(
-        Path(tempfile.mkdtemp()) / "route.sdf",
+        tmp_path / "route.sdf",
         _sdf_text(
             port_source_entry=(
-                "(INTERCONNECT in[3] u_l1.A (0.000:0.000:0.000) (0.000:0.000:0.000))"
+                f"(INTERCONNECT in[3] u_l1{divider}A"
+                " (0.000:0.000:0.000) (0.000:0.000:0.000))"
             ),
             deep_entry=(
-                "(INTERCONNECT u_src.Y blk.u_l4.A (0.000:0.000:0.000)"
-                " (0.000:0.000:0.000))"
+                f"(INTERCONNECT u_src{divider}Y blk{divider}u_l4{divider}A"
+                " (0.000:0.000:0.000) (0.000:0.000:0.000))"
             ),
             bare_dest_entry=(
-                "(INTERCONNECT u_src.Y out3 (0.000:0.000:0.000) (0.000:0.000:0.000))"
+                f"(INTERCONNECT u_src{divider}Y out3"
+                " (0.000:0.000:0.000) (0.000:0.000:0.000))"
             ),
+            divider=divider,
         ),
     )
     pins = fvib._collect_sdf_internal_bus_net_pins(
@@ -272,10 +285,10 @@ def test_drop_sdf_zero_delay_internal_bus_net_interconnects_drops_only_those(tmp
     text, dropped = result
     assert dropped == 4
     assert text.count("(INTERCONNECT") == 7
-    assert "(INTERCONNECT u_w.Y u_w1.A (0.000:0.000:0.000)" in text
-    assert "(INTERCONNECT in[3] u_l1.A" in text
-    assert "(INTERCONNECT u_src.Y blk.u_l4.A" in text
-    assert "(INTERCONNECT u_src.Y out3" in text
+    assert f"(INTERCONNECT u_w{divider}Y u_w1{divider}A (0.000:0.000:0.000)" in text
+    assert f"(INTERCONNECT in[3] u_l1{divider}A" in text
+    assert f"(INTERCONNECT u_src{divider}Y blk{divider}u_l4{divider}A" in text
+    assert f"(INTERCONNECT u_src{divider}Y out3" in text
 
 
 def test_drop_keeps_a_nonzero_entry_on_the_same_net(tmp_path):

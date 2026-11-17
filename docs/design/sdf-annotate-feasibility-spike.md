@@ -512,11 +512,12 @@ Three consequences, all load-bearing for the fix that shipped:
 Shipped as `environment.sdf.dropped`'s
 `zero_delay_internal_bus_net_interconnect` class
 (`_collect_sdf_internal_bus_net_pins` /
-`_drop_sdf_zero_delay_internal_bus_net_interconnects`), pinned by
-`tests/test_functional_verification_sdf_internal_bit_select.py` — including
-the raw-simulator verdict rows above and the end-to-end run that the same
-fixture used to refuse ("did not fully apply", 4 diagnostics) and now
-completes with the class counted.
+`_drop_sdf_zero_delay_internal_bus_net_interconnects`).
+`tests/test_functional_verification_sdf_internal_bit_select.py` covers
+classification. `tests/test_functional_verification_sdf_internal_bit_select_live.py`
+covers the raw-simulator verdicts and the end-to-end run that previously
+refused with "did not fully apply" and four diagnostics. The run now
+completes and reports the count under this class.
 
 ### 3.8 The "constant-zero on every test case" shape is a timing outcome, not a broken annotation
 

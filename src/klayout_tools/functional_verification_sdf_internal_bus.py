@@ -224,21 +224,21 @@ def _sdf_interconnect_is_zero_delay_internal_bus_net(
     :func:`_drop_sdf_zero_delay_internal_bus_net_interconnects` removes an
     entry on (issue #6075).
 
-    ``divider`` is the SDF file's own ``(DIVIDER ...)`` character, so the
-    endpoints are split on the separator *that file* declares rather than a
-    hardcoded ``.``. A bare top-level-port endpoint (no divider), a deeper
-    hierarchical path, or endpoints outside the map (or mapping to
-    different nets) leaves the entry in place, whatever its delays.
+    Split endpoints on the SDF file's declared ``divider``, then use
+    the netlist pin map's ``instance.pin`` keys. A bare top-level-port
+    endpoint (no divider), a deeper hierarchical path, or endpoints outside
+    the map (or mapping to different nets) leaves the entry in place,
+    whatever its delays.
     """
     head = _SDF_INTERCONNECT_HEAD_RE.match(entry_text)
     if head is None:
         return False
     endpoints = []
     for token in (head.group(1), head.group(2)):
-        instance, separator, _pin = token.rpartition(divider)
-        if not separator:
+        instance, separator, pin = token.rpartition(divider)
+        if not separator or divider in instance:
             return False
-        endpoint = internal_bus_net_pins.get(f"{instance}{divider}{_pin}")
+        endpoint = internal_bus_net_pins.get(f"{instance}.{pin}")
         if endpoint is None:
             return False
         endpoints.append(endpoint)
