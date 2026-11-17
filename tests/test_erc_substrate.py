@@ -346,6 +346,113 @@ def test_ihp_unclosed_or_missing_ring_leaves_island_unisolated(tmp_path, deck, r
     assert shorts[0]["body"]["id"] == "vsubs"
 
 
+# --- Issue #5745: an asserted well_boxes tie capturing another net's well tap
+
+
+def _foreign_well_repro():
+    """Supply A's asserted ``well_boxes`` overlap supply B's drawn well, and
+    B's own tap marker sits inside that overlap."""
+    layout = kdb.Layout()
+    layout.dbu = DBU
+    top = layout.create_cell("TOP")
+    _rail(layout, top, 0, "VSS")
+    _box(top, layout, (10, 0), 0, 4, 12, 8)  # B's drawn n-well
+    _rail(layout, top, 5, "VSS2")  # its own tap marker sits inside the well
+    return layout, top
+
+
+def _foreign_well_spec():
+    return _spec(
+        [
+            _ptie("a1", "VSS", well_complement_of=None, well_boxes=[[0, -1, 12, 9]]),
+            _ptie("b1", "VSS2", well_layer="10/0", well_complement_of=None),
+        ]
+    )
+
+
+def test_foreign_well_tap_not_attributed_to_asserted_substrate_body(tmp_path):
+    """Issue #5745 repro: ``a1`` asserts substrate over a region that overlaps
+    ``b1``'s drawn well, so ``a1``'s (net-agnostic) tap region captures ``b1``'s
+    own well tap. That tap taps the *well*, not the substrate, so it must not
+    be attributed to ``a1``'s asserted substrate body and the two supplies
+    stay unmerged."""
+    layout, _ = _foreign_well_repro()
+    report = _run(tmp_path, layout, _foreign_well_spec(), stem="repro")
+    shorts = _shorts(report)
+    assert shorts == []
+    bodies = {b["id"]: b for b in report["provenance"]["substrate_bodies"]}
+    assert bodies["vsubs"]["ties"] == ["a1"]
+    assert bodies["0,4000,12000,8000"]["ties"] == ["b1"]
+    assert "erc.supply_short.substrate" in report["erc_coverage"]["checked"]
+
+
+def test_finding_body_joins_name_the_joining_tap_evidence(tmp_path):
+    """A substrate short names, per side, the tap site that joined its net to
+    the body: ``body.joins`` carries ``{net, tie, bbox}`` per contributing tap
+    polygon (fixture 1's two complement ties sharing ``vsubs``)."""
+    layout, _ = _two_rails()
+    report = _run(tmp_path, layout, _spec([_ptie("p1", "VSS"), _ptie("p2", "VSS2")]))
+    (short,) = _shorts(report)
+    assert short["body"]["joins"] == [
+        {
+            "net": "VSS",
+            "tie": "p1",
+            "bbox": {"left": 2000, "bottom": 200, "right": 2600, "top": 800},
+        },
+        {
+            "net": "VSS2",
+            "tie": "p2",
+            "bbox": {"left": 2000, "bottom": 5200, "right": 2600, "top": 5800},
+        },
+    ]
+
+
+def test_join_names_the_contributing_well_box_index(tmp_path):
+    """When the joining site came from an asserted ``well_boxes`` region, the
+    join names the index of the contributing box (0-based, lowest when
+    several overlap); a complemented side carries no index."""
+    layout, _ = _two_rails()
+    spec = _spec(
+        [
+            _ptie(
+                "a1",
+                "VSS",
+                well_complement_of=None,
+                well_boxes=[[0, -1, 3, 3], [0, 3, 20, 7]],
+            ),
+            _ptie("p2", "VSS2"),
+        ]
+    )
+    report = _run(tmp_path, layout, spec)
+    (short,) = _shorts(report)
+    assert short["body"]["ties"] == ["a1", "p2"]
+    assert short["body"]["joins"] == [
+        {
+            "net": "VSS",
+            "tie": "a1",
+            "bbox": {"left": 2000, "bottom": 200, "right": 2600, "top": 800},
+            "well_box": 0,
+        },
+        {
+            "net": "VSS2",
+            "tie": "p2",
+            "bbox": {"left": 2000, "bottom": 5200, "right": 2600, "top": 5800},
+        },
+    ]
+
+
+def test_metal_and_substrate_pair_stays_suppressed_by_metal_pairs(tmp_path):
+    """A pair already reported through the metal graph is not re-reported
+    through the substrate body graph: one short, ``via: "metal"``."""
+    layout, top = _two_rails()
+    _box(top, layout, (3, 0), 5, 0, 6, 6)  # li1 strap joining both rails
+    report = _run(tmp_path, layout, _spec([_ptie("p1", "VSS"), _ptie("p2", "VSS2")]))
+    shorts = _shorts(report)
+    assert len(shorts) == 1
+    assert shorts[0]["via"] == "metal"
+    assert "body" not in shorts[0]
+
+
 # --- sky130: dnwell island counts only when an n-well ring closes it (#5344) --
 
 

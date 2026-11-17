@@ -14,6 +14,29 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt erc`: a substrate assertion reaching over a drawn well can no longer
+  fabricate a `erc.supply_short`, and substrate shorts name the geometry that
+  performed the merge** (#5745, 2026-11-17): the substrate/well body-merge
+  pass attributed a tie's tap sites to bodies without asking where each site
+  physically was. A `ties[]` entry declaring the #2255 form
+  (`well_layer: null` + `well_boxes`) whose asserted region reached over a
+  *different* supply's drawn well captured that net's own well tap into the
+  shared `vsubs` body -- a tap inside a drawn well taps the well (junction-
+  isolated from the substrate), not the substrate -- so the union-find welded
+  the two supply clusters and reported a fabricated `erc.supply_short` via
+  `substrate` on inputs that grade clean. Non-drawn-well ties now subtract
+  every drawn-well tie's (selected) well region before attributing substrate
+  bodies, so the repro shape grades clean; drawn-well ties keep their own
+  sites by construction. Additively, every `erc.supply_short` via
+  `"substrate"` now carries `body.joins` -- one `{net, tie, bbox}` entry per
+  tap site that welded that net to the body, with `well_box` (0-based index
+  into that tie's `well_boxes`, lowest when several overlap) when the site
+  came from an assertion -- so a finding names its evidence instead of
+  inviting a pass/fail bisection. Existing fields are unchanged; a spec
+  without the repro shape grades byte-identically except for the new
+  `joins` key. `schema_version` is unaffected (additive, per
+  `docs/json-contract.md`); `provenance.klt_version` tells which build
+  graded a committed report.
 - **`klt sim` refuses `measurements[].transfer` declared beside `noise`**
   (#5695, 2026-11-14): the mutually exclusive measurement forms each carried a
   hand-maintained list of "every *other* exclusive form", and `transfer`'s
