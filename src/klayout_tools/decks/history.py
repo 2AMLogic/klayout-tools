@@ -157,7 +157,7 @@ def _self_release_entries(content_hash: str, deck: str | None) -> list[dict[str,
                 }
             )
         return matches
-    except Exception:  # noqa: BLE001 - an identity probe must never break a lookup
+    except Exception:  # - an identity probe must never break a lookup
         return []
 
 

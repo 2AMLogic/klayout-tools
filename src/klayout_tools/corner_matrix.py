@@ -79,7 +79,19 @@ def _duplicates(ids: list[str]) -> list[str]:
 
 
 def _measurement_nonfinite(corner: dict[str, Any]) -> bool:
-    for measurement in corner.get("measurements") or []:
+    corner_id = corner.get("corner_id")
+    measurements = corner.get("measurements")
+    if measurements is None:
+        return False
+    if not isinstance(measurements, list) or not all(
+        isinstance(measurement, dict) for measurement in measurements
+    ):
+        # Route malformed shapes through CornerMatrixError so the CLI emits
+        # its documented error envelope instead of a traceback (issue #5872).
+        raise CornerMatrixError(
+            f"report corner {corner_id!r}: measurements must be an array of objects"
+        )
+    for measurement in measurements:
         value = measurement.get("value")
         if isinstance(value, bool):
             continue
@@ -148,11 +160,17 @@ def check_corner_matrix(
     extra = sorted(observed_set - expected_set)
     duplicate = _duplicates(observed)
     complete = not (missing or extra or duplicate or any(extra_checks.values()))
+    # Coverage (did the run exercise the declared matrix, once each?) is a
+    # separate question from outcome quality (were those corners usable and
+    # in-limit?); report both verdicts so a caller can gate coverage without
+    # recomputing it, and a legitimately failing corner stays recordable.
+    coverage_complete = not (missing or extra or duplicate)
     result.update(
         {
             "mode": mode,
             "source": source,
             "complete": complete,
+            "coverage_complete": coverage_complete,
             "matrix_size": len(expected),
             "observed_count": len(observed),
             "missing": missing,

@@ -1201,7 +1201,7 @@ def collect_gate_level_port_aliases(text: str) -> dict[str, dict[str, str]]:
     """
     modules = parse_gate_level_verilog(text)
     return {
-        module["name"]: dict(module["port_aliases"])  # type: ignore[arg-type]
+        module["name"]: dict(module["port_aliases"])
         for module in modules
         if module["port_aliases"]
     }
@@ -1466,7 +1466,7 @@ def _bind_all_instances(
                 else _sub_module_by_name(modules, cell)["ports"]  # type: ignore[assignment]
             )
             pin_nets, unknown = _bind_connections(
-                instance,  # type: ignore[arg-type]
+                instance,
                 pins,
                 library=library,
                 port_case_folds=port_case_folds,

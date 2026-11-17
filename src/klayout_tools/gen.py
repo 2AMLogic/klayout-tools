@@ -550,7 +550,7 @@ CONTACT_SIZE_UM = 0.22
 #: deliberately not re-derived per-request from the resolved dbu -- doing so
 #: would move geometry (a finer snap grid moves a contact's centre) on the
 #: very PDKs this constant was validated against.
-from .gen_snap import (  # noqa: E402,F401 -- re-exported
+from .gen_snap import (  # noqa: E402 -- re-exported
     _GRID_DBU_UM,
     _snap_offset_um,
     _snap_rect_box_um,
@@ -3785,7 +3785,7 @@ def load_params_arg(value: str | None) -> dict[str, Any]:
         try:
             with open(value, encoding="utf-8") as handle:
                 data = json.load(handle)
-        except OSError as exc:
+        except (OSError, UnicodeDecodeError) as exc:
             raise GenError(f"could not read params file '{value}': {exc}") from exc
         except json.JSONDecodeError as exc:
             raise GenError(f"params file '{value}' is not valid JSON: {exc}") from exc

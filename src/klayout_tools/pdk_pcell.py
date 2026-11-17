@@ -78,6 +78,7 @@ from .pdk import (
     find_pdk,
     resolve_pdk_dbu,
 )
+from .pdk_pcell_checks import check_pcell_variant
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import klayout.db as kdb
@@ -518,7 +519,7 @@ def _load_libraries(
         modules_before = set(sys.modules)
         try:
             module = importlib.import_module(package)
-        except Exception as exc:  # noqa: BLE001 - reported, never re-raised
+        except Exception as exc:  # - reported, never re-raised
             unavailable.append(_unavailable_entry(package, exc, package_dir, memo_key))
             continue
 
@@ -629,7 +630,7 @@ def _instantiate_library_classes(
             continue
         try:
             value()
-        except Exception as exc:  # noqa: BLE001 - reported, never re-raised
+        except Exception as exc:  # - reported, never re-raised
             failure = failure or exc
     return failure
 
@@ -819,7 +820,7 @@ def _describe_loaded(
     for entry in loaded:
         try:
             libraries.append(_describe_library(entry))
-        except Exception as exc:  # noqa: BLE001 - vendor code, never a traceback
+        except Exception as exc:  # - vendor code, never a traceback
             unavailable.append(
                 {
                     "package": entry["package"],
@@ -915,14 +916,12 @@ def _produce_pdk_pcell(
     raw_params: dict[str, Any],
     pdk_info: dict[str, Any],
 ) -> tuple[kdb.Layout, kdb.Cell]:
-    """Instantiate ``entry``'s ``pcell_name`` into a fresh layout.
-
-    Identical in shape to :func:`klayout_tools.gen._produce` -- resolve the
-    declaration, ``add_pcell_variant``, insert into a fresh top cell -- except
-    the declaration comes from the *vendor's* library rather than klt's own.
-    The output dbu is resolved from the PDK's tech LEF the same way, so a
-    ``--pdk-pcell`` block and a built-in-generator block resolved against one
-    PDK agree by construction (a `klt gen-compose` precondition).
+    """Instantiate ``entry``'s ``pcell_name`` into a fresh layout, then
+    validate the variant -- KLayout swallows a vendor ``produce`` failure
+    and leaves an unnamed cell (issue #5936). Otherwise identical in shape
+    to klt's own ``_produce``: resolve the declaration, ``add_pcell_variant``,
+    insert into a fresh top cell; the dbu comes from the PDK's tech LEF (a
+    `klt gen-compose` precondition). See :mod:`klayout_tools.pdk_pcell_checks`.
     """
     import klayout.db as kdb
 
@@ -930,7 +929,7 @@ def _produce_pdk_pcell(
     try:
         declaration = handle.layout().pcell_declaration(pcell_name)
         available = sorted(handle.layout().pcell_names())
-    except Exception as exc:  # noqa: BLE001 - vendor code, never a traceback
+    except Exception as exc:  # - vendor code, never a traceback
         raise PdkPCellError(
             f"PDK PCell library '{entry['library']}' is unusable: "
             f"{type(exc).__name__}: {exc}"
@@ -952,11 +951,12 @@ def _produce_pdk_pcell(
     _apply_tkinter_workaround(entry["package"])
     try:
         variant = layout.add_pcell_variant(handle, declaration.id(), values)
+        check_pcell_variant(layout, variant, entry["library"], pcell_name)
         top = layout.create_cell(cell_name)
         top.insert(kdb.CellInstArray(variant, kdb.Trans()))
     except PdkPCellError:
         raise
-    except Exception as exc:  # noqa: BLE001 - vendor code, never a traceback
+    except Exception as exc:  # - vendor code, never a traceback
         raise PdkPCellError(
             f"PDK PCell '{entry['library']}/{pcell_name}' failed while "
             f"producing geometry: {type(exc).__name__}: {exc}"
@@ -1018,7 +1018,7 @@ def _coerce_layer_param(ref: str, name: str, value: Any) -> Any:
     if isinstance(value, str):
         try:
             return kdb.LayerInfo.from_string(value)
-        except Exception as exc:  # noqa: BLE001 - reported as a param error
+        except Exception as exc:  # - reported as a param error
             raise PdkPCellError(
                 f"PDK PCell '{ref}': params.{name} is not a valid layer "
                 f"specification: {value!r}"

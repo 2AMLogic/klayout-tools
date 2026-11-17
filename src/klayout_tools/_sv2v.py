@@ -31,7 +31,7 @@ def validate_sv_frontend(value: object, error: Callable[[str], Exception]) -> st
             f"request.sv_frontend must be one of {', '.join(SV_FRONTENDS)} "
             f"(got {value!r})"
         )
-    return value  # type: ignore[return-value]
+    return value
 
 
 def _find_sv2v(error: Callable[[str], Exception]) -> str:

@@ -20,7 +20,11 @@ def check_label(check: Mapping[str, Any]) -> str:
 
 
 def _what_present(c: dict) -> str:
-    return f"{c['role']} {c['path']} present"
+    what = f"{c['role']} {c['path']} present"
+    benches = c.get("testbenches")
+    if benches:
+        what += f" (bench: {', '.join(benches)})"
+    return what
 
 
 def _what_stream_readable(c: dict) -> str:
@@ -105,4 +109,9 @@ def attestation_check_line(check: dict) -> str:
         tail = failed_output_tail(check)
         if tail:
             line += "\n" + "\n".join(f"    | {row}" for row in tail.splitlines())
+        # Live-only, and only ever present on a generate-mode result: see
+        # `signoff_attest_live.attach_record_check_hints` (issue #5538).
+        hint = check.get("hint")
+        if hint:
+            line += f"\n    hint: {hint}"
     return line

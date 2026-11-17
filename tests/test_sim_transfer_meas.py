@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from helpers.subprocess_fakes import fake_completed
+from helpers.tool_probes import SKIP_NO_NGSPICE as real_ngspice
 from klayout_tools import _paths as paths_module
 from klayout_tools import sim, sim_batch, sim_raw, sim_transfer_meas
 
@@ -521,10 +522,6 @@ def test_existing_scalar_forms_are_unaffected_by_a_transfer_neighbour(
 # --------------------------------------------------------------------------- #
 # Real ngspice
 # --------------------------------------------------------------------------- #
-
-real_ngspice = pytest.mark.skipif(
-    shutil.which("ngspice") is None, reason="ngspice not installed"
-)
 
 
 @real_ngspice
