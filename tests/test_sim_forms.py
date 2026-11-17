@@ -87,6 +87,33 @@ def test_an_entry_declaring_one_exclusive_form_needs_a_name(form):
         sim_validate._validate_measurement_forms([{form: _BODY[form]}])
 
 
+def test_noise_refusal_names_the_cause_without_listing_forms():
+    """Issue #6389: the ``noise``-beside-another-form refusal says *why* the
+    entry was refused and carries no hand-written form list, so adding a form
+    to the registry cannot re-drift the message."""
+    with pytest.raises(SimError) as excinfo:
+        sim_validate._validate_noise_measurement("m1", {"noise": {}}, True)
+    message = str(excinfo.value)
+    assert "'noise'" in message
+    assert "together with" in message and "another form" in message
+    assert "no name" in message
+    assert "exactly one of" not in message
+    for form in sim_forms.FORMS:
+        if form != "noise":
+            assert f"'{form}'" not in message, message
+
+
+@pytest.mark.parametrize("has_other_form", [True, False])
+def test_noise_refusal_is_the_same_for_a_missing_name(has_other_form):
+    """The ``name is None`` path hits the same refusal as the
+    beside-another-form path (the message covers both causes)."""
+    with pytest.raises(SimError) as excinfo:
+        sim_validate._validate_noise_measurement(None, {"noise": {}}, has_other_form)
+    message = str(excinfo.value)
+    assert "'noise'" in message
+    assert "another form (or has no name)" in message
+
+
 def test_normalize_selector_is_shared_by_transfer_and_snm():
     from klayout_tools import sim_snm_meas, sim_transfer_meas
 
