@@ -273,7 +273,7 @@
     },
     {
       "path": "src/klayout_tools/equiv.py",
-      "lines": 1132
+      "lines": 1131
     },
     {
       "path": "src/klayout_tools/equiv_replay.py",
@@ -285,7 +285,7 @@
     },
     {
       "path": "src/klayout_tools/erc.py",
-      "lines": 3524
+      "lines": 3520
     },
     {
       "path": "src/klayout_tools/erc_spec.py",
@@ -297,7 +297,7 @@
     },
     {
       "path": "src/klayout_tools/extract.py",
-      "lines": 9856
+      "lines": 9838
     },
     {
       "path": "src/klayout_tools/extract_abstract.py",
@@ -345,7 +345,7 @@
     },
     {
       "path": "src/klayout_tools/functional_verification.py",
-      "lines": 3152
+      "lines": 3138
     },
     {
       "path": "src/klayout_tools/functional_verification_sdf.py",
@@ -409,7 +409,7 @@
     },
     {
       "path": "src/klayout_tools/lvs.py",
-      "lines": 6448
+      "lines": 6428
     },
     {
       "path": "src/klayout_tools/lvs_combine.py",
@@ -425,7 +425,7 @@
     },
     {
       "path": "src/klayout_tools/lvs_mismatch.py",
-      "lines": 2423
+      "lines": 2420
     },
     {
       "path": "src/klayout_tools/lvs_netgen.py",
@@ -469,7 +469,7 @@
     },
     {
       "path": "src/klayout_tools/netlist_normalize.py",
-      "lines": 2246
+      "lines": 2245
     },
     {
       "path": "src/klayout_tools/op_sanity.py",
@@ -533,7 +533,7 @@
     },
     {
       "path": "src/klayout_tools/post_route_sta.py",
-      "lines": 4651
+      "lines": 4644
     },
     {
       "path": "src/klayout_tools/power.py",
@@ -593,7 +593,7 @@
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
-      "lines": 4441
+      "lines": 4420
     },
     {
       "path": "src/klayout_tools/sim_commands.py",
