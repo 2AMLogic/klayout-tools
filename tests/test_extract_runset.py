@@ -448,18 +448,6 @@ def test_reserved_deck_var_is_refused(tmp_path):
     assert "may not set 'topcell'" in str(exc.value)
 
 
-def test_refused_flag_table_names_real_run_extract_parameters():
-    """`run_extract` reads the refused set out of its own `locals()` against
-    this table, so a key that is not a parameter would silently never be
-    checked -- and a flag the runset engine cannot honour would be accepted
-    and dropped, which is the one outcome issue #5481 rules out."""
-    import inspect
-
-    parameters = set(inspect.signature(run_extract).parameters)
-    unknown = sorted(set(extract_runset.REFUSED_FLAG_BY_PARAM) - parameters)
-    assert unknown == [], unknown
-
-
 def test_curated_engine_is_unchanged_by_the_new_parameters():
     """Every refusable flag's default must read as "not given" -- otherwise a
     plain curated run would start refusing flags nobody passed."""

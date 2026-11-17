@@ -103,6 +103,9 @@ from .extract_runset_flags import (
     parse_deck_vars as parse_deck_vars,
 )
 from .extract_runset_flags import (
+    provenance_hash_check as provenance_hash_check,
+)
+from .extract_runset_flags import (
     refuse_unsupported as refuse_unsupported,
 )
 from .extract_runset_flags import (
@@ -374,10 +377,10 @@ def run_extract_klayout_runset(
             # which flattens unmatched sub-circuits into their callers) leaves
             # exactly one, which is the shape the curated engine also has; more
             # than one is disclosed below rather than silently summarised away.
-            # Both read out as plain strings here, not held as live KLayout
-            # objects: `circuit`/`netlist` are borrowed references into
-            # `lvsdb` and are invalid once it is collected, which happens
-            # before the report below is assembled.
+            # Both are read out as plain strings here -- the report carries
+            # names, never live KLayout objects. `circuit`/`netlist` are
+            # borrowed references into `lvsdb`, which stays referenced (the
+            # local above) for as long as the reads and writes below need it.
             circuit_name = circuit.name
             extra_circuits = sorted(
                 c.name for c in netlist.each_circuit() if c.name != circuit_name

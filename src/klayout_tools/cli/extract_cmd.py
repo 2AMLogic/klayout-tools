@@ -577,12 +577,19 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
     )
 
 
-def _refuse_batch_for_runset_engine(args: argparse.Namespace) -> None:
+def _refuse_batch_for_runset_engine(engine: str) -> None:
     """Issue #5481: the runset engine needs the standalone ``klayout``
     application and the PDK install on the *executing* host, and the batch
     runner's request can ship neither -- so refuse rather than submit a job
-    that cannot honour the engine that was asked for."""
-    if getattr(args, "engine", DEFAULT_ENGINE) != RUNSET_ENGINE:
+    that cannot honour the engine that was asked for.
+
+    Called twice with different engines: once with the argv ``--engine``
+    before the request document is applied (it has not been read yet), and
+    once inside :func:`_run_batch` with the request's own ``engine`` -- a
+    request document carrying ``"engine": "klayout-runset"`` never reaches
+    the argv form, and must be refused with this same message rather than
+    failing later on a missing ``deck`` or en route to a submit."""
+    if engine != RUNSET_ENGINE:
         return
     raise ExtractError(
         f"--backend batch cannot run engine '{RUNSET_ENGINE}' -- the runset "
@@ -613,7 +620,7 @@ def run(args: argparse.Namespace) -> int:
         # `--backend` > $KLT_EXTRACT_BACKEND > local (issue #4613). `batch`
         # never falls back to a local run: every batch failure is exit 1.
         if extract_batch.resolve_backend(getattr(args, "backend", None)) == "batch":
-            _refuse_batch_for_runset_engine(args)
+            _refuse_batch_for_runset_engine(getattr(args, "engine", DEFAULT_ENGINE))
             report = _run_batch(args)
             emit_success(report, args.format, _print_text)
             return EXIT_OK
@@ -879,6 +886,10 @@ def _run_batch(args: argparse.Namespace) -> dict[str, Any]:
             }
         )
         base_dir, output = os.getcwd(), args.output
+    # The request document was not read when `run()` checked the argv engine,
+    # so re-check the engine the request itself declares -- the one a
+    # `--backend batch` run actually honours.
+    _refuse_batch_for_runset_engine(request.get("engine", DEFAULT_ENGINE))
     if not request.get("deck"):
         raise ExtractError("argument --deck is required")
     return extract_batch.run_extract_batch(

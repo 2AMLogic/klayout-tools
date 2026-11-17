@@ -13,9 +13,11 @@ device-only netlist as a parasitic-annotated one.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
+from ._digest import content_hash
+from ._report_verify import get_path, hash_check
 from .extract_spef import ExtractError
 
 #: ``engine`` value selecting the PDK-runset engine (the ``klt lvs`` spelling).
@@ -110,15 +112,19 @@ REFUSED_FLAG_BY_PARAM: dict[str, str] = {
     "probes": "--probe",
 }
 
-#: Values that mean "this flag was not given", whatever its declared default
-#: spelling is (``None``, ``False``, ``()``, ``{}``, ``[]``).
-_UNSET_VALUES: tuple[Any, ...] = (None, False, (), {}, [])
+#: Container values that mean "this flag was not given" (``()``, ``{}``,
+#: ``[]``). ``None`` and ``False`` are handled structurally in
+#: :func:`_is_unset` -- never by equality against this tuple.
+_UNSET_VALUES: tuple[Any, ...] = ((), {}, [])
 
 
 def _is_unset(value: Any) -> bool:
     if isinstance(value, bool):
         return value is False
-    return any(value is unset or value == unset for unset in _UNSET_VALUES)
+    # `False` is matched by the bool arm above, never by equality: `0 ==
+    # False` (and `0.0 == False`) in Python, and a literal zero the caller
+    # *did* give must be refused, not read as "not given".
+    return value is None or any(value == unset for unset in _UNSET_VALUES)
 
 
 def refused_flags(given: Mapping[str, Any]) -> list[str]:
@@ -159,6 +165,38 @@ def refuse_unsupported(given: Mapping[str, Any]) -> None:
         f"curated-deck engine ('{DEFAULT_ENGINE}'). The runset engine extracts "
         "devices and connectivity only, with no parasitics and no deck "
         "options; see docs/cli/extract.md, 'Engine'"
+    )
+
+
+def provenance_hash_check(
+    committed: Mapping[str, Any],
+    deck_source_path: Callable[[str | None], str | None],
+) -> dict[str, Any]:
+    """The engine-aware provenance entry ``check_extract_report`` appends
+    for a committed report.
+
+    The curated engine hashes its deck module through
+    ``deck_source_path(provenance.deck.name)``. A runset-engine report names
+    no curated deck -- its ``provenance.deck.name`` is the runset's own
+    filename, which no curated deck module resolves, so hashing it would
+    grade every pristine runset report ``"drifted"``. It hashes the runset
+    itself via the committed ``deck_file`` instead, the same branch
+    ``check_lvs_report`` has carried since issue #2849: a changed runset
+    changes the extraction exactly as a changed deck does.
+
+    ``deck_source_path`` is injected so this module, whose engine never
+    resolves a curated deck, stays free of the ``decks`` import."""
+    if committed.get("engine") == RUNSET_ENGINE:
+        return hash_check(
+            "provenance.runset.content_hash",
+            get_path(committed, ("provenance", "runset", "content_hash")),
+            content_hash(committed.get("deck_file")),
+        )
+    deck_name = get_path(committed, ("provenance", "deck", "name"))
+    return hash_check(
+        "provenance.deck.content_hash",
+        get_path(committed, ("provenance", "deck", "content_hash")),
+        content_hash(deck_source_path(deck_name) if deck_name else None),
     )
 
 

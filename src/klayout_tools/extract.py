@@ -2906,8 +2906,8 @@ def run_extract(
     # everything after it is curated-engine-only. The refused-flag set is read
     # out of this call's own arguments against `extract_runset`'s explicit
     # parameter -> flag table, so a parameter added here forces a deliberate
-    # decision there (`tests/test_extract_runset.py` checks the table names
-    # real parameters). `--backend batch` never reaches here, and
+    # decision there (`tests/test_extract_runset_check.py` checks the
+    # table in both directions). `--backend batch` never reaches here, and
     # `--check`/`--rerun` run no engine at all.
     extract_runset.validate_engine(engine)
     extract_runset.require_deck_file(engine, deck_file)
@@ -3712,6 +3712,9 @@ def check_extract_report(
     via :func:`~klayout_tools.decks.deck_source_path`, which likewise never
     counts as a match.
 
+    Under ``--engine klayout-runset`` the deck entry is replaced by a runset
+    hash check -- :func:`extract_runset_flags.provenance_hash_check`.
+
     ``committed["file"]`` is read through
     :func:`klayout_tools._report_verify.resolve_committed_path` (issue
     #2659), so both shapes a committed report can carry work: the ``{path,
@@ -3726,7 +3729,6 @@ def check_extract_report(
     traceback.
     """
     committed = _load_committed_report(report_path, ExtractError)
-    deck_name = get_path(committed, ("provenance", "deck", "name"))
     checks = [
         hash_check(
             "provenance.input.content_hash",
@@ -3739,10 +3741,8 @@ def check_extract_report(
                 )
             ),
         ),
-        hash_check(
-            "provenance.deck.content_hash",
-            get_path(committed, ("provenance", "deck", "content_hash")),
-            content_hash(deck_source_path(deck_name) if deck_name else None),
+        extract_runset.provenance_hash_check(
+            committed, deck_source_path=deck_source_path
         ),
     ]
     return build_check_result(report_path=report_path, checks=checks)

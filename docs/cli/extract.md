@@ -518,7 +518,7 @@ device_count: 2   device_counts: {"pnpMPA": 1, "ptap1": 1}
 ```
 
 The same layout through the curated deck still reports `device_count: 0`
-(`tests/test_extract_runset.py` measures both, rather than asserting the
+(`tests/test_extract_runset_pdk.py` measures both, rather than asserting the
 contrast from memory).
 
 **Flags.** `--deck-file PATH` is the PDK's runset, required under this engine
@@ -8676,6 +8676,13 @@ signal issue #1149 was filed to add: it means the curated deck's own source
 changed since this report was committed, so the previously-recorded
 `devices`/`nets` (and any downstream `klt lvs` comparison against them) can
 no longer be trusted to still reproduce without re-running.
+
+A report produced by `--engine klayout-runset` (above) has no curated deck
+to hash — its `provenance.deck.name` is the runset's own filename — so the
+deck check is replaced by a `provenance.runset.content_hash` check against
+the `deck_file` runset the report itself names, mirroring `klt lvs --check`
+(issue #2849). A changed runset changes the extraction exactly as a changed
+curated deck does, so it grades `status: "drifted"` the same way.
 
 ### Full mode (`--rerun`)
 

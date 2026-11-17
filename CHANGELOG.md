@@ -363,6 +363,7 @@ not `klt --version`, if you need to detect this kind of drift. See
   `content_hash` comes from inside the envelope, so it is encoding-independent;
   the one `content_hash_basis: "evidence_file"` case keeps hashing the file as
   committed. Additive; no `schema_version` bump.
+
 - **`klt gen` / `klt layout-plan execute`: a generated stream no longer
   depends on which generators ran earlier in the same process** (#5499,
   2026-11-13): `gen`'s reference PCell library is registered once per process
