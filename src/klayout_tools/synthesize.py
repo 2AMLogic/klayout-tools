@@ -233,6 +233,7 @@ from typing import Any
 from . import env_provenance
 from . import macros as macro_spec
 from . import synthesize_timeout as ytimeout
+from ._engine_proc import run_in_group
 from ._jsonnum import is_int, is_number
 from ._paths import _load_request_json, _reject_unknown_keys, validate_request_shape
 from ._provenance import (
@@ -264,6 +265,7 @@ from ._verilog_params import (
 from .equiv import EquivError, run_equiv
 from .liberty_compare import LibertyCompareError, parse_liberty_text
 from .pdk_cells import resolve_liberty_for_cell_library
+from .request_paths import RequestPaths
 from .restructure import RestructureError, restructure_for_timing
 from .sta import StaError, compute_critical_path
 
@@ -787,6 +789,9 @@ class SynthesizeError(Exception):
     with ``structural.has_critical: true`` and exit code ``3`` -- never this
     exception. See ``docs/cli/synthesize.md``'s "Exit codes" section.
     """
+
+
+_rpath = RequestPaths(SynthesizeError)
 
 
 def _script_path_text(path: str, *, repo_root: str | None) -> str:
@@ -2046,7 +2051,7 @@ def _resolve_sources(sources: Any, request_dir: str) -> list[str]:
 
     resolved: list[str] = []
     for entry in sources:
-        path = entry if os.path.isabs(entry) else os.path.join(request_dir, entry)
+        path = _rpath(entry, request_dir, "request.sources entry")
         if not os.path.isfile(path):
             raise SynthesizeError(f"RTL source not found: {entry}")
         try:
@@ -2508,7 +2513,7 @@ def _abc_supports_dont_use() -> bool:
     right below.
     """
     try:
-        completed = subprocess.run(
+        completed = run_in_group(
             ["yosys", "-p", "help abc"],
             capture_output=True,
             text=True,
@@ -3127,7 +3132,7 @@ def _run_yosys(
     """
     timeout_s = ytimeout.resolve_timeout(timeout_s, DEFAULT_YOSYS_TIMEOUT_S)
     try:
-        completed = subprocess.run(
+        completed = run_in_group(
             ["yosys", "-s", script_path],
             capture_output=True,
             text=True,
@@ -3158,11 +3163,9 @@ def _write_yosys_log(
     """Keep both streams next to every executed script, including failed trials."""
 
     def text(stream: str | bytes | None) -> str:
-        return (
-            stream.decode("utf-8", errors="replace")
-            if isinstance(stream, bytes)
-            else stream or ""
-        )
+        if isinstance(stream, bytes):
+            return stream.decode("utf-8", errors="replace")
+        return stream or ""
 
     _write_text_file(
         os.path.splitext(script_path)[0] + ".log",
@@ -4273,19 +4276,12 @@ def _compute_baseline(
         )
 
     if response_path is not None:
-        resolved = (
-            response_path
-            if os.path.isabs(response_path)
-            else os.path.join(request_dir, response_path)
-        )
+        resolved = _rpath(response_path, request_dir, "request.baseline.response_path")
         baseline_metrics = _baseline_metrics_from_response_file(resolved)
         ref = ref or _baseline_ref_fallback(resolved, repo_root=repo_root)
     else:
-        resolved = (
-            netlist_path
-            if os.path.isabs(netlist_path)
-            else os.path.join(request_dir, netlist_path)
-        )
+        assert netlist_path is not None
+        resolved = _rpath(netlist_path, request_dir, "request.baseline.netlist_path")
         baseline_metrics = _baseline_metrics_from_netlist(
             resolved, liberty_path, hdl_toplevel, output_dir
         )

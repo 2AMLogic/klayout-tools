@@ -118,25 +118,23 @@ implemented deliberately rather than rediscovered:
 
 9. **A bit-selected top-level-port ``INTERCONNECT`` entry can poison a
    sibling entry on the same net** (issue #1619, live on Icarus 13.0) --
-   distinct from finding 7's *scalar* bare-port fix, and only reachable once
-   that fix let a *vector* port bit (``y[0]``, ``a[0]``) resolve at all. Two
-   separate mechanisms, depending on which side of the entry carries the
-   bit-selected port -- see the module comment above
-   :func:`_split_sdf_bus_port_interconnects` for the full write-up and
-   `docs/design/sdf-annotate-feasibility-spike.md` §3.7 for the live
-   evidence: (a) as a *destination*, order-dependent -- fixed by deferring
-   every such entry to its own, later ``$sdf_annotate`` call
-   (:func:`_split_sdf_bus_port_interconnects`); (b) as a *source* feeding a
-   ``specify``-bearing destination -- fails even in total isolation,
-   unfixable by reordering, and confirmed sensitive to the testbench itself
-   (a no-op test resolves cleanly; any test that actually drives the DUT and
-   awaits a trigger does not) -- left unfixed and pinned down by
-   ``test_integration_real_icarus_sdf_bus_port_input_fanout_stays_
-   unresolvable`` rather than silently reported as "annotated" or masked.
-   The issue's own "wrapper double-binds the net identity" hypothesis is
-   refuted by shape (a) alone: reordering the entries (bit-selected-port
-   entry last instead of first) resolves everything, which a genuine
-   identity double-bind would not fix.
+   distinct from finding 7's *scalar* bare-port fix, and only reachable
+   once that fix let a *vector* port bit (``y[0]``, ``a[0]``) resolve.
+   Two separate mechanisms, depending on which side of the entry carries
+   the bit-selected port -- full write-up in the module comment above
+   :func:`_split_sdf_bus_port_interconnects` and
+   `docs/design/sdf-annotate-feasibility-spike.md` §3.7:
+   (a) as a *destination*, order-dependent -- fixed by deferring every
+   such entry to its own, later ``$sdf_annotate`` call; (b) as a *source*
+   -- the one-modpath-per-port-net cap (issue #5705, raw
+   ``iverilog``/``vvp`` 13.0): on a fanout-above-1 net ``$sdf_annotate``
+   annotates only the last-declared instance's destination and rejects
+   the rest, deterministically -- unfixable by reordering, left unfixed,
+   pinned down by ``test_integration_real_icarus_sdf_bus_port_input_
+   fanout_stays_unresolvable`` rather than silently reported as
+   "annotated" or masked. The "wrapper double-binds the net identity"
+   hypothesis is refuted by shape (a): reordering (bit-selected entry
+   last) resolves everything, which a genuine double-bind would not.
 
 10. **A run that fails on every test case under ``options.sdf`` -- often
     with the design's outputs reading a constant zero -- while the
@@ -218,8 +216,6 @@ from .env_provenance import find_repo_root, repo_relative_path
 from .functional_verification_from_synthesize import (  # noqa: F401
     _resolve_sources,
     has_from_synthesize,
-    resolve_sources_with_synthesize,
-    with_from_synthesize,
 )
 from .functional_verification_initial_state import (
     INITIAL_STATE_MODULE,
@@ -227,6 +223,7 @@ from .functional_verification_initial_state import (
     build_initial_state_verilog,
     count_d_nets,
 )
+from .functional_verification_run_inputs import resolve_run_inputs, with_run_inputs
 from .functional_verification_sdf import (
     _check_sdf_engine_capability,
     _collect_sdf_alias_port_bits,
@@ -261,6 +258,7 @@ from .functional_verification_sdf_steps import (
     _apply_sdf_header_normalization,
     _sdf_refusal_error,
 )
+from .request_paths import RequestPaths
 from .reset_coverage import ResetCoverageError, sequential_elements
 
 #: Bumped only on a non-additive (breaking) change to this command's own
@@ -657,6 +655,9 @@ class FunctionalVerificationError(Exception):
             self.code = code
 
 
+_rpath = RequestPaths(FunctionalVerificationError)
+
+
 # ---------------------------------------------------------------------------
 # request loading (same file / "-" / inline-JSON convention as `klt lvs`)
 # ---------------------------------------------------------------------------
@@ -761,11 +762,7 @@ def _resolve_testbench(
             raise FunctionalVerificationError(
                 "request.testbench.search_path must be a non-empty string when given"
             )
-        search_dir = (
-            search_path
-            if os.path.isabs(search_path)
-            else os.path.join(request_dir, search_path)
-        )
+        search_dir = _rpath(search_path, request_dir, "request.testbench.search_path")
     else:
         search_dir = request_dir
 
@@ -978,9 +975,7 @@ def _resolve_initial_state(
             f"options.initial_state requires engine 'icarus' -- engine "
             f"'{engine}' cannot force cell-model pins hierarchically"
         )
-    netlist_path = (
-        netlist if os.path.isabs(netlist) else os.path.join(request_dir, netlist)
-    )
+    netlist_path = _rpath(netlist, request_dir, "request.options.initial_state.netlist")
     if not os.path.isfile(netlist_path):
         raise FunctionalVerificationError(
             f"request.options.initial_state.netlist '{netlist_path}' not found"
@@ -1274,7 +1269,7 @@ def _resolve_source_defines(
                 "request.options.source_defines keys must be non-empty strings"
             )
         path = os.path.abspath(
-            key if os.path.isabs(key) else os.path.join(request_dir, key)
+            _rpath(key, request_dir, "request.options.source_defines key")
         )
         if path not in sources:
             raise FunctionalVerificationError(
@@ -1395,7 +1390,7 @@ def _resolve_includes(includes: Any, request_dir: str) -> list[str]:
 
     resolved: list[str] = []
     for entry in includes:
-        path = entry if os.path.isabs(entry) else os.path.join(request_dir, entry)
+        path = _rpath(entry, request_dir, "request.options.includes entry")
         if not os.path.isdir(path):
             raise FunctionalVerificationError(f"include directory not found: {entry}")
         resolved.append(os.path.abspath(path))
@@ -2578,7 +2573,7 @@ def run_functional_verification(
             "request.hdl_toplevel must be a non-empty string"
         )
     # Issue #5684: verify the synthesized netlist before anything is built.
-    sources, synth_block = resolve_sources_with_synthesize(
+    sources, run_inputs = resolve_run_inputs(
         request_doc, request_dir, hdl_toplevel, _path_envelope
     )
 
@@ -2827,17 +2822,17 @@ def run_functional_verification(
         # Issue #2363: an `INTERCONNECT` entry from a bit-selected top-level
         # input port onto a pin of a *physical-only* instance -- a
         # router-inserted antenna diode, or any filler/tapcell whose model
-        # is timing-empty -- is shape (b) of the #1619/#1857 spike and
-        # cannot be annotated by Icarus at all. Unlike the general shape (b)
-        # case (which stays failing, pinned by
+        # is timing-empty -- is shape (b) of the #1619/#1857 spike: on a
+        # fanout-above-1 net, #5705's cap leaves every non-last-declared
+        # load's entry unannotated. Unlike the general shape (b) case
+        # (which stays failing, pinned by
         # `test_integration_real_icarus_sdf_bus_port_input_fanout_stays_
-        # unresolvable`), this destination's elaborated model carries no
-        # `specify` block and no output pin, so there is no modpath the
-        # entry could ever annotate. When such an entry is zero-delay at
-        # every corner, dropping it cannot change any simulated timing, so
+        # unresolvable`), this destination has no timing content and no
+        # logic observes the pin -- its entry can still be the cap's
+        # survivor, so the drop rests on timing emptiness, not "no modpath
+        # exists". A zero-delay-at-every-corner entry is timing-neutral, so
         # it is removed here and counted in `environment.sdf.dropped`
-        # instead of failing the run. A non-zero-delay entry is left in
-        # place and still fails the diagnostic gate loudly.
+        # instead of failing the run; a non-zero-delay entry still fails.
         annotate_source_path = _apply_sdf_physical_only_drop(
             annotate_source_path,
             output_dir,
@@ -2903,7 +2898,7 @@ def run_functional_verification(
     includes = [*includes, *scoped_include_dirs]
 
     if verilog_tb is not None:
-        return with_from_synthesize(
+        return with_run_inputs(
             _run_verilog_top(
                 verilog_tb,
                 engine=engine,
@@ -2922,7 +2917,7 @@ def run_functional_verification(
                 source_defines=source_defines,
                 tools=tools,
             ),
-            synth_block,
+            run_inputs,
         )
 
     runner_module = _import_runner()
@@ -3037,18 +3032,18 @@ def run_functional_verification(
                 "tools": tools,
                 "cocotb_version": _cocotb_version(),
                 "results_xml": _hashed_path_envelope(results_xml),
-                # Additive (issue #3013): the simulator/cocotb console transcript
-                # and the build transcript the run wrote, named by path (never
-                # inlined) like `results_xml`.
+                # Additive (issue #3013): the simulator/cocotb console and build
+                # transcripts, named by path (never inlined) like `results_xml`.
                 "test_log": _hashed_path_envelope(test_log),
                 "build_log": _hashed_path_envelope(build_log),
                 "random_seed": _extract_random_seed_property(results_xml),
                 # Additive (issue #3290): `options.source_defines` keyed by the
-                # request.sources entry as resolved to an absolute path; `{}`
-                # when absent.
+                # request.sources entry as resolved; `{}` when absent.
                 "source_defines": source_defines,
                 # Additive (issue #4338): `request.env` as given; `{}` when absent.
                 "env": env,
+                # Additive (issue #5697): `request.parameters` echo; `{}` when absent.
+                "parameters": parameters,
                 # Additive (issue #2998): `null` unless the request set
                 # `options.initial_state`. `seeds` echoes the effective seeds
                 # (empty for mode "x"); `runs` has one entry per seed.
@@ -3102,7 +3097,7 @@ def run_functional_verification(
             },
         }
     )
-    with_from_synthesize(report, synth_block)  # issue #5684, additive
+    with_run_inputs(report, run_inputs)  # #5684/#5771, additive
     report.local_paths = {
         "results_xml": results_xml,
         "test_log": test_log,
