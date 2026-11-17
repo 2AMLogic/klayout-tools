@@ -210,11 +210,10 @@ def is_steps_analysis(analysis: dict[str, Any]) -> bool:
 def measurement_provenance(spec: dict[str, Any]) -> dict[str, Any]:
     """The additive provenance fields a measurement result/rollup entry
     carries: ``step`` for a step-scoped measurement, ``derived_from`` for one
-    computed from other results. Empty for every scalar-``analysis``
+    computed from other results, ``case`` for one expanded from a ``{case}``
+    template (issue #5731). Empty for every plain scalar-``analysis``
     measurement, so those report entries keep their exact shape."""
-    fields: dict[str, Any] = {}
-    if "step" in spec:
-        fields["step"] = spec["step"]
+    fields: dict[str, Any] = {k: spec[k] for k in ("step", "case") if k in spec}
     if "derived_from" in spec:
         fields["derived_from"] = list(spec["derived_from"])
     return fields

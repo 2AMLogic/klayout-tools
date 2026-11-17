@@ -263,7 +263,7 @@ from .sim_measurement_results import (
 from .sim_measurement_results import (
     NOT_REACHED_DIAGNOSTIC_CODE as NOT_REACHED_DIAGNOSTIC_CODE,
 )
-from .sim_measurement_results import _corner_measurement_results
+from .sim_measurement_results import _corner_measurement_results, expand_request
 from .sim_param_file import _corner_lib_lines as _corner_lib_lines
 from .sim_param_file import param_file_environment, resolve_param_file
 from .sim_plot import render_waveform_svg
@@ -1568,7 +1568,7 @@ def load_request(request_path: str) -> dict[str, Any]:
             "request is missing required field: analysis (or analysis_steps "
             "for an ordered multi-step sequence)"
         )
-    return request
+    return expand_request(request)  # issue #5731; see sim_measurement_template
 
 
 def _reject_linearize_in_steps(request: dict[str, Any]) -> None:

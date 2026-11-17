@@ -249,6 +249,11 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
         (0, 7, 1),
         lambda request: sim_twoport.has_noise_request(request.get("analysis")),
     ),
+    # No entry for `options.measurement_cases` (issue #5731): the expansion is
+    # resolved client-side -- `sim_measurement_template.expand_request` runs in
+    # `_prepare_sim_request` before any dispatch -- so the forwarded request
+    # document carries only the expanded plain `measurements[]` (the option
+    # key itself is dropped). An older runner sees an ordinary request.
 }
 
 #: Registry features a runner must be *known* to support (issue #2924): a
