@@ -101,8 +101,8 @@ def test_rerun_after_release_cut_skips_empty_section_gate(tmp_path: Path) -> Non
     rp.prepare(repo, None, "2026-11-09")
     log = (repo / "CHANGELOG.md").read_text()
     assert log.startswith("# Changelog\n\n## Unreleased\n\n## 0.9.0 (2026-11-09)")
-    rp.prepare(repo, "0.9.0", "2026-11-10")  # no raise
     snapshot = {p.name: p.read_text() for p in repo.rglob("*") if p.is_file()}
+    rp.prepare(repo, "0.9.0", "2026-11-10")  # no raise
     assert snapshot == {p.name: p.read_text() for p in repo.rglob("*") if p.is_file()}
 
 
