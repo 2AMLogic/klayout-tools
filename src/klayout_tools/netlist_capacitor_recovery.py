@@ -105,7 +105,7 @@ need not guess it from geometry.
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -545,6 +545,7 @@ def make_capacitor_class_recovery_reader(
     *,
     custom_device_classes: Mapping[str, str] | None = None,
     resistor_classes: Mapping[str, str] | None = None,
+    defined_subckt_names: Collection[str] | None = None,
 ) -> kdb.NetlistSpiceReader:
     """Build a ``kdb.NetlistSpiceReader`` whose delegate reattaches a
     recovered capacitor device-class name (see
@@ -590,11 +591,36 @@ def make_capacitor_class_recovery_reader(
     parsing -- ``10U`` is ``1e-5`` -- and are converted to the micrometre
     domain ``DeviceClassResistor`` reports). ``None``/``{}`` (the default)
     leaves every such card to the default handling, unchanged.
+
+    ``defined_subckt_names`` (issue #5665) is the set of ``.subckt`` names
+    the text being read itself defines (already upper-cased -- see
+    :func:`klayout_tools.netlist_normalize_scan.defined_subckt_names`, the
+    scanner both ``klt lvs`` call sites use). A name in it is unambiguously
+    a real circuit, so neither lookup above may claim it: ``True`` from
+    ``wants_subcircuit`` for a *defined* name tells KLayout the name is a
+    device model, and KLayout then silently declines to build that
+    ``.SUBCKT`` definition's ``Circuit`` at all -- a reference defining a
+    subcircuit named after a deck device class (a foundry resistor CDL's
+    ``.SUBCKT rppd``, the naming convention this parameter exists for) came
+    back with zero circuits, and one that also instantiated it via an ``X``
+    card failed to parse with ``Not a known element type: 'X'``. The claim
+    exists for the *undefined*-``X``-card recovery shape only, so yielding
+    to the default handling for a defined name is exactly its intended
+    scope. ``None``/empty (the default) claims every lookup name as before,
+    byte-identical to the pre-#5665 reader -- a netlist that defines no
+    colliding subcircuit cannot behave differently.
     """
     import klayout.db as kdb
 
     custom_lookup: dict[str, str] = dict(custom_device_classes or {})
     resistor_lookup: dict[str, str] = dict(resistor_classes or {})
+    # Issue #5665: upper-cased once so `wants_subcircuit`'s per-card check
+    # against it stays a single set lookup, exactly like the two below.
+    defined_subckts: set[str] | None = (
+        None
+        if defined_subckt_names is None
+        else {name.upper() for name in defined_subckt_names}
+    )
     # One reader instance serves exactly one `Netlist.read` call (every
     # caller in this repo builds it per call), so a plain per-class-name
     # cache is a complete registry of the classes this delegate created or
@@ -603,6 +629,11 @@ def make_capacitor_class_recovery_reader(
 
     class _CapacitorClassRecoveringDelegate(kdb.NetlistSpiceReaderDelegate):
         def wants_subcircuit(self, name: str) -> bool:
+            # Issue #5665: a subcircuit the file itself defines is a real
+            # circuit, never a device model -- check this BEFORE the two
+            # recovery lookups so neither can swallow the definition.
+            if defined_subckts is not None and name.upper() in defined_subckts:
+                return super().wants_subcircuit(name)
             if name.upper() in custom_lookup or name.upper() in resistor_lookup:
                 return True
             return super().wants_subcircuit(name)

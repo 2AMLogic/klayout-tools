@@ -3531,10 +3531,16 @@ def _resolve_layout(
             # keyed off `layout.deck`'s own `resistors` table.
             resistor_classes = resistor_classes_for_deck(layout_deck_for_recovery)
     netlist = kdb.Netlist()
+    # Issue #5665: a `.SUBCKT` the layout netlist itself defines must survive
+    # the recovery reader's `wants_subcircuit` claim above (a name matching a
+    # deck resistor/MoM class is a real circuit when the file defines it).
+    from .netlist_normalize import defined_subckt_names
+
     reader = make_capacitor_class_recovery_reader(
         recovered_capacitor_classes,
         custom_device_classes=custom_device_classes,
         resistor_classes=resistor_classes,
+        defined_subckt_names=defined_subckt_names(layout_netlist_text),
     )
     try:
         netlist.read(layout_netlist_path, reader)
@@ -3821,12 +3827,20 @@ def _read_reference_netlist(
     read_path, read_text, tmp_path = sliced_reference_file(
         finfet, finfet_top, read_path, read_text, tmp_path
     )
+    # Issue #5665: scan the text actually handed to the reader below (the
+    # converted text for the conversion forms, post-`sliced_reference_file`)
+    # so a `.SUBCKT` the reference itself defines survives the recovery
+    # reader's `wants_subcircuit` claim -- a name matching a deck
+    # resistor/MoM class is a real circuit when the file defines it.
+    from .netlist_normalize import defined_subckt_names
+
     reader = reference_reader(
         finfet,
         lambda: make_capacitor_class_recovery_reader(
             recovered_capacitor_classes,
             custom_device_classes=custom_device_classes,
             resistor_classes=resistor_classes,
+            defined_subckt_names=defined_subckt_names(read_text),
         ),
     )
     try:
