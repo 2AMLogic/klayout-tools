@@ -6,21 +6,42 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from .liberty_merge import cache_root
 from .place_and_route_reports import parse_global_route_congestion
 
 
+def _under(real: str, root: str) -> bool:
+    return real == root or real.startswith(root.rstrip(os.sep) + os.sep)
+
+
 def outside_cwd_note(path: str) -> str:
-    """Issue #4191: the docker wrapper mounts only `$PWD`, `$PDK_ROOT` and
-    `$TMPDIR`, so a readable path outside the invocation directory is the
-    commonest trigger -- say the rule and the fix, not just the symptom."""
+    """Issue #4191, extended by #5626: the docker wrapper mounts `$PWD`,
+    `$PDK_ROOT`, `$TMPDIR` and the klt cache root, so a readable path
+    outside all of those is the commonest trigger -- say the rule and the
+    fix, not just the symptom. A path under the klt cache root (the merged
+    `.lib` a list-form liberty descriptor produces) gets its own
+    remediation: "run from a common ancestor" is unachievable for a cache
+    path, so point at regenerating the wrapper or relocating `KLT_CACHE_DIR`
+    instead."""
     cwd = os.path.realpath(os.getcwd())
     real = os.path.realpath(path)
-    if real == cwd or real.startswith(cwd.rstrip(os.sep) + os.sep):
+    if _under(real, cwd):
         return ""
+    cache = os.path.realpath(os.path.expanduser(cache_root()))
+    if _under(real, cache):
+        return (
+            f"; '{path}' is under the klt cache root '{cache}' -- a "
+            "container wrapper must mount that path (read-only is enough; "
+            "the wrapper scripts/install-openroad-docker.sh writes does); "
+            "re-run that installer to regenerate a wrapper predating the "
+            "mount, or point KLT_CACHE_DIR under a directory the wrapper "
+            "already mounts (e.g. $TMPDIR/klt-cache)"
+        )
     return (
         f"; '{path}' is outside the invocation directory '{cwd}', and the "
-        "container wrapper mounts only $PWD, $PDK_ROOT and $TMPDIR -- run "
-        "from a common ancestor of the request and its inputs"
+        "container wrapper mounts only $PWD, $PDK_ROOT, $TMPDIR and the klt "
+        "cache root -- run from a common ancestor of the request and its "
+        "inputs"
     )
 
 

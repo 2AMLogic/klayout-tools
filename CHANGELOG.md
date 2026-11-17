@@ -14,6 +14,26 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`openroad` Docker wrapper mounts the klt cache root** (issue #5626,
+  2026-11-17): the merged `.lib` that a descriptor's list-form `liberty`
+  entry produces is written under the klt cache root (`$KLT_CACHE_DIR`
+  itself when set, else `${XDG_CACHE_HOME:-$HOME/.cache}/klt`) and embedded
+  as an absolute path in the generated Tcl, but the wrapper
+  `scripts/install-openroad-docker.sh` writes mounted only `$PWD`,
+  `$PDK_ROOT` and `$TMPDIR` — so every `klt place-and-route` /
+  `klt post-route-sta` run against a list-form corner failed at its first
+  OpenROAD stage with `cannot read file <cache>/liberty-merged/merged-*.lib`.
+  The wrapper now resolves the cache root exactly as
+  `klayout_tools.liberty_merge.cache_root()` does, `mkdir -p`s it before
+  `docker run` (Docker otherwise creates a missing bind-mount source as
+  root, issue #3151), mounts it `:ro`, and skips the mount when the path
+  duplicates `$PWD`/`$PDK_ROOT`/`$TMPDIR` (a duplicate mount point is a
+  hard `docker run` error). The mount-coverage hint for an unreadable path
+  under the cache root no longer advises "run from a common ancestor"
+  (unachievable for a cache path); it names the cache root instead. Hosts
+  with an older wrapper must re-run `scripts/install-openroad-docker.sh`
+  to regenerate it (or set `KLT_CACHE_DIR` under an already-mounted
+  directory, e.g. `$TMPDIR/klt-cache`).
 - **`klt sim --fail-fast-probe` reads the same `.spiceinit` as the corners it
   screens** (#6047, 2026-11-17): `_run_corner` pins the thread count by writing
   a run-directory `.spiceinit`, which *replaces* `$HOME/.spiceinit`, but the

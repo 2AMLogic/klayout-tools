@@ -39,15 +39,26 @@ class LibertyMergeError(Exception):
     """Liberty files cannot be merged (header mismatch, duplicate cell, ...)."""
 
 
-def cache_dir() -> str:
-    """Directory merged Liberty files are written to."""
+def cache_root() -> str:
+    """Root directory the Liberty merge cache lives under.
+
+    ``$KLT_CACHE_DIR`` itself when set, else ``${XDG_CACHE_HOME:-~/.cache}``
+    plus ``klt`` -- the path a container ``openroad`` wrapper must mount for
+    :func:`cache_dir`'s contents to be reachable inside the container
+    (issue #5626).
+    """
     base = os.environ.get(CACHE_ENV)
     if base:
-        return os.path.join(os.path.expanduser(base), "liberty-merged")
+        return os.path.expanduser(base)
     xdg = os.environ.get("XDG_CACHE_HOME") or os.path.join(
         os.path.expanduser("~"), ".cache"
     )
-    return os.path.join(xdg, "klt", "liberty-merged")
+    return os.path.join(xdg, "klt")
+
+
+def cache_dir() -> str:
+    """Directory merged Liberty files are written to."""
+    return os.path.join(cache_root(), "liberty-merged")
 
 
 def merge_liberty(paths: list[str]) -> str:

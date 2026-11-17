@@ -245,7 +245,12 @@ directory itself, or a named subdirectory of it). When present it wins over
   `library (<name>)` name and comments). klt merges them
   into one content-addressed `.lib` under `$KLT_CACHE_DIR` (default
   `~/.cache/klt/liberty-merged`, never inside the PDK tree) and hands that single
-  path to Yosys/OpenROAD/OpenSTA. Top-level `lu_table_template` and
+  path to Yosys/OpenROAD/OpenSTA. A containerized `openroad`/OpenSTA can only
+  read that path if its wrapper mounts the cache root (`$KLT_CACHE_DIR`
+  itself when set, else `${XDG_CACHE_HOME:-$HOME/.cache}/klt`) — the wrapper
+  `scripts/install-openroad-docker.sh` writes does (issue #5626); see
+  [`place-and-route.md`](place-and-route.md) § "Installing OpenROAD".
+  Top-level `lu_table_template` and
   `power_lut_template` groups are unioned by name (same name with different
   content is an error). Any other header difference (units, operating
   conditions) or a duplicate cell name is an error; the merged header is the

@@ -57,6 +57,24 @@
 # lives outside `$PWD` (verified live against this exact failure while
 # building #1353).
 #
+# And it mounts the klt cache root (issue #5626): the merged `.lib` that a
+# descriptor's LIST-form `liberty` entry produces is written under
+# `$KLT_CACHE_DIR` itself when set, else `${XDG_CACHE_HOME:-$HOME/.cache}/klt`
+# -- exactly the resolution `src/klayout_tools/liberty_merge.py`'s
+# `cache_root()` performs -- and that absolute path is embedded in the
+# generated Tcl (`read_liberty <path>`), so a container that cannot see it
+# fails on its first OpenROAD stage with an opaque `cannot read file` no
+# matter how well everything else is mounted. The mount is read-only
+# (klt writes the merged file host-side before ever invoking the wrapper;
+# OpenROAD only ever `read_liberty`s it), mirroring the `$PDK_ROOT:ro`
+# precedent. Two guards the one-liner needs: the directory is `mkdir -p`'d
+# by the wrapper BEFORE `docker run` (Docker creates a missing bind-mount
+# source as root -- issue #3151's exact hazard, reachable whenever no
+# list-form corner has ever created `~/.cache/klt`), and the mount is
+# skipped when its path exactly equals a path already mounted (`docker run`
+# rejects a duplicate mount point, so `KLT_CACHE_DIR=$TMPDIR` must not
+# become a second `-v` for it).
+#
 # The wrapper forwards a narrow allowlist of the caller's environment into the
 # container (issue #3821): `PLATFORM_DIR` (the ORFS idiom, read by Tcl as
 # `$::env(PLATFORM_DIR)`) when it is set -- even if empty -- and every variable
@@ -64,8 +82,8 @@
 # so Docker copies the host value verbatim and an unset variable stays unset.
 # The whole environment is deliberately NOT forwarded (it would leak unrelated
 # host state and break reproducibility). Because values are verbatim, a
-# host-path `PLATFORM_DIR` only resolves in the container if it lies under a
-# mounted path ($PWD, $PDK_ROOT, $TMPDIR).
+# host-path `PLATFORM_DIR` only resolves in the container if it lies under
+# a mounted path ($PWD, $PDK_ROOT, $TMPDIR, or the klt cache root).
 
 set -euo pipefail
 
@@ -114,7 +132,9 @@ cat >"$WRAPPER" <<WRAPPER_EOF
 # hand, re-run that script instead. Mirrors docs/cli/place-and-route.md's
 # "Docker: extract the binary onto \$PATH" recipe, plus a \$PDK_ROOT mount
 # (falling back to \`klt pdk find\` when \$PDK_ROOT is unset -- issue #1868,
-# see this generator's own header comment for why) and a \$TMPDIR mount.
+# see this generator's own header comment for why), a \$TMPDIR mount, and
+# the klt cache root that holds the merged Liberty file a list-form
+# descriptor's \`liberty\` entry produces (issue #5626).
 #
 # Runs the image by PINNED DIGEST, never by the moving \`:latest\` tag, so this
 # wrapper keeps executing the exact OpenROAD build it was installed against
@@ -129,8 +149,10 @@ cat >"$WRAPPER" <<WRAPPER_EOF
 # because that uid usually has no passwd entry (hence no home) in the image.
 set -euo pipefail
 MOUNTS=(-v "\$PWD:\$PWD" -w "\$PWD")
+MOUNTED_PATHS=("\$PWD")
 if [[ -n "\${PDK_ROOT:-}" ]]; then
     MOUNTS+=(-v "\$PDK_ROOT:\$PDK_ROOT:ro")
+    MOUNTED_PATHS+=("\$PDK_ROOT")
 elif command -v klt >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
     # \$PDK_ROOT unset -- mirror \`klt place-and-route\`'s own PDK resolution
     # (find_pdk()'s search order) so the mount matches what it will actually
@@ -139,9 +161,31 @@ elif command -v klt >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
     RESOLVED_PDK_ROOT="\$(klt pdk find --format json 2>/dev/null | jq -r '.root // empty' 2>/dev/null || true)"
     if [[ -n "\$RESOLVED_PDK_ROOT" ]]; then
         MOUNTS+=(-v "\$RESOLVED_PDK_ROOT:\$RESOLVED_PDK_ROOT:ro")
+        MOUNTED_PATHS+=("\$RESOLVED_PDK_ROOT")
     fi
 fi
 MOUNTS+=(-v "\${TMPDIR:-/tmp}:\${TMPDIR:-/tmp}")
+MOUNTED_PATHS+=("\${TMPDIR:-/tmp}")
+# klt cache root (issue #5626): the merged .lib a list-form \`liberty\`
+# descriptor produces is written under it and embedded as an absolute path
+# in the generated Tcl, so the container must see it. Resolved exactly as
+# src/klayout_tools/liberty_merge.py's cache_root() resolves it. mkdir -p
+# BEFORE docker run -- Docker would otherwise create a missing bind-mount
+# source as root (issue #3151). The mount is skipped when the path already
+# equals one mounted above -- docker run rejects a duplicate mount point,
+# so e.g. KLT_CACHE_DIR=\$TMPDIR must not become a second -v for it.
+KLT_CACHE_ROOT="\${KLT_CACHE_DIR:-\${XDG_CACHE_HOME:-\$HOME/.cache}/klt}"
+mkdir -p "\$KLT_CACHE_ROOT"
+CACHE_DUPE=0
+for m in "\${MOUNTED_PATHS[@]}"; do
+    if [[ "\$KLT_CACHE_ROOT" == "\$m" ]]; then
+        CACHE_DUPE=1
+        break
+    fi
+done
+if [[ "\$CACHE_DUPE" -eq 0 ]]; then
+    MOUNTS+=(-v "\$KLT_CACHE_ROOT:\$KLT_CACHE_ROOT:ro")
+fi
 # Forward PLATFORM_DIR and OPENROAD_* by name (issue #3821).
 ENV_ARGS=()
 if [[ -n "\${PLATFORM_DIR+x}" ]]; then

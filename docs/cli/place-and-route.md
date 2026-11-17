@@ -116,7 +116,8 @@ invocation itself — e.g. `sudo docker run ...` if your user isn't in the
 host (e.g. Apple Silicon) works but is slower, per the survey's own
 "Environment limitation" section, which hit the identical constraint.
 
-**Gotcha: this bare wrapper does not mount the PDK at all.** `klt
+**Gotcha: this bare wrapper mounts only `$PWD` — not the PDK, and not the
+klt cache root.** `klt
 place-and-route` resolves the PDK's LEF/tech-LEF/liberty files on the
 **host** and bakes those absolute paths straight into the generated Tcl
 (`read_liberty <path>`, `read_lef <path>`) — a container `openroad` can only
@@ -131,14 +132,38 @@ nothing about the real cause (issue #1868). `klt place-and-route` itself
 now recognizes this exact failure shape — a path `openroad` reports it
 cannot read that this process can itself still read — and appends a hint
 about mount coverage rather than passing the raw Tcl error through
-unexplained. **Rule (issue #4191):** the container wrapper mounts only `$PWD`,
-`$PDK_ROOT` and `$TMPDIR`, so every input the request references (netlist,
-macro LEF, `--abstract-cell-lef`) must live under one of those. When the
+unexplained. **Rule (issue #4191, extended by #5626):** a working container
+wrapper mounts `$PWD`, `$PDK_ROOT`, `$TMPDIR` **and the klt cache root**, so
+every input the request references (netlist,
+macro LEF, `--abstract-cell-lef`, and the merged `.lib` a list-form
+`liberty` descriptor produces) must live under one of those. When the
 unreadable path is outside the invocation directory, the hint names that
 path and says to run `klt place-and-route` from a common ancestor of the
-request and its inputs. [`scripts/install-openroad-docker.sh`](../../scripts/install-openroad-docker.sh)'s
+request and its inputs — except when the path is under the klt cache root,
+where that advice is unachievable; the hint then names the cache root and
+the fixes below.
+[`scripts/install-openroad-docker.sh`](../../scripts/install-openroad-docker.sh)'s
 wrapper (below) already automates this fallback; only the bare snippet
 above needs it spelled out manually.
+
+**The klt cache root must be mounted (issue #5626).** When a descriptor's
+`liberty` entry is a *list* of `.lib` files (see [`pdk.md`](pdk.md) § "4.
+Descriptor-declared tree"), `klt` merges them into one content-addressed
+file under the klt cache root — `$KLT_CACHE_DIR` itself when set, else
+`${XDG_CACHE_HOME:-$HOME/.cache}/klt` — and embeds that absolute path in
+the generated Tcl. A containerized `openroad` can only read it if the
+wrapper bind-mounts that path at the identical location (`:ro` is enough;
+`klt` writes the merged file host-side before ever invoking `openroad`).
+[`scripts/install-openroad-docker.sh`](../../scripts/install-openroad-docker.sh)'s
+wrapper does this: it resolves the cache root exactly as `klt` does,
+`mkdir -p`s it as the caller before `docker run` (so Docker never plants a
+root-owned directory there, issue #3151), mounts it read-only, and skips
+the mount when it would duplicate `$PWD`, `$PDK_ROOT` or `$TMPDIR` (a
+duplicate mount point is a hard `docker run` error). **A wrapper generated
+before this change must be re-generated** — re-run
+`scripts/install-openroad-docker.sh` to upgrade it in place — or point
+`KLT_CACHE_DIR` at a directory the wrapper already mounts, e.g.
+`KLT_CACHE_DIR=$TMPDIR/klt-cache`.
 
 ### From source
 

@@ -6518,8 +6518,8 @@ def test_engine_error_message_flags_readable_file_openroad_cannot_read(tmp_path)
 def test_engine_error_message_names_mount_rule_for_path_outside_cwd(
     tmp_path, monkeypatch
 ):
-    """Issue #4191: a readable path outside the invocation directory gets the
-    `$PWD`/`$PDK_ROOT`/`$TMPDIR` mount rule and the common-ancestor advice."""
+    """Issue #4191 (rule extended by #5626): a readable path outside the
+    invocation directory gets the mount rule and common-ancestor advice."""
     cwd = tmp_path / "work"
     cwd.mkdir()
     outside = tmp_path / "elsewhere" / "macro.lef"
@@ -6534,7 +6534,7 @@ def test_engine_error_message_names_mount_rule_for_path_outside_cwd(
     message = place_and_route._engine_error_message("floorplan", completed)
 
     assert f"'{outside}' is outside the invocation directory" in message
-    assert "$PWD, $PDK_ROOT and $TMPDIR" in message
+    assert "$PWD, $PDK_ROOT, $TMPDIR and the klt cache root" in message
     assert "common ancestor" in message
 
     inside = cwd / "macro.lef"
