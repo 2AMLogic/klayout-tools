@@ -11,24 +11,16 @@ skip without it. Follows `tests/test_sim_params.py`.
 from __future__ import annotations
 
 import json
-import os
 import re
-import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
+from helpers.tool_probes import SKIP_NO_NGSPICE as _SKIP_NO_NGSPICE
 from klayout_tools import sim, sim_remote
 
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
-
-HAVE_NGSPICE = shutil.which("ngspice") is not None and (
-    os.environ.get("KLT_SKIP_NGSPICE_TESTS") != "1"
-)
-_SKIP_NO_NGSPICE = pytest.mark.skipif(
-    not HAVE_NGSPICE, reason="ngspice is not installed on this machine"
-)
 
 #: Two independent bistable latches (`a`/`b` and `c`/`d`): without a hint every
 #: node solves to 0 V, with one the latch settles at the hinted sign. The

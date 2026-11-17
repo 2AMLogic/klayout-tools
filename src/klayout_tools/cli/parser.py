@@ -10,7 +10,7 @@ import sys
 
 from .. import (
     arith_gen,
-    artifact_store,
+    artifact_objects,
     pdk_stackup,
 )
 from ..equiv import SUPPORTED_ENGINES as SUPPORTED_EQUIV_ENGINES
@@ -27,7 +27,6 @@ from . import (
     corner_matrix_cmd,
     deck_cmd,
     design_centering_cmd,
-    diff_cmd,
     draw_cmd,
     drc_cmd,
     env_provenance_cmd,
@@ -87,6 +86,7 @@ from ._argv_flags import _require_one_input as _require_one_input
 from ._drc_parser_args import add_klayout_app_args, add_rule_listing_args
 from .color import add_color_args
 from .parser_characterize import add_characterize_parser
+from .parser_diff import add_diff_parser
 from .parser_economy import add_economy_parser
 from .parser_netlist import add_netlist_parser
 from .parser_pex import add_pex_parser
@@ -221,7 +221,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_layers_parser(subparsers)
 
     _add_stats_parser(subparsers)
-    _add_diff_parser(subparsers)
+    add_diff_parser(subparsers, _add_format_arg)
 
     add_economy_parser(subparsers, _add_format_arg)
 
@@ -2635,6 +2635,7 @@ def _add_place_and_route_parser(subparsers: argparse._SubParsersAction) -> None:
         inputs="gate-level netlist and standard-cell liberty",
         engine="OpenROAD",
         docs="docs/cli/place-and-route.md",
+        rerun_extra=place_and_route_cmd.RERUN_HELP_EXTRA,
     )
     _add_format_arg(place_and_route_parser)
     place_and_route_parser.set_defaults(func=place_and_route_cmd.run)
@@ -2647,16 +2648,14 @@ def _add_flow_verify_args(
     inputs: str,
     engine: str,
     docs: str,
+    rerun_extra: str = "",
 ) -> None:
     """Register the shared ``--check``/``--rerun`` committed-evidence
     verification flags on a *flow* verb (issue #2224).
 
-    Deliberately **not** the mutually-exclusive-with-the-input group ``klt
-    drc``/``klt lvs``/``klt extract`` use: those reports echo their own
-    inputs, so ``--check REPORT`` is self-sufficient there. A flow verb's
-    report echoes outputs and provenance hashes only, so the positional
-    ``request`` stays required and supplies the inputs to re-hash/re-run
-    against. See ``_report_verify.py``'s module docstring.
+    Deliberately **not** the input-exclusive group ``klt drc``/``klt lvs``/
+    ``klt extract`` use: their reports echo their own inputs; a flow verb's
+    report does not, so ``request`` stays required for the re-run inputs.
     """
     parser.add_argument(
         "--check",
@@ -2683,6 +2682,7 @@ def _add_flow_verify_args(
             "provenance.klt_version/klayout_version/pdk.version, "
             "engine_version, and run-scoped bookkeeping (see "
             f"{docs}). Requires --check; a clean error (exit 1) otherwise"
+            + (f" {rerun_extra}" if rerun_extra else "")
         ),
     )
 
@@ -3482,7 +3482,7 @@ def _add_artifact_parser(subparsers: argparse._SubParsersAction) -> None:
         description=(
             "Evidence bytes go to the artifact store through its broker; git "
             "keeps a manifest naming each object by sha256. The broker URL "
-            f"comes from --broker or ${artifact_store.ENV_BROKER}; there is "
+            f"comes from --broker or ${artifact_objects.ENV_BROKER}; there is "
             "no default. No credential is held: the broker identifies the "
             "caller by its network identity. Presigned URLs stay in-process "
             "and are never printed."
@@ -3510,7 +3510,7 @@ def _add_artifact_parser(subparsers: argparse._SubParsersAction) -> None:
         help="merge the entries into this manifest JSON (created if absent)",
     )
     put_parser.add_argument(
-        "--kind", choices=list(artifact_store.CLIENT_KINDS), default="evidence"
+        "--kind", choices=list(artifact_objects.CLIENT_KINDS), default="evidence"
     )
     put_parser.add_argument(
         "--name",
@@ -3606,7 +3606,7 @@ def _add_artifact_common_args(parser: argparse.ArgumentParser, *, repo: bool) ->
         "--broker",
         metavar="URL",
         default=None,
-        help=f"artifact broker base URL (default: ${artifact_store.ENV_BROKER})",
+        help=f"artifact broker base URL (default: ${artifact_objects.ENV_BROKER})",
     )
     if repo:
         parser.add_argument(
@@ -3614,7 +3614,7 @@ def _add_artifact_common_args(parser: argparse.ArgumentParser, *, repo: bool) ->
             metavar="OWNER/NAME",
             default=None,
             help=f"repo the objects are stored under (default: "
-            f"${artifact_store.ENV_REPO}, else the git origin remote)",
+            f"${artifact_objects.ENV_REPO}, else the git origin remote)",
         )
     _add_format_arg(parser)
 
@@ -4007,7 +4007,7 @@ def _add_stats_parser(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         help="also compute geometry_digest, a sha256 of the stream's decoded "
         "geometry (null otherwise; it re-reads the whole layout and "
-        "roughly 2.5x's the runtime on large flat layouts)",
+        "roughly 2.5x the runtime on large flat layouts)",
     )
     stats_parser.add_argument(
         "--top",
@@ -4034,36 +4034,6 @@ def _add_stats_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(stats_parser)
     stats_parser.set_defaults(func=stats_cmd.run)
-
-
-def _add_diff_parser(subparsers: argparse._SubParsersAction) -> None:
-    """Register the ``diff`` verb: compare two layout streams for equal geometry."""
-    diff_parser = subparsers.add_parser(
-        "diff",
-        help="compare two GDSII/OASIS streams for equal geometry, labels and hierarchy",
-        description=(
-            "Compare two layout streams shape-for-shape. Ignores stream "
-            "timestamps, element order and library name; never ignores "
-            "coordinates, path widths, text, instance transforms, the "
-            "database unit or cell names. Exit 0 = equivalent, 3 = layouts "
-            "differ, 1 = unreadable file or unknown --top."
-        ),
-    )
-    diff_parser.add_argument("file_a", help="first GDSII or OASIS layout file")
-    diff_parser.add_argument("file_b", help="second GDSII or OASIS layout file")
-    diff_parser.add_argument(
-        "--top",
-        default=None,
-        help="compare only this cell's hierarchy (must exist in both streams)",
-    )
-    diff_parser.add_argument(
-        "--max-items",
-        type=int,
-        default=50,
-        help="cap on listed differences per list (counts stay exact; default 50)",
-    )
-    _add_format_arg(diff_parser)
-    diff_parser.set_defaults(func=diff_cmd.run)
 
 
 def _add_cells_parser(subparsers: argparse._SubParsersAction) -> None:
