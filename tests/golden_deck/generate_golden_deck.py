@@ -71,7 +71,9 @@ from typing import Any
 GOLDEN_DECK_DIR = Path(__file__).resolve().parent
 REPO_ROOT = GOLDEN_DECK_DIR.parent.parent
 
-sys.path.insert(0, str(REPO_ROOT / "src"))
+sys.path[0:0] = [str(REPO_ROOT / "src"), str(GOLDEN_DECK_DIR)]
+
+from _allowed_checks import ALLOWED_CHECKS  # noqa: E402  (data table; see below)
 
 from klayout_tools.decks import (  # noqa: E402
     DrcRule,
@@ -81,8 +83,6 @@ from klayout_tools.decks import (  # noqa: E402
     sky130,
 )
 
-from ._allowed_checks import ALLOWED_CHECKS  # noqa: E402  (data table; see below)
-
 DECKS: dict[str, list[DrcRule]] = {
     "sky130": sky130.DECK,
     "gf180mcu": gf180mcu.DECK,
@@ -91,7 +91,7 @@ DECKS: dict[str, list[DrcRule]] = {
 }
 
 # `ALLOWED_CHECKS` (per-deck manifest check-kind table, data only) lives in
-# :mod:`._allowed_checks` (per-file size ratchet); re-exported here.
+# :mod:`_allowed_checks` (per-file size ratchet); re-exported here.
 
 
 #: Fixed bar dimensions (database units), independent of any individual
