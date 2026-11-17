@@ -39,6 +39,8 @@ not `klt --version`, if you need to detect this kind of drift. See
   additive array -- one `{path, scope, sha256}` entry per resolved source, in
   build order (the `options.from_synthesize` netlist first), on both the cocotb
   and the Verilog-top path. `path`/`scope` is the repo-relative shape, so a
+  source outside the repo reads `{"path": null, "scope": "external"}` and never
+  leaks a host path. No `schema_version` bump.
 - **`klt synthesize` accepts an abstract-less macro** (#5612, 2026-11-16):
   a `request.macros[]` entry may omit `lef` when it gives `verilog_blackbox`;
   identity comes from `cell` or the blackbox's single module, the instance
