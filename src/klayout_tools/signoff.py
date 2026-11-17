@@ -5531,6 +5531,15 @@ def _grade_check_outcome(
     :func:`~.signoff_nothing_checked.nothing_checked_item_detail` (issue
     #5479), naming the artifact read though ``citation`` stays ``None``.
 
+    Issue #5692: every other non-passing reason (``check_failed``,
+    ``partial_coverage``, ``undersized_sample``,
+    ``runset_unrecognised_device``) carries the same ``detail.cited_evidence``
+    block, built from :func:`_citation`, so a failing citation's ``body_bias``
+    and other passthroughs have an in-report source. This reverses #5479's
+    "a failed check's remedy is the defect, not the citation" position.
+    ``citation`` itself stays ``None`` (met-only contract) and grading is
+    unchanged.
+
     Issue #5598: this return precedes :func:`_grade_evidence`'s staleness
     gate, so it would otherwise hide the manifest ``content_hash`` pin --
     a comparable, genuinely stale one included -- behind the envelope's own
@@ -5555,6 +5564,13 @@ def _grade_check_outcome(
             **failure_detail,
             **vacuous.nothing_checked_item_detail(envelope, _citation(resolution)),
         }
+    else:
+        # Issue #5692: every other non-passing reason names what was read too,
+        # unconditionally -- ``check_failed``, ``partial_coverage``,
+        # ``undersized_sample`` and ``runset_unrecognised_device`` all leave
+        # through this one return, so gating on a single token would leave its
+        # siblings bare. Disclosure only: no grading rule reads it.
+        failure_detail = {**failure_detail, "cited_evidence": _citation(resolution)}
     pin = pin_disclosure(spec, resolution, check_kind=kind)
     if pin.get("content_hash_pin") == PIN_STALE:
         # Name the failed comparison, exactly as the staleness verdict does.
