@@ -255,6 +255,8 @@ from .sim_batch_contract_worker import (  # noqa: F401
     WORKER_CAPTURE_STR_MAX,
     _assess_capability_support,
     _assess_deck_support,
+    _bounded_model_inputs,
+    _bounded_str,
     _capability_preflight_lines,
     _deck_preflight_lines,
     _runner_supports_decks,
@@ -263,6 +265,13 @@ from .sim_batch_contract_worker import (  # noqa: F401
     _worker_capture_command,
     assess_par_backend_support,
     par_backend_preflight_lines,
+    runner_ngspice_init,
+)
+from .sim_batch_job_timeout import (
+    _resolve_job_ceiling_check,
+    _resolve_max_units_per_job,
+    assess_caller_job_timeout,
+    resolve_job_timeout_s,
 )
 
 # --------------------------------------------------------------------------- #
@@ -303,6 +312,10 @@ class BatchConfig:
     #: ``request.batch.max_concurrent_jobs`` (issue #3914): opt-in bound on
     #: the shard jobs in flight at once; ``None`` submits every shard at once.
     max_concurrent_jobs: int | None = None
+    #: ``request.batch.job_timeout_s`` (issue #5544): the caller's stated
+    #: wall bound for one job; ``None`` -- the default -- keeps the
+    #: fully-serial upper bound.
+    job_timeout_s: float | None = None
     #: ``request.batch.interrupted_grace_s`` (issue #2992); ``0`` disables.
     interrupted_grace_s: float = DEFAULT_INTERRUPTED_GRACE_S
     #: Pre-launch ``warn`` diagnostic for request features the manifest's
@@ -669,6 +682,7 @@ def _resolve_batch_config(
     job_ceiling_check = _resolve_job_ceiling_check(batch_spec)
     max_units_per_job = _resolve_max_units_per_job(batch_spec, job_ceiling_check)
     max_concurrent_jobs = _resolve_max_concurrent_jobs(batch_spec)
+    job_timeout_s = resolve_job_timeout_s(batch_spec)
     config = BatchConfig(
         provision_script=provision_script,
         bucket=bucket,
@@ -695,7 +709,9 @@ def _resolve_batch_config(
         poll_timeout_s=float(
             batch_spec.get(
                 "poll_timeout_s",
-                _default_batch_poll_timeout_s(corner_count, timeout_s),
+                _default_batch_poll_timeout_s(
+                    corner_count, timeout_s, job_timeout_s=job_timeout_s
+                ),
             )
         ),
         capacity_wait_s=capacity_wait_s,
@@ -705,6 +721,7 @@ def _resolve_batch_config(
         job_ceiling_check=job_ceiling_check,
         max_units_per_job=max_units_per_job,
         max_concurrent_jobs=max_concurrent_jobs,
+        job_timeout_s=job_timeout_s,
         interrupted_grace_s=_resolve_interrupted_grace_s(batch_spec),
     )
     # Issue #2851: compare the runner klt the AMI manifest publishes with
@@ -983,22 +1000,6 @@ def _resolve_max_job_seconds(
     return DEFAULT_BATCH_MAX_JOB_SECONDS, "default"
 
 
-def _resolve_job_ceiling_check(batch_spec: dict[str, Any]) -> str:
-    """``request.batch.job_ceiling_check``: ``"warn"`` (default),
-    ``"enforce"`` or ``"split"`` (issue #3446), else
-    :class:`~klayout_tools.sim.SimError` before any S3 write (issue #2833)."""
-    from .sim import SimError
-
-    value = batch_spec.get("job_ceiling_check", "warn")
-    if value not in JOB_CEILING_CHECK_MODES:
-        raise SimError(
-            "request.batch.job_ceiling_check must be one of "
-            f"{', '.join(repr(m) for m in JOB_CEILING_CHECK_MODES)} "
-            f"(got {value!r})"
-        )
-    return value
-
-
 def _resolve_max_concurrent_jobs(batch_spec: dict[str, Any]) -> int | None:
     """``request.batch.max_concurrent_jobs`` (issue #3914): a positive integer
     bound on the shard jobs in flight at once, else
@@ -1013,35 +1014,6 @@ def _resolve_max_concurrent_jobs(batch_spec: dict[str, Any]) -> int | None:
             "request.batch.max_concurrent_jobs must be a positive integer "
             f"(got {value!r})",
             code=BATCH_MAX_CONCURRENT_CODE,
-        )
-    return value
-
-
-def _resolve_max_units_per_job(
-    batch_spec: dict[str, Any], job_ceiling_check: str
-) -> int | None:
-    """``request.batch.max_units_per_job`` (issue #3446): a positive integer
-    cap on the units of one job, which opts the request into splitting; else
-    :class:`~klayout_tools.sim.SimError` before any S3 write. Combining it
-    with ``job_ceiling_check: "enforce"`` is contradictory (one refuses an
-    over-ceiling request, the other splits it) and is refused."""
-    from .sim import SimError
-
-    value = batch_spec.get("max_units_per_job")
-    if value is None:
-        return None
-    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
-        raise SimError(
-            "request.batch.max_units_per_job must be a positive integer "
-            f"(got {value!r})",
-            code=BATCH_MAX_UNITS_CODE,
-        )
-    if job_ceiling_check == "enforce":
-        raise SimError(
-            "request.batch.max_units_per_job splits an over-ceiling request "
-            'and cannot be combined with job_ceiling_check "enforce", which '
-            'refuses it; use "warn" or "split"',
-            code=BATCH_MAX_UNITS_CODE,
         )
     return value
 
@@ -1102,7 +1074,17 @@ def _assess_job_ceiling(
     ``ceil(units / hosts)`` -- fits it, or ``None`` when no ``hosts`` value
     can (lower ``options.timeout_s`` instead). When the bound exceeds the
     ceiling the result carries a human-readable ``warning``.
+
+    ``config.job_timeout_s`` (issue #5544) replaces the whole assessment:
+    :func:`sim_batch_job_timeout.assess_caller_job_timeout` defines every
+    field from the caller's stated bound instead of this serial formula.
     """
+    if getattr(config, "job_timeout_s", None) is not None:
+        return assess_caller_job_timeout(
+            unit_count=unit_count,
+            per_unit_timeout_s=per_unit_timeout_s,
+            config=config,
+        )
     units = max(1, unit_count)
     ceiling = config.max_job_seconds
     bound = _default_batch_job_timeout_s(units, per_unit_timeout_s)
@@ -1978,15 +1960,6 @@ def _batch_environment(
     }
 
 
-def _bounded_str(value: Any, limit: int = WORKER_CAPTURE_STR_MAX) -> str | None:
-    """A JSON-safe, bounded, control-character-free copy of a captured string
-    (``None`` for anything that is not a string)."""
-    if not isinstance(value, str):
-        return None
-    cleaned = "".join(ch if (ch >= " " or ch in "\n\t") else "?" for ch in value)
-    return cleaned[:limit]
-
-
 def _client_pdk_stamp(request: dict[str, Any] | None) -> dict[str, Any] | None:
     """The submitter's local view of the requested PDK variant's stamp (``SOURCES``,
     else bundle ``.pdk-store.json``, #5318); ``None`` when nothing comparable is
@@ -2124,22 +2097,6 @@ def attach_staged_model_comparison(
             worker_env["pdk_stamp_comparison"] = _compare_staged_model_inputs(
                 staged_model_inputs, worker_env.get("model_inputs"), client_stamp
             )
-
-
-def _bounded_model_inputs(doc: dict[str, Any]) -> list[dict[str, str | None]] | None:
-    """The worker-reported ``model_inputs`` list, re-validated and bounded.
-    ``None`` (not ``[]``) when the capture carries no list at all."""
-    models_in = doc.get("model_inputs")
-    if not isinstance(models_in, list):
-        return None
-    return [
-        {
-            "name": _bounded_str(entry.get("name")),
-            "sha256": _bounded_str(entry.get("sha256"), 64),
-        }
-        for entry in models_in[:WORKER_CAPTURE_MODEL_INPUTS_MAX]
-        if isinstance(entry, dict)
-    ]
 
 
 def _compare_engine_builds(
@@ -2393,11 +2350,15 @@ def _read_runner_identity(
 
 
 def _read_job_identity(
-    local_dir: str | None, request: dict[str, Any] | None = None
+    local_dir: str | None,
+    request: dict[str, Any] | None = None,
+    *,
+    report: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Runner identity plus the worker-observed environment capture, merged
     into ``environment.remote``. Neither reader can raise."""
     worker_environment = _read_worker_environment(local_dir, request)
+    worker_environment["ngspice_init"] = runner_ngspice_init(report)
     return {
         **_read_runner_identity(local_dir, request),
         "worker_environment": worker_environment,
@@ -2673,9 +2634,11 @@ def _recover_failed_job_corners(
             identity = _read_job_identity(collected, request)
             log_note, log_diagnostic = _engine_log_note(collected)
             try:
-                kind, runner_error = _classify_collected_report(
-                    read_collected_report(collected)
+                report = read_collected_report(collected)
+                identity["worker_environment"]["ngspice_init"] = runner_ngspice_init(
+                    report
                 )
+                kind, runner_error = _classify_collected_report(report)
                 if kind == "report":
                     note = "collected report is not a klt error envelope"
                 elif kind == "unusable":
@@ -2741,13 +2704,12 @@ def _annotate_unrecovered_preflight_reject(
     status: dict[str, Any],
     identity: dict[str, Any],
 ) -> None:
-    """Issue #4161: a job that exited :data:`_BATCH_PREFLIGHT_REJECT_EXIT`
-    but whose klt error envelope could not be recovered (no ``report.json``,
-    no ``stderr.log``) would otherwise read as the bare ``job command exited
-    87``. Say what the exit means and, when the post-run runner identity
-    shows a major.minor mismatch, classify the failure as a version mismatch
-    (``runner_code`` :data:`BATCH_RUNNER_MISMATCH_CODE` plus both klt
-    identities). Any other non-zero exit code gets the generic
+    """Issue #4161: a job that exited :data:`_BATCH_PREFLIGHT_REJECT_EXIT` but whose
+    klt error envelope could not be recovered (no ``report.json``, no ``stderr.log``)
+    would otherwise read as the bare ``job command exited 87``. Say what the exit means
+    and, when the post-run runner identity shows a major.minor mismatch, classify the
+    failure as a version mismatch (``runner_code`` :data:`BATCH_RUNNER_MISMATCH_CODE`
+    plus both klt identities). Any other non-zero exit code gets the generic
     :func:`.sim_batch_features.annotate_unrecovered_failure` wording (issue #4217)."""
     exit_code = _status_exit_code(status)
     if exit_code is None or exit_code == 0:
@@ -2765,7 +2727,8 @@ def _annotate_unrecovered_preflight_reject(
         note += (
             f"; the runner ran klt {identity.get('runner_klt_version')} but the "
             f"client is {identity.get('client_klt_version')} -- update the "
-            "runner image or use a compatible client"
+            "runner image, use a compatible client, or set "
+            'request.batch.runner_version_check to "warn" to submit anyway'
         )
     note += gap_note(identity)
     for corner in corners:
@@ -2835,6 +2798,7 @@ def _prepare_batch_job_spec(
         netlist_path,
         corner_count=corner_count,
         timeout_s=timeout_s,
+        job_timeout_s=config.job_timeout_s,
         keep_artifacts=keep_artifacts,
         request_dir=request_dir,
         version_check=config.runner_version_check,
@@ -3437,7 +3401,10 @@ def _poll_and_collect(
         environment["client_collected_at"] = now()
         report = read_collected_report(collected)
         check_ngspice_options_echo(request, report)
-        environment = {**environment, **_read_job_identity(collected, request)}
+        environment = {
+            **environment,
+            **_read_job_identity(collected, request, report=report),
+        }
         environment.update(collected_report_env(status, report))
         corners = report.get("corners") or []
         _surface_log_fatal(corners, collected)
