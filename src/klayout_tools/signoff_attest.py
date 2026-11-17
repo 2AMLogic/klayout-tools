@@ -30,9 +30,9 @@ and 10"):
   numeric field of a cited envelope for every declared corner. Item 8 stays
   open to a bare generic envelope in the grader -- this producer is the
   tool-produced alternative, disclosed as such on the citation.
-- **Item 9 (Testbenches shipped)** -- every listed testbench exists; the
-  declared cold-start invocation exits ``0``; the PDK name + revision and at
-  least one tool version are pinned.
+- **Item 9 (Testbenches shipped)** -- every listed testbench exists; each
+  ``depends_on``-declared dependency is hashed (#5850); the declared
+  cold-start exits ``0``; PDK name + revision and a tool version are pinned.
 - **Item 10 (Repo hygiene)** -- every listed hygiene artifact exists; every
   declared CI/audit command exits ``0``.
 
@@ -401,9 +401,9 @@ def _validated_inventory(
     normalised form the checks run against. Raises :class:`AttestationError`
     for anything malformed."""
     _validate_header(inventory, item, source)
-    bench_specs: dict[str, Any] = {}
+    bench_extra: dict[str, Any] = {}
     if item == 9:
-        inventory, bench_specs = item9.split_testbenches(
+        inventory, bench_extra = item9.split_testbenches(
             inventory, root, _normalize_repo_path, _command_spec
         )
     seen: dict[str, str] = {}
@@ -417,7 +417,7 @@ def _validated_inventory(
     elif item == CHARACTERIZATION_ITEM:
         normalized.update(_validated_characterization(inventory, root))
     elif item == 9:
-        item9.validate_into(normalized, inventory, bench_specs, root, _command_spec)
+        item9.validate_into(normalized, inventory, bench_extra, root, _command_spec)
     else:
         normalized["checks"] = _validated_command_checks(inventory, root, 10)
     return normalized
@@ -1006,7 +1006,7 @@ def _run_checks(
     elif item == CHARACTERIZATION_ITEM:
         checks.extend(_characterization_checks(root, normalized, command))
     elif item == 9:
-        checks.extend(item9.item9_checks(normalized, command))
+        checks.extend(item9.item9_checks(normalized, command, root))
         checks.extend(item9.pin_checks(normalized["pins"]))
     else:
         checks.extend(_audit_command_checks(normalized["checks"], command))

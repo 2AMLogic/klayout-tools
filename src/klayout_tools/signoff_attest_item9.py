@@ -12,6 +12,13 @@ top-level ``cold_start``:
 Plus (issue #5463) the ``documented_argv`` disclosure on a cold start and the
 item's reproducibility-pin checks, which live here for the same reason.
 
+Plus (issue #5850) a testbench entry may declare ``depends_on`` --
+repository-relative paths the bench depends on (a helper it imports, a model
+card it includes). Each declared dependency is hashed into the envelope as
+its own ``present`` check, so editing it is caught by ``--check`` instead of
+passing green; the per-member ``dependency_binding`` disclosure records how
+many edges were declared, because binding is otherwise shallow.
+
 The validators take the command/path helpers as arguments so this module need
 not import :mod:`signoff_attest` (which imports it).
 """
@@ -138,28 +145,39 @@ def split_testbenches(
     root: str,
     normalize_path: Callable[[Any, str, str], str],
     command_spec: Callable[..., dict[str, Any]],
-) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+) -> tuple[dict[str, Any], dict[str, Any]]:
     """Reduce object-form ``testbenches`` entries to plain paths.
 
-    Returns ``(inventory_with_plain_paths, {normalized_path: cold_start_spec})``.
-    String entries pass through untouched, so an old-form inventory is
-    returned as an equal mapping and validates exactly as before. A malformed
-    container is left for the generic path-list validator to refuse."""
+    Returns ``(inventory_with_plain_paths, extras)``, where ``extras`` maps
+    ``"cold_starts"`` to ``{normalized_path: cold_start_spec}`` and
+    ``"depends_on"`` to ``{normalized_path: [dependency, ...]}`` (issue
+    #5850; only object-form entries appear in either). String entries pass
+    through untouched, so an old-form inventory is returned as an equal
+    mapping and validates exactly as before. A malformed container is left
+    for the generic path-list validator to refuse.
+
+    ``depends_on`` paths are validated per entry and deliberately do not
+    join the inventory's shared path-uniqueness dict: a helper shared by two
+    benches is the normal case (the same exemption item 1's
+    ``recorded.sources`` enjoys), so a dependency may repeat across entries
+    and may itself be an inventoried member -- only a repeat *within* one
+    entry is refused."""
     entries = inventory.get("testbenches")
     if not isinstance(entries, list):
         return dict(inventory), {}
     paths: list[Any] = []
     specs: dict[str, dict[str, Any]] = {}
+    depends_on: dict[str, list[str]] = {}
     for index, entry in enumerate(entries):
         if not isinstance(entry, Mapping):
             paths.append(entry)
             continue
         field = f"testbenches[{index}]"
-        unknown = sorted(set(entry) - {"path", "cold_start"})
+        unknown = sorted(set(entry) - {"path", "cold_start", "depends_on"})
         if unknown:
             raise _error(
                 f"'{field}' has unknown field(s): {', '.join(unknown)} "
-                "(accepted: cold_start, path)"
+                "(accepted: cold_start, depends_on, path)"
             )
         if "path" not in entry:
             raise _error(f"'{field}' must declare 'path'")
@@ -176,20 +194,58 @@ def split_testbenches(
                     documented_argv=True,
                 ),
             )
-    return {**inventory, "testbenches": paths}, specs
+        if "depends_on" in entry:
+            depends_on[path] = validated_depends_on(
+                entry["depends_on"], field, root, normalize_path
+            )
+    return (
+        {**inventory, "testbenches": paths},
+        {"cold_starts": specs, "depends_on": depends_on},
+    )
+
+
+def validated_depends_on(
+    raw: Any,
+    field: str,
+    root: str,
+    normalize_path: Callable[[Any, str, str], str],
+) -> list[str]:
+    """One entry's ``depends_on`` (issue #5850): a list of repo-relative
+    paths under the ordinary path rules (non-empty, relative, no ``..``, no
+    symlink traversal). An empty list is accepted -- the bench declares it
+    has no first-party dependencies. Sorted, and deduplicated per entry."""
+    if not isinstance(raw, list):
+        raise _error(
+            f"'{field}.depends_on' must be a list of repository-relative paths"
+        )
+    seen: set[str] = set()
+    deps: list[str] = []
+    for dep in raw:
+        normalized = normalize_path(dep, f"{field}.depends_on", root)
+        if normalized in seen:
+            raise _error(f"'{field}.depends_on' lists '{normalized}' more than once")
+        seen.add(normalized)
+        deps.append(normalized)
+    return sorted(deps)
 
 
 def validate_into(
     normalized: dict[str, Any],
     inventory: Mapping[str, Any],
-    bench_specs: Mapping[str, Any],
+    bench_extra: Mapping[str, Any],
     root: str,
     command_spec: Callable[..., dict[str, Any]],
 ) -> None:
     """Item 9's normalised non-path fields. Every bench needs a cold start:
     its own, or the top-level one."""
     benches = normalized["testbenches"]
-    normalized["bench_cold_starts"] = dict(bench_specs)
+    cold_starts = bench_extra.get("cold_starts", {})
+    normalized["bench_cold_starts"] = dict(cold_starts)
+    normalized["bench_depends_on"] = {
+        path: list(deps)
+        for path, deps in bench_extra.get("depends_on", {}).items()
+        if path in benches
+    }
     normalized["unbenched_rows"] = validated_unbenched_rows(inventory)
     normalized["pins"] = inventory.get("pins")
     if "cold_start" in inventory:
@@ -197,7 +253,7 @@ def validate_into(
             inventory["cold_start"], "cold_start", root, documented_argv=True
         )
         return
-    missing = [path for path in benches if path not in bench_specs]
+    missing = [path for path in benches if path not in cold_starts]
     if missing:
         raise _error(
             "item 9 inventory must declare 'cold_start' -- the invocation "
@@ -272,21 +328,77 @@ def with_progress(
     return wrapped
 
 
-def item9_checks(
-    normalized: Mapping[str, Any], command: Callable[..., dict[str, Any]]
+def dependency_present_checks(
+    root: str, normalized: Mapping[str, Any]
 ) -> list[dict[str, Any]]:
-    """Item 9's command, unbenched-row and (via the caller) pin checks, in a
-    deterministic order: top-level cold start, per-bench cold starts sorted by
-    path, then unbenched rows sorted by row id."""
+    """One ``present`` check per declared dependency edge (issue #5850),
+    benches sorted by path (each entry's dependencies were sorted at
+    validation), so a missing or edited dependency names both itself and the
+    bench that declared it. ``_file_check`` is reused unchanged (imported
+    lazily -- :mod:`signoff_attest` imports this module); the owning
+    ``testbench`` is recorded after ``role``, where the per-bench cold-start
+    checks carry theirs."""
+    from klayout_tools.signoff_attest import _file_check
+
+    checks = []
+    for bench in sorted(normalized["bench_depends_on"]):
+        for dep in normalized["bench_depends_on"][bench]:
+            base = _file_check(root, dep, "testbench_dependency")
+            checks.append(
+                {
+                    "check": base["check"],
+                    "role": "testbench_dependency",
+                    "testbench": bench,
+                    "path": base["path"],
+                    "passed": base["passed"],
+                    "content_hash": base["content_hash"],
+                }
+            )
+    return checks
+
+
+def dependency_binding_checks(normalized: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """One visible, **passing** check per member recording how many
+    dependency edges it declared (issue #5850). Member binding is shallow: a
+    bench's own dependencies are resolved and hashed only when ``depends_on``
+    declares them, and the envelope must say so plainly -- a member list and
+    a green ``--check`` must not read as complete coverage. Whether an
+    undeclared dependency should fail T1 item 9 is a grading-policy decision
+    this producer does not make, so the check passes at ``declared: 0``."""
+    depends_on = normalized["bench_depends_on"]
+    return [
+        {
+            "check": "dependency_binding",
+            "role": "testbench",
+            "testbench": path,
+            "declared": len(depends_on.get(path, ())),
+            "passed": True,
+        }
+        for path in sorted(normalized["testbenches"])
+    ]
+
+
+def item9_checks(
+    normalized: Mapping[str, Any], command: Callable[..., dict[str, Any]], root: str
+) -> list[dict[str, Any]]:
+    """Item 9's dependency, command and unbenched-row checks (the caller
+    adds the pin checks), in a deterministic order: declared-dependency
+    ``present`` checks bench by sorted bench, top-level cold start, per-bench
+    cold starts sorted by path, unbenched rows sorted by row id, then
+    ``dependency_binding`` rows sorted by path."""
     run = with_progress(
         command, lambda role, ident: f"{role} {ident.get('testbench', '')}".strip()
     )
-    checks = []
+    checks = dependency_present_checks(root, normalized)
     if "cold_start" in normalized:
         checks.append(run(normalized["cold_start"], "cold_start"))
     for path, spec in sorted(normalized["bench_cold_starts"].items()):
         checks.append(run(spec, "cold_start", testbench=path))
-    return checks + unbenched_row_checks(normalized["unbenched_rows"])
+    return (
+        checks
+        + unbenched_row_checks(normalized["unbenched_rows"])
+        + dependency_binding_checks(normalized)
+    )
 
 
 def pdk_pin(pdk: Any) -> dict[str, Any] | None:

@@ -20,6 +20,8 @@ def check_label(check: Mapping[str, Any]) -> str:
 
 
 def _what_present(c: dict) -> str:
+    if c.get("role") == "testbench_dependency":
+        return f"dependency {c['path']} of {c['testbench']} present"
     return f"{c['role']} {c['path']} present"
 
 
@@ -56,6 +58,10 @@ def _what_unbenched(c: dict) -> str:
     return f"row {c['row']} has no testbench (issue #{c['issue']})"
 
 
+def _what_dependency_binding(c: dict) -> str:
+    return f"testbench {c['testbench']}: {c['declared']} dependencies declared"
+
+
 def _what_citation(c: dict) -> str:
     cited = ", ".join(c["envelopes"]) or "no envelope cited"
     return f"spec row {c['row']}: {cited}"
@@ -88,6 +94,7 @@ _WHAT_RENDERERS = {
     "dbu_on_grid": _what_dbu,
     "command": _what_command,
     "unbenched_row": _what_unbenched,
+    "dependency_binding": _what_dependency_binding,
     "citation": _what_citation,
     "recorded_hash": _what_recorded_hash,
     "metric": _what_metric,

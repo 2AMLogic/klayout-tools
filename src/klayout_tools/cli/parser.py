@@ -2158,7 +2158,10 @@ def _add_signoff_parser(subparsers: argparse._SubParsersAction) -> None:
         help=(
             "with --attest: the versioned attestation inventory (kind "
             "'t1-attestation-inventory') in a git repo; the envelope pins its "
-            "sha256. Optional for --attest 2: declared layout 'checks'."
+            "sha256. An item 9 testbench entry may declare 'depends_on': "
+            "repo-relative paths hashed in as the bench's declared "
+            "dependencies (binding is otherwise shallow). Optional for "
+            "--attest 2: declared layout 'checks'."
         ),
     )
     add_skip_local_only_argument(signoff_parser)
