@@ -1397,12 +1397,12 @@ def run_synthesize(
     # is never the one executed.
     yosys_log = _run_yosys(executed_script_path, cwd=repo_root)
 
-    # Issue #1973 Failure 1: strip any `signed` declaration `write_verilog`
-    # left in place (see `_strip_signed_qualifiers`); rewritten only when
-    # something changed, so a clean netlist's mtime is never touched.
+    # Issues #1973, #4872, #5594: drop `signed` qualifiers and host source dirs
+    # (absolute and repo-relative); rewritten only if changed (mtime kept).
     netlist_text = _read_produced_netlist(netlist_path)
-    rewrite_netlist(  # issue #4872: also drops host source dirs
-        netlist_path, netlist_text, _strip_signed_qualifiers(netlist_text), elab_sources
+    stripped = _strip_signed_qualifiers(netlist_text)
+    rewrite_netlist(
+        netlist_path, netlist_text, stripped, elab_sources, repo_root=repo_root
     )
 
     module_stats = _read_stats(stats_path, hdl_toplevel)
