@@ -654,6 +654,145 @@ def test_cli_lint_envelope_missing_file_is_an_application_error(tmp_path, capsys
 
 
 # --------------------------------------------------------------------------- #
+# `lint-envelope --json-stream` (issue #5887): a file of concatenated JSON
+# documents is lintable per-document instead of rejected as "Extra data"
+# --------------------------------------------------------------------------- #
+
+
+def _write_stream(path, payloads) -> str:
+    path.write_text(
+        "\n".join(json.dumps(payload) for payload in payloads), encoding="utf-8"
+    )
+    return str(path)
+
+
+def test_lint_envelope_json_stream_clean_documents_exit_clean(tmp_path):
+    """The gap of issue #5887: N clean concatenated documents (one
+    `json.dumps` per record) lint to a clean verdict instead of
+    `Extra data`."""
+    path = _write_stream(
+        tmp_path / "stream.json",
+        [{"def_path": "build/a.def"}, {"lib": {"path": "x.lib", "scope": "repo"}}],
+    )
+    report = ep.lint_envelope_files([path], json_stream=True)
+    assert report["status"] == "clean"
+    assert report["finding_count"] == 0
+
+
+def test_lint_envelope_json_stream_findings_carry_the_document_index(tmp_path):
+    path = _write_stream(
+        tmp_path / "stream.json",
+        [
+            {"def_path": "build/a.def"},
+            {"def_path": "/Users/x/a.def"},
+            {"def_path": "/opt/p/b.def"},
+        ],
+    )
+    report = ep.lint_envelope_files([path], json_stream=True)
+    assert report["status"] == "violations"
+    assert report["finding_count"] == 2
+    findings = report["files"][0]["findings"]
+    assert [(f["document"], f["field"]) for f in findings] == [
+        (1, "def_path"),
+        (2, "def_path"),
+    ]
+
+
+def test_lint_envelope_json_stream_bare_scalars_and_no_separator(tmp_path):
+    """Edge cases from the issue's test plan: documents that are bare
+    strings/numbers, and two objects with no separator between `}{`. A
+    top-level bare string reports the `<root>` field."""
+    path = tmp_path / "stream.json"
+    path.write_text(
+        '"/Users/x/a.def" 1 {"a":1}{"b":"/opt/p/b.def"}\n', encoding="utf-8"
+    )
+    report = ep.lint_envelope_files([path], json_stream=True)
+    assert [(f["document"], f["field"]) for f in report["files"][0]["findings"]] == [
+        (0, "<root>"),
+        (3, "b"),
+    ]
+
+
+def test_lint_envelope_json_stream_rejects_a_corrupt_trailing_document(tmp_path):
+    path = tmp_path / "stream.json"
+    path.write_text(json.dumps({"a": 1}) + '\n{"broken": ', encoding="utf-8")
+    with pytest.raises(ep.EnvironmentProvenanceError, match="not valid JSON"):
+        ep.lint_envelope_files([path], json_stream=True)
+
+
+@pytest.mark.parametrize("content", ["", "   \n\t\n"])
+def test_lint_envelope_json_stream_rejects_an_empty_file(tmp_path, content):
+    path = tmp_path / "stream.json"
+    path.write_text(content, encoding="utf-8")
+    with pytest.raises(ep.EnvironmentProvenanceError, match="not valid JSON"):
+        ep.lint_envelope_files([path], json_stream=True)
+
+
+def test_lint_envelope_default_mode_still_rejects_a_stream(tmp_path):
+    """Without the flag nothing changes: a concatenated stream is the
+    existing single-document parse error, and the default-mode report has
+    no `document` key."""
+    path = _write_stream(tmp_path / "stream.json", [{"a": 1}, {"b": 2}])
+    with pytest.raises(ep.EnvironmentProvenanceError, match="not valid JSON"):
+        ep.lint_envelope_files([path])
+
+
+def test_cli_lint_envelope_json_stream_exits_three_and_reports_documents(
+    tmp_path, capsys
+):
+    path = _write_stream(
+        tmp_path / "stream.json",
+        [{"def_path": "build/a.def"}, {"def_path": "/Users/x/a.def"}],
+    )
+    assert main(
+        ["env-provenance", "lint-envelope", path, "--json-stream", "--format", "json"]
+    ) == (ep.LEAKS_FOUND_EXIT_CODE)
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "violations"
+    finding = payload["files"][0]["findings"][0]
+    assert finding["document"] == 1
+    assert finding["field"] == "def_path"
+
+
+def test_cli_lint_envelope_json_stream_clean_exits_zero(tmp_path, capsys):
+    path = _write_stream(tmp_path / "stream.json", [{"a": 1}, {"b": 2}])
+    assert (
+        main(
+            [
+                "env-provenance",
+                "lint-envelope",
+                path,
+                "--json-stream",
+                "--format",
+                "json",
+            ]
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out)["status"] == "clean"
+
+
+def test_cli_lint_envelope_json_stream_corrupt_tail_is_an_application_error(
+    tmp_path, capsys
+):
+    path = tmp_path / "stream.json"
+    path.write_text(json.dumps({"a": 1}) + " oops", encoding="utf-8")
+    assert main(["env-provenance", "lint-envelope", str(path), "--json-stream"]) == 1
+    assert "not valid JSON" in capsys.readouterr().err
+
+
+def test_cli_lint_envelope_json_stream_text_output_names_the_document(tmp_path, capsys):
+    path = _write_stream(
+        tmp_path / "stream.json",
+        [{"def_path": "build/a.def"}, {"def_path": "/Users/x/a.def"}],
+    )
+    main(["env-provenance", "lint-envelope", path, "--json-stream"])
+    out = capsys.readouterr().out
+    assert f"{path}[1]: def_path: /Users/x/a.def" in out
+    assert "repo-relative" in out
+
+
+# --------------------------------------------------------------------------- #
 # this repository's own committed examples/ tree (issue #2230)
 # --------------------------------------------------------------------------- #
 

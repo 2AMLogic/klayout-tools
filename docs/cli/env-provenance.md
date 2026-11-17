@@ -7,7 +7,7 @@ field (issue #1254).
 ```
 klt env-provenance emit [--path LABEL=PATH ...] [--format text|json]
 klt env-provenance scan FILE [FILE ...] [--format text|json]
-klt env-provenance lint-envelope FILE [FILE ...] [--allow-prefix PREFIX ...] [--format text|json]
+klt env-provenance lint-envelope FILE [FILE ...] [--allow-prefix PREFIX ...] [--json-stream] [--format text|json]
 ```
 
 The rule this implements is stated in
@@ -200,6 +200,44 @@ regeneration on another checkout produced different bytes. The dotted field
 path matters for the same reason: the remedy is field-specific (retype to
 `{path, scope}`, or drop the path in favour of a content hash), so a line
 number is not actionable on a one-line JSON document.
+
+### Input: one document per file, or `--json-stream`
+
+Each FILE is parsed as a **single JSON document** by default — that is the
+contract, and a file holding several concatenated documents (e.g. one
+`json.dumps(...)` printed per record) is rejected as `not valid JSON`
+(exit `1`), indistinguishable at this surface from a corrupt file. A
+repository whose records are legitimately such a document stream opts in
+with `--json-stream` (issue #5887): each FILE is then read as **one or
+more whitespace-separated JSON documents**, the lint runs over every
+document, and each finding gains an additive 0-based `document` key so the
+verdict names where the leak lives:
+
+```json
+{
+  "schema_version": 1,
+  "status": "violations",
+  "finding_count": 1,
+  "recommendation": "replace each absolute host path with a repo-relative reference …",
+  "files": [
+    {
+      "file": "build/records.json",
+      "findings": [
+        { "field": "def_path", "match": "/Users/…/a.def", "document": 1 }
+      ]
+    }
+  ]
+}
+```
+
+`field` stays relative to its own document. Default-mode output has no
+`document` key. A truncated or corrupt trailing document, an unparsable
+one anywhere in the stream, or an empty/whitespace-only FILE is still
+exit `1` — never a silent "clean" verdict. Documents may be bare
+strings or numbers, and no separator is required between them
+(`{"a":1}{"b":2}` parses as two documents); the mode is a JSON document
+stream, not [JSON Lines](https://jsonlines.org/) (no newline rules, no
+one-document-per-line requirement).
 
 ### Rules
 

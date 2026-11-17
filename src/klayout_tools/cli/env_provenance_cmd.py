@@ -95,7 +95,9 @@ def _print_scan_text(report: dict) -> None:
 def run_lint_envelope(args: argparse.Namespace) -> int:
     try:
         report = lint_envelope_files(
-            args.files, allow_prefixes=args.allow_prefixes or []
+            args.files,
+            allow_prefixes=args.allow_prefixes or [],
+            json_stream=args.json_stream,
         )
     except EnvironmentProvenanceError as exc:
         return emit_error("env-provenance lint-envelope", str(exc), args.format)
@@ -107,7 +109,13 @@ def run_lint_envelope(args: argparse.Namespace) -> int:
 def _print_lint_envelope_text(report: dict) -> None:
     for entry in report["files"]:
         for finding in entry["findings"]:
-            print(f"{entry['file']}: {finding['field']}: {finding['match']}")
+            if "document" in finding:
+                print(
+                    f"{entry['file']}[{finding['document']}]: "
+                    f"{finding['field']}: {finding['match']}"
+                )
+            else:
+                print(f"{entry['file']}: {finding['field']}: {finding['match']}")
     print(
         f"{report['status']}: {report['finding_count']} absolute path(s) in "
         f"{len(report['files'])} file(s)"

@@ -505,7 +505,10 @@ def find_absolute_path_fields(
 
 
 def lint_envelope_files(
-    paths: Iterable[str], *, allow_prefixes: Iterable[str] = ()
+    paths: Iterable[str],
+    *,
+    allow_prefixes: Iterable[str] = (),
+    json_stream: bool = False,
 ) -> dict[str, Any]:
     """Run :func:`find_absolute_path_fields` over each JSON file in ``paths``.
 
@@ -517,13 +520,30 @@ def lint_envelope_files(
     "clean" verdict (the same discipline :func:`scan_files` applies to an
     unreadable file, and the same one ``_report_verify.hash_check`` applies
     to a missing hash).
+
+    Each file is one JSON document by default. With ``json_stream=True``
+    (issue #5887, the CLI's ``--json-stream``) a file is instead read as one
+    or more whitespace-separated JSON documents (e.g. concatenated
+    ``json.dumps`` output); the lint runs over every document and each
+    finding gains an additive 0-based ``document`` index, with ``field``
+    staying relative to its own document. Default-mode output has no
+    ``document`` key.
     """
     prefixes = tuple(allow_prefixes)
     entries: list[dict[str, Any]] = []
     total = 0
     for path in paths:
-        payload = _load_json_envelope(path)
-        findings = find_absolute_path_fields(payload, allow_prefixes=prefixes)
+        if json_stream:
+            findings: list[dict[str, Any]] = []
+            for index, document in enumerate(_load_json_envelope_documents(path)):
+                for finding in find_absolute_path_fields(
+                    document, allow_prefixes=prefixes
+                ):
+                    finding["document"] = index
+                    findings.append(finding)
+        else:
+            payload = _load_json_envelope(path)
+            findings = find_absolute_path_fields(payload, allow_prefixes=prefixes)
         total += len(findings)
         entries.append({"file": str(path), "findings": findings})
 
@@ -544,6 +564,43 @@ def _load_json_envelope(path: str) -> Any:
         raise EnvironmentProvenanceError(f"could not read {path}: {exc}") from exc
     except json.JSONDecodeError as exc:
         raise EnvironmentProvenanceError(f"{path} is not valid JSON: {exc}") from exc
+
+
+def _load_json_envelope_documents(path: str) -> list[Any]:
+    """Read ``path`` as one or more whitespace-separated JSON documents.
+
+    The stream counterpart of :func:`_load_json_envelope` (issue #5887): a
+    file of concatenated ``json.dumps`` records is a clean stream, not an
+    ``Extra data`` parse error. A file that cannot be parsed at any point --
+    a truncated or corrupt document, or a file with no document at all
+    (empty / whitespace-only) -- is the same "not valid JSON" error as the
+    single-document mode, never a silent "clean" verdict.
+    """
+    try:
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+    except OSError as exc:
+        raise EnvironmentProvenanceError(f"could not read {path}: {exc}") from exc
+    decoder = json.JSONDecoder()
+    documents: list[Any] = []
+    index = 0
+    while True:
+        while index < len(text) and text[index].isspace():
+            index += 1
+        if index >= len(text):
+            break
+        try:
+            document, index = decoder.raw_decode(text, index)
+        except json.JSONDecodeError as exc:
+            raise EnvironmentProvenanceError(
+                f"{path} is not valid JSON (document {len(documents)}): {exc}"
+            ) from exc
+        documents.append(document)
+    if not documents:
+        raise EnvironmentProvenanceError(
+            f"{path} is not valid JSON: no JSON document found"
+        ) from None
+    return documents
 
 
 # --------------------------------------------------------------------------- #

@@ -3955,6 +3955,19 @@ def _add_env_provenance_parser(subparsers: argparse._SubParsersAction) -> None:
             "/opt/pdk-scratch/... Repeatable."
         ),
     )
+    lint_parser.add_argument(
+        "--json-stream",
+        dest="json_stream",
+        action="store_true",
+        help=(
+            "treat each FILE as a stream of one or more whitespace-separated "
+            "JSON documents (e.g. concatenated json.dumps output) instead of "
+            "a single document. Findings gain a 0-based `document` index; "
+            "`field` stays relative to its own document. The default is "
+            "single-document: without this flag a concatenated stream is a "
+            "not-valid-JSON error."
+        ),
+    )
     _add_format_arg(lint_parser)
     lint_parser.set_defaults(func=env_provenance_cmd.run_lint_envelope)
 

@@ -64,4 +64,5 @@ positional arguments:
 options:
   -h, --help show this help message and exit
   --allow-prefix PREFIX an absolute install prefix that may legitimately appear (e.g. --allow-prefix /usr/share/pdk). Matched on a path-component boundary, so /opt/pdk admits /opt/pdk/sky130A/... but not /opt/pdk-scratch/... Repeatable.
+  --json-stream treat each FILE as a stream of one or more whitespace- separated JSON documents (e.g. concatenated json.dumps output) instead of a single document. Findings gain a 0-based `document` index; `field` stays relative to its own document. The default is single-document: without this flag a concatenated stream is a not- valid-JSON error.
   --format {text,json} output format (default: text)
