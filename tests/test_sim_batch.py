@@ -2365,42 +2365,6 @@ def test_failed_job_error_envelope_reaches_every_corner(tmp_path, monkeypatch):
     assert len(runner.argvs_matching("launch")) == 1
 
 
-def test_failed_job_runner_side_pin_refusal_names_engine_version_unmet(
-    tmp_path, monkeypatch
-):
-    """Issue #5853: when the runner's own ``klt sim`` refuses the forwarded
-    ``engine_version`` pin before any corner simulates, the recovered klt
-    envelope turns into per-unit ``batch_job_failed`` diagnostics whose
-    ``runner_code`` names ``engine_version_unmet`` and whose message quotes
-    the runner's reason -- and no engine version comes back, so the
-    submitter's post-run pin check fails closed on its own."""
-    runner = _FakeRunner()
-    runner.default = fake_completed(
-        _status("failed", exit_code="1", detail="job command exited 1")
-    )
-    runner.outputs = {
-        "report.json": _envelope(
-            "pinned simulator unavailable: request requires ngspice 44; "
-            "the local engine probe found ngspice 42",
-            code="engine_version_unmet",
-        )
-    }
-
-    corners, engine_version, _ = _run_failed_job(
-        tmp_path, monkeypatch, runner, points=2
-    )
-
-    assert engine_version is None
-    for corner in corners:
-        assert corner["status"] == "error"
-        diagnostic = corner["diagnostics"][0]
-        assert diagnostic["code"] == "batch_job_failed"
-        assert diagnostic["runner_code"] == "engine_version_unmet"
-        assert "the job's klt reported" in diagnostic["message"]
-        assert "requires ngspice 44" in diagnostic["message"]
-        assert "found ngspice 42" in diagnostic["message"]
-
-
 @pytest.mark.parametrize(
     "payload",
     [

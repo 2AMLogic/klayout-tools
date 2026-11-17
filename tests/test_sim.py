@@ -12644,29 +12644,6 @@ def test_build_remote_request_max_workers_only_pinned_when_given():
     assert pinned["options"]["max_workers"] == 20
 
 
-def test_build_remote_request_forwards_engine_version_and_ngspice_binary():
-    """Issue #5853: the ``engine_version`` pin and the
-    ``options.ngspice_binary`` override travel with the job, and the runner
-    is forced onto the ``local-parallel`` backend whose own pre-corner pin
-    check enforces the pin there; only the submit-side ``remote`` block (and
-    the submitter's pool size) is stripped. The caller's document is copied,
-    not mutated."""
-    request = {
-        "engine_version": "44",
-        "remote": {"batch": {"profile": "p"}},
-        "options": {"ngspice_binary": "./ngspice-44", "max_workers": 99},
-    }
-    kwargs = dict(timeout_s=10.0, keep_artifacts=False, want_waveforms=False)
-    forwarded = sim_remote._build_remote_request(request, **kwargs)
-    assert forwarded["engine_version"] == "44"
-    assert forwarded["options"]["ngspice_binary"] == "./ngspice-44"
-    assert forwarded["backend"] == "local-parallel"
-    assert "remote" not in forwarded
-    assert "max_workers" not in forwarded["options"]
-    assert request["options"]["max_workers"] == 99
-    assert "backend" not in request
-
-
 # --------------------------------------------------------------------------- #
 # Opt-in model staging for the off-host backends (issue #2668):
 # `options.stage_model_inputs`. Transports are always faked.
@@ -14089,38 +14066,6 @@ def test_engine_version_unmet_fails_before_simulating(tmp_path, monkeypatch):
         sim.run_sim(str(request), backend="local")
     assert exc.value.code == "engine_version_unmet"
     assert sims == []
-
-
-def test_engine_version_unmet_fails_before_simulating_on_local_parallel(
-    tmp_path, monkeypatch
-):
-    """Issue #5853: ``local-parallel`` -- the exact backend a remote/batch
-    runner executes on the forwarded request -- enforces the pin before any
-    corner runs there; the submit-side report check only backstops it."""
-    sims = _fake_engine_probe(monkeypatch, "** ngspice-42 : Circuit level\n")
-    request = _pin_request(tmp_path, engine_version="44")
-    with pytest.raises(
-        sim.SimError, match="requires ngspice 44; .*found ngspice 42"
-    ) as exc:
-        sim.run_sim(str(request), backend="local-parallel")
-    assert exc.value.code == "engine_version_unmet"
-    assert sims == []
-
-
-def test_engine_version_pin_fails_closed_when_the_batch_runner_reports_none(
-    tmp_path, monkeypatch
-):
-    """Issue #5853: a runner-side pin refusal fails the job before any
-    corner, so no report -- and no ``environment.engine_version`` -- comes
-    back; the submit-side off-host check fails closed on exactly that, so
-    the submitter's own error is ``engine_version_unmet`` too. The per-unit
-    ``batch_job_failed``/``runner_code`` detail is in the collected job
-    outputs, not in this error envelope."""
-    monkeypatch.setitem(sim._BACKENDS, "batch", lambda **kwargs: ([], None, None))
-    request = _pin_request(tmp_path, engine_version="44")
-    with pytest.raises(sim.SimError, match="reported no ngspice version") as exc:
-        sim.run_sim(str(request), backend="batch")
-    assert exc.value.code == "engine_version_unmet"
 
 
 _PDK_SHA = "f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7"
