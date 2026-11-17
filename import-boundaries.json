@@ -17,7 +17,9 @@
       "modules": [
         "klayout_tools.artifact_objects",
         "klayout_tools.artifact_verify",
-        "klayout_tools.cli.artifact_cmd"
+        "klayout_tools.artifact_verify_local",
+        "klayout_tools.cli.artifact_cmd",
+        "klayout_tools.cli.parser_artifact"
       ]
     },
     "cells": {
@@ -538,6 +540,7 @@
         "klayout_tools.decks.finfet",
         "klayout_tools.decks.gf180mcu",
         "klayout_tools.decks.gf180mcu_bond_pad",
+        "klayout_tools.decks.gf180mcu_untranscribed",
         "klayout_tools.decks.parasitics",
         "klayout_tools.decks.rules",
         "klayout_tools.decks.sg13cmos5l",
@@ -574,6 +577,7 @@
         "klayout_tools.pex",
         "klayout_tools.pex_async",
         "klayout_tools.pex_netlist_text",
+        "klayout_tools.pex_resistance_graph",
         "klayout_tools.pex_asap7",
         "klayout_tools.pex_sim_evidence",
         "klayout_tools.spice_flatten",
@@ -717,6 +721,7 @@
         "klayout_tools.macros",
         "klayout_tools.metrics",
         "klayout_tools.op_sanity",
+        "klayout_tools.op_sanity_diagnostics",
         "klayout_tools.output_lock",
         "klayout_tools.resistor_mesh",
         "klayout_tools.touchstone",
@@ -732,6 +737,7 @@
         "klayout_tools.cli.signoff_cmd",
         "klayout_tools.signoff",
         "klayout_tools.signoff_attest",
+        "klayout_tools.signoff_attest_binding",
         "klayout_tools.signoff_attest_build",
         "klayout_tools.signoff_attest_carry",
         "klayout_tools.signoff_attest_drift",
