@@ -29,20 +29,34 @@ features narrower than `2T`. A layer absent from the stream contributes nothing.
 ## Abutment
 
 `--cell` (the **unit cell**), `--pitch` (um, `> 0`) and `--count` (integer
-`>= 1`) are required together; `--direction` is `x` (default) or `y`. The
-bounding box of every placement of the unit cell under each top cell (placement
-transforms applied) is sorted along the direction; the check flags:
+`>= 1`) are required together; `--direction` is `x` (default) or `y`.
 
-| `kind` | Meaning |
-| ------ | ------- |
-| `gap` | consecutive placements are separated by more than `--tolerance` |
-| `overlap` | consecutive placements overlap by more than `--tolerance` |
-| `pitch` | placements abut but advance by something other than the pitch |
-| `count` | the number of placements differs from `--count` |
-| `length` | the union extent differs from `count x pitch` |
+Placements are first grouped into **lanes** by their extent on the axis
+perpendicular to `--direction` (`(bottom, top)` for `x`, `(left, right)` for
+`y`), so a 2-D grid is read as parallel 1-D arrays and placements from
+different lanes are never compared. Each lane is then sorted along the
+direction and checked independently; the record reports how many lanes were
+found (`lanes`), and `--count` is the expected population **of each lane**:
+
+- **count** -- the lane must hold exactly `--count` placements.
+- **seam gap** -- every consecutive pair's measured gap must match the
+  expected gap **derived from the declared pitch**: `pitch - width`, where
+  `width` is the placement's extent along `--direction`. The expected gap is
+  negative for mirror-abutted tiles sharing a seam (`pitch < width`) and
+  positive for a spaced array (`pitch > width`); `--tolerance` bounds the
+  deviation from that expectation, not the absolute gap.
+- **length** -- the lane's extent must be `(count - 1) x pitch + width`.
 
 The pitch is rounded to the layout's database grid. Top cells with no
 placement of the unit cell are skipped; none at all exits `1`.
+
+| `kind` | Meaning |
+| ------ | ------- |
+| `gap` | a consecutive pair's measured gap exceeds the expected gap (`pitch - width`) by more than `--tolerance` |
+| `overlap` | a consecutive pair's measured gap falls below the expected gap (`pitch - width`) by more than `--tolerance`. The `kind` names the **deviation direction**, not a physical intersection: with `pitch > width`, a seam that comes up short reports `overlap` even though the placements never touch |
+| `pitch` | two placements whose extents along the axis differ (e.g. a rotated placement) advance by something other than the pitch |
+| `count` | a lane holds a different number of placements than `--count` |
+| `length` | a lane's extent differs from `(count - 1) x pitch + width` |
 
 ## JSON schema (the contract)
 
@@ -61,6 +75,7 @@ Emitted through the shared envelope (`docs/json-contract.md`).
   "pitch_um": 10.0,
   "count": 4,
   "direction": "x",
+  "lanes": 3,
   "dbu_um": 0.001,
   "status": "clean | violated",
   "violation_count": 1,
@@ -97,14 +112,17 @@ Emitted through the shared envelope (`docs/json-contract.md`).
 | `mirror_axis` / `at_um` / `translate_um` | string \| number \| array \| null | The symmetry request echoed back; the two `null` when only abutment ran. |
 | `tolerance_um`    | number (float)          | As given (default `0.0`). |
 | `pitch_um` / `count` / `direction` | number \| integer \| string \| null | The abutment request echoed back; `direction` is `null` when `--pitch` was not given. |
+| `lanes`           | integer \| null         | Number of lanes the placements were grouped into (ordered by the lane's perpendicular low coordinate); `null` when `--pitch` was not given. A 4x3 grid checked along `x` reads as 3 lanes of 4. |
 | `dbu_um`          | number (float)          | Database unit in micrometres. |
 | `status`          | string                  | `clean` \| `violated` — the verdict. Gate on this, not the exit code. |
 | `violation_count` | integer                 | Number of violations. |
 | `violations`      | array\<object\>         | Sorted deterministically; see the bullets below. |
 | `provenance`      | object                  | The shared provenance block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) — see [`docs/json-contract.md`](../json-contract.md). `pdk`/`deck` are always `null` (this command resolves neither); `input.content_hash` is the input file's own SHA-256. |
 
-- `layer` is `null` for abutment violations, which also carry `measured_um`
-  and `expected_um`.
+- `layer` is `null` for abutment violations, which also carry `measured_um`,
+  `expected_um` and `lane` — the 0-based index of the lane the violating
+  pair/lane belongs to (`expected_um` is the derived expected gap
+  `pitch - width` for `gap`/`overlap`, the declared pitch for `pitch`).
 - `bbox` is in **micrometres**. Violations are sorted deterministically.
 
 Gate on `status`, not the exit code.
@@ -122,4 +140,6 @@ Gate on `status`, not the exit code.
 
 - Keep-out of device layers under pads (use `klt keepout-check --region`).
 - Net-level (electrical) symmetry or matching; rotational symmetry.
-- Perpendicular alignment of placements.
+- Perpendicular alignment of placements: lanes are keyed on the perpendicular
+  extent, but whether the lanes are themselves evenly pitched is not checked
+  (the 2-D gap/overlap question is `klt seam-check --tiling`).

@@ -11,7 +11,8 @@ Headless invariant: uses only the pip ``klayout`` package's batch database API
 
 Why a distinct verb: ``klt diff`` compares two streams and ``klt stats``
 reports a bounding box; neither can assert that one cell is its own mirror
-image, or that N placements of a unit cell tile a line with no gap or overlap.
+image, or that N placements of a unit cell advance by a declared pitch along
+every lane of the array.
 Like ``klt keepout-check`` this emits the shared ``violations[]`` shape.
 
 Semantics:
@@ -25,10 +26,17 @@ Semantics:
   box and its translated copy, since nothing can be compared outside it.
   ``tolerance_um`` ignores residual features narrower than ``2 * tolerance_um``.
 - **Abutment** collects the bounding box of every placement of the unit
-  ``cell`` under each top cell (placement transforms applied), sorts them along
-  ``direction`` and checks consecutive pairs touch exactly (no gap, no overlap),
-  advance by ``pitch_um``, that there are ``count`` of them, and that the union
-  extent equals ``count * pitch_um``. The pitch is rounded to the database grid.
+  ``cell`` under each top cell (placement transforms applied), groups them
+  into lanes by their extent on the axis perpendicular to ``direction`` (a
+  2-D grid is read as parallel 1-D arrays; placements in different lanes are
+  never compared), sorts each lane along ``direction`` and checks, per lane:
+  that there are ``count`` of them; that every consecutive pair's gap matches
+  the expected gap ``pitch_um - width`` derived from the declared pitch (so a
+  mirror seam -- ``pitch < width`` -- and a spaced array -- ``pitch > width``
+  -- are both expressible, and ``kind`` names the deviation direction, not
+  necessarily a physical intersection); and that the lane's extent equals
+  ``(count - 1) * pitch_um + width``. The pitch is rounded to the database
+  grid.
 """
 
 from __future__ import annotations
@@ -189,11 +197,12 @@ def run_array_check(
                 )
             )
     if pitch_um is not None:
-        violations.extend(
-            _abutment_violations(
-                kdb, layout, tops, cell, pitch_um, count, direction, tolerance_um
-            )
+        abutment, lanes = _abutment_violations(
+            kdb, layout, tops, cell, pitch_um, count, direction, tolerance_um
         )
+        violations.extend(abutment)
+    else:
+        lanes = None  # symmetry-only request: no lanes were grouped
 
     violations.sort(
         key=lambda v: (
@@ -225,6 +234,9 @@ def run_array_check(
         "pitch_um": pitch_um,
         "count": count,
         "direction": direction if pitch_um is not None else None,
+        # additive (docs/json-contract.md): lane count of the abutment
+        # grouping -- null when only symmetry ran. No schema_version bump.
+        "lanes": lanes,
         "dbu_um": dbu,
         "status": "violated" if violations else "clean",
         "violation_count": len(violations),
@@ -339,15 +351,31 @@ _PAIR_TEXT = {
 }
 
 
-def _classify_pair(gap: int, step: int, pitch: int, tol: int) -> tuple[str, int] | None:
-    """Classify two consecutive placements (all in dbu): ``(kind, size)`` or
-    ``None`` when they abut and advance by exactly the pitch (within ``tol``)."""
-    if gap > tol:
-        return "gap", gap
-    if gap < -tol:
-        return "overlap", -gap
-    if abs(step - pitch) > tol:
-        return "pitch", step
+def _classify_pair(
+    gap: int, step: int, width: int, nxt_width: int, pitch: int, tol: int
+) -> tuple[str, int, int] | None:
+    """Classify two consecutive placements (all in dbu): ``(kind, size,
+    expected_gap)``, or ``None`` when the pair matches the declared pitch
+    (within ``tol``).
+
+    The expected gap is derived from the declared pitch -- ``pitch - width`` --
+    rather than assumed zero, so ``--pitch`` may be smaller than the unit cell
+    (mirror-abutted tiles sharing a seam) or larger (a spaced array). The
+    ``pitch`` kind survives only for the case the gap test cannot express:
+    placements whose extents along the axis differ (a rotated placement),
+    where the advance is checked instead -- so ``gap``/``overlap`` and
+    ``pitch`` are never both emitted for one pair.
+    """
+    if width != nxt_width:
+        if abs(step - pitch) > tol:
+            return "pitch", step, pitch
+        return None
+    expected_gap = pitch - width
+    delta = gap - expected_gap
+    if delta > tol:
+        return "gap", gap, expected_gap
+    if delta < -tol:
+        return "overlap", -gap, expected_gap
     return None
 
 
@@ -361,7 +389,7 @@ def _abutment_for_top(
     count: int,
     direction: str,
     tolerance_um: float,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], int]:
     dbu = layout.dbu
     pitch = round(pitch_um / dbu)
     tol = round(tolerance_um / dbu)
@@ -376,9 +404,22 @@ def _abutment_for_top(
     def um(value: int) -> float:
         return round(value * dbu, 9)
 
+    def lane_key(b: Any) -> tuple[int, int]:
+        # The placement's extent on the axis perpendicular to --direction;
+        # placements sharing it form one 1-D lane and are never compared
+        # against another lane's placements.
+        return (b.bottom, b.top) if horizontal else (b.left, b.right)
+
+    lanes: dict[tuple[int, int], list[Any]] = {}
+    for b in boxes:
+        lanes.setdefault(lane_key(b), []).append(b)
+    ordered = [lanes[key] for key in sorted(lanes)]
+
     out: list[dict[str, Any]] = []
 
-    def add(kind: str, desc: str, box: Any, measured: float, expected: float) -> None:
+    def add(
+        kind: str, desc: str, box: Any, measured: float, expected: float, lane: int
+    ) -> None:
         out.append(
             {
                 "rule": RULE_ABUTMENT,
@@ -387,38 +428,59 @@ def _abutment_for_top(
                 "kind": kind,
                 "layer": None,
                 "cell": top.name,
+                "lane": lane,
                 "bbox": bbox_um_dict(box, dbu),
                 "measured_um": measured,
                 "expected_um": expected,
             }
         )
 
-    boxes = sorted(boxes, key=lo)
-    if len(boxes) != count:
-        add(
-            "count",
-            f"{len(boxes)} placement(s) of {unit} found, expected {count}",
-            boxes[0],
-            float(len(boxes)),
-            float(count),
-        )
-    for prev, nxt in zip(boxes, boxes[1:], strict=False):
-        found = _classify_pair(lo(nxt) - hi(prev), lo(nxt) - lo(prev), pitch, tol)
-        if found is None:
-            continue
-        kind, size = found
-        box = _pair_box(kdb, kind, prev, nxt, horizontal)
-        expected = um(pitch) if kind == "pitch" else 0.0
-        add(kind, _PAIR_TEXT[kind].format(um(size)), box, um(size), expected)
-    extent = max(hi(b) for b in boxes) - lo(boxes[0])
-    expected = count * pitch
-    if abs(extent - expected) > tol:
-        union = boxes[0]
-        for b in boxes[1:]:
-            union = union + b
-        desc = f"array length {um(extent)} um != count x pitch {um(expected)} um"
-        add("length", desc, union, um(extent), um(expected))
-    return out
+    for lane_index, lane_boxes in enumerate(ordered):
+        lane = sorted(lane_boxes, key=lo)
+        if len(lane) != count:
+            add(
+                "count",
+                f"lane {lane_index}: {len(lane)} placement(s) of {unit} found, "
+                f"expected {count}",
+                lane[0],
+                float(len(lane)),
+                float(count),
+                lane_index,
+            )
+        for prev, nxt in zip(lane, lane[1:], strict=False):
+            found = _classify_pair(
+                lo(nxt) - hi(prev),
+                lo(nxt) - lo(prev),
+                hi(prev) - lo(prev),
+                hi(nxt) - lo(nxt),
+                pitch,
+                tol,
+            )
+            if found is None:
+                continue
+            kind, size, expected_gap = found
+            box = _pair_box(kdb, kind, prev, nxt, horizontal)
+            add(
+                kind,
+                _PAIR_TEXT[kind].format(um(size)),
+                box,
+                um(size),
+                um(expected_gap),
+                lane_index,
+            )
+        width = hi(lane[-1]) - lo(lane[-1])
+        extent = hi(lane[-1]) - lo(lane[0])
+        expected = (count - 1) * pitch + width
+        if abs(extent - expected) > tol:
+            union = lane[0]
+            for b in lane[1:]:
+                union = union + b
+            desc = (
+                f"array length {um(extent)} um != (count - 1) x pitch + width "
+                f"{um(expected)} um"
+            )
+            add("length", desc, union, um(extent), um(expected), lane_index)
+    return out, len(ordered)
 
 
 def _abutment_violations(
@@ -430,29 +492,30 @@ def _abutment_violations(
     count: int | None,
     direction: str,
     tolerance_um: float,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], int]:
     out: list[dict[str, Any]] = []
+    lanes = 0
     found = False
     for top in tops:
         boxes = _placement_boxes(kdb, layout, top, unit)  # type: ignore[arg-type]
         if not boxes:
             continue
         found = True
-        out.extend(
-            _abutment_for_top(
-                kdb,
-                layout,
-                top,
-                boxes,
-                unit,  # type: ignore[arg-type]
-                pitch_um,
-                count,  # type: ignore[arg-type]
-                direction,
-                tolerance_um,
-            )
+        lane_out, lane_count = _abutment_for_top(
+            kdb,
+            layout,
+            top,
+            boxes,
+            unit,  # type: ignore[arg-type]
+            pitch_um,
+            count,  # type: ignore[arg-type]
+            direction,
+            tolerance_um,
         )
+        out.extend(lane_out)
+        lanes += lane_count
     if not found:
         raise ArrayCheckError(
             f"cell {unit!r} has no placed geometry under the checked top cell(s)"
         )
-    return out
+    return out, lanes
