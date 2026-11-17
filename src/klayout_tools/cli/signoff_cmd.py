@@ -142,6 +142,7 @@ from ..signoff_generator_batch import (
     GeneratorExecution,
     resolve_execution,
 )
+from ..signoff_output import non_attest_problem, write_output_or_message
 from .color import Palette, resolve_palette
 from .output import emit_error, emit_success, render_rerun_drift
 from .signoff_flags import mode_flag_problem
@@ -194,32 +195,15 @@ def _maybe_run_attest(
     """``--attest`` dispatch (issue #2844) -- run it, or refuse its flags.
 
     Returns the exit code when the invocation is an ``--attest`` one (run it)
-    or an ``--inventory``/``--output`` misuse (refuse them), and ``None``
+    or a flag misuse (refuse it: the non-``--attest`` pairings that make no
+    sense, per :func:`~.signoff_output.non_attest_problem`), and ``None``
     otherwise so ``run`` can fall through to the other modes.
     """
     if getattr(args, "attest", None) is not None:
         return _run_attest(args, manifest_source, fleet_source)
-    stray = [
-        flag
-        for flag, attr in (
-            ("--inventory", "inventory"),
-            ("--output", "output"),
-            ("--input", "attest_input"),
-            ("--generator", "generator"),
-            ("--regenerated-hash", "regenerated_hash"),
-            ("--skip-local-only", "skip_local_only"),
-            ("--require-build-match", "require_build_match"),
-        )
-        if getattr(args, attr, None)
-    ]
-    if stray or getattr(args, "hash_kind", None) is not None:
-        return emit_error(
-            "signoff",
-            "--inventory/--output/--input/--generator/--regenerated-hash/"
-            "--hash-kind/--skip-local-only/--require-build-match only apply to "
-            "--attest",
-            args.format,
-        )
+    problem = non_attest_problem(args, manifest_source, fleet_source)
+    if problem:
+        return emit_error("signoff", problem, args.format)
     return None
 
 
@@ -460,12 +444,7 @@ def _run_tier_report(
         emit_success(result, args.format, render_rerun_drift)
         return _CHECK_EXIT_CODES[result["status"]]
 
-    palette = resolve_palette(args)
-    emit_success(
-        result, args.format, lambda payload: _print_tier_report_text(payload, palette)
-    )
-
-    return EXIT_PASS if result["tier"] == "T1" else EXIT_FAIL
+    return _finish_render(result, args, _print_tier_report_text, result["tier"] == "T1")
 
 
 def _run_fleet_report(
@@ -511,17 +490,28 @@ def _run_fleet_report(
         emit_success(result, args.format, render_rerun_drift)
         return _CHECK_EXIT_CODES[result["status"]]
 
-    palette = resolve_palette(args)
-    emit_success(
-        result, args.format, lambda payload: _print_fleet_report_text(payload, palette)
+    return _finish_render(
+        result, args, _print_fleet_report_text, result["not_t1_count"] == 0
     )
-
-    return EXIT_PASS if result["not_t1_count"] == 0 else EXIT_FAIL
 
 
 def _read_manifest(source: str, *, description: str = "manifest") -> Any:
     """Use the same strict JSON reader for manifest, fleet, and evidence."""
     return _read_json_source(source, description)
+
+
+def _finish_render(
+    result: dict, args: argparse.Namespace, print_text: Any, passed: bool
+) -> int:
+    """Emit a fresh render's verdict (issue #5867 wiring): write the
+    ``--output`` envelope (if any) *before* stdout so a write failure
+    never follows a printed success, then render the text report."""
+    problem = write_output_or_message(result, getattr(args, "output", None))
+    if problem:
+        return emit_error("signoff", problem, args.format)
+    palette = resolve_palette(args)
+    emit_success(result, args.format, lambda payload: print_text(payload, palette))
+    return EXIT_PASS if passed else EXIT_FAIL
 
 
 def _print_describe_grader_text(result: dict) -> None:
