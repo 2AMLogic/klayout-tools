@@ -2175,6 +2175,54 @@ carried, as for item 10. Without `--inventory` the envelope is unchanged.
 klt ships no built-in geometry engine for these checks — the declared command
 is the authority.
 
+**Pinning the generator's inputs (`inputs`, issue #5724).** An inventory may
+also declare `inputs`: a non-empty list of repo-relative paths the layout
+generator consumed (generator script, cell library, sub-cell streams,
+configuration).
+
+```json
+{
+  "schema_version": 1,
+  "kind": "t1-attestation-inventory",
+  "t1_item": 2,
+  "inputs": ["tools/gen.py", "tools/cells.json"]
+}
+```
+
+`inputs` is accepted with or without `checks`; an inventory declaring neither
+is refused (exit `1`), as is an empty list, a path listed twice, an absolute or
+repository-escaping path, a path through a symlink, or a path that is also an
+`--input` stream. Each input yields one `attestation.checks[]` entry
+`{"check": "present", "role": "input", "path", "content_hash", "passed"}`,
+ordered by path, after the built-in checks and before the `role: "audit"`
+commands; a missing input fails its check and the envelope (exit `3`).
+
+Like item 1, an envelope that declares `inputs` pins its whole input set:
+`provenance.input.paths` holds one member per `--input` stream
+(`"role": "stream"`) and per declared input (`"role": "input"`), sorted by
+path, and `provenance.input.content_hash` is the combined set digest (see "Set
+binding" above); `provenance.input.path` is not emitted. Editing a declared
+input while every stream stays byte-identical therefore renders the manifest
+row `unmet` / `stale_evidence` (the changed member is named in
+`detail.artifact_binding.members`), and `--attest 2 --check` reports drift, even
+when every declared command is `local_only` and skipped. A member that cannot
+be read is left out of the set; its `present` check already fails the
+attestation. `inputs` is a hash pin, not a rebuild: klt neither runs the
+generator nor verifies that the stream regenerates from the inputs (declare a
+`checks` command for that).
+
+`inputs` composes with repeated `--input`. It also composes with `--generator` /
+`--regenerated-hash` on a single stream, with one caveat: the grader compares
+`regenerated_hash` to the *bound* hash, which for an envelope that declares
+`inputs` is the set digest (`provenance.input.content_hash`), not the bare
+stream hash, and a `geometry` hash kind is unavailable for a set binding.
+
+> **Pin change.** An item-2 envelope that declares `inputs` reports
+> `provenance.input.paths` plus a set digest instead of a single
+> `provenance.input.path`, so a manifest citing it must re-pin the evidence
+> `content_hash` to the new `provenance.input.content_hash`. An envelope
+> without `inputs` is byte-for-byte unchanged.
+
 Declared `argv` commands run with the tool virtualenv's `bin` directory
 removed from `PATH` when klt itself runs inside a venv (`uvx`, pipx), so a bare
 `python3` in an `argv` is the repository's interpreter, not klt's. The one
@@ -2258,6 +2306,8 @@ an inventory the author did not write.
 | ---- | ----- | -------- | ---------- |
 | **1** Design sources | `sources`: list of paths | yes, non-empty | each file exists (`present`, role `source`) |
 | | `derived`: list of `{path, generator, check}` or `{path, generator, recorded}` | yes, non-empty | each file exists (`present`, role `derived`), **and** exactly one of: its `check` command exits `0` (`command`, role `freshness`), or its `recorded` digests match (`recorded_hash`, role `freshness`; see below). `generator` names what produced it (e.g. `"klt netlist"`). Both or neither of `check`/`recorded` is refused (exit `1`). |
+| **2** Layout (optional inventory, with `--input`) | `checks`: list of `{name, argv, cwd?, local_only?, timeout_s?}` | `checks` and/or `inputs` — at least one | each exits `0` (`command`, role `audit`); `name` must be unique |
+| | `inputs`: list of paths (first ships in the first release after `v0.9.2`) | `checks` and/or `inputs` — at least one | each file exists and is hash-pinned (`present`, role `input`), and joins the role-tagged `provenance.input.paths` set digest; see "Pinning the generator's inputs" |
 | **8** Characterization report | `report`: path | yes | the report file exists (`present`, role `report`) |
 | | `spec_rows`: list of row ids | yes, non-empty | each row has at least one citation (`citation`, role `spec_row`) and every envelope it cites exists (`present`, role `evidence`) |
 | | `citations`: `{row: [envelope path, ...]}` | yes | keys must be declared rows; a declared row with no entry fails its `citation` check |
@@ -2265,7 +2315,7 @@ an inventory the author did not write.
 | | `corners`: list of names, with `metrics`: `{corner: {fmax\|area\|power: {"envelope": path, "field": "dotted.path"}}}` | digital partitions only (both or neither) | for every corner and each of `area`, `fmax`, `power`, the named field of the named cited envelope is a finite number (`metric`, role `digital`; the value is recorded). A missing binding or non-numeric field is a **failed check**. Digit segments index lists, e.g. `result.0.fmax_mhz`. |
 | **9** Testbenches shipped | `testbenches`: list of paths, or `{"path", "cold_start", "sources"}` objects (mixing is fine; the object form first ships in 0.9.0, `sources` in 0.9.3) | yes, non-empty | each file exists (`present`, role `testbench`) |
 | | `sources` (on a `{"path", ...}` entry): non-empty list of paths | no | each file exists (`present`, role `source`, plus `testbenches: [<bench path>, ...]` — the sorted benches that declared it). The same source named by several benches is hashed once and lists all of them; a path declared both as a bench and as a source is refused (exit `1` — its bytes are already pinned as the bench). *First ships in 0.9.3.* |
-| | `cold_start`: command | yes, unless **every** testbench entry carries its own `cold_start` | exits `0` (`command`, role `cold_start`). A per-bench `cold_start` is a command too and yields a `command` check with `testbench: "<path>"`, so a failure names its bench. When both forms are present, the top-level command runs as well. A cold start (either form) may add `documented_argv` — the full reproducing invocation, recorded and never run; see "A cold start that only validates its bench" below. *First ships in the first release after `v0.9.2`.* |
+| | `cold_start`: command, or a non-empty list of `{name, ...}` commands (each `name` a non-empty string, unique within its entry; the list form is refused otherwise, exit `1`) | yes, unless **every** testbench entry carries its own `cold_start` | exits `0` (`command`, role `cold_start`). A per-bench `cold_start` is a command too and yields a `command` check with `testbench: "<path>"`, so a failure names its bench. The list form declares several cold starts over the same file: each member yields its own `command` check carrying `testbench` **and** `name`, graded independently, while the file is still inventoried (and hashed) exactly once — the honest way to attest N benches that share one implementation module, where minting one wrapper file per bench would hash hollow files and leave the real module attested by nothing. Members are emitted in `name` order after benches sorted by path. When both forms are present, the top-level command runs as well. A cold start (either form) may add `documented_argv` — the full reproducing invocation, recorded and never run; see "A cold start that only validates its bench" below. *Per-bench `cold_start` first ships in the first release after `v0.9.2`; the list form adds no envelope field for today's single-command inventories (no `schema_version` bump).* |
 | | `unbenched_rows`: list of `{"row": "<id>", "issue": <positive int>}` | no | one `unbenched_row` check per entry (role `row`), **passing**: the gap and its owner issue are visible to the grader, not refused. Empty/duplicate `row` or a non-positive `issue` is refused (exit `1`). Whether bench-less rows should fail T1 item 9 is a grading-policy decision this producer does not make. *First ships in 0.9.0; 0.8.0 refuses `unbenched_rows` as an unknown field.* |
 | | `pins`: `{"pdk": {"name", "revision"} \| {"none": true, "reason"}, "tools": {<tool>: <version>}}` | checked, not structurally required | `pdk.name` and `pdk.revision` non-empty, or, for a partition whose cold start consumes no PDK, the explicit no-PDK form `{"none": true, "reason": "<non-empty>"}` (`pin`, role `pdk`; `none` mixed with `name`/`revision`, or with an empty `reason`, fails; an absent `pdk` still fails -- silence never means "no PDK"); `tools` a non-empty map of non-empty versions (`pin`, role `tools`). A missing pin is a **failed check**, not a malformed inventory. |
 | **10** Repo hygiene | `hygiene`: list of paths, or `{"path", "attest": "presence"\|"content"}` objects (mixing is fine) | yes, non-empty | each file exists (`present`, role `hygiene`); a `"presence"` entry omits `content_hash`, so content edits are not drift |
@@ -2481,10 +2531,43 @@ top-level `cold_start` stays valid and produces the same envelope as before):
 }
 ```
 
-Each command run under `--attest 9` prints `attest item 9: running <role> [<bench>] ...`
+Each command run under `--attest 9` prints `attest item 9: running <role> [<name>] [<bench>] ...`
 and a `... ok|FAILED|skipped in N.Ns` line to **stderr**, regardless of
-`--format`; stdout (and so the JSON envelope) is unchanged and carries no
-timing, keeping `--check` drift comparison reproducible.
+`--format`; the `<name>` segment appears only for a member of a `cold_start`
+list. stdout (and so the JSON envelope) is unchanged and carries no timing,
+keeping `--check` drift comparison reproducible.
+
+**Several cold starts over one file: `cold_start` as a list (issue #5641).**
+When several testbenches are implemented by one shared module — invoked with
+different arguments, graded separately — the inventory needs a way to run a
+cold start per bench without repeating the file. An entry's `cold_start`
+therefore also accepts a non-empty list of named commands:
+
+```json
+{
+  "testbenches": [
+    {"path": "tb/shared.py", "cold_start": [
+      {"name": "ac", "argv": ["make", "ac"]},
+      {"name": "tran", "argv": ["make", "tran"], "local_only": true, "timeout_s": 7200}
+    ]}
+  ]
+}
+```
+
+Each member yields its own `command` check (`role: "cold_start"`) carrying
+`testbench: "tb/shared.py"` **and** its `name`, with its own `argv`, `cwd`,
+`exit_status` and `passed` — N independently graded cold starts — while the
+file itself is still inventoried exactly once: one `present` check, one
+attested `content_hash` on the module that implements every graded behaviour.
+This is what replaced the wrapper-file workaround, which attested N hollow
+one-line files and left the shared module (every behaviour, none of the
+hashes) outside the envelope. Every bench still needs a cold start: the list
+satisfies the requirement on its own, and an empty list is refused, exit `1`
+— as is a non-object member, a member without a `name`, an empty or non-string
+`name`, or a duplicate `name` within one entry. Repeating one `path` across
+`testbenches` object entries is still refused, and the refusal now points at
+this list form as the alternative. Text output labels a listed cold start by
+its `name` (`[PASS] cold_start ac: make ac (exit 0)`).
 
 **A bench's implementation modules: `sources` (first ships in 0.9.3).** A
 bench whose behaviour lives across an entry point plus the modules it imports

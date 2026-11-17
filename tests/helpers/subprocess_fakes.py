@@ -24,7 +24,7 @@ import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
-from klayout_tools import sim
+from klayout_tools import sim, synthesize
 
 
 def fake_completed(
@@ -211,3 +211,20 @@ def uploaded_request_of(argv: list[str]) -> tuple[dict, str] | None:
         return None
     job_id = destination.partition("/jobs/")[2].split("/")[0]
     return json.loads(document.read_text()), job_id
+
+
+def _patch_yosys_run(monkeypatch, fake) -> None:
+    """Install a ``subprocess.run``-shaped fake across the Yosys spawns.
+
+    Every Yosys invocation -- the ``yosys -s`` script run and the ``yosys
+    -V`` / ``help abc`` capability probes -- spawns through
+    ``_engine_proc.run_in_group``, which delegates to ``subprocess.run``
+    (start_new_session + group kill, issue #5871). Patching ``run`` on the
+    shared stdlib module intercepts all of them; a mocked ``run`` spawns
+    nothing, so ``run_in_group`` records no pid and kills nothing.
+
+    Tests exercising the REAL spawn path (the process-group regression
+    tests in ``test_synthesize_timeout.py``) patch nothing and put a stub
+    ``yosys`` binary on ``PATH`` instead.
+    """
+    monkeypatch.setattr(synthesize.subprocess, "run", fake)
