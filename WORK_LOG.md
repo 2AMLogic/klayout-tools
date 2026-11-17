@@ -8,6 +8,14 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-16
 
+- **PR #5965**: ci: provision pinned sv2v so synthesize's sv2v tests run in CI
+- **PR #5957**: perf: make klt stats geometry_digest opt-in via --geometry-digest
+- **PR #5859**: refactor: dedupe env_provenance walk -- single regex constant, one string walker
+- **PR #5822**: fix: reject LIST_ITEM wildcard entries in diff_verdict_fields exclude sets
+- **Issue #5956** (closed): CI does not exercise the real sv2v front end, so synthesize's sv2v reproducibility tests only ever skip there
+- **Issue #5669** (closed): Remove duplicated code in the env_provenance walk: a shadowed regex constant and a redundant tree walk
+- **Issue #5586** (closed): evidence canonicalize: a LIST_ITEM exclusion entry would silently break the canonicalize/--rerun equivalence
+- **Issue #5583** (closed): Consider gating klt stats' geometry_digest behind a flag (measured ~2.5x runtime)
 - **Issue #2912** (closed): Friction: sky130 native-Vt NMOS (nfet_05v0_nvt) cannot be drawn by klt gen or compared by klt lvs
 - **PR #5953**: feat: report build_drift on signoff attest --check, add --require-build-match
 - **PR #5920**: docs(lvs): backfill category-count drift in CHANGELOG and guard category coverage

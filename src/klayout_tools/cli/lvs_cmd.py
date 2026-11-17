@@ -92,11 +92,11 @@ def run(args: argparse.Namespace) -> int:
     # group (parser.py) -- omitting both, or giving both, is already a usage
     # error (exit 2) by the time `run()` is ever called.
     if args.check is not None:
-        if args.deck_file is not None or args.deck_var:
+        if args.deck is not None or args.deck_file is not None or args.deck_var:
             return emit_error(
                 "lvs",
-                "--deck-file/--deck-var apply to a fresh run; --check reads "
-                "the deck from the committed report",
+                "--deck/--deck-file/--deck-var apply to a fresh run; --check "
+                "reads the deck from the committed report",
                 args.format,
             )
         return _run_check(args)
@@ -110,6 +110,7 @@ def run(args: argparse.Namespace) -> int:
     try:
         report = run_lvs(
             args.request,
+            deck=args.deck,
             deck_file=args.deck_file,
             deck_vars=_parse_deck_vars(args.deck_var),
             # `--progress` (issue #4347), same default as `klt extract`:
