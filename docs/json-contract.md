@@ -618,6 +618,19 @@ worker-observed `worker_environment.pdk` so the two are never confused;
 `cli/sim.md`'s option and `environment` tables are the field-level record.
 Additive fields only; no `schema_version` bump (issue #4020).
 
+`klt sim`'s `environment.ngspice_init` (issue #5648) records the ngspice init
+file that was **in effect** -- always present on corner-mode runs, `null` for
+`engine: "xyce"` -- as `{source, lines, sha256}`. `source` is a path-free label
+(the same rule as `provenance.pdk.ambiguous_sources`: committed evidence must
+not carry the resolving machine's `$HOME`): `"request"` (klt wrote a
+`.spiceinit` including declared `options.ngspice_init` lines), `"thread_pin"`
+(klt wrote only the `set num_threads=N` pin), `"home"` (klt wrote none and
+`$HOME/.spiceinit` exists), `"none"`, or `"runner"` (off-host backends
+`remote`/`batch`: the worker resolves the file, which the client cannot
+observe). `lines` is the written file's lines for `request`/`thread_pin`, else
+`null`; `sha256` is `sha256:<hex>` of the effective file's bytes, `null` for
+`none`/`runner`. Additive; no `schema_version` bump.
+
 `environment.remote` (and each `fleet[]` member) also gains the additive
 `runner_models_lib_sha256` (string or `null`) and `models_lib_comparison`
 (`status` `match` / `mismatch` / `not_comparable`); no `schema_version` bump
@@ -733,7 +746,14 @@ unchanged in grading; issue #4188 adds a producer for it,
 [--hash-kind {bytes,geometry}]]`, emitting the same `generic` envelope with
 `attestation.checks[]` entries `stream_readable`, `top_cell_non_empty` and
 `dbu_on_grid`, `provenance.klayout_version` populated, and an optional
-`provenance.regeneration` (additive; no `schema_version` bump). The inventory `--attest` reads is its own versioned contract —
+`provenance.regeneration` (additive; no `schema_version` bump). The
+inventory-driven producers — `klt signoff --attest ITEM` for items 1, 8, 9
+and 10 (issue #5690) — populate `provenance.klayout_version` the same way:
+the `klayout` build resolved into the attesting process, which is the engine
+a declared `checks[].argv` command that imports `klayout.db` actually ran
+against (`null` when `klayout` is not importable). Like `klt_version`, it is
+a version string in the `--check`/`--rerun` exclusion set, so committed
+evidence re-checked across a klayout upgrade still reports `match`. The inventory `--attest` reads is its own versioned contract —
 see "A versioned *input* contract" below.
 
 Issue #3044 adds an optional `provenance.input.paths` set form to that
@@ -1534,7 +1554,7 @@ which reads the input field only (`signoff.py`'s `_INPUT_ARTIFACT_FIELDS`).
 | `extract` | `file` (the hashed input layout; both response builders) | 4 | #2659 |
 | `lvs` | `layout` (the hashed layout side, `schema_version` 2, #2659); `reference` (the resolved reference netlist, `schema_version` 3, #4984; the `klayout-runset` engine keeps both as plain strings) | 3 | #2659, #4984 |
 | `erc` | `file` (the hashed input layout; `spec` stays a plain string) | 2 | #2703 |
-| `lef-abstract` | `file` (the hashed input layout; `socket` and `output` stay plain strings) | 2 | #2703 |
+| `lef-abstract` | `file` (the hashed input layout; `socket` and `output` stay plain strings; `{path: null, scope: "absent"}` under `--no-layout`, #5714) | 2 | #2703 |
 | `place-and-route` | `netlist` — the input netlist `provenance.input.content_hash` pins (additive, no bump) | 1 | #3751 |
 | `sta` | `def_path`, `verilog_path`, `spef_path` (`null` when the request does not use that input) | 2 | #2879 (moved from the plain-string table; schema-1 evidence carries absolute strings) |
 | `sta` | `sdf` / `corners[].sdf` — a written output: the envelope plus `content_hash` (`null` unless `request.sdf: true`; additive, no bump) | 2 | #2886 |
@@ -1810,6 +1830,12 @@ All eight share one contract:
   item still fails, via the counts and per-item `id`s that stay compared.
   See [`cli/signoff.md`](cli/signoff.md)'s "A reworded checklist is not
   evidence drift".
+- **`klt signoff --check` also carries a report-only `build_skew`** (issue
+  #5868; additive, no `schema_version` bump): `{state, fields}` where `state`
+  is `"same"`, `"build_only"`, `"ruleset"` (`build.grading_ruleset_id`
+  differs) or `"unknown"` (the committed report has no `build` block), and
+  `fields` lists each differing `build.*` field in the `{field, committed,
+  fresh}` shape of `drift`. It never affects `status` or the exit code.
 
 **Build identity is route-dependent, so committed reports must not be
 byte-compared (issue #2249).** A `klt signoff` tier/fleet report's `build`
