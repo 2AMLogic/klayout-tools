@@ -90,6 +90,11 @@ during #196's bring-up:
    `mos_cap: true` and `add_guard_ring: true` (gf180mcu): S/D tied into one
    `U<i>_SD` port, marker layer drawn, width floor taken from the deck's COMP
    min-width rule (`docs/cli/gen.md`).
+   For a precision resistor whose single body would set the cell's outline
+   (a few hundred µm of poly), fold it instead: `klt gen res_array` with
+   `length_um = L/k`, `num = k`, `rows >= 2`, `series: true`, then `klt lvs`
+   `options.combine_devices: true` against the unmodified one-resistor
+   netlist (`docs/cli/gen.md`, "Series strings").
 2. **Compose multiple generated blocks into one placed-and-routed
    circuit.** `klt gen-compose <request.json>` places a row of already-
    generated blocks and routes two-pin *and* >2-pin (shared rail, fanout)

@@ -3101,6 +3101,55 @@ def test_res_array_series_extracts_as_connected_chain(tmp_path, pdk_root):
     assert sorted(degree.values()) == [1, 1, 2, 2, 2], degree
 
 
+#: `res_generic_po`'s deck sheet rho (`decks/sky130.py`), transcribed as a
+#: literal so a deck-value drift fails the test loudly instead of silently
+#: tracking it -- the same convention as test_lvs.py's resistor fixtures.
+_RES_GENERIC_PO_SHEET_RHO_OHM_SQ = 48.2
+
+
+def test_res_array_series_fold_lvs_matches_one_device_reference(tmp_path, pdk_root):
+    """Issue #5555 regression: a series=true `res_array` draws one long
+    logical resistor as a folded chain, and `klt lvs` matches it against the
+    *unmodified* one-device schematic reference when `options.combine_devices:
+    true`; without combining, the chain's 4 extracted devices mismatch the
+    reference's 1."""
+    num, length_um, width_um = 4, 2.0, 1.0
+    output, _ = _series_report(
+        tmp_path,
+        pdk_root,
+        "fold",
+        num=num,
+        rows=2,
+        dummy=0,
+        series=True,
+        width_um=width_um,
+    )
+    reference = tmp_path / "ref.spice"
+    r_ohm = num * (length_um / width_um) * _RES_GENERIC_PO_SHEET_RHO_OHM_SQ
+    reference.write_text(
+        f".subckt RES R0_A R3_B\nR1 R0_A R3_B {r_ohm:.5f} res_generic_po\n.ends\n"
+    )
+
+    from klayout_tools.lvs import run_lvs
+
+    request = {
+        "layout": {"file": str(output), "deck": "sky130"},
+        "reference": {"netlist": str(reference), "top": "RES"},
+    }
+    folded = run_lvs(json.dumps({**request, "options": {"combine_devices": True}}))
+    assert folded["status"] == "match"
+    assert folded["counts"]["devices"] == {
+        "layout": 1,
+        "reference": 1,
+        "matched": 1,
+    }
+
+    unfolded = run_lvs(json.dumps({**request, "options": {"combine_devices": False}}))
+    assert unfolded["status"] == "mismatch"
+    assert unfolded["counts"]["devices"]["layout"] == num
+    assert unfolded["counts"]["devices"]["reference"] == 1
+
+
 def test_res_array_num_1_boundary_and_zero_dummy(tmp_path, pdk_root):
     output = tmp_path / "res_array_1.gds"
     report = generate(

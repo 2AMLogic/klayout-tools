@@ -1021,16 +1021,38 @@ layer (the local-metal role for a poly body; the body layer for
 `metal_level > 0`), as wide as the pad is tall. Only the two outer terminals
 are reported as ports, `R0_A` and `R<num-1>_B`; interior ports are omitted.
 `device_count` stays `num` (`klt extract` reports the chain as `num` series
-devices; merging them into one logical device is not done). `drc_hints.notes`
-states the joint count and per-joint overhead.
+devices — merging them into one logical device is not done *there*; that is
+the compare's job, below). `drc_hints.notes` states the joint count and
+per-joint overhead.
+
+**Folding one long resistor (issue #5555).** The series string *is* the fold
+for a single body too long for the cell's other axis: to draw one logical
+resistor of total length `L`, request `length_um = L / k`, `num = k`,
+`series: true`, and `rows >= 2` — the jumpers above chain the `k` segments
+into one device spanning `k` rows instead of one strip `L` long. Keep the
+schematic netlist unmodified (one resistor sized for the full `L`) and
+compare with [`klt lvs`](lvs.md) `options.combine_devices: true`, which folds
+the chain back into one device and matches it (with `false`, the chain's `k`
+layout devices mismatch the reference's 1 — see the
+[`combine_devices` request field](lvs.md#request) for what combining does and
+why it is opt-in). Three limits: `klt extract` alone still reports `k`
+devices; the interior joints must stay unlabelled — the generator omits their
+ports, and a label on a joint promotes it to a declared pin (see the declared
+pin set, `--pins`, in [`klt extract`](extract.md)) and blocks the fold; and
+the folded device has `k` head pairs where the schematic device has one,
+which `klt lvs` discloses as a `device.series_fold_offset_absorbed` warning
+(issue #3017) instead of a mismatch.
 
 `rows` (default `1`, the original single-row layout) folds the `num` unit
 resistors into that many parallel rows in boustrophedon ("snake") order —
 row 0 runs left to right, row 1 right to left, and so on — instead of one
 long row, mirroring how `mos_array`/`bjt_array` use `rows`/`cols` to keep an
-array roughly square. Without it, a resistor string with a realistic
-unit-segment count (dummies and trim taps included) produces a bounding box
-dominated by one axis, which can blow a floorplan's area budget even though
+array roughly square. `rows` folds the unit *count*; it does not fold one
+unit's *length* — a single body that is too long is folded by `series: true`
+instead (see "Series strings" above). Without it, a resistor string with a
+realistic unit-segment count (dummies and trim taps included) produces a
+bounding box dominated by one axis, which can blow a floorplan's area budget
+even though
 the drawn area itself is small (issue #415). Row-to-row pitch is fixed (unit
 height plus the same `MIN_SAME_LAYER_SPACING_UM` margin `mos_array` uses for
 its own row pitch), independent of `spacing_um`, which stays scoped to

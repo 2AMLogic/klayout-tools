@@ -1019,6 +1019,9 @@ def _res_array_series_note(joints: list[dict[str, Any]], num: int) -> str:
         f"units end to end; only R0_A and R{num - 1}_B are reported as ports. "
         "Per-joint overhead (jumper length): "
         + (", ".join(overhead) if overhead else "none (num is 1)")
+        + ". Compare the chain against the schematic's single resistor with "
+        "`klt lvs` options.combine_devices: true (default false reports each "
+        "unit as its own device)"
     )
 
 
