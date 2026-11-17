@@ -3219,8 +3219,8 @@ def _resolve_layout(
     ``layout.file`` shape -- every instantiated cell matching one of the
     patterns is extracted as a pin-only black box, exactly like ``klt extract
     --abstract-cells``. Already validated by
-    :func:`_parse_layout_abstract_cells` (which rejects it on the
-    ``layout.netlist`` shape, so it never reaches that branch). No PDK is
+    :func:`_parse_layout_abstract_cells` (which rejects ``abstract_cells`` on
+    the ``layout.netlist`` shape -- that shape runs no extraction). No PDK is
     resolved here (``klt lvs`` has no ``layout.pdk``), so an
     ``abstract_cell_lef`` port is probed the way ``klt extract
     --abstract-cell-lef`` probes it without ``--pdk``.
