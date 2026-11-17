@@ -3557,12 +3557,7 @@ def _add_env_provenance_parser(subparsers: argparse._SubParsersAction) -> None:
             "not itself be committed to the repo it scanned."
         ),
     )
-    scan_parser.add_argument(
-        "files",
-        nargs="+",
-        metavar="FILE",
-        help="files to scan",
-    )
+    scan_parser.add_argument("files", nargs="+", metavar="FILE", help="files to scan")
     _add_format_arg(scan_parser)
     scan_parser.set_defaults(func=env_provenance_cmd.run_scan)
 
@@ -3588,10 +3583,7 @@ def _add_env_provenance_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     lint_parser.add_argument(
-        "files",
-        nargs="+",
-        metavar="FILE",
-        help="JSON envelope files to lint",
+        "files", nargs="+", metavar="FILE", help="JSON envelope files to lint"
     )
     lint_parser.add_argument(
         "--allow-prefix",
@@ -3605,6 +3597,12 @@ def _add_env_provenance_parser(subparsers: argparse._SubParsersAction) -> None:
             "boundary, so /opt/pdk admits /opt/pdk/sky130A/... but not "
             "/opt/pdk-scratch/... Repeatable."
         ),
+    )
+    lint_parser.add_argument(
+        "--json-stream",
+        action="store_true",
+        help="treat each FILE as whitespace-separated JSON documents (default: each"
+        " FILE is a single JSON document); findings gain a 0-based `document` index",
     )
     _add_format_arg(lint_parser)
     lint_parser.set_defaults(func=env_provenance_cmd.run_lint_envelope)
