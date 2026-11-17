@@ -186,7 +186,7 @@ from collections.abc import Callable
 from typing import Any
 
 from . import gen_compose_port_request as _pr
-from ._jsonnum import is_int, is_number
+from ._jsonnum import is_finite_number, is_int, is_number
 from ._layout import write_layout
 from ._paths import _load_request_json, _resolve_relative
 from ._provenance import build_provenance, layout_geometry_digest
@@ -1543,10 +1543,10 @@ def _parse_drc_hints(drc_hints: Any) -> tuple[str | None, float, float | None]:
     if isinstance(candidate, str) and candidate:
         matched_group_id = candidate
     spacing = drc_hints.get("min_spacing_um")
-    if is_number(spacing):
+    if is_finite_number(spacing):
         min_spacing_um = max(0.0, float(spacing))
     clearance = drc_hints.get("foreign_clearance_um")
-    if is_number(clearance):
+    if is_finite_number(clearance):
         foreign_clearance_um = max(0.0, float(clearance))
     return matched_group_id, min_spacing_um, foreign_clearance_um
 
@@ -2910,7 +2910,7 @@ def _snap_port_to_grid(
     direction = int(port.get("direction_deg", 0)) % 360
     tangential = "y" if direction in (0, 180) else "x"
     width = port.get("width_um")
-    half = float(width) / 2.0 if is_number(width) else None
+    half = float(width) / 2.0 if is_finite_number(width) else None
     new_port = dict(port)
     for axis in ("x", "y"):
         composed = float(port[f"{axis}_um"]) + offset[axis]
