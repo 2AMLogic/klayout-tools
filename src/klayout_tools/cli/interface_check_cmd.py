@@ -29,7 +29,8 @@ EXIT_FAIL = 3
 
 
 def add_matching_arguments(parser: argparse.ArgumentParser) -> None:
-    """Register the pad-matching options (``--tol-um``, ``--pair``).
+    """Register the pad-matching options (``--tol-um``, per-side
+    ``--pins-a`` / ``--pins-b``, ``--pair``).
 
     Lives here, not in ``parser.py``, to keep that file under its size ceiling.
     """
@@ -41,6 +42,24 @@ def add_matching_arguments(parser: argparse.ArgumentParser) -> None:
         help="largest pad-to-pad gap still counted as mated (default 0: overlap/touch)",
     )
     parser.add_argument(
+        "--pins-a",
+        default=None,
+        metavar="REGEX",
+        help=(
+            "narrow A's checked labels: a label is checked only when it fully "
+            "matches --pins AND --pins-a (default: --pins alone)"
+        ),
+    )
+    parser.add_argument(
+        "--pins-b",
+        default=None,
+        metavar="REGEX",
+        help=(
+            "narrow B's checked labels: a label is checked only when it fully "
+            "matches --pins AND --pins-b (default: --pins alone)"
+        ),
+    )
+    parser.add_argument(
         "--pair",
         action="append",
         default=None,
@@ -49,7 +68,8 @@ def add_matching_arguments(parser: argparse.ArgumentParser) -> None:
             "pair complementary names: an A label fully matching A_REGEX mates "
             "with the B label named by the re.Match.expand template, e.g. "
             "'n_out\\[(\\d+)\\]=s_in[\\1]'; repeatable, first match wins; "
-            "both names must match --pins"
+            "both names must match --pins, each within its side's "
+            "--pins-a/--pins-b scope"
         ),
     )
 
@@ -75,6 +95,8 @@ def run(args: argparse.Namespace) -> int:
             top_a=args.top_a,
             top_b=args.top_b,
             pairs=pairs,
+            pins_a=args.pins_a,
+            pins_b=args.pins_b,
         )
     except InterfaceCheckError as exc:
         return emit_error("interface-check", str(exc), args.format)

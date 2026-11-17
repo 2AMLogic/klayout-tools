@@ -287,6 +287,35 @@ the invoking directory or `$HOME` happened to carry a `.spiceinit` of its
 own). ngspice-only: the `xyce` engine has no equivalent init-file lookup, so
 `options.ngspice_init` is accepted but has no effect when `engine: "xyce"`.
 
+The option applies to **deck-list requests** too (see "Pre-composed decks"):
+each unit's own directory gets the same `.spiceinit` before `ngspice -b`
+runs there, on every backend — an off-host job forwards the option in its
+worker request. A unit that itself stages a deck, input, or include named
+`.spiceinit` while the option is set is rejected by name rather than
+silently dropping one side. Note the file ngspice reads from its working
+directory *replaces* `$HOME/.spiceinit` — ngspice does not merge the two —
+so the requested lines must be complete, not mode-only additions to
+whatever the host's own init file sets.
+
+**What was in effect is recorded (issue
+[#5648](https://github.com/2AMLogic/klayout-tools/issues/5648)).** A run-directory
+`.spiceinit` *replaces* `$HOME/.spiceinit` rather than merging with it, and
+klt also writes one on requests that declared nothing whenever it pins the
+thread count (`options.threads_per_worker`, or `local-parallel` with more than
+one worker and unit) — so the same request can read the host's ambient init on
+`--backend local` and ignore it on `--backend local-parallel`. The report's
+`environment.ngspice_init` is `{source, lines, sha256}` (`null` for xyce);
+`source` is `"request"`, `"thread_pin"`, `"home"`, `"none"`, or `"runner"` for
+`remote`/`batch` (resolved by the worker). It reflects what ngspice actually
+reads, never what the request merely declared, and carries no absolute path.
+Two runs whose `sha256` differ read different init files. See
+`docs/json-contract.md`.
+
+Two stderr warnings (stdout JSON unaffected, silent when no
+`$HOME/.spiceinit` exists): the run **inherits** an ambient `$HOME/.spiceinit`
+(declare `options.ngspice_init` to make the request self-contained), or klt's
+own `.spiceinit` **replaced** it rather than merging.
+
 ### Transient noise coverage (ngspice, [#2985](https://github.com/2AMLogic/klayout-tools/issues/2985))
 
 On the **ngspice** engine a transient (`analysis.kind: "tran"`, or a `tran`
@@ -1026,7 +1055,13 @@ shards and merges them exactly as the blocking sharded run does. The request
 must be the one submitted (a `request_sha256` or fingerprint mismatch is
 `error.code: "resume_fingerprint_mismatch"`). `--attach` only re-attaches: a
 shard whose job is gone is reported as lost, other shards are still reported,
-and nothing is resubmitted.
+and nothing is resubmitted. A map written by a `--hosts N` / `remote.hosts: N`
+run attaches the same way ([#5777](https://github.com/2AMLogic/klayout-tools/issues/5777)):
+pass the request (and `--hosts`, if it was given at submit) the shards were
+submitted from; the shard count is read from the map itself, so `--hosts` is not
+compared on attach, while a changed `remote.hosts` in the request file is a
+`request_sha256` mismatch naming `remote`. `--collect-partial` takes such a
+map too.
 
 **Worked example: a 135-unit grid** ([#4878](https://github.com/2AMLogic/klayout-tools/issues/4878)).
 A job is capped by the whole-job ceiling (`max_job_seconds`, default `3600`
@@ -1881,7 +1916,9 @@ which of those changed is not recoverable). A shard lost at the collect stage
 ends its `lost_shard` message with `[remote job <id>: finished|failed|timeout|
 running|unknown]`, the job's `status.json` state at that moment: `finished`
 means re-attaching can collect it, `unknown` means no status was readable.
-`--attach` still takes a single job id; recover a split request with
+A bare `--attach <job_id>` still takes a single job (`hosts = 1`) and is
+refused for `hosts != 1`; re-attach a sharded run (`--hosts N` or a
+`--max-units-per-job` split) with its `batch-shards.json`, or recover it with
 `--resume`.
 
 The dispatch-time fail-fast probe is skipped for `batch` —
@@ -1960,10 +1997,15 @@ runner silently drops them ([#4212](https://github.com/2AMLogic/klayout-tools/is
 | `corners.params` | 0.8.0 |
 | `corners.units` | 0.8.0 |
 | `corners.temperature_param` | 0.8.0 |
+| `corners.options` | 0.8.0 |
 | `options.ngspice_init` | 0.7.0 |
 | `options.ngspice_options` | 0.8.0 |
+| `options.nodeset` | 0.8.0 |
+| `options.initial_conditions` | 0.8.0 |
 | `options.osdi_preload` | 0.7.0 |
 | `options.stage_model_inputs` | 0.7.0 |
+| `analysis_overrides` | 0.9.1 |
+| `analysis.op_check` | 0.9.2 |
 | `analysis_steps[].measurements[]` (noise analysis `.meas` cards) | unreleased |
 | `measurements[].search` | unreleased |
 
@@ -2098,12 +2140,17 @@ release segment:
 | `measurements[].expr` | any `measurements[]` entry has `expr` | `0.7.0` |
 | `corners.process[].sections[]` | a `corners.process[]` bundle has an object-form `sections[]` entry | `0.7.0` |
 | `corners.params` ([#4097](https://github.com/2AMLogic/klayout-tools/issues/4097)) | `corners.params` is present and non-empty; checked before launch against the AMI manifest (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `params_unsupported_worker` check stays) | `0.8.0` (**mandatory**, see below) |
+| `corners.options` ([#3125](https://github.com/2AMLogic/klayout-tools/issues/3125)) | `corners.options` is present and non-empty; checked before launch against the AMI manifest (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `options_unsupported_worker` check stays) | `0.8.0` (**mandatory**, see below) |
+| `options.nodeset` ([#3036](https://github.com/2AMLogic/klayout-tools/issues/3036)) | `options.nodeset` is set and non-empty; checked before launch against the AMI manifest (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `nodeset_unsupported_worker` check stays) | `0.8.0` (**mandatory**, see below) |
+| `options.initial_conditions` ([#3881](https://github.com/2AMLogic/klayout-tools/issues/3881)) | `options.initial_conditions` is set and non-empty; checked before launch against the AMI manifest (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `initial_conditions_unsupported_worker` check stays) | `0.8.0` (**mandatory**, see below) |
+| `analysis_overrides` ([#4970](https://github.com/2AMLogic/klayout-tools/issues/4970)) | `analysis_overrides` is present and non-empty; checked before launch against the AMI manifest (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `analysis_overrides_unsupported_worker` check stays) | `0.9.1` (**mandatory**, see below) |
+| `analysis.op_check` ([#5077](https://github.com/2AMLogic/klayout-tools/issues/5077)) | `analysis.op_check` is declared; checked before launch against the AMI manifest (**mandatory**, see below; refused even under `runner_version_check: warn`; the post-run `op_check_unsupported_worker` check stays) | `0.9.2` (**mandatory**, see below) |
 | `options.ngspice_init` | `options.ngspice_init` is set and non-empty | `0.7.0` |
 | `options.ngspice_options` ([#4212](https://github.com/2AMLogic/klayout-tools/issues/4212)) | `options.ngspice_options` is set and non-empty | `0.8.0` |
 | `options.osdi_preload` | `options.osdi_preload` is set and non-empty | `0.7.0` |
 | `options.stage_model_inputs` | `options.stage_model_inputs` is set | `0.7.0` |
 
-The last six rows are the released entries of
+The rows from `measurements[].expr` down are the released entries of
 `REQUEST_FEATURE_MIN_RUNNER_VERSION` ([#2877](https://github.com/2AMLogic/klayout-tools/issues/2877)),
 the same table the checks below read ([#2901](https://github.com/2AMLogic/klayout-tools/issues/2901)).
 An entry whose minimum is `unreleased` has no detector and never counts as
@@ -2737,6 +2784,7 @@ in the deck path), exactly as corner jobs do.
 | `options.timeout_s` | number | Default per-unit timeout (see `decks[].timeout_s`). |
 | `options.max_workers` | integer | Worker-pool size for `local-parallel`; overridable with `--max-workers`, capped by `$KLT_SIM_MAX_WORKERS`, same as corners. |
 | `options.ngspice_binary` | string | Same resolution rules as corners (issue #2423). Interpreted on the *executing* host. |
+| `options.ngspice_init` | array\<string\> | Same meaning as corners (issue #2520): each string becomes one line of the `.spiceinit` written into every unit's own directory before `ngspice -b` runs there (issue #5738), on every backend. Replaces the executing host's `$HOME/.spiceinit` — lines must be complete. A unit staging its own `.spiceinit` while this is set is rejected by name. |
 | `remote.*` / `batch.*` | object | The same backend blocks corner requests carry; only read for the matching backend. `remote.hosts` sharding is refused for deck requests — one off-host job runs the whole list across its own worker pool. |
 
 A deck-list request must not also declare `netlist`, `corners`, `analysis`,
@@ -3804,7 +3852,12 @@ the `options.resume` fingerprint (changing it invalidates a stored result) and
 is forwarded to `remote`/`batch` workers; omitting it leaves decks, corner IDs
 and fingerprints byte-identical. A worker built before the field would drop it,
 so the client requires `op_check` on every corner that ran and otherwise fails
-with `error.code: "op_check_unsupported_worker"`.
+with `error.code: "op_check_unsupported_worker"`. It is also a **mandatory**
+runner feature (`analysis.op_check`, minimum `0.9.2`), so a submit against an
+AMI manifest whose every image predates it is refused with
+`batch_runner_feature_unsupported` before anything is uploaded or launched --
+and `--dry-run` reports the refusal -- rather than the grid running first and
+the echo check refusing the result afterward.
 
 **Pinning a node (the deterministic workaround).** `op_check` only detects.
 To make the solution deterministic, hold the latch node with an ideal source at
@@ -3951,15 +4004,24 @@ conditions, so a large transient keeps only the signals you named resident
 (and in the rawfile/waveform artifact) without editing the netlist.
 
 klt always adds every `v(x)`/`i(x)` (and derivative forms such as `vdb(x)`,
-`vm(a,b)`) referenced by a declared `measurements[].spice`, `measurements[].expr`
-or `crossings.signal`, so measurements stay correct. A measurement that names
-a vector *bare* (`out` rather than `v(out)`) is not detected — list it in
-`save_vectors` yourself. `save_vectors` and `save_mode: "netlist"` are mutually
-exclusive (an application error: the latter already suppresses the card the
-former rewrites), and `engine: "xyce"` refuses it like `save_mode`. Omitting it
-leaves the deck byte-identical. A changed `save_vectors` invalidates a
-`--resume` checkpoint. It rides the forwarded request document to
-`remote`/`batch` workers, so the worker image must include this implementation.
+`vm(a,b)`) referenced by a declared measurement, so measurements stay
+correct. Covered (issue #5559): the `measurements[].spice` and
+`measurements[].expr` text, `crossings.signal`, `step_resolution.signal`,
+the `settled` clock and `settled.mean.signal`/`settled.peak.signal`,
+`cycle_mean.signal` and `cycle_mean.align`, `energy.voltage` plus the
+implied `i(<energy.source>)`, `stress.a`/`stress.b` (bare node names, saved
+as `v(<node>)`), `snm.x`/`snm.y1`/`snm.y2`, `eye.signal`,
+`transfer.num`/`transfer.den`, and `tian` — its `tv`/`ti` selectors, or
+`v(<series_injection.load_node>)` and `i(<series_injection.source>)` for a
+series injection; the `analysis.passes` decks read the same `save` card. A
+measurement that names a vector *bare* (`out` rather than `v(out)`) is not
+detected — list it in `save_vectors` yourself. `save_vectors` and
+`save_mode: "netlist"` are mutually exclusive (an application error: the
+latter already suppresses the card the former rewrites), and
+`engine: "xyce"` refuses it like `save_mode`. Omitting it leaves the deck
+byte-identical. A changed `save_vectors` invalidates a `--resume`
+checkpoint. It rides the forwarded request document to `remote`/`batch`
+workers, so the worker image must include this implementation.
 
 ### Complex AC vectors: `options.complex_vectors` (issue #3337)
 
@@ -6859,7 +6921,9 @@ a corner grid. A stock ngspice without the module still produces the
     Poly resistors (`sky130_fd_pr__res_*`) are covered too: their subcircuits
     draw per-instance `AGAUSS` terms (`res_match`, `rend`) scaled by
     `MC_MM_SWITCH`, so two identical instances differ under `tt_mm` (measured
-    on the volare sky130A build `c6d73a35…`; note the term is upper-case, so a
+    on the volare sky130A build `c6d73a35…`, re-checked 2026-10-29 on `f6eeac7…`:
+    `res_high_po.model.spice` still carries 3 upper-case `AGAUSS` terms and no
+    lower-case `agauss` (#3420); note the term is upper-case, so a
     case-sensitive `grep agauss` misses it). The corner-level `var_mult` is a
     separate term shared by all instances.
   - **ihp-sg13g2**: Section-based like sky130. `cornerMOSlv.lib` /
@@ -8498,6 +8562,16 @@ preflight warning, attached at report assembly (after the corners finish), so
 it is present even when every corner passed. The entry has `severity: "warning"`,
 `code: "model_bin_range_preflight"`, and `instance`, `model`, `w_um`, `nf`
 fields. It never rejects the run; a `w` given as an expression is skipped.
+
+A `w` literal's unit follows the card it sits on (issue #5802). A literal that
+carries a **unit suffix** (`50u`, `100n`, `128u`) is read as written — an
+absolute SPICE quantity in metres, converted to µm for `w_um` — on every card
+kind. A **bare** literal — no suffix, including plain exponential notation
+(`13`, `150`, `1e-4`) — is read as micrometres on an `X` subckt call, the
+convention PDK device wrappers with micrometre parameters use (sky130: `W=13`
+is 13 µm, and the genuinely oversized `W=150` still warns at `w_um: 150`), and
+as metres on an `M` card (`w=1e-4` is 100 µm), matching SPICE's bare-number
+convention for primitive MOS cards.
 
 When ngspice's log matches this failure, `klt sim` re-scans the corner's own
 netlist for MOS-shaped instances (`M`/`X` cards) and picks out the one with

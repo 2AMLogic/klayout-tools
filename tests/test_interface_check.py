@@ -344,6 +344,9 @@ def test_no_pair_unchanged_and_b_name_equals_name(tmp_path):
     assert report["status"] == "pass"
     assert report["pairs"] == []
     assert all(p["b_name"] == p["name"] for p in report["pins"])
+    assert report["pins_pattern"] == _PINS
+    assert report["pins_pattern_a"] is None
+    assert report["pins_pattern_b"] is None
 
 
 def test_pair_duplicate_names_keep_occurrence(tmp_path):

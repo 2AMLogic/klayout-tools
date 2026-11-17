@@ -10,22 +10,14 @@ simulator; the integration tests run the real `ngspice -b` and skip without it.
 from __future__ import annotations
 
 import json
-import os
-import shutil
 from pathlib import Path
 
 import pytest
 
+from helpers.tool_probes import SKIP_NO_NGSPICE as _SKIP_NO_NGSPICE
 from klayout_tools import sim
 
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
-
-HAVE_NGSPICE = shutil.which("ngspice") is not None and (
-    os.environ.get("KLT_SKIP_NGSPICE_TESTS") != "1"
-)
-_SKIP_NO_NGSPICE = pytest.mark.skipif(
-    not HAVE_NGSPICE, reason="ngspice is not installed on this machine"
-)
 
 #: A source-free RC: the only thing that decides `v(out)` at t=0 is the start
 #: state. (Without `uic` the DC solve would put it at 0 V.)
