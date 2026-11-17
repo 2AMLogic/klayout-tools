@@ -14,6 +14,25 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt drc` no longer files an `ongrid` marker under a clean child cell**
+  (#6447, 2026-11-17): `ongrid` runs on the merged layer, so a top-level shape
+  with an off-grid edge overlapping an on-grid child put a T-vertex on the
+  child's boundary, and bounding-box containment attributed that marker to the
+  child (`source_cell`/`source_path`) -- misfiling a block that drew nothing
+  off-grid, and letting a `--waivers` entry for that child hide it. A native
+  physical-layer `ongrid` marker is now attributed to the one placement whose
+  own source edges supply the offending coordinate(s) at that point (a
+  horizontal edge supplies Y, a vertical edge X, in checked-cell coordinates,
+  placements told apart by transform), and both fields are `null` when that
+  evidence is absent, conflicting (overlapping placements, or X and Y from
+  different placements) or unprovable (a diagonal edge through the point). A
+  child's own corners, and T-vertices its own edge supplies, keep their
+  attribution. Detection is unchanged: the same markers at the same
+  coordinates, and no JSON field or `schema_version` change. Spacing,
+  enclosure and other rule kinds, and derived-layer rules, keep the
+  bounding-box rule. The attribution code moved to
+  `klayout_tools.drc_attribution` (`drc._attribute_to_instance` still resolves).
+
 - **`klt env-provenance lint-envelope --json-stream` lints concatenated JSON
   document streams** (#5887, 2026-11-17): each FILE argument is parsed as a
   single JSON document, so a file holding several whitespace-separated
