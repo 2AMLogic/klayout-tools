@@ -31,6 +31,7 @@ from typing import Any
 
 from . import signoff_attest_item9 as item9
 from ._report_verify import VOLATILE_PROVENANCE_PATHS, build_rerun_result
+from .signoff_attest_shape import shape_mismatch
 
 #: Volatile envelope paths ``--check`` excludes from drift: the producing
 #: build's version strings. A `klt` upgrade that attests byte-identical
@@ -126,7 +127,15 @@ def drift_result(
     """The ``--attest --check`` response: ``fresh`` diffed against the
     committed envelope, with ``skipped_checks`` and ``fresh_status`` beside
     it and every check-scoped ``drift`` entry annotated by
-    :func:`annotate_check_drift`."""
+    :func:`annotate_check_drift`.
+
+    A cross-release ``provenance.input`` key-shape change (0.8.0 ``path``
+    binding vs the 0.9.x ``paths`` set binding, #4764) is additionally named
+    by the additive ``shape_mismatch`` field (:mod:
+    `.signoff_attest_shape`) -- present only when the two envelopes'
+    ``provenance.input`` key sets differ, so a consumer can tell "regenerate
+    the envelope" from content drift. ``status`` and ``drift`` are
+    unchanged: a mismatch is never a false pass."""
     # ``skipped`` marks a local_only check this run did not execute; its
     # (carried-through) outcome is the committed one, so it is reported beside
     # the diff rather than as a difference from the committed envelope.
@@ -143,6 +152,9 @@ def drift_result(
         exclude=VOLATILE_ATTESTATION_PATHS,
         mode="check",
     )
+    mismatch = shape_mismatch(committed, fresh)
+    if mismatch is not None:
+        result["shape_mismatch"] = mismatch
     annotate_check_drift(result["drift"], fresh["attestation"]["checks"])
     fresh_payload = result.pop("fresh")
     result["fresh_status"] = fresh_payload["status"]

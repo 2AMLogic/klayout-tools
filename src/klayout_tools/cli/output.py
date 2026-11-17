@@ -183,11 +183,26 @@ def render_rerun_drift(result: dict) -> None:
     label after the pointer so the drifted file is named without a second
     lookup -- the same "print it only when present" pattern as ``doc_drift``
     above. See :func:`_drift_check_label`.
+
+    It also carries ``shape_mismatch`` (issue #5829): one line when a
+    committed envelope binds ``provenance.input`` with different keys than
+    the fresh one -- a cross-release envelope-shape change, not content
+    drift -- naming both key sets and the regeneration remediation.
     """
     print(f"report: {result['report']}")
     print(f"status: {result['status']}")
     if "doc_drift" in result:
         print(f"doc_drift: {str(result['doc_drift']).lower()}")
+    mismatch = result.get("shape_mismatch")
+    if isinstance(mismatch, dict):
+        committed_keys = ", ".join(mismatch.get("keys_committed") or [])
+        fresh_keys = ", ".join(mismatch.get("keys_fresh") or [])
+        print(
+            f"shape_mismatch: {mismatch.get('field', 'provenance.input')} binds "
+            f"{committed_keys} committed vs {fresh_keys} fresh -- a cross-release "
+            "envelope shape change, not content drift; Regenerate the envelope "
+            "and re-commit it"
+        )
     drift = result["drift"]
     if drift:
         print()

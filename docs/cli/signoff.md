@@ -2400,6 +2400,41 @@ entry that names no single check: a `status` entry, and the single whole-list
 whole-list diff. Matching committed to fresh checks by identity rather than
 position, so that case too became per-check, is not done here.
 
+**A cross-release `provenance.input` shape change is named, not just diffed
+(issue #5829).** Item 1 moved from a single `provenance.input.path` binding
+(0.8.0) to the `paths` input-set binding (0.9.x, #4764) without an envelope
+`schema_version` bump, so `--attest 1 --check` against a committed
+pre-#4764 envelope reports `drifted` with field pointers
+(`provenance.input.path` vs `provenance.input.paths`) that say nothing about
+*why*. When the committed and fresh envelopes bind `provenance.input` with
+**different key sets**, the response carries an additive top-level
+`shape_mismatch` object naming both and stating the remediation:
+
+```json
+{
+  "shape_mismatch": {
+    "field": "provenance.input",
+    "keys_committed": ["content_hash", "path"],
+    "keys_fresh": ["content_hash", "paths"],
+    "note": "the committed and freshly re-attested envelopes bind provenance.input with different key shapes — a cross-release envelope-shape change (item 1 moved from the single 'path' binding to the 'paths' input-set binding in 0.9.0, #4764), not evidence content drift. Regenerate the envelope: re-run 'klt signoff --attest ITEM --inventory INVENTORY -o PATH' under the current klt and re-commit it."
+  }
+}
+```
+
+The field is **additive and situational**: it is absent whenever both sides
+bind the same keys, so a content-only drift (same shape, a moved
+`content_hash` or check outcome) reports no field, and items whose binding
+never changed (9, 10) never produce one. It changes nothing about the
+verdict — `status` stays `"drifted"`, exit stays `3`, and the `drift[]`
+list is exactly what the shapes alone would produce: a mismatch is still
+drift (the committed envelope does not reproduce), it is just no longer
+indistinguishable from evidence that actually moved. There is no converter
+by design: recomputing the combined `paths` set digest requires the input
+files, so **regenerating the envelope** (re-run `--attest` with `-o` under
+the current `klt`, re-commit, re-pin the manifest `content_hash`) is the
+migration. `--format text` prints one `shape_mismatch:` line when the field
+is present.
+
 **Toolchain-free runners: `local_only` commands (issue #3743).** A command
 declared `"local_only": true` (an item-1 `derived[].check`, an item-9
 `cold_start`, or an item-10 `checks[]` entry) runs under `--attest` as usual,
