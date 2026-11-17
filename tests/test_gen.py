@@ -3122,6 +3122,7 @@ def test_res_array_series_fold_lvs_matches_one_device_reference(tmp_path, pdk_ro
         rows=2,
         dummy=0,
         series=True,
+        length_um=length_um,
         width_um=width_um,
     )
     reference = tmp_path / "ref.spice"
@@ -4060,118 +4061,65 @@ def test_res_array_sky130_draws_poly_res_marker(tmp_path, pdk_root):
     assert _SKY130_RES_MARK_LAYER in present
 
 
-def test_res_array_sky130_draws_dummy_marker_over_dummy_cells_only(tmp_path, pdk_root):
-    """Issue #491: on sky130, `res_array` draws the deck's curated `dummy`
-    marker layer over each dummy unit resistor's recognised body segment --
-    the same footprint the `poly.res` marker covers -- and only over the
-    dummy units, never a real cell, so `klt extract`'s existing
-    dummy-suppression guard (#295/#462) actually fires on sky130."""
-    import klayout.db as kdb
-
-    output = tmp_path / "res_array_dummy_marker.gds"
-    num, dummy = 3, 2
-    generate(
-        {
-            "generator": "res_array",
-            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
-            "params": {"num": num, "dummy": dummy},
-            "options": {"output": str(output)},
-        }
-    )
-    layout = kdb.Layout()
-    layout.read(str(output))
-    present = {
-        (layout.get_info(i).layer, layout.get_info(i).datatype)
-        for i in layout.layer_indexes()
-    }
-    assert _SKY130_DUMMY_LAYER in present
-
-    dummy_index = layout.layer(*_SKY130_DUMMY_LAYER)
-    dummy_region = kdb.Region(layout.top_cell().begin_shapes_rec(dummy_index))
-    mark_index = layout.layer(*_SKY130_RES_MARK_LAYER)
-    mark_region = kdb.Region(layout.top_cell().begin_shapes_rec(mark_index))
-    # One dummy-marker shape per dummy unit (2 dummies per end, single row).
-    assert dummy_region.count() == 2 * dummy
-    # It is a strict subset of the res-mark marker's own footprint -- never
-    # bleeding onto a real unit's body segment.
-    assert (dummy_region - mark_region).is_empty()
-    assert dummy_region.area() < mark_region.area()
-
-    output_no_dummy = tmp_path / "res_array_no_dummy_marker.gds"
-    generate(
-        {
-            "generator": "res_array",
-            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
-            "params": {"num": num, "dummy": 0},
-            "options": {"output": str(output_no_dummy)},
-        }
-    )
-    layout_no_dummy = kdb.Layout()
-    layout_no_dummy.read(str(output_no_dummy))
-    present_no_dummy = {
-        (layout_no_dummy.get_info(i).layer, layout_no_dummy.get_info(i).datatype)
-        for i in layout_no_dummy.layer_indexes()
-    }
-    assert _SKY130_DUMMY_LAYER not in present_no_dummy
-
-
-def test_res_array_gf180mcu_draws_dummy_marker_over_dummy_cells_only(
-    tmp_path, both_pdk_root
+@pytest.mark.parametrize(
+    ("variant", "dummy_layer", "marker_layer"),
+    [
+        # sky130: the deck's curated `dummy` marker vs its `poly.res` marker
+        # (issue #491).
+        ("sky130A", _SKY130_DUMMY_LAYER, _SKY130_RES_MARK_LAYER),
+        # gf180mcuD: the same discipline against `RES_MK` (issue #2599, the
+        # gf180mcu counterpart of sky130's #491).
+        ("gf180mcuD", _GF180_DUMMY_LAYER, _GF180_RES_MARK_LAYER),
+    ],
+)
+def test_res_array_draws_dummy_marker_over_dummy_cells_only(
+    tmp_path, both_pdk_root, variant, dummy_layer, marker_layer
 ):
-    """Issue #2599 (the gf180mcu counterpart of sky130's own #491): on
-    gf180mcu, `res_array` draws the deck's curated `dummy` marker layer over
-    each dummy unit resistor's recognised body segment -- the same footprint
-    the `RES_MK` marker covers -- and only over the dummy units, never a real
-    cell, so `klt extract`'s existing dummy-suppression guard (#295/#462)
-    actually fires on this family too."""
+    """Issues #491/#2599: on each family, `res_array` draws the deck's curated
+    `dummy` marker layer over each dummy unit resistor's recognised body
+    segment -- the same footprint the marker layer (`poly.res`/`RES_MK`)
+    covers -- and only over the dummy units, never a real cell, so `klt
+    extract`'s existing dummy-suppression guard (#295/#462) actually fires on
+    this family."""
     import klayout.db as kdb
 
-    output = tmp_path / "res_array_gf180_dummy_marker.gds"
+    output = tmp_path / f"res_array_{variant}_dummy_marker.gds"
     num, dummy = 3, 2
     generate(
         {
             "generator": "res_array",
-            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "pdk": {"variant": variant, "root": str(both_pdk_root)},
             "params": {"num": num, "dummy": dummy},
             "options": {"output": str(output)},
         }
     )
     layout = kdb.Layout()
     layout.read(str(output))
-    present = {
-        (layout.get_info(i).layer, layout.get_info(i).datatype)
-        for i in layout.layer_indexes()
-    }
-    assert _GF180_DUMMY_LAYER in present
+    assert dummy_layer in _layers_present(output)
 
     dummy_region = kdb.Region(
-        layout.top_cell().begin_shapes_rec(layout.layer(*_GF180_DUMMY_LAYER))
+        layout.top_cell().begin_shapes_rec(layout.layer(*dummy_layer))
     )
     mark_region = kdb.Region(
-        layout.top_cell().begin_shapes_rec(layout.layer(*_GF180_RES_MARK_LAYER))
+        layout.top_cell().begin_shapes_rec(layout.layer(*marker_layer))
     )
     # One dummy-marker shape per dummy unit (2 dummies per end, single row).
     assert dummy_region.count() == 2 * dummy
-    # It is a strict subset of the RES_MK marker's own footprint -- never
-    # bleeding onto a real unit's body segment.
+    # It is a strict subset of the marker's own footprint -- never bleeding
+    # onto a real unit's body segment.
     assert (dummy_region - mark_region).is_empty()
     assert dummy_region.area() < mark_region.area()
 
-    output_no_dummy = tmp_path / "res_array_gf180_no_dummy_marker.gds"
+    output_no_dummy = tmp_path / f"res_array_{variant}_no_dummy_marker.gds"
     generate(
         {
             "generator": "res_array",
-            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "pdk": {"variant": variant, "root": str(both_pdk_root)},
             "params": {"num": num, "dummy": 0},
             "options": {"output": str(output_no_dummy)},
         }
     )
-    layout_no_dummy = kdb.Layout()
-    layout_no_dummy.read(str(output_no_dummy))
-    assert _GF180_DUMMY_LAYER not in {
-        (layout_no_dummy.get_info(i).layer, layout_no_dummy.get_info(i).datatype)
-        for i in layout_no_dummy.layer_indexes()
-    }
+    assert dummy_layer not in _layers_present(output_no_dummy)
 
 
 def test_res_array_gf180_draws_res_mk_marker_and_requires_layers(
@@ -4294,24 +4242,35 @@ def test_res_array_sky130_default_matches_explicit_generic(tmp_path, pdk_root):
     _assert_gds_geometry_equal(output_default, output_explicit)
 
 
-def test_res_array_sky130_flavor_high_draws_psdm_and_rpm(tmp_path, pdk_root):
-    """`flavor='high'` (`res_high_po`) draws the psdm P+ implant and the rpm
-    precision-resistor mask over each unit body -- and *not* urpm, which is
-    mutually exclusive with rpm."""
-    output = tmp_path / "res_array_high.gds"
+@pytest.mark.parametrize(
+    ("flavor", "marker_layer", "mutually_exclusive_layer"),
+    [
+        # `flavor='high'` (`res_high_po`): rpm marker, never urpm.
+        ("high", _SKY130_RPM_LAYER, _SKY130_URPM_LAYER),
+        # `flavor='xhigh'` (`res_xhigh_po`): urpm marker, never rpm.
+        ("xhigh", _SKY130_URPM_LAYER, _SKY130_RPM_LAYER),
+    ],
+)
+def test_res_array_sky130_flavor_draws_psdm_and_marker(
+    tmp_path, pdk_root, flavor, marker_layer, mutually_exclusive_layer
+):
+    """`flavor='high'`/`'xhigh'` draws the psdm P+ implant and its family's
+    precision-resistor marker over each unit body -- and *not* the mutually
+    exclusive other marker."""
+    output = tmp_path / f"res_array_{flavor}.gds"
     generate(
         {
             "generator": "res_array",
             "pdk": {"variant": "sky130A", "root": str(pdk_root)},
-            "params": {"flavor": "high"},
+            "params": {"flavor": flavor},
             "options": {"output": str(output)},
         }
     )
     present = _layers_present(output)
     assert _SKY130_RES_MARK_LAYER in present
     assert _SKY130_PSDM_LAYER in present
-    assert _SKY130_RPM_LAYER in present
-    assert _SKY130_URPM_LAYER not in present
+    assert marker_layer in present
+    assert mutually_exclusive_layer not in present
     assert _SKY130_NPC_LAYER in present  # issue #3077
 
 
@@ -4352,26 +4311,6 @@ def test_res_array_sky130_min_width_marker_meets_pdk_minimum(
 
     drc_report = run_drc(str(output), "sky130")
     assert rule_id not in drc_report["rule_counts"]
-
-
-def test_res_array_sky130_flavor_xhigh_draws_psdm_and_urpm(tmp_path, pdk_root):
-    """`flavor='xhigh'` (`res_xhigh_po`) draws the psdm P+ implant and the urpm
-    precision-resistor mask over each unit body -- and *not* rpm."""
-    output = tmp_path / "res_array_xhigh.gds"
-    generate(
-        {
-            "generator": "res_array",
-            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
-            "params": {"flavor": "xhigh"},
-            "options": {"output": str(output)},
-        }
-    )
-    present = _layers_present(output)
-    assert _SKY130_RES_MARK_LAYER in present
-    assert _SKY130_PSDM_LAYER in present
-    assert _SKY130_URPM_LAYER in present
-    assert _SKY130_RPM_LAYER not in present
-    assert _SKY130_NPC_LAYER in present  # issue #3077
 
 
 def test_res_array_invalid_flavor_rejected(tmp_path, pdk_root):
@@ -4637,35 +4576,29 @@ def test_res_array_sky130_flavor_still_rejects_narrower_than_0p35(
         )
 
 
-def test_res_array_sky130_generic_flavor_floor_unchanged_at_0p42(tmp_path, pdk_root):
-    """The `"high"`/`"xhigh"` per-flavour floor (issue #2407) does not widen
-    to sky130's `"generic"` flavour (`res_generic_po`), which has no such
-    fixed-width PDK primitive on record -- a request between the new 0.35um
-    floor and the generic 0.42um structural floor still fails, with the
-    original 0.42um message."""
-    with pytest.raises(GenError, match=r"width_um must be >= 0\.42"):
-        generate(
-            {
-                "generator": "res_array",
-                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
-                "params": {"length_um": 22, "width_um": 0.35, "num": 1},
-                "options": {"output": str(tmp_path / "out.gds")},
-            }
-        )
-
-
-def test_res_array_gf180_generic_flavor_floor_unchanged_at_0p42(
-    tmp_path, both_pdk_root
+@pytest.mark.parametrize(
+    "variant",
+    [
+        # sky130's `"generic"` flavour (`res_generic_po`) has no fixed-width
+        # PDK primitive on record, so the per-flavour floor table (issue
+        # #2407) does not widen to it.
+        "sky130A",
+        # gf180mcu has no `_PDK_RES_FLAVOR_MIN_W_UM` entry: its own flavours
+        # keep the original, unconditional floor byte-for-byte.
+        "gf180mcuD",
+    ],
+)
+def test_res_array_generic_flavor_floor_unchanged_at_0p42(
+    tmp_path, both_pdk_root, variant
 ):
-    """The new sky130-only per-flavour floor table (issue #2407) leaves
-    gf180mcu's own flavours at the original, unconditional `UNIT_MIN_W_UM`
-    floor -- `_PDK_RES_FLAVOR_MIN_W_UM` has no gf180mcu entry, so this must
-    fall back byte-for-byte to the pre-#2407 behaviour."""
+    """Issue #2407's per-flavour floor is sky130-only: a request between the
+    new 0.35um floor and the generic 0.42um structural floor still fails,
+    with the original 0.42um message."""
     with pytest.raises(GenError, match=r"width_um must be >= 0\.42"):
         generate(
             {
                 "generator": "res_array",
-                "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+                "pdk": {"variant": variant, "root": str(both_pdk_root)},
                 "params": {"length_um": 22, "width_um": 0.35, "num": 1},
                 "options": {"output": str(tmp_path / "out.gds")},
             }

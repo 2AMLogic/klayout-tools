@@ -1052,10 +1052,10 @@ unit's *length* — a single body that is too long is folded by `series: true`
 instead (see "Series strings" above). Without it, a resistor string with a
 realistic unit-segment count (dummies and trim taps included) produces a
 bounding box dominated by one axis, which can blow a floorplan's area budget
-even though
-the drawn area itself is small (issue #415). Row-to-row pitch is fixed (unit
-height plus the same `MIN_SAME_LAYER_SPACING_UM` margin `mos_array` uses for
-its own row pitch), independent of `spacing_um`, which stays scoped to
+even though the drawn area itself is small (issue #415). Row-to-row pitch is
+fixed (unit height plus the same `MIN_SAME_LAYER_SPACING_UM` margin
+`mos_array` uses for its own row pitch), independent of `spacing_um`, which
+stays scoped to
 within-row unit spacing. Port naming keeps the physically-adjacent pad pair
 short across every row transition: on a right-to-left (odd) row, `R<i>_A`
 and `R<i>_B` report the *opposite* physical pad from an even row (the unit's

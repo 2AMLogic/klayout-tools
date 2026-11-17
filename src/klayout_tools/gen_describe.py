@@ -1019,9 +1019,8 @@ def _res_array_series_note(joints: list[dict[str, Any]], num: int) -> str:
         f"units end to end; only R0_A and R{num - 1}_B are reported as ports. "
         "Per-joint overhead (jumper length): "
         + (", ".join(overhead) if overhead else "none (num is 1)")
-        + ". Compare the chain against the schematic's single resistor with "
-        "`klt lvs` options.combine_devices: true (default false reports each "
-        "unit as its own device)"
+        + ". Compare against the schematic's single resistor with `klt lvs` "
+        "options.combine_devices: true (default false: one device per unit)"
     )
 
 
@@ -2268,8 +2267,7 @@ def _well_island_validate(params: dict[str, Any]) -> None:
     )
 
     # The ring geometry is `guard_ring`'s, so its bounds are too -- reuse the
-    # shared validator rather than restating (and risking drift from) the
-    # same checks.
+    # shared validator rather than restating (and risking drift from) the same checks.
     _ring_params_validate("well_island", params)
 
     net = params["net"]
@@ -2371,8 +2369,7 @@ def _well_island_describe(
             # Issue #1421's own reporting contract: the caller (or
             # `klt gen-compose`, or their own placer) gets the island's
             # resulting well rectangle and the region no *other* well may
-            # enter, so a composition never has to re-derive either from raw
-            # geometry.
+            # enter, so a composition never has to re-derive either from raw geometry.
             "well_net": net,
             "well_box_um": _box_um_field(isolation["well_box_um"]),
             "well_separation_um": isolation["separation_um"],

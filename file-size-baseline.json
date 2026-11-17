@@ -865,7 +865,7 @@
     },
     {
       "path": "tests/test_gen.py",
-      "lines": 12392
+      "lines": 12374
     },
     {
       "path": "tests/test_gen_compose.py",
