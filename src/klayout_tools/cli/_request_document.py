@@ -191,7 +191,12 @@ def get_number(
         return None
     if not is_number(value):
         raise _type_error(verb, key, "a number", value, error_cls)
-    return float(value)
+    try:
+        return float(value)
+    except OverflowError:
+        # An int too large for a float (issue #6114): refuse it with the
+        # verb's documented field error rather than an uncaught traceback.
+        raise _type_error(verb, key, "a number", value, error_cls) from None
 
 
 def get_int(
