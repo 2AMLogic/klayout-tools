@@ -169,6 +169,15 @@
         "klayout_tools.economy_whatif"
       ]
     },
+    "em": {
+      "kind": "verb",
+      "description": "`klt em` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.em_cmd",
+        "klayout_tools._geode",
+        "klayout_tools.em"
+      ]
+    },
     "env_provenance": {
       "kind": "verb",
       "description": "`klt env_provenance` implementation: core modules plus CLI adapter.",
@@ -1756,6 +1765,16 @@
       "consumer": "route",
       "exporter": "gen_compose",
       "reason": "`klt route` deliberately reuses gen_compose's router, landing-pad sizing and label-port derivation so labelled-pin routing in a placed layout matches klt gen-compose output (issue #5205); promote the private helpers to a shared module when either is next reworked."
+    },
+    {
+      "consumer": "em",
+      "exporter": "cli-infra",
+      "reason": "`klt em` adapter uses the shared CLI output envelope helpers (emit_success/emit_error), like every verb adapter."
+    },
+    {
+      "consumer": "em",
+      "exporter": "functional_verification",
+      "reason": "`klt em` emits mesh/spec/report/log artifact envelopes through the shared _artifact_envelope helper."
     }
   ],
   "shared_private_permissions": [
@@ -2322,6 +2341,12 @@
       "exporter": "klayout_tools._paths",
       "symbol": "_resolve_relative",
       "reason": "Issue #5464: `klt pex --dry-run` resolves a testbench's `netlist` field against its request directory with the same helper `pex.py`'s own first pass uses, so the dry run cannot resolve it differently; promote to public with the other _paths importers."
+    },
+    {
+      "consumer": "klayout_tools.em",
+      "exporter": "klayout_tools._paths",
+      "symbol": "_load_request_json",
+      "reason": "Issue #5616: loads the em request with the same error handling as sim/corner_matrix; promote to a public name when _paths is next reworked."
     }
   ],
   "legacy_exceptions": {
