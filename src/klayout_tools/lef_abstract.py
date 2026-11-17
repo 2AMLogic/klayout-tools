@@ -85,14 +85,11 @@ from typing import Any
 
 from . import env_provenance
 from ._layout import load_layout, resolve_top_cell
-from ._provenance import INPUT_ROLE_SOURCE, build_provenance
-from .lef_header import read_lef_header
-from .pdk import (
-    PdkNotFoundError,
-    find_pdk,
-    lef_files,
-    load_gds_to_lef_layer_map,
-    resolve_klayout_layer_map,
+from ._provenance import INPUT_ROLE_LAYOUT, INPUT_ROLE_SOURCE, build_provenance
+from .lef_abstract_no_layout import (
+    resolve_dbu_um,
+    resolve_tech_context,
+    seed_outline_obs,
 )
 from .socket_check import (
     GROUND_NAME_TOKENS,
@@ -262,46 +259,10 @@ def run_lef_abstract(
     if symmetry is not None and not all(isinstance(s, str) and s for s in symmetry):
         raise LefAbstractError("symmetry must be a list of non-empty strings")
 
-    try:
-        pdk_info = find_pdk(variant=pdk_variant, root=pdk_root)
-    except PdkNotFoundError as exc:
-        raise LefAbstractError(str(exc)) from exc
-
-    lefs = lef_files(cell_library, variant=pdk_info["variant"], root=pdk_info["root"])
-    tech_lef = lefs["tech_lef"]
-    if tech_lef is None:
-        raise LefAbstractError(
-            f"tech LEF not found for standard-cell library '{cell_library}' "
-            f"under resolved PDK install '{pdk_info['variant']}' at "
-            f"'{pdk_info['root']}'"
-        )
-    tech_header = read_lef_header(tech_lef)
-    routing_layers = {
-        layer["name"]: layer
-        for layer in tech_header["layers"]
-        if layer["type"] == "ROUTING"
-    }
-
-    layer_map_path, _layer_map_resolution = resolve_klayout_layer_map(pdk_info)
-    if layer_map_path is None:
-        raise LefAbstractError(
-            f"no KLayout GDS<->LEF layer map found for resolved PDK install "
-            f"'{pdk_info['variant']}' -- cannot translate socket descriptor "
-            "layers into LEF layer names"
-        )
-    gds_to_lef = load_gds_to_lef_layer_map(layer_map_path)
-
-    if layout is not None:
-        dbu_um = layout.dbu
-    else:
-        # No layout to supply a database unit: take the tech LEF's.
-        database_microns = tech_header.get("database_microns")
-        if not database_microns:
-            raise LefAbstractError(
-                f"tech LEF '{tech_lef}' declares no DATABASE MICRONS -- cannot "
-                "determine a database unit without a layout"
-            )
-        dbu_um = 1.0 / database_microns
+    pdk_info, tech_lef, tech_header, routing_layers, gds_to_lef = resolve_tech_context(
+        cell_library, pdk_variant, pdk_root, LefAbstractError
+    )
+    dbu_um = resolve_dbu_um(layout, tech_header, tech_lef, LefAbstractError)
     outline = descriptor["outline"]
     origin_x_dbu = round(outline["x0"] / dbu_um)
     origin_y_dbu = round(outline["y0"] / dbu_um)
@@ -361,9 +322,9 @@ def run_lef_abstract(
         deck_name=cell_library,
         deck_path=tech_lef,
         pdk=pdk_info,
-        # Layout-free mode pins the descriptor (role "source") instead.
         input_path=layout_path if layout_path is not None else socket_path,
-        **({"input_role": INPUT_ROLE_SOURCE} if layout_path is None else {}),
+        # Layout-free mode pins the descriptor (role "source") instead.
+        input_role=INPUT_ROLE_SOURCE if layout_path is None else INPUT_ROLE_LAYOUT,
     )
 
     return {
@@ -756,15 +717,9 @@ def _resolve_obs(
     if layout is None:
         # Issue #5714: black-box semantics -- the whole outline blocks every
         # routing layer; declared pin ports are subtracted below.
-        for lef_layer in routing_layers:
-            regions_by_layer[lef_layer] = kdb.Region(
-                kdb.Box(
-                    origin_x_dbu,
-                    origin_y_dbu,
-                    origin_x_dbu + width_dbu,
-                    origin_y_dbu + height_dbu,
-                )
-            )
+        regions_by_layer = seed_outline_obs(
+            routing_layers, origin_x_dbu, origin_y_dbu, width_dbu, height_dbu
+        )
     for layer_index in layout.layer_indexes() if layout is not None else ():
         info = layout.get_info(layer_index)
         lef_layer = gds_to_lef.get((info.layer, info.datatype))

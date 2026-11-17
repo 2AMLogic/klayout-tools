@@ -359,6 +359,9 @@ descriptor alone is a sufficient declaration — no second schema:
 - **Database unit** — taken from the tech LEF's `DATABASE MICRONS`.
 - **Report** — `file` is `{"path": null, "scope": "absent"}`;
   `provenance.input` pins the socket descriptor with role `source`.
+  `obs_mode` echoes the resolved default `"detailed"` (the flag itself is a
+  usage error here; the field is a fixed echo in this mode, not a mode
+  selection).
   `schema_version` is unchanged.
 - **`power_pins`** is still reported but can only fail (`port_not_drawn`
   for every supply pin), so `--require-power-pins` is rejected as a usage
