@@ -230,12 +230,14 @@ from .functional_verification_initial_state import (
 from .functional_verification_sdf import (
     _check_sdf_engine_capability,
     _collect_sdf_alias_port_bits,
+    _collect_sdf_internal_bus_net_pins,
     _collect_sdf_physical_only_instances,
     _drop_sdf_bit_selected_bus_iopaths,
     _drop_sdf_non_interconnect_entries,
     _drop_sdf_unsupported_edge_modpath_iopaths,
     _drop_sdf_zero_delay_alias_port_interconnects,
     _drop_sdf_zero_delay_bus_port_source_interconnects,
+    _drop_sdf_zero_delay_internal_bus_net_interconnects,
     _drop_sdf_zero_delay_physical_only_interconnects,
     _normalize_sdf_header_triples,  # noqa: F401 -- tests reach it as fv._normalize_sdf_header_triples
     _parse_toplevel_parameters,
@@ -424,6 +426,22 @@ SDF_PHYSICAL_ONLY_DROPPED_CLASS = "zero_delay_physical_only_interconnect"
 #: diagnostic substring.
 SDF_BUS_PORT_SOURCE_DROPPED_CLASS = "zero_delay_bus_port_source_interconnect"
 
+#: ``INTERCONNECT`` entries removed before annotation because both of their
+#: endpoints are instance pins whose parsed netlist connections resolve to
+#: the same bit-select of an *internal* wire (a wire that is not a
+#: top-level port) and carry zero delay at every corner. Measured live on
+#: Icarus 13.0 (issue #6075; spike §3.7's dated addendum): Icarus fails to
+#: insert an intermodpath for *every* entry on such a net -- 0-of-N at any
+#: fanout and any delay population, unlike a top-level port bit's
+#: last-declared-survivor rule (#5705) -- and the SDF text cannot tell the
+#: failing entries from clean ones (``inst.pin`` endpoints are identical),
+#: so the decision is made from the same gate-level parse the run already
+#: compiles. An all-zero entry models no delay, so dropping it cannot
+#: change simulated timing; a non-zero entry on the identical net is left
+#: in place and still fails loudly (the #5769 boundary). Pre-dropped from
+#: the SDF text, not derived from a diagnostic substring.
+SDF_INTERNAL_BUS_NET_DROPPED_CLASS = "zero_delay_internal_bus_net_interconnect"
+
 #: The ``environment.sdf.dropped`` class counting the non-``INTERCONNECT``
 #: delay entries -- on a real ``write_sdf`` output, the ``IOPATH`` population
 #: -- removed before annotation because the request selected
@@ -512,6 +530,20 @@ SDF_BENIGN_DIAGNOSTIC_REASONS: dict[str, str] = {
         "at any corner, so they are removed before annotation and counted "
         "here instead of failing the run -- a non-zero-delay entry on the "
         "same source is left in place and still fails loudly"
+    ),
+    SDF_INTERNAL_BUS_NET_DROPPED_CLASS: (
+        "Icarus Verilog fails to insert an intermodpath for EVERY "
+        "INTERCONNECT entry that runs across a bit-select of an internal "
+        "wire -- both endpoints are ordinary instance pins, and the entry's "
+        "text is byte-identical to an entry on a scalar net that annotates "
+        "cleanly, so the decision is made from the netlist the run already "
+        "compiles (measured live on Icarus 13.0, issue #6075: 0-of-N "
+        "entries applied at any fanout, unlike a top-level port bit's "
+        "last-declared-survivor rule). Entries whose every min:typ:max "
+        "delay value is zero model no delay at any corner, so they are "
+        "removed before annotation and counted here instead of failing the "
+        "run -- a non-zero-delay entry on the same net is left in place and "
+        "still fails loudly"
     ),
     SDF_IOPATH_DROPPED_CLASS: (
         "The request selected options.sdf.entries: 'interconnect' "
@@ -2518,6 +2550,46 @@ def _apply_sdf_bus_port_source_drop(
     return new_path
 
 
+def _apply_sdf_internal_bus_net_drop(
+    annotate_source_path: str,
+    output_dir: str,
+    sources: list[str],
+    hdl_toplevel: str,
+    sdf_pre_dropped_counts: dict[str, int],
+) -> str:
+    """Issue #6075's zero-delay internal-bit-select-net SDF-text drop, the
+    sibling of :func:`_apply_sdf_bus_port_source_drop` and kept as its own
+    function for the same reason (no new branch in
+    :func:`run_functional_verification`). Runs after the physical-only and
+    bus-port-source passes -- neither of whose predicates can ever claim an
+    entry between two instance pins -- so every entry is counted under
+    exactly one class. Counts under
+    :data:`SDF_INTERNAL_BUS_NET_DROPPED_CLASS`.
+
+    The decision is structural (:func:`_collect_sdf_internal_bus_net_pins`,
+    over the same ``sources``/``hdl_toplevel`` parse the physical-only pass
+    already reads): Icarus fails to insert an intermodpath for *every*
+    ``INTERCONNECT`` entry crossing a bit-select of an internal wire --
+    measured 0-of-N at any fanout and any delay population -- and the SDF
+    text alone cannot tell those entries from clean ones.
+
+    Returns ``annotate_source_path`` unchanged when nothing was dropped, or
+    a new normalized-copy path otherwise.
+    """
+    drop = _drop_sdf_zero_delay_internal_bus_net_interconnects(
+        annotate_source_path,
+        _collect_sdf_internal_bus_net_pins(sources, hdl_toplevel),
+    )
+    if drop is None:
+        return annotate_source_path
+    text, count = drop
+    new_path = os.path.join(output_dir, "klt_sdf_internal_bus_net_dropped.sdf")
+    with open(new_path, "w", encoding="utf-8") as handle:
+        handle.write(text)
+    sdf_pre_dropped_counts[SDF_INTERNAL_BUS_NET_DROPPED_CLASS] = count
+    return new_path
+
+
 # ---------------------------------------------------------------------------
 # entry point
 # ---------------------------------------------------------------------------
@@ -2851,6 +2923,19 @@ def run_functional_verification(
         # dropping them is timing-neutral; non-zero ones stay and still fail.
         annotate_source_path = _apply_sdf_bus_port_source_drop(
             annotate_source_path, output_dir, ports, sdf_pre_dropped_counts
+        )
+
+        # Issue #6075: the same cap also bites bit-selected INTERNAL nets,
+        # where Icarus inserts no survivor at all (0-of-N at any fanout).
+        # Both endpoints are instance pins here, so neither sibling pass
+        # above can have claimed these entries; the decision reads the same
+        # gate-level parse, and the zero-delay bound is the same.
+        annotate_source_path = _apply_sdf_internal_bus_net_drop(
+            annotate_source_path,
+            output_dir,
+            sources,
+            hdl_toplevel,
+            sdf_pre_dropped_counts,
         )
 
         split = _split_sdf_bus_port_interconnects(annotate_source_path, vector_ports)

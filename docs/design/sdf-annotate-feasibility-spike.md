@@ -465,6 +465,59 @@ one. Filed as its own follow-up rather than guessed at here — issue #1854.
 **Answered in §3.8 below** (2026-09-15): reproduced at sky130 scale, and it
 is *not* the same mechanism — not an annotation failure at all.
 
+**§3.7.1 The cap is not confined to top-level port nets — internal
+bit-select nets keep no survivor at all** (2026-11-17, issue #6075). The
+field report on #5705 (one ASAP7/Yosys + OpenROAD run, Icarus 13.0) recorded
+a bit-selected **internal** net — escaped identifier `\<bus> [3]`, physical
+fanout 4 — where all four `INTERCONNECT` entries failed (`VPI error: Could
+not insert intermodpath!` ×4, `SDF ERROR: … Could not find intermodpath!`
+×4: 0-of-4 applied). Reproduced here with the section's own fixture
+methodology (raw `iverilog`/`vvp`, `module dut(in, out1…)` +
+`assign`-only cells with `(0.0, 0.0)` specify paths, `-g2012 -gspecify
+-ginterconnect`, Icarus 13.0 stable) — identical diagnostic signature — and
+extended into a fixture matrix:
+
+| # | connecting net | fanout | delay population | verdict |
+|---|---|---|---|---|
+| A | internal bit-select (`wire [3:0] \soc_bus ;`, `.Y(\soc_bus [3])`) | 4 | all zero | **0-of-4**, field report's exact signature |
+| B | same | 1 | all zero | **0-of-1** — fanout 1 fails too |
+| F | same | 2 | all zero | **0-of-2** |
+| E | internal bit-select, **plain** name (`wire [3:0] soc_bus;`, `.Y(soc_bus[3])`) | 4 | all zero | **0-of-4** — the escape is irrelevant |
+| D | escaped internal bit-select | 4 | all **non-zero** | **0-of-4** |
+| M | escaped internal bit-select | 2 | **mixed** (one zero, one non-zero) | **0-of-2** — both fail |
+| C | internal **scalar** wire (`.Y(w)`), otherwise identical fixture | 4 | all zero | **4-of-4**, clean |
+| P | top-level **port** bit (`input [3:0] in`, `INTERCONNECT in[3] …`) | 2 | all zero | **1-of-2** — #5705's last-declared survivor, harness validation |
+| Q | top-level port bit | 1 | all zero | **1-of-1**, clean — the field report's "bit-select at fanout 1 annotates cleanly" control was this shape, not an internal net |
+
+Three consequences, all load-bearing for the fix that shipped:
+
+1. **The survivor rule differs by net kind, and internal nets are the
+   worse case**: a port-bit net keeps a last-declared survivor (N-1-of-N,
+   rows P/Q), an internal bit-select net keeps **none** (0-of-N at any
+   fanout, any delay population). The fanout precondition the field report
+   suspected is refuted by row B.
+2. **The SDF text carries no trace of the failing shape**: rows A and C's
+   entries are byte-identical (`INTERCONNECT u_src.Y u_l*.A`) — the net
+   name never appears — so a text-only predicate cannot tell them apart.
+   The decision has to be structural, from the gate-level parse the run
+   already compiles: both endpoints are `<instance>.<pin>` pairs whose
+   parsed connections resolve to the same bit-select of a wire that is not
+   a top-level port.
+3. **The zero-delay bound is what keeps the fix timing-neutral**: rows
+   D/M show non-zero entries fail identically, so dropping only the
+   all-zero members cannot change simulated timing at any corner, while
+   the non-zero ones stay in place and keep failing loudly (the #5769
+   boundary, untouched).
+
+Shipped as `environment.sdf.dropped`'s
+`zero_delay_internal_bus_net_interconnect` class
+(`_collect_sdf_internal_bus_net_pins` /
+`_drop_sdf_zero_delay_internal_bus_net_interconnects`), pinned by
+`tests/test_functional_verification_sdf_internal_bit_select.py` — including
+the raw-simulator verdict rows above and the end-to-end run that the same
+fixture used to refuse ("did not fully apply", 4 diagnostics) and now
+completes with the class counted.
+
 ### 3.8 The "constant-zero on every test case" shape is a timing outcome, not a broken annotation
 
 > **Scope (2026-09-23, issue #2364):** this attribution was measured on — and
