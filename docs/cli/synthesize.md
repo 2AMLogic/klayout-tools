@@ -279,6 +279,12 @@ overwritten. `outputs.dir` together with `run_id` is an error, unknown keys
 inside `outputs` are rejected, and the response `run_id` is the directory's
 basename. Requests without `outputs` behave exactly as above.
 
+This stable path is the recommended way to wire a committed
+`klt place-and-route` pair: that command's `netlist` request field can name
+`outputs.dir`'s `<top>_synth.v` directly, and the committed pair re-runs once
+the directory is cleared — see [`place-and-route.md`](place-and-route.md)'s
+`netlist` request-field row.
+
 A zero engine exit is insufficient: the current run must contain a readable,
 nonempty netlist, parseable synthesis statistics, and its ABC log when the
 library enables ABC constraints. Missing artifacts fail explicitly. A current
