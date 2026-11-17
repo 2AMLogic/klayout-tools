@@ -139,8 +139,8 @@ def _token_end(spice: str, start: int) -> int | None:
         return None
     ch = spice[start]
     if ch == "'":
-        close = spice.find("'", start + 1)
-        return None if close == -1 else close + 1
+        quote_close = spice.find("'", start + 1)
+        return None if quote_close == -1 else quote_close + 1
     if ch == "(":
         close = _balanced_close(spice, start)
         return None if close is None else close + 1
