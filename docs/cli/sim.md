@@ -1055,7 +1055,13 @@ shards and merges them exactly as the blocking sharded run does. The request
 must be the one submitted (a `request_sha256` or fingerprint mismatch is
 `error.code: "resume_fingerprint_mismatch"`). `--attach` only re-attaches: a
 shard whose job is gone is reported as lost, other shards are still reported,
-and nothing is resubmitted.
+and nothing is resubmitted. A map written by a `--hosts N` / `remote.hosts: N`
+run attaches the same way ([#5777](https://github.com/2AMLogic/klayout-tools/issues/5777)):
+pass the request (and `--hosts`, if it was given at submit) the shards were
+submitted from; the shard count is read from the map itself, so `--hosts` is not
+compared on attach, while a changed `remote.hosts` in the request file is a
+`request_sha256` mismatch naming `remote`. `--collect-partial` takes such a
+map too.
 
 **Worked example: a 135-unit grid** ([#4878](https://github.com/2AMLogic/klayout-tools/issues/4878)).
 A job is capped by the whole-job ceiling (`max_job_seconds`, default `3600`
@@ -1910,7 +1916,9 @@ which of those changed is not recoverable). A shard lost at the collect stage
 ends its `lost_shard` message with `[remote job <id>: finished|failed|timeout|
 running|unknown]`, the job's `status.json` state at that moment: `finished`
 means re-attaching can collect it, `unknown` means no status was readable.
-`--attach` still takes a single job id; recover a split request with
+A bare `--attach <job_id>` still takes a single job (`hosts = 1`) and is
+refused for `hosts != 1`; re-attach a sharded run (`--hosts N` or a
+`--max-units-per-job` split) with its `batch-shards.json`, or recover it with
 `--resume`.
 
 The dispatch-time fail-fast probe is skipped for `batch` —

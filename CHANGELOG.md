@@ -14,6 +14,14 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt sim --attach <batch-shards.json>` accepts a map written by a
+  `--hosts N` / `remote.hosts: N` run** (#5777, 2026-11-17): `--attach` and
+  `--collect-partial` refused every `hosts != 1` request with "requires backend
+  'batch' with a single job", contradicting `--help`, and even once past that
+  gate a `hosts > 1` dispatch would have submitted a fresh fleet instead of
+  attaching. A shard map now attaches under any `hosts` (the shard count is read
+  from the map); a bare job id still requires `hosts = 1`. Additive: a call that
+  used to fail now succeeds.
 - **`klt sim --fail-fast-probe` reads the same `.spiceinit` as the corners it
   screens** (#6047, 2026-11-17): `_run_corner` pins the thread count by writing
   a run-directory `.spiceinit`, which *replaces* `$HOME/.spiceinit`, but the
