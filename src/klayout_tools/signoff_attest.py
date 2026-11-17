@@ -79,6 +79,7 @@ from .signoff import (
     _classify,
     _finite_json_float,
     _generic_item_binding_refusal,
+    _read_envelope,
     _reject_json_constant,
 )
 from .signoff_attest_drift import drift_result
@@ -869,13 +870,8 @@ def _metric_value(root: str, path: str, field: str) -> float | int | None:
     """The finite number at dotted ``field`` of the JSON envelope at ``path``
     (digit segments index lists), or ``None`` if unreadable/absent/non-numeric."""
     try:
-        with open(os.path.join(root, path), "rb") as handle:
-            node: Any = json.loads(
-                handle.read().decode("utf-8"),
-                parse_constant=_reject_json_constant,
-                parse_float=_finite_json_float,
-            )
-    except (OSError, UnicodeDecodeError, ValueError):
+        node: Any = _read_envelope(os.path.join(root, path))
+    except SignoffError:
         return None
     for segment in field.split("."):
         if isinstance(node, Mapping) and segment in node:
