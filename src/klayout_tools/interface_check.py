@@ -111,15 +111,22 @@ def _check_template(compiled: re.Pattern[str], template: str) -> None:
             raise IndexError(f"unknown group name {group!r}")
 
 
-def _compile_pin_pattern(regex: str | None, flag: str) -> re.Pattern[str] | None:
-    """Compile a ``--pins`` / ``--pins-a`` / ``--pins-b`` regex; ``None``
-    (flag not given) stays ``None``."""
-    if regex is None:
-        return None
+def _compile_pin_pattern(regex: str, flag: str) -> re.Pattern[str]:
+    """Compile a ``--pins`` regex; ``regex`` is required."""
     try:
         return re.compile(regex)
     except re.error as exc:
         raise InterfaceCheckError(f"{flag} is not a valid regex: {exc}") from None
+
+
+def _compile_optional_pin_pattern(
+    regex: str | None, flag: str
+) -> re.Pattern[str] | None:
+    """Compile a ``--pins-a`` / ``--pins-b`` regex; ``None`` (flag not given)
+    stays ``None``."""
+    if regex is None:
+        return None
+    return _compile_pin_pattern(regex, flag)
 
 
 def _apply_pairs(
@@ -220,8 +227,8 @@ def run_interface_check(
     if tol_um < 0 or not math.isfinite(tol_um):
         raise InterfaceCheckError(f"--tol-um must be >= 0, got: {tol_um}")
     pattern = _compile_pin_pattern(pins, "--pins")
-    pattern_a = _compile_pin_pattern(pins_a, "--pins-a")
-    pattern_b = _compile_pin_pattern(pins_b, "--pins-b")
+    pattern_a = _compile_optional_pin_pattern(pins_a, "--pins-a")
+    pattern_b = _compile_optional_pin_pattern(pins_b, "--pins-b")
 
     layout_a = load_layout(a_path, InterfaceCheckError)
     layout_b = load_layout(b_path, InterfaceCheckError)
