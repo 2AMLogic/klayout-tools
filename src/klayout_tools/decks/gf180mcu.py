@@ -2927,6 +2927,18 @@ UNMODELED_VOLTAGE_MARKERS: dict[tuple[int, int], str] = {
 #   than upstream's `poly2.not(res_mk).not(plfuse)`; the two agree except on
 #   marked poly this deck does not recognise as a resistor, which stays
 #   ordinary connected poly here rather than being cut out of connectivity.
+#   For an SB.10-compliant drawing this alone is not enough: the DRM's own
+#   `poly2.enclosing.sab.1` (SB.10) *mandates* a >= 220 nm unmarked Poly2
+#   band around every SAB edge, and that band wraps the body and merges
+#   both leads into one terminal component, so the resistor silently
+#   vanishes (issue #5889 -- the same shape upstream's `poly2.not(res_mk)`
+#   has). Both poly entries therefore declare
+#   `terminal_enclosure_um=0.22`: `_resolve_resistors` narrows the terminal
+#   region to the Poly2 within 220 nm of Poly2 drawn beyond the mandated
+#   band (the leads and their channels through it) and severs the band's
+#   dead flanks from connectivity, so a DRC-clean drawing still extracts
+#   as a two-terminal device -- see `ResistorDevice.terminal_enclosure_um`
+#   and docs/cli/extract.md's "Drawn resistors" section.
 #
 # `ppolyf_u_1k` (issue #299): the high-sheet-rho flavour `ppolyf_u`'s own
 # `excludes` above rules out. The official LVS deck's own `res_derivations.lvs`
@@ -3567,6 +3579,12 @@ EXTRACTION_DECK = ExtractionDeck(
                 (12, 0),  # DNWELL -> the `_dw` (deep-nwell) device variants
             ),
             bulk_to_substrate=True,  # upstream extracts it with 'W' => sub
+            # SB.10 (`poly2.enclosing.sab.1`, 220 nm) mandates a Poly2 halo
+            # around every SAB edge; the halo band around this body is
+            # severed from the terminal region so a DRC-clean drawing still
+            # extracts as a two-terminal device (issue #5889) -- see
+            # `ResistorDevice.terminal_enclosure_um`'s own docstring.
+            terminal_enclosure_um=0.22,
             provenance=_gf180mcu_lvs_provenance(
                 "libs.tech/klayout/tech/lvs/rule_decks/res_extraction.lvs",
                 "gf180mcu_fd_pr__ppolyf_u",
@@ -3598,6 +3616,10 @@ EXTRACTION_DECK = ExtractionDeck(
                 (12, 0),  # DNWELL -> the `_dw` (deep-nwell) device variants
             ),
             bulk_to_substrate=True,  # upstream extracts it with 'W' => sub
+            # Same SB.10-mandated halo severing as `ppolyf_u` above (the
+            # rule constrains every SAB edge identically); shared
+            # derivation, issue #5889.
+            terminal_enclosure_um=0.22,
             flavour_option="poly_res",
             flavours=(
                 ResistorFlavour(

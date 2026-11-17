@@ -14,6 +14,28 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt extract` gf180mcu deck: an SB.10-compliant (SAB-enclosed) poly
+  resistor now extracts as a two-terminal device instead of silently
+  vanishing** (#5889, 2026-11-17). The DRM's own SB.10
+  (`poly2.enclosing.sab.1`) *mandates* that Poly2 extend >= 220 nm beyond
+  every SAB edge, so a DRC-clean `ppolyf_u`/`ppolyf_u_1k` drawing carries an
+  unmarked 220 nm Poly2 band around the recognised body on every side; that
+  band wraps the body and merged both contacted leads into ONE terminal
+  component, so `DeviceExtractorResistorWithBulk` found a single contact
+  region ("Expected two polygons on contacts interacting with one resistor
+  shape") and formed no device — the device count dropped (29 -> 27 on the
+  issue's block layout) while `klt drc` stayed clean. Both poly entries now
+  declare the new `ResistorDevice.terminal_enclosure_um=0.22`:
+  `_resolve_resistors` narrows the terminal region to the Poly2 within
+  220 nm of Poly2 drawn *beyond* the mandated band (each lead plus its
+  channel through the band) and severs the band's side flanks from the
+  terminal conductor's connectivity, so each lead lands on its own net and
+  the extracted L/W/R are exactly the marked body's own geometry (6.0
+  squares -> 2100 Ω at 350 Ω/□ on the reproducer). A drawing with no band
+  (exact-body markers, the pre-#5889 fixture style) extracts bit-for-bit as
+  before; a halo that is itself a conductor path around the body still
+  forms no device. Other decks are untouched (the field defaults to `0.0`).
+  No JSON field added or removed; `schema_version` unchanged.
 - **`klt drc` gf180mcu deck: `DF.1c` (MOSCAP COMP min width) is now checked,
   and `comp.width.mv.1` exempts `MVSD`/`MVPSD`-marked LDMOS drains** (#5719,
   2026-11-17). New rule `comp.width.moscap.1` (`DF.1c`, 1.0 um,

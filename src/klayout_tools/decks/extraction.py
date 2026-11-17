@@ -97,6 +97,29 @@ class ResistorDevice:
     - ``terminal`` -- optional override naming a *different* deck conductor
       layer to take the terminals from (defaults to ``body``). Like
       ``body``, it must be one of the deck's own conductor layers.
+    - ``terminal_enclosure_um`` (issue #5889) -- optional width, in
+      micrometres, of a terminal-conductor halo the PDK's own DRC
+      *mandates* around this device's body. ``0.0`` (the default, every
+      entry before this field existed) means no such rule is declared and
+      the terminal derivation is exactly what it was. gf180mcu's SB.10
+      (``poly2.enclosing.sab.1``) is the motivating case: Poly2 must
+      extend >= 220 nm beyond every SAB edge, so a DRC-clean drawing
+      surrounds the recognised body with an unmarked Poly2 band 220 nm
+      wide on every side -- and that band wraps the body, touches it along
+      its entire perimeter, and merges both contacted leads into ONE
+      terminal component, so the native resistor extractor finds a single
+      contact region and forms no device at all (the resistor silently
+      vanishes while ``klt drc`` reports the layout clean). With this
+      field set, :func:`~klayout_tools.extract_passive_regions
+      ._resolve_resistors` narrows the terminal region to the conductor
+      lying within the declared distance of conductor drawn *beyond* the
+      mandated band -- the leads and their channels through the band --
+      and severs the band's side flanks from the terminal conductor's
+      connectivity region, so each lead is its own terminal on its own
+      net. Set-theoretically there is no drawn shape that escapes the
+      conflict (any single-polygon marked region under an enclosure rule
+      carries a connected unmarked band), so the derivation, not the
+      drawing, is the only place the two requirements can coexist.
 
     ``sheet_rho_ohm_sq`` is the device's sheet resistance in ohms per
     square; KLayout computes ``R = L / W * sheet_rho`` from the recognised
@@ -264,6 +287,7 @@ class ResistorDevice:
     requires: tuple[tuple[int, int], ...] = ()
     excludes: tuple[tuple[int, int], ...] = ()
     terminal: tuple[int, int] | None = None
+    terminal_enclosure_um: float = 0.0
     bulk_to_substrate: bool = False
     fixed_offset_ohm: float = 0.0
     end_term_ohm_um: float = 0.0
