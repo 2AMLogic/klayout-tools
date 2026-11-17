@@ -1519,7 +1519,11 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   already-submitted jobs. If a held job never launches, the remaining unstarted
   members become `not_launched` entries naming that job id (with no job ids of
   their own) one more `--wait-for-capacity` window after the abandonment,
-  instead of being submitted; the set then terminates.
+  instead of being submitted; the set then terminates. The window is measured
+  per job ([#6324](https://github.com/2AMLogic/klayout-tools/issues/6324)): the
+  job already held at the abandonment gets it from the abandonment, while a
+  shard accepted later (e.g. a later shard of a multi-shard member) gets its
+  own full window from its acceptance.
   An interrupt
   (`KeyboardInterrupt`/`SystemExit`) turns every unfinished member into a
   `set_interrupted` entry; the envelope and manifest are still written. Without
