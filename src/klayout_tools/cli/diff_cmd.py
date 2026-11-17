@@ -18,13 +18,54 @@ EXIT_DIFFERENT = 3
 def run(args: argparse.Namespace) -> int:
     try:
         report = diff_report(
-            args.file_a, args.file_b, top=args.top, max_items=args.max_items
+            args.file_a,
+            args.file_b,
+            top=args.top,
+            max_items=args.max_items,
+            flattened=args.flattened,
         )
     except LayoutDiffError as exc:
         return emit_error("diff", str(exc), args.format)
 
-    emit_success(report, args.format, _print_text)
+    emit_success(
+        report, args.format, _print_flattened_text if args.flattened else _print_text
+    )
     return 0 if report["equivalent"] else EXIT_DIFFERENT
+
+
+def _print_flattened_text(report: dict) -> None:
+    a, b = report["a"], report["b"]
+    print(f"a: {a['file']}")
+    print(f"b: {b['file']}")
+    print(f"status: {report['status']} (flattened)")
+    if report["equivalent"]:
+        return
+    if not report["dbu_equal"]:
+        print(f"dbu_um: a={a['dbu_um']} b={b['dbu_um']}")
+    drawn = report["drawn_layers"]
+    for label, key in (("only in a", "only_in_a"), ("only in b", "only_in_b")):
+        if drawn[key]:
+            pairs = ", ".join(f"{e['layer']}/{e['datatype']}" for e in drawn[key])
+            print(f"drawn layers {label}: {pairs}")
+    if not report["bbox"]["equal"]:
+        print("flattened bbox differs")
+    for layer in report["layers"]:
+        if not layer["equivalent"]:
+            print(
+                f"  layer {layer['layer']}/{layer['datatype']}: "
+                f"xor polygons={layer['xor_polygon_count']} "
+                f"area_um2={layer['xor_area_um2']}"
+            )
+    for layer in report["labels"]["layers"]:
+        print(
+            f"  labels {layer['layer']}/{layer['texttype']}: "
+            f"{layer['only_in_a_count']} only in a, "
+            f"{layer['only_in_b_count']} only in b"
+        )
+    if report["truncated"]:
+        print(
+            f"(output truncated at --max-items {report['max_items']}; see JSON counts)"
+        )
 
 
 def _print_text(report: dict) -> None:
