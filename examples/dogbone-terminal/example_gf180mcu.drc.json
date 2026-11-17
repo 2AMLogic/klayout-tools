@@ -48,6 +48,7 @@
       "117/10",
       "125/5",
       "127/5",
+      "166/5",
       "167/5",
       "204/0",
       "210/0",
@@ -103,6 +104,7 @@
       "comp.tap_distance.nwell.lv.1",
       "comp.tap_distance.nwell.mv.1",
       "comp.tap_distance.psub.mv.1",
+      "comp.width.moscap.1",
       "comp.width.mv.1",
       "diode_mk.ongrid.1",
       "dnwell.ongrid.1",
@@ -492,6 +494,10 @@
       {
         "id": "comp.tap_distance.psub.mv.1",
         "reason": "inapplicable_empty_checked_region"
+      },
+      {
+        "id": "comp.width.moscap.1",
+        "reason": "no_applicable_geometry"
       },
       {
         "id": "comp.width.mv.1",
