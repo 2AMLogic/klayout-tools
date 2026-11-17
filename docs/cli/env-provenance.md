@@ -355,6 +355,33 @@ one repo root for a verb that records several input paths (the outermost when th
 inputs sit in nested repos), so every `{path, scope}` field in one report shares an
 anchor; `klt lvs` uses it for `layout` and `reference`.
 
+### Redacting a foreign payload: `scrub_payload` (issue #5828)
+
+A harness that embeds a `klt` response verbatim in a committed record can
+redact it with one call instead of hand-rolling a JSON walk:
+
+```python
+from klayout_tools.env_provenance import find_absolute_path_fields, scrub_payload
+
+clean = scrub_payload(resp, [("/tmp/run1/work", "<WORK>"), ("/tmp/run1", "<RUN>")])
+assert not find_absolute_path_fields(clean)  # same check as `lint-envelope`
+```
+
+- `subs` is an ordered `(host_root, tag)` list, applied in order to every string
+  **value and mapping key** (list the longest root first when roots nest).
+- Roots match on path boundaries: `/tmp/a` rewrites `/tmp/a/x` to `<TAG>/x` but
+  leaves `/tmp/ab/x` alone. A trailing `/` on a root is ignored.
+- Returns a new structure (tuples become lists); the input is not mutated and
+  non-string scalars pass through. Two keys that collapse to the same string
+  raise `ValueError` rather than silently dropping a value.
+- Nothing is special-cased: remote `worker_environment` observations are
+  rewritten if you name their roots, and untouched otherwise.
+- To verify the result use **`lint-envelope`** (or `find_absolute_path_fields`),
+  not `scan`: `lint-envelope` flags any absolute path including `/tmp/…`,
+  `/root/…` and `/var/…`, whereas `scan` matches home-shaped roots only
+  (`/home`, `/Users`, `C:\Users`) by design, so a clean `scan` says nothing
+  about non-home roots.
+
 Also exported: `opaque_host_id()`, `repo_relative_path()`, `find_repo_root()`,
 `find_leaks()`, `scan_files()`, `find_absolute_path_fields()`,
 `lint_envelope_files()`, and `render_path_field()` (the same

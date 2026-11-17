@@ -64,6 +64,19 @@ acceptance data keyed on `category_counts`), key that pin off the shared
 fields below — not `klt --version` — until `klt` reaches `1.0` and this
 caveat is retired.
 
+Growing value sets are not the only pre-1.0 drift this caveat covers: the
+**count under an already-shipped key can change what it counts**. A
+category's own rules can consolidate or split the entries one event emits —
+e.g. issue #4729 (`v0.9.0`) folded the geometry-derived `as`/`ad`/`ps`/`pd`
+parameter differences into the same `device.property` entry as the primary
+`w_um` difference they duplicated, so a width-only difference that
+reported `category_counts["device.property"] == 5` before that release
+reports `1` after, with `status` unchanged. Under this repo's policy such a
+change is additive: it earns no `schema_version` bump, and it is recorded in
+`CHANGELOG.md`. A caller comparing `category_counts` (or `error_count`)
+values across versions therefore needs the same `provenance.deck` /
+`provenance.klayout_version` pin described above.
+
 The same rule applies on the **request** side for the commands that take a
 JSON request document (`klt lvs`, `klt place-and-route`, `klt synthesize`,
 …): a new accepted value for an already-shipped request enum — e.g. `klt
@@ -569,13 +582,12 @@ and [#2124](https://github.com/2AMLogic/klayout-tools/issues/2124).
 
 Verbs whose verdict depends on the exact tool build, PDK release, and rule
 deck — currently `drc`, `lvs`, `extract`, `sim`, `size`, `precheck`, `erc`,
-`power`, `gen`, and `gen-compose` — emit a shared top-level `provenance`
-block so a
-"clean"/"pass"/"match" result is auditable and reproducible later. Two runs
-made against different deck revisions or PDK releases are otherwise
-indistinguishable in the output, so a signoff claim can't be checked or
-reproduced. This block is **additive** (see above): adopting it required no
-`schema_version` bump on any verb.
+`power`, `economy`, `ring-check`, `gen`, `gen-compose`, and `array-check` — emit a
+shared top-level `provenance` block so a "clean"/"pass"/"match" result is
+auditable and reproducible later. Two runs made against different deck
+revisions or PDK releases are otherwise indistinguishable in the output, so a
+signoff claim can't be checked or reproduced. This block is **additive** (see
+above): adopting it required no `schema_version` bump on any verb.
 
 **Build drift in `klt signoff` (issue #4223).** `klt signoff` compares each
 cited check's `provenance.klt_version` with the running build and reports an
@@ -605,6 +617,19 @@ and gets it back as `environment.pdk_revision_asserted` (`{value, scope:
 worker-observed `worker_environment.pdk` so the two are never confused;
 `cli/sim.md`'s option and `environment` tables are the field-level record.
 Additive fields only; no `schema_version` bump (issue #4020).
+
+`klt sim`'s `environment.ngspice_init` (issue #5648) records the ngspice init
+file that was **in effect** -- always present on corner-mode runs, `null` for
+`engine: "xyce"` -- as `{source, lines, sha256}`. `source` is a path-free label
+(the same rule as `provenance.pdk.ambiguous_sources`: committed evidence must
+not carry the resolving machine's `$HOME`): `"request"` (klt wrote a
+`.spiceinit` including declared `options.ngspice_init` lines), `"thread_pin"`
+(klt wrote only the `set num_threads=N` pin), `"home"` (klt wrote none and
+`$HOME/.spiceinit` exists), `"none"`, or `"runner"` (off-host backends
+`remote`/`batch`: the worker resolves the file, which the client cannot
+observe). `lines` is the written file's lines for `request`/`thread_pin`, else
+`null`; `sha256` is `sha256:<hex>` of the effective file's bytes, `null` for
+`none`/`runner`. Additive; no `schema_version` bump.
 
 `environment.remote` (and each `fleet[]` member) also gains the additive
 `runner_models_lib_sha256` (string or `null`) and `models_lib_comparison`
@@ -721,7 +746,14 @@ unchanged in grading; issue #4188 adds a producer for it,
 [--hash-kind {bytes,geometry}]]`, emitting the same `generic` envelope with
 `attestation.checks[]` entries `stream_readable`, `top_cell_non_empty` and
 `dbu_on_grid`, `provenance.klayout_version` populated, and an optional
-`provenance.regeneration` (additive; no `schema_version` bump). The inventory `--attest` reads is its own versioned contract —
+`provenance.regeneration` (additive; no `schema_version` bump). The
+inventory-driven producers — `klt signoff --attest ITEM` for items 1, 8, 9
+and 10 (issue #5690) — populate `provenance.klayout_version` the same way:
+the `klayout` build resolved into the attesting process, which is the engine
+a declared `checks[].argv` command that imports `klayout.db` actually ran
+against (`null` when `klayout` is not importable). Like `klt_version`, it is
+a version string in the `--check`/`--rerun` exclusion set, so committed
+evidence re-checked across a klayout upgrade still reports `match`. The inventory `--attest` reads is its own versioned contract —
 see "A versioned *input* contract" below.
 
 Issue #3044 adds an optional `provenance.input.paths` set form to that
@@ -750,6 +782,28 @@ when `"geometry"`; unknown values are `unanchored_evidence`); `local_only`
 were not run. See
 [`docs/cli/signoff.md`](cli/signoff.md)'s "Items 1 and 2: attesting that
 the artifact was regenerated".
+
+Issue #5460 adds an optional `check` object to a `drift[]` entry of the
+`klt signoff --attest --check` response, naming the `attestation.checks[]`
+entry the entry is about: its `role`, plus whichever identity keys that check
+kind carries — `path` (a `present` file check), `target` / `name` /
+`testbench` (a `command` or `recorded_hash` check), `row` (an item-8 citation
+check), `corner` + `metric` (an item-8 metric check, one per corner ×
+metric). A check with no identity beyond its role — item 9's `pdk` / `tools`
+pins, a top-level `cold_start` — gets `{"role": …}`. **Additive; no
+`schema_version` bump**: `field` stays the dotted positional pointer
+(`attestation.checks.17.content_hash`) it has always been, and `committed` /
+`fresh` are untouched, so a consumer that never reads `check` sees the bytes
+it saw before. The key is **absent** on an entry that names no single check —
+a whole-list `attestation.checks` entry (the index-by-index diff only applies
+when both lists have the same length, so an inventory that *gained or lost* a
+file still yields one whole-list entry), a `status` entry, anything outside
+`attestation.checks`, and every `drift[]` entry the other `--check` verbs
+produce. `--format text` renders it as a bracketed label after the pointer
+(`attestation.checks.17.content_hash  [testbench sim/bin/sim_common.py]:`) so
+a CI log names the file that moved without a second lookup — the index alone
+is not even stable, since file-presence checks are sorted by path. See
+[`docs/cli/signoff.md`](cli/signoff.md)'s "CI usage: `--check`".
 
 Issue #5463 adds two more additive, optional fields on the same principle (no
 `schema_version` bump; absent they change nothing): `documented_argv` on an
@@ -1306,6 +1360,60 @@ install without any `klt`-specific flag — see
 `docs/design/klayout-engine-version-pin.md` for why this, rather than a new
 override mechanism, is the documented fix.
 
+## Stream-stability contract: layout stream bytes are not stable across klt versions
+
+Everything above contracts on JSON *report* payloads. The **layout streams**
+(`GDS`/`OASIS`) that the write-side verbs produce are contracted separately,
+and the contract is: **`klt` does not guarantee that a generated stream's
+bytes are stable across `klt` versions.** The drawn geometry is meant to be
+stable — every cross-version divergence on record is a reordering or a
+bookkeeping change, not a geometry change — but *record order within a cell*
+and the presence of non-geometry structures are KLayout-writer
+implementation details that an upgrade may change.
+
+Worked instance: #5499 (commit `7d1a262fb`, released in
+[`CHANGELOG.md`](../CHANGELOG.md)'s `## 0.9.2 (2026-11-14)` section) pinned
+`gen`'s layer table to a sorted order and stopped `write_layout()` from
+emitting the `$$$CONTEXT_INFO$$$` structure. Streams written before and after
+that commit are geometrically identical (zero XOR area on every layer) yet
+differ byte-for-byte, so a consumer gate that regenerated a committed stream
+and byte-compared it went red for a tool-churn reason indistinguishable from
+a real generator regression.
+
+**A raw byte hash (`sha256sum`, or `provenance.input.content_hash`) or a
+`cmp` against a committed stream is therefore not a supported
+reproducibility gate across a `klt` upgrade.** Within one pinned `klt` build
+bytes *are* deterministic — stream write timestamps are suppressed — which is
+what this repo's own within-version drift guard
+(`tests/test_gen.py::test_dogbone_terminal_example_regenerates_byte_identical`)
+relies on: a byte compare pins record order, which a geometry compare cannot
+see. Across an upgrade, gate on one of the two supported
+order-insensitive comparisons instead:
+
+- **`klt diff a.gds b.gds`** ([`docs/cli/diff.md`](cli/diff.md)) — exit `0`/`3`
+  answers "same layout?", ignoring stream timestamps and record order within
+  a cell; equal `canonical_hash` with `stream_identical: false` is the
+  precise "bytes reordered, layout unchanged" verdict. Two known limits, so
+  the gate is not oversold: `klt diff` deliberately never ignores **cell
+  names**, so a release that renames an emitted inner cell reports
+  `equivalent: false` even with identical drawn geometry (open #5729; the
+  live instance is #5627); and `canonical_hash` is this verb's own
+  normalization — **not** interchangeable with the digest below (issue
+  #5551), meaningful only against another `canonical_hash`.
+- **`klt stats --format json | jq -r .geometry_digest`**
+  ([`docs/cli/stats.md`](cli/stats.md) → "Geometry digest") — the
+  `geometry_digest` field `klt stats` reports is a SHA-256 over the stream's
+  **decoded geometry** that never reads the write timestamp, record order
+  within a cell, cell-table indices or the stream format, and is the value
+  `klt signoff --attest 2 --hash-kind geometry` is graded against. (Its
+  computation costs runtime; #5583 proposes gating it behind a flag — phrase
+  your gate around the field, which survives either way.)
+
+Emission-affecting changes are called out in `CHANGELOG.md` as a practice,
+and the #5499 entry above is the model — mechanism, every affected verb,
+regenerated goldens — so a consumer pinning a version can see when an
+upgrade will invalidate committed streams before taking it.
+
 ## Declared metric namespace (`metrics` block, issue #247)
 
 Every verb's numeric fields are named ad hoc today (`violation_count`,
@@ -1446,11 +1554,12 @@ which reads the input field only (`signoff.py`'s `_INPUT_ARTIFACT_FIELDS`).
 | `extract` | `file` (the hashed input layout; both response builders) | 4 | #2659 |
 | `lvs` | `layout` (the hashed layout side, `schema_version` 2, #2659); `reference` (the resolved reference netlist, `schema_version` 3, #4984; the `klayout-runset` engine keeps both as plain strings) | 3 | #2659, #4984 |
 | `erc` | `file` (the hashed input layout; `spec` stays a plain string) | 2 | #2703 |
-| `lef-abstract` | `file` (the hashed input layout; `socket` and `output` stay plain strings) | 2 | #2703 |
+| `lef-abstract` | `file` (the hashed input layout; `socket` and `output` stay plain strings; `{path: null, scope: "absent"}` under `--no-layout`, #5714) | 2 | #2703 |
 | `place-and-route` | `netlist` — the input netlist `provenance.input.content_hash` pins (additive, no bump) | 1 | #3751 |
 | `sta` | `def_path`, `verilog_path`, `spef_path` (`null` when the request does not use that input) | 2 | #2879 (moved from the plain-string table; schema-1 evidence carries absolute strings) |
 | `sta` | `sdf` / `corners[].sdf` — a written output: the envelope plus `content_hash` (`null` unless `request.sdf: true`; additive, no bump) | 2 | #2886 |
 | `functional-verification` | `environment.{results_xml,test_log,build_log}`, `environment.initial_state.runs[].results_xml`, `mutation_testing.results[].log_path` (`{path: null, scope: "absent"}` when there is none, e.g. `results_xml` on the Verilog-bench path; `--format text` still prints the real paths). The `environment.{results_xml,test_log,build_log}` and `initial_state.runs[].results_xml` envelopes also carry an additive `sha256` (`sha256:<hex>` of the file as written, `null` when it was not produced, #4931) | 2 | #4279 (moved from the plain-string table; schema-1 evidence carries absolute strings) |
+| `array-check` | `file` (the hashed input layout) | 2 | #5788 |
 
 **Plain-string fields** — intentionally unchanged:
 
@@ -1561,7 +1670,12 @@ hard-code names from observation. The lists are also importable constants in
 `EXTRACT_PATH_ONLY_PATHS`, `PATH_ONLY_KEYS_BY_VERB`) with a helper
 `strip_path_only_keys(report, verb)`; a test fails if a path-bearing key is
 added without being registered. Paths use dotted notation, `*` standing for
-any list index.
+any list index. The wildcard is meaningful only on this canonicalization
+side: drift exclusion in `--rerun`/`--check` verdicts
+(`diff_verdict_fields(exclude=...)`) matches by exact path, so a `*` entry
+in an `exclude` set is rejected with a `ValueError` rather than silently
+ignored (issue #5586) — a per-list-entry exclusion belongs in a
+`strip_path_patterns` set passed via `committed_for_diff`/`fresh_for_diff`.
 
 | Verb | Key | Meaning |
 |---|---|---|
@@ -1716,6 +1830,12 @@ All eight share one contract:
   item still fails, via the counts and per-item `id`s that stay compared.
   See [`cli/signoff.md`](cli/signoff.md)'s "A reworded checklist is not
   evidence drift".
+- **`klt signoff --check` also carries a report-only `build_skew`** (issue
+  #5868; additive, no `schema_version` bump): `{state, fields}` where `state`
+  is `"same"`, `"build_only"`, `"ruleset"` (`build.grading_ruleset_id`
+  differs) or `"unknown"` (the committed report has no `build` block), and
+  `fields` lists each differing `build.*` field in the `{field, committed,
+  fresh}` shape of `drift`. It never affects `status` or the exit code.
 
 **Build identity is route-dependent, so committed reports must not be
 byte-compared (issue #2249).** A `klt signoff` tier/fleet report's `build`
@@ -2292,6 +2412,22 @@ report, so a reader can tell the two apart without looking at the argv.
 additive); it exists so a dry run states what it did not verify rather than
 letting a `"valid"` status imply more than it earned. See
 [`cli/pex.md`](cli/pex.md)'s "Validating an invocation without running it".
+
+### `klt corner-matrix check` coverage verdict (issue #5865)
+
+`klt corner-matrix check` adds the always-present boolean
+`coverage_complete` next to `complete`: true iff `missing[]`, `extra[]` and
+`duplicate[]` are all empty — *did the run exercise the declared matrix,
+once each*. `complete` keeps its published meaning (coverage **and**
+outcome quality: no `not_simulated[]`, no `non_finite[]`, no
+`out_of_bounds[]`), so a report that covered its matrix but recorded one
+legitimate failing corner is `coverage_complete: true` with
+`complete: false`. The field is emitted in both modes; in `--request` mode
+`coverage_complete == complete` by construction. Exit codes are unchanged,
+which is the point: the exit status follows `complete` and cannot serve as
+a coverage gate. Additive — no existing field changes name, type or
+meaning, so **no `schema_version` bump** (the command's success payload
+carries none today). See [`cli/corner-matrix.md`](cli/corner-matrix.md).
 
 ## Static typing of the envelope
 

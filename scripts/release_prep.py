@@ -20,7 +20,9 @@ version changes nothing):
   ``## Unreleased`` (the unreleased entries become the release's entries and
   ``## Unreleased`` stays, empty, for the next cycle);
 - ``docs/cli/signoff.md``: "first release after `vPREV`" availability notes
-  become "`klt X.Y.Z`" (PREV is the version being superseded).
+  become "`klt X.Y.Z`" (PREV is the version being superseded). A placeholder
+  anchored on a release older than PREV can never be resolved again; the prep
+  run refuses (``PrepError``) naming the line rather than let it ship stale.
 
 The version defaults to the next *minor* (``vX.(Y+1).0``): that satisfies
 RELEASING.md's batch-runner rule (a contract change never ships in a patch)
@@ -56,6 +58,9 @@ _MERGE_SUBJECT_RE = re.compile(
     rf"^Merge pull request #\d+ from \S+?/release/v({_VERSION})(?:\s|$)"
 )
 _UNRELEASED_RE = re.compile(r"^## Unreleased[ \t]*$", re.MULTILINE)
+_NOTE_PLACEHOLDER_RE = re.compile(
+    rf"(?:the )?(?:first|next) release after `?v?({_VERSION})`?"
+)
 
 
 class PrepError(Exception):
@@ -98,10 +103,30 @@ def add_changelog_heading(text: str, new: str, date: str) -> str:
 
 def update_signoff_notes(text: str, previous: str, new: str) -> str:
     """Resolve "the first release after `vPREV`" notes to the release now cut."""
-    pattern = re.compile(
-        rf"(?:the )?(?:first|next) release after `?v?{re.escape(previous)}`?"
-    )
-    return pattern.sub(f"`klt {new}`", text)
+
+    def _resolve(match: re.Match[str]) -> str:
+        return f"`klt {new}`" if match.group(1) == previous else match.group(0)
+
+    return _NOTE_PLACEHOLDER_RE.sub(_resolve, text)
+
+
+def check_signoff_note_anchors(text: str, previous: str) -> None:
+    """Refuse availability-note placeholders the resolver can never match again.
+
+    A placeholder is only resolvable for the release being bumped *from*
+    (``previous``); once ``base-version`` moves past its anchor it is orphaned
+    for good. Raise instead of letting it ship silently stale (issue #5582).
+    """
+
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        for match in _NOTE_PLACEHOLDER_RE.finditer(line):
+            if parse_version(match.group(1)) < parse_version(previous):
+                raise PrepError(
+                    f"docs/cli/signoff.md:{lineno}: availability note anchored"
+                    f" on v{match.group(1)}, older than the previous release"
+                    f" {previous} -- the note resolver can never match it again;"
+                    " resolve it by hand (e.g. '`klt X.Y.Z`')"
+                )
 
 
 def release_version_from_subject(subject: str) -> str | None:
@@ -130,10 +155,11 @@ def prepare(repo: Path, version: str | None, date: str) -> dict[str, str]:
     )
     # On an idempotent re-run `current == new`; the notes were already resolved.
     if signoff.exists() and current != new:
-        signoff.write_text(
-            update_signoff_notes(signoff.read_text(encoding="utf-8"), current, new),
-            encoding="utf-8",
+        signoff_text = update_signoff_notes(
+            signoff.read_text(encoding="utf-8"), current, new
         )
+        check_signoff_note_anchors(signoff_text, current)
+        signoff.write_text(signoff_text, encoding="utf-8")
     return {"previous": current, "version": new, "date": date}
 
 

@@ -2117,7 +2117,7 @@ re-derived from a real fetched install's own
 (`ciel enable --pdk gf180mcu f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7`;
 re-verified against that tree 2026-10-16, thresholds unchanged from the
 earlier `c6d73a3` build's `drc/rule_decks/{contact,via1,via2,via3,via4}.drc`.
-gf180mcu's LVS-derived extraction deck still cites `c6d73a3` until #3540), and each cites both its DRM rule id and the executable
+gf180mcu's LVS-derived extraction deck was re-verified against the same tree in #3540 and now cites `f6eeac7`), and each cites both its DRM rule id and the executable
 statement it was re-derived from. The same install's `comp.drc` (issue
 #1110's `_LV`/`_MV` voltage-split rules) and `{nplus,pplus}.drc` (issue
 #2369's `NP.3a`/`NP.5a`/`NP.5b` and `PP.*` mirrors, whose `PCOMP`/`NCOMP`/
@@ -3735,7 +3735,7 @@ zero-violation case (where `drc__error__count` is `0`).
 | `source_cell` | string \| null       | Cell-definition name of the *innermost placed instance* whose bounding box fully contains this violation's `bbox` — the originating standard cell for a hierarchical, machine-generated layout. `null` when the violation is contained in no single instance: top-level geometry, or a `bbox` that straddles an instance boundary (a violation *between* two placements belongs to neither). See "Per-instance attribution" below. |
 | `source_path` | array\<string\> \| null | The instance chain from the top cell's direct child down to `source_cell` (inclusive), e.g. `["block_a", "sky130_fd_sc_hd__inv_2"]`; a single-element list for a directly-placed leaf. `null` exactly when `source_cell` is `null`. |
 | `bbox`        | object (dbu ints)    | `{"left", "bottom", "right", "top"}`, in database units.                     |
-| `polygon`     | array\<[x,y]\> \| null | Vertices in database units, or `null` if the check produced a degenerate edge pair that could not be converted to a polygon. |
+| `polygon`     | array\<[x,y]\> \| null | Vertices in database units, or `null` if the check produced a degenerate edge pair that could not be converted to a polygon. A marker whose hull is zero-area — every vertex collinear on the failing edge, which a total-deficit edge pair produces (e.g. an `enclosing` violation where the enclosed edge is exactly coincident with the enclosing edge, zero extension) — is reported as a 2-point segment `[min, max]` spanning the failing edge's full extent, not as the self-touching quad the hull literally is. |
 
 `violations` is sorted by
 `(rule, cell, bbox.left, bbox.bottom, bbox.right, bbox.top)` so repeated runs
@@ -4140,10 +4140,31 @@ klt drc --check design.drc.json                  # cheap mode (default)
 klt drc --check design.drc.json --rerun           # full mode
 ```
 
-`--check` takes no `--deck`/`--top`/`--engine`/etc. (those are ignored) — the
-deck and engine are always read from `<report.json>` itself, not given again
-on the command line, and so is the input path unless you pass the positional
-`<file>` (below).
+`--check` takes no `--deck`/`--top`/`--engine`: the deck and engine are
+always read from `<report.json>` itself, and so is the input path unless you
+pass the positional `<file>` (below). `-o/--output`, `--waivers`, `--tile` and
+`--rules` are clean exit-1 errors (the report's own recorded values are
+replayed). The two honoured overrides are the positional `<file>` (input) and
+`--deck-file` (deck).
+
+**Deck resolution order (issue #5709)**, shared by `--check`, `--check
+--rerun` and both sides of an `--engine both` report: (1) `--deck-file
+<path>`, which wins for a `klayout`-engine report only -- a curated report
+(curated side included) ignores it and keeps resolving its recorded deck
+*name*, the same treatment `--rerun` already gives the flag -- and only when
+it names an existing file; (2) the report's recorded `deck` -- a deck name for
+`--engine curated`, the producing host's script path for `--engine klayout` --
+when it exists; (3) for `--engine klayout`, `provenance.deck.name` looked up as
+a plain basename among the decks packaged with klt (`asap7.drc`). Resolution
+never decides a verdict: the resolved bytes are still compared to the recorded
+`content_hash`, so a changed deck is `[DRIFTED]` with its real hash. When none
+of the three resolves -- or `--deck-file` names no existing file, in which
+case the diagnostic names the override as the thing looked for -- the deck
+check stays failed (`match: false`, `status:
+"drifted"`, exit 3) and carries an additive `deck_not_found` key (`recorded`,
+`resolved`, `name`, `packaged_dir`, `hint`); `--rerun` raises an exit-1 error
+instead. Pass `--deck-file` to verify a vendor runset that has no packaged
+counterpart. `--rerun` on a curated report rejects `--deck-file`.
 
 **Both modes resolve the committed report's `file` field from *this*
 checkout (issue #2659).** Since `schema_version` 3 that field is the

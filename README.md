@@ -68,6 +68,9 @@ pip install klayout-tools
 `klt` is now on `PATH`. Either install provides the `klayout` **Python
 module** only — `klt drc --engine klayout` additionally needs a system KLayout
 application with `klayout` on `PATH` (<https://www.klayout.de/build.html>).
+Engine-version compatibility (supported/tested `klayout` versions, and what
+happens below the `klayout>=0.30` floor):
+[Engine version compatibility](docs/design/klayout-engine-version-pin.md#engine-version-compatibility).
 For the latest development version, install from
 source instead:
 
@@ -113,6 +116,7 @@ for the version pins and the full contract.
 klt layers design.gds                    # enumerate layers, JSON out
 klt cells design.gds --top               # cell hierarchy
 klt drc design.gds --deck sky130        # run a DRC deck, structured results
+klt diff a.gds b.gds                     # same layout? order-insensitive compare for regenerate-and-compare gates (byte hashes drift across klt upgrades)
 klt precheck design.gds --grid-um 0.005  # off-grid/zero-area/naming hygiene checks
 klt ring-check design.gds --layers '[[22,0],[34,0]]'  # guard/tap ring is a closed annulus
 klt seam-check row.gds --tiling TILE --layer 68/20 --band 0,0,30,2  # abutting cells tile and the rail is continuous across seams

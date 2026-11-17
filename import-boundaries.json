@@ -82,7 +82,11 @@
       "description": "`klt components` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.components_cmd",
-        "klayout_tools.components"
+        "klayout_tools.cli.parsers.components",
+        "klayout_tools.components",
+        "klayout_tools.components_errors",
+        "klayout_tools.components_probe",
+        "klayout_tools.components_specs"
       ]
     },
     "corner_matrix": {
@@ -141,6 +145,7 @@
         "klayout_tools.cli._drc_parser_args",
         "klayout_tools.cli.drc_cmd",
         "klayout_tools.cli.drc_text",
+        "klayout_tools._drc_edge_pair_hull",
         "klayout_tools.drc",
         "klayout_tools.drc_check_kinds",
         "klayout_tools.drc_crosscheck",
@@ -175,6 +180,7 @@
       "modules": [
         "klayout_tools.cli.env_provenance_cmd",
         "klayout_tools.env_provenance",
+        "klayout_tools.env_provenance_scrub",
         "klayout_tools.env_provenance_walk"
       ]
     },
@@ -278,6 +284,7 @@
         "klayout_tools._artifact_envelope",
         "klayout_tools.cli.functional_verification_cmd",
         "klayout_tools.functional_verification",
+        "klayout_tools.functional_verification_from_synthesize",
         "klayout_tools.functional_verification_initial_state",
         "klayout_tools.functional_verification_mutation",
         "klayout_tools.functional_verification_mutation_proposals",
@@ -326,6 +333,7 @@
         "klayout_tools.gen_pcells.esd_device",
         "klayout_tools.gen_pcells.guard_ring",
         "klayout_tools.gen_pcells.pdk_cell",
+        "klayout_tools.gen_pcells._common_params",
         "klayout_tools.gen_pcells._mos_array_shapes",
         "klayout_tools.gen_pcells.mos_array",
         "klayout_tools.gen_pcells.res_array",
@@ -427,7 +435,8 @@
       "description": "`klt lef_abstract` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.lef_abstract_cmd",
-        "klayout_tools.lef_abstract"
+        "klayout_tools.lef_abstract",
+        "klayout_tools.lef_abstract_no_layout"
       ]
     },
     "lvs": {
@@ -437,8 +446,10 @@
         "klayout_tools.cli.lvs_cmd",
         "klayout_tools.lvs",
         "klayout_tools.lvs_combine",
+        "klayout_tools.lvs_coverage",
         "klayout_tools.lvs_finfet",
         "klayout_tools.lvs_finfet_flatten",
+        "klayout_tools.lvs_finfet_power",
         "klayout_tools.lvs_flatten",
         "klayout_tools.lvs_gate_level",
         "klayout_tools.lvs_gate_level_convert",
@@ -468,6 +479,7 @@
       "description": "`klt mcp` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.mcp_cmd",
+        "klayout_tools.mcp_resources",
         "klayout_tools.mcp_server",
         "klayout_tools.mcp_tools"
       ]
@@ -625,6 +637,7 @@
       "modules": [
         "klayout_tools.cli.ring_check_cmd",
         "klayout_tools.ring_check",
+        "klayout_tools.ring_check_enclosed",
         "klayout_tools.seal_ring_check",
         "klayout_tools.seal_ring_rules"
       ]
@@ -655,6 +668,7 @@
         "klayout_tools._check_result",
         "klayout_tools._devices",
         "klayout_tools._digest",
+        "klayout_tools._git_tracked",
         "klayout_tools._jsongz",
         "klayout_tools._jsonnum",
         "klayout_tools._layout",
@@ -665,8 +679,10 @@
         "klayout_tools._request_fields",
         "klayout_tools._provenance",
         "klayout_tools._report_verify",
+        "klayout_tools._report_verify_exclude",
         "klayout_tools._report_verify_hints",
         "klayout_tools._spice_number",
+        "klayout_tools._spice_tokens",
         "klayout_tools._text",
         "klayout_tools._unionfind",
         "klayout_tools._vendor",
@@ -699,13 +715,17 @@
         "klayout_tools.cli.signoff_cmd",
         "klayout_tools.signoff",
         "klayout_tools.signoff_attest",
+        "klayout_tools.signoff_attest_build",
         "klayout_tools.signoff_attest_carry",
+        "klayout_tools.signoff_attest_drift",
         "klayout_tools.signoff_attest_input",
         "klayout_tools.signoff_attest_item9",
+        "klayout_tools.signoff_attest_live",
         "klayout_tools.signoff_attest_stream",
         "klayout_tools.signoff_attest_text",
         "klayout_tools.signoff_derived_rows",
         "klayout_tools.signoff_details",
+        "klayout_tools.signoff_drc_crosscheck",
         "klayout_tools.signoff_envelopes",
         "klayout_tools.signoff_evidence_pin",
         "klayout_tools.signoff_fleet",
@@ -716,10 +736,12 @@
         "klayout_tools.signoff_multi_member",
         "klayout_tools.signoff_na",
         "klayout_tools.signoff_nothing_checked",
+        "klayout_tools.signoff_output",
         "klayout_tools.signoff_power_delivery",
         "klayout_tools.signoff_power_delivery_substrate",
         "klayout_tools.signoff_runset",
-        "klayout_tools.signoff_sta_constraints"
+        "klayout_tools.signoff_sta_constraints",
+        "klayout_tools.signoff_yield_disclosure"
       ]
     },
     "sim": {
@@ -799,6 +821,7 @@
         "klayout_tools.sim_osdi_pin",
         "klayout_tools.sim_osdi_settle",
         "klayout_tools.sim_pdk_ambiguity",
+        "klayout_tools.sim_pin_settle",
         "klayout_tools.sim_peak_rss",
         "klayout_tools.sim_plan",
         "klayout_tools.sim_plot",
@@ -817,6 +840,7 @@
         "klayout_tools.sim_slug",
         "klayout_tools.sim_snm",
         "klayout_tools.sim_snm_meas",
+        "klayout_tools.sim_spiceinit",
         "klayout_tools.sim_staging",
         "klayout_tools.sim_step_resolution",
         "klayout_tools.sim_step_shadow",
@@ -1010,6 +1034,11 @@
       "consumer": "array_check",
       "exporter": "cli-infra",
       "reason": "CLI adapter uses the shared output envelope and --layers parser, as every verb does."
+    },
+    {
+      "consumer": "array_check",
+      "exporter": "env_provenance",
+      "reason": "`klt array-check` echoes its layout input as env_provenance's committable {path, scope} envelope (issue #5788)."
     },
     {
       "consumer": "fill",
@@ -1500,6 +1529,11 @@
       "consumer": "ring_check",
       "exporter": "cli-infra",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "ring_check",
+      "exporter": "env_provenance",
+      "reason": "`klt ring-check` echoes its layout input as env_provenance's committable {path, scope} envelope (issue #5650)."
     },
     {
       "consumer": "seam_check",
