@@ -4821,8 +4821,11 @@ Worked `op` example — the case that had no expression at all before:
 - **An `expr` name must be unique** across the whole `measurements[]` list
   (compared case-insensitively, per the previous bullet): a second `let
   <name>` overwrites the first, so both response entries would report the same
-  value. Duplicate names among `spice`-only entries are left to ngspice
-  exactly as before.
+  value. Byte-identical duplicate names are refused for every measurement
+  form ([#6289](https://github.com/2AMLogic/klayout-tools/issues/6289)):
+  before that issue a request with two same-named `spice` cards failed
+  outside the JSON error envelope with an unhandled `ValueError` (exit 1,
+  traceback) instead of an application error.
 - **Single line only.** The expression is spliced verbatim into one `let`
   line; an embedded newline would become a separate control command.
 - **No bare `<` / `>`.** In ngspice's control language these are I/O
