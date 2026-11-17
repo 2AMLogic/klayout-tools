@@ -26,7 +26,7 @@ from pathlib import Path
 import pytest
 
 from helpers.subprocess_fakes import fake_completed, keep_uploaded
-from klayout_tools import _provenance, sim_batch
+from klayout_tools import _batch_collect, _provenance, sim_batch
 from klayout_tools import netlist as netlist_module
 from klayout_tools import netlist_batch as nb
 from klayout_tools.cli import main, netlist_cmd
@@ -915,7 +915,7 @@ def test_failed_job_without_envelope_carries_the_stderr_tail(
     tail = error["remote_stderr_tail"]
     assert "tar: design/missing.sym: Cannot open" in tail
     assert "\x1b" not in tail and "\x07" not in tail
-    assert len(tail.encode("utf-8")) <= nb.REMOTE_STDERR_TAIL_BYTES
+    assert len(tail.encode("utf-8")) <= _batch_collect.REMOTE_STDERR_TAIL_BYTES
     assert error["remote_exit_code"] == 2
     assert error["harness_log"].endswith(f"/{_job_id(fake)}/harness.log")
     assert "tar: design/missing.sym" in error["message"]
