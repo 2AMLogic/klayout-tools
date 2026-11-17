@@ -33,9 +33,13 @@ not `klt --version`, if you need to detect this kind of drift. See
   runs record `input: null` (their netlist is already pinned by
   `from_synthesize.netlist_sha256`). Grading change, disclosed: a pinned
   citation now compares against the RTL digest; the `evidence_file` basis
-  applies only to a legacy envelope with no `provenance` key, so a manifest
-  pinned under #4893 (the report's byte hash) grades `stale_evidence`
-  against a new report — re-pin against `provenance.input.content_hash`. No
+  applies only where the envelope has no `provenance.input` — a legacy
+  envelope with no `provenance` key, or an `options.from_synthesize` report
+  (which keeps the #4893 file-bytes binding it always had; a command-backed
+  pin of one stays `unverifiable_provenance`, with a note naming that cause)
+  — so a manifest pinned under #4893 (the report's byte hash) grades
+  `stale_evidence` against a new report that records a source digest —
+  re-pin against `provenance.input.content_hash`. No
   `schema_version` bump: the block is additive by contract.
 
 - **`klt signoff --attest 2` inventories can pin the generator's input files**

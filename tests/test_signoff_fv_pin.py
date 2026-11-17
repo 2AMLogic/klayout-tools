@@ -38,6 +38,19 @@ RTL_DIGEST = FUNCTIONAL_VERIFICATION_SDF_PROVENANCE_ENVELOPE["provenance"]["inpu
 ]
 
 
+#: An `options.from_synthesize` report from the same `klt`: the block is
+#: present but `provenance.input` is `null` *by design* (the design input is
+#: the synthesized netlist, pinned by `from_synthesize.netlist_sha256`), unlike
+#: the null-digest case (`input` present, `content_hash` null).
+FUNCTIONAL_VERIFICATION_SDF_FROM_SYNTHESIZE_ENVELOPE = {
+    **FUNCTIONAL_VERIFICATION_SDF_PROVENANCE_ENVELOPE,
+    "provenance": {
+        **FUNCTIONAL_VERIFICATION_SDF_PROVENANCE_ENVELOPE["provenance"],
+        "input": None,
+    },
+}
+
+
 def _fv_item7(
     tmp_path, pin, *, command=False, envelope=FUNCTIONAL_VERIFICATION_SDF_ENVELOPE
 ):
@@ -191,6 +204,88 @@ def test_null_rtl_digest_pin_is_unverifiable_with_null_note(tmp_path):
     note = item_7["detail"]["content_hash_pin_note"]
     assert "null" in note
     assert "could not be hashed" in note
+    assert "legacy" not in note
+
+
+def test_null_rtl_digest_never_falls_back_to_the_evidence_file_basis(tmp_path):
+    """The designed null-digest case (`input` present, `content_hash` null)
+    keeps refusing the #4893 basis even when the pin is the report's own
+    bytes -- only an *absent* `provenance.input` re-opens that basis."""
+    envelope = {
+        **FUNCTIONAL_VERIFICATION_SDF_PROVENANCE_ENVELOPE,
+        "provenance": {
+            **FUNCTIONAL_VERIFICATION_SDF_PROVENANCE_ENVELOPE["provenance"],
+            "input": {"content_hash": None, "role": "source"},
+        },
+    }
+    fv_path = _write(tmp_path, "fv.json", envelope)
+    with open(fv_path, "rb") as handle:
+        byte_pin = "sha256:" + hashlib.sha256(handle.read()).hexdigest()
+
+    _, item_7 = _fv_item7(tmp_path, byte_pin, envelope=envelope)
+
+    assert item_7["status"] == "unmet"
+    assert item_7["reason"] == "unverifiable_provenance"
+    assert "content_hash_basis" not in (item_7.get("citation") or {})
+
+
+# --------------------------------------------------------------------------- #
+# `options.from_synthesize` reports (issue #5550): a block with `input: null`
+# --------------------------------------------------------------------------- #
+
+
+def test_from_synthesize_file_backed_pin_keeps_the_evidence_file_basis(tmp_path):
+    """A `from_synthesize` report records no digest of its own (its design
+    input is the netlist), so a pin on the file keeps the #4893 binding it has
+    on `main` -- the report's own bytes, disclosed as `evidence_file`."""
+    fv_path = _write(
+        tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_SDF_FROM_SYNTHESIZE_ENVELOPE
+    )
+    with open(fv_path, "rb") as handle:
+        pin = "sha256:" + hashlib.sha256(handle.read()).hexdigest()
+
+    _, item_7 = _fv_item7(
+        tmp_path,
+        pin,
+        envelope=FUNCTIONAL_VERIFICATION_SDF_FROM_SYNTHESIZE_ENVELOPE,
+    )
+
+    assert item_7["status"] == "met"
+    assert item_7["citation"]["content_hash"] == pin
+    assert item_7["citation"]["content_hash_basis"] == "evidence_file"
+
+
+def test_from_synthesize_file_backed_pin_goes_stale_on_edit(tmp_path):
+    """The evidence-file basis still detects an edited report."""
+    _, item_7 = _fv_item7(
+        tmp_path,
+        "sha256:" + "0" * 64,
+        envelope=FUNCTIONAL_VERIFICATION_SDF_FROM_SYNTHESIZE_ENVELOPE,
+    )
+
+    assert item_7["status"] == "unmet"
+    assert item_7["reason"] == "stale_evidence"
+
+
+def test_from_synthesize_command_backed_pin_note_names_the_real_cause(tmp_path):
+    """A command citation's stdout is not a stable file, so the pin stays
+    ungradable -- and the note says so, naming the netlist-pinned design input
+    rather than an unhashable source or a legacy `klt`."""
+    _, item_7 = _fv_item7(
+        tmp_path,
+        "sha256:expected",
+        command=True,
+        envelope=FUNCTIONAL_VERIFICATION_SDF_FROM_SYNTHESIZE_ENVELOPE,
+    )
+
+    assert item_7["status"] == "unmet"
+    assert item_7["reason"] == "unverifiable_provenance"
+    assert item_7["detail"]["content_hash_pin"] == "unverifiable"
+    note = item_7["detail"]["content_hash_pin_note"]
+    assert "from_synthesize" in note
+    assert "netlist" in note
+    assert "command-backed" in note
+    assert "could not be hashed" not in note
     assert "legacy" not in note
 
 
