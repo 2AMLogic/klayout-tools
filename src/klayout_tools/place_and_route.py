@@ -51,8 +51,8 @@ from ._openroad_engine import (
     _run_openroad,
     _timing_status,
     container_runtime_hint,
-    mount_namespace_hint,
 )
+from ._openroad_mount_hint import mount_namespace_hint
 from ._paths import _count_spef_nets_annotated as _count_spef_nets_annotated
 from ._paths import (
     _load_request_json,
@@ -2737,7 +2737,7 @@ def _engine_error_message(
 
     ``pdk_info`` -- when the caller has one (``run_place_and_route`` always
     does, once liberty/LEF resolution has happened) -- feeds
-    :func:`~klayout_tools._openroad_engine.mount_namespace_hint`, appended
+    :func:`~klayout_tools._openroad_mount_hint.mount_namespace_hint`, appended
     as a further ``--`` clause when
     the failure looks like the container-wrapper mount gap issue #1868
     describes: ``openroad`` couldn't read a file this process just resolved

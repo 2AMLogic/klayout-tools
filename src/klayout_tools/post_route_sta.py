@@ -264,9 +264,9 @@ from ._openroad_engine import (
     _timing_status,
     _timing_violation_report_lines,
     container_runtime_hint,
-    mount_namespace_hint,
     write_sdf_line,
 )
+from ._openroad_mount_hint import mount_namespace_hint
 from ._paths import (
     _count_spef_nets_annotated,
     _load_request_json,
@@ -3977,23 +3977,13 @@ def _engine_error_message(
 ) -> str:
     """Build an actionable error message from a failed OpenROAD run.
 
-    Prefers a bracketed ``[ERROR ...]`` diagnostic OpenROAD itself printed
-    over a bare ``Error:`` trailer line, mirroring
-    ``place_and_route.py``'s own ``_engine_error_message`` (minus that
-    function's route-stage-only ``DRT-0305`` diagnosis, which cannot occur
-    here -- this verb never runs TritonRoute).
-
-    :func:`~klayout_tools._openroad_engine.container_runtime_hint` is
-    appended as a further ``--`` clause when the captured output shows the
-    engine never really ran at all because its container runtime was
-    unreachable (issue #2632). :func:`~klayout_tools._openroad_engine.
-    mount_namespace_hint` is appended likewise when the captured output
-    names a file this process can still read that ``openroad`` reported it
-    could not open -- the container-wrapper mount gap (issue #1868; shared
-    helper, issue #5753), with ``pdk_info`` feeding the PDK-specific aside
-    when the caller has one. Both use the same append-a-recognized-hint
-    structure ``place_and_route.py`` already uses. A failure carrying
-    neither signature keeps exactly its previous message."""
+    Prefers a bracketed ``[ERROR ...]`` diagnostic over a bare ``Error:``
+    trailer, mirroring ``place_and_route.py``'s own function minus its
+    TritonRoute-only ``DRT-0305`` diagnosis. :func:`container_runtime_hint`
+    is appended when the engine never ran (issue #2632);
+    :func:`mount_namespace_hint` likewise when the output names a readable
+    file -- the container-wrapper mount gap (issues #1868/#5753),
+    ``pdk_info`` feeding its PDK aside; neither keeps the previous message."""
     bracket_lines: list[str] = []
     bare_error_lines: list[str] = []
     for stream in (completed.stdout or "", completed.stderr or ""):
@@ -4016,10 +4006,6 @@ def _engine_error_message(
     hint = container_runtime_hint(completed)
     if hint is not None:
         message = f"{message} -- {hint}"
-    # Issue #1868/#5753: an "cannot open/read '<abs path>'" failure for a
-    # path this process can itself read is a container-wrapper mount gap,
-    # not a missing file. Appended as a further `--` clause, the same
-    # recognized-hint structure `container_runtime_hint` above uses.
     mount_hint = mount_namespace_hint(completed, pdk_info)
     if mount_hint is not None:
         message = f"{message} -- {mount_hint}"
