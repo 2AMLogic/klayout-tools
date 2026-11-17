@@ -919,7 +919,7 @@ def _run_checks(
     elif item == CHARACTERIZATION_ITEM:
         checks.extend(_characterization_checks(root, normalized, command))
     elif item == 9:
-        checks.extend(item9.item9_checks(normalized, command))
+        checks.extend(item9.item9_checks(normalized, command, root, _file_check))
         checks.extend(item9.pin_checks(normalized["pins"]))
     else:
         checks.extend(_audit_command_checks(normalized["checks"], command))

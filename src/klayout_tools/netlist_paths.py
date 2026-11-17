@@ -90,16 +90,59 @@ def _rewrite_runner_paths(
     return _PATH_COMMENT_RE.sub(_rewrite, data)
 
 
+def fold_continuations(data: bytes) -> bytes:
+    """``data`` with every ``+`` continuation line joined onto the card it
+    continues and whitespace runs inside non-comment lines collapsed to
+    single spaces (issue #5715): the line layout ``--check`` compares
+    (:func:`klayout_tools.netlist._normalize_layout`, issue #3324), shared
+    with the writer so ``klt netlist --canonical-wrap`` output is independent
+    of the host xschem's wrap column.
+
+    Comment lines (``*``) are left byte-intact: a ``+`` line is never joined
+    onto one, and comment content -- xschem's ``**.subckt`` port order
+    included -- is not rewritten. Only line layout changes, never a token of
+    a non-comment line, so a quoted expression with embedded spaces
+    (``ad='int((nf+1)/2) * w/nf * 0.29'``) survives verbatim. Idempotent.
+    """
+    lines: list[bytes] = []
+    prev_joinable = False
+    for raw in data.split(b"\n"):
+        if raw.lstrip().startswith(b"*"):
+            lines.append(raw)
+            prev_joinable = False
+            continue
+        tokens = raw.split()
+        if tokens and tokens[0].startswith(b"+") and prev_joinable:
+            rest = [tokens[0][1:]] + tokens[1:]
+            lines[-1] = b" ".join([lines[-1]] + [t for t in rest if t])
+            continue
+        lines.append(b" ".join(tokens))
+        prev_joinable = bool(tokens)
+    return b"\n".join(lines)
+
+
 def postprocess_netlist(
-    data: bytes, *, block: bool, relative_paths: bool, schematic: str
+    data: bytes,
+    *,
+    block: bool,
+    relative_paths: bool,
+    schematic: str,
+    canonical_wrap: bool = False,
 ) -> tuple[bytes, dict[str, Any] | None]:
     """Apply the post-xschem netlist rewrites (block mode, port spacing,
-    ``--relative-paths``); returns ``(data, block_info)``.
+    ``--relative-paths``, ``--canonical-wrap``); returns ``(data,
+    block_info)``.
 
     ``schematic`` reaches block mode as well as ``--relative-paths``: the
     cell's subcircuit parameters live in its symbol attributes, not in the
     netlist text (issue #5439), and so does the port order of the restored
-    ``.subckt`` header (:func:`with_port_order`, issue #5473)."""
+    ``.subckt`` header (:func:`with_port_order`, issue #5473).
+
+    ``canonical_wrap`` (issue #5715) applies :func:`fold_continuations` last,
+    after the other rewrites, on the local write path. The batch backend
+    repeats the path rewrites client-side instead of calling this function,
+    and must apply the same fold there -- a canonicalization added only here
+    would silently no-op under ``--backend batch``."""
     block_info: dict[str, Any] | None = None
     if block:
         data, block_info = apply_block_mode(data, schematic=schematic)
@@ -109,4 +152,6 @@ def postprocess_netlist(
     data = space_separate_subckt_ports(data)
     if relative_paths:
         data = relativize_schematic_paths(data, schematic)
+    if canonical_wrap:
+        data = fold_continuations(data)
     return data, block_info
