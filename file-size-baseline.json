@@ -345,11 +345,11 @@
     },
     {
       "path": "src/klayout_tools/functional_verification.py",
-      "lines": 3159
+      "lines": 3151
     },
     {
       "path": "src/klayout_tools/functional_verification_sdf.py",
-      "lines": 2536
+      "lines": 2531
     },
     {
       "path": "src/klayout_tools/gen.py",
@@ -853,7 +853,7 @@
     },
     {
       "path": "tests/test_functional_verification.py",
-      "lines": 6590
+      "lines": 6588
     },
     {
       "path": "tests/test_functional_verification_identity_contract.py",

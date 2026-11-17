@@ -132,10 +132,9 @@ implemented deliberately rather than rediscovered:
    the rest, deterministically -- unfixable by reordering, left unfixed,
    pinned down by ``test_integration_real_icarus_sdf_bus_port_input_
    fanout_stays_unresolvable`` rather than silently reported as
-   "annotated" or masked. The issue's "wrapper double-binds the net
-   identity" hypothesis is refuted by shape (a) alone: reordering
-   (bit-selected-port entry last) resolves everything, which a genuine
-   double-bind would not fix.
+   "annotated" or masked. The "wrapper double-binds the net identity"
+   hypothesis is refuted by shape (a): reordering (bit-selected entry
+   last) resolves everything, which a genuine double-bind would not.
 
 10. **A run that fails on every test case under ``options.sdf`` -- often
     with the design's outputs reading a constant zero -- while the
@@ -2827,23 +2826,16 @@ def run_functional_verification(
         # input port onto a pin of a *physical-only* instance -- a
         # router-inserted antenna diode, or any filler/tapcell whose model
         # is timing-empty -- is shape (b) of the #1619/#1857 spike: on a
-        # fanout-above-1 port-bit net, #5705's one-modpath cap leaves every
-        # non-last-declared load's entry unannotated. Unlike the general
-        # shape (b) case (which stays failing, pinned by
+        # fanout-above-1 net, #5705's cap leaves every non-last-declared
+        # load's entry unannotated. Unlike the general shape (b) case
+        # (which stays failing, pinned by
         # `test_integration_real_icarus_sdf_bus_port_input_fanout_stays_
-        # unresolvable`), this destination's elaborated model carries no
-        # `specify` block and no output pin, so it has no timing content
-        # and no logic observes the pin -- the entry can still be the
-        # cap's annotated survivor when its instance is the net's
-        # last-declared load (in #2363's two-diodes fixture the
-        # last-declared diode's entry annotates and the first-declared one
-        # is rejected), so the drop does not rest on "no modpath exists".
-        # When such an entry is zero-delay at
-        # every corner, dropping it cannot change any simulated timing
-        # either way, so it is removed here and counted in
-        # `environment.sdf.dropped` instead of failing the run. A
-        # non-zero-delay entry is left in place and still fails the
-        # diagnostic gate loudly.
+        # unresolvable`), this destination has no timing content and no
+        # logic observes the pin -- its entry can still be the cap's
+        # survivor, so the drop rests on timing emptiness, not "no modpath
+        # exists". A zero-delay-at-every-corner entry is timing-neutral, so
+        # it is removed here and counted in `environment.sdf.dropped`
+        # instead of failing the run; a non-zero-delay entry still fails.
         annotate_source_path = _apply_sdf_physical_only_drop(
             annotate_source_path,
             output_dir,

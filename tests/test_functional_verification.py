@@ -4520,11 +4520,9 @@ def test_integration_real_icarus_sdf_nonzero_alias_port_interconnect_fails_loud(
 #
 # What makes this subset droppable where the *general* shape (b) case is not
 # is the destination: `klt_diode`'s model has no `specify` block and no
-# output pin at all, so it has no timing content of its own and no logic
-# observes the pin -- the entry can still be the one-modpath cap's
-# annotated survivor when the diode is the net's last-declared load, so
-# the drop rests on that timing emptiness, not on "no modpath exists".
-# `_drop_sdf_zero_delay_physical_only_interconnects`
+# output pin at all, no logic observes the pin, the entry can still be
+# the cap's survivor -- the drop rests on timing emptiness, not "no
+# modpath exists". `_drop_sdf_zero_delay_physical_only_interconnects`
 # removes exactly those entries and reports the count as its own
 # `environment.sdf.dropped` class; a **non**-zero-delay entry onto the
 # identical pin, and *any* entry onto a `specify`-bearing destination, are
